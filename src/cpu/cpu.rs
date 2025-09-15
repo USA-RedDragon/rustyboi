@@ -2,17 +2,17 @@ use crate::{cpu::opcodes, memory, memory::Addressable};
 
 pub struct SM83 {
     r_a: u8, // A, accumulator register
-	r_f: u8, // F, flags register
-	r_b: u8, // B
-	r_c: u8, // C
-	r_d: u8, // D
-	r_e: u8, // E
-	r_h: u8, // H
-	r_l: u8, // L
+    r_f: u8, // F, flags register
+    r_b: u8, // B
+    r_c: u8, // C
+    r_d: u8, // D
+    r_e: u8, // E
+    r_h: u8, // H
+    r_l: u8, // L
 
-	// 16-bit registers
-	r_pc: u16, // PC (Program Counter)
-	r_sp: u16, // SP (Stack Pointer)
+    // 16-bit registers
+    r_pc: u16, // PC (Program Counter)
+    r_sp: u16, // SP (Stack Pointer)
 }
 
 impl SM83 {
