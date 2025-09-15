@@ -32,17 +32,20 @@ impl SM83 {
     }
 
     pub fn step(&mut self, mmio: &mut memory::mmio::MMIO) {
-        (self.fetch(mmio).execute)(self, mmio);
+        let (opcode, length) = Self::fetch(self.r_pc, mmio);
+        self.r_pc = self.r_pc.wrapping_add(length as u16);
+        (opcode.execute)(self, mmio);
+        println!("Executed opcode: {}\tCycles: {}", opcode.name, opcode.cycles);
     }
 
-    fn fetch(&mut self, mmio: &mut memory::mmio::MMIO) -> &opcodes::Opcode {
-        let opcode = mmio.read(self.r_pc);
-        let opcode_obj = &opcodes::OPCODES[mmio.read(self.r_pc) as usize];
-        self.r_pc = self.r_pc.wrapping_add(opcode_obj.length.into());
+    fn fetch(pc: u16, mmio: &memory::mmio::MMIO) -> (&opcodes::Opcode, u8) {
+        let opcode = mmio.read(pc);
+        let mut opcode_obj = &opcodes::OPCODES[opcode as usize];
+        let mut length = opcode_obj.length;
         if opcode == 0xCB { // Special CB-prefixed opcodes
-            let opcode_obj = &opcodes::CB_OPCODES[mmio.read(self.r_pc) as usize];
-            self.r_pc = self.r_pc.wrapping_add(opcode_obj.length.into());
+            opcode_obj = &opcodes::CB_OPCODES[mmio.read(pc + 1) as usize];
+            length += opcode_obj.length;
         }
-        opcode_obj
+        (opcode_obj, length)
     }
 }
