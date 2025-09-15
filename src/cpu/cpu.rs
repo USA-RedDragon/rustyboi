@@ -1,5 +1,4 @@
-use crate::memory;
-use crate::memory::Addressable;
+use crate::{cpu::opcodes, memory, memory::Addressable};
 
 pub struct SM83 {
     r_a: u8, // A, accumulator register
@@ -33,26 +32,12 @@ impl SM83 {
     }
 
     pub fn step(&mut self, mmio: &mut memory::mmio::MMIO) {
-        let opcode = self.fetch(mmio);
-        // Decode and execute the opcode
-        self.execute(opcode);
+        (self.fetch(mmio).execute)(self, mmio);
     }
 
-    fn fetch(&mut self, mmio: &mut memory::mmio::MMIO) -> u8 {
-        let opcode = mmio.read(self.r_pc);
-        self.r_pc = self.r_pc.wrapping_add(1);
+    fn fetch(&mut self, mmio: &mut memory::mmio::MMIO) -> &opcodes::Opcode {
+        let opcode = &opcodes::OPCODES[mmio.read(self.r_pc) as usize];
+        self.r_pc = self.r_pc.wrapping_add(opcode.length.into());
         opcode
-    }
-
-    fn execute(&mut self, opcode: u8) -> u8 {
-        match opcode {
-            0x00 => self.nop(),
-            // Add more opcodes here
-            _ => unimplemented!("Opcode {:02X} not implemented", opcode),
-        }
-    }
-
-    fn nop(&self) -> u8 {
-        1 // NOP takes 1 machine cycle
     }
 }
