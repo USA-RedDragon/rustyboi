@@ -1,18 +1,18 @@
 use crate::{cpu::opcodes, memory, memory::Addressable};
 
 pub struct SM83 {
-    r_a: u8, // A, accumulator register
-    r_f: u8, // F, flags register
-    r_b: u8, // B
-    r_c: u8, // C
-    r_d: u8, // D
-    r_e: u8, // E
-    r_h: u8, // H
-    r_l: u8, // L
+    pub r_a: u8, // A, accumulator register
+    pub r_f: u8, // F, flags register
+    pub r_b: u8, // B
+    pub r_c: u8, // C
+    pub r_d: u8, // D
+    pub r_e: u8, // E
+    pub r_h: u8, // H
+    pub r_l: u8, // L
 
     // 16-bit registers
-    r_pc: u16, // PC (Program Counter)
-    r_sp: u16, // SP (Stack Pointer)
+    pub r_pc: u16, // PC (Program Counter)
+    pub r_sp: u16, // SP (Stack Pointer)
 }
 
 impl SM83 {
@@ -36,8 +36,13 @@ impl SM83 {
     }
 
     fn fetch(&mut self, mmio: &mut memory::mmio::MMIO) -> &opcodes::Opcode {
-        let opcode = &opcodes::OPCODES[mmio.read(self.r_pc) as usize];
-        self.r_pc = self.r_pc.wrapping_add(opcode.length.into());
-        opcode
+        let opcode = mmio.read(self.r_pc);
+        let opcode_obj = &opcodes::OPCODES[mmio.read(self.r_pc) as usize];
+        self.r_pc = self.r_pc.wrapping_add(opcode_obj.length.into());
+        if opcode == 0xCB { // Special CB-prefixed opcodes
+            let opcode_obj = &opcodes::CB_OPCODES[mmio.read(self.r_pc) as usize];
+            self.r_pc = self.r_pc.wrapping_add(opcode_obj.length.into());
+        }
+        opcode_obj
     }
 }
