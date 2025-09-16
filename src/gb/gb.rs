@@ -29,6 +29,7 @@ impl GB {
 
     pub fn insert(&mut self, cartridge: cartridge::Cartridge) {
         self.mmio.insert_cartridge(cartridge);
+        self.cpu.registers.reset(true);
         if self.mmio.read(0x014D) == 0x00 {
             self.cpu.registers.set_flag(registers::Flag::Carry, true);
             self.cpu.registers.set_flag(registers::Flag::HalfCarry, true);
