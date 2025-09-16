@@ -1,5 +1,5 @@
 pub mod cpu;
 mod opcodes;
-mod registers;
+pub mod registers;
 
 pub use cpu::*;

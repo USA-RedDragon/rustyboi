@@ -53,7 +53,7 @@ impl SM83 {
             0xCB => self.execute_cb(mmio),
             0xDE => opcodes::sbc_a_imm(self, mmio),
             0xF1 => opcodes::pop_af(self, mmio),
-            _ => unimplemented!("Opcode {:02X} not implemented at PC {:04X}", opcode, self.registers.pc - 1),
+            _ => unimplemented!("Opcode 0x{:02X} not implemented at PC 0x{:04X}", opcode, self.registers.pc - 1),
         }
     }
 
@@ -61,7 +61,7 @@ impl SM83 {
         let opcode = mmio.read(self.registers.pc);
         self.registers.pc += 1;
         match opcode {
-            _ => unimplemented!("CB Opcode {:02X} not implemented at PC {:04X}", opcode, self.registers.pc - 1),
+            _ => unimplemented!("CB Opcode 0x{:02X} not implemented at PC 0x{:04X}", opcode, self.registers.pc - 1),
         }
     }
 }

@@ -1,5 +1,8 @@
+use crate::cartridge;
 use crate::cpu;
+use crate::cpu::registers;
 use crate::memory;
+use crate::memory::Addressable;
 use crate::ppu;
 
 use std::time::{Duration, Instant};
@@ -22,6 +25,21 @@ impl GB {
             mmio: memory::mmio::MMIO::new(),
             ppu: ppu::PPU::new(),
         }
+    }
+
+    pub fn insert(&mut self, cartridge: cartridge::Cartridge) {
+        self.mmio.insert_cartridge(cartridge);
+        if self.mmio.read(0x014D) == 0x00 {
+            self.cpu.registers.set_flag(registers::Flag::Carry, true);
+            self.cpu.registers.set_flag(registers::Flag::HalfCarry, true);
+            println!("Warning: ROM without header checksum");
+        }
+    }
+
+    pub fn load_bios(&mut self, path: &str) -> Result<(), std::io::Error> {
+        self.mmio.load_bios(path)?;
+        self.cpu.registers.reset(false);
+        Ok(())
     }
 
     pub fn run(&mut self) {
