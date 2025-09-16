@@ -65,11 +65,13 @@ impl GB {
             }
 
             // Advance hardware by batch cycles
-            self.ppu.advance(batch_cycles);
+            for _ in 0..batch_cycles {
+                self.ppu.step(&mut self.cpu, &mut self.mmio);
+            }
 
             // Render frame if ready
             if self.ppu.frame_ready() {
-                self.ppu.render_frame();
+                let frame = self.ppu.get_frame();
             }
 
             total_cycles += batch_cycles as u128;

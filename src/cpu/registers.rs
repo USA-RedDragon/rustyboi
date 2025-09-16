@@ -5,6 +5,17 @@ pub enum Flag {
     Zero = 1<<7,
 }
 
+pub enum InterruptFlag {
+    Joypad = 1<<4,
+    Serial = 1<<3,
+    Timer = 1<<2,
+    LCD = 1<<1,
+    VBlank = 1<<0,
+}
+
+pub const INTERRUPT_FLAG: u16 = 0xFF0F;
+pub const INTERRUPT_ENABLE: u16 = 0xFFFF;
+
 pub struct Registers {
     pub a: u8,
     pub f: u8,
