@@ -16,6 +16,7 @@ pub struct Registers {
     pub l: u8,
     pub pc: u16,
     pub sp: u16,
+    pub ime: bool, // Interrupt Master Enable Flag
 }
 
 impl Registers {
@@ -31,6 +32,7 @@ impl Registers {
             l: 0,
             pc: 0,
             sp: 0,
+            ime: false,
         }
     }
 
@@ -47,12 +49,13 @@ impl Registers {
     }
 
     pub fn reset(&mut self, skip_bios: bool) {
+        self.b = 0x00;
+        self.d = 0x00;
+        self.ime = false;
         if skip_bios {
             self.a = 0x01;
             self.f = Flag::Zero as u8;
-            self.b = 0x00;
             self.c = 0x13;
-            self.d = 0x00;
             self.e = 0xD8;
             self.h = 0x01;
             self.l = 0x4D;
@@ -61,9 +64,7 @@ impl Registers {
         } else {
             self.a = 0x0;
             self.f = 0x0;
-            self.b = 0x0;
             self.c = 0x0;
-            self.d = 0x0;
             self.e = 0x0;
             self.h = 0x0;
             self.l = 0x0;
