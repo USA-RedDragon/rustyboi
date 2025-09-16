@@ -4,3 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+[profile.release]
+# 454744 bytes
+strip = true
+# 377544
+opt-level = "z"
+# 373448
+lto = true
+# 320104
