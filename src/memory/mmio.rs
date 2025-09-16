@@ -1,7 +1,18 @@
+use crate::cartridge;
 use crate::memory;
+use crate::memory::Addressable;
 
-const CARTRIDGE_START: u16 = 0x0000;
-const CARTRIDGE_SIZE: usize = 16384; // 16KB
+use std::fs;
+use std::io;
+
+const EMPTY_BYTE: u8 = 0xFF;
+
+const BIOS_START: u16 = 0x0000;
+const BIOS_SIZE: usize = 256; // 256 bytes
+const BIOS_END: u16 = BIOS_START + BIOS_SIZE as u16 - 1;
+pub const CARTRIDGE_START: u16 = 0x0000;
+pub const CARTRIDGE_SIZE: usize = 16384; // 16KB
+const CARTRIDGE_AFTER_BIOS_START: u16 = 0x0100; // After BIOS is disabled
 const CARTRIDGE_END: u16 = CARTRIDGE_START + CARTRIDGE_SIZE as u16 - 1;
 const CARTRIDGE_BANK_START: u16 = 0x4000;
 const CARTRIDGE_BANK_SIZE: usize = 16384; // 16KB
@@ -36,8 +47,11 @@ const HRAM_SIZE: usize = 127; // 127 bytes
 const HRAM_END: u16 = HRAM_START + HRAM_SIZE as u16 - 1;
 const IE_REGISTER: u16 = 0xFFFF; // Interrupt Enable Register
 
+pub const REG_BOOT_OFF: u16 = 0xFF50; // Boot ROM disable
+
 pub struct MMIO {
-    cartridge: memory::Memory<CARTRIDGE_START, CARTRIDGE_SIZE>,
+    bios: Option<memory::Memory<BIOS_START, BIOS_SIZE>>,
+    cartridge: Option<cartridge::Cartridge>,
     cartridge_bank: memory::Memory<CARTRIDGE_BANK_START, CARTRIDGE_BANK_SIZE>,
     vram: memory::Memory<VRAM_START, VRAM_SIZE>,
     ram: memory::Memory<RAM_START, RAM_SIZE>,
@@ -52,7 +66,8 @@ pub struct MMIO {
 impl MMIO {
     pub fn new() -> Self {
         MMIO {
-            cartridge: memory::Memory::new(),
+            bios: None,
+            cartridge: None,
             cartridge_bank: memory::Memory::new(),
             vram: memory::Memory::new(),
             ram: memory::Memory::new(),
@@ -64,12 +79,53 @@ impl MMIO {
             ie_register: 0,
         }
     }
+
+    pub fn insert_cartridge(&mut self, cartridge: cartridge::Cartridge) {
+        self.cartridge = Some(cartridge);
+    }
+
+    pub fn load_bios(&mut self, path: &str) -> Result<(), io::Error> {
+        let data = fs::read(path)?;
+        let mut bios = memory::Memory::new();
+        if data.len() < BIOS_SIZE {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "BIOS file too small"));
+        }
+        if data.len() > BIOS_SIZE {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "BIOS file too large"));
+        }
+        for (i, &byte) in data.iter().take(BIOS_SIZE).enumerate() {
+            bios.write(BIOS_START + i as u16, byte);
+        }
+        self.bios = Some(bios);
+        Ok(())
+    }
 }
 
 impl memory::Addressable for MMIO {
     fn read(&self, addr: u16) -> u8 {
         match addr {
-            CARTRIDGE_START..=CARTRIDGE_END => self.cartridge.read(addr),
+            BIOS_START..=BIOS_END => {
+                match self.read(REG_BOOT_OFF) {
+                    0 => {
+                        match &self.bios {
+                            Some(bios) => bios.read(addr),
+                            None => EMPTY_BYTE,
+                        }
+                    },
+                    _ => {
+                        match &self.cartridge {
+                            Some(cart) => cart.read(addr),
+                            None => EMPTY_BYTE,
+                        }
+                    }
+                }
+            },
+            CARTRIDGE_AFTER_BIOS_START..=CARTRIDGE_END => {
+                match &self.cartridge {
+                    Some(cart) => cart.read(addr),
+                    None => EMPTY_BYTE,
+                }
+            },
             CARTRIDGE_BANK_START..=CARTRIDGE_BANK_END => self.cartridge_bank.read(addr),
             VRAM_START..=VRAM_END => self.vram.read(addr),
             RAM_START..=RAM_END => self.ram.read(addr),
@@ -85,7 +141,7 @@ impl memory::Addressable for MMIO {
                 }
             },
             OAM_START..=OAM_END => self.oam.read(addr),
-            UNUSED_START..=UNUSED_END => 0xFF, // Unused memory returns
+            UNUSED_START..=UNUSED_END => EMPTY_BYTE,
             IO_REGISTERS_START..=IO_REGISTERS_END => self.io_registers.read(addr),
             HRAM_START..=HRAM_END => self.hram.read(addr),
             IE_REGISTER => self.ie_register,
@@ -94,7 +150,12 @@ impl memory::Addressable for MMIO {
 
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
-            CARTRIDGE_START..=CARTRIDGE_END => self.cartridge.write(addr, value),
+            CARTRIDGE_START..=CARTRIDGE_END => {
+                match self.cartridge.as_mut() {
+                    Some(cart) => cart.write(addr, value),
+                    None => (),
+                }
+            },
             CARTRIDGE_BANK_START..=CARTRIDGE_BANK_END => self.cartridge_bank.write(addr, value),
             VRAM_START..=VRAM_END => self.vram.write(addr, value),
             RAM_START..=RAM_END => self.ram.write(addr, value),
