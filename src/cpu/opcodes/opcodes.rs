@@ -12,6 +12,68 @@ pub fn jp_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
     16
 }
 
+pub fn di(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+    cpu.registers.ime = false;
+    4
+}
+
+pub fn ei(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+    cpu.registers.ime = true;
+    4
+}
+
+pub fn cp_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let value = mmio.read(cpu.registers.pc);
+    cpu.registers.pc += 1;
+    let result = cpu.registers.a.wrapping_sub(value);
+    cpu.registers.set_flag(registers::Flag::Zero, result == 0);
+    cpu.registers.set_flag(registers::Flag::Negative, true);
+    cpu.registers.set_flag(registers::Flag::Carry, cpu.registers.a < value);
+    cpu.registers.set_flag(registers::Flag::HalfCarry, (cpu.registers.a & 0x0F) < (value & 0x0F));
+    8
+}
+
+pub fn ldh_a_memory_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let offset = mmio.read(cpu.registers.pc) as u16;
+    let addr = 0xFF00 | offset;
+    cpu.registers.a = mmio.read(addr);
+    cpu.registers.pc += 1;
+    12
+}
+
+pub fn ldh_memory_imm_a(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let offset = mmio.read(cpu.registers.pc) as u16;
+    let addr = 0xFF00 | offset;
+    mmio.write(addr, cpu.registers.a);
+    cpu.registers.pc += 1;
+    12
+}
+
+pub fn ld_memory_hl_dec_a(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
+    mmio.write(addr, cpu.registers.a);
+    let new_addr = addr.wrapping_sub(1);
+    cpu.registers.h = (new_addr >> 8) as u8;
+    cpu.registers.l = (new_addr & 0x00FF) as u8;
+    8
+}
+
+pub fn sbc_a_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let value = mmio.read(cpu.registers.pc) as u16;
+    cpu.registers.pc += 1;
+
+    let carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 } as u8;
+    let result = (cpu.registers.a as u16)
+        .wrapping_sub(value as u16)
+        .wrapping_sub(carry as u16);
+    cpu.registers.a = (result & 0x00FF) as u8;
+    cpu.registers.set_flag(registers::Flag::Zero, result & 0xFF == 0);
+    cpu.registers.set_flag(registers::Flag::Negative, true);
+    cpu.registers.set_flag(registers::Flag::Carry, result > 0xFF);
+    cpu.registers.set_flag(registers::Flag::HalfCarry, (cpu.registers.a & 0x0F) < ((result & 0x000F) as u8) + carry);
+    8
+}
+
 macro_rules! make_inc_register {
     ($name:ident, $reg:ident) => {
         pub fn $name(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
@@ -176,65 +238,3 @@ make_jr_cond!(jr_nz_imm, |cpu: &cpu::SM83| !cpu.registers.get_flag(registers::Fl
 make_jr_cond!(jr_z_imm, |cpu: &cpu::SM83| cpu.registers.get_flag(registers::Flag::Zero));
 make_jr_cond!(jr_nc_imm, |cpu: &cpu::SM83| !cpu.registers.get_flag(registers::Flag::Carry));
 make_jr_cond!(jr_c_imm, |cpu: &cpu::SM83| cpu.registers.get_flag(registers::Flag::Carry));
-
-pub fn di(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
-    cpu.registers.ime = false;
-    4
-}
-
-pub fn ei(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
-    cpu.registers.ime = true;
-    4
-}
-
-pub fn cp_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
-    let value = mmio.read(cpu.registers.pc);
-    cpu.registers.pc += 1;
-    let result = cpu.registers.a.wrapping_sub(value);
-    cpu.registers.set_flag(registers::Flag::Zero, result == 0);
-    cpu.registers.set_flag(registers::Flag::Negative, true);
-    cpu.registers.set_flag(registers::Flag::Carry, cpu.registers.a < value);
-    cpu.registers.set_flag(registers::Flag::HalfCarry, (cpu.registers.a & 0x0F) < (value & 0x0F));
-    8
-}
-
-pub fn ldh_a_memory_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
-    let offset = mmio.read(cpu.registers.pc) as u16;
-    let addr = 0xFF00 | offset;
-    cpu.registers.a = mmio.read(addr);
-    cpu.registers.pc += 1;
-    12
-}
-
-pub fn ldh_memory_imm_a(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
-    let offset = mmio.read(cpu.registers.pc) as u16;
-    let addr = 0xFF00 | offset;
-    mmio.write(addr, cpu.registers.a);
-    cpu.registers.pc += 1;
-    12
-}
-
-pub fn ld_memory_hl_dec_a(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
-    let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
-    mmio.write(addr, cpu.registers.a);
-    let new_addr = addr.wrapping_sub(1);
-    cpu.registers.h = (new_addr >> 8) as u8;
-    cpu.registers.l = (new_addr & 0x00FF) as u8;
-    8
-}
-
-pub fn sbc_a_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
-    let value = mmio.read(cpu.registers.pc) as u16;
-    cpu.registers.pc += 1;
-
-    let carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 } as u8;
-    let result = (cpu.registers.a as u16)
-        .wrapping_sub(value as u16)
-        .wrapping_sub(carry as u16);
-    cpu.registers.a = (result & 0x00FF) as u8;
-    cpu.registers.set_flag(registers::Flag::Zero, result & 0xFF == 0);
-    cpu.registers.set_flag(registers::Flag::Negative, true);
-    cpu.registers.set_flag(registers::Flag::Carry, result > 0xFF);
-    cpu.registers.set_flag(registers::Flag::HalfCarry, (cpu.registers.a & 0x0F) < ((result & 0x000F) as u8) + carry);
-    8
-}
