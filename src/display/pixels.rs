@@ -98,7 +98,8 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                 let gui_paused_state = manually_paused || world.error_state.is_some();
                 // Always pass register data for the debug overlay, regardless of pause state
                 let registers = Some(world.gb.get_cpu_registers());
-                let (gui_action, menu_open) = framework.prepare(&window, gui_paused_state, registers);
+                let gb_ref = Some(&world.gb);
+                let (gui_action, menu_open) = framework.prepare(&window, gui_paused_state, registers, gb_ref);
                 
                 // Handle GUI actions
                 match gui_action {

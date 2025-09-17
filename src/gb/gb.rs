@@ -157,6 +157,10 @@ impl GB {
         &self.cpu.registers
     }
 
+    pub fn read_memory(&self, address: u16) -> u8 {
+        self.mmio.read(address)
+    }
+
     pub fn run(&mut self) {
         let mut total_cycles: u128 = 0;
         let start_time = Instant::now();
