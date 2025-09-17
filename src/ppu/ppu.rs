@@ -62,6 +62,10 @@ impl PPU {
         }
     }
 
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
     pub fn get_palette_color(&self, mmio: &mut mmio::MMIO, idx: u8) -> u8 {
         match idx {
             0 => mmio.read(BGP)&0x03,        // White

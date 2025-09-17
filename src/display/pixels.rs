@@ -42,7 +42,8 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
 
         (pixels, framework)
     };
-    let mut world = World::new(gb);
+    let mut world = World::new(gb); 
+    let mut manually_paused = false;
 
     let res = event_loop.run(|event, elwt| {
         if input.update(&event) {
@@ -78,7 +79,8 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
             } => {
                 world.draw(pixels.frame_mut());
 
-                let (gui_action, menu_open, manually_paused) = framework.prepare(&window);
+                let gui_paused_state = manually_paused || world.error_state.is_some();
+                let (gui_action, menu_open) = framework.prepare(&window, gui_paused_state);
                 
                 // Handle GUI actions
                 match gui_action {
@@ -96,7 +98,23 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                             }
                         }
                     }
+                    Some(GuiAction::Restart) => {
+                        world.restart();
+                        manually_paused = false;
+                        framework.clear_error();
+                        framework.set_status("Emulation restarted".to_string());
+                        window.request_redraw();
+                    }
+                    Some(GuiAction::ClearError) => {
+                        world.clear_error();
+                        world.pause();
+                        manually_paused = true;
+                        framework.clear_error();
+                        framework.set_status("Error cleared for debugging - CPU state preserved".to_string());
+                        window.request_redraw();
+                    }
                     Some(GuiAction::TogglePause) => {
+                        manually_paused = !manually_paused;
                         world.toggle_pause();
                     }
                     None => {}
@@ -114,7 +132,6 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                         }
                     }
                 }
-
                 if let Some(error_msg) = &world.error_state {
                     framework.set_error(error_msg.clone());
                 }
@@ -177,6 +194,24 @@ impl World {
         self.is_paused = false;
     }
 
+    fn restart(&mut self) {
+        // Reset the Game Boy to its initial state
+        self.gb.reset();
+        
+        // Clear any error state
+        self.error_state = None;
+        
+        // Clear the current frame
+        self.frame = None;
+        
+        // Reset pause state
+        self.is_paused = false;
+    }
+
+    fn clear_error(&mut self) {
+        self.error_state = None;
+    }
+
     fn draw(&mut self, frame: &mut [u8]) {
         if let Some(rgba_frame) = &self.frame {
             frame.copy_from_slice(rgba_frame);
@@ -211,17 +246,7 @@ impl World {
                 
                 self.error_state = Some(error_msg);
                 println!("Game Boy emulator crashed: {}", self.error_state.as_ref().unwrap());
-                
-                // Create a red error frame to indicate the crash
-                let mut error_frame = [0; ppu::FRAMEBUFFER_SIZE * 4];
-                for i in 0..ppu::FRAMEBUFFER_SIZE {
-                    let offset = i * 4;
-                    error_frame[offset] = 0xFF;     // Red
-                    error_frame[offset + 1] = 0x00; // Green
-                    error_frame[offset + 2] = 0x00; // Blue
-                    error_frame[offset + 3] = 0xFF; // Alpha
-                }
-                self.frame = Some(error_frame);
+                self.frame = None;
             }
         }
     }

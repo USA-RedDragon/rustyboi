@@ -23,6 +23,8 @@ pub struct GB {
     mmio: memory::mmio::MMIO,
     ppu: ppu::PPU,
     #[serde(skip, default)]
+    skip_bios: bool,
+    #[serde(skip, default)]
     display_callback: Option<DisplayCallback>,
 }
 
@@ -32,6 +34,7 @@ impl Clone for GB {
             cpu: self.cpu.clone(),
             mmio: self.mmio.clone(),
             ppu: self.ppu.clone(),
+            skip_bios: self.skip_bios,
             display_callback: None,
         }
     }
@@ -45,6 +48,7 @@ impl GB {
             cpu,
             mmio: memory::mmio::MMIO::new(),
             ppu: ppu::PPU::new(),
+            skip_bios,
             display_callback: None,
         }
     }
@@ -144,5 +148,11 @@ impl GB {
         let serialized = serde_json::to_string(&self)?;
         fs::write(path, serialized)?;
         Ok(())
+    }
+
+    pub fn reset(&mut self) {
+        self.mmio.reset();
+        self.ppu.reset();
+        self.cpu.registers.reset(self.skip_bios);
     }
 }

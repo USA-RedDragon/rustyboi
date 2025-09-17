@@ -85,6 +85,13 @@ impl MMIO {
         }
     }
 
+    pub fn reset(&mut self) {
+        let mut new = Self::new();
+        self.bios.clone_into(&mut new.bios);
+        self.cartridge.clone_into(&mut new.cartridge);
+        *self = new;
+    }
+
     pub fn insert_cartridge(&mut self, cartridge: cartridge::Cartridge) {
         self.cartridge = Some(cartridge);
     }
