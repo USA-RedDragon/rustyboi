@@ -12,6 +12,24 @@ pub fn jp_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
     16
 }
 
+pub fn jr_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let offset = mmio.read(cpu.registers.pc) as i8;
+    cpu.registers.pc += 1;
+    cpu.registers.pc = ((cpu.registers.pc as i16) + (offset as i16)) as u16;
+    12
+}
+
+pub fn cp_memory_hl(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
+    let value = mmio.read(addr);
+    let result = cpu.registers.a.wrapping_sub(value);
+    cpu.registers.set_flag(registers::Flag::Zero, result == 0);
+    cpu.registers.set_flag(registers::Flag::Negative, true);
+    cpu.registers.set_flag(registers::Flag::Carry, cpu.registers.a < value);
+    cpu.registers.set_flag(registers::Flag::HalfCarry, (cpu.registers.a & 0x0F) < (value & 0x0F));
+    8
+}
+
 pub fn ret(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
     cpu.registers.pc = mmio.read(cpu.registers.sp) as u16;
     cpu.registers.pc |= (mmio.read(cpu.registers.sp + 1) as u16) << 8;
@@ -34,6 +52,26 @@ pub fn di(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
 pub fn ei(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
     cpu.registers.ime = true;
     4
+}
+
+pub fn rla(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+    let old_carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 };
+    let new_carry = (cpu.registers.a & 0x80) >> 7;
+    cpu.registers.a = (cpu.registers.a << 1) | old_carry;
+    cpu.registers.set_flag(registers::Flag::Zero, false);
+    cpu.registers.set_flag(registers::Flag::Negative, false);
+    cpu.registers.set_flag(registers::Flag::HalfCarry, false);
+    cpu.registers.set_flag(registers::Flag::Carry, new_carry == 1);
+    4
+}
+
+pub fn ld_memory_hl_inc_a(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
+    mmio.write(addr, cpu.registers.a);
+    let new_addr = addr.wrapping_add(1);
+    cpu.registers.h = (new_addr >> 8) as u8;
+    cpu.registers.l = (new_addr & 0x00FF) as u8;
+    8
 }
 
 pub fn ld_memory_hl_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
@@ -374,6 +412,18 @@ macro_rules! make_dec_combined_register {
     };
 }
 
+macro_rules! make_inc_combined_register {
+    ($name:ident, $reg1:ident, $reg2:ident) => {
+        pub fn $name(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+            let value = ((cpu.registers.$reg1 as u16) << 8) | (cpu.registers.$reg2 as u16);
+            let new_value = value.wrapping_add(1);
+            cpu.registers.$reg1 = (new_value >> 8) as u8;
+            cpu.registers.$reg2 = (new_value & 0x00FF) as u8;
+            8
+        }
+    };
+}
+
 macro_rules! make_ld_register_register {
     ($name:ident, $reg1:ident, $reg2:ident) => {
         pub fn $name(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
@@ -393,8 +443,171 @@ macro_rules! make_ld_memory_combined_register_a {
     };
 }
 
+macro_rules! make_bit_register {
+    ($name:ident, $bit:expr, $reg:ident) => {
+        pub fn $name(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+            let bit_set = (cpu.registers.$reg & (1 << $bit)) != 0;
+            cpu.registers.set_flag(registers::Flag::Zero, !bit_set);
+            cpu.registers.set_flag(registers::Flag::Negative, false);
+            cpu.registers.set_flag(registers::Flag::HalfCarry, true);
+            8
+        }
+    };
+}
+
+macro_rules! make_ld_register_memory_combined {
+    ($name:ident, $reg1:ident, $reg2:ident, $reg3:ident) => {
+        pub fn $name(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+            let addr = ((cpu.registers.$reg2 as u16) << 8) | (cpu.registers.$reg3 as u16);
+            cpu.registers.$reg1 = mmio.read(addr);
+            8
+        }
+    };
+}
+
+macro_rules! make_push_combined_register {
+    ($name:ident, $reg1:ident, $reg2:ident) => {
+        pub fn $name(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+            cpu.registers.sp = cpu.registers.sp.wrapping_sub(2);
+            mmio.write(cpu.registers.sp, cpu.registers.$reg2);
+            mmio.write(cpu.registers.sp + 1, cpu.registers.$reg1);
+            16
+        }
+    };
+}
+
+macro_rules! make_pop_combined_register {
+    ($name:ident, $reg1:ident, $reg2:ident) => {
+        pub fn $name(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+            let addr = cpu.registers.sp;
+            let low = mmio.read(addr);
+            let high = mmio.read(addr.wrapping_add(1));
+            cpu.registers.sp = cpu.registers.sp.wrapping_add(2);
+            cpu.registers.$reg2 = low;
+            cpu.registers.$reg1 = high;
+            12
+        }
+    };
+}
+
+macro_rules! make_rl_register {
+    ($name:ident, $reg:ident) => {
+        pub fn $name(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+            let old_carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 };
+            let new_carry = (cpu.registers.$reg & 0x80) >> 7;
+            cpu.registers.$reg = (cpu.registers.$reg << 1) | old_carry;
+            cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.$reg == 0);
+            cpu.registers.set_flag(registers::Flag::Negative, false);
+            cpu.registers.set_flag(registers::Flag::HalfCarry, false);
+            cpu.registers.set_flag(registers::Flag::Carry, new_carry == 1);
+            8
+        }
+    };
+}
+
+macro_rules! make_rr_register {
+    ($name:ident, $reg:ident) => {
+        pub fn $name(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+            let old_carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 };
+            let new_carry = cpu.registers.$reg & 0x01;
+            cpu.registers.$reg = (cpu.registers.$reg >> 1) | (old_carry << 7);
+            cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.$reg == 0);
+            cpu.registers.set_flag(registers::Flag::Negative, false);
+            cpu.registers.set_flag(registers::Flag::HalfCarry, false);
+            cpu.registers.set_flag(registers::Flag::Carry, new_carry == 1);
+            8
+        }
+    };
+}
+
+make_rl_register!(rl_a, a);
+make_rl_register!(rl_b, b);
+make_rl_register!(rl_c, c);
+make_rl_register!(rl_d, d);
+make_rl_register!(rl_e, e);
+make_rl_register!(rl_h, h);
+make_rl_register!(rl_l, l);
+make_rr_register!(rr_a, a);
+make_rr_register!(rr_b, b);
+make_rr_register!(rr_c, c);
+make_rr_register!(rr_d, d);
+make_rr_register!(rr_e, e);
+make_rr_register!(rr_h, h);
+make_rr_register!(rr_l, l);
+make_push_combined_register!(push_bc, b, c);
+make_push_combined_register!(push_de, d, e);
+make_push_combined_register!(push_hl, h, l);
+make_pop_combined_register!(pop_bc, b, c);
+make_pop_combined_register!(pop_de, d, e);
+make_pop_combined_register!(pop_hl, h, l);
+make_bit_register!(bit_0_b, 0, b);
+make_bit_register!(bit_0_c, 0, c);
+make_bit_register!(bit_0_d, 0, d);
+make_bit_register!(bit_0_e, 0, e);
+make_bit_register!(bit_0_h, 0, h);
+make_bit_register!(bit_0_l, 0, l);
+make_bit_register!(bit_0_a, 0, a);
+make_bit_register!(bit_1_b, 1, b);
+make_bit_register!(bit_1_c, 1, c);
+make_bit_register!(bit_1_d, 1, d);
+make_bit_register!(bit_1_e, 1, e);
+make_bit_register!(bit_1_h, 1, h);
+make_bit_register!(bit_1_l, 1, l);
+make_bit_register!(bit_1_a, 1, a);
+make_bit_register!(bit_2_b, 2, b);
+make_bit_register!(bit_2_c, 2, c);
+make_bit_register!(bit_2_d, 2, d);
+make_bit_register!(bit_2_e, 2, e);
+make_bit_register!(bit_2_h, 2, h);
+make_bit_register!(bit_2_l, 2, l);
+make_bit_register!(bit_2_a, 2, a);
+make_bit_register!(bit_3_b, 3, b);
+make_bit_register!(bit_3_c, 3, c);
+make_bit_register!(bit_3_d, 3, d);
+make_bit_register!(bit_3_e, 3, e);
+make_bit_register!(bit_3_h, 3, h);
+make_bit_register!(bit_3_l, 3, l);
+make_bit_register!(bit_3_a, 3, a);
+make_bit_register!(bit_4_b, 4, b);
+make_bit_register!(bit_4_c, 4, c);
+make_bit_register!(bit_4_d, 4, d);
+make_bit_register!(bit_4_e, 4, e);
+make_bit_register!(bit_4_h, 4, h);
+make_bit_register!(bit_4_l, 4, l);
+make_bit_register!(bit_4_a, 4, a);
+make_bit_register!(bit_5_b, 5, b);
+make_bit_register!(bit_5_c, 5, c);
+make_bit_register!(bit_5_d, 5, d);
+make_bit_register!(bit_5_e, 5, e);
+make_bit_register!(bit_5_h, 5, h);
+make_bit_register!(bit_5_l, 5, l);
+make_bit_register!(bit_5_a, 5, a);
+make_bit_register!(bit_6_b, 6, b);
+make_bit_register!(bit_6_c, 6, c);
+make_bit_register!(bit_6_d, 6, d);
+make_bit_register!(bit_6_e, 6, e);
+make_bit_register!(bit_6_h, 6, h);
+make_bit_register!(bit_6_l, 6, l);
+make_bit_register!(bit_6_a, 6, a);
+make_bit_register!(bit_7_b, 7, b);
+make_bit_register!(bit_7_c, 7, c);
+make_bit_register!(bit_7_d, 7, d);
+make_bit_register!(bit_7_e, 7, e);
+make_bit_register!(bit_7_h, 7, h);
+make_bit_register!(bit_7_l, 7, l);
+make_bit_register!(bit_7_a, 7, a);
+make_ld_register_memory_combined!(ld_a_memory_bc, a, b, c);
+make_ld_register_memory_combined!(ld_a_memory_de, a, d, e);
+make_ld_register_memory_combined!(ld_b_memory_hl, b, h, l);
+make_ld_register_memory_combined!(ld_c_memory_hl, c, h, l);
+make_ld_register_memory_combined!(ld_d_memory_hl, d, h, l);
+make_ld_register_memory_combined!(ld_e_memory_hl, e, h, l);
+make_ld_register_memory_combined!(ld_h_memory_hl, h, h, l);
+make_ld_register_memory_combined!(ld_l_memory_hl, l, h, l);
+make_ld_register_memory_combined!(ld_a_memory_hl, a, h, l);
 make_ld_memory_combined_register_a!(ld_memory_bc_a, b, c);
 make_ld_memory_combined_register_a!(ld_memory_de_a, d, e);
+make_ld_memory_combined_register_a!(ld_memory_hl_a, h, l);
 make_ld_register_register!(ld_a_b, a, b);
 make_ld_register_register!(ld_a_c, a, c);
 make_ld_register_register!(ld_a_d, a, d);
@@ -460,6 +673,9 @@ make_dec_register!(dec_e, e);
 make_dec_register!(dec_h, h);
 make_dec_register!(dec_l, l);
 make_dec_register!(dec_sp, sp);
+make_inc_combined_register!(inc_bc, b, c);
+make_inc_combined_register!(inc_de, d, e);
+make_inc_combined_register!(inc_hl, h, l);
 make_dec_combined_register!(dec_bc, b, c);
 make_dec_combined_register!(dec_de, d, e);
 make_dec_combined_register!(dec_hl, h, l);
