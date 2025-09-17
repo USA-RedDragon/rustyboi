@@ -78,7 +78,7 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
             } => {
                 world.draw(pixels.frame_mut());
 
-                let gui_action = framework.prepare(&window);
+                let (gui_action, menu_open, manually_paused) = framework.prepare(&window);
                 
                 // Handle GUI actions
                 match gui_action {
@@ -96,7 +96,23 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                             }
                         }
                     }
+                    Some(GuiAction::TogglePause) => {
+                        world.toggle_pause();
+                    }
                     None => {}
+                }
+
+                // Auto-pause when menu is open, but respect manual pause state
+                let should_be_paused = manually_paused || menu_open;
+                if should_be_paused != world.is_paused {
+                    if should_be_paused {
+                        world.pause();
+                    } else {
+                        // Only auto-resume if not manually paused
+                        if !manually_paused {
+                            world.resume();
+                        }
+                    }
                 }
 
                 if let Some(error_msg) = &world.error_state {
@@ -129,6 +145,7 @@ struct World {
     gb: gb::GB,
     frame: Option<[u8; ppu::FRAMEBUFFER_SIZE * 4]>,
     error_state: Option<String>,
+    is_paused: bool,
 }
 
 impl World {
@@ -137,6 +154,7 @@ impl World {
             gb,
             frame: None,
             error_state: None,
+            is_paused: false,
         }
     }
 
@@ -147,6 +165,18 @@ impl World {
         Ok(filename)
     }
 
+    fn toggle_pause(&mut self) {
+        self.is_paused = !self.is_paused;
+    }
+
+    fn pause(&mut self) {
+        self.is_paused = true;
+    }
+
+    fn resume(&mut self) {
+        self.is_paused = false;
+    }
+
     fn draw(&mut self, frame: &mut [u8]) {
         if let Some(rgba_frame) = &self.frame {
             frame.copy_from_slice(rgba_frame);
@@ -155,8 +185,8 @@ impl World {
     }
 
     fn update(&mut self) {
-        // Skip updating if we're in an error state
-        if self.error_state.is_some() {
+        // Skip updating if we're in an error state or paused
+        if self.error_state.is_some() || self.is_paused {
             return;
         }
 
