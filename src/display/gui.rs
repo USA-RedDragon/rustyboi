@@ -305,6 +305,24 @@ impl Gui {
                             ui.monospace(egui::RichText::new(format!("D: {:02X}    E: {:02X}", regs.d, regs.e)).color(egui::Color32::WHITE));
                             ui.monospace(egui::RichText::new(format!("H: {:02X}    L: {:02X}", regs.h, regs.l)).color(egui::Color32::WHITE));
                             ui.separator();
+                            
+                            // Pretty-print the flags (F register bits 7-4)
+                            let z_flag = (regs.f & 0x80) != 0; // Bit 7: Zero flag
+                            let n_flag = (regs.f & 0x40) != 0; // Bit 6: Subtract flag
+                            let h_flag = (regs.f & 0x20) != 0; // Bit 5: Half Carry flag
+                            let c_flag = (regs.f & 0x10) != 0; // Bit 4: Carry flag
+                            
+                            ui.horizontal(|ui| {
+                                ui.monospace(egui::RichText::new(format!("Z:{}", if z_flag { "1" } else { "0" }))
+                                    .color(if z_flag { egui::Color32::LIGHT_GREEN } else { egui::Color32::GRAY }));
+                                ui.monospace(egui::RichText::new(format!("N:{}", if n_flag { "1" } else { "0" }))
+                                    .color(if n_flag { egui::Color32::LIGHT_BLUE } else { egui::Color32::GRAY }));
+                                ui.monospace(egui::RichText::new(format!("H:{}", if h_flag { "1" } else { "0" }))
+                                    .color(if h_flag { egui::Color32::YELLOW } else { egui::Color32::GRAY }));
+                                ui.monospace(egui::RichText::new(format!("C:{}", if c_flag { "1" } else { "0" }))
+                                    .color(if c_flag { egui::Color32::LIGHT_RED } else { egui::Color32::GRAY }));
+                            });
+                            ui.separator();
                             ui.monospace(egui::RichText::new(format!("PC: {:04X}", regs.pc.saturating_sub(1))).color(egui::Color32::WHITE));
                             ui.monospace(egui::RichText::new(format!("SP: {:04X}", regs.sp)).color(egui::Color32::WHITE));
                             ui.separator();
