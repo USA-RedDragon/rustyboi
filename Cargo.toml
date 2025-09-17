@@ -10,7 +10,7 @@ egui-wgpu = "0.32.3"
 egui-winit = { version = "0.32.3", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
 pixels = "0.15.0"
 winit = "0.29"
-winit_input_helper = "0.15"
+winit_input_helper = "0.16.0"
 
 [profile.release]
 # 454744 bytes
