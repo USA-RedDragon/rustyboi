@@ -84,10 +84,11 @@ pub fn run_with_gui(bios: Option<String>, rom: Option<String>) -> Result<(), Err
                     elwt.exit();
                     return;
                 }
-                // Prepare egui
-                framework.prepare(&window);
 
-                // Render everything together
+                if let Some(error_msg) = &world.error_state {
+                    framework.set_error(error_msg.clone());
+                }
+
                 let render_result = pixels.render_with(|encoder, render_target, context| {
                     context.scaling_renderer.render(encoder, render_target);
 
@@ -96,10 +97,9 @@ pub fn run_with_gui(bios: Option<String>, rom: Option<String>) -> Result<(), Err
                     Ok(())
                 });
 
-                // Basic error handling
                 if let Err(err) = render_result {
-                    println!("Failed to render pixels: {}", err);
-                    elwt.exit();
+                    println!("Render error: {}", err);
+                    window.request_redraw();
                 }
             }
             Event::WindowEvent { event, .. } => {
@@ -114,6 +114,7 @@ pub fn run_with_gui(bios: Option<String>, rom: Option<String>) -> Result<(), Err
 struct World {
     gb: gb::GB,
     frame: Option<[u8; ppu::FRAMEBUFFER_SIZE * 4]>,
+    error_state: Option<String>,
 }
 
 impl World {
@@ -134,6 +135,7 @@ impl World {
         Self {
             gb,
             frame: None,
+            error_state: None,
         }
     }
 
@@ -145,7 +147,45 @@ impl World {
     }
 
     fn update(&mut self) {
-        self.frame = Some(convert_to_rgba(&self.gb.run_until_frame()));
+        // Skip updating if we're in an error state
+        if self.error_state.is_some() {
+            return;
+        }
+
+        // Catch panics from the Game Boy emulator
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.gb.run_until_frame()
+        }));
+
+        match result {
+            Ok(frame_data) => {
+                self.frame = Some(convert_to_rgba(&frame_data));
+            }
+            Err(panic_info) => {
+                // Convert panic info to a string for debugging
+                let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    format!("Emulator panic: {}", s)
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    format!("Emulator panic: {}", s)
+                } else {
+                    "Emulator panic: Unknown error".to_string()
+                };
+                
+                self.error_state = Some(error_msg);
+                println!("Game Boy emulator crashed: {}", self.error_state.as_ref().unwrap());
+                
+                // Create a red error frame to indicate the crash
+                let mut error_frame = [0; ppu::FRAMEBUFFER_SIZE * 4];
+                for i in 0..ppu::FRAMEBUFFER_SIZE {
+                    let offset = i * 4;
+                    error_frame[offset] = 0xFF;     // Red
+                    error_frame[offset + 1] = 0x00; // Green
+                    error_frame[offset + 2] = 0x00; // Blue
+                    error_frame[offset + 3] = 0xFF; // Alpha
+                }
+                self.frame = Some(error_frame);
+            }
+        }
     }
 }
 
