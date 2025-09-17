@@ -30,7 +30,11 @@ struct Gui {
     status_message: Option<String>,
     show_debug_overlay: bool,
     show_stack_overlay: bool,
+    show_memory_explorer: bool,
     stack_scroll_offset: i16,
+    memory_explorer_address: String,
+    memory_explorer_parsed_address: u16,
+    memory_scroll_offset: i16,
 }
 
 impl Gui {
@@ -40,7 +44,11 @@ impl Gui {
             status_message: None,
             show_debug_overlay: true,
             show_stack_overlay: true,
+            show_memory_explorer: true,
             stack_scroll_offset: 0,
+            memory_explorer_address: String::from("0000"),
+            memory_explorer_parsed_address: 0x0000,
+            memory_scroll_offset: 0,
         }
     }
 
@@ -98,6 +106,9 @@ impl Gui {
                     if ui.checkbox(&mut self.show_stack_overlay, "Show Stack Explorer").clicked() {
                         ui.close_menu();
                     }
+                    if ui.checkbox(&mut self.show_memory_explorer, "Show Memory Explorer").clicked() {
+                        ui.close_menu();
+                    }
                 });
             });
         });
@@ -118,9 +129,10 @@ impl Gui {
                             let sp = regs.sp;
                             ui.monospace(egui::RichText::new(format!("SP: {:04X}", sp)).color(egui::Color32::YELLOW));
                             
-                            // Scroll up button
                             if ui.button("↑ Scroll Up").clicked() {
-                                self.stack_scroll_offset = self.stack_scroll_offset.saturating_add(1);
+                                if self.stack_scroll_offset < 100 { // Reasonable upper limit
+                                    self.stack_scroll_offset = self.stack_scroll_offset.saturating_add(1);
+                                }
                             }
                             
                             ui.separator();
@@ -128,16 +140,16 @@ impl Gui {
                             // Show stack contents around SP with scroll offset
                             let base_start = sp.saturating_sub(8); // 4 entries above SP (8 bytes)
                             let scroll_adjustment = (self.stack_scroll_offset as i32) * 2; // 2 bytes per scroll step
-                            let start_addr = if scroll_adjustment < 0 {
-                                base_start.saturating_add((-scroll_adjustment) as u16)
-                            } else {
+                            let start_addr = if scroll_adjustment >= 0 {
                                 base_start.saturating_sub(scroll_adjustment as u16)
+                            } else {
+                                base_start.saturating_add((-scroll_adjustment) as u16)
                             };
-                            let end_addr = start_addr.saturating_add(16); // Show 9 entries (18 bytes)
+                            let end_addr = std::cmp::min(start_addr.saturating_add(16), 0xFFFF); // Show 9 entries, capped at 0xFFFF
                             
                             for addr in (start_addr..=end_addr).step_by(2) {
                                 let val1 = gb_ref.read_memory(addr);
-                                let val2 = if addr + 1 <= end_addr { gb_ref.read_memory(addr + 1) } else { 0 };
+                                let val2 = if addr < 0xFFFF { gb_ref.read_memory(addr + 1) } else { 0 };
                                 let word_val = ((val2 as u16) << 8) | (val1 as u16);
                                 
                                 let color = if addr == sp {
@@ -154,9 +166,10 @@ impl Gui {
                             
                             ui.separator();
                             
-                            // Scroll down button
                             if ui.button("↓ Scroll Down").clicked() {
-                                self.stack_scroll_offset = self.stack_scroll_offset.saturating_sub(1);
+                                if self.stack_scroll_offset > -100 { // Reasonable lower limit
+                                    self.stack_scroll_offset = self.stack_scroll_offset.saturating_sub(1);
+                                }
                             }
                             
                             // Reset button
@@ -171,6 +184,105 @@ impl Gui {
                             ui.small(egui::RichText::new("Yellow = SP position").color(egui::Color32::LIGHT_GRAY));
                         });
                 }
+            }
+        }
+
+        // Memory explorer overlay
+        if self.show_memory_explorer {
+            if let Some(gb_ref) = gb {
+                egui::Window::new("Memory Explorer")
+                    .default_pos([410.0, 50.0])
+                    .default_size([220.0, 400.0])
+                    .collapsible(true)
+                    .resizable(false)
+                    .frame(egui::Frame::window(&ctx.style()).fill(egui::Color32::from_rgba_unmultiplied(64, 64, 64, 220)))
+                    .show(ctx, |ui| {
+                        ui.set_width(200.0);
+                        
+                        // Address input field
+                        ui.horizontal(|ui| {
+                            ui.label("Address:");
+                            if ui.text_edit_singleline(&mut self.memory_explorer_address).changed() {
+                                // Parse hex input (with or without 0x prefix)
+                                let clean_input = if self.memory_explorer_address.starts_with("0x") || self.memory_explorer_address.starts_with("0X") {
+                                    &self.memory_explorer_address[2..]
+                                } else {
+                                    &self.memory_explorer_address
+                                };
+                                
+                                if let Ok(addr) = u16::from_str_radix(clean_input, 16) {
+                                    self.memory_explorer_parsed_address = addr;
+                                    self.memory_scroll_offset = 0; // Reset scroll when address changes
+                                }
+                            }
+                        });
+                        
+                        // Scroll up button (move pointer to lower addresses)
+                        if ui.button("↑ Move Up").clicked() {
+                            // Ensure we don't go below 0x0000
+                            if self.memory_explorer_parsed_address >= 2 {
+                                self.memory_explorer_parsed_address = self.memory_explorer_parsed_address.saturating_sub(2);
+                                self.memory_explorer_address = format!("{:04X}", self.memory_explorer_parsed_address);
+                            }
+                        }
+                        
+                        ui.separator();
+                        
+                        // Show memory contents around the current address (fixed view)
+                        let start_addr = self.memory_explorer_parsed_address.saturating_sub(8); // 4 entries above (8 bytes)
+                        let end_addr = std::cmp::min(start_addr.saturating_add(16), 0xFFFF); // Show 9 entries (18 bytes), capped at 0xFFFF
+                        
+                        for addr in (start_addr..=end_addr).step_by(2) {
+                            let val1 = gb_ref.read_memory(addr);
+                            let val2 = if addr < 0xFFFF { gb_ref.read_memory(addr + 1) } else { 0 };
+                            let word_val = ((val2 as u16) << 8) | (val1 as u16);
+                            
+                            let color = if addr == self.memory_explorer_parsed_address {
+                                egui::Color32::YELLOW // Highlight target address
+                            } else if addr < self.memory_explorer_parsed_address {
+                                egui::Color32::LIGHT_GRAY // Before target
+                            } else {
+                                egui::Color32::GRAY // After target
+                            };
+                            
+                            let marker = if addr == self.memory_explorer_parsed_address { "→" } else { " " };
+                            ui.monospace(egui::RichText::new(format!("{} {:04X}: {:04X}", marker, addr, word_val)).color(color));
+                        }
+                        
+                        ui.separator();
+                        
+                        // Scroll down button (move pointer to higher addresses)
+                        if ui.button("↓ Move Down").clicked() {
+                            // Ensure we don't go above 0xFFFF
+                            if self.memory_explorer_parsed_address <= 0xFFFF - 2 {
+                                self.memory_explorer_parsed_address = self.memory_explorer_parsed_address.saturating_add(2);
+                                self.memory_explorer_address = format!("{:04X}", self.memory_explorer_parsed_address);
+                            }
+                        }
+                        
+                        // Navigation buttons
+                        ui.horizontal(|ui| {
+                            if ui.button("+0x10").clicked() {
+                                // Add 0x10, but clamp to maximum valid address (0xFFFE for 16-bit words)
+                                let new_addr = self.memory_explorer_parsed_address.saturating_add(0x10);
+                                self.memory_explorer_parsed_address = std::cmp::min(new_addr, 0xFFFE);
+                                self.memory_explorer_address = format!("{:04X}", self.memory_explorer_parsed_address);
+                            }
+                        });
+                        
+                        ui.horizontal(|ui| {
+                            if ui.button("-0x10").clicked() {
+                                // Subtract 0x10, but clamp to minimum valid address (0x0000)
+                                self.memory_explorer_parsed_address = self.memory_explorer_parsed_address.saturating_sub(0x10);
+                                self.memory_explorer_address = format!("{:04X}", self.memory_explorer_parsed_address);
+                            }
+                            ui.small(egui::RichText::new(format!("Current: {:04X}", self.memory_explorer_parsed_address)).color(egui::Color32::LIGHT_GRAY));
+                        });
+                        
+                        ui.separator();
+                        ui.small(egui::RichText::new("Yellow = target address").color(egui::Color32::LIGHT_GRAY));
+                        ui.small(egui::RichText::new("Input: hex (with/without 0x)").color(egui::Color32::LIGHT_GRAY));
+                    });
             }
         }
 
