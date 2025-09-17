@@ -106,21 +106,12 @@ impl Gui {
 
                 ui.menu_button("Debug", |ui| {
                     any_menu_open = true;
-                    if ui.checkbox(&mut self.show_debug_overlay, "Show Debug Overlay").clicked() {
-                        ui.close_menu();
-                    }
-                    if ui.checkbox(&mut self.show_stack_overlay, "Show Stack Explorer").clicked() {
-                        ui.close_menu();
-                    }
-                    if ui.checkbox(&mut self.show_memory_explorer, "Show Memory Explorer").clicked() {
-                        ui.close_menu();
-                    }
-                    if ui.checkbox(&mut self.show_ppu_debug, "Show PPU Debug").clicked() {
-                        ui.close_menu();
-                    }
-                    if ui.checkbox(&mut self.show_palette_explorer, "Show Palette Explorer").clicked() {
-                        ui.close_menu();
-                    }
+                    ui.checkbox(&mut self.show_debug_overlay, "Show Debug Overlay");
+                    ui.checkbox(&mut self.show_stack_overlay, "Show Stack Explorer");
+                    ui.checkbox(&mut self.show_memory_explorer, "Show Memory Explorer");
+                    ui.checkbox(&mut self.show_ppu_debug, "Show PPU Debug");
+                    ui.checkbox(&mut self.show_palette_explorer, "Show Palette Explorer");
+                    ui.checkbox(&mut self.show_tile_explorer, "Show Tile Explorer");
                 });
             });
         });
