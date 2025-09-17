@@ -136,14 +136,6 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                         manually_paused = !manually_paused;
                         world.toggle_pause();
                     }
-                    Some(GuiAction::StepFrame) => {
-                        world.step_single_frame = true;
-                        window.request_redraw();
-                    }
-                    Some(GuiAction::StepCycle) => {
-                        world.step_single_cycle = true;
-                        window.request_redraw();
-                    }
                     None => {}
                 }
 

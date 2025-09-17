@@ -12,8 +12,6 @@ pub enum GuiAction {
     TogglePause,
     Restart,
     ClearError,
-    StepFrame,
-    StepCycle,
 }
 
 pub(crate) struct Framework {
