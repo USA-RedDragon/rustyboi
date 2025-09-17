@@ -9,6 +9,7 @@ use winit::window::Window;
 pub enum GuiAction {
     Exit,
     SaveState(std::path::PathBuf),
+    LoadState(std::path::PathBuf),
     LoadRom(std::path::PathBuf),
     TogglePause,
     Restart,
@@ -95,6 +96,18 @@ impl Gui {
                         }
                         if let Some(path) = dialog.save_file() {
                             action = Some(GuiAction::SaveState(path));
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Load State").clicked() {
+                        let mut dialog = rfd::FileDialog::new()
+                            .add_filter("RustyBoi Save State", &["rustyboisave"])
+                            .add_filter("All Files", &["*"]);
+                        if env::current_dir().is_ok() {
+                            dialog = dialog.set_directory(env::current_dir().unwrap());
+                        }
+                        if let Some(path) = dialog.pick_file() {
+                            action = Some(GuiAction::LoadState(path));
                         }
                         ui.close_menu();
                     }

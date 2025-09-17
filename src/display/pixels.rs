@@ -42,7 +42,7 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
 
         (pixels, framework)
     };
-    let mut world = World::new(gb); 
+    let mut world = World::new_with_paths(gb, config.rom.clone(), config.bios.clone()); 
     let mut manually_paused = false;
 
     let res = event_loop.run(|event, elwt| {
@@ -114,6 +114,19 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                             }
                             Err(e) => {
                                 framework.set_error(format!("Failed to save state: {}", e));
+                            }
+                        }
+                    }
+                    Some(GuiAction::LoadState(path)) => {
+                        match world.load_state(path) {
+                            Ok(loaded_path) => {
+                                manually_paused = false;
+                                framework.clear_error();
+                                framework.set_status(format!("State loaded from: {}", loaded_path));
+                                window.request_redraw();
+                            }
+                            Err(e) => {
+                                framework.set_error(format!("Failed to load state: {}", e));
                             }
                         }
                     }
@@ -197,10 +210,12 @@ struct World {
     is_paused: bool,
     step_single_frame: bool,
     step_single_cycle: bool,
+    current_rom_path: Option<String>,
+    current_bios_path: Option<String>,
 }
 
 impl World {
-    fn new(gb: gb::GB) -> Self {
+    fn new_with_paths(gb: gb::GB, rom_path: Option<String>, bios_path: Option<String>) -> Self {
         Self {
             gb,
             frame: None,
@@ -208,6 +223,8 @@ impl World {
             is_paused: false,
             step_single_frame: false,
             step_single_cycle: false,
+            current_rom_path: rom_path,
+            current_bios_path: bios_path,
         }
     }
 
@@ -218,10 +235,65 @@ impl World {
         Ok(filename)
     }
 
+    fn load_state(&mut self, path: std::path::PathBuf) -> Result<String, Box<dyn std::error::Error>> {
+        let filename = path.to_string_lossy().to_string();
+        
+        // Save the current ROM and BIOS paths before loading state
+        let saved_rom_path = self.current_rom_path.clone();
+        let saved_bios_path = self.current_bios_path.clone();
+        
+        // Load the new state
+        self.gb = crate::gb::GB::from_state_file(&filename)?;
+        
+        // Reload the ROM if we had one loaded
+        if let Some(rom_path) = saved_rom_path {
+            match crate::cartridge::Cartridge::load(&rom_path) {
+                Ok(cartridge) => {
+                    self.gb.insert(cartridge);
+                    self.current_rom_path = Some(rom_path);
+                    println!("Reloaded ROM: {}", self.current_rom_path.as_ref().unwrap());
+                }
+                Err(e) => {
+                    println!("Warning: Failed to reload ROM {}: {}", rom_path, e);
+                    self.current_rom_path = None;
+                }
+            }
+        }
+        
+        // Reload the BIOS if we had one loaded
+        if let Some(bios_path) = saved_bios_path {
+            match self.gb.load_bios(&bios_path) {
+                Ok(_) => {
+                    self.current_bios_path = Some(bios_path);
+                    println!("Reloaded BIOS: {}", self.current_bios_path.as_ref().unwrap());
+                }
+                Err(e) => {
+                    println!("Warning: Failed to reload BIOS {}: {}", bios_path, e);
+                    self.current_bios_path = None;
+                }
+            }
+        }
+        
+        // Clear any error state
+        self.error_state = None;
+        
+        // Clear the current frame
+        self.frame = None;
+        
+        // Reset pause state
+        self.is_paused = false;
+        
+        println!("Game state loaded from: {}", filename);
+        Ok(filename)
+    }
+
     fn load_rom(&mut self, path: std::path::PathBuf) -> Result<String, Box<dyn std::error::Error>> {
         let filename = path.to_string_lossy().to_string();
         let cartridge = crate::cartridge::Cartridge::load(&filename)?;
         self.gb.insert(cartridge);
+        
+        // Track the current ROM path
+        self.current_rom_path = Some(filename.clone());
         
         // Reset the emulator to a clean state after loading the ROM
         self.gb.reset();
