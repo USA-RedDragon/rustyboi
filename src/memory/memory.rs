@@ -1,5 +1,15 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Memory<const START: u16, const SIZE: usize> {
+    #[serde(with = "serde_bytes")]
     data: [u8; SIZE],
+}
+
+impl<const START: u16, const SIZE: usize> Default for Memory<START, SIZE> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<const START: u16, const SIZE: usize> Memory<START, SIZE> {

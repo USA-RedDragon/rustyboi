@@ -3,6 +3,7 @@ use crate::cpu::registers;
 use crate::memory::mmio;
 use crate::memory::Addressable;
 use crate::ppu::fetcher;
+use serde::{Deserialize, Serialize};
 
 pub const LCD_CONTROL: u16 = 0xFF40;
 pub const LCD_STATUS: u16 = 0xFF41;
@@ -24,6 +25,7 @@ pub enum LCDCFlags {
     DisplayEnable = 1<<7,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
 pub enum State {
     OAMSearch,
     PixelTransfer,
@@ -31,6 +33,7 @@ pub enum State {
     VBlank,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PPU {
     fetcher: fetcher::Fetcher,
     disabled: bool,
@@ -38,7 +41,9 @@ pub struct PPU {
     ticks: u128,
     x: u8,
 
+    #[serde(with = "serde_bytes")]
     fb_a: [u8; FRAMEBUFFER_SIZE],
+    #[serde(with = "serde_bytes")]
     fb_b: [u8; FRAMEBUFFER_SIZE],
     have_frame: bool,
 }

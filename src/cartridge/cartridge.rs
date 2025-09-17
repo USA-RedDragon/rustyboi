@@ -1,10 +1,12 @@
 use crate::memory;
 use crate::memory::mmio;
 use crate::memory::Addressable;
+use serde::{Deserialize, Serialize};
 
 use std::fs;
 use std::io;
 
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Cartridge {
     cartridge: memory::Memory<{mmio::CARTRIDGE_START}, {mmio::CARTRIDGE_SIZE}>,
 }

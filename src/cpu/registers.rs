@@ -1,3 +1,6 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
 pub enum Flag {
     Carry = 1<<4,
     HalfCarry = 1<<5,
@@ -5,6 +8,7 @@ pub enum Flag {
     Zero = 1<<7,
 }
 
+#[derive(Serialize, Deserialize)]
 pub enum InterruptFlag {
     Joypad = 1<<4,
     Serial = 1<<3,
@@ -16,6 +20,7 @@ pub enum InterruptFlag {
 pub const INTERRUPT_FLAG: u16 = 0xFF0F;
 pub const INTERRUPT_ENABLE: u16 = 0xFFFF;
 
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Registers {
     pub a: u8,
     pub f: u8,
