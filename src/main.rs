@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod gb;
 mod cartridge;
 mod cpu;
