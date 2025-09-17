@@ -8,6 +8,7 @@ mod memory;
 mod ppu;
 
 use clap::Parser;
+use pixels;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -18,17 +19,20 @@ struct Args {
 
     #[arg(short, long)]
     bios: Option<String>,
+
+    #[arg(short, long, default_value_t = false)]
+    gui: bool,
 }
 
-fn main() {
+fn main() -> Result<(), pixels::Error> {
     let args = Args::parse();
 
-    let mut gb = gb::GB::new(display::Terminal::new());
-
-    if let Some(bios) = args.bios {
-        gb.load_bios(&bios)
-            .expect("Failed to load BIOS file");
+    if args.gui {
+        return display::run_with_gui(args.bios, args.rom);
     }
+
+    let mut gb = gb::GB::new();
+    gb.set_display_callback(Box::new(display::Terminal::render_frame));
 
     if let Some(rom) = args.rom {
         let cartridge = cartridge::Cartridge::load(&rom)
@@ -36,5 +40,11 @@ fn main() {
         gb.insert(cartridge);
     }
 
+    if let Some(bios) = args.bios {
+        gb.load_bios(&bios)
+            .expect("Failed to load BIOS file");
+    }
+
     gb.run();
+    Ok(())
 }

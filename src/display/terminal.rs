@@ -1,17 +1,10 @@
-use crate::display;
 use crate::ppu;
 
 pub struct Terminal {
 }
 
 impl Terminal {
-    pub fn new() -> Self {
-        Terminal {}
-    }
-}
-
-impl display::Display for Terminal {
-    fn render_frame(&mut self, frame: [u8; ppu::FRAMEBUFFER_SIZE]) {
+    pub fn render_frame(frame: &[u8; ppu::FRAMEBUFFER_SIZE]) {
         // Simple Terminal rendering: print the frame as ASCII art
         for y in 0..144 {
             for x in 0..160 {
