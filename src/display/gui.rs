@@ -11,6 +11,8 @@ pub enum GuiAction {
     Exit,
     SaveState(std::path::PathBuf),
     TogglePause,
+    Restart,
+    ClearError,
 }
 
 pub(crate) struct Framework {
@@ -27,8 +29,6 @@ pub(crate) struct Framework {
 struct Gui {
     error_message: Option<String>,
     status_message: Option<String>,
-    is_paused: bool,
-    manually_paused: bool,
 }
 
 impl Gui {
@@ -36,13 +36,11 @@ impl Gui {
         Self { 
             error_message: None,
             status_message: None,
-            is_paused: false,
-            manually_paused: false,
         }
     }
 
     /// Create the UI using egui.
-    fn ui(&mut self, ctx: &Context) -> (Option<GuiAction>, bool, bool) {
+    fn ui(&mut self, ctx: &Context, paused: bool) -> (Option<GuiAction>, bool) {
         let mut action = None;
         let mut any_menu_open = false;
         
@@ -75,11 +73,14 @@ impl Gui {
                 
                 ui.menu_button("Emulation", |ui| {
                     any_menu_open = true;
-                    let pause_text = if self.is_paused { "Resume" } else { "Pause" };
+                    if ui.button("Restart").clicked() {
+                        action = Some(GuiAction::Restart);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    let pause_text = if paused { "Resume" } else { "Pause" };
                     if ui.button(pause_text).clicked() {
                         action = Some(GuiAction::TogglePause);
-                        self.is_paused = !self.is_paused;
-                        self.manually_paused = self.is_paused;
                         ui.close_menu();
                     }
                 });
@@ -106,7 +107,6 @@ impl Gui {
 
         // Display error panel if there's an error
         if let Some(error_msg) = &self.error_message.clone() {
-            let mut clear_error = false;
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.heading("🚨 Emulator Crashed");
                 ui.separator();
@@ -126,21 +126,27 @@ impl Gui {
                 
                 ui.add_space(10.0);
                 
-                if ui.button("Clear Error (Debug Mode)").clicked() {
-                    clear_error = true;
-                }
+                ui.horizontal(|ui| {
+                    if ui.button("🔄 Restart Emulation").clicked() {
+                        action = Some(GuiAction::Restart);
+                    }
+                    
+                    if ui.button("Clear Error (Debug Mode)").clicked() {
+                        action = Some(GuiAction::ClearError);
+                    }
+                });
             });
-            
-            if clear_error {
-                self.error_message = None;
-            }
         }
         
-        (action, any_menu_open, self.manually_paused)
+        (action, any_menu_open)
     }
 
     fn set_error(&mut self, error_message: String) {
         self.error_message = Some(error_message);
+    }
+
+    fn clear_error(&mut self) {
+        self.error_message = None;
     }
 
     fn set_status(&mut self, status_message: String) {
@@ -203,15 +209,19 @@ impl Framework {
         self.gui.set_error(error_message);
     }
 
+    pub(crate) fn clear_error(&mut self) {
+        self.gui.clear_error();
+    }
+
     pub(crate) fn set_status(&mut self, status_message: String) {
         self.gui.set_status(status_message);
     }
 
-    pub(crate) fn prepare(&mut self, window: &Window) -> (Option<GuiAction>, bool, bool) {
+    pub(crate) fn prepare(&mut self, window: &Window, paused: bool) -> (Option<GuiAction>, bool) {
         let raw_input = self.egui_state.take_egui_input(window);
-        let mut result = (None, false, false);
+        let mut result = (None, false);
         let output = self.egui_ctx.run(raw_input, |egui_ctx| {
-            result = self.gui.ui(egui_ctx);
+            result = self.gui.ui(egui_ctx, paused);
         });
 
         self.textures.append(output.textures_delta);
