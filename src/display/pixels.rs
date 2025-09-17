@@ -3,6 +3,7 @@ use crate::display::gui::{Framework, GuiAction};
 use crate::gb;
 use crate::ppu;
 
+use std::time::{Duration, Instant};
 use winit::dpi::LogicalSize;
 use winit::event::{Event,WindowEvent};
 use winit::event_loop::EventLoop;
@@ -45,6 +46,16 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
     let mut world = World::new_with_paths(gb, config.rom.clone(), config.bios.clone()); 
     let mut manually_paused = false;
 
+    // Debounce timing for F and N keys
+    const DEBOUNCE_DURATION: Duration = Duration::from_millis(250); // Time to wait before auto-repeat
+    const REPEAT_INTERVAL: Duration = Duration::from_millis(67); // Execute every ~67ms when held (about 15fps)
+    let mut f_key_press_time: Option<Instant> = None;
+    let mut n_key_press_time: Option<Instant> = None;
+    let mut f_key_processed_initial = false;
+    let mut n_key_processed_initial = false;
+    let mut f_last_repeat_time: Option<Instant> = None;
+    let mut n_last_repeat_time: Option<Instant> = None;
+
     let res = event_loop.run(|event, elwt| {
         if input.update(&event) {
             if input.key_pressed(KeyCode::Escape) || input.close_requested() {
@@ -52,20 +63,72 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                 return;
             }
 
-            // Handle F key for frame stepping when paused
+            // Handle F key for frame stepping with debounce
             if input.key_pressed(KeyCode::KeyF) {
                 if manually_paused || world.error_state.is_some() {
+                    // Initial press - execute immediately
                     world.step_single_frame = true;
+                    let now = Instant::now();
+                    f_key_press_time = Some(now);
+                    f_last_repeat_time = Some(now);
+                    f_key_processed_initial = true;
                     window.request_redraw();
                 }
+            } else if input.key_held(KeyCode::KeyF) {
+                if manually_paused || world.error_state.is_some() {
+                    if let Some(press_time) = f_key_press_time {
+                        // Check if debounce period has elapsed
+                        if press_time.elapsed() >= DEBOUNCE_DURATION {
+                            // Check if enough time has passed since last repeat
+                            if let Some(last_repeat) = f_last_repeat_time {
+                                if last_repeat.elapsed() >= REPEAT_INTERVAL {
+                                    world.step_single_frame = true;
+                                    f_last_repeat_time = Some(Instant::now());
+                                    window.request_redraw();
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Key released - reset state
+                f_key_press_time = None;
+                f_key_processed_initial = false;
+                f_last_repeat_time = None;
             }
 
-            // Handle N key for cycle stepping when paused
+            // Handle N key for cycle stepping with debounce
             if input.key_pressed(KeyCode::KeyN) {
                 if manually_paused || world.error_state.is_some() {
+                    // Initial press - execute immediately
                     world.step_single_cycle = true;
+                    let now = Instant::now();
+                    n_key_press_time = Some(now);
+                    n_last_repeat_time = Some(now);
+                    n_key_processed_initial = true;
                     window.request_redraw();
                 }
+            } else if input.key_held(KeyCode::KeyN) {
+                if manually_paused || world.error_state.is_some() {
+                    if let Some(press_time) = n_key_press_time {
+                        // Check if debounce period has elapsed
+                        if press_time.elapsed() >= DEBOUNCE_DURATION {
+                            // Check if enough time has passed since last repeat
+                            if let Some(last_repeat) = n_last_repeat_time {
+                                if last_repeat.elapsed() >= REPEAT_INTERVAL {
+                                    world.step_single_cycle = true;
+                                    n_last_repeat_time = Some(Instant::now());
+                                    window.request_redraw();
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Key released - reset state
+                n_key_press_time = None;
+                n_key_processed_initial = false;
+                n_last_repeat_time = None;
             }
 
             if let Some(scale_factor) = input.scale_factor() {
