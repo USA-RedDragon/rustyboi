@@ -13,6 +13,8 @@ pub enum GuiAction {
     TogglePause,
     Restart,
     ClearError,
+    StepFrame,
+    StepCycle,
 }
 
 pub(crate) struct Framework {
@@ -29,6 +31,7 @@ pub(crate) struct Framework {
 struct Gui {
     error_message: Option<String>,
     status_message: Option<String>,
+    show_debug_overlay: bool,
 }
 
 impl Gui {
@@ -36,11 +39,12 @@ impl Gui {
         Self { 
             error_message: None,
             status_message: None,
+            show_debug_overlay: true,
         }
     }
 
     /// Create the UI using egui.
-    fn ui(&mut self, ctx: &Context, paused: bool) -> (Option<GuiAction>, bool) {
+    fn ui(&mut self, ctx: &Context, paused: bool, registers: Option<&crate::cpu::registers::Registers>) -> (Option<GuiAction>, bool) {
         let mut action = None;
         let mut any_menu_open = false;
         
@@ -84,8 +88,44 @@ impl Gui {
                         ui.close_menu();
                     }
                 });
+
+                ui.menu_button("Debug", |ui| {
+                    any_menu_open = true;
+                    if ui.checkbox(&mut self.show_debug_overlay, "Show Debug Overlay").clicked() {
+                        ui.close_menu();
+                    }
+                });
             });
         });
+
+        // Debug overlay
+        if self.show_debug_overlay {
+            if let Some(regs) = registers {
+                egui::Window::new("CPU Registers")
+                    .default_pos([10.0, 50.0])
+                    .default_size([200.0, 300.0])
+                    .collapsible(true)
+                    .resizable(false)
+                    .frame(egui::Frame::window(&ctx.style()).fill(egui::Color32::from_rgba_unmultiplied(64, 64, 64, 220)))
+                    .show(ctx, |ui| {
+                        ui.set_width(180.0);
+                        
+                        // Use rich text for better color control
+                        ui.monospace(egui::RichText::new(format!("A: {:02X}    F: {:02X}", regs.a, regs.f)).color(egui::Color32::WHITE));
+                        ui.monospace(egui::RichText::new(format!("B: {:02X}    C: {:02X}", regs.b, regs.c)).color(egui::Color32::WHITE));
+                        ui.monospace(egui::RichText::new(format!("D: {:02X}    E: {:02X}", regs.d, regs.e)).color(egui::Color32::WHITE));
+                        ui.monospace(egui::RichText::new(format!("H: {:02X}    L: {:02X}", regs.h, regs.l)).color(egui::Color32::WHITE));
+                        ui.separator();
+                        ui.monospace(egui::RichText::new(format!("PC: {:04X}", regs.pc)).color(egui::Color32::WHITE));
+                        ui.monospace(egui::RichText::new(format!("SP: {:04X}", regs.sp)).color(egui::Color32::WHITE));
+                        ui.separator();
+                        ui.monospace(egui::RichText::new(format!("IME: {}", if regs.ime { "ON" } else { "OFF" })).color(egui::Color32::WHITE));
+                        ui.separator();
+                        ui.small(egui::RichText::new("F = step frame").color(egui::Color32::LIGHT_GRAY));
+                        ui.small(egui::RichText::new("N = step cycle").color(egui::Color32::LIGHT_GRAY));
+                    });
+            }
+        }
 
         // Display status message if there's one
         if let Some(status_msg) = &self.status_message.clone() {
@@ -217,11 +257,11 @@ impl Framework {
         self.gui.set_status(status_message);
     }
 
-    pub(crate) fn prepare(&mut self, window: &Window, paused: bool) -> (Option<GuiAction>, bool) {
+    pub(crate) fn prepare(&mut self, window: &Window, paused: bool, registers: Option<&crate::cpu::registers::Registers>) -> (Option<GuiAction>, bool) {
         let raw_input = self.egui_state.take_egui_input(window);
         let mut result = (None, false);
         let output = self.egui_ctx.run(raw_input, |egui_ctx| {
-            result = self.gui.ui(egui_ctx, paused);
+            result = self.gui.ui(egui_ctx, paused, registers);
         });
 
         self.textures.append(output.textures_delta);
