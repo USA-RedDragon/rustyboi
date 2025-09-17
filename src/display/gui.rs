@@ -29,8 +29,8 @@ pub(crate) struct Framework {
 struct Gui {
     error_message: Option<String>,
     status_message: Option<String>,
-    show_debug_overlay: bool,
-    show_stack_overlay: bool,
+    show_cpu_registers: bool,
+    show_stack_explorer: bool,
     show_memory_explorer: bool,
     show_ppu_debug: bool,
     show_palette_explorer: bool,
@@ -46,12 +46,12 @@ impl Gui {
         Self { 
             error_message: None,
             status_message: None,
-            show_debug_overlay: true,
-            show_stack_overlay: true,
-            show_memory_explorer: true,
-            show_ppu_debug: true,
-            show_palette_explorer: true,
-            show_tile_explorer: true,
+            show_cpu_registers: true,
+            show_stack_explorer: false,
+            show_memory_explorer: false,
+            show_ppu_debug: false,
+            show_palette_explorer: false,
+            show_tile_explorer: false,
             stack_scroll_offset: 0,
             memory_explorer_address: String::from("0000"),
             memory_explorer_parsed_address: 0x0000,
@@ -121,18 +121,18 @@ impl Gui {
 
                 ui.menu_button("Debug", |ui| {
                     any_menu_open = true;
-                    ui.checkbox(&mut self.show_debug_overlay, "Show Debug Overlay");
-                    ui.checkbox(&mut self.show_stack_overlay, "Show Stack Explorer");
-                    ui.checkbox(&mut self.show_memory_explorer, "Show Memory Explorer");
-                    ui.checkbox(&mut self.show_ppu_debug, "Show PPU Debug");
-                    ui.checkbox(&mut self.show_palette_explorer, "Show Palette Explorer");
-                    ui.checkbox(&mut self.show_tile_explorer, "Show Tile Explorer");
+                    ui.checkbox(&mut self.show_cpu_registers, "CPU Registers");
+                    ui.checkbox(&mut self.show_stack_explorer, "Stack Explorer");
+                    ui.checkbox(&mut self.show_memory_explorer, "Memory Explorer");
+                    ui.checkbox(&mut self.show_ppu_debug, "PPU");
+                    ui.checkbox(&mut self.show_palette_explorer, "Palette Explorer");
+                    ui.checkbox(&mut self.show_tile_explorer, "Tile Explorer");
                 });
             });
         });
 
         // Stack overlay
-        if self.show_stack_overlay {
+        if self.show_stack_explorer {
             if let Some(regs) = registers {
                 if let Some(gb_ref) = gb {
                     egui::Window::new("Stack Explorer")
@@ -563,7 +563,7 @@ impl Gui {
         }
 
         // Debug overlay
-        if self.show_debug_overlay {
+        if self.show_cpu_registers {
             if let Some(regs) = registers {
                 if let Some(gb_ref) = gb {
                     egui::Window::new("CPU Registers")
