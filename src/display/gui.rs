@@ -53,9 +53,9 @@ impl Gui {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
                             .as_secs();
-                        let file_name = format!("save_{}.json", timestamp);
+                        let file_name = format!("save_{}", timestamp);
                         let mut dialog = rfd::FileDialog::new()
-                            .add_filter("RustyBoi Save State", &[".rustyboisave"])
+                            .add_filter("RustyBoi Save State", &["rustyboisave"])
                             .set_file_name(file_name);
                         if env::current_dir().is_ok() {
                             dialog = dialog.set_directory(env::current_dir().unwrap());
