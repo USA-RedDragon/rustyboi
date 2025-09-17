@@ -16,7 +16,7 @@ pub struct RawConfig {
     state: Option<String>,
 
     /// Scale factor for GUI
-    #[arg(short, long, default_value_t = 3)]
+    #[arg(short, long, default_value_t = 5)]
     scale: u8,
 
     /// Run with CLI (no GUI)
