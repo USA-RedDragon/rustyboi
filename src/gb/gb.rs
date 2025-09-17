@@ -1,6 +1,7 @@
 use crate::cartridge;
 use crate::cpu;
 use crate::cpu::registers;
+use crate::display;
 use crate::memory;
 use crate::memory::Addressable;
 use crate::ppu;
@@ -12,18 +13,20 @@ const NANO: u128 = 1_000_000_000u128;
 const BATCH_CYCLES: u64 = 500;   // batch size
 const BUSY_WAIT_NS: u128 = 50_000; // 50 µs busy-wait
 
-pub struct GB {
+pub struct GB<D: display::Display> {
     cpu: cpu::SM83,
     mmio: memory::mmio::MMIO,
     ppu: ppu::PPU,
+    display: D,
 }
 
-impl GB {
-    pub fn new() -> Self {
+impl<D: display::Display> GB<D> {
+    pub fn new(display: D) -> Self {
         GB {
             cpu: cpu::SM83::new(),
             mmio: memory::mmio::MMIO::new(),
             ppu: ppu::PPU::new(),
+            display,
         }
     }
 
@@ -71,7 +74,7 @@ impl GB {
 
             // Render frame if ready
             if self.ppu.frame_ready() {
-                let frame = self.ppu.get_frame();
+                self.display.render_frame(self.ppu.get_frame());
             }
 
             total_cycles += batch_cycles as u128;

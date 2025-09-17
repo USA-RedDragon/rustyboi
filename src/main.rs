@@ -1,6 +1,7 @@
 mod gb;
 mod cartridge;
 mod cpu;
+mod display;
 mod memory;
 mod ppu;
 
@@ -20,7 +21,7 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    let mut gb = gb::GB::new();
+    let mut gb = gb::GB::new(display::TUI::new());
 
     if let Some(bios) = args.bios {
         gb.load_bios(&bios)
