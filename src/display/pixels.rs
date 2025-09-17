@@ -1,4 +1,4 @@
-use crate::cartridge;
+use crate::config;
 use crate::display::gui::Framework;
 use crate::gb;
 use crate::ppu;
@@ -13,13 +13,12 @@ use pixels::{Error,Pixels,SurfaceTexture};
 
 const WIDTH: u32 = 160;
 const HEIGHT: u32 = 144;
-const DEFAULT_SCALE: u32 = 3;
 
-pub fn run_with_gui(bios: Option<String>, rom: Option<String>) -> Result<(), Error> {
+pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Error> {
     let event_loop = EventLoop::new().unwrap();
     let mut input = WinitInputHelper::new();
     let window = {
-        let size = LogicalSize::new((WIDTH * DEFAULT_SCALE) as f64, (HEIGHT * DEFAULT_SCALE) as f64);
+        let size = LogicalSize::new((WIDTH * (config.scale as u32)) as f64, (HEIGHT * (config.scale as u32)) as f64);
         WindowBuilder::new()
             .with_title("RustyBoi")
             .with_inner_size(size)
@@ -43,7 +42,7 @@ pub fn run_with_gui(bios: Option<String>, rom: Option<String>) -> Result<(), Err
 
         (pixels, framework)
     };
-    let mut world = World::new(bios, rom);
+    let mut world = World::new(gb);
 
     let res = event_loop.run(|event, elwt| {
         if input.update(&event) {
@@ -118,20 +117,7 @@ struct World {
 }
 
 impl World {
-    fn new(bios: Option<String>, rom: Option<String>) -> Self {
-        let mut gb = gb::GB::new();
-
-        if let Some(rom) = rom {
-            let cartridge = cartridge::Cartridge::load(&rom)
-                .expect("Failed to load ROM file");
-            gb.insert(cartridge);
-        }
-
-        if let Some(bios) = bios {
-            gb.load_bios(&bios)
-                .expect("Failed to load BIOS file");
-        }
-
+    fn new(gb: gb::GB) -> Self {
         Self {
             gb,
             frame: None,

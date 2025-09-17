@@ -38,9 +38,11 @@ impl Clone for GB {
 }
 
 impl GB {
-    pub fn new() -> Self {
+    pub fn new(skip_bios: bool) -> Self {
+        let mut cpu = cpu::SM83::new();
+        cpu.registers.reset(skip_bios);
         GB {
-            cpu: cpu::SM83::new(),
+            cpu,
             mmio: memory::mmio::MMIO::new(),
             ppu: ppu::PPU::new(),
             display_callback: None,
@@ -62,7 +64,6 @@ impl GB {
 
     pub fn load_bios(&mut self, path: &str) -> Result<(), std::io::Error> {
         self.mmio.load_bios(path)?;
-        self.cpu.registers.reset(false);
         Ok(())
     }
 
