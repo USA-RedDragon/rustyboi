@@ -13,16 +13,17 @@ use pixels::{Error,Pixels,SurfaceTexture};
 
 const WIDTH: u32 = 160;
 const HEIGHT: u32 = 144;
+const DEFAULT_SCALE: u32 = 3;
 
 pub fn run_with_gui(bios: Option<String>, rom: Option<String>) -> Result<(), Error> {
     let event_loop = EventLoop::new().unwrap();
     let mut input = WinitInputHelper::new();
     let window = {
-        let size = LogicalSize::new(WIDTH as f64, HEIGHT as f64);
+        let size = LogicalSize::new((WIDTH * DEFAULT_SCALE) as f64, (HEIGHT * DEFAULT_SCALE) as f64);
         WindowBuilder::new()
             .with_title("RustyBoi")
             .with_inner_size(size)
-            .with_min_inner_size(size)
+            .with_min_inner_size(LogicalSize::new(WIDTH as f64, HEIGHT as f64))
             .build(&event_loop)
             .unwrap()
     };
@@ -45,52 +46,51 @@ pub fn run_with_gui(bios: Option<String>, rom: Option<String>) -> Result<(), Err
     let mut world = World::new(bios, rom);
 
     let res = event_loop.run(|event, elwt| {
-        // Handle input events
         if input.update(&event) {
-            // Close events
             if input.key_pressed(KeyCode::Escape) || input.close_requested() {
                 elwt.exit();
                 return;
             }
 
-            // Update the scale factor
             if let Some(scale_factor) = input.scale_factor() {
                 framework.scale_factor(scale_factor);
             }
 
-            // Resize the window
-            if let Some(size) = input.window_resized() {
-                if let Err(err) = pixels.resize_surface(size.width, size.height) {
-                    println!("Failed to resize surface {}, exiting", err);
-                    elwt.exit();
-                    return;
-                }
-                framework.resize(size.width, size.height);
-            }
-
-            // Update internal state and request a redraw
+            // Update internal state and request a redraw (only if not resizing)
             world.update();
             window.request_redraw();
         }
 
         match event {
-            // Draw the current frame
+            Event::WindowEvent {
+                event: WindowEvent::Resized(size),
+                ..
+            } => {
+                if let Err(err) = pixels.resize_surface(size.width, size.height) {
+                    println!("Failed to resize surface during window event: {}", err);
+                    elwt.exit();
+                    return;
+                }
+                framework.resize(size.width, size.height);
+            }
             Event::WindowEvent {
                 event: WindowEvent::RedrawRequested,
                 ..
             } => {
-                // Draw the world
                 world.draw(pixels.frame_mut());
 
+                let should_exit = framework.prepare(&window);
+                if should_exit {
+                    elwt.exit();
+                    return;
+                }
                 // Prepare egui
                 framework.prepare(&window);
 
                 // Render everything together
                 let render_result = pixels.render_with(|encoder, render_target, context| {
-                    // Render the world texture
                     context.scaling_renderer.render(encoder, render_target);
 
-                    // Render egui
                     framework.render(encoder, render_target, context);
 
                     Ok(())
@@ -103,7 +103,6 @@ pub fn run_with_gui(bios: Option<String>, rom: Option<String>) -> Result<(), Err
                 }
             }
             Event::WindowEvent { event, .. } => {
-                // Update egui inputs
                 framework.handle_event(&window, &event);
             }
             _ => (),
