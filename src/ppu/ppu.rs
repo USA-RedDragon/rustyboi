@@ -11,7 +11,7 @@ pub const SCY: u16 = 0xFF42;
 pub const LYC: u16 = 0xFF45;
 pub const BGP: u16 = 0xFF47;
 
-const FRAMEBUFFER_SIZE: usize = 160 * 144;
+pub const FRAMEBUFFER_SIZE: usize = 160 * 144;
 
 pub enum LCDCFlags {
     BGDisplay = 1<<0,
