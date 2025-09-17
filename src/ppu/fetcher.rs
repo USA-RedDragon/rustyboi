@@ -87,4 +87,8 @@ impl Fetcher {
             }
         }
     }
+
+    pub fn get_pixel_buffer(&self) -> [u8; 8] {
+        self.pixel_buffer
+    }
 }

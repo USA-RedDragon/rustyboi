@@ -157,6 +157,10 @@ impl GB {
         &self.cpu.registers
     }
 
+    pub fn get_ppu_debug_info(&self) -> (&ppu::PPU, [u8; 8]) {
+        (&self.ppu, self.ppu.get_fetcher_pixel_buffer())
+    }
+
     pub fn read_memory(&self, address: u16) -> u8 {
         self.mmio.read(address)
     }

@@ -177,4 +177,29 @@ impl PPU {
         self.have_frame = false;
         self.fb_b
     }
+
+    // Debug methods
+    pub fn get_fetcher_pixel_buffer(&self) -> [u8; 8] {
+        self.fetcher.get_pixel_buffer()
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+
+    pub fn get_state(&self) -> &State {
+        &self.state
+    }
+
+    pub fn get_ticks(&self) -> u128 {
+        self.ticks
+    }
+
+    pub fn get_x(&self) -> u8 {
+        self.x
+    }
+
+    pub fn has_frame(&self) -> bool {
+        self.have_frame
+    }
 }
