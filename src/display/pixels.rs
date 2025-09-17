@@ -117,6 +117,19 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                             }
                         }
                     }
+                    Some(GuiAction::LoadRom(path)) => {
+                        match world.load_rom(path) {
+                            Ok(loaded_path) => {
+                                manually_paused = false;
+                                framework.clear_error();
+                                framework.set_status(format!("ROM loaded from: {}", loaded_path));
+                                window.request_redraw();
+                            }
+                            Err(e) => {
+                                framework.set_error(format!("Failed to load ROM: {}", e));
+                            }
+                        }
+                    }
                     Some(GuiAction::Restart) => {
                         world.restart();
                         manually_paused = false;
@@ -202,6 +215,27 @@ impl World {
         let filename = path.to_string_lossy().to_string();
         self.gb.to_state_file(&filename)?;
         println!("Game state saved to: {}", filename);
+        Ok(filename)
+    }
+
+    fn load_rom(&mut self, path: std::path::PathBuf) -> Result<String, Box<dyn std::error::Error>> {
+        let filename = path.to_string_lossy().to_string();
+        let cartridge = crate::cartridge::Cartridge::load(&filename)?;
+        self.gb.insert(cartridge);
+        
+        // Reset the emulator to a clean state after loading the ROM
+        self.gb.reset();
+        
+        // Clear any error state
+        self.error_state = None;
+        
+        // Clear the current frame
+        self.frame = None;
+        
+        // Reset pause state
+        self.is_paused = false;
+        
+        println!("ROM loaded from: {}", filename);
         Ok(filename)
     }
 

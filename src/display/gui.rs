@@ -9,6 +9,7 @@ use winit::window::Window;
 pub enum GuiAction {
     Exit,
     SaveState(std::path::PathBuf),
+    LoadRom(std::path::PathBuf),
     TogglePause,
     Restart,
     ClearError,
@@ -67,6 +68,19 @@ impl Gui {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     any_menu_open = true;
+                    if ui.button("Load ROM").clicked() {
+                        let mut dialog = rfd::FileDialog::new()
+                            .add_filter("Game Boy ROM", &["gb", "gbc"])
+                            .add_filter("All Files", &["*"]);
+                        if env::current_dir().is_ok() {
+                            dialog = dialog.set_directory(env::current_dir().unwrap());
+                        }
+                        if let Some(path) = dialog.pick_file() {
+                            action = Some(GuiAction::LoadRom(path));
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Save State").clicked() {
                         let timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -84,6 +98,7 @@ impl Gui {
                         }
                         ui.close_menu();
                     }
+                    ui.separator();
                     if ui.button("Exit").clicked() {
                         action = Some(GuiAction::Exit);
                         ui.close_menu();
