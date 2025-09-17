@@ -51,17 +51,13 @@ impl GB {
         Ok(())
     }
 
-    /// Helper method that runs the CPU and PPU for one batch and handles timing.
-    /// Returns the number of cycles executed in this batch.
     fn step_batch(&mut self, total_cycles: &mut u128, start_time: &Instant) -> u64 {
         let mut batch_cycles = 0;
 
-        // Step CPU until batch is filled
         while batch_cycles < BATCH_CYCLES {
             let cycles = self.cpu.step(&mut self.mmio) as u64;
             batch_cycles += cycles;
 
-            // Check for events mid-batch
             let next_event = self.ppu.next_event_in_cycles();
             if batch_cycles > next_event {
                 let excess = batch_cycles - next_event;
@@ -70,7 +66,6 @@ impl GB {
             }
         }
 
-        // Advance hardware by batch cycles
         for _ in 0..batch_cycles {
             self.ppu.step(&mut self.cpu, &mut self.mmio);
         }
@@ -115,7 +110,6 @@ impl GB {
         loop {
             self.step_batch(&mut total_cycles, &start_time);
 
-            // Render frame if ready
             if self.ppu.frame_ready() {
                 if let Some(display) = &mut self.display_callback {
                     display(&self.ppu.get_frame());
