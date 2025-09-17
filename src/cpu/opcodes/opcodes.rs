@@ -218,6 +218,20 @@ macro_rules! make_alu_register {
     };
 }
 
+macro_rules! make_alu_bitwise_register {
+    ($name:ident, $op:tt, $reg:ident) => {
+        pub fn $name(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+            let result = cpu.registers.a $op cpu.registers.$reg;
+            cpu.registers.a = result;
+            cpu.registers.set_flag(registers::Flag::Zero, result == 0);
+            cpu.registers.set_flag(registers::Flag::Negative, false);
+            cpu.registers.set_flag(registers::Flag::HalfCarry, false);
+            cpu.registers.set_flag(registers::Flag::Carry, false);
+            4
+        }
+    };
+}
+
 macro_rules! make_alu_mem_hl {
     ($name:ident, $op:tt, $is_sub:expr) => {
         pub fn $name(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
@@ -234,6 +248,21 @@ macro_rules! make_alu_mem_hl {
     };
 }
 
+macro_rules! make_alu_bitwise_mem_hl {
+    ($name:ident, $op:tt) => {
+        pub fn $name(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+            let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
+            let value = mmio.read(addr);
+            let result = cpu.registers.a $op value;
+            cpu.registers.a = result;
+            cpu.registers.set_flag(registers::Flag::Zero, result == 0);
+            cpu.registers.set_flag(registers::Flag::Negative, false);
+            cpu.registers.set_flag(registers::Flag::HalfCarry, false);
+            cpu.registers.set_flag(registers::Flag::Carry, false);
+            8
+        }
+    };
+}
 
 macro_rules! make_ld_16_bit_imm {
     ($name:ident, $reg1:ident, $reg2:ident) => {
@@ -373,6 +402,27 @@ make_ld_register_imm!(ld_e_imm, e);
 make_ld_register_imm!(ld_h_imm, h);
 make_ld_register_imm!(ld_l_imm, l);
 make_inc_memory!(inc_memory_hl, h, l);
+make_alu_bitwise_register!(and_a, &, a);
+make_alu_bitwise_register!(and_b, &, b);
+make_alu_bitwise_register!(and_c, &, c);
+make_alu_bitwise_register!(and_d, &, d);
+make_alu_bitwise_register!(and_e, &, e);
+make_alu_bitwise_register!(and_h, &, h);
+make_alu_bitwise_register!(and_l, &, l);
+make_alu_bitwise_register!(or_a, |, a);
+make_alu_bitwise_register!(or_b, |, b);
+make_alu_bitwise_register!(or_c, |, c);
+make_alu_bitwise_register!(or_d, |, d);
+make_alu_bitwise_register!(or_e, |, e);
+make_alu_bitwise_register!(or_h, |, h);
+make_alu_bitwise_register!(or_l, |, l);
+make_alu_bitwise_register!(xor_a, ^, a);
+make_alu_bitwise_register!(xor_b, ^, b);
+make_alu_bitwise_register!(xor_c, ^, c);
+make_alu_bitwise_register!(xor_d, ^, d);
+make_alu_bitwise_register!(xor_e, ^, e);
+make_alu_bitwise_register!(xor_h, ^, h);
+make_alu_bitwise_register!(xor_l, ^, l);
 make_alu_register!(add_a, +, a, false);
 make_alu_register!(add_b, +, b, false);
 make_alu_register!(add_c, +, c, false);
@@ -380,27 +430,6 @@ make_alu_register!(add_d, +, d, false);
 make_alu_register!(add_e, +, e, false);
 make_alu_register!(add_h, +, h, false);
 make_alu_register!(add_l, +, l, false);
-make_alu_register!(and_a, &, a, false);
-make_alu_register!(and_b, &, b, false);
-make_alu_register!(and_c, &, c, false);
-make_alu_register!(and_d, &, d, false);
-make_alu_register!(and_e, &, e, false);
-make_alu_register!(and_h, &, h, false);
-make_alu_register!(and_l, &, l, false);
-make_alu_register!(or_a, |, a, false);
-make_alu_register!(or_b, |, b, false);
-make_alu_register!(or_c, |, c, false);
-make_alu_register!(or_d, |, d, false);
-make_alu_register!(or_e, |, e, false);
-make_alu_register!(or_h, |, h, false);
-make_alu_register!(or_l, |, l, false);
-make_alu_register!(xor_a, ^, a, false);
-make_alu_register!(xor_b, ^, b, false);
-make_alu_register!(xor_c, ^, c, false);
-make_alu_register!(xor_d, ^, d, false);
-make_alu_register!(xor_e, ^, e, false);
-make_alu_register!(xor_h, ^, h, false);
-make_alu_register!(xor_l, ^, l, false);
 make_alu_register!(sub_a, -, a, true);
 make_alu_register!(sub_b, -, b, true);
 make_alu_register!(sub_c, -, c, true);
@@ -408,10 +437,10 @@ make_alu_register!(sub_d, -, d, true);
 make_alu_register!(sub_e, -, e, true);
 make_alu_register!(sub_h, -, h, true);
 make_alu_register!(sub_l, -, l, true);
+make_alu_bitwise_mem_hl!(and_memory_hl, &);
+make_alu_bitwise_mem_hl!(or_memory_hl, |);
+make_alu_bitwise_mem_hl!(xor_memory_hl, ^);
 make_alu_mem_hl!(add_memory_hl, +, false);
-make_alu_mem_hl!(and_memory_hl, &, false);
-make_alu_mem_hl!(or_memory_hl, |, false);
-make_alu_mem_hl!(xor_memory_hl, ^, false);
 make_alu_mem_hl!(sub_memory_hl, -, true);
 make_pop_register_pair!(pop_af, a, f);
 make_ld_16_bit_imm!(ld_bc_imm, b, c);
