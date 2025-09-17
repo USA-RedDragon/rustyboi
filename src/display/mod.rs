@@ -1,5 +1,5 @@
 pub mod display;
-mod tui;
+mod terminal;
 
 pub use display::*;
-pub use tui::*;
+pub use terminal::*;
