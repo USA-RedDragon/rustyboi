@@ -1,8 +1,16 @@
+use std::env;
+
 use egui::{ClippedPrimitive, Context, TexturesDelta, ViewportId};
 use egui_wgpu::{Renderer, ScreenDescriptor};
 use pixels::{wgpu, PixelsContext};
 use winit::event_loop::EventLoopWindowTarget;
 use winit::window::Window;
+
+#[derive(Debug, Clone)]
+pub enum GuiAction {
+    Exit,
+    SaveState(std::path::PathBuf),
+}
 
 pub(crate) struct Framework {
     egui_ctx: Context,
@@ -17,29 +25,66 @@ pub(crate) struct Framework {
 
 struct Gui {
     error_message: Option<String>,
+    status_message: Option<String>,
 }
 
 impl Gui {
     fn new() -> Self {
         Self { 
             error_message: None,
+            status_message: None,
         }
     }
 
     /// Create the UI using egui.
-    fn ui(&mut self, ctx: &Context) -> bool {
-        let mut should_exit = false;
+    fn ui(&mut self, ctx: &Context) -> Option<GuiAction> {
+        let mut action = None;
         
         egui::TopBottomPanel::top("menubar_container").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    if ui.button("Save State").clicked() {
+                        let timestamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
+                        let file_name = format!("save_{}.json", timestamp);
+                        let mut dialog = rfd::FileDialog::new()
+                            .add_filter("RustyBoi Save State", &[".rustyboisave"])
+                            .set_file_name(file_name);
+                        if env::current_dir().is_ok() {
+                            dialog = dialog.set_directory(env::current_dir().unwrap());
+                        }
+                        if let Some(path) = dialog.save_file() {
+                            action = Some(GuiAction::SaveState(path));
+                        }
+                        ui.close_menu();
+                    }
                     if ui.button("Exit").clicked() {
-                        should_exit = true;
+                        action = Some(GuiAction::Exit);
                         ui.close_menu();
                     }
                 })
             });
         });
+
+        // Display status message if there's one
+        if let Some(status_msg) = &self.status_message.clone() {
+            let mut clear_status = false;
+            egui::TopBottomPanel::bottom("status_panel").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("✅");
+                    ui.label(status_msg);
+                    if ui.button("✕").clicked() {
+                        clear_status = true;
+                    }
+                });
+            });
+            
+            if clear_status {
+                self.status_message = None;
+            }
+        }
 
         // Display error panel if there's an error
         if let Some(error_msg) = &self.error_message.clone() {
@@ -73,11 +118,15 @@ impl Gui {
             }
         }
         
-        should_exit
+        action
     }
 
     fn set_error(&mut self, error_message: String) {
         self.error_message = Some(error_message);
+    }
+
+    fn set_status(&mut self, status_message: String) {
+        self.status_message = Some(status_message);
     }
 }
 
@@ -136,11 +185,15 @@ impl Framework {
         self.gui.set_error(error_message);
     }
 
-    pub(crate) fn prepare(&mut self, window: &Window) -> bool {
+    pub(crate) fn set_status(&mut self, status_message: String) {
+        self.gui.set_status(status_message);
+    }
+
+    pub(crate) fn prepare(&mut self, window: &Window) -> Option<GuiAction> {
         let raw_input = self.egui_state.take_egui_input(window);
-        let mut should_exit = false;
+        let mut action = None;
         let output = self.egui_ctx.run(raw_input, |egui_ctx| {
-            should_exit = self.gui.ui(egui_ctx);
+            action = self.gui.ui(egui_ctx);
         });
 
         self.textures.append(output.textures_delta);
@@ -150,7 +203,7 @@ impl Framework {
             .egui_ctx
             .tessellate(output.shapes, self.screen_descriptor.pixels_per_point);
             
-        should_exit
+        action
     }
 
     pub(crate) fn render(
