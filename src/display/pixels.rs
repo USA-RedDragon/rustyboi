@@ -1,5 +1,5 @@
 use crate::config;
-use crate::display::gui::Framework;
+use crate::display::gui::{Framework, GuiAction};
 use crate::gb;
 use crate::ppu;
 
@@ -78,10 +78,25 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
             } => {
                 world.draw(pixels.frame_mut());
 
-                let should_exit = framework.prepare(&window);
-                if should_exit {
-                    elwt.exit();
-                    return;
+                let gui_action = framework.prepare(&window);
+                
+                // Handle GUI actions
+                match gui_action {
+                    Some(GuiAction::Exit) => {
+                        elwt.exit();
+                        return;
+                    }
+                    Some(GuiAction::SaveState(path)) => {
+                        match world.save_state(path) {
+                            Ok(saved_path) => {
+                                framework.set_status(format!("State saved to: {}", saved_path));
+                            }
+                            Err(e) => {
+                                framework.set_error(format!("Failed to save state: {}", e));
+                            }
+                        }
+                    }
+                    None => {}
                 }
 
                 if let Some(error_msg) = &world.error_state {
@@ -123,6 +138,13 @@ impl World {
             frame: None,
             error_state: None,
         }
+    }
+
+    fn save_state(&self, path: std::path::PathBuf) -> Result<String, std::io::Error> {
+        let filename = path.to_string_lossy().to_string();
+        self.gb.to_state_file(&filename)?;
+        println!("Game state saved to: {}", filename);
+        Ok(filename)
     }
 
     fn draw(&mut self, frame: &mut [u8]) {
