@@ -128,18 +128,18 @@ pub fn ld_memory_hl_dec_a(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) ->
 }
 
 pub fn sbc_a_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
-    let value = mmio.read(cpu.registers.pc) as u16;
+    let value = mmio.read(cpu.registers.pc);
     cpu.registers.pc += 1;
 
-    let carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 } as u8;
-    let result = (cpu.registers.a as u16)
-        .wrapping_sub(value as u16)
-        .wrapping_sub(carry as u16);
-    cpu.registers.a = (result & 0x00FF) as u8;
-    cpu.registers.set_flag(registers::Flag::Zero, result & 0xFF == 0);
+    let carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 };
+    let a = cpu.registers.a;
+    let result = (a as i16) - (value as i16) - (carry as i16);
+    
+    cpu.registers.a = (result & 0xFF) as u8;
+    cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.a == 0);
     cpu.registers.set_flag(registers::Flag::Negative, true);
-    cpu.registers.set_flag(registers::Flag::Carry, result > 0xFF);
-    cpu.registers.set_flag(registers::Flag::HalfCarry, (cpu.registers.a & 0x0F) < ((result & 0x000F) as u8) + carry);
+    cpu.registers.set_flag(registers::Flag::Carry, result < 0);
+    cpu.registers.set_flag(registers::Flag::HalfCarry, (a & 0x0F) < ((value & 0x0F) + carry));
     8
 }
 
@@ -182,43 +182,76 @@ macro_rules! make_inc_memory {
     ($name:ident, $reg1:ident, $reg2:ident) => {
         pub fn $name(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
             let addr = ((cpu.registers.$reg1 as u16) << 8) | (cpu.registers.$reg2 as u16);
-            mmio.write(addr, mmio.read(addr).wrapping_add(1));
-            cpu.registers.set_flag(registers::Flag::Zero, mmio.read(addr) == 0);
+            let old_value = mmio.read(addr);
+            let new_value = old_value.wrapping_add(1);
+            mmio.write(addr, new_value);
+            cpu.registers.set_flag(registers::Flag::Zero, new_value == 0);
             cpu.registers.set_flag(registers::Flag::Negative, false);
-            cpu.registers.set_flag(registers::Flag::HalfCarry, (mmio.read(addr) & 0x0F) == 0);
+            cpu.registers.set_flag(registers::Flag::HalfCarry, (old_value & 0x0F) == 0x0F);
             12
         }
     };
 }
 
-macro_rules! make_pop_register_pair {
-    ($name:ident, $reg1:ident, $reg2:ident) => {
+pub fn pop_af(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let addr = cpu.registers.sp;
+    let f_value = mmio.read(addr) & 0xF0; // Only upper 4 bits are valid for F register
+    let a_value = mmio.read(addr.wrapping_add(1));
+    cpu.registers.sp = cpu.registers.sp.wrapping_add(2);
+    cpu.registers.f = f_value;
+    cpu.registers.a = a_value;
+    12
+}
+
+macro_rules! make_alu_add_register {
+    ($name:ident, $reg:ident) => {
         pub fn $name(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
-            let addr = cpu.registers.sp;
-            let val = (_mmio.read(addr) as u16) | ((_mmio.read(addr.wrapping_add(1)) as u16) << 8);
-            cpu.registers.sp = cpu.registers.sp.wrapping_add(2);
-            cpu.registers.$reg1 = (val >> 8) as u8;
-            cpu.registers.$reg2 = (val & 0x00FF) as u8;
-            12
+            let a = cpu.registers.a;
+            let operand = cpu.registers.$reg;
+            let result = a as u16 + operand as u16;
+            
+            cpu.registers.a = (result & 0xFF) as u8;
+            cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.a == 0);
+            cpu.registers.set_flag(registers::Flag::Negative, false);
+            cpu.registers.set_flag(registers::Flag::Carry, result > 0xFF);
+            cpu.registers.set_flag(registers::Flag::HalfCarry, (a & 0x0F) + (operand & 0x0F) > 0x0F);
+            4
         }
     };
 }
 
-macro_rules! make_alu_register {
-    ($name:ident, $op:tt, $reg:ident, $is_sub:expr) => {
+macro_rules! make_alu_sub_register {
+    ($name:ident, $reg:ident) => {
         pub fn $name(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
-            let result = cpu.registers.a $op cpu.registers.$reg;
+            let a = cpu.registers.a;
+            let operand = cpu.registers.$reg;
+            let result = a.wrapping_sub(operand);
+            
             cpu.registers.a = result;
             cpu.registers.set_flag(registers::Flag::Zero, result == 0);
-            cpu.registers.set_flag(registers::Flag::Negative, $is_sub);
-            cpu.registers.set_flag(registers::Flag::HalfCarry, false);
+            cpu.registers.set_flag(registers::Flag::Negative, true);
+            cpu.registers.set_flag(registers::Flag::Carry, a < operand);
+            cpu.registers.set_flag(registers::Flag::HalfCarry, (a & 0x0F) < (operand & 0x0F));
+            4
+        }
+    };
+}
+
+macro_rules! make_alu_and_register {
+    ($name:ident, $reg:ident) => {
+        pub fn $name(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+            let result = cpu.registers.a & cpu.registers.$reg;
+            cpu.registers.a = result;
+            cpu.registers.set_flag(registers::Flag::Zero, result == 0);
+            cpu.registers.set_flag(registers::Flag::Negative, false);
+            cpu.registers.set_flag(registers::Flag::HalfCarry, true);
             cpu.registers.set_flag(registers::Flag::Carry, false);
             4
         }
     };
 }
 
-macro_rules! make_alu_bitwise_register {
+macro_rules! make_alu_or_register {
     ($name:ident, $op:tt, $reg:ident) => {
         pub fn $name(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
             let result = cpu.registers.a $op cpu.registers.$reg;
@@ -232,23 +265,59 @@ macro_rules! make_alu_bitwise_register {
     };
 }
 
-macro_rules! make_alu_mem_hl {
-    ($name:ident, $op:tt, $is_sub:expr) => {
+macro_rules! make_alu_add_mem_hl {
+    ($name:ident) => {
+        pub fn $name(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+            let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
+            let a = cpu.registers.a;
+            let operand = mmio.read(addr);
+            let result = a as u16 + operand as u16;
+            
+            cpu.registers.a = (result & 0xFF) as u8;
+            cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.a == 0);
+            cpu.registers.set_flag(registers::Flag::Negative, false);
+            cpu.registers.set_flag(registers::Flag::Carry, result > 0xFF);
+            cpu.registers.set_flag(registers::Flag::HalfCarry, (a & 0x0F) + (operand & 0x0F) > 0x0F);
+            8
+        }
+    };
+}
+
+macro_rules! make_alu_sub_mem_hl {
+    ($name:ident) => {
+        pub fn $name(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+            let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
+            let a = cpu.registers.a;
+            let operand = mmio.read(addr);
+            let result = a.wrapping_sub(operand);
+            
+            cpu.registers.a = result;
+            cpu.registers.set_flag(registers::Flag::Zero, result == 0);
+            cpu.registers.set_flag(registers::Flag::Negative, true);
+            cpu.registers.set_flag(registers::Flag::Carry, a < operand);
+            cpu.registers.set_flag(registers::Flag::HalfCarry, (a & 0x0F) < (operand & 0x0F));
+            8
+        }
+    };
+}
+
+macro_rules! make_alu_and_mem_hl {
+    ($name:ident) => {
         pub fn $name(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
             let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
             let value = mmio.read(addr);
-            let result = cpu.registers.a $op value;
+            let result = cpu.registers.a & value;
             cpu.registers.a = result;
             cpu.registers.set_flag(registers::Flag::Zero, result == 0);
-            cpu.registers.set_flag(registers::Flag::Negative, $is_sub);
-            cpu.registers.set_flag(registers::Flag::HalfCarry, false);
+            cpu.registers.set_flag(registers::Flag::Negative, false);
+            cpu.registers.set_flag(registers::Flag::HalfCarry, true);
             cpu.registers.set_flag(registers::Flag::Carry, false);
             8
         }
     };
 }
 
-macro_rules! make_alu_bitwise_mem_hl {
+macro_rules! make_alu_or_mem_hl {
     ($name:ident, $op:tt) => {
         pub fn $name(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
             let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
@@ -402,47 +471,46 @@ make_ld_register_imm!(ld_e_imm, e);
 make_ld_register_imm!(ld_h_imm, h);
 make_ld_register_imm!(ld_l_imm, l);
 make_inc_memory!(inc_memory_hl, h, l);
-make_alu_bitwise_register!(and_a, &, a);
-make_alu_bitwise_register!(and_b, &, b);
-make_alu_bitwise_register!(and_c, &, c);
-make_alu_bitwise_register!(and_d, &, d);
-make_alu_bitwise_register!(and_e, &, e);
-make_alu_bitwise_register!(and_h, &, h);
-make_alu_bitwise_register!(and_l, &, l);
-make_alu_bitwise_register!(or_a, |, a);
-make_alu_bitwise_register!(or_b, |, b);
-make_alu_bitwise_register!(or_c, |, c);
-make_alu_bitwise_register!(or_d, |, d);
-make_alu_bitwise_register!(or_e, |, e);
-make_alu_bitwise_register!(or_h, |, h);
-make_alu_bitwise_register!(or_l, |, l);
-make_alu_bitwise_register!(xor_a, ^, a);
-make_alu_bitwise_register!(xor_b, ^, b);
-make_alu_bitwise_register!(xor_c, ^, c);
-make_alu_bitwise_register!(xor_d, ^, d);
-make_alu_bitwise_register!(xor_e, ^, e);
-make_alu_bitwise_register!(xor_h, ^, h);
-make_alu_bitwise_register!(xor_l, ^, l);
-make_alu_register!(add_a, +, a, false);
-make_alu_register!(add_b, +, b, false);
-make_alu_register!(add_c, +, c, false);
-make_alu_register!(add_d, +, d, false);
-make_alu_register!(add_e, +, e, false);
-make_alu_register!(add_h, +, h, false);
-make_alu_register!(add_l, +, l, false);
-make_alu_register!(sub_a, -, a, true);
-make_alu_register!(sub_b, -, b, true);
-make_alu_register!(sub_c, -, c, true);
-make_alu_register!(sub_d, -, d, true);
-make_alu_register!(sub_e, -, e, true);
-make_alu_register!(sub_h, -, h, true);
-make_alu_register!(sub_l, -, l, true);
-make_alu_bitwise_mem_hl!(and_memory_hl, &);
-make_alu_bitwise_mem_hl!(or_memory_hl, |);
-make_alu_bitwise_mem_hl!(xor_memory_hl, ^);
-make_alu_mem_hl!(add_memory_hl, +, false);
-make_alu_mem_hl!(sub_memory_hl, -, true);
-make_pop_register_pair!(pop_af, a, f);
+make_alu_and_register!(and_a, a);
+make_alu_and_register!(and_b, b);
+make_alu_and_register!(and_c, c);
+make_alu_and_register!(and_d, d);
+make_alu_and_register!(and_e, e);
+make_alu_and_register!(and_h, h);
+make_alu_and_register!(and_l, l);
+make_alu_or_register!(or_a, |, a);
+make_alu_or_register!(or_b, |, b);
+make_alu_or_register!(or_c, |, c);
+make_alu_or_register!(or_d, |, d);
+make_alu_or_register!(or_e, |, e);
+make_alu_or_register!(or_h, |, h);
+make_alu_or_register!(or_l, |, l);
+make_alu_or_register!(xor_a, ^, a);
+make_alu_or_register!(xor_b, ^, b);
+make_alu_or_register!(xor_c, ^, c);
+make_alu_or_register!(xor_d, ^, d);
+make_alu_or_register!(xor_e, ^, e);
+make_alu_or_register!(xor_h, ^, h);
+make_alu_or_register!(xor_l, ^, l);
+make_alu_add_register!(add_a, a);
+make_alu_add_register!(add_b, b);
+make_alu_add_register!(add_c, c);
+make_alu_add_register!(add_d, d);
+make_alu_add_register!(add_e, e);
+make_alu_add_register!(add_h, h);
+make_alu_add_register!(add_l, l);
+make_alu_sub_register!(sub_a, a);
+make_alu_sub_register!(sub_b, b);
+make_alu_sub_register!(sub_c, c);
+make_alu_sub_register!(sub_d, d);
+make_alu_sub_register!(sub_e, e);
+make_alu_sub_register!(sub_h, h);
+make_alu_sub_register!(sub_l, l);
+make_alu_and_mem_hl!(and_memory_hl);
+make_alu_or_mem_hl!(or_memory_hl, |);
+make_alu_or_mem_hl!(xor_memory_hl, ^);
+make_alu_add_mem_hl!(add_memory_hl);
+make_alu_sub_mem_hl!(sub_memory_hl);
 make_ld_16_bit_imm!(ld_bc_imm, b, c);
 make_ld_16_bit_imm!(ld_de_imm, d, e);
 make_ld_16_bit_imm!(ld_hl_imm, h, l);
