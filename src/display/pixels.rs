@@ -52,6 +52,22 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                 return;
             }
 
+            // Handle F key for frame stepping when paused
+            if input.key_pressed(KeyCode::KeyF) {
+                if manually_paused || world.error_state.is_some() {
+                    world.step_single_frame = true;
+                    window.request_redraw();
+                }
+            }
+
+            // Handle N key for cycle stepping when paused
+            if input.key_pressed(KeyCode::KeyN) {
+                if manually_paused || world.error_state.is_some() {
+                    world.step_single_cycle = true;
+                    window.request_redraw();
+                }
+            }
+
             if let Some(scale_factor) = input.scale_factor() {
                 framework.scale_factor(scale_factor);
             }
@@ -80,7 +96,9 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                 world.draw(pixels.frame_mut());
 
                 let gui_paused_state = manually_paused || world.error_state.is_some();
-                let (gui_action, menu_open) = framework.prepare(&window, gui_paused_state);
+                // Always pass register data for the debug overlay, regardless of pause state
+                let registers = Some(world.gb.get_cpu_registers());
+                let (gui_action, menu_open) = framework.prepare(&window, gui_paused_state, registers);
                 
                 // Handle GUI actions
                 match gui_action {
@@ -116,6 +134,14 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                     Some(GuiAction::TogglePause) => {
                         manually_paused = !manually_paused;
                         world.toggle_pause();
+                    }
+                    Some(GuiAction::StepFrame) => {
+                        world.step_single_frame = true;
+                        window.request_redraw();
+                    }
+                    Some(GuiAction::StepCycle) => {
+                        world.step_single_cycle = true;
+                        window.request_redraw();
                     }
                     None => {}
                 }
@@ -163,6 +189,8 @@ struct World {
     frame: Option<[u8; ppu::FRAMEBUFFER_SIZE * 4]>,
     error_state: Option<String>,
     is_paused: bool,
+    step_single_frame: bool,
+    step_single_cycle: bool,
 }
 
 impl World {
@@ -172,6 +200,8 @@ impl World {
             frame: None,
             error_state: None,
             is_paused: false,
+            step_single_frame: false,
+            step_single_cycle: false,
         }
     }
 
@@ -220,6 +250,58 @@ impl World {
     }
 
     fn update(&mut self) {
+        // Handle single frame stepping
+        if self.step_single_frame {
+            self.step_single_frame = false;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.gb.step_single_frame()
+            }));
+            match result {
+                Ok(frame_data) => {
+                    self.frame = Some(convert_to_rgba(&frame_data));
+                }
+                Err(panic_info) => {
+                    let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                        format!("Emulator panic during frame step: {}", s)
+                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                        format!("Emulator panic during frame step: {}", s)
+                    } else {
+                        "Emulator panic during frame step: Unknown error".to_string()
+                    };
+                    self.error_state = Some(error_msg);
+                    self.frame = None;
+                }
+            }
+            return;
+        }
+
+        // Handle single cycle stepping
+        if self.step_single_cycle {
+            self.step_single_cycle = false;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.gb.step_single_cycle();
+                // For cycle stepping, we need to get the current frame even if incomplete
+                self.gb.get_current_frame()
+            }));
+            match result {
+                Ok(frame_data) => {
+                    self.frame = Some(convert_to_rgba(&frame_data));
+                }
+                Err(panic_info) => {
+                    let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                        format!("Emulator panic during cycle step: {}", s)
+                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                        format!("Emulator panic during cycle step: {}", s)
+                    } else {
+                        "Emulator panic during cycle step: Unknown error".to_string()
+                    };
+                    self.error_state = Some(error_msg);
+                    self.frame = None;
+                }
+            }
+            return;
+        }
+
         // Skip updating if we're in an error state or paused
         if self.error_state.is_some() || self.is_paused {
             return;

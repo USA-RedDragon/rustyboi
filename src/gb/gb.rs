@@ -123,6 +123,40 @@ impl GB {
         }
     }
 
+    pub fn step_single_frame(&mut self) -> [u8; ppu::FRAMEBUFFER_SIZE] {
+        // Step through CPU cycles until a frame is complete
+        loop {
+            let cycles = self.cpu.step(&mut self.mmio) as u64;
+            
+            for _ in 0..cycles {
+                self.ppu.step(&mut self.cpu, &mut self.mmio);
+            }
+
+            // Return frame if ready
+            if self.ppu.frame_ready() {
+                return self.ppu.get_frame();
+            }
+        }
+    }
+
+    pub fn step_single_cycle(&mut self) {
+        // Execute one CPU instruction
+        let cycles = self.cpu.step(&mut self.mmio) as u64;
+        
+        // Run the PPU for the same number of cycles
+        for _ in 0..cycles {
+            self.ppu.step(&mut self.cpu, &mut self.mmio);
+        }
+    }
+
+    pub fn get_current_frame(&mut self) -> [u8; ppu::FRAMEBUFFER_SIZE] {
+        self.ppu.get_frame()
+    }
+
+    pub fn get_cpu_registers(&self) -> &cpu::registers::Registers {
+        &self.cpu.registers
+    }
+
     pub fn run(&mut self) {
         let mut total_cycles: u128 = 0;
         let start_time = Instant::now();
