@@ -2,7 +2,9 @@ use crate::ppu;
 use crate::ppu::fifo;
 use crate::memory::mmio;
 use crate::memory::Addressable;
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize, Clone)]
 enum State {
     TileNumber,
     TileDataLow,
@@ -12,6 +14,7 @@ enum State {
 
 const BACKGROUND_MAP_OFFSET: u16 = 6144;
 
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Fetcher {
     state: State,
     pub pixel_fifo: fifo::FIFO,

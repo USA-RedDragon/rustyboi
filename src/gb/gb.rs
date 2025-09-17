@@ -5,6 +5,9 @@ use crate::memory;
 use crate::memory::Addressable;
 use crate::ppu;
 
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io;
 use std::time::{Duration, Instant};
 
 const CPU_FREQ: u128 = 4_194_304; // Hz
@@ -14,11 +17,24 @@ const BUSY_WAIT_NS: u128 = 50_000; // 50 µs busy-wait
 
 pub type DisplayCallback = Box<dyn Fn(&[u8; ppu::FRAMEBUFFER_SIZE])>;
 
+#[derive(Serialize, Deserialize)]
 pub struct GB {
     cpu: cpu::SM83,
     mmio: memory::mmio::MMIO,
     ppu: ppu::PPU,
+    #[serde(skip, default)]
     display_callback: Option<DisplayCallback>,
+}
+
+impl Clone for GB {
+    fn clone(&self) -> Self {
+        GB {
+            cpu: self.cpu.clone(),
+            mmio: self.mmio.clone(),
+            ppu: self.ppu.clone(),
+            display_callback: None,
+        }
+    }
 }
 
 impl GB {
@@ -37,7 +53,6 @@ impl GB {
 
     pub fn insert(&mut self, cartridge: cartridge::Cartridge) {
         self.mmio.insert_cartridge(cartridge);
-        self.cpu.registers.reset(true);
         if self.mmio.read(0x014D) == 0x00 {
             self.cpu.registers.set_flag(registers::Flag::Carry, true);
             self.cpu.registers.set_flag(registers::Flag::HalfCarry, true);
@@ -116,5 +131,17 @@ impl GB {
                 }
             }
         }
+    }
+
+    pub fn from_state_file(path: &str) -> Result<Self, io::Error> {
+        let saved_state = fs::read_to_string(path)?;
+        let gb = serde_json::from_str(&saved_state)?;
+        Ok(gb)
+    }
+
+    pub fn to_state_file(&self, path: &str) -> Result<(), io::Error> {
+        let serialized = serde_json::to_string(&self)?;
+        fs::write(path, serialized)?;
+        Ok(())
     }
 }

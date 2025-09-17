@@ -1,6 +1,7 @@
 use crate::{cpu::opcodes, cpu::registers, memory, memory::Addressable};
+use serde::{Deserialize, Serialize};
 
-
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SM83 {
     pub registers: registers::Registers,
 }

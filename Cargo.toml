@@ -9,6 +9,9 @@ egui = "0.26"
 egui-wgpu = "0.26.0"
 egui-winit = { version = "0.26", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
 pixels = "0.15.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json = "1.0"
 winit = "0.29"
 winit_input_helper = "0.15"
 

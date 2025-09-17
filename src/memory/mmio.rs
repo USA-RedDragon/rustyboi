@@ -1,6 +1,7 @@
 use crate::cartridge;
 use crate::memory;
 use crate::memory::Addressable;
+use serde::{Deserialize, Serialize};
 
 use std::fs;
 use std::io;
@@ -49,9 +50,13 @@ const IE_REGISTER: u16 = 0xFFFF; // Interrupt Enable Register
 
 pub const REG_BOOT_OFF: u16 = 0xFF50; // Boot ROM disable
 
+#[derive(Serialize, Deserialize, Clone)]
 pub struct MMIO {
+    #[serde(skip, default)]
     bios: Option<memory::Memory<BIOS_START, BIOS_SIZE>>,
+    #[serde(skip, default)]
     cartridge: Option<cartridge::Cartridge>,
+    #[serde(skip, default)]
     cartridge_bank: memory::Memory<CARTRIDGE_BANK_START, CARTRIDGE_BANK_SIZE>,
     vram: memory::Memory<VRAM_START, VRAM_SIZE>,
     ram: memory::Memory<RAM_START, RAM_SIZE>,
