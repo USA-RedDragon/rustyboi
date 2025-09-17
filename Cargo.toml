@@ -5,6 +5,12 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.47", features = ["derive"] }
+egui = "0.26"
+egui-wgpu = "0.26.0"
+egui-winit = { version = "0.26", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
+pixels = "0.15.0"
+winit = "0.29"
+winit_input_helper = "0.15"
 
 [profile.release]
 # 454744 bytes

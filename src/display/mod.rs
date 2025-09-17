@@ -1,5 +1,6 @@
-pub mod display;
 mod terminal;
+mod pixels;
+mod gui;
 
-pub use display::*;
 pub use terminal::*;
+pub use pixels::*;
