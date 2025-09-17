@@ -21,7 +21,7 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    let mut gb = gb::GB::new(display::TUI::new());
+    let mut gb = gb::GB::new(display::Terminal::new());
 
     if let Some(bios) = args.bios {
         gb.load_bios(&bios)

@@ -1,18 +1,18 @@
 use crate::display;
 use crate::ppu;
 
-pub struct TUI {
+pub struct Terminal {
 }
 
-impl TUI {
+impl Terminal {
     pub fn new() -> Self {
-        TUI {}
+        Terminal {}
     }
 }
 
-impl display::Display for TUI {
+impl display::Display for Terminal {
     fn render_frame(&mut self, frame: [u8; ppu::FRAMEBUFFER_SIZE]) {
-        // Simple TUI rendering: print the frame as ASCII art
+        // Simple Terminal rendering: print the frame as ASCII art
         for y in 0..144 {
             for x in 0..160 {
                 let pixel = frame[y * 160 + x];
