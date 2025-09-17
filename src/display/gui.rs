@@ -6,7 +6,6 @@ use pixels::{wgpu, PixelsContext};
 use winit::event_loop::EventLoopWindowTarget;
 use winit::window::Window;
 
-#[derive(Debug, Clone)]
 pub enum GuiAction {
     Exit,
     SaveState(std::path::PathBuf),
@@ -32,6 +31,8 @@ struct Gui {
     error_message: Option<String>,
     status_message: Option<String>,
     show_debug_overlay: bool,
+    show_stack_overlay: bool,
+    stack_scroll_offset: i16,
 }
 
 impl Gui {
@@ -40,11 +41,13 @@ impl Gui {
             error_message: None,
             status_message: None,
             show_debug_overlay: true,
+            show_stack_overlay: true,
+            stack_scroll_offset: 0,
         }
     }
 
     /// Create the UI using egui.
-    fn ui(&mut self, ctx: &Context, paused: bool, registers: Option<&crate::cpu::registers::Registers>) -> (Option<GuiAction>, bool) {
+    fn ui(&mut self, ctx: &Context, paused: bool, registers: Option<&crate::cpu::registers::Registers>, gb: Option<&crate::gb::GB>) -> (Option<GuiAction>, bool) {
         let mut action = None;
         let mut any_menu_open = false;
         
@@ -94,36 +97,137 @@ impl Gui {
                     if ui.checkbox(&mut self.show_debug_overlay, "Show Debug Overlay").clicked() {
                         ui.close_menu();
                     }
+                    if ui.checkbox(&mut self.show_stack_overlay, "Show Stack Explorer").clicked() {
+                        ui.close_menu();
+                    }
                 });
             });
         });
 
+        // Stack overlay
+        if self.show_stack_overlay {
+            if let Some(regs) = registers {
+                if let Some(gb_ref) = gb {
+                    egui::Window::new("Stack Explorer")
+                        .default_pos([220.0, 50.0])
+                        .default_size([180.0, 400.0])
+                        .collapsible(true)
+                        .resizable(false)
+                        .frame(egui::Frame::window(&ctx.style()).fill(egui::Color32::from_rgba_unmultiplied(64, 64, 64, 220)))
+                        .show(ctx, |ui| {
+                            ui.set_width(160.0);
+                            
+                            let sp = regs.sp;
+                            ui.monospace(egui::RichText::new(format!("SP: {:04X}", sp)).color(egui::Color32::YELLOW));
+                            
+                            // Scroll up button
+                            if ui.button("↑ Scroll Up").clicked() {
+                                self.stack_scroll_offset = self.stack_scroll_offset.saturating_add(1);
+                            }
+                            
+                            ui.separator();
+                            
+                            // Show stack contents around SP with scroll offset
+                            let base_start = sp.saturating_sub(8); // 4 entries above SP (8 bytes)
+                            let scroll_adjustment = (self.stack_scroll_offset as i32) * 2; // 2 bytes per scroll step
+                            let start_addr = if scroll_adjustment < 0 {
+                                base_start.saturating_add((-scroll_adjustment) as u16)
+                            } else {
+                                base_start.saturating_sub(scroll_adjustment as u16)
+                            };
+                            let end_addr = start_addr.saturating_add(16); // Show 9 entries (18 bytes)
+                            
+                            for addr in (start_addr..=end_addr).step_by(2) {
+                                let val1 = gb_ref.read_memory(addr);
+                                let val2 = if addr + 1 <= end_addr { gb_ref.read_memory(addr + 1) } else { 0 };
+                                let word_val = ((val2 as u16) << 8) | (val1 as u16);
+                                
+                                let color = if addr == sp {
+                                    egui::Color32::YELLOW // Highlight current SP
+                                } else if addr < sp {
+                                    egui::Color32::LIGHT_GRAY // Above SP (older entries)
+                                } else {
+                                    egui::Color32::GRAY // Below SP (unused)
+                                };
+                                
+                                let marker = if addr == sp { "→" } else { " " };
+                                ui.monospace(egui::RichText::new(format!("{} {:04X}: {:04X}", marker, addr, word_val)).color(color));
+                            }
+                            
+                            ui.separator();
+                            
+                            // Scroll down button
+                            if ui.button("↓ Scroll Down").clicked() {
+                                self.stack_scroll_offset = self.stack_scroll_offset.saturating_sub(1);
+                            }
+                            
+                            // Reset button
+                            ui.horizontal(|ui| {
+                                if ui.button("Center on SP").clicked() {
+                                    self.stack_scroll_offset = 0;
+                                }
+                                ui.small(egui::RichText::new(format!("Offset: {}", self.stack_scroll_offset)).color(egui::Color32::LIGHT_GRAY));
+                            });
+                            
+                            ui.separator();
+                            ui.small(egui::RichText::new("Yellow = SP position").color(egui::Color32::LIGHT_GRAY));
+                        });
+                }
+            }
+        }
+
         // Debug overlay
         if self.show_debug_overlay {
             if let Some(regs) = registers {
-                egui::Window::new("CPU Registers")
-                    .default_pos([10.0, 50.0])
-                    .default_size([200.0, 300.0])
-                    .collapsible(true)
-                    .resizable(false)
-                    .frame(egui::Frame::window(&ctx.style()).fill(egui::Color32::from_rgba_unmultiplied(64, 64, 64, 220)))
-                    .show(ctx, |ui| {
-                        ui.set_width(180.0);
-                        
-                        // Use rich text for better color control
-                        ui.monospace(egui::RichText::new(format!("A: {:02X}    F: {:02X}", regs.a, regs.f)).color(egui::Color32::WHITE));
-                        ui.monospace(egui::RichText::new(format!("B: {:02X}    C: {:02X}", regs.b, regs.c)).color(egui::Color32::WHITE));
-                        ui.monospace(egui::RichText::new(format!("D: {:02X}    E: {:02X}", regs.d, regs.e)).color(egui::Color32::WHITE));
-                        ui.monospace(egui::RichText::new(format!("H: {:02X}    L: {:02X}", regs.h, regs.l)).color(egui::Color32::WHITE));
-                        ui.separator();
-                        ui.monospace(egui::RichText::new(format!("PC: {:04X}", regs.pc)).color(egui::Color32::WHITE));
-                        ui.monospace(egui::RichText::new(format!("SP: {:04X}", regs.sp)).color(egui::Color32::WHITE));
-                        ui.separator();
-                        ui.monospace(egui::RichText::new(format!("IME: {}", if regs.ime { "ON" } else { "OFF" })).color(egui::Color32::WHITE));
-                        ui.separator();
-                        ui.small(egui::RichText::new("F = step frame").color(egui::Color32::LIGHT_GRAY));
-                        ui.small(egui::RichText::new("N = step cycle").color(egui::Color32::LIGHT_GRAY));
-                    });
+                if let Some(gb_ref) = gb {
+                    egui::Window::new("CPU Registers")
+                        .default_pos([10.0, 50.0])
+                        .default_size([200.0, 400.0])
+                        .collapsible(true)
+                        .resizable(false)
+                        .frame(egui::Frame::window(&ctx.style()).fill(egui::Color32::from_rgba_unmultiplied(64, 64, 64, 220)))
+                        .show(ctx, |ui| {
+                            ui.set_width(180.0);
+                            
+                            // Use rich text for better color control
+                            ui.monospace(egui::RichText::new(format!("A: {:02X}    F: {:02X}", regs.a, regs.f)).color(egui::Color32::WHITE));
+                            ui.monospace(egui::RichText::new(format!("B: {:02X}    C: {:02X}", regs.b, regs.c)).color(egui::Color32::WHITE));
+                            ui.monospace(egui::RichText::new(format!("D: {:02X}    E: {:02X}", regs.d, regs.e)).color(egui::Color32::WHITE));
+                            ui.monospace(egui::RichText::new(format!("H: {:02X}    L: {:02X}", regs.h, regs.l)).color(egui::Color32::WHITE));
+                            ui.separator();
+                            ui.monospace(egui::RichText::new(format!("PC: {:04X}", regs.pc.saturating_sub(1))).color(egui::Color32::WHITE));
+                            ui.monospace(egui::RichText::new(format!("SP: {:04X}", regs.sp)).color(egui::Color32::WHITE));
+                            ui.separator();
+                            ui.monospace(egui::RichText::new(format!("IME: {}", if regs.ime { "ON" } else { "OFF" })).color(egui::Color32::WHITE));
+                            ui.separator();
+                            
+                            // Instruction viewer around PC
+                            ui.small(egui::RichText::new("Instructions:").color(egui::Color32::LIGHT_GRAY));
+                            let pc = regs.pc;
+                            let display_pc = pc.saturating_sub(1); // Show the instruction that was just executed
+                            let start_addr = display_pc.saturating_sub(1); // 1 byte before the executed instruction
+                            let end_addr = display_pc.saturating_add(4);   // 4 bytes after the executed instruction
+                            
+                            for addr in start_addr..=end_addr {
+                                let byte_val = gb_ref.read_memory(addr);
+                                
+                                let color = if addr == display_pc {
+                                    egui::Color32::YELLOW // Highlight the instruction that was just executed
+                                } else if addr < display_pc {
+                                    egui::Color32::LIGHT_GRAY // Before executed instruction
+                                } else {
+                                    egui::Color32::GRAY // After executed instruction (upcoming)
+                                };
+                                
+                                let marker = if addr == display_pc { "→" } else { " " };
+                                ui.monospace(egui::RichText::new(format!("{} {:04X}: {:02X}", marker, addr, byte_val)).color(color));
+                            }
+                            
+                            ui.separator();
+                            ui.small(egui::RichText::new("F = step frame").color(egui::Color32::LIGHT_GRAY));
+                            ui.small(egui::RichText::new("N = step cycle").color(egui::Color32::LIGHT_GRAY));
+                        });
+                }
             }
         }
 
@@ -257,11 +361,11 @@ impl Framework {
         self.gui.set_status(status_message);
     }
 
-    pub(crate) fn prepare(&mut self, window: &Window, paused: bool, registers: Option<&crate::cpu::registers::Registers>) -> (Option<GuiAction>, bool) {
+    pub(crate) fn prepare(&mut self, window: &Window, paused: bool, registers: Option<&crate::cpu::registers::Registers>, gb: Option<&crate::gb::GB>) -> (Option<GuiAction>, bool) {
         let raw_input = self.egui_state.take_egui_input(window);
         let mut result = (None, false);
         let output = self.egui_ctx.run(raw_input, |egui_ctx| {
-            result = self.gui.ui(egui_ctx, paused, registers);
+            result = self.gui.ui(egui_ctx, paused, registers, gb);
         });
 
         self.textures.append(output.textures_delta);
