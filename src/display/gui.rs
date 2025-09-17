@@ -16,24 +16,68 @@ pub(crate) struct Framework {
 }
 
 struct Gui {
+    error_message: Option<String>,
 }
 
 impl Gui {
     fn new() -> Self {
-        Self {  }
+        Self { 
+            error_message: None,
+        }
     }
 
     /// Create the UI using egui.
-    fn ui(&mut self, ctx: &Context) {
+    fn ui(&mut self, ctx: &Context) -> bool {
+        let mut should_exit = false;
+        
         egui::TopBottomPanel::top("menubar_container").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Exit").clicked() {
+                        should_exit = true;
                         ui.close_menu();
                     }
                 })
             });
         });
+
+        // Display error panel if there's an error
+        if let Some(error_msg) = &self.error_message.clone() {
+            let mut clear_error = false;
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.heading("🚨 Emulator Crashed");
+                ui.separator();
+                
+                ui.label("The Game Boy emulator has encountered a fatal error and has stopped running.");
+                ui.label("The GUI remains open for debugging purposes.");
+                
+                ui.add_space(10.0);
+                
+                ui.label("Error Details:");
+                ui.group(|ui| {
+                    ui.add(egui::TextEdit::multiline(&mut error_msg.as_str())
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(6)
+                        .font(egui::TextStyle::Monospace));
+                });
+                
+                ui.add_space(10.0);
+                
+                if ui.button("Clear Error (Debug Mode)").clicked() {
+                    clear_error = true;
+                }
+            });
+            
+            if clear_error {
+                self.error_message = None;
+            }
+        }
+        
+        should_exit
+    }
+
+    fn set_error(&mut self, error_message: String) {
+        self.error_message = Some(error_message);
     }
 }
 
@@ -88,10 +132,15 @@ impl Framework {
         self.screen_descriptor.pixels_per_point = scale_factor as f32;
     }
 
-    pub(crate) fn prepare(&mut self, window: &Window) {
+    pub(crate) fn set_error(&mut self, error_message: String) {
+        self.gui.set_error(error_message);
+    }
+
+    pub(crate) fn prepare(&mut self, window: &Window) -> bool {
         let raw_input = self.egui_state.take_egui_input(window);
+        let mut should_exit = false;
         let output = self.egui_ctx.run(raw_input, |egui_ctx| {
-            self.gui.ui(egui_ctx);
+            should_exit = self.gui.ui(egui_ctx);
         });
 
         self.textures.append(output.textures_delta);
@@ -100,6 +149,8 @@ impl Framework {
         self.paint_jobs = self
             .egui_ctx
             .tessellate(output.shapes, self.screen_descriptor.pixels_per_point);
+            
+        should_exit
     }
 
     pub(crate) fn render(
