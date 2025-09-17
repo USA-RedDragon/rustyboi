@@ -10,6 +10,7 @@ use winit::window::Window;
 pub enum GuiAction {
     Exit,
     SaveState(std::path::PathBuf),
+    TogglePause,
 }
 
 pub(crate) struct Framework {
@@ -26,6 +27,8 @@ pub(crate) struct Framework {
 struct Gui {
     error_message: Option<String>,
     status_message: Option<String>,
+    is_paused: bool,
+    manually_paused: bool,
 }
 
 impl Gui {
@@ -33,16 +36,20 @@ impl Gui {
         Self { 
             error_message: None,
             status_message: None,
+            is_paused: false,
+            manually_paused: false,
         }
     }
 
     /// Create the UI using egui.
-    fn ui(&mut self, ctx: &Context) -> Option<GuiAction> {
+    fn ui(&mut self, ctx: &Context) -> (Option<GuiAction>, bool, bool) {
         let mut action = None;
+        let mut any_menu_open = false;
         
         egui::TopBottomPanel::top("menubar_container").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    any_menu_open = true;
                     if ui.button("Save State").clicked() {
                         let timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -64,7 +71,18 @@ impl Gui {
                         action = Some(GuiAction::Exit);
                         ui.close_menu();
                     }
-                })
+                });
+                
+                ui.menu_button("Emulation", |ui| {
+                    any_menu_open = true;
+                    let pause_text = if self.is_paused { "Resume" } else { "Pause" };
+                    if ui.button(pause_text).clicked() {
+                        action = Some(GuiAction::TogglePause);
+                        self.is_paused = !self.is_paused;
+                        self.manually_paused = self.is_paused;
+                        ui.close_menu();
+                    }
+                });
             });
         });
 
@@ -118,7 +136,7 @@ impl Gui {
             }
         }
         
-        action
+        (action, any_menu_open, self.manually_paused)
     }
 
     fn set_error(&mut self, error_message: String) {
@@ -189,11 +207,11 @@ impl Framework {
         self.gui.set_status(status_message);
     }
 
-    pub(crate) fn prepare(&mut self, window: &Window) -> Option<GuiAction> {
+    pub(crate) fn prepare(&mut self, window: &Window) -> (Option<GuiAction>, bool, bool) {
         let raw_input = self.egui_state.take_egui_input(window);
-        let mut action = None;
+        let mut result = (None, false, false);
         let output = self.egui_ctx.run(raw_input, |egui_ctx| {
-            action = self.gui.ui(egui_ctx);
+            result = self.gui.ui(egui_ctx);
         });
 
         self.textures.append(output.textures_delta);
@@ -203,7 +221,7 @@ impl Framework {
             .egui_ctx
             .tessellate(output.shapes, self.screen_descriptor.pixels_per_point);
             
-        action
+        result
     }
 
     pub(crate) fn render(
