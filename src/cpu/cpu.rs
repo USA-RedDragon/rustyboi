@@ -4,51 +4,55 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SM83 {
     pub registers: registers::Registers,
+    pub halted: bool,
+    pub stopped: bool,
 }
 
 impl SM83 {
     pub fn new() -> Self {
-        SM83 { registers: registers::Registers::new() }
+        SM83 { registers: registers::Registers::new(), halted: false, stopped: false }
     }
 
     pub fn step(&mut self, mmio: &mut memory::mmio::MMIO) -> u8 {
         let mut cycles = 0;
-        if self.registers.ime && mmio.read(registers::INTERRUPT_FLAG) != 0 {
-            let mut interrupt: Option<registers::InterruptFlag> = None;
-
-            if self.get_interrupt_enable_flag(registers::InterruptFlag::Joypad, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Joypad, mmio) {
-                interrupt = Some(registers::InterruptFlag::Joypad);
-            } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Serial, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Serial, mmio) {
-                interrupt = Some(registers::InterruptFlag::Serial);
-            } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Timer, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Timer, mmio) {
-                interrupt = Some(registers::InterruptFlag::Timer);
-            } else if self.get_interrupt_enable_flag(registers::InterruptFlag::LCD, mmio) && self.get_interrupt_flag(registers::InterruptFlag::LCD, mmio) {
-                interrupt = Some(registers::InterruptFlag::LCD);
-            } else if self.get_interrupt_enable_flag(registers::InterruptFlag::VBlank, mmio) && self.get_interrupt_flag(registers::InterruptFlag::VBlank, mmio) {
-                interrupt = Some(registers::InterruptFlag::VBlank);
-            }
-
-            if let Some(flag) = interrupt {
-                self.registers.ime = false;
-                self.registers.set_flag(registers::Flag::Carry, false);
-                self.registers.set_flag(registers::Flag::HalfCarry, false);
-                self.registers.set_flag(registers::Flag::Negative, false);
-                self.registers.set_flag(registers::Flag::Zero, false);
-
-                self.registers.sp -= 2;
-                mmio.write(self.registers.sp, (self.registers.pc & 0x00FF) as u8);
-                mmio.write(self.registers.sp + 1, (self.registers.pc >> 8) as u8);
-                self.registers.pc = match flag {
-                    registers::InterruptFlag::VBlank => 0x40,
-                    registers::InterruptFlag::LCD => 0x48,
-                    registers::InterruptFlag::Timer => 0x50,
-                    registers::InterruptFlag::Serial => 0x58,
-                    registers::InterruptFlag::Joypad => 0x60,
-                };
-                self.set_interrupt_flag(flag, false, mmio);
-                cycles += 5; // Interrupt handling takes 5 extra cycles
+        
+        // Check for pending interrupts
+        let pending_interrupt = self.get_pending_interrupt(mmio);
+        
+        // If halted, check if we should exit halt state
+        if self.halted {
+            if pending_interrupt.is_some() {
+                self.halted = false;
+            } else {
+                // CPU is halted and no interrupt is pending, consume 1 cycle and return
+                return 1;
             }
         }
+        
+        // Handle interrupts if IME is enabled and there's a pending interrupt
+        if self.registers.ime && pending_interrupt.is_some() {
+            let flag = pending_interrupt.unwrap();
+            
+            self.registers.ime = false;
+            self.registers.set_flag(registers::Flag::Carry, false);
+            self.registers.set_flag(registers::Flag::HalfCarry, false);
+            self.registers.set_flag(registers::Flag::Negative, false);
+            self.registers.set_flag(registers::Flag::Zero, false);
+
+            self.registers.sp -= 2;
+            mmio.write(self.registers.sp, (self.registers.pc & 0x00FF) as u8);
+            mmio.write(self.registers.sp + 1, (self.registers.pc >> 8) as u8);
+            self.registers.pc = match flag {
+                registers::InterruptFlag::VBlank => 0x40,
+                registers::InterruptFlag::LCD => 0x48,
+                registers::InterruptFlag::Timer => 0x50,
+                registers::InterruptFlag::Serial => 0x58,
+                registers::InterruptFlag::Joypad => 0x60,
+            };
+            self.set_interrupt_flag(flag, false, mmio);
+            cycles += 5; // Interrupt handling takes 5 extra cycles
+        }
+        
         let opcode = mmio.read(self.registers.pc);
         self.registers.pc += 1;
         self.execute(opcode, mmio) + cycles
@@ -68,6 +72,23 @@ impl SM83 {
 
     pub fn get_interrupt_enable_flag(&self, flag: registers::InterruptFlag, mmio: &memory::mmio::MMIO) -> bool {
         (mmio.read(registers::INTERRUPT_ENABLE) & (flag as u8)) != 0
+    }
+
+    fn get_pending_interrupt(&self, mmio: &memory::mmio::MMIO) -> Option<registers::InterruptFlag> {
+        // Check interrupts in priority order (highest to lowest)
+        if self.get_interrupt_enable_flag(registers::InterruptFlag::VBlank, mmio) && self.get_interrupt_flag(registers::InterruptFlag::VBlank, mmio) {
+            Some(registers::InterruptFlag::VBlank)
+        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::LCD, mmio) && self.get_interrupt_flag(registers::InterruptFlag::LCD, mmio) {
+            Some(registers::InterruptFlag::LCD)
+        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Timer, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Timer, mmio) {
+            Some(registers::InterruptFlag::Timer)
+        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Serial, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Serial, mmio) {
+            Some(registers::InterruptFlag::Serial)
+        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Joypad, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Joypad, mmio) {
+            Some(registers::InterruptFlag::Joypad)
+        } else {
+            None
+        }
     }
 
     fn execute(&mut self, opcode: u8, mmio: &mut memory::mmio::MMIO) -> u8 {
@@ -188,6 +209,7 @@ impl SM83 {
             0x73 => opcodes::ld_memory_hl_e(self, mmio),
             0x74 => opcodes::ld_memory_hl_h(self, mmio),
             0x75 => opcodes::ld_memory_hl_l(self, mmio),
+            0x76 => opcodes::halt(self, mmio),
             0x77 => opcodes::ld_memory_hl_a(self, mmio),
             0x78 => opcodes::ld_a_b(self, mmio),
             0x79 => opcodes::ld_a_c(self, mmio),
