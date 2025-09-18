@@ -164,11 +164,6 @@ impl PPU {
         self.ticks += 1;
     }
 
-    pub fn next_event_in_cycles(&self) -> u64 {
-        // Return the number of cycles until the next PPU event
-        500 // Placeholder value
-    }
-
     pub fn frame_ready(&self) -> bool {
         self.have_frame
     }

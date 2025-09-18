@@ -231,6 +231,14 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                         manually_paused = user_paused || world.error_state.is_some();
                         world.toggle_pause();
                     }
+                    Some(GuiAction::StepCycles(count)) => {
+                        world.step_multiple_cycles = Some(count);
+                        window.request_redraw();
+                    }
+                    Some(GuiAction::StepFrames(count)) => {
+                        world.step_multiple_frames = Some(count);
+                        window.request_redraw();
+                    }
                     None => {}
                 }
 
@@ -281,6 +289,8 @@ struct World {
     is_paused: bool,
     step_single_frame: bool,
     step_single_cycle: bool,
+    step_multiple_cycles: Option<u32>,
+    step_multiple_frames: Option<u32>,
     current_rom_path: Option<String>,
     current_bios_path: Option<String>,
 }
@@ -294,6 +304,8 @@ impl World {
             is_paused: false,
             step_single_frame: false,
             step_single_cycle: false,
+            step_multiple_cycles: None,
+            step_multiple_frames: None,
             current_rom_path: rom_path,
             current_bios_path: bios_path,
         }
@@ -424,7 +436,7 @@ impl World {
         if self.step_single_frame {
             self.step_single_frame = false;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.gb.step_single_frame()
+                self.gb.run_until_frame()
             }));
             match result {
                 Ok(frame_data) => {
@@ -449,7 +461,7 @@ impl World {
         if self.step_single_cycle {
             self.step_single_cycle = false;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.gb.step_single_cycle();
+                self.gb.step_instruction();
                 // For cycle stepping, we need to get the current frame even if incomplete
                 self.gb.get_current_frame()
             }));
@@ -464,6 +476,60 @@ impl World {
                         format!("Emulator panic during cycle step: {}", s)
                     } else {
                         "Emulator panic during cycle step: Unknown error".to_string()
+                    };
+                    self.error_state = Some(error_msg);
+                    self.frame = None;
+                }
+            }
+            return;
+        }
+
+        // Handle multiple cycle stepping
+        if let Some(count) = self.step_multiple_cycles.take() {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                for _ in 0..count {
+                    self.gb.step_instruction();
+                }
+                self.gb.get_current_frame()
+            }));
+            match result {
+                Ok(frame_data) => {
+                    self.frame = Some(convert_to_rgba(&frame_data));
+                }
+                Err(panic_info) => {
+                    let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                        format!("Emulator panic during multi-cycle step ({}): {}", count, s)
+                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                        format!("Emulator panic during multi-cycle step ({}): {}", count, s)
+                    } else {
+                        format!("Emulator panic during multi-cycle step ({}): Unknown error", count)
+                    };
+                    self.error_state = Some(error_msg);
+                    self.frame = None;
+                }
+            }
+            return;
+        }
+
+        // Handle multiple frame stepping
+        if let Some(count) = self.step_multiple_frames.take() {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                for _ in 0..count {
+                    self.gb.run_until_frame();
+                }
+                self.gb.get_current_frame()
+            }));
+            match result {
+                Ok(frame_data) => {
+                    self.frame = Some(convert_to_rgba(&frame_data));
+                }
+                Err(panic_info) => {
+                    let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                        format!("Emulator panic during multi-frame step ({}): {}", count, s)
+                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                        format!("Emulator panic during multi-frame step ({}): {}", count, s)
+                    } else {
+                        format!("Emulator panic during multi-frame step ({}): Unknown error", count)
                     };
                     self.error_state = Some(error_msg);
                     self.frame = None;

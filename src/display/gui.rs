@@ -14,6 +14,8 @@ pub enum GuiAction {
     TogglePause,
     Restart,
     ClearError,
+    StepCycles(u32),
+    StepFrames(u32),
 }
 
 pub(crate) struct Framework {
@@ -40,6 +42,10 @@ struct Gui {
     memory_explorer_address: String,
     memory_explorer_parsed_address: u16,
     memory_scroll_offset: i16,
+    step_count: u32,
+    // Button hold state tracking
+    step_cycles_held_frames: u32,
+    step_frames_held_frames: u32,
 }
 
 impl Gui {
@@ -57,6 +63,9 @@ impl Gui {
             memory_explorer_address: String::from("0000"),
             memory_explorer_parsed_address: 0x0000,
             memory_scroll_offset: 0,
+            step_count: 1,
+            step_cycles_held_frames: 0,
+            step_frames_held_frames: 0,
         }
     }
 
@@ -641,8 +650,69 @@ impl Gui {
                             }
                             
                             ui.separator();
-                            ui.small(egui::RichText::new("F = step frame").color(egui::Color32::LIGHT_GRAY));
-                            ui.small(egui::RichText::new("N = step cycle").color(egui::Color32::LIGHT_GRAY));
+                            
+                            // Step controls
+                            ui.small(egui::RichText::new("Step Controls:").color(egui::Color32::LIGHT_GRAY));
+                            
+                            // Slider for step count
+                            ui.horizontal(|ui| {
+                                ui.label("Steps:");
+                                ui.add(egui::Slider::new(&mut self.step_count, 1..=100)
+                                    .text("instructions"));
+                            });
+                            
+                            ui.separator();
+                            
+                            // Step buttons
+                            ui.horizontal(|ui| {
+                                if paused {
+                                    // Step Cycles button with hold functionality
+                                    let cycles_response = ui.button("Step Cycles");
+                                    if cycles_response.clicked() {
+                                        // Initial press - execute immediately
+                                        action = Some(GuiAction::StepCycles(self.step_count));
+                                        self.step_cycles_held_frames = 0;
+                                    } else if cycles_response.is_pointer_button_down_on() {
+                                        // Button is being held down
+                                        self.step_cycles_held_frames += 1;
+                                        // After 15 frames (250ms at 60fps), start repeating every 4 frames (67ms at 60fps)
+                                        if self.step_cycles_held_frames > 15 && (self.step_cycles_held_frames - 15) % 4 == 0 {
+                                            action = Some(GuiAction::StepCycles(self.step_count));
+                                        }
+                                    } else {
+                                        // Button released - reset state
+                                        self.step_cycles_held_frames = 0;
+                                    }
+                                    
+                                    // Step Frames button with hold functionality
+                                    let frames_response = ui.button("Step Frames");
+                                    if frames_response.clicked() {
+                                        // Initial press - execute immediately
+                                        action = Some(GuiAction::StepFrames(self.step_count));
+                                        self.step_frames_held_frames = 0;
+                                    } else if frames_response.is_pointer_button_down_on() {
+                                        // Button is being held down
+                                        self.step_frames_held_frames += 1;
+                                        // After 15 frames (250ms at 60fps), start repeating every 4 frames (67ms at 60fps)
+                                        if self.step_frames_held_frames > 15 && (self.step_frames_held_frames - 15) % 4 == 0 {
+                                            action = Some(GuiAction::StepFrames(self.step_count));
+                                        }
+                                    } else {
+                                        // Button released - reset state
+                                        self.step_frames_held_frames = 0;
+                                    }
+                                } else {
+                                    ui.add_enabled(false, egui::Button::new("Step Cycles"));
+                                    ui.add_enabled(false, egui::Button::new("Step Frames"));
+                                }
+                            });
+                            
+                            if !paused {
+                                ui.small(egui::RichText::new("(Pause to enable stepping)").color(egui::Color32::GRAY));
+                            }
+                            
+                            ui.separator();
+                            ui.small(egui::RichText::new("F = step frame | N = step cycle").color(egui::Color32::LIGHT_GRAY));
                         });
                 }
             }
