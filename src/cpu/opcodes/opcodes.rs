@@ -213,6 +213,11 @@ pub fn add_sp_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
     16
 }
 
+pub fn halt(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+    cpu.halted = true;
+    4
+}
+
 pub fn ld_hl_sp_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
     let offset = mmio.read(cpu.registers.pc) as i8;
     cpu.registers.pc += 1;
