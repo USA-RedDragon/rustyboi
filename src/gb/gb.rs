@@ -8,12 +8,6 @@ use crate::ppu;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::time::{Duration, Instant};
-
-const CPU_FREQ: u128 = 4_194_304; // Hz
-const NANO: u128 = 1_000_000_000u128;
-const BATCH_CYCLES: u64 = 500;   // batch size
-const BUSY_WAIT_NS: u128 = 50_000; // 50 µs busy-wait
 
 pub type DisplayCallback = Box<dyn Fn(&[u8; ppu::FRAMEBUFFER_SIZE])>;
 
@@ -71,81 +65,22 @@ impl GB {
         Ok(())
     }
 
-    fn step_batch(&mut self, total_cycles: &mut u128, start_time: &Instant) -> u64 {
-        let mut batch_cycles = 0;
-
-        while batch_cycles < BATCH_CYCLES {
-            let cycles = self.cpu.step(&mut self.mmio) as u64;
-            batch_cycles += cycles;
-
-            let next_event = self.ppu.next_event_in_cycles();
-            if batch_cycles > next_event {
-                let excess = batch_cycles - next_event;
-                batch_cycles -= excess;
-                break;
-            }
-        }
-
-        for _ in 0..batch_cycles {
+    pub fn step_instruction(&mut self) {
+        // Execute one CPU instruction and step PPU accordingly
+        let cycles = self.cpu.step(&mut self.mmio);
+        for _ in 0..cycles {
             self.ppu.step(&mut self.cpu, &mut self.mmio);
         }
-
-        *total_cycles += batch_cycles as u128;
-
-        // Sleep + busy-wait to maintain 4.194 MHz
-        let target_ns = (*total_cycles * NANO) / CPU_FREQ;
-        let elapsed_ns = start_time.elapsed().as_nanos();
-
-        if target_ns > elapsed_ns {
-            let remaining_ns = target_ns - elapsed_ns;
-
-            if remaining_ns > BUSY_WAIT_NS {
-                std::thread::sleep(Duration::from_nanos((remaining_ns - BUSY_WAIT_NS) as u64));
-            }
-
-            while start_time.elapsed().as_nanos() < target_ns {}
-        }
-
-        batch_cycles
     }
 
     pub fn run_until_frame(&mut self) -> [u8; ppu::FRAMEBUFFER_SIZE] {
-        let mut total_cycles: u128 = 0;
-        let start_time = Instant::now();
-
+        // Run CPU/PPU until a frame is ready - simple loop
         loop {
-            self.step_batch(&mut total_cycles, &start_time);
-
-            // Render frame if ready
-            if self.ppu.frame_ready() {
-                return self.ppu.get_frame();
-            }
-        }
-    }
-
-    pub fn step_single_frame(&mut self) -> [u8; ppu::FRAMEBUFFER_SIZE] {
-        // Step through CPU cycles until a frame is complete
-        loop {
-            let cycles = self.cpu.step(&mut self.mmio) as u64;
+            self.step_instruction();
             
-            for _ in 0..cycles {
-                self.ppu.step(&mut self.cpu, &mut self.mmio);
-            }
-
-            // Return frame if ready
             if self.ppu.frame_ready() {
                 return self.ppu.get_frame();
             }
-        }
-    }
-
-    pub fn step_single_cycle(&mut self) {
-        // Execute one CPU instruction
-        let cycles = self.cpu.step(&mut self.mmio) as u64;
-        
-        // Run the PPU for the same number of cycles
-        for _ in 0..cycles {
-            self.ppu.step(&mut self.cpu, &mut self.mmio);
         }
     }
 
@@ -166,16 +101,11 @@ impl GB {
     }
 
     pub fn run(&mut self) {
-        let mut total_cycles: u128 = 0;
-        let start_time = Instant::now();
-
         loop {
-            self.step_batch(&mut total_cycles, &start_time);
-
-            if self.ppu.frame_ready() {
-                if let Some(display) = &mut self.display_callback {
-                    display(&self.ppu.get_frame());
-                }
+            let frame = self.run_until_frame();
+            
+            if let Some(display) = &mut self.display_callback {
+                display(&frame);
             }
         }
     }
