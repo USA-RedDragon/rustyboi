@@ -14,10 +14,10 @@ const BIOS_END: u16 = BIOS_START + BIOS_SIZE as u16 - 1;
 pub const CARTRIDGE_START: u16 = 0x0000;
 pub const CARTRIDGE_SIZE: usize = 16384; // 16KB
 const CARTRIDGE_AFTER_BIOS_START: u16 = 0x0100; // After BIOS is disabled
-const CARTRIDGE_END: u16 = CARTRIDGE_START + CARTRIDGE_SIZE as u16 - 1;
-const CARTRIDGE_BANK_START: u16 = 0x4000;
-const CARTRIDGE_BANK_SIZE: usize = 16384; // 16KB
-const CARTRIDGE_BANK_END: u16 = CARTRIDGE_BANK_START + CARTRIDGE_BANK_SIZE as u16 - 1;
+pub const CARTRIDGE_END: u16 = CARTRIDGE_START + CARTRIDGE_SIZE as u16 - 1;
+pub const CARTRIDGE_BANK_START: u16 = 0x4000;
+pub const CARTRIDGE_BANK_SIZE: usize = 16384; // 16KB
+pub const CARTRIDGE_BANK_END: u16 = CARTRIDGE_BANK_START + CARTRIDGE_BANK_SIZE as u16 - 1;
 pub const VRAM_START: u16 = 0x8000;
 const VRAM_SIZE: usize = 8192; // 8KB
 const VRAM_END: u16 = VRAM_START + VRAM_SIZE as u16 - 1;
@@ -56,8 +56,6 @@ pub struct MMIO {
     bios: Option<memory::Memory<BIOS_START, BIOS_SIZE>>,
     #[serde(skip, default)]
     cartridge: Option<cartridge::Cartridge>,
-    #[serde(skip, default)]
-    cartridge_bank: memory::Memory<CARTRIDGE_BANK_START, CARTRIDGE_BANK_SIZE>,
     vram: memory::Memory<VRAM_START, VRAM_SIZE>,
     ram: memory::Memory<RAM_START, RAM_SIZE>,
     wram: memory::Memory<WRAM_START, WRAM_SIZE>,
@@ -73,7 +71,6 @@ impl MMIO {
         MMIO {
             bios: None,
             cartridge: None,
-            cartridge_bank: memory::Memory::new(),
             vram: memory::Memory::new(),
             ram: memory::Memory::new(),
             wram: memory::Memory::new(),
@@ -138,7 +135,12 @@ impl memory::Addressable for MMIO {
                     None => EMPTY_BYTE,
                 }
             },
-            CARTRIDGE_BANK_START..=CARTRIDGE_BANK_END => self.cartridge_bank.read(addr),
+            CARTRIDGE_BANK_START..=CARTRIDGE_BANK_END => {
+                match &self.cartridge {
+                    Some(cart) => cart.read(addr),
+                    None => EMPTY_BYTE,
+                }
+            },
             VRAM_START..=VRAM_END => self.vram.read(addr),
             RAM_START..=RAM_END => self.ram.read(addr),
             WRAM_START..=WRAM_END => self.wram.read(addr),
@@ -168,7 +170,12 @@ impl memory::Addressable for MMIO {
                     None => (),
                 }
             },
-            CARTRIDGE_BANK_START..=CARTRIDGE_BANK_END => self.cartridge_bank.write(addr, value),
+            CARTRIDGE_BANK_START..=CARTRIDGE_BANK_END => {
+                match self.cartridge.as_mut() {
+                    Some(cart) => cart.write(addr, value),
+                    None => (),
+                }
+            },
             VRAM_START..=VRAM_END => self.vram.write(addr, value),
             RAM_START..=RAM_END => self.ram.write(addr, value),
             WRAM_START..=WRAM_END => self.wram.write(addr, value),
