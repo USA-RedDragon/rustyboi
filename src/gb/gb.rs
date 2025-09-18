@@ -168,6 +168,8 @@ impl GB {
     pub fn reset(&mut self) {
         self.mmio.reset();
         self.ppu.reset();
+        self.cpu.halted = false;
+        self.cpu.stopped = false;
         self.cpu.registers.reset(self.skip_bios);
     }
 }
