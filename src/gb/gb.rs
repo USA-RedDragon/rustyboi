@@ -148,6 +148,7 @@ impl GB {
                     };
 
                     println!("Game Boy emulator crashed: {}", error_msg);
+                    break;
                 }
             }
         }
