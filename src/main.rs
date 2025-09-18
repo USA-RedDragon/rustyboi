@@ -37,7 +37,13 @@ fn main() -> Result<(), pixels::Error> {
         return display::run_with_gui(gb, &config);
     }
 
-    gb.set_display_callback(Box::new(display::Terminal::render_frame));
+    // Create a stateful terminal instance for differential rendering
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let terminal = Rc::new(RefCell::new(display::Terminal::new()));
+    gb.set_display_callback(Box::new(move |frame| {
+        terminal.borrow_mut().render_frame(frame);
+    }));
     gb.run();
     Ok(())
 }
