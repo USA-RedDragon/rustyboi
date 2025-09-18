@@ -59,7 +59,7 @@ impl SM83 {
     }
 
     pub fn set_interrupt_flag(&mut self, flag: registers::InterruptFlag, value: bool, mmio: &mut memory::mmio::MMIO) {
-        if self.registers.ime && value {
+        if value {
             mmio.write(registers::INTERRUPT_FLAG, mmio.read(registers::INTERRUPT_FLAG) | flag as u8);
         } else {
             mmio.write(registers::INTERRUPT_FLAG, mmio.read(registers::INTERRUPT_FLAG) & !(flag as u8));
