@@ -8,6 +8,7 @@ mod display;
 mod input;
 mod memory;
 mod ppu;
+mod timer;
 
 use clap::Parser;
 use pixels;

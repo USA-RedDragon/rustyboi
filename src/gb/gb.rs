@@ -74,6 +74,7 @@ impl GB {
         // Execute one CPU instruction and step PPU accordingly
         let cycles = self.cpu.step(&mut self.mmio);
         for _ in 0..cycles {
+            self.mmio.step_timer(&mut self.cpu);
             self.ppu.step(&mut self.cpu, &mut self.mmio);
         }
     }
