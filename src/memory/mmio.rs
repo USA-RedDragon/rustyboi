@@ -1,4 +1,5 @@
 use crate::cartridge;
+use crate::input;
 use crate::memory;
 use crate::memory::Addressable;
 use serde::{Deserialize, Serialize};
@@ -41,7 +42,9 @@ const UNUSED_START: u16 = 0xFEA0;
 const UNUSED_SIZE: usize = 96; // 96 bytes
 const UNUSED_END: u16 = UNUSED_START + UNUSED_SIZE as u16 - 1;
 const IO_REGISTERS_START: u16 = 0xFF00;
+const IO_REGISTERS_START_WITHOUT_JOYP: u16 = 0xFF01; // Exclude JOYP at 0xFF00
 const IO_REGISTERS_SIZE: usize = 128; // 128 bytes
+const IO_REGISTERS_SIZE_WITHOUT_JOYP: usize = IO_REGISTERS_SIZE - 1; // 127 bytes excluding JOYP
 const IO_REGISTERS_END: u16 = IO_REGISTERS_START + IO_REGISTERS_SIZE as u16 - 1;
 const HRAM_START: u16 = 0xFF80;
 const HRAM_SIZE: usize = 127; // 127 bytes
@@ -56,12 +59,13 @@ pub struct MMIO {
     bios: Option<memory::Memory<BIOS_START, BIOS_SIZE>>,
     #[serde(skip, default)]
     cartridge: Option<cartridge::Cartridge>,
+    input: input::Input,
     vram: memory::Memory<VRAM_START, VRAM_SIZE>,
     ram: memory::Memory<RAM_START, RAM_SIZE>,
     wram: memory::Memory<WRAM_START, WRAM_SIZE>,
     wram_bank: memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>,
     oam: memory::Memory<OAM_START, OAM_SIZE>,
-    io_registers: memory::Memory<IO_REGISTERS_START, IO_REGISTERS_SIZE>,
+    io_registers: memory::Memory<IO_REGISTERS_START_WITHOUT_JOYP, IO_REGISTERS_SIZE_WITHOUT_JOYP>,
     hram: memory::Memory<HRAM_START, HRAM_SIZE>,
     ie_register: u8,
 }
@@ -71,6 +75,7 @@ impl MMIO {
         MMIO {
             bios: None,
             cartridge: None,
+            input: input::Input::new(),
             vram: memory::Memory::new(),
             ram: memory::Memory::new(),
             wram: memory::Memory::new(),
@@ -156,7 +161,8 @@ impl memory::Addressable for MMIO {
             },
             OAM_START..=OAM_END => self.oam.read(addr),
             UNUSED_START..=UNUSED_END => EMPTY_BYTE,
-            IO_REGISTERS_START..=IO_REGISTERS_END => self.io_registers.read(addr),
+            input::JOYP => self.input.read(addr),
+            IO_REGISTERS_START_WITHOUT_JOYP..=IO_REGISTERS_END => self.io_registers.read(addr),
             HRAM_START..=HRAM_END => self.hram.read(addr),
             IE_REGISTER => self.ie_register,
         }
@@ -191,7 +197,8 @@ impl memory::Addressable for MMIO {
             },
             OAM_START..=OAM_END => self.oam.write(addr, value),
             UNUSED_START..=UNUSED_END => (), // Writes to unused memory are ignored
-            IO_REGISTERS_START..=IO_REGISTERS_END => self.io_registers.write(addr, value),
+            input::JOYP => self.input.write(addr, value),
+            IO_REGISTERS_START_WITHOUT_JOYP..=IO_REGISTERS_END => self.io_registers.write(addr, value),
             HRAM_START..=HRAM_END => self.hram.write(addr, value),
             IE_REGISTER => self.ie_register = value,
         }
