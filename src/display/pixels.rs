@@ -158,8 +158,10 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                 ..
             } => {
                 world.draw(pixels.frame_mut());
-
                 let gui_paused_state = manually_paused || world.error_state.is_some();
+                
+                // Update window title with performance metrics
+                world.update_window_title(&window, gui_paused_state);
                 // Always pass register data for the debug overlay, regardless of pause state
                 let registers = Some(world.gb.get_cpu_registers());
                 let gb_ref = Some(&world.gb);
@@ -293,10 +295,16 @@ struct World {
     step_multiple_frames: Option<u32>,
     current_rom_path: Option<String>,
     current_bios_path: Option<String>,
+    // FPS and performance tracking
+    frame_times: Vec<Instant>,
+    last_title_update: Instant,
+    // Frame timing for 60fps
+    last_frame_time: Instant,
 }
 
 impl World {
     fn new_with_paths(gb: gb::GB, rom_path: Option<String>, bios_path: Option<String>) -> Self {
+        let now = Instant::now();
         Self {
             gb,
             frame: None,
@@ -308,6 +316,9 @@ impl World {
             step_multiple_frames: None,
             current_rom_path: rom_path,
             current_bios_path: bios_path,
+            frame_times: Vec::with_capacity(60), // Store last 60 frame times for FPS calculation
+            last_title_update: now,
+            last_frame_time: now,
         }
     }
 
@@ -543,6 +554,26 @@ impl World {
             return;
         }
 
+        // Frame timing: target 60fps (16.75ms per frame)
+        const TARGET_FRAME_TIME: Duration = Duration::from_micros(16750); // ~59.7 fps
+        let now = Instant::now();
+        let elapsed_since_last_frame = now.duration_since(self.last_frame_time);
+        
+        // Only update if enough time has passed
+        if elapsed_since_last_frame < TARGET_FRAME_TIME {
+            let remaining = TARGET_FRAME_TIME - elapsed_since_last_frame;
+            // Sleep for most of the remaining time
+            if remaining > Duration::from_micros(100) {
+                std::thread::sleep(remaining - Duration::from_micros(50));
+            }
+            // Spin for precision
+            while self.last_frame_time.elapsed() < TARGET_FRAME_TIME {
+                std::hint::spin_loop();
+            }
+        }
+        
+        self.last_frame_time = Instant::now();
+
         // Catch panics from the Game Boy emulator
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.gb.run_until_frame()
@@ -551,6 +582,7 @@ impl World {
         match result {
             Ok(frame_data) => {
                 self.frame = Some(convert_to_rgba(&frame_data));
+                self.update_performance_metrics();
             }
             Err(panic_info) => {
                 // Convert panic info to a string for debugging
@@ -566,6 +598,52 @@ impl World {
                 println!("Game Boy emulator crashed: {}", self.error_state.as_ref().unwrap());
                 self.frame = None;
             }
+        }
+    }
+
+    fn update_performance_metrics(&mut self) {
+        let now = Instant::now();
+        
+        // Track frame times for FPS calculation
+        self.frame_times.push(now);
+        
+        // Keep only the last 60 frame times (1 second at 60 FPS)
+        if self.frame_times.len() > 60 {
+            self.frame_times.remove(0);
+        }
+    }
+
+    fn get_fps(&self) -> f64 {
+        let frame_count = self.frame_times.len();
+        if frame_count < 2 {
+            return 0.0;
+        }
+        
+        let duration = self.frame_times[frame_count - 1].duration_since(self.frame_times[0]);
+        if duration.as_secs_f64() == 0.0 {
+            return 0.0;
+        }
+        
+        (frame_count as f64 - 1.0) / duration.as_secs_f64()
+    }
+
+    fn update_window_title(&mut self, window: &winit::window::Window, is_paused: bool) {
+        let now = Instant::now();
+        
+        // Update title every 500ms to avoid excessive updates
+        if now.duration_since(self.last_title_update).as_millis() >= 500 {
+            let fps = self.get_fps();
+            
+            let title = if self.error_state.is_some() {
+                format!("RustyBoi - ERROR | {:.1} FPS", fps)
+            } else if is_paused {
+                format!("RustyBoi - PAUSED | {:.1} FPS", fps)
+            } else {
+                format!("RustyBoi | {:.1} FPS", fps)
+            };
+            
+            window.set_title(&title);
+            self.last_title_update = now;
         }
     }
 }
