@@ -260,8 +260,8 @@ impl Gui {
                         // Scroll up button (move pointer to lower addresses)
                         if ui.button("↑ Move Up").clicked() {
                             // Ensure we don't go below 0x0000
-                            if self.memory_explorer_parsed_address >= 2 {
-                                self.memory_explorer_parsed_address = self.memory_explorer_parsed_address.saturating_sub(2);
+                            if self.memory_explorer_parsed_address >= 1 {
+                                self.memory_explorer_parsed_address = self.memory_explorer_parsed_address.saturating_sub(1);
                                 self.memory_explorer_address = format!("{:04X}", self.memory_explorer_parsed_address);
                             }
                         }
@@ -269,13 +269,11 @@ impl Gui {
                         ui.separator();
                         
                         // Show memory contents around the current address (fixed view)
-                        let start_addr = self.memory_explorer_parsed_address.saturating_sub(8); // 4 entries above (8 bytes)
-                        let end_addr = std::cmp::min(start_addr.saturating_add(16), 0xFFFF); // Show 9 entries (18 bytes), capped at 0xFFFF
+                        let start_addr = self.memory_explorer_parsed_address.saturating_sub(4); // 4 entries above
+                        let end_addr = std::cmp::min(start_addr.saturating_add(8), 0xFFFF); // Show 9 entries
                         
-                        for addr in (start_addr..=end_addr).step_by(2) {
-                            let val1 = gb_ref.read_memory(addr);
-                            let val2 = if addr < 0xFFFF { gb_ref.read_memory(addr + 1) } else { 0 };
-                            let word_val = ((val2 as u16) << 8) | (val1 as u16);
+                        for addr in (start_addr..=end_addr).step_by(1) {
+                            let val = gb_ref.read_memory(addr);
                             
                             let color = if addr == self.memory_explorer_parsed_address {
                                 egui::Color32::YELLOW // Highlight target address
@@ -286,7 +284,7 @@ impl Gui {
                             };
                             
                             let marker = if addr == self.memory_explorer_parsed_address { "→" } else { " " };
-                            ui.monospace(egui::RichText::new(format!("{} {:04X}: {:04X}", marker, addr, word_val)).color(color));
+                            ui.monospace(egui::RichText::new(format!("{} {:04X}: {:02X}", marker, addr, val)).color(color));
                         }
                         
                         ui.separator();
@@ -294,8 +292,8 @@ impl Gui {
                         // Scroll down button (move pointer to higher addresses)
                         if ui.button("↓ Move Down").clicked() {
                             // Ensure we don't go above 0xFFFF
-                            if self.memory_explorer_parsed_address <= 0xFFFF - 2 {
-                                self.memory_explorer_parsed_address = self.memory_explorer_parsed_address.saturating_add(2);
+                            if self.memory_explorer_parsed_address <= 0xFFFF - 1 {
+                                self.memory_explorer_parsed_address = self.memory_explorer_parsed_address.saturating_add(1);
                                 self.memory_explorer_address = format!("{:04X}", self.memory_explorer_parsed_address);
                             }
                         }
