@@ -5,6 +5,7 @@ mod cartridge;
 mod config;
 mod cpu;
 mod display;
+mod input;
 mod memory;
 mod ppu;
 

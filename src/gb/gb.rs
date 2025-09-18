@@ -1,6 +1,7 @@
 use crate::cartridge;
 use crate::cpu;
 use crate::cpu::registers;
+use crate::input;
 use crate::memory;
 use crate::memory::Addressable;
 use crate::ppu;
@@ -23,6 +24,8 @@ pub struct GB {
     mmio: memory::mmio::MMIO,
     ppu: ppu::PPU,
     #[serde(skip, default)]
+    input: input::Input,
+    #[serde(skip, default)]
     skip_bios: bool,
     #[serde(skip, default)]
     display_callback: Option<DisplayCallback>,
@@ -34,6 +37,7 @@ impl Clone for GB {
             cpu: self.cpu.clone(),
             mmio: self.mmio.clone(),
             ppu: self.ppu.clone(),
+            input: self.input.clone(),
             skip_bios: self.skip_bios,
             display_callback: None,
         }
@@ -48,6 +52,7 @@ impl GB {
             cpu,
             mmio: memory::mmio::MMIO::new(),
             ppu: ppu::PPU::new(),
+            input: input::Input::new(),
             skip_bios,
             display_callback: None,
         }
@@ -75,6 +80,7 @@ impl GB {
         let mut batch_cycles = 0;
 
         while batch_cycles < BATCH_CYCLES {
+            self.input.update(&mut self.mmio);
             let cycles = self.cpu.step(&mut self.mmio) as u64;
             batch_cycles += cycles;
 
@@ -126,6 +132,7 @@ impl GB {
     pub fn step_single_frame(&mut self) -> [u8; ppu::FRAMEBUFFER_SIZE] {
         // Step through CPU cycles until a frame is complete
         loop {
+            self.input.update(&mut self.mmio);
             let cycles = self.cpu.step(&mut self.mmio) as u64;
             
             for _ in 0..cycles {
@@ -141,6 +148,7 @@ impl GB {
 
     pub fn step_single_cycle(&mut self) {
         // Execute one CPU instruction
+        self.input.update(&mut self.mmio);
         let cycles = self.cpu.step(&mut self.mmio) as u64;
         
         // Run the PPU for the same number of cycles
