@@ -45,6 +45,7 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
     };
     let mut world = World::new_with_paths(gb, config.rom.clone(), config.bios.clone()); 
     let mut manually_paused = false;
+    let mut user_paused = false; // Track user-initiated pause separate from debug pause
 
     // Debounce timing for F and N keys
     const DEBOUNCE_DURATION: Duration = Duration::from_millis(250); // Time to wait before auto-repeat
@@ -183,7 +184,8 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                     Some(GuiAction::LoadState(path)) => {
                         match world.load_state(path) {
                             Ok(loaded_path) => {
-                                manually_paused = false;
+                                // Keep user pause state when loading state
+                                manually_paused = user_paused || world.error_state.is_some();
                                 framework.clear_error();
                                 framework.set_status(format!("State loaded from: {}", loaded_path));
                                 window.request_redraw();
@@ -196,7 +198,8 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                     Some(GuiAction::LoadRom(path)) => {
                         match world.load_rom(path) {
                             Ok(loaded_path) => {
-                                manually_paused = false;
+                                // Keep user pause state when loading ROM
+                                manually_paused = user_paused;
                                 framework.clear_error();
                                 framework.set_status(format!("ROM loaded from: {}", loaded_path));
                                 window.request_redraw();
@@ -208,7 +211,8 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                     }
                     Some(GuiAction::Restart) => {
                         world.restart();
-                        manually_paused = false;
+                        // Keep user pause state when restarting
+                        manually_paused = user_paused;
                         framework.clear_error();
                         framework.set_status("Emulation restarted".to_string());
                         window.request_redraw();
@@ -216,13 +220,15 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                     Some(GuiAction::ClearError) => {
                         world.clear_error();
                         world.pause();
-                        manually_paused = true;
+                        // Update manually_paused to reflect only user pause state after clearing error
+                        manually_paused = user_paused;
                         framework.clear_error();
                         framework.set_status("Error cleared for debugging - CPU state preserved".to_string());
                         window.request_redraw();
                     }
                     Some(GuiAction::TogglePause) => {
-                        manually_paused = !manually_paused;
+                        user_paused = !user_paused;
+                        manually_paused = user_paused || world.error_state.is_some();
                         world.toggle_pause();
                     }
                     None => {}
@@ -234,14 +240,16 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                     if should_be_paused {
                         world.pause();
                     } else {
-                        // Only auto-resume if not manually paused
-                        if !manually_paused {
+                        // Only auto-resume if not manually paused and no error
+                        if !user_paused && world.error_state.is_none() {
                             world.resume();
                         }
                     }
                 }
                 if let Some(error_msg) = &world.error_state {
                     framework.set_error(error_msg.clone());
+                    // Update manually_paused to include error state
+                    manually_paused = user_paused || world.error_state.is_some();
                 }
 
                 let render_result = pixels.render_with(|encoder, render_target, context| {
