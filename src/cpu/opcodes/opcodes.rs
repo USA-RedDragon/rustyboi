@@ -179,6 +179,114 @@ pub fn jr_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
     12
 }
 
+pub fn rrca(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+    let old_carry = cpu.registers.a & 0x01;
+    cpu.registers.a = (cpu.registers.a >> 1) | (old_carry << 7);
+    cpu.registers.set_flag(registers::Flag::Zero, false);
+    cpu.registers.set_flag(registers::Flag::Negative, false);
+    cpu.registers.set_flag(registers::Flag::HalfCarry, false);
+    cpu.registers.set_flag(registers::Flag::Carry, old_carry == 1);
+    4
+}
+
+pub fn ld_memory_imm_16_sp(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let low = mmio.read(cpu.registers.pc) as u16;
+    let high = mmio.read(cpu.registers.pc + 1) as u16;
+    let addr = (high << 8) | low;
+    cpu.registers.pc += 2;
+    mmio.write(addr, (cpu.registers.sp & 0x00FF) as u8);
+    mmio.write(addr + 1, ((cpu.registers.sp & 0xFF00) >> 8) as u8);
+    20
+}
+
+pub fn add_sp_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let offset = mmio.read(cpu.registers.pc) as i8;
+    cpu.registers.pc += 1;
+    let sp = cpu.registers.sp;
+    let result = (sp as i16).wrapping_add(offset as i16) as u16;
+    cpu.registers.sp = result;
+
+    cpu.registers.set_flag(registers::Flag::Zero, false);
+    cpu.registers.set_flag(registers::Flag::Negative, false);
+    cpu.registers.set_flag(registers::Flag::Carry, ((sp & 0xFF) + (offset as u16 & 0xFF)) > 0xFF);
+    cpu.registers.set_flag(registers::Flag::HalfCarry, ((sp & 0x0F) + (offset as u16 & 0x0F)) > 0x0F);
+    16
+}
+
+pub fn ld_hl_sp_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let offset = mmio.read(cpu.registers.pc) as i8;
+    cpu.registers.pc += 1;
+    let sp = cpu.registers.sp;
+    let result = (sp as i16).wrapping_add(offset as i16) as u16;
+    
+    cpu.registers.h = ((result & 0xFF00) >> 8) as u8;
+    cpu.registers.l = (result & 0xFF) as u8;
+
+    cpu.registers.set_flag(registers::Flag::Zero, false);
+    cpu.registers.set_flag(registers::Flag::Negative, false);
+    cpu.registers.set_flag(registers::Flag::Carry, ((sp & 0xFF) + (offset as u16 & 0xFF)) > 0xFF);
+    cpu.registers.set_flag(registers::Flag::HalfCarry, ((sp & 0x0F) + (offset as u16 & 0x0F)) > 0x0F);
+    12
+}
+
+pub fn ld_sp_hl(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+    let hl = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
+    cpu.registers.sp = hl;
+    8
+}
+
+pub fn rra(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+    let old_carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 };
+    let new_carry = cpu.registers.a & 0x01;
+    cpu.registers.a = (cpu.registers.a >> 1) | (old_carry << 7);
+    cpu.registers.set_flag(registers::Flag::Zero, false);
+    cpu.registers.set_flag(registers::Flag::Negative, false);
+    cpu.registers.set_flag(registers::Flag::HalfCarry, false);
+    cpu.registers.set_flag(registers::Flag::Carry, new_carry == 1);
+    4
+}
+
+pub fn adc_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let value = mmio.read(cpu.registers.pc);
+    cpu.registers.pc += 1;
+    let carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 };
+    let a = cpu.registers.a;
+    let result = (a as u16) + (value as u16) + (carry as u16);
+    
+    cpu.registers.a = (result & 0xFF) as u8;
+    cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.a == 0);
+    cpu.registers.set_flag(registers::Flag::Negative, false);
+    cpu.registers.set_flag(registers::Flag::Carry, result > 0xFF);
+    cpu.registers.set_flag(registers::Flag::HalfCarry, ((a & 0x0F) + (value & 0x0F) + carry) > 0x0F);
+    8
+}
+
+pub fn xor_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let value = mmio.read(cpu.registers.pc);
+    cpu.registers.pc += 1;
+    let result = cpu.registers.a ^ value;
+    cpu.registers.a = result;
+    cpu.registers.set_flag(registers::Flag::Zero, result == 0);
+    cpu.registers.set_flag(registers::Flag::Negative, false);
+    cpu.registers.set_flag(registers::Flag::HalfCarry, false);
+    cpu.registers.set_flag(registers::Flag::Carry, false);
+    8
+}
+
+pub fn add_hl_sp(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+    let hl = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
+    let sp = cpu.registers.sp;
+    let result = hl as u32 + sp as u32;
+    
+    cpu.registers.h = ((result & 0xFF00) >> 8) as u8;
+    cpu.registers.l = (result & 0xFF) as u8;
+
+    cpu.registers.set_flag(registers::Flag::Negative, false);
+    cpu.registers.set_flag(registers::Flag::Carry, result > 0xFFFF);
+    cpu.registers.set_flag(registers::Flag::HalfCarry, ((hl & 0x0FFF) + (sp & 0x0FFF)) > 0x0FFF);
+    8
+}
+
 pub fn cp_memory_hl(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
     let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
     let value = mmio.read(addr);
@@ -1017,6 +1125,26 @@ macro_rules! make_ld_memory_hl_register {
     };
 }
 
+macro_rules! make_call_cond {
+    ($name:ident, $cond:expr) => {
+        pub fn $name(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+            let low = mmio.read(cpu.registers.pc) as u16;
+            let high = mmio.read(cpu.registers.pc + 1) as u16;
+            let addr = (high << 8) | low;
+            cpu.registers.pc += 2;
+            if $cond(cpu) {
+                cpu.registers.sp = cpu.registers.sp.wrapping_sub(2);
+                mmio.write(cpu.registers.sp, (cpu.registers.pc & 0x00FF) as u8);
+                mmio.write(cpu.registers.sp + 1, (cpu.registers.pc >> 8) as u8);
+                cpu.registers.pc = addr;
+                24
+            } else {
+                12
+            }
+        }
+    };
+}
+
 make_rl_register!(rl_a, a);
 make_rl_register!(rl_b, b);
 make_rl_register!(rl_c, c);
@@ -1449,3 +1577,7 @@ make_rrc_register!(rrc_d, d);
 make_rrc_register!(rrc_e, e);
 make_rrc_register!(rrc_h, h);
 make_rrc_register!(rrc_l, l);
+make_call_cond!(call_nz_imm, |cpu: &cpu::SM83| !cpu.registers.get_flag(registers::Flag::Zero));
+make_call_cond!(call_z_imm, |cpu: &cpu::SM83| cpu.registers.get_flag(registers::Flag::Zero));
+make_call_cond!(call_nc_imm, |cpu: &cpu::SM83| !cpu.registers.get_flag(registers::Flag::Carry));
+make_call_cond!(call_c_imm, |cpu: &cpu::SM83| cpu.registers.get_flag(registers::Flag::Carry));
