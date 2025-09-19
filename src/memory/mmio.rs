@@ -24,9 +24,9 @@ pub const CARTRIDGE_BANK_END: u16 = CARTRIDGE_BANK_START + CARTRIDGE_BANK_SIZE a
 pub const VRAM_START: u16 = 0x8000;
 const VRAM_SIZE: usize = 8192; // 8KB
 const VRAM_END: u16 = VRAM_START + VRAM_SIZE as u16 - 1;
-const RAM_START: u16 = 0xA000;
-const RAM_SIZE: usize = 8192; // 8KB
-const RAM_END: u16 = RAM_START + RAM_SIZE as u16 - 1;
+const EXTERNAL_RAM_START: u16 = 0xA000;
+const EXTERNAL_RAM_SIZE: usize = 8192; // 8KB
+const EXTERNAL_RAM_END: u16 = EXTERNAL_RAM_START + EXTERNAL_RAM_SIZE as u16 - 1;
 const WRAM_START: u16 = 0xC000;
 const WRAM_SIZE: usize = 4096; // 4KB
 const WRAM_END: u16 = WRAM_START + WRAM_SIZE as u16 - 1;
@@ -61,7 +61,6 @@ pub struct MMIO {
     cartridge: Option<cartridge::Cartridge>,
     input: input::Input,
     vram: memory::Memory<VRAM_START, VRAM_SIZE>,
-    ram: memory::Memory<RAM_START, RAM_SIZE>,
     wram: memory::Memory<WRAM_START, WRAM_SIZE>,
     wram_bank: memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>,
     oam: memory::Memory<OAM_START, OAM_SIZE>,
@@ -78,7 +77,6 @@ impl MMIO {
             cartridge: None,
             input: input::Input::new(),
             vram: memory::Memory::new(),
-            ram: memory::Memory::new(),
             wram: memory::Memory::new(),
             wram_bank: memory::Memory::new(),
             oam: memory::Memory::new(),
@@ -155,7 +153,12 @@ impl memory::Addressable for MMIO {
                 }
             },
             VRAM_START..=VRAM_END => self.vram.read(addr),
-            RAM_START..=RAM_END => self.ram.read(addr),
+            EXTERNAL_RAM_START..=EXTERNAL_RAM_END => {
+                match &self.cartridge {
+                    Some(cart) => cart.read(addr),
+                    None => EMPTY_BYTE,
+                }
+            },
             WRAM_START..=WRAM_END => self.wram.read(addr),
             WRAM_BANK_START..=WRAM_BANK_END => self.wram_bank.read(addr),
             ECHO_RAM_START..=ECHO_RAM_END => {
@@ -197,7 +200,12 @@ impl memory::Addressable for MMIO {
                 }
             },
             VRAM_START..=VRAM_END => self.vram.write(addr, value),
-            RAM_START..=RAM_END => self.ram.write(addr, value),
+            EXTERNAL_RAM_START..=EXTERNAL_RAM_END => {
+                match self.cartridge.as_mut() {
+                    Some(cart) => cart.write(addr, value),
+                    None => (),
+                }
+            },
             WRAM_START..=WRAM_END => self.wram.write(addr, value),
             WRAM_BANK_START..=WRAM_BANK_END => self.wram_bank.write(addr, value),
             ECHO_RAM_START..=ECHO_RAM_END => {
