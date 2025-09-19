@@ -337,6 +337,20 @@ pub fn ret(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
     16
 }
 
+pub fn ccf(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+    let current_carry = cpu.registers.get_flag(registers::Flag::Carry);
+    cpu.registers.set_flag(registers::Flag::Carry, !current_carry);
+    cpu.registers.set_flag(registers::Flag::Negative, false);
+    cpu.registers.set_flag(registers::Flag::HalfCarry, false);
+    4
+}
+
+pub fn ld_a_memory_c(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let addr = 0xFF00 | (cpu.registers.c as u16);
+    cpu.registers.a = mmio.read(addr);
+    8
+}
+
 pub fn reti(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
     cpu.registers.pc = mmio.read(cpu.registers.sp) as u16;
     cpu.registers.pc |= (mmio.read(cpu.registers.sp + 1) as u16) << 8;
@@ -1177,6 +1191,24 @@ macro_rules! make_call_cond {
     };
 }
 
+macro_rules! make_sbc_a_register {
+    ($name:ident, $reg:ident) => {
+        pub fn $name(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+            let a = cpu.registers.a;
+            let operand = cpu.registers.$reg;
+            let carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1u8 } else { 0u8 };
+            let result = a.wrapping_sub(operand).wrapping_sub(carry);
+
+            cpu.registers.a = result;
+            cpu.registers.set_flag(registers::Flag::Zero, result == 0);
+            cpu.registers.set_flag(registers::Flag::Negative, true);
+            cpu.registers.set_flag(registers::Flag::Carry, (a as u16) < (operand as u16 + carry as u16));
+            cpu.registers.set_flag(registers::Flag::HalfCarry, (a & 0x0F) < ((operand & 0x0F) + carry));
+            4
+        }
+    };
+}
+
 make_rl_register!(rl_a, a);
 make_rl_register!(rl_b, b);
 make_rl_register!(rl_c, c);
@@ -1611,3 +1643,10 @@ make_call_cond!(call_nz_imm, |cpu: &cpu::SM83| !cpu.registers.get_flag(registers
 make_call_cond!(call_z_imm, |cpu: &cpu::SM83| cpu.registers.get_flag(registers::Flag::Zero));
 make_call_cond!(call_nc_imm, |cpu: &cpu::SM83| !cpu.registers.get_flag(registers::Flag::Carry));
 make_call_cond!(call_c_imm, |cpu: &cpu::SM83| cpu.registers.get_flag(registers::Flag::Carry));
+make_sbc_a_register!(sbc_a_a, a);
+make_sbc_a_register!(sbc_a_b, b);
+make_sbc_a_register!(sbc_a_c, c);
+make_sbc_a_register!(sbc_a_d, d);
+make_sbc_a_register!(sbc_a_e, e);
+make_sbc_a_register!(sbc_a_h, h);
+make_sbc_a_register!(sbc_a_l, l);
