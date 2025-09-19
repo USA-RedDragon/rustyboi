@@ -4,6 +4,14 @@ pub fn nop(_cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
     4
 }
 
+pub fn stop(_cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+    unimplemented!("STOP instruction is not implemented");
+}
+
+pub fn undefined(_cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+    panic!("Attempted to execute an undefined opcode");
+}
+
 pub fn dec_memory_hl(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
     let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
     let old_value = mmio.read(addr);
