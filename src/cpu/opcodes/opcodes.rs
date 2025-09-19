@@ -213,6 +213,21 @@ pub fn add_sp_imm(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
     16
 }
 
+pub fn sbc_a_memory_hl(cpu: &mut cpu::SM83, mmio: &mut memory::mmio::MMIO) -> u8 {
+    let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
+    let value = mmio.read(addr);
+    let carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 };
+    let a = cpu.registers.a;
+    let result = (a as i16) - (value as i16) - (carry as i16);
+    
+    cpu.registers.a = (result & 0xFF) as u8;
+    cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.a == 0);
+    cpu.registers.set_flag(registers::Flag::Negative, true);
+    cpu.registers.set_flag(registers::Flag::Carry, result < 0);
+    cpu.registers.set_flag(registers::Flag::HalfCarry, ((a & 0x0F) as i16 - (value & 0x0F) as i16 - (carry as i16)) < 0);
+    8
+}
+
 pub fn halt(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
     cpu.halted = true;
     4
