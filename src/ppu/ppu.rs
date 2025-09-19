@@ -145,10 +145,10 @@ impl PPU {
             },
             State::VBlank => {
                 // no-ops
-                if self.ticks == 339 {
+                if self.ticks == 4560 {
                     self.ticks = 0;
                     mmio.write(LY, mmio.read(LY) + 1);
-                    if mmio.read(LY) == 154 {
+                    if mmio.read(LY) == 153 {
                         mmio.write(LY, 0);
                         self.state = State::OAMSearch;
                     }
