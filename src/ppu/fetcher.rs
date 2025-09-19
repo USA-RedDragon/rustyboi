@@ -14,6 +14,10 @@ enum State {
 
 const BACKGROUND_MAP_OFFSET: u16 = 6144;
 
+// Tile data addressing constants
+const TILE_DATA_8000_BASE: u16 = 0x8000; // $8000 method base (unsigned addressing)
+const TILE_DATA_8800_BASE: u16 = 0x9000; // $8800 method base (signed addressing)
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Fetcher {
     state: State,
@@ -43,6 +47,27 @@ impl Fetcher {
         self.pixel_buffer = [0; 8];
     }
 
+    // Calculate the correct tile data address based on LCDC.4 (BGWindowTileDataSelect)
+    fn get_tile_data_address(&self, tile_id: u8, tile_line: u8, mmio: &mmio::MMIO) -> u16 {
+        let lcdc = mmio.read(ppu::LCD_CONTROL);
+        let bg_window_tile_data_select = (lcdc & (ppu::LCDCFlags::BGWindowTileDataSelect as u8)) != 0;
+        
+        if bg_window_tile_data_select {
+            // $8000 method: unsigned addressing
+            // Tiles 0-127 are in block 0 ($8000-$87FF)
+            // Tiles 128-255 are in block 1 ($8800-$8FFF)
+            let offset = (tile_id as u16) * 16 + (tile_line as u16) * 2;
+            TILE_DATA_8000_BASE + offset
+        } else {
+            // $8800 method: signed addressing
+            // Tiles 0-127 are in block 2 ($9000-$97FF)
+            // Tiles 128-255 (interpreted as -128 to -1) are in block 1 ($8800-$8FFF)
+            let tile_id_signed = tile_id as i8;
+            let offset = (tile_id_signed as i16) * 16 + (tile_line as i16) * 2;
+            ((TILE_DATA_8800_BASE as i16) + offset) as u16
+        }
+    }
+
     pub fn step(&mut self, mmio: &mut mmio::MMIO) {
         let y = mmio.read(ppu::LY).wrapping_add(mmio.read(ppu::SCY));
         let tile_line = y % 8;
@@ -55,30 +80,28 @@ impl Fetcher {
                 self.state = State::TileDataLow;
             }
             State::TileDataLow => {
-                // Fetch the low byte of the tile data
-                let offset = self.tile_num as u16 * 16; // Each tile is 16 bytes (8 lines, 2 bytes per line)
-                let addr = offset + (tile_line as u16 * 2);
-                let low_byte = mmio.read(mmio::VRAM_START + addr);
+                // Fetch the low byte of the tile data using the correct addressing method
+                let addr = self.get_tile_data_address(self.tile_num, tile_line, mmio);
+                let low_byte = mmio.read(addr);
                 for i in 0..8 {
-                    self.pixel_buffer[i] = (low_byte >> i) & 0x01;
+                    self.pixel_buffer[i] = (low_byte >> (7 - i)) & 0x01;
                 }
                 self.state = State::TileDataHigh;
             }
             State::TileDataHigh => {
-                // Fetch the high byte of the tile data
-                let offset = self.tile_num as u16 * 16; // Each tile is 16 bytes (8 lines, 2 bytes per line)
-                let addr = offset + (tile_line as u16 * 2) + 1;
-                let high_byte = mmio.read(mmio::VRAM_START + addr);
+                // Fetch the high byte of the tile data using the correct addressing method
+                let addr = self.get_tile_data_address(self.tile_num, tile_line, mmio) + 1;
+                let high_byte = mmio.read(addr);
                 for i in 0..8 {
                     // Combine low and high bytes to form the pixel data
-                    self.pixel_buffer[i] |= ((high_byte >> i) & 0x01) << 1;
+                    self.pixel_buffer[i] |= ((high_byte >> (7 - i)) & 0x01) << 1;
                 }
                 self.state = State::PushToFIFO;
             }
             State::PushToFIFO => {
                 // Push the fetched tile data to the FIFO
                 if self.pixel_fifo.size() <= 8 {
-                    for i in (0..8).rev() {
+                    for i in 0..8 {
                         self.pixel_fifo.push(self.pixel_buffer[i]);
                     }
                 }
