@@ -70,7 +70,7 @@ impl Registers {
         self.ime = false;
         if skip_bios {
             self.a = 0x01;
-            self.f = Flag::Zero as u8;
+            self.f = Flag::Zero as u8 | Flag::HalfCarry as u8 | Flag::Carry as u8;
             self.c = 0x13;
             self.e = 0xD8;
             self.h = 0x01;
