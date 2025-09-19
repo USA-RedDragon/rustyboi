@@ -240,6 +240,18 @@ pub fn ld_sp_hl(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
     8
 }
 
+pub fn inc_sp(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+    cpu.registers.sp = cpu.registers.sp.wrapping_add(1);
+    // INC SP does not affect any flags
+    8
+}
+
+pub fn dec_sp(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
+    cpu.registers.sp = cpu.registers.sp.wrapping_sub(1);
+    // DEC SP does not affect any flags
+    8
+}
+
 pub fn rra(cpu: &mut cpu::SM83, _mmio: &mut memory::mmio::MMIO) -> u8 {
     let old_carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 };
     let new_carry = cpu.registers.a & 0x01;
@@ -1301,7 +1313,6 @@ make_inc_register!(inc_d, d);
 make_inc_register!(inc_e, e);
 make_inc_register!(inc_h, h);
 make_inc_register!(inc_l, l);
-make_inc_register!(inc_sp, sp);
 make_dec_register!(dec_a, a);
 make_dec_register!(dec_b, b);
 make_dec_register!(dec_c, c);
@@ -1309,7 +1320,6 @@ make_dec_register!(dec_d, d);
 make_dec_register!(dec_e, e);
 make_dec_register!(dec_h, h);
 make_dec_register!(dec_l, l);
-make_dec_register!(dec_sp, sp);
 make_inc_combined_register!(inc_bc, b, c);
 make_inc_combined_register!(inc_de, d, e);
 make_inc_combined_register!(inc_hl, h, l);
