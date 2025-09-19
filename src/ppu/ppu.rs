@@ -93,10 +93,6 @@ impl PPU {
             }
         }
 
-        if mmio.read(LCD_CONTROL)&(LCDCFlags::BGWindowTileDataSelect as u8) == 1 {
-            println!("PPU: BG/Window Tile Data Select is set to 1, this is not supported in DMG mode");
-        }
-
         if mmio.read(LYC) == mmio.read(LY) {
             mmio.write(LCD_STATUS, mmio.read(LCD_STATUS) | (1 << 2)); // Set the LYC=LY flag
         } else {
@@ -129,8 +125,6 @@ impl PPU {
                     if self.x == 160 {
                         self.state = State::HBlank
                     }
-                } else {
-                    break 'label;
                 }
             },
             State::HBlank => {
@@ -151,10 +145,10 @@ impl PPU {
             },
             State::VBlank => {
                 // no-ops
-                if self.ticks == 4560 {
+                if self.ticks == 339 {
                     self.ticks = 0;
                     mmio.write(LY, mmio.read(LY) + 1);
-                    if mmio.read(LY) == 153 {
+                    if mmio.read(LY) == 154 {
                         mmio.write(LY, 0);
                         self.state = State::OAMSearch;
                     }
