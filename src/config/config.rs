@@ -45,13 +45,18 @@ pub struct CleanConfig {
 
 impl RawConfig {
     pub fn clean(self) -> CleanConfig {
+        let mut skip_bios = self.skip_bios;
+        if self.bios.is_none() {
+            skip_bios = true;
+        }
+
         CleanConfig {
             bios: self.bios,
             rom: self.rom,
             state: self.state,
             scale: self.scale,
             cli: self.cli,
-            skip_bios: self.skip_bios,
+            skip_bios: skip_bios,
         }
     }
 }

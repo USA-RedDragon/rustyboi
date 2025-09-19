@@ -42,9 +42,13 @@ impl GB {
     pub fn new(skip_bios: bool) -> Self {
         let mut cpu = cpu::SM83::new();
         cpu.registers.reset(skip_bios);
+        let mut mmio = memory::mmio::MMIO::new();
+        if skip_bios {
+            mmio.write(crate::memory::mmio::REG_BOOT_OFF, 1);
+        }
         GB {
             cpu,
-            mmio: memory::mmio::MMIO::new(),
+            mmio,
             ppu: ppu::PPU::new(),
             skip_bios,
             display_callback: None,
@@ -173,5 +177,8 @@ impl GB {
         self.cpu.halted = false;
         self.cpu.stopped = false;
         self.cpu.registers.reset(self.skip_bios);
+        if self.skip_bios {
+            self.mmio.write(crate::memory::mmio::REG_BOOT_OFF, 1);
+        }
     }
 }
