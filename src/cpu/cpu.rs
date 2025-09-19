@@ -243,6 +243,7 @@ impl SM83 {
             0x95 => opcodes::sub_l(self, mmio),
             0x96 => opcodes::sub_memory_hl(self, mmio),
             0x97 => opcodes::sub_a(self, mmio),
+            0x9E => opcodes::sbc_a_memory_hl(self, mmio),
             0xA0 => opcodes::and_b(self, mmio),
             0xA1 => opcodes::and_c(self, mmio),
             0xA2 => opcodes::and_d(self, mmio),
