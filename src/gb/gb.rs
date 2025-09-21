@@ -162,4 +162,9 @@ impl GB {
             self.mmio.write(crate::memory::mmio::REG_BOOT_OFF, 1);
         }
     }
+
+    // Input methods to update button states
+    pub fn set_input_state(&mut self, a: bool, b: bool, start: bool, select: bool, up: bool, down: bool, left: bool, right: bool) {
+        self.mmio.set_input_state(a, b, start, select, up, down, left, right);
+    }
 }

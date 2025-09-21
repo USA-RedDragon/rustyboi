@@ -42,6 +42,11 @@ fn main() -> Result<(), pixels::Error> {
     let mut terminal = display::Terminal::new();
     
     loop {
+        // Update input from terminal (placeholder implementation)
+        terminal.update_input(&config.keybinds);
+        let (a, b, start, select, up, down, left, right) = terminal.get_input_state();
+        gb.set_input_state(a, b, start, select, up, down, left, right);
+        
         match gb.run_until_frame() {
             Some(frame) => {
                 terminal.render_frame(&frame);

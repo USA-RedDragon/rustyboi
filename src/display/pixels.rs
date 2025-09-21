@@ -136,6 +136,18 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                 framework.scale_factor(scale_factor);
             }
 
+            // Handle Game Boy input based on keybinds
+            let a = input.key_held(config.keybinds.a);
+            let b = input.key_held(config.keybinds.b);
+            let start = input.key_held(config.keybinds.start);
+            let select = input.key_held(config.keybinds.select);
+            let up = input.key_held(config.keybinds.up);
+            let down = input.key_held(config.keybinds.down);
+            let left = input.key_held(config.keybinds.left);
+            let right = input.key_held(config.keybinds.right);
+            
+            world.set_input_state(a, b, start, select, up, down, left, right);
+
             // Update internal state and request a redraw (only if not resizing)
             world.update();
             window.request_redraw();
@@ -626,6 +638,10 @@ impl World {
             window.set_title(&title);
             self.last_title_update = now;
         }
+    }
+
+    fn set_input_state(&mut self, a: bool, b: bool, start: bool, select: bool, up: bool, down: bool, left: bool, right: bool) {
+        self.gb.set_input_state(a, b, start, select, up, down, left, right);
     }
 }
 
