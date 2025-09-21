@@ -52,6 +52,7 @@ const HRAM_END: u16 = HRAM_START + HRAM_SIZE as u16 - 1;
 const IE_REGISTER: u16 = 0xFFFF; // Interrupt Enable Register
 
 pub const REG_BOOT_OFF: u16 = 0xFF50; // Boot ROM disable
+pub const REG_DMA: u16 = 0xFF46; // DMA Transfer and Start Address
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MMIO {
@@ -68,6 +69,11 @@ pub struct MMIO {
     io_registers: memory::Memory<IO_REGISTERS_START, IO_REGISTERS_SIZE>,
     hram: memory::Memory<HRAM_START, HRAM_SIZE>,
     ie_register: u8,
+    
+    // OAM DMA state
+    dma_active: bool,
+    dma_source_base: u16,
+    dma_progress: u8, // 0-159, tracks which byte we're transferring
 }
 
 impl MMIO {
@@ -84,6 +90,9 @@ impl MMIO {
             io_registers: memory::Memory::new(),
             hram: memory::Memory::new(),
             ie_register: 0,
+            dma_active: false,
+            dma_source_base: 0,
+            dma_progress: 0,
         }
     }
 
@@ -119,10 +128,33 @@ impl MMIO {
         timer.step(cpu, self);
         self.timer = timer;
     }
-}
 
-impl memory::Addressable for MMIO {
-    fn read(&self, addr: u16) -> u8 {
+    pub fn step_dma(&mut self) {
+        if !self.dma_active {
+            return;
+        }
+
+        // Perform one byte transfer per cycle
+        let source_addr = self.dma_source_base + self.dma_progress as u16;
+        let dest_addr = OAM_START + self.dma_progress as u16;
+        
+        // Read from source address (bypassing DMA conflicts for now - the source read is always allowed)
+        let byte = self.read_during_dma(source_addr);
+        
+        // Write directly to OAM memory
+        self.oam.write(dest_addr, byte);
+        
+        self.dma_progress += 1;
+        
+        // DMA transfer is complete after 160 bytes (cycles)
+        if self.dma_progress >= 160 {
+            self.dma_active = false;
+            self.dma_progress = 0;
+        }
+    }
+
+    // Private helper to read during DMA without triggering DMA conflicts
+    fn read_during_dma(&self, addr: u16) -> u8 {
         match addr {
             BIOS_START..=BIOS_END => {
                 match self.read(REG_BOOT_OFF) {
@@ -170,64 +202,172 @@ impl memory::Addressable for MMIO {
                     0xDE00..=0xFFFF => panic!("This is literally never possible"),
                 }
             },
-            OAM_START..=OAM_END => self.oam.read(addr),
-            UNUSED_START..=UNUSED_END => EMPTY_BYTE,
-            input::JOYP => self.input.read(addr),
             IO_REGISTERS_START..=IO_REGISTERS_END => {
                 match addr {
                     input::JOYP => self.input.read(addr),
                     timer::DIV..=timer::TAC => self.timer.read(addr),
+                    REG_DMA => self.io_registers.read(addr),
                     _ => self.io_registers.read(addr),
                 }
             }
             HRAM_START..=HRAM_END => self.hram.read(addr),
-            IE_REGISTER => self.ie_register,
+            _ => EMPTY_BYTE,
+        }
+    }
+}
+
+impl memory::Addressable for MMIO {
+    fn read(&self, addr: u16) -> u8 {
+        // During DMA, CPU can only access HRAM and some IO registers
+        if self.dma_active {
+            match addr {
+                HRAM_START..=HRAM_END => self.hram.read(addr),
+                IE_REGISTER => self.ie_register,
+                // Allow reading from some essential IO registers during DMA
+                timer::DIV..=timer::TAC => self.timer.read(addr),
+                input::JOYP => self.input.read(addr),
+                REG_DMA => self.io_registers.read(addr),
+                _ => 0xFF, // Return 0xFF for all other addresses during DMA
+            }
+        } else {
+            // Normal memory access when DMA is not active
+            match addr {
+                BIOS_START..=BIOS_END => {
+                    match self.read(REG_BOOT_OFF) {
+                        0 => {
+                            match &self.bios {
+                                Some(bios) => bios.read(addr),
+                                None => EMPTY_BYTE,
+                            }
+                        },
+                        _ => {
+                            match &self.cartridge {
+                                Some(cart) => cart.read(addr),
+                                None => EMPTY_BYTE,
+                            }
+                        }
+                    }
+                },
+                CARTRIDGE_AFTER_BIOS_START..=CARTRIDGE_END => {
+                    match &self.cartridge {
+                        Some(cart) => cart.read(addr),
+                        None => EMPTY_BYTE,
+                    }
+                },
+                CARTRIDGE_BANK_START..=CARTRIDGE_BANK_END => {
+                    match &self.cartridge {
+                        Some(cart) => cart.read(addr),
+                        None => EMPTY_BYTE,
+                    }
+                },
+                VRAM_START..=VRAM_END => self.vram.read(addr),
+                EXTERNAL_RAM_START..=EXTERNAL_RAM_END => {
+                    match &self.cartridge {
+                        Some(cart) => cart.read(addr),
+                        None => EMPTY_BYTE,
+                    }
+                },
+                WRAM_START..=WRAM_END => self.wram.read(addr),
+                WRAM_BANK_START..=WRAM_BANK_END => self.wram_bank.read(addr),
+                ECHO_RAM_START..=ECHO_RAM_END => {
+                    let addr = addr - 0x2000;
+                    match addr {
+                        0..WRAM_START => panic!("This is literally never possible"),
+                        WRAM_START..=WRAM_END => self.wram.read(addr),
+                        WRAM_BANK_START..=ECHO_RAM_MIRROR_END => self.wram_bank.read(addr),
+                        0xDE00..=0xFFFF => panic!("This is literally never possible"),
+                    }
+                },
+                OAM_START..=OAM_END => self.oam.read(addr),
+                UNUSED_START..=UNUSED_END => EMPTY_BYTE,
+                input::JOYP => self.input.read(addr),
+                IO_REGISTERS_START..=IO_REGISTERS_END => {
+                    match addr {
+                        input::JOYP => self.input.read(addr),
+                        timer::DIV..=timer::TAC => self.timer.read(addr),
+                        REG_DMA => self.io_registers.read(addr),
+                        _ => self.io_registers.read(addr),
+                    }
+                }
+                HRAM_START..=HRAM_END => self.hram.read(addr),
+                IE_REGISTER => self.ie_register,
+            }
         }
     }
 
     fn write(&mut self, addr: u16, value: u8) {
-        match addr {
-            CARTRIDGE_START..=CARTRIDGE_END => {
-                match self.cartridge.as_mut() {
-                    Some(cart) => cart.write(addr, value),
-                    None => (),
-                }
-            },
-            CARTRIDGE_BANK_START..=CARTRIDGE_BANK_END => {
-                match self.cartridge.as_mut() {
-                    Some(cart) => cart.write(addr, value),
-                    None => (),
-                }
-            },
-            VRAM_START..=VRAM_END => self.vram.write(addr, value),
-            EXTERNAL_RAM_START..=EXTERNAL_RAM_END => {
-                match self.cartridge.as_mut() {
-                    Some(cart) => cart.write(addr, value),
-                    None => (),
-                }
-            },
-            WRAM_START..=WRAM_END => self.wram.write(addr, value),
-            WRAM_BANK_START..=WRAM_BANK_END => self.wram_bank.write(addr, value),
-            ECHO_RAM_START..=ECHO_RAM_END => {
-                let addr = addr - 0x2000;
-                match addr {
-                    0..WRAM_START => panic!("This is literally never possible"),
-                    WRAM_START..=WRAM_END => self.wram.write(addr, value),
-                    WRAM_BANK_START..=ECHO_RAM_MIRROR_END => self.wram_bank.write(addr, value),
-                    0xDE00..=0xFFFF => panic!("This is literally never possible"),
-                }
-            },
-            OAM_START..=OAM_END => self.oam.write(addr, value),
-            UNUSED_START..=UNUSED_END => (), // Writes to unused memory are ignored
-            IO_REGISTERS_START..=IO_REGISTERS_END => {
-                match addr {
-                    input::JOYP => self.input.write(addr, value),
-                    timer::DIV..=timer::TAC => self.timer.write(addr, value),
-                    _ => self.io_registers.write(addr, value),
-                }
+        // During DMA, CPU can only access HRAM and some IO registers
+        if self.dma_active {
+            match addr {
+                HRAM_START..=HRAM_END => self.hram.write(addr, value),
+                IE_REGISTER => self.ie_register = value,
+                // Allow writing to some essential IO registers during DMA
+                timer::DIV..=timer::TAC => self.timer.write(addr, value),
+                input::JOYP => self.input.write(addr, value),
+                REG_DMA => {
+                    // Allow starting another DMA during current DMA (restarts)
+                    self.dma_active = true;
+                    self.dma_source_base = (value as u16) << 8;
+                    self.dma_progress = 0;
+                    self.io_registers.write(addr, value);
+                },
+                _ => (), // Ignore writes to other addresses during DMA
             }
-            HRAM_START..=HRAM_END => self.hram.write(addr, value),
-            IE_REGISTER => self.ie_register = value,
+        } else {
+            // Normal memory access when DMA is not active
+            match addr {
+                CARTRIDGE_START..=CARTRIDGE_END => {
+                    match self.cartridge.as_mut() {
+                        Some(cart) => cart.write(addr, value),
+                        None => (),
+                    }
+                },
+                CARTRIDGE_BANK_START..=CARTRIDGE_BANK_END => {
+                    match self.cartridge.as_mut() {
+                        Some(cart) => cart.write(addr, value),
+                        None => (),
+                    }
+                },
+                VRAM_START..=VRAM_END => self.vram.write(addr, value),
+                EXTERNAL_RAM_START..=EXTERNAL_RAM_END => {
+                    match self.cartridge.as_mut() {
+                        Some(cart) => cart.write(addr, value),
+                        None => (),
+                    }
+                },
+                WRAM_START..=WRAM_END => self.wram.write(addr, value),
+                WRAM_BANK_START..=WRAM_BANK_END => self.wram_bank.write(addr, value),
+                ECHO_RAM_START..=ECHO_RAM_END => {
+                    let addr = addr - 0x2000;
+                    match addr {
+                        0..WRAM_START => panic!("This is literally never possible"),
+                        WRAM_START..=WRAM_END => self.wram.write(addr, value),
+                        WRAM_BANK_START..=ECHO_RAM_MIRROR_END => self.wram_bank.write(addr, value),
+                        0xDE00..=0xFFFF => panic!("This is literally never possible"),
+                    }
+                },
+                OAM_START..=OAM_END => self.oam.write(addr, value),
+                UNUSED_START..=UNUSED_END => (), // Writes to unused memory are ignored
+                IO_REGISTERS_START..=IO_REGISTERS_END => {
+                    match addr {
+                        input::JOYP => self.input.write(addr, value),
+                        timer::DIV..=timer::TAC => self.timer.write(addr, value),
+                        REG_DMA => {
+                            // Start OAM DMA transfer
+                            // The high byte of the source address is written to DMA register
+                            // The transfer copies 160 bytes from source to OAM
+                            self.dma_active = true;
+                            self.dma_source_base = (value as u16) << 8;
+                            self.dma_progress = 0;
+                            // Store the DMA register value for reads
+                            self.io_registers.write(addr, value);
+                        },
+                        _ => self.io_registers.write(addr, value),
+                    }
+                }
+                HRAM_START..=HRAM_END => self.hram.write(addr, value),
+                IE_REGISTER => self.ie_register = value,
+            }
         }
     }
 }
