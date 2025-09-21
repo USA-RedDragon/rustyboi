@@ -3,7 +3,9 @@ use crate::memory::mmio;
 use serde::{Deserialize, Serialize};
 
 use std::fs;
+use std::fs::{File, OpenOptions};
 use std::io;
+use std::io::{Seek, SeekFrom, Write};
 
 // Cartridge header offsets
 const CARTRIDGE_TYPE_OFFSET: usize = 0x0147;
@@ -35,7 +37,7 @@ pub enum CartridgeType {
     MBC1 { ram: bool, battery: bool },
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize)]
 pub struct Cartridge {
     // ROM data - all banks
     rom_data: Vec<u8>,
@@ -46,12 +48,36 @@ pub struct Cartridge {
     // Number of ROM and RAM banks
     rom_banks: usize,
     ram_banks: usize,
+    // ROM file path (for determining .sav file location)
+    #[serde(skip)]
+    rom_path: Option<String>,
+    // Open file handle for save file (for battery-backed cartridges)
+    #[serde(skip)]
+    save_file: Option<File>,
     
     // MBC1 state
     ram_enabled: bool,
     rom_bank_low: u8,    // 5 bits (0x01-0x1F)
     ram_bank_or_rom_bank_high: u8, // 2 bits (0x00-0x03)
     banking_mode: u8,    // 0 = ROM banking mode, 1 = RAM banking mode
+}
+
+impl Clone for Cartridge {
+    fn clone(&self) -> Self {
+        Cartridge {
+            rom_data: self.rom_data.clone(),
+            ram_data: self.ram_data.clone(),
+            cartridge_type: self.cartridge_type,
+            rom_banks: self.rom_banks,
+            ram_banks: self.ram_banks,
+            rom_path: self.rom_path.clone(),
+            save_file: None, // Don't clone file handles
+            ram_enabled: self.ram_enabled,
+            rom_bank_low: self.rom_bank_low,
+            ram_bank_or_rom_bank_high: self.ram_bank_or_rom_bank_high,
+            banking_mode: self.banking_mode,
+        }
+    }
 }
 
 impl Cartridge {
@@ -105,17 +131,24 @@ impl Cartridge {
         // Initialize RAM data
         let ram_data = vec![0xFF; ram_banks * 0x2000]; // 8KB per bank
         
-        Ok(Cartridge {
+        let mut cartridge = Cartridge {
             rom_data,
             ram_data,
             cartridge_type,
             rom_banks,
             ram_banks,
+            rom_path: Some(path.to_string()),
+            save_file: None,
             ram_enabled: false,
             rom_bank_low: 1, // Bank 0 cannot be selected for 0x4000-0x7FFF area
             ram_bank_or_rom_bank_high: 0,
             banking_mode: 0,
-        })
+        };
+        
+        // Try to load existing save file or create new one (only for battery-backed RAM)
+        cartridge.load_or_create_save_file()?;
+        
+        Ok(cartridge)
     }
     
     fn get_cartridge_type(&self) -> CartridgeType {
@@ -162,6 +195,69 @@ impl Cartridge {
             }
             CartridgeType::NoMBC => 0,
         }
+    }
+    
+    /// Get the save file path for this cartridge
+    fn get_save_file_path(&self) -> Option<String> {
+        self.rom_path.as_ref().map(|path| {
+            // Replace the extension with .sav
+            let mut save_path = path.clone();
+            if let Some(dot_pos) = save_path.rfind('.') {
+                save_path.truncate(dot_pos);
+            }
+            save_path.push_str(".sav");
+            save_path
+        })
+    }
+    
+    /// Load save file data into RAM if it exists, or create empty save file (only for battery-backed RAM)
+    fn load_or_create_save_file(&mut self) -> Result<(), io::Error> {
+        // Only process save files for cartridges with battery-backed RAM
+        if !self.has_battery() || self.ram_data.is_empty() {
+            return Ok(());
+        }
+        
+        if let Some(save_path) = self.get_save_file_path() {
+            if std::path::Path::new(&save_path).exists() {
+                // Load existing save file
+                let save_data = fs::read(&save_path)?;
+                if save_data.len() <= self.ram_data.len() {
+                    self.ram_data[..save_data.len()].copy_from_slice(&save_data);
+                    println!("Loaded save file: {}", save_path);
+                }
+            } else {
+                // Create new save file with current RAM data
+                fs::write(&save_path, &self.ram_data)?;
+                println!("Created new save file: {}", save_path);
+            }
+            
+            // Open file handle for efficient writing
+            self.save_file = Some(OpenOptions::new()
+                .write(true)
+                .open(&save_path)?);
+        }
+        Ok(())
+    }
+    
+    /// Write a byte to both RAM and save file simultaneously (if battery-backed)
+    fn write_ram_byte(&mut self, offset: usize, value: u8) -> Result<(), io::Error> {
+        if offset < self.ram_data.len() {
+            // Write to RAM buffer
+            self.ram_data[offset] = value;
+            
+            // Also write to save file if we have one open
+            if let Some(ref mut file) = self.save_file {
+                file.seek(SeekFrom::Start(offset as u64))?;
+                file.write_all(&[value])?;
+                file.flush()?; // Ensure immediate write
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if this cartridge has battery-backed RAM
+    pub fn has_battery(&self) -> bool {
+        matches!(self.get_cartridge_type(), CartridgeType::MBC1 { battery: true, .. })
     }
 }
 
@@ -256,7 +352,8 @@ impl memory::Addressable for Cartridge {
                             let ram_bank = self.get_ram_bank();
                             let offset = (addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000);
                             if offset < self.ram_data.len() {
-                                self.ram_data[offset] = value;
+                                // Use our dual-write method that writes to both RAM and save file
+                                let _ = self.write_ram_byte(offset, value); // Ignore errors for now
                             }
                         }
                     }
