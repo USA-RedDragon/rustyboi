@@ -10,8 +10,6 @@ use std::fs;
 use std::io;
 use std::time::{Duration, Instant};
 
-pub type DisplayCallback = Box<dyn Fn(&[u8; ppu::FRAMEBUFFER_SIZE])>;
-
 #[derive(Serialize, Deserialize)]
 pub struct GB {
     cpu: cpu::SM83,
@@ -19,8 +17,6 @@ pub struct GB {
     ppu: ppu::PPU,
     #[serde(skip, default)]
     skip_bios: bool,
-    #[serde(skip, default)]
-    display_callback: Option<DisplayCallback>,
     #[serde(skip, default = "Instant::now")]
     last_frame_time: Instant,
 }
@@ -32,7 +28,6 @@ impl Clone for GB {
             mmio: self.mmio.clone(),
             ppu: self.ppu.clone(),
             skip_bios: self.skip_bios,
-            display_callback: None,
             last_frame_time: Instant::now(),
         }
     }
@@ -51,13 +46,8 @@ impl GB {
             mmio,
             ppu: ppu::PPU::new(),
             skip_bios,
-            display_callback: None,
             last_frame_time: Instant::now(),
         }
-    }
-
-    pub fn set_display_callback(&mut self, display: DisplayCallback) {
-        self.display_callback = Some(display);
     }
 
     pub fn insert(&mut self, cartridge: cartridge::Cartridge) {
@@ -83,13 +73,52 @@ impl GB {
         }
     }
 
-    pub fn run_until_frame(&mut self) -> [u8; ppu::FRAMEBUFFER_SIZE] {
-        // Run CPU/PPU until a frame is ready - simple loop
-        loop {
-            self.step_instruction();
-            
-            if self.ppu.frame_ready() {
-                return self.ppu.get_frame();
+    pub fn run_until_frame(&mut self) -> Option<[u8; ppu::FRAMEBUFFER_SIZE]> {
+        const TARGET_FRAME_TIME: Duration = Duration::from_micros(16750); // ~59.7 fps
+        let now = Instant::now();
+        let elapsed_since_last_frame = now.duration_since(self.last_frame_time);
+
+        // Only update if enough time has passed
+        if elapsed_since_last_frame < TARGET_FRAME_TIME {
+            let remaining = TARGET_FRAME_TIME - elapsed_since_last_frame;
+            // Sleep for most of the remaining time
+            if remaining > Duration::from_micros(100) {
+                std::thread::sleep(remaining - Duration::from_micros(50));
+            }
+            // Spin for precision
+            while self.last_frame_time.elapsed() < TARGET_FRAME_TIME {
+                std::hint::spin_loop();
+            }
+        }
+        
+        self.last_frame_time = Instant::now();
+
+        // Catch panics from the Game Boy emulator
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Run CPU/PPU until a frame is ready - simple loop
+            loop {
+                self.step_instruction();
+                
+                if self.ppu.frame_ready() {
+                    return self.ppu.get_frame();
+                }
+            }
+        }));
+
+        match result {
+            Ok(frame_data) => Some(frame_data),
+            Err(panic_info) => {
+                // Convert panic info to a string for debugging
+                let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    format!("Emulator panic: {}", s)
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    format!("Emulator panic: {}", s)
+                } else {
+                    "Emulator panic: Unknown error".to_string()
+                };
+
+                println!("Game Boy emulator crashed: {}", error_msg);
+                None
             }
         }
     }
@@ -108,55 +137,6 @@ impl GB {
 
     pub fn read_memory(&self, address: u16) -> u8 {
         self.mmio.read(address)
-    }
-
-    pub fn run(&mut self) {
-        loop {
-            const TARGET_FRAME_TIME: Duration = Duration::from_micros(16750); // ~59.7 fps
-            let now = Instant::now();
-            let elapsed_since_last_frame = now.duration_since(self.last_frame_time);
-
-            // Only update if enough time has passed
-            if elapsed_since_last_frame < TARGET_FRAME_TIME {
-                let remaining = TARGET_FRAME_TIME - elapsed_since_last_frame;
-                // Sleep for most of the remaining time
-                if remaining > Duration::from_micros(100) {
-                    std::thread::sleep(remaining - Duration::from_micros(50));
-                }
-                // Spin for precision
-                while self.last_frame_time.elapsed() < TARGET_FRAME_TIME {
-                    std::hint::spin_loop();
-                }
-            }
-            
-            self.last_frame_time = Instant::now();
-
-            // Catch panics from the Game Boy emulator
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.run_until_frame()
-            }));
-
-            match result {
-                Ok(frame_data) => {
-                    if let Some(display) = &mut self.display_callback {
-                        display(&frame_data);
-                    }
-                }
-                Err(panic_info) => {
-                    // Convert panic info to a string for debugging
-                    let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        format!("Emulator panic: {}", s)
-                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                        format!("Emulator panic: {}", s)
-                    } else {
-                        "Emulator panic: Unknown error".to_string()
-                    };
-
-                    println!("Game Boy emulator crashed: {}", error_msg);
-                    break;
-                }
-            }
-        }
     }
 
     pub fn from_state_file(path: &str) -> Result<Self, io::Error> {
