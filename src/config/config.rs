@@ -1,4 +1,32 @@
 use clap::Parser;
+use winit::keyboard::KeyCode;
+
+#[derive(Debug, Clone)]
+pub struct KeyBinds {
+    pub a: KeyCode,
+    pub b: KeyCode,
+    pub start: KeyCode,
+    pub select: KeyCode,
+    pub up: KeyCode,
+    pub down: KeyCode,
+    pub left: KeyCode,
+    pub right: KeyCode,
+}
+
+impl Default for KeyBinds {
+    fn default() -> Self {
+        Self {
+            a: KeyCode::KeyZ,
+            b: KeyCode::KeyX,
+            start: KeyCode::Enter,
+            select: KeyCode::Space,
+            up: KeyCode::ArrowUp,
+            down: KeyCode::ArrowDown,
+            left: KeyCode::ArrowLeft,
+            right: KeyCode::ArrowRight,
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -41,6 +69,8 @@ pub struct CleanConfig {
     pub cli: bool,
     // skip BIOS on startup
     pub skip_bios: bool,
+    // keybinds configuration
+    pub keybinds: KeyBinds,
 }
 
 impl RawConfig {
@@ -57,6 +87,7 @@ impl RawConfig {
             scale: self.scale,
             cli: self.cli,
             skip_bios: skip_bios,
+            keybinds: KeyBinds::default(),
         }
     }
 }

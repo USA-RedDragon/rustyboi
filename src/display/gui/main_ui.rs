@@ -12,6 +12,7 @@ pub(crate) struct Gui {
     show_sprite_debug: bool,
     show_palette_explorer: bool,
     show_tile_explorer: bool,
+    show_keybind_settings: bool,
     pub(super) stack_scroll_offset: i16,
     pub(super) memory_explorer_address: String,
     pub(super) memory_explorer_parsed_address: u16,
@@ -36,6 +37,7 @@ impl Gui {
             show_sprite_debug: false,
             show_palette_explorer: false,
             show_tile_explorer: false,
+            show_keybind_settings: false,
             stack_scroll_offset: 0,
             memory_explorer_address: String::from("0000"),
             memory_explorer_parsed_address: 0x0000,
@@ -138,6 +140,11 @@ impl Gui {
                     ui.checkbox(&mut self.show_palette_explorer, "Palette Explorer");
                     ui.checkbox(&mut self.show_tile_explorer, "Tile Explorer");
                 });
+
+                ui.menu_button("Settings", |ui| {
+                    *any_menu_open = true;
+                    ui.checkbox(&mut self.show_keybind_settings, "Keybind Settings");
+                });
             });
         });
     }
@@ -169,6 +176,10 @@ impl Gui {
         
         if self.show_tile_explorer {
             self.render_tile_explorer_panel(ctx, gb);
+        }
+
+        if self.show_keybind_settings {
+            self.render_keybind_settings_panel(ctx);
         }
     }
 

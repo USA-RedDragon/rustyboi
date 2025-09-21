@@ -1,8 +1,37 @@
 use crate::ppu;
+use crate::config;
 
 pub struct Terminal {
     previous_frame: [u8; ppu::FRAMEBUFFER_SIZE],
     first_render: bool,
+    current_input_state: InputState,
+}
+
+#[derive(Clone)]
+struct InputState {
+    a: bool,
+    b: bool,
+    start: bool,
+    select: bool,
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+}
+
+impl InputState {
+    fn new() -> Self {
+        Self {
+            a: false,
+            b: false,
+            start: false,
+            select: false,
+            up: false,
+            down: false,
+            left: false,
+            right: false,
+        }
+    }
 }
 
 impl Terminal {
@@ -10,6 +39,7 @@ impl Terminal {
         Self {
             previous_frame: [0; ppu::FRAMEBUFFER_SIZE],
             first_render: true,
+            current_input_state: InputState::new(),
         }
     }
 
@@ -74,6 +104,24 @@ impl Terminal {
         print!("\x1b[0m");
         use std::io::{self, Write};
         io::stdout().flush().unwrap();
+    }
+
+    pub fn get_input_state(&self) -> (bool, bool, bool, bool, bool, bool, bool, bool) {
+        let state = &self.current_input_state;
+        (state.a, state.b, state.start, state.select, state.up, state.down, state.left, state.right)
+    }
+
+    pub fn update_input(&mut self, _keybinds: &config::KeyBinds) {
+        // For now, we'll use a simple mapping system
+        // This is a simplified version - in a real implementation we'd need
+        // proper terminal input handling with libraries like termion or crossterm
+        // For this basic implementation, we'll use some standard keys
+        
+        // This is a placeholder - the actual terminal input handling would be much more complex
+        // and would require non-blocking input reading and proper key mapping
+        self.current_input_state.a = false; // Would map to keybinds.a
+        self.current_input_state.b = false; // Would map to keybinds.b
+        // ... etc for other keys
     }
 
     fn render_full_frame(&self, frame: &[u8; ppu::FRAMEBUFFER_SIZE]) {
