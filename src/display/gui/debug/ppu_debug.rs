@@ -7,7 +7,7 @@ impl Gui {
             let (ppu, pixel_buffer) = gb_ref.get_ppu_debug_info();
             egui::Window::new("PPU Debug")
                 .default_pos([640.0, 50.0])
-                .default_size([250.0, 400.0])
+                .default_size([250.0, 500.0])
                 .collapsible(true)
                 .resizable(false)
                 .frame(egui::Frame::window(&ctx.style()).fill(egui::Color32::from_rgba_unmultiplied(64, 64, 64, 220)))
@@ -36,6 +36,8 @@ impl Gui {
                     let ly = gb_ref.read_memory(crate::ppu::ppu::LY);
                     let scy = gb_ref.read_memory(crate::ppu::ppu::SCY);
                     let bgp = gb_ref.read_memory(crate::ppu::ppu::BGP);
+                    let obp0 = gb_ref.read_memory(crate::ppu::ppu::OBP0);
+                    let obp1 = gb_ref.read_memory(crate::ppu::ppu::OBP1);
                     let lyc = gb_ref.read_memory(crate::ppu::ppu::LYC);
                     let lcd_control = gb_ref.read_memory(crate::ppu::ppu::LCD_CONTROL);
                     let lcd_status = gb_ref.read_memory(crate::ppu::ppu::LCD_STATUS);
@@ -44,8 +46,30 @@ impl Gui {
                     ui.monospace(egui::RichText::new(format!("LYC: {:02X} ({})", lyc, lyc)).color(egui::Color32::WHITE));
                     ui.monospace(egui::RichText::new(format!("SCY: {:02X} ({})", scy, scy)).color(egui::Color32::WHITE));
                     ui.monospace(egui::RichText::new(format!("BGP: {:02X}", bgp)).color(egui::Color32::WHITE));
+                    ui.monospace(egui::RichText::new(format!("OBP0: {:02X}", obp0)).color(egui::Color32::LIGHT_BLUE));
+                    ui.monospace(egui::RichText::new(format!("OBP1: {:02X}", obp1)).color(egui::Color32::LIGHT_BLUE));
                     ui.monospace(egui::RichText::new(format!("LCD_CTRL: {:02X}", lcd_control)).color(egui::Color32::WHITE));
                     ui.monospace(egui::RichText::new(format!("LCD_STAT: {:02X}", lcd_status)).color(egui::Color32::WHITE));
+                    
+                    ui.separator();
+                    
+                    // LCDC Flags
+                    ui.small(egui::RichText::new("LCDC Flags:").color(egui::Color32::LIGHT_GRAY));
+                    ui.horizontal(|ui| {
+                        ui.small(egui::RichText::new(format!("BG: {}", if lcd_control & 0x01 != 0 { "ON" } else { "OFF" }))
+                            .color(if lcd_control & 0x01 != 0 { egui::Color32::LIGHT_GREEN } else { egui::Color32::GRAY }));
+                        ui.small(egui::RichText::new(format!("SPR: {}", if lcd_control & 0x02 != 0 { "ON" } else { "OFF" }))
+                            .color(if lcd_control & 0x02 != 0 { egui::Color32::LIGHT_GREEN } else { egui::Color32::GRAY }));
+                        ui.small(egui::RichText::new(format!("8x{}", if lcd_control & 0x04 != 0 { "16" } else { "8" }))
+                            .color(egui::Color32::YELLOW));
+                    });
+                    
+                    ui.separator();
+                    
+                    // Sprites on current line
+                    let sprites_count = ppu.get_sprites_on_line_count();
+                    ui.small(egui::RichText::new(format!("Sprites on line {}: {}", ly, sprites_count))
+                        .color(if sprites_count > 0 { egui::Color32::LIGHT_GREEN } else { egui::Color32::GRAY }));
                     
                     ui.separator();
                     

@@ -9,10 +9,50 @@ pub const LCD_CONTROL: u16 = 0xFF40;
 pub const LCD_STATUS: u16 = 0xFF41;
 pub const LY: u16 = 0xFF44;
 pub const SCY: u16 = 0xFF42;
+pub const SCX: u16 = 0xFF43;
 pub const LYC: u16 = 0xFF45;
 pub const BGP: u16 = 0xFF47;
+pub const OBP0: u16 = 0xFF48; // Object Palette 0 Data
+pub const OBP1: u16 = 0xFF49; // Object Palette 1 Data
+pub const WY: u16 = 0xFF4A;  // Window Y Position
+pub const WX: u16 = 0xFF4B;  // Window X Position
 
 pub const FRAMEBUFFER_SIZE: usize = 160 * 144;
+
+// OAM constants
+pub const OAM_SPRITE_COUNT: usize = 40; // 40 sprites total in OAM
+pub const OAM_BYTES_PER_SPRITE: usize = 4; // 4 bytes per sprite
+pub const MAX_SPRITES_PER_LINE: usize = 10; // Maximum 10 sprites per scanline
+
+// Sprite attribute flags (from byte 3 of sprite data)
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct SpriteAttributes {
+    pub priority: bool,    // 0 = above BG, 1 = behind BG colors 1-3
+    pub y_flip: bool,      // 0 = normal, 1 = vertically mirrored
+    pub x_flip: bool,      // 0 = normal, 1 = horizontally mirrored
+    pub palette: bool,     // 0 = OBP0, 1 = OBP1
+}
+
+impl SpriteAttributes {
+    pub fn from_byte(byte: u8) -> Self {
+        SpriteAttributes {
+            priority: (byte & 0x80) != 0,
+            y_flip: (byte & 0x40) != 0,
+            x_flip: (byte & 0x20) != 0,
+            palette: (byte & 0x10) != 0,
+        }
+    }
+}
+
+// Sprite data structure
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct Sprite {
+    pub y: u8,
+    pub x: u8,
+    pub tile_index: u8,
+    pub attributes: SpriteAttributes,
+    pub oam_index: u8, // For priority resolution
+}
 
 pub enum LCDCFlags {
     BGDisplay = 1<<0,
@@ -25,7 +65,7 @@ pub enum LCDCFlags {
     DisplayEnable = 1<<7,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub enum State {
     OAMSearch,
     PixelTransfer,
@@ -41,6 +81,14 @@ pub struct PPU {
     ticks: u128,
     x: u8,
 
+    // Sprite data for current scanline
+    sprites_on_line: Vec<Sprite>,
+    
+    // Window state tracking
+    window_line_counter: u8,    // Internal counter for window Y position
+    window_y_triggered: bool,   // Whether WY condition was met this frame
+    window_started_this_line: bool, // Whether window started rendering on current scanline
+    
     #[serde(with = "serde_bytes")]
     fb_a: [u8; FRAMEBUFFER_SIZE],
     #[serde(with = "serde_bytes")]
@@ -56,6 +104,10 @@ impl PPU {
             state: State::OAMSearch,
             ticks: 0,
             x: 0,
+            sprites_on_line: Vec::new(),
+            window_line_counter: 0,
+            window_y_triggered: false,
+            window_started_this_line: false,
             fb_a: [0; FRAMEBUFFER_SIZE],
             fb_b: [0; FRAMEBUFFER_SIZE],
             have_frame: false,
@@ -66,13 +118,27 @@ impl PPU {
         *self = Self::new();
     }
 
-    pub fn get_palette_color(&self, mmio: &mut mmio::MMIO, idx: u8) -> u8 {
+    pub fn get_palette_color(&self, mmio: &mmio::MMIO, idx: u8) -> u8 {
         match idx {
             0 => mmio.read(BGP)&0x03,        // White
             1 => (mmio.read(BGP)>>2)&0x03, // Light Gray
             2 => (mmio.read(BGP)>>4)&0x03, // Dark Gray
             3 => (mmio.read(BGP)>>6)&0x03, // Black
             _ => 0x00, // Default to black for invalid indices
+        }
+    }
+
+    pub fn get_sprite_palette_color(&self, mmio: &mmio::MMIO, idx: u8, palette: bool) -> u8 {
+        if idx == 0 {
+            return 0; // Transparent for sprites
+        }
+        
+        let palette_reg = if palette { OBP1 } else { OBP0 };
+        match idx {
+            1 => (mmio.read(palette_reg)>>2)&0x03, // Light Gray
+            2 => (mmio.read(palette_reg)>>4)&0x03, // Dark Gray
+            3 => (mmio.read(palette_reg)>>6)&0x03, // Black
+            _ => 0x00, // Default to transparent for invalid indices
         }
     }
 
@@ -100,26 +166,93 @@ impl PPU {
         }
         match self.state {
             State::OAMSearch => {
-                // TODO: find sprites
+                // Check WY condition at the start of Mode 2 (OAMSearch)
+                if self.ticks == 0 {
+                    let ly = mmio.read(LY);
+                    let wy = mmio.read(WY);
+                    if ly == wy {
+                        self.window_y_triggered = true;
+                    }
+                    // Reset window line flag for new scanline
+                    self.window_started_this_line = false;
+                }
+                
+                // Perform sprite search - scan OAM for sprites on current line
+                if self.ticks == 0 {
+                    self.sprites_on_line.clear();
+                    self.scan_oam_for_sprites(mmio);
+                }
+                
                 if self.ticks == 80 {
                     self.x = 0;
-                    self.fetcher.reset();
+                    self.fetcher.reset_with_scx_offset(mmio);
                     self.state = State::PixelTransfer
                 }
             },
             State::PixelTransfer => 'label: {
                 if self.ticks%2 == 0 {
-                    self.fetcher.step(mmio);
+                    self.fetcher.step(mmio, self.window_line_counter);
                 }
                 if self.fetcher.pixel_fifo.size() <= 8 {
                     break 'label;
                 }
 
-                // Put a pixel from the FIFO on screen.
-                if let Ok(pixel_idx) = self.fetcher.pixel_fifo.pop() {
+                // Check if we should start window rendering
+                let lcdc = mmio.read(LCD_CONTROL);
+                let window_enabled = (lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
+                if window_enabled && self.window_y_triggered && !self.fetcher.is_fetching_window() {
+                    let wx = mmio.read(WX);
+                    // WX=0-6 can trigger immediately, WX=7+ needs exact match with X+7
+                    let should_start_window = if wx < 7 {
+                        self.x == 0  // Start immediately if WX is 0-6
+                    } else {
+                        self.x + 7 == wx
+                    };
+                    
+                    if should_start_window {
+                        // Start window rendering and increment line counter only first time per line
+                        self.fetcher.start_window(self.x);
+                        if !self.window_started_this_line {
+                            self.window_line_counter = self.window_line_counter.wrapping_add(1);
+                            self.window_started_this_line = true;
+                        }
+                        break 'label; // Skip this cycle to let window fetching start
+                    }
+                }
+
+                // Put a pixel from the FIFO on screen with sprite mixing
+                if let Ok(bg_pixel_idx) = self.fetcher.pixel_fifo.pop() {
                     let ly = mmio.read(LY) as u16;
+                    
+                    // Bounds check to prevent crashes - during PixelTransfer, LY should be 0-143
+                    if ly >= 144 {
+                        // Invalid LY value during pixel transfer, this indicates a bug
+                        // During pixel transfer, LY should be 0-143 (visible scanlines)
+                        eprintln!("Warning: PPU pixel transfer with invalid LY={}, X={}, ticks={}, state={:?}", 
+                                  ly, self.x, self.ticks, self.state);
+                        eprintln!("         Forcing transition to HBlank to fix state");
+                        self.x = 160; // Force HBlank transition
+                        self.state = State::HBlank;
+                        break 'label;
+                    }
+                    
                     let fb_offset = (ly * 160) + self.x as u16;
-                    self.fb_a[fb_offset as usize] = self.get_palette_color(mmio, pixel_idx);
+                    
+                    // Additional safety check for framebuffer bounds
+                    if fb_offset as usize >= FRAMEBUFFER_SIZE {
+                        // This should never happen with the above check, but just in case
+                        eprintln!("Warning: PPU framebuffer bounds exceeded: offset={}, LY={}, X={}", 
+                                  fb_offset, ly, self.x);
+                        self.x += 1;
+                        if self.x == 160 {
+                            self.state = State::HBlank
+                        }
+                        break 'label;
+                    }
+                    
+                    // Get the final pixel color by mixing background and sprites
+                    let final_color = self.mix_background_and_sprites(mmio, bg_pixel_idx, self.x, ly as u8);
+                    self.fb_a[fb_offset as usize] = final_color;
 
                     self.x += 1;
                     if self.x == 160 {
@@ -131,27 +264,46 @@ impl PPU {
                 // no-ops
                 if self.ticks == 339 {
                     self.ticks = 0;
-                    mmio.write(LY, mmio.read(LY) + 1);
-                    if mmio.read(LY) == 144 {
+                    let current_ly = mmio.read(LY);
+                    
+                    if current_ly >= 143 {
+                        // Should transition to VBlank
+                        mmio.write(LY, 144);
                         self.fb_b = self.fb_a;
                         self.fb_a = [0; FRAMEBUFFER_SIZE];
                         self.have_frame = true;
                         self.state = State::VBlank;
                         cpu.set_interrupt_flag(registers::InterruptFlag::VBlank, true, mmio);
                     } else {
+                        // Continue to next visible scanline
+                        let next_ly = current_ly.saturating_add(1);
+                        mmio.write(LY, next_ly);
                         self.state = State::OAMSearch;
                     }
+                    return;
                 }
             },
             State::VBlank => {
-                // no-ops
-                if self.ticks == 4560 {
+                // VBlank lasts for 10 scanlines (144-153)
+                // Each scanline is 456 cycles, so VBlank should transition every 456 cycles
+                if self.ticks == 455 { // 456 cycles per scanline minus 1 (0-based)
                     self.ticks = 0;
-                    mmio.write(LY, mmio.read(LY) + 1);
-                    if mmio.read(LY) == 153 {
+                    let current_ly = mmio.read(LY);
+                    
+                    if current_ly >= 153 {
+                        // Reset to line 0 and go back to OAM search
                         mmio.write(LY, 0);
                         self.state = State::OAMSearch;
+                        // Reset window state for new frame
+                        self.window_line_counter = 0;
+                        self.window_y_triggered = false;
+                        self.window_started_this_line = false;
+                    } else if current_ly >= 144 && current_ly < 153 {
+                        // Normal VBlank increment
+                        let next_ly = current_ly.saturating_add(1);
+                        mmio.write(LY, next_ly);
                     }
+                    return;
                 }
             },
         }
@@ -190,5 +342,165 @@ impl PPU {
 
     pub fn has_frame(&self) -> bool {
         self.have_frame
+    }
+
+    pub fn get_sprites_on_line_count(&self) -> usize {
+        self.sprites_on_line.len()
+    }
+
+    // Scan OAM memory for sprites that appear on the current scanline
+    fn scan_oam_for_sprites(&mut self, mmio: &mmio::MMIO) {
+        let ly = mmio.read(LY);
+        let lcdc = mmio.read(LCD_CONTROL);
+        
+        // Check if sprites are enabled
+        if (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
+            return;
+        }
+        
+        // Determine sprite height (8x8 or 8x16)
+        let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
+        
+        // Scan through all 40 sprites in OAM
+        for sprite_index in 0..OAM_SPRITE_COUNT {
+            if self.sprites_on_line.len() >= MAX_SPRITES_PER_LINE {
+                break; // Maximum 10 sprites per line
+            }
+            
+            let oam_offset = sprite_index * OAM_BYTES_PER_SPRITE;
+            let sprite_y = mmio.read(0xFE00 + oam_offset as u16);
+            let sprite_x = mmio.read(0xFE00 + oam_offset as u16 + 1);
+            let tile_index = mmio.read(0xFE00 + oam_offset as u16 + 2);
+            let attributes_byte = mmio.read(0xFE00 + oam_offset as u16 + 3);
+            
+            // Sprites use offset coordinates: Y=0 is at line -16, X=0 is at column -8
+            let sprite_screen_y = sprite_y.wrapping_sub(16);
+            
+            // Check if sprite is visible on current scanline
+            if ly >= sprite_screen_y && ly < sprite_screen_y + sprite_height {
+                let sprite = Sprite {
+                    y: sprite_y,
+                    x: sprite_x,
+                    tile_index,
+                    attributes: SpriteAttributes::from_byte(attributes_byte),
+                    oam_index: sprite_index as u8,
+                };
+                
+                self.sprites_on_line.push(sprite);
+            }
+        }
+        
+        // Sort sprites by X coordinate for priority handling
+        // When X coordinates are equal, lower OAM index has priority
+        self.sprites_on_line.sort_by(|a, b| {
+            match a.x.cmp(&b.x) {
+                std::cmp::Ordering::Equal => a.oam_index.cmp(&b.oam_index),
+                other => other,
+            }
+        });
+    }
+
+    // Mix background pixel with sprites at the given screen coordinates
+    fn mix_background_and_sprites(&self, mmio: &mmio::MMIO, bg_pixel_idx: u8, screen_x: u8, screen_y: u8) -> u8 {
+        let lcdc = mmio.read(LCD_CONTROL);
+        
+        // Check if BG/Window display is enabled (LCDC bit 0)
+        let bg_enabled = (lcdc & (LCDCFlags::BGDisplay as u8)) != 0;
+        
+        // Get background color - if BG display is disabled, force to white (color 0)
+        let bg_color = if bg_enabled {
+            self.get_palette_color(mmio, bg_pixel_idx)
+        } else {
+            // When BG display is disabled, background becomes white (palette color 0)
+            self.get_palette_color(mmio, 0)
+        };
+        
+        // For sprite priority calculation, we need the original bg_pixel_idx
+        let effective_bg_pixel_idx = if bg_enabled { bg_pixel_idx } else { 0 };
+        
+        // Check if sprites are enabled
+        if (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
+            return bg_color;
+        }
+        
+        // Find the highest priority sprite at this position
+        for sprite in &self.sprites_on_line {
+            // Sprite X coordinate is offset by 8, Y coordinate is offset by 16
+            let sprite_actual_x = sprite.x as i16 - 8;
+            let sprite_actual_y = sprite.y as i16 - 16;
+            
+            // Check if this screen pixel is within the sprite bounds
+            let relative_x = screen_x as i16 - sprite_actual_x;
+            let relative_y = screen_y as i16 - sprite_actual_y;
+            
+            // Sprite is 8 pixels wide
+            if relative_x >= 0 && relative_x < 8 {
+                let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
+                if relative_y >= 0 && relative_y < sprite_height as i16 {
+                    // Get sprite pixel data
+                    if let Some(sprite_pixel_idx) = self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8) {
+                        if sprite_pixel_idx != 0 { // Sprite pixel is not transparent
+                            let sprite_color = self.get_sprite_palette_color(mmio, sprite_pixel_idx, sprite.attributes.palette);
+                            
+                            // Handle sprite priority
+                            if !sprite.attributes.priority || effective_bg_pixel_idx == 0 {
+                                // Sprite appears above background or background is transparent
+                                return sprite_color;
+                            }
+                            // If sprite has priority=1 and background is not color 0, background wins
+                        }
+                    }
+                }
+            }
+        }
+        
+        bg_color
+    }
+
+    // Get a specific pixel from a sprite's tile data
+    fn get_sprite_pixel(&self, mmio: &mmio::MMIO, sprite: &Sprite, sprite_x: u8, sprite_y: u8) -> Option<u8> {
+        let lcdc = mmio.read(LCD_CONTROL);
+        let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
+        
+        if sprite_x >= 8 || sprite_y >= sprite_height {
+            return None;
+        }
+        
+        // Handle Y flipping
+        let actual_y = if sprite.attributes.y_flip {
+            sprite_height - 1 - sprite_y
+        } else {
+            sprite_y
+        };
+        
+        // For 8x16 sprites, the tile index is different
+        let tile_index = if sprite_height == 16 {
+            if actual_y < 8 {
+                sprite.tile_index & 0xFE // Top tile (even)
+            } else {
+                sprite.tile_index | 0x01  // Bottom tile (odd)
+            }
+        } else {
+            sprite.tile_index
+        };
+        
+        let tile_line = actual_y % 8;
+        
+        // Sprite tiles always use the $8000 addressing method
+        let tile_addr = 0x8000 + (tile_index as u16) * 16 + (tile_line as u16) * 2;
+        let low_byte = mmio.read(tile_addr);
+        let high_byte = mmio.read(tile_addr + 1);
+        
+        // Handle X flipping
+        let bit_index = if sprite.attributes.x_flip {
+            sprite_x
+        } else {
+            7 - sprite_x
+        };
+        
+        let low_bit = (low_byte >> bit_index) & 1;
+        let high_bit = (high_byte >> bit_index) & 1;
+        
+        Some((high_bit << 1) | low_bit)
     }
 }

@@ -227,6 +227,8 @@ impl memory::Addressable for MMIO {
                 timer::DIV..=timer::TAC => self.timer.read(addr),
                 input::JOYP => self.input.read(addr),
                 REG_DMA => self.io_registers.read(addr),
+                // Allow PPU registers during DMA since PPU continues to operate
+                0xFF40..=0xFF4B => self.io_registers.read(addr), // LCD Control, Status, LY, LYC, etc.
                 _ => 0xFF, // Return 0xFF for all other addresses during DMA
             }
         } else {
@@ -286,7 +288,16 @@ impl memory::Addressable for MMIO {
                         input::JOYP => self.input.read(addr),
                         timer::DIV..=timer::TAC => self.timer.read(addr),
                         REG_DMA => self.io_registers.read(addr),
-                        _ => self.io_registers.read(addr),
+                        _ => {
+                            let value = self.io_registers.read(addr);
+                            // Debug LY register reads
+                            if addr == 0xFF44 {
+                                if value > 153 {
+                                    eprintln!("MMIO: Reading invalid LY value {} from register (0xFF44)", value);
+                                }
+                            }
+                            value
+                        }
                     }
                 }
                 HRAM_START..=HRAM_END => self.hram.read(addr),
@@ -309,6 +320,10 @@ impl memory::Addressable for MMIO {
                     self.dma_active = true;
                     self.dma_source_base = (value as u16) << 8;
                     self.dma_progress = 0;
+                    self.io_registers.write(addr, value);
+                },
+                // Allow PPU registers during DMA since PPU continues to operate
+                0xFF40..=0xFF4B => {
                     self.io_registers.write(addr, value);
                 },
                 _ => (), // Ignore writes to other addresses during DMA
@@ -362,7 +377,9 @@ impl memory::Addressable for MMIO {
                             // Store the DMA register value for reads
                             self.io_registers.write(addr, value);
                         },
-                        _ => self.io_registers.write(addr, value),
+                        _ => {
+                            self.io_registers.write(addr, value);
+                        },
                     }
                 }
                 HRAM_START..=HRAM_END => self.hram.write(addr, value),
