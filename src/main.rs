@@ -39,12 +39,18 @@ fn main() -> Result<(), pixels::Error> {
     }
 
     // Create a stateful terminal instance for differential rendering
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    let terminal = Rc::new(RefCell::new(display::Terminal::new()));
-    gb.set_display_callback(Box::new(move |frame| {
-        terminal.borrow_mut().render_frame(frame);
-    }));
-    gb.run();
+    let mut terminal = display::Terminal::new();
+    
+    loop {
+        match gb.run_until_frame() {
+            Some(frame) => {
+                terminal.render_frame(&frame);
+            }
+            None => {
+                // Emulator crashed, exit
+                break;
+            }
+        }
+    }
     Ok(())
 }

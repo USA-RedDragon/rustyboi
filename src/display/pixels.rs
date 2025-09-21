@@ -446,22 +446,12 @@ impl World {
         // Handle single frame stepping
         if self.step_single_frame {
             self.step_single_frame = false;
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.gb.run_until_frame()
-            }));
-            match result {
-                Ok(frame_data) => {
+            match self.gb.run_until_frame() {
+                Some(frame_data) => {
                     self.frame = Some(convert_to_rgba(&frame_data));
                 }
-                Err(panic_info) => {
-                    let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        format!("Emulator panic during frame step: {}", s)
-                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                        format!("Emulator panic during frame step: {}", s)
-                    } else {
-                        "Emulator panic during frame step: Unknown error".to_string()
-                    };
-                    self.error_state = Some(error_msg);
+                None => {
+                    self.error_state = Some("Emulator crashed during frame step".to_string());
                     self.frame = None;
                 }
             }
@@ -524,25 +514,29 @@ impl World {
 
         // Handle multiple frame stepping
         if let Some(count) = self.step_multiple_frames.take() {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                for _ in 0..count {
-                    self.gb.run_until_frame();
+            let mut success = true;
+            let mut final_frame = None;
+            
+            for _ in 0..count {
+                match self.gb.run_until_frame() {
+                    Some(_) => {}, // Continue to next frame
+                    None => {
+                        success = false;
+                        break;
+                    }
                 }
-                self.gb.get_current_frame()
-            }));
-            match result {
-                Ok(frame_data) => {
+            }
+            
+            if success {
+                final_frame = Some(self.gb.get_current_frame());
+            }
+            
+            match final_frame {
+                Some(frame_data) => {
                     self.frame = Some(convert_to_rgba(&frame_data));
                 }
-                Err(panic_info) => {
-                    let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        format!("Emulator panic during multi-frame step ({}): {}", count, s)
-                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                        format!("Emulator panic during multi-frame step ({}): {}", count, s)
-                    } else {
-                        format!("Emulator panic during multi-frame step ({}): Unknown error", count)
-                    };
-                    self.error_state = Some(error_msg);
+                None => {
+                    self.error_state = Some(format!("Emulator crashed during multi-frame step ({})", count));
                     self.frame = None;
                 }
             }
@@ -575,26 +569,13 @@ impl World {
         self.last_frame_time = Instant::now();
 
         // Catch panics from the Game Boy emulator
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.gb.run_until_frame()
-        }));
-
-        match result {
-            Ok(frame_data) => {
+        match self.gb.run_until_frame() {
+            Some(frame_data) => {
                 self.frame = Some(convert_to_rgba(&frame_data));
                 self.update_performance_metrics();
             }
-            Err(panic_info) => {
-                // Convert panic info to a string for debugging
-                let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    format!("Emulator panic: {}", s)
-                } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                    format!("Emulator panic: {}", s)
-                } else {
-                    "Emulator panic: Unknown error".to_string()
-                };
-                
-                self.error_state = Some(error_msg);
+            None => {
+                self.error_state = Some("Emulator crashed".to_string());
                 println!("Game Boy emulator crashed: {}", self.error_state.as_ref().unwrap());
                 self.frame = None;
             }
