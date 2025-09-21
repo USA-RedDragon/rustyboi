@@ -172,7 +172,17 @@ impl PPU {
                     let wy = mmio.read(WY);
                     if ly == wy {
                         self.window_y_triggered = true;
+                        // Reset window line counter when window first becomes active
+                        self.window_line_counter = 0;
                     }
+                    
+                    // If window is already active and enabled, increment the window line counter
+                    let lcdc = mmio.read(LCD_CONTROL);
+                    let window_enabled = (lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
+                    if window_enabled && self.window_y_triggered && ly > wy {
+                        self.window_line_counter = self.window_line_counter.wrapping_add(1);
+                    }
+                    
                     // Reset window line flag for new scanline
                     self.window_started_this_line = false;
                 }
@@ -210,12 +220,9 @@ impl PPU {
                     };
                     
                     if should_start_window {
-                        // Start window rendering and increment line counter only first time per line
+                        // Start window rendering
                         self.fetcher.start_window(self.x);
-                        if !self.window_started_this_line {
-                            self.window_line_counter = self.window_line_counter.wrapping_add(1);
-                            self.window_started_this_line = true;
-                        }
+                        self.window_started_this_line = true;
                         break 'label; // Skip this cycle to let window fetching start
                     }
                 }
