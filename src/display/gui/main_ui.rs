@@ -9,6 +9,7 @@ pub(crate) struct Gui {
     show_stack_explorer: bool,
     show_memory_explorer: bool,
     show_ppu_debug: bool,
+    show_sprite_debug: bool,
     show_palette_explorer: bool,
     show_tile_explorer: bool,
     pub(super) stack_scroll_offset: i16,
@@ -19,6 +20,8 @@ pub(crate) struct Gui {
     // Button hold state tracking
     pub(super) step_cycles_held_frames: u32,
     pub(super) step_frames_held_frames: u32,
+    // Sprite debug state
+    pub(super) selected_sprite_index: Option<u8>,
 }
 
 impl Gui {
@@ -30,6 +33,7 @@ impl Gui {
             show_stack_explorer: false,
             show_memory_explorer: false,
             show_ppu_debug: false,
+            show_sprite_debug: false,
             show_palette_explorer: false,
             show_tile_explorer: false,
             stack_scroll_offset: 0,
@@ -39,6 +43,7 @@ impl Gui {
             step_count: 1,
             step_cycles_held_frames: 0,
             step_frames_held_frames: 0,
+            selected_sprite_index: None,
         }
     }
 
@@ -129,6 +134,7 @@ impl Gui {
                     ui.checkbox(&mut self.show_stack_explorer, "Stack Explorer");
                     ui.checkbox(&mut self.show_memory_explorer, "Memory Explorer");
                     ui.checkbox(&mut self.show_ppu_debug, "PPU");
+                    ui.checkbox(&mut self.show_sprite_debug, "Sprite Debug");
                     ui.checkbox(&mut self.show_palette_explorer, "Palette Explorer");
                     ui.checkbox(&mut self.show_tile_explorer, "Tile Explorer");
                 });
@@ -151,6 +157,10 @@ impl Gui {
         
         if self.show_ppu_debug {
             self.render_ppu_debug_panel(ctx, gb);
+        }
+
+        if self.show_sprite_debug {
+            self.render_sprite_debug_panel(ctx, gb);
         }
         
         if self.show_palette_explorer {
