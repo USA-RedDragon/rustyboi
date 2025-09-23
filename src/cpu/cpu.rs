@@ -34,10 +34,6 @@ impl SM83 {
             let flag = pending_interrupt.unwrap();
             
             self.registers.ime = false;
-            self.registers.set_flag(registers::Flag::Carry, false);
-            self.registers.set_flag(registers::Flag::HalfCarry, false);
-            self.registers.set_flag(registers::Flag::Negative, false);
-            self.registers.set_flag(registers::Flag::Zero, false);
 
             self.registers.sp -= 2;
             mmio.write(self.registers.sp, (self.registers.pc & 0x00FF) as u8);
