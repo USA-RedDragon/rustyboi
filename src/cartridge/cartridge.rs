@@ -17,6 +17,17 @@ const MBC1: u8 = 0x01;
 const MBC1_RAM: u8 = 0x02;
 const MBC1_RAM_BATTERY: u8 = 0x03;
 
+// Cartridge types for MBC2
+const MBC2: u8 = 0x05;
+const MBC2_BATTERY: u8 = 0x06;
+
+// Cartridge types for MBC3
+const MBC3_TIMER_BATTERY: u8 = 0x0F;
+const MBC3_TIMER_RAM_BATTERY: u8 = 0x10;
+const MBC3: u8 = 0x11;
+const MBC3_RAM: u8 = 0x12;
+const MBC3_RAM_BATTERY: u8 = 0x13;
+
 // MBC1 register ranges
 const RAM_ENABLE_START: u16 = 0x0000;
 const RAM_ENABLE_END: u16 = 0x1FFF;
@@ -31,10 +42,17 @@ const BANKING_MODE_END: u16 = 0x7FFF;
 const EXTERNAL_RAM_START: u16 = 0xA000;
 const EXTERNAL_RAM_END: u16 = 0xBFFF;
 
+// MBC2 specific ranges
+const MBC2_RAM_SIZE: usize = 512; // 512 x 4 bits
+const MBC2_RAM_START: u16 = 0xA000;
+const MBC2_RAM_END: u16 = 0xA1FF;
+
 #[derive(Clone, Debug)]
 pub enum CartridgeType {
     NoMBC,
     MBC1 { ram: bool, battery: bool },
+    MBC2 { battery: bool },
+    MBC3 { ram: bool, battery: bool, timer: bool },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -60,6 +78,28 @@ pub struct Cartridge {
     rom_bank_low: u8,    // 5 bits (0x01-0x1F)
     ram_bank_or_rom_bank_high: u8, // 2 bits (0x00-0x03)
     banking_mode: u8,    // 0 = ROM banking mode, 1 = RAM banking mode
+    
+    // MBC2 state (MBC2 has built-in 512x4 RAM)
+    mbc2_ram: Vec<u8>, // MBC2 built-in RAM (512 x 4 bits, stored as full bytes)
+    
+    // MBC3 state
+    mbc3_ram_bank: u8,   // 0x00-0x03 for RAM, 0x08-0x0C for RTC
+    mbc3_rtc_latch: u8,  // RTC latch register
+    mbc3_rtc_latched: bool, // Whether RTC registers are latched
+    
+    // MBC3 RTC registers
+    rtc_seconds: u8,     // 0-59
+    rtc_minutes: u8,     // 0-59  
+    rtc_hours: u8,       // 0-23
+    rtc_days_low: u8,    // Lower 8 bits of day counter
+    rtc_days_high: u8,   // Upper 1 bit of day counter + halt flag + day carry
+    
+    // MBC3 RTC latched values
+    rtc_seconds_latched: u8,
+    rtc_minutes_latched: u8,
+    rtc_hours_latched: u8,
+    rtc_days_low_latched: u8,
+    rtc_days_high_latched: u8,
 }
 
 impl Clone for Cartridge {
@@ -76,6 +116,20 @@ impl Clone for Cartridge {
             rom_bank_low: self.rom_bank_low,
             ram_bank_or_rom_bank_high: self.ram_bank_or_rom_bank_high,
             banking_mode: self.banking_mode,
+            mbc2_ram: self.mbc2_ram.clone(),
+            mbc3_ram_bank: self.mbc3_ram_bank,
+            mbc3_rtc_latch: self.mbc3_rtc_latch,
+            mbc3_rtc_latched: self.mbc3_rtc_latched,
+            rtc_seconds: self.rtc_seconds,
+            rtc_minutes: self.rtc_minutes,
+            rtc_hours: self.rtc_hours,
+            rtc_days_low: self.rtc_days_low,
+            rtc_days_high: self.rtc_days_high,
+            rtc_seconds_latched: self.rtc_seconds_latched,
+            rtc_minutes_latched: self.rtc_minutes_latched,
+            rtc_hours_latched: self.rtc_hours_latched,
+            rtc_days_low_latched: self.rtc_days_low_latched,
+            rtc_days_high_latched: self.rtc_days_high_latched,
         }
     }
 }
@@ -143,6 +197,20 @@ impl Cartridge {
             rom_bank_low: 1, // Bank 0 cannot be selected for 0x4000-0x7FFF area
             ram_bank_or_rom_bank_high: 0,
             banking_mode: 0,
+            mbc2_ram: vec![0xFF; MBC2_RAM_SIZE],
+            mbc3_ram_bank: 0,
+            mbc3_rtc_latch: 0,
+            mbc3_rtc_latched: false,
+            rtc_seconds: 0,
+            rtc_minutes: 0,
+            rtc_hours: 0,
+            rtc_days_low: 0,
+            rtc_days_high: 0,
+            rtc_seconds_latched: 0,
+            rtc_minutes_latched: 0,
+            rtc_hours_latched: 0,
+            rtc_days_low_latched: 0,
+            rtc_days_high_latched: 0,
         };
         
         // Try to load existing save file or create new one (only for battery-backed RAM)
@@ -156,6 +224,13 @@ impl Cartridge {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
             MBC1_RAM => CartridgeType::MBC1 { ram: true, battery: false },
             MBC1_RAM_BATTERY => CartridgeType::MBC1 { ram: true, battery: true },
+            MBC2 => CartridgeType::MBC2 { battery: false },
+            MBC2_BATTERY => CartridgeType::MBC2 { battery: true },
+            MBC3_TIMER_BATTERY => CartridgeType::MBC3 { ram: false, battery: true, timer: true },
+            MBC3_TIMER_RAM_BATTERY => CartridgeType::MBC3 { ram: true, battery: true, timer: true },
+            MBC3 => CartridgeType::MBC3 { ram: false, battery: false, timer: false },
+            MBC3_RAM => CartridgeType::MBC3 { ram: true, battery: false, timer: false },
+            MBC3_RAM_BATTERY => CartridgeType::MBC3 { ram: true, battery: true, timer: false },
             _ => CartridgeType::NoMBC,
         }
     }
@@ -178,6 +253,16 @@ impl Cartridge {
                 // Limit to available banks
                 bank % self.rom_banks
             }
+            CartridgeType::MBC2 { .. } => {
+                // MBC2 uses only the lower 4 bits, bank 0 maps to bank 1
+                let bank = (self.rom_bank_low & 0x0F) as usize;
+                if bank == 0 { 1 } else { bank % self.rom_banks }
+            }
+            CartridgeType::MBC3 { .. } => {
+                // MBC3 uses 7 bits for ROM bank selection, bank 0 maps to bank 1
+                let bank = (self.rom_bank_low & 0x7F) as usize;
+                if bank == 0 { 1 } else { bank % self.rom_banks }
+            }
             CartridgeType::NoMBC => 1, // Simple cartridge always uses bank 1 for upper area
         }
     }
@@ -192,6 +277,11 @@ impl Cartridge {
                     // ROM banking mode - always bank 0
                     0
                 }
+            }
+            CartridgeType::MBC2 { .. } => 0, // MBC2 has built-in RAM, no banking
+            CartridgeType::MBC3 { .. } => {
+                // MBC3 uses mbc3_ram_bank for both RAM and RTC
+                (self.mbc3_ram_bank & 0x03) as usize % self.ram_banks.max(1)
             }
             CartridgeType::NoMBC => 0,
         }
@@ -213,22 +303,50 @@ impl Cartridge {
     /// Load save file data into RAM if it exists, or create empty save file (only for battery-backed RAM)
     fn load_or_create_save_file(&mut self) -> Result<(), io::Error> {
         // Only process save files for cartridges with battery-backed RAM
-        if !self.has_battery() || self.ram_data.is_empty() {
+        if !self.has_battery() {
+            return Ok(());
+        }
+        
+        // For MBC2, we need to save the built-in RAM instead of external RAM
+        let save_data = match self.get_cartridge_type() {
+            CartridgeType::MBC2 { .. } => &self.mbc2_ram,
+            _ => &self.ram_data,
+        };
+        
+        if save_data.is_empty() {
             return Ok(());
         }
         
         if let Some(save_path) = self.get_save_file_path() {
             if std::path::Path::new(&save_path).exists() {
                 // Load existing save file
-                let save_data = fs::read(&save_path)?;
-                if save_data.len() <= self.ram_data.len() {
-                    self.ram_data[..save_data.len()].copy_from_slice(&save_data);
-                    println!("Loaded save file: {}", save_path);
+                let loaded_data = fs::read(&save_path)?;
+                match self.get_cartridge_type() {
+                    CartridgeType::MBC2 { .. } => {
+                        if loaded_data.len() <= self.mbc2_ram.len() {
+                            self.mbc2_ram[..loaded_data.len()].copy_from_slice(&loaded_data);
+                            println!("Loaded MBC2 save file: {}", save_path);
+                        }
+                    }
+                    _ => {
+                        if loaded_data.len() <= self.ram_data.len() {
+                            self.ram_data[..loaded_data.len()].copy_from_slice(&loaded_data);
+                            println!("Loaded save file: {}", save_path);
+                        }
+                    }
                 }
             } else {
                 // Create new save file with current RAM data
-                fs::write(&save_path, &self.ram_data)?;
-                println!("Created new save file: {}", save_path);
+                match self.get_cartridge_type() {
+                    CartridgeType::MBC2 { .. } => {
+                        fs::write(&save_path, &self.mbc2_ram)?;
+                        println!("Created new MBC2 save file: {}", save_path);
+                    }
+                    _ => {
+                        fs::write(&save_path, &self.ram_data)?;
+                        println!("Created new save file: {}", save_path);
+                    }
+                }
             }
             
             // Open file handle for efficient writing
@@ -254,10 +372,65 @@ impl Cartridge {
         }
         Ok(())
     }
+    
+    /// Write a byte to MBC2 RAM and save file simultaneously (if battery-backed)
+    fn write_mbc2_ram_byte(&mut self, offset: usize, value: u8) -> Result<(), io::Error> {
+        if offset < self.mbc2_ram.len() {
+            // Write to MBC2 RAM buffer
+            self.mbc2_ram[offset] = value & 0x0F; // Only 4 bits valid
+            
+            // Also write to save file if we have one open
+            if let Some(ref mut file) = self.save_file {
+                file.seek(SeekFrom::Start(offset as u64))?;
+                file.write_all(&[self.mbc2_ram[offset]])?;
+                file.flush()?; // Ensure immediate write
+            }
+        }
+        Ok(())
+    }
 
     /// Check if this cartridge has battery-backed RAM
     pub fn has_battery(&self) -> bool {
-        matches!(self.get_cartridge_type(), CartridgeType::MBC1 { battery: true, .. })
+        match self.get_cartridge_type() {
+            CartridgeType::MBC1 { battery, .. } => battery,
+            CartridgeType::MBC2 { battery } => battery,
+            CartridgeType::MBC3 { battery, .. } => battery,
+            CartridgeType::NoMBC => false,
+        }
+    }
+    
+    /// Read from MBC3 RTC registers
+    fn read_rtc_register(&self) -> u8 {
+        match self.mbc3_ram_bank {
+            0x08 => if self.mbc3_rtc_latched { self.rtc_seconds_latched } else { self.rtc_seconds },
+            0x09 => if self.mbc3_rtc_latched { self.rtc_minutes_latched } else { self.rtc_minutes },
+            0x0A => if self.mbc3_rtc_latched { self.rtc_hours_latched } else { self.rtc_hours },
+            0x0B => if self.mbc3_rtc_latched { self.rtc_days_low_latched } else { self.rtc_days_low },
+            0x0C => if self.mbc3_rtc_latched { self.rtc_days_high_latched } else { self.rtc_days_high },
+            _ => 0xFF,
+        }
+    }
+    
+    /// Write to MBC3 RTC registers
+    fn write_rtc_register(&mut self, value: u8) {
+        match self.mbc3_ram_bank {
+            0x08 => self.rtc_seconds = value & 0x3F, // 0-59
+            0x09 => self.rtc_minutes = value & 0x3F, // 0-59
+            0x0A => self.rtc_hours = value & 0x1F,   // 0-23
+            0x0B => self.rtc_days_low = value,       // Lower 8 bits of day counter
+            0x0C => self.rtc_days_high = value & 0xC1, // Upper bit + halt flag + day carry
+            _ => {}
+        }
+    }
+    
+    /// Latch current RTC values for consistent reading
+    fn latch_rtc(&mut self) {
+        self.rtc_seconds_latched = self.rtc_seconds;
+        self.rtc_minutes_latched = self.rtc_minutes;
+        self.rtc_hours_latched = self.rtc_hours;
+        self.rtc_days_low_latched = self.rtc_days_low;
+        self.rtc_days_high_latched = self.rtc_days_high;
+        self.mbc3_rtc_latched = true;
     }
 }
 
@@ -299,6 +472,54 @@ impl memory::Addressable for Cartridge {
                             0xFF
                         }
                     }
+                    CartridgeType::MBC2 { .. } => {
+                        // MBC2 has built-in 512x4 RAM at 0xA000-0xA1FF
+                        if self.ram_enabled && addr <= MBC2_RAM_END {
+                            let offset = (addr - MBC2_RAM_START) as usize;
+                            if offset < self.mbc2_ram.len() {
+                                self.mbc2_ram[offset] & 0x0F // Only lower 4 bits are valid
+                            } else {
+                                0xFF
+                            }
+                        } else {
+                            0xFF
+                        }
+                    }
+                    CartridgeType::MBC3 { ram: true, .. } => {
+                        if self.ram_enabled {
+                            match self.mbc3_ram_bank {
+                                0x00..=0x03 => {
+                                    // RAM bank access
+                                    if !self.ram_data.is_empty() {
+                                        let ram_bank = self.get_ram_bank();
+                                        let offset = (addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000);
+                                        if offset < self.ram_data.len() {
+                                            self.ram_data[offset]
+                                        } else {
+                                            0xFF
+                                        }
+                                    } else {
+                                        0xFF
+                                    }
+                                }
+                                0x08..=0x0C => {
+                                    // RTC register access
+                                    self.read_rtc_register()
+                                }
+                                _ => 0xFF,
+                            }
+                        } else {
+                            0xFF
+                        }
+                    }
+                    CartridgeType::MBC3 { ram: false, timer: true, .. } => {
+                        // Timer-only MBC3 (no RAM)
+                        if self.ram_enabled && (0x08..=0x0C).contains(&self.mbc3_ram_bank) {
+                            self.read_rtc_register()
+                        } else {
+                            0xFF
+                        }
+                    }
                     _ => 0xFF,
                 }
             }
@@ -314,6 +535,15 @@ impl memory::Addressable for Cartridge {
                     CartridgeType::MBC1 { .. } => {
                         self.ram_enabled = (value & 0x0F) == 0x0A;
                     }
+                    CartridgeType::MBC2 { .. } => {
+                        // MBC2 uses bit 8 of the address to differentiate from ROM bank select
+                        if (addr & 0x0100) == 0 {
+                            self.ram_enabled = (value & 0x0F) == 0x0A;
+                        }
+                    }
+                    CartridgeType::MBC3 { .. } => {
+                        self.ram_enabled = (value & 0x0F) == 0x0A;
+                    }
                     _ => {}
                 }
             }
@@ -322,6 +552,15 @@ impl memory::Addressable for Cartridge {
                 match self.get_cartridge_type() {
                     CartridgeType::MBC1 { .. } => {
                         self.rom_bank_low = (value & 0x1F).max(1); // 5 bits, minimum value 1
+                    }
+                    CartridgeType::MBC2 { .. } => {
+                        // MBC2 uses bit 8 of the address to differentiate from RAM enable
+                        if (addr & 0x0100) != 0 {
+                            self.rom_bank_low = (value & 0x0F).max(1); // 4 bits, minimum value 1
+                        }
+                    }
+                    CartridgeType::MBC3 { .. } => {
+                        self.rom_bank_low = (value & 0x7F).max(1); // 7 bits, minimum value 1
                     }
                     _ => {}
                 }
@@ -332,6 +571,12 @@ impl memory::Addressable for Cartridge {
                     CartridgeType::MBC1 { .. } => {
                         self.ram_bank_or_rom_bank_high = value & 0x03; // 2 bits
                     }
+                    CartridgeType::MBC2 { .. } => {
+                        // MBC2 doesn't use this register
+                    }
+                    CartridgeType::MBC3 { .. } => {
+                        self.mbc3_ram_bank = value; // Can be 0x00-0x03 for RAM or 0x08-0x0C for RTC
+                    }
                     _ => {}
                 }
             }
@@ -340,6 +585,19 @@ impl memory::Addressable for Cartridge {
                 match self.get_cartridge_type() {
                     CartridgeType::MBC1 { .. } => {
                         self.banking_mode = value & 0x01; // 1 bit
+                    }
+                    CartridgeType::MBC2 { .. } => {
+                        // MBC2 doesn't use this register
+                    }
+                    CartridgeType::MBC3 { timer: true, .. } => {
+                        // MBC3 RTC latch register
+                        if self.mbc3_rtc_latch == 0x00 && value == 0x01 {
+                            self.latch_rtc();
+                        }
+                        self.mbc3_rtc_latch = value;
+                    }
+                    CartridgeType::MBC3 { .. } => {
+                        // Non-timer MBC3 ignores this register
                     }
                     _ => {}
                 }
@@ -355,6 +613,42 @@ impl memory::Addressable for Cartridge {
                                 // Use our dual-write method that writes to both RAM and save file
                                 let _ = self.write_ram_byte(offset, value); // Ignore errors for now
                             }
+                        }
+                    }
+                    CartridgeType::MBC2 { .. } => {
+                        // MBC2 has built-in 512x4 RAM at 0xA000-0xA1FF
+                        if self.ram_enabled && addr <= MBC2_RAM_END {
+                            let offset = (addr - MBC2_RAM_START) as usize;
+                            if offset < self.mbc2_ram.len() {
+                                let _ = self.write_mbc2_ram_byte(offset, value); // Ignore errors for now
+                            }
+                        }
+                    }
+                    CartridgeType::MBC3 { ram: true, .. } => {
+                        if self.ram_enabled {
+                            match self.mbc3_ram_bank {
+                                0x00..=0x03 => {
+                                    // RAM bank access
+                                    if !self.ram_data.is_empty() {
+                                        let ram_bank = self.get_ram_bank();
+                                        let offset = (addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000);
+                                        if offset < self.ram_data.len() {
+                                            let _ = self.write_ram_byte(offset, value);
+                                        }
+                                    }
+                                }
+                                0x08..=0x0C => {
+                                    // RTC register access
+                                    self.write_rtc_register(value);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    CartridgeType::MBC3 { ram: false, timer: true, .. } => {
+                        // Timer-only MBC3 (no RAM)
+                        if self.ram_enabled && (0x08..=0x0C).contains(&self.mbc3_ram_bank) {
+                            self.write_rtc_register(value);
                         }
                     }
                     _ => {}
