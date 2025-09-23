@@ -83,6 +83,7 @@ pub struct PPU {
 
     // Sprite data for current scanline
     sprites_on_line: Vec<Sprite>,
+    current_oam_sprite_index: usize, // Current sprite being checked during OAM search
     
     // Window state tracking
     window_line_counter: u8,    // Internal counter for window Y position
@@ -105,6 +106,7 @@ impl PPU {
             ticks: 0,
             x: 0,
             sprites_on_line: Vec::new(),
+            current_oam_sprite_index: 0,
             window_line_counter: 0,
             window_y_triggered: false,
             window_started_this_line: false,
@@ -185,12 +187,17 @@ impl PPU {
                     
                     // Reset window line flag for new scanline
                     self.window_started_this_line = false;
+                    
+                    // Initialize OAM search state
+                    self.sprites_on_line.clear();
+                    self.current_oam_sprite_index = 0;
                 }
                 
-                // Perform sprite search - scan OAM for sprites on current line
-                if self.ticks == 0 {
-                    self.sprites_on_line.clear();
-                    self.scan_oam_for_sprites(mmio);
+                // Perform sprite search distributed across 80 ticks
+                // Check one sprite every 2 ticks (40 sprites × 2 ticks = 80 ticks)
+                if self.ticks % 2 == 0 && self.current_oam_sprite_index < OAM_SPRITE_COUNT {
+                    self.check_single_sprite_for_scanline(mmio, self.current_oam_sprite_index);
+                    self.current_oam_sprite_index += 1;
                 }
                 
                 if self.ticks == 80 {
@@ -230,19 +237,6 @@ impl PPU {
                 // Put a pixel from the FIFO on screen with sprite mixing
                 if let Ok(bg_pixel_idx) = self.fetcher.pixel_fifo.pop() {
                     let ly = mmio.read(LY) as u16;
-                    
-                    // Bounds check to prevent crashes - during PixelTransfer, LY should be 0-143
-                    if ly >= 144 {
-                        // Invalid LY value during pixel transfer, this indicates a bug
-                        // During pixel transfer, LY should be 0-143 (visible scanlines)
-                        eprintln!("Warning: PPU pixel transfer with invalid LY={}, X={}, ticks={}, state={:?}", 
-                                  ly, self.x, self.ticks, self.state);
-                        eprintln!("         Forcing transition to HBlank to fix state");
-                        self.x = 160; // Force HBlank transition
-                        self.state = State::HBlank;
-                        break 'label;
-                    }
-                    
                     let fb_offset = (ly * 160) + self.x as u16;
                     
                     // Additional safety check for framebuffer bounds
@@ -355,8 +349,13 @@ impl PPU {
         self.sprites_on_line.len()
     }
 
-    // Scan OAM memory for sprites that appear on the current scanline
-    fn scan_oam_for_sprites(&mut self, mmio: &mmio::MMIO) {
+    // Check a single sprite during distributed OAM search
+    fn check_single_sprite_for_scanline(&mut self, mmio: &mmio::MMIO, sprite_index: usize) {
+        // Skip if we already have the maximum sprites for this line
+        if self.sprites_on_line.len() >= MAX_SPRITES_PER_LINE {
+            return;
+        }
+        
         let ly = mmio.read(LY);
         let lcdc = mmio.read(LCD_CONTROL);
         
@@ -368,43 +367,27 @@ impl PPU {
         // Determine sprite height (8x8 or 8x16)
         let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
         
-        // Scan through all 40 sprites in OAM
-        for sprite_index in 0..OAM_SPRITE_COUNT {
-            if self.sprites_on_line.len() >= MAX_SPRITES_PER_LINE {
-                break; // Maximum 10 sprites per line
-            }
-            
-            let oam_offset = sprite_index * OAM_BYTES_PER_SPRITE;
-            let sprite_y = mmio.read(0xFE00 + oam_offset as u16);
-            let sprite_x = mmio.read(0xFE00 + oam_offset as u16 + 1);
-            let tile_index = mmio.read(0xFE00 + oam_offset as u16 + 2);
-            let attributes_byte = mmio.read(0xFE00 + oam_offset as u16 + 3);
-            
-            // Sprites use offset coordinates: Y=0 is at line -16, X=0 is at column -8
-            let sprite_screen_y = sprite_y.wrapping_sub(16);
-            
-            // Check if sprite is visible on current scanline
-            if ly >= sprite_screen_y && ly < sprite_screen_y + sprite_height {
-                let sprite = Sprite {
-                    y: sprite_y,
-                    x: sprite_x,
-                    tile_index,
-                    attributes: SpriteAttributes::from_byte(attributes_byte),
-                    oam_index: sprite_index as u8,
-                };
-                
-                self.sprites_on_line.push(sprite);
-            }
-        }
+        let oam_offset = sprite_index * OAM_BYTES_PER_SPRITE;
+        let sprite_y = mmio.read(0xFE00 + oam_offset as u16);
+        let sprite_x = mmio.read(0xFE00 + oam_offset as u16 + 1);
+        let tile_index = mmio.read(0xFE00 + oam_offset as u16 + 2);
+        let attributes_byte = mmio.read(0xFE00 + oam_offset as u16 + 3);
         
-        // Sort sprites by X coordinate for priority handling
-        // When X coordinates are equal, lower OAM index has priority
-        self.sprites_on_line.sort_by(|a, b| {
-            match a.x.cmp(&b.x) {
-                std::cmp::Ordering::Equal => a.oam_index.cmp(&b.oam_index),
-                other => other,
-            }
-        });
+        // Sprites use offset coordinates: Y=0 is at line -16, X=0 is at column -8
+        let sprite_screen_y = sprite_y.wrapping_sub(16);
+        
+        // Check if sprite is visible on current scanline
+        if ly >= sprite_screen_y && ly < sprite_screen_y + sprite_height {
+            let sprite = Sprite {
+                y: sprite_y,
+                x: sprite_x,
+                tile_index,
+                attributes: SpriteAttributes::from_byte(attributes_byte),
+                oam_index: sprite_index as u8,
+            };
+            
+            self.sprites_on_line.push(sprite);
+        }
     }
 
     // Mix background pixel with sprites at the given screen coordinates
