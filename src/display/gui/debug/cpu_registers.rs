@@ -1,6 +1,7 @@
 use egui::Context;
 use super::super::actions::GuiAction;
 use super::super::main_ui::Gui;
+use crate::cpu::disassembler::Disassembler;
 
 impl Gui {
     pub(in crate::display::gui) fn render_cpu_registers_panel(&mut self, ctx: &Context, registers: Option<&crate::cpu::registers::Registers>, gb: Option<&crate::gb::GB>, action: &mut Option<GuiAction>, paused: bool) {
@@ -48,12 +49,14 @@ impl Gui {
                         // Instruction viewer around PC
                         ui.small(egui::RichText::new("Instructions:").color(egui::Color32::LIGHT_GRAY));
                         let pc = regs.pc;
-                        let display_pc = pc.saturating_sub(1); // Show the instruction that was just executed
-                        let start_addr = display_pc.saturating_sub(1); // 1 byte before the executed instruction
-                        let end_addr = display_pc.saturating_add(4);   // 4 bytes after the executed instruction
+                        let display_pc = pc.saturating_sub(0); // Show the instruction that was just executed
                         
-                        for addr in start_addr..=end_addr {
-                            let byte_val = gb_ref.read_memory(addr);
+                        // Display instructions around the current PC
+                        let mut addr = display_pc;
+                        let end_addr = display_pc.saturating_add(8);
+                        
+                        while addr <= end_addr {
+                            let (mnemonic, instruction_length) = Disassembler::disassemble_with_reader(addr, |address| gb_ref.read_memory(address));
                             
                             let color = if addr == display_pc {
                                 egui::Color32::YELLOW // Highlight the instruction that was just executed
@@ -64,7 +67,25 @@ impl Gui {
                             };
                             
                             let marker = if addr == display_pc { "→" } else { " " };
-                            ui.monospace(egui::RichText::new(format!("{} {:04X}: {:02X}", marker, addr, byte_val)).color(color));
+                            
+                            // Show the first byte and mnemonic for single-byte instructions
+                            // For multi-byte instructions, show the full instruction with all bytes
+                            let bytes = if instruction_length == 1 {
+                                format!("{:02X}", gb_ref.read_memory(addr))
+                            } else if instruction_length == 2 {
+                                format!("{:02X} {:02X}", 
+                                    gb_ref.read_memory(addr), 
+                                    gb_ref.read_memory(addr + 1))
+                            } else {
+                                format!("{:02X} {:02X} {:02X}", 
+                                    gb_ref.read_memory(addr), 
+                                    gb_ref.read_memory(addr + 1),
+                                    gb_ref.read_memory(addr + 2))
+                            };
+                            
+                            ui.monospace(egui::RichText::new(format!("{} {:04X}: {:8} {}", marker, addr, bytes, mnemonic)).color(color));
+                            
+                            addr += instruction_length;
                         }
                         
                         ui.separator();
