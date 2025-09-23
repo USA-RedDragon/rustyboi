@@ -44,6 +44,13 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
         (pixels, framework)
     };
     let mut world = World::new_with_paths(gb, config.rom.clone(), config.bios.clone(), config.palette); 
+    
+    // Enable audio output
+    if let Err(e) = world.enable_audio() {
+        println!("Failed to initialize audio: {}", e);
+        println!("Continuing without audio...");
+    }
+    
     let mut manually_paused = false;
     let mut user_paused = false; // Track user-initiated pause separate from debug pause
 
@@ -366,6 +373,18 @@ impl World {
         Ok(filename)
     }
 
+    fn enable_audio(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.gb.enable_audio()
+    }
+
+    fn disable_audio(&mut self) {
+        self.gb.disable_audio();
+    }
+
+    fn set_audio_volume(&mut self, volume: f32) {
+        self.gb.set_audio_volume(volume);
+    }
+
     fn load_state(&mut self, path: std::path::PathBuf) -> Result<String, Box<dyn std::error::Error>> {
         let filename = path.to_string_lossy().to_string();
         
@@ -481,11 +500,12 @@ impl World {
 
     fn run_until_frame(&mut self) -> Option<[u8; ppu::FRAMEBUFFER_SIZE * 4]> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.gb.run_until_frame()
+            // Collect audio when running frames
+            self.gb.run_until_frame(true)
         }));
 
         match result {
-            Ok(frame_data) => Some(convert_to_rgba(&frame_data, &self.palette)),
+            Ok((frame_data, _audio_samples, _breakpoint_hit)) => Some(convert_to_rgba(&frame_data, &self.palette)),
             Err(panic_info) => {
                 // Convert panic info to a string for debugging
                 let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
@@ -504,11 +524,12 @@ impl World {
 
     fn run_until_frame_with_breakpoints(&mut self) -> (Option<[u8; ppu::FRAMEBUFFER_SIZE * 4]>, bool) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.gb.run_until_frame_with_breakpoints()
+            // Collect audio when running frames
+            self.gb.run_until_frame(true)
         }));
 
         match result {
-            Ok((frame_data, breakpoint_hit)) => (Some(convert_to_rgba(&frame_data, &self.palette)), breakpoint_hit),
+            Ok((frame_data, _audio_samples, breakpoint_hit)) => (Some(convert_to_rgba(&frame_data, &self.palette)), breakpoint_hit),
             Err(panic_info) => {
                 // Convert panic info to a string for debugging
                 let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
@@ -545,7 +566,8 @@ impl World {
         if self.step_single_cycle {
             self.step_single_cycle = false;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.gb.step_instruction();
+                // Collect audio for cycle stepping too
+                let (_audio_samples, _breakpoint_hit) = self.gb.step_instruction(true);
                 // For cycle stepping, we need to get the current frame even if incomplete
                 self.gb.get_current_frame()
             }));
@@ -572,7 +594,8 @@ impl World {
         if let Some(count) = self.step_multiple_cycles.take() {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 for _ in 0..count {
-                    self.gb.step_instruction();
+                    // Collect audio for cycle stepping
+                    let (_audio_samples, _breakpoint_hit) = self.gb.step_instruction(true);
                 }
                 self.gb.get_current_frame()
             }));

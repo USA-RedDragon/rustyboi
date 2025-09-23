@@ -51,18 +51,7 @@ impl SM83 {
         
         let opcode = mmio.read(self.registers.pc);
         self.registers.pc += 1;
-        self.log(opcode, mmio);
         self.execute(opcode, mmio) + cycles
-    }
-
-    pub fn log(&self, opcode: u8, mmio: &memory::mmio::MMIO) {
-        println!("A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X} SP:{:04X} PC:{:04X} PCMEM:{:02X},{:02X},{:02X},{:02X}",
-            self.registers.a, self.registers.f, self.registers.b, self.registers.c,
-            self.registers.d, self.registers.e, self.registers.h, self.registers.l,
-            self.registers.sp, self.registers.pc - 1, opcode,
-            mmio.read(self.registers.pc),
-            mmio.read(self.registers.pc + 1),
-            mmio.read(self.registers.pc + 2));
     }
 
     pub fn set_interrupt_flag(&mut self, flag: registers::InterruptFlag, value: bool, mmio: &mut memory::mmio::MMIO) {
