@@ -8,4 +8,6 @@ pub enum GuiAction {
     ClearError,
     StepCycles(u32),
     StepFrames(u32),
+    SetBreakpoint(u16),
+    RemoveBreakpoint(u16),
 }
