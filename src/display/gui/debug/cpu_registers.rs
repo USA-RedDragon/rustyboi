@@ -9,12 +9,12 @@ impl Gui {
             if let Some(gb_ref) = gb {
                 egui::Window::new("CPU Registers")
                     .default_pos([10.0, 50.0])
-                    .default_size([200.0, 400.0])
+                    .default_size([250.0, 400.0])
                     .collapsible(true)
                     .resizable(false)
                     .frame(egui::Frame::window(&ctx.style()).fill(egui::Color32::from_rgba_unmultiplied(64, 64, 64, 220)))
                     .show(ctx, |ui| {
-                        ui.set_width(180.0);
+                        ui.set_width(230.0);
                         
                         // Use rich text for better color control
                         ui.monospace(egui::RichText::new(format!("A: {:02X}    F: {:02X}", regs.a, regs.f)).color(egui::Color32::WHITE));
@@ -51,11 +51,12 @@ impl Gui {
                         let pc = regs.pc;
                         let display_pc = pc.saturating_sub(0); // Show the instruction that was just executed
                         
-                        // Display instructions around the current PC
+                        // Display exactly 5 instructions starting from the current PC
                         let mut addr = display_pc;
-                        let end_addr = display_pc.saturating_add(8);
+                        let mut instruction_count = 0;
+                        const MAX_INSTRUCTIONS: usize = 5;
                         
-                        while addr <= end_addr {
+                        while instruction_count < MAX_INSTRUCTIONS {
                             let (mnemonic, instruction_length) = Disassembler::disassemble_with_reader(addr, |address| gb_ref.read_memory(address));
                             
                             let color = if addr == display_pc {
@@ -86,10 +87,10 @@ impl Gui {
                             ui.monospace(egui::RichText::new(format!("{} {:04X}: {:8} {}", marker, addr, bytes, mnemonic)).color(color));
                             
                             addr += instruction_length;
+                            instruction_count += 1;
                         }
-                        
                         ui.separator();
-                        
+
                         // Step controls
                         ui.small(egui::RichText::new("Step Controls:").color(egui::Color32::LIGHT_GRAY));
                         
