@@ -69,6 +69,7 @@ impl GB {
         for _ in 0..cycles {
             self.mmio.step_timer(&mut self.cpu);
             self.mmio.step_dma();
+            self.mmio.step_audio();
             self.ppu.step(&mut self.cpu, &mut self.mmio);
         }
     }
