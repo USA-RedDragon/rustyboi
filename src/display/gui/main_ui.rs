@@ -13,6 +13,8 @@ pub(crate) struct Gui {
     show_palette_explorer: bool,
     show_tile_explorer: bool,
     show_keybind_settings: bool,
+    show_breakpoint_panel: bool,
+    breakpoint_address_input: String,
     pub(super) stack_scroll_offset: i16,
     pub(super) memory_explorer_address: String,
     pub(super) memory_explorer_parsed_address: u16,
@@ -38,6 +40,8 @@ impl Gui {
             show_palette_explorer: false,
             show_tile_explorer: false,
             show_keybind_settings: false,
+            show_breakpoint_panel: false,
+            breakpoint_address_input: String::from("0000"),
             stack_scroll_offset: 0,
             memory_explorer_address: String::from("0000"),
             memory_explorer_parsed_address: 0x0000,
@@ -139,6 +143,8 @@ impl Gui {
                     ui.checkbox(&mut self.show_sprite_debug, "Sprite Debug");
                     ui.checkbox(&mut self.show_palette_explorer, "Palette Explorer");
                     ui.checkbox(&mut self.show_tile_explorer, "Tile Explorer");
+                    ui.separator();
+                    ui.checkbox(&mut self.show_breakpoint_panel, "Breakpoint Manager");
                 });
 
                 ui.menu_button("Settings", |ui| {
@@ -180,6 +186,10 @@ impl Gui {
 
         if self.show_keybind_settings {
             self.render_keybind_settings_panel(ctx);
+        }
+
+        if self.show_breakpoint_panel {
+            self.render_breakpoint_panel(ctx, action, gb);
         }
     }
 
@@ -246,5 +256,71 @@ impl Gui {
 
     pub(crate) fn set_status(&mut self, status_message: String) {
         self.status_message = Some(status_message);
+    }
+
+    fn render_breakpoint_panel(&mut self, ctx: &Context, action: &mut Option<GuiAction>, gb: Option<&crate::gb::GB>) {
+        egui::Window::new("Breakpoint Manager")
+            .default_width(300.0)
+            .show(ctx, |ui| {
+                ui.heading("Breakpoints");
+                ui.separator();
+
+                // Input for new breakpoint address
+                ui.horizontal(|ui| {
+                    ui.label("Address:");
+                    ui.add(egui::TextEdit::singleline(&mut self.breakpoint_address_input)
+                        .desired_width(80.0)
+                        .font(egui::TextStyle::Monospace));
+
+                    if ui.button("Add").clicked() {
+                        // Parse the address from hex string
+                        if let Ok(address) = u16::from_str_radix(&self.breakpoint_address_input.trim_start_matches("0x"), 16) {
+                            *action = Some(GuiAction::SetBreakpoint(address));
+                            self.breakpoint_address_input = String::from("0000");
+                        }
+                    }
+                });
+
+                ui.small("Enter address in hex format (e.g., 0100, FFAA)");
+                ui.separator();
+
+                // Display current breakpoints if we have access to GB
+                if let Some(gb) = gb {
+                    ui.label("Active Breakpoints:");
+                    ui.separator();
+
+                    let breakpoints: Vec<u16> = gb.get_breakpoints().iter().cloned().collect();
+                    if breakpoints.is_empty() {
+                        ui.label("No breakpoints set");
+                    } else {
+                        // Sort breakpoints for consistent display
+                        let mut sorted_breakpoints = breakpoints.clone();
+                        sorted_breakpoints.sort();
+
+                        for &address in &sorted_breakpoints {
+                            ui.horizontal(|ui| {
+                                ui.monospace(format!("{:04X}", address));
+                                if ui.small_button("✕").clicked() {
+                                    *action = Some(GuiAction::RemoveBreakpoint(address));
+                                }
+                            });
+                        }
+
+                        ui.separator();
+                        if ui.button("Clear All").clicked() {
+                            // Remove all breakpoints by sending individual remove actions
+                            // We'll handle this in the main loop
+                            for &address in &breakpoints {
+                                *action = Some(GuiAction::RemoveBreakpoint(address));
+                            }
+                        }
+                    }
+
+                    ui.separator();
+                    ui.small("Click ✕ to remove a breakpoint");
+                } else {
+                    ui.label("Game Boy not available");
+                }
+            });
     }
 }

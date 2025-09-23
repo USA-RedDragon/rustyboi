@@ -253,6 +253,16 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                         world.step_multiple_frames = Some(count);
                         window.request_redraw();
                     }
+                    Some(GuiAction::SetBreakpoint(address)) => {
+                        world.add_breakpoint(address);
+                        framework.set_status(format!("Breakpoint set at ${:04X}", address));
+                        window.request_redraw();
+                    }
+                    Some(GuiAction::RemoveBreakpoint(address)) => {
+                        world.remove_breakpoint(address);
+                        framework.set_status(format!("Breakpoint removed from ${:04X}", address));
+                        window.request_redraw();
+                    }
                     None => {}
                 }
 
@@ -268,6 +278,15 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
                         }
                     }
                 }
+
+                // Check for breakpoint hits and notify user
+                if world.check_and_clear_breakpoint_hit() {
+                    let pc = world.gb.get_cpu_registers().pc;
+                    manually_paused = true; // Ensure we stay paused
+                    user_paused = true; // User should explicitly resume
+                    framework.set_status(format!("Breakpoint hit at PC: ${:04X}", pc));
+                }
+
                 if let Some(error_msg) = &world.error_state {
                     framework.set_error(error_msg.clone());
                     // Update manually_paused to include error state
@@ -312,6 +331,8 @@ struct World {
     last_title_update: Instant,
     // Frame timing for 60fps
     last_frame_time: Instant,
+    // Breakpoint status
+    breakpoint_hit: bool,
 }
 
 impl World {
@@ -331,6 +352,7 @@ impl World {
             frame_times: Vec::with_capacity(60), // Store last 60 frame times for FPS calculation
             last_title_update: now,
             last_frame_time: now,
+            breakpoint_hit: false,
         }
     }
 
@@ -580,16 +602,40 @@ impl World {
         
         self.last_frame_time = Instant::now();
 
-        // Catch panics from the Game Boy emulator
-        match self.gb.run_until_frame() {
-            Some(frame_data) => {
-                self.frame = Some(convert_to_rgba(&frame_data));
-                self.update_performance_metrics();
+        // Use breakpoint-aware version if we have any breakpoints set
+        if self.gb.get_breakpoints().is_empty() {
+            // No breakpoints - use regular version for better performance
+            match self.gb.run_until_frame() {
+                Some(frame_data) => {
+                    self.frame = Some(convert_to_rgba(&frame_data));
+                    self.update_performance_metrics();
+                }
+                None => {
+                    self.error_state = Some("Emulator crashed".to_string());
+                    println!("Game Boy emulator crashed: {}", self.error_state.as_ref().unwrap());
+                    self.frame = None;
+                }
             }
-            None => {
-                self.error_state = Some("Emulator crashed".to_string());
-                println!("Game Boy emulator crashed: {}", self.error_state.as_ref().unwrap());
-                self.frame = None;
+        } else {
+            // We have breakpoints - use breakpoint-aware version
+            let (frame_result, breakpoint_hit) = self.gb.run_until_frame_with_breakpoints();
+            match frame_result {
+                Some(frame_data) => {
+                    self.frame = Some(convert_to_rgba(&frame_data));
+                    self.update_performance_metrics();
+                    
+                    // If a breakpoint was hit, pause emulation
+                    if breakpoint_hit {
+                        self.is_paused = true;
+                        self.breakpoint_hit = true;
+                        println!("Breakpoint hit at PC: {:04X}", self.gb.get_cpu_registers().pc);
+                    }
+                }
+                None => {
+                    self.error_state = Some("Emulator crashed".to_string());
+                    println!("Game Boy emulator crashed: {}", self.error_state.as_ref().unwrap());
+                    self.frame = None;
+                }
             }
         }
     }
@@ -642,6 +688,21 @@ impl World {
 
     fn set_input_state(&mut self, a: bool, b: bool, start: bool, select: bool, up: bool, down: bool, left: bool, right: bool) {
         self.gb.set_input_state(a, b, start, select, up, down, left, right);
+    }
+
+    // Breakpoint management methods
+    fn add_breakpoint(&mut self, address: u16) {
+        self.gb.add_breakpoint(address);
+    }
+
+    fn remove_breakpoint(&mut self, address: u16) {
+        self.gb.remove_breakpoint(address);
+    }
+
+    fn check_and_clear_breakpoint_hit(&mut self) -> bool {
+        let hit = self.breakpoint_hit;
+        self.breakpoint_hit = false;
+        hit
     }
 }
 
