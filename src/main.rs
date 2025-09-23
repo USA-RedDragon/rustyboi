@@ -48,6 +48,8 @@ fn main() -> Result<(), pixels::Error> {
         let (a, b, start, select, up, down, left, right) = terminal.get_input_state();
         gb.set_input_state(a, b, start, select, up, down, left, right);
         
-        terminal.render_frame(&gb.run_until_frame());
+        // Don't collect audio in terminal mode to keep it simple
+        let (frame_data, _audio_samples, _breakpoint_hit) = gb.run_until_frame(false);
+        terminal.render_frame(&frame_data);
     }
 }

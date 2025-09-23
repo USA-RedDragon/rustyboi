@@ -27,17 +27,6 @@ impl ColorPalette {
             _ => None,
         }
     }
-
-    pub fn to_str(&self) -> &'static str {
-        match self {
-            Self::Grayscale => "grayscale",
-            Self::OriginalGreen => "green",
-            Self::Blue => "blue",
-            Self::Brown => "brown",
-            Self::Red => "red",
-        }
-    }
-
     /// Returns RGBA colors for Game Boy palette values 0-3
     pub fn get_rgba_colors(&self) -> [[u8; 4]; 4] {
         match self {

@@ -4,6 +4,7 @@ use crate::cpu::registers;
 use crate::memory;
 use crate::memory::Addressable;
 use crate::ppu;
+use crate::audio;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -18,6 +19,8 @@ pub struct GB {
     skip_bios: bool,
     #[serde(skip, default)]
     breakpoints: HashSet<u16>,
+    #[serde(skip)]
+    audio_output: Option<audio::output::AudioOutput>,
 }
 
 impl Clone for GB {
@@ -28,6 +31,7 @@ impl Clone for GB {
             ppu: self.ppu.clone(),
             skip_bios: self.skip_bios,
             breakpoints: self.breakpoints.clone(),
+            audio_output: None, // Don't clone audio output - it will be recreated if needed
         }
     }
 }
@@ -46,6 +50,7 @@ impl GB {
             ppu: ppu::PPU::new(),
             skip_bios,
             breakpoints: HashSet::new(),
+            audio_output: None, // Audio will be enabled when needed
         }
     }
 
@@ -63,7 +68,38 @@ impl GB {
         Ok(())
     }
 
-    pub fn step_instruction(&mut self) {
+    // Audio management methods
+    pub fn enable_audio(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut audio_output = audio::output::AudioOutput::new()?;
+        audio_output.start()?;
+        self.audio_output = Some(audio_output);
+        println!("Audio output enabled");
+        Ok(())
+    }
+
+    pub fn disable_audio(&mut self) {
+        self.audio_output = None;
+        println!("Audio output disabled");
+    }
+
+    pub fn is_audio_enabled(&self) -> bool {
+        self.audio_output.is_some()
+    }
+
+    pub fn set_audio_volume(&mut self, volume: f32) {
+        if let Some(audio_output) = &self.audio_output {
+            audio_output.set_volume(volume);
+        }
+    }
+
+    pub fn step_instruction(&mut self, collect_audio: bool) -> (Vec<(f32, f32)>, bool) {
+        // Check for breakpoint at current PC before executing
+        let pc = self.cpu.registers.pc;
+        if self.breakpoints.contains(&pc) {
+            // Breakpoint hit - don't execute instruction and return (empty audio, breakpoint hit)
+            return (Vec::new(), true);
+        }
+
         // Execute one CPU instruction and step PPU accordingly
         let cycles = self.cpu.step(&mut self.mmio);
         for _ in 0..cycles {
@@ -72,40 +108,46 @@ impl GB {
             self.mmio.step_audio();
             self.ppu.step(&mut self.cpu, &mut self.mmio);
         }
+        
+        // Generate audio samples if requested
+        let audio_samples = if collect_audio {
+            self.mmio.generate_audio_samples(cycles as u32)
+        } else {
+            Vec::new()
+        };
+        
+        (audio_samples, false) // No breakpoint hit
     }
 
-    pub fn step_instruction_with_breakpoint_check(&mut self) -> bool {
-        // Check for breakpoint at current PC before executing
-        let pc = self.cpu.registers.pc;
-        if self.breakpoints.contains(&pc) {
-            // Breakpoint hit - don't execute instruction and return false to pause
-            return false;
-        }
-
-        // No breakpoint, execute normally
-        self.step_instruction();
-        true // Continue execution
-    }
-
-    pub fn run_until_frame(&mut self) -> [u8; ppu::FRAMEBUFFER_SIZE] {
+    pub fn run_until_frame(&mut self, collect_audio: bool) -> ([u8; ppu::FRAMEBUFFER_SIZE], Vec<(f32, f32)>, bool) {
+        let mut all_audio_samples = Vec::new();
+        
         loop {
-            self.step_instruction();
+            let (audio_samples, breakpoint_hit) = self.step_instruction(collect_audio);
             
-            if self.ppu.frame_ready() {
-                return self.ppu.get_frame();
-            }
-        }
-    }
-
-    pub fn run_until_frame_with_breakpoints(&mut self) -> ([u8; ppu::FRAMEBUFFER_SIZE], bool) {
-        loop {
-            if !self.step_instruction_with_breakpoint_check() {
+            if breakpoint_hit {
+                // Send accumulated audio before returning due to breakpoint
+                if !all_audio_samples.is_empty() {
+                    if let Some(audio_output) = &self.audio_output {
+                        audio_output.add_samples(&all_audio_samples);
+                    }
+                }
                 // Breakpoint hit - return current frame and indicate breakpoint hit
-                return (self.ppu.get_frame(), true);
+                return (self.ppu.get_frame(), all_audio_samples, true);
+            }
+            
+            if collect_audio {
+                all_audio_samples.extend(audio_samples);
             }
             
             if self.ppu.frame_ready() {
-                return (self.ppu.get_frame(), false);
+                // Send accumulated audio to output if audio is enabled
+                if !all_audio_samples.is_empty() {
+                    if let Some(audio_output) = &self.audio_output {
+                        audio_output.add_samples(&all_audio_samples);
+                    }
+                }
+                return (self.ppu.get_frame(), all_audio_samples, false);
             }
         }
     }

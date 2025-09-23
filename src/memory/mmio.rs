@@ -138,6 +138,13 @@ impl MMIO {
         self.audio = audio;
     }
 
+    pub fn generate_audio_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
+        let mut audio = self.audio.clone();
+        let samples = audio.generate_samples(self, cpu_cycles);
+        self.audio = audio;
+        samples
+    }
+
     pub fn step_dma(&mut self) {
         if !self.dma_active {
             return;
