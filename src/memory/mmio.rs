@@ -1,8 +1,10 @@
+use crate::audio;
 use crate::cartridge;
 use crate::cpu;
 use crate::input;
 use crate::memory;
 use crate::memory::Addressable;
+use crate::ppu::ppu;
 use crate::timer;
 use serde::{Deserialize, Serialize};
 
@@ -69,7 +71,7 @@ pub struct MMIO {
     io_registers: memory::Memory<IO_REGISTERS_START, IO_REGISTERS_SIZE>,
     hram: memory::Memory<HRAM_START, HRAM_SIZE>,
     ie_register: u8,
-    
+    audio: audio::Audio,
     // OAM DMA state
     dma_active: bool,
     dma_source_base: u16,
@@ -90,6 +92,7 @@ impl MMIO {
             io_registers: memory::Memory::new(),
             hram: memory::Memory::new(),
             ie_register: 0,
+            audio: audio::Audio::new(),
             dma_active: false,
             dma_source_base: 0,
             dma_progress: 0,
@@ -127,6 +130,12 @@ impl MMIO {
         let mut timer = self.timer.clone();
         timer.step(cpu, self);
         self.timer = timer;
+    }
+
+    pub fn step_audio(&mut self) {
+        let mut audio = self.audio.clone();
+        audio.step(self);
+        self.audio = audio;
     }
 
     pub fn step_dma(&mut self) {
@@ -239,7 +248,7 @@ impl memory::Addressable for MMIO {
                 input::JOYP => self.input.read(addr),
                 REG_DMA => self.io_registers.read(addr),
                 // Allow PPU registers during DMA since PPU continues to operate
-                0xFF40..=0xFF4B => self.io_registers.read(addr), // LCD Control, Status, LY, LYC, etc.
+                ppu::LCD_CONTROL..=ppu::WX => self.io_registers.read(addr),
                 _ => 0xFF, // Return 0xFF for all other addresses during DMA
             }
         } else {
@@ -298,17 +307,13 @@ impl memory::Addressable for MMIO {
                     match addr {
                         input::JOYP => self.input.read(addr),
                         timer::DIV..=timer::TAC => self.timer.read(addr),
+                        audio::NR10..=audio::NR14 => self.audio.read(addr),
+                        audio::NR21..=audio::NR24 => self.audio.read(addr),
+                        audio::NR30..=audio::NR34 => self.audio.read(addr),
+                        audio::NR41..=audio::NR52 => self.audio.read(addr),
+                        audio::WAV_START..=audio::WAV_END => self.audio.read(addr),
                         REG_DMA => self.io_registers.read(addr),
-                        _ => {
-                            let value = self.io_registers.read(addr);
-                            // Debug LY register reads
-                            if addr == 0xFF44 {
-                                if value > 153 {
-                                    eprintln!("MMIO: Reading invalid LY value {} from register (0xFF44)", value);
-                                }
-                            }
-                            value
-                        }
+                        _ => self.io_registers.read(addr),
                     }
                 }
                 HRAM_START..=HRAM_END => self.hram.read(addr),
@@ -333,10 +338,7 @@ impl memory::Addressable for MMIO {
                     self.dma_progress = 0;
                     self.io_registers.write(addr, value);
                 },
-                // Allow PPU registers during DMA since PPU continues to operate
-                0xFF40..=0xFF4B => {
-                    self.io_registers.write(addr, value);
-                },
+                ppu::LCD_CONTROL..=ppu::WX => self.io_registers.write(addr, value),
                 _ => (), // Ignore writes to other addresses during DMA
             }
         } else {
@@ -378,6 +380,11 @@ impl memory::Addressable for MMIO {
                     match addr {
                         input::JOYP => self.input.write(addr, value),
                         timer::DIV..=timer::TAC => self.timer.write(addr, value),
+                        audio::NR10..=audio::NR14 => self.audio.write(addr, value),
+                        audio::NR21..=audio::NR24 => self.audio.write(addr, value),
+                        audio::NR30..=audio::NR34 => self.audio.write(addr, value),
+                        audio::NR41..=audio::NR52 => self.audio.write(addr, value),
+                        audio::WAV_START..=audio::WAV_END => self.audio.write(addr, value),
                         REG_DMA => {
                             // Start OAM DMA transfer
                             // The high byte of the source address is written to DMA register
@@ -388,9 +395,7 @@ impl memory::Addressable for MMIO {
                             // Store the DMA register value for reads
                             self.io_registers.write(addr, value);
                         },
-                        _ => {
-                            self.io_registers.write(addr, value);
-                        },
+                        _ => self.io_registers.write(addr, value),
                     }
                 }
                 HRAM_START..=HRAM_END => self.hram.write(addr, value),
