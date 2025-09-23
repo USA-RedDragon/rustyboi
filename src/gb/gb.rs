@@ -9,8 +9,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::time::{Duration, Instant};
-
 #[derive(Serialize, Deserialize)]
 pub struct GB {
     cpu: cpu::SM83,
@@ -18,8 +16,6 @@ pub struct GB {
     ppu: ppu::PPU,
     #[serde(skip, default)]
     skip_bios: bool,
-    #[serde(skip, default = "Instant::now")]
-    last_frame_time: Instant,
     #[serde(skip, default)]
     breakpoints: HashSet<u16>,
 }
@@ -31,7 +27,6 @@ impl Clone for GB {
             mmio: self.mmio.clone(),
             ppu: self.ppu.clone(),
             skip_bios: self.skip_bios,
-            last_frame_time: Instant::now(),
             breakpoints: self.breakpoints.clone(),
         }
     }
@@ -50,7 +45,6 @@ impl GB {
             mmio,
             ppu: ppu::PPU::new(),
             skip_bios,
-            last_frame_time: Instant::now(),
             breakpoints: HashSet::new(),
         }
     }
@@ -92,105 +86,25 @@ impl GB {
         true // Continue execution
     }
 
-    pub fn run_until_frame(&mut self) -> Option<[u8; ppu::FRAMEBUFFER_SIZE]> {
-        const TARGET_FRAME_TIME: Duration = Duration::from_micros(16750); // ~59.7 fps
-        let now = Instant::now();
-        let elapsed_since_last_frame = now.duration_since(self.last_frame_time);
-
-        // Only update if enough time has passed
-        if elapsed_since_last_frame < TARGET_FRAME_TIME {
-            let remaining = TARGET_FRAME_TIME - elapsed_since_last_frame;
-            // Sleep for most of the remaining time
-            if remaining > Duration::from_micros(100) {
-                std::thread::sleep(remaining - Duration::from_micros(50));
-            }
-            // Spin for precision
-            while self.last_frame_time.elapsed() < TARGET_FRAME_TIME {
-                std::hint::spin_loop();
-            }
-        }
-        
-        self.last_frame_time = Instant::now();
-
-        // Catch panics from the Game Boy emulator
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Run CPU/PPU until a frame is ready - simple loop
-            loop {
-                self.step_instruction();
-                
-                if self.ppu.frame_ready() {
-                    return self.ppu.get_frame();
-                }
-            }
-        }));
-
-        match result {
-            Ok(frame_data) => Some(frame_data),
-            Err(panic_info) => {
-                // Convert panic info to a string for debugging
-                let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    format!("Emulator panic: {}", s)
-                } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                    format!("Emulator panic: {}", s)
-                } else {
-                    "Emulator panic: Unknown error".to_string()
-                };
-
-                println!("Game Boy emulator crashed: {}", error_msg);
-                None
+    pub fn run_until_frame(&mut self) -> [u8; ppu::FRAMEBUFFER_SIZE] {
+        loop {
+            self.step_instruction();
+            
+            if self.ppu.frame_ready() {
+                return self.ppu.get_frame();
             }
         }
     }
 
-    pub fn run_until_frame_with_breakpoints(&mut self) -> (Option<[u8; ppu::FRAMEBUFFER_SIZE]>, bool) {
-        const TARGET_FRAME_TIME: Duration = Duration::from_micros(16750); // ~59.7 fps
-        let now = Instant::now();
-        let elapsed_since_last_frame = now.duration_since(self.last_frame_time);
-
-        // Only update if enough time has passed
-        if elapsed_since_last_frame < TARGET_FRAME_TIME {
-            let remaining = TARGET_FRAME_TIME - elapsed_since_last_frame;
-            // Sleep for most of the remaining time
-            if remaining > Duration::from_micros(100) {
-                std::thread::sleep(remaining - Duration::from_micros(50));
+    pub fn run_until_frame_with_breakpoints(&mut self) -> ([u8; ppu::FRAMEBUFFER_SIZE], bool) {
+        loop {
+            if !self.step_instruction_with_breakpoint_check() {
+                // Breakpoint hit - return current frame and indicate breakpoint hit
+                return (self.ppu.get_frame(), true);
             }
-            // Spin for precision
-            while self.last_frame_time.elapsed() < TARGET_FRAME_TIME {
-                std::hint::spin_loop();
-            }
-        }
-        
-        self.last_frame_time = Instant::now();
-
-        // Catch panics from the Game Boy emulator
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Run CPU/PPU until a frame is ready or breakpoint is hit - simple loop
-            loop {
-                if !self.step_instruction_with_breakpoint_check() {
-                    // Breakpoint hit - return current frame and indicate breakpoint hit
-                    return (self.ppu.get_frame(), true);
-                }
-                
-                if self.ppu.frame_ready() {
-                    return (self.ppu.get_frame(), false);
-                }
-            }
-        }));
-
-        match result {
-            Ok((frame_data, breakpoint_hit)) => (Some(frame_data), breakpoint_hit),
-            Err(panic_info) => {
-                // Convert panic info to a string for debugging
-                let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    format!("Emulator panic: {}", s)
-                } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                    format!("Emulator panic: {}", s)
-                } else {
-                    "Emulator panic: Unknown error".to_string()
-                };
-
-                println!("Game Boy emulator crashed: {}", error_msg);
-                (None, false)
+            
+            if self.ppu.frame_ready() {
+                return (self.ppu.get_frame(), false);
             }
         }
     }
@@ -250,13 +164,5 @@ impl GB {
 
     pub fn get_breakpoints(&self) -> &HashSet<u16> {
         &self.breakpoints
-    }
-
-    pub fn has_breakpoint(&self, address: u16) -> bool {
-        self.breakpoints.contains(&address)
-    }
-
-    pub fn clear_breakpoints(&mut self) {
-        self.breakpoints.clear();
     }
 }

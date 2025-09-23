@@ -1,10 +1,11 @@
 use crate::ppu;
-use crate::config;
+use crate::config::{self, ColorPalette};
 
 pub struct Terminal {
     previous_frame: [u8; ppu::FRAMEBUFFER_SIZE],
     first_render: bool,
     current_input_state: InputState,
+    palette: ColorPalette,
 }
 
 #[derive(Clone)]
@@ -35,54 +36,41 @@ impl InputState {
 }
 
 impl Terminal {
-    pub fn new() -> Self {
+    pub fn new(palette: ColorPalette) -> Self {
         Self {
             previous_frame: [0; ppu::FRAMEBUFFER_SIZE],
             first_render: true,
             current_input_state: InputState::new(),
+            palette,
         }
     }
 
     /// Get ANSI color code for a Game Boy palette color
-    fn get_ansi_color(color: u8) -> &'static str {
-        match color {
-            0 => "\x1b[48;5;231m",  // White background
-            1 => "\x1b[48;5;248m", // Light gray background (bright black)
-            2 => "\x1b[48;5;240m",  // Dark gray background (black)
-            3 => "\x1b[48;5;232m",  // Black background
-            _ => "\x1b[48;5;232m",  // Default to black
-        }
-        // 0 => [0xFF, 0xFF, 0xFF, 0xFF], // White
-        // 1 => [0xAA, 0xAA, 0xAA, 0xFF], // Light gray
-        // 2 => [0x55, 0x55, 0x55, 0xFF], // Dark gray
-        // 3 => [0x00, 0x00, 0x00, 0xFF], // Black
+    fn get_ansi_color(&self, color: u8) -> &'static str {
+        let colors = self.palette.get_ansi_bg_colors();
+        colors.get(color as usize).unwrap_or(&colors[3])
     }
 
     /// Get ANSI foreground color code for a Game Boy palette color
-    fn get_ansi_fg_color(color: u8) -> &'static str {
-        match color {
-            0 => "\x1b[38;5;231m",  // White background
-            1 => "\x1b[38;5;248m", // Light gray background (bright black)
-            2 => "\x1b[38;5;240m",  // Dark gray background (black)
-            3 => "\x1b[38;5;232m",  // Black background
-            _ => "\x1b[38;5;232m",  // Default to black
-        }
+    fn get_ansi_fg_color(&self, color: u8) -> &'static str {
+        let colors = self.palette.get_ansi_fg_colors();
+        colors.get(color as usize).unwrap_or(&colors[3])
     }
 
     /// Generate the character and colors for a pair of pixels
-    fn get_character_for_pixels(upper_pixel: u8, lower_pixel: u8) -> (&'static str, &'static str, &'static str) {
+    fn get_character_for_pixels(&self, upper_pixel: u8, lower_pixel: u8) -> (&'static str, &'static str, &'static str) {
         match (upper_pixel, lower_pixel) {
             // Both pixels same color - use full block with that color as background
-            (a, b) if a == b => ("█", Self::get_ansi_fg_color(a), Self::get_ansi_color(a)),
+            (a, b) if a == b => ("█", self.get_ansi_fg_color(a), self.get_ansi_color(a)),
             
             // Upper pixel darker than lower - use upper half block
-            (upper, lower) if upper > lower => ("▀", Self::get_ansi_fg_color(upper), Self::get_ansi_color(lower)),
+            (upper, lower) if upper > lower => ("▀", self.get_ansi_fg_color(upper), self.get_ansi_color(lower)),
             
             // Lower pixel darker than upper - use lower half block
-            (upper, lower) if upper < lower => ("▄", Self::get_ansi_fg_color(lower), Self::get_ansi_color(upper)),
+            (upper, lower) if upper < lower => ("▄", self.get_ansi_fg_color(lower), self.get_ansi_color(upper)),
             
             // Fallback (shouldn't happen due to above conditions)
-            (upper, lower) => ("▀", Self::get_ansi_fg_color(upper), Self::get_ansi_color(lower)),
+            (upper, lower) => ("▀", self.get_ansi_fg_color(upper), self.get_ansi_color(lower)),
         }
     }
 
@@ -134,7 +122,7 @@ impl Terminal {
                     0
                 };
 
-                let (character, fg_color, bg_color) = Self::get_character_for_pixels(upper_pixel, lower_pixel);
+                let (character, fg_color, bg_color) = self.get_character_for_pixels(upper_pixel, lower_pixel);
                 print!("{}{}{}\x1b[0m", bg_color, fg_color, character);
             }
             println!("\x1b[K");
@@ -187,7 +175,7 @@ impl Terminal {
                             break;
                         }
 
-                        let (character, fg_color, bg_color) = Self::get_character_for_pixels(upper, lower);
+                        let (character, fg_color, bg_color) = self.get_character_for_pixels(upper, lower);
                         print!("{}{}{}\x1b[0m", bg_color, fg_color, character);
                         col += 1;
                     }

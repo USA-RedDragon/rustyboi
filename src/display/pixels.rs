@@ -43,7 +43,7 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
 
         (pixels, framework)
     };
-    let mut world = World::new_with_paths(gb, config.rom.clone(), config.bios.clone()); 
+    let mut world = World::new_with_paths(gb, config.rom.clone(), config.bios.clone(), config.palette); 
     let mut manually_paused = false;
     let mut user_paused = false; // Track user-initiated pause separate from debug pause
 
@@ -333,10 +333,12 @@ struct World {
     last_frame_time: Instant,
     // Breakpoint status
     breakpoint_hit: bool,
+    // Color palette
+    palette: config::ColorPalette,
 }
 
 impl World {
-    fn new_with_paths(gb: gb::GB, rom_path: Option<String>, bios_path: Option<String>) -> Self {
+    fn new_with_paths(gb: gb::GB, rom_path: Option<String>, bios_path: Option<String>, palette: config::ColorPalette) -> Self {
         let now = Instant::now();
         Self {
             gb,
@@ -353,6 +355,7 @@ impl World {
             last_title_update: now,
             last_frame_time: now,
             breakpoint_hit: false,
+            palette,
         }
     }
 
@@ -476,13 +479,59 @@ impl World {
         }
     }
 
+    fn run_until_frame(&mut self) -> Option<[u8; ppu::FRAMEBUFFER_SIZE * 4]> {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.gb.run_until_frame()
+        }));
+
+        match result {
+            Ok(frame_data) => Some(convert_to_rgba(&frame_data, &self.palette)),
+            Err(panic_info) => {
+                // Convert panic info to a string for debugging
+                let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    format!("Emulator panic: {}", s)
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    format!("Emulator panic: {}", s)
+                } else {
+                    "Emulator panic: Unknown error".to_string()
+                };
+
+                println!("Game Boy emulator crashed: {}", error_msg);
+                None
+            }
+        }
+    }
+
+    fn run_until_frame_with_breakpoints(&mut self) -> (Option<[u8; ppu::FRAMEBUFFER_SIZE * 4]>, bool) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.gb.run_until_frame_with_breakpoints()
+        }));
+
+        match result {
+            Ok((frame_data, breakpoint_hit)) => (Some(convert_to_rgba(&frame_data, &self.palette)), breakpoint_hit),
+            Err(panic_info) => {
+                // Convert panic info to a string for debugging
+                let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    format!("Emulator panic: {}", s)
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    format!("Emulator panic: {}", s)
+                } else {
+                    "Emulator panic: Unknown error".to_string()
+                };
+
+                println!("Game Boy emulator crashed: {}", error_msg);
+                (None, false)
+            }
+        }
+    }
+
     fn update(&mut self) {
         // Handle single frame stepping
         if self.step_single_frame {
             self.step_single_frame = false;
-            match self.gb.run_until_frame() {
+            match self.run_until_frame() {
                 Some(frame_data) => {
-                    self.frame = Some(convert_to_rgba(&frame_data));
+                    self.frame = Some(frame_data);
                 }
                 None => {
                     self.error_state = Some("Emulator crashed during frame step".to_string());
@@ -502,7 +551,7 @@ impl World {
             }));
             match result {
                 Ok(frame_data) => {
-                    self.frame = Some(convert_to_rgba(&frame_data));
+                    self.frame = Some(convert_to_rgba(&frame_data, &self.palette));
                 }
                 Err(panic_info) => {
                     let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
@@ -529,7 +578,7 @@ impl World {
             }));
             match result {
                 Ok(frame_data) => {
-                    self.frame = Some(convert_to_rgba(&frame_data));
+                    self.frame = Some(convert_to_rgba(&frame_data, &self.palette));
                 }
                 Err(panic_info) => {
                     let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
@@ -552,7 +601,7 @@ impl World {
             let mut final_frame = None;
             
             for _ in 0..count {
-                match self.gb.run_until_frame() {
+                match self.run_until_frame() {
                     Some(_) => {}, // Continue to next frame
                     None => {
                         success = false;
@@ -567,7 +616,7 @@ impl World {
             
             match final_frame {
                 Some(frame_data) => {
-                    self.frame = Some(convert_to_rgba(&frame_data));
+                    self.frame = Some(convert_to_rgba(&frame_data, &self.palette));
                 }
                 None => {
                     self.error_state = Some(format!("Emulator crashed during multi-frame step ({})", count));
@@ -605,9 +654,9 @@ impl World {
         // Use breakpoint-aware version if we have any breakpoints set
         if self.gb.get_breakpoints().is_empty() {
             // No breakpoints - use regular version for better performance
-            match self.gb.run_until_frame() {
+            match self.run_until_frame() {
                 Some(frame_data) => {
-                    self.frame = Some(convert_to_rgba(&frame_data));
+                    self.frame = Some(frame_data);
                     self.update_performance_metrics();
                 }
                 None => {
@@ -618,10 +667,10 @@ impl World {
             }
         } else {
             // We have breakpoints - use breakpoint-aware version
-            let (frame_result, breakpoint_hit) = self.gb.run_until_frame_with_breakpoints();
+            let (frame_result, breakpoint_hit) = self.run_until_frame_with_breakpoints();
             match frame_result {
                 Some(frame_data) => {
-                    self.frame = Some(convert_to_rgba(&frame_data));
+                    self.frame = Some(frame_data);
                     self.update_performance_metrics();
                     
                     // If a breakpoint was hit, pause emulation
@@ -706,18 +755,14 @@ impl World {
     }
 }
 
-fn convert_to_rgba(frame: &[u8; ppu::FRAMEBUFFER_SIZE]) -> [u8; ppu::FRAMEBUFFER_SIZE * 4] {
+fn convert_to_rgba(frame: &[u8; ppu::FRAMEBUFFER_SIZE], palette: &config::ColorPalette) -> [u8; ppu::FRAMEBUFFER_SIZE * 4] {
     let mut rgba_frame = [0; ppu::FRAMEBUFFER_SIZE * 4];
+    let colors = palette.get_rgba_colors();
+    
     for (i, &pixel) in frame.iter().enumerate() {
-        let rgba = match pixel {
-            0 => [0xFF, 0xFF, 0xFF, 0xFF], // White
-            1 => [0xAA, 0xAA, 0xAA, 0xFF], // Light gray
-            2 => [0x55, 0x55, 0x55, 0xFF], // Dark gray
-            3 => [0x00, 0x00, 0x00, 0xFF], // Black
-            _ => [0xFF, 0x00, 0xFF, 0xFF], // Fallback (magenta)
-        };
+        let rgba = colors.get(pixel as usize).unwrap_or(&colors[3]);
         let offset = i * 4;
-        rgba_frame[offset..offset + 4].copy_from_slice(&rgba);
+        rgba_frame[offset..offset + 4].copy_from_slice(rgba);
     }
     rgba_frame
 }

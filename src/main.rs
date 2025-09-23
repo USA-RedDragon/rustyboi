@@ -39,7 +39,7 @@ fn main() -> Result<(), pixels::Error> {
     }
 
     // Create a stateful terminal instance for differential rendering
-    let mut terminal = display::Terminal::new();
+    let mut terminal = display::Terminal::new(config.palette);
     
     loop {
         // Update input from terminal (placeholder implementation)
@@ -47,15 +47,6 @@ fn main() -> Result<(), pixels::Error> {
         let (a, b, start, select, up, down, left, right) = terminal.get_input_state();
         gb.set_input_state(a, b, start, select, up, down, left, right);
         
-        match gb.run_until_frame() {
-            Some(frame) => {
-                terminal.render_frame(&frame);
-            }
-            None => {
-                // Emulator crashed, exit
-                break;
-            }
-        }
+        terminal.render_frame(&gb.run_until_frame());
     }
-    Ok(())
 }
