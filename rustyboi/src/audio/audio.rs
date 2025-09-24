@@ -73,7 +73,7 @@ impl Audio {
         }
     }
 
-    pub fn step(&mut self, mmio: &mut mmio::MMIO) {
+    pub fn step(&mut self, mmio: &mut mmio::Mmio) {
         if !self.audio_enabled {
             return;
         }
@@ -176,7 +176,7 @@ impl Audio {
         (left_mix / 4.0, right_mix / 4.0)
     }
 
-    pub fn generate_samples(&mut self, mmio: &mut mmio::MMIO, cpu_cycles: u32) -> Vec<(f32, f32)> {
+    pub fn generate_samples(&mut self, mmio: &mut mmio::Mmio, cpu_cycles: u32) -> Vec<(f32, f32)> {
         let mut samples = Vec::new();
         
         // Game Boy audio runs at ~4.194 MHz (same as CPU)

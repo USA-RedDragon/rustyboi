@@ -13,7 +13,7 @@ impl SM83 {
         SM83 { registers: registers::Registers::new(), halted: false, stopped: false }
     }
 
-    pub fn step(&mut self, mmio: &mut memory::mmio::MMIO) -> u8 {
+    pub fn step(&mut self, mmio: &mut memory::mmio::Mmio) -> u8 {
         let mut cycles = 0;
         
         // Check for pending interrupts
@@ -30,9 +30,7 @@ impl SM83 {
         }
         
         // Handle interrupts if IME is enabled and there's a pending interrupt
-        if self.registers.ime && pending_interrupt.is_some() {
-            let flag = pending_interrupt.unwrap();
-            
+        if self.registers.ime && let Some(flag) = pending_interrupt {
             self.registers.ime = false;
 
             self.registers.sp -= 2;
@@ -40,7 +38,7 @@ impl SM83 {
             mmio.write(self.registers.sp + 1, (self.registers.pc >> 8) as u8);
             self.registers.pc = match flag {
                 registers::InterruptFlag::VBlank => 0x40,
-                registers::InterruptFlag::LCD => 0x48,
+                registers::InterruptFlag::Lcd => 0x48,
                 registers::InterruptFlag::Timer => 0x50,
                 registers::InterruptFlag::Serial => 0x58,
                 registers::InterruptFlag::Joypad => 0x60,
@@ -54,7 +52,7 @@ impl SM83 {
         self.execute(opcode, mmio) + cycles
     }
 
-    pub fn set_interrupt_flag(&mut self, flag: registers::InterruptFlag, value: bool, mmio: &mut memory::mmio::MMIO) {
+    pub fn set_interrupt_flag(&mut self, flag: registers::InterruptFlag, value: bool, mmio: &mut memory::mmio::Mmio) {
         if value {
             mmio.write(registers::INTERRUPT_FLAG, mmio.read(registers::INTERRUPT_FLAG) | flag as u8);
         } else {
@@ -62,20 +60,20 @@ impl SM83 {
         }
     }
 
-    pub fn get_interrupt_flag(&self, flag: registers::InterruptFlag, mmio: &memory::mmio::MMIO) -> bool {
+    pub fn get_interrupt_flag(&self, flag: registers::InterruptFlag, mmio: &memory::mmio::Mmio) -> bool {
         (mmio.read(registers::INTERRUPT_FLAG) & (flag as u8)) != 0
     }
 
-    pub fn get_interrupt_enable_flag(&self, flag: registers::InterruptFlag, mmio: &memory::mmio::MMIO) -> bool {
+    pub fn get_interrupt_enable_flag(&self, flag: registers::InterruptFlag, mmio: &memory::mmio::Mmio) -> bool {
         (mmio.read(registers::INTERRUPT_ENABLE) & (flag as u8)) != 0
     }
 
-    fn get_pending_interrupt(&self, mmio: &memory::mmio::MMIO) -> Option<registers::InterruptFlag> {
+    fn get_pending_interrupt(&self, mmio: &memory::mmio::Mmio) -> Option<registers::InterruptFlag> {
         // Check interrupts in priority order (highest to lowest)
         if self.get_interrupt_enable_flag(registers::InterruptFlag::VBlank, mmio) && self.get_interrupt_flag(registers::InterruptFlag::VBlank, mmio) {
             Some(registers::InterruptFlag::VBlank)
-        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::LCD, mmio) && self.get_interrupt_flag(registers::InterruptFlag::LCD, mmio) {
-            Some(registers::InterruptFlag::LCD)
+        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Lcd, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Lcd, mmio) {
+            Some(registers::InterruptFlag::Lcd)
         } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Timer, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Timer, mmio) {
             Some(registers::InterruptFlag::Timer)
         } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Serial, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Serial, mmio) {
@@ -87,7 +85,7 @@ impl SM83 {
         }
     }
 
-    fn execute(&mut self, opcode: u8, mmio: &mut memory::mmio::MMIO) -> u8 {
+    fn execute(&mut self, opcode: u8, mmio: &mut memory::mmio::Mmio) -> u8 {
         match opcode {
             0x00 => opcodes::nop(self, mmio),
             0x01 => opcodes::ld_bc_imm(self, mmio),
@@ -348,7 +346,7 @@ impl SM83 {
         }
     }
 
-    fn execute_cb(&mut self, mmio: &mut memory::mmio::MMIO) -> u8 {
+    fn execute_cb(&mut self, mmio: &mut memory::mmio::Mmio) -> u8 {
         let opcode = mmio.read(self.registers.pc);
         self.registers.pc += 1;
         match opcode {

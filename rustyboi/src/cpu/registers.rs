@@ -13,7 +13,7 @@ pub enum InterruptFlag {
     Joypad = 1<<4,
     Serial = 1<<3,
     Timer = 1<<2,
-    LCD = 1<<1,
+    Lcd = 1<<1,
     VBlank = 1<<0,
 }
 

@@ -57,7 +57,7 @@ pub const REG_BOOT_OFF: u16 = 0xFF50; // Boot ROM disable
 pub const REG_DMA: u16 = 0xFF46; // DMA Transfer and Start Address
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct MMIO {
+pub struct Mmio {
     #[serde(skip, default)]
     bios: Option<memory::Memory<BIOS_START, BIOS_SIZE>>,
     #[serde(skip, default)]
@@ -78,9 +78,9 @@ pub struct MMIO {
     dma_progress: u8, // 0-159, tracks which byte we're transferring
 }
 
-impl MMIO {
+impl Mmio {
     pub fn new() -> Self {
-        MMIO {
+        Mmio {
             bios: None,
             cartridge: None,
             input: input::Input::new(),
@@ -243,7 +243,7 @@ impl MMIO {
     }
 }
 
-impl memory::Addressable for MMIO {
+impl memory::Addressable for Mmio {
     fn read(&self, addr: u16) -> u8 {
         // During DMA, CPU can only access HRAM and some IO registers
         if self.dma_active {
@@ -309,7 +309,6 @@ impl memory::Addressable for MMIO {
                 },
                 OAM_START..=OAM_END => self.oam.read(addr),
                 UNUSED_START..=UNUSED_END => EMPTY_BYTE,
-                input::JOYP => self.input.read(addr),
                 IO_REGISTERS_START..=IO_REGISTERS_END => {
                     match addr {
                         input::JOYP => self.input.read(addr),
@@ -352,23 +351,14 @@ impl memory::Addressable for MMIO {
             // Normal memory access when DMA is not active
             match addr {
                 CARTRIDGE_START..=CARTRIDGE_END => {
-                    match self.cartridge.as_mut() {
-                        Some(cart) => cart.write(addr, value),
-                        None => (),
-                    }
+                    if let Some(cart) = self.cartridge.as_mut() { cart.write(addr, value) }
                 },
                 CARTRIDGE_BANK_START..=CARTRIDGE_BANK_END => {
-                    match self.cartridge.as_mut() {
-                        Some(cart) => cart.write(addr, value),
-                        None => (),
-                    }
+                    if let Some(cart) = self.cartridge.as_mut() { cart.write(addr, value) }
                 },
                 VRAM_START..=VRAM_END => self.vram.write(addr, value),
                 EXTERNAL_RAM_START..=EXTERNAL_RAM_END => {
-                    match self.cartridge.as_mut() {
-                        Some(cart) => cart.write(addr, value),
-                        None => (),
-                    }
+                    if let Some(cart) = self.cartridge.as_mut() { cart.write(addr, value) }
                 },
                 WRAM_START..=WRAM_END => self.wram.write(addr, value),
                 WRAM_BANK_START..=WRAM_BANK_END => self.wram_bank.write(addr, value),

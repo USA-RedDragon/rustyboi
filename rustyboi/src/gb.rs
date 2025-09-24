@@ -13,8 +13,8 @@ use std::io;
 #[derive(Serialize, Deserialize)]
 pub struct GB {
     cpu: cpu::SM83,
-    mmio: memory::mmio::MMIO,
-    ppu: ppu::PPU,
+    mmio: memory::mmio::Mmio,
+    ppu: ppu::Ppu,
     #[serde(skip, default)]
     skip_bios: bool,
     #[serde(skip, default)]
@@ -40,14 +40,14 @@ impl GB {
     pub fn new(skip_bios: bool) -> Self {
         let mut cpu = cpu::SM83::new();
         cpu.registers.reset(skip_bios);
-        let mut mmio = memory::mmio::MMIO::new();
+        let mut mmio = memory::mmio::Mmio::new();
         if skip_bios {
             mmio.write(crate::memory::mmio::REG_BOOT_OFF, 1);
         }
         GB {
             cpu,
             mmio,
-            ppu: ppu::PPU::new(),
+            ppu: ppu::Ppu::new(),
             skip_bios,
             breakpoints: HashSet::new(),
             audio_output: None, // Audio will be enabled when needed
@@ -102,10 +102,9 @@ impl GB {
         };
         
         // Send audio samples directly to output as they're generated
-        if !audio_samples.is_empty() {
-            if let Some(audio_output) = &mut self.audio_output {
+        if !audio_samples.is_empty()
+            && let Some(audio_output) = &mut self.audio_output {
                 audio_output.add_samples(&audio_samples);
-            }
         }
         
         (false, cycles) // No breakpoint hit
@@ -148,7 +147,7 @@ impl GB {
         &self.cpu.registers
     }
 
-    pub fn get_ppu_debug_info(&self) -> (&ppu::PPU, [u8; 8]) {
+    pub fn get_ppu_debug_info(&self) -> (&ppu::Ppu, [u8; 8]) {
         (&self.ppu, self.ppu.get_fetcher_pixel_buffer())
     }
 

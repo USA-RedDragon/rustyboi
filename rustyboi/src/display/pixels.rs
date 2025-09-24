@@ -132,21 +132,19 @@ fn run_gui_loop(
                     window.request_redraw();
                 }
             } else if input.key_held(KeyCode::KeyF) {
-                if manually_paused || world.error_state.is_some() {
-                    if let Some(press_time) = f_key_press_time {
+                if (manually_paused || world.error_state.is_some())
+                    && let Some(press_time) = f_key_press_time {
                         // Check if debounce period has elapsed
                         if press_time.elapsed() >= DEBOUNCE_DURATION {
                             // Check if enough time has passed since last repeat
-                            if let Some(last_repeat) = f_last_repeat_time {
-                                if last_repeat.elapsed() >= REPEAT_INTERVAL {
+                            if let Some(last_repeat) = f_last_repeat_time
+                                && last_repeat.elapsed() >= REPEAT_INTERVAL {
                                     world.step_single_frame = true;
                                     f_last_repeat_time = Some(Instant::now());
                                     window.request_redraw();
                                 }
-                            }
                         }
                     }
-                }
             } else {
                 // Key released - reset state
                 f_key_press_time = None;
@@ -166,21 +164,19 @@ fn run_gui_loop(
                     window.request_redraw();
                 }
             } else if input.key_held(KeyCode::KeyN) {
-                if manually_paused || world.error_state.is_some() {
-                    if let Some(press_time) = n_key_press_time {
+                if (manually_paused || world.error_state.is_some())
+                    && let Some(press_time) = n_key_press_time {
                         // Check if debounce period has elapsed
                         if press_time.elapsed() >= DEBOUNCE_DURATION {
                             // Check if enough time has passed since last repeat
-                            if let Some(last_repeat) = n_last_repeat_time {
-                                if last_repeat.elapsed() >= REPEAT_INTERVAL {
+                            if let Some(last_repeat) = n_last_repeat_time
+                                && last_repeat.elapsed() >= REPEAT_INTERVAL {
                                     world.step_single_cycle = true;
                                     n_last_repeat_time = Some(Instant::now());
                                     window.request_redraw();
                                 }
-                            }
                         }
                     }
-                }
             } else {
                 // Key released - reset state
                 n_key_press_time = None;
@@ -229,11 +225,11 @@ fn run_gui_loop(
                 let gui_paused_state = manually_paused || world.error_state.is_some();
                 
                 // Update window title with performance metrics
-                world.update_window_title(&window, gui_paused_state);
+                world.update_window_title(window, gui_paused_state);
                 // Always pass register data for the debug overlay, regardless of pause state
                 let registers = Some(world.gb.get_cpu_registers());
                 let gb_ref = Some(&world.gb);
-                let (gui_action, menu_open) = framework.prepare(&window, gui_paused_state, registers, gb_ref);
+                let (gui_action, menu_open) = framework.prepare(window, gui_paused_state, registers, gb_ref);
                 
                 // Handle GUI actions
                 match gui_action {
@@ -363,7 +359,7 @@ fn run_gui_loop(
                 }
             }
             Event::WindowEvent { event, .. } => {
-                framework.handle_event(&window, &event);
+                framework.handle_event(window, &event);
             }
             _ => (),
         }

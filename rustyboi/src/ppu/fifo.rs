@@ -1,14 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct FIFO {
+pub struct Fifo {
     size: usize,
     data: Vec<u8>,
 }
 
-impl FIFO {
+impl Fifo {
     pub fn new() -> Self {
-        let mut fifo = FIFO {
+        let mut fifo = Fifo {
             size: 0,
             data: Vec::new(),
         };

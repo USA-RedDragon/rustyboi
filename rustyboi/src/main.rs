@@ -1,3 +1,4 @@
+#![warn(clippy::all)]
 #![forbid(unsafe_code)]
 
 mod audio;
@@ -12,7 +13,6 @@ mod ppu;
 mod timer;
 
 use clap::Parser;
-use pixels;
 
 fn main() -> Result<(), pixels::Error> {
     #[cfg(target_arch = "wasm32")]

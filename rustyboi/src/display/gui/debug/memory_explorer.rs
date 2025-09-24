@@ -66,7 +66,7 @@ impl Gui {
                     // Scroll down button (move pointer to higher addresses)
                     if ui.button("↓ Move Down").clicked() {
                         // Ensure we don't go above 0xFFFF
-                        if self.memory_explorer_parsed_address <= 0xFFFF - 1 {
+                        if self.memory_explorer_parsed_address < 0xFFFF {
                             self.memory_explorer_parsed_address = self.memory_explorer_parsed_address.saturating_add(1);
                             self.memory_explorer_address = format!("{:04X}", self.memory_explorer_parsed_address);
                         }
