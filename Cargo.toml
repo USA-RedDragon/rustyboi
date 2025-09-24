@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.48", features = ["derive"] }
-crossbeam = "0.8"
+crossbeam = "0.8.4"
 egui = "0.26"
 egui-wgpu = "0.26.0"
 egui-winit = { version = "0.26", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
