@@ -1,5 +1,5 @@
 use crate::config;
-use crate::display::gui::{Framework, GuiAction};
+use crate::display::gui::{Framework, GuiAction, FileData};
 use crate::gb;
 use crate::ppu;
 
@@ -13,10 +13,26 @@ use winit_input_helper::WinitInputHelper;
 use pixels::{Error, Pixels, SurfaceTexture};
 #[cfg(target_arch = "wasm32")]
 use pixels::PixelsBuilder;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use winit::platform::web::WindowExtWebSys;
+#[cfg(target_arch = "wasm32")]
+use std::rc::Rc;
 
 const WIDTH: u32 = 160;
 const HEIGHT: u32 = 144;
 
+
+#[cfg(target_arch = "wasm32")]
+/// Retrieve current width and height dimensions of browser client window
+fn get_window_size() -> LogicalSize<f64> {
+    let client_window = web_sys::window().unwrap();
+    LogicalSize::new(
+        client_window.inner_width().unwrap().as_f64().unwrap(),
+        client_window.inner_height().unwrap().as_f64().unwrap(),
+    )
+}
 
 #[cfg(target_arch = "wasm32")]
 pub async fn run_with_gui_async(gb: gb::GB, config: config::CleanConfig) {
@@ -31,14 +47,43 @@ pub async fn run_with_gui_async(gb: gb::GB, config: config::CleanConfig) {
             .unwrap()
     };
 
+    web_sys::window()
+        .and_then(|win| win.document())
+        .and_then(|doc| doc.body())
+        .and_then(|body| {
+            body.append_child(&web_sys::Element::from(window.canvas().unwrap()))
+                .ok()
+        })
+        .expect("couldn't append canvas to document body");
+
+    let window = Rc::new(window);
+
+    let closure = wasm_bindgen::closure::Closure::wrap(Box::new({
+        let window = Rc::clone(&window);
+        move |_e: web_sys::Event| {
+            let _ = window.request_inner_size(get_window_size());
+        }
+    }) as Box<dyn FnMut(_)>);
+    web_sys::window()
+        .unwrap()
+        .add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
+        .unwrap();
+    closure.forget();
+
+    // Trigger initial resize event
+    let _ = window.request_inner_size(get_window_size());
+
     let (pixels, framework) = async {
-        let window_size = window.inner_size();
         let scale_factor = window.scale_factor() as f32;
-        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
+        let window_size = get_window_size().to_physical::<u32>(scale_factor as f64);
+        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, window.as_ref());
         let pixels = PixelsBuilder::new(WIDTH, HEIGHT, surface_texture)
+            .texture_format(pixels::wgpu::TextureFormat::Rgba8Unorm)
+            .surface_texture_format(pixels::wgpu::TextureFormat::Rgba8Unorm)
+            .wgpu_backend(pixels::wgpu::Backends::all())
             .build_async()
             .await
-            .unwrap();
+            .expect("Failed to create Pixels instance");
         let framework = Framework::new(
             &event_loop,
             window_size.width,
@@ -49,7 +94,10 @@ pub async fn run_with_gui_async(gb: gb::GB, config: config::CleanConfig) {
 
         (pixels, framework)
     }.await;
-    run_gui_loop(event_loop, &window, pixels, framework, gb, &config);
+    match run_gui_loop(event_loop, &window, pixels, framework, gb, &config) {
+        Ok(_) => (),
+        Err(e) => eprintln!("Error in GUI loop: {}", e),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -422,15 +470,27 @@ impl World {
         self.gb.enable_audio()
     }
 
-    fn load_state(&mut self, path: std::path::PathBuf) -> Result<String, Box<dyn std::error::Error>> {
-        let filename = path.to_string_lossy().to_string();
-        
+    fn load_state(&mut self, file_data: FileData) -> Result<String, Box<dyn std::error::Error>> {
         // Save the current ROM and BIOS paths before loading state
         let saved_rom_path = self.current_rom_path.clone();
         let saved_bios_path = self.current_bios_path.clone();
         
-        // Load the new state
-        self.gb = crate::gb::GB::from_state_file(&filename)?;
+        // Load the new state and get filename
+        let filename = match file_data {
+            #[cfg(not(target_arch = "wasm32"))]
+            FileData::Path(path) => {
+                let filename = path.to_string_lossy().to_string();
+                self.gb = crate::gb::GB::from_state_file(&filename)?;
+                filename
+            }
+            #[cfg(target_arch = "wasm32")]
+            FileData::Contents { name, data } => {
+                // For WASM, parse the data directly
+                let saved_state = String::from_utf8(data)?;
+                self.gb = serde_json::from_str(&saved_state)?;
+                name
+            }
+        };
         
         // Reload the ROM if we had one loaded
         if let Some(rom_path) = saved_rom_path {
@@ -474,13 +534,29 @@ impl World {
         Ok(filename)
     }
 
-    fn load_rom(&mut self, path: std::path::PathBuf) -> Result<String, Box<dyn std::error::Error>> {
-        let filename = path.to_string_lossy().to_string();
-        let cartridge = crate::cartridge::Cartridge::load(&filename)?;
+    fn load_rom(&mut self, file_data: FileData) -> Result<String, Box<dyn std::error::Error>> {
+        let (filename, cartridge, has_file_path) = match file_data {
+            #[cfg(not(target_arch = "wasm32"))]
+            FileData::Path(path) => {
+                let filename = path.to_string_lossy().to_string();
+                let cartridge = crate::cartridge::Cartridge::load(&filename)?;
+                (filename, cartridge, true)
+            }
+            #[cfg(target_arch = "wasm32")]
+            FileData::Contents { name, data } => {
+                // For WASM, load from memory
+                let cartridge = crate::cartridge::Cartridge::from_bytes(&data)?;
+                (name, cartridge, false)
+            }
+        };
         self.gb.insert(cartridge);
         
         // Track the current ROM path
-        self.current_rom_path = Some(filename.clone());
+        self.current_rom_path = if has_file_path {
+            Some(filename.clone())
+        } else {
+            None // No file path for WASM content
+        };
         
         // Reset the emulator to a clean state after loading the ROM
         self.gb.reset();

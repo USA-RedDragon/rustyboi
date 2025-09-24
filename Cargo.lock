@@ -2615,7 +2615,9 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
  "winit",
  "winit_input_helper",
 ]

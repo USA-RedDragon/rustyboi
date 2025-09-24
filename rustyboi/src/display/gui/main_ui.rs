@@ -1,6 +1,8 @@
 use std::env;
+use std::sync::{Arc, Mutex};
 use egui::Context;
 use super::actions::GuiAction;
+use super::file_dialog::{self, FileDialogBuilder};
 
 pub(crate) struct Gui {
     error_message: Option<String>,
@@ -25,6 +27,8 @@ pub(crate) struct Gui {
     pub(super) step_frames_held_frames: u32,
     // Sprite debug state
     pub(super) selected_sprite_index: Option<u8>,
+    // File dialog result tracking
+    pending_dialog_result: Arc<Mutex<Option<GuiAction>>>,
 }
 
 impl Gui {
@@ -50,6 +54,7 @@ impl Gui {
             step_cycles_held_frames: 0,
             step_frames_held_frames: 0,
             selected_sprite_index: None,
+            pending_dialog_result: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -57,6 +62,12 @@ impl Gui {
     pub(crate) fn ui(&mut self, ctx: &Context, paused: bool, registers: Option<&crate::cpu::registers::Registers>, gb: Option<&crate::gb::GB>) -> (Option<GuiAction>, bool) {
         let mut action = None;
         let mut any_menu_open = false;
+        
+        // Check for pending dialog results first
+        if let Ok(mut pending) = self.pending_dialog_result.try_lock()
+            && let Some(pending_action) = pending.take() {
+                action = Some(pending_action);
+            }
         
         self.render_menu_bar(ctx, &mut action, &mut any_menu_open, paused);
         self.render_debug_panels(ctx, registers, gb, &mut action, paused);
@@ -72,15 +83,19 @@ impl Gui {
                 ui.menu_button("File", |ui| {
                     *any_menu_open = true;
                     if ui.button("Load ROM").clicked() {
-                        let mut dialog = rfd::FileDialog::new()
+                        let mut dialog = file_dialog::new()
                             .add_filter("Game Boy ROM", &["gb", "gbc"])
                             .add_filter("All Files", &["*"]);
                         if env::current_dir().is_ok() {
                             dialog = dialog.set_directory(env::current_dir().unwrap());
                         }
-                        if let Some(path) = dialog.pick_file() {
-                            *action = Some(GuiAction::LoadRom(path));
-                        }
+                        let result_holder = Arc::clone(&self.pending_dialog_result);
+                        dialog.pick_file(move |file_data| {
+                            if let Some(file_data) = file_data
+                                && let Ok(mut pending) = result_holder.lock() {
+                                    *pending = Some(GuiAction::LoadRom(file_data));
+                            }
+                        });
                         ui.close_menu();
                     }
                     ui.separator();
@@ -90,27 +105,35 @@ impl Gui {
                             .unwrap()
                             .as_secs();
                         let file_name = format!("save_{}", timestamp);
-                        let mut dialog = rfd::FileDialog::new()
+                        let mut dialog = file_dialog::new()
                             .add_filter("RustyBoi Save State", &["rustyboisave"])
                             .set_file_name(file_name);
                         if env::current_dir().is_ok() {
                             dialog = dialog.set_directory(env::current_dir().unwrap());
                         }
-                        if let Some(path) = dialog.save_file() {
-                            *action = Some(GuiAction::SaveState(path));
-                        }
+                        let result_holder = Arc::clone(&self.pending_dialog_result);
+                        dialog.save_file(move |path| {
+                            if let Some(path) = path
+                                && let Ok(mut pending) = result_holder.lock() {
+                                    *pending = Some(GuiAction::SaveState(path));
+                                }
+                        });
                         ui.close_menu();
                     }
                     if ui.button("Load State").clicked() {
-                        let mut dialog = rfd::FileDialog::new()
+                        let mut dialog = file_dialog::new()
                             .add_filter("RustyBoi Save State", &["rustyboisave"])
                             .add_filter("All Files", &["*"]);
                         if env::current_dir().is_ok() {
                             dialog = dialog.set_directory(env::current_dir().unwrap());
                         }
-                        if let Some(path) = dialog.pick_file() {
-                            *action = Some(GuiAction::LoadState(path));
-                        }
+                        let result_holder = Arc::clone(&self.pending_dialog_result);
+                        dialog.pick_file(move |file_data| {
+                            if let Some(file_data) = file_data
+                                && let Ok(mut pending) = result_holder.lock() {
+                                    *pending = Some(GuiAction::LoadState(file_data));
+                            }
+                        });
                         ui.close_menu();
                     }
                     ui.separator();
@@ -274,7 +297,7 @@ impl Gui {
 
                     if ui.button("Add").clicked() {
                         // Parse the address from hex string
-                        if let Ok(address) = u16::from_str_radix(&self.breakpoint_address_input.trim_start_matches("0x"), 16) {
+                        if let Ok(address) = u16::from_str_radix(self.breakpoint_address_input.trim_start_matches("0x"), 16) {
                             *action = Some(GuiAction::SetBreakpoint(address));
                             self.breakpoint_address_input = String::from("0000");
                         }
