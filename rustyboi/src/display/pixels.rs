@@ -237,16 +237,18 @@ fn run_gui_loop(
             }
 
             // Handle Game Boy input based on keybinds
-            let a = input.key_held(config.keybinds.a);
-            let b = input.key_held(config.keybinds.b);
-            let start = input.key_held(config.keybinds.start);
-            let select = input.key_held(config.keybinds.select);
-            let up = input.key_held(config.keybinds.up);
-            let down = input.key_held(config.keybinds.down);
-            let left = input.key_held(config.keybinds.left);
-            let right = input.key_held(config.keybinds.right);
+            let button_state = crate::input::ButtonState {
+                a: input.key_held(config.keybinds.a),
+                b: input.key_held(config.keybinds.b),
+                start: input.key_held(config.keybinds.start),
+                select: input.key_held(config.keybinds.select),
+                up: input.key_held(config.keybinds.up),
+                down: input.key_held(config.keybinds.down),
+                left: input.key_held(config.keybinds.left),
+                right: input.key_held(config.keybinds.right),
+            };
             
-            world.set_input_state(a, b, start, select, up, down, left, right);
+            world.set_input_state(button_state);
 
             // Update internal state and request a redraw (only if not resizing)
             world.update();
@@ -879,8 +881,8 @@ impl World {
         }
     }
 
-    fn set_input_state(&mut self, a: bool, b: bool, start: bool, select: bool, up: bool, down: bool, left: bool, right: bool) {
-        self.gb.set_input_state(a, b, start, select, up, down, left, right);
+    fn set_input_state(&mut self, state: crate::input::ButtonState) {
+        self.gb.set_input_state(state);
     }
 
     // Breakpoint management methods
