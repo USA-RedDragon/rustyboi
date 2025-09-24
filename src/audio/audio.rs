@@ -109,14 +109,6 @@ impl Audio {
         self.nr50 & 0x07
     }
 
-    pub fn is_vin_left_enabled(&self) -> bool {
-        (self.nr50 >> 7) & 0x01 != 0
-    }
-
-    pub fn is_vin_right_enabled(&self) -> bool {
-        (self.nr50 >> 3) & 0x01 != 0
-    }
-
     pub fn is_channel_left_enabled(&self, channel: u8) -> bool {
         match channel {
             1 => (self.nr51 >> 4) & 0x01 != 0,
@@ -184,9 +176,6 @@ impl Audio {
         (left_mix / 4.0, right_mix / 4.0)
     }
 
-    /// Generate audio samples for the given number of CPU cycles
-    /// Game Boy CPU runs at ~4.194 MHz, audio typically at 44.1 kHz
-    /// So we need about 1 audio sample per ~95 CPU cycles
     pub fn generate_samples(&mut self, mmio: &mut mmio::MMIO, cpu_cycles: u32) -> Vec<(f32, f32)> {
         let mut samples = Vec::new();
         
@@ -198,10 +187,8 @@ impl Audio {
         self.fractional_cycles += cpu_cycles as f32;
         
         while self.fractional_cycles >= CYCLES_PER_SAMPLE {
-            // Step the audio system
             self.step(mmio);
             
-            // Generate one sample
             let sample = self.get_mixed_output();
             samples.push(sample);
             

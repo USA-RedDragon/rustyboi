@@ -49,7 +49,7 @@ fn main() -> Result<(), pixels::Error> {
         gb.set_input_state(a, b, start, select, up, down, left, right);
         
         // Don't collect audio in terminal mode to keep it simple
-        let (frame_data, _audio_samples, _breakpoint_hit) = gb.run_until_frame(false);
+        let (frame_data, _breakpoint_hit) = gb.run_until_frame(false);
         terminal.render_frame(&frame_data);
     }
 }

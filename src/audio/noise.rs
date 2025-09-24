@@ -136,10 +136,6 @@ impl Noise {
         self.nr42 & 0x07
     }
 
-    fn is_length_enabled(&self) -> bool {
-        (self.nr44 >> 6) & 0x01 != 0
-    }
-
     fn trigger(&mut self) {
         self.enabled = true;
         
@@ -209,7 +205,6 @@ impl Addressable for Noise {
                     }
                     NR42 => {
                         self.nr42 = value;
-                        // If DAC is disabled, disable channel
                         if self.get_envelope_initial_volume() == 0 && !self.get_envelope_direction() {
                             self.enabled = false;
                         }

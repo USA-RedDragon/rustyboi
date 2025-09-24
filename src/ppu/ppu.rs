@@ -238,19 +238,7 @@ impl PPU {
                 if let Ok(bg_pixel_idx) = self.fetcher.pixel_fifo.pop() {
                     let ly = mmio.read(LY) as u16;
                     let fb_offset = (ly * 160) + self.x as u16;
-                    
-                    // Additional safety check for framebuffer bounds
-                    if fb_offset as usize >= FRAMEBUFFER_SIZE {
-                        // This should never happen with the above check, but just in case
-                        eprintln!("Warning: PPU framebuffer bounds exceeded: offset={}, LY={}, X={}", 
-                                  fb_offset, ly, self.x);
-                        self.x += 1;
-                        if self.x == 160 {
-                            self.state = State::HBlank
-                        }
-                        break 'label;
-                    }
-                    
+
                     // Get the final pixel color by mixing background and sprites
                     let final_color = self.mix_background_and_sprites(mmio, bg_pixel_idx, self.x, ly as u8);
                     self.fb_a[fb_offset as usize] = final_color;
@@ -262,17 +250,12 @@ impl PPU {
                 }
             },
             State::HBlank => {
-                // no-ops
-                if self.ticks == 376 {
+                if self.ticks == 455 {
                     self.ticks = 0;
                     let current_ly = mmio.read(LY);
                     
                     if current_ly >= 143 {
-                        // Should transition to VBlank
                         mmio.write(LY, 144);
-                        self.fb_b = self.fb_a;
-                        self.fb_a = [0; FRAMEBUFFER_SIZE];
-                        self.have_frame = true;
                         self.state = State::VBlank;
                         cpu.set_interrupt_flag(registers::InterruptFlag::VBlank, true, mmio);
                     } else {
@@ -285,22 +268,20 @@ impl PPU {
                 }
             },
             State::VBlank => {
-                // VBlank lasts for 10 scanlines (144-153)
-                // Each scanline is 456 cycles, so VBlank should transition every 456 cycles
-                if self.ticks == 456 { // 456 cycles per scanline minus 1 (0-based)
+                if self.ticks == 455 {
                     self.ticks = 0;
                     let current_ly = mmio.read(LY);
                     
                     if current_ly >= 153 {
-                        // Reset to line 0 and go back to OAM search
                         mmio.write(LY, 0);
                         self.state = State::OAMSearch;
-                        // Reset window state for new frame
                         self.window_line_counter = 0;
                         self.window_y_triggered = false;
                         self.window_started_this_line = false;
+                        self.fb_b = self.fb_a;
+                        self.fb_a = [0; FRAMEBUFFER_SIZE];
+                        self.have_frame = true;
                     } else if current_ly >= 144 && current_ly < 153 {
-                        // Normal VBlank increment
                         let next_ly = current_ly.saturating_add(1);
                         mmio.write(LY, next_ly);
                     }

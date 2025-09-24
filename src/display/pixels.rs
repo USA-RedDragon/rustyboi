@@ -377,14 +377,6 @@ impl World {
         self.gb.enable_audio()
     }
 
-    fn disable_audio(&mut self) {
-        self.gb.disable_audio();
-    }
-
-    fn set_audio_volume(&mut self, volume: f32) {
-        self.gb.set_audio_volume(volume);
-    }
-
     fn load_state(&mut self, path: std::path::PathBuf) -> Result<String, Box<dyn std::error::Error>> {
         let filename = path.to_string_lossy().to_string();
         
@@ -505,7 +497,7 @@ impl World {
         }));
 
         match result {
-            Ok((frame_data, _audio_samples, _breakpoint_hit)) => Some(convert_to_rgba(&frame_data, &self.palette)),
+            Ok((frame_data, _breakpoint_hit)) => Some(convert_to_rgba(&frame_data, &self.palette)),
             Err(panic_info) => {
                 // Convert panic info to a string for debugging
                 let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
@@ -529,7 +521,7 @@ impl World {
         }));
 
         match result {
-            Ok((frame_data, _audio_samples, breakpoint_hit)) => (Some(convert_to_rgba(&frame_data, &self.palette)), breakpoint_hit),
+            Ok((frame_data, breakpoint_hit)) => (Some(convert_to_rgba(&frame_data, &self.palette)), breakpoint_hit),
             Err(panic_info) => {
                 // Convert panic info to a string for debugging
                 let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
@@ -567,7 +559,7 @@ impl World {
             self.step_single_cycle = false;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // Collect audio for cycle stepping too
-                let (_audio_samples, _breakpoint_hit) = self.gb.step_instruction(true);
+                let (_breakpoint_hit, _cycles) = self.gb.step_instruction(true);
                 // For cycle stepping, we need to get the current frame even if incomplete
                 self.gb.get_current_frame()
             }));
@@ -595,7 +587,7 @@ impl World {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 for _ in 0..count {
                     // Collect audio for cycle stepping
-                    let (_audio_samples, _breakpoint_hit) = self.gb.step_instruction(true);
+                    let (_breakpoint_hit, _cycles) = self.gb.step_instruction(true);
                 }
                 self.gb.get_current_frame()
             }));
@@ -659,9 +651,12 @@ impl World {
         let now = Instant::now();
         let elapsed_since_last_frame = now.duration_since(self.last_frame_time);
         
+        
         // Only update if enough time has passed
         if elapsed_since_last_frame < TARGET_FRAME_TIME {
             let remaining = TARGET_FRAME_TIME - elapsed_since_last_frame;
+            
+            
             // Sleep for most of the remaining time
             if remaining > Duration::from_micros(100) {
                 std::thread::sleep(remaining - Duration::from_micros(50));
@@ -670,6 +665,11 @@ impl World {
             while self.last_frame_time.elapsed() < TARGET_FRAME_TIME {
                 std::hint::spin_loop();
             }
+        } else if elapsed_since_last_frame.as_millis() > 25 {
+            // Frame took too long
+            println!("Slow frame: {}ms (target: {}ms)", 
+                    elapsed_since_last_frame.as_millis(), 
+                    TARGET_FRAME_TIME.as_millis());
         }
         
         self.last_frame_time = Instant::now();
