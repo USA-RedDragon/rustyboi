@@ -23,7 +23,7 @@ const TILE_MAP_9C00_BASE: u16 = 0x9C00; // Tile map area 1
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Fetcher {
     state: State,
-    pub pixel_fifo: fifo::FIFO,
+    pub pixel_fifo: fifo::Fifo,
 
     tile_num: u8,
     tile_index: u8,
@@ -38,7 +38,7 @@ impl Fetcher {
     pub fn new() -> Self {
         Fetcher {
             state: State::TileNumber,
-            pixel_fifo: fifo::FIFO::new(),
+            pixel_fifo: fifo::Fifo::new(),
             tile_num: 0,
             tile_index: 0,
             pixel_buffer: [0; 8],
@@ -58,7 +58,7 @@ impl Fetcher {
     }
     
     // Reset and apply SCX offset for background scrolling
-    pub fn reset_with_scx_offset(&mut self, mmio: &mut mmio::MMIO) {
+    pub fn reset_with_scx_offset(&mut self, mmio: &mut mmio::Mmio) {
         self.reset();
         
         // Apply SCX pixel offset by pre-fetching and discarding pixels
@@ -89,7 +89,7 @@ impl Fetcher {
     }
 
     // Calculate the correct tile map base address based on LCDC.6 (WindowTileMapDisplaySelect)
-    fn get_window_tile_map_base(&self, mmio: &mmio::MMIO) -> u16 {
+    fn get_window_tile_map_base(&self, mmio: &mmio::Mmio) -> u16 {
         let lcdc = mmio.read(ppu::LCD_CONTROL);
         let window_tile_map_select = (lcdc & (ppu::LCDCFlags::WindowTileMapDisplaySelect as u8)) != 0;
         
@@ -101,7 +101,7 @@ impl Fetcher {
     }
 
     // Calculate the correct tile map base address based on LCDC.3 (BGTileMapDisplaySelect)
-    fn get_tile_map_base(&self, mmio: &mmio::MMIO) -> u16 {
+    fn get_tile_map_base(&self, mmio: &mmio::Mmio) -> u16 {
         let lcdc = mmio.read(ppu::LCD_CONTROL);
         let bg_tile_map_select = (lcdc & (ppu::LCDCFlags::BGTileMapDisplaySelect as u8)) != 0;
         
@@ -113,7 +113,7 @@ impl Fetcher {
     }
 
     // Calculate the correct tile data address based on LCDC.4 (BGWindowTileDataSelect)
-    fn get_tile_data_address(&self, tile_id: u8, tile_line: u8, mmio: &mmio::MMIO) -> u16 {
+    fn get_tile_data_address(&self, tile_id: u8, tile_line: u8, mmio: &mmio::Mmio) -> u16 {
         let lcdc = mmio.read(ppu::LCD_CONTROL);
         let bg_window_tile_data_select = (lcdc & (ppu::LCDCFlags::BGWindowTileDataSelect as u8)) != 0;
         
@@ -133,7 +133,7 @@ impl Fetcher {
         }
     }
 
-    pub fn step(&mut self, mmio: &mut mmio::MMIO, window_line: u8) {
+    pub fn step(&mut self, mmio: &mut mmio::Mmio, window_line: u8) {
         let ly = mmio.read(ppu::LY);
         let y = if self.fetching_window {
             // For window, use the internal window line counter

@@ -38,7 +38,7 @@ impl Noise {
         }
     }
 
-    pub fn step(&mut self, _mmio: &mut mmio::MMIO) {
+    pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
         if !self.enabled {
             return;
         }
@@ -58,7 +58,7 @@ impl Noise {
         }
 
         // Length counter (steps 0, 2, 4, 6)
-        if step % 2 == 0 {
+        if step.is_multiple_of(2) {
             self.step_length_counter();
         }
 

@@ -42,7 +42,7 @@ impl Wave {
         }
     }
 
-    pub fn step(&mut self, _mmio: &mut mmio::MMIO) {
+    pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
         if !self.enabled || !self.dac_enabled {
             return;
         }
@@ -62,7 +62,7 @@ impl Wave {
         }
 
         // Length counter (steps 0, 2, 4, 6)
-        if step % 2 == 0 {
+        if step.is_multiple_of(2) {
             self.step_length_counter();
         }
     }
@@ -112,7 +112,7 @@ impl Wave {
 
         // Get the current sample from wave RAM
         let byte_index = (self.position_counter / 2) as usize;
-        let sample = if self.position_counter % 2 == 0 {
+        let sample = if self.position_counter.is_multiple_of(2) {
             // High nibble
             (self.wave_ram[byte_index] >> 4) & 0x0F
         } else {

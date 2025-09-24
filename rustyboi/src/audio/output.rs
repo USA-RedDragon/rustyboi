@@ -33,19 +33,18 @@ impl AudioOutput {
     }
 
     pub fn add_samples(&mut self, samples: &[(f32, f32)]) {
-        if self.sink.is_some() {
-            if !samples.is_empty() {
+        if self.sink.is_some()
+            && !samples.is_empty() {
                 self.buffer.extend_from_slice(samples);
                 if self.buffer.len() >= BUFFER_SIZE {
                     self.flush_buffer();
                 }
-            }
         }
     }
 
     fn flush_buffer(&mut self) {
-        if let Some(sink) = &self.sink {
-            if !self.buffer.is_empty() {
+        if let Some(sink) = &self.sink
+            && !self.buffer.is_empty() {
                 let mut mono_samples = Vec::with_capacity(self.buffer.len() * 2);
                 for &(left, right) in &self.buffer {
                     mono_samples.push(left);
@@ -57,6 +56,5 @@ impl AudioOutput {
                 
                 self.buffer.clear();
             }
-        }
     }
 }

@@ -226,9 +226,9 @@ impl RawConfig {
             rom: self.rom,
             state: self.state,
             scale: self.scale,
-            palette: ColorPalette::from_str(&self.palette).unwrap_or(ColorPalette::default()),
+            palette: ColorPalette::from_str(&self.palette).unwrap_or_default(),
             cli: self.cli,
-            skip_bios: skip_bios,
+            skip_bios,
             keybinds: KeyBinds::default(),
         }
     }

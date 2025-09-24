@@ -34,7 +34,7 @@ impl Timer {
         }
     }
 
-    pub fn step(&mut self, cpu: &mut cpu::SM83, mmio: &mut mmio::MMIO) {
+    pub fn step(&mut self, cpu: &mut cpu::SM83, mmio: &mut mmio::Mmio) {
         self.internal_counter = self.internal_counter.wrapping_add(1);
         self.div = (self.internal_counter >> 8) as u8;
 

@@ -3,8 +3,8 @@ use super::super::main_ui::Gui;
 
 impl Gui {
     pub(in crate::display::gui) fn render_stack_explorer_panel(&mut self, ctx: &Context, registers: Option<&crate::cpu::registers::Registers>, gb: Option<&crate::gb::GB>) {
-        if let Some(regs) = registers {
-            if let Some(gb_ref) = gb {
+        if let Some(regs) = registers
+            && let Some(gb_ref) = gb {
                 egui::Window::new("Stack Explorer")
                     .default_pos([220.0, 50.0])
                     .default_size([180.0, 400.0])
@@ -17,11 +17,10 @@ impl Gui {
                         let sp = regs.sp;
                         ui.monospace(egui::RichText::new(format!("SP: {:04X}", sp)).color(egui::Color32::YELLOW));
                         
-                        if ui.button("↑ Scroll Up").clicked() {
-                            if self.stack_scroll_offset < 100 { // Reasonable upper limit
+                        if ui.button("↑ Scroll Up").clicked()
+                            && self.stack_scroll_offset < 100 { // Reasonable upper limit
                                 self.stack_scroll_offset = self.stack_scroll_offset.saturating_add(1);
                             }
-                        }
                         
                         ui.separator();
                         
@@ -54,11 +53,10 @@ impl Gui {
                         
                         ui.separator();
                         
-                        if ui.button("↓ Scroll Down").clicked() {
-                            if self.stack_scroll_offset > -100 { // Reasonable lower limit
+                        if ui.button("↓ Scroll Down").clicked()
+                            && self.stack_scroll_offset > -100 { // Reasonable lower limit
                                 self.stack_scroll_offset = self.stack_scroll_offset.saturating_sub(1);
                             }
-                        }
                         
                         // Reset button
                         ui.horizontal(|ui| {
@@ -72,6 +70,5 @@ impl Gui {
                         ui.small(egui::RichText::new("Yellow = SP position").color(egui::Color32::LIGHT_GRAY));
                     });
             }
-        }
     }
 }

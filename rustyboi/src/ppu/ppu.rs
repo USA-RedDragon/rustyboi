@@ -74,7 +74,7 @@ pub enum State {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct PPU {
+pub struct Ppu {
     fetcher: fetcher::Fetcher,
     disabled: bool,
     state: State,
@@ -97,9 +97,9 @@ pub struct PPU {
     have_frame: bool,
 }
 
-impl PPU {
+impl Ppu {
     pub fn new() -> Self {
-        PPU {
+        Ppu {
             fetcher: fetcher::Fetcher::new(),
             disabled: true,
             state: State::OAMSearch,
@@ -120,7 +120,7 @@ impl PPU {
         *self = Self::new();
     }
 
-    pub fn get_palette_color(&self, mmio: &mmio::MMIO, idx: u8) -> u8 {
+    pub fn get_palette_color(&self, mmio: &mmio::Mmio, idx: u8) -> u8 {
         match idx {
             0 => mmio.read(BGP)&0x03,        // White
             1 => (mmio.read(BGP)>>2)&0x03, // Light Gray
@@ -130,7 +130,7 @@ impl PPU {
         }
     }
 
-    pub fn get_sprite_palette_color(&self, mmio: &mmio::MMIO, idx: u8, palette: bool) -> u8 {
+    pub fn get_sprite_palette_color(&self, mmio: &mmio::Mmio, idx: u8, palette: bool) -> u8 {
         if idx == 0 {
             return 0; // Transparent for sprites
         }
@@ -144,7 +144,7 @@ impl PPU {
         }
     }
 
-    pub fn step(&mut self, cpu: &mut cpu::SM83, mmio: &mut mmio::MMIO) {
+    pub fn step(&mut self, cpu: &mut cpu::SM83, mmio: &mut mmio::Mmio) {
         if self.disabled {
             if mmio.read(LCD_CONTROL)&(LCDCFlags::DisplayEnable as u8) != 0 {
                 self.disabled = false;
@@ -152,13 +152,11 @@ impl PPU {
             } else {
                 return;
             }
-        } else {
-            if mmio.read(LCD_CONTROL)&(LCDCFlags::DisplayEnable as u8) == 0 {
-                mmio.write(LY, 0);
-                self.x = 0;
-                self.disabled = true;
-                return;
-            }
+        } else if mmio.read(LCD_CONTROL)&(LCDCFlags::DisplayEnable as u8) == 0 {
+            mmio.write(LY, 0);
+            self.x = 0;
+            self.disabled = true;
+            return;
         }
 
         if mmio.read(LYC) == mmio.read(LY) {
@@ -195,7 +193,7 @@ impl PPU {
                 
                 // Perform sprite search distributed across 80 ticks
                 // Check one sprite every 2 ticks (40 sprites × 2 ticks = 80 ticks)
-                if self.ticks % 2 == 0 && self.current_oam_sprite_index < OAM_SPRITE_COUNT {
+                if self.ticks.is_multiple_of(2) && self.current_oam_sprite_index < OAM_SPRITE_COUNT {
                     self.check_single_sprite_for_scanline(mmio, self.current_oam_sprite_index);
                     self.current_oam_sprite_index += 1;
                 }
@@ -207,7 +205,7 @@ impl PPU {
                 }
             },
             State::PixelTransfer => 'label: {
-                if self.ticks%2 == 0 {
+                if self.ticks.is_multiple_of(2) {
                     self.fetcher.step(mmio, self.window_line_counter);
                 }
                 if self.fetcher.pixel_fifo.size() <= 8 {
@@ -281,7 +279,7 @@ impl PPU {
                         self.fb_b = self.fb_a;
                         self.fb_a = [0; FRAMEBUFFER_SIZE];
                         self.have_frame = true;
-                    } else if current_ly >= 144 && current_ly < 153 {
+                    } else if (144..153).contains(&current_ly) {
                         let next_ly = current_ly.saturating_add(1);
                         mmio.write(LY, next_ly);
                     }
@@ -331,7 +329,7 @@ impl PPU {
     }
 
     // Check a single sprite during distributed OAM search
-    fn check_single_sprite_for_scanline(&mut self, mmio: &mmio::MMIO, sprite_index: usize) {
+    fn check_single_sprite_for_scanline(&mut self, mmio: &mmio::Mmio, sprite_index: usize) {
         // Skip if we already have the maximum sprites for this line
         if self.sprites_on_line.len() >= MAX_SPRITES_PER_LINE {
             return;
@@ -372,7 +370,7 @@ impl PPU {
     }
 
     // Mix background pixel with sprites at the given screen coordinates
-    fn mix_background_and_sprites(&self, mmio: &mmio::MMIO, bg_pixel_idx: u8, screen_x: u8, screen_y: u8) -> u8 {
+    fn mix_background_and_sprites(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8, screen_x: u8, screen_y: u8) -> u8 {
         let lcdc = mmio.read(LCD_CONTROL);
         
         // Check if BG/Window display is enabled (LCDC bit 0)
@@ -405,12 +403,12 @@ impl PPU {
             let relative_y = screen_y as i16 - sprite_actual_y;
             
             // Sprite is 8 pixels wide
-            if relative_x >= 0 && relative_x < 8 {
+            if (0..8).contains(&relative_x) {
                 let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
                 if relative_y >= 0 && relative_y < sprite_height as i16 {
                     // Get sprite pixel data
-                    if let Some(sprite_pixel_idx) = self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8) {
-                        if sprite_pixel_idx != 0 { // Sprite pixel is not transparent
+                    if let Some(sprite_pixel_idx) = self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8)
+                        && sprite_pixel_idx != 0 { // Sprite pixel is not transparent
                             let sprite_color = self.get_sprite_palette_color(mmio, sprite_pixel_idx, sprite.attributes.palette);
                             
                             // Handle sprite priority
@@ -420,7 +418,6 @@ impl PPU {
                             }
                             // If sprite has priority=1 and background is not color 0, background wins
                         }
-                    }
                 }
             }
         }
@@ -429,7 +426,7 @@ impl PPU {
     }
 
     // Get a specific pixel from a sprite's tile data
-    fn get_sprite_pixel(&self, mmio: &mmio::MMIO, sprite: &Sprite, sprite_x: u8, sprite_y: u8) -> Option<u8> {
+    fn get_sprite_pixel(&self, mmio: &mmio::Mmio, sprite: &Sprite, sprite_x: u8, sprite_y: u8) -> Option<u8> {
         let lcdc = mmio.read(LCD_CONTROL);
         let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
         

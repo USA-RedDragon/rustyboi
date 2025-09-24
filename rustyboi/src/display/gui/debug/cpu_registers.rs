@@ -5,8 +5,8 @@ use crate::cpu::disassembler::Disassembler;
 
 impl Gui {
     pub(in crate::display::gui) fn render_cpu_registers_panel(&mut self, ctx: &Context, registers: Option<&crate::cpu::registers::Registers>, gb: Option<&crate::gb::GB>, action: &mut Option<GuiAction>, paused: bool) {
-        if let Some(regs) = registers {
-            if let Some(gb_ref) = gb {
+        if let Some(regs) = registers
+            && let Some(gb_ref) = gb {
                 egui::Window::new("CPU Registers")
                     .default_pos([10.0, 50.0])
                     .default_size([250.0, 400.0])
@@ -116,7 +116,7 @@ impl Gui {
                                     // Button is being held down
                                     self.step_cycles_held_frames += 1;
                                     // After 15 frames (250ms at 60fps), start repeating every 4 frames (67ms at 60fps)
-                                    if self.step_cycles_held_frames > 15 && (self.step_cycles_held_frames - 15) % 4 == 0 {
+                                    if self.step_cycles_held_frames > 15 && (self.step_cycles_held_frames - 15).is_multiple_of(4) {
                                         *action = Some(GuiAction::StepCycles(self.step_count));
                                     }
                                 } else {
@@ -134,7 +134,7 @@ impl Gui {
                                     // Button is being held down
                                     self.step_frames_held_frames += 1;
                                     // After 15 frames (250ms at 60fps), start repeating every 4 frames (67ms at 60fps)
-                                    if self.step_frames_held_frames > 15 && (self.step_frames_held_frames - 15) % 4 == 0 {
+                                    if self.step_frames_held_frames > 15 && (self.step_frames_held_frames - 15).is_multiple_of(4) {
                                         *action = Some(GuiAction::StepFrames(self.step_count));
                                     }
                                 } else {
@@ -155,6 +155,5 @@ impl Gui {
                         ui.small(egui::RichText::new("F = step frame | N = step cycle").color(egui::Color32::LIGHT_GRAY));
                     });
             }
-        }
     }
 }

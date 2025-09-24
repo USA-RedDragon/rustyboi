@@ -133,7 +133,7 @@ impl Gui {
                             ui.monospace(format!("OAM Position: Y={:02X} ({}) X={:02X} ({})", sprite_y, sprite_y, sprite_x, sprite_x));
                             ui.monospace(format!("Screen Position: Y={} X={}", screen_y, screen_x));
                             ui.monospace(format!("Tile Index: {:02X} ({})", tile_index, tile_index));
-                            ui.monospace(format!("Attributes: {:02X} ({})", attributes, format!("{:08b}", attributes)));
+                            ui.monospace(format!("Attributes: {:02X} ({:08b})", attributes, attributes));
                             
                             ui.separator();
                             
