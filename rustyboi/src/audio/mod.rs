@@ -1,7 +1,7 @@
-pub mod audio;
+pub mod controller;
 mod noise;
 mod square;
 mod wave;
 pub mod output;
 
-pub use audio::*;
+pub use controller::*;

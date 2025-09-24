@@ -4,7 +4,7 @@ use crate::cpu;
 use crate::input;
 use crate::memory;
 use crate::memory::Addressable;
-use crate::ppu::ppu;
+use crate::ppu;
 use crate::timer;
 use serde::{Deserialize, Serialize};
 

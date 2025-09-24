@@ -14,7 +14,7 @@ impl Gui {
                     ui.set_min_width(320.0);
                     
                     // Get current palette for color mapping
-                    let bgp = gb_ref.read_memory(crate::ppu::ppu::BGP);
+                    let bgp = gb_ref.read_memory(crate::ppu::BGP);
                     
                     ui.monospace(egui::RichText::new("VRAM Tile Data").color(egui::Color32::YELLOW));
                     ui.small(egui::RichText::new("8x8 pixel tiles from 0x8000-0x97FF").color(egui::Color32::LIGHT_GRAY));

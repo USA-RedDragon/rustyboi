@@ -16,7 +16,7 @@ impl Gui {
                         
                         // Background Palette (BGP)
                         ui.heading("Background Palette (BGP)");
-                        let bgp = gb_ref.read_memory(crate::ppu::ppu::BGP);
+                        let bgp = gb_ref.read_memory(crate::ppu::BGP);
                         ui.monospace(egui::RichText::new(format!("BGP: {:02X}", bgp)).color(egui::Color32::YELLOW));
                     
                     ui.separator();
@@ -60,8 +60,8 @@ impl Gui {
 
                     // Sprite Palettes (OBP0 and OBP1)
                     ui.heading("Sprite Palettes");
-                    let obp0 = gb_ref.read_memory(crate::ppu::ppu::OBP0);
-                    let obp1 = gb_ref.read_memory(crate::ppu::ppu::OBP1);
+                    let obp0 = gb_ref.read_memory(crate::ppu::OBP0);
+                    let obp1 = gb_ref.read_memory(crate::ppu::OBP1);
                     
                     // OBP0 Palette
                     ui.monospace(egui::RichText::new(format!("OBP0: {:02X}", obp0)).color(egui::Color32::LIGHT_BLUE));

@@ -14,7 +14,7 @@ impl Gui {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         // Current scanline sprites
                         let (ppu, _) = gb_ref.get_ppu_debug_info();
-                        let ly = gb_ref.read_memory(crate::ppu::ppu::LY);
+                        let ly = gb_ref.read_memory(crate::ppu::LY);
                         let sprites_count = ppu.get_sprites_on_line_count();
                         
                         ui.heading("Current Scanline Sprites");
@@ -59,7 +59,7 @@ impl Gui {
                                     let screen_y = sprite_y.wrapping_sub(16);
                                     
                                     // Determine if sprite is visible on current line
-                                    let lcd_control = gb_ref.read_memory(crate::ppu::ppu::LCD_CONTROL);
+                                    let lcd_control = gb_ref.read_memory(crate::ppu::LCD_CONTROL);
                                     let sprite_height = if (lcd_control & 0x04) != 0 { 16 } else { 8 };
                                     let on_current_line = ly >= screen_y && ly < screen_y + sprite_height;
                                     
@@ -167,9 +167,9 @@ impl Gui {
                             ui.separator();
                             
                             // Show visibility status
-                            let lcd_control = gb_ref.read_memory(crate::ppu::ppu::LCD_CONTROL);
+                            let lcd_control = gb_ref.read_memory(crate::ppu::LCD_CONTROL);
                             let sprite_height = if (lcd_control & 0x04) != 0 { 16 } else { 8 };
-                            let ly = gb_ref.read_memory(crate::ppu::ppu::LY);
+                            let ly = gb_ref.read_memory(crate::ppu::LY);
                             let on_current_line = ly >= screen_y && ly < screen_y + sprite_height;
                             let visible = sprite_y != 0 && sprite_y < 160 && sprite_x != 0 && sprite_x < 168;
                             
@@ -206,9 +206,9 @@ impl Gui {
         // Get sprite palettes
         let palette_bit = (attributes & 0x10) != 0;
         let palette_reg = if palette_bit { 
-            gb_ref.read_memory(crate::ppu::ppu::OBP1)
+            gb_ref.read_memory(crate::ppu::OBP1)
         } else { 
-            gb_ref.read_memory(crate::ppu::ppu::OBP0)
+            gb_ref.read_memory(crate::ppu::OBP0)
         };
         
         // Get flip flags
