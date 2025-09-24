@@ -7,7 +7,7 @@
     {
       "groupName": "egui",
       "matchDatasources": [
-        "cargo"
+        "crate"
       ],
       "matchPackageNames": [
         "egui",
