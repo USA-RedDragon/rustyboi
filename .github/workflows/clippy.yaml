@@ -31,6 +31,11 @@ jobs:
           rustup target add wasm32-unknown-unknown
           rustup component add clippy
 
+      - name: Install ALSA
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features --fix || true
       - uses: stefanzweifel/git-auto-commit-action@v6
