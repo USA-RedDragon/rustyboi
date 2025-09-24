@@ -169,15 +169,8 @@ impl Mmio {
         }
     }
 
-    pub fn set_input_state(&mut self, a: bool, b: bool, start: bool, select: bool, up: bool, down: bool, left: bool, right: bool) {
-        self.input.a = a;
-        self.input.b = b;
-        self.input.start = start;
-        self.input.select = select;
-        self.input.up = up;
-        self.input.down = down;
-        self.input.left = left;
-        self.input.right = right;
+    pub fn set_input_state(&mut self, state: crate::input::ButtonState) {
+        self.input.set_button_state(state);
     }
 
     // Private helper to read during DMA without triggering DMA conflicts

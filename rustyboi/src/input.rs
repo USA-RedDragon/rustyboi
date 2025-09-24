@@ -4,6 +4,18 @@ use serde::{Deserialize, Serialize};
 
 pub const JOYP: u16 = 0xFF00;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ButtonState {
+    pub a: bool,
+    pub b: bool,
+    pub start: bool,
+    pub select: bool,
+    pub up: bool,
+    pub down: bool,
+    pub left: bool,
+    pub right: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Input {
     #[serde(skip, default)]
@@ -44,6 +56,17 @@ impl Input {
             right: false,
             joyp: 0b00001111,
         }
+    }
+
+    pub fn set_button_state(&mut self, state: ButtonState) {
+        self.a = state.a;
+        self.b = state.b;
+        self.start = state.start;
+        self.select = state.select;
+        self.up = state.up;
+        self.down = state.down;
+        self.left = state.left;
+        self.right = state.right;
     }
 }
 

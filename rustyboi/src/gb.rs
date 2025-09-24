@@ -180,8 +180,8 @@ impl GB {
     }
 
     // Input methods to update button states
-    pub fn set_input_state(&mut self, a: bool, b: bool, start: bool, select: bool, up: bool, down: bool, left: bool, right: bool) {
-        self.mmio.set_input_state(a, b, start, select, up, down, left, right);
+    pub fn set_input_state(&mut self, state: crate::input::ButtonState) {
+        self.mmio.set_input_state(state);
     }
 
     // Breakpoint management methods
