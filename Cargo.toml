@@ -6,11 +6,10 @@ members = [
 ]
 default-members = ["rustyboi"]
 
+[profile.dev]
+opt-level = "s"
+
 [profile.release]
-# 454744 bytes
 strip = true
-# 377544
-opt-level = "z"
-# 373448
-# lto = true
-# 320104
+opt-level = "s"
+lto = true
