@@ -116,6 +116,13 @@ impl GB {
             Vec::new()
         };
         
+        // Send audio samples directly to output as they're generated
+        if !audio_samples.is_empty() {
+            if let Some(audio_output) = &self.audio_output {
+                audio_output.add_samples(&audio_samples);
+            }
+        }
+        
         (audio_samples, false) // No breakpoint hit
     }
 
@@ -126,27 +133,15 @@ impl GB {
             let (audio_samples, breakpoint_hit) = self.step_instruction(collect_audio);
             
             if breakpoint_hit {
-                // Send accumulated audio before returning due to breakpoint
-                if !all_audio_samples.is_empty() {
-                    if let Some(audio_output) = &self.audio_output {
-                        audio_output.add_samples(&all_audio_samples);
-                    }
-                }
                 // Breakpoint hit - return current frame and indicate breakpoint hit
                 return (self.ppu.get_frame(), all_audio_samples, true);
             }
             
             if collect_audio {
-                all_audio_samples.extend(audio_samples);
+                all_audio_samples.extend(&audio_samples);
             }
             
             if self.ppu.frame_ready() {
-                // Send accumulated audio to output if audio is enabled
-                if !all_audio_samples.is_empty() {
-                    if let Some(audio_output) = &self.audio_output {
-                        audio_output.add_samples(&all_audio_samples);
-                    }
-                }
                 return (self.ppu.get_frame(), all_audio_samples, false);
             }
         }
