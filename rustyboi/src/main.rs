@@ -11,7 +11,6 @@ mod memory;
 mod ppu;
 mod timer;
 
-#[cfg(not(target_arch = "wasm32"))]
 use clap::Parser;
 use pixels;
 
@@ -21,7 +20,9 @@ fn main() -> Result<(), pixels::Error> {
         std::panic::set_hook(Box::new(console_error_panic_hook::hook));
         console_log::init_with_level(log::Level::Trace).expect("error initializing logger");
 
-        wasm_bindgen_futures::spawn_local(display::run_with_gui_async(gb, &config));
+        let config = config::RawConfig::try_parse_from(std::iter::empty::<String>())
+            .expect("Failed to create default config").clean();
+        wasm_bindgen_futures::spawn_local(display::run_with_gui_async(gb::GB::new(true), config));
         return Ok(());
     }
 

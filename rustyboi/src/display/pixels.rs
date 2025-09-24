@@ -19,7 +19,7 @@ const HEIGHT: u32 = 144;
 
 
 #[cfg(target_arch = "wasm32")]
-pub async fn run_with_gui_async(gb: gb::GB, config: &config::CleanConfig) {
+pub async fn run_with_gui_async(gb: gb::GB, config: config::CleanConfig) {
     let event_loop = EventLoop::new().unwrap();
     let window = {
         let size = LogicalSize::new((WIDTH * (config.scale as u32)) as f64, (HEIGHT * (config.scale as u32)) as f64);
@@ -49,7 +49,7 @@ pub async fn run_with_gui_async(gb: gb::GB, config: &config::CleanConfig) {
 
         (pixels, framework)
     }.await;
-    run_gui_loop(event_loop, &window, pixels, framework, gb, config);
+    run_gui_loop(event_loop, &window, pixels, framework, gb, &config);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
