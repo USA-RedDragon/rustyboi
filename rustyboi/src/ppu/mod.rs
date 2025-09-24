@@ -1,5 +1,5 @@
-pub mod ppu;
+pub mod controller;
 mod fetcher;
 mod fifo;
 
-pub use ppu::*;
+pub use controller::*;

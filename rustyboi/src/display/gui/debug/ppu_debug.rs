@@ -19,10 +19,10 @@ impl Gui {
                         .color(if ppu.is_disabled() { egui::Color32::LIGHT_RED } else { egui::Color32::LIGHT_GREEN }));
                     
                     let state_str = match ppu.get_state() {
-                        crate::ppu::ppu::State::OAMSearch => "OAM Search",
-                        crate::ppu::ppu::State::PixelTransfer => "Pixel Transfer", 
-                        crate::ppu::ppu::State::HBlank => "H-Blank",
-                        crate::ppu::ppu::State::VBlank => "V-Blank",
+                        crate::ppu::State::OAMSearch => "OAM Search",
+                        crate::ppu::State::PixelTransfer => "Pixel Transfer", 
+                        crate::ppu::State::HBlank => "H-Blank",
+                        crate::ppu::State::VBlank => "V-Blank",
                     };
                     ui.monospace(egui::RichText::new(format!("State: {}", state_str)).color(egui::Color32::WHITE));
                     ui.monospace(egui::RichText::new(format!("Ticks: {}", ppu.get_ticks())).color(egui::Color32::WHITE));
@@ -33,14 +33,14 @@ impl Gui {
                     ui.separator();
                     
                     // MMIO Registers
-                    let ly = gb_ref.read_memory(crate::ppu::ppu::LY);
-                    let scy = gb_ref.read_memory(crate::ppu::ppu::SCY);
-                    let bgp = gb_ref.read_memory(crate::ppu::ppu::BGP);
-                    let obp0 = gb_ref.read_memory(crate::ppu::ppu::OBP0);
-                    let obp1 = gb_ref.read_memory(crate::ppu::ppu::OBP1);
-                    let lyc = gb_ref.read_memory(crate::ppu::ppu::LYC);
-                    let lcd_control = gb_ref.read_memory(crate::ppu::ppu::LCD_CONTROL);
-                    let lcd_status = gb_ref.read_memory(crate::ppu::ppu::LCD_STATUS);
+                    let ly = gb_ref.read_memory(crate::ppu::LY);
+                    let scy = gb_ref.read_memory(crate::ppu::SCY);
+                    let bgp = gb_ref.read_memory(crate::ppu::BGP);
+                    let obp0 = gb_ref.read_memory(crate::ppu::OBP0);
+                    let obp1 = gb_ref.read_memory(crate::ppu::OBP1);
+                    let lyc = gb_ref.read_memory(crate::ppu::LYC);
+                    let lcd_control = gb_ref.read_memory(crate::ppu::LCD_CONTROL);
+                    let lcd_status = gb_ref.read_memory(crate::ppu::LCD_STATUS);
 
                     ui.monospace(egui::RichText::new(format!("LY: {:02X} ({})", ly, ly)).color(egui::Color32::WHITE));
                     ui.monospace(egui::RichText::new(format!("LYC: {:02X} ({})", lyc, lyc)).color(egui::Color32::WHITE));

@@ -1,4 +1,4 @@
-pub mod memory;
+pub mod buffer;
 pub mod mmio;
 
-pub use memory::*;
+pub use buffer::*;
