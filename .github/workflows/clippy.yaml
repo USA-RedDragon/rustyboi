@@ -36,6 +36,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features --fix || true
       - uses: stefanzweifel/git-auto-commit-action@v6
