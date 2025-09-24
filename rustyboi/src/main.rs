@@ -48,22 +48,6 @@ fn main() -> Result<(), pixels::Error> {
                 .expect("Failed to load BIOS file");
         }
 
-        if !config.cli {
-            return display::run_with_gui(gb, &config);
-        }
-
-        // Create a stateful terminal instance for differential rendering
-        let mut terminal = display::Terminal::new(config.palette);
-        
-        loop {
-            // Update input from terminal (placeholder implementation)
-            terminal.update_input(&config.keybinds);
-            let (a, b, start, select, up, down, left, right) = terminal.get_input_state();
-            gb.set_input_state(a, b, start, select, up, down, left, right);
-            
-            // Don't collect audio in terminal mode to keep it simple
-            let (frame_data, _breakpoint_hit) = gb.run_until_frame(false);
-            terminal.render_frame(&frame_data);
-        }
+        display::run_with_gui(gb, &config)
     }
 }
