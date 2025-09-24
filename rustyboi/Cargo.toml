@@ -7,7 +7,7 @@ edition = "2024"
 clap = { version = "4.5.48", features = ["derive"] }
 crossbeam = "0.8.4"
 egui = "0.26"
-egui-wgpu = "0.26.0"
+egui-wgpu = "0.32.3"
 log = "0.4.28"
 pixels = "0.15.0"
 rodio = "0.19"
