@@ -77,27 +77,12 @@ impl GB {
         Ok(())
     }
 
-    pub fn disable_audio(&mut self) {
-        self.audio_output = None;
-        println!("Audio output disabled");
-    }
-
-    pub fn is_audio_enabled(&self) -> bool {
-        self.audio_output.is_some()
-    }
-
-    pub fn set_audio_volume(&mut self, volume: f32) {
-        if let Some(audio_output) = &self.audio_output {
-            audio_output.set_volume(volume);
-        }
-    }
-
-    pub fn step_instruction(&mut self, collect_audio: bool) -> (Vec<(f32, f32)>, bool) {
+    pub fn step_instruction(&mut self, collect_audio: bool) -> (bool, u8) {
         // Check for breakpoint at current PC before executing
         let pc = self.cpu.registers.pc;
         if self.breakpoints.contains(&pc) {
             // Breakpoint hit - don't execute instruction and return (empty audio, breakpoint hit)
-            return (Vec::new(), true);
+            return (true, 0);
         }
 
         // Execute one CPU instruction and step PPU accordingly
@@ -118,31 +103,39 @@ impl GB {
         
         // Send audio samples directly to output as they're generated
         if !audio_samples.is_empty() {
-            if let Some(audio_output) = &self.audio_output {
+            if let Some(audio_output) = &mut self.audio_output {
                 audio_output.add_samples(&audio_samples);
             }
         }
         
-        (audio_samples, false) // No breakpoint hit
+        (false, cycles) // No breakpoint hit
     }
 
-    pub fn run_until_frame(&mut self, collect_audio: bool) -> ([u8; ppu::FRAMEBUFFER_SIZE], Vec<(f32, f32)>, bool) {
-        let mut all_audio_samples = Vec::new();
+    pub fn run_until_frame(&mut self, collect_audio: bool) -> ([u8; ppu::FRAMEBUFFER_SIZE], bool) {
+        let mut cpu_cycles_this_frame = 0u32;
+        // Normal frame should be 70224 cycles (154 scanlines × 456 cycles)
+        // If we exceed this, we assume PPU is disabled or stuck
+        // and return to avoid audio buildup
+        const MAX_CYCLES_PER_FRAME: u32 = 70224;
         
         loop {
-            let (audio_samples, breakpoint_hit) = self.step_instruction(collect_audio);
+            let (breakpoint_hit, cycles) = self.step_instruction(collect_audio);
+            cpu_cycles_this_frame += cycles as u32;
             
             if breakpoint_hit {
                 // Breakpoint hit - return current frame and indicate breakpoint hit
-                return (self.ppu.get_frame(), all_audio_samples, true);
+                return (self.ppu.get_frame(), true);
             }
             
-            if collect_audio {
-                all_audio_samples.extend(&audio_samples);
-            }
-            
+            // Check if PPU has completed a frame
             if self.ppu.frame_ready() {
-                return (self.ppu.get_frame(), all_audio_samples, false);
+                return (self.ppu.get_frame(), false);
+            }
+            
+            // If PPU is disabled or taking too long, cap the cycles to prevent audio buildup
+            if cpu_cycles_this_frame >= MAX_CYCLES_PER_FRAME {
+                // PPU disabled or stuck - return after reasonable cycle count to maintain timing
+                return (self.ppu.get_frame(), false);
             }
         }
     }

@@ -228,14 +228,6 @@ impl SquareWave {
         }
     }
 
-    fn is_length_enabled(&self) -> bool {
-        if self.channel1 {
-            (self.nr14 >> 6) & 0x01 != 0
-        } else {
-            (self.nr24 >> 6) & 0x01 != 0
-        }
-    }
-
     fn trigger(&mut self) {
         self.enabled = true;
         

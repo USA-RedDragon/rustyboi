@@ -84,10 +84,6 @@ impl Wave {
         (self.nr32 >> 5) & 0x03
     }
 
-    fn is_length_enabled(&self) -> bool {
-        (self.nr34 >> 6) & 0x01 != 0
-    }
-
     fn trigger(&mut self) {
         self.enabled = true;
         
