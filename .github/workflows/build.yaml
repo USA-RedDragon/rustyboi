@@ -1,0 +1,24 @@
+name: Build
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.ref }}'
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        run: |
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+      - name: Build
+        run: cargo build --all-targets --all-features --workspace
