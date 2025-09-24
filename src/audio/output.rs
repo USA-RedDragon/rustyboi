@@ -1,6 +1,5 @@
 use rodio::{OutputStream, Sink};
 use rodio::buffer::SamplesBuffer;
-use std::time::Instant;
 
 pub struct AudioOutput {
     _stream: Option<OutputStream>,
