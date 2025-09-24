@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 clap = { version = "4.5.48", features = ["derive"] }
 crossbeam = "0.8.4"
-egui = "0.26"
+egui = "0.32.3"
 egui-wgpu = "0.26.0"
 log = "0.4.28"
 pixels = "0.15.0"
