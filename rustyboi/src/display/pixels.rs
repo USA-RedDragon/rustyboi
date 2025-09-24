@@ -10,14 +10,17 @@ use winit::event_loop::EventLoop;
 use winit::keyboard::KeyCode;
 use winit::window::WindowBuilder;
 use winit_input_helper::WinitInputHelper;
-use pixels::{Error,Pixels,SurfaceTexture};
+use pixels::{Error, Pixels, SurfaceTexture};
+#[cfg(target_arch = "wasm32")]
+use pixels::PixelsBuilder;
 
 const WIDTH: u32 = 160;
 const HEIGHT: u32 = 144;
 
-pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Error> {
+
+#[cfg(target_arch = "wasm32")]
+pub async fn run_with_gui_async(gb: gb::GB, config: &config::CleanConfig) {
     let event_loop = EventLoop::new().unwrap();
-    let mut input = WinitInputHelper::new();
     let window = {
         let size = LogicalSize::new((WIDTH * (config.scale as u32)) as f64, (HEIGHT * (config.scale as u32)) as f64);
         WindowBuilder::new()
@@ -28,7 +31,41 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
             .unwrap()
     };
 
-    let (mut pixels, mut framework) = {
+    let (pixels, framework) = async {
+        let window_size = window.inner_size();
+        let scale_factor = window.scale_factor() as f32;
+        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
+        let pixels = PixelsBuilder::new(WIDTH, HEIGHT, surface_texture)
+            .build_async()
+            .await
+            .unwrap();
+        let framework = Framework::new(
+            &event_loop,
+            window_size.width,
+            window_size.height,
+            scale_factor,
+            &pixels,
+        );
+
+        (pixels, framework)
+    }.await;
+    run_gui_loop(event_loop, &window, pixels, framework, gb, config);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Error> {
+    let event_loop = EventLoop::new().unwrap();
+    let window = {
+        let size = LogicalSize::new((WIDTH * (config.scale as u32)) as f64, (HEIGHT * (config.scale as u32)) as f64);
+        WindowBuilder::new()
+            .with_title("RustyBoi")
+            .with_inner_size(size)
+            .with_min_inner_size(LogicalSize::new(WIDTH as f64, HEIGHT as f64))
+            .build(&event_loop)
+            .unwrap()
+    };
+
+    let (pixels, framework) = {
         let window_size = window.inner_size();
         let scale_factor = window.scale_factor() as f32;
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
@@ -43,6 +80,18 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
 
         (pixels, framework)
     };
+    run_gui_loop(event_loop, &window, pixels, framework, gb, config)
+}
+
+fn run_gui_loop(
+    event_loop: EventLoop<()>,
+    window: &winit::window::Window,
+    mut pixels: Pixels,
+    mut framework: Framework,
+    gb: gb::GB,
+    config: &config::CleanConfig,
+) -> Result<(), Error> {
+    let mut input = WinitInputHelper::new();
     let mut world = World::new_with_paths(gb, config.rom.clone(), config.bios.clone(), config.palette); 
     
     // Enable audio output
