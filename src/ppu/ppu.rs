@@ -263,7 +263,7 @@ impl PPU {
             },
             State::HBlank => {
                 // no-ops
-                if self.ticks == 339 {
+                if self.ticks == 376 {
                     self.ticks = 0;
                     let current_ly = mmio.read(LY);
                     
@@ -287,7 +287,7 @@ impl PPU {
             State::VBlank => {
                 // VBlank lasts for 10 scanlines (144-153)
                 // Each scanline is 456 cycles, so VBlank should transition every 456 cycles
-                if self.ticks == 455 { // 456 cycles per scanline minus 1 (0-based)
+                if self.ticks == 456 { // 456 cycles per scanline minus 1 (0-based)
                     self.ticks = 0;
                     let current_ly = mmio.read(LY);
                     
