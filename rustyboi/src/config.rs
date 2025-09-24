@@ -62,80 +62,6 @@ impl ColorPalette {
             ],
         }
     }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    /// Returns ANSI color codes for terminal display
-    pub fn get_ansi_bg_colors(&self) -> [&'static str; 4] {
-        match self {
-            Self::Grayscale => [
-                "\x1b[48;5;231m", // White
-                "\x1b[48;5;248m", // Light gray
-                "\x1b[48;5;240m", // Dark gray
-                "\x1b[48;5;232m", // Black
-            ],
-            Self::OriginalGreen => [
-                "\x1b[48;2;155;188;15m", // Light green
-                "\x1b[48;2;139;172;15m", // Medium green
-                "\x1b[48;2;48;98;48m",   // Dark green
-                "\x1b[48;2;15;56;15m",   // Darkest green
-            ],
-            Self::Blue => [
-                "\x1b[48;2;224;248;255m", // Light blue
-                "\x1b[48;2;134;192;234m", // Medium blue
-                "\x1b[48;2;46;89;141m",   // Dark blue
-                "\x1b[48;2;26;28;44m",    // Darkest blue
-            ],
-            Self::Brown => [
-                "\x1b[48;2;255;246;211m", // Light brown
-                "\x1b[48;2;191;139;103m", // Medium brown
-                "\x1b[48;2;127;79;36m",   // Dark brown
-                "\x1b[48;2;51;32;20m",    // Darkest brown
-            ],
-            Self::Red => [
-                "\x1b[48;2;255;228;225m", // Light red
-                "\x1b[48;2;255;165;158m", // Medium red
-                "\x1b[48;2;191;48;48m",   // Dark red
-                "\x1b[48;2;127;10;10m",   // Darkest red
-            ],
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    /// Returns ANSI foreground color codes for terminal display
-    pub fn get_ansi_fg_colors(&self) -> [&'static str; 4] {
-        match self {
-            Self::Grayscale => [
-                "\x1b[38;5;231m", // White
-                "\x1b[38;5;248m", // Light gray
-                "\x1b[38;5;240m", // Dark gray
-                "\x1b[38;5;232m", // Black
-            ],
-            Self::OriginalGreen => [
-                "\x1b[38;2;155;188;15m", // Light green
-                "\x1b[38;2;139;172;15m", // Medium green
-                "\x1b[38;2;48;98;48m",   // Dark green
-                "\x1b[38;2;15;56;15m",   // Darkest green
-            ],
-            Self::Blue => [
-                "\x1b[38;2;224;248;255m", // Light blue
-                "\x1b[38;2;134;192;234m", // Medium blue
-                "\x1b[38;2;46;89;141m",   // Dark blue
-                "\x1b[38;2;26;28;44m",    // Darkest blue
-            ],
-            Self::Brown => [
-                "\x1b[38;2;255;246;211m", // Light brown
-                "\x1b[38;2;191;139;103m", // Medium brown
-                "\x1b[38;2;127;79;36m",   // Dark brown
-                "\x1b[38;2;51;32;20m",    // Darkest brown
-            ],
-            Self::Red => [
-                "\x1b[38;2;255;228;225m", // Light red
-                "\x1b[38;2;255;165;158m", // Medium red
-                "\x1b[38;2;191;48;48m",   // Dark red
-                "\x1b[38;2;127;10;10m",   // Darkest red
-            ],
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -188,10 +114,6 @@ pub struct RawConfig {
     #[arg(short, long, default_value = "grayscale")]
     palette: String,
 
-    /// Run with CLI (no GUI)
-    #[arg(long, default_value_t = false)]
-    cli: bool,
-
     /// Skip BIOS on startup
     #[arg(long, default_value_t = false)]
     skip_bios: bool,
@@ -209,9 +131,6 @@ pub struct CleanConfig {
     pub scale: u8,
     // Color palette
     pub palette: ColorPalette,
-    #[cfg(not(target_arch = "wasm32"))]
-    // run in CLI mode (no GUI)
-    pub cli: bool,
     #[cfg(not(target_arch = "wasm32"))]
     // skip BIOS on startup
     pub skip_bios: bool,
@@ -236,8 +155,6 @@ impl RawConfig {
             state: self.state,
             scale: self.scale,
             palette: ColorPalette::from_str(&self.palette).unwrap_or_default(),
-            #[cfg(not(target_arch = "wasm32"))]
-            cli: self.cli,
             #[cfg(not(target_arch = "wasm32"))]
             skip_bios: _skip_bios,
             keybinds: KeyBinds::default(),
