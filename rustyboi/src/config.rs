@@ -63,6 +63,7 @@ impl ColorPalette {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Returns ANSI color codes for terminal display
     pub fn get_ansi_bg_colors(&self) -> [&'static str; 4] {
         match self {
@@ -99,6 +100,7 @@ impl ColorPalette {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Returns ANSI foreground color codes for terminal display
     pub fn get_ansi_fg_colors(&self) -> [&'static str; 4] {
         match self {
@@ -200,14 +202,17 @@ pub struct CleanConfig {
     pub bios: Option<String>,
     // path to ROM file
     pub rom: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
     // path to save state to load on startup
     pub state: Option<String>,
     // GUI scale factor
     pub scale: u8,
     // Color palette
     pub palette: ColorPalette,
+    #[cfg(not(target_arch = "wasm32"))]
     // run in CLI mode (no GUI)
     pub cli: bool,
+    #[cfg(not(target_arch = "wasm32"))]
     // skip BIOS on startup
     pub skip_bios: bool,
     // keybinds configuration
@@ -216,19 +221,25 @@ pub struct CleanConfig {
 
 impl RawConfig {
     pub fn clean(self) -> CleanConfig {
-        let mut skip_bios = self.skip_bios;
-        if self.bios.is_none() {
-            skip_bios = true;
+        let mut _skip_bios = self.skip_bios;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.bios.is_none() {
+                _skip_bios = true;
+            }
         }
 
         CleanConfig {
             bios: self.bios,
             rom: self.rom,
+            #[cfg(not(target_arch = "wasm32"))]
             state: self.state,
             scale: self.scale,
             palette: ColorPalette::from_str(&self.palette).unwrap_or_default(),
+            #[cfg(not(target_arch = "wasm32"))]
             cli: self.cli,
-            skip_bios,
+            #[cfg(not(target_arch = "wasm32"))]
+            skip_bios: _skip_bios,
             keybinds: KeyBinds::default(),
         }
     }

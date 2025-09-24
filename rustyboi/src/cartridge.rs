@@ -218,6 +218,89 @@ impl Cartridge {
         
         Ok(cartridge)
     }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_bytes(data: &[u8]) -> Result<Self, io::Error> {
+        if data.len() < 0x0150 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "ROM too small"));
+        }
+        
+        // Read cartridge header information
+        let cartridge_type = data[CARTRIDGE_TYPE_OFFSET];
+        let rom_size_code = data[ROM_SIZE_OFFSET];
+        let ram_size_code = data[RAM_SIZE_OFFSET];
+        
+        // Calculate number of ROM banks
+        let rom_banks = match rom_size_code {
+            0x00 => 2,   // 32KB = 2 banks of 16KB
+            0x01 => 4,   // 64KB = 4 banks of 16KB
+            0x02 => 8,   // 128KB = 8 banks of 16KB
+            0x03 => 16,  // 256KB = 16 banks of 16KB
+            0x04 => 32,  // 512KB = 32 banks of 16KB
+            0x05 => 64,  // 1MB = 64 banks of 16KB
+            0x06 => 128, // 2MB = 128 banks of 16KB
+            0x07 => 256, // 4MB = 256 banks of 16KB (though MBC1 only supports up to 125)
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid ROM size")),
+        };
+        
+        // Calculate number of RAM banks
+        let ram_banks = match ram_size_code {
+            0x00 => 0, // No RAM
+            0x01 => 1, // 2KB (partial bank)
+            0x02 => 1, // 8KB = 1 bank
+            0x03 => 4, // 32KB = 4 banks of 8KB
+            0x04 => 16, // 128KB = 16 banks of 8KB
+            0x05 => 8,  // 64KB = 8 banks of 8KB
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid RAM size")),
+        };
+        
+        // Copy ROM data
+        let expected_rom_size = rom_banks * 0x4000; // 16KB per bank
+        let rom_data = if data.len() >= expected_rom_size {
+            data[..expected_rom_size].to_vec()
+        } else {
+            // Pad with 0xFF if ROM is smaller than expected
+            let mut padded_rom = data.to_vec();
+            padded_rom.resize(expected_rom_size, 0xFF);
+            padded_rom
+        };
+        
+        // Initialize RAM data
+        let ram_data = vec![0xFF; ram_banks * 0x2000]; // 8KB per bank
+        
+        let cartridge = Cartridge {
+            rom_data,
+            ram_data,
+            cartridge_type,
+            rom_banks,
+            ram_banks,
+            rom_path: None, // No path for in-memory data
+            save_file: None,
+            ram_enabled: false,
+            rom_bank_low: 1, // Bank 0 cannot be selected for 0x4000-0x7FFF area
+            ram_bank_or_rom_bank_high: 0,
+            banking_mode: 0,
+            mbc2_ram: vec![0xFF; MBC2_RAM_SIZE],
+            mbc3_ram_bank: 0,
+            mbc3_rtc_latch: 0,
+            mbc3_rtc_latched: false,
+            rtc_seconds: 0,
+            rtc_minutes: 0,
+            rtc_hours: 0,
+            rtc_days_low: 0,
+            rtc_days_high: 0,
+            rtc_seconds_latched: 0,
+            rtc_minutes_latched: 0,
+            rtc_hours_latched: 0,
+            rtc_days_low_latched: 0,
+            rtc_days_high_latched: 0,
+        };
+        
+        // Note: For WASM/in-memory loading, we skip save file loading
+        // since there's no persistent filesystem
+        
+        Ok(cartridge)
+    }
     
     fn get_cartridge_type(&self) -> CartridgeType {
         match self.cartridge_type {

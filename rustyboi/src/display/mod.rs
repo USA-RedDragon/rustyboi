@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 mod terminal;
 mod pixels;
 mod gui;
