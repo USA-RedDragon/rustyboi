@@ -98,6 +98,10 @@ pub struct RawConfig {
     #[arg(short, long)]
     bios: Option<String>,
 
+    // Hardware type (DMG, CGB, SGB, etc.)
+    #[arg(short = 't', long, default_value = "dmg")]
+    hardware: crate::gb::Hardware,
+
     /// ROM file path, optional
     #[arg(short, long)]
     rom: Option<String>,
@@ -124,6 +128,8 @@ pub struct CleanConfig {
     pub bios: Option<String>,
     // path to ROM file
     pub rom: Option<String>,
+    // Hardware type (DMG, CGB, SGB, etc.)
+    pub hardware: crate::gb::Hardware,
     #[cfg(not(target_arch = "wasm32"))]
     // path to save state to load on startup
     pub state: Option<String>,
@@ -151,6 +157,7 @@ impl RawConfig {
         CleanConfig {
             bios: self.bios,
             rom: self.rom,
+            hardware: self.hardware,
             #[cfg(not(target_arch = "wasm32"))]
             state: self.state,
             scale: self.scale,

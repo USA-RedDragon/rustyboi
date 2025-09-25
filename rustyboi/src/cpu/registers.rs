@@ -63,29 +63,4 @@ impl Registers {
     pub fn get_flag(&self, flag: Flag) -> bool {
         (self.f & (flag as u8)) != 0
     }
-
-    pub fn reset(&mut self, skip_bios: bool) {
-        self.b = 0x00;
-        self.d = 0x00;
-        self.ime = false;
-        if skip_bios {
-            self.a = 0x01;
-            self.f = Flag::Zero as u8 | Flag::HalfCarry as u8 | Flag::Carry as u8;
-            self.c = 0x13;
-            self.e = 0xD8;
-            self.h = 0x01;
-            self.l = 0x4D;
-            self.sp = 0xFFFE;
-            self.pc = 0x0100;
-        } else {
-            self.a = 0x0;
-            self.f = 0x0;
-            self.c = 0x0;
-            self.e = 0x0;
-            self.h = 0x0;
-            self.l = 0x0;
-            self.sp = 0x0;
-            self.pc = 0x0;
-        }
-    }
 }

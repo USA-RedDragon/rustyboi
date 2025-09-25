@@ -22,7 +22,7 @@ fn main() -> Result<(), pixels::Error> {
 
         let config = config::RawConfig::try_parse_from(std::iter::empty::<String>())
             .expect("Failed to create default config").clean();
-        wasm_bindgen_futures::spawn_local(display::run_with_gui_async(gb::GB::new(true), config));
+        wasm_bindgen_futures::spawn_local(display::run_with_gui_async(gb::GB::new(config.hardware), config));
         return Ok(());
     }
 
@@ -30,7 +30,7 @@ fn main() -> Result<(), pixels::Error> {
     {
         let config = config::RawConfig::parse().clean();
 
-        let mut gb = gb::GB::new(config.skip_bios);
+        let mut gb = gb::GB::new(config.hardware);
 
         if let Some(state) = config.state.as_ref() {
             gb = gb::GB::from_state_file(state)
@@ -46,6 +46,10 @@ fn main() -> Result<(), pixels::Error> {
         if let Some(bios) = config.bios.as_ref() {
             gb.load_bios(bios)
                 .expect("Failed to load BIOS file");
+        }
+
+        if config.skip_bios {
+            gb.skip_bios();
         }
 
         display::run_with_gui(gb, &config)
