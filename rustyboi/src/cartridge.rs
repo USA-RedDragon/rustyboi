@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
+use zip::ZipArchive;
 
 // Cartridge header offsets
 const CARTRIDGE_TYPE_OFFSET: usize = 0x0147;
@@ -135,8 +136,69 @@ impl Clone for Cartridge {
 }
 
 impl Cartridge {
+    /// Extract ROM data from a zip file, looking for common ROM file extensions
+    #[cfg(not(target_arch = "wasm32"))]
+    fn extract_rom_from_zip(path: &str) -> Result<Vec<u8>, io::Error> {
+        let file = File::open(path)?;
+        let mut archive = ZipArchive::new(file)?;
+        
+        // Common Game Boy ROM extensions
+        let rom_extensions = [".gb", ".gbc", ".sgb"];
+        
+        // First, try to find a file with a ROM extension
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)?;
+            let name = file.name().to_lowercase();
+            
+            if rom_extensions.iter().any(|ext| name.ends_with(ext)) {
+                let mut data = Vec::with_capacity(file.size() as usize);
+                file.read_to_end(&mut data)?;
+                println!("Found ROM in zip: {}", file.name());
+                return Ok(data);
+            }
+        }
+        
+        // If no ROM extension found, look for the largest file (common case)
+        let mut largest_file_index = 0;
+        let mut largest_size = 0;
+        
+        for i in 0..archive.len() {
+            let file = archive.by_index(i)?;
+            if !file.is_dir() && file.size() > largest_size {
+                largest_size = file.size();
+                largest_file_index = i;
+            }
+        }
+        
+        if largest_size > 0 {
+            let mut file = archive.by_index(largest_file_index)?;
+            let mut data = Vec::with_capacity(file.size() as usize);
+            file.read_to_end(&mut data)?;
+            println!("Using largest file in zip as ROM: {} ({} bytes)", file.name(), data.len());
+            return Ok(data);
+        }
+        
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "No suitable ROM file found in zip archive"
+        ))
+    }
+
     pub fn load(path: &str) -> Result<Self, io::Error> {
-        let data = fs::read(path)?;
+        let data = if path.to_lowercase().ends_with(".zip") {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                Self::extract_rom_from_zip(path)?
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                // For WASM, read the zip file and extract from bytes
+                let zip_data = fs::read(path)?;
+                Self::extract_rom_from_zip_bytes(&zip_data)?
+            }
+        } else {
+            fs::read(path)?
+        };
         
         if data.len() < 0x0150 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "ROM too small"));
@@ -220,15 +282,70 @@ impl Cartridge {
     }
 
     #[cfg(target_arch = "wasm32")]
+    /// Extract ROM data from zip bytes for WASM
+    fn extract_rom_from_zip_bytes(data: &[u8]) -> Result<Vec<u8>, io::Error> {
+        use std::io::Cursor;
+        
+        let cursor = Cursor::new(data);
+        let mut archive = ZipArchive::new(cursor)?;
+        
+        // Common Game Boy ROM extensions
+        let rom_extensions = [".gb", ".gbc", ".sgb"];
+        
+        // First, try to find a file with a ROM extension
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)?;
+            let name = file.name().to_lowercase();
+            
+            if rom_extensions.iter().any(|ext| name.ends_with(ext)) {
+                let mut rom_data = Vec::with_capacity(file.size() as usize);
+                file.read_to_end(&mut rom_data)?;
+                return Ok(rom_data);
+            }
+        }
+        
+        // If no ROM extension found, look for the largest file
+        let mut largest_file_index = 0;
+        let mut largest_size = 0;
+        
+        for i in 0..archive.len() {
+            let file = archive.by_index(i)?;
+            if !file.is_dir() && file.size() > largest_size {
+                largest_size = file.size();
+                largest_file_index = i;
+            }
+        }
+        
+        if largest_size > 0 {
+            let mut file = archive.by_index(largest_file_index)?;
+            let mut rom_data = Vec::with_capacity(file.size() as usize);
+            file.read_to_end(&mut rom_data)?;
+            return Ok(rom_data);
+        }
+        
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "No suitable ROM file found in zip archive"
+        ))
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub fn from_bytes(data: &[u8]) -> Result<Self, io::Error> {
-        if data.len() < 0x0150 {
+        // Try to detect if this is a zip file by checking the magic bytes
+        let actual_data = if data.len() >= 4 && &data[0..4] == b"PK\x03\x04" {
+            // This looks like a ZIP file
+            Self::extract_rom_from_zip_bytes(data)?
+        } else {
+            data.to_vec()
+        };
+        if actual_data.len() < 0x0150 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "ROM too small"));
         }
         
         // Read cartridge header information
-        let cartridge_type = data[CARTRIDGE_TYPE_OFFSET];
-        let rom_size_code = data[ROM_SIZE_OFFSET];
-        let ram_size_code = data[RAM_SIZE_OFFSET];
+        let cartridge_type = actual_data[CARTRIDGE_TYPE_OFFSET];
+        let rom_size_code = actual_data[ROM_SIZE_OFFSET];
+        let ram_size_code = actual_data[RAM_SIZE_OFFSET];
         
         // Calculate number of ROM banks
         let rom_banks = match rom_size_code {
@@ -256,11 +373,11 @@ impl Cartridge {
         
         // Copy ROM data
         let expected_rom_size = rom_banks * 0x4000; // 16KB per bank
-        let rom_data = if data.len() >= expected_rom_size {
-            data[..expected_rom_size].to_vec()
+        let rom_data = if actual_data.len() >= expected_rom_size {
+            actual_data[..expected_rom_size].to_vec()
         } else {
             // Pad with 0xFF if ROM is smaller than expected
-            let mut padded_rom = data.to_vec();
+            let mut padded_rom = actual_data.clone();
             padded_rom.resize(expected_rom_size, 0xFF);
             padded_rom
         };
