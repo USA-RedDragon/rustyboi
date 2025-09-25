@@ -84,7 +84,7 @@ impl Gui {
                     *any_menu_open = true;
                     if ui.button("Load ROM").clicked() {
                         let mut dialog = file_dialog::new()
-                            .add_filter("Game Boy ROM", &["gb", "gbc"])
+                            .add_filter("Game Boy ROM", &["gb", "gbc", "zip"])
                             .add_filter("All Files", &["*"]);
                         if env::current_dir().is_ok() {
                             dialog = dialog.set_directory(env::current_dir().unwrap());
