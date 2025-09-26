@@ -4,6 +4,8 @@ use egui::Context;
 use super::actions::GuiAction;
 use super::file_dialog::{self, FileDialogBuilder};
 
+pub const PANEL_BACKGROUND: egui::Color32 = egui::Color32::from_rgba_premultiplied(64, 64, 64, 220);
+
 pub(crate) struct Gui {
     error_message: Option<String>,
     status_message: Option<String>,
@@ -289,6 +291,7 @@ impl Gui {
     fn render_breakpoint_panel(&mut self, ctx: &Context, action: &mut Option<GuiAction>, gb: Option<&crate::gb::GB>) {
         egui::Window::new("Breakpoint Manager")
             .default_width(300.0)
+            .frame(egui::Frame::window(&ctx.style()).fill(PANEL_BACKGROUND))
             .show(ctx, |ui| {
                 ui.heading("Breakpoints");
                 ui.separator();
