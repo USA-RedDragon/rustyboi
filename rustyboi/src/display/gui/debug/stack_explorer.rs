@@ -10,7 +10,7 @@ impl Gui {
                     .default_size([180.0, 400.0])
                     .collapsible(true)
                     .resizable(false)
-                    .frame(egui::Frame::window(&ctx.style()).fill(egui::Color32::from_rgba_unmultiplied(64, 64, 64, 220)))
+                    .frame(egui::Frame::window(&ctx.style()).fill(crate::display::gui::main_ui::PANEL_BACKGROUND))
                     .show(ctx, |ui| {
                         ui.set_width(160.0);
                         
