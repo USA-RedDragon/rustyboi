@@ -171,6 +171,10 @@ impl GB {
         }
         
         self.mmio.insert_cartridge(cartridge);
+        
+        // Update CGB features enablement based on hardware and cartridge compatibility
+        let cgb_enabled = self.should_enable_cgb_features();
+        self.mmio.set_cgb_features_enabled(cgb_enabled);
     }
 
     /// Validate that the cartridge is compatible with the current hardware
