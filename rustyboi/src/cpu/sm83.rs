@@ -12,10 +12,14 @@ pub struct SM83 {
 
 impl SM83 {
     pub fn new() -> Self {
-        SM83 { registers: registers::Registers::new(), halted: false, stopped: false }
+        SM83 { 
+            registers: registers::Registers::new(), 
+            halted: false, 
+            stopped: false
+        }
     }
 
-    pub fn step(&mut self, mmio: &mut memory::mmio::Mmio) -> u8 {
+    pub fn step(&mut self, mmio: &mut memory::mmio::Mmio) -> u32 {
         let mut cycles = 0;
         
         // Check for pending interrupts
@@ -87,7 +91,7 @@ impl SM83 {
         }
     }
 
-    fn execute(&mut self, opcode: u8, mmio: &mut memory::mmio::Mmio) -> u8 {
+    fn execute(&mut self, opcode: u8, mmio: &mut memory::mmio::Mmio) -> u32 {
         match opcode {
             0x00 => opcodes::nop(self, mmio),
             0x01 => opcodes::ld_bc_imm(self, mmio),
@@ -348,7 +352,7 @@ impl SM83 {
         }
     }
 
-    fn execute_cb(&mut self, mmio: &mut memory::mmio::Mmio) -> u8 {
+    fn execute_cb(&mut self, mmio: &mut memory::mmio::Mmio) -> u32 {
         let opcode = mmio.read(self.registers.pc);
         self.registers.pc += 1;
         match opcode {
