@@ -1,6 +1,8 @@
 use crate::{cpu::opcodes, cpu::registers, memory, memory::Addressable};
 use serde::{Deserialize, Serialize};
 
+pub const REG_KEY1: u16 = 0xFF4D; // CGB Speed Switch
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SM83 {
     pub registers: registers::Registers,
