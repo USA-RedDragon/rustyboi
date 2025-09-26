@@ -17,12 +17,6 @@ pub const OBP1: u16 = 0xFF49; // Object Palette 1 Data
 pub const WY: u16 = 0xFF4A;  // Window Y Position
 pub const WX: u16 = 0xFF4B;  // Window X Position
 
-// CGB
-pub const BCPS: u16 = 0xFF68; // Background Color Palette Specification
-pub const BCPD: u16 = 0xFF69; // Background Color Palette Data
-pub const OCPS: u16 = 0xFF6A; // Object Color Palette Specification
-pub const OCPD: u16 = 0xFF6B; // Object Color Palette Data
-
 pub const FRAMEBUFFER_SIZE: usize = 160 * 144;
 
 // OAM constants
@@ -100,6 +94,10 @@ pub struct Ppu {
     fb_a: [u8; FRAMEBUFFER_SIZE],
     #[serde(with = "serde_bytes")]
     fb_b: [u8; FRAMEBUFFER_SIZE],
+    #[serde(with = "serde_bytes")]
+    color_fb_a: [u8; FRAMEBUFFER_SIZE * 3], // RGB color framebuffer
+    #[serde(with = "serde_bytes")]
+    color_fb_b: [u8; FRAMEBUFFER_SIZE * 3], // RGB color framebuffer
     have_frame: bool,
 }
 
@@ -118,6 +116,8 @@ impl Ppu {
             window_started_this_line: false,
             fb_a: [0; FRAMEBUFFER_SIZE],
             fb_b: [0; FRAMEBUFFER_SIZE],
+            color_fb_a: [0; FRAMEBUFFER_SIZE * 3],
+            color_fb_b: [0; FRAMEBUFFER_SIZE * 3],
             have_frame: false,
         }
     }
@@ -205,6 +205,17 @@ impl Ppu {
                 }
                 
                 if self.ticks == 80 {
+                    // Sort sprites by priority after OAM search is complete
+                    if mmio.is_cgb_features_enabled() {
+                        // CGB mode: Sort by OAM index only (already in order, but ensure it)
+                        self.sprites_on_line.sort_by_key(|sprite| sprite.oam_index);
+                    } else {
+                        // DMG mode: Sort by X coordinate first, then OAM index
+                        self.sprites_on_line.sort_by(|a, b| {
+                            a.x.cmp(&b.x).then(a.oam_index.cmp(&b.oam_index))
+                        });
+                    }
+                    
                     self.x = 0;
                     self.fetcher.reset_with_scx_offset(mmio);
                     mmio.write(LCD_STATUS, (mmio.read(LCD_STATUS) & !(1 << 1)) | (1 << 0)); // Set Mode 3 flag
@@ -244,9 +255,18 @@ impl Ppu {
                     let ly = mmio.read(LY) as u16;
                     let fb_offset = (ly * 160) + self.x as u16;
 
-                    // Get the final pixel color by mixing background and sprites
-                    let final_color = self.mix_background_and_sprites(mmio, bg_pixel_idx, self.x, ly as u8);
-                    self.fb_a[fb_offset as usize] = final_color;
+                    if mmio.is_cgb_features_enabled() {
+                        // CGB mode: write to color framebuffer with proper sprite mixing
+                        let final_color_rgb = self.mix_background_and_sprites_color(mmio, bg_pixel_idx, self.x, ly as u8);
+                        let color_offset = fb_offset as usize * 3;
+                        self.color_fb_a[color_offset] = final_color_rgb.0;
+                        self.color_fb_a[color_offset + 1] = final_color_rgb.1;
+                        self.color_fb_a[color_offset + 2] = final_color_rgb.2;
+                    } else {
+                        // DMG mode: write to monochrome framebuffer
+                        let final_color = self.mix_background_and_sprites(mmio, bg_pixel_idx, self.x, ly as u8);
+                        self.fb_a[fb_offset as usize] = final_color;
+                    }
 
                     self.x += 1;
                     if self.x == 160 {
@@ -287,8 +307,17 @@ impl Ppu {
                         self.window_line_counter = 0;
                         self.window_y_triggered = false;
                         self.window_started_this_line = false;
-                        self.fb_b = self.fb_a;
-                        self.fb_a = [0; FRAMEBUFFER_SIZE];
+                        
+                        if mmio.is_cgb_features_enabled() {
+                            // CGB mode: swap color framebuffers
+                            self.color_fb_b = self.color_fb_a;
+                            self.color_fb_a = [0; FRAMEBUFFER_SIZE * 3];
+                        } else {
+                            // DMG mode: swap monochrome framebuffers
+                            self.fb_b = self.fb_a;
+                            self.fb_a = [0; FRAMEBUFFER_SIZE];
+                        }
+                        
                         self.have_frame = true;
                     } else if (144..153).contains(&current_ly) {
                         let next_ly = current_ly.saturating_add(1);
@@ -305,9 +334,13 @@ impl Ppu {
         self.have_frame
     }
 
-    pub fn get_frame(&mut self) -> crate::gb::Frame {
+    pub fn get_frame(&mut self, mmio: &mmio::Mmio) -> crate::gb::Frame {
         self.have_frame = false;
-        crate::gb::Frame::Monochrome(self.fb_b)
+        if mmio.is_cgb_features_enabled() {
+            crate::gb::Frame::Color(self.color_fb_b)
+        } else {
+            crate::gb::Frame::Monochrome(self.fb_b)
+        }
     }
 
     // Debug methods
@@ -337,6 +370,118 @@ impl Ppu {
 
     pub fn get_sprites_on_line_count(&self) -> usize {
         self.sprites_on_line.len()
+    }
+    
+    // Get the CGB tile attributes for a background/window pixel
+    fn get_bg_tile_attributes(&self, mmio: &mmio::Mmio, screen_x: u8, screen_y: u8) -> u8 {
+        if !mmio.is_cgb_features_enabled() {
+            return 0; // DMG mode - no attributes
+        }
+        
+        let lcdc = mmio.read(LCD_CONTROL);
+        
+        // Check if we're in window area
+        let in_window = if (lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0 {
+            let wx = mmio.read(WX);
+            let wy = mmio.read(WY);
+            screen_y >= wy && screen_x + 7 >= wx
+        } else {
+            false
+        };
+        
+        let (tile_x, tile_y) = if in_window {
+            // Window coordinates
+            let wx = mmio.read(WX);
+            let window_x = screen_x.saturating_sub(wx.saturating_sub(7));
+            let window_y = screen_y.saturating_sub(mmio.read(WY));
+            (window_x / 8, window_y / 8)
+        } else {
+            // Background coordinates with scrolling
+            let scx = mmio.read(SCX);
+            let scy = mmio.read(SCY);
+            let bg_x = screen_x.wrapping_add(scx);
+            let bg_y = screen_y.wrapping_add(scy);
+            (bg_x / 8, bg_y / 8)
+        };
+        
+        // Calculate tile map address
+        let tile_map_base = if in_window {
+            if (lcdc & (LCDCFlags::WindowTileMapDisplaySelect as u8)) != 0 {
+                0x9C00 // Window tile map 1
+            } else {
+                0x9800 // Window tile map 0
+            }
+        } else {
+            if (lcdc & (LCDCFlags::BGTileMapDisplaySelect as u8)) != 0 {
+                0x9C00 // BG tile map 1
+            } else {
+                0x9800 // BG tile map 0
+            }
+        };
+        
+        let tile_map_addr = tile_map_base + (tile_y as u16 * 32) + tile_x as u16;
+        
+        // In CGB mode, tile attributes are stored in VRAM bank 1 at the same address as the tile map
+        mmio.read_vram_bank1(tile_map_addr)
+    }
+    
+    // CGB color conversion functions
+    fn cgb_color_to_rgb(&self, low_byte: u8, high_byte: u8) -> (u8, u8, u8) {
+        // CGB color format: GGGRRRRR BBBBBGGG (little endian)
+        let color_word = (high_byte as u16) << 8 | low_byte as u16;
+        
+        // Extract 5-bit RGB components
+        let r = (color_word & 0x1F) as u16;
+        let g = ((color_word >> 5) & 0x1F) as u16;
+        let b = ((color_word >> 10) & 0x1F) as u16;
+        
+        // Convert from 5-bit to 8-bit (0-31 -> 0-255)
+        // Use u16 arithmetic to avoid overflow, then cast to u8
+        let r8 = ((r * 255) / 31) as u8;
+        let g8 = ((g * 255) / 31) as u8;
+        let b8 = ((b * 255) / 31) as u8;
+        
+        (r8, g8, b8)
+    }
+    
+    fn get_cgb_bg_color(&self, mmio: &mmio::Mmio, palette_idx: u8, color_idx: u8) -> (u8, u8, u8) {
+        if !mmio.is_cgb_features_enabled() {
+            // Fallback to monochrome conversion
+            let mono_color = self.get_palette_color(mmio, color_idx);
+            let intensity = match mono_color {
+                0 => 255, // White
+                1 => 170, // Light gray
+                2 => 85,  // Dark gray
+                _ => 0,   // Black
+            };
+            return (intensity, intensity, intensity);
+        }
+        
+        // Read CGB palette data from palette RAM
+        let (low_byte, high_byte) = mmio.read_bg_palette_data(palette_idx, color_idx);
+        self.cgb_color_to_rgb(low_byte, high_byte)
+    }
+    
+    fn get_cgb_obj_color(&self, mmio: &mmio::Mmio, palette_idx: u8, color_idx: u8) -> (u8, u8, u8) {
+        if color_idx == 0 {
+            return (0, 0, 0); // Transparent - will be handled by caller
+        }
+        
+        if !mmio.is_cgb_features_enabled() {
+            // Fallback to monochrome conversion
+            let mono_color = self.get_sprite_palette_color(mmio, color_idx, palette_idx != 0);
+            let intensity = match mono_color {
+                0 => 0,   // Transparent
+                1 => 170, // Light gray
+                2 => 85,  // Dark gray
+                _ => 0,   // Black
+            };
+            return (intensity, intensity, intensity);
+        }
+        
+        // Read CGB palette data from palette RAM
+        let (low_byte, high_byte) = mmio.read_obj_palette_data(palette_idx, color_idx);
+        self.cgb_color_to_rgb(low_byte, high_byte)
     }
 
     // Check a single sprite during distributed OAM search
@@ -378,6 +523,122 @@ impl Ppu {
             
             self.sprites_on_line.push(sprite);
         }
+    }
+
+    // Mix background pixel with sprites at the given screen coordinates (CGB color version)
+    fn mix_background_and_sprites_color(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8, screen_x: u8, screen_y: u8) -> (u8, u8, u8) {
+        let lcdc = mmio.read(LCD_CONTROL);
+        
+        // Check if BG/Window display is enabled (LCDC bit 0)
+        let bg_enabled = (lcdc & (LCDCFlags::BGDisplay as u8)) != 0;
+        
+        // Get background color and attributes
+        let (bg_color_rgb, bg_attributes) = if bg_enabled {
+            // Get tile attributes to determine palette
+            let tile_attributes = self.get_bg_tile_attributes(mmio, screen_x, screen_y);
+            let palette_idx = tile_attributes & 0x07; // Bits 0-2 = palette index
+            let bg_color = self.get_cgb_bg_color(mmio, palette_idx, bg_pixel_idx);
+            (bg_color, tile_attributes)
+        } else {
+            // When BG display is disabled, background becomes white
+            ((255, 255, 255), 0)
+        };
+        
+        // For sprite priority calculation, we need the original bg_pixel_idx
+        let effective_bg_pixel_idx = if bg_enabled { bg_pixel_idx } else { 0 };
+        
+        // Check if sprites are enabled
+        if (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
+            return bg_color_rgb;
+        }
+        
+        // First, resolve object-to-object priority to find the highest priority opaque sprite pixel
+        let mut selected_sprite: Option<(&Sprite, u8, (u8, u8, u8))> = None; // (sprite, pixel_idx, color)
+        
+        for sprite in &self.sprites_on_line {
+            // Sprite X coordinate is offset by 8, Y coordinate is offset by 16
+            let sprite_actual_x = sprite.x as i16 - 8;
+            let sprite_actual_y = sprite.y as i16 - 16;
+            
+            // Check if this screen pixel is within the sprite bounds
+            let relative_x = screen_x as i16 - sprite_actual_x;
+            let relative_y = screen_y as i16 - sprite_actual_y;
+            
+            // Sprite is 8 pixels wide
+            if (0..8).contains(&relative_x) {
+                let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
+                if relative_y >= 0 && relative_y < sprite_height as i16 {
+                    // Get sprite pixel data
+                    if let Some(sprite_pixel_idx) = self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8)
+                        && sprite_pixel_idx != 0 { // Sprite pixel is not transparent
+                            
+                            // Get sprite palette (in CGB mode, sprite attributes can specify palette)
+                            let sprite_palette_idx = if mmio.is_cgb_features_enabled() {
+                                // TODO: In CGB mode, sprites can have palette info in OAM attributes
+                                // For now, use the old palette bit
+                                if sprite.attributes.palette { 1 } else { 0 }
+                            } else {
+                                if sprite.attributes.palette { 1 } else { 0 }
+                            };
+                            
+                            let sprite_color_rgb = self.get_cgb_obj_color(mmio, sprite_palette_idx, sprite_pixel_idx);
+                            
+                            // Check if this sprite has higher priority than the currently selected one
+                            let is_higher_priority = if let Some((current_sprite, _, _)) = selected_sprite {
+                                if mmio.is_cgb_features_enabled() {
+                                    // CGB mode: Only OAM position matters (lower index = higher priority)
+                                    sprite.oam_index < current_sprite.oam_index
+                                } else {
+                                    // DMG mode: X coordinate first, then OAM position
+                                    sprite.x < current_sprite.x || 
+                                    (sprite.x == current_sprite.x && sprite.oam_index < current_sprite.oam_index)
+                                }
+                            } else {
+                                true // First opaque sprite found
+                            };
+                            
+                            if is_higher_priority {
+                                selected_sprite = Some((sprite, sprite_pixel_idx, sprite_color_rgb));
+                            }
+                        }
+                }
+            }
+        }
+        
+        // Now resolve BG vs OBJ priority using the selected sprite (if any)
+        if let Some((sprite, _, sprite_color_rgb)) = selected_sprite {
+            if mmio.is_cgb_features_enabled() {
+                // CGB priority rules
+                // If BG color index is 0, OBJ always has priority
+                if effective_bg_pixel_idx == 0 {
+                    return sprite_color_rgb;
+                }
+                
+                // If LCDC bit 0 is clear, OBJ always has priority
+                if !bg_enabled {
+                    return sprite_color_rgb;
+                }
+                
+                // Check BG attributes bit 7 and OAM attributes bit 7
+                let bg_priority = (bg_attributes & 0x80) != 0; // BG attr bit 7
+                let obj_priority = sprite.attributes.priority;   // OAM attr bit 7 (note: priority=true means "behind BG")
+                
+                // If both BG and OAM attributes have bit 7 clear, OBJ has priority
+                // Otherwise, BG has priority (when BG color is 1-3)
+                if !bg_priority && !obj_priority {
+                    return sprite_color_rgb; // OBJ priority
+                } else {
+                    return bg_color_rgb; // BG priority for colors 1-3
+                }
+            } else {
+                // DMG mode: Simple priority check
+                if !sprite.attributes.priority || effective_bg_pixel_idx == 0 {
+                    return sprite_color_rgb;
+                }
+            }
+        }
+        
+        bg_color_rgb
     }
 
     // Mix background pixel with sprites at the given screen coordinates

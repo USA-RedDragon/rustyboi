@@ -272,24 +272,24 @@ impl GB {
             
             if breakpoint_hit {
                 // Breakpoint hit - return current frame and indicate breakpoint hit
-                return (self.ppu.get_frame(), true);
+                return (self.ppu.get_frame(&self.mmio), true);
             }
             
             // Check if PPU has completed a frame
             if self.ppu.frame_ready() {
-                return (self.ppu.get_frame(), false);
+                return (self.ppu.get_frame(&self.mmio), false);
             }
             
             // If PPU is disabled or taking too long, cap the cycles to prevent audio buildup
             if cpu_cycles_this_frame >= MAX_CYCLES_PER_FRAME {
                 // PPU disabled or stuck - return after reasonable cycle count to maintain timing
-                return (self.ppu.get_frame(), false);
+                return (self.ppu.get_frame(&self.mmio), false);
             }
         }
     }
 
     pub fn get_current_frame(&mut self) -> Frame {
-        self.ppu.get_frame()
+        self.ppu.get_frame(&self.mmio)
     }
 
     pub fn get_cpu_registers(&self) -> &cpu::registers::Registers {
