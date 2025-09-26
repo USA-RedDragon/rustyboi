@@ -230,7 +230,7 @@ impl GB {
         Ok(())
     }
 
-    pub fn step_instruction(&mut self, collect_audio: bool) -> (bool, u8) {
+    pub fn step_instruction(&mut self, collect_audio: bool) -> (bool, u32) {
         // Check for breakpoint at current PC before executing
         let pc = self.cpu.registers.pc;
         if self.breakpoints.contains(&pc) {
@@ -240,16 +240,27 @@ impl GB {
 
         // Execute one CPU instruction and step PPU accordingly
         let cycles = self.cpu.step(&mut self.mmio);
+        let is_double_speed = self.mmio.is_double_speed_mode();
+        
         for _ in 0..cycles {
+            // Timer and DMA run at double speed in double speed mode
             self.mmio.step_timer(&mut self.cpu);
             self.mmio.step_dma();
+            if is_double_speed {
+                self.mmio.step_timer(&mut self.cpu);
+                self.mmio.step_dma(); 
+            }
+            
+            // PPU and audio always run at normal speed
             self.mmio.step_audio();
             self.ppu.step(&mut self.cpu, &mut self.mmio);
         }
         
         // Generate audio samples if requested
         let audio_samples = if collect_audio {
-            self.mmio.generate_audio_samples(cycles as u32)
+            // In double speed mode, audio runs at normal speed, so we need to adjust the cycle count
+            let audio_cycles = if is_double_speed { cycles / 2 } else { cycles };
+            self.mmio.generate_audio_samples(audio_cycles)
         } else {
             Vec::new()
         };
@@ -272,7 +283,7 @@ impl GB {
         
         loop {
             let (breakpoint_hit, cycles) = self.step_instruction(collect_audio);
-            cpu_cycles_this_frame += cycles as u32;
+            cpu_cycles_this_frame += cycles;
             
             if breakpoint_hit {
                 // Breakpoint hit - return current frame and indicate breakpoint hit

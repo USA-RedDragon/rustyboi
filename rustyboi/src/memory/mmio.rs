@@ -57,7 +57,9 @@ pub const REG_BOOT_OFF: u16 = 0xFF50; // Boot ROM disable
 pub const REG_DMA: u16 = 0xFF46; // DMA Transfer and Start Address
 
 // CGB-specific registers
-pub const REG_VBK: u16 = 0xFF4F;  // VRAM Bank select
+pub const REG_KEY0: u16 = 0xFF4C;  // CGB CPU mode select (DMG compatibility)
+pub const REG_KEY1: u16 = 0xFF4D;  // CGB Prepare speed switch
+pub const REG_VBK: u16 = 0xFF4F;   // VRAM Bank select
 pub const REG_HDMA1: u16 = 0xFF51; // HDMA Source High
 pub const REG_HDMA2: u16 = 0xFF52; // HDMA Source Low
 pub const REG_HDMA3: u16 = 0xFF53; // HDMA Destination High
@@ -94,6 +96,12 @@ pub struct Mmio {
     // CGB-specific state
     vram_bank: u8,          // VRAM bank select (0-1)
     wram_bank_select: u8,   // WRAM bank select (1-7)
+    
+    // CGB speed switching state
+    key0_locked: bool,      // Whether KEY0 register is locked (after boot ROM finishes)
+    key0_dmg_mode: bool,    // DMG compatibility mode (KEY0 bit 0)
+    key1_current_speed: bool, // Current speed mode (KEY1 bit 7): false=normal, true=double
+    key1_switch_armed: bool,  // Speed switch armed (KEY1 bit 0)
     
     // CGB VRAM bank 1 (bank 0 is the existing vram field)
     vram_bank1: memory::Memory<VRAM_START, VRAM_SIZE>,
@@ -142,6 +150,12 @@ impl Mmio {
             // CGB-specific fields initialization
             vram_bank: 0,
             wram_bank_select: 1, // CGB starts with WRAM bank 1 selected
+            
+            // CGB speed switching initialization
+            key0_locked: false,    // Unlocked at boot, locked after boot ROM finishes
+            key0_dmg_mode: false,  // Default to full CGB mode
+            key1_current_speed: false, // Start in normal speed mode
+            key1_switch_armed: false,  // No speed switch armed initially
             vram_bank1: memory::Memory::new(),
             wram_banks: (0..6).map(|_| memory::Memory::new()).collect(), // Banks 2-7
             hdma_source: 0,
@@ -297,6 +311,28 @@ impl Mmio {
 
     pub fn set_input_state(&mut self, state: crate::input::ButtonState) {
         self.input.set_button_state(state);
+    }
+
+    // CGB Speed switching methods
+    pub fn is_double_speed_mode(&self) -> bool {
+        self.cgb_features_enabled && self.key1_current_speed
+    }
+
+    pub fn is_speed_switch_armed(&self) -> bool {
+        self.cgb_features_enabled && self.key1_switch_armed
+    }
+
+    pub fn perform_speed_switch(&mut self) {
+        if self.cgb_features_enabled && self.key1_switch_armed {
+            // Toggle the speed mode
+            self.key1_current_speed = !self.key1_current_speed;
+            // Clear the armed bit
+            self.key1_switch_armed = false;
+        }
+    }
+
+    pub fn is_dmg_compatibility_mode(&self) -> bool {
+        self.cgb_features_enabled && self.key0_dmg_mode
     }
 
     // Private helper to read during DMA without triggering DMA conflicts
@@ -472,6 +508,24 @@ impl memory::Addressable for Mmio {
                         REG_DMA => self.io_registers.read(addr),
                         
                         // CGB registers - only accessible when CGB features are enabled
+                        REG_KEY0 => {
+                            if self.cgb_features_enabled {
+                                // KEY0: DMG compatibility mode bit
+                                (if self.key0_dmg_mode { 0x01 } else { 0x00 }) | 0xFE // Bit 0 = DMG mode, bits 1-7 = 1
+                            } else {
+                                0xFF // DMG hardware returns 0xFF for CGB registers
+                            }
+                        },
+                        REG_KEY1 => {
+                            if self.cgb_features_enabled {
+                                // KEY1: Current speed (bit 7) | Switch armed (bit 0)
+                                let speed_bit = if self.key1_current_speed { 0x80 } else { 0x00 };
+                                let armed_bit = if self.key1_switch_armed { 0x01 } else { 0x00 };
+                                speed_bit | armed_bit | 0x7E // Bits 1-6 = 1, bit 7 = current speed, bit 0 = switch armed
+                            } else {
+                                0xFF // DMG hardware returns 0xFF for CGB registers
+                            }
+                        },
                         REG_VBK => {
                             if self.cgb_features_enabled {
                                 self.vram_bank | 0xFE // Bit 0 = bank, bits 1-7 = 1
@@ -661,8 +715,29 @@ impl memory::Addressable for Mmio {
                             // Store the DMA register value for reads
                             self.io_registers.write(addr, value);
                         },
+                        REG_BOOT_OFF => {
+                            // When boot ROM is disabled, lock the KEY0 register
+                            if self.cgb_features_enabled && value != 0 {
+                                self.key0_locked = true;
+                            }
+                            self.io_registers.write(addr, value);
+                        },
                         
                         // CGB registers - only writable when CGB features are enabled
+                        REG_KEY0 => {
+                            if self.cgb_features_enabled && !self.key0_locked {
+                                // KEY0 can only be written before boot ROM finishes (when not locked)
+                                self.key0_dmg_mode = (value & 0x01) != 0;
+                            }
+                            // Writes ignored if not CGB, or if KEY0 is locked
+                        },
+                        REG_KEY1 => {
+                            if self.cgb_features_enabled {
+                                // Only bit 0 (switch armed) is writable
+                                self.key1_switch_armed = (value & 0x01) != 0;
+                            }
+                            // On DMG hardware, writes are ignored
+                        },
                         REG_VBK => {
                             if self.cgb_features_enabled {
                                 self.vram_bank = value & 0x01; // Only bit 0 is writable
