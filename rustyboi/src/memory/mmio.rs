@@ -64,6 +64,11 @@ pub const REG_HDMA3: u16 = 0xFF53; // HDMA Destination High
 pub const REG_HDMA4: u16 = 0xFF54; // HDMA Destination Low
 pub const REG_HDMA5: u16 = 0xFF55; // HDMA Length/Mode/Start
 pub const REG_SVBK: u16 = 0xFF70; // WRAM Bank select
+pub const REG_BCPS: u16 = 0xFF68; // Background Color Palette Specification
+pub const REG_BCPD: u16 = 0xFF69; // Background Color Palette Data
+pub const REG_OCPS: u16 = 0xFF6A; // Object Color Palette Specification
+pub const REG_OCPD: u16 = 0xFF6B; // Object Color Palette Data
+
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Mmio {
@@ -103,6 +108,14 @@ pub struct Mmio {
     hdma_mode: u8,          // HDMA mode (0=general purpose, 1=H-blank)
     hdma_active: bool,      // HDMA transfer active
     
+    // CGB palette state
+    #[serde(with = "serde_bytes")]
+    bg_palette_ram: [u8; 64],    // 8 palettes × 4 colors × 2 bytes = 64 bytes
+    #[serde(with = "serde_bytes")]
+    obj_palette_ram: [u8; 64],   // 8 palettes × 4 colors × 2 bytes = 64 bytes
+    bg_palette_spec: u8,         // BCPS register
+    obj_palette_spec: u8,        // OCPS register
+    
     // CGB feature enablement
     cgb_features_enabled: bool, // Whether CGB-specific features should be active
 }
@@ -136,6 +149,13 @@ impl Mmio {
             hdma_length: 0,
             hdma_mode: 0,
             hdma_active: false,
+            
+            // CGB palette initialization
+            bg_palette_ram: [0; 64],
+            obj_palette_ram: [0; 64],
+            bg_palette_spec: 0,
+            obj_palette_spec: 0,
+            
             cgb_features_enabled: false, // Will be set when cartridge is inserted
         }
     }
@@ -153,6 +173,44 @@ impl Mmio {
     
     pub fn set_cgb_features_enabled(&mut self, enabled: bool) {
         self.cgb_features_enabled = enabled;
+    }
+    
+    pub fn is_cgb_features_enabled(&self) -> bool {
+        self.cgb_features_enabled
+    }
+    
+    pub fn read_bg_palette_data(&self, palette_idx: u8, color_idx: u8) -> (u8, u8) {
+        if !self.cgb_features_enabled || palette_idx >= 8 || color_idx >= 4 {
+            return (0xFF, 0xFF); // Invalid access
+        }
+        
+        let offset = (palette_idx * 8 + color_idx * 2) as usize;
+        if offset + 1 < 64 {
+            (self.bg_palette_ram[offset], self.bg_palette_ram[offset + 1])
+        } else {
+            (0xFF, 0xFF)
+        }
+    }
+    
+    pub fn read_obj_palette_data(&self, palette_idx: u8, color_idx: u8) -> (u8, u8) {
+        if !self.cgb_features_enabled || palette_idx >= 8 || color_idx >= 4 {
+            return (0xFF, 0xFF); // Invalid access
+        }
+        
+        let offset = (palette_idx * 8 + color_idx * 2) as usize;
+        if offset + 1 < 64 {
+            (self.obj_palette_ram[offset], self.obj_palette_ram[offset + 1])
+        } else {
+            (0xFF, 0xFF)
+        }
+    }
+    
+    pub fn read_vram_bank1(&self, addr: u16) -> u8 {
+        if !self.cgb_features_enabled || addr < VRAM_START || addr > VRAM_END {
+            return 0xFF; // Invalid access
+        }
+        
+        self.vram_bank1.read(addr)
     }
 
     pub fn get_cartridge(&self) -> Option<&cartridge::Cartridge> {
@@ -402,9 +460,78 @@ impl memory::Addressable for Mmio {
                                 0xFF // DMG hardware returns 0xFF for CGB registers
                             }
                         },
+                        REG_HDMA1 => {
+                            if self.cgb_features_enabled {
+                                (self.hdma_source >> 8) as u8
+                            } else {
+                                0xFF
+                            }
+                        },
+                        REG_HDMA2 => {
+                            if self.cgb_features_enabled {
+                                self.hdma_source as u8
+                            } else {
+                                0xFF
+                            }
+                        },
+                        REG_HDMA3 => {
+                            if self.cgb_features_enabled {
+                                (self.hdma_dest >> 8) as u8
+                            } else {
+                                0xFF
+                            }
+                        },
+                        REG_HDMA4 => {
+                            if self.cgb_features_enabled {
+                                self.hdma_dest as u8
+                            } else {
+                                0xFF
+                            }
+                        },
+                        REG_HDMA5 => {
+                            if self.cgb_features_enabled {
+                                if self.hdma_active {
+                                    self.hdma_length // Transfer in progress, return remaining length
+                                } else {
+                                    0xFF // No transfer
+                                }
+                            } else {
+                                0xFF
+                            }
+                        },
                         REG_SVBK => {
                             if self.cgb_features_enabled {
                                 self.wram_bank_select | 0xF8 // Bits 0-2 = bank, bits 3-7 = 1
+                            } else {
+                                0xFF
+                            }
+                        },
+                        REG_BCPS => {
+                            if self.cgb_features_enabled {
+                                self.bg_palette_spec
+                            } else {
+                                0xFF
+                            }
+                        },
+                        REG_BCPD => {
+                            if self.cgb_features_enabled {
+                                let index = (self.bg_palette_spec & 0x3F) as usize; // Bits 0-5 = address
+                                self.bg_palette_ram[index]
+                            } else {
+                                0xFF
+                            }
+                        },
+                        REG_OCPS => {
+                            if self.cgb_features_enabled {
+                                self.obj_palette_spec
+                            } else {
+                                0xFF
+                            }
+                        },
+                        REG_OCPD => {
+                            if self.cgb_features_enabled {
+                                let index = (self.obj_palette_spec & 0x3F) as usize; // Bits 0-5 = address
+                                self.obj_palette_ram[index]
                             } else {
                                 0xFF
                             }
@@ -523,10 +650,72 @@ impl memory::Addressable for Mmio {
                             }
                             // On DMG hardware, writes are ignored
                         },
+                        REG_HDMA1 => {
+                            if self.cgb_features_enabled {
+                                self.hdma_source = (self.hdma_source & 0x00FF) | ((value as u16) << 8);
+                            }
+                        },
+                        REG_HDMA2 => {
+                            if self.cgb_features_enabled {
+                                self.hdma_source = (self.hdma_source & 0xFF00) | (value as u16);
+                            }
+                        },
+                        REG_HDMA3 => {
+                            if self.cgb_features_enabled {
+                                self.hdma_dest = (self.hdma_dest & 0x00FF) | ((value as u16) << 8);
+                            }
+                        },
+                        REG_HDMA4 => {
+                            if self.cgb_features_enabled {
+                                self.hdma_dest = (self.hdma_dest & 0xFF00) | (value as u16);
+                            }
+                        },
+                        REG_HDMA5 => {
+                            if self.cgb_features_enabled {
+                                // TODO: Implement HDMA transfer logic
+                                self.hdma_length = value & 0x7F; // Bits 0-6 = length
+                                self.hdma_mode = (value >> 7) & 0x01; // Bit 7 = mode
+                                // For now, just store the values - full HDMA implementation would start transfer here
+                            }
+                        },
                         REG_SVBK => {
                             if self.cgb_features_enabled {
                                 let bank = value & 0x07; // Bits 0-2 = bank select
                                 self.wram_bank_select = if bank == 0 { 1 } else { bank }; // Bank 0 selects bank 1
+                            }
+                        },
+                        REG_BCPS => {
+                            if self.cgb_features_enabled {
+                                self.bg_palette_spec = value;
+                            }
+                        },
+                        REG_BCPD => {
+                            if self.cgb_features_enabled {
+                                let index = (self.bg_palette_spec & 0x3F) as usize; // Bits 0-5 = address
+                                self.bg_palette_ram[index] = value;
+                                
+                                // Auto-increment if bit 7 is set
+                                if (self.bg_palette_spec & 0x80) != 0 {
+                                    let new_index = ((self.bg_palette_spec & 0x3F) + 1) & 0x3F;
+                                    self.bg_palette_spec = (self.bg_palette_spec & 0x80) | new_index;
+                                }
+                            }
+                        },
+                        REG_OCPS => {
+                            if self.cgb_features_enabled {
+                                self.obj_palette_spec = value;
+                            }
+                        },
+                        REG_OCPD => {
+                            if self.cgb_features_enabled {
+                                let index = (self.obj_palette_spec & 0x3F) as usize; // Bits 0-5 = address
+                                self.obj_palette_ram[index] = value;
+                                
+                                // Auto-increment if bit 7 is set
+                                if (self.obj_palette_spec & 0x80) != 0 {
+                                    let new_index = ((self.obj_palette_spec & 0x3F) + 1) & 0x3F;
+                                    self.obj_palette_spec = (self.obj_palette_spec & 0x80) | new_index;
+                                }
                             }
                         },
                         
