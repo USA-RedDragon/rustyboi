@@ -559,8 +559,8 @@ impl Cartridge {
     
     /// Write a byte to both RAM and save file simultaneously (if battery-backed)
     fn write_ram_byte(&mut self, offset: usize, value: u8) -> Result<(), io::Error> {
-        if offset < self.ram_data.len() {
-            // Write to RAM buffer
+        if !self.ram_data.is_empty() {
+            // Write to RAM buffer (offset is already wrapped by caller)
             self.ram_data[offset] = value;
             
             // Also write to save file if we have one open
@@ -575,8 +575,8 @@ impl Cartridge {
     
     /// Write a byte to MBC2 RAM and save file simultaneously (if battery-backed)
     fn write_mbc2_ram_byte(&mut self, offset: usize, value: u8) -> Result<(), io::Error> {
-        if offset < self.mbc2_ram.len() {
-            // Write to MBC2 RAM buffer
+        if !self.mbc2_ram.is_empty() {
+            // Write to MBC2 RAM buffer (offset is already wrapped by caller)
             self.mbc2_ram[offset] = value & 0x0F; // Only 4 bits valid
             
             // Also write to save file if we have one open
@@ -662,12 +662,8 @@ impl memory::Addressable for Cartridge {
                     CartridgeType::MBC1 { ram: true, .. } => {
                         if self.ram_enabled && !self.ram_data.is_empty() {
                             let ram_bank = self.get_ram_bank();
-                            let offset = (addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000);
-                            if offset < self.ram_data.len() {
-                                self.ram_data[offset]
-                            } else {
-                                0xFF
-                            }
+                            let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
+                            self.ram_data[offset]
                         } else {
                             0xFF
                         }
@@ -675,12 +671,8 @@ impl memory::Addressable for Cartridge {
                     CartridgeType::MBC2 { .. } => {
                         // MBC2 has built-in 512x4 RAM at 0xA000-0xA1FF
                         if self.ram_enabled && addr <= MBC2_RAM_END {
-                            let offset = (addr - MBC2_RAM_START) as usize;
-                            if offset < self.mbc2_ram.len() {
-                                self.mbc2_ram[offset] & 0x0F // Only lower 4 bits are valid
-                            } else {
-                                0xFF
-                            }
+                            let offset = (addr - MBC2_RAM_START) as usize % self.mbc2_ram.len();
+                            self.mbc2_ram[offset] & 0x0F // Only lower 4 bits are valid
                         } else {
                             0xFF
                         }
@@ -692,12 +684,8 @@ impl memory::Addressable for Cartridge {
                                     // RAM bank access
                                     if !self.ram_data.is_empty() {
                                         let ram_bank = self.get_ram_bank();
-                                        let offset = (addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000);
-                                        if offset < self.ram_data.len() {
-                                            self.ram_data[offset]
-                                        } else {
-                                            0xFF
-                                        }
+                                        let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
+                                        self.ram_data[offset]
                                     } else {
                                         0xFF
                                     }
@@ -808,20 +796,16 @@ impl memory::Addressable for Cartridge {
                     CartridgeType::MBC1 { ram: true, .. } => {
                         if self.ram_enabled && !self.ram_data.is_empty() {
                             let ram_bank = self.get_ram_bank();
-                            let offset = (addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000);
-                            if offset < self.ram_data.len() {
-                                // Use our dual-write method that writes to both RAM and save file
-                                let _ = self.write_ram_byte(offset, value); // Ignore errors for now
-                            }
+                            let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
+                            // Use our dual-write method that writes to both RAM and save file
+                            let _ = self.write_ram_byte(offset, value); // Ignore errors for now
                         }
                     }
                     CartridgeType::MBC2 { .. } => {
                         // MBC2 has built-in 512x4 RAM at 0xA000-0xA1FF
                         if self.ram_enabled && addr <= MBC2_RAM_END {
-                            let offset = (addr - MBC2_RAM_START) as usize;
-                            if offset < self.mbc2_ram.len() {
-                                let _ = self.write_mbc2_ram_byte(offset, value); // Ignore errors for now
-                            }
+                            let offset = (addr - MBC2_RAM_START) as usize % self.mbc2_ram.len();
+                            let _ = self.write_mbc2_ram_byte(offset, value); // Ignore errors for now
                         }
                     }
                     CartridgeType::MBC3 { ram: true, .. } => {
@@ -831,10 +815,8 @@ impl memory::Addressable for Cartridge {
                                     // RAM bank access
                                     if !self.ram_data.is_empty() {
                                         let ram_bank = self.get_ram_bank();
-                                        let offset = (addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000);
-                                        if offset < self.ram_data.len() {
-                                            let _ = self.write_ram_byte(offset, value);
-                                        }
+                                        let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
+                                        let _ = self.write_ram_byte(offset, value);
                                     }
                                 }
                                 0x08..=0x0C => {
