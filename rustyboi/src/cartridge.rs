@@ -12,6 +12,18 @@ use zip::ZipArchive;
 const CARTRIDGE_TYPE_OFFSET: usize = 0x0147;
 const ROM_SIZE_OFFSET: usize = 0x0148;
 const RAM_SIZE_OFFSET: usize = 0x0149;
+const CGB_FLAG_OFFSET: usize = 0x0143;
+
+// CGB support flags
+const CGB_COMPATIBLE: u8 = 0x80; // Works on both DMG and CGB
+const CGB_ONLY: u8 = 0xC0;       // CGB only
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum CgbSupport {
+    None,        // DMG only
+    Compatible,  // Works on both DMG and CGB (0x80)
+    Only,        // CGB only (0xC0)
+}
 
 // Cartridge types for MBC1
 const MBC1: u8 = 0x01;
@@ -115,6 +127,9 @@ pub struct Cartridge {
     mbc5_rom_bank_low: u8,   // Lower 8 bits of ROM bank (0x2000-0x2FFF)
     mbc5_rom_bank_high: u8,  // Upper 1 bit of ROM bank (0x3000-0x3FFF) - only bit 0 used
     mbc5_ram_bank: u8,       // RAM bank select (0x4000-0x5FFF) - 4 bits used (0x00-0x0F)
+    
+    // CGB support information
+    cgb_support: CgbSupport, // CGB compatibility from cartridge header
 }
 
 impl Clone for Cartridge {
@@ -148,11 +163,25 @@ impl Clone for Cartridge {
             mbc5_rom_bank_low: self.mbc5_rom_bank_low,
             mbc5_rom_bank_high: self.mbc5_rom_bank_high,
             mbc5_ram_bank: self.mbc5_ram_bank,
+            cgb_support: self.cgb_support.clone(),
         }
     }
 }
 
 impl Cartridge {
+    /// Detect CGB support from cartridge header byte 0x0143
+    fn detect_cgb_support(data: &[u8]) -> CgbSupport {
+        if data.len() <= CGB_FLAG_OFFSET {
+            return CgbSupport::None;
+        }
+        
+        match data[CGB_FLAG_OFFSET] {
+            CGB_COMPATIBLE => CgbSupport::Compatible,
+            CGB_ONLY => CgbSupport::Only,
+            _ => CgbSupport::None,
+        }
+    }
+
     /// Extract ROM data from a zip file, looking for common ROM file extensions
     #[cfg(not(target_arch = "wasm32"))]
     fn extract_rom_from_zip(path: &str) -> Result<Vec<u8>, io::Error> {
@@ -264,6 +293,9 @@ impl Cartridge {
         // Initialize RAM data
         let ram_data = vec![0xFF; ram_banks * 0x2000]; // 8KB per bank
         
+        // Detect CGB support
+        let cgb_support = Self::detect_cgb_support(&data);
+        
         let mut cartridge = Cartridge {
             rom_data,
             ram_data,
@@ -293,6 +325,7 @@ impl Cartridge {
             mbc5_rom_bank_low: 1,
             mbc5_rom_bank_high: 0,
             mbc5_ram_bank: 0,
+            cgb_support,
         };
         
         // Try to load existing save file or create new one (only for battery-backed RAM)
@@ -405,6 +438,9 @@ impl Cartridge {
         // Initialize RAM data
         let ram_data = vec![0xFF; ram_banks * 0x2000]; // 8KB per bank
         
+        // Detect CGB support
+        let cgb_support = Self::detect_cgb_support(&actual_data);
+        
         let cartridge = Cartridge {
             rom_data,
             ram_data,
@@ -434,6 +470,7 @@ impl Cartridge {
             mbc5_rom_bank_low: 1,
             mbc5_rom_bank_high: 0,
             mbc5_ram_bank: 0,
+            cgb_support,
         };
         
         // Note: For WASM/in-memory loading, we skip save file loading
@@ -637,6 +674,21 @@ impl Cartridge {
             CartridgeType::MBC5 { battery, .. } => battery,
             CartridgeType::NoMBC => false,
         }
+    }
+
+    /// Get CGB support information from cartridge header
+    pub fn get_cgb_support(&self) -> CgbSupport {
+        self.cgb_support.clone()
+    }
+
+    /// Check if this cartridge supports CGB features
+    pub fn supports_cgb(&self) -> bool {
+        matches!(self.cgb_support, CgbSupport::Compatible | CgbSupport::Only)
+    }
+
+    /// Check if this cartridge requires CGB hardware
+    pub fn requires_cgb(&self) -> bool {
+        matches!(self.cgb_support, CgbSupport::Only)
     }
     
     /// Read from MBC3 RTC registers

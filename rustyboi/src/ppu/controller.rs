@@ -17,6 +17,12 @@ pub const OBP1: u16 = 0xFF49; // Object Palette 1 Data
 pub const WY: u16 = 0xFF4A;  // Window Y Position
 pub const WX: u16 = 0xFF4B;  // Window X Position
 
+// CGB
+pub const BCPS: u16 = 0xFF68; // Background Color Palette Specification
+pub const BCPD: u16 = 0xFF69; // Background Color Palette Data
+pub const OCPS: u16 = 0xFF6A; // Object Color Palette Specification
+pub const OCPD: u16 = 0xFF6B; // Object Color Palette Data
+
 pub const FRAMEBUFFER_SIZE: usize = 160 * 144;
 
 // OAM constants

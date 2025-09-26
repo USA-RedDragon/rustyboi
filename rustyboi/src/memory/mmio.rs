@@ -56,6 +56,15 @@ const IE_REGISTER: u16 = 0xFFFF; // Interrupt Enable Register
 pub const REG_BOOT_OFF: u16 = 0xFF50; // Boot ROM disable
 pub const REG_DMA: u16 = 0xFF46; // DMA Transfer and Start Address
 
+// CGB-specific registers
+pub const REG_VBK: u16 = 0xFF4F;  // VRAM Bank select
+pub const REG_HDMA1: u16 = 0xFF51; // HDMA Source High
+pub const REG_HDMA2: u16 = 0xFF52; // HDMA Source Low
+pub const REG_HDMA3: u16 = 0xFF53; // HDMA Destination High
+pub const REG_HDMA4: u16 = 0xFF54; // HDMA Destination Low
+pub const REG_HDMA5: u16 = 0xFF55; // HDMA Length/Mode/Start
+pub const REG_SVBK: u16 = 0xFF70; // WRAM Bank select
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Mmio {
     #[serde(skip, default)]
@@ -108,6 +117,10 @@ impl Mmio {
 
     pub fn insert_cartridge(&mut self, cartridge: cartridge::Cartridge) {
         self.cartridge = Some(cartridge);
+    }
+
+    pub fn get_cartridge(&self) -> Option<&cartridge::Cartridge> {
+        self.cartridge.as_ref()
     }
 
     pub fn load_bios(&mut self, path: &str) -> Result<(), io::Error> {
