@@ -35,9 +35,6 @@ impl Gui {
                     // MMIO Registers
                     let ly = gb_ref.read_memory(crate::ppu::LY);
                     let scy = gb_ref.read_memory(crate::ppu::SCY);
-                    let bgp = gb_ref.read_memory(crate::ppu::BGP);
-                    let obp0 = gb_ref.read_memory(crate::ppu::OBP0);
-                    let obp1 = gb_ref.read_memory(crate::ppu::OBP1);
                     let lyc = gb_ref.read_memory(crate::ppu::LYC);
                     let lcd_control = gb_ref.read_memory(crate::ppu::LCD_CONTROL);
                     let lcd_status = gb_ref.read_memory(crate::ppu::LCD_STATUS);
@@ -45,11 +42,33 @@ impl Gui {
                     ui.monospace(egui::RichText::new(format!("LY: {:02X} ({})", ly, ly)).color(egui::Color32::WHITE));
                     ui.monospace(egui::RichText::new(format!("LYC: {:02X} ({})", lyc, lyc)).color(egui::Color32::WHITE));
                     ui.monospace(egui::RichText::new(format!("SCY: {:02X} ({})", scy, scy)).color(egui::Color32::WHITE));
-                    ui.monospace(egui::RichText::new(format!("BGP: {:02X}", bgp)).color(egui::Color32::WHITE));
-                    ui.monospace(egui::RichText::new(format!("OBP0: {:02X}", obp0)).color(egui::Color32::LIGHT_BLUE));
-                    ui.monospace(egui::RichText::new(format!("OBP1: {:02X}", obp1)).color(egui::Color32::LIGHT_BLUE));
                     ui.monospace(egui::RichText::new(format!("LCD_CTRL: {:02X}", lcd_control)).color(egui::Color32::WHITE));
                     ui.monospace(egui::RichText::new(format!("LCD_STAT: {:02X}", lcd_status)).color(egui::Color32::WHITE));
+                    
+                    // Hardware-specific registers
+                    if gb_ref.should_enable_cgb_features() {
+                        ui.separator();
+                        ui.small(egui::RichText::new("CGB Registers:").color(egui::Color32::LIGHT_GRAY));
+                        let vbk = gb_ref.read_memory(crate::memory::mmio::REG_VBK);
+                        let svbk = gb_ref.read_memory(crate::memory::mmio::REG_SVBK);
+                        let bcps = gb_ref.read_memory(crate::memory::mmio::REG_BCPS);
+                        let ocps = gb_ref.read_memory(crate::memory::mmio::REG_OCPS);
+                        
+                        ui.monospace(egui::RichText::new(format!("VBK: {:02X} (Bank {})", vbk, vbk & 1)).color(egui::Color32::LIGHT_GREEN));
+                        ui.monospace(egui::RichText::new(format!("SVBK: {:02X} (Bank {})", svbk, if svbk & 7 == 0 { 1 } else { svbk & 7 })).color(egui::Color32::LIGHT_GREEN));
+                        ui.monospace(egui::RichText::new(format!("BCPS: {:02X} (Addr {:02X})", bcps, bcps & 0x3F)).color(egui::Color32::YELLOW));
+                        ui.monospace(egui::RichText::new(format!("OCPS: {:02X} (Addr {:02X})", ocps, ocps & 0x3F)).color(egui::Color32::LIGHT_BLUE));
+                    } else {
+                        ui.separator();
+                        ui.small(egui::RichText::new("DMG Palettes:").color(egui::Color32::LIGHT_GRAY));
+                        let bgp = gb_ref.read_memory(crate::ppu::BGP);
+                        let obp0 = gb_ref.read_memory(crate::ppu::OBP0);
+                        let obp1 = gb_ref.read_memory(crate::ppu::OBP1);
+                        
+                        ui.monospace(egui::RichText::new(format!("BGP: {:02X}", bgp)).color(egui::Color32::WHITE));
+                        ui.monospace(egui::RichText::new(format!("OBP0: {:02X}", obp0)).color(egui::Color32::LIGHT_BLUE));
+                        ui.monospace(egui::RichText::new(format!("OBP1: {:02X}", obp1)).color(egui::Color32::LIGHT_BLUE));
+                    }
                     
                     ui.separator();
                     

@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, clap::ValueEnum)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, clap::ValueEnum, PartialEq)]
 pub enum Hardware {
     DMG,  // Original DMG-01
     DMG0, // Very early Japanese DMG-01
@@ -161,6 +161,10 @@ impl GB {
             Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 | Hardware::CGB => false,
             Hardware::DMG | Hardware::MGB => self.mmio.read(0x014D) == 0x00,
         });
+        if self.hardware == Hardware::CGB {
+            self.mmio.write(crate::memory::mmio::REG_VBK, 0x7E);
+            self.mmio.write(crate::memory::mmio::REG_SVBK, 0xF8);
+        }
         self.mmio.write(crate::memory::mmio::REG_BOOT_OFF, 1);
     }
 
@@ -302,6 +306,23 @@ impl GB {
 
     pub fn read_memory(&self, address: u16) -> u8 {
         self.mmio.read(address)
+    }
+
+    /// Read RGB555 color from CGB background palette RAM
+    pub fn read_bg_palette_data(&self, palette_idx: u8, color_idx: u8) -> u16 {
+        let (low, high) = self.mmio.read_bg_palette_data(palette_idx, color_idx);
+        (high as u16) << 8 | (low as u16)
+    }
+
+    /// Read RGB555 color from CGB object palette RAM
+    pub fn read_obj_palette_data(&self, palette_idx: u8, color_idx: u8) -> u16 {
+        let (low, high) = self.mmio.read_obj_palette_data(palette_idx, color_idx);
+        (high as u16) << 8 | (low as u16)
+    }
+
+    /// Read from specific VRAM bank for debugging (CGB only)
+    pub fn read_vram_bank(&self, bank: u8, address: u16) -> u8 {
+        self.mmio.read_vram_bank(bank, address)
     }
 
     #[cfg(not(target_arch = "wasm32"))]

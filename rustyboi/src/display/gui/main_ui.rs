@@ -27,6 +27,9 @@ pub(crate) struct Gui {
     pub(super) step_frames_held_frames: u32,
     // Sprite debug state
     pub(super) selected_sprite_index: Option<u8>,
+    // Tile explorer state for CGB
+    pub(super) tile_explorer_vram_bank: u8,
+    pub(super) tile_explorer_palette: u8,
     // File dialog result tracking
     pending_dialog_result: Arc<Mutex<Option<GuiAction>>>,
 }
@@ -54,6 +57,8 @@ impl Gui {
             step_cycles_held_frames: 0,
             step_frames_held_frames: 0,
             selected_sprite_index: None,
+            tile_explorer_vram_bank: 0,
+            tile_explorer_palette: 0,
             pending_dialog_result: Arc::new(Mutex::new(None)),
         }
     }

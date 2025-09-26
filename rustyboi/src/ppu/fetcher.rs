@@ -27,6 +27,7 @@ pub struct Fetcher {
 
     tile_num: u8,
     tile_index: u8,
+    tile_attributes: u8, // CGB tile attributes from VRAM bank 1
     pixel_buffer: [u8; 8],
     
     // Window support
@@ -41,6 +42,7 @@ impl Fetcher {
             pixel_fifo: fifo::Fifo::new(),
             tile_num: 0,
             tile_index: 0,
+            tile_attributes: 0,
             pixel_buffer: [0; 8],
             fetching_window: false,
             window_x_start: 0,
@@ -52,6 +54,7 @@ impl Fetcher {
         self.pixel_fifo.reset();
         self.tile_num = 0;
         self.tile_index = 0;
+        self.tile_attributes = 0;
         self.pixel_buffer = [0; 8];
         self.fetching_window = false;
         self.window_x_start = 0;
@@ -167,12 +170,27 @@ impl Fetcher {
                 
                 let map_addr = tile_map_base + map_offset;
                 self.tile_num = mmio.read(map_addr);
+                
+                // In CGB mode, read tile attributes from VRAM bank 1
+                self.tile_attributes = if mmio.is_cgb_features_enabled() {
+                    mmio.read_vram_bank1(map_addr)
+                } else {
+                    0 // No attributes in DMG mode
+                };
+                
                 self.state = State::TileDataLow;
             }
             State::TileDataLow => {
                 // Fetch the low byte of the tile data using the correct addressing method
                 let addr = self.get_tile_data_address(self.tile_num, tile_line, mmio);
-                let low_byte = mmio.read(addr);
+                
+                // In CGB mode, use VRAM bank specified in tile attributes (bit 3)
+                let low_byte = if mmio.is_cgb_features_enabled() && (self.tile_attributes & 0x08) != 0 {
+                    mmio.read_vram_bank1(addr) // Read from VRAM bank 1
+                } else {
+                    mmio.read(addr) // Read from VRAM bank 0 (or current bank on DMG)
+                };
+                
                 for i in 0..8 {
                     self.pixel_buffer[i] = (low_byte >> (7 - i)) & 0x01;
                 }
@@ -181,7 +199,14 @@ impl Fetcher {
             State::TileDataHigh => {
                 // Fetch the high byte of the tile data using the correct addressing method
                 let addr = self.get_tile_data_address(self.tile_num, tile_line, mmio) + 1;
-                let high_byte = mmio.read(addr);
+                
+                // In CGB mode, use VRAM bank specified in tile attributes (bit 3)
+                let high_byte = if mmio.is_cgb_features_enabled() && (self.tile_attributes & 0x08) != 0 {
+                    mmio.read_vram_bank1(addr) // Read from VRAM bank 1
+                } else {
+                    mmio.read(addr) // Read from VRAM bank 0 (or current bank on DMG)
+                };
+                
                 for i in 0..8 {
                     // Combine low and high bytes to form the pixel data
                     self.pixel_buffer[i] |= ((high_byte >> (7 - i)) & 0x01) << 1;

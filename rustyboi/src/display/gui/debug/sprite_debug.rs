@@ -141,7 +141,7 @@ impl Gui {
                             let priority = (attributes & 0x80) != 0;
                             let y_flip = (attributes & 0x40) != 0;
                             let x_flip = (attributes & 0x20) != 0;
-                            let palette = (attributes & 0x10) != 0;
+                            let dmg_palette = (attributes & 0x10) != 0;
                             
                             ui.heading("Attribute Details:");
                             ui.monospace(egui::RichText::new(format!("Bit 7 - Priority: {} ({})", 
@@ -159,10 +159,35 @@ impl Gui {
                                 if x_flip { "Horizontally mirrored" } else { "Normal" }
                             )).color(if x_flip { egui::Color32::YELLOW } else { egui::Color32::WHITE }));
                             
-            ui.monospace(egui::RichText::new(format!("Bit 4 - Palette: {} ({})", 
-                if palette { "1" } else { "0" },
-                if palette { "OBP1" } else { "OBP0" }
-            )).color(if palette { egui::Color32::LIGHT_BLUE } else { egui::Color32::from_rgb(0, 255, 255) }));                            ui.monospace(egui::RichText::new("Bits 3-0 - Unused").color(egui::Color32::GRAY));
+                            // Show different attribute meanings based on hardware
+                            if gb_ref.should_enable_cgb_features() {
+                                // CGB mode - different bit meanings
+                                let vram_bank = (attributes & 0x08) != 0;
+                                let cgb_palette = attributes & 0x07;
+                                
+                                ui.monospace(egui::RichText::new(format!("Bit 4 - DMG Palette: {} ({})", 
+                                    if dmg_palette { "1" } else { "0" },
+                                    if dmg_palette { "OBP1" } else { "OBP0" }
+                                )).color(egui::Color32::GRAY));
+                                ui.small(egui::RichText::new("  (DMG compatibility only)").color(egui::Color32::GRAY));
+                                
+                                ui.monospace(egui::RichText::new(format!("Bit 3 - VRAM Bank: {} (Bank {})", 
+                                    if vram_bank { "1" } else { "0" },
+                                    if vram_bank { "1" } else { "0" }
+                                )).color(if vram_bank { egui::Color32::LIGHT_GREEN } else { egui::Color32::WHITE }));
+                                
+                                ui.monospace(egui::RichText::new(format!("Bits 2-0 - CGB Palette: {:03b} (Palette {})", 
+                                    cgb_palette, cgb_palette
+                                )).color(egui::Color32::LIGHT_BLUE));
+                            } else {
+                                // DMG mode - standard interpretation
+                                ui.monospace(egui::RichText::new(format!("Bit 4 - Palette: {} ({})", 
+                                    if dmg_palette { "1" } else { "0" },
+                                    if dmg_palette { "OBP1" } else { "OBP0" }
+                                )).color(if dmg_palette { egui::Color32::LIGHT_BLUE } else { egui::Color32::from_rgb(0, 255, 255) }));
+                                
+                                ui.monospace(egui::RichText::new("Bits 3-0 - Unused").color(egui::Color32::GRAY));
+                            }
                             
                             ui.separator();
                             
@@ -191,8 +216,15 @@ impl Gui {
                             ui.monospace("Bit 7: Priority (0=Above BG, 1=Behind BG colors 1-3)");
                             ui.monospace("Bit 6: Y-Flip (0=Normal, 1=Vertically mirrored)");
                             ui.monospace("Bit 5: X-Flip (0=Normal, 1=Horizontally mirrored)"); 
-                            ui.monospace("Bit 4: Palette (0=OBP0, 1=OBP1)");
-                            ui.monospace("Bits 3-0: Unused (should be 0)");
+                            
+                            if gb_ref.should_enable_cgb_features() {
+                                ui.monospace("Bit 4: DMG Palette (0=OBP0, 1=OBP1) - compatibility only");
+                                ui.monospace("Bit 3: VRAM Bank (0=Bank 0, 1=Bank 1)");
+                                ui.monospace("Bits 2-0: CGB Palette (0-7)");
+                            } else {
+                                ui.monospace("Bit 4: Palette (0=OBP0, 1=OBP1)");
+                                ui.monospace("Bits 3-0: Unused (should be 0)");
+                            }
                         }
                     });
                 });
@@ -202,14 +234,6 @@ impl Gui {
     // Helper method to render a small sprite preview
     fn render_sprite_preview(&self, ui: &mut egui::Ui, gb_ref: &crate::gb::GB, tile_index: u8, attributes: u8, sprite_height: u8) {
         let tile_size = 16.0; // Small preview size
-        
-        // Get sprite palettes
-        let palette_bit = (attributes & 0x10) != 0;
-        let palette_reg = if palette_bit { 
-            gb_ref.read_memory(crate::ppu::OBP1)
-        } else { 
-            gb_ref.read_memory(crate::ppu::OBP0)
-        };
         
         // Get flip flags
         let x_flip = (attributes & 0x20) != 0;
@@ -228,6 +252,17 @@ impl Gui {
             tile_index
         };
         
+        // Determine VRAM bank and palette based on CGB mode
+        let (vram_bank, palette_info) = if gb_ref.should_enable_cgb_features() {
+            let vram_bank = if (attributes & 0x08) != 0 { 1 } else { 0 };
+            let cgb_palette = attributes & 0x07;
+            (vram_bank, format!("CGB Pal {}", cgb_palette))
+        } else {
+            let palette_bit = (attributes & 0x10) != 0;
+            let palette_name = if palette_bit { "OBP1" } else { "OBP0" };
+            (0, palette_name.to_string())
+        };
+        
         // Calculate VRAM address for this tile (sprites always use $8000 method)
         let tile_addr = 0x8000u16 + (display_tile as u16 * 16);
         
@@ -235,8 +270,8 @@ impl Gui {
         for y in 0..8 {
             // Read the two bytes for this line of the tile
             let actual_y = if y_flip { 7 - y } else { y };
-            let low_byte = gb_ref.read_memory(tile_addr + (actual_y * 2));
-            let high_byte = gb_ref.read_memory(tile_addr + (actual_y * 2) + 1);
+            let low_byte = gb_ref.read_vram_bank(vram_bank, tile_addr + (actual_y * 2));
+            let high_byte = gb_ref.read_vram_bank(vram_bank, tile_addr + (actual_y * 2) + 1);
             
             for x in 0..8 {
                 // Extract pixel value (2 bits)
@@ -249,14 +284,7 @@ impl Gui {
                 let pixel_color = if pixel_value == 0 {
                     egui::Color32::TRANSPARENT
                 } else {
-                    let palette_bits = (palette_reg >> (pixel_value * 2)) & 0x03;
-                    match palette_bits {
-                        0 => egui::Color32::from_rgb(255, 255, 255), // White
-                        1 => egui::Color32::from_rgb(170, 170, 170), // Light Gray
-                        2 => egui::Color32::from_rgb(85, 85, 85),    // Dark Gray
-                        3 => egui::Color32::from_rgb(0, 0, 0),       // Black
-                        _ => egui::Color32::RED, // Should never happen
-                    }
+                    self.get_sprite_pixel_color(gb_ref, attributes, pixel_value)
                 };
                 
                 // Calculate pixel position within the sprite preview
@@ -298,8 +326,8 @@ impl Gui {
         // Re-draw the sprite on top of the checkerboard
         for y in 0..8 {
             let actual_y = if y_flip { 7 - y } else { y };
-            let low_byte = gb_ref.read_memory(tile_addr + (actual_y * 2));
-            let high_byte = gb_ref.read_memory(tile_addr + (actual_y * 2) + 1);
+            let low_byte = gb_ref.read_vram_bank(vram_bank, tile_addr + (actual_y * 2));
+            let high_byte = gb_ref.read_vram_bank(vram_bank, tile_addr + (actual_y * 2) + 1);
             
             for x in 0..8 {
                 let actual_x = if x_flip { x } else { 7 - x };
@@ -308,14 +336,7 @@ impl Gui {
                 let pixel_value = (high_bit << 1) | low_bit;
                 
                 if pixel_value != 0 {
-                    let palette_bits = (palette_reg >> (pixel_value * 2)) & 0x03;
-                    let pixel_color = match palette_bits {
-                        0 => egui::Color32::from_rgb(255, 255, 255), // White
-                        1 => egui::Color32::from_rgb(170, 170, 170), // Light Gray
-                        2 => egui::Color32::from_rgb(85, 85, 85),    // Dark Gray
-                        3 => egui::Color32::from_rgb(0, 0, 0),       // Black
-                        _ => egui::Color32::RED,
-                    };
+                    let pixel_color = self.get_sprite_pixel_color(gb_ref, attributes, pixel_value);
                     
                     let pixel_size = tile_size / 8.0;
                     let pixel_x = sprite_rect.min.x + (x as f32 * pixel_size);
@@ -335,17 +356,53 @@ impl Gui {
         
         // Show tooltip with sprite info on hover
         if response.hovered() {
-            let palette_name = if palette_bit { "OBP1" } else { "OBP0" };
             let flips = format!("{}{}",
                 if x_flip { "X-Flip " } else { "" },
                 if y_flip { "Y-Flip" } else { "" }
             );
+            let vram_info = if gb_ref.should_enable_cgb_features() {
+                format!(" Bank {}", vram_bank)
+            } else {
+                String::new()
+            };
             response.on_hover_text(format!(
-                "Tile: 0x{:02X}\nPalette: {}\nFlips: {}\nVRAM: 0x{:04X}",
-                display_tile, palette_name, 
+                "Tile: 0x{:02X}\nPalette: {}\nFlips: {}\nVRAM: 0x{:04X}{}",
+                display_tile, palette_info, 
                 if flips.is_empty() { "None" } else { &flips },
-                tile_addr
+                tile_addr, vram_info
             ));
+        }
+    }
+
+    fn get_sprite_pixel_color(&self, gb_ref: &crate::gb::GB, attributes: u8, pixel_value: u8) -> egui::Color32 {
+        if gb_ref.should_enable_cgb_features() {
+            // CGB mode - use CGB palette
+            let cgb_palette = attributes & 0x07;
+            let rgb555 = gb_ref.read_obj_palette_data(cgb_palette, pixel_value);
+            
+            // Convert RGB555 to RGB888
+            let r = ((rgb555 & 0x1F) * 255 / 31) as u8;
+            let g = (((rgb555 >> 5) & 0x1F) * 255 / 31) as u8; 
+            let b = (((rgb555 >> 10) & 0x1F) * 255 / 31) as u8;
+            
+            egui::Color32::from_rgb(r, g, b)
+        } else {
+            // DMG mode - use monochrome palette
+            let palette_bit = (attributes & 0x10) != 0;
+            let palette_reg = if palette_bit { 
+                gb_ref.read_memory(crate::ppu::OBP1)
+            } else { 
+                gb_ref.read_memory(crate::ppu::OBP0)
+            };
+            
+            let palette_bits = (palette_reg >> (pixel_value * 2)) & 0x03;
+            match palette_bits {
+                0 => egui::Color32::from_rgb(255, 255, 255), // White
+                1 => egui::Color32::from_rgb(170, 170, 170), // Light Gray
+                2 => egui::Color32::from_rgb(85, 85, 85),    // Dark Gray
+                3 => egui::Color32::from_rgb(0, 0, 0),       // Black
+                _ => egui::Color32::RED, // Should never happen
+            }
         }
     }
 }

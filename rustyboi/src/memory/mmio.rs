@@ -213,6 +213,25 @@ impl Mmio {
         self.vram_bank1.read(addr)
     }
 
+    /// Read from specific VRAM bank for debugging purposes
+    pub fn read_vram_bank(&self, bank: u8, addr: u16) -> u8 {
+        if addr < VRAM_START || addr > VRAM_END {
+            return 0xFF; // Invalid address
+        }
+        
+        match bank {
+            0 => self.vram.read(addr),
+            1 => {
+                if self.cgb_features_enabled {
+                    self.vram_bank1.read(addr)
+                } else {
+                    0xFF // Bank 1 doesn't exist on DMG
+                }
+            }
+            _ => 0xFF, // Invalid bank
+        }
+    }
+
     pub fn get_cartridge(&self) -> Option<&cartridge::Cartridge> {
         self.cartridge.as_ref()
     }
