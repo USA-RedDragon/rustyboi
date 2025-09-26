@@ -99,7 +99,7 @@ pub struct RawConfig {
     bios: Option<String>,
 
     // Hardware type (DMG, CGB, SGB, etc.)
-    #[arg(short = 't', long, default_value = "dmg")]
+    #[arg(short = 't', long, default_value = "cgb")]
     hardware: crate::gb::Hardware,
 
     /// ROM file path, optional
