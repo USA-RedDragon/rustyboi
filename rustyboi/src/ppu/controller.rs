@@ -30,7 +30,8 @@ pub struct SpriteAttributes {
     pub priority: bool,    // 0 = above BG, 1 = behind BG colors 1-3
     pub y_flip: bool,      // 0 = normal, 1 = vertically mirrored
     pub x_flip: bool,      // 0 = normal, 1 = horizontally mirrored
-    pub palette: bool,     // 0 = OBP0, 1 = OBP1
+    pub palette: bool,     // 0 = OBP0, 1 = OBP1 (DMG compatibility)
+    pub raw: u8,           // Raw attribute byte for CGB palette access
 }
 
 impl SpriteAttributes {
@@ -40,6 +41,7 @@ impl SpriteAttributes {
             y_flip: (byte & 0x40) != 0,
             x_flip: (byte & 0x20) != 0,
             palette: (byte & 0x10) != 0,
+            raw: byte,
         }
     }
 }
@@ -574,10 +576,10 @@ impl Ppu {
                             
                             // Get sprite palette (in CGB mode, sprite attributes can specify palette)
                             let sprite_palette_idx = if mmio.is_cgb_features_enabled() {
-                                // TODO: In CGB mode, sprites can have palette info in OAM attributes
-                                // For now, use the old palette bit
-                                if sprite.attributes.palette { 1 } else { 0 }
+                                // CGB mode: Use bits 2-0 for palette selection (0-7)
+                                sprite.attributes.raw & 0x07
                             } else {
+                                // DMG mode: Use bit 4 for palette selection (0-1)
                                 if sprite.attributes.palette { 1 } else { 0 }
                             };
                             
@@ -728,8 +730,15 @@ impl Ppu {
         
         // Sprite tiles always use the $8000 addressing method
         let tile_addr = 0x8000 + (tile_index as u16) * 16 + (tile_line as u16) * 2;
-        let low_byte = mmio.read(tile_addr);
-        let high_byte = mmio.read(tile_addr + 1);
+        
+        // In CGB mode, sprites can use VRAM bank 1 if bit 3 is set
+        let (low_byte, high_byte) = if mmio.is_cgb_features_enabled() && (sprite.attributes.raw & 0x08) != 0 {
+            // Read from VRAM bank 1
+            (mmio.read_vram_bank1(tile_addr), mmio.read_vram_bank1(tile_addr + 1))
+        } else {
+            // Read from VRAM bank 0 (or current bank on DMG)
+            (mmio.read(tile_addr), mmio.read(tile_addr + 1))
+        };
         
         // Handle X flipping
         let bit_index = if sprite.attributes.x_flip {

@@ -13,11 +13,31 @@ impl Gui {
                 .show(ctx, |ui| {
                     ui.set_min_width(320.0);
                     
-                    // Get current palette for color mapping
-                    let bgp = gb_ref.read_memory(crate::ppu::BGP);
-                    
                     ui.monospace(egui::RichText::new("VRAM Tile Data").color(egui::Color32::YELLOW));
                     ui.small(egui::RichText::new("8x8 pixel tiles from 0x8000-0x97FF").color(egui::Color32::LIGHT_GRAY));
+                    
+                    // CGB/DMG specific controls
+                    if gb_ref.should_enable_cgb_features() {
+                        ui.separator();
+                        let current_vbk = gb_ref.read_memory(crate::memory::mmio::REG_VBK) & 1;
+                        ui.horizontal(|ui| {
+                            ui.label("VRAM Bank:");
+                            ui.radio_value(&mut self.tile_explorer_vram_bank, 0, "Bank 0");
+                            ui.radio_value(&mut self.tile_explorer_vram_bank, 1, "Bank 1");
+                            ui.label(format!("(Current: {})", current_vbk));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Palette:");
+                            ui.radio_value(&mut self.tile_explorer_palette, 0, "BG Pal 0");
+                            for i in 1..8 {
+                                ui.radio_value(&mut self.tile_explorer_palette, i, format!("BG {}", i));
+                            }
+                        });
+                    } else {
+                        // Get current palette for DMG color mapping
+                        let bgp = gb_ref.read_memory(crate::ppu::BGP);
+                        ui.small(egui::RichText::new(format!("Using BGP palette: {:02X}", bgp)).color(egui::Color32::LIGHT_GRAY));
+                    }
                     
                     ui.separator();
                     
@@ -45,9 +65,17 @@ impl Gui {
                                         
                                         // Draw the tile
                                         for y in 0..8 {
-                                            // Read the two bytes for this line of the tile
-                                            let low_byte = gb_ref.read_memory(tile_addr + (y * 2));
-                                            let high_byte = gb_ref.read_memory(tile_addr + (y * 2) + 1);
+                                            // Read the two bytes for this line of the tile from the selected VRAM bank
+                                            let low_byte = if gb_ref.should_enable_cgb_features() {
+                                                gb_ref.read_vram_bank(self.tile_explorer_vram_bank, tile_addr + (y * 2))
+                                            } else {
+                                                gb_ref.read_memory(tile_addr + (y * 2))
+                                            };
+                                            let high_byte = if gb_ref.should_enable_cgb_features() {
+                                                gb_ref.read_vram_bank(self.tile_explorer_vram_bank, tile_addr + (y * 2) + 1)
+                                            } else {
+                                                gb_ref.read_memory(tile_addr + (y * 2) + 1)
+                                            };
                                             
                                             for x in 0..8 {
                                                 // Extract pixel value (2 bits)
@@ -56,14 +84,25 @@ impl Gui {
                                                 let high_bit = (high_byte >> bit) & 1;
                                                 let pixel_value = (high_bit << 1) | low_bit;
                                                 
-                                                // Apply palette mapping
-                                                let palette_bits = (bgp >> (pixel_value * 2)) & 0x03;
-                                                let pixel_color = match palette_bits {
-                                                    0 => egui::Color32::from_rgb(255, 255, 255), // White
-                                                    1 => egui::Color32::from_rgb(170, 170, 170), // Light Gray
-                                                    2 => egui::Color32::from_rgb(85, 85, 85),    // Dark Gray
-                                                    3 => egui::Color32::from_rgb(0, 0, 0),       // Black
-                                                    _ => egui::Color32::RED, // Should never happen
+                                                // Apply palette mapping based on hardware
+                                                let pixel_color = if gb_ref.should_enable_cgb_features() {
+                                                    // CGB mode - use selected palette
+                                                    let rgb555 = gb_ref.read_bg_palette_data(self.tile_explorer_palette, pixel_value);
+                                                    let r = ((rgb555 & 0x1F) * 255 / 31) as u8;
+                                                    let g = (((rgb555 >> 5) & 0x1F) * 255 / 31) as u8; 
+                                                    let b = (((rgb555 >> 10) & 0x1F) * 255 / 31) as u8;
+                                                    egui::Color32::from_rgb(r, g, b)
+                                                } else {
+                                                    // DMG mode - use BGP
+                                                    let bgp = gb_ref.read_memory(crate::ppu::BGP);
+                                                    let palette_bits = (bgp >> (pixel_value * 2)) & 0x03;
+                                                    match palette_bits {
+                                                        0 => egui::Color32::from_rgb(255, 255, 255), // White
+                                                        1 => egui::Color32::from_rgb(170, 170, 170), // Light Gray
+                                                        2 => egui::Color32::from_rgb(85, 85, 85),    // Dark Gray
+                                                        3 => egui::Color32::from_rgb(0, 0, 0),       // Black
+                                                        _ => egui::Color32::RED, // Should never happen
+                                                    }
                                                 };
                                                 
                                                 // Calculate pixel position within the tile
@@ -101,7 +140,12 @@ impl Gui {
                     
                     ui.separator();
                     ui.small(egui::RichText::new("Hover tiles for details").color(egui::Color32::LIGHT_GRAY));
-                    ui.small(egui::RichText::new("Uses current BGP palette").color(egui::Color32::LIGHT_GRAY));
+                    if gb_ref.should_enable_cgb_features() {
+                        ui.small(egui::RichText::new(format!("Showing VRAM Bank {} with CGB Palette {}", 
+                            self.tile_explorer_vram_bank, self.tile_explorer_palette)).color(egui::Color32::LIGHT_GRAY));
+                    } else {
+                        ui.small(egui::RichText::new("Uses current BGP palette").color(egui::Color32::LIGHT_GRAY));
+                    }
                 });
         }
     }
