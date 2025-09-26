@@ -207,7 +207,8 @@ impl Ppu {
                 if self.ticks == 80 {
                     self.x = 0;
                     self.fetcher.reset_with_scx_offset(mmio);
-                    self.state = State::PixelTransfer
+                    mmio.write(LCD_STATUS, (mmio.read(LCD_STATUS) & !(1 << 1)) | (1 << 0)); // Set Mode 3 flag
+                    self.state = State::PixelTransfer;
                 }
             },
             State::PixelTransfer => 'label: {
@@ -249,7 +250,8 @@ impl Ppu {
 
                     self.x += 1;
                     if self.x == 160 {
-                        self.state = State::HBlank
+                        self.state = State::HBlank;
+                        mmio.write(LCD_STATUS, mmio.read(LCD_STATUS) & !((1 << 0) | (1 << 1))); // Set Mode 0 flag
                     }
                 }
             },
@@ -261,12 +263,14 @@ impl Ppu {
                     if current_ly >= 143 {
                         mmio.write(LY, 144);
                         self.state = State::VBlank;
+                        mmio.write(LCD_STATUS, (mmio.read(LCD_STATUS) & !(1 << 1)) | (1 << 0)); // Set Mode 1 flag
                         cpu.set_interrupt_flag(registers::InterruptFlag::VBlank, true, mmio);
                     } else {
                         // Continue to next visible scanline
                         let next_ly = current_ly.saturating_add(1);
                         mmio.write(LY, next_ly);
                         self.state = State::OAMSearch;
+                        mmio.write(LCD_STATUS, mmio.read(LCD_STATUS) | (1 << 1)); // Set Mode 2 flag
                     }
                     return;
                 }
@@ -279,6 +283,7 @@ impl Ppu {
                     if current_ly >= 153 {
                         mmio.write(LY, 0);
                         self.state = State::OAMSearch;
+                        mmio.write(LCD_STATUS, mmio.read(LCD_STATUS) | (1 << 1)); // Set Mode 2 flag
                         self.window_line_counter = 0;
                         self.window_y_triggered = false;
                         self.window_started_this_line = false;
