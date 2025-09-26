@@ -85,6 +85,26 @@ pub struct Mmio {
     dma_active: bool,
     dma_source_base: u16,
     dma_progress: u8, // 0-159, tracks which byte we're transferring
+    
+    // CGB-specific state
+    vram_bank: u8,          // VRAM bank select (0-1)
+    wram_bank_select: u8,   // WRAM bank select (1-7)
+    
+    // CGB VRAM bank 1 (bank 0 is the existing vram field)
+    vram_bank1: memory::Memory<VRAM_START, VRAM_SIZE>,
+    
+    // CGB WRAM banks 2-7 (bank 1 is the existing wram_bank field)  
+    wram_banks: Vec<memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>>, // Banks 2-7
+    
+    // CGB HDMA state
+    hdma_source: u16,       // HDMA source address
+    hdma_dest: u16,         // HDMA destination address
+    hdma_length: u8,        // HDMA transfer length
+    hdma_mode: u8,          // HDMA mode (0=general purpose, 1=H-blank)
+    hdma_active: bool,      // HDMA transfer active
+    
+    // CGB feature enablement
+    cgb_features_enabled: bool, // Whether CGB-specific features should be active
 }
 
 impl Mmio {
@@ -105,6 +125,18 @@ impl Mmio {
             dma_active: false,
             dma_source_base: 0,
             dma_progress: 0,
+            
+            // CGB-specific fields initialization
+            vram_bank: 0,
+            wram_bank_select: 1, // CGB starts with WRAM bank 1 selected
+            vram_bank1: memory::Memory::new(),
+            wram_banks: (0..6).map(|_| memory::Memory::new()).collect(), // Banks 2-7
+            hdma_source: 0,
+            hdma_dest: 0,
+            hdma_length: 0,
+            hdma_mode: 0,
+            hdma_active: false,
+            cgb_features_enabled: false, // Will be set when cartridge is inserted
         }
     }
 
@@ -117,6 +149,10 @@ impl Mmio {
 
     pub fn insert_cartridge(&mut self, cartridge: cartridge::Cartridge) {
         self.cartridge = Some(cartridge);
+    }
+    
+    pub fn set_cgb_features_enabled(&mut self, enabled: bool) {
+        self.cgb_features_enabled = enabled;
     }
 
     pub fn get_cartridge(&self) -> Option<&cartridge::Cartridge> {
@@ -295,7 +331,13 @@ impl memory::Addressable for Mmio {
                         None => EMPTY_BYTE,
                     }
                 },
-                VRAM_START..=VRAM_END => self.vram.read(addr),
+                VRAM_START..=VRAM_END => {
+                    if self.cgb_features_enabled && self.vram_bank == 1 {
+                        self.vram_bank1.read(addr)
+                    } else {
+                        self.vram.read(addr) // Always use bank 0 on DMG or when bank 0 is selected
+                    }
+                },
                 EXTERNAL_RAM_START..=EXTERNAL_RAM_END => {
                     match &self.cartridge {
                         Some(cart) => cart.read(addr),
@@ -303,13 +345,39 @@ impl memory::Addressable for Mmio {
                     }
                 },
                 WRAM_START..=WRAM_END => self.wram.read(addr),
-                WRAM_BANK_START..=WRAM_BANK_END => self.wram_bank.read(addr),
+                WRAM_BANK_START..=WRAM_BANK_END => {
+                    if self.cgb_features_enabled {
+                        match self.wram_bank_select {
+                            0 | 1 => self.wram_bank.read(addr), // Bank 0 and 1 use the original wram_bank
+                            2..=7 => {
+                                let bank_index = (self.wram_bank_select - 2) as usize; 
+                                self.wram_banks[bank_index].read(addr)
+                            },
+                            _ => self.wram_bank.read(addr), // Fallback to bank 1
+                        }
+                    } else {
+                        self.wram_bank.read(addr) // DMG always uses bank 1
+                    }
+                },
                 ECHO_RAM_START..=ECHO_RAM_END => {
                     let addr = addr - 0x2000;
                     match addr {
                         0..WRAM_START => panic!("This is literally never possible"),
                         WRAM_START..=WRAM_END => self.wram.read(addr),
-                        WRAM_BANK_START..=ECHO_RAM_MIRROR_END => self.wram_bank.read(addr),
+                        WRAM_BANK_START..=ECHO_RAM_MIRROR_END => {
+                            if self.cgb_features_enabled {
+                                match self.wram_bank_select {
+                                    0 | 1 => self.wram_bank.read(addr), // Bank 0 and 1 use the original wram_bank
+                                    2..=7 => {
+                                        let bank_index = (self.wram_bank_select - 2) as usize; 
+                                        self.wram_banks[bank_index].read(addr)
+                                    },
+                                    _ => self.wram_bank.read(addr), // Fallback to bank 1
+                                }
+                            } else {
+                                self.wram_bank.read(addr) // DMG always uses bank 1
+                            }
+                        },
                         0xDE00..=0xFFFF => panic!("This is literally never possible"),
                     }
                 },
@@ -325,6 +393,23 @@ impl memory::Addressable for Mmio {
                         audio::NR41..=audio::NR52 => self.audio.read(addr),
                         audio::WAV_START..=audio::WAV_END => self.audio.read(addr),
                         REG_DMA => self.io_registers.read(addr),
+                        
+                        // CGB registers - only accessible when CGB features are enabled
+                        REG_VBK => {
+                            if self.cgb_features_enabled {
+                                self.vram_bank | 0xFE // Bit 0 = bank, bits 1-7 = 1
+                            } else {
+                                0xFF // DMG hardware returns 0xFF for CGB registers
+                            }
+                        },
+                        REG_SVBK => {
+                            if self.cgb_features_enabled {
+                                self.wram_bank_select | 0xF8 // Bits 0-2 = bank, bits 3-7 = 1
+                            } else {
+                                0xFF
+                            }
+                        },
+                        
                         _ => self.io_registers.read(addr),
                     }
                 }
@@ -362,18 +447,50 @@ impl memory::Addressable for Mmio {
                 CARTRIDGE_BANK_START..=CARTRIDGE_BANK_END => {
                     if let Some(cart) = self.cartridge.as_mut() { cart.write(addr, value) }
                 },
-                VRAM_START..=VRAM_END => self.vram.write(addr, value),
+                VRAM_START..=VRAM_END => {
+                    if self.cgb_features_enabled && self.vram_bank == 1 {
+                        self.vram_bank1.write(addr, value)
+                    } else {
+                        self.vram.write(addr, value) // Always use bank 0 on DMG or when bank 0 is selected
+                    }
+                },
                 EXTERNAL_RAM_START..=EXTERNAL_RAM_END => {
                     if let Some(cart) = self.cartridge.as_mut() { cart.write(addr, value) }
                 },
                 WRAM_START..=WRAM_END => self.wram.write(addr, value),
-                WRAM_BANK_START..=WRAM_BANK_END => self.wram_bank.write(addr, value),
+                WRAM_BANK_START..=WRAM_BANK_END => {
+                    if self.cgb_features_enabled {
+                        match self.wram_bank_select {
+                            0 | 1 => self.wram_bank.write(addr, value), // Bank 0 and 1 use the original wram_bank
+                            2..=7 => {
+                                let bank_index = (self.wram_bank_select - 2) as usize; 
+                                self.wram_banks[bank_index].write(addr, value)
+                            },
+                            _ => self.wram_bank.write(addr, value), // Fallback to bank 1
+                        }
+                    } else {
+                        self.wram_bank.write(addr, value) // DMG always uses bank 1
+                    }
+                },
                 ECHO_RAM_START..=ECHO_RAM_END => {
                     let addr = addr - 0x2000;
                     match addr {
                         0..WRAM_START => panic!("This is literally never possible"),
                         WRAM_START..=WRAM_END => self.wram.write(addr, value),
-                        WRAM_BANK_START..=ECHO_RAM_MIRROR_END => self.wram_bank.write(addr, value),
+                        WRAM_BANK_START..=ECHO_RAM_MIRROR_END => {
+                            if self.cgb_features_enabled {
+                                match self.wram_bank_select {
+                                    0 | 1 => self.wram_bank.write(addr, value), // Bank 0 and 1 use the original wram_bank
+                                    2..=7 => {
+                                        let bank_index = (self.wram_bank_select - 2) as usize; 
+                                        self.wram_banks[bank_index].write(addr, value)
+                                    },
+                                    _ => self.wram_bank.write(addr, value), // Fallback to bank 1
+                                }
+                            } else {
+                                self.wram_bank.write(addr, value) // DMG always uses bank 1
+                            }
+                        },
                         0xDE00..=0xFFFF => panic!("This is literally never possible"),
                     }
                 },
@@ -398,6 +515,21 @@ impl memory::Addressable for Mmio {
                             // Store the DMA register value for reads
                             self.io_registers.write(addr, value);
                         },
+                        
+                        // CGB registers - only writable when CGB features are enabled
+                        REG_VBK => {
+                            if self.cgb_features_enabled {
+                                self.vram_bank = value & 0x01; // Only bit 0 is writable
+                            }
+                            // On DMG hardware, writes are ignored
+                        },
+                        REG_SVBK => {
+                            if self.cgb_features_enabled {
+                                let bank = value & 0x07; // Bits 0-2 = bank select
+                                self.wram_bank_select = if bank == 0 { 1 } else { bank }; // Bank 0 selects bank 1
+                            }
+                        },
+                        
                         _ => self.io_registers.write(addr, value),
                     }
                 }
