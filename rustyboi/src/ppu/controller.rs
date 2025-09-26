@@ -305,9 +305,9 @@ impl Ppu {
         self.have_frame
     }
 
-    pub fn get_frame(&mut self) -> [u8; FRAMEBUFFER_SIZE] {
+    pub fn get_frame(&mut self) -> crate::gb::Frame {
         self.have_frame = false;
-        self.fb_b
+        crate::gb::Frame::Monochrome(self.fb_b)
     }
 
     // Debug methods

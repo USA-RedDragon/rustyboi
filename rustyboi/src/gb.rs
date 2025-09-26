@@ -49,6 +49,11 @@ impl Clone for GB {
     }
 }
 
+pub enum Frame {
+    Monochrome([u8; ppu::FRAMEBUFFER_SIZE]),
+    Color([u8; ppu::FRAMEBUFFER_SIZE * 3]),
+}
+
 impl GB {
     pub fn new(hardware: Hardware) -> Self {
         GB {
@@ -250,7 +255,7 @@ impl GB {
         (false, cycles) // No breakpoint hit
     }
 
-    pub fn run_until_frame(&mut self, collect_audio: bool) -> ([u8; ppu::FRAMEBUFFER_SIZE], bool) {
+    pub fn run_until_frame(&mut self, collect_audio: bool) -> (Frame, bool) {
         let mut cpu_cycles_this_frame = 0u32;
         // Normal frame should be 70224 cycles (154 scanlines × 456 cycles)
         // If we exceed this, we assume PPU is disabled or stuck
@@ -279,7 +284,7 @@ impl GB {
         }
     }
 
-    pub fn get_current_frame(&mut self) -> [u8; ppu::FRAMEBUFFER_SIZE] {
+    pub fn get_current_frame(&mut self) -> Frame {
         self.ppu.get_frame()
     }
 

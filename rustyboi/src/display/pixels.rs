@@ -419,7 +419,7 @@ fn run_gui_loop(
 
 struct World {
     gb: gb::GB,
-    frame: Option<[u8; ppu::FRAMEBUFFER_SIZE * 4]>,
+    frame: Option<crate::gb::Frame>,
     error_state: Option<String>,
     is_paused: bool,
     step_single_frame: bool,
@@ -607,20 +607,39 @@ impl World {
     }
 
     fn draw(&mut self, frame: &mut [u8]) {
-        if let Some(rgba_frame) = &self.frame {
-            frame.copy_from_slice(rgba_frame);
+        if let Some(gb_frame) = self.frame.as_ref() {
+            let rgba_frame = match gb_frame {
+                crate::gb::Frame::Monochrome(data) => {
+                    // Convert monochrome framebuffer to RGBA using the palette
+                    convert_to_rgba(&data, &self.palette)
+                }
+                crate::gb::Frame::Color(data) => {
+                    // Convert color framebuffer (RGB888) to RGBA8888
+                    let mut rgba = [0u8; ppu::FRAMEBUFFER_SIZE * 4];
+                    for (i, chunk) in data.chunks(3).enumerate() {
+                        let offset = i * 4;
+                        rgba[offset] = chunk[0];     // R
+                        rgba[offset + 1] = chunk[1]; // G
+                        rgba[offset + 2] = chunk[2]; // B
+                        rgba[offset + 3] = 255;      // A
+                    }
+                    rgba
+                }
+                
+            };
+            frame.copy_from_slice(&rgba_frame);
             self.frame = None;
         }
     }
 
-    fn run_until_frame(&mut self) -> Option<[u8; ppu::FRAMEBUFFER_SIZE * 4]> {
+    fn run_until_frame(&mut self) -> Option<crate::gb::Frame> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Collect audio when running frames
             self.gb.run_until_frame(true)
         }));
 
         match result {
-            Ok((frame_data, _breakpoint_hit)) => Some(convert_to_rgba(&frame_data, &self.palette)),
+            Ok((frame, _breakpoint_hit)) => Some(frame),
             Err(panic_info) => {
                 // Convert panic info to a string for debugging
                 let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
@@ -637,14 +656,14 @@ impl World {
         }
     }
 
-    fn run_until_frame_with_breakpoints(&mut self) -> (Option<[u8; ppu::FRAMEBUFFER_SIZE * 4]>, bool) {
+    fn run_until_frame_with_breakpoints(&mut self) -> (Option<crate::gb::Frame>, bool) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Collect audio when running frames
             self.gb.run_until_frame(true)
         }));
 
         match result {
-            Ok((frame_data, breakpoint_hit)) => (Some(convert_to_rgba(&frame_data, &self.palette)), breakpoint_hit),
+            Ok((frame, breakpoint_hit)) => (Some(frame), breakpoint_hit),
             Err(panic_info) => {
                 // Convert panic info to a string for debugging
                 let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
@@ -666,8 +685,8 @@ impl World {
         if self.step_single_frame {
             self.step_single_frame = false;
             match self.run_until_frame() {
-                Some(frame_data) => {
-                    self.frame = Some(frame_data);
+                Some(frame) => {
+                    self.frame = Some(frame);
                 }
                 None => {
                     self.error_state = Some("Emulator crashed during frame step".to_string());
@@ -687,8 +706,8 @@ impl World {
                 self.gb.get_current_frame()
             }));
             match result {
-                Ok(frame_data) => {
-                    self.frame = Some(convert_to_rgba(&frame_data, &self.palette));
+                Ok(frame) => {
+                    self.frame = Some(frame);
                 }
                 Err(panic_info) => {
                     let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
@@ -715,8 +734,8 @@ impl World {
                 self.gb.get_current_frame()
             }));
             match result {
-                Ok(frame_data) => {
-                    self.frame = Some(convert_to_rgba(&frame_data, &self.palette));
+                Ok(frame) => {
+                    self.frame = Some(frame);
                 }
                 Err(panic_info) => {
                     let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
@@ -753,8 +772,8 @@ impl World {
             }
             
             match final_frame {
-                Some(frame_data) => {
-                    self.frame = Some(convert_to_rgba(&frame_data, &self.palette));
+                Some(frame) => {
+                    self.frame = Some(frame);
                 }
                 None => {
                     self.error_state = Some(format!("Emulator crashed during multi-frame step ({})", count));
