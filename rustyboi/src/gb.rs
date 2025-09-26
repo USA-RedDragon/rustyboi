@@ -160,7 +160,47 @@ impl GB {
     }
 
     pub fn insert(&mut self, cartridge: cartridge::Cartridge) {
+        // Validate hardware compatibility
+        if let Err(msg) = self.validate_cartridge_compatibility(&cartridge) {
+            eprintln!("Warning: {}", msg);
+        }
+        
         self.mmio.insert_cartridge(cartridge);
+    }
+
+    /// Validate that the cartridge is compatible with the current hardware
+    fn validate_cartridge_compatibility(&self, cartridge: &cartridge::Cartridge) -> Result<(), String> {
+        let cgb_support = cartridge.get_cgb_support();
+        
+        match (self.hardware, &cgb_support) {
+            // CGB-only cartridge on non-CGB hardware
+            (Hardware::DMG | Hardware::DMG0 | Hardware::MGB | Hardware::SGB | Hardware::SGB2, cartridge::CgbSupport::Only) => {
+                Err("CGB-only cartridge cannot run on DMG hardware".to_string())
+            }
+            // CGB cartridge on CGB hardware - always OK
+            (Hardware::CGB, _) => Ok(()),
+            // DMG cartridge on any hardware - always OK  
+            (_, cartridge::CgbSupport::None) => Ok(()),
+            // CGB-compatible cartridge on DMG hardware - OK but will run in DMG mode
+            (_, cartridge::CgbSupport::Compatible) => Ok(()),
+        }
+    }
+
+    /// Check if CGB features should be enabled
+    /// CGB features are enabled when:
+    /// 1. Hardware is CGB, AND
+    /// 2. Cartridge supports CGB (Compatible or Only)
+    pub fn should_enable_cgb_features(&self) -> bool {
+        if !matches!(self.hardware, Hardware::CGB) {
+            return false;
+        }
+        
+        // Check if cartridge supports CGB
+        if let Some(cartridge) = self.mmio.get_cartridge() {
+            cartridge.supports_cgb()
+        } else {
+            false
+        }
     }
 
     pub fn load_bios(&mut self, path: &str) -> Result<(), std::io::Error> {
