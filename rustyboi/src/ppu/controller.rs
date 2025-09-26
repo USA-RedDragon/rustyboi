@@ -156,12 +156,14 @@ impl Ppu {
         if self.disabled {
             if mmio.read(LCD_CONTROL)&(LCDCFlags::DisplayEnable as u8) != 0 {
                 self.disabled = false;
+                mmio.write(LCD_STATUS, mmio.read(LCD_STATUS) | (1 << 1)); // Set Mode 2 flag
                 self.state = State::OAMSearch;
             } else {
                 return;
             }
         } else if mmio.read(LCD_CONTROL)&(LCDCFlags::DisplayEnable as u8) == 0 {
             mmio.write(LY, 0);
+            mmio.write(LCD_STATUS, mmio.read(LCD_STATUS) & !0x03); // Set mode to 0
             self.x = 0;
             self.disabled = true;
             return;
