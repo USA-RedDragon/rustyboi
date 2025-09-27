@@ -92,6 +92,9 @@ pub struct Ppu {
     window_y_triggered: bool,   // Whether WY condition was met this frame
     window_started_this_line: bool, // Whether window started rendering on current scanline
     
+    // STAT interrupt state tracking
+    previous_stat_interrupt_line: bool, // Previous state of STAT interrupt line for edge detection
+    
     #[serde(with = "serde_bytes")]
     fb_a: [u8; FRAMEBUFFER_SIZE],
     #[serde(with = "serde_bytes")]
@@ -116,6 +119,7 @@ impl Ppu {
             window_line_counter: 0,
             window_y_triggered: false,
             window_started_this_line: false,
+            previous_stat_interrupt_line: false,
             fb_a: [0; FRAMEBUFFER_SIZE],
             fb_b: [0; FRAMEBUFFER_SIZE],
             color_fb_a: [0; FRAMEBUFFER_SIZE * 3],
@@ -152,12 +156,59 @@ impl Ppu {
         }
     }
 
+    /// Calculate the current state of the STAT interrupt line based on all interrupt sources
+    fn calculate_stat_interrupt_line(&self, mmio: &mmio::Mmio) -> bool {
+        let stat_register = mmio.read(LCD_STATUS);
+        
+        // Extract enable bits for each interrupt source
+        let mode_0_int_enable = (stat_register & (1 << 3)) != 0; // HBlank
+        let mode_1_int_enable = (stat_register & (1 << 4)) != 0; // VBlank
+        let mode_2_int_enable = (stat_register & (1 << 5)) != 0; // OAM Search
+        let lyc_int_enable = (stat_register & (1 << 6)) != 0;    // LYC=LY
+        
+        // Extract current state flags
+        let current_mode = stat_register & 0x03; // Bits 1-0: PPU mode
+        let lyc_equals_ly = (stat_register & (1 << 2)) != 0;     // Bit 2: LYC=LY flag
+        
+        // Check each interrupt source and OR them together
+        let mut interrupt_line = false;
+        
+        // Mode interrupts
+        match current_mode {
+            0 if mode_0_int_enable => interrupt_line = true, // HBlank
+            1 if mode_1_int_enable => interrupt_line = true, // VBlank
+            2 if mode_2_int_enable => interrupt_line = true, // OAM Search
+            _ => {}
+        }
+        
+        // LYC=LY interrupt
+        if lyc_int_enable && lyc_equals_ly {
+            interrupt_line = true;
+        }
+        
+        interrupt_line
+    }
+
+    /// Check for STAT interrupt rising edge and trigger interrupt if needed
+    fn check_and_trigger_stat_interrupt(&mut self, cpu: &mut cpu::SM83, mmio: &mut mmio::Mmio) {
+        let current_stat_line = self.calculate_stat_interrupt_line(mmio);
+        
+        // Trigger interrupt on rising edge (low to high transition)
+        if current_stat_line && !self.previous_stat_interrupt_line {
+            cpu.set_interrupt_flag(registers::InterruptFlag::Lcd, true, mmio);
+        }
+        
+        // Update previous state for next cycle
+        self.previous_stat_interrupt_line = current_stat_line;
+    }
+
     pub fn step(&mut self, cpu: &mut cpu::SM83, mmio: &mut mmio::Mmio) {
         if self.disabled {
             if mmio.read(LCD_CONTROL)&(LCDCFlags::DisplayEnable as u8) != 0 {
                 self.disabled = false;
                 mmio.write(LCD_STATUS, mmio.read(LCD_STATUS) | (1 << 1)); // Set Mode 2 flag
                 self.state = State::OAMSearch;
+                self.check_and_trigger_stat_interrupt(cpu, mmio);
             } else {
                 return;
             }
@@ -174,6 +225,9 @@ impl Ppu {
         } else {
             mmio.write(LCD_STATUS, mmio.read(LCD_STATUS) & !(1 << 2)); // Clear the LYC=LY flag
         }
+        
+        // Check for STAT interrupt after LYC=LY update
+        self.check_and_trigger_stat_interrupt(cpu, mmio);
         match self.state {
             State::OAMSearch => {
                 // Check WY condition at the start of Mode 2 (OAMSearch)
@@ -224,6 +278,7 @@ impl Ppu {
                     self.fetcher.reset_with_scx_offset(mmio);
                     mmio.write(LCD_STATUS, (mmio.read(LCD_STATUS) & !(1 << 1)) | (1 << 0)); // Set Mode 3 flag
                     self.state = State::PixelTransfer;
+                    self.check_and_trigger_stat_interrupt(cpu, mmio);
                 }
             },
             State::PixelTransfer => 'label: {
@@ -276,6 +331,7 @@ impl Ppu {
                     if self.x == 160 {
                         self.state = State::HBlank;
                         mmio.write(LCD_STATUS, mmio.read(LCD_STATUS) & !((1 << 0) | (1 << 1))); // Set Mode 0 flag
+                        self.check_and_trigger_stat_interrupt(cpu, mmio);
                     }
                 }
             },
@@ -289,12 +345,14 @@ impl Ppu {
                         self.state = State::VBlank;
                         mmio.write(LCD_STATUS, (mmio.read(LCD_STATUS) & !(1 << 1)) | (1 << 0)); // Set Mode 1 flag
                         cpu.set_interrupt_flag(registers::InterruptFlag::VBlank, true, mmio);
+                        self.check_and_trigger_stat_interrupt(cpu, mmio);
                     } else {
                         // Continue to next visible scanline
                         let next_ly = current_ly.saturating_add(1);
                         mmio.write(LY, next_ly);
                         self.state = State::OAMSearch;
                         mmio.write(LCD_STATUS, mmio.read(LCD_STATUS) | (1 << 1)); // Set Mode 2 flag
+                        self.check_and_trigger_stat_interrupt(cpu, mmio);
                     }
                     return;
                 }
@@ -308,6 +366,7 @@ impl Ppu {
                         mmio.write(LY, 0);
                         self.state = State::OAMSearch;
                         mmio.write(LCD_STATUS, mmio.read(LCD_STATUS) | (1 << 1)); // Set Mode 2 flag
+                        self.check_and_trigger_stat_interrupt(cpu, mmio);
                         self.window_line_counter = 0;
                         self.window_y_triggered = false;
                         self.window_started_this_line = false;
