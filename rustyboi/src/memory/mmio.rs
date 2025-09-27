@@ -266,6 +266,10 @@ impl Mmio {
         Ok(())
     }
 
+    pub fn has_bios(&self) -> bool {
+        self.bios.is_some()
+    }
+
     pub fn step_timer(&mut self, cpu: &mut cpu::SM83) {
         let mut timer = self.timer.clone();
         timer.step(cpu, self);
