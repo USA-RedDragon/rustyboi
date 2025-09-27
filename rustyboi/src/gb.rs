@@ -221,6 +221,16 @@ impl GB {
         Ok(())
     }
 
+    /// Check if a ROM cartridge is loaded
+    pub fn has_rom(&self) -> bool {
+        self.mmio.get_cartridge().is_some()
+    }
+
+    /// Check if a BIOS is loaded
+    pub fn has_bios(&self) -> bool {
+        self.mmio.has_bios()
+    }
+
     // Audio management methods
     pub fn enable_audio(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let mut audio_output = audio::output::AudioOutput::new()?;

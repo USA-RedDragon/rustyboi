@@ -148,8 +148,10 @@ fn run_gui_loop(
         println!("Continuing without audio...");
     }
     
-    let mut manually_paused = false;
-    let mut user_paused = false; // Track user-initiated pause separate from debug pause
+    // Start paused if no ROM and no BIOS are loaded
+    let should_start_paused = world.is_paused;
+    let mut manually_paused = should_start_paused;
+    let mut user_paused = should_start_paused; // Track user-initiated pause separate from debug pause
 
     // Debounce timing for F and N keys
     const DEBOUNCE_DURATION: Duration = Duration::from_millis(250); // Time to wait before auto-repeat
@@ -300,8 +302,14 @@ fn run_gui_loop(
                     Some(GuiAction::LoadState(path)) => {
                         match world.load_state(path) {
                             Ok(loaded_path) => {
-                                // Keep user pause state when loading state
-                                manually_paused = user_paused || world.error_state.is_some();
+                                // If emulator was auto-paused due to no content and now has content, unpause
+                                if world.should_auto_unpause() {
+                                    manually_paused = false;
+                                    user_paused = false;
+                                } else {
+                                    // Keep user pause state when loading state
+                                    manually_paused = user_paused || world.error_state.is_some();
+                                }
                                 framework.clear_error();
                                 framework.set_status(format!("State loaded from: {}", loaded_path));
                                 window.request_redraw();
@@ -314,8 +322,14 @@ fn run_gui_loop(
                     Some(GuiAction::LoadRom(path)) => {
                         match world.load_rom(path) {
                             Ok(loaded_path) => {
-                                // Keep user pause state when loading ROM
-                                manually_paused = user_paused;
+                                // If emulator was auto-paused due to no content and now has ROM, unpause
+                                if world.should_auto_unpause() {
+                                    manually_paused = false;
+                                    user_paused = false;
+                                } else {
+                                    // Keep user pause state when loading ROM
+                                    manually_paused = user_paused;
+                                }
                                 framework.clear_error();
                                 framework.set_status(format!("ROM loaded from: {}", loaded_path));
                                 window.request_redraw();
@@ -437,16 +451,22 @@ struct World {
     breakpoint_hit: bool,
     // Color palette
     palette: config::ColorPalette,
+    // Track if emulator was auto-paused due to missing ROM/BIOS
+    auto_paused_no_content: bool,
 }
 
 impl World {
     fn new_with_paths(gb: gb::GB, rom_path: Option<String>, bios_path: Option<String>, palette: config::ColorPalette) -> Self {
         let now = Instant::now();
+        
+        // Check if both ROM and BIOS are missing - if so, start paused
+        let should_start_paused = !gb.has_rom() && !gb.has_bios();
+        
         Self {
             gb,
             frame: None,
             error_state: None,
-            is_paused: false,
+            is_paused: should_start_paused,
             step_single_frame: false,
             step_single_cycle: false,
             step_multiple_cycles: None,
@@ -458,6 +478,7 @@ impl World {
             last_frame_time: now,
             breakpoint_hit: false,
             palette,
+            auto_paused_no_content: should_start_paused,
         }
     }
 
@@ -529,8 +550,11 @@ impl World {
         // Clear the current frame
         self.frame = None;
         
-        // Reset pause state
-        self.is_paused = false;
+        // If emulator was auto-paused due to no content and state has content, unpause it
+        if self.auto_paused_no_content && (self.gb.has_rom() || self.gb.has_bios()) {
+            self.is_paused = false;
+            self.auto_paused_no_content = false;
+        }
         
         println!("Game state loaded from: {}", filename);
         Ok(filename)
@@ -569,8 +593,11 @@ impl World {
         // Clear the current frame
         self.frame = None;
         
-        // Reset pause state
-        self.is_paused = false;
+        // If emulator was auto-paused due to no content, unpause it now
+        if self.auto_paused_no_content {
+            self.is_paused = false;
+            self.auto_paused_no_content = false;
+        }
         
         println!("ROM loaded from: {}", filename);
         Ok(filename)
@@ -586,6 +613,11 @@ impl World {
 
     fn resume(&mut self) {
         self.is_paused = false;
+    }
+
+    /// Check if the emulator should be automatically unpaused due to ROM loading
+    fn should_auto_unpause(&self) -> bool {
+        !self.auto_paused_no_content && !self.is_paused
     }
 
     fn restart(&mut self) {
