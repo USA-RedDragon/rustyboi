@@ -1,10 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    "rustyboi",
+    "rustyboi-core",
+    "rustyboi-debugger",
+    "rustyboi-egui",
+    "rustyboi-platform",
     "run-wasm",
 ]
-default-members = ["rustyboi"]
+default-members = ["rustyboi-core", "rustyboi-debugger", "rustyboi-egui", "rustyboi-platform"]
 
 [profile.dev]
 opt-level = "s"
