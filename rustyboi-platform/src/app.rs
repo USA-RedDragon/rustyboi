@@ -699,8 +699,6 @@ impl App {
     pub fn new() -> Self {
         #[cfg(target_arch = "wasm32")]
         {
-            web_sys::console::log_1(&"WASM App::new() called - creating default Game Boy components".into());
-            
             // Create default config and Game Boy for WASM
             let config = config::CleanConfig::default();
             let mut gb = gb::GB::new(config.hardware);
@@ -764,9 +762,6 @@ impl App {
     }
 
     pub fn new_with_gb(gb: gb::GB, config: config::CleanConfig) -> Self {
-        #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(&"WASM App::new_with_gb() called - has Game Boy components".into());
-        
         let instance = egui_wgpu::wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         
         // Create World instance
@@ -803,11 +798,24 @@ impl App {
 
     async fn set_window(&mut self, window: Window) {
         let window = Arc::new(window);
-        let scale = self.config.as_ref().map(|c| c.scale as u32).unwrap_or(7);
-        let initial_width = 160 * scale;
-        let initial_height = 144 * scale;
-
-        let _ = window.request_inner_size(PhysicalSize::new(initial_width, initial_height));
+        
+        let (initial_width, initial_height) = {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let scale = self.config.as_ref().map(|c| c.scale as u32).unwrap_or(7);
+                let width = 160 * scale;
+                let height = 144 * scale;
+                let _ = window.request_inner_size(PhysicalSize::new(width, height));
+                (width, height)
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                // For WASM, don't request window size - let CSS handle it
+                // Just use the current window size
+                let current_size = window.inner_size();
+                (current_size.width, current_size.height)
+            }
+        };
 
         let surface = self
             .instance
@@ -827,6 +835,17 @@ impl App {
 
         self.window.get_or_insert(window);
         self.state.get_or_insert(state);
+
+        // Trigger a resize event now that the WASM state is ready
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window() {
+                if let Ok(event) = web_sys::Event::new("resize") {
+                    let _ = window.dispatch_event(&event);
+                    web_sys::console::log_1(&"WASM state ready - triggered resize event".into());
+                }
+            }
+        }
 
         // Enable audio if we have a world
         if let Some(world) = &mut self.world {
@@ -868,7 +887,14 @@ impl App {
                     if let Ok(mut shared_state) = self.shared_state.try_borrow_mut() {
                         if let Some(state) = shared_state.take() {
                             self.state = Some(state);
-                            web_sys::console::log_1(&"WASM state moved to local, starting render".into());
+                            
+                            // Trigger a resize event now that the WASM state is ready
+                            if let Some(window) = web_sys::window() {
+                                if let Ok(event) = web_sys::Event::new("resize") {
+                                    let _ = window.dispatch_event(&event);
+                                    web_sys::console::log_1(&"WASM state ready (shared) - triggered resize event".into());
+                                }
+                            }
                         }
                     }
                 }
@@ -1013,28 +1039,13 @@ impl App {
             // Auto-pause when menu is open, but respect manual pause state
             let should_be_paused = self.manually_paused || menu_open;
             if let Some(world) = &mut self.world {
-                // Only log when there's a mismatch between should_be_paused and actual state
-                if should_be_paused != world.is_paused {
-                    #[cfg(target_arch = "wasm32")]
-                    web_sys::console::log_1(&format!("WASM STATE MISMATCH: manually_paused={}, menu_open={}, user_paused={}, should_be_paused={}, world.is_paused={}, auto_paused_no_content={}", 
-                        self.manually_paused, menu_open, self.user_paused, should_be_paused, world.is_paused, world.auto_paused_no_content).into());
-                }
-                    
                 if should_be_paused != world.is_paused {
                     if should_be_paused {
-                        #[cfg(target_arch = "wasm32")]
-                        web_sys::console::log_1(&"WASM: ⏸️ Auto-pausing due to menu or manual pause".into());
                         world.pause();
                     } else {
                         // Only auto-resume if not manually paused, no error, AND not auto-paused due to no content
                         if !self.user_paused && world.error_state.is_none() && !world.auto_paused_no_content {
-                            #[cfg(target_arch = "wasm32")]
-                            web_sys::console::log_1(&"WASM: ▶️ Auto-resuming".into());
                             world.resume();
-                        } else {
-                            #[cfg(target_arch = "wasm32")]
-                            web_sys::console::log_1(&format!("WASM: ❌ Cannot auto-resume: user_paused={}, error_state={}, auto_paused_no_content={}", 
-                                self.user_paused, world.error_state.is_some(), world.auto_paused_no_content).into());
                         }
                     }
                 }
@@ -1100,74 +1111,15 @@ impl App {
 
             gui_action
         } else {
-            // Fallback to simple egui demo if Game Boy components aren't initialized
-            #[cfg(target_arch = "wasm32")]
-            web_sys::console::log_1(&"WASM using fallback UI".into());
-            
-            state.egui_renderer.begin_frame(window);
-
-            egui::CentralPanel::default()
-                .show(state.egui_renderer.context(), |ui| {
-                    ui.heading("RustyBoi Game Boy Emulator");
-                    ui.separator();
-                    ui.label("Welcome to RustyBoi WASM!");
-                    ui.label("This is the fallback interface.");
-                    ui.label("Game Boy components not initialized.");
-                    
-                    if ui.button("Test Button").clicked() {
-                        #[cfg(target_arch = "wasm32")]
-                        web_sys::console::log_1(&"WASM test button clicked".into());
-                    }
-                });
-
-            // Complete the egui frame for fallback UI
-            let surface_texture = state.surface.get_current_texture();
-            match surface_texture {
-                Ok(surface_texture) => {
-                    let surface_view = surface_texture
-                        .texture
-                        .create_view(&wgpu::TextureViewDescriptor::default());
-
-                    let mut encoder = state
-                        .device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                    
-                    state.egui_renderer.end_frame_and_draw(
-                        &state.device,
-                        &state.queue,
-                        &mut encoder,
-                        window,
-                        &surface_view,
-                        screen_descriptor,
-                    );
-                    
-                    state.queue.submit(Some(encoder.finish()));
-                    surface_texture.present();
-                    
-                    #[cfg(target_arch = "wasm32")]
-                    web_sys::console::log_1(&"WASM fallback UI rendered".into());
-                }
-                Err(err) => {
-                    #[cfg(target_arch = "wasm32")]
-                    web_sys::console::log_1(&format!("WASM surface error in fallback: {:?}", err).into());
-                }
-            }
-
-            None // No gui action when components aren't initialized
+            None
         };
 
         // Handle GUI actions
         if let Some(action) = gui_action {
-            #[cfg(target_arch = "wasm32")]
-            web_sys::console::log_1(&"WASM GUI action received".into());
-            
             // Move gui_action handling outside of the state borrow scope
             let action_copy = action;
             match action_copy {
                 GuiAction::LoadRom(file_data) => {
-                    #[cfg(target_arch = "wasm32")]
-                    web_sys::console::log_1(&"WASM LoadRom action received".into());
-                    
                     if let Some(world) = &mut self.world {
                         match world.load_rom(file_data) {
                             Ok(msg) => {
@@ -1225,22 +1177,11 @@ impl App {
                     }
                 }
                 GuiAction::TogglePause => {
-                    #[cfg(target_arch = "wasm32")]
-                    web_sys::console::log_1(&"🎮 WASM TogglePause action received".into());
-                    
                     if let Some(world) = &mut self.world {
-                        let was_paused = world.is_paused;
-                        let old_user_paused = self.user_paused;
-                        let old_manually_paused = self.manually_paused;
-                        
                         world.toggle_pause();
                         // Update our tracking of user pause state
                         self.user_paused = world.is_paused;
                         self.manually_paused = self.user_paused || world.error_state.is_some();
-                        
-                        #[cfg(target_arch = "wasm32")]
-                        web_sys::console::log_1(&format!("🎮 PAUSE TOGGLE COMPLETE: world.is_paused {} -> {}, user_paused {} -> {}, manually_paused {} -> {}", 
-                            was_paused, world.is_paused, old_user_paused, self.user_paused, old_manually_paused, self.manually_paused).into());
                     }
                 }
                 GuiAction::ClearError => {
@@ -1276,6 +1217,25 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_arch = "wasm32")]
+        let window = {
+            use winit::platform::web::WindowAttributesExtWebSys;
+            use wasm_bindgen::JsCast;
+            
+            // Get the existing canvas element
+            let canvas = web_sys::window()
+                .and_then(|win| win.document())
+                .and_then(|doc| doc.get_element_by_id("rustyboi-canvas"))
+                .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+                .expect("Failed to find canvas element with id 'rustyboi-canvas'");
+            
+            let window_attributes = Window::default_attributes()
+                .with_canvas(Some(canvas));
+                
+            event_loop.create_window(window_attributes).unwrap()
+        };
+        
+        #[cfg(not(target_arch = "wasm32"))]
         let window = event_loop
             .create_window(Window::default_attributes())
             .unwrap();
@@ -1321,47 +1281,6 @@ impl ApplicationHandler for App {
             // For WASM, add the canvas to the DOM and set up proper sizing
             use wasm_bindgen::JsCast;
             
-            // Get the canvas from the window and append it to the document body
-            web_sys::window()
-                .and_then(|win| win.document())
-                .and_then(|doc| {
-                    // Set up document and body styling for full viewport
-                    doc.document_element().map(|element| {
-                        element.set_attribute("style", "margin: 0; padding: 0; width: 100%; height: 100%;").ok();
-                    });
-                    
-                    if let Some(body) = doc.body() {
-                        body.style().set_property("margin", "0").ok();
-                        body.style().set_property("padding", "0").ok();
-                        body.style().set_property("width", "100vw").ok();
-                        body.style().set_property("height", "100vh").ok();
-                        body.style().set_property("overflow", "hidden").ok();
-                        
-                        let canvas = window.canvas().expect("Failed to get canvas from window");
-                        body.append_child(&web_sys::Element::from(canvas)).ok()
-                    } else {
-                        None
-                    }
-                })
-                .expect("couldn't append canvas to document body");
-            
-            // Set up canvas styling for full viewport
-            if let Some(canvas) = window.canvas() {
-                let canvas_element: web_sys::HtmlCanvasElement = canvas.into();
-                canvas_element.style().set_property("display", "block").ok();
-                canvas_element.style().set_property("width", &format!("{}px", current_size.width)).ok();
-                canvas_element.style().set_property("height", &format!("{}px", current_size.height)).ok();
-                canvas_element.style().set_property("position", "absolute").ok();
-                canvas_element.style().set_property("top", "0").ok();
-                canvas_element.style().set_property("left", "0").ok();
-
-                // Set actual canvas dimensions to match the CSS styling exactly
-                canvas_element.set_width(current_size.width);
-                canvas_element.set_height(current_size.height);
-                
-                web_sys::console::log_1(&format!("Canvas CSS and dimensions set to: {}x{}", current_size.width, current_size.height).into());
-            }
-            
             // Set up window resize handler
             use std::rc::Rc;
             let window_clone = Rc::new(window.clone());
@@ -1377,16 +1296,7 @@ impl ApplicationHandler for App {
                         })
                         .unwrap_or(PhysicalSize::new(1360, 768));
                     
-                    // Update canvas dimensions and CSS to match new viewport size
-                    if let Some(canvas) = window.canvas() {
-                        let canvas_element: web_sys::HtmlCanvasElement = canvas.into();
-                        // Update CSS styling to match new size
-                        canvas_element.style().set_property("width", &format!("{}px", new_size.width)).ok();
-                        canvas_element.style().set_property("height", &format!("{}px", new_size.height)).ok();
-                        // Update actual canvas dimensions
-                        canvas_element.set_width(new_size.width);
-                        canvas_element.set_height(new_size.height);
-                    }
+                    
                     
                     let _ = window.request_inner_size(new_size);
                 }
@@ -1398,9 +1308,8 @@ impl ApplicationHandler for App {
                 .unwrap();
             closure.forget();
             
-            // Set the window size
-            web_sys::console::log_1(&format!("WASM setting window size to: {}x{}", current_size.width, current_size.height).into());
-            let _ = window.request_inner_size(current_size);
+            // Don't override canvas size - let JavaScript handle sizing
+            web_sys::console::log_1(&"WASM skipping window size request to preserve canvas sizing".into());
 
             // Start async initialization
             if !self.initializing {
@@ -1420,7 +1329,6 @@ impl ApplicationHandler for App {
                     
                     // Set the shared state
                     *shared_state.borrow_mut() = Some(state);
-                    web_sys::console::log_1(&"WASM state initialization completed".into());
                     
                     // Request multiple redraws to ensure rendering starts
                     window.request_redraw();
@@ -1429,7 +1337,6 @@ impl ApplicationHandler for App {
                     let window_clone = window.clone();
                     let closure = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
                         window_clone.request_redraw();
-                        web_sys::console::log_1(&"WASM forced redraw requested".into());
                     }) as Box<dyn FnMut()>);
                     
                     web_sys::window()
