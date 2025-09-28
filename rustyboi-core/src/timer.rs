@@ -34,12 +34,12 @@ impl Timer {
         }
     }
 
-    pub fn step(&mut self, cpu: &mut cpu::SM83, mmio: &mut mmio::Mmio) {
+    pub fn step(&mut self) -> bool {
         self.internal_counter = self.internal_counter.wrapping_add(1);
         self.div = (self.internal_counter >> 8) as u8;
 
         if (self.tac & TAC_ENABLE) == 0 {
-            return;
+            return false;
         }
 
         let frequency_bits = self.tac & TAC_FREQUENCY_MASK;
@@ -57,11 +57,12 @@ impl Timer {
             // Increment TIMA and handle overflow
             if self.tima == 0xFF {
                 self.tima = self.tma;
-                cpu.set_interrupt_flag(cpu::registers::InterruptFlag::Timer, true, mmio);
+                return true; // Signal that timer interrupt should be set
             } else {
                 self.tima = self.tima.wrapping_add(1);
             }
         }
+        false
     }
 }
 

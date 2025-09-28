@@ -271,22 +271,17 @@ impl Mmio {
     }
 
     pub fn step_timer(&mut self, cpu: &mut cpu::SM83) {
-        let mut timer = self.timer.clone();
-        timer.step(cpu, self);
-        self.timer = timer;
+        if self.timer.step() {
+            cpu.set_interrupt_flag(cpu::registers::InterruptFlag::Timer, true, self);
+        }
     }
 
     pub fn step_audio(&mut self) {
-        let mut audio = self.audio.clone();
-        audio.step(self);
-        self.audio = audio;
+        self.audio.step();
     }
 
     pub fn generate_audio_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
-        let mut audio = self.audio.clone();
-        let samples = audio.generate_samples(self, cpu_cycles);
-        self.audio = audio;
-        samples
+        self.audio.generate_samples(cpu_cycles)
     }
 
     pub fn step_dma(&mut self) {

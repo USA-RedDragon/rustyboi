@@ -54,6 +54,9 @@ pub struct Audio {
     
     // Sample generation timing
     fractional_cycles: f32,
+    
+    // Reusable sample buffer to avoid allocations
+    sample_buffer: Vec<(f32, f32)>,
 }
 
 impl Audio {
@@ -70,19 +73,20 @@ impl Audio {
             frame_sequencer_timer: 8192,
             audio_enabled: false,
             fractional_cycles: 0.0,
+            sample_buffer: Vec::with_capacity(2048), // Pre-allocate for common frame sizes
         }
     }
 
-    pub fn step(&mut self, mmio: &mut mmio::Mmio) {
+    pub fn step(&mut self) {
         if !self.audio_enabled {
             return;
         }
 
-        // Step individual channels
-        self.channel1.step(mmio);
-        self.channel2.step(mmio);
-        self.channel3.step(mmio);
-        self.channel4.step(mmio);
+        // Step individual channels without mmio (they don't use it anyway)
+        self.channel1.step();
+        self.channel2.step();
+        self.channel3.step();
+        self.channel4.step();
 
         // Step frame sequencer
         self.frame_sequencer_timer -= 1;
@@ -176,8 +180,8 @@ impl Audio {
         (left_mix / 4.0, right_mix / 4.0)
     }
 
-    pub fn generate_samples(&mut self, mmio: &mut mmio::Mmio, cpu_cycles: u32) -> Vec<(f32, f32)> {
-        let mut samples = Vec::new();
+    pub fn generate_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
+        self.sample_buffer.clear();
         
         // Game Boy audio runs at ~4.194 MHz (same as CPU)
         // We want to output at 44.1 kHz, so we need to downsample
@@ -187,15 +191,15 @@ impl Audio {
         self.fractional_cycles += cpu_cycles as f32;
         
         while self.fractional_cycles >= CYCLES_PER_SAMPLE {
-            self.step(mmio);
+            self.step();
             
             let sample = self.get_mixed_output();
-            samples.push(sample);
+            self.sample_buffer.push(sample);
             
             self.fractional_cycles -= CYCLES_PER_SAMPLE;
         }
         
-        samples
+        self.sample_buffer.clone()
     }
 }
 

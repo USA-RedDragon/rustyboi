@@ -42,7 +42,7 @@ impl Wave {
         }
     }
 
-    pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
+    pub fn step(&mut self) {
         if !self.enabled || !self.dac_enabled {
             return;
         }
