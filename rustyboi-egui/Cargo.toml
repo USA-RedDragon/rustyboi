@@ -13,7 +13,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [dependencies]
 rustyboi-core = { path = "../rustyboi-core" }
 rustyboi-debugger = { path = "../rustyboi-debugger" }
-egui = "0.26"
+egui = "0.32.3"
+web-time = "1.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = "0.15.4"

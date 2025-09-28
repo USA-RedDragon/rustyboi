@@ -1,5 +1,5 @@
 use rustyboi_core_lib::{cpu, gb};
-
+use web_time::{ SystemTime, UNIX_EPOCH };
 use std::env;
 use std::sync::{Arc, Mutex};
 use egui::Context;
@@ -88,7 +88,7 @@ impl Gui {
 
     fn render_menu_bar(&mut self, ctx: &Context, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool) {
         egui::TopBottomPanel::top("menubar_container").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     *any_menu_open = true;
                     if ui.button("Load ROM").clicked() {
@@ -105,12 +105,12 @@ impl Gui {
                                     *pending = Some(GuiAction::LoadRom(file_data));
                             }
                         });
-                        ui.close_menu();
+                        ui.close_kind(egui::UiKind::Menu);
                     }
                     ui.separator();
                     if ui.button("Save State").clicked() {
-                        let timestamp = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
+                        let timestamp = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
                             .unwrap()
                             .as_secs();
                         let file_name = format!("save_{}", timestamp);
@@ -127,7 +127,7 @@ impl Gui {
                                     *pending = Some(GuiAction::SaveState(path));
                                 }
                         });
-                        ui.close_menu();
+                        ui.close_kind(egui::UiKind::Menu);
                     }
                     if ui.button("Load State").clicked() {
                         let mut dialog = file_dialog::new()
@@ -143,12 +143,12 @@ impl Gui {
                                     *pending = Some(GuiAction::LoadState(file_data));
                             }
                         });
-                        ui.close_menu();
+                        ui.close_kind(egui::UiKind::Menu);
                     }
                     ui.separator();
                     if ui.button("Exit").clicked() {
                         *action = Some(GuiAction::Exit);
-                        ui.close_menu();
+                        ui.close_kind(egui::UiKind::Menu);
                     }
                 });
                 
@@ -156,13 +156,13 @@ impl Gui {
                     *any_menu_open = true;
                     if ui.button("Restart").clicked() {
                         *action = Some(GuiAction::Restart);
-                        ui.close_menu();
+                        ui.close_kind(egui::UiKind::Menu);
                     }
                     ui.separator();
                     let pause_text = if paused { "Resume" } else { "Pause" };
                     if ui.button(pause_text).clicked() {
                         *action = Some(GuiAction::TogglePause);
-                        ui.close_menu();
+                        ui.close_kind(egui::UiKind::Menu);
                     }
                 });
 

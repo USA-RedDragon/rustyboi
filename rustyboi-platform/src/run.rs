@@ -4,7 +4,7 @@ use crate::config;
 use crate::display;
 use clap::Parser;
 
-pub fn run() -> Result<(), pixels::Error> {
+pub async fn run() {
     #[cfg(target_arch = "wasm32")]
     {
         std::panic::set_hook(Box::new(console_error_panic_hook::hook));
@@ -12,8 +12,8 @@ pub fn run() -> Result<(), pixels::Error> {
 
         let config = config::RawConfig::try_parse_from(std::iter::empty::<String>())
             .expect("Failed to create default config").clean();
+        
         wasm_bindgen_futures::spawn_local(display::run_with_gui_async(gb::GB::new(config.hardware), config));
-        return Ok(());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -44,6 +44,9 @@ pub fn run() -> Result<(), pixels::Error> {
             gb.skip_bios();
         }
 
-        display::run_with_gui(gb, &config)
+        match display::run_with_gui(gb, config) {
+            Ok(_) => {}
+            Err(e) => eprintln!("Error: {}", e),
+        }
     }
 }

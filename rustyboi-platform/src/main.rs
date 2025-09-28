@@ -1,12 +1,17 @@
 #![warn(clippy::all)]
 #![forbid(unsafe_code)]
 
+mod app;
 mod audio;
 mod config;
 mod display;
 mod framework;
+mod input;
+mod renderer;
 mod run;
 
-fn main() -> Result<(), pixels::Error> {
-    run::run()
+use pollster;
+
+fn main() {
+    pollster::block_on(run::run());
 }

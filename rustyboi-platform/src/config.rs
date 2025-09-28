@@ -124,6 +124,7 @@ pub struct RawConfig {
     skip_bios: bool,
 }
 
+#[derive(Clone)]
 pub struct CleanConfig {
     // path to BIOS file
     pub bios: Option<String>,
@@ -167,5 +168,14 @@ impl RawConfig {
             skip_bios: _skip_bios,
             keybinds: KeyBinds::default(),
         }
+    }
+}
+
+impl CleanConfig {
+    /// Get default configuration by parsing empty arguments with clap
+    pub fn default() -> Self {
+        use clap::Parser;
+        let raw_config = RawConfig::parse_from(std::iter::empty::<&str>());
+        raw_config.clean()
     }
 }

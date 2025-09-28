@@ -61,7 +61,7 @@ impl Gui {
                     egui::Sense::hover()
                 );
                 ui.painter().rect_filled(rect, 2.0, display_color);
-                ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+                ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::WHITE), egui::StrokeKind::Outside);
                 
                 // Palette info
                 ui.monospace(egui::RichText::new(format!("P{}: {} ({:02b})", i, color_name, palette_bits))
@@ -106,7 +106,7 @@ impl Gui {
                     egui::Sense::hover()
                 );
                 ui.painter().rect_filled(rect, 2.0, display_color);
-                ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+                ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::WHITE), egui::StrokeKind::Outside);
                 
                 ui.monospace(egui::RichText::new(format!("P{}: {} ({:02b})", i, color_name, palette_bits))
                     .color(egui::Color32::WHITE));
@@ -145,7 +145,7 @@ impl Gui {
                     egui::Sense::hover()
                 );
                 ui.painter().rect_filled(rect, 2.0, display_color);
-                ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+                ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::WHITE), egui::StrokeKind::Outside);
                 
                 ui.monospace(egui::RichText::new(format!("P{}: {} ({:02b})", i, color_name, palette_bits))
                     .color(egui::Color32::WHITE));
@@ -189,7 +189,7 @@ impl Gui {
                             egui::Sense::hover()
                         );
                         ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(r, g, b));
-                        ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+                        ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::WHITE), egui::StrokeKind::Outside);
                         
                         // Color info
                         ui.monospace(egui::RichText::new(format!("C{}: RGB({:02X},{:02X},{:02X}) ${:04X}", 
@@ -250,7 +250,7 @@ impl Gui {
                         } else {
                             ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(r, g, b));
                         }
-                        ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+                        ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::WHITE), egui::StrokeKind::Outside);
                         
                         // Color info
                         ui.monospace(egui::RichText::new(format!("C{}: RGB({:02X},{:02X},{:02X}) ${:04X}{}", 

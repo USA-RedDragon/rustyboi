@@ -1,7 +1,6 @@
 use egui::{ClippedPrimitive, Context, TexturesDelta, ViewportId};
 use egui_wgpu::{Renderer, ScreenDescriptor};
-use pixels::{wgpu, PixelsContext};
-use winit::event_loop::EventLoopWindowTarget;
+use wgpu;
 use winit::window::Window;
 
 use rustyboi_core_lib::{cpu, gb};
@@ -20,28 +19,31 @@ pub struct Framework {
 }
 
 impl Framework {
-    pub fn new<T>(
-        event_loop: &EventLoopWindowTarget<T>,
+    pub fn new(
         width: u32,
         height: u32,
         scale_factor: f32,
-        pixels: &pixels::Pixels,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
     ) -> Self {
-        let max_texture_size = pixels.device().limits().max_texture_dimension_2d as usize;
+        let max_texture_size = device.limits().max_texture_dimension_2d as usize;
 
         let egui_ctx = Context::default();
+        // Create a placeholder egui_state that we'll replace when we have a window
+        // For now, we'll create it with default values and replace it later
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
             ViewportId::ROOT,
-            event_loop,
+            &egui_winit::winit::event_loop::EventLoop::new().unwrap(),
             Some(scale_factor),
+            None, // theme
             Some(max_texture_size),
         );
         let screen_descriptor = ScreenDescriptor {
             size_in_pixels: [width, height],
             pixels_per_point: scale_factor,
         };
-        let renderer = Renderer::new(pixels.device(), pixels.render_texture_format(), None, 1);
+        let renderer = Renderer::new(device, format, None, 1, false);
         let textures = TexturesDelta::default();
         let gui = Gui::new();
 
@@ -54,6 +56,20 @@ impl Framework {
             textures,
             gui,
         }
+    }
+
+    pub fn setup_window(&mut self, window: &Window) {
+        // Re-initialize egui_state with the actual window
+        let scale_factor = self.screen_descriptor.pixels_per_point;
+        let max_texture_size = 8192; // reasonable default
+        self.egui_state = egui_winit::State::new(
+            self.egui_ctx.clone(),
+            ViewportId::ROOT,
+            window,
+            Some(scale_factor),
+            None, // theme
+            Some(max_texture_size),
+        );
     }
 
     pub fn handle_event(&mut self, window: &Window, event: &winit::event::WindowEvent) {
@@ -104,15 +120,16 @@ impl Framework {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         render_target: &wgpu::TextureView,
-        context: &PixelsContext,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
     ) {
         for (id, image_delta) in &self.textures.set {
             self.renderer
-                .update_texture(&context.device, &context.queue, *id, image_delta);
+                .update_texture(device, queue, *id, image_delta);
         }
         self.renderer.update_buffers(
-            &context.device,
-            &context.queue,
+            device,
+            queue,
             encoder,
             &self.paint_jobs,
             &self.screen_descriptor,
@@ -134,8 +151,8 @@ impl Framework {
                 occlusion_query_set: None,
             });
 
-            self.renderer
-                .render(&mut rpass, &self.paint_jobs, &self.screen_descriptor);
+            // self.renderer
+            //     .render(&mut rpass, &self.paint_jobs, &self.screen_descriptor);
         }
 
         let textures = std::mem::take(&mut self.textures);

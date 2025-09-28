@@ -353,7 +353,7 @@ impl Gui {
         }
         
         // Draw border around the sprite
-        ui.painter().rect_stroke(sprite_rect, 0.0, egui::Stroke::new(0.5, egui::Color32::GRAY));
+        ui.painter().rect_stroke(sprite_rect, 0.0, egui::Stroke::new(0.5, egui::Color32::GRAY), egui::StrokeKind::Outside);
         
         // Show tooltip with sprite info on hover
         if response.hovered() {

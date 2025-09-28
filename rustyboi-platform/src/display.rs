@@ -1,25 +1,23 @@
 use crate::config;
 use crate::framework::Framework;
+use crate::input::InputHandler;
+use crate::renderer::WgpuRenderer;
 use rustyboi_egui_lib::actions::GuiAction;
 use rustyboi_egui_lib::actions::FileData;
 use rustyboi_core_lib::{cartridge, gb, ppu, input};
 
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
+use std::sync::Arc;
 use winit::dpi::LogicalSize;
 use winit::event::{Event,WindowEvent};
-use winit::event_loop::EventLoop;
+use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::KeyCode;
-use winit::window::WindowBuilder;
-use winit_input_helper::WinitInputHelper;
-use pixels::{Error, Pixels, SurfaceTexture};
-#[cfg(target_arch = "wasm32")]
-use pixels::PixelsBuilder;
+use winit::window::Window;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::WindowExtWebSys;
-#[cfg(target_arch = "wasm32")]
-use std::rc::Rc;
+
 
 const WIDTH: u32 = 160;
 const HEIGHT: u32 = 144;
@@ -38,109 +36,28 @@ fn get_window_size() -> LogicalSize<f64> {
 #[cfg(target_arch = "wasm32")]
 pub async fn run_with_gui_async(gb: gb::GB, config: config::CleanConfig) {
     let event_loop = EventLoop::new().unwrap();
-    let window = {
-        let size = LogicalSize::new((WIDTH * (config.scale as u32)) as f64, (HEIGHT * (config.scale as u32)) as f64);
-        WindowBuilder::new()
-            .with_title("RustyBoi")
-            .with_inner_size(size)
-            .with_min_inner_size(LogicalSize::new(WIDTH as f64, HEIGHT as f64))
-            .build(&event_loop)
-            .unwrap()
-    };
-
-    web_sys::window()
-        .and_then(|win| win.document())
-        .and_then(|doc| doc.body())
-        .and_then(|body| {
-            body.append_child(&web_sys::Element::from(window.canvas().unwrap()))
-                .ok()
-        })
-        .expect("couldn't append canvas to document body");
-
-    let window = Rc::new(window);
-
-    let closure = wasm_bindgen::closure::Closure::wrap(Box::new({
-        let window = Rc::clone(&window);
-        move |_e: web_sys::Event| {
-            let _ = window.request_inner_size(get_window_size());
-        }
-    }) as Box<dyn FnMut(_)>);
-    web_sys::window()
-        .unwrap()
-        .add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
-        .unwrap();
-    closure.forget();
-
-    // Trigger initial resize event
-    let _ = window.request_inner_size(get_window_size());
-
-    let (pixels, framework) = async {
-        let scale_factor = window.scale_factor() as f32;
-        let window_size = get_window_size().to_physical::<u32>(scale_factor as f64);
-        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, window.as_ref());
-        let pixels = PixelsBuilder::new(WIDTH, HEIGHT, surface_texture)
-            .texture_format(pixels::wgpu::TextureFormat::Rgba8Unorm)
-            .surface_texture_format(pixels::wgpu::TextureFormat::Rgba8Unorm)
-            .wgpu_backend(pixels::wgpu::Backends::all())
-            .build_async()
-            .await
-            .expect("Failed to create Pixels instance");
-        let framework = Framework::new(
-            &event_loop,
-            window_size.width,
-            window_size.height,
-            scale_factor,
-            &pixels,
-        );
-
-        (pixels, framework)
-    }.await;
-    match run_gui_loop(event_loop, &window, pixels, framework, gb, &config) {
-        Ok(_) => (),
-        Err(e) => eprintln!("Error in GUI loop: {}", e),
-    }
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let mut app = crate::app::App::new();
+    event_loop.run_app(&mut app).expect("Failed to run app");
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Error> {
+pub fn run_with_gui(gb: gb::GB, config: config::CleanConfig) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new().unwrap();
-    let window = {
-        let size = LogicalSize::new((WIDTH * (config.scale as u32)) as f64, (HEIGHT * (config.scale as u32)) as f64);
-        WindowBuilder::new()
-            .with_title("RustyBoi")
-            .with_inner_size(size)
-            .with_min_inner_size(LogicalSize::new(WIDTH as f64, HEIGHT as f64))
-            .build(&event_loop)
-            .unwrap()
-    };
-
-    let (pixels, framework) = {
-        let window_size = window.inner_size();
-        let scale_factor = window.scale_factor() as f32;
-        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
-        let pixels = Pixels::new(WIDTH, HEIGHT, surface_texture)?;
-        let framework = Framework::new(
-            &event_loop,
-            window_size.width,
-            window_size.height,
-            scale_factor,
-            &pixels,
-        );
-
-        (pixels, framework)
-    };
-    run_gui_loop(event_loop, &window, pixels, framework, gb, config)
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let mut app = crate::app::App::new_with_gb(gb, config);
+    event_loop.run_app(&mut app).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
 }
 
 fn run_gui_loop(
     event_loop: EventLoop<()>,
     window: &winit::window::Window,
-    mut pixels: Pixels,
+    mut renderer: WgpuRenderer,
     mut framework: Framework,
     gb: gb::GB,
     config: &config::CleanConfig,
-) -> Result<(), Error> {
-    let mut input = WinitInputHelper::new();
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut input = InputHandler::new();
     let mut world = World::new_with_paths(gb, config.rom.clone(), config.bios.clone(), config.palette); 
     
     // Enable audio output
@@ -164,7 +81,7 @@ fn run_gui_loop(
     let mut f_last_repeat_time: Option<Instant> = None;
     let mut n_last_repeat_time: Option<Instant> = None;
 
-    let res = event_loop.run(|event, elwt| {
+    let _res = event_loop.run(|event, elwt| {
         if input.update(&event) {
             if input.key_pressed(KeyCode::Escape) || input.close_requested() {
                 elwt.exit();
@@ -263,18 +180,17 @@ fn run_gui_loop(
                 event: WindowEvent::Resized(size),
                 ..
             } => {
-                if let Err(err) = pixels.resize_surface(size.width, size.height) {
-                    println!("Failed to resize surface during window event: {}", err);
-                    elwt.exit();
-                    return;
-                }
+                renderer.resize(size);
                 framework.resize(size.width, size.height);
             }
             Event::WindowEvent {
                 event: WindowEvent::RedrawRequested,
                 ..
             } => {
-                world.draw(pixels.frame_mut());
+                let mut frame_buffer = vec![0u8; WIDTH as usize * HEIGHT as usize * 4];
+                if world.draw(&mut frame_buffer) {
+                    renderer.update_texture(&frame_buffer);
+                }
                 let gui_paused_state = manually_paused || world.error_state.is_some();
                 
                 // Update window title with performance metrics
@@ -410,11 +326,8 @@ fn run_gui_loop(
                     manually_paused = user_paused || world.error_state.is_some();
                 }
 
-                let render_result = pixels.render_with(|encoder, render_target, context| {
-                    context.scaling_renderer.render(encoder, render_target);
-
-                    framework.render(encoder, render_target, context);
-
+                let render_result = renderer.render_with(|encoder, render_target| {
+                    framework.render(encoder, render_target, renderer.device(), renderer.queue());
                     Ok(())
                 });
 
@@ -428,8 +341,8 @@ fn run_gui_loop(
             }
             _ => (),
         }
-    });
-    res.map_err(|e| Error::UserDefined(Box::new(e)))
+    })?;
+    Ok(())
 }
 
 struct World {
@@ -640,7 +553,7 @@ impl World {
         self.error_state = None;
     }
 
-    fn draw(&mut self, frame: &mut [u8]) {
+    fn draw(&mut self, frame: &mut [u8]) -> bool {
         if let Some(gb_frame) = self.frame.as_ref() {
             let rgba_frame = match gb_frame {
                 gb::Frame::Monochrome(data) => {
@@ -663,6 +576,9 @@ impl World {
             };
             frame.copy_from_slice(&rgba_frame);
             self.frame = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -833,7 +749,8 @@ impl World {
             let remaining = TARGET_FRAME_TIME - elapsed_since_last_frame;
             
             
-            // Sleep for most of the remaining time
+            // Sleep for most of the remaining time (not supported in WASM)
+            #[cfg(not(target_arch = "wasm32"))]
             if remaining > Duration::from_micros(100) {
                 std::thread::sleep(remaining - Duration::from_micros(50));
             }

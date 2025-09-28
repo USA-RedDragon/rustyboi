@@ -120,7 +120,7 @@ impl Gui {
                                         }
                                         
                                         // Draw tile border
-                                        ui.painter().rect_stroke(tile_rect, 0.0, egui::Stroke::new(0.5, egui::Color32::GRAY));
+                                        ui.painter().rect_stroke(tile_rect, 0.0, egui::Stroke::new(0.5, egui::Color32::GRAY), egui::StrokeKind::Outside);
                                         
                                         // Show tooltip with tile info on hover
                                         if response.hovered() {
