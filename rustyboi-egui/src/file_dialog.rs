@@ -6,7 +6,9 @@ pub trait FileDialogBuilder {
     /// Add a file filter to the dialog
     fn add_filter(self, name: &str, extensions: &[&str]) -> Self;
     
-    /// Set the default directory for the dialog
+    /// Set the default directory for the dialog. Unused on Android,
+    /// where the SAF picker decides its own starting location.
+    #[allow(dead_code)]
     fn set_directory<P: AsRef<std::path::Path>>(self, path: P) -> Self;
     
     /// Set the default filename for save dialogs
@@ -28,7 +30,7 @@ pub fn new() -> impl FileDialogBuilder {
     FileDialogBuilderImpl::new()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 mod sync_impl {
     use super::*;
     
@@ -140,8 +142,62 @@ mod async_impl {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_os = "android")]
+mod android_impl {
+    use super::*;
+
+    /// Android file dialog: dispatches the request to a platform-installed
+    /// bridge (set up from `android_main`) which fires a SAF intent and
+    /// returns the bytes asynchronously via the callback.
+    pub struct FileDialogBuilderImpl {
+        file_name: Option<String>,
+    }
+
+    impl FileDialogBuilderImpl {
+        pub fn new() -> Self {
+            Self { file_name: None }
+        }
+    }
+
+    impl FileDialogBuilder for FileDialogBuilderImpl {
+        fn add_filter(self, _name: &str, _extensions: &[&str]) -> Self {
+            // SAF mime types are not built from filename filters; ignore.
+            self
+        }
+
+        fn set_directory<P: AsRef<std::path::Path>>(self, _path: P) -> Self {
+            // SAF doesn't accept a starting directory in a way we can use; ignore.
+            self
+        }
+
+        fn set_file_name<S: AsRef<str>>(mut self, name: S) -> Self {
+            self.file_name = Some(name.as_ref().to_string());
+            self
+        }
+
+        fn pick_file<F>(self, callback: F)
+        where
+            F: FnOnce(Option<FileData>) + Send + 'static,
+        {
+            crate::android_bridge::pick_file(Box::new(callback));
+        }
+
+        fn save_file<F>(self, callback: F)
+        where
+            F: FnOnce(Option<PathBuf>) + Send + 'static,
+        {
+            // Saves go to the app's internal files directory; the bridge
+            // returns the chosen path (or None on failure/cancel).
+            crate::android_bridge::save_file(self.file_name, Box::new(callback));
+        }
+    }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 use sync_impl::FileDialogBuilderImpl;
 
 #[cfg(target_arch = "wasm32")]
 use async_impl::FileDialogBuilderImpl;
+
+#[cfg(target_os = "android")]
+use android_impl::FileDialogBuilderImpl;

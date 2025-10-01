@@ -1,0 +1,8 @@
+build/
+.kotlin/
+.gradle/
+app/src/main/jniLibs/
+# Release signing material — never commit.
+keystore.properties
+*.jks
+*.keystore

@@ -5,6 +5,7 @@ use crate::input;
 use crate::memory;
 use crate::memory::Addressable;
 use crate::ppu;
+use crate::serial;
 use crate::timer;
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +73,39 @@ pub const REG_OCPS: u16 = 0xFF6A; // Object Color Palette Specification
 pub const REG_OCPD: u16 = 0xFF6B; // Object Color Palette Data
 
 
+/// CGB HDMA halt-state machine
+/// Captured at HALT and consulted on unhalt to decide whether the next
+/// Mode 0 should immediately fire an HDMA block.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HaltHdmaState {
+    /// Not in an HDMA period when halt was entered.
+    Low,
+    /// Halt entered while in HDMA period, HDMA armed, no block scheduled.
+    High,
+    /// Halt entered with a block already scheduled (req flagged).
+    Requested,
+}
+
+impl Default for HaltHdmaState {
+    fn default() -> Self {
+        HaltHdmaState::Low
+    }
+}
+
+
+#[derive(Serialize, Deserialize, Clone)]
+struct DelayedMmioWrite {
+    addr: u16,
+    value: u8,
+    cycles_remaining: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppliedMmioWrite {
+    pub addr: u16,
+    pub value: u8,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Mmio {
     #[serde(skip, default)]
@@ -84,14 +118,40 @@ pub struct Mmio {
     wram_bank: memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>,
     oam: memory::Memory<OAM_START, OAM_SIZE>,
     timer: timer::Timer,
+    #[serde(default = "serial::Serial::new")]
+    serial: serial::Serial,
+    #[serde(skip, default)]
+    delayed_writes: Vec<DelayedMmioWrite>,
     io_registers: memory::Memory<IO_REGISTERS_START, IO_REGISTERS_SIZE>,
     hram: memory::Memory<HRAM_START, HRAM_SIZE>,
     ie_register: u8,
     audio: audio::Audio,
-    // OAM DMA state
+    // OAM DMA state. Modeled on Gambatte's continuously-running engine:
+    // `dma_pos` mirrors `oamDmaPos_` and idles at 254 (-2). On an FF46 write
+    // the engine is armed (`dma_active`) and `dma_start_pos = (dma_pos + 2)`;
+    // the transfer of byte 0 therefore begins two M-cycles after the write.
+    // Each M-cycle (4 dots) advances `dma_pos`; when it reaches `dma_start_pos`
+    // the transfer (re)starts at 0, copies bytes 0..=159, then ends at 160.
     dma_active: bool,
     dma_source_base: u16,
-    dma_progress: u8, // 0-159, tracks which byte we're transferring
+    #[serde(default)]
+    dma_pos: u8,
+    #[serde(default)]
+    dma_start_pos: u8,
+    #[serde(default)]
+    dma_subcycle: u8, // dots elapsed within the current M-cycle (0..=3)
+
+    // Set true when the CPU writes to FF44 (LY). Consumed by the PPU on its
+    // next step to reset internal scanline timing. Not part of save state.
+    #[serde(skip, default)]
+    ly_write_pending: bool,
+    // Set true when the CPU writes to a register that affects the STAT line
+    // (FF40 LCDC, FF41 STAT, FF45 LYC). Consumed by the PPU between CPU
+    // instructions to re-run LYC compare and the STAT edge detector so that
+    // enabling a STAT source mid-frame can fire IRQ immediately when a
+    // matching condition is already true.
+    #[serde(skip, default)]
+    stat_register_write_pending: bool,
     
     // CGB-specific state
     vram_bank: u8,          // VRAM bank select (0-1)
@@ -110,11 +170,28 @@ pub struct Mmio {
     wram_banks: Vec<memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>>, // Banks 2-7
     
     // CGB HDMA state
-    hdma_source: u16,       // HDMA source address
-    hdma_dest: u16,         // HDMA destination address
-    hdma_length: u8,        // HDMA transfer length
-    hdma_mode: u8,          // HDMA mode (0=general purpose, 1=H-blank)
-    hdma_active: bool,      // HDMA transfer active
+    hdma_source: u16,       // HDMA source address (advances per byte)
+    hdma_dest: u16,         // HDMA destination (advances per byte; low 13 bits used for VRAM offset)
+    // Blocks-remaining-minus-one, matching Gambatte's `dmaLength/0x10 - 1`.
+    // 0x7F means "fully done": FF55 reads as 0xFF.
+    hdma_length: u8,
+    // True while HDMA is armed (FF55 bit7 written as 1, not yet completed
+    // or cancelled).
+    #[serde(default)]
+    hdma_enabled: bool,
+    // True while a 0x10-byte block is scheduled to fire on the next CPU
+    // cycle. Mirrors Gambatte's `hdma_req` intreq flag. Set by the PPU at
+    // Mode 3->0 boundary (when `hdma_enabled`) and by LCD enable/disable
+    // edges; cleared after `run_hdma_block` runs.
+    #[serde(default)]
+    hdma_req_pending: bool,
+    // Mirrors Gambatte's `haltHdmaState_`.
+    #[serde(default)]
+    halt_hdma_state: HaltHdmaState,
+    // Cached `Ppu::is_hdma_period()` value, refreshed each PPU step. Read
+    // by the HALT opcode handler so it does not need a `&Ppu` borrow.
+    #[serde(skip, default)]
+    hdma_is_in_period_cached: bool,
     
     // CGB palette state
     #[serde(with = "serde_bytes")]
@@ -139,13 +216,19 @@ impl Mmio {
             wram_bank: memory::Memory::new(),
             oam: memory::Memory::new(),
             timer: timer::Timer::new(),
+            serial: serial::Serial::new(),
+            delayed_writes: Vec::new(),
             io_registers: memory::Memory::new(),
             hram: memory::Memory::new(),
             ie_register: 0,
             audio: audio::Audio::new(),
             dma_active: false,
             dma_source_base: 0,
-            dma_progress: 0,
+            dma_pos: 0xFE,
+            dma_start_pos: 0,
+            dma_subcycle: 0,
+            ly_write_pending: false,
+            stat_register_write_pending: false,
             
             // CGB-specific fields initialization
             vram_bank: 0,
@@ -161,8 +244,10 @@ impl Mmio {
             hdma_source: 0,
             hdma_dest: 0,
             hdma_length: 0,
-            hdma_mode: 0,
-            hdma_active: false,
+            hdma_enabled: false,
+            hdma_req_pending: false,
+            halt_hdma_state: HaltHdmaState::Low,
+            hdma_is_in_period_cached: false,
             
             // CGB palette initialization
             bg_palette_ram: [0; 64],
@@ -176,8 +261,14 @@ impl Mmio {
 
     pub fn reset(&mut self) {
         let mut new = Self::new();
-        self.bios.clone_into(&mut new.bios);
-        self.cartridge.clone_into(&mut new.cartridge);
+        // Move (rather than clone) the bios and cartridge into the fresh
+        // MMIO. The cartridge owns the open `.sav` file handle for
+        // battery-backed carts; `Cartridge::Clone` deliberately drops that
+        // handle, so cloning here would silently disable persistent save
+        // writes after every reset/restart (including the implicit reset
+        // performed by the GUI's "Load ROM" path).
+        new.bios = self.bios.take();
+        new.cartridge = self.cartridge.take();
         *self = new;
     }
 
@@ -192,7 +283,7 @@ impl Mmio {
     pub fn is_cgb_features_enabled(&self) -> bool {
         self.cgb_features_enabled
     }
-    
+
     pub fn read_bg_palette_data(&self, palette_idx: u8, color_idx: u8) -> (u8, u8) {
         if !self.cgb_features_enabled || palette_idx >= 8 || color_idx >= 4 {
             return (0xFF, 0xFF); // Invalid access
@@ -270,10 +361,78 @@ impl Mmio {
         self.bios.is_some()
     }
 
-    pub fn step_timer(&mut self, cpu: &mut cpu::SM83) {
+    pub fn step_timer(&mut self) {
         let mut timer = self.timer.clone();
-        timer.step(cpu, self);
+        timer.step(self);
         self.timer = timer;
+    }
+
+    pub fn step_serial(&mut self) {
+        let divider = self.timer.internal_counter();
+        let mut serial = self.serial.clone();
+        serial.step(divider, self);
+        self.serial = serial;
+    }
+
+    pub fn set_serial_cgb(&mut self, cgb: bool) {
+        self.serial.set_cgb(cgb);
+    }
+
+    /// Raise an interrupt by setting its IF bit. Equivalent to
+    /// `SM83::set_interrupt_flag(flag, true, self)` but needs no CPU borrow, so
+    /// peripherals (PPU) can request interrupts directly.
+    pub fn request_interrupt(&mut self, flag: cpu::registers::InterruptFlag) {
+        let current = self.read(cpu::registers::INTERRUPT_FLAG);
+        self.write(cpu::registers::INTERRUPT_FLAG, current | flag as u8);
+    }
+
+    /// Queue a CPU write to land `cycles_until_write` T-cycles later (0 = now).
+    /// Models the sub-instruction landing cycle of certain register writes.
+    pub fn queue_delayed_write(&mut self, addr: u16, value: u8, cycles_until_write: u32) {
+        if cycles_until_write > 0 {
+            self.delayed_writes.push(DelayedMmioWrite {
+                addr,
+                value,
+                cycles_remaining: cycles_until_write,
+            });
+        } else {
+            self.write(addr, value);
+        }
+    }
+
+    pub fn step_delayed_writes(&mut self) -> Vec<AppliedMmioWrite> {
+        let mut applied = Vec::new();
+        let mut index = 0;
+        while index < self.delayed_writes.len() {
+            if self.delayed_writes[index].cycles_remaining > 0 {
+                self.delayed_writes[index].cycles_remaining -= 1;
+            }
+            if self.delayed_writes[index].cycles_remaining == 0 {
+                let write = self.delayed_writes.remove(index);
+                self.write(write.addr, write.value);
+                applied.push(AppliedMmioWrite {
+                    addr: write.addr,
+                    value: write.value,
+                });
+            } else {
+                index += 1;
+            }
+        }
+        applied
+    }
+
+    pub fn clear_delayed_writes(&mut self) {
+        self.delayed_writes.clear();
+    }
+
+    pub fn clock_apu_frame_sequencer(&mut self) {
+        self.audio.clock_frame_sequencer();
+    }
+
+    /// Initialize the timer's internal 16-bit counter at boot. See
+    /// `Timer::set_internal_counter`.
+    pub fn set_timer_internal_counter(&mut self, value: u16) {
+        self.timer.set_internal_counter(value);
     }
 
     pub fn step_audio(&mut self) {
@@ -289,28 +448,259 @@ impl Mmio {
         samples
     }
 
+    /// Copy a single byte from `src` to the VRAM destination corresponding
+    /// to `dst`. Shared by GDMA and HDMA. Caller advances `hdma_source` /
+    /// `hdma_dest`. Mirrors the inner-loop of Gambatte's `Memory::dma`:
+    ///   - Source reads from VRAM (0x8000-0x9FFF) or >=0xE000 (WRAM
+    ///     mirror / OAM / IO / HRAM) return 0xFF (open bus).
+    ///   - Destination wraps within the currently selected VRAM bank
+    ///     (modulo 0x2000), written at 0x8000 | (dst & 0x1FFF).
+    fn copy_dma_byte(&mut self, src: u16, dst: u16) {
+        // Bypass DMA-active gating while we drive the bus read internally:
+        // GDMA / HDMA are separate transfer engines from OAM DMA.
+        let saved_dma_active = self.dma_active;
+        self.dma_active = false;
+
+        let byte = if (0x8000..=0x9FFF).contains(&src) || src >= 0xE000 {
+            0xFF
+        } else {
+            <Self as memory::Addressable>::read(self, src)
+        };
+
+        let vram_addr = VRAM_START | (dst & 0x1FFF);
+        if self.cgb_features_enabled && self.vram_bank == 1 {
+            self.vram_bank1.write(vram_addr, byte);
+        } else {
+            self.vram.write(vram_addr, byte);
+        }
+
+        self.dma_active = saved_dma_active;
+    }
+
+    /// Execute a CGB General-Purpose DMA (GDMA) transfer synchronously.
+    /// Copies `length` bytes from `self.hdma_source` into VRAM starting at
+    /// `self.hdma_dest`. Mirrors Gambatte's `Memory::dma`:
+    ///   - If the LCD is off, GDMA does not run.
+    ///   - Destination clamped if it would overflow the 16-bit address
+    ///     space (memory.cpp:335-337).
+    fn execute_gdma(&mut self, length: usize) {
+        let lcdc = self.io_registers.read(ppu::LCD_CONTROL);
+        if lcdc & (ppu::LCDCFlags::DisplayEnable as u8) == 0 {
+            return;
+        }
+
+        let mut src = self.hdma_source;
+        let mut dst = self.hdma_dest;
+
+        let effective_length = if (dst as usize) + length >= 0x10000 {
+            0x10000 - dst as usize
+        } else {
+            length
+        };
+
+        for _ in 0..effective_length {
+            self.copy_dma_byte(src, dst);
+            src = src.wrapping_add(1);
+            dst = dst.wrapping_add(1);
+        }
+
+        self.hdma_source = src;
+        self.hdma_dest = dst;
+    }
+
+    // ----------------------------------------------------------------------
+    // HDMA accessors used by gb.rs / cpu / ppu.
+    // ----------------------------------------------------------------------
+
+    pub fn hdma_is_enabled(&self) -> bool {
+        self.cgb_features_enabled && self.hdma_enabled
+    }
+
+    pub fn hdma_req_pending(&self) -> bool {
+        self.hdma_req_pending
+    }
+
+    pub fn set_hdma_req(&mut self) {
+        if self.cgb_features_enabled && self.hdma_enabled {
+            self.hdma_req_pending = true;
+        }
+    }
+
+    pub fn ack_hdma_req(&mut self) {
+        self.hdma_req_pending = false;
+    }
+
+    pub fn halt_hdma_state(&self) -> HaltHdmaState {
+        self.halt_hdma_state
+    }
+
+    pub fn set_halt_hdma_state(&mut self, s: HaltHdmaState) {
+        self.halt_hdma_state = s;
+    }
+
+    pub fn update_hdma_period_cache(&mut self, in_period: bool) {
+        self.hdma_is_in_period_cached = in_period;
+    }
+
+    pub fn hdma_is_in_period_cached(&self) -> bool {
+        self.hdma_is_in_period_cached
+    }
+
+    /// CPU has just entered HALT. Mirrors Gambatte's `Memory::halt`
+    /// (memory.cpp:407): records the halt-HDMA state and acks any
+    /// currently flagged req so it does not double-fire on unhalt.
+    pub fn on_cpu_halt(&mut self) {
+        if !self.cgb_features_enabled {
+            self.halt_hdma_state = HaltHdmaState::Low;
+            return;
+        }
+        self.halt_hdma_state = if self.hdma_req_pending {
+            HaltHdmaState::Requested
+        } else if self.hdma_enabled && self.hdma_is_in_period_cached {
+            HaltHdmaState::High
+        } else {
+            HaltHdmaState::Low
+        };
+        // Gambatte does ackDmaReq after copying the flag.
+        self.hdma_req_pending = false;
+    }
+
+    /// Execute one 0x10-byte HDMA block. Caller must have verified
+    /// `hdma_req_pending && hdma_enabled`. Bytes are copied synchronously;
+    /// callers charge the returned CPU-cycle stall via the outer per-cycle
+    /// loop so PPU/timer/audio continue to tick during the transfer.
+    pub fn run_hdma_block(&mut self) -> u32 {
+        for _ in 0..0x10 {
+            self.copy_dma_byte(self.hdma_source, self.hdma_dest);
+            self.hdma_source = self.hdma_source.wrapping_add(1);
+            self.hdma_dest = self.hdma_dest.wrapping_add(1);
+
+            // Interleave one OAM-DMA M-cycle per HDMA byte. Mirrors Gambatte's
+            // `Memory::dma` which advances `oamDmaPos_` inside the HDMA loop.
+            if self.dma_active {
+                self.dma_advance_one_mcycle();
+            }
+        }
+
+        self.hdma_length = self.hdma_length.wrapping_sub(1) & 0x7F;
+        // After underflow from 0x00 -> 0xFF -> masked = 0x7F the transfer
+        // is complete: FF55 reads 0xFF.
+        if self.hdma_length == 0x7F {
+            self.hdma_enabled = false;
+        }
+        self.hdma_req_pending = false;
+
+        // Stall: Gambatte `Memory::dma` advances `cc` by `(2 + 2*ds) * 16`
+        // per byte plus a trailing `cc += 4` setup overhead = 36 / 68.
+        // Gambatte's `cc` and rustyboi's `cycles` use the same unit (NOP
+        // returns 4 in both, frame budget = 70224 SS / 140448 DS), so use
+        // these values verbatim.
+        if self.is_double_speed_mode() { 68 } else { 36 }
+    }
+
+    /// Advance the OAM-DMA engine by one M-cycle (mirrors one iteration of
+    /// Gambatte's `updateOamDma` loop). Advances `dma_pos`, (re)starts the
+    /// transfer when it reaches `dma_start_pos`, copies the corresponding
+    /// source byte into OAM, and ends the transfer at byte 160.
+    fn dma_advance_one_mcycle(&mut self) {
+        self.dma_pos = self.dma_pos.wrapping_add(1);
+
+        if self.dma_pos == self.dma_start_pos {
+            // startOamDma: transfer (re)starts from the top.
+            self.dma_pos = 0;
+            self.dma_start_pos = 0;
+        }
+
+        if self.dma_pos < 160 {
+            let source_addr = self.dma_source_base + self.dma_pos as u16;
+            let byte = self.read_during_dma(source_addr);
+            self.oam.write(OAM_START + self.dma_pos as u16, byte);
+        } else if self.dma_pos == 160 {
+            // endOamDma: park the engine. Because no restart was requested
+            // (`dma_start_pos == 0`), idle `dma_pos` at -2 and stop.
+            if self.dma_start_pos == 0 {
+                self.dma_pos = 0xFE;
+                self.dma_active = false;
+            }
+        }
+    }
+
+    /// Handle a CPU write to FF46. Arms the engine: the transfer of byte 0
+    /// begins two M-cycles later (`dma_start_pos = dma_pos + 2`). A write while
+    /// a transfer is already running schedules a restart at that point, leaving
+    /// the in-flight transfer to continue until then (DMA-restart behavior).
+    fn start_oam_dma(&mut self, value: u8) {
+        self.dma_start_pos = self.dma_pos.wrapping_add(2);
+        self.dma_subcycle = 0;
+        self.dma_source_base = (value as u16) << 8;
+        self.dma_active = true;
+        self.io_registers.write(REG_DMA, value);
+    }
+
     pub fn step_dma(&mut self) {
         if !self.dma_active {
             return;
         }
 
-        // Perform one byte transfer per cycle
-        let source_addr = self.dma_source_base + self.dma_progress as u16;
-        let dest_addr = OAM_START + self.dma_progress as u16;
-        
-        // Read from source address (bypassing DMA conflicts for now - the source read is always allowed)
-        let byte = self.read_during_dma(source_addr);
-        
-        // Write directly to OAM memory
-        self.oam.write(dest_addr, byte);
-        
-        self.dma_progress += 1;
-        
-        // DMA transfer is complete after 160 bytes (cycles)
-        if self.dma_progress >= 160 {
-            self.dma_active = false;
-            self.dma_progress = 0;
+        // One source byte is transferred per M-cycle (4 dots), not per dot.
+        self.dma_subcycle += 1;
+        if self.dma_subcycle < 4 {
+            return;
         }
+        self.dma_subcycle = 0;
+        self.dma_advance_one_mcycle();
+    }
+
+    /// True while a transfer is actively placing bytes into OAM (the window in
+    /// which the CPU bus conflicts with OAM DMA). Mirrors `oamDmaPos_ < 160`.
+    fn dma_transfer_in_progress(&self) -> bool {
+        self.dma_active && self.dma_pos < 160
+    }
+
+    /// As `dma_transfer_in_progress`, but using the read-observed position.
+    fn dma_read_conflict_active(&self) -> bool {
+        self.dma_active && self.dma_pos < 160
+    }
+
+    /// Byte the CPU sees on a conflicting bus read while OAM DMA is mid-transfer:
+    /// the byte currently being moved to OAM. Equal to `oam[pos]` after the
+    /// transfer, but read from the source so the read-lookahead can observe a
+    /// byte the engine has not physically copied yet.
+    fn dma_conflict_byte(&self) -> u8 {
+        self.read_during_dma(self.dma_source_base + self.dma_pos as u16)
+    }
+
+    /// Whether a CPU access to `addr` conflicts with the in-progress OAM DMA.
+    /// Faithful port of Gambatte's `isInOamDmaConflictArea`: classify the DMA
+    /// source into rom/sram/vram/wram/invalid, then test a per-4KB-block
+    /// conflict bitmask (which differs between DMG and CGB).
+    fn dma_address_conflicts(&self, addr: u16) -> bool {
+        if addr >= OAM_START {
+            return false;
+        }
+        let cgb = self.cgb_features_enabled;
+        let src_high = (self.dma_source_base >> 8) as u8;
+
+        // oamDmaInitSetup: source-region classification.
+        // 0 = rom, 1 = sram, 2 = vram, 3 = wram, 4 = invalid.
+        // CGB marks 0xE0..=0xFF as invalid; DMG treats them as wram (echo).
+        let wram_top: u16 = if cgb { 0xE0 } else { 0x100 };
+        let src = if src_high < 0xA0 {
+            if src_high < 0x80 { 0 } else { 2 }
+        } else if (src_high as u16) < wram_top {
+            if src_high < 0xC0 { 1 } else { 3 }
+        } else {
+            4
+        };
+
+        // Per-block conflict masks (bit n set => 4KB block n conflicts).
+        let mask: u16 = match src {
+            0 | 1 => 0xFCFF,
+            2 => 0x0300,
+            3 => if cgb { 0xF000 } else { 0xFCFF },
+            _ => if cgb { 0xFCFF } else { 0x0000 },
+        };
+        (mask >> (addr >> 12)) & 1 != 0
     }
 
     pub fn set_input_state(&mut self, state: crate::input::ButtonState) {
@@ -332,6 +722,12 @@ impl Mmio {
             self.key1_current_speed = !self.key1_current_speed;
             // Clear the armed bit
             self.key1_switch_armed = false;
+            // Gambatte's `Memory::stop` resets DIV and re-bases peripheral
+            // timing on speed switch. We don't keep separately scaled internal
+            // counters, so resetting DIV is the only resync we need; the
+            // per-T-cycle stepping in gb.rs already produces the correct
+            // half-rate PPU/audio cadence in double-speed.
+            self.timer.write(timer::DIV, 0);
         }
     }
 
@@ -392,6 +788,8 @@ impl Mmio {
                 match addr {
                     input::JOYP => self.input.read(addr),
                     timer::DIV..=timer::TAC => self.timer.read(addr),
+                serial::SB..=serial::SC => self.serial.read(addr),
+                cpu::registers::INTERRUPT_FLAG => self.io_registers.read(addr) | 0xE0,
                     REG_DMA => self.io_registers.read(addr),
                     _ => self.io_registers.read(addr),
                 }
@@ -400,25 +798,64 @@ impl Mmio {
             _ => EMPTY_BYTE,
         }
     }
+
+    fn write_lcd_status(&mut self, value: u8) {
+        let current = self.io_registers.read(ppu::LCD_STATUS);
+        self.io_registers
+            .write(ppu::LCD_STATUS, (current & 0x07) | (value & 0x78));
+        self.stat_register_write_pending = true;
+    }
+
+    fn write_lcd_control(&mut self, value: u8) {
+        self.io_registers.write(ppu::LCD_CONTROL, value);
+        self.stat_register_write_pending = true;
+    }
+
+    pub fn write_lcd_status_from_ppu(&mut self, value: u8) {
+        self.io_registers.write(ppu::LCD_STATUS, value);
+    }
+
+    /// CPU-side write to FF44 (LY). On real hardware this resets the line
+    /// counter to 0 (the value written is ignored). The PPU will observe the
+    /// pending flag on its next step and re-arm internal scanline state.
+    fn write_ly_from_cpu(&mut self) {
+        // FF44 (LY) is read-only on hardware; CPU writes are ignored.
+    }
+
+    /// PPU-side update of FF44 (LY). Bypasses the CPU-write reset semantics so
+    /// the PPU can advance the line counter through normal scanline progression.
+    pub fn write_ly_from_ppu(&mut self, value: u8) {
+        self.io_registers.write(ppu::LY, value);
+    }
+
+    /// Consume the pending LY-write signal. Returns true if the CPU wrote to
+    /// FF44 since the last call.
+    pub fn take_ly_write_pending(&mut self) -> bool {
+        let pending = self.ly_write_pending;
+        self.ly_write_pending = false;
+        pending
+    }
+
+    /// Consume the pending STAT-register-write signal. Returns true if the CPU
+    /// wrote to FF40, FF41, or FF45 since the last call.
+    pub fn take_stat_register_write_pending(&mut self) -> bool {
+        let pending = self.stat_register_write_pending;
+        self.stat_register_write_pending = false;
+        pending
+    }
 }
 
 impl memory::Addressable for Mmio {
     fn read(&self, addr: u16) -> u8 {
-        // During DMA, CPU can only access HRAM and some IO registers
-        if self.dma_active {
-            match addr {
-                HRAM_START..=HRAM_END => self.hram.read(addr),
-                IE_REGISTER => self.ie_register,
-                // Allow reading from some essential IO registers during DMA
-                timer::DIV..=timer::TAC => self.timer.read(addr),
-                input::JOYP => self.input.read(addr),
-                REG_DMA => self.io_registers.read(addr),
-                // Allow PPU registers during DMA since PPU continues to operate
-                ppu::LCD_CONTROL..=ppu::WX => self.io_registers.read(addr),
-                _ => 0xFF, // Return 0xFF for all other addresses during DMA
-            }
-        } else {
-            // Normal memory access when DMA is not active
+        // While an OAM DMA transfer is in progress, a CPU read of a memory
+        // region that conflicts with the DMA source returns the byte the DMA
+        // is currently moving into OAM, not the real memory. I/O and HRAM are
+        // unaffected (Gambatte gates the conflict on `p < mm_hram_begin`).
+        if self.dma_read_conflict_active() && self.dma_address_conflicts(addr) {
+            return self.dma_conflict_byte();
+        }
+        {
+            // Normal memory access (the conflict above already handled).
             match addr {
                 BIOS_START..=BIOS_END => {
                     match self.read(REG_BOOT_OFF) {
@@ -504,6 +941,8 @@ impl memory::Addressable for Mmio {
                     match addr {
                         input::JOYP => self.input.read(addr),
                         timer::DIV..=timer::TAC => self.timer.read(addr),
+                serial::SB..=serial::SC => self.serial.read(addr),
+                cpu::registers::INTERRUPT_FLAG => self.io_registers.read(addr) | 0xE0,
                         audio::NR10..=audio::NR14 => self.audio.read(addr),
                         audio::NR21..=audio::NR24 => self.audio.read(addr),
                         audio::NR30..=audio::NR34 => self.audio.read(addr),
@@ -537,40 +976,22 @@ impl memory::Addressable for Mmio {
                                 0xFF // DMG hardware returns 0xFF for CGB registers
                             }
                         },
-                        REG_HDMA1 => {
-                            if self.cgb_features_enabled {
-                                (self.hdma_source >> 8) as u8
-                            } else {
-                                0xFF
-                            }
-                        },
-                        REG_HDMA2 => {
-                            if self.cgb_features_enabled {
-                                self.hdma_source as u8
-                            } else {
-                                0xFF
-                            }
-                        },
-                        REG_HDMA3 => {
-                            if self.cgb_features_enabled {
-                                (self.hdma_dest >> 8) as u8
-                            } else {
-                                0xFF
-                            }
-                        },
-                        REG_HDMA4 => {
-                            if self.cgb_features_enabled {
-                                self.hdma_dest as u8
-                            } else {
-                                0xFF
-                            }
-                        },
+                        // HDMA1-4 (FF51-FF54) are write-only on real hardware;
+                        // reads always return 0xFF. See Gambatte
+                        // `nontrivial_ff_read` in memory.cpp, which falls
+                        // through to the never-written ioamhram_ shadow.
+                        REG_HDMA1 | REG_HDMA2 | REG_HDMA3 | REG_HDMA4 => 0xFF,
                         REG_HDMA5 => {
                             if self.cgb_features_enabled {
-                                if self.hdma_active {
-                                    self.hdma_length // Transfer in progress, return remaining length
+                                if self.hdma_enabled {
+                                    // In-progress: bit 7 clear, low 7 bits =
+                                    // blocks remaining minus 1.
+                                    self.hdma_length & 0x7F
                                 } else {
-                                    0xFF // No transfer
+                                    // Done / cancelled / never-armed: bit 7
+                                    // set. `hdma_length == 0x7F` after a
+                                    // completed transfer encodes 0xFF.
+                                    self.hdma_length | 0x80
                                 }
                             } else {
                                 0xFF
@@ -613,7 +1034,10 @@ impl memory::Addressable for Mmio {
                                 0xFF
                             }
                         },
-                        
+                        // Bit 7 of STAT is unused but always reads as 1 on real
+                        // hardware. See Gambatte memory.cpp case 0x41.
+                        ppu::LCD_STATUS => self.io_registers.read(addr) | 0x80,
+
                         _ => self.io_registers.read(addr),
                     }
                 }
@@ -631,15 +1055,25 @@ impl memory::Addressable for Mmio {
                 IE_REGISTER => self.ie_register = value,
                 // Allow writing to some essential IO registers during DMA
                 timer::DIV..=timer::TAC => self.timer.write(addr, value),
+                serial::SB..=serial::SC => self.serial.write(addr, value),
                 input::JOYP => self.input.write(addr, value),
-                REG_DMA => {
-                    // Allow starting another DMA during current DMA (restarts)
-                    self.dma_active = true;
-                    self.dma_source_base = (value as u16) << 8;
-                    self.dma_progress = 0;
+                REG_DMA => self.start_oam_dma(value),
+                ppu::LCD_CONTROL => self.write_lcd_control(value),
+                ppu::LCD_STATUS => self.write_lcd_status(value),
+                ppu::LY => self.write_ly_from_cpu(),
+                ppu::LYC => {
                     self.io_registers.write(addr, value);
-                },
-                ppu::LCD_CONTROL..=ppu::WX => self.io_registers.write(addr, value),
+                    self.stat_register_write_pending = true;
+                }
+                ppu::SCY..=ppu::WX => self.io_registers.write(addr, value),
+                // While a transfer is in progress the DMA owns the OAM bus, so
+                // a CPU write to OAM is dropped. Once the transfer has ended
+                // (engine still parked for a cycle) the CPU write lands.
+                OAM_START..=OAM_END => {
+                    if !self.dma_transfer_in_progress() {
+                        self.oam.write(addr, value);
+                    }
+                }
                 _ => (), // Ignore writes to other addresses during DMA
             }
         } else {
@@ -704,21 +1138,21 @@ impl memory::Addressable for Mmio {
                     match addr {
                         input::JOYP => self.input.write(addr, value),
                         timer::DIV..=timer::TAC => self.timer.write(addr, value),
+                serial::SB..=serial::SC => self.serial.write(addr, value),
                         audio::NR10..=audio::NR14 => self.audio.write(addr, value),
                         audio::NR21..=audio::NR24 => self.audio.write(addr, value),
                         audio::NR30..=audio::NR34 => self.audio.write(addr, value),
                         audio::NR41..=audio::NR52 => self.audio.write(addr, value),
                         audio::WAV_START..=audio::WAV_END => self.audio.write(addr, value),
-                        REG_DMA => {
-                            // Start OAM DMA transfer
-                            // The high byte of the source address is written to DMA register
-                            // The transfer copies 160 bytes from source to OAM
-                            self.dma_active = true;
-                            self.dma_source_base = (value as u16) << 8;
-                            self.dma_progress = 0;
-                            // Store the DMA register value for reads
+                        REG_DMA => self.start_oam_dma(value),
+                        ppu::LCD_CONTROL => self.write_lcd_control(value),
+                        ppu::LCD_STATUS => self.write_lcd_status(value),
+                        ppu::LY => self.write_ly_from_cpu(),
+                        ppu::LYC => {
                             self.io_registers.write(addr, value);
-                        },
+                            self.stat_register_write_pending = true;
+                        }
+                        ppu::SCY..=ppu::WX => self.io_registers.write(addr, value),
                         REG_BOOT_OFF => {
                             // When boot ROM is disabled, lock the KEY0 register
                             if self.cgb_features_enabled && value != 0 {
@@ -755,7 +1189,9 @@ impl memory::Addressable for Mmio {
                         },
                         REG_HDMA2 => {
                             if self.cgb_features_enabled {
-                                self.hdma_source = (self.hdma_source & 0xFF00) | (value as u16);
+                                // Low nibble of source low byte is masked off on real hardware.
+                                // See Gambatte memory.cpp case 0x52: `data & 0xF0`.
+                                self.hdma_source = (self.hdma_source & 0xFF00) | ((value as u16) & 0x00F0);
                             }
                         },
                         REG_HDMA3 => {
@@ -765,15 +1201,51 @@ impl memory::Addressable for Mmio {
                         },
                         REG_HDMA4 => {
                             if self.cgb_features_enabled {
-                                self.hdma_dest = (self.hdma_dest & 0xFF00) | (value as u16);
+                                // Low nibble of dest low byte is masked off on real hardware.
+                                // See Gambatte memory.cpp case 0x54: `data & 0xF0`.
+                                self.hdma_dest = (self.hdma_dest & 0xFF00) | ((value as u16) & 0x00F0);
                             }
                         },
                         REG_HDMA5 => {
                             if self.cgb_features_enabled {
-                                // TODO: Implement HDMA transfer logic
-                                self.hdma_length = value & 0x7F; // Bits 0-6 = length
-                                self.hdma_mode = (value >> 7) & 0x01; // Bit 7 = mode
-                                // For now, just store the values - full HDMA implementation would start transfer here
+                                let length_blocks_minus_1 = value & 0x7F;
+                                let new_mode = (value >> 7) & 0x01; // 0=GDMA, 1=HDMA
+                                let lcd_on = (self.io_registers.read(ppu::LCD_CONTROL)
+                                    & (ppu::LCDCFlags::DisplayEnable as u8)) != 0;
+
+                                if self.hdma_enabled {
+                                    // HDMA already armed: bit7=0 cancels,
+                                    // bit7=1 restarts with new length / src
+                                    // / dst (Gambatte memory.cpp ~line 1266).
+                                    if new_mode == 0 {
+                                        // Cancel only: Gambatte preserves
+                                        // the existing remaining length and
+                                        // just flips bit 7 on read by
+                                        // disabling HDMA.
+                                        self.hdma_enabled = false;
+                                        self.hdma_req_pending = false;
+                                    } else {
+                                        self.hdma_length = length_blocks_minus_1;
+                                        if !lcd_on || self.hdma_is_in_period_cached {
+                                            self.hdma_req_pending = true;
+                                        }
+                                    }
+                                } else if new_mode == 0 {
+                                    // GDMA kick (synchronous).
+                                    let total_bytes = (length_blocks_minus_1 as usize + 1) * 16;
+                                    self.execute_gdma(total_bytes);
+                                    self.hdma_length = 0x7F; // FF55 reads 0xFF
+                                } else {
+                                    // Arm HDMA. Fire the first block now if
+                                    // LCD off or already in the HDMA period;
+                                    // otherwise the PPU's Mode 3->0 trigger
+                                    // will set the req on the next H-blank.
+                                    self.hdma_enabled = true;
+                                    self.hdma_length = length_blocks_minus_1;
+                                    if !lcd_on || self.hdma_is_in_period_cached {
+                                        self.hdma_req_pending = true;
+                                    }
+                                }
                             }
                         },
                         REG_SVBK => {

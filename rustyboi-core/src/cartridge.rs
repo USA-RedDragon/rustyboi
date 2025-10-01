@@ -6,6 +6,7 @@ use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
 use zip::ZipArchive;
 
 // Cartridge header offsets
@@ -334,8 +335,7 @@ impl Cartridge {
         Ok(cartridge)
     }
 
-    #[cfg(target_arch = "wasm32")]
-    /// Extract ROM data from zip bytes for WASM
+    /// Extract ROM data from zip bytes.
     fn extract_rom_from_zip_bytes(data: &[u8]) -> Result<Vec<u8>, io::Error> {
         use std::io::Cursor;
         
@@ -382,7 +382,6 @@ impl Cartridge {
         ))
     }
 
-    #[cfg(target_arch = "wasm32")]
     pub fn from_bytes(data: &[u8]) -> Result<Self, io::Error> {
         // Try to detect if this is a zip file by checking the magic bytes
         let actual_data = if data.len() >= 4 && &data[0..4] == b"PK\x03\x04" {
@@ -473,8 +472,8 @@ impl Cartridge {
             cgb_support,
         };
         
-        // Note: For WASM/in-memory loading, we skip save file loading
-        // since there's no persistent filesystem
+        // In-memory loading intentionally skips save files so test runners and
+        // WASM callers do not create sidecar files.
         
         Ok(cartridge)
     }
@@ -578,58 +577,191 @@ impl Cartridge {
     
     /// Load save file data into RAM if it exists, or create empty save file (only for battery-backed RAM)
     fn load_or_create_save_file(&mut self) -> Result<(), io::Error> {
+        if let Some(save_path) = self.get_save_file_path() {
+            self.attach_save_file_at(Path::new(&save_path))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Attach a battery-backed save file at an explicit path. Used by
+    /// callers (e.g. the Android entry point) that loaded the ROM via
+    /// `from_bytes` and therefore have no `rom_path` from which to derive
+    /// the default sidecar `.sav` location. Behaviour mirrors
+    /// `load_or_create_save_file`: if the file exists its contents are
+    /// copied into the cart's RAM, otherwise the current RAM contents
+    /// are written out. Either way the file is kept open for streaming
+    /// per-byte writes from `write_ram_byte` / `write_mbc2_ram_byte`.
+    ///
+    /// No-op for cartridges without battery-backed RAM.
+    pub fn attach_save_file(&mut self, path: impl AsRef<Path>) -> Result<(), io::Error> {
+        self.attach_save_file_at(path.as_ref())
+    }
+
+    /// Overwrite the cartridge's battery-backed RAM with the supplied
+    /// bytes. Intended for the Android sibling-`.sav` path: SAF hands us
+    /// the user's existing save bytes from /sdcard, and we copy them
+    /// into the live cart RAM *after* `attach_save_file` has prepared
+    /// the internal sidecar so subsequent writes still persist. If a
+    /// save file is currently attached, the whole RAM image is flushed
+    /// to disk so the internal sidecar matches the loaded state.
+    ///
+    /// Returns the number of bytes actually copied (truncated to the
+    /// cart's RAM size). No-op for non-battery carts.
+    pub fn load_sram_bytes(&mut self, bytes: &[u8]) -> Result<usize, io::Error> {
+        if !self.has_battery() {
+            return Ok(0);
+        }
+        let copied = match self.get_cartridge_type() {
+            CartridgeType::MBC2 { .. } => {
+                let n = bytes.len().min(self.mbc2_ram.len());
+                self.mbc2_ram[..n].copy_from_slice(&bytes[..n]);
+                // MBC2 stores 4-bit nibbles; mask to be safe.
+                for b in &mut self.mbc2_ram[..n] {
+                    *b &= 0x0F;
+                }
+                n
+            }
+            _ => {
+                if self.ram_data.is_empty() {
+                    return Ok(0);
+                }
+                let n = bytes.len().min(self.ram_data.len());
+                self.ram_data[..n].copy_from_slice(&bytes[..n]);
+                n
+            }
+        };
+        // If a save file is attached, flush the current RAM image so the
+        // internal sidecar mirrors the freshly-loaded state.
+        let is_mbc2 = matches!(self.get_cartridge_type(), CartridgeType::MBC2 { .. });
+        if let Some(ref mut file) = self.save_file {
+            file.seek(SeekFrom::Start(0))?;
+            let buf: &[u8] = if is_mbc2 { &self.mbc2_ram } else { &self.ram_data };
+            file.write_all(buf)?;
+            file.flush()?;
+        }
+        Ok(copied)
+    }
+
+    fn attach_save_file_at(&mut self, save_path: &Path) -> Result<(), io::Error> {
         // Only process save files for cartridges with battery-backed RAM
         if !self.has_battery() {
             return Ok(());
         }
-        
+
         // For MBC2, we need to save the built-in RAM instead of external RAM
-        let save_data = match self.get_cartridge_type() {
-            CartridgeType::MBC2 { .. } => &self.mbc2_ram,
-            _ => &self.ram_data,
+        let save_data_is_empty = match self.get_cartridge_type() {
+            CartridgeType::MBC2 { .. } => self.mbc2_ram.is_empty(),
+            _ => self.ram_data.is_empty(),
         };
-        
-        if save_data.is_empty() {
+        if save_data_is_empty {
             return Ok(());
         }
-        
-        if let Some(save_path) = self.get_save_file_path() {
-            if std::path::Path::new(&save_path).exists() {
-                // Load existing save file
-                let loaded_data = fs::read(&save_path)?;
-                match self.get_cartridge_type() {
-                    CartridgeType::MBC2 { .. } => {
-                        if loaded_data.len() <= self.mbc2_ram.len() {
-                            self.mbc2_ram[..loaded_data.len()].copy_from_slice(&loaded_data);
-                            println!("Loaded MBC2 save file: {}", save_path);
-                        }
-                    }
-                    _ => {
-                        if loaded_data.len() <= self.ram_data.len() {
-                            self.ram_data[..loaded_data.len()].copy_from_slice(&loaded_data);
-                            println!("Loaded save file: {}", save_path);
-                        }
+
+        // Ensure the parent directory exists; on Android the save
+        // directory is created by `android::save_dir()` but callers may
+        // hand us nested paths.
+        if let Some(parent) = save_path.parent()
+            && !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+
+        if save_path.exists() {
+            // Load existing save file
+            let loaded_data = fs::read(save_path)?;
+            match self.get_cartridge_type() {
+                CartridgeType::MBC2 { .. } => {
+                    if loaded_data.len() <= self.mbc2_ram.len() {
+                        self.mbc2_ram[..loaded_data.len()].copy_from_slice(&loaded_data);
+                        println!("Loaded MBC2 save file: {}", save_path.display());
                     }
                 }
-            } else {
-                // Create new save file with current RAM data
-                match self.get_cartridge_type() {
-                    CartridgeType::MBC2 { .. } => {
-                        fs::write(&save_path, &self.mbc2_ram)?;
-                        println!("Created new MBC2 save file: {}", save_path);
-                    }
-                    _ => {
-                        fs::write(&save_path, &self.ram_data)?;
-                        println!("Created new save file: {}", save_path);
+                _ => {
+                    if loaded_data.len() <= self.ram_data.len() {
+                        self.ram_data[..loaded_data.len()].copy_from_slice(&loaded_data);
+                        println!("Loaded save file: {}", save_path.display());
                     }
                 }
             }
-            
-            // Open file handle for efficient writing
-            self.save_file = Some(OpenOptions::new()
-                .write(true)
-                .open(&save_path)?);
+        } else {
+            // Create new save file with current RAM data
+            match self.get_cartridge_type() {
+                CartridgeType::MBC2 { .. } => {
+                    fs::write(save_path, &self.mbc2_ram)?;
+                    println!("Created new MBC2 save file: {}", save_path.display());
+                }
+                _ => {
+                    fs::write(save_path, &self.ram_data)?;
+                    println!("Created new save file: {}", save_path.display());
+                }
+            }
         }
+
+        // Open file handle for efficient streaming writes
+        self.save_file = Some(OpenOptions::new().write(true).open(save_path)?);
+        Ok(())
+    }
+
+    /// Attach a battery-backed save file via an already-open `File`
+    /// handle. Used by callers that can't represent the save location
+    /// as a filesystem `Path` (e.g. Android SAF, which gives us a file
+    /// descriptor pointing at a `content://` document). The file must
+    /// be opened read+write and positioned arbitrarily; this function
+    /// will `seek` as needed.
+    ///
+    /// Behaviour mirrors [`attach_save_file_at`]: if the file is
+    /// non-empty its contents are copied into the cart's RAM, otherwise
+    /// the current RAM contents are written out. The file is retained
+    /// for streaming per-byte writes from `write_ram_byte` /
+    /// `write_mbc2_ram_byte`.
+    ///
+    /// No-op for cartridges without battery-backed RAM (the file is
+    /// dropped, closing its underlying descriptor).
+    pub fn attach_save_file_from(&mut self, mut file: File) -> Result<(), io::Error> {
+        if !self.has_battery() {
+            return Ok(());
+        }
+        let save_data_is_empty = match self.get_cartridge_type() {
+            CartridgeType::MBC2 { .. } => self.mbc2_ram.is_empty(),
+            _ => self.ram_data.is_empty(),
+        };
+        if save_data_is_empty {
+            return Ok(());
+        }
+        let len = file.seek(SeekFrom::End(0))?;
+        file.seek(SeekFrom::Start(0))?;
+        if len > 0 {
+            let mut loaded_data = Vec::with_capacity(len as usize);
+            file.read_to_end(&mut loaded_data)?;
+            match self.get_cartridge_type() {
+                CartridgeType::MBC2 { .. } => {
+                    let n = loaded_data.len().min(self.mbc2_ram.len());
+                    self.mbc2_ram[..n].copy_from_slice(&loaded_data[..n]);
+                    for b in &mut self.mbc2_ram[..n] {
+                        *b &= 0x0F;
+                    }
+                    println!("Loaded MBC2 save file from fd ({n} bytes)");
+                }
+                _ => {
+                    let n = loaded_data.len().min(self.ram_data.len());
+                    self.ram_data[..n].copy_from_slice(&loaded_data[..n]);
+                    println!("Loaded save file from fd ({n} bytes)");
+                }
+            }
+        } else {
+            // Empty/new save file: seed it with the current RAM image so
+            // subsequent per-byte streaming writes have a well-defined
+            // backing region.
+            file.seek(SeekFrom::Start(0))?;
+            let buf: &[u8] = match self.get_cartridge_type() {
+                CartridgeType::MBC2 { .. } => &self.mbc2_ram,
+                _ => &self.ram_data,
+            };
+            file.write_all(buf)?;
+            file.flush()?;
+            println!("Initialised new save file via fd ({} bytes)", buf.len());
+        }
+        self.save_file = Some(file);
         Ok(())
     }
     

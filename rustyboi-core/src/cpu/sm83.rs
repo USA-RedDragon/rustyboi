@@ -6,6 +6,14 @@ pub struct SM83 {
     pub registers: registers::Registers,
     pub halted: bool,
     pub stopped: bool,
+    #[serde(default)]
+    pub ime_enable_delay: u8,
+    /// T-cycles remaining in the post-STOP-speed-switch stall.
+    /// While non-zero, `step` returns short slices without fetching, so the
+    /// surrounding `step_instruction` loop continues to advance peripherals.
+    /// Mirrors Gambatte's `intevent_unhalt = cc + 0x20000 + 4` schedule.
+    #[serde(default)]
+    pub stop_unhalt_cycles: u32,
 }
 
 impl SM83 {
@@ -13,13 +21,25 @@ impl SM83 {
         SM83 { 
             registers: registers::Registers::new(), 
             halted: false, 
-            stopped: false
+            stopped: false,
+            ime_enable_delay: 0,
+            stop_unhalt_cycles: 0,
         }
     }
 
-    pub fn step(&mut self, mmio: &mut memory::mmio::Mmio) -> u32 {
+    pub fn step(&mut self, mmio: &mut crate::cpu::Bus) -> u32 {
+        // While stalled after a CGB STOP-speed-switch, advance peripherals in
+        // small slices without fetching instructions. Gambatte's `intevent_unhalt`
+        // schedule effectively suspends CPU fetch for 0x20000 + 4 T-cycles after
+        // STOP completes; the per-cycle peripheral loop in gb.rs still runs.
+        if self.stop_unhalt_cycles > 0 {
+            let slice = self.stop_unhalt_cycles.min(4);
+            self.stop_unhalt_cycles -= slice;
+            return slice;
+        }
+
         let mut cycles = 0;
-        
+
         // Check for pending interrupts
         let pending_interrupt = self.get_pending_interrupt(mmio);
         
@@ -27,6 +47,16 @@ impl SM83 {
         if self.halted {
             if pending_interrupt.is_some() {
                 self.halted = false;
+                match mmio.halt_hdma_state() {
+                    memory::mmio::HaltHdmaState::Requested => mmio.set_hdma_req(),
+                    memory::mmio::HaltHdmaState::High
+                        if mmio.hdma_is_in_period_cached() && mmio.hdma_is_enabled() =>
+                    {
+                        mmio.set_hdma_req()
+                    }
+                    _ => {}
+                }
+                mmio.set_halt_hdma_state(memory::mmio::HaltHdmaState::Low);
             } else {
                 // CPU is halted and no interrupt is pending, consume 1 cycle and return
                 return 1;
@@ -35,25 +65,45 @@ impl SM83 {
         
         // Handle interrupts if IME is enabled and there's a pending interrupt
         if self.registers.ime && let Some(flag) = pending_interrupt {
-            self.registers.ime = false;
-
-            self.registers.sp -= 2;
-            mmio.write(self.registers.sp, (self.registers.pc & 0x00FF) as u8);
-            mmio.write(self.registers.sp + 1, (self.registers.pc >> 8) as u8);
-            self.registers.pc = match flag {
-                registers::InterruptFlag::VBlank => 0x40,
-                registers::InterruptFlag::Lcd => 0x48,
-                registers::InterruptFlag::Timer => 0x50,
-                registers::InterruptFlag::Serial => 0x58,
-                registers::InterruptFlag::Joypad => 0x60,
-            };
-            self.set_interrupt_flag(flag, false, mmio);
-            cycles += 5; // Interrupt handling takes 5 extra cycles
+            return self.service_interrupt(flag, mmio);
         }
         
         let opcode = mmio.read(self.registers.pc);
         self.registers.pc += 1;
-        self.execute(opcode, mmio) + cycles
+        cycles += self.execute(opcode, mmio);
+        self.apply_ime_delay();
+        cycles
+    }
+
+    fn service_interrupt(&mut self, flag: registers::InterruptFlag, mmio: &mut memory::mmio::Mmio) -> u32 {
+        self.registers.ime = false;
+        self.ime_enable_delay = 0;
+        mmio.clear_delayed_writes();
+
+        self.registers.sp = self.registers.sp.wrapping_sub(2);
+        mmio.write(self.registers.sp, (self.registers.pc & 0x00FF) as u8);
+        mmio.write(self.registers.sp.wrapping_add(1), (self.registers.pc >> 8) as u8);
+        self.registers.pc = match flag {
+            registers::InterruptFlag::VBlank => 0x40,
+            registers::InterruptFlag::Lcd => 0x48,
+            registers::InterruptFlag::Timer => 0x50,
+            registers::InterruptFlag::Serial => 0x58,
+            registers::InterruptFlag::Joypad => 0x60,
+        };
+        self.set_interrupt_flag(flag, false, mmio);
+
+        20
+    }
+
+    fn apply_ime_delay(&mut self) {
+        if self.ime_enable_delay == 0 {
+            return;
+        }
+
+        self.ime_enable_delay -= 1;
+        if self.ime_enable_delay == 0 {
+            self.registers.ime = true;
+        }
     }
 
     pub fn set_interrupt_flag(&mut self, flag: registers::InterruptFlag, value: bool, mmio: &mut memory::mmio::Mmio) {
@@ -89,7 +139,7 @@ impl SM83 {
         }
     }
 
-    fn execute(&mut self, opcode: u8, mmio: &mut memory::mmio::Mmio) -> u32 {
+    fn execute(&mut self, opcode: u8, mmio: &mut crate::cpu::Bus) -> u32 {
         match opcode {
             0x00 => opcodes::nop(self, mmio),
             0x01 => opcodes::ld_bc_imm(self, mmio),
@@ -350,7 +400,7 @@ impl SM83 {
         }
     }
 
-    fn execute_cb(&mut self, mmio: &mut memory::mmio::Mmio) -> u32 {
+    fn execute_cb(&mut self, mmio: &mut crate::cpu::Bus) -> u32 {
         let opcode = mmio.read(self.registers.pc);
         self.registers.pc += 1;
         match opcode {

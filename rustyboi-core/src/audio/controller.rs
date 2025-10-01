@@ -84,10 +84,15 @@ impl Audio {
         self.channel3.step(mmio);
         self.channel4.step(mmio);
 
-        // Step frame sequencer
-        self.frame_sequencer_timer -= 1;
-        if self.frame_sequencer_timer == 0 {
-            self.frame_sequencer_timer = 8192; // 512 Hz
+        // The frame sequencer is clocked directly by the timer on each DIV-bit-12
+        // falling edge (see `clock_frame_sequencer`), so nothing to do here.
+    }
+
+    /// Clock the frame sequencer one step. Called by the timer at the exact dot
+    /// of each DIV-bit-12 (bit-13 in double speed) falling edge, so the sequencer
+    /// stays phase-locked to DIV (and reacts to DIV writes).
+    pub fn clock_frame_sequencer(&mut self) {
+        if self.audio_enabled {
             self.step_frame_sequencer();
         }
     }
