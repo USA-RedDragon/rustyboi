@@ -61,6 +61,13 @@ impl<'a> Bus<'a> {
         }
     }
 
+    /// Tick one internal (non-memory) M-cycle, for opcodes that need their
+    /// internal cycles placed at the right point (e.g. CALL's SP-dec before the
+    /// stack pushes) rather than batched at instruction end.
+    pub fn internal_cycle(&mut self) {
+        self.tick_m();
+    }
+
     pub fn read(&mut self, addr: u16) -> u8 {
         self.tick_m();
         self.mmio.read(addr)

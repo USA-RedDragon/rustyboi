@@ -64,8 +64,8 @@ impl SM83 {
         }
         
         // Handle interrupts if IME is enabled and there's a pending interrupt
-        if self.registers.ime && let Some(flag) = pending_interrupt {
-            return self.service_interrupt(flag, mmio);
+        if self.registers.ime && pending_interrupt.is_some() {
+            return self.service_interrupt(mmio);
         }
         
         let opcode = mmio.read(self.registers.pc);
@@ -75,22 +75,37 @@ impl SM83 {
         cycles
     }
 
-    fn service_interrupt(&mut self, flag: registers::InterruptFlag, mmio: &mut memory::mmio::Mmio) -> u32 {
+    fn service_interrupt(&mut self, bus: &mut crate::cpu::Bus) -> u32 {
         self.registers.ime = false;
         self.ime_enable_delay = 0;
-        mmio.clear_delayed_writes();
+        bus.clear_delayed_writes();
 
-        self.registers.sp = self.registers.sp.wrapping_sub(2);
-        mmio.write(self.registers.sp, (self.registers.pc & 0x00FF) as u8);
-        mmio.write(self.registers.sp.wrapping_add(1), (self.registers.pc >> 8) as u8);
+        // 2 internal M-cycles, then push PC high, then push PC low.
+        bus.internal_cycle();
+        bus.internal_cycle();
+
+        self.registers.sp = self.registers.sp.wrapping_sub(1);
+        bus.write(self.registers.sp, (self.registers.pc >> 8) as u8);
+
+        // The vector is latched from IE&IF *after* the high-byte push: if that
+        // push wrote over IE (SP near 0xFFFF) the pending set can change, and
+        // if nothing is pending the interrupt is cancelled (vector 0x0000).
+        let flag = self.get_pending_interrupt(bus);
+
+        self.registers.sp = self.registers.sp.wrapping_sub(1);
+        bus.write(self.registers.sp, (self.registers.pc & 0x00FF) as u8);
+
         self.registers.pc = match flag {
-            registers::InterruptFlag::VBlank => 0x40,
-            registers::InterruptFlag::Lcd => 0x48,
-            registers::InterruptFlag::Timer => 0x50,
-            registers::InterruptFlag::Serial => 0x58,
-            registers::InterruptFlag::Joypad => 0x60,
+            Some(registers::InterruptFlag::VBlank) => 0x40,
+            Some(registers::InterruptFlag::Lcd) => 0x48,
+            Some(registers::InterruptFlag::Timer) => 0x50,
+            Some(registers::InterruptFlag::Serial) => 0x58,
+            Some(registers::InterruptFlag::Joypad) => 0x60,
+            None => 0x0000,
         };
-        self.set_interrupt_flag(flag, false, mmio);
+        if let Some(flag) = flag {
+            self.set_interrupt_flag(flag, false, bus);
+        }
 
         20
     }
