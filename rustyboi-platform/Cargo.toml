@@ -25,10 +25,12 @@ log = "0.4.28"
 pixels = "0.15.0"
 rodio = "0.19"
 serde_json = "1.0.145"
-winit = "0.29"
+# winit features are configured per-target below so Android doesn't pull wayland/x11.
+winit = { version = "0.29", default-features = false, features = ["rwh_06"] }
 winit_input_helper = "0.16.0"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
+winit = { version = "0.29", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }
 egui-winit = { version = "0.26", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -38,3 +40,18 @@ egui-winit = { version = "0.26", default-features = false, features = ["links"] 
 web-sys = { version = "0.3.81", features = ["GpuTextureFormat"] }
 wasm-bindgen = "0.2.104"
 wasm-bindgen-futures = "0.4.54"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Use GameActivity through winit's android-activity backend (subclassable from
+# Kotlin/Java, forwards onActivityResult, better IME/lifecycle than NativeActivity).
+winit = { version = "0.29", default-features = false, features = ["android-game-activity", "rwh_06"] }
+# Re-declare egui-winit without wayland/x11 features (Android has neither).
+egui-winit = { version = "0.26", default-features = false, features = ["links"] }
+android_logger = "0.13"
+jni = "0.21"
+libc = "0.2"
+ndk-context = "0.1"
+# Force rodio's transitive cpal to enable the oboe backend on Android.
+# Version is pinned to whatever rodio currently pulls in (see Cargo.lock);
+# bump alongside rodio upgrades.
+cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }

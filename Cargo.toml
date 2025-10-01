@@ -5,6 +5,7 @@ members = [
     "rustyboi-debugger",
     "rustyboi-egui",
     "rustyboi-platform",
+    "rustyboi-test-runner",
     "run-wasm",
 ]
 default-members = ["rustyboi-core", "rustyboi-debugger", "rustyboi-egui", "rustyboi-platform"]
@@ -14,5 +15,6 @@ opt-level = "s"
 
 [profile.release]
 strip = true
-opt-level = "s"
-lto = true
+opt-level = 3
+lto = "fat"
+codegen-units = 1
