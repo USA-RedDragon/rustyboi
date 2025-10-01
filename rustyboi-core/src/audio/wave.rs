@@ -22,6 +22,8 @@ pub struct Wave {
     frequency: u16,
     frequency_timer: u16,
     position_counter: u8, // 0-31, current position in wave pattern
+    length_enabled: bool,
+    fs_step: u8,
 }
 
 impl Wave {
@@ -39,7 +41,17 @@ impl Wave {
             frequency: 0,
             frequency_timer: 0,
             position_counter: 0,
+            length_enabled: false,
+            fs_step: 0,
         }
+    }
+
+    pub fn set_fs_step(&mut self, step: u8) {
+        self.fs_step = step;
+    }
+
+    fn length_extra_clock_due(&self) -> bool {
+        (self.fs_step % 2) == 1
     }
 
     pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
@@ -62,7 +74,7 @@ impl Wave {
         }
 
         // Length counter (steps 0, 2, 4, 6)
-        if step.is_multiple_of(2) {
+        if step.is_multiple_of(2) && self.length_enabled {
             self.step_length_counter();
         }
     }
@@ -84,14 +96,41 @@ impl Wave {
         (self.nr32 >> 5) & 0x03
     }
 
+    fn write_nrx4(&mut self, value: u8) {
+        let trigger = (value >> 7) & 0x01 != 0;
+        let new_length_enabled = (value >> 6) & 0x01 != 0;
+        let was_length_enabled = self.length_enabled;
+
+        if new_length_enabled
+            && !was_length_enabled
+            && self.length_extra_clock_due()
+            && self.length_counter > 0
+        {
+            self.length_counter -= 1;
+            if self.length_counter == 0 && !trigger {
+                self.enabled = false;
+            }
+        }
+
+        self.length_enabled = new_length_enabled;
+        self.nr34 = value;
+
+        if trigger {
+            self.trigger();
+        }
+    }
+
     fn trigger(&mut self) {
         self.enabled = true;
-        
+
         // Length counter
         if self.length_counter == 0 {
             self.length_counter = 256;
+            if self.length_enabled && self.length_extra_clock_due() {
+                self.length_counter -= 1;
+            }
         }
-        
+
         // Update frequency
         self.frequency = ((self.nr34 as u16 & 0x07) << 8) | self.nr33 as u16;
         self.frequency_timer = (2048 - self.frequency) * 2;
@@ -195,12 +234,7 @@ impl Addressable for Wave {
                         self.nr33 = value;
                     }
                     NR34 => {
-                        let trigger = (value >> 7) & 0x01 != 0;
-                        self.nr34 = value;
-                        
-                        if trigger {
-                            self.trigger();
-                        }
+                        self.write_nrx4(value);
                     }
                     _ => {}
                 }

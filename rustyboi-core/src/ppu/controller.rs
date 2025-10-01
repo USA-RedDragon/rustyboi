@@ -915,21 +915,14 @@ impl Ppu {
                     }
 
                     self.x += 1;
-                    if self.x == 158 && !self.mode0_pretriggered_this_line {
-                        // Pretrigger Mode 0: FF41 reports mode 0 and the
-                        // wired-OR mode-0 STAT IRQ fires two pixel-pushes
-                        // before the actual Mode 3 -> Mode 0 transition,
-                        // matching Gambatte's `cc + 2 < m0TimeOfCurrentLine`.
-                        Self::set_lcd_status_mode(mmio, 0);
-                        self.mode0_pretriggered_this_line = true;
-                        self.check_and_trigger_stat_interrupt(mmio);
-                    }
                     if self.x == 160 {
+                        // Mode 3 -> Mode 0 at the exact pixel-push that
+                        // produces x==160. Under the tick-before read model
+                        // the CPU samples FF41 at the end of the M-cycle, so
+                        // no early pretrigger is needed.
                         self.state = State::HBlank;
-                        if !self.mode0_pretriggered_this_line {
-                            Self::set_lcd_status_mode(mmio, 0);
-                            self.check_and_trigger_stat_interrupt(mmio);
-                        }
+                        Self::set_lcd_status_mode(mmio, 0);
+                        self.check_and_trigger_stat_interrupt(mmio);
                     }
                 }
             },
