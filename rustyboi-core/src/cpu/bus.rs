@@ -77,7 +77,15 @@ impl<'a> Bus<'a> {
         // Registers belonging to peripherals we tick inline (timer/serial/DMA)
         // latch at the end of the write M-cycle, so advance first. Everything
         // else (PPU registers, RAM) takes effect as the access is issued.
-        let tick_before = matches!(addr, 0xFF01..=0xFF02 | 0xFF04..=0xFF07 | 0xFF46 | 0xFF4A | 0xFF4B);
+        //
+        // While an OAM DMA transfer is running, the DMA engine advances during
+        // this M-cycle *before* the CPU's write is resolved (Gambatte calls
+        // `updateOamDma(cc)` at the top of `nontrivial_write`). A write into the
+        // DMA's conflict area is then redirected into OAM[oamDmaPos_]. Ticking
+        // the M-cycle first reproduces that ordering so `dma_pos` is the value
+        // for this cycle when `mmio.write` resolves the conflict.
+        let tick_before = matches!(addr, 0xFF01..=0xFF02 | 0xFF04..=0xFF07 | 0xFF46 | 0xFF4A | 0xFF4B)
+            || self.mmio.dma_active();
         if tick_before {
             self.tick_m();
             self.mmio.write(addr, value);

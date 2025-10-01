@@ -98,11 +98,19 @@ impl Audio {
     }
 
     fn step_frame_sequencer(&mut self) {
-        self.channel1.step_frame_sequencer(self.frame_sequencer_step);
-        self.channel2.step_frame_sequencer(self.frame_sequencer_step);
-        self.channel3.step_frame_sequencer(self.frame_sequencer_step);
-        self.channel4.step_frame_sequencer(self.frame_sequencer_step);
-        
+        let step = self.frame_sequencer_step;
+        self.channel1.step_frame_sequencer(step);
+        self.channel2.step_frame_sequencer(step);
+        self.channel3.step_frame_sequencer(step);
+        self.channel4.step_frame_sequencer(step);
+
+        // Channels need to know which step was just clocked so their NRx4 write
+        // handlers can model the length-counter "extra clock" quirk.
+        self.channel1.set_fs_step(step);
+        self.channel2.set_fs_step(step);
+        self.channel3.set_fs_step(step);
+        self.channel4.set_fs_step(step);
+
         self.frame_sequencer_step = (self.frame_sequencer_step + 1) % 8;
     }
 
@@ -181,25 +189,21 @@ impl Audio {
         (left_mix / 4.0, right_mix / 4.0)
     }
 
-    pub fn generate_samples(&mut self, mmio: &mut mmio::Mmio, cpu_cycles: u32) -> Vec<(f32, f32)> {
+    pub fn generate_samples(&mut self, _mmio: &mut mmio::Mmio, cpu_cycles: u32) -> Vec<(f32, f32)> {
         let mut samples = Vec::new();
-        
-        // Game Boy audio runs at ~4.194 MHz (same as CPU)
-        // We want to output at 44.1 kHz, so we need to downsample
-        // 4194304 / 44100 ≈ 95.1 cycles per sample
+
+        // Channels are advanced per-dot via `step` (called from the Bus tick),
+        // so here we only down-sample the live mixer output. Re-stepping here
+        // would double-advance the channel timers and corrupt their phase.
         const CYCLES_PER_SAMPLE: f32 = 4194304.0 / 44100.0;
-        
+
         self.fractional_cycles += cpu_cycles as f32;
-        
+
         while self.fractional_cycles >= CYCLES_PER_SAMPLE {
-            self.step(mmio);
-            
-            let sample = self.get_mixed_output();
-            samples.push(sample);
-            
+            samples.push(self.get_mixed_output());
             self.fractional_cycles -= CYCLES_PER_SAMPLE;
         }
-        
+
         samples
     }
 }
