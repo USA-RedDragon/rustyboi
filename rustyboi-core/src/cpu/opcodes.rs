@@ -516,9 +516,10 @@ pub fn call_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let addr = (high << 8) | low;
     cpu.registers.pc += 2;
 
+    mmio.internal_cycle(); // SP-dec internal M-cycle, before the pushes
     cpu.registers.sp = cpu.registers.sp.wrapping_sub(2);
-    mmio.write(cpu.registers.sp, (cpu.registers.pc & 0x00FF) as u8);
     mmio.write(cpu.registers.sp.wrapping_add(1), (cpu.registers.pc >> 8) as u8);
+    mmio.write(cpu.registers.sp, (cpu.registers.pc & 0x00FF) as u8);
 
     cpu.registers.pc = addr;
     24
@@ -1034,9 +1035,10 @@ macro_rules! make_ld_register_memory_combined {
 macro_rules! make_push_combined_register {
     ($name:ident, $reg1:ident, $reg2:ident) => {
         pub fn $name(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
+            mmio.internal_cycle(); // M2 internal (SP dec), before the pushes
             cpu.registers.sp = cpu.registers.sp.wrapping_sub(2);
-            mmio.write(cpu.registers.sp, cpu.registers.$reg2);
-            mmio.write(cpu.registers.sp.wrapping_add(1), cpu.registers.$reg1);
+            mmio.write(cpu.registers.sp.wrapping_add(1), cpu.registers.$reg1); // high byte first
+            mmio.write(cpu.registers.sp, cpu.registers.$reg2); // then low
             16
         }
     };
