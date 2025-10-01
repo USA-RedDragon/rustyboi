@@ -169,6 +169,16 @@ impl GB {
             self.mmio.write(crate::memory::mmio::REG_SVBK, 0xF8);
         }
         self.mmio.write(crate::memory::mmio::REG_BOOT_OFF, 1);
+
+        // Post-boot DIV phase. `write(DIV)` above resets the counter, so set the
+        // hardware boot value of the 16-bit internal counter directly (its low
+        // 16 bits drive DIV and the TIMA/serial/APU pre-tick phase).
+        let boot_counter: u16 = match self.hardware {
+            Hardware::CGB => 0x1EA0,
+            Hardware::DMG | Hardware::MGB | Hardware::SGB | Hardware::SGB2 => 0xABCC,
+            Hardware::DMG0 => 0x1800,
+        };
+        self.mmio.set_timer_internal_counter(boot_counter);
     }
 
     pub fn insert(&mut self, cartridge: cartridge::Cartridge) {
