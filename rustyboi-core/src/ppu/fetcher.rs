@@ -98,28 +98,6 @@ impl Fetcher {
         self.window_x_start = 0;
     }
     
-    // Reset and apply SCX offset for background scrolling
-    pub fn reset_with_scx_offset(&mut self, mmio: &mut mmio::Mmio, lcdc_state: FetcherLcdcState) {
-        self.reset();
-        
-        // Apply SCX pixel offset by pre-fetching and discarding pixels
-        let scx = mmio.read(ppu::SCX);
-        let pixel_offset = scx % 8;
-        
-        if pixel_offset > 0 {
-            // We need to pre-fetch enough tiles to have pixels to discard
-            // Keep stepping the fetcher until we have enough pixels in the FIFO
-            while self.pixel_fifo.size() < pixel_offset as usize {
-                let _ = self.step(mmio, 0, lcdc_state); // Fetch tiles until we have enough pixels
-            }
-            
-            // Discard the first (pixel_offset) pixels from the FIFO
-            for _ in 0..pixel_offset {
-                let _ = self.pixel_fifo.pop(); // Discard pixels for sub-tile alignment
-            }
-        }
-    }
-    
     // Start fetching window tiles when WX condition is met
     pub fn start_window(&mut self, window_x: u8) {
         self.fetching_window = true;
