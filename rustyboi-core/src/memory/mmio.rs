@@ -625,6 +625,20 @@ impl Mmio {
         if self.is_double_speed_mode() { 68 } else { 36 }
     }
 
+    /// The byte the OAM-DMA engine copies into `OAM[pos]`. Mirrors Gambatte's
+    /// `oamDmaSrcPtr()`:
+    ///   - invalid / off source -> `rdisabledRam()` (filled with 0xFF).
+    ///   - WRAM source -> `wramdata(src_high >> 4 & 1)` indexed by the 12-bit
+    ///     offset (DMA source-high bit, NOT the CPU SVBK selection).
+    ///   - rom/sram/vram -> normal read of `source_base + pos`.
+    fn dma_source_byte(&self, pos: u8) -> u8 {
+        match self.dma_src_kind() {
+            4 => 0xFF,
+            3 => self.dma_conflict_wram_read(self.dma_source_base.wrapping_add(pos as u16)),
+            _ => self.read_during_dma(self.dma_source_base.wrapping_add(pos as u16)),
+        }
+    }
+
     /// Advance the OAM-DMA engine by one M-cycle (mirrors one iteration of
     /// Gambatte's `updateOamDma` loop). Advances `dma_pos`, (re)starts the
     /// transfer when it reaches `dma_start_pos`, copies the corresponding
@@ -639,8 +653,7 @@ impl Mmio {
         }
 
         if self.dma_pos < 160 {
-            let source_addr = self.dma_source_base + self.dma_pos as u16;
-            let byte = self.read_during_dma(source_addr);
+            let byte = self.dma_source_byte(self.dma_pos);
             self.oam.write(OAM_START + self.dma_pos as u16, byte);
         } else if self.dma_pos == 160 {
             // endOamDma: park the engine. Because no restart was requested
