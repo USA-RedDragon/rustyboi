@@ -475,6 +475,33 @@ impl Ppu {
         interrupt_line
     }
 
+    /// Like `calculate_stat_interrupt_line`, but ignores the Mode-2 (OAM)
+    /// source. The Mode-2 STAT IRQ is delivered exclusively by the scheduled
+    /// mode-2 entry / pretrigger path; a CPU write to FF40/FF41/FF45 that
+    /// enables the mode-2 source must never fire it immediately (matching
+    /// Gambatte, where the mode-2 IRQ is a discrete scheduled event that the
+    /// write only reschedules for the next occurrence). Used by the STAT
+    /// register write hook for its edge decision.
+    fn calculate_stat_interrupt_line_excluding_mode2(&self, mmio: &mmio::Mmio) -> bool {
+        let stat_register = mmio.read(LCD_STATUS);
+        let mode_0_int_enable = (stat_register & (1 << 3)) != 0;
+        let mode_1_int_enable = (stat_register & (1 << 4)) != 0;
+        let lyc_int_enable = (stat_register & (1 << 6)) != 0;
+        let current_mode = stat_register & 0x03;
+        let lyc_equals_ly = (stat_register & (1 << 2)) != 0;
+
+        let mut interrupt_line = false;
+        match current_mode {
+            0 if mode_0_int_enable => interrupt_line = true,
+            1 if mode_1_int_enable => interrupt_line = true,
+            _ => {}
+        }
+        if lyc_int_enable && lyc_equals_ly {
+            interrupt_line = true;
+        }
+        interrupt_line
+    }
+
     fn set_lcd_status_mode(mmio: &mut mmio::Mmio, mode: u8) {
         mmio.write_lcd_status_from_ppu((mmio.read(LCD_STATUS) & !0x03) | (mode & 0x03));
     }
@@ -530,7 +557,17 @@ impl Ppu {
         } else {
             mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) & !(1 << 2));
         }
-        self.check_and_trigger_stat_interrupt(mmio);
+        // Fire only on a rising edge produced by a non-Mode-2 source. The
+        // Mode-2 STAT IRQ is delivered exclusively by the scheduled mode-2
+        // entry / pretrigger path, so re-enabling the mode-2 source via a CPU
+        // write must not produce a spurious immediate interrupt. The full
+        // wired-OR line (including mode 2) is still latched for subsequent
+        // edge detection.
+        let line_excl_m2 = self.calculate_stat_interrupt_line_excluding_mode2(mmio);
+        if line_excl_m2 && !self.previous_stat_interrupt_line {
+            mmio.request_interrupt(registers::InterruptFlag::Lcd);
+        }
+        self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
     }
 
     /// LY value used for the LYC=LY comparison. In Gambatte the compare uses
