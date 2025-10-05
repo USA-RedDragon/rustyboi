@@ -183,9 +183,13 @@ impl Fetcher {
         // re-read SCY so the latch reflects the current scroll. Window
         // fetches always use the internal `window_line` counter, which is
         // already independent of SCY.
+        // Gambatte samples (scy + ly) at the tile-data fetch (xpos%8==2),
+        // i.e. our `TileDataLow` substep, not at `TileNumber`. Latch there so
+        // a mid-M3 SCY write lands in the correct fetch window, then reuse the
+        // latch for `TileDataHigh`. Window fetches use `window_line` instead.
         let y = if self.fetching_window {
             window_line
-        } else if matches!(self.state, State::TileNumber) {
+        } else if matches!(self.state, State::TileNumber | State::TileDataLow) {
             let new_y = ly.wrapping_add(mmio.read(ppu::SCY));
             self.latched_y = new_y;
             new_y

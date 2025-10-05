@@ -24,6 +24,7 @@ pub struct Wave {
     position_counter: u8, // 0-31, current position in wave pattern
     length_enabled: bool,
     fs_step: u8,
+    cgb: bool,
 }
 
 impl Wave {
@@ -43,6 +44,7 @@ impl Wave {
             position_counter: 0,
             length_enabled: false,
             fs_step: 0,
+            cgb: false,
         }
     }
 
@@ -55,6 +57,7 @@ impl Wave {
     }
 
     pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
+        self.cgb = _mmio.is_cgb_features_enabled();
         if !self.enabled || !self.dac_enabled {
             return;
         }
@@ -133,8 +136,10 @@ impl Wave {
 
         // Update frequency
         self.frequency = ((self.nr34 as u16 & 0x07) << 8) | self.nr33 as u16;
-        self.frequency_timer = (2048 - self.frequency) * 2;
-        
+        // First wave-RAM fetch happens period+3 (2MHz) cycles after trigger, i.e.
+        // an extra 6 dots beyond the steady-state period (Gambatte channel3).
+        self.frequency_timer = (2048 - self.frequency) * 2 + 6;
+
         // Reset position
         self.position_counter = 0;
         
@@ -176,18 +181,45 @@ impl Wave {
 
     pub fn read_wave_ram(&self, addr: u16) -> u8 {
         let index = (addr - WAV_START) as usize;
-        if index < 16 {
-            self.wave_ram[index]
-        } else {
-            0xFF
+        if index >= 16 {
+            return 0xFF;
         }
+        // While the channel is actively reading wave RAM, CPU access is gated to
+        // the byte the channel is currently fetching. On DMG only the exact byte
+        // being read is visible (everything else reads 0xFF); on CGB the live
+        // byte is always returned.
+        if self.enabled && self.dac_enabled {
+            let cur = (self.position_counter / 2) as usize;
+            if self.cgb {
+                return self.wave_ram[cur];
+            }
+            // DMG: only the byte the channel is currently fetching is visible to
+            // the CPU; every other index reads back 0xFF.
+            if index == cur {
+                return self.wave_ram[cur];
+            }
+            return 0xFF;
+        }
+        self.wave_ram[index]
     }
 
     pub fn write_wave_ram(&mut self, addr: u16, value: u8) {
         let index = (addr - WAV_START) as usize;
-        if index < 16 {
-            self.wave_ram[index] = value;
+        if index >= 16 {
+            return;
         }
+        // Writes are likewise redirected to the byte currently being read while
+        // the channel plays (DMG); on CGB the live byte is written.
+        if self.enabled && self.dac_enabled {
+            let cur = (self.position_counter / 2) as usize;
+            if self.cgb {
+                self.wave_ram[cur] = value;
+            } else if index == cur {
+                self.wave_ram[cur] = value;
+            }
+            return;
+        }
+        self.wave_ram[index] = value;
     }
 }
 
