@@ -37,7 +37,7 @@ impl<'a> Bus<'a> {
         self.mmio.step_dma();
 
         let double_speed = self.mmio.is_double_speed_mode();
-        if !double_speed || self.dot % 2 == 1 {
+        if !double_speed || self.dot % 2 == 0 {
             self.ppu.step_scheduled_stat_events(self.mmio);
             self.mmio.step_audio();
             self.ppu.step(self.mmio);
