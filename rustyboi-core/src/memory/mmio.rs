@@ -185,6 +185,10 @@ pub struct Mmio {
     // edges; cleared after `run_hdma_block` runs.
     #[serde(default)]
     hdma_req_pending: bool,
+    // CPU-cycle stall owed for HDMA/GDMA blocks already transferred; the CPU
+    // idles these cycles (peripherals keep ticking) before its next fetch.
+    #[serde(skip, default)]
+    pending_dma_stall: u32,
     // Mirrors Gambatte's `haltHdmaState_`.
     #[serde(default)]
     halt_hdma_state: HaltHdmaState,
@@ -249,6 +253,7 @@ impl Mmio {
             hdma_dest: 0,
             hdma_length: 0,
             hdma_enabled: false,
+            pending_dma_stall: 0,
             hdma_req_pending: false,
             halt_hdma_state: HaltHdmaState::Low,
             hdma_is_in_period_cached: false,
@@ -511,6 +516,12 @@ impl Mmio {
 
         self.hdma_source = src;
         self.hdma_dest = dst;
+
+        // Same per-block stall as run_hdma_block (36 SS / 68 DS), charged for
+        // every 0x10-byte block of the immediate transfer.
+        let blocks = (effective_length / 0x10) as u32;
+        let per_block = if self.is_double_speed_mode() { 68 } else { 36 };
+        self.pending_dma_stall += blocks * per_block;
     }
 
     // ----------------------------------------------------------------------
@@ -685,8 +696,13 @@ impl Mmio {
         self.hdma_prev_stat_mode = mode;
 
         if self.hdma_req_pending && self.hdma_enabled {
-            self.run_hdma_block();
+            self.pending_dma_stall += self.run_hdma_block();
         }
+    }
+
+    /// Consume the CPU-cycle stall owed for completed HDMA/GDMA transfers.
+    pub fn take_dma_stall(&mut self) -> u32 {
+        std::mem::take(&mut self.pending_dma_stall)
     }
 
     /// Whether the OAM-DMA engine is armed/running (mirrors
