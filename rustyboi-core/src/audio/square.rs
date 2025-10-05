@@ -3,42 +3,89 @@ use crate::audio::{NR10, NR11, NR12, NR13, NR14, NR21, NR22, NR23, NR24};
 use crate::memory::mmio;
 use crate::memory::Addressable;
 
+// Gambatte's sound cycle counter is a free-running 2 MHz value; the frame
+// sequencer position is `(cc >> 12) & 7`. Our FS step (the index about to be
+// clocked) is offset from that by +3 (measured empirically against the boot
+// DIV phase): `fs_step == ((cc >> 12) + 3) & 7`. Equivalently, length clocks
+// when `(cc >> 12) & 7` is in {5,7,1,3} and envelope at {2}.
+//
+// Duty timing uses absolute event counters (`next_pos_update`) exactly like
+// Gambatte's duty_unit.cpp; envelope and length use absolute `cc`-based
+// counters mirroring envelope_unit.cpp / length_counter.cpp.
+
+const COUNTER_DISABLED: u32 = 0xFFFF_FFFF;
+
+// 0x7EE18180: duty/position output table, same packing as Gambatte.
+fn to_out_state(duty: u8, pos: u8) -> bool {
+    (0x7EE1_8180u32 >> (duty * 8 + pos)) & 1 != 0
+}
+
+fn to_period(freq: u16) -> u32 {
+    (2048 - freq as u32) * 2
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SquareWave {
     channel1: bool,
-    
-    // Sound channel registers
-    nr10: u8, // Channel 1 sweep register (frequency sweep)
-    nr11: u8, // Sound length/wave pattern duty
-    nr12: u8, // Volume envelope
-    nr13: u8, // Period low
-    nr14: u8, // Period high and control
-    
-    nr21: u8, // Channel 2 sound length/wave pattern duty
-    nr22: u8, // Channel 2 volume envelope
-    nr23: u8, // Channel 2 period low  
-    nr24: u8, // Channel 2 period high and control
-    
-    // Internal state
-    enabled: bool,
-    length_counter: u8,
-    volume: u8,
-    volume_direction: bool, // true = increase, false = decrease
-    volume_timer: u8,
-    frequency: u16,
-    frequency_timer: u16,
-    duty_position: u8,
-    
-    // Frequency sweep (Channel 1 only)
-    sweep_enabled: bool,
-    sweep_timer: u8,
-    sweep_shadow_frequency: u16,
 
-    // Whether the length counter is currently enabled (NRx4 bit 6).
+    nr10: u8,
+    nr11: u8,
+    nr12: u8,
+    nr13: u8,
+    nr14: u8,
+    nr21: u8,
+    nr22: u8,
+    nr23: u8,
+    nr24: u8,
+
+    enabled: bool,
+
+    // Free-running 2 MHz cycle counter, kept in sync by the controller.
+    #[serde(default)]
+    cc: u32,
+
+    // --- Duty unit (absolute event-counter model) ---
+    #[serde(default = "disabled")]
+    next_pos_update: u32,
+    #[serde(default)]
+    period: u32,
+    #[serde(default)]
+    pos: u8,
+    #[serde(default)]
+    high: bool,
+
+    // --- Envelope unit ---
+    #[serde(default = "disabled")]
+    env_counter: u32,
+    #[serde(default)]
+    volume: u8,
+    // The DAC/master enable: false once the DAC is off (NRx2 high nibble 0 and
+    // not increasing). Mirrors Gambatte's `master_`.
+    #[serde(default)]
+    master: bool,
+
+    // --- Length counter ---
+    #[serde(default)]
+    length_counter: u16,
+    // Absolute-cc expiry counter (Gambatte LengthCounter::counter_).
+    #[serde(default = "disabled")]
+    length_abs: u32,
+    #[serde(default)]
     length_enabled: bool,
-    // Current frame-sequencer step (kept in sync by the controller), used to
-    // model the length-counter "extra clock" quirk on trigger / on enabling.
+
+    // --- Frequency sweep (Channel 1 only) ---
+    #[serde(default)]
+    sweep_enabled: bool,
+    #[serde(default)]
+    sweep_timer: u8,
+    #[serde(default)]
+    sweep_shadow_frequency: u16,
+    #[serde(default)]
     fs_step: u8,
+}
+
+fn disabled() -> u32 {
+    COUNTER_DISABLED
 }
 
 impl SquareWave {
@@ -55,46 +102,244 @@ impl SquareWave {
             nr23: 0,
             nr24: 0,
             enabled: false,
-            length_counter: 0,
+            cc: 0,
+            next_pos_update: COUNTER_DISABLED,
+            period: 4096,
+            pos: 0,
+            high: false,
+            env_counter: COUNTER_DISABLED,
             volume: 0,
-            volume_direction: false,
-            volume_timer: 0,
-            frequency: 0,
-            frequency_timer: 0,
-            duty_position: 0,
+            master: false,
+            length_counter: 0,
+            length_abs: COUNTER_DISABLED,
+            length_enabled: false,
             sweep_enabled: false,
             sweep_timer: 0,
             sweep_shadow_frequency: 0,
-            length_enabled: false,
             fs_step: 0,
         }
     }
 
-    /// Keep the channel's view of the frame-sequencer step in sync. `step` is
-    /// the index of the step that was *just* clocked (length clocks on the even
-    /// steps 0,2,4,6).
+    pub fn set_cc(&mut self, cc: u32) {
+        self.cc = cc;
+    }
+
+    /// Shift all absolute event counters backward by `delta` (Gambatte
+    /// `resetCc`). Called when the underlying cycle counter is reset (DIV write)
+    /// so the absolute schedules stay relative to the new counter origin.
+    pub fn reset_cc(&mut self, delta: u32) {
+        self.update_pos();
+        if self.next_pos_update != COUNTER_DISABLED {
+            self.next_pos_update = self.next_pos_update.wrapping_sub(delta);
+        }
+        if self.env_counter != COUNTER_DISABLED {
+            self.env_counter = self.env_counter.wrapping_sub(delta);
+        }
+        if self.length_abs != COUNTER_DISABLED {
+            self.length_abs = self.length_abs.wrapping_sub(delta);
+        }
+    }
+
     pub fn set_fs_step(&mut self, step: u8) {
         self.fs_step = step;
     }
 
-    /// Condition under which the length-counter "extra clock" quirk fires on
-    /// a trigger / length-enable: the frame sequencer is positioned such that
-    /// length is about to be clocked (DIV-coupled, empirically odd `fs_step`).
-    fn length_extra_clock_due(&self) -> bool {
-        (self.fs_step % 2) == 1
+    fn freq(&self) -> u16 {
+        if self.channel1 {
+            ((self.nr14 as u16 & 0x07) << 8) | self.nr13 as u16
+        } else {
+            ((self.nr24 as u16 & 0x07) << 8) | self.nr23 as u16
+        }
+    }
+
+    fn duty(&self) -> u8 {
+        if self.channel1 {
+            self.nr11 >> 6
+        } else {
+            self.nr21 >> 6
+        }
+    }
+
+    fn nr2(&self) -> u8 {
+        if self.channel1 { self.nr12 } else { self.nr22 }
+    }
+
+    // --- Duty unit ---
+
+    fn update_pos(&mut self) {
+        let cc = self.cc;
+        if self.next_pos_update != COUNTER_DISABLED && cc >= self.next_pos_update {
+            let inc = (cc - self.next_pos_update) / self.period + 1;
+            self.next_pos_update = self.next_pos_update.wrapping_add(self.period * inc);
+            self.pos = ((self.pos as u32 + inc) % 8) as u8;
+            self.high = to_out_state(self.duty(), self.pos);
+        }
+    }
+
+    fn set_freq(&mut self, new_freq: u16) {
+        self.update_pos();
+        self.period = to_period(new_freq);
+    }
+
+    // --- Envelope unit ---
+
+    fn env_event(&mut self) {
+        let period = (self.nr2() & 0x07) as u32;
+        if period != 0 {
+            let inc = (self.nr2() & 0x08) != 0;
+            let new_vol = if inc { self.volume as i16 + 1 } else { self.volume as i16 - 1 };
+            if (0..0x10).contains(&new_vol) {
+                self.volume = new_vol as u8;
+                self.env_counter = self.env_counter.wrapping_add(period << 15);
+            } else {
+                self.env_counter = COUNTER_DISABLED;
+            }
+        } else {
+            self.env_counter = self.env_counter.wrapping_add(8u32 << 15);
+        }
+    }
+
+    /// Gambatte `EnvelopeUnit::nr4Init`. Returns true if the DAC is off.
+    fn env_nr4_init(&mut self) -> bool {
+        let nr2 = self.nr2();
+        let mut period = if nr2 & 0x07 != 0 { (nr2 & 0x07) as u32 } else { 8 };
+        if (self.cc.wrapping_add(2) & 0x7000) == 0x0000 {
+            period += 1;
+        }
+        self.env_counter = self.cc
+            .wrapping_sub(self.cc.wrapping_sub(0x1000) & 0x7FFF)
+            .wrapping_add(period * 0x8000);
+        self.volume = nr2 >> 4;
+        (nr2 & 0xF8) == 0
+    }
+
+    fn write_nrx2(&mut self, value: u8) {
+        // Gambatte `EnvelopeUnit::nr2Change` (DMG zombie mode), only when master.
+        let old = self.nr2();
+        if self.master {
+            let will_clock = self.env_will_clock();
+            if will_clock {
+                let period = (old & 0x07) as u32;
+                self.env_counter = self.cc
+                    .wrapping_sub(self.cc.wrapping_sub(0x1000) & 0x7FFF)
+                    .wrapping_add(period * 0x8000);
+            }
+
+            let mut tick = (value & 0x07) != 0
+                && (old & 0x07) == 0
+                && self.env_counter != COUNTER_DISABLED;
+            let invert = ((value & 0x08) ^ (old & 0x08)) != 0;
+
+            if (value & 0x0F) == 0x08
+                && (old & 0x0F) == 0x08
+                && self.env_counter != COUNTER_DISABLED
+            {
+                tick = true;
+            }
+
+            if invert {
+                if value & 0x08 != 0 {
+                    if (old & 0x07) == 0 && self.env_counter != COUNTER_DISABLED {
+                        self.volume ^= 0xF;
+                    } else {
+                        self.volume = (0xE_i16 - self.volume as i16) as u8 & 0xF;
+                    }
+                    tick = false;
+                } else {
+                    self.volume = (0x10_i16 - self.volume as i16) as u8 & 0xF;
+                }
+            }
+
+            if tick {
+                if value & 0x08 != 0 {
+                    self.volume = self.volume.wrapping_add(1);
+                } else {
+                    self.volume = self.volume.wrapping_sub(1);
+                }
+                self.volume &= 0xF;
+            } else if (value & 0x07) == 0 && will_clock {
+                if invert {
+                    if self.volume == (if value & 0x08 != 0 { 0xE } else { 0x1 }) {
+                        self.env_counter = COUNTER_DISABLED;
+                    }
+                } else if self.volume == (if value & 0x08 != 0 { 0xF } else { 0x0 }) {
+                    self.env_counter = COUNTER_DISABLED;
+                }
+            }
+        }
+
+        if self.channel1 {
+            self.nr12 = value;
+        } else {
+            self.nr22 = value;
+        }
+
+        // DAC off disables the channel (master).
+        if (value & 0xF8) == 0 {
+            self.master = false;
+            self.enabled = false;
+        }
+    }
+
+    /// Will the envelope clock on the FS step that NRx2 writes coincide with?
+    /// In Gambatte this is `EnvelopeUnit::clock(cc)`; the envelope event fires on
+    /// FS step 7, i.e. when `(cc >> 12) & 7` rounds into that frame region.
+    fn env_will_clock(&self) -> bool {
+        // Gambatte's clock_ flag is set when the unit is in the active phase. We
+        // approximate via the counter being live; the precise zombie sub-cases
+        // are handled by the volume math above.
+        self.env_counter != COUNTER_DISABLED
+    }
+
+    // --- Length counter ---
+
+    fn length_mask(&self) -> u16 {
+        0x3F
+    }
+
+    fn write_nrx1(&mut self, value: u8) {
+        if self.channel1 {
+            self.nr11 = value;
+        } else {
+            self.nr21 = value;
+        }
+        // length_counter.cpp nr1Change.
+        self.length_counter = (!(value as u16) & self.length_mask()) + 1;
+        let nr4 = if self.channel1 { self.nr14 } else { self.nr24 };
+        self.length_abs = if nr4 & 0x40 != 0 {
+            ((self.cc >> 13) + self.length_counter as u32) << 13
+        } else {
+            COUNTER_DISABLED
+        };
+        self.duty_nr1_change();
+    }
+
+    /// Clock the length counter if cc has reached the absolute expiry.
+    fn length_check(&mut self) {
+        if self.length_abs != COUNTER_DISABLED && self.cc >= self.length_abs {
+            self.length_abs = COUNTER_DISABLED;
+            self.length_counter = 0;
+            self.enabled = false;
+        }
+    }
+
+    fn duty_nr1_change(&mut self) {
+        self.update_pos();
     }
 
     pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
-        if !self.enabled {
+        // Length expiry is checked even when the DAC is off.
+        self.length_check();
+
+        if !self.master {
             return;
         }
+        // Advance the duty position up to the current cc.
+        self.update_pos();
 
-        // Update frequency timer
-        if self.frequency_timer > 0 {
-            self.frequency_timer -= 1;
-        } else {
-            self.frequency_timer = (2048 - self.frequency) * 4;
-            self.duty_position = (self.duty_position + 1) % 8;
+        // Envelope event(s).
+        while self.env_counter != COUNTER_DISABLED && self.cc >= self.env_counter {
+            self.env_event();
         }
     }
 
@@ -103,45 +348,9 @@ impl SquareWave {
             return;
         }
 
-        // Length counter (steps 0, 2, 4, 6)
-        if step.is_multiple_of(2) && self.length_enabled {
-            self.step_length_counter();
-        }
-
-        // Volume envelope (step 7)
-        if step == 7 {
-            self.step_volume_envelope();
-        }
-
-        // Frequency sweep (steps 2, 6) - Channel 1 only
+        // Frequency sweep (steps 2, 6) - Channel 1 only.
         if self.channel1 && (step == 2 || step == 6) {
             self.step_frequency_sweep();
-        }
-    }
-
-    fn step_length_counter(&mut self) {
-        if self.length_counter > 0 {
-            self.length_counter -= 1;
-            if self.length_counter == 0 {
-                self.enabled = false;
-            }
-        }
-    }
-
-    fn step_volume_envelope(&mut self) {
-        if self.volume_timer > 0 {
-            self.volume_timer -= 1;
-            if self.volume_timer == 0 {
-                let envelope_period = self.get_envelope_period();
-                if envelope_period > 0 {
-                    self.volume_timer = envelope_period;
-                    if self.volume_direction && self.volume < 15 {
-                        self.volume += 1;
-                    } else if !self.volume_direction && self.volume > 0 {
-                        self.volume -= 1;
-                    }
-                }
-            }
         }
     }
 
@@ -159,10 +368,8 @@ impl SquareWave {
                     let new_frequency = self.calculate_sweep_frequency();
                     if new_frequency <= 2047 && self.get_sweep_shift() > 0 {
                         self.sweep_shadow_frequency = new_frequency;
-                        self.frequency = new_frequency;
+                        self.set_freq(new_frequency);
                         self.update_frequency_registers();
-                        
-                        // Check overflow again
                         let _ = self.calculate_sweep_frequency();
                     }
                 }
@@ -173,28 +380,27 @@ impl SquareWave {
     fn calculate_sweep_frequency(&mut self) -> u16 {
         let shift = self.get_sweep_shift();
         let direction = self.get_sweep_direction();
-        
         let offset = self.sweep_shadow_frequency >> shift;
         if direction {
-            // Decrease frequency
             self.sweep_shadow_frequency.saturating_sub(offset)
         } else {
-            // Increase frequency
             let new_freq = self.sweep_shadow_frequency + offset;
             if new_freq > 2047 {
-                self.enabled = false; // Disable channel on overflow
+                self.enabled = false;
+                self.master = false;
             }
             new_freq
         }
     }
 
     fn update_frequency_registers(&mut self) {
+        // Reflect the swept frequency back into the period registers.
         if self.channel1 {
-            self.nr13 = (self.frequency & 0xFF) as u8;
-            self.nr14 = (self.nr14 & 0xF8) | ((self.frequency >> 8) & 0x07) as u8;
+            self.nr13 = (self.sweep_shadow_frequency & 0xFF) as u8;
+            self.nr14 = (self.nr14 & 0xF8) | ((self.sweep_shadow_frequency >> 8) & 0x07) as u8;
         } else {
-            self.nr23 = (self.frequency & 0xFF) as u8;
-            self.nr24 = (self.nr24 & 0xF8) | ((self.frequency >> 8) & 0x07) as u8;
+            self.nr23 = (self.sweep_shadow_frequency & 0xFF) as u8;
+            self.nr24 = (self.nr24 & 0xF8) | ((self.sweep_shadow_frequency >> 8) & 0x07) as u8;
         }
     }
 
@@ -210,79 +416,31 @@ impl SquareWave {
         self.nr10 & 0x07
     }
 
-    fn get_duty_cycle(&self) -> u8 {
-        if self.channel1 {
-            (self.nr11 >> 6) & 0x03
-        } else {
-            (self.nr21 >> 6) & 0x03
-        }
-    }
+    // --- NRx4 / trigger ---
 
-    fn get_length_load(&self) -> u8 {
-        if self.channel1 {
-            self.nr11 & 0x3F
-        } else {
-            self.nr21 & 0x3F
-        }
-    }
-
-    fn get_envelope_initial_volume(&self) -> u8 {
-        if self.channel1 {
-            (self.nr12 >> 4) & 0x0F
-        } else {
-            (self.nr22 >> 4) & 0x0F
-        }
-    }
-
-    fn get_envelope_direction(&self) -> bool {
-        if self.channel1 {
-            (self.nr12 >> 3) & 0x01 != 0
-        } else {
-            (self.nr22 >> 3) & 0x01 != 0
-        }
-    }
-
-    fn get_envelope_period(&self) -> u8 {
-        if self.channel1 {
-            self.nr12 & 0x07
-        } else {
-            self.nr22 & 0x07
-        }
-    }
-
-    /// Handle a write to NRx2 (volume / envelope). Disables the channel when
-    /// the write turns the DAC off.
-    fn write_nrx2(&mut self, value: u8) {
-        if self.channel1 {
-            self.nr12 = value;
-        } else {
-            self.nr22 = value;
-        }
-
-        if self.get_envelope_initial_volume() == 0 && !self.get_envelope_direction() {
-            self.enabled = false;
-        }
-    }
-
-    /// Handle a write to NRx4 (period-high / control). Implements the length
-    /// counter "extra clock" quirks that fire when the length counter is
-    /// enabled while the frame sequencer's next step will not clock length.
     fn write_nrx4(&mut self, value: u8) {
-        let trigger = (value >> 7) & 0x01 != 0;
-        let new_length_enabled = (value >> 6) & 0x01 != 0;
-        let was_length_enabled = self.length_enabled;
+        let old_nr4 = if self.channel1 { self.nr14 } else { self.nr24 };
+        let trigger = value & 0x80 != 0;
+        let new_length_enabled = value & 0x40 != 0;
 
-        // Enabling the length counter at a moment where the next FS step will
-        // not clock it produces one extra length clock.
-        if new_length_enabled
-            && !was_length_enabled
-            && self.length_extra_clock_due()
-            && self.length_counter > 0
-        {
-            self.length_counter -= 1;
-            if self.length_counter == 0 && !trigger {
-                self.enabled = false;
+        // length_counter.cpp nr4Change (absolute-cc model).
+        if self.length_abs != COUNTER_DISABLED {
+            self.length_counter = ((self.length_abs >> 13) - (self.cc >> 13)) as u16;
+        }
+
+        let mut dec: u16 = 0;
+        if new_length_enabled {
+            dec = ((!self.cc >> 12) & 1) as u16;
+            if (old_nr4 & 0x40) == 0 && self.length_counter > 0 {
+                self.length_counter -= dec;
+                if self.length_counter == 0 {
+                    self.enabled = false;
+                }
             }
+        }
+
+        if trigger && self.length_counter == 0 {
+            self.length_counter = self.length_mask() + 1 - dec;
         }
 
         self.length_enabled = new_length_enabled;
@@ -293,74 +451,61 @@ impl SquareWave {
             self.nr24 = value;
         }
 
+        self.length_abs = if new_length_enabled && self.length_counter > 0 {
+            ((self.cc >> 13) + self.length_counter as u32) << 13
+        } else {
+            COUNTER_DISABLED
+        };
+
+        // dutyUnit/envelope nr4 handling happens on trigger.
         if trigger {
             self.trigger();
+        } else {
+            // Frequency-high write still updates the duty period.
+            self.set_freq(self.freq());
         }
     }
 
     fn trigger(&mut self) {
         self.enabled = true;
 
-        // Length counter: reload when zero. If the length counter is enabled
-        // and the next FS step won't clock length, the just-reloaded max value
-        // is immediately decremented (trigger extra-clock quirk).
-        if self.length_counter == 0 {
-            self.length_counter = 64;
-            if self.length_enabled && self.length_extra_clock_due() {
-                self.length_counter -= 1;
-            }
-        }
+        // Envelope: nr4Init sets volume + counter; master = DAC on.
+        let dac_off = self.env_nr4_init();
+        self.master = !dac_off;
 
-        // Volume envelope
-        self.volume = self.get_envelope_initial_volume();
-        self.volume_direction = self.get_envelope_direction();
-        self.volume_timer = self.get_envelope_period();
-        
-        // Update frequency
+        // Duty: set frequency/period, then place the absolute next-pos update.
+        self.set_freq(self.freq());
+        // ref = 1 in single speed (lastUpdate_ always 4-aligned); master bool
+        // toggles the +4 vs +2 offset.
+        let m = if self.master { 1 } else { 0 };
+        self.next_pos_update = self.cc
+            .wrapping_sub((self.cc.wrapping_sub(1)) & 1)
+            .wrapping_add(self.period)
+            .wrapping_add(4 - 2 * m);
+
+        // Frequency sweep (Channel 1 only).
         if self.channel1 {
-            self.frequency = ((self.nr14 as u16 & 0x07) << 8) | self.nr13 as u16;
-        } else {
-            self.frequency = ((self.nr24 as u16 & 0x07) << 8) | self.nr23 as u16;
-        }
-        self.frequency_timer = (2048 - self.frequency) * 4;
-        
-        // Frequency sweep (Channel 1 only)
-        if self.channel1 {
-            self.sweep_shadow_frequency = self.frequency;
+            self.sweep_shadow_frequency = self.freq();
             self.sweep_timer = self.get_sweep_period();
             if self.sweep_timer == 0 {
                 self.sweep_timer = 8;
             }
             self.sweep_enabled = self.get_sweep_period() > 0 || self.get_sweep_shift() > 0;
-            
             if self.get_sweep_shift() > 0 {
                 let _ = self.calculate_sweep_frequency();
             }
         }
-        
-        // If DAC is disabled, disable channel
-        if self.get_envelope_initial_volume() == 0 && !self.get_envelope_direction() {
+
+        if dac_off {
             self.enabled = false;
         }
     }
 
     pub fn get_output(&self) -> f32 {
-        if !self.enabled || self.volume == 0 {
+        if !self.enabled || !self.master || self.volume == 0 {
             return 0.0;
         }
-
-        // Duty cycle patterns
-        const DUTY_PATTERNS: [[u8; 8]; 4] = [
-            [0, 0, 0, 0, 0, 0, 0, 1], // 12.5%
-            [1, 0, 0, 0, 0, 0, 0, 1], // 25%
-            [1, 0, 0, 0, 0, 1, 1, 1], // 50%
-            [0, 1, 1, 1, 1, 1, 1, 0], // 75%
-        ];
-
-        let duty_cycle = self.get_duty_cycle() as usize;
-        let output_bit = DUTY_PATTERNS[duty_cycle][self.duty_position as usize];
-        
-        if output_bit == 1 {
+        if self.high {
             (self.volume as f32) / 15.0
         } else {
             0.0
@@ -378,11 +523,11 @@ impl Addressable for SquareWave {
             NR10..=NR14 => {
                 if self.channel1 {
                     match addr {
-                        NR10 => self.nr10 | 0x80, // Top bit always set
-                        NR11 => self.nr11 | 0x3F, // Bottom 6 bits always set
+                        NR10 => self.nr10 | 0x80,
+                        NR11 => self.nr11 | 0x3F,
                         NR12 => self.nr12,
-                        NR13 => 0xFF, // Write-only
-                        NR14 => self.nr14 | 0xBF, // Only bit 6 readable
+                        NR13 => 0xFF,
+                        NR14 => self.nr14 | 0xBF,
                         _ => 0xFF,
                     }
                 } else {
@@ -392,17 +537,17 @@ impl Addressable for SquareWave {
             NR21..=NR24 => {
                 if !self.channel1 {
                     match addr {
-                        NR21 => self.nr21 | 0x3F, // Bottom 6 bits always set
+                        NR21 => self.nr21 | 0x3F,
                         NR22 => self.nr22,
-                        NR23 => 0xFF, // Write-only
-                        NR24 => self.nr24 | 0xBF, // Only bit 6 readable
+                        NR23 => 0xFF,
+                        NR24 => self.nr24 | 0xBF,
                         _ => 0xFF,
                     }
                 } else {
                     panic!("Invalid read from Channel 1 SquareWave: {:#X}", addr);
                 }
             }
-            _ => panic!("Invalid address for SquareWave: {:#X}", addr)
+            _ => panic!("Invalid address for SquareWave: {:#X}", addr),
         }
     }
 
@@ -411,22 +556,14 @@ impl Addressable for SquareWave {
             NR10..=NR14 => {
                 if self.channel1 {
                     match addr {
-                        NR10 => {
-                            self.nr10 = value;
-                        }
-                        NR11 => {
-                            self.nr11 = value;
-                            self.length_counter = 64 - self.get_length_load();
-                        }
-                        NR12 => {
-                            self.write_nrx2(value);
-                        }
+                        NR10 => self.nr10 = value,
+                        NR11 => self.write_nrx1(value),
+                        NR12 => self.write_nrx2(value),
                         NR13 => {
                             self.nr13 = value;
+                            self.set_freq(self.freq());
                         }
-                        NR14 => {
-                            self.write_nrx4(value);
-                        }
+                        NR14 => self.write_nrx4(value),
                         _ => {}
                     }
                 } else {
@@ -436,26 +573,20 @@ impl Addressable for SquareWave {
             NR21..=NR24 => {
                 if !self.channel1 {
                     match addr {
-                        NR21 => {
-                            self.nr21 = value;
-                            self.length_counter = 64 - self.get_length_load();
-                        }
-                        NR22 => {
-                            self.write_nrx2(value);
-                        }
+                        NR21 => self.write_nrx1(value),
+                        NR22 => self.write_nrx2(value),
                         NR23 => {
                             self.nr23 = value;
+                            self.set_freq(self.freq());
                         }
-                        NR24 => {
-                            self.write_nrx4(value);
-                        }
+                        NR24 => self.write_nrx4(value),
                         _ => {}
                     }
                 } else {
                     panic!("Invalid write to Channel 1 SquareWave: {:#X}", addr);
                 }
             }
-            _ => panic!("Invalid address for SquareWave: {:#X}", addr)
+            _ => panic!("Invalid address for SquareWave: {:#X}", addr),
         }
     }
 }
