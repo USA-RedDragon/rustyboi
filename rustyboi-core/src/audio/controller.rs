@@ -54,6 +54,15 @@ pub struct Audio {
     
     // Sample generation timing
     fractional_cycles: f32,
+
+    // Free-running 2 MHz cycle counter mirroring Gambatte's `cycleCounter_`.
+    // The timer hands us its 15-bit low value (`ic >> 1`); we widen it to a
+    // free-running 32-bit counter by tracking wraps so the square channels can
+    // use Gambatte's absolute event-counter timing model.
+    #[serde(default)]
+    cc: u32,
+    #[serde(default)]
+    last_cc15: u16,
 }
 
 impl Audio {
@@ -70,7 +79,50 @@ impl Audio {
             frame_sequencer_timer: 8192,
             audio_enabled: false,
             fractional_cycles: 0.0,
+            cc: 0,
+            last_cc15: 0,
         }
+    }
+
+    /// Reconstruct Gambatte's free-running 2 MHz `cycleCounter_` and push it to
+    /// the square channels.
+    ///
+    /// The frame-sequencer phase (`cc >> 12 & 7`) comes from our independent
+    /// `frame_sequencer_step` (which survives DIV writes), and the sub-step
+    /// position (`cc & 0xFFF`) from the timer's internal counter (`ic >> 1`).
+    /// Measured against the boot DIV phase, `cc>>12&7 == (fs_step + 5) & 7`.
+    ///
+    /// The sub-step part jumps on a DIV write (the timer resets its internal
+    /// counter) while the FS phase keeps advancing, so we shift the channels'
+    /// absolute event counters by the same delta to keep them valid — mirroring
+    /// Gambatte's `divReset`/`resetCc`.
+    pub fn sync_cc(&mut self, ic: u16) {
+        let raw = ((ic >> 1) & 0x7FFF) as u32;
+
+        let old = self.cc;
+        let old_low = old & 0x7FFF;
+        let mut high = old & !0x7FFF;
+
+        if raw < old_low {
+            if old_low >= 0x7F00 {
+                // Natural wrap of the 15-bit counter (0x7FFF -> 0).
+                high = high.wrapping_add(0x8000);
+            } else {
+                // A DIV write reset the timer's internal counter mid-range:
+                // shift the absolute event counters back by the cc drop so the
+                // schedules stay relative (Gambatte divReset/resetCc).
+                let new = high | raw;
+                let delta = old.wrapping_sub(new);
+                self.channel1.reset_cc(delta);
+                self.channel2.reset_cc(delta);
+            }
+        }
+
+        let new = high | raw;
+        self.cc = new;
+        self.last_cc15 = raw as u16;
+        self.channel1.set_cc(new);
+        self.channel2.set_cc(new);
     }
 
     pub fn step(&mut self, mmio: &mut mmio::Mmio) {
@@ -219,7 +271,7 @@ impl Addressable for Audio {
             NR51 => self.nr51,
             NR52 => {
                 let mut value = self.nr52 & 0x80; // Preserve audio enabled bit
-                
+
                 // Set channel status bits (read-only)
                 if self.channel1.is_enabled() { value |= 0x01; }
                 if self.channel2.is_enabled() { value |= 0x02; }

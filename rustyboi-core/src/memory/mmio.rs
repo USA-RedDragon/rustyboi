@@ -14,6 +14,10 @@ use std::io;
 
 const EMPTY_BYTE: u8 = 0xFF;
 
+fn default_oam_high() -> [u8; 0x60] {
+    [0; 0x60]
+}
+
 const BIOS_START: u16 = 0x0000;
 const BIOS_SIZE: usize = 256; // 256 bytes
 const BIOS_END: u16 = BIOS_START + BIOS_SIZE as u16 - 1;
@@ -117,6 +121,12 @@ pub struct Mmio {
     wram: memory::Memory<WRAM_START, WRAM_SIZE>,
     wram_bank: memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>,
     oam: memory::Memory<OAM_START, OAM_SIZE>,
+    // CGB-only shadow for the 0xFEA0-0xFEFF "unused" region, which on CGB
+    // mirrors the OAM index space masked with 0xE7 (Gambatte ioamhram_ tail).
+    // Indexed by `(addr & 0xFF) & 0xE7` minus 0xA0 (reachable indices are
+    // 0xA0..=0xE7). Not present on DMG (writes ignored, reads 0xFF).
+    #[serde(default = "default_oam_high", with = "serde_bytes")]
+    oam_high: [u8; 0x60],
     timer: timer::Timer,
     #[serde(default = "serial::Serial::new")]
     serial: serial::Serial,
@@ -223,6 +233,7 @@ impl Mmio {
             wram: memory::Memory::new(),
             wram_bank: memory::Memory::new(),
             oam: memory::Memory::new(),
+            oam_high: [0; 0x60],
             timer: timer::Timer::new(),
             serial: serial::Serial::new(),
             delayed_writes: Vec::new(),
@@ -517,11 +528,11 @@ impl Mmio {
         self.hdma_source = src;
         self.hdma_dest = dst;
 
-        // Same per-block stall as run_hdma_block (36 SS / 68 DS), charged for
-        // every 0x10-byte block of the immediate transfer.
-        let blocks = (effective_length / 0x10) as u32;
-        let per_block = if self.is_double_speed_mode() { 68 } else { 36 };
-        self.pending_dma_stall += blocks * per_block;
+        // Gambatte `Memory::dma` charges `2 + 2*ds` cc per byte for the entire
+        // transfer plus a single trailing `cc += 4`, regardless of block count
+        // (the +4 setup is NOT per-block). For one block this is 36 SS / 68 DS.
+        let per_byte = if self.is_double_speed_mode() { 4 } else { 2 };
+        self.pending_dma_stall += (effective_length as u32) * per_byte + 4;
     }
 
     // ----------------------------------------------------------------------
@@ -734,28 +745,43 @@ impl Mmio {
         }
     }
 
-    /// Write into the WRAM/echo region honoring CGB bank selection. Used by the
-    /// OAM-DMA conflict path (CGB, non-WRAM source) where the write still has to
-    /// land in WRAM while the normal during-DMA routing would drop it.
-    fn write_wram_region(&mut self, addr: u16, value: u8) {
-        let addr = if addr >= ECHO_RAM_START { addr - 0x2000 } else { addr };
-        match addr {
-            WRAM_START..=WRAM_END => self.wram.write(addr, value),
-            WRAM_BANK_START..=WRAM_BANK_END => {
-                if self.cgb_features_enabled {
-                    match self.wram_bank_select {
-                        0 | 1 => self.wram_bank.write(addr, value),
-                        2..=7 => {
-                            let bank_index = (self.wram_bank_select - 2) as usize;
-                            self.wram_banks[bank_index].write(addr, value)
-                        }
-                        _ => self.wram_bank.write(addr, value),
-                    }
-                } else {
-                    self.wram_bank.write(addr, value)
-                }
+    /// The WRAM "area" (bank slot) selected by the active OAM DMA during a CGB
+    /// conflicting WRAM access. Mirrors Gambatte's
+    /// `cart_.wramdata(ioamhram_[0x146] >> 4 & 1)`: bit 4 of the DMA source-high
+    /// byte (NOT the CPU's SVBK selection) chooses between the fixed bank-0
+    /// block (area 0) and the currently SVBK-banked block (area 1).
+    fn dma_conflict_wram_area(&self) -> u8 {
+        ((self.dma_source_base >> 8) >> 4 & 1) as u8
+    }
+
+    /// Read the WRAM byte seen on a CGB OAM-DMA conflicting access. The byte is
+    /// taken from `wramdata(area)[p & 0xFFF]`, so the address's C/D range is
+    /// ignored: only the 12-bit offset and the DMA-derived area matter.
+    fn dma_conflict_wram_read(&self, addr: u16) -> u8 {
+        let offset = addr & 0x0FFF;
+        if self.dma_conflict_wram_area() == 0 {
+            self.wram.read(WRAM_START + offset)
+        } else {
+            match self.wram_bank_select {
+                2..=7 => self.wram_banks[(self.wram_bank_select - 2) as usize]
+                    .read(WRAM_BANK_START + offset),
+                _ => self.wram_bank.read(WRAM_BANK_START + offset),
             }
-            _ => (),
+        }
+    }
+
+    /// Write the CPU byte into WRAM during a CGB OAM-DMA conflict, matching the
+    /// `wramdata(area)[p & 0xFFF]` routing used by `dma_conflict_wram_read`.
+    fn dma_conflict_wram_write(&mut self, addr: u16, value: u8) {
+        let offset = addr & 0x0FFF;
+        if self.dma_conflict_wram_area() == 0 {
+            self.wram.write(WRAM_START + offset, value);
+        } else {
+            match self.wram_bank_select {
+                2..=7 => self.wram_banks[(self.wram_bank_select - 2) as usize]
+                    .write(WRAM_BANK_START + offset, value),
+                _ => self.wram_bank.write(WRAM_BANK_START + offset, value),
+            }
         }
     }
 
@@ -776,9 +802,11 @@ impl Mmio {
                 let byte = if self.dma_src_kind() == 2 { 0 } else { value };
                 self.oam.write(OAM_START + pos, byte);
             } else if self.dma_src_kind() != 3 {
-                // WRAM region with a non-WRAM source: the write still reaches the
-                // CPU-selected WRAM bank (it does not disturb OAM).
-                self.write_wram_region(addr, value);
+                // WRAM region with a non-WRAM source: the write still reaches
+                // WRAM, but on the bank slot chosen by the DMA source-high bit
+                // (Gambatte `wramdata(ioamhram_[0x146] >> 4 & 1)`), not the
+                // CPU's SVBK selection.
+                self.dma_conflict_wram_write(addr, value);
             }
             // WRAM region with a WRAM source: write is swallowed (no effect).
         } else {
@@ -807,7 +835,7 @@ impl Mmio {
     /// WRAM byte.
     fn dma_conflict_byte(&self, addr: u16) -> u8 {
         if self.cgb_features_enabled && self.dma_src_kind() != 3 && addr >= WRAM_START {
-            return self.read_during_dma(addr);
+            return self.dma_conflict_wram_read(addr);
         }
         self.oam.read(OAM_START + self.dma_pos as u16)
     }
@@ -1075,7 +1103,17 @@ impl memory::Addressable for Mmio {
                         self.oam.read(addr)
                     }
                 }
-                UNUSED_START..=UNUSED_END => EMPTY_BYTE,
+                // CGB mirrors 0xFEA0-0xFEFF into the OAM index space (masked
+                // with 0xE7). During an OAM-DMA transfer the bus is owned by the
+                // DMA, so the read returns 0xFF (Gambatte's `oamDmaPos_<oam_size`
+                // gate). DMG returns open-bus 0xFF here.
+                UNUSED_START..=UNUSED_END => {
+                    if self.cgb_features_enabled && !self.dma_transfer_in_progress() {
+                        self.oam_high[((addr & 0xFF) & 0xE7) as usize - 0xA0]
+                    } else {
+                        EMPTY_BYTE
+                    }
+                }
                 IO_REGISTERS_START..=IO_REGISTERS_END => {
                     match addr {
                         input::JOYP => self.input.read(addr),
@@ -1256,7 +1294,14 @@ impl memory::Addressable for Mmio {
                         self.oam.write(addr, value);
                     }
                 }
-                UNUSED_START..=UNUSED_END => (), // Writes to unused memory are ignored
+                // CGB OAM mirror (0xFEA0-0xFEFF). Writable only when the OAM bus
+                // is free (no in-progress OAM DMA); otherwise dropped. DMG
+                // ignores writes here entirely.
+                UNUSED_START..=UNUSED_END => {
+                    if self.cgb_features_enabled && !self.dma_transfer_in_progress() {
+                        self.oam_high[((addr & 0xFF) & 0xE7) as usize - 0xA0] = value;
+                    }
+                }
                 IO_REGISTERS_START..=IO_REGISTERS_END => {
                     match addr {
                         input::JOYP => self.input.write(addr, value),
