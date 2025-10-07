@@ -515,6 +515,17 @@ impl Ppu {
     // Cycle-exact Mode 3 length (dots from M3 start to xpos=167), ported from
     // Gambatte's predictCyclesUntilXpos_fn / addSpriteCycles. Sprites must be
     // pre-sorted by raw OAM X ascending. Returns dots to add past the 167 base.
+    // Whether the window starts drawing on this line (Gambatte's win-draw-start
+    // gate). DMG ignores WX==166.
+    fn window_will_start(&self, mmio: &mmio::Mmio, is_cgb: bool) -> bool {
+        let window_enabled = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
+        if !window_enabled || !self.window_y_triggered {
+            return false;
+        }
+        let wx = mmio.read(WX) as i32;
+        (0..=166).contains(&wx) && (is_cgb || wx != 166)
+    }
+
     fn compute_m3_length(&self, mmio: &mmio::Mmio, is_cgb: bool) -> u128 {
         let scx = (mmio.read(SCX) & 0x07) as i32;
         // Fine-scroll discard prefix: M3Start::f1 consumes scx%8 dots, then
@@ -523,12 +534,8 @@ impl Ppu {
         cycles += 167; // targetx - xpos, xpos=0 at tile-loop start
 
         // Window: if it will start on this line in range.
-        let window_enabled = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
-        if window_enabled && self.window_y_triggered {
-            let wx = mmio.read(WX) as i32;
-            if (0..=166).contains(&wx) {
-                cycles += 6;
-            }
+        if self.window_will_start(mmio, is_cgb) {
+            cycles += 6;
         }
 
         // Sprites. Only count if OBJ enabled (or CGB always evaluates them).
@@ -901,10 +908,17 @@ impl Ppu {
                     self.m3_pixels_discarded = 0;
                     self.check_and_trigger_stat_interrupt(mmio);
 
-                    let m3_len = self.compute_m3_length(mmio, is_cgb);
-                    let offset = if is_cgb { CGB_MODE0_OFFSET } else { DMG_MODE0_OFFSET };
-                    let dot = self.ticks as i64 + m3_len as i64 + offset as i64;
-                    self.scheduled_mode0_dot = Some(dot.max(0) as u128);
+                    // On window-start lines the emergent fetcher (window restart)
+                    // tracks the mode-3 length better than the closed-form
+                    // predictor, so fall back to the x==160 trigger there.
+                    if self.window_will_start(mmio, is_cgb) {
+                        self.scheduled_mode0_dot = None;
+                    } else {
+                        let m3_len = self.compute_m3_length(mmio, is_cgb);
+                        let offset = if is_cgb { CGB_MODE0_OFFSET } else { DMG_MODE0_OFFSET };
+                        let dot = self.ticks as i64 + m3_len as i64 + offset as i64;
+                        self.scheduled_mode0_dot = Some(dot.max(0) as u128);
+                    }
                 }
             },
             State::PixelTransfer => 'label: {
@@ -1031,8 +1045,13 @@ impl Ppu {
                     }
 
                     self.x += 1;
-                    // Mode 3 -> Mode 0 (STAT bits + IRQ + state) is driven by
-                    // the scheduled dot at the top of this arm, not x==160.
+                    // When no cycle-exact dot is scheduled (window-start lines),
+                    // fall back to ending Mode 3 at the x==160 pixel push.
+                    if self.scheduled_mode0_dot.is_none() && self.x == 160 {
+                        self.state = State::HBlank;
+                        Self::set_lcd_status_mode(mmio, 0);
+                        self.check_and_trigger_stat_interrupt(mmio);
+                    }
                 }
             },
             State::HBlank => {
