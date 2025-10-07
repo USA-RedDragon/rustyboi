@@ -901,6 +901,7 @@ impl Ppu {
                     self.state = State::PixelTransfer;
                     // First scanline after enable is now armed; subsequent
                     // lines use normal Mode 2 timing.
+                    let was_first_line = self.first_line_after_enable;
                     self.first_line_after_enable = false;
                     self.mode0_pretriggered_this_line = false;
                     // SCX fine-scroll discard is done per-dot at the start of
@@ -911,7 +912,7 @@ impl Ppu {
                     // On window-start lines the emergent fetcher (window restart)
                     // tracks the mode-3 length better than the closed-form
                     // predictor, so fall back to the x==160 trigger there.
-                    if self.window_will_start(mmio, is_cgb) {
+                    if was_first_line || self.window_will_start(mmio, is_cgb) {
                         self.scheduled_mode0_dot = None;
                     } else {
                         let m3_len = self.compute_m3_length(mmio, is_cgb);
