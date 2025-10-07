@@ -33,6 +33,10 @@ const CGB_PIXEL_TRANSFER_WARMUP: u8 = 2;
 // giving 85 (DMG) / 86 (CGB) dots from enable to first M3.
 const DMG_FIRST_FRAME_ARM_DOT: u128 = 85;
 const CGB_FIRST_FRAME_ARM_DOT: u128 = 86;
+// Offset between rustyboi's `ticks` at M3 arm and Gambatte's lineCycle frame
+// for the scheduled Mode 3 -> Mode 0 transition. Swept against the full suite.
+const DMG_MODE0_OFFSET: i32 = 4;
+const CGB_MODE0_OFFSET: i32 = 4;
 const MODE2_STAT_PRETRIGGER_DOT: u128 = 452;
 const LY0_MODE2_STAT_PRETRIGGER_DOT: u128 = 454;
 // Within line 153 (the last VBlank line) the LY register is held at 153 only
@@ -210,7 +214,12 @@ pub struct Ppu {
     // tile-map column. Reset to 0 at every M3 arm.
     #[serde(default)]
     m3_pixels_discarded: u8,
-    
+    // Absolute `ticks` dot at which Mode 3 -> Mode 0 (HBlank) fires. Computed
+    // at M3 arm from a cycle-exact mode-3 length formula (Gambatte oracle) and
+    // drives the FF41 mode bits + mode-0 STAT IRQ, replacing the x==160 trigger.
+    #[serde(default)]
+    scheduled_mode0_dot: Option<u128>,
+
     #[serde(with = "serde_bytes")]
     fb_a: [u8; FRAMEBUFFER_SIZE],
     #[serde(with = "serde_bytes")]
@@ -259,6 +268,7 @@ impl Ppu {
             line_153_ly_zeroed: false,
             mode0_pretriggered_this_line: false,
             m3_pixels_discarded: 0,
+            scheduled_mode0_dot: None,
             fb_a: [0; FRAMEBUFFER_SIZE],
             fb_b: [0; FRAMEBUFFER_SIZE],
             color_fb_a: [0; FRAMEBUFFER_SIZE * 3],
@@ -502,6 +512,76 @@ impl Ppu {
         interrupt_line
     }
 
+    // Cycle-exact Mode 3 length (dots from M3 start to xpos=167), ported from
+    // Gambatte's predictCyclesUntilXpos_fn / addSpriteCycles. Sprites must be
+    // pre-sorted by raw OAM X ascending. Returns dots to add past the 167 base.
+    fn compute_m3_length(&self, mmio: &mmio::Mmio, is_cgb: bool) -> u128 {
+        let scx = (mmio.read(SCX) & 0x07) as i32;
+        // Fine-scroll discard prefix: M3Start::f1 consumes scx%8 dots, then
+        // nextCall(1-cgb) before the tile loop (167-base) begins.
+        let mut cycles: i32 = scx + (1 - is_cgb as i32);
+        cycles += 167; // targetx - xpos, xpos=0 at tile-loop start
+
+        // Window: if it will start on this line in range.
+        let window_enabled = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
+        if window_enabled && self.window_y_triggered {
+            let wx = mmio.read(WX) as i32;
+            if (0..=166).contains(&wx) {
+                cycles += 6;
+            }
+        }
+
+        // Sprites. Only count if OBJ enabled (or CGB always evaluates them).
+        let obj_enabled = (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0;
+        if obj_enabled || is_cgb {
+            let first_tile_xpos = (8 - scx) % 8; // = endx % 8
+            let mut prev_tile_no: i32 = -1;
+            let mut first = true;
+            let mut x0_seen = false;
+            let mut sprite_xs: Vec<i32> = self.sprites_on_line.iter().map(|s| s.x as i32).collect();
+            sprite_xs.sort_unstable();
+            for &spx in &sprite_xs {
+                if spx == 0 {
+                    x0_seen = true;
+                }
+                if first {
+                    // First-sprite special: fno=1, xpos=0 at line start.
+                    // if (fno + spx - xpos) < 5: cycles += 11 - (fno+spx-xpos)
+                    let v = 1 + spx; // fno + spx - xpos
+                    if v < 5 {
+                        cycles += 11 - v;
+                    } else {
+                        // Falls through to the general per-sprite path below.
+                        let dist = (spx - first_tile_xpos).rem_euclid(8);
+                        let tile_no = (spx - first_tile_xpos) & !7;
+                        let mut c = 6;
+                        if dist < 5 && tile_no != prev_tile_no {
+                            c = 11 - dist;
+                        }
+                        cycles += c;
+                        prev_tile_no = tile_no;
+                    }
+                    first = false;
+                    continue;
+                }
+                let dist = (spx - first_tile_xpos).rem_euclid(8);
+                let tile_no = (spx - first_tile_xpos) & !7;
+                let mut c = 6;
+                if dist < 5 && tile_no != prev_tile_no {
+                    c = 11 - dist;
+                }
+                cycles += c;
+                prev_tile_no = tile_no;
+            }
+            // Sprite-at-x0 fine adjustment.
+            if x0_seen {
+                cycles -= scx.min(5);
+            }
+        }
+
+        cycles.max(0) as u128
+    }
+
     fn set_lcd_status_mode(mmio: &mut mmio::Mmio, mode: u8) {
         mmio.write_lcd_status_from_ppu((mmio.read(LCD_STATUS) & !0x03) | (mode & 0x03));
     }
@@ -523,6 +603,7 @@ impl Ppu {
         self.line_153_ly_zeroed = false;
         self.mode0_pretriggered_this_line = false;
         self.m3_pixels_discarded = 0;
+        self.scheduled_mode0_dot = None;
     }
 
     /// Check for STAT interrupt rising edge and trigger interrupt if needed
@@ -819,9 +900,23 @@ impl Ppu {
                     // Mode 3 (see `m3_pixels_discarded`), re-reading SCX live.
                     self.m3_pixels_discarded = 0;
                     self.check_and_trigger_stat_interrupt(mmio);
+
+                    let m3_len = self.compute_m3_length(mmio, is_cgb);
+                    let offset = if is_cgb { CGB_MODE0_OFFSET } else { DMG_MODE0_OFFSET };
+                    let dot = self.ticks as i64 + m3_len as i64 + offset as i64;
+                    self.scheduled_mode0_dot = Some(dot.max(0) as u128);
                 }
             },
             State::PixelTransfer => 'label: {
+                // Scheduled cycle-exact Mode 3 -> Mode 0 transition.
+                if self.scheduled_mode0_dot == Some(self.ticks) {
+                    self.scheduled_mode0_dot = None;
+                    self.state = State::HBlank;
+                    Self::set_lcd_status_mode(mmio, 0);
+                    self.check_and_trigger_stat_interrupt(mmio);
+                    break 'label;
+                }
+
                 if self.sprite_fetch_stall > 0 {
                     self.sprite_fetch_stall -= 1;
                     break 'label;
@@ -895,7 +990,11 @@ impl Ppu {
                     }
                 }
 
-                // Put a pixel from the FIFO on screen with sprite mixing
+                // Put a pixel from the FIFO on screen with sprite mixing.
+                // Stop visible output at x==160; the scheduled dot ends Mode 3.
+                if self.x >= 160 {
+                    break 'label;
+                }
                 if let Ok(bg_pixel) = self.fetcher.pixel_fifo.pop() {
                     let bg_pixel_idx = bg_pixel.color;
                     let bg_attrs = bg_pixel.attrs;
@@ -932,15 +1031,8 @@ impl Ppu {
                     }
 
                     self.x += 1;
-                    if self.x == 160 {
-                        // Mode 3 -> Mode 0 at the exact pixel-push that
-                        // produces x==160. Under the tick-before read model
-                        // the CPU samples FF41 at the end of the M-cycle, so
-                        // no early pretrigger is needed.
-                        self.state = State::HBlank;
-                        Self::set_lcd_status_mode(mmio, 0);
-                        self.check_and_trigger_stat_interrupt(mmio);
-                    }
+                    // Mode 3 -> Mode 0 (STAT bits + IRQ + state) is driven by
+                    // the scheduled dot at the top of this arm, not x==160.
                 }
             },
             State::HBlank => {
