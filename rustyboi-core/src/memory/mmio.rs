@@ -457,9 +457,19 @@ impl Mmio {
     }
 
     pub fn step_audio(&mut self) {
+        self.sync_apu_cc();
         let mut audio = self.audio.clone();
         audio.step(self);
         self.audio = audio;
+    }
+
+    /// Push the APU's 2 MHz cycle-counter inputs to the audio unit: the
+    /// frame-sequencer step (FS phase, maintained independently of DIV writes)
+    /// and the timer's internal counter (sub-step position). The controller
+    /// reconstructs Gambatte's `cycleCounter_` from these.
+    fn sync_apu_cc(&mut self) {
+        let ic = self.timer.internal_counter();
+        self.audio.sync_cc(ic);
     }
 
     pub fn generate_audio_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
@@ -1320,11 +1330,10 @@ impl memory::Addressable for Mmio {
                         input::JOYP => self.input.write(addr, value),
                         timer::DIV..=timer::TAC => self.timer.write(addr, value),
                 serial::SB..=serial::SC => self.serial.write(addr, value),
-                        audio::NR10..=audio::NR14 => self.audio.write(addr, value),
-                        audio::NR21..=audio::NR24 => self.audio.write(addr, value),
-                        audio::NR30..=audio::NR34 => self.audio.write(addr, value),
-                        audio::NR41..=audio::NR52 => self.audio.write(addr, value),
-                        audio::WAV_START..=audio::WAV_END => self.audio.write(addr, value),
+                        audio::NR10..=audio::NR52 | audio::WAV_START..=audio::WAV_END => {
+                            self.sync_apu_cc();
+                            self.audio.write(addr, value);
+                        }
                         REG_DMA => self.start_oam_dma(value),
                         ppu::LCD_CONTROL => self.write_lcd_control(value),
                         ppu::LCD_STATUS => self.write_lcd_status(value),
