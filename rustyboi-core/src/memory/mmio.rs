@@ -18,6 +18,10 @@ fn default_oam_high() -> [u8; 0x60] {
     [0; 0x60]
 }
 
+fn default_pending_oam_zero() -> std::cell::Cell<i16> {
+    std::cell::Cell::new(-1)
+}
+
 const BIOS_START: u16 = 0x0000;
 const BIOS_SIZE: usize = 256; // 256 bytes
 const BIOS_END: u16 = BIOS_START + BIOS_SIZE as u16 - 1;
@@ -150,6 +154,12 @@ pub struct Mmio {
     dma_start_pos: u8,
     #[serde(default)]
     dma_subcycle: u8, // dots elapsed within the current M-cycle (0..=3)
+    // CGB VRAM-source OAM-DMA conflict reads return OAM[oamDmaPos_] and then
+    // zero that OAM byte (Gambatte `nontrivial_read`). The read path is &self,
+    // so record the position here and apply the zero on the next DMA advance.
+    // -1 = none.
+    #[serde(skip, default = "default_pending_oam_zero")]
+    pending_oam_zero: std::cell::Cell<i16>,
 
     // Set true when the CPU writes to FF44 (LY). Consumed by the PPU on its
     // next step to reset internal scanline timing. Not part of save state.
@@ -246,6 +256,7 @@ impl Mmio {
             dma_pos: 0xFE,
             dma_start_pos: 0,
             dma_subcycle: 0,
+            pending_oam_zero: std::cell::Cell::new(-1),
             ly_write_pending: false,
             stat_register_write_pending: false,
             
@@ -654,6 +665,14 @@ impl Mmio {
     /// transfer when it reaches `dma_start_pos`, copies the corresponding
     /// source byte into OAM, and ends the transfer at byte 160.
     fn dma_advance_one_mcycle(&mut self) {
+        // Apply any deferred CGB VRAM-source conflict-read OAM zero before this
+        // M-cycle places a new byte (Gambatte zeroes inside the read itself).
+        let pending = self.pending_oam_zero.get();
+        if pending >= 0 {
+            self.oam.write(OAM_START + pending as u16, 0);
+            self.pending_oam_zero.set(-1);
+        }
+
         self.dma_pos = self.dma_pos.wrapping_add(1);
 
         if self.dma_pos == self.dma_start_pos {
@@ -860,7 +879,14 @@ impl Mmio {
         if self.cgb_features_enabled && self.dma_src_kind() != 3 && addr >= WRAM_START {
             return self.dma_conflict_wram_read(addr);
         }
-        self.oam.read(OAM_START + self.dma_pos as u16)
+        let byte = self.oam.read(OAM_START + self.dma_pos as u16);
+        // CGB with a VRAM source: the conflict read returns OAM[pos] but then
+        // zeroes that OAM byte (Gambatte `nontrivial_read`). Defer the zero to
+        // the next DMA advance so the &self read path can record it.
+        if self.cgb_features_enabled && self.dma_src_kind() == 2 {
+            self.pending_oam_zero.set(self.dma_pos as i16);
+        }
+        byte
     }
 
     /// Whether a CPU access to `addr` conflicts with the in-progress OAM DMA.
