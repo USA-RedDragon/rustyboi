@@ -99,6 +99,24 @@ impl<'a> Bus<'a> {
         // DMA's conflict area is then redirected into OAM[oamDmaPos_]. Ticking
         // the M-cycle first reproduces that ordering so `dma_pos` is the value
         // for this cycle when `mmio.write` resolves the conflict.
+        // VRAM writes during Mode 3 and OAM writes during Mode 2/3 are ignored
+        // by the hardware (the PPU owns the bus). Drop the write but still tick.
+        if ((0x8000..=0x9FFF).contains(&addr) || (0xFE00..=0xFE9F).contains(&addr))
+            && !self.mmio.dma_active()
+            && self.mmio.read(ppu::LCD_CONTROL) & 0x80 != 0
+        {
+            let mode = self.mmio.read(ppu::LCD_STATUS) & 0x03;
+            let blocked = if (0x8000..=0x9FFF).contains(&addr) {
+                mode == 3
+            } else {
+                mode == 2 || mode == 3
+            };
+            if blocked {
+                self.tick_m();
+                return;
+            }
+        }
+
         let tick_before = matches!(addr, 0xFF01..=0xFF02 | 0xFF04..=0xFF07 | 0xFF46 | 0xFF4A | 0xFF4B)
             || self.mmio.dma_active();
         if tick_before {
