@@ -995,6 +995,7 @@ impl Ppu {
                 self.line_cycle = 0;
                 self.internal_ly_val = 0;
                 self.stat_reg_committed = mmio.read(LCD_STATUS);
+                self.lyc_irq.set_cgb(mmio.is_cgb_features_enabled());
                 self.lyc_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
                 self.mstat_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
                 self.lyc_irq.lcd_reset();
