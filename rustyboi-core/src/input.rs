@@ -73,7 +73,10 @@ impl Input {
 impl Addressable for Input {
     fn read(&self, addr: u16) -> u8 {
         match addr {
-            JOYP => self.joyp,
+            // Bits 6-7 are unused and always read back as 1 (open bus). Bits
+            // 4-5 reflect the last-written select lines; bits 0-3 the button
+            // state of the selected group.
+            JOYP => self.joyp | 0xC0,
             _ => panic!("Input: Invalid read address {:04X}", addr),
         }
     }
@@ -81,24 +84,23 @@ impl Addressable for Input {
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
             JOYP => {
-                if value & JoypadBits::SelectButtons as u8 == 0 {
-                    // Select Buttons
-                    self.joyp = (self.joyp & 0b00110000)
-                        | ((!self.start as u8) << 3)
+                // Bits 4-5 hold exactly the written select lines (not the old
+                // ones); the low nibble is the selected group's pressed state.
+                let select = value & 0b0011_0000;
+                let low = if value & JoypadBits::SelectButtons as u8 == 0 {
+                    ((!self.start as u8) << 3)
                         | ((!self.select as u8) << 2)
                         | ((!self.b as u8) << 1)
-                        | (!self.a as u8);
+                        | (!self.a as u8)
                 } else if value & JoypadBits::SelectDirections as u8 == 0 {
-                    // Select Directions
-                    self.joyp = (self.joyp & 0b00110000)
-                        | ((!self.down as u8) << 3)
+                    ((!self.down as u8) << 3)
                         | ((!self.up as u8) << 2)
                         | ((!self.left as u8) << 1)
-                        | (!self.right as u8);
+                        | (!self.right as u8)
                 } else {
-                    // Neither selected
-                    self.joyp = 0b00001111;
-                }
+                    0b0000_1111
+                };
+                self.joyp = select | (low & 0x0F);
             },
             _ => panic!("Input: Invalid write address {:04X}", addr),
         }
