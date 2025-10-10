@@ -780,10 +780,22 @@ impl Ppu {
         // state; only its IRQ side-effects are gated by enable.
         if self.disabled {
             self.previous_stat_interrupt_line = false;
+            // STAT-write quirk (memory.cpp case 0x41): with the LCD off, an FF41
+            // write that newly enables LYC IRQ (0->1) while the LYC=LY flag is
+            // set flags a STAT IRQ.
+            let live_stat = mmio.read(LCD_STATUS);
+            let new_stat = live_stat & 0x78;
+            let old_stat = self.stat_reg_committed & 0x78;
+            let lycflag = live_stat & 0x04 != 0;
+            let old_lycen = old_stat & stat_irq::STAT_LYCEN != 0;
+            let new_lycen = new_stat & stat_irq::STAT_LYCEN != 0;
+            if lycflag && !old_lycen && new_lycen {
+                mmio.request_interrupt(registers::InterruptFlag::Lcd);
+            }
             // Keep the IRQ sources' shadow registers current so a later enable
             // sees the right values (Gambatte calls lcdstat/lycRegChange even
             // while off, just skipping event scheduling).
-            self.stat_reg_committed = mmio.read(LCD_STATUS) & 0x78;
+            self.stat_reg_committed = new_stat;
             return;
         }
 
