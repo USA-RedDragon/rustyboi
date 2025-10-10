@@ -93,6 +93,21 @@ impl Timer {
         self.internal_counter
     }
 
+    /// CGB STOP speed switch. Gambatte's `Tima::speedChange` shifts the timer's
+    /// `lastUpdate_` back by 4 T-cycles when the timer is enabled at one of the
+    /// faster frequencies (`tac & 0x07 >= 0x05`), i.e. TIMA effectively counts 4
+    /// extra cycles at the switch (potentially one extra increment) before the
+    /// DIV reset that follows. We reproduce that by running 4 extra counter
+    /// ticks (with edge detection) prior to the DIV reset.
+    pub fn speed_change(&mut self) {
+        if (self.tac & 0x07) >= 0x05 {
+            for _ in 0..4 {
+                self.internal_counter = self.internal_counter.wrapping_add(1);
+                self.update_edge();
+            }
+        }
+    }
+
     pub fn step(&mut self, mmio: &mut mmio::Mmio) {
         if self.reload_pending > 0 {
             self.reload_pending -= 1;
