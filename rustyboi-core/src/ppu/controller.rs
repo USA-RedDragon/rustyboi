@@ -533,8 +533,13 @@ impl Ppu {
         let mut cycles: i32 = scx + (1 - is_cgb as i32);
         cycles += 167; // targetx - xpos, xpos=0 at tile-loop start
 
-        // Window: if it will start on this line in range.
+        // Window: if it will start on this line in range. Gambatte sets
+        // `nwx = wx` and adds 6; sprites then split into a `spx <= nwx` group
+        // (firstTileXpos = endx%8) and a `spx > nwx` group (firstTileXpos =
+        // nwx+1, prevTileNo reset). nwx stays 0xFF when no window starts.
+        let mut nwx: i32 = 0xFF;
         if self.window_will_start(mmio, is_cgb) {
+            nwx = mmio.read(WX) as i32;
             cycles += 6;
         }
 
@@ -542,47 +547,43 @@ impl Ppu {
         let obj_enabled = (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0;
         if obj_enabled || is_cgb {
             let first_tile_xpos = (8 - scx) % 8; // = endx % 8
-            let mut prev_tile_no: i32 = -1;
-            let mut first = true;
-            let mut x0_seen = false;
+            let target_x = 167;
             let mut sprite_xs: Vec<i32> = self.sprites_on_line.iter().map(|s| s.x as i32).collect();
             sprite_xs.sort_unstable();
-            for &spx in &sprite_xs {
-                if spx == 0 {
-                    x0_seen = true;
-                }
-                if first {
-                    // First-sprite special: fno=1, xpos=0 at line start.
-                    // if (fno + spx - xpos) < 5: cycles += 11 - (fno+spx-xpos)
-                    let v = 1 + spx; // fno + spx - xpos
-                    if v < 5 {
-                        cycles += 11 - v;
-                    } else {
-                        // Falls through to the general per-sprite path below.
-                        let dist = (spx - first_tile_xpos).rem_euclid(8);
-                        let tile_no = (spx - first_tile_xpos) & !7;
-                        let mut c = 6;
-                        if dist < 5 && tile_no != prev_tile_no {
-                            c = 11 - dist;
-                        }
-                        cycles += c;
-                        prev_tile_no = tile_no;
+            let mut idx = 0usize;
+
+            // addSpriteCycles helper: accumulates for sprites with spx <= max_spx.
+            let add_sprite_cycles = |xs: &[i32], idx: &mut usize, max_spx: i32,
+                                     first_tile_xpos: i32, mut prev_tile_no: i32,
+                                     cycles: &mut i32| {
+                while *idx < xs.len() && xs[*idx] <= max_spx {
+                    let spx = xs[*idx];
+                    let dist = (spx - first_tile_xpos).rem_euclid(8);
+                    let tile_no = (spx - first_tile_xpos) & !7;
+                    let mut c = 6;
+                    if dist < 5 && tile_no != prev_tile_no {
+                        c = 11 - dist;
                     }
-                    first = false;
-                    continue;
+                    prev_tile_no = tile_no;
+                    *cycles += c;
+                    *idx += 1;
                 }
-                let dist = (spx - first_tile_xpos).rem_euclid(8);
-                let tile_no = (spx - first_tile_xpos) & !7;
-                let mut c = 6;
-                if dist < 5 && tile_no != prev_tile_no {
-                    c = 11 - dist;
+            };
+
+            if idx < sprite_xs.len() {
+                // First-sprite special case: fno=1, xpos=0.
+                let spx0 = sprite_xs[0];
+                let prev_tile_no = (0 - first_tile_xpos) & !7; // (xpos - firstTileXpos) & -8
+                if 1 + spx0 < 5 && spx0 <= nwx && spx0 <= target_x {
+                    cycles += 11 - (1 + spx0);
+                    idx += 1;
                 }
-                cycles += c;
-                prev_tile_no = tile_no;
-            }
-            // Sprite-at-x0 fine adjustment.
-            if x0_seen {
-                cycles -= scx.min(5);
+                if nwx < target_x {
+                    add_sprite_cycles(&sprite_xs, &mut idx, nwx, first_tile_xpos, prev_tile_no, &mut cycles);
+                    add_sprite_cycles(&sprite_xs, &mut idx, target_x, nwx + 1, 1, &mut cycles);
+                } else {
+                    add_sprite_cycles(&sprite_xs, &mut idx, target_x, first_tile_xpos, prev_tile_no, &mut cycles);
+                }
             }
         }
 
