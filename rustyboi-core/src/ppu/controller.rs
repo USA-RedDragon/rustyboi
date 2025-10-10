@@ -44,10 +44,12 @@ const M0IRQ_OFFSET: i64 = 0;
 // Mode-2 STAT IRQ fires this many dots relative to the schedule formula; the
 // renderer-timed render tests need it 2 dots earlier. Swept against the suite.
 const M2IRQ_OFFSET: i64 = -2;
-// Absolute-clock offset attributed to an FF41/FF45 register write, single and
-// double speed. The write hook fires after the store, before the M-cycle ticks.
+// Absolute-clock offset attributed to an FF41/FF45 register write. The write
+// hook fires after the store but before this M-cycle's dots tick; `abs_cc`
+// advances by 1<<ds per dot, so at double speed the write's true cycle is a
+// full M-cycle (4 machine cycles) behind. Swept against the suite.
 const WRITE_CC_OFFSET: i64 = -1;
-const WRITE_CC_OFFSET_DS: i64 = -1;
+const WRITE_CC_OFFSET_DS: i64 = -4;
 const MODE2_STAT_PRETRIGGER_DOT: u128 = 452;
 // Within line 153 (the last VBlank line) the LY register is held at 153 only
 // briefly; after this many dots it reads 0, even though the line itself
