@@ -934,6 +934,9 @@ impl Mmio {
             // counters, so resetting DIV is the only resync we need; the
             // per-T-cycle stepping in gb.rs already produces the correct
             // half-rate PPU/audio cadence in double-speed.
+            // Gambatte applies `Tima::speedChange` (a 4-cycle TIMA phase shift
+            // for enabled fast timers) before the DIV reset; mirror that order.
+            self.timer.speed_change();
             self.timer.write(timer::DIV, 0);
         }
     }
