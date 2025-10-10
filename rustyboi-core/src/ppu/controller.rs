@@ -40,7 +40,7 @@ const DMG_MODE0_OFFSET: i32 = 4;
 const CGB_MODE0_OFFSET: i32 = 4;
 // Offset (dots) between the renderer's scheduled mode-0 transition and the
 // event-model mode-0 STAT IRQ fire time. Tuned against the suite.
-const M0IRQ_OFFSET: i64 = 0;
+const M0IRQ_OFFSET: i64 = -1;
 // Mode-2 STAT IRQ fires this many dots relative to the schedule formula; the
 // renderer-timed render tests need it 2 dots earlier. Swept against the suite.
 const M2IRQ_OFFSET: i64 = -2;
