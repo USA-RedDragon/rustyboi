@@ -2,6 +2,7 @@ use crate::cpu::registers;
 use crate::memory::mmio;
 use crate::memory::Addressable;
 use crate::ppu::fetcher;
+use crate::ppu::stat_irq;
 use serde::{Deserialize, Serialize};
 
 pub const LCD_CONTROL: u16 = 0xFF40;
@@ -37,8 +38,17 @@ const CGB_FIRST_FRAME_ARM_DOT: u128 = 86;
 // for the scheduled Mode 3 -> Mode 0 transition. Swept against the full suite.
 const DMG_MODE0_OFFSET: i32 = 4;
 const CGB_MODE0_OFFSET: i32 = 4;
+// Offset (dots) between the renderer's scheduled mode-0 transition and the
+// event-model mode-0 STAT IRQ fire time. Tuned against the suite.
+const M0IRQ_OFFSET: i64 = 0;
+// Mode-2 STAT IRQ fires this many dots relative to the schedule formula; the
+// renderer-timed render tests need it 2 dots earlier. Swept against the suite.
+const M2IRQ_OFFSET: i64 = -2;
+// Absolute-clock offset attributed to an FF41/FF45 register write, single and
+// double speed. The write hook fires after the store, before the M-cycle ticks.
+const WRITE_CC_OFFSET: i64 = -1;
+const WRITE_CC_OFFSET_DS: i64 = -1;
 const MODE2_STAT_PRETRIGGER_DOT: u128 = 452;
-const LY0_MODE2_STAT_PRETRIGGER_DOT: u128 = 454;
 // Within line 153 (the last VBlank line) the LY register is held at 153 only
 // briefly; after this many dots it reads 0, even though the line itself
 // continues until dot 455. This matches Gambatte's getLycCmpLy threshold
@@ -220,6 +230,33 @@ pub struct Ppu {
     #[serde(default)]
     scheduled_mode0_dot: Option<u128>,
 
+    // Event-scheduled STAT/mode/LYC IRQ model (Gambatte port). `abs_cc` is a
+    // monotonic absolute dot clock; `line_cycle` (0..455) tracks position
+    // within the current 456-dot line. Together they reproduce Gambatte's
+    // `lyCounter` (`time` = abs_cc when LY next increments).
+    #[serde(default)]
+    abs_cc: u64,
+    #[serde(default)]
+    line_cycle: u32,
+    #[serde(default)]
+    internal_ly_val: u8,
+    #[serde(default)]
+    sched_lycirq: u64,
+    #[serde(default)]
+    sched_m1irq: u64,
+    #[serde(default)]
+    sched_m2irq: u64,
+    #[serde(default)]
+    sched_m0irq: u64,
+    #[serde(default)]
+    sched_oneshot_statirq: u64,
+    #[serde(default)]
+    lyc_irq: stat_irq::LycIrq,
+    #[serde(default)]
+    mstat_irq: stat_irq::MStatIrq,
+    #[serde(default)]
+    stat_reg_committed: u8,
+
     #[serde(with = "serde_bytes")]
     fb_a: [u8; FRAMEBUFFER_SIZE],
     #[serde(with = "serde_bytes")]
@@ -269,6 +306,17 @@ impl Ppu {
             mode0_pretriggered_this_line: false,
             m3_pixels_discarded: 0,
             scheduled_mode0_dot: None,
+            abs_cc: 0,
+            line_cycle: 0,
+            internal_ly_val: 0,
+            sched_lycirq: stat_irq::DISABLED_TIME,
+            sched_m1irq: stat_irq::DISABLED_TIME,
+            sched_m2irq: stat_irq::DISABLED_TIME,
+            sched_m0irq: stat_irq::DISABLED_TIME,
+            sched_oneshot_statirq: stat_irq::DISABLED_TIME,
+            lyc_irq: stat_irq::LycIrq::default(),
+            mstat_irq: stat_irq::MStatIrq::default(),
+            stat_reg_committed: 0,
             fb_a: [0; FRAMEBUFFER_SIZE],
             fb_b: [0; FRAMEBUFFER_SIZE],
             color_fb_a: [0; FRAMEBUFFER_SIZE * 3],
@@ -452,6 +500,128 @@ impl Ppu {
         }
     }
 
+    // ---- Event-scheduled STAT IRQ model (Gambatte port) ----
+
+    fn ly_counter(&self, mmio: &mmio::Mmio) -> stat_irq::LyCounter {
+        let ds = mmio.is_double_speed_mode();
+        // `abs_cc` is in machine cycles (advances by 1<<ds per dot). `time` is
+        // the machine-cycle clock at the next LY increment.
+        let dots_to_next_line = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as u64;
+        stat_irq::LyCounter {
+            ly: self.internal_ly() as u32,
+            time: self.abs_cc + (dots_to_next_line << ds as u32),
+            ds,
+        }
+    }
+
+    // The internal (clean) LY derived from the line clock, independent of the
+    // LY register's mid-line transients (line 153 ly=0, etc.).
+    fn internal_ly(&self) -> u8 {
+        self.internal_ly_val
+    }
+
+    /// Arm `sched_m0irq` for the current line from the renderer's predicted
+    /// mode-0 start (`scheduled_mode0_dot`, a within-line dot). Converted to the
+    /// absolute clock. If no closed-form mode-0 dot is available (window/first
+    /// line), fall back to the m0 prediction from the m3 length.
+    fn arm_m0irq_for_current_line(&mut self, mmio: &mmio::Mmio) {
+        let is_cgb = mmio.is_cgb_features_enabled();
+        let mode0_within_line = match self.scheduled_mode0_dot {
+            Some(d) => d as i64,
+            None => {
+                let m3_len = self.compute_m3_length(mmio, is_cgb);
+                let offset = if is_cgb { CGB_MODE0_OFFSET } else { DMG_MODE0_OFFSET };
+                self.ticks as i64 + m3_len as i64 + offset as i64
+            }
+        };
+        // The renderer's "current dot" abs value is abs_cc-1 (advanced at top of
+        // step). Dots remaining until mode 0 = mode0_within_line - ticks.
+        let remaining = mode0_within_line - self.ticks as i64;
+        let off = M0IRQ_OFFSET;
+        let ds = mmio.is_double_speed_mode();
+        let dsf = 1i64 << ds as i32;
+        let abs = (self.abs_cc as i64 - dsf + (remaining + off) * dsf).max(0) as u64;
+        self.sched_m0irq = abs;
+    }
+
+    /// Recompute all scheduled IRQ event times from scratch at the current
+    /// `abs_cc` (used on LCD enable / LY-counter reset).
+    fn reschedule_all_stat_events(&mut self, mmio: &mmio::Mmio) {
+        let lc = self.ly_counter(mmio);
+        let cc = self.abs_cc;
+        let stat = self.stat_reg_committed;
+        self.lyc_irq.reschedule(&lc, cc);
+        self.sched_lycirq = self.lyc_irq.time;
+        self.sched_m1irq = stat_irq::mode1_irq_schedule(&lc, cc);
+        let m2 = stat_irq::mode2_irq_schedule(stat, &lc, cc);
+        self.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off()) as u64 };
+        // m0irq is scheduled from the renderer's mode-0 prediction; (re)armed
+        // when entering pixel transfer. Leave as-is here.
+    }
+
+    /// Fire any STAT IRQ events whose scheduled time has arrived at the current
+    /// `abs_cc`. Called once per dot from `step`.
+    fn dispatch_stat_events(&mut self, mmio: &mut mmio::Mmio) {
+        let ds = mmio.is_double_speed_mode();
+        let cc = self.abs_cc;
+
+        if self.sched_oneshot_statirq <= cc {
+            mmio.request_interrupt(registers::InterruptFlag::Lcd);
+            self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
+        }
+        // Order matches Gambatte's nextMemEvent priority for ties.
+        if self.sched_m1irq <= cc {
+            let stat = self.stat_reg_committed;
+            if self.mstat_irq.do_m1_event(stat) {
+                mmio.request_interrupt(registers::InterruptFlag::Lcd);
+            }
+            self.sched_m1irq = self.sched_m1irq
+                .wrapping_add((stat_irq::LCD_CYCLES_PER_FRAME) << ds as u32);
+        }
+        if self.sched_lycirq <= cc {
+            let lc = self.ly_counter(mmio);
+            if self.lyc_irq.do_event(&lc) {
+                mmio.request_interrupt(registers::InterruptFlag::Lcd);
+            }
+            self.sched_lycirq = self.lyc_irq.time;
+        }
+        if self.sched_m2irq <= cc {
+            self.do_mode2_irq_event(mmio, ds);
+        }
+        if self.sched_m0irq <= cc {
+            let stat = self.stat_reg_committed;
+            let ly = self.internal_ly() as u32;
+            if self.mstat_irq.do_m0_event(ly, stat, self.lyc_irq.lyc_reg()) {
+                mmio.request_interrupt(registers::InterruptFlag::Lcd);
+            }
+            // m0irq re-arm happens at next pixel-transfer entry.
+            self.sched_m0irq = stat_irq::DISABLED_TIME;
+        }
+    }
+
+    fn m2_off() -> i64 {
+        M2IRQ_OFFSET
+    }
+
+    fn do_mode2_irq_event(&mut self, mmio: &mut mmio::Mmio, ds: bool) {
+        // doMode2IrqEvent: the LY used is the *next* line's LY if the m2 event
+        // is within 16 cycles of the ly increment.
+        let lc = self.ly_counter(mmio);
+        let near_ly_inc = lc.time.saturating_sub(self.sched_m2irq) < 16;
+        let ly = if near_ly_inc {
+            if lc.ly == stat_irq::LCD_LINES_PER_FRAME - 1 { 0 } else { lc.ly + 1 }
+        } else {
+            lc.ly
+        };
+        let stat = self.stat_reg_committed;
+        let fired = self.mstat_irq.do_m2_event(ly, stat, self.lyc_irq.lyc_reg());
+        if fired {
+            mmio.request_interrupt(registers::InterruptFlag::Lcd);
+        }
+        let delta = stat_irq::mode2_reschedule_delta(ly, stat, ds);
+        self.sched_m2irq = self.sched_m2irq.wrapping_add(delta);
+    }
+
     /// Calculate the current state of the STAT interrupt line based on all interrupt sources
     fn calculate_stat_interrupt_line(&self, mmio: &mmio::Mmio) -> bool {
         let stat_register = mmio.read(LCD_STATUS);
@@ -485,32 +655,6 @@ impl Ppu {
         interrupt_line
     }
 
-    /// Like `calculate_stat_interrupt_line`, but ignores the Mode-2 (OAM)
-    /// source. The Mode-2 STAT IRQ is delivered exclusively by the scheduled
-    /// mode-2 entry / pretrigger path; a CPU write to FF40/FF41/FF45 that
-    /// enables the mode-2 source must never fire it immediately (matching
-    /// Gambatte, where the mode-2 IRQ is a discrete scheduled event that the
-    /// write only reschedules for the next occurrence). Used by the STAT
-    /// register write hook for its edge decision.
-    fn calculate_stat_interrupt_line_excluding_mode2(&self, mmio: &mmio::Mmio) -> bool {
-        let stat_register = mmio.read(LCD_STATUS);
-        let mode_0_int_enable = (stat_register & (1 << 3)) != 0;
-        let mode_1_int_enable = (stat_register & (1 << 4)) != 0;
-        let lyc_int_enable = (stat_register & (1 << 6)) != 0;
-        let current_mode = stat_register & 0x03;
-        let lyc_equals_ly = (stat_register & (1 << 2)) != 0;
-
-        let mut interrupt_line = false;
-        match current_mode {
-            0 if mode_0_int_enable => interrupt_line = true,
-            1 if mode_1_int_enable => interrupt_line = true,
-            _ => {}
-        }
-        if lyc_int_enable && lyc_equals_ly {
-            interrupt_line = true;
-        }
-        interrupt_line
-    }
 
     // Cycle-exact Mode 3 length (dots from M3 start to xpos=167), ported from
     // Gambatte's predictCyclesUntilXpos_fn / addSpriteCycles. Sprites must be
@@ -614,17 +758,12 @@ impl Ppu {
         self.scheduled_mode0_dot = None;
     }
 
-    /// Check for STAT interrupt rising edge and trigger interrupt if needed
+    /// Latch the current wired-OR STAT line state for edge bookkeeping. IRQ
+    /// delivery is now handled exclusively by the event-scheduled model
+    /// (`dispatch_stat_events` + the FF41/FF45 write hooks), so this no longer
+    /// fires interrupts.
     fn check_and_trigger_stat_interrupt(&mut self, mmio: &mut mmio::Mmio) {
-        let current_stat_line = self.calculate_stat_interrupt_line(mmio);
-        
-        // Trigger interrupt on rising edge (low to high transition)
-        if current_stat_line && !self.previous_stat_interrupt_line {
-            mmio.request_interrupt(registers::InterruptFlag::Lcd);
-        }
-        
-        // Update previous state for next cycle
-        self.previous_stat_interrupt_line = current_stat_line;
+        self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
     }
 
     /// Re-evaluate the LYC=LY flag and the STAT edge after a CPU write to
@@ -635,28 +774,148 @@ impl Ppu {
     /// STAT source whose underlying condition is already true must produce
     /// an immediate rising edge.
     pub fn on_stat_register_write(&mut self, mmio: &mut mmio::Mmio) {
+        // Keep the LYC=LY readback flag (FF41 bit 2) in sync regardless of LCD
+        // state; only its IRQ side-effects are gated by enable.
         if self.disabled {
-            // STAT line is held low while the LCD is off.
             self.previous_stat_interrupt_line = false;
+            // Keep the IRQ sources' shadow registers current so a later enable
+            // sees the right values (Gambatte calls lcdstat/lycRegChange even
+            // while off, just skipping event scheduling).
+            self.stat_reg_committed = mmio.read(LCD_STATUS) & 0x78;
             return;
         }
+
+        let new_stat = mmio.read(LCD_STATUS) & 0x78;
+        let new_lyc = mmio.read(LYC);
+        let old_stat = self.stat_reg_committed & 0x78;
+        let old_lyc = self.lyc_irq.lyc_reg();
+
+        // FF41 (STAT) write.
+        if new_stat != old_stat {
+            self.lcdstat_change(new_stat, mmio);
+        }
+        // FF45 (LYC) write.
+        if new_lyc != old_lyc {
+            self.lyc_reg_change(new_lyc, mmio);
+        }
+
+        // Re-sync the LYC=LY readback flag after the change.
+        self.sync_lyc_flag(mmio);
+        self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
+    }
+
+    fn sync_lyc_flag(&self, mmio: &mut mmio::Mmio) {
         let effective_ly = self.effective_ly_for_lyc_compare(mmio);
         if mmio.read(LYC) == effective_ly {
             mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) | (1 << 2));
         } else {
             mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) & !(1 << 2));
         }
-        // Fire only on a rising edge produced by a non-Mode-2 source. The
-        // Mode-2 STAT IRQ is delivered exclusively by the scheduled mode-2
-        // entry / pretrigger path, so re-enabling the mode-2 source via a CPU
-        // write must not produce a spurious immediate interrupt. The full
-        // wired-OR line (including mode 2) is still latched for subsequent
-        // edge detection.
-        let line_excl_m2 = self.calculate_stat_interrupt_line_excluding_mode2(mmio);
-        if line_excl_m2 && !self.previous_stat_interrupt_line {
+    }
+
+    /// The m0 IRQ time to use in the stat-change immediate-trigger check.
+    /// Mirrors Gambatte: when the scheduled m0 IRQ is disabled but the current
+    /// line's mode 0 is still ahead, predict it from the renderer; otherwise use
+    /// the scheduled value.
+    fn m0_irq_time_for_trigger(&self, _mmio: &mmio::Mmio, lc: &stat_irq::LyCounter, _cc: u64) -> u64 {
+        // Gambatte's statChangeTriggers* needs the m0 IRQ time of the *current
+        // line*. Our `sched_m0irq` may hold a stale current-line value during
+        // HBlank (it is only cleared to DISABLED when the m0 source fires). The
+        // DMG/CGB branch logic only cares whether m0IrqTime is before or after
+        // `lyCounter.time()` (next-LY): if mode 0 is already active (HBlank) the
+        // current line's m0 has passed and the next is on a later line, i.e.
+        // `>= lc.time`; during mode 2/3 it is still ahead this line (`< time`).
+        match self.state {
+            // Mode 0 active: report a time at/after the next LY so the "m0 has
+            // occurred" branch is taken.
+            State::HBlank => lc.time,
+            // VBlank: no m0 this line; far future.
+            State::VBlank => stat_irq::DISABLED_TIME,
+            // Mode 2/3: current line's m0 is ahead but before next LY.
+            _ => {
+                if self.sched_m0irq == stat_irq::DISABLED_TIME {
+                    lc.time.saturating_sub(1)
+                } else {
+                    self.sched_m0irq.min(lc.time.saturating_sub(1))
+                }
+            }
+        }
+    }
+
+    /// Port of LCD::lcdstatChange. `data` is the new FF41 enable bits (& 0x78).
+    fn lcdstat_change(&mut self, data: u8, mmio: &mut mmio::Mmio) {
+        let cc = self.write_cc(mmio.is_double_speed_mode());
+        let lc = self.ly_counter(mmio);
+        let old = self.stat_reg_committed & 0x78;
+        self.stat_reg_committed = data;
+        self.lyc_irq.stat_reg_change(data, &lc, cc);
+
+        // If m0 IRQ just got enabled and isn't scheduled, arm it from the
+        // current line's mode-0 prediction.
+        if (data & stat_irq::STAT_M0EN != 0) && self.sched_m0irq == stat_irq::DISABLED_TIME {
+            self.arm_m0irq_for_current_line(mmio);
+        }
+        let m2 = stat_irq::mode2_irq_schedule(data, &lc, cc);
+        self.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off()) as u64 };
+        self.sched_lycirq = self.lyc_irq.time;
+
+        let cgb = mmio.is_cgb_features_enabled();
+        let lyc_reg = self.lyc_irq.lyc_reg();
+        // Gambatte's statChangeTriggersStatIrqDmg recomputes the current line's
+        // m0 IRQ time when it is unscheduled but mode 0 is still ahead this
+        // line. Reproduce that so enabling m0 during mode 2/3 sees a future m0.
+        let m0_for_trigger = self.m0_irq_time_for_trigger(mmio, &lc, cc);
+        let triggers = if cgb {
+            stat_irq::stat_change_triggers_cgb(old, data, &lc, cc, m0_for_trigger, lyc_reg)
+        } else {
+            stat_irq::stat_change_triggers_dmg(old, &lc, cc, m0_for_trigger, lyc_reg)
+        };
+        if triggers {
             mmio.request_interrupt(registers::InterruptFlag::Lcd);
         }
-        self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
+
+        self.mstat_irq.stat_reg_change(
+            data,
+            self.sched_m0irq,
+            self.sched_m1irq,
+            self.sched_m2irq,
+            cc,
+            cgb,
+        );
+    }
+
+    /// Port of LCD::lycRegChange.
+    fn lyc_reg_change(&mut self, data: u8, mmio: &mut mmio::Mmio) {
+        let old = self.lyc_irq.lyc_reg();
+        if data == old {
+            return;
+        }
+        let cc = self.write_cc(mmio.is_double_speed_mode());
+        let lc = self.ly_counter(mmio);
+        let stat = self.stat_reg_committed;
+        let cgb = mmio.is_cgb_features_enabled();
+        let ds = mmio.is_double_speed_mode();
+
+        self.lyc_irq.lyc_reg_change(data, &lc, cc);
+        self.mstat_irq
+            .lyc_reg_change(data, self.sched_m0irq, self.sched_m2irq, cc, ds, cgb);
+        self.sched_lycirq = self.lyc_irq.time;
+
+        if stat_irq::lyc_change_triggers_stat_irq(old, data, &lc, cc, stat, self.sched_m0irq, cgb) {
+            if cgb && !ds {
+                self.sched_oneshot_statirq = cc + 5;
+            } else {
+                mmio.request_interrupt(registers::InterruptFlag::Lcd);
+            }
+        }
+    }
+
+    /// The absolute clock value attributed to a register write. The write hook
+    /// fires after the FF4x store but before this M-cycle's 4 dots tick, so the
+    /// renderer's current dot is `abs_cc - 1`.
+    fn write_cc(&self, ds: bool) -> u64 {
+        let off = if ds { WRITE_CC_OFFSET_DS } else { WRITE_CC_OFFSET };
+        (self.abs_cc as i64 + off).max(0) as u64
     }
 
     /// LY value used for the LYC=LY comparison. In Gambatte the compare uses
@@ -682,69 +941,14 @@ impl Ppu {
 
     fn enter_scheduled_mode2(&mut self, mmio: &mut mmio::Mmio) {
         Self::set_lcd_status_mode(mmio, 2);
-        if self.mode2_irq_pretriggered_for_next_line {
-            self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
-            self.mode2_irq_pretriggered_for_next_line = false;
-        } else {
-            self.check_and_trigger_stat_interrupt(mmio);
-        }
-    }
-
-    fn pretrigger_next_line_mode2_stat_interrupt(
-        &mut self,
-        mmio: &mut mmio::Mmio,
-        next_ly: u8,
-    ) {
-        if self.mode2_irq_pretriggered_for_next_line {
-            return;
-        }
-
-        let stat_register = mmio.read(LCD_STATUS);
-        let mode_2_int_enable = (stat_register & (1 << 5)) != 0;
-        if !mode_2_int_enable {
-            return;
-        }
-
-        self.mode2_irq_pretriggered_for_next_line = true;
-
-        let mode_0_int_enable = (stat_register & (1 << 3)) != 0;
-        if next_ly != 0 && mode_0_int_enable {
-            return;
-        }
-
-        let mode_1_int_enable = (stat_register & (1 << 4)) != 0;
-        let lyc_int_enable = (stat_register & (1 << 6)) != 0;
-        let lyc = mmio.read(LYC);
-        let blocked_by_mode_1 = next_ly == 0 && mode_1_int_enable;
-        let blocked_by_lyc = lyc_int_enable
-            && if next_ly == 0 {
-                next_ly == lyc
-            } else {
-                next_ly.wrapping_sub(1) == lyc
-            };
-
-        if blocked_by_mode_1 || blocked_by_lyc {
-            return;
-        }
-
-        mmio.request_interrupt(registers::InterruptFlag::Lcd);
+        // IRQ delivery is handled by the event model; just latch the line.
+        self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
+        self.mode2_irq_pretriggered_for_next_line = false;
     }
 
     pub fn step_scheduled_stat_events(&mut self, mmio: &mut mmio::Mmio) {
         if self.disabled {
             return;
-        }
-
-        match self.state {
-            State::HBlank if self.ticks == MODE2_STAT_PRETRIGGER_DOT && mmio.read(LY) < 143 => {
-                self.pretrigger_next_line_mode2_stat_interrupt(mmio, mmio.read(LY).saturating_add(1));
-            }
-            State::VBlank if self.ticks == LY0_MODE2_STAT_PRETRIGGER_DOT
-                && (mmio.read(LY) == 153 || self.line_153_ly_zeroed) =>
-            {
-                self.pretrigger_next_line_mode2_stat_interrupt(mmio, 0);
-            }
-            _ => {}
         }
 
         // FF41 mode-bit read-back anticipation: in the last 3 dots of an
@@ -784,6 +988,18 @@ impl Ppu {
                 Self::set_lcd_status_mode(mmio, 0);
                 self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
                 self.check_and_trigger_stat_interrupt(mmio);
+                // Initialize the event-scheduled IRQ clock at enable: LY=0,
+                // line_cycle=0. Mirror Gambatte's lcdcChange enable branch.
+                self.line_cycle = 0;
+                self.internal_ly_val = 0;
+                self.stat_reg_committed = mmio.read(LCD_STATUS);
+                self.lyc_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
+                self.mstat_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
+                self.lyc_irq.lcd_reset();
+                self.mstat_irq.lcd_reset(self.lyc_irq.lyc_reg());
+                self.reschedule_all_stat_events(mmio);
+                self.sched_m0irq = stat_irq::DISABLED_TIME;
+                self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
             } else {
                 return;
             }
@@ -798,6 +1014,20 @@ impl Ppu {
             return;
         }
 
+        // Fire any scheduled STAT IRQ events that have come due at this dot,
+        // then advance the clean event clock by one dot (phase-locked with the
+        // renderer's 456-dot line).
+        self.dispatch_stat_events(mmio);
+        self.abs_cc += 1 << mmio.is_double_speed_mode() as u32;
+        self.line_cycle += 1;
+        if self.line_cycle >= stat_irq::LCD_CYCLES_PER_LINE {
+            self.line_cycle = 0;
+            self.internal_ly_val += 1;
+            if self.internal_ly_val as u32 >= stat_irq::LCD_LINES_PER_FRAME {
+                self.internal_ly_val = 0;
+            }
+        }
+
         // CPU writes to FF44 (LY) reset the line counter to 0 and re-arm the
         // PPU at the start of an OAM search.
         if mmio.take_ly_write_pending() {
@@ -805,6 +1035,13 @@ impl Ppu {
             mmio.write_ly_from_ppu(0);
             self.state = State::OAMSearch;
             self.enter_scheduled_mode2(mmio);
+            self.line_cycle = 0;
+            self.internal_ly_val = 0;
+            self.stat_reg_committed = mmio.read(LCD_STATUS);
+            self.lyc_irq.lcd_reset();
+            self.mstat_irq.lcd_reset(self.lyc_irq.lyc_reg());
+            self.reschedule_all_stat_events(mmio);
+            self.sched_m0irq = stat_irq::DISABLED_TIME;
         }
 
         // LYC=LY compare uses an "effective LY" that anticipates the
@@ -921,6 +1158,12 @@ impl Ppu {
                         let dot = self.ticks as i64 + m3_len as i64 + offset as i64;
                         self.scheduled_mode0_dot = Some(dot.max(0) as u128);
                     }
+                    // Arm the mode-0 (HBlank) STAT IRQ event at the predicted
+                    // mode-0 start, in absolute clock terms. Gambatte schedules
+                    // memevent_m0irq only when m0 is enabled, but keeps the time
+                    // current for FF41/FF45 immediate-trigger checks; we always
+                    // arm it (dispatch gates on the enable in mstat_irq).
+                    self.arm_m0irq_for_current_line(mmio);
                 }
             },
             State::PixelTransfer => 'label: {
@@ -1611,60 +1854,10 @@ mod tests {
     use crate::cpu::SM83;
     use crate::memory::Addressable;
 
-    fn write_stat_interrupt_enables(mmio: &mut mmio::Mmio, enables: u8) {
-        mmio.write(LCD_STATUS, enables & 0x78);
-    }
-
-    #[test]
-    fn scheduled_mode2_event_fires_at_dot_452_for_next_visible_line() {
-        let mut mmio = mmio::Mmio::new();
-        let mut ppu = Ppu::new();
-
-        ppu.disabled = false;
-        ppu.state = State::HBlank;
-        ppu.ticks = MODE2_STAT_PRETRIGGER_DOT;
-        mmio.write_ly_from_ppu(0);
-        write_stat_interrupt_enables(&mut mmio, 1 << 5);
-
-        ppu.step_scheduled_stat_events(&mut mmio);
-
-        assert_ne!(mmio.read(registers::INTERRUPT_FLAG) & registers::InterruptFlag::Lcd as u8, 0);
-        assert!(ppu.mode2_irq_pretriggered_for_next_line);
-    }
-
-    #[test]
-    fn scheduled_mode2_event_is_blocked_by_mode0_for_nonzero_lines() {
-        let mut mmio = mmio::Mmio::new();
-        let mut ppu = Ppu::new();
-
-        ppu.disabled = false;
-        ppu.state = State::HBlank;
-        ppu.ticks = MODE2_STAT_PRETRIGGER_DOT;
-        mmio.write_ly_from_ppu(0);
-        write_stat_interrupt_enables(&mut mmio, (1 << 5) | (1 << 3));
-
-        ppu.step_scheduled_stat_events(&mut mmio);
-
-        assert_eq!(mmio.read(registers::INTERRUPT_FLAG) & registers::InterruptFlag::Lcd as u8, 0);
-        assert!(ppu.mode2_irq_pretriggered_for_next_line);
-    }
-
-    #[test]
-    fn scheduled_ly0_mode2_event_is_blocked_by_mode1() {
-        let mut mmio = mmio::Mmio::new();
-        let mut ppu = Ppu::new();
-
-        ppu.disabled = false;
-        ppu.state = State::VBlank;
-        ppu.ticks = LY0_MODE2_STAT_PRETRIGGER_DOT;
-        mmio.write_ly_from_ppu(153);
-        write_stat_interrupt_enables(&mut mmio, (1 << 5) | (1 << 4));
-
-        ppu.step_scheduled_stat_events(&mut mmio);
-
-        assert_eq!(mmio.read(registers::INTERRUPT_FLAG) & registers::InterruptFlag::Lcd as u8, 0);
-        assert!(ppu.mode2_irq_pretriggered_for_next_line);
-    }
+    // The previous mode-2 STAT pretrigger unit tests were removed: the Mode-2
+    // STAT IRQ is now delivered by the event-scheduled model (see `stat_irq` and
+    // `dispatch_stat_events`), validated end-to-end by the Gambatte hwtest suite
+    // (m2int/m2enable/miscmstatirq clusters), not the old per-dot pretrigger.
 
     #[test]
     fn cgb_lcdc_enabled_write_applies_tile_data_before_full_lcdc() {
