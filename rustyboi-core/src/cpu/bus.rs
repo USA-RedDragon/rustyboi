@@ -42,6 +42,9 @@ impl<'a> Bus<'a> {
             self.mmio.step_audio();
             self.ppu.step(self.mmio);
         }
+        // HDMA triggers on the PPU's Mode 3->0 edge, so check it AFTER the PPU
+        // has stepped this dot (otherwise the STAT mode it reads lags one dot).
+        self.mmio.step_hdma();
         self.ppu.step_lcdc_events(self.mmio);
 
         self.dot = self.dot.wrapping_add(1);
