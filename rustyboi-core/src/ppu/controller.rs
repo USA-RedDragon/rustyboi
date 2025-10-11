@@ -40,10 +40,6 @@ const DMG_MODE0_OFFSET: i32 = 4;
 const CGB_MODE0_OFFSET: i32 = 4;
 // Mode-3 dot penalty for a window starting on this line (Gambatte StartWindowDraw).
 const WIN_M3_PENALTY: i32 = 6;
-// Extra mode-0 schedule offset on window-start lines, relative to the normal
-// DMG/CGB offset. Swept against the suite.
-const DMG_WIN_MODE0_OFFSET: i32 = 0;
-const CGB_WIN_MODE0_OFFSET: i32 = 0;
 // Offset (dots) between the renderer's scheduled mode-0 transition and the
 // event-model mode-0 STAT IRQ fire time. Tuned against the suite.
 const M0IRQ_OFFSET: i64 = -1;
@@ -1187,21 +1183,16 @@ impl Ppu {
                     self.m3_pixels_discarded = 0;
                     self.check_and_trigger_stat_interrupt(mmio);
 
-                    // On window-start lines the emergent fetcher (window restart)
-                    // tracks the mode-3 length better than the closed-form
-                    // predictor, so fall back to the x==160 trigger there.
                     if was_first_line {
                         self.scheduled_mode0_dot = None;
                     } else {
-                        // Closed-form mode-0 schedule, including window-start lines.
-                        // A mid-mode-3 window-enable toggle (handled in
-                        // set_lcdc_visible) invalidates this and falls back to the
-                        // live emergent x==160 transition.
-                        let (m3_len, win) = self.compute_m3_length_win(mmio, is_cgb);
-                        let mut offset = if is_cgb { CGB_MODE0_OFFSET } else { DMG_MODE0_OFFSET };
-                        if win {
-                            offset += if is_cgb { CGB_WIN_MODE0_OFFSET } else { DMG_WIN_MODE0_OFFSET };
-                        }
+                        // Closed-form mode-0 schedule, including window-start lines
+                        // (compute_m3_length applies the window penalty). Mid-mode-3
+                        // window-enable toggles (set_lcdc_visible) and WX changes
+                        // (PixelTransfer) invalidate it, falling back to the live
+                        // emergent x==160 transition.
+                        let m3_len = self.compute_m3_length(mmio, is_cgb);
+                        let offset = if is_cgb { CGB_MODE0_OFFSET } else { DMG_MODE0_OFFSET };
                         let dot = self.ticks as i64 + m3_len as i64 + offset as i64;
                         self.scheduled_mode0_dot = Some(dot.max(0) as u128);
                         self.m3_scheduled_wx = mmio.read(WX);
