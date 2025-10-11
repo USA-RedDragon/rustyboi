@@ -557,8 +557,8 @@ impl Mmio {
         // Gambatte `Memory::dma` charges `2 + 2*ds` cc per byte for the entire
         // transfer plus a single trailing `cc += 4`, regardless of block count
         // (the +4 setup is NOT per-block). For one block this is 36 SS / 68 DS.
-        let per_byte = if self.is_double_speed_mode() { 4 } else { 2 };
-        self.pending_dma_stall += (effective_length as u32) * per_byte + 4;
+        let (per_byte, setup) = if self.is_double_speed_mode() { (4, 5) } else { (2, 4) };
+        self.pending_dma_stall += (effective_length as u32) * per_byte + setup;
     }
 
     // ----------------------------------------------------------------------
