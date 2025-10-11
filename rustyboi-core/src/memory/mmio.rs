@@ -1175,15 +1175,18 @@ impl memory::Addressable for Mmio {
                         self.oam.read(addr)
                     }
                 }
-                // CGB mirrors 0xFEA0-0xFEFF into the OAM index space (masked
-                // with 0xE7). During an OAM-DMA transfer the bus is owned by the
-                // DMA, so the read returns 0xFF (Gambatte's `oamDmaPos_<oam_size`
-                // gate). DMG returns open-bus 0xFF here.
+                // 0xFEA0-0xFEFF. While an OAM-DMA transfer owns the bus the read
+                // returns 0xFF (Gambatte's `oamDmaPos_ < oam_size` gate). Otherwise
+                // it returns the `oam_high` shadow: CGB mirrors into the OAM index
+                // space masked with 0xE7; DMG indexes directly and the shadow is
+                // initialised to 0x00 (Gambatte `ioamhram_[p - mm_oam_begin]`).
                 UNUSED_START..=UNUSED_END => {
-                    if self.cgb_features_enabled && !self.dma_transfer_in_progress() {
+                    if self.dma_transfer_in_progress() {
+                        EMPTY_BYTE
+                    } else if self.cgb_features_enabled {
                         self.oam_high[((addr & 0xFF) & 0xE7) as usize - 0xA0]
                     } else {
-                        EMPTY_BYTE
+                        self.oam_high[(addr & 0xFF) as usize - 0xA0]
                     }
                 }
                 IO_REGISTERS_START..=IO_REGISTERS_END => {
