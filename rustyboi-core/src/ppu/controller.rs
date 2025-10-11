@@ -232,6 +232,9 @@ pub struct Ppu {
     // tile-map column. Reset to 0 at every M3 arm.
     #[serde(default)]
     m3_pixels_discarded: u8,
+    // WX snapshot taken when the closed-form mode-0 schedule was computed; a
+    // mid-mode-3 WX change before the window starts invalidates the schedule.
+    m3_scheduled_wx: u8,
     // Absolute `ticks` dot at which Mode 3 -> Mode 0 (HBlank) fires. Computed
     // at M3 arm from a cycle-exact mode-3 length formula (Gambatte oracle) and
     // drives the FF41 mode bits + mode-0 STAT IRQ, replacing the x==160 trigger.
@@ -313,6 +316,7 @@ impl Ppu {
             line_153_ly_zeroed: false,
             mode0_pretriggered_this_line: false,
             m3_pixels_discarded: 0,
+            m3_scheduled_wx: 0,
             scheduled_mode0_dot: None,
             abs_cc: 0,
             line_cycle: 0,
@@ -1200,6 +1204,7 @@ impl Ppu {
                         }
                         let dot = self.ticks as i64 + m3_len as i64 + offset as i64;
                         self.scheduled_mode0_dot = Some(dot.max(0) as u128);
+                        self.m3_scheduled_wx = mmio.read(WX);
                     }
                     // Arm the mode-0 (HBlank) STAT IRQ event at the predicted
                     // mode-0 start, in absolute clock terms. Gambatte schedules
@@ -1210,6 +1215,14 @@ impl Ppu {
                 }
             },
             State::PixelTransfer => 'label: {
+                // A mid-mode-3 WX change before the window starts invalidates the
+                // closed-form schedule; fall back to the live emergent transition.
+                if self.scheduled_mode0_dot.is_some()
+                    && !self.window_started_this_line
+                    && mmio.read(WX) != self.m3_scheduled_wx
+                {
+                    self.scheduled_mode0_dot = None;
+                }
                 // Scheduled cycle-exact Mode 3 -> Mode 0 transition.
                 if self.scheduled_mode0_dot == Some(self.ticks) {
                     self.scheduled_mode0_dot = None;
