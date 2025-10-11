@@ -282,7 +282,9 @@ impl Addressable for Audio {
                 value | 0x70 // Bits 4-6 always read as 1
             }
             WAV_START..=WAV_END => self.channel3.read(addr),
-            _ => panic!("Invalid address for Audio: {:#X}", addr)
+            // Unused gaps in the APU register block (0xFF15, 0xFF1F,
+            // 0xFF27-0xFF2F) read back as open bus.
+            _ => 0xFF,
         }
     }
 
@@ -333,7 +335,9 @@ impl Addressable for Audio {
                 // Wave RAM can be accessed even when audio is disabled
                 self.channel3.write(addr, value);
             },
-            _ => panic!("Invalid address for Audio: {:#X}", addr)
+            // Unused gaps in the APU register block (0xFF15, 0xFF1F,
+            // 0xFF27-0xFF2F): writes are ignored.
+            _ => {}
         }
     }
 }

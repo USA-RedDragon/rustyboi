@@ -1470,59 +1470,6 @@ impl Ppu {
         self.sprites_on_line.len()
     }
     
-    // Get the CGB tile attributes for a background/window pixel
-    fn get_bg_tile_attributes(&self, mmio: &mmio::Mmio, screen_x: u8, screen_y: u8) -> u8 {
-        if !mmio.is_cgb_features_enabled() {
-            return 0; // DMG mode - no attributes
-        }
-        
-        let lcdc = self.lcdc;
-        
-        // Check if we're in window area
-        let in_window = if (lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0 {
-            let wx = mmio.read(WX);
-            let wy = mmio.read(WY);
-            screen_y >= wy && screen_x + 7 >= wx
-        } else {
-            false
-        };
-        
-        let (tile_x, tile_y) = if in_window {
-            // Window coordinates
-            let wx = mmio.read(WX);
-            let window_x = screen_x.saturating_sub(wx.saturating_sub(7));
-            let window_y = screen_y.saturating_sub(mmio.read(WY));
-            (window_x / 8, window_y / 8)
-        } else {
-            // Background coordinates with scrolling
-            let scx = mmio.read(SCX);
-            let scy = mmio.read(SCY);
-            let bg_x = screen_x.wrapping_add(scx);
-            let bg_y = screen_y.wrapping_add(scy);
-            (bg_x / 8, bg_y / 8)
-        };
-        
-        // Calculate tile map address
-        let tile_map_base = if in_window {
-            if (lcdc & (LCDCFlags::WindowTileMapDisplaySelect as u8)) != 0 {
-                0x9C00 // Window tile map 1
-            } else {
-                0x9800 // Window tile map 0
-            }
-        } else {
-            if (lcdc & (LCDCFlags::BGTileMapDisplaySelect as u8)) != 0 {
-                0x9C00 // BG tile map 1
-            } else {
-                0x9800 // BG tile map 0
-            }
-        };
-        
-        let tile_map_addr = tile_map_base + (tile_y as u16 * 32) + tile_x as u16;
-        
-        // In CGB mode, tile attributes are stored in VRAM bank 1 at the same address as the tile map
-        mmio.read_vram_bank1(tile_map_addr)
-    }
-    
     // CGB color conversion functions
     fn cgb_color_to_rgb(&self, low_byte: u8, high_byte: u8) -> (u8, u8, u8) {
         // CGB color format: GGGRRRRR BBBBBGGG (little endian)
