@@ -216,10 +216,14 @@ pub struct Mmio {
     // by the HALT opcode handler so it does not need a `&Ppu` borrow.
     #[serde(skip, default)]
     hdma_is_in_period_cached: bool,
-    // Previous STAT mode observed by `step_dma`, used to detect the Mode 3->0
-    // (HBlank) edge that arms an HDMA block. Not part of save state.
+    // Previous STAT mode observed by `step_hdma`, used to detect the Mode 3->0
+    // (HBlank) edge that arms an HDMA block (fallback path). Not part of save state.
     #[serde(skip, default)]
     hdma_prev_stat_mode: u8,
+    // Previous `Ppu::hdma_period` value, used to detect the rising edge of the
+    // cycle-exact HDMA-eligibility window. Not part of save state.
+    #[serde(skip, default)]
+    hdma_prev_period: bool,
 
     // CGB palette state
     #[serde(with = "serde_bytes")]
@@ -280,6 +284,7 @@ impl Mmio {
             halt_hdma_state: HaltHdmaState::Low,
             hdma_is_in_period_cached: false,
             hdma_prev_stat_mode: 0,
+            hdma_prev_period: false,
 
             // CGB palette initialization
             bg_palette_ram: [0; 64],
@@ -725,26 +730,43 @@ impl Mmio {
     /// enabled, then services any pending request by transferring one 0x10-byte
     /// block. `run_hdma_block` is otherwise never invoked, so without this the
     /// HDMA engine never moves bytes.
-    pub fn step_hdma(&mut self) {
+    pub fn step_hdma(&mut self, period: Option<bool>) {
         if !self.cgb_features_enabled {
             return;
         }
 
         let lcdc = self.io_registers.read(ppu::LCD_CONTROL);
         let lcd_on = lcdc & (ppu::LCDCFlags::DisplayEnable as u8) != 0;
-        let mode = if lcd_on {
-            self.io_registers.read(ppu::LCD_STATUS) & 0x03
-        } else {
-            // LCD off: treat as a permanent HBlank-like period (Gambatte fires
-            // HDMA immediately when armed with the LCD disabled).
-            0
-        };
 
-        // Mode 3 -> Mode 0 edge: entering HBlank. Arm one block if HDMA is on.
-        if lcd_on && self.hdma_prev_stat_mode == 3 && mode == 0 && self.hdma_enabled {
-            self.hdma_req_pending = true;
+        // Cycle-exact HDMA-eligibility window from the PPU renderer (Gambatte
+        // `isHdmaPeriod`). When the LCD is off, treat it as permanently in the
+        // period (Gambatte fires HDMA immediately when armed). When the renderer
+        // cannot supply a closed-form mode-0 dot (window/first line), fall back
+        // to the STAT mode-3->0 edge below.
+        let in_period = if !lcd_on { true } else { period.unwrap_or(false) };
+        self.hdma_is_in_period_cached = in_period;
+
+        if lcd_on && period.is_some() {
+            // Rising edge of the eligibility window arms a block.
+            if !self.hdma_prev_period && in_period && self.hdma_enabled {
+                self.hdma_req_pending = true;
+            }
+            self.hdma_prev_period = in_period;
+            // Keep the STAT-mode tracker current so a later fallback line edges
+            // cleanly rather than firing on a stale mode value.
+            self.hdma_prev_stat_mode = self.io_registers.read(ppu::LCD_STATUS) & 0x03;
+        } else {
+            let mode = if lcd_on {
+                self.io_registers.read(ppu::LCD_STATUS) & 0x03
+            } else {
+                0
+            };
+            if lcd_on && self.hdma_prev_stat_mode == 3 && mode == 0 && self.hdma_enabled {
+                self.hdma_req_pending = true;
+            }
+            self.hdma_prev_stat_mode = mode;
+            self.hdma_prev_period = in_period;
         }
-        self.hdma_prev_stat_mode = mode;
 
         if self.hdma_req_pending && self.hdma_enabled {
             self.pending_dma_stall += self.run_hdma_block();
