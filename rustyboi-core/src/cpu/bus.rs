@@ -42,9 +42,12 @@ impl<'a> Bus<'a> {
             self.mmio.step_audio();
             self.ppu.step(self.mmio);
         }
-        // HDMA triggers on the PPU's Mode 3->0 edge, so check it AFTER the PPU
-        // has stepped this dot (otherwise the STAT mode it reads lags one dot).
-        self.mmio.step_hdma();
+        // HDMA triggers on the PPU's exact mode-0 (HBlank) entry, so check it
+        // AFTER the PPU has stepped this dot. Prefer the renderer's cycle-exact
+        // `hdma_period` predicate (Gambatte `isHdmaPeriod`); fall back to the
+        // STAT mode-edge when no closed-form mode-0 dot is available.
+        let period = self.ppu.hdma_period(double_speed);
+        self.mmio.step_hdma(period);
         self.ppu.step_lcdc_events(self.mmio);
 
         self.dot = self.dot.wrapping_add(1);
