@@ -728,6 +728,45 @@ impl Ppu {
         }
     }
 
+    // Pop one pixel from the BG/window FIFO, mix sprites, write it to the
+    // framebuffer at the current x and advance x. Returns true if a pixel was
+    // drawn (FIFO non-empty).
+    fn draw_fifo_pixel(&mut self, mmio: &mmio::Mmio) -> bool {
+        let Ok(bg_pixel) = self.fetcher.pixel_fifo.pop() else {
+            return false;
+        };
+        let bg_pixel_idx = bg_pixel.color;
+        let bg_attrs = bg_pixel.attrs;
+        let ly = mmio.read(LY) as u16;
+        let fb_offset = (ly * 160) + self.x as u16;
+
+        if mmio.is_cgb_features_enabled() {
+            let final_color_rgb =
+                self.mix_background_and_sprites_color(mmio, bg_pixel_idx, bg_attrs, self.x, ly as u8);
+            self.record_pixel_debug_event(
+                ly as u8,
+                bg_pixel_idx,
+                [final_color_rgb.0, final_color_rgb.1, final_color_rgb.2],
+            );
+            let color_offset = fb_offset as usize * 3;
+            self.color_fb_a[color_offset] = final_color_rgb.0;
+            self.color_fb_a[color_offset + 1] = final_color_rgb.1;
+            self.color_fb_a[color_offset + 2] = final_color_rgb.2;
+        } else {
+            let final_color = self.mix_background_and_sprites(mmio, bg_pixel_idx, self.x, ly as u8);
+            let intensity = match final_color {
+                0 => 255,
+                1 => 170,
+                2 => 85,
+                _ => 0,
+            };
+            self.record_pixel_debug_event(ly as u8, bg_pixel_idx, [intensity, intensity, intensity]);
+            self.fb_a[fb_offset as usize] = final_color;
+        }
+        self.x += 1;
+        true
+    }
+
     fn window_will_start(&self, mmio: &mmio::Mmio, is_cgb: bool) -> bool {
         let window_enabled = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
         if !window_enabled || !self.window_y_triggered {
@@ -1292,6 +1331,15 @@ impl Ppu {
                 // Scheduled cycle-exact Mode 3 -> Mode 0 transition.
                 if self.scheduled_mode0_dot == Some(self.ticks) {
                     self.scheduled_mode0_dot = None;
+                    // On window-start lines the closed-form length is correct,
+                    // but the live pixel pipeline can lag a couple of dots after
+                    // the window fetch restart, leaving the last 1-2 pixels still
+                    // queued in the FIFO. Flush them so the visible output spans
+                    // all 160 columns (matches real HW, where M3 lasted long
+                    // enough to push them).
+                    if self.window_started_this_line {
+                        while self.x < 160 && self.draw_fifo_pixel(mmio) {}
+                    }
                     self.state = State::HBlank;
                     Self::set_lcd_status_mode(mmio, 0);
                     self.check_and_trigger_stat_interrupt(mmio);
@@ -1376,42 +1424,7 @@ impl Ppu {
                 if self.x >= 160 {
                     break 'label;
                 }
-                if let Ok(bg_pixel) = self.fetcher.pixel_fifo.pop() {
-                    let bg_pixel_idx = bg_pixel.color;
-                    let bg_attrs = bg_pixel.attrs;
-                    let ly = mmio.read(LY) as u16;
-                    let fb_offset = (ly * 160) + self.x as u16;
-
-                    if mmio.is_cgb_features_enabled() {
-                        // CGB mode: write to color framebuffer with proper sprite mixing
-                        let final_color_rgb = self.mix_background_and_sprites_color(mmio, bg_pixel_idx, bg_attrs, self.x, ly as u8);
-                        self.record_pixel_debug_event(
-                            ly as u8,
-                            bg_pixel_idx,
-                            [final_color_rgb.0, final_color_rgb.1, final_color_rgb.2],
-                        );
-                        let color_offset = fb_offset as usize * 3;
-                        self.color_fb_a[color_offset] = final_color_rgb.0;
-                        self.color_fb_a[color_offset + 1] = final_color_rgb.1;
-                        self.color_fb_a[color_offset + 2] = final_color_rgb.2;
-                    } else {
-                        // DMG mode: write to monochrome framebuffer
-                        let final_color = self.mix_background_and_sprites(mmio, bg_pixel_idx, self.x, ly as u8);
-                        let intensity = match final_color {
-                            0 => 255,
-                            1 => 170,
-                            2 => 85,
-                            _ => 0,
-                        };
-                        self.record_pixel_debug_event(
-                            ly as u8,
-                            bg_pixel_idx,
-                            [intensity, intensity, intensity],
-                        );
-                        self.fb_a[fb_offset as usize] = final_color;
-                    }
-
-                    self.x += 1;
+                if self.draw_fifo_pixel(mmio) {
                     // When no cycle-exact dot is scheduled (window-start lines),
                     // fall back to ending Mode 3 at the x==160 pixel push.
                     if self.scheduled_mode0_dot.is_none() && self.x == 160 {
