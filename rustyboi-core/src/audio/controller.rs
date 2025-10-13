@@ -112,6 +112,7 @@ impl Audio {
             let delta = old.wrapping_sub(new);
             self.channel1.reset_cc(delta);
             self.channel2.reset_cc(delta);
+            self.channel3.reset_cc(delta);
         } else {
             if raw < old_low {
                 // Natural wrap of the 15-bit counter (0x7FFF -> 0).
@@ -124,6 +125,15 @@ impl Audio {
         self.last_cc15 = (new & 0x7FFF) as u16;
         self.channel1.set_cc(new);
         self.channel2.set_cc(new);
+        self.channel3.set_cc(new);
+    }
+
+    /// Advance only the wave channel's fetch counter to the current cc, for the
+    /// CPU read path. Does not run square envelope/length events.
+    pub fn sync_wave_for_read(&mut self) {
+        if self.audio_enabled {
+            self.channel3.sync_for_read();
+        }
     }
 
     pub fn step(&mut self, mmio: &mut mmio::Mmio) {
