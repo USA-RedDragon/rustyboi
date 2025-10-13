@@ -488,6 +488,15 @@ impl Mmio {
         self.audio.sync_cc(ic);
     }
 
+    /// Sync the APU cycle counter to the exact CPU read cycle and advance the
+    /// wave channel's fetch position, so an APU/wave-RAM read observes the
+    /// channel at the precise sub-M-cycle (Gambatte evaluates waveRamRead with
+    /// the live cc). Only used on the read path (0xFF10-0xFF3F).
+    pub fn sync_apu_for_read(&mut self) {
+        self.sync_apu_cc();
+        self.audio.sync_wave_for_read();
+    }
+
     pub fn generate_audio_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
         let mut audio = self.audio.clone();
         let samples = audio.generate_samples(self, cpu_cycles);

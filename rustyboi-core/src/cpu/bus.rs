@@ -93,11 +93,26 @@ impl<'a> Bus<'a> {
     }
 
     pub fn read(&mut self, addr: u16) -> u8 {
+        // Wave-RAM reads observe channel 3 at the read M-cycle start cc
+        // (Gambatte resolves the read before advancing). Snapshot the value
+        // before ticking; the per-dot step during tick_m would otherwise move
+        // the wave fetch position past the read cycle. NR registers/NR52 status
+        // keep the post-tick path so length expiry is evaluated at the same cc
+        // the rest of the system observes.
+        let apu_read = if (0xFF30..=0xFF3F).contains(&addr) {
+            self.mmio.sync_apu_for_read();
+            Some(self.mmio.read(addr))
+        } else {
+            None
+        };
         self.tick_m();
         // VRAM is inaccessible to the CPU during Mode 3, OAM during Mode 2/3;
         // a blocked read returns open-bus 0xFF. Only while the LCD is on.
         if self.ppu_locks_access(addr) {
             return 0xFF;
+        }
+        if let Some(v) = apu_read {
+            return v;
         }
         self.mmio.read(addr)
     }
