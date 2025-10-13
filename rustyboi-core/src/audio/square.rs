@@ -465,6 +465,11 @@ impl SquareWave {
     fn trigger(&mut self) {
         self.enabled = true;
 
+        // Channel 1 runs dutyUnit_.nr4Change BEFORE updating master_, so its
+        // nextPosUpdate uses the OLD master; channel 2 updates master_ first and
+        // uses the NEW master (Gambatte channel1.cpp vs channel2.cpp ordering).
+        let old_master = self.master;
+
         // Envelope: nr4Init sets volume + counter; master = DAC on.
         let dac_off = self.env_nr4_init();
         self.master = !dac_off;
@@ -473,7 +478,8 @@ impl SquareWave {
         self.set_freq(self.freq());
         // ref = 1 in single speed (lastUpdate_ always 4-aligned); master bool
         // toggles the +4 vs +2 offset.
-        let m = if self.master { 1 } else { 0 };
+        let duty_master = if self.channel1 { old_master } else { self.master };
+        let m = if duty_master { 1 } else { 0 };
         self.next_pos_update = self.cc
             .wrapping_sub((self.cc.wrapping_sub(1)) & 1)
             .wrapping_add(self.period)
