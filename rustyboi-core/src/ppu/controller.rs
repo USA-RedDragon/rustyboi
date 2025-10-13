@@ -681,6 +681,53 @@ impl Ppu {
     // pre-sorted by raw OAM X ascending. Returns dots to add past the 167 base.
     // Whether the window starts drawing on this line (Gambatte's win-draw-start
     // gate). DMG ignores WX==166.
+    // Gambatte weMaster latch (M2_Ly0::f0 + M2_LyNon0::f0/f1). Sets the sticky
+    // `window_y_triggered` flag at the same three line-cycle checkpoints
+    // Gambatte uses, reading WY live so late writes are caught precisely.
+    fn update_window_y_latch(&mut self, mmio: &mmio::Mmio) {
+        if self.disabled {
+            return;
+        }
+        let is_cgb = mmio.is_cgb_features_enabled();
+        let win_en = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
+        if !win_en {
+            return;
+        }
+        let ly = mmio.read(LY) as i32;
+        let wy = mmio.read(WY) as i32;
+
+        // ly0 check (only valid during the active frame's line 0 mode-2).
+        // weMasterCheckLy0LineCycle = 1 + cgb. Also runs on the first line
+        // after enable (where ly is held at 0 and there is no mode-2 phase).
+        if ly == 0
+            && self.state == State::OAMSearch
+            && self.ticks == (1 + is_cgb as u128)
+        {
+            if wy == 0 {
+                self.window_y_triggered = true;
+            }
+            return;
+        }
+
+        // The remaining checks ride the previous line's HBlank; on the first
+        // line after enable there is no such prior line.
+        if self.first_line_after_enable {
+            return;
+        }
+
+        // Prior-to-LY-inc check at line cycle 450: weMaster |= (ly == wy).
+        if self.ticks == 450 {
+            if ly == wy {
+                self.window_y_triggered = true;
+            }
+            return;
+        }
+        // After-LY-inc check at line cycle 454: weMaster |= (ly + 1 == wy).
+        if self.ticks == 454 && ly + 1 == wy {
+            self.window_y_triggered = true;
+        }
+    }
+
     fn window_will_start(&self, mmio: &mmio::Mmio, is_cgb: bool) -> bool {
         let window_enabled = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
         if !window_enabled || !self.window_y_triggered {
@@ -1099,25 +1146,35 @@ impl Ppu {
         
         // Check for STAT interrupt after LYC=LY update
         self.check_and_trigger_stat_interrupt(mmio);
+
+        // Gambatte-style window-Y (weMaster) latch. The trigger is sticky for
+        // the frame and is evaluated at three points: ly0 mode-2 start
+        // (wy==0), and near each line's end at the prior-to-LY-inc (ly==wy)
+        // and after-LY-inc (ly+1==wy) cycles. This catches late WY writes that
+        // land in the small window between these checks.
+        self.update_window_y_latch(mmio);
+
         match self.state {
             State::OAMSearch => {
-                // Check WY condition at the start of Mode 2 (OAMSearch)
+                // Window line-counter bookkeeping at the start of Mode 2. The WY
+                // trigger latch (`window_y_triggered`/weMaster) is handled by the
+                // Gambatte-style three-point check in `update_window_y_latch`,
+                // which runs near the previous line's end.
                 if self.ticks == 0 {
                     let ly = mmio.read(LY);
                     let wy = mmio.read(WY);
                     if ly == wy {
-                        self.window_y_triggered = true;
                         // Reset window line counter when window first becomes active
                         self.window_line_counter = 0;
                     }
-                    
+
                     // If window is already active and enabled, increment the window line counter
                     let lcdc = self.lcdc;
                     let window_enabled = (lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
                     if window_enabled && self.window_y_triggered && ly > wy {
                         self.window_line_counter = self.window_line_counter.wrapping_add(1);
                     }
-                    
+
                     // Reset window line flag for new scanline
                     self.window_started_this_line = false;
                     
