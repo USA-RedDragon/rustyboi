@@ -1114,9 +1114,11 @@ macro_rules! make_swap_register {
 macro_rules! make_rst {
     ($name:ident, $addr:expr) => {
         pub fn $name(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
-            cpu.registers.sp = cpu.registers.sp.wrapping_sub(2);
-            mmio.write(cpu.registers.sp, (cpu.registers.pc & 0x00FF) as u8);
-            mmio.write(cpu.registers.sp.wrapping_add(1), (cpu.registers.pc >> 8) as u8);
+            mmio.internal_cycle(); // M2 internal (SP dec) before the pushes
+            cpu.registers.sp = cpu.registers.sp.wrapping_sub(1);
+            mmio.write(cpu.registers.sp, (cpu.registers.pc >> 8) as u8); // high byte first
+            cpu.registers.sp = cpu.registers.sp.wrapping_sub(1);
+            mmio.write(cpu.registers.sp, (cpu.registers.pc & 0x00FF) as u8); // then low
             cpu.registers.pc = $addr;
             16
         }
