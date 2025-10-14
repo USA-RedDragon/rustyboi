@@ -157,18 +157,14 @@ impl Fetcher {
         display_x: u8,
     ) -> Option<FetcherDebugEvent> {
         let ly = mmio.read(ppu::LY);
-        // For data-fetch states (`TileDataLow`/`High`), reuse the y latched
-        // when this fetch began at `TileNumber`. For `TileNumber` itself,
-        // re-read SCY so the latch reflects the current scroll. Window
-        // fetches always use the internal `window_line` counter, which is
-        // already independent of SCY.
-        // Gambatte samples (scy + ly) at the tile-data fetch (xpos%8==2),
-        // i.e. our `TileDataLow` substep, not at `TileNumber`. Latch there so
-        // a mid-M3 SCY write lands in the correct fetch window, then reuse the
-        // latch for `TileDataHigh`. Window fetches use `window_line` instead.
+        // Re-read (scy + ly) live at every BG fetch substep. The fetcher runs
+        // ahead of the display by the FIFO depth, so sampling SCY as late as
+        // possible (through TileDataHigh) lets a mid-M3 SCY write land on the
+        // last fetched tile, matching Gambatte's late tileline sample. Window
+        // fetches use the internal `window_line` counter, independent of SCY.
         let y = if self.fetching_window {
             window_line
-        } else if matches!(self.state, State::TileNumber | State::TileDataLow) {
+        } else if matches!(self.state, State::TileNumber | State::TileDataLow | State::TileDataHigh) {
             let new_y = ly.wrapping_add(mmio.read(ppu::SCY));
             self.latched_y = new_y;
             new_y
