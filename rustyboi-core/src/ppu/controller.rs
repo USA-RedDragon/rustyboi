@@ -1390,12 +1390,15 @@ impl Ppu {
                 let window_enabled = (lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
                 if window_enabled && self.window_y_triggered && !self.fetcher.is_fetching_window() {
                     let wx = mmio.read(WX);
+                    // DMG never starts the window at WX==166; CGB does.
+                    let wx_allowed = wx <= 166 && (mmio.is_cgb_features_enabled() || wx != 166);
                     // WX=0-6 can trigger immediately, WX=7+ needs exact match with X+7
-                    let should_start_window = if wx < 7 {
-                        self.x == 0  // Start immediately if WX is 0-6
-                    } else {
-                        self.x + 7 == wx
-                    };
+                    let should_start_window = wx_allowed
+                        && if wx < 7 {
+                            self.x == 0 // Start immediately if WX is 0-6
+                        } else {
+                            self.x + 7 == wx
+                        };
                     
                     if should_start_window {
                         // Start window rendering
