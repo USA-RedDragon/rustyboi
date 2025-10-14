@@ -195,7 +195,11 @@ impl Fetcher {
                     // makes a mid-M3 SCX write land at the correct display column
                     // despite FIFO latency.
                     let scx = mmio.read(ppu::SCX);
-                    let cgb_adj: u16 = if mmio.is_cgb_features_enabled() { 0 } else { 1 };
+                    // The DMG +1 phase adjustment (Gambatte tileMapXpos =
+                    // (scx + xpos + 1 - cgb) / 8) applies only past the M3Start
+                    // discard prologue; the first tile (display_x == 0) is fetched
+                    // at scx/8 with no adjustment.
+                    let cgb_adj: u16 = if mmio.is_cgb_features_enabled() || display_x == 0 { 0 } else { 1 };
                     let xpos = display_x as u16 + self.pixel_fifo.size() as u16;
                     let bg_tile_x = (scx as u16 + xpos + cgb_adj) / 8 % 32;
                     let bg_tile_y = (y as u16 / 8) % 32;
