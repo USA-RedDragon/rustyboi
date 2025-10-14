@@ -154,6 +154,7 @@ impl Fetcher {
         mmio: &mut mmio::Mmio,
         window_line: u8,
         lcdc_state: FetcherLcdcState,
+        display_x: u8,
     ) -> Option<FetcherDebugEvent> {
         let ly = mmio.read(ppu::LY);
         // For data-fetch states (`TileDataLow`/`High`), reuse the y latched
@@ -189,9 +190,17 @@ impl Fetcher {
                     (window_tile_map_base, map_offset)
                 } else {
                     let bg_tile_map_base = self.get_tile_map_base(lcdc_state.lcdc);
-                    // For background, account for SCX scrolling
+                    // For background, account for SCX scrolling. Gambatte computes
+                    // tileMapXpos = (scx + xpos) / 8 from the DISPLAY position of the
+                    // tile's first pixel, re-reading SCX live at each tile fetch. The
+                    // tile being fetched will be displayed at column
+                    // display_x + (pixels currently queued in FIFO), so derive the
+                    // column from that rather than the free-running tile_index. This
+                    // makes a mid-M3 SCX write land at the correct display column
+                    // despite FIFO latency.
                     let scx = mmio.read(ppu::SCX);
-                    let bg_tile_x = (self.tile_index as u16).wrapping_add(scx as u16 / 8) % 32;
+                    let xpos = display_x as u16 + self.pixel_fifo.size() as u16;
+                    let bg_tile_x = (scx as u16 + xpos) / 8 % 32;
                     let bg_tile_y = (y as u16 / 8) % 32;
                     let map_offset = bg_tile_y * 32 + bg_tile_x;
                     (bg_tile_map_base, map_offset)
@@ -391,16 +400,16 @@ mod tests {
 
         let mut fetcher = Fetcher::new();
         let state = lcdc_state(&mmio, false);
-        let tile_number = fetcher.step(&mut mmio, 0, state).unwrap();
+        let tile_number = fetcher.step(&mut mmio, 0, state, 0).unwrap();
         assert_eq!(tile_number.kind, FetcherDebugEventKind::TileNumber);
         assert_eq!(tile_number.tile_num, TILE_ID);
         assert_eq!(tile_number.tile_attributes, 0x07);
 
-        let tile_data_low = fetcher.step(&mut mmio, 0, state).unwrap();
+        let tile_data_low = fetcher.step(&mut mmio, 0, state, 0).unwrap();
         assert_eq!(tile_data_low.kind, FetcherDebugEventKind::TileDataLow);
         assert_eq!(tile_data_low.value, Some(0b1010_1010));
 
-        let tile_data_high = fetcher.step(&mut mmio, 0, state).unwrap();
+        let tile_data_high = fetcher.step(&mut mmio, 0, state, 0).unwrap();
         assert_eq!(tile_data_high.kind, FetcherDebugEventKind::TileDataHigh);
         assert_eq!(tile_data_high.value, Some(0b0101_0101));
     }
@@ -417,16 +426,16 @@ mod tests {
 
         let mut fetcher = Fetcher::new();
         let state = lcdc_state(&mmio, false);
-        let tile_number = fetcher.step(&mut mmio, 0, state).unwrap();
+        let tile_number = fetcher.step(&mut mmio, 0, state, 0).unwrap();
         assert_eq!(tile_number.kind, FetcherDebugEventKind::TileNumber);
         assert_eq!(tile_number.tile_num, TILE_ID);
         assert_eq!(tile_number.tile_attributes, 0x08);
 
-        let tile_data_low = fetcher.step(&mut mmio, 0, state).unwrap();
+        let tile_data_low = fetcher.step(&mut mmio, 0, state, 0).unwrap();
         assert_eq!(tile_data_low.kind, FetcherDebugEventKind::TileDataLow);
         assert_eq!(tile_data_low.value, Some(0x33));
 
-        let tile_data_high = fetcher.step(&mut mmio, 0, state).unwrap();
+        let tile_data_high = fetcher.step(&mut mmio, 0, state, 0).unwrap();
         assert_eq!(tile_data_high.kind, FetcherDebugEventKind::TileDataHigh);
         assert_eq!(tile_data_high.value, Some(0x44));
     }
@@ -444,14 +453,14 @@ mod tests {
 
         let mut fetcher = Fetcher::new();
         let state = lcdc_state(&mmio, true);
-        let tile_number = fetcher.step(&mut mmio, 0, state).unwrap();
+        let tile_number = fetcher.step(&mut mmio, 0, state, 0).unwrap();
         assert!(tile_number.tile_index_is_tile_data);
 
-        let tile_data_low = fetcher.step(&mut mmio, 0, state).unwrap();
+        let tile_data_low = fetcher.step(&mut mmio, 0, state, 0).unwrap();
         assert_eq!(tile_data_low.kind, FetcherDebugEventKind::TileDataLow);
         assert_eq!(tile_data_low.value, Some(TILE_ID));
 
-        let tile_data_high = fetcher.step(&mut mmio, 0, state).unwrap();
+        let tile_data_high = fetcher.step(&mut mmio, 0, state, 0).unwrap();
         assert_eq!(tile_data_high.kind, FetcherDebugEventKind::TileDataHigh);
         assert_eq!(tile_data_high.value, Some(TILE_ID));
 
