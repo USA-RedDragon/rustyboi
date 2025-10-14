@@ -199,8 +199,9 @@ impl Fetcher {
                     // makes a mid-M3 SCX write land at the correct display column
                     // despite FIFO latency.
                     let scx = mmio.read(ppu::SCX);
+                    let cgb_adj: u16 = if mmio.is_cgb_features_enabled() { 0 } else { 1 };
                     let xpos = display_x as u16 + self.pixel_fifo.size() as u16;
-                    let bg_tile_x = (scx as u16 + xpos) / 8 % 32;
+                    let bg_tile_x = (scx as u16 + xpos + cgb_adj) / 8 % 32;
                     let bg_tile_y = (y as u16 / 8) % 32;
                     let map_offset = bg_tile_y * 32 + bg_tile_x;
                     (bg_tile_map_base, map_offset)
