@@ -31,6 +31,11 @@ pub struct Timer {
     // edge clocks the APU frame sequencer.
     #[serde(default)]
     last_apu_div_bit: bool,
+    // Double-speed state observed at the last `step`; used by `speed_change`
+    // (called right after the speed flag toggles, before any further step) to
+    // learn the pre-switch speed.
+    #[serde(default)]
+    last_double_speed: bool,
 }
 
 impl Timer {
@@ -44,6 +49,7 @@ impl Timer {
             last_timer_input: false,
             reload_pending: 0,
             last_apu_div_bit: false,
+            last_double_speed: false,
         }
     }
 
@@ -100,7 +106,15 @@ impl Timer {
     /// DIV reset that follows. We reproduce that by running 4 extra counter
     /// ticks (with edge detection) prior to the DIV reset.
     pub fn speed_change(&mut self) {
-        if (self.tac & 0x07) >= 0x05 {
+        // Fast-frequency timers get the 4-cycle catch-up Gambatte applies in
+        // `Tima::speedChange`. A switch back to single speed additionally runs
+        // the catch-up for any enabled timer: the double->single STOP window is
+        // 4 cycles longer in TIMA's edge accounting. The DIV reset that follows
+        // zeroes the counter, so this advance affects only TIMA's edge count,
+        // not the post-switch DIV phase.
+        let fast = (self.tac & 0x07) >= 0x05;
+        let single_after = self.last_double_speed && (self.tac & TAC_ENABLE) != 0;
+        if fast || single_after {
             for _ in 0..4 {
                 self.internal_counter = self.internal_counter.wrapping_add(1);
                 self.update_edge();
@@ -123,7 +137,8 @@ impl Timer {
 
         // The APU frame sequencer is clocked by the falling edge of DIV bit 12
         // (bit 13 in double speed), so it tracks DIV writes like the timer does.
-        let apu_bit_pos = if mmio.is_double_speed_mode() { 13 } else { 12 };
+        self.last_double_speed = mmio.is_double_speed_mode();
+        let apu_bit_pos = if self.last_double_speed { 13 } else { 12 };
         let apu_bit = (self.internal_counter & (1 << apu_bit_pos)) != 0;
         if self.last_apu_div_bit && !apu_bit {
             mmio.clock_apu_frame_sequencer();
