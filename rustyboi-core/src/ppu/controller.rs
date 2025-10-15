@@ -236,6 +236,10 @@ pub struct Ppu {
     // WX snapshot taken when the closed-form mode-0 schedule was computed; a
     // mid-mode-3 WX change before the window starts invalidates the schedule.
     m3_scheduled_wx: u8,
+    // window_will_start() result at schedule time; a mid-mode-3 WY write that
+    // flips it (late WY==ly) invalidates the schedule.
+    #[serde(default)]
+    m3_scheduled_win: bool,
     // Absolute `ticks` dot at which Mode 3 -> Mode 0 (HBlank) fires. Computed
     // at M3 arm from a cycle-exact mode-3 length formula (Gambatte oracle) and
     // drives the FF41 mode bits + mode-0 STAT IRQ, replacing the x==160 trigger.
@@ -318,6 +322,7 @@ impl Ppu {
             mode0_pretriggered_this_line: false,
             m3_pixels_discarded: 0,
             m3_scheduled_wx: 0,
+            m3_scheduled_win: false,
             scheduled_mode0_dot: None,
             abs_cc: 0,
             line_cycle: 0,
@@ -1324,6 +1329,7 @@ impl Ppu {
                         let dot = self.ticks as i64 + m3_len as i64 + offset as i64;
                         self.scheduled_mode0_dot = Some(dot.max(0) as u128);
                         self.m3_scheduled_wx = mmio.read(WX);
+                        self.m3_scheduled_win = self.window_will_start(mmio, is_cgb);
                     }
                     // Arm the mode-0 (HBlank) STAT IRQ event at the predicted
                     // mode-0 start, in absolute clock terms. Gambatte schedules
@@ -1338,7 +1344,9 @@ impl Ppu {
                 // closed-form schedule; fall back to the live emergent transition.
                 if self.scheduled_mode0_dot.is_some()
                     && !self.window_started_this_line
-                    && mmio.read(WX) != self.m3_scheduled_wx
+                    && (mmio.read(WX) != self.m3_scheduled_wx
+                        || self.window_will_start(mmio, mmio.is_cgb_features_enabled())
+                            != self.m3_scheduled_win)
                 {
                     self.scheduled_mode0_dot = None;
                 }
