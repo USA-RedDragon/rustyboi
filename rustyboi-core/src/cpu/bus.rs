@@ -105,6 +105,13 @@ impl<'a> Bus<'a> {
         } else {
             None
         };
+        // Serial registers and IF observe serial-completion state at the read's
+        // start cc; snapshot before tick (mirrors the APU read hook).
+        let serial_read = if matches!(addr, 0xFF01 | 0xFF02) {
+            Some(self.mmio.snapshot_serial_read(addr))
+        } else {
+            None
+        };
         self.tick_m();
         // VRAM is inaccessible to the CPU during Mode 3, OAM during Mode 2/3;
         // a blocked read returns open-bus 0xFF. Only while the LCD is on.
@@ -112,6 +119,9 @@ impl<'a> Bus<'a> {
             return 0xFF;
         }
         if let Some(v) = apu_read {
+            return v;
+        }
+        if let Some(v) = serial_read {
             return v;
         }
         self.mmio.read(addr)

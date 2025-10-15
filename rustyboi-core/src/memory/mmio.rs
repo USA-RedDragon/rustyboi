@@ -415,6 +415,15 @@ impl Mmio {
         self.serial.set_cgb(cgb);
     }
 
+    /// Snapshot a serial-influenced register (SB/SC/IF) at the read M-cycle
+    /// start cc, mirroring `sync_apu_for_read`. The per-dot `step_serial` during
+    /// `tick_m` can complete the transfer and set the serial IF bit within the
+    /// read cycle; capturing the value before ticking makes the CPU observe
+    /// serial state at the read's start (Gambatte resolves the read at cc).
+    pub fn snapshot_serial_read(&self, addr: u16) -> u8 {
+        self.read(addr)
+    }
+
     /// Raise an interrupt by setting its IF bit. Equivalent to
     /// `SM83::set_interrupt_flag(flag, true, self)` but needs no CPU borrow, so
     /// peripherals (PPU) can request interrupts directly.
