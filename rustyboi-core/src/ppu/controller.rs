@@ -1112,6 +1112,10 @@ impl Ppu {
     /// STAT model half-PPU-dot precision.
     fn write_cc(&self, ds: bool) -> u64 {
         let off = if ds { write_cc_off_ds() } else { WRITE_CC_OFFSET };
+        // `write_subdot` carries the sub-PPU-dot parity of the resolving CPU
+        // write. In practice the STAT/render tests align via whole-instruction
+        // polling loops, so writes land on M-cycle (even) phases and this term
+        // is 0; it remains wired for the rare odd-phase write (post-HALT-1cc).
         let sub = if ds { self.write_subdot as i64 } else { 0 };
         (self.abs_cc as i64 + off + sub).max(0) as u64
     }
