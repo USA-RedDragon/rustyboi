@@ -1719,12 +1719,13 @@ impl Ppu {
         
         let ly = mmio.read(LY);
         let lcdc = self.lcdc;
-        
-        // Check if sprites are enabled
-        if (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
-            return;
-        }
-        
+
+        // OAM scan (Gambatte's SpriteMapper::mapSprites) builds the per-line
+        // sprite list regardless of the OBJ-enable bit (LCDC.1). The enable bit
+        // only gates the M3 sprite fetch and the final pixel mix, so a sprite
+        // enabled mid-mode-3 still incurs its fetch penalty. Do not early-out
+        // here on OBJ-disable.
+
         // Determine sprite height (8x8 or 8x16)
         let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
         
