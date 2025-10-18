@@ -56,7 +56,6 @@ const M2IRQ_OFFSET: i64 = -1;
 // advances by 1<<ds per dot, so at double speed the write's true cycle is a
 // full M-cycle (4 machine cycles) behind. Swept against the suite.
 const WRITE_CC_OFFSET: i64 = -1;
-const WRITE_CC_OFFSET_DS: i64 = -4;
 
 // Env-tunable override of an i64 offset (for sweeping during development). When
 // the named env var is unset, the compiled-in default is used.
