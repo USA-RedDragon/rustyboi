@@ -124,6 +124,29 @@ impl SquareWave {
         self.cc = cc;
     }
 
+    /// Post-boot channel-1 mid-tone state (Gambatte `setPostBiosState`). The boot
+    /// ROM leaves ch1 playing the startup tone: master/enabled with duty pos/phase
+    /// mid-cycle. `pos_offset` is Gambatte's duty.nextPosUpdate offset (in 2 MHz
+    /// units) added to the current cc; `pos`/`high` are the duty-unit phase.
+    pub fn set_post_bios_ch1(&mut self, pos_offset: u32, pos: u8, high: bool) {
+        self.nr11 = 0xBF;
+        self.nr12 = 0xF3;
+        self.nr13 = 0xC1;
+        self.nr14 = 0x07;
+        self.master = true;
+        self.enabled = true;
+        self.volume = 0x0F;
+        self.period = to_period(self.freq());
+        self.pos = pos;
+        self.high = high;
+        self.next_pos_update = (self.cc & !1u32).wrapping_add(pos_offset);
+        self.length_counter = 0x40;
+    }
+
+    pub fn set_length_counter(&mut self, value: u16) {
+        self.length_counter = value;
+    }
+
     /// Shift the duty event counter backward by `delta` (Gambatte
     /// `Channel::resetCc`, which only resets the duty unit). Called when the
     /// underlying cycle counter is reset by a DIV write. The envelope and length
