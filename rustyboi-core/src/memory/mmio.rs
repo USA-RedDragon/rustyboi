@@ -172,7 +172,13 @@ pub struct Mmio {
     // matching condition is already true.
     #[serde(skip, default)]
     stat_register_write_pending: bool,
-    
+    // Persistent CPU T-cycle phase. Survives instruction boundaries (unlike the
+    // per-instruction `Bus::dot`). At double speed the PPU steps every other
+    // T-cycle; this counter carries the true accumulated phase so the DS gate
+    // and register-write sub-dot resolution stay aligned to the real cc parity.
+    #[serde(default)]
+    cpu_t_phase: u64,
+
     // CGB-specific state
     vram_bank: u8,          // VRAM bank select (0-1)
     wram_bank_select: u8,   // WRAM bank select (1-7)
@@ -263,7 +269,8 @@ impl Mmio {
             pending_oam_zero: std::cell::Cell::new(-1),
             ly_write_pending: false,
             stat_register_write_pending: false,
-            
+            cpu_t_phase: 0,
+
             // CGB-specific fields initialization
             vram_bank: 0,
             wram_bank_select: 1, // CGB starts with WRAM bank 1 selected
@@ -1091,6 +1098,16 @@ impl Mmio {
         let pending = self.ly_write_pending;
         self.ly_write_pending = false;
         pending
+    }
+
+    /// The persistent CPU T-cycle phase (survives instruction boundaries).
+    pub fn cpu_t_phase(&self) -> u64 {
+        self.cpu_t_phase
+    }
+
+    /// Advance the persistent CPU T-cycle phase by one.
+    pub fn advance_cpu_t_phase(&mut self) {
+        self.cpu_t_phase = self.cpu_t_phase.wrapping_add(1);
     }
 
     /// Consume the pending STAT-register-write signal. Returns true if the CPU
