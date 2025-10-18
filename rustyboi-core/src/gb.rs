@@ -179,6 +179,24 @@ impl GB {
             Hardware::DMG0 => 0x1800,
         };
         self.mmio.set_timer_internal_counter(boot_counter);
+
+        // Post-boot APU state. The boot ROM enables the APU and leaves channel 1
+        // mid-tone; channel registers are gated behind APU-enable, so the writes
+        // above were dropped. Apply Gambatte's exact post-boot APU state directly
+        // (must follow the timer-counter set so the duty phase has the right cc).
+        // Wave RAM differs between DMG and CGB (Gambatte ioamhram dumps).
+        let cgb = self.hardware == Hardware::CGB;
+        let wave_ram: [u8; 16] = if cgb {
+            [0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF,
+             0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF]
+        } else {
+            [0x71, 0x72, 0xD5, 0x91, 0x58, 0xBB, 0x2A, 0xFA,
+             0xCF, 0x3C, 0x54, 0x75, 0x48, 0xCF, 0x8F, 0xD9]
+        };
+        for (i, b) in wave_ram.iter().enumerate() {
+            self.mmio.write(crate::audio::WAV_START + i as u16, *b);
+        }
+        self.mmio.set_post_bios_audio_state(cgb);
     }
 
     pub fn insert(&mut self, cartridge: cartridge::Cartridge) {

@@ -136,6 +136,27 @@ impl Audio {
         }
     }
 
+    /// Apply Gambatte's post-`skip_bios` APU state. The boot ROM enables the APU
+    /// and leaves channel 1 mid-tone (the startup "ding"). `sync_cc` must run
+    /// first so the channels' duty event counter has the correct cc base.
+    /// `cgb` selects the CGB vs DMG duty phase (Gambatte `setPostBiosState`).
+    pub fn set_post_bios_state(&mut self, cgb: bool) {
+        self.audio_enabled = true;
+        self.nr50 = 0x77;
+        self.nr51 = 0xF3;
+        self.nr52 = 0xF1;
+
+        // Channel 1 startup-tone phase: CGB pos=6/high, offset 37*2; DMG pos=3,
+        // offset 69*2 (Gambatte initstate.cpp).
+        if cgb {
+            self.channel1.set_post_bios_ch1(37 * 2, 6, true);
+        } else {
+            self.channel1.set_post_bios_ch1(69 * 2, 3, false);
+        }
+
+        self.channel2.set_length_counter(0x40);
+    }
+
     pub fn step(&mut self, mmio: &mut mmio::Mmio) {
         if !self.audio_enabled {
             return;
