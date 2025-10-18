@@ -37,7 +37,11 @@ impl<'a> Bus<'a> {
         self.mmio.step_dma();
 
         let double_speed = self.mmio.is_double_speed_mode();
-        if !double_speed || self.dot % 2 == 0 {
+        // Gate the PPU/audio step on the *persistent* T-phase parity so the
+        // PPU's even-dot stepping stays aligned with the true accumulated cc
+        // across instruction boundaries (per-instruction `dot` would re-anchor
+        // the phase to the instruction start every M-cycle).
+        if !double_speed || self.mmio.cpu_t_phase() % 2 == 0 {
             self.ppu.step_scheduled_stat_events(self.mmio);
             self.mmio.step_audio();
             self.ppu.step(self.mmio);
@@ -50,6 +54,7 @@ impl<'a> Bus<'a> {
         self.mmio.step_hdma(period);
         self.ppu.step_lcdc_events(self.mmio);
 
+        self.mmio.advance_cpu_t_phase();
         self.dot = self.dot.wrapping_add(1);
         self.ticked += 1;
     }
@@ -167,6 +172,10 @@ impl<'a> Bus<'a> {
             self.tick_m();
             self.mmio.write(addr, value);
         } else {
+            // The write resolves at the current persistent T-phase, before this
+            // M-cycle's dots tick. Pass that phase's sub-dot parity so the PPU
+            // STAT/LYC hooks place the event on the correct half-dot at DS.
+            self.ppu.set_write_subdot(self.mmio.cpu_t_phase());
             self.mmio.write(addr, value);
             if addr == ppu::LCD_CONTROL {
                 self.ppu.handle_lcdc_write(value, self.mmio);
