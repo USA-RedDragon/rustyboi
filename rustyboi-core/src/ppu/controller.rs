@@ -450,7 +450,14 @@ impl Ppu {
         // schedule (computed at M3 start from the initial WX/LCDC). Fall back to
         // the live emergent x==160 transition, which tracks the change.
         let win_bit = LCDCFlags::WindowDisplayEnable as u8;
-        if self.state == State::PixelTransfer && (old_lcdc & win_bit) != (value & win_bit) {
+        // A mid-mode-3 sprite-enable (bit 1) or sprite-size (bit 2) toggle also
+        // changes the closed-form sprite-fetch penalty; invalidate and fall back
+        // to the live emergent transition.
+        let spr_bits = (LCDCFlags::SpriteDisplayEnable as u8) | (LCDCFlags::SpriteSize as u8);
+        if self.state == State::PixelTransfer
+            && ((old_lcdc & win_bit) != (value & win_bit)
+                || (old_lcdc & spr_bits) != (value & spr_bits))
+        {
             self.scheduled_mode0_dot = None;
         }
         self.lcdc = value;
