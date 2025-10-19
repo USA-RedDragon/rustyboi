@@ -103,13 +103,12 @@ impl<'a> Bus<'a> {
         if self.mmio.read(ppu::LCD_CONTROL) & 0x80 == 0 {
             return false;
         }
-        let _ = is_read;
         let kind: u8 = if is_vram { 0 } else if is_oam { 1 } else { 2 };
         let mode = self.mmio.read(ppu::LCD_STATUS) & 0x03;
         let mode_locked = if is_oam { mode == 2 || mode == 3 } else { mode == 3 };
         let ds = self.mmio.is_double_speed_mode();
         let is_cgb = self.mmio.is_cgb_features_enabled();
-        if let Some(blocked) = self.ppu.cpu_access_blocked(kind, mode_locked, is_cgb, ds) {
+        if let Some(blocked) = self.ppu.cpu_access_blocked(kind, is_read, mode_locked, is_cgb, ds) {
             return blocked;
         }
         mode_locked
