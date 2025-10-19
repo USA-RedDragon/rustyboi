@@ -412,10 +412,18 @@ impl Mmio {
     }
 
     pub fn step_serial(&mut self) {
-        let divider = self.timer.internal_counter();
+        let phase = self.cpu_t_phase;
         let mut serial = self.serial.clone();
-        serial.step(divider, self);
+        serial.step(phase, self);
         self.serial = serial;
+    }
+
+    /// SC (FF02) write: latches the value, then (re)schedules the transfer event
+    /// using the timer counter and CPU T-phase at this write's resolution cc.
+    pub fn write_serial_sc(&mut self, value: u8) {
+        let divider = self.timer.internal_counter();
+        let phase = self.cpu_t_phase;
+        self.serial.schedule_sc(value, divider, phase);
     }
 
     pub fn set_serial_cgb(&mut self, cgb: bool) {
@@ -1438,7 +1446,8 @@ impl memory::Addressable for Mmio {
                     match addr {
                         input::JOYP => self.input.write(addr, value),
                         timer::DIV..=timer::TAC => self.timer.write(addr, value),
-                serial::SB..=serial::SC => self.serial.write(addr, value),
+                serial::SB => self.serial.write(addr, value),
+                        serial::SC => self.write_serial_sc(value),
                         audio::NR10..=audio::NR52 | audio::WAV_START..=audio::WAV_END => {
                             self.sync_apu_cc();
                             self.audio.write(addr, value);

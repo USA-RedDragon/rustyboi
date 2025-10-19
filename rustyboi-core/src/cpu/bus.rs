@@ -119,11 +119,13 @@ impl<'a> Bus<'a> {
         };
         // IF read: the CPU resolves it at cc, but tick_m advances peripherals and
         // would let an IRQ flagged within this read M-cycle leak in 4 dots early.
-        // Snapshot the VBlank (0) and STAT (1) bits pre-tick so a PPU IRQ raised
-        // within this read cycle is observed at the read's start cc (matching
-        // Gambatte's read-at-cc); the timer/serial/joypad bits keep the post-tick
-        // path, where their flag timing is already tuned to the full M-cycle.
-        const IF_PRE_MASK: u8 = 0x03;
+        // Snapshot the VBlank (0), STAT (1), and serial (3) bits pre-tick so an
+        // IRQ raised within this read cycle is observed at the read's start cc
+        // (matching Gambatte's read-at-cc); the timer/joypad bits keep the
+        // post-tick path, where their flag timing is already tuned to the full
+        // M-cycle. Serial completion fires mid-tick_m on the boundary tests, so
+        // snapshotting bit 3 makes the read resolve at cc like Gambatte.
+        const IF_PRE_MASK: u8 = 0x0B;
         let if_pre = if addr == 0xFF0F {
             Some(self.mmio.snapshot_serial_read(addr) & IF_PRE_MASK)
         } else {
