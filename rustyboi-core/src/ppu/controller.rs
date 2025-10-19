@@ -967,6 +967,10 @@ impl Ppu {
     }
 
     pub fn on_stat_register_write(&mut self, mmio: &mut mmio::Mmio) {
+        // The DMG STAT-write bug fires on any FF41 write, even one that leaves
+        // the enable bits unchanged. Track whether this was an FF41 write so the
+        // unchanged-value case still runs lcdstat_change below.
+        let ff41_written = mmio.take_ff41_write_pending();
         // Keep the LYC=LY readback flag (FF41 bit 2) in sync regardless of LCD
         // state; only its IRQ side-effects are gated by enable.
         if self.disabled {
@@ -995,8 +999,10 @@ impl Ppu {
         let old_stat = self.stat_reg_committed & 0x78;
         let old_lyc = self.lyc_irq.lyc_reg();
 
-        // FF41 (STAT) write.
-        if new_stat != old_stat {
+        // FF41 (STAT) write. Run unconditionally on any FF41 write (even a
+        // same-value write) to reproduce the DMG STAT-write IRQ bug; the CGB
+        // trigger path self-guards on newly-set bits, so this is a no-op there.
+        if ff41_written || new_stat != old_stat {
             self.lcdstat_change(new_stat, mmio);
         }
         // FF45 (LYC) write.
