@@ -84,6 +84,16 @@ impl<'a> Bus<'a> {
     /// Mode 3. Only while the LCD is on. Blocked reads return 0xFF; blocked
     /// writes are dropped.
     fn ppu_locks_access(&self, addr: u16) -> bool {
+        self.ppu_blocks(addr, true)
+    }
+
+    /// Whether the PPU locks `addr` from a CPU access of the given direction.
+    /// Boundary precision (the exact mode-2->3 and mode-3->0 transition dots)
+    /// uses the renderer's cycle-exact predictor (`cpu_access_blocked`), which
+    /// mirrors Gambatte's lineCycle thresholds. When no closed-form mode-0 dot
+    /// is available (window / first line after enable) it falls back to the
+    /// FF41 mode bits.
+    fn ppu_blocks(&self, addr: u16, is_read: bool) -> bool {
         let is_vram = (0x8000..=0x9FFF).contains(&addr);
         let is_oam = (0xFE00..=0xFE9F).contains(&addr);
         let is_cgb_pal = (addr == 0xFF69 || addr == 0xFF6B) && self.mmio.is_cgb_features_enabled();
@@ -93,8 +103,16 @@ impl<'a> Bus<'a> {
         if self.mmio.read(ppu::LCD_CONTROL) & 0x80 == 0 {
             return false;
         }
+        let _ = is_read;
+        let kind: u8 = if is_vram { 0 } else if is_oam { 1 } else { 2 };
         let mode = self.mmio.read(ppu::LCD_STATUS) & 0x03;
-        if is_oam { mode == 2 || mode == 3 } else { mode == 3 }
+        let mode_locked = if is_oam { mode == 2 || mode == 3 } else { mode == 3 };
+        let ds = self.mmio.is_double_speed_mode();
+        let is_cgb = self.mmio.is_cgb_features_enabled();
+        if let Some(blocked) = self.ppu.cpu_access_blocked(kind, mode_locked, is_cgb, ds) {
+            return blocked;
+        }
+        mode_locked
     }
 
     pub fn read(&mut self, addr: u16) -> u8 {
@@ -163,7 +181,7 @@ impl<'a> Bus<'a> {
         // VRAM/OAM/CGB-palette writes are ignored while the PPU owns those
         // resources (see `ppu_locks_access`). Drop the write but still tick.
         // OAM-DMA conflicts are resolved separately in the tick-before path.
-        if !self.mmio.dma_active() && self.ppu_locks_access(addr) {
+        if !self.mmio.dma_active() && self.ppu_blocks(addr, false) {
             self.tick_m();
             return;
         }

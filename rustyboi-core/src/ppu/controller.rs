@@ -1679,6 +1679,37 @@ impl Ppu {
         Some(dot >= m0 && dot + 3 + 3 * ds < 456)
     }
 
+    /// Whether the CPU may currently access VRAM/OAM/CGB-palette, mirroring
+    /// Gambatte's `vramReadable`/`vramWritable`/`oamReadable`/`oamWritable`/
+    /// `cgbpAccessible` lineCycle thresholds rather than the rounded FF41 mode.
+    /// `ticks` is the renderer's within-line dot (mode-3 starts at dot 80 DMG /
+    /// 82 CGB); Gambatte's `lineCycles` frame is `ticks - (4 - cgb)`. The mode-0
+    /// end is the scheduled mode-0 dot. Returns None when no closed-form mode-0
+    /// dot is available (window / first line after enable) so the caller falls
+    /// back to the FF41-mode gate. `is_read` selects the read vs write
+    /// threshold; `kind`: 0=vram, 1=oam, 2=cgbpal. Read-only.
+    /// `mode3_locked` is the caller's FF41-mode start gate (mode 3 for vram/cgbp,
+    /// mode 2|3 for oam). The cycle-exact predictor only refines the mode-3->0
+    /// END boundary against `scheduled_mode0_dot` (Gambatte's `m0TimeOfCurrentLine`);
+    /// the start stays on the renderer's mode set, which is window-independent.
+    pub fn cpu_access_blocked(&self, kind: u8, mode3_locked: bool, is_cgb: bool, double_speed: bool) -> Option<bool> {
+        if self.disabled || self.internal_ly_val >= 144 {
+            return Some(false);
+        }
+        let m0 = self.scheduled_mode0_dot? as i64;
+        let ds = double_speed as i64;
+        let cgb = is_cgb as i64;
+        // End: vram/oam unblock at cc+2 >= m0Time; cgbp at cc >= m0Time+2.
+        // DMG's m0 end sits one dot later than CGB in the renderer's tick frame.
+        // VRAM/OAM unblock at Gambatte's `cc+2 >= m0Time`; DMG's m0 end lands one
+        // renderer dot later than CGB, so DMG keeps blocking one extra dot.
+        let ended = match kind {
+            2 => self.ticks as i64 + ds >= m0 + 2,
+            _ => self.ticks as i64 - ds - (1 - cgb) >= m0,
+        };
+        Some(mode3_locked && !ended)
+    }
+
     pub fn get_x(&self) -> u8 {
         self.x
     }
