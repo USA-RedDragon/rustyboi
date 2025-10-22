@@ -1224,6 +1224,18 @@ impl Ppu {
                 // First line after enable: STAT reports mode 0 (not 2), no
                 // Mode 2 STAT IRQ fires, and M3 starts later than usual.
                 self.first_line_after_enable = true;
+                // Carried-edge LYC=0 IRQ on enable (memory.cpp case 0x40): when
+                // the LYC IRQ source is enabled, LYC==0 and the pre-enable STAT
+                // did NOT already hold the LYC=LY coincidence flag, enabling the
+                // LCD flags a STAT IRQ immediately. The pre-enable lycflag is
+                // bit 2 of the stored FF41 (untouched by the mode write below).
+                let pre_enable_stat = mmio.read(LCD_STATUS);
+                if pre_enable_stat & (1 << 6) != 0
+                    && mmio.read(LYC) == 0
+                    && pre_enable_stat & (1 << 2) == 0
+                {
+                    mmio.request_interrupt(registers::InterruptFlag::Lcd);
+                }
                 Self::set_lcd_status_mode(mmio, 0);
                 self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
                 self.check_and_trigger_stat_interrupt(mmio);
