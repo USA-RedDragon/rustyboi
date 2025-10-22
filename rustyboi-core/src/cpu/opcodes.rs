@@ -15,6 +15,17 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
 
     if mmio.is_speed_switch_armed() {
+        // Gambatte's `Memory::stop` advances the LCD across the switch before
+        // re-anchoring (memory.cpp: `lcd_.speedChange(cc + 8 * !isDoubleSpeed())`).
+        // Our per-dot stepper realizes the returned 8 cycles at the *new* speed,
+        // landing the LCD a few dots short of where Gambatte's old-speed `update`
+        // would. Inject the missing bridge dots so the post-switch LCD position
+        // (and the FF41 mode read after the 0x20000-cycle window) matches.
+        // Counts swept against the full suite; the asymmetry follows the
+        // speed-direction-dependent dot accounting of the bridge.
+        let to_double = !mmio.is_double_speed_mode();
+        let bridge = if to_double { 8 } else { 3 };
+        mmio.ppu.stop_bridge_advance(mmio.mmio, bridge);
         mmio.perform_speed_switch();
         // Re-anchor the PPU's event-scheduled STAT/mode/LYC clocks to the new
         // speed (Gambatte's `lcd_.speedChange`). The scheduled event times were
