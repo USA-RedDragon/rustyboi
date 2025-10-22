@@ -52,10 +52,12 @@ const M0IRQ_OFFSET: i64 = -3;
 // renderer-timed render tests need it earlier. Swept against the suite.
 const M2IRQ_OFFSET: i64 = -1;
 // Absolute-clock offset attributed to an FF41/FF45 register write. The write
-// hook fires after the store but before this M-cycle's dots tick; `abs_cc`
-// advances by 1<<ds per dot, so at double speed the write's true cycle is a
-// full M-cycle (4 machine cycles) behind. Swept against the suite.
-const WRITE_CC_OFFSET: i64 = -1;
+// hook fires after the store but before this M-cycle's dots tick, so the
+// renderer's current dot is already `abs_cc` (the M-cycle start), matching
+// Gambatte's `write(addr, data, cc)` resolving at `cc` before `cc += 4`. No
+// extra bias is needed at single speed. Swept against the full suite (0 beats
+// the former -1 by 32 net).
+const WRITE_CC_OFFSET: i64 = 0;
 
 // Env-tunable override of an i64 offset (for sweeping during development). When
 // the named env var is unset, the compiled-in default is used.
@@ -66,6 +68,12 @@ fn env_off(name: &str, default: i64) -> i64 {
 fn write_cc_off_ds() -> i64 { env_off("RB_WRITE_CC_OFF_DS", -6) }
 fn m0irq_off_ds() -> i64 { env_off("RB_M0IRQ_OFF_DS", M0IRQ_OFFSET) }
 fn m2irq_off_ds() -> i64 { env_off("RB_M2IRQ_OFF_DS", -2) }
+// Sweep-tunable single-speed offsets (default to the compiled-in constants).
+fn dmg_mode0_offset() -> i32 { env_off("RB_DMG_MODE0_OFF", DMG_MODE0_OFFSET as i64) as i32 }
+fn cgb_mode0_offset() -> i32 { env_off("RB_CGB_MODE0_OFF", CGB_MODE0_OFFSET as i64) as i32 }
+fn m0irq_off_ss() -> i64 { env_off("RB_M0IRQ_OFF", M0IRQ_OFFSET) }
+fn m2irq_off_ss() -> i64 { env_off("RB_M2IRQ_OFF", M2IRQ_OFFSET) }
+fn write_cc_off_ss() -> i64 { env_off("RB_WRITE_CC_OFF", WRITE_CC_OFFSET) }
 const MODE2_STAT_PRETRIGGER_DOT: u128 = 452;
 // Within line 153 (the last VBlank line) the LY register is held at 153 only
 // briefly; after this many dots it reads 0, even though the line itself
@@ -593,7 +601,7 @@ impl Ppu {
             Some(d) => d as i64,
             None => {
                 let m3_len = self.compute_m3_length(mmio, is_cgb);
-                let offset = if is_cgb { CGB_MODE0_OFFSET } else { DMG_MODE0_OFFSET };
+                let offset = if is_cgb { cgb_mode0_offset() } else { dmg_mode0_offset() };
                 self.ticks as i64 + m3_len as i64 + offset as i64
             }
         };
@@ -601,7 +609,7 @@ impl Ppu {
         // step). Dots remaining until mode 0 = mode0_within_line - ticks.
         let remaining = mode0_within_line - self.ticks as i64;
         let ds = mmio.is_double_speed_mode();
-        let off = if ds { m0irq_off_ds() } else { M0IRQ_OFFSET };
+        let off = if ds { m0irq_off_ds() } else { m0irq_off_ss() };
         let dsf = 1i64 << ds as i32;
         let abs = (self.abs_cc as i64 - dsf + (remaining + off) * dsf).max(0) as u64;
         self.sched_m0irq = abs;
@@ -692,7 +700,7 @@ impl Ppu {
     }
 
     fn m2_off(ds: bool) -> i64 {
-        if ds { m2irq_off_ds() } else { M2IRQ_OFFSET }
+        if ds { m2irq_off_ds() } else { m2irq_off_ss() }
     }
 
     fn do_mode2_irq_event(&mut self, mmio: &mut mmio::Mmio, ds: bool) {
@@ -1148,7 +1156,7 @@ impl Ppu {
     /// resolving CPU write (0 on an even T-phase, 1 on an odd one), giving the
     /// STAT model half-PPU-dot precision.
     fn write_cc(&self, ds: bool) -> u64 {
-        let off = if ds { write_cc_off_ds() } else { WRITE_CC_OFFSET };
+        let off = if ds { write_cc_off_ds() } else { write_cc_off_ss() };
         // `write_subdot` carries the sub-PPU-dot parity of the resolving CPU
         // write. In practice the STAT/render tests align via whole-instruction
         // polling loops, so writes land on M-cycle (even) phases and this term
@@ -1431,7 +1439,7 @@ impl Ppu {
                         // (PixelTransfer) invalidate it, falling back to the live
                         // emergent x==160 transition.
                         let m3_len = self.compute_m3_length(mmio, is_cgb);
-                        let offset = if is_cgb { CGB_MODE0_OFFSET } else { DMG_MODE0_OFFSET };
+                        let offset = if is_cgb { cgb_mode0_offset() } else { dmg_mode0_offset() };
                         let dot = self.ticks as i64 + m3_len as i64 + offset as i64;
                         self.scheduled_mode0_dot = Some(dot.max(0) as u128);
                         self.m3_scheduled_wx = mmio.read(WX);
