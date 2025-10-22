@@ -603,8 +603,14 @@ impl Mmio {
         // Gambatte `Memory::dma` charges `2 + 2*ds` cc per byte for the entire
         // transfer plus a single trailing `cc += 4`, regardless of block count
         // (the +4 setup is NOT per-block). For one block this is 36 SS / 68 DS.
+        // Gambatte runs GDMA as an event preceded by `Interrupter::prefetch`
+        // (the next opcode is fetched *before* the transfer's cc advance) and a
+        // trailing `cc += 4`. Synchronous GDMA here charges the transfer up
+        // front, so the post-stall return must absorb that prefetch/setup
+        // overlap; +6 lands the next STAT-mode read on the exact mode-0 dot for
+        // the gdma_cycles boundary pairs.
         let (per_byte, setup) = if self.is_double_speed_mode() { (4, 5) } else { (2, 4) };
-        self.pending_dma_stall += (effective_length as u32) * per_byte + setup;
+        self.pending_dma_stall += (effective_length as u32) * per_byte + setup + 6;
     }
 
     // ----------------------------------------------------------------------
