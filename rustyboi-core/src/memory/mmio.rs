@@ -695,12 +695,13 @@ impl Mmio {
         }
         self.hdma_req_pending = false;
 
-        // Stall: Gambatte `Memory::dma` advances `cc` by `(2 + 2*ds) * 16`
-        // per byte plus a trailing `cc += 4` setup overhead = 36 / 68.
-        // Gambatte's `cc` and rustyboi's `cycles` use the same unit (NOP
-        // returns 4 in both, frame budget = 70224 SS / 140448 DS), so use
-        // these values verbatim.
-        if self.is_double_speed_mode() { 68 } else { 36 }
+        // Stall: Gambatte `Memory::dma` advances `cc` by `(2 + 2*ds) * 16` per
+        // byte (= 32 / 64) plus a trailing `cc += 4`. Gambatte runs the block as
+        // an event preceded by `Interrupter::prefetch` (next opcode fetched
+        // before the transfer's cc advance); synchronous HDMA here absorbs that
+        // prefetch/setup overlap with +6 so the post-block stall return lands
+        // the next STAT-mode read on the exact mode-0 dot (36+6 / 68+6).
+        if self.is_double_speed_mode() { 74 } else { 42 }
     }
 
     /// The byte the OAM-DMA engine copies into `OAM[pos]`. Mirrors Gambatte's
