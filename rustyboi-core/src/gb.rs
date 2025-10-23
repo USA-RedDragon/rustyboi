@@ -168,6 +168,33 @@ impl GB {
             self.mmio.write(crate::memory::mmio::REG_VBK, 0x7E);
             self.mmio.write(crate::memory::mmio::REG_SVBK, 0xF8);
         }
+
+        // Work-RAM power-on contents (Gambatte setInitial*Wram). Fill via the
+        // normal bus, walking SVBK so each CGB bank receives its slice; fixed
+        // bank 0 lives at 0xC000, the banked region at 0xD000.
+        {
+            let cgb = self.hardware == Hardware::CGB;
+            let banks = if cgb { 8 } else { 2 };
+            let mut wram = vec![0u8; banks * 0x1000];
+            crate::memory::init_wram_powerup(cgb, &mut wram);
+            for (i, b) in wram[0x0000..0x1000].iter().enumerate() {
+                self.mmio.write(0xC000 + i as u16, *b);
+            }
+            for bank in 1..banks {
+                if cgb {
+                    self.mmio
+                        .write(crate::memory::mmio::REG_SVBK, bank as u8);
+                }
+                let base = bank * 0x1000;
+                for (i, b) in wram[base..base + 0x1000].iter().enumerate() {
+                    self.mmio.write(0xD000 + i as u16, *b);
+                }
+            }
+            if cgb {
+                self.mmio.write(crate::memory::mmio::REG_SVBK, 0xF8);
+            }
+        }
+
         self.mmio.write(crate::memory::mmio::REG_BOOT_OFF, 1);
 
         // Post-boot DIV phase. `write(DIV)` above resets the counter, so set the
