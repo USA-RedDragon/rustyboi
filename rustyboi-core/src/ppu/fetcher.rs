@@ -155,6 +155,7 @@ impl Fetcher {
         window_line: u8,
         lcdc_state: FetcherLcdcState,
         display_x: u8,
+        pending_discard: u8,
     ) -> Option<FetcherDebugEvent> {
         let ly = mmio.read(ppu::LY);
         // Re-read (scy + ly) live at every BG fetch substep. The fetcher runs
@@ -200,7 +201,8 @@ impl Fetcher {
                     // discard prologue; the first tile (display_x == 0) is fetched
                     // at scx/8 with no adjustment.
                     let cgb_adj: u16 = if mmio.is_cgb_features_enabled() || display_x == 0 { 0 } else { 1 };
-                    let xpos = display_x as u16 + self.pixel_fifo.size() as u16;
+                    let xpos = (display_x as u16 + self.pixel_fifo.size() as u16)
+                        .saturating_sub(pending_discard as u16);
                     let bg_tile_x = (scx as u16 + xpos + cgb_adj) / 8 % 32;
                     let bg_tile_y = (y as u16 / 8) % 32;
                     let map_offset = bg_tile_y * 32 + bg_tile_x;
