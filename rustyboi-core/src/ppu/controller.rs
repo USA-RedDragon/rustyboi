@@ -1728,7 +1728,10 @@ impl Ppu {
         }
         let ds = double_speed as i128;
         let dot = self.ticks as i128;
-        Some(dot >= m0 && dot + 3 + 3 * ds < 456)
+        // Gambatte gates HDMA on `cc >= m0Time` but its eligibility call site
+        // (video.cpp:357) passes `cc + 4`; the +1 dot here aligns the renderer
+        // tick with that access cc. Net +1 on the dma suite, no regressions.
+        Some(dot >= m0 + 1 && dot + 3 + 3 * ds < 456)
     }
 
     /// Whether the CPU may currently access VRAM/OAM/CGB-palette, mirroring
