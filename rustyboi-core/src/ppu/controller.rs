@@ -250,6 +250,13 @@ pub struct Ppu {
     // tile-map column. Reset to 0 at every M3 arm.
     #[serde(default)]
     m3_pixels_discarded: u8,
+    // Fine-scroll discard target latched at M3 start (Gambatte M3Start::f1
+    // samples `scx % 8` when the loop first runs, at M3 start, before the
+    // mode-2 STAT handler's mid-M3 SCX write lands). Reading SCX live in the
+    // pop loop samples it too late (after FIFO latency), capturing the
+    // already-written value and over-discarding. -1 = not yet latched.
+    #[serde(default)]
+    m3_discard_target: i8,
     // WX snapshot taken when the closed-form mode-0 schedule was computed; a
     // mid-mode-3 WX change before the window starts invalidates the schedule.
     m3_scheduled_wx: u8,
@@ -355,6 +362,7 @@ impl Ppu {
             line_153_ly_zeroed: false,
             mode0_pretriggered_this_line: false,
             m3_pixels_discarded: 0,
+            m3_discard_target: -1,
             m3_scheduled_wx: 0,
             m3_scheduled_win: false,
             scheduled_mode0_dot: None,
@@ -1425,9 +1433,10 @@ impl Ppu {
                     let was_first_line = self.first_line_after_enable;
                     self.first_line_after_enable = false;
                     self.mode0_pretriggered_this_line = false;
-                    // SCX fine-scroll discard is done per-dot at the start of
-                    // Mode 3 (see `m3_pixels_discarded`), re-reading SCX live.
+                    // SCX fine-scroll discard target is latched at M3 start (see
+                    // m3_discard_target); the per-dot pop loop consumes that many.
                     self.m3_pixels_discarded = 0;
+                    self.m3_discard_target = (mmio.read(SCX) & 0x07) as i8;
                     self.check_and_trigger_stat_interrupt(mmio);
 
                     if was_first_line {
@@ -1548,8 +1557,8 @@ impl Ppu {
                 // dot. A mid-M3 SCX write changes this count (and the fetched
                 // tile column, since TileNumber re-reads SCX live).
                 if self.x == 0 {
-                    let scx_low3 = mmio.read(SCX) & 0x07;
-                    if self.m3_pixels_discarded < scx_low3
+                    let target = self.m3_discard_target.max(0) as u8;
+                    if self.m3_pixels_discarded < target
                         && let Ok(_) = self.fetcher.pixel_fifo.pop() {
                             self.m3_pixels_discarded += 1;
                             break 'label;
