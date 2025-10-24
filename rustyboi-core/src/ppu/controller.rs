@@ -1053,10 +1053,10 @@ impl Ppu {
         let ds = mmio.is_double_speed_mode();
         let cc = self.write_cc(ds);
         // wy2 apply delay (cc) past the write, swept against the late_wy suite:
-        // CGB 6 (Gambatte's nominal), DMG 4. The split reflects the differing
+        // CGB 7, DMG 4 (-ds at double speed). The split reflects the differing
         // M3-start / fine-scroll phase between the two cores.
         let base = if mmio.is_cgb_features_enabled() {
-            env_off("RB_WY2_DELAY_CGB", 6)
+            env_off("RB_WY2_DELAY_CGB", 7)
         } else {
             env_off("RB_WY2_DELAY_DMG", 4)
         };
