@@ -194,6 +194,12 @@ impl<'a> Bus<'a> {
         let tick_before = matches!(addr, 0xFF01..=0xFF02 | 0xFF04..=0xFF07 | 0xFF46 | 0xFF4A | 0xFF4B)
             || self.mmio.dma_active();
         if tick_before {
+            // FF4A (WY): schedule Gambatte's `wy2` at the write's cc (read-at-
+            // cc-start phase, like the STAT path) before the M-cycle ticks.
+            if addr == ppu::WY {
+                self.ppu.set_write_subdot(self.mmio.cpu_t_phase());
+                self.ppu.on_wy_write(value, self.mmio);
+            }
             self.tick_m();
             self.mmio.write(addr, value);
         } else {
