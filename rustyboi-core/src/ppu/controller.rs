@@ -65,9 +65,13 @@ const WRITE_CC_OFFSET: i64 = 0;
 fn env_off(name: &str, default: i64) -> i64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
-fn write_cc_off_ds() -> i64 { env_off("RB_WRITE_CC_OFF_DS", -3) }
+// DS offsets re-derived after the double-speed STAT sub-dot step (step_subdot)
+// gave the IRQ model true odd-cc resolution: m2 relaxes -2 -> -1 (the odd-cc
+// fire is now caught by the sub-dot rather than rounded down), and the write cc
+// tightens -3 -> -4.
+fn write_cc_off_ds() -> i64 { env_off("RB_WRITE_CC_OFF_DS", -4) }
 fn m0irq_off_ds() -> i64 { env_off("RB_M0IRQ_OFF_DS", M0IRQ_OFFSET) }
-fn m2irq_off_ds() -> i64 { env_off("RB_M2IRQ_OFF_DS", -2) }
+fn m2irq_off_ds() -> i64 { env_off("RB_M2IRQ_OFF_DS", -1) }
 // Sweep-tunable single-speed offsets (default to the compiled-in constants).
 fn dmg_mode0_offset() -> i32 { env_off("RB_DMG_MODE0_OFF", DMG_MODE0_OFFSET as i64) as i32 }
 fn cgb_mode0_offset() -> i32 { env_off("RB_CGB_MODE0_OFF", CGB_MODE0_OFFSET as i64) as i32 }
@@ -665,6 +669,25 @@ impl Ppu {
         self.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off(mmio.is_double_speed_mode())) as u64 };
         // m0irq is scheduled from the renderer's mode-0 prediction; (re)armed
         // when entering pixel transfer. Leave as-is here.
+    }
+
+    /// Double-speed sub-dot step. At DS the CPU runs two M-cycles per displayed
+    /// pixel-dot; the full `step` runs on the even (render) M-cycle and advances
+    /// `abs_cc` by 2. This runs on the intervening odd M-cycle so STAT/LYC IRQ
+    /// events scheduled at an *odd* `abs_cc` fire at the true half-dot instead of
+    /// being rounded up to the next even render dot. It dispatches events at the
+    /// intermediate cc (`abs_cc - 1`, i.e. one M-cycle before the next render
+    /// dot's post-increment value) without advancing the renderer's clock.
+    pub fn step_subdot(&mut self, mmio: &mut mmio::Mmio) {
+        if self.disabled {
+            return;
+        }
+        // The preceding full `step` dispatched at the even cc N and advanced
+        // `abs_cc` to N+2 (the next render dot). The odd half-dot is cc N+1, one
+        // machine cycle earlier; dispatch any event due there, then restore.
+        self.abs_cc -= 1;
+        self.dispatch_stat_events(mmio);
+        self.abs_cc += 1;
     }
 
     /// Fire any STAT IRQ events whose scheduled time has arrived at the current

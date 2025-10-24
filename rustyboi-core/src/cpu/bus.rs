@@ -45,6 +45,12 @@ impl<'a> Bus<'a> {
             self.ppu.step_scheduled_stat_events(self.mmio);
             self.mmio.step_audio();
             self.ppu.step(self.mmio);
+        } else {
+            // Double-speed odd half-dot: the renderer steps once per pixel-dot
+            // (the even phase above), but the CPU runs a second M-cycle here. Run
+            // a STAT/IRQ sub-dot so events scheduled at an odd `abs_cc` fire at
+            // the true half-dot instead of being rounded to the next render dot.
+            self.ppu.step_subdot(self.mmio);
         }
         // HDMA triggers on the PPU's exact mode-0 (HBlank) entry, so check it
         // AFTER the PPU has stepped this dot. Prefer the renderer's cycle-exact
