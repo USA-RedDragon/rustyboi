@@ -36,15 +36,18 @@ The resulting core lands at:
 
 ### Install
 
-Copy the built library into RetroArch's `cores/` directory. On Linux that is
-typically:
+Copy the built library into RetroArch's `cores/` directory, and the bundled
+`rustyboi_libretro.info` into its `info/` directory so RetroArch shows the core
+name, supported extensions, and capabilities. On Linux that is typically:
 
 ```sh
 cp target/release/librustyboi_libretro.so ~/.config/retroarch/cores/
+cp rustyboi-libretro/rustyboi_libretro.info ~/.config/retroarch/info/
 ```
 
-A matching `rustyboi_libretro.info` file (metadata shown in RetroArch's menus)
-is optional and not required to run the core.
+The `.info` file is not required to *run* the core, but without it RetroArch
+lists the core by its filename and won't associate `.gb`/`.gbc` content with it.
+The library and `.info` basenames must match (`rustyboi_libretro`).
 
 ### Load
 

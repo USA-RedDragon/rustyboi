@@ -1,0 +1,37 @@
+# Software Information
+display_name = "Nintendo - Game Boy / Game Boy Color (rustyboi)"
+authors = "Jacob McSwain"
+supported_extensions = "gb|gbc|zip"
+corename = "rustyboi"
+categories = "Emulator"
+license = "MIT"
+permissions = ""
+display_version = "0.1.0"
+
+# Hardware Information
+manufacturer = "Nintendo"
+systemname = "Game Boy / Game Boy Color"
+systemid = "game_boy"
+
+# Libretro Features
+database = "Nintendo - Game Boy|Nintendo - Game Boy Color"
+supports_no_game = "false"
+savestate = "true"
+savestate_features = "serialized"
+cheats = "false"
+input_descriptors = "true"
+memory_descriptors = "false"
+libretro_saves = "false"
+core_options = "true"
+core_options_version = "2.0"
+load_subsystem = "false"
+hw_render = "false"
+needs_fullpath = "false"
+disk_control = "false"
+is_experimental = "false"
+
+# Firmware / BIOS
+# rustyboi boots without an external BIOS (skip_bios), so no firmware is required.
+firmware_count = 0
+
+description = "rustyboi is a cycle-accurate Game Boy / Game Boy Color emulator written in Rust. This libretro core provides video, audio, joypad input, runtime-serialized save states, and a selectable hardware model (Auto/CGB/DMG). Note: in-cartridge battery (SRAM) saves are not yet persisted by this core — use save states."
