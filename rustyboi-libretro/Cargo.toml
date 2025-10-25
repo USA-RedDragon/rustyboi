@@ -1,0 +1,14 @@
+[package]
+name = "rustyboi-libretro"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "rustyboi_libretro"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustyboi-core = { path = "../rustyboi-core" }
+rust-libretro = "0.3.2"
+bincode = { version = "1.3", default-features = false }
+libc = "0.2"
