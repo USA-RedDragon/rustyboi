@@ -264,6 +264,17 @@ pub struct Ppu {
     // already-written value and over-discarding. -1 = not yet latched.
     #[serde(default)]
     m3_discard_target: i8,
+    // Dot at which the current line's M3 (PixelTransfer) was armed. xpos in
+    // Gambatte's M3Start::f1 loop == ticks - this. Used to re-read SCX at the
+    // same early M3 dots Gambatte samples, so a mid-discard SCX write moves the
+    // break target without the FIFO-warmup latency over-reading later writes.
+    #[serde(default)]
+    m3_arm_dot: u128,
+    // scx%8 sampled at M3 arm, used by the closed-form mode-0 schedule's
+    // discard prefix. If the live f1 break resolves to a different count, the
+    // schedule is nudged by the difference so M3 ends at the right dot.
+    #[serde(default)]
+    m3_arm_scx: u8,
     // WX snapshot taken when the closed-form mode-0 schedule was computed; a
     // mid-mode-3 WX change before the window starts invalidates the schedule.
     m3_scheduled_wx: u8,
@@ -381,6 +392,8 @@ impl Ppu {
             mode0_pretriggered_this_line: false,
             m3_pixels_discarded: 0,
             m3_discard_target: -1,
+            m3_arm_dot: 0,
+            m3_arm_scx: 0,
             m3_scheduled_wx: 0,
             m3_scheduled_win: false,
             scheduled_mode0_dot: None,
@@ -1504,10 +1517,14 @@ impl Ppu {
                     let was_first_line = self.first_line_after_enable;
                     self.first_line_after_enable = false;
                     self.mode0_pretriggered_this_line = false;
-                    // SCX fine-scroll discard target is latched at M3 start (see
-                    // m3_discard_target); the per-dot pop loop consumes that many.
+                    // SCX fine-scroll discard target (Gambatte M3Start::f1): the
+                    // break xpos is resolved over the first M3 dots by re-reading
+                    // SCX live (see the early-window loop in PixelTransfer). Seed
+                    // it unlatched (-1) and record the arm dot for xpos tracking.
                     self.m3_pixels_discarded = 0;
-                    self.m3_discard_target = (mmio.read(SCX) & 0x07) as i8;
+                    self.m3_discard_target = -1;
+                    self.m3_arm_dot = self.ticks;
+                    self.m3_arm_scx = (mmio.read(SCX) & 0x07) as u8;
                     self.check_and_trigger_stat_interrupt(mmio);
 
                     if was_first_line {
@@ -1560,6 +1577,33 @@ impl Ppu {
                     Self::set_lcd_status_mode(mmio, 0);
                     self.check_and_trigger_stat_interrupt(mmio);
                     break 'label;
+                }
+
+                // Gambatte M3Start::f1 fine-scroll break resolution. The f1 loop
+                // runs xpos = 0,1,2,... one per M3 dot, re-reading p.scx each
+                // step, and breaks (fixing the discard count) at the first xpos
+                // with xpos%8 == scx%8. xpos == ticks - arm dot, so reading SCX
+                // here samples it at the same early M3 dots Gambatte does -
+                // independent of the FIFO/warmup latency that delays the pops.
+                // Once resolved the target is frozen, so a later SCX write past
+                // the break has no effect (matching the single-write tests).
+                if self.x == 0 && self.m3_discard_target < 0 {
+                    const F1_OFFSET: i64 = -1;
+                    let xpos = ((self.ticks as i64 - self.m3_arm_dot as i64 + F1_OFFSET).max(0)) as u32;
+                    let scx_live = (mmio.read(SCX) & 0x07) as u32;
+                    if xpos % 8 == scx_live || xpos >= 80 {
+                        // Discard the full xpos count: a mid-discard SCX change can
+                        // push the break past tile_len (Gambatte loops on to the
+                        // next matching xpos), discarding more than 7 pixels.
+                        self.m3_discard_target = xpos as i8;
+                        // The closed-form mode-0 schedule assumed m3_arm_scx dots
+                        // of discard; nudge it by the actual difference so M3 ends
+                        // at the right dot (the extra discards lengthen M3).
+                        if let Some(dot) = self.scheduled_mode0_dot {
+                            let delta = xpos as i64 - self.m3_arm_scx as i64;
+                            self.scheduled_mode0_dot = Some((dot as i64 + delta).max(0) as u128);
+                        }
+                    }
                 }
 
                 if self.sprite_fetch_stall > 0 {
@@ -1636,7 +1680,11 @@ impl Ppu {
                 // dot. A mid-M3 SCX write changes this count (and the fetched
                 // tile column, since TileNumber re-reads SCX live).
                 if self.x == 0 {
-                    let target = self.m3_discard_target.max(0) as u8;
+                    // Hold output until the f1 break is resolved (target latched).
+                    if self.m3_discard_target < 0 {
+                        break 'label;
+                    }
+                    let target = self.m3_discard_target as u8;
                     if self.m3_pixels_discarded < target
                         && let Ok(_) = self.fetcher.pixel_fifo.pop() {
                             self.m3_pixels_discarded += 1;
