@@ -76,6 +76,30 @@ impl Serial {
         self.active = true;
     }
 
+    /// Re-align the pending transfer event to a DIV reset, mirroring Gambatte
+    /// memory.cpp `case 0x04`:
+    /// `n = t + (cc - t) % align - 2 * ((cc - t) & half); eventTime = max(cc,n)`.
+    /// A DIV write resets the internal divider that gates the serial shift clock,
+    /// so the next (and only the next) shift edge snaps to the new divider phase.
+    /// Only perturbs an in-flight, future-completing transfer.
+    pub fn realign_to_div(&mut self, phase: u64) {
+        if !self.active || self.complete_at <= phase {
+            return;
+        }
+        let fast = self.cgb && (self.sc & SC_FAST_CLOCK) != 0;
+        let (align, half) = if fast { (8u64, 4u64) } else { (0x100u64, 0x80u64) };
+        // Gambatte operates on the raw serial event time `t` and write cc; our
+        // `complete_at` carries the SC-write -8 offset, so undo it for the
+        // residue math (and the matching write-cc offset cancels in delta).
+        const OFF: u64 = 8;
+        let t = self.complete_at + OFF;
+        let delta = phase.wrapping_sub(t); // (cc - t), wraps since t > cc
+        let n = t
+            .wrapping_add(delta % align)
+            .wrapping_sub(2 * (delta & half));
+        self.complete_at = n.saturating_sub(OFF).max(phase);
+    }
+
     /// Advance bookkeeping at CPU T-phase `phase` (sampled before this dot's
     /// advance, matching the per-dot tick ordering). Shifts SB as bits clock out
     /// and raises the serial IRQ exactly when `complete_at` is reached.
