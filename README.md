@@ -55,5 +55,30 @@ The library and `.info` basenames must match (`rustyboi_libretro`).
 2. Choose **Load Content** and pick a `.gb`, `.gbc`, or zipped ROM.
 
 Under **Quick Menu > Options** you can set the hardware model
-(Auto / Game Boy Color / Game Boy DMG). Auto selects CGB unless the ROM header
-marks it DMG-only. Save states (RetroArch's save/load state) are supported.
+(Auto / Game Boy Color / Game Boy DMG; Auto selects CGB unless the ROM header
+marks it DMG-only), the DMG palette (Grayscale / Green / Game Boy Pocket), and
+the GBC colour correction (Linear / Gambatte).
+
+### Supported features
+
+- **Video / audio / input** — XRGB8888 video, stereo audio, joypad input.
+- **Save states** — RetroArch save/load state (bincode-serialized).
+- **Battery saves (SRAM)** — `RETRO_MEMORY_SAVE_RAM`; RetroArch persists the
+  cartridge's battery RAM to a `.srm` file. The core never writes its own
+  sidecar save when run under libretro, so RetroArch owns persistence.
+- **RTC** — MBC3 real-time-clock registers via `RETRO_MEMORY_RTC` (`.rtc`).
+- **Cheats** — Game Genie (`AAA-BBB[-CCC]`, applied as ROM patches) and
+  GameShark (`ABCDGHIJ`, applied as RAM pokes each frame).
+- **Memory maps** — WRAM, HRAM, VRAM and cartridge SRAM are exposed via
+  `SET_MEMORY_MAPS`, enabling RetroAchievements and RAM tools.
+- **Rumble** — MBC5 rumble cartridges drive the frontend rumble motor.
+- **Palette / colour options** — DMG palette presets and a GBC colour
+  correction mode (wired to the core's CGB colour conversion).
+
+### Limitations
+
+- **Sensors** (MBC7 accelerometer, Boktai light sensor) and the **microphone**
+  are unsupported: the core has no sensor/mic input path.
+- **Link cable / multiplayer subsystems** are out of scope; the core has no
+  serial-link networking.
+- Disk control and hardware (GL) rendering are not applicable to the Game Boy.
