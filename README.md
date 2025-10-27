@@ -49,6 +49,36 @@ The `.info` file is not required to *run* the core, but without it RetroArch
 lists the core by its filename and won't associate `.gb`/`.gbc` content with it.
 The library and `.info` basenames must match (`rustyboi_libretro`).
 
+### Android (RetroArch)
+
+The desktop `.so` is glibc/x86-64 and will **not** load on Android. Cross-compile
+with the Android NDK using the helper script (needs `cargo-ndk`, the Android Rust
+targets, and an NDK):
+
+```sh
+ANDROID_NDK_HOME=/path/to/ndk ./build-libretro-android.sh arm64-v8a   # or --all
+```
+
+This emits `target/libretro-android/<abi>/rustyboi_libretro_android.so` — note the
+mandatory `_android` suffix and **no** `lib` prefix; RetroArch Android only loads
+cores named `<name>_libretro_android.so`. The script handles the two cross-build
+gotchas: a per-ABI bindgen `--target`/`--sysroot` (so 32-bit pointer/`size_t`
+layouts are correct) and a host `libclang` ≤ 21 (libclang 22 mis-parses a libretro
+struct; set `LIBCLANG_PATH` if it isn't auto-detected).
+
+Install it via the in-app menu — RetroArch's Android cores live in an app-private
+directory you can't push into without root:
+
+```sh
+adb push target/libretro-android/arm64-v8a/rustyboi_libretro_android.so /sdcard/Download/
+```
+
+Then **Main Menu → Load Core → Install or Restore a Core → Downloads →
+`rustyboi_libretro_android.so`** (RetroArch copies it into its real cores dir,
+shown under **Settings → Directory → Cores**). The `.info` is optional and not
+copied by that flow; to add it, push `rustyboi_libretro.info` into the path under
+**Settings → Directory → Core Info** if that path is writable.
+
 ### Load
 
 1. In RetroArch, choose **Load Core** and select `librustyboi_libretro.so`.
