@@ -436,6 +436,43 @@ impl GB {
         self.mmio.read(address)
     }
 
+    /// Write a byte through the memory bus. Used by the libretro frontend to
+    /// apply per-frame GameShark RAM pokes.
+    pub fn write_memory(&mut self, address: u16, value: u8) {
+        self.mmio.write(address, value);
+    }
+
+    /// Mutable handle to the inserted cartridge (libretro save-RAM / RTC /
+    /// rumble / Game Genie access).
+    pub fn cartridge_mut(&mut self) -> Option<&mut cartridge::Cartridge> {
+        self.mmio.get_cartridge_mut()
+    }
+
+    /// Immutable handle to the inserted cartridge.
+    pub fn cartridge(&self) -> Option<&cartridge::Cartridge> {
+        self.mmio.get_cartridge()
+    }
+
+    /// Fixed WRAM bank 0 (0xC000-0xCFFF) for libretro memory maps.
+    pub fn wram_bank0_mut(&mut self) -> &mut [u8] {
+        self.mmio.wram_bank0_slice_mut()
+    }
+
+    /// Switchable WRAM bank window (0xD000-0xDFFF) for libretro memory maps.
+    pub fn wram_bank1_mut(&mut self) -> &mut [u8] {
+        self.mmio.wram_bank1_slice_mut()
+    }
+
+    /// High RAM (0xFF80-0xFFFE) for libretro memory maps.
+    pub fn hram_mut(&mut self) -> &mut [u8] {
+        self.mmio.hram_slice_mut()
+    }
+
+    /// Video RAM bank 0 (0x8000-0x9FFF) for libretro memory maps.
+    pub fn vram_mut(&mut self) -> &mut [u8] {
+        self.mmio.vram_slice_mut()
+    }
+
     /// Read RGB555 color from CGB background palette RAM
     pub fn read_bg_palette_data(&self, palette_idx: u8, color_idx: u8) -> u16 {
         let (low, high) = self.mmio.read_bg_palette_data(palette_idx, color_idx);
