@@ -230,7 +230,9 @@ impl RustyboiCore {
         };
 
         let mut descriptors: Vec<retro_memory_descriptor> = Vec::new();
-        let mut push = |ptr: *mut u8, len: usize, start: usize, flags: u64, name: *const i8| {
+        // `c_char` is i8 on x86 but u8 on ARM/Android; use the alias so the
+        // `addrspace` field type matches on every target.
+        let mut push = |ptr: *mut u8, len: usize, start: usize, flags: u64, name: *const std::os::raw::c_char| {
             if len == 0 {
                 return;
             }
