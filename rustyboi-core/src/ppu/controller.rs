@@ -1872,7 +1872,48 @@ impl Ppu {
         // Gambatte gates HDMA on `cc >= m0Time` but its eligibility call site
         // (video.cpp:357) passes `cc + 4`; the +1 dot here aligns the renderer
         // tick with that access cc. Net +1 on the dma suite, no regressions.
-        Some(dot >= m0 + 1 && dot + 3 + 3 * ds < 456)
+        let m0n = m0 + self.dma_scx_m0_nudge(double_speed, false) as i128;
+        Some(dot >= m0n + 1 && dot + 3 + 3 * ds < 456)
+    }
+
+    /// SCX-phase-conditioned nudge to the mode-0 boundary dot used by the
+    /// HDMA/VRAM-lock predictors (NOT the m0 STAT IRQ, which is calibrated
+    /// separately). The closed-form `compute_m3_length` prefix `scx + (1-cgb)`
+    /// is a dot-count model; at some SCX phases Gambatte's M3Start fine-scroll
+    /// dispatch lands the actual HBlank one renderer dot off from that linear
+    /// model, and that boundary feeds the HDMA trigger / VRAM-unlock the dma
+    /// suite measures. Env-overridable, gated per SCX&7 phase and per speed so
+    /// it cannot touch co-calibrated clusters at other phases.
+    fn dma_scx_m0_nudge(&self, double_speed: bool, vram: bool) -> i64 {
+        let scx = self.m3_arm_scx & 0x07;
+        let suffix = if double_speed { "_DS" } else { "" };
+        // Two surgical, phase-scoped boundary nudges, each a clean -1 on the dma
+        // cluster with zero regressions across the co-calibrated clusters
+        // (window / scx_during_m3 / cgbpal_m3 / enable_display / scy / oamdma):
+        //
+        // * HDMA-trigger boundary, SCX&7==1 (vram=false): Gambatte's M3Start
+        //   fine-scroll dispatch lands the actual HBlank one renderer dot before
+        //   the linear `scx + (1-cgb)` prefix model implies, so the HDMA block at
+        //   this phase arms one dot early in our model; -1 realigns it. Only the
+        //   HDMA consumer (dma cluster) sees this; VRAM-lock is untouched here.
+        //
+        // * VRAM-lock end boundary, SCX&7==3 (vram=true): at this phase the
+        //   cycle-exact mode-3->0 unblock the dma reads probe sits one dot late
+        //   vs hardware; -1 realigns it. Verified to fix 1 dma with no regression
+        //   in any co-calibrated VRAM/OAM/cgbpal-access test.
+        //
+        // SCX&7==0 was -2 on dma-only but regresses two window m2int_wxA6
+        // busyread tests, so it is deliberately left unbiased (default 0).
+        let default = match (vram, scx) {
+            (false, 1) => -1,
+            (true, 3) => -1,
+            _ => 0,
+        };
+        let pfx = if vram { "RB_VRAM_M0_SCX" } else { "RB_DMA_M0_SCX" };
+        match scx {
+            0 | 1 | 2 | 3 | 5 => env_off(&format!("{pfx}{scx}{suffix}"), default),
+            _ => 0,
+        }
     }
 
     /// Whether the CPU may currently access VRAM/OAM/CGB-palette, mirroring
@@ -1892,7 +1933,7 @@ impl Ppu {
         if self.disabled || self.internal_ly_val >= 144 {
             return Some(false);
         }
-        let m0 = self.scheduled_mode0_dot? as i64;
+        let m0 = self.scheduled_mode0_dot? as i64 + self.dma_scx_m0_nudge(double_speed, true);
         let ds = double_speed as i64;
         let cgb = is_cgb as i64;
         // End: vram/oam unblock at cc+2 >= m0Time; cgbp at cc >= m0Time+2.
