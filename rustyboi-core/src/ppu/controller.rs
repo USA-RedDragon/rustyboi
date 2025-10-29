@@ -1773,8 +1773,20 @@ impl Ppu {
                 // line itself has not ended. Update LYC=LY immediately so the
                 // STAT line for LYC==0 fires one line earlier than the
                 // visible LY=0 scanline.
+                // At double speed the line-153 LY-register zero transition lands
+                // a couple of dots later (in speed-independent dot units) than the
+                // single-speed dot-6 threshold: the FF44/LYC=0 read tests
+                // (ly0 lyc0flag_ds / lyc153flag_ds) only see LY==0 once the renderer
+                // has advanced past dot 8. Gambatte's getLycCmpLy uses lineTime-6-6*ds
+                // for the compare anticipation; the register-visibility transition
+                // measured by these DS probes sits at dot 8. Single speed stays at 6.
+                let line_153_zero_dot = if mmio.is_double_speed_mode() {
+                    env_off("RB_LINE153_LY0_DOT_DS", 8).max(0) as u128
+                } else {
+                    LINE_153_LY_ZERO_DOT
+                };
                 if !self.line_153_ly_zeroed
-                    && self.ticks == LINE_153_LY_ZERO_DOT
+                    && self.ticks == line_153_zero_dot
                     && mmio.read(LY) == 153
                 {
                     mmio.write_ly_from_ppu(0);
