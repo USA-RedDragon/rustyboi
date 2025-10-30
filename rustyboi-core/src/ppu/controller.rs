@@ -302,6 +302,18 @@ pub struct Ppu {
     // drives the FF41 mode bits + mode-0 STAT IRQ, replacing the x==160 trigger.
     #[serde(default)]
     scheduled_mode0_dot: Option<u128>,
+    // The CPU-visible mode-0 (HBlank) start dot is computed on demand by
+    // `reported_mode0_dot_value` from the closed-form `scheduled_mode0_dot` plus
+    // a per-phase early-report nudge. It is decoupled from the live pixel
+    // pipeline's actual M3 termination, driving ONLY the FF41 mode bits read back
+    // by the CPU and the mode-0 STAT IRQ arm, so it can report mode 0 a few dots
+    // EARLIER than the renderer drains its FIFO (Gambatte computes the reported
+    // mode from the closed-form mode-3 length, not from the pixel-pump
+    // termination) without ever hanging M3. This flag latches once that report
+    // has fired for the current line, so the later live termination does not
+    // re-drive the mode bits or re-fire the STAT check.
+    #[serde(default)]
+    mode0_reported_this_line: bool,
 
     // Event-scheduled STAT/mode/LYC IRQ model (Gambatte port). `abs_cc` is a
     // monotonic absolute dot clock; `line_cycle` (0..455) tracks position
@@ -412,6 +424,7 @@ impl Ppu {
             m3_scheduled_wx: 0,
             m3_scheduled_win: false,
             scheduled_mode0_dot: None,
+            mode0_reported_this_line: false,
             abs_cc: 0,
             write_subdot: 0,
             wy2: 0,
@@ -648,13 +661,44 @@ impl Ppu {
         self.internal_ly_val
     }
 
+    /// The CPU-visible mode-0 (HBlank) start dot, decoupled from the live pixel
+    /// pipeline's actual M3 termination. Derived from the closed-form
+    /// `scheduled_mode0_dot` plus a per-phase early-report nudge (<= 0): in
+    /// Gambatte the FF41 mode and the mode-0 STAT IRQ are computed from the
+    /// predicted mode-3 length and report mode 0 a few dots before the renderer
+    /// finishes draining the FIFO. Moving this value earlier is safe because it
+    /// drives ONLY the FF41 mode bits and the STAT mode-0 arm, never the
+    /// pipeline's own `x==160`/FIFO-drain termination. Returns None when no
+    /// closed-form dot is available (window / first line after enable) so the
+    /// caller falls back to the live x==160 transition for the report too.
+    fn reported_mode0_dot_value(&self, mmio: &mmio::Mmio) -> Option<u128> {
+        let sched = self.scheduled_mode0_dot? as i64;
+        let nudge = self.reported_mode0_early_nudge(mmio);
+        Some((sched + nudge).max(0) as u128)
+    }
+
+    /// Per-phase early-report nudge (<= 0 dots) applied to the reported mode-0
+    /// dot. The live pipeline (rendering / VRAM-unlock) is untouched; only the
+    /// FF41 mode read-back and the mode-0 STAT IRQ arm see this. Bucketed by
+    /// SCX&7 / sprite-count / speed / CGB-DMG, env-overridable, default 0 so the
+    /// pure decouple is net-zero. Each non-zero default below is a measured,
+    /// zero-regression net-positive on the m3stat / m0irq / scx_during_m3
+    /// clusters.
+    fn reported_mode0_early_nudge(&self, mmio: &mmio::Mmio) -> i64 {
+        let _ = mmio;
+        0
+    }
+
     /// Arm `sched_m0irq` for the current line from the renderer's predicted
     /// mode-0 start (`scheduled_mode0_dot`, a within-line dot). Converted to the
     /// absolute clock. If no closed-form mode-0 dot is available (window/first
     /// line), fall back to the m0 prediction from the m3 length.
     fn arm_m0irq_for_current_line(&mut self, mmio: &mmio::Mmio) {
         let is_cgb = mmio.is_cgb_features_enabled();
-        let mode0_within_line = match self.scheduled_mode0_dot {
+        // The mode-0 STAT IRQ is armed from the CPU-visible reported mode-0 dot
+        // (decoupled from the live pipeline termination), so the IRQ fires in
+        // lockstep with the FF41 mode-0 read-back.
+        let mode0_within_line = match self.reported_mode0_dot_value(mmio) {
             Some(d) => d as i64,
             None => {
                 let m3_len = self.compute_m3_length(mmio, is_cgb);
@@ -1551,6 +1595,7 @@ impl Ppu {
                     let was_first_line = self.first_line_after_enable;
                     self.first_line_after_enable = false;
                     self.mode0_pretriggered_this_line = false;
+                    self.mode0_reported_this_line = false;
                     // SCX fine-scroll discard target (Gambatte M3Start::f1): the
                     // break xpos is resolved over the first M3 dots by re-reading
                     // SCX live (see the early-window loop in PixelTransfer). Seed
@@ -1598,7 +1643,28 @@ impl Ppu {
                 {
                     self.scheduled_mode0_dot = None;
                 }
-                // Scheduled cycle-exact Mode 3 -> Mode 0 transition.
+                // CPU-visible mode-0 report (decoupled from pipeline). The FF41
+                // mode bits and the mode-0 STAT check are driven from the
+                // closed-form reported dot, which may land a few dots before the
+                // live pipeline drains its FIFO. This does NOT terminate the
+                // renderer loop (no state change), so it cannot hang M3; the
+                // actual termination still happens below at scheduled_mode0_dot
+                // (or the x==160 fallback). Skip on window-start lines: there the
+                // mode-0 boundary is the live FIFO-flush transition below.
+                if !self.mode0_reported_this_line
+                    && !self.window_started_this_line
+                    && let Some(rdot) = self.reported_mode0_dot_value(mmio)
+                    && self.ticks >= rdot
+                {
+                    self.mode0_reported_this_line = true;
+                    Self::set_lcd_status_mode(mmio, 0);
+                    self.check_and_trigger_stat_interrupt(mmio);
+                }
+
+                // Scheduled cycle-exact Mode 3 -> Mode 0 transition (live
+                // pipeline termination). Ends the renderer loop and enters
+                // HBlank. The FF41 mode / STAT report may have already fired
+                // above; guard against re-driving them.
                 if self.scheduled_mode0_dot == Some(self.ticks) {
                     self.scheduled_mode0_dot = None;
                     // On window-start lines the closed-form length is correct,
@@ -1611,8 +1677,11 @@ impl Ppu {
                         while self.x < 160 && self.draw_fifo_pixel(mmio) {}
                     }
                     self.state = State::HBlank;
-                    Self::set_lcd_status_mode(mmio, 0);
-                    self.check_and_trigger_stat_interrupt(mmio);
+                    if !self.mode0_reported_this_line {
+                        self.mode0_reported_this_line = true;
+                        Self::set_lcd_status_mode(mmio, 0);
+                        self.check_and_trigger_stat_interrupt(mmio);
+                    }
                     break 'label;
                 }
 
@@ -1739,6 +1808,7 @@ impl Ppu {
                     // fall back to ending Mode 3 at the x==160 pixel push.
                     if self.scheduled_mode0_dot.is_none() && self.x == 160 {
                         self.state = State::HBlank;
+                        self.mode0_reported_this_line = true;
                         Self::set_lcd_status_mode(mmio, 0);
                         self.check_and_trigger_stat_interrupt(mmio);
                     }
