@@ -63,7 +63,9 @@ impl Serial {
             return;
         }
         let fast = self.cgb && (self.sc & SC_FAST_CLOCK) != 0;
-        let (step, align_mask) = if fast { (16u32, 0x0Fu64) } else { (512u32, 0xFFu64) };
+        // DIV-align residue mask matches Gambatte's `% 8` (fast) / `% 0x100`
+        // (slow) in memory.cpp case 0x02; the realign path already uses align=8.
+        let (step, align_mask) = if fast { (16u32, 0x07u64) } else { (512u32, 0xFFu64) };
         self.step_t = step;
         self.bits_shifted = 0;
         // Snap `phase` down to the DIV-aligned grid (Gambatte:
