@@ -521,8 +521,10 @@ impl Mmio {
     /// and the timer's internal counter (sub-step position). The controller
     /// reconstructs Gambatte's `cycleCounter_` from these.
     fn sync_apu_cc(&mut self) {
-        let ic = self.timer.internal_counter();
-        self.audio.sync_cc(ic);
+        let abs_cc = self.timer.abs_cc();
+        let div_resets = self.timer.div_reset_count();
+        let ds = self.is_double_speed_mode();
+        self.audio.sync_cc(abs_cc, div_resets, ds);
     }
 
     /// Sync the APU cycle counter to the exact CPU read cycle and advance the
