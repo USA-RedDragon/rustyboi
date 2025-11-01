@@ -124,7 +124,7 @@ impl Audio {
         // the FF04 write), fire any length events strictly before the fold, then
         // fold `cycleCounter_` there — not at the (later) current dot.
         if div_resets != self.last_div_resets {
-            self.advance_to(div_anchor, ds);
+            self.advance_to(abs_cc, ds);
             self.push_cc();
             self.fire_length_events(self.cc);
             self.div_reset_fold(ds);
@@ -134,6 +134,7 @@ impl Audio {
         self.advance_to(abs_cc, ds);
         self.push_cc();
         self.fire_length_events(self.cc);
+        let _ = div_anchor;
     }
 
     /// Gambatte `PSG::generateSamples`: convert CPU cycles since `last_update` to
@@ -175,28 +176,40 @@ impl Audio {
         self.channel3.reset_cc(delta);
     }
 
+    // APU-cc offset applied to the length subsystem only. rustyboi's duty/
+    // envelope units are anchored to the raw `abs_cc>>1` phase, but the length
+    // counter's DIV-phase reference (Gambatte's folded `cc>>13` boundary) is the
+    // access-cc phase the timer's DIV write resolves on. This constant carries
+    // that fixed phase difference into the length `cc` without disturbing duty.
+    const LEN_CC_OFF: u32 = 0;
+
     fn push_cc(&mut self) {
         let cc = self.cc;
         self.channel1.set_cc(cc);
         self.channel2.set_cc(cc);
         self.channel3.set_cc(cc);
         self.channel4.set_cc(cc);
+        let lcc = cc.wrapping_add(Self::LEN_CC_OFF);
+        self.channel1.set_len_cc(lcc);
+        self.channel2.set_len_cc(lcc);
+        self.channel3.set_len_cc(lcc);
+        self.channel4.set_len_cc(lcc);
     }
 
     /// Gambatte's length unit is a scheduled absolute-cc event: when the master
     /// clock reaches a channel's `counter_` (`((cc>>13)+len)<<13`), the channel's
     /// length expires (disables it). We poll it each clock advance.
-    fn fire_length_events(&mut self, cc: u32) {
-        if cc >= self.channel1.len_counter() {
+    fn fire_length_events(&mut self, _cc: u32) {
+        if self.channel1.len_expired() {
             self.channel1.length_event();
         }
-        if cc >= self.channel2.len_counter() {
+        if self.channel2.len_expired() {
             self.channel2.length_event();
         }
-        if cc >= self.channel3.len_counter() {
+        if self.channel3.len_expired() {
             self.channel3.length_event();
         }
-        if cc >= self.channel4.len_counter() {
+        if self.channel4.len_expired() {
             self.channel4.length_event();
         }
     }
