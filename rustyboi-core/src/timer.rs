@@ -265,9 +265,11 @@ impl Timer {
     }
 
     /// Gambatte `Tima::divReset`: applied on a DIV write (FF04). The divider phase
-    /// back-shift glitches TIMA by `(1 << (clk-1)) + 3`.
-    fn div_reset(&mut self) {
-        let cc = self.access_cc();
+    /// back-shift glitches TIMA by `(1 << (clk-1)) + 3`. `cc` is the resolution
+    /// cc: `access_cc()` for a CPU FF04 write, raw `abs_cc` for the STOP-internal
+    /// reset (the speed-switch DIV reset happens at the STOP cc, not a CPU
+    /// register-access M-cycle end).
+    fn div_reset_at(&mut self, cc: u64) {
         if self.tac & TAC_ENABLE != 0 {
             let clk = self.clk();
             let shift = (1u64 << (clk - 1)) + 3;
@@ -287,6 +289,13 @@ impl Timer {
         // APU-FS edge stays on the pre-move (end-of-M-cycle) DIV phase.
         self.apu_div_anchor = (self.abs_cc as i64 + APU_OFF) as u64;
         self.div_reset_count = self.div_reset_count.wrapping_add(1);
+    }
+
+    /// CGB STOP speed-switch DIV reset: resolves at the raw `abs_cc` (the STOP
+    /// instruction's cc), not the +CC_OFF CPU-register-access cc.
+    pub fn stop_div_reset(&mut self) {
+        let cc = self.abs_cc;
+        self.div_reset_at(cc);
     }
 
     /// Initialize the timer's internal 16-bit counter (used at boot to mirror
@@ -406,7 +415,10 @@ impl Addressable for Timer {
 
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
-            DIV => self.div_reset(),
+            DIV => {
+                let cc = self.access_cc();
+                self.div_reset_at(cc);
+            }
             TIMA => self.set_tima(value),
             TMA => self.set_tma(value),
             TAC => self.set_tac(value & 0b00000111),
