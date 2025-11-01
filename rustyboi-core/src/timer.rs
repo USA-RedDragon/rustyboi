@@ -196,15 +196,6 @@ impl Timer {
         self.tima = tmp as u8;
     }
 
-    /// Gambatte `Tima::tima`: lazily derive the current TIMA value.
-    fn tima_value(&mut self) -> u8 {
-        if self.tac & TAC_ENABLE != 0 {
-            let cc = self.abs_cc;
-            self.update_tima(cc);
-        }
-        self.tima
-    }
-
     /// Gambatte `Tima::setTima`.
     fn set_tima(&mut self, data: u8) {
         let cc = self.access_cc();
