@@ -231,14 +231,28 @@ impl Audio {
     /// quantum off Gambatte after a DIV write. Folding the whole APU clock here
     /// re-anchors that boundary exactly like Gambatte.
     fn psg_reset(&mut self, ds: bool) {
+        // Skip the fold before the APU master clock is anchored (boot instant,
+        // `cc`/`last_update` still 0): there's no accumulated phase to fold, and
+        // the fold formula would inject a spurious +0x1000 that offsets `cc>>13`
+        // (the length quantum) for the rest of the run. The channel sub-counters
+        // are still reset.
+        if !self.clock_anchored || self.last_update == 0 {
+            self.channel1.psg_reset();
+            self.channel2.psg_reset();
+            self.channel3.psg_reset();
+            self.channel4.psg_reset();
+            self.push_cc();
+            return;
+        }
         // PSG::reset cycleCounter_ fold (sound.cpp:67).
-        // rustyboi's master `cc` is phased as `cc>>12&7 == (true_fs + FS_OFF)&7`
-        // relative to Gambatte's `cycleCounter_` (the seed is `abs_cc>>1`, not
-        // Gambatte's boot-folded value). The fold formula assumes `cc>>12&7` is the
-        // TRUE FS position, so we re-phase the FS-region bits (12-14) by FS_OFF
-        // before folding so the result matches Gambatte's `cycleCounter_`.
+        // Fold from the authoritative `abs_cc>>1` phase (`last_update>>1`), not the
+        // drifted master accumulator: `self.cc` carries a small boot/parity offset
+        // from prior folds that shifts `cc>>13` (the length quantum) one step off
+        // Gambatte. `last_update` stays exactly anchored to the CPU clock, so
+        // `last_update>>1` is the un-drifted `cycleCounter_` Gambatte would fold.
+        let base_cc = (self.last_update >> 1) as u32 & (Self::CC_MAX - 1);
         let div_offset = (self.last_update as u32) & (ds as u32);
-        let cc = self.cc.wrapping_add(div_offset);
+        let cc = base_cc.wrapping_add(div_offset);
         // (cc & 0xFFF) + 2 * (~(cc + 1 + !ds) & 0x800)
         let not_ds = (!ds) as u32;
         let folded = (cc & 0xFFF)
