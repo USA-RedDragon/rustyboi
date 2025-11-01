@@ -73,6 +73,9 @@ pub struct SquareWave {
     // `((cc>>13)+lengthCounter)<<13` when enabled, else `LEN_DISABLED`.
     #[serde(default = "len_disabled")]
     len_counter: u32,
+    // Length-subsystem cc (duty/envelope use `cc`; length uses this phased cc).
+    #[serde(default)]
+    len_cc: u32,
 
     // --- Frequency sweep (Channel 1 only) ---
     #[serde(default)]
@@ -120,6 +123,7 @@ impl SquareWave {
             length_counter: 0,
             length_enabled: false,
             len_counter: LEN_DISABLED,
+            len_cc: 0,
             sweep_enabled: false,
             sweep_timer: 0,
             sweep_shadow_frequency: 0,
@@ -129,6 +133,14 @@ impl SquareWave {
 
     pub fn set_cc(&mut self, cc: u32) {
         self.cc = cc;
+    }
+
+    pub fn set_len_cc(&mut self, cc: u32) {
+        self.len_cc = cc;
+    }
+
+    pub fn len_expired(&self) -> bool {
+        self.len_cc >= self.len_counter
     }
 
     /// Post-boot channel-1 mid-tone state (Gambatte `setPostBiosState`). The boot
@@ -338,7 +350,7 @@ impl SquareWave {
         let mask = self.length_mask();
         self.length_counter = (!value as u16 & mask) + 1;
         self.len_counter = if self.nr4() & 0x40 != 0 {
-            (((self.cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+            (((self.len_cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
         } else {
             LEN_DISABLED
         };
@@ -347,6 +359,9 @@ impl SquareWave {
 
     /// Gambatte `LengthCounter::event`: expiry disables the channel.
     pub fn length_event(&mut self) {
+        if std::env::var("APUDBG").is_ok() && !self.channel1 {
+            eprintln!("EXPIRE ch2: len_cc={:#x} len_counter={:#x}", self.len_cc, self.len_counter);
+        }
         self.len_counter = LEN_DISABLED;
         self.length_counter = 0;
         self.enabled = false;
@@ -460,12 +475,12 @@ impl SquareWave {
         let mask = self.length_mask();
         if self.len_counter != LEN_DISABLED {
             self.length_counter =
-                ((self.len_counter >> 13).wrapping_sub(self.cc >> 13)) as u16;
+                ((self.len_counter >> 13).wrapping_sub(self.len_cc >> 13)) as u16;
         }
 
         let mut dec: u16 = 0;
         if new_nr4 & 0x40 != 0 {
-            dec = ((!self.cc >> 12) & 1) as u16;
+            dec = ((!self.len_cc >> 12) & 1) as u16;
             if old_nr4 & 0x40 == 0 && self.length_counter != 0 {
                 self.length_counter -= dec;
                 if self.length_counter == 0 {
@@ -480,10 +495,16 @@ impl SquareWave {
 
         let _ = trigger;
         self.len_counter = if new_nr4 & 0x40 != 0 && self.length_counter != 0 {
-            (((self.cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+            (((self.len_cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
         } else {
             LEN_DISABLED
         };
+        if std::env::var("APUDBG").is_ok() && !self.channel1 {
+            eprintln!(
+                "nr4: cc={:#x} len_cc={:#x} nr4={:#x} dec={} len={} len_counter={:#x}",
+                self.cc, self.len_cc, new_nr4, dec, self.length_counter, self.len_counter
+            );
+        }
     }
 
     fn write_nrx4(&mut self, value: u8) {

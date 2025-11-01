@@ -542,6 +542,18 @@ impl Mmio {
         self.audio.sync_cc(abs_cc, div_resets, div_anchor, ds);
     }
 
+    /// APU sync for a CPU register access (NRxx / wave RAM write or read).
+    /// Resolves the APU master cc at the access (M-cycle start) cc, mirroring
+    /// Gambatte's single `cycleCounter_` for the register write — the NR4
+    /// trigger's length scheduling and the divReset fold both key on this cc.
+    fn sync_apu_cc_access(&mut self) {
+        let access_cc = self.timer.access_cc_pub();
+        let div_resets = self.timer.div_reset_count();
+        let div_anchor = self.timer.div_anchor();
+        let ds = self.is_double_speed_mode();
+        self.audio.sync_cc(access_cc, div_resets, div_anchor, ds);
+    }
+
     /// Sync the APU cycle counter to the exact CPU read cycle and advance the
     /// wave channel's fetch position, so an APU/wave-RAM read observes the
     /// channel at the precise sub-M-cycle (Gambatte evaluates waveRamRead with
