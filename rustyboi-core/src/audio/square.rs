@@ -182,6 +182,19 @@ impl SquareWave {
         self.fs_step = step;
     }
 
+    /// Gambatte `Channel1::reset`/`Channel2::reset` (called from `PSG::reset` on
+    /// the NR52 0→1 enable). Re-initializes the duty + envelope sub-counters at
+    /// the freshly-folded cc. The length counter is intentionally preserved
+    /// (Gambatte's `lengthCounter_` survives `PSG::reset`).
+    pub fn psg_reset(&mut self) {
+        // DutyUnit::reset
+        self.pos = 0;
+        self.high = false;
+        self.next_pos_update = COUNTER_DISABLED;
+        // EnvelopeUnit::reset
+        self.env_counter = COUNTER_DISABLED;
+    }
+
     fn freq(&self) -> u16 {
         if self.channel1 {
             ((self.nr14 as u16 & 0x07) << 8) | self.nr13 as u16
