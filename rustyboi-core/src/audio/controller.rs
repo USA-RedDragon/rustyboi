@@ -232,6 +232,11 @@ impl Audio {
     /// re-anchors that boundary exactly like Gambatte.
     fn psg_reset(&mut self, ds: bool) {
         // PSG::reset cycleCounter_ fold (sound.cpp:67).
+        // rustyboi's master `cc` is phased as `cc>>12&7 == (true_fs + FS_OFF)&7`
+        // relative to Gambatte's `cycleCounter_` (the seed is `abs_cc>>1`, not
+        // Gambatte's boot-folded value). The fold formula assumes `cc>>12&7` is the
+        // TRUE FS position, so we re-phase the FS-region bits (12-14) by FS_OFF
+        // before folding so the result matches Gambatte's `cycleCounter_`.
         let div_offset = (self.last_update as u32) & (ds as u32);
         let cc = self.cc.wrapping_add(div_offset);
         // (cc & 0xFFF) + 2 * (~(cc + 1 + !ds) & 0x800)
@@ -240,8 +245,12 @@ impl Audio {
             .wrapping_add(2 * (!(cc.wrapping_add(1).wrapping_add(not_ds)) & 0x800))
             % Self::CC_MAX;
         self.cc = folded;
-        // lastUpdate_ = ((lastUpdate_ + 3) & -4) - !ds
-        self.last_update = ((self.last_update + 3) & !3u64).wrapping_sub(not_ds as u64);
+        // Gambatte adjusts `lastUpdate_ = ((lastUpdate_+3)&-4) - !ds` here to set
+        // the sub-cycle parity for subsequent generateSamples/divReset shifts.
+        // rustyboi's `advance_to` re-derives whole APU cycles via `floor(abs/2)`
+        // each sync, so it only needs `last_update` to stay anchored to the CPU
+        // clock — mutating its low bits (and the `-!ds` underflow at last_update=0)
+        // freezes `advance_to`. Leave it anchored to the current CPU cc.
 
         self.channel1.psg_reset();
         self.channel2.psg_reset();
