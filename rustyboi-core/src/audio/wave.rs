@@ -19,11 +19,13 @@ pub struct Wave {
 
     wave_ram: [u8; 16],
 
-    // Length counter (FS-step model, DIV-locked via clock_frame_sequencer).
+    // Length counter (Gambatte length_counter.cpp, cc-driven absolute expiry).
     enabled: bool,
     length_counter: u16,
     length_enabled: bool,
     fs_step: u8,
+    #[serde(default = "len_disabled")]
+    len_counter: u32,
 
     // Free-running 2 MHz cycle counter (Gambatte cycleCounter_), pushed by the
     // controller. Channel 3's wave fetch is modelled cc-based per channel3.cpp.
@@ -55,6 +57,12 @@ fn disabled() -> u32 {
     COUNTER_DISABLED
 }
 
+const LEN_DISABLED: u32 = COUNTER_DISABLED;
+
+fn len_disabled() -> u32 {
+    LEN_DISABLED
+}
+
 impl Wave {
     pub fn new() -> Self {
         Wave {
@@ -68,6 +76,7 @@ impl Wave {
             length_counter: 0,
             length_enabled: false,
             fs_step: 0,
+            len_counter: LEN_DISABLED,
             cc: 0,
             wave_counter: COUNTER_DISABLED,
             last_read_time: 0,
@@ -97,8 +106,58 @@ impl Wave {
         self.fs_step = step;
     }
 
-    fn length_extra_clock_due(&self) -> bool {
-        (self.fs_step % 2) == 1
+    const LEN_MASK: u16 = 0xFF;
+
+    /// Gambatte `LengthCounter::event` for channel 3: expiry disables the
+    /// channel and its DAC/fetch (mirrors the prior FS-driven expiry).
+    pub fn length_event(&mut self) {
+        self.len_counter = LEN_DISABLED;
+        self.length_counter = 0;
+        self.enabled = false;
+        self.master = false;
+        self.wave_counter = COUNTER_DISABLED;
+    }
+
+    pub fn len_counter(&self) -> u32 {
+        self.len_counter
+    }
+
+    /// Gambatte `LengthCounter::nr1Change` (channel 3 / NR31).
+    fn len_nr1_change(&mut self, value: u8) {
+        self.length_counter = (!value as u16 & Self::LEN_MASK) + 1;
+        self.len_counter = if self.nr34 & 0x40 != 0 {
+            (((self.cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+        } else {
+            LEN_DISABLED
+        };
+    }
+
+    /// Gambatte `LengthCounter::nr4Change` (channel 3 / NR34) length handling.
+    fn len_nr4_change(&mut self, old_nr4: u8, new_nr4: u8) {
+        if self.len_counter != LEN_DISABLED {
+            self.length_counter =
+                ((self.len_counter >> 13).wrapping_sub(self.cc >> 13)) as u16;
+        }
+        let mut dec: u16 = 0;
+        if new_nr4 & 0x40 != 0 {
+            dec = ((!self.cc >> 12) & 1) as u16;
+            if old_nr4 & 0x40 == 0 && self.length_counter != 0 {
+                self.length_counter -= dec;
+                if self.length_counter == 0 {
+                    self.enabled = false;
+                    self.master = false;
+                    self.wave_counter = COUNTER_DISABLED;
+                }
+            }
+        }
+        if new_nr4 & 0x80 != 0 && self.length_counter == 0 {
+            self.length_counter = Self::LEN_MASK + 1 - dec;
+        }
+        self.len_counter = if new_nr4 & 0x40 != 0 && self.length_counter != 0 {
+            (((self.cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+        } else {
+            LEN_DISABLED
+        };
     }
 
     fn period(&self) -> u32 {
@@ -136,24 +195,9 @@ impl Wave {
         }
     }
 
-    pub fn step_frame_sequencer(&mut self, step: u8) {
-        if !self.enabled {
-            return;
-        }
-        if step.is_multiple_of(2) && self.length_enabled {
-            self.step_length_counter();
-        }
-    }
-
-    fn step_length_counter(&mut self) {
-        if self.length_counter > 0 {
-            self.length_counter -= 1;
-            if self.length_counter == 0 {
-                self.enabled = false;
-                self.master = false;
-                self.wave_counter = COUNTER_DISABLED;
-            }
-        }
+    pub fn step_frame_sequencer(&mut self, _step: u8) {
+        // Length is now a cc-driven absolute expiry event (see `length_event`).
+        // Channel 3 has no envelope/sweep, so nothing else is FS-clocked.
     }
 
     fn get_output_level(&self) -> u8 {
@@ -162,23 +206,11 @@ impl Wave {
 
     fn write_nrx4(&mut self, value: u8) {
         let trigger = (value >> 7) & 0x01 != 0;
-        let new_length_enabled = (value >> 6) & 0x01 != 0;
-        let was_length_enabled = self.length_enabled;
+        // `self.nr34` already carries bit 6 (stored as `value & !0x80`).
+        let old_nr4 = self.nr34;
 
-        if new_length_enabled
-            && !was_length_enabled
-            && self.length_extra_clock_due()
-            && self.length_counter > 0
-        {
-            self.length_counter -= 1;
-            if self.length_counter == 0 && !trigger {
-                self.enabled = false;
-                self.master = false;
-                self.wave_counter = COUNTER_DISABLED;
-            }
-        }
-
-        self.length_enabled = new_length_enabled;
+        self.len_nr4_change(old_nr4, value);
+        self.length_enabled = (value >> 6) & 0x01 != 0;
         self.nr34 = value & !0x80;
 
         if trigger {
@@ -186,16 +218,10 @@ impl Wave {
         }
     }
 
-    /// channel3.cpp setNr4 trigger (DAC-gated) plus the FS-step length reload.
+    /// channel3.cpp setNr4 trigger (DAC-gated). Length reload is handled in
+    /// `len_nr4_change` (Gambatte folds it into the length unit).
     fn trigger(&mut self) {
         self.enabled = true;
-
-        if self.length_counter == 0 {
-            self.length_counter = 256;
-            if self.length_enabled && self.length_extra_clock_due() {
-                self.length_counter -= 1;
-            }
-        }
 
         if self.dac_enabled {
             // DMG wave-RAM corruption when triggering during an active fetch.
@@ -319,7 +345,7 @@ impl Addressable for Wave {
                 NR30 => self.write_nr0(value),
                 NR31 => {
                     self.nr31 = value;
-                    self.length_counter = 256 - value as u16;
+                    self.len_nr1_change(value);
                 }
                 NR32 => self.nr32 = value,
                 NR33 => self.nr33 = value,

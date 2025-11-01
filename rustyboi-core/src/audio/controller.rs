@@ -106,7 +106,7 @@ impl Audio {
     /// part of cc. We mirror Gambatte's `divReset`/`Channel::resetCc`: preserve
     /// the upper cc bits (the length `cc>>13` / FS-phase boundaries) and shift
     /// only the duty unit by the resulting delta.
-    pub fn sync_cc(&mut self, abs_cc: u64, div_resets: u64, ds: bool) {
+    pub fn sync_cc(&mut self, abs_cc: u64, div_resets: u64, div_anchor: u64, ds: bool) {
         if !self.clock_anchored {
             // Anchor `cc` so `abs_cc >> 1` reproduces the post-boot duty phase
             // base the channels were tuned against (the old `ic >> 1`).
@@ -118,16 +118,22 @@ impl Audio {
             return;
         }
 
-        // A DIV write resets the divider; mirror `PSG::divReset` — first advance
-        // the clock to (approximately) the write cc, then fold cycleCounter_.
+        // A DIV write resets the divider; mirror `PSG::divReset`. Gambatte runs
+        // `generateSamples(writeCc)` then `divReset` AT the DIV-write cc, so we
+        // advance to the DIV-write cc (`div_anchor`, the timer's access-cc for
+        // the FF04 write), fire any length events strictly before the fold, then
+        // fold `cycleCounter_` there — not at the (later) current dot.
         if div_resets != self.last_div_resets {
-            self.advance_to(abs_cc, ds);
+            self.advance_to(div_anchor, ds);
+            self.push_cc();
+            self.fire_length_events(self.cc);
             self.div_reset_fold(ds);
             self.last_div_resets = div_resets;
         }
 
         self.advance_to(abs_cc, ds);
         self.push_cc();
+        self.fire_length_events(self.cc);
     }
 
     /// Gambatte `PSG::generateSamples`: convert CPU cycles since `last_update` to
@@ -141,10 +147,12 @@ impl Audio {
         // Count whole APU cycles using absolute even boundaries (floor(abs/2) -
         // floor(last/2)), matching the prior direct `ic >> 1` so the floored
         // phase aligns to absolute parity rather than the anchor's parity.
-        let cycles = (abs_cc >> 1) - (self.last_update >> 1);
-        if cycles == 0 {
+        // Guard against a non-monotonic target (e.g. a DIV-write access cc that
+        // resolves slightly before the current dot anchor): never run backward.
+        if (abs_cc >> 1) <= (self.last_update >> 1) {
             return;
         }
+        let cycles = (abs_cc >> 1) - (self.last_update >> 1);
         self.last_update = abs_cc;
         self.cc = ((self.cc as u64 + cycles) % Self::CC_MAX as u64) as u32;
     }
@@ -172,6 +180,25 @@ impl Audio {
         self.channel1.set_cc(cc);
         self.channel2.set_cc(cc);
         self.channel3.set_cc(cc);
+        self.channel4.set_cc(cc);
+    }
+
+    /// Gambatte's length unit is a scheduled absolute-cc event: when the master
+    /// clock reaches a channel's `counter_` (`((cc>>13)+len)<<13`), the channel's
+    /// length expires (disables it). We poll it each clock advance.
+    fn fire_length_events(&mut self, cc: u32) {
+        if cc >= self.channel1.len_counter() {
+            self.channel1.length_event();
+        }
+        if cc >= self.channel2.len_counter() {
+            self.channel2.length_event();
+        }
+        if cc >= self.channel3.len_counter() {
+            self.channel3.length_event();
+        }
+        if cc >= self.channel4.len_counter() {
+            self.channel4.length_event();
+        }
     }
 
     /// Advance only the wave channel's fetch counter to the current cc, for the

@@ -64,11 +64,15 @@ pub struct SquareWave {
     #[serde(default)]
     master: bool,
 
-    // --- Length counter ---
+    // --- Length counter (Gambatte length_counter.cpp, cc-event model) ---
     #[serde(default)]
     length_counter: u16,
     #[serde(default)]
     length_enabled: bool,
+    // Absolute cc of length expiry (Gambatte `LengthCounter::counter_`):
+    // `((cc>>13)+lengthCounter)<<13` when enabled, else `LEN_DISABLED`.
+    #[serde(default = "len_disabled")]
+    len_counter: u32,
 
     // --- Frequency sweep (Channel 1 only) ---
     #[serde(default)]
@@ -83,6 +87,12 @@ pub struct SquareWave {
 
 fn disabled() -> u32 {
     COUNTER_DISABLED
+}
+
+const LEN_DISABLED: u32 = COUNTER_DISABLED;
+
+fn len_disabled() -> u32 {
+    LEN_DISABLED
 }
 
 impl SquareWave {
@@ -109,6 +119,7 @@ impl SquareWave {
             master: false,
             length_counter: 0,
             length_enabled: false,
+            len_counter: LEN_DISABLED,
             sweep_enabled: false,
             sweep_timer: 0,
             sweep_shadow_frequency: 0,
@@ -306,39 +317,45 @@ impl SquareWave {
         self.env_counter != COUNTER_DISABLED
     }
 
-    // --- Length counter ---
+    // --- Length counter (Gambatte length_counter.cpp, cc-driven) ---
 
     fn length_mask(&self) -> u16 {
         0x3F
     }
 
-    /// True when the next length clock would fire on the FS step the current
-    /// write coincides with (the length "extra clock" quirk). Mirrors the
-    /// wave/noise FS-driven model: length clocks on even FS steps, and an
-    /// enable/trigger landing one step before such an edge gets an extra clock.
-    fn length_extra_clock_due(&self) -> bool {
-        (self.fs_step % 2) == 1
+    fn nr4(&self) -> u8 {
+        if self.channel1 { self.nr14 } else { self.nr24 }
     }
 
+    /// Gambatte `LengthCounter::nr1Change`. The NRx1 write reloads the length
+    /// load and (re)schedules the absolute expiry cc from the current NRx4 lcen.
     fn write_nrx1(&mut self, value: u8) {
         if self.channel1 {
             self.nr11 = value;
         } else {
             self.nr21 = value;
         }
-        // length_counter.cpp nr1Change: load = mask+1 - (value & mask).
-        self.length_counter = (self.length_mask() + 1) - (value as u16 & self.length_mask());
+        let mask = self.length_mask();
+        self.length_counter = (!value as u16 & mask) + 1;
+        self.len_counter = if self.nr4() & 0x40 != 0 {
+            (((self.cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+        } else {
+            LEN_DISABLED
+        };
         self.duty_nr1_change();
     }
 
-    /// FS-driven length clock (steps 0,2,4,6), matching wave/noise.
-    fn step_length_counter(&mut self) {
-        if self.length_counter > 0 {
-            self.length_counter -= 1;
-            if self.length_counter == 0 {
-                self.enabled = false;
-            }
-        }
+    /// Gambatte `LengthCounter::event`: expiry disables the channel.
+    pub fn length_event(&mut self) {
+        self.len_counter = LEN_DISABLED;
+        self.length_counter = 0;
+        self.enabled = false;
+    }
+
+    /// cc of the next scheduled length expiry (Gambatte `counter_`), or
+    /// `LEN_DISABLED`. The controller fires `length_event` when `cc` reaches it.
+    pub fn len_counter(&self) -> u32 {
+        self.len_counter
     }
 
     fn duty_nr1_change(&mut self) {
@@ -363,11 +380,8 @@ impl SquareWave {
             return;
         }
 
-        // Length counter (steps 0, 2, 4, 6), FS-driven like wave/noise.
-        if step.is_multiple_of(2) && self.length_enabled {
-            self.step_length_counter();
-        }
-
+        // Length is now a cc-driven absolute expiry event (see `length_event`),
+        // not clocked here. Only the sweep remains FS-clocked.
         // Frequency sweep (steps 2, 6) - Channel 1 only.
         if self.channel1 && (step == 2 || step == 6) {
             self.step_frequency_sweep();
@@ -438,26 +452,46 @@ impl SquareWave {
 
     // --- NRx4 / trigger ---
 
-    fn write_nrx4(&mut self, value: u8) {
-        let trigger = value & 0x80 != 0;
-        let new_length_enabled = value & 0x40 != 0;
-        let was_length_enabled = self.length_enabled;
+    /// Gambatte `LengthCounter::nr4Change` length-unit handling, folded into the
+    /// NRx4 write. Re-derives `lengthCounter_` from the absolute expiry cc, then
+    /// applies the lcen-enable `dec = ~cc>>12 & 1` extra-clock quirk and the
+    /// trigger reload, finally rescheduling the absolute expiry.
+    fn length_nr4_change(&mut self, old_nr4: u8, new_nr4: u8, trigger: bool) {
+        let mask = self.length_mask();
+        if self.len_counter != LEN_DISABLED {
+            self.length_counter =
+                ((self.len_counter >> 13).wrapping_sub(self.cc >> 13)) as u16;
+        }
 
-        // FS-driven length "extra clock" quirk (matches wave/noise): enabling
-        // the length counter on the step just before an even FS length edge
-        // clocks it once immediately.
-        if new_length_enabled
-            && !was_length_enabled
-            && self.length_extra_clock_due()
-            && self.length_counter > 0
-        {
-            self.length_counter -= 1;
-            if self.length_counter == 0 && !trigger {
-                self.enabled = false;
+        let mut dec: u16 = 0;
+        if new_nr4 & 0x40 != 0 {
+            dec = ((!self.cc >> 12) & 1) as u16;
+            if old_nr4 & 0x40 == 0 && self.length_counter != 0 {
+                self.length_counter -= dec;
+                if self.length_counter == 0 {
+                    self.enabled = false;
+                }
             }
         }
 
-        self.length_enabled = new_length_enabled;
+        if new_nr4 & 0x80 != 0 && self.length_counter == 0 {
+            self.length_counter = mask + 1 - dec;
+        }
+
+        let _ = trigger;
+        self.len_counter = if new_nr4 & 0x40 != 0 && self.length_counter != 0 {
+            (((self.cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+        } else {
+            LEN_DISABLED
+        };
+    }
+
+    fn write_nrx4(&mut self, value: u8) {
+        let trigger = value & 0x80 != 0;
+        let old_nr4 = self.nr4();
+
+        self.length_nr4_change(old_nr4, value, trigger);
+        self.length_enabled = value & 0x40 != 0;
 
         if self.channel1 {
             self.nr14 = value;
@@ -477,13 +511,8 @@ impl SquareWave {
     fn trigger(&mut self) {
         self.enabled = true;
 
-        // Length counter reload (FS-driven, matching wave/noise).
-        if self.length_counter == 0 {
-            self.length_counter = self.length_mask() + 1;
-            if self.length_enabled && self.length_extra_clock_due() {
-                self.length_counter -= 1;
-            }
-        }
+        // Length-counter reload + reschedule is handled in `length_nr4_change`
+        // (Gambatte folds the trigger reload into the length unit's nr4Change).
 
         // Channel 1 runs dutyUnit_.nr4Change BEFORE updating master_, so its
         // nextPosUpdate uses the OLD master; channel 2 updates master_ first and

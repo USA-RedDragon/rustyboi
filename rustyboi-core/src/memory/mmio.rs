@@ -537,8 +537,9 @@ impl Mmio {
     fn sync_apu_cc(&mut self) {
         let abs_cc = self.timer.abs_cc();
         let div_resets = self.timer.div_reset_count();
+        let div_anchor = self.timer.div_anchor();
         let ds = self.is_double_speed_mode();
-        self.audio.sync_cc(abs_cc, div_resets, ds);
+        self.audio.sync_cc(abs_cc, div_resets, div_anchor, ds);
     }
 
     /// Sync the APU cycle counter to the exact CPU read cycle and advance the
