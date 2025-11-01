@@ -140,6 +140,16 @@ impl<'a> Bus<'a> {
         } else {
             None
         };
+        // TIMA/TMA/TAC reads (FF05-07) derive against `abs_cc`; resolve the read
+        // at the access START cc (Gambatte `read(addr,cc)`), before the M-cycle
+        // ticks `abs_cc` forward 4. Snapshot here so the read anchor equals the
+        // scheduled-IRQ delivery anchor (D1/D2). DIV (FF04) stays on the
+        // post-tick path with serial/APU (not yet on start-cc).
+        let timer_read = if matches!(addr, 0xFF04..=0xFF07) {
+            Some(self.mmio.read(addr))
+        } else {
+            None
+        };
         // IF read: the CPU resolves it at cc, but tick_m advances peripherals and
         // would let an IRQ flagged within this read M-cycle leak in 4 dots early.
         // Snapshot the VBlank (0), STAT (1), and serial (3) bits pre-tick so an
@@ -164,6 +174,9 @@ impl<'a> Bus<'a> {
             return v;
         }
         if let Some(v) = serial_read {
+            return v;
+        }
+        if let Some(v) = timer_read {
             return v;
         }
         if let Some(pre) = if_pre {
@@ -191,7 +204,21 @@ impl<'a> Bus<'a> {
             return;
         }
 
-        let tick_before = matches!(addr, 0xFF01..=0xFF02 | 0xFF04..=0xFF07 | 0xFF46 | 0xFF4A | 0xFF4B)
+        // TIMA/TMA/TAC writes (FF05-07) resolve at the access START cc, then time
+        // advances (Gambatte `write(addr,data,cc); cc += 4`). The scheduled-TIMA
+        // model derives/IRQ-delivers against `abs_cc`, so the write must land
+        // before the M-cycle ticks for its anchor to match the start-cc read
+        // anchor (D1). FF04 (DIV) stays on the tick-before path below: its
+        // `div_anchor` is shared by serial/APU-FS which are NOT yet on start-cc
+        // (the atomic cluster move — serial WRITE_CC_OFFSET drop + APU root 2 —
+        // is the follow-up step), so moving DIV alone would mix anchors.
+        if matches!(addr, 0xFF04..=0xFF07) {
+            self.mmio.write(addr, value);
+            self.tick_m();
+            return;
+        }
+
+        let tick_before = matches!(addr, 0xFF01..=0xFF02 | 0xFF46 | 0xFF4A | 0xFF4B)
             || self.mmio.dma_active();
         if tick_before {
             // FF4A (WY): schedule Gambatte's `wy2` at the write's cc (read-at-
