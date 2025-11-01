@@ -136,12 +136,6 @@ impl Timer {
         (self.abs_cc as i64 + CC_OFF) as u64
     }
 
-    /// Public view of the CPU-access resolution cc, for APU register accesses
-    /// (the DIV-reset fold + length scheduling must use the same cc the timer's
-    /// DIV write resolves on, mirroring Gambatte's single `cycleCounter_`).
-    pub fn access_cc_pub(&self) -> u64 {
-        self.access_cc()
-    }
 
     /// Gambatte `Tima::doIrqEvent`: flag the IRQ and advance the scheduled time
     /// by a full TIMA period. Returns `true` so the caller can raise the IF bit
