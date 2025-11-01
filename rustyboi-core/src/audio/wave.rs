@@ -129,9 +129,6 @@ impl Wave {
         self.wave_counter = COUNTER_DISABLED;
     }
 
-    pub fn len_counter(&self) -> u32 {
-        self.len_counter
-    }
 
     /// Gambatte `LengthCounter::nr1Change` (channel 3 / NR31).
     fn len_nr1_change(&mut self, value: u8) {
