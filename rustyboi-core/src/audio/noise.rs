@@ -73,6 +73,17 @@ impl Noise {
         self.len_cc >= self.len_counter
     }
 
+    /// Gambatte `Channel4::reset` (from `PSG::reset` on the NR52 0→1 enable):
+    /// resets the LFSR + envelope sub-state and disables the channel. The length
+    /// counter is preserved.
+    pub fn psg_reset(&mut self) {
+        self.lfsr = 0x7FFF;
+        self.frequency_timer = 0;
+        self.volume = 0;
+        self.volume_timer = 0;
+        self.enabled = false;
+    }
+
     pub fn set_fs_step(&mut self, step: u8) {
         self.fs_step = step;
     }

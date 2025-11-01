@@ -72,6 +72,10 @@ pub struct Audio {
     last_div_resets: u64,
     #[serde(default)]
     clock_anchored: bool,
+    // Double-speed flag from the last `sync_cc`, so the NR52-enable `PSG::reset`
+    // fold (which happens on the write path, without `ds`) uses the right speed.
+    #[serde(default)]
+    cached_ds: bool,
 }
 
 impl Audio {
@@ -92,6 +96,7 @@ impl Audio {
             last_update: 0,
             last_div_resets: 0,
             clock_anchored: false,
+            cached_ds: false,
         }
     }
 
@@ -107,6 +112,7 @@ impl Audio {
     /// the upper cc bits (the length `cc>>13` / FS-phase boundaries) and shift
     /// only the duty unit by the resulting delta.
     pub fn sync_cc(&mut self, abs_cc: u64, div_resets: u64, div_anchor: u64, ds: bool) {
+        self.cached_ds = ds;
         if !self.clock_anchored {
             // Anchor `cc` so `abs_cc >> 1` reproduces the post-boot duty phase
             // base the channels were tuned against (the old `ic >> 1`).
@@ -212,6 +218,37 @@ impl Audio {
         if self.channel4.len_expired() {
             self.channel4.length_event();
         }
+    }
+
+    /// Gambatte `PSG::reset`, fired on the NR52 0→1 (APU enable) transition. Folds
+    /// the master clock from its large `abs_cc>>1`-anchored value down to the small
+    /// FS-anchored value Gambatte's `cycleCounter_` carries, then re-initializes
+    /// every channel's duty/envelope/LFSR sub-counter at the folded cc. The length
+    /// counters survive (they're re-derived against the new small `cc>>13`).
+    ///
+    /// This is the M2b fix: the length-expiry boundary `((cc>>13)+len)<<13` was
+    /// being computed against the un-folded large anchor, landing one 0x1000
+    /// quantum off Gambatte after a DIV write. Folding the whole APU clock here
+    /// re-anchors that boundary exactly like Gambatte.
+    fn psg_reset(&mut self, ds: bool) {
+        // PSG::reset cycleCounter_ fold (sound.cpp:67).
+        let div_offset = (self.last_update as u32) & (ds as u32);
+        let cc = self.cc.wrapping_add(div_offset);
+        // (cc & 0xFFF) + 2 * (~(cc + 1 + !ds) & 0x800)
+        let not_ds = (!ds) as u32;
+        let folded = (cc & 0xFFF)
+            .wrapping_add(2 * (!(cc.wrapping_add(1).wrapping_add(not_ds)) & 0x800))
+            % Self::CC_MAX;
+        self.cc = folded;
+        // lastUpdate_ = ((lastUpdate_ + 3) & -4) - !ds
+        self.last_update = ((self.last_update + 3) & !3u64).wrapping_sub(not_ds as u64);
+
+        self.channel1.psg_reset();
+        self.channel2.psg_reset();
+        self.channel3.psg_reset();
+        self.channel4.psg_reset();
+
+        self.push_cc();
     }
 
     /// Advance only the wave channel's fetch counter to the current cc, for the
@@ -439,14 +476,29 @@ impl Addressable for Audio {
             },
             NR52 => {
                 let was_enabled = self.audio_enabled;
-                self.audio_enabled = (value >> 7) & 0x01 != 0;
-                self.nr52 = value;
-                
-                // If audio was disabled, reset all registers
-                if was_enabled && !self.audio_enabled {
+                let now_enabled = (value >> 7) & 0x01 != 0;
+
+                if was_enabled && !now_enabled {
+                    // APU power-off: clear all channel + control registers, but
+                    // preserve the free-running master clock state (Gambatte's
+                    // `cycleCounter_`/`lastUpdate_` keep running while disabled).
+                    // The clock continuity is what lets the next enable's
+                    // `PSG::reset` fold from the correct large anchor.
+                    let cc = self.cc;
+                    let last_update = self.last_update;
+                    let last_div_resets = self.last_div_resets;
+                    let clock_anchored = self.clock_anchored;
                     *self = Audio::new();
-                    self.nr52 = value; // Preserve the written value
+                    self.cc = cc;
+                    self.last_update = last_update;
+                    self.last_div_resets = last_div_resets;
+                    self.clock_anchored = clock_anchored;
+                } else if !was_enabled && now_enabled {
+                    // APU power-on (NR52 0→1): apply Gambatte's `PSG::reset` fold.
+                    self.psg_reset(self.cached_ds);
                 }
+                self.audio_enabled = now_enabled;
+                self.nr52 = value;
             },
             WAV_START..=WAV_END => {
                 // Wave RAM can be accessed even when audio is disabled
