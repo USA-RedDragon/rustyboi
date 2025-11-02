@@ -352,6 +352,41 @@ impl Audio {
         self.channel4.set_len_cc(base);
     }
 
+    /// Overlay the length subsystem cc (`len_cc`) at the canonical CPU WRITE
+    /// access cc, so the NRx1/NRx4 length-counter math (trigger reload + expiry
+    /// scheduling, `((len_cc>>13)+len)<<13`) is anchored to the SAME per-access
+    /// clock the subsequent NR52 read resolves on (M7 read side: `set_read_len_cc`).
+    /// The write side is a SEPARATE phase term from the read (the trigger's
+    /// `nr4Change` boundary rounding differs from the read's `event` rounding), so
+    /// `write_abs_cc` carries the write access cc (`abs_cc + APU_WRITE_CC_OFF`).
+    /// Unlike the read overlay we LEAVE `len_cc` set: the immediately-following
+    /// `audio.write` consumes it, and the next per-dot `push_cc` restores the
+    /// steady-state base. Duty/envelope (`self.cc`) are untouched.
+    pub fn set_write_len_cc(&mut self, write_abs_cc: u64) {
+        if !self.clock_anchored {
+            return;
+        }
+        let delta = (write_abs_cc >> 1).wrapping_sub(self.last_update >> 1) as u32;
+        let lcc = self.cc.wrapping_add(delta).wrapping_add(Self::LEN_CC_OFF);
+        self.channel1.set_len_cc(lcc);
+        self.channel2.set_len_cc(lcc);
+        self.channel3.set_len_cc(lcc);
+        self.channel4.set_len_cc(lcc);
+    }
+
+    /// Restore the steady-state length cc after a write overlay, so a later
+    /// per-dot poll doesn't see a stale ahead value before the next `push_cc`.
+    pub fn restore_len_cc(&mut self) {
+        if !self.clock_anchored {
+            return;
+        }
+        let base = self.cc.wrapping_add(Self::LEN_CC_OFF);
+        self.channel1.set_len_cc(base);
+        self.channel2.set_len_cc(base);
+        self.channel3.set_len_cc(base);
+        self.channel4.set_len_cc(base);
+    }
+
     /// Apply Gambatte's post-`skip_bios` APU state. The boot ROM enables the APU
     /// and leaves channel 1 mid-tone (the startup "ding"). `sync_cc` must run
     /// first so the channels' duty event counter has the correct cc base.

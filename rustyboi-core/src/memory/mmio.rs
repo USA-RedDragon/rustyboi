@@ -562,6 +562,20 @@ impl Mmio {
         self.audio.set_read_len_cc(read_abs_cc);
     }
 
+    /// Resolve the APU length subsystem at the canonical CPU WRITE access cc
+    /// (M8). Overlays `len_cc` to the write cc, then runs the actual register
+    /// write (whose NRx1/NRx4 length math consumes the overlaid cc), then
+    /// restores the steady-state base. Mirrors `sync_apu_read_cc` for the read
+    /// side: the trigger's length-expiry boundary is anchored to one uniform
+    /// per-access clock, dissolving the write/read phase asymmetry.
+    pub fn write_apu(&mut self, addr: u16, value: u8) {
+        self.sync_apu_cc();
+        let write_cc = self.timer.write_access_cc();
+        self.audio.set_write_len_cc(write_cc);
+        self.audio.write(addr, value);
+        self.audio.restore_len_cc();
+    }
+
     /// The canonical CPU-access cc the timer resolves register accesses on.
     /// Exposed so the bus can present the SAME cc to the APU/serial reads,
     /// dissolving the per-peripheral phase constants (M7).
@@ -1560,8 +1574,7 @@ impl memory::Addressable for Mmio {
                 serial::SB => self.serial.write(addr, value),
                         serial::SC => self.write_serial_sc(value),
                         audio::NR10..=audio::NR52 | audio::WAV_START..=audio::WAV_END => {
-                            self.sync_apu_cc();
-                            self.audio.write(addr, value);
+                            self.write_apu(addr, value);
                         }
                         REG_DMA => self.start_oam_dma(value),
                         ppu::LCD_CONTROL => self.write_lcd_control(value),
