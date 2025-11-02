@@ -224,6 +224,20 @@ impl<'a> Bus<'a> {
             return;
         }
 
+        // SC (FF02) ABORT write resolves at the access START cc (M8 serial
+        // merge): clearing the transfer-start/internal-clock bits must land
+        // BEFORE this M-cycle's per-dot `step_serial` runs — otherwise the
+        // in-flight transfer completes during the tick and raises the serial IF
+        // the abort is meant to suppress. A START write (bits set) keeps the
+        // tick-before path so its scheduled completion cc is unchanged (the
+        // nopx/late_div_write completion-timing cases are tuned to it).
+        let sc_abort = addr == 0xFF02 && (value & 0x81) != 0x81;
+        if sc_abort {
+            self.mmio.write(addr, value);
+            self.tick_m();
+            return;
+        }
+
         let tick_before = matches!(addr, 0xFF01..=0xFF02 | 0xFF46 | 0xFF4A | 0xFF4B)
             || self.mmio.dma_active();
         if tick_before {

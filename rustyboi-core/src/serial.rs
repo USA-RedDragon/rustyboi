@@ -16,8 +16,8 @@ pub struct Serial {
     sb: u8,
     sc: u8,
     // Absolute completion model (mirrors Gambatte's serial event time): a
-    // transfer's interrupt fires at `complete_at` (a CPU T-phase), with one bit
-    // shifted out every `step_t` phases. Bits already shifted are reconstructed
+    // transfer's interrupt fires at `complete_at` (a master-cc value), with one
+    // bit shifted out every `step_t` cc. Bits already shifted are reconstructed
     // from the remaining time so SB reads stay correct mid-transfer.
     active: bool,
     complete_at: u64,
@@ -54,9 +54,10 @@ impl Serial {
     }
 
     /// Schedule (or cancel) the transfer event. `divider` is the timer's
-    /// internal counter and `phase` the CPU T-phase, both sampled at the SC
-    /// write's resolution cc. Mirrors Gambatte memory.cpp 0x02 write:
-    /// `eventTime = cc - (cc - divLastUpdate) % align + step * 8`.
+    /// internal counter and `phase` the master cc (`abs_cc`-based) at the SC
+    /// write's resolution cc — serial now shares the single master clock, not a
+    /// separate `cpu_t_phase` (M8 serial merge). Mirrors Gambatte memory.cpp
+    /// 0x02 write: `eventTime = cc - (cc - divLastUpdate) % align + step * 8`.
     fn schedule(&mut self, divider: u16, phase: u64) {
         if !self.internal_start() {
             self.active = false;
@@ -69,10 +70,11 @@ impl Serial {
         self.step_t = step;
         self.bits_shifted = 0;
         // Snap `phase` down to the DIV-aligned grid (Gambatte:
-        // `cc - (cc - divLastUpdate) % align`), add the 8-bit transfer span, and
-        // back off one M-cycle: the SC write resolves at this M-cycle's end
-        // (tick-before-write), one M-cycle past Gambatte's mid-cycle write cc.
-        const WRITE_CC_OFFSET: u64 = 8;
+        // `cc - (cc - divLastUpdate) % align`), add the 8-bit transfer span, then
+        // subtract the master-cc write-phase offset mapping the per-dot `abs_cc`
+        // (advanced at the start of each dot's tick) to Gambatte's mid-cycle SC
+        // write cc. Swept against the serial cluster post-merge (minimum at 6/7).
+        const WRITE_CC_OFFSET: u64 = 7;
         self.complete_at =
             phase - (divider as u64 & align_mask) + (step as u64) * 8 - WRITE_CC_OFFSET;
         self.active = true;
@@ -91,9 +93,10 @@ impl Serial {
         let fast = self.cgb && (self.sc & SC_FAST_CLOCK) != 0;
         let (align, half) = if fast { (8u64, 4u64) } else { (0x100u64, 0x80u64) };
         // Gambatte operates on the raw serial event time `t` and write cc; our
-        // `complete_at` carries the SC-write -8 offset, so undo it for the
-        // residue math (and the matching write-cc offset cancels in delta).
-        const OFF: u64 = 8;
+        // `complete_at` carries the SC-write offset, so undo it for the residue
+        // math (the matching write-cc offset cancels in `delta`). Must equal
+        // `schedule`'s WRITE_CC_OFFSET.
+        const OFF: u64 = 7;
         let t = self.complete_at + OFF;
         let delta = phase.wrapping_sub(t); // (cc - t), wraps since t > cc
         let n = t
@@ -102,9 +105,9 @@ impl Serial {
         self.complete_at = n.saturating_sub(OFF).max(phase);
     }
 
-    /// Advance bookkeeping at CPU T-phase `phase` (sampled before this dot's
-    /// advance, matching the per-dot tick ordering). Shifts SB as bits clock out
-    /// and raises the serial IRQ exactly when `complete_at` is reached.
+    /// Advance bookkeeping at master cc `phase` (the timer's `abs_cc`, sampled
+    /// within this dot's tick). Shifts SB as bits clock out and raises the serial
+    /// IRQ exactly when `complete_at` is reached.
     pub fn step(&mut self, phase: u64, mmio: &mut mmio::Mmio) {
         if !self.active {
             return;
