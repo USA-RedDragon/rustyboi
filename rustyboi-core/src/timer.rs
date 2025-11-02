@@ -131,8 +131,9 @@ impl Timer {
     }
 
     /// cc at which a CPU register access resolves, relative to the per-dot
-    /// `abs_cc` (tuning lever `CC_OFF`).
-    fn access_cc(&self) -> u64 {
+    /// `abs_cc` (tuning lever `CC_OFF`). This is the canonical per-access cc the
+    /// timer, serial, and APU all resolve register accesses on (M7).
+    pub fn access_cc(&self) -> u64 {
         (self.abs_cc as i64 + CC_OFF) as u64
     }
 
