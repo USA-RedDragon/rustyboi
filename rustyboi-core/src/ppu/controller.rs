@@ -76,6 +76,7 @@ const WRITE_CC_OFFSET: i64 = 0;
 
 // Sentinel for "no pending wy2 update".
 fn wy2_disabled() -> u64 { u64::MAX }
+fn pnow_disabled() -> u64 { u64::MAX }
 
 // Env-tunable override of an i64 offset (for sweeping during development). When
 // the named env var is unset, the compiled-in default is used.
@@ -321,6 +322,15 @@ pub struct Ppu {
     // `lyCounter` (`time` = abs_cc when LY next increments).
     #[serde(default)]
     abs_cc: u64,
+    // LCD-enable anchor (Gambatte `p_.now()` base): the master cc value at which
+    // the PPU dot-clock `abs_cc` was last re-based. The PPU's machine-cycle clock
+    // is `master_cc - p_now` (both advance 1/T-cycle), so `p_now` folds the PPU
+    // onto the single master cc. Re-anchored on LCD enable / LY-write reset, and
+    // on every speed change / STOP bridge where the master cc and the PPU's
+    // render-dot accumulation diverge in count. DISABLED sentinel until first
+    // enable, where it is seeded so the derived value equals the accumulator.
+    #[serde(default = "pnow_disabled")]
+    p_now: u64,
     // Sub-PPU-dot parity (0/1) of the currently-resolving CPU register write at
     // double speed. Set by the bus just before the FF4x write hooks run.
     #[serde(skip, default)]
@@ -426,6 +436,7 @@ impl Ppu {
             scheduled_mode0_dot: None,
             mode0_reported_this_line: false,
             abs_cc: 0,
+            p_now: pnow_disabled(),
             write_subdot: 0,
             wy2: 0,
             wy2_apply_cc: wy2_disabled(),
@@ -751,6 +762,11 @@ impl Ppu {
     pub fn stop_bridge_advance(&mut self, mmio: &mut mmio::Mmio, dots: u32) {
         for _ in 0..dots {
             self.step_scheduled_stat_events(mmio);
+            // The bridge injects render dots the CPU's returned cycles did not
+            // cover, so the master cc does not advance for them. `step` derives
+            // `abs_cc = master_cc - p_now`; pull `p_now` back by one dot first so
+            // the derived clock still advances `1<<ds` this bridge step.
+            self.p_now = self.p_now.wrapping_sub(1 << mmio.is_double_speed_mode() as u32);
             self.step(mmio);
             self.step_lcdc_events(mmio);
         }
@@ -1423,6 +1439,13 @@ impl Ppu {
                 // line_cycle=0. Mirror Gambatte's lcdcChange enable branch.
                 self.line_cycle = 0;
                 self.internal_ly_val = 0;
+                // Anchor the PPU dot-clock onto the master cc at LCD enable
+                // (Gambatte seeds `p_.now()` here). `abs_cc` keeps its accumulated
+                // value across an off/on cycle. The derive at the end of THIS step
+                // must reproduce the old post-increment value (pre + 1<<ds), so the
+                // anchor subtracts that one dot the old accumulator added below.
+                let ds_inc = 1u64 << mmio.is_double_speed_mode() as u32;
+                self.p_now = mmio.master_cc().wrapping_sub(self.abs_cc + ds_inc);
                 self.wy2 = mmio.read(WY);
                 self.wy2_apply_cc = wy2_disabled();
                 self.stat_reg_committed = mmio.read(LCD_STATUS);
@@ -1452,7 +1475,13 @@ impl Ppu {
         // then advance the clean event clock by one dot (phase-locked with the
         // renderer's 456-dot line).
         self.dispatch_stat_events(mmio);
-        self.abs_cc += 1 << mmio.is_double_speed_mode() as u32;
+        // Fold the PPU dot-clock onto the master cc. `p_now` is the LCD-enable
+        // anchor such that the PPU machine-cycle clock is `master_cc - p_now`
+        // (Gambatte `p_.now()`); the master cc advances `1<<ds` per render dot
+        // within a speed epoch, so the derived clock advances exactly as the old
+        // accumulator did. `p_now` is seeded at enable and re-based on the speed
+        // change / STOP bridge (where the master cc and render-dot counts diverge).
+        self.abs_cc = mmio.master_cc().wrapping_sub(self.p_now);
         self.line_cycle += 1;
         if self.line_cycle >= stat_irq::LCD_CYCLES_PER_LINE {
             self.line_cycle = 0;
