@@ -1015,6 +1015,10 @@ impl Mmio {
 
     pub fn perform_speed_switch(&mut self) {
         if self.cgb_features_enabled && self.key1_switch_armed {
+            // Gambatte evaluates `isDoubleSpeed()` for the PSG/timer speed-change
+            // folds BEFORE toggling KEY1 (`ioamhram_[0x14D] ^= 0x81`), so capture
+            // the speed being LEFT here.
+            let old_ds = self.is_double_speed_mode();
             // Toggle the speed mode
             self.key1_current_speed = !self.key1_current_speed;
             // Clear the armed bit
@@ -1031,6 +1035,12 @@ impl Mmio {
             if self.timer.take_pending_irq() {
                 self.request_interrupt(cpu::registers::InterruptFlag::Timer);
             }
+            // Gambatte order (memory.cpp:466): after the DIV reset (which the APU
+            // mirrors as a `PSG::divReset` fold on the next `sync_cc`), apply the
+            // `PSG::speedChange` fold. Sync first so the divReset fold + flush to
+            // the switch cc happen, then re-fold for the speed transition.
+            self.sync_apu_cc();
+            self.audio.psg_speed_change(old_ds);
         }
     }
 
