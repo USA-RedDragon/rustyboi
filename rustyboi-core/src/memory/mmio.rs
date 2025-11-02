@@ -431,17 +431,24 @@ impl Mmio {
     }
 
     pub fn step_serial(&mut self) {
-        let phase = self.cpu_t_phase;
+        // Serial now runs on the master cc (`abs_cc`), the SAME clock the timer
+        // DIV/TIMA and APU derive from — no separate `cpu_t_phase` parallel
+        // clock (M8 serial merge). `abs_cc` is advanced at the start of the
+        // timer step within this same dot's tick, so it is the live cc here.
+        let phase = self.timer.abs_cc();
         let mut serial = self.serial.clone();
         serial.step(phase, self);
         self.serial = serial;
     }
 
     /// SC (FF02) write: latches the value, then (re)schedules the transfer event
-    /// using the timer counter and CPU T-phase at this write's resolution cc.
+    /// using the timer counter and the canonical WRITE access cc (M8). The write
+    /// resolves at the access START cc (bus.rs routes FF02 to the start-cc path),
+    /// so an abort (SC bit-0 cleared) lands before this access's `step_serial`
+    /// can fire a completion the abort must suppress.
     pub fn write_serial_sc(&mut self, value: u8) {
         let divider = self.timer.internal_counter();
-        let phase = self.cpu_t_phase;
+        let phase = self.timer.write_access_cc();
         self.serial.schedule_sc(value, divider, phase);
     }
 
@@ -1560,13 +1567,12 @@ impl memory::Addressable for Mmio {
                         input::JOYP => self.input.write(addr, value),
                         timer::DIV => {
                             // Gambatte 0x04: realign the pending serial event to
-                            // the new divider phase before resetting DIV. The DIV
-                            // write now resolves at the access START cc (4 dots
-                            // earlier than the prior tick-before path); serial is
-                            // not yet on start-cc, so feed it the unshifted
-                            // (end-of-M-cycle) phase to keep its timing identical
-                            // until the serial leg of the cluster moves too.
-                            let phase = self.cpu_t_phase.wrapping_add(5);
+                            // the new divider phase before resetting DIV. Serial
+                            // now shares the master cc, so feed the DIV write's
+                            // canonical access cc (`access_cc()` = abs_cc + 5),
+                            // the same cc the timer's own divReset resolves on
+                            // (M8 serial merge).
+                            let phase = self.timer.access_cc();
                             self.serial.realign_to_div(phase);
                             self.write_timer(addr, value);
                         }
