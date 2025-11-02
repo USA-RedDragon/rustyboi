@@ -14,11 +14,6 @@ use std::io;
 
 const EMPTY_BYTE: u8 = 0xFF;
 
-// M7 sweep lever: master-cc offset from the per-dot `abs_cc` at which an APU
-// length read resolves. The M4 trace pins the steady-state need at +2 APU-cc
-// (= +4 master cc, parity-independent). The timer's CC_OFF is +5.
-const APU_ACCESS_CC_OFF: i64 = 4;
-
 fn default_oam_high() -> [u8; 0x60] {
     [0; 0x60]
 }
@@ -572,12 +567,6 @@ impl Mmio {
     /// dissolving the per-peripheral phase constants (M7).
     pub fn access_cc(&self) -> u64 {
         self.timer.access_cc()
-    }
-
-    /// Canonical per-access cc for the APU length read. Sweep lever during M7
-    /// unification.
-    pub fn apu_access_cc(&self) -> u64 {
-        (self.timer.abs_cc() as i64 + APU_ACCESS_CC_OFF) as u64
     }
 
     pub fn generate_audio_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
