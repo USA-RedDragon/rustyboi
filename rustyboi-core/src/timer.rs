@@ -30,6 +30,14 @@ const DISABLED_TIME: u64 = u64::MAX;
 // (13 failures, below the 17 baseline) sits exactly at +5, confirming the
 // scheduled-TIMA arithmetic is exact at this anchor.
 const CC_OFF: i64 = 5;
+/// Write-side canonical access-cc offset (M8). Swept against the ch2
+/// `late_reset_nr52` a/b pairs; the trigger's length boundary lands at this
+/// phase rather than the read's `CC_OFF`.
+const WRITE_CC_OFF: i64 = 0;
+/// STOP-write DIV-reset canonical cc offset (M8 speedchange). The STOP
+/// speed-switch DIV reset resolves at this phase relative to the per-dot
+/// `abs_cc`; swept against `speedchange2_tima00_2a/2b`.
+const STOP_CC_OFF: i64 = 0;
 
 // Gambatte's `+3` constant in `tmatime`/`nextIrqEventTime` (mem/tima.cpp).
 const TMA_OFF: u64 = 3;
@@ -135,6 +143,15 @@ impl Timer {
     /// timer, serial, and APU all resolve register accesses on (M7).
     pub fn access_cc(&self) -> u64 {
         (self.abs_cc as i64 + CC_OFF) as u64
+    }
+
+    /// cc at which a CPU register WRITE resolves. The write side is a separate
+    /// sub-quantum phase term from the read `access_cc()` (M8): the APU/serial
+    /// trigger boundary math (`nr4Change`, serial completion/abort) rounds
+    /// differently from the read `event`, so its canonical write cc carries its
+    /// own offset (`WRITE_CC_OFF`) rather than reusing the read's `CC_OFF`.
+    pub fn write_access_cc(&self) -> u64 {
+        (self.abs_cc as i64 + WRITE_CC_OFF) as u64
     }
 
 
@@ -275,10 +292,11 @@ impl Timer {
         self.div_reset_count = self.div_reset_count.wrapping_add(1);
     }
 
-    /// CGB STOP speed-switch DIV reset: resolves at the raw `abs_cc` (the STOP
-    /// instruction's cc), not the +CC_OFF CPU-register-access cc.
+    /// CGB STOP speed-switch DIV reset. Resolves at the STOP-write canonical cc
+    /// (`abs_cc + STOP_CC_OFF`); the STOP is a CPU write whose DIV-reset effect
+    /// lands at the write phase, mirroring `write_access_cc()` (M8).
     pub fn stop_div_reset(&mut self) {
-        let cc = self.abs_cc;
+        let cc = (self.abs_cc as i64 + STOP_CC_OFF) as u64;
         self.div_reset_at(cc);
     }
 
