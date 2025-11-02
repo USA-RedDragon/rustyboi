@@ -590,6 +590,13 @@ impl Mmio {
         self.timer.access_cc()
     }
 
+    /// The raw master clock (`cc`, T-cycles) the whole engine advances. The PPU
+    /// derives its dot-cycles from this against the LCD-enable anchor `p_now`
+    /// (Gambatte: PPU dot-cycles = `(cc - p_now) >> ds`).
+    pub fn master_cc(&self) -> u64 {
+        self.timer.abs_cc()
+    }
+
     pub fn generate_audio_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
         let mut audio = self.audio.clone();
         let samples = audio.generate_samples(self, cpu_cycles);
