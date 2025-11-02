@@ -130,7 +130,12 @@ impl Audio {
         // the FF04 write), fire any length events strictly before the fold, then
         // fold `cycleCounter_` there — not at the (later) current dot.
         if div_resets != self.last_div_resets {
-            self.advance_to(abs_cc, ds);
+            // Run the fold AT the FF04 write's canonical access cc (`div_anchor`,
+            // the timer's `access_cc()`), not the later current dot — so the
+            // length-expiry boundary `((cc>>13)+len)<<13` is anchored to the SAME
+            // per-access cc the subsequent NR52 read resolves on (M7). This is
+            // the mixed-anchor the prior `advance_to(abs_cc)` left open.
+            self.advance_to(div_anchor, ds);
             self.push_cc();
             self.fire_length_events(self.cc);
             self.div_reset_fold(ds);
@@ -140,7 +145,6 @@ impl Audio {
         self.advance_to(abs_cc, ds);
         self.push_cc();
         self.fire_length_events(self.cc);
-        let _ = div_anchor;
     }
 
     /// Gambatte `PSG::generateSamples`: convert CPU cycles since `last_update` to
@@ -314,6 +318,38 @@ impl Audio {
         if self.audio_enabled {
             self.channel3.sync_for_read();
         }
+    }
+
+    /// Resolve the length subsystem at the canonical CPU-access cc on an APU
+    /// register read (M7). `read_abs_cc` is the master cc at the exact access
+    /// point (the same canonical cc the timer register access resolves on); it
+    /// may run a few dots ahead of the per-dot `self.last_update` that the
+    /// duty/envelope sub-counters are anchored to.
+    ///
+    /// We overlay each channel's length-comparison cc (`len_cc`) at the access
+    /// cc — `self.cc + ((read_abs_cc>>1) - (last_update>>1))` — and fire any
+    /// length expiry there, WITHOUT disturbing `self.cc`/`last_update`/duty. This
+    /// makes the cycle-exact NR52 length-expiry boundary (`((cc>>13)+len)<<13`
+    /// vs the read cc) resolve at the same canonical access cc as the timer,
+    /// dissolving the per-peripheral phase constant.
+    pub fn set_read_len_cc(&mut self, read_abs_cc: u64) {
+        if !self.clock_anchored {
+            return;
+        }
+        let delta = (read_abs_cc >> 1).wrapping_sub(self.last_update >> 1) as u32;
+        let lcc = self.cc.wrapping_add(delta).wrapping_add(Self::LEN_CC_OFF);
+        self.channel1.set_len_cc(lcc);
+        self.channel2.set_len_cc(lcc);
+        self.channel3.set_len_cc(lcc);
+        self.channel4.set_len_cc(lcc);
+        self.fire_length_events(lcc);
+        // Restore the steady-state length cc so the next per-dot `push_cc`
+        // (which uses the un-overlaid `self.cc`) doesn't see a stale ahead value.
+        let base = self.cc.wrapping_add(Self::LEN_CC_OFF);
+        self.channel1.set_len_cc(base);
+        self.channel2.set_len_cc(base);
+        self.channel3.set_len_cc(base);
+        self.channel4.set_len_cc(base);
     }
 
     /// Apply Gambatte's post-`skip_bios` APU state. The boot ROM enables the APU

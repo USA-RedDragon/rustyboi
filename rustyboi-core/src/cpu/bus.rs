@@ -129,7 +129,12 @@ impl<'a> Bus<'a> {
         // (length expiry at `((cc>>13)+len)<<13` vs the NR52 read cc) read 0 one
         // M-cycle too soon. NR52 status must reflect the pre-tick enabled state.
         let apu_read = if (0xFF10..=0xFF3F).contains(&addr) {
-            self.mmio.sync_apu_for_read();
+            // Resolve the APU length subsystem at the canonical per-access cc
+            // (the SAME cc the timer register access resolves on), so the
+            // length-expiry boundary is decided off one uniform clock with no
+            // APU-specific phase constant (M7).
+            let access_cc = self.mmio.apu_access_cc();
+            self.mmio.sync_apu_read_cc(access_cc);
             Some(self.mmio.read(addr))
         } else {
             None

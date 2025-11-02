@@ -14,6 +14,11 @@ use std::io;
 
 const EMPTY_BYTE: u8 = 0xFF;
 
+// M7 sweep lever: master-cc offset from the per-dot `abs_cc` at which an APU
+// length read resolves. The M4 trace pins the steady-state need at +2 APU-cc
+// (= +4 master cc, parity-independent). The timer's CC_OFF is +5.
+const APU_ACCESS_CC_OFF: i64 = 4;
+
 fn default_oam_high() -> [u8; 0x60] {
     [0; 0x60]
 }
@@ -549,6 +554,30 @@ impl Mmio {
     pub fn sync_apu_for_read(&mut self) {
         self.sync_apu_cc();
         self.audio.sync_wave_for_read();
+    }
+
+    /// Resolve the APU length subsystem at the canonical CPU-access cc (M7).
+    /// `read_abs_cc` is the master cc at the access point — the SAME value the
+    /// timer register access resolves on (`abs_cc + ACCESS_CC_OFF`). Drives the
+    /// length-expiry comparison off one uniform per-access cc, with no
+    /// APU-specific additive constant.
+    pub fn sync_apu_read_cc(&mut self, read_abs_cc: u64) {
+        self.sync_apu_cc();
+        self.audio.sync_wave_for_read();
+        self.audio.set_read_len_cc(read_abs_cc);
+    }
+
+    /// The canonical CPU-access cc the timer resolves register accesses on.
+    /// Exposed so the bus can present the SAME cc to the APU/serial reads,
+    /// dissolving the per-peripheral phase constants (M7).
+    pub fn access_cc(&self) -> u64 {
+        self.timer.access_cc()
+    }
+
+    /// Canonical per-access cc for the APU length read. Sweep lever during M7
+    /// unification.
+    pub fn apu_access_cc(&self) -> u64 {
+        (self.timer.abs_cc() as i64 + APU_ACCESS_CC_OFF) as u64
     }
 
     pub fn generate_audio_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
