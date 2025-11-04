@@ -325,6 +325,15 @@ pub struct Ppu {
     // drives the FF41 mode bits + mode-0 STAT IRQ, replacing the x==160 trigger.
     #[serde(default)]
     scheduled_mode0_dot: Option<u128>,
+    // Gambatte's `m0TimeOfCurrentLine` in MASTER-cc units: the absolute clock at
+    // which the predicted mode-3 -> mode-0 transition occurs, equal to
+    // `predictedNextXposTime(167) = now_at_arm + (m3_len << ds)`. Captured at M3
+    // arm (master_cc + m3_len<<ds). The CPU's FF41 read resolves mode 3 iff
+    // `access_cc + 2 < m0_time_master` (Gambatte `getStat`); the mode-0 STAT IRQ
+    // fires one xpos earlier (`predictedNextXposTime(166) = m0Time - (1<<ds)`).
+    // None when no closed-form dot is available (window / first line).
+    #[serde(default)]
+    m0_time_master: Option<u64>,
     // The CPU-visible mode-0 (HBlank) start dot is computed on demand by
     // `reported_mode0_dot_value` from the closed-form `scheduled_mode0_dot` plus
     // a per-phase early-report nudge. It is decoupled from the live pixel
@@ -459,6 +468,7 @@ impl Ppu {
             m3_scheduled_wx: 0,
             m3_scheduled_win: false,
             scheduled_mode0_dot: None,
+            m0_time_master: None,
             mode0_reported_this_line: false,
             abs_cc: 0,
             p_now: pnow_disabled(),
@@ -587,6 +597,7 @@ impl Ppu {
                 || (old_lcdc & spr_bits) != (value & spr_bits))
         {
             self.scheduled_mode0_dot = None;
+            self.m0_time_master = None;
         }
         self.lcdc = value;
     }
@@ -1160,6 +1171,7 @@ impl Ppu {
         self.mode0_pretriggered_this_line = false;
         self.m3_pixels_discarded = 0;
         self.scheduled_mode0_dot = None;
+        self.m0_time_master = None;
     }
 
     /// Latch the current wired-OR STAT line state for edge bookkeeping. IRQ
@@ -1704,6 +1716,7 @@ impl Ppu {
 
                     if was_first_line {
                         self.scheduled_mode0_dot = None;
+                        self.m0_time_master = None;
                     } else {
                         // Closed-form mode-0 schedule, including window-start lines
                         // (compute_m3_length applies the window penalty). Mid-mode-3
@@ -1714,6 +1727,21 @@ impl Ppu {
                         let offset = if is_cgb { cgb_mode0_offset() } else { dmg_mode0_offset() };
                         let dot = self.ticks as i64 + m3_len as i64 + offset as i64;
                         self.scheduled_mode0_dot = Some(dot.max(0) as u128);
+                        // Gambatte `m0Time = predictedNextXposTime(167) = now +
+                        // (predictCyclesUntilXpos(167) << ds)`; m3_len IS
+                        // predictCyclesUntilXpos(167) in dots, and `now` at arm is
+                        // the current master cc. The CPU-visible boundary is derived
+                        // from this exact value rather than the tick-frame offset.
+                        let ds = mmio.is_double_speed_mode() as u32;
+                        // K reconciles rustyboi's master-cc M3-arm anchor with
+                        // Gambatte's `now`/access-cc phase so the getStat boundary
+                        // `cc + 2 < m0Time` lands on the (Gambatte-exact) persisted
+                        // mode-3 length. DMG's m0 end sits one cc later than CGB
+                        // (the `1 - cgb` term lives in the renderer tick frame, not
+                        // this master-cc anchor), hence +1.
+                        let k = if is_cgb { env_off("RB_M0TIME_K_CGB", 6) } else { env_off("RB_M0TIME_K_DMG", 7) };
+                        self.m0_time_master =
+                            Some((mmio.master_cc() as i64 + ((m3_len as i64 + k) << ds)).max(0) as u64);
                         self.m3_scheduled_wx = mmio.read(WX);
                         self.m3_scheduled_win = self.window_will_start(mmio, is_cgb);
                     }
@@ -1735,6 +1763,7 @@ impl Ppu {
                             != self.m3_scheduled_win)
                 {
                     self.scheduled_mode0_dot = None;
+                    self.m0_time_master = None;
                 }
                 // CPU-visible mode-0 report (decoupled from pipeline). The FF41
                 // mode bits and the mode-0 STAT check are driven from the
@@ -1801,6 +1830,11 @@ impl Ppu {
                         if let Some(dot) = self.scheduled_mode0_dot {
                             let delta = xpos as i64 - self.m3_arm_scx as i64;
                             self.scheduled_mode0_dot = Some((dot as i64 + delta).max(0) as u128);
+                            if let Some(m0t) = self.m0_time_master {
+                                let ds = mmio.is_double_speed_mode() as u32;
+                                self.m0_time_master =
+                                    Some((m0t as i64 + (delta << ds)).max(0) as u64);
+                            }
                         }
                     }
                 }
@@ -2172,6 +2206,37 @@ impl Ppu {
         // VRAM/OAM M3 start stays on the renderer's FF41 mode (window-safe).
         let _ = is_read;
         Some(mode3_locked && !ended)
+    }
+
+    /// Gambatte `getStat` mode-3 <-> mode-0 resolution at the CPU's access cc.
+    /// Returns the FF41 lower two mode bits the CPU observes when reading FF41 at
+    /// `access_cc` (master-cc units), or None when no closed-form m0Time is
+    /// available (window / first line / not in mode 3) so the bus falls back to
+    /// the renderer-set FF41 register.
+    ///
+    /// Gambatte resolves mode 3 iff `cc + 2 < m0TimeOfCurrentLine(cc)`; the first
+    /// mode-0 read therefore lands at `cc = m0Time - 2`. This reproduces the
+    /// (now Gambatte-exact) persisted boundary at single speed and adds correct
+    /// sub-dot resolution at double speed, where the CPU samples FF41 at an odd
+    /// master cc that the per-dot renderer would otherwise round.
+    pub fn get_stat_mode3to0_at_cc(&self, access_cc: u64) -> Option<u8> {
+        if self.disabled || self.internal_ly_val >= 144 {
+            return None;
+        }
+        // Only refine when the renderer currently reports mode 3 (we are in the
+        // mode-3 window for this line) and a closed-form m0Time exists. Outside
+        // mode 3 the register is already correct (mode 0/2 boundaries handled
+        // elsewhere).
+        if self.state != State::PixelTransfer {
+            return None;
+        }
+        let m0t = self.m0_time_master? as i64;
+        // mode 3 iff access_cc + 2 < m0Time, else mode 0.
+        if (access_cc as i64) + 2 < m0t {
+            Some(3)
+        } else {
+            Some(0)
+        }
     }
 
     pub fn get_x(&self) -> u8 {
