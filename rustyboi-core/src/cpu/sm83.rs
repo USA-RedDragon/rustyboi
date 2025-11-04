@@ -54,10 +54,17 @@ impl SM83 {
         if self.halted {
             if pending_interrupt.is_some() {
                 self.halted = false;
+                mmio.clear_cpu_halt();
+                // Gambatte unhalt re-flag gate (memory.cpp:224/304):
+                //   (hdmaEnabled && isHdmaPeriod && haltHdmaState == hdma_low)
+                //   || haltHdmaState == hdma_requested
+                // Keys on hdma_low: the block fires on unhalt only when the HDMA
+                // period was *entered during* the halt (Low at halt time), not when
+                // it was already in-period+armed (High, which already fired).
                 match mmio.halt_hdma_state() {
                     memory::mmio::HaltHdmaState::Requested => mmio.set_hdma_req(),
-                    memory::mmio::HaltHdmaState::High
-                        if mmio.hdma_is_in_period_cached() && mmio.hdma_is_enabled() =>
+                    memory::mmio::HaltHdmaState::Low
+                        if mmio.hdma_in_period_for_unhalt() && mmio.hdma_is_enabled() =>
                     {
                         mmio.set_hdma_req()
                     }
