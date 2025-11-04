@@ -246,6 +246,20 @@ pub struct Ppu {
     // fetcher uses this (masked) for the window tile row / tile line.
     #[serde(default = "win_y_pos_init")]
     win_y_pos: u8,
+    // Gambatte's `win_draw_start` bit of winDrawState. On DMG, when WX matches
+    // at xpos == 166 (lcd_hres+6) the window cannot draw this line (the line
+    // ends first) but ARMS: win_draw_start is set and survives into the next
+    // line, where M3Start::f0 activates the window from x==0 (++winYPos) even
+    // though WX is unchanged. Set during a line, consumed at the next line's
+    // M3 start. CGB never arms this way (handled by plotPixel's !cgb guard).
+    #[serde(default)]
+    win_draw_start: bool,
+    // Set at this line's M3 start (M3Start::f0) when win_draw_start was armed
+    // from the previous line and the window is enabled: the window draws from
+    // x==0 this line regardless of WX. Consumed by the PixelTransfer window
+    // start at x==0.
+    #[serde(default)]
+    win_draw_started_at_x0: bool,
     window_y_triggered: bool,   // Whether WY condition was met this frame
     window_started_this_line: bool, // Whether window started rendering on current scanline
     
@@ -429,6 +443,8 @@ impl Ppu {
             fetcher_cadence_tick: 0,
             window_line_counter: 0,
             win_y_pos: 0xFF,
+            win_draw_start: false,
+            win_draw_started_at_x0: false,
             window_y_triggered: false,
             window_started_this_line: false,
             previous_stat_interrupt_line: false,
@@ -1135,6 +1151,7 @@ impl Ppu {
         self.pixel_transfer_warmup = 0;
         self.window_line_counter = 0;
         self.win_y_pos = 0xFF;
+        self.win_draw_start = false;
         self.window_y_triggered = false;
         self.window_started_this_line = false;
         self.mode2_irq_pretriggered_for_next_line = false;
@@ -1629,6 +1646,43 @@ impl Ppu {
                     };
                     Self::set_lcd_status_mode(mmio, 3);
                     self.state = State::PixelTransfer;
+                    // Gambatte M3Start::f0: if win_draw_start was armed from the
+                    // previous line (DMG wx==166 case) and the window is enabled,
+                    // the window draws from xpos 0 this line (++winYPos), even
+                    // though WX is unchanged. Otherwise winDrawState clears to 0.
+                    {
+                        let win_en = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
+                        if self.win_draw_start && win_en && !self.first_line_after_enable {
+                            self.win_y_pos = self.win_y_pos.wrapping_add(1);
+                            self.win_draw_started_at_x0 = true;
+                            // The window is `started` from line begin: fetch
+                            // window tiles from xpos 0 (after the SCX discard
+                            // prefix), not BG. Gambatte M3Start::f0 seeds
+                            // wscx = tile_len + scx%8, so the first window tile
+                            // column is wscx/8 == 1 (for scx<8).
+                            let scx = (mmio.read(SCX) & 0x07) as u32;
+                            let start_tile = ((8 + scx) / 8) as u8;
+                            self.fetcher.start_window_at_tile(0, start_tile);
+                            self.window_started_this_line = true;
+                        } else {
+                            self.win_draw_started_at_x0 = false;
+                        }
+                        self.win_draw_start = false;
+                    }
+                    // DMG wx==166 (lcd_hres+6): the window cannot draw this line
+                    // (the line ends before xpos reaches it) but ARMS for the next
+                    // line. Gambatte plotPixel sets win_draw_start at xpos==166
+                    // on DMG whenever the window-Y condition holds, regardless of
+                    // whether the window is already drawing. Evaluated here at M3
+                    // start (M3 always reaches xpos 166); win_draw_start is then
+                    // consumed by the next line's M3Start::f0 above.
+                    if !is_cgb
+                        && !self.first_line_after_enable
+                        && mmio.read(WX) == 166
+                        && self.window_y_active(mmio)
+                    {
+                        self.win_draw_start = true;
+                    }
                     // First scanline after enable is now armed; subsequent
                     // lines use normal Mode 2 timing.
                     let was_first_line = self.first_line_after_enable;
@@ -1801,8 +1855,9 @@ impl Ppu {
                 // Check if we should start window rendering
                 if self.window_y_active(mmio) && !self.fetcher.is_fetching_window() {
                     let wx = mmio.read(WX);
-                    // DMG never starts the window at WX==166; CGB does.
-                    let wx_allowed = wx <= 166 && (mmio.is_cgb_features_enabled() || wx != 166);
+                    let is_cgb = mmio.is_cgb_features_enabled();
+                    // DMG never starts the window drawing at WX==166; CGB does.
+                    let wx_allowed = wx <= 166 && (is_cgb || wx != 166);
                     // WX=0-6 can trigger immediately, WX=7+ needs exact match with X+7
                     let should_start_window = wx_allowed
                         && if wx < 7 {
@@ -1810,7 +1865,7 @@ impl Ppu {
                         } else {
                             self.x + 7 == wx
                         };
-                    
+
                     if should_start_window {
                         // Window draw-start: Gambatte increments winYPos here
                         // (M3Start::f0 / plotPixel win_draw_start), once per line
@@ -1927,6 +1982,12 @@ impl Ppu {
                         self.pixel_transfer_warmup = 0;
                         self.window_line_counter = 0;
                         self.win_y_pos = 0xFF;
+                        // NOTE: win_draw_start is intentionally NOT reset here.
+                        // Gambatte resets winYPos at M2_Ly0::f0 but leaves
+                        // winDrawState untouched across the frame boundary, so a
+                        // window armed on the last visible line (e.g. DMG wx==166
+                        // on line 143) carries win_draw_start through vblank and
+                        // activates the window on the next frame's line 0.
                         self.window_y_triggered = false;
                         self.window_started_this_line = false;
                         
