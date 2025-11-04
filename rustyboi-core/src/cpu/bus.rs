@@ -170,6 +170,19 @@ impl<'a> Bus<'a> {
         } else {
             None
         };
+        // FF41 (STAT) read-at-cc: Gambatte resolves the mode bits with
+        // `getStat(cc)` at the access START cc, where the mode-3 -> mode-0
+        // boundary is `cc + 2 < m0Time`. The per-dot renderer sets the FF41 mode
+        // register at a dot boundary that, at double speed, can round the odd-cc
+        // sample; resolve it here against the closed-form m0Time so the straddle
+        // pairs (m2int_*_m3stat_ds, etc.) sample the same sub-dot boundary
+        // Gambatte does. Snapshot pre-tick so the read anchors at access_cc.
+        let stat_mode_pre = if addr == ppu::LCD_STATUS {
+            let access_cc = self.mmio.access_cc();
+            self.ppu.get_stat_mode3to0_at_cc(access_cc)
+        } else {
+            None
+        };
         self.tick_m();
         // VRAM is inaccessible to the CPU during Mode 3, OAM during Mode 2/3;
         // a blocked read returns open-bus 0xFF. Only while the LCD is on.
@@ -187,6 +200,9 @@ impl<'a> Bus<'a> {
         }
         if let Some(pre) = if_pre {
             return pre | (self.mmio.read(addr) & !IF_PRE_MASK);
+        }
+        if let Some(mode) = stat_mode_pre {
+            return (self.mmio.read(addr) & !0x03) | (mode & 0x03);
         }
         self.mmio.read(addr)
     }
