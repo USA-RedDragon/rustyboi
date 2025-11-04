@@ -77,6 +77,7 @@ const WRITE_CC_OFFSET: i64 = 0;
 // Sentinel for "no pending wy2 update".
 fn wy2_disabled() -> u64 { u64::MAX }
 fn pnow_disabled() -> u64 { u64::MAX }
+fn win_y_pos_init() -> u8 { 0xFF }
 
 // Env-tunable override of an i64 offset (for sweeping during development). When
 // the named env var is unset, the compiled-in default is used.
@@ -238,6 +239,13 @@ pub struct Ppu {
     
     // Window state tracking
     window_line_counter: u8,    // Internal counter for window Y position
+    // Gambatte's `winYPos`: the window's internal Y line, incremented by 1 ONLY
+    // at the moment the window actually begins drawing on a line (M3Start::f0 /
+    // plotPixel draw-start), NOT per-line whenever ly > wy. Initialized to 0xFF
+    // at frame start so the first window-draw line yields winYPos == 0. The
+    // fetcher uses this (masked) for the window tile row / tile line.
+    #[serde(default = "win_y_pos_init")]
+    win_y_pos: u8,
     window_y_triggered: bool,   // Whether WY condition was met this frame
     window_started_this_line: bool, // Whether window started rendering on current scanline
     
@@ -420,6 +428,7 @@ impl Ppu {
             pixel_transfer_warmup: 0,
             fetcher_cadence_tick: 0,
             window_line_counter: 0,
+            win_y_pos: 0xFF,
             window_y_triggered: false,
             window_started_this_line: false,
             previous_stat_interrupt_line: false,
@@ -1125,6 +1134,7 @@ impl Ppu {
         self.sprite_fetch_stall = 0;
         self.pixel_transfer_warmup = 0;
         self.window_line_counter = 0;
+        self.win_y_pos = 0xFF;
         self.window_y_triggered = false;
         self.window_started_this_line = false;
         self.mode2_irq_pretriggered_for_next_line = false;
@@ -1541,20 +1551,11 @@ impl Ppu {
                 // Gambatte-style three-point check in `update_window_y_latch`,
                 // which runs near the previous line's end.
                 if self.ticks == 0 {
-                    let ly = mmio.read(LY);
-                    let wy = mmio.read(WY);
-                    if ly == wy {
-                        // Reset window line counter when window first becomes active
-                        self.window_line_counter = 0;
-                    }
-
-                    // If window is already active and enabled, increment the window line counter
-                    let lcdc = self.lcdc;
-                    let window_enabled = (lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
-                    if window_enabled && self.window_y_triggered && ly > wy {
-                        self.window_line_counter = self.window_line_counter.wrapping_add(1);
-                    }
-
+                    // winYPos is now incremented at window draw-start (see the
+                    // PixelTransfer start_window site), matching Gambatte's
+                    // M3Start::f0 semantics. The old per-line `window_line_counter`
+                    // increment here (every line with ly > wy) is removed; the
+                    // counter is no longer consumed by the fetcher.
                     // Reset window line flag for new scanline
                     self.window_started_this_line = false;
                     
@@ -1784,7 +1785,7 @@ impl Ppu {
                     0
                 };
                 if cadence_even
-                    && let Some(event) = self.fetcher.step(mmio, self.window_line_counter, fetcher_lcdc_state, self.x, pending_discard) {
+                    && let Some(event) = self.fetcher.step(mmio, self.win_y_pos, fetcher_lcdc_state, self.x, pending_discard) {
                         self.record_fetch_debug_event(event, mmio);
                 }
 
@@ -1811,6 +1812,10 @@ impl Ppu {
                         };
                     
                     if should_start_window {
+                        // Window draw-start: Gambatte increments winYPos here
+                        // (M3Start::f0 / plotPixel win_draw_start), once per line
+                        // the window actually begins drawing, not per-line in M2.
+                        self.win_y_pos = self.win_y_pos.wrapping_add(1);
                         // Start window rendering
                         self.fetcher.start_window(self.x);
                         self.window_started_this_line = true;
@@ -1921,6 +1926,7 @@ impl Ppu {
                         self.sprite_fetch_stall = 0;
                         self.pixel_transfer_warmup = 0;
                         self.window_line_counter = 0;
+                        self.win_y_pos = 0xFF;
                         self.window_y_triggered = false;
                         self.window_started_this_line = false;
                         
