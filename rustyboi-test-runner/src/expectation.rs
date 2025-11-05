@@ -26,11 +26,36 @@ impl Mode {
     }
 }
 
+/// Memory region a `.dump` oracle is captured from. The base address is fixed
+/// per region; the length comes from the reference file size.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DumpRegion {
+    /// OAM region starting at 0xFE00 (a `.dump` may cover the full 256 bytes
+    /// 0xFE00..=0xFEFF, not only the 160-byte sprite table).
+    Oam,
+    /// VRAM region starting at 0x8000.
+    Vram,
+}
+
+impl DumpRegion {
+    pub fn base_address(self) -> u16 {
+        match self {
+            Self::Oam => 0xFE00,
+            Self::Vram => 0x8000,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Oracle {
     Hex { marker: &'static str, expected: String },
     Audio { marker: &'static str, audible: bool },
     Png { path: PathBuf },
+    /// Cart SRAM contents dumped by the ROM, compared against a `.bin` reference.
+    SramDump { path: PathBuf },
+    /// A memory region (OAM/VRAM) read back after the test, compared against a
+    /// `.dump` reference. Length is the reference file size.
+    RegionDump { path: PathBuf, region: DumpRegion },
 }
 
 impl Oracle {
@@ -45,6 +70,10 @@ impl Oracle {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "png".to_string()),
+            Self::SramDump { path } | Self::RegionDump { path, .. } => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "dump".to_string()),
         }
     }
 }
@@ -127,7 +156,72 @@ pub fn cases_for_rom(rom_path: &Path, enabled_modes: &HashSet<Mode>) -> Vec<Test
         }
     }
 
+    push_dump_cases(&mut cases, rom_path, enabled_modes, &base);
+
     cases
+}
+
+/// Detect SRAM `.bin` and region `.dump` oracles that accompany a dumper ROM.
+fn push_dump_cases(
+    cases: &mut Vec<TestCase>,
+    rom_path: &Path,
+    enabled_modes: &HashSet<Mode>,
+    base: &str,
+) {
+    // Per-model SRAM dumps: `<base>_dmg08.bin` / `<base>_cgb.bin`.
+    let dmg_bin = PathBuf::from(format!("{base}_dmg08.bin"));
+    if dmg_bin.exists() && enabled_modes.contains(&Mode::Dmg) {
+        cases.push(TestCase {
+            rom_path: rom_path.to_path_buf(),
+            mode: Mode::Dmg,
+            oracle: Oracle::SramDump { path: dmg_bin },
+        });
+    }
+    let cgb_bin = PathBuf::from(format!("{base}_cgb.bin"));
+    if cgb_bin.exists() && enabled_modes.contains(&Mode::Cgb) {
+        cases.push(TestCase {
+            rom_path: rom_path.to_path_buf(),
+            mode: Mode::Cgb,
+            oracle: Oracle::SramDump { path: cgb_bin },
+        });
+    }
+
+    // Region `.dump` oracles. CGB-only single file `<base>.dump`, plus an
+    // optional DMG variant `<base>_dmg08.dump` (e.g. the oambusy dumpers).
+    if let Some(region) = dump_region_for(base) {
+        let cgb_dump = PathBuf::from(format!("{base}.dump"));
+        if cgb_dump.exists() && enabled_modes.contains(&Mode::Cgb) {
+            cases.push(TestCase {
+                rom_path: rom_path.to_path_buf(),
+                mode: Mode::Cgb,
+                oracle: Oracle::RegionDump {
+                    path: cgb_dump,
+                    region,
+                },
+            });
+        }
+        let dmg_dump = PathBuf::from(format!("{base}_dmg08.dump"));
+        if dmg_dump.exists() && enabled_modes.contains(&Mode::Dmg) {
+            cases.push(TestCase {
+                rom_path: rom_path.to_path_buf(),
+                mode: Mode::Dmg,
+                oracle: Oracle::RegionDump {
+                    path: dmg_dump,
+                    region,
+                },
+            });
+        }
+    }
+}
+
+fn dump_region_for(base: &str) -> Option<DumpRegion> {
+    if base.contains("oamdumper") || base.contains("oambusy_dumper") {
+        Some(DumpRegion::Oam)
+    } else if base.contains("vramdumper") {
+        Some(DumpRegion::Vram)
+    } else {
+        None
+    }
 }
 
 fn push_string_case(
@@ -265,5 +359,59 @@ mod tests {
         assert!(is_rom_path(Path::new("a.gbc")));
         assert!(is_rom_path(Path::new("a.sgb")));
         assert!(!is_rom_path(Path::new("a.png")));
+    }
+
+    #[test]
+    fn infers_dump_region_from_filename() {
+        assert_eq!(dump_region_for("foo_oamdumper_1"), Some(DumpRegion::Oam));
+        assert_eq!(
+            dump_region_for("oamdma_src80_oambusy_dumper_1"),
+            Some(DumpRegion::Oam)
+        );
+        assert_eq!(dump_region_for("foo_vramdumper_1"), Some(DumpRegion::Vram));
+        assert_eq!(dump_region_for("foo_outA"), None);
+    }
+
+    #[test]
+    fn detects_sram_and_region_dump_oracles() {
+        let dir = std::env::temp_dir().join(format!("rtk_dump_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Per-model SRAM dumps.
+        std::fs::write(dir.join("vram_dumper_dmg08.bin"), [0u8; 4]).unwrap();
+        std::fs::write(dir.join("vram_dumper_cgb.bin"), [0u8; 4]).unwrap();
+        let cases = cases_for_rom(&dir.join("vram_dumper.gbc"), &all_modes());
+        assert_eq!(cases.len(), 2);
+        let dmg = cases.iter().find(|c| c.mode == Mode::Dmg).unwrap();
+        assert!(matches!(dmg.oracle, Oracle::SramDump { .. }));
+
+        // CGB-only region dump plus a DMG variant.
+        std::fs::write(dir.join("oambusy_dumper_1.dump"), [0u8; 4]).unwrap();
+        std::fs::write(dir.join("oambusy_dumper_1_dmg08.dump"), [0u8; 4]).unwrap();
+        let cases = cases_for_rom(&dir.join("oambusy_dumper_1.gbc"), &all_modes());
+        assert_eq!(cases.len(), 2);
+        assert!(cases.iter().all(|c| matches!(
+            c.oracle,
+            Oracle::RegionDump {
+                region: DumpRegion::Oam,
+                ..
+            }
+        )));
+
+        // CGB-only when only the base .dump exists.
+        std::fs::write(dir.join("vramdumper_1.dump"), [0u8; 4]).unwrap();
+        let cases = cases_for_rom(&dir.join("vramdumper_1.gbc"), &all_modes());
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].mode, Mode::Cgb);
+        assert!(matches!(
+            cases[0].oracle,
+            Oracle::RegionDump {
+                region: DumpRegion::Vram,
+                ..
+            }
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

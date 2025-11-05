@@ -12,7 +12,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 type SharedSamples = Arc<Mutex<Vec<(f32, f32)>>>;
-const MAX_CYCLES_UNTIL_LCD_FRAME: u32 = 70224 * 64;
+const CYCLES_PER_FRAME: u32 = 70224;
+const MAX_CYCLES_UNTIL_LCD_FRAME: u32 = CYCLES_PER_FRAME * 64;
+/// Minimum cycle budget (in frames) for dump oracles, large enough for the
+/// biggest dumper (wram, 32 KiB) plus its post-copy LCD re-enable and LY wait.
+const DUMP_MIN_FRAMES: usize = 64;
 
 #[derive(Debug)]
 pub struct CaseResult {
@@ -89,6 +93,26 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         .unwrap_or(false);
     let mut trace = trace_case.then(|| TimingTrace::new(options.trace_limit, options.trace_ly));
 
+    // Dump oracles read memory back directly and do not need a final LCD frame.
+    // The dumpers turn the LCD off while copying (so no frame completes) and then
+    // spin in a tight idle loop, so the frame-driven path would time out. Drive a
+    // generous fixed cycle budget, large enough for the biggest dumper (wram,
+    // 32 KiB across banks) plus its post-copy LCD re-enable and LY wait, then read
+    // the region back.
+    let dump_oracle = matches!(
+        case.oracle,
+        Oracle::SramDump { .. } | Oracle::RegionDump { .. }
+    );
+    if dump_oracle {
+        let cycle_budget = (options.frames.max(DUMP_MIN_FRAMES) as u64) * (CYCLES_PER_FRAME as u64);
+        let mut cycles_run: u64 = 0;
+        while cycles_run < cycle_budget {
+            let (_breakpoint_hit, cycles) = gb.step_instruction(false);
+            cycles_run += cycles as u64;
+        }
+        return evaluate_dump_oracle(&gb, &case.oracle);
+    }
+
     for frame_index in 0..options.frames {
         let trace_this_frame = trace.is_some()
             && options
@@ -151,7 +175,68 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
                 Ok(())
             }
         }
+        Oracle::SramDump { .. } | Oracle::RegionDump { .. } => {
+            // Handled before the frame loop via the cycle-driven dump path.
+            evaluate_dump_oracle(&gb, &case.oracle)
+        }
     }
+}
+
+/// Read back the dumped memory region and compare it to the reference file.
+fn evaluate_dump_oracle(gb: &GB, oracle: &Oracle) -> Result<(), String> {
+    match oracle {
+        Oracle::SramDump { path } => {
+            let expected = fs::read(path)
+                .map_err(|error| format!("failed to read SRAM dump {}: {error}", path.display()))?;
+            let cartridge = gb
+                .cartridge()
+                .ok_or_else(|| "no cartridge present when reading SRAM dump".to_string())?;
+            let actual = cartridge.save_ram();
+            compare_dump(&format!("SRAM dump {}", path.display()), &expected, actual)
+        }
+        Oracle::RegionDump { path, region } => {
+            let expected = fs::read(path).map_err(|error| {
+                format!("failed to read region dump {}: {error}", path.display())
+            })?;
+            let base = region.base_address();
+            let actual: Vec<u8> = (0..expected.len())
+                .map(|offset| gb.read_memory(base.wrapping_add(offset as u16)))
+                .collect();
+            compare_dump(
+                &format!(
+                    "region dump {} ({:?} @ {:#06X})",
+                    path.display(),
+                    region,
+                    base
+                ),
+                &expected,
+                &actual,
+            )
+        }
+        _ => Err("evaluate_dump_oracle called with non-dump oracle".to_string()),
+    }
+}
+
+/// Compare a captured byte region against a reference dump. Reports the first
+/// differing offset with expected/actual bytes, or a length mismatch.
+fn compare_dump(label: &str, expected: &[u8], actual: &[u8]) -> Result<(), String> {
+    if actual.len() < expected.len() {
+        return Err(format!(
+            "{label}: captured region too small ({} bytes available, {} expected)",
+            actual.len(),
+            expected.len()
+        ));
+    }
+
+    for (offset, (&want, &got)) in expected.iter().zip(actual.iter()).enumerate() {
+        if want != got {
+            return Err(format!(
+                "{label}: first mismatch at offset {offset:#06X}: expected {want:#04X}, got {got:#04X}",
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
