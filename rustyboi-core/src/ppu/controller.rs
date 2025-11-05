@@ -1738,10 +1738,15 @@ impl Ppu {
                         // `cc + 2 < m0Time` lands on the (Gambatte-exact) persisted
                         // mode-3 length. DMG's m0 end sits one cc later than CGB
                         // (the `1 - cgb` term lives in the renderer tick frame, not
-                        // this master-cc anchor), hence +1.
+                        // this master-cc anchor), hence +1. K is added in DOTS then
+                        // shifted by ds; at double speed the access-cc sub-dot phase
+                        // wants its own master-cc bias `KD` (in master cc, not dots).
                         let k = if is_cgb { env_off("RB_M0TIME_K_CGB", 6) } else { env_off("RB_M0TIME_K_DMG", 7) };
-                        self.m0_time_master =
-                            Some((mmio.master_cc() as i64 + ((m3_len as i64 + k) << ds)).max(0) as u64);
+                        let kd = if ds == 1 { env_off("RB_M0TIME_KD", -1) } else { 0 };
+                        self.m0_time_master = Some(
+                            (mmio.master_cc() as i64 + ((m3_len as i64 + k) << ds) + kd).max(0)
+                                as u64,
+                        );
                         self.m3_scheduled_wx = mmio.read(WX);
                         self.m3_scheduled_win = self.window_will_start(mmio, is_cgb);
                     }
