@@ -79,13 +79,18 @@ pub struct SquareWave {
 
     // --- Frequency sweep (Channel 1 only) ---
     #[serde(default)]
-    sweep_enabled: bool,
-    #[serde(default)]
-    sweep_timer: u8,
-    #[serde(default)]
     sweep_shadow_frequency: u16,
     #[serde(default)]
     fs_step: u8,
+
+    // Gambatte cc-driven sweep (channel1.cpp SweepUnit). Absolute-cc event
+    // counter, `neg_` latch, and the cgb flag the nr4Init phase needs.
+    #[serde(default = "disabled")]
+    sweep_counter: u32,
+    #[serde(default)]
+    sweep_neg: bool,
+    #[serde(default)]
+    cgb: bool,
 }
 
 fn disabled() -> u32 {
@@ -124,16 +129,18 @@ impl SquareWave {
             length_enabled: false,
             len_counter: LEN_DISABLED,
             len_cc: 0,
-            sweep_enabled: false,
-            sweep_timer: 0,
             sweep_shadow_frequency: 0,
             fs_step: 0,
+            sweep_counter: COUNTER_DISABLED,
+            sweep_neg: false,
+            cgb: false,
         }
     }
 
     pub fn set_cc(&mut self, cc: u32) {
         self.cc = cc;
     }
+
 
     pub fn set_len_cc(&mut self, cc: u32) {
         self.len_cc = cc;
@@ -382,6 +389,9 @@ impl SquareWave {
     }
 
     pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
+        if self.channel1 {
+            self.cgb = _mmio.is_cgb_features_enabled();
+        }
         if !self.master {
             return;
         }
@@ -392,81 +402,101 @@ impl SquareWave {
         while self.env_counter != COUNTER_DISABLED && self.cc >= self.env_counter {
             self.env_event();
         }
-    }
 
-    pub fn step_frame_sequencer(&mut self, step: u8) {
-        if !self.enabled {
-            return;
-        }
-
-        // Length is now a cc-driven absolute expiry event (see `length_event`),
-        // not clocked here. Only the sweep remains FS-clocked.
-        // Frequency sweep (steps 2, 6) - Channel 1 only.
-        if self.channel1 && (step == 2 || step == 6) {
-            self.step_frequency_sweep();
+        // Frequency sweep event(s) (Channel 1 only) — cc-driven, like Gambatte's
+        // SweepUnit (channel1.cpp). Polled here, not FS-clocked.
+        while self.channel1
+            && self.sweep_counter != COUNTER_DISABLED
+            && self.cc >= self.sweep_counter
+        {
+            self.sweep_event();
         }
     }
 
-    fn step_frequency_sweep(&mut self) {
-        if !self.channel1 || !self.sweep_enabled {
-            return;
-        }
-
-        if self.sweep_timer > 0 {
-            self.sweep_timer -= 1;
-            if self.sweep_timer == 0 {
-                let sweep_period = self.get_sweep_period();
-                if sweep_period > 0 {
-                    self.sweep_timer = sweep_period;
-                    let new_frequency = self.calculate_sweep_frequency();
-                    if new_frequency <= 2047 && self.get_sweep_shift() > 0 {
-                        self.sweep_shadow_frequency = new_frequency;
-                        self.set_freq(new_frequency);
-                        self.update_frequency_registers();
-                        let _ = self.calculate_sweep_frequency();
-                    }
-                }
-            }
-        }
+    pub fn step_frame_sequencer(&mut self, _step: u8) {
+        // Length is a cc-driven absolute expiry event (see `length_event`) and
+        // the frequency sweep is now a cc-driven event polled in `step`, so
+        // nothing is FS-clocked here.
     }
 
-    fn calculate_sweep_frequency(&mut self) -> u16 {
-        let shift = self.get_sweep_shift();
-        let direction = self.get_sweep_direction();
-        let offset = self.sweep_shadow_frequency >> shift;
-        if direction {
-            self.sweep_shadow_frequency.saturating_sub(offset)
+    /// Gambatte `Channel1::SweepUnit::calcFreq`. Uses NR10 directly, latches
+    /// `neg_`, and disables master on an overflow (freq & 2048).
+    fn sweep_calc_freq(&mut self) -> u16 {
+        let nr0 = self.nr10;
+        let shift = (nr0 & 0x07) as u16;
+        let freq = if nr0 & 0x08 != 0 {
+            self.sweep_shadow_frequency.wrapping_sub(self.sweep_shadow_frequency >> shift)
         } else {
-            let new_freq = self.sweep_shadow_frequency + offset;
-            if new_freq > 2047 {
-                self.enabled = false;
-                self.master = false;
+            self.sweep_shadow_frequency.wrapping_add(self.sweep_shadow_frequency >> shift)
+        };
+        if nr0 & 0x08 != 0 {
+            self.sweep_neg = true;
+        }
+        if freq & 2048 != 0 {
+            self.enabled = false;
+            self.master = false;
+        }
+        freq
+    }
+
+    /// Gambatte `Channel1::SweepUnit::event`. Dispatched when `cc >= counter_`.
+    fn sweep_event(&mut self) {
+        let period = ((self.nr10 & 0x70) >> 4) as u32;
+        if period != 0 {
+            let freq = self.sweep_calc_freq();
+            if freq & 2048 == 0 && (self.nr10 & 0x07) != 0 {
+                self.sweep_shadow_frequency = freq;
+                self.set_freq_at(freq, self.sweep_counter);
+                self.sweep_calc_freq();
             }
-            new_freq
+            self.sweep_counter = self.sweep_counter.wrapping_add(period << 14);
+        } else {
+            self.sweep_counter = self.sweep_counter.wrapping_add(8u32 << 14);
         }
     }
 
-    fn update_frequency_registers(&mut self) {
+    /// Gambatte `Channel1::SweepUnit::nr0Change`: a neg→non-neg transition after
+    /// a negative calc disables master.
+    fn sweep_nr0_change(&mut self, new_nr0: u8) {
+        if self.sweep_neg && (new_nr0 & 0x08) == 0 {
+            self.enabled = false;
+            self.master = false;
+        }
+    }
+
+    /// Gambatte `Channel1::SweepUnit::nr4Init`. Schedules the absolute-cc sweep
+    /// event counter at the trigger cc.
+    fn sweep_nr4_init(&mut self) {
+        self.sweep_neg = false;
+        self.sweep_shadow_frequency = self.freq();
+        let period = ((self.nr10 & 0x70) >> 4) as u32;
+        let rsh = (self.nr10 & 0x07) as u32;
+        if period | rsh != 0 {
+            let cgb2 = if self.cgb { 2 } else { 0 };
+            self.sweep_counter = ((((self.cc.wrapping_add(2).wrapping_add(cgb2)) >> 14)
+                + if period != 0 { period } else { 8 })
+                << 14)
+                .wrapping_add(2);
+        } else {
+            self.sweep_counter = COUNTER_DISABLED;
+        }
+        if rsh != 0 {
+            self.sweep_calc_freq();
+        }
+    }
+
+    /// Like `set_freq`, but advances the duty position to a specified cc (the
+    /// sweep event's `counter_`) rather than the live `cc` (Gambatte calls
+    /// `dutyUnit_.setFreq(freq, counter_)`).
+    fn set_freq_at(&mut self, new_freq: u16, at_cc: u32) {
+        let saved = self.cc;
+        self.cc = at_cc;
+        self.update_pos();
+        self.cc = saved;
+        self.period = to_period(new_freq);
         // Reflect the swept frequency back into the period registers.
-        if self.channel1 {
-            self.nr13 = (self.sweep_shadow_frequency & 0xFF) as u8;
-            self.nr14 = (self.nr14 & 0xF8) | ((self.sweep_shadow_frequency >> 8) & 0x07) as u8;
-        } else {
-            self.nr23 = (self.sweep_shadow_frequency & 0xFF) as u8;
-            self.nr24 = (self.nr24 & 0xF8) | ((self.sweep_shadow_frequency >> 8) & 0x07) as u8;
-        }
-    }
-
-    fn get_sweep_period(&self) -> u8 {
-        (self.nr10 >> 4) & 0x07
-    }
-
-    fn get_sweep_direction(&self) -> bool {
-        (self.nr10 >> 3) & 0x01 != 0
-    }
-
-    fn get_sweep_shift(&self) -> u8 {
-        self.nr10 & 0x07
+        self.nr13 = (new_freq & 0xFF) as u8;
+        self.nr14 = (self.nr14 & 0xF8) | ((new_freq >> 8) & 0x07) as u8;
     }
 
     // --- NRx4 / trigger ---
@@ -553,17 +583,9 @@ impl SquareWave {
             .wrapping_add(self.period)
             .wrapping_add(4 - 2 * m);
 
-        // Frequency sweep (Channel 1 only).
+        // Frequency sweep (Channel 1 only) — Gambatte cc-driven SweepUnit.
         if self.channel1 {
-            self.sweep_shadow_frequency = self.freq();
-            self.sweep_timer = self.get_sweep_period();
-            if self.sweep_timer == 0 {
-                self.sweep_timer = 8;
-            }
-            self.sweep_enabled = self.get_sweep_period() > 0 || self.get_sweep_shift() > 0;
-            if self.get_sweep_shift() > 0 {
-                let _ = self.calculate_sweep_frequency();
-            }
+            self.sweep_nr4_init();
         }
 
         if dac_off {
@@ -626,7 +648,10 @@ impl Addressable for SquareWave {
             NR10..=NR14 => {
                 if self.channel1 {
                     match addr {
-                        NR10 => self.nr10 = value,
+                        NR10 => {
+                            self.sweep_nr0_change(value);
+                            self.nr10 = value;
+                        }
                         NR11 => self.write_nrx1(value),
                         NR12 => self.write_nrx2(value),
                         NR13 => {
