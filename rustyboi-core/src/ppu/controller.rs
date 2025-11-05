@@ -638,7 +638,13 @@ impl Ppu {
             if !enable_off && only_win_toggle && self.window_started_this_line && clean {
                 if let (Some(m0t), Some(ws)) = (self.m0_time_master, self.win_start_dot) {
                     let dsu = ds as u32;
-                    let lock = ws + WIN_M3_PENALTY as u128;
+                    // Penalty-lock dot past win_start: WIN_M3_PENALTY at single
+                    // speed; two dots earlier at double speed (the sub-dot
+                    // window-fetch phase reaches the lock sooner relative to the
+                    // dot-granular `ticks`). Swept against the late_disable DS
+                    // straddle pairs.
+                    let lock_dots = WIN_M3_PENALTY as u128 - if ds { env_off("RB_WIN_LOCK_DS", 2) as u128 } else { 0 };
+                    let lock = ws + lock_dots;
                     if (self.ticks as u128) < lock {
                         let refund = (WIN_M3_PENALTY as i64) << dsu;
                         self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
