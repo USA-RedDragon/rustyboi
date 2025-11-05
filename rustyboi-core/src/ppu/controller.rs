@@ -262,6 +262,12 @@ pub struct Ppu {
     win_draw_started_at_x0: bool,
     window_y_triggered: bool,   // Whether WY condition was met this frame
     window_started_this_line: bool, // Whether window started rendering on current scanline
+    // Dot (within-line `ticks`) at which the window began drawing this line.
+    // The StartWindowDraw mode-3 penalty becomes non-refundable once the
+    // pipeline advances WIN_M3_PENALTY dots past this; used by the late_disable
+    // read-at-cc recompute to decide whether a mid-M3 window-disable keeps the
+    // window-inclusive m0Time or reverts to the no-window length.
+    win_start_dot: Option<u128>,
     
     // STAT interrupt state tracking
     previous_stat_interrupt_line: bool, // Previous state of STAT interrupt line for edge detection
@@ -455,6 +461,7 @@ impl Ppu {
             win_draw_start: false,
             win_draw_started_at_x0: false,
             window_y_triggered: false,
+            win_start_dot: None,
             window_started_this_line: false,
             previous_stat_interrupt_line: false,
             mode2_irq_pretriggered_for_next_line: false,
@@ -513,7 +520,7 @@ impl Ppu {
     }
 
     pub fn sync_lcdc_from_mmio(&mut self, mmio: &mmio::Mmio) {
-        self.set_lcdc_visible(mmio.read(LCD_CONTROL), mmio.is_cgb_features_enabled());
+        self.set_lcdc_visible(mmio.read(LCD_CONTROL), mmio.is_cgb_features_enabled(), mmio.is_double_speed_mode());
         self.pending_lcdc_events.clear();
     }
 
@@ -539,7 +546,7 @@ impl Ppu {
             });
         } else {
             self.pending_lcdc_events.clear();
-            self.set_lcdc_visible(value, mmio.is_cgb_features_enabled());
+            self.set_lcdc_visible(value, mmio.is_cgb_features_enabled(), mmio.is_double_speed_mode());
         }
     }
 
@@ -556,10 +563,10 @@ impl Ppu {
                     PendingLcdcEventKind::TileDataSelectOnly => {
                         let tile_data_select = LCDCFlags::BGWindowTileDataSelect as u8;
                         let value = (event.base_value & !tile_data_select) | (event.value & tile_data_select);
-                        self.set_lcdc_visible(value, mmio.is_cgb_features_enabled());
+                        self.set_lcdc_visible(value, mmio.is_cgb_features_enabled(), mmio.is_double_speed_mode());
                     }
                     PendingLcdcEventKind::Full => {
-                        self.set_lcdc_visible(event.value, mmio.is_cgb_features_enabled());
+                        self.set_lcdc_visible(event.value, mmio.is_cgb_features_enabled(), mmio.is_double_speed_mode());
                     }
                 }
             } else {
@@ -575,7 +582,7 @@ impl Ppu {
         }
     }
 
-    fn set_lcdc_visible(&mut self, value: u8, cgb_features_enabled: bool) {
+    fn set_lcdc_visible(&mut self, value: u8, cgb_features_enabled: bool, ds: bool) {
         let old_lcdc = self.lcdc;
         let tile_data_select = LCDCFlags::BGWindowTileDataSelect as u8;
         let display_enable = LCDCFlags::DisplayEnable as u8;
@@ -596,8 +603,53 @@ impl Ppu {
             && ((old_lcdc & win_bit) != (value & win_bit)
                 || (old_lcdc & spr_bits) != (value & spr_bits))
         {
+            if std::env::var("RB_DBG_WIN").is_ok() {
+                eprintln!("[INVAL-LCDC] ly={} ticks={} old={:02x} new={:02x} m0t={:?} wstart={}",
+                    self.internal_ly_val, self.ticks, old_lcdc, value, self.m0_time_master,
+                    self.window_started_this_line);
+            }
             self.scheduled_mode0_dot = None;
-            self.m0_time_master = None;
+            // A mid-mode-3 window-DISABLE toggle (not sprite) interacts with the
+            // StartWindowDraw mode-3 penalty captured at M3 arm. Gambatte locks
+            // the penalty once the window has drawn for WIN_M3_PENALTY dots
+            // (StartWindowDraw::inc spans those dots); a disable BEFORE that lock
+            // refunds the whole window penalty, a disable after keeps it. The
+            // read-at-cc m0Time captured at arm already includes the penalty, so:
+            //   - disable >= win_start_dot + WIN_M3_PENALTY: keep m0Time as-is.
+            //   - disable <  win_start_dot + WIN_M3_PENALTY: subtract the penalty
+            //     (refund) so the FF41 read resolves the no-window boundary.
+            //   - window never started: null (fall back; live no-window path).
+            // The live pipeline (scheduled_mode0_dot) is invalidated above either
+            // way; only the read-at-cc m0Time is adjusted. Sprite-bit toggles
+            // null m0Time (the sprite-fetch penalty genuinely changes).
+            let enable_off = std::env::var("RB_WIN_KEEP_M0T").map(|v| v == "0").unwrap_or(false);
+            let only_win_toggle = (old_lcdc & spr_bits) == (value & spr_bits)
+                && (old_lcdc & win_bit) != (value & win_bit)
+                && (value & win_bit) == 0; // disable
+            // Scoped to the clean sub-case where the StartWindowDraw refund/keep
+            // boundary is exactly WIN_M3_PENALTY past win_start_dot: CGB, SCX
+            // phase 0, no sprites on the line. Other phases (the scx-prefix
+            // shifts the boundary) and DMG (different M3-start phase) keep the
+            // baseline fall-back (the live persisted register already resolves
+            // their _0/_2 reads; only the straddle _1 is at stake there).
+            let clean = cgb_features_enabled
+                && (self.m3_arm_scx & 7) == 0
+                && self.sprites_on_line.is_empty();
+            if !enable_off && only_win_toggle && self.window_started_this_line && clean {
+                if let (Some(m0t), Some(ws)) = (self.m0_time_master, self.win_start_dot) {
+                    let dsu = ds as u32;
+                    let lock = ws + WIN_M3_PENALTY as u128;
+                    if (self.ticks as u128) < lock {
+                        let refund = (WIN_M3_PENALTY as i64) << dsu;
+                        self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
+                    }
+                    // else: keep m0t unchanged (penalty locked).
+                } else {
+                    self.m0_time_master = None;
+                }
+            } else {
+                self.m0_time_master = None;
+            }
         }
         self.lcdc = value;
     }
@@ -1587,7 +1639,8 @@ impl Ppu {
                     // counter is no longer consumed by the fetcher.
                     // Reset window line flag for new scanline
                     self.window_started_this_line = false;
-                    
+                    self.win_start_dot = None;
+
                     // Initialize OAM search state
                     self.sprites_on_line.clear();
                     self.current_oam_sprite_index = 0;
@@ -1676,6 +1729,7 @@ impl Ppu {
                             let start_tile = ((8 + scx) / 8) as u8;
                             self.fetcher.start_window_at_tile(0, start_tile);
                             self.window_started_this_line = true;
+                            self.win_start_dot = Some(self.ticks);
                         } else {
                             self.win_draw_started_at_x0 = false;
                         }
@@ -1749,6 +1803,11 @@ impl Ppu {
                         );
                         self.m3_scheduled_wx = mmio.read(WX);
                         self.m3_scheduled_win = self.window_will_start(mmio, is_cgb);
+                        if std::env::var("RB_DBG_WIN").is_ok() {
+                            eprintln!("[ARM] ly={} ticks={} m3len={} win={} wx={} scx={} m0t={:?} mcc={}",
+                                self.internal_ly_val, self.ticks, m3_len, self.m3_scheduled_win,
+                                mmio.read(WX), mmio.read(SCX)&7, self.m0_time_master, mmio.master_cc());
+                        }
                     }
                     // Arm the mode-0 (HBlank) STAT IRQ event at the predicted
                     // mode-0 start, in absolute clock terms. Gambatte schedules
@@ -1767,6 +1826,11 @@ impl Ppu {
                         || self.window_will_start(mmio, mmio.is_cgb_features_enabled())
                             != self.m3_scheduled_win)
                 {
+                    if std::env::var("RB_DBG_WIN").is_ok() {
+                        eprintln!("[INVAL-WX] ly={} ticks={} wx={} sched_wx={} win={} sched_win={}",
+                            self.internal_ly_val, self.ticks, mmio.read(WX), self.m3_scheduled_wx,
+                            self.window_will_start(mmio, mmio.is_cgb_features_enabled()), self.m3_scheduled_win);
+                    }
                     self.scheduled_mode0_dot = None;
                     self.m0_time_master = None;
                 }
@@ -1913,6 +1977,13 @@ impl Ppu {
                         // Start window rendering
                         self.fetcher.start_window(self.x);
                         self.window_started_this_line = true;
+                        if self.win_start_dot.is_none() {
+                            self.win_start_dot = Some(self.ticks);
+                        }
+                        if std::env::var("RB_DBG_WIN").is_ok() {
+                            eprintln!("[WINSTART] ly={} ticks={} x={} wx={}",
+                                self.internal_ly_val, self.ticks, self.x, wx);
+                        }
                         break 'label; // Skip this cycle to let window fetching start
                     }
                 }
@@ -2234,6 +2305,10 @@ impl Ppu {
         // elsewhere).
         if self.state != State::PixelTransfer {
             return None;
+        }
+        if std::env::var("RB_DBG_WIN").is_ok() {
+            eprintln!("[READ] ly={} ticks={} acc={} m0t={:?} win_started={}",
+                self.internal_ly_val, self.ticks, access_cc, self.m0_time_master, self.window_started_this_line);
         }
         let m0t = self.m0_time_master? as i64;
         // mode 3 iff access_cc + 2 < m0Time, else mode 0.
