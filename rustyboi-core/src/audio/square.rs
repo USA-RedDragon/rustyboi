@@ -150,6 +150,10 @@ impl SquareWave {
         self.len_cc >= self.len_counter
     }
 
+    pub fn len_dbg(&self) -> (u32, u32, bool) {
+        (self.len_cc, self.len_counter, self.enabled)
+    }
+
     /// Post-boot channel-1 mid-tone state (Gambatte `setPostBiosState`). The boot
     /// ROM leaves ch1 playing the startup tone: master/enabled with duty pos/phase
     /// mid-cycle. `pos_offset` is Gambatte's duty.nextPosUpdate offset (in 2 MHz
@@ -379,6 +383,12 @@ impl SquareWave {
 
     /// Gambatte `LengthCounter::event`: expiry disables the channel.
     pub fn length_event(&mut self) {
+        if !self.channel1 && std::env::var("RB_NR52_TRACE").is_ok() {
+            eprintln!(
+                "CH2 length_event len_cc={} len_counter={} (boundary)",
+                self.len_cc, self.len_counter
+            );
+        }
         self.len_counter = LEN_DISABLED;
         self.length_counter = 0;
         self.enabled = false;
@@ -533,6 +543,12 @@ impl SquareWave {
         } else {
             LEN_DISABLED
         };
+        if !self.channel1 && std::env::var("RB_NR52_TRACE").is_ok() {
+            eprintln!(
+                "CH2 nr4_change old={:02x} new={:02x} len_cc={} length_counter={} -> len_counter={}",
+                old_nr4, new_nr4, self.len_cc, self.length_counter, self.len_counter
+            );
+        }
     }
 
     fn write_nrx4(&mut self, value: u8) {
