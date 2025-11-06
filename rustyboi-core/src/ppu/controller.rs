@@ -1856,18 +1856,19 @@ impl Ppu {
                     self.scheduled_mode0_dot = None;
                     self.m0_time_master = None;
                 }
-                // late_wx: a mid-mode-3 WX write AFTER the window has started but
-                // BEFORE the StartWindowDraw penalty locks moves the window out
-                // of range (WX no longer triggers), refunding the penalty in the
-                // read-at-cc m0Time. Mirror the late_disable refund/keep rule;
-                // touch only m0Time (the live pipeline is unaffected here - the
-                // window already started drawing). Scoped CGB / SCX phase 0 / no
-                // sprites where the boundary is exactly WIN_M3_PENALTY.
+                // late_wx: a mid-mode-3 WX write AFTER the window has started,
+                // moving WX out of range, cancels the remaining window draw and
+                // refunds the unaccrued StartWindowDraw penalty from the
+                // read-at-cc m0Time. Graduated like late_disable (one accrued dot
+                // per drawn window dot, capped at WIN_M3_PENALTY); a nonzero SCX
+                // fine-scroll prefix advances the accrual one dot. WX<7 windows
+                // (immediate x==0 start) lock at win_start (no refund once
+                // started). CGB single-speed / no sprites; live pipeline
+                // untouched; applied once per line.
                 if self.m0_time_master.is_some()
                     && self.window_started_this_line
                     && mmio.is_cgb_features_enabled()
                     && !mmio.is_double_speed_mode()
-                    && (self.m3_arm_scx & 7) == 0
                     && self.sprites_on_line.is_empty()
                     && mmio.read(WX) != self.m3_scheduled_wx
                     && !self.win_wx_penalty_resolved
@@ -1875,29 +1876,18 @@ impl Ppu {
                 {
                     let wx_now = mmio.read(WX) as i32;
                     let wx_in_range = (0..=166).contains(&wx_now);
-                    if let Some(ws) = self.win_start_dot {
-                        // late_wx penalty-lock offset past win_start. A WX>=7
-                        // window (fine-scroll x+7==wx start) locks ~2 dots in; a
-                        // WX<7 window (immediate x==0 start) locks at win_start.
-                        // Calibrated against the late_wx _1/_2 straddle pairs.
-                        let lock_off = if (self.m3_scheduled_wx as i32) < 7 {
-                            env_off("RB_WIN_LATEWX_LOCK_LT7", 1) as u128
+                    if let (Some(ws), Some(m0t)) = (self.win_start_dot, self.m0_time_master)
+                        && !wx_in_range
+                    {
+                        if (self.m3_scheduled_wx as i32) < 7 {
+                            // Immediate-start window: penalty already locked.
+                            self.win_wx_penalty_resolved = true;
                         } else {
-                            env_off("RB_WIN_LATEWX_LOCK", 2) as u128
-                        };
-                        let lock = ws + lock_off;
-                        // Only a WX that leaves the window-start range cancels the
-                        // remaining draw; an in-range WX change does not refund.
-                        if std::env::var("RB_DBG_WIN").is_ok() {
-                            eprintln!("[LATEWX] ly={} ticks={} wx_now={} ws={} lock={} refund={}",
-                                self.internal_ly_val, self.ticks, wx_now, ws, lock,
-                                !wx_in_range && (self.ticks as u128) < lock);
-                        }
-                        if !wx_in_range && (self.ticks as u128) < lock {
-                            if let Some(m0t) = self.m0_time_master {
-                                self.m0_time_master =
-                                    Some((m0t as i64 - WIN_M3_PENALTY as i64).max(0) as u64);
-                            }
+                            let scx_bias = if (self.m3_arm_scx & 7) != 0 { 1 } else { 0 };
+                            let drawn = (self.ticks as i64) - ws as i64 + scx_bias;
+                            let accrued = drawn.clamp(0, WIN_M3_PENALTY as i64);
+                            let refund = WIN_M3_PENALTY as i64 - accrued;
+                            self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
                             self.win_wx_penalty_resolved = true;
                         }
                     }
