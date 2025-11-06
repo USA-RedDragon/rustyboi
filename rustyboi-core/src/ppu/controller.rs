@@ -636,9 +636,15 @@ impl Ppu {
             // shifts the boundary) and DMG (different M3-start phase) keep the
             // baseline fall-back (the live persisted register already resolves
             // their _0/_2 reads; only the straddle _1 is at stake there).
+            // The StartWindowDraw lock dot relative to win_start is independent
+            // of SCX phase for the standard WX=7 windows, and independent of WX
+            // at SCX phase 0. The COMBINED WX-offset + nonzero-SCX variants
+            // (late_disable_early_scxNN_wxNN) shift the lock further and keep the
+            // live fall-back. Allow (WX==7) OR (SCX phase 0).
+            let win_wx = self.m3_scheduled_wx as i32;
             let clean = cgb_features_enabled
-                && (self.m3_arm_scx & 7) == 0
-                && self.sprites_on_line.is_empty();
+                && self.sprites_on_line.is_empty()
+                && (win_wx == 7 || (self.m3_arm_scx & 7) == 0);
             if !enable_off && only_win_toggle && self.window_started_this_line && clean {
                 if let (Some(m0t), Some(ws)) = (self.m0_time_master, self.win_start_dot) {
                     let dsu = ds as u32;
