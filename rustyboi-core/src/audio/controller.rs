@@ -63,6 +63,16 @@ pub struct Audio {
     // cc-driven length counter needs across the power-on fold.
     #[serde(default)]
     cc: u32,
+    // Length-subsystem clock, mirroring Gambatte's `cycleCounter_` at the TRUE
+    // `generateSamples` rate `(cpuCc - lastUpdate) >> (1 + ds)`. The duty/envelope
+    // `cc` above advances at `>>1` in both speeds (its tuning is anchored there
+    // via the half-rate `step_audio` gating); but the length-expiry boundary
+    // `((cc>>13)+len)<<13` must advance at HALF that rate at double speed to land
+    // on Gambatte's boundary (the NR52 ch2 a/b straddle). This parallel clock
+    // carries the Gambatte length rate, folded identically to `cc` on DIV-reset /
+    // PSG::reset / speedChange.
+    #[serde(default)]
+    len_cc: u32,
     // Absolute CPU cc (Gambatte `lastUpdate_`) at the last clock advance; its
     // bit-0 parity matters for the duty/divReset/speedchange folds.
     #[serde(default)]
@@ -88,6 +98,7 @@ impl Audio {
             nr50: 0,
             nr51: 0,
             nr52: 0,
+            len_cc: 0,
             frame_sequencer_step: 0,
             frame_sequencer_timer: 8192,
             audio_enabled: false,
@@ -117,6 +128,7 @@ impl Audio {
             // Anchor `cc` so `abs_cc >> 1` reproduces the post-boot duty phase
             // base the channels were tuned against (the old `ic >> 1`).
             self.cc = ((abs_cc >> 1) as u32) & (Self::CC_MAX - 1);
+            self.len_cc = self.cc;
             self.last_update = abs_cc;
             self.last_div_resets = div_resets;
             self.clock_anchored = true;
@@ -150,7 +162,7 @@ impl Audio {
     /// Gambatte `PSG::generateSamples`: convert CPU cycles since `last_update` to
     /// 2 MHz APU cycles and advance `cc`. We don't buffer audio here (the live
     /// mixer is sampled elsewhere), so this only moves the clock.
-    fn advance_to(&mut self, abs_cc: u64, _ds: bool) {
+    fn advance_to(&mut self, abs_cc: u64, ds: bool) {
         // rustyboi gates `step_audio` to half-rate in double speed, so the timer
         // divider (`abs_cc`) already advances at the physical APU rate that the
         // duty/envelope tuning was anchored to: shift by 1 in both speeds, i.e.
@@ -164,8 +176,15 @@ impl Audio {
             return;
         }
         let cycles = (abs_cc >> 1) - (self.last_update >> 1);
+        // Length clock advances at Gambatte's `generateSamples` rate
+        // `(cpuCc - lastUpdate) >> (1 + ds)` — HALF of `cc`'s `>>1` rate at double
+        // speed. Compute from absolute floored boundaries (like `cc`) so the
+        // floored phase aligns to absolute parity across calls.
+        let shift = 1 + ds as u32;
+        let len_cycles = (abs_cc >> shift) - (self.last_update >> shift);
         self.last_update = abs_cc;
         self.cc = ((self.cc as u64 + cycles) % Self::CC_MAX as u64) as u32;
+        self.len_cc = ((self.len_cc as u64 + len_cycles) % Self::CC_MAX as u64) as u32;
     }
 
     /// Gambatte `PSG::divReset`: re-fold `cycleCounter_` so the DIV-relative phase
@@ -184,6 +203,13 @@ impl Audio {
         self.channel1.reset_cc(delta);
         self.channel2.reset_cc(delta);
         self.channel3.reset_cc(delta);
+        // Fold the length clock with the same DIV-reset transform (it preserves
+        // the `cc>>13` length boundaries the channels' `len_counter` are pinned to).
+        let lcc = self.len_cc.wrapping_add(div_offset);
+        self.len_cc = (lcc & 0xFFFF_F000)
+            .wrapping_add(2 * (lcc & 0x800))
+            .wrapping_sub(div_offset)
+            % Self::CC_MAX;
     }
 
     // APU-cc offset applied to the length subsystem only. rustyboi's duty/
@@ -199,7 +225,7 @@ impl Audio {
         self.channel2.set_cc(cc);
         self.channel3.set_cc(cc);
         self.channel4.set_cc(cc);
-        let lcc = cc.wrapping_add(Self::LEN_CC_OFF);
+        let lcc = self.len_cc.wrapping_add(Self::LEN_CC_OFF);
         self.channel1.set_len_cc(lcc);
         self.channel2.set_len_cc(lcc);
         self.channel3.set_len_cc(lcc);
@@ -260,6 +286,13 @@ impl Audio {
             .wrapping_add(2 * (!(cc.wrapping_add(1).wrapping_add(not_ds)) & 0x800))
             % Self::CC_MAX;
         self.cc = folded;
+        // Gambatte's `PSG::reset` folds `cycleCounter_` (the length clock) with
+        // this same formula; apply it to `len_cc` so the length-expiry boundary is
+        // re-anchored exactly like Gambatte after the NR52-enable.
+        let lcc = self.len_cc.wrapping_add(div_offset);
+        self.len_cc = (lcc & 0xFFF)
+            .wrapping_add(2 * (!(lcc.wrapping_add(1).wrapping_add(not_ds)) & 0x800))
+            % Self::CC_MAX;
         // Gambatte adjusts `lastUpdate_ = ((lastUpdate_+3)&-4) - !ds` here to set
         // the sub-cycle parity for subsequent generateSamples/divReset shifts.
         // rustyboi's `advance_to` re-derives whole APU cycles via `floor(abs/2)`
@@ -307,7 +340,22 @@ impl Audio {
             self.channel1.reset_cc(delta);
             self.channel2.reset_cc(delta);
             self.channel3.reset_cc(delta);
+            // Gambatte's `speedChange` folds `cycleCounter_` (the length clock);
+            // apply the same single->double correction to `len_cc`.
+            let lc = self.len_cc;
+            let lc_div = lc & 0xFFF;
+            self.len_cc = lc
+                .wrapping_sub(lc_div / 2)
+                .wrapping_sub((self.last_update % 2) as u32)
+                % Self::CC_MAX;
             self.push_cc();
+            if std::env::var("RB_NR52_TRACE").is_ok() {
+                let (lc, lcnt, en) = self.channel2.len_dbg();
+                eprintln!(
+                    "SPEEDCHG old_ds={} cc_before={} div_cycles={} folded={} delta={} | ch2 len_cc={} len_counter={} en={}",
+                    old_ds, cc, div_cycles, folded, delta, lc, lcnt, en
+                );
+            }
             self.fire_length_events(self.cc);
         }
     }
@@ -336,16 +384,24 @@ impl Audio {
         if !self.clock_anchored {
             return;
         }
-        let delta = (read_abs_cc >> 1).wrapping_sub(self.last_update >> 1) as u32;
-        let lcc = self.cc.wrapping_add(delta).wrapping_add(Self::LEN_CC_OFF);
+        let shift = 1 + self.cached_ds as u32;
+        let delta = (read_abs_cc >> shift).wrapping_sub(self.last_update >> shift) as u32;
+        let lcc = self.len_cc.wrapping_add(delta).wrapping_add(Self::LEN_CC_OFF);
         self.channel1.set_len_cc(lcc);
         self.channel2.set_len_cc(lcc);
         self.channel3.set_len_cc(lcc);
         self.channel4.set_len_cc(lcc);
+        if std::env::var("RB_NR52_TRACE").is_ok() {
+            let (lc, lcnt, en) = self.channel2.len_dbg();
+            eprintln!(
+                "NR52rd read_abs_cc={} last_update={} len_cc={} lcc={} ch2 len_cc={} len_counter={} enabled={} expired={}",
+                read_abs_cc, self.last_update, self.len_cc, lcc, lc, lcnt, en, lc >= lcnt
+            );
+        }
         self.fire_length_events(lcc);
         // Restore the steady-state length cc so the next per-dot `push_cc`
-        // (which uses the un-overlaid `self.cc`) doesn't see a stale ahead value.
-        let base = self.cc.wrapping_add(Self::LEN_CC_OFF);
+        // (which uses the un-overlaid `len_cc`) doesn't see a stale ahead value.
+        let base = self.len_cc.wrapping_add(Self::LEN_CC_OFF);
         self.channel1.set_len_cc(base);
         self.channel2.set_len_cc(base);
         self.channel3.set_len_cc(base);
@@ -366,8 +422,9 @@ impl Audio {
         if !self.clock_anchored {
             return;
         }
-        let delta = (write_abs_cc >> 1).wrapping_sub(self.last_update >> 1) as u32;
-        let lcc = self.cc.wrapping_add(delta).wrapping_add(Self::LEN_CC_OFF);
+        let shift = 1 + self.cached_ds as u32;
+        let delta = (write_abs_cc >> shift).wrapping_sub(self.last_update >> shift) as u32;
+        let lcc = self.len_cc.wrapping_add(delta).wrapping_add(Self::LEN_CC_OFF);
         self.channel1.set_len_cc(lcc);
         self.channel2.set_len_cc(lcc);
         self.channel3.set_len_cc(lcc);
@@ -380,7 +437,7 @@ impl Audio {
         if !self.clock_anchored {
             return;
         }
-        let base = self.cc.wrapping_add(Self::LEN_CC_OFF);
+        let base = self.len_cc.wrapping_add(Self::LEN_CC_OFF);
         self.channel1.set_len_cc(base);
         self.channel2.set_len_cc(base);
         self.channel3.set_len_cc(base);
@@ -613,6 +670,7 @@ impl Addressable for Audio {
                     // The clock continuity is what lets the next enable's
                     // `PSG::reset` fold from the correct large anchor.
                     let cc = self.cc;
+                    let len_cc = self.len_cc;
                     let last_update = self.last_update;
                     let last_div_resets = self.last_div_resets;
                     let clock_anchored = self.clock_anchored;
@@ -621,6 +679,7 @@ impl Addressable for Audio {
                     let wave_ram = self.channel3.wave_ram();
                     *self = Audio::new();
                     self.cc = cc;
+                    self.len_cc = len_cc;
                     self.last_update = last_update;
                     self.last_div_resets = last_div_resets;
                     self.clock_anchored = clock_anchored;
