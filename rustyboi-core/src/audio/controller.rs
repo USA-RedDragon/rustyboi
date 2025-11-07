@@ -349,13 +349,6 @@ impl Audio {
                 .wrapping_sub((self.last_update % 2) as u32)
                 % Self::CC_MAX;
             self.push_cc();
-            if std::env::var("RB_NR52_TRACE").is_ok() {
-                let (lc, lcnt, en) = self.channel2.len_dbg();
-                eprintln!(
-                    "SPEEDCHG old_ds={} cc_before={} div_cycles={} folded={} delta={} | ch2 len_cc={} len_counter={} en={}",
-                    old_ds, cc, div_cycles, folded, delta, lc, lcnt, en
-                );
-            }
             self.fire_length_events(self.cc);
         }
     }
@@ -385,19 +378,17 @@ impl Audio {
             return;
         }
         let shift = 1 + self.cached_ds as u32;
-        let delta = (read_abs_cc >> shift).wrapping_sub(self.last_update >> shift) as u32;
+        // Gambatte `generateSamples` advances by `(cpuCc - lastUpdate) >> (1+ds)`
+        // — the difference is taken BEFORE the shift. Flooring `read_abs_cc` and
+        // `last_update` independently (each `>>shift`) over-counts by one length-cc
+        // when they straddle a `>>shift` boundary, pushing the read one cc past the
+        // expiry boundary (the ch2 nr52 `_1a` off-by-one). Match Gambatte exactly.
+        let delta = (read_abs_cc.wrapping_sub(self.last_update) >> shift) as u32;
         let lcc = self.len_cc.wrapping_add(delta).wrapping_add(Self::LEN_CC_OFF);
         self.channel1.set_len_cc(lcc);
         self.channel2.set_len_cc(lcc);
         self.channel3.set_len_cc(lcc);
         self.channel4.set_len_cc(lcc);
-        if std::env::var("RB_NR52_TRACE").is_ok() {
-            let (lc, lcnt, en) = self.channel2.len_dbg();
-            eprintln!(
-                "NR52rd read_abs_cc={} last_update={} len_cc={} lcc={} ch2 len_cc={} len_counter={} enabled={} expired={}",
-                read_abs_cc, self.last_update, self.len_cc, lcc, lc, lcnt, en, lc >= lcnt
-            );
-        }
         self.fire_length_events(lcc);
         // Restore the steady-state length cc so the next per-dot `push_cc`
         // (which uses the un-overlaid `len_cc`) doesn't see a stale ahead value.
