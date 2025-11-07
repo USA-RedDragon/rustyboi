@@ -630,7 +630,7 @@ impl Mmio {
     ///     mirror / OAM / IO / HRAM) return 0xFF (open bus).
     ///   - Destination wraps within the currently selected VRAM bank
     ///     (modulo 0x2000), written at 0x8000 | (dst & 0x1FFF).
-    fn copy_dma_byte(&mut self, src: u16, dst: u16) {
+    fn copy_dma_byte(&mut self, src: u16, dst: u16) -> u8 {
         // Bypass DMA-active gating while we drive the bus read internally:
         // GDMA / HDMA are separate transfer engines from OAM DMA.
         let saved_dma_active = self.dma_active;
@@ -650,6 +650,7 @@ impl Mmio {
         }
 
         self.dma_active = saved_dma_active;
+        byte
     }
 
     /// Execute a CGB General-Purpose DMA (GDMA) transfer synchronously.
@@ -673,10 +674,47 @@ impl Mmio {
             length
         };
 
+        let ds = self.is_double_speed_mode();
+        let per_byte_cc: i64 = if ds { 4 } else { 2 };
+
+        // OAM-DMA interleave (Gambatte `Memory::dma`). The OAM-DMA engine keeps
+        // advancing one M-cycle (4 cc) per `lOam += 4` step while the GDMA copies
+        // bytes. The bus ran one `tick_m` (step_dma) before resolving this FF55
+        // write, leaving rustyboi's `dma_pos` one M-cycle BEHIND Gambatte's
+        // `oamDmaPos_` at the kick instant. Catch up by one M-cycle (advance the
+        // OAM-DMA position without a conflict write) so the gate below fires on
+        // the same boundaries Gambatte does.
+        let interleave = self.dma_active;
+        if interleave {
+            self.dma_advance_one_mcycle();
+        }
+        // `lOam` mirrors Gambatte's relative `lastOamDmaUpdate_`: it starts at
+        // `-dma_subcycle` (dots already elapsed in the current M-cycle) and the
+        // per-byte cc advance is compared against `lOam + 3` (gate `cc-3 > lOam`).
+        let mut cc: i64 = 0;
+        let mut loam: i64 = -(self.dma_subcycle as i64);
+
         for _ in 0..effective_length {
-            self.copy_dma_byte(src, dst);
+            let data = self.copy_dma_byte(src, dst);
+            cc += per_byte_cc;
+            if interleave && self.dma_active && cc - 3 > loam {
+                loam += 4;
+                self.dma_conflict_advance(src, data);
+            }
             src = src.wrapping_add(1);
             dst = dst.wrapping_add(1);
+        }
+        // After the block, the OAM-DMA continues from the advanced position. The
+        // residual `lOam` phase becomes the next M-cycle's sub-cycle offset so
+        // `step_dma` resumes on the correct dot (mirrors Gambatte storing
+        // `lastOamDmaUpdate_ = lOam`).
+        if interleave && self.dma_active {
+            // Dots elapsed since the last OAM-DMA M-cycle fired. `step_dma` fires
+            // when `dma_subcycle` reaches 4, so the residual phase `(cc - loam)`
+            // (mod 4) is exactly the count already accrued toward the next
+            // M-cycle (mirrors Gambatte storing `lastOamDmaUpdate_ = lOam` and
+            // recomputing `(cc - lastOamDmaUpdate_) >> 2`).
+            self.dma_subcycle = (cc - loam).rem_euclid(4) as u8;
         }
 
         self.hdma_source = src;
@@ -861,6 +899,38 @@ impl Mmio {
         } else if self.dma_pos == 160 {
             // endOamDma: park the engine. Because no restart was requested
             // (`dma_start_pos == 0`), idle `dma_pos` at -2 and stop.
+            if self.dma_start_pos == 0 {
+                self.dma_pos = 0xFE;
+                self.dma_active = false;
+            }
+        }
+    }
+
+    /// One OAM-DMA M-cycle that fires *inside* a concurrent GDMA/HDMA transfer.
+    /// Unlike `dma_advance_one_mcycle` (which writes the OAM-DMA's own source
+    /// byte), the conflict path writes the GDMA-read byte `data` into
+    /// `OAM[src & 0xFF]` — the GDMA source low byte — mirroring Gambatte's
+    /// `Memory::dma` inner loop (memory.cpp:357-372). Cells the GDMA bus index
+    /// touches get overwritten with GDMA data; cells the OAM-DMA already wrote
+    /// keep their values.
+    fn dma_conflict_advance(&mut self, src: u16, data: u8) {
+        self.dma_pos = self.dma_pos.wrapping_add(1);
+
+        if self.dma_pos == self.dma_start_pos {
+            self.dma_pos = 0;
+            self.dma_start_pos = 0;
+        }
+
+        if (self.dma_pos as usize) < OAM_SIZE {
+            let p = (src & 0xFF) as usize;
+            if p < OAM_SIZE {
+                self.oam.write(OAM_START + p as u16, data);
+            } else if self.cgb_features_enabled {
+                // p >= 160 writes the `ioamhram_` tail (0xFEA0-0xFEFF) masked
+                // with 0xE7 (Gambatte memory.cpp:366, `!agbFlag_` branch).
+                self.oam_high[(p & 0xE7) - 0xA0] = data;
+            }
+        } else if self.dma_pos as usize == OAM_SIZE {
             if self.dma_start_pos == 0 {
                 self.dma_pos = 0xFE;
                 self.dma_active = false;
