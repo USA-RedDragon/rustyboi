@@ -386,6 +386,15 @@ pub struct Ppu {
     // The WY value to latch into wy2 when wy2_apply_cc arrives.
     #[serde(default)]
     wy2_pending: u8,
+    // Gambatte's `p.wy` (the value the weMaster checkpoints read): updated at
+    // `cc + 1 + cgb` after a write (`update(cc + 1 + cgb)` in `wyChange`).
+    // Distinct from `wy2` (the per-line gate value), which is delayed further.
+    #[serde(default = "win_y_pos_init")]
+    wy1: u8,
+    #[serde(default = "wy2_disabled")]
+    wy1_apply_cc: u64,
+    #[serde(default)]
+    wy1_pending: u8,
     #[serde(default)]
     line_cycle: u32,
     #[serde(default)]
@@ -487,6 +496,9 @@ impl Ppu {
             wy2: 0,
             wy2_apply_cc: wy2_disabled(),
             wy2_pending: 0,
+            wy1: 0xFF,
+            wy1_apply_cc: wy2_disabled(),
+            wy1_pending: 0,
             line_cycle: 0,
             internal_ly_val: 0,
             sched_lycirq: stat_irq::DISABLED_TIME,
@@ -925,6 +937,10 @@ impl Ppu {
             self.wy2 = self.wy2_pending;
             self.wy2_apply_cc = wy2_disabled();
         }
+        if self.wy1_apply_cc != wy2_disabled() && self.wy1_apply_cc <= cc {
+            self.wy1 = self.wy1_pending;
+            self.wy1_apply_cc = wy2_disabled();
+        }
 
         if self.sched_oneshot_statirq <= cc {
             mmio.request_interrupt(registers::InterruptFlag::Lcd);
@@ -1035,7 +1051,11 @@ impl Ppu {
             return;
         }
         let ly = mmio.read(LY) as i32;
-        let wy = mmio.read(WY) as i32;
+        // Gambatte's weMaster checkpoints read `p.wy`, the WY value applied
+        // `1 + cgb` cc after the write (not the live mmio value). Using the
+        // delayed `wy1` makes a mid-frame WY write reach these checkpoints with
+        // Gambatte's exact phase.
+        let wy = self.wy1 as i32;
 
         // ly0 check (only valid during the active frame's line 0 mode-2).
         // weMasterCheckLy0LineCycle = 1 + cgb. Also runs on the first line
@@ -1271,10 +1291,20 @@ impl Ppu {
         if self.disabled {
             self.wy2 = value;
             self.wy2_apply_cc = wy2_disabled();
+            self.wy1 = value;
+            self.wy1_apply_cc = wy2_disabled();
             return;
         }
         let ds = mmio.is_double_speed_mode();
         let cc = self.write_cc(ds);
+        // Gambatte `wyChange`: `update(cc + 1 + cgb)` applies `p.wy` (the value
+        // the weMaster checkpoints read) at cc + 1 + cgb. Schedule that delayed
+        // apply so a mid-frame WY write reaches the weMaster latch with the same
+        // phase Gambatte uses, rather than the live (immediate) mmio value.
+        let cgb = mmio.is_cgb_features_enabled() as i64;
+        let wy1_delay = env_off("RB_WY1_DELAY", 2) + cgb;
+        self.wy1_pending = value;
+        self.wy1_apply_cc = cc + wy1_delay.max(0) as u64;
         // wy2 apply delay (cc) past the write, swept against the late_wy suite:
         // CGB 7, DMG 4 (-ds at double speed). The split reflects the differing
         // M3-start / fine-scroll phase between the two cores.
@@ -1560,6 +1590,8 @@ impl Ppu {
                 self.p_now = mmio.master_cc().wrapping_sub(self.abs_cc + ds_inc);
                 self.wy2 = mmio.read(WY);
                 self.wy2_apply_cc = wy2_disabled();
+                self.wy1 = mmio.read(WY);
+                self.wy1_apply_cc = wy2_disabled();
                 self.stat_reg_committed = mmio.read(LCD_STATUS);
                 self.lyc_irq.set_cgb(mmio.is_cgb_features_enabled());
                 self.lyc_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
