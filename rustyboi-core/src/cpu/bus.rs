@@ -271,6 +271,17 @@ impl<'a> Bus<'a> {
             // STAT/LYC hooks place the event on the correct half-dot at DS.
             self.ppu.set_write_subdot(self.mmio.cpu_t_phase());
             self.mmio.write(addr, value);
+            // FF42/FF43 (SCY/SCX): the CPU readback above is immediate, but the
+            // BG fetcher must see the new value ~N dots later (write-side analog
+            // of the wy1/wy2 latches). The mmio write phase is unchanged (kept in
+            // this else branch, pre-tick) so steady-state rendering is identical;
+            // only the fetcher's mid-M3 view is delayed via on_sc{y,x}_write.
+            if addr == ppu::SCY {
+                self.ppu.on_scy_write(value, self.mmio);
+            }
+            if addr == ppu::SCX {
+                self.ppu.on_scx_write(value, self.mmio);
+            }
             if addr == ppu::LCD_CONTROL {
                 self.ppu.handle_lcdc_write(value, self.mmio);
             }

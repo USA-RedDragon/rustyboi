@@ -165,6 +165,8 @@ impl Fetcher {
         lcdc_state: FetcherLcdcState,
         display_x: u8,
         pending_discard: u8,
+        scy: u8,
+        scx: u8,
     ) -> Option<FetcherDebugEvent> {
         let ly = mmio.read(ppu::LY);
         // Re-read (scy + ly) live at every BG fetch substep. The fetcher runs
@@ -175,7 +177,7 @@ impl Fetcher {
         let y = if self.fetching_window {
             window_line
         } else if matches!(self.state, State::TileNumber | State::TileDataLow | State::TileDataHigh) {
-            let new_y = ly.wrapping_add(mmio.read(ppu::SCY));
+            let new_y = ly.wrapping_add(scy);
             self.latched_y = new_y;
             new_y
         } else {
@@ -204,7 +206,6 @@ impl Fetcher {
                     // column from that rather than the free-running tile_index. This
                     // makes a mid-M3 SCX write land at the correct display column
                     // despite FIFO latency.
-                    let scx = mmio.read(ppu::SCX);
                     // The DMG +1 phase adjustment (Gambatte tileMapXpos =
                     // (scx + xpos + 1 - cgb) / 8) applies only past the M3Start
                     // discard prologue; the first tile (display_x == 0) is fetched
