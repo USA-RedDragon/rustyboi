@@ -1450,6 +1450,9 @@ impl Mmio {
             ];
             self.oam_high = CGB_FEAX;
             self.hram.as_mut_slice().copy_from_slice(&CGB_HRAM);
+            // Power-on HDMA5 reads 0xFF (no transfer armed). With bit 7 set the
+            // read is `hdma_length | 0x80`, so seed the length to 0x7F.
+            self.hdma_length = 0x7F;
         } else {
             // DMG: OAM holds uninitialised garbage; 0xFEA0-0xFEFF reads 0x00.
             const DMG_OAM: [u8; 0xA0] = [
