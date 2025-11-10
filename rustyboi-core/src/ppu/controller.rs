@@ -395,6 +395,23 @@ pub struct Ppu {
     wy1_apply_cc: u64,
     #[serde(default)]
     wy1_pending: u8,
+    // Delayed SCY/SCX visible to the BG fetcher during mode 3. A mid-M3 write to
+    // FF42/FF43 resolves in mmio immediately (CPU readback is live), but the
+    // fetcher sees the new value only after `scy/scx_apply_cc` (write-side analog
+    // of the wy1/wy2 delayed-apply latches). Steady-state these equal the live
+    // register, so non-write rendering is unaffected.
+    #[serde(default)]
+    scy_delayed: u8,
+    #[serde(default = "wy2_disabled")]
+    scy_apply_cc: u64,
+    #[serde(default)]
+    scy_pending: u8,
+    #[serde(default)]
+    scx_delayed: u8,
+    #[serde(default = "wy2_disabled")]
+    scx_apply_cc: u64,
+    #[serde(default)]
+    scx_pending: u8,
     #[serde(default)]
     line_cycle: u32,
     #[serde(default)]
@@ -499,6 +516,12 @@ impl Ppu {
             wy1: 0xFF,
             wy1_apply_cc: wy2_disabled(),
             wy1_pending: 0,
+            scy_delayed: 0,
+            scy_apply_cc: wy2_disabled(),
+            scy_pending: 0,
+            scx_delayed: 0,
+            scx_apply_cc: wy2_disabled(),
+            scx_pending: 0,
             line_cycle: 0,
             internal_ly_val: 0,
             sched_lycirq: stat_irq::DISABLED_TIME,
@@ -941,6 +964,14 @@ impl Ppu {
             self.wy1 = self.wy1_pending;
             self.wy1_apply_cc = wy2_disabled();
         }
+        if self.scy_apply_cc != wy2_disabled() && self.scy_apply_cc <= cc {
+            self.scy_delayed = self.scy_pending;
+            self.scy_apply_cc = wy2_disabled();
+        }
+        if self.scx_apply_cc != wy2_disabled() && self.scx_apply_cc <= cc {
+            self.scx_delayed = self.scx_pending;
+            self.scx_apply_cc = wy2_disabled();
+        }
 
         if self.sched_oneshot_statirq <= cc {
             mmio.request_interrupt(registers::InterruptFlag::Lcd);
@@ -1318,6 +1349,56 @@ impl Ppu {
         self.wy2_apply_cc = cc + delay;
     }
 
+    /// FF42 (SCY) write hook. The CPU readback of FF42 is immediate (handled by
+    /// mmio), but the BG fetcher must see the new SCY only ~N dots later, the
+    /// write-side analog of the wy1/wy2 delayed latches: rustyboi otherwise
+    /// resolves the write pre-tick and the fetcher re-reads it live one M-cycle
+    /// too early vs Gambatte. Schedule the delayed apply against the write cc.
+    pub fn on_scy_write(&mut self, value: u8, mmio: &mmio::Mmio) {
+        if self.disabled {
+            self.scy_delayed = value;
+            self.scy_apply_cc = wy2_disabled();
+            return;
+        }
+        let ds = mmio.is_double_speed_mode();
+        let cc = self.write_cc(ds);
+        // CGB-only: rustyboi's DMG fetcher already samples SCY at the
+        // Gambatte-correct dot (delay 0); only the CGB core sees the mid-M3 write
+        // one M-cycle too early (the `_2/_4/_6` straddle pairs vs the passing
+        // `_1/_3/_5`). A DMG delay regresses the DMG scy_during_m3 cases.
+        let delay = if mmio.is_cgb_features_enabled() {
+            env_off("RB_SCY_DELAY", 1).max(0) as u64
+        } else {
+            0
+        };
+        self.scy_pending = value;
+        self.scy_apply_cc = cc + delay;
+    }
+
+    /// FF43 (SCX) write hook. See `on_scy_write`.
+    pub fn on_scx_write(&mut self, value: u8, mmio: &mmio::Mmio) {
+        if self.disabled {
+            self.scx_delayed = value;
+            self.scx_apply_cc = wy2_disabled();
+            return;
+        }
+        let ds = mmio.is_double_speed_mode();
+        let cc = self.write_cc(ds);
+        // CGB-only, see `on_scy_write`.
+        let delay = if mmio.is_cgb_features_enabled() {
+            env_off("RB_SCX_DELAY", 1).max(0) as u64
+        } else {
+            0
+        };
+        self.scx_pending = value;
+        self.scx_apply_cc = cc + delay;
+    }
+
+    /// Current SCY value the BG fetcher should sample during mode 3 (delayed).
+    pub fn fetcher_scy(&self) -> u8 { self.scy_delayed }
+    /// Current SCX value the BG fetcher should sample during mode 3 (delayed).
+    pub fn fetcher_scx(&self) -> u8 { self.scx_delayed }
+
     pub fn on_stat_register_write(&mut self, mmio: &mut mmio::Mmio) {
         // The DMG STAT-write bug fires on any FF41 write, even one that leaves
         // the enable bits unchanged. Track whether this was an FF41 write so the
@@ -1592,6 +1673,10 @@ impl Ppu {
                 self.wy2_apply_cc = wy2_disabled();
                 self.wy1 = mmio.read(WY);
                 self.wy1_apply_cc = wy2_disabled();
+                self.scy_delayed = mmio.read(SCY);
+                self.scy_apply_cc = wy2_disabled();
+                self.scx_delayed = mmio.read(SCX);
+                self.scx_apply_cc = wy2_disabled();
                 self.stat_reg_committed = mmio.read(LCD_STATUS);
                 self.lyc_irq.set_cgb(mmio.is_cgb_features_enabled());
                 self.lyc_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
@@ -2017,7 +2102,7 @@ impl Ppu {
                     0
                 };
                 if cadence_even
-                    && let Some(event) = self.fetcher.step(mmio, self.win_y_pos, fetcher_lcdc_state, self.x, pending_discard) {
+                    && let Some(event) = self.fetcher.step(mmio, self.win_y_pos, fetcher_lcdc_state, self.x, pending_discard, self.scy_delayed, self.scx_delayed) {
                         self.record_fetch_debug_event(event, mmio);
                 }
 
