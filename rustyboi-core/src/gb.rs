@@ -171,6 +171,9 @@ impl GB {
         if self.hardware == Hardware::CGB {
             self.mmio.write(crate::memory::mmio::REG_VBK, 0x7E);
             self.mmio.write(crate::memory::mmio::REG_SVBK, 0xF8);
+            // RP/IR (0xFF56) power-on: bits 1-5 hold 0x3E so the masked read
+            // returns 0x3E (Gambatte ffxxDump). Bits 0,6,7 start clear.
+            self.mmio.set_io_register(0xFF56, 0x3E);
         }
 
         // Work-RAM power-on contents (Gambatte setInitial*Wram). Fill via the
