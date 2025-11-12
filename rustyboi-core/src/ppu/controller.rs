@@ -329,16 +329,6 @@ pub struct Ppu {
     // flips it (late WY==ly) invalidates the schedule.
     #[serde(default)]
     m3_scheduled_win: bool,
-    // OBJ-size (LCDC bit2) snapshot at schedule time; a mid-mode-3 size toggle
-    // re-maps the per-line sprite list (different heights -> different sprites
-    // overlap this LY) and changes the not-yet-fetched sprite-fetch M3 penalty.
-    #[serde(default)]
-    m3_scheduled_obj_size: bool,
-    // Set when a mid-mode-3 OBJ-size toggle happened and the live pipeline needs
-    // to re-map sprites_on_line + recompute the closed-form schedule (deferred to
-    // the PixelTransfer step where mmio is available).
-    #[serde(default)]
-    pending_obj_size_recompute: bool,
     // OBJ-size (LCDC bit2) value used by the mode-2 OAM scan, latched one scan
     // slot behind the live LCDC. Gambatte's SpriteMapper latches the per-OAM
     // entry size (`lsbuf_[pos/2]`) when that entry's OAM slot is read; a mid-mode-2
@@ -522,8 +512,6 @@ impl Ppu {
             m3_arm_scx: 0,
             m3_scheduled_wx: 0,
             m3_scheduled_win: false,
-            m3_scheduled_obj_size: false,
-            pending_obj_size_recompute: false,
             scan_obj_size_large: false,
             scheduled_mode0_dot: None,
             m0_time_master: None,
@@ -659,25 +647,6 @@ impl Ppu {
         // changes the closed-form sprite-fetch penalty; invalidate and fall back
         // to the live emergent transition.
         let spr_bits = (LCDCFlags::SpriteDisplayEnable as u8) | (LCDCFlags::SpriteSize as u8);
-        let size_bit = LCDCFlags::SpriteSize as u8;
-        let enable_bit = LCDCFlags::SpriteDisplayEnable as u8;
-        // A pure mid-mode-3 OBJ-SIZE toggle (bit2 only; enable + window unchanged)
-        // re-maps the per-line sprite list with the new height and recomputes the
-        // closed-form M3 length over the not-yet-fetched sprites (the analog of
-        // the window-enable mid-M3 recompute). This is Gambatte's spritemap
-        // reschedule + invalidatePredictedNextM0Time path. Deferred to the
-        // PixelTransfer step (needs mmio for OAM rescan + compute_m3_length).
-        let pure_size_toggle = (old_lcdc & size_bit) != (value & size_bit)
-            && (old_lcdc & enable_bit) == (value & enable_bit)
-            && (old_lcdc & win_bit) == (value & win_bit);
-        let recompute_size = std::env::var("RB_OBJSIZE_M3")
-            .map(|v| v != "0")
-            .unwrap_or(true);
-        if self.state == State::PixelTransfer && pure_size_toggle && recompute_size {
-            self.lcdc = value;
-            self.pending_obj_size_recompute = true;
-            return;
-        }
         if self.state == State::PixelTransfer
             && ((old_lcdc & win_bit) != (value & win_bit)
                 || (old_lcdc & spr_bits) != (value & spr_bits))
@@ -1225,86 +1194,6 @@ impl Ppu {
     fn compute_m3_length(&self, mmio: &mmio::Mmio, is_cgb: bool) -> u128 {
         let (len, _win) = self.compute_m3_length_win(mmio, is_cgb);
         len
-    }
-
-    // Mid-mode-3 OBJ-size (LCDC bit2) toggle: re-map the per-line sprite list
-    // with the new sprite height (the y-overlap of each OAM entry against this LY
-    // changes, adding/removing sprites) and shift the closed-form M3-length
-    // schedule by the change in not-yet-fetched sprite-fetch cost. Mirrors
-    // Gambatte's `SpriteMapper::mapSprites` + `invalidatePredictedNextM0Time`
-    // (video.cpp lcdcChange obj2x path). Sprites already fetched (trigger_x past
-    // the current xpos) keep their sunk cost via the unchanged elapsed `ticks`.
-    fn recompute_m3_for_obj_size_change(&mut self, mmio: &mmio::Mmio) {
-        // The schedule must have been armed (not a window/first-line null) for
-        // the delta-shift to be meaningful.
-        if self.scheduled_mode0_dot.is_none() && self.m0_time_master.is_none() {
-            return;
-        }
-        let is_cgb = mmio.is_cgb_features_enabled();
-        let old_len = self.compute_m3_length(mmio, is_cgb) as i64;
-
-        // Re-map the per-line sprite list with the new height. Preserve already-
-        // fetched sprites (index < next_sprite_fetch_index) so their fetch cost
-        // stays sunk; re-scan only OAM entries not yet consumed would be ideal,
-        // but Gambatte re-maps the whole line and the fetcher re-derives the
-        // remaining group, so rebuild the full list and re-point the index.
-        let ly = mmio.read(LY);
-        let lcdc = self.lcdc;
-        let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
-        let mut remapped: Vec<Sprite> = Vec::new();
-        for idx in 0..OAM_SPRITE_COUNT {
-            if remapped.len() >= MAX_SPRITES_PER_LINE {
-                break;
-            }
-            let oam_offset = idx * OAM_BYTES_PER_SPRITE;
-            let sprite_y = mmio.read(0xFE00 + oam_offset as u16);
-            let sprite_x = mmio.read(0xFE00 + oam_offset as u16 + 1);
-            let tile_index = mmio.read(0xFE00 + oam_offset as u16 + 2);
-            let attributes_byte = mmio.read(0xFE00 + oam_offset as u16 + 3);
-            let sprite_screen_y = sprite_y.wrapping_sub(16);
-            if ly >= sprite_screen_y && ly < sprite_screen_y.wrapping_add(sprite_height) {
-                remapped.push(Sprite {
-                    y: sprite_y,
-                    x: sprite_x,
-                    tile_index,
-                    attributes: SpriteAttributes::from_byte(attributes_byte),
-                    oam_index: idx as u8,
-                });
-            }
-        }
-        if is_cgb {
-            remapped.sort_by_key(|s| s.oam_index);
-        } else {
-            remapped.sort_by(|a, b| a.x.cmp(&b.x).then(a.oam_index.cmp(&b.oam_index)));
-        }
-        self.sprites_on_line = remapped;
-        // Re-point the fetch index past sprites whose trigger column already
-        // passed (Gambatte's nextSprite skip): trigger_x = spx-8 < current x.
-        let cur_x = self.x;
-        let mut fetched = 0usize;
-        while fetched < self.sprites_on_line.len() {
-            let trigger_x = self.sprites_on_line[fetched].x.saturating_sub(8);
-            if trigger_x < cur_x {
-                fetched += 1;
-            } else {
-                break;
-            }
-        }
-        self.next_sprite_fetch_index = fetched;
-
-        let new_len = self.compute_m3_length(mmio, is_cgb) as i64;
-        let delta = new_len - old_len;
-        if delta != 0 {
-            let ds = mmio.is_double_speed_mode() as u32;
-            if let Some(dot) = self.scheduled_mode0_dot {
-                self.scheduled_mode0_dot = Some((dot as i64 + delta).max(0) as u128);
-            }
-            if let Some(m0t) = self.m0_time_master {
-                self.m0_time_master = Some((m0t as i64 + (delta << ds)).max(0) as u64);
-            }
-            self.arm_m0irq_for_current_line(mmio);
-        }
-        self.m3_scheduled_obj_size = (lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
     }
 
     // Returns (mode-3 length in dots past base, whether the window contributed).
@@ -1931,10 +1820,9 @@ impl Ppu {
                 {
                     self.check_single_sprite_for_scanline(mmio, self.current_oam_sprite_index);
                     self.current_oam_sprite_index += 1;
-                    // Latch the OBJ-size for the NEXT scan slot from the live LCDC.
-                    // A mid-mode-2 size write applies to entries scanned after it
-                    // commits, not the one just read (Gambatte lsbuf per-slot
-                    // latch).
+                    // Latch the OBJ-size for the NEXT scan slot from the live LCDC
+                    // (DMG: write applies to entries scanned after it commits, not
+                    // the one just read; Gambatte lsbuf per-slot latch).
                     self.scan_obj_size_large = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
                 }
                 
@@ -2068,8 +1956,6 @@ impl Ppu {
                         );
                         self.m3_scheduled_wx = mmio.read(WX);
                         self.m3_scheduled_win = self.window_will_start(mmio, is_cgb);
-                        self.m3_scheduled_obj_size =
-                            (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
                     }
                     // Arm the mode-0 (HBlank) STAT IRQ event at the predicted
                     // mode-0 start, in absolute clock terms. Gambatte schedules
@@ -2080,12 +1966,6 @@ impl Ppu {
                 }
             },
             State::PixelTransfer => 'label: {
-                // A mid-mode-3 OBJ-size toggle re-maps the per-line sprite list
-                // with the new height and recomputes the closed-form M3 length.
-                if self.pending_obj_size_recompute {
-                    self.pending_obj_size_recompute = false;
-                    self.recompute_m3_for_obj_size_change(mmio);
-                }
                 // A mid-mode-3 WX change before the window starts invalidates the
                 // closed-form schedule; fall back to the live emergent transition.
                 if self.scheduled_mode0_dot.is_some()
