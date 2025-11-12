@@ -1366,8 +1366,10 @@ impl Ppu {
         // Gambatte-correct dot (delay 0); only the CGB core sees the mid-M3 write
         // one M-cycle too early (the `_2/_4/_6` straddle pairs vs the passing
         // `_1/_3/_5`). A DMG delay regresses the DMG scy_during_m3 cases.
+        // SCY=2 is the swept optimum (fixes 20 CGB scy_during_m3 straddle cases,
+        // zero regression; 1 -> -4, 3 -> -14, 4 -> +8 regresses).
         let delay = if mmio.is_cgb_features_enabled() {
-            env_off("RB_SCY_DELAY", 1).max(0) as u64
+            env_off("RB_SCY_DELAY", 2).max(0) as u64
         } else {
             0
         };
@@ -1384,9 +1386,11 @@ impl Ppu {
         }
         let ds = mmio.is_double_speed_mode();
         let cc = self.write_cc(ds);
-        // CGB-only, see `on_scy_write`.
+        // SCX has no positive lever in the sweep (delay 1/2 == net-zero vs the
+        // live read); the SCX-write straddles need the read-cc convergent root,
+        // out of scope. Default 0 (live), env-overridable for future work.
         let delay = if mmio.is_cgb_features_enabled() {
-            env_off("RB_SCX_DELAY", 1).max(0) as u64
+            env_off("RB_SCX_DELAY", 0).max(0) as u64
         } else {
             0
         };
