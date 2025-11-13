@@ -1628,6 +1628,18 @@ impl Ppu {
         // IRQ delivery is handled by the event model; just latch the line.
         self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
         self.mode2_irq_pretriggered_for_next_line = false;
+        // Arm the cgbp begin boundary (Gambatte cgbpAccessible: blocked once
+        // `lineCycles(cc) + ds >= 80`) as soon as the line's mode 2 begins, so a
+        // BCPD/OCPD write landing in late mode 2 (before M3 is armed) sees it.
+        // lineCycles = ticks - (4 - cgb); the block begins at the renderer tick
+        // `tick_block = 80 - ds + (4 - cgb)`, converted to master cc from the
+        // current tick (each dot = 1<<ds cc). Refined (kept) at M3 arm.
+        let ds = mmio.is_double_speed_mode() as i64;
+        let cgb_i = mmio.is_cgb_features_enabled() as i64;
+        let tick_block = 80 - ds + (4 - cgb_i);
+        self.cgbp_block_start_cc = Some(
+            (mmio.master_cc() as i64 + ((tick_block - self.ticks as i64) << ds)).max(0) as u64,
+        );
     }
 
     pub fn step_scheduled_stat_events(&mut self, mmio: &mut mmio::Mmio) {
@@ -2466,22 +2478,30 @@ impl Ppu {
         // is independent of `scheduled_mode0_dot`, so it resolves even after the
         // renderer has cleared / advanced past it on this line.
         if kind == 2 {
-            if let (Some(start), Some(m0t)) = (self.cgbp_block_start_cc, self.m0_time_master) {
+            if let Some(start) = self.cgbp_block_start_cc {
                 let cc = access_cc as i64;
+                // BEGIN: blocked once the access cc reaches `lineCycles + ds == 80`
+                // (armed at mode-2 entry, so a late-mode-2 BCPD/OCPD write before
+                // M3 is armed sees it).
                 let begun = cc >= start as i64;
                 // END (Gambatte cgbpAccessible: accessible once `cc >= m0Time + 2`).
-                // Single speed compares against the master-cc m0Time directly,
-                // reproducing the SS m3end `_1`/`_4` accessible boundary. At double
-                // speed `m0_time_master` carries the getStat-read-calibrated sub-dot
-                // bias (KD=-1) plus the SS->DS access-cc phase, leaving it ~4 cc
-                // high for the cgbp write end; the DS-CGBP end folds that constant
-                // back in (`cc + DS_END_BIAS >= m0Time + 2`), straddling both the
-                // m3end_ds and m3end_scx5_ds `_2`/`_4` pairs.
-                let ds_end_bias = if double_speed { env_off("RB_CGBP_DS_END", 4) } else { 0 };
-                let ended = cc + ds_end_bias >= m0t as i64 + 2;
+                // The closed-form m0Time exists only once M3 is armed; before that
+                // the line cannot have ended, so treat a missing m0Time as not
+                // ended. Single speed compares against the master-cc m0Time
+                // directly (reproducing the SS m3end `_1`/`_4` accessible window);
+                // at double speed `m0_time_master` carries the getStat-read sub-dot
+                // bias (KD=-1) + the SS->DS access-cc phase, ~4 cc high for the cgbp
+                // write end, so the DS end folds that constant back in.
+                let ended = match self.m0_time_master {
+                    Some(m0t) => {
+                        let ds_end_bias = if double_speed { env_off("RB_CGBP_DS_END", 4) } else { 0 };
+                        cc + ds_end_bias >= m0t as i64 + 2
+                    }
+                    None => false,
+                };
                 return Some(begun && !ended);
             }
-            // No closed-form anchors (first line / window): fall through to the
+            // No begin anchor (first line after enable / window fallback): use the
             // renderer-tick boundary below.
         }
         let m0_raw = self.scheduled_mode0_dot? as i64;
