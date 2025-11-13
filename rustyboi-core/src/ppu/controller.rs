@@ -98,6 +98,13 @@ fn cgb_mode0_offset() -> i32 { env_off("RB_CGB_MODE0_OFF", CGB_MODE0_OFFSET as i
 fn m0irq_off_ss() -> i64 { env_off("RB_M0IRQ_OFF", M0IRQ_OFFSET) }
 fn m2irq_off_ss() -> i64 { env_off("RB_M2IRQ_OFF", M2IRQ_OFFSET) }
 fn write_cc_off_ss() -> i64 { env_off("RB_WRITE_CC_OFF", WRITE_CC_OFFSET) }
+// CL1: the PPU access-gating / FF41-read consumers now receive the *honest*
+// start-of-access cc (`master_cc + 1`) instead of the old `master_cc + 5`. The
+// 4-cc difference (resolve-at-end vs resolve-at-start) is relocated into the
+// consumer boundary constants via this term, keeping every boundary at the
+// identical absolute cc (net-zero). CL2 (ISR-dispatch cc) and CL3 (opcode
+// granularity) will let the true access cc vary, dissolving this constant.
+const ACCESS_CC_RELOC: i64 = 4;
 const MODE2_STAT_PRETRIGGER_DOT: u128 = 452;
 // Within line 153 (the last VBlank line) the LY register is held at 153 only
 // briefly; after this many dots it reads 0, even though the line itself
@@ -2479,7 +2486,11 @@ impl Ppu {
         // renderer has cleared / advanced past it on this line.
         if kind == 2 {
             if let Some(start) = self.cgbp_block_start_cc {
-                let cc = access_cc as i64;
+                // CL1: `access_cc` is the honest start-of-access cc (master_cc+1),
+                // 4 cc below the old master_cc+5 these begin/end anchors were
+                // calibrated against; relocate the +4 here so the window is at the
+                // identical absolute cc (net-zero).
+                let cc = access_cc as i64 + ACCESS_CC_RELOC;
                 // BEGIN: blocked once the access cc reaches `lineCycles + ds == 80`
                 // (armed at mode-2 entry, so a late-mode-2 BCPD/OCPD write before
                 // M3 is armed sees it).
@@ -2557,8 +2568,13 @@ impl Ppu {
             return None;
         }
         let m0t = self.m0_time_master? as i64;
-        // mode 3 iff access_cc + 2 < m0Time, else mode 0.
-        if (access_cc as i64) + 2 < m0t {
+        // mode 3 iff access_cc + 2 < m0Time, else mode 0. CL1: `access_cc` is now
+        // the honest start-of-access cc (`master_cc + 1`), 4 cc below the old
+        // `master_cc + 5` anchor this constant was calibrated against; the `+ 6`
+        // (= Gambatte's `+ 2` plus the relocated `+ 4`) keeps the boundary at the
+        // identical absolute cc. CL2 will narrow the +4 toward the true ISR cc.
+        const STAT_READ_CC_OFF: i64 = 6;
+        if (access_cc as i64) + STAT_READ_CC_OFF < m0t {
             Some(3)
         } else {
             Some(0)

@@ -178,7 +178,8 @@ impl<'a> Bus<'a> {
         // pairs (m2int_*_m3stat_ds, etc.) sample the same sub-dot boundary
         // Gambatte does. Snapshot pre-tick so the read anchors at access_cc.
         let stat_mode_pre = if addr == ppu::LCD_STATUS {
-            let access_cc = self.mmio.access_cc();
+            // CL1: resolve the FF41 mode at the honest start-of-access cc.
+            let access_cc = self.mmio.ppu_access_cc();
             self.ppu.get_stat_mode3to0_at_cc(access_cc)
         } else {
             None
@@ -186,7 +187,10 @@ impl<'a> Bus<'a> {
         // Snapshot the access cc at the read's START (Gambatte resolves PPU
         // access gating at `cc` before advancing). The cgbp begin/end boundary
         // is master-cc based and must anchor here, not at the post-tick cc.
-        let pre_access_cc = self.mmio.access_cc();
+        // CL1: PPU access-gating (VRAM/OAM/cgbp) resolves at the honest
+        // start-of-access cc; the +4 vs the old `access_cc()` is folded into the
+        // `cpu_access_blocked` boundary constants.
+        let pre_access_cc = self.mmio.ppu_access_cc();
         self.tick_m();
         // VRAM is inaccessible to the CPU during Mode 3, OAM during Mode 2/3;
         // a blocked read returns open-bus 0xFF. Only while the LCD is on.
@@ -225,7 +229,7 @@ impl<'a> Bus<'a> {
         // VRAM/OAM/CGB-palette writes are ignored while the PPU owns those
         // resources (see `ppu_locks_access`). Drop the write but still tick.
         // OAM-DMA conflicts are resolved separately in the tick-before path.
-        if !self.mmio.dma_active() && self.ppu_blocks(addr, false, self.mmio.access_cc()) {
+        if !self.mmio.dma_active() && self.ppu_blocks(addr, false, self.mmio.ppu_access_cc()) {
             self.tick_m();
             return;
         }

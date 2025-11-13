@@ -616,6 +616,22 @@ impl Mmio {
         self.timer.access_cc()
     }
 
+    /// CL1: the *honest* per-access cc — the true `abs_cc` at the START of the
+    /// CPU access's M-cycle. `master_cc()` is incremented at the top of each
+    /// dot-step, so before this access's `tick_m` it trails the M-cycle start by
+    /// exactly one dot; the true start is `master_cc + 1` (Gambatte resolves the
+    /// access at `cc`, then `cc += 4`). The old `access_cc()` = `master_cc + 5`
+    /// resolved the access at its END (`+4`) plus the same `+1` lag — a fixed
+    /// offset that is right on average but off by the intra-instruction position.
+    /// The PPU read-cc / access-gating consumers anchor here so CL2 (ISR-dispatch
+    /// cc) and CL3 (opcode granularity) can vary the true access cc and have the
+    /// PPU respond at the exact point, instead of a baked-in `+5`. The four-dot
+    /// difference vs `access_cc()` is folded into the PPU consumer constants
+    /// (`get_stat_mode3to0_at_cc`, `cpu_access_blocked`) so this is net-zero.
+    pub fn ppu_access_cc(&self) -> u64 {
+        self.timer.abs_cc().wrapping_add(1)
+    }
+
     /// The raw master clock (`cc`, T-cycles) the whole engine advances. The PPU
     /// derives its dot-cycles from this against the LCD-enable anchor `p_now`
     /// (Gambatte: PPU dot-cycles = `(cc - p_now) >> ds`).
