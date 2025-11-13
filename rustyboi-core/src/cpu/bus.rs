@@ -178,9 +178,14 @@ impl<'a> Bus<'a> {
         // pairs (m2int_*_m3stat_ds, etc.) sample the same sub-dot boundary
         // Gambatte does. Snapshot pre-tick so the read anchors at access_cc.
         let stat_mode_pre = if addr == ppu::LCD_STATUS {
-            // CL1: resolve the FF41 mode at the honest start-of-access cc.
-            let access_cc = self.mmio.ppu_access_cc();
-            self.ppu.get_stat_mode3to0_at_cc(access_cc)
+            // Gambatte resolves FF41 at the raw master cc (== Gambatte `cc`);
+            // boundary mode3 iff `master_cc + 2 < m0Time`.
+            let access_cc = self.mmio.master_cc();
+            let r = self.ppu.get_stat_mode3to0_at_cc(access_cc);
+            if std::env::var("RB_DBG_M0").is_ok() {
+                eprintln!("[FF41] master_cc={} m0t={:?} mode={:?} ly={} m3len={} lyt={}", access_cc, self.ppu.dbg_m0_time(), r, self.mmio.read(0xFF44), self.ppu.dbg_m3len(), self.ppu.dbg_lytime(&self.mmio));
+            }
+            r
         } else {
             None
         };
