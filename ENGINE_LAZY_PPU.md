@@ -54,6 +54,25 @@ pinned with the cctracer oracle before LP1, by dumping Gambatte's `cc` at a know
 `m0Time`/`lineStart` for that line. Extend `cctracer` to expose Gambatte's internal `m0Time`
 (`NextM0Time::predictedNextM0Time_`) and `lineCycles`.
 
+## LP0 RESULTS (calibrated via the extended cctracer oracle)
+
+Ground truth (cctracer now dumps Gambatte `m0Time`, `lineCycles`, `lyTime` at every FF41 read):
+- **The boundary rule is `cc + 2 < m0Time` → mode3** (constant `+2`), confirmed identical across
+  `m2int_m3stat_ds_2` (mode0), `ds_1` (mode3), and the inline `dma/gdma_cycles_short_ds_1`. NOT
+  rustyboi's `access_cc + 6`.
+- **The read cc `cc` == rustyboi's RAW `abs_cc`** (the master cc before the access M-cycle ticks),
+  NOT the CL1 `abs_cc + 1`. (m2int_ds_2: Gambatte cc=198532 ↔ rustyboi abs_cc=149604, offset 48928.)
+- **`m0Time = lyTime − ((456 − m0_lineCycle) << ds)`**, where `lyTime` is the next-LY cc (rustyboi
+  has this exactly from `ly_counter`) and `m0_lineCycle` is the mode-0-start lineCycle from the
+  pixel predictor. For scx0/cgb/no-sprite/no-window: `m0_lineCycle = 251` (m0Time = lyTime − 410 at ds=1).
+- rustyboi's current `m0_time_master` is ~3cc high at DS purely from the `K(6)/KD(-1)` arm-anchor
+  fudge; anchoring on `lyTime` with the exact `m0_lineCycle` and comparing `abs_cc + 2 < m0Time`
+  removes ALL of `CC_OFF`/`+1`/`+6`/`K`/`KD` at once for the read path.
+
+LP1 task: get `m0_lineCycle` exact across scx / sprite / window configs (build the calibration
+table from cctracer; it should equal `(80-ish base) + compute_m3_length_win(...)` — verify the
+base/anchor) and switch getStat to the lyTime-anchored `abs_cc + 2 < m0Time` form.
+
 ## Phasing (each on this branch; red allowed if attributed; merge only net-positive)
 
 - **LP0 — anchor calibration (read-only + cctracer):** extend cctracer to dump Gambatte
