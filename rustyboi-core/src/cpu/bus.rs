@@ -89,8 +89,8 @@ impl<'a> Bus<'a> {
     /// OAM during Mode 2/3, and (CGB) the palette-data ports FF69/FF6B during
     /// Mode 3. Only while the LCD is on. Blocked reads return 0xFF; blocked
     /// writes are dropped.
-    fn ppu_locks_access(&self, addr: u16) -> bool {
-        self.ppu_blocks(addr, true)
+    fn ppu_locks_access(&self, addr: u16, access_cc: u64) -> bool {
+        self.ppu_blocks(addr, true, access_cc)
     }
 
     /// Whether the PPU locks `addr` from a CPU access of the given direction.
@@ -99,7 +99,7 @@ impl<'a> Bus<'a> {
     /// mirrors Gambatte's lineCycle thresholds. When no closed-form mode-0 dot
     /// is available (window / first line after enable) it falls back to the
     /// FF41 mode bits.
-    fn ppu_blocks(&self, addr: u16, is_read: bool) -> bool {
+    fn ppu_blocks(&self, addr: u16, is_read: bool, access_cc: u64) -> bool {
         let is_vram = (0x8000..=0x9FFF).contains(&addr);
         let is_oam = (0xFE00..=0xFE9F).contains(&addr);
         let is_cgb_pal = (addr == 0xFF69 || addr == 0xFF6B) && self.mmio.is_cgb_features_enabled();
@@ -114,7 +114,7 @@ impl<'a> Bus<'a> {
         let mode_locked = if is_oam { mode == 2 || mode == 3 } else { mode == 3 };
         let ds = self.mmio.is_double_speed_mode();
         let is_cgb = self.mmio.is_cgb_features_enabled();
-        if let Some(blocked) = self.ppu.cpu_access_blocked(kind, is_read, mode_locked, is_cgb, ds) {
+        if let Some(blocked) = self.ppu.cpu_access_blocked(kind, is_read, mode_locked, is_cgb, ds, access_cc) {
             return blocked;
         }
         mode_locked
@@ -183,10 +183,14 @@ impl<'a> Bus<'a> {
         } else {
             None
         };
+        // Snapshot the access cc at the read's START (Gambatte resolves PPU
+        // access gating at `cc` before advancing). The cgbp begin/end boundary
+        // is master-cc based and must anchor here, not at the post-tick cc.
+        let pre_access_cc = self.mmio.access_cc();
         self.tick_m();
         // VRAM is inaccessible to the CPU during Mode 3, OAM during Mode 2/3;
         // a blocked read returns open-bus 0xFF. Only while the LCD is on.
-        if self.ppu_locks_access(addr) {
+        if self.ppu_locks_access(addr, pre_access_cc) {
             return 0xFF;
         }
         if let Some(v) = apu_read {
@@ -221,7 +225,7 @@ impl<'a> Bus<'a> {
         // VRAM/OAM/CGB-palette writes are ignored while the PPU owns those
         // resources (see `ppu_locks_access`). Drop the write but still tick.
         // OAM-DMA conflicts are resolved separately in the tick-before path.
-        if !self.mmio.dma_active() && self.ppu_blocks(addr, false) {
+        if !self.mmio.dma_active() && self.ppu_blocks(addr, false, self.mmio.access_cc()) {
             self.tick_m();
             return;
         }
