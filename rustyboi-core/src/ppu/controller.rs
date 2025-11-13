@@ -323,6 +323,7 @@ pub struct Ppu {
     // same early M3 dots Gambatte samples, so a mid-discard SCX write moves the
     // break target without the FIFO-warmup latency over-reading later writes.
     #[serde(default)]
+    dbg_m3_len: u128,
     m3_arm_dot: u128,
     // scx%8 sampled at M3 arm, used by the closed-form mode-0 schedule's
     // discard prefix. If the live f1 break resolves to a different count, the
@@ -524,6 +525,7 @@ impl Ppu {
             mode0_pretriggered_this_line: false,
             m3_pixels_discarded: 0,
             m3_discard_target: -1,
+            dbg_m3_len: 0,
             m3_arm_dot: 0,
             m3_arm_scx: 0,
             m3_scheduled_wx: 0,
@@ -835,6 +837,20 @@ impl Ppu {
     // LY register's mid-line transients (line 153 ly=0, etc.).
     fn internal_ly(&self) -> u8 {
         self.internal_ly_val
+    }
+
+    /// Byte-exact Gambatte `m0Time` (master-cc) for the current line, given the
+    /// closed-form mode-3 length `m3_len` (= `predictCyclesUntilXpos(167)` dots).
+    ///   m0Time = (p_now + ly_counter().time + 1) − ((456 − (m3_len + BASE)) << ds)
+    /// BASE = 84 (CGB SS+DS), 83 (DMG). `p_now + ly_counter().time` is the next-LY
+    /// master cc; the +1 corrects rustyboi's LyCounter.time running one master-cc
+    /// below Gambatte's lyTime. getStat boundary: mode3 iff `master_cc + 2 < m0Time`.
+    fn m0_time_exact(&self, mmio: &mmio::Mmio, m3_len: u128, is_cgb: bool) -> u64 {
+        let ds = mmio.is_double_speed_mode() as u32;
+        let base: i64 = if is_cgb { 84 } else { 83 };
+        let ly_time = self.p_now as i64 + self.ly_counter(mmio).time as i64 + 1;
+        let m0_line_cycle = m3_len as i64 + base;
+        (ly_time - ((456 - m0_line_cycle) << ds)).max(0) as u64
     }
 
     /// The CPU-visible mode-0 (HBlank) start dot, decoupled from the live pixel
@@ -1971,20 +1987,16 @@ impl Ppu {
                         // the current master cc. The CPU-visible boundary is derived
                         // from this exact value rather than the tick-frame offset.
                         let ds = mmio.is_double_speed_mode() as u32;
-                        // K reconciles rustyboi's master-cc M3-arm anchor with
-                        // Gambatte's `now`/access-cc phase so the getStat boundary
-                        // `cc + 2 < m0Time` lands on the (Gambatte-exact) persisted
-                        // mode-3 length. DMG's m0 end sits one cc later than CGB
-                        // (the `1 - cgb` term lives in the renderer tick frame, not
-                        // this master-cc anchor), hence +1. K is added in DOTS then
-                        // shifted by ds; at double speed the access-cc sub-dot phase
-                        // wants its own master-cc bias `KD` (in master cc, not dots).
-                        let k = if is_cgb { env_off("RB_M0TIME_K_CGB", 6) } else { env_off("RB_M0TIME_K_DMG", 7) };
-                        let kd = if ds == 1 { env_off("RB_M0TIME_KD", -1) } else { 0 };
-                        self.m0_time_master = Some(
-                            (mmio.master_cc() as i64 + ((m3_len as i64 + k) << ds) + kd).max(0)
-                                as u64,
-                        );
+                        // Byte-exact m0Time, lyTime-anchored (ENGINE_LAZY_PPU.md):
+                        //   m0Time = (p_now + ly_counter().time + 1)
+                        //            − ((456 − (m3_len + BASE)) << ds)
+                        // BASE = 84 (CGB SS+DS), 83 (DMG — the `1−cgb` term already
+                        // lives in m3_len). `p_now + ly_counter().time` is the
+                        // next-LY master cc; +1 corrects rustyboi's LyCounter.time
+                        // running 1 master-cc below Gambatte's lyTime.
+                        self.m0_time_master = Some(self.m0_time_exact(mmio, m3_len, is_cgb));
+                        self.dbg_m3_len = m3_len;
+                        let _ = ds;
                         self.m3_scheduled_wx = mmio.read(WX);
                         self.m3_scheduled_win = self.window_will_start(mmio, is_cgb);
                         // cgbp begin boundary (Gambatte cgbpAccessible: blocked once
@@ -2056,46 +2068,28 @@ impl Ppu {
                         }
                     }
                 }
-                // CPU-visible mode-0 report (decoupled from pipeline). The FF41
-                // mode bits and the mode-0 STAT check are driven from the
-                // closed-form reported dot, which may land a few dots before the
-                // live pipeline drains its FIFO. This does NOT terminate the
-                // renderer loop (no state change), so it cannot hang M3; the
-                // actual termination still happens below at scheduled_mode0_dot
-                // (or the x==160 fallback). Skip on window-start lines: there the
-                // mode-0 boundary is the live FIFO-flush transition below.
-                if !self.mode0_reported_this_line
-                    && !self.window_started_this_line
-                    && let Some(rdot) = self.reported_mode0_dot_value(mmio)
-                    && self.ticks >= rdot
-                {
-                    self.mode0_reported_this_line = true;
-                    Self::set_lcd_status_mode(mmio, 0);
-                    self.check_and_trigger_stat_interrupt(mmio);
-                }
-
-                // Scheduled cycle-exact Mode 3 -> Mode 0 transition (live
-                // pipeline termination). Ends the renderer loop and enters
-                // HBlank. The FF41 mode / STAT report may have already fired
-                // above; guard against re-driving them.
-                if self.scheduled_mode0_dot == Some(self.ticks) {
-                    self.scheduled_mode0_dot = None;
-                    // On window-start lines the closed-form length is correct,
-                    // but the live pixel pipeline can lag a couple of dots after
-                    // the window fetch restart, leaving the last 1-2 pixels still
-                    // queued in the FIFO. Flush them so the visible output spans
-                    // all 160 columns (matches real HW, where M3 lasted long
-                    // enough to push them).
-                    if self.window_started_this_line {
+                // ATOMIC mode-3 END: mode 3 ends at the exact closed-form m0Time
+                // (master cc), and EVERYTHING (eager FF41 mode register, mode-0
+                // STAT check, VRAM/OAM/cgbp unblock, m0 IRQ) is driven off this one
+                // boundary. The pixel pipeline is now image-only: at the transition
+                // we flush any remaining FIFO pixels to x==160 so the visible line
+                // is complete, and the pipeline's own x==160 push no longer drives
+                // timing. When no closed-form m0Time exists (first line after
+                // enable / mid-M3 invalidation), fall back to the live x==160 push.
+                if let Some(m0t) = self.m0_time_master {
+                    if mmio.master_cc() >= m0t {
+                        self.scheduled_mode0_dot = None;
+                        // Flush remaining FIFO pixels to fill all 160 columns; the
+                        // pipeline may lag the closed-form boundary by a few dots.
                         while self.x < 160 && self.draw_fifo_pixel(mmio) {}
+                        self.state = State::HBlank;
+                        if !self.mode0_reported_this_line {
+                            self.mode0_reported_this_line = true;
+                            Self::set_lcd_status_mode(mmio, 0);
+                            self.check_and_trigger_stat_interrupt(mmio);
+                        }
+                        break 'label;
                     }
-                    self.state = State::HBlank;
-                    if !self.mode0_reported_this_line {
-                        self.mode0_reported_this_line = true;
-                        Self::set_lcd_status_mode(mmio, 0);
-                        self.check_and_trigger_stat_interrupt(mmio);
-                    }
-                    break 'label;
                 }
 
                 // Gambatte M3Start::f1 fine-scroll break resolution. The f1 loop
@@ -2230,9 +2224,11 @@ impl Ppu {
                     break 'label;
                 }
                 if self.draw_fifo_pixel(mmio) {
-                    // When no cycle-exact dot is scheduled (window-start lines),
-                    // fall back to ending Mode 3 at the x==160 pixel push.
-                    if self.scheduled_mode0_dot.is_none() && self.x == 160 {
+                    // Fallback (no closed-form m0Time: first line after enable /
+                    // mid-M3 invalidation): end Mode 3 at the x==160 pixel push.
+                    // When m0Time IS known the transition is driven off master_cc
+                    // above; the pipeline caps at 160 and idles until then.
+                    if self.m0_time_master.is_none() && self.x == 160 {
                         self.state = State::HBlank;
                         self.mode0_reported_this_line = true;
                         Self::set_lcd_status_mode(mmio, 0);
@@ -2568,18 +2564,22 @@ impl Ppu {
             return None;
         }
         let m0t = self.m0_time_master? as i64;
-        // mode 3 iff access_cc + 2 < m0Time, else mode 0. CL1: `access_cc` is now
-        // the honest start-of-access cc (`master_cc + 1`), 4 cc below the old
-        // `master_cc + 5` anchor this constant was calibrated against; the `+ 6`
-        // (= Gambatte's `+ 2` plus the relocated `+ 4`) keeps the boundary at the
-        // identical absolute cc. CL2 will narrow the +4 toward the true ISR cc.
-        const STAT_READ_CC_OFF: i64 = 6;
-        if (access_cc as i64) + STAT_READ_CC_OFF < m0t {
+        // Gambatte getStat: mode 3 iff `cc + 2 < m0Time` (raw master cc).
+        if (access_cc as i64) + 2 < m0t {
             Some(3)
         } else {
             Some(0)
         }
     }
+
+    #[doc(hidden)]
+    pub fn dbg_m0_time(&self) -> Option<u64> {
+        self.m0_time_master
+    }
+    #[doc(hidden)]
+    pub fn dbg_m3len(&self) -> u128 { self.dbg_m3_len }
+    #[doc(hidden)]
+    pub fn dbg_lytime(&self, mmio: &mmio::Mmio) -> u64 { self.p_now + self.ly_counter(mmio).time + 1 }
 
     pub fn get_x(&self) -> u8 {
         self.x
