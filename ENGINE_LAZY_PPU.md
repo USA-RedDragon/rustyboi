@@ -89,6 +89,44 @@ base anchor (84) and the formula were wrong. So:
   constants (VRAM/OAM unblock `cc + 2 >= m0Time`; cgbp accessible `cc >= m0Time + 2`), removing
   `K`/`KD`/`ACCESS_CC_RELOC`/`*_mode0_offset`/`dma_scx_m0_nudge`/`RB_CGBP_DS_END`.
 
+## LP1 RESULTS — calibration byte-exact; LP1 must merge with LP2 (atomic whole-grid move)
+
+LP1-in-isolation = net 0 (reverted): every variant fixed EXACTLY the 562 baseline failures and broke
+a **disjoint** ~755 (verified `overlap=0`). Diagnostic proof that the exact `cc+2 < m0Time` boundary is
+*correct*, but the rest of the PPU sits ~8cc off it, so moving only the read desyncs the grid.
+
+**Byte-exact calibration (verified vs cctracer, ready to use):**
+- `m0Time = (p_now + ly_counter().time + 1) − ((456 − (m3_len + BASE)) << ds)`
+  - `BASE = 84` (CGB, SS *and* DS); `BASE = 83` (DMG — the `(1−cgb)` term already lives in `m3_len`).
+  - Two rustyboi anchor corrections vs raw Gambatte: (1) `ly_counter().time` is PPU-relative → add
+    `p_now`; (2) rustyboi's `LyCounter.time` runs exactly **1 master-cc below** Gambatte's `lyTime` → `+1`.
+  - With both, byte-identical to cctracer's `m0Time` (boot offsets cancel).
+- getStat: **mode3 iff `abs_cc + 2 < m0Time`** (raw `master_cc()`, NOT `ppu_access_cc()`/`+6`).
+
+**Architecture finding — there are TWO mode-0 notions that must be unified:**
+1. *Emergent*: the pixel pipeline reaching `x == 160` (controller.rs ~2092) sets `State::HBlank` and
+   pokes the eager FF41 mode register (`set_lcd_status_mode(mmio,0)`). ~755 currently-passing tests ride
+   this grid.
+2. *Closed-form*: `m0_time_master`/`scheduled_mode0_dot` — feeds the FF41 read refinement, m0 IRQ arm,
+   VRAM/OAM/cgbp access blocking. The 562 failing straddle tests ride this.
+The swept offsets exist only to reconcile (1) and (2). **They are ~8cc apart at DS.**
+
+**THE ATOMIC CHANGE (do LP1+LP2 — and effectively LP3 — together):** make **mode 3 end at the exact
+`m0Time`, period.** Drive the `PixelTransfer→HBlank` transition off `abs_cc >= m0Time` (exact), set the
+eager mode register there, anchor the m0 IRQ + VRAM/OAM/cgbp blocking on the same `m0Time`, and let the
+pixel pipeline become image-only — flush remaining FIFO pixels to 160 at the transition rather than
+letting `x==160` drive timing. Then ALL the swept offsets (`CC_OFF`/`STAT_READ_CC_OFF`/`K`/`KD`/
+`*_mode0_offset`/`ACCESS_CC_RELOC`/`dma_scx_m0_nudge`/`RB_CGBP_DS_END`/`reported_mode0_early_nudge`)
+collapse to Gambatte's constants (read `+2`, vram/oam unblock `cc+2>=m0Time`, cgbp `cc>=m0Time+2`).
+Expect this single atomic move to flip the 562 to pass while keeping the ~755 (they were passing on an
+internally-consistent-but-offset grid; the exact grid is also internally consistent AND matches Gambatte).
+
+**Flagged anomaly to investigate first:** in the isolated-field experiment, merely *assigning* a value to
+a new `m0_time_exact` field read ONLY by `get_stat` flipped `sprites/space/10spritesPrLine_*_m3stat_ds_1`
+(a rom that never reads FF41) from pass→fail — reproduced with a constant 12345 and via `RB_NO_EXACT`.
+Suggests a PPU state coupling/aliasing not yet mapped (possibly `compute_m3_length` side-effects, or the
+assignment site perturbing control flow). Trace this before trusting any partial approach.
+
 ## Phasing (each on this branch; red allowed if attributed; merge only net-positive)
 
 - **LP0 — anchor calibration (read-only + cctracer):** extend cctracer to dump Gambatte
