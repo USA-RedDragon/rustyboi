@@ -26,6 +26,9 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         let to_double = !mmio.is_double_speed_mode();
         let bridge = if to_double { 8 } else { 3 };
         mmio.ppu.stop_bridge_advance(mmio.mmio, bridge);
+        if !to_double {
+            mmio.ppu.set_dsss_lytime_adjust();
+        }
         mmio.perform_speed_switch();
         // Re-anchor the PPU's event-scheduled STAT/mode/LYC clocks to the new
         // speed (Gambatte's `lcd_.speedChange`). The scheduled event times were
