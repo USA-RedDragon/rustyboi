@@ -234,3 +234,33 @@ reachable from any rustyboi PPU state.** Proven via dual-rom byte comparison + i
   CPU/PPU cc-accounting difference accumulated over the sprite rom's longer pre-read path, or a
   one-time enable-with-OBJ warmup offset Gambatte applies that rustyboi does not. Bisect with a
   cctracer that dumps `now`/lineStart at LCD-enable and at each LY increment on ONE sprite rom.
+
+## BUG#1 RE-DIAGNOSIS (corrected — it is NOT p_now / PPU phase)
+
+Hands-on offset-free tracing (line_cycle = within-line dot 0..455, directly comparable to Gambatte
+`lineCycles`, NO boot-offset needed) overturns the prior "sprite p_now 4cc" framing:
+
+- At the decisive read, ALL three roms read at LY=1. Offset-free line_cycle vs Gambatte lineCycles:
+  - `m2int_m3stat_ds_2` (twin, PASS): rustyboi 250 == Gambatte 250 ✓
+  - `m2int_scx2_m3stat_ds_2` (PASS): rustyboi 252 == Gambatte 252 ✓
+  - `10spritesPrLine_nr10space10_m3stat_ds_1` (FAIL): rustyboi 358 vs Gambatte 356 — **+2 dots**
+- The m2/LYC DISPATCH is at rustyboi line_cycle ~10 vs Gambatte 8 (+2 dots); the handler timing
+  (dispatch→read) MATCHES. So the PPU phase / p_now / m0Time formula are all FINE — the **STAT
+  interrupt dispatches 2 dots late**, carrying the whole handler (and its read) 2 dots late.
+- **Discriminator:** the failing rom writes `STAT=0x40` (bit6 = **LYC=LY** IRQ enable) and `LYC=1`,
+  so the LYC=LY interrupt fires at LY=1. The passing twin/scx2 use `STAT=0x20` (mode-2 IRQ, via
+  `ldff(c)`), no LYC. So bug#1 is the **LYC=LY STAT interrupt dispatching ~2 dots late at DS**, NOT
+  sprites and NOT a PPU anchor. (The agent's "OBJ-correlated 4cc p_now" was a cross-LY artifact.)
+- `lyc_schedule` (`lyc*456 − 2`, `+6` for lyc0) MATCHES Gambatte `lyc_irq.cpp::schedule` exactly. So
+  the 2 dots are in the FLAG/DISPATCH path, not the schedule — prime suspect: `dispatch_stat_events`
+  fires `sched_lycirq <= abs_cc` on the even render dot, rounding an odd-cc LYC time up to the next
+  render dot at DS (the `step_subdot` sub-dot handling covers m2/m0 but may miss LYC). Verify the LYC
+  fire cc vs Gambatte (add a LYC hook to cctracer like the m2 one) and route LYC through the sub-dot
+  dispatch. This is a small, localized `stat_irq`/`dispatch_stat_events` fix, not an anchor rewrite.
+
+### Net status of the rewrite (honest)
+`lp-atomic`/`pnow-fix` = 816 (vs 562 core-loop). m0Time formula byte-exact; bug#2 fixed (+12);
+bug#1 (LYC dispatch) ~157 tests pending. The lp-atomic disjoint break was 335 broke / 69 fixed, so
+beyond bug#1+#2 there remain ~150+ other breakages (each a similar pre-existing timing layer the
+fudges masked). Reaching net-positive vs 562 is a multi-fix convergence, not one change. main/core-loop
+remain clean at 562; nothing net-negative merges.
