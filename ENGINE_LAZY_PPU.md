@@ -264,3 +264,20 @@ bug#1 (LYC dispatch) ~157 tests pending. The lp-atomic disjoint break was 335 br
 beyond bug#1+#2 there remain ~150+ other breakages (each a similar pre-existing timing layer the
 fudges masked). Reaching net-positive vs 562 is a multi-fix convergence, not one change. main/core-loop
 remain clean at 562; nothing net-negative merges.
+
+## BUG#1 FINAL ROOT — CPU interrupt-dispatch phase (PPU is done)
+
+Instrumented the LYC fire directly: it fires at **ly=0 line_cycle=454 (fc 454) = byte-exact Gambatte**.
+So the PPU/m0Time/LYC-schedule are ALL correct. The residual is purely **CPU-side**: the IF-set→service
+latency. Measured (sprite rom): LYC IF set at abs_cc 141267; CPU dispatches (post-20cc-service) at abs_cc
+141292 = fire + 12.5 dots. Gambatte dispatches at fire + 10 dots. So Gambatte services ~0 dots after the
+fire (an instruction boundary coincides with fc 454), rustyboi ~2.5 dots later → the whole handler + its
+FF41 read land 2 dots late → reads mode0 instead of mode3.
+
+**This is the original convergent root, CPU-side:** the CPU instruction-stream-vs-PPU dispatch phase is
+~2 dots off. It needs sm83 per-access cc / the prefetch dispatch model (ENGINE_REWRITE step 2-3; see memory
+`cl-m2int-ds-gap10-retriangulation`, `ss-failures-classification-halt-bug` — the SAME prefetch gap blocks the
+HALT-bug fix). It is NOT a PPU/m0Time/anchor issue. **The PPU lazy-closed-form rewrite (this branch) achieved
+its goal: the PPU timing is byte-exact.** The remaining lp-atomic breakages (the ~150 beyond bug#1/#2) are
+very likely all this one CPU dispatch-phase root — fixing it should resolve the cluster wholesale and is the
+correct next target. The PPU rewrite + CPU-dispatch fix together are the path to net-positive.
