@@ -196,3 +196,41 @@ coupling only through `p_now`, not a hidden side effect of `compute_m3_length` (
   is exact the formula is byte-exact everywhere (proven on the non-drifted clusters).
 - The branch keeps the exact grid; it is the correct target. It is net-negative ONLY because of
   these two anchor drifts. Do NOT re-introduce K/KD to mask them — fix `p_now`.
+
+## PNOW-FIX RESULTS (branch `pnow-fix` off `lp-atomic`, HEAD d773dab)
+
+**828 -> 816 (-12, net +12).** Bug #2 FIXED; bug #1 root narrowed but not fixed.
+
+**Bug #2 FIXED** (`ppu: drop lyTime +1 correction after DS->SS speed switch`):
+- Root: the DS->SS stop bridge (`opcodes::stop`, `bridge=3` dots, each subtracts `1<<ds=2` from
+  `p_now`) lands the LyCounter exactly 1 master-cc HIGH vs Gambatte (the DS half-dot the whole-dot
+  bridge can't express). So the `+1` LyCounter correction in `m0_time_exact` over-corrects by 1
+  right after a DS->SS switch.
+- Fix: added `lytime_no_plus1` flag — set by `set_dsss_lytime_adjust()` on the DS->SS switch
+  (`!to_double`), cleared at the next LCD enable. `m0_time_exact` drops the `+1` while set.
+- Verified byte-exact: `speedchange2_frame1_m2int_m3stat_scx2_2` now m0t=354978==Gambatte
+  (offset-corrected), passes. Confirmed via dispatch(354744<->417516 off 62772) + inline-INSTR sync.
+- Did NOT touch the bridge dot counts (3/8) — those also drive line_cycle/IRQ scheduling.
+
+**Bug #1 (sprite 4cc) — DEEPER than "p_now seed/rebase"; it is a per-rom PPU-vs-CPU phase, NOT
+reachable from any rustyboi PPU state.** Proven via dual-rom byte comparison + inline-INSTR offset:
+- Sprite rom (`10spritesPrLine_nr10space10_m3stat_ds_1`, LYC-driven, OBJ on) and the PASSING twin
+  (`m2int_scx2_m3stat_ds_2`, m2-driven, OBJ off) have **byte-identical rustyboi PPU state** at the
+  read: same `p_now=7832`, same `abs_cc`, same enable seq (enable@mc7841 + 8-dot SS->DS bridge,
+  NO LY-write, NO re-enable), same lineStart_master=149104, same ly_time_full=150016.
+- CPU is PROVABLY synced on BOTH (offset confirmed by the 0x48 dispatch AND two inline INSTRs at
+  pc 0x1074/0x1075 — all give sprite offset 67164; read cc 149820<->216984 exact).
+- Yet Gambatte's lineStart (offset-corrected) is 149108 on the sprite rom (rustyboi 4 LOW) but
+  149104 on the twin (rustyboi EXACT). i.e. Gambatte's LY-counter sits 4cc later vs the (synced)
+  CPU on the sprite rom only. Identical for 1-sprite and 10-sprite roms (NOT sprite-count-scaled;
+  m3_len=275 matches Gambatte). lineCycle at read: rustyboi 358 vs cctracer 356 (2 dots high).
+- The LyCounter is sprite-INDEPENDENT in rustyboi, and the enable phase is identical to the twin,
+  so this 4cc CANNOT come from any closed-form input. It is a genuine 4cc divergence in how
+  *Gambatte* advances its PPU `now` relative to the CPU between the (identical) boot enable and the
+  read — correlated with OBJ-enabled / LYC-driven roms but not caused by sprite cycles.
+- **A sprite-count or OBJ-gated lineStart/m0Time nudge would be exactly the per-cluster fudge the
+  doc forbids (it'd be coincidental, not the real phase).** Resolving it needs Gambatte's enable
+  `p_.now()` (or a per-line `now`) exposed by cctracer — NOT modifiable per instructions. Likely a
+  CPU/PPU cc-accounting difference accumulated over the sprite rom's longer pre-read path, or a
+  one-time enable-with-OBJ warmup offset Gambatte applies that rustyboi does not. Bisect with a
+  cctracer that dumps `now`/lineStart at LCD-enable and at each LY increment on ONE sprite rom.
