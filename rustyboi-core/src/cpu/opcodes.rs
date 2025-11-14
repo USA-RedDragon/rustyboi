@@ -283,6 +283,18 @@ pub fn sbc_a_memory_hl(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
 }
 
 pub fn halt(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
+    // HALT-bug (Gambatte cpu.cpp case 0x76): with IME clear and IE & IF != 0 the
+    // CPU does NOT halt. The byte after HALT is fetched here (the HALT M-cycle)
+    // and held as a prefetched opcode; PC is NOT incremented, so `step` consumes
+    // it without a re-read and then re-fetches the same byte — the instruction
+    // after HALT executes with PC failing to increment once. With IME set the
+    // pending interrupt is serviced normally (in `step`), so HALT falls through.
+    if !cpu.registers.ime && cpu.has_pending_interrupt(mmio) {
+        let next = mmio.read(cpu.registers.pc);
+        cpu.prefetched = true;
+        cpu.prefetched_opcode = next;
+        return 4;
+    }
     cpu.halted = true;
     // Capture the HDMA halt-state for the unhalt path. Mirrors Gambatte's
     // `Memory::halt`.
