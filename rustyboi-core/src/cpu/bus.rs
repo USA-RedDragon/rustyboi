@@ -17,6 +17,7 @@ pub struct Bus<'a> {
 }
 
 impl<'a> Bus<'a> {
+
     pub fn new(mmio: &'a mut Mmio, ppu: &'a mut Ppu) -> Self {
         Bus {
             mmio,
@@ -181,11 +182,7 @@ impl<'a> Bus<'a> {
             // Gambatte resolves FF41 at the raw master cc (== Gambatte `cc`);
             // boundary mode3 iff `master_cc + 2 < m0Time`.
             let access_cc = self.mmio.master_cc();
-            let r = self.ppu.get_stat_mode3to0_at_cc(access_cc);
-            if std::env::var("RB_DBG_M0").is_ok() {
-                eprintln!("[FF41] master_cc={} m0t={:?} mode={:?} ly={} m3len={} lyt={}", access_cc, self.ppu.dbg_m0_time(), r, self.mmio.read(0xFF44), self.ppu.dbg_m3len(), self.ppu.dbg_lytime(&self.mmio));
-            }
-            r
+            self.ppu.get_stat_mode3to0_at_cc(access_cc)
         } else {
             None
         };
@@ -195,7 +192,7 @@ impl<'a> Bus<'a> {
         // CL1: PPU access-gating (VRAM/OAM/cgbp) resolves at the honest
         // start-of-access cc; the +4 vs the old `access_cc()` is folded into the
         // `cpu_access_blocked` boundary constants.
-        let pre_access_cc = self.mmio.ppu_access_cc();
+        let pre_access_cc = self.mmio.master_cc();
         self.tick_m();
         // VRAM is inaccessible to the CPU during Mode 3, OAM during Mode 2/3;
         // a blocked read returns open-bus 0xFF. Only while the LCD is on.
@@ -234,7 +231,7 @@ impl<'a> Bus<'a> {
         // VRAM/OAM/CGB-palette writes are ignored while the PPU owns those
         // resources (see `ppu_locks_access`). Drop the write but still tick.
         // OAM-DMA conflicts are resolved separately in the tick-before path.
-        if !self.mmio.dma_active() && self.ppu_blocks(addr, false, self.mmio.ppu_access_cc()) {
+        if !self.mmio.dma_active() && self.ppu_blocks(addr, false, self.mmio.master_cc()) {
             self.tick_m();
             return;
         }
