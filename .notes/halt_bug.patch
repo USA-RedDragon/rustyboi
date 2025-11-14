@@ -1,0 +1,66 @@
+diff --git a/rustyboi-core/src/cpu/opcodes.rs b/rustyboi-core/src/cpu/opcodes.rs
+index ab7ccb7..8e7ef8a 100644
+--- a/rustyboi-core/src/cpu/opcodes.rs
++++ b/rustyboi-core/src/cpu/opcodes.rs
+@@ -280,6 +280,13 @@ pub fn sbc_a_memory_hl(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
+ }
+ 
+ pub fn halt(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
++    // HALT bug: with IME=0 and a pending interrupt (IE & IF != 0), the CPU does
++    // not enter the halt state; the next opcode fetch fails to advance PC, so
++    // the byte after HALT is executed twice.
++    if !cpu.registers.ime && cpu.has_pending_interrupt(mmio) {
++        cpu.halt_bug = true;
++        return 4;
++    }
+     cpu.halted = true;
+     // Capture the HDMA halt-state for the unhalt path. Mirrors Gambatte's
+     // `Memory::halt`.
+diff --git a/rustyboi-core/src/cpu/sm83.rs b/rustyboi-core/src/cpu/sm83.rs
+index 825772b..ec525ac 100644
+--- a/rustyboi-core/src/cpu/sm83.rs
++++ b/rustyboi-core/src/cpu/sm83.rs
+@@ -14,6 +14,11 @@ pub struct SM83 {
+     /// Mirrors Gambatte's `intevent_unhalt = cc + 0x20000 + 4` schedule.
+     #[serde(default)]
+     pub stop_unhalt_cycles: u32,
++    /// HALT bug: HALT with IME=0 and a pending interrupt (IE & IF != 0) does not
++    /// halt; the next opcode fetch fails to advance PC, executing the byte after
++    /// HALT twice.
++    #[serde(default)]
++    pub halt_bug: bool,
+ }
+ 
+ impl SM83 {
+@@ -24,6 +29,7 @@ impl SM83 {
+             stopped: false,
+             ime_enable_delay: 0,
+             stop_unhalt_cycles: 0,
++            halt_bug: false,
+         }
+     }
+ 
+@@ -83,7 +89,11 @@ impl SM83 {
+         }
+         
+         let opcode = mmio.read(self.registers.pc);
+-        self.registers.pc += 1;
++        if self.halt_bug {
++            self.halt_bug = false;
++        } else {
++            self.registers.pc += 1;
++        }
+         cycles += self.execute(opcode, mmio);
+         self.apply_ime_delay();
+         cycles
+@@ -155,6 +165,10 @@ impl SM83 {
+         (mmio.read(registers::INTERRUPT_ENABLE) & (flag as u8)) != 0
+     }
+ 
++    pub fn has_pending_interrupt(&self, mmio: &memory::mmio::Mmio) -> bool {
++        self.get_pending_interrupt(mmio).is_some()
++    }
++
+     fn get_pending_interrupt(&self, mmio: &memory::mmio::Mmio) -> Option<registers::InterruptFlag> {
+         // Check interrupts in priority order (highest to lowest)
+         if self.get_interrupt_enable_flag(registers::InterruptFlag::VBlank, mmio) && self.get_interrupt_flag(registers::InterruptFlag::VBlank, mmio) {
