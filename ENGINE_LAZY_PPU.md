@@ -150,3 +150,49 @@ cctracer is the per-line oracle (exact boundary cc). After each phase run the FU
 (`--json`), diff with `/tmp/diff_runs.py`, keep only net-positive, attribute every red to an
 unfinished phase. Single-speed clusters and the non-PPU clusters must converge back. Mergeable
 to `main` only when net-positive with zero unexplained regressions.
+
+## LP-ATOMIC RESULTS (branch `lp-atomic`, all 5 wiring steps done together)
+
+Implemented the full atomic move: `m0_time_master` = exact lyTime-anchored m0Time;
+`scheduled_mode0_dot` DERIVED from it (`arm_ticks + (m0t-arm_cc)>>ds`); getStat
+(`master_cc+2 < m0Time`), the `PixelTransfer->HBlank` transition (`master_cc >= m0Time`, flush
+FIFO to 160, x==160 only a no-m0Time fallback), VRAM/OAM/cgbp blocking, and the m0 IRQ arm all
+driven off the ONE boundary. Removed `K`/`KD`/`STAT_READ_CC_OFF`/`ACCESS_CC_RELOC`/
+`RB_CGBP_DS_END`/`dma_scx_m0_nudge` from these paths. bus passes raw `master_cc()`.
+
+**Net = 828 vs 562 (−266; fixed 69 / broke 335).** NOT mergeable. The formula is **byte-exact vs
+cctracer wherever the LCD-enable anchor `p_now` is correct** (verified: non-sprite scx0..7 ds_1
+mode3 + ds_2 mode0 are byte-identical m0Time AND lyTime). The intended straddle targets converge
+(m2int_m3stat 17→13; cgbpal/dma/m2int_m0irq partially). But the move EXPOSES two pre-existing,
+**anchor** bugs that the swept fudges were silently absorbing — both are `p_now`/abs_cc
+miscalibrations, NOT m0Time-formula errors, and both are unreachable from the PPU closed form:
+
+1. **Sprite-heavy roms: `p_now` is 4cc (2 dots DS) too high → abs_cc/lyTime/m0Time 4cc LOW.**
+   `sprites/space` (112 were passing, all broke) + `sprites` (net −40). cctracer proof on
+   `10spritesPrLine_nr10space10_m3stat_ds_1` (out3=mode3): Gambatte cc=216984 m0Time=216990
+   (mode3); rustyboi master_cc=149820 m0t=149822 (mode0, WRONG by reading 1 step late). CPU is
+   perfectly synced — DISPATCH 0x48 and the FF41 read share offset 67164 — but offset-correcting
+   Gambatte's lyTime (217184→150020) vs rustyboi's (150016) shows the **PPU trails the CPU 4cc on
+   these roms only**. rustyboi `line_cycle` IS locked to abs_cc (constant +45 phase), so the drift
+   is in `p_now` set at this rom's enable/LY-write/speedchange sequence, not the line counter.
+   m3_len matches Gambatte exactly (275 = m0_lineCycle 359 − BASE 84) — sprite cycles are right.
+2. **Post-speedchange lines: m0Time 1cc too HIGH** (the lyTime `+1` over-corrects after a
+   `speed_change` p_now rebase). `speedchange` net −34, `dma/hdma_late_m3speedchange` etc.
+   cctracer proof on `speedchange2_frame1_m2int_m3stat_scx2_2` (out0=mode0): Gambatte cc=417748
+   m0Time=417750 (mode0); rustyboi 354976 m0t=354979, off +1 high → reads mode3. The identical
+   non-speedchange `m2int_scx2_m3stat_ds_2` is byte-exact (rustyboi m0t 149610 == Gambatte 198538
+   offset-corrected). So the `+1` is right at steady state, wrong right after a speed change.
+
+**Anomaly resolved:** the flagged "assigning a get_stat-only field flips a sprite render test" is
+the SAME root — those sprite render tests were riding the eager grid whose m0-boundary the
+swept K=6 fudge put 5cc above the exact value; the exact m0Time is 4cc below where the drifted
+`p_now` needs it, so any consumer reading the exact value desyncs the sprite line. It is a control
+coupling only through `p_now`, not a hidden side effect of `compute_m3_length` (which is pure).
+
+**Next levers (both are CPU/anchor-engine, outside this closed form):**
+- Fix the `p_now` enable/speedchange rebase so abs_cc tracks Gambatte's `p_.now()` on the
+  sprite + post-speedchange roms (the 4cc and the +1). Bisect the enable / LY-write / `speed_change`
+  / `stop_bridge_advance` p_now math against cctracer's lineStart on one sprite rom. Once `p_now`
+  is exact the formula is byte-exact everywhere (proven on the non-drifted clusters).
+- The branch keeps the exact grid; it is the correct target. It is net-negative ONLY because of
+  these two anchor drifts. Do NOT re-introduce K/KD to mask them — fix `p_now`.
