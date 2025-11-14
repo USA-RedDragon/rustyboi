@@ -887,15 +887,30 @@ impl Ppu {
     /// line), fall back to the m0 prediction from the m3 length.
     fn arm_m0irq_for_current_line(&mut self, mmio: &mmio::Mmio) {
         let is_cgb = mmio.is_cgb_features_enabled();
-        // The mode-0 STAT IRQ is armed from the CPU-visible reported mode-0 dot
-        // (decoupled from the live pipeline termination), so the IRQ fires in
-        // lockstep with the FF41 mode-0 read-back.
-        let mode0_within_line = match self.reported_mode0_dot_value(mmio) {
-            Some(d) => d as i64,
-            None => {
-                let m3_len = self.compute_m3_length(mmio, is_cgb);
-                let offset = if is_cgb { cgb_mode0_offset() } else { dmg_mode0_offset() };
-                self.ticks as i64 + m3_len as i64 + offset as i64
+        // The mode-0 (HBlank) STAT IRQ time is co-calibrated with the
+        // `ticks + m3_len + offset` mode-0 dot, NOT the exact getStat `m0Time`.
+        // The lazy-PPU rewrite re-derived `scheduled_mode0_dot` from the exact
+        // getStat m0Time (which the CPU read resolves at `cc + 2 < m0Time`),
+        // landing it 1-3 dots earlier than the eager mode-0 grid the m0 IRQ
+        // offset (M0IRQ_OFFSET) was tuned against. Reading `reported_mode0_dot`
+        // (= that exact dot) here armed the m0 IRQ early and broke the
+        // m2int_m0irq / m0enable / enable_display / vramw_m3end m0-IRQ clusters.
+        // Arm from the m3-length dot instead — the same anchor core-loop used —
+        // so the IRQ fires on the calibrated boundary again. (Env-overridable to
+        // restore the exact-m0Time arm for diagnostics.)
+        let use_m3len = std::env::var("RB_M0IRQ_M3LEN").map(|v| v != "0").unwrap_or(true);
+        let mode0_within_line = if use_m3len {
+            let m3_len = self.compute_m3_length(mmio, is_cgb);
+            let offset = if is_cgb { cgb_mode0_offset() } else { dmg_mode0_offset() };
+            self.ticks as i64 + m3_len as i64 + offset as i64
+        } else {
+            match self.reported_mode0_dot_value(mmio) {
+                Some(d) => d as i64,
+                None => {
+                    let m3_len = self.compute_m3_length(mmio, is_cgb);
+                    let offset = if is_cgb { cgb_mode0_offset() } else { dmg_mode0_offset() };
+                    self.ticks as i64 + m3_len as i64 + offset as i64
+                }
             }
         };
         let remaining = mode0_within_line - self.ticks as i64;
@@ -1030,7 +1045,12 @@ impl Ppu {
         if self.sched_m2irq <= cc {
             self.do_mode2_irq_event(mmio, ds);
         }
-        if self.sched_m0irq <= cc {
+        // The mode-0 (HBlank) STAT IRQ schedules at an odd `abs_cc` (a half-dot)
+        // at double speed; the per-dot dispatch flags it one M-cycle late, which
+        // pushes it across a CPU instruction boundary (≈4cc service delay).
+        // Anticipating by `ds` dots lands it on the boundary Gambatte services at
+        // — the same half-dot sub-dot fix applied to the LYC=LY IRQ above.
+        if self.sched_m0irq <= cc + ds as u64 {
             let stat = self.stat_reg_committed;
             let ly = self.internal_ly() as u32;
             if self.mstat_irq.do_m0_event(ly, stat, self.lyc_irq.lyc_reg()) {
