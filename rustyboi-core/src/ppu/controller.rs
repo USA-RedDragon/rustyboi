@@ -2506,15 +2506,24 @@ impl Ppu {
         }
         let cc = access_cc as i64;
         let ds = double_speed as i64;
+        // The cached `m0_time_master` is byte-exact with Gambatte's `m0Time` at a
+        // boot offset N, but the raw `master_cc` the bus snapshots sits at offset
+        // N+1 (one master-cc below) for the `ld (hl)` / `ld (ff69),a` style memory
+        // accesses these gates serve — so the access-cc must anchor at `cc + 1` to
+        // share m0Time's offset. Without it the END boundary lands 1 cc short on
+        // odd-SCX lines whose `cc + 2` ties `m0Time` exactly (postread_scx3 etc.).
+        // (The FF41/getStat read uses a different opcode whose raw cc already shares
+        // the offset, so this correction is scoped to the access gate.)
+        let cc_end = cc + 1;
         // CGB palette RAM (FF69/FF6B): Gambatte `cgbpAccessible(cc)` — accessible
         // iff `lineCycles(cc) + ds < 80` OR `cc >= m0Time + 2`. Both boundaries are
-        // resolved at the raw access cc against master-cc anchors (begin =
+        // resolved at the access cc against master-cc anchors (begin =
         // cgbp_block_start_cc, end = exact m0_time_master).
         if kind == 2 {
             if let Some(start) = self.cgbp_block_start_cc {
                 let begun = cc >= start as i64;
                 let ended = match self.m0_time_master {
-                    Some(m0t) => cc >= m0t as i64 + 2,
+                    Some(m0t) => cc_end >= m0t as i64 + 2,
                     None => false,
                 };
                 return Some(begun && !ended);
@@ -2524,7 +2533,7 @@ impl Ppu {
             let m0t = self.m0_time_master;
             let begun = self.ticks as i64 + ds - (4 - is_cgb as i64) >= 80;
             let ended = match m0t {
-                Some(m0t) => cc >= m0t as i64 + 2,
+                Some(m0t) => cc_end >= m0t as i64 + 2,
                 None => return Some(begun && mode3_locked),
             };
             return Some(begun && !ended);
@@ -2536,8 +2545,24 @@ impl Ppu {
         // value, so the `cc+2 >= m0t` test would spuriously report "ended" and
         // unblock OAM mid-OAM-scan. In mode 2 the access is simply blocked.
         let m0t = self.m0_time_master? as i64;
-        let ended = self.state != State::OAMSearch && cc + 2 >= m0t;
-        Some(mode3_locked && !ended)
+        // END unblocks at Gambatte's `cc + 2 >= m0Time` (exact), resolved at the
+        // raw access cc. The post-tick FF41 mode register (`mode3_locked`) crosses
+        // this boundary one access-tick (2/4 cc) EARLY because `ppu_locks_access`
+        // runs after `tick_m`, so it cannot gate the END — a `postread` landing at
+        // `cc = m0Time - 4` (still mode 3 at the access cc) would wrongly unblock.
+        // Resolve the mode-3 END here from `m0Time`; gate the START on the mode-2->3
+        // master-cc anchor (`cgbp_block_start_cc`, == `lineCycles + ds >= 80`) when
+        // it exists, else fall back to the register's `mode3_locked`. OAM is also
+        // blocked through mode 2: in `OAMSearch` (mode 2) `m0_time_master` still
+        // holds the PREVIOUS line's (past) value, so the END test must not apply.
+        let ended = self.state != State::OAMSearch && cc_end + 2 >= m0t;
+        let started = match self.cgbp_block_start_cc {
+            // mode 3 has begun at the access cc; for OAM (blocked from mode 2)
+            // the register `mode3_locked` already covers the mode-2 prefix.
+            Some(start) => cc >= start as i64 || mode3_locked,
+            None => mode3_locked,
+        };
+        Some(started && !ended)
     }
 
     /// Gambatte `getStat` mode-3 <-> mode-0 resolution at the CPU's access cc.

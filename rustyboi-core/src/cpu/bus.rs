@@ -191,9 +191,6 @@ impl<'a> Bus<'a> {
         // Snapshot the access cc at the read's START (Gambatte resolves PPU
         // access gating at `cc` before advancing). The cgbp begin/end boundary
         // is master-cc based and must anchor here, not at the post-tick cc.
-        // CL1: PPU access-gating (VRAM/OAM/cgbp) resolves at the honest
-        // start-of-access cc; the +4 vs the old `access_cc()` is folded into the
-        // `cpu_access_blocked` boundary constants.
         let pre_access_cc = self.mmio.master_cc();
         self.tick_m();
         // VRAM is inaccessible to the CPU during Mode 3, OAM during Mode 2/3;
