@@ -2521,7 +2521,14 @@ impl Ppu {
         // cgbp_block_start_cc, end = exact m0_time_master).
         if kind == 2 {
             if let Some(start) = self.cgbp_block_start_cc {
-                let begun = cc >= start as i64;
+                // Gambatte cgbpAccessible BEGIN: blocked once `lineCycles(cc) + ds
+                // >= 80`. The shared `cgbp_block_start_cc` anchor is armed at the
+                // tick where `ticks == 80 - ds + (4 - cgb)`; the `(4 - cgb)`
+                // ticks->lineCycles conversion belongs to the VRAM/OAM start gate
+                // (which reuses the anchor), not to cgbp itself, so undo it here so
+                // the cgbp begin lands exactly on Gambatte's `lineCycles + ds >= 80`.
+                let cgbp_start = start as i64 - (4 - is_cgb as i64);
+                let begun = cc_end >= cgbp_start;
                 let ended = match self.m0_time_master {
                     Some(m0t) => cc_end >= m0t as i64 + 2,
                     None => false,
