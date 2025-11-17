@@ -1261,10 +1261,12 @@ impl Ppu {
             // CGB window lines at SCX%8 == 5: the closed-form mode-3 window
             // penalty runs one dot long versus Gambatte's M3Start fine-scroll
             // dispatch at this phase, flipping the sampled STAT mode on the
-            // m2int_*_scx5 window probes. Scoped to this SCX phase / speed-
-            // agnostic; other phases (scx2 DMG, scx7) regress and stay put.
+            // m2int_*_scx5 window probes — but only at single speed; at double
+            // speed Gambatte's phase agrees, so the -1 over-corrects (the DS
+            // m2int_wx*_scx5_m3stat reads flip mode3->mode0).
             if is_cgb && scx == 5 && self.sprites_on_line.is_empty() {
-                cycles += env_off("RB_WIN_M3_SCX5_CGB", -1) as i32;
+                let dflt = if mmio.is_double_speed_mode() { 0 } else { -1 };
+                cycles += env_off("RB_WIN_M3_SCX5_CGB", dflt) as i32;
             }
             win = true;
         }
