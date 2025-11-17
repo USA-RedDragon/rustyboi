@@ -184,7 +184,7 @@ impl<'a> Bus<'a> {
             // Gambatte resolves FF41 at the raw master cc (== Gambatte `cc`);
             // boundary mode3 iff `master_cc + 2 < m0Time`.
             let access_cc = self.mmio.master_cc();
-            self.ppu.get_stat_mode3to0_at_cc(access_cc)
+            self.ppu.get_stat_mode3to0_at_cc(access_cc, self.mmio.is_double_speed_mode())
         } else {
             None
         };

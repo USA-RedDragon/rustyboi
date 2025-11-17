@@ -2598,7 +2598,7 @@ impl Ppu {
     /// (now Gambatte-exact) persisted boundary at single speed and adds correct
     /// sub-dot resolution at double speed, where the CPU samples FF41 at an odd
     /// master cc that the per-dot renderer would otherwise round.
-    pub fn get_stat_mode3to0_at_cc(&self, access_cc: u64) -> Option<u8> {
+    pub fn get_stat_mode3to0_at_cc(&self, access_cc: u64, ds: bool) -> Option<u8> {
         if self.disabled || self.internal_ly_val >= 144 {
             return None;
         }
@@ -2610,8 +2610,13 @@ impl Ppu {
             return None;
         }
         let m0t = self.m0_time_master? as i64;
-        // Gambatte getStat: mode 3 iff `cc + 2 < m0Time` (raw master cc).
-        if (access_cc as i64) + 2 < m0t {
+        // Gambatte getStat: mode 3 iff `cc + 2 < m0Time`. The shared m0Time carries
+        // the lyTime `+1` correction the VRAM/OAM/cgbp access gate needs; at single
+        // speed (and only when not in a post-DS->SS-switch line, where `lytime_no_plus1`
+        // already drops it) it sits 1cc high for the getStat read specifically, so the
+        // read boundary uses `+3` instead of `+2`.
+        let read_off = if !ds && !self.lytime_no_plus1 { 3 } else { 2 };
+        if (access_cc as i64) + read_off < m0t {
             Some(3)
         } else {
             Some(0)
