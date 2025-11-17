@@ -320,3 +320,29 @@ the true **per-access cc** (track the exact intra-instruction cc through the int
 ISR read resolves at its real cc without changing latency). That is ENGINE_REWRITE steps 2-3 — a
 CPU-engine model change, the atomic partner to this PPU rewrite. `rewrite-int` (603) is the correct
 PPU foundation; `main`/`core-loop` remain clean at 562.
+
+## TRACE-AND-FIX: getStat single-speed boundary (rewrite-int 603 -> 586)
+
+Resolved the "ISR read needs +1" mystery by tracing a failing case byte-for-byte vs the cctracer
+oracle (`sprites/1spritesPrLine_m3stat_2`): **the CPU dispatch is byte-EXACT** (rustyboi dispatch cc,
+read cc, and line_cycle all match Gambatte at offset 7464) — so it is NOT a CPU per-access/dispatch
+problem. The only difference: rustyboi's `m0_time_master` is **1cc too high at single speed**
+(78731 vs 78730), because the shared m0Time carries the `+1` lyTime correction that the VRAM/OAM/cgbp
+access gate genuinely needs, but which over-corrects the getStat READ by 1cc at single speed.
+
+FIX (committed): `get_stat_mode3to0_at_cc` uses `access_cc + 3 < m0Time` (not `+2`) at single speed
+when not in a post-DS->SS-switch line (`!lytime_no_plus1`). Net **−17** (fixed 21 SS m3stat reads:
+sprites/m2int/late; broke 4 inline gdma/hdma — those are ISR-context too, so in_isr gating does NOT
+separate them; the +1 is a genuine straddle swap for the DMA-context inline reads). This proves the
+"per-access cc" hypothesis was WRONG for the SS residuals — they were a PPU m0Time calibration bug,
+fixable surgically.
+
+### State: rewrite-int = 586 (was 670 rewrite; core-loop/main 562 → only +24)
+Recovered 84 of the 108 rewrite regressions. The remaining ~90 broke / 66 fixed (net +24) are:
+- **DS sub-dot STAT-IRQ enable/disable timing** (m1, lycEnable, m2enable — all `_ds_`): enabling/
+  disabling a STAT IRQ at a precise DS half-dot; the `stat_change_triggers` sub-dot evaluation.
+- **speedchange m3stat (22, all `_1`)**: the SS->DS bridge `+2 line_cycle` vs sprite `m3_len` are
+  entangled (fixing one un-cancels the other) — the documented bridge/sprite coupling.
+- **window/dma DS boundary reads**: the DS half-dot access-cc phase per access type.
+These are the genuine DS sub-dot convergence frontier. `rewrite-int` (586) is NOT yet mergeable
+(+24 vs core-loop); `main` stays clean at 562. Next: DS sub-dot STAT-write-trigger + bridge phase.
