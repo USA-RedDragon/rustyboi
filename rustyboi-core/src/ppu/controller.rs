@@ -2562,6 +2562,21 @@ impl Ppu {
         // it exists, else fall back to the register's `mode3_locked`. OAM is also
         // blocked through mode 2: in `OAMSearch` (mode 2) `m0_time_master` still
         // holds the PREVIOUS line's (past) value, so the END test must not apply.
+        // OAM-WRITE line-wrap (Gambatte oamWritable): in the last few dots of a line
+        // the next line's mode-2 OAM scan is imminent, so an OAM WRITE is already
+        // dropped — except on the vblank-entry line (ly 143, whose successor is mode
+        // 1, not mode 2). Gambatte gates this on `lineCycles(cc) + 3 + cgb >=
+        // lcd_cycles_per_line`; `line_cycle` is the post-tick within-line dot, one
+        // ahead of the pre-tick access cc, so `lineCycles(cc) = line_cycle - 1`.
+        // (Reads use a different sub-M-cycle phase; left on the m0Time path.)
+        if kind == 1 && !is_read {
+            let line_cycles_cc = self.line_cycle as i64 - 1;
+            if line_cycles_cc + 3 + is_cgb as i64 >= stat_irq::LCD_CYCLES_PER_LINE as i64 {
+                let ly = self.internal_ly_val as i64;
+                let accessible = ly >= 143 && ly < 153;
+                return Some(!accessible);
+            }
+        }
         let ended = self.state != State::OAMSearch && cc_end + 2 >= m0t;
         let started = match self.cgbp_block_start_cc {
             // mode 3 has begun at the access cc; for OAM (blocked from mode 2)
