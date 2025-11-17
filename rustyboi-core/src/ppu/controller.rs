@@ -717,11 +717,16 @@ impl Ppu {
                 }
             } else if clean_ds {
                 if let (Some(m0t), Some(ws)) = (self.m0_time_master, self.win_start_dot) {
-                    let lock = ws + (WIN_M3_PENALTY as u128 - 2);
-                    if (self.ticks as u128) < lock {
-                        self.m0_time_master =
-                            Some((m0t as i64 - ((WIN_M3_PENALTY as i64) << 1)).max(0) as u64);
-                    }
+                    // GRADUATED refund (as in the single-speed branch): the window
+                    // penalty accrues one dot per drawn window dot, capped at
+                    // WIN_M3_PENALTY; the unaccrued remainder is refunded. At double
+                    // speed each dot is 2 cc. (Was a binary full-or-none refund,
+                    // which over-refunded an early disable by the 2 already-drawn
+                    // window dots -> the late_disable_early_*_ds reads flipped.)
+                    let drawn = (self.ticks as i64) - ws as i64;
+                    let accrued = drawn.clamp(0, WIN_M3_PENALTY as i64);
+                    let refund = (WIN_M3_PENALTY as i64 - accrued) << 1;
+                    self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
                 } else {
                     self.m0_time_master = None;
                 }
