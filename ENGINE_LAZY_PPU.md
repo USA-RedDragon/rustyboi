@@ -281,3 +281,42 @@ HALT-bug fix). It is NOT a PPU/m0Time/anchor issue. **The PPU lazy-closed-form r
 its goal: the PPU timing is byte-exact.** The remaining lp-atomic breakages (the ~150 beyond bug#1/#2) are
 very likely all this one CPU dispatch-phase root — fixing it should resolve the cluster wholesale and is the
 correct next target. The PPU rewrite + CPU-dispatch fix together are the path to net-positive.
+
+## PARALLEL FAN-OUT + PREFETCH RESULTS (rewrite-int = 603)
+
+Baselines re-confirmed: **core-loop 562, rewrite (d9f3322) 670** (the "core-loop=670" some
+agents reported was a contaminated build — building in the main checkout runs the wrong branch).
+
+8 load-gated agents (one per regression cluster, isolated worktrees off `rewrite`) + integration
+onto **`rewrite-int`** drove **670 → 603 (−67)** via GENUINE, zero-regression PPU fixes:
+- **m0 IRQ arm** (−37): the rewrite over-shifted `sched_m0irq` by deriving it from the exact
+  getStat m0Time; revert just the IRQ arm to the `ticks + m3_len + offset` dot (keep exact m0Time
+  for reads) + half-dot DS dispatch.
+- **VRAM/OAM/cgbp access boundaries** (−21): END at access-cc m0Time, cgbp BEGIN, OAM line-wrap.
+- **on_screen window render** (−9): drain the FIFO to x=160 at m0Time on window-start lines.
+- HALT-bug prefetch (parked on `cpu-prefetch`, +1 net alone).
+
+`rewrite-int` is still **+41 vs core-loop** (603 vs 562) — NOT mergeable. Every remaining regression
+(late/speedchange/m2int/hdma/lyc153/m1irq/sprites m3stat) is the SAME root: the **CPU per-access /
+interrupt-dispatch cc** for ISR-dispatched FF41 reads.
+
+### Prefetch / dispatch-cc: empirically bounded (this session)
+The ISR-dispatched FF41 read needs to resolve ~+4cc (one M-cycle / "+1 access") vs an inline read at
+the same PPU phase. Three implementations tried and measured on the exact-PPU `rewrite-int`:
+1. **HALT-bug prefetch** (IME=0 + IE&IF: no halt, reuse post-HALT byte, PC fails to increment):
+   correct & Gambatte-faithful; fixes the `noime_ifandie` tests but **+1 net** (the double-fetch
+   shifts poll-loop timing — same straddle collateral). Parked on `cpu-prefetch`.
+2. **Kept-prefetch as dispatch LATENCY** (+4cc to every interrupt): **catastrophic −1090 (→1693)**.
+   FIXED exactly the residual clusters (late 51, m2int 13, lyc153 7, m1irq 6, sprites 5) but broke
+   1120 — the +4 latency desyncs timer counters (tc00/tc01) and rendering (scy/bgtilemap). The +4
+   the reads need is a RESOLUTION shift, NOT latency.
+3. **Reads-only ISR FF41 bias** (+4 to FF41 read resolution while in-ISR, set at dispatch, cleared
+   on RETI): **+326 (→929)**. Over-applies — the test handlers `jp` away and never RETI, so the bias
+   persists into later inline reads; and per the sprites-vram trace even a clean per-read +1 is a
+   fundamental mode3↔mode0 1-for-1 swap (fixes `_2`, breaks `_1`/inline at the same offset).
+
+CONCLUSION: the residual is NOT fixable by a constant bias or a dispatch-latency change — it requires
+the true **per-access cc** (track the exact intra-instruction cc through the interrupt dispatch so an
+ISR read resolves at its real cc without changing latency). That is ENGINE_REWRITE steps 2-3 — a
+CPU-engine model change, the atomic partner to this PPU rewrite. `rewrite-int` (603) is the correct
+PPU foundation; `main`/`core-loop` remain clean at 562.
