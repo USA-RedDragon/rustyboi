@@ -750,10 +750,11 @@ impl Mmio {
         // (the next opcode is fetched *before* the transfer's cc advance) and a
         // trailing `cc += 4`. Synchronous GDMA here charges the transfer up
         // front, so the post-stall return must absorb that prefetch/setup
-        // overlap; +6 lands the next STAT-mode read on the exact mode-0 dot for
-        // the gdma_cycles boundary pairs.
+        // overlap; +5 lands the next STAT-mode read on the exact mode-0 dot for
+        // the gdma_cycles boundary pairs (the PPU position trailed the synced
+        // master cc by ~1 dot at the read with the old +6 — see fix-gdma).
         let (per_byte, setup) = if self.is_double_speed_mode() { (4, 5) } else { (2, 4) };
-        self.pending_dma_stall += (effective_length as u32) * per_byte + setup + 6;
+        self.pending_dma_stall += (effective_length as u32) * per_byte + setup + 5;
     }
 
     // ----------------------------------------------------------------------
