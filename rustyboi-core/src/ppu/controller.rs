@@ -268,6 +268,17 @@ pub struct Ppu {
     // read-at-cc recompute to decide whether a mid-M3 window-disable keeps the
     // window-inclusive m0Time or reverts to the no-window length.
     win_start_dot: Option<u128>,
+    // Predicted within-line `ticks` at which the window WILL begin drawing this
+    // line, computed at M3 arm from WX/SCX when a window is scheduled. Used only
+    // on DMG to resolve the disable-AT-window-start boundary race: the LCDC-write
+    // hook fires during the CPU's store, one step before the PixelTransfer code
+    // that latches `win_start_dot`, so a disable landing on the exact start dot
+    // sees `window_started_this_line == false` even though the StartWindowDraw
+    // penalty is already committed. The late_disable_N cluster brackets this:
+    // disable strictly before the start dot refunds (mode 0), at/after keeps
+    // (mode 3). `None` when no window is scheduled this line.
+    #[serde(default)]
+    predicted_win_start_dot: Option<u128>,
     // Set once a late-WX mid-window refund has been applied this line, so a
     // second WX write does not refund twice.
     win_wx_penalty_resolved: bool,
@@ -523,6 +534,7 @@ impl Ppu {
             win_draw_started_at_x0: false,
             window_y_triggered: false,
             win_start_dot: None,
+            predicted_win_start_dot: None,
             win_wx_penalty_resolved: false,
             window_started_this_line: false,
             previous_stat_interrupt_line: false,
@@ -706,17 +718,49 @@ impl Ppu {
             // and m0Time together). Scoped CGB / no sprites / single speed; DS
             // keeps the calibrated binary lock below. The live pipeline
             // (scheduled_mode0_dot) is invalidated above regardless.
-            let clean_ss = cgb_features_enabled
-                && !ds
-                && self.sprites_on_line.is_empty();
+            // Single-speed window-disable handling for both CGB and DMG. The
+            // StartWindowDraw mode-3 penalty is captured (full) at M3 arm in
+            // m0_time_master. CGB refunds the not-yet-drawn window dots gradually;
+            // DMG is binary (full keep once committed, else null) — see the two
+            // branches below. The DMG late_disable cluster reads the STAT mode
+            // after the disable and expects mode 3 to persist whenever the window
+            // had already committed, which the binary keep provides; the prior
+            // null-and-fall-back-to-live-no-window path reported mode 0 too early.
+            let clean_ss = !ds && self.sprites_on_line.is_empty();
             let clean_ds = cgb_features_enabled
                 && ds
                 && self.m3_arm_scx & 7 == 0
                 && self.sprites_on_line.is_empty();
-            if enable_off || !only_win_toggle || !self.window_started_this_line {
+            // On DMG the LCDC-write hook fires one PPU step before the
+            // PixelTransfer code latches `win_start_dot`, so a disable landing
+            // exactly on the window-start dot still sees
+            // `window_started_this_line == false`. Bridge that one-step race with
+            // the M3-arm prediction: the window is effectively started once the
+            // current tick has reached the predicted start dot. The graduated
+            // refund then uses the predicted dot as the start (drawn==0 at the
+            // boundary -> full penalty kept).
+            let win_started_for_refund = self.window_started_this_line
+                || (!cgb_features_enabled
+                    && self
+                        .predicted_win_start_dot
+                        .is_some_and(|p| self.ticks >= p));
+            // CGB keeps the graduated refund (predicted_win_start_dot is DMG-only,
+            // so this is just win_start_dot on CGB); DMG uses the binary keep below.
+            let refund_start_dot = self.win_start_dot.or(self.predicted_win_start_dot);
+            if enable_off || !only_win_toggle || !win_started_for_refund {
                 self.m0_time_master = None;
+            } else if clean_ss && !cgb_features_enabled {
+                // DMG: the StartWindowDraw penalty is binary, not graduated. Once
+                // the window has reached its commit dot (win_started_for_refund),
+                // a mid-M3 window-disable keeps the FULL window-inclusive m0Time
+                // (mode 3 persists through the read); a disable before the commit
+                // dot already nulled above (no penalty -> mode 0). The
+                // late_disable_* DMG cluster (out0 just-before vs out3 at/after)
+                // brackets exactly this binary boundary; a graduated refund here
+                // over-shortens the at/after cases at SCX>0 / higher WX. Keep the
+                // window-inclusive m0_time_master as captured at M3 arm (no-op).
             } else if clean_ss {
-                if let (Some(m0t), Some(ws)) = (self.m0_time_master, self.win_start_dot) {
+                if let (Some(m0t), Some(ws)) = (self.m0_time_master, refund_start_dot) {
                     let drawn = (self.ticks as i64) - ws as i64;
                     let accrued = drawn.clamp(0, WIN_M3_PENALTY as i64);
                     let refund = WIN_M3_PENALTY as i64 - accrued;
@@ -1864,6 +1908,7 @@ impl Ppu {
                     // Reset window line flag for new scanline
                     self.window_started_this_line = false;
                     self.win_start_dot = None;
+                    self.predicted_win_start_dot = None;
                     self.win_wx_penalty_resolved = false;
 
                     // Initialize OAM search state
@@ -2027,6 +2072,33 @@ impl Ppu {
                         self.scheduled_mode0_dot = Some(dot.max(0) as u128);
                         self.m3_scheduled_wx = mmio.read(WX);
                         self.m3_scheduled_win = self.window_will_start(mmio, is_cgb);
+                        // Predict the DMG dot at which the window's StartWindowDraw
+                        // mode-3 penalty commits, so a disable landing on it (one
+                        // PPU step before the PixelTransfer latch sets
+                        // `win_start_dot`) is still treated as "started". The window
+                        // draws when visible x reaches max(0, WX-7); x begins
+                        // advancing `WARMUP + 8` dots past the M3 arm (the first BG
+                        // tile fill) plus the SCX fine-scroll discard. The penalty
+                        // commits at the fetcher's window-tile boundary, one dot
+                        // ahead of the first window pixel reaching x (the `-1`), so
+                        // a disable on the dot before the visible start still keeps
+                        // it (late_disable_*_wx11 vs the same-tile wx10).
+                        self.predicted_win_start_dot =
+                            if !is_cgb && self.m3_scheduled_win {
+                                let wx = self.m3_scheduled_wx as i64;
+                                let x_at_start = (wx - 7).max(0);
+                                Some(
+                                    (self.m3_arm_dot as i64
+                                        + DMG_PIXEL_TRANSFER_WARMUP as i64
+                                        + 8
+                                        + (self.m3_arm_scx as i64)
+                                        + x_at_start
+                                        - 1)
+                                        .max(0) as u128,
+                                )
+                            } else {
+                                None
+                            };
                         // cgbp begin boundary (Gambatte cgbpAccessible: blocked once
                         // `lineCycles(cc) + ds >= 80`). lineCycles = ticks - (4 - cgb),
                         // so the block begins at the renderer tick
