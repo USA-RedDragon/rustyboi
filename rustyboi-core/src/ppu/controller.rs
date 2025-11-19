@@ -395,6 +395,14 @@ pub struct Ppu {
     // enable / LY reset. See ENGINE_LAZY_PPU.md bug #2.
     #[serde(default)]
     lytime_no_plus1: bool,
+    // Set when an SS->DS speed switch executes during PixelTransfer (mode 3) and
+    // the bridge dropped 2 dots (see `stop_bridge_advance`). If a subsequent
+    // DS->SS switch follows (the double-switch speedchange{2..5} families), that
+    // bridge restores the 2 dots so the net renderer advance matches the
+    // single-switch base family's tuning. Cleared by the compensating DS->SS
+    // switch or at the next LCD enable / LY reset.
+    #[serde(default)]
+    sc_mode3_pullback_pending: bool,
     // Sub-PPU-dot parity (0/1) of the currently-resolving CPU register write at
     // double speed. Set by the bus just before the FF4x write hooks run.
     #[serde(skip, default)]
@@ -532,6 +540,7 @@ impl Ppu {
             scheduled_mode0_dot: None,
             m0_time_master: None,
             lytime_no_plus1: false,
+            sc_mode3_pullback_pending: false,
             cgbp_block_start_cc: None,
             mode0_reported_this_line: false,
             abs_cc: 0,
@@ -1750,6 +1759,7 @@ impl Ppu {
                 let ds_inc = 1u64 << mmio.is_double_speed_mode() as u32;
                 self.p_now = mmio.master_cc().wrapping_sub(self.abs_cc + ds_inc);
                 self.lytime_no_plus1 = false;
+                self.sc_mode3_pullback_pending = false;
                 self.wy2 = mmio.read(WY);
                 self.wy2_apply_cc = wy2_disabled();
                 self.wy1 = mmio.read(WY);
@@ -2629,6 +2639,28 @@ impl Ppu {
         }
     }
 
+
+    /// True when the PPU is currently in PixelTransfer (STAT mode 3, active
+    /// rendering). Used by the CGB STOP speed-switch bridge to gate the
+    /// mode-3-specific dot correction.
+    pub fn is_in_pixel_transfer(&self) -> bool {
+        !self.disabled && self.state == State::PixelTransfer
+    }
+
+    /// Arm the SS->DS-during-mode3 bridge pullback marker (the SS->DS bridge
+    /// dropped 2 dots). A following DS->SS switch consumes it.
+    pub fn arm_sc_mode3_pullback(&mut self) {
+        self.sc_mode3_pullback_pending = true;
+    }
+
+    /// Consume the SS->DS-during-mode3 pullback marker, returning whether it was
+    /// set. Used by the DS->SS bridge to restore the 2 dropped dots for the
+    /// double-switch speedchange families.
+    pub fn take_sc_mode3_pullback(&mut self) -> bool {
+        let p = self.sc_mode3_pullback_pending;
+        self.sc_mode3_pullback_pending = false;
+        p
+    }
 
     pub fn get_x(&self) -> u8 {
         self.x

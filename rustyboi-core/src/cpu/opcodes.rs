@@ -24,7 +24,30 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // Counts swept against the full suite; the asymmetry follows the
         // speed-direction-dependent dot accounting of the bridge.
         let to_double = !mmio.is_double_speed_mode();
-        let bridge = if to_double { 8 } else { 3 };
+        // SS<->DS bridge dot count. Gambatte's `Memory::stop` advances the LCD to
+        // `cc + 8` at the OLD (single) speed before re-anchoring; the per-dot
+        // stepper covers `8 >> ds` of those through the returned cycles, so the
+        // bridge injects the remainder. When the SS->DS switch executes during
+        // active rendering (PixelTransfer / mode 3) the renderer otherwise
+        // overshoots the post-window mode-3->mode-0 boundary by 2 dots (verified
+        // against the Gambatte cctracer on speedchange_ly44_m3_*: the m3stat FF41
+        // read lands 4cc late, lineCycle 250 vs 248), so inject 2 fewer dots and
+        // arm a marker. The double-switch families (speedchange{2..5}) follow with
+        // a DS->SS switch whose bridge restores those 2 dots, so their already-
+        // tuned reads are unaffected; the single-switch base family keeps the -2.
+        // The VBlank/boot SS->DS path (DS sprite/m2int tests) keeps the full 8.
+        let bridge = if to_double {
+            if mmio.ppu.is_in_pixel_transfer() {
+                mmio.ppu.arm_sc_mode3_pullback();
+                6
+            } else {
+                8
+            }
+        } else {
+            // DS->SS: restore the 2 dots the preceding mode-3 SS->DS bridge
+            // dropped, if any (double-switch families); else the plain bridge.
+            if mmio.ppu.take_sc_mode3_pullback() { 5 } else { 3 }
+        };
         mmio.ppu.stop_bridge_advance(mmio.mmio, bridge);
         if !to_double {
             mmio.ppu.set_dsss_lytime_adjust();
