@@ -89,7 +89,7 @@ fn env_off(name: &str, default: i64) -> i64 {
 // gave the IRQ model true odd-cc resolution: m2 relaxes -2 -> -1 (the odd-cc
 // fire is now caught by the sub-dot rather than rounded down), and the write cc
 // tightens -3 -> -4.
-fn write_cc_off_ds() -> i64 { env_off("RB_WRITE_CC_OFF_DS", -4) }
+fn write_cc_off_ds() -> i64 { env_off("RB_WRITE_CC_OFF_DS", 0) }
 fn m0irq_off_ds() -> i64 { env_off("RB_M0IRQ_OFF_DS", M0IRQ_OFFSET) }
 fn m2irq_off_ds() -> i64 { env_off("RB_M2IRQ_OFF_DS", -1) }
 // Sweep-tunable single-speed offsets (default to the compiled-in constants).
