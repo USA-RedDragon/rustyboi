@@ -194,6 +194,18 @@ impl<'a> Bus<'a> {
         } else {
             None
         };
+        // FF44 (LY) read-at-cc: Gambatte resolves LY with `getLyReg(cc)` at the
+        // access cc. In the last few cc of a line the register anticipates the
+        // next LY (and reads 0 early on line 153); the per-dot renderer flips the
+        // register one dot boundary later, so a read whose M-cycle lands in the
+        // anticipation window samples the OLD LY (one M-cycle stale). Resolve it
+        // here from the LY-counter phase at the raw read cc (== Gambatte `cc`).
+        let ly_reg_pre = if addr == ppu::LY {
+            let access_cc = self.mmio.master_cc();
+            self.ppu.get_ly_reg_at_cc(self.mmio, access_cc)
+        } else {
+            None
+        };
         // Snapshot the access cc at the read's START (Gambatte resolves PPU
         // access gating at `cc` before advancing). The cgbp begin/end boundary
         // is master-cc based and must anchor here, not at the post-tick cc.
@@ -218,6 +230,9 @@ impl<'a> Bus<'a> {
         }
         if let Some(mode) = stat_mode_pre {
             return (self.mmio.read(addr) & !0x03) | (mode & 0x03);
+        }
+        if let Some(ly) = ly_reg_pre {
+            return ly;
         }
         self.mmio.read(addr)
     }
