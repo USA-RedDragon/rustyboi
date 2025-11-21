@@ -2867,22 +2867,48 @@ impl Ppu {
         // it exists, else fall back to the register's `mode3_locked`. OAM is also
         // blocked through mode 2: in `OAMSearch` (mode 2) `m0_time_master` still
         // holds the PREVIOUS line's (past) value, so the END test must not apply.
-        // OAM-WRITE line-wrap (Gambatte oamWritable): in the last few dots of a line
-        // the next line's mode-2 OAM scan is imminent, so an OAM WRITE is already
-        // dropped — except on the vblank-entry line (ly 143, whose successor is mode
-        // 1, not mode 2). Gambatte gates this on `lineCycles(cc) + 3 + cgb >=
-        // lcd_cycles_per_line`; `line_cycle` is the post-tick within-line dot, one
-        // ahead of the pre-tick access cc, so `lineCycles(cc) = line_cycle - 1`.
-        // (Reads use a different sub-M-cycle phase; left on the m0Time path.)
-        if kind == 1 && !is_read {
-            let line_cycles_cc = self.line_cycle as i64 - 1;
-            if line_cycles_cc + 3 + is_cgb as i64 >= stat_irq::LCD_CYCLES_PER_LINE as i64 {
+        // OAM line-wrap (Gambatte oamReadable/oamWritable): in the last few dots of
+        // a line the next line's mode-2 OAM scan is imminent, so an OAM access is
+        // already locked — except on the vblank lines (ly 143..152, whose successor
+        // is mode 1, not mode 2). Gambatte gates on `lineCycles(cc) + K >= 456`:
+        //   read : lineCycles(cc) + 4 - ds   (video.cpp oamReadable)
+        //   write: lineCycles(cc) + 3 + cgb  (video.cpp oamWritable)
+        // The CPU read and write land on different sub-M-cycle phases, so the
+        // `lineCycles(cc)` each resolves at maps differently onto the renderer state:
+        //   WRITE commits on the renderer dot boundary, so `lineCycles(cc)` is the
+        //     post-tick `line_cycle`, minus the LyCounter `+1` phase that the
+        //     stop-bridge (lcdoffset / `lytime_no_plus1`) lines drop:
+        //     `line_cycle - lytime_no_plus1`. (Verified across the prewrite plain/
+        //     lcdoffset, SS/DS pairs: block boundary == lineCycles 452.)
+        //   READ samples mid-M-cycle, off the renderer dot grid; only the lyTime
+        //     master clock captures that phase, so use Gambatte's own
+        //     `lineCycles(cc) = 456 - ((lyTime - cc) >> ds)` with lyTime =
+        //     p_now + LyCounter.time (+plus1, the shared gate phase). (Verified
+        //     across the preread plain/lcdoffset, SS/DS pairs: block boundary at the
+        //     DS-lcdoffset case, accessible everywhere else.)
+        let oam_line_cycle = if kind != 1 {
+            0
+        } else if is_read {
+            let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
+            let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as i64;
+            let ly_time = self.p_now as i64 + self.abs_cc as i64 + (dots_to_next << ds) + plus1;
+            stat_irq::LCD_CYCLES_PER_LINE as i64 - ((ly_time - cc) >> ds)
+        } else {
+            self.line_cycle as i64 - self.lytime_no_plus1 as i64
+        };
+        if kind == 1 {
+            let k = if is_read { 4 - ds } else { 3 + is_cgb as i64 };
+            if oam_line_cycle + k >= stat_irq::LCD_CYCLES_PER_LINE as i64 {
                 let ly = self.internal_ly_val as i64;
                 let accessible = ly >= 143 && ly < 153;
                 return Some(!accessible);
             }
         }
         let ended = self.state != State::OAMSearch && cc_end + 2 >= m0t;
+        // OAM-WRITE DMG quirk (Gambatte oamWritable): at exactly lineCycles(cc) == 76
+        // (the last mode-2 OAM-scan dot, DMG only) an OAM write is accepted. CGB has
+        // no such escape.
+        let oam_write_escape = kind == 1 && !is_read && !is_cgb && oam_line_cycle == 76;
         let started = match (kind, vram_started) {
             // VRAM: byte-exact per-direction/model begin (see `vram_started`).
             (0, Some(s)) => s || mode3_locked,
@@ -2893,6 +2919,9 @@ impl Ppu {
                 None => mode3_locked,
             },
         };
+        if oam_write_escape {
+            return Some(false);
+        }
         Some(started && !ended)
     }
 
