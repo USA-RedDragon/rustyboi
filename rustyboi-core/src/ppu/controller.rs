@@ -2170,28 +2170,42 @@ impl Ppu {
                     }
                     // DMG wx==166 (lcd_hres+6): the window cannot draw a visible
                     // pixel this line (the line ends at xpos 166) but interacts with
-                    // winDrawState exactly as Gambatte plotPixel (886-890) does when
-                    // xpos reaches wx==166 with the WY condition met:
-                    //   - winDrawState == 0 (window NOT yet drawing this frame): the
-                    //     window STARTS this line (++winYPos, win_draw_started set) and
-                    //     also arms win_draw_start. No visible pixels here, but the next
-                    //     line's M3Start::f0 then draws with winYPos one HIGHER than an
-                    //     arm-only path would give (the DMG wxA6 off-by-one fix).
-                    //   - already started: re-arm win_draw_start only (keep drawing).
-                    // CGB never arms this way (plotPixel's !cgb guard on branch 889).
+                    // winDrawState exactly as Gambatte plotPixel (883-895) does when
+                    // xpos reaches wx==166. Gambatte's OUTER gate is
+                    //   wx==xpos && (weMaster || (wy2==ly && winEn)) && xpos<167
+                    // i.e. `weMaster` alone is sufficient and does NOT require winEn.
+                    // The INNER branches mirror Gambatte:
+                    //   branch A (891): winDrawState==0 && winEn -> start now
+                    //       (winDrawState = win_draw_start|win_draw_started, ++winYPos)
+                    //   branch B (894, else-if): !cgb && (winDrawState==0 || xpos==166)
+                    //       -> winDrawState |= win_draw_start (arm only)
+                    // For DMG wx==166 the xpos==166 term makes branch B fire on EVERY
+                    // line where the gate holds, INCLUDING lines with winEn off (the
+                    // window was disabled mid-frame). That armed win_draw_start bit then
+                    // carries — across the frame boundary, since winDrawState is not
+                    // reset at frame end — into the next frame's line-0 M3Start::f0,
+                    // which consumes it (++winYPos) and draws the window on LY=0. This
+                    // is the wxA6 weMaster-persistence path Gambatte exhibits.
+                    let win_en_now = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
+                    let we_gate = self.window_y_triggered
+                        || (self.wy2 == mmio.read(LY) && win_en_now);
                     if !is_cgb
                         && !self.first_line_after_enable
                         && mmio.read(WX) == 166
-                        && self.window_y_active(mmio)
+                        && we_gate
                     {
-                        if !self.win_draw_started {
-                            // plotPixel branch 886: start now (no visible window).
-                            self.win_y_pos = self.win_y_pos.wrapping_add(1);
+                        let win_draw_state_zero = !self.win_draw_start && !self.win_draw_started;
+                        if win_draw_state_zero && win_en_now {
+                            // plotPixel branch A (891): start now (no visible window).
+                            self.win_draw_start = true;
                             self.win_draw_started = true;
+                            self.win_y_pos = self.win_y_pos.wrapping_add(1);
+                        } else {
+                            // plotPixel branch B (894): arm for the next line's
+                            // M3Start::f0 consume (xpos==166 term, fires regardless of
+                            // winEn).
+                            self.win_draw_start = true;
                         }
-                        // plotPixel branch 889 (and the |= win_draw_start of 887):
-                        // arm for the next line's M3Start::f0 consume.
-                        self.win_draw_start = true;
                     }
                     // First scanline after enable is now armed; subsequent
                     // lines use normal Mode 2 timing.
@@ -2593,15 +2607,18 @@ impl Ppu {
                         self.pixel_transfer_warmup = 0;
                         self.window_line_counter = 0;
                         self.win_y_pos = 0xFF;
-                        // NOTE: win_draw_start is intentionally NOT reset here.
-                        // Gambatte resets winYPos at M2_Ly0::f0 but leaves
-                        // winDrawState untouched across the frame boundary, so a
-                        // window armed on the last visible line (e.g. DMG wx==166
-                        // on line 143) carries win_draw_start through vblank and
-                        // activates the window on the next frame's line 0.
+                        // NOTE: win_draw_start / win_draw_started are intentionally
+                        // NOT reset here. Gambatte resets winYPos at M2_Ly0::f0 but
+                        // leaves winDrawState (both bits) untouched across the frame
+                        // boundary, so a window armed on the last visible line (e.g.
+                        // DMG wx==166 on line 143, where plotPixel branch B arms
+                        // win_draw_start even with the window then disabled) carries
+                        // through vblank and activates the window on the next frame's
+                        // line 0 (M3Start::f0 consumes win_draw_start, ++winYPos).
+                        // This is the wxA6 weMaster-persistence path.
                         self.window_y_triggered = false;
                         self.window_started_this_line = false;
-                        
+
                         if mmio.is_cgb_features_enabled() {
                             // CGB mode: swap color framebuffers
                             self.color_fb_b = self.color_fb_a;
