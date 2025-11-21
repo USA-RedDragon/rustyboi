@@ -206,6 +206,18 @@ impl<'a> Bus<'a> {
         } else {
             None
         };
+        // FF41 (STAT) LYC=LY coincidence flag (bit 2) read-at-cc: Gambatte resolves
+        // it via getLycCmpLy at the access master cc. The per-dot renderer flips
+        // the bit at the dot it changes (e.g. line-153 LY=0 transient at dot 6); a
+        // read whose M-cycle straddles that dot reads the post-tick register one
+        // M-cycle late. Resolve the flag at access_cc so the lyc0flag/lyc153flag/
+        // ly0 boundary probes sample Gambatte's exact sub-dot.
+        let stat_lyc_pre = if addr == ppu::LCD_STATUS {
+            let access_cc = self.mmio.master_cc();
+            self.ppu.get_lyc_flag_at_cc(self.mmio, access_cc)
+        } else {
+            None
+        };
         // Snapshot the access cc at the read's START (Gambatte resolves PPU
         // access gating at `cc` before advancing). The cgbp begin/end boundary
         // is master-cc based and must anchor here, not at the post-tick cc.
@@ -228,8 +240,15 @@ impl<'a> Bus<'a> {
         if let Some(pre) = if_pre {
             return pre | (self.mmio.read(addr) & !IF_PRE_MASK);
         }
-        if let Some(mode) = stat_mode_pre {
-            return (self.mmio.read(addr) & !0x03) | (mode & 0x03);
+        if stat_mode_pre.is_some() || stat_lyc_pre.is_some() {
+            let mut v = self.mmio.read(addr);
+            if let Some(mode) = stat_mode_pre {
+                v = (v & !0x03) | (mode & 0x03);
+            }
+            if let Some(lyc_flag) = stat_lyc_pre {
+                v = (v & !0x04) | ((lyc_flag as u8) << 2);
+            }
+            return v;
         }
         if let Some(ly) = ly_reg_pre {
             return ly;
