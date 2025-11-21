@@ -2902,6 +2902,31 @@ impl Ppu {
         Some(0)
     }
 
+    /// Gambatte `LCD::getStat` LYC=LY coincidence flag (FF41 bit 2), computed at
+    /// the CPU's access cc. The per-dot renderer writes the coincidence bit into
+    /// the FF41 register at the dot it flips (e.g. the line-153 LY=0 transient at
+    /// dot 6); a read whose M-cycle straddles that dot would otherwise sample the
+    /// bit one M-cycle late from the post-tick register. Gambatte instead resolves
+    /// the flag at the read's master cc via `getLycCmpLy`:
+    ///   stat |= lycflag iff lycReg == lycCmp.ly && lycCmp.timeToNextLy > 2
+    /// (the AGB `2 - 1` term is dropped: rustyboi targets DMG/CGB only).
+    pub fn get_lyc_flag_at_cc(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<bool> {
+        if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
+            return None;
+        }
+        // Reanchor the LyCounter.time to master cc (`p_now + lc.time`), matching
+        // `get_stat_mode_at_cc`: rustyboi's LyCounter.time is in abs_cc units.
+        let lc = self.ly_counter(mmio);
+        let lc_master = stat_irq::LyCounter {
+            ly: lc.ly,
+            time: (self.p_now as i64 + lc.time as i64).max(0) as u64,
+            ds: lc.ds,
+        };
+        let cmp = stat_irq::get_lyc_cmp_ly(&lc_master, access_cc);
+        let lyc_reg = mmio.read(LYC) as u32;
+        Some(lyc_reg == cmp.ly && cmp.time_to_next_ly > 2)
+    }
+
 
     /// Byte-exact Gambatte `video.h getLyReg(cc)`. The FF44 (LY) register the CPU
     /// reads is NOT simply the renderer's LY: in the last ~6-10 cc of a line the
