@@ -288,6 +288,13 @@ impl GB {
                 self.mmio.write(0x9924 + i as u16, t);
             }
         }
+
+        // Post-boot PPU frame phase. The boot ROM leaves the LCD enabled and the
+        // PPU deep into a frame (Gambatte setInitialState `videoCycles`): the game
+        // starts in VBlank at LY=144 (CGB) / LY=153 (DMG), not a fresh LY=0 OAM
+        // search. Seed that here so the first instruction's LY/STAT reads match
+        // hardware (display_startstate). Must follow the LCDC=0x91 write above.
+        self.ppu.set_post_bios_state(&mut self.mmio);
     }
 
     pub fn insert(&mut self, cartridge: cartridge::Cartridge) {
