@@ -2903,6 +2903,59 @@ impl Ppu {
     }
 
 
+    /// Byte-exact Gambatte `video.h getLyReg(cc)`. The FF44 (LY) register the CPU
+    /// reads is NOT simply the renderer's LY: in the last ~6-10 cc of a line the
+    /// register anticipates the next line, and on line 153 it reads 0 early. The
+    /// renderer-set LY register only flips at the dot boundary (one M-cycle late
+    /// for a read whose access cc lands in the anticipation window), so resolve
+    /// the value here from the LY counter phase at the read's access cc.
+    ///
+    /// Returns None when the LCD is off (the bus keeps the renderer register).
+    pub fn get_ly_reg_at_cc(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<u8> {
+        if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
+            return None;
+        }
+        let ds = mmio.is_double_speed_mode();
+        let lc = self.ly_counter(mmio);
+        let ly_reg = lc.ly as i64;
+        // Gambatte's lyCounter().time() in master-cc. The closed-form LyCounter.time
+        // runs one master-cc below Gambatte's lyTime (see m0_time_exact), so add 1.
+        let time = self.p_now as i64 + lc.time as i64 + 1;
+        let cc = access_cc as i64;
+        let to_next = time - cc; // timeToNextLy
+        let cpl = stat_irq::LCD_CYCLES_PER_LINE as i64;
+        let last_line = (stat_irq::LCD_LINES_PER_FRAME - 1) as i64; // 153
+
+        if ly_reg == last_line {
+            // Line 153: FF44 reads 0 early (Gambatte getLyReg). At single speed the
+            // renderer's own dot-6 LY->0 flip (co-tuned with the STAT/LYC machinery)
+            // already matches the probed reads, so defer to the renderer register
+            // there. At double speed the renderer's dot-6 convention reads one
+            // M-cycle stale for the reads these tests probe, so resolve from the LY
+            // phase: FF44 reads 0 once `timeToNextLy <= 2*cpl-2`.
+            if !ds {
+                return None;
+            }
+            if to_next <= 2 * cpl - 2 {
+                return Some(0);
+            }
+            return Some((ly_reg & 0xFF) as u8);
+        }
+        // Line-end anticipation window: the register pre-increments to the next LY,
+        // except exactly at `to_next == 6+4*ds` where the hardware briefly shows
+        // `ly & (ly+1)` (the glitch the count tests probe). Outside the window
+        // defer to the renderer register (return None).
+        if to_next <= 10 && to_next <= 6 + 4 * (ds as i64) {
+            let result = if to_next == 6 + 4 * (ds as i64) {
+                ly_reg & (ly_reg + 1)
+            } else {
+                ly_reg + 1
+            };
+            return Some((result & 0xFF) as u8);
+        }
+        None
+    }
+
     /// True when the PPU is currently in PixelTransfer (STAT mode 3, active
     /// rendering). Used by the CGB STOP speed-switch bridge to gate the
     /// mode-3-specific dot correction.
