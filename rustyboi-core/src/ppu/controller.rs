@@ -617,6 +617,87 @@ impl Ppu {
         self.pending_lcdc_events.clear();
     }
 
+    /// Seed the post-boot PPU frame phase for `skip_bios`. The real boot ROM
+    /// leaves the LCD enabled and the PPU deep into a frame; Gambatte's
+    /// `setInitialState` sets `videoCycles = 144*456 + 164` (CGB) /
+    /// `153*456 + 396` (DMG) — i.e. the game starts in VBlank at LY=144 (CGB) or
+    /// LY=153 (DMG), NOT at a fresh LY=0 OAM search. Mirror that here so the very
+    /// first instruction's LY/STAT reads (display_startstate tests) match real
+    /// hardware. Must run after LCDC=0x91 and `sync_lcdc_from_mmio`.
+    pub fn set_post_bios_state(&mut self, mmio: &mut mmio::Mmio) {
+        // LCD must be on for this to apply (skip_bios writes LCDC=0x91 first).
+        if self.lcdc & (LCDCFlags::DisplayEnable as u8) == 0 {
+            return;
+        }
+        let cgb = mmio.is_cgb_features_enabled();
+        // Gambatte initstate.cpp: videoCycles = cgb ? 144*456+164 : 153*456+396.
+        let video_cycles: u32 = if cgb {
+            144 * stat_irq::LCD_CYCLES_PER_LINE + 164
+        } else {
+            153 * stat_irq::LCD_CYCLES_PER_LINE + 396
+        };
+        let ly = (video_cycles / stat_irq::LCD_CYCLES_PER_LINE) as u8;
+        let line_cycle = video_cycles % stat_irq::LCD_CYCLES_PER_LINE;
+
+        self.disabled = false;
+        self.internal_ly_val = ly;
+        self.line_cycle = line_cycle;
+        self.ticks = line_cycle as u128;
+        // Both LY=144 (CGB) and LY=153 (DMG) land in VBlank.
+        self.state = State::VBlank;
+        self.first_line_after_enable = false;
+
+        // On line 153 the LY *register* flips to 0 early (at dot
+        // LINE_153_LY_ZERO_DOT), well before the line itself ends. The DMG
+        // post-boot phase (LY=153, lineCycle=396) is past that dot, so the
+        // register already reads 0 and the LYC=0 coincidence has already armed.
+        // Mirror that transient state so the first FF44/FF41 read matches.
+        let line_153_zeroed =
+            ly == (stat_irq::LCD_LINES_PER_FRAME as u8 - 1) && line_cycle >= LINE_153_LY_ZERO_DOT as u32;
+        self.line_153_ly_zeroed = line_153_zeroed;
+        let ly_reg = if line_153_zeroed { 0 } else { ly };
+
+        // Anchor the dot-clock origin: abs_cc = 0 at the post-boot instant so
+        // ly_counter().time mirrors Gambatte's lyCounter.reset(videoCycles, cc)
+        // with cc as the origin. p_now = master_cc keeps abs_cc = master_cc -
+        // p_now consistent; the first step() folds abs_cc -> 1 and advances
+        // line_cycle by one dot.
+        self.abs_cc = 0;
+        self.p_now = mmio.master_cc();
+        self.lytime_no_plus1 = false;
+
+        // Publish LY and the VBlank STAT mode (FF41 mode bits = 1).
+        mmio.write_ly_from_ppu(ly_reg);
+        Self::set_lcd_status_mode(mmio, 1);
+        // LYC=LY coincidence flag against the *register* LY (0 on the line-153
+        // transient). LYC defaults to 0, so CGB (LY=144) clears it and DMG
+        // (LY register 0) sets it.
+        let lyc = mmio.read(LYC);
+        if lyc == ly_reg {
+            mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) | (1 << 2));
+        } else {
+            mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) & !(1 << 2));
+        }
+
+        // Seed the event-scheduled STAT/LYC IRQ clocks for the running frame.
+        self.scy_delayed = mmio.read(SCY);
+        self.scy_apply_cc = wy2_disabled();
+        self.scx_delayed = mmio.read(SCX);
+        self.scx_apply_cc = wy2_disabled();
+        self.wy2 = mmio.read(WY);
+        self.wy2_apply_cc = wy2_disabled();
+        self.wy1 = mmio.read(WY);
+        self.wy1_apply_cc = wy2_disabled();
+        self.stat_reg_committed = mmio.read(LCD_STATUS);
+        self.lyc_irq.set_cgb(cgb);
+        self.lyc_irq.seed(mmio.read(LCD_STATUS), lyc);
+        self.mstat_irq.seed(mmio.read(LCD_STATUS), lyc);
+        self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
+        self.reschedule_all_stat_events(mmio);
+        self.sched_m0irq = stat_irq::DISABLED_TIME;
+        self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
+    }
+
     pub fn handle_lcdc_write(&mut self, value: u8, mmio: &mmio::Mmio) {
         let display_enable = LCDCFlags::DisplayEnable as u8;
         let old_lcdc = self.lcdc;
@@ -2629,9 +2710,21 @@ impl Ppu {
                 // (which reuses the anchor), not to cgbp itself, so undo it here so
                 // the cgbp begin lands exactly on Gambatte's `lineCycles + ds >= 80`.
                 let cgbp_start = start as i64 - (4 - is_cgb as i64);
-                let begun = cc_end >= cgbp_start;
+                // The current line's m0Time is always after its own mode-3 start
+                // (`cgbp_start`). At the very start of mode 3 (line_cycle ~80)
+                // `m0_time_master` can still hold the PREVIOUS line's (now-past)
+                // value, which would spuriously satisfy the END test (`cc >= m0t+2`)
+                // and unblock a write that is really in this line's mode 3. Treat
+                // m0Time as "current" only once it belongs to this line's mode 3.
+                let m0t_current = self.m0_time_master.is_some_and(|m0t| (m0t as i64) >= cgbp_start);
+                // BEGIN (Gambatte cgbpAccessible: blocked once `lineCycles(cc)+ds >=
+                // 80`). When m0Time is current the access cc at exactly `cgbp_start`
+                // is the first mode-3 dot (blocked); when it is still stale this
+                // line's mode 3 has not armed yet, so that same dot is the last
+                // mode-2 dot (accessible) — use the strict boundary there.
+                let begun = if m0t_current { cc_end >= cgbp_start } else { cc_end > cgbp_start };
                 let ended = match self.m0_time_master {
-                    Some(m0t) => cc_end >= m0t as i64 + 2,
+                    Some(m0t) => m0t_current && cc_end >= m0t as i64 + 2,
                     None => false,
                 };
                 return Some(begun && !ended);
