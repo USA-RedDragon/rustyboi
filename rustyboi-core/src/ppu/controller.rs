@@ -293,6 +293,11 @@ pub struct Ppu {
     // (dot 85 on DMG / 86 on CGB instead of 80 / 82).
     #[serde(default)]
     first_line_after_enable: bool,
+    // Gambatte `OamReader::lu_` for `inactivePeriodAfterDisplayEnable(cc) = cc < lu_`:
+    // the master cc until which, right after an LCD enable, getStat suppresses
+    // mode 2/3 (reports mode 0). Seeded at enable to `enable_cc + (80<<ds) + 1`.
+    #[serde(default)]
+    display_enable_inactive_until: u64,
     // True once we've zeroed FF44 partway through line 153 and before the
     // line itself ends. Used to gate the end-of-frame transition and the
     // LY=0 Mode 2 pretrigger (both of which originally checked LY==153).
@@ -540,6 +545,7 @@ impl Ppu {
             previous_stat_interrupt_line: false,
             mode2_irq_pretriggered_for_next_line: false,
             first_line_after_enable: false,
+            display_enable_inactive_until: 0,
             line_153_ly_zeroed: false,
             mode0_pretriggered_this_line: false,
             m3_pixels_discarded: 0,
@@ -1776,6 +1782,13 @@ impl Ppu {
                 // First line after enable: STAT reports mode 0 (not 2), no
                 // Mode 2 STAT IRQ fires, and M3 starts later than usual.
                 self.first_line_after_enable = true;
+                // Gambatte OamReader::enableDisplay: `lu_ = cc + (2*40 << ds) + 1`.
+                // getStat reports mode 0 (suppresses mode 2/3) for `cc < lu_`.
+                {
+                    let ds_u = mmio.is_double_speed_mode() as u32;
+                    self.display_enable_inactive_until =
+                        mmio.master_cc().wrapping_add((80u64 << ds_u) + 1);
+                }
                 // Carried-edge LYC=0 IRQ on enable (memory.cpp case 0x40): when
                 // the LYC IRQ source is enabled, LYC==0 and the pre-enable STAT
                 // did NOT already hold the LYC=LY coincidence flag, enabling the
@@ -2709,6 +2722,91 @@ impl Ppu {
         } else {
             Some(0)
         }
+    }
+
+    /// Gambatte `LCD::getStat` mode bits, computed at the CPU's access cc, for the
+    /// mode 0<->1 (VBlank entry/exit) boundary ONLY. The per-dot renderer advances
+    /// the FF41 mode register inside `tick_m()`, so a read whose M-cycle straddles
+    /// the line-143->144 (VBlank entry) or line-153->0 (VBlank exit / wrap-to-OAM)
+    /// boundary latches the next line's mode; Gambatte resolves it from the LY
+    /// phase at the raw read cc (video.cpp:802-810). This is exactly the
+    /// enable_display m1stat / ly_count / m2-m3 count cluster: those reads land in
+    /// the last few cc of line 143 or line 153 and must read the OLD line's mode 0.
+    ///
+    /// Scoped to the VBlank boundary (frameCycles window) so the tuned per-dot
+    /// register still serves every mid-frame mode 0/2/3 read. Returns None when the
+    /// access cc does not resolve into the mode-1 window (then the bus keeps the
+    /// renderer register).
+    pub fn get_stat_mode_at_cc(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<u8> {
+        if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
+            return None;
+        }
+        let ds = mmio.is_double_speed_mode();
+        // The bus passes the read M-cycle START cc (`master_cc`). Gambatte's getStat
+        // resolves at the latch cc; the lineCycles/frameCycles phase needs a small
+        // per-speed bias to align the VBlank-entry boundary (swept against the
+        // suite: SS 0, DS -1; the DS read samples one cc past the SS phase since
+        // each dot is 2 cc, so the boundary sits a cc earlier in the read window).
+        let access_cc = {
+            let off = if ds { env_off("RB_GETSTAT_OFF_DS", -1) } else { env_off("RB_GETSTAT_OFF", 0) };
+            (access_cc as i64 + off).max(0) as u64
+        };
+        let lc = self.ly_counter(mmio);
+        let ly = lc.ly as i64;
+        let cpl = stat_irq::LCD_CYCLES_PER_LINE as i64;
+        let cpf = stat_irq::LCD_CYCLES_PER_FRAME as i64;
+        // lyCounter.time() in master-cc; timeToNextLy = time - cc; lineCycles =
+        // 456 - (timeToNextLy >> ds); frameCycles = ly*456 + lineCycles.
+        let ly_time_master = self.p_now as i64 + lc.time as i64;
+        let time_to_next_ly = ly_time_master - access_cc as i64;
+        let line_cycles = cpl - (time_to_next_ly >> ds as i32);
+        let frame_cycles = ly * cpl + line_cycles;
+        let dsi = ds as i64;
+
+        // The per-dot register only mis-reads when this read's M-cycle straddles a
+        // line boundary: the access cc lands in the LAST few dots of a line (high
+        // lineCycles) and the post-tick advance crosses into the next line's mode.
+        // Scope to the VBlank-adjacent lines (143 tail .. 153 tail / wrap): the
+        // mid-frame line-tail mode-0/2 boundary is co-tuned with the renderer
+        // register for the m0stat / halt-m0stat tests, so only the VBlank entry/exit
+        // and the line-153->0 wrap straddles are refined here. (`ly` is the clean
+        // event-clock LY == Gambatte's lyCounter.ly().) The cpl-7 threshold covers
+        // the 4-dot (1 M-cycle, 8 cc at DS) post-tick over-advance plus margin.
+        if ly < 143 {
+            return None;
+        }
+        let near_line_end = line_cycles >= cpl - 7;
+        let in_vblank_window = frame_cycles >= 144 * cpl - 3 && frame_cycles < cpf - 3;
+        if !near_line_end && !in_vblank_window {
+            return None;
+        }
+
+        // VBlank window (mode 1) — video.cpp:806-810.
+        if in_vblank_window {
+            if frame_cycles >= 144 * cpl - 2 && frame_cycles < cpf - 4 + dsi {
+                return Some(1);
+            }
+            return Some(0);
+        }
+        // Mode 2 (OAM) at line END (the next line's OAM is anticipated from
+        // lineCycles >= cpl-3) — video.cpp:811-813.
+        if line_cycles >= cpl - 3 {
+            if (access_cc + 1) < self.display_enable_inactive_until {
+                return Some(0);
+            }
+            return Some(2);
+        }
+        // Line tail before the mode-2 anticipation window (cpl-7 .. cpl-3): mode 3
+        // iff cc+2 < m0Time, else mode 0 — video.cpp:814-816.
+        if let Some(m0t) = self.m0_time_master {
+            if (access_cc + 1) < self.display_enable_inactive_until {
+                return Some(0);
+            }
+            if (access_cc as i64) + 2 < m0t as i64 {
+                return Some(3);
+            }
+        }
+        Some(0)
     }
 
 
