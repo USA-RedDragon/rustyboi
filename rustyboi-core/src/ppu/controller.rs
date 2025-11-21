@@ -260,6 +260,16 @@ pub struct Ppu {
     // start at x==0.
     #[serde(default)]
     win_draw_started_at_x0: bool,
+    // Gambatte's `win_draw_started` bit of winDrawState: persists across lines
+    // once the window has begun drawing this frame, until a WE-off / display
+    // disable / frame end clears it. Distinct from `window_started_this_line`
+    // (per-line). Mirrors Gambatte plotPixel branch 886 (start now) vs 889
+    // (re-arm an already-started window): the FIRST WX==166 match with the
+    // window not yet drawing starts it on that very line (++winYPos, no visible
+    // pixels), so the next line draws with winYPos one higher than an arm-only
+    // path would give. Needed by the DMG wxA6 cluster.
+    #[serde(default)]
+    win_draw_started: bool,
     window_y_triggered: bool,   // Whether WY condition was met this frame
     window_started_this_line: bool, // Whether window started rendering on current scanline
     // Dot (within-line `ticks`) at which the window began drawing this line.
@@ -537,6 +547,7 @@ impl Ppu {
             win_y_pos: 0xFF,
             win_draw_start: false,
             win_draw_started_at_x0: false,
+            win_draw_started: false,
             window_y_triggered: false,
             win_start_dot: None,
             predicted_win_start_dot: None,
@@ -2093,8 +2104,12 @@ impl Ppu {
                     // though WX is unchanged. Otherwise winDrawState clears to 0.
                     {
                         let win_en = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
+                        // Gambatte M3Start::f0 (270-275): if win_draw_start is set and
+                        // the window is enabled, winDrawState becomes win_draw_started
+                        // and winYPos increments; otherwise winDrawState clears.
                         if self.win_draw_start && win_en && !self.first_line_after_enable {
                             self.win_y_pos = self.win_y_pos.wrapping_add(1);
+                            self.win_draw_started = true;
                             self.win_draw_started_at_x0 = true;
                             // The window is `started` from line begin: fetch
                             // window tiles from xpos 0 (after the SCX discard
@@ -2108,21 +2123,42 @@ impl Ppu {
                             self.win_start_dot = Some(self.ticks);
                         } else {
                             self.win_draw_started_at_x0 = false;
+                            // Gambatte M3Start::f0 line 275: when win_draw_start was
+                            // NOT armed, winDrawState clears to 0 (win_draw_started
+                            // bit dropped). Normal (non-wxA6) windows re-set this on
+                            // the same line via the live x+7==wx start below, so this
+                            // only persistently clears the bit on lines where the
+                            // window does not (re)start — which is what lets the DMG
+                            // wxA6 START-NOW branch fire again when WY next matches.
+                            if win_en && !self.first_line_after_enable {
+                                self.win_draw_started = false;
+                            }
                         }
                         self.win_draw_start = false;
                     }
-                    // DMG wx==166 (lcd_hres+6): the window cannot draw this line
-                    // (the line ends before xpos reaches it) but ARMS for the next
-                    // line. Gambatte plotPixel sets win_draw_start at xpos==166
-                    // on DMG whenever the window-Y condition holds, regardless of
-                    // whether the window is already drawing. Evaluated here at M3
-                    // start (M3 always reaches xpos 166); win_draw_start is then
-                    // consumed by the next line's M3Start::f0 above.
+                    // DMG wx==166 (lcd_hres+6): the window cannot draw a visible
+                    // pixel this line (the line ends at xpos 166) but interacts with
+                    // winDrawState exactly as Gambatte plotPixel (886-890) does when
+                    // xpos reaches wx==166 with the WY condition met:
+                    //   - winDrawState == 0 (window NOT yet drawing this frame): the
+                    //     window STARTS this line (++winYPos, win_draw_started set) and
+                    //     also arms win_draw_start. No visible pixels here, but the next
+                    //     line's M3Start::f0 then draws with winYPos one HIGHER than an
+                    //     arm-only path would give (the DMG wxA6 off-by-one fix).
+                    //   - already started: re-arm win_draw_start only (keep drawing).
+                    // CGB never arms this way (plotPixel's !cgb guard on branch 889).
                     if !is_cgb
                         && !self.first_line_after_enable
                         && mmio.read(WX) == 166
                         && self.window_y_active(mmio)
                     {
+                        if !self.win_draw_started {
+                            // plotPixel branch 886: start now (no visible window).
+                            self.win_y_pos = self.win_y_pos.wrapping_add(1);
+                            self.win_draw_started = true;
+                        }
+                        // plotPixel branch 889 (and the |= win_draw_start of 887):
+                        // arm for the next line's M3Start::f0 consume.
                         self.win_draw_start = true;
                     }
                     // First scanline after enable is now armed; subsequent
@@ -2395,6 +2431,7 @@ impl Ppu {
                         // (M3Start::f0 / plotPixel win_draw_start), once per line
                         // the window actually begins drawing, not per-line in M2.
                         self.win_y_pos = self.win_y_pos.wrapping_add(1);
+                        self.win_draw_started = true;
                         // Start window rendering
                         self.fetcher.start_window(self.x);
                         self.window_started_this_line = true;
