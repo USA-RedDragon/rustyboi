@@ -98,6 +98,88 @@ fn cgb_mode0_offset() -> i32 { env_off("RB_CGB_MODE0_OFF", CGB_MODE0_OFFSET as i
 fn m0irq_off_ss() -> i64 { env_off("RB_M0IRQ_OFF", M0IRQ_OFFSET) }
 fn m2irq_off_ss() -> i64 { env_off("RB_M2IRQ_OFF", M2IRQ_OFFSET) }
 fn write_cc_off_ss() -> i64 { env_off("RB_WRITE_CC_OFF", WRITE_CC_OFFSET) }
+
+// Sentinel tile number that can never equal a real `(spx - firstTileXpos) & -8`
+// value (Gambatte's `tileno_none` = low bit set). Used to force the first sprite
+// of a fresh tile group to be charged the leading-sprite rate.
+const SPRITE_TILE_NONE: i32 = 1;
+fn sprite_prev_tile_default() -> i32 { SPRITE_TILE_NONE }
+
+// Dots into a sprite's mode-3 stall after which its cost is locked into the
+// schedule (Gambatte's `doFullTilesUnrolled` advances `p.nextSprite` once it
+// processes the sprite's BG tile). rustyboi arms the stall -- and eagerly bumps
+// `next_sprite_fetch_index` -- at dot 0 of the stall; the lock lags by this many
+// dots. A mid-mode-3 OBJ-disable landing before the lock still refunds the cost
+// (calibrated against the sprite_late_disable_spx{18..1B}_{1,2} bracket pairs).
+const SPRITE_LOCK_LAG: u128 = 3;
+
+/// One faithful port of Gambatte's mode-3 sprite-cost tile walk
+/// (`predictCyclesUntilXpos_fn` + `addSpriteCycles`, ppu.cpp:1313-1392, the same
+/// per-tile cost the runtime `doFullTilesUnrolled` charges at ppu.cpp:525-530).
+///
+/// Walks the BG tiles left-to-right. Within each 8-pixel tile, the FIRST sprite
+/// whose `spx` falls in the tile costs `max(11 - dist, 6)` (where `dist =
+/// (spx - firstTileXpos) % 8`, and the leading rate only applies when `dist < 5`);
+/// every FURTHER sprite in the same tile costs a flat 6. The window split (the
+/// `spx <= nwx` group vs the `spx > nwx` group) mirrors Gambatte exactly: the
+/// post-window group restarts the tile grid at `nwx + 1` with no previous tile.
+///
+/// `sprite_xs` MUST be sorted ascending by spx. `scx` is `SCX & 7`. `nwx` is the
+/// window X split point (0xFF when no window starts this line). `target_x` is
+/// `lcd_hres + 7 = 167`. `obj_enabled` follows `lcdcObjEn(p) | p.cgb`.
+/// Returns the total sprite cost in dots.
+fn sprite_tile_walk_cost(
+    sprite_xs: &[i32],
+    scx: i32,
+    nwx: i32,
+    target_x: i32,
+    obj_enabled: bool,
+) -> i32 {
+    if !obj_enabled || sprite_xs.is_empty() {
+        return 0;
+    }
+    // firstTileXpos = endx % 8 = (8 - scx%8) % 8: the BG-tile grid phase at
+    // xpos = 0 (M3 start). fno is the fine-scroll discard count Gambatte passes
+    // from M3Start (`min(scx%8, 5)`), used only for the first sprite.
+    let first_tile_xpos = (8 - scx).rem_euclid(8);
+    let fno = scx.min(5);
+    let mut cycles = 0i32;
+    let mut idx = 0usize;
+
+    // First-sprite special case (Tile::predictCyclesUntilXpos_fn first branch):
+    // xpos is 0, so the leading sprite uses `fno + spx` for its distance.
+    let prev_tile_no_initial = (0 - first_tile_xpos) & !7; // (xpos - firstTileXpos) & -8
+    let spx0 = sprite_xs[0];
+    if fno + spx0 < 5 && spx0 <= nwx && spx0 <= target_x {
+        cycles += 11 - (fno + spx0);
+        idx += 1;
+    }
+
+    // addSpriteCycles: accumulate for sprites with spx <= max_spx, charging the
+    // first per tile the leading rate and 6 for the rest.
+    let add = |xs: &[i32], idx: &mut usize, max_spx: i32, first_tile_xpos: i32,
+               mut prev_tile_no: i32, cycles: &mut i32| {
+        while *idx < xs.len() && xs[*idx] <= max_spx {
+            let spx = xs[*idx];
+            let dist = (spx - first_tile_xpos).rem_euclid(8);
+            let tile_no = (spx - first_tile_xpos) & !7;
+            let c = if dist < 5 && tile_no != prev_tile_no { 11 - dist } else { 6 };
+            prev_tile_no = tile_no;
+            *cycles += c;
+            *idx += 1;
+        }
+    };
+
+    if nwx < target_x {
+        add(sprite_xs, &mut idx, nwx, first_tile_xpos, prev_tile_no_initial, &mut cycles);
+        add(sprite_xs, &mut idx, target_x, nwx + 1, SPRITE_TILE_NONE, &mut cycles);
+    } else {
+        add(sprite_xs, &mut idx, target_x, first_tile_xpos, prev_tile_no_initial, &mut cycles);
+    }
+
+    cycles
+}
+
 const MODE2_STAT_PRETRIGGER_DOT: u128 = 452;
 // Within line 153 (the last VBlank line) the LY register is held at 153 only
 // briefly; after this many dots it reads 0, even though the line itself
@@ -227,6 +309,22 @@ pub struct Ppu {
     current_oam_sprite_index: usize, // Current sprite being checked during OAM search
     #[serde(default)]
     next_sprite_fetch_index: usize,
+    // Tile number `(spx - firstTileXpos) & -8` of the most recently charged
+    // sprite in the live mode-3 walk. Sprites sharing a tile with this one cost
+    // a flat 6 (only the first sprite per BG tile gets the leading rate), matching
+    // Gambatte's `prevSpriteTileNo` in `doFullTilesUnrolled`/`addSpriteCycles`.
+    // Reset to SPRITE_TILE_NONE at M3 start and on window draw-start.
+    #[serde(default = "sprite_prev_tile_default")]
+    m3_sprite_prev_tile: i32,
+    // Tick at which the most-recently-fetched sprite's stall was armed (the dot
+    // `next_sprite_fetch_index` last advanced). rustyboi advances the fetch index
+    // eagerly at the START of a sprite's stall, but Gambatte's `doFullTilesUnrolled`
+    // only locks a sprite's cost into the schedule once it processes that sprite's
+    // BG tile -- about SPRITE_LOCK_LAG dots into the stall. A mid-mode-3 OBJ-disable
+    // refunds a sprite iff that lock hasn't happened yet, so the disable recompute
+    // gates on `ticks - this >= SPRITE_LOCK_LAG` rather than on the eager index.
+    #[serde(default)]
+    m3_last_sprite_commit_tick: u128,
     #[serde(default)]
     sprite_fetch_stall: u8,
     #[serde(default)]
@@ -540,6 +638,8 @@ impl Ppu {
             sprites_on_line: Vec::new(),
             current_oam_sprite_index: 0,
             next_sprite_fetch_index: 0,
+            m3_sprite_prev_tile: SPRITE_TILE_NONE,
+            m3_last_sprite_commit_tick: 0,
             sprite_fetch_stall: 0,
             pixel_transfer_warmup: 0,
             fetcher_cadence_tick: 0,
@@ -760,6 +860,69 @@ impl Ppu {
         }
     }
 
+    /// Mode-3 sprite cost (dots) of the sprites NOT yet rendered this line, under
+    /// the given OBJ-enable state, using the one faithful tile-walk model. Sprites
+    /// with index < `next_sprite_fetch_index` have already been drawn (their cost
+    /// is already spent and fixed); only the remaining ones contribute. Drives the
+    /// mid-mode-3 OBJ-toggle recompute so the closed-form m0Time is shifted by the
+    /// exact remaining-sprite cost delta (matching Gambatte's predictNextM0Time
+    /// re-run at the current `p.nextSprite`).
+    fn remaining_sprite_cost(&self, scx: i32, obj_enabled: bool, use_fetch_index: bool) -> i32 {
+        if !obj_enabled {
+            return 0;
+        }
+        // The set of sprites whose cost is NOT yet committed (and so is affected by
+        // a mid-mode-3 OBJ toggle). Two gates, matching how the live renderer
+        // commits sprite fetches:
+        //  - DISABLE (`use_fetch_index`): OBJ was on up to here, so the fetch loop
+        //    has advanced `next_sprite_fetch_index` over every sprite whose stall
+        //    already armed (committed). Only sprites at index >= that count have
+        //    their cost removed. This gives the exact 1-cc disable boundary the
+        //    sprite_late_disable_*_{1,2} pairs bracket (the stall arms on the dot
+        //    the index advances).
+        //  - ENABLE: OBJ was off, so the fetch loop never advanced; a sprite will
+        //    still be fetched iff its trigger (display x = spx - 8) is not yet
+        //    passed, i.e. spx >= x + 8.
+        let mut sprite_xs: Vec<i32> = if use_fetch_index {
+            // DISABLE: the live renderer advances `next_sprite_fetch_index` at the
+            // START of each sprite's stall, but Gambatte only LOCKS a sprite's cost
+            // into the schedule once it processes the sprite's BG tile, ~SPRITE_LOCK_LAG
+            // dots later. So the count of truly-committed sprites is the eager index
+            // MINUS the most-recent sprite if its lock hasn't elapsed yet. Sprites at
+            // index >= that committed count still have their cost refunded by the
+            // disable. (`m3_last_sprite_commit_tick` is the dot the eager index last
+            // advanced; before lock the renderer is mid-fetch and the cost is unlocked.)
+            let committed = if self.next_sprite_fetch_index > 0
+                && self.ticks < self.m3_last_sprite_commit_tick + SPRITE_LOCK_LAG
+            {
+                self.next_sprite_fetch_index - 1
+            } else {
+                self.next_sprite_fetch_index
+            };
+            self.sprites_on_line
+                .iter()
+                .skip(committed)
+                .map(|s| s.x as i32)
+                .collect()
+        } else {
+            // ENABLE: a sprite will still be fetched iff its trigger is not yet
+            // passed (display x = spx - 8 >= x, i.e. spx >= x + 8).
+            let cutoff = self.x as i32 + 8;
+            self.sprites_on_line
+                .iter()
+                .map(|s| s.x as i32)
+                .filter(|&spx| spx >= cutoff)
+                .collect()
+        };
+        sprite_xs.sort_unstable();
+        // The remaining group resumes the tile walk with no carried "first sprite"
+        // (prevTileNo = none), so the first remaining sprite in its tile gets the
+        // leading rate, the rest 6 — the same `addSpriteCycles` continuation
+        // Gambatte uses. No window split here (the window-bit is unchanged on this
+        // path, so `nwx == targetx` collapses the split).
+        sprite_tile_walk_cost(&sprite_xs, scx, 167, 167, true)
+    }
+
     fn fetcher_lcdc_state(&self) -> fetcher::FetcherLcdcState {
         fetcher::FetcherLcdcState {
             lcdc: self.lcdc,
@@ -784,6 +947,55 @@ impl Ppu {
         // changes the closed-form sprite-fetch penalty; invalidate and fall back
         // to the live emergent transition.
         let spr_bits = (LCDCFlags::SpriteDisplayEnable as u8) | (LCDCFlags::SpriteSize as u8);
+        // A mid-mode-3 sprite-enable (bit 1) toggle, with no window change, keeps
+        // the closed-form schedule but RECOMPUTES the not-yet-drawn sprite cost
+        // from the single tile-walk model (Gambatte's predictNextM0Time re-runs the
+        // predictor with `lcdcObjEn(p)` live and the current `p.nextSprite`, so the
+        // remaining sprites' cost is added/removed precisely). Shift both the
+        // mode-0 dot and the read-at-cc m0Time by the cost delta rather than
+        // nulling and falling back to the live x==160 transition.
+        let obj_bit = LCDCFlags::SpriteDisplayEnable as u8;
+        let only_obj_toggle = (old_lcdc & win_bit) == (value & win_bit)
+            && (old_lcdc & (LCDCFlags::SpriteSize as u8)) == (value & (LCDCFlags::SpriteSize as u8))
+            && (old_lcdc & obj_bit) != (value & obj_bit);
+        if self.state == State::PixelTransfer
+            && only_obj_toggle
+            && self.scheduled_mode0_dot.is_some()
+        {
+            let scx = (self.m3_arm_scx & 0x07) as i32;
+            let old_obj = (old_lcdc & obj_bit) != 0 || cgb_features_enabled;
+            let new_obj = (value & obj_bit) != 0 || cgb_features_enabled;
+            // DISABLE (old OBJ on): committed sprites are those whose cost the live
+            // fetch loop has already locked into the schedule -> gate by the
+            // lock-aware committed index. ENABLE (old OBJ off): gate by display
+            // position. `use_fetch_index = old_obj` selects the right gate for
+            // whichever side is non-zero.
+            let use_fetch_index = old_obj && !new_obj;
+            let old_rem = self.remaining_sprite_cost(scx, old_obj, use_fetch_index);
+            let new_rem = self.remaining_sprite_cost(scx, new_obj, false);
+            let delta = new_rem - old_rem; // dots; negative on disable
+            // Only KEEP the closed-form schedule (shifting it by the cost delta)
+            // when the toggle actually changes the remaining-sprite cost. A delta==0
+            // toggle has no schedule effect; resolving the FF41 read against the
+            // (unchanged) closed-form m0Time would land ~1cc off the live
+            // fallback's boundary and swap the read-cc bracket pairs (e.g.
+            // late_disable spx1B_2 vs late_late_disable spx1B_1, which share an
+            // identical disable state and differ only in read cc). So for delta==0
+            // fall through to the null-and-fall-back-to-live path below, exactly as
+            // a generic sprite-bit toggle did before C8 -> no read-cc regression.
+            if delta != 0 {
+                if let Some(dot) = self.scheduled_mode0_dot {
+                    self.scheduled_mode0_dot = Some((dot as i64 + delta as i64).max(0) as u128);
+                }
+                if let Some(m0t) = self.m0_time_master {
+                    let dsf = ds as i64;
+                    self.m0_time_master =
+                        Some((m0t as i64 + ((delta as i64) << dsf)).max(0) as u64);
+                }
+                self.lcdc = value;
+                return;
+            }
+        }
         if self.state == State::PixelTransfer
             && ((old_lcdc & win_bit) != (value & win_bit)
                 || (old_lcdc & spr_bits) != (value & spr_bits))
@@ -1466,53 +1678,14 @@ impl Ppu {
             win = true;
         }
 
-        // Sprites. Only count if OBJ enabled (or CGB always evaluates them).
+        // Sprites. The single faithful tile-walk model (shared with the live
+        // renderer via `sprite_tile_walk_cost`). Only count if OBJ enabled (or
+        // CGB always evaluates them).
         let obj_enabled = (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0;
-        if obj_enabled || is_cgb {
-            let first_tile_xpos = (8 - scx) % 8; // = endx % 8
-            let target_x = 167;
-            let mut sprite_xs: Vec<i32> = self.sprites_on_line.iter().map(|s| s.x as i32).collect();
-            sprite_xs.sort_unstable();
-            let mut idx = 0usize;
-
-            // addSpriteCycles helper: accumulates for sprites with spx <= max_spx.
-            let add_sprite_cycles = |xs: &[i32], idx: &mut usize, max_spx: i32,
-                                     first_tile_xpos: i32, mut prev_tile_no: i32,
-                                     cycles: &mut i32| {
-                while *idx < xs.len() && xs[*idx] <= max_spx {
-                    let spx = xs[*idx];
-                    let dist = (spx - first_tile_xpos).rem_euclid(8);
-                    let tile_no = (spx - first_tile_xpos) & !7;
-                    let mut c = 6;
-                    if dist < 5 && tile_no != prev_tile_no {
-                        c = 11 - dist;
-                    }
-                    prev_tile_no = tile_no;
-                    *cycles += c;
-                    *idx += 1;
-                }
-            };
-
-            if idx < sprite_xs.len() {
-                // First-sprite special case (Tile::predictCyclesUntilXpos_fn, the
-                // `fno + spx - xpos` first-sprite branch). The `fno` Gambatte
-                // passes from M3Start::f1 is the fine-scroll discard
-                // `min(scx % 8, 5)`, NOT a constant 1; xpos is 0 here.
-                let spx0 = sprite_xs[0];
-                let fno = scx.min(5);
-                let prev_tile_no = (0 - first_tile_xpos) & !7; // (xpos - firstTileXpos) & -8
-                if fno + spx0 < 5 && spx0 <= nwx && spx0 <= target_x {
-                    cycles += 11 - (fno + spx0);
-                    idx += 1;
-                }
-                if nwx < target_x {
-                    add_sprite_cycles(&sprite_xs, &mut idx, nwx, first_tile_xpos, prev_tile_no, &mut cycles);
-                    add_sprite_cycles(&sprite_xs, &mut idx, target_x, nwx + 1, 1, &mut cycles);
-                } else {
-                    add_sprite_cycles(&sprite_xs, &mut idx, target_x, first_tile_xpos, prev_tile_no, &mut cycles);
-                }
-            }
-        }
+        let target_x = 167;
+        let mut sprite_xs: Vec<i32> = self.sprites_on_line.iter().map(|s| s.x as i32).collect();
+        sprite_xs.sort_unstable();
+        cycles += sprite_tile_walk_cost(&sprite_xs, scx, nwx, target_x, obj_enabled || is_cgb);
 
         (cycles.max(0) as u128, win)
     }
@@ -1528,6 +1701,8 @@ impl Ppu {
         self.sprites_on_line.clear();
         self.current_oam_sprite_index = 0;
         self.next_sprite_fetch_index = 0;
+        self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
+        self.m3_last_sprite_commit_tick = 0;
         self.sprite_fetch_stall = 0;
         self.pixel_transfer_warmup = 0;
         self.window_line_counter = 0;
@@ -2202,6 +2377,8 @@ impl Ppu {
                     self.x = 0;
                     self.fetcher.reset();
                     self.next_sprite_fetch_index = 0;
+                    self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
+                    self.m3_last_sprite_commit_tick = 0;
                     self.sprite_fetch_stall = 0;
                     self.fetcher_cadence_tick = 0;
                     // CGB arms two dots later, so use a shorter warmup to keep the first visible pixel aligned.
@@ -2585,6 +2762,11 @@ impl Ppu {
                         // Start window rendering
                         self.fetcher.start_window(self.x);
                         self.window_started_this_line = true;
+                        // The post-window sprite group restarts the BG-tile grid
+                        // (Gambatte resets prevSpriteTileNo to tileno_none after
+                        // the window split), so the first post-window sprite in a
+                        // tile is again charged the leading rate.
+                        self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
                         if self.win_start_dot.is_none() {
                             self.win_start_dot = Some(self.ticks);
                         }
@@ -3556,18 +3738,36 @@ impl Ppu {
             }
 
             self.next_sprite_fetch_index += 1;
+            // Record the dot this sprite's stall arms so the OBJ-disable recompute
+            // can tell whether the sprite's cost has been locked into the schedule
+            // yet (it locks SPRITE_LOCK_LAG dots later).
+            self.m3_last_sprite_commit_tick = self.ticks;
+
+            // Single faithful tile-walk cost (mirrors `sprite_tile_walk_cost` /
+            // Gambatte `doFullTilesUnrolled` ppu.cpp:525-530): the FIRST sprite in
+            // each BG tile costs `max(11 - dist, 6)`; every further sprite sharing
+            // that tile costs a flat 6. `dist = pixel_in_tile = (x + scx) & 7`. The
+            // tile id `(x + scx) & !7` differs from the closed-form's `(spx -
+            // firstTileXpos) & -8` only by a per-line constant, so the equality
+            // grouping (first-vs-rest) is identical.
+            let scx = mmio.read(SCX);
+            let pixel_in_tile = self.x.wrapping_add(scx) & 0x07;
+            let tile_no = (self.x as i32 + scx as i32) & !7;
+            let first_in_tile = tile_no != self.m3_sprite_prev_tile;
+            self.m3_sprite_prev_tile = tile_no;
 
             if sprite_x == 0 {
                 return Some(11);
             }
 
-            // Match Gambatte's addSpriteCycles: first sprite per BG tile contributes
-            // (11 - distanceFromTileStart) dots, where distance < 5; otherwise 6.
-            // distance = pixel_in_tile = (x + scx) & 7. (7-x).saturating_sub(2) + 6 yields
-            // 11,10,9,8,7,6,6,6 for pixel_in_tile = 0..7, matching Gambatte exactly.
-            let pixel_in_tile = self.x.wrapping_add(mmio.read(SCX)) & 0x07;
-            let wait_for_bg_fetch = (7u8 - pixel_in_tile).saturating_sub(2);
-            let base_penalty = wait_for_bg_fetch + 6;
+            // pixel_in_tile 0..7 -> leading rate 11,10,9,8,7,6,6,6 (= max(11-dist,6));
+            // a non-leading sprite in the same tile is always a flat 6.
+            let base_penalty = if first_in_tile {
+                let wait_for_bg_fetch = (7u8 - pixel_in_tile).saturating_sub(2);
+                wait_for_bg_fetch + 6
+            } else {
+                6
+            };
             return Some(base_penalty);
         }
 
