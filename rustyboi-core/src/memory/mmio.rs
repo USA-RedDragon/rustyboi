@@ -293,6 +293,23 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_write_delay: u32,
 
+    // C7-full FF55-kick fire-timing: set when an FF55 bit7=1 write (enable or
+    // restart) wants to arm the first block immediately. Gambatte's `enableHdma`
+    // gates that immediate flag on the LIVE `isHdmaPeriod(cc + 4)` predicate, not
+    // the 1-dot-lagged renderer period cache. The bus resolves this flag after
+    // the FF55 write by evaluating the PPU's `hdma_period` at the write access cc;
+    // if not in period the kick is dropped (the block then arms on the next
+    // Mode 3->0 edge). 0=no kick pending, 1=enable kick, 2=restart kick.
+    #[serde(skip, default)]
+    hdma_kick_eval_pending: u8,
+
+    // C7-full interrupt-vs-dma precedence: while an interrupt service is
+    // mid-flight (its PC pushes not yet complete), the M-cycle-boundary HDMA fire
+    // is suppressed so the block fires AFTER the pushes (memory.cpp:312-320). Set
+    // by `service_interrupt` around the pushes, cleared once it fires the block.
+    #[serde(skip, default)]
+    hdma_mcycle_fire_suppressed: bool,
+
     // CGB palette state
     #[serde(with = "serde_bytes")]
     bg_palette_ram: [u8; 64],    // 8 palettes × 4 colors × 2 bytes = 64 bytes
@@ -361,6 +378,8 @@ impl Mmio {
             hdma_block_done_this_period: false,
             hdma_pending_writes: Vec::new(),
             hdma_write_delay: 0,
+            hdma_kick_eval_pending: 0,
+            hdma_mcycle_fire_suppressed: false,
 
             // CGB palette initialization
             bg_palette_ram: [0; 64],
@@ -862,6 +881,12 @@ impl Mmio {
         self.hdma_req_pending
     }
 
+    /// C7-full: whether an HDMA block is latched and would fire at the next
+    /// M-cycle boundary (the `fire_pending_hdma_mcycle` precondition).
+    pub fn hdma_fire_pending(&self) -> bool {
+        self.hdma_req_pending && self.hdma_enabled
+    }
+
     pub fn set_hdma_req(&mut self) {
         if self.cgb_features_enabled && self.hdma_enabled {
             self.hdma_req_pending = true;
@@ -901,6 +926,29 @@ impl Mmio {
 
     pub fn update_hdma_period_cache(&mut self, in_period: bool) {
         self.hdma_is_in_period_cached = in_period;
+    }
+
+    /// C7-full: resolve a pending FF55 bit7=1 kick (`hdma_kick_eval_pending`)
+    /// against the LIVE HDMA-period predicate the bus evaluates at the write
+    /// access cc (Gambatte `enableHdma` -> `isHdmaPeriod(cc + 4)`). If in period
+    /// the first block is armed immediately; otherwise the kick is dropped and the
+    /// block arms on the next Mode 3->0 edge (matching Gambatte scheduling
+    /// `memevent_hdma` to the next m0 without flagging now). Returns whether a kick
+    /// was pending (so the bus knows it consumed it).
+    pub fn resolve_hdma_kick(&mut self, in_period: bool) -> bool {
+        if self.hdma_kick_eval_pending == 0 {
+            return false;
+        }
+        self.hdma_kick_eval_pending = 0;
+        if in_period && self.hdma_enabled {
+            self.hdma_req_pending = true;
+        }
+        true
+    }
+
+    /// Whether an FF55 bit7=1 kick is awaiting the bus's live-period resolution.
+    pub fn hdma_kick_eval_pending(&self) -> bool {
+        self.hdma_kick_eval_pending != 0
     }
 
     pub fn hdma_is_in_period_cached(&self) -> bool {
@@ -1168,18 +1216,51 @@ impl Mmio {
             self.hdma_prev_period = in_period;
         }
 
+        // C7-full event firing. Normally the block fires synchronously the dot the
+        // request is latched (the byte-landing timing the hdma_start/late read
+        // tests are calibrated to). The ONLY exception is the interrupt-vs-dma
+        // precedence window: while an interrupt service is pushing PC
+        // (`hdma_mcycle_fire_suppressed`), a block latched mid-service is HELD and
+        // fired explicitly after the pushes (memory.cpp:312-320) so the pushed
+        // return address is visible in the HDMA copy of that stack slot.
         if self.hdma_req_pending && self.hdma_enabled {
-            self.pending_dma_stall += self.run_hdma_block();
             if in_period {
                 self.hdma_block_done_this_period = true;
             }
-            // Gambatte intevent_dma (memory.cpp:280): after the block, a halt-time
-            // `hdma_requested` collapses to `hdma_low` so a subsequent unhalt does
-            // not re-fire it (the request has now been serviced).
-            if self.halt_hdma_state == HaltHdmaState::Requested {
-                self.halt_hdma_state = HaltHdmaState::Low;
+            if !self.hdma_mcycle_fire_suppressed {
+                self.fire_pending_hdma_mcycle();
             }
         }
+    }
+
+    /// C7-full: fire any latched HDMA block at a CPU M-cycle boundary (the
+    /// `intevent_dma` body). Called by the bus after each access M-cycle so the
+    /// copy lands one M-cycle after the trigger — and, when an interrupt service
+    /// pushed to the block's source region during this M-cycle, AFTER those
+    /// pushes (memory.cpp:312-320 precedence). No-op when nothing is latched.
+    pub fn fire_pending_hdma_mcycle(&mut self) {
+        if !(self.hdma_req_pending && self.hdma_enabled) {
+            return;
+        }
+        self.pending_dma_stall += self.run_hdma_block();
+        // Gambatte intevent_dma (memory.cpp:280): after the block, a halt-time
+        // `hdma_requested` collapses to `hdma_low` so a subsequent unhalt does
+        // not re-fire it (the request has now been serviced).
+        if self.halt_hdma_state == HaltHdmaState::Requested {
+            self.halt_hdma_state = HaltHdmaState::Low;
+        }
+    }
+
+    /// C7-full: whether the M-cycle-boundary HDMA fire is currently suppressed
+    /// (an interrupt service is pushing PC; the block must fire after the pushes).
+    pub fn hdma_mcycle_fire_suppressed(&self) -> bool {
+        self.hdma_mcycle_fire_suppressed
+    }
+
+    /// C7-full: begin/end suppression of the M-cycle-boundary HDMA fire around an
+    /// interrupt service's PC pushes.
+    pub fn set_hdma_mcycle_fire_suppressed(&mut self, v: bool) {
+        self.hdma_mcycle_fire_suppressed = v;
     }
 
     /// Consume the CPU-cycle stall owed for completed HDMA/GDMA transfers.
@@ -2153,8 +2234,15 @@ impl memory::Addressable for Mmio {
                                         self.hdma_req_pending = false;
                                     } else {
                                         self.hdma_length = length_blocks_minus_1;
-                                        if !lcd_on || self.hdma_is_in_period_cached {
+                                        if !lcd_on {
+                                            // LCD off: Gambatte fires immediately
+                                            // (no HDMA period concept).
                                             self.hdma_req_pending = true;
+                                        } else {
+                                            // LCD on: gate the immediate kick on the
+                                            // LIVE isHdmaPeriod(cc+4), resolved by
+                                            // the bus after this write (C7-full).
+                                            self.hdma_kick_eval_pending = 2;
                                         }
                                     }
                                 } else if new_mode == 0 {
@@ -2164,13 +2252,15 @@ impl memory::Addressable for Mmio {
                                     self.hdma_length = 0x7F; // FF55 reads 0xFF
                                 } else {
                                     // Arm HDMA. Fire the first block now if
-                                    // LCD off or already in the HDMA period;
-                                    // otherwise the PPU's Mode 3->0 trigger
-                                    // will set the req on the next H-blank.
+                                    // LCD off; otherwise gate the immediate kick
+                                    // on the live isHdmaPeriod(cc+4) (resolved by
+                                    // the bus), else the Mode 3->0 trigger arms it.
                                     self.hdma_enabled = true;
                                     self.hdma_length = length_blocks_minus_1;
-                                    if !lcd_on || self.hdma_is_in_period_cached {
+                                    if !lcd_on {
                                         self.hdma_req_pending = true;
+                                    } else {
+                                        self.hdma_kick_eval_pending = 1;
                                     }
                                 }
                             }

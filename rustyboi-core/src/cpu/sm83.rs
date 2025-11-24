@@ -51,9 +51,11 @@ impl SM83 {
         let pending_interrupt = self.get_pending_interrupt(mmio);
         
         // If halted, check if we should exit halt state
+        let mut just_unhalted = false;
         if self.halted {
             if pending_interrupt.is_some() {
                 self.halted = false;
+                just_unhalted = true;
                 mmio.clear_cpu_halt();
                 // C1: the instruction stream resumed by this wakeup carries the
                 // unmodeled HALT-prefetch sub-M-cycle skew; flag it so the FF41
@@ -84,7 +86,7 @@ impl SM83 {
         
         // Handle interrupts if IME is enabled and there's a pending interrupt
         if self.registers.ime && pending_interrupt.is_some() {
-            return self.service_interrupt(mmio);
+            return self.service_interrupt(mmio, just_unhalted);
         }
         
         let opcode = mmio.read(self.registers.pc);
@@ -94,10 +96,29 @@ impl SM83 {
         cycles
     }
 
-    fn service_interrupt(&mut self, bus: &mut crate::cpu::Bus) -> u32 {
+    fn service_interrupt(&mut self, bus: &mut crate::cpu::Bus, just_unhalted: bool) -> u32 {
         self.registers.ime = false;
         self.ime_enable_delay = 0;
         bus.clear_delayed_writes();
+
+        // C7-full interrupt-vs-dma precedence (Gambatte memory.cpp:312-320): an
+        // HDMA block whose m0-edge latch is LATER than the interrupt's service cc
+        // fires AFTER the interrupt's PC pushes, so a pushed return address is
+        // visible in the HDMA copy of that stack slot (`late_hdma_vs_ei/ie/tima`
+        // content-test root). A block ALREADY latched before this service began is
+        // *earlier* than the interrupt and keeps firing at its natural dot (before
+        // the pushes — the dma-wins races). So suppress the fire only when no block
+        // is pending at service entry; a block latched during the service M-cycles
+        // is then held and fired explicitly after the pushes.
+        //
+        // A service that resumes from HALT this same step is NOT eligible: the
+        // halt-deferred block re-flagged on unhalt fires on its own
+        // `haltHdmaState_` schedule (already calibrated), and the m0-edge phase of
+        // the HALT-wakeup stream is the C8/C9 sprite/scx lever — suppressing here
+        // mis-orders the dma-wins halt races (`*_halt_1`). Keep the prior
+        // synchronous timing on the unhalt path.
+        let suppress = !just_unhalted && !bus.hdma_fire_pending();
+        bus.set_hdma_mcycle_fire_suppressed(suppress);
 
         // 3 internal M-cycles (Gambatte `cc += 12`: undone prefetch + 2 wait),
         // then push PC high, then push PC low. Ticking all internal cycles
@@ -117,6 +138,11 @@ impl SM83 {
 
         self.registers.sp = self.registers.sp.wrapping_sub(1);
         bus.write(self.registers.sp, (self.registers.pc & 0x00FF) as u8);
+
+        // Pushes complete: re-enable the M-cycle fire and fire any HDMA block
+        // latched during the service, so it reads memory as of the post-push cc.
+        bus.set_hdma_mcycle_fire_suppressed(false);
+        bus.fire_pending_hdma_mcycle();
 
         self.registers.pc = match flag {
             Some(registers::InterruptFlag::VBlank) => 0x40,
