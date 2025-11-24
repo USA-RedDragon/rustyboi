@@ -1463,7 +1463,7 @@ impl Mmio {
             // Gambatte applies `Tima::speedChange` (a 4-cycle TIMA phase shift
             // for enabled fast timers) before the DIV reset; mirror that order.
             self.timer.speed_change();
-            self.timer.stop_div_reset();
+            self.timer.stop_div_reset(old_ds);
             if self.timer.take_pending_irq() {
                 self.request_interrupt(cpu::registers::InterruptFlag::Timer);
             }
