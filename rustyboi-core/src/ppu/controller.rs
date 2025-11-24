@@ -3017,17 +3017,30 @@ impl Ppu {
         let frame_cycles = ly * cpl + line_cycles;
         let dsi = ds as i64;
 
-        // The per-dot register only mis-reads when this read's M-cycle straddles a
-        // line boundary: the access cc lands in the LAST few dots of a line (high
-        // lineCycles) and the post-tick advance crosses into the next line's mode.
-        // Scope to the VBlank-adjacent lines (143 tail .. 153 tail / wrap): the
-        // mid-frame line-tail mode-0/2 boundary is co-tuned with the renderer
-        // register for the m0stat / halt-m0stat tests, so only the VBlank entry/exit
-        // and the line-153->0 wrap straddles are refined here. (`ly` is the clean
-        // event-clock LY == Gambatte's lyCounter.ly().) The cpl-7 threshold covers
-        // the 4-dot (1 M-cycle, 8 cc at DS) post-tick over-advance plus margin.
+        // The per-dot register mis-reads whenever the post-tick FF41 register lags
+        // the access-start cc: at a line-boundary straddle (VBlank entry/exit, line
+        // wrap) AND mid-frame, where a mode 0 / mode 2 read in a non-PixelTransfer
+        // state samples the register ~+4cc (≈+2 dots) late (C1: the lycint_m0stat /
+        // m2int_m0stat / m0int_m0stat / lycEnable / misc-small clusters). The
+        // PixelTransfer (mode-3) reads are already resolved exactly by
+        // `get_stat_mode3to0_at_cc` (which runs first in the bus `.or_else` chain),
+        // so this is only ever consulted in mode 0 / mode 2 / mode 1 — never inside
+        // mode 3. (`ly` is the clean event-clock LY == Gambatte's lyCounter.ly().)
+        //
+        // VBlank-adjacent lines (ly>=143): keep the original line-tail-scoped path
+        // byte-identical (those boundaries are co-tuned with the renderer register).
+        // Mid-frame lines (ly<143): C1 resolves the mode 0 / mode 2 read at the
+        // access-start cc via the full Gambatte getStat branch order (video.cpp
+        // 806-817), reusing the exact mode-3 sub-test so it stays byte-identical to
+        // the PixelTransfer path for any line-straddle that resolves back into mode 3.
         if ly < 143 {
-            return None;
+            return self.get_stat_mode_midframe(
+                access_cc,
+                ly,
+                line_cycles,
+                ds,
+                mmio.halt_wakeup_skew(),
+            );
         }
         let near_line_end = line_cycles >= cpl - 7;
         let in_vblank_window = frame_cycles >= 144 * cpl - 3 && frame_cycles < cpf - 3;
@@ -3061,6 +3074,92 @@ impl Ppu {
             }
         }
         Some(0)
+    }
+
+    /// C1: full Gambatte `getStat` mode resolution for a MID-FRAME line (ly < 143),
+    /// resolved at the access-start cc. The post-tick FF41 register lags a mode 0 /
+    /// mode 2 read by ~+4cc (≈+2 dots) because `bus.rs read()` samples it AFTER
+    /// `tick_m()`; this resolves the mode at the access cc instead.
+    ///
+    /// Mirrors the video.cpp:811-817 branch ORDER (the VBlank-window branch at 806
+    /// never applies for ly<143):
+    ///   - mode 2 iff `lineCycles < 77 || lineCycles >= cpl - 3` (guarded by
+    ///     inactivePeriodAfterDisplayEnable, == rustyboi `display_enable_inactive_until`)
+    ///   - else mode 3 iff `access_cc + read_off < m0Time`  — the SAME sub-test as
+    ///     `get_stat_mode3to0_at_cc` (so a line-straddle that resolves back into
+    ///     mode 3 stays byte-identical to the already-passing PixelTransfer path)
+    ///   - else mode 0
+    ///
+    /// This is only ever reached when the renderer is NOT in PixelTransfer (the
+    /// PixelTransfer reads short-circuit through `get_stat_mode3to0_at_cc` first), so
+    /// the mode-3 sub-test resolves a mode 0/mode 3 line-boundary straddle only.
+    /// During mode 2 (OAMSearch) `m0_time_master` still holds the PREVIOUS line's
+    /// (now-past) value, so the mode-3 sub-test is gated on `state != OAMSearch`
+    /// (mirroring the cpu_access_blocked stale-m0Time guards) — mode 3 cannot have
+    /// ended before it begins.
+    fn get_stat_mode_midframe(
+        &self,
+        access_cc: u64,
+        ly: i64,
+        line_cycles: i64,
+        ds: bool,
+        halt_skew: bool,
+    ) -> Option<u8> {
+        let _ = ly;
+        let cpl = stat_irq::LCD_CYCLES_PER_LINE as i64;
+        // Line-tail zone (lineCycles >= cpl - 7) under a HALT-woken stream: the
+        // mode-0 <-> next-line-mode-2 boundary here is irreducibly ambiguous in
+        // rustyboi between a normal read and a post-HALT-wakeup read — both land at
+        // the SAME modeled access_cc / lineCycles / m0Time, yet hardware reports
+        // opposite modes (e.g. non-HALT `m0int_m0stat_scx2_1` out0 vs HALT
+        // `m0int_m0stat_scx2_2` out2 both at lineCycles 452, access_cc-m0Time 198).
+        // The discriminator is the HALT wakeup M-cycle phase, which rustyboi does
+        // not yet model (the prefetch / per-access-cc gap), so when the live stream
+        // was resumed by a HALT wakeup the access_cc is sub-M-cycle skewed and the
+        // post-tick renderer register is the correct value at the line tail — defer
+        // to it (return None). Non-HALT reads keep C1's exact line-tail resolution.
+        if halt_skew && line_cycles >= cpl - 7 {
+            return None;
+        }
+        // Mode 2 (OAM search): start-of-line lineCycles (< 77), or line-tail
+        // anticipation — video.cpp:811-813.
+        if line_cycles < 77 || line_cycles >= cpl - 3 {
+            if (access_cc + 1) < self.display_enable_inactive_until {
+                return Some(0);
+            }
+            return Some(2);
+        }
+        // Mode 3 (pixel transfer) iff `access_cc + read_off < m0Time` — the exact
+        // sub-test from `get_stat_mode3to0_at_cc` (video.cpp:814-816). Skipped during
+        // OAMSearch where `m0_time_master` is the previous line's stale value.
+        //
+        // When no closed-form `m0_time_master` exists (first line after enable,
+        // window-start / mid-mode-3 WX-invalidated lines) we CANNOT resolve the
+        // mode-3 -> mode-0 boundary here, and the renderer register is already the
+        // correct emergent value for these lines (the late_reenable / late_disable /
+        // late_wy / window / first-line-after-enable `out3` cases all rely on it) —
+        // so defer to it (return None) instead of falsely reporting mode 0.
+        if self.state != State::OAMSearch {
+            match self.m0_time_master {
+                Some(m0t) => {
+                    if (access_cc + 1) < self.display_enable_inactive_until {
+                        return Some(0);
+                    }
+                    let read_off: i64 = if !ds && !self.lytime_no_plus1 { 3 } else { 2 };
+                    if (access_cc as i64) + read_off < m0t as i64 {
+                        return Some(3);
+                    }
+                    // else mode 0 — the body of the line past m0Time.
+                    Some(0)
+                }
+                None => None,
+            }
+        } else {
+            // Mode 2 with no closed-form anchor resolved above already returned;
+            // a lineCycles-77..453 read during OAMSearch is a stale-m0Time straddle:
+            // defer to the renderer register.
+            None
+        }
     }
 
     /// Gambatte `LCD::getStat` LYC=LY coincidence flag (FF41 bit 2), computed at
