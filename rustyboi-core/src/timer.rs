@@ -38,6 +38,24 @@ const WRITE_CC_OFF: i64 = 0;
 /// speed-switch DIV reset resolves at this phase relative to the per-dot
 /// `abs_cc`; swept against `speedchange2_tima00_2a/2b`.
 const STOP_CC_OFF: i64 = 0;
+/// Extra master-cc added to the STOP divReset/speed-switch cc when the STOP is
+/// entered in DOUBLE speed (DS->SS direction). Gambatte's STOP-entry cc carries
+/// one more prefetch M-cycle in double speed than in single (cctracer: SS-entry
+/// divReset at instr_start+4, DS-entry at instr_start+8), so the per-dot `abs_cc`
+/// (which trails by the single-speed amount) is 4 master-cc short of the true
+/// switch cc in the DS->SS direction. The DIV/TIMA register READ resolves at
+/// `access_cc()` (CC_OFF=5), which itself trails Gambatte's read cc by 3 for these
+/// post-switch reads; only `read_cc - div_anchor` matters for the high-byte/tick
+/// boundary, so the boundary-matching re-anchor is `4 - 3 = +1`. Swept against the
+/// full speedchange2 tima/div families: +1 passes BOTH sub-dot probe sides of
+/// every `_1/_2/_1a/_1b/_2a/_2b` pair (10 fixes, zero regressions).
+const STOP_DS_OFF: i64 = 1;
+/// APU-specific STOP speed-switch cc offset (DS->SS direction). The APU divReset
+/// fold (square duty + length `cc>>13` boundary) re-anchors at a different
+/// sub-cycle phase than the TIMA/DIV high-byte boundary, so it carries its own
+/// offset (swept: +2 fixes the `ch2_nr52_2b` length-expiry probes with no
+/// regression; the TIMA/DIV `STOP_DS_OFF` of +1 is calibrated separately).
+const STOP_APU_DS_OFF: i64 = 2;
 
 // Gambatte's `+3` constant in `tmatime`/`nextIrqEventTime` (mem/tima.cpp).
 const TMA_OFF: u64 = 3;
@@ -89,6 +107,13 @@ pub struct Timer {
     // `step` (and the post-write flush in `mmio`) raise the actual IF bit.
     #[serde(default)]
     pending_irq: bool,
+    // APU-visible divider anchor. Equals `div_anchor` for normal FF04 writes, but
+    // for the CGB STOP speed-switch divReset it carries the APU's own switch-cc
+    // offset (`STOP_APU_DS_OFF`), which is calibrated independently of the
+    // TIMA/DIV-register `STOP_DS_OFF` (the square-duty sub-cycle phase rounds
+    // differently from the TIMA/DIV high-byte boundary).
+    #[serde(default)]
+    div_anchor_apu: u64,
 }
 
 fn disabled_time() -> u64 {
@@ -110,6 +135,7 @@ impl Timer {
             tmatime: DISABLED_TIME,
             next_irq_event_time: DISABLED_TIME,
             pending_irq: false,
+            div_anchor_apu: 0,
         }
     }
 
@@ -123,9 +149,12 @@ impl Timer {
 
     /// The access cc of the most recent DIV write (Gambatte `divLastUpdate_`).
     /// The APU divReset fold must run at this cc, matching the single
-    /// `cycleCounter_` Gambatte folds on.
+    /// `cycleCounter_` Gambatte folds on. Returns the APU-visible anchor, which
+    /// for a STOP speed-switch divReset carries the APU-specific switch-cc offset
+    /// (`div_anchor_apu` tracks `div_anchor` for every normal FF04 write and only
+    /// diverges across a STOP speed switch).
     pub fn div_anchor(&self) -> u64 {
-        self.div_anchor
+        self.div_anchor_apu
     }
 
     /// The 16-bit DIV divider: a pure derivation of the master counter and the
@@ -290,15 +319,27 @@ impl Timer {
                 self.tima_last_update + ((256u64 - self.tima as u64) << clk) + TMA_OFF;
         }
         self.div_anchor = cc;
+        // Normal FF04 writes share one cc for the DIV register and the APU fold;
+        // the STOP path overrides `div_anchor_apu` afterward with its own offset.
+        self.div_anchor_apu = cc;
         self.div_reset_count = self.div_reset_count.wrapping_add(1);
     }
 
-    /// CGB STOP speed-switch DIV reset. Resolves at the STOP-write canonical cc
-    /// (`abs_cc + STOP_CC_OFF`); the STOP is a CPU write whose DIV-reset effect
-    /// lands at the write phase, mirroring `write_access_cc()` (M8).
-    pub fn stop_div_reset(&mut self) {
-        let cc = (self.abs_cc as i64 + STOP_CC_OFF) as u64;
+    /// CGB STOP speed-switch DIV reset. Re-anchors DIV/TIMA at the switch cc:
+    /// `abs_cc + STOP_CC_OFF`, plus `STOP_DS_OFF` extra master-cc when the STOP is
+    /// entered in DOUBLE speed (`old_ds`, the DS->SS direction); see `STOP_DS_OFF`
+    /// for the derivation. The APU divReset fold's anchor (`div_anchor_apu`) gets
+    /// its own `STOP_APU_DS_OFF` offset, set after `div_reset_at` (which would
+    /// otherwise overwrite it with the TIMA/DIV `cc`).
+    pub fn stop_div_reset(&mut self, old_ds: bool) {
+        let cc = (self.abs_cc as i64 + STOP_CC_OFF
+            + if old_ds { STOP_DS_OFF } else { 0 }) as u64;
+        // APU divReset fold anchor: independently offset from the TIMA/DIV cc.
+        let apu_cc = (self.abs_cc as i64 + STOP_CC_OFF
+            + if old_ds { STOP_APU_DS_OFF } else { 0 }) as u64;
         self.div_reset_at(cc);
+        // div_reset_at set div_anchor_apu = cc; override with the APU-specific cc.
+        self.div_anchor_apu = apu_cc;
     }
 
     /// Initialize the timer's internal 16-bit counter (used at boot to mirror
@@ -306,6 +347,7 @@ impl Timer {
     pub fn set_internal_counter(&mut self, value: u16) {
         self.abs_cc = value as u64;
         self.div_anchor = 0;
+        self.div_anchor_apu = 0;
         self.tima_last_update = self.abs_cc;
     }
 
