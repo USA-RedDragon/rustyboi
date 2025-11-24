@@ -1039,7 +1039,6 @@ impl Ppu {
             let clean_ss = !ds && self.sprites_on_line.is_empty();
             let clean_ds = cgb_features_enabled
                 && ds
-                && self.m3_arm_scx & 7 == 0
                 && self.sprites_on_line.is_empty();
             // On DMG the LCDC-write hook fires one PPU step before the
             // PixelTransfer code latches `win_start_dot`, so a disable landing
@@ -1112,7 +1111,17 @@ impl Ppu {
                     // speed each dot is 2 cc. (Was a binary full-or-none refund,
                     // which over-refunded an early disable by the 2 already-drawn
                     // window dots -> the late_disable_early_*_ds reads flipped.)
-                    let drawn = (self.ticks as i64) - ws as i64;
+                    // SCX fine-scroll shift for x==0 windows (WX<=7), same as the
+                    // single-speed branch: win_start_dot is latched before the scx&7
+                    // discard completes, so the accrual reference is scx&7 dots early.
+                    // Generalising the former `m3_arm_scx&7==0` gate to all phases
+                    // covers the late_disable_scx5_ds_1 CGB rep.
+                    let win_fine = if self.m3_scheduled_wx <= 7 {
+                        (self.m3_arm_scx & 7) as i64
+                    } else {
+                        0
+                    };
+                    let drawn = (self.ticks as i64) - ws as i64 - win_fine;
                     let accrued = drawn.clamp(0, WIN_M3_PENALTY as i64);
                     let refund = (WIN_M3_PENALTY as i64 - accrued) << 1;
                     self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
