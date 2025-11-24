@@ -219,6 +219,18 @@ pub struct Mmio {
     // idles these cycles (peripherals keep ticking) before its next fetch.
     #[serde(skip, default)]
     pending_dma_stall: u32,
+    // C7 (DMA prefetch absorption): Gambatte runs GDMA/HDMA as `intevent_dma` with
+    // a preceding `Interrupter::prefetch` that fetches the next opcode at the dma
+    // event cc with NO extra cc — the opcode-fetch M-cycle is folded into the dma's
+    // trailing `+4`. rustyboi copies the block synchronously and drains the cc as an
+    // idle stall, so the FIRST access after the stall starts its M-cycle one dot
+    // higher than Gambatte's (the absorbed prefetch M-cycle is double-counted). This
+    // flag, set when the stall is consumed, tells the next FF41 STAT-mode read to
+    // resolve at `master_cc - 1` (Gambatte's true read cc) so the post-DMA mode-3
+    // boundary `_1`/`_2` brackets land on the same sub-dot Gambatte does. Cleared
+    // after the first STAT mode read consumes it.
+    #[serde(skip, default)]
+    dma_prefetch_stat_bias: bool,
     // Mirrors Gambatte's `haltHdmaState_`.
     #[serde(default)]
     halt_hdma_state: HaltHdmaState,
@@ -338,6 +350,7 @@ impl Mmio {
             hdma_length: 0,
             hdma_enabled: false,
             pending_dma_stall: 0,
+            dma_prefetch_stat_bias: false,
             hdma_req_pending: false,
             halt_hdma_state: HaltHdmaState::Low,
             halt_wakeup_skew: false,
@@ -1171,7 +1184,19 @@ impl Mmio {
 
     /// Consume the CPU-cycle stall owed for completed HDMA/GDMA transfers.
     pub fn take_dma_stall(&mut self) -> u32 {
-        std::mem::take(&mut self.pending_dma_stall)
+        let stall = std::mem::take(&mut self.pending_dma_stall);
+        if stall > 0 {
+            // C7: arm the post-DMA STAT-read bias (prefetch absorption) so the
+            // first FF41 mode read after the stall resolves at Gambatte's read cc.
+            self.dma_prefetch_stat_bias = true;
+        }
+        stall
+    }
+
+    /// C7: whether the next FF41 STAT-mode read should apply the post-DMA prefetch
+    /// bias (resolve at `master_cc - 1`). Consumes the flag.
+    pub fn take_dma_prefetch_stat_bias(&mut self) -> bool {
+        std::mem::take(&mut self.dma_prefetch_stat_bias)
     }
 
     /// Whether the OAM-DMA engine is armed/running (mirrors

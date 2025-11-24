@@ -188,7 +188,20 @@ impl<'a> Bus<'a> {
         let stat_mode_pre = if addr == ppu::LCD_STATUS {
             // Gambatte resolves FF41 at the raw master cc (== Gambatte `cc`);
             // boundary mode3 iff `master_cc + 2 < m0Time`.
-            let access_cc = self.mmio.master_cc();
+            // C7: the first STAT-mode read after a GDMA/HDMA stall drain starts its
+            // M-cycle one dot higher than Gambatte's read cc (the prefetch M-cycle
+            // Gambatte absorbs is double-counted by the synchronous-copy + idle-stall
+            // model). Resolve it at `master_cc - 1` so the post-DMA mode-3 boundary
+            // brackets land on Gambatte's exact sub-dot.
+            //
+            // Scoped to double speed: at single speed the closed-form `m0_time_master`
+            // carries a per-SCX +1 phase error that the `read_off=3` STAT bias already
+            // masks at the exact boundary, so the -1 would mis-flag the SS `_2`
+            // (mode-0) brackets into mode 3. The DS read uses Gambatte's true `+2`
+            // boundary, where the -1 prefetch absorption is exact and regression-free.
+            let bias =
+                self.mmio.take_dma_prefetch_stat_bias() && self.mmio.is_double_speed_mode();
+            let access_cc = self.mmio.master_cc().saturating_sub(if bias { 1 } else { 0 });
             self.ppu
                 .get_stat_mode3to0_at_cc(access_cc, self.mmio.is_double_speed_mode())
                 // The mode-3<->0 path only covers in-mode-3 reads; the mode 0/1/2
