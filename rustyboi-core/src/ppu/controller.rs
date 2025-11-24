@@ -1032,12 +1032,19 @@ impl Ppu {
     /// BASE = 84 (CGB SS+DS), 83 (DMG). `p_now + ly_counter().time` is the next-LY
     /// master cc; the +1 corrects rustyboi's LyCounter.time running one master-cc
     /// below Gambatte's lyTime. getStat boundary: mode3 iff `master_cc + 2 < m0Time`.
-    fn m0_time_exact(&self, mmio: &mmio::Mmio, m3_len: u128, is_cgb: bool) -> u64 {
+    ///
+    /// `first_line` selects the first line after LCD enable: Gambatte seeds the PPU
+    /// at enable with `cycles = -(m3StartLineCycle + 2)` (PPU::setLcdc), so the
+    /// first M3 begins TWO dots later than the normal-line m3-start anchor encoded
+    /// in BASE (which == `m3StartLineCycle`). The mode-0 line-cycle is therefore
+    /// `m3_len + BASE + 2`. (`p_now + ly_counter().time` is enable-anchored on this
+    /// line — `setLcdc` reset `now = enable_cc`, `lyCounter.reset(0, enable_cc)`.)
+    fn m0_time_exact(&self, mmio: &mmio::Mmio, m3_len: u128, is_cgb: bool, first_line: bool) -> u64 {
         let ds = mmio.is_double_speed_mode() as u32;
         let base: i64 = if is_cgb { 84 } else { 83 };
         let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
         let ly_time = self.p_now as i64 + self.ly_counter(mmio).time as i64 + plus1;
-        let m0_line_cycle = m3_len as i64 + base;
+        let m0_line_cycle = m3_len as i64 + base + if first_line { 2 } else { 0 };
         (ly_time - ((456 - m0_line_cycle) << ds)).max(0) as u64
     }
 
@@ -2075,6 +2082,23 @@ impl Ppu {
                         Self::set_lcd_status_mode(mmio, 3);
                         self.check_and_trigger_stat_interrupt(mmio);
                     }
+                    // Install the closed-form master-cc anchors for the first line
+                    // BEFORE M3 arms, so the CPU-access gates (OAM/VRAM/cgbp) resolve
+                    // the mode-3 END boundary (`cc + 2 >= m0Time`) during this pre-M3
+                    // OAMSearch phase too. In Gambatte the PPU machine is fully seeded
+                    // at enable (`cycles = -(m3StartLineCycle + 2)`), so
+                    // `m0TimeOfCurrentLine` is predictable from the start of the line;
+                    // here it is enable-anchored (`p_now`) and uses the first-line
+                    // m3-start (+2). OAM is blocked from line start to m0Time (mode 2
+                    // and mode 3 alike) — the inactive-period guard above keeps it
+                    // accessible until `lu_`. Recomputed each tick so a mid-line SCX/
+                    // window change tracks (the M3-arm site re-installs the final
+                    // value). No closed-form anchor existed here before (the gates
+                    // fell back to the first-line FF41 mode register, which reports
+                    // mode 0 and wrongly unblocked OAM in this window).
+                    let m3_len = self.compute_m3_length(mmio, is_cgb);
+                    self.m0_time_master = Some(self.m0_time_exact(mmio, m3_len, is_cgb, true));
+                    self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
                 }
 
                 // Perform sprite search distributed across 80 ticks
@@ -2227,9 +2251,31 @@ impl Ppu {
                     self.check_and_trigger_stat_interrupt(mmio);
 
                     if was_first_line {
+                        // First line after LCD enable: install the SAME closed-form
+                        // master-cc anchors the normal-line path uses, computed for
+                        // this line, so the CPU-access gates (cgbp/oam/vram) and the
+                        // getStat mode reads resolve at the access cc instead of
+                        // falling back to the hand-tuned FIRST_FRAME per-dot pipeline.
+                        //
+                        // Gambatte PPU::setLcdc seeds the PPU at enable with `now =
+                        // enable_cc`, `lyCounter.reset(0, enable_cc)`, no sprites
+                        // (enableDisplay clears the buffer), and `cycles =
+                        // -(m3StartLineCycle + 2)` — so the first M3 begins 2 dots
+                        // later than a normal line. `m0_time_exact(.., first_line)`
+                        // adds that +2 to the mode-0 line-cycle; `cgbp_begin_exact`
+                        // (the lineCycles+ds>=80 begin boundary) is enable-anchored
+                        // already (it shares the same lyTime as a normal line).
+                        // The inactive-period gate (`display_enable_inactive_until`,
+                        // Gambatte OamReader::lu_) was seeded at enable.
+                        let m3_len = self.compute_m3_length(mmio, is_cgb);
+                        let m0t = self.m0_time_exact(mmio, m3_len, is_cgb, true);
+                        self.m0_time_master = Some(m0t);
+                        self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
+                        // The within-line reported mode-0 dot / m0 IRQ arm keep the
+                        // calibrated FIRST_FRAME timing (the first-line pixel
+                        // pipeline arms later than a normal line); only the
+                        // closed-form access/getStat anchors above are installed.
                         self.scheduled_mode0_dot = None;
-                        self.m0_time_master = None;
-                        self.cgbp_block_start_cc = None;
                     } else {
                         // Closed-form mode-0 schedule, including window-start lines
                         // (compute_m3_length applies the window penalty). Mid-mode-3
@@ -2245,7 +2291,7 @@ impl Ppu {
                         // lives in m3_len). `p_now + ly_counter().time` is the
                         // next-LY master cc; +1 corrects rustyboi's LyCounter.time
                         // running 1 master-cc below Gambatte's lyTime.
-                        let m0t = self.m0_time_exact(mmio, m3_len, is_cgb);
+                        let m0t = self.m0_time_exact(mmio, m3_len, is_cgb, false);
                         self.m0_time_master = Some(m0t);
                         // The within-line mode-0 dot is DERIVED from the same exact
                         // m0Time (master cc) so the eager-grid consumers (reported
@@ -2782,6 +2828,32 @@ impl Ppu {
         // (The FF41/getStat read uses a different opcode whose raw cc already shares
         // the offset, so this correction is scoped to the access gate.)
         let cc_end = cc + 1;
+        // First line after LCD enable: Gambatte's accessibility functions all OR in
+        // `inactivePeriodAfterDisplayEnable(cc + bias)` == `cc + bias < lu_`, where
+        // `lu_` == `display_enable_inactive_until` (seeded at enable to
+        // `enable_cc + (80<<ds) + 1`). While inactive the access is ACCESSIBLE
+        // (not blocked), overriding the lineCycle / renderer-tick begin boundary
+        // (which on the first line arms M3 two dots late and would otherwise report
+        // the access blocked before `lu_`). The per-kind/direction bias mirrors
+        // Gambatte (video.cpp cgbpAccessible/vramReadable/vramWritable/oamReadable/
+        // oamWritable), shifted by +1 to share the access-cc offset the m0Time END
+        // tests use (`cc_end = cc + 1`):
+        //   cgbp (2):       cc + 1                  < lu_   (Gambatte raw cc)
+        //   vram (0, r/w):  cc + 2 - cgb + ds       < lu_   (Gambatte cc + 1 - cgb + ds)
+        //   oam  (1) read:  cc + 5                  < lu_   (Gambatte cc + 4)
+        //   oam  (1) write: cc + 5 + ds             < lu_   (Gambatte cc + 4 + ds)
+        if self.display_enable_inactive_until != 0 {
+            let bias: i64 = match (kind, is_read) {
+                (2, _) => 1,
+                (0, _) => 2 - is_cgb as i64 + ds,
+                (1, true) => 5,
+                (1, false) => 5 + ds,
+                _ => 1,
+            };
+            if cc + bias < self.display_enable_inactive_until as i64 {
+                return Some(false);
+            }
+        }
         // CGB palette RAM (FF69/FF6B): Gambatte `cgbpAccessible(cc)` — accessible
         // iff `lineCycles(cc) + ds < 80` OR `cc >= m0Time + 2`. Both boundaries are
         // resolved at the access cc against master-cc anchors (begin =
@@ -2866,10 +2938,14 @@ impl Ppu {
                 // prewrite_lcdoffset2_1 accessible). Double speed never legitimately
                 // sits in OAMSearch past tick 80 with this anomaly (no DS lcdoffset2
                 // tests), so there `ticks > 80` is a genuine late-mode-2 block; only
-                // apply the escape at single speed. Gated on the anchor being present
-                // so the first-line-after-enable case (no anchor, `ly0_late_vram*`)
-                // falls through to the `mode3_locked` register path below.
-                let lcdoffset_extended = !double_speed && self.ticks > 80;
+                // apply the escape at single speed. EXCLUDE the first line after
+                // enable: there M3 legitimately arms at tick 85/86 (m3StartLineCycle
+                // + 2), so an OAMSearch tick > 80 is the normal first-line pre-M3
+                // window, NOT an lcdoffset2 stop-bridge anomaly — the `vram_started`
+                // begin (now closed-form from the enable-anchored cgbp anchor) is the
+                // correct gate there (ly0_late_vramr/vramw _2/_3 boundary).
+                let lcdoffset_extended =
+                    !double_speed && self.ticks > 80 && !self.first_line_after_enable;
                 return Some(if lcdoffset_extended { false } else { started });
             }
         }
@@ -2929,6 +3005,14 @@ impl Ppu {
         let started = match (kind, vram_started) {
             // VRAM: byte-exact per-direction/model begin (see `vram_started`).
             (0, Some(s)) => s || mode3_locked,
+            // OAM (kind 1) on the first line after enable: Gambatte's oamWritable/
+            // oamReadable have NO lineCycle-begin term — OAM is blocked from the end
+            // of the inactive period (handled by the guard at the top) to m0Time,
+            // through both mode 2 and mode 3. The first line has no mode-2 FF41
+            // register (it reports mode 0), so `mode3_locked`/`cgbp_block_start_cc`
+            // do not gate it; once past the inactive period it is simply blocked
+            // (the `ended` test unblocks it at m0Time / mode 0).
+            (1, _) if self.first_line_after_enable => true,
             // OAM (kind 1, blocked from mode 2): the register `mode3_locked`
             // already covers the mode-2 prefix; the cgbp anchor refines the dot.
             _ => match self.cgbp_block_start_cc {
