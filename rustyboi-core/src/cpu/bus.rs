@@ -332,6 +332,17 @@ impl<'a> Bus<'a> {
             }
             self.tick_m();
             self.mmio.write(addr, value);
+            // C7-full: an FF55 bit7=1 kick written while OAM-DMA is active routes
+            // through this tick-before path; resolve its live-period gate here too
+            // so the flag never leaks (see the else branch for the rationale).
+            if self.mmio.hdma_kick_eval_pending() {
+                let ds = self.mmio.is_double_speed_mode();
+                let in_period = self
+                    .ppu
+                    .hdma_period(ds)
+                    .unwrap_or_else(|| self.mmio.hdma_is_in_period_cached());
+                self.mmio.resolve_hdma_kick(in_period);
+            }
         } else {
             // The write resolves at the current persistent T-phase, before this
             // M-cycle's dots tick. Pass that phase's sub-dot parity so the PPU
@@ -354,6 +365,20 @@ impl<'a> Bus<'a> {
             }
             if self.mmio.take_stat_register_write_pending() {
                 self.ppu.on_stat_register_write(self.mmio);
+            }
+            // C7-full: resolve a pending FF55 bit7=1 kick against the LIVE HDMA
+            // period predicate (Gambatte enableHdma -> isHdmaPeriod(cc+4)) rather
+            // than the 1-dot-lagged renderer cache. Evaluated here at the write's
+            // access cc, before the M-cycle ticks. When `hdma_period` cannot supply
+            // a closed-form mode-0 dot (window / first line after enable) fall back
+            // to the cached period so those paths still kick.
+            if self.mmio.hdma_kick_eval_pending() {
+                let ds = self.mmio.is_double_speed_mode();
+                let in_period = self
+                    .ppu
+                    .hdma_period(ds)
+                    .unwrap_or_else(|| self.mmio.hdma_is_in_period_cached());
+                self.mmio.resolve_hdma_kick(in_period);
             }
             self.tick_m();
         }
