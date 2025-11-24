@@ -1715,7 +1715,7 @@ impl Ppu {
     /// Mirrors Gambatte: when the scheduled m0 IRQ is disabled but the current
     /// line's mode 0 is still ahead, predict it from the renderer; otherwise use
     /// the scheduled value.
-    fn m0_irq_time_for_trigger(&self, _mmio: &mmio::Mmio, lc: &stat_irq::LyCounter, _cc: u64) -> u64 {
+    fn m0_irq_time_for_trigger(&self, mmio: &mmio::Mmio, lc: &stat_irq::LyCounter, _cc: u64) -> u64 {
         // Gambatte's statChangeTriggers* needs the m0 IRQ time of the *current
         // line*. Our `sched_m0irq` may hold a stale current-line value during
         // HBlank (it is only cleared to DISABLED when the m0 source fires). The
@@ -1723,20 +1723,68 @@ impl Ppu {
         // `lyCounter.time()` (next-LY): if mode 0 is already active (HBlank) the
         // current line's m0 has passed and the next is on a later line, i.e.
         // `>= lc.time`; during mode 2/3 it is still ahead this line (`< time`).
+        // Mode 3 (PixelTransfer): the current line's m0 is ahead, and the
+        // closed-form `m0_time_master` is this line's exact m0Time — use the exact
+        // Gambatte mode-0 IRQ event time (predictedNextXposTime(166)). Mode 2
+        // (OAMSearch): `m0_time_master` still holds the PREVIOUS line's value, so
+        // keep the per-dot `sched_m0irq` (this line's armed m0). Both clamp below
+        // next-LY so the "m0 ahead this line" branch is taken.
+        let sched_or_future = if self.sched_m0irq == stat_irq::DISABLED_TIME {
+            lc.time.saturating_sub(1)
+        } else {
+            self.sched_m0irq.min(lc.time.saturating_sub(1))
+        };
         match self.state {
             // Mode 0 active: report a time at/after the next LY so the "m0 has
             // occurred" branch is taken.
             State::HBlank => lc.time,
             // VBlank: no m0 this line; far future.
             State::VBlank => stat_irq::DISABLED_TIME,
-            // Mode 2/3: current line's m0 is ahead but before next LY.
-            _ => {
-                if self.sched_m0irq == stat_irq::DISABLED_TIME {
-                    lc.time.saturating_sub(1)
-                } else {
-                    self.sched_m0irq.min(lc.time.saturating_sub(1))
-                }
-            }
+            State::PixelTransfer => self
+                .m0_irq_time_exact(mmio)
+                .map(|t| t.min(lc.time.saturating_sub(1)))
+                .unwrap_or(sched_or_future),
+            _ => sched_or_future,
+        }
+    }
+
+    /// The exact Gambatte mode-0 STAT-IRQ event time for the current line, used
+    /// by the FF41/FF45 latch + immediate-trigger comparisons. Gambatte's m0 IRQ
+    /// fires at `predictedNextXposTime(166) = m0Time - (1<<ds)`, one xpos before
+    /// the mode-3 -> mode-0 transition (`m0Time = predictedNextXposTime(167)`,
+    /// our `m0_time_master`). Returns `None` when no closed-form master exists
+    /// (window mid-line / first line after enable), in which case callers fall
+    /// back to the per-dot delivery value (`sched_m0irq`).
+    fn m0_irq_time_exact(&self, mmio: &mmio::Mmio) -> Option<u64> {
+        let ds = mmio.is_double_speed_mode() as i64;
+        // `m0_time_master` is the master-cc m0Time (= predictedNextXposTime(167)).
+        // The STAT/LYC write-trigger comparisons run in abs-cc units (the same
+        // `cc = write_cc()` / `sched_m0irq` clock), so rebase by `p_now`
+        // (abs_cc = master_cc - p_now). The mode-0 IRQ fires one xpos earlier:
+        // predictedNextXposTime(166) = m0Time - (1<<ds).
+        //
+        // `m0_time_master` (via `m0_time_exact`) carries a `+1` lyTime correction
+        // tuned for the C1 *read* access-cc phase (`access_cc + 2 < m0Time`). The
+        // *write* cc (write_cc_off = 0) resolves the latch/trigger one cc earlier,
+        // so that read-phase `+1` over-counts the write-boundary IRQ time by 1 —
+        // subtract it back out to land the write-phase boundary exactly.
+        self.m0_time_master
+            .map(|m0t| (m0t as i64 - (1 << ds) - self.p_now as i64 - 1).max(0) as u64)
+    }
+
+    /// The current-line mode-0 IRQ time for the FF41/FF45 *latch* comparisons
+    /// (Gambatte `eventTimes_(memevent_m0irq)`). During mode 3 the closed-form
+    /// `m0_time_master`-derived exact value (predictedNextXposTime(166)) is this
+    /// line's m0; in HBlank/mode 2/VBlank/window the per-dot `sched_m0irq` already
+    /// carries the relevant scheduled (next-line) value, matching the pre-C5 latch
+    /// behaviour, so keep it there to avoid disturbing those boundaries.
+    fn m0_irq_time_latch(&self, mmio: &mmio::Mmio, lc: &stat_irq::LyCounter) -> u64 {
+        match self.state {
+            State::PixelTransfer => self
+                .m0_irq_time_exact(mmio)
+                .map(|t| t.min(lc.time.saturating_sub(1)))
+                .unwrap_or(self.sched_m0irq),
+            _ => self.sched_m0irq,
         }
     }
 
@@ -1772,9 +1820,14 @@ impl Ppu {
             mmio.request_interrupt(registers::InterruptFlag::Lcd);
         }
 
+        // Latch the new STAT bits against the exact current-line mode-0 IRQ time
+        // (Gambatte's `eventTimes_(memevent_m0irq)` = predictedNextXposTime(166))
+        // during mode 3, keeping the per-dot `sched_m0irq` next-line value
+        // elsewhere (HBlank/mode 2/window) — see `m0_irq_time_latch`.
+        let m0_latch = self.m0_irq_time_latch(mmio, &lc);
         self.mstat_irq.stat_reg_change(
             data,
-            self.sched_m0irq,
+            m0_latch,
             self.sched_m1irq,
             self.sched_m2irq,
             cc,
@@ -1794,12 +1847,17 @@ impl Ppu {
         let cgb = mmio.is_cgb_features_enabled();
         let ds = mmio.is_double_speed_mode();
 
+        // Trigger/latch against the current-line mode-0 IRQ time: the closed-form
+        // `m0_time_master`-derived exact value (Gambatte predictedNextXposTime
+        // (166)) during mode 3, the per-dot `sched_m0irq` (next-line scheduled m0,
+        // > lc.time) elsewhere — see `m0_irq_time_latch`.
+        let m0_for_trigger = self.m0_irq_time_latch(mmio, &lc);
         self.lyc_irq.lyc_reg_change(data, &lc, cc);
         self.mstat_irq
-            .lyc_reg_change(data, self.sched_m0irq, self.sched_m2irq, cc, ds, cgb);
+            .lyc_reg_change(data, m0_for_trigger, self.sched_m2irq, cc, ds, cgb);
         self.sched_lycirq = self.lyc_irq.time;
 
-        if stat_irq::lyc_change_triggers_stat_irq(old, data, &lc, cc, stat, self.sched_m0irq, cgb) {
+        if stat_irq::lyc_change_triggers_stat_irq(old, data, &lc, cc, stat, m0_for_trigger, cgb) {
             if cgb && !ds {
                 self.sched_oneshot_statirq = cc + 5;
             } else {
