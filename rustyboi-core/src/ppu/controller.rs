@@ -1071,7 +1071,33 @@ impl Ppu {
                 // window-inclusive m0_time_master as captured at M3 arm (no-op).
             } else if clean_ss {
                 if let (Some(m0t), Some(ws)) = (self.m0_time_master, refund_start_dot) {
-                    let drawn = (self.ticks as i64) - ws as i64;
+                    // The StartWindowDraw penalty does not begin accruing until the
+                    // fetcher reaches the window tile, which the SCX fine-scroll
+                    // discard delays by `scx&7` dots past `win_start_dot`. Without
+                    // this shift the accrual is `scx&7` dots early, so a disable in
+                    // the `scx&7` dots just after win_start over-accrues (refund
+                    // truncated) — the late_disable_scx{2,3,5}_1 CGB cluster reads
+                    // mode 3 (out3) where Gambatte's later lock still refunds to
+                    // mode 0 (out0). Shifting the reference by scx&7 lands all phases
+                    // (scx0 unchanged; scx5_1 at the same dot as scx0_2 now refunds).
+                    // The StartWindowDraw penalty does not begin accruing until the
+                    // fetcher reaches the window tile. For a window that starts at
+                    // x==0 (WX<=7), `win_start_dot` is latched at the start of the
+                    // x==0 region — BEFORE the SCX fine-scroll discard (which still
+                    // consumes scx&7 dots). So the accrual reference is scx&7 dots
+                    // early, and a disable in those dots over-accrues (refund
+                    // truncated): the late_disable_scx{2,3,5}_1 CGB reps read mode 3
+                    // (out3) where Gambatte's later lock still refunds to mode 0
+                    // (out0). Shift the reference by scx&7 for x==0 windows only.
+                    // For WX>7 the window starts AFTER the discard, so `win_start_dot`
+                    // already reflects post-discard time (no shift — the scx03_wx1x
+                    // reps keep their out3 boundary).
+                    let win_fine = if self.m3_scheduled_wx <= 7 {
+                        (self.m3_arm_scx & 7) as i64
+                    } else {
+                        0
+                    };
+                    let drawn = (self.ticks as i64) - ws as i64 - win_fine;
                     let accrued = drawn.clamp(0, WIN_M3_PENALTY as i64);
                     let refund = WIN_M3_PENALTY as i64 - accrued;
                     self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
