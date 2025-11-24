@@ -242,6 +242,20 @@ pub struct Mmio {
     #[serde(skip, default)]
     cpu_halted: bool,
 
+    // C1 HALT-wakeup access-cc skew guard. rustyboi does not yet model the
+    // HALT-wakeup prefetch cost (the documented +9cc HALT bug), so the master_cc
+    // the bus snapshots for memory accesses in the instruction stream resumed by a
+    // HALT-wakeup is one M-cycle too early. The FF41 (STAT) getStat-at-cc
+    // resolution (`get_stat_mode_at_cc` mid-frame line tail) is the only consumer
+    // sensitive to that sub-M-cycle skew, and the post-tick renderer register is
+    // already correct there, so this flag tells the bus to defer the FF41 line-tail
+    // override to the register while a HALT-woken stream is live. Set on HALT
+    // wakeup, cleared when the CPU next halts again (re-arm). Without it the
+    // `halt/m0int_m0stat_*` / `late_m0*_halt_m0stat_*` (out2) reads regress against
+    // their HALT-free twins, which land the same access_cc but read mode 2.
+    #[serde(skip, default)]
+    halt_wakeup_skew: bool,
+
     // Whether the HDMA block owed for the *current* eligibility period has
     // already been serviced. rustyboi fires the period block immediately at the
     // rising edge, whereas Gambatte defers it to the `intevent_dma` event; this
@@ -326,6 +340,7 @@ impl Mmio {
             pending_dma_stall: 0,
             hdma_req_pending: false,
             halt_hdma_state: HaltHdmaState::Low,
+            halt_wakeup_skew: false,
             hdma_is_in_period_cached: false,
             hdma_prev_stat_mode: 0,
             hdma_prev_period: false,
@@ -858,6 +873,19 @@ impl Mmio {
         self.cpu_halted = false;
     }
 
+    /// C1: mark/clear that the live instruction stream was resumed by a HALT
+    /// wakeup (its access-cc is sub-M-cycle skewed; see field doc). Set on wakeup,
+    /// cleared when the CPU halts again.
+    pub fn set_halt_wakeup_skew(&mut self, v: bool) {
+        self.halt_wakeup_skew = v;
+    }
+
+    /// C1: true while a HALT-woken instruction stream is live (FF41 getStat-at-cc
+    /// line-tail override is deferred to the renderer register).
+    pub fn halt_wakeup_skew(&self) -> bool {
+        self.halt_wakeup_skew
+    }
+
     pub fn update_hdma_period_cache(&mut self, in_period: bool) {
         self.hdma_is_in_period_cached = in_period;
     }
@@ -888,6 +916,9 @@ impl Mmio {
     /// currently flagged req so it does not double-fire on unhalt.
     pub fn on_cpu_halt(&mut self) {
         self.cpu_halted = true;
+        // C1: a fresh HALT re-arms the wakeup-skew guard (the previous HALT-woken
+        // stream has ended).
+        self.halt_wakeup_skew = false;
         if !self.cgb_features_enabled {
             self.halt_hdma_state = HaltHdmaState::Low;
             return;
