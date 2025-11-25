@@ -3503,6 +3503,7 @@ impl Ppu {
                 line_cycles,
                 ds,
                 mmio.halt_wakeup_skew(),
+                mmio.is_cgb_features_enabled(),
             );
         }
         let near_line_end = line_cycles >= cpl - 7;
@@ -3567,20 +3568,34 @@ impl Ppu {
         line_cycles: i64,
         ds: bool,
         halt_skew: bool,
+        is_cgb: bool,
     ) -> Option<u8> {
         let _ = ly;
         let cpl = stat_irq::LCD_CYCLES_PER_LINE as i64;
-        // Line-tail zone (lineCycles >= cpl - 7) under a HALT-woken stream: the
-        // mode-0 <-> next-line-mode-2 boundary here is irreducibly ambiguous in
-        // rustyboi between a normal read and a post-HALT-wakeup read — both land at
-        // the SAME modeled access_cc / lineCycles / m0Time, yet hardware reports
-        // opposite modes (e.g. non-HALT `m0int_m0stat_scx2_1` out0 vs HALT
-        // `m0int_m0stat_scx2_2` out2 both at lineCycles 452, access_cc-m0Time 198).
-        // The discriminator is the HALT wakeup M-cycle phase, which rustyboi does
-        // not yet model (the prefetch / per-access-cc gap), so when the live stream
-        // was resumed by a HALT wakeup the access_cc is sub-M-cycle skewed and the
-        // post-tick renderer register is the correct value at the line tail — defer
-        // to it (return None). Non-HALT reads keep C1's exact line-tail resolution.
+        // PTZ: Line-tail zone under a HALT-woken stream — resolve the next-line OAM
+        // (mode 2) anticipation instead of deferring to the post-tick renderer
+        // register (which lags here and reports the stale mode 0).
+        //
+        // With the current engine the post-wake decisive reads PRESERVE Gambatte's
+        // exact 4cc arming spacing, so the `_1` (want-mode0) and `_2`/`2b`/`ds_2`
+        // (want-mode2) reads land at DIFFERENT, cleanly-separable lineCycles:
+        //   CGB single speed: want-mode0 at 446-448, want-mode2 at 450-451
+        //                     -> threshold cpl-7 (449)
+        //   CGB double speed: want-mode0 at 449-450, want-mode2 at 451
+        //                     -> threshold cpl-5 (451)
+        // (cctraced: `m0int_m0stat_scx*_1` vs `*_2`/`*_ds_2`, the Gambatte read
+        // lands at the line wrap == mode2, rustyboi ~3-5cc short of the wrap.)
+        //
+        // Scoped to CGB: DMG's mode-0 line-tail phase differs (the same read wants
+        // mode0 on DMG, mode2 on CGB — e.g. `m0int_m0stat_scx3_2_dmg08_out0_cgb04c_out2`),
+        // so DMG keeps the prior defer-to-renderer behavior (sub-dot-irreducible there).
+        let tail_thresh = if ds { cpl - 5 } else { cpl - 7 };
+        if halt_skew && is_cgb && line_cycles >= tail_thresh {
+            if (access_cc + 1) < self.display_enable_inactive_until {
+                return Some(0);
+            }
+            return Some(2);
+        }
         if halt_skew && line_cycles >= cpl - 7 {
             return None;
         }
