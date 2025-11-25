@@ -3708,8 +3708,20 @@ impl Ppu {
         // except exactly at `to_next == 6+4*ds` where the hardware briefly shows
         // `ly & (ly+1)` (the glitch the count tests probe). Outside the window
         // defer to the renderer register (return None).
-        if to_next <= 10 && to_next <= 6 + 4 * (ds as i64) {
-            let result = if to_next == 6 + 4 * (ds as i64) {
+        //
+        // PTZ: Gambatte's getLyReg compares against the RAW `lyCounter().time()`,
+        // whereas `time` above carries the +1 lyTime correction the m0Time/getStat
+        // consumers need (rustyboi's closed-form counter runs 1cc below Gambatte's
+        // lyTime). For a HALT-woken read this 1cc lifts the glitch-dot probe onto
+        // the wrong side: m1int_ly_3 lands at to_next=6 and reads the `ly&(ly+1)`
+        // glitch (144) when CGB hardware has already pre-incremented to 145. Drop
+        // the +1 for the skewed anticipation comparison so it matches getLyReg's
+        // raw-time boundary. Scoped to halt-skew (the non-HALT count/ly tests are
+        // co-tuned to the +1 and stay byte-identical).
+        let halt_skew = mmio.halt_wakeup_skew();
+        let tn = if halt_skew { to_next - 1 } else { to_next };
+        if tn <= 10 && tn <= 6 + 4 * (ds as i64) {
+            let result = if tn == 6 + 4 * (ds as i64) {
                 ly_reg & (ly_reg + 1)
             } else {
                 ly_reg + 1
