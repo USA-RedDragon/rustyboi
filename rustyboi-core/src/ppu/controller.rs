@@ -568,6 +568,18 @@ pub struct Ppu {
     scx_apply_cc: u64,
     #[serde(default)]
     scx_pending: u8,
+    // Exact-cc f1-discard SCX latch. Gambatte's scxChange does
+    // `update(cc + 2*cgb)` BEFORE `setScx`, so on CGB the new SCX is only
+    // visible to the f1 fine-scroll discard 2 PPU cc after the write's cc. The
+    // f1 loop reads SCX as-of its dot's exact abs_cc through this latch instead
+    // of the immediate register, so a mid-discard SCX write lands on the
+    // correct f1 iteration without shifting the steady-state discard timing.
+    #[serde(default)]
+    scx_prev_f1: u8, // value in effect before the pending write
+    #[serde(default = "wy2_disabled")]
+    scx_f1_apply_cc: u64, // abs_cc at which scx_pending becomes visible to f1
+    #[serde(default)]
+    scx_f1_new: u8,
     #[serde(default)]
     line_cycle: u32,
     #[serde(default)]
@@ -697,6 +709,9 @@ impl Ppu {
             scx_delayed: 0,
             scx_apply_cc: wy2_disabled(),
             scx_pending: 0,
+            scx_prev_f1: 0,
+            scx_f1_apply_cc: wy2_disabled(),
+            scx_f1_new: 0,
             line_cycle: 0,
             internal_ly_val: 0,
             sched_lycirq: stat_irq::DISABLED_TIME,
@@ -1913,6 +1928,30 @@ impl Ppu {
         };
         self.scx_pending = value;
         self.scx_apply_cc = cc + delay;
+
+        // Exact-cc f1-discard latch. The "before" value is whatever the f1 loop
+        // sees right now (resolving any already-pending latch up to this write's
+        // cc); the new value becomes visible at write_cc + 2*cgb (Gambatte
+        // scxChange `update(cc + 2*cgb)`). NB: mmio already holds `value` (the
+        // store ran before this hook), so `scx_f1_at_cc` must derive the old
+        // value from the latch state, never from mmio.read(SCX).
+        let cgb = mmio.is_cgb_features_enabled();
+        self.scx_prev_f1 = self.scx_f1_pending_at_cc(cc);
+        self.scx_f1_new = value;
+        self.scx_f1_apply_cc = cc + if cgb { 2 } else { 0 };
+    }
+
+    /// SCX value visible to the f1 fine-scroll discard at PPU `cc`, honoring the
+    /// CGB `update(cc + 2*cgb)`-before-`setScx` write delay. Before the pending
+    /// write's apply cc the f1 sees the pre-write value; at/after it sees the
+    /// new. Derived purely from the latch state (mmio already holds the latest
+    /// write), seeded with the M3-start SCX in `scx_prev_f1`.
+    fn scx_f1_pending_at_cc(&self, cc: u64) -> u8 {
+        if self.scx_f1_apply_cc != wy2_disabled() && cc >= self.scx_f1_apply_cc {
+            self.scx_f1_new
+        } else {
+            self.scx_prev_f1
+        }
     }
 
     pub fn on_stat_register_write(&mut self, mmio: &mut mmio::Mmio) {
@@ -2569,6 +2608,11 @@ impl Ppu {
                     self.m3_pixels_discarded = 0;
                     self.m3_arm_dot = self.ticks;
                     self.m3_arm_scx = (mmio.read(SCX) & 0x07) as u8;
+                    // Seed the exact-cc f1 latch at the SCX value live at M3
+                    // start; clear any pending write latch left from a prior
+                    // line so it cannot leak into this line's discard.
+                    self.scx_prev_f1 = mmio.read(SCX);
+                    self.scx_f1_apply_cc = wy2_disabled();
                     // The first line after display enable has bespoke warmup/arm
                     // timing; the live f1 xpos mapping does not align there, so
                     // latch the discard immediately (pre-write SCX), as before.
@@ -2761,7 +2805,12 @@ impl Ppu {
                 if self.x == 0 && self.m3_discard_target < 0 {
                     const F1_OFFSET: i64 = -1;
                     let xpos = ((self.ticks as i64 - self.m3_arm_dot as i64 + F1_OFFSET).max(0)) as u32;
-                    let scx_live = (mmio.read(SCX) & 0x07) as u32;
+                    // Exact-cc SCX read: sample SCX as-of this f1 dot's abs_cc
+                    // (honoring the CGB +2cc scxChange delay) so a mid-discard
+                    // write lands on the correct iteration, instead of the
+                    // immediate register read whose visibility depends on the
+                    // per-dot PPU-step-vs-CPU-write ordering within a dot.
+                    let scx_live = (self.scx_f1_pending_at_cc(self.abs_cc) & 0x07) as u32;
                     if xpos % 8 == scx_live || xpos >= 80 {
                         // Discard the full xpos count: a mid-discard SCX change can
                         // push the break past tile_len (Gambatte loops on to the
