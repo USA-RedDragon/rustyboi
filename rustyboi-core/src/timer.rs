@@ -60,6 +60,26 @@ const STOP_APU_DS_OFF: i64 = 2;
 // Gambatte's `+3` constant in `tmatime`/`nextIrqEventTime` (mem/tima.cpp).
 const TMA_OFF: u64 = 3;
 
+// ds-engine STAGE 1: RB_EXACTCC. When set, the timer register access cc is the
+// RAW master cc (`abs_cc`, captured at the START of the CPU access M-cycle —
+// proven by the cctracer LP0 oracle to be Gambatte's read/write cc), retiring
+// the `access_cc()` = abs_cc + CC_OFF (=5) anchor. All register-effect
+// arithmetic (set_tima/tma/tac, div_reset, TIMA/DIV reads) then resolves at the
+// same raw cc. The IRQ DELIVERY path in `step()` compares the raw `abs_cc`
+// against `next_irq_event_time`; since the scheduled time is now derived from
+// raw-cc-anchored writes (CC_OFF lower than before), the delivery comparison
+// folds the CC_OFF delta back in so the absolute IRQ fire cc — hence steady
+// state — is preserved.
+fn exactcc_enabled() -> bool {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("RB_EXACTCC")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Timer {
     tima: u8,
@@ -171,6 +191,12 @@ impl Timer {
     /// `abs_cc` (tuning lever `CC_OFF`). This is the canonical per-access cc the
     /// timer, serial, and APU all resolve register accesses on (M7).
     pub fn access_cc(&self) -> u64 {
+        if exactcc_enabled() {
+            // STAGE 1: the access resolves at the raw master cc (Gambatte read/write
+            // cc), with no CC_OFF. The CPU positions `abs_cc` at the access M-cycle
+            // start before any tick, so `abs_cc` IS the access cc.
+            return self.abs_cc;
+        }
         let off = std::env::var("RB_CC_OFF").ok().and_then(|v| v.parse().ok()).unwrap_or(CC_OFF);
         (self.abs_cc as i64 + off) as u64
     }
@@ -196,8 +222,25 @@ impl Timer {
     }
 
     /// Gambatte `updateIrq`: fire all IRQ events whose scheduled cc has passed.
+    /// `cc` is the access cc (now raw `abs_cc` under RB_EXACTCC). The glitch-IRQ
+    /// flagging from a register write compares against the same access cc the
+    /// schedule was set on, so it is self-consistent in either anchor space.
     fn update_irq(&mut self, cc: u64) {
         while self.next_irq_event_time != DISABLED_TIME && cc >= self.next_irq_event_time {
+            self.do_irq_event();
+        }
+    }
+
+    /// IRQ DELIVERY path (raw `abs_cc` per-dot). Under RB_EXACTCC the schedule is
+    /// anchored CC_OFF lower than the legacy access-cc anchor (writes now resolve
+    /// at the raw start cc, not abs_cc+CC_OFF), so the delivery comparison adds
+    /// CC_OFF back to keep the absolute fire cc — and thus steady state —
+    /// unchanged. Flag-off this is identical to `update_irq(abs_cc)`.
+    fn update_irq_delivery(&mut self, abs_cc: u64) {
+        let fold = if exactcc_enabled() { CC_OFF as u64 } else { 0 };
+        while self.next_irq_event_time != DISABLED_TIME
+            && abs_cc >= self.next_irq_event_time.wrapping_add(fold)
+        {
             self.do_irq_event();
         }
     }
@@ -399,7 +442,7 @@ impl Timer {
         // access-cc space) by `CC_OFF` dots, which matches Gambatte's late IRQ
         // sampling relative to the access that scheduled it.
         if self.tac & TAC_ENABLE != 0 {
-            self.update_irq(self.abs_cc);
+            self.update_irq_delivery(self.abs_cc);
         }
         self.flush_pending_irq(mmio);
 
