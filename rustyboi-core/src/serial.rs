@@ -7,6 +7,22 @@ use serde::{Deserialize, Serialize};
 pub const SB: u16 = 0xFF01;
 pub const SC: u16 = 0xFF02;
 
+// ds-engine STAGE 3: RB_LAZYPERIPH. When set, serial anchors its completion
+// event on the TRUE write cc (the raw master cc captured at the SC-write access
+// start, supplied via stage-1 RB_EXACTCC `write_access_cc()` = raw abs_cc) and
+// drops the per-dot phase-mapping `WRITE_CC_OFFSET=7`. The offset existed only
+// to fold the legacy abs_cc-advanced-at-start-of-dot phase back to Gambatte's
+// SC-write cc; with the exact write cc it becomes 0.
+fn lazyperiph_enabled() -> bool {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("RB_LAZYPERIPH")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 const SC_TRANSFER_START: u8 = 1 << 7;
 const SC_FAST_CLOCK: u8 = 1 << 1; // CGB only
 const SC_INTERNAL_CLOCK: u8 = 1 << 0;
@@ -74,9 +90,11 @@ impl Serial {
         // subtract the master-cc write-phase offset mapping the per-dot `abs_cc`
         // (advanced at the start of each dot's tick) to Gambatte's mid-cycle SC
         // write cc. Swept against the serial cluster post-merge (minimum at 6/7).
-        const WRITE_CC_OFFSET: u64 = 7;
+        // Under RB_LAZYPERIPH the SC write resolves at the exact (raw) write cc,
+        // so the per-dot phase-mapping offset collapses to 0.
+        let write_cc_offset: u64 = if lazyperiph_enabled() { 0 } else { 7 };
         self.complete_at =
-            phase - (divider as u64 & align_mask) + (step as u64) * 8 - WRITE_CC_OFFSET;
+            phase - (divider as u64 & align_mask) + (step as u64) * 8 - write_cc_offset;
         self.active = true;
     }
 
@@ -96,13 +114,13 @@ impl Serial {
         // `complete_at` carries the SC-write offset, so undo it for the residue
         // math (the matching write-cc offset cancels in `delta`). Must equal
         // `schedule`'s WRITE_CC_OFFSET.
-        const OFF: u64 = 7;
-        let t = self.complete_at + OFF;
+        let off: u64 = if lazyperiph_enabled() { 0 } else { 7 };
+        let t = self.complete_at + off;
         let delta = phase.wrapping_sub(t); // (cc - t), wraps since t > cc
         let n = t
             .wrapping_add(delta % align)
             .wrapping_sub(2 * (delta & half));
-        self.complete_at = n.saturating_sub(OFF).max(phase);
+        self.complete_at = n.saturating_sub(off).max(phase);
     }
 
     /// Advance bookkeeping at master cc `phase` (the timer's `abs_cc`, sampled
