@@ -680,6 +680,18 @@ impl Mmio {
         self.timer.access_cc()
     }
 
+    /// STAGE 2 (RB_FAITHFUL) event-cc dispatch: the cc the most recent still-
+    /// undispatched TIMA IRQ fired at, or `None`. The CPU gates timer-interrupt
+    /// eligibility on the boundary access cc having reached this cc.
+    pub fn pending_timer_fire_cc(&self) -> Option<u64> {
+        self.timer.pending_fire_cc()
+    }
+
+    /// STAGE 2: clear the recorded timer fire cc once the CPU dispatches the IRQ.
+    pub fn clear_timer_fire_cc(&mut self) {
+        self.timer.clear_fire_cc();
+    }
+
     /// CL1: the *honest* per-access cc — the true `abs_cc` at the START of the
     /// CPU access's M-cycle. `master_cc()` is incremented at the top of each
     /// dot-step, so before this access's `tick_m` it trails the M-cycle start by
