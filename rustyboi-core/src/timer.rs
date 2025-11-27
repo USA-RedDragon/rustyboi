@@ -134,6 +134,13 @@ pub struct Timer {
     // differently from the TIMA/DIV high-byte boundary).
     #[serde(default)]
     div_anchor_apu: u64,
+    // ds-engine STAGE 2 (RB_FAITHFUL event-cc dispatch): the raw-abs_cc cc at
+    // which the most recent still-undispatched TIMA IRQ became deliverable (its
+    // IF bit was raised). The CPU's faithful step gate makes the timer IRQ
+    // serviceable only once the boundary access cc has reached this cc, instead
+    // of off the instruction-start IF snapshot. DISABLED_TIME = none pending.
+    #[serde(default = "disabled_time")]
+    last_fire_cc: u64,
 }
 
 fn disabled_time() -> u64 {
@@ -156,7 +163,23 @@ impl Timer {
             next_irq_event_time: DISABLED_TIME,
             pending_irq: false,
             div_anchor_apu: 0,
+            last_fire_cc: DISABLED_TIME,
         }
+    }
+
+    /// STAGE 2 (RB_FAITHFUL): the cc the most recent still-undispatched TIMA IRQ
+    /// became deliverable, or `None`. Cleared at dispatch via `clear_fire_cc`.
+    pub fn pending_fire_cc(&self) -> Option<u64> {
+        if self.last_fire_cc != DISABLED_TIME {
+            Some(self.last_fire_cc)
+        } else {
+            None
+        }
+    }
+
+    /// STAGE 2: clear the recorded fire cc after the CPU dispatches the IRQ.
+    pub fn clear_fire_cc(&mut self) {
+        self.last_fire_cc = DISABLED_TIME;
     }
 
     pub fn abs_cc(&self) -> u64 {
@@ -241,6 +264,14 @@ impl Timer {
         while self.next_irq_event_time != DISABLED_TIME
             && abs_cc >= self.next_irq_event_time.wrapping_add(fold)
         {
+            // STAGE 2: record the deliverable cc (the IF-visible fire cc) before
+            // do_irq_event advances next_irq_event_time to the following period.
+            // The CPU's faithful event-cc gate compares the boundary access cc
+            // (raw master_cc) against this. Only record while none is pending so
+            // a back-to-back overflow keeps the earliest undispatched fire.
+            if crate::cpu::bus::faithful_enabled() && self.last_fire_cc == DISABLED_TIME {
+                self.last_fire_cc = self.next_irq_event_time.wrapping_add(fold);
+            }
             self.do_irq_event();
         }
     }
