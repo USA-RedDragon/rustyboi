@@ -102,6 +102,27 @@ pub fn getstat_enabled() -> bool {
             .unwrap_or(false)
     })
 }
+
+// ds-engine STAGE 5: RB_LINERENDER. With getStat (stage 4) owning all CPU-visible
+// timing, the pixel pipeline no longer affects timing — only the final
+// framebuffer values (read at frame end) matter. When this flag is set the
+// per-dot fetcher/FIFO still RUNS (it advances `self.x` so the timing fallbacks
+// that key off `x==160` are unchanged) but it no longer WRITES the framebuffer;
+// instead each visible line is rendered ONCE in a single closed-form pass
+// (`render_full_line`) at the mode-3 -> HBlank transition, driven by the same
+// per-line geometry getStat uses (SCX/SCY/WX/WY/LCDC + the latched
+// `sprites_on_line` / `win_y_pos`). Flag-off keeps the per-dot draw
+// (byte-identical to stage 4). Timing is unaffected either way (it lives wholly
+// in getStat / the STAT event schedule).
+pub fn linerender_enabled() -> bool {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("RB_LINERENDER")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
 // DS offsets re-derived after the double-speed STAT sub-dot step (step_subdot)
 // gave the IRQ model true odd-cc resolution: m2 relaxes -2 -> -1 (the odd-cc
 // fire is now caught by the sub-dot rather than rounded down), and the write cc
@@ -532,6 +553,12 @@ pub struct Ppu {
     #[serde(default)]
     mode0_reported_this_line: bool,
 
+    // STAGE 5 (RB_LINERENDER): latched once `render_full_line` has produced the
+    // current visible line's framebuffer, so the closed-form line render runs at
+    // most once per line. Reset at the start of each line (mode-2 entry).
+    #[serde(default)]
+    line_rendered_this_line: bool,
+
     // Event-scheduled STAT/mode/LYC IRQ model (Gambatte port). `abs_cc` is a
     // monotonic absolute dot clock; `line_cycle` (0..455) tracks position
     // within the current 456-dot line. Together they reproduce Gambatte's
@@ -732,6 +759,7 @@ impl Ppu {
             sc_mode3_pullback_pending: false,
             cgbp_block_start_cc: None,
             mode0_reported_this_line: false,
+            line_rendered_this_line: false,
             abs_cc: 0,
             p_now: pnow_disabled(),
             write_subdot: 0,
@@ -1766,6 +1794,14 @@ impl Ppu {
         let Ok(bg_pixel) = self.fetcher.pixel_fifo.pop() else {
             return false;
         };
+        // STAGE 5 (RB_LINERENDER): the per-dot FIFO still runs so `self.x`
+        // advances (the timing fallbacks key off x==160), but it no longer
+        // writes the framebuffer — `render_full_line` produces the visible line
+        // in one closed-form pass at the mode-3 -> HBlank transition instead.
+        if linerender_enabled() {
+            self.x += 1;
+            return true;
+        }
         let bg_pixel_idx = bg_pixel.color;
         let bg_attrs = bg_pixel.attrs;
         let ly = mmio.read(LY) as u16;
@@ -1796,6 +1832,117 @@ impl Ppu {
         }
         self.x += 1;
         true
+    }
+
+    // STAGE 5 (RB_LINERENDER): compute one displayed BG/window pixel
+    // (color index + CGB attrs) at screen column `screen_x` on the current line,
+    // reproducing the fetcher's tile addressing in closed form. `win_active`
+    // says the window owns this line; `win_first_col` is the screen column where
+    // the window begins drawing (wx-7, clamped to 0). Returns (pixel_idx, attrs).
+    fn line_bg_pixel(
+        &self,
+        mmio: &mmio::Mmio,
+        screen_x: u8,
+        win_active: bool,
+        win_first_col: i32,
+    ) -> (u8, u8) {
+        let lcdc = self.lcdc;
+        let cgb = mmio.is_cgb_features_enabled();
+        let ly = mmio.read(LY);
+
+        let in_window = win_active && (screen_x as i32) >= win_first_col;
+
+        let (map_base, map_x, map_y, tile_line) = if in_window {
+            let wc = (screen_x as i32 - win_first_col) as u32;
+            let win_map_base: u16 = if (lcdc & (LCDCFlags::WindowTileMapDisplaySelect as u8)) != 0 {
+                0x9C00
+            } else {
+                0x9800
+            };
+            let wy = self.win_y_pos as u32;
+            (win_map_base, (wc / 8) % 32, (wy / 8) % 32, (wy % 8) as u8)
+        } else {
+            let bg_map_base: u16 = if (lcdc & (LCDCFlags::BGTileMapDisplaySelect as u8)) != 0 {
+                0x9C00
+            } else {
+                0x9800
+            };
+            let bg_x = (self.scx_delayed as u32 + screen_x as u32) & 0xFF;
+            let bg_y = (self.scy_delayed as u32 + ly as u32) & 0xFF;
+            (bg_map_base, (bg_x / 8) % 32, (bg_y / 8) % 32, (bg_y % 8) as u8)
+        };
+
+        let map_addr = map_base + (map_y * 32 + map_x) as u16;
+        let tile_num = mmio.read_vram_bank(0, map_addr);
+        let tile_attrs = if cgb { mmio.read_vram_bank(1, map_addr) } else { 0 };
+
+        let y_flip = cgb && (tile_attrs & 0x40) != 0;
+        let x_flip = cgb && (tile_attrs & 0x20) != 0;
+        let eff_line = if y_flip { 7 - tile_line } else { tile_line };
+
+        // Tile data address ($8000 vs $8800 method) — mirror Fetcher.
+        let data_addr: u16 = if (lcdc & (LCDCFlags::BGWindowTileDataSelect as u8)) != 0 {
+            0x8000 + (tile_num as u16) * 16 + (eff_line as u16) * 2
+        } else {
+            let signed = tile_num as i8;
+            ((0x9000u16 as i16).wrapping_add((signed as i16) * 16 + (eff_line as i16) * 2)) as u16
+        };
+        let bank = if cgb && (tile_attrs & 0x08) != 0 { 1 } else { 0 };
+        let low = mmio.read_vram_bank(bank, data_addr);
+        let high = mmio.read_vram_bank(bank, data_addr + 1);
+
+        // Fine pixel within the tile.
+        let fine = if in_window {
+            ((screen_x as i32 - win_first_col) as u32 % 8) as u8
+        } else {
+            ((self.scx_delayed as u32 + screen_x as u32) % 8) as u8
+        };
+        let bit = if x_flip { fine } else { 7 - fine };
+        let idx = (((high >> bit) & 1) << 1) | ((low >> bit) & 1);
+        (idx, tile_attrs)
+    }
+
+    // STAGE 5 (RB_LINERENDER): render the whole visible scanline at once into the
+    // framebuffer, reusing the per-dot mixing functions for sprite priority.
+    // Called once per visible line at the mode-3 -> HBlank transition.
+    fn render_full_line(&mut self, mmio: &mmio::Mmio) {
+        let ly = mmio.read(LY);
+        if ly >= 144 {
+            return;
+        }
+        let cgb = mmio.is_cgb_features_enabled();
+        let bg_enabled = (self.lcdc & (LCDCFlags::BGDisplay as u8)) != 0;
+
+        // Window geometry for this line: active if the window-Y trigger latched
+        // (or the live wy2==ly fallback) and WX is in range.
+        let win_active = self.window_y_active(mmio)
+            && {
+                let wx = mmio.read(WX) as i32;
+                (0..=166).contains(&wx) && (cgb || wx != 166)
+            };
+        let wx = mmio.read(WX) as i32;
+        let win_first_col = (wx - 7).max(0);
+
+        for sx in 0u8..160 {
+            // On DMG, BG-disabled forces the BG layer to color 0 (white).
+            let (bg_idx, bg_attrs) = if !bg_enabled && !cgb {
+                (0u8, 0u8)
+            } else {
+                self.line_bg_pixel(mmio, sx, win_active, win_first_col)
+            };
+            let fb_offset = (ly as u16) * 160 + sx as u16;
+            if cgb {
+                let rgb = self.mix_background_and_sprites_color(mmio, bg_idx, bg_attrs, sx, ly);
+                let off = fb_offset as usize * 3;
+                self.color_fb_a[off] = rgb.0;
+                self.color_fb_a[off + 1] = rgb.1;
+                self.color_fb_a[off + 2] = rgb.2;
+            } else {
+                let color = self.mix_background_and_sprites(mmio, bg_idx, sx, ly);
+                self.fb_a[fb_offset as usize] = color;
+            }
+        }
+        self.line_rendered_this_line = true;
     }
 
     // Gambatte's plotPixel/predictor window-Y gate: `weMaster || (wy2 == ly &&
@@ -2708,6 +2855,7 @@ impl Ppu {
                     self.first_line_after_enable = false;
                     self.mode0_pretriggered_this_line = false;
                     self.mode0_reported_this_line = false;
+                    self.line_rendered_this_line = false;
                     // SCX fine-scroll discard target (Gambatte M3Start::f1): the
                     // break xpos is resolved over the first M3 dots by re-reading
                     // SCX live (see the early-window loop in PixelTransfer). Seed
@@ -2895,6 +3043,9 @@ impl Ppu {
                         // HBlank via the x==160 fallback below. For all other lines
                         // the flush completed the line, so end mode 3 now.
                         if !(self.window_started_this_line && self.x < 160) {
+                            if linerender_enabled() && !self.line_rendered_this_line {
+                                self.render_full_line(mmio);
+                            }
                             self.state = State::HBlank;
                             break 'label;
                         }
@@ -3059,6 +3210,9 @@ impl Ppu {
                     // mode 3 early here on ordinary (non-window) lines.
                     let window_deferred = self.window_started_this_line && self.mode0_reported_this_line;
                     if self.m0_time_master.is_none() {
+                        if linerender_enabled() && !self.line_rendered_this_line {
+                            self.render_full_line(mmio);
+                        }
                         self.state = State::HBlank;
                         if !self.mode0_reported_this_line {
                             self.mode0_reported_this_line = true;
@@ -3066,6 +3220,9 @@ impl Ppu {
                             self.check_and_trigger_stat_interrupt(mmio);
                         }
                     } else if window_deferred {
+                        if linerender_enabled() && !self.line_rendered_this_line {
+                            self.render_full_line(mmio);
+                        }
                         self.state = State::HBlank;
                     }
                 }
