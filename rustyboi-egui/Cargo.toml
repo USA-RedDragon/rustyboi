@@ -20,4 +20,4 @@ rfd = "0.15.4"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 rfd = { version = "0.15.4", features = ["async-std"] }
-wasm-bindgen-futures = "0.4.54"
+wasm-bindgen-futures = "0.4.56"
