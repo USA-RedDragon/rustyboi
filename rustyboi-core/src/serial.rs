@@ -14,13 +14,8 @@ pub const SC: u16 = 0xFF02;
 // to fold the legacy abs_cc-advanced-at-start-of-dot phase back to Gambatte's
 // SC-write cc; with the exact write cc it becomes 0.
 fn lazyperiph_enabled() -> bool {
-    use std::sync::OnceLock;
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| {
-        std::env::var("RB_LAZYPERIPH")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    })
+    // ds-engine STAGE 7: permanently on.
+    true
 }
 
 const SC_TRANSFER_START: u8 = 1 << 7;

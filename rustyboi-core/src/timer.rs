@@ -71,26 +71,16 @@ const TMA_OFF: u64 = 3;
 // folds the CC_OFF delta back in so the absolute IRQ fire cc — hence steady
 // state — is preserved.
 fn exactcc_enabled() -> bool {
-    use std::sync::OnceLock;
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| {
-        std::env::var("RB_EXACTCC")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    })
+    // ds-engine STAGE 7: permanently on.
+    true
 }
 
 // ds-engine STAGE 3: RB_LAZYPERIPH. Gates the closed-form (update-to-cc)
 // peripheral models: the APU frame sequencer here, plus serial/DMA in their
 // own modules. See the per-site comments for what each conversion replaces.
 fn lazyperiph_enabled() -> bool {
-    use std::sync::OnceLock;
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| {
-        std::env::var("RB_LAZYPERIPH")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    })
+    // ds-engine STAGE 7: permanently on.
+    true
 }
 
 #[derive(Serialize, Deserialize, Clone)]
