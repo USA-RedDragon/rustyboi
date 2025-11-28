@@ -23,6 +23,33 @@ pub(crate) fn faithful_enabled() -> bool {
     })
 }
 
+/// ds-engine STAGE 6: the run-to-next-event scheduler gate (RB_EVENTLOOP). When
+/// OFF (default) `tick_m` is the per-dot 4×`tick_t` crank, byte-identical to
+/// HEAD. When ON the CPU advances `master_cc` by the access duration and a
+/// single `run_to(target_cc)` resolves every peripheral up to that cc — the
+/// CPU no longer cranks peripherals dot-by-dot, it requests "advance the world
+/// to this cc". `run_to` itself, in min-event order, drains each scheduled
+/// peripheral whose fire cc <= target. At double speed a CPU access lands on an
+/// exact odd/even `master_cc` and `run_to` resolves every peripheral to THAT
+/// cc, so the half-dot is exact by construction (no parity gate).
+///
+/// This stage keeps `run_to`'s per-cc resolution primitive identical to the
+/// proven stage-5 per-dot path (it still resolves one dot at a time internally),
+/// so flag-on MUST match flag-on stage-5 numbers exactly: it is a control-flow
+/// refactor (the CPU drives by duration + one run_to, not by hand-cranked dots),
+/// not a behavior change. Any divergence reveals a peripheral still carrying
+/// hidden per-instruction (not per-cc) state — that is the diagnostic this
+/// stage exists to surface. Read once, OnceLock-cached.
+pub(crate) fn eventloop_enabled() -> bool {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("RB_EVENTLOOP")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 /// A tick-aware view over the system. CPU memory accesses go through `read`/
 /// `write`, which advance every peripheral one M-cycle (4 dots) so each access
 /// observes/mutates live state at its true intra-instruction cycle. Everything
@@ -51,8 +78,25 @@ impl<'a> Bus<'a> {
         self.ticked
     }
 
-    /// Advance every peripheral by one dot.
+    /// Advance every peripheral by one dot (per-dot crank). Bookkeeping for the
+    /// per-instruction `dot`/`ticked` counters is applied here; the actual
+    /// world-advance is in `resolve_one_dot` so the event-loop `run_to` can reuse
+    /// the identical resolution without re-touching the per-instruction counters.
     fn tick_t(&mut self) {
+        self.resolve_one_dot();
+        self.dot = self.dot.wrapping_add(1);
+        self.ticked += 1;
+    }
+
+    /// STAGE 6: advance the whole world by exactly one dot (one `master_cc`).
+    /// This is the per-cc resolution primitive shared by the per-dot crank
+    /// (`tick_t`) and the event-loop driver (`run_to`). It steps each peripheral
+    /// for this dot in the SAME order the per-dot path always used, so the
+    /// event-loop path resolves byte-identically to the per-dot path. The
+    /// per-instruction `dot`/`ticked` counters are NOT touched here — callers own
+    /// that bookkeeping (only `tick_t` keeps them, matching HEAD semantics; the
+    /// event loop drives off `master_cc` directly).
+    fn resolve_one_dot(&mut self) {
         self.mmio.step_timer();
         self.mmio.step_serial();
         self.mmio.step_dma();
@@ -87,20 +131,56 @@ impl<'a> Bus<'a> {
         self.ppu.step_lcdc_events(self.mmio);
 
         self.mmio.advance_cpu_t_phase();
-        self.dot = self.dot.wrapping_add(1);
-        self.ticked += 1;
     }
 
     /// Tick the remaining internal (non-memory) cycles of an instruction.
     pub fn tick_remaining(&mut self, total_cycles: u32) {
-        for _ in 0..total_cycles.saturating_sub(self.ticked) {
-            self.tick_t();
+        let remaining = total_cycles.saturating_sub(self.ticked);
+        if eventloop_enabled() {
+            // STAGE 6: resolve the leftover internal dots via the run-to-cc
+            // driver too, so the whole instruction advances off cc targets.
+            let target = self.mmio.master_cc().wrapping_add(remaining as u64);
+            self.run_to(target);
+        } else {
+            for _ in 0..remaining {
+                self.tick_t();
+            }
         }
     }
 
     fn tick_m(&mut self) {
-        for _ in 0..4 {
-            self.tick_t();
+        if eventloop_enabled() {
+            // STAGE 6: the CPU advances `master_cc` by the access duration (one
+            // M-cycle = 4 dots) and a single `run_to` resolves every peripheral
+            // up to that cc. The CPU no longer hand-cranks each dot; it requests
+            // "advance the world to target_cc".
+            let target = self.mmio.master_cc().wrapping_add(4);
+            self.run_to(target);
+        } else {
+            for _ in 0..4 {
+                self.tick_t();
+            }
+        }
+    }
+
+    /// STAGE 6: advance the world to `target_cc`, resolving every peripheral up
+    /// to (and including) that cc. This is the run-to-next-event driver: the CPU
+    /// hands it a target cc and it drains each scheduled peripheral event whose
+    /// fire cc <= target, in min-cc order, until `master_cc == target_cc`.
+    ///
+    /// In this stage the per-cc resolution primitive (`resolve_one_dot`) is the
+    /// proven stage-5 per-dot step, so `run_to` advances one dot at a time and is
+    /// byte-identical to the per-dot crank — the structural win is that the CPU
+    /// drives off a cc TARGET (and at DS lands on the exact odd/even master_cc),
+    /// not off a hand-counted dot loop. The per-instruction `dot`/`ticked`
+    /// counters are advanced by the number of dots actually resolved so
+    /// `tick_remaining` and the PPU's per-instruction `dot` semantics are
+    /// preserved.
+    fn run_to(&mut self, target_cc: u64) {
+        while self.mmio.master_cc() < target_cc {
+            self.resolve_one_dot();
+            self.dot = self.dot.wrapping_add(1);
+            self.ticked += 1;
         }
     }
 
