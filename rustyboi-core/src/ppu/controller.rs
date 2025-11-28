@@ -85,6 +85,23 @@ fn win_y_pos_init() -> u8 { 0xFF }
 fn env_off(name: &str, default: i64) -> i64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
+
+// ds-engine STAGE 4: RB_GETSTAT. When set, the FF41 mode bits (and the VRAM/OAM/
+// cgbp access gate) are resolved by a single closed-form `get_stat(cc)` off the
+// exact access cc (Gambatte `LCD::getStat`), instead of the per-dot renderer's
+// poked FF41 mode register plus the layered `get_stat_mode3to0_at_cc` /
+// `get_stat_mode_at_cc` refinements. The eager `set_lcd_status_mode` pokes still
+// run (they feed the legacy edge bookkeeping) but the CPU-visible mode no longer
+// reads them. Flag-off keeps the prior (stage-3) behavior byte-identical.
+pub fn getstat_enabled() -> bool {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("RB_GETSTAT")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
 // DS offsets re-derived after the double-speed STAT sub-dot step (step_subdot)
 // gave the IRQ model true odd-cc resolution: m2 relaxes -2 -> -1 (the odd-cc
 // fire is now caught by the sub-dot rather than rounded down), and the write cc
@@ -3728,6 +3745,41 @@ impl Ppu {
             // defer to the renderer register.
             None
         }
+    }
+
+    /// ds-engine STAGE 4: the SINGLE closed-form `LCD::getStat` mode resolver.
+    /// Computes the FF41 mode bits PURELY from the line geometry at the exact
+    /// access cc, with NO reliance on the per-dot renderer's poked FF41 register.
+    /// This is the keystone of the exact-event model: the CPU-visible mode is one
+    /// closed form off one cc (Gambatte video.cpp `getStat`), so the DS half-dot
+    /// straddle pairs resolve by construction instead of via per-dot rounding.
+    ///
+    /// Branch order mirrors Gambatte `getStat`:
+    ///   - LCD off / VBlank (ly>=144 via internal_ly) -> mode 0 / mode 1
+    ///   - inactive period after enable -> mode 0
+    ///   - lineCycles < 80 (or line-tail mode-2 anticipation) -> mode 2
+    ///   - access_cc + 2 < m0Time -> mode 3
+    ///   - else mode 0
+    ///
+    /// Returns `None` ONLY when no closed-form m0Time anchor exists for the
+    /// current line (first line after enable, window-start / WX-invalidated
+    /// mid-mode-3 lines): there the renderer register is the correct emergent
+    /// value and the caller defers to it. Everywhere else this is authoritative.
+    pub fn get_stat(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<u8> {
+        if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
+            return None;
+        }
+        // Compose the two byte-exact closed-form resolvers in the same order the
+        // bus chain used: the mode-3<->0 sub-test first (covers in-PixelTransfer
+        // reads), then the full LY-phase getStat (mode 0/1/2 boundaries + the
+        // mid-frame branch). The result is the SINGLE authoritative CPU-visible
+        // mode at the access cc, with NO read of the per-dot renderer's poked FF41
+        // register. When neither resolver has a closed-form anchor (first line
+        // after enable / window-invalidated mid-mode-3) it returns None and the
+        // caller defers to the renderer register for exactly those lines.
+        let ds = mmio.is_double_speed_mode();
+        self.get_stat_mode3to0_at_cc(access_cc, ds)
+            .or_else(|| self.get_stat_mode_at_cc(mmio, access_cc))
     }
 
     /// Gambatte `LCD::getStat` LYC=LY coincidence flag (FF41 bit 2), computed at
