@@ -13,10 +13,6 @@ pub const SC: u16 = 0xFF02;
 // drops the per-dot phase-mapping `WRITE_CC_OFFSET=7`. The offset existed only
 // to fold the legacy abs_cc-advanced-at-start-of-dot phase back to Gambatte's
 // SC-write cc; with the exact write cc it becomes 0.
-fn lazyperiph_enabled() -> bool {
-    // ds-engine STAGE 7: permanently on.
-    true
-}
 
 const SC_TRANSFER_START: u8 = 1 << 7;
 const SC_FAST_CLOCK: u8 = 1 << 1; // CGB only
@@ -87,9 +83,10 @@ impl Serial {
         // write cc. Swept against the serial cluster post-merge (minimum at 6/7).
         // Under RB_LAZYPERIPH the SC write resolves at the exact (raw) write cc,
         // so the per-dot phase-mapping offset collapses to 0.
-        let write_cc_offset: u64 = if lazyperiph_enabled() { 0 } else { 7 };
+        // STAGE 3/7: the SC write resolves at the exact (raw) write cc, so the
+        // old per-dot phase-mapping WRITE_CC_OFFSET=7 is permanently 0.
         self.complete_at =
-            phase - (divider as u64 & align_mask) + (step as u64) * 8 - write_cc_offset;
+            phase - (divider as u64 & align_mask) + (step as u64) * 8;
         self.active = true;
     }
 
@@ -109,13 +106,14 @@ impl Serial {
         // `complete_at` carries the SC-write offset, so undo it for the residue
         // math (the matching write-cc offset cancels in `delta`). Must equal
         // `schedule`'s WRITE_CC_OFFSET.
-        let off: u64 = if lazyperiph_enabled() { 0 } else { 7 };
-        let t = self.complete_at + off;
+        // STAGE 3/7: WRITE_CC_OFFSET is permanently 0, so `complete_at` already
+        // carries the raw write cc — no offset to undo.
+        let t = self.complete_at;
         let delta = phase.wrapping_sub(t); // (cc - t), wraps since t > cc
         let n = t
             .wrapping_add(delta % align)
             .wrapping_sub(2 * (delta & half));
-        self.complete_at = n.saturating_sub(off).max(phase);
+        self.complete_at = n.max(phase);
     }
 
     /// Advance bookkeeping at master cc `phase` (the timer's `abs_cc`, sampled
