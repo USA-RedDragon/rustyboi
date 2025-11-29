@@ -975,6 +975,14 @@ impl Mmio {
         self.hdma_kick_eval_pending = 0;
         if in_period && self.hdma_enabled {
             self.hdma_req_pending = true;
+            // DEFERRED-HDMA-FIRE: the kick services THIS period's block. Mark it
+            // done so an immediately-following `halt` captures `haltHdmaState_ =
+            // High` (Gambatte: in-period + already-serviced) rather than
+            // `Requested`, which would re-fire a SECOND block on unhalt
+            // (hdma_late_m0halt_*). The per-dot `hdma_period` is false mid-HBlank
+            // (post-m0Time crossing) so `step_hdma`'s own block_done set never
+            // fires for a kick-armed block; set it here at the in-period kick.
+            self.hdma_block_done_this_period = true;
         }
         true
     }
