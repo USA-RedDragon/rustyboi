@@ -1170,6 +1170,77 @@ impl Ppu {
                 || (old_lcdc & spr_bits) != (value & spr_bits))
         {
             self.scheduled_mode0_dot = None;
+            // A mid-mode-3 window-ENABLE toggle (not sprite) is the symmetric
+            // counterpart to the disable refund below: the closed-form m0_time_master
+            // was captured at M3 arm WITHOUT the window (it was off), so it lacks the
+            // StartWindowDraw mode-3 penalty. If the window will now actually start
+            // this line (window-Y gate holds and the fetcher has not yet passed the
+            // window-start x = max(0, WX-7)), Gambatte's predictNextM0Time re-runs
+            // with the window included and the boundary moves WIN_M3_PENALTY dots
+            // later. ADD that penalty to m0_time_master so the FF41 read resolves the
+            // window-inclusive mode-3 end, instead of nulling and falling back to the
+            // live no-window-at-arm pipeline (which lands the boundary too early).
+            // Scoped to no-sprite lines (CGB and DMG alike) so the sprite-fetch
+            // geometry is unchanged; sprite-bit toggles still null below.
+            let win_enable_clean = (old_lcdc & spr_bits) == (value & spr_bits)
+                && (old_lcdc & win_bit) == 0
+                && (value & win_bit) != 0
+                && self.sprites_on_line.is_empty();
+            let mut win_enable_handled = false;
+            if win_enable_clean {
+                win_enable_handled = true;
+                // Window-Y gate: the window can start this line iff WY has triggered
+                // (`window_y_triggered`, set at the line-450/454 weMaster checkpoints
+                // when LY==WY). set_lcdc_visible has no mmio handle, so use the
+                // cached arm-time geometry: m3_scheduled_wx (WX latched at M3 arm)
+                // and the window-Y trigger latch.
+                let wx = self.m3_scheduled_wx as i32;
+                // Window-Y gate, mirroring `window_y_active`: the weMaster trigger
+                // latch (`window_y_triggered`, set at the line-450/454 checkpoints)
+                // OR the immediate `wy2 == LY` fallback. The latter is required on
+                // the first line after enable (LY=0), where the previous line's
+                // checkpoints never ran so `window_y_triggered` is still false even
+                // when WY==0 — exactly the late_enable_ly0 case.
+                let wy_ok = self.window_y_triggered || self.wy2 == self.internal_ly_val;
+                let wx_in_range = (0..=166).contains(&wx) && (cgb_features_enabled || wx != 166);
+                // The window penalty applies iff the enable lands BEFORE the
+                // fetcher reaches the window-tile commit dot. The window draws from
+                // visible x == max(0, WX-7); x begins advancing `WARMUP + 8` dots
+                // past the M3 arm (the first BG tile fill) plus the SCX fine-scroll
+                // discard. The penalty commits one dot ahead of the first window
+                // pixel reaching x (the `-1`), mirroring `predicted_win_start_dot`.
+                // The late_enable_ly0_ds_{1,2} pair brackets this commit dot to a
+                // single cycle: _1 (write 1 cycle earlier) takes the +6, _2 does not.
+                let x_at_start = (wx - 7).max(0);
+                let warmup = if cgb_features_enabled {
+                    CGB_PIXEL_TRANSFER_WARMUP as i64
+                } else {
+                    DMG_PIXEL_TRANSFER_WARMUP as i64
+                };
+                // SCX==5 fine-scroll phase: Gambatte's M3Start dispatch runs the
+                // window-tile fetch one dot later than the linear discard model at
+                // this single phase (the same +1 the closed-form mode-3 length applies
+                // at scx==5, compute_m3_length_win). For x==0 windows (WX<=7) the
+                // commit dot is therefore one dot later; without it a window-enable on
+                // the boundary dot wrongly drops the penalty (late_reenable_scx5_2),
+                // while scx3 stays on the linear boundary (late_reenable_scx3_2).
+                let win_fine = if wx <= 7 && (self.m3_arm_scx & 7) == 5 { 1 } else { 0 };
+                let commit_dot = self.m3_arm_dot as i64
+                    + warmup
+                    + 8
+                    + self.m3_arm_scx as i64
+                    + x_at_start as i64
+                    + win_fine
+                    - 1;
+                let will_start = wy_ok && wx_in_range && (self.ticks as i64) < commit_dot;
+                if will_start {
+                    if let Some(m0t) = self.m0_time_master {
+                        let pen = (WIN_M3_PENALTY as i64) << ds as i64;
+                        self.m0_time_master = Some((m0t as i64 + pen).max(0) as u64);
+                    }
+                }
+                // else: keep the no-window m0_time_master as captured at arm.
+            }
             // A mid-mode-3 window-DISABLE toggle (not sprite) interacts with the
             // StartWindowDraw mode-3 penalty captured at M3 arm. Gambatte locks
             // the penalty once the window has drawn for WIN_M3_PENALTY dots
@@ -1225,7 +1296,11 @@ impl Ppu {
             // CGB keeps the graduated refund (predicted_win_start_dot is DMG-only,
             // so this is just win_start_dot on CGB); DMG uses the binary keep below.
             let refund_start_dot = self.win_start_dot.or(self.predicted_win_start_dot);
-            if enable_off || !only_win_toggle || !win_started_for_refund {
+            if win_enable_handled {
+                // The clean window-ENABLE adjusted m0_time_master above; skip the
+                // disable-refund / null path (which would otherwise null it because
+                // `only_win_toggle` is false for an enable).
+            } else if enable_off || !only_win_toggle || !win_started_for_refund {
                 self.m0_time_master = None;
             } else if clean_ss && !cgb_features_enabled {
                 // DMG: the StartWindowDraw penalty is binary, not graduated. Once
