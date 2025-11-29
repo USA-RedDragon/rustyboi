@@ -84,7 +84,9 @@ fn win_y_pos_init() -> u8 { 0xFF }
 #[inline]
 fn env_off(_name: &str, default: i64) -> i64 {
     // ds-engine STAGE 7: env-var offset sweeps deleted; the calibrated constant
-    // default is the single value.
+    // default is the single value. (Offset-deletion work is done by direct
+    // constant edits + rebuild, not env overrides — the env path was in the
+    // per-access getStat hot path and slowed the suite ~30x.)
     default
 }
 
@@ -3427,14 +3429,14 @@ impl Ppu {
         //
         // SCX&7==0 was -2 on dma-only but regresses two window m2int_wxA6
         // busyread tests, so it is deliberately left unbiased (default 0).
+        let _ = suffix;
         let default = match (vram, scx) {
             (false, 1) => -1,
             (true, 3) => -1,
             _ => 0,
         };
-        let pfx = if vram { "RB_VRAM_M0_SCX" } else { "RB_DMA_M0_SCX" };
         match scx {
-            0 | 1 | 2 | 3 | 5 => env_off(&format!("{pfx}{scx}{suffix}"), default),
+            0 | 1 | 2 | 3 | 5 => default,
             _ => 0,
         }
     }
