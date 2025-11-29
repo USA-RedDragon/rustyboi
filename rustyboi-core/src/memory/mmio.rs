@@ -310,6 +310,25 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_mcycle_fire_suppressed: bool,
 
+    // C7-full late-hdma-vs-interrupt re-order: the master_cc at which the most
+    // recent m0-edge HDMA block fired (read its 16 source bytes). Gambatte orders
+    // the `intevent_dma` (HDMA, flagged at `m0Time`) vs `intevent_interrupts`
+    // race by event time: DMA wins only when `m0Time <= minIntTime_` (the
+    // interrupt's serviceable cc). rustyboi fires the block greedily the dot the
+    // m0-edge is reached — one or two cc BEFORE the interrupt-triggering
+    // instruction's boundary — so when an interrupt dispatches within the same
+    // M-cycle window the block wrongly read pre-push memory. `service_interrupt`
+    // compares this against its access cc and, when the interrupt won the race,
+    // re-runs the block AFTER the pushes (the `late_hdma_vs_*` content tests).
+    // None when no block is in-flight for the current period.
+    #[serde(skip, default)]
+    hdma_last_fire_cc: Option<u64>,
+    // Snapshot of (source, dest, length, enabled) captured immediately BEFORE the
+    // last m0-edge block fired, so the late-hdma-vs re-order can restore the
+    // pre-fire pointers and re-run the block reading post-push memory.
+    #[serde(skip, default)]
+    hdma_pre_fire_state: Option<(u16, u16, u8, bool)>,
+
     // CGB palette state
     #[serde(with = "serde_bytes")]
     bg_palette_ram: [u8; 64],    // 8 palettes × 4 colors × 2 bytes = 64 bytes
@@ -380,6 +399,8 @@ impl Mmio {
             hdma_write_delay: 0,
             hdma_kick_eval_pending: 0,
             hdma_mcycle_fire_suppressed: false,
+            hdma_last_fire_cc: None,
+            hdma_pre_fire_state: None,
 
             // CGB palette initialization
             bg_palette_ram: [0; 64],
@@ -1277,6 +1298,16 @@ impl Mmio {
         if !(self.hdma_req_pending && self.hdma_enabled) {
             return;
         }
+        // Snapshot the pre-fire block pointers so the late-hdma-vs-interrupt
+        // re-order (see `reorder_late_hdma_after_pushes`) can restore them and
+        // re-run the block reading post-push memory when an interrupt won the
+        // m0Time-vs-minIntTime race. Only meaningful while no OAM-DMA interleave
+        // is active (the `late_hdma_vs_*` tests have none); a re-run with an
+        // active OAM-DMA would double-advance its position, so the re-order is
+        // gated on `!dma_active` at the service site.
+        self.hdma_pre_fire_state =
+            Some((self.hdma_source, self.hdma_dest, self.hdma_length, self.hdma_enabled));
+        self.hdma_last_fire_cc = Some(self.master_cc());
         self.pending_dma_stall += self.run_hdma_block();
         // Gambatte intevent_dma (memory.cpp:280): after the block, a halt-time
         // `hdma_requested` collapses to `hdma_low` so a subsequent unhalt does
@@ -1284,6 +1315,56 @@ impl Mmio {
         if self.halt_hdma_state == HaltHdmaState::Requested {
             self.halt_hdma_state = HaltHdmaState::Low;
         }
+    }
+
+    /// C7-full late-hdma-vs-interrupt re-order (memory.cpp:312-320 / the
+    /// `intevent_dma` < `intevent_interrupts` event ordering). Gambatte resolves
+    /// the race by event time: the m0-edge HDMA (`flagHdmaReq` at `m0Time`) wins
+    /// over the interrupt only when `m0Time <= minIntTime_` (the interrupt's
+    /// serviceable cc); otherwise the interrupt's PC pushes run first and the
+    /// block fires AFTER, so its copy of the source stack slot carries the pushed
+    /// return address (`late_hdma_vs_ei/ie/tima/m0` content tests).
+    ///
+    /// rustyboi fires the m0-edge block greedily the dot the edge is reached —
+    /// which lands one or two cc BEFORE the interrupt-triggering instruction's
+    /// boundary. When the interrupt then dispatches within the same M-cycle window
+    /// (its boundary `access_cc` no more than a full M-cycle past the fire) the
+    /// block already (wrongly) read pre-push memory. Re-run it here, after the
+    /// pushes, restoring the pre-fire pointers and discarding the stale deferred
+    /// writes so the post-push source bytes land instead. Gated on no active
+    /// OAM-DMA interleave (the only safe re-run; the vs tests have none) and on
+    /// the block actually having fired this M-cycle window.
+    pub fn reorder_late_hdma_after_pushes(&mut self, service_access_cc: u64) {
+        if self.dma_active {
+            return;
+        }
+        let Some(fire_cc) = self.hdma_last_fire_cc else {
+            return;
+        };
+        let Some((src, dst, len, en)) = self.hdma_pre_fire_state else {
+            return;
+        };
+        // The interrupt won the race only when its dispatch boundary is within one
+        // M-cycle (4cc) of the greedy fire on EITHER side: the failing vs tests
+        // dispatch at fire+0 / fire+2, versus +46 for the genuine dma-wins races
+        // (where the block fired a full instruction earlier and legitimately wins).
+        // The two-sided window also rejects a stale `hdma_last_fire_cc` left by an
+        // unrelated earlier block. `service_access_cc` is the pre-push boundary cc;
+        // `fire_cc` is the post-tick master_cc of the fire.
+        if fire_cc + 4 < service_access_cc || fire_cc > service_access_cc + 4 {
+            return;
+        }
+        // Discard the stale (pre-push) deferred writes and re-run the block from
+        // the restored pointers so its source reads see the just-pushed PC.
+        self.hdma_pending_writes.clear();
+        self.hdma_source = src;
+        self.hdma_dest = dst;
+        self.hdma_length = len;
+        self.hdma_enabled = en;
+        self.hdma_req_pending = true;
+        self.run_hdma_block();
+        self.hdma_last_fire_cc = None;
+        self.hdma_pre_fire_state = None;
     }
 
     /// C7-full: whether the M-cycle-boundary HDMA fire is currently suppressed
