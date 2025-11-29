@@ -403,21 +403,25 @@ impl<'a> Bus<'a> {
             return;
         }
 
-        // SC (FF02) ABORT write resolves at the access START cc (M8 serial
-        // merge): clearing the transfer-start/internal-clock bits must land
-        // BEFORE this M-cycle's per-dot `step_serial` runs — otherwise the
-        // in-flight transfer completes during the tick and raises the serial IF
-        // the abort is meant to suppress. A START write (bits set) keeps the
-        // tick-before path so its scheduled completion cc is unchanged (the
-        // nopx/late_div_write completion-timing cases are tuned to it).
-        let sc_abort = addr == 0xFF02 && (value & 0x81) != 0x81;
-        if sc_abort {
+        // SC (FF02) writes resolve at the access START cc (Gambatte
+        // `interrupt_request 0x02: updateSerial(cc); ... setEventTime(... cc ...)`
+        // — the SC write's `cc` is the access cc, NOT cc+4). An ABORT (bits
+        // cleared) must land BEFORE this M-cycle's per-dot `step_serial` so the
+        // in-flight transfer cannot complete and raise the serial IF the abort
+        // suppresses. A START write must ALSO resolve at the access cc: the
+        // completion event is `cc - (cc - divLastUpdate) % align + step*8`, and
+        // capturing `cc` (and thus the DIV residue) at the post-tick cc+4 placed
+        // both the residue and the completion 4 cc late vs Gambatte (the serial-IF
+        // boundary `start83*`/`nopx1* read_if` cases read the IF bit at the exact
+        // completion cc). Writing before the tick anchors the SC write at the same
+        // start cc the DIV/TIMA writes already use, matching Gambatte's `cc`.
+        if addr == 0xFF02 {
             self.mmio.write(addr, value);
             self.tick_m();
             return;
         }
 
-        let tick_before = matches!(addr, 0xFF01..=0xFF02 | 0xFF46 | 0xFF4A | 0xFF4B)
+        let tick_before = matches!(addr, 0xFF01 | 0xFF46 | 0xFF4A | 0xFF4B)
             || self.mmio.dma_active();
         if tick_before {
             // FF4A (WY): schedule Gambatte's `wy2` at the write's cc (read-at-
