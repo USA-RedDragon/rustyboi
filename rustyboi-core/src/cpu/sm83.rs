@@ -169,6 +169,12 @@ impl SM83 {
         // synchronous timing on the unhalt path.
         let suppress = !just_unhalted && !bus.hdma_fire_pending();
         bus.set_hdma_mcycle_fire_suppressed(suppress);
+        // Boundary (pre-push) access cc for the late-hdma-vs-interrupt re-order
+        // (see `reorder_late_hdma_after_pushes`): a greedy m0-edge HDMA fire that
+        // raced this same M-cycle window read pre-push memory and must be re-run
+        // post-push. Only the unhalt-free path is eligible (the halt path's block
+        // is governed by `haltHdmaState_`).
+        let service_access_cc = bus.access_cc();
 
         if crate::cpu::bus::faithful_enabled() {
             // STAGE 2: the boundary prefetch already read (and charged +4 for)
@@ -206,6 +212,12 @@ impl SM83 {
         // latched during the service, so it reads memory as of the post-push cc.
         bus.set_hdma_mcycle_fire_suppressed(false);
         bus.fire_pending_hdma_mcycle();
+        // Late-hdma-vs-interrupt: if a greedy m0-edge block fired within this
+        // service's M-cycle window (the interrupt won the m0Time-vs-minIntTime
+        // race) re-run it now so its source reads see the just-pushed PC.
+        if !just_unhalted {
+            bus.reorder_late_hdma_after_pushes(service_access_cc);
+        }
 
         self.registers.pc = match flag {
             Some(registers::InterruptFlag::VBlank) => 0x40,
