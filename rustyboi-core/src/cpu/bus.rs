@@ -307,10 +307,20 @@ impl<'a> Bus<'a> {
             // there is no such phase error, so the post-DMA read needs the same -1
             // the DS path uses to land the mode-3 `_1` bracket (hdma_cycles_1).
             let post_dma = self.mmio.take_dma_prefetch_stat_bias();
-            let bias = post_dma
-                && (self.mmio.is_double_speed_mode()
-                    || (self.mmio.read(ppu::SCX) & 0x07) == 0);
-            let access_cc = self.mmio.master_cc().saturating_sub(if bias { 1 } else { 0 });
+            let ds = self.mmio.is_double_speed_mode();
+            let scx0 = (self.mmio.read(ppu::SCX) & 0x07) == 0;
+            let bias_cc: u64 = if post_dma && (ds || scx0) {
+                // At DS with SCX&7 != 0 the m0_time_master keeps a 1cc-low per-SCX
+                // phase the read_off=2 boundary does not mask, so the post-DMA read
+                // ties m0Time exactly (gdma_cycles_2xshort_scx5_ds_1 reads mode 0
+                // where Gambatte reads mode 3 at cc+2<m0Time); a second dot of
+                // prefetch absorption lands it. SCX&7==0 (DS or SS) keeps the plain
+                // -1.
+                if ds && !scx0 { 2 } else { 1 }
+            } else {
+                0
+            };
+            let access_cc = self.mmio.master_cc().saturating_sub(bias_cc);
             if crate::ppu::controller::getstat_enabled() {
                 // STAGE 4: one closed-form getStat off the exact access cc; no
                 // reliance on the per-dot renderer FF41 mode register.
