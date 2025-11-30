@@ -904,8 +904,18 @@ impl Mmio {
         // overlap; +5 lands the next STAT-mode read on the exact mode-0 dot for
         // the gdma_cycles boundary pairs (the PPU position trailed the synced
         // master cc by ~1 dot at the read with the old +6 — see fix-gdma).
+        //
+        // Two back-to-back FF55=0 kicks (gdma_cycles_2xshort) drain as effectively
+        // ONE prefetch sequence: Gambatte's `Interrupter::prefetch` absorption
+        // happens once across the pair, not per `dma()` event. The first kick set
+        // `dma_prefetch_stat_bias` (its stall was drained, no STAT read has consumed
+        // it yet); a second kick before that consumption must add only the raw
+        // transfer + trailing setup (no second `+5`), else the post-stall STAT read
+        // lands ~5 dots late at double speed (2xshort_ds_1 reads mode 0 where
+        // Gambatte still reads mode 3 at `cc + 2 < m0Time`).
         let (per_byte, setup) = if self.is_double_speed_mode() { (4, 5) } else { (2, 4) };
-        self.pending_dma_stall += (effective_length as u32) * per_byte + setup + 5;
+        let prefetch_fudge = if self.dma_prefetch_stat_bias { 0 } else { 5 };
+        self.pending_dma_stall += (effective_length as u32) * per_byte + setup + prefetch_fudge;
     }
 
     // ----------------------------------------------------------------------
