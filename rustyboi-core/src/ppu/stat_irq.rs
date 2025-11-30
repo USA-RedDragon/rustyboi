@@ -100,7 +100,7 @@ pub fn get_lyc_cmp_ly(lc: &LyCounter, cc: u64) -> LyCmp {
     LyCmp { ly, time_to_next_ly: ttnl }
 }
 
-fn inc_ly(ly: u32) -> u32 {
+pub fn inc_ly(ly: u32) -> u32 {
     if ly == LCD_LINES_PER_FRAME - 1 { 0 } else { ly + 1 }
 }
 

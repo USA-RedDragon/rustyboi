@@ -507,6 +507,11 @@ impl GB {
         self.mmio.read(address)
     }
 
+    /// Master cycle counter (abs_cc) for timing trace reconciliation vs cctracer.
+    pub fn master_cc(&self) -> u64 {
+        self.mmio.master_cc()
+    }
+
     /// Write a byte through the memory bus. Used by the libretro frontend to
     /// apply per-frame GameShark RAM pokes.
     pub fn write_memory(&mut self, address: u16, value: u8) {

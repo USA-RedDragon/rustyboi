@@ -4330,23 +4330,40 @@ impl Ppu {
         }
         let ds = mmio.is_double_speed_mode();
         let lc = self.ly_counter(mmio);
-        let ly_reg = lc.ly as i64;
-        // Gambatte's lyCounter().time() in master-cc. The closed-form LyCounter.time
-        // runs one master-cc below Gambatte's lyTime (see m0_time_exact), so add 1.
-        let time = self.p_now as i64 + lc.time as i64 + 1;
         let cc = access_cc as i64;
-        let to_next = time - cc; // timeToNextLy
         let cpl = stat_irq::LCD_CYCLES_PER_LINE as i64;
         let last_line = (stat_irq::LCD_LINES_PER_FRAME - 1) as i64; // 153
+        // Gambatte's lyCounter().time() in master-cc. The closed-form LyCounter.time
+        // runs one master-cc below Gambatte's lyTime (see m0_time_exact), so add 1.
+        let mut ly_reg = lc.ly as i64;
+        let mut time = self.p_now as i64 + lc.time as i64 + 1;
+        // Gambatte getLyReg: `if (cc >= lyCounter().time()) update(cc)` advances the
+        // LY counter when the read's access cc has already passed the LY increment.
+        // The closed-form (ly_counter) is renderer-anchored and does NOT advance, so
+        // a read whose M-cycle lands AT/AFTER the line wrap reads the stale LY (the
+        // renderer flips one dot boundary later). Replay the advance here: at the
+        // 152->153 boundary this lifts ly to 153 so the line-153 reads-0 case fires
+        // (lycint152_ly153 family).
+        let line_time = lc.line_time() as i64;
+        if cc >= time {
+            ly_reg = stat_irq::inc_ly(ly_reg as u32) as i64;
+            time += line_time;
+        }
+        let to_next = time - cc; // timeToNextLy
 
         if ly_reg == last_line {
             // Line 153: FF44 reads 0 early (Gambatte getLyReg). At single speed the
-            // renderer's own dot-6 LY->0 flip (co-tuned with the STAT/LYC machinery)
-            // already matches the probed reads, so defer to the renderer register
-            // there. At double speed the renderer's dot-6 convention reads one
-            // M-cycle stale for the reads these tests probe, so resolve from the LY
-            // phase: FF44 reads 0 once `timeToNextLy <= 2*cpl-2`.
+            // renderer's dot-6 LY->0 flip handles MOST of line 153 correctly, EXCEPT
+            // at the very top of the line (`to_next >= cpl`, the just-wrapped sub-dot
+            // where the closed-form LY counter has rolled to 153 but the renderer
+            // register is still one M-cycle stale on the prior line). There the
+            // renderer reads the wrong (prior) LY, so resolve from the counter:
+            // Gambatte's getLyReg returns 0 for the whole of line 153 single speed.
+            // For the rest of the line defer to the renderer (return None).
             if !ds {
+                if to_next >= cpl {
+                    return Some(0);
+                }
                 return None;
             }
             if to_next <= 2 * cpl - 2 {
