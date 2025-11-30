@@ -1790,7 +1790,24 @@ impl Ppu {
                 }
             }
         };
-        let remaining = mode0_within_line - self.ticks as i64;
+        let mut remaining = mode0_within_line - self.ticks as i64;
+        // VBlank (LY 144..153) has no mode 0 on the current line: Gambatte's
+        // `predictedNextXposTime(166)` lands on the next *rendering* line's mode 0
+        // (line 0 of the following frame), far beyond the current VBlank. The
+        // `ticks + m3_len + offset` form above computes a bogus within-VBlank-line
+        // dot which would fire a spurious m0 STAT IRQ this frame (lycint152_m0irq).
+        // Carry the schedule forward to line 0: dots to the end of the current
+        // line, plus the full VBlank lines that follow, plus line-0's mode-0 dot
+        // offset (reuse `m3_len + offset` from above as the line-0 proxy).
+        let ly = self.internal_ly() as i64;
+        if ly >= stat_irq::LCD_VRES as i64 {
+            let last_line = (stat_irq::LCD_LINES_PER_FRAME - 1) as i64; // 153
+            let cpl = stat_irq::LCD_CYCLES_PER_LINE as i64;
+            let line0_m0_offset = mode0_within_line - self.ticks as i64; // m3_len + offset
+            let dots_to_current_line_end = cpl - self.ticks as i64;
+            let full_vblank_lines = (last_line - ly) * cpl;
+            remaining = dots_to_current_line_end + full_vblank_lines + line0_m0_offset;
+        }
         let ds = mmio.is_double_speed_mode();
         let mut off = if ds { m0irq_off_ds() } else { m0irq_off_ss() };
         if is_cgb && !ds && (mmio.read(SCX) & 0x07) == 2 {
