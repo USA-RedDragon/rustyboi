@@ -298,8 +298,18 @@ impl<'a> Bus<'a> {
             // masks at the exact boundary, so the -1 would mis-flag the SS `_2`
             // (mode-0) brackets into mode 3. The DS read uses Gambatte's true `+2`
             // boundary, where the -1 prefetch absorption is exact and regression-free.
-            let bias =
-                self.mmio.take_dma_prefetch_stat_bias() && self.mmio.is_double_speed_mode();
+            // Post-DMA STAT-read prefetch absorption. At double speed the -1
+            // applies unconditionally (the read M-cycle starts one dot high after
+            // the synchronous-copy + idle-stall drain). At single speed the closed-
+            // form m0_time_master carries a per-SCX +1 phase error that read_off=3
+            // normally masks; the -1 would then double-correct and flip the SCX>0
+            // mode-0 `_2` brackets into mode 3 (gdma_cycles_scx3_2). At SCX&7==0
+            // there is no such phase error, so the post-DMA read needs the same -1
+            // the DS path uses to land the mode-3 `_1` bracket (hdma_cycles_1).
+            let post_dma = self.mmio.take_dma_prefetch_stat_bias();
+            let bias = post_dma
+                && (self.mmio.is_double_speed_mode()
+                    || (self.mmio.read(ppu::SCX) & 0x07) == 0);
             let access_cc = self.mmio.master_cc().saturating_sub(if bias { 1 } else { 0 });
             if crate::ppu::controller::getstat_enabled() {
                 // STAGE 4: one closed-form getStat off the exact access cc; no
