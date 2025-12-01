@@ -469,6 +469,44 @@ impl<'a> Bus<'a> {
             return;
         }
 
+        // IF (0xFF0F) write: split the write M-cycle. Gambatte applies the CPU's
+        // explicit `ifReg` store partway through the access M-cycle: an IRQ event
+        // flagged at a cc strictly before the store cc is clobbered by the write,
+        // while one flagged at/after the store cc survives. Measured byte-exact via
+        // cctracer (m2int_m0irq_scx3_ifw_2 vs scx4_ifw_1): the m0 STAT IRQ at
+        // m0Time-1 is cleared when m0Time-1 < store_cc and kept otherwise, with the
+        // store landing `IF_WRITE_SPLIT << ds` dots into the M-cycle. Tick that
+        // many dots first (so earlier-firing IRQs are already in IF and get
+        // overwritten), store IF, then tick the remainder.
+        if addr == 0xFF0F
+            && !self.mmio.dma_active()
+            && !self.mmio.is_double_speed_mode()
+            && !self.mmio.is_cgb_features_enabled()
+        {
+            // IF (0xFF0F) write: split the write M-cycle so the explicit `ifReg`
+            // store lands partway through it (Gambatte applies the store at the
+            // write cc, after the access M-cycle's leading dots). An IRQ flagged at
+            // a cc <= store_cc is already in IF and is overwritten by the write; one
+            // flagged later survives. On DMG the m0 STAT IRQ at m0Time-1 falls in the
+            // first half of the IF-clear write's M-cycle, so storing 1 dot in clears
+            // it (m2int_m0irq_scx3_ifw_2/_4 -> out0) while leaving a later IRQ alone.
+            //
+            // Scoped to DMG single speed. On CGB the m0 STAT IRQ is delivered one dot
+            // later than its byte-exact m0Time-1 phase (the per-dot dispatch flags it
+            // at the mode-3->0 transition dot, not predictedNextXposTime(166)); a
+            // split that clears the CGB m0 IRQ also clears the (correctly phased) m2/
+            // lyc IRQ at the same relative cc, swapping m2int_m0irq for
+            // lyc153int_m2irq. Until the CGB m0 delivery phase is corrected, the CGB
+            // and double-speed paths keep the pre-tick store.
+            const IF_WRITE_SPLIT: u64 = 1;
+            let mid = self.mmio.master_cc().wrapping_add(IF_WRITE_SPLIT);
+            self.run_to(mid);
+            self.mmio.write(addr, value);
+            let end = self.mmio.master_cc().wrapping_add(4 - IF_WRITE_SPLIT);
+            self.run_to(end);
+            return;
+        }
+
         let tick_before = matches!(addr, 0xFF01 | 0xFF46 | 0xFF4A | 0xFF4B)
             || self.mmio.dma_active();
         if tick_before {
