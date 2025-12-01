@@ -613,7 +613,13 @@ pub struct Ppu {
     // Set once a late-WX mid-window refund has been applied this line, so a
     // second WX write does not refund twice.
     win_wx_penalty_resolved: bool,
-    
+    // Set once a mid-mode-3 WX-write window-ENABLE has been resolved this line
+    // (penalty added or determined not-applicable), so the WX != arm-WX
+    // pre-window-start condition does not re-enter and null the schedule on the
+    // following dots.
+    #[serde(default)]
+    win_wx_enable_resolved: bool,
+
     // STAT interrupt state tracking
     previous_stat_interrupt_line: bool, // Previous state of STAT interrupt line for edge detection
     #[serde(default)]
@@ -925,6 +931,7 @@ impl Ppu {
             win_start_dot: None,
             predicted_win_start_dot: None,
             win_wx_penalty_resolved: false,
+            win_wx_enable_resolved: false,
             window_started_this_line: false,
             previous_stat_interrupt_line: false,
             mode2_irq_pretriggered_for_next_line: false,
@@ -2971,6 +2978,7 @@ impl Ppu {
                     self.win_start_dot = None;
                     self.predicted_win_start_dot = None;
                     self.win_wx_penalty_resolved = false;
+                    self.win_wx_enable_resolved = false;
 
                     // Initialize OAM search state
                     self.sprites_on_line.clear();
@@ -3298,14 +3306,80 @@ impl Ppu {
             State::PixelTransfer => 'label: {
                 // A mid-mode-3 WX change before the window starts invalidates the
                 // closed-form schedule; fall back to the live emergent transition.
+                // The `win_wx_enable_resolved` latch suppresses re-entry on the dots
+                // after a clean WX-enable was handled (the WX != arm-WX condition
+                // stays true every subsequent dot until the window draws).
                 if self.scheduled_mode0_dot.is_some()
                     && !self.window_started_this_line
+                    && !self.win_wx_enable_resolved
                     && (mmio.read(WX) != self.m3_scheduled_wx
                         || self.window_will_start(mmio, mmio.is_cgb_features_enabled())
                             != self.m3_scheduled_win)
                 {
-                    self.scheduled_mode0_dot = None;
-                    self.m0_time_master = None;
+                    // WX-write-ENABLE: the window was out of range at M3 arm
+                    // (`!m3_scheduled_win`, so m0_time_master has NO StartWindowDraw
+                    // penalty) and a mid-mode-3 WX write brings it into range so the
+                    // window will now start this line. Gambatte's predictNextM0Time
+                    // re-runs with the window included, moving the mode-3 end
+                    // WIN_M3_PENALTY dots later. ADD that penalty (symmetric to the
+                    // LCDC window-enable path) iff the write lands before the window
+                    // tile commits — otherwise the fetcher already passed the window
+                    // start and no penalty accrues. Scoped CGB / no sprites; the live
+                    // pipeline is untouched, only the read-at-cc m0Time is shifted.
+                    let now_will_start =
+                        self.window_will_start(mmio, mmio.is_cgb_features_enabled());
+                    // Only the WX-into-range case: WX itself changed from out of range
+                    // (arm WX > 166, no window scheduled) to in range. A window that
+                    // newly starts for any OTHER reason (a mid-mode-3 WY trigger with
+                    // WX unchanged and already in range) is NOT this lever and must
+                    // keep nulling (the late_wy / late_scx_late_wy cluster).
+                    let arm_wx = self.m3_scheduled_wx as i32;
+                    let wx_now = mmio.read(WX) as i32;
+                    let wx_into_range = arm_wx > 166 && (0..=166).contains(&wx_now);
+                    let wx_enable_clean = !self.m3_scheduled_win
+                        && now_will_start
+                        && wx_into_range
+                        && mmio.is_cgb_features_enabled()
+                        && !mmio.is_double_speed_mode()
+                        && self.sprites_on_line.is_empty();
+                    let mut keep_schedule = false;
+                    if wx_enable_clean && let Some(m0t) = self.m0_time_master {
+                        // Latch: this clean WX-enable is now resolved for the line, so
+                        // later dots (WX still != arm) do not re-enter and null.
+                        self.win_wx_enable_resolved = true;
+                        keep_schedule = true;
+                        let wx = mmio.read(WX) as i32;
+                        let x_at_start = (wx - 7).max(0);
+                        let warmup = CGB_PIXEL_TRANSFER_WARMUP as i64;
+                        // SCX>3 / scx5 fine-scroll: the x==0 window-tile commit runs
+                        // two dots later per extra discarded SCX dot, mirroring the
+                        // late-WX-disable accrual shift.
+                        let win_fine = if wx <= 7 {
+                            2 * (((self.m3_arm_scx & 7) as i64) - 3).max(0)
+                        } else {
+                            0
+                        };
+                        let commit_dot = self.m3_arm_dot as i64
+                            + warmup
+                            + 8
+                            + self.m3_arm_scx as i64
+                            + x_at_start as i64
+                            + win_fine
+                            + env_off("RB_WXEN_COMMIT", 3);
+                        if (self.ticks as i64) < commit_dot {
+                            let pen = (WIN_M3_PENALTY as i64) << (mmio.is_double_speed_mode() as i64);
+                            self.m0_time_master = Some((m0t as i64 + pen).max(0) as u64);
+                            // Keep the closed-form schedule (mode-3 end shifts with
+                            // the penalty); only the master m0Time moved.
+                        }
+                        // else: window starts but the write is past the commit dot, so
+                        // no penalty is added — the no-window m0Time captured at arm is
+                        // the correct (mode-0-earlier) boundary; keep the schedule.
+                    }
+                    if !keep_schedule {
+                        self.scheduled_mode0_dot = None;
+                        self.m0_time_master = None;
+                    }
                 }
                 // late_wx: a mid-mode-3 WX write AFTER the window has started,
                 // moving WX out of range, cancels the remaining window draw and
