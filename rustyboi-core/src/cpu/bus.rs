@@ -365,10 +365,29 @@ impl<'a> Bus<'a> {
         // access gating at `cc` before advancing). The cgbp begin/end boundary
         // is master-cc based and must anchor here, not at the post-tick cc.
         let pre_access_cc = self.mmio.master_cc();
+        // HALT-wakeup VRAM-read phase: a VRAM read on the instruction stream
+        // resumed by a HALT wakeup (`halt_wakeup_skew`) resolves its mode-3->0
+        // boundary 6cc late vs the engine's `master_cc`. Root: the LYC/STAT IRQ
+        // that woke the CPU is flagged into IF one dot early (sched_lycirq <= cc+ds)
+        // and serviced in the same step, so the HALT-woken stream's master_cc runs
+        // ~6cc ahead of the PPU's m0Time anchor (measured byte-exact via cctracer:
+        // engine m0_time_master = gb_m0Time + 6 relative to the woken read, vs +0
+        // on the non-halt m0-IRQ-dispatch stream — hdma_start/hdma_late_disable
+        // scx3/scx5 `_1` read mode-3 0xFF where Gambatte reads mode-0). The
+        // non-halt postread/vramw reads on the same lines are correctly phased, so
+        // bias ONLY the halt-woken VRAM read's access cc, not the shared m0Time.
+        let vram_read_cc = if (0x8000..=0x9FFF).contains(&addr)
+            && self.mmio.halt_wakeup_skew()
+            && self.mmio.read(ppu::LCD_CONTROL) & 0x80 != 0
+        {
+            pre_access_cc + 6
+        } else {
+            pre_access_cc
+        };
         self.tick_m();
         // VRAM is inaccessible to the CPU during Mode 3, OAM during Mode 2/3;
         // a blocked read returns open-bus 0xFF. Only while the LCD is on.
-        if self.ppu_locks_access(addr, pre_access_cc) {
+        if self.ppu_locks_access(addr, vram_read_cc) {
             return 0xFF;
         }
         if let Some(v) = apu_read {
