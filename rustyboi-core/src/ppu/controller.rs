@@ -1829,6 +1829,14 @@ impl Ppu {
             let dots_to_current_line_end = cpl - self.ticks as i64;
             let full_vblank_lines = (last_line - ly) * cpl;
             remaining = dots_to_current_line_end + full_vblank_lines + line0_m0_offset;
+        } else {
+            // The mode-0 STAT IRQ fires at `predictedNextXposTime(166)`, one xpos
+            // before the m0Time (xpos 167) the closed-form `m3_len` above tracks.
+            // For plain lines those differ by one dot (already folded into
+            // `M0IRQ_OFFSET`); when a window starts at WX=166 or a sprite sits at
+            // the right edge, the final xpos step carries the whole penalty and
+            // the IRQ fires that many dots earlier. Subtract that extra advance.
+            remaining -= self.m0irq_xpos166_advance(mmio, is_cgb);
         }
         let ds = mmio.is_double_speed_mode();
         let mut off = if ds { m0irq_off_ds() } else { m0irq_off_ss() };
@@ -2286,6 +2294,56 @@ impl Ppu {
         len
     }
 
+    // Closed-form mode-3 length to reach an arbitrary `targetx`, mirroring
+    // Gambatte `predictCyclesUntilXpos_fn`: the window penalty (+6) is charged
+    // only when `wx < targetx`, and a sprite contributes only when `spx <=
+    // targetx`. `compute_m3_length_win` is the `targetx == 167` (m0Time, getStat)
+    // case; the mode-0 STAT IRQ fires at `predictedNextXposTime(lcd_hres+6) =
+    // predictedNextXposTime(166)`, one xpos earlier. When a window starts at
+    // WX=166 and/or a sprite sits at the right edge (spx > 166), that final
+    // xpos step carries the whole window+sprite penalty, so xpos 166 lands many
+    // dots before xpos 167 — not the usual single dot.
+    fn compute_m3_length_to_target(&self, mmio: &mmio::Mmio, is_cgb: bool, targetx: i32) -> u128 {
+        let scx = (mmio.read(SCX) & 0x07) as i32;
+        let mut cycles: i32 = scx + (1 - is_cgb as i32);
+        cycles += targetx; // targetx - xpos, xpos = 0 at tile-loop start
+
+        let mut nwx: i32 = 0xFF;
+        if self.window_will_start(mmio, is_cgb) {
+            let wx = mmio.read(WX) as i32;
+            // Gambatte: window penalty only if `wx < targetx` (`p.wx - xpos <
+            // targetx - xpos`). At targetx == 167 this matches the +6 in
+            // `compute_m3_length_win` (any in-range WX <= 166 < 167).
+            if wx < targetx {
+                nwx = wx;
+                cycles += WIN_M3_PENALTY + env_off("RB_WIN_M3_PEN", 0) as i32;
+                if is_cgb && scx == 5 && self.sprites_on_line.is_empty() {
+                    let dflt = if mmio.is_double_speed_mode() { 0 } else { -1 };
+                    cycles += env_off("RB_WIN_M3_SCX5_CGB", dflt) as i32;
+                }
+            }
+        }
+
+        let obj_enabled = (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0;
+        let mut sprite_xs: Vec<i32> = self.sprites_on_line.iter().map(|s| s.x as i32).collect();
+        sprite_xs.sort_unstable();
+        cycles += sprite_tile_walk_cost(&sprite_xs, scx, nwx, targetx, obj_enabled || is_cgb);
+
+        cycles.max(0) as u128
+    }
+
+    /// The extra dots (beyond the usual single dot) that the final xpos step
+    /// (166 -> 167) carries on this line, i.e. how many dots earlier the mode-0
+    /// STAT IRQ (`predictedNextXposTime(166)`) fires relative to the m0Time
+    /// (`predictedNextXposTime(167)`) closed form. Zero for plain BG lines, so
+    /// the calibrated `M0IRQ_OFFSET` arm is unchanged; non-zero only when a
+    /// window starts at WX=166 or a sprite sits at the right edge.
+    fn m0irq_xpos166_advance(&self, mmio: &mmio::Mmio, is_cgb: bool) -> i64 {
+        let len167 = self.compute_m3_length_to_target(mmio, is_cgb, 167) as i64;
+        let len166 = self.compute_m3_length_to_target(mmio, is_cgb, 166) as i64;
+        (len167 - len166 - 1).max(0)
+    }
+
     // Returns (mode-3 length in dots past base, whether the window contributed).
     fn compute_m3_length_win(&self, mmio: &mmio::Mmio, is_cgb: bool) -> (u128, bool) {
         let scx = (mmio.read(SCX) & 0x07) as i32;
@@ -2573,7 +2631,7 @@ impl Ppu {
     /// Mirrors Gambatte: when the scheduled m0 IRQ is disabled but the current
     /// line's mode 0 is still ahead, predict it from the renderer; otherwise use
     /// the scheduled value.
-    fn m0_irq_time_for_trigger(&self, mmio: &mmio::Mmio, lc: &stat_irq::LyCounter, _cc: u64) -> u64 {
+    fn m0_irq_time_for_trigger(&self, mmio: &mmio::Mmio, lc: &stat_irq::LyCounter, cc: u64) -> u64 {
         // Gambatte's statChangeTriggers* needs the m0 IRQ time of the *current
         // line*. Our `sched_m0irq` may hold a stale current-line value during
         // HBlank (it is only cleared to DISABLED when the m0 source fires). The
@@ -2600,7 +2658,22 @@ impl Ppu {
             State::VBlank => stat_irq::DISABLED_TIME,
             State::PixelTransfer => self
                 .m0_irq_time_exact(mmio)
-                .map(|t| t.min(lc.time.saturating_sub(1)))
+                .map(|t| {
+                    // Gambatte runs pending events before the FF41-write trigger
+                    // check: if the write cc has already passed the mode-0 STAT
+                    // IRQ time (predictedNextXposTime(166)), that event fired and
+                    // rescheduled `eventTimes_(memevent_m0irq)` onto the next line
+                    // (> lyCounter.time()). Report a next-LY value so the trigger
+                    // takes the "m0 already occurred" branch and the enable
+                    // immediately flags the STAT IRQ — the `_2`/`_3`/`_4` bracket
+                    // where the window/sprite-deferred m0 xpos lies just before the
+                    // enable write.
+                    if cc >= t {
+                        lc.time
+                    } else {
+                        t.min(lc.time.saturating_sub(1))
+                    }
+                })
                 .unwrap_or(sched_or_future),
             _ => sched_or_future,
         }
@@ -2619,15 +2692,19 @@ impl Ppu {
         // The STAT/LYC write-trigger comparisons run in abs-cc units (the same
         // `cc = write_cc()` / `sched_m0irq` clock), so rebase by `p_now`
         // (abs_cc = master_cc - p_now). The mode-0 IRQ fires one xpos earlier:
-        // predictedNextXposTime(166) = m0Time - (1<<ds).
+        // predictedNextXposTime(166) = m0Time - (cost(166->167) << ds), where the
+        // 166->167 step costs one dot plus any window-start (WX=166) / right-edge
+        // sprite penalty that lands in that final xpos (`m0irq_xpos166_advance`).
         //
         // `m0_time_master` (via `m0_time_exact`) carries a `+1` lyTime correction
         // tuned for the C1 *read* access-cc phase (`access_cc + 2 < m0Time`). The
         // *write* cc (write_cc_off = 0) resolves the latch/trigger one cc earlier,
         // so that read-phase `+1` over-counts the write-boundary IRQ time by 1 —
         // subtract it back out to land the write-phase boundary exactly.
+        let is_cgb = mmio.is_cgb_features_enabled();
+        let adv = self.m0irq_xpos166_advance(mmio, is_cgb);
         self.m0_time_master
-            .map(|m0t| (m0t as i64 - (1 << ds) - self.p_now as i64 - 1).max(0) as u64)
+            .map(|m0t| (m0t as i64 - ((1 + adv) << ds) - self.p_now as i64 - 1).max(0) as u64)
     }
 
     /// The current-line mode-0 IRQ time for the FF41/FF45 *latch* comparisons
