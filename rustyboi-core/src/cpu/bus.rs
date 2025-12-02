@@ -478,26 +478,17 @@ impl<'a> Bus<'a> {
         // store landing `IF_WRITE_SPLIT << ds` dots into the M-cycle. Tick that
         // many dots first (so earlier-firing IRQs are already in IF and get
         // overwritten), store IF, then tick the remainder.
-        if addr == 0xFF0F
-            && !self.mmio.dma_active()
-            && !self.mmio.is_double_speed_mode()
-            && !self.mmio.is_cgb_features_enabled()
-        {
+        if addr == 0xFF0F && !self.mmio.dma_active() && !self.mmio.is_double_speed_mode() {
             // IF (0xFF0F) write: split the write M-cycle so the explicit `ifReg`
             // store lands partway through it (Gambatte applies the store at the
             // write cc, after the access M-cycle's leading dots). An IRQ flagged at
             // a cc <= store_cc is already in IF and is overwritten by the write; one
-            // flagged later survives. On DMG the m0 STAT IRQ at m0Time-1 falls in the
-            // first half of the IF-clear write's M-cycle, so storing 1 dot in clears
-            // it (m2int_m0irq_scx3_ifw_2/_4 -> out0) while leaving a later IRQ alone.
-            //
-            // Scoped to DMG single speed. On CGB the m0 STAT IRQ is delivered one dot
-            // later than its byte-exact m0Time-1 phase (the per-dot dispatch flags it
-            // at the mode-3->0 transition dot, not predictedNextXposTime(166)); a
-            // split that clears the CGB m0 IRQ also clears the (correctly phased) m2/
-            // lyc IRQ at the same relative cc, swapping m2int_m0irq for
-            // lyc153int_m2irq. Until the CGB m0 delivery phase is corrected, the CGB
-            // and double-speed paths keep the pre-tick store.
+            // flagged later survives. The m0 STAT IRQ at m0Time-1 falls one dot into
+            // the IF-clear write's M-cycle, so storing 1 dot in clears it
+            // (m2int_m0irq_scx{3,4}_ifw -> out0/out2) while a later m2/lyc IRQ (at
+            // the next dot) survives. Scoped to single speed; double speed keeps the
+            // pre-tick store (its sub-dot M-cycle phasing is not yet calibrated and a
+            // full-M-cycle split there swaps the *_ds_* cases).
             const IF_WRITE_SPLIT: u64 = 1;
             let mid = self.mmio.master_cc().wrapping_add(IF_WRITE_SPLIT);
             self.run_to(mid);

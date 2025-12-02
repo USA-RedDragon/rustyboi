@@ -1951,7 +1951,17 @@ impl Ppu {
         // pushes it across a CPU instruction boundary (≈4cc service delay).
         // Anticipating by `ds` dots lands it on the boundary Gambatte services at
         // — the same half-dot sub-dot fix applied to the LYC=LY IRQ above.
-        if self.sched_m0irq <= cc + ds as u64 {
+        //
+        // On CGB single speed the per-dot dispatch additionally flags the m0 IRQ one
+        // dot after Gambatte's `predictedNextXposTime(166)` (= m0Time-1): the IRQ is
+        // delivered at the mode-3->0 transition dot rather than one xpos before it.
+        // Measured byte-exact via cctracer (m2int_m0irq_scx3 fires at rel+2 from the
+        // IF-clear write M-cycle start vs Gambatte's rel+1; DMG is already at rel+1).
+        // Anticipate by one dot on CGB SS so the m0 IRQ flags at m0Time-1, matching
+        // the (already exact) m2/LYC phase. Fixes 10sprites/ly0/wxA5 m0irq and the
+        // CGB m2int_m0irq_*_ifw IF-clear-vs-m0 ordering.
+        let cgb_ss_m0_anticip = (!ds && mmio.is_cgb_features_enabled()) as u64;
+        if self.sched_m0irq <= cc + ds as u64 + cgb_ss_m0_anticip {
             let stat = self.stat_reg_committed;
             let ly = self.internal_ly() as u32;
             if self.mstat_irq.do_m0_event(ly, stat, self.lyc_irq.lyc_reg()) {
