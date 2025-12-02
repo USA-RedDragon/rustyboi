@@ -78,10 +78,15 @@ impl SM83 {
                 // Keys on hdma_low: the block fires on unhalt only when the HDMA
                 // period was *entered during* the halt (Low at halt time), not when
                 // it was already in-period+armed (High, which already fired).
+                // COORDINATED piece #3: evaluate the unhalt period off the
+                // renderer's cycle-exact isHdmaPeriod(cc) (bus path), not the loose
+                // cached/STAT-mode snapshot, so a Low-at-halt block that is not yet
+                // in period at unhalt fires on its natural m0 edge.
+                let in_period_unhalt = mmio.hdma_in_period_for_unhalt();
                 match mmio.halt_hdma_state() {
                     memory::mmio::HaltHdmaState::Requested => mmio.set_hdma_req(),
                     memory::mmio::HaltHdmaState::Low
-                        if mmio.hdma_in_period_for_unhalt() && mmio.hdma_is_enabled() =>
+                        if in_period_unhalt && mmio.hdma_is_enabled() =>
                     {
                         mmio.set_hdma_req()
                     }
