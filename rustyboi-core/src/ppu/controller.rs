@@ -1257,14 +1257,17 @@ impl Ppu {
             }
             return cost;
         }
-        // ENABLE: a sprite will still be fetched iff its trigger is not yet
-        // passed (display x = spx - 8 >= x, i.e. spx >= x + 8).
+        // ENABLE: a sprite will still be fetched iff the fetcher has NOT yet reached
+        // its trigger (display x = spx - 8). At x == spx - 8 the fetcher is already
+        // at the trigger and the sprite is missed, so the gate is strict: spx > x + 8.
+        // (The sprite_late_enable_spx18_{1,2} pair brackets this single-dot boundary:
+        // enabling at x = spx-9 still fetches, at x = spx-8 does not.)
         let cutoff = self.x as i32 + 8;
         let mut sprite_xs: Vec<i32> = self
             .sprites_on_line
             .iter()
             .map(|s| s.x as i32)
-            .filter(|&spx| spx >= cutoff)
+            .filter(|&spx| spx > cutoff)
             .collect();
         sprite_xs.sort_unstable();
         // The remaining group resumes the tile walk with no carried "first sprite"
