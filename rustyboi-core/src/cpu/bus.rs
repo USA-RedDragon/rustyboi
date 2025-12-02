@@ -469,31 +469,23 @@ impl<'a> Bus<'a> {
             return;
         }
 
-        // IF (0xFF0F) write: split the write M-cycle. Gambatte applies the CPU's
-        // explicit `ifReg` store partway through the access M-cycle: an IRQ event
-        // flagged at a cc strictly before the store cc is clobbered by the write,
-        // while one flagged at/after the store cc survives. Measured byte-exact via
-        // cctracer (m2int_m0irq_scx3_ifw_2 vs scx4_ifw_1): the m0 STAT IRQ at
-        // m0Time-1 is cleared when m0Time-1 < store_cc and kept otherwise, with the
-        // store landing `IF_WRITE_SPLIT << ds` dots into the M-cycle. Tick that
-        // many dots first (so earlier-firing IRQs are already in IF and get
-        // overwritten), store IF, then tick the remainder.
-        if addr == 0xFF0F && !self.mmio.dma_active() && !self.mmio.is_double_speed_mode() {
+        if addr == 0xFF0F && !self.mmio.dma_active() {
             // IF (0xFF0F) write: split the write M-cycle so the explicit `ifReg`
             // store lands partway through it (Gambatte applies the store at the
             // write cc, after the access M-cycle's leading dots). An IRQ flagged at
             // a cc <= store_cc is already in IF and is overwritten by the write; one
             // flagged later survives. The m0 STAT IRQ at m0Time-1 falls one dot into
-            // the IF-clear write's M-cycle, so storing 1 dot in clears it
-            // (m2int_m0irq_scx{3,4}_ifw -> out0/out2) while a later m2/lyc IRQ (at
-            // the next dot) survives. Scoped to single speed; double speed keeps the
-            // pre-tick store (its sub-dot M-cycle phasing is not yet calibrated and a
-            // full-M-cycle split there swaps the *_ds_* cases).
-            const IF_WRITE_SPLIT: u64 = 1;
-            let mid = self.mmio.master_cc().wrapping_add(IF_WRITE_SPLIT);
+            // the IF-clear write's M-cycle, so storing one dot in clears it
+            // (m2int_m0irq_scx{3,4}_ifw -> out0/out2) while a later m2/lyc IRQ (next
+            // dot, or the read M-cycle at +2 dots) survives. One dot = `1 << ds`
+            // master-cc, so the store lands at the same sub-dot at both speeds
+            // (cctracer-measured: m0 cleared at write-mcycle +1 dot, kept at +2).
+            let ds = self.mmio.is_double_speed_mode();
+            let split: u64 = 1u64 << ds as u32;
+            let mid = self.mmio.master_cc().wrapping_add(split);
             self.run_to(mid);
             self.mmio.write(addr, value);
-            let end = self.mmio.master_cc().wrapping_add(4 - IF_WRITE_SPLIT);
+            let end = self.mmio.master_cc().wrapping_add(4 - split);
             self.run_to(end);
             return;
         }
