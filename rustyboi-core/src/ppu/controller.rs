@@ -3932,6 +3932,30 @@ impl Ppu {
     /// `< 192`; DS: arm 394/391, drop 398/395 -> `< 395`). Returns None when no
     /// closed-form mode-0 anchor exists (window / first line / mid-M3 invalidation)
     /// so the caller falls back to the STAT-mode gate.
+    /// COORDINATED piece #3 (HDMA-halt deferred held-flag): the unhalt re-flag
+    /// gate's `isHdmaPeriod(cc)` at the unhalt access cc. Same closed-form mode-0
+    /// anchor as `hdma_period_kick`, but the END (drop) bracket sits later: the
+    /// unhalt-reflag boundary the `hdma_late_m0unhalt_{1,2}` straddle pairs probe
+    /// is past the FF55-enable kick boundary (cctracer: SS depth 196 reflags /
+    /// 200 does not; DS 398 reflags / 402 does not), so it carries its own limit.
+    /// Returns None when no closed-form mode-0 anchor exists (caller falls back).
+    pub fn hdma_period_unhalt(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
+        if self.disabled {
+            return None;
+        }
+        if self.internal_ly_val >= 144 {
+            return Some(false);
+        }
+        let m0t = self.m0_time_master? as i64;
+        let cc = access_cc as i64;
+        if cc < m0t {
+            return Some(false);
+        }
+        let depth = cc - m0t;
+        let limit: i64 = if double_speed { 400 } else { 198 };
+        Some(depth < limit)
+    }
+
     pub fn hdma_period_kick(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
         if self.disabled {
             return None;

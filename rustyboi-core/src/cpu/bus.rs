@@ -178,6 +178,29 @@ impl<'a> Bus<'a> {
         self.mmio.pending_timer_fire_cc()
     }
 
+    /// COORDINATED piece #3 (HDMA-halt deferred held-flag): Gambatte's unhalt
+    /// re-flag gate (`memory.cpp:224/304`) keys on `isHdmaPeriod` evaluated at the
+    /// unhalt cc, NOT a STAT-mode==0 snapshot. The greedy `hdma_in_period_for_unhalt`
+    /// (cached period || STAT mode 0) over-fires the m0-edge block at unhalt
+    /// (`hdma_late_m0unhalt_*`: FF55 reads 0xFF where Gambatte reads 0x00 because
+    /// the block had not yet fired). Resolve the period off the renderer's
+    /// cycle-exact `isHdmaPeriod(cc)` predicate at the unhalt access cc instead, so
+    /// a Low-at-halt block that is NOT yet in period at unhalt is left to fire on
+    /// its natural mode-0 edge after the FF55 read. Fall back to the cached/STAT
+    /// gate only when no closed-form mode-0 anchor exists (window / first line).
+    pub fn hdma_in_period_for_unhalt(&self) -> bool {
+        let lcd_on = self.mmio.read(ppu::LCD_CONTROL) & (ppu::LCDCFlags::DisplayEnable as u8) != 0;
+        if !lcd_on {
+            return true;
+        }
+        let ds = self.mmio.is_double_speed_mode();
+        let cc = self.mmio.master_cc();
+        if let Some(p) = self.ppu.hdma_period_unhalt(cc, ds) {
+            return p;
+        }
+        self.mmio.hdma_in_period_for_unhalt()
+    }
+
     /// STAGE 2: clear the recorded timer fire cc after the CPU dispatches it.
     pub fn clear_timer_fire_cc(&mut self) {
         self.mmio.clear_timer_fire_cc();
