@@ -141,13 +141,6 @@ fn write_cc_off_ss() -> i64 { env_off("RB_WRITE_CC_OFF", WRITE_CC_OFFSET) }
 const SPRITE_TILE_NONE: i32 = 1;
 fn sprite_prev_tile_default() -> i32 { SPRITE_TILE_NONE }
 
-// Dots into a sprite's mode-3 stall after which its cost is locked into the
-// schedule (Gambatte's `doFullTilesUnrolled` advances `p.nextSprite` once it
-// processes the sprite's BG tile). rustyboi arms the stall -- and eagerly bumps
-// `next_sprite_fetch_index` -- at dot 0 of the stall; the lock lags by this many
-// dots. A mid-mode-3 OBJ-disable landing before the lock still refunds the cost
-// (calibrated against the sprite_late_disable_spx{18..1B}_{1,2} bracket pairs).
-const SPRITE_LOCK_LAG: u128 = 3;
 
 /// One faithful port of Gambatte's mode-3 sprite-cost tile walk
 /// (`predictCyclesUntilXpos_fn` + `addSpriteCycles`, ppu.cpp:1313-1392, the same
@@ -540,12 +533,11 @@ pub struct Ppu {
     #[serde(default = "sprite_prev_tile_default")]
     m3_sprite_prev_tile: i32,
     // Tick at which the most-recently-fetched sprite's stall was armed (the dot
-    // `next_sprite_fetch_index` last advanced). rustyboi advances the fetch index
-    // eagerly at the START of a sprite's stall, but Gambatte's `doFullTilesUnrolled`
-    // only locks a sprite's cost into the schedule once it processes that sprite's
-    // BG tile -- about SPRITE_LOCK_LAG dots into the stall. A mid-mode-3 OBJ-disable
-    // refunds a sprite iff that lock hasn't happened yet, so the disable recompute
-    // gates on `ticks - this >= SPRITE_LOCK_LAG` rather than on the eager index.
+    // `next_sprite_fetch_index` last advanced, and the first stall dot was consumed).
+    // Gambatte's `doFullTilesUnrolled` charges that sprite's `max(11-dist,6)` stall
+    // dots one at a time as `p.cycles` counts down, so a mid-mode-3 OBJ-disable
+    // refunds only the not-yet-counted-down remainder of the in-progress sprite:
+    // `cost - (ticks - this + 1)` (see `remaining_sprite_cost`).
     #[serde(default)]
     m3_last_sprite_commit_tick: u128,
     #[serde(default)]
@@ -1223,37 +1215,57 @@ impl Ppu {
         //  - ENABLE: OBJ was off, so the fetch loop never advanced; a sprite will
         //    still be fetched iff its trigger (display x = spx - 8) is not yet
         //    passed, i.e. spx >= x + 8.
-        let mut sprite_xs: Vec<i32> = if use_fetch_index {
+        if use_fetch_index {
             // DISABLE: the live renderer advances `next_sprite_fetch_index` at the
-            // START of each sprite's stall, but Gambatte only LOCKS a sprite's cost
-            // into the schedule once it processes the sprite's BG tile, ~SPRITE_LOCK_LAG
-            // dots later. So the count of truly-committed sprites is the eager index
-            // MINUS the most-recent sprite if its lock hasn't elapsed yet. Sprites at
-            // index >= that committed count still have their cost refunded by the
-            // disable. (`m3_last_sprite_commit_tick` is the dot the eager index last
-            // advanced; before lock the renderer is mid-fetch and the cost is unlocked.)
-            let committed = if self.next_sprite_fetch_index > 0
-                && self.ticks < self.m3_last_sprite_commit_tick + SPRITE_LOCK_LAG
-            {
-                self.next_sprite_fetch_index - 1
-            } else {
-                self.next_sprite_fetch_index
-            };
-            self.sprites_on_line
+            // START of each sprite's stall and locks that sprite's cost into the
+            // schedule GRADUALLY as the stall counts down -- Gambatte's
+            // `doFullTilesUnrolled` charges the sprite's `max(11-dist,6)` dots one at
+            // a time as `p.cycles` is consumed. A mid-mode-3 OBJ-disable therefore
+            // refunds only the part of the in-progress sprite's stall that has NOT
+            // yet elapsed, plus the full cost of every sprite whose stall has not yet
+            // started (index >= nsfi). This makes the refunded m0Time depend 1:1 on
+            // the disable cc (the later the disable, the less the refund), which the
+            // sprite_late[_late]_disable_spx{18..1B}_{1,2} bracket pairs require:
+            // their disable timings differ by single dots and the refunded mode-3 end
+            // must cross the FF41 read cc by the matching fraction.
+            //
+            // Sprites at index >= nsfi: stall not yet started -> fully refundable.
+            let mut tail: Vec<i32> = self
+                .sprites_on_line
                 .iter()
-                .skip(committed)
+                .skip(self.next_sprite_fetch_index)
                 .map(|s| s.x as i32)
-                .collect()
-        } else {
-            // ENABLE: a sprite will still be fetched iff its trigger is not yet
-            // passed (display x = spx - 8 >= x, i.e. spx >= x + 8).
-            let cutoff = self.x as i32 + 8;
-            self.sprites_on_line
-                .iter()
-                .map(|s| s.x as i32)
-                .filter(|&spx| spx >= cutoff)
-                .collect()
-        };
+                .collect();
+            tail.sort_unstable();
+            let mut cost = sprite_tile_walk_cost(&tail, scx, 167, 167, true);
+            // In-progress sprite (index nsfi-1): its stall began at
+            // `m3_last_sprite_commit_tick`; the dots remaining are its standalone
+            // leading-rate cost minus the dots already counted down. Refund only the
+            // remaining (clamped at 0 once fully drawn).
+            if self.next_sprite_fetch_index > 0 {
+                let in_prog = &self.sprites_on_line[self.next_sprite_fetch_index - 1];
+                let single = sprite_tile_walk_cost(&[in_prog.x as i32], scx, 167, 167, true);
+                // The live renderer consumes the in-progress sprite's first stall dot
+                // on the same tick it advances `next_sprite_fetch_index` (the stall is
+                // armed and immediately decremented), so the elapsed count includes
+                // the commit tick itself: `ticks - commit_tick + 1`.
+                let elapsed = self
+                    .ticks
+                    .saturating_sub(self.m3_last_sprite_commit_tick) as i32
+                    + 1;
+                cost += (single - elapsed).max(0);
+            }
+            return cost;
+        }
+        // ENABLE: a sprite will still be fetched iff its trigger is not yet
+        // passed (display x = spx - 8 >= x, i.e. spx >= x + 8).
+        let cutoff = self.x as i32 + 8;
+        let mut sprite_xs: Vec<i32> = self
+            .sprites_on_line
+            .iter()
+            .map(|s| s.x as i32)
+            .filter(|&spx| spx >= cutoff)
+            .collect();
         sprite_xs.sort_unstable();
         // The remaining group resumes the tile walk with no carried "first sprite"
         // (prevTileNo = none), so the first remaining sprite in its tile gets the
@@ -1341,27 +1353,27 @@ impl Ppu {
             let old_rem = self.remaining_sprite_cost(scx, old_obj, use_fetch_index);
             let new_rem = self.remaining_sprite_cost(scx, new_obj, false);
             let delta = new_rem - old_rem; // dots; negative on disable
-            // Only KEEP the closed-form schedule (shifting it by the cost delta)
-            // when the toggle actually changes the remaining-sprite cost. A delta==0
-            // toggle has no schedule effect; resolving the FF41 read against the
-            // (unchanged) closed-form m0Time would land ~1cc off the live
-            // fallback's boundary and swap the read-cc bracket pairs (e.g.
-            // late_disable spx1B_2 vs late_late_disable spx1B_1, which share an
-            // identical disable state and differ only in read cc). So for delta==0
-            // fall through to the null-and-fall-back-to-live path below, exactly as
-            // a generic sprite-bit toggle did before C8 -> no read-cc regression.
-            if delta != 0 {
-                if let Some(dot) = self.scheduled_mode0_dot {
-                    self.scheduled_mode0_dot = Some((dot as i64 + delta as i64).max(0) as u128);
-                }
-                if let Some(m0t) = self.m0_time_master {
-                    let dsf = ds as i64;
-                    self.m0_time_master =
-                        Some((m0t as i64 + ((delta as i64) << dsf)).max(0) as u64);
-                }
-                self.lcdc = value;
-                return;
+            // KEEP the closed-form schedule, shifting it by the (graduated) cost
+            // delta. delta < 0 refunds the not-yet-drawn portion of the remaining
+            // sprites (predictNextM0Time re-run with the new lcdcObjEn at the current
+            // `p.nextSprite`); delta == 0 means every remaining sprite's cost is
+            // already drawn, so the original closed-form m0Time (which includes the
+            // full sprite cost) is already correct and must be kept -- nulling it and
+            // falling back to the live x==160 transition would mis-resolve the FF41
+            // read for the fully-committed bracket variants (sprite_late_late_disable
+            // spx1B_2). The graduated `remaining_sprite_cost` makes the refund (and so
+            // the resulting m0Time) depend 1:1 on the disable cc, which is what the
+            // sprite_late[_late]_disable bracket pairs require.
+            if let Some(dot) = self.scheduled_mode0_dot {
+                self.scheduled_mode0_dot = Some((dot as i64 + delta as i64).max(0) as u128);
             }
+            if let Some(m0t) = self.m0_time_master {
+                let dsf = ds as i64;
+                self.m0_time_master =
+                    Some((m0t as i64 + ((delta as i64) << dsf)).max(0) as u64);
+            }
+            self.lcdc = value;
+            return;
         }
         if self.state == State::PixelTransfer
             && ((old_lcdc & win_bit) != (value & win_bit)
@@ -4777,9 +4789,9 @@ impl Ppu {
             }
 
             self.next_sprite_fetch_index += 1;
-            // Record the dot this sprite's stall arms so the OBJ-disable recompute
-            // can tell whether the sprite's cost has been locked into the schedule
-            // yet (it locks SPRITE_LOCK_LAG dots later).
+            // Record the dot this sprite's stall arms (its first dot is consumed this
+            // tick) so the OBJ-disable recompute can refund the not-yet-counted-down
+            // remainder of an in-progress sprite (see `remaining_sprite_cost`).
             self.m3_last_sprite_commit_tick = self.ticks;
 
             // Single faithful tile-walk cost (mirrors `sprite_tile_walk_cost` /
