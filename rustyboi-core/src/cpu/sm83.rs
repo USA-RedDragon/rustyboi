@@ -95,7 +95,7 @@ impl SM83 {
                 // either way, matching Gambatte). (Non-fast HALT-late path:
                 // limit_adj = 0 => byte-identical.) Fast dispatch is ON by default
                 // post co-land; RB_EI_FAST=0 forces it OFF.
-                let ei_fast = std::env::var("RB_EI_FAST").map(|v| v == "1").unwrap_or(true);
+                let ei_fast = crate::timer::ei_fast_enabled();
                 let limit_adj: i64 = if ei_fast { 4 } else { 0 };
                 let in_period_unhalt = mmio.hdma_in_period_for_unhalt_adj(limit_adj);
                 match mmio.halt_hdma_state() {
@@ -152,7 +152,7 @@ impl SM83 {
             // belongs to the lazy-PPU render stage, and which simultaneously flips
             // the sibling hdma_*_ly_*_6 tests TO passing). RB_EI_FAST=0 forces the
             // OFF / +5-grid baseline (A/B preserved); unset or =1 leaves it ON.
-            let ei_fast = std::env::var("RB_EI_FAST").map(|v| v == "1").unwrap_or(true);
+            let ei_fast = crate::timer::ei_fast_enabled();
             let mut pending_interrupt = pending_interrupt;
             if ei_fast && ei_ctx && self.registers.ime {
                 if let Some(early) = mmio.next_timer_overflow_ei_cc() {

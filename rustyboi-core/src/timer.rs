@@ -27,11 +27,26 @@ const DISABLED_TIME: u64 = u64::MAX;
 /// re-tuned the +5 IF-delivery grid, so the fast path is net-positive vs the
 /// baseline). RB_EI_FAST=0 forces it OFF (A/B preserved); RB_EI_FAST=1 (or
 /// unset) leaves it ON. Cached once.
-fn ei_fast_enabled() -> bool {
+pub(crate) fn ei_fast_enabled() -> bool {
     use std::sync::OnceLock;
     static EI_FAST: OnceLock<bool> = OnceLock::new();
     *EI_FAST.get_or_init(|| {
         std::env::var("RB_EI_FAST").map(|v| v == "1").unwrap_or(true)
+    })
+}
+
+/// The early IF-set anchor offset (`IF_OFF`, optionally overridden by `RB_IF_OFF`
+/// for tuning). Cached once: this is read on the per-instruction EI-dispatch hot
+/// path (`next_overflow_ei_cc`), so an uncached `env::var` here costs a syscall +
+/// alloc per instruction (~7x suite slowdown).
+fn if_off() -> i64 {
+    use std::sync::OnceLock;
+    static IF_OFF_CACHED: OnceLock<i64> = OnceLock::new();
+    *IF_OFF_CACHED.get_or_init(|| {
+        std::env::var("RB_IF_OFF")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(IF_OFF)
     })
 }
 
@@ -282,10 +297,7 @@ impl Timer {
     /// The non-halt fast dispatch fires the overflow once the boundary reaches this.
     pub fn next_overflow_ei_cc(&self) -> Option<u64> {
         if self.tac & TAC_ENABLE != 0 && self.next_irq_event_time != DISABLED_TIME {
-            let if_off = std::env::var("RB_IF_OFF")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(IF_OFF);
+            let if_off = if_off();
             Some(self.next_irq_event_time.wrapping_add(if_off as u64))
         } else {
             None
@@ -426,10 +438,7 @@ impl Timer {
         if self.tac & TAC_ENABLE == 0 {
             return false;
         }
-        let if_off = std::env::var("RB_IF_OFF")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(IF_OFF);
+        let if_off = if_off();
         let mut fired = false;
         while self.next_irq_event_time != DISABLED_TIME
             && boundary >= self.next_irq_event_time.wrapping_add(if_off as u64)
