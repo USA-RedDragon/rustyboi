@@ -178,6 +178,27 @@ impl<'a> Bus<'a> {
         self.mmio.pending_timer_fire_cc()
     }
 
+    /// Delivery cc of the next scheduled timer overflow (EI-loop fast-dispatch).
+    pub fn next_timer_overflow_cc(&self) -> Option<u64> {
+        self.mmio.next_timer_overflow_cc()
+    }
+
+    /// EARLY (EI-loop) gate cc of the undispatched timer IRQ.
+    pub fn pending_timer_fire_cc_ei(&self) -> Option<u64> {
+        self.mmio.pending_timer_fire_cc_ei()
+    }
+
+    /// EI-loop fast timer delivery (non-halt/non-stop): fire an imminent overflow
+    /// at the early anchor and raise its IF bit.
+    pub fn force_ei_timer_delivery(&mut self, boundary: u64) {
+        self.mmio.force_ei_timer_delivery(boundary);
+    }
+
+    /// EARLY (EI-loop) anchor cc of the next scheduled timer overflow.
+    pub fn next_timer_overflow_ei_cc(&self) -> Option<u64> {
+        self.mmio.next_timer_overflow_ei_cc()
+    }
+
     /// COORDINATED piece #3 (HDMA-halt deferred held-flag): Gambatte's unhalt
     /// re-flag gate (`memory.cpp:224/304`) keys on `isHdmaPeriod` evaluated at the
     /// unhalt cc, NOT a STAT-mode==0 snapshot. The greedy `hdma_in_period_for_unhalt`
