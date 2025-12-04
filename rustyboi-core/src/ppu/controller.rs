@@ -307,12 +307,20 @@ impl OamReader {
     }
 
     // toPosCycles: lineCycles(cc)+1 wrapped to [0, 456).
+    //
+    // `cc` may be a past update cc (`self.lu`) lying on the PREVIOUS line relative
+    // to `lc`'s anchor — rustyboi updates the OAM snapshot sparsely (only at
+    // change/doEvent), so `lu` can trail the current line by up to ~one line
+    // without the >=1-line full-resample (controller `update`) firing. The raw
+    // `456 - ((time - cc) >> ds)` then goes negative and the u64 subtraction
+    // overflow-panics in debug (silently wraps in release). Compute it signed and
+    // reduce modulo the line length — Gambatte's unsigned wrap — so the position
+    // stays in [0,456). Byte-identical to the old `if v>=456 {v-=456}` whenever
+    // `cc` is within the current line (`dots` in 1..=456).
     fn to_pos_cycles(cc: u64, lc: &stat_irq::LyCounter) -> u32 {
-        let mut v = lc.line_cycles(cc) as u32 + 1;
-        if v >= stat_irq::LCD_CYCLES_PER_LINE {
-            v -= stat_irq::LCD_CYCLES_PER_LINE;
-        }
-        v
+        let dots = (lc.time.wrapping_sub(cc) >> lc.ds as u32) as i64;
+        let raw = stat_irq::LCD_CYCLES_PER_LINE as i64 - dots + 1;
+        raw.rem_euclid(stat_irq::LCD_CYCLES_PER_LINE as i64) as u32
     }
 
     // Re-seed the snapshot from the current OAM (SpriteMapper::reset).
