@@ -1059,7 +1059,17 @@ impl Mmio {
     /// CPU has just entered HALT. Mirrors Gambatte's `Memory::halt`
     /// (memory.cpp:407): records the halt-HDMA state and acks any
     /// currently flagged req so it does not double-fire on unhalt.
+    /// Coarse fallback (no PPU access): uses the cached per-step period.
     pub fn on_cpu_halt(&mut self) {
+        let in_period = self.hdma_is_in_period_cached;
+        self.on_cpu_halt_with_period(Some(in_period));
+    }
+
+    /// HALT-entry with a caller-supplied cycle-exact `isHdmaPeriod(cc)` (the Bus
+    /// path computes this via the renderer's `m0_time_master`-anchored predictor,
+    /// the SAME predicate c04d78a uses for the unhalt re-flag). `None` => no
+    /// closed-form mode-0 anchor; fall back to the cached per-step period.
+    pub fn on_cpu_halt_with_period(&mut self, in_period: Option<bool>) {
         self.cpu_halted = true;
         // Gambatte advances the OAM-DMA one M-cycle at halt entry (the HALT
         // instruction's own M-cycle); allow that single advance through the freeze.
@@ -1077,9 +1087,10 @@ impl Mmio {
         // block that is *owed but not yet serviced* this period (would still be
         // flagged in Gambatte) maps to `Requested`; one already serviced maps to
         // `High`.
+        let period = in_period.unwrap_or(self.hdma_is_in_period_cached);
         self.halt_hdma_state = if self.hdma_req_pending {
             HaltHdmaState::Requested
-        } else if self.hdma_enabled && self.hdma_is_in_period_cached {
+        } else if self.hdma_enabled && period {
             if self.hdma_block_done_this_period {
                 HaltHdmaState::High
             } else {
