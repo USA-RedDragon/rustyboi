@@ -356,8 +356,20 @@ impl<'a> Bus<'a> {
         // M-cycle. Serial completion fires mid-tick_m on the boundary tests, so
         // snapshotting bit 3 makes the read resolve at cc like Gambatte.
         const IF_PRE_MASK: u8 = 0x0B;
+        // FAST EI-loop: inside an early-grid ISR the timer overflow raises IF on the
+        // early anchor (see timer.rs); sample the timer bit (0x04) at the read's
+        // access START cc too — pre-tick — so a read-only early-grid ISR misses an
+        // overflow whose early IF-set has NOT been reached at the read cc, matching
+        // Gambatte's read-at-cc (tc00_irq_ds_1: read just before the early IF-set =>
+        // E0). OFF / late-grid reads keep the timer bit on the post-tick path where
+        // its full-M-cycle flag timing is already tuned.
+        let if_pre_mask = if self.mmio.timer_isr_on_early_grid() {
+            IF_PRE_MASK | 0x04
+        } else {
+            IF_PRE_MASK
+        };
         let if_pre = if addr == 0xFF0F {
-            Some(self.mmio.snapshot_serial_read(addr) & IF_PRE_MASK)
+            Some(self.mmio.snapshot_serial_read(addr) & if_pre_mask)
         } else {
             None
         };
@@ -484,7 +496,7 @@ impl<'a> Bus<'a> {
             return v;
         }
         if let Some(pre) = if_pre {
-            return pre | (self.mmio.read(addr) & !IF_PRE_MASK);
+            return pre | (self.mmio.read(addr) & !if_pre_mask);
         }
         if stat_mode_pre.is_some() || stat_lyc_pre.is_some() {
             let mut v = self.mmio.read(addr);
