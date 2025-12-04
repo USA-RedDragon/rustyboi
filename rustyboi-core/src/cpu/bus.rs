@@ -210,13 +210,32 @@ impl<'a> Bus<'a> {
     /// its natural mode-0 edge after the FF55 read. Fall back to the cached/STAT
     /// gate only when no closed-form mode-0 anchor exists (window / first line).
     pub fn hdma_in_period_for_unhalt(&self) -> bool {
+        self.hdma_in_period_for_unhalt_adj(0)
+    }
+
+    /// As `hdma_in_period_for_unhalt`, but widens the unhalt-period line-END
+    /// bracket by `limit_adj` dots. Used by the EI fast-dispatch path: when the
+    /// timer IRQ is delivered at the EARLY anchor (`schedCc + IF_OFF`) instead of
+    /// the LATE anchor (`schedCc + CC_OFF`) the timer ISR (which re-enables the
+    /// LCD via the FF40 write) runs `CC_OFF - IF_OFF` = 4 cc earlier, so the
+    /// closed-form `m0_time_master` for the unhalt line lands 4 cc earlier than
+    /// the OFF baseline against which `hdma_period_unhalt`'s limit was calibrated.
+    /// The unhalt access cc (driven by the absolute timer-overflow
+    /// `intevent_unhalt` schedule) is unchanged, so the period DEPTH (`cc - m0t`)
+    /// inflates by 4: a Low-at-halt block near the line END drops its reflag
+    /// (`hdma_late_m0unhalt_2`: depth 196->200 across the 198 limit). Widening the
+    /// END bracket by +4 on the fast path restores the in-period reflag for that
+    /// block WITHOUT disturbing the mode-0 ENTRY (start) bracket — so a block at
+    /// depth ~0 (`hdma_ei_m3halt_m0unhalt_ly_*`, Gambatte reflag=1) still reflags.
+    /// The non-fast (HALT-late) path passes 0 and is byte-identical.
+    pub fn hdma_in_period_for_unhalt_adj(&self, limit_adj: i64) -> bool {
         let lcd_on = self.mmio.read(ppu::LCD_CONTROL) & (ppu::LCDCFlags::DisplayEnable as u8) != 0;
         if !lcd_on {
             return true;
         }
         let ds = self.mmio.is_double_speed_mode();
         let cc = self.mmio.master_cc();
-        if let Some(p) = self.ppu.hdma_period_unhalt(cc, ds) {
+        if let Some(p) = self.ppu.hdma_period_unhalt_adj(cc, ds, limit_adj) {
             return p;
         }
         self.mmio.hdma_in_period_for_unhalt()
