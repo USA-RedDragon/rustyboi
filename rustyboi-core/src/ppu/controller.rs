@@ -1475,7 +1475,6 @@ impl Ppu {
             // The live pipeline (scheduled_mode0_dot) is invalidated above either
             // way; only the read-at-cc m0Time is adjusted. Sprite-bit toggles
             // null m0Time (the sprite-fetch penalty genuinely changes).
-            let enable_off = std::env::var("RB_WIN_KEEP_M0T").map(|v| v == "0").unwrap_or(false);
             let only_win_toggle = (old_lcdc & spr_bits) == (value & spr_bits)
                 && (old_lcdc & win_bit) != (value & win_bit)
                 && (value & win_bit) == 0; // disable
@@ -1521,7 +1520,7 @@ impl Ppu {
                 // The clean window-ENABLE adjusted m0_time_master above; skip the
                 // disable-refund / null path (which would otherwise null it because
                 // `only_win_toggle` is false for an enable).
-            } else if enable_off || !only_win_toggle || !win_started_for_refund {
+            } else if !only_win_toggle || !win_started_for_refund {
                 self.m0_time_master = None;
             } else if clean_ss && !cgb_features_enabled {
                 // DMG: the StartWindowDraw penalty is binary, not graduated. Once
@@ -1760,34 +1759,6 @@ impl Ppu {
         (ly_time - ((456 - m0_line_cycle) << ds)).max(0) as u64
     }
 
-    /// The CPU-visible mode-0 (HBlank) start dot, decoupled from the live pixel
-    /// pipeline's actual M3 termination. Derived from the closed-form
-    /// `scheduled_mode0_dot` plus a per-phase early-report nudge (<= 0): in
-    /// Gambatte the FF41 mode and the mode-0 STAT IRQ are computed from the
-    /// predicted mode-3 length and report mode 0 a few dots before the renderer
-    /// finishes draining the FIFO. Moving this value earlier is safe because it
-    /// drives ONLY the FF41 mode bits and the STAT mode-0 arm, never the
-    /// pipeline's own `x==160`/FIFO-drain termination. Returns None when no
-    /// closed-form dot is available (window / first line after enable) so the
-    /// caller falls back to the live x==160 transition for the report too.
-    fn reported_mode0_dot_value(&self, mmio: &mmio::Mmio) -> Option<u128> {
-        let sched = self.scheduled_mode0_dot? as i64;
-        let nudge = self.reported_mode0_early_nudge(mmio);
-        Some((sched + nudge).max(0) as u128)
-    }
-
-    /// Per-phase early-report nudge (<= 0 dots) applied to the reported mode-0
-    /// dot. The live pipeline (rendering / VRAM-unlock) is untouched; only the
-    /// FF41 mode read-back and the mode-0 STAT IRQ arm see this. Bucketed by
-    /// SCX&7 / sprite-count / speed / CGB-DMG, env-overridable, default 0 so the
-    /// pure decouple is net-zero. Each non-zero default below is a measured,
-    /// zero-regression net-positive on the m3stat / m0irq / scx_during_m3
-    /// clusters.
-    fn reported_mode0_early_nudge(&self, mmio: &mmio::Mmio) -> i64 {
-        let _ = mmio;
-        0
-    }
-
     /// Arm `sched_m0irq` for the current line from the renderer's predicted
     /// mode-0 start (`scheduled_mode0_dot`, a within-line dot). Converted to the
     /// absolute clock. If no closed-form mode-0 dot is available (window/first
@@ -1805,20 +1776,10 @@ impl Ppu {
         // Arm from the m3-length dot instead — the same anchor core-loop used —
         // so the IRQ fires on the calibrated boundary again. (Env-overridable to
         // restore the exact-m0Time arm for diagnostics.)
-        let use_m3len = std::env::var("RB_M0IRQ_M3LEN").map(|v| v != "0").unwrap_or(true);
-        let mode0_within_line = if use_m3len {
+        let mode0_within_line = {
             let m3_len = self.compute_m3_length(mmio, is_cgb);
             let offset = if is_cgb { cgb_mode0_offset() } else { dmg_mode0_offset() };
             self.ticks as i64 + m3_len as i64 + offset as i64
-        } else {
-            match self.reported_mode0_dot_value(mmio) {
-                Some(d) => d as i64,
-                None => {
-                    let m3_len = self.compute_m3_length(mmio, is_cgb);
-                    let offset = if is_cgb { cgb_mode0_offset() } else { dmg_mode0_offset() };
-                    self.ticks as i64 + m3_len as i64 + offset as i64
-                }
-            }
         };
         let mut remaining = mode0_within_line - self.ticks as i64;
         // VBlank (LY 144..153) has no mode 0 on the current line: Gambatte's
@@ -3150,15 +3111,7 @@ impl Ppu {
                     // rebuild has a valid size for all 40 entries).
                     {
                         let idx = self.current_oam_sprite_index;
-                        let use_latch = std::env::var("RB_OBJSIZE_SCAN")
-                            .map(|v| v != "0")
-                            .unwrap_or(true);
-                        let large = if use_latch {
-                            self.scan_obj_size_large
-                        } else {
-                            (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0
-                        };
-                        self.scan_slot_large[idx] = large;
+                        self.scan_slot_large[idx] = self.scan_obj_size_large;
                     }
                     self.check_single_sprite_for_scanline(mmio, self.current_oam_sprite_index);
                     self.current_oam_sprite_index += 1;
@@ -3507,7 +3460,6 @@ impl Ppu {
                     && self.sprites_on_line.is_empty()
                     && mmio.read(WX) != self.m3_scheduled_wx
                     && !self.win_wx_penalty_resolved
-                    && std::env::var("RB_WIN_LATE_WX").map(|v| v != "0").unwrap_or(true)
                 {
                     let wx_now = mmio.read(WX) as i32;
                     let wx_in_range = (0..=166).contains(&wx_now);
@@ -4785,7 +4737,6 @@ impl Ppu {
         }
         
         let ly = mmio.read(LY);
-        let lcdc = self.lcdc;
 
         // OAM scan (Gambatte's SpriteMapper::mapSprites) builds the per-line
         // sprite list regardless of the OBJ-enable bit (LCDC.1). The enable bit
@@ -4796,15 +4747,8 @@ impl Ppu {
         // Determine sprite height (8x8 or 8x16). Use the per-line scan latch
         // (lags the live LCDC by one OAM slot) so a mid-mode-2 OBJ-size write
         // affects only entries scanned strictly after it commits, matching
-        // Gambatte's per-entry lsbuf latch. Gated for safety.
-        let use_latch = std::env::var("RB_OBJSIZE_SCAN")
-            .map(|v| v != "0")
-            .unwrap_or(true);
-        let large = if use_latch {
-            self.scan_obj_size_large
-        } else {
-            (lcdc & (LCDCFlags::SpriteSize as u8)) != 0
-        };
+        // Gambatte's per-entry lsbuf latch.
+        let large = self.scan_obj_size_large;
         let sprite_height = if large { 16 } else { 8 };
 
         let oam_offset = sprite_index * OAM_BYTES_PER_SPRITE;
