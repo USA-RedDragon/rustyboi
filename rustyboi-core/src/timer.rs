@@ -22,6 +22,16 @@ const TIMA_CLOCK: [u32; 4] = [10, 4, 6, 8];
 // `tmatime`/`next_irq_event_time` is guarded by an explicit disabled check.
 const DISABLED_TIME: u64 = u64::MAX;
 
+/// EI-loop fast-dispatch active (RB_EI_FAST=1). When set, a non-halt/non-stop EI
+/// loop services the timer IRQ at the EARLY (`IF_OFF`) anchor. Cached once.
+fn ei_fast_enabled() -> bool {
+    use std::sync::OnceLock;
+    static EI_FAST: OnceLock<bool> = OnceLock::new();
+    *EI_FAST.get_or_init(|| {
+        std::env::var("RB_EI_FAST").map(|v| v == "1").unwrap_or(false)
+    })
+}
+
 // Offset mapping the per-dot `abs_cc` (incremented at the *start* of each dot's
 // `step`, so it trails the live access cc by one dot) to the cc at which a CPU
 // timer-register access resolves. A CPU access occupies a 4-dot M-cycle; its
@@ -185,6 +195,19 @@ pub struct Timer {
     // and never persists past one STOP.
     #[serde(skip, default)]
     ei_promoted: bool,
+
+    /// FAST EI-loop: sticky "the current ISR / instruction stream was entered via
+    /// an EI fast-dispatch and therefore runs on the EARLY (`IF_OFF`) grid". Unlike
+    /// `ei_promoted` (a one-shot consumed by the STOP-divider adjust and reset when
+    /// the next fire is recorded), this persists through the whole ISR. While set,
+    /// an un-serviced overflow re-flags IF on the EARLY anchor (`update_irq_delivery`)
+    /// and the FF0F timer-bit READ samples at the access cc (`bus.rs`), so the ISR's
+    /// IF write / read / re-trigger all resolve on Gambatte's grid (irq_ifw /
+    /// irq_late_retrigger `_2`). SET by `force_ei_delivery`; CLEARED when the CPU
+    /// enters HALT (the HALT-woken ISR is not on the EI early grid — its IF-set stays
+    /// LATE: tc00_irq_1 / tc01_irq_1 / stopstart).
+    #[serde(skip, default)]
+    isr_on_early_grid: bool,
 }
 
 fn disabled_time() -> u64 {
@@ -211,6 +234,7 @@ impl Timer {
             last_fire_cc_ei: DISABLED_TIME,
             last_apu_cc: 0,
             ei_promoted: false,
+            isr_on_early_grid: false,
         }
     }
 
@@ -339,16 +363,28 @@ impl Timer {
     /// at the raw start cc, not abs_cc+CC_OFF), so the delivery comparison adds
     /// CC_OFF back to keep the absolute fire cc — and thus steady state —
     /// unchanged. Flag-off this is identical to `update_irq(abs_cc)`.
-    fn update_irq_delivery(&mut self, abs_cc: u64) {
-        // The IF bit is raised at the LATE anchor (`CC_OFF`) — UNCHANGED from
-        // baseline so the HALT-wakeup detection AND the IF re-flag observation
-        // (irq_1-style tests) stay on the late grid. The non-halt EI-loop fast
-        // dispatch is handled separately by `force_ei_delivery` (the CPU calls it
-        // in a non-halt/non-stop EI loop): it does the same do_irq_event early so
-        // the ISR / TAC re-write runs on Gambatte's exact phase, but ONLY when the
-        // CPU is about to service it — it never raises IF early on the bus that the
-        // HALT/re-flag paths observe.
-        let fold = CC_OFF as u64;
+    fn update_irq_delivery(&mut self, abs_cc: u64, cpu_halted: bool) {
+        // The IF bit is normally raised at the LATE anchor (`CC_OFF`) so the
+        // HALT-wakeup detection AND the IF re-flag observation (irq_1-style tests)
+        // stay on the late grid. The non-halt EI-loop fast dispatch is handled by
+        // `force_ei_delivery` (the CPU calls it in a non-halt/non-stop EI loop): it
+        // does the same do_irq_event early so the ISR / TAC re-write runs on
+        // Gambatte's exact phase.
+        //
+        // FAST EI-LOOP IF-SET GRID (irq_ifw / irq_late_retrigger `_2`): once the ISR
+        // is running on the early grid (`isr_on_early_grid`, set by force_ei_delivery
+        // and cleared on HALT entry), an UN-serviced overflow that only re-flags IF
+        // mid-ISR (the second overflow, IME off) must also raise IF on the EARLY
+        // anchor — otherwise it sits 4 cc late vs the ISR's own (early) IF write /
+        // re-trigger, putting the `_2` write/read on the wrong side of the boundary.
+        // Gambatte raises IF at the schedule cc and runs the ISR on that grid, so we
+        // mirror it. Gated to the non-halt early-grid context; HALTed or OFF keeps
+        // the baseline `CC_OFF` grid (tc00_irq_1 / tc01_irq_1 / stopstart). The
+        // timer-bit READ is also sampled at the access cc in this context (see
+        // bus.rs) so a read-only ISR (tc00_irq_ds_1) still misses an overflow that
+        // has not flagged at its read cc.
+        let early = ei_fast_enabled() && !cpu_halted && self.isr_on_early_grid;
+        let fold = if early { IF_OFF as u64 } else { CC_OFF as u64 };
         while self.next_irq_event_time != DISABLED_TIME
             && abs_cc >= self.next_irq_event_time.wrapping_add(fold)
         {
@@ -404,8 +440,21 @@ impl Timer {
         }
         if fired {
             self.ei_promoted = true;
+            // Sticky: the ISR this dispatch enters runs on the EARLY grid, so a
+            // mid-ISR overflow re-flags IF early and FF0F reads/writes resolve on
+            // that grid (see `update_irq_delivery` / the FF0F read+write in bus.rs).
+            self.isr_on_early_grid = true;
         }
         fired
+    }
+
+    /// FAST EI-loop: is the current ISR running on the EARLY (`IF_OFF`) grid (set by
+    /// `force_ei_delivery`, cleared on HALT entry)? When true the un-serviced
+    /// overflow IF-set uses the early anchor and timer-bit reads sample at the
+    /// access cc, so the ISR's IF write/read/re-trigger all resolve on Gambatte's
+    /// grid (irq_ifw / irq_late_retrigger `_2`).
+    pub fn isr_on_early_grid(&self) -> bool {
+        ei_fast_enabled() && self.isr_on_early_grid && self.tac & TAC_ENABLE != 0
     }
 
     /// Gambatte `Tima::updateTima`: advance the derived TIMA value to `cc`.
@@ -652,6 +701,13 @@ impl Timer {
         p
     }
 
+    /// FAST EI-loop: a HALT (entry or wakeup) ends any prior EI fast-dispatch
+    /// stream — the next ISR is HALT-driven and observes the IF re-flag on the
+    /// LATE grid (tc00_irq_1 / tc01_irq_1 / stopstart). Clears the early-grid stick.
+    pub fn clear_isr_early_grid(&mut self) {
+        self.isr_on_early_grid = false;
+    }
+
     /// Count DIV-bit-12 (single speed) / bit-13 (double speed) falling edges in
     /// the cc interval `(a, b]`. The divider counter is `cc - div_anchor`; bit N
     /// falls each time that counter passes a multiple of `2^(N+1)`. Used by the
@@ -680,7 +736,7 @@ impl Timer {
         // access-cc space) by `CC_OFF` dots, which matches Gambatte's late IRQ
         // sampling relative to the access that scheduled it.
         if self.tac & TAC_ENABLE != 0 {
-            self.update_irq_delivery(self.abs_cc);
+            self.update_irq_delivery(self.abs_cc, mmio.cpu_is_halted());
         }
         self.flush_pending_irq(mmio);
 

@@ -767,6 +767,21 @@ impl Mmio {
         self.timer.clear_fire_cc();
     }
 
+    /// Mirror of `intreq_.halted()`: true while the CPU is in HALT. The FAST EI-loop
+    /// timer IF-set grid keeps the HALT-wakeup IF-set on the late (`CC_OFF`) anchor
+    /// while non-halt (EI-loop) overflows use the early grid.
+    pub fn cpu_is_halted(&self) -> bool {
+        self.cpu_halted
+    }
+
+    /// FAST EI-loop: is the current ISR running on the early IF-set grid? The bus
+    /// uses this to sample the timer IF bit at the access cc (rather than the
+    /// M-cycle end) so a read-only early-grid ISR (tc00_irq_ds_1) still misses an
+    /// overflow whose early IF-set has not yet been reached at the read cc.
+    pub fn timer_isr_on_early_grid(&self) -> bool {
+        self.timer.isr_on_early_grid()
+    }
+
     /// CL1: the *honest* per-access cc — the true `abs_cc` at the START of the
     /// CPU access's M-cycle. `master_cc()` is incremented at the top of each
     /// dot-step, so before this access's `tick_m` it trails the M-cycle start by
@@ -1101,6 +1116,9 @@ impl Mmio {
     /// closed-form mode-0 anchor; fall back to the cached per-step period.
     pub fn on_cpu_halt_with_period(&mut self, in_period: Option<bool>) {
         self.cpu_halted = true;
+        // FAST EI-loop: entering HALT ends any prior EI fast-dispatch stream; the
+        // HALT-woken ISR observes the timer IF re-flag on the LATE grid.
+        self.timer.clear_isr_early_grid();
         // Gambatte advances the OAM-DMA one M-cycle at halt entry (the HALT
         // instruction's own M-cycle); allow that single advance through the freeze.
         self.halt_oam_grace = 1;
