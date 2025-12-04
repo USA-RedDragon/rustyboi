@@ -22,34 +22,6 @@ const TIMA_CLOCK: [u32; 4] = [10, 4, 6, 8];
 // `tmatime`/`next_irq_event_time` is guarded by an explicit disabled check.
 const DISABLED_TIME: u64 = u64::MAX;
 
-/// EI-loop fast-dispatch active. Now ON by default (the per-access timer
-/// fast-dispatch co-land: the irq_ifw / speedchange_tima / hdma-unhalt buckets
-/// re-tuned the +5 IF-delivery grid, so the fast path is net-positive vs the
-/// baseline). RB_EI_FAST=0 forces it OFF (A/B preserved); RB_EI_FAST=1 (or
-/// unset) leaves it ON. Cached once.
-pub(crate) fn ei_fast_enabled() -> bool {
-    use std::sync::OnceLock;
-    static EI_FAST: OnceLock<bool> = OnceLock::new();
-    *EI_FAST.get_or_init(|| {
-        std::env::var("RB_EI_FAST").map(|v| v == "1").unwrap_or(true)
-    })
-}
-
-/// The early IF-set anchor offset (`IF_OFF`, optionally overridden by `RB_IF_OFF`
-/// for tuning). Cached once: this is read on the per-instruction EI-dispatch hot
-/// path (`next_overflow_ei_cc`), so an uncached `env::var` here costs a syscall +
-/// alloc per instruction (~7x suite slowdown).
-fn if_off() -> i64 {
-    use std::sync::OnceLock;
-    static IF_OFF_CACHED: OnceLock<i64> = OnceLock::new();
-    *IF_OFF_CACHED.get_or_init(|| {
-        std::env::var("RB_IF_OFF")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(IF_OFF)
-    })
-}
-
 // Offset mapping the per-dot `abs_cc` (incremented at the *start* of each dot's
 // `step`, so it trails the live access cc by one dot) to the cc at which a CPU
 // timer-register access resolves. A CPU access occupies a 4-dot M-cycle; its
@@ -297,8 +269,7 @@ impl Timer {
     /// The non-halt fast dispatch fires the overflow once the boundary reaches this.
     pub fn next_overflow_ei_cc(&self) -> Option<u64> {
         if self.tac & TAC_ENABLE != 0 && self.next_irq_event_time != DISABLED_TIME {
-            let if_off = if_off();
-            Some(self.next_irq_event_time.wrapping_add(if_off as u64))
+            Some(self.next_irq_event_time.wrapping_add(IF_OFF as u64))
         } else {
             None
         }
@@ -398,7 +369,7 @@ impl Timer {
         // timer-bit READ is also sampled at the access cc in this context (see
         // bus.rs) so a read-only ISR (tc00_irq_ds_1) still misses an overflow that
         // has not flagged at its read cc.
-        let early = ei_fast_enabled() && !cpu_halted && self.isr_on_early_grid;
+        let early = !cpu_halted && self.isr_on_early_grid;
         let fold = if early { IF_OFF as u64 } else { CC_OFF as u64 };
         while self.next_irq_event_time != DISABLED_TIME
             && abs_cc >= self.next_irq_event_time.wrapping_add(fold)
@@ -415,11 +386,6 @@ impl Timer {
                 // EI-promotion flag so a stale promotion from an earlier ISR cannot
                 // mis-bias a later, normally-entered STOP.
                 self.ei_promoted = false;
-            }
-            if std::env::var("RB_TIMATRACE").is_ok() {
-                eprintln!("[RB IRQ-fire] schedCc={} deliverCc={} ifCc={} (abs_cc={})",
-                    self.next_irq_event_time, self.next_irq_event_time.wrapping_add(CC_OFF as u64),
-                    self.next_irq_event_time.wrapping_add(fold), abs_cc);
             }
             self.do_irq_event();
         }
@@ -438,10 +404,9 @@ impl Timer {
         if self.tac & TAC_ENABLE == 0 {
             return false;
         }
-        let if_off = if_off();
         let mut fired = false;
         while self.next_irq_event_time != DISABLED_TIME
-            && boundary >= self.next_irq_event_time.wrapping_add(if_off as u64)
+            && boundary >= self.next_irq_event_time.wrapping_add(IF_OFF as u64)
         {
             if self.last_fire_cc == DISABLED_TIME {
                 self.last_fire_cc = self.next_irq_event_time.wrapping_add(CC_OFF as u64);
@@ -466,7 +431,7 @@ impl Timer {
     /// access cc, so the ISR's IF write/read/re-trigger all resolve on Gambatte's
     /// grid (irq_ifw / irq_late_retrigger `_2`).
     pub fn isr_on_early_grid(&self) -> bool {
-        ei_fast_enabled() && self.isr_on_early_grid && self.tac & TAC_ENABLE != 0
+        self.isr_on_early_grid && self.tac & TAC_ENABLE != 0
     }
 
     /// Gambatte `Tima::updateTima`: advance the derived TIMA value to `cc`.
@@ -533,12 +498,6 @@ impl Timer {
     /// Gambatte `Tima::setTac` (DMG / CGB; `agbFlag` is false for both targets).
     fn set_tac(&mut self, data: u8) {
         let cc = self.access_cc();
-        if std::env::var("RB_TIMATRACE").is_ok() {
-            eprintln!("[RB setTac] cc={} data={:02X} oldtac={:02X} tima={:02X} tma={:02X} lastUpd={} nextIrq={} tmatime={} divAnchor={}",
-                cc, data, self.tac, self.tima, self.tma, self.tima_last_update,
-                if self.next_irq_event_time==DISABLED_TIME {0} else {self.next_irq_event_time},
-                if self.tmatime==DISABLED_TIME {0} else {self.tmatime}, self.div_anchor);
-        }
         if (self.tac ^ data) != 0 {
             let mut next = self.next_irq_event_time;
 
@@ -640,12 +599,6 @@ impl Timer {
         } else {
             STOP_EI_PROMOTE_ADJ_SS
         };
-        // RB_STOP_PROMOTE forces a single value across both directions (calibration
-        // only): if set it overrides the direction split.
-        let promote_adj_const = std::env::var("RB_STOP_PROMOTE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(promote_adj_const);
         let promote_adj = if self.ei_promoted { promote_adj_const } else { 0 };
         self.ei_promoted = false;
         // The promote adjustment shifts ONLY the reset-TIMA-value resolution cc
@@ -800,11 +753,6 @@ impl Addressable for Timer {
                     if tmp == 0x100 {
                         let tmatime = self.tima_last_update + (ticks << clk) + TMA_OFF;
                         tmp = if cc >= tmatime { self.tma as u64 } else { 0 };
-                    }
-                    if std::env::var("RB_TIMATRACE").is_ok() {
-                        eprintln!("[RB TIMA read] cc={} -> {:02X} (lastUpd={} tmatime={} tma={:02X})",
-                            cc, tmp as u8, self.tima_last_update,
-                            if self.tmatime==DISABLED_TIME {0} else {self.tmatime}, self.tma);
                     }
                     tmp as u8
                 }
