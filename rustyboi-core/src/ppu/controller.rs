@@ -3956,6 +3956,33 @@ impl Ppu {
         Some(depth < limit)
     }
 
+    /// HALT-ENTRY `isHdmaPeriod(cc)` for `haltHdmaState_` (Gambatte `Memory::halt`).
+    /// Same `m0_time_master`-anchored closed-form predicate as `hdma_period_unhalt`,
+    /// but the line-end (drop) bracket sits a few cc LATER: the HALT instruction's
+    /// access cc reaches the `cc + 3 + 3*ds < lineEnd` boundary at a different phase
+    /// than the unhalt access cc, so the `hdma_late_m0halt_{1,2}` straddle pair
+    /// (cctracer: HALT cc 4cc apart, period 1->0) bracket their own limit. Probed
+    /// per speed via the `_1` (in-period -> High -> 1 block) / `_2` (past-boundary
+    /// -> Low -> reflag -> 2 blocks) pairs: SS depth 206/204 in, 210/208 out -> 208;
+    /// DS depth 408/407 in, 412/411 out -> 410. Returns None when no closed-form
+    /// mode-0 anchor exists (caller falls back to the cached per-step period).
+    pub fn hdma_period_halt(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
+        if self.disabled {
+            return None;
+        }
+        if self.internal_ly_val >= 144 {
+            return Some(false);
+        }
+        let m0t = self.m0_time_master? as i64;
+        let cc = access_cc as i64;
+        if cc < m0t {
+            return Some(false);
+        }
+        let depth = cc - m0t;
+        let limit: i64 = if double_speed { 410 } else { 208 };
+        Some(depth < limit)
+    }
+
     pub fn hdma_period_kick(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
         if self.disabled {
             return None;

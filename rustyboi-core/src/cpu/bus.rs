@@ -201,6 +201,27 @@ impl<'a> Bus<'a> {
         self.mmio.hdma_in_period_for_unhalt()
     }
 
+    /// CPU has just entered HALT. Computes Gambatte's `haltHdmaState_` using the
+    /// SAME cycle-exact `isHdmaPeriod(cc)` predicate the unhalt re-flag path uses
+    /// (`hdma_period_unhalt` anchored on `m0_time_master`), instead of the coarse
+    /// per-PPU-step `hdma_is_in_period_cached` (STAT-mode snapshot). This makes the
+    /// `haltHdmaState_` latch at HALT entry straddle the line-end `cc + 3 + 3*ds <
+    /// lineEnd` boundary precisely: the `hdma_late_m0halt_1` (in-period -> High ->
+    /// 1 block) vs `_2` (past-boundary -> Low -> reflag -> 2 blocks) pair differ by
+    /// 4cc at the HALT cc and must resolve together. Falls back to the cached/STAT
+    /// gate when no closed-form mode-0 anchor exists (window / first line).
+    pub fn on_cpu_halt(&mut self) {
+        let lcd_on = self.mmio.read(ppu::LCD_CONTROL) & (ppu::LCDCFlags::DisplayEnable as u8) != 0;
+        let ds = self.mmio.is_double_speed_mode();
+        let cc = self.mmio.master_cc();
+        let in_period = if !lcd_on {
+            Some(true)
+        } else {
+            self.ppu.hdma_period_halt(cc, ds)
+        };
+        self.mmio.on_cpu_halt_with_period(in_period);
+    }
+
     /// STAGE 2: clear the recorded timer fire cc after the CPU dispatches it.
     pub fn clear_timer_fire_cc(&mut self) {
         self.mmio.clear_timer_fire_cc();
