@@ -324,6 +324,17 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_kick_eval_pending: u8,
 
+    // FF55=00 disable-vs-m0-edge race (Gambatte `disableHdma`): a FF55 bit7=0
+    // write only clears the FUTURE m0-edge HDMA schedule; it CANNOT un-flag a
+    // block whose m0 edge already fired (`intevent_dma` latched -> `dma()` still
+    // runs). The bus sets this BEFORE the FF55 write by evaluating the PPU's
+    // `hdma_disable_fires(cc)` (true => m0 edge already passed => the block must
+    // still run despite the disable). The write handler reads it: Some(true) =>
+    // keep the request and let the block fire (then HDMA ends normally),
+    // Some(false)/None => the historical unconditional cancel. Consumed once.
+    #[serde(skip, default)]
+    hdma_disable_fires: Option<bool>,
+
     // C7-full interrupt-vs-dma precedence: while an interrupt service is
     // mid-flight (its PC pushes not yet complete), the M-cycle-boundary HDMA fire
     // is suppressed so the block fires AFTER the pushes (memory.cpp:312-320). Set
@@ -422,6 +433,7 @@ impl Mmio {
             hdma_pending_writes: Vec::new(),
             hdma_write_delay: 0,
             hdma_kick_eval_pending: 0,
+            hdma_disable_fires: None,
             hdma_mcycle_fire_suppressed: false,
             hdma_last_fire_cc: None,
             hdma_pre_fire_state: None,
@@ -1078,6 +1090,13 @@ impl Mmio {
     /// Whether an FF55 bit7=1 kick is awaiting the bus's live-period resolution.
     pub fn hdma_kick_eval_pending(&self) -> bool {
         self.hdma_kick_eval_pending != 0
+    }
+
+    /// Bus-supplied decision for the NEXT FF55 disable write: `Some(true)` => the
+    /// m0 edge has already fired so the block must still run (do not cancel),
+    /// `Some(false)`/`None` => cancel as before. Set just before the write.
+    pub fn set_hdma_disable_fires(&mut self, v: Option<bool>) {
+        self.hdma_disable_fires = v;
     }
 
     pub fn hdma_is_in_period_cached(&self) -> bool {
@@ -2528,12 +2547,33 @@ impl memory::Addressable for Mmio {
                                     // bit7=1 restarts with new length / src
                                     // / dst (Gambatte memory.cpp ~line 1266).
                                     if new_mode == 0 {
-                                        // Cancel only: Gambatte preserves
-                                        // the existing remaining length and
-                                        // just flips bit 7 on read by
-                                        // disabling HDMA.
-                                        self.hdma_enabled = false;
-                                        self.hdma_req_pending = false;
+                                        // FF55=00 disable-vs-m0-edge race
+                                        // (Gambatte `disableHdma`): the disable
+                                        // only clears the FUTURE m0-edge schedule.
+                                        // A block whose m0 edge already fired
+                                        // (`intevent_dma` latched) STILL runs. The
+                                        // bus stashes that decision in
+                                        // `hdma_disable_fires` by evaluating the
+                                        // PPU m0Time at this write's access cc.
+                                        if self.hdma_disable_fires == Some(true) {
+                                            // m0 edge already passed: keep the
+                                            // request latched so the block fires
+                                            // this M-cycle (step_hdma), exactly as
+                                            // Gambatte's `dma()` runs despite the
+                                            // disable. The block-fire decrements
+                                            // length and ends HDMA normally.
+                                            self.hdma_req_pending = true;
+                                            // Leave hdma_enabled = true so the
+                                            // M-cycle fire gate passes; the
+                                            // post-block length wrap clears it.
+                                        } else {
+                                            // Disable wins (edge not yet reached):
+                                            // Gambatte preserves the remaining
+                                            // length and flips bit 7 on read.
+                                            self.hdma_enabled = false;
+                                            self.hdma_req_pending = false;
+                                        }
+                                        self.hdma_disable_fires = None;
                                     } else {
                                         self.hdma_length = length_blocks_minus_1;
                                         if !lcd_on {
@@ -2565,6 +2605,9 @@ impl memory::Addressable for Mmio {
                                         self.hdma_kick_eval_pending = 1;
                                     }
                                 }
+                                // Consume the per-write disable-race decision (only
+                                // the disable branch above uses it).
+                                self.hdma_disable_fires = None;
                             }
                         },
                         REG_SVBK => {
