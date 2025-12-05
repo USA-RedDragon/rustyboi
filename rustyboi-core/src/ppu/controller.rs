@@ -4482,7 +4482,19 @@ impl Ppu {
         // access-start cc via the full Gambatte getStat branch order (video.cpp
         // 806-817), reusing the exact mode-3 sub-test so it stays byte-identical to
         // the PixelTransfer path for any line-straddle that resolves back into mode 3.
-        if ly < 143 {
+        let near_line_end = line_cycles >= cpl - 7;
+        // LY 0..142: full mid-frame resolution. LY 143 is ALSO a rendering line
+        // (it has its own m0Time), so its line BODY resolves mode 3 exactly like
+        // any other rendering line — the m3stat_count / m0irq_count streams read
+        // FF41 at lineCycles 77..80 through LY 143 and Gambatte reports mode 3 for
+        // all 144 lines (LY 0..143). The renderer is in the OAMSearch dead zone at
+        // those lineCycles, so without this LY=143 would fall through to the
+        // VBlank-boundary path below (which returns None for the line body) and
+        // count one read short. Only the LY=143 line TAIL (the 143->144 mode 0->1
+        // transition) stays on the VBlank-boundary path — there the mid-frame
+        // handler would wrongly anticipate the next line's mode 2 (LY 144 is
+        // VBlank, not OAM), so gate the unification to the line body.
+        if ly < 143 || (ly == 143 && !near_line_end) {
             return self.get_stat_mode_midframe(
                 mmio,
                 access_cc,
@@ -4493,7 +4505,6 @@ impl Ppu {
                 mmio.is_cgb_features_enabled(),
             );
         }
-        let near_line_end = line_cycles >= cpl - 7;
         let in_vblank_window = frame_cycles >= 144 * cpl - 3 && frame_cycles < cpf - 3;
         if !near_line_end && !in_vblank_window {
             return None;
