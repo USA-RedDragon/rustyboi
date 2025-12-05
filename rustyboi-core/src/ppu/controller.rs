@@ -2499,7 +2499,13 @@ impl Ppu {
         let cgb = mmio.is_cgb_features_enabled();
         self.scx_prev_f1 = self.scx_f1_pending_at_cc(cc);
         self.scx_f1_new = value;
-        self.scx_f1_apply_cc = cc + if cgb { 2 } else { 0 };
+        // Gambatte scxChange `update(cc + 2*cgb)` runs in PPU dot units: the new
+        // SCX becomes visible to the f1 fine-scroll loop one PPU dot after the
+        // write (CGB). `abs_cc` is the master clock (1 dot = 1<<ds cc), so the
+        // dot delay scales with double speed -- otherwise a mid-f1 SCX write
+        // lands one f1 iteration too early at DS (scx_0367c0/scx_0761c0 _ds).
+        let ds = mmio.is_double_speed_mode() as u32;
+        self.scx_f1_apply_cc = cc + if cgb { 2u64 << ds } else { 0 };
     }
 
     /// SCX value visible to the f1 fine-scroll discard at PPU `cc`, honoring the
