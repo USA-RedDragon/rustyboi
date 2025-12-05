@@ -106,6 +106,43 @@ impl SM83 {
                     }
                     _ => {}
                 }
+                // Late-hdma-vs-interrupt unhalt precedence (memory.cpp:329-364): a
+                // Low-at-halt block that is NOT in the HDMA period at unhalt
+                // (Gambatte's `isHdmaPeriod(cc)` reflag gate false => NOREFLAG) does
+                // not fire at unhalt; its m0-edge falls within the immediately-following
+                // interrupt service, so the block fires AFTER the PC pushes and
+                // copies the pushed return address (`late_hdma_vs_tima_*_halt_2`,
+                // 0x11C9). Flag it so `service_interrupt` suppresses+reorders that
+                // greedy fire past the pushes. An in-period (REFLAG) block fires AT
+                // unhalt, before the pushes (the `_halt_1` dma-wins case), and is
+                // left on the synchronous path.
+                // The unhalt-cc-vs-m0Time straddle that decides REFLAG (fire at
+                // unhalt) vs NOREFLAG (defer past the pushes) is razor-thin (1 cc).
+                // rustyboi's `m0_time_master` matches Gambatte to within the +1 dot
+                // phase ONLY on an already-rendered line (LY>=1, the TIMA content
+                // tests at LY=1). On the first visible line after an LCD re-enable
+                // (LY=0) the closed-form m0Time carries the unresolved ~6 cc phase
+                // lag, so the straddle is unreliable there — and the LY=0 case here
+                // is the mode-0-IRQ `hdma_vs_m0_*_halt` (REFLAG / dma-wins), for which
+                // no deferred-content sibling exists. Scope the defer to the timer
+                // IRQ (the `late_hdma_vs_tima_*_halt_2` family), where the straddle is
+                // sound; the mode-0-IRQ block keeps its synchronous (REFLAG) fire.
+                let pending_is_timer =
+                    pending_interrupt == Some(registers::InterruptFlag::Timer);
+                let fires_before_pushes = mmio.hdma_unhalt_fires_before_pushes();
+                let noreflag_deferred = pending_is_timer
+                    && mmio.hdma_is_enabled()
+                    && matches!(mmio.halt_hdma_state(), memory::mmio::HaltHdmaState::Low)
+                    && !fires_before_pushes;
+                mmio.set_hdma_unhalt_noreflag_deferred(noreflag_deferred);
+                // Engage the M-cycle fire suppression NOW (before the boundary
+                // prefetch read ticks the bus): the deferred block's m0-edge arms
+                // during the prefetch's M-cycle and would otherwise fire there,
+                // ahead of the interrupt's pushes. Held here, it is fired post-push
+                // by `service_interrupt`.
+                if noreflag_deferred {
+                    mmio.set_hdma_mcycle_fire_suppressed(true);
+                }
                 mmio.set_halt_hdma_state(memory::mmio::HaltHdmaState::Low);
             } else {
                 // CPU is halted and no interrupt is pending, consume 1 cycle and return
@@ -191,6 +228,16 @@ impl SM83 {
                 return self.service_interrupt(mmio, just_unhalted);
             }
 
+            // No interrupt is serviced this step after the unhalt (IME off, or the
+            // timer gate downgraded it): release any unhalt-deferred HDMA
+            // suppression and fire the held block now, on the post-prefetch cc
+            // (there is no PC push to wait for).
+            if mmio.hdma_mcycle_fire_suppressed() && mmio.hdma_unhalt_noreflag_deferred() {
+                mmio.set_hdma_mcycle_fire_suppressed(false);
+                mmio.fire_pending_hdma_mcycle();
+                mmio.set_hdma_unhalt_noreflag_deferred(false);
+            }
+
             let op = self.opcode;
             self.prefetched = false;
             cycles += self.execute(op, mmio);
@@ -225,13 +272,27 @@ impl SM83 {
         // is pending at service entry; a block latched during the service M-cycles
         // is then held and fired explicitly after the pushes.
         //
-        // A service that resumes from HALT this same step is NOT eligible: the
-        // halt-deferred block re-flagged on unhalt fires on its own
-        // `haltHdmaState_` schedule (already calibrated), and the m0-edge phase of
-        // the HALT-wakeup stream is the C8/C9 sprite/scx lever — suppressing here
-        // mis-orders the dma-wins halt races (`*_halt_1`). Keep the prior
-        // synchronous timing on the unhalt path.
-        let suppress = !just_unhalted && !bus.hdma_fire_pending();
+        // A service that resumes from HALT this same step is eligible ONLY when the
+        // unhalt did NOT reflag the block (Gambatte's `isHdmaPeriod(cc)` reflag gate
+        // false at unhalt => NOREFLAG): that block's m0-edge falls within THIS service window
+        // and must fire AFTER the pushes (`late_hdma_vs_tima_*_halt_2`, copy 0x11C9).
+        // A REFLAG block fired AT unhalt, before the pushes (the `*_halt_1` dma-wins
+        // case), and is left on the synchronous path. Non-halt services suppress
+        // whenever no block is already pending at entry (a block latched during the
+        // service M-cycles is held and fired post-push).
+        // For the unhalt-deferred case the block's m0-edge may have already ARMED
+        // (`hdma_req_pending`) during the boundary prefetch — its FIRE was held by
+        // the suppression engaged at unhalt. Keep suppressing it here (the
+        // already-pending block is exactly the one to fire post-push); do NOT gate
+        // on `!hdma_fire_pending`. The non-halt path keeps that gate: a block
+        // already pending at entry there latched a full instruction earlier and
+        // wins the race (fires on its natural dot, not post-push).
+        let unhalt_defer = just_unhalted && bus.hdma_unhalt_noreflag_deferred();
+        let suppress = if unhalt_defer {
+            true
+        } else {
+            !just_unhalted && !bus.hdma_fire_pending()
+        };
         bus.set_hdma_mcycle_fire_suppressed(suppress);
         // Boundary (pre-push) access cc for the late-hdma-vs-interrupt re-order
         // (see `reorder_late_hdma_after_pushes`): a greedy m0-edge HDMA fire that
@@ -276,6 +337,7 @@ impl SM83 {
         // latched during the service, so it reads memory as of the post-push cc.
         bus.set_hdma_mcycle_fire_suppressed(false);
         bus.fire_pending_hdma_mcycle();
+        bus.set_hdma_unhalt_noreflag_deferred(false);
         // Late-hdma-vs-interrupt: if a greedy m0-edge block fired within this
         // service's M-cycle window (the interrupt won the m0Time-vs-minIntTime
         // race) re-run it now so its source reads see the just-pushed PC.
