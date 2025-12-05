@@ -219,6 +219,19 @@ impl Audio {
     // that fixed phase difference into the length `cc` without disturbing duty.
     const LEN_CC_OFF: u32 = 0;
 
+    // The reconstructed `len_cc` (built from the per-dot `abs_cc`, anchored at boot
+    // to `abs_cc>>1` and accumulated across the run) lands a uniform 1 APU-cc BELOW
+    // Gambatte's `cycleCounter_` by the time a test re-anchors the clock with the
+    // NR52-enable `PSG::reset` fold (traced via cctracer: rustyboi pre-fold low-12
+    // = Gambatte's - 1 across the ch2 nr52 ds cases — e.g. 0x900E vs 0x900F →
+    // 4110 vs 4111). The shortfall is invisible at steady state (the `cc>>13`
+    // length quantum floors it away) but flips the fold's bit-11/bit-12 phase test
+    // and the exact NR52 length-expiry `>=` boundary. Re-add it ONCE, at the
+    // `PSG::reset` re-anchor (the first re-anchoring in these tests); the small
+    // post-enable `len_cc` is then byte-exact with `cycleCounter_`, so the later
+    // `divReset` fold must NOT re-apply it (that would double-count → +0x1000).
+    const LEN_FOLD_BIAS: u32 = 1;
+
     fn push_cc(&mut self) {
         let cc = self.cc;
         self.channel1.set_cc(cc);
@@ -288,8 +301,13 @@ impl Audio {
         self.cc = folded;
         // Gambatte's `PSG::reset` folds `cycleCounter_` (the length clock) with
         // this same formula; apply it to `len_cc` so the length-expiry boundary is
-        // re-anchored exactly like Gambatte after the NR52-enable.
-        let lcc = self.len_cc.wrapping_add(div_offset);
+        // re-anchored exactly like Gambatte after the NR52-enable. Re-add the
+        // accumulated `len_cc` -1 reconstruction drift (`LEN_FOLD_BIAS`) here, at
+        // the re-anchor, so the post-enable `len_cc` is byte-exact with Gambatte's
+        // `cycleCounter_`.
+        let lcc = self.len_cc
+            .wrapping_add(Self::LEN_FOLD_BIAS)
+            .wrapping_add(div_offset);
         self.len_cc = (lcc & 0xFFF)
             .wrapping_add(2 * (!(lcc.wrapping_add(1).wrapping_add(not_ds)) & 0x800))
             % Self::CC_MAX;
