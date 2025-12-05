@@ -241,6 +241,25 @@ impl<'a> Bus<'a> {
         self.mmio.hdma_in_period_for_unhalt()
     }
 
+    /// Late-hdma-vs-interrupt unhalt precedence: whether a Low-at-halt HDMA block
+    /// would fire AT unhalt (before the next interrupt's PC pushes) per Gambatte's
+    /// `isHdmaPeriod(cc)` reflag gate at the unhalt cc. When this is false but a
+    /// block still fires (its m0-edge falls within the service window) the block
+    /// must be deferred past the pushes (the `*_halt_2` content tests). Defaults to
+    /// firing before pushes (the synchronous baseline) when no closed-form anchor
+    /// exists.
+    pub fn hdma_unhalt_fires_before_pushes(&self) -> bool {
+        let lcd_on = self.mmio.read(ppu::LCD_CONTROL) & (ppu::LCDCFlags::DisplayEnable as u8) != 0;
+        if !lcd_on {
+            return true;
+        }
+        let ds = self.mmio.is_double_speed_mode();
+        let cc = self.mmio.master_cc();
+        self.ppu
+            .hdma_unhalt_fires_before_pushes(cc, ds)
+            .unwrap_or(true)
+    }
+
     /// CPU has just entered HALT. Computes Gambatte's `haltHdmaState_` using the
     /// SAME cycle-exact `isHdmaPeriod(cc)` predicate the unhalt re-flag path uses
     /// (`hdma_period_unhalt` anchored on `m0_time_master`), instead of the coarse
