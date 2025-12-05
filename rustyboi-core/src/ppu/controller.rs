@@ -4038,6 +4038,47 @@ impl Ppu {
         Some(depth < limit)
     }
 
+    /// FF55=00 HDMA-DISABLE-vs-m0-edge race (Gambatte `disableHdma`): writing
+    /// FF55 bit7=0 only clears the FUTURE `memevent_hdma` schedule; it does NOT
+    /// un-flag a block whose m0-edge has ALREADY fired (`intevent_dma` is latched
+    /// and `dma()` will still run). So a late disable cannot stop a block once the
+    /// current line's mode-0 edge has passed. The boundary is exactly the m0-edge
+    /// time: Gambatte processes the `memevent_hdma` event (which `flagHdmaReq`s)
+    /// before the FF55 write whenever the write cc has reached `m0Time`.
+    /// Returns `Some(true)` when the disable is too late (the m0 edge already
+    /// flagged -> the block must still fire), `Some(false)` when the disable wins
+    /// (cancel before the edge), or `None` when no closed-form mode-0 anchor exists
+    /// (caller falls back to the unconditional cancel).
+    /// Boundary is Gambatte's exact m0-edge time (`m0TimeOfCurrentLine` =
+    /// `predictedNextM0Time`): the disable fires the block iff `disable_cc >=
+    /// m0Time`. rustyboi's `m0_time_master` is the STAT-read anchor (calibrated for
+    /// `abs_cc + 2 < m0Time` with the LyCounter `+1` and renderer-tick phase), and
+    /// it runs a fixed few cc ABOVE Gambatte's bare m0-edge time: cctracer pins the
+    /// gap at +6 (single speed) / +4 (double speed), constant across SCX (the SCX
+    /// m3-length delta already lives in `m0_time_master`). So the true edge is
+    /// `m0_time_master - gap`.
+    ///
+    /// cctracer ground truth (CGB, [_1 cancel -> out0 / _2 fire -> out1] pairs,
+    /// rustyboi-clock disable cc vs m0_time_master):
+    ///   SS base   _1=12935 _2=12939 m0t=12944  edge=12938 (m0t-6)
+    ///   SS scx2   _1=12939 _2=12943 m0t=12946  edge=12940 (m0t-6)
+    ///   SS scx5   _1=12939 _2=12943 m0t=12949  edge=12943 (m0t-6)
+    ///   DS        _1=158392 _2=158396 m0t=158398 edge=158394 (m0t-4)
+    ///   DS scx5   _1=158400 _2=158404 m0t=158408 edge=158404 (m0t-4)
+    pub fn hdma_disable_fires(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
+        if self.disabled {
+            return None;
+        }
+        if self.internal_ly_val >= 144 {
+            return Some(false);
+        }
+        let m0t = self.m0_time_master? as i64;
+        let gap: i64 = if double_speed { 4 } else { 6 };
+        let edge = m0t - gap;
+        let cc = access_cc as i64;
+        Some(cc >= edge)
+    }
+
     /// SCX-phase-conditioned nudge to the mode-0 boundary dot used by the
     /// HDMA/VRAM-lock predictors (NOT the m0 STAT IRQ, which is calibrated
     /// separately). The closed-form `compute_m3_length` prefix `scx + (1-cgb)`
