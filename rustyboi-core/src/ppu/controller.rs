@@ -3590,6 +3590,39 @@ impl Ppu {
                         }
                     }
                 }
+                // Double-speed late-WX window-disable refund. Unlike single speed
+                // (graduated per drawn dot), the DS StartWindowDraw penalty is BINARY:
+                // a WX-out-of-range write that lands BEFORE the window-tile commits
+                // (`ws + scx&7 + 1` dots into the window draw) fully refunds the
+                // WIN_M3_PENALTY (<<1 cc at DS), so the FF41 read resolves the
+                // no-window mode-0 boundary; at/after the commit the penalty is locked
+                // and the window-inclusive m0Time (captured at arm) is kept. cctracer
+                // ground truth: late_wx_scx5_ds_1 (write 2 dots into the x==0 window,
+                // scx5) takes the full 12-cc refund -> mode 0 (out0); the `_ds_2` reps
+                // (write 2 dots later, or scx0 1 dot in) keep the full m0Time -> mode 3
+                // (out3). CGB / no sprites; live pipeline untouched, only read-at-cc.
+                else if self.m0_time_master.is_some()
+                    && self.window_started_this_line
+                    && mmio.is_cgb_features_enabled()
+                    && mmio.is_double_speed_mode()
+                    && self.sprites_on_line.is_empty()
+                    && mmio.read(WX) != self.m3_scheduled_wx
+                    && !self.win_wx_penalty_resolved
+                    && (self.m3_scheduled_wx as i32) >= 7
+                {
+                    let wx_now = mmio.read(WX) as i32;
+                    let wx_in_range = (0..=166).contains(&wx_now);
+                    if let (Some(ws), Some(m0t)) = (self.win_start_dot, self.m0_time_master)
+                        && !wx_in_range
+                    {
+                        let commit = ws as i64 + (self.m3_arm_scx & 7) as i64 + 1;
+                        if (self.ticks as i64) < commit {
+                            let refund = (WIN_M3_PENALTY as i64) << 1;
+                            self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
+                        }
+                        self.win_wx_penalty_resolved = true;
+                    }
+                }
                 // ATOMIC mode-3 END: mode 3 ends at the exact closed-form m0Time
                 // (master cc), and EVERYTHING (eager FF41 mode register, mode-0
                 // STAT check, VRAM/OAM/cgbp unblock, m0 IRQ) is driven off this one
