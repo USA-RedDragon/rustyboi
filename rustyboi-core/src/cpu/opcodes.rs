@@ -55,6 +55,44 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             // dropped, if any (double-switch families); else the plain bridge.
             if mmio.ppu.take_sc_mode3_pullback() { 5 } else { 3 }
         };
+        // Gambatte `Memory::stop` (memory.cpp:453) captures the HDMA halt state at
+        // the stop cc and `intreq_.halt()`s for the 0x20000 unhalt window, so the
+        // per-dot HDMA period edge is suppressed across the bridge + stall. rustyboi
+        // arms the FF55-enabled block lazily on the renderer m0 edge, which the
+        // per-access stepping has NOT crossed at the stop instruction on these lines
+        // — it would only cross during the bridge, where the old eager arm fired it
+        // unconditionally. Decide here instead, at the exact stop cc:
+        //   * m0 edge already crossed (`hdma_disable_fires` == true): the block is
+        //     latched (Gambatte `prefetched`, not acked at single speed). Fire it
+        //     now, pre-switch, so the readback reflects the completed block
+        //     (`hdma_late_m3speedchange_*_3` -> outFF; `_transition_hdmalen7f`).
+        //   * m0 edge NOT yet crossed: hold it across the suppressed window and let
+        //     the reflag gate at the unhalt cc decide (`SM83::step` exit): it fires
+        //     only if the unhalt lands back in the HDMA period or the block was
+        //     owed (`hdma_m3speedchange_late_m0wakeup_*`), else stays dropped
+        //     (`hdma_late_m3speedchange_*_1` -> out00).
+        let suppress_edge = mmio.ppu.is_on_rendering_line();
+        if suppress_edge {
+            let cc = mmio.mmio.master_cc();
+            let dsb = mmio.is_double_speed_mode();
+            let in_period_now = mmio.ppu.hdma_disable_fires(cc, dsb).unwrap_or(false);
+            if to_double && in_period_now
+                && mmio.mmio.hdma_is_enabled()
+                && !mmio.mmio.hdma_req_pending()
+            {
+                // SS->DS, m0 edge already crossed at stop: the block is latched
+                // (Gambatte `prefetched`, single speed not acked) — fire now.
+                mmio.mmio.set_hdma_req();
+                mmio.mmio.fire_pending_hdma_mcycle();
+            } else {
+                // SS->DS not-yet-in-period, or the DS->SS return switch: hold the
+                // block across the suppressed window with the captured halt state;
+                // the reflag gate at the unhalt cc decides. (`on_stop_window_enter`
+                // captures `requested`/`low` so a DS->SS block owed from the prior
+                // switch still fires at unhalt — `hdma_late_m3speedchange_*_ds_2`.)
+                mmio.mmio.on_stop_window_enter(in_period_now);
+            }
+        }
         mmio.ppu.stop_bridge_advance(mmio.mmio, bridge);
         if !to_double {
             mmio.ppu.set_dsss_lytime_adjust();

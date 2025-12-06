@@ -275,6 +275,17 @@ pub struct Mmio {
     #[serde(skip, default)]
     cpu_halted: bool,
 
+    // CGB STOP speed-switch unhalt window. Gambatte's `Memory::stop` calls
+    // `intreq_.halt()` for the 0x20000-cycle unhalt window, so the HDMA
+    // period-edge `flagHdmaReq` is suppressed during the bridge + window
+    // (video.h:41 `if (!intreq_.halted())`). rustyboi's `cpu_halted` is only set
+    // by the HALT opcode, not by STOP, so the m0-edge wrongly auto-arms a block
+    // while the CPU is parked across the speed bridge. Set by `on_stop_window_enter`
+    // / cleared by `stop_window_exit_reflag` so `step_hdma`'s arm gate (and edge
+    // consumption) treats the STOP window as halted.
+    #[serde(skip, default)]
+    in_stop_window: bool,
+
     // C1 HALT-wakeup access-cc skew guard. rustyboi does not yet model the
     // HALT-wakeup prefetch cost (the documented +9cc HALT bug), so the master_cc
     // the bus snapshots for memory accesses in the instruction stream resumed by a
@@ -453,6 +464,7 @@ impl Mmio {
             hdma_prev_stat_mode: 0,
             hdma_prev_period: false,
             cpu_halted: false,
+            in_stop_window: false,
             hdma_block_done_this_period: false,
             hdma_halt_edge_consumed: false,
             hdma_pending_writes: Vec::new(),
@@ -1070,6 +1082,14 @@ impl Mmio {
         self.cpu_halted = false;
     }
 
+    /// True while the CGB STOP speed-switch unhalt window is open (Gambatte
+    /// `intreq_.halt()`): the HDMA period-edge `flagHdmaReq` is suppressed across
+    /// the speed bridge and stall (video.h:41). Set by `on_stop_window_enter`,
+    /// cleared by `stop_window_exit_reflag`.
+    pub fn in_stop_window(&self) -> bool {
+        self.in_stop_window
+    }
+
     /// C1: mark/clear that the live instruction stream was resumed by a HALT
     /// wakeup (its access-cc is sub-M-cycle skewed; see field doc). Set on wakeup,
     /// cleared when the CPU halts again.
@@ -1194,6 +1214,52 @@ impl Mmio {
         };
         // Gambatte does ackDmaReq after copying the flag.
         self.hdma_req_pending = false;
+    }
+
+    /// CGB STOP speed-switch entry (Gambatte `Memory::stop`, memory.cpp:453). Like
+    /// `Memory::halt` it captures `haltHdmaState_` and `intreq_.halt()`s for the
+    /// 0x20000 unhalt window, so the per-dot HDMA period edge is suppressed across
+    /// the speed bridge and stall (`in_stop_window`). `in_period_now` is
+    /// `hdmaIsEnabled() && isHdmaPeriod(stop_cc)` evaluated by the caller at the
+    /// stop cc (the exact `m0_time_master - gap` edge). The block is (re)flagged or
+    /// dropped by `stop_window_exit_reflag` at the unhalt cc.
+    pub fn on_stop_window_enter(&mut self, in_period_now: bool) {
+        if !self.cgb_features_enabled {
+            self.halt_hdma_state = HaltHdmaState::Low;
+            self.in_stop_window = true;
+            return;
+        }
+        self.halt_hdma_state = if self.hdma_req_pending {
+            HaltHdmaState::Requested
+        } else if self.hdma_enabled && in_period_now {
+            if self.hdma_block_done_this_period {
+                HaltHdmaState::High
+            } else {
+                HaltHdmaState::Requested
+            }
+        } else {
+            HaltHdmaState::Low
+        };
+        // Gambatte ackDmaReq after copying the flag.
+        self.hdma_req_pending = false;
+        self.in_stop_window = true;
+    }
+
+    /// CGB STOP unhalt (Gambatte `intevent_unhalt` reflag gate, memory.cpp:224/304):
+    /// at the unhalt cc reflag the held block iff
+    /// `(hdmaEnabled && isHdmaPeriod(cc) && state==low) || state==requested`.
+    /// `in_period_unhalt` is `isHdmaPeriod(unhalt_cc)` (renderer-exact). Clears the
+    /// stop-window suppression and fires the block when the gate passes.
+    pub fn stop_window_exit_reflag(&mut self, in_period_unhalt: bool) {
+        self.in_stop_window = false;
+        let reflag = matches!(self.halt_hdma_state, HaltHdmaState::Requested)
+            || (self.hdma_enabled
+                && in_period_unhalt
+                && matches!(self.halt_hdma_state, HaltHdmaState::Low));
+        if reflag {
+            self.set_hdma_req();
+            self.fire_pending_hdma_mcycle();
+        }
     }
 
     /// Execute one 0x10-byte HDMA block. Caller must have verified
@@ -1437,11 +1503,13 @@ impl Mmio {
         }
 
         // Gambatte's period-edge `flagHdmaReq` is suppressed while the CPU is
-        // halted (video.h:41 `if (!intreq_.halted())`): during HALT the block is
-        // governed by the `haltHdmaState_` machine and re-flagged only on unhalt,
-        // so the edge must NOT auto-arm here. Edge trackers are still advanced so
-        // the rising edge is detected cleanly once the CPU unhalts.
-        let arm_allowed = !self.cpu_halted;
+        // halted (video.h:41 `if (!intreq_.halted())`): during HALT — and equally
+        // during the CGB STOP speed-switch window (`Memory::stop` also
+        // `intreq_.halt()`s, see `in_stop_window`) — the block is governed by the
+        // `haltHdmaState_` machine and re-flagged only on unhalt, so the edge must
+        // NOT auto-arm here. Edge trackers are still advanced so the rising edge is
+        // detected cleanly once the CPU unhalts.
+        let arm_allowed = !self.cpu_halted && !self.in_stop_window;
         if lcd_on && period.is_some() {
             // Rising edge of the eligibility window arms a block.
             if arm_allowed && !self.hdma_prev_period && in_period && self.hdma_enabled {
