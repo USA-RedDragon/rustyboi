@@ -4848,6 +4848,20 @@ impl Ppu {
         !self.disabled && self.state == State::PixelTransfer
     }
 
+    /// True when the renderer is on an ACTIVE rendering line (LCD on, LY 0..143):
+    /// OAMSearch / PixelTransfer / HBlank of a visible line. An SS->DS speed switch
+    /// here makes the per-dot renderer overshoot the post-window mode-3->mode-0
+    /// boundary by 2 dots (the same overshoot the PixelTransfer bridge already
+    /// compensates), so the STOP bridge drops 2 dots and arms the pullback marker.
+    /// VBlank lines (LY 143-tail..152) and the LCD-off path keep the full 8 — there
+    /// the renderer is not advancing a mode-3 window, so no overshoot occurs.
+    pub fn is_on_rendering_line(&self) -> bool {
+        !self.disabled
+            && (self.lcdc & (LCDCFlags::DisplayEnable as u8)) != 0
+            && self.internal_ly_val < 144
+            && self.state != State::VBlank
+    }
+
     /// Arm the SS->DS-during-mode3 bridge pullback marker (the SS->DS bridge
     /// dropped 2 dots). A following DS->SS switch consumes it.
     pub fn arm_sc_mode3_pullback(&mut self) {
