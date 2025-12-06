@@ -65,6 +65,14 @@ const M0IRQ_OFFSET: i64 = -3;
 // Mode-2 STAT IRQ fires this many dots relative to the schedule formula; the
 // renderer-timed render tests need it earlier. Swept against the suite.
 const M2IRQ_OFFSET: i64 = -1;
+// First-line-after-enable DMG single-speed mode-0 STAT IRQ correction (dots).
+// On the first frame after the LCD turns on there is no prior mode-2 scan; the
+// DMG first-frame arm (DMG_FIRST_FRAME_ARM_DOT=85) lands the line-0 m0 IRQ three
+// master-cc late versus hardware. The ly0_m0irq / frame0_m0irq_count brackets
+// (read-PC-calibrated to the exact m0 fire) place the true fire 3 dots earlier;
+// every scx (0..3) is uniformly +3. Scoped to DMG SS first line so the
+// steady-state m0/m2 IRQ schedule (the m0int/m2int canaries) is untouched.
+const M0IRQ_DMG_FIRST_FRAME_OFFSET: i64 = -3;
 // Absolute-clock offset attributed to an FF41/FF45 register write. The write
 // hook fires after the store but before this M-cycle's dots tick, so the
 // renderer's current dot is already `abs_cc` (the M-cycle start), matching
@@ -1764,7 +1772,7 @@ impl Ppu {
     /// mode-0 start (`scheduled_mode0_dot`, a within-line dot). Converted to the
     /// absolute clock. If no closed-form mode-0 dot is available (window/first
     /// line), fall back to the m0 prediction from the m3 length.
-    fn arm_m0irq_for_current_line(&mut self, mmio: &mmio::Mmio) {
+    fn arm_m0irq_for_current_line(&mut self, mmio: &mmio::Mmio, first_frame: bool) {
         let is_cgb = mmio.is_cgb_features_enabled();
         // The mode-0 (HBlank) STAT IRQ time is co-calibrated with the
         // `ticks + m3_len + offset` mode-0 dot, NOT the exact getStat `m0Time`.
@@ -1813,6 +1821,9 @@ impl Ppu {
         if is_cgb && !ds && (mmio.read(SCX) & 0x07) == 2 {
             off += M0IRQ_SCX2_CGB_OFFSET;
         }
+        if first_frame && !is_cgb && !ds {
+            off += M0IRQ_DMG_FIRST_FRAME_OFFSET;
+        }
         let dsf = 1i64 << ds as i32;
         let abs = (self.abs_cc as i64 - dsf + (remaining + off) * dsf).max(0) as u64;
         self.sched_m0irq = abs;
@@ -1829,7 +1840,7 @@ impl Ppu {
         }
         self.reschedule_all_stat_events(mmio);
         if self.sched_m0irq != stat_irq::DISABLED_TIME {
-            self.arm_m0irq_for_current_line(mmio);
+            self.arm_m0irq_for_current_line(mmio, self.first_line_after_enable);
         }
     }
 
@@ -2710,7 +2721,7 @@ impl Ppu {
         // If m0 IRQ just got enabled and isn't scheduled, arm it from the
         // current line's mode-0 prediction.
         if (data & stat_irq::STAT_M0EN != 0) && self.sched_m0irq == stat_irq::DISABLED_TIME {
-            self.arm_m0irq_for_current_line(mmio);
+            self.arm_m0irq_for_current_line(mmio, self.first_line_after_enable);
         }
         let m2 = stat_irq::mode2_irq_schedule(data, &lc, cc);
         self.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off(mmio.is_double_speed_mode())) as u64 };
@@ -3370,7 +3381,7 @@ impl Ppu {
                     // memevent_m0irq only when m0 is enabled, but keeps the time
                     // current for FF41/FF45 immediate-trigger checks; we always
                     // arm it (dispatch gates on the enable in mstat_irq).
-                    self.arm_m0irq_for_current_line(mmio);
+                    self.arm_m0irq_for_current_line(mmio, was_first_line);
                 }
             },
             State::PixelTransfer => 'label: {
