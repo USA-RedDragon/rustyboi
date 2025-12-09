@@ -113,6 +113,15 @@ impl SM83 {
                     {
                         mmio.set_hdma_req()
                     }
+                    memory::mmio::HaltHdmaState::High if mmio.hdma_is_enabled() => {
+                        // High-at-halt: the held block was already served and the
+                        // unhalt does NOT reflag. Gambatte also consumed the
+                        // immediately-following line's m0 `flagHdmaReq` during the
+                        // halt; our unhalt cc lands ~1 dot before that m0, so without
+                        // this the post-unhalt STAT fallback would fire a spurious
+                        // extra block one line early (hdma_late_m0halt_*lcdoffset*_1).
+                        mmio.arm_hdma_high_unhalt_consume();
+                    }
                     _ => {}
                 }
                 // Late-hdma-vs-interrupt unhalt precedence (memory.cpp:329-364): a

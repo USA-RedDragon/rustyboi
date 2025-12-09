@@ -278,7 +278,23 @@ impl<'a> Bus<'a> {
         } else {
             self.ppu.hdma_period_halt(cc, ds)
         };
-        self.mmio.on_cpu_halt_with_period(in_period);
+        // Robust "current period's block already serviced" signal for the
+        // HALT-entry High-vs-Requested capture. The live `hdma_block_done_this_period`
+        // flag is cleared by the per-dot `hdma_period` falling edge, whose line-END
+        // dot sits a hair earlier than `hdma_period_halt`'s end bracket — a HALT in
+        // that sliver sees the flag already reset and wrongly captures `Requested`.
+        // Derive it instead from the last block-fire cc landing within THIS line's
+        // mode-0 period window `[m0t, m0t + lineLen)` (master cc; lineLen scales with
+        // double speed). Only supplied when a closed-form m0 anchor exists.
+        let block_done_override = match (lcd_on, self.ppu.m0_time_master_cc()) {
+            (true, Some(m0t)) => self.mmio.hdma_last_fire_cc().map(|fc| {
+                let line_len: u64 = 456u64 << (ds as u64);
+                fc >= m0t && fc < m0t + line_len
+            }),
+            _ => None,
+        };
+        self.mmio
+            .on_cpu_halt_with_period_done(in_period, block_done_override);
     }
 
     /// STAGE 2: clear the recorded timer fire cc after the CPU dispatches it.

@@ -325,6 +325,20 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_halt_edge_consumed: bool,
 
+    // High-at-halt unhalt: the next-line m0 edge consume that lands JUST AFTER the
+    // unhalt (not during the halt window, so `hdma_halt_edge_consumed` was never
+    // set for it). When a HALT was entered in-period with the block already served
+    // (`haltHdmaState_ == High`), Gambatte suppresses+consumes the during-halt m0
+    // `flagHdmaReq` for the immediately-following line; rustyboi's unhalt cc can land
+    // ONE dot before that line's m0 (vs Gambatte's unhalt landing just after it), so
+    // the edge fires through the post-unhalt STAT 3->0 fallback instead of being
+    // consumed (`hdma_late_m0halt_*_lcdoffset*_1`: a spurious extra block one line
+    // early). This flag, set at the High-unhalt site, suppresses exactly the first
+    // post-unhalt m0 fire; unlike `hdma_halt_edge_consumed` it is NOT cleared by an
+    // intervening `period == Some(false)` dot, so it survives the unhalt-to-m0 gap.
+    #[serde(skip, default)]
+    hdma_high_unhalt_consume: bool,
+
     // Deferred HDMA block byte writes. Gambatte's `Memory::dma` reads each byte
     // at `cc` but writes it to VRAM at `cc + (2 + 2*ds)` (memory.cpp:354/375),
     // so byte 0 lands one sub-M-cycle AFTER the trigger/prefetch boundary and
@@ -467,6 +481,7 @@ impl Mmio {
             in_stop_window: false,
             hdma_block_done_this_period: false,
             hdma_halt_edge_consumed: false,
+            hdma_high_unhalt_consume: false,
             hdma_pending_writes: Vec::new(),
             hdma_write_delay: 0,
             hdma_kick_eval_pending: 0,
@@ -1052,6 +1067,18 @@ impl Mmio {
         self.hdma_req_pending
     }
 
+    /// Arm the High-at-halt unhalt edge-consume: the first post-unhalt m0 HDMA edge
+    /// is suppressed (it was the during-halt edge Gambatte already consumed). Called
+    /// at the unhalt site when `haltHdmaState_ == High`.
+    pub fn arm_hdma_high_unhalt_consume(&mut self) {
+        self.hdma_high_unhalt_consume = true;
+    }
+
+    /// Master cc of the last HDMA block fire (None if none in-flight this period).
+    pub fn hdma_last_fire_cc(&self) -> Option<u64> {
+        self.hdma_last_fire_cc
+    }
+
     /// C7-full: whether an HDMA block is latched and would fire at the next
     /// M-cycle boundary (the `fire_pending_hdma_mcycle` precondition).
     pub fn hdma_fire_pending(&self) -> bool {
@@ -1180,6 +1207,25 @@ impl Mmio {
     /// the SAME predicate c04d78a uses for the unhalt re-flag). `None` => no
     /// closed-form mode-0 anchor; fall back to the cached per-step period.
     pub fn on_cpu_halt_with_period(&mut self, in_period: Option<bool>) {
+        self.on_cpu_halt_with_period_done(in_period, None)
+    }
+
+    /// As `on_cpu_halt_with_period`, with a caller-supplied `block_done_override`:
+    /// whether the CURRENT period's HDMA block has ALREADY been serviced, derived
+    /// from the last block-fire cc vs this line's mode-0 time rather than the live
+    /// `hdma_block_done_this_period` flag. The flag is cleared by the per-dot
+    /// `hdma_period` falling edge, whose line-END dot (`dot + 3 + 3*ds < 456`) sits
+    /// a hair EARLIER than the HALT-entry predicate's end bracket (`depth < 208/410`)
+    /// — so a HALT landing in that sliver sees the flag already reset and wrongly
+    /// captures `Requested` (re-firing a spurious second block at unhalt) where
+    /// Gambatte captures `High` (in-period, block done, no reflag). The fire-cc
+    /// override is robust across that boundary disagreement
+    /// (`hdma_late_m0halt_*_lcdoffset*_1`). `None` keeps the legacy flag behaviour.
+    pub fn on_cpu_halt_with_period_done(
+        &mut self,
+        in_period: Option<bool>,
+        block_done_override: Option<bool>,
+    ) {
         self.cpu_halted = true;
         // FAST EI-loop: entering HALT ends any prior EI fast-dispatch stream; the
         // HALT-woken ISR observes the timer IF re-flag on the LATE grid.
@@ -1190,6 +1236,9 @@ impl Mmio {
         // C1: a fresh HALT re-arms the wakeup-skew guard (the previous HALT-woken
         // stream has ended).
         self.halt_wakeup_skew = false;
+        // A fresh HALT supersedes any pending High-unhalt edge-consume (the prior
+        // unhalt's stream has ended); never let it span halts.
+        self.hdma_high_unhalt_consume = false;
         if !self.cgb_features_enabled {
             self.halt_hdma_state = HaltHdmaState::Low;
             return;
@@ -1201,10 +1250,11 @@ impl Mmio {
         // flagged in Gambatte) maps to `Requested`; one already serviced maps to
         // `High`.
         let period = in_period.unwrap_or(self.hdma_is_in_period_cached);
+        let block_done = block_done_override.unwrap_or(self.hdma_block_done_this_period);
         self.halt_hdma_state = if self.hdma_req_pending {
             HaltHdmaState::Requested
         } else if self.hdma_enabled && period {
-            if self.hdma_block_done_this_period {
+            if block_done {
                 HaltHdmaState::High
             } else {
                 HaltHdmaState::Requested
@@ -1513,7 +1563,14 @@ impl Mmio {
         if lcd_on && period.is_some() {
             // Rising edge of the eligibility window arms a block.
             if arm_allowed && !self.hdma_prev_period && in_period && self.hdma_enabled {
-                self.hdma_req_pending = true;
+                // High-at-halt unhalt: consume the first post-unhalt m0 edge (the
+                // during-halt edge Gambatte already consumed, landing one dot past
+                // our slightly-early unhalt cc). Suppress this arm and clear.
+                if self.hdma_high_unhalt_consume {
+                    self.hdma_high_unhalt_consume = false;
+                } else {
+                    self.hdma_req_pending = true;
+                }
             } else if !arm_allowed && !self.hdma_prev_period && in_period && self.hdma_enabled {
                 // A period rising edge while HALTED. Gambatte suppresses (and
                 // CONSUMES) the `flagHdmaReq` here. Whether this consumed edge must
@@ -1565,7 +1622,15 @@ impl Mmio {
                 && mode == 0
                 && self.hdma_enabled
             {
-                self.hdma_req_pending = true;
+                // High-at-halt unhalt: consume the first post-unhalt m0 edge (see
+                // the period-rising-edge branch). The lcdoffset m0halt tests fire
+                // this edge through the STAT 3->0 fallback (period handed off to
+                // None), one dot after the unhalt.
+                if self.hdma_high_unhalt_consume {
+                    self.hdma_high_unhalt_consume = false;
+                } else {
+                    self.hdma_req_pending = true;
+                }
             }
             // The consumed-edge guard is single-use: it suppresses exactly the one
             // STAT 3->0 fallback that mirrors the consumed period edge, then clears
