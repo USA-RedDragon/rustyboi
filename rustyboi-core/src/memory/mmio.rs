@@ -1240,7 +1240,12 @@ impl Mmio {
         // HALT-woken ISR observes the timer IF re-flag on the LATE grid.
         self.timer.clear_isr_early_grid();
         // Gambatte advances the OAM-DMA one M-cycle at halt entry (the HALT
-        // instruction's own M-cycle); allow that single advance through the freeze.
+        // instruction's own M-cycle, `updateOamDma(cc + 4)` before
+        // `intreq_.halt()`); allow that single advance through the freeze. The
+        // FINAL completing byte (pos 159 -> 160 = endOamDma) is additionally let
+        // through in `step_dma` even past the grace, because Gambatte's halt-entry
+        // `updateOamDma(cc+4)` finishes a transfer whose last byte lands inside the
+        // halt window — see the `dma_pos == 159` bypass there.
         self.halt_oam_grace = 1;
         // C1: a fresh HALT re-arms the wakeup-skew guard (the previous HALT-woken
         // stream has ended).
@@ -1588,7 +1593,22 @@ impl Mmio {
         if self.cpu_halted {
             if self.halt_oam_grace > 0 {
                 self.halt_oam_grace -= 1;
-            } else {
+            } else if self.dma_pos != 159 {
+                // Freeze the OAM-DMA mid-transfer during HALT. EXCEPTION: the very
+                // last byte (pos 159 -> 160 = endOamDma). Gambatte's `Memory::halt`
+                // runs `updateOamDma(cc)` THEN `updateOamDma(cc + 4)` before
+                // `intreq_.halt()`, so a transfer whose final byte's M-cycle lands
+                // inside the halt-entry window completes BEFORE the freeze rather
+                // than stalling to unhalt. rustyboi's per-dot `step_dma` catch-up
+                // sits one M-cycle behind Gambatte's `updateOamDma(cc)` at the halt
+                // instant (the FF46 two-M-cycle arm phase), so the grace M-cycle
+                // only reaches pos 159; letting pos 159 -> 160 through here lands
+                // endOamDma at the same point Gambatte does. A mid-transfer DMA
+                // (pos << 159, e.g. oamdmasrc80_halt_*: pos 11) stays frozen.
+                // Gating on the final byte keeps every existing freeze boundary
+                // (the read8000 / hdma_transition_oamdma cases) byte-identical,
+                // while letting oamdma_late_halt_stat_2 finish so LY=4's mode-2
+                // scan sees the real OAM sprite (m0Time +11, STAT read mode 3).
                 return;
             }
         }
