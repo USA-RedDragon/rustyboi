@@ -4274,6 +4274,17 @@ impl Ppu {
         Some(cc >= edge)
     }
 
+    /// The HDMA m0 (mode-3->0) trigger edge cc for the current line — the same
+    /// `m0_time_master - gap` boundary `hdma_disable_fires` compares against,
+    /// returned as a value. The STOP path uses it to measure how far before the
+    /// stop the block's edge was crossed (deciding the halted-vs-completing FF55
+    /// readback for `hdma_late_m3speedchange_hdma5_scx*_2` vs `_3`).
+    pub fn hdma_m0_edge(&self, double_speed: bool) -> Option<i64> {
+        let m0t = self.m0_time_master? as i64;
+        let gap: i64 = if double_speed { 4 } else { 6 };
+        Some(m0t - gap)
+    }
+
     /// SCX-phase-conditioned nudge to the mode-0 boundary dot used by the
     /// HDMA/VRAM-lock predictors (NOT the m0 STAT IRQ, which is calibrated
     /// separately). The closed-form `compute_m3_length` prefix `scx + (1-cgb)`

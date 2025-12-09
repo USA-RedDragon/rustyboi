@@ -81,9 +81,24 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
                 && !mmio.mmio.hdma_req_pending()
             {
                 // SS->DS, m0 edge already crossed at stop: the block is latched
-                // (Gambatte `prefetched`, single speed not acked) — fire now.
+                // (Gambatte `prefetched`, single speed not acked) and fires now.
+                // WHEN it fires relative to the STOP halt decides the FF55 readback
+                // (cctracer on hdma5_scx*_2 vs _3): the GDMA-like `dma()` event runs
+                // an M-cycle behind the `flagHdmaReq` m0 edge, so if the edge was
+                // crossed strictly WITHIN this stop's own M-cycle (`cc - edge < 4`)
+                // the block's copy lands inside the halt window — Gambatte's
+                // `halted()` branch (memory.cpp:384) freezes FF55 at the written
+                // length | 0x80 (`_2` -> out80). If the edge was crossed a full
+                // M-cycle earlier (`cc - edge >= 4`) the block already completed
+                // before the STOP, so FF55 length-wraps to 0xFF (`_3` -> outFF).
+                let edge = mmio.ppu.hdma_m0_edge(dsb).unwrap_or(cc as i64);
+                let fires_in_halt = (cc as i64) - edge < 4;
                 mmio.mmio.set_hdma_req();
-                mmio.mmio.fire_pending_hdma_mcycle();
+                if fires_in_halt {
+                    mmio.mmio.fire_pending_hdma_mcycle_stop_halt();
+                } else {
+                    mmio.mmio.fire_pending_hdma_mcycle();
+                }
             } else {
                 // SS->DS not-yet-in-period, or the DS->SS return switch: hold the
                 // block across the suppressed window with the captured halt state;
