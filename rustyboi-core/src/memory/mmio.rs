@@ -410,6 +410,14 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_pre_fire_state: Option<(u16, u16, u8, bool)>,
 
+    // True when the HDMA block was already set up (FF55 written, `hdma_enabled`) at
+    // HALT entry. Distinguishes the `hdma_*halt_*_ly_*`/`inc_*` family (HDMA armed in
+    // the m3halt ISR BEFORE the HALT; the value-read is a downstream post-unhalt FF44
+    // -> drop the +6 stall fudge) from `hdma_cycles_2` (FF55 written in the wakeup
+    // ISR AFTER the HALT; the immediate FF41 STAT read needs the +6).
+    #[serde(skip, default)]
+    hdma_enabled_at_halt: bool,
+
     // CGB palette state
     #[serde(with = "serde_bytes")]
     bg_palette_ram: [u8; 64],    // 8 palettes × 4 colors × 2 bytes = 64 bytes
@@ -490,6 +498,7 @@ impl Mmio {
             hdma_unhalt_noreflag_deferred: false,
             hdma_last_fire_cc: None,
             hdma_pre_fire_state: None,
+            hdma_enabled_at_halt: false,
 
             // CGB palette initialization
             bg_palette_ram: [0; 64],
@@ -1249,8 +1258,61 @@ impl Mmio {
         // block that is *owed but not yet serviced* this period (would still be
         // flagged in Gambatte) maps to `Requested`; one already serviced maps to
         // `High`.
-        let period = in_period.unwrap_or(self.hdma_is_in_period_cached);
-        let block_done = block_done_override.unwrap_or(self.hdma_block_done_this_period);
+        let mut period = in_period.unwrap_or(self.hdma_is_in_period_cached);
+        let mut block_done = block_done_override.unwrap_or(self.hdma_block_done_this_period);
+        // HALT-coincident HDMA fire rollback (Gambatte `Memory::halt` flag-then-event
+        // ordering). rustyboi services an HBlank-DMA block greedily the dot its m0
+        // edge latches; Gambatte instead FLAGS it (`flagHdmaReq`) and runs the block
+        // as the `intevent_dma` event that follows the HALT's own prefetch M-cycle.
+        // When the HALT instruction executes on the very M-cycle that m0 edge lands,
+        // Gambatte therefore captures the block as `Requested` (held, NOT yet served)
+        // and fires it at UNHALT — whereas rustyboi has already fired it this dot,
+        // pinning the post-unhalt FF44 read 36cc early (the block's stall, which
+        // Gambatte inserts right after unhalt, was instead spent during the HALT).
+        // Detect that exact coincidence (`hdma_last_fire_cc == halt cc`), roll the
+        // just-fired block back to its pre-fire pointers, drop its deferred VRAM
+        // writes and un-charge its stall, then capture `Requested` so the unhalt
+        // re-fires it on Gambatte's dot. Scoped to the same-M-cycle straddle so the
+        // ordinary in-period (`High`) and out-of-period (`Low` -> reflag) HALT
+        // captures, whose block fired on an earlier dot, are untouched.
+        let halt_cc = self.master_cc();
+        // Use the PRE-fire enabled flag: a final block (length underflow) clears
+        // `hdma_enabled` inside `run_hdma_block`, but Gambatte still holds it enabled
+        // and `Requested` at the coincident HALT.
+        let pre_fire_enabled = self.hdma_pre_fire_state.map(|s| s.3).unwrap_or(false);
+        // Record whether HDMA was armed at HALT entry (the value-read-downstream
+        // family) vs requested only in the wakeup ISR (`hdma_cycles_2`).
+        self.hdma_enabled_at_halt = self.hdma_enabled || pre_fire_enabled;
+        // The m0 edge that latches the block can land anywhere within the HALT's own
+        // prefetch M-cycle (4cc, or 8cc at double speed): scx shifts the mode-3->0
+        // boundary a couple dots relative to the HALT cc. Treat a fire within that
+        // one-M-cycle window before the HALT as coincident.
+        let mcycle: u64 = 4u64 << (self.is_double_speed_mode() as u64);
+        let coincident_fire = pre_fire_enabled
+            // An interleaving OAM-DMA advanced its own position inside the fired
+            // block; rolling the block back would double-advance it (the same guard
+            // `reorder_late_hdma_after_pushes` uses). Leave the synchronous fire.
+            && !self.dma_active
+            && self
+                .hdma_last_fire_cc
+                .map(|fc| fc <= halt_cc && halt_cc - fc < mcycle)
+                .unwrap_or(false);
+        if coincident_fire {
+            if let Some((src, dst, len, en)) = self.hdma_pre_fire_state {
+                self.hdma_pending_writes.clear();
+                self.hdma_source = src;
+                self.hdma_dest = dst;
+                self.hdma_length = len;
+                self.hdma_enabled = en;
+                self.pending_dma_stall = 0;
+                self.hdma_write_delay = 0;
+                self.hdma_last_fire_cc = None;
+                self.hdma_pre_fire_state = None;
+                self.hdma_block_done_this_period = false;
+                period = true;
+                block_done = false;
+            }
+        }
         self.halt_hdma_state = if self.hdma_req_pending {
             HaltHdmaState::Requested
         } else if self.hdma_enabled && period {
@@ -1388,7 +1450,21 @@ impl Mmio {
         // before the transfer's cc advance); synchronous HDMA here absorbs that
         // prefetch/setup overlap with +6 so the post-block stall return lands
         // the next STAT-mode read on the exact mode-0 dot (36+6 / 68+6).
-        if self.is_double_speed_mode() { 74 } else { 42 }
+        // A block that fires on a HALT-woken instruction stream drops that +6 fudge:
+        // its downstream value-read is the post-unhalt FF44 (the `hdma_*_ly_*` /
+        // `inc_*` glyph reads), many instructions past the block, not an immediate
+        // STAT read. The +6 there is a spurious persistent skew that pins the read
+        // 6cc late (one LY high). Covers both the unhalt re-fire of a rolled-back
+        // HALT-coincident block (the REFLAG side) and a NOREFLAG block that latches
+        // on its m0 edge during the post-unhalt sled. The synchronous (non-HALT)
+        // blocks `hdma_cycles` measures keep the +6.
+        let prefetch_fudge: u32 = if self.halt_wakeup_skew && self.hdma_enabled_at_halt {
+            0
+        } else {
+            6
+        };
+        let base = if self.is_double_speed_mode() { 68 } else { 36 };
+        base + prefetch_fudge
     }
 
     /// The byte the OAM-DMA engine copies into `OAM[pos]`. Mirrors Gambatte's
