@@ -3574,6 +3574,41 @@ impl Ppu {
                         }
                         // else: no penalty — keep the no-window m0Time captured at arm.
                     }
+                    // WX-DISABLE of a WX<7 (visible x==0) window that WAS scheduled at
+                    // M3 arm: the immediate-start window's StartWindowDraw penalty
+                    // locks the moment the fetcher fetches the window tile (Gambatte's
+                    // `xpos == wx` compare uses the WX register, so a smaller WX commits
+                    // earlier). A WX-write moving WX out of range at/after that commit
+                    // dot keeps the window-inclusive m0_time_master (mode 3 persists ->
+                    // out3); before it the existing null applies (refund -> mode 0). The
+                    // commit dot is `m3_arm_dot + DMG_WARMUP + 5 + scx&7 + WX` (the first
+                    // BG tile fill plus the WX-pixel BG prefix before the window tile,
+                    // less the f0/f1 dispatch lead). The late_wx_wx03_{1,2} DMG reps
+                    // bracket it at WX=3 (write at dot 88 = before -> out0; dot 92 =
+                    // at commit -> out3); WX=7 (late_wx_1) commits 4 dots later (dot
+                    // 96) so the same dot-92 disable still nulls (out0). Scoped DMG /
+                    // single speed / no sprites / WX<7; the WX>=7 reps keep the existing
+                    // `>= 7` graduated branch below. window_started_this_line is still
+                    // false at this dot (the latch lags the closed-form commit).
+                    if !keep_schedule
+                        && self.m3_scheduled_win
+                        && (self.m3_scheduled_wx as i32) < 7
+                        && !now_will_start
+                        && !mmio.is_cgb_features_enabled()
+                        && !mmio.is_double_speed_mode()
+                        && self.sprites_on_line.is_empty()
+                        && self.m0_time_master.is_some()
+                    {
+                        let commit_dot = self.m3_arm_dot as i64
+                            + DMG_PIXEL_TRANSFER_WARMUP as i64
+                            + 5
+                            + (self.m3_arm_scx & 7) as i64
+                            + self.m3_scheduled_wx as i64;
+                        if (self.ticks as i64) >= commit_dot {
+                            keep_schedule = true;
+                            self.win_wx_penalty_resolved = true;
+                        }
+                    }
                     if !keep_schedule {
                         self.scheduled_mode0_dot = None;
                         self.m0_time_master = None;
