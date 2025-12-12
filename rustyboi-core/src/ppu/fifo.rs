@@ -55,4 +55,22 @@ impl Fifo {
     pub fn size(&self) -> usize {
         self.size
     }
+
+    // Overwrite the `n` oldest (front) entries in place, leaving the rest of the
+    // queue intact. Used by the M3Start fine-scroll path when a mid-discard SCX
+    // write moves the first displayed tile to a different tile-map column: the
+    // already-queued first tile is stale and must be replaced with the tile at
+    // the break column without disturbing the later tiles (which keep their
+    // live-SCX columns). `n` must not exceed the current size.
+    pub fn overwrite_oldest(&mut self, pixels: &[BgPixel]) {
+        for (i, p) in pixels.iter().enumerate() {
+            if i >= self.size {
+                break;
+            }
+            let idx = self.head + i;
+            if idx < self.data.len() {
+                self.data[idx] = *p;
+            }
+        }
+    }
 }
