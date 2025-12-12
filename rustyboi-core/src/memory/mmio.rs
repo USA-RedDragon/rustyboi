@@ -751,10 +751,18 @@ impl Mmio {
     /// and the timer's internal counter (sub-step position). The controller
     /// reconstructs Gambatte's `cycleCounter_` from these.
     fn sync_apu_cc(&mut self) {
+        let ds = self.is_double_speed_mode();
+        self.sync_apu_cc_with_ds(ds);
+    }
+
+    /// Like `sync_apu_cc`, but with an explicit double-speed flag. Gambatte's
+    /// `PSG::speedChange` calls `generateSamples(cpuCc, isDoubleSpeed())` with
+    /// the speed being LEFT, BEFORE the KEY1 toggle — so the flush to the switch
+    /// cc must use the OLD speed's `>>(1+ds)` rate, not the just-toggled one.
+    fn sync_apu_cc_with_ds(&mut self, ds: bool) {
         let abs_cc = self.timer.abs_cc();
         let div_resets = self.timer.div_reset_count();
         let div_anchor = self.timer.div_anchor();
-        let ds = self.is_double_speed_mode();
         self.audio.sync_cc(abs_cc, div_resets, div_anchor, ds);
     }
 
