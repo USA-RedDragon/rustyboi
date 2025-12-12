@@ -794,6 +794,14 @@ impl Mmio {
     /// per-access clock, dissolving the write/read phase asymmetry.
     pub fn write_apu(&mut self, addr: u16, value: u8) {
         self.sync_apu_cc();
+        // Gambatte's `waveRamWrite` runs `updateWaveCounter(cc)` before the write
+        // so the corruption/active-fetch window (`waveCounter_ == cc+1`) and the
+        // overwritten wave-RAM byte are resolved at the live fetch position. The
+        // per-dot `step` only advances the fetch on whole dots; sync it to the
+        // exact write cc here, matching the read path.
+        if (audio::WAV_START..=audio::WAV_END).contains(&addr) {
+            self.audio.sync_wave_for_read();
+        }
         let write_cc = self.timer.write_access_cc();
         self.audio.set_write_len_cc(write_cc);
         self.audio.write(addr, value);
