@@ -1526,11 +1526,37 @@ impl Ppu {
             // current tick has reached the predicted start dot. The graduated
             // refund then uses the predicted dot as the start (drawn==0 at the
             // boundary -> full penalty kept).
+            // CGB single-speed window-disable WITH a sprite on the line: the
+            // window_started_this_line latch lags the closed-form StartWindowDraw
+            // commit (it flips only when the visible window x is reached), so a
+            // disable landing at/after the window-tile fetch commit still sees it
+            // false and would wrongly null (mode 0). Bridge with the predicted
+            // commit dot `m3_arm_dot + CGB_WARMUP + 8 + scx&7 + max(0, WX-7) - 1`
+            // (mirroring the LCDC window-ENABLE commit), so the binary keep branch
+            // below fires once the window has committed. The late_disable_spx10_wx0f
+            // _{1,2} CGB reps bracket it (disable at dot 98 = before -> out0 via the
+            // null below; dot 102 = at commit -> out3 keep).
+            let cgb_spr_commit = if cgb_features_enabled
+                && !ds
+                && !self.sprites_on_line.is_empty()
+                && self.m3_scheduled_win
+            {
+                let x_at_start = (self.m3_scheduled_wx as i64 - 7).max(0);
+                Some(self.m3_arm_dot as i64
+                    + CGB_PIXEL_TRANSFER_WARMUP as i64
+                    + 8
+                    + (self.m3_arm_scx & 7) as i64
+                    + x_at_start
+                    - 1)
+            } else {
+                None
+            };
             let win_started_for_refund = self.window_started_this_line
                 || (!cgb_features_enabled
                     && self
                         .predicted_win_start_dot
-                        .is_some_and(|p| self.ticks >= p));
+                        .is_some_and(|p| self.ticks >= p))
+                || cgb_spr_commit.is_some_and(|c| (self.ticks as i64) >= c);
             // CGB keeps the graduated refund (predicted_win_start_dot is DMG-only,
             // so this is just win_start_dot on CGB); DMG uses the binary keep below.
             let refund_start_dot = self.win_start_dot.or(self.predicted_win_start_dot);
@@ -1554,6 +1580,20 @@ impl Ppu {
                 // before the commit took the `!win_started_for_refund` null path above
                 // (no penalty -> mode 0 -> out0). The spx10_wx0f_{1,2} reps bracket this
                 // boundary. Keep m0_time_master as captured (no-op).
+            } else if !ds
+                && cgb_features_enabled
+                && !self.sprites_on_line.is_empty()
+                && win_started_for_refund
+            {
+                // CGB single-speed late window-disable WITH a sprite on the line
+                // (late_disable_spx10_wx0f_2). Binary like the DMG-sprite branch: the
+                // sprite cost is baked into the M3-arm m0_time_master and the window
+                // StartWindowDraw penalty locks once the fetcher fetches the window
+                // tile. `win_started_for_refund` already gated the commit dot via
+                // `cgb_spr_commit`, so reaching here means the disable landed at/after
+                // the commit -> keep the full window-inclusive m0Time (mode 3 -> out3).
+                // A disable before the commit took the `!win_started_for_refund` null
+                // path above (-> mode 0 -> out0, the passing _1 rep). Keep (no-op).
             } else if clean_ss && !cgb_features_enabled {
                 // DMG: the StartWindowDraw penalty is binary, not graduated. Once
                 // the window has reached its commit dot (win_started_for_refund),
