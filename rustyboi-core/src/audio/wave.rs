@@ -185,10 +185,11 @@ impl Wave {
     }
 
     fn period(&self) -> u32 {
-        // Our cycle counter advances at the single-speed rate per CPU M-cycle
-        // even in double speed, so the wave fetch period (in those cc) doubles
-        // to keep the fetch cadence aligned to the CPU.
-        to_period(self.nr33, self.nr34) << (self.ds as u32)
+        // The APU cycle counter now mirrors Gambatte's `cycleCounter_`, which
+        // advances at `>>(1+ds)` (half-rate at double speed). The wave fetch
+        // period `0x800 - freq` is in those same units regardless of speed
+        // (Gambatte channel3.cpp `toPeriod`), so no double-speed scaling.
+        to_period(self.nr33, self.nr34)
     }
 
     /// channel3.cpp updateWaveCounter.
@@ -269,7 +270,10 @@ impl Wave {
             }
             self.master = true;
             self.wave_pos = 0;
-            self.wave_counter = self.cc + self.period() + 3 + 2 * self.ds as u32;
+            // Gambatte channel3.cpp setNr4: `waveCounter_ = cc + toPeriod + 3`,
+            // in `cycleCounter_` units with no double-speed term (the unified APU
+            // cc already carries the speed via its `>>(1+ds)` rate).
+            self.wave_counter = self.cc + self.period() + 3;
             self.last_read_time = self.wave_counter;
         } else {
             self.enabled = false;

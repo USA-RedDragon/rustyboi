@@ -91,6 +91,18 @@ pub struct SquareWave {
     sweep_neg: bool,
     #[serde(default)]
     cgb: bool,
+
+    // The duty-trigger reference parity (`ref` in Gambatte's `setNr4`):
+    // `!(lastUpdate_ & ds)`. In single speed this is always 1, but at double
+    // speed it tracks the CPU `lastUpdate_` parity, which shifts the
+    // `nextPosUpdate_ = cc - (cc - ref) % 2 + ...` duty-trigger placement by one
+    // cc. Pushed each sync by the controller.
+    #[serde(default = "default_nr4_ref")]
+    nr4_ref: u32,
+}
+
+fn default_nr4_ref() -> u32 {
+    1
 }
 
 fn disabled() -> u32 {
@@ -134,7 +146,12 @@ impl SquareWave {
             sweep_counter: COUNTER_DISABLED,
             sweep_neg: false,
             cgb: false,
+            nr4_ref: 1,
         }
+    }
+
+    pub fn set_nr4_ref(&mut self, r: u32) {
+        self.nr4_ref = r;
     }
 
     pub fn set_cc(&mut self, cc: u32) {
@@ -578,8 +595,12 @@ impl SquareWave {
         // toggles the +4 vs +2 offset.
         let duty_master = if self.channel1 { old_master } else { self.master };
         let m = if duty_master { 1 } else { 0 };
+        // Gambatte DutyUnit::nr4Change: `nextPosUpdate_ =
+        //   cc - (cc - ref) % 2 + period_ + 4 - (master << 1)`. `ref` is
+        // `!(lastUpdate_ & ds)` (always 1 in single speed; tracks the CPU
+        // `lastUpdate_` parity at double speed). Pushed in `nr4_ref`.
         self.next_pos_update = self.cc
-            .wrapping_sub((self.cc.wrapping_sub(1)) & 1)
+            .wrapping_sub(self.cc.wrapping_sub(self.nr4_ref) & 1)
             .wrapping_add(self.period)
             .wrapping_add(4 - 2 * m);
 
