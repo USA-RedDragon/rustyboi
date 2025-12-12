@@ -99,18 +99,6 @@ const WYTRIG_COMMIT_DELAY: i64 = 3;
 const LINE153_LY0_DOT_DS: i64 = 6;
 const GETSTAT_OFF_DS: i64 = -1;
 
-// ds-engine STAGE 4: RB_GETSTAT. When set, the FF41 mode bits (and the VRAM/OAM/
-// cgbp access gate) are resolved by a single closed-form `get_stat(cc)` off the
-// exact access cc (Gambatte `LCD::getStat`), instead of the per-dot renderer's
-// poked FF41 mode register plus the layered `get_stat_mode3to0_at_cc` /
-// `get_stat_mode_at_cc` refinements. The eager `set_lcd_status_mode` pokes still
-// run (they feed the legacy edge bookkeeping) but the CPU-visible mode no longer
-// reads them. Flag-off keeps the prior (stage-3) behavior byte-identical.
-pub fn getstat_enabled() -> bool {
-    // ds-engine STAGE 7: permanently on.
-    true
-}
-
 // ds-engine STAGE 5: RB_LINERENDER. With getStat (stage 4) owning all CPU-visible
 // timing, the pixel pipeline no longer affects timing — only the final
 // framebuffer values (read at frame end) matter. When this flag is set the

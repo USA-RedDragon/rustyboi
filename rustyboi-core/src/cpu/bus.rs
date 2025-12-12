@@ -330,13 +330,9 @@ impl<'a> Bus<'a> {
         // STAGE 4: derive the fallback mode (used only when no closed-form
         // m0Time anchor exists for this line) from the closed-form getStat at the
         // access cc, not the per-dot renderer's poked FF41 register.
-        let mode = if crate::ppu::controller::getstat_enabled() {
-            self.ppu
+        let mode = self.ppu
                 .get_stat(self.mmio, access_cc)
-                .unwrap_or_else(|| self.mmio.read(ppu::LCD_STATUS) & 0x03)
-        } else {
-            self.mmio.read(ppu::LCD_STATUS) & 0x03
-        };
+                .unwrap_or_else(|| self.mmio.read(ppu::LCD_STATUS) & 0x03);
         let mode_locked = if is_oam { mode == 2 || mode == 3 } else { mode == 3 };
         let ds = self.mmio.is_double_speed_mode();
         let is_cgb = self.mmio.is_cgb_features_enabled();
@@ -452,19 +448,7 @@ impl<'a> Bus<'a> {
                 0
             };
             let access_cc = self.mmio.master_cc().saturating_sub(bias_cc);
-            if crate::ppu::controller::getstat_enabled() {
-                // STAGE 4: one closed-form getStat off the exact access cc; no
-                // reliance on the per-dot renderer FF41 mode register.
-                self.ppu.get_stat(self.mmio, access_cc)
-            } else {
-                self.ppu
-                    .get_stat_mode3to0_at_cc(access_cc, self.mmio.is_double_speed_mode())
-                    // The mode-3<->0 path only covers in-mode-3 reads; the mode 0/1/2
-                    // line-boundary transitions (VBlank entry, line wrap to OAM) are
-                    // sampled one M-cycle late by the post-tick register, so resolve
-                    // them from the LY phase at the raw read cc too (Gambatte getStat).
-                    .or_else(|| self.ppu.get_stat_mode_at_cc(self.mmio, access_cc))
-            }
+            self.ppu.get_stat(self.mmio, access_cc)
         } else {
             None
         };
