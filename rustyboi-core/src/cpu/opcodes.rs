@@ -156,7 +156,26 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // and the STOP itself advances the CPU clock by 8 (cc += 8). The 8 we
         // return below is part of that window, so the remaining no-fetch stall
         // is 0x20000 + 4 - 8.
-        cpu.stop_unhalt_cycles = 0x20000 + 4 - 8;
+        //
+        // LEVER A (RB_SUBDOT): the K=4 DS-entry per-access skew. Gambatte's
+        // `case 0x10` is `cc() = mem_.stop(cc() - 4)` after `PC_READ_OPERAND`
+        // (+4): the unhalt window is `0x20000 + 4` measured from the PRE-operand
+        // cc (= the cc just after the opcode fetch). rustyboi's opcode fetch has
+        // already ticked master_cc by 4 (one M-cycle) before `stop()` runs, and
+        // `tick_remaining` charges the returned cycles against that already-ticked
+        // M-cycle — so the returned 8 only nets +4 of master_cc advance, folding
+        // the opcode-fetch tick INTO the STOP's 8 and losing 4cc across the whole
+        // window. (Measured: abs_cc↔Gambatte offset 58368 at STOP-start, drifts to
+        // 58372 by the resume.) The faithful window from the post-opcode cc is
+        // exactly `0x20000 + 4`; with the returned 8 contributing (8 - 4)=4 net,
+        // the no-fetch stall must be `0x20000` (not `0x20000 + 4 - 8`). This makes
+        // the resume land at post_opcode_cc + 0x20000 + 4, exactly Gambatte's
+        // `(cc()-4) + 0x20000 + 4`, holding the offset constant at 58368.
+        cpu.stop_unhalt_cycles = if crate::cpu::bus::subdot_enabled() {
+            0x20000
+        } else {
+            0x20000 + 4 - 8
+        };
         return 8;
     }
 
