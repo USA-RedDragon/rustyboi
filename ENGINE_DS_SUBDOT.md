@@ -66,6 +66,29 @@ dot-count, and the offsets above are deleted.
 - Stage 2: STOP switch sub-dot re-anchor — line_cycle + p_now advance EXACTLY across the switch
   (delete bridge dot-counts + pullback + lytime_adjust). Validate m2 event cc == Gambatte
   (speedchange2_lcdoff canaries; the 6cc lag → 0).
+  STATUS: DONE for the DS->SS-during-OAMSearch case (commit on ds-subdot-engine). Gambatte
+  `Memory::stop` runs `lcd_.speedChange(cc_=cc+8*!old_ds)` = `update(cc_)` (old speed) then
+  `ppu_.speedChange()` (`p_.now -= old_ds`, lineCycle PRESERVED) then reschedule at new speed.
+  For DS->SS `cc_==cc` so `update` advances ZERO dots and `p_.now=cc-1`. PROOF via cctracer
+  stop-hook (CCT_STOPDBG, since reverted): switch2 cc=197736 cc_=197736 lineCycle=16 ly=0 →
+  Gambatte `p_.now=cc-1`. rustyboi at that switch: pre-bridge line_cycle=16 (== Gambatte) and
+  `p_now+abs_cc == master_cc-1` (== Gambatte) — the Stage-1 per-dot stepper ALREADY lands the
+  exact phase in OAMSearch. So the faithful bridge there is 0; the old `+3` over-advanced
+  line_cycle, leaving lyTime/m0Time 2cc low (the failing m2). FIX (RB_SUBDOT, opcodes.rs stop):
+  `faithful_dsss = subdot && !to_double && ppu.is_in_oam_search()` → bridge=0, skip
+  set_dsss_lytime_adjust, consume the pullback marker. RESULT (cctracer-anchored, boot offset
+  58371 from the m2 event): scx1_1 lyTime 271129->271132 == Gambatte 329503 (BYTE-EXACT, the
+  3-dot/6cc switch lag DISSOLVED); m2 event byte-exact relative to lyTime (both fire lyTime_133-4).
+  scx1_1 mode3 PASS, scx1_2 mode0 PASS (BEFORE: scx1_1 mode0 FAIL — m0Time 2cc low). Residual ±1
+  (read access_cc -1, m0Time-vs-lyTime +1) is the SEPARATE per-access-cc / m0-phase root (NOT
+  Stage 2); it flips the boundary-exact scx4_2 bracket (Gambatte margin 0=mode0; rustyboi +2) —
+  a 2-for-2 swap with scx1_1, NET-ZERO. SCOPE LIMIT: switches DURING/after mode-3 (PixelTransfer/
+  HBlank, e.g. ly44_m3) keep the per-dot stepper's mode-3-length phase deficit and the tuned
+  bridge — their faithful re-anchor couples to the mode-3-length work (deferred). SS->DS bridge
+  unchanged. GUARDS: flag-OFF full suite = 131 (byte-identical to main_131, verified). Flag-ON
+  full = 132 (== Stage 1; Stage-2 net-zero: scx1_1 fixed / scx4_2 broke; the +1 is the carried
+  Stage-1 `enable_display/frame0_m3stat_count_ds_2` leftover — NOT resolved by Stage 2, its
+  first-line enable anchor is re-anchored later).
 - Stage 3: timer div_anchor sub-dot at STOP (delete STOP_DERIV_OFF/TIMA/APU extras, unify
   div_anchor_apu). Validate DIV-phase bucket (`&0x800`) == Gambatte at STOP (speedchange_tima).
 - Stage 4: APU rebase (mechanics proven above) — now lands (DIV-phase exact). Validate whole sound
