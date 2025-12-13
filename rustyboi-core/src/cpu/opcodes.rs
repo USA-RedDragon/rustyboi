@@ -36,6 +36,23 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // a DS->SS switch whose bridge restores those 2 dots, so their already-
         // tuned reads are unaffected; the single-switch base family keeps the -2.
         // The VBlank/boot SS->DS path (DS sprite/m2int tests) keeps the full 8.
+        // ds-subdot STAGE 2: with the Stage-1 sub-dot `line_cycle` foundation, the
+        // per-dot stepper already leaves the renderer at the EXACT Gambatte lineCycle
+        // / PPU-clock phase at the stop cc, so the tuned bridge dot-counts (and the
+        // pullback / lytime_adjust compensations) are unnecessary. Gambatte's
+        // `Memory::stop` runs `lcd_.speedChange(cc + 8*!old_ds)`, which `update()`s
+        // the LCD to `cc_` at the OLD speed then re-anchors `p_.now = cc_ - old_ds`.
+        // For DS->SS (`old_ds==1`): `cc_ == cc` (8*!1 == 0), so `update` advances ZERO
+        // dots and `p_.now = cc - 1`. The Stage-1 per-dot stepper already has
+        // `line_cycle` at Gambatte's value and `p_now+abs_cc == master_cc - 1` at the
+        // stop cc (the -1 the last render dot left), so the faithful bridge is 0 — the
+        // old `+3` over-advanced `line_cycle`, leaving lyTime/m0Time 2cc low (the
+        // 6cc-late m2). For SS->DS (`old_ds==0`): `cc_ = cc + 8`, so the renderer must
+        // advance the remaining old-speed (SS) dots the returned 8 DS cycles did not
+        // cover; keep the tuned bridge there for now (validated in a later sub-step).
+        let subdot = crate::cpu::bus::subdot_enabled();
+        // Stage 2 faithful DS->SS re-anchor taken (no bridge, no lytime compensation).
+        let faithful_dsss = subdot && !to_double && mmio.ppu.is_in_oam_search();
         let bridge = if to_double {
             // SS->DS during an active rendering line (OAMSearch / PixelTransfer /
             // HBlank of LY 0..143): the per-dot renderer overshoots the post-window
@@ -50,6 +67,19 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             } else {
                 8
             }
+        } else if faithful_dsss {
+            // DS->SS, Stage 2: faithful re-anchor for a switch during the OAM-search
+            // (mode 2) phase — the lcdoff_m2int re-enable-then-OAMSearch canaries. The
+            // Stage-1 per-dot stepper already left the renderer at Gambatte's exact
+            // lineCycle / PPU-clock phase there (no mode-3-length coupling yet), so no
+            // bridge advance is needed: the old `+3` over-advanced `line_cycle`,
+            // leaving lyTime/m0Time 2cc low (the 6cc-late m2). Consume any pullback
+            // marker so a preceding SS->DS that armed it does not dangle. Switches
+            // during/after mode-3 (PixelTransfer / HBlank) still inherit the per-dot
+            // stepper's mode-3-length phase deficit and keep the tuned bridge below;
+            // their faithful re-anchor couples to the mode-3-length work (Stage 5).
+            mmio.ppu.take_sc_mode3_pullback();
+            0
         } else {
             // DS->SS: restore the 2 dots the preceding mode-3 SS->DS bridge
             // dropped, if any (double-switch families); else the plain bridge.
@@ -109,7 +139,12 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             }
         }
         mmio.ppu.stop_bridge_advance(mmio.mmio, bridge);
-        if !to_double {
+        if !to_double && !faithful_dsss {
+            // Stage 2: the lytime `+1`-drop compensated the old whole-dot bridge that
+            // landed the LyCounter one master-cc high. Skip it ONLY on the faithful
+            // bridge=0 re-anchor path (where the natural +1 phase is exact); every
+            // other DS->SS (the tuned bridge: mid-mode-3 / HBlank switches, and all
+            // flag-off runs) still needs it.
             mmio.ppu.set_dsss_lytime_adjust();
         }
         mmio.perform_speed_switch();
