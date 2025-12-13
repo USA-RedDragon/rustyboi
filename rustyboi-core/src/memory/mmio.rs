@@ -2153,8 +2153,23 @@ impl Mmio {
             // mirrors as a `PSG::divReset` fold on the next `sync_cc`), apply the
             // `PSG::speedChange` fold. Sync first so the divReset fold + flush to
             // the switch cc happen, then re-fold for the speed transition.
-            self.sync_apu_cc();
-            self.audio.psg_speed_change(old_ds);
+            //
+            // Stage 4 (RB_SUBDOT): Gambatte's `Memory::stop` runs both
+            // `psg_.divReset(isDoubleSpeed())` and `psg_.speedChange(cc_,
+            // isDoubleSpeed())` with the OLD speed (the KEY1 toggle is AFTER), and
+            // flushes the speedChange to `cc_ = stopCc + 8 * !old_ds`, not to the
+            // current dot. KEY1 was already toggled above, so `is_double_speed_mode`
+            // now reports the NEW speed; sync with the captured `old_ds` so the
+            // divReset fold runs at the old speed, then hand the stop cc to
+            // `psg_speed_change` for the faithful `+8*!ds` flush.
+            if crate::cpu::bus::subdot_enabled() {
+                let stop_cc = self.timer.abs_cc();
+                self.sync_apu_cc_with_ds(old_ds);
+                self.audio.psg_speed_change_at(old_ds, stop_cc);
+            } else {
+                self.sync_apu_cc();
+                self.audio.psg_speed_change(old_ds);
+            }
         }
     }
 
