@@ -18,6 +18,16 @@ pub(crate) fn faithful_enabled() -> bool {
     true
 }
 
+/// ds-subdot STAGE 1: when set, the PPU's `line_cycle`/mode-boundary/LY phase
+/// tracking carries FULL master_cc precision (including odd DS half-dots) instead
+/// of being rounded to the even-render-dot grid by the DS parity gate. The
+/// renderer's pixel cadence is unchanged. Flag-OFF (default) is byte-identical to
+/// the pre-Stage-1 build. Env is acceptable on this branch for testing; it will be
+/// inlined before main (like RB_EXACTCC/RB_FAITHFUL).
+pub(crate) fn subdot_enabled() -> bool {
+    std::env::var("RB_SUBDOT").is_ok()
+}
+
 /// ds-engine STAGE 6/7: the run-to-next-event scheduler is the single CPU world-
 /// advance path. `tick_m` advances `master_cc` by the access duration (one
 /// M-cycle = 4 dots) and a single `run_to(target_cc)` resolves every peripheral

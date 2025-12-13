@@ -1799,6 +1799,27 @@ impl Ppu {
         }
     }
 
+    /// ds-subdot STAGE 1: the LyCounter as the CPU READ path must observe it —
+    /// sub-dot (master_cc) exact. At double speed the renderer's `abs_cc`/
+    /// `line_cycle` are advanced on the even-render-dot grid, which sits one
+    /// master_cc below Gambatte's even line phase, so the bare `lyTime` (next-LY
+    /// master cc) runs 1 cc low and `lineCycles = 456 - ((lyTime-cc)>>1)` reads 1
+    /// high. Carry the missing sub-dot here so the observed `lyTime`/`lineCycles`/
+    /// LY/LYC-flag are master_cc-exact at DS (proven via cctracer: ds_1 lineCycles
+    /// 251->250, lyTime 140567->140568). At single speed the bare phase is already
+    /// exact (no flooring), so the correction is DS-only; `lytime_no_plus1` (post
+    /// DS->SS-switch line) already drops the +1. Flag-OFF this is identical to
+    /// `ly_counter`. SCOPE: only the CPU-visible read observers call this; the
+    /// internal STAT-event SCHEDULE still keys off the un-corrected `ly_counter`
+    /// (its fire-cc anchors are re-anchored in Stages 2-4, not here).
+    fn ly_counter_obs(&self, mmio: &mmio::Mmio) -> stat_irq::LyCounter {
+        let mut lc = self.ly_counter(mmio);
+        if crate::cpu::bus::subdot_enabled() && lc.ds && !self.lytime_no_plus1 {
+            lc.time += 1;
+        }
+        lc
+    }
+
     // The internal (clean) LY derived from the line clock, independent of the
     // LY register's mid-line transients (line 153 ly=0, etc.).
     fn internal_ly(&self) -> u8 {
@@ -4786,7 +4807,7 @@ impl Ppu {
             let off = if ds { GETSTAT_OFF_DS } else { 0 };
             (access_cc as i64 + off).max(0) as u64
         };
-        let lc = self.ly_counter(mmio);
+        let lc = self.ly_counter_obs(mmio); // ds-subdot STAGE 1: read-path phase
         let ly = lc.ly as i64;
         let cpl = stat_irq::LCD_CYCLES_PER_LINE as i64;
         let cpf = stat_irq::LCD_CYCLES_PER_FRAME as i64;
@@ -4988,7 +5009,7 @@ impl Ppu {
             // first line; on steady lines it is far in the past.) Needed for the
             // enable_display frame*_m3stat_count / m0irq_count / ly0 streams whose
             // FF41 read lands at lineCycles 78..80 during OAMSearch.
-            let lc = self.ly_counter(mmio);
+            let lc = self.ly_counter_obs(mmio); // ds-subdot STAGE 1: read-path phase
             let line_start = (self.p_now as i64 + lc.time as i64) - (456i64 << ds as u32);
             let cur_m0t = if self.first_line_after_enable {
                 // Exact first-line value already installed (carries the +1 lyTime
@@ -5079,7 +5100,7 @@ impl Ppu {
         }
         // Reanchor the LyCounter.time to master cc (`p_now + lc.time`), matching
         // `get_stat_mode_at_cc`: rustyboi's LyCounter.time is in abs_cc units.
-        let lc = self.ly_counter(mmio);
+        let lc = self.ly_counter_obs(mmio); // ds-subdot STAGE 1: read-path phase
         let lc_master = stat_irq::LyCounter {
             ly: lc.ly,
             time: (self.p_now as i64 + lc.time as i64).max(0) as u64,
