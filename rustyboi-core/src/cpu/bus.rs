@@ -25,7 +25,7 @@ pub(crate) fn faithful_enabled() -> bool {
 /// the pre-Stage-1 build. Env is acceptable on this branch for testing; it will be
 /// inlined before main (like RB_EXACTCC/RB_FAITHFUL).
 pub(crate) fn subdot_enabled() -> bool {
-    std::env::var("RB_SUBDOT").is_ok()
+    true
 }
 
 /// ds-engine STAGE 6/7: the run-to-next-event scheduler is the single CPU world-
