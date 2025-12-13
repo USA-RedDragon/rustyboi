@@ -91,6 +91,44 @@ dot-count, and the offsets above are deleted.
   first-line enable anchor is re-anchored later).
 - Stage 3: timer div_anchor sub-dot at STOP (delete STOP_DERIV_OFF/TIMA/APU extras, unify
   div_anchor_apu). Validate DIV-phase bucket (`&0x800`) == Gambatte at STOP (speedchange_tima).
+  STATUS: DONE, coupled with LEVER A below (one build). Under RB_SUBDOT `stop_div_reset`
+  collapses to `anchor_cc = tima_cc = apu_cc = abs_cc` (no STOP_DERIV_OFF/TIMA/APU extras,
+  no EI-promote adj, div_anchor_apu unified). Verified byte-exact: Gambatte's divReset cc
+  == STOP cc_in in EVERY tima canary (cctracer DIVRESET hook: speedchange2_tima00_2a 67680/
+  199264, tima01_1 66624/197716, tima02_1a 66464/197560), and rustyboi abs_cc maps with the
+  CONSTANT 58368 offset. ALL speedchange tima/div tests pass flag-on (0 tima/div in the
+  flag-on broke set vs the +56 they were with the old offsets pre-LEVER-A).
+
+## LEVER A — DS-entry per-access cc skew (THE FOUNDATION) — DONE (with Stage 3)
+ROOT (cctracer, CCT_STOP/CCT_DIVRESET hooks, since reverted): Gambatte `case 0x10` is
+`cc() = mem_.stop(cc() - 4)` AFTER `PC_READ_OPERAND` (+4) — the unhalt window `0x20000 + 4`
+is measured from the PRE-operand cc (= just after the opcode fetch). rustyboi's opcode fetch
+ALREADY ticks master_cc +4 (one M-cycle) before `stop()` runs, and `tick_remaining` charges
+the returned 8 against that already-ticked M-cycle, so the returned 8 only NETS +4 of advance
+— folding the opcode-fetch tick INTO the STOP's 8 and losing 4cc across the whole window.
+MEASURED (speedchange2_lcdoff…scx1_1): abs_cc↔Gambatte offset 58368 at STOP1, drifting to
+58372 by the SS→DS resume (rustyboi 4 short). FIX (opcodes::stop, RB_SUBDOT): no-fetch stall =
+`0x20000` (not `0x20000 + 4 - 8`); the returned 8 contributes (8-4)=4 net, so the window from
+the post-opcode cc is exactly `0x20000 + 4` = Gambatte's `(cc()-4) + 0x20000 + 4`.
+PROOF (AFTER): offset CONSTANT 58368 at STOP1 (66612/8244) AND STOP2 (197736/139368), and the
+whole inter-STOP instruction stream byte-exact (0x0164..0x016D all offset 58368). divReset
+byte-exact at anchor=abs_cc (above). Stage-1 m2int_m3stat canaries 0/0 flag-on/off; Stage-2
+speedchange2…scx1_1 PASS flag-on. REGRESSION GUARD: flag-OFF full suite = 131 (114 CGB + 17
+DMG), exact identity. FLAG-ON full suite = 214 (vs the pre-LEVER-A flag-on baseline 132):
+net +82, ALL CGB. The valley is ENTIRELY the downstream DS firing-offset coupling that LEVER A
+exposes (NOT a LEVER-A bug — abs_cc is now byte-exact everywhere, verified on the regressing
+`offset1_lyc99int_m2irq_count_1` too: STOP offsets 58368/58368, abs_cc perfect, only the
+rendered LY-count is off). Breakdown of the +82: 41 `ly44_m3` (mid-mode-3 SS→DS bridge,
+explicitly deferred — couples to mode-3-length), 17 APU (Stage 4), and ~41 double-speed
+`lcdoffset*/offset*_lyc*` count tests whose controller.rs DS firing offsets (`m2irq_off_ds`,
+`m0irq_off_ds`, `write_cc_off_ds`, the `+ds` fudges, `cgb_ss_m0_anticip`, the lytime `+1`) and
+the SS→DS/mid-mode-3 `bridge` dot-counts in opcodes::stop ENCODE the now-eliminated 4-short
+abs_cc and must be rebased (this IS Stage 5: delete/rebase the firing offsets + bridge). 16
+fixed flag-on (the tima/div + several APU `_b` + the scx1_1 m2 canaries). GATE (per roadmap)
+MET: cctracer byte-exactness + flag-OFF=131 + Stages 1-2 canaries byte-exact; the flag-on
+valley is the documented Stage-5 trigger, not a regression of main (main stays 131).
+BLOCKER for net-positive flag-on: Stage 5 (rebase controller DS firing offsets -4, make the
+SS→DS / mid-mode-3 bridge faithful) — large coupled build, deliberately separate.
 - Stage 4: APU rebase (mechanics proven above) — now lands (DIV-phase exact). Validate whole sound
   suite (length/nr52/duty/env/sweep/wave) byte-exact.
 - Stage 5: delete `step_subdot` + parity-gate + all firing/DS offsets; flip RB_SUBDOT default on.

@@ -601,6 +601,22 @@ impl Timer {
         };
         let promote_adj = if self.ei_promoted { promote_adj_const } else { 0 };
         self.ei_promoted = false;
+        // LEVER A (RB_SUBDOT): with the K=4 STOP per-access skew removed (the
+        // unhalt-window operand-read 4cc charged in opcodes::stop), `abs_cc` at the
+        // speed switch maps to Gambatte's divReset cc with a CONSTANT boot offset
+        // (58368) in BOTH directions — cctracer-verified on speedchange2_tima00_2a:
+        // STOP1 abs_cc 9312 -> Gambatte 67680, STOP2 140896 -> 199264, offset 58368.
+        // So the divReset / tick-grid / APU anchor collapse to the bare `abs_cc`:
+        // delete STOP_DERIV_OFF (-4, the skew compensation), the STOP_TIMA/APU
+        // direction extras (they bracketed the rounded phase), and the EI-promote
+        // adjustment (the promoted/non-promoted divReset cc are identical once the
+        // skew is gone). `div_anchor_apu` unifies to the same anchor.
+        if crate::cpu::bus::subdot_enabled() {
+            let anchor_cc = self.abs_cc;
+            self.div_reset_split(anchor_cc, anchor_cc);
+            self.div_anchor_apu = anchor_cc;
+            return;
+        }
         // The promote adjustment shifts ONLY the reset-TIMA-value resolution cc
         // (`tima_cc`), NOT the tick-grid / divider anchor (`anchor_cc`). The
         // promoted SS->DS read straddles the SAME post-switch divider boundary as
