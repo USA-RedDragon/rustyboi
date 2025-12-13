@@ -157,6 +157,38 @@ SS→DS / mid-mode-3 bridge faithful) — large coupled build, deliberately sepa
   REGRESSION GUARD: flag-OFF full suite = 131 (114 CGB + 17 DMG), exact identity. The whole
   rebase is behind RB_SUBDOT; flag-off keeps the legacy `>>1`-anchored dual-clock reconstruction
   byte-identical.
+- Stage 5a (firing-offset cluster recovery): rebase the DS firing/bridge offsets so the
+  lcdoffset1/offset[123]/lyc*/m2int_m3stat cluster that main_131 PASSES but the Lever-A flag-on
+  valley BROKE is recovered under RB_SUBDOT.
+  STATUS: DONE (commit on ds-subdot-engine). ROOT FOUND (cctracer + runner DBGLY/DBGW/DBGSTOP,
+  since reverted): the 40 cluster cases all execute a DOUBLE STOP at boot (SS->DS during VBlank,
+  then DS->SS during PixelTransfer = mode 3 of an early line), then DEFER the graded LY/STAT/cgbp
+  read to a much later frame (LY 152/153, the bracket boundary). The 2nd stop is a mode-3 DS->SS
+  switch, so the tuned `bridge` (opcodes::stop else-branch, base 3/5) was calibrated for the OLD
+  4-short abs_cc; once Lever A made abs_cc byte-exact the bridge OVER-ADVANCES the renderer line
+  phase by exactly 2 dots, and the deferred read's LY-increment-vs-access boundary lands on the
+  wrong side (lcdoffset1/offset1 FAIL, lcdoffset3/offset3 PASS — a 1-for-1 straddle; e.g.
+  offset1_lyc98int_ly_count_1 read LY=0 via the line-153-reads-0 rule where Gambatte anticipated
+  152->153=0x99, because rustyboi's 152->153 increment fired ~5cc early relative to the read).
+  FIX (opcodes::stop, RB_SUBDOT only): the mode-3 DS->SS bridge rebases `-2`
+  (`base.saturating_sub(2)`), gated OUT when HDMA is enabled (the hdma_late_m3speedchange_*_ds
+  cases couple to the HDMA block-fire/timer phase across the switch — keep the tuned bridge there,
+  Stage 5b). PROOF (byte-exact, all bracket sides served by the SINGLE -2 — the roadmap invariant):
+  offset1/offset2/offset3_lyc98int_ly_count_1 AND _2 ALL PASS (displayed count = 0x99/0x9A exact);
+  the lcdoffset1 enable brackets (late_enable / late_ff41/ff45_enable / cgbpal_read/write_m3start /
+  preread/prewrite / m1irq_late_enable / ly143_late_m0enable) PASS with their lcdoffset3 partners.
+  RESULTS: flag-ON full suite 184 -> 148 (net -36): 37 RECOVERED of the 40-case cluster, 1
+  net-zero bracket swap (offset1_lyc99int_m2irq_count_1 broke->fixed / count_2 fixed->broke; the
+  m2irq read straddles a sub-dot the whole-dot bridge can't split — couples to per-access m2irq
+  event-cc, Lever-A residual). 3 RESIST: frame0_m3stat_count_ds_2 (the carried Stage-1 first-line
+  enable-anchor leftover) + speedchange2[_nop]_lcdoff_nop_m2int_m3stat_scx4_2 (LCD-OFF around the
+  stop -> the re-enable first_line anchor, not the mode-3 bridge — separate root). Remaining flag-on
+  broke = 41 ly44_m3 (Stage 5b) + 1 oamdma (harness) + the 3 above. REGRESSION GUARD: flag-OFF
+  full suite = 131 (114 CGB + 17 DMG), EXACT identity (the -2 and the HDMA gate are both behind
+  `subdot`). NOTE: the faithful-getLyReg port (drop the +1 lyTime correction, return the
+  cc-resolved counter instead of deferring to the renderer register) was attempted first and
+  NET-REGRESSED (-2: fixed offset3 brackets but broke offset1_ds_2/offset2_1/offset2_3) because the
+  read-resolution was never the lever — the renderer LINE PHASE (the mode-3 bridge) is. Reverted.
 - Stage 5: delete `step_subdot` + parity-gate + all firing/DS offsets; flip RB_SUBDOT default on.
   Full-suite re-validate; expect the ~50-70 coupled cluster to fall together.
 
