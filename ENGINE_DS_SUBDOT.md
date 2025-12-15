@@ -221,8 +221,46 @@ SS→DS / mid-mode-3 bridge faithful) — large coupled build, deliberately sepa
   4->bridge rebase and the dropped pullback +2 are both behind `subdot`). The lcdoff_m2int and
   HDMA-gated DS->SS paths are untouched (verified: lcdoff takes bridge=8 SS->DS-VBlank then the
   faithful_dsss=0 OAMSearch path; never the changed mid-mode-3 branch).
-- Stage 5: delete `step_subdot` + parity-gate + all firing/DS offsets; flip RB_SUBDOT default on.
-  Full-suite re-validate; expect the ~50-70 coupled cluster to fall together.
+- Stage 5c (finalization — flip the sub-dot engine permanent + remove the flag):
+  STATUS: DONE (commits on ds-subdot-engine). `subdot_enabled()` flipped to
+  unconditional true, then EVERY `if subdot_enabled() { NEW } else { OLD }` site
+  inlined to NEW and the OLD compensation branch deleted, incrementally with the
+  full suite (NO env var) held at 106 after EACH file:
+    * timer.rs: `stop_div_reset` collapses to the bare `abs_cc` anchor; DELETED
+      the dead constants `STOP_DERIV_OFF`, `STOP_TIMA_{SS,DS}_EXTRA`,
+      `STOP_APU_{SS,DS}_EXTRA`, `STOP_EI_PROMOTE_ADJ_{SS,DS}` and the old
+      direction-split derivation.
+    * audio/controller.rs + mmio.rs: the faithful single-counter APU clock is the
+      ONLY path; removed the `subdot` field, the legacy `>>1` dual-clock
+      reconstruction, the legacy `psg_speed_change`, and the `LEN_FOLD_BIAS` /
+      `LEN_CC_OFF` constants. `perform_speed_switch` uses `psg_speed_change_at`.
+    * opcodes.rs stop(): inlined the faithful DS->SS OAMSearch re-anchor, the
+      SS->DS mid-mode-3 bridge=4, the DS->SS mode-3 bridge=1 (HDMA-gated), and the
+      LEVER-A unhalt stall 0x20000; deleted the old 6/3/5 + `0x20000+4-8`.
+    * ppu/controller.rs: `ly_counter_obs` DS +1 sub-dot correction unconditional.
+    * cpu/bus.rs: `subdot_enabled()` DELETED entirely. No `RB_SUBDOT` references
+      remain anywhere; the core is env-free. `cargo build` is dead-code-warning-
+      clean (release + debug lib).
+  KEPT (load-bearing, NOT compensation): `step_subdot` and the DS parity-gate in
+  `resolve_one_dot` — the legitimate double-speed 1-pixel-per-2-master_cc render
+  cadence reached by the now-default sub-dot path. The roadmap's "delete
+  step_subdot/parity-gate" was aspirational; removing them would break DS render.
+  ALSO KEPT (still live on unconditional paths, NOT flag-gated — deleting would
+  change behavior and break 106): the controller DS firing offsets
+  `m2irq_off_ds`/`m0irq_off_ds`/`write_cc_off_ds`/`cgb_ss_m0_anticip`, the
+  pullback (`arm/take_sc_mode3_pullback`) + `set_dsss_lytime_adjust` machinery,
+  and `div_anchor_apu`. These are the landed (flag-on) firing model — the
+  roadmap's "Offsets to DELETE" inventory described the full-Stage-5 endgame, not
+  the 106-holding landed state.
+  RESULT: full suite with NO env var = 106, net -25 vs main_131
+  (fixed 28, broke 3 = the documented residuals ONLY: frame0_m3stat_count_ds_2 +
+  speedchange2[_nop]_lcdoff_nop_m2int_m3stat_scx4_2 x2). Failure set BYTE-IDENTICAL
+  to the prior RB_SUBDOT=1 run (diffn vs s5b_on: fixed 0 / broke 0). SMOKE TEST:
+  Pokemon Crystal + Harry Potter CoS both ran 600 frames in DEBUG (overflow checks
+  ON) with NO overflow panic. The sub-dot engine is now the permanent, env-free
+  default — the merge candidate.
+- Stage 5 (remaining, follow-up): the 3 residual failures + the further coupled
+  cluster (per the original aspiration). Out of scope for 5c.
 
 ## Discipline
 - cctracer byte-exact per stage BEFORE suite. Flag-off must stay 131 at every stage.
