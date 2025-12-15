@@ -5034,7 +5034,16 @@ impl Ppu {
             // would end the window one render dot late — see the comment above).
             let read_off: i64 = if !ds && !self.lytime_no_plus1 { 3 } else { 2 };
             if self.first_line_after_enable {
-                let lu_local = line_start + ((80i64 << ds as u32) + 1);
+                // `line_start` here (the raw LyCounter-derived line origin) sits one
+                // master-cc ABOVE Gambatte's enable cc anchor (`lyCounter.reset(0,
+                // enableCc)`): cross-checked vs cctracer on frame0_m3stat_count_ds_2 the
+                // rustyboi enableCc maps one cc low. Gambatte's
+                // `inactivePeriodAfterDisplayEnable(cc+1)` boundary is
+                // `lu_ = enableCc + (80<<ds)+1`, so subtract that one cc here. Without
+                // it `lu_local` sat one cc high and the first line's lineCycles-80
+                // mode-3 read fell inside the inactive window, reporting mode 0 and
+                // dropping the first line's m3 count (out90: 144 m3 reads).
+                let lu_local = line_start + ((80i64 << ds as u32) + 1) - 1;
                 if (access_cc as i64 + 1) < lu_local {
                     return Some(0);
                 }
