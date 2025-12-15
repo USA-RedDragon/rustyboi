@@ -86,13 +86,6 @@ pub struct Audio {
     // fold (which happens on the write path, without `ds`) uses the right speed.
     #[serde(default)]
     cached_ds: bool,
-    // Stage 4 (RB_SUBDOT): faithful single-counter APU clock. When set, `cc` IS
-    // Gambatte's `cycleCounter_`, `last_update` IS Gambatte's `lastUpdate_` (the
-    // FLOORED boundary, not raw `abs_cc`), and the dual `len_cc` clock collapses
-    // to mirror `cc` (no `LEN_FOLD_BIAS`/`LEN_CC_OFF`). Flag-off keeps the legacy
-    // `>>1`-anchored reconstruction byte-identical. Cached from `sync_cc`.
-    #[serde(default)]
-    subdot: bool,
 }
 
 impl Audio {
@@ -115,7 +108,6 @@ impl Audio {
             last_div_resets: 0,
             clock_anchored: false,
             cached_ds: false,
-            subdot: false,
         }
     }
 
@@ -132,13 +124,12 @@ impl Audio {
     /// only the duty unit by the resulting delta.
     pub fn sync_cc(&mut self, abs_cc: u64, div_resets: u64, div_anchor: u64, ds: bool) {
         self.cached_ds = ds;
-        self.subdot = crate::cpu::bus::subdot_enabled();
         if !self.clock_anchored {
-            // Stage 4 (RB_SUBDOT): defer the boot anchor past the abs_cc==0
-            // pre-boot sync (Gambatte `loadState` sets `lastUpdate_ = cpuCc - 1`
-            // at the post-BIOS load, with cpuCc already advanced). Anchoring at
-            // abs_cc==0 with `-1` would underflow and freeze `advance_to`.
-            if self.subdot && abs_cc == 0 {
+            // Defer the boot anchor past the abs_cc==0 pre-boot sync (Gambatte
+            // `loadState` sets `lastUpdate_ = cpuCc - 1` at the post-BIOS load,
+            // with cpuCc already advanced). Anchoring at abs_cc==0 with `-1` would
+            // underflow and freeze `advance_to`.
+            if abs_cc == 0 {
                 self.last_div_resets = div_resets;
                 self.push_cc();
                 return;
@@ -150,7 +141,7 @@ impl Audio {
             // Faithful boot anchor (Gambatte loadState `lastUpdate_ = cpuCc - 1`):
             // the floored boundary sits one cc below the current cpu cc so the
             // first generateSamples picks up the right parity remainder.
-            self.last_update = if self.subdot { abs_cc - 1 } else { abs_cc };
+            self.last_update = abs_cc - 1;
             self.last_div_resets = div_resets;
             self.clock_anchored = true;
             self.push_cc();
@@ -201,32 +192,21 @@ impl Audio {
         // same 2 MHz units regardless of speed. (The earlier `>>1` duty rate ran
         // the duty 2x too fast in DS, off the pos6→pos7 boundary.)
         let shift = 1 + ds as u32;
-        if self.subdot {
-            // Stage 4: faithful `PSG::generateSamples`. `cycles` is the cc delta
-            // taken BEFORE the shift (Gambatte sound.cpp:142), and `last_update`
-            // advances by whole APU cycles (`cycles << shift`), staying a FLOORED
-            // boundary that preserves the sub-quantum remainder/parity. `cc` is
-            // the single real counter; `len_cc` mirrors it exactly (no dual clock).
-            if abs_cc <= self.last_update {
-                return;
-            }
-            let cycles = (abs_cc - self.last_update) >> shift;
-            if cycles == 0 {
-                return;
-            }
-            self.last_update = self.last_update.wrapping_add(cycles << shift);
-            self.cc = ((self.cc as u64 + cycles) % Self::CC_MAX as u64) as u32;
-            self.len_cc = self.cc;
+        // Faithful `PSG::generateSamples`. `cycles` is the cc delta taken BEFORE
+        // the shift (Gambatte sound.cpp:142), and `last_update` advances by whole
+        // APU cycles (`cycles << shift`), staying a FLOORED boundary that preserves
+        // the sub-quantum remainder/parity. `cc` is the single real counter;
+        // `len_cc` mirrors it exactly (no dual clock).
+        if abs_cc <= self.last_update {
             return;
         }
-        if (abs_cc >> shift) <= (self.last_update >> shift) {
+        let cycles = (abs_cc - self.last_update) >> shift;
+        if cycles == 0 {
             return;
         }
-        let cycles = (abs_cc >> shift) - (self.last_update >> shift);
-        let len_cycles = cycles;
-        self.last_update = abs_cc;
+        self.last_update = self.last_update.wrapping_add(cycles << shift);
         self.cc = ((self.cc as u64 + cycles) % Self::CC_MAX as u64) as u32;
-        self.len_cc = ((self.len_cc as u64 + len_cycles) % Self::CC_MAX as u64) as u32;
+        self.len_cc = self.cc;
     }
 
     /// Gambatte `PSG::divReset`: re-fold `cycleCounter_` so the DIV-relative phase
@@ -245,41 +225,11 @@ impl Audio {
         self.channel1.reset_cc(delta);
         self.channel2.reset_cc(delta);
         self.channel3.reset_cc(delta);
-        if self.subdot {
-            // Stage 4: single counter — `len_cc` mirrors `cc` (Gambatte folds the
-            // one `cycleCounter_`; the channels' `len_counter` boundaries survive
-            // because the fold preserves `cc & -0x1000`).
-            self.len_cc = self.cc;
-            return;
-        }
-        // Fold the length clock with the same DIV-reset transform (it preserves
-        // the `cc>>13` length boundaries the channels' `len_counter` are pinned to).
-        let lcc = self.len_cc.wrapping_add(div_offset);
-        self.len_cc = (lcc & 0xFFFF_F000)
-            .wrapping_add(2 * (lcc & 0x800))
-            .wrapping_sub(div_offset)
-            % Self::CC_MAX;
+        // Single counter — `len_cc` mirrors `cc` (Gambatte folds the one
+        // `cycleCounter_`; the channels' `len_counter` boundaries survive because
+        // the fold preserves `cc & -0x1000`).
+        self.len_cc = self.cc;
     }
-
-    // APU-cc offset applied to the length subsystem only. rustyboi's duty/
-    // envelope units are anchored to the raw `abs_cc>>1` phase, but the length
-    // counter's DIV-phase reference (Gambatte's folded `cc>>13` boundary) is the
-    // access-cc phase the timer's DIV write resolves on. This constant carries
-    // that fixed phase difference into the length `cc` without disturbing duty.
-    const LEN_CC_OFF: u32 = 0;
-
-    // The reconstructed `len_cc` (built from the per-dot `abs_cc`, anchored at boot
-    // to `abs_cc>>1` and accumulated across the run) lands a uniform 1 APU-cc BELOW
-    // Gambatte's `cycleCounter_` by the time a test re-anchors the clock with the
-    // NR52-enable `PSG::reset` fold (traced via cctracer: rustyboi pre-fold low-12
-    // = Gambatte's - 1 across the ch2 nr52 ds cases — e.g. 0x900E vs 0x900F →
-    // 4110 vs 4111). The shortfall is invisible at steady state (the `cc>>13`
-    // length quantum floors it away) but flips the fold's bit-11/bit-12 phase test
-    // and the exact NR52 length-expiry `>=` boundary. Re-add it ONCE, at the
-    // `PSG::reset` re-anchor (the first re-anchoring in these tests); the small
-    // post-enable `len_cc` is then byte-exact with `cycleCounter_`, so the later
-    // `divReset` fold must NOT re-apply it (that would double-count → +0x1000).
-    const LEN_FOLD_BIAS: u32 = 1;
 
     fn push_cc(&mut self) {
         let cc = self.cc;
@@ -293,8 +243,8 @@ impl Audio {
         let nr4_ref = if (self.last_update & (self.cached_ds as u64)) != 0 { 0 } else { 1 };
         self.channel1.set_nr4_ref(nr4_ref);
         self.channel2.set_nr4_ref(nr4_ref);
-        // Stage 4: the single counter — length cc is `cc` itself (no LEN_CC_OFF).
-        let lcc = if self.subdot { cc } else { self.len_cc.wrapping_add(Self::LEN_CC_OFF) };
+        // The single counter — length cc is `cc` itself.
+        let lcc = cc;
         self.channel1.set_len_cc(lcc);
         self.channel2.set_len_cc(lcc);
         self.channel3.set_len_cc(lcc);
@@ -335,7 +285,7 @@ impl Audio {
         // the fold formula would inject a spurious +0x1000 that offsets `cc>>13`
         // (the length quantum) for the rest of the run. The channel sub-counters
         // are still reset.
-        if !self.clock_anchored || (!self.subdot && self.last_update == 0) {
+        if !self.clock_anchored {
             self.channel1.psg_reset();
             self.channel2.psg_reset();
             self.channel3.psg_reset();
@@ -343,120 +293,28 @@ impl Audio {
             self.push_cc();
             return;
         }
-        if self.subdot {
-            // Stage 4: faithful `PSG::reset` (sound.cpp:67). Single counter, no
-            // reconstruction-drift bias (`last_update` is the exact floored
-            // boundary, so `cc` already equals Gambatte's `cycleCounter_`).
-            let div_offset = (self.last_update as u32) & (ds as u32);
-            let cc = self.cc.wrapping_add(div_offset);
-            let not_ds = (!ds) as u32;
-            let folded = ((cc & 0xFFF)
-                .wrapping_add(2 * (!(cc.wrapping_add(1).wrapping_add(not_ds)) & 0x800)))
-                % Self::CC_MAX;
-            self.cc = folded;
-            self.len_cc = folded;
-            // lastUpdate_ = ((lastUpdate_ + 3) & -4) - !ds  (parity re-anchor).
-            self.last_update = (self.last_update.wrapping_add(3) & !3u64)
-                .wrapping_sub(not_ds as u64);
-            self.channel1.psg_reset();
-            self.channel2.psg_reset();
-            self.channel3.psg_reset();
-            self.channel4.psg_reset();
-            self.push_cc();
-            return;
-        }
-        // PSG::reset cycleCounter_ fold (sound.cpp:67). Fold the master
-        // accumulator `self.cc` (it carries the DIV-reset fold phase the div_write
-        // cases need); the boot +0x1000 artifact that would otherwise offset the
-        // length quantum is suppressed by the boot-instant guard above.
+        // Faithful `PSG::reset` (sound.cpp:67). Single counter, no reconstruction-
+        // drift bias (`last_update` is the exact floored boundary, so `cc` already
+        // equals Gambatte's `cycleCounter_`).
         let div_offset = (self.last_update as u32) & (ds as u32);
-        // The duty `cc` is reconstructed from the per-dot `abs_cc>>(1+ds)`; the
-        // floored reconstruction lands one APU-cc BELOW Gambatte's
-        // `cycleCounter_` only when the re-anchor happens at DOUBLE speed (the
-        // `>>2` floor drops a sub-quantum the single-speed `>>1` does not).
-        // Re-add it ONCE here at the `PSG::reset` re-anchor so the post-enable
-        // duty cc is byte-exact at both speeds.
-        let duty_bias = if ds { Self::LEN_FOLD_BIAS } else { 0 };
-        let cc = self.cc.wrapping_add(duty_bias).wrapping_add(div_offset);
-        // (cc & 0xFFF) + 2 * (~(cc + 1 + !ds) & 0x800)
+        let cc = self.cc.wrapping_add(div_offset);
         let not_ds = (!ds) as u32;
-        let folded = (cc & 0xFFF)
-            .wrapping_add(2 * (!(cc.wrapping_add(1).wrapping_add(not_ds)) & 0x800))
+        let folded = ((cc & 0xFFF)
+            .wrapping_add(2 * (!(cc.wrapping_add(1).wrapping_add(not_ds)) & 0x800)))
             % Self::CC_MAX;
         self.cc = folded;
-        // Gambatte's `PSG::reset` folds `cycleCounter_` (the length clock) with
-        // this same formula; apply it to `len_cc` so the length-expiry boundary is
-        // re-anchored exactly like Gambatte after the NR52-enable. Re-add the
-        // accumulated `len_cc` -1 reconstruction drift (`LEN_FOLD_BIAS`) here, at
-        // the re-anchor, so the post-enable `len_cc` is byte-exact with Gambatte's
-        // `cycleCounter_`.
-        let lcc = self.len_cc
-            .wrapping_add(Self::LEN_FOLD_BIAS)
-            .wrapping_add(div_offset);
-        self.len_cc = (lcc & 0xFFF)
-            .wrapping_add(2 * (!(lcc.wrapping_add(1).wrapping_add(not_ds)) & 0x800))
-            % Self::CC_MAX;
-        // Gambatte adjusts `lastUpdate_ = ((lastUpdate_+3)&-4) - !ds` here to set
-        // the sub-cycle parity for subsequent generateSamples/divReset shifts.
-        // rustyboi's `advance_to` re-derives whole APU cycles via `floor(abs/2)`
-        // each sync, so it only needs `last_update` to stay anchored to the CPU
-        // clock — mutating its low bits (and the `-!ds` underflow at last_update=0)
-        // freezes `advance_to`. Leave it anchored to the current CPU cc.
-
+        self.len_cc = folded;
+        // lastUpdate_ = ((lastUpdate_ + 3) & -4) - !ds  (parity re-anchor).
+        self.last_update = (self.last_update.wrapping_add(3) & !3u64)
+            .wrapping_sub(not_ds as u64);
         self.channel1.psg_reset();
         self.channel2.psg_reset();
         self.channel3.psg_reset();
         self.channel4.psg_reset();
-
         self.push_cc();
     }
 
-    /// Gambatte `PSG::speedChange` (sound.cpp:89), fired on the CGB STOP speed
-    /// switch. Flushes the APU to the switch cc (handled by the caller via
-    /// `sync_cc` before this runs), then re-folds `cycleCounter_` for the
-    /// single→double transition so the DIV-relative phase halves. `old_ds` is the
-    /// speed being LEFT (Gambatte passes `isDoubleSpeed()` before the KEY1 toggle).
-    ///
-    /// Gambatte: `lastUpdate_ -= ds; if (!ds) { cc = cycleCounter_;
-    /// divCycles = cc & 0xFFF; cycleCounter_ = cc - divCycles/2 - lastUpdate_%2;
-    /// chN.resetCc(cc, cycleCounter_); }`. The `if(!ds)` correction only applies
-    /// going single→double (the DIV runs twice as fast in cc terms afterward, so
-    /// the accumulated sub-quantum phase is halved).
-    pub fn psg_speed_change(&mut self, old_ds: bool) {
-        if !self.clock_anchored {
-            return;
-        }
-        // lastUpdate_ -= ds
-        if old_ds {
-            self.last_update = self.last_update.wrapping_sub(1);
-        }
-        // Only the single->double transition re-folds cycleCounter_.
-        if !old_ds {
-            let cc = self.cc;
-            let div_cycles = cc & 0xFFF;
-            let folded = cc
-                .wrapping_sub(div_cycles / 2)
-                .wrapping_sub((self.last_update % 2) as u32)
-                % Self::CC_MAX;
-            let delta = cc.wrapping_sub(folded);
-            self.cc = folded;
-            self.channel1.reset_cc(delta);
-            self.channel2.reset_cc(delta);
-            self.channel3.reset_cc(delta);
-            // Gambatte's `speedChange` folds `cycleCounter_` (the length clock);
-            // apply the same single->double correction to `len_cc`.
-            let lc = self.len_cc;
-            let lc_div = lc & 0xFFF;
-            self.len_cc = lc
-                .wrapping_sub(lc_div / 2)
-                .wrapping_sub((self.last_update % 2) as u32)
-                % Self::CC_MAX;
-            self.push_cc();
-            self.fire_length_events(self.cc);
-        }
-    }
-
-    /// Stage 4 (RB_SUBDOT): faithful `PSG::speedChange` (sound.cpp:106) for the
+    /// Faithful `PSG::speedChange` (sound.cpp:106) for the
     /// CGB STOP speed switch. `stop_cc` is the master cc the STOP resolves at
     /// (Gambatte's `cc`); the flush target is `cc_ = stop_cc + 8 * !old_ds`. The
     /// single counter is flushed to `cc_` at the OLD speed (`generateSamples`),
@@ -522,7 +380,7 @@ impl Audio {
         // when they straddle a `>>shift` boundary, pushing the read one cc past the
         // expiry boundary (the ch2 nr52 `_1a` off-by-one). Match Gambatte exactly.
         let delta = (read_abs_cc.wrapping_sub(self.last_update) >> shift) as u32;
-        let lcc = self.len_cc.wrapping_add(delta).wrapping_add(Self::LEN_CC_OFF);
+        let lcc = self.len_cc.wrapping_add(delta);
         self.channel1.set_len_cc(lcc);
         self.channel2.set_len_cc(lcc);
         self.channel3.set_len_cc(lcc);
@@ -530,7 +388,7 @@ impl Audio {
         self.fire_length_events(lcc);
         // Restore the steady-state length cc so the next per-dot `push_cc`
         // (which uses the un-overlaid `len_cc`) doesn't see a stale ahead value.
-        let base = self.len_cc.wrapping_add(Self::LEN_CC_OFF);
+        let base = self.len_cc;
         self.channel1.set_len_cc(base);
         self.channel2.set_len_cc(base);
         self.channel3.set_len_cc(base);
@@ -552,15 +410,10 @@ impl Audio {
             return;
         }
         let shift = 1 + self.cached_ds as u32;
-        // Stage 4: the BEFORE-shift delta (Gambatte generateSamples) over the
-        // single counter, matching the read path; flag-off keeps the legacy
-        // independent-floor write overlay.
-        let delta = if self.subdot {
-            (write_abs_cc.wrapping_sub(self.last_update) >> shift) as u32
-        } else {
-            (write_abs_cc >> shift).wrapping_sub(self.last_update >> shift) as u32
-        };
-        let lcc = self.len_cc.wrapping_add(delta).wrapping_add(Self::LEN_CC_OFF);
+        // The BEFORE-shift delta (Gambatte generateSamples) over the single
+        // counter, matching the read path.
+        let delta = (write_abs_cc.wrapping_sub(self.last_update) >> shift) as u32;
+        let lcc = self.len_cc.wrapping_add(delta);
         self.channel1.set_len_cc(lcc);
         self.channel2.set_len_cc(lcc);
         self.channel3.set_len_cc(lcc);
@@ -573,7 +426,7 @@ impl Audio {
         if !self.clock_anchored {
             return;
         }
-        let base = self.len_cc.wrapping_add(Self::LEN_CC_OFF);
+        let base = self.len_cc;
         self.channel1.set_len_cc(base);
         self.channel2.set_len_cc(base);
         self.channel3.set_len_cc(base);
