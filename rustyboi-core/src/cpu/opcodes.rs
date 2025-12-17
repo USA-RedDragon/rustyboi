@@ -35,88 +35,30 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // Counts swept against the full suite; the asymmetry follows the
         // speed-direction-dependent dot accounting of the bridge.
         let to_double = !mmio.is_double_speed_mode();
-        // SS<->DS bridge dot count. Gambatte's `Memory::stop` advances the LCD to
-        // `cc + 8` at the OLD (single) speed before re-anchoring; the per-dot
-        // stepper covers `8 >> ds` of those through the returned cycles, so the
-        // bridge injects the remainder. When the SS->DS switch executes during
-        // active rendering (PixelTransfer / mode 3) the renderer otherwise
-        // overshoots the post-window mode-3->mode-0 boundary by 2 dots (verified
-        // against the Gambatte cctracer on speedchange_ly44_m3_*: the m3stat FF41
-        // read lands 4cc late, lineCycle 250 vs 248), so inject 2 fewer dots and
-        // arm a marker. The double-switch families (speedchange{2..5}) follow with
-        // a DS->SS switch whose bridge restores those 2 dots, so their already-
-        // tuned reads are unaffected; the single-switch base family keeps the -2.
-        // The VBlank/boot SS->DS path (DS sprite/m2int tests) keeps the full 8.
-        // ds-subdot STAGE 2: with the Stage-1 sub-dot `line_cycle` foundation, the
-        // per-dot stepper already leaves the renderer at the EXACT Gambatte lineCycle
-        // / PPU-clock phase at the stop cc, so the tuned bridge dot-counts (and the
-        // pullback / lytime_adjust compensations) are unnecessary. Gambatte's
-        // `Memory::stop` runs `lcd_.speedChange(cc + 8*!old_ds)`, which `update()`s
-        // the LCD to `cc_` at the OLD speed then re-anchors `p_.now = cc_ - old_ds`.
-        // For DS->SS (`old_ds==1`): `cc_ == cc` (8*!1 == 0), so `update` advances ZERO
-        // dots and `p_.now = cc - 1`. The Stage-1 per-dot stepper already has
-        // `line_cycle` at Gambatte's value and `p_now+abs_cc == master_cc - 1` at the
-        // stop cc (the -1 the last render dot left), so the faithful bridge is 0 — the
-        // old `+3` over-advanced `line_cycle`, leaving lyTime/m0Time 2cc low (the
-        // 6cc-late m2). For SS->DS (`old_ds==0`): `cc_ = cc + 8`, so the renderer must
-        // advance the remaining old-speed (SS) dots the returned 8 DS cycles did not
-        // cover; keep the tuned bridge there for now (validated in a later sub-step).
-        // Stage 2 faithful DS->SS re-anchor taken (no bridge, no lytime compensation).
-        let faithful_dsss = !to_double && mmio.ppu.is_in_oam_search();
+        // UNIFORM FAITHFUL STOP-BRIDGE. Gambatte's `Memory::stop` runs
+        // `lcd_.speedChange(cc_ = cc + 8*!old_ds)` -> `update(cc_)` (advance the LCD
+        // to cc_ at the OLD speed) then `PPU::speedChange()` (`now -= old_ds`, with
+        // `lineCycle` preserved). In rustyboi's per-dot model the bridge injects only
+        // the render dots that the returned-8 STOP cycles' NEW-speed stepping does
+        // not cover, derived from that formula rather than per-config tuning:
+        //   SS->DS (old_ds=0): `update` advances 8 old-speed (SS) dots; the returned
+        //     8 cycles tick at the new DS speed and cover `8>>1 = 4`, so the bridge
+        //     injects 8-4 = 4. On a non-rendering line (VBlank / LCD-off) the per-dot
+        //     stepper has no mode-3 window to advance, so the full 8 is injected.
+        //   DS->SS (old_ds=1): `update` advances 0 dots (cc_ == cc); the `now -= 1`
+        //     re-anchor (folded into the bridge dot here) shifts the line phase by 1.
+        // The OAMSearch / pixel-transfer / mode-3-length distinctions the old tuned
+        // bridge encoded collapse to this single per-direction derivation; the prior
+        // pullback double-switch marker is gone (the faithful SS->DS=4 no longer
+        // over-advances, so there is nothing to "restore"). The HDMA-active mode-3
+        // DS->SS still couples to the HDMA block-fire / timer phase across the switch
+        // (the suppress-edge path below), out of scope here — keep its tuned 3.
         let bridge = if to_double {
-            // SS->DS during an active rendering line (OAMSearch / PixelTransfer /
-            // HBlank of LY 0..143): the per-dot renderer overshoots the post-window
-            // mode-3->mode-0 boundary by 2 dots, so drop 2 (bridge 6) and arm the
-            // pullback marker (a following DS->SS restores them). Previously gated to
-            // PixelTransfer only; the HBlank/OAMSearch of a rendering line shares the
-            // overshoot (cctracer speedchange5_ly44: the terminal HBlank SS->DS read
-            // landed at lineCycles 252 vs Gambatte 250). VBlank / LCD-off keeps 8.
-            if mmio.ppu.is_in_pixel_transfer() || mmio.ppu.is_on_rendering_line() {
-                mmio.ppu.arm_sc_mode3_pullback();
-                // ds-subdot STAGE 5b: with Lever A holding abs_cc byte-exact, the
-                // SS->DS mid-mode-3 bridge advances the renderer line phase by 4 dots
-                // so the post-switch renderer lineCycle/m0Time land exact.
-                4
-            } else {
-                8
-            }
-        } else if faithful_dsss {
-            // DS->SS, Stage 2: faithful re-anchor for a switch during the OAM-search
-            // (mode 2) phase — the lcdoff_m2int re-enable-then-OAMSearch canaries. The
-            // Stage-1 per-dot stepper already left the renderer at Gambatte's exact
-            // lineCycle / PPU-clock phase there (no mode-3-length coupling yet), so no
-            // bridge advance is needed: the old `+3` over-advanced `line_cycle`,
-            // leaving lyTime/m0Time 2cc low (the 6cc-late m2). Consume any pullback
-            // marker so a preceding SS->DS that armed it does not dangle. Switches
-            // during/after mode-3 (PixelTransfer / HBlank) still inherit the per-dot
-            // stepper's mode-3-length phase deficit and keep the tuned bridge below;
-            // their faithful re-anchor couples to the mode-3-length work (Stage 5).
-            mmio.ppu.take_sc_mode3_pullback();
-            0
+            if mmio.ppu.is_on_rendering_line() { 4 } else { 8 }
+        } else if mmio.mmio.hdma_is_enabled() {
+            3
         } else {
-            // DS->SS: restore the 2 dots the preceding mode-3 SS->DS bridge
-            // dropped, if any (double-switch families); else the plain bridge.
-            let pullback = mmio.ppu.take_sc_mode3_pullback();
-            // ds-subdot STAGE 5a/5b: with Lever A holding abs_cc byte-exact, the tuned
-            // mode-3 DS->SS bridge over-advances the renderer line phase by 2 dots
-            // (the old +3/+5 encoded the now-eliminated 4-short abs_cc). Rebase -2 so
-            // the post-double-stop PixelTransfer DS->SS re-anchor lands the renderer
-            // lineCycle exact. Under subdot the preceding SS->DS bridge is now itself
-            // faithful (STAGE 5b: rebased to 4), so there is nothing to "restore" — the
-            // pullback `+2` is dropped and base stays 3 regardless of the marker; the
-            // -2 rebase then lands the DS->SS line phase exact for BOTH the Stage-5a
-            // VBlank-then-mode3 cluster (no pullback) AND the ly44_m3 mode3-then-mode3
-            // double switch (pullback). Scope OUT the HDMA-active mode-3 switch
-            // (hdma_late_m3speedchange_*_ds): those couple to the HDMA block-fire/timer
-            // phase across the switch (the suppress-edge path above), where the -2
-            // over-shifts them — keep the tuned bridge there (later HDMA coupling work).
-            if !mmio.mmio.hdma_is_enabled() {
-                1
-            } else if pullback {
-                5
-            } else {
-                3
-            }
+            1
         };
         // Gambatte `Memory::stop` (memory.cpp:453) captures the HDMA halt state at
         // the stop cc and `intreq_.halt()`s for the 0x20000 unhalt window, so the
@@ -198,12 +140,10 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             }
         }
         mmio.ppu.stop_bridge_advance(mmio.mmio, bridge);
-        if !to_double && !faithful_dsss {
-            // Stage 2: the lytime `+1`-drop compensated the old whole-dot bridge that
-            // landed the LyCounter one master-cc high. Skip it ONLY on the faithful
-            // bridge=0 re-anchor path (where the natural +1 phase is exact); every
-            // other DS->SS (the tuned bridge: mid-mode-3 / HBlank switches, and all
-            // flag-off runs) still needs it.
+        if !to_double {
+            // DS->SS: the faithful `now -= old_ds` (== 1) re-anchor is folded into
+            // the bridge dot count (DS->SS bridge = 1), which leaves the LyCounter
+            // one master-cc high; the closed-form lyTime drops its `+1` correction.
             mmio.ppu.set_dsss_lytime_adjust();
         }
         mmio.perform_speed_switch();
