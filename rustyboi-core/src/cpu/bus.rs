@@ -18,6 +18,22 @@ pub(crate) fn faithful_enabled() -> bool {
     true
 }
 
+/// per-access engine STAGE 0: scaffolding gate (RB_PERACCESS). Default OFF =
+/// byte-identical to HEAD (86 failures). When ON it will (future stages) make
+/// the within-M-cycle / instruction-boundary / m0-edge cc sub-dot exact: a true
+/// min-event `run_to` jump, the STOP re-anchor by exact fractional phase, the
+/// CPU store vs PPU fetch ordered at their true sub-dot cc, and the m0 rising
+/// edge resolved at the exact cc — deleting the dot-grid compensations. See
+/// ENGINE_PERACCESS.md. Stage 0 wires the flag ONLY (no behavior change). Read
+/// once, OnceLock-cached (same pattern as the historical RB_SUBDOT/RB_FAITHFUL;
+/// inlined/removed before merging to main, where env vars are not permitted).
+#[allow(dead_code)]
+pub(crate) fn peraccess_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("RB_PERACCESS").is_ok())
+}
+
 /// ds-engine STAGE 6/7: the run-to-next-event scheduler is the single CPU world-
 /// advance path. `tick_m` advances `master_cc` by the access duration (one
 /// M-cycle = 4 dots) and a single `run_to(target_cc)` resolves every peripheral
