@@ -618,6 +618,56 @@ impl Mmio {
         self.timer = timer;
     }
 
+    /// per-access STAGE 1 (min-event idle fast path): true when the whole world is
+    /// idle except the timer+serial, so a span of dots can be bulk-skipped to the
+    /// next scheduled event without losing any per-dot peripheral side effect.
+    /// Requires: LCD off (no PPU renderer / mode edges / STAT-IRQ schedule),
+    /// no OAM-DMA in flight, no HDMA armed, APU powered off (its channels step per
+    /// dot), no deferred HDMA block writes, no OAM-DMA stall catch-up, no halt OAM
+    /// grace, and no queued delayed register writes. Under all of these only
+    /// `step_timer` and `step_serial` advance, and both are span-collapsible
+    /// (the timer via `Timer::step_to`, serial via its phase-based `step`). The CPU
+    /// T-phase parity only gates the PPU, which is off here, so collapsing it is a
+    /// no-op. This is purely an advance-mechanism optimization: the per-dot
+    /// fallback in `Bus::run_to` handles every cc the guard rejects, so behavior is
+    /// byte-identical to the per-dot crank.
+    pub fn idle_bulk_skippable(&self) -> bool {
+        let lcd_on = self.io_registers.read(ppu::LCD_CONTROL)
+            & (ppu::LCDCFlags::DisplayEnable as u8)
+            != 0;
+        !lcd_on
+            && !self.dma_active
+            && self.oam_dma_stall_suppress == 0
+            && self.halt_oam_grace == 0
+            && !self.hdma_enabled
+            && !self.hdma_req_pending
+            && !self.audio.is_powered()
+            && !self.serial.is_active()
+            && self.delayed_writes.is_empty()
+            && !self.has_pending_hdma_deferred()
+    }
+
+    /// per-access STAGE 1: bulk-advance the timer+serial to `target_cc` in one shot
+    /// (only call when `idle_bulk_skippable()` held for the entire span). Mirrors
+    /// the order `resolve_one_dot` uses (timer, then serial) so the net effect is
+    /// byte-identical to cranking each dot. `master_cc` is `timer.abs_cc`, so the
+    /// timer's `step_to` carries the master cc to the target and the serial step
+    /// observes the final phase.
+    pub fn bulk_advance_idle(&mut self, target_cc: u64) {
+        let dots = target_cc.wrapping_sub(self.master_cc());
+        let mut timer = self.timer.clone();
+        timer.step_to(target_cc, self);
+        self.timer = timer;
+        // Serial is phase-based: stepping once at the final phase shifts the same
+        // bits and (if it completed) fires the IRQ exactly as the per-dot path. The
+        // guard already requires it inactive, so this is a defensive no-op.
+        self.step_serial();
+        // The per-dot path advances `cpu_t_phase` once per dot; collapse the same
+        // count so the T-phase parity that gates the (currently off) PPU stays
+        // exactly where the per-dot crank would have left it.
+        self.cpu_t_phase = self.cpu_t_phase.wrapping_add(dots);
+    }
+
     /// Write a timer register, then immediately deliver any glitch IRQ the write
     /// scheduled (Gambatte flags it inline at the write cc). The write resolves
     /// at the timer's current `abs_cc`, which the CPU positions at the access
@@ -832,6 +882,13 @@ impl Mmio {
         self.timer.next_overflow_ei_cc()
     }
 
+    /// per-access STAGE 1: the EXACT cc the next timer overflow's IF bit is raised
+    /// at, with the same `fold` `step_to`/`update_irq_delivery` will apply. The
+    /// min-event idle fast path lands on this cc so the overflow fires identically.
+    pub fn next_timer_overflow_fire_cc(&self) -> Option<u64> {
+        self.timer.next_overflow_fire_cc(self.cpu_is_halted())
+    }
+
     /// EARLY (EI-loop) gate cc of the undispatched timer IRQ.
     pub fn pending_timer_fire_cc_ei(&self) -> Option<u64> {
         self.timer.pending_fire_cc_ei()
@@ -958,6 +1015,13 @@ impl Mmio {
         } else {
             self.vram.write(vram_addr, byte);
         }
+    }
+
+    /// per-access STAGE 1: true while deferred HDMA block writes are still in their
+    /// per-dot countdown (`step_hdma_deferred` must run each dot to commit them at
+    /// the right cc). Blocks the idle bulk-skip.
+    pub fn has_pending_hdma_deferred(&self) -> bool {
+        !self.hdma_pending_writes.is_empty()
     }
 
     /// Drain the deferred-HDMA write buffer one dot. When the delay expires the

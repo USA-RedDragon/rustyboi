@@ -50,6 +50,13 @@ impl Serial {
         self.cgb = cgb;
     }
 
+    /// per-access STAGE 1: true while a serial transfer is in flight (its
+    /// `complete_at` event is pending). Blocks the idle bulk-skip so the transfer's
+    /// bit-shift and completion IRQ land at the exact cc.
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
     /// Latch an SC (FF02) write and (re)schedule the transfer event.
     pub fn schedule_sc(&mut self, value: u8, divider: u16, phase: u64) {
         self.sc = value;

@@ -495,6 +495,14 @@ impl Audio {
         self.frame_sequencer_step = (self.frame_sequencer_step + 1) % 8;
     }
 
+    /// per-access STAGE 1: true while the APU is powered (NR52 bit 7). The
+    /// min-event idle fast path only bulk-skips dots when audio is OFF, because a
+    /// powered APU steps its channel duty/freq counters per dot (`step`), which is
+    /// not span-collapsible like the frame sequencer.
+    pub fn is_powered(&self) -> bool {
+        self.audio_enabled
+    }
+
     pub fn get_master_volume_left(&self) -> u8 {
         (self.nr50 >> 4) & 0x07
     }

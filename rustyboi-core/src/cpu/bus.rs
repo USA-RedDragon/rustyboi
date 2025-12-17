@@ -153,10 +153,62 @@ impl<'a> Bus<'a> {
     /// `tick_remaining` and the PPU's per-instruction `dot` semantics are
     /// preserved.
     fn run_to(&mut self, target_cc: u64) {
+        if peraccess_enabled() {
+            self.run_to_min_event(target_cc);
+            return;
+        }
         while self.mmio.master_cc() < target_cc {
             self.resolve_one_dot();
             self.dot = self.dot.wrapping_add(1);
             self.ticked += 1;
+        }
+    }
+
+    /// per-access STAGE 1: the true min-event-jump driver (behind `RB_PERACCESS`).
+    /// Instead of cranking `resolve_one_dot` once per dot to `target_cc`, advance
+    /// `master_cc` directly to `min(target_cc, next_event_cc)` — the next cc at
+    /// which any peripheral does something observable — firing exactly that span,
+    /// then repeat until `master_cc == target_cc`.
+    ///
+    /// Stage 1 is a PURE refactor of the advance MECHANISM: it must be
+    /// byte-identical to the per-dot crank. The renderer / PPU / OAM-DMA / HDMA /
+    /// powered-APU are intrinsically per-dot stateful machines (mode edges,
+    /// duty/freq counters, period-edge detection, sub-cycle catch-up), so while ANY
+    /// of them is live the loop still resolves dot-by-dot (`resolve_one_dot`) — the
+    /// proven byte-identical primitive. The genuine jump win is over IDLE spans
+    /// (`Mmio::idle_bulk_skippable`: LCD off, no DMA/HDMA, APU off, serial idle):
+    /// there only the timer and serial advance, and both are span-collapsible
+    /// (closed-form over the span), so the whole idle span is jumped in one
+    /// `bulk_advance_idle` to the next scheduled event cc (timer overflow / next
+    /// non-idle boundary), reproducing every fire at its exact cc. The next-event
+    /// cc for the idle skip is the next timer-overflow delivery cc (the only event
+    /// that can fire while idle); everything else is reached by clamping to
+    /// `target_cc`, where the CPU's own access boundary re-evaluates the world.
+    fn run_to_min_event(&mut self, target_cc: u64) {
+        while self.mmio.master_cc() < target_cc {
+            if self.mmio.idle_bulk_skippable() {
+                // Jump straight to the next event the timer can raise (an overflow
+                // IRQ delivery) or, if none, to the target. The timer overflow is
+                // delivered at its absolute fire cc inside `bulk_advance_idle`, so
+                // landing exactly there fires it at the identical cc the per-dot
+                // path would have. Clamp to target so the CPU access boundary
+                // re-checks the world (e.g. a freshly written FF40 turning the LCD
+                // on) before we skip past it.
+                let next_event = self
+                    .mmio
+                    .next_timer_overflow_fire_cc()
+                    .filter(|&cc| cc > self.mmio.master_cc())
+                    .map(|cc| cc.min(target_cc))
+                    .unwrap_or(target_cc);
+                let span = next_event.wrapping_sub(self.mmio.master_cc());
+                self.mmio.bulk_advance_idle(next_event);
+                self.dot = self.dot.wrapping_add(span as u32);
+                self.ticked += span as u32;
+            } else {
+                self.resolve_one_dot();
+                self.dot = self.dot.wrapping_add(1);
+                self.ticked += 1;
+            }
         }
     }
 
