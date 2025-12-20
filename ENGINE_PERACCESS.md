@@ -364,6 +364,68 @@ FF41 write lands at line_cycle 47 not 50.)
   Depends on Stage 1 (sub-dot advance); somewhat coupled to Stage 2 via the
   speed-switch+m0 variants.
 
+#### Stage 3 status (FACET 1, this session) — ROOT FOUND + faithful fix identified, but it COUPLES to FACET 2 (cannot reach broke-0 alone). REVERTED to 798b356.
+
+**Decisive cctracer + runner-trace ground truth (canary `late_enable_lcdoffset2_1`):**
+The CPU instruction boundary is ALREADY byte-exact through the STOP sequence — the
+handler's IF read (`pc=0x1067`, `ldff a,(0f)`) lands at rustyboi cc 553716 == Gambatte
+612084 (constant boot offset 58368), in BOTH the passing 1-pair and the failing 2-pair.
+Lever A's `0x20000+8` per-STOP CPU advance matches Gambatte's `cc()=C+0x20000+8` exactly
+(verified against `Memory::stop` memory.cpp:444 + cpu.cpp case 0x10: `cc()=stop(cc()-4)`
+then the `+= cycles + (-cycles&3)` unhalt jump). **So the failure is NOT the CPU resume
+cc — it is the LCD/renderer phase.**
+
+The real observable: the handler's FF41 mode-2-enable write (`pc=0x1065`) fires the m2
+STAT IRQ via the immediate `statChangeTriggersM2IrqCgb` quirk (video.cpp:619) iff
+`time_to_next_ly = lyCounter.time - write_cc` ∈ {3,4} at SS (`(456-452)*(1+ds)`, `>2`).
+Measured `ttnl` at the write (runner STATW hook):
+- 1-pair `lcdoffset3_1` (PASS): ttnl=3 → m2 fires → out2. ✓
+- 2-pair `lcdoffset2_1` (FAIL): ttnl=2 → no fire → out0. ✗ (needs 3)
+
+**Root, MEASURED & DECISIVE — the DS->SS sub-dot (half-dot) carry.** Gambatte's
+`Memory::stop` re-anchors the LCD with `now -= isDoubleSpeed()` (== 1 DS cc = HALF an
+SS dot) on a DS->SS switch (video/ppu.cpp:1846 `PPU::speedChange`). rustyboi's whole-dot
+DS->SS bridge (1) + `set_dsss_lytime_adjust` rounds that half-dot to 0. So:
+  - 1 DS->SS-mode3 switch  → +0.5 dot → rounds to 0 (correct; the 1-pair siblings pass).
+  - 2 DS->SS-mode3 switches → +1.0 dot → a WHOLE dot the whole-dot bridge never injects.
+The failing 2-pair (`lcdoffset2_1`, 2 DS->SS-mode3 STOPs at cc=139004 + 401188) lands the
+post-STOP LCD phase 1 dot short; the passing 1-pair `*_ds_lcdoffset1_2` (1 DS->SS-mode3
+STOP) is BYTE-IDENTICAL at every STOP yet needs NO extra dot. **No integer-cc predicate
+at any single STOP discriminates them** (the SS->DS-HBlank STOP at cc=270096 is identical
+in both) — exactly the "needs even deeper per-access cc" the roadmap warns of. The
+discriminator is the ACCUMULATED half-dot across the DS->SS switch COUNT.
+
+**Faithful fix BUILT & PROVEN (then reverted):** a stop-count-invariant half-dot
+accumulator — every SECOND DS->SS-mode3 STOP injects one extra bridge dot (`floor(n/2)`,
+reproducing the `now -= 1` accumulation), reusing the vestigial `sc_mode3_pullback`
+flag. Full suite RB_PERACCESS=1: **84 -> 81, fixed 6, broke 3.** flag-OFF (env UNSET)
+== 86 byte-exact. Fixed: `late_enable_lcdoffset2_1`, `late_enable_ly0_lcdoffset2_1`,
+`offset2_lyc8fint_m1stat_1`, `offset2_lyc98int_ly_count_2`,
+`offset2_lyc99int_m0stat_count_scx1_1`, `offset2_lyc99int_m2irq_count_1`. The
+multi-pair `speedchange*_m3stat` (3/4/5-pair) and `*_ds_lcdoffset1_2` families STAY
+passing. Debug smoke (overflow checks) of Pokemon Crystal (heavy speed-switch) + Tetris
+ran clean at flag-ON and flag-OFF.
+
+**WHY it is reverted (the broke-0 blocker = FACET 2 coupling):** the carry MUST be a
+*rendered* bridge dot. The m2-enable trigger reads `lyCounter.time = abs_cc +
+(456-line_cycle)<<ds`, and `ttnl = lyCounter.time - write_cc` must shift by an ODD 1 dot.
+A pure `p_now` phase shift moves `ttnl` only by `2*p_now` (EVEN; verified: it spared all
+FACET-2 collateral but left the targets at the wrong ttnl). The odd shift REQUIRES
+advancing `line_cycle`, i.e. a rendered dot — which simultaneously shifts the mode-3
+render-latch by 1 dot. That regresses the FACET-2-coupled siblings:
+  - `prewrite_lcdoffset2_1` (vram_m3 mode-3 write latch) — pure render collateral.
+  - `offset2_lyc8fint_m1irq_2`, `offset2_lyc99int_m2irq_count_2` — the `_2` halves of
+    `_1`/`_2` bracket pairs Gambatte separates by 1cc (rustyboi collapses both to one
+    side; fixing `_1` flips `_2` — a sub-cc swap, net 0 for that pair).
+So the LCD-phase fix (correct for the STAT/m2 observable) and the render-latch are
+COUPLED through `line_cycle`; reaching broke-0 needs **FACET 2 — decoupling the line
+clock from the pixel fetcher** so the STAT phase can advance without moving the latch.
+That is out of FACET-1 scope. The faithful per-STOP DS->SS half-dot carry is PROVEN
+correct and stop-count-invariant; its application is gated on the FACET-2 line/fetcher
+split. Patch preserved in this note (the `floor(n/2)` accumulator in `opcodes.rs::stop`
++ a rendered carry bridge dot on the 2nd DS->SS-mode3 STOP). Tree reverted to 798b356,
+flag-OFF == 86, flag-ON == 84.
+
 ### Stage 4 — FACET 2: within-M-cycle store-vs-latch order.
 Make the CPU SCX/SCY (and any VRAM/OAM/reg) store and the PPU fetcher's TileNumber
 latch resolve in their true sub-dot order within the M-cycle: instead of committing the
