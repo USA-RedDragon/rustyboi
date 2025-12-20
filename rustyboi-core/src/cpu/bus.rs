@@ -396,16 +396,23 @@ impl<'a> Bus<'a> {
             return false;
         }
         let kind: u8 = if is_vram { 0 } else if is_oam { 1 } else { 2 };
-        // STAGE 4: derive the fallback mode (used only when no closed-form
-        // m0Time anchor exists for this line) from the closed-form getStat at the
-        // access cc, not the per-dot renderer's poked FF41 register.
+        // STAGE 4 KEYSTONE: this is a RENDER-visibility gate, so view the CPU
+        // access in the carried anchor frame (un-carried fetcher geometry) by
+        // adding the accumulated STAT-phase carry skew. The FACET-1 STOP carry
+        // advances the STAT/line phase (so getStat / lyTime-anchored boundaries
+        // shift) but the fetcher's mode-3 lock window did NOT move; the skew
+        // re-aligns the access. 0 (no shift) when no carry is live / flag-OFF.
+        let gate_cc = (access_cc as i64 - self.ppu.render_carry_skew()).max(0) as u64;
+        // Derive the fallback mode (used only when no closed-form m0Time anchor
+        // exists for this line) from the closed-form getStat at the gate cc, not
+        // the per-dot renderer's poked FF41 register.
         let mode = self.ppu
-                .get_stat(self.mmio, access_cc)
+                .get_stat(self.mmio, gate_cc)
                 .unwrap_or_else(|| self.mmio.read(ppu::LCD_STATUS) & 0x03);
         let mode_locked = if is_oam { mode == 2 || mode == 3 } else { mode == 3 };
         let ds = self.mmio.is_double_speed_mode();
         let is_cgb = self.mmio.is_cgb_features_enabled();
-        if let Some(blocked) = self.ppu.cpu_access_blocked(kind, is_read, mode_locked, is_cgb, ds, access_cc) {
+        if let Some(blocked) = self.ppu.cpu_access_blocked(kind, is_read, mode_locked, is_cgb, ds, gate_cc) {
             return blocked;
         }
         mode_locked

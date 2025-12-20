@@ -792,6 +792,16 @@ pub struct Ppu {
     // shift on the STAT/line phase WITHOUT moving the render latch.
     #[serde(default)]
     dsss_mode3_stop_count: u32,
+    // STAGE 4 (FACET 2 KEYSTONE, RB_PERACCESS): accumulated STAT-phase carry in
+    // master-cc (`1<<ds` per `stat_phase_carry` dot). The carry advances the
+    // STAT/line phase (line_cycle/abs_cc) so the STAT/m2-enable observables shift,
+    // but the pixel-fetcher render latch must stay anchored to its ORIGINAL
+    // position. The CPU VRAM/OAM/cgbp access-visibility gate (`ppu_blocks` via
+    // `render_carry_skew`) SUBTRACTS this skew from the access cc so a store still
+    // resolves against the un-carried fetcher mode-3 lock window — the decoupling
+    // that lets FACET 1's odd STAT-phase shift land without moving the render latch.
+    #[serde(default)]
+    render_carry_skew_cc: i64,
     // Sub-PPU-dot parity (0/1) of the currently-resolving CPU register write at
     // double speed. Set by the bus just before the FF4x write hooks run.
     #[serde(skip, default)]
@@ -975,6 +985,7 @@ impl Ppu {
             lytime_no_plus1: false,
             sc_mode3_pullback_pending: false,
             dsss_mode3_stop_count: 0,
+            render_carry_skew_cc: 0,
             cgbp_block_start_cc: None,
             mode0_reported_this_line: false,
             line_rendered_this_line: false,
@@ -1713,6 +1724,15 @@ impl Ppu {
     /// `Bus::interrupt_low_push_lcd_ack`).
     pub fn abs_cc(&self) -> u64 { self.abs_cc }
 
+    /// STAGE 4 KEYSTONE — the accumulated STAT-phase carry (master-cc). The bus
+    /// SUBTRACTS this from a CPU VRAM/OAM access cc so the render-visibility gate
+    /// (`ppu_blocks` / `get_stat` fallback mode + `cpu_access_blocked`) sees the
+    /// access in the un-carried fetcher geometry (the carry moved the lyTime
+    /// boundaries but not the fetcher's lock window). 0 when no carry is live.
+    pub fn render_carry_skew(&self) -> i64 {
+        self.render_carry_skew_cc
+    }
+
     pub fn set_fetch_debug_events_enabled(&mut self, enabled: bool) {
         self.fetch_debug_events_enabled = enabled;
         if !enabled {
@@ -2045,9 +2065,15 @@ impl Ppu {
     pub fn stat_phase_carry(&mut self, mmio: &mut mmio::Mmio, dots: u32) {
         for _ in 0..dots {
             self.step_scheduled_stat_events(mmio);
-            self.p_now = self.p_now.wrapping_sub(1 << mmio.is_double_speed_mode() as u32);
+            let dot_cc = 1i64 << mmio.is_double_speed_mode() as u32;
+            self.p_now = self.p_now.wrapping_sub(dot_cc as u64);
             self.step_stat_phase_only(mmio);
             self.step_lcdc_events(mmio);
+            // The STAT phase (line_cycle/abs_cc) just advanced one dot; the render
+            // latch did NOT. Record the divergence so the CPU-access visibility
+            // gate (`ppu_blocks` -> `render_carry_skew`) re-aligns a store to the
+            // un-carried fetcher position (FACET-2 decoupling).
+            self.render_carry_skew_cc += dot_cc;
         }
     }
 
@@ -4636,6 +4662,14 @@ impl Ppu {
         if self.disabled || self.internal_ly_val >= 144 {
             return Some(false);
         }
+        // STAGE 4 KEYSTONE: this gate is a RENDER-visibility decision (does the
+        // CPU VRAM/OAM/cgbp store land before/after the fetcher's mode-3 lock).
+        // The FACET-1 carry advances the STAT/line phase, so the lyTime-anchored
+        // boundaries (`cgbp_block_start_cc`/`m0_time_master`) move EARLIER in
+        // master cc while the fetcher's actual lock window did NOT. The caller
+        // (`ppu_blocks`) passes a render-frame `access_cc` (the raw cc minus the
+        // accumulated carry skew) so the access compares against the un-carried
+        // geometry. No-op when no carry is live (flag-OFF / non-STOP paths).
         let cc = access_cc as i64;
         let ds = double_speed as i64;
         // The cached `m0_time_master` is byte-exact with Gambatte's `m0Time` at a

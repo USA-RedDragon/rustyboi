@@ -165,7 +165,7 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // gates the staging: Step 1 (decouple checkpoint) keeps it false so the
         // path is registered/wired but injects 0 dots => flag-ON byte-identical to
         // the rendered bridge (84). Step 2 flips it true to land the carry.
-        const STAGE4_FACET1_CARRY: bool = false;
+        const STAGE4_FACET1_CARRY: bool = true;
         if dsss_mode3_switch {
             let carry = mmio.ppu.register_dsss_mode3_stop();
             if STAGE4_FACET1_CARRY {
