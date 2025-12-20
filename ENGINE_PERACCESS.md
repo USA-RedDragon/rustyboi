@@ -288,6 +288,66 @@ m0-edge-constant brackets are already at their calibrated optimum on the dot gri
 nudging them is a strict trade. Reverted; tree clean at a6d344f, flag-OFF=86,
 flag-ON=86.
 
+#### Stage 2 status (CORRECTED, LANDED) — sub-block-cc m0-edge CONSUME. flag-ON 86->84, broke 0.
+The FALSIFIED note above located the discriminator at the HALT entry and concluded it
+was sub-dot-only. That was **half right**: the HALT entry is genuinely invariant — BOTH
+ROMs enter `Memory::halt` as `hdma_requested` (cctracer `[GBHALT]` hook on the gambatte
+worktree, NEW this session: `_1` cc=70240 / `_2` cc=70244, both `isHdmaPeriod=1
+hdmaReqFlagged=1`). So the halt classification is NOT the lever. The TRUE discriminator
+is one level later, at the **post-unhalt m0 edge vs the just-fired block's transfer
+span** — an integer-cc signal that the prior note missed by only tracing the halt cc.
+
+**Decisive cctracer ground truth** (gambatte `[GBHALT]/[GBINTUNHALT]/[GBDMAEV]/[GBM0EV]`
+hooks added to memory.cpp/video.cpp this session, then fully reverted — cctracer pristine):
+```
+            HALT@req  UNHALT  block1(DMAEV,req)  block2(DMAEV)  gap b1->b2
+ _1 (out00) 70240     70664   70664              71152          +488 (one LINE later)
+ _2 (outFF) 70244     70664   70664              70700          +36  (this line, in-service)
+```
+Gambatte fires exactly TWO blocks. block1 is the held `Requested` block, fired at unhalt.
+block2 is the NEXT m0 edge. The discriminator: after block1 fires at 70664, its `dma()`
+transfer occupies `[70664, 70664+16*(2+2*ds)) = [70664, 70696)` (SS). The next m0
+`memevent_hdma` lands at **70696 (`_1`, == transfer END → ABSORBED by the in-flight
+`dma()`; `flagHdmaReq` reschedules to the line AFTER → block2 @71152)** vs **70700
+(`_2`, transfer-end+4 → fires its OWN block @70700, this line)**. So a 4 cc shift in the
+m0 edge flips whether it falls inside block1's transfer span or just past it.
+
+rustyboi (RB_HDMA_TRACE map, same clock): UNHALT 12296, block1 FIRE 12297, block2 arm at
+the per-dot m0 edge `m0t-1` = 12328 (`_1`) / 12332 (`_2`); transfer end = 12297+32 = 12329.
+`_1` arm (12328/12329) is `<= end` → must be ABSORBED (block2 → next line); `_2` arm (12332)
+is `> end` → fires this line. The dot-grid baseline fired block2 at the absorbed edge for
+BOTH (plus a spurious coincident-rollback re-fire), passing `_2` by luck, failing `_1`.
+
+**Fix (LANDED, RB_PERACCESS):** at the `Requested`-at-halt unhalt reflag
+(`sm83.rs`, the `HaltHdmaState::Requested` arm) arm a one-shot sub-block-cc consume
+(`Mmio::arm_hdma_peraccess_consume`). In `step_hdma`'s two m0-arm branches
+(`mmio.rs`), a new `peraccess_consume_m0_arm()` absorbs any m0 rising-edge arm whose
+master cc lands in `[block1_fire_cc, block1_fire_cc + 16*(2+2*ds)]` (inclusive end —
+Gambatte's edge AT the transfer end is consumed), deferring the genuine next block one
+line; the first arm strictly PAST the span fires its block and disarms the consume. This
+is the faithful Gambatte mechanism (m0 `memevent_hdma` absorbed by the in-flight `dma()`),
+NOT a bracket constant: the boundary is the transfer LENGTH, derived, not tuned. The
+consume is cleared at HALT entry so it never spans halts; flag-OFF leaves the whole path
+untouched (`peraccess_enabled()` early-out inside the helper).
+
+**Result:** full suite RB_PERACCESS=1 **86 -> 84**, fixed=2 (`hdma_transition_halt_late
+_unhalt_scx1_1` + sibling `hdma_transition_ei_halt_late_unhalt_scx1_1`), broke=0 across
+all 5257 tests (hdma/dma/m0/sprite/window screened via diffn vs main_86). flag-OFF == 86
+byte-identical. ONE faithful model resolves the canary `_1`/`_2` pair with no swap.
+
+**What resists (NOT this consume's bug — separate sub-mechanisms):** the
+`hdma_transition_*halt_late_unhalt_ldaaimm_hdma_scx1_*` siblings fire block2 this line
+(Gambatte @70712, an intervening LD A,imm shifts the block start) but at a WRONG block2
+FIRE CC in rustyboi — a block2-fire-cc-PRECISION residual, not a consume-decision error
+(my window correctly does NOT consume them). The `hdma_late_m3speedchange_*` /
+`m0speedchange_late_m3wakeup_*` family is the m0-edge × speed-switch coupling (FACET 3 ×
+FACET 1), still open. The `_2` (out02) `inc`/`ldaaimm` variants are the same block2-fire-cc
+precision class. Next sub-step for FACET 3: make block2's FIRE cc (not just the
+fire/defer decision) exact for the in-service case — i.e. fire block2 at its exact m0
+event cc in the min-event driver rather than the per-dot `m0t-1` arm dot.
+
+Tree at f-peraccess HEAD (this commit), flag-OFF=86, flag-ON=84.
+
 ### Stage 3 — FACET 1: sub-dot STOP re-anchor (CPU boundary locked to LCD).
 Replace the whole-dot `stop_bridge_advance` with the exact fractional renderer
 re-anchor across the STOP, so the CPU instruction boundary's `abs_cc` parity stays
