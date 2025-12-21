@@ -1176,6 +1176,12 @@ impl Mmio {
         self.hdma_req_pending
     }
 
+    /// Remaining HDMA blocks minus one (the FF55 length field). 0 => the next
+    /// block completes the transfer.
+    pub fn hdma_length(&self) -> u8 {
+        self.hdma_length
+    }
+
     /// Arm the High-at-halt unhalt edge-consume: the first post-unhalt m0 HDMA edge
     /// is suppressed (it was the during-halt edge Gambatte already consumed). Called
     /// at the unhalt site when `haltHdmaState_ == High`.
