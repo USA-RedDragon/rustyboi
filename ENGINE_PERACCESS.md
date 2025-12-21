@@ -518,6 +518,59 @@ line-END / next-line mode-2 OAM-wrap boundary cc under the carried phase (the 1-
 fetcher-latch-vs-store order (the original FACET-2 "store-vs-TileNumber-latch" item).
 Both are integer-cc-invisible without a fetch-vs-store-cc hook; do NOT bracket-tune.
 
+#### Stage 5 status (FACET-2-proper) — the 3 `_2` bracket halves RECOVERED. flag-ON 81 -> 78, broke 0, flag-OFF == 86. Commit `60e36b6`.
+The 3 Stage-4 regressions (`prewrite_lcdoffset2_2`, `offset2_lyc8fint_m1irq_2`,
+`offset2_lyc99int_m2irq_count_2`) were ALL the same line-end boundary at sub-dot
+resolution under the carried phase — NOT the within-dot SCX store-vs-TileNumber-latch
+order. Located decisively via rustyboi-side cc traces (the carried `abs_cc`/`internal_ly`
+vs the un-carried render machine), no bracket tuning:
+
+- **`prewrite_lcdoffset2_2` (VRAM-write line-end).** Trace at the write: `_1` lands at
+  line_cycle 79 (still LY=1 mode-2, before the cgbp/VRAM begin window), `_2` 4cc later
+  at line_cycle 83 (PAST the begin window, i.e. into the next line's mode-3 → blocked).
+  Under the carry the lyTime-anchored `vram_started` begin (de-skewed access cc vs the
+  un-carried cgbp begin) is now EXACT, so `started` alone discriminates the pair. The
+  pre-existing coarse `ticks>80` OAMSearch escape (`cpu_access_blocked`) forced the whole
+  carried mode-2 tail accessible and flipped `_2` wrong. Fix: when a carry is live
+  (`render_carry_skew_cc != 0`), return `started` directly instead of the coarse escape.
+- **`offset2_*_m1irq_2` + `*_m2irq_count_2` (VBlank line-end).** Decisive trace: rustyboi
+  flags the mode-1 STAT IRQ (`sched_m1irq` in `dispatch_stat_events`) at the CARRIED
+  line-clock m1 boundary (abs_cc 552272 = master_cc 560096, Gambatte-exact), but flags the
+  actual VBlank interrupt (IF bit 0) from the RENDER machine (`HBlank ticks==455`, master_cc
+  560098) which the carry does NOT advance. The `_2`-half IF read lands in that 2-3cc gap
+  → sees the STAT bit (E2) but misses VBlank (correct = E3). Gambatte fires BOTH from the
+  same lyCounter LY=144 event. Fix: under a live carry, also fire VBlank at the carried m1
+  boundary in `dispatch_stat_events` (idempotent with the render machine's later same-frame
+  fire). This is the line-clock/render decoupling carried through to the VBlank IRQ, the
+  exact analog of the STAT-phase carry.
+
+Both fixes are `render_carry_skew_cc != 0`-scoped so flag-OFF and non-carried frames keep
+the proven render-machine paths byte-identical. Full suite RB_PERACCESS=1: 81 -> 78
+(fixed 8 vs main_86, broke 0); flag-OFF == 86 byte-identical; debug smoke (overflow checks)
+clean on lcd_offset/vram_m3/oam_access/scx_during_m3/m1.
+
+#### Stage 5 — scx_during_m3 render cluster (the original FACET-2 store-vs-latch): NOT a
+#### sub-dot-cc fix — it needs a per-COLUMN-scx closed-form renderer. DEFERRED (net-0 risk).
+The `scx_during_m3_3/_4` (= `scx_0761c0/_3,_4`), `scx_during_m3_ds_2..5`, `spx0/1/2`,
+`scx_attrib_*` failures are NOT the within-dot store-vs-TileNumber-latch order at all —
+they are a structural limitation of the closed-form renderer. `render_full_line`
+(`linerender_enabled`) renders the whole visible line at the mode-3→HBlank transition
+using a SINGLE `scx_delayed` value (`line_bg_pixel` reads `self.scx_delayed` for every
+column). The scx_during_m3 ROMs write SCX 3+ times mid-mode-3 (e.g. 0x07→0x61→0xc0→0x07):
+the displayed line must show each column with the scroll value in effect WHEN THAT TILE
+WAS FETCHED. The single-value renderer cannot represent that. Measured: `scx_0761c0/_4`
+diverges 1144 px with the first mismatch at x=135 (the LATE columns, governed by the
+later 0xc0/0x07 writes), confirming a multi-value-per-line scroll, not a first-tile
+discard (the existing `rewrite_first_fifo_tile`/`scx_f1_*` f1-discard latch already
+handles the first tile; the aligned `scx_0060c0` set passes). A faithful fix requires
+recording the (cc, scx&7 + tile-column-shift) write events during mode-3 and having
+`line_bg_pixel` pick the scx that was live at each column's fetch cc. This is exactly the
+render-side rewrite memory `scx-during-m3-plus2cgb` proved nets 0 at any single offset and
+risks the many passing scx cases; it is its own substantial sub-project (per-column scx
+history in the closed-form renderer), deliberately deferred rather than bracket-tuned. The
+3 `_2` halves above were the genuinely sub-dot-cc-recoverable FACET-2 residual; the scx
+cluster is a separate renderer-model item.
+
 ### Stage 5 — FINALIZE (flip default-on + delete compensations).
 Flip `peraccess_enabled()` to unconditional true; inline each
 `if peraccess { NEW } else { OLD }` to NEW; DELETE the dead offsets
