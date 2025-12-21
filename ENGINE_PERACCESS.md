@@ -580,6 +580,52 @@ fully subsumes them — `step_subdot`/parity-gate), incrementally, holding the f
 after EACH file. Remove the env var (env not allowed in main). FINAL gate: full suite
 < 86 with no env, HARD self-verify, smoke-test 2 real ROMs in DEBUG (overflow checks).
 
+#### Stage 5 FINALIZE status (DONE — flip complete, env-free, suite=78). f-peraccess.
+The flip + cleanup is complete. The per-access engine is now the PERMANENT default
+with NO env var. Done incrementally, full suite held byte-identical at 78 after EACH
+step:
+
+1. `peraccess_enabled()` made unconditional `true`; full suite (env UNSET) = **78**
+   (net -8 vs main_86, fixed 8, broke 0), failure set byte-identical to the prior
+   `RB_PERACCESS=1` run. Confirmed the env had no other reader.
+2. Inlined every flag site to the NEW branch and deleted the dead flag-off OLD code:
+   - `cpu/bus.rs::run_to` — removed the per-dot-crank else branch; now calls
+     `run_to_min_event` unconditionally.
+   - `cpu/sm83.rs` — `arm_hdma_peraccess_consume()` called unconditionally at the
+     Requested-unhalt reflag.
+   - `cpu/opcodes.rs` — `dsss_mode3_switch` no longer gated on the flag.
+   - `memory/mmio.rs::peraccess_consume_m0_arm` — removed the flag early-out.
+   Suite held at 78, byte-identical, after each.
+3. Deleted the `peraccess_enabled()` accessor and ALL `RB_PERACCESS` / `std::env`
+   references. **rustyboi-core is now fully env-free** (`grep` for `std::env` / `RB_`
+   in core = NONE). `cargo build --release` is dead-code-warning-clean.
+
+**Load-bearing engine code KEPT (the NEW default behavior):** the min-event `run_to`
+driver (`run_to_min_event` + `idle_bulk_skippable`/`bulk_advance_idle`), the
+line/fetcher decouple (`step_stat_phase_only` / `stat_phase_carry` /
+`render_carry_skew_cc` / `gate_cc`), the HDMA m0 sub-block-cc consume
+(`arm_hdma_peraccess_consume` / `peraccess_consume_m0_arm`), the DS->SS half-dot
+carry (`dsss_mode3_stop_count` / `register_dsss_mode3_stop`), and `step_subdot` / the
+DS parity-gate in `resolve_one_dot` (still the DS render cadence — proven still
+load-bearing: it is the inner primitive of `run_to_min_event` for all non-idle spans).
+
+**Note on the FINALIZE plan's "delete the compensations" list** (`write_cc_off_*`,
+`write_subdot`, `on_scx_write delay`, read-path `+6`/`bias_cc`/`hdma_*_for_unhalt_adj`,
+STOP whole-dot bridge counts, parity-gate): in THIS tree those were NOT `if peraccess
+{ } else { }` pairs — the per-access engine landed its gains by ADDING new gated paths
+(min-event driver, sub-block consume, STAT-phase carry, render-skew de-coupling) on
+top of the DS-engine compensations, not by gating an alternative to each compensation.
+So there were no OLD branches of those to delete; they remain as the shared
+DS+per-access default and are still load-bearing (deleting them is a separate fix, not
+part of a pure flip — and per the discipline, anything whose removal does not hold 78
+must be kept). The flip is therefore a clean inline of the 4 genuine flag sites plus
+the accessor/env removal.
+
+**Smoke-test (DEBUG, overflow-checks ON):** Pokemon Crystal (600 frames, 19.8M instrs)
+and Harry Potter CoS (600 frames, 4.4M instrs) both ran to completion with NO
+overflow panic. The cc-math touched by the inline is unchanged arithmetic (only the
+gate was removed), and all underflow guards in the kept helpers are intact.
+
 ---
 
 ## Stage-1 recommendation (smallest contained validatable FIRST step)
