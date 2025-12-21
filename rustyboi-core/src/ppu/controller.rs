@@ -784,7 +784,7 @@ pub struct Ppu {
     // switch or at the next LCD enable / LY reset.
     #[serde(default)]
     sc_mode3_pullback_pending: bool,
-    // STAGE 4 (FACET 1, RB_PERACCESS): running count of DS->SS-during-mode3 STOP
+    // STAGE 4 (FACET 1): running count of DS->SS-during-mode3 STOP
     // switches. The faithful Gambatte `PPU::speedChange` re-anchor is `now -= 1`
     // (HALF an SS dot) per DS->SS switch; the whole-dot bridge rounds each to 0,
     // accumulating a missing HALF dot per switch. `floor(count/2)` extra STAT-only
@@ -792,7 +792,7 @@ pub struct Ppu {
     // shift on the STAT/line phase WITHOUT moving the render latch.
     #[serde(default)]
     dsss_mode3_stop_count: u32,
-    // STAGE 4 (FACET 2 KEYSTONE, RB_PERACCESS): accumulated STAT-phase carry in
+    // STAGE 4 (FACET 2 KEYSTONE): accumulated STAT-phase carry in
     // master-cc (`1<<ds` per `stat_phase_carry` dot). The carry advances the
     // STAT/line phase (line_cycle/abs_cc) so the STAT/m2-enable observables shift,
     // but the pixel-fetcher render latch must stay anchored to its ORIGINAL
