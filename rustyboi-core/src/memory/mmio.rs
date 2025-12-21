@@ -339,7 +339,7 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_high_unhalt_consume: bool,
 
-    // per-access STAGE 2 (RB_PERACCESS, FACET 3): when a Requested-at-halt HDMA
+    // per-access STAGE 2 (FACET 3): when a Requested-at-halt HDMA
     // block is reflagged+fired at unhalt, the NEXT line's m0 rising edge that
     // re-arms the following block may fall WITHIN that block's transfer span. In
     // Gambatte that m0 `memevent_hdma` is absorbed by the in-flight `dma()` (the
@@ -354,8 +354,7 @@ pub struct Mmio {
     // The window is `[block1_fire_cc, block1_fire_cc + 16*(2+2*ds)]` (the dma()
     // transfer length, inclusive end — Gambatte's edge AT the transfer end is still
     // absorbed); armed at the Requested unhalt reflag, `step_hdma` consumes every m0
-    // arm inside it and disarms on the first arm strictly past it. Off (no effect)
-    // when RB_PERACCESS is disabled.
+    // arm inside it and disarms on the first arm strictly past it.
     #[serde(skip, default)]
     hdma_peraccess_consume_pending: bool,
 
@@ -1188,7 +1187,7 @@ impl Mmio {
     /// Called at the unhalt site when a `Requested`-at-halt block is reflagged so
     /// `step_hdma` can absorb the next-line m0 arm iff it falls within the freshly
     /// fired block's transfer span (Gambatte's m0 `memevent_hdma` consumed by the
-    /// in-flight `dma()`), deferring the genuine next block one line. RB_PERACCESS.
+    /// in-flight `dma()`), deferring the genuine next block one line.
     pub fn arm_hdma_peraccess_consume(&mut self) {
         self.hdma_peraccess_consume_pending = true;
     }
@@ -1199,17 +1198,13 @@ impl Mmio {
     /// processes the m0 `memevent_hdma` at the in-flight `dma()`'s end cc, so an edge
     /// landing inside `[fire_cc, fire_cc + 16*(2+2*ds))` is absorbed and its block
     /// deferred to the next line; an edge at/after that span fires this line. Returns
-    /// true (consume this arm, clearing the pending flag) iff RB_PERACCESS is on, a
-    /// Requested-unhalt consume is armed, and the current dot cc is strictly inside the
-    /// span. Otherwise leaves the arm to proceed. The pending flag is one-shot: it is
-    /// cleared whether the arm is consumed (inside span) or allowed (past span), so it
-    /// only ever gates the single immediate post-unhalt m0 edge.
+    /// true (consume this arm, clearing the pending flag) iff a Requested-unhalt
+    /// consume is armed and the current dot cc is strictly inside the span. Otherwise
+    /// leaves the arm to proceed. The pending flag is one-shot: it is cleared whether
+    /// the arm is consumed (inside span) or allowed (past span), so it only ever gates
+    /// the single immediate post-unhalt m0 edge.
     fn peraccess_consume_m0_arm(&mut self) -> bool {
         if !self.hdma_peraccess_consume_pending {
-            return false;
-        }
-        if !crate::cpu::bus::peraccess_enabled() {
-            self.hdma_peraccess_consume_pending = false;
             return false;
         }
         let fire_cc = match self.hdma_last_fire_cc {
@@ -1858,9 +1853,9 @@ impl Mmio {
                 if self.hdma_high_unhalt_consume {
                     self.hdma_high_unhalt_consume = false;
                 } else if self.peraccess_consume_m0_arm() {
-                    // Requested-unhalt sub-block-cc consume (RB_PERACCESS): this m0
-                    // edge fell inside block1's transfer span; Gambatte absorbs it
-                    // and defers the next block one line. Suppress this arm.
+                    // Requested-unhalt sub-block-cc consume: this m0 edge fell inside
+                    // block1's transfer span; Gambatte absorbs it and defers the next
+                    // block one line. Suppress this arm.
                 } else {
                     self.hdma_req_pending = true;
                 }
@@ -1922,7 +1917,7 @@ impl Mmio {
                 if self.hdma_high_unhalt_consume {
                     self.hdma_high_unhalt_consume = false;
                 } else if self.peraccess_consume_m0_arm() {
-                    // Requested-unhalt sub-block-cc consume (RB_PERACCESS): see the
+                    // Requested-unhalt sub-block-cc consume: see the
                     // period-rising-edge branch.
                 } else {
                     self.hdma_req_pending = true;
