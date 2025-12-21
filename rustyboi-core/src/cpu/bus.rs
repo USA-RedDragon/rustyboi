@@ -29,9 +29,7 @@ pub(crate) fn faithful_enabled() -> bool {
 /// inlined/removed before merging to main, where env vars are not permitted).
 #[allow(dead_code)]
 pub(crate) fn peraccess_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("RB_PERACCESS").is_ok())
+    true
 }
 
 /// ds-engine STAGE 6/7: the run-to-next-event scheduler is the single CPU world-
