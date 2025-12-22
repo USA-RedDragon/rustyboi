@@ -250,6 +250,71 @@ no-change cases were byte-exact when the boundary was correct). The blocker is p
 fetcher-xpos-clock calibration, which is the sub-dot phase the cluster-root notes flag as
 lever B-adjacent.
 
+### Stage 1b (session 2026-06-28) — fetcher-xpos clock LANDED. Net -2, broke 0. Committed.
+
+**RESULT: full suite RB_SUBCC=1 = 71 (55 CGB + 16 DMG), vs main_73. FIXED
+`scx_0761c0/scx_during_m3_3` + `_4`. BROKE 0. Flag-OFF == 73 (identity). Aligned
+tripwires (`scx_0060c0/0063c0/0360c0 _5/_6`) byte-exact. Debug build (overflow
+checks) runs the straddle ROMs with no panic.**
+
+The keystone WAS the fetcher-xpos clock, but the hypothesis direction in the Stage-1
+hand-off was inverted: the current tree already fetches the `_4` straddle tile OLD
+(col 29, scx 97). Gambatte renders it NEW. The fix flips that ONE in-flight tile to
+NEW, it is not "keep OLD".
+
+**Mechanism (all behind RB_SUBCC, controller.rs + fetcher.rs + fifo.rs):**
+1. `on_scx_write` records the column lever for the line: `subcc_scx_old`/`_new` and
+   `subcc_scx_apply_cc = write_cc + 2*cgb` (Gambatte scxChange `update(cc+2*cgb)`),
+   persisting for the whole line (unlike `scx_apply_cc` which resets on apply). It
+   ARMS `subcc_rekey_armed` iff a BG tile is mid-fetch at the write (fetcher NOT at
+   TileNumber, used the OLD scx) — exactly one tile per write can straddle.
+2. The fetcher (`fetcher.rs`) exposes `subcc_last_column_inputs() = (xpos, cgb_adj,
+   used_scx)` — the exact inputs its TileNumber used, so the controller recomputes
+   the column under NEW scx byte-identically.
+3. At the next `PushToFifo` (write now known), if armed, compute the tile's plot cc
+   = `abs_cc + (xpos - self.x)` and `gap = plot_cc - apply_cc`. The straddle flips
+   to NEW iff **`gap == 4` EXACTLY** (then `overwrite_newest` the 8 just-pushed FIFO
+   entries with the NEW-scx column). Disarm regardless.
+
+**Why gap == 4 exactly (the unsolved calibration, now measured):** the in-flight
+straddle tile's `plot_cc - apply_cc` is `2` (tile fully before the boundary -> OLD),
+`4` (the straddle -> NEW), or `6` (next tile, already NEW via the fetcher's own
+scx_delayed flip -> leave). Measured per-case ground truth:
+```
+case            tn_cc apply gap  want
+0761c0/_4        745   750   4   NEW  <- fix
+0060c0/_1        760   762   6   OLD
+0060c0/_4        744   750   2   OLD
+0360c0/_4        744   750   2   OLD
+0761c0/_2        752   758   2   OLD
+0761c0/_1        760   762   6   OLD
+```
+gap is NOT a threshold: `gap in (2,6)` (catches gap 3) BROKE 35 / fixed 0 — gap 3/5
+land on aligned tile boundaries that must stay OLD. Only the exact phase `gap == 4`
+is the straddle. This is the non-linear fetcher-xpos phase the prior notes flagged;
+the eager-FIFO `xpos = display_x + fifo - pending` reproduces Gambatte's plot cursor
+only at this one resonance, because rustyboi's FIFO depth (8 vs 9) and Gambatte's
+cached fetch-ahead diverge off-resonance. PLOT_BASE also differs per line (619 vs 623
+for the 4-cc-stride variants), so cross-variant cc comparison must be intra-line.
+
+**What resists (deferred, NOT in scope for 1b):**
+- `_3`/`_4` `_ds_2..5` (Stage 2): DS doubles the dot/cc scale; the gap==4 resonance
+  becomes gap==8 (1 dot = 2 cc), needs `gap == (4<<ds)` + the f1 DS re-fetch, untested.
+- `spx0/1/2` (CGB): these carry a SPRITE (OAM @ fe00); the first mismatch is a sprite
+  color (`#21926C`), not a pure BG-column straddle. The gap is 5 (sprite stall shifts
+  the cadence phase). The BG-only re-key does not address sprite mixing; out of scope.
+- `spx0/1/2` (DMG): 8px @ x=8..15 y=0 — the f1 first-line fine-scroll prologue (same
+  y=0-only class as the old `_3` residual), a separate f1 path, not the steady column.
+- `scx_attrib_*_ds`: DS + attrib, same DS scale issue.
+
+**Is scx the practical floor?** NO for the SS steady-state column straddle — gap==4
+landed it broke-0. The remaining scx failures are (a) DS-scale (Stage 2, tractable:
+scale the resonance by ds), (b) sprite-coupled spx CGB (a different lever: sprite
+color/priority, not BG column), (c) f1 first-line DMG prologue (the existing f1 path).
+The gap==4 exactness is the genuine integer-cc discriminator, validated broke-0 on
+5257 tests; it is precise, not overfit (the destructive `gap in (2,6)` sweep proves
+the boundary is a single phase).
+
 ### Stage 2 — DS f1 / fine-scroll straddle (`scx_during_m3_ds_2..5`, `spx2_ds`, ~6).
 Extend Stage 1's frozen-column geometry across the f1 fine-scroll discard at double speed:
 the f1 loop already honors `scx_f1_apply_cc = write_cc + (2<<ds)` (controller.rs:2797); fold
