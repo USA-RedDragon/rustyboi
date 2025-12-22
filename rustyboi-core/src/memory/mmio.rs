@@ -2074,6 +2074,19 @@ impl Mmio {
         self.hdma_unhalt_noreflag_deferred = v;
     }
 
+    /// Read the pending DMA stall without consuming it or arming the post-DMA
+    /// STAT-read bias (unlike `take_dma_stall`).
+    pub fn peek_dma_stall(&self) -> u32 {
+        self.pending_dma_stall
+    }
+
+    /// Drop `amount` cc from the pending DMA stall (saturating). Used to absorb a
+    /// deferred stop_halt HDMA block's transfer span into the STOP unhalt window
+    /// rather than charging it as a separate post-window stall.
+    pub fn reduce_dma_stall(&mut self, amount: u32) {
+        self.pending_dma_stall = self.pending_dma_stall.saturating_sub(amount);
+    }
+
     /// Consume the CPU-cycle stall owed for completed HDMA/GDMA transfers.
     pub fn take_dma_stall(&mut self) -> u32 {
         let stall = std::mem::take(&mut self.pending_dma_stall);
