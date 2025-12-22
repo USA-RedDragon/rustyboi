@@ -188,9 +188,24 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // Fire the deferred SS->DS prefetched block now — post-switch, so it runs
         // at the new (double) speed at the post-bridge cc, matching Gambatte's
         // `intevent_dma` after `ioamhram_[0x14D] ^= 0x81` (dma fires at ds=1).
+        // Track the HDMA block stall produced by a deferred stop_halt fire so it
+        // can be ABSORBED into the 0x20000 unhalt window below instead of being
+        // charged on top of it. Gambatte's `intevent_dma` fires *during* the
+        // unhalt window (the block's cc advance happens before `intevent_unhalt`
+        // resumes the CPU), so the transfer's ~64 DS cc are part of the window,
+        // not an extra stall appended after it. rustyboi otherwise drains the
+        // full 0x20000 first and only then the block's `pending_dma_stall`,
+        // pushing the post-stop resume (and its LY read) ~64+fudge cc late —
+        // one LY high on the boundary (`hdma_late_m3speedchange_ly_scx1_3`).
+        let dma_stall_before = mmio.mmio.peek_dma_stall();
         if let Some(fires_in_halt) = deferred_stop_fire {
             if fires_in_halt {
                 mmio.mmio.fire_pending_hdma_mcycle_stop_halt();
+                // Drop the block's transfer stall from `pending_dma_stall`: its cc
+                // advance is folded into the 0x20000 unhalt window (kept intact
+                // below), not charged as a separate stall appended after it.
+                let absorb = mmio.mmio.peek_dma_stall().saturating_sub(dma_stall_before);
+                mmio.mmio.reduce_dma_stall(absorb);
             } else {
                 // Edge crossed a full M-cycle BEFORE this STOP (`cc - edge >= 4`):
                 // in Gambatte the `dma()` event already ran and acked the req
