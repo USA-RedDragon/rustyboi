@@ -326,6 +326,51 @@ _ds regressed when the dot delay didn't scale with ds).
 - **Risk:** MEDIUM. DS dot/cc scaling is the known trap; reuse the proven `<<ds` f1 scale.
   Depends on Stage 1.
 
+### Stage 2 (session 2026-06-28) — DS straddle LANDED. Net -6, broke 0. Committed.
+
+**RESULT: full suite RB_SUBCC=1 = 67 (vs Stage-1b 71, vs main_73). FIXED
+`scx_during_m3_ds_2/3/4/5` (CGB). BROKE 0. Flag-OFF (var UNSET) == 73 (identity).
+SS tripwires (`scx_during_m3_3/_4` + the aligned `scx_0060c0/0063c0/0360c0/0363c0/
+0367c0` SS+DS sets) all byte-exact. DEBUG build (overflow checks) runs ds_2..5 with
+no panic.**
+
+The DS failures were TWO distinct bugs, both at x=0..6 then x=143..150:
+
+1. **The f1 fine-scroll first-tile re-fetch was gated OFF for DS** (controller.rs
+   `if cgb && !double_speed && brk_col != arm_col`). At DS the `07->61` first SCX
+   write crosses the f1 discard (xpos=9, arm_col=0 -> brk_col=12), so the stale
+   first tile must be re-fetched exactly as SS does. Gate flipped to
+   `(!double_speed || subcc_enabled())`; the existing `delta<<ds` mode0/m0Time nudge
+   already carried the DS scale. This fixed the x=0..6 prologue (the dominant DS
+   failure region) on all four variants.
+
+2. **The mid-line column straddle resonance.** With the prologue fixed the failure
+   moved to the steady straddle (x=143..150). The Stage-1b `gap==4` (where
+   `gap = plot_cc - apply_cc`, `plot_cc = abs_cc + (xpos - x)`) does NOT generalize:
+   - `plot_cc`'s dot delta must be scaled to master cc: `+ ((xpos - x) << ds)`.
+   - The gap proxy is AMBIGUOUS across initial-scx at DS. Measured ground truth: the
+     straddle tile that must flip to NEW is `ds_3/4/5` (xpos=143) in BOTH `scx_0761c0`
+     (gap 4/8/12, fifo=11) and `scx_0360c0` (gap 2, fifo=10) — gap and FIFO-depth/span
+     proxies disagree between the two dirs. The INVARIANT that separates flip from
+     no-flip across every initial-scx is the **fetcher-step phase of the apply cc
+     relative to the armed tile's TileNumber latch**:
+       `(apply_cc - tn_cc) % (2<<ds) == (1<<ds)`
+     The BG fetcher steps every 2 dots == `(2<<ds)` cc; the straddle is exactly when
+     the write's apply lands HALF a step (`1<<ds`) into the armed tile's fetch cycle.
+     At DS this is `(apply-tn)%4==2`; verified flip-set {0761:ds_3/4/5, 0360:ds_3}
+     vs no-flip {0761:ds_1/2/6, 0360:ds_1/2/4/5/6} byte-exact.
+   - Required a new field `subcc_last_tn_cc` (abs_cc recorded at each BG TileNumber).
+   - **SS is NOT switched to the mod predicate** — it regresses the DMG SS scx set
+     (DMG fetcher cadence differs; the unified mod gave net +32/broke 8). SS keeps the
+     validated `gap==4`; the DS branch alone carries the mod phase. SS `plot_cc` now
+     uses `<<ds` which is a no-op at `ds==0` (byte-identical to Stage 1b).
+
+**What resists (deferred, NOT BG-column straddle — separate levers):**
+- `scx_during_m3_spx2_ds`, `scx_attrib_during_m3_spx1_ds/spx2_ds` (CGB): carry a
+  SPRITE; the mismatch is sprite mixing, not the BG column. The spx lever (sprite
+  color/priority + DMG f1 prologue) is Stage-2-adjacent but explicitly out of scope.
+- The `hdma_*_scx1*` cases are the HDMA event-cc family (PERACCESS FACET 3), not scx.
+
 ### Stage 3 — late_wy delay-constant rebase + late_scx interaction (~3).
 Rebase `WY2_DELAY_CGB/DMG`, `WY1_DELAY`, `SCY_DELAY` from swept constants to Gambatte's
 faithful `update(cc + 1 + cgb)` (wy1) / `update(cc + 2*cgb)` (wy2 via mode3CyclesChange) /
