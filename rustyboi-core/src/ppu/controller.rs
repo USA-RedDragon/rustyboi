@@ -2863,24 +2863,22 @@ impl Ppu {
         let ds = mmio.is_double_speed_mode() as u32;
         self.scx_f1_apply_cc = cc + if cgb { 2u64 << ds } else { 0 };
 
-        // RB_SUBCC sub-cc column lever: record the apply boundary on the PLOT
-        // clock. The BG fetcher chooses old/new per tile by comparing the tile's
-        // plot cc to this. Persists for the line (does not reset on apply).
-        if crate::cpu::bus::subcc_enabled() {
-            self.subcc_scx_old = self.scx_delayed;
-            self.subcc_scx_new = value;
-            self.subcc_scx_apply_cc = cc + if cgb { 2u64 << ds } else { 0 };
-            // Arm the single-tile re-key only when a BG tile is mid-fetch (its
-            // column was already committed under the OLD scx and it has not yet
-            // pushed). If the fetcher is at TileNumber, the next fetch will read
-            // the (about-to-be-NEW) scx itself; no in-flight straddle exists.
-            self.subcc_rekey_armed = !self.disabled
-                && self.state == State::PixelTransfer
-                && self.x > 0
-                && !self.fetcher.is_fetching_window()
-                && !self.fetcher.fetch_state_is_tile_number()
-                && self.fetcher.subcc_last_column_inputs().2 == self.subcc_scx_old;
-        }
+        // sub-cc column lever: record the apply boundary on the PLOT clock. The
+        // BG fetcher chooses old/new per tile by comparing the tile's plot cc to
+        // this. Persists for the line (does not reset on apply).
+        self.subcc_scx_old = self.scx_delayed;
+        self.subcc_scx_new = value;
+        self.subcc_scx_apply_cc = cc + if cgb { 2u64 << ds } else { 0 };
+        // Arm the single-tile re-key only when a BG tile is mid-fetch (its
+        // column was already committed under the OLD scx and it has not yet
+        // pushed). If the fetcher is at TileNumber, the next fetch will read
+        // the (about-to-be-NEW) scx itself; no in-flight straddle exists.
+        self.subcc_rekey_armed = !self.disabled
+            && self.state == State::PixelTransfer
+            && self.x > 0
+            && !self.fetcher.is_fetching_window()
+            && !self.fetcher.fetch_state_is_tile_number()
+            && self.fetcher.subcc_last_column_inputs().2 == self.subcc_scx_old;
     }
 
     /// SCX value visible to the f1 fine-scroll discard at PPU `cc`, honoring the
@@ -4150,20 +4148,15 @@ impl Ppu {
                             self.scx_f1_pending_at_cc(self.abs_cc.wrapping_sub(back));
                         let arm_col = ((self.m3_arm_scx_full.max(0) as u16) >> 3) & 0x1F;
                         let brk_col = (scx_col_full as u16 >> 3) & 0x1F;
-                        // CGB single-speed only: the DMG M3Start fine-scroll uses
-                        // a different (+1) tile-column phase that the discard model
-                        // already matches, and at double speed the post-discard
-                        // tile-walk lands the line-end one tile off after the
-                        // re-fetch (the SS-derived discard nudge does not carry the
-                        // DS sub-dot phase). Both are left to the existing model.
-                        // RB_SUBCC Stage 2: the DS f1 first-tile re-fetch was
-                        // gated off (the SS-derived discard/mode0 nudge was
-                        // believed to land the DS line-end one tile off). With
-                        // the subcc clock the same re-fetch + delta nudge applies
-                        // at DS; allow it behind the flag.
-                        let allow_ds_refetch = crate::cpu::bus::subcc_enabled();
+                        // CGB f1 first-tile re-fetch (both single and double speed):
+                        // a mid-f1 SCX write whose break column differs from the
+                        // armed column rewrites the first queued BG tile. The
+                        // sub-cc clock carries the DS sub-dot phase via the
+                        // `delta << ds` mode0/m0Time nudge below, so the same
+                        // re-fetch applies at double speed (the DMG M3Start
+                        // fine-scroll uses a different +1 tile-column phase the
+                        // discard model already matches, so it stays excluded).
                         if mmio.is_cgb_features_enabled()
-                            && (!mmio.is_double_speed_mode() || allow_ds_refetch)
                             && self.m3_arm_scx_full >= 0
                             && brk_col != arm_col
                         {
@@ -4246,17 +4239,16 @@ impl Ppu {
                         if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::TileNumber) {
                             self.subcc_last_tn_cc = self.abs_cc;
                         }
-                        // RB_SUBCC sub-cc column lever: a BG tile whose column was
-                        // committed at TileNumber under the OLD scx, but whose
-                        // pixels are PLOTTED after the write's apply cc
-                        // (write_cc + 2*cgb), must render under the NEW scx
-                        // (Gambatte scxChange `update(cc+2*cgb); setScx` samples
-                        // the column at plot time, not fetch time). Only the single
-                        // in-flight straddle tile (armed at the write) is corrected,
-                        // and only at the exact plot-vs-apply phase (gap == 4); see
-                        // the gap comment below.
-                        if crate::cpu::bus::subcc_enabled()
-                            && self.subcc_rekey_armed
+                        // sub-cc column lever: a BG tile whose column was committed
+                        // at TileNumber under the OLD scx, but whose pixels are
+                        // PLOTTED after the write's apply cc (write_cc + 2*cgb),
+                        // must render under the NEW scx (Gambatte scxChange
+                        // `update(cc+2*cgb); setScx` samples the column at plot
+                        // time, not fetch time). Only the single in-flight straddle
+                        // tile (armed at the write) is corrected, and only at the
+                        // exact plot-vs-apply phase (gap == 4); see the gap comment
+                        // below.
+                        if self.subcc_rekey_armed
                             && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
                         {
                             // The single in-flight tile (column committed under the
