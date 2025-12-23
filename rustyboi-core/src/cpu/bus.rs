@@ -28,9 +28,7 @@ pub(crate) fn faithful_enabled() -> bool {
 /// are implemented yet — this accessor gates zero behavior at Stage 0.
 #[allow(dead_code)]
 pub(crate) fn subcc_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RB_SUBCC").is_ok())
+    true
 }
 
 /// ds-engine STAGE 6/7: the run-to-next-event scheduler is the single CPU world-
