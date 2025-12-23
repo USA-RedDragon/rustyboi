@@ -883,6 +883,11 @@ pub struct Ppu {
     // apply cc, then disarms. Exactly one tile per write can straddle.
     #[serde(default)]
     subcc_rekey_armed: bool,
+    // abs_cc at which the most recent BG TileNumber latch happened (the fetch
+    // cc of the tile currently in flight). The armed straddle tile's column was
+    // committed at this cc; the rekey compares it to the write's apply cc.
+    #[serde(default)]
+    subcc_last_tn_cc: u64,
     // First line after enable: the SCX value the fine-scroll discard prefix
     // actually samples (Gambatte M3Start::f1 reads SCX once at the M3-start
     // dot). A mid-discard SCX write (write_cc + 2*cgb visible) only counts if
@@ -1040,6 +1045,7 @@ impl Ppu {
             subcc_scx_old: 0,
             subcc_scx_new: 0,
             subcc_rekey_armed: false,
+            subcc_last_tn_cc: 0,
             first_line_scx_override: None,
             line_cycle: 0,
             internal_ly_val: 0,
@@ -4150,8 +4156,14 @@ impl Ppu {
                         // tile-walk lands the line-end one tile off after the
                         // re-fetch (the SS-derived discard nudge does not carry the
                         // DS sub-dot phase). Both are left to the existing model.
+                        // RB_SUBCC Stage 2: the DS f1 first-tile re-fetch was
+                        // gated off (the SS-derived discard/mode0 nudge was
+                        // believed to land the DS line-end one tile off). With
+                        // the subcc clock the same re-fetch + delta nudge applies
+                        // at DS; allow it behind the flag.
+                        let allow_ds_refetch = crate::cpu::bus::subcc_enabled();
                         if mmio.is_cgb_features_enabled()
-                            && !mmio.is_double_speed_mode()
+                            && (!mmio.is_double_speed_mode() || allow_ds_refetch)
                             && self.m3_arm_scx_full >= 0
                             && brk_col != arm_col
                         {
@@ -4231,6 +4243,9 @@ impl Ppu {
                 };
                 if cadence_even
                     && let Some(event) = self.fetcher.step(mmio, self.win_y_pos, fetcher_lcdc_state, self.x, pending_discard, self.scy_delayed, self.scx_delayed) {
+                        if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::TileNumber) {
+                            self.subcc_last_tn_cc = self.abs_cc;
+                        }
                         // RB_SUBCC sub-cc column lever: a BG tile whose column was
                         // committed at TileNumber under the OLD scx, but whose
                         // pixels are PLOTTED after the write's apply cc
@@ -4255,21 +4270,42 @@ impl Ppu {
                             // FIFO entries with the NEW-scx column using the
                             // fetcher's exact xpos/cgb_adj. Disarm afterwards.
                             self.subcc_rekey_armed = false;
+                            let dsf = mmio.is_double_speed_mode() as u32;
                             let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
-                            let plot_cc = self.abs_cc as i64 + (xpos as i64 - self.x as i64);
-                            // The straddle tile flips to NEW only at the exact
-                            // sub-dot resonance where its first plotted pixel lands
-                            // 4 master-cc after the apply cc (= write_cc + 2*cgb).
-                            // At gap 2 (tile fully before the apply boundary) and
-                            // gap 6 (the next tile, already committed under the new
-                            // scx_delayed by the fetcher itself) the tile must keep
-                            // its fetched scx; only gap 4 is the in-flight straddle
-                            // whose column was committed OLD but plots NEW. Measured
-                            // broke-0 across the full suite; gap 3/5 are destructive
-                            // (they fall on aligned tile boundaries that must stay
-                            // OLD), so this is an exact phase, not a threshold.
+                            // plot cc = abs_cc + the dot distance to this tile's
+                            // first displayed pixel. The dot delta must be scaled
+                            // to master cc (1 dot = 1<<ds cc) so the gap resonance
+                            // is in master cc at both speeds.
+                            let plot_cc = self.abs_cc as i64
+                                + ((xpos as i64 - self.x as i64) << dsf);
+                            // SS (validated Stage 1b, broke-0 across the full
+                            // suite incl. DMG): the in-flight straddle flips to NEW
+                            // at the exact plot-vs-apply phase gap==4.
                             let gap = plot_cc - self.subcc_scx_apply_cc as i64;
-                            if gap == 4 {
+                            // DS (Stage 2): the gap proxy is ambiguous across
+                            // initial-scx, but the underlying resonance is that the
+                            // write's apply cc lands at the MIDPOINT of the armed
+                            // tile's fetcher step. The BG fetcher advances one step
+                            // every 2 dots == (2<<ds) cc; the armed tile's column
+                            // was latched at TileNumber (subcc_last_tn_cc) and
+                            // Gambatte's `update(apply_cc); setScx` re-derives that
+                            // single tile NEW only when apply falls half a step
+                            // (1<<ds cc) past the latch, modulo the step:
+                            //   (apply_cc - tn_cc) % (2<<ds) == (1<<ds)
+                            // At DS this is (apply-tn)%4==2, which flips ds_3/4/5
+                            // across every initial-scx (0761/0360/...) where the
+                            // cruder gap/span proxies disagree. SS keeps gap==4
+                            // (the DMG cadence differs and the mod phase regresses
+                            // the DMG SS set, so SS is left exactly as Stage 1b).
+                            let flip = if dsf == 0 {
+                                gap == 4
+                            } else {
+                                let step = 2i64 << dsf;
+                                let phase = (self.subcc_scx_apply_cc as i64
+                                    - self.subcc_last_tn_cc as i64).rem_euclid(step);
+                                phase == (1i64 << dsf)
+                            };
+                            if flip {
                                 let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
                                 let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
                                 if new_col != old_col {
