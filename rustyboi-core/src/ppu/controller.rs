@@ -863,7 +863,7 @@ pub struct Ppu {
     scx_f1_apply_cc: u64, // abs_cc at which scx_pending becomes visible to f1
     #[serde(default)]
     scx_f1_new: u8,
-    // RB_SUBCC sub-cc column lever. A mid-mode-3 SCX write applies to the BG
+    // sub-cc column lever. A mid-mode-3 SCX write applies to the BG
     // column fetcher at `write_cc + 2*cgb` (Gambatte scxChange `update(cc+2*cgb);
     // setScx`), evaluated against the cc at which a fetched tile's pixels are
     // PLOTTED (the fetcher leads the display by the FIFO depth). A tile whose
@@ -2410,7 +2410,7 @@ impl Ppu {
     // reproducing the fetcher's BG addressing (LCDC tile-map/tile-data select,
     // CGB attribute bank + x/y flip). Used by the M3Start fine-scroll re-fetch
     // when a mid-discard SCX write moves the first displayed tile's column.
-    // RB_SUBCC: compute the 8 BG pixels for tile-map column `tile_col` on pixel
+    // Compute the 8 BG pixels for tile-map column `tile_col` on pixel
     // row `bg_y`, reproducing the fetcher's addressing. Shared by the fine-scroll
     // first-tile rewrite and the sub-cc SCX column re-key.
     fn bg_pixels_at_col(&self, mmio: &mmio::Mmio, tile_col: u16, bg_y: u16) -> [crate::ppu::fifo::BgPixel; 8] {
@@ -3556,8 +3556,8 @@ impl Ppu {
                     
                     self.x = 0;
                     self.fetcher.reset();
-                    // RB_SUBCC: clear any pending sub-cc scx column lever from the
-                    // previous line; a new write this line re-arms it.
+                    // Clear any pending sub-cc scx column lever from the previous
+                    // line; a new write this line re-arms it.
                     self.subcc_scx_apply_cc = wy2_disabled();
                     self.next_sprite_fetch_index = 0;
                     self.m3_sprite_prev_tile = SPRITE_TILE_NONE;

@@ -231,7 +231,7 @@ impl Fetcher {
                     let xpos = (display_x as u16 + self.pixel_fifo.size() as u16)
                         .saturating_sub(pending_discard as u16);
                     let bg_tile_x = (scx as u16 + xpos + cgb_adj) / 8 % 32;
-                    // RB_SUBCC: remember the exact (xpos, scx, cgb_adj) used to
+                    // sub-cc lever: remember the exact (xpos, scx, cgb_adj) used to
                     // derive this tile's column so the controller can recompute
                     // the column under a different (NEW) scx with identical inputs.
                     self.subcc_xpos = xpos;
@@ -391,15 +391,15 @@ impl Fetcher {
         self.fetching_window
     }
 
-    // RB_SUBCC: true when the next step() will run the TileNumber substep (the
-    // one that derives the BG tile-map column). The sub-cc column lever only
-    // reroutes SCX on that substep.
+    // True when the next step() will run the TileNumber substep (the one that
+    // derives the BG tile-map column). The sub-cc column lever only reroutes SCX
+    // on that substep.
     pub fn fetch_state_is_tile_number(&self) -> bool {
         matches!(self.state, State::TileNumber)
     }
 
-    // RB_SUBCC: the (xpos, cgb_adj, scx) the last BG TileNumber used to derive
-    // its column. The controller recomputes the column under a NEW scx with the
+    // The (xpos, cgb_adj, scx) the last BG TileNumber used to derive its column.
+    // The controller recomputes the column under a NEW scx with the
     // same xpos/cgb_adj to re-key the just-pushed tile.
     pub fn subcc_last_column_inputs(&self) -> (u16, u8, u8) {
         (self.subcc_xpos, self.subcc_cgb_adj, self.subcc_used_scx)
