@@ -590,6 +590,31 @@ impl Mmio {
         }
     }
     
+    /// Seed the CGB power-on palette RAM (libgambatte initstate.cpp). The boot
+    /// ROM leaves BG palette RAM all-white (0x7FFF) and OBJ palette RAM holding
+    /// a fixed hardware power-on dump (`cgbObjpDump`). Games (and hwtests) that
+    /// render sprites/BG without writing FF68-FF6B observe these values, so
+    /// skip_bios must reproduce them instead of all-zero (black).
+    pub fn set_post_bios_cgb_palettes(&mut self) {
+        // BG palette RAM: every color = 0x7FFF (0xFF, 0x7F).
+        for i in (0..64).step_by(2) {
+            self.bg_palette_ram[i] = 0xFF;
+            self.bg_palette_ram[i + 1] = 0x7F;
+        }
+        // OBJ palette RAM: Gambatte cgbObjpDump.
+        const CGB_OBJP_DUMP: [u8; 64] = [
+            0x00, 0x00, 0xF2, 0xAB, 0x61, 0xC2, 0xD9, 0xBA,
+            0x88, 0x6E, 0xDD, 0x63, 0x28, 0x27, 0xFB, 0x9F,
+            0x35, 0x42, 0xD6, 0xD4, 0x50, 0x48, 0x57, 0x5E,
+            0x23, 0x3E, 0x3D, 0xCA, 0x71, 0x21, 0x37, 0xC0,
+            0xC6, 0xB3, 0xFB, 0xF9, 0x08, 0x00, 0x8D, 0x29,
+            0xA3, 0x20, 0xDB, 0x87, 0x62, 0x05, 0x5D, 0xD4,
+            0x0E, 0x08, 0xFE, 0xAF, 0x20, 0x02, 0xD7, 0xFF,
+            0x07, 0x6A, 0x55, 0xEC, 0x83, 0x40, 0x0B, 0x77,
+        ];
+        self.obj_palette_ram = CGB_OBJP_DUMP;
+    }
+
     pub fn read_vram_bank1(&self, addr: u16) -> u8 {
         if !self.cgb_features_enabled || addr < VRAM_START || addr > VRAM_END {
             return 0xFF; // Invalid access
