@@ -50,9 +50,13 @@ impl SM83 {
             // A block held Low-at-stop reflags only if the unhalt lands back in the
             // HDMA period (`hdma_m3speedchange_late_m0wakeup_*`); one whose unhalt is
             // out of period stays dropped (`hdma_late_m3speedchange_*_1` -> out00).
-            if self.stop_unhalt_cycles == 0 && mmio.in_stop_window() {
-                let in_period_unhalt = mmio.hdma_in_period_for_unhalt();
-                mmio.stop_window_exit_reflag(in_period_unhalt);
+            if self.stop_unhalt_cycles == 0 {
+                // Unfreeze the OAM-DMA (Gambatte's unhalt resumes `updateOamDma`).
+                mmio.set_oam_dma_stop_freeze(false);
+                if mmio.in_stop_window() {
+                    let in_period_unhalt = mmio.hdma_in_period_for_unhalt();
+                    mmio.stop_window_exit_reflag(in_period_unhalt);
+                }
             }
             return slice;
         }

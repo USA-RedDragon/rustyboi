@@ -244,6 +244,11 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // post_opcode_cc + 0x20000 + 4, exactly Gambatte's `(cc()-4) + 0x20000 + 4`,
         // holding the offset constant at 58368.
         cpu.stop_unhalt_cycles = 0x20000;
+        // Freeze the OAM-DMA across the unhalt window (Gambatte `Memory::stop`
+        // `intreq_.halt()` -> `updateOamDma` `halted()` branch: `oamDmaPos_`
+        // stays put). An OAM-DMA in flight at the STOP keeps its position so the
+        // post-switch conflict read sees the same in-flight byte Gambatte does.
+        mmio.mmio.set_oam_dma_stop_freeze(true);
         return 8;
     }
 
