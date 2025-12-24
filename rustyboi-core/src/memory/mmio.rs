@@ -809,6 +809,12 @@ impl Mmio {
         self.audio.set_post_bios_state(cgb);
     }
 
+    /// Record the CGB flag for the APU boot anchor. Must run before any audio
+    /// register write or `sync_apu_cc` that would anchor the SPU clock.
+    pub fn set_audio_boot_cgb(&mut self, cgb: bool) {
+        self.audio.set_boot_cgb(cgb);
+    }
+
     pub fn step_audio(&mut self) {
         self.sync_apu_cc();
         let mut audio = self.audio.clone();
