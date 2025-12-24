@@ -252,6 +252,14 @@ pub struct Mmio {
     // `step_dma` advances.
     #[serde(skip, default)]
     halt_oam_grace: u8,
+    // True while the CPU is parked in the STOP speed-switch unhalt window
+    // (0x20000 cycles). Gambatte's `Memory::stop` `intreq_.halt()`s for this
+    // window, so `updateOamDma` takes its `halted()` branch (advances
+    // `lastOamDmaUpdate_` WITHOUT moving `oamDmaPos_`). rustyboi drains the
+    // window via `stop_unhalt_cycles` without setting `cpu_halted`, so the
+    // OAM-DMA must be frozen here too. Set on STOP entry, cleared at unhalt.
+    #[serde(skip, default)]
+    oam_dma_stop_freeze: bool,
     // Mirrors Gambatte's `haltHdmaState_`.
     #[serde(default)]
     halt_hdma_state: HaltHdmaState,
@@ -498,6 +506,7 @@ impl Mmio {
             dma_prefetch_stat_bias: false,
             oam_dma_stall_suppress: 0,
             halt_oam_grace: 0,
+            oam_dma_stop_freeze: false,
             hdma_req_pending: false,
             halt_hdma_state: HaltHdmaState::Low,
             halt_wakeup_skew: false,
@@ -1275,6 +1284,12 @@ impl Mmio {
         self.halt_hdma_state = s;
     }
 
+    /// Freeze/unfreeze the OAM-DMA across the STOP speed-switch unhalt window
+    /// (Gambatte `updateOamDma` `halted()` branch — `oamDmaPos_` stays put).
+    pub fn set_oam_dma_stop_freeze(&mut self, freeze: bool) {
+        self.oam_dma_stop_freeze = freeze;
+    }
+
     /// CPU has left HALT. Clears the `intreq_.halted()` mirror so the
     /// period-edge `flagHdmaReq` resumes (video.h:41).
     pub fn clear_cpu_halt(&mut self) {
@@ -1782,6 +1797,15 @@ impl Mmio {
             return;
         }
         self.dma_subcycle = 0;
+        // STOP speed-switch unhalt window: the CPU is `intreq_.halt()`ed for the
+        // 0x20000 cycles, so Gambatte's `updateOamDma` takes its `halted()` branch
+        // and freezes `oamDmaPos_`. Mid-transfer OAM-DMA must stay put across the
+        // window (oamdma_*_speedchange_* read the in-flight conflict byte after the
+        // switch). The sub-M-cycle phase already advanced (reset above) but no byte
+        // is placed.
+        if self.oam_dma_stop_freeze {
+            return;
+        }
         // While the CPU is halted the OAM-DMA position is FROZEN: Gambatte's
         // `updateOamDma` halt branch consumes the elapsed M-cycles
         // (`lastOamDmaUpdate_ += 4*cycles`) WITHOUT advancing `oamDmaPos_`. Keep
