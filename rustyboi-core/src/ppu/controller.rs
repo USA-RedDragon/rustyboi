@@ -2191,19 +2191,17 @@ impl Ppu {
             if self.mstat_irq.do_m1_event(stat) {
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
             }
-            // PERACCESS facet-2 (line-end VBlank boundary): Gambatte's VBlank
-            // interrupt (IF bit 0) and the mode-1 STAT IRQ both fire from the SAME
-            // lyCounter LY=144 event. rustyboi normally flags VBlank from the
-            // render machine (HBlank `ticks==455`), which the FACET-1 STAT-phase
-            // carry does NOT advance — so under a live carry the carried STAT/m1
-            // boundary leads the un-carried render VBlank by `skew` dots, and a
-            // CPU IF read landing in that gap sees the STAT bit but misses VBlank
-            // (the `offset2_*_m1irq_2` `_2`-half bracket: E2 vs the correct E3).
-            // Fire VBlank here at the carried line-clock m1 boundary so the two
-            // bits land coincident as Gambatte. Idempotent with the render
-            // machine's later fire (same frame). Scoped to a live carry so
-            // flag-OFF / non-carried frames keep the render-machine VBlank exactly.
-            if self.render_carry_skew_cc != 0 && self.internal_ly_val >= 143 {
+            // Gambatte's VBlank interrupt (IF bit 0) and the mode-1 STAT IRQ both
+            // fire from the SAME lyCounter LY=144 event (`flagIrq(doM1Event?3:1)`):
+            // bit 0 (VBlank) ALWAYS, bit 1 (STAT) only when the m1 condition holds.
+            // The event fires at frame_cycle 144*456-2 (line_cycle 454 of LY=143),
+            // ~3cc BEFORE rustyboi's render-machine VBlank (the HBlank ly143->144
+            // line transition at line_cycle 455/0). A CPU IF read landing in that
+            // gap saw the STAT bit but missed VBlank (the m1irq `_2`/`_3` bracket
+            // halves: out0 vs the correct out3, outE2 vs outE3). Flag VBlank here
+            // at the faithful m1 event cc so both bits land coincident as Gambatte;
+            // the render machine's later fire is idempotent (same frame OR).
+            if self.internal_ly_val >= 143 {
                 mmio.request_interrupt(registers::InterruptFlag::VBlank);
             }
             self.sched_m1irq = self.sched_m1irq
