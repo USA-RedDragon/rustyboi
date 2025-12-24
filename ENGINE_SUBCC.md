@@ -401,6 +401,41 @@ full suite after EACH file. Remove the env var (env not allowed in main). FINAL 
 suite < 73 with no env, HARD self-verify, smoke-test 2 real ROMs in DEBUG (overflow
 checks).
 
+### Stage 5 (session 2026-06-28) — FLIP TO PERMANENT DEFAULT LANDED. Env-free. Merge candidate.
+
+**RESULT: rebased onto current main = main_72 (dc581e7). The RB_SUBCC scx
+mechanism is now the unconditional default. Full suite with NO env var == 66
+(net -6 vs main_72; fixed `scx_during_m3_3`, `_4`, `_ds_2`, `_ds_3`, `_ds_4`,
+`_ds_5` — all CGB; broke 0), BYTE-IDENTICAL to the prior RB_SUBCC=1 run.**
+
+Done in three incremental commits, suite == 66 held after each:
+1. **Flip** (`df6687c`): `subcc_enabled()` -> `true` unconditionally.
+2. **Inline** (`1929881`): removed the gate from the three live sites —
+   `on_scx_write` column-record/arm block, the f1 first-tile re-fetch
+   (`(!double_speed || subcc)` collapsed to drop the `!double_speed` term so
+   the re-fetch runs at BOTH speeds), and the PushToFifo straddle re-key
+   conjunct. There were NO `else`/OLD branches (all gate-only sites), so
+   nothing to delete beyond the wrapper.
+3. **Remove flag** (`43f5fcd`): deleted the `subcc_enabled()` accessor + its
+   Stage-0 doc comment from `cpu/bus.rs` and stripped the `RB_SUBCC` token from
+   the comment-only references (text kept). Core is env-free:
+   `grep -rn 'RB_SUBCC|subcc_enabled|std::env' rustyboi-core/src` == NONE.
+   `cargo build -p rustyboi-core` is dead-code/warning clean.
+
+**Kept (the fix itself):** the `gap==4` SS straddle flip, the DS
+`(apply_cc - tn_cc) % (2<<ds) == (1<<ds)` predicate, the f1 DS re-fetch, the
+frozen `BgPixel` fields, `overwrite_newest`, `subcc_scx_apply_cc` /
+`subcc_last_tn_cc` / `subcc_last_column_inputs`.
+
+**Smoke-test:** DEBUG build (overflow checks) clean. Ran the full
+`scx_during_m3` CGB subset (97) + `bgen`/`sprites` (478) with NO overflow
+panic. Touched render cc-math is i64/u16 with bounded operands, `rem_euclid`
+on step∈{2,4} (panic-free), existing `.max(0) as u128/u64` guards intact.
+
+Everything beyond the scx column straddle (DS-spx/sprite mixing, f1-DMG
+prologue, late_wy/late_enable Stages 3-4) remains deferred — out of scope for
+the flip.
+
 ---
 
 ## Stage-1 recommendation (smallest contained validatable FIRST step)
