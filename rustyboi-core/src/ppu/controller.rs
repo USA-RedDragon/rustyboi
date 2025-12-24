@@ -910,6 +910,11 @@ pub struct Ppu {
     sched_m0irq: u64,
     #[serde(default)]
     sched_oneshot_statirq: u64,
+    // Set when the m1 event flagged VBlank this frame so the render-machine
+    // ly143->144 transition does NOT re-flag it (Gambatte has a single VBlank
+    // source: the m1 event). Cleared when the m1 event re-arms for the next frame.
+    #[serde(default)]
+    m1_vblank_fired: bool,
     #[serde(default)]
     lyc_irq: stat_irq::LycIrq,
     #[serde(default)]
@@ -1054,6 +1059,7 @@ impl Ppu {
             sched_m2irq: stat_irq::DISABLED_TIME,
             sched_m0irq: stat_irq::DISABLED_TIME,
             sched_oneshot_statirq: stat_irq::DISABLED_TIME,
+            m1_vblank_fired: false,
             lyc_irq: stat_irq::LycIrq::default(),
             mstat_irq: stat_irq::MStatIrq::default(),
             stat_reg_committed: 0,
@@ -2186,17 +2192,21 @@ impl Ppu {
             self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
         }
         // Order matches Gambatte's nextMemEvent priority for ties.
-        // The m1 (VBlank) event schedules at an even `abs_cc` (frame_cycle
-        // 144*456-2). At double speed two corrections stack: (1) the even-cc event
-        // sits one half-dot past the odd-cc CPU access that should already observe
-        // it (the +ds the LYC=LY/mode-0 events also carry); (2) a read-at-cc IF
-        // snapshot is taken pre-tick, BEFORE this M-cycle's dispatch runs, so an
-        // event whose cc EQUALS the read cc fires one dispatch too late to be seen
-        // — Gambatte processes events with eventTime <= cc before the read returns.
-        // Anticipate by `2*ds` so the m1/VBlank bits land at-or-before the read cc
-        // Gambatte sets them (lycint143_m1irq `_2`/`_3`, m1irq_disable `_2`). DS-only
-        // (ds=0 leaves the single-speed phase byte-identical).
-        if self.sched_m1irq <= cc + 2 * ds as u64 {
+        // The m1 (VBlank) event (frame_cycle 144*456-2, an even `abs_cc`) is observed
+        // two ways at double speed: a CPU FF0F read snapshots IF pre-tick (the snapshot
+        // is taken BEFORE this M-cycle's dispatch, so an event at cc == read_cc fires
+        // one dispatch too late to be seen — Gambatte processes events <= cc before
+        // read(0xFF0F,cc) returns; needs +2*ds to land at-or-before the read cc), and
+        // the VBlank IRQ is *delivered* by the CPU service path (needs the true event
+        // cc). The read-snapshot brackets only exist with the m1-STAT source enabled
+        // (STAT bit4: lycint143_m1irq `_2`/`_3`, m1irq_disable `_2`); when it is OFF
+        // (e.g. the vblankirq retrigger tests, STAT=0x40) the VBlank IRQ-delivery
+        // timing dominates and the extra dot delivers the IRQ too early. Anticipate by
+        // 2*ds only when m1-STAT is enabled, else by the half-dot +ds the LYC=LY/mode-0
+        // events also carry. DS-only (ds=0 leaves the single-speed phase byte-identical).
+        let m1en = self.stat_reg_committed & (1 << 4) != 0;
+        let m1_anticip = if m1en { 2 * ds as u64 } else { ds as u64 };
+        if self.sched_m1irq <= cc + m1_anticip {
             let stat = self.stat_reg_committed;
             if self.mstat_irq.do_m1_event(stat) {
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
@@ -2213,6 +2223,11 @@ impl Ppu {
             // the render machine's later fire is idempotent (same frame OR).
             if self.internal_ly_val >= 143 {
                 mmio.request_interrupt(registers::InterruptFlag::VBlank);
+                // Mark so the render-machine ly143->144 transition does not re-flag
+                // VBlank after a CPU IF-write cleared it (Gambatte: single VBlank
+                // source). The flag covers the gap between this event (line_cycle
+                // 454) and the render transition (line_cycle 455/0).
+                self.m1_vblank_fired = true;
             }
             self.sched_m1irq = self.sched_m1irq
                 .wrapping_add((stat_irq::LCD_CYCLES_PER_FRAME) << ds as u32);
@@ -4428,7 +4443,15 @@ impl Ppu {
                         mmio.write_ly_from_ppu(144);
                         self.state = State::VBlank;
                         Self::set_lcd_status_mode(mmio, 1);
-                        mmio.request_interrupt(registers::InterruptFlag::VBlank);
+                        // The m1 event already flagged VBlank (line_cycle 454, ~3cc
+                        // earlier); re-flagging here would re-set bit 0 after a CPU
+                        // IF-write between the two cc cleared it (lycint143_m1irq_ifw
+                        // `_2`, m2m1irq_ifw `_3`). Only flag if the m1 event did not
+                        // (e.g. LCD enabled mid-frame with no armed m1 schedule).
+                        if !self.m1_vblank_fired {
+                            mmio.request_interrupt(registers::InterruptFlag::VBlank);
+                        }
+                        self.m1_vblank_fired = false;
                         self.check_and_trigger_stat_interrupt(mmio);
                     } else {
                         // Continue to next visible scanline
