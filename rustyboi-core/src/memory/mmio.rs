@@ -1143,7 +1143,15 @@ impl Mmio {
         // `oamDmaPos_` at the kick instant. Catch up by one M-cycle (advance the
         // OAM-DMA position without a conflict write) so the gate below fires on
         // the same boundaries Gambatte does.
-        let interleave = self.dma_active;
+        // A block fired inside the STOP speed-switch unhalt window must NOT advance
+        // the OAM-DMA: Gambatte's `Memory::dma` interleaves via `updateOamDma`, which
+        // takes its `halted()` branch (oamDmaPos_ frozen) while the CPU is
+        // `intreq_.halt()`ed across the STOP. rustyboi's `step_dma` already honors
+        // `oam_dma_stop_freeze`, but the synchronous HDMA-block interleave here
+        // bypassed it, advancing oamDmaPos_ ~16 bytes and shifting the post-switch
+        // in-flight conflict byte (hdma_transition_speedchange_oamdma: read 0x60
+        // where Gambatte's frozen position reads 0x71).
+        let interleave = self.dma_active && !self.oam_dma_stop_freeze;
         if interleave {
             self.dma_advance_one_mcycle();
         }
@@ -1646,7 +1654,14 @@ impl Mmio {
         // overwrite the oamdma-transition tests probe. Use the same gated cadence.
         let ds = self.is_double_speed_mode();
         let per_byte_cc: i64 = if ds { 4 } else { 2 };
-        let interleave = self.dma_active;
+        // A block firing inside the STOP speed-switch halt window must NOT advance
+        // the OAM-DMA: Gambatte's `Memory::dma` interleaves via `updateOamDma`,
+        // whose `halted()` branch freezes `oamDmaPos_` while the CPU is
+        // `intreq_.halt()`ed across the STOP. Without this gate the block's
+        // interleave advanced oamDmaPos_ ~16 bytes, shifting the post-switch
+        // in-flight conflict byte (hdma_transition_speedchange_oamdma: read 0x60
+        // where the frozen position reads 0x71).
+        let interleave = self.dma_active && !self.oam_dma_stop_freeze;
         // OAM-DMA catch-up. rustyboi resolves the FF55 write at the end of the
         // bus M-cycle; whether the current OAM-DMA byte for that M-cycle has
         // already been placed depends on the sub-cycle phase. When
