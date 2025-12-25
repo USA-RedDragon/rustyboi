@@ -425,6 +425,18 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_unhalt_noreflag_deferred: bool,
 
+    // Next-M-cycle dma() scheduling for the IME-off HALT-bug resume. A block
+    // reflagged at unhalt fires (in Gambatte) at the instruction boundary AFTER
+    // the resume instruction (`intevent_dma` runs after the opcode completes), so
+    // its VRAM write lands AFTER the resume instruction's own memory read. The
+    // synchronous m0-edge fire instead lands DURING the resume instruction,
+    // ahead of that read (hdma_late_if_and_ie_halt_1: the `ld a,(80FA)` read sees
+    // the post-DMA byte 0x02 instead of the pre-DMA 0x00). Set at the unhalt
+    // reflag, this suppresses the synchronous fire across the resume instruction
+    // and fires the held block at the next boundary.
+    #[serde(skip, default)]
+    hdma_unhalt_reflag_deferred: bool,
+
     // C7-full late-hdma-vs-interrupt re-order: the master_cc at which the most
     // recent m0-edge HDMA block fired (read its 16 source bytes). Gambatte orders
     // the `intevent_dma` (HDMA, flagged at `m0Time`) vs `intevent_interrupts`
@@ -533,6 +545,7 @@ impl Mmio {
             hdma_disable_fires: None,
             hdma_mcycle_fire_suppressed: false,
             hdma_unhalt_noreflag_deferred: false,
+            hdma_unhalt_reflag_deferred: false,
             hdma_last_fire_cc: None,
             hdma_pre_fire_state: None,
             hdma_enabled_at_halt: false,
@@ -2154,6 +2167,14 @@ impl Mmio {
     /// interrupt service and must fire AFTER the PC pushes).
     pub fn hdma_unhalt_noreflag_deferred(&self) -> bool {
         self.hdma_unhalt_noreflag_deferred
+    }
+
+    pub fn hdma_unhalt_reflag_deferred(&self) -> bool {
+        self.hdma_unhalt_reflag_deferred
+    }
+
+    pub fn set_hdma_unhalt_reflag_deferred(&mut self, v: bool) {
+        self.hdma_unhalt_reflag_deferred = v;
     }
 
     pub fn set_hdma_unhalt_noreflag_deferred(&mut self, v: bool) {

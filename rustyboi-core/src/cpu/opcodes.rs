@@ -511,6 +511,18 @@ pub fn halt(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             // pc and mark it prefetched: the +4 charge is deferred to consumption.
             cpu.opcode = mmio.peek(cpu.registers.pc);
             cpu.prefetched = true;
+            // Next-M-cycle dma() scheduling for the IME-off HALT-bug resume: an HDMA
+            // block whose m0-edge falls during the doubled resume instruction runs
+            // its `dma()` (in Gambatte) at the instruction boundary AFTER that
+            // instruction, so its VRAM write lands after the resume instruction's
+            // own memory read. Defer + suppress the synchronous m0-edge fire across
+            // the resume instruction; the bus fires the held block at the next
+            // boundary (hdma_late_if_and_ie_halt_1: the doubled `ld a,(80FA)` reads
+            // the pre-DMA 0x00, not the post-DMA 0x02). Only when an HDMA is armed.
+            if mmio.mmio.hdma_is_enabled() {
+                mmio.mmio.set_hdma_unhalt_reflag_deferred(true);
+                mmio.mmio.set_hdma_mcycle_fire_suppressed(true);
+            }
             return 4;
         }
     }
