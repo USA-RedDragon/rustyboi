@@ -883,6 +883,14 @@ pub struct Ppu {
     // apply cc, then disarms. Exactly one tile per write can straddle.
     #[serde(default)]
     subcc_rekey_armed: bool,
+    // First-line (LY=0) sprite-shifted straddle (CGB SS, gap==1): on the line
+    // after LCD-enable the fetcher runs a different warmup/dispatch phase, so a
+    // left-edge sprite-fetch dot shifts the OLD->NEW scx boundary one tile later
+    // than on LY>=1. The per-dot fetcher already read the NEW scx for that tile
+    // (one tile too early), so when set the next PushToFifo reverts the 8
+    // just-pushed entries back to the OLD-scx column.
+    #[serde(default)]
+    subcc_revert_next_old: bool,
     // abs_cc at which the most recent BG TileNumber latch happened (the fetch
     // cc of the tile currently in flight). The armed straddle tile's column was
     // committed at this cc; the rekey compares it to the write's apply cc.
@@ -1050,6 +1058,7 @@ impl Ppu {
             subcc_scx_old: 0,
             subcc_scx_new: 0,
             subcc_rekey_armed: false,
+            subcc_revert_next_old: false,
             subcc_last_tn_cc: 0,
             first_line_scx_override: None,
             line_cycle: 0,
@@ -4271,6 +4280,7 @@ impl Ppu {
                         // tile (armed at the write) is corrected, and only at the
                         // exact plot-vs-apply phase (gap == 4); see the gap comment
                         // below.
+                        let mut armed_this_event = false;
                         if self.subcc_rekey_armed
                             && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
                         {
@@ -4329,6 +4339,48 @@ impl Ppu {
                                     let pixels = self.bg_pixels_at_col(mmio, new_col, bg_y);
                                     self.fetcher.pixel_fifo.overwrite_newest(&pixels);
                                 }
+                            } else if dsf == 0
+                                && mmio.is_cgb_features_enabled()
+                                && gap == 1
+                                && self.sprites_on_line.iter().any(|s| s.x >= 1 && s.x <= 8)
+                            {
+                                // First rendered line (LY=0) straddle, CGB SS: the
+                                // line after LCD-enable runs its mode-3 fetcher
+                                // through a different warmup/dispatch phase, so the
+                                // write's apply lands one fetcher step EARLIER
+                                // relative to the in-flight tile (gap==1 here vs
+                                // gap==5 on LY>=1, same xpos). The armed tile stays
+                                // OLD (it plots just before the boundary), AND the
+                                // NEXT tile -- which the per-dot fetcher already
+                                // read NEW because the first-line dispatch lags the
+                                // boundary by one tile -- must be reverted to OLD so
+                                // the OLD->NEW boundary lands one tile later, exactly
+                                // as Gambatte's `update(apply_cc)` first-line xpos
+                                // does. On LY>=1 (gap==5) this revert does NOT fire,
+                                // so those lines keep the boundary one tile earlier.
+                                self.subcc_revert_next_old = true;
+                                armed_this_event = true;
+                            }
+                        }
+                        // Sprite-shifted revert: the tile pushed right after the
+                        // armed straddle tile was fetched with the NEW scx one tile
+                        // too early (FIFO depth 8 vs 9 due to a sprite-fetch dot);
+                        // rewrite its 8 entries back to the OLD-scx column so the
+                        // OLD->NEW boundary lands one tile later (matching Gambatte's
+                        // `update(apply_cc)` fetcher-xpos boundary).
+                        if self.subcc_revert_next_old
+                            && !armed_this_event
+                            && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
+                        {
+                            self.subcc_revert_next_old = false;
+                            let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
+                            let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                            let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                            if new_col != old_col {
+                                let bg_y = (self.scy_delayed as u16
+                                    + mmio.read(LY) as u16) & 0xFF;
+                                let pixels = self.bg_pixels_at_col(mmio, old_col, bg_y);
+                                self.fetcher.pixel_fifo.overwrite_newest(&pixels);
                             }
                         }
                         self.record_fetch_debug_event(event, mmio);
