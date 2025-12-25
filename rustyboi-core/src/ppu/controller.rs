@@ -1263,12 +1263,13 @@ impl Ppu {
             if (old_lcdc & we) != (value & we) {
                 let ds = mmio.is_double_speed_mode();
                 // Gambatte `setLcdc(data, cc + 2)`: the window bit is effective at
-                // write_cc + 2 dots. rustyboi's `abs_cc` carries a +1 derive-phase
-                // relative to `ticks`, so the abs_cc that equals the checkpoint dot
-                // (write_ticks + 2) is `write_cc + 3`. The weMaster event runs at
-                // the checkpoint BEFORE setLcdc, so equality reads the OLD bit (the
-                // `<=` in `update_window_y_latch`).
-                let commit_cc = self.write_cc(ds) + 3;
+                // write_cc + 2 master cc. In rustyboi's abs_cc units the boundary
+                // that aligns with the weMaster checkpoint dot (write_ticks + 2 dots
+                // ahead) is `write_cc + 3` (single speed) / `+4` (double speed) —
+                // the abs_cc derive-phase plus the per-dot abs_cc factor. The
+                // weMaster event runs at the checkpoint BEFORE setLcdc, so equality
+                // reads the OLD bit (the `<=` in `update_window_y_latch`).
+                let commit_cc = self.write_cc(ds) + if ds { 4 } else { 3 };
                 self.we_win_bit_exact =
                     Some((commit_cc, (value & we) != 0, (old_lcdc & we) != 0));
             }
