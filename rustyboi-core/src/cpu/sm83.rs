@@ -80,6 +80,17 @@ impl SM83 {
                 self.halted = false;
                 just_unhalted = true;
                 mmio.clear_cpu_halt();
+                // Mark whether this wakeup involved HDMA: those families fold the
+                // CGB halt-exit +4 into their own block-transfer / unhalt-reflag
+                // phase, so the getLyReg halt-exit bias must be suppressed for them
+                // (see get_ly_reg_at_cc). A plain (no-HDMA) wakeup gets the bias.
+                let hdma_wakeup = mmio.hdma_is_enabled()
+                    || mmio.hdma_last_fire_cc().is_some()
+                    || !matches!(
+                        mmio.halt_hdma_state(),
+                        memory::mmio::HaltHdmaState::Low
+                    );
+                mmio.set_halt_wakeup_hdma(hdma_wakeup);
                 // C1: the instruction stream resumed by this wakeup carries the
                 // unmodeled HALT-prefetch sub-M-cycle skew; flag it so the FF41
                 // getStat-at-cc line-tail override defers to the renderer register
@@ -221,7 +232,7 @@ impl SM83 {
                 return 1;
             }
         }
-        
+
         if crate::cpu::bus::faithful_enabled() {
             // STAGE 2 event-cc dispatch: an IRQ is serviceable only once the
             // boundary access cc has reached the cc its IF bit was raised
