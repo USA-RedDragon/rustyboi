@@ -308,6 +308,13 @@ pub struct Mmio {
     #[serde(skip, default)]
     halt_wakeup_skew: bool,
 
+    // True when the current HALT wakeup involved HDMA (a block was Low/Requested
+    // at halt or HDMA was enabled across the wakeup). The CGB halt-exit +4 getLyReg
+    // bias is already folded into the HDMA wakeup phase (the in-halt block transfer
+    // / unhalt reflag), so the plain-wakeup bias must be suppressed for these.
+    #[serde(skip, default)]
+    halt_wakeup_hdma: bool,
+
     // Whether the HDMA block owed for the *current* eligibility period has
     // already been serviced. rustyboi fires the period block immediately at the
     // rising edge, whereas Gambatte defers it to the `intevent_dma` event; this
@@ -510,6 +517,7 @@ impl Mmio {
             hdma_req_pending: false,
             halt_hdma_state: HaltHdmaState::Low,
             halt_wakeup_skew: false,
+            halt_wakeup_hdma: false,
             hdma_is_in_period_cached: false,
             hdma_prev_stat_mode: 0,
             hdma_prev_period: false,
@@ -1340,6 +1348,14 @@ impl Mmio {
     /// line-tail override is deferred to the renderer register).
     pub fn halt_wakeup_skew(&self) -> bool {
         self.halt_wakeup_skew
+    }
+
+    pub fn set_halt_wakeup_hdma(&mut self, v: bool) {
+        self.halt_wakeup_hdma = v;
+    }
+
+    pub fn halt_wakeup_hdma(&self) -> bool {
+        self.halt_wakeup_hdma
     }
 
     pub fn update_hdma_period_cache(&mut self, in_period: bool) {

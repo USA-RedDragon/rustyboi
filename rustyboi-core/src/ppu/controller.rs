@@ -5570,8 +5570,35 @@ impl Ppu {
         // the +1 for the skewed anticipation comparison so it matches getLyReg's
         // raw-time boundary. Scoped to halt-skew (the non-HALT count/ly tests are
         // co-tuned to the +1 and stay byte-identical).
+        // For a HALT-woken read, the post-wakeup instruction stream lands later in
+        // the line on CGB than DMG: Gambatte's halt-exit M-cycle (memory.cpp:300-301,
+        // `cc += 4 * isCgb()`) charges a flat +4 on CGB before the stream resumes,
+        // whereas rustyboi's engine does not model that extra M-cycle here. So a
+        // CGB halt-woken FF44 read effectively samples 4cc closer to the line wrap
+        // than the engine's access cc reflects. Bias only the CGB single-speed
+        // halt-woken read by that +4 (== to_next - 4) on top of the pre-existing
+        // -1 raw-time correction (the closed-form counter runs 1cc below Gambatte's
+        // lyTime; getLyReg compares against the RAW lyCounter().time()). This makes
+        // m1int_ly_1/_2/_3 (CGB) read at to_next 14/10/6 -> 9/5/1, so _1 stays
+        // renderer (0x90) and _2/_3 anticipate (0x91), matching Gambatte; DMG keeps
+        // -1 (its m1int_ly_2 reads the stale 0x90 at the SAME to_next=10). DS keeps
+        // -1: the speedchange/hdma _ly families resolve their own halt-exit phase
+        // through the bridge and are co-tuned to it.
+        // The HDMA-active halt-woken families (hdma_*_m*unhalt_ly / hdma_*_ly) carry
+        // their own wakeup-cc shift through the in-halt block transfer and the
+        // unhalt-reflag path, so the Gambatte halt-exit +4 is already folded into
+        // their post-wakeup phase; applying it again here double-counts. Scope the
+        // CGB halt-exit bias to the no-HDMA halt wakeup (the plain m1int_ly family).
         let halt_skew = mmio.halt_wakeup_skew();
-        let tn = if halt_skew { to_next - 1 } else { to_next };
+        let cgb_halt_exit =
+            halt_skew && mmio.is_cgb_features_enabled() && !ds && !mmio.halt_wakeup_hdma();
+        let tn = if cgb_halt_exit {
+            to_next - 5
+        } else if halt_skew {
+            to_next - 1
+        } else {
+            to_next
+        };
         if tn <= 10 && tn <= 6 + 4 * (ds as i64) {
             let result = if tn == 6 + 4 * (ds as i64) {
                 ly_reg & (ly_reg + 1)
