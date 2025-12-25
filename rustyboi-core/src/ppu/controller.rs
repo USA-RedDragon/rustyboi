@@ -5270,6 +5270,33 @@ impl Ppu {
             let off = if ds { GETSTAT_OFF_DS } else { 0 };
             (access_cc as i64 + off).max(0) as u64
         };
+        // CGB halt-exit +5: Gambatte's halt-exit M-cycle (memory.cpp:300-301,
+        // `cc += 4 * isCgb()`) charges a flat +4 on CGB before the woken instruction
+        // stream resumes, so a CGB halt-woken FF41 read effectively samples ~5cc
+        // later in the line than the engine's access cc reflects (mirror of the
+        // proven getLyReg `cgb_halt_exit` bias; the extra +1 over the raw +4 is the
+        // same lyTime correction the line-phase consumers carry). Without it the
+        // `lycirq_m2stat_2` STAT read lands at lineCycles 75 (OAMSearch -> mode 2)
+        // where Gambatte reads lineCycles 80 (mode 3, `cc+2 < m0Time`). The
+        // lycirq_m2stat_1/_2/_3 family arms 4cc apart, so this +5 lifts 71/75/79 ->
+        // 76/80/84: _1 stays mode 2 (<77), _2/_3 resolve mode 3 — matching Gambatte.
+        //
+        // SCOPED to the OAMSearch-state read (the line-START mode2->mode3 boundary).
+        // The HBlank line-tail halt-woken reads (`m0int_m0stat_scx*`, lineCycles
+        // ~445-454) are already resolved exactly by the `tail_thresh` path below and
+        // MUST keep their un-biased access cc, so gate this on `state == OAMSearch`.
+        // Same CGB-single-speed-no-HDMA predicate as getLyReg (the HDMA / DS halt
+        // wakeups fold their own halt-exit phase through the bridge/block-transfer).
+        let access_cc = if self.state == State::OAMSearch
+            && mmio.halt_wakeup_skew()
+            && mmio.is_cgb_features_enabled()
+            && !ds
+            && !mmio.halt_wakeup_hdma()
+        {
+            access_cc + 5
+        } else {
+            access_cc
+        };
         let lc = self.ly_counter_obs(mmio); // ds-subdot STAGE 1: read-path phase
         let ly = lc.ly as i64;
         let cpl = stat_irq::LCD_CYCLES_PER_LINE as i64;
