@@ -388,6 +388,33 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_write_delay: u32,
 
+    // PC-in-DMA-dest prefetch absorption (Gambatte `Interrupter::prefetch` runs
+    // the next-opcode fetch at the instruction boundary, BEFORE the `dma()` event
+    // overwrites VRAM). When a synchronous GDMA/HDMA block fires and the CPU's
+    // very next opcode fetch lands on the block's first destination byte
+    // (pc straddles ROM bank0->VRAM at 0x7FFE->0x8000), that opcode must read the
+    // PRE-transfer VRAM byte while the instruction's operands (dest+1..) read the
+    // POST-transfer bytes. Records the first-dest address and its pre-transfer
+    // byte at fire; sm83 consults it for exactly the next prefetch.
+    // (hdma_pc_7ffe / late_gdma_pc_7ffe.)
+    #[serde(skip, default)]
+    hdma_fire_dest0: Option<u16>,
+    #[serde(skip, default)]
+    hdma_fire_dest0_prebyte: u8,
+    // The dma-event cc at which the block fired. Gambatte's `intevent_dma`
+    // prefetch reads the next opcode at THIS cc (before the transfer), so the
+    // prefetch's VRAM-lock decision must be taken here, not at rustyboi's
+    // post-stall prefetch cc (which trails the fire by the whole transfer stall).
+    #[serde(skip, default)]
+    hdma_fire_cc: u64,
+    // Armed by the FF55-write immediate kick (in-period HDMA enable on the same
+    // instruction). Only such an instruction-driven block can flow the CPU's PC
+    // straight into its VRAM destination (pc 0x7FFE -> 0x8000), so the
+    // prefetch-absorption snapshot is gated on it: an m0-edge block firing inside
+    // a HALT window (no kick this instruction) must NOT arm the shadow.
+    #[serde(skip, default)]
+    hdma_snapshot_armed: bool,
+
     // C7-full FF55-kick fire-timing: set when an FF55 bit7=1 write (enable or
     // restart) wants to arm the first block immediately. Gambatte's `enableHdma`
     // gates that immediate flag on the LIVE `isHdmaPeriod(cc + 4)` predicate, not
@@ -540,6 +567,10 @@ impl Mmio {
             hdma_high_unhalt_consume: false,
             hdma_peraccess_consume_pending: false,
             hdma_pending_writes: Vec::new(),
+            hdma_fire_dest0: None,
+            hdma_fire_dest0_prebyte: 0xFF,
+            hdma_fire_cc: 0,
+            hdma_snapshot_armed: false,
             hdma_write_delay: 0,
             hdma_kick_eval_pending: 0,
             hdma_disable_fires: None,
@@ -1105,6 +1136,43 @@ impl Mmio {
         }
     }
 
+    /// Record the first destination byte's pre-transfer VRAM value for the
+    /// PC-in-DMA-dest prefetch-absorption case. Reads the current VRAM byte at
+    /// the block's first dest address (in the bank that will be written) before
+    /// the transfer overwrites it.
+    fn snapshot_dma_dest0_pre(&mut self) {
+        let vram_addr = VRAM_START | (self.hdma_dest & 0x1FFF);
+        let into_bank1 = self.cgb_features_enabled && self.vram_bank == 1;
+        let pre = if into_bank1 {
+            self.vram_bank1.read(vram_addr)
+        } else {
+            self.vram.read(vram_addr)
+        };
+        self.hdma_fire_dest0 = Some(vram_addr);
+        self.hdma_fire_dest0_prebyte = pre;
+        self.hdma_fire_cc = self.master_cc();
+    }
+
+    /// If the just-fired DMA block's first destination byte equals `pc` (the
+    /// CPU's next opcode-fetch address), consume and return its pre-transfer
+    /// value together with the dma-event fire cc (for the prefetch's VRAM-lock
+    /// decision). One-shot. Returns None when no fire is pending or `pc` is not
+    /// the block's first dest byte.
+    pub fn take_dma_prefetch_shadow(&mut self, pc: u16) -> Option<(u8, u64)> {
+        if self.hdma_fire_dest0 == Some(pc) {
+            self.hdma_fire_dest0 = None;
+            return Some((self.hdma_fire_dest0_prebyte, self.hdma_fire_cc));
+        }
+        None
+    }
+
+    /// Clear any stale DMA prefetch-shadow (called once the next opcode has been
+    /// fetched without consuming it, so it cannot leak to a later access).
+    pub fn clear_dma_prefetch_shadow(&mut self) {
+        self.hdma_fire_dest0 = None;
+        self.hdma_snapshot_armed = false;
+    }
+
     /// per-access STAGE 1: true while deferred HDMA block writes are still in their
     /// per-dot countdown (`step_hdma_deferred` must run each dot to commit them at
     /// the right cc). Blocks the idle bulk-skip.
@@ -1144,6 +1212,7 @@ impl Mmio {
         // the GDMA conflict on LCD-off re-runs of the oamdumper tests, letting a
         // clean OAM-DMA pass overwrite the conflict bytes.
 
+        self.snapshot_dma_dest0_pre();
         let mut src = self.hdma_source;
         let mut dst = self.hdma_dest;
 
@@ -1404,6 +1473,10 @@ impl Mmio {
         self.hdma_kick_eval_pending = 0;
         if in_period && self.hdma_enabled {
             self.hdma_req_pending = true;
+            // Instruction-driven in-period kick: arm the prefetch-absorption
+            // snapshot for the block this kick will fire (pc_7ffe). Cleared by
+            // the snapshot or the next opcode fetch.
+            self.hdma_snapshot_armed = true;
             // DEFERRED-HDMA-FIRE: the kick services THIS period's block. Mark it
             // done so an immediately-following `halt` captures `haltHdmaState_ =
             // High` (Gambatte: in-period + already-serviced) rather than
@@ -1692,6 +1765,17 @@ impl Mmio {
         // extra catch-up over-advances by one (suppresses the final conflict).
         if interleave && self.dma_subcycle == 0 {
             self.dma_advance_one_mcycle();
+        }
+        // Snapshot the first destination byte's PRE-transfer value for the
+        // PC-in-DMA-dest opcode-prefetch absorption. Only for a block fired by an
+        // instruction-driven in-period kick (the only case where the CPU's next
+        // opcode fetch can flow straight into the VRAM destination, pc_7ffe). An
+        // m0-edge block firing inside a HALT window (no kick this instruction)
+        // must NOT arm the shadow, else its unhalt-resume opcode at dest0 would
+        // wrongly read the pre-transfer byte (hdma_transition_halt_hdmadst_unhalt).
+        if self.hdma_snapshot_armed {
+            self.snapshot_dma_dest0_pre();
+            self.hdma_snapshot_armed = false;
         }
         let mut cc: i64 = 0;
         let mut loam: i64 = -(self.dma_subcycle as i64);
