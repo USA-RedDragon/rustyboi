@@ -1808,7 +1808,7 @@ impl Ppu {
 
     /// Current PPU master clock (`abs_cc`). Used by the interrupt-service LCD
     /// ack to position the IF clear at the exact dot (see
-    /// `Bus::interrupt_low_push_lcd_ack`).
+    /// `Bus::interrupt_low_push_ack`).
     pub fn abs_cc(&self) -> u64 { self.abs_cc }
 
     /// STAGE 4 KEYSTONE — the accumulated STAT-phase carry (master-cc). The bus

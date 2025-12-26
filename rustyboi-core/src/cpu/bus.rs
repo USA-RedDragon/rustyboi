@@ -585,66 +585,78 @@ impl<'a> Bus<'a> {
         self.mmio.read(addr)
     }
 
-    /// Interrupt-service low-byte push that ACKs the LCD IF bit partway through
-    /// its M-cycle, faithful to Gambatte's `Interrupter::interrupt` ordering
-    /// (`memory.write(low push); ackIrq(n, cc)` where `ackIrq` runs
-    /// `lcd_.update(cc+2)` then `intreq_.ackIrq(bit)`). A STAT/m2 IRQ whose fire
-    /// cc lands at or before the ack sub-point (cc+2 into this M-cycle) is
-    /// overwritten by the ack-clear; one firing later in the M-cycle (the trailing
-    /// dots) re-flags IF and survives for the ISR to read (the `late_retrigger`
-    /// re-fire). `ack_lcd` is false for non-LCD vectors (clears nothing here).
-    /// The stack write itself targets RAM (SP), so it resolves directly via mmio
-    /// without PPU gating — matching Gambatte's `write<false,false>`.
-    pub fn interrupt_low_push_lcd_ack(&mut self, sp: u16, value: u8, ack_lcd: bool) {
+    /// Interrupt-service low-byte push that ACKs the dispatched IF bit partway
+    /// through its M-cycle, faithful to Gambatte's `Interrupter::interrupt`
+    /// ordering (`memory.write(low push); memory.ackIrq(n, cc)`). `Memory::ackIrq`
+    /// advances each source to a per-source sub-cc offset before clearing only the
+    /// dispatched bit `n`:
+    ///   `updateSerial(cc + 3 + isCgb())`  (bit 8)
+    ///   `updateTimaIrq(cc + 2 + isCgb())` (bit 4)
+    ///   `lcd_.update(cc + 2)`             (bit 2)
+    /// A source whose completion cc lands at or before its offset is flagged then
+    /// immediately cleared (reads back gone); one completing later in the M-cycle
+    /// re-flags IF and survives for the ISR to read (the `late_retrigger` /
+    /// `start_wait..._read_if` re-fire). The +cgb on serial/timer is the DMG-vs-CGB
+    /// discriminator for the `_2` boundary cases. `bit` is the dispatched vector's
+    /// IF bit. The stack write targets RAM (SP) and is never PPU-gated (Gambatte
+    /// `write<false,false>`).
+    pub fn interrupt_low_push_ack(&mut self, sp: u16, value: u8, bit: u8) {
         // Stack byte stores at the access start (the push data is fixed for the
         // whole M-cycle); RAM is never PPU-gated.
         self.mmio.write(sp, value);
-        // Advance to the ack sub-point and ACK. Gambatte's `ackIrq` runs
-        // `lcd_.update(cc + 2)` (set any IRQ firing by cc+2) THEN clears the bit:
-        // a STAT/m2 IRQ whose fire cc is <= cc+2 is wiped, one firing in the
-        // trailing dots survives (the `late_retrigger` re-fire). The ack point is
-        // Gambatte's `cc + 2`; clear once that dot's events have been flagged.
         let ds = self.mmio.is_double_speed_mode();
+        let cgb = self.mmio.is_cgb() as u64;
         let start = self.mmio.master_cc();
         let target = start.wrapping_add(4);
-        // Ack-point trigger differs by speed because the PPU STAT events fire at a
-        // finer granularity than the dot clock at double speed (step_subdot at the
-        // odd master cc). Single speed: the dot clock IS the master clock, so the
-        // ack point is `abs_cc > start_abs + 2` (the dot that has flagged events up
-        // through cc+2). Double speed: events fire on sub-dots, so trigger on the
-        // raw `master_cc >= start + 2` (Gambatte's exact `cc + 2`) which correctly
-        // orders against the sub-dot fires. (cctracer-measured against the
-        // `_1`/`_2` refire/no-refire pairs at both speeds; the cross-speed mix
-        // beats either single rule on the full suite.)
+        // Per-source ack offset (Gambatte Memory::ackIrq), in master cc from the
+        // low-push start. Serial/timer carry the +cgb the DMG/CGB `_2` boundaries
+        // hinge on; LCD is a flat +2.
+        let lcd_bit = crate::cpu::registers::InterruptFlag::Lcd as u8;
+        let serial_bit = crate::cpu::registers::InterruptFlag::Serial as u8;
+        let timer_bit = crate::cpu::registers::InterruptFlag::Timer as u8;
+        // The clear-point trigger. For the LCD vector keep the cctracer-tuned
+        // dual rule (DS uses the raw master cc+2; SS uses the PPU abs-cc edge,
+        // where STAT events fire at the dot clock). Serial/timer events fire off
+        // the master cc (timer.abs_cc / serial phase), so they use Gambatte's exact
+        // master `cc + offset` at both speeds.
+        // Gambatte `Memory::ackIrq` flags the source up to `cc + N + isCgb()` then
+        // clears bit n: serial N=3, timer N=2, lcd N=2 (flat). rustyboi's per-dot
+        // crossing compares the source's *fire dot* (abs_cc), not Gambatte's
+        // unfolded eventTime; the serial fire dot equals its complete_at (offset
+        // 3+cgb maps 1:1), while the timer fire dot is its eventTime + IF_OFF(1),
+        // so the equivalent crossing is also `start + 3 + cgb` (= eventTime+1 <=
+        // start+2+cgb+1). Both peripheral vectors therefore share the 3+cgb dot
+        // threshold; LCD keeps the flat +2.
+        let offset = if bit == serial_bit || bit == timer_bit {
+            3 + cgb
+        } else {
+            2
+        };
         let ack_abs_threshold = self.ppu.abs_cc().wrapping_add(2);
-        let ack_master_threshold = start.wrapping_add(2);
-        let mut acked = !ack_lcd;
+        let ack_master_threshold = start.wrapping_add(offset);
+        let mut acked = false;
         while self.mmio.master_cc() < target {
             self.resolve_one_dot();
             self.dot = self.dot.wrapping_add(1);
             self.ticked += 1;
-            let crossed = if ds {
-                self.mmio.master_cc() >= ack_master_threshold
-            } else {
+            let crossed = if bit == lcd_bit && !ds {
                 self.ppu.abs_cc() > ack_abs_threshold
+            } else {
+                self.mmio.master_cc() >= ack_master_threshold
             };
             if !acked && crossed {
                 let cur = self.mmio.read(crate::cpu::registers::INTERRUPT_FLAG);
-                self.mmio.write(
-                    crate::cpu::registers::INTERRUPT_FLAG,
-                    cur & !(crate::cpu::registers::InterruptFlag::Lcd as u8),
-                );
+                self.mmio
+                    .write(crate::cpu::registers::INTERRUPT_FLAG, cur & !bit);
                 acked = true;
             }
         }
         if !acked {
-            // Threshold not crossed within this M-cycle (the trailing dots were
-            // all <= threshold): ACK now so the bit is still cleared.
+            // Threshold not crossed within this M-cycle: ACK now so the bit is
+            // still cleared (the source never re-fired in the trailing dots).
             let cur = self.mmio.read(crate::cpu::registers::INTERRUPT_FLAG);
-            self.mmio.write(
-                crate::cpu::registers::INTERRUPT_FLAG,
-                cur & !(crate::cpu::registers::InterruptFlag::Lcd as u8),
-            );
+            self.mmio
+                .write(crate::cpu::registers::INTERRUPT_FLAG, cur & !bit);
         }
     }
 
