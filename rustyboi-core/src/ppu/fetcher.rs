@@ -62,6 +62,17 @@ pub struct Fetcher {
     // Window support
     fetching_window: bool,
     window_x_start: u8,
+    // Gambatte WE-off / Tile::f0 boundary: when a mid-mode-3 window-disable
+    // lands mid-window-tile (Gambatte `xpos != endx`), the in-progress tile
+    // (whose tilemap was committed window at its f0) finishes drawing before
+    // the revert. Count of additional window-tile fetches to draw before
+    // reverting to BG. 0 = stop at the very next TileNumber (the boundary case).
+    #[serde(default)]
+    stop_window_after_tiles: u8,
+    // Set at the last deferred-extra window tile's TileNumber; its PushToFIFO
+    // flips fetching_window off so the following tile fetches BG.
+    #[serde(default)]
+    window_revert_at_push: bool,
 
     // Latched (LY + SCY) for the current tile fetch. Captured when the
     // fetcher enters `TileNumber` and reused by `TileDataLow`/`High` for
@@ -89,6 +100,8 @@ impl Fetcher {
             pixel_buffer: [0; 8],
             fetching_window: false,
             window_x_start: 0,
+            stop_window_after_tiles: 0,
+            window_revert_at_push: false,
             latched_y: 0,
             subcc_xpos: 0,
             subcc_cgb_adj: 0,
@@ -105,8 +118,10 @@ impl Fetcher {
         self.pixel_buffer = [0; 8];
         self.fetching_window = false;
         self.window_x_start = 0;
+        self.stop_window_after_tiles = 0;
+        self.window_revert_at_push = false;
     }
-    
+
     // Start fetching window tiles when WX condition is met
     pub fn start_window(&mut self, window_x: u8) {
         self.start_window_at_tile(window_x, 0);
@@ -123,6 +138,9 @@ impl Fetcher {
         self.tile_index = start_tile;
         self.pixel_fifo.reset(); // Clear FIFO when switching to window
         self.state = State::TileNumber; // Start fetching immediately
+        // A fresh window start cancels any pending deferred WE-off revert.
+        self.stop_window_after_tiles = 0;
+        self.window_revert_at_push = false;
     }
 
     // Stop fetching window tiles mid-line (Gambatte WE-off / handleWinDrawStartReq
@@ -130,7 +148,22 @@ impl Fetcher {
     // tilemap; the FIFO is left intact so the window tile already queued drains
     // before the BG pixels arrive, matching Gambatte's per-tile-boundary switch.
     pub fn stop_window(&mut self) {
-        self.fetching_window = false;
+        self.stop_window_with_extra(0);
+    }
+
+    // Stop the window, but draw `extra` additional full window tiles first.
+    // Gambatte's Tile::f0 commits each tile's window-vs-BG choice at the tile
+    // boundary (`xpos == endx`); a WE-off that lands mid-tile (`xpos != endx`)
+    // lets the already-committed in-progress tile finish before reverting. The
+    // controller passes extra=1 in that mid-tile case, 0 at a tile boundary.
+    pub fn stop_window_with_extra(&mut self, extra: u8) {
+        if extra == 0 {
+            self.fetching_window = false;
+            self.stop_window_after_tiles = 0;
+        } else {
+            // Keep fetching window for `extra` more tile fetches, then revert.
+            self.stop_window_after_tiles = extra;
+        }
     }
 
     // Calculate the correct tile map base address based on LCDC.6 (WindowTileMapDisplaySelect)
@@ -204,6 +237,22 @@ impl Fetcher {
 
         match self.state {
             State::TileNumber => {
+                // Deferred WE-off (Gambatte Tile::f0 mid-tile boundary): when a
+                // window-disable landed mid-window-tile, the controller armed
+                // `stop_window_after_tiles` extra window tiles. Each TileNumber
+                // that begins while armed consumes one; the LAST one keeps
+                // fetching_window true for its own tile, then reverts so the
+                // following tile fetches BG. (The in-flight tile at the disable
+                // dot is already past TileNumber, so it is never counted here.)
+                if self.fetching_window && self.stop_window_after_tiles > 0 {
+                    self.stop_window_after_tiles -= 1;
+                    if self.stop_window_after_tiles == 0 {
+                        // This tile is the last window tile; revert after it.
+                        // Set a marker by leaving fetching_window true for this
+                        // fetch but scheduling the flip at its PushToFIFO.
+                        self.window_revert_at_push = true;
+                    }
+                }
                 // Fetch the tile number from VRAM using the correct tile map
                 let (tile_map_base, map_offset) = if self.fetching_window {
                     let window_tile_map_base = self.get_window_tile_map_base(lcdc_state.lcdc);
@@ -358,6 +407,12 @@ impl Fetcher {
                 }
                 self.tile_index = self.tile_index.wrapping_add(1);
                 self.state = State::TileNumber;
+                // Deferred WE-off revert: the last extra window tile has now
+                // been pushed; revert to BG for subsequent fetches.
+                if self.window_revert_at_push {
+                    self.window_revert_at_push = false;
+                    self.fetching_window = false;
+                }
                 Some(FetcherDebugEvent {
                     kind: FetcherDebugEventKind::PushToFifo,
                     tile_index: self.tile_index.wrapping_sub(1),
@@ -389,6 +444,10 @@ impl Fetcher {
     
     pub fn is_fetching_window(&self) -> bool {
         self.fetching_window
+    }
+
+    pub fn window_x_start_dbg(&self) -> u8 {
+        self.window_x_start
     }
 
     // True when the next step() will run the TileNumber substep (the one that
