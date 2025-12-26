@@ -5540,7 +5540,44 @@ impl Ppu {
             }
             return Some(2);
         }
+        // DMG halt-woken line-tail (the `m0int_m0stat_scx*` ly<143 mid-frame
+        // family): the post-wake decisive reads preserve Gambatte's exact 4cc arming
+        // spacing, so on DMG the want-mode0 reads land at lineCycles 445..450 and the
+        // want-mode2 reads at lineCycles 451..454 — cleanly separable at integer cc
+        // (measured via the runner's closed-form lineCycles, NOT sub-dot). DMG's
+        // mode-0 line tail runs TWO lineCycles longer than CGB (which splits at
+        // 448/449): the dmg08-distinguished `scx3_2` (449) / `scx4_2` (450) read
+        // mode0 on DMG but mode2 on CGB. Resolve mode 2 from the closed form at the
+        // DMG cpl-5 (451) boundary instead of deferring to the post-tick renderer
+        // register (which lags and reports the stale mode 2 at exactly lineCycles
+        // 450 — the `m0int_m0stat_scx4_2` DMG failure; lineCycles 449/451..454 the
+        // renderer already resolves correctly). The want-mode0 reads (<=450) fall
+        // through to the mode-3/mode-0 resolution below. The ly=153 VBlank-line
+        // `*_2b` reads are NOT in this mid-frame path (handled by the VBlank branch
+        // in get_stat_mode_at_cc), so their genuine sub-dot collapse is untouched.
+        if halt_skew && line_cycles >= cpl - 5 {
+            if (access_cc + 1) < self.display_enable_inactive_until {
+                return Some(0);
+            }
+            return Some(2);
+        }
         if halt_skew && line_cycles >= cpl - 7 {
+            // DMG line tail at lineCycles 449/450: still mode 0 (the want-mode0
+            // group extends to 450 on DMG). Fall through to the mode-3/mode-0
+            // resolution below rather than deferring to the lagging renderer.
+            if (access_cc + 1) < self.display_enable_inactive_until {
+                return Some(0);
+            }
+            // mode 3 iff still before m0Time, else mode 0 (the line body).
+            if self.state != State::OAMSearch
+                && let Some(m0t) = self.m0_time_master
+            {
+                let read_off: i64 = if !ds && !self.lytime_no_plus1 { 3 } else { 2 };
+                if (access_cc as i64) + read_off < m0t as i64 {
+                    return Some(3);
+                }
+                return Some(0);
+            }
             return None;
         }
         // Mode 2 (OAM search): start-of-line lineCycles (< 77), or line-tail
