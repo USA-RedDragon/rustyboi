@@ -4065,6 +4065,46 @@ impl Ppu {
                         }
                         // else: no penalty — keep the no-window m0Time captured at arm.
                     }
+                    // DMG WY-trigger enable (mirror of the CGB branch above). A
+                    // mid-mode-3 WY==LY trigger with an x==0 window (WX 0..=7,
+                    // unchanged) brings the window into play this line. Gambatte keeps
+                    // a finite (window-inclusive or no-window) m0Time, so the FF41
+                    // line-tail read resolves a concrete mode 0/3 boundary; nulling
+                    // m0_time_master here would defer to the renderer register (always
+                    // mode 3), passing the out3 `_1`/`_2` reps but FAILING the out0
+                    // `_3` rep (late_wy_FFto2_ly2_wx00_3 / late_scx_late_wy_FFto4_ly4
+                    // _wx00_3). Keep the no-window m0Time and add WIN_M3_PENALTY iff the
+                    // WY trigger lands before the window-tile commit dot. The DMG commit
+                    // dot is the CGB form (`m3_arm_dot + scx&7 + WX + 3`) plus the
+                    // DMG pixel-transfer warmup less one (`DMG_WARMUP - 1` = 3):
+                    // measured ticks at the WY block bracket it across WX/SCX (wx00:
+                    // pen@84,no-pen@88; scx4: pen@84/88,no-pen@92; wx07: pen@88/92,
+                    // no-pen@96; scx3+wx07: pen@88/92,no-pen@96), so commit_dot =
+                    // m3_arm_dot + scx&7 + WX + 3 + 3 separates pen vs no-pen at every
+                    // rep. Scoped DMG / SS / no sprites / x==0 (WX 0..=7).
+                    if !keep_schedule
+                        && !self.m3_scheduled_win
+                        && now_will_start
+                        && arm_wx == wx_now
+                        && (0..=7).contains(&wx_now)
+                        && !mmio.is_cgb_features_enabled()
+                        && !mmio.is_double_speed_mode()
+                        && self.sprites_on_line.is_empty()
+                        && let Some(m0t) = self.m0_time_master
+                    {
+                        self.win_wx_enable_resolved = true;
+                        keep_schedule = true;
+                        let commit_dot = self.m3_arm_dot as i64
+                            + (self.m3_arm_scx & 7) as i64
+                            + wx_now as i64
+                            + WYTRIG_COMMIT_DELAY
+                            + (DMG_PIXEL_TRANSFER_WARMUP as i64 - 1);
+                        if (self.ticks as i64) < commit_dot {
+                            self.m0_time_master =
+                                Some((m0t as i64 + WIN_M3_PENALTY as i64).max(0) as u64);
+                        }
+                        // else: no penalty — keep the no-window m0Time captured at arm.
+                    }
                     // WX-DISABLE of a WX<7 (visible x==0) window that WAS scheduled at
                     // M3 arm: the immediate-start window's StartWindowDraw penalty
                     // locks the moment the fetcher fetches the window tile (Gambatte's
