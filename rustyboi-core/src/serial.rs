@@ -50,6 +50,10 @@ impl Serial {
         self.cgb = cgb;
     }
 
+    pub fn is_cgb(&self) -> bool {
+        self.cgb
+    }
+
     /// per-access STAGE 1: true while a serial transfer is in flight (its
     /// `complete_at` event is pending). Blocks the idle bulk-skip so the transfer's
     /// bit-shift and completion IRQ land at the exact cc.
