@@ -302,7 +302,7 @@ impl SM83 {
             // serviced interrupt UNDOES the prefetch (rewinds pc); otherwise the
             // prefetched opcode is consumed by execute with no re-fetch/re-charge.
             if !self.prefetched {
-                self.opcode = mmio.read(self.registers.pc);
+                self.opcode = mmio.fetch_opcode(self.registers.pc);
                 self.registers.pc = self.registers.pc.wrapping_add(1);
                 self.prefetched = true;
             }
@@ -333,7 +333,7 @@ impl SM83 {
             return self.service_interrupt(mmio, just_unhalted);
         }
 
-        let opcode = mmio.read(self.registers.pc);
+        let opcode = mmio.fetch_opcode(self.registers.pc);
         self.registers.pc += 1;
         cycles += self.execute(opcode, mmio);
         // Next-M-cycle dma() fire (IME-off HALT-bug resume): a block whose m0-edge
