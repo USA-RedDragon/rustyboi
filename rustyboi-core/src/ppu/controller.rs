@@ -6311,7 +6311,7 @@ impl Ppu {
                     // Get sprite pixel data
                     if let Some(sprite_pixel_idx) = self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8)
                         && sprite_pixel_idx != 0 { // Sprite pixel is not transparent
-                            
+
                             // Get sprite palette (in CGB mode, sprite attributes can specify palette)
                             let sprite_palette_idx = if mmio.is_cgb_features_enabled() {
                                 // CGB mode: Use bits 2-0 for palette selection (0-7)
@@ -6469,12 +6469,16 @@ impl Ppu {
         // Sprite tiles always use the $8000 addressing method
         let tile_addr = 0x8000 + (tile_index as u16) * 16 + (tile_line as u16) * 2;
         
-        // In CGB mode, sprites can use VRAM bank 1 if bit 3 is set
-        let (low_byte, high_byte) = if mmio.is_cgb_features_enabled() && (sprite.attributes.raw & 0x08) != 0 {
-            // Read from VRAM bank 1
-            (mmio.read_vram_bank1(tile_addr), mmio.read_vram_bank1(tile_addr + 1))
+        // In CGB mode the sprite tile-data bank is fixed by OAM attr bit 3,
+        // independent of the CPU's live VRAM-bank select (FF4F). The PPU must
+        // read bank 0 when the bit is clear; using the live `mmio.read` here
+        // returns whatever bank the CPU left selected (bank 1 in the
+        // scx_attrib tests), corrupting the left-edge sprite color.
+        let (low_byte, high_byte) = if mmio.is_cgb_features_enabled() {
+            let bank = if (sprite.attributes.raw & 0x08) != 0 { 1 } else { 0 };
+            (mmio.read_vram_bank(bank, tile_addr), mmio.read_vram_bank(bank, tile_addr + 1))
         } else {
-            // Read from VRAM bank 0 (or current bank on DMG)
+            // DMG: single bank (the live read is correct).
             (mmio.read(tile_addr), mmio.read(tile_addr + 1))
         };
         
