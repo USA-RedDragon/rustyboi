@@ -3,3 +3,6 @@
 
 # External test suite (assembled locally; never a tracked symlink)
 gambatte-core
+
+# Copyrighted boot ROMs — never commit (provided locally for hardware-accurate test init)
+/bios/*.bin
