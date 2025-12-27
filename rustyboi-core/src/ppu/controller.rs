@@ -5468,6 +5468,27 @@ impl Ppu {
         Some(mode2_readable || mode0_reached)
     }
 
+    /// getStat mode-3->0 read-boundary offset (`access_cc + off < m0Time` => mode 3).
+    /// SS: rustyboi's `m0_time_master` carries the lyTime `+1` so it sits 1cc high vs
+    /// Gambatte's getStat read -> off=3 (`!lytime_no_plus1`); on a post-DS->SS line the
+    /// `+1` is dropped -> off=2. DS samples the half-dot grid -> off=2.
+    ///
+    /// On a post-DS->SS line that took the FACET1 mode-3 STAT-phase carry
+    /// (`render_carry_skew_cc != 0`), the STAT/m0Time clock was advanced `carry` dots
+    /// WITHOUT moving the render latch / read-cc grid, so the FF41 read cc sits `carry`
+    /// dots BEHIND the carried m0Time. Gambatte's `cc + 2 < m0Time` holds against the
+    /// un-carried read grid, so subtract the carry from the offset (target carry=1 ->
+    /// off 2->1 -> gap-3 mode-3 read; carry=0 want-mode-0 siblings keep off=2). The
+    /// carry is 0 except on a post-mode-3-switch line, so this is inert elsewhere.
+    fn stat_read_off(&self, ds: bool) -> i64 {
+        let base = if !ds && !self.lytime_no_plus1 { 3 } else { 2 };
+        if self.lytime_no_plus1 {
+            base - self.render_carry_skew_cc
+        } else {
+            base
+        }
+    }
+
     /// Gambatte `getStat` mode-3 <-> mode-0 resolution at the CPU's access cc.
     /// Returns the FF41 lower two mode bits the CPU observes when reading FF41 at
     /// `access_cc` (master-cc units), or None when no closed-form m0Time is
@@ -5496,7 +5517,7 @@ impl Ppu {
         // speed (and only when not in a post-DS->SS-switch line, where `lytime_no_plus1`
         // already drops it) it sits 1cc high for the getStat read specifically, so the
         // read boundary uses `+3` instead of `+2`.
-        let read_off = if !ds && !self.lytime_no_plus1 { 3 } else { 2 };
+        let read_off = self.stat_read_off(ds);
         if (access_cc as i64) + read_off < m0t {
             Some(3)
         } else {
@@ -5731,7 +5752,7 @@ impl Ppu {
             if self.state != State::OAMSearch
                 && let Some(m0t) = self.m0_time_master
             {
-                let read_off: i64 = if !ds && !self.lytime_no_plus1 { 3 } else { 2 };
+                let read_off: i64 = self.stat_read_off(ds);
                 if (access_cc as i64) + read_off < m0t as i64 {
                     return Some(3);
                 }
@@ -5763,7 +5784,7 @@ impl Ppu {
                     if (access_cc + 1) < self.display_enable_inactive_until {
                         return Some(0);
                     }
-                    let read_off: i64 = if !ds && !self.lytime_no_plus1 { 3 } else { 2 };
+                    let read_off: i64 = self.stat_read_off(ds);
                     if (access_cc as i64) + read_off < m0t as i64 {
                         return Some(3);
                     }
@@ -5820,7 +5841,7 @@ impl Ppu {
             // enable; on steady lines it ended long ago. Gate the lineStart-local
             // inactive suppression to the first line (using the global field there
             // would end the window one render dot late — see the comment above).
-            let read_off: i64 = if !ds && !self.lytime_no_plus1 { 3 } else { 2 };
+            let read_off: i64 = self.stat_read_off(ds);
             if self.first_line_after_enable {
                 // `line_start` here (the raw LyCounter-derived line origin) sits one
                 // master-cc ABOVE Gambatte's enable cc anchor (`lyCounter.reset(0,
