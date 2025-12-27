@@ -409,7 +409,28 @@ impl<'a> Bus<'a> {
             // Charge the M-cycle exactly as a normal fetch would (the read path
             // ticks before resolving), then resolve against the fire-cc lock.
             self.tick_m();
-            if self.ppu_locks_access(pc, fire_cc) {
+            // Gambatte's `Interrupter::prefetch` runs at the `intevent_dma` event
+            // cc — the instruction boundary AFTER `ldff(55),a` completes — and
+            // resolves VRAM via `vramReadable`. The synchronous GDMA snapshot is
+            // taken at the FF55 write's START cc (pre-tick, inside `execute_gdma`),
+            // one CPU M-cycle (`4`) plus the `ppu_access_cc` phase (`+1`, see
+            // `Mmio::ppu_access_cc`) BEFORE that boundary. Advance the fire cc by
+            // that fixed offset so the prefetch's readability lands on Gambatte's
+            // lineCycle: late_gdma_pc_7ffe_1 lineCycles 76 (< 79 -> mode-2 readable
+            // -> pre-byte) vs _2 lineCycles 80 (mode-3 locked -> open-bus).
+            let prefetch_cc = fire_cc.wrapping_add(5);
+            let is_cgb = self.mmio.is_cgb_features_enabled();
+            let ds = self.mmio.is_double_speed_mode();
+            // Resolve readability from the lyTime-derived lineCycle (Gambatte
+            // `vramReadable`), which honours the mode-2 readable window the
+            // renderer-mode lock (`ppu_locks_access`, polluted by the renderer's
+            // current FF41 mode) misses. Fall back to the renderer-mode lock when
+            // no closed-form m0Time exists (window / first line after enable).
+            let readable = self
+                .ppu
+                .vram_readable_at_cc(prefetch_cc, is_cgb, ds)
+                .unwrap_or_else(|| !self.ppu_locks_access(pc, fire_cc));
+            if !readable {
                 return 0xFF;
             }
             return pre;
