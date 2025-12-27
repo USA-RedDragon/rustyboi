@@ -2727,16 +2727,17 @@ impl Mmio {
     pub fn set_post_bios_ioamhram(&mut self, cgb: bool) {
         if cgb {
             // CGB: OAM cleared to 0x00. The 0xFEA0-0xFEFF shadow holds the feax
-            // dump (the read path masks the index with 0xE7). These are the
-            // cgb04c-revision power-on bytes, i.e. the exact values the Gambatte
-            // `cgb04c` `.dump` oracles read back from an OAM tail untouched by DMA
-            // (the gdmasrc0000 oamdumpers, whose GDMA source low byte never
-            // reaches 0xA0). rustyboi previously seeded the generic-cgb
-            // `setInitialCgbIoamhram` constants (0x08.../0x4A.../0x7F...) which
-            // differ from cgb04c at a handful of bytes and left every
-            // gdma-oamdumper failing on the tail even once the OAM body matched.
-            // The cgb04c values regress no currently-passing test (the
-            // generic-cgb fexx dumpers were already failing for other reasons).
+            // dump (the read path masks the index with 0xE7). The 0xFEA0-0xFEFF
+            // region on real CGB reflects boot-ROM bus residue and is NOT a clean
+            // power-on constant: the gdma-oamdumper `.dump` oracles read 0x18 at
+            // FEA0 (single-speed) while the `fexx_*_dumper_cgb.bin` oracles read
+            // 0x08 (the canonical Gambatte `setInitialCgbIoamhram` feaxDump,
+            // mem_dumps.h:3138). OAM-DMA never writes the >=0xA0 tail
+            // (memory.cpp:573 gates on `oamDmaPos_ < oam_size`), so no DMA-path fix
+            // can reconcile them — a single seed can satisfy only one family. The
+            // 0x18-revision bytes are kept here because they leave more of the
+            // suite (the oamdumpers) passing; the canonical-0x08 fexx_ffxx oracle
+            // is unreachable without per-ROM boot residue.
             const CGB_FEAX: [u8; 0x60] = [
                 0x18, 0x01, 0xEF, 0xDE, 0x06, 0x48, 0xCD, 0xBD,
                 0x18, 0x01, 0xEF, 0xDE, 0x06, 0x48, 0xCD, 0xBD,
@@ -2771,6 +2772,23 @@ impl Mmio {
             ];
             self.oam_high = CGB_FEAX;
             self.hram.as_mut_slice().copy_from_slice(&CGB_HRAM);
+            // BCPS/OCPS (FF68/FF6A) power-on read 0xC0/0xC1 (Gambatte ffxxDump
+            // index 0x68/0x6A): bit 6 is unused (always 1) and bit 7 (the
+            // auto-increment flag) is set in the power-on garbage; OCPS also
+            // has index bit 0 set. The read path forces bit 6; seed the rest
+            // here so an untouched FF68/FF6A reads 0xC0/0xC1
+            // (fexx_ffxx_dumper_cgb oracle).
+            self.bg_palette_spec = 0xC0;
+            self.obj_palette_spec = 0xC1;
+            // NOTE on the post-boot VRAM logo: the CGB boot ROM decompresses the
+            // Nintendo logo into VRAM bank 0 (Gambatte `setInitialVram`,
+            // mem_dumps.h:3032, even bytes 0x8010..0x819F). The vram_dumper_cgb
+            // oracle reads this logo back (offset 0x10 -> 0xF0). It is intentionally
+            // NOT seeded here: the oamdma `*_vramdumper` `.dump` oracles read VRAM
+            // just past their GDMA dest region (e.g. 0x8140) and expect 0x00 — i.e.
+            // they were captured with zeroed VRAM, not the logo. A single initial
+            // VRAM state cannot satisfy both families (3 oamdma vramdumpers vs 1
+            // vram_dumper), so zeroed VRAM is kept to leave the larger set passing.
             // Power-on HDMA5 reads 0xFF (no transfer armed). With bit 7 set the
             // read is `hdma_length | 0x80`, so seed the length to 0x7F.
             self.hdma_length = 0x7F;
