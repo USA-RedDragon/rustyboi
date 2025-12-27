@@ -693,13 +693,35 @@ impl<'a> Bus<'a> {
         };
         let ack_abs_threshold = self.ppu.abs_cc().wrapping_add(2);
         let ack_master_threshold = start.wrapping_add(offset);
+        // Gambatte's `Memory::ackIrq` does `lcd_.update(cc + 2)` (advance the LCD to
+        // cc+2, flagging any STAT IRQ that *completes by* cc+2) and *then* clears the
+        // dispatched bit. A STAT IRQ whose event lands one dot later (the mode-0
+        // HBlank re-trigger fires at `predictedNextXposTime(166)` = cc+3 here) is
+        // flagged *after* the clear and survives for the ISR to read
+        // (`late_m0irq_retrigger`). Faithful to that, the clear must land the moment
+        // the LCD dot clock *reaches* cc+2 (`abs_cc == threshold`), i.e. a `>=`
+        // crossing, so the next dot's m0 event re-flags after it.
+        //
+        // This only holds for the mode-0 (HBlank) STAT IRQ. The LYC=LY / mode-1
+        // re-trigger events (`lycint152_*`, `lycint143_m1irq_*`) fire one dot
+        // *earlier* in rustyboi's per-dot grid than Gambatte's predicted time, so a
+        // `>=` clear would run in the same iteration that resolved them and wrongly
+        // keep the bit; there the original `>` (clear one dot later, after the event
+        // dot) reproduces Gambatte's flagged-then-cleared result. The surviving
+        // source is distinguished by the STAT enable bits: only mode-0 (m0en, bit 3)
+        // gets the `>=` clear; LYC/mode-1/mode-2 keep `>`.
+        let m0_retrig_window = (self.mmio.read(ppu::LCD_STATUS) & 0x08) != 0;
         let mut acked = false;
         while self.mmio.master_cc() < target {
             self.resolve_one_dot();
             self.dot = self.dot.wrapping_add(1);
             self.ticked += 1;
             let crossed = if bit == lcd_bit && !ds {
-                self.ppu.abs_cc() > ack_abs_threshold
+                if m0_retrig_window {
+                    self.ppu.abs_cc() >= ack_abs_threshold
+                } else {
+                    self.ppu.abs_cc() > ack_abs_threshold
+                }
             } else {
                 self.mmio.master_cc() >= ack_master_threshold
             };
