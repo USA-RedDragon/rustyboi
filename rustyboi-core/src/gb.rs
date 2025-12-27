@@ -199,13 +199,18 @@ impl GB {
             Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 => false,
         });
         self.cpu.registers.set_flag(registers::Flag::Negative, false);
+        // DMG/MGB post-boot H/C reflect the boot ROM's final header-checksum
+        // `ADD A,(0x14D)`: a valid ROM has `A == 256 - rom[0x14D]` there, so the add
+        // carries iff rom[0x14D] != 0 (C), and half-carries iff its low nibble != 0
+        // (H). The previous `== 0x00` was inverted (gave F=0x80 where real hardware
+        // gives 0xB0). DMG0/SGB/CGB leave H/C clear.
         self.cpu.registers.set_flag(registers::Flag::HalfCarry, match self.hardware {
             Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 | Hardware::CGB => false,
-            Hardware::DMG | Hardware::MGB => self.mmio.read(0x014D) == 0x00,
+            Hardware::DMG | Hardware::MGB => (self.mmio.read(0x014D) & 0x0F) != 0,
         });
         self.cpu.registers.set_flag(registers::Flag::Carry, match self.hardware {
             Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 | Hardware::CGB => false,
-            Hardware::DMG | Hardware::MGB => self.mmio.read(0x014D) == 0x00,
+            Hardware::DMG | Hardware::MGB => self.mmio.read(0x014D) != 0x00,
         });
         if self.hardware == Hardware::CGB {
             self.mmio.write(crate::memory::mmio::REG_VBK, 0x7E);
