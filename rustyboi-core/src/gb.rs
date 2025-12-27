@@ -83,10 +83,16 @@ impl GB {
         self.mmio.write(crate::input::JOYP, 0xCF);
         self.mmio.write(crate::ppu::LYC, 0x00);
         self.mmio.write(crate::ppu::BGP, 0xFC);
-        // OBP0/OBP1 are left uninitialised by the boot ROM and read 0xFF
-        // post-boot (Gambatte setInitial ffxxDump 0x48/0x49).
-        self.mmio.write(crate::ppu::OBP0, 0xFF);
-        self.mmio.write(crate::ppu::OBP1, 0xFF);
+        // OBP0/OBP1 post-boot value (Gambatte setInitial ffxxDump 0x48/0x49,
+        // mem_dumps.h): DMG leaves them uninitialised reading 0xFF; the CGB boot
+        // ROM zeroes the obj-palette I/O so FF48/FF49 read 0x00 (the
+        // fexx_ffxx_dumper_cgb oracle reads 0x00 at FF48/FF49).
+        let obp_init = match self.hardware {
+            Hardware::CGB => 0x00,
+            _ => 0xFF,
+        };
+        self.mmio.write(crate::ppu::OBP0, obp_init);
+        self.mmio.write(crate::ppu::OBP1, obp_init);
         self.mmio.write(registers::INTERRUPT_FLAG, 0xE1);
         self.mmio.write(registers::INTERRUPT_ENABLE, 0x00);
         self.mmio.write(crate::audio::NR10, 0x80);
