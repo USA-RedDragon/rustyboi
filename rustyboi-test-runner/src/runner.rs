@@ -34,6 +34,279 @@ pub struct RunOptions {
     pub trace_limit: usize,
     pub trace_frame: Option<usize>,
     pub trace_ly: Option<u8>,
+    /// When set, run the REAL boot ROM (from `bios/`) before each test instead
+    /// of the synthetic `skip_bios()` seed (mirrors Gambatte's testrunner).
+    /// Falls back to `skip_bios()` per case if the matching bios file is absent.
+    pub real_bios: bool,
+    /// Directory holding `dmg_boot.bin` / `cgb_boot.bin`. Defaults to `bios/`
+    /// resolved against the candidate roots in `resolve_bios_path`.
+    pub bios_dir: Option<PathBuf>,
+}
+
+/// Locate the boot ROM file for a hardware mode. Tries `bios_dir` first (if
+/// given), then `bios/` relative to CWD and to the crate manifest dir, then the
+/// worktree default. Returns the first existing path.
+fn resolve_bios_path(mode: Mode, bios_dir: Option<&PathBuf>) -> Option<PathBuf> {
+    let file = match mode {
+        Mode::Dmg => "dmg_boot.bin",
+        Mode::Cgb => "cgb_boot.bin",
+    };
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = bios_dir {
+        candidates.push(dir.join(file));
+    }
+    candidates.push(PathBuf::from("bios").join(file));
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("bios")
+            .join(file),
+    );
+    candidates.into_iter().find(|p| p.exists())
+}
+
+/// Set initial state for a case: real boot ROM if requested and available,
+/// otherwise the synthetic skip_bios seed. Returns true if the real boot ROM
+/// ran (so callers can branch on which path produced the state).
+fn seed_initial_state(gb: &mut GB, case: &TestCase, options: &RunOptions) -> bool {
+    if options.real_bios
+        && let Some(path) = resolve_bios_path(case.mode, options.bios_dir.as_ref())
+        && let Ok(()) = gb.load_bios(&path.to_string_lossy())
+    {
+        gb.run_boot_rom();
+        return true;
+    }
+    // Fallback: synthetic post-boot seed (per-oracle residue selection).
+    if matches!(case.oracle, Oracle::SramDump { .. }) {
+        gb.skip_bios_with_boot_residue();
+    } else {
+        gb.skip_bios();
+    }
+    false
+}
+
+/// Full observable post-boot state snapshot for the skip_bios-vs-real-boot diff.
+struct BootSnapshot {
+    // CPU registers.
+    a: u8, f: u8, b: u8, c: u8, d: u8, e: u8, h: u8, l: u8,
+    sp: u16, pc: u16, ime: bool,
+    ie: u8, iff: u8,
+    io: [u8; 0x80],        // FF00-FF7F
+    oam: [u8; 0xA0],       // FE00-FE9F
+    feax: [u8; 0x60],      // FEA0-FEFF (unusable tail)
+    hram: [u8; 0x7F],      // FF80-FFFE
+    vram0: [u8; 0x2000],   // 8000-9FFF bank 0
+    vram1: [u8; 0x2000],   // 8000-9FFF bank 1 (CGB)
+    bgpal: [u16; 32],      // 8 palettes x 4 colors
+    objpal: [u16; 32],
+    timer_counter: u16,
+}
+
+fn snapshot_state(gb: &GB, cgb: bool) -> BootSnapshot {
+    let r = gb.get_cpu_registers();
+    let mut io = [0u8; 0x80];
+    for (i, b) in io.iter_mut().enumerate() {
+        *b = gb.read_memory(0xFF00 + i as u16);
+    }
+    let mut oam = [0u8; 0xA0];
+    for (i, b) in oam.iter_mut().enumerate() {
+        *b = gb.read_memory(0xFE00 + i as u16);
+    }
+    let mut feax = [0u8; 0x60];
+    for (i, b) in feax.iter_mut().enumerate() {
+        *b = gb.read_memory(0xFEA0 + i as u16);
+    }
+    let mut hram = [0u8; 0x7F];
+    for (i, b) in hram.iter_mut().enumerate() {
+        *b = gb.read_memory(0xFF80 + i as u16);
+    }
+    let mut vram0 = [0u8; 0x2000];
+    let mut vram1 = [0u8; 0x2000];
+    for i in 0..0x2000u16 {
+        vram0[i as usize] = gb.read_vram_bank(0, 0x8000 + i);
+        vram1[i as usize] = if cgb { gb.read_vram_bank(1, 0x8000 + i) } else { 0 };
+    }
+    let mut bgpal = [0u16; 32];
+    let mut objpal = [0u16; 32];
+    if cgb {
+        for p in 0..8u8 {
+            for c in 0..4u8 {
+                bgpal[(p * 4 + c) as usize] = gb.bg_palette_pair(p, c);
+                objpal[(p * 4 + c) as usize] = gb.obj_palette_pair(p, c);
+            }
+        }
+    }
+    BootSnapshot {
+        a: r.a, f: r.f, b: r.b, c: r.c, d: r.d, e: r.e, h: r.h, l: r.l,
+        sp: r.sp, pc: r.pc, ime: r.ime,
+        ie: gb.read_memory(0xFFFF), iff: gb.read_memory(0xFF0F),
+        io, oam, feax, hram, vram0, vram1, bgpal, objpal,
+        timer_counter: gb.timer_internal_counter(),
+    }
+}
+
+/// Run the real boot ROM and skip_bios independently on the same ROM, then
+/// print every byte/register where they differ. The diff exposes latent
+/// skip_bios hardware-accuracy bugs. Returns the number of discrepancies.
+pub fn validate_bios(
+    rom_path: &PathBuf,
+    mode: Mode,
+    bios_dir: Option<&PathBuf>,
+) -> Result<usize, String> {
+    let cgb = mode == Mode::Cgb;
+    let hw = match mode {
+        Mode::Dmg => Hardware::DMG,
+        Mode::Cgb => Hardware::CGB,
+    };
+
+    let bios_path = resolve_bios_path(mode, bios_dir)
+        .ok_or_else(|| format!("no boot ROM found for {:?}", mode))?;
+    let rom_data = fs::read(rom_path).map_err(|e| format!("read ROM: {e}"))?;
+
+    // Real boot ROM.
+    let mut gb_real = GB::new(hw);
+    gb_real.insert(
+        Cartridge::from_bytes(&rom_data).map_err(|e| format!("load ROM: {e}"))?,
+    );
+    gb_real
+        .load_bios(&bios_path.to_string_lossy())
+        .map_err(|e| format!("load bios: {e}"))?;
+    let steps = gb_real.run_boot_rom();
+    let real = snapshot_state(&gb_real, cgb);
+
+    // skip_bios.
+    let mut gb_skip = GB::new(hw);
+    gb_skip.insert(
+        Cartridge::from_bytes(&rom_data).map_err(|e| format!("load ROM: {e}"))?,
+    );
+    gb_skip.skip_bios();
+    let skip = snapshot_state(&gb_skip, cgb);
+
+    let io_name = |addr: u16| -> &'static str {
+        match addr {
+            0xFF00 => "JOYP", 0xFF01 => "SB", 0xFF02 => "SC", 0xFF04 => "DIV",
+            0xFF05 => "TIMA", 0xFF06 => "TMA", 0xFF07 => "TAC", 0xFF0F => "IF",
+            0xFF40 => "LCDC", 0xFF41 => "STAT", 0xFF42 => "SCY", 0xFF43 => "SCX",
+            0xFF44 => "LY", 0xFF45 => "LYC", 0xFF46 => "DMA", 0xFF47 => "BGP",
+            0xFF48 => "OBP0", 0xFF49 => "OBP1", 0xFF4A => "WY", 0xFF4B => "WX",
+            0xFF4C => "KEY0", 0xFF4D => "KEY1", 0xFF4F => "VBK", 0xFF50 => "BOOT",
+            0xFF51 => "HDMA1", 0xFF52 => "HDMA2", 0xFF53 => "HDMA3",
+            0xFF54 => "HDMA4", 0xFF55 => "HDMA5", 0xFF56 => "RP",
+            0xFF68 => "BCPS", 0xFF69 => "BCPD", 0xFF6A => "OCPS", 0xFF6B => "OCPD",
+            0xFF70 => "SVBK", _ => "",
+        }
+    };
+
+    let mut diffs: Vec<String> = Vec::new();
+    macro_rules! cmp {
+        ($field:ident, $name:expr) => {
+            if real.$field != skip.$field {
+                diffs.push(format!(
+                    "  {:<12} real=0x{:02X} skip=0x{:02X}",
+                    $name, real.$field, skip.$field
+                ));
+            }
+        };
+    }
+    cmp!(a, "A"); cmp!(f, "F"); cmp!(b, "B"); cmp!(c, "C");
+    cmp!(d, "D"); cmp!(e, "E"); cmp!(h, "H"); cmp!(l, "L");
+    if real.sp != skip.sp {
+        diffs.push(format!("  {:<12} real=0x{:04X} skip=0x{:04X}", "SP", real.sp, skip.sp));
+    }
+    if real.pc != skip.pc {
+        diffs.push(format!("  {:<12} real=0x{:04X} skip=0x{:04X}", "PC", real.pc, skip.pc));
+    }
+    if real.ime != skip.ime {
+        diffs.push(format!("  {:<12} real={} skip={}", "IME", real.ime, skip.ime));
+    }
+    cmp!(ie, "IE(FFFF)"); cmp!(iff, "IF(FF0F)");
+    if real.timer_counter != skip.timer_counter {
+        diffs.push(format!(
+            "  {:<12} real=0x{:04X} skip=0x{:04X}",
+            "DIV_CTR", real.timer_counter, skip.timer_counter
+        ));
+    }
+
+    let mut io_diffs = 0;
+    for i in 0..0x80usize {
+        if real.io[i] != skip.io[i] {
+            let addr = 0xFF00 + i as u16;
+            diffs.push(format!(
+                "  IO 0x{:04X} {:<6} real=0x{:02X} skip=0x{:02X}",
+                addr, io_name(addr), real.io[i], skip.io[i]
+            ));
+            io_diffs += 1;
+        }
+    }
+
+    let count_diffs = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x != y).count();
+    let oam_d = count_diffs(&real.oam, &skip.oam);
+    let feax_d = count_diffs(&real.feax, &skip.feax);
+    let hram_d = count_diffs(&real.hram, &skip.hram);
+    let vram0_d = count_diffs(&real.vram0, &skip.vram0);
+    let vram1_d = count_diffs(&real.vram1, &skip.vram1);
+    let bgpal_d = real.bgpal.iter().zip(&skip.bgpal).filter(|(x, y)| x != y).count();
+    let objpal_d = real.objpal.iter().zip(&skip.objpal).filter(|(x, y)| x != y).count();
+
+    println!("\n=== BIOS validation: {:?} {} ===", mode, rom_path.display());
+    println!("boot ROM executed {steps} instructions; handoff PC=0x{:04X}", real.pc);
+    println!("--- CPU / IO / timer discrepancies ({}) ---", diffs.len());
+    if diffs.is_empty() {
+        println!("  (none)");
+    } else {
+        for d in &diffs {
+            println!("{d}");
+        }
+    }
+    println!("--- region byte-diff counts ---");
+    println!("  OAM (FE00-FE9F):     {oam_d} / 160 bytes differ");
+    println!("  FEAX (FEA0-FEFF):    {feax_d} / 96 bytes differ");
+    println!("  HRAM (FF80-FFFE):    {hram_d} / 127 bytes differ");
+    println!("  VRAM bank0:          {vram0_d} / 8192 bytes differ");
+    if cgb {
+        println!("  VRAM bank1:          {vram1_d} / 8192 bytes differ");
+        println!("  CGB BG palette:      {bgpal_d} / 32 slots differ");
+        println!("  CGB OBJ palette:     {objpal_d} / 32 slots differ");
+    }
+
+    // Detailed first-bytes for any differing region (cap the spam).
+    let dump_region = |label: &str, a: &[u8], b: &[u8], base: u16| {
+        let mut shown = 0;
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            if x != y {
+                if shown < 24 {
+                    println!("    {label} 0x{:04X}: real=0x{:02X} skip=0x{:02X}", base + i as u16, x, y);
+                }
+                shown += 1;
+            }
+        }
+        if shown > 24 {
+            println!("    {label}: ... and {} more", shown - 24);
+        }
+    };
+    if oam_d > 0 { dump_region("OAM ", &real.oam, &skip.oam, 0xFE00); }
+    if feax_d > 0 { dump_region("FEAX", &real.feax, &skip.feax, 0xFEA0); }
+    if hram_d > 0 { dump_region("HRAM", &real.hram, &skip.hram, 0xFF80); }
+    if vram0_d > 0 { dump_region("VRM0", &real.vram0, &skip.vram0, 0x8000); }
+    if cgb && vram1_d > 0 { dump_region("VRM1", &real.vram1, &skip.vram1, 0x8000); }
+    if cgb && (bgpal_d > 0 || objpal_d > 0) {
+        for s in 0..32usize {
+            if real.bgpal[s] != skip.bgpal[s] {
+                println!("    BGPAL pal{} col{}: real=0x{:04X} skip=0x{:04X}", s/4, s%4, real.bgpal[s], skip.bgpal[s]);
+            }
+        }
+        for s in 0..32usize {
+            if real.objpal[s] != skip.objpal[s] {
+                println!("    OBJPAL pal{} col{}: real=0x{:04X} skip=0x{:04X}", s/4, s%4, real.objpal[s], skip.objpal[s]);
+            }
+        }
+    }
+
+    let total = diffs.len() + oam_d + feax_d + hram_d + vram0_d
+        + if cgb { vram1_d + bgpal_d + objpal_d } else { 0 };
+    let _ = io_diffs;
+    println!("TOTAL discrepancies: {total}");
+    Ok(total)
 }
 
 pub fn run_case(case: TestCase, options: &RunOptions) -> CaseResult {
@@ -65,16 +338,12 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         Mode::Cgb => Hardware::CGB,
     });
     gb.insert(cartridge);
-    // SRAM `.bin` dumper oracles were captured WITH the boot ROM having run, so
-    // they read back the boot-ROM-final residue (VRAM Nintendo logo, CGB feax
-    // 0x08 tail). The `.dump` region oracles and every other case were captured
-    // WITHOUT the boot ROM and need the no-boot zeroed/0x18 state, so they keep
-    // plain `skip_bios`. Select per oracle type.
-    if matches!(case.oracle, Oracle::SramDump { .. }) {
-        gb.skip_bios_with_boot_residue();
-    } else {
-        gb.skip_bios();
-    }
+    // Initial state: real boot ROM (Gambatte-faithful) when --real-bios is set
+    // and the bios file is present, else the synthetic skip_bios seed. The
+    // synthetic path selects per-oracle residue (SRAM `.bin` dumper oracles were
+    // captured WITH the boot ROM having run, so they read the boot-ROM-final
+    // residue; `.dump` region oracles need the no-boot zeroed state).
+    seed_initial_state(&mut gb, case, options);
 
     if case.mode == Mode::Cgb {
         gb.set_cgb_color_conversion(CgbColorConversion::Gambatte);

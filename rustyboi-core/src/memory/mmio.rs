@@ -23,15 +23,46 @@ fn default_pending_oam_zero() -> std::cell::Cell<i16> {
 }
 
 const BIOS_START: u16 = 0x0000;
-const BIOS_SIZE: usize = 256; // 256 bytes
+const BIOS_SIZE: usize = 256; // DMG boot ROM length
+/// CGB boot ROM length. It occupies 0x0000-0x00FF AND 0x0200-0x08FF; the gap
+/// 0x0100-0x01FF is the live cartridge header (the boot ROM reads the cart logo
+/// there). The 2304-byte file is stored contiguously and indexed by address.
+const CGB_BIOS_SIZE: usize = 2304;
+/// Highest address the largest (CGB) boot ROM overlay can map.
+const BIOS_OVERLAY_END: u16 = 0x08FF;
+/// During CGB boot the cartridge header is visible in this window (not boot ROM).
+const BIOS_HEADER_HOLE_START: u16 = 0x0100;
+const BIOS_HEADER_HOLE_END: u16 = 0x01FF;
 const BIOS_END: u16 = BIOS_START + BIOS_SIZE as u16 - 1;
+/// Expected masked CRC32 of the DMG boot ROM (byte 0xFD zeroed before hashing),
+/// matching Gambatte testrunner `loadBios("bios.gb", 0x100, 0x580A33B9)`.
+pub const DMG_BIOS_CRC32: u32 = 0x580A33B9;
+/// Expected masked CRC32 of the CGB boot ROM (byte 0xFD zeroed before hashing),
+/// matching Gambatte testrunner `loadBios("bios.gbc", 0x900, 0x31672598)`.
+pub const CGB_BIOS_CRC32: u32 = 0x31672598;
 pub const CARTRIDGE_START: u16 = 0x0000;
 pub const CARTRIDGE_SIZE: usize = 16384; // 16KB
-const CARTRIDGE_AFTER_BIOS_START: u16 = 0x0100; // After BIOS is disabled
 pub const CARTRIDGE_END: u16 = CARTRIDGE_START + CARTRIDGE_SIZE as u16 - 1;
 pub const CARTRIDGE_BANK_START: u16 = 0x4000;
 pub const CARTRIDGE_BANK_SIZE: usize = 16384; // 16KB
 pub const CARTRIDGE_BANK_END: u16 = CARTRIDGE_BANK_START + CARTRIDGE_BANK_SIZE as u16 - 1;
+
+/// CRC32 (IEEE, the zlib/PNG polynomial) of a boot-ROM image with byte 0xFD
+/// forced to 0 before hashing. Gambatte's testrunner does the same masking so a
+/// boot ROM that only differs at 0xFD (a known per-revision byte) still matches.
+fn bios_masked_crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for (i, &raw) in data.iter().enumerate() {
+        let byte = if i == 0xFD { 0 } else { raw };
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
 pub const VRAM_START: u16 = 0x8000;
 const VRAM_SIZE: usize = 8192; // 8KB
 const VRAM_END: u16 = VRAM_START + VRAM_SIZE as u16 - 1;
@@ -116,8 +147,10 @@ pub struct AppliedMmioWrite {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Mmio {
+    // Raw boot-ROM bytes (256 = DMG, 2304 = CGB). Indexed directly by address;
+    // the overlay read path maps 0x000-0x0FF (+ 0x200-0x8FF for CGB) to these.
     #[serde(skip, default)]
-    bios: Option<memory::Memory<BIOS_START, BIOS_SIZE>>,
+    bios: Option<Vec<u8>>,
     #[serde(skip, default)]
     cartridge: Option<cartridge::Cartridge>,
     input: input::Input,
@@ -700,22 +733,70 @@ impl Mmio {
 
     pub fn load_bios(&mut self, path: &str) -> Result<(), io::Error> {
         let data = fs::read(path)?;
-        let mut bios = memory::Memory::new();
-        if data.len() < BIOS_SIZE {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "BIOS file too small"));
+        // Accept only the two real hardware boot-ROM lengths.
+        let expected_crc = match data.len() {
+            BIOS_SIZE => DMG_BIOS_CRC32,
+            CGB_BIOS_SIZE => CGB_BIOS_CRC32,
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "BIOS file has unexpected length {} (want {} DMG or {} CGB)",
+                        other, BIOS_SIZE, CGB_BIOS_SIZE
+                    ),
+                ));
+            }
+        };
+        // Faithful to Gambatte's testrunner loadBios(): zero byte 0xFD before
+        // hashing (it differs between revisions / patched dumps) then crc32.
+        let masked_crc = bios_masked_crc32(&data);
+        if masked_crc != expected_crc {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "BIOS CRC mismatch for {}: got 0x{:08X}, expected 0x{:08X}",
+                    path, masked_crc, expected_crc
+                ),
+            ));
         }
-        if data.len() > BIOS_SIZE {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "BIOS file too large"));
-        }
-        for (i, &byte) in data.iter().take(BIOS_SIZE).enumerate() {
-            bios.write(BIOS_START + i as u16, byte);
-        }
-        self.bios = Some(bios);
+        self.bios = Some(data);
         Ok(())
     }
 
     pub fn has_bios(&self) -> bool {
         self.bios.is_some()
+    }
+
+    /// True while the boot ROM overlay is mapped (FF50 still 0 and a boot ROM is
+    /// loaded). After the boot ROM writes FF50 the overlay is gone.
+    pub fn bios_mapped(&self) -> bool {
+        self.bios.is_some() && self.io_registers.read(REG_BOOT_OFF) == 0
+    }
+
+    /// Resolve a low-memory read through the boot-ROM overlay.
+    /// Returns Some(byte) when the address is currently served by the boot ROM;
+    /// None means the caller should fall through to the cartridge. The CGB boot
+    /// ROM maps 0x000-0x0FF and 0x200-0x8FF; 0x100-0x1FF is the live cart header.
+    fn bios_overlay_read(&self, addr: u16) -> Option<u8> {
+        let bios = self.bios.as_ref()?;
+        if self.io_registers.read(REG_BOOT_OFF) != 0 {
+            return None;
+        }
+        if bios.len() == BIOS_SIZE {
+            // DMG: only 0x000-0x0FF is boot ROM.
+            if addr <= BIOS_END {
+                return Some(bios[addr as usize]);
+            }
+            return None;
+        }
+        // CGB 2304-byte layout.
+        if addr >= BIOS_HEADER_HOLE_START && addr <= BIOS_HEADER_HOLE_END {
+            return None; // cartridge header window
+        }
+        if addr <= BIOS_OVERLAY_END {
+            return Some(bios[addr as usize]);
+        }
+        None
     }
 
     pub fn step_timer(&mut self) {
@@ -885,6 +966,12 @@ impl Mmio {
     /// `Timer::set_internal_counter`.
     pub fn set_timer_internal_counter(&mut self, value: u16) {
         self.timer.set_internal_counter(value);
+    }
+
+    /// Current 16-bit internal timer/DIV counter (low byte drives DIV; the full
+    /// value sets the TIMA/serial/APU pre-tick phase). For state snapshots.
+    pub fn timer_internal_counter(&self) -> u16 {
+        self.timer.internal_counter()
     }
 
     /// Write a raw byte into the generic IO-register backing store, bypassing
@@ -2543,23 +2630,12 @@ impl Mmio {
     // Private helper to read during DMA without triggering DMA conflicts
     fn read_during_dma(&self, addr: u16) -> u8 {
         match addr {
-            BIOS_START..=BIOS_END => {
-                match self.read(REG_BOOT_OFF) {
-                    0 => {
-                        match &self.bios {
-                            Some(bios) => bios.read(addr),
-                            None => EMPTY_BYTE,
-                        }
-                    },
-                    _ => {
-                        match &self.cartridge {
-                            Some(cart) => cart.read(addr),
-                            None => EMPTY_BYTE,
-                        }
-                    }
+            CARTRIDGE_START..=CARTRIDGE_END => {
+                // Boot-ROM overlay first (DMG 0x000-0x0FF, CGB 0x000-0x0FF +
+                // 0x200-0x8FF), then fall through to the cartridge.
+                if let Some(byte) = self.bios_overlay_read(addr) {
+                    return byte;
                 }
-            },
-            CARTRIDGE_AFTER_BIOS_START..=CARTRIDGE_END => {
                 match &self.cartridge {
                     Some(cart) => cart.read(addr),
                     None => EMPTY_BYTE,
@@ -2724,6 +2800,36 @@ impl Mmio {
     /// power-on pattern. Bytes are Gambatte's `setInitial{Dmg,Cgb}Ioamhram`
     /// dumps (libgambatte/src/mem_dumps.h). Tests that read never-written OAM /
     /// unusable / HRAM (the fexx_* dumpers) depend on these.
+    /// Seed ONLY the hardware power-on RAM garbage that the boot ROM does not
+    /// overwrite: OAM (0xFE00-0xFE9F), the 0xFEA0-0xFEFF shadow, HRAM
+    /// (0xFF80-0xFFFE) and wave RAM (0xFF30-0xFF3F). Used BEFORE running the real
+    /// boot ROM (mirrors Gambatte initializing ioamhram before `loadBios`), so
+    /// the boot ROM executes on top of real power-on contents and any region it
+    /// leaves untouched reads back the hardware garbage the dumper oracles expect.
+    /// (CGB clears OAM during boot, so seeding OAM garbage is harmless there.)
+    pub fn seed_power_on_ram(&mut self, cgb: bool) {
+        // Reuses the exact captured OAM/FEAX/HRAM constants. The I/O register
+        // seeds it also sets (FF68/FF6A/HDMA5) are harmless: the boot ROM
+        // rewrites them. Wave RAM is seeded by the caller via the bus.
+        self.set_post_bios_ioamhram(cgb);
+        if cgb {
+            // The CGB boot ROM does not touch OBJ palette RAM, so it retains the
+            // hardware power-on garbage (Gambatte cgbObjpDump). Seed it pre-boot.
+            // (BG palette RAM is left for the boot ROM, which overwrites it.)
+            const CGB_OBJP_DUMP: [u8; 64] = [
+                0x00, 0x00, 0xF2, 0xAB, 0x61, 0xC2, 0xD9, 0xBA,
+                0x88, 0x6E, 0xDD, 0x63, 0x28, 0x27, 0xFB, 0x9F,
+                0x35, 0x42, 0xD6, 0xD4, 0x50, 0x48, 0x57, 0x5E,
+                0x23, 0x3E, 0x3D, 0xCA, 0x71, 0x21, 0x37, 0xC0,
+                0xC6, 0xB3, 0xFB, 0xF9, 0x08, 0x00, 0x8D, 0x29,
+                0xA3, 0x20, 0xDB, 0x87, 0x62, 0x05, 0x5D, 0xD4,
+                0x0E, 0x08, 0xFE, 0xAF, 0x20, 0x02, 0xD7, 0xFF,
+                0x07, 0x6A, 0x55, 0xEC, 0x83, 0x40, 0x0B, 0x77,
+            ];
+            self.obj_palette_ram = CGB_OBJP_DUMP;
+        }
+    }
+
     pub fn set_post_bios_ioamhram(&mut self, cgb: bool) {
         if cgb {
             // CGB: OAM cleared to 0x00. The 0xFEA0-0xFEFF shadow holds the feax
@@ -2878,23 +2984,12 @@ impl memory::Addressable for Mmio {
         {
             // Normal memory access (the conflict above already handled).
             match addr {
-                BIOS_START..=BIOS_END => {
-                    match self.read(REG_BOOT_OFF) {
-                        0 => {
-                            match &self.bios {
-                                Some(bios) => bios.read(addr),
-                                None => EMPTY_BYTE,
-                            }
-                        },
-                        _ => {
-                            match &self.cartridge {
-                                Some(cart) => cart.read(addr),
-                                None => EMPTY_BYTE,
-                            }
-                        }
+                CARTRIDGE_START..=CARTRIDGE_END => {
+                    // Boot-ROM overlay first (DMG 0x000-0x0FF, CGB 0x000-0x0FF +
+                    // 0x200-0x8FF), then fall through to the cartridge.
+                    if let Some(byte) = self.bios_overlay_read(addr) {
+                        return byte;
                     }
-                },
-                CARTRIDGE_AFTER_BIOS_START..=CARTRIDGE_END => {
                     match &self.cartridge {
                         Some(cart) => cart.read(addr),
                         None => EMPTY_BYTE,
