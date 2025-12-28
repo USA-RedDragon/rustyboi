@@ -406,6 +406,75 @@ impl GB {
         Ok(())
     }
 
+    /// Run the REAL boot ROM from power-on (PC=0x0000) until it hands off to the
+    /// cartridge. Mirrors Gambatte's testrunner, which executes the boot ROM
+    /// before every test instead of seeding a synthetic post-boot state.
+    ///
+    /// Preconditions: a cartridge is inserted and a matching boot ROM is loaded
+    /// (`load_bios`). The CPU/peripherals are at their hardware power-on values
+    /// (the default `SM83::new` / `Mmio::new`, PC=0). Returns the number of
+    /// instructions executed. Handoff is detected when the boot ROM unmaps
+    /// itself (writes FF50, so the overlay is gone) — exactly when execution
+    /// would leave boot-ROM space.
+    ///
+    /// For CGB hardware the boot ROM needs the CGB register set live (VBK/SVBK/
+    /// HDMA/palettes) regardless of cart support, so CGB features are forced on
+    /// for the duration of boot; afterwards they are reconciled to the cart's
+    /// actual support (the boot ROM has already latched KEY0 DMG-compat).
+    pub fn run_boot_rom(&mut self) -> usize {
+        if !self.has_bios() {
+            return 0;
+        }
+        // Real power-on register/PC state. SM83::new already zeroes everything
+        // and PC=0; be explicit so this works even if a skip path ran before.
+        self.cpu.registers = registers::Registers::new();
+        self.cpu.registers.pc = 0x0000;
+        self.cpu.registers.sp = 0x0000;
+        self.skip_bios = false;
+
+        let cgb = self.hardware == Hardware::CGB;
+        if cgb {
+            // Let the CGB boot ROM drive the full CGB register set.
+            self.mmio.set_cgb_features_enabled(true);
+        }
+
+        // Seed the hardware power-on RAM garbage BEFORE the boot ROM runs
+        // (mirrors Gambatte initializing ioamhram before loadBios). The boot ROM
+        // overwrites what it writes and leaves OAM/HRAM/feax/wave RAM as this
+        // power-on pattern — which the fexx_*/dumper oracles read back. Our
+        // power-on memory init is all-zero, so without this the dumper regions
+        // would read zero (a real-boot-vs-skip_bios discrepancy).
+        self.mmio.seed_power_on_ram(cgb);
+        // Wave RAM power-on pattern (DMG boot ROM does not touch it; the CGB
+        // boot ROM initialises sound itself, so only seed it for DMG).
+        if !cgb {
+            let wave: [u8; 16] = [
+                0x71, 0x72, 0xD5, 0x91, 0x58, 0xBB, 0x2A, 0xFA,
+                0xCF, 0x3C, 0x54, 0x75, 0x48, 0xCF, 0x8F, 0xD9,
+            ];
+            for (i, b) in wave.iter().enumerate() {
+                self.mmio.write(crate::audio::WAV_START + i as u16, *b);
+            }
+        }
+
+        // Step until the boot ROM unmaps itself (FF50 written). Guard with a
+        // generous instruction ceiling so a bad ROM can never wedge the runner.
+        let mut steps = 0usize;
+        const MAX_BOOT_STEPS: usize = 50_000_000;
+        while self.mmio.bios_mapped() && steps < MAX_BOOT_STEPS {
+            self.step_instruction(false);
+            steps += 1;
+        }
+
+        if cgb {
+            // Reconcile CGB feature state to the cart now that boot has latched
+            // KEY0 DMG-compat. (DMG carts on a CGB run with features off.)
+            let cgb_enabled = self.should_enable_cgb_features();
+            self.mmio.set_cgb_features_enabled(cgb_enabled);
+        }
+        steps
+    }
+
     /// Check if a ROM cartridge is loaded
     pub fn has_rom(&self) -> bool {
         self.mmio.get_cartridge().is_some()
@@ -619,6 +688,21 @@ impl GB {
     /// Read from specific VRAM bank for debugging (CGB only)
     pub fn read_vram_bank(&self, bank: u8, address: u16) -> u8 {
         self.mmio.read_vram_bank(bank, address)
+    }
+
+    /// 16-bit internal timer/DIV counter (for state snapshots / diagnostics).
+    pub fn timer_internal_counter(&self) -> u16 {
+        self.mmio.timer_internal_counter()
+    }
+
+    /// Raw CGB BG palette RAM byte pair for a palette/color slot.
+    pub fn bg_palette_pair(&self, palette: u8, color: u8) -> u16 {
+        self.read_bg_palette_data(palette, color)
+    }
+
+    /// Raw CGB OBJ palette RAM byte pair for a palette/color slot.
+    pub fn obj_palette_pair(&self, palette: u8, color: u8) -> u16 {
+        self.read_obj_palette_data(palette, color)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
