@@ -455,6 +455,10 @@ impl GB {
             for (i, b) in wave.iter().enumerate() {
                 self.mmio.write(crate::audio::WAV_START + i as u16, *b);
             }
+            // DMG OBP0/OBP1 power-on read 0xFF (uninitialised). The DMG boot ROM
+            // does not write them, so seed the power-on value pre-boot.
+            self.mmio.set_io_register(crate::ppu::OBP0, 0xFF);
+            self.mmio.set_io_register(crate::ppu::OBP1, 0xFF);
         }
 
         // Step until the boot ROM unmaps itself (FF50 written). Guard with a
