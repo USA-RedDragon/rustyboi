@@ -10,3 +10,4 @@ gambatte-core
 # Session scratch — baselines + agent worktrees (never tracked)
 /.baselines/
 /.claude/worktrees/
+tools/gambatte_agb_ref

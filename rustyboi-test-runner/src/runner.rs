@@ -50,6 +50,8 @@ fn resolve_bios_path(mode: Mode, bios_dir: Option<&PathBuf>) -> Option<PathBuf> 
     let file = match mode {
         Mode::Dmg => "dmg_boot.bin",
         Mode::Cgb => "cgb_boot.bin",
+        // AGB uses the GBA's CGB-compat boot ROM.
+        Mode::Agb => "cgb_agb_boot.bin",
     };
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(dir) = bios_dir {
@@ -153,10 +155,11 @@ pub fn validate_bios(
     mode: Mode,
     bios_dir: Option<&PathBuf>,
 ) -> Result<usize, String> {
-    let cgb = mode == Mode::Cgb;
+    let cgb = matches!(mode, Mode::Cgb | Mode::Agb);
     let hw = match mode {
         Mode::Dmg => Hardware::DMG,
         Mode::Cgb => Hardware::CGB,
+        Mode::Agb => Hardware::AGB,
     };
 
     let bios_path = resolve_bios_path(mode, bios_dir)
@@ -336,6 +339,7 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
     let mut gb = GB::new(match case.mode {
         Mode::Dmg => Hardware::DMG,
         Mode::Cgb => Hardware::CGB,
+        Mode::Agb => Hardware::AGB,
     });
     gb.insert(cartridge);
     // Initial state: real boot ROM (Gambatte-faithful) when --real-bios is set
@@ -345,7 +349,7 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
     // residue; `.dump` region oracles need the no-boot zeroed state).
     seed_initial_state(&mut gb, case, options);
 
-    if case.mode == Mode::Cgb {
+    if matches!(case.mode, Mode::Cgb | Mode::Agb) {
         gb.set_cgb_color_conversion(CgbColorConversion::Gambatte);
     }
 

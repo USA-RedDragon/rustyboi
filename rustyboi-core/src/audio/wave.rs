@@ -53,6 +53,11 @@ pub struct Wave {
     cgb: bool,
     #[serde(default)]
     ds: bool,
+    // AGB ch3 wave-RAM behavior (Gambatte channel3 agb_): while playing,
+    // wave-RAM reads return 0xFF and writes are dropped unconditionally, and
+    // the setNr0 sample-buffer restore is skipped.
+    #[serde(default)]
+    agb: bool,
 }
 
 fn disabled() -> u32 {
@@ -89,6 +94,7 @@ impl Wave {
             dac_enabled: false,
             cgb: false,
             ds: false,
+            agb: false,
         }
     }
 
@@ -205,8 +211,15 @@ impl Wave {
         }
     }
 
+    /// Seed the AGB flag before the first `step` so an early wave-RAM access
+    /// (before the channel has ticked) already sees AGB semantics.
+    pub fn set_agb(&mut self, agb: bool) {
+        self.agb = agb;
+    }
+
     pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
         self.cgb = _mmio.is_cgb_features_enabled();
+        self.agb = _mmio.is_agb();
         self.ds = _mmio.is_double_speed_mode();
         if self.master {
             self.update_wave_counter();
@@ -288,7 +301,9 @@ impl Wave {
         self.nr30 = new_nr0;
         self.dac_enabled = new_nr0 != 0;
         if new_nr0 == 0 {
-            if self.master {
+            // channel3.cpp:59 setNr0: AGB skips the sample-buffer restore on
+            // DAC-disable while playing (`!agb_ && master_`).
+            if !self.agb && self.master {
                 if self.wave_counter == self.cc.wrapping_add(1) {
                     self.sample_buf = self.wave_ram[0];
                 } else if !self.cgb && self.last_read_time == self.cc {
@@ -327,7 +342,10 @@ impl Wave {
             return 0xFF;
         }
         if self.master {
-            if !self.cgb && self.cc != self.last_read_time {
+            // channel3.h:53 waveRamRead: AGB returns 0xFF unconditionally while
+            // playing; CGB allows only the just-accessed byte; DMG only when the
+            // read coincides with the channel's own fetch cc.
+            if self.agb || (!self.cgb && self.cc != self.last_read_time) {
                 return 0xFF;
             }
             index = (self.wave_pos / 2) as usize;
@@ -342,7 +360,9 @@ impl Wave {
             return;
         }
         if self.master {
-            if !self.cgb && self.cc != self.last_read_time {
+            // channel3.h:64 waveRamWrite: AGB drops the write unconditionally
+            // while playing (mirrors waveRamRead).
+            if self.agb || (!self.cgb && self.cc != self.last_read_time) {
                 return;
             }
             index = (self.wave_pos / 2) as usize;

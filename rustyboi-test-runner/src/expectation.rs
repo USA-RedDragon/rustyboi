@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 pub enum Mode {
     Dmg,
     Cgb,
+    /// GBA-in-GBC-compat mode. Runs a CGB ROM on Hardware::AGB. Opt-in only
+    /// (never in the default mode set); selected via `--mode agb`.
+    Agb,
 }
 
 impl Mode {
@@ -15,6 +18,7 @@ impl Mode {
         match self {
             Self::Dmg => "DMG",
             Self::Cgb => "CGB",
+            Self::Agb => "AGB",
         }
     }
 
@@ -22,6 +26,7 @@ impl Mode {
         match self {
             Self::Dmg => 'd',
             Self::Cgb => 'c',
+            Self::Agb => 'a',
         }
     }
 }
@@ -95,9 +100,21 @@ pub fn is_rom_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-pub fn cases_for_rom(rom_path: &Path, enabled_modes: &HashSet<Mode>) -> Vec<TestCase> {
+pub fn cases_for_rom(rom_path: &Path, requested_modes: &HashSet<Mode>) -> Vec<TestCase> {
     let base = extension_stripped_string(rom_path);
     let mut cases = Vec::new();
+
+    // AGB cases are derived from the CGB oracle reference files, so when AGB is
+    // requested we generate the CGB case templates (even if CGB itself was not
+    // requested) and twin them to AGB below. The CGB templates are dropped
+    // afterward unless CGB was actually requested.
+    let cgb_requested = requested_modes.contains(&Mode::Cgb);
+    let agb_requested = requested_modes.contains(&Mode::Agb);
+    let mut enabled = requested_modes.clone();
+    if agb_requested {
+        enabled.insert(Mode::Cgb);
+    }
+    let enabled_modes = &enabled;
 
     if base.contains("dmg08_cgb04c_out") {
         push_string_case(
@@ -157,6 +174,29 @@ pub fn cases_for_rom(rom_path: &Path, enabled_modes: &HashSet<Mode>) -> Vec<Test
     }
 
     push_dump_cases(&mut cases, rom_path, enabled_modes, &base);
+
+    // AGB cases reuse the CGB oracle reference files: AGB is CGB-compatible, so
+    // the same CGB (`cgb04c`) references are the baseline. This measures how many
+    // CGB references rustyboi-AGB still matches. (Where AGB's isAgb() diffs make
+    // the output legitimately differ from CGB hardware, the divergence is
+    // expected and is cross-checked against Gambatte-AGB by the bootstrap
+    // oracle tool, not these CGB references.) Opt-in: only when `agb` is enabled.
+    if agb_requested {
+        let cgb_twins: Vec<TestCase> = cases
+            .iter()
+            .filter(|c| c.mode == Mode::Cgb)
+            .map(|c| TestCase {
+                rom_path: c.rom_path.clone(),
+                mode: Mode::Agb,
+                oracle: c.oracle.clone(),
+            })
+            .collect();
+        cases.extend(cgb_twins);
+    }
+    // Drop the CGB templates if CGB was not actually requested (AGB-only run).
+    if !cgb_requested {
+        cases.retain(|c| c.mode != Mode::Cgb);
+    }
 
     cases
 }

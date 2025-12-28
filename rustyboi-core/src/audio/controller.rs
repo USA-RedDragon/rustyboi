@@ -454,6 +454,11 @@ impl Audio {
         self.boot_cgb = cgb;
     }
 
+    /// Seed the AGB flag into the wave channel (Gambatte channel3 agb_).
+    pub fn set_agb(&mut self, agb: bool) {
+        self.channel3.set_agb(agb);
+    }
+
     pub fn set_post_bios_state(&mut self, cgb: bool) {
         self.audio_enabled = true;
         self.nr50 = 0x77;
