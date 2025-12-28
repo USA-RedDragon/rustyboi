@@ -534,6 +534,12 @@ pub struct Mmio {
     
     // CGB feature enablement
     cgb_features_enabled: bool, // Whether CGB-specific features should be active
+    // AGB (GBA-in-GBC-mode) hardware flag. AGB behaves like CGB everywhere
+    // except a small, well-defined set of timing/APU diffs (Gambatte isAgb()).
+    // Set once at construction from Hardware::AGB; never toggled by cart compat
+    // (an AGB is still an AGB even running a DMG-only cart).
+    #[serde(default)]
+    is_agb: bool,
 }
 
 impl Mmio {
@@ -621,6 +627,7 @@ impl Mmio {
             obj_palette_spec: 0,
             
             cgb_features_enabled: false, // Will be set when cartridge is inserted
+            is_agb: false,
         }
     }
 
@@ -634,6 +641,7 @@ impl Mmio {
         // performed by the GUI's "Load ROM" path).
         new.bios = self.bios.take();
         new.cartridge = self.cartridge.take();
+        new.is_agb = self.is_agb;
         *self = new;
     }
 
@@ -643,6 +651,18 @@ impl Mmio {
     
     pub fn set_cgb_features_enabled(&mut self, enabled: bool) {
         self.cgb_features_enabled = enabled;
+    }
+
+    /// Set the AGB (GBA-in-GBC-mode) hardware flag. AGB == CGB plus the small
+    /// isAgb() diff set (Gambatte). Called once from `GB::new` for Hardware::AGB.
+    pub fn set_agb(&mut self, agb: bool) {
+        self.is_agb = agb;
+        self.audio.set_agb(agb);
+    }
+
+    /// Whether this is AGB hardware (Gambatte isAgb()).
+    pub fn is_agb(&self) -> bool {
+        self.is_agb
     }
     
     pub fn is_cgb_features_enabled(&self) -> bool {

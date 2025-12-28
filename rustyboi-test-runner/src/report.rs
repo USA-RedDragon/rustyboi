@@ -14,6 +14,10 @@ pub struct Summary {
     pub dmg_failed: usize,
     pub cgb_total: usize,
     pub cgb_failed: usize,
+    #[serde(default)]
+    pub agb_total: usize,
+    #[serde(default)]
+    pub agb_failed: usize,
     pub failures: Vec<FailureRecord>,
 }
 
@@ -32,6 +36,7 @@ impl Summary {
         match result.case.mode {
             Mode::Dmg => self.dmg_total += 1,
             Mode::Cgb => self.cgb_total += 1,
+            Mode::Agb => self.agb_total += 1,
         }
 
         if result.passed {
@@ -41,6 +46,7 @@ impl Summary {
             match result.case.mode {
                 Mode::Dmg => self.dmg_failed += 1,
                 Mode::Cgb => self.cgb_failed += 1,
+                Mode::Agb => self.agb_failed += 1,
             }
 
             self.failures.push(FailureRecord {
@@ -76,6 +82,11 @@ pub fn print_summary(summary: &Summary) {
 
     println!("\nRan {} DMG tests.", summary.dmg_total);
     println!("{} DMG failures.", summary.dmg_failed);
+
+    if summary.agb_total > 0 {
+        println!("\nRan {} AGB tests.", summary.agb_total);
+        println!("{} AGB failures.", summary.agb_failed);
+    }
 
     if summary.skipped_roms > 0 {
         println!(
