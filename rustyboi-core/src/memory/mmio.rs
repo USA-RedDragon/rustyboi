@@ -2827,6 +2827,10 @@ impl Mmio {
                 0x07, 0x6A, 0x55, 0xEC, 0x83, 0x40, 0x0B, 0x77,
             ];
             self.obj_palette_ram = CGB_OBJP_DUMP;
+            // RP/IR (FF56) power-on: bits 2-5 hold 0x3C so the masked read
+            // (which forces bit 1) returns 0x3E. The boot ROM does not write
+            // FF56, so without this pre-boot seed an untouched FF56 reads 0x02.
+            self.io_registers.write(0xFF56, 0x3C);
         }
     }
 
