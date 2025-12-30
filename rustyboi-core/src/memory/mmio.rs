@@ -658,6 +658,7 @@ impl Mmio {
     pub fn set_agb(&mut self, agb: bool) {
         self.is_agb = agb;
         self.audio.set_agb(agb);
+        self.timer.set_agb(agb);
     }
 
     /// Whether this is AGB hardware (Gambatte isAgb()).
