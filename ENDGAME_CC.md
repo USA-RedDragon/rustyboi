@@ -136,4 +136,41 @@ Keep overflow guards (suite=release); smoke a debug build after cc-math changes.
 - Oracle: `gambatte-core/libgambatte/src/{cpu,memory,tima,video,interruptrequester}.cpp`.
 
 ## 5. PROGRESS LOG
-- (init) Plan written. Worktree confirmed flag-OFF == main_31 (31, byte-identical).
+
+### (init) Plan written. Worktree confirmed flag-OFF == main_31 (31, byte-identical).
+
+### Milestone-1 (R1 STOP-window parity) — HYPOTHESIS REFUTED, mechanism proven inert
+Wired `RB_CANONICAL_CC` (+ `RB_CANONICAL_CC_ADJ` signed sweep) in `cpu/bus.rs`;
+applied ADJ to `cpu/opcodes.rs::stop`'s `stop_unhalt_cycles` (the post-STOP unhalt
+window). flag-OFF and flag-ON(ADJ=0) are BOTH byte-identical to main_31 (full suite:
+net +0, broke 0) — proven, not assumed.
+
+**Decisive result — the offset2 error is NOT in the STOP-window length.** Per-case
+ADJ sweep over the 3 offset2 roms (`count_2`=target, `count_1`=passing sibling,
+`m0stat_scx2`=target):
+
+```
+ADJ:  -16 -6 -4 -3 -2 -1  0  1  2  3  4  6  16
+count_2(target):   F  F  F  F  F  F  F  F  F  F  F  F  F   (never fixes)
+count_1(sibling):  P  F  P  P  F  F  P  P  F  F  P  F  P   (only ever BREAKS)
+m0stat_scx2(tgt):  F  F  F  F  F  F  F  F  F  F  F  F  F   (never fixes)
+```
+
+At NO unhalt-window length does either target case pass; the only effect of a nonzero
+ADJ is to break the passing sibling. So the 4-STOP CPU instruction-boundary cc is NOT
+the offset2 lever — the LY-counter sample in the ISR is invariant under the unhalt-cc
+shift because the FF44 reads happen many lines later, on the renderer phase.
+
+**Redirection (where R1 actually lives):** `ppu/controller.rs::get_ly_reg_at_cc`
+(~line 5920). The `_count` tests probe the getLyReg "anticipation window"
+(`to_next == 6 + 4*ds`, the brief `ly & (ly+1)` glitch dot). The offset2 count is
+decided by the FF44-read **access cc vs that window boundary** — a per-access-cc /
+renderer-phase error in `get_ly_reg_at_cc`, NOT a CPU STOP-cc accumulation. R1 should
+be RE-CLASSIFIED into the renderer-getLyReg-cc family (adjacent to R3/R5), and the
+next session should sweep the read `time`/`to_next` anchor in `get_ly_reg_at_cc`
+against the cctracer FF44 oracle (cc/LY/lineCycles), NOT the STOP window.
+
+The `RB_CANONICAL_CC` scaffold stays (ADJ default 0 ⇒ ship-inert); the STOP-window ADJ
+hook is retained as a documented dead-end marker and the proven flag plumbing for the
+next stage. NEXT-SESSION owners: keep flag-OFF==31 gate; move the experiment into
+`get_ly_reg_at_cc`'s anticipation-window cc under the same flag.
