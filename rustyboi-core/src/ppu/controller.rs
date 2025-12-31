@@ -754,6 +754,12 @@ pub struct Ppu {
     #[serde(default)]
     line_rendered_this_line: bool,
 
+    // DMG wx==166 plotPixel-at-xpos166 runs once at the mode-3 -> HBlank
+    // transition; this guards against the two transition call sites both firing
+    // it on the same line. Reset at M3 start. See apply_dmg_wxa6_lineend_windraw.
+    #[serde(default)]
+    wxa6_lineend_applied: bool,
+
     // Event-scheduled STAT/mode/LYC IRQ model (Gambatte port). `abs_cc` is a
     // monotonic absolute dot clock; `line_cycle` (0..455) tracks position
     // within the current 456-dot line. Together they reproduce Gambatte's
@@ -1082,6 +1088,7 @@ impl Ppu {
             cgbp_block_start_cc: None,
             mode0_reported_this_line: false,
             line_rendered_this_line: false,
+            wxa6_lineend_applied: false,
             bgen_history: Vec::new(),
             abs_cc: 0,
             p_now: pnow_disabled(),
@@ -2812,6 +2819,52 @@ impl Ppu {
         (0..=166).contains(&wx) && (is_cgb || wx != 166)
     }
 
+    // Gambatte plotPixel (ppu.cpp 883-895) evaluated at the END of mode 3, where
+    // the fetcher's xpos reaches wx==166 (lcd_hres+6) on DMG with WX==166. The
+    // window cannot draw a visible pixel this line (the line ends at xpos 166)
+    // but it still mutates winDrawState exactly as Gambatte does when xpos hits
+    // wx. The OUTER gate is `wx==xpos && (weMaster || (wy2==ly && winEn)) &&
+    // xpos<167`; weMaster alone is sufficient (does NOT require winEn). INNER:
+    //   branch A (886): winDrawState==0 && winEn -> start now
+    //       (winDrawState = win_draw_start|win_draw_started, ++winYPos)
+    //   branch B (889): !cgb && (winDrawState==0 || xpos==166) -> |= win_draw_start
+    // The xpos==166 term makes branch B fire on EVERY qualifying line (even with
+    // WE off), arming win_draw_start. That bit survives into the next M3Start::f0
+    // (and across the frame boundary, since winDrawState is not reset at frame
+    // end) where it is consumed (++winYPos, window draws from x0). Running this at
+    // line end — AFTER the mid-mode-3 WE-off cleared win_draw_started — is what
+    // gives the wxA6 steady state TWO winYPos increments per line (f0 + the HBlank
+    // WE-on, which now sees winDrawState==win_draw_start) and lets the WE-off
+    // actually revert the right columns to BG. Idempotent within a line: it only
+    // runs once at the mode-3->HBlank transition (the two transition call sites
+    // are mutually exclusive per line).
+    fn apply_dmg_wxa6_lineend_windraw(&mut self, mmio: &mmio::Mmio, is_cgb: bool) {
+        if self.wxa6_lineend_applied {
+            return;
+        }
+        if is_cgb || self.first_line_after_enable || mmio.read(WX) != 166 {
+            return;
+        }
+        self.wxa6_lineend_applied = true;
+        let win_en_now = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
+        let we_gate = self.window_y_triggered
+            || (self.wy2 == mmio.read(LY) && win_en_now);
+        if !we_gate {
+            return;
+        }
+        let win_draw_state_zero = !self.win_draw_start && !self.win_draw_started;
+        if win_draw_state_zero && win_en_now {
+            // branch A (886): start now (no visible window at xpos 166).
+            self.win_draw_start = true;
+            self.win_draw_started = true;
+            self.win_y_pos = self.win_y_pos.wrapping_add(1);
+        } else {
+            // branch B (889): arm win_draw_start (xpos==166 term, fires
+            // regardless of winEn) for the next line's M3Start::f0 consume.
+            self.win_draw_start = true;
+        }
+    }
+
     fn compute_m3_length(&self, mmio: &mmio::Mmio, is_cgb: bool) -> u128 {
         let (len, _win) = self.compute_m3_length_win(mmio, is_cgb);
         len
@@ -3864,45 +3917,20 @@ impl Ppu {
                         }
                         self.win_draw_start = false;
                     }
-                    // DMG wx==166 (lcd_hres+6): the window cannot draw a visible
-                    // pixel this line (the line ends at xpos 166) but interacts with
-                    // winDrawState exactly as Gambatte plotPixel (883-895) does when
-                    // xpos reaches wx==166. Gambatte's OUTER gate is
-                    //   wx==xpos && (weMaster || (wy2==ly && winEn)) && xpos<167
-                    // i.e. `weMaster` alone is sufficient and does NOT require winEn.
-                    // The INNER branches mirror Gambatte:
-                    //   branch A (891): winDrawState==0 && winEn -> start now
-                    //       (winDrawState = win_draw_start|win_draw_started, ++winYPos)
-                    //   branch B (894, else-if): !cgb && (winDrawState==0 || xpos==166)
-                    //       -> winDrawState |= win_draw_start (arm only)
-                    // For DMG wx==166 the xpos==166 term makes branch B fire on EVERY
-                    // line where the gate holds, INCLUDING lines with winEn off (the
-                    // window was disabled mid-frame). That armed win_draw_start bit then
-                    // carries — across the frame boundary, since winDrawState is not
-                    // reset at frame end — into the next frame's line-0 M3Start::f0,
-                    // which consumes it (++winYPos) and draws the window on LY=0. This
-                    // is the wxA6 weMaster-persistence path Gambatte exhibits.
-                    let win_en_now = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
-                    let we_gate = self.window_y_triggered
-                        || (self.wy2 == mmio.read(LY) && win_en_now);
-                    if !is_cgb
-                        && !self.first_line_after_enable
-                        && mmio.read(WX) == 166
-                        && we_gate
-                    {
-                        let win_draw_state_zero = !self.win_draw_start && !self.win_draw_started;
-                        if win_draw_state_zero && win_en_now {
-                            // plotPixel branch A (891): start now (no visible window).
-                            self.win_draw_start = true;
-                            self.win_draw_started = true;
-                            self.win_y_pos = self.win_y_pos.wrapping_add(1);
-                        } else {
-                            // plotPixel branch B (894): arm for the next line's
-                            // M3Start::f0 consume (xpos==166 term, fires regardless of
-                            // winEn).
-                            self.win_draw_start = true;
-                        }
-                    }
+                    // DMG wx==166 (lcd_hres+6): Gambatte's plotPixel runs at EVERY
+                    // xpos as the fetcher walks the line; the wx==xpos==166 branch
+                    // (883-895) therefore fires at the END of mode 3 (xpos reaches
+                    // 166), AFTER the line's mid-mode-3 WE-off has had its effect on
+                    // winDrawState — NOT at M3 start. Relocating this branch to the
+                    // mode-3 -> HBlank transition (where xpos==166) is what lets the
+                    // steady-state wxA6 sequence converge: f0(++winYPos, state->2) ->
+                    // WE-off(state==2 -> clears started, state->0, stops window) ->
+                    // THIS branch B at xpos==166(state |= win_draw_start, state->1) ->
+                    // HBlank WE-on(state==win_draw_start -> ++winYPos, state->3). That
+                    // is the TWO winYPos increments per line (8px/4rows) the window
+                    // diagonal needs, and the WE-off now actually reverts the right
+                    // columns to BG (it no longer sees win_draw_start pre-armed). See
+                    // the relocated block at the mode-3 -> HBlank boundary below.
                     // First scanline after enable is now armed; subsequent
                     // lines use normal Mode 2 timing.
                     let was_first_line = self.first_line_after_enable;
@@ -3910,6 +3938,7 @@ impl Ppu {
                     self.mode0_pretriggered_this_line = false;
                     self.mode0_reported_this_line = false;
                     self.line_rendered_this_line = false;
+                    self.wxa6_lineend_applied = false;
                     // SCX fine-scroll discard target (Gambatte M3Start::f1): the
                     // break xpos is resolved over the first M3 dots by re-reading
                     // SCX live (see the early-window loop in PixelTransfer). Seed
@@ -4401,6 +4430,9 @@ impl Ppu {
                             if linerender_enabled() && !self.line_rendered_this_line {
                                 self.render_full_line(mmio);
                             }
+                            // DMG wx==166 plotPixel-at-xpos166 (mode-3 end). See
+                            // apply_dmg_wxa6_lineend_windraw.
+                            self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
                             self.state = State::HBlank;
                             break 'label;
                         }
@@ -4857,6 +4889,7 @@ impl Ppu {
                         if linerender_enabled() && !self.line_rendered_this_line {
                             self.render_full_line(mmio);
                         }
+                        self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
                         self.state = State::HBlank;
                         if !self.mode0_reported_this_line {
                             self.mode0_reported_this_line = true;
@@ -4867,6 +4900,7 @@ impl Ppu {
                         if linerender_enabled() && !self.line_rendered_this_line {
                             self.render_full_line(mmio);
                         }
+                        self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
                         self.state = State::HBlank;
                     }
                 }
