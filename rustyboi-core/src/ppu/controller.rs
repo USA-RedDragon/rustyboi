@@ -1001,6 +1001,19 @@ pub struct Ppu {
     // checkpoint cc through this. (commit_master_cc, new_win_bit, old_win_bit).
     #[serde(default)]
     we_win_bit_exact: Option<(u64, bool, bool)>,
+    // Per-line LCDC.0 (BG-enable) plot history for the per-pixel renderer
+    // (RB_LINERENDER per-pixel). The per-dot draw is flushed in bursts (the
+    // m0Time flush draws all remaining FIFO pixels at one cc), so a live
+    // `self.lcdc & 1` read applies the final BG-enable to every flushed column
+    // and a mid-mode-3 LCDC.0 toggle (BG off then on within pixel transfer) is
+    // lost. Gambatte instead reads `lcdc & lcdc_bgen` live as the fetcher walks
+    // tiles, so each plotted column sees the BG-enable bit in effect at its own
+    // plot position. We record the BG-enable changes during this line's mode 3
+    // as (boundary_col, bgen) entries — columns >= boundary_col see the new bit.
+    // The first entry (boundary_col == 0) seeds the value at mode-3 start.
+    // Empty/single-entry => no mid-line toggle => identical to the live read.
+    #[serde(default)]
+    bgen_history: Vec<(u64, bool)>,
     #[serde(default)]
     cgb_color_conversion: CgbColorConversion,
     #[serde(skip, default)]
@@ -1069,6 +1082,7 @@ impl Ppu {
             cgbp_block_start_cc: None,
             mode0_reported_this_line: false,
             line_rendered_this_line: false,
+            bgen_history: Vec::new(),
             abs_cc: 0,
             p_now: pnow_disabled(),
             write_subdot: 0,
@@ -1228,6 +1242,47 @@ impl Ppu {
         let display_enable = LCDCFlags::DisplayEnable as u8;
         let old_lcdc = self.lcdc;
         let display_stays_enabled = (old_lcdc & display_enable) != 0 && (value & display_enable) != 0;
+
+        // Per-pixel BG-enable history (RB_LINERENDER per-pixel). A mid-mode-3
+        // LCDC.0 (BG-enable) toggle must be applied per display column: the
+        // per-dot draw is flushed in bursts (the m0Time flush draws all remaining
+        // FIFO pixels at one cc), so a once-per-line / live `self.lcdc & 1` read
+        // applies the final BG-enable to every flushed column. Record each bit0
+        // change as a (boundary_col, bgen) entry — columns >= boundary_col see the
+        // new bit — so the renderer reproduces Gambatte's live per-tile `lcdc &
+        // lcdc_bgen` read. Only while pixel transfer is active for this line.
+        let bgen_bit = LCDCFlags::BGDisplay as u8;
+        if display_stays_enabled
+            && self.state == State::PixelTransfer
+            && (old_lcdc & bgen_bit) != (value & bgen_bit)
+        {
+            // Column-space history keyed by the display column at which the
+            // BG-enable change first becomes visible. `self.x` is the next display
+            // column to be popped — the real pipeline plot position at the write
+            // instant (it already carries the warmup/FIFO and window latency the
+            // latency-free closed-form predictor lacks). Gambatte commits the
+            // write at `setLcdc(cc + 2)` PPU dots; the change first affects the
+            // column plotted ~2 dots later. Near an active window the displayed
+            // column advances slower than 1/dot (the +6 StartWindowDraw penalty
+            // stalls the BG fetcher), so the 2-dot commit reaches a few more
+            // display columns; add the window penalty when this line draws a
+            // window so the BG-off span extends across the stalled window columns
+            // (bgoff_bgon line 104: F7/on at x=143 + window -> boundary 147, so the
+            // sprite columns 142/144/146 keep BG-off and the sprite shows).
+            // Gambatte commits the write at `setLcdc(cc + 2)` PPU dots, so the
+            // change first reaches the column plotted 2 dots later: boundary =
+            // `self.x + 2`. When this line draws a window the displayed column
+            // advances slower than 1/dot through the StartWindowDraw stall, so the
+            // 2-dot commit spans ~2 extra display columns; add +2 on window lines.
+            // (Both terms calibrated against bgoff_bgon_sprite_below_window: the
+            // no-window lines need boundary self.x+2, the window lines self.x+4.)
+            let new_on = (value & bgen_bit) != 0;
+            let win = self.window_started_this_line
+                || self.win_draw_start
+                || self.window_y_active(mmio);
+            let boundary_col = (self.x as i32 + 2 + if win { 2 } else { 0 }).clamp(0, 160) as u8;
+            self.bgen_history.push((boundary_col as u64, new_on));
+        }
 
         // Exact-cc OBJ-size (LCDC bit2) latch for the mode-2 OAM scan (PoC
         // extension). A sprite-size write during OAMSearch must become visible to
@@ -2502,9 +2557,19 @@ impl Ppu {
         let ly = mmio.read(LY) as u16;
         let fb_offset = (ly * 160) + self.x as u16;
 
+        // Per-pixel BG-enable (RB_LINERENDER per-pixel). The per-dot draw is
+        // flushed in bursts (the m0Time flush at mode-3 end draws all remaining
+        // FIFO pixels in one pass), so reading the LIVE `self.lcdc` would apply
+        // the final BG-enable to every flushed column. Instead evaluate BG-enable
+        // as-of THIS column's plot cc from the line's `bgen_history`, so a
+        // mid-mode-3 LCDC.0 toggle (BG off then on) covers exactly the pixel span
+        // it should — matching Gambatte's live per-tile `lcdc & lcdc_bgen` read.
+        // With no mid-line toggle `bgen_at` returns the single seeded value
+        // (== live `lcdc & 1`), so the common case is unchanged.
+        let bg_enabled_col = self.bgen_at(mmio, mmio.is_cgb_features_enabled(), self.x);
         if mmio.is_cgb_features_enabled() {
             let final_color_rgb =
-                self.mix_background_and_sprites_color(mmio, bg_pixel_idx, bg_attrs, self.x, ly as u8);
+                self.mix_background_and_sprites_color(mmio, bg_pixel_idx, bg_attrs, self.x, ly as u8, bg_enabled_col);
             self.record_pixel_debug_event(
                 ly as u8,
                 bg_pixel_idx,
@@ -2515,7 +2580,7 @@ impl Ppu {
             self.color_fb_a[color_offset + 1] = final_color_rgb.1;
             self.color_fb_a[color_offset + 2] = final_color_rgb.2;
         } else {
-            let final_color = self.mix_background_and_sprites(mmio, bg_pixel_idx, self.x, ly as u8);
+            let final_color = self.mix_background_and_sprites(mmio, bg_pixel_idx, self.x, ly as u8, bg_enabled_col);
             let intensity = match final_color {
                 0 => 255,
                 1 => 170,
@@ -2694,22 +2759,30 @@ impl Ppu {
         let wx = mmio.read(WX) as i32;
         let win_first_col = (wx - 7).max(0);
 
+        // `_bg_enabled` is the once-per-line final LCDC.0 (kept for reference /
+        // the no-toggle fast path inside `bgen_at`). The renderer evaluates
+        // BG-enable PER COLUMN via `bgen_at` so a mid-mode-3 LCDC.0 toggle is
+        // applied to the exact pixel span it covers (Gambatte reads `lcdc &
+        // lcdc_bgen` live as the fetcher walks tiles).
+        let _ = bg_enabled;
         for sx in 0u8..160 {
+            let bg_enabled_col = self.bgen_at(mmio, cgb, sx);
             // On DMG, BG-disabled forces the BG layer to color 0 (white).
-            let (bg_idx, bg_attrs) = if !bg_enabled && !cgb {
+            let (bg_idx, bg_attrs) = if !bg_enabled_col && !cgb {
                 (0u8, 0u8)
             } else {
                 self.line_bg_pixel(mmio, sx, win_active, win_first_col)
             };
             let fb_offset = (ly as u16) * 160 + sx as u16;
             if cgb {
-                let rgb = self.mix_background_and_sprites_color(mmio, bg_idx, bg_attrs, sx, ly);
+                let rgb = self
+                    .mix_background_and_sprites_color(mmio, bg_idx, bg_attrs, sx, ly, bg_enabled_col);
                 let off = fb_offset as usize * 3;
                 self.color_fb_a[off] = rgb.0;
                 self.color_fb_a[off + 1] = rgb.1;
                 self.color_fb_a[off + 2] = rgb.2;
             } else {
-                let color = self.mix_background_and_sprites(mmio, bg_idx, sx, ly);
+                let color = self.mix_background_and_sprites(mmio, bg_idx, sx, ly, bg_enabled_col);
                 self.fb_a[fb_offset as usize] = color;
             }
         }
@@ -2742,6 +2815,31 @@ impl Ppu {
     fn compute_m3_length(&self, mmio: &mmio::Mmio, is_cgb: bool) -> u128 {
         let (len, _win) = self.compute_m3_length_win(mmio, is_cgb);
         len
+    }
+
+    // Per-pixel BG-enable (RB_LINERENDER per-pixel). Returns the LCDC.0
+    // (BG-enable) bit in effect for display column `sx`, from the line's
+    // `bgen_history` (boundary_col, bgen) entries. The last entry whose boundary
+    // column is <= `sx` wins. With no mid-mode-3 LCDC.0 toggle the history is a
+    // single seed (boundary 0) and this always returns the seeded value —
+    // byte-identical to the old once-per-pixel live `lcdc & 1` read.
+    fn bgen_at(&self, _mmio: &mmio::Mmio, _is_cgb: bool, sx: u8) -> bool {
+        if self.bgen_history.len() <= 1 {
+            return self
+                .bgen_history
+                .last()
+                .map(|&(_, b)| b)
+                .unwrap_or((self.lcdc & (LCDCFlags::BGDisplay as u8)) != 0);
+        }
+        let mut bgen = self.bgen_history[0].1;
+        for &(boundary_col, b) in self.bgen_history.iter() {
+            if boundary_col <= sx as u64 {
+                bgen = b;
+            } else {
+                break;
+            }
+        }
+        bgen
     }
 
     // Closed-form mode-3 length to reach an arbitrary `targetx`, mirroring
@@ -3818,6 +3916,17 @@ impl Ppu {
                     // it unlatched (-1) and record the arm dot for xpos tracking.
                     self.m3_pixels_discarded = 0;
                     self.m3_arm_dot = self.ticks;
+                    // Per-pixel BG-enable history (RB_LINERENDER): anchor the
+                    // plot-cc origin at mode-3 entry and seed the line's history
+                    // with the BG-enable bit in effect now. Mid-mode-3 LCDC.0
+                    // writes append (commit_cc, bgen) entries (handle_lcdc_write).
+                    self.bgen_history.clear();
+                    // Seed at boundary column 0 (applies to all columns until the
+                    // first mid-mode-3 toggle).
+                    self.bgen_history.push((
+                        0,
+                        (self.lcdc & (LCDCFlags::BGDisplay as u8)) != 0,
+                    ));
                     self.m3_arm_scx = (mmio.read(SCX) & 0x07) as u8;
                     self.m3_arm_scx_full = mmio.read(SCX) as i16;
                     // First line after enable: resolve the SCX value the fine-scroll
@@ -6395,9 +6504,13 @@ impl Ppu {
     }
 
     // Mix background pixel with sprites at the given screen coordinates (CGB color version)
-    fn mix_background_and_sprites_color(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8, bg_attrs: u8, screen_x: u8, screen_y: u8) -> (u8, u8, u8) {
+    fn mix_background_and_sprites_color(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8, bg_attrs: u8, screen_x: u8, screen_y: u8, bg_enabled_col: bool) -> (u8, u8, u8) {
         let lcdc = self.lcdc;
-        let bg_priority_master = (lcdc & (LCDCFlags::BGDisplay as u8)) != 0;
+        // Per-pixel BG-master-priority: on CGB, LCDC.0 off keeps BG/window
+        // visible but drops BG master priority over sprites for this column
+        // (Gambatte `bgprioritymask = p.lcdc << 7`, evaluated live per tile). Use
+        // the column's BG-enable rather than the final once-per-line value.
+        let bg_priority_master = bg_enabled_col;
 
         // Background attributes captured at fetch time travel with the pixel.
         let tile_attributes = bg_attrs;
@@ -6499,12 +6612,14 @@ impl Ppu {
     }
 
     // Mix background pixel with sprites at the given screen coordinates
-    fn mix_background_and_sprites(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8, screen_x: u8, screen_y: u8) -> u8 {
+    fn mix_background_and_sprites(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8, screen_x: u8, screen_y: u8, bg_enabled_col: bool) -> u8 {
         let lcdc = self.lcdc;
-        
-        // Check if BG/Window display is enabled (LCDC bit 0)
-        let bg_enabled = (lcdc & (LCDCFlags::BGDisplay as u8)) != 0;
-        
+
+        // Per-pixel BG-enable: DMG BG-off forces this column's BG layer to white
+        // (palette color 0) for the exact span the toggle covers. Use the
+        // column's BG-enable from the line history, not the final LCDC.0.
+        let bg_enabled = bg_enabled_col;
+
         // Get background color - if BG display is disabled, force to white (color 0)
         let bg_color = if bg_enabled {
             self.get_palette_color(mmio, bg_pixel_idx)
