@@ -282,3 +282,53 @@ STAT mode, not FF44 LY; separate fix).
 - R3 (`oamdma_late_speedchange_stat_2`, SS→DS m0Time +18 vs −4) and R2 (HDMA brackets)
   remain; the audit method (cctracer `[INSTR]` stream + PC-gated engine trace) is now
   proven and reusable for both.
+
+### Milestone-4 (rebased onto main@28; m0stat audit → m0Time lever REFUTED by sibling-swap)
+M3 landed on main env-free (main 29→28). Rebased onto main@28, re-verified flag-OFF
+byte-identical to **main_28** (net +0, broke 0). New gate baseline = main_28.
+
+Audited `offset2_lyc99int_m0stat_count_scx2_1` with the same method (PC-gated FETCH +
+FF41/FF44 value trace + cctracer `[FF41 READ]`/`[INSTR]`). The test loops reading FF41
+`== 0x83` (mode 3) and prints the LY at which the mode leaves 3 (expected 0x90=144).
+
+**Audit table (ISR-entry FF41 read, LY=0):**
+| | rustyboi | Gambatte |
+|---|----------|----------|
+| read cc | 564908 | 623280 |
+| m0Time | 564910 | 623283 |
+| m0Time − cc | **2** | **3** |
+| getStat mode (`cc+2 < m0Time`) | **0** (HBlank) | **3** (XFER) |
+
+rustyboi exits the loop on the FIRST read (mode 0 → ≠0x83 → bail), printing the wrong
+LY; Gambatte reads mode 3 and counts. The divergence is `get_stat_mode3to0_at_cc`'s
+m0Time being **exactly 1cc low** at the LY=0 first-visible line after the 4-STOP speed
+switch: the post-DS→SS `lytime_no_plus1` flag drops the lyTime `+1` from m0Time (gap 2),
+where Gambatte keeps gap 3. (read_off is already the faithful +2; the lever is m0Time.)
+
+**m0Time `+1` lever — REFUTED by sibling-swap (the per-access-CPU-cc bracket):**
+- broad (`!ds && lytime_no_plus1`): flag-ON net **+18** (fixed 1, broke 19) — every
+  post-switch `_2` m3stat/m0stat/speedchange sibling regressed (they need gap 2).
+- narrowed to `internal_ly_val == 0`: net **+2** (fixed 0, broke 2) — UN-fixes the
+  target (its count needs the gap-3 on the exit read too, not just LY=0) AND still
+  breaks `offset1_..._2`/`offset3_..._2` (currently PASSING, gap-2 correct).
+
+`offset2_..._1` (gap-3) and `offset1/offset3_..._2` (gap-2) are **the same line/LY** but
+differ only by a 1-byte `.text`/offset shift in the read cc → they straddle the
+`cc+2 < m0Time` boundary in OPPOSITE directions. This is the genuine **per-access CPU
+cc** bracket (a 1-byte offset shifts the read cc by 1cc), NOT a line-153-style
+faithfulness gap. NO m0Time/read_off constant resolves `_1` without swapping the `_2`
+siblings. Confirmed dead-end; lever reverted (tree clean, flag-OFF==28).
+
+**Distinction from M3:** getLyReg (M3) had a true FORMULA bug (top-only vs whole-line),
+fixable faithfully. m0stat's getStat formula is already correct (`cc+2<m0Time`); the
+residual is the 1cc m0Time phase at the LY=0 post-switch line, and the cases that need
+it shifted are byte-indistinguishable (by any line/LY/state predicate) from the cases
+tuned to the current value — the classic mixed-anchors wall. m0stat needs the real
+per-access CPU read cc (the 1-byte offset must change the read's `master_cc()` by 1),
+same root as R2. NOT slicable here.
+
+**NEXT:** pivot to R3 (`oamdma_late_speedchange_stat_2`, renderer-phase) per coordinator
+— more tractable than the per-access-cc brackets (R1-m0stat / R2). The audit method
+(cctracer `[FF41 READ]`/`[INSTR]` + PC-gated engine STAT3/STAT30 + m0Time trace) is
+reusable. m0stat + R2 both await a per-access-CPU-cc mechanism (the 1-byte-offset read
+cc), deferred together.
