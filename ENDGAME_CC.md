@@ -230,3 +230,55 @@ same family.
 
 The `RB_CANONICAL_CC_ADJ` hook now drives the getLyReg `to_next` probe (was STOP-window;
 both are documented dead-ends). flag-OFF / ADJ=0 remain ship-inert.
+
+### Milestone-3 (per-instruction cc AUDIT → real fix) — R1 `offset2_lyc98int_ly_count_2` LANDED (flag-ON net −1, broke 0)
+Built the audit: PC-gated per-instruction `master_cc()` trace at `bus.rs::fetch_opcode`
++ an FF44-read value trace, vs cctracer's `[INSTR]`/`[DISPATCH]` stream
+(`cctracer <rom> 0x1068 0x1149 …`). **The m2 "8cc count-loop" picture was a red
+herring — the audit found the divergence is at the ISR-ENTRY read, one line earlier:**
+
+Audit table (offset2_lyc98int_ly_count_2, ISR entry):
+| PC | rustyboi cc | rustyboi FF44 | Gambatte cc | Gambatte FF44 |
+|------|-------------|---------------|-------------|---------------|
+| 0x1068 `ldff a,(44)` | 564196 (read@564204) | **153** | 622568 | **0** (a=0x00 post-exec) |
+| 0x106B `jpnz lprint` | — | taken (153≠b=0) → BAILS | — | not taken (0==0) → enters loop |
+
+rustyboi's per-instruction cc is byte-exact (contiguous +4/fetch, no drift) — the
+**instruction stream is NOT mis-phased**. The bug is purely that rustyboi's `get_ly_reg_at_cc`
+returns **153** at the line-153 ISR-entry read where Gambatte returns **0**. rustyboi
+bails out of the count loop on the FIRST check (`cmp a,b; jpnz`), never running the
+counting loop at all; Gambatte reads 0, passes the check, and counts normally.
+
+**Root (different from m2's hypothesis):** rustyboi's line-153 single-speed branch
+returned 0 only at the line TOP (`to_next >= cpl`) and DEFERRED to the renderer
+otherwise — but the renderer's dot-6 LY→0 flip has NOT happened at the just-wrapped
+ISR-entry read (`to_next=454`, renderer still 153), so the defer yields 153. Gambatte's
+`getLyReg` (`video.h:135`) returns 0 for the WHOLE of line 153 at SS non-agb
+(`time - cc <= cpl - isAgb`). 
+
+**Fix (faithful, flag-gated `RB_CANONICAL_CC`):** in the `ly_reg==153 && !ds` branch,
+resolve 0 for the whole line via the raw-Gambatte-time bound `to_next - 1 <= cpl`
+(the `-1` undoes rustyboi's `+1` lyTime correction; verified against the `to_next=457`
+just-wrapped read in `lycint152_ly153_3` which also needs 0). This removes the
+renderer-flip race entirely.
+
+**Validation:** flag-ON full suite = **net −1 (fixed `offset2_lyc98int_ly_count_2`,
+broke 0)**. Initial naive `to_next <= cpl` broke 4 (`frame1_ly_count_2`,
+`lycint152_ly153_3` ×{dmg,cgb}); the `-1` raw-time correction fixed those too →
+zero regressions. flag-OFF byte-identical to main_29. Debug build clean.
+
+**WHICH OF THE 15 MOVED:** `offset2_lyc98int_ly_count_2` (R1) — FIXED, flag-ON, no swap.
+`offset2_lyc99int_m0stat_count_scx2_1` did NOT move (m0stat sub-root — it reads FF41
+STAT mode, not FF44 LY; separate fix).
+
+**NEXT SESSION:**
+- This fix is unconditionally faithful (a verbatim port of Gambatte `video.h:135`),
+  flag-ON net-negative with zero regressions. STRONG candidate to make default-on
+  (flip `canonical_cc_enabled` line-153 branch to unconditional, drop the old top-only
+  path) → would take main to 28. Verify once more, then the flag-flip is a clean commit.
+- `offset2_lyc99int_m0stat_count_scx2_1`: apply the SAME audit method to the FF41
+  STAT-mode read at the count-loop (`get_stat`/`get_stat_mode_at_cc`) — likely an
+  analogous line-153 / mode-1 STAT-read faithfulness gap.
+- R3 (`oamdma_late_speedchange_stat_2`, SS→DS m0Time +18 vs −4) and R2 (HDMA brackets)
+  remain; the audit method (cctracer `[INSTR]` stream + PC-gated engine trace) is now
+  proven and reusable for both.
