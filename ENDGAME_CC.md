@@ -172,5 +172,61 @@ against the cctracer FF44 oracle (cc/LY/lineCycles), NOT the STOP window.
 
 The `RB_CANONICAL_CC` scaffold stays (ADJ default 0 ⇒ ship-inert); the STOP-window ADJ
 hook is retained as a documented dead-end marker and the proven flag plumbing for the
-next stage. NEXT-SESSION owners: keep flag-OFF==31 gate; move the experiment into
-`get_ly_reg_at_cc`'s anticipation-window cc under the same flag.
+next stage.
+
+### Milestone-2 (R1 redirected → getLyReg anticipation window) — ALSO REFUTED, root isolated
+Rebased onto main@29 (clean). flag-OFF re-verified byte-identical to **main_29**
+(full suite net +0, broke 0). Moved `RB_CANONICAL_CC_ADJ` to shift `to_next` in
+`get_ly_reg_at_cc` (non-halt read path only).
+
+**Instrumented ground truth (cctracer + in-engine LY trace):**
+- The two siblings differ ONLY by a 1-byte `.text` offset (`_1`: read@`1067`/loop@`1148`
+  + 3 trailing NOPs; `_2`: read@`1068`/loop@`1149`, different cmp, no NOPs). This is the
+  literal "1-byte .text offset crosses a boundary" CPU-cc signature.
+- That 1 byte shifts the count-loop FF44 read's access cc by **8cc (2 M-cycles)**:
+  rustyboi's `_1` deciding reads land at getLyReg `to_next=6` (glitch dot, ANTIC fires);
+  `_2` lands at `to_next=14` (outside the ≤10 window → returns the plain renderer LY,
+  the glitch never fires). The 8cc gap === the off-by-one in the printed count
+  (rustyboi prints 99, expected 9A; high nibble "9" already matches).
+
+**getLyReg-window sweep (the redirect's own hypothesis) — REFUTED by sibling-swap:**
+```
+ADJ(to_next):  -10 -8 -6 -4 -2  0  2  4  6  8
+count_2(tgt):    F  F  F  F  F  F  P  F  F  F   <- only adj=+2 fixes it
+count_1(sib):    F  F  F  F  F  P  F  F  F  P   <- and +2 BREAKS the sibling
+m0stat(tgt):     F  F  F  F  F  F  F  F  F  F   <- never moves
+```
+Exactly the predicted 1-for-1 swap. NO scoped getLyReg `to_next` constant fixes count_2
+without breaking count_1. m0stat is unmoved by any window shift (different sub-root).
+**Full-suite flag-ON @ADJ=+2 valley: net +318 (fixed 1, broke 318).** The +2 shifts
+EVERY non-halt LY read suite-wide (all the m3stat/lyc/m2int/speedchange families), the
+textbook mixed-anchors wall: getLyReg's `to_next` is a global anchor, structurally
+un-sliceable for one case. Quantitatively confirms the lever is a dead-end.
+
+**ROOT, now isolated (both candidate levers refuted):** the error is NOT in getLyReg's
+formula (a faithful port of `video.h:124`), NOT in the STOP window, NOT in the getLyReg
+`to_next` anchor. It is in the **absolute per-access CPU cc of the count-loop FF44 read**
+itself: rustyboi's instruction-stream cc is ~8cc mis-phased for the `_2` byte alignment
+(correct for `_1`). The read access cc = `bus.rs:594 master_cc()`; that value is right for
+one alignment and wrong for the other, so the 1-byte shift lands the read on the wrong
+side of the getLyReg window. This is the per-access-cc instruction-boundary root the whole
+endgame is about — it is genuinely NOT slicable by any peripheral/renderer constant
+(proven twice now by sibling-swap). m0stat_scx2 is a separate STAT-mode sub-root in the
+same family.
+
+**NEXT-SESSION direction (R1 needs the real per-access CPU cc, not another constant):**
+- The fix must make the FF44 read's `master_cc()` byte-exact across the 1-byte `.text`
+  shift, i.e. validate rustyboi's per-instruction cc accounting against Gambatte for the
+  exact opcode stream between ISR entry (`0x1068`/`0x1149`) and the FF44 read. Use cctracer
+  with watch-PCs on that stream to get Gambatte's `cc` at the read for BOTH variants and
+  compare to rustyboi's `master_cc()` at the same architectural read (add a PC-gated trace
+  at `bus.rs:594`). The 8cc discrepancy lives in some opcode's cc cost or the ISR
+  dispatch/EI-service cc on this stream — find WHICH instruction, fix its cc (flag-gated),
+  re-validate flag-OFF==29.
+- Likely shares the lever with R2 (the HDMA m2-unhalt brackets are the SAME "1-byte .text
+  offset crosses a TIMA tick" signature). Consider tackling R1's instruction-cc fix and
+  R2 together once the per-instruction cc audit tool exists.
+- Defer R1 to that audit; do NOT ship a getLyReg/STOP constant.
+
+The `RB_CANONICAL_CC_ADJ` hook now drives the getLyReg `to_next` probe (was STOP-window;
+both are documented dead-ends). flag-OFF / ADJ=0 remain ship-inert.
