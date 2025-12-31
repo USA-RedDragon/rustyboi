@@ -1951,6 +1951,18 @@ impl Mmio {
         } else {
             6
         };
+        // A post-STOP-unhalt HDMA block (Gambatte's prefetched `hdma_requested` fired
+        // at the speed-switch unhalt; `halt_hdma_state == Requested`) charges only the
+        // pure transfer cc (32 SS / 64 DS) — NEITHER the trailing +4 NOR the +6
+        // CPU-prefetch fudge. Those are faithful only for a STAT/LY-read-downstream
+        // block (the `hdma_cycles`/`frame*_count` calibration tests, which are `Low`);
+        // the Requested block's downstream value-read is a TIMA read several
+        // instructions later (hdma_late_m3speedchange_tima), so the fudge pinned it one
+        // TIMA tick high. cctracer (`_3`): faithful cc-tlu == 131132 == Gambatte
+        // (8195 = F6); the old 36+6 lands 131142 (8196 = F7).
+        if matches!(self.halt_hdma_state, HaltHdmaState::Requested) {
+            return 16 * (2 + 2 * self.is_double_speed_mode() as u32);
+        }
         let base = if self.is_double_speed_mode() { 68 } else { 36 };
         base + prefetch_fudge
     }
