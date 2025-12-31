@@ -250,6 +250,15 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // post_opcode_cc + 0x20000 + 4, exactly Gambatte's `(cc()-4) + 0x20000 + 4`,
         // holding the offset constant at 58368.
         cpu.stop_unhalt_cycles = 0x20000;
+        // ENDGAME R1 (RB_CANONICAL_CC): sweep the post-STOP unhalt-window length to
+        // probe the offset2_* 4-STOP per-access-cc parity. flag-OFF => unchanged.
+        if crate::cpu::bus::canonical_cc_enabled() {
+            let adj = crate::cpu::bus::canonical_cc_stop_adj();
+            if adj != 0 {
+                cpu.stop_unhalt_cycles =
+                    (cpu.stop_unhalt_cycles as i64 + adj).max(0) as u32;
+            }
+        }
         // (OAM-DMA freeze already armed above, before the deferred HDMA block fire.)
         return 8;
     }
