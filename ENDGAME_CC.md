@@ -383,3 +383,67 @@ Characterized and deferred — do NOT chase a constant bridge tweak (proven sibl
   the highest-leverage remaining build. R3's m3-length rebase is the other deep build.
   Both are multi-session; the cheap faithful-port wins (getLyReg-style) appear exhausted
   among the current 14.
+
+### Milestone-5 (DIFFERENTIAL audit — m0stat 1cc source CLASSIFIED: #3 emergent m0Time quantization)
+Traced BOTH siblings of `offset2_lyc99int_m0stat_count_scx2` through BOTH emulators from
+ISR dispatch → the deciding FF41 read. **The siblings differ by a 1-byte `.text` offset
+(`_1` read@`0x10A5` `cmp 0x83`=want-mode-3; `_2` read@`0x10A6` `cmp 0x80`=want-mode-0).**
+
+**4-column differential table (cc at each anchor):**
+| event | rb_cc `_1` | gb_cc `_1` | rb_cc `_2` | gb_cc `_2` |
+|-------|-----------|-----------|-----------|-----------|
+| ISR dispatch (pc=0x48) | 564220 | — | 564220 | — |
+| FF41 read fetch (0x10A5/0x10A6) | 564900 | 623280 | 564904 | 623284 |
+| **read−read sibling delta** | **+4** | **+4** | (anchor) | (anchor) |
+| FF41 read access cc | 564908 | 623280 | 564912 | 623284 |
+| m0Time at read | 564910 | 623283 | 564910 | 623283 |
+| **m0Time − read cc (gap)** | **2** | **3** | **−2** | **−1** |
+| getStat (`cc+2 < m0Time`) | mode 0 ✗ | **mode 3** ✓ | mode 0 ✓ | mode 0 ✓ |
+
+**CLASSIFICATION = #3 (emergent PPU-boundary-vs-CPU-phase), NOT a CPU-cc bug:**
+1. **Per-instruction cc is byte-exact.** Both emulators agree the 1-byte operand shifts
+   the read by exactly **+4cc** (`_1`→`_2` delta = +4 in BOTH). Dispatch is identical.
+   So it is NOT a wrong opcode cost and NOT a wrong dispatch/service cc — corrects the m4
+   note's "1-byte offset shifts read cc by 1cc" (it shifts by 4; the read cc is RIGHT).
+2. **m0Time is the shared anchor and is 1cc LOW.** Gambatte's gap for `_1` is **3**
+   (mode 3); rustyboi's is **2** (mode 0). The `+4` sibling delta lands `_1` and `_2` on
+   the SAME m0Time(623283) in Gambatte at gaps 3 and −1 → mode 3 / mode 0. rustyboi's
+   `lytime_no_plus1` (set on the DS→SS switch, never cleared without an LCD-enable) drops
+   the lyTime `+1`, quantizing m0Time 1cc low → `_1`'s gap collapses 3→2 → mode 0.
+3. **The 1cc CANNOT be sliced.** Cross-test differential proves the swap-victims
+   `offset1_lyc99int_m0stat_count_scx2_2` / `offset3_..scx0_2` are **want-mode-0** loops
+   (`cmp 0x80`) whose Gambatte gap is genuinely **2** (`m0Time−cc=2`, `cc+2<m0Time` tie →
+   mode 0). So `_1` needs gap 3 and the victims need gap 2 **at the same LY=0 post-switch
+   line** — a real Gambatte difference driven by each test's distinct cumulative
+   instruction cc before the loop. rustyboi has ONE m0Time per line, so no (LY, state,
+   `lytime_no_plus1`) predicate separates them.
+4. **m0Time is multi-consumer.** The +1 (even scoped to `get_stat_mode3to0_at_cc` &&
+   `internal_ly==0`) still broke the victims: their FF41 reads never call
+   `get_stat_mode3to0_at_cc` (0 calls — they resolve via `get_stat_mode_at_cc` in HBlank),
+   yet they regressed — because `get_stat_mode3to0_at_cc` is ALSO the VRAM-access-lock
+   gate (`bus.rs:417`), so the +1 shifted the mode-3 RENDER lock and corrupted their
+   printed tiles. m0Time cannot be perturbed for the FF41 read alone.
+
+**Validation:** flag-ON ily==0-scoped +1 = net **+2** (fixed 0, broke the 2 want-mode-0
+victims). Even fixing `_1`'s LY=0 read, its loop then exits at LY=1 (every post-switch
+line needs the +1, not just LY=0). flag-OFF byte-identical to main_28. Reverted clean.
+
+**THE REARCHITECTURE SPEC (definitive — why this needs the coupled build):**
+The defect is that rustyboi carries ONE `m0_time_master`/lyTime per line with a BINARY
+`lytime_no_plus1` switch, where the true Gambatte value is a continuous sub-cc phase that,
+combined with each instruction-stream's exact read cc, yields gap 3 for some post-switch
+reads and gap 2 for others. To resolve m0stat (and the structurally-identical R2 HDMA
+m2-unhalt brackets) WITHOUT swapping siblings, the post-DS→SS `m0_time_master` must be
+re-derived to Gambatte's exact sub-cc (the `lcd_.speedChange` re-anchor in `opcodes.rs::
+stop` + `compute_m3_length` + the lyTime `+1` fold), so that `cc + 2 < m0Time` evaluates
+byte-true at every read cc — replacing the `lytime_no_plus1` boolean with the faithful
+per-cc anchor. That is the SAME post-switch m0Time rebase R3 needs (the −18-vs-+4 / +18
+divergence) — **R1-m0stat, R2's 8 brackets, and R3 all collapse to one post-DS→SS
+m0Time/m3-length re-anchor build.** It is NOT a faithful-port one-liner; the m0Time
+anchor is shared by the FF41 mode read, the VRAM/OAM render lock, and the m0/m2 IRQ
+schedule, so it must move atomically. No MAIN-MERGE CANDIDATE this session (the only
+faithful change, the +1, is multi-consumer and sibling-swapping).
+
+**Which of the 9 moved:** none landed (correctly — the lever is a proven sibling-swap).
+The audit's payoff is the spec above: the highest-leverage remaining build is the single
+post-DS→SS m0Time/m3-length re-anchor, which subsumes R1-m0stat + R2 (8) + R3 (~10 cases).
