@@ -447,3 +447,54 @@ faithful change, the +1, is multi-consumer and sibling-swapping).
 **Which of the 9 moved:** none landed (correctly — the lever is a proven sibling-swap).
 The audit's payoff is the spec above: the highest-leverage remaining build is the single
 post-DS→SS m0Time/m3-length re-anchor, which subsumes R1-m0stat + R2 (8) + R3 (~10 cases).
+
+### Milestone-6 (BUILD attempt: post-DS→SS m0Time re-anchor) — root pinned to a DOT-LEVEL m3-length deficit
+Attempted the m5-spec build three ways, each flag-gated, each measured. ALL three move the
+target `offset2_lyc99int_m0stat_count_scx2_1` (fix) but break the want-mode-0 victims
+`offset1_lyc99int_m0stat_count_scx2_2` / `offset3_..scx0_2` — the SAME sibling-swap, now
+pinned to its exact dot-level cause:
+
+1. **read_off 2→1** on the post-switch FF41 read (`stat_read_off`): target gap 2→effective-3
+   (mode 3 ✓), but the victim's same-path read also widens → mode 3 ✗.
+2. **Atomic m0Time `+1`** (restore the dropped lyTime `+1` in `m0_time_exact`, moving ALL
+   consumers — render lock + IRQ + read — together): target gap 2→3 (mode 3 ✓), victim gap
+   2→3 (mode 3 ✗).
+3. **lineCycle-domain analysis** (`self.ticks` vs `scheduled_mode0_dot`): see the table.
+
+**Decisive dot-level table (flag-OFF, the deciding FF41 read, via `[S30]`/`[M0EX]` traces):**
+| | rb read lineCycle (`ticks`) | rb `scheduled_mode0_dot` | rb `m0_line_cycle` | **Gambatte m0 boundary lineCycle** |
+|---|---|---|---|---|
+| target `_1` (scx2) | 250 | **251** | 251 (m3_len 167 + base 84) | **253** |
+| victim offset1 `_2` (scx2) | 251 | **252** | 251 | **253** |
+
+**ROOT (exact):** rustyboi's per-test post-bridge m0 boundary is **251/252 — i.e. 2 dots
+(target) and 1 dot (victim) SHORT of Gambatte's 253.** The read lineCycles are byte-exact
+(250/251 == Gambatte). Both tests compute the SAME `m0_line_cycle=251` from
+`m3_len=167 + base=84`, yet `scheduled_mode0_dot` lands 251 vs 252 — the bridge/speedChange
+leaves a per-test sub-dot residue. Gambatte's mode-3 window extends to lineCycle 253 on this
+post-DS→SS line; rustyboi's `compute_m3_length`/bridge ends it ~2 dots early. Because the
+deficit is per-test (2 vs 1) and the reads straddle the true 253 boundary at 250/251, NO
+uniform m0Time/read_off shift places both correctly — only restoring the **true mode-3
+length** (boundary → 253) does, which requires the bridge/m3-length rebuild, not an anchor nudge.
+
+**This IS the `m3len-is-cpu-phase-not-renderer` / SS↔DS-bridge cluster, now quantified:** the
+fix must make the post-DS→SS line's m0 boundary land at Gambatte's lineCycle 253 (add the ~2
+missing mode-3 dots in `stop_bridge_advance` + `compute_m3_length` for the post-switch line),
+after which the existing cc-domain `cc+2 < m0Time` resolves target(250)→mode3 and
+victim(251)→mode0 by construction. This is the same m3-length deficit R3
+(`oamdma_late_speedchange_stat_2`, m0Time −18-vs-+4) shows — confirming R1-m0stat + R2 + R3
+share ONE post-DS→SS m3-length root.
+
+**Validation:** all three attempts flag-ON net +2 (fixed target, broke the 2 want-mode-0
+victims). flag-OFF byte-identical to main_28 (net +0, broke 0). Experiments reverted; tree clean.
+No MAIN-MERGE CANDIDATE (the bridge m3-length rebuild is the real fix; multi-session).
+
+**NEXT-SESSION concrete entry point:** in `opcodes.rs::stop` (DS→SS branch) /
+`controller.rs::stop_bridge_advance` + `compute_m3_length`, the post-switch line must report
+`m3_len` such that `m3_len + base == 253` (≈ +2 over the current 251) — derived from Gambatte's
+`lcd_.speedChange` mode-3 carry, NOT the current bridge dot count. Verify with cctracer that
+the post-switch line's m0 boundary == lineCycle 253 for BOTH siblings; then the cc-domain
+getStat needs no read_off/anchor patch, and `lytime_no_plus1` can be dropped. Risk: `m3_len`
+feeds the render lock + IRQ schedule too, so the +2 must come from the genuine speedChange
+mode-3 carry (a real PPU phase) so all consumers move faithfully together — that is the
+coupled build, with this table as the acceptance test (boundary==253 both siblings).
