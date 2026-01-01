@@ -332,3 +332,54 @@ same root as R2. NOT slicable here.
 (cctracer `[FF41 READ]`/`[INSTR]` + PC-gated engine STAT3/STAT30 + m0Time trace) is
 reusable. m0stat + R2 both await a per-access-CPU-cc mechanism (the 1-byte-offset read
 cc), deferred together.
+
+### Milestone-4b (R3 `oamdma_late_speedchange_stat_2` audit) — CONFIRMED the SS→DS bridge m0Time phase (deep cluster, deferred)
+Test: ISR fires OAM DMA (FF46=C0), waits, does a CGB STOP speed-switch, then immediately
+reads FF41 and prints the STAT mode (expected out3 = mode 3).
+
+**Audit (post-STOP FF41 read at LY=3), cctracer vs engine:**
+| | rustyboi | Gambatte |
+|---|----------|----------|
+| read cc | 149836 | 208204 |
+| m0Time | 149818 | 208208 |
+| **m0Time − read cc** | **−18** (m0Time in the PAST) | **+4** |
+| renderer state / mode | **HBlank / mode 0** | **PixelTransfer / mode 3** |
+
+rustyboi's `m0_time_master` sits **~22cc too low** relative to the read across the SS→DS
+switch (−18 where Gambatte is +4), so the renderer is in HBlank (mode 0) where Gambatte
+is still in mode 3. The mode-3 STAT read resolves via `get_stat_mode3to0_at_cc`, which
+returns None here (state==HBlank, not PixelTransfer) → falls to the renderer's mode-0
+register. This is EXACTLY the documented "+18 vs −4" m0Time divergence across the speed
+switch (≈22cc line-position phase error in the post-switch mode-3 WINDOW LENGTH).
+
+**Verdict — NOT a quick faithful-port fix; it is the deferred coupled cluster.** Per
+memory (`uniform-faithful-bridge`, `m3len-is-cpu-phase-not-renderer`): the SS↔DS STOP
+bridge's mode-3-length / m0Time phase cannot be fixed by a uniform constant (off2-vs-scx
+resist any single bridge dot-count), and needs the coupled mode-3-length/m0Time rebase
+(`opcodes.rs::stop` bridge + `compute_m3_length` + `m0_time_master` re-anchor across the
+switch, all together). That is a deliberate multi-session build, not a one-read fix.
+Characterized and deferred — do NOT chase a constant bridge tweak (proven sibling-swap).
+
+## SESSION SUMMARY (state for handoff)
+- main: **28** (M3 landed env-free). Branch `endgame-cc` = 5 commits on main@28, tree
+  clean, flag-OFF byte-identical to main_28 (net +0, broke 0), debug build clean.
+- **Landed (on main via M3):** `offset2_lyc98int_ly_count_2` — getLyReg line-153
+  whole-line-0 faithful fix (`video.h:135`).
+- **Refuted by audit (per-access-CPU-cc brackets, not slicable by constants):**
+  R1-`offset2_lyc99int_m0stat_count_scx2_1` (m0Time +1 swaps offset1/3 `_2` siblings),
+  and the m2 STOP-window / getLyReg-window levers.
+- **Characterized + deferred (deep coupled cluster):** R3 SS→DS bridge m0Time phase
+  (≈22cc), needs the mode-3-length/m0Time rebase.
+- **Untouched:** R2 (8 HDMA m2-unhalt+TIMA brackets — same per-access-cc signature as
+  R1-m0stat), R4 (dmg write-vs-latch), R5 (per-pixel LCDC).
+- **Reusable tooling proven:** cctracer `[INSTR]`/`[DISPATCH]`/`[FF41 READ]`/`[FF44 READ]`
+  (m0Time, lineCycles, lyTime) is the oracle; PC-gated engine traces at
+  `bus.rs::fetch_opcode` + `controller.rs::get_stat_mode3to0_at_cc`/`get_ly_reg_at_cc`
+  give the per-read engine side. Pattern: audit → isolate the divergent READ → if it's a
+  faithful-port formula gap (like getLyReg) land it; if it's a per-access-cc bracket
+  (sibling-swap) or the SS↔DS bridge phase, defer to the per-access-cc / m3-length rebuild.
+- **Recommended next:** the per-access-CPU-cc mechanism (make a 1-byte `.text` offset shift
+  the read's `master_cc()` by 1cc) would unlock R1-m0stat AND R2's 8 brackets together —
+  the highest-leverage remaining build. R3's m3-length rebase is the other deep build.
+  Both are multi-session; the cheap faithful-port wins (getLyReg-style) appear exhausted
+  among the current 14.
