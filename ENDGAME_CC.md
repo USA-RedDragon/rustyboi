@@ -772,3 +772,63 @@ block tick peripherals per-cc like Gambatte's `dma()` inner loop does for OAM-DM
 regression risk (every HDMA/GDMA test shares it). Acceptance unchanged: `_3`→F6, `_4`→F7,
 `_6`→F9, `_2`/`_5` intact, R3 mode-3-at-read, m0stat `lineCycle(m0Time)==253`, whole
 speedchange/dma/tima/div family byte-exact.
+
+### Milestone-11 (per-cc HDMA-block interleave build) — HYPOTHESIS REFUTED: the read is post-block, and block-cc is COUPLED into tlu; per-cc interleave cannot help R2
+Built toward the per-cc interleave. Two findings — one structural, one decisive:
+
+**(a) rustyboi ALREADY ticks peripherals per-cc during the block stall.** `cpu.step()` returns the
+block stall; `gb.rs` `tick_remaining(stall)` → `bus.run_to(target)` which advances every
+peripheral ONE DOT AT A TIME (`bus.rs:163-165`, the proven per-dot primitive). So the timer/PPU/APU
+DO advance per-cc through the block's cc. The block is a synchronous BYTE-COPY (all 16 bytes
+written up front) but the cc advance that follows is already per-dot. The "lump" is the byte copy,
+not the peripheral advance.
+
+**(b) The per-cc interleave cannot change the TIMA bracket — the read is POST-block.** The
+deciding TIMA read (`ldff a,(05)`) happens AFTER the block + its stall, when the CPU resumes. Its
+value = `(read_cc − tlu) >> clk`. The interleave changes WHEN bytes copy, not the total block cc
+nor `read_cc` (still = stall-end) nor `tlu`. So a TIMA tick edge "landing mid-block" is irrelevant
+— the CPU read is at stall-end regardless. The m10 acceptance framing (per-cc → edge mid-block)
+was wrong: the bracket is decided by the post-block read cc, not by mid-block tick alignment.
+
+**(c) DECISIVE: block-cc is COUPLED into `tlu`.** Probed the actual lever — the post-STOP block
+stall (`run_hdma_block`, base 36 SS / 68 DS + prefetch_fudge 6). Sweeping it (flag-gated, both
+broad and NARROWLY gated to the `_3`/`_6` fire profile `halt_wakeup_skew && !hdma_enabled_at_halt`):
+| adj | _2 | _3 | _4 | _5 | _6 |
+|---|---|---|---|---|---|
+| 0 | P | F | P | P | F |
+| −6/−8/−10 | **F** | **P** | **F** | **F** | F |
+
+`adj=−6..−10` fixes `_3` but BREAKS `_2`/`_4`/`_5`. Why: reducing the block stall moves `tlu` too
+(`_4` tlu 150564→150548, `_2` 150560→150544, both −16 at adj=−10) — the block's cc cascades through
+the STOP sequence into the DIV reset / `tima_last_update` anchor of the SAME test. So `(read_cc −
+tlu)` stays coupled: shifting the block shifts BOTH read_cc AND tlu, and cannot independently move
+the read across the TIMA tick edge. This holds even with the narrow gate (all five tests fire the
+same block profile).
+
+**REFINED FLOOR (sharper than m10):** R2 is NOT a "synchronous-stall-vs-interleaved-dma" problem
+that per-cc interleaving fixes — the peripheral advance is ALREADY per-cc, and the read is post-block.
+The true root is that **rustyboi's HDMA block cc is ENTANGLED with the timer's `tlu`/DIV anchor
+through the STOP-sequence cc**, where Gambatte's scheduler keeps the block (`intevent_dma`) and the
+DIV reset (`nontrivial_ff_write(0x04)`) as INDEPENDENT events at fixed cc. The fix is NOT per-cc
+byte interleaving; it is **decoupling the block cc from the DIV/tlu re-anchor** — i.e. the block
+must advance `cycleCounter_` without that advance feeding back into `divLastUpdate_`/`lastUpdate_`.
+That is the event-scheduler's separation of concerns (each peripheral re-anchors only on its own
+events, not on the block's stall lump), the MinKeeper-class architecture scoped out by the project.
+
+**Build result:** 0 of ~9 moved (refuted: per-cc interleave is a no-op for the read; block-cost
+sweep fixes one and breaks three via the tlu cascade). flag-OFF byte-identical to main_27; all
+experiments reverted clean; release build clean.
+
+**OAM-DMA bus-conflict cluster (dumpers/AGB) outlook:** those are a DIFFERENT mechanism (OAM-DMA
+byte-source bus conflict, not the HDMA-block-vs-timer cc coupling). They MAY benefit from a faithful
+per-cc OAM-DMA byte model, but that is orthogonal to R2's tlu-coupling root — the per-cc HDMA
+interleave does NOT address them (refuted here for R2; untested but mechanistically distinct for
+OAM). Do not assume a shared unlock: R2/R3 = block-cc↔tlu decoupling (scheduler); dumpers = OAM
+bus-conflict capture (separate, likely the harness/sub-frame model per `oamdma-dumpers-are-harness-
+floor`).
+
+**NEXT-SESSION (if pursued):** the only real lever for R2/R3 is decoupling the HDMA block's cc
+advance from the timer DIV/tlu re-anchor across the STOP — make `perform_speed_switch`'s DIV reset
+anchor on a cc INDEPENDENT of the post-stop block stall (Gambatte: DIV reset at the stop `cc`, block
+at its own `intevent_dma` cc, neither re-anchoring the other). This is the event-scheduler separation,
+not a byte-interleave; high risk, multi-session, and may need the full scheduler. Acceptance unchanged.
