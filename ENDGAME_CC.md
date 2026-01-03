@@ -832,3 +832,54 @@ advance from the timer DIV/tlu re-anchor across the STOP — make `perform_speed
 anchor on a cc INDEPENDENT of the post-stop block stall (Gambatte: DIV reset at the stop `cc`, block
 at its own `intevent_dma` cc, neither re-anchoring the other). This is the event-scheduler separation,
 not a byte-interleave; high risk, multi-session, and may need the full scheduler. Acceptance unchanged.
+
+### Milestone-12 (R4 + R5 carry-key audits — the LAST default lever) — BOTH confirmed DEFINITIVE FLOOR
+Ran the m7 carry-key differential hunt on the final 3 default cases. Neither has a live-state key.
+
+**R4: `late_m0int_halt_m0stat_scx3_2b` + `late_m0irq_..._2b` (dmg, out2) — sub-master-cc, NO key.**
+The family `_1b`/`_2b`/`_3b`/`_4b` are 1-byte `.text` shifts (HALT position 1032→1033, read 1051→
+1052) walking the halt-woken FF41 STAT read. Differential (rustyboi, DMG, the deciding read):
+| sib | access_cc | ly | line_cycles | state | m0t | carry_skew | DMG wants | rb |
+|---|---|---|---|---|---|---|---|---|
+| _1b | 44945 | 1 | 449 | HBlank | 44751 | 0 | mode 0 | mode 0 ✓ |
+| _2b | 44945 | 1 | 449 | HBlank | 44751 | 0 | **mode 2** | mode 0 ✗ |
+
+`_1b` and `_2b` are **byte-identical in EVERY engine field** at the deciding read (access_cc=44945,
+ly=1, line_cycles=449, state=HBlank, m0t=44751, ticks=449, inact_until=0, carry_skew=0) yet DMG
+hardware gives OPPOSITE answers (`_1b`→mode 0, `_2b`→mode 2). The 1-byte shift is BEFORE the HALT,
+so rustyboi's halt-wakeup snaps BOTH to the same resume cc (the post-halt instruction stream is
+identical → same read cc). Gambatte reads them on DIFFERENT lines (`_2a` cc=71508 LY=1 mode 0;
+`_2b` cc=71512 LY=2 mode 2) — the 1-byte HALT-position changes the DMG halt-wakeup by a sub-master-cc
+that lands the read on opposite sides of the line wrap. **NO live-state key exists** (unlike m7's
+`render_carry_skew_cc`, here every field is identical); the distinguishing info is the DMG
+halt-bug sub-cc below rustyboi's master_cc resolution. Definitive floor — genuinely sub-master-cc.
+
+**R5: `bgoff_bgon_sprite_below_window` (cgb) — needs per-pixel LCDC.0; NO closed-form proxy.**
+Test: in the mid-mode-3 STAT ISR, write LCDC=0xF6 (BG off, bit0=0) then immediately LCDC=0xF7 (BG
+on) — toggling BG-enable OFF then ON for a precise pixel span during pixel transfer, with a sprite
+below a window. 24 pixels wrong (rustyboi #F8F8F8 white where Gambatte #9D669D). rustyboi's renderer
+is `render_full_line` (RB_LINERENDER): it renders the WHOLE scanline at once at the mode-3→HBlank
+transition, reading `bg_enabled = self.lcdc & 1` ONCE per line (controller.rs:2683). It has NO
+per-pixel LCDC.0 history — the momentary BG-off window is invisible to a single-snapshot whole-line
+render. There is NO sibling-pair / CPU-read straddle and NO closed-form proxy: the BG-off pixel
+range is an arbitrary span set by the exact cc of the two LCDC writes vs the mode-3 plot position,
+and on CGB BG-off = BG-master-priority off (affecting the sprite-below-window mix). Fixing it needs
+the renderer to track per-pixel LCDC.0 (plot-cc), a whole-line→per-column-aware renderer change.
+The m7 carry-key is structurally inapplicable (it distinguishes two CPU reads; R5 is a missing
+per-pixel render feature). Definitive floor — renderer per-pixel-history rewrite.
+
+**VERDICT — the default-suite incremental work is COMPLETE.** All reducible default cases are now
+either landed (m7 m0stat) or floored with a precise mechanism:
+- R1-m0stat: LANDED on main (m7, →27).
+- R2 (8 HDMA tima/speedchange brackets) + R3 (oamdma speedchange stat): block-cc↔tlu coupling via
+  the STOP-sequence (m8-m11) → needs the event-scheduler separation (intevent_dma independent of
+  the DIV/tlu re-anchor); per-cc byte-interleave proven a no-op (m11).
+- R4 (m0stat halt scx3 _2b, dmg ×2): genuinely sub-master-cc — byte-identical engine state, opposite
+  DMG answers via the 1-byte halt-position sub-cc; no live-state key.
+- R5 (bgoff_bgon_sprite_below_window): needs per-pixel LCDC.0 plot-cc history; whole-line renderer
+  can't express it; no carry-key/proxy.
+
+Remaining default failures = MinKeeper-class event scheduler (R2/R3), DMG halt-bug sub-master-cc
+(R4), per-pixel renderer history (R5), plus the 16 harness/oracle dumpers. No further sliceable
+live-state key exists in the default suite. flag-OFF byte-identical to main_27; no code changed this
+milestone (audit only); release build clean.
