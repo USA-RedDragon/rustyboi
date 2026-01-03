@@ -6132,16 +6132,11 @@ impl Ppu {
             ly_reg = stat_irq::inc_ly(ly_reg as u32) as i64;
             time += line_time;
         }
-        let mut to_next = time - cc; // timeToNextLy
-        // ENDGAME R1 sweep (RB_CANONICAL_CC + RB_CANONICAL_CC_ADJ): probe whether
-        // the offset2 count error is fixable by a scoped getLyReg anticipation-
-        // window shift on the NON-HALT read path. flag-OFF / ADJ=0 => unchanged.
-        if crate::cpu::bus::canonical_cc_enabled() && !mmio.halt_wakeup_skew() {
-            let adj = crate::cpu::bus::canonical_cc_stop_adj();
-            if adj != 0 {
-                to_next += adj;
-            }
-        }
+        let to_next = time - cc; // timeToNextLy
+        // NOTE: the m2 getLyReg `to_next` RB_CANONICAL_CC_ADJ probe was removed — it
+        // was a refuted dead-end (m2) that shared RB_CANONICAL_CC_ADJ and confounded
+        // the R2 block-stall measurement (it shifted every non-halt LY read). The
+        // block stall probe (mmio.rs run_hdma_block) now owns RB_CANONICAL_CC_ADJ.
 
         if ly_reg == last_line {
             // Line 153: FF44 reads 0 early (Gambatte getLyReg). At single speed,
