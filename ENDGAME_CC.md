@@ -717,3 +717,58 @@ reflag and operand-exec fire-paths, and same-block TIMA siblings straddle a tick
 uniform block-cost can split** — the faithful fix is the coupled `Tima`+`dma`+bridge re-derivation
 (block-free window + tlu tick-edge re-anchor together), a larger speedchange rewrite. flag-OFF
 byte-identical to main_27; all experiments reverted clean.
+
+### Milestone-10 (coupled speedchange rewrite attempt) — ARCHITECTURAL FLOOR: tlu is byte-exact, the residual is HDMA-block-as-synchronous-stall vs Gambatte's interleaved `intevent_dma`
+Committed to the coupled rewrite (pieces 1+2). Studied Gambatte `Memory::stop` (memory.cpp:444)
+authoritatively: `intevent_unhalt = cc+0x20000+4`; `tima_.speedChange()`; `nontrivial_ff_write
+(0x04,0,cc)` (DIV reset → `Tima::divReset`, tima.cpp:168: `lastUpdate_ -= (1<<(clk-1))+3;
+updateTima(cc); lastUpdate_ = cc`). The HDMA block is NOT run in `stop()` — it fires later via
+the `intevent_dma` scheduler slot, interleaved with the per-cc timer advance.
+
+**PIECE 2 (tlu re-anchor) is ALREADY FAITHFUL — proven byte-exact:**
+- rustyboi `div_reset_split` does EXACTLY Gambatte `Tima::divReset` (`tlu -= (1<<(clk-1))+3`;
+  `update_tima`; `tlu = anchor_cc`) → post-stop `tima_last_update = stop abs_cc`.
+- cctracer cross-check: Gambatte STOP cc `_2`=208944 / `_3`=208948; rustyboi STOP-internal
+  (=tlu) `_2`=150560 / `_3`=150564 → **constant boot offset 58384 BOTH**. tlu is byte-exact to
+  Gambatte. No re-anchor is needed; piece 2 is a no-op (already correct).
+
+**PIECE 1 (block-free window) does NOT decompose — the residual is the block-cost model:**
+- The 0x20000 halt window is byte-exact (m9). The error is purely the post-STOP HDMA block's
+  CPU cost. But the block fires via DIFFERENT paths per sibling: `_3`/`_4` via the per-dot
+  m0-edge during the resume instruction (`fire_pending_hdma_mcycle` in the bus tick), `_5`/`_6`
+  via `stop_window_exit_reflag`. The reflag-absorb (tested, full + partial sweep) does NOT touch
+  `_3`/`_4` (different path) and does NOT change `_5`/`_6`'s TIMA read (their block was already
+  charged at STOP, not before the read).
+- `_3` needs the read EARLIER (fewer ticks: 8196→8195); `_6` needs it LATER (8197→8198) —
+  OPPOSITE corrections. No single block-cost change moves both correctly.
+- `_3`/`_4` are byte-identical through STOP/unhalt/block (same tlu, same block, differ only by
+  the read NOP). Their reads (rem 6 / rem 10) sit in ONE rustyboi TIMA tick; Gambatte splits
+  them (F6/F7) because its block runs as a SCHEDULED EVENT interleaved with the per-cc timer
+  advance, so the tick edge falls BETWEEN their reads. rustyboi charges the whole block as a
+  synchronous `pending_dma_stall` LUMP, advancing the timer monotonically across it — it cannot
+  place a tick edge mid-block at the sub-cc position Gambatte does.
+
+**THE DEFINITIVE ARCHITECTURAL FLOOR:** R2/R3 are NOT fixable by STOP-window arithmetic, tlu
+re-anchor (already exact), or block-cost tuning. The residual is that **rustyboi models the HDMA
+block transfer as a synchronous CPU-stall lump, whereas Gambatte runs it as a scheduled
+`intevent_dma` event interleaved with the timer's per-cc advance.** The 1-tick `_3`/`_4` (and
+`_5`/`_6`) bracket is a sub-block-cc TIMA-edge position that only the event-interleaved model
+produces. Closing it requires the per-event scheduler interleave (the block's cc advancing the
+timer/PPU dot-by-dot during the transfer, with the TIMA tick edge landing mid-block) — i.e. the
+MinKeeper-class event scheduler the project notes (`oamdma-dumpers`, "do not port MinKeeper")
+deliberately scoped OUT. This is the true floor for R2 (8) + R3: ~9 cases gated on the
+synchronous-stall→scheduled-event HDMA-transfer model, a scheduler rewrite beyond the
+speedchange/bridge cc.
+
+**Build result:** 0 of ~9 moved; no faithful slice (tlu exact, block-cost can't split same-block
+siblings, paths divergent). flag-OFF byte-identical to main_27; all experiments reverted clean;
+release + debug build clean.
+
+**NEXT-SESSION (if pursued):** the only remaining lever is the HDMA-block event interleave —
+advance the timer/PPU per-cc THROUGH the block transfer (so a TIMA tick can land mid-block)
+instead of charging `pending_dma_stall` as a lump and draining it after. That is a focused but
+real change to `run_hdma_block`/`fire_pending_hdma_mcycle` + the bus stall-drain loop (make the
+block tick peripherals per-cc like Gambatte's `dma()` inner loop does for OAM-DMA). High
+regression risk (every HDMA/GDMA test shares it). Acceptance unchanged: `_3`→F6, `_4`→F7,
+`_6`→F9, `_2`/`_5` intact, R3 mode-3-at-read, m0stat `lineCycle(m0Time)==253`, whole
+speedchange/dma/tima/div family byte-exact.
