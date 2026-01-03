@@ -641,3 +641,25 @@ tests: m0stat `lineCycle(m0Time)==253`, R2 `_3` STOP window == 131112 (Gambatte)
 read == F6, R3 m0Time gap +4. m7's m0stat fix was sliceable ONLY because its specific read had
 the FACET1 carry as a live-state proxy for the residue; R2/R3 have no such proxy and need the
 window cc fixed at the source. flag-OFF byte-identical to main_27; experiments reverted clean.
+
+### Milestone-8b (R3 carry-key check) — CONFIRMED same blocker as R2 (no carry proxy, state-level error)
+Probed `oamdma_late_speedchange_stat_2` (R3) for the m7 carry-key. The deciding post-STOP FF41
+read: `get_stat=Some(0)` (mode 0), **`render_carry_skew_cc=0`**, `state_in_xfer=false` (HBlank).
+- The FACET1 carry key does NOT apply (carry=0), same as R2.
+- The error is STATE-LEVEL: rustyboi's renderer is in HBlank (m0Time already −18 in the past,
+  per m4b) where Gambatte is still in PixelTransfer (mode 3, m0Time +4) — a ~22cc m0Time phase
+  error, far larger than m7's 1 dot. A carry-key (≤1 dot) cannot bridge it.
+- R3 resolves via `get_stat_mode_at_cc` (HBlank path) returning mode 0; extending the m7
+  `stat_read_off` carry subtraction (PixelTransfer mode3to0 path) does nothing here.
+
+R3 is the SAME post-DS→SS STOP-window/bridge cc blocker as R2: the ~22cc residue puts the
+renderer in the wrong mode entirely. No live-state proxy. Needs the bridge cc re-anchor at the
+source (acceptance: post-STOP m0Time gap +4, renderer still in mode 3 at the read).
+
+**SESSION VERDICT:** R1-m0stat fix is on main (m7, →27). R2 (8 brackets) + R3 are ONE deferred
+build — the post-DS→SS STOP-window/bridge cc must be made byte-exact per STOP-timing
+(`opcodes.rs::stop` window arithmetic + `stop_bridge_advance` / `perform_speed_switch`). There
+is NO sliceable per-test live-state key for R2/R3 (carry_skew=0; same-rem opposite-outcome
+siblings) — the residue is upstream in the STOP cc, in both the read cc and the timer/PPU
+anchors, so it cannot be corrected downstream. This is the genuine remaining floor for ~9 of
+the reducible cases; it is the bridge-cc surgery, deliberately multi-session.
