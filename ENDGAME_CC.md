@@ -883,3 +883,55 @@ Remaining default failures = MinKeeper-class event scheduler (R2/R3), DMG halt-b
 (R4), per-pixel renderer history (R5), plus the 16 harness/oracle dumpers. No further sliceable
 live-state key exists in the default suite. flag-OFF byte-identical to main_27; no code changed this
 milestone (audit only); release build clean.
+
+### Milestone-13 (MinKeeper rewrite — increment 1) — BREAKTHROUGH: the m11 block-cc↔tlu "coupling" was an ARTIFACT; the block IS decoupled from tlu
+User authorized pursuing the MinKeeper event-scheduler rewrite. Started with the smallest decoupling.
+First step: re-pin the exact mechanism — and found the m11 conclusion was WRONG.
+
+**The m11 "coupling" was a measurement artifact.** m11 reported that reducing the HDMA block stall
+moved `tlu` (timer DIV anchor) by −16, concluding block-cc is entangled with tlu. But `RB_CANONICAL_CC`
+also enabled the LEFTOVER m1 STOP-window probe (`opcodes.rs:255`), which ALSO consumed
+`RB_CANONICAL_CC_ADJ` and shortened the STOP unhalt window — shifting the unhalt resume and cascading
+into the DIV reset. When I removed that confounding probe and reduced ONLY the block stall:
+- `[DIVRESET] abs_cc=150564` (tlu) stays **FIXED** at adj=0, −6, −8, −10 (was "moving" in m11).
+- `[BLKFIRE]` and the TIMA read cc shift with the block stall, tlu unchanged.
+
+So **the HDMA block cc is ALREADY decoupled from the timer tlu/DIV anchor** in the synchronous model
+(the DIV reset anchors on `abs_cc` at the STOP, which precedes the unhalt block). m8-m11's
+"block-cc↔tlu entanglement = needs MinKeeper" was a false floor. The block stall CAN be changed
+independently of tlu.
+
+**Direct fix progress (block stall, tlu fixed):** TIMA read cc-tlu with the block reduced (tlu=150564
+constant throughout):
+| | adj=0 | adj=−6 (block 36, faithful) | adj=−8 (block 34) | want |
+|---|---|---|---|---|
+| _3 | 131142 → 8196 (F7✗) | 131136 → 8196 (F7, AT edge) | 131134 → **8195 (F6✓)** | F6 |
+| _4 | — | — | 131138 → **8196 (F7✓)** | F7 |
+`_3`/`_4` BOTH land correctly at adj=−8 — proving they ARE splittable (the m9/m10/m11 "same-block
+siblings can't split" was also downstream of the artifact). The TIMA tick edge is at cc-tlu=131136;
+`_3`(131134)<edge→F6, `_4`(131138)≥edge→F7. The faithful block (36, drop the spurious +6
+prefetch-fudge) puts `_3` exactly AT the edge (F7); −8 (block 34) clears it.
+
+**REMAINING SUB-PROBLEM (the real next increment, NOT a floor):** the block-stall gate
+(`halt_wakeup_skew && !hdma_enabled_at_halt`) is too BROAD — it also matches the `hdma_cycles_*_2`
+and `frame*_ly_count`/`m2irq_count` calibration blocks (which are halt-woken but NOT post-STOP and
+DO need the +6 prefetch-fudge for their downstream STAT read). A blanket −8 broke 37. The +6
+`prefetch_fudge` is a CPU-stall artifact (Gambatte's `Interrupter::prefetch` absorbed into the
+synchronous block) that is FAITHFUL for a STAT-read-downstream block but SPURIOUS for a
+TIMA-read-downstream block (`_3`). The synchronous model can't make the block cost depend on the
+downstream read type — which IS the MinKeeper separation: the block should be an event at the pure
+transfer cc (36), and the prefetch (+6) a SEPARATE CPU event, not folded into the block stall.
+
+**INCREMENT-1 RESULT:** the architectural premise is corrected and sharpened — block-cc/tlu are
+already decoupled; `_3`/`_4` are splittable; the true remaining work is **separating the +6
+CPU-prefetch-fudge from the block transfer cc** (make the block a fixed transfer-cc event and the
+prefetch its own event), so the block cost stops depending on the downstream read context. That is a
+focused, real next increment (not the full MinKeeper). No code landed yet (the broad knob breaks the
+calibration tests); flag-OFF byte-identical to main_27; experiments reverted clean.
+
+**NEXT-SESSION increment-2:** at the post-STOP-unhalt block fire, charge the pure transfer cc (36 SS
+/ 68 DS) and route the +6 prefetch-fudge through the CPU-prefetch path INSTEAD of the block stall
+(or gate the fudge on the downstream-read-is-STAT context). Acceptance: `_3`→F6, `_4`→F7 (proven
+reachable at block 34/−8), `_6`→F9, `_2`/`_5` intact, AND `hdma_cycles_*_2`/`frame*_count` stay
+passing (the fudge preserved for their STAT-read path). Then R3 + R4 re-check under the event-exact
+block cc.
