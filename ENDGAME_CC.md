@@ -935,3 +935,61 @@ calibration tests); flag-OFF byte-identical to main_27; experiments reverted cle
 reachable at block 34/−8), `_6`→F9, `_2`/`_5` intact, AND `hdma_cycles_*_2`/`frame*_count` stay
 passing (the fudge preserved for their STAT-read path). Then R3 + R4 re-check under the event-exact
 block cc.
+
+### Milestone-14 (MinKeeper increment 2 — prefetch-fudge separation) — LANDED: `hdma_late_m3speedchange_tima_scx1_ds_3` FIXED (flag-ON net −1, broke 0). MAIN-MERGE CANDIDATE.
+Rebased onto main@0b5d8ff (=26; R5/bgoff per-pixel LCDC.0 landed). Clean rebase, no conflicts.
+flag-OFF re-verified byte-identical to **main_26** (net +0, broke 0). New gate baseline = main_26.
+
+**THE FIX (`mmio.rs::run_hdma_block_inner` stall):** a post-STOP-unhalt HDMA block — Gambatte's
+prefetched `hdma_requested` fired at the speed-switch unhalt — charges ONLY the pure transfer cc
+`16 * (2 + 2*ds)` (= 32 SS / 64 DS), with NEITHER the trailing `+4` NOR the +6 CPU-prefetch fudge.
+Those two are CPU-prefetch artifacts faithful only for a STAT/LY-read-DOWNSTREAM block (the
+`hdma_cycles`/`frame*_count` calibration tests, whose value-read is the immediate post-block read);
+the Requested block's downstream value-read is a TIMA read several instructions later
+(`hdma_late_m3speedchange_tima`), so the fudge pinned it 1 TIMA tick high. **Discriminator:
+`halt_hdma_state == HaltHdmaState::Requested`** — set ONLY by the STOP speed-switch
+prefetched-block path; the plain halt-woken calibration blocks are `Low` and keep `base + fudge`.
+
+**Also removed two refuted dead-end probes** (m1 STOP-window unhalt-cycles in `opcodes.rs`, m2
+getLyReg `to_next` in `controller.rs`) that shared `RB_CANONICAL_CC_ADJ` and CONFOUNDED every
+block-stall measurement — the FALSE "block-cc↔tlu coupling" of m8-m11 was their artifact. Both were
+flag-gated and refuted; flag-OFF unaffected by their removal.
+
+**cctracer proof (`_3`):** Gambatte reads TIMA=**0xF6** (`[INSTR] cc=340104 pc=0x7000 a=0xF6`);
+faithful block 32 gives rustyboi cc-tlu = **131132 == Gambatte exactly** → ticks 8195 → F6. The old
+36+6 stall landed 131142 → 8196 → F7.
+
+**VALIDATION (full suite, main_26):**
+- flag-OFF: byte-identical to main_26 (net +0, broke 0).
+- flag-ON: **net −1, fixed `hdma_late_m3speedchange_tima_scx1_ds_3`, broke 0.**
+- ENV-FREE (guard dropped): same — net −1, broke 0 → main 26→25.
+- Acceptance: `_2`→F4, `_3`→F6, `_4`→F7, `_5`→F8 PASS; `_6` FAIL (separate sub-case, below).
+  Calibration STAY PASSING: `hdma_cycles_2`, `hdma_cycles_ds_2`, `frame0_ly_count_1`,
+  `frame0_m2irq_count_1`, `frame1_ly_count_ds_1` — the `Requested` gate spares them. broke-0 across
+  the whole hdma/gdma/oamdma/dma/speedchange/tima/div/halt family.
+
+**Which of R2(8)/R3/R4 moved:** 1 — `hdma_late_m3speedchange_tima_scx1_ds_3` (R2). `_6` did NOT move
+(`halt_hdma_state == Low`, NOT Requested — it fires via a different path and needs the OPPOSITE
+correction, read 8197→8198). R3 (`oamdma_late_speedchange_stat_2`) and R4 (the dmg halt m0stat ×2)
+did NOT move — they are not the post-STOP-unhalt-block TIMA-read mechanism (R4 is the m12 DMG
+halt-wakeup sub-master-cc floor; R3 is the m4b HBlank-state m0Time phase).
+
+**MAIN-MERGE CANDIDATE — exact env-free diff** (drop the `canonical_cc_enabled()` guard; the
+`Requested` state is real engine state so it is faithful unconditionally):
+```rust
+// in run_hdma_block_inner, replacing `base + prefetch_fudge` as the stall when Requested:
+if matches!(self.halt_hdma_state, HaltHdmaState::Requested) {
+    return 16 * (2 + 2 * self.is_double_speed_mode() as u32);
+}
+base + prefetch_fudge
+```
+Plus the two dead-probe removals (opcodes.rs m1 unhalt-cycles block, controller.rs m2 getLyReg
+`to_next` block) — both already deleted on-branch, both flag-gated/refuted (no behavior change).
+Verified env-free full suite = main_25, broke 0.
+
+**NEXT (`_6`, the Low-state sub-case):** `_6` fires its block via the `Low`/per-dot path (not the
+Requested prefetched path) and needs the read 1 tick LATER (8197→8198) — the OPPOSITE of `_3`. The
+faithful question: does the `Low`-at-unhalt block ALSO drop the +6 fudge (a separate gate), or is
+`_6`'s residual elsewhere (the unhalt-reflag cc)? Audit `_6`'s block fire path + its read cc-tlu vs
+Gambatte. Then the remaining 6 HDMA brackets (`hdma_late_ei`, `hdma_m0speedchange`,
+`hdma_transition` ×4) are EI-service / m3wakeup / multi-block mechanisms — separate audits.
