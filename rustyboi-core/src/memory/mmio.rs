@@ -1998,24 +1998,6 @@ impl Mmio {
             return 16 * (2 + 2 * self.is_double_speed_mode() as u32);
         }
         let base = if self.is_double_speed_mode() { 68 } else { 36 };
-        // ENDGAME R2 (RB_CANONICAL_CC): a post-STOP-unhalt HDMA block — Gambatte's
-        // prefetched `hdma_requested` fired at the speed-switch unhalt — charges only
-        // the PURE transfer cc (16 bytes * (2 + 2*ds) = 32 SS / 64 DS), with NEITHER
-        // the trailing `+4` NOR the +6 CPU-prefetch fudge. Those two are CPU-prefetch
-        // artifacts faithful only for a STAT-read-DOWNSTREAM block (the `hdma_cycles`/
-        // `frame*_count` calibration tests, whose read is the immediate post-block
-        // STAT/LY read); the Requested block's downstream value-read is a TIMA read
-        // several instructions later (hdma_late_m3speedchange_tima), so the fudge
-        // pins it 1 TIMA tick high. cctracer (`_3`): faithful read cc-tlu == 131132
-        // == Gambatte (8195 = F6); the 36+6 stall lands 131142 (8196 = F7). Gated on
-        // `halt_hdma_state == Requested`, set ONLY by the STOP speed-switch
-        // prefetched-block path (the plain halt-woken calibration blocks are `Low`),
-        // so the STAT/LY-downstream blocks keep the full `base + fudge`.
-        if crate::cpu::bus::canonical_cc_enabled()
-            && matches!(self.halt_hdma_state, HaltHdmaState::Requested)
-        {
-            return 16 * (2 + 2 * self.is_double_speed_mode() as u32);
-        }
         base + prefetch_fudge
     }
 
