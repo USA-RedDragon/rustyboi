@@ -993,3 +993,43 @@ faithful question: does the `Low`-at-unhalt block ALSO drop the +6 fudge (a sepa
 `_6`'s residual elsewhere (the unhalt-reflag cc)? Audit `_6`'s block fire path + its read cc-tlu vs
 Gambatte. Then the remaining 6 HDMA brackets (`hdma_late_ei`, `hdma_m0speedchange`,
 `hdma_transition` ×4) are EI-service / m3wakeup / multi-block mechanisms — separate audits.
+
+### Milestone-15 (R2 continuation: `_6` root + bracket survey) — `_6` needs the tlu/STOP-anchor lever (NOT a block slice); other 6 brackets are distinct mechanisms
+Rebased onto main@5b125c6 (=25; m14 Requested-block fix landed env-free). Dropped the m14
+flag-gated dup (took main's unconditional version). flag-OFF re-verified byte-identical to **main_25**
+(net +0, broke 0).
+
+**`_6` (`hdma_late_m3speedchange_tima_scx1_ds_6`) — ROOT FOUND, but it is the tlu/STOP-anchor, not
+a block-cost slice.** Differential (`_5` passes F8, `_6` wants F9, +1 NOP apart, both `halt_hdma_state
+== Low`):
+- `_5`: read cc-tlu=131158 → 8197 (F8 ✓); `_6`: cc-tlu=131162 → 8197 (wants 8198/F9).
+- The TIMA tick edge is at cc-tlu=131168 (8198*16). Both reads sit below it; rustyboi's edge is
+  ~6cc too HIGH. Gambatte's `_5`/`_6` reads are ALSO +4 apart (push-af 340128→340132) but Gambatte's
+  edge falls BETWEEN them — i.e. **rustyboi's `tlu` is ~6cc too high**, putting the edge above both.
+- **Found a clean discriminator** (`halt_hdma_state == Low && key1_switch_armed`) that separates
+  `_6`'s pre-STOP block from the identical-context `hdma_cycles_ds_2` calibration block (which has
+  `key1_armed=false`). BUT dropping the block's +6 fudge moved the READ 6cc EARLIER (cc-tlu
+  131162→131156) — the WRONG direction. `_6` needs cc-tlu HIGHER (read later / tlu lower), and the
+  block fires too late to feed the DIV reset (block@150565, DIV-reset@150568, 3cc apart; the block's
+  stall drains as `pending_dma_stall` AFTER, not before the reset). So the block-cost lever cannot
+  fix `_6`.
+- `_6`'s real lever is **lowering `tlu` by 6** — i.e. the STOP DIV-reset anchor (`stop_div_reset` →
+  `tlu = abs_cc` at the STOP). That requires abs_cc at the STOP to be 6 lower = the STOP-window /
+  DS→SS-bridge cc, which is SHARED with many passing speedchange tests (the deferred high-risk bridge
+  lever from m6/m9). `_6` is NOT a block-local slice like `_3`; it is the bridge-cc anchor. Deferred.
+
+**Other 6 brackets — distinct mechanisms (surveyed, none is the `_3` block-cost slice):**
+- `hdma_m0speedchange_late_m3wakeup_scx1_2` / `scx2_2` (out00): m3-wakeup reflag, FF55/screen read.
+- `hdma_transition_ei_halt_late_unhalt_ldaaimm_hdma_scx1_1` / `_2` / `hdma_transition_halt_late_unhalt
+  _ldaaimm_hdma_scx1_1` (out00/02): EI-service / multi-block unhalt (FF55/PC reads).
+- `hdma_late_ei_m3halt_m2unhalt_pc_scx1_2` (outAD): m2-unhalt EI, PC read.
+These read FF55/PC/screen at the unhalt, not a TIMA tick — their residual is the unhalt-reflag /
+m2-service cc (the `hdma-unhalt-bracket-floor` memory note), not the post-block transfer cc. Each
+needs its own audit; they do NOT share `_3`'s clean `Requested`-block discriminator.
+
+**SESSION RESULT:** `_3` (m14) is the clean extractable R2 win (on main, 26→25). `_6` root pinned to
+the tlu/STOP-anchor (bridge-cc, deferred high-risk). The other 6 brackets are unhalt-service-cc
+mechanisms (separate). No new clean block-context slice found this session beyond `_3`. flag-OFF
+byte-identical to main_25; no flag-ON change landed (the `_6` block lever was the wrong direction,
+reverted). The remaining R2 brackets converge on the STOP-window/bridge cc + unhalt-service cc —
+the levers the campaign has repeatedly flagged as shared/high-risk, now confirmed for `_6` too.
