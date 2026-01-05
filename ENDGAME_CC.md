@@ -1179,3 +1179,56 @@ of A/B. R3 stays a getStat/m0Time-phase case (the deferred bridge-cc lever, same
 3. **sub-master-cc floors** (byte-identical / 1cc straddle): R2 group C (1) + R4 (2 dmg) = 3 cases.
 No clean per-context slice remains; `_3` (m14, landed) was the only block-local one. flag-OFF
 byte-identical to main_25; disambiguation audit only, no code landed.
+
+### Milestone-19 (BUILD attempt: during-halt block fire) — CORRECTS m18: it is the PPU-mode/m0Time phase (R3 family), NOT transfer-completion; and the m0Time/read-cc is co-tuned (no clean slice)
+Built the during-halt Requested-block fire (m18's prescription: fire the multi-block transfer during
+the halt window so the byte is in VRAM before the resume read). It worked mechanically (block fired at
+12296, byte committed, resume read got the transferred byte) — but the test STILL FAILED, which
+exposed that **m18's verdict was WRONG.**
+
+**The m18 error: cctracer's a=0x02 was a NON-CGB-oracle value.** The CGB oracle for
+`hdma_transition_halt_late_unhalt_ldaaimm_hdma_scx1_1` is **out00** (want 0x00), NOT 0x02. So `_1`'s
+resume `ld a,(0x80FA)` should read **0x00**, not the transferred byte. flag-OFF rustyboi: the raw VRAM
+byte at 0x80FA IS already 0x00 (the transfer hasn't reached it / it's pre-transfer), but rustyboi
+returns **0xFF because the PPU is mode-3-LOCKED** at the read. **The fix is to UNLOCK the read (mode 0
+→ returns the raw 0x00), NOT to fire the block early.** This is the PPU-mode-at-cc phase — m18's
+"dma-transfer-completion" reading is REFUTED; the during-halt fire is the wrong lever (it made the
+read see the transferred byte where the test wants the pre-transfer 0x00).
+
+**The lock decision (traced):** `_1`'s resume VRAM read at cc=12310 resolves `get_stat=Some(3)`
+(PixelTransfer/locked) with `m0_time_master = 12333` (mode-3→0 boundary). `ended = cc_end+2 >= m0t`
+→ `12313 < 12333` → not ended → locked → returns 0xFF. Gambatte has this read in **mode 0** (unlocked,
+returns 0x00 = out00). So **rustyboi's m0Time (12333) is ~20cc too LATE** at this halt-woken read — the
+mode-3 window over-extends. The passing sibling `_2` reads 84cc later (cc=12394, get_stat=mode 0,
+unlocked, returns 0x02). The `+6` halt-woken VRAM read-cc bias (`vram_read_cc = pre_cc + 6`) is already
+applied; `_1` needs ~+20 more to land past m0Time.
+
+**Why it's NOT a clean slice (the co-tuning):** sweeping the halt-woken VRAM read-cc bias — adj=+20
+fixes `_1` (mode-3→0 crossed) but **broke 6** on the full suite: `hdma_late_disable/enable_ds`,
+`hdma_late_enable_ds_lcdoffset1`, `oamdmasrc80_halt_m2irq_read8000` (dmg+cgb). These are OTHER
+halt-woken VRAM reads calibrated to the existing `+6` bias / the shared `m0_time_master`. The
+read-cc-vs-m0Time phase is **co-tuned across the halt+VRAM family** — exactly the mixed-anchors wall.
+The +20 is a tuned constant, not a faithful derivation, and it only fixed 1 of the 3 group-A cases
+(the EI variants read via a different IME-on service path). REVERTED.
+
+**CORRECTED VERDICT — group A (and B) is the PPU-mode-at-resume-cc / m0Time phase, R3's family:**
+- It is NOT the dma-transfer-completion cc (the transferred byte presence is irrelevant; the byte at
+  the read is the right value, the LOCK is wrong). m18's during-halt-fire build is the wrong lever.
+- It is the **m0Time / mode-3→0 boundary at the halt-woken read** being ~20cc too late vs Gambatte —
+  the SAME shared `m0_time_master` / read-cc-bias the whole halt+VRAM family is co-tuned to. Shifting
+  it (the only sliceable knob, the read-cc bias) breaks the calibrated siblings. This is the deferred
+  **m0Time-phase / bridge-cc lever** (R3, `_6`'s tlu) — confirmed to also govern these VRAM-read
+  brackets, NOT the event-interleaved `dma()`.
+
+**Consolidated remaining-default roots (REVISED after m19):** the 5 brackets (A 3 + B 2) are NOT the
+event-interleaved `dma()` — they are the **m0Time/getStat-phase at the halt-woken read** (the read
+locks mode-3 where Gambatte has mode-0), the SAME root as R3 and `_6`'s tlu. So the consolidated map
+is now just TWO deep levers:
+1. **post-DS→SS / halt-woken m0Time-phase + read-cc** (the shared `m0_time_master` / VRAM-readable /
+   getStat boundary, co-tuned across the halt+VRAM+speedchange family): R2 group A (3) + B (2) + `_6`
+   + R3 = **7 cases**. The only knob (read-cc bias) is co-tuned → needs the faithful m0Time re-derivation
+   (the deferred bridge-cc/m3-length build), not a constant.
+2. **sub-master-cc floors** (byte-identical / 1cc straddle): R2 group C (1) + R4 (2) = **3 cases**.
+m18's "event-interleaved `dma()`" lever is RETRACTED — proven the wrong root by this build. flag-OFF
+byte-identical to main_25; the during-halt-fire and read-cc-bias experiments both reverted; no code
+landed.
