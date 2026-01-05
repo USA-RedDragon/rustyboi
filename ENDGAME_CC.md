@@ -1232,3 +1232,54 @@ is now just TWO deep levers:
 m18's "event-interleaved `dma()`" lever is RETRACTED — proven the wrong root by this build. flag-OFF
 byte-identical to main_25; the during-halt-fire and read-cc-bias experiments both reverted; no code
 landed.
+
+### Milestone-20 (m0Time re-derivation attempt) — ROOT NAILED + m19 RE-CORRECTED: the m0Time is FAITHFUL; the PPU is UNDER-ADVANCED because the HDMA block stall does not tick the PPU in lockstep. The fix IS the event-interleaved `dma()` (m18's lever re-instated).
+Tried to re-derive the halt-woken `m0_time_master` faithfully (m19's prescription). The diagnostic
+REFUTED m19's "m0Time too late" framing and nailed the true mechanism.
+
+**Step-by-step chronology for `hdma_transition_halt_late_unhalt_ldaaimm_hdma_scx1_1` (`_1`, FAIL):**
+- cc=12296: the late interrupt becomes pending → unhalt. The FA (`ld a,(0x80FA)`) resume begins.
+- cc=12297: HDMA **block 1** fires via the m0-edge (mid-FA, during its operand tick), dest 0x80E0,
+  queues a **36cc transfer stall** into `pending_dma_stall`.
+- cc=12310: the FA reads **0x80FA** — `ppu_ticks=228` (lineCycle 228), **`stall_pending=36`** (block 1's
+  stall is STILL queued, has NOT advanced the PPU). getStat→mode 3 → locked → 0xFF.
+- cc=12312: the NEXT `step()` finally takes the 36cc stall and ticks the PPU — but the FA already read.
+- cc=12332: block 2 fires (writes 0x80FA=0x02), irrelevant — the read already happened.
+
+Gambatte at the resume read: **lineCycle 284, LY=2** (deep in mode 0, unlocked → reads the
+pre-transfer 0x00 = out00). rustyboi: **lineCycle 228** — **56 dots behind**, because block 1's
+36cc transfer cycles have NOT advanced the PPU before the same-instruction read.
+
+**THE TRUE ROOT (re-corrects both m18 and m19):** rustyboi charges the HDMA block's transfer cc as a
+SEPARATE CPU stall (`pending_dma_stall`) that the PPU catches up on at a LATER `step()` — it does NOT
+advance the PPU in lockstep with the transfer. Gambatte's `intevent_dma` advances ALL peripherals
+(incl. the PPU) through the transfer cc as it runs, so by the time the resume instruction reads, the
+PPU line is already extended. The `m0_time_master` (12333) is FAITHFUL for the PPU's ACTUAL (un-
+advanced, lineCycle-228) position — it is NOT too late; the **PPU is under-advanced**. m19's "re-derive
+m0Time" is the wrong fix; m18's **event-interleaved `dma()` IS the right lever** (re-instated) — but
+not the byte-commit timing (m18's error): the block's TRANSFER CYCLES must advance the PPU (and timer)
+mid-instruction, between the m0-edge fire and the subsequent same-instruction read.
+
+**Why a pre-resume stall drain doesn't work (tested):** I added an `unhalt_drain_stall` to tick the
+pending stall into the PPU before the resume `execute`. At that point (cc=12296, op=FA) the
+**pending_stall=0** — block 1 fires at 12297, DURING the FA's tick, AFTER the drain point. So the stall
+isn't queued yet at any pre-execute hook. The block fires mid-instruction (at its m0-edge dot), and its
+cc must advance the PPU right there, in the per-dot crank — i.e. `step_hdma` must apply the block's
+transfer cc to the PPU/timer in lockstep, not queue it as a deferred CPU stall. That is the
+event-interleaved transfer model (the `resolve_one_dot` loop would advance the PPU through the block's
+36 dots when the block fires), a structural change to `run_hdma_block`/`step_hdma`/`pending_dma_stall`.
+Reverted (no clean hook exists at the CPU-step granularity).
+
+**DEFINITIVE VERDICT for the 5 brackets (A 3 + B 2):** they need the **event-interleaved HDMA `dma()`**:
+when a block fires (m0-edge or unhalt), its transfer cc must advance the PPU/timer dot-by-dot IN
+LOCKSTEP (so a same-instruction or near read sees the extended line), instead of being queued as a
+`pending_dma_stall` the PPU catches up on later. This is the deferred MinKeeper-class transfer model
+(m10/m11), now PROVEN at dot precision to be the irreducible root — NOT the m0Time derivation (faithful
+already), NOT a read-cc bias (co-tuned), NOT the byte-commit timing. The blast radius is the entire
+HDMA/GDMA stall path (every transfer test), so it is a dedicated deep build.
+
+`_6` (tlu) and R3 (FF41 m0Time phase) are SEPARATE (the post-DS→SS bridge-cc / m0Time, not the
+block-stall-PPU-lockstep): the consolidated map is now THREE roots: (1) **event-interleaved `dma()`**
+= A(3)+B(2) = 5; (2) **post-DS→SS bridge-cc/m0Time** = `_6`+R3 = 2; (3) **sub-master-cc floors** =
+C(1)+R4(2) = 3. flag-OFF byte-identical to main_25; the m0Time-re-derivation and pre-resume-drain
+experiments both reverted; no code landed.
