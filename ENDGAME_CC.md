@@ -1136,3 +1136,46 @@ only); these read VRAM/FF55/PC where the block's transfer-completion/lock cc (no
 matters — needs the event-interleaved `dma()` (the deferred MinKeeper transfer model), not a
 per-context block-cost slice. No clean slice exists. flag-OFF byte-identical to main_25; the
 resume-PC fix was reverted (wrong direction); audit only, no code landed.
+
+### Milestone-18 (DISAMBIGUATION) — VERDICT: it is the dma-transfer-completion cc, NOT the PPU-mode phase. The 6 brackets need the event-interleaved `dma()` build (deep). R3 is a SEPARATE m0Time-phase root.
+The decisive open question from m17: is the resume-read 0xFF the PPU-mode-at-cc phase (tractable
+getStat-style slice) or the dma-transfer-completion cc (deep)? **Traced both at the resume read of
+`hdma_transition_halt_late_unhalt_ldaaimm_hdma_scx1_1` (`ld a,(0x80FA)`, FAIL want 0x02):**
+
+| | resume read cc | PPU locked? | raw VRAM byte @ 0x80FA | block fires @ | byte commits @ |
+|---|---|---|---|---|---|
+| _1 (FAIL) | 12310 | **true** | **0x00** | 12332 | 12334 |
+| _2 (pass) | 12394 | false | **0x02** | 12332 | 12334 |
+
+**DECISIVE: the HDMA block fires (12332) and commits 0x80FA (12334) AFTER `_1`'s resume read (12310).**
+At `_1`'s read the transferred byte 0x02 is NOT in VRAM (raw=0x00) — so even unlocking the PPU mode
+would yield 0x00, not the wanted 0x02. The PPU-mode-phase fix is IRRELEVANT here. The block fire/commit
+cc is IDENTICAL (12332/12334) for `_1` and `_2`; the only difference is the resume read cc (the 1-byte
+`.text` shift moves `_1`'s read 84cc earlier, BEFORE the block fires). Gambatte's `intevent_dma` fires
+DURING the halt window (before the unhalt resume), so the byte is already in VRAM at the resume read;
+rustyboi's synchronous block fires at the UNHALT (after the resume instruction already read), 22cc too
+late. **This is the dma-transfer-completion / block-fire-during-halt cc** — confirmed, not the PPU mode.
+
+**Verdict for the 6 unhalt-service brackets:**
+- **Group A (3) + Group B (2): the dma-transfer-completion cc** — rustyboi fires the HDMA block at the
+  unhalt (after the resume read / FF55 read), where Gambatte fires `intevent_dma` DURING the halt window
+  so the transfer is complete before the resume reads it. The resume VRAM/FF55 read sees stale state.
+  NO PPU-mode slice exists (the transferred byte/length isn't updated yet). These need the
+  **event-interleaved `dma()` build**: the block must fire as a scheduled event DURING the 0x20000 halt
+  window (before `intevent_unhalt` resumes the CPU), so its writes/length-decrement land before the
+  resume read. This is the deferred MinKeeper-class transfer model (m10/m11/m17), now PROVEN to be the
+  precise lever for these 5 cases — not a getStat phase, not a block-cost constant.
+- **Group C (1): m2-service-vs-block-push PC straddle** — 1cc sub-master-cc floor (unchanged).
+
+**R3 re-check under the same lens — SEPARATE root, NOT shared.** `oamdma_late_speedchange_stat_2` reads
+**FF41 (STAT mode)** at `.text@10df` (`ldff a,(41)`), NOT VRAM or a transferred byte — there is no HDMA
+block-completion involved. R3 is purely the **PPU-mode-at-cc / m0Time phase** across the speed switch
+(m4b's −18-vs-+4 m0Time = the SS→DS bridge-cc phase). It does NOT share the dma-transfer-completion root
+of A/B. R3 stays a getStat/m0Time-phase case (the deferred bridge-cc lever, same as `_6`'s tlu).
+
+**CONSOLIDATED remaining-default roots (3 distinct deep levers):**
+1. **event-interleaved `dma()`** (block fires during the halt window): R2 group A (3) + B (2) = 5 cases.
+2. **post-DS→SS bridge-cc / m0Time-tlu phase**: R2 `_6` (tlu) + R3 (m0Time STAT read) = 2 cases.
+3. **sub-master-cc floors** (byte-identical / 1cc straddle): R2 group C (1) + R4 (2 dmg) = 3 cases.
+No clean per-context slice remains; `_3` (m14, landed) was the only block-local one. flag-OFF
+byte-identical to main_25; disambiguation audit only, no code landed.
