@@ -689,6 +689,17 @@ impl<'a> Bus<'a> {
         if self.ppu_locks_access(addr, vram_read_cc) {
             return 0xFF;
         }
+        // ENDGAME m25 (RB_CANONICAL_CC): a VRAM read inside the HALT-bug resume
+        // window of an in-block dest byte observes the PRE-transfer value — the
+        // resume read is ordered before dma()'s dest commits (Gambatte
+        // `Interrupter::prefetch(cc)` before `dma(cc)`). The mode-readability gate
+        // above still applies (mode-3 -> 0xFF); a mode-0 readable read returns the
+        // old byte (0x00) the just-fired block has not yet committed.
+        if (0x8000..=0x9FFF).contains(&addr) {
+            if let Some(pre) = self.mmio.hdma_resume_pre_byte(addr) {
+                return pre;
+            }
+        }
         if let Some(v) = apu_read {
             return v;
         }
