@@ -126,6 +126,20 @@ impl SM83 {
                 match mmio.halt_hdma_state() {
                     memory::mmio::HaltHdmaState::Requested => {
                         mmio.set_hdma_req();
+                        // ENDGAME R2 (RB_CANONICAL_CC): a multi-block Requested
+                        // transfer (hdma_length() != 0) does NOT inline-fire at unhalt
+                        // (gated off below); its first block fires on its m0 edge
+                        // DURING the resume instruction. Arm the lockstep window so the
+                        // bus advances the world through that block's transfer cc at
+                        // fire time (event-interleaved dma()), so the same-instruction
+                        // resume read sees the extended mode-3 line. Cleared when the
+                        // resume instruction completes.
+                        if crate::cpu::bus::canonical_cc_enabled()
+                            && !self.registers.ime
+                            && mmio.hdma_length() != 0
+                        {
+                            mmio.set_hdma_resume_lockstep_window(true);
+                        }
                         // per-access STAGE 2 (FACET 3): the Requested-held block is
                         // about to fire at unhalt. Arm the sub-block-cc consume so
                         // the next-line m0 edge that re-arms the following block is
@@ -325,6 +339,7 @@ impl SM83 {
             self.prefetched = false;
             cycles += self.execute(op, mmio);
             self.apply_ime_delay();
+            mmio.set_hdma_resume_lockstep_window(false);
             return cycles;
         }
 

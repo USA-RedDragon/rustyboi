@@ -213,9 +213,50 @@ impl<'a> Bus<'a> {
                 self.dot = self.dot.wrapping_add(span as u32);
                 self.ticked += span as u32;
             } else {
+                let stall_before = if crate::cpu::bus::canonical_cc_enabled() {
+                    self.mmio.peek_dma_stall()
+                } else {
+                    0
+                };
                 self.resolve_one_dot();
                 self.dot = self.dot.wrapping_add(1);
                 self.ticked += 1;
+                // ENDGAME R2 (RB_CANONICAL_CC): event-interleaved HDMA transfer. A
+                // block that just fired in `step_hdma` queued its transfer cc as
+                // `pending_dma_stall` (the CPU pays it at a LATER step, so the PPU
+                // catches up only then — m20: the resume read sees the un-advanced
+                // lineCycle, mode-3-locked). Gambatte's `intevent_dma` advances ALL
+                // peripherals through the transfer cc in lockstep at fire time. Tick
+                // the world through the just-queued transfer NOW (consuming the
+                // stall) so the same-instruction resume read after the block observes
+                // the extended line. Scoped to `hdma_resume_lockstep_window` — armed
+                // only at a Requested-context (multi-block) IME-off HALT-bug unhalt, so
+                // normal m0-edge / GDMA-calibration / late_hdma_vs_* blocks keep the
+                // proven deferred-stall path (lockstep-ing ALL of them regresses +28).
+                // m21 NOTE: this lockstep is faithful and corrects the block-transfer
+                // read timing (group A `_1` first-tile mismatch clears), but the 5
+                // scx brackets it targets retain a SECOND-tile residual = the scx
+                // first-tile mode-3 render phase (the deferred renderer rebase), so it
+                // lands net-0/broke-0 alone — see ENDGAME_CC.md m21.
+                if crate::cpu::bus::canonical_cc_enabled()
+                    && self.mmio.hdma_resume_lockstep_window()
+                {
+                    let stall_after = self.mmio.peek_dma_stall();
+                    let delta = stall_after.saturating_sub(stall_before);
+                    if delta > 0 && std::env::var("RB_CC_AUDIT").is_ok() {
+                        eprintln!("[LOCKSTEP] cc={} delta={}", self.mmio.master_cc(), delta);
+                    }
+                    if delta > 0 {
+                        self.mmio.reduce_dma_stall(delta);
+                        self.mmio.set_hdma_lockstep_active(true);
+                        for _ in 0..delta {
+                            self.resolve_one_dot();
+                            self.dot = self.dot.wrapping_add(1);
+                            self.ticked += 1;
+                        }
+                        self.mmio.set_hdma_lockstep_active(false);
+                    }
+                }
             }
         }
     }

@@ -1283,3 +1283,47 @@ block-stall-PPU-lockstep): the consolidated map is now THREE roots: (1) **event-
 = A(3)+B(2) = 5; (2) **post-DS→SS bridge-cc/m0Time** = `_6`+R3 = 2; (3) **sub-master-cc floors** =
 C(1)+R4(2) = 3. flag-OFF byte-identical to main_25; the m0Time-re-derivation and pre-resume-drain
 experiments both reverted; no code landed.
+
+---
+
+## m21 — event-interleaved HDMA lockstep BUILT; residual is the scx1 first-tile renderer phase (NOT block-transfer cc)
+
+**Built (flag-gated, RB_CANONICAL_CC):** the event-interleaved HDMA block transfer. When a block fires
+in the per-dot crank (`step_hdma` inside `resolve_one_dot`), `run_to_min_event` (bus.rs) now detects the
+just-queued `pending_dma_stall` delta and advances the world (PPU + timer) dot-by-dot through that
+transfer cc IN LOCKSTEP at the fire point — `reduce_dma_stall(delta)` then loop `resolve_one_dot()`
+`delta` times under `hdma_lockstep_active` (which suppresses `step_hdma` re-arm during the advance).
+This is exactly Gambatte's `intevent_dma` (advance all peripherals through the transfer cc), not the
+deferred `pending_dma_stall` the PPU caught up on later.
+
+**Gate (`hdma_resume_lockstep_window`):** armed at unhalt ONLY for the Requested-context multi-block
+transfer (`HaltHdmaState::Requested && !ime && hdma_length() != 0` — the IME-off HALT-bug resume whose
+first block is gated OFF from the inline-fire at sm83.rs:217 and so fires on its m0-edge DURING the
+resume instruction). Cleared when the resume instruction completes. WITHOUT this gate (lockstep ALL
+fired blocks) the full suite regressed +28 (broke 30 normal m0-edge / GDMA-calibration / late_hdma_vs_*
+blocks, fixed 2) — confirming the lockstep is correct ONLY for the halt-resume block; normal blocks keep
+the proven deferred-stall path. WITH the `!ime` gate: **flag-ON net +0, broke 0; flag-OFF byte-identical
+to main_25.**
+
+**Why it lands net-0 (the real residual, MEASURED):** the lockstep IS faithful and demonstrably
+corrects the block-transfer/read timing — for group A `hdma_transition_halt_late_unhalt_ldaaimm_hdma_scx1_1`
+(out00) the render mismatch moves from **tile 0** (OFF: 15 px, bounds x=7..7 — first digit wrong) to
+**tile 1** (ON: 9 px, bounds x=9..15 — first digit now CORRECT, second digit wrong). The lockstep fixes
+the FIRST tile; the residual is the SECOND tile / low-nibble digit under scx1. Group B
+`hdma_late_ei_m3halt_m2unhalt_pc_scx1_2` (outAD) mismatches identically at **tile 1 (D)** — high nibble
+'A' correct, low nibble 'D' wrong. ALL 5 brackets are `scx1`/`scx2` cases; the irreducible residual is
+the **scx first-tile mode-3 render phase** (the deferred mode-3-length/m0Time renderer rebase noted in
+[[scx-during-m3-plus2cgb]] / [[m3len-is-cpu-phase-not-renderer]]), NOT the block-transfer cc (now
+faithful) and NOT a read-cc bias.
+
+**VERDICT:** the m21 task's premise ("the block-transfer lockstep is the lever for the 5 brackets") is
+HALF-confirmed: the lockstep is the necessary, correct mechanism and it fixes the data-read timing
+(first tile), but it CANNOT land the 5 brackets alone — each is blocked by the scx first-tile renderer
+phase residual. Without the gate the lockstep 1-for-1 swaps render phases (the no-`!ime` run: fixed
+`ei_..._ldaaimm_scx1_2`, broke `ei_..._scx1_1` — a pure scx render-phase swap). The `!ime`-gated
+lockstep is committed as the faithful prerequisite mechanism (net-0/broke-0/flag-OFF-identical); the 5
+brackets now require the coupled **scx-first-tile mode-3 render rebase** as the FINAL co-land, on top of
+this lockstep. Three-root map updated: (1) event-interleaved `dma()` lockstep — **BUILT (m21)**, gated
+behind the renderer rebase; (2) post-DS→SS bridge-cc/m0Time = `_6`+R3 = 2; (3) sub-master-cc floors =
+C(1)+R4(2) = 3. The 5 brackets fold into a new root (4): **scx first-tile mode-3 render phase** (couples
+with the m21 lockstep).
