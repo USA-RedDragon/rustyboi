@@ -1415,3 +1415,41 @@ The resume `ld a,(0080)` is a DMA-bus-conflict read whose exposed byte is cycle-
 (unhooked) and find why its DMA-conflict-exposed byte is 0x02 where untraced Gambatte's is 0x00 —
 whether the HALT-bug read address, the in-flight HDMA source-pointer phase, or the conflict model
 itself. This composes with the committed m21 lockstep (high nibble already correct).
+
+---
+
+## m24 — PINPOINTED: the resume HALT-bug read is VRAM[0x80FA]; needs mode-0-readable + pre-write byte (interleaved transfer write timing)
+
+**The read is a VRAM read, not ROM.** rustyboi's `ld_a_memory_imm_16` at the resume executes with
+pc=0x1187 (HALT-bug: PC not advanced past the FA opcode), so it reads operand low=read(0x1187)=0xFA,
+high=read(0x1188)=0x80 -> **addr=0x80FA** (VRAM), NOT 0x0080. The HDMA block (src=0x0000, dest=0x80E0,
+16 bytes) writes ROM[0x1A]=0x02 to VRAM 0x80FA (0x80E0 + 0x1A = 0x80FA).
+
+**Three states at the resume read of VRAM[0x80FA] (traced, unhooked):**
+| reference | read cc | PPU mode | VRAM[0x80FA] | a |
+|---|---|---|---|---|
+| flag-OFF | 12312 | **3** (locked) | 0x00 | **0xFF** (open-bus) |
+| flag-ON (m21 lockstep) | 12378 | **0** (readable) | 0x02 (block written) | **0x02** |
+| **Gambatte (correct)** | — | **0** (readable) | **0x00** (pre-write) | **0x00** |
+
+So the correct answer needs BOTH: (1) PPU in mode 0 so VRAM is READABLE (not 0xFF) — the m21 lockstep
+already achieves this (mode 3 -> 0); AND (2) VRAM[0x80FA] still holding its PRE-write value 0x00 — the
+HDMA block's write to offset 0x1A must NOT have landed by the read cc.
+
+**Root:** the m21 lockstep advances the PPU mode AND completes the ENTIRE block write synchronously at
+fire (cc 12297), so by the read (12378) VRAM[0x80FA] is already 0x02. Gambatte's `dma()` interleaves
+the per-byte writes across the transfer cc (and orders the CPU prefetch/read at the dma-event cc BEFORE
+the dest write), so at the read the destination byte 0x80FA is still pre-write 0x00 even though the PPU
+line has advanced to mode 0.
+
+**Existing partial mechanism:** bus.rs `fetch_opcode` has a `dma_prefetch_shadow` that returns the
+PRE-transfer byte for a PC-in-DMA-dest OPCODE FETCH of the FIRST dest byte (late_gdma_pc_7ffe). It does
+NOT cover (a) DATA reads (`ld a,(nn)` via `read`, deliberately post-transfer per its own comment) nor
+(b) non-first dest bytes (we read offset 0x1A, not 0x00). 
+
+**FIX DIRECTION (m25):** model the HDMA block transfer's per-byte WRITE timing — each dest byte written
+at its cc within the transfer (interleaved), decoupled from the PPU-mode lockstep — so a CPU read of a
+not-yet-written dest byte during/after the lockstep sees the pre-write value while the PPU is mode-0
+readable. Equivalently: order the resume read's VRAM resolution at the dma-event cc BEFORE the block's
+dest writes for the bytes past the read point. This composes with the m21 lockstep (mode advance) — the
+two together should land a=0x00. The 5 are FIXABLE (m23); this is the precise remaining lever.
