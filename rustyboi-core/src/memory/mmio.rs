@@ -328,6 +328,22 @@ pub struct Mmio {
     #[serde(skip, default)]
     cpu_halted: bool,
 
+    // ENDGAME R2 (RB_CANONICAL_CC): true while the bus is advancing the world in
+    // lockstep through an HDMA block's transfer cc (the event-interleaved dma()).
+    // While set, `step_hdma` must NOT fire/arm a new block (the lockstep advance
+    // only ticks timer/PPU through the in-flight transfer; the next m0-edge is
+    // handled by the normal per-dot crank after the lockstep).
+    #[serde(skip, default)]
+    hdma_lockstep_active: bool,
+
+    // ENDGAME R2: armed at a Requested-context (multi-block) HDMA unhalt so the
+    // per-dot lockstep advance (run_to_min_event) applies ONLY to the block that
+    // fires during the resume instruction (the m21 5-bracket lever), not to the
+    // normal m0-edge / GDMA-calibration blocks (which keep the deferred-stall
+    // path). Cleared when the resume instruction completes.
+    #[serde(skip, default)]
+    hdma_resume_lockstep_window: bool,
+
     // CGB STOP speed-switch unhalt window. Gambatte's `Memory::stop` calls
     // `intreq_.halt()` for the 0x20000-cycle unhalt window, so the HDMA
     // period-edge `flagHdmaReq` is suppressed during the bridge + window
@@ -613,6 +629,8 @@ impl Mmio {
             hdma_prev_stat_mode: 0,
             hdma_prev_period: false,
             cpu_halted: false,
+            hdma_lockstep_active: false,
+            hdma_resume_lockstep_window: false,
             in_stop_window: false,
             hdma_block_done_this_period: false,
             hdma_halt_edge_consumed: false,
@@ -2172,6 +2190,12 @@ impl Mmio {
         if !self.cgb_features_enabled {
             return;
         }
+        // ENDGAME R2: while ticking the world in lockstep through an in-flight
+        // block transfer, do not arm/fire another block (the per-dot crank handles
+        // the next m0-edge after the lockstep completes).
+        if self.hdma_lockstep_active {
+            return;
+        }
 
         let lcdc = self.io_registers.read(ppu::LCD_CONTROL);
         let lcd_on = lcdc & (ppu::LCDCFlags::DisplayEnable as u8) != 0;
@@ -2440,6 +2464,30 @@ impl Mmio {
     /// STAT-read bias (unlike `take_dma_stall`).
     pub fn peek_dma_stall(&self) -> u32 {
         self.pending_dma_stall
+    }
+
+    /// ENDGAME R2: mark/unmark the lockstep-transfer-advance window (suppresses
+    /// `step_hdma` block arm/fire while the bus ticks the world through the
+    /// in-flight block's transfer cc).
+    pub fn set_hdma_lockstep_active(&mut self, v: bool) {
+        self.hdma_lockstep_active = v;
+    }
+
+    /// Whether the CPU is in a HALT or STOP window (the block fires during the halt;
+    /// the event-interleaved transfer advance is scoped to this context so plain
+    /// non-halt blocks — the `hdma_cycles`/`gdma_cycles` calibration — are unchanged).
+    pub fn in_halt_or_stop(&self) -> bool {
+        self.cpu_halted || self.in_stop_window
+    }
+
+    /// ENDGAME R2: the Requested-context resume-instruction window in which a
+    /// late-firing HDMA block must be advanced in lockstep (event-interleaved
+    /// transfer) so the same-instruction resume read observes the extended line.
+    pub fn set_hdma_resume_lockstep_window(&mut self, v: bool) {
+        self.hdma_resume_lockstep_window = v;
+    }
+    pub fn hdma_resume_lockstep_window(&self) -> bool {
+        self.hdma_resume_lockstep_window
     }
 
     /// Drop `amount` cc from the pending DMA stall (saturating). Used to absorb a
