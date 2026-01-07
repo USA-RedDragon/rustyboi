@@ -1327,3 +1327,56 @@ this lockstep. Three-root map updated: (1) event-interleaved `dma()` lockstep �
 behind the renderer rebase; (2) post-DS→SS bridge-cc/m0Time = `_6`+R3 = 2; (3) sub-master-cc floors =
 C(1)+R4(2) = 3. The 5 brackets fold into a new root (4): **scx first-tile mode-3 render phase** (couples
 with the m21 lockstep).
+
+---
+
+## m22 — the 5-bracket residual is the DMA bus-conflict READ VALUE (Gambatte≠hardware wall), NOT the scx renderer
+
+**Setup:** m21 left the lockstep flag-gated, net-0 alone, with the residual hypothesized as the scx
+first-tile mode-3 render phase. m22 traced it to ground truth and FALSIFIED that hypothesis.
+
+**What the glyphs actually encode:** the `out00`/`out02`/`outAD` oracles are the resume-read register
+value `a` rendered as two hex-digit tiles (`swap a;and 0f -> 9800`, `a;and 0f -> 9801`). So "tile 1
+mismatch" is the LOW NIBBLE of the read value, not a shifted render column. For group A
+`hdma_transition_halt_late_unhalt_ldaaimm_hdma_scx1_1` (out00) the lockstep render is tile0='0'
+(CORRECT — first nibble), tile1='2' (WRONG — should be '0'): **rustyboi reads a=0x02, oracle wants
+a=0x00.**
+
+**cctracer ground truth (libgambatte):**
+- `_1` (oracle out00 = hardware 0x00): Gambatte reads `a=0x02` at pc=0x118A, cc=70752. **Gambatte
+  FAILS the hardware oracle.** rustyboi == Gambatte (0x02) -> also fails, AT THE GAMBATTE CEILING.
+- `_2` (oracle out02 = hardware 0x02): Gambatte reads `a=0x02` at pc=0x118B, cc=70756 (+4cc). Gambatte
+  matches hardware. rustyboi == Gambatte -> PASSES.
+
+So `_1`/`_2` is a 4-cc resume-timing bracket. Gambatte's read returns **0x02 for BOTH halves**; real
+silicon returns 0x00 at the earlier (`_1`) timing and 0x02 at the later (`_2`) timing. Gambatte's
+value-transition is on the wrong side of the bracket for `_1`.
+
+**Where 0x02 comes from (DMA bus conflict):** the resume `ld a,(0080)` executes while the HDMA block
+is in flight (cctracer DMA-FIRE src 0x0000->0x0010->0x0020 straddling the read cc). The CPU read during
+an active transfer returns the DMA SOURCE byte, not ROM[0x80]=0x01. Gambatte's source-pointer phase
+yields 0x02 (=ROM[0x1a], `.data@1a: 02`); hardware's phase yields 0x00. This is the DMA bus-conflict
+source-byte phase, the exact "model real bus-conflict" target in [[oamdma-dumpers-are-harness-floor]]
+/ [[goal-is-hardware-accuracy]].
+
+**PROOF the lockstep / scx-phase cannot reach it:** with `RB_LOCKSTEP_ADJ` sweeping the lockstep
+advance count -2..+2 dots, the rendered tile1 glyph stays '2' (a=0x02) for EVERY value. The read value
+is INVARIANT to the PPU/timer lockstep advance — it is fixed by the DMA source-pointer phase at the
+block fire, not by how far the PPU is cranked. A renderer scx fix is irrelevant: the failing quantity
+is a CPU register read (surfaced as a glyph), not a BG render column (all three tiles are tn-driven by
+the same value; colors are pure mono, no palette/attr divergence).
+
+**DEFINITIVE VERDICT (the complete dependency chain, m21 + m22):**
+1. **lockstep (m21) is correct + necessary** — it makes the FIRST nibble (high tile) read at the right
+   line phase (tile0 corrected on all 5), flag-gated, net-0/broke-0/flag-OFF-identical.
+2. The 5 brackets' REMAINING residual is the **DMA bus-conflict source-byte read phase**, where
+   **Gambatte itself diverges from silicon by ~4cc** (reads 0x02 where hardware reads 0x00). rustyboi
+   already MATCHES Gambatte here (the Gambatte ceiling). To pass `_1` rustyboi must be MORE accurate
+   than Gambatte: model the real DMA-source-pointer-vs-CPU-read conflict phase. This is NOT the scx
+   renderer (falsified), NOT the m0Time, NOT the lockstep advance (read-value-invariant).
+
+This is the same class as the oamdma/vram dumper bus-conflict floor: a reachable hardware-accuracy
+target that requires beating Gambatte's bus model, decoupled from the lockstep/render timing. The
+m21 lockstep stays flag-gated (it co-lands only WITH a future DMA-source-conflict model that flips the
+`_1`-side read to 0x00). No code landed in m22; flag-OFF byte-identical to main_25; the
+`RB_LOCKSTEP_ADJ` probe was reverted.
