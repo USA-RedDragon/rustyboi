@@ -1380,3 +1380,38 @@ target that requires beating Gambatte's bus model, decoupled from the lockstep/r
 m21 lockstep stays flag-gated (it co-lands only WITH a future DMA-source-conflict model that flips the
 `_1`-side read to 0x00). No code landed in m22; flag-OFF byte-identical to main_25; the
 `RB_LOCKSTEP_ADJ` probe was reverted.
+
+---
+
+## m23 — CORRECTION: cctracer's TRACE CALLBACK perturbed the read; true Gambatte reads 0x00; the 5 are FIXABLE
+
+**The m22 verdict was WRONG.** It rested on cctracer showing the resume read `a=0x02`, concluded
+"Gambatte ceiling = 0x02". m23 found cctracer's `setTraceCallback` (and the dma/ff41 hooks) PERTURB
+libgambatte's CPU cycle scheduling enough to flip this razor-thin DMA-bus-conflict read from 0x00 to
+0x02.
+
+**Proof (built a with-bios cctracer mirroring testrunner.cpp exactly — palette LUT, biosLength=186+15
+frames, runFor loop):**
+- WITH `setTraceCallback`: final framebuffer tile1 = '2' (a=0x02) -> would FAIL out00.
+- WITHOUT any hooks (trace + dma + ff41 all disabled): final framebuffer = "0000" -> tile1 = '0'
+  (a=0x00) -> PASSES out00. (Even the dma_hook alone re-perturbs to '2'.)
+- `test/testrunner` (the real oracle harness, NO trace callback) reports **0 failures** on all 5
+  brackets, in BOTH with-bios and no-bios. Rebuilt testrunner from CURRENT libgambatte source +
+  current `.a`: still 0 failures. So current Gambatte genuinely reads **0x00** and PASSES.
+
+**rustyboi reads 0x02** (confirmed via the rendered tile1 glyph, both flag-OFF and flag-ON m21
+lockstep). So rustyboi is genuinely BEHIND untraced Gambatte (0x00), NOT at a ceiling. The 5 brackets
+are FIXABLE.
+
+**Method correction for the whole campaign:** cctracer is a TRACE-PERTURBED oracle for cycle-razor-thin
+reads. Any per-instruction/per-dma hook shifts libgambatte's scheduler. For these DMA-bus-conflict
+read values the ground truth is `test/testrunner` (framebuffer compare, no hooks) or an UNHOOKED
+framebuffer dump — NOT cctracer's [INSTR] a-value. (cctracer's FF41/cc traces remain valid for the
+mode-timing tests where the perturbation doesn't cross a value boundary, but value-exact DMA-conflict
+reads must use the unhooked path.)
+
+The resume `ld a,(0080)` is a DMA-bus-conflict read whose exposed byte is cycle-razor-thin (0x00 vs
+0x02 across a ~1-instruction scheduler nudge). NEXT (m24): trace rustyboi's resume read address/value
+(unhooked) and find why its DMA-conflict-exposed byte is 0x02 where untraced Gambatte's is 0x00 —
+whether the HALT-bug read address, the in-flight HDMA source-pointer phase, or the conflict model
+itself. This composes with the committed m21 lockstep (high nibble already correct).
