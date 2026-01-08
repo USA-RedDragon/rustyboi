@@ -140,6 +140,17 @@ impl SM83 {
                         {
                             mmio.set_hdma_resume_lockstep_window(true);
                         }
+                        // m25: the PRE-transfer dest-byte shadow is needed for BOTH
+                        // the IME-off HALT-bug resume read AND the IME-on
+                        // interrupt-service resume read (the ISR reads an in-block
+                        // VRAM dest byte). Arm the shadow window regardless of IME
+                        // (the lockstep ADVANCE above stays !ime-gated — it breaks the
+                        // IME-on render phase; only the byte-ordering shadow applies).
+                        if crate::cpu::bus::canonical_cc_enabled()
+                            && mmio.hdma_length() != 0
+                        {
+                            mmio.set_hdma_resume_shadow_window(true);
+                        }
                         // per-access STAGE 2 (FACET 3): the Requested-held block is
                         // about to fire at unhalt. Arm the sub-block-cc consume so
                         // the next-line m0 edge that re-arms the following block is

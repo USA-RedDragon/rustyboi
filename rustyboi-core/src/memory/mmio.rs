@@ -488,6 +488,11 @@ pub struct Mmio {
     // (one resume instruction). 1FFF-masked VRAM offset -> pre-byte.
     #[serde(skip, default)]
     hdma_resume_pre_shadow: std::collections::HashMap<u16, u8>,
+    // Armed for BOTH IME states (unlike the !ime lockstep window); scopes the m25
+    // pre-transfer shadow capture/serve through the resume read (HALT-bug double
+    // execute OR the IME-on interrupt-service ISR read).
+    #[serde(skip, default)]
+    hdma_resume_shadow_window: bool,
 
     // C7-full FF55-kick fire-timing: set when an FF55 bit7=1 write (enable or
     // restart) wants to arm the first block immediately. Gambatte's `enableHdma`
@@ -655,6 +660,7 @@ impl Mmio {
             hdma_fire_cc: 0,
             hdma_snapshot_armed: false,
             hdma_resume_pre_shadow: std::collections::HashMap::new(),
+            hdma_resume_shadow_window: false,
             hdma_write_delay: 0,
             hdma_kick_eval_pending: 0,
             hdma_disable_fires: None,
@@ -1730,6 +1736,13 @@ impl Mmio {
         block_done_override: Option<bool>,
     ) {
         self.cpu_halted = true;
+        // m25: a fresh HALT is a new resume context — drop any stale resume
+        // pre-transfer shadow window (bounds the IME-on arm's lifetime so it cannot
+        // leak a stale pre-byte into a later unrelated VRAM read).
+        if self.hdma_resume_shadow_window {
+            self.hdma_resume_shadow_window = false;
+            self.hdma_resume_pre_shadow.clear();
+        }
         // FAST EI-loop: entering HALT ends any prior EI fast-dispatch stream; the
         // HALT-woken ISR observes the timer IF re-flag on the LATE grid.
         self.timer.clear_isr_early_grid();
@@ -1958,7 +1971,7 @@ impl Mmio {
         // PRE-transfer VRAM value before the write is queued, so the resume read
         // (ordered before dma()'s commits in Gambatte) observes the old byte.
         let capture_resume_pre =
-            crate::cpu::bus::canonical_cc_enabled() && self.hdma_resume_lockstep_window;
+            crate::cpu::bus::canonical_cc_enabled() && self.hdma_resume_shadow_window;
         for _ in 0..0x10 {
             let src = self.hdma_source;
             let (vaddr, byte, into_bank1) =
@@ -2509,19 +2522,32 @@ impl Mmio {
     pub fn set_hdma_resume_lockstep_window(&mut self, v: bool) {
         self.hdma_resume_lockstep_window = v;
         if !v {
-            // Window closed (resume instruction done) — drop the pre-transfer shadow.
+            // Resume instruction done — drop both the lockstep window and (m25) the
+            // pre-transfer shadow + its window.
+            self.hdma_resume_shadow_window = false;
             self.hdma_resume_pre_shadow.clear();
         }
     }
     pub fn hdma_resume_lockstep_window(&self) -> bool {
         self.hdma_resume_lockstep_window
     }
+    /// m25: arm/clear the pre-transfer shadow window (armed for both IME states;
+    /// the lockstep advance window is separate and !ime-gated).
+    pub fn set_hdma_resume_shadow_window(&mut self, v: bool) {
+        self.hdma_resume_shadow_window = v;
+        if !v {
+            self.hdma_resume_pre_shadow.clear();
+        }
+    }
+    pub fn hdma_resume_shadow_window(&self) -> bool {
+        self.hdma_resume_shadow_window
+    }
 
     /// ENDGAME m25: pre-transfer VRAM byte for a resume-window read of an in-block
     /// dest address (the resume read is ordered before dma()'s commits). Returns
     /// None outside the window or for an address not in the just-fired block.
     pub fn hdma_resume_pre_byte(&self, addr: u16) -> Option<u8> {
-        if !self.hdma_resume_lockstep_window {
+        if !self.hdma_resume_shadow_window {
             return None;
         }
         self.hdma_resume_pre_shadow.get(&(addr & 0x1FFF)).copied()
