@@ -1453,3 +1453,28 @@ not-yet-written dest byte during/after the lockstep sees the pre-write value whi
 readable. Equivalently: order the resume read's VRAM resolution at the dma-event cc BEFORE the block's
 dest writes for the bytes past the read point. This composes with the m21 lockstep (mode advance) — the
 two together should land a=0x00. The 5 are FIXABLE (m23); this is the precise remaining lever.
+
+---
+
+## m25 (cont.) — group A _1 FIXED via resume pre-transfer shadow; IME-on cases need the service-path read ordering
+
+**LANDED (flag-gated, RB_CANONICAL_CC):** `hdma_transition_halt_late_unhalt_ldaaimm_hdma_scx1_1` (out00)
+now PASSES. Full suite flag-ON **net -1, broke 0**; flag-OFF byte-identical to main_25. MAIN-MERGE
+CANDIDATE (composes with the m21 lockstep). The fix: a resume-window pre-transfer VRAM shadow
+(`hdma_resume_pre_shadow`) — capture each just-fired block dest byte's PRE-transfer value at fire,
+serve it for an in-block VRAM read during the resume window (after the mode-readability gate, so mode-3
+still -> 0xFF; mode-0 -> the old 0x00). Faithful to Gambatte ordering the resume read (Interrupter::
+prefetch(cc)) BEFORE dma()'s dest commits. Bounded by a fresh-HALT clear (no leak).
+
+**IME-on (`ei_`) cases NOT yet fixed (3 remain):** traced — the IME-on resume services an interrupt;
+its readout block (dest 0x80E0, byte 0x80EA) fires LATER (cc~12784) than the IME-off block (cc 12297),
+AFTER the resume shadow window has closed, AND the ISR's `ld a,(80ea)` read timing relative to that
+fire differs from the HALT-bug double-execute. The shadow is armed for IME-on too (harmless: broke 0)
+but the relevant block fires outside the window. These need the pre-transfer ordering applied on the
+INTERRUPT-SERVICE resume path (the ISR read vs the service-time block fire), a separate cc-ordering
+than the HALT-bug double-execute. Deferred as the next increment.
+
+**5-bracket status:** group A _1 LANDED (net -1). Remaining: group A _2 already passed; the 3 `ei_`
+(IME-on, service-path read ordering) + the pc_scx1_2 (also `ei`/service-path). The m23 reframing holds:
+all are FIXABLE (Gambatte reads the correct value untraced); _1 proves the mechanism (pre-transfer
+dest byte + mode-0 readability).
