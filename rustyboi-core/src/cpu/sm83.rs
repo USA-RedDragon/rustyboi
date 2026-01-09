@@ -234,8 +234,7 @@ impl SM83 {
                 //    `service_interrupt`, where this inline shift double-counts. The EI
                 //    PC/LY readers (hdma_late_ei_m3halt_m2unhalt_pc_scx1_2) carry the
                 //    same +4 phase but need the service-path cc fix, not this one.
-                if crate::cpu::bus::faithful_enabled()
-                    && was_requested
+                if was_requested
                     && !self.registers.ime
                     && mmio.hdma_length() == 0
                     && mmio.hdma_req_pending()
@@ -253,101 +252,99 @@ impl SM83 {
             }
         }
 
-        if crate::cpu::bus::faithful_enabled() {
-            // STAGE 2 event-cc dispatch: an IRQ is serviceable only once the
-            // boundary access cc has reached the cc its IF bit was raised
-            // (Gambatte's `intevent_interrupts` boundary), not merely once the
-            // IF bit is flagged. `pending_interrupt` was sampled at this
-            // instruction boundary; gate the timer IRQ on the boundary access cc
-            // (raw master_cc, the stage-1 read anchor) having reached its
-            // recorded fire cc, re-resolving a lower-priority armed IRQ if the
-            // timer is not yet due.
-            //
-            // PER-ACCESS DELIVERY SPLIT: a non-halt, non-stop EI loop services the
-            // timer IRQ at the EARLY anchor (`pending_timer_fire_cc_ei`, schedCc +
-            // IF_OFF) so the ISR / TAC re-write lands on Gambatte's exact divider
-            // phase (the late_tc01 / irq cluster). HALT and post-STOP streams keep
-            // the LATE anchor (`pending_timer_fire_cc`, schedCc + CC_OFF), which is
-            // where their read-after-overflow tests are byte-exact.
-            let boundary_access_cc = mmio.access_cc();
-            let ei_ctx = !just_unhalted && !self.stopped;
+        // STAGE 2 event-cc dispatch: an IRQ is serviceable only once the
+        // boundary access cc has reached the cc its IF bit was raised
+        // (Gambatte's `intevent_interrupts` boundary), not merely once the
+        // IF bit is flagged. `pending_interrupt` was sampled at this
+        // instruction boundary; gate the timer IRQ on the boundary access cc
+        // (raw master_cc, the stage-1 read anchor) having reached its
+        // recorded fire cc, re-resolving a lower-priority armed IRQ if the
+        // timer is not yet due.
+        //
+        // PER-ACCESS DELIVERY SPLIT: a non-halt, non-stop EI loop services the
+        // timer IRQ at the EARLY anchor (`pending_timer_fire_cc_ei`, schedCc +
+        // IF_OFF) so the ISR / TAC re-write lands on Gambatte's exact divider
+        // phase (the late_tc01 / irq cluster). HALT and post-STOP streams keep
+        // the LATE anchor (`pending_timer_fire_cc`, schedCc + CC_OFF), which is
+        // where their read-after-overflow tests are byte-exact.
+        let boundary_access_cc = mmio.access_cc();
+        let ei_ctx = !just_unhalted && !self.stopped;
 
-            // EI-loop fast delivery: in a non-halt/non-stop loop with IME on, fire
-            // an imminent overflow at the EARLY anchor (schedCc + IF_OFF) so the
-            // ensuing service runs on Gambatte's exact phase, ahead of the late
-            // per-dot delivery. Re-sample the pending interrupt afterward.
-            // NOTE: the EI-loop fast timer dispatch is now ON by default (per-access
-            // timer fast-dispatch co-land). It dissolves the timer-schedule offset
-            // for the pure-timer re-derivation cluster (tima/tc00_late_tc01_*,
-            // irq_ds, irq_retrigger: +19 by construction); the +5 IF-delivery grid
-            // it bypasses was the shared lever for three coupled subsystems, all
-            // re-tuned to the early grid in the same co-land — the IF-edge re-flag
-            // tests (tc00_irq_ifw_* / late_retrigger), the CGB STOP sub-dot
-            // derivation (speedchange_tima*, STOP_EI_PROMOTE_ADJ split), and the
-            // HDMA-vs-IRQ unhalt service-phase race (hdma_*unhalt, END-bracket +4).
-            // Net co-land vs the +5-grid baseline is strongly positive; the only
-            // residuals are the render-phase-coupled hdma_*_ly_*_1 glyph tests (the
-            // EI-fast LCD-re-enable shifts the PPU render phase 4 cc — a lever that
-            // belongs to the lazy-PPU render stage, and which simultaneously flips
-            // the sibling hdma_*_ly_*_6 tests TO passing). RB_EI_FAST=0 forces the
-            // OFF / +5-grid baseline (A/B preserved); unset or =1 leaves it ON.
-            if ei_ctx && self.registers.ime {
-                if let Some(early) = mmio.next_timer_overflow_ei_cc() {
-                    if boundary_access_cc >= early {
-                        mmio.force_ei_timer_delivery(boundary_access_cc);
-                        pending_interrupt = self.get_pending_interrupt(mmio);
-                    }
+        // EI-loop fast delivery: in a non-halt/non-stop loop with IME on, fire
+        // an imminent overflow at the EARLY anchor (schedCc + IF_OFF) so the
+        // ensuing service runs on Gambatte's exact phase, ahead of the late
+        // per-dot delivery. Re-sample the pending interrupt afterward.
+        // NOTE: the EI-loop fast timer dispatch is now ON by default (per-access
+        // timer fast-dispatch co-land). It dissolves the timer-schedule offset
+        // for the pure-timer re-derivation cluster (tima/tc00_late_tc01_*,
+        // irq_ds, irq_retrigger: +19 by construction); the +5 IF-delivery grid
+        // it bypasses was the shared lever for three coupled subsystems, all
+        // re-tuned to the early grid in the same co-land — the IF-edge re-flag
+        // tests (tc00_irq_ifw_* / late_retrigger), the CGB STOP sub-dot
+        // derivation (speedchange_tima*, STOP_EI_PROMOTE_ADJ split), and the
+        // HDMA-vs-IRQ unhalt service-phase race (hdma_*unhalt, END-bracket +4).
+        // Net co-land vs the +5-grid baseline is strongly positive; the only
+        // residuals are the render-phase-coupled hdma_*_ly_*_1 glyph tests (the
+        // EI-fast LCD-re-enable shifts the PPU render phase 4 cc — a lever that
+        // belongs to the lazy-PPU render stage, and which simultaneously flips
+        // the sibling hdma_*_ly_*_6 tests TO passing). RB_EI_FAST=0 forces the
+        // OFF / +5-grid baseline (A/B preserved); unset or =1 leaves it ON.
+        if ei_ctx && self.registers.ime {
+            if let Some(early) = mmio.next_timer_overflow_ei_cc() {
+                if boundary_access_cc >= early {
+                    mmio.force_ei_timer_delivery(boundary_access_cc);
+                    pending_interrupt = self.get_pending_interrupt(mmio);
                 }
             }
-
-            let mut serviceable = pending_interrupt;
-            if serviceable == Some(registers::InterruptFlag::Timer) {
-                // Only the EI fast-dispatch (when enabled) services on the early
-                // anchor; otherwise the gate is the baseline late (+CC_OFF) anchor.
-                let gate_cc = if ei_ctx {
-                    mmio.pending_timer_fire_cc_ei()
-                } else {
-                    mmio.pending_timer_fire_cc()
-                };
-                if let Some(fire_cc) = gate_cc
-                    && boundary_access_cc < fire_cc
-                {
-                    serviceable = self.get_pending_interrupt_excluding_timer(mmio);
-                }
-            }
-
-            // FAITHFUL prefetch model: fetch the opcode at the instruction
-            // boundary FIRST (Gambatte's end-of-previous-instruction prefetch,
-            // charged at the boundary cc), THEN decide whether to service. A
-            // serviced interrupt UNDOES the prefetch (rewinds pc); otherwise the
-            // prefetched opcode is consumed by execute with no re-fetch/re-charge.
-            if !self.prefetched {
-                self.opcode = mmio.fetch_opcode(self.registers.pc);
-                self.registers.pc = self.registers.pc.wrapping_add(1);
-                self.prefetched = true;
-            }
-
-            if self.registers.ime && serviceable.is_some() {
-                return self.service_interrupt(mmio, just_unhalted);
-            }
-
-            // No interrupt is serviced this step after the unhalt (IME off, or the
-            // timer gate downgraded it): release any unhalt-deferred HDMA
-            // suppression and fire the held block now, on the post-prefetch cc
-            // (there is no PC push to wait for).
-            if mmio.hdma_mcycle_fire_suppressed() && mmio.hdma_unhalt_noreflag_deferred() {
-                mmio.set_hdma_mcycle_fire_suppressed(false);
-                mmio.fire_pending_hdma_mcycle();
-                mmio.set_hdma_unhalt_noreflag_deferred(false);
-            }
-
-            let op = self.opcode;
-            self.prefetched = false;
-            cycles += self.execute(op, mmio);
-            self.apply_ime_delay();
-            mmio.set_hdma_resume_lockstep_window(false);
-            return cycles;
         }
+
+        let mut serviceable = pending_interrupt;
+        if serviceable == Some(registers::InterruptFlag::Timer) {
+            // Only the EI fast-dispatch (when enabled) services on the early
+            // anchor; otherwise the gate is the baseline late (+CC_OFF) anchor.
+            let gate_cc = if ei_ctx {
+                mmio.pending_timer_fire_cc_ei()
+            } else {
+                mmio.pending_timer_fire_cc()
+            };
+            if let Some(fire_cc) = gate_cc
+                && boundary_access_cc < fire_cc
+            {
+                serviceable = self.get_pending_interrupt_excluding_timer(mmio);
+            }
+        }
+
+        // FAITHFUL prefetch model: fetch the opcode at the instruction
+        // boundary FIRST (Gambatte's end-of-previous-instruction prefetch,
+        // charged at the boundary cc), THEN decide whether to service. A
+        // serviced interrupt UNDOES the prefetch (rewinds pc); otherwise the
+        // prefetched opcode is consumed by execute with no re-fetch/re-charge.
+        if !self.prefetched {
+            self.opcode = mmio.fetch_opcode(self.registers.pc);
+            self.registers.pc = self.registers.pc.wrapping_add(1);
+            self.prefetched = true;
+        }
+
+        if self.registers.ime && serviceable.is_some() {
+            return self.service_interrupt(mmio, just_unhalted);
+        }
+
+        // No interrupt is serviced this step after the unhalt (IME off, or the
+        // timer gate downgraded it): release any unhalt-deferred HDMA
+        // suppression and fire the held block now, on the post-prefetch cc
+        // (there is no PC push to wait for).
+        if mmio.hdma_mcycle_fire_suppressed() && mmio.hdma_unhalt_noreflag_deferred() {
+            mmio.set_hdma_mcycle_fire_suppressed(false);
+            mmio.fire_pending_hdma_mcycle();
+            mmio.set_hdma_unhalt_noreflag_deferred(false);
+        }
+
+        let op = self.opcode;
+        self.prefetched = false;
+        cycles += self.execute(op, mmio);
+        self.apply_ime_delay();
+        mmio.set_hdma_resume_lockstep_window(false);
+        return cycles;
 
         // Handle interrupts if IME is enabled and there's a pending interrupt
         if self.registers.ime && pending_interrupt.is_some() {
@@ -415,26 +412,16 @@ impl SM83 {
         // is governed by `haltHdmaState_`).
         let service_access_cc = bus.access_cc();
 
-        if crate::cpu::bus::faithful_enabled() {
-            // STAGE 2: the boundary prefetch already read (and charged +4 for)
-            // the opcode this interrupt discards. UNDO it: rewind pc to that
-            // opcode and drop the prefetch flag (re-fetched after the ISR
-            // returns). With the real prefetch supplying one of the 5 interrupt
-            // M-cycles, service ticks 2 internal (the 2 wait cycles) + 2 pushes =
-            // 16; prefetch (4) + 16 = the full 20-cc / 5-M-cycle interrupt cost.
-            self.registers.pc = self.registers.pc.wrapping_sub(1);
-            self.prefetched = false;
-            bus.internal_cycle();
-            bus.internal_cycle();
-        } else {
-            // 3 internal M-cycles (Gambatte `cc += 12`: undone prefetch + 2 wait),
-            // then push PC high, then push PC low. Ticking all internal cycles
-            // before the pushes (rather than leaving one to the trailing
-            // tick_remaining) advances OAM DMA to the correct dma_pos at each push.
-            bus.internal_cycle();
-            bus.internal_cycle();
-            bus.internal_cycle();
-        }
+        // STAGE 2: the boundary prefetch already read (and charged +4 for)
+        // the opcode this interrupt discards. UNDO it: rewind pc to that
+        // opcode and drop the prefetch flag (re-fetched after the ISR
+        // returns). With the real prefetch supplying one of the 5 interrupt
+        // M-cycles, service ticks 2 internal (the 2 wait cycles) + 2 pushes =
+        // 16; prefetch (4) + 16 = the full 20-cc / 5-M-cycle interrupt cost.
+        self.registers.pc = self.registers.pc.wrapping_sub(1);
+        self.prefetched = false;
+        bus.internal_cycle();
+        bus.internal_cycle();
 
         self.registers.sp = self.registers.sp.wrapping_sub(1);
         bus.write(self.registers.sp, (self.registers.pc >> 8) as u8);
@@ -500,7 +487,7 @@ impl SM83 {
             }
             // STAGE 2: once the timer IRQ is dispatched, drop its recorded fire
             // cc so the next period's fire is tracked fresh.
-            if flag == registers::InterruptFlag::Timer && crate::cpu::bus::faithful_enabled() {
+            if flag == registers::InterruptFlag::Timer {
                 bus.clear_timer_fire_cc();
             }
         }

@@ -3,21 +3,6 @@ use crate::memory::mmio::Mmio;
 use crate::ppu::{self, Ppu};
 use std::ops::{Deref, DerefMut};
 
-/// ds-engine STAGE 2: the faithful CPU exact-cc spine gate (RB_FAITHFUL). When
-/// OFF (default) the CPU step/service paths are byte-identical to HEAD. When ON
-/// the CPU runs the faithful prefetch model (prefetch-at-boundary +
-/// execute-no-refetch + service pc-rewind) and event-cc interrupt dispatch (an
-/// IRQ is serviceable only once the boundary access cc has reached its recorded
-/// fire cc, not merely once its IF bit is set). This stage does NOT touch the
-/// timer access anchor — RB_EXACTCC (stage 1) already owns that — so the +106
-/// well from the prior ptz-faithful (which welded CC_OFF 5->1 into this gate) is
-/// avoided: here RB_FAITHFUL only changes the CPU's boundary/dispatch phasing.
-/// Read once, OnceLock-cached.
-pub(crate) fn faithful_enabled() -> bool {
-    // ds-engine STAGE 7: permanently on.
-    true
-}
-
 /// ENDGAME milestone-1 gate (`RB_CANONICAL_CC`). OFF (unset / `=0`) => the CPU
 /// paths are byte-identical to `main_31`. ON => the experimental per-access-cc
 /// corrections for the final-15 boundary families are active. This flag is a

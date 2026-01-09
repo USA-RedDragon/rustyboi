@@ -507,29 +507,27 @@ pub fn halt(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     // double-read); when IME=1 the next step's interrupt service undoes the prefetch
     // (pc -= 1) so the return address is the HALT itself, and HALT re-runs after the
     // ISR. The pending test is `IE & IF & 0x1F != 0`, independent of IME.
-    if crate::cpu::bus::faithful_enabled() {
-        let if_reg = mmio.peek(registers::INTERRUPT_FLAG);
-        let ie_reg = mmio.peek(registers::INTERRUPT_ENABLE);
-        if (if_reg & ie_reg & 0x1F) != 0 {
-            // In the faithful prefetch model pc already points at the byte after
-            // HALT (the 0x76 fetch advanced it). Peek that byte WITHOUT advancing
-            // pc and mark it prefetched: the +4 charge is deferred to consumption.
-            cpu.opcode = mmio.peek(cpu.registers.pc);
-            cpu.prefetched = true;
-            // Next-M-cycle dma() scheduling for the IME-off HALT-bug resume: an HDMA
-            // block whose m0-edge falls during the doubled resume instruction runs
-            // its `dma()` (in Gambatte) at the instruction boundary AFTER that
-            // instruction, so its VRAM write lands after the resume instruction's
-            // own memory read. Defer + suppress the synchronous m0-edge fire across
-            // the resume instruction; the bus fires the held block at the next
-            // boundary (hdma_late_if_and_ie_halt_1: the doubled `ld a,(80FA)` reads
-            // the pre-DMA 0x00, not the post-DMA 0x02). Only when an HDMA is armed.
-            if mmio.mmio.hdma_is_enabled() {
-                mmio.mmio.set_hdma_unhalt_reflag_deferred(true);
-                mmio.mmio.set_hdma_mcycle_fire_suppressed(true);
-            }
-            return 4;
+    let if_reg = mmio.peek(registers::INTERRUPT_FLAG);
+    let ie_reg = mmio.peek(registers::INTERRUPT_ENABLE);
+    if (if_reg & ie_reg & 0x1F) != 0 {
+        // In the faithful prefetch model pc already points at the byte after
+        // HALT (the 0x76 fetch advanced it). Peek that byte WITHOUT advancing
+        // pc and mark it prefetched: the +4 charge is deferred to consumption.
+        cpu.opcode = mmio.peek(cpu.registers.pc);
+        cpu.prefetched = true;
+        // Next-M-cycle dma() scheduling for the IME-off HALT-bug resume: an HDMA
+        // block whose m0-edge falls during the doubled resume instruction runs
+        // its `dma()` (in Gambatte) at the instruction boundary AFTER that
+        // instruction, so its VRAM write lands after the resume instruction's
+        // own memory read. Defer + suppress the synchronous m0-edge fire across
+        // the resume instruction; the bus fires the held block at the next
+        // boundary (hdma_late_if_and_ie_halt_1: the doubled `ld a,(80FA)` reads
+        // the pre-DMA 0x00, not the post-DMA 0x02). Only when an HDMA is armed.
+        if mmio.mmio.hdma_is_enabled() {
+            mmio.mmio.set_hdma_unhalt_reflag_deferred(true);
+            mmio.mmio.set_hdma_mcycle_fire_suppressed(true);
         }
+        return 4;
     }
     cpu.halted = true;
     // Capture the HDMA halt-state for the unhalt path. Mirrors Gambatte's
@@ -544,8 +542,7 @@ pub fn halt(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     // unhalt's mode-3 the VRAM byte now reads 0xFF). This is the m3unhalt
     // double-execute (`hdma_transition_7fffhalt_inc_m3unhalt`: the post-HALT
     // `inc a` runs once -> a=01 -> out01).
-    if crate::cpu::bus::faithful_enabled()
-        && matches!(
+    if matches!(
             mmio.halt_hdma_state(),
             crate::memory::mmio::HaltHdmaState::Requested
         )
