@@ -119,6 +119,13 @@ impl<'a> Bus<'a> {
         self.mmio.step_hdma_deferred();
         self.ppu.step_lcdc_events(self.mmio);
 
+        // Publish the BG fetcher's current VRAM data-bus address for the next
+        // dot's OAM-DMA-source conflict resolution. `step_dma` runs at the START
+        // of the following dot (before that dot's `ppu.step`), so it reads the
+        // address as latched HERE — one dot earlier — which is the phase the real
+        // bus conflict observes.
+        self.ppu.update_dma_fetcher_bus(self.mmio);
+
         self.mmio.advance_cpu_t_phase();
     }
 

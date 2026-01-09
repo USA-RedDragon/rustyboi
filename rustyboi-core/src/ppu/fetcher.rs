@@ -87,6 +87,16 @@ pub struct Fetcher {
     subcc_cgb_adj: u8,
     #[serde(default)]
     subcc_used_scx: u8,
+
+    // OAM-DMA-source bus-conflict model: the VRAM data-bus address the BG fetcher
+    // most recently drove (the tile-data / tile-number read), plus its VRAM bank.
+    // During mode 3 a VRAM-source OAM-DMA read does NOT see VRAM[src]; the BG
+    // fetcher and the DMA both drive the VRAM address bus, so the array is indexed
+    // by the bitwise AND of the two addresses (real-silicon address-line conflict).
+    #[serde(default)]
+    last_vram_addr: u16,
+    #[serde(default)]
+    last_vram_bank: u8,
 }
 
 impl Fetcher {
@@ -106,7 +116,17 @@ impl Fetcher {
             subcc_xpos: 0,
             subcc_cgb_adj: 0,
             subcc_used_scx: 0,
+            last_vram_addr: 0xFFFF,
+            last_vram_bank: 0,
         }
+    }
+
+    /// The VRAM address/bank the BG fetcher most recently drove onto the VRAM bus
+    /// (tile-number or tile-data read). Used by the OAM-DMA-source bus-conflict
+    /// model. Stable between fetch substeps, so it reflects the byte latched on the
+    /// VRAM data bus at the current dot.
+    pub fn last_vram_bus(&self) -> (u16, u8) {
+        (self.last_vram_addr, self.last_vram_bank)
     }
 
     pub fn reset(&mut self) {
@@ -120,6 +140,10 @@ impl Fetcher {
         self.window_x_start = 0;
         self.stop_window_after_tiles = 0;
         self.window_revert_at_push = false;
+        // Hold the OAM-DMA conflict bus at AND-identity for the new line until the
+        // fetcher drives a real address (the first locked read is suppressed in
+        // mmio; this guards against a stale cross-line address conflicting).
+        self.last_vram_addr = 0xFFFF;
     }
 
     // Start fetching window tiles when WX condition is met
@@ -292,8 +316,10 @@ impl Fetcher {
                 };
                 
                 let map_addr = tile_map_base + map_offset;
+                self.last_vram_addr = map_addr;
+                self.last_vram_bank = 0;
                 self.tile_num = mmio.read_vram_bank(0, map_addr);
-                
+
                 // In CGB mode, read tile attributes from VRAM bank 1
                 self.tile_attributes = if mmio.is_cgb_features_enabled() {
                     mmio.read_vram_bank(1, map_addr)
@@ -330,6 +356,12 @@ impl Fetcher {
                 } else {
                     0
                 };
+                // NOTE: the tile-data-LOW read is a transient on the VRAM address
+                // bus; the OAM-DMA conflict bus continues to hold the tile-NUMBER
+                // address driven on the previous substep through the next read. So
+                // we do NOT update `last_vram_addr` here (matching the hardware bus
+                // hold windows: tile-number held through tile-data-low, then the
+                // tile-data-high address takes over).
                 let low_byte = if lcdc_state.cgb_tile_index_is_tile_data && self.tile_num < 0x80 {
                     self.tile_num
                 } else {
@@ -369,6 +401,8 @@ impl Fetcher {
                 } else {
                     0
                 };
+                self.last_vram_addr = addr;
+                self.last_vram_bank = tile_data_bank;
                 let high_byte = if lcdc_state.cgb_tile_index_is_tile_data && self.tile_num < 0x80 {
                     self.tile_num
                 } else {
