@@ -328,7 +328,7 @@ pub struct Mmio {
     #[serde(skip, default)]
     cpu_halted: bool,
 
-    // ENDGAME R2 (RB_CANONICAL_CC): true while the bus is advancing the world in
+    // ENDGAME R2: true while the bus is advancing the world in
     // lockstep through an HDMA block's transfer cc (the event-interleaved dma()).
     // While set, `step_hdma` must NOT fire/arm a new block (the lockstep advance
     // only ticks timer/PPU through the in-flight transfer; the next m0-edge is
@@ -476,7 +476,7 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_snapshot_armed: bool,
 
-    // ENDGAME m25 (RB_CANONICAL_CC): resume-read pre-transfer shadow. When an HDMA
+    // ENDGAME m25: resume-read pre-transfer shadow. When an HDMA
     // block fires inside the Requested-context HALT-bug resume window
     // (`hdma_resume_lockstep_window`), Gambatte's `Interrupter::prefetch(cc)` runs
     // the resume instruction's reads at the dma-event cc, BEFORE `dma()` commits
@@ -1970,8 +1970,7 @@ impl Mmio {
         // ENDGAME m25: in the HALT-bug resume window, snapshot each dest byte's
         // PRE-transfer VRAM value before the write is queued, so the resume read
         // (ordered before dma()'s commits in Gambatte) observes the old byte.
-        let capture_resume_pre =
-            crate::cpu::bus::canonical_cc_enabled() && self.hdma_resume_shadow_window;
+        let capture_resume_pre = self.hdma_resume_shadow_window;
         for _ in 0..0x10 {
             let src = self.hdma_source;
             let (vaddr, byte, into_bank1) =
