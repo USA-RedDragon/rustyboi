@@ -354,7 +354,7 @@ impl Timer {
             // The CPU's faithful event-cc gate compares the boundary access cc
             // (raw master_cc) against this. Only record while none is pending so
             // a back-to-back overflow keeps the earliest undispatched fire.
-            if crate::cpu::bus::faithful_enabled() && self.last_fire_cc == DISABLED_TIME {
+            if self.last_fire_cc == DISABLED_TIME {
                 self.last_fire_cc = self.next_irq_event_time.wrapping_add(CC_OFF as u64);
                 self.last_fire_cc_ei = self.next_irq_event_time.wrapping_add(IF_OFF as u64);
                 // A normally-delivered (not force-promoted) IRQ resets the one-shot
