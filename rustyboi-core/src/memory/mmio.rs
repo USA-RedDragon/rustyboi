@@ -199,6 +199,37 @@ pub struct Mmio {
     #[serde(skip, default = "default_pending_oam_zero")]
     pending_oam_zero: std::cell::Cell<i16>,
 
+    // OAM-DMA-source VRAM bus-conflict model. The PPU pushes its BG fetcher's
+    // current VRAM data-bus address/bank here each dot during mode 3 (VRAM locked).
+    // A VRAM-source OAM-DMA read while `fetcher_bus_locked` is set returns
+    // VRAM[(dma_src_addr & fetcher_bus_addr)] — both the fetcher and the DMA drive
+    // the VRAM address bus, so the array is indexed by their bitwise-AND (the real
+    // hardware "OAM DMA bus conflict"). Cleared each dot the PPU is not mode-3.
+    #[serde(skip, default)]
+    fetcher_bus_addr: u16,
+    #[serde(skip, default)]
+    fetcher_bus_bank: u8,
+    #[serde(skip, default)]
+    fetcher_bus_locked: bool,
+    // The first OAM-DMA VRAM-source read after the fetcher bus lock engages (a
+    // fresh mode-3 entry) still resolves to true VRAM: the BG fetcher has not yet
+    // settled a displayed-tile byte on the conflict bus during the line's warmup,
+    // so the first locked M-cycle reads cleanly (the dumps show the first mode-3
+    // byte of each crossed line is identity). Set on the lock's rising edge,
+    // consumed by the first conflicting read.
+    #[serde(skip, default)]
+    fetcher_bus_warmup: bool,
+    // Second-order conflict: when an OAM-DMA M-cycle reads VRAM while the BG
+    // fetcher is driving a TILE-NUMBER (tilemap) address, both the DMA byte and the
+    // tile number the fetcher would latch are `VRAM[tilemap_addr & dma_src]`. That
+    // poisoned tile number shifts the tile-data address the fetcher drives on the
+    // NEXT M-cycle, so the following tile-data DMA read sees
+    // `VRAM[tiledata(poisoned_tile,row) & dma_src]`. We carry the poisoned tile's
+    // tile-data base (0x8000 + tile*16) here from the tilemap read to the next
+    // tile-data read; the row low bits come from that read's own fetcher address.
+    #[serde(skip, default)]
+    poison_tiledata_base: Option<u16>,
+
     // Set true when the CPU writes to FF44 (LY). Consumed by the PPU on its
     // next step to reset internal scanline timing. Not part of save state.
     #[serde(skip, default)]
@@ -613,6 +644,11 @@ impl Mmio {
             dma_subcycle: 0,
             oam_write_pending: false,
             pending_oam_zero: std::cell::Cell::new(-1),
+            fetcher_bus_addr: 0,
+            fetcher_bus_bank: 0,
+            fetcher_bus_locked: false,
+            fetcher_bus_warmup: false,
+            poison_tiledata_base: None,
             ly_write_pending: false,
             stat_register_write_pending: false,
             ff41_write_pending: false,
@@ -2068,6 +2104,86 @@ impl Mmio {
         }
     }
 
+    /// The byte an OAM-DMA M-cycle copies into `OAM[pos]`, modeling the VRAM-source
+    /// bus conflict while the PPU has VRAM mode-3-locked. Both the OAM-DMA and the
+    /// BG fetcher drive the VRAM address bus, so the array is indexed by the
+    /// bitwise-AND of the two addresses (real-silicon "OAM DMA bus conflict").
+    ///
+    /// The fetcher address depends on which fetch substep is on the bus:
+    ///   - tile-NUMBER read (`fetcher_bus_addr` in the 0x9800-0x9FFF tilemap range):
+    ///     the byte is `VRAM[tilemap_addr & dma_addr]`. That same value is also the
+    ///     POISONED tile number the fetcher latches, so we remember its tile-data
+    ///     base for the next (tile-data) read.
+    ///   - tile-DATA read (`fetcher_bus_addr` in 0x8000-0x97FF): the byte is
+    ///     `VRAM[tiledata(poisoned_tile,row) & dma_addr]`, where the poisoned tile's
+    ///     base was carried from the preceding tilemap read and the row low bits come
+    ///     from this read's own fetcher address.
+    /// The first locked M-cycle of a line (`fetcher_bus_warmup`) and any non-mode-3
+    /// read fall back to the true VRAM source.
+    fn dma_vram_conflict_or_source_byte(&mut self, pos: u8) -> u8 {
+        let dma_addr = self.dma_source_base.wrapping_add(pos as u16);
+        if self.dma_src_kind() != 2 || !self.fetcher_bus_locked {
+            // Non-VRAM source, or VRAM free (HBlank/mode 0): true source byte.
+            self.poison_tiledata_base = None;
+            return self.dma_source_byte(pos);
+        }
+        if self.fetcher_bus_warmup {
+            // First locked M-cycle of the line: the fetcher has not settled a
+            // displayed-tile byte on the bus yet, so this reads clean VRAM.
+            self.fetcher_bus_warmup = false;
+            self.poison_tiledata_base = None;
+            return self.dma_source_byte(pos);
+        }
+        let fa = self.fetcher_bus_addr;
+        let bank = self.fetcher_bus_bank;
+        let is_tile_number = (0x9800..=0x9FFF).contains(&fa);
+        if !self.cgb_features_enabled {
+            // DMG bus conflict. The DMG VRAM data bus behaves as an OR (not the
+            // CGB address-line AND): a tile-DATA read returns
+            // `VRAM[dma_addr | (fa & 0x0E)]` — the fetcher forces the tile-data
+            // address's row bits high while the DMA address otherwise passes
+            // through. A tile-NUMBER read on the bus does not conflict (reads true
+            // VRAM), and does not poison.
+            self.poison_tiledata_base = None;
+            if is_tile_number {
+                return self.dma_source_byte(pos);
+            }
+            return self.vram.read(dma_addr | (fa & 0x000E));
+        }
+        let eff_addr = if is_tile_number {
+            // Tile-number read on the bus: AND the tilemap address. The resulting
+            // byte is also the poisoned tile number, whose tile-data base feeds the
+            // next read.
+            let a = dma_addr & fa;
+            let tile = self.read_vram_bank_internal(0, a);
+            self.poison_tiledata_base = Some(0x8000u16.wrapping_add((tile as u16) << 4));
+            a
+        } else {
+            // Tile-data read on the bus: substitute the poisoned tile's data base
+            // (carried from the preceding tilemap read) for tile 0's, keeping this
+            // read's own row low nibble, then AND the DMA address.
+            let poisoned_fa = match self.poison_tiledata_base {
+                Some(base) => base | (fa & 0x000F),
+                None => fa,
+            };
+            dma_addr & poisoned_fa
+        };
+        if self.cgb_features_enabled && bank == 1 {
+            self.vram_bank1.read(eff_addr)
+        } else {
+            self.vram.read(eff_addr)
+        }
+    }
+
+    /// Read a VRAM byte from a specific bank (0/1), bypassing the DMA-conflict path.
+    fn read_vram_bank_internal(&self, bank: u8, addr: u16) -> u8 {
+        if self.cgb_features_enabled && bank == 1 {
+            self.vram_bank1.read(addr)
+        } else {
+            self.vram.read(addr)
+        }
+    }
+
     /// Advance the OAM-DMA engine by one M-cycle (mirrors one iteration of
     /// Gambatte's `updateOamDma` loop). Advances `dma_pos`, (re)starts the
     /// transfer when it reaches `dma_start_pos`, copies the corresponding
@@ -2090,7 +2206,7 @@ impl Mmio {
         }
 
         if self.dma_pos < 160 {
-            let byte = self.dma_source_byte(self.dma_pos);
+            let byte = self.dma_vram_conflict_or_source_byte(self.dma_pos);
             self.oam.write(OAM_START + self.dma_pos as u16, byte);
         } else if self.dma_pos == 160 {
             // endOamDma: park the engine. Because no restart was requested
@@ -2583,6 +2699,22 @@ impl Mmio {
         self.dma_active
     }
 
+    /// The PPU pushes its BG fetcher's current VRAM data-bus address/bank here at
+    /// each mode-3 dot (`locked` true). A VRAM-source OAM-DMA read during the lock
+    /// is then resolved against this address (the bus-conflict AND). `locked` false
+    /// (any non-mode-3 dot) makes a VRAM-source DMA read return true VRAM again, so
+    /// the HBlank/mode-0 window stays the clean identity source.
+    pub fn set_fetcher_vram_bus(&mut self, addr: u16, bank: u8, locked: bool) {
+        // Rising edge of the lock (mode-3 entry): arm the warmup so the first
+        // VRAM-source OAM-DMA M-cycle of this lock window reads clean VRAM.
+        if locked && !self.fetcher_bus_locked {
+            self.fetcher_bus_warmup = true;
+        }
+        self.fetcher_bus_addr = addr;
+        self.fetcher_bus_bank = bank;
+        self.fetcher_bus_locked = locked;
+    }
+
     /// True while a transfer is actively placing bytes into OAM (the window in
     /// which the CPU bus conflicts with OAM DMA). Mirrors `oamDmaPos_ < 160`.
     fn dma_transfer_in_progress(&self) -> bool {
@@ -2836,7 +2968,8 @@ impl Mmio {
             },
             // VRAM-source OAM DMA reads through the live VBK pointer
             // (Gambatte `vrambankptr()`), so a mid-DMA VBK write retargets
-            // subsequent source bytes.
+            // subsequent source bytes. The mode-3 bus conflict is applied upstream
+            // in `dma_vram_conflict_or_source_byte`; this path is the clean source.
             VRAM_START..=VRAM_END => {
                 if self.cgb_features_enabled && self.vram_bank == 1 {
                     self.vram_bank1.read(addr)
