@@ -139,6 +139,24 @@ pub fn faithful_eventcc_enabled() -> bool {
     })
 }
 
+// HALT-PREFETCH phase register (`RB_PREFETCH_CC`, Lever A). OFF (unset / `=0`)
+// => byte-identical to flag-OFF f-eventclock (== main_22). ON => the halt-woken
+// FF41 read's access_cc carries the M-cycle-granular HALT-entry-vs-eventTime
+// boundary bit (the pre-snap quantity Gambatte's ceil_4(E) snap erases), so the
+// byte-identical _1b/_2b ROMs separate (phase 0 -> mode0, phase 1 -> mode2).
+// CANNOT be ON without the eventcc foundation (`&& faithful_eventcc_enabled()`).
+// DEV-ONLY knob; inline/remove before merge. Read once, cached.
+pub fn prefetch_cc_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("RB_PREFETCH_CC").as_deref(),
+            Ok("1") | Ok("on") | Ok("true")
+        )
+    }) && faithful_eventcc_enabled()
+}
+
 // DS offsets re-derived after the double-speed STAT sub-dot step (step_subdot)
 // gave the IRQ model true odd-cc resolution: m2 relaxes -2 -> -1 (the odd-cc
 // fire is now caught by the sub-dot rather than rounded down), and the write cc
