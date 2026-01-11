@@ -118,6 +118,27 @@ pub fn linerender_enabled() -> bool {
     // per-dot path while keeping the exact-cc/getStat spine.
     false
 }
+// FAITHFUL EVENTCC rebuild (`RB_FAITHFUL_EVENTCC`). OFF (unset / `=0`) =>
+// byte-identical to main_22. ON => the HALT-exit consumer is migrated onto the
+// single faithful mode-0 STAT IRQ event time (`m0_irq_event_cc_master` =
+// Gambatte's `intevent_interrupts` m0 eventTime = `predictedNextXposTime(166)`):
+// the DMG branch of memory.cpp:308's `cc += 4 * (isCgb() || cc - eventTime < 2)`
+// HALT-wakeup latency fixup, which the legacy `+5`-CGB-only read bias never
+// modelled. Recovers the R4 `late_m0*_halt_m0stat_scx3_2b` DMG family. (The
+// IRQ-DISPATCH and getStat-read consumers stay on the calibrated offset form —
+// their migration onto this same event cc is a later stage; see the engine
+// verdict.) DEV-ONLY knob; inline/remove before merge. Read once, cached.
+pub fn faithful_eventcc_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("RB_FAITHFUL_EVENTCC").as_deref(),
+            Ok("1") | Ok("on") | Ok("true")
+        )
+    })
+}
+
 // DS offsets re-derived after the double-speed STAT sub-dot step (step_subdot)
 // gave the IRQ model true odd-cc resolution: m2 relaxes -2 -> -1 (the odd-cc
 // fire is now caught by the sub-dot rather than rounded down), and the write cc
@@ -2141,7 +2162,35 @@ impl Ppu {
         }
         let dsf = 1i64 << ds as i32;
         let abs = (self.abs_cc as i64 - dsf + (remaining + off) * dsf).max(0) as u64;
+        // The IRQ-dispatch arm keeps the calibrated offset form (the faithful
+        // `predictedNextXposTime(166)` migration of THIS consumer is deferred — the
+        // per-dot dispatch phase is co-tuned with the consume-site `+ds /
+        // +cgb_ss_m0_anticip` anticipation). The faithful event cc is consumed
+        // independently by the halt-exit `<2` fixup via `m0_irq_event_cc_master`,
+        // captured at the m0 IRQ flag site.
         self.sched_m0irq = abs;
+    }
+
+    /// FAITHFUL EVENTCC: the mode-0 STAT IRQ event time
+    /// (`predictedNextXposTime(166)` = Gambatte's `intevent_interrupts` m0
+    /// eventTime, video.cpp:884) in MASTER cc — the cc domain `master_cc()` /
+    /// `m0_time_master` / getStat `access_cc` share, so the halt-exit
+    /// `cc - eventTime < 2` fixup (memory.cpp:308) compares like-for-like.
+    ///
+    /// Derived from the closed-form `m0_time_master` (= predictedNextXposTime(167)
+    /// in master cc): the m0 IRQ fires one xpos earlier, so subtract the 166->167
+    /// step cost `((1 + xpos166_advance) << ds)`. `None` when no closed-form master
+    /// exists (window mid-line / first line / VBlank), where no faithful event cc
+    /// is available and the halt-exit fixup is skipped.
+    pub fn m0_irq_event_cc_master(&self, mmio: &mmio::Mmio) -> Option<u64> {
+        if self.internal_ly() as u32 >= stat_irq::LCD_VRES {
+            return None;
+        }
+        let ds = mmio.is_double_speed_mode() as i64;
+        let is_cgb = mmio.is_cgb_features_enabled();
+        let adv = self.m0irq_xpos166_advance(mmio, is_cgb);
+        self.m0_time_master
+            .map(|m0t| (m0t as i64 - ((1 + adv) << ds)).max(0) as u64)
     }
 
     /// Re-anchor the event-scheduled STAT/mode/LYC clocks to the new CPU speed.
@@ -2415,8 +2464,15 @@ impl Ppu {
         if self.sched_m0irq <= cc + ds as u64 + cgb_ss_m0_anticip {
             let stat = self.stat_reg_committed;
             let ly = self.internal_ly() as u32;
-            if self.mstat_irq.do_m0_event(ly, stat, self.lyc_irq.lyc_reg()) {
+            // FAITHFUL EVENTCC: capture this line's m0 IRQ event cc
+            // (predictedNextXposTime(166)) BEFORE the mutable IF-flag borrow, so
+            // the halt-exit `<2` fixup can read the cc the IF bit was raised at
+            // (Gambatte `flagIrq(2, eventTimes_(memevent_m0irq))`).
+            let m0_event_cc = self.m0_irq_event_cc_master(mmio);
+            let fired = self.mstat_irq.do_m0_event(ly, stat, self.lyc_irq.lyc_reg());
+            if fired {
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
+                mmio.set_pending_m0_irq_fire_cc(m0_event_cc);
             }
             // m0irq re-arm happens at next pixel-transfer entry.
             self.sched_m0irq = stat_irq::DISABLED_TIME;
@@ -5740,6 +5796,19 @@ impl Ppu {
             && !mmio.halt_wakeup_hdma()
         {
             access_cc + 5
+        } else {
+            access_cc
+        };
+        // FAITHFUL EVENTCC (R4): the DMG branch of Gambatte's HALT-exit fixup
+        // (memory.cpp:308, `cc += 4 * (... || cc - eventTime < 2)`). When the DMG
+        // wakeup landed within 2cc of the woken mode-0 STAT IRQ event time, the +4
+        // wakeup latency advances the CPU clock, so the halt-woken FF41 read samples
+        // +4cc later in the line — lifting the `late_m0*_halt_m0stat_scx3_2b` read
+        // from the stale mode-0 line tail into the next line's OAM (mode 2). Only
+        // active under RB_FAITHFUL_EVENTCC; the flag is set at unhalt and cleared on
+        // the next HALT, so it only ever biases the single woken instruction stream.
+        let access_cc = if faithful_eventcc_enabled() && mmio.halt_wake_plus4_dmg() {
+            access_cc + 4
         } else {
             access_cc
         };

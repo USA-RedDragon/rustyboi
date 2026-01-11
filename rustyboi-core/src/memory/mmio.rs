@@ -407,6 +407,24 @@ pub struct Mmio {
     #[serde(skip, default)]
     halt_wakeup_hdma: bool,
 
+    // FAITHFUL EVENTCC: the cc at which the most-recent still-unserviced mode-0
+    // STAT IRQ's IF bit was raised, equal to Gambatte's
+    // `intreq_.eventTime(intevent_interrupts)` for that m0 IRQ
+    // (`predictedNextXposTime(166)`). The halt-exit `<2` fixup (memory.cpp:308)
+    // reads this to decide the +4 wakeup latency. `None` once serviced/cleared or
+    // when no closed-form master existed at flag time.
+    #[serde(skip, default)]
+    pending_m0_irq_fire_cc: Option<u64>,
+
+    // FAITHFUL EVENTCC: set at HALT-exit when Gambatte's memory.cpp:308 fixup
+    // `cc += 4 * (isCgb() || cc - eventTime < 2)` applies the +4 wakeup latency on
+    // a non-CGB (DMG) wakeup — i.e. the wakeup landed within 2cc of the woken IRQ
+    // event time. The DMG halt-woken getStat read then samples +4cc later in the
+    // line (the same place the existing CGB `+5` read bias models the isCgb()
+    // branch). Cleared on the next HALT entry.
+    #[serde(skip, default)]
+    halt_wake_plus4_dmg: bool,
+
     // Whether the HDMA block owed for the *current* eligibility period has
     // already been serviced. rustyboi fires the period block immediately at the
     // rising edge, whereas Gambatte defers it to the `intevent_dma` event; this
@@ -679,6 +697,8 @@ impl Mmio {
             halt_hdma_state: HaltHdmaState::Low,
             halt_wakeup_skew: false,
             halt_wakeup_hdma: false,
+            pending_m0_irq_fire_cc: None,
+            halt_wake_plus4_dmg: false,
             hdma_is_in_period_cached: false,
             hdma_prev_stat_mode: 0,
             hdma_prev_period: false,
@@ -1191,6 +1211,18 @@ impl Mmio {
         self.timer.next_overflow_deliver_cc()
     }
 
+    /// FAITHFUL EVENTCC: record the mode-0 STAT IRQ event cc when its IF bit is
+    /// raised (Gambatte `flagIrq(2, eventTimes_(memevent_m0irq))`).
+    pub fn set_pending_m0_irq_fire_cc(&mut self, cc: Option<u64>) {
+        self.pending_m0_irq_fire_cc = cc;
+    }
+
+    /// FAITHFUL EVENTCC: the recorded mode-0 STAT IRQ event cc (halt-exit `<2`
+    /// fixup), or `None` if no unserviced m0 IRQ with a closed-form anchor.
+    pub fn pending_m0_irq_fire_cc(&self) -> Option<u64> {
+        self.pending_m0_irq_fire_cc
+    }
+
     /// EARLY (EI-loop) anchor cc of the next scheduled overflow (schedCc + IF_OFF).
     pub fn next_timer_overflow_ei_cc(&self) -> Option<u64> {
         self.timer.next_overflow_ei_cc()
@@ -1663,6 +1695,17 @@ impl Mmio {
         self.halt_wakeup_skew
     }
 
+    /// FAITHFUL EVENTCC: record the DMG HALT-exit `cc += 4` wakeup-latency decision
+    /// (Gambatte memory.cpp:308, `cc - eventTime < 2` branch).
+    pub fn set_halt_wake_plus4_dmg(&mut self, v: bool) {
+        self.halt_wake_plus4_dmg = v;
+    }
+
+    /// FAITHFUL EVENTCC: true when this DMG wakeup carried the +4 read-phase bias.
+    pub fn halt_wake_plus4_dmg(&self) -> bool {
+        self.halt_wake_plus4_dmg
+    }
+
     pub fn set_halt_wakeup_hdma(&mut self, v: bool) {
         self.halt_wakeup_hdma = v;
     }
@@ -1793,6 +1836,8 @@ impl Mmio {
         // C1: a fresh HALT re-arms the wakeup-skew guard (the previous HALT-woken
         // stream has ended).
         self.halt_wakeup_skew = false;
+        // FAITHFUL EVENTCC: a fresh HALT ends the previous wakeup's +4 read bias.
+        self.halt_wake_plus4_dmg = false;
         // A fresh HALT supersedes any pending High-unhalt edge-consume (the prior
         // unhalt's stream has ended); never let it span halts.
         self.hdma_high_unhalt_consume = false;

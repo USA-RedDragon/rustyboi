@@ -96,6 +96,27 @@ impl SM83 {
                 // getStat-at-cc line-tail override defers to the renderer register
                 // (which is already correct there). Cleared on the next HALT.
                 mmio.set_halt_wakeup_skew(true);
+                // FAITHFUL EVENTCC (R4): Gambatte's HALT-exit fixup (memory.cpp:308)
+                // advances `cc += 4 * (isCgb() || cc - eventTime < 2)` before the
+                // woken instruction stream resumes. The CGB (`isCgb()`) branch is
+                // already modelled by the `+5` getStat read bias (controller.rs);
+                // here we add the DMG branch: when the wakeup landed within 2cc of
+                // the woken mode-0 STAT IRQ's event time (`pending_m0_irq_fire_cc`,
+                // master cc), the +4 also applies on DMG. Flag it so the DMG
+                // halt-woken getStat read samples +4cc later (the R4
+                // `late_m0*_halt_m0stat_scx3_2b` reads land in the next-line OAM /
+                // mode 2 instead of the stale mode 0).
+                if crate::ppu::faithful_eventcc_enabled()
+                    && pending_interrupt == Some(registers::InterruptFlag::Lcd)
+                    && !mmio.mmio.is_cgb()
+                {
+                    if let Some(ev) = mmio.mmio.pending_m0_irq_fire_cc() {
+                        let mcc = mmio.master_cc_dbg() as i64;
+                        if mcc - (ev as i64) < 2 {
+                            mmio.mmio.set_halt_wake_plus4_dmg(true);
+                        }
+                    }
+                }
                 // Gambatte unhalt re-flag gate (memory.cpp:224/304):
                 //   (hdmaEnabled && isHdmaPeriod && haltHdmaState == hdma_low)
                 //   || haltHdmaState == hdma_requested
