@@ -1912,6 +1912,14 @@ impl Mmio {
         // ordinary in-period (`High`) and out-of-period (`Low` -> reflag) HALT
         // captures, whose block fired on an earlier dot, are untouched.
         let halt_cc = self.master_cc();
+        // HALT-PREFETCH (Lever A): record the pre-snap HALT-entry master_cc. This
+        // is the un-snapped cc Gambatte's ceil_4(eventTime) snap (cpu.cpp:1075)
+        // would erase; at unhalt it derives the M-cycle-granular phase bit that
+        // separates the byte-identical _1b/_2b streams. Real-halt path only;
+        // inert until the DMG-LCD derivation reads it. Flag-OFF: never set.
+        if crate::ppu::controller::prefetch_cc_enabled() {
+            self.set_halt_entry_cc(Some(halt_cc));
+        }
         // Use the PRE-fire enabled flag: a final block (length underflow) clears
         // `hdma_enabled` inside `run_hdma_block`, but Gambatte still holds it enabled
         // and `Requested` at the coincident HALT.
