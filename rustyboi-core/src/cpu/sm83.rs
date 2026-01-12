@@ -167,6 +167,51 @@ impl SM83 {
                         );
                     }
                 }
+                // HALT-PREFETCH woken-PC PUSH phase (R-PC, RB_TIMER_PUSH_PHASE).
+                // Faithful conditional-prefetch-undo fix. Gambatte's interrupt
+                // service undoes the boundary prefetch CONDITIONALLY
+                // (interrupter.cpp:42 `if (prefetched_) pc_ -= 1`), where
+                // `prefetched_` is the byte fetched by `case 0x76`'s
+                // `prefetched_ = mem_.halt(cc()) = hdmaReqFlagged(...)`. rustyboi's
+                // service_interrupt instead undoes UNCONDITIONALLY (`pc -= 1`),
+                // which is correct for the common path where the unhalt did a real
+                // pc-ADVANCING boundary fetch. But a Requested-halt wakeup left a
+                // NON-advancing prefetch peek at HALT entry (opcodes.rs halt(): the
+                // byte at pc=HALT+1 is peeked, pc NOT advanced), so the unhalt skips
+                // its fetch and pc stays at the resume address. There the
+                // unconditional `pc -= 1` over-subtracts by one instruction byte,
+                // pinning the pushed resume PC one short (pc_scx1 _2: AC instead of
+                // AD; _1/_3 took the Low/real-fetch path and net to zero). Mark
+                // phase 1 for exactly that case so the push consume re-adds the +1.
+                // Gated Timer IRQ + CGB (the failing family's vector + hardware) and
+                // stored in a SEPARATE register so the FF41 getStat consumer that
+                // reads halt_prefetch_phase is untouched. The blast radius is the
+                // whole interrupt-service path, so the gate is the exact wakeup
+                // shape: just-unhalted Timer service whose halt left a non-advancing
+                // Requested-HDMA prefetch peek.
+                let req_halt_peek = self.prefetched
+                    && matches!(
+                        mmio.halt_hdma_state(),
+                        memory::mmio::HaltHdmaState::Requested
+                    );
+                if crate::ppu::controller::timer_push_phase_enabled()
+                    && pending_interrupt == Some(registers::InterruptFlag::Timer)
+                    && mmio.mmio.is_cgb()
+                {
+                    let phase = if req_halt_peek { 1u32 } else { 0u32 };
+                    mmio.mmio.set_timer_push_phase(phase);
+                    if std::env::var("RB_TIMER_PUSH_TRACE").is_ok() {
+                        let pc = self.registers.pc;
+                        let h = mmio.mmio.halt_entry_cc();
+                        let ev = mmio.mmio.pending_timer_event_cc();
+                        let e = ev.map(|x| x as i64).unwrap_or(-1);
+                        let mcc = mmio.master_cc_dbg();
+                        eprintln!(
+                            "[TIMERPUSH] pc={:#06x} mcc={} H={:?} E={} prefetched={} hdma={:?} phase={}",
+                            pc, mcc, h, e, self.prefetched, mmio.halt_hdma_state(), phase
+                        );
+                    }
+                }
                 // Gambatte unhalt re-flag gate (memory.cpp:224/304):
                 //   (hdmaEnabled && isHdmaPeriod && haltHdmaState == hdma_low)
                 //   || haltHdmaState == hdma_requested
@@ -491,6 +536,26 @@ impl SM83 {
         // 16; prefetch (4) + 16 = the full 20-cc / 5-M-cycle interrupt cost.
         self.registers.pc = self.registers.pc.wrapping_sub(1);
         self.prefetched = false;
+        // HALT-PREFETCH woken-PC PUSH consume (R-PC, RB_TIMER_PUSH_PHASE). The
+        // unconditional `pc -= 1` undo above is correct only when the unhalt did a
+        // pc-ADVANCING boundary fetch. For the CGB+Timer phase-1 wakeup (the HALT
+        // left a NON-advancing Requested-HDMA prefetch peek, so pc was never
+        // advanced past the resume byte) the undo over-subtracts by one. Re-add the
+        // +1 here, BEFORE both pushes (so a page-crossing carry propagates to the
+        // high byte too), reproducing Gambatte's CONDITIONAL prefetch undo
+        // (interrupter.cpp:42 `if (prefetched_) pc_ -= 1`, where for this wakeup
+        // hdmaReq=false => no undo => pushed resume PC = HALT+1). Phase-conditioned:
+        // phase 0 streams (pc_scx1 _1/_3, real-fetch path) are unchanged. The flag
+        // is consumed (zeroed) below so it biases exactly one interrupt service.
+        if just_unhalted
+            && crate::ppu::controller::timer_push_phase_enabled()
+            && bus.mmio.timer_push_phase() == 1
+        {
+            self.registers.pc = self.registers.pc.wrapping_add(1);
+        }
+        if crate::ppu::controller::timer_push_phase_enabled() {
+            bus.mmio.set_timer_push_phase(0);
+        }
         bus.internal_cycle();
         bus.internal_cycle();
 

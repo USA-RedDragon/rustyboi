@@ -187,6 +187,30 @@ pub fn tima_lowfudge_enabled() -> bool {
     })
 }
 
+// HALT-PREFETCH woken-PC push phase (`RB_TIMER_PUSH_PHASE`, R-PC). OFF (unset /
+// `=0`) => byte-identical to main_19. ON => a CGB+Timer HALT-exit whose HALT left
+// a NON-advancing Requested-HDMA prefetch peek (pc was not advanced past the
+// resume byte) marks phase 1, so service_interrupt re-adds the +1 its
+// unconditional `pc -= 1` prefetch undo wrongly removed there — reproducing
+// Gambatte's CONDITIONAL undo (interrupter.cpp:42 `if (prefetched_) pc_ -= 1`,
+// hdmaReq=false => no undo => pushed resume PC = HALT+1). Separates the
+// byte-identical pc_scx1 _1/_2/_3 streams (AC/AD/AE): _2 took the Requested-peek
+// path; _1/_3 the Low/real-fetch path (net zero). The INVERSE-gated (Timer+CGB)
+// sibling of prefetch_cc (DMG+Lcd FF41 getStat); it consumes a NEW register
+// (timer_push_phase) so the getStat path is untouched. CANNOT be ON without the
+// eventcc/prefetch foundation. Default ON (proven broke-0, zero regressions);
+// set RB_TIMER_PUSH_PHASE=0 to disable. Read once, cached.
+pub fn timer_push_phase_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("RB_TIMER_PUSH_PHASE").as_deref(),
+            Ok("0") | Ok("off") | Ok("false")
+        )
+    }) && prefetch_cc_enabled()
+}
+
 // DS offsets re-derived after the double-speed STAT sub-dot step (step_subdot)
 // gave the IRQ model true odd-cc resolution: m2 relaxes -2 -> -1 (the odd-cc
 // fire is now caught by the sub-dot rather than rounded down), and the write cc
