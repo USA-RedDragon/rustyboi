@@ -127,14 +127,15 @@ pub fn linerender_enabled() -> bool {
 // modelled. Recovers the R4 `late_m0*_halt_m0stat_scx3_2b` DMG family. (The
 // IRQ-DISPATCH and getStat-read consumers stay on the calibrated offset form —
 // their migration onto this same event cc is a later stage; see the engine
-// verdict.) DEV-ONLY knob; inline/remove before merge. Read once, cached.
+// verdict.) Default ON (proven broke-0, coupled with prefetch_cc below);
+// set RB_FAITHFUL_EVENTCC=0 to disable for debugging/bisection. Read once, cached.
 pub fn faithful_eventcc_enabled() -> bool {
     use std::sync::OnceLock;
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("RB_FAITHFUL_EVENTCC").as_deref(),
-            Ok("1") | Ok("on") | Ok("true")
+            Ok("0") | Ok("off") | Ok("false")
         )
     })
 }
@@ -144,15 +145,16 @@ pub fn faithful_eventcc_enabled() -> bool {
 // FF41 read's access_cc carries the M-cycle-granular HALT-entry-vs-eventTime
 // boundary bit (the pre-snap quantity Gambatte's ceil_4(E) snap erases), so the
 // byte-identical _1b/_2b ROMs separate (phase 0 -> mode0, phase 1 -> mode2).
-// CANNOT be ON without the eventcc foundation (`&& faithful_eventcc_enabled()`).
-// DEV-ONLY knob; inline/remove before merge. Read once, cached.
+// CANNOT be ON without the eventcc foundation (`&& faithful_eventcc_enabled()`),
+// so disabling the foundation disables this too (they move together).
+// Default ON (proven broke-0); set RB_PREFETCH_CC=0 to disable. Read once, cached.
 pub fn prefetch_cc_enabled() -> bool {
     use std::sync::OnceLock;
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("RB_PREFETCH_CC").as_deref(),
-            Ok("1") | Ok("on") | Ok("true")
+            Ok("0") | Ok("off") | Ok("false")
         )
     }) && faithful_eventcc_enabled()
 }
