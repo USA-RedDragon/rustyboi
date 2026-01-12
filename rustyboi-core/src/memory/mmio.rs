@@ -1880,6 +1880,15 @@ impl Mmio {
         // prefetch-phase bias (and its captured pre-snap entry cc).
         self.halt_entry_cc = None;
         self.halt_prefetch_phase = 0;
+        // HALT-PREFETCH (Lever A): record the pre-snap HALT-entry master_cc here
+        // (above the DMG `!cgb_features_enabled` early-return) so the DMG R4
+        // streams capture it. This is the un-snapped cc Gambatte's
+        // ceil_4(eventTime) snap (cpu.cpp:1075) would erase; the unhalt
+        // derivation (sm83.rs) compares it against the captured m0 eventTime to
+        // separate the byte-identical _1b/_2b streams. Flag-OFF: never set.
+        if crate::ppu::controller::prefetch_cc_enabled() {
+            self.set_halt_entry_cc(Some(self.master_cc()));
+        }
         // A fresh HALT supersedes any pending High-unhalt edge-consume (the prior
         // unhalt's stream has ended); never let it span halts.
         self.hdma_high_unhalt_consume = false;
@@ -1912,14 +1921,6 @@ impl Mmio {
         // ordinary in-period (`High`) and out-of-period (`Low` -> reflag) HALT
         // captures, whose block fired on an earlier dot, are untouched.
         let halt_cc = self.master_cc();
-        // HALT-PREFETCH (Lever A): record the pre-snap HALT-entry master_cc. This
-        // is the un-snapped cc Gambatte's ceil_4(eventTime) snap (cpu.cpp:1075)
-        // would erase; at unhalt it derives the M-cycle-granular phase bit that
-        // separates the byte-identical _1b/_2b streams. Real-halt path only;
-        // inert until the DMG-LCD derivation reads it. Flag-OFF: never set.
-        if crate::ppu::controller::prefetch_cc_enabled() {
-            self.set_halt_entry_cc(Some(halt_cc));
-        }
         // Use the PRE-fire enabled flag: a final block (length underflow) clears
         // `hdma_enabled` inside `run_hdma_block`, but Gambatte still holds it enabled
         // and `Requested` at the coincident HALT.
