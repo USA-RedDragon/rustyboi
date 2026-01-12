@@ -117,6 +117,56 @@ impl SM83 {
                         }
                     }
                 }
+                // HALT-PREFETCH (Lever A, RB_PREFETCH_CC). Derive the M-cycle
+                // phase bit that separates the byte-identical _1b/_2b streams.
+                // The pre-snap HALT-entry cc H (halt_entry_cc) carries the extra
+                // M-cycle that Gambatte's ceil_4(eventTime) snap (cpu.cpp:1075
+                // `if cc() < nextEventTime()`) would erase: H < S means the snap
+                // fired (cc rounded up to S) -> phase 0; H >= S means the snap was
+                // SKIPPED (the test failed, cc stayed at the later entry) and the
+                // woken read inherits its extra M-cycle -> phase 1. _2b enters
+                // HALT one M-cycle (4cc) later than _1b, pushing H across S.
+                // Replaces the all-or-nothing +4 with a per-stream 0/1 phase at
+                // the FF41 consume site (controller.rs). Stacks on the foundation:
+                // halt_wake_plus4_dmg above is left set for the flag-OFF path.
+                if crate::ppu::controller::prefetch_cc_enabled()
+                    && pending_interrupt == Some(registers::InterruptFlag::Lcd)
+                    && !mmio.mmio.is_cgb()
+                {
+                    let phase = match (mmio.mmio.pending_m0_irq_fire_cc(), mmio.mmio.halt_entry_cc()) {
+                        (Some(ev), Some(h)) => {
+                            let e = ev as i64;
+                            // S = ceil_4(E) = the snap target Gambatte rounds cc up
+                            // to (cpu.cpp:1077 `cc += cycles + (-cycles & 3)`).
+                            let s = e + ((e.wrapping_neg()) & 3);
+                            // Faithful reconstruction of Gambatte's snap-SKIP test
+                            // (cpu.cpp:1075 `if cc() < nextEventTime()`): the HALT
+                            // M-cycle charges cc forward; when the pre-snap entry H
+                            // lands in the M-cycle directly below the snap target,
+                            // the post-charge cc reaches the event and the snap is
+                            // SKIPPED, so the woken read inherits the extra M-cycle
+                            // (phase 1). _2b enters HALT one M-cycle later than _1b
+                            // (H = S-4 vs S-8), crossing this boundary. The +4
+                            // aligns rustyboi's pre-charge entry cc to Gambatte's
+                            // post-HALT-charge cc origin.
+                            if (h as i64) + 4 >= s { 1u32 } else { 0u32 }
+                        }
+                        _ => 0,
+                    };
+                    mmio.mmio.set_halt_prefetch_phase(phase);
+                    if std::env::var("RB_PREFETCH_TRACE").is_ok() {
+                        let pc = self.registers.pc;
+                        let h = mmio.mmio.halt_entry_cc();
+                        let ev = mmio.mmio.pending_m0_irq_fire_cc();
+                        let e = ev.map(|x| x as i64).unwrap_or(-1);
+                        let s = e + ((e.wrapping_neg()) & 3);
+                        let mcc = mmio.master_cc_dbg();
+                        eprintln!(
+                            "[PREFETCH] pc={:#06x} mcc={} H={:?} E={} S={} phase={}",
+                            pc, mcc, h, e, s, phase
+                        );
+                    }
+                }
                 // Gambatte unhalt re-flag gate (memory.cpp:224/304):
                 //   (hdmaEnabled && isHdmaPeriod && haltHdmaState == hdma_low)
                 //   || haltHdmaState == hdma_requested
