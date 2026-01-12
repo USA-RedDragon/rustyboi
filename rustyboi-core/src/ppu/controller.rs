@@ -160,27 +160,29 @@ pub fn prefetch_cc_enabled() -> bool {
 }
 
 // HDMA Low halt-woken block prefetch-fudge correction (`RB_TIMA_LOWFUDGE`).
-// OFF (unset / `=0`) => byte-identical to main_19. ON => an HDMA block that fires
-// on the halt-woken instruction stream WHILE a CGB speed switch is armed
-// (`key1_switch_armed`, i.e. the program has set FF4D bit 0 and a `stop` is
-// pending downstream) charges the full 12cc CPU-prefetch overlap instead of the
-// 6cc tuned for the STAT/FF44-immediate-read calibration blocks. Such a block's
-// block cost is drained as a timer-ticking idle slice (sm83 take_dma_stall) and
-// feeds `abs_cc` into the pending 2nd STOP's `divReset` re-anchor, so its
-// downstream value-read is a TIMA read several instructions out (past that STOP),
-// not an immediate STAT read. The +6 there pins the TIMA divider phase 6cc short
-// (anchor%16 = 6 vs Gambatte 12), one TIMA tick low at the read
-// (`hdma_late_m3speedchange_tima_scx1_ds_6` -> F8 instead of F9). The armed-switch
-// gate isolates exactly these STOP-downstream blocks; the calibration blocks
-// (`hdma_cycles`/`frame*_count`) fire with no switch armed and keep the +6.
-// Read once, cached.
+// ON (unset / != `0`) => an HDMA block that fires on the halt-woken instruction
+// stream WHILE a CGB speed switch is armed (`key1_switch_armed`, i.e. the program
+// has set FF4D bit 0 and a `stop` is pending downstream) charges the full 12cc
+// CPU-prefetch overlap instead of the 6cc tuned for the STAT/FF44-immediate-read
+// calibration blocks. Such a block's cost is drained as a timer-ticking idle
+// slice (sm83 take_dma_stall) and feeds `abs_cc` into the pending 2nd STOP's
+// `divReset` re-anchor, so its downstream value-read is a TIMA read several
+// instructions out (past that STOP), not an immediate STAT read. The +6 there
+// pins the TIMA divider phase 6cc short (read - anchor = 131162, one TIMA tick
+// below the 131168 boundary), so `hdma_late_m3speedchange_tima_scx1_ds_6` reads
+// F8 where hardware reads F9. The +12 lands the read on the boundary and produces
+// the byte-exact hardware TIMA sequence F3,F4,F6,F7,F8,F9 across ds_1..ds_6. The
+// armed-switch gate isolates exactly these STOP-downstream blocks; the
+// calibration blocks (`hdma_cycles`/`frame*_count`) fire with no switch armed and
+// keep the +6. Default ON (proven broke-0 on the no-bios main_19 oracle); set
+// RB_TIMA_LOWFUDGE=0 to disable for debugging/bisection. Read once, cached.
 pub fn tima_lowfudge_enabled() -> bool {
     use std::sync::OnceLock;
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         !matches!(
             std::env::var("RB_TIMA_LOWFUDGE").as_deref(),
-            Ok("0") | Ok("off") | Ok("false") | Err(_)
+            Ok("0") | Ok("off") | Ok("false")
         )
     })
 }
