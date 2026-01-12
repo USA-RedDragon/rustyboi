@@ -2167,6 +2167,20 @@ impl Mmio {
         // blocks `hdma_cycles` measures keep the +6.
         let prefetch_fudge: u32 = if self.halt_wakeup_skew && self.hdma_enabled_at_halt {
             0
+        } else if crate::ppu::controller::tima_lowfudge_enabled()
+            && self.halt_wakeup_skew
+            && !self.hdma_enabled_at_halt
+            && matches!(self.halt_hdma_state, HaltHdmaState::Low)
+            && self.key1_switch_armed
+        {
+            // A halt-woken Low block fired while a CGB speed switch is armed (a
+            // `stop` is pending downstream): its block cost feeds `abs_cc` into the
+            // pending STOP's `divReset` re-anchor, so the downstream value-read is a
+            // TIMA read past that STOP — not the immediate STAT/FF44 read the +6 is
+            // tuned for. The full 12cc CPU-prefetch overlap lands the post-STOP TIMA
+            // divider phase on Gambatte's grid (anchor%16 = 12, one TIMA tick higher
+            // than the +6's %16 = 6). See `tima_lowfudge_enabled`.
+            12
         } else {
             6
         };
