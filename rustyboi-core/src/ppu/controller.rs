@@ -5157,11 +5157,43 @@ impl Ppu {
     /// the only window in which the fetcher drives VRAM. Outside it a VRAM-source
     /// OAM-DMA read sees true VRAM (the clean HBlank/mode-0 identity window).
     pub fn update_dma_fetcher_bus(&self, mmio: &mut mmio::Mmio) {
-        let locked = !self.disabled
-            && (self.lcdc & (LCDCFlags::DisplayEnable as u8)) != 0
-            && self.state == State::PixelTransfer;
+        let lcd_on = !self.disabled && (self.lcdc & (LCDCFlags::DisplayEnable as u8)) != 0;
+        let locked = lcd_on && self.state == State::PixelTransfer;
         let (addr, bank) = self.fetcher.last_vram_bus();
         mmio.set_fetcher_vram_bus(addr, bank, locked);
+
+        // DMG mode-2 fetcher-prefetch onset (see `Mmio::set_dmg_prefetch_bus`). On
+        // DMG the BG fetcher's first tile-NUMBER fetch begins one M-cycle (4 dots)
+        // before the mode-3 lock, so a VRAM-source OAM-DMA M-cycle in the last
+        // mode-2 M-cycle already conflicts on the first tilemap address. Publish
+        // that predicted address for the 4-dot window preceding the normal-line
+        // mode-3 arm. CGB is unaffected (its AND lock at mode-3 entry already
+        // byte-matches its dumps). Skipped on the first line after enable (no
+        // mode-2 phase / different arm geometry).
+        let prefetch = lcd_on
+            && !mmio.is_cgb_features_enabled()
+            && self.state == State::OAMSearch
+            && !self.first_line_after_enable
+            && self.ticks + 4 >= DMG_PIXEL_TRANSFER_ARM_DOT
+            && self.ticks < DMG_PIXEL_TRANSFER_ARM_DOT;
+        if prefetch {
+            // First BG tile-number address for this line (display column 0):
+            // tilemap_base + ((ly + scy)/8 % 32)*32 + (scx/8 % 32).
+            let map_base: u16 = if (self.lcdc & (LCDCFlags::BGTileMapDisplaySelect as u8)) != 0 {
+                0x9C00
+            } else {
+                0x9800
+            };
+            let scy = mmio.read(SCY) as u16;
+            let scx = mmio.read(SCX) as u16;
+            let bg_y = self.internal_ly_val as u16 + scy;
+            let map_y = (bg_y / 8) & 0x1F;
+            let map_x = (scx / 8) & 0x1F;
+            let map_addr = map_base + (map_y * 32 + map_x);
+            mmio.set_dmg_prefetch_bus(map_addr, true);
+        } else {
+            mmio.set_dmg_prefetch_bus(0, false);
+        }
     }
 
     pub fn frame_ready(&self) -> bool {
