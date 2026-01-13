@@ -400,6 +400,10 @@ fn collect_mismatch(pixels: impl Iterator<Item = (u32, u32)>) -> Option<FrameMis
     })
 }
 
+/// Decode a 160x144 PNG to one packed 0xRRGGBB per pixel. Supports the c-sp
+/// reference formats (color types 0=grayscale, 2=RGB, 3=palette, 6=RGBA at bit
+/// depths 1/2/4/8) in addition to the original 8-bit-RGBA Gambatte references.
+/// Non-interlaced only; alpha is dropped (the comparison mask ignores it).
 fn decode_png_rgba(data: &[u8]) -> Result<Vec<u32>, String> {
     if data.len() < PNG_SIGNATURE.len() || &data[..PNG_SIGNATURE.len()] != PNG_SIGNATURE {
         return Err("not a PNG file".to_string());
@@ -407,6 +411,9 @@ fn decode_png_rgba(data: &[u8]) -> Result<Vec<u32>, String> {
 
     let mut width = None;
     let mut height = None;
+    let mut bit_depth = 8u8;
+    let mut color_type = 6u8;
+    let mut palette: Vec<u32> = Vec::new();
     let mut idat = Vec::new();
     let mut offset = PNG_SIGNATURE.len();
 
@@ -432,8 +439,8 @@ fn decode_png_rgba(data: &[u8]) -> Result<Vec<u32>, String> {
 
                 let image_width = read_be_u32(&chunk_data[0..4]) as usize;
                 let image_height = read_be_u32(&chunk_data[4..8]) as usize;
-                let bit_depth = chunk_data[8];
-                let color_type = chunk_data[9];
+                bit_depth = chunk_data[8];
+                color_type = chunk_data[9];
                 let compression = chunk_data[10];
                 let filter = chunk_data[11];
                 let interlace = chunk_data[12];
@@ -443,12 +450,23 @@ fn decode_png_rgba(data: &[u8]) -> Result<Vec<u32>, String> {
                         "expected {GB_WIDTH}x{GB_HEIGHT} PNG, got {image_width}x{image_height}"
                     ));
                 }
-                if bit_depth != 8 || color_type != 6 || compression != 0 || filter != 0 || interlace != 0 {
-                    return Err("only non-interlaced 8-bit RGBA PNGs are supported".to_string());
+                if compression != 0 || filter != 0 || interlace != 0 {
+                    return Err("only non-interlaced PNGs are supported".to_string());
+                }
+                if !matches!(color_type, 0 | 2 | 3 | 6) || !matches!(bit_depth, 1 | 2 | 4 | 8) {
+                    return Err(format!(
+                        "unsupported PNG color type {color_type} / bit depth {bit_depth}"
+                    ));
                 }
 
                 width = Some(image_width);
                 height = Some(image_height);
+            }
+            b"PLTE" => {
+                palette = chunk_data
+                    .chunks_exact(3)
+                    .map(|c| ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32)
+                    .collect();
             }
             b"IDAT" => idat.extend_from_slice(chunk_data),
             b"IEND" => break,
@@ -458,7 +476,18 @@ fn decode_png_rgba(data: &[u8]) -> Result<Vec<u32>, String> {
 
     let width = width.ok_or_else(|| "missing PNG IHDR".to_string())?;
     let height = height.ok_or_else(|| "missing PNG IHDR".to_string())?;
-    let stride = width * 4;
+
+    // Samples per pixel for the channel layout (alpha dropped at read time).
+    let channels = match color_type {
+        0 | 3 => 1,
+        2 => 3,
+        6 => 4,
+        _ => unreachable!(),
+    };
+    // Bytes per pixel for filtering (rounded up to 1 for sub-byte depths).
+    let bits_per_pixel = channels * bit_depth as usize;
+    let bytes_per_pixel = bits_per_pixel.div_ceil(8).max(1);
+    let stride = (width * bits_per_pixel).div_ceil(8);
     let expected_raw_len = (stride + 1) * height;
 
     let mut decoder = ZlibDecoder::new(&idat[..]);
@@ -474,16 +503,83 @@ fn decode_png_rgba(data: &[u8]) -> Result<Vec<u32>, String> {
         ));
     }
 
-    let rgba = unfilter_rgba_rows(&raw, width, height)?;
-    Ok(rgba
-        .chunks_exact(4)
-        .map(|chunk| ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | chunk[2] as u32)
-        .collect())
+    let unfiltered = unfilter_rows(&raw, stride, bytes_per_pixel, height)?;
+    samples_to_rgb(
+        &unfiltered,
+        width,
+        height,
+        stride,
+        bit_depth,
+        color_type,
+        channels,
+        &palette,
+    )
 }
 
-fn unfilter_rgba_rows(raw: &[u8], width: usize, height: usize) -> Result<Vec<u8>, String> {
-    let bytes_per_pixel = 4;
-    let stride = width * bytes_per_pixel;
+/// Expand the unfiltered scanline bytes into one 0xRRGGBB per pixel.
+#[allow(clippy::too_many_arguments)]
+fn samples_to_rgb(
+    bytes: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    bit_depth: u8,
+    color_type: u8,
+    channels: usize,
+    palette: &[u32],
+) -> Result<Vec<u32>, String> {
+    let mut out = Vec::with_capacity(width * height);
+    let max = ((1u32 << bit_depth) - 1) as u32;
+    for y in 0..height {
+        let row = &bytes[y * stride..y * stride + stride];
+        for x in 0..width {
+            let pixel = if bit_depth == 8 {
+                let base = x * channels;
+                match color_type {
+                    0 => {
+                        let g = row[base] as u32;
+                        (g << 16) | (g << 8) | g
+                    }
+                    2 | 6 => {
+                        ((row[base] as u32) << 16)
+                            | ((row[base + 1] as u32) << 8)
+                            | row[base + 2] as u32
+                    }
+                    3 => *palette
+                        .get(row[base] as usize)
+                        .ok_or("palette index out of range")?,
+                    _ => unreachable!(),
+                }
+            } else {
+                // Sub-byte sample (grayscale or palette index), MSB-first.
+                let bit = x * bit_depth as usize;
+                let byte = row[bit / 8];
+                let shift = 8 - bit_depth as usize - (bit % 8);
+                let sample = ((byte >> shift) as u32) & max;
+                match color_type {
+                    0 => {
+                        // Scale the grayscale sample to 8-bit.
+                        let g = (sample * 255 / max) & 0xFF;
+                        (g << 16) | (g << 8) | g
+                    }
+                    3 => *palette
+                        .get(sample as usize)
+                        .ok_or("palette index out of range")?,
+                    _ => return Err("sub-byte depth only valid for grayscale/palette".into()),
+                }
+            };
+            out.push(pixel);
+        }
+    }
+    Ok(out)
+}
+
+fn unfilter_rows(
+    raw: &[u8],
+    stride: usize,
+    bytes_per_pixel: usize,
+    height: usize,
+) -> Result<Vec<u8>, String> {
     let mut output = vec![0; stride * height];
 
     for y in 0..height {
@@ -588,5 +684,76 @@ mod tests {
         assert!(audio_matches(&[(0.0, 0.0), (0.0, 0.0)], false));
         assert!(!audio_matches(&[(0.0, 0.0), (0.0, 0.0)], true));
         assert!(audio_matches(&[(0.0, 0.0), (0.1, 0.0)], true));
+    }
+
+    // Build a minimal 160x144 PNG (the decoder ignores chunk CRCs, so we use 0).
+    fn build_png(bit_depth: u8, color_type: u8, plte: &[u8], raw_rows: &[u8]) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::ZlibEncoder;
+        use std::io::Write as _;
+
+        let mut png = PNG_SIGNATURE.to_vec();
+        let mut chunk = |ty: &[u8; 4], data: &[u8], out: &mut Vec<u8>| {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            out.extend_from_slice(ty);
+            out.extend_from_slice(data);
+            out.extend_from_slice(&[0, 0, 0, 0]); // CRC (unchecked by decoder)
+        };
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&(GB_WIDTH as u32).to_be_bytes());
+        ihdr.extend_from_slice(&(GB_HEIGHT as u32).to_be_bytes());
+        ihdr.extend_from_slice(&[bit_depth, color_type, 0, 0, 0]);
+        chunk(b"IHDR", &ihdr, &mut png);
+        if !plte.is_empty() {
+            chunk(b"PLTE", plte, &mut png);
+        }
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(raw_rows).unwrap();
+        let idat = enc.finish().unwrap();
+        chunk(b"IDAT", &idat, &mut png);
+        chunk(b"IEND", &[], &mut png);
+        png
+    }
+
+    #[test]
+    fn decodes_palette_2bit_csp_png() {
+        // 2-bit palette, 4 colors. Each row packs 4 pixels/byte. 160 px = 40 bytes.
+        let plte = [
+            0xFF, 0xFF, 0xFF, // index 0 white
+            0xAA, 0xAA, 0xAA, // index 1
+            0x55, 0x55, 0x55, // index 2
+            0x00, 0x00, 0x00, // index 3 black
+        ];
+        let row_bytes = (GB_WIDTH * 2).div_ceil(8); // 40
+        let mut raw = Vec::new();
+        for _ in 0..GB_HEIGHT {
+            raw.push(0u8); // filter: none
+                           // first byte = indices 0,1,2,3 (0b00_01_10_11 = 0x1B), rest = 0.
+            raw.push(0x1B);
+            raw.extend(std::iter::repeat(0u8).take(row_bytes - 1));
+        }
+        let png = build_png(2, 3, &plte, &raw);
+        let decoded = decode_png_rgba(&png).unwrap();
+        assert_eq!(decoded.len(), FRAMEBUFFER_SIZE);
+        assert_eq!(decoded[0], 0xFFFFFF); // index 0
+        assert_eq!(decoded[1], 0xAAAAAA); // index 1
+        assert_eq!(decoded[2], 0x555555); // index 2
+        assert_eq!(decoded[3], 0x000000); // index 3
+        assert_eq!(decoded[4], 0xFFFFFF); // index 0 again
+    }
+
+    #[test]
+    fn decodes_grayscale_8bit_csp_png() {
+        let row_bytes = GB_WIDTH; // 1 byte/pixel
+        let mut raw = Vec::new();
+        for _ in 0..GB_HEIGHT {
+            raw.push(0u8); // filter: none
+            raw.push(0x80); // gray 0x80
+            raw.extend(std::iter::repeat(0u8).take(row_bytes - 1));
+        }
+        let png = build_png(8, 0, &[], &raw);
+        let decoded = decode_png_rgba(&png).unwrap();
+        assert_eq!(decoded[0], 0x808080);
+        assert_eq!(decoded[1], 0x000000);
     }
 }
