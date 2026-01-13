@@ -725,7 +725,13 @@ pub fn di(cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
 }
 
 pub fn ei(cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
-    cpu.ime_enable_delay = 2;
+    // EI enables IME after the instruction FOLLOWING it (the 1-instruction delay).
+    // A back-to-back EI must NOT re-arm an enable already in flight (mooneye
+    // ei_sequence: with consecutive EIs, IME turns on after the 2nd instruction,
+    // not pushed forward by each extra EI). Only arm when no enable is pending.
+    if cpu.ime_enable_delay == 0 {
+        cpu.ime_enable_delay = 2;
+    }
     4
 }
 
@@ -1181,6 +1187,12 @@ macro_rules! make_ret_cond {
     ($name:ident, $cond:expr) => {
         pub fn $name(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             if $cond(cpu) {
+                // Faithful conditional-RET M-cycle layout (mooneye ret_cc_timing):
+                //   M1 internal condition-check delay, M2 PC pop low byte, M3 PC pop
+                //   high byte, M4 internal delay (batched at instruction end via the
+                //   returned 20cc). The leading internal cycle must precede the pops
+                //   so the OAM-DMA conflict probe sees the pop M-cycles 4cc later.
+                mmio.internal_cycle();
                 cpu.registers.pc = mmio.read(cpu.registers.sp) as u16;
                 cpu.registers.pc |= (mmio.read(cpu.registers.sp.wrapping_add(1)) as u16) << 8;
                 cpu.registers.sp = cpu.registers.sp.wrapping_add(2);
@@ -1513,9 +1525,16 @@ macro_rules! make_call_cond {
             let addr = (high << 8) | low;
             cpu.registers.pc += 2;
             if $cond(cpu) {
+                // Faithful conditional-CALL M-cycle layout (mooneye call_cc_timing2):
+                //   M1 nn-low read, M2 nn-high read (above), M3 internal SP-dec delay,
+                //   M4 PC push high byte, M5 PC push low byte. The internal cycle must
+                //   precede the pushes so the stack writes land 4cc later — the
+                //   OAM-DMA conflict probe times the push M-cycle, and the high byte
+                //   must be written before the low byte (high at M4, low at M5).
+                mmio.internal_cycle();
                 cpu.registers.sp = cpu.registers.sp.wrapping_sub(2);
-                mmio.write(cpu.registers.sp, (cpu.registers.pc & 0x00FF) as u8);
                 mmio.write(cpu.registers.sp.wrapping_add(1), (cpu.registers.pc >> 8) as u8);
+                mmio.write(cpu.registers.sp, (cpu.registers.pc & 0x00FF) as u8);
                 cpu.registers.pc = addr;
                 24
             } else {
