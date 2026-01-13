@@ -3,7 +3,7 @@ mod frame;
 mod report;
 mod runner;
 
-use crate::expectation::{Mode, cases_for_rom, is_rom_path};
+use crate::expectation::{Mode, cases_for_rom, is_rom_path, parse_manifest};
 use crate::report::Summary;
 use clap::Parser;
 use std::collections::HashSet;
@@ -18,6 +18,14 @@ struct Args {
     /// Directory containing Gambatte hwtests. ROMs are discovered recursively.
     #[arg(long, value_name = "DIR")]
     suite: Option<PathBuf>,
+
+    /// Run a c-sp public-suite manifest (acid2/mealybug/blargg/gbmicrotest/
+    /// mooneye). Each line: `<id>|<dmg|cgb|agb>|<grading>|<rom>[|<arg>]` where
+    /// grading is one of png/serial/blargg_mem/memauto/mem/mooneye. Bypasses the
+    /// name-based Gambatte discovery; cases are taken from the manifest directly.
+    /// Regenerate manifests with `tools/gen_suite_manifests.sh`.
+    #[arg(long, value_name = "FILE")]
+    manifest: Option<PathBuf>,
 
     /// Hardware modes to run, comma-separated.
     #[arg(long, value_delimiter = ',', default_value = "dmg,cgb")]
@@ -106,6 +114,12 @@ fn run() -> Result<u8, String> {
     let enabled_modes = args.mode.iter().copied().collect::<HashSet<_>>();
     if enabled_modes.is_empty() {
         return Err("at least one mode must be selected".to_string());
+    }
+
+    // Manifest mode: a c-sp public suite. Cases come from the manifest directly
+    // (it carries the model + grading per ROM), not the name-based discovery.
+    if let Some(manifest_path) = &args.manifest {
+        return run_manifest(manifest_path, &enabled_modes, &args);
     }
 
     let mut roms = collect_roms(&args)?;
@@ -203,6 +217,74 @@ fn run() -> Result<u8, String> {
 
     if let Some(path) = args.json {
         report::write_json(&summary, &path)?;
+    }
+
+    Ok(summary.exit_code())
+}
+
+/// Run a c-sp public-suite manifest. Parses the `|`-separated manifest into
+/// cases (keeping only the requested modes), runs each, prints per-failure
+/// detail, and emits the same summary + optional JSON as the Gambatte path.
+fn run_manifest(
+    manifest_path: &PathBuf,
+    enabled_modes: &HashSet<Mode>,
+    args: &Args,
+) -> Result<u8, String> {
+    let text = std::fs::read_to_string(manifest_path)
+        .map_err(|e| format!("read manifest {}: {e}", manifest_path.display()))?;
+    let mut cases = parse_manifest(&text, enabled_modes)?;
+    if let Some(limit) = args.limit {
+        cases.truncate(limit);
+    }
+    if cases.is_empty() {
+        return Err(format!(
+            "manifest {} produced no cases for the requested modes",
+            manifest_path.display()
+        ));
+    }
+
+    println!(
+        "Manifest {}: {} runnable cases.",
+        manifest_path.display(),
+        cases.len()
+    );
+
+    let mut summary = Summary::default();
+    let run_options = runner::RunOptions {
+        frames: args.frames,
+        scan_frames: args.scan_frames,
+        dump_dir: args.dump_dir.clone(),
+        trace_rom: args.trace_rom.clone(),
+        trace_limit: args.trace_limit,
+        trace_frame: args.trace_frame,
+        trace_ly: args.trace_ly,
+        real_bios: args.real_bios,
+        bios_dir: args.bios_dir.clone(),
+    };
+
+    for case in cases {
+        print!("{}", case.mode.progress_char());
+        io::stdout()
+            .flush()
+            .map_err(|error| format!("failed to flush stdout: {error}"))?;
+
+        let result = runner::run_case(case, &run_options);
+        let failed = !result.passed;
+        if failed {
+            report::print_failure(&result);
+        }
+        summary.record(&result);
+
+        if failed && args.fail_fast {
+            break;
+        }
+    }
+
+    println!();
+    report::print_summary(&summary);
+
+    if let Some(path) = &args.json {
+        report::write_json(&summary, path)?;
     }
 
     Ok(summary.exit_code())

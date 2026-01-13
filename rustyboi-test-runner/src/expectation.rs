@@ -61,6 +61,31 @@ pub enum Oracle {
     /// A memory region (OAM/VRAM) read back after the test, compared against a
     /// `.dump` reference. Length is the reference file size.
     RegionDump { path: PathBuf, region: DumpRegion },
+
+    // --- c-sp public-suite oracles (manifest-driven; see `--manifest`) ---
+    /// Framebuffer compared to a c-sp reference PNG (any color type/bit depth).
+    /// Unlike `Png` (Gambatte suite), this runs instruction-by-instruction with
+    /// an early stop on the `LD B,B` (0x40) done-marker and uses the Linear CGB
+    /// color conversion (bucket-identical to the c-sp shift formula under the
+    /// 0xF8 mask). Used by acid2 and mealybug-tearoom.
+    CspPng { path: PathBuf },
+    /// Like `CspPng` but runs a flat cycle budget (no `LD B,B` / frame-ready
+    /// stop) and grades the final held framebuffer. For ROMs that turn the LCD
+    /// off after rendering their result screen (e.g. blargg oam_bug). Manifest
+    /// grading `png_fixed`.
+    CspPngFixed { path: PathBuf },
+    /// blargg serial-port text protocol: scan the bytes written to SB (FF01) on
+    /// each SC (FF02) start edge for "Passed" / "Failed".
+    Serial,
+    /// blargg cart-RAM memory protocol: the result code is written to 0xA000
+    /// (0x00 == pass) once the signature 0xDE 0xB0 0x61 appears at 0xA001-3.
+    BlarggMem,
+    /// gbmicrotest / generic memory check: after a fixed cycle budget, read
+    /// `addr` and require it to equal `expected`. gbmicrotest uses FF82==0x01.
+    MemValue { addr: u16, expected: u8 },
+    /// mooneye: run to `LD B,B` and require the Fibonacci magic registers
+    /// B,C,D,E,H,L = 3,5,8,13,21,34.
+    MooneyeFib,
 }
 
 impl Oracle {
@@ -71,7 +96,7 @@ impl Oracle {
                 let suffix = if *audible { "audio1" } else { "audio0" };
                 format!("{marker}{suffix}")
             }
-            Self::Png { path } => path
+            Self::Png { path } | Self::CspPng { path } | Self::CspPngFixed { path } => path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "png".to_string()),
@@ -79,6 +104,10 @@ impl Oracle {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "dump".to_string()),
+            Self::Serial => "serial".to_string(),
+            Self::BlarggMem => "blargg_mem".to_string(),
+            Self::MemValue { addr, expected } => format!("mem[{addr:04X}]={expected:02X}"),
+            Self::MooneyeFib => "mooneye".to_string(),
         }
     }
 }
@@ -199,6 +228,73 @@ pub fn cases_for_rom(rom_path: &Path, requested_modes: &HashSet<Mode>) -> Vec<Te
     }
 
     cases
+}
+
+/// Parse a c-sp suite manifest into `TestCase`s, keeping only the requested
+/// modes. Each non-blank, non-`#` line is `|`-separated:
+///   `<id>|<mode>|<grading>|<rom_path>[|<arg>]`
+/// where `<mode>` is `dmg`/`cgb`/`agb`, `<grading>` is one of `png`, `serial`,
+/// `blargg_mem`, `memauto`, `mem`, `mooneye`, and `<arg>` is the reference-PNG
+/// path (png), `ADDR=VAL` hex (mem), or empty. The `<id>` is descriptive only.
+pub fn parse_manifest(
+    text: &str,
+    requested_modes: &HashSet<Mode>,
+) -> Result<Vec<TestCase>, String> {
+    let mut cases = Vec::new();
+    for (line_no, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('|').collect();
+        if fields.len() < 4 {
+            return Err(format!("manifest line {}: too few fields: {raw}", line_no + 1));
+        }
+        let mode = match fields[1] {
+            "dmg" => Mode::Dmg,
+            "cgb" => Mode::Cgb,
+            "agb" => Mode::Agb,
+            other => return Err(format!("manifest line {}: bad mode {other}", line_no + 1)),
+        };
+        if !requested_modes.contains(&mode) {
+            continue;
+        }
+        let grading = fields[2];
+        let rom_path = PathBuf::from(fields[3]);
+        let arg = fields.get(4).copied().unwrap_or("").trim();
+        let oracle = match grading {
+            "png" => Oracle::CspPng {
+                path: PathBuf::from(arg),
+            },
+            "png_fixed" => Oracle::CspPngFixed {
+                path: PathBuf::from(arg),
+            },
+            "serial" => Oracle::Serial,
+            "blargg_mem" => Oracle::BlarggMem,
+            "mooneye" => Oracle::MooneyeFib,
+            "memauto" => Oracle::MemValue {
+                addr: 0xFF82,
+                expected: 0x01,
+            },
+            "mem" => {
+                let (a, v) = arg
+                    .split_once('=')
+                    .ok_or_else(|| format!("manifest line {}: mem arg needs ADDR=VAL", line_no + 1))?;
+                let addr = u16::from_str_radix(a.trim().trim_start_matches("0x"), 16)
+                    .map_err(|_| format!("manifest line {}: bad addr {a}", line_no + 1))?;
+                let expected = u8::from_str_radix(v.trim().trim_start_matches("0x"), 16)
+                    .map_err(|_| format!("manifest line {}: bad value {v}", line_no + 1))?;
+                Oracle::MemValue { addr, expected }
+            }
+            other => return Err(format!("manifest line {}: bad grading {other}", line_no + 1)),
+        };
+        cases.push(TestCase {
+            rom_path,
+            mode,
+            oracle,
+        });
+    }
+    Ok(cases)
 }
 
 /// Detect SRAM `.bin` and region `.dump` oracles that accompany a dumper ROM.
@@ -344,6 +440,46 @@ mod tests {
 
     fn all_modes() -> HashSet<Mode> {
         [Mode::Dmg, Mode::Cgb].into_iter().collect()
+    }
+
+    #[test]
+    fn parses_manifest_oracles_and_filters_modes() {
+        let manifest = "\
+# comment line
+acid2|dmg|png|/roms/dmg-acid2.gb|/refs/acid2.png
+blargg/cpu|cgb|serial|/roms/cpu_instrs.gb
+sound/01|dmg|blargg_mem|/roms/01.gb
+000-oam|dmg|memauto|/roms/000-oam.gb
+custom|dmg|mem|/roms/custom.gb|0xFF80=0x01
+mn/add|cgb|mooneye|/roms/add.gb
+";
+        let dmg_only: HashSet<Mode> = [Mode::Dmg].into_iter().collect();
+        let cases = parse_manifest(manifest, &dmg_only).unwrap();
+        // Only the dmg lines survive the mode filter (4 of 6 entries).
+        assert_eq!(cases.len(), 4);
+        assert!(matches!(&cases[0].oracle, Oracle::CspPng { path } if path == Path::new("/refs/acid2.png")));
+        assert!(matches!(cases[1].oracle, Oracle::BlarggMem));
+        assert!(matches!(
+            cases[2].oracle,
+            Oracle::MemValue { addr: 0xFF82, expected: 0x01 }
+        ));
+        assert!(matches!(
+            cases[3].oracle,
+            Oracle::MemValue { addr: 0xFF80, expected: 0x01 }
+        ));
+
+        let all = parse_manifest(manifest, &all_modes()).unwrap();
+        assert_eq!(all.len(), 6);
+        assert!(matches!(all[1].oracle, Oracle::Serial));
+        assert!(matches!(all[5].oracle, Oracle::MooneyeFib));
+    }
+
+    #[test]
+    fn rejects_malformed_manifest_lines() {
+        assert!(parse_manifest("too|few|fields", &all_modes()).is_err());
+        assert!(parse_manifest("id|xbox|png|/r.gb|p", &all_modes()).is_err());
+        assert!(parse_manifest("id|dmg|bogus|/r.gb", &all_modes()).is_err());
+        assert!(parse_manifest("id|dmg|mem|/r.gb|noeq", &all_modes()).is_err());
     }
 
     #[test]

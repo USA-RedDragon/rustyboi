@@ -385,7 +385,33 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
     seed_initial_state(&mut gb, case, options);
 
     if matches!(case.mode, Mode::Cgb | Mode::Agb) {
-        gb.set_cgb_color_conversion(CgbColorConversion::Gambatte);
+        // c-sp PNG references use the `(X<<3)|(X>>2)` shift formula; Linear is
+        // bucket-identical to it under the 0xF8 comparison mask (RESULTS.md).
+        // The Gambatte suite keeps its native Gambatte conversion.
+        let conversion = if matches!(
+            case.oracle,
+            Oracle::CspPng { .. } | Oracle::CspPngFixed { .. }
+        ) {
+            CgbColorConversion::Linear
+        } else {
+            CgbColorConversion::Gambatte
+        };
+        gb.set_cgb_color_conversion(conversion);
+    }
+
+    // c-sp public-suite oracles drive the CPU instruction-by-instruction rather
+    // than the Gambatte frame loop (they need the `LD B,B` done-marker and the
+    // serial / cart-RAM / FF82 / register protocols). Handle them up front.
+    match &case.oracle {
+        Oracle::Serial => return evaluate_serial(&mut gb, options.frames),
+        Oracle::BlarggMem => return evaluate_blargg_mem(&mut gb, options.frames),
+        Oracle::MemValue { addr, expected } => {
+            return evaluate_mem_value(&mut gb, options.frames, *addr, *expected);
+        }
+        Oracle::MooneyeFib => return evaluate_mooneye(&mut gb),
+        Oracle::CspPng { path } => return evaluate_csp_png(&mut gb, options, path, false),
+        Oracle::CspPngFixed { path } => return evaluate_csp_png(&mut gb, options, path, true),
+        _ => {}
     }
 
     let collect_audio = matches!(case.oracle, Oracle::Audio { .. });
@@ -496,6 +522,15 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
             // Handled before the frame loop via the cycle-driven dump path.
             evaluate_dump_oracle(&gb, &case.oracle)
         }
+        // c-sp suite oracles are dispatched (and returned) before the frame loop.
+        Oracle::CspPng { .. }
+        | Oracle::CspPngFixed { .. }
+        | Oracle::Serial
+        | Oracle::BlarggMem
+        | Oracle::MemValue { .. }
+        | Oracle::MooneyeFib => {
+            unreachable!("c-sp oracle handled before the Gambatte frame loop")
+        }
     }
 }
 
@@ -554,6 +589,217 @@ fn compare_dump(label: &str, expected: &[u8], actual: &[u8]) -> Result<(), Strin
     }
 
     Ok(())
+}
+
+/// Run instruction-by-instruction until the `LD B,B` (0x40) done-marker is the
+/// next opcode, capped at `max_cycles`. Returns true if the marker was reached.
+fn run_until_ldbb(gb: &mut GB, max_cycles: u64) -> bool {
+    let mut cycles = 0u64;
+    while cycles < max_cycles {
+        let pc = gb.get_cpu_registers().pc;
+        if gb.read_memory(pc) == 0x40 {
+            return true;
+        }
+        let (_breakpoint, c) = gb.step_instruction(false);
+        cycles += c as u64;
+    }
+    false
+}
+
+/// mooneye: run to `LD B,B` and check the Fibonacci magic registers.
+fn evaluate_mooneye(gb: &mut GB) -> Result<(), String> {
+    // mooneye tests complete quickly; 250M cycles is ~60s of GB time, ample.
+    if !run_until_ldbb(gb, 250_000_000) {
+        return Err("no LD B,B done-marker (timeout)".to_string());
+    }
+    let r = gb.get_cpu_registers();
+    if r.b == 3 && r.c == 5 && r.d == 8 && r.e == 13 && r.h == 21 && r.l == 34 {
+        Ok(())
+    } else {
+        Err(format!(
+            "regs B={:02X} C={:02X} D={:02X} E={:02X} H={:02X} L={:02X} (want 03 05 08 0D 15 22)",
+            r.b, r.c, r.d, r.e, r.h, r.l
+        ))
+    }
+}
+
+/// gbmicrotest / generic memory check: run a flat cycle budget, then compare a
+/// memory byte. gbmicrotest's protocol is FF82==0x01 (FF80=actual, FF81=expected).
+fn evaluate_mem_value(gb: &mut GB, frames: usize, addr: u16, expected: u8) -> Result<(), String> {
+    let budget = frames as u64 * CYCLES_PER_FRAME as u64;
+    let mut cycles = 0u64;
+    while cycles < budget {
+        let (_breakpoint, c) = gb.step_instruction(false);
+        cycles += c as u64;
+    }
+    let got = gb.read_memory(addr);
+    if got == expected {
+        Ok(())
+    } else if addr == 0xFF82 {
+        let actual = gb.read_memory(0xFF80);
+        let want = gb.read_memory(0xFF81);
+        Err(format!(
+            "FF82={got:02X} (want {expected:02X}); FF80(actual)={actual:02X} FF81(expected)={want:02X}"
+        ))
+    } else {
+        Err(format!("[{addr:04X}]={got:02X} want {expected:02X}"))
+    }
+}
+
+/// blargg serial grading. blargg ROMs write each result byte to SB (FF01) then
+/// start a transfer via SC (FF02) bit7+bit0. Capture SB on each rising edge of
+/// the start bit, reconstruct the text, and scan for "Passed"/"Failed"/"Error".
+fn evaluate_serial(gb: &mut GB, frames: usize) -> Result<(), String> {
+    let budget = frames as u64 * CYCLES_PER_FRAME as u64;
+    let mut cycles = 0u64;
+    let mut prev_start = false;
+    let mut out: Vec<u8> = Vec::new();
+    while cycles < budget {
+        let sc = gb.read_memory(0xFF02);
+        let start = (sc & 0x80) != 0 && (sc & 0x01) != 0;
+        if start && !prev_start {
+            out.push(gb.read_memory(0xFF01));
+            if out.len() >= 6 {
+                let s = String::from_utf8_lossy(&out);
+                if s.contains("Passed") {
+                    return Ok(());
+                }
+                if s.contains("Failed") || s.contains("Error") {
+                    return Err(format!("serial verdict: {}", verdict_tail(&s)));
+                }
+            }
+        }
+        prev_start = start;
+        let (_breakpoint, c) = gb.step_instruction(false);
+        cycles += c as u64;
+    }
+    let s = String::from_utf8_lossy(&out);
+    if s.contains("Passed") {
+        Ok(())
+    } else if s.is_empty() {
+        Err("no serial output (timeout)".to_string())
+    } else {
+        Err(format!("no Passed; tail: {}", verdict_tail(&s)))
+    }
+}
+
+fn verdict_tail(s: &str) -> String {
+    let tail: String = s.chars().rev().take(60).collect::<String>().chars().rev().collect();
+    tail.replace('\n', " ").trim().to_string()
+}
+
+/// blargg cart-RAM memory protocol. The result code is written to 0xA000 (0x80
+/// while running, final code on completion: 0x00 == pass) once the signature
+/// 0xDE 0xB0 0x61 appears at 0xA001-3, with ASCII detail at 0xA004... We read
+/// from the cart RAM backing store so the result survives blargg disabling RAM.
+fn evaluate_blargg_mem(gb: &mut GB, frames: usize) -> Result<(), String> {
+    let budget = frames as u64 * CYCLES_PER_FRAME as u64;
+    let mut cycles = 0u64;
+    let read_ram = |gb: &GB, off: usize| -> u8 {
+        gb.cartridge()
+            .map(|c| c.save_ram().get(off).copied().unwrap_or(0xFF))
+            .unwrap_or(0xFF)
+    };
+    // Only trust a completion after observing the 0x80 running marker, so the
+    // uninitialized 0xFF window is not mistaken for a verdict.
+    let mut saw_running = false;
+    loop {
+        let sig = [read_ram(gb, 1), read_ram(gb, 2), read_ram(gb, 3)];
+        let status = read_ram(gb, 0);
+        if sig == [0xDE, 0xB0, 0x61] && status == 0x80 {
+            saw_running = true;
+        }
+        if saw_running && sig == [0xDE, 0xB0, 0x61] && status != 0x80 {
+            let mut txt = Vec::new();
+            for off in 4usize..0x200 {
+                let b = read_ram(gb, off);
+                if b == 0 {
+                    break;
+                }
+                txt.push(b);
+            }
+            let s = String::from_utf8_lossy(&txt);
+            let oneline = s.replace('\n', " ");
+            if status == 0x00 {
+                return Ok(());
+            }
+            return Err(format!("code={status:02X}: {}", oneline.trim()));
+        }
+        if cycles >= budget {
+            return Err("no result signature (timeout)".to_string());
+        }
+        let (_breakpoint, c) = gb.step_instruction(false);
+        cycles += c as u64;
+    }
+}
+
+/// c-sp framebuffer-PNG grading. Runs LCD frames, early-stopping once the
+/// `LD B,B` (0x40) done-marker is the next opcode (mealybug/acid2 convention),
+/// then compares the final frame to the reference. When `fixed` is set (the
+/// `png_fixed` grading), instead runs a flat `--frames`-cycle budget and grades
+/// the final held framebuffer — for ROMs that turn the LCD off after rendering
+/// their result screen and never complete another frame.
+fn evaluate_csp_png(
+    gb: &mut GB,
+    options: &RunOptions,
+    refpng: &std::path::Path,
+    fixed: bool,
+) -> Result<(), String> {
+    let actual = if fixed {
+        let budget = options.frames as u64 * CYCLES_PER_FRAME as u64;
+        let mut cycles = 0u64;
+        while cycles < budget {
+            let (_breakpoint, c) = gb.step_instruction(false);
+            cycles += c as u64;
+        }
+        frame::normalize_frame(gb.get_current_frame())
+    } else {
+        run_csp_frames_until_ldbb(gb, options.frames)?
+    };
+
+    let expected = frame::read_png_rgb(refpng)
+        .map_err(|e| format!("reference PNG {}: {e}", refpng.display()))?;
+
+    if let Some(mismatch) = frame::frame_buffer_mismatch(&actual, &expected) {
+        Err(format!(
+            "screen did not match PNG {}: {}",
+            refpng.display(),
+            mismatch.describe()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Run up to `frames` LCD frames, stepping instruction-by-instruction within a
+/// frame so the `LD B,B` (0x40) done-marker can stop the run early. Returns the
+/// last completed (or marker-time) frame.
+fn run_csp_frames_until_ldbb(gb: &mut GB, frames: usize) -> Result<Vec<u32>, String> {
+    let mut last: Option<Vec<u32>> = None;
+    let mut done = false;
+    for frame_index in 0..frames {
+        let mut cycles = 0u32;
+        loop {
+            let pc = gb.get_cpu_registers().pc;
+            if gb.read_memory(pc) == 0x40 {
+                done = true;
+                break;
+            }
+            let (_breakpoint, c) = gb.step_instruction(false);
+            cycles += c;
+            if gb.get_ppu_debug_info().0.frame_ready() {
+                break;
+            }
+            if cycles >= MAX_CYCLES_UNTIL_LCD_FRAME {
+                return Err(format!("frame {frame_index} timeout"));
+            }
+        }
+        last = Some(frame::normalize_frame(gb.get_current_frame()));
+        if done {
+            break;
+        }
+    }
+    last.ok_or_else(|| "no frame produced".to_string())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
