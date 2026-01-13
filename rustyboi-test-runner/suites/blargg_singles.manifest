@@ -1,0 +1,42 @@
+# blargg per-subtest singles. Run: --frames 2000
+cpu_instrs/01-special|dmg|serial|/home/reddragon/gb-test-roms/blargg/cpu_instrs/individual/01-special.gb
+cpu_instrs/02-interrupts|dmg|serial|/home/reddragon/gb-test-roms/blargg/cpu_instrs/individual/02-interrupts.gb
+cpu_instrs/03-op sp,hl|dmg|serial|/home/reddragon/gb-test-roms/blargg/cpu_instrs/individual/03-op sp,hl.gb
+cpu_instrs/04-op r,imm|dmg|serial|/home/reddragon/gb-test-roms/blargg/cpu_instrs/individual/04-op r,imm.gb
+cpu_instrs/05-op rp|dmg|serial|/home/reddragon/gb-test-roms/blargg/cpu_instrs/individual/05-op rp.gb
+cpu_instrs/06-ld r,r|dmg|serial|/home/reddragon/gb-test-roms/blargg/cpu_instrs/individual/06-ld r,r.gb
+cpu_instrs/07-jr,jp,call,ret,rst|dmg|serial|/home/reddragon/gb-test-roms/blargg/cpu_instrs/individual/07-jr,jp,call,ret,rst.gb
+cpu_instrs/08-misc instrs|dmg|serial|/home/reddragon/gb-test-roms/blargg/cpu_instrs/individual/08-misc instrs.gb
+cpu_instrs/09-op r,r|dmg|serial|/home/reddragon/gb-test-roms/blargg/cpu_instrs/individual/09-op r,r.gb
+cpu_instrs/10-bit ops|dmg|serial|/home/reddragon/gb-test-roms/blargg/cpu_instrs/individual/10-bit ops.gb
+cpu_instrs/11-op a,(hl)|dmg|serial|/home/reddragon/gb-test-roms/blargg/cpu_instrs/individual/11-op a,(hl).gb
+mem_timing/01-read_timing|dmg|serial|/home/reddragon/gb-test-roms/blargg/mem_timing/individual/01-read_timing.gb
+mem_timing/02-write_timing|dmg|serial|/home/reddragon/gb-test-roms/blargg/mem_timing/individual/02-write_timing.gb
+mem_timing/03-modify_timing|dmg|serial|/home/reddragon/gb-test-roms/blargg/mem_timing/individual/03-modify_timing.gb
+mem_timing-2/01-read_timing|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/mem_timing-2/rom_singles/01-read_timing.gb
+mem_timing-2/02-write_timing|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/mem_timing-2/rom_singles/02-write_timing.gb
+mem_timing-2/03-modify_timing|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/mem_timing-2/rom_singles/03-modify_timing.gb
+dmg_sound/01-registers|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/dmg_sound/rom_singles/01-registers.gb
+dmg_sound/02-len ctr|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/dmg_sound/rom_singles/02-len ctr.gb
+dmg_sound/03-trigger|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/dmg_sound/rom_singles/03-trigger.gb
+dmg_sound/04-sweep|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/dmg_sound/rom_singles/04-sweep.gb
+dmg_sound/05-sweep details|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/dmg_sound/rom_singles/05-sweep details.gb
+dmg_sound/06-overflow on trigger|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/dmg_sound/rom_singles/06-overflow on trigger.gb
+dmg_sound/07-len sweep period sync|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/dmg_sound/rom_singles/07-len sweep period sync.gb
+dmg_sound/08-len ctr during power|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/dmg_sound/rom_singles/08-len ctr during power.gb
+dmg_sound/09-wave read while on|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/dmg_sound/rom_singles/09-wave read while on.gb
+dmg_sound/10-wave trigger while on|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/dmg_sound/rom_singles/10-wave trigger while on.gb
+dmg_sound/11-regs after power|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/dmg_sound/rom_singles/11-regs after power.gb
+dmg_sound/12-wave write while on|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/dmg_sound/rom_singles/12-wave write while on.gb
+cgb_sound/01-registers|cgb|blargg_mem|/home/reddragon/gb-test-roms/blargg/cgb_sound/rom_singles/01-registers.gb
+cgb_sound/02-len ctr|cgb|blargg_mem|/home/reddragon/gb-test-roms/blargg/cgb_sound/rom_singles/02-len ctr.gb
+cgb_sound/03-trigger|cgb|blargg_mem|/home/reddragon/gb-test-roms/blargg/cgb_sound/rom_singles/03-trigger.gb
+cgb_sound/04-sweep|cgb|blargg_mem|/home/reddragon/gb-test-roms/blargg/cgb_sound/rom_singles/04-sweep.gb
+cgb_sound/05-sweep details|cgb|blargg_mem|/home/reddragon/gb-test-roms/blargg/cgb_sound/rom_singles/05-sweep details.gb
+cgb_sound/06-overflow on trigger|cgb|blargg_mem|/home/reddragon/gb-test-roms/blargg/cgb_sound/rom_singles/06-overflow on trigger.gb
+cgb_sound/07-len sweep period sync|cgb|blargg_mem|/home/reddragon/gb-test-roms/blargg/cgb_sound/rom_singles/07-len sweep period sync.gb
+cgb_sound/08-len ctr during power|cgb|blargg_mem|/home/reddragon/gb-test-roms/blargg/cgb_sound/rom_singles/08-len ctr during power.gb
+cgb_sound/09-wave read while on|cgb|blargg_mem|/home/reddragon/gb-test-roms/blargg/cgb_sound/rom_singles/09-wave read while on.gb
+cgb_sound/10-wave trigger while on|cgb|blargg_mem|/home/reddragon/gb-test-roms/blargg/cgb_sound/rom_singles/10-wave trigger while on.gb
+cgb_sound/11-regs after power|cgb|blargg_mem|/home/reddragon/gb-test-roms/blargg/cgb_sound/rom_singles/11-regs after power.gb
+cgb_sound/12-wave|cgb|blargg_mem|/home/reddragon/gb-test-roms/blargg/cgb_sound/rom_singles/12-wave.gb

@@ -1,0 +1,16 @@
+# blargg test ROMs (best oracle per ROM). Run: --frames 4000
+cpu_instrs|dmg|serial|/home/reddragon/gb-test-roms/blargg/cpu_instrs/cpu_instrs.gb
+cpu_instrs|cgb|serial|/home/reddragon/gb-test-roms/blargg/cpu_instrs/cpu_instrs.gb
+instr_timing|dmg|serial|/home/reddragon/gb-test-roms/blargg/instr_timing/instr_timing.gb
+instr_timing|cgb|serial|/home/reddragon/gb-test-roms/blargg/instr_timing/instr_timing.gb
+mem_timing|dmg|serial|/home/reddragon/gb-test-roms/blargg/mem_timing/mem_timing.gb
+mem_timing|cgb|serial|/home/reddragon/gb-test-roms/blargg/mem_timing/mem_timing.gb
+mem_timing-2|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/mem_timing-2/mem_timing.gb
+mem_timing-2|cgb|blargg_mem|/home/reddragon/gb-test-roms/blargg/mem_timing-2/mem_timing.gb
+dmg_sound|dmg|blargg_mem|/home/reddragon/gb-test-roms/blargg/dmg_sound/dmg_sound.gb
+cgb_sound|cgb|blargg_mem|/home/reddragon/gb-test-roms/blargg/cgb_sound/cgb_sound.gb
+halt_bug|dmg|png|/home/reddragon/gb-test-roms/blargg/halt_bug.gb|/home/reddragon/gb-test-roms/blargg/halt_bug-dmg-cgb.png
+halt_bug|cgb|png|/home/reddragon/gb-test-roms/blargg/halt_bug.gb|/home/reddragon/gb-test-roms/blargg/halt_bug-dmg-cgb.png
+oam_bug-dmg|dmg|png_fixed|/home/reddragon/gb-test-roms/blargg/oam_bug/oam_bug.gb|/home/reddragon/gb-test-roms/blargg/oam_bug/oam_bug-dmg.png
+oam_bug-cgb|cgb|png_fixed|/home/reddragon/gb-test-roms/blargg/oam_bug/oam_bug.gb|/home/reddragon/gb-test-roms/blargg/oam_bug/oam_bug-cgb.png
+interrupt_time|cgb|png|/home/reddragon/gb-test-roms/blargg/interrupt_time/interrupt_time.gb|/home/reddragon/gb-test-roms/blargg/interrupt_time/interrupt_time-cgb.png
