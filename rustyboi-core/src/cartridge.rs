@@ -67,7 +67,6 @@ const EXTERNAL_RAM_END: u16 = 0xBFFF;
 // MBC2 specific ranges
 const MBC2_RAM_SIZE: usize = 512; // 512 x 4 bits
 const MBC2_RAM_START: u16 = 0xA000;
-const MBC2_RAM_END: u16 = 0xA1FF;
 
 #[derive(Clone, Debug)]
 pub enum CartridgeType {
@@ -101,6 +100,11 @@ pub struct Cartridge {
     rom_bank_low: u8,    // 5 bits (0x01-0x1F)
     ram_bank_or_rom_bank_high: u8, // 2 bits (0x00-0x03)
     banking_mode: u8,    // 0 = ROM banking mode, 1 = RAM banking mode
+    // MBC1 multicart: the BANK2 register supplies ROM-bank bits 4-5 and only the
+    // low 4 bits of BANK1 are wired, so the combined bank is 6 bits. Detected
+    // from the Nintendo-logo-per-segment header layout (see is_mbc1_multicart).
+    #[serde(default)]
+    mbc1_multicart: bool,
     
     // MBC2 state (MBC2 has built-in 512x4 RAM)
     mbc2_ram: Vec<u8>, // MBC2 built-in RAM (512 x 4 bits, stored as full bytes)
@@ -163,6 +167,7 @@ impl Clone for Cartridge {
             rom_bank_low: self.rom_bank_low,
             ram_bank_or_rom_bank_high: self.ram_bank_or_rom_bank_high,
             banking_mode: self.banking_mode,
+            mbc1_multicart: self.mbc1_multicart,
             mbc2_ram: self.mbc2_ram.clone(),
             mbc3_ram_bank: self.mbc3_ram_bank,
             mbc3_rtc_latch: self.mbc3_rtc_latch,
@@ -200,6 +205,58 @@ impl Cartridge {
             CGB_ONLY => CgbSupport::Only,
             _ => CgbSupport::None,
         }
+    }
+
+    /// Detect an MBC1 multicart. These are 8Mbit (1MB) MBC1 carts whose ROM is
+    /// divided into four 256KB games, each carrying its own Nintendo logo at
+    /// 0x104. The accepted heuristic (used by mooneye / hardware reference
+    /// emulators) is: cartridge type is MBC1, ROM is exactly 64 banks, and the
+    /// Nintendo logo appears at the start of two or more of the four 256KB
+    /// segments. On a multicart BANK2 supplies bank bits 4-5 (not 5-6) and only
+    /// the low 4 bits of BANK1 are wired.
+    fn detect_mbc1_multicart(cartridge_type: u8, data: &[u8]) -> bool {
+        if !matches!(cartridge_type, MBC1 | MBC1_RAM | MBC1_RAM_BATTERY) {
+            return false;
+        }
+        if data.len() != 64 * 0x4000 {
+            return false; // multicarts are exactly 8Mbit / 1MB
+        }
+        let logo = &data[0x0104..0x0134];
+        let mut copies = 0;
+        for seg in 0..4 {
+            let base = seg * 0x40000;
+            if data[base + 0x0104..base + 0x0134] == *logo {
+                copies += 1;
+            }
+        }
+        copies >= 2
+    }
+
+    /// Determine the number of 16KB ROM banks. The cartridge header byte at
+    /// 0x0148 is the nominal size, but it is only metadata: the physical ROM
+    /// chip determines how many banks the MBC can actually address. Some test
+    /// ROMs (e.g. gbmicrotest) ship a deliberately wrong header (claims 32KB
+    /// but is 2MB), so when the real file is larger we trust the file size,
+    /// rounding up to the next power-of-two bank count (banking masks are
+    /// bit-based: bank index is taken modulo this count).
+    fn compute_rom_banks(rom_size_code: u8, data_len: usize) -> Result<usize, io::Error> {
+        let header_banks = match rom_size_code {
+            0x00 => 2,   // 32KB = 2 banks of 16KB
+            0x01 => 4,   // 64KB = 4 banks of 16KB
+            0x02 => 8,   // 128KB = 8 banks of 16KB
+            0x03 => 16,  // 256KB = 16 banks of 16KB
+            0x04 => 32,  // 512KB = 32 banks of 16KB
+            0x05 => 64,  // 1MB = 64 banks of 16KB
+            0x06 => 128, // 2MB = 128 banks of 16KB
+            0x07 => 256, // 4MB = 256 banks of 16KB
+            0x08 => 512, // 8MB = 512 banks of 16KB (MBC5 64Mbit)
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid ROM size")),
+        };
+        // Number of whole 16KB banks present in the actual file, rounded up to a
+        // power of two so the bank-number modulo mask matches the wired address
+        // lines.
+        let file_banks = data_len.div_ceil(0x4000).next_power_of_two().max(2);
+        Ok(header_banks.max(file_banks))
     }
 
     /// Extract ROM data from a zip file, looking for common ROM file extensions
@@ -275,19 +332,9 @@ impl Cartridge {
         let rom_size_code = data[ROM_SIZE_OFFSET];
         let ram_size_code = data[RAM_SIZE_OFFSET];
         
-        // Calculate number of ROM banks
-        let rom_banks = match rom_size_code {
-            0x00 => 2,   // 32KB = 2 banks of 16KB
-            0x01 => 4,   // 64KB = 4 banks of 16KB
-            0x02 => 8,   // 128KB = 8 banks of 16KB
-            0x03 => 16,  // 256KB = 16 banks of 16KB
-            0x04 => 32,  // 512KB = 32 banks of 16KB
-            0x05 => 64,  // 1MB = 64 banks of 16KB
-            0x06 => 128, // 2MB = 128 banks of 16KB
-            0x07 => 256, // 4MB = 256 banks of 16KB (though MBC1 only supports up to 125)
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid ROM size")),
-        };
-        
+        // Calculate number of ROM banks (header size, widened to the real file).
+        let rom_banks = Self::compute_rom_banks(rom_size_code, data.len())?;
+
         // Calculate number of RAM banks
         let ram_banks = match ram_size_code {
             0x00 => 0, // No RAM
@@ -298,7 +345,7 @@ impl Cartridge {
             0x05 => 8,  // 64KB = 8 banks of 8KB
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid RAM size")),
         };
-        
+
         // Copy ROM data
         let expected_rom_size = rom_banks * 0x4000; // 16KB per bank
         let rom_data = if data.len() >= expected_rom_size {
@@ -315,7 +362,10 @@ impl Cartridge {
         
         // Detect CGB support
         let cgb_support = Self::detect_cgb_support(&data);
-        
+
+        // Detect MBC1 multicart wiring from the per-segment logo layout.
+        let mbc1_multicart = Self::detect_mbc1_multicart(cartridge_type, &data);
+
         let mut cartridge = Cartridge {
             rom_data,
             ram_data,
@@ -328,6 +378,7 @@ impl Cartridge {
             rom_bank_low: 1, // Bank 0 cannot be selected for 0x4000-0x7FFF area
             ram_bank_or_rom_bank_high: 0,
             banking_mode: 0,
+            mbc1_multicart,
             mbc2_ram: vec![0xFF; MBC2_RAM_SIZE],
             mbc3_ram_bank: 0,
             mbc3_rtc_latch: 0,
@@ -421,19 +472,9 @@ impl Cartridge {
         let rom_size_code = actual_data[ROM_SIZE_OFFSET];
         let ram_size_code = actual_data[RAM_SIZE_OFFSET];
         
-        // Calculate number of ROM banks
-        let rom_banks = match rom_size_code {
-            0x00 => 2,   // 32KB = 2 banks of 16KB
-            0x01 => 4,   // 64KB = 4 banks of 16KB
-            0x02 => 8,   // 128KB = 8 banks of 16KB
-            0x03 => 16,  // 256KB = 16 banks of 16KB
-            0x04 => 32,  // 512KB = 32 banks of 16KB
-            0x05 => 64,  // 1MB = 64 banks of 16KB
-            0x06 => 128, // 2MB = 128 banks of 16KB
-            0x07 => 256, // 4MB = 256 banks of 16KB (though MBC1 only supports up to 125)
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid ROM size")),
-        };
-        
+        // Calculate number of ROM banks (header size, widened to the real file).
+        let rom_banks = Self::compute_rom_banks(rom_size_code, actual_data.len())?;
+
         // Calculate number of RAM banks
         let ram_banks = match ram_size_code {
             0x00 => 0, // No RAM
@@ -444,7 +485,7 @@ impl Cartridge {
             0x05 => 8,  // 64KB = 8 banks of 8KB
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid RAM size")),
         };
-        
+
         // Copy ROM data
         let expected_rom_size = rom_banks * 0x4000; // 16KB per bank
         let rom_data = if actual_data.len() >= expected_rom_size {
@@ -461,7 +502,10 @@ impl Cartridge {
         
         // Detect CGB support
         let cgb_support = Self::detect_cgb_support(&actual_data);
-        
+
+        // Detect MBC1 multicart wiring from the per-segment logo layout.
+        let mbc1_multicart = Self::detect_mbc1_multicart(cartridge_type, &actual_data);
+
         let cartridge = Cartridge {
             rom_data,
             ram_data,
@@ -474,6 +518,7 @@ impl Cartridge {
             rom_bank_low: 1, // Bank 0 cannot be selected for 0x4000-0x7FFF area
             ram_bank_or_rom_bank_high: 0,
             banking_mode: 0,
+            mbc1_multicart,
             mbc2_ram: vec![0xFF; MBC2_RAM_SIZE],
             mbc3_ram_bank: 0,
             mbc3_rtc_latch: 0,
@@ -528,18 +573,19 @@ impl Cartridge {
     fn get_rom_bank(&self) -> usize {
         match self.get_cartridge_type() {
             CartridgeType::MBC1 { .. } => {
-                let mut bank = self.rom_bank_low as usize;
-                
-                // In ROM banking mode, add upper 2 bits to ROM bank
-                if self.banking_mode == 0 {
-                    bank |= (self.ram_bank_or_rom_bank_high as usize) << 5;
-                }
-                
-                // Bank 0 maps to bank 1 for the switchable area
-                if bank == 0 {
-                    bank = 1;
-                }
-                
+                // The 0x4000-0x7FFF ROM bank is always (BANK2 << shift) | BANK1,
+                // regardless of banking mode. BANK1's zero->one remap is applied
+                // at write time, so banks 0x20/0x40/0x60 (BANK1==0 with BANK2 set)
+                // remain inaccessible exactly as on hardware.
+                let bank = if self.mbc1_multicart {
+                    // Multicart: BANK2 -> bits 4-5, only low 4 bits of BANK1 wired.
+                    ((self.ram_bank_or_rom_bank_high as usize) << 4)
+                        | (self.rom_bank_low as usize & 0x0F)
+                } else {
+                    ((self.ram_bank_or_rom_bank_high as usize) << 5)
+                        | (self.rom_bank_low as usize)
+                };
+
                 // Limit to available banks
                 bank % self.rom_banks
             }
@@ -586,7 +632,24 @@ impl Cartridge {
             CartridgeType::NoMBC => 0,
         }
     }
-    
+
+    /// ROM bank mapped at the 0x0000-0x3FFF region. Normally bank 0, but on
+    /// MBC1 in banking mode 1 the BANK2 register is also applied here, so a
+    /// large cart sees bank 0x20/0x40/0x60 (or 0x10/0x20/0x30 on a multicart).
+    fn get_rom_bank0(&self) -> usize {
+        match self.get_cartridge_type() {
+            CartridgeType::MBC1 { .. } if self.banking_mode == 1 => {
+                let bank = if self.mbc1_multicart {
+                    (self.ram_bank_or_rom_bank_high as usize) << 4
+                } else {
+                    (self.ram_bank_or_rom_bank_high as usize) << 5
+                };
+                bank % self.rom_banks
+            }
+            _ => 0,
+        }
+    }
+
     /// Get the save file path for this cartridge
     fn get_save_file_path(&self) -> Option<String> {
         self.rom_path.as_ref().map(|path| {
@@ -982,9 +1045,11 @@ impl Cartridge {
 impl memory::Addressable for Cartridge {
     fn read(&self, addr: u16) -> u8 {
         match addr {
-            // ROM Bank 0 (fixed)
+            // ROM Bank 0 (0x0000-0x3FFF). Fixed to bank 0 except on MBC1 in
+            // banking mode 1, where BANK2 also selects this region.
             mmio::CARTRIDGE_START..=mmio::CARTRIDGE_END => {
-                let offset = (addr - mmio::CARTRIDGE_START) as usize;
+                let rom_bank0 = self.get_rom_bank0();
+                let offset = (addr - mmio::CARTRIDGE_START) as usize + (rom_bank0 * 0x4000);
                 if offset < self.rom_data.len() {
                     self.rom_data[offset]
                 } else {
@@ -1014,10 +1079,13 @@ impl memory::Addressable for Cartridge {
                         }
                     }
                     CartridgeType::MBC2 { .. } => {
-                        // MBC2 has built-in 512x4 RAM at 0xA000-0xA1FF
-                        if self.ram_enabled && addr <= MBC2_RAM_END {
+                        // MBC2 has built-in 512x4 RAM. The 512 nibbles echo every
+                        // 0x200 bytes across the whole 0xA000-0xBFFF window. Only
+                        // the low 4 data bits are stored; the upper 4 read back as
+                        // 1s (open data lines), so reads return 0xF0 | nibble.
+                        if self.ram_enabled {
                             let offset = (addr - MBC2_RAM_START) as usize % self.mbc2_ram.len();
-                            self.mbc2_ram[offset] & 0x0F // Only lower 4 bits are valid
+                            0xF0 | (self.mbc2_ram[offset] & 0x0F)
                         } else {
                             0xFF
                         }
@@ -1071,17 +1139,27 @@ impl memory::Addressable for Cartridge {
 
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
+            // MBC2 register block (0x0000-0x3FFF). MBC2 has a SINGLE register
+            // region here, selected by address bit 8: bit8==0 => RAMG (RAM
+            // enable), bit8==1 => ROMB (ROM bank, low 4 bits). The 0x2000
+            // boundary is irrelevant on MBC2 — only bit 8 matters — so handle
+            // the whole range here before the generic per-quarter arms.
+            RAM_ENABLE_START..=ROM_BANK_SELECT_END
+                if matches!(self.get_cartridge_type(), CartridgeType::MBC2 { .. }) =>
+            {
+                if (addr & 0x0100) == 0 {
+                    // RAMG: RAM enable
+                    self.ram_enabled = (value & 0x0F) == 0x0A;
+                } else {
+                    // ROMB: 4-bit ROM bank, value 0 maps to bank 1
+                    self.rom_bank_low = (value & 0x0F).max(1);
+                }
+            }
             // RAM Enable (0x0000-0x1FFF)
             RAM_ENABLE_START..=RAM_ENABLE_END => {
                 match self.get_cartridge_type() {
                     CartridgeType::MBC1 { .. } => {
                         self.ram_enabled = (value & 0x0F) == 0x0A;
-                    }
-                    CartridgeType::MBC2 { .. } => {
-                        // MBC2 uses bit 8 of the address to differentiate from ROM bank select
-                        if (addr & 0x0100) == 0 {
-                            self.ram_enabled = (value & 0x0F) == 0x0A;
-                        }
                     }
                     CartridgeType::MBC3 { .. } => {
                         self.ram_enabled = (value & 0x0F) == 0x0A;
@@ -1097,12 +1175,6 @@ impl memory::Addressable for Cartridge {
                 match self.get_cartridge_type() {
                     CartridgeType::MBC1 { .. } => {
                         self.rom_bank_low = (value & 0x1F).max(1); // 5 bits, minimum value 1
-                    }
-                    CartridgeType::MBC2 { .. } => {
-                        // MBC2 uses bit 8 of the address to differentiate from RAM enable
-                        if (addr & 0x0100) != 0 {
-                            self.rom_bank_low = (value & 0x0F).max(1); // 4 bits, minimum value 1
-                        }
                     }
                     CartridgeType::MBC3 { .. } => {
                         self.rom_bank_low = (value & 0x7F).max(1); // 7 bits, minimum value 1
@@ -1177,8 +1249,9 @@ impl memory::Addressable for Cartridge {
                         }
                     }
                     CartridgeType::MBC2 { .. } => {
-                        // MBC2 has built-in 512x4 RAM at 0xA000-0xA1FF
-                        if self.ram_enabled && addr <= MBC2_RAM_END {
+                        // MBC2 has built-in 512x4 RAM that echoes every 0x200
+                        // bytes across the whole 0xA000-0xBFFF window.
+                        if self.ram_enabled {
                             let offset = (addr - MBC2_RAM_START) as usize % self.mbc2_ram.len();
                             let _ = self.write_mbc2_ram_byte(offset, value); // Ignore errors for now
                         }
