@@ -874,6 +874,58 @@ impl Mmio {
         self.obj_palette_ram = CGB_OBJP_DUMP;
     }
 
+    /// Seed the CGB boot ROM's DMG-compatibility palette for a DMG cart running
+    /// on CGB hardware. When a non-CGB cart is inserted, the CGB-CPU-04 boot ROM
+    /// hashes the cart title and writes a fixed colored palette into CGB palette
+    /// RAM (BG palette 0, OBJ palettes 0 and 1); the PPU then renders the DMG
+    /// game through that palette (indexing it via BGP/OBP), so the game shows in
+    /// the boot ROM's chosen colors rather than grayscale. These bytes are the
+    /// exact post-boot palette RAM captured by running cgb_boot.bin with an
+    /// unlicensed/test cart (dmg-acid2), which hashes to the default palette:
+    ///   BG  : #FFFFFF #7BFF31 #0063C6 #000000
+    ///   OBJ0: #FFFFFF #FF8484 #943939 #000000  (OBJ1 identical)
+    /// The remaining BG palettes stay all-white and the remaining OBJ palettes
+    /// keep the hardware power-on dump, matching the real boot ROM end state.
+    pub fn set_cgb_compat_dmg_palettes(&mut self) {
+        // Start from the normal CGB power-on palette state (BG all-white, OBJ
+        // power-on dump) so palettes the boot ROM does not touch match hardware.
+        self.set_post_bios_cgb_palettes();
+        // BG palette 0: white, green, blue, black (RGB555 byte pairs).
+        const BG0: [u8; 8] = [0xFF, 0x7F, 0xEF, 0x1B, 0x80, 0x61, 0x00, 0x00];
+        self.bg_palette_ram[0..8].copy_from_slice(&BG0);
+        // OBJ palettes 0 and 1: white, light-red, dark-red, black.
+        const OBJ: [u8; 8] = [0xFF, 0x7F, 0x1F, 0x42, 0xF2, 0x1C, 0x00, 0x00];
+        self.obj_palette_ram[0..8].copy_from_slice(&OBJ);
+        self.obj_palette_ram[8..16].copy_from_slice(&OBJ);
+    }
+
+    /// Read a CGB BG palette color (RGB555 byte pair) ignoring the
+    /// `cgb_features_enabled` gate. Used by the DMG-compat-on-CGB renderer: a DMG
+    /// cart on CGB hardware has CGB features OFF (so FF68-FF6B are blocked for the
+    /// game), yet the boot ROM still filled palette RAM with the DMG-compat
+    /// palette that the PPU indexes via BGP/OBP. The normal `read_bg_palette_data`
+    /// returns 0xFF in that state, which is correct for the CPU bus but wrong for
+    /// the internal PPU lookup.
+    pub fn bg_palette_pair_raw(&self, palette_idx: u8, color_idx: u8) -> (u8, u8) {
+        let offset = (palette_idx as usize) * 8 + (color_idx as usize) * 2;
+        if offset + 1 < 64 {
+            (self.bg_palette_ram[offset], self.bg_palette_ram[offset + 1])
+        } else {
+            (0xFF, 0xFF)
+        }
+    }
+
+    /// Read a CGB OBJ palette color (RGB555 byte pair) ignoring the
+    /// `cgb_features_enabled` gate. See `bg_palette_pair_raw`.
+    pub fn obj_palette_pair_raw(&self, palette_idx: u8, color_idx: u8) -> (u8, u8) {
+        let offset = (palette_idx as usize) * 8 + (color_idx as usize) * 2;
+        if offset + 1 < 64 {
+            (self.obj_palette_ram[offset], self.obj_palette_ram[offset + 1])
+        } else {
+            (0xFF, 0xFF)
+        }
+    }
+
     pub fn read_vram_bank1(&self, addr: u16) -> u8 {
         if !self.cgb_features_enabled || addr < VRAM_START || addr > VRAM_END {
             return 0xFF; // Invalid access
