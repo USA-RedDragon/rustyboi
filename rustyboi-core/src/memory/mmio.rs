@@ -3409,6 +3409,11 @@ impl Mmio {
             // Power-on HDMA5 reads 0xFF (no transfer armed). With bit 7 set the
             // read is `hdma_length | 0x80`, so seed the length to 0x7F.
             self.hdma_length = 0x7F;
+            // FF46 (OAM-DMA register) is fully readable and reads back its last
+            // written value; its CGB post-boot value is 0x00
+            // (fexx_ffxx_dumper_cgb / ioregs_reset oracle), seeded here so an
+            // untouched FF46 reads 0x00 while a written value reads back.
+            self.io_registers.write(REG_DMA, 0x00);
         } else {
             // DMG: OAM holds uninitialised garbage; 0xFEA0-0xFEFF reads 0x00.
             const DMG_OAM: [u8; 0xA0] = [
@@ -3455,6 +3460,11 @@ impl Mmio {
                 self.oam.write(OAM_START + i as u16, *b);
             }
             self.hram.as_mut_slice().copy_from_slice(&DMG_HRAM);
+            // FF46 (OAM-DMA register) is fully readable and reads back its last
+            // written value; its DMG post-boot value is 0xFF (fexx_ffxx_dumper /
+            // ioregs_reset oracle), seeded here so an untouched FF46 reads 0xFF
+            // while a written value reads back (mooneye oam_dma/reg_read).
+            self.io_registers.write(REG_DMA, 0xFF);
         }
     }
 
@@ -3600,16 +3610,12 @@ impl memory::Addressable for Mmio {
                         audio::NR30..=audio::NR34 => self.audio.read(addr),
                         audio::NR41..=audio::NR52 => self.audio.read(addr),
                         audio::WAV_START..=audio::WAV_END => self.audio.read(addr),
-                        // OAM-DMA source register (0xFF46). On CGB it reads
-                        // back the written value; on DMG it always reads 0xFF
-                        // (Gambatte's DMG ioamhram_[0x146] post-boot shadow).
-                        REG_DMA => {
-                            if self.cgb_features_enabled {
-                                self.io_registers.read(addr)
-                            } else {
-                                0xFF
-                            }
-                        },
+                        // OAM-DMA source register (0xFF46). Fully readable on both
+                        // models: it reads back the last written value (Gambatte
+                        // `nontrivial_ff_read` falls through to `ioamhram_[0x146]`,
+                        // no isCgb() gate — mooneye oam_dma/reg_read asserts this on
+                        // DMG and CGB alike).
+                        REG_DMA => self.io_registers.read(addr),
 
                         // KEY0 (0xFF4C, CGB DMG-compat select). Write-once and
                         // only meaningful while the boot ROM is mapped; once
