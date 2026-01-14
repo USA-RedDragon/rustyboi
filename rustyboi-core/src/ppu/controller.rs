@@ -2088,6 +2088,20 @@ impl Ppu {
         });
     }
 
+    /// DMG-compatibility mode on CGB hardware: a DMG cart running on a CGB
+    /// (`is_cgb()` true, but CGB features OFF because the cart is not CGB-aware).
+    /// The PPU still produces RGB color output, indexing the boot ROM's
+    /// DMG-compat palette in CGB palette RAM via BGP/OBP shade remap.
+    fn is_cgb_compat_dmg(&self, mmio: &mmio::Mmio) -> bool {
+        mmio.is_cgb() && !mmio.is_cgb_features_enabled()
+    }
+
+    /// True when this frame should be rendered to the RGB color framebuffer:
+    /// either full CGB mode or DMG-compat-on-CGB.
+    fn renders_color(&self, mmio: &mmio::Mmio) -> bool {
+        mmio.is_cgb_features_enabled() || self.is_cgb_compat_dmg(mmio)
+    }
+
     pub fn get_palette_color(&self, _mmio: &mmio::Mmio, idx: u8) -> u8 {
         let bgp = self.bgp_delayed;
         match idx {
@@ -2714,6 +2728,19 @@ impl Ppu {
             self.color_fb_a[color_offset] = final_color_rgb.0;
             self.color_fb_a[color_offset + 1] = final_color_rgb.1;
             self.color_fb_a[color_offset + 2] = final_color_rgb.2;
+        } else if self.is_cgb_compat_dmg(mmio) {
+            // DMG cart on CGB: color output via the boot ROM's DMG-compat palette.
+            let final_color_rgb =
+                self.mix_background_and_sprites_compat(mmio, bg_pixel_idx, self.x, ly as u8, bg_enabled_col);
+            self.record_pixel_debug_event(
+                ly as u8,
+                bg_pixel_idx,
+                [final_color_rgb.0, final_color_rgb.1, final_color_rgb.2],
+            );
+            let color_offset = fb_offset as usize * 3;
+            self.color_fb_a[color_offset] = final_color_rgb.0;
+            self.color_fb_a[color_offset + 1] = final_color_rgb.1;
+            self.color_fb_a[color_offset + 2] = final_color_rgb.2;
         } else {
             let final_color = self.mix_background_and_sprites(mmio, bg_pixel_idx, self.x, ly as u8, bg_enabled_col);
             let intensity = match final_color {
@@ -2882,6 +2909,8 @@ impl Ppu {
             return;
         }
         let cgb = mmio.is_cgb_features_enabled();
+        // DMG-compat-on-CGB renders to color but uses DMG geometry/priority.
+        let compat = self.is_cgb_compat_dmg(mmio);
         let bg_enabled = (self.lcdc & (LCDCFlags::BGDisplay as u8)) != 0;
 
         // Window geometry for this line: active if the window-Y trigger latched
@@ -2902,7 +2931,8 @@ impl Ppu {
         let _ = bg_enabled;
         for sx in 0u8..160 {
             let bg_enabled_col = self.bgen_at(mmio, cgb, sx);
-            // On DMG, BG-disabled forces the BG layer to color 0 (white).
+            // On DMG (and DMG-compat-on-CGB), BG-disabled forces the BG layer to
+            // color 0 (white).
             let (bg_idx, bg_attrs) = if !bg_enabled_col && !cgb {
                 (0u8, 0u8)
             } else {
@@ -2912,6 +2942,12 @@ impl Ppu {
             if cgb {
                 let rgb = self
                     .mix_background_and_sprites_color(mmio, bg_idx, bg_attrs, sx, ly, bg_enabled_col);
+                let off = fb_offset as usize * 3;
+                self.color_fb_a[off] = rgb.0;
+                self.color_fb_a[off + 1] = rgb.1;
+                self.color_fb_a[off + 2] = rgb.2;
+            } else if compat {
+                let rgb = self.mix_background_and_sprites_compat(mmio, bg_idx, sx, ly, bg_enabled_col);
                 let off = fb_offset as usize * 3;
                 self.color_fb_a[off] = rgb.0;
                 self.color_fb_a[off + 1] = rgb.1;
@@ -5122,8 +5158,8 @@ impl Ppu {
                         self.window_y_triggered = false;
                         self.window_started_this_line = false;
 
-                        if mmio.is_cgb_features_enabled() {
-                            // CGB mode: swap color framebuffers
+                        if self.renders_color(mmio) {
+                            // CGB / DMG-compat-on-CGB: swap color framebuffers
                             self.color_fb_b = self.color_fb_a;
                             self.color_fb_a = [0; FRAMEBUFFER_SIZE * 3];
                         } else {
@@ -5202,7 +5238,7 @@ impl Ppu {
 
     pub fn get_frame(&mut self, mmio: &mmio::Mmio) -> crate::gb::Frame {
         self.have_frame = false;
-        if mmio.is_cgb_features_enabled() {
+        if self.renders_color(mmio) {
             crate::gb::Frame::Color(self.color_fb_b)
         } else {
             crate::gb::Frame::Monochrome(self.fb_b)
@@ -6842,6 +6878,57 @@ impl Ppu {
             }
         }
         
+        bg_color_rgb
+    }
+
+    /// DMG-compat-on-CGB pixel mix. Uses the DMG palette/priority rules (BGP/OBP
+    /// shade remap, DMG sprite X-then-OAM priority, single OBP-selected palette),
+    /// but resolves the final shade through CGB palette RAM so the output is the
+    /// boot ROM's DMG-compat color instead of grayscale. The shade->RGB lookups
+    /// read BG palette 0 and OBJ palette 0/1 (the slots the boot ROM fills).
+    fn mix_background_and_sprites_compat(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8, screen_x: u8, screen_y: u8, bg_enabled_col: bool) -> (u8, u8, u8) {
+        let lcdc = self.lcdc;
+        let bg_enabled = bg_enabled_col;
+
+        // BG shade via BGP, then look up BG palette 0 in CGB palette RAM.
+        let bg_shade = if bg_enabled {
+            self.get_palette_color(mmio, bg_pixel_idx)
+        } else {
+            self.get_palette_color(mmio, 0)
+        };
+        let (lo, hi) = mmio.bg_palette_pair_raw(0, bg_shade);
+        let bg_color_rgb = self.cgb_color_to_rgb(lo, hi);
+
+        let effective_bg_pixel_idx = if bg_enabled { bg_pixel_idx } else { 0 };
+
+        if (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
+            return bg_color_rgb;
+        }
+
+        for sprite in &self.sprites_on_line {
+            let sprite_actual_x = sprite.x as i16 - 8;
+            let sprite_actual_y = sprite.y as i16 - 16;
+            let relative_x = screen_x as i16 - sprite_actual_x;
+            let relative_y = screen_y as i16 - sprite_actual_y;
+            if (0..8).contains(&relative_x) {
+                let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
+                if relative_y >= 0 && relative_y < sprite_height as i16
+                    && let Some(sprite_pixel_idx) = self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8)
+                    && sprite_pixel_idx != 0 {
+                        // DMG-compat: OBP0/OBP1 selected by attr bit 4, shade
+                        // looked up in OBJ palette 0/1 of CGB palette RAM.
+                        let use_obp1 = sprite.attributes.palette;
+                        let obj_shade = self.get_sprite_palette_color(mmio, sprite_pixel_idx, use_obp1);
+                        let pal = if use_obp1 { 1 } else { 0 };
+                        let (slo, shi) = mmio.obj_palette_pair_raw(pal, obj_shade);
+                        let sprite_color_rgb = self.cgb_color_to_rgb(slo, shi);
+                        if !sprite.attributes.priority || effective_bg_pixel_idx == 0 {
+                            return sprite_color_rgb;
+                        }
+                    }
+            }
+        }
+
         bg_color_rgb
     }
 

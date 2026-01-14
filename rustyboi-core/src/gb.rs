@@ -215,6 +215,20 @@ impl GB {
             Hardware::DMG | Hardware::MGB => 0x4D,
             Hardware::SGB | Hardware::SGB2 => 0x60,
         };
+        // CGB boot ROM in DMG-compatibility mode (a non-CGB cart on CGB/AGB
+        // hardware) leaves a different DE/HL than full-CGB mode. The CGB-CPU-04
+        // boot ROM produces D=00 E=08 H=00 L=7C for a DMG cart (captured by
+        // running cgb_boot.bin with a CGB-flag=0x00 cart); full-CGB carts get the
+        // D=FF E=56 L=0D set above. mooneye boot_regs-cgb (CGB flag 0x00) checks
+        // exactly this DMG-compat register set. A/F/B/C are unchanged (B keeps
+        // the AGB GBA-detection bit). Only applies on CGB-like hardware running a
+        // DMG cart; full-CGB carts and pure DMG hardware are untouched.
+        if self.hardware.is_cgb_like() && !self.should_enable_cgb_features() {
+            self.cpu.registers.d = 0x00;
+            self.cpu.registers.e = 0x08;
+            self.cpu.registers.h = 0x00;
+            self.cpu.registers.l = 0x7C;
+        }
         self.cpu.registers.set_flag(registers::Flag::Zero, match self.hardware {
             Hardware::DMG | Hardware::CGB | Hardware::AGB | Hardware::MGB => true,
             Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 => false,
@@ -313,8 +327,17 @@ impl GB {
         // (Gambatte initstate cgbObjpDump). A program that renders a sprite
         // without writing FF6A/FF6B observes these values; without this the
         // OBJ palette is all-zero (black). Matches scx_during_m3_spx2 etc.
+        //
+        // DMG cart on CGB hardware (CGB features OFF): the CGB boot ROM instead
+        // installs a fixed DMG-compatibility colored palette, and the PPU renders
+        // the DMG game through it. Seed that palette so a DMG cart shows in the
+        // boot ROM's colors (dmg-acid2-on-CGB) rather than grayscale.
         if cgb {
-            self.mmio.set_post_bios_cgb_palettes();
+            if self.should_enable_cgb_features() {
+                self.mmio.set_post_bios_cgb_palettes();
+            } else {
+                self.mmio.set_cgb_compat_dmg_palettes();
+            }
         }
 
         // Post-boot VRAM contents. The boot ROM decompresses the Nintendo logo
