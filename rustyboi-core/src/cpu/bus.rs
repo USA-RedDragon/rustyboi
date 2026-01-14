@@ -35,6 +35,16 @@ pub(crate) fn canonical_cc_stop_adj() -> i64 {
     })
 }
 
+/// DMG OAM-corruption-bug access classification (Pan Docs "Corruption Patterns").
+/// Each variant selects the documented OAM mutation applied to the row the PPU is
+/// scanning in mode 2: a plain OAM-bus write, a plain OAM-bus read, or the
+/// combined read+IDU-write of an `ld a,[hli]`/`ld a,[hld]` whose `hl` is in OAM.
+#[derive(Clone, Copy)]
+pub enum OamBugKind {
+    Write,
+    Read,
+}
+
 /// ds-engine STAGE 6/7: the run-to-next-event scheduler is the single CPU world-
 /// advance path. `tick_m` advances `master_cc` by the access duration (one
 /// M-cycle = 4 dots) and a single `run_to(target_cc)` resolves every peripheral
@@ -498,6 +508,39 @@ impl<'a> Bus<'a> {
         self.read(pc)
     }
 
+    /// DMG OAM corruption bug (Pan Docs "OAM Corruption Bug"). An OAM-bus access
+    /// while the PPU is in mode 2 (OAM scan) corrupts the row the PPU is scanning.
+    /// `kind` selects the documented pattern. DMG/MGB/SGB hardware only — CGB/AGB
+    /// (including CGB-in-DMG-compat) do not have the bug, so it is gated on
+    /// `!is_cgb()`. No effect outside mode 2. The row is sampled from the PPU's
+    /// current OAM-scan position.
+    fn oam_bug_corrupt(&mut self, kind: OamBugKind) {
+        if self.mmio.is_cgb() {
+            return;
+        }
+        let row = match self.ppu.oam_bug_mode2_row() {
+            Some(r) => r as usize,
+            None => return,
+        };
+        match kind {
+            OamBugKind::Write => self.mmio.oam_bug_write_corrupt(row),
+            OamBugKind::Read => self.mmio.oam_bug_read_corrupt(row),
+        }
+    }
+
+    /// Trigger point for a 16-bit IDU (inc/dec rr) op. On real hardware the IDU is
+    /// tied to the address bus, so incrementing/decrementing a 16-bit register
+    /// whose value (BEFORE the op) is in 0xFE00-0xFEFF asserts that address and
+    /// triggers a write corruption during mode 2 (Pan Docs "Affected Operations").
+    /// Objects 0 & 1 (rows 0) are handled by the corruption routine. `pre_value`
+    /// is the register's value before the inc/dec.
+    pub fn oam_bug_idu(&mut self, pre_value: u16) {
+        if !(0xFE00..=0xFEFF).contains(&pre_value) {
+            return;
+        }
+        self.oam_bug_corrupt(OamBugKind::Write);
+    }
+
     pub fn read(&mut self, addr: u16) -> u8 {
         // APU reads (NRxx status, NR52, wave RAM) observe the channels at the
         // read M-cycle START cc (Gambatte resolves the read before advancing).
@@ -655,6 +698,18 @@ impl<'a> Bus<'a> {
         } else {
             pre_access_cc
         };
+        // DMG OAM-bug: sample the PPU's mode-2 OAM-scan row at the access START
+        // (pre-tick), so a CPU OAM read and write sample the row at the same phase
+        // of their M-cycle. Captured here; the corruption is applied after the
+        // read resolves (DMG-only, mode-2-gated inside `oam_bug_corrupt`).
+        let oam_bug_read_row = if (0xFE00..=0xFEFF).contains(&addr)
+            && !self.mmio.is_cgb()
+            && !self.mmio.oam_dma_window_active()
+        {
+            self.ppu.oam_bug_mode2_row()
+        } else {
+            None
+        };
         self.tick_m();
         // PC-in-DMA-dest prefetch absorption (Gambatte `intevent_dma`:
         // `interrupter_.prefetch(cc)` runs BEFORE `dma(cc)`). When a synchronous
@@ -670,6 +725,13 @@ impl<'a> Bus<'a> {
         // VRAM is inaccessible to the CPU during Mode 3, OAM during Mode 2/3;
         // a blocked read returns open-bus 0xFF. Only while the LCD is on.
         if self.ppu_locks_access(addr, vram_read_cc) {
+            // DMG OAM-bug: even though the OAM read returns open-bus 0xFF (the PPU
+            // owns OAM in mode 2/3), a CPU OAM read during mode 2 still corrupts
+            // the scanned row. `oam_bug_read_row` is Some only on DMG, mode 2,
+            // non-DMA; in mode 3 it is None. Apply it before returning 0xFF.
+            if let Some(row) = oam_bug_read_row {
+                self.mmio.oam_bug_read_corrupt(row as usize);
+            }
             return 0xFF;
         }
         // ENDGAME m25: a VRAM read inside the HALT-bug resume
@@ -707,6 +769,15 @@ impl<'a> Bus<'a> {
         }
         if let Some(ly) = ly_reg_pre {
             return ly;
+        }
+        // DMG OAM corruption bug: a CPU OAM-bus read during PPU mode 2 returns the
+        // byte normally, then corrupts the row the PPU was scanning at the access
+        // start. `oam_bug_read_row` is Some only on DMG, in mode 2, outside an
+        // OAM-DMA window (the DMA owns the bus; the read returns 0xFF via mmio).
+        if let Some(row) = oam_bug_read_row {
+            let v = self.mmio.read(addr);
+            self.mmio.oam_bug_read_corrupt(row as usize);
+            return v;
         }
         self.mmio.read(addr)
     }
@@ -823,6 +894,14 @@ impl<'a> Bus<'a> {
         // resources (see `ppu_locks_access`). Drop the write but still tick.
         // OAM-DMA conflicts are resolved separately in the tick-before path.
         if !self.mmio.dma_active() && self.ppu_blocks(addr, false, self.mmio.master_cc()) {
+            // DMG OAM-bug: the PPU owns OAM in mode 2/3 so the write is dropped,
+            // but a write to OAM during mode 2 still corrupts the scanned row
+            // (Pan Docs "Write Corruption"). Sample the row at the access start
+            // (pre-tick), matching the read path's phase. DMG-only + mode-2-gated
+            // inside `oam_bug_corrupt`; in mode 3 `oam_bug_mode2_row` is None.
+            if (0xFE00..=0xFEFF).contains(&addr) {
+                self.oam_bug_corrupt(OamBugKind::Write);
+            }
             self.tick_m();
             return;
         }
@@ -920,6 +999,16 @@ impl<'a> Bus<'a> {
                 let cc = self.mmio.master_cc();
                 self.mmio
                     .set_hdma_disable_fires(self.ppu.hdma_disable_fires(cc, ds));
+            }
+            // DMG OAM-bug: a CPU write to the OAM range (0xFE00-0xFEFF) reaching
+            // this branch (i.e. NOT blocked by the mode-2/3 `ppu_blocks` guard,
+            // which only covers 0xFE00-0xFE9F) still corrupts the scanned row if
+            // we are in mode 2 — notably writes to the 0xFEA0-0xFEFF tail
+            // (PUSH/CALL stack writes into OAM). Sample at the access start
+            // (pre-tick); `oam_bug_corrupt` is DMG-only + mode-2-gated (None
+            // otherwise), so this is a no-op outside mode 2.
+            if (0xFE00..=0xFEFF).contains(&addr) {
+                self.oam_bug_corrupt(OamBugKind::Write);
             }
             self.mmio.write(addr, value);
             // FF42/FF43 (SCY/SCX): the CPU readback above is immediate, but the
