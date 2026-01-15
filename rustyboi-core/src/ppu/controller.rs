@@ -157,16 +157,9 @@ pub fn linerender_enabled() -> bool {
 // IRQ-DISPATCH and getStat-read consumers stay on the calibrated offset form —
 // their migration onto this same event cc is a later stage; see the engine
 // verdict.) Default ON (proven broke-0, coupled with prefetch_cc below);
-// set RB_FAITHFUL_EVENTCC=0 to disable for debugging/bisection. Read once, cached.
+// Proven-permanent (was the RB_FAITHFUL_EVENTCC dev knob); now unconditional.
 pub fn faithful_eventcc_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("RB_FAITHFUL_EVENTCC").as_deref(),
-            Ok("0") | Ok("off") | Ok("false")
-        )
-    })
+    true
 }
 
 // HALT-PREFETCH phase register (`RB_PREFETCH_CC`, Lever A). OFF (unset / `=0`)
@@ -176,16 +169,9 @@ pub fn faithful_eventcc_enabled() -> bool {
 // byte-identical _1b/_2b ROMs separate (phase 0 -> mode0, phase 1 -> mode2).
 // CANNOT be ON without the eventcc foundation (`&& faithful_eventcc_enabled()`),
 // so disabling the foundation disables this too (they move together).
-// Default ON (proven broke-0); set RB_PREFETCH_CC=0 to disable. Read once, cached.
+// Proven-permanent (was the RB_PREFETCH_CC dev knob); now unconditional.
 pub fn prefetch_cc_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("RB_PREFETCH_CC").as_deref(),
-            Ok("0") | Ok("off") | Ok("false")
-        )
-    }) && faithful_eventcc_enabled()
+    true
 }
 
 // HDMA Low halt-woken block prefetch-fudge correction (`RB_TIMA_LOWFUDGE`).
@@ -204,16 +190,9 @@ pub fn prefetch_cc_enabled() -> bool {
 // armed-switch gate isolates exactly these STOP-downstream blocks; the
 // calibration blocks (`hdma_cycles`/`frame*_count`) fire with no switch armed and
 // keep the +6. Default ON (proven broke-0 on the no-bios main_19 oracle); set
-// RB_TIMA_LOWFUDGE=0 to disable for debugging/bisection. Read once, cached.
+// RB_TIMA_LOWFUDGE dev knob); now unconditional.
 pub fn tima_lowfudge_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("RB_TIMA_LOWFUDGE").as_deref(),
-            Ok("0") | Ok("off") | Ok("false")
-        )
-    })
+    true
 }
 
 // HALT-PREFETCH woken-PC push phase (`RB_TIMER_PUSH_PHASE`, R-PC). OFF (unset /
@@ -228,16 +207,9 @@ pub fn tima_lowfudge_enabled() -> bool {
 // sibling of prefetch_cc (DMG+Lcd FF41 getStat); it consumes a NEW register
 // (timer_push_phase) so the getStat path is untouched. CANNOT be ON without the
 // eventcc/prefetch foundation. Default ON (proven broke-0, zero regressions);
-// set RB_TIMER_PUSH_PHASE=0 to disable. Read once, cached.
+// Proven-permanent (was the RB_TIMER_PUSH_PHASE dev knob); now unconditional.
 pub fn timer_push_phase_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("RB_TIMER_PUSH_PHASE").as_deref(),
-            Ok("0") | Ok("off") | Ok("false")
-        )
-    }) && prefetch_cc_enabled()
+    true
 }
 
 // DS offsets re-derived after the double-speed STAT sub-dot step (step_subdot)
