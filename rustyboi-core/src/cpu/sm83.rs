@@ -154,18 +154,6 @@ impl SM83 {
                         _ => 0,
                     };
                     mmio.mmio.set_halt_prefetch_phase(phase);
-                    if std::env::var("RB_PREFETCH_TRACE").is_ok() {
-                        let pc = self.registers.pc;
-                        let h = mmio.mmio.halt_entry_cc();
-                        let ev = mmio.mmio.pending_m0_irq_fire_cc();
-                        let e = ev.map(|x| x as i64).unwrap_or(-1);
-                        let s = e + ((e.wrapping_neg()) & 3);
-                        let mcc = mmio.master_cc_dbg();
-                        eprintln!(
-                            "[PREFETCH] pc={:#06x} mcc={} H={:?} E={} S={} phase={}",
-                            pc, mcc, h, e, s, phase
-                        );
-                    }
                 }
                 // HALT-PREFETCH woken-PC PUSH phase (R-PC, RB_TIMER_PUSH_PHASE).
                 // Faithful conditional-prefetch-undo fix. Gambatte's interrupt
@@ -200,17 +188,6 @@ impl SM83 {
                 {
                     let phase = if req_halt_peek { 1u32 } else { 0u32 };
                     mmio.mmio.set_timer_push_phase(phase);
-                    if std::env::var("RB_TIMER_PUSH_TRACE").is_ok() {
-                        let pc = self.registers.pc;
-                        let h = mmio.mmio.halt_entry_cc();
-                        let ev = mmio.mmio.pending_timer_event_cc();
-                        let e = ev.map(|x| x as i64).unwrap_or(-1);
-                        let mcc = mmio.master_cc_dbg();
-                        eprintln!(
-                            "[TIMERPUSH] pc={:#06x} mcc={} H={:?} E={} prefetched={} hdma={:?} phase={}",
-                            pc, mcc, h, e, self.prefetched, mmio.halt_hdma_state(), phase
-                        );
-                    }
                 }
                 // Gambatte unhalt re-flag gate (memory.cpp:224/304):
                 //   (hdmaEnabled && isHdmaPeriod && haltHdmaState == hdma_low)

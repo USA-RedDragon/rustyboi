@@ -97,19 +97,19 @@ pub const REG_BOOT_OFF: u16 = 0xFF50; // Boot ROM disable
 pub const REG_DMA: u16 = 0xFF46; // DMA Transfer and Start Address
 
 // CGB-specific registers
-pub const REG_KEY0: u16 = 0xFF4C;  // CGB CPU mode select (DMG compatibility)
-pub const REG_KEY1: u16 = 0xFF4D;  // CGB Prepare speed switch
+pub(crate) const REG_KEY0: u16 = 0xFF4C;  // CGB CPU mode select (DMG compatibility)
+pub(crate) const REG_KEY1: u16 = 0xFF4D;  // CGB Prepare speed switch
 pub const REG_VBK: u16 = 0xFF4F;   // VRAM Bank select
-pub const REG_HDMA1: u16 = 0xFF51; // HDMA Source High
-pub const REG_HDMA2: u16 = 0xFF52; // HDMA Source Low
-pub const REG_HDMA3: u16 = 0xFF53; // HDMA Destination High
-pub const REG_HDMA4: u16 = 0xFF54; // HDMA Destination Low
-pub const REG_HDMA5: u16 = 0xFF55; // HDMA Length/Mode/Start
+pub(crate) const REG_HDMA1: u16 = 0xFF51; // HDMA Source High
+pub(crate) const REG_HDMA2: u16 = 0xFF52; // HDMA Source Low
+pub(crate) const REG_HDMA3: u16 = 0xFF53; // HDMA Destination High
+pub(crate) const REG_HDMA4: u16 = 0xFF54; // HDMA Destination Low
+pub(crate) const REG_HDMA5: u16 = 0xFF55; // HDMA Length/Mode/Start
 pub const REG_SVBK: u16 = 0xFF70; // WRAM Bank select
 pub const REG_BCPS: u16 = 0xFF68; // Background Color Palette Specification
-pub const REG_BCPD: u16 = 0xFF69; // Background Color Palette Data
+pub(crate) const REG_BCPD: u16 = 0xFF69; // Background Color Palette Data
 pub const REG_OCPS: u16 = 0xFF6A; // Object Color Palette Specification
-pub const REG_OCPD: u16 = 0xFF6B; // Object Color Palette Data
+pub(crate) const REG_OCPD: u16 = 0xFF6B; // Object Color Palette Data
 
 
 /// CGB HDMA halt-state machine
@@ -1302,13 +1302,6 @@ impl Mmio {
     /// eligibility on the boundary access cc having reached this cc.
     pub fn pending_timer_fire_cc(&self) -> Option<u64> {
         self.timer.pending_fire_cc()
-    }
-
-    /// HALT-PREFETCH (R-PC) diagnostic anchor: the RAW Gambatte intevent timer
-    /// eventTime of the most recent undispatched TIMA IRQ (no `+CC_OFF` delivery
-    /// offset), in master_cc space. Logged by the R-PC unhalt trace only.
-    pub fn pending_timer_event_cc(&self) -> Option<u64> {
-        self.timer.pending_fire_event_cc()
     }
 
     /// Delivery cc of the next scheduled timer overflow (EI-loop fast-dispatch).
