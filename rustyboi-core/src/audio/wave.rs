@@ -102,16 +102,6 @@ impl Wave {
         self.cc = cc;
     }
 
-    /// Snapshot the wave pattern RAM (preserved across APU power-off, which
-    /// Gambatte keeps untouched in `PSG::reset`).
-    pub fn wave_ram(&self) -> [u8; 16] {
-        self.wave_ram
-    }
-
-    pub fn set_wave_ram(&mut self, ram: [u8; 16]) {
-        self.wave_ram = ram;
-    }
-
     pub fn set_len_cc(&mut self, cc: u32) {
         self.len_cc = cc;
     }

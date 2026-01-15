@@ -460,27 +460,6 @@ impl SM83 {
         cycles += self.execute(op, mmio);
         self.apply_ime_delay();
         mmio.set_hdma_resume_lockstep_window(false);
-        return cycles;
-
-        // Handle interrupts if IME is enabled and there's a pending interrupt
-        if self.registers.ime && pending_interrupt.is_some() {
-            return self.service_interrupt(mmio, just_unhalted);
-        }
-
-        let opcode = mmio.fetch_opcode(self.registers.pc);
-        self.registers.pc += 1;
-        cycles += self.execute(opcode, mmio);
-        // Next-M-cycle dma() fire (IME-off HALT-bug resume): a block whose m0-edge
-        // fell during this (doubled) resume instruction was held by the suppression
-        // engaged in `halt()`; fire it now, at the boundary AFTER the instruction's
-        // accesses, so its VRAM write lands after the resume read
-        // (hdma_late_if_and_ie_halt_1).
-        if mmio.hdma_unhalt_reflag_deferred() {
-            mmio.set_hdma_unhalt_reflag_deferred(false);
-            mmio.set_hdma_mcycle_fire_suppressed(false);
-            mmio.fire_pending_hdma_mcycle();
-        }
-        self.apply_ime_delay();
         cycles
     }
 
