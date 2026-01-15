@@ -236,6 +236,7 @@ impl Audio {
         self.channel1.reset_cc(delta);
         self.channel2.reset_cc(delta);
         self.channel3.reset_cc(delta);
+        self.channel4.reset_cc(old, delta);
         // Single counter — `len_cc` mirrors `cc` (Gambatte folds the one
         // `cycleCounter_`; the channels' `len_counter` boundaries survive because
         // the fold preserves `cc & -0x1000`).
@@ -297,11 +298,11 @@ impl Audio {
         // (the length quantum) for the rest of the run. The channel sub-counters
         // are still reset.
         if !self.clock_anchored {
+            self.push_cc();
             self.channel1.psg_reset();
             self.channel2.psg_reset();
             self.channel3.psg_reset();
             self.channel4.psg_reset();
-            self.push_cc();
             return;
         }
         // Faithful `PSG::reset` (sound.cpp:67). Single counter, no reconstruction-
@@ -318,11 +319,13 @@ impl Audio {
         // lastUpdate_ = ((lastUpdate_ + 3) & -4) - !ds  (parity re-anchor).
         self.last_update = (self.last_update.wrapping_add(3) & !3u64)
             .wrapping_sub(not_ds as u64);
+        // Push the folded cc into the channels first so ch4's `Lfsr::reset(cc)`
+        // anchors `backupCounter_` at the folded cc (Gambatte `reset(cc)`).
+        self.push_cc();
         self.channel1.psg_reset();
         self.channel2.psg_reset();
         self.channel3.psg_reset();
         self.channel4.psg_reset();
-        self.push_cc();
     }
 
     /// Faithful `PSG::speedChange` (sound.cpp:106) for the
@@ -355,6 +358,7 @@ impl Audio {
             self.channel1.reset_cc(delta);
             self.channel2.reset_cc(delta);
             self.channel3.reset_cc(delta);
+            self.channel4.reset_cc(cc, delta);
             self.push_cc();
             self.fire_length_events(self.cc);
         }
@@ -365,6 +369,7 @@ impl Audio {
     pub fn sync_wave_for_read(&mut self) {
         if self.audio_enabled {
             self.channel3.sync_for_read();
+            self.channel4.sync_for_read();
         }
     }
 
@@ -397,6 +402,12 @@ impl Audio {
         self.channel3.set_len_cc(lcc);
         self.channel4.set_len_cc(lcc);
         self.fire_length_events(lcc);
+        // Resolve channel 4's LFSR register at the SAME precise per-access cc the
+        // length comparison uses (Gambatte `pcm34Read` -> `generateSamples(cc)`
+        // with the exact CPU read cc), rather than the per-dot `self.cc` which
+        // can lag the access by a sub-M-cycle. `delta` maps the master read cc
+        // into the channel's `cycleCounter_` units.
+        self.channel4.sync_lfsr_at(self.cc.wrapping_add(delta));
         // Restore the steady-state length cc so the next per-dot `push_cc`
         // (which uses the un-overlaid `len_cc`) doesn't see a stale ahead value.
         let base = self.len_cc;
