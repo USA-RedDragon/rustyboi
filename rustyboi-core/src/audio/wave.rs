@@ -335,6 +335,28 @@ impl Wave {
         self.enabled
     }
 
+    /// CGB PCM34 low nibble for the wave channel (Gambatte `channel3.cpp`):
+    /// `isActive()` is `master_` and `vol_ = waveSample(wavePos_, sampleBuf_,
+    /// rshift_)` = `(pos%2 ? s&0xF : s>>4) >> rshift`, where `rshift` is
+    /// `min((nr32>>5 & 3) - 1, 4)` so output level 0 mutes (shift past the data).
+    pub fn pcm_nibble(&self) -> u8 {
+        if !self.master {
+            return 0;
+        }
+        let byte_index = (self.wave_pos / 2) as usize;
+        let sample = if self.wave_pos.is_multiple_of(2) {
+            (self.wave_ram[byte_index] >> 4) & 0x0F
+        } else {
+            self.wave_ram[byte_index] & 0x0F
+        };
+        let output_level = self.get_output_level();
+        if output_level == 0 {
+            0
+        } else {
+            (sample >> (output_level - 1)) & 0x0F
+        }
+    }
+
     /// channel3.h waveRamRead, evaluated at the exact read cc.
     pub fn read_wave_ram(&self, addr: u16) -> u8 {
         let mut index = (addr - WAV_START) as usize;
