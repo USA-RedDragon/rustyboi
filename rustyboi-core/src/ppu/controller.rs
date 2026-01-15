@@ -59,6 +59,35 @@ const DMG_MODE0_OFFSET: i32 = 4;
 const CGB_MODE0_OFFSET: i32 = 4;
 // Mode-3 dot penalty for a window starting on this line (Gambatte StartWindowDraw).
 const WIN_M3_PENALTY: i32 = 6;
+// Display-column latency between a mid-mode-3 DMG palette-register (BGP/OBP0/OBP1)
+// write and the first pixel that sees the new value. `self.x` at the write instant
+// is the next column to be popped (the live pipeline plot position); the change
+// first reaches the column plotted this many dots later. Calibrated byte-exact
+// against mealybug m3_bgp_change / m3_obp0_change (DMG-blob + cgb-c references),
+// whose per-line palette boundary lands past the column being popped at the write
+// cc. Same shape as the LCDC `self.x + 2` commit in handle_lcdc_write. BGP and OBP
+// carry separate latencies (the BG fetcher and the sprite mixer sample at different
+// pipeline stages). RB_BGP_LAT / RB_OBP_LAT override for calibration.
+// CGB hardware samples the palette mapping one dot later in the pipeline than DMG
+// hardware (the DMG fetcher runs a 4-dot pixel-transfer warmup + the +1 cgb_adj
+// phase vs CGB's 2-dot warmup): the same mid-mode-3 write reaches the displayed
+// column one column earlier on DMG. Keyed by `is_cgb()` (the hardware, NOT the
+// CGB-features mode) so DMG-compat-on-CGB — which renders with the CGB warmup but
+// the DMG palette regs (mealybug m3_bgp_change cgb_c) — takes the CGB latency. The
+// split also keeps Gambatte's own dmgpalette_during_m3 DMG tests (which encode the
+// real DMG latch column) passing.
+const BGP_LATENCY_CGB: i32 = 2;
+const BGP_LATENCY_DMG: i32 = 1;
+const OBP_LATENCY_CGB: i32 = 2;
+const OBP_LATENCY_DMG: i32 = 1;
+fn bgp_latency(cgb: bool) -> i32 {
+    let d = if cgb { BGP_LATENCY_CGB } else { BGP_LATENCY_DMG };
+    std::env::var("RB_BGP_LAT").ok().and_then(|s| s.parse().ok()).unwrap_or(d)
+}
+fn obp_latency(cgb: bool) -> i32 {
+    let d = if cgb { OBP_LATENCY_CGB } else { OBP_LATENCY_DMG };
+    std::env::var("RB_OBP_LAT").ok().and_then(|s| s.parse().ok()).unwrap_or(d)
+}
 // Offset (dots) between the renderer's scheduled mode-0 transition and the
 // event-model mode-0 STAT IRQ fire time. Tuned against the suite.
 const M0IRQ_OFFSET: i64 = -3;
@@ -1113,6 +1142,23 @@ pub struct Ppu {
     // Empty/single-entry => no mid-line toggle => identical to the live read.
     #[serde(default)]
     bgen_history: Vec<(u64, bool)>,
+    // Per-line BGP / OBP0 / OBP1 plot history for the per-pixel renderer, mirroring
+    // `bgen_history`. A mid-mode-3 write to BGP (FF47) / OBP0 (FF48) / OBP1 (FF49)
+    // takes effect at the exact pixel being drawn `MID_M3_PAL_LATENCY` dots later
+    // (the DMG palette-RAM pipeline latency the mealybug m3_bgp_change / m3_obp0_change
+    // tests measure). The per-dot draw is flushed in bursts at m0Time, so a single
+    // live `mmio.read(BGP)` snapshot would apply the final value to every flushed
+    // column. We record each mid-mode-3 change as a (boundary_col, value) entry —
+    // columns >= boundary_col see the new value — and resolve per displayed column.
+    // The first entry (boundary 0) seeds the value at mode-3 start; with no mid-line
+    // write the history is a single seed and resolves to that value for the whole
+    // line (identical to the previous `bgp_delayed` steady-state read).
+    #[serde(default)]
+    bgp_history: Vec<(u64, u8)>,
+    #[serde(default)]
+    obp0_history: Vec<(u64, u8)>,
+    #[serde(default)]
+    obp1_history: Vec<(u64, u8)>,
     #[serde(default)]
     cgb_color_conversion: CgbColorConversion,
     #[serde(skip, default)]
@@ -1183,6 +1229,9 @@ impl Ppu {
             line_rendered_this_line: false,
             wxa6_lineend_applied: false,
             bgen_history: Vec::new(),
+            bgp_history: Vec::new(),
+            obp0_history: Vec::new(),
+            obp1_history: Vec::new(),
             abs_cc: 0,
             p_now: pnow_disabled(),
             write_subdot: 0,
@@ -2102,8 +2151,20 @@ impl Ppu {
         mmio.is_cgb_features_enabled() || self.is_cgb_compat_dmg(mmio)
     }
 
-    pub fn get_palette_color(&self, _mmio: &mmio::Mmio, idx: u8) -> u8 {
-        let bgp = self.bgp_delayed;
+    // BG palette shade for color index `idx` at display column `sx`. On CGB hardware
+    // resolves BGP per column from `bgp_history` so a mid-mode-3 BGP write remaps only
+    // the pixels drawn at/after its apply column (mealybug m3_bgp_change cgb_c, which
+    // runs DMG-compat-on-CGB). On DMG hardware the proven per-dot `bgp_delayed` latch
+    // (refreshed at the end of every dot) already yields the exact DMG latch column
+    // that Gambatte's own dmgpalette_during_m3 tests require, so DMG keeps it
+    // untouched. With no mid-line write the CGB history is a single seed == the
+    // delayed register, so the steady-state output is identical either way.
+    pub fn get_palette_color(&self, mmio: &mmio::Mmio, idx: u8, sx: u8) -> u8 {
+        let bgp = if mmio.is_cgb() {
+            Self::pal_at(&self.bgp_history, sx, self.bgp_delayed)
+        } else {
+            self.bgp_delayed
+        };
         match idx {
             0 => bgp&0x03,        // White
             1 => (bgp>>2)&0x03, // Light Gray
@@ -2113,12 +2174,25 @@ impl Ppu {
         }
     }
 
-    pub fn get_sprite_palette_color(&self, _mmio: &mmio::Mmio, idx: u8, palette: bool) -> u8 {
+    // Sprite palette shade at display column `sx`. CGB resolves OBP0/OBP1 per column
+    // from the obp histories (mealybug m3_obp0_change cgb_c); DMG keeps the proven
+    // per-dot `*_delayed` latch (see get_palette_color).
+    pub fn get_sprite_palette_color(&self, mmio: &mmio::Mmio, idx: u8, palette: bool, sx: u8) -> u8 {
         if idx == 0 {
             return 0; // Transparent for sprites
         }
 
-        let obp = if palette { self.obp1_delayed } else { self.obp0_delayed };
+        let obp = if mmio.is_cgb() {
+            if palette {
+                Self::pal_at(&self.obp1_history, sx, self.obp1_delayed)
+            } else {
+                Self::pal_at(&self.obp0_history, sx, self.obp0_delayed)
+            }
+        } else if palette {
+            self.obp1_delayed
+        } else {
+            self.obp0_delayed
+        };
         match idx {
             1 => (obp>>2)&0x03, // Light Gray
             2 => (obp>>4)&0x03, // Dark Gray
@@ -3237,6 +3311,82 @@ impl Ppu {
         self.wy2_apply_cc = cc + delay;
     }
 
+    /// FF47 (BGP) write hook. The CPU readback is immediate (handled by mmio), but
+    /// the rendered BG palette mapping must change at the exact pixel being drawn
+    /// `MID_M3_PAL_LATENCY` columns after the write (mealybug m3_bgp_change). Record
+    /// the change keyed by the display column it first becomes visible at; the
+    /// per-column draw resolves it via `bgp_at`. Only while pixel transfer is active
+    /// for this line — a write outside mode 3 just lands in the seed at the next
+    /// mode-3 entry. Steady-state (no mid-mode-3 write) is unaffected.
+    pub fn on_bgp_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
+        if self.state != State::PixelTransfer || self.disabled {
+            return;
+        }
+        let boundary = self.pal_write_boundary(bgp_latency(_mmio.is_cgb()));
+        Self::push_pal_history(&mut self.bgp_history, boundary, value);
+    }
+
+    /// FF48 (OBP0) write hook. See `on_bgp_write`; affects sprite palette 0.
+    pub fn on_obp0_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
+        if self.state != State::PixelTransfer || self.disabled {
+            return;
+        }
+        let boundary = self.pal_write_boundary(obp_latency(_mmio.is_cgb()));
+        Self::push_pal_history(&mut self.obp0_history, boundary, value);
+    }
+
+    /// FF49 (OBP1) write hook. See `on_bgp_write`; affects sprite palette 1.
+    pub fn on_obp1_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
+        if self.state != State::PixelTransfer || self.disabled {
+            return;
+        }
+        let boundary = self.pal_write_boundary(obp_latency(_mmio.is_cgb()));
+        Self::push_pal_history(&mut self.obp1_history, boundary, value);
+    }
+
+    // Display column at which a mid-mode-3 palette write becomes visible: the next
+    // column to be popped (`self.x`) plus the register's pipeline latency in dots.
+    // While the pipeline is still warming up (`pixel_transfer_warmup > 0`, before any
+    // column has popped) the write lands before column 0 is plotted, so it colors
+    // column 0 onward — the `+latency` delay is absorbed by the remaining warmup.
+    fn pal_write_boundary(&self, latency: i32) -> u64 {
+        if self.pixel_transfer_warmup > 0 {
+            return 0;
+        }
+        (self.x as i32 + latency).clamp(0, 160) as u64
+    }
+
+    // Append a (boundary_col, value) palette-history entry. If the last entry shares
+    // the same boundary column (two writes resolving to the same display column),
+    // overwrite it so only the last write at that column wins.
+    fn push_pal_history(hist: &mut Vec<(u64, u8)>, boundary: u64, value: u8) {
+        if let Some(last) = hist.last_mut()
+            && last.0 == boundary
+        {
+            last.1 = value;
+            return;
+        }
+        hist.push((boundary, value));
+    }
+
+    // Resolve a column-keyed DMG palette history at display column `sx`: the last
+    // entry whose boundary column is <= `sx` wins. Single-seed history (the common
+    // no-mid-write case) always returns the seed. Mirrors `bgen_at`.
+    fn pal_at(hist: &[(u64, u8)], sx: u8, fallback: u8) -> u8 {
+        if hist.len() <= 1 {
+            return hist.last().map(|&(_, v)| v).unwrap_or(fallback);
+        }
+        let mut val = hist[0].1;
+        for &(boundary_col, v) in hist.iter() {
+            if boundary_col <= sx as u64 {
+                val = v;
+            } else {
+                break;
+            }
+        }
+        val
+    }
+
     /// FF42 (SCY) write hook. The CPU readback of FF42 is immediate (handled by
     /// mmio), but the BG fetcher must see the new SCY only ~N dots later, the
     /// write-side analog of the wy1/wy2 delayed latches: rustyboi otherwise
@@ -4120,6 +4270,21 @@ impl Ppu {
                         0,
                         (self.lcdc & (LCDCFlags::BGDisplay as u8)) != 0,
                     ));
+                    // Per-pixel DMG palette histories: seed each at boundary 0 with
+                    // the 1-dot-delayed register value (`*_delayed`, refreshed at the
+                    // end of every dot), NOT the live register. A BGP/OBP write on the
+                    // dot the PPU enters mode 3 has already updated mmio but must not
+                    // yet color column 0 — the column-0 pixel sees the prior dot's
+                    // value (Gambatte dmgpalette_during_m3: the write at mode-3 entry
+                    // leaves column 0 white). Mid-mode-3 writes after entry append
+                    // (boundary_col, value) entries via on_{bgp,obp0,obp1}_write, which
+                    // land at column >= 1 so column 0 keeps this seed.
+                    self.bgp_history.clear();
+                    self.bgp_history.push((0, self.bgp_delayed));
+                    self.obp0_history.clear();
+                    self.obp0_history.push((0, self.obp0_delayed));
+                    self.obp1_history.clear();
+                    self.obp1_history.push((0, self.obp1_delayed));
                     self.m3_arm_scx = (mmio.read(SCX) & 0x07) as u8;
                     self.m3_arm_scx_full = mmio.read(SCX) as i16;
                     // First line after enable: resolve the SCX value the fine-scroll
@@ -6564,10 +6729,10 @@ impl Ppu {
         }
     }
     
-    fn get_cgb_bg_color(&self, mmio: &mmio::Mmio, palette_idx: u8, color_idx: u8) -> (u8, u8, u8) {
+    fn get_cgb_bg_color(&self, mmio: &mmio::Mmio, palette_idx: u8, color_idx: u8, sx: u8) -> (u8, u8, u8) {
         if !mmio.is_cgb_features_enabled() {
             // Fallback to monochrome conversion
-            let mono_color = self.get_palette_color(mmio, color_idx);
+            let mono_color = self.get_palette_color(mmio, color_idx, sx);
             let intensity = match mono_color {
                 0 => 255, // White
                 1 => 170, // Light gray
@@ -6582,14 +6747,14 @@ impl Ppu {
         self.cgb_color_to_rgb(low_byte, high_byte)
     }
     
-    fn get_cgb_obj_color(&self, mmio: &mmio::Mmio, palette_idx: u8, color_idx: u8) -> (u8, u8, u8) {
+    fn get_cgb_obj_color(&self, mmio: &mmio::Mmio, palette_idx: u8, color_idx: u8, sx: u8) -> (u8, u8, u8) {
         if color_idx == 0 {
             return (0, 0, 0); // Transparent - will be handled by caller
         }
-        
+
         if !mmio.is_cgb_features_enabled() {
             // Fallback to monochrome conversion
-            let mono_color = self.get_sprite_palette_color(mmio, color_idx, palette_idx != 0);
+            let mono_color = self.get_sprite_palette_color(mmio, color_idx, palette_idx != 0, sx);
             let intensity = match mono_color {
                 0 => 0,   // Transparent
                 1 => 170, // Light gray
@@ -6815,7 +6980,7 @@ impl Ppu {
         // Background attributes captured at fetch time travel with the pixel.
         let tile_attributes = bg_attrs;
         let palette_idx = tile_attributes & 0x07; // Bits 0-2 = palette index
-        let bg_color_rgb = self.get_cgb_bg_color(mmio, palette_idx, bg_pixel_idx);
+        let bg_color_rgb = self.get_cgb_bg_color(mmio, palette_idx, bg_pixel_idx, screen_x);
         
         // Check if sprites are enabled
         if (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
@@ -6851,7 +7016,7 @@ impl Ppu {
                                 if sprite.attributes.palette { 1 } else { 0 }
                             };
                             
-                            let sprite_color_rgb = self.get_cgb_obj_color(mmio, sprite_palette_idx, sprite_pixel_idx);
+                            let sprite_color_rgb = self.get_cgb_obj_color(mmio, sprite_palette_idx, sprite_pixel_idx, screen_x);
                             
                             // Check if this sprite has higher priority than the currently selected one
                             let is_higher_priority = if let Some((current_sprite, _, _)) = selected_sprite {
@@ -6922,9 +7087,9 @@ impl Ppu {
 
         // BG shade via BGP, then look up BG palette 0 in CGB palette RAM.
         let bg_shade = if bg_enabled {
-            self.get_palette_color(mmio, bg_pixel_idx)
+            self.get_palette_color(mmio, bg_pixel_idx, screen_x)
         } else {
-            self.get_palette_color(mmio, 0)
+            self.get_palette_color(mmio, 0, screen_x)
         };
         let (lo, hi) = mmio.bg_palette_pair_raw(0, bg_shade);
         let bg_color_rgb = self.cgb_color_to_rgb(lo, hi);
@@ -6948,7 +7113,7 @@ impl Ppu {
                         // DMG-compat: OBP0/OBP1 selected by attr bit 4, shade
                         // looked up in OBJ palette 0/1 of CGB palette RAM.
                         let use_obp1 = sprite.attributes.palette;
-                        let obj_shade = self.get_sprite_palette_color(mmio, sprite_pixel_idx, use_obp1);
+                        let obj_shade = self.get_sprite_palette_color(mmio, sprite_pixel_idx, use_obp1, screen_x);
                         let pal = if use_obp1 { 1 } else { 0 };
                         let (slo, shi) = mmio.obj_palette_pair_raw(pal, obj_shade);
                         let sprite_color_rgb = self.cgb_color_to_rgb(slo, shi);
@@ -6973,10 +7138,10 @@ impl Ppu {
 
         // Get background color - if BG display is disabled, force to white (color 0)
         let bg_color = if bg_enabled {
-            self.get_palette_color(mmio, bg_pixel_idx)
+            self.get_palette_color(mmio, bg_pixel_idx, screen_x)
         } else {
             // When BG display is disabled, background becomes white (palette color 0)
-            self.get_palette_color(mmio, 0)
+            self.get_palette_color(mmio, 0, screen_x)
         };
         
         // For sprite priority calculation, we need the original bg_pixel_idx
@@ -7004,8 +7169,8 @@ impl Ppu {
                     // Get sprite pixel data
                     if let Some(sprite_pixel_idx) = self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8)
                         && sprite_pixel_idx != 0 { // Sprite pixel is not transparent
-                            let sprite_color = self.get_sprite_palette_color(mmio, sprite_pixel_idx, sprite.attributes.palette);
-                            
+                            let sprite_color = self.get_sprite_palette_color(mmio, sprite_pixel_idx, sprite.attributes.palette, screen_x);
+
                             // Handle sprite priority
                             if !sprite.attributes.priority || effective_bg_pixel_idx == 0 {
                                 // Sprite appears above background or background is transparent
