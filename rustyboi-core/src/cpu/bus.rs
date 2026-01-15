@@ -998,6 +998,21 @@ impl<'a> Bus<'a> {
             if addr == ppu::LCD_CONTROL {
                 self.ppu.handle_lcdc_write(value, self.mmio);
             }
+            // FF47/FF48/FF49 (BGP/OBP0/OBP1): the CPU readback is immediate (mmio
+            // write above), but the rendered palette mapping must change at the
+            // exact pixel drawn a fixed latency after the write (mid-mode-3
+            // per-pixel palette effect; mealybug m3_bgp_change / m3_obp0_change).
+            // Record the change keyed by display column; the per-column draw
+            // resolves it. No-op outside pixel transfer.
+            if addr == ppu::BGP {
+                self.ppu.on_bgp_write(value, self.mmio);
+            }
+            if addr == ppu::OBP0 {
+                self.ppu.on_obp0_write(value, self.mmio);
+            }
+            if addr == ppu::OBP1 {
+                self.ppu.on_obp1_write(value, self.mmio);
+            }
             if self.mmio.take_stat_register_write_pending() {
                 self.ppu.on_stat_register_write(self.mmio);
             }
