@@ -167,14 +167,6 @@ impl Fetcher {
         self.window_revert_at_push = false;
     }
 
-    // Stop fetching window tiles mid-line (Gambatte WE-off / handleWinDrawStartReq
-    // clearing win_draw_started). The next TileNumber fetch reverts to the BG
-    // tilemap; the FIFO is left intact so the window tile already queued drains
-    // before the BG pixels arrive, matching Gambatte's per-tile-boundary switch.
-    pub fn stop_window(&mut self) {
-        self.stop_window_with_extra(0);
-    }
-
     // Stop the window, but draw `extra` additional full window tiles first.
     // Gambatte's Tile::f0 commits each tile's window-vs-BG choice at the tile
     // boundary (`xpos == endx`); a WE-off that lands mid-tile (`xpos != endx`)
