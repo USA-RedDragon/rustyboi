@@ -267,6 +267,21 @@ impl Noise {
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
+
+    /// CGB PCM34 high nibble for the noise channel (Gambatte `channel4.cpp`):
+    /// `isActive()` is `master_` (here our `enabled`, which the DAC-off path
+    /// clears) and `vol_ = lfsr.isHighState(cc) ? envelope.volume : 0`. The LFSR
+    /// high state is the inverted bit-0 (Gambatte `Lfsr::isHighState`).
+    pub fn pcm_nibble(&self) -> u8 {
+        if !self.enabled {
+            return 0;
+        }
+        if (!self.lfsr) & 0x01 == 1 {
+            self.volume & 0x0F
+        } else {
+            0
+        }
+    }
 }
 
 impl Addressable for Noise {

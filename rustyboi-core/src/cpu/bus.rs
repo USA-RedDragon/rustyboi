@@ -549,11 +549,16 @@ impl<'a> Bus<'a> {
         // channel 4 dots early — making the cycle-exact `nr52` boundary tests
         // (length expiry at `((cc>>13)+len)<<13` vs the NR52 read cc) read 0 one
         // M-cycle too soon. NR52 status must reflect the pre-tick enabled state.
-        let apu_read = if (0xFF10..=0xFF3F).contains(&addr) {
+        let apu_read = if (0xFF10..=0xFF3F).contains(&addr)
+            || matches!(addr, 0xFF76 | 0xFF77)
+        {
             // Resolve the APU length subsystem at the canonical per-access cc
             // (the SAME cc the timer register access resolves on), so the
             // length-expiry boundary is decided off one uniform clock with no
-            // APU-specific phase constant (M7).
+            // APU-specific phase constant (M7). FF76/FF77 (PCM12/PCM34) are read
+            // off the same access-cc snapshot so the digital amplitude reflects
+            // the channels advanced to the read M-cycle (Gambatte
+            // `PSG::pcm{12,34}Read` calls `generateSamples(cpuCc)` first).
             let access_cc = self.mmio.access_cc();
             self.mmio.sync_apu_read_cc(access_cc);
             Some(self.mmio.read(addr))

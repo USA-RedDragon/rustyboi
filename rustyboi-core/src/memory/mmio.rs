@@ -3993,6 +3993,15 @@ impl memory::Addressable for Mmio {
                             if self.io_registers.read(REG_BOOT_OFF) != 0 { 0xFF } else { 0x00 }
                         },
 
+                        // PCM12 (0xFF76) / PCM34 (0xFF77): CGB-only digital
+                        // amplitude read-back (Gambatte memory.cpp case 0x76/0x77
+                        // -> PSG::pcm{12,34}Read, gated by isCgb() && isEnabled()).
+                        // The channels were advanced to the read access cc in
+                        // `Bus::read` (`sync_apu_read_cc`); the controller returns
+                        // 0 when the APU is powered off.
+                        0xFF76 if self.cgb_features_enabled => self.audio.pcm12(),
+                        0xFF77 if self.cgb_features_enabled => self.audio.pcm34(),
+
                         // CGB-only registers (0xFF51-0xFF77, the ones not
                         // explicitly handled above) read 0xFF on DMG.
                         0xFF51..=0xFF77 if !self.cgb_features_enabled => 0xFF,
