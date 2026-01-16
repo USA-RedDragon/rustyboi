@@ -128,90 +128,6 @@ const WYTRIG_COMMIT_DELAY: i64 = 3;
 const LINE153_LY0_DOT_DS: i64 = 6;
 const GETSTAT_OFF_DS: i64 = -1;
 
-// ds-engine STAGE 5: RB_LINERENDER. With getStat (stage 4) owning all CPU-visible
-// timing, the pixel pipeline no longer affects timing — only the final
-// framebuffer values (read at frame end) matter. When this flag is set the
-// per-dot fetcher/FIFO still RUNS (it advances `self.x` so the timing fallbacks
-// that key off `x==160` are unchanged) but it no longer WRITES the framebuffer;
-// instead each visible line is rendered ONCE in a single closed-form pass
-// (`render_full_line`) at the mode-3 -> HBlank transition, driven by the same
-// per-line geometry getStat uses (SCX/SCY/WX/WY/LCDC + the latched
-// `sprites_on_line` / `win_y_pos`). Flag-off keeps the per-dot draw
-// (byte-identical to stage 4). Timing is unaffected either way (it lives wholly
-// in getStat / the STAT event schedule).
-pub fn linerender_enabled() -> bool {
-    // ds-engine converge: OFF. The closed-form per-line render ignored mid-mode-3
-    // register writes (SCX/LCDC/BGP/WX) -> 219 pixel-content regressions. The
-    // per-dot fetcher/FIFO render handles mid-line writes correctly and getStat
-    // still owns all CPU-visible timing, so the framebuffer goes back to the
-    // per-dot path while keeping the exact-cc/getStat spine.
-    false
-}
-// FAITHFUL EVENTCC rebuild (`RB_FAITHFUL_EVENTCC`). OFF (unset / `=0`) =>
-// byte-identical to main_22. ON => the HALT-exit consumer is migrated onto the
-// single faithful mode-0 STAT IRQ event time (`m0_irq_event_cc_master` =
-// Gambatte's `intevent_interrupts` m0 eventTime = `predictedNextXposTime(166)`):
-// the DMG branch of memory.cpp:308's `cc += 4 * (isCgb() || cc - eventTime < 2)`
-// HALT-wakeup latency fixup, which the legacy `+5`-CGB-only read bias never
-// modelled. Recovers the R4 `late_m0*_halt_m0stat_scx3_2b` DMG family. (The
-// IRQ-DISPATCH and getStat-read consumers stay on the calibrated offset form —
-// their migration onto this same event cc is a later stage; see the engine
-// verdict.) Default ON (proven broke-0, coupled with prefetch_cc below);
-// Proven-permanent (was the RB_FAITHFUL_EVENTCC dev knob); now unconditional.
-pub fn faithful_eventcc_enabled() -> bool {
-    true
-}
-
-// HALT-PREFETCH phase register (`RB_PREFETCH_CC`, Lever A). OFF (unset / `=0`)
-// => byte-identical to flag-OFF f-eventclock (== main_22). ON => the halt-woken
-// FF41 read's access_cc carries the M-cycle-granular HALT-entry-vs-eventTime
-// boundary bit (the pre-snap quantity Gambatte's ceil_4(E) snap erases), so the
-// byte-identical _1b/_2b ROMs separate (phase 0 -> mode0, phase 1 -> mode2).
-// CANNOT be ON without the eventcc foundation (`&& faithful_eventcc_enabled()`),
-// so disabling the foundation disables this too (they move together).
-// Proven-permanent (was the RB_PREFETCH_CC dev knob); now unconditional.
-pub fn prefetch_cc_enabled() -> bool {
-    true
-}
-
-// HDMA Low halt-woken block prefetch-fudge correction (`RB_TIMA_LOWFUDGE`).
-// ON (unset / != `0`) => an HDMA block that fires on the halt-woken instruction
-// stream WHILE a CGB speed switch is armed (`key1_switch_armed`, i.e. the program
-// has set FF4D bit 0 and a `stop` is pending downstream) charges the full 12cc
-// CPU-prefetch overlap instead of the 6cc tuned for the STAT/FF44-immediate-read
-// calibration blocks. Such a block's cost is drained as a timer-ticking idle
-// slice (sm83 take_dma_stall) and feeds `abs_cc` into the pending 2nd STOP's
-// `divReset` re-anchor, so its downstream value-read is a TIMA read several
-// instructions out (past that STOP), not an immediate STAT read. The +6 there
-// pins the TIMA divider phase 6cc short (read - anchor = 131162, one TIMA tick
-// below the 131168 boundary), so `hdma_late_m3speedchange_tima_scx1_ds_6` reads
-// F8 where hardware reads F9. The +12 lands the read on the boundary and produces
-// the byte-exact hardware TIMA sequence F3,F4,F6,F7,F8,F9 across ds_1..ds_6. The
-// armed-switch gate isolates exactly these STOP-downstream blocks; the
-// calibration blocks (`hdma_cycles`/`frame*_count`) fire with no switch armed and
-// keep the +6. Default ON (proven broke-0 on the no-bios main_19 oracle); set
-// RB_TIMA_LOWFUDGE dev knob); now unconditional.
-pub fn tima_lowfudge_enabled() -> bool {
-    true
-}
-
-// HALT-PREFETCH woken-PC push phase (`RB_TIMER_PUSH_PHASE`, R-PC). OFF (unset /
-// `=0`) => byte-identical to main_19. ON => a CGB+Timer HALT-exit whose HALT left
-// a NON-advancing Requested-HDMA prefetch peek (pc was not advanced past the
-// resume byte) marks phase 1, so service_interrupt re-adds the +1 its
-// unconditional `pc -= 1` prefetch undo wrongly removed there — reproducing
-// Gambatte's CONDITIONAL undo (interrupter.cpp:42 `if (prefetched_) pc_ -= 1`,
-// hdmaReq=false => no undo => pushed resume PC = HALT+1). Separates the
-// byte-identical pc_scx1 _1/_2/_3 streams (AC/AD/AE): _2 took the Requested-peek
-// path; _1/_3 the Low/real-fetch path (net zero). The INVERSE-gated (Timer+CGB)
-// sibling of prefetch_cc (DMG+Lcd FF41 getStat); it consumes a NEW register
-// (timer_push_phase) so the getStat path is untouched. CANNOT be ON without the
-// eventcc/prefetch foundation. Default ON (proven broke-0, zero regressions);
-// Proven-permanent (was the RB_TIMER_PUSH_PHASE dev knob); now unconditional.
-pub fn timer_push_phase_enabled() -> bool {
-    true
-}
-
 // DS offsets re-derived after the double-speed STAT sub-dot step (step_subdot)
 // gave the IRQ model true odd-cc resolution: m2 relaxes -2 -> -1 (the odd-cc
 // fire is now caught by the sub-dot rather than rounded down), and the write cc
@@ -2739,14 +2655,6 @@ impl Ppu {
         let Ok(bg_pixel) = self.fetcher.pixel_fifo.pop() else {
             return false;
         };
-        // STAGE 5 (RB_LINERENDER): the per-dot FIFO still runs so `self.x`
-        // advances (the timing fallbacks key off x==160), but it no longer
-        // writes the framebuffer — `render_full_line` produces the visible line
-        // in one closed-form pass at the mode-3 -> HBlank transition instead.
-        if linerender_enabled() {
-            self.x += 1;
-            return true;
-        }
         let bg_pixel_idx = bg_pixel.color;
         let bg_attrs = bg_pixel.attrs;
         let ly = mmio.read(LY) as u16;
@@ -4728,9 +4636,6 @@ impl Ppu {
                         // HBlank via the x==160 fallback below. For all other lines
                         // the flush completed the line, so end mode 3 now.
                         if !(self.window_started_this_line && self.x < 160) {
-                            if linerender_enabled() && !self.line_rendered_this_line {
-                                self.render_full_line(mmio);
-                            }
                             // DMG wx==166 plotPixel-at-xpos166 (mode-3 end). See
                             // apply_dmg_wxa6_lineend_windraw.
                             self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
@@ -5187,9 +5092,6 @@ impl Ppu {
                     // mode 3 early here on ordinary (non-window) lines.
                     let window_deferred = self.window_started_this_line && self.mode0_reported_this_line;
                     if self.m0_time_master.is_none() {
-                        if linerender_enabled() && !self.line_rendered_this_line {
-                            self.render_full_line(mmio);
-                        }
                         self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
                         self.state = State::HBlank;
                         if !self.mode0_reported_this_line {
@@ -5198,9 +5100,6 @@ impl Ppu {
                             self.check_and_trigger_stat_interrupt(mmio);
                         }
                     } else if window_deferred {
-                        if linerender_enabled() && !self.line_rendered_this_line {
-                            self.render_full_line(mmio);
-                        }
                         self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
                         self.state = State::HBlank;
                     }
@@ -6122,13 +6021,7 @@ impl Ppu {
         // foundation's uniform +4 (halt_wake_plus4_dmg) lifted BOTH, swapping the
         // failures; the phase isolates the bias to _2b alone. Under RB_PREFETCH_CC
         // OFF the foundation behavior is preserved verbatim.
-        let access_cc = if prefetch_cc_enabled() {
-            access_cc + 4 * mmio.halt_prefetch_phase() as u64
-        } else if faithful_eventcc_enabled() && mmio.halt_wake_plus4_dmg() {
-            access_cc + 4
-        } else {
-            access_cc
-        };
+        let access_cc = access_cc + 4 * mmio.halt_prefetch_phase() as u64;
         let lc = self.ly_counter_obs(mmio); // ds-subdot STAGE 1: read-path phase
         let ly = lc.ly as i64;
         let cpl = stat_irq::LCD_CYCLES_PER_LINE as i64;

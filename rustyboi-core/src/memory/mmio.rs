@@ -1980,9 +1980,7 @@ impl Mmio {
         // ceil_4(eventTime) snap (cpu.cpp:1075) would erase; the unhalt
         // derivation (sm83.rs) compares it against the captured m0 eventTime to
         // separate the byte-identical _1b/_2b streams. Flag-OFF: never set.
-        if crate::ppu::controller::prefetch_cc_enabled() {
-            self.set_halt_entry_cc(Some(self.master_cc()));
-        }
+        self.set_halt_entry_cc(Some(self.master_cc()));
         // A fresh HALT supersedes any pending High-unhalt edge-consume (the prior
         // unhalt's stream has ended); never let it span halts.
         self.hdma_high_unhalt_consume = false;
@@ -2261,8 +2259,7 @@ impl Mmio {
         // blocks `hdma_cycles` measures keep the +6.
         let prefetch_fudge: u32 = if self.halt_wakeup_skew && self.hdma_enabled_at_halt {
             0
-        } else if crate::ppu::controller::tima_lowfudge_enabled()
-            && self.halt_wakeup_skew
+        } else if self.halt_wakeup_skew
             && !self.hdma_enabled_at_halt
             && matches!(self.halt_hdma_state, HaltHdmaState::Low)
             && self.key1_switch_armed
@@ -2275,7 +2272,7 @@ impl Mmio {
             // its phase directly: the +6 leaves `read - anchor = 131162`, one TIMA
             // tick below the 131168 boundary (ds_6 reads F8 vs hardware F9). The full
             // 12cc CPU-prefetch overlap lands the read on 131168 — and the byte-exact
-            // F3..F9 sequence across ds_1..ds_6. See `tima_lowfudge_enabled`.
+            // F3..F9 sequence across ds_1..ds_6
             12
         } else {
             6
