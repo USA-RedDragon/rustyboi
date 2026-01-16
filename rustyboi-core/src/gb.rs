@@ -11,14 +11,16 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, clap::ValueEnum, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, clap::ValueEnum, PartialEq, Eq)]
 pub enum Hardware {
     DMG,  // Original DMG-01
     DMG0, // Very early Japanese DMG-01
     MGB,  // Game Boy Pocket
     SGB,  // Super Game Boy
     SGB2, // Super Game Boy 2
-    CGB,  // Game Boy Color, CGB-CPU-01
+    CGB0, // Game Boy Color, CGB-CPU-0 (earliest revision; post-boot DIV phase
+          // leads CGB-A..E by 512 master-cc, the only observable difference)
+    CGB,  // Game Boy Color, CGB-CPU-A..E
     AGB,  // Game Boy Advance in GBC-compatibility mode (CGB + isAgb() diffs)
 }
 
@@ -33,7 +35,7 @@ impl Hardware {
     /// Whether this hardware runs the CGB feature set (CGB or AGB). Used to
     /// decide CGB-vs-DMG behavior; AGB is a CGB for all CGB-feature purposes.
     pub fn is_cgb_like(self) -> bool {
-        matches!(self, Hardware::CGB | Hardware::AGB)
+        matches!(self, Hardware::CGB0 | Hardware::CGB | Hardware::AGB)
     }
 }
 
@@ -164,14 +166,14 @@ impl GB {
         self.mmio.write(crate::audio::NR50, 0x77);
         self.mmio.write(crate::audio::NR51, 0xF3);
         self.mmio.write(crate::audio::NR52, match self.hardware {
-            Hardware::DMG0 | Hardware::DMG | Hardware::MGB | Hardware::CGB | Hardware::AGB => 0xF1,
+            Hardware::DMG0 | Hardware::DMG | Hardware::MGB | Hardware::CGB0 | Hardware::CGB | Hardware::AGB => 0xF1,
             Hardware::SGB | Hardware::SGB2 => 0xF0,
         });
         self.mmio.write(crate::timer::TIMA, 0x00);
         self.mmio.write(crate::timer::TMA, 0x00);
         self.mmio.write(crate::timer::TAC, 0xF8);
         self.mmio.write(crate::timer::DIV, match self.hardware {
-            Hardware::DMG | Hardware::MGB | Hardware::SGB | Hardware::SGB2 | Hardware::CGB | Hardware::AGB => 0xAB,
+            Hardware::DMG | Hardware::MGB | Hardware::SGB | Hardware::SGB2 | Hardware::CGB0 | Hardware::CGB | Hardware::AGB => 0xAB,
             Hardware::DMG0 => 0x18,
         });
 
@@ -179,38 +181,38 @@ impl GB {
             Hardware::DMG0 | Hardware::DMG | Hardware::SGB => 0x01,
             Hardware::MGB | Hardware::SGB2 => 0xFF,
             // Gambatte setPostBiosState: a = cgb*0x10 | 0x01 (0x11 for CGB & AGB).
-            Hardware::CGB | Hardware::AGB => 0x11,
+            Hardware::CGB0 | Hardware::CGB | Hardware::AGB => 0x11,
         };
         self.cpu.registers.b = match self.hardware {
             // Gambatte setPostBiosState: b = cgb & agb. AGB sets B bit0 (the
             // GBA-detection flag games read at boot); CGB/others leave B=0.
             Hardware::AGB => 0x01,
-            Hardware::CGB | Hardware::DMG | Hardware::MGB | Hardware::SGB | Hardware::SGB2 => 0x00,
+            Hardware::CGB0 | Hardware::CGB | Hardware::DMG | Hardware::MGB | Hardware::SGB | Hardware::SGB2 => 0x00,
             Hardware::DMG0 => 0xFF,
         };
         self.cpu.registers.c = match self.hardware {
-            Hardware::CGB | Hardware::AGB => 0x00,
+            Hardware::CGB0 | Hardware::CGB | Hardware::AGB => 0x00,
             Hardware::DMG0 | Hardware::DMG | Hardware::MGB => 0x13,
             Hardware::SGB | Hardware::SGB2 => 0x14,
         };
         self.cpu.registers.d = match self.hardware {
-            Hardware::CGB | Hardware::AGB => 0xFF,
+            Hardware::CGB0 | Hardware::CGB | Hardware::AGB => 0xFF,
             Hardware::SGB | Hardware::SGB2 | Hardware::DMG0 | Hardware::DMG | Hardware::MGB => 0x00,
         };
         self.cpu.registers.e = match self.hardware {
             Hardware::DMG | Hardware::MGB => 0xD8,
             Hardware::DMG0 => 0xC1,
             Hardware::SGB | Hardware::SGB2 => 0x00,
-            Hardware::CGB | Hardware::AGB => 0x56,
+            Hardware::CGB0 | Hardware::CGB | Hardware::AGB => 0x56,
         };
         self.cpu.registers.h = match self.hardware {
-            Hardware::CGB | Hardware::AGB => 0x00,
+            Hardware::CGB0 | Hardware::CGB | Hardware::AGB => 0x00,
             Hardware::DMG0 => 0x84,
             Hardware::DMG | Hardware::MGB => 0x01,
             Hardware::SGB | Hardware::SGB2 => 0xC0,
         };
         self.cpu.registers.l = match self.hardware {
-            Hardware::CGB | Hardware::AGB => 0x0D,
+            Hardware::CGB0 | Hardware::CGB | Hardware::AGB => 0x0D,
             Hardware::DMG0 => 0x03,
             Hardware::DMG | Hardware::MGB => 0x4D,
             Hardware::SGB | Hardware::SGB2 => 0x60,
@@ -229,9 +231,15 @@ impl GB {
             self.cpu.registers.h = 0x00;
             self.cpu.registers.l = 0x7C;
         }
+        // Post-boot Zero flag. Per Pan Docs Power_Up_Sequence CPU-register table
+        // (confirmed by mooneye boot_regs-A / boot_regs-cgb): CGB leaves Z=1, but
+        // AGB leaves Z=0. The CGB-AGB boot ROM's last flag-touching op is an
+        // `inc b` on the GBA-detection value: on CGB B stays $00, on AGB it is
+        // incremented to $01, so the `inc` clears Z on AGB (and only sets Z if the
+        // pre-inc B were $FF, which it is not for these test carts).
         self.cpu.registers.set_flag(registers::Flag::Zero, match self.hardware {
-            Hardware::DMG | Hardware::CGB | Hardware::AGB | Hardware::MGB => true,
-            Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 => false,
+            Hardware::DMG | Hardware::CGB0 | Hardware::CGB | Hardware::MGB => true,
+            Hardware::AGB | Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 => false,
         });
         self.cpu.registers.set_flag(registers::Flag::Negative, false);
         // DMG/MGB post-boot H/C reflect the boot ROM's final header-checksum
@@ -240,11 +248,11 @@ impl GB {
         // (H). The previous `== 0x00` was inverted (gave F=0x80 where real hardware
         // gives 0xB0). DMG0/SGB/CGB leave H/C clear.
         self.cpu.registers.set_flag(registers::Flag::HalfCarry, match self.hardware {
-            Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 | Hardware::CGB | Hardware::AGB => false,
+            Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 | Hardware::CGB0 | Hardware::CGB | Hardware::AGB => false,
             Hardware::DMG | Hardware::MGB => (self.mmio.read(0x014D) & 0x0F) != 0,
         });
         self.cpu.registers.set_flag(registers::Flag::Carry, match self.hardware {
-            Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 | Hardware::CGB | Hardware::AGB => false,
+            Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 | Hardware::CGB0 | Hardware::CGB | Hardware::AGB => false,
             Hardware::DMG | Hardware::MGB => self.mmio.read(0x014D) != 0x00,
         });
         if self.hardware.is_cgb_like() {
@@ -286,13 +294,34 @@ impl GB {
         // Post-boot DIV phase. `write(DIV)` above resets the counter, so set the
         // hardware boot value of the 16-bit internal counter directly (its low
         // 16 bits drive DIV and the TIMA/serial/APU pre-tick phase).
+        // The default CGB counter (0x1EA0) is anchored to rustyboi's CGB
+        // PPU/CPU timing (Gambatte-aligned): it is load-bearing for the gambatte
+        // hwtest CGB references and must stay. The boot-rev-only models (DMG0,
+        // SGB/SGB2, CGB0) are never used for the rendering suites, so they carry
+        // their real-hardware post-boot DIV phase, sourced empirically from the
+        // mooneye boot_div assert chains (each boot_div-<rev> ROM reads DIV six
+        // times at fixed NOP offsets; the value below is the unique post-boot
+        // 16-bit counter that reproduces that revision's fingerprint on
+        // rustyboi's timer). AGB is opt-in (never in the default mode set), so it
+        // likewise takes its real-hardware boot_div phase.
         let boot_counter: u16 = match self.hardware {
             Hardware::CGB => 0x1EA0,
-            // Gambatte setPostBiosState: cpu.cycleCounter = 0x102A0 + agb*4, so
-            // AGB's post-boot timer/DIV phase leads CGB's by 4 master-cc.
-            Hardware::AGB => 0x1EA0 + 4,
-            Hardware::DMG | Hardware::MGB | Hardware::SGB | Hardware::SGB2 => 0xABCC,
-            Hardware::DMG0 => 0x1800,
+            // boot_div-cgb0 fingerprint (29 2a 2a 2b 2c 2e); leads CGB-A..E by
+            // ~2 DIV increments. Verified: passes mooneye boot_div-cgb0.
+            Hardware::CGB0 => 0x2884,
+            // boot_div-A fingerprint (27 28 28 29 2a 2c) == CGB-A..E + 4 master-cc
+            // (Gambatte setPostBiosState 0x102A0 + agb*4). Verified: passes
+            // mooneye boot_div-A. AGB is opt-in, outside the default suites.
+            Hardware::AGB => 0x267C,
+            Hardware::DMG | Hardware::MGB => 0xABCC,
+            // boot_div-S / boot_div2-S fingerprint (d9 da da db dc de). The SGB
+            // CPU uses the DMG-style single-speed timer; this is the post-boot
+            // counter that reproduces the SGB boot_div fingerprint. Verified:
+            // passes mooneye boot_div-S and boot_div2-S.
+            Hardware::SGB | Hardware::SGB2 => 0xD860,
+            // boot_div-dmg0 fingerprint (19 1a 1a 1b 1c 1e). Verified: passes
+            // mooneye boot_div-dmg0.
+            Hardware::DMG0 => 0x1830,
         };
         self.mmio.set_timer_internal_counter(boot_counter);
         // Record the CGB flag before any audio write anchors the SPU clock, so
@@ -423,7 +452,7 @@ impl GB {
                 Err("CGB-only cartridge cannot run on DMG hardware".to_string())
             }
             // CGB cartridge on CGB/AGB hardware - always OK
-            (Hardware::CGB | Hardware::AGB, _) => Ok(()),
+            (Hardware::CGB0 | Hardware::CGB | Hardware::AGB, _) => Ok(()),
             // DMG cartridge on any hardware - always OK  
             (_, cartridge::CgbSupport::None) => Ok(()),
             // CGB-compatible cartridge on DMG hardware - OK but will run in DMG mode
