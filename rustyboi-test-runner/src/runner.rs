@@ -416,6 +416,9 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         Oracle::MooneyeFibEd => return evaluate_mooneye(&mut gb, 0xED),
         Oracle::CspPng { path } => return evaluate_csp_png(&mut gb, options, path, false),
         Oracle::CspPngFixed { path } => return evaluate_csp_png(&mut gb, options, path, true),
+        Oracle::PngShootout { refs, frames } => {
+            return evaluate_png_shootout(&mut gb, options, refs, *frames);
+        }
         _ => {}
     }
 
@@ -530,6 +533,7 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         // c-sp suite oracles are dispatched (and returned) before the frame loop.
         Oracle::CspPng { .. }
         | Oracle::CspPngFixed { .. }
+        | Oracle::PngShootout { .. }
         | Oracle::Serial
         | Oracle::BlarggMem
         | Oracle::MemValue { .. }
@@ -740,6 +744,57 @@ fn evaluate_blargg_mem(gb: &mut GB, frames: usize) -> Result<(), String> {
         let (_breakpoint, c) = gb.step_instruction(false);
         cycles += c as u64;
     }
+}
+
+/// GBEmulatorShootout-exact screenshot grading. Mirrors the shootout's
+/// `Emulator.runTest`: run the normal Gambatte LCD frame loop and, after EACH
+/// completed frame, screenshot-grade it against every reference PNG; PASS the
+/// instant any frame matches any ref (the shootout early-exits on a match and
+/// its `pass_result` list is an OR-match). The frame budget (`case_frames` if
+/// > 0, else `--frames`) is the shootout's own poll deadline
+/// (`runtime + startup + 5 s`), so we never grade past the window the shootout
+/// would have allowed. Polling every frame (rather than only the final one)
+/// avoids both under-running slow-rendering tests and over-running tests whose
+/// screen changes after the match — exactly the shootout's behaviour.
+fn evaluate_png_shootout(
+    gb: &mut GB,
+    options: &RunOptions,
+    refs: &[std::path::PathBuf],
+    case_frames: usize,
+) -> Result<(), String> {
+    let frames = if case_frames > 0 {
+        case_frames
+    } else {
+        options.frames
+    };
+
+    let mut expected_refs: Vec<Vec<u32>> = Vec::with_capacity(refs.len());
+    for r in refs {
+        expected_refs.push(
+            frame::read_png_rgb(r).map_err(|e| format!("reference PNG {}: {e}", r.display()))?,
+        );
+    }
+
+    let mut worst: Option<frame::FrameMismatch> = None;
+    for frame_index in 0..frames.max(1) {
+        let (frame, _bp) = gb
+            .run_until_lcd_frame(false, MAX_CYCLES_UNTIL_LCD_FRAME)
+            .map_err(|e| format!("{e} while running frame {frame_index}"))?;
+        let actual = frame::normalize_frame(frame);
+        // OR-match across pass refs; the shootout passes on the first match.
+        for expected in &expected_refs {
+            match frame::shootout_mismatch(&actual, expected) {
+                None => return Ok(()),
+                Some(m) => worst = Some(m),
+            }
+        }
+    }
+    let m = worst.expect("at least one frame graded with non-empty refs");
+    Err(format!(
+        "screen did not match shootout PNG {}: {}",
+        refs[0].display(),
+        m.describe()
+    ))
 }
 
 /// c-sp framebuffer-PNG grading. Runs LCD frames, early-stopping once the
