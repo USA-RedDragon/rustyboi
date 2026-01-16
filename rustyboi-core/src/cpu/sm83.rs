@@ -106,8 +106,7 @@ impl SM83 {
                 // halt-woken getStat read samples +4cc later (the R4
                 // `late_m0*_halt_m0stat_scx3_2b` reads land in the next-line OAM /
                 // mode 2 instead of the stale mode 0).
-                if crate::ppu::faithful_eventcc_enabled()
-                    && pending_interrupt == Some(registers::InterruptFlag::Lcd)
+                if pending_interrupt == Some(registers::InterruptFlag::Lcd)
                     && !mmio.mmio.is_cgb()
                 {
                     if let Some(ev) = mmio.mmio.pending_m0_irq_fire_cc() {
@@ -129,8 +128,7 @@ impl SM83 {
                 // Replaces the all-or-nothing +4 with a per-stream 0/1 phase at
                 // the FF41 consume site (controller.rs). Stacks on the foundation:
                 // halt_wake_plus4_dmg above is left set for the flag-OFF path.
-                if crate::ppu::controller::prefetch_cc_enabled()
-                    && pending_interrupt == Some(registers::InterruptFlag::Lcd)
+                if pending_interrupt == Some(registers::InterruptFlag::Lcd)
                     && !mmio.mmio.is_cgb()
                 {
                     let phase = match (mmio.mmio.pending_m0_irq_fire_cc(), mmio.mmio.halt_entry_cc()) {
@@ -182,8 +180,7 @@ impl SM83 {
                         mmio.halt_hdma_state(),
                         memory::mmio::HaltHdmaState::Requested
                     );
-                if crate::ppu::controller::timer_push_phase_enabled()
-                    && pending_interrupt == Some(registers::InterruptFlag::Timer)
+                if pending_interrupt == Some(registers::InterruptFlag::Timer)
                     && mmio.mmio.is_cgb()
                 {
                     let phase = if req_halt_peek { 1u32 } else { 0u32 };
@@ -503,15 +500,11 @@ impl SM83 {
         // hdmaReq=false => no undo => pushed resume PC = HALT+1). Phase-conditioned:
         // phase 0 streams (pc_scx1 _1/_3, real-fetch path) are unchanged. The flag
         // is consumed (zeroed) below so it biases exactly one interrupt service.
-        if just_unhalted
-            && crate::ppu::controller::timer_push_phase_enabled()
-            && bus.mmio.timer_push_phase() == 1
+        if just_unhalted && bus.mmio.timer_push_phase() == 1
         {
             self.registers.pc = self.registers.pc.wrapping_add(1);
         }
-        if crate::ppu::controller::timer_push_phase_enabled() {
-            bus.mmio.set_timer_push_phase(0);
-        }
+        bus.mmio.set_timer_push_phase(0);
         bus.internal_cycle();
         bus.internal_cycle();
 
