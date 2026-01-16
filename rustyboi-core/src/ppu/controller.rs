@@ -67,7 +67,7 @@ const WIN_M3_PENALTY: i32 = 6;
 // whose per-line palette boundary lands past the column being popped at the write
 // cc. Same shape as the LCDC `self.x + 2` commit in handle_lcdc_write. BGP and OBP
 // carry separate latencies (the BG fetcher and the sprite mixer sample at different
-// pipeline stages). RB_BGP_LAT / RB_OBP_LAT override for calibration.
+// pipeline stages).
 // CGB hardware samples the palette mapping one dot later in the pipeline than DMG
 // hardware (the DMG fetcher runs a 4-dot pixel-transfer warmup + the +1 cgb_adj
 // phase vs CGB's 2-dot warmup): the same mid-mode-3 write reaches the displayed
@@ -81,12 +81,10 @@ const BGP_LATENCY_DMG: i32 = 1;
 const OBP_LATENCY_CGB: i32 = 2;
 const OBP_LATENCY_DMG: i32 = 1;
 fn bgp_latency(cgb: bool) -> i32 {
-    let d = if cgb { BGP_LATENCY_CGB } else { BGP_LATENCY_DMG };
-    std::env::var("RB_BGP_LAT").ok().and_then(|s| s.parse().ok()).unwrap_or(d)
+    if cgb { BGP_LATENCY_CGB } else { BGP_LATENCY_DMG }
 }
 fn obp_latency(cgb: bool) -> i32 {
-    let d = if cgb { OBP_LATENCY_CGB } else { OBP_LATENCY_DMG };
-    std::env::var("RB_OBP_LAT").ok().and_then(|s| s.parse().ok()).unwrap_or(d)
+    if cgb { OBP_LATENCY_CGB } else { OBP_LATENCY_DMG }
 }
 // Offset (dots) between the renderer's scheduled mode-0 transition and the
 // event-model mode-0 STAT IRQ fire time. Tuned against the suite.
