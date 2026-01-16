@@ -1,0 +1,11 @@
+# scribbltests (PPU screenshots). statcount_auto needs ~270 frames.
+scribbltests/lycscx|dmg|png|/home/reddragon/gb-test-roms/scribbltests/lycscx/lycscx.gb|/home/reddragon/gb-test-roms/scribbltests/lycscx/lycscx-cgb-dmg.png
+scribbltests/lycscx|cgb|png|/home/reddragon/gb-test-roms/scribbltests/lycscx/lycscx.gb|/home/reddragon/gb-test-roms/scribbltests/lycscx/lycscx-cgb-dmg.png
+scribbltests/lycscy|dmg|png|/home/reddragon/gb-test-roms/scribbltests/lycscy/lycscy.gb|/home/reddragon/gb-test-roms/scribbltests/lycscy/lycscy-cgb-dmg.png
+scribbltests/lycscy|cgb|png|/home/reddragon/gb-test-roms/scribbltests/lycscy/lycscy.gb|/home/reddragon/gb-test-roms/scribbltests/lycscy/lycscy-cgb-dmg.png
+scribbltests/palettely|cgb|png|/home/reddragon/gb-test-roms/scribbltests/palettely/palettely.gb|/home/reddragon/gb-test-roms/scribbltests/palettely/palettely-cgb.png
+scribbltests/palettely|dmg|png|/home/reddragon/gb-test-roms/scribbltests/palettely/palettely.gb|/home/reddragon/gb-test-roms/scribbltests/palettely/palettely-dmg.png
+scribbltests/scxly|cgb|png|/home/reddragon/gb-test-roms/scribbltests/scxly/scxly.gb|/home/reddragon/gb-test-roms/scribbltests/scxly/scxly-cgb.png
+scribbltests/scxly|dmg|png|/home/reddragon/gb-test-roms/scribbltests/scxly/scxly.gb|/home/reddragon/gb-test-roms/scribbltests/scxly/scxly-dmg.png
+scribbltests/statcount-auto|dmg|png|/home/reddragon/gb-test-roms/scribbltests/statcount/statcount-auto.gb|/home/reddragon/gb-test-roms/scribbltests/statcount/statcount_auto-cgb-dmg.png
+scribbltests/statcount-auto|cgb|png|/home/reddragon/gb-test-roms/scribbltests/statcount/statcount-auto.gb|/home/reddragon/gb-test-roms/scribbltests/statcount/statcount_auto-cgb-dmg.png
