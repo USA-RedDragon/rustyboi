@@ -412,7 +412,8 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         Oracle::MemValue { addr, expected } => {
             return evaluate_mem_value(&mut gb, options.frames, *addr, *expected);
         }
-        Oracle::MooneyeFib => return evaluate_mooneye(&mut gb),
+        Oracle::MooneyeFib => return evaluate_mooneye(&mut gb, 0x40),
+        Oracle::MooneyeFibEd => return evaluate_mooneye(&mut gb, 0xED),
         Oracle::CspPng { path } => return evaluate_csp_png(&mut gb, options, path, false),
         Oracle::CspPngFixed { path } => return evaluate_csp_png(&mut gb, options, path, true),
         _ => {}
@@ -532,7 +533,8 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         | Oracle::Serial
         | Oracle::BlarggMem
         | Oracle::MemValue { .. }
-        | Oracle::MooneyeFib => {
+        | Oracle::MooneyeFib
+        | Oracle::MooneyeFibEd => {
             unreachable!("c-sp oracle handled before the Gambatte frame loop")
         }
     }
@@ -595,13 +597,15 @@ fn compare_dump(label: &str, expected: &[u8], actual: &[u8]) -> Result<(), Strin
     Ok(())
 }
 
-/// Run instruction-by-instruction until the `LD B,B` (0x40) done-marker is the
+/// Run instruction-by-instruction until the `marker` done-marker opcode is the
 /// next opcode, capped at `max_cycles`. Returns true if the marker was reached.
-fn run_until_ldbb(gb: &mut GB, max_cycles: u64) -> bool {
+/// `marker` is `0x40` (`LD B,B`) for the modern Mooneye/age convention or `0xED`
+/// (illegal opcode) for the 2016 Mooneye/wilbertpol convention.
+fn run_until_ldbb(gb: &mut GB, max_cycles: u64, marker: u8) -> bool {
     let mut cycles = 0u64;
     while cycles < max_cycles {
         let pc = gb.get_cpu_registers().pc;
-        if gb.read_memory(pc) == 0x40 {
+        if gb.read_memory(pc) == marker {
             return true;
         }
         let (_breakpoint, c) = gb.step_instruction(false);
@@ -610,11 +614,12 @@ fn run_until_ldbb(gb: &mut GB, max_cycles: u64) -> bool {
     false
 }
 
-/// mooneye: run to `LD B,B` and check the Fibonacci magic registers.
-fn evaluate_mooneye(gb: &mut GB) -> Result<(), String> {
+/// mooneye: run to the done-marker opcode and check the Fibonacci magic
+/// registers. `marker` is `0x40` (`LD B,B`) or `0xED` (2016-era illegal-opcode).
+fn evaluate_mooneye(gb: &mut GB, marker: u8) -> Result<(), String> {
     // mooneye tests complete quickly; 250M cycles is ~60s of GB time, ample.
-    if !run_until_ldbb(gb, 250_000_000) {
-        return Err("no LD B,B done-marker (timeout)".to_string());
+    if !run_until_ldbb(gb, 250_000_000, marker) {
+        return Err("no done-marker (timeout)".to_string());
     }
     let r = gb.get_cpu_registers();
     if r.b == 3 && r.c == 5 && r.d == 8 && r.e == 13 && r.h == 21 && r.l == 34 {

@@ -1,0 +1,4 @@
+# rtc3test (MBC3 RTC). NEEDS button-input navigation -- see notes; will
+# fail without input injection. Emitted for an explicit number only.
+rtc3test-basic/rtc3test|cgb|png|/home/reddragon/gb-test-roms/rtc3test/rtc3test.gb|/home/reddragon/gb-test-roms/rtc3test/rtc3test-basic-tests-cgb.png
+rtc3test-basic/rtc3test|dmg|png|/home/reddragon/gb-test-roms/rtc3test/rtc3test.gb|/home/reddragon/gb-test-roms/rtc3test/rtc3test-basic-tests-dmg.png

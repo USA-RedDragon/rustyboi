@@ -21,8 +21,8 @@ struct Args {
 
     /// Run a c-sp public-suite manifest (acid2/mealybug/blargg/gbmicrotest/
     /// mooneye). Each line: `<id>|<dmg|cgb|agb>|<grading>|<rom>[|<arg>]` where
-    /// grading is one of png/serial/blargg_mem/memauto/mem/mooneye. Bypasses the
-    /// name-based Gambatte discovery; cases are taken from the manifest directly.
+    /// grading is one of png/serial/blargg_mem/memauto/mem/mooneye/mooneye_ed.
+    /// Bypasses the name-based Gambatte discovery; cases come from the manifest.
     /// Regenerate manifests with `tools/gen_suite_manifests.sh`.
     #[arg(long, value_name = "FILE")]
     manifest: Option<PathBuf>,
