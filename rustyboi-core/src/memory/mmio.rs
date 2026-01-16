@@ -1031,6 +1031,17 @@ impl Mmio {
         self.timer = timer;
     }
 
+    /// Advance the cartridge's MBC3 RTC by `cycles` master (dot) clock T-cycles.
+    /// The RTC crystal runs at the 4.194304 MHz master rate independent of CPU
+    /// speed, which is exactly the `master_cc` dot clock, so this is called with
+    /// the same span the rest of the world advances by. No-op for carts without
+    /// an RTC.
+    pub fn tick_rtc(&mut self, cycles: u64) {
+        if let Some(cart) = self.cartridge.as_mut() {
+            cart.rtc_tick(cycles);
+        }
+    }
+
     /// per-access STAGE 1 (min-event idle fast path): true when the whole world is
     /// idle except the timer+serial, so a span of dots can be bulk-skipped to the
     /// next scheduled event without losing any per-dot peripheral side effect.
@@ -1071,6 +1082,10 @@ impl Mmio {
         let mut timer = self.timer.clone();
         timer.step_to(target_cc, self);
         self.timer = timer;
+        // The RTC keeps ticking across the idle span (LCD off etc. does not stop
+        // the crystal). Advance it by the same dot count the per-dot crank would
+        // have, so the idle fast path is byte-identical for the RTC too.
+        self.tick_rtc(dots);
         // Serial is phase-based: stepping once at the final phase shifts the same
         // bits and (if it completed) fires the IRQ exactly as the per-dot path. The
         // guard already requires it inactive, so this is a defensive no-op.

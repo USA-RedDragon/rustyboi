@@ -127,7 +127,15 @@ pub struct Cartridge {
     rtc_hours_latched: u8,
     rtc_days_low_latched: u8,
     rtc_days_high_latched: u8,
-    
+
+    // Sub-second cycle accumulator for the cycle-derived RTC. One RTC second is
+    // 4_194_304 T-cycles (the 4.194304 MHz master/dot clock). The RTC crystal is
+    // independent of CPU speed, so this is driven off the master `abs_cc` dot
+    // clock (constant across single/double speed), NOT host wall-clock — keeping
+    // RTC advancement fully deterministic and test-reproducible.
+    #[serde(default)]
+    rtc_cycle_accum: u64,
+
     // MBC5 state
     mbc5_rom_bank_low: u8,   // Lower 8 bits of ROM bank (0x2000-0x2FFF)
     mbc5_rom_bank_high: u8,  // Upper 1 bit of ROM bank (0x3000-0x3FFF) - only bit 0 used
@@ -182,6 +190,7 @@ impl Clone for Cartridge {
             rtc_hours_latched: self.rtc_hours_latched,
             rtc_days_low_latched: self.rtc_days_low_latched,
             rtc_days_high_latched: self.rtc_days_high_latched,
+            rtc_cycle_accum: self.rtc_cycle_accum,
             mbc5_rom_bank_low: self.mbc5_rom_bank_low,
             mbc5_rom_bank_high: self.mbc5_rom_bank_high,
             mbc5_ram_bank: self.mbc5_ram_bank,
@@ -393,6 +402,7 @@ impl Cartridge {
             rtc_hours_latched: 0,
             rtc_days_low_latched: 0,
             rtc_days_high_latched: 0,
+            rtc_cycle_accum: 0,
             mbc5_rom_bank_low: 1,
             mbc5_rom_bank_high: 0,
             mbc5_ram_bank: 0,
@@ -533,6 +543,7 @@ impl Cartridge {
             rtc_hours_latched: 0,
             rtc_days_low_latched: 0,
             rtc_days_high_latched: 0,
+            rtc_cycle_accum: 0,
             mbc5_rom_bank_low: 1,
             mbc5_rom_bank_high: 0,
             mbc5_ram_bank: 0,
@@ -913,29 +924,50 @@ impl Cartridge {
     
     /// Read from MBC3 RTC registers
     fn read_rtc_register(&self) -> u8 {
+        // Reads always return the CPU-visible (latched) shadow register. On real
+        // MBC3 the internal free-running counters (`rtc_seconds`..) are never read
+        // directly — a latch (any write to 0x6000-0x7FFF) copies them into these
+        // shadow registers, and software reads the shadows. Register writes go to
+        // the internal counters only (see `write_rtc_register`), so a freshly
+        // written value is not visible until the next latch.
         match self.mbc3_ram_bank {
-            0x08 => if self.mbc3_rtc_latched { self.rtc_seconds_latched } else { self.rtc_seconds },
-            0x09 => if self.mbc3_rtc_latched { self.rtc_minutes_latched } else { self.rtc_minutes },
-            0x0A => if self.mbc3_rtc_latched { self.rtc_hours_latched } else { self.rtc_hours },
-            0x0B => if self.mbc3_rtc_latched { self.rtc_days_low_latched } else { self.rtc_days_low },
-            0x0C => if self.mbc3_rtc_latched { self.rtc_days_high_latched } else { self.rtc_days_high },
+            0x08 => self.rtc_seconds_latched,
+            0x09 => self.rtc_minutes_latched,
+            0x0A => self.rtc_hours_latched,
+            0x0B => self.rtc_days_low_latched,
+            0x0C => self.rtc_days_high_latched,
             _ => 0xFF,
         }
     }
     
-    /// Write to MBC3 RTC registers
+    /// Write to MBC3 RTC registers. A write updates the INTERNAL free-running
+    /// counter (`rtc_*`, advanced by the cycle-derived tick) only — it does NOT
+    /// touch the CPU-visible latched shadow (`rtc_*_latched`, the read path).
+    /// The written value only becomes visible on the next latch, exactly like
+    /// gambatte's `Rtc::setS`/`setM`/... (which write `data*`, never `latch*`).
+    /// Register widths are the documented MBC3 masks (seconds/minutes 6-bit,
+    /// hours 5-bit, days_high = day bit 8 + HALT + carry).
     fn write_rtc_register(&mut self, value: u8) {
         match self.mbc3_ram_bank {
-            0x08 => self.rtc_seconds = value & 0x3F, // 0-59
-            0x09 => self.rtc_minutes = value & 0x3F, // 0-59
-            0x0A => self.rtc_hours = value & 0x1F,   // 0-23
-            0x0B => self.rtc_days_low = value,       // Lower 8 bits of day counter
-            0x0C => self.rtc_days_high = value & 0xC1, // Upper bit + halt flag + day carry
+            0x08 => {
+                self.rtc_seconds = value & 0x3F;
+                // Writing seconds resets the internal sub-second divider (gambatte
+                // `setS` clears dataC_), so the next tick is a full second away.
+                self.rtc_cycle_accum = 0;
+            }
+            0x09 => self.rtc_minutes = value & 0x3F,
+            0x0A => self.rtc_hours = value & 0x1F,
+            0x0B => self.rtc_days_low = value,
+            0x0C => self.rtc_days_high = value & 0xC1,
             _ => {}
         }
     }
-    
-    /// Latch current RTC values for consistent reading
+
+    /// Copy the live internal RTC counters into the CPU-visible latch registers.
+    /// On real MBC3 this happens on ANY write to the 0x6000-0x7FFF region (no
+    /// 0x00->0x01 edge is required — gambatte `Mbc3::romWrite` case 3 calls
+    /// `rtc_->latch(cc)` unconditionally). The read path returns these shadows,
+    /// so software must latch to observe the advancing clock.
     fn latch_rtc(&mut self) {
         self.rtc_seconds_latched = self.rtc_seconds;
         self.rtc_minutes_latched = self.rtc_minutes;
@@ -943,6 +975,87 @@ impl Cartridge {
         self.rtc_days_low_latched = self.rtc_days_low;
         self.rtc_days_high_latched = self.rtc_days_high;
         self.mbc3_rtc_latched = true;
+    }
+
+    /// Advance the cycle-derived RTC by `cycles` master (dot) clock T-cycles.
+    /// Driven from the bus tick loop (`master_cc` advances at 4.194304 MHz
+    /// regardless of CPU speed), so the clock is fully deterministic. No-op
+    /// unless this cart actually has an RTC. The HALT bit (bit 6 of days_high)
+    /// freezes advancement but the sub-second accumulator keeps running so the
+    /// halt/resume boundary lands on an exact second, matching hardware.
+    pub fn rtc_tick(&mut self, cycles: u64) {
+        if cycles == 0 || !self.has_rtc() {
+            return;
+        }
+        // HALT bit frozen: the crystal still oscillates but the counters do not
+        // advance. Do not accumulate while halted so no seconds are "banked".
+        if self.rtc_days_high & 0x40 != 0 {
+            return;
+        }
+        self.rtc_cycle_accum = self.rtc_cycle_accum.wrapping_add(cycles);
+        const CYCLES_PER_SECOND: u64 = 4_194_304;
+        while self.rtc_cycle_accum >= CYCLES_PER_SECOND {
+            self.rtc_cycle_accum -= CYCLES_PER_SECOND;
+            self.advance_rtc_second();
+        }
+    }
+
+    /// Increment the live RTC by one second with the full MBC3 cascade:
+    /// seconds 0->59, minutes 0->59, hours 0->23, then the 9-bit day counter
+    /// (days_low + bit 0 of days_high). Overflow of the day counter sets the
+    /// day-carry flag (bit 7 of days_high), which latches until software clears
+    /// it. Mirrors real MBC3: the 6-bit seconds/minutes registers can hold
+    /// out-of-range values written by software; on the natural tick the seconds
+    /// counter counts 0..59 and wraps, and an out-of-range value simply keeps
+    /// counting up (it does NOT force-normalise), so a value like 60 advances to
+    /// 61.. up to 63 then wraps to 0 with a minute carry — the documented
+    /// hardware quirk the RTC test ROMs check.
+    fn advance_rtc_second(&mut self) {
+        // Seconds: 6-bit counter. 59 -> 0 carries to minutes; any other value
+        // (including out-of-range 60-62) just increments, and 63 -> 0 without a
+        // carry (the 6-bit register simply overflows) — matching hardware where
+        // only the 59->0 transition produces the minute carry.
+        let sec = self.rtc_seconds & 0x3F;
+        if sec == 59 {
+            self.rtc_seconds = 0;
+        } else {
+            self.rtc_seconds = (sec + 1) & 0x3F;
+            return;
+        }
+
+        let min = self.rtc_minutes & 0x3F;
+        if min == 59 {
+            self.rtc_minutes = 0;
+        } else {
+            self.rtc_minutes = (min + 1) & 0x3F;
+            return;
+        }
+
+        let hour = self.rtc_hours & 0x1F;
+        if hour == 23 {
+            self.rtc_hours = 0;
+        } else {
+            self.rtc_hours = (hour + 1) & 0x1F;
+            return;
+        }
+
+        // Day counter: 9 bits = days_low (8) + bit 0 of days_high. On overflow
+        // past 0x1FF the counter wraps to 0 and the carry flag (bit 7) latches.
+        let day = (self.rtc_days_low as u16) | (((self.rtc_days_high & 0x01) as u16) << 8);
+        let next = day + 1;
+        self.rtc_days_low = (next & 0xFF) as u8;
+        // Preserve HALT (bit 6) and the already-latched carry (bit 7); set bit 0
+        // from the new day counter, and set carry on the 0x1FF -> 0x200 wrap.
+        let mut high = self.rtc_days_high & 0xC0;
+        if next & 0x100 != 0 {
+            high |= 0x01;
+        }
+        if next > 0x1FF {
+            self.rtc_days_low = 0;
+            high &= !0x01;
+            high |= 0x80; // day-carry latches until software clears it
+        }
+        self.rtc_days_high = high;
     }
 
     // --- libretro accessors ---
@@ -1202,7 +1315,13 @@ impl memory::Addressable for Cartridge {
                         // MBC2 doesn't use this register
                     }
                     CartridgeType::MBC3 { .. } => {
-                        self.mbc3_ram_bank = value; // Can be 0x00-0x03 for RAM or 0x08-0x0C for RTC
+                        // The MBC3 RAM-bank / RTC-select register is 4 bits wide:
+                        // only the low nibble is latched. Values 0x00-0x03 select
+                        // a RAM bank, 0x08-0x0C select an RTC register, and the
+                        // rest (0x04-0x07, 0x0D-0x0F) read back 0xFF. Because it is
+                        // a 4-bit register, a write of e.g. 0x18 behaves exactly as
+                        // 0x08 (rtc-invalid-banks-test relies on this masking).
+                        self.mbc3_ram_bank = value & 0x0F;
                     }
                     CartridgeType::MBC5 { _rumble, .. } => {
                         if _rumble {
@@ -1225,10 +1344,12 @@ impl memory::Addressable for Cartridge {
                         // MBC2 doesn't use this register
                     }
                     CartridgeType::MBC3 { timer: true, .. } => {
-                        // MBC3 RTC latch register
-                        if self.mbc3_rtc_latch == 0x00 && value == 0x01 {
-                            self.latch_rtc();
-                        }
+                        // RTC latch: ANY write to 0x6000-0x7FFF copies the live
+                        // clock into the visible latch registers. Real MBC3 does
+                        // not require a 0x00->0x01 edge (gambatte latches on every
+                        // write); latch-rtc-test writes random values here and
+                        // expects each to re-latch.
+                        self.latch_rtc();
                         self.mbc3_rtc_latch = value;
                     }
                     CartridgeType::MBC3 { .. } => {
