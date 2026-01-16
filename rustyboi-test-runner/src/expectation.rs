@@ -91,6 +91,18 @@ pub enum Oracle {
     /// check, but the done-marker is the illegal opcode `0xED` (the 2016 Mooneye
     /// convention) rather than `LD B,B` (0x40). Manifest grading `mooneye_ed`.
     MooneyeFibEd,
+
+    /// GBEmulatorShootout-exact screenshot grading (`png_shootout`). Runs a flat
+    /// per-test frame budget (from the manifest `frames=` token, itself derived
+    /// from the shootout's `runtime` seconds) and grades the final held
+    /// framebuffer against one-or-more reference PNGs using the shootout's
+    /// lenient grayscale rule: convert both to PIL "L", per-pixel abs diff, pass
+    /// iff every pixel's diff is <= 50 (see `frame::shootout_mismatch`). Multiple
+    /// refs are an OR-match (the shootout's `pass_result` list). This mirrors the
+    /// shootout's own `Emulator.runTest` + `Test.checkResult`, so the numbers are
+    /// apples-to-apples with docboy et al. Uses the Gambatte CGB color conversion
+    /// (the shootout compares full-RGB screenshots, not 5-bit-masked buckets).
+    PngShootout { refs: Vec<PathBuf>, frames: usize },
 }
 
 impl Oracle {
@@ -114,6 +126,11 @@ impl Oracle {
             Self::MemValue { addr, expected } => format!("mem[{addr:04X}]={expected:02X}"),
             Self::MooneyeFib => "mooneye".to_string(),
             Self::MooneyeFibEd => "mooneye_ed".to_string(),
+            Self::PngShootout { refs, .. } => refs
+                .first()
+                .and_then(|p| p.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "png_shootout".to_string()),
         }
     }
 }
@@ -275,7 +292,37 @@ pub fn parse_manifest(
         let grading = fields[2];
         let rom_path = PathBuf::from(fields[3]);
         let arg = fields.get(4).copied().unwrap_or("").trim();
+        // Field 5 (index 5) is an optional extra token. For `png_shootout` it
+        // carries `frames=<N>` (the per-test frame budget derived from the
+        // shootout `runtime` seconds); other gradings ignore it.
+        let arg2 = fields.get(5).copied().unwrap_or("").trim();
         let oracle = match grading {
+            // GBEmulatorShootout-exact grading: field 4 is a `;`-separated list
+            // of reference PNGs (OR-match), field 5 is `frames=<N>`.
+            "png_shootout" => {
+                let refs: Vec<PathBuf> = arg
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+                    .collect();
+                if refs.is_empty() {
+                    return Err(format!(
+                        "manifest line {}: png_shootout needs at least one ref PNG",
+                        line_no + 1
+                    ));
+                }
+                let frames = arg2
+                    .strip_prefix("frames=")
+                    .map(|n| {
+                        n.parse::<usize>().map_err(|_| {
+                            format!("manifest line {}: bad frames {arg2}", line_no + 1)
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or(0);
+                Oracle::PngShootout { refs, frames }
+            }
             "png" => Oracle::CspPng {
                 path: PathBuf::from(arg),
             },
