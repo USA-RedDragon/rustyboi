@@ -1,4 +1,5 @@
 use clap::ValueEnum;
+use rustyboi_core_lib::gb::Hardware;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -117,6 +118,12 @@ pub struct TestCase {
     pub rom_path: PathBuf,
     pub mode: Mode,
     pub oracle: Oracle,
+    /// Hardware sub-revision override. `None` uses the default model for the
+    /// case's `mode` (DMG-ABC / CGB-04 / AGB). `Some` selects a specific boot
+    /// revision (DMG0/MGB/SGB/CGB0/...) for the mooneye boot_regs/boot_div/
+    /// boot_hwio tests that check a particular silicon revision's post-boot
+    /// state. Set from a `rev=<model>` manifest token; see `parse_manifest`.
+    pub revision: Option<Hardware>,
 }
 
 pub fn is_rom_path(path: &Path) -> bool {
@@ -218,6 +225,7 @@ pub fn cases_for_rom(rom_path: &Path, requested_modes: &HashSet<Mode>) -> Vec<Te
                 rom_path: c.rom_path.clone(),
                 mode: Mode::Agb,
                 oracle: c.oracle.clone(),
+                revision: c.revision,
             })
             .collect();
         cases.extend(cgb_twins);
@@ -288,13 +296,42 @@ pub fn parse_manifest(
             }
             other => return Err(format!("manifest line {}: bad grading {other}", line_no + 1)),
         };
+        // Optional hardware sub-revision override, carried as a `rev=<model>`
+        // token in the arg field (field 4). Used by the mooneye boot_regs/
+        // boot_div/boot_hwio tests that check a specific silicon revision's
+        // post-boot state; absent, the case uses the default model for `mode`.
+        let revision = if arg.starts_with("rev=") {
+            Some(parse_revision(&arg["rev=".len()..]).ok_or_else(|| {
+                format!("manifest line {}: unknown revision {arg}", line_no + 1)
+            })?)
+        } else {
+            None
+        };
         cases.push(TestCase {
             rom_path,
             mode,
             oracle,
+            revision,
         });
     }
     Ok(cases)
+}
+
+/// Map a `rev=` manifest token to a `Hardware` sub-revision. The token names
+/// the mooneye boot-test target model (`dmg0`/`mgb`/`sgb`/`sgb2`/`cgb0`/`cgb`/
+/// `agb`); `dmg`/`cgb` here name the default ABC/04 silicon used elsewhere.
+fn parse_revision(token: &str) -> Option<Hardware> {
+    match token {
+        "dmg" => Some(Hardware::DMG),
+        "dmg0" => Some(Hardware::DMG0),
+        "mgb" => Some(Hardware::MGB),
+        "sgb" => Some(Hardware::SGB),
+        "sgb2" => Some(Hardware::SGB2),
+        "cgb0" => Some(Hardware::CGB0),
+        "cgb" => Some(Hardware::CGB),
+        "agb" => Some(Hardware::AGB),
+        _ => None,
+    }
 }
 
 /// Detect SRAM `.bin` and region `.dump` oracles that accompany a dumper ROM.
@@ -311,6 +348,7 @@ fn push_dump_cases(
             rom_path: rom_path.to_path_buf(),
             mode: Mode::Dmg,
             oracle: Oracle::SramDump { path: dmg_bin },
+            revision: None,
         });
     }
     let cgb_bin = PathBuf::from(format!("{base}_cgb.bin"));
@@ -319,6 +357,7 @@ fn push_dump_cases(
             rom_path: rom_path.to_path_buf(),
             mode: Mode::Cgb,
             oracle: Oracle::SramDump { path: cgb_bin },
+            revision: None,
         });
     }
 
@@ -334,6 +373,7 @@ fn push_dump_cases(
                     path: cgb_dump,
                     region,
                 },
+                revision: None,
             });
         }
         let dmg_dump = PathBuf::from(format!("{base}_dmg08.dump"));
@@ -345,6 +385,7 @@ fn push_dump_cases(
                     path: dmg_dump,
                     region,
                 },
+                revision: None,
             });
         }
     }
@@ -377,6 +418,7 @@ fn push_string_case(
             rom_path: rom_path.to_path_buf(),
             mode,
             oracle,
+            revision: None,
         });
     }
 }
@@ -395,6 +437,7 @@ fn push_png_case(
             oracle: Oracle::Png {
                 path: png_path.to_path_buf(),
             },
+            revision: None,
         });
     }
 }
