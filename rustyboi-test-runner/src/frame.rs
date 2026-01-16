@@ -290,6 +290,71 @@ pub fn read_png_rgb(path: &Path) -> Result<Vec<u32>, String> {
     decode_png_rgba(&data)
 }
 
+/// Convert one 0xRRGGBB pixel to an 8-bit grayscale value EXACTLY as PIL's
+/// `Image.convert("L")` does. PIL uses fixed-point ITU-R 601-2 luma, not the
+/// naive `round(R*299/1000 + G*587/1000 + B*114/1000)`: the two disagree by ±1
+/// near the .5 boundary (verified against PIL 12.x). The shootout's
+/// `util.compareImage` runs `convert("L")` on both images before diffing, so we
+/// must match PIL bit-for-bit or a ±1 luma error could flip the diff-50 verdict.
+fn pil_luminance(rgb: u32) -> u8 {
+    let r = ((rgb >> 16) & 0xFF) as u32;
+    let g = ((rgb >> 8) & 0xFF) as u32;
+    let b = (rgb & 0xFF) as u32;
+    // PIL C: L24(rgb) = (r*19595 + g*38470 + b*7471 + 0x8000) >> 16
+    ((r * 19595 + g * 38470 + b * 7471 + 0x8000) >> 16) as u8
+}
+
+/// Shootout-exact screenshot grading. Replicates GBEmulatorShootout
+/// `util.compareImage`: convert both framebuffers to PIL "L" grayscale, take the
+/// per-pixel absolute difference, and PASS iff the maximum difference is <= 50
+/// (the shootout fails on any histogram bucket whose value is strictly > 50).
+/// Returns `None` on a pass, or `Some(describe)` on a mismatch (with the worst
+/// pixel and its grayscale values, for diagnostics).
+pub fn shootout_mismatch(actual: &[u32], expected: &[u32]) -> Option<FrameMismatch> {
+    if actual.len() != FRAMEBUFFER_SIZE || expected.len() != FRAMEBUFFER_SIZE {
+        return Some(FrameMismatch {
+            differing_pixels: FRAMEBUFFER_SIZE,
+            first_x: 0,
+            first_y: 0,
+            max_x: GB_WIDTH - 1,
+            max_y: GB_HEIGHT - 1,
+            actual: actual.first().copied().unwrap_or(0),
+            expected: expected.first().copied().unwrap_or(0),
+        });
+    }
+
+    let mut worst_diff = 0u8;
+    let mut over_threshold = 0usize;
+    let mut first: Option<FrameMismatch> = None;
+    for (index, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+        let la = pil_luminance(a);
+        let le = pil_luminance(e);
+        let diff = la.abs_diff(le);
+        if diff > worst_diff {
+            worst_diff = diff;
+        }
+        if diff > 50 {
+            over_threshold += 1;
+            let m = first.get_or_insert(FrameMismatch {
+                differing_pixels: 0,
+                first_x: index % GB_WIDTH,
+                first_y: index / GB_WIDTH,
+                max_x: index % GB_WIDTH,
+                max_y: index / GB_WIDTH,
+                actual: a,
+                expected: e,
+            });
+            m.max_x = m.max_x.max(index % GB_WIDTH);
+            m.max_y = m.max_y.max(index / GB_WIDTH);
+        }
+    }
+
+    first.map(|mut m| {
+        m.differing_pixels = over_threshold;
+        m
+    })
+}
+
 pub fn write_ppm(path: &Path, frame: &[u32]) -> Result<(), String> {
     if frame.len() != FRAMEBUFFER_SIZE {
         return Err(format!(
@@ -740,6 +805,34 @@ mod tests {
         assert_eq!(decoded[2], 0x555555); // index 2
         assert_eq!(decoded[3], 0x000000); // index 3
         assert_eq!(decoded[4], 0xFFFFFF); // index 0 again
+    }
+
+    #[test]
+    fn pil_luminance_matches_pil_convert_l() {
+        // Exact PIL "L" values (captured from PIL 12.x Image.convert("L")).
+        assert_eq!(pil_luminance(0xFFFFFF), 255);
+        assert_eq!(pil_luminance(0x000000), 0);
+        assert_eq!(pil_luminance(0xAAAAAA), 170);
+        assert_eq!(pil_luminance(0x555555), 85);
+        assert_eq!(pil_luminance(0xFF0000), 76);
+        assert_eq!(pil_luminance(0x00FF00), 150);
+        assert_eq!(pil_luminance(0x0000FF), 29);
+        assert_eq!(pil_luminance(0x8040C8), 99);
+        assert_eq!(pil_luminance(0x010203), 2);
+    }
+
+    #[test]
+    fn shootout_grading_passes_within_threshold_fails_beyond() {
+        // Two solid fields whose grayscale diff is <= 50 pass; > 50 fails.
+        let white = vec![0xFFFFFF; FRAMEBUFFER_SIZE]; // L=255
+        let light = vec![0xF0F0F0u32; FRAMEBUFFER_SIZE]; // L=240, diff 15 <= 50
+        let dark = vec![0x808080u32; FRAMEBUFFER_SIZE]; // L=128, diff 127 > 50
+        assert!(shootout_mismatch(&white, &light).is_none());
+        assert!(shootout_mismatch(&white, &dark).is_some());
+        // The shootout mask is lenient: a 5-bit-mask-distinct color that is
+        // grayscale-close still passes.
+        let a = vec![0xF8F8F8u32; FRAMEBUFFER_SIZE]; // L=248
+        assert!(shootout_mismatch(&white, &a).is_none()); // diff 7
     }
 
     #[test]
