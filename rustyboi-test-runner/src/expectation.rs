@@ -87,6 +87,10 @@ pub enum Oracle {
     /// mooneye: run to `LD B,B` and require the Fibonacci magic registers
     /// B,C,D,E,H,L = 3,5,8,13,21,34.
     MooneyeFib,
+    /// mooneye (wilbertpol / age-test-roms era): identical Fibonacci-register
+    /// check, but the done-marker is the illegal opcode `0xED` (the 2016 Mooneye
+    /// convention) rather than `LD B,B` (0x40). Manifest grading `mooneye_ed`.
+    MooneyeFibEd,
 }
 
 impl Oracle {
@@ -109,6 +113,7 @@ impl Oracle {
             Self::BlarggMem => "blargg_mem".to_string(),
             Self::MemValue { addr, expected } => format!("mem[{addr:04X}]={expected:02X}"),
             Self::MooneyeFib => "mooneye".to_string(),
+            Self::MooneyeFibEd => "mooneye_ed".to_string(),
         }
     }
 }
@@ -242,7 +247,7 @@ pub fn cases_for_rom(rom_path: &Path, requested_modes: &HashSet<Mode>) -> Vec<Te
 /// modes. Each non-blank, non-`#` line is `|`-separated:
 ///   `<id>|<mode>|<grading>|<rom_path>[|<arg>]`
 /// where `<mode>` is `dmg`/`cgb`/`agb`, `<grading>` is one of `png`, `serial`,
-/// `blargg_mem`, `memauto`, `mem`, `mooneye`, and `<arg>` is the reference-PNG
+/// `blargg_mem`, `memauto`, `mem`, `mooneye`, `mooneye_ed`, and `<arg>` is the reference-PNG
 /// path (png), `ADDR=VAL` hex (mem), or empty. The `<id>` is descriptive only.
 pub fn parse_manifest(
     text: &str,
@@ -280,6 +285,7 @@ pub fn parse_manifest(
             "serial" => Oracle::Serial,
             "blargg_mem" => Oracle::BlarggMem,
             "mooneye" => Oracle::MooneyeFib,
+            "mooneye_ed" => Oracle::MooneyeFibEd,
             "memauto" => Oracle::MemValue {
                 addr: 0xFF82,
                 expected: 0x01,
