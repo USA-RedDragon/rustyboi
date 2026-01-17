@@ -1002,6 +1002,15 @@ pub struct Ppu {
     // let the fetcher consult it per-substep. (commit_cc, new_lcdc, old_lcdc).
     #[serde(default)]
     lcdc_b4_exact: Option<(u64, u8, u8)>,
+    // Per-substep CGB tile-index-is-tile-data quirk history (Gambatte
+    // `p.tileIndexIsTd`). Each mid-mode-3 LCDC.4 write records
+    // (apply_cc, quirk) where quirk = cgb && old_b4 && !new_b4 && en, matching
+    // Gambatte's `setLcdc`. A byte fetch resolves the quirk at its own fetch cc
+    // (most recent apply_cc <= fetch cc), so a falling edge that lands between a
+    // tile's TileDataLow and TileDataHigh reads applies the quirk (tile index as
+    // data) to the HIGH byte only — the mixed-tile behavior cgb-acid-hell tests.
+    #[serde(default)]
+    tidxtd_history: Vec<(u64, bool)>,
     // Exact-cc window-enable (LCDC bit 5) toggle for the weMaster checkpoints.
     // rustyboi's pending_lcdc_events commit the window bit one PPU dot before
     // Gambatte's `setLcdc(data, cc + 2)` (the queue runs through one
@@ -1168,6 +1177,7 @@ impl Ppu {
             cgb_tile_index_is_tile_data: false,
             pending_lcdc_events: Vec::new(),
             lcdc_b4_exact: None,
+            tidxtd_history: Vec::new(),
             we_win_bit_exact: None,
             cgb_color_conversion: CgbColorConversion::Linear,
             fetch_debug_events_enabled: false,
@@ -1364,10 +1374,32 @@ impl Ppu {
             // lands the bit4 change exactly on the BG-fetch substep that should
             // first see it (verified against bgtiledata_spx08_ds_3/_4).
             let tds = LCDCFlags::BGWindowTileDataSelect as u8;
+            let en = LCDCFlags::DisplayEnable as u8;
             if self.state == State::PixelTransfer && (old_lcdc & tds) != (value & tds) {
                 let ds = mmio.is_double_speed_mode();
                 let commit_cc = self.write_cc(ds) + 2;
                 self.lcdc_b4_exact = Some((commit_cc, value, old_lcdc));
+                // Record the tile-index-is-tile-data quirk (Gambatte
+                // `p.tileIndexIsTd = cgb && old_b4 && !new_b4 && en`) on the master
+                // clock so each BG-fetch byte resolves it at its own fetch cc. The
+                // quirk apply cc is offset from the write so a falling edge lands
+                // between a straddled tile's TileDataLow and TileDataHigh reads
+                // (applying the quirk to the HIGH byte only).
+                let quirk_now = (old_lcdc & tds) != 0
+                    && (value & tds) == 0
+                    && (old_lcdc & en) != 0
+                    && (value & en) != 0;
+                // The quirk becomes visible to the BG fetcher 7 dots after the
+                // write (single speed). The fetcher's TileDataLow read for the
+                // tile that straddles the change is 6 dots after the write and its
+                // TileDataHigh read 8 dots after, so +7 lands the falling edge
+                // between them: the HIGH byte reads the tile index as data while
+                // the LOW byte keeps the normal VRAM read (the mixed-tile behavior
+                // cgb-acid-hell verifies). At double speed the per-dot cc doubles,
+                // so scale to +14. Validated broke-0 across gambatte / mealybug /
+                // acid2 / blargg and closes cgb-acid-hell.
+                let apply_cc = self.write_cc(ds) + if ds { 14 } else { 7 };
+                self.tidxtd_history.push((apply_cc, quirk_now));
             }
             // Window-enable (bit 5) toggle: record the exact Gambatte commit cc
             // (`write_cc + 2`, abs_cc units — same anchor as `lcdc_b4_exact`) so
@@ -1521,28 +1553,51 @@ impl Ppu {
         sprite_tile_walk_cost(&sprite_xs, scx, 167, 167, true)
     }
 
+    // The CGB tile-index-is-tile-data quirk as-of the current fetch dot
+    // (`self.abs_cc`), resolved from the per-substep history: the most recent
+    // recorded falling-edge quirk whose apply cc has been reached. A byte fetch
+    // whose cc lands after a falling edge's apply cc (but before the next write)
+    // sees the quirk; this lets a single tile straddle the fall (LOW byte
+    // pre-fall = normal read, HIGH byte post-fall = tile index as data).
+    fn tidxtd_quirk_at_fetch(&self) -> bool {
+        let mut quirk = self
+            .tidxtd_history
+            .first()
+            .map(|&(_, q)| q)
+            .unwrap_or(self.cgb_tile_index_is_tile_data);
+        for &(apply_cc, q) in self.tidxtd_history.iter() {
+            if apply_cc <= self.abs_cc {
+                quirk = q;
+            } else {
+                break;
+            }
+        }
+        quirk
+    }
+
     fn fetcher_lcdc_state(&self) -> fetcher::FetcherLcdcState {
+        // The tile-index-is-tile-data quirk is resolved per fetch dot from the
+        // history (independent of the tdsel-address split below), so a falling
+        // edge landing between a tile's TileDataLow and TileDataHigh reads
+        // quirks the HIGH byte only.
+        let quirk = self.tidxtd_quirk_at_fetch();
         // Exact-cc resolution of a pending mid-mode-3 bit4 toggle (PoC). If a
         // bit4 change is latched and this substep's abs_cc has not yet reached
-        // its exact commit cc, present the PRE-commit bit4 (and suppress the
-        // CGB tile-index-as-data quirk, which only arms on the realized fall).
-        // This lets a single tile straddle the change: TileDataLow before the
-        // commit uses the old method, TileDataHigh after it uses the new one.
+        // its exact commit cc, present the PRE-commit bit4. This lets a single
+        // tile straddle the change: TileDataLow before the commit uses the old
+        // addressing method, TileDataHigh after it uses the new one.
         if let Some((commit_cc, new_val, old_val)) = self.lcdc_b4_exact {
             let tds = LCDCFlags::BGWindowTileDataSelect as u8;
             if self.abs_cc < commit_cc {
-                // Pre-commit: old bit4, no quirk yet.
+                // Pre-commit: old bit4.
                 let lcdc = (self.lcdc & !tds) | (old_val & tds);
                 return fetcher::FetcherLcdcState {
                     lcdc,
-                    cgb_tile_index_is_tile_data: false,
+                    cgb_tile_index_is_tile_data: quirk,
                 };
             } else {
-                // Post-commit: new bit4. Re-derive the falling-edge quirk
-                // (set in set_lcdc_visible) so a 1->0 fall returns the tile
-                // index as data for tiles < 0x80.
+                // Post-commit: new bit4.
                 let lcdc = (self.lcdc & !tds) | (new_val & tds);
-                let quirk = (old_val & tds) != 0 && (new_val & tds) == 0;
                 return fetcher::FetcherLcdcState {
                     lcdc,
                     cgb_tile_index_is_tile_data: quirk,
@@ -1551,7 +1606,7 @@ impl Ppu {
         }
         fetcher::FetcherLcdcState {
             lcdc: self.lcdc,
-            cgb_tile_index_is_tile_data: self.cgb_tile_index_is_tile_data,
+            cgb_tile_index_is_tile_data: quirk,
         }
     }
 
@@ -4148,6 +4203,12 @@ impl Ppu {
                         0,
                         (self.lcdc & (LCDCFlags::BGDisplay as u8)) != 0,
                     ));
+                    // Seed the tile-index-is-tile-data quirk history with the
+                    // current persistent quirk (apply_cc 0 == effective from the
+                    // start of this line's mode 3). Mid-mode-3 LCDC.4 writes append
+                    // (apply_cc, quirk) so each byte fetch resolves it per-substep.
+                    self.tidxtd_history.clear();
+                    self.tidxtd_history.push((0, self.cgb_tile_index_is_tile_data));
                     // Per-pixel DMG palette histories: seed each at boundary 0 with
                     // the 1-dot-delayed register value (`*_delayed`, refreshed at the
                     // end of every dot), NOT the live register. A BGP/OBP write on the
