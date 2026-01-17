@@ -3317,6 +3317,35 @@ impl Mmio {
         self.input.set_button_state(state);
     }
 
+    /// Enable Super Game Boy JOYP-packet handling on the joypad. Called once
+    /// from `GB::new` for Hardware::SGB/SGB2 only.
+    pub fn enable_sgb(&mut self) {
+        self.input.enable_sgb();
+    }
+
+    /// Immutable access to SGB palette/mask state for the frame-output path.
+    pub fn sgb(&self) -> Option<&crate::sgb::Sgb> {
+        self.input.sgb()
+    }
+
+    /// Service a pending SGB *_TRN VRAM transfer: if the joypad's SGB state has a
+    /// _TRN command awaiting a VBlank, hand it the 4KB VRAM block at $8000. Call
+    /// once per VBlank. No-op on non-SGB hardware.
+    pub fn service_sgb_vram_transfer(&mut self) {
+        // Snapshot the pending command, then read the 4KB block, then apply. Done
+        // in two borrows to avoid overlapping &mut self.input and &self.vram.
+        let pending = self.input.sgb_mut().and_then(|s| s.take_pending_trn());
+        if let Some(command) = pending {
+            let mut block = [0u8; 0x1000];
+            for (i, b) in block.iter_mut().enumerate() {
+                *b = self.vram.read(0x8000 + i as u16);
+            }
+            if let Some(s) = self.input.sgb_mut() {
+                s.apply_trn(command, &block);
+            }
+        }
+    }
+
     // CGB Speed switching methods
     pub fn is_double_speed_mode(&self) -> bool {
         self.cgb_features_enabled && self.key1_current_speed
