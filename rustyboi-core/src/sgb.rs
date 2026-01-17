@@ -118,7 +118,14 @@ impl Default for Sgb {
 impl Sgb {
     pub fn new() -> Self {
         Sgb {
-            ready_for_pulse: false,
+            // The JOYP line idles both-high at power-on, which is exactly the
+            // state a both-high (0x30) write leaves: the receiver is armed for
+            // the next single-line pulse. Starting `false` would drop the very
+            // first packet, whose transmit routine begins with the both-low
+            // start pulse (no preceding 0x30 to arm it). SameSuite's MLT_REQ
+            // tests send that first packet with no warm-up, so we must model the
+            // idle-high line as pulse-armed.
+            ready_for_pulse: true,
             ready_for_write: false,
             ready_for_stop: false,
             last_p1: 0x30,
@@ -135,7 +142,7 @@ impl Sgb {
         }
     }
 
-    /// Number of players currently selected by MLT_REQ (1/2/4).
+    /// Number of players currently selected by MLT_REQ (1/2/3-glitch/4).
     pub fn players(&self) -> u8 {
         self.players
     }
@@ -161,9 +168,14 @@ impl Sgb {
         let count = self.command[0] & 7;
         let command_size: u16 = (if count == 0 { 1 } else { count } as u16) * 128;
 
-        // MLT_REQ joypad multiplexing: on the P14 (bit 5) rising edge, advance
-        // the current player (only when player_count is even, i.e. 2 or 4).
-        if value & 0x20 != 0 && self.last_p1 & 0x20 == 0 && self.players & 1 == 0 {
+        // MLT_REQ joypad multiplexing: on the P15 (bit 5) rising edge, advance
+        // the current player. Real SGB advances for any multi-player count
+        // (2, 3-glitched, or 4) but not in single-player mode, and wraps the
+        // index within the live player count. SameSuite's command_mlt_req_1_*
+        // read tables pin this edge (P15 0->1) exactly. The wrap here uses
+        // `& (players - 1)`; the divergence from `% players` only matters for the
+        // invalid 3-player mode and is reconciled at dispatch time.
+        if value & 0x20 != 0 && self.last_p1 & 0x20 == 0 && self.players != 1 {
             self.joypad_index = self.joypad_index.wrapping_add(1) & (self.players - 1);
         }
         self.last_p1 = value;
@@ -251,14 +263,17 @@ impl Sgb {
         let command = self.command[0] >> 3;
         match command {
             cmd::MLT_REQ => {
-                // Byte 1 bits 0-1 select the player count: 0->1, 1->2, 3->4
-                // (SameBoy: player_count = (byte1 & 3) + 1, then 3 becomes 4).
-                let mut pc = (self.command[1] & 3) + 1;
-                if pc == 3 {
-                    pc = 4;
-                }
-                self.players = pc;
-                self.joypad_index &= self.players - 1;
+                // Byte 1 bits 0-1 select the player count: 0->1, 1->2, 2->3, 3->4.
+                // NOTE: SameBoy's HLE folds the invalid `2` case up to 4 players;
+                // real SGB silicon keeps it as a *glitched 3-player* mode (the
+                // wrap uses a non-power-of-two modulus), which SameSuite's
+                // command_mlt_req captures. We model the hardware, not the HLE:
+                // keep player_count = (byte1 & 3) + 1 with no fold, and reconcile
+                // the index against the new count with a modulo (so 3 players
+                // cycles 0,1,2 rather than the `& 2` glitch an AND-mask would
+                // give).
+                self.players = (self.command[1] & 3) + 1;
+                self.joypad_index %= self.players;
             }
             cmd::MASK_EN => {
                 self.mask = match self.command[1] & 0x03 {
@@ -405,7 +420,8 @@ mod tests {
 
     #[test]
     fn mlt_req_selects_player_count() {
-        for (sel, want) in [(0u8, 1u8), (1, 2), (2, 4), (3, 4)] {
+        // 0->1, 1->2, 2->3 (invalid/glitched), 3->4. No SameBoy 3->4 fold.
+        for (sel, want) in [(0u8, 1u8), (1, 2), (2, 3), (3, 4)] {
             let mut sgb = Sgb::new();
             let mut pkt = [0u8; 16];
             pkt[0] = (cmd::MLT_REQ << 3) | 1; // command 0x11, 1 packet
