@@ -2161,30 +2161,44 @@ impl Ppu {
         }
     }
 
-    // Sprite palette shade at display column `sx`. CGB resolves OBP0/OBP1 per column
-    // from the obp histories (mealybug m3_obp0_change cgb_c); DMG keeps the proven
-    // per-dot `*_delayed` latch (see get_palette_color).
-    pub fn get_sprite_palette_color(&self, mmio: &mmio::Mmio, idx: u8, palette: bool, sx: u8) -> u8 {
+    // Sprite palette shade at display column `sx` (CGB: per-pixel OBP sample from the
+    // true-color palette-RAM pipeline — mealybug m3_obp0_change cgb_c). Used by the
+    // CGB and DMG-compat sprite mixers. DMG-hardware sprites use
+    // `dmg_sprite_palette_shade` (a per-SPRITE latch, not per-pixel).
+    pub fn get_sprite_palette_color(&self, _mmio: &mmio::Mmio, idx: u8, palette: bool, sx: u8) -> u8 {
         if idx == 0 {
             return 0; // Transparent for sprites
         }
-
-        let obp = if mmio.is_cgb() {
-            if palette {
-                Self::pal_at(&self.obp1_history, sx, self.obp1_delayed)
-            } else {
-                Self::pal_at(&self.obp0_history, sx, self.obp0_delayed)
-            }
-        } else if palette {
-            self.obp1_delayed
+        let obp = if palette {
+            Self::pal_at(&self.obp1_history, sx, self.obp1_delayed)
         } else {
-            self.obp0_delayed
+            Self::pal_at(&self.obp0_history, sx, self.obp0_delayed)
         };
+        Self::obp_shade(obp, idx)
+    }
+
+    // DMG sprite palette shade resolved off the column-keyed obp history (seeded at
+    // mode-3 entry) at `sample_col`. The caller passes the display column at which the
+    // OBP register is effectively sampled for this sprite pixel — normally the pixel's
+    // own `screen_x`, but 0 for a sprite fetched off the left edge (mealybug
+    // m3_obp0_change dmg_blob). See the call site in `mix_background_and_sprites`.
+    fn dmg_sprite_palette_shade(&self, idx: u8, palette: bool, sample_col: u64) -> u8 {
+        if idx == 0 {
+            return 0; // Transparent for sprites
+        }
+        let hist = if palette { &self.obp1_history } else { &self.obp0_history };
+        let fallback = if palette { self.obp1_delayed } else { self.obp0_delayed };
+        let obp = Self::pal_at_col(hist, sample_col, fallback);
+        Self::obp_shade(obp, idx)
+    }
+
+    #[inline]
+    fn obp_shade(obp: u8, idx: u8) -> u8 {
         match idx {
-            1 => (obp>>2)&0x03, // Light Gray
-            2 => (obp>>4)&0x03, // Dark Gray
-            3 => (obp>>6)&0x03, // Black
-            _ => 0x00, // Default to transparent for invalid indices
+            1 => (obp >> 2) & 0x03, // Light Gray
+            2 => (obp >> 4) & 0x03, // Dark Gray
+            3 => (obp >> 6) & 0x03, // Black
+            _ => 0x00,              // Default to transparent for invalid indices
         }
     }
 
@@ -3415,12 +3429,18 @@ impl Ppu {
     // entry whose boundary column is <= `sx` wins. Single-seed history (the common
     // no-mid-write case) always returns the seed. Mirrors `bgen_at`.
     fn pal_at(hist: &[(u64, u8)], sx: u8, fallback: u8) -> u8 {
+        Self::pal_at_col(hist, sx as u64, fallback)
+    }
+
+    // As `pal_at` but with an arbitrary sample column (the DMG sprite OBP path may
+    // force column 0 for off-left-edge sprites rather than the pixel's own column).
+    fn pal_at_col(hist: &[(u64, u8)], sample_col: u64, fallback: u8) -> u8 {
         if hist.len() <= 1 {
             return hist.last().map(|&(_, v)| v).unwrap_or(fallback);
         }
         let mut val = hist[0].1;
         for &(boundary_col, v) in hist.iter() {
-            if boundary_col <= sx as u64 {
+            if boundary_col <= sample_col {
                 val = v;
             } else {
                 break;
@@ -7249,7 +7269,27 @@ impl Ppu {
                     // Get sprite pixel data
                     if let Some(sprite_pixel_idx) = self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8)
                         && sprite_pixel_idx != 0 { // Sprite pixel is not transparent
-                            let sprite_color = self.get_sprite_palette_color(mmio, sprite_pixel_idx, sprite.attributes.palette, screen_x);
+                            let sprite_color = if mmio.is_cgb() {
+                                // CGB: OBP sampled per pixel (true-color palette-RAM pipeline).
+                                self.get_sprite_palette_color(mmio, sprite_pixel_idx, sprite.attributes.palette, screen_x)
+                            } else {
+                                // DMG mid-mode-3 OBP-write model (mealybug m3_obp0_change).
+                                // The OBP register is sampled per pixel as the sprite is
+                                // composited out of the OAM FIFO: a pixel drawn at display
+                                // column `screen_x` picks up the new palette iff the mid-mode-3
+                                // write already became visible there (its `pal_write_boundary`
+                                // column, resolved via the column-keyed obp history). The one DMG
+                                // wrinkle vs CGB: a sprite whose origin is off the left edge
+                                // (origin < 0) is fetched at the very start of the line, before
+                                // any mid-mode-3 write, so its whole run keeps the pre-write
+                                // (seed) palette regardless of where its visible pixels land.
+                                let sample_col = if sprite_actual_x < 0 {
+                                    0 // off-screen-left fetch: force the pre-write (seed) value
+                                } else {
+                                    screen_x as u64
+                                };
+                                self.dmg_sprite_palette_shade(sprite_pixel_idx, sprite.attributes.palette, sample_col)
+                            };
 
                             // Handle sprite priority
                             if !sprite.attributes.priority || effective_bg_pixel_idx == 0 {
