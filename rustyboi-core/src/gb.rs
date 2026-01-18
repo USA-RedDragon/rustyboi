@@ -110,6 +110,9 @@ impl GB {
         let mut mmio = memory::mmio::Mmio::new();
         mmio.set_serial_cgb(hardware.is_cgb_like());
         mmio.set_agb(hardware.is_agb());
+        if matches!(hardware, Hardware::SGB | Hardware::SGB2) {
+            mmio.enable_sgb();
+        }
         GB {
             cpu: cpu::SM83::new(),
             mmio,
@@ -666,6 +669,10 @@ impl GB {
             }
 
             if self.ppu.frame_ready() {
+                // SGB *_TRN commands read a 4KB VRAM block during the VBlank
+                // after the command. Service any pending transfer at the frame
+                // boundary (no-op on non-SGB hardware).
+                self.mmio.service_sgb_vram_transfer();
                 return Ok((self.ppu.get_frame(&self.mmio), false));
             }
 

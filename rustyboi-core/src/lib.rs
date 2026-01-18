@@ -6,4 +6,5 @@ pub mod input;
 pub mod memory;
 pub mod ppu;
 pub mod serial;
+pub mod sgb;
 pub mod timer;

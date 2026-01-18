@@ -350,12 +350,19 @@ pub fn parse_manifest(
             other => return Err(format!("manifest line {}: bad grading {other}", line_no + 1)),
         };
         // Optional hardware sub-revision override, carried as a `rev=<model>`
-        // token in the arg field (field 4). Used by the mooneye boot_regs/
-        // boot_div/boot_hwio tests that check a specific silicon revision's
-        // post-boot state; absent, the case uses the default model for `mode`.
-        let revision = if arg.starts_with("rev=") {
-            Some(parse_revision(&arg["rev=".len()..]).ok_or_else(|| {
-                format!("manifest line {}: unknown revision {arg}", line_no + 1)
+        // token in ANY trailing field. Used by the mooneye boot_regs/boot_div/
+        // boot_hwio tests that check a specific silicon revision's post-boot
+        // state, and by SGB tests (`rev=sgb`) which need Hardware::SGB while
+        // still grading via png_shootout (whose field 4/5 carry the ref/frames).
+        // Absent, the case uses the default model for `mode`.
+        let rev_tok = fields
+            .iter()
+            .skip(4)
+            .map(|f| f.trim())
+            .find(|f| f.starts_with("rev="));
+        let revision = if let Some(tok) = rev_tok {
+            Some(parse_revision(&tok["rev=".len()..]).ok_or_else(|| {
+                format!("manifest line {}: unknown revision {tok}", line_no + 1)
             })?)
         } else {
             None
