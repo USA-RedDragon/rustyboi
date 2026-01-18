@@ -89,6 +89,14 @@ const BGP_LATENCY_CGB: i32 = 2;
 const BGP_LATENCY_DMG: i32 = 1;
 const OBP_LATENCY_CGB: i32 = 2;
 const OBP_LATENCY_DMG: i32 = 1;
+// Maximum dot-gap between two consecutive mid-mode-3 palette writes for the DMG
+// palette-latch glitch to fire. The glitch is a TWO-WRITE collision: mealybug's
+// SET/RESTORE bursts write ~12 dots apart, so the settling from the first write is
+// still in-flight when the second lands. Single writes, or writes spaced wider than
+// this (gambatte dmgpalette_during_m3: one write per line / 60+ dots apart), don't
+// collide and produce no spike. 12 cleanly separates the mealybug 12-dot pairs from
+// the 60-dot inter-pair gap.
+const BGP_SPIKE_CADENCE_CC: u64 = 12;
 fn bgp_latency(cgb: bool) -> i32 {
     if cgb { BGP_LATENCY_CGB } else { BGP_LATENCY_DMG }
 }
@@ -1063,6 +1071,33 @@ pub struct Ppu {
     obp0_history: Vec<(u64, u8)>,
     #[serde(default)]
     obp1_history: Vec<(u64, u8)>,
+    // DMG mid-mode-3 BGP-write "glitch" (mealybug m3_bgp_change). On real DMG hardware a
+    // CPU write to BGP (FF47) during mode 3 can collide with the PPU's palette read for
+    // the pixel being pushed at that dot: the register is mid-transition and the pixel is
+    // looked up through the bitwise OR of the old and new BGP bytes (`old | new`) rather
+    // than either settled value. When old and new differ in a color slot the OR sets
+    // extra shade bits, darkening that one pixel — the "black spike" bracketing each
+    // mid-line palette band (e.g. old=$41,new=$42 -> $43, so a color-0 pixel reads shade
+    // 3 / black; when old|new==old the spike is invisible). It is a TWO-WRITE collision
+    // (see `bgp_writes`), so a lone or loosely-spaced write shows no spike. CGB uses
+    // true-color palette RAM and shows no such collapse, so this is DMG-gated. The two
+    // fields below drive it, both reset at mode-3 start:
+    // Per-column BG color index (0-3) of the pixel drawn at each display column this
+    // line, or -1 where a sprite won the mix / the column is undrawn. Recorded by the
+    // per-dot DMG draw and read by `resolve_bgp_spikes` to re-map the glitched columns
+    // through the OR palette at mode-3 end. 160 entries, reset each line.
+    #[serde(default)]
+    line_bg_idx: Vec<i8>,
+    // Every mid-mode-3 BGP write on the current line, as (abs_cc, display_col, old|new).
+    // The DMG palette-latch glitch is a TWO-WRITE interaction: a write spikes its own
+    // pixel only when it has a neighboring mid-mode-3 write within the tight SET/RESTORE
+    // cadence (`BGP_SPIKE_CADENCE_CC`; mealybug bursts writes in ~12-dot pairs). A single
+    // write, or one loosely spaced (the gambatte dmgpalette_during_m3 family: one write
+    // per line, or 60-148 dots apart), does NOT collide and shows no spike. The gate is
+    // resolved at mode-3 end (all writes known) by `resolve_bgp_spikes`, which paints the
+    // glitch straight into the framebuffer. Reset at mode-3 start.
+    #[serde(default)]
+    bgp_writes: Vec<(u64, u8, u8)>,
     #[serde(default)]
     cgb_color_conversion: CgbColorConversion,
     #[serde(skip, default)]
@@ -1136,6 +1171,8 @@ impl Ppu {
             bgp_history: Vec::new(),
             obp0_history: Vec::new(),
             obp1_history: Vec::new(),
+            line_bg_idx: vec![-1; 160],
+            bgp_writes: Vec::new(),
             abs_cc: 0,
             p_now: pnow_disabled(),
             write_subdot: 0,
@@ -2759,6 +2796,16 @@ impl Ppu {
             self.color_fb_a[color_offset + 2] = final_color_rgb.2;
         } else {
             let final_color = self.mix_background_and_sprites(mmio, bg_pixel_idx, self.x, ly as u8, bg_enabled_col);
+            // DMG mid-mode-3 BGP-write glitch: record the BG color index of THIS pixel so
+            // the mode-3-end `resolve_bgp_spikes` post-pass can re-map it through the
+            // OR-glitched palette. Only BG-won pixels are eligible (a sprite that won the
+            // mix is untouched). A per-write glitch here cannot see a SET write's FUTURE
+            // RESTORE neighbor (the SET column draws before the RESTORE write lands), so
+            // the two-write cadence gate is deferred to the post-pass. See `bgp_writes`.
+            if (self.x as usize) < self.line_bg_idx.len() {
+                let bg_won = bg_enabled_col && final_color == self.get_palette_color(mmio, bg_pixel_idx, self.x);
+                self.line_bg_idx[self.x as usize] = if bg_won { bg_pixel_idx as i8 } else { -1 };
+            }
             let intensity = match final_color {
                 0 => 255,
                 1 => 170,
@@ -3264,8 +3311,61 @@ impl Ppu {
         if self.state != State::PixelTransfer || self.disabled {
             return;
         }
+        // DMG mid-mode-3 palette-write glitch (see `bgp_writes`): record this write's
+        // apply column, `old | new` glitch value, and cc. Whether it actually spikes a
+        // pixel (the TWO-WRITE cadence gate) is resolved at mode-3 end in
+        // `resolve_bgp_spikes`, once all of the line's writes are known. Capture the old
+        // (settled) value BEFORE recording the new one in the history.
+        if !_mmio.is_cgb() && self.pixel_transfer_warmup == 0 {
+            let col = self.pal_write_boundary(bgp_latency(_mmio.is_cgb())) as u8;
+            if col < 160 {
+                let old = self.bgp_history.last().map(|&(_, v)| v).unwrap_or(self.bgp_delayed);
+                self.bgp_writes.push((self.abs_cc, col, old | value));
+            }
+        }
         let boundary = self.pal_write_boundary(bgp_latency(_mmio.is_cgb()));
         Self::push_pal_history(&mut self.bgp_history, boundary, value);
+    }
+
+    // Resolve the DMG mid-mode-3 BGP-write glitch for the just-finished line and paint
+    // the spikes into the framebuffer. Called at the mode-3 -> HBlank transition, when
+    // every write of the line is known. The glitch is a TWO-WRITE collision: a write
+    // spikes its own pixel (looked up through `old | new`) only when it has a
+    // neighboring mid-mode-3 write within `BGP_SPIKE_CADENCE_CC` (mealybug's SET/RESTORE
+    // pairs, ~12 dots apart). A single write, or one spaced wider (the gambatte
+    // dmgpalette_during_m3 family: one write per line, or 60-148 dots apart), has no
+    // colliding neighbor and paints no spike — leaving the clean palette transition the
+    // dmgpalette oracles expect. Resolving at line end (all writes known) lets a SET
+    // write spike on the strength of its FUTURE RESTORE neighbor, which a per-write gate
+    // could not see. DMG-only; the CGB path uses true-color palette RAM (no collapse).
+    fn resolve_bgp_spikes(&mut self, mmio: &mmio::Mmio) {
+        if mmio.is_cgb() || self.bgp_writes.len() < 2 {
+            return;
+        }
+        let ly = mmio.read(LY);
+        if ly >= 144 {
+            return;
+        }
+        let writes = std::mem::take(&mut self.bgp_writes);
+        for i in 0..writes.len() {
+            let (cc, col, glitch) = writes[i];
+            // Neighboring write within the tight cadence, in either direction.
+            let has_neighbor = writes.iter().enumerate().any(|(j, &(occ, _, _))| {
+                j != i && cc.abs_diff(occ) <= BGP_SPIKE_CADENCE_CC
+            });
+            if !has_neighbor || col >= 160 {
+                continue;
+            }
+            // Re-map the BG pixel drawn at `col` through the OR-glitched palette. The
+            // per-dot draw stored its BG color index in `line_bg_idx` (-1 = a sprite won
+            // this column, or it was BG-disabled; leave those untouched).
+            let bg_idx = self.line_bg_idx[col as usize];
+            if bg_idx < 0 {
+                continue;
+            }
+            let fb_offset = (ly as u16) * 160 + col as u16;
+            self.fb_a[fb_offset as usize] = (glitch >> (2 * bg_idx as u8)) & 0x03;
+        }
     }
 
     /// FF48 (OBP0) write hook. See `on_bgp_write`; affects sprite palette 0.
@@ -4233,6 +4333,11 @@ impl Ppu {
                     self.obp0_history.push((0, self.obp0_delayed));
                     self.obp1_history.clear();
                     self.obp1_history.push((0, self.obp1_delayed));
+                    self.bgp_writes.clear();
+                    // 160-entry per-column BG-index scratch; ensure sized (deserialized
+                    // saves may carry an empty vec) and clear to -1 (no BG pixel yet).
+                    self.line_bg_idx.clear();
+                    self.line_bg_idx.resize(160, -1);
                     self.m3_arm_scx = (mmio.read(SCX) & 0x07) as u8;
                     self.m3_arm_scx_full = mmio.read(SCX) as i16;
                     // First line after enable: resolve the SCX value the fine-scroll
@@ -4707,6 +4812,7 @@ impl Ppu {
                             // DMG wx==166 plotPixel-at-xpos166 (mode-3 end). See
                             // apply_dmg_wxa6_lineend_windraw.
                             self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
+                            self.resolve_bgp_spikes(mmio);
                             self.state = State::HBlank;
                             break 'label;
                         }
@@ -5161,6 +5267,7 @@ impl Ppu {
                     let window_deferred = self.window_started_this_line && self.mode0_reported_this_line;
                     if self.m0_time_master.is_none() {
                         self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
+                        self.resolve_bgp_spikes(mmio);
                         self.state = State::HBlank;
                         if !self.mode0_reported_this_line {
                             self.mode0_reported_this_line = true;
@@ -5169,6 +5276,7 @@ impl Ppu {
                         }
                     } else if window_deferred {
                         self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
+                        self.resolve_bgp_spikes(mmio);
                         self.state = State::HBlank;
                     }
                 }
