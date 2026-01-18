@@ -1063,6 +1063,19 @@ pub struct Ppu {
     obp0_history: Vec<(u64, u8)>,
     #[serde(default)]
     obp1_history: Vec<(u64, u8)>,
+    // Mid-mode-3 DMG BGP-write "glitch" columns: (display_col, glitch_bgp). On real
+    // DMG hardware the CPU write to BGP (FF47) during mode 3 collides with the PPU's
+    // palette read for the pixel being pushed at that dot. The palette register is
+    // mid-transition, and the pixel is looked up through the bitwise OR of the old
+    // and new BGP bytes (`old | new`) rather than either settled value. When the
+    // written value and the previous value differ in a color slot, the OR sets extra
+    // shade bits, darkening the pixel — the mealybug m3_bgp_change "black spike"
+    // bracketing each mid-line palette band (e.g. old=$41,new=$42 -> $43, so a
+    // color-0 pixel reads shade 3 / black; when old|new==old the spike is invisible,
+    // matching the un-spiked band-0 rows). CGB uses true-color palette RAM and shows
+    // no such collapse, so this is DMG-gated. Reset at mode-3 start.
+    #[serde(default)]
+    bgp_spike_cols: Vec<(u8, u8)>,
     #[serde(default)]
     cgb_color_conversion: CgbColorConversion,
     #[serde(skip, default)]
@@ -1136,6 +1149,7 @@ impl Ppu {
             bgp_history: Vec::new(),
             obp0_history: Vec::new(),
             obp1_history: Vec::new(),
+            bgp_spike_cols: Vec::new(),
             abs_cc: 0,
             p_now: pnow_disabled(),
             write_subdot: 0,
@@ -2758,7 +2772,16 @@ impl Ppu {
             self.color_fb_a[color_offset + 1] = final_color_rgb.1;
             self.color_fb_a[color_offset + 2] = final_color_rgb.2;
         } else {
-            let final_color = self.mix_background_and_sprites(mmio, bg_pixel_idx, self.x, ly as u8, bg_enabled_col);
+            let mut final_color = self.mix_background_and_sprites(mmio, bg_pixel_idx, self.x, ly as u8, bg_enabled_col);
+            // DMG mid-mode-3 BGP-write glitch (see `bgp_spike_cols`): the BG pixel at
+            // the write's apply column is looked up through the OR of the old and new
+            // BGP bytes. Only overrides the BG layer; a sprite drawn here (resolved by
+            // mix_background_and_sprites above) is unaffected unless it lost to BG.
+            if bg_enabled_col && final_color == self.get_palette_color(mmio, bg_pixel_idx, self.x) {
+                if let Some(&(_, glitch)) = self.bgp_spike_cols.iter().find(|&&(c, _)| c == self.x) {
+                    final_color = (glitch >> (2 * bg_pixel_idx)) & 0x03;
+                }
+            }
             let intensity = match final_color {
                 0 => 255,
                 1 => 170,
@@ -3263,6 +3286,16 @@ impl Ppu {
     pub fn on_bgp_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
         if self.state != State::PixelTransfer || self.disabled {
             return;
+        }
+        // DMG mid-mode-3 palette-write glitch (see `bgp_spike_cols`): the pixel at
+        // this write's apply column is looked up through `old | new`. Capture the
+        // old (settled) value BEFORE recording the new one in the history.
+        if !_mmio.is_cgb() && self.pixel_transfer_warmup == 0 {
+            let col = self.pal_write_boundary(bgp_latency(_mmio.is_cgb())) as u8;
+            let old = self.bgp_history.last().map(|&(_, v)| v).unwrap_or(self.bgp_delayed);
+            if col < 160 {
+                self.bgp_spike_cols.push((col, old | value));
+            }
         }
         let boundary = self.pal_write_boundary(bgp_latency(_mmio.is_cgb()));
         Self::push_pal_history(&mut self.bgp_history, boundary, value);
@@ -4233,6 +4266,7 @@ impl Ppu {
                     self.obp0_history.push((0, self.obp0_delayed));
                     self.obp1_history.clear();
                     self.obp1_history.push((0, self.obp1_delayed));
+                    self.bgp_spike_cols.clear();
                     self.m3_arm_scx = (mmio.read(SCX) & 0x07) as u8;
                     self.m3_arm_scx_full = mmio.read(SCX) as i16;
                     // First line after enable: resolve the SCX value the fine-scroll
