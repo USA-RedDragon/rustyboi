@@ -790,6 +790,13 @@ fn evaluate_png_shootout(
         }
     }
     let m = worst.expect("at least one frame graded with non-empty refs");
+    if let Some(dir) = &options.dump_dir {
+        let stem = refs[0].file_stem().and_then(|s| s.to_str()).unwrap_or("case");
+        let last = gb.get_current_frame();
+        let actual = frame::normalize_frame(last);
+        let _ = frame::write_ppm(&dir.join(format!("{stem}.actual.ppm")), &actual);
+        let _ = frame::write_ppm(&dir.join(format!("{stem}.expected.ppm")), &expected_refs[0]);
+    }
     Err(format!(
         "screen did not match shootout PNG {}: {}",
         refs[0].display(),
@@ -825,6 +832,11 @@ fn evaluate_csp_png(
         .map_err(|e| format!("reference PNG {}: {e}", refpng.display()))?;
 
     if let Some(mismatch) = frame::frame_buffer_mismatch(&actual, &expected) {
+        if let Some(dir) = &options.dump_dir {
+            let stem = refpng.file_stem().and_then(|s| s.to_str()).unwrap_or("case");
+            let _ = frame::write_ppm(&dir.join(format!("{stem}.actual.ppm")), &actual);
+            let _ = frame::write_ppm(&dir.join(format!("{stem}.expected.ppm")), &expected);
+        }
         Err(format!(
             "screen did not match PNG {}: {}",
             refpng.display(),
