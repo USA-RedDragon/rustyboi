@@ -143,6 +143,24 @@ impl SM83 {
                         let mcc = mmio.master_cc_dbg() as i64;
                         if mcc - (ev as i64) < 2 {
                             mmio.mmio.set_halt_wake_plus4_dmg(true);
+                            // FAITHFUL HALT-EXIT (m0-woken): the full Gambatte
+                            // wake advance for this stream — the ceil-to-M-cycle
+                            // snap (`-cycles & 3`) plus the conditional +4
+                            // (`snap-delta < 2`). The m0 eventTime's mod-4 phase
+                            // (against the 0-aligned instruction grid) decides
+                            // both, which is exactly the per-SCX class structure
+                            // of hblank_ly_scx_timing-GS (snap 2/+0, 1/+4, 0/+4,
+                            // 3/+0 for E mod 4 = 2,3,0,1). Consumed by the woken
+                            // FF44 read (get_ly_reg_at_cc) as a read-side
+                            // re-anchor; the FF41/VRAM read models on this
+                            // stream stay on their co-tuned un-advanced cc.
+                            // Phase from the WAKE mcc (== the IF-set fire cc ==
+                            // Gambatte's eventTime number): the closed-form
+                            // `ev` carries a +1 phase that would mis-class the
+                            // mod-4 snap.
+                            let align = ((4 - (mcc % 4)) % 4) as u32;
+                            let adv = align + 4 * (align < 2) as u32;
+                            mmio.mmio.set_dmg_m0_halt_ly_advance(Some(adv));
                         }
                     }
                 }

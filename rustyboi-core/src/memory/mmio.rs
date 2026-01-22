@@ -449,6 +449,18 @@ pub struct Mmio {
     #[serde(skip, default)]
     last_m2_irq_fire_cc: Option<u64>,
 
+    // FAITHFUL HALT-EXIT (mooneye hblank_ly_scx): the total halt-exit cc
+    // advance Gambatte charges a DMG m0-STAT-IRQ-woken wake — the ceil-to-
+    // M-cycle snap (`-cycles & 3`, cpu.cpp:533) plus the conditional +4
+    // (`cc - eventTime < 2`, memory.cpp:301) — derived from the m0 eventTime's
+    // mod-4 phase. rustyboi's per-cycle halt loop wakes at the exact IF-set cc
+    // instead, so the woken stream's single FF44 read must be re-anchored by
+    // this advance at the consume site (get_ly_reg_at_cc). Read-side only (the
+    // m0-woken FF41/VRAM read models are co-tuned to the un-advanced wake cc).
+    // Cleared on the next HALT.
+    #[serde(skip, default)]
+    dmg_m0_halt_ly_advance: Option<u32>,
+
     // HALT-PREFETCH (Lever A, RB_PREFETCH_CC). The pre-snap master_cc at real
     // HALT entry (on_cpu_halt). This is the un-snapped HALT-entry cc that
     // Gambatte's ceil_4(eventTime) snap (cpu.cpp:1075) would otherwise erase;
@@ -752,6 +764,7 @@ impl Mmio {
             pending_m0_irq_fire_cc: None,
             halt_wake_plus4_dmg: false,
             last_m2_irq_fire_cc: None,
+            dmg_m0_halt_ly_advance: None,
             halt_entry_cc: None,
             halt_prefetch_phase: 0,
             timer_push_phase: 0,
@@ -1835,6 +1848,18 @@ impl Mmio {
         self.last_m2_irq_fire_cc
     }
 
+    /// FAITHFUL HALT-EXIT: set the DMG m0-woken wake's halt-exit cc advance
+    /// (snap + conditional +4) for the woken stream's FF44 read.
+    pub fn set_dmg_m0_halt_ly_advance(&mut self, adv: Option<u32>) {
+        self.dmg_m0_halt_ly_advance = adv;
+    }
+
+    /// FAITHFUL HALT-EXIT: the DMG m0-woken halt-exit advance, if this stream
+    /// was woken by the mode-0 STAT IRQ at its event cc.
+    pub fn dmg_m0_halt_ly_advance(&self) -> Option<u32> {
+        self.dmg_m0_halt_ly_advance
+    }
+
     /// FAITHFUL EVENTCC: true when this DMG wakeup carried the +4 read-phase bias.
     pub fn halt_wake_plus4_dmg(&self) -> bool {
         self.halt_wake_plus4_dmg
@@ -2005,6 +2030,7 @@ impl Mmio {
         self.halt_wakeup_skew = false;
         // FAITHFUL EVENTCC: a fresh HALT ends the previous wakeup's +4 read bias.
         self.halt_wake_plus4_dmg = false;
+        self.dmg_m0_halt_ly_advance = None;
         // HALT-PREFETCH (Lever A): a fresh HALT supersedes the prior wakeup's
         // prefetch-phase bias (and its captured pre-snap entry cc).
         self.halt_entry_cc = None;

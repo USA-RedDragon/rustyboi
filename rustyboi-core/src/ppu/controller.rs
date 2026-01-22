@@ -6711,7 +6711,24 @@ impl Ppu {
         let halt_skew = mmio.halt_wakeup_skew();
         let cgb_halt_exit =
             halt_skew && mmio.is_cgb_features_enabled() && !ds && !mmio.halt_wakeup_hdma();
-        let tn = if cgb_halt_exit {
+        // FAITHFUL HALT-EXIT (DMG m0-woken stream): re-anchor the woken FF44
+        // read by the real Gambatte wake advance (snap + conditional +4,
+        // derived at unhalt from the m0 eventTime phase). The un-advanced wake
+        // stream reads `adv` cc earlier than Gambatte's, and this read path's
+        // `time` base already matches Gambatte's lyTime, so the effective
+        // comparison is `to_next - adv` — byte-exact for the
+        // hblank_ly_scx_timing-GS per-SCX classes (to_next 9 for delay_a /
+        // 5 for delay_b across all SCX and both wake-M-cycle phases, skipping
+        // the ly&(ly+1) glitch dot the -1-skewed read landed on). Replaces the
+        // generic -1 halt skew for exactly this stream shape.
+        let m0_halt_adv = if halt_skew && !mmio.is_cgb_features_enabled() && !ds {
+            mmio.dmg_m0_halt_ly_advance()
+        } else {
+            None
+        };
+        let tn = if let Some(adv) = m0_halt_adv {
+            to_next - adv as i64
+        } else if cgb_halt_exit {
             to_next - 5
         } else if halt_skew {
             to_next - 1
