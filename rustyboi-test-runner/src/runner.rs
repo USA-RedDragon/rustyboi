@@ -790,6 +790,17 @@ fn evaluate_png_shootout(
         }
     }
     let m = worst.expect("at least one frame graded with non-empty refs");
+    if let Some(dump_dir) = &options.dump_dir {
+        let (frame, _bp) = gb
+            .run_until_lcd_frame(false, MAX_CYCLES_UNTIL_LCD_FRAME)
+            .map_err(|e| format!("{e} while running dump frame"))?;
+        let actual = frame::normalize_frame(frame);
+        let stem = refs[0]
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("shootout");
+        let _ = frame::write_ppm(&dump_dir.join(format!("{stem}.actual.ppm")), &actual);
+    }
     Err(format!(
         "screen did not match shootout PNG {}: {}",
         refs[0].display(),
