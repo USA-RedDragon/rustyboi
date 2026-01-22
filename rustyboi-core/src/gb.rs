@@ -308,6 +308,21 @@ impl GB {
         // rustyboi's timer). AGB is opt-in (never in the default mode set), so it
         // likewise takes its real-hardware boot_div phase.
         let boot_counter: u16 = match self.hardware {
+            // KNOWN CONFLICT (measured 2026-07-02): the hardware-authentic
+            // bare-boot CGB counter is 0x2678 (== AGB 0x267C - 4; == CGB0
+            // 0x2884 - ~2 DIV; VERIFIED: 0x2678 passes mooneye
+            // boot_div-cgbABCDE, the one remaining shootout mooneye fail).
+            // But 0x2678 breaks EXACTLY 15 gambatte CGB hwtests whose refs
+            // encode this synthetic counter (Gambatte setPostBiosState
+            // cycleCounter 0x102A0 - divLastUpdate -0x1C00, low 16 = 0x1EA0):
+            // start_inc_1/_2 (out1E/out1F literally read this DIV), tc00_start_2,
+            // fexx_ffxx_dumper, and 11 ch1/ch2 init/reset sweep/env/length
+            // boot-phase audio tests. The six boot_div reads pin the counter to
+            // a 4cc window, so no phase-preserving compromise exists — a hard
+            // either/or between the two reference sets until the gambatte
+            // boot-anchored refs are re-derived. --real-bios does not resolve
+            // it (the emulated bios path is not DIV-calibrated; both boot_div
+            // tests fail under it).
             Hardware::CGB => 0x1EA0,
             // boot_div-cgb0 fingerprint (29 2a 2a 2b 2c 2e); leads CGB-A..E by
             // ~2 DIV increments. Verified: passes mooneye boot_div-cgb0.
