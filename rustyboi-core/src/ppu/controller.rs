@@ -2644,6 +2644,10 @@ impl Ppu {
         let fired = self.mstat_irq.do_m2_event(ly, stat, self.lyc_irq.lyc_reg());
         if fired {
             mmio.request_interrupt(registers::InterruptFlag::Lcd);
+            // FAITHFUL HALT-EXIT: a halted CPU wakes at this exact cc; the DMG
+            // halt-exit fixup (sm83.rs) needs the m2 eventTime to apply the
+            // real +4 (`cc - eventTime < 2`).
+            mmio.set_last_m2_irq_fire_cc(mmio.master_cc());
         }
         let delta = stat_irq::mode2_reschedule_delta(ly, stat, ds);
         self.sched_m2irq = self.sched_m2irq.wrapping_add(delta);

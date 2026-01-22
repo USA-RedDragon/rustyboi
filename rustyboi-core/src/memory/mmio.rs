@@ -440,6 +440,15 @@ pub struct Mmio {
     #[serde(skip, default)]
     halt_wake_plus4_dmg: bool,
 
+    // FAITHFUL HALT-EXIT (mooneye intr_2): master_cc at which the mode-2 STAT
+    // IRQ event last raised IF (Gambatte's eventTime for the m2 memevent). A
+    // DMG halt wake landing within 2cc of it takes the real +4 halt-exit
+    // M-cycle (memory.cpp:301 `cc += 4 * (isCgb() || cc - eventTime < 2)`) as
+    // a genuine 4-cycle stall before the wake, so the whole woken instruction
+    // stream — not just biased reads — resumes on Gambatte's cc.
+    #[serde(skip, default)]
+    last_m2_irq_fire_cc: Option<u64>,
+
     // HALT-PREFETCH (Lever A, RB_PREFETCH_CC). The pre-snap master_cc at real
     // HALT entry (on_cpu_halt). This is the un-snapped HALT-entry cc that
     // Gambatte's ceil_4(eventTime) snap (cpu.cpp:1075) would otherwise erase;
@@ -742,6 +751,7 @@ impl Mmio {
             halt_wakeup_hdma: false,
             pending_m0_irq_fire_cc: None,
             halt_wake_plus4_dmg: false,
+            last_m2_irq_fire_cc: None,
             halt_entry_cc: None,
             halt_prefetch_phase: 0,
             timer_push_phase: 0,
@@ -1812,6 +1822,17 @@ impl Mmio {
     /// (Gambatte memory.cpp:308, `cc - eventTime < 2` branch).
     pub fn set_halt_wake_plus4_dmg(&mut self, v: bool) {
         self.halt_wake_plus4_dmg = v;
+    }
+
+    /// FAITHFUL HALT-EXIT: record the master_cc the mode-2 STAT IRQ event
+    /// raised IF at (its Gambatte eventTime; the per-dot dispatch fires at it).
+    pub fn set_last_m2_irq_fire_cc(&mut self, cc: u64) {
+        self.last_m2_irq_fire_cc = Some(cc);
+    }
+
+    /// FAITHFUL HALT-EXIT: the last mode-2 STAT IRQ IF-set master_cc.
+    pub fn last_m2_irq_fire_cc(&self) -> Option<u64> {
+        self.last_m2_irq_fire_cc
     }
 
     /// FAITHFUL EVENTCC: true when this DMG wakeup carried the +4 read-phase bias.

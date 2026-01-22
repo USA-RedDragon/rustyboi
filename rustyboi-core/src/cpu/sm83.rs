@@ -77,6 +77,36 @@ impl SM83 {
         let mut just_unhalted = false;
         if self.halted {
             if pending_interrupt.is_some() {
+                // FAITHFUL HALT-EXIT (DMG, m2-woken): Gambatte memory.cpp:301
+                // `cc += 4 * (isCgb() || cc - eventTime < 2)`. rustyboi's halted
+                // CPU steps per-cycle, so it reaches this wake at the EXACT
+                // IF-set cc; hardware spends one more M-cycle leaving HALT when
+                // the wake landed on the IRQ's event time. The m2 STAT event is
+                // 4-aligned to the instruction stream (eventTime = lineStart-4),
+                // so its `ceil_4` snap is a no-op and the `< 2` branch always
+                // takes the +4 — without it the whole woken stream (dispatch,
+                // polls, the next m0 IRQ count) runs 4cc early (mooneye
+                // intr_2_* family). Charged as a REAL 4-cycle stall (still
+                // halted; the world advances) so downstream event cc's shift
+                // with it. Scoped to the m2-woken DMG wake: the LYC/m1 events
+                // (eventTime ≡ 2 mod 4) take `ceil_4` +2 and MISS the < 2
+                // branch on hardware, and the m0/CGB wakes are modelled by the
+                // established read-side biases (halt_wake_plus4_dmg / +5 CGB).
+                // IME-on only: hardware charges the M-cycle regardless, but the
+                // IME-off resume streams' post-wake reads (noime_m2irq_m0stat_1,
+                // oamdmasrc80_halt_m2irq_read8000) resolve against the STAT/DMA
+                // read models tuned to the un-advanced wake cc — advancing only
+                // the IME-on dispatch path keeps those byte-identical.
+                if self.registers.ime
+                    && !mmio.mmio.is_cgb()
+                    && pending_interrupt == Some(registers::InterruptFlag::Lcd)
+                    && mmio
+                        .mmio
+                        .last_m2_irq_fire_cc()
+                        .is_some_and(|fire| mmio.master_cc_dbg().wrapping_sub(fire) < 2)
+                {
+                    return 4;
+                }
                 self.halted = false;
                 just_unhalted = true;
                 mmio.clear_cpu_halt();
