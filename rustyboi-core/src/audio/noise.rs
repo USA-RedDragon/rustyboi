@@ -10,30 +10,18 @@ pub struct Noise {
     nr42: u8, // Volume envelope
     nr43: u8, // Frequency and randomness
     nr44: u8, // Control
-    
+
     // Internal state
-    enabled: bool,
+    enabled: bool, // SameBoy `is_active[GB_NOISE]` (NR52 status bit)
     length_counter: u8,
     volume: u8,
     volume_direction: bool,
     volume_timer: u8,
-    lfsr: u16, // Linear feedback shift register (Gambatte Lfsr::reg_)
     length_enabled: bool,
     fs_step: u8,
 
-    // Gambatte `Channel4::Lfsr` cc-based model (channel4.cpp). The LFSR register
-    // is advanced lazily to the access cc via `update_backup_counter`, so a
-    // PCM34 read resolves the exact sub-counter phase rather than a per-clock
-    // countdown.
-    #[serde(default = "counter_disabled")]
-    lfsr_backup_counter: u32,
-    #[serde(default = "counter_disabled")]
-    lfsr_counter: u32,
-    #[serde(default)]
-    lfsr_master: bool,
-
-    // Free-running 2 MHz cycle counter (Gambatte cycleCounter_), pushed by the
-    // controller; drives the cc-based length expiry.
+    // Free-running 2 MHz cycle counter (controller cc), pushed each sync;
+    // drives the cc-based length expiry and the ripple-counter advance.
     #[serde(default)]
     cc: u32,
     // Absolute cc of length expiry (Gambatte `LengthCounter::counter_`).
@@ -41,29 +29,79 @@ pub struct Noise {
     len_counter: u32,
     #[serde(default)]
     len_cc: u32,
+
+    // --- SameBoy ripple-counter noise model (Core/apu.c noise_channel) ---
+    // 14-bit ripple counter incremented every `divisor` 2 MHz cycles; the
+    // LFSR steps on the RISING edge of counter bit (nr43 >> 4). This is what
+    // makes frequency changes glitch-accurate (the counter keeps running
+    // through NR43 writes) and is the model SameSuite's channel_4 tests are
+    // validated against.
+    #[serde(default)]
+    counter: u16,
+    // 2 MHz cycles until the next counter increment.
+    #[serde(default)]
+    counter_countdown: u32,
+    // Free-running 2 MHz cycle count since APU power-on (SameBoy
+    // `noise_channel.alignment`): accumulates in `run_batch` from elapsed
+    // cycles only, so the DIV-reset/speed-switch cc folds never touch it.
+    #[serde(default)]
+    alignment: u32,
+    // 7-bit LFSR width (NR43 bit 3).
+    #[serde(default)]
+    narrow: bool,
+    // SameBoy-convention 15-bit LFSR: starts at 0, feedback
+    // `(lfsr ^ (lfsr>>1) ^ 1) & 1` into the high bit(s); output = bit 0.
+    #[serde(default)]
+    lfsr: u16,
+    // Latched output bit (SameBoy `current_lfsr_sample`).
+    #[serde(default)]
+    current_sample: bool,
+    // SameBoy `noise_counter_active` / `noise_background_counter_active`:
+    // the ripple counter runs while either is set (background counting keeps
+    // the counter alive after DAC-off, with trigger-time glitches).
+    #[serde(default)]
+    counter_active: bool,
+    #[serde(default)]
+    background_active: bool,
+    // SameBoy `countdown_reloaded` / `did_step_counter` write-quirk flags.
+    #[serde(default)]
+    countdown_reloaded: bool,
+    #[serde(default)]
+    did_step_counter: bool,
+    // DMG-only delayed channel start (SameBoy `dmg_delayed_start`).
+    #[serde(default)]
+    dmg_delayed_start: u32,
+    // SameBoy `noise_started_with_dac_disabled`.
+    #[serde(default)]
+    started_with_dac_off: bool,
+    // The 2 MHz cc up to which the ripple counter has been advanced.
+    #[serde(default)]
+    last_run_cc: u32,
+    // CGB (vs DMG) and double-speed flags, pushed by the controller.
+    #[serde(default)]
+    cgb: bool,
+    #[serde(default)]
+    ds: bool,
 }
 
 const LEN_DISABLED: u32 = 0xFFFF_FFFF;
-const COUNTER_DISABLED: u32 = 0xFFFF_FFFF;
 
 fn len_disabled() -> u32 {
     LEN_DISABLED
 }
 
-fn counter_disabled() -> u32 {
-    COUNTER_DISABLED
-}
-
-/// Gambatte channel4.cpp `toPeriod`: the LFSR step period in `cycleCounter_`
-/// units. `s = nr3>>4 + 3`, `r = nr3 & 7` (r==0 acts as r=1 with s-1).
-fn lfsr_to_period(nr3: u8) -> u32 {
-    let mut s = (nr3 >> 4) as u32 + 3;
-    let mut r = (nr3 & 0x07) as u32;
-    if r == 0 {
-        r = 1;
-        s -= 1;
-    }
-    r << s
+/// Calibration knob: `RB_APU_CH4_ALIGN=N` (0..3) offsets the power-on
+/// `alignment` seed to map SameBoy's write-instant frame onto rustyboi's
+/// dot-sync frame.
+fn ch4_align_seed() -> u32 {
+    static FLAG: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("RB_APU_CH4_ALIGN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+            & 3
+    })
 }
 
 impl Noise {
@@ -78,15 +116,26 @@ impl Noise {
             volume: 0,
             volume_direction: false,
             volume_timer: 0,
-            lfsr: 0x7FFF,
             length_enabled: false,
             fs_step: 0,
-            lfsr_backup_counter: COUNTER_DISABLED,
-            lfsr_counter: COUNTER_DISABLED,
-            lfsr_master: false,
             cc: 0,
             len_counter: LEN_DISABLED,
             len_cc: 0,
+            counter: 0,
+            counter_countdown: 0,
+            alignment: 0,
+            narrow: false,
+            lfsr: 0,
+            current_sample: false,
+            counter_active: false,
+            background_active: false,
+            countdown_reloaded: false,
+            did_step_counter: false,
+            dmg_delayed_start: 0,
+            started_with_dac_off: false,
+            last_run_cc: 0,
+            cgb: false,
+            ds: false,
         }
     }
 
@@ -98,23 +147,39 @@ impl Noise {
         self.len_cc = cc;
     }
 
+    pub fn set_cgb(&mut self, cgb: bool) {
+        self.cgb = cgb;
+    }
+
+    pub fn set_ds(&mut self, ds: bool) {
+        self.ds = ds;
+    }
+
     pub fn len_expired(&self) -> bool {
         self.len_cc >= self.len_counter
     }
 
-    /// Gambatte `Channel4::reset` (from `PSG::reset` on the NR52 0→1 enable):
-    /// resets the LFSR + envelope sub-state and disables the channel. The length
-    /// counter is preserved.
+    /// SameBoy `GB_apu_init` noise state (the APU struct memset at the NR52
+    /// 0->1 power-on): the ripple counter, its alignment and the LFSR restart
+    /// from zero. The length counter is preserved (handled by the caller's
+    /// register-zeroing path).
     pub fn psg_reset(&mut self) {
-        self.lfsr = 0x7FFF;
+        self.lfsr = 0;
+        self.current_sample = false;
+        self.counter = 0;
+        self.counter_countdown = 0;
+        self.alignment = ch4_align_seed();
+        self.narrow = false;
+        self.counter_active = false;
+        self.background_active = false;
+        self.countdown_reloaded = false;
+        self.did_step_counter = false;
+        self.dmg_delayed_start = 0;
+        self.started_with_dac_off = false;
+        self.last_run_cc = self.cc;
         self.volume = 0;
         self.volume_timer = 0;
         self.enabled = false;
-        // Gambatte `Channel4::reset` -> `Lfsr::reset(cc)`: nr3_=0, master off,
-        // backupCounter_ = cc + toPeriod(0); the step counter stays disabled.
-        self.lfsr_master = false;
-        self.lfsr_backup_counter = self.cc.wrapping_add(lfsr_to_period(0));
-        self.lfsr_counter = COUNTER_DISABLED;
     }
 
     pub fn set_fs_step(&mut self, step: u8) {
@@ -128,9 +193,7 @@ impl Noise {
         self.len_counter = LEN_DISABLED;
         self.length_counter = 0;
         self.enabled = false;
-        self.lfsr_master = false;
     }
-
 
     /// Gambatte `LengthCounter::nr1Change` (channel 4 / NR41).
     fn len_nr1_change(&mut self, value: u8) {
@@ -155,7 +218,6 @@ impl Noise {
                 self.length_counter -= dec;
                 if self.length_counter == 0 {
                     self.enabled = false;
-                    self.lfsr_master = false;
                 }
             }
         }
@@ -170,40 +232,28 @@ impl Noise {
     }
 
     pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
-        // The LFSR register is advanced LAZILY at the access cc via
-        // `update_backup_counter` (Gambatte `Lfsr::updateBackupCounter`), so no
-        // per-clock stepping is needed here — `event()`/`lfsr_counter` is only
-        // the audio-mixer's scheduling bookkeeping, kept in sync inside the
-        // bulk update. Advancing it here too would double-count the shifts.
+        self.advance();
     }
 
-    /// Resolve the LFSR register to the current cc for the CPU read path
-    /// (PCM34), mirroring `Channel3::sync_for_read`.
+    /// Resolve the ripple counter/LFSR to the current cc for the CPU read
+    /// path.
     pub fn sync_for_read(&mut self) {
-        if self.lfsr_master {
-            self.lfsr_update_backup_counter(self.cc);
-        }
+        self.advance();
     }
 
-    /// Resolve the LFSR register at a specific (precise per-access) cc, the
-    /// length subsystem's overlaid read cc rather than the per-dot `self.cc`.
-    pub fn sync_lfsr_at(&mut self, at_cc: u32) {
-        if self.lfsr_master {
-            self.lfsr_update_backup_counter(at_cc);
-        }
-    }
-
-    /// Gambatte `Channel4::Lfsr::resetCc` hook for a DIV write.
-    pub fn reset_cc(&mut self, cc: u32, delta: u32) {
-        self.lfsr_reset_cc(cc, delta);
+    /// SameBoy `resetCc` equivalent for a DIV write: the controller folds the
+    /// master cc; shift the run anchor so the elapsed-cycle stream (and thus
+    /// `alignment`) is unaffected.
+    pub fn reset_cc(&mut self, _cc: u32, delta: u32) {
+        self.advance();
+        self.last_run_cc = self.last_run_cc.wrapping_sub(delta);
     }
 
     pub fn step_frame_sequencer(&mut self, step: u8) {
         if !self.enabled {
             return;
         }
-
-        // Length is now a cc-driven absolute expiry event (see `length_event`).
+        // Length is a cc-driven absolute expiry event (see `length_event`).
         // Volume envelope (step 7)
         if step == 7 {
             self.step_volume_envelope();
@@ -227,67 +277,188 @@ impl Noise {
         }
     }
 
-    // --- Gambatte `Channel4::Lfsr` (channel4.cpp) cc-based register model ---
+    // --- SameBoy ripple-counter machinery (Core/apu.c GB_apu_run noise) ---
 
-    /// channel4.cpp `Lfsr::updateBackupCounter`: bulk-advance the LFSR register
-    /// to `cc` (lazy catch-up). Only steps while the shift code is < 14
-    /// (`nr3_ < 0xE0`); a code >= 14 freezes the register (Gambatte quirk).
-    fn lfsr_update_backup_counter(&mut self, cc: u32) {
-        if self.lfsr_backup_counter <= cc {
-            let period = lfsr_to_period(self.nr43);
-            let mut periods = (cc - self.lfsr_backup_counter) / period + 1;
-            self.lfsr_backup_counter = self
-                .lfsr_backup_counter
-                .wrapping_add(periods * period);
+    /// Advance the ripple counter/LFSR to the current `cc`.
+    fn advance(&mut self) {
+        let cc = self.cc;
+        let cycles = cc.wrapping_sub(self.last_run_cc);
+        if cycles == 0 || cycles >= 0x8000_0000 {
+            return;
+        }
+        self.last_run_cc = cc;
+        self.run_cycles(cycles);
+    }
 
-            if self.lfsr_master && self.nr43 < 0xE0 {
-                let mut reg = self.lfsr as u32;
-                if self.nr43 & 0x08 != 0 {
-                    // 7-bit width.
-                    while periods > 6 {
-                        let xored = (reg << 1 ^ reg) & 0x7E;
-                        reg = (reg >> 6 & !0x7E) | xored | xored << 8;
-                        periods -= 6;
-                    }
-                    let xored = ((reg ^ reg >> 1) << (7 - periods)) & 0x7F;
-                    reg = (reg >> periods & !(0x80u32.wrapping_sub(0x80 >> periods)))
-                        | xored
-                        | xored << 8;
-                } else {
-                    // 15-bit width.
-                    while periods > 15 {
-                        reg = reg ^ reg >> 1;
-                        periods -= 15;
-                    }
-                    reg = reg >> periods | (((reg ^ reg >> 1) << (15 - periods)) & 0x7FFF);
+    fn run_cycles(&mut self, mut cycles: u32) {
+        // DMG delayed channel start (SameBoy `dmg_delayed_start` handling in
+        // GB_apu_run): the NR44 trigger takes effect 6 cycles later; the
+        // batch is split at the crossing and NR44 is re-applied there.
+        if self.dmg_delayed_start > 0 {
+            if self.dmg_delayed_start > cycles {
+                self.dmg_delayed_start -= cycles;
+            } else {
+                let head = self.dmg_delayed_start;
+                self.dmg_delayed_start = 0;
+                cycles -= head;
+                self.run_batch(head);
+                let nr44 = self.nr44 | 0x80;
+                self.write_nrx4(nr44);
+                if cycles == 0 {
+                    return;
                 }
-                self.lfsr = reg as u16;
             }
+        }
+        self.run_batch(cycles);
+    }
+
+    fn run_batch(&mut self, cycles: u32) {
+        self.alignment = self.alignment.wrapping_add(cycles);
+        if !(self.counter_active || self.background_active) {
+            return;
+        }
+        let mut divisor = ((self.nr43 & 0x07) as u32) << 2;
+        if divisor == 0 {
+            divisor = 2;
+        }
+        if self.counter_countdown == 0 {
+            self.counter_countdown = divisor;
+        }
+        let mut cycles_left = cycles;
+        while cycles_left >= self.counter_countdown {
+            cycles_left -= self.counter_countdown;
+            self.counter_countdown = divisor;
+            let mask = 1u16 << (self.nr43 >> 4);
+            let old_bit = self.counter & mask != 0;
+            self.counter = self.counter.wrapping_add(1) & 0x3FFF;
+            self.did_step_counter = true;
+            let new_bit = self.counter & mask != 0;
+            if new_bit && !old_bit && self.enabled {
+                self.step_lfsr();
+            }
+        }
+        if cycles_left > 0 {
+            self.counter_countdown -= cycles_left;
+            self.countdown_reloaded = false;
+        } else {
+            self.countdown_reloaded = true;
         }
     }
 
-    /// channel4.cpp `Lfsr::nr3Change`: re-anchor the step counter (`counter_=cc`,
-    /// the GSR "Mickey fix") after catching the register up.
-    fn lfsr_nr3_change(&mut self, cc: u32) {
-        self.lfsr_update_backup_counter(cc);
-        self.lfsr_counter = cc;
+    /// SameBoy `step_lfsr`: feedback `(lfsr ^ lfsr>>1 ^ 1) & 1` into bit 14
+    /// (and bit 6 in narrow mode); output = bit 0.
+    fn step_lfsr(&mut self) {
+        let high_mask: u16 = if self.narrow { 0x4040 } else { 0x4000 };
+        let new_high = (self.lfsr ^ (self.lfsr >> 1) ^ 1) & 1 != 0;
+        self.lfsr >>= 1;
+        if new_high {
+            self.lfsr |= high_mask;
+        } else {
+            // Relevant when switching LFSR widths.
+            self.lfsr &= !high_mask;
+        }
+        self.current_sample = self.lfsr & 1 != 0;
     }
 
-    /// channel4.cpp `Lfsr::nr4Init`: enable + schedule the first step at `cc+4`.
-    fn lfsr_nr4_init(&mut self, cc: u32) {
-        self.lfsr_master = false;
-        self.lfsr_update_backup_counter(cc);
-        self.lfsr_master = true;
-        self.lfsr_backup_counter = self.lfsr_backup_counter.wrapping_add(4);
-        self.lfsr_counter = self.lfsr_backup_counter;
-    }
+    /// SameBoy `prepare_noise_start` (Core/apu.c), CGB-C-and-older + DMG
+    /// paths (cgb04c/dmg08 are the hardware oracles; AGB and CGB-D/E-specific
+    /// branches omitted). Reloads the counter countdown with the
+    /// alignment-dependent trigger phase and reseeds the LFSR.
+    fn prepare_noise_start(&mut self) {
+        self.counter_active = self.nr42 & 0xF8 != 0;
+        let was_started_with_dac_off = self.started_with_dac_off;
+        self.started_with_dac_off = !self.counter_active;
+        let mut divisor = (self.nr43 & 0x07) as u32;
+        let was_background = self.background_active;
+        self.background_active = true;
+        let mut instant_step = false;
+        let mut div_1_glitch = false;
 
-    /// channel4.cpp `Lfsr::resetCc`: shift the cc anchors back on a DIV write.
-    fn lfsr_reset_cc(&mut self, cc: u32, delta: u32) {
-        self.lfsr_update_backup_counter(cc);
-        self.lfsr_backup_counter = self.lfsr_backup_counter.wrapping_sub(delta);
-        if self.lfsr_counter != COUNTER_DISABLED {
-            self.lfsr_counter = self.lfsr_counter.wrapping_sub(delta);
+        if divisor > 1 && self.counter_countdown == 1 {
+            self.counter = self.counter.wrapping_add(1) & 0x3FFF;
+        } else if divisor > 1 && self.counter_countdown == 2 && self.enabled && self.ds {
+            // model <= CGB_C in double speed
+            self.counter = self.counter.wrapping_add(1) & 0x3FFF;
+        } else if self.counter_countdown == 2 && (self.alignment & 3) == 0 && self.enabled {
+            if divisor == 0 {
+                divisor = 8;
+            } else if divisor == 1 {
+                if !self.did_step_counter {
+                    div_1_glitch = true;
+                }
+                let mask = 1u16 << (self.nr43 >> 4);
+                let old_bit = self.counter & mask != 0;
+                self.counter = self.counter.wrapping_add(1) & 0x3FFF;
+                let new_bit = self.counter & mask != 0;
+                if new_bit && !old_bit {
+                    instant_step = true;
+                }
+            }
+        }
+        let mut countdown: i32 = if divisor == 0 { 6 } else { divisor as i32 * 4 + 6 };
+        if self.alignment & 1 != 0 {
+            if divisor == 0 {
+                // model <= CGB_C (DMG uses the was_background variants, but
+                // <=C is the cgb04c behavior; DMG08's r=0 path matches +1)
+                countdown += 1;
+            } else if self.alignment & 2 != 0 {
+                if divisor == 1 && !self.enabled {
+                    countdown += 1;
+                } else {
+                    countdown -= 3;
+                }
+            } else {
+                countdown -= 1;
+                if divisor == 1 && self.enabled {
+                    countdown -= 4;
+                }
+            }
+        } else if divisor != 0 {
+            if self.alignment & 2 != 0 {
+                if self.ds && divisor == 1 {
+                    countdown += 2; // <= CGB_C in double speed
+                } else {
+                    countdown -= 2;
+                }
+            } else if divisor > 1 && !self.ds {
+                countdown -= 4;
+            } else if divisor == 1 && self.enabled && (self.nr43 & 0xF0) == 0 {
+                countdown -= 4;
+            }
+        } else if self.ds {
+            countdown += 2; // <= CGB_C in double speed
+        }
+
+        // Background counting glitches.
+        if divisor > 1 {
+            if !self.counter_active && (self.alignment & 3) == 0 {
+                countdown += 4;
+            }
+        } else if was_background && !self.enabled && (self.alignment & 3) == 0 {
+            if divisor == 0 {
+                if was_started_with_dac_off {
+                    countdown += 28;
+                }
+            } else {
+                countdown -= 4;
+            }
+        }
+        if divisor == 0 && was_background && !self.enabled && self.ds {
+            countdown -= 1; // <= CGB_C
+        }
+        if div_1_glitch {
+            countdown -= 4;
+        }
+        self.counter_countdown = countdown.max(1) as u32;
+
+        if divisor == 0 && self.enabled && (self.alignment & 3) == 3 {
+            // Confirmed-but-unexplained constant on real hardware (SameBoy).
+            self.lfsr = 0x0055;
+        } else {
+            self.lfsr = 0;
+        }
+        if instant_step {
+            self.step_lfsr();
         }
     }
 
@@ -317,37 +488,77 @@ impl Noise {
     }
 
     fn trigger(&mut self) {
-        self.enabled = true;
+        self.advance();
+        let dac_off =
+            self.get_envelope_initial_volume() == 0 && !self.get_envelope_direction();
 
-        // Length reload handled in `len_nr4_change` (Gambatte folds it in).
+        // DMG-only: an unaligned trigger is deferred 6 cycles (SameBoy
+        // `dmg_delayed_start`); the whole start runs at the crossing.
+        if !self.cgb && (self.alignment & 3) != 0 && self.dmg_delayed_start == 0 {
+            self.dmg_delayed_start = 6;
+            return;
+        }
 
-        // Volume envelope
+        self.lfsr = 0;
+        self.prepare_noise_start();
+        self.current_sample = false;
+
+        // Volume envelope init.
         self.volume = self.get_envelope_initial_volume();
         self.volume_direction = self.get_envelope_direction();
         self.volume_timer = self.get_envelope_period();
 
-        // LFSR: Gambatte channel4.cpp `setNr4` triggers `lfsr_.nr4Init(cc)` only
-        // when the DAC stays on (`master_ = !envelope.nr4Init`). The register is
-        // NOT reloaded to 0x7FFF on trigger (only on `Lfsr::reset` at power-on).
-        let dac_off =
-            self.get_envelope_initial_volume() == 0 && !self.get_envelope_direction();
+        self.did_step_counter = (self.alignment & 3) == 2;
+
         if dac_off {
             self.enabled = false;
-            self.lfsr_master = false;
         } else {
-            self.lfsr_nr4_init(self.cc);
+            self.enabled = true;
         }
+    }
+
+    /// SameBoy NR43 write: if the counter countdown just reloaded, re-derive
+    /// it from the new divisor with the alignment-phase table, and apply the
+    /// <=CGB-C reload-coincident LFSR step glitch. The ripple counter itself
+    /// keeps running (frequency changes are inherently glitch-accurate).
+    fn write_nr43(&mut self, value: u8) {
+        self.advance();
+        if self.countdown_reloaded {
+            let mut divisor = ((value & 0x07) as u32) << 2;
+            if divisor == 0 {
+                divisor = 2;
+            }
+            // <= CGB_C table {2,1,4,3} (CGB-D/E use {2,1,0,3}).
+            let adj = if divisor == 2 {
+                0
+            } else {
+                [2u32, 1, 4, 3][(self.alignment & 3) as usize]
+            };
+            self.counter_countdown = divisor + adj;
+
+            // <= CGB_C: reload-coincident bit-transition glitch.
+            let old_bit = (self.counter >> (self.nr43 >> 4)) & 1 != 0;
+            let glitch_bit = (self.counter >> 7) & 1 != 0;
+            let new_bit = (self.counter >> (value >> 4)) & 1 != 0;
+            if !old_bit && new_bit && glitch_bit {
+                let prev = self.counter.wrapping_sub(1) & 0x3FFF;
+                let p_old = (prev >> (self.nr43 >> 4)) & 1 != 0;
+                let p_glitch = (prev >> 7) & 1 != 0;
+                let p_new = (prev >> (value >> 4)) & 1 != 0;
+                if p_old && !p_new && p_glitch {
+                    self.step_lfsr();
+                }
+            }
+        }
+        self.narrow = value & 0x08 != 0;
+        self.nr43 = value;
     }
 
     pub fn get_output(&self) -> f32 {
         if !self.enabled || self.volume == 0 {
             return 0.0;
         }
-
-        // Output is inverted LFSR bit 0
-        let output_bit = (!self.lfsr) & 0x01;
-        
-        if output_bit == 1 {
+        if self.current_sample {
             (self.volume as f32) / 15.0
         } else {
             0.0
@@ -358,18 +569,65 @@ impl Noise {
         self.enabled
     }
 
-    /// CGB PCM34 high nibble for the noise channel (Gambatte `channel4.cpp`):
-    /// `isActive()` is `master_` (here our `enabled`, which the DAC-off path
-    /// clears) and `vol_ = lfsr.isHighState(cc) ? envelope.volume : 0`. The LFSR
-    /// high state is the inverted bit-0 (Gambatte `Lfsr::isHighState`).
+    /// CGB PCM34 high nibble for the noise channel: the latched LFSR output
+    /// bit times the envelope volume while the channel is active.
     pub fn pcm_nibble(&self) -> u8 {
-        // Gambatte channel4.cpp `update`: `vol_ = isHighState(cc) ? volume : 0`,
-        // gated by `isActive()` == `master_` (the DAC/trigger gate). The register
-        // is already advanced to the read cc by `sync_for_read`.
-        if !self.lfsr_master {
+        if !self.enabled {
             return 0;
         }
-        if (!self.lfsr) & 0x01 == 1 {
+        if self.current_sample {
+            self.volume & 0x0F
+        } else {
+            0
+        }
+    }
+
+    /// PCM34 nibble resolved at the canonical CPU READ access cc (M7) via a
+    /// non-mutating shadow advance of the ripple counter, mirroring the
+    /// squares' `pcm_nibble_at`.
+    pub fn pcm_nibble_at(&self, read_cc: u32) -> u8 {
+        if !self.enabled {
+            return 0;
+        }
+        let mut sample = self.current_sample;
+        let cycles = read_cc.wrapping_sub(self.last_run_cc);
+        if cycles > 0
+            && cycles < 0x8000_0000
+            && (self.counter_active || self.background_active)
+            && self.dmg_delayed_start == 0
+        {
+            let mut divisor = ((self.nr43 & 0x07) as u32) << 2;
+            if divisor == 0 {
+                divisor = 2;
+            }
+            let mut countdown = self.counter_countdown;
+            if countdown == 0 {
+                countdown = divisor;
+            }
+            let mut counter = self.counter;
+            let mut lfsr = self.lfsr;
+            let mut cycles_left = cycles;
+            let mask = 1u16 << (self.nr43 >> 4);
+            let high_mask: u16 = if self.narrow { 0x4040 } else { 0x4000 };
+            while cycles_left >= countdown {
+                cycles_left -= countdown;
+                countdown = divisor;
+                let old_bit = counter & mask != 0;
+                counter = counter.wrapping_add(1) & 0x3FFF;
+                let new_bit = counter & mask != 0;
+                if new_bit && !old_bit {
+                    let new_high = (lfsr ^ (lfsr >> 1) ^ 1) & 1 != 0;
+                    lfsr >>= 1;
+                    if new_high {
+                        lfsr |= high_mask;
+                    } else {
+                        lfsr &= !high_mask;
+                    }
+                    sample = lfsr & 1 != 0;
+                }
+            }
+        }
+        if sample {
             self.volume & 0x0F
         } else {
             0
@@ -402,20 +660,27 @@ impl Addressable for Noise {
                         self.len_nr1_change(value);
                     }
                     NR42 => {
-                        self.nr42 = value;
-                        // channel4.cpp setNr2: a DAC-off envelope disables master.
-                        if self.get_envelope_initial_volume() == 0 && !self.get_envelope_direction() {
+                        self.advance();
+                        if value & 0xF8 == 0 {
+                            // DAC off (SameBoy NR42 case): a running channel
+                            // with a nonzero divisor gets a counter nudge and
+                            // stops the background counting.
+                            if self.enabled && self.nr43 & 0x07 != 0 {
+                                if self.counter_countdown <= 2 {
+                                    self.counter = self.counter.wrapping_add(1) & 0x3FFF;
+                                }
+                                self.background_active = false;
+                            }
                             self.enabled = false;
-                            self.lfsr_master = false;
+                            self.counter_active = false;
                         }
+                        self.nr42 = value;
                     }
                     NR43 => {
-                        // channel4.cpp setNr3 -> lfsr_.nr3Change(value, cc): catch
-                        // the register up at the OLD period, then re-anchor.
-                        self.lfsr_nr3_change(self.cc);
-                        self.nr43 = value;
+                        self.write_nr43(value);
                     }
                     NR44 => {
+                        self.advance();
                         self.write_nrx4(value);
                     }
                     _ => {}
