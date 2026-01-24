@@ -255,6 +255,16 @@ impl Audio {
         let nr4_ref = if (self.last_update & (self.cached_ds as u64)) != 0 { 0 } else { 1 };
         self.channel1.set_nr4_ref(nr4_ref);
         self.channel2.set_nr4_ref(nr4_ref);
+        // SameBoy `lf_div` (the 2 MHz sub-phase for the trigger delay). Derived
+        // from the free-running `cc` parity; the exact polarity is calibrated
+        // against channel_*_align/delay. Single speed the cc parity is constant
+        // at instruction boundaries (delay=5); double speed it toggles and the
+        // hardware phase runs inverted from the single-speed convention.
+        let lf_div = if self.cached_ds { cc & 1 } else { (cc & 1) ^ 1 };
+        self.channel1.set_lf_div(lf_div);
+        self.channel2.set_lf_div(lf_div);
+        self.channel1.set_ds(self.cached_ds);
+        self.channel2.set_ds(self.cached_ds);
         // The single counter — length cc is `cc` itself.
         let lcc = cc;
         self.channel1.set_len_cc(lcc);
