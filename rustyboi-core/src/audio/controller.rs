@@ -358,6 +358,7 @@ impl Audio {
         self.channel2.set_lf_div(lf_div);
         self.channel1.set_ds(self.cached_ds);
         self.channel2.set_ds(self.cached_ds);
+        self.channel4.set_ds(self.cached_ds);
         // The single counter — length cc is `cc` itself.
         let lcc = cc;
         self.channel1.set_len_cc(lcc);
@@ -545,12 +546,9 @@ impl Audio {
         self.channel3.set_len_cc(lcc);
         self.channel4.set_len_cc(lcc);
         self.fire_length_events(lcc);
-        // Resolve channel 4's LFSR register at the SAME precise per-access cc the
-        // length comparison uses (Gambatte `pcm34Read` -> `generateSamples(cc)`
-        // with the exact CPU read cc), rather than the per-dot `self.cc` which
-        // can lag the access by a sub-M-cycle. `delta` maps the master read cc
-        // into the channel's `cycleCounter_` units.
-        self.channel4.sync_lfsr_at(self.cc.wrapping_add(delta));
+        // Channel 4's PCM34 read resolves at the same per-access cc via the
+        // non-mutating shadow advance (`pcm_nibble_at`, keyed off
+        // `pcm_read_cc`).
         // Restore the steady-state length cc so the next per-dot `push_cc`
         // (which uses the un-overlaid `len_cc`) doesn't see a stale ahead value.
         let base = self.len_cc;
@@ -606,6 +604,7 @@ impl Audio {
     /// so the post-BIOS `cycleCounter_` high-bit constant is correct.
     pub fn set_boot_cgb(&mut self, cgb: bool) {
         self.boot_cgb = cgb;
+        self.channel4.set_cgb(cgb);
     }
 
     /// Seed the AGB flag into the wave channel (Gambatte channel3 agb_).
@@ -741,7 +740,14 @@ impl Audio {
         if !self.audio_enabled {
             return 0;
         }
-        self.channel3.pcm_nibble() | (self.channel4.pcm_nibble() << 4)
+        // Channel 4 resolves at the canonical per-access read cc (M7) like
+        // PCM12; channel 3's fetch counter was already advanced on the read
+        // path (`sync_wave_for_read`).
+        let ch4 = match self.pcm_read_cc {
+            Some(rcc) if pcm_access_cc() => self.channel4.pcm_nibble_at(rcc),
+            _ => self.channel4.pcm_nibble(),
+        };
+        self.channel3.pcm_nibble() | (ch4 << 4)
     }
 
     pub fn get_mixed_output(&self) -> (f32, f32) {
