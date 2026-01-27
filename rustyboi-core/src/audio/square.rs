@@ -171,6 +171,13 @@ pub struct SquareWave {
     // counter, `neg_` latch, and the cgb flag the nr4Init phase needs.
     #[serde(default = "disabled")]
     sweep_counter: u32,
+    // Deferred sweep overflow disable (SameBoy square_sweep_calculate_countdown):
+    // the post-event "second calculation" overflow check takes (NR10 & 7)
+    // 1 MHz cycles on hardware; the channel stays audible until it lands
+    // (SameSuite channel_1_sweep rows around the 128 Hz event pin the
+    // 2*(NR10&7) cc gap). Absolute-cc event; COUNTER_DISABLED when idle.
+    #[serde(default = "disabled")]
+    sweep_kill_counter: u32,
     #[serde(default)]
     sweep_neg: bool,
     #[serde(default)]
@@ -244,6 +251,7 @@ impl SquareWave {
             sweep_shadow_frequency: 0,
             fs_step: 0,
             sweep_counter: COUNTER_DISABLED,
+            sweep_kill_counter: COUNTER_DISABLED,
             sweep_neg: false,
             cgb: false,
             nr4_ref: 1,
@@ -345,6 +353,7 @@ impl SquareWave {
         self.did_tick = false;
         self.just_reloaded = false;
         self.last_pos_cc = self.cc;
+        self.sweep_kill_counter = COUNTER_DISABLED;
         // Envelope reset (SameBoy GB_apu_init memset).
         self.volume_countdown = 0;
         self.env_clock = false;
@@ -664,12 +673,37 @@ impl SquareWave {
         {
             self.sweep_event();
         }
+        // Deferred sweep overflow disable.
+        if self.channel1
+            && self.sweep_kill_counter != COUNTER_DISABLED
+            && self.cc >= self.sweep_kill_counter
+        {
+            self.sweep_kill_counter = COUNTER_DISABLED;
+            self.enabled = false;
+            self.master = false;
+        }
     }
 
     pub fn step_frame_sequencer(&mut self, _step: u8) {
         // Length is a cc-driven absolute expiry event (see `length_event`) and
         // the frequency sweep is now a cc-driven event polled in `step`, so
         // nothing is FS-clocked here.
+    }
+
+    /// `calcFreq` without the overflow disable: latches `neg_` only. Used by
+    /// the deferred second calculation (the disable lands later).
+    fn sweep_calc_freq_raw(&mut self) -> u16 {
+        let nr0 = self.nr10;
+        let shift = (nr0 & 0x07) as u16;
+        let freq = if nr0 & 0x08 != 0 {
+            self.sweep_shadow_frequency.wrapping_sub(self.sweep_shadow_frequency >> shift)
+        } else {
+            self.sweep_shadow_frequency.wrapping_add(self.sweep_shadow_frequency >> shift)
+        };
+        if nr0 & 0x08 != 0 {
+            self.sweep_neg = true;
+        }
+        freq
     }
 
     /// Gambatte `Channel1::SweepUnit::calcFreq`. Uses NR10 directly, latches
@@ -694,13 +728,22 @@ impl SquareWave {
 
     /// Gambatte `Channel1::SweepUnit::event`. Dispatched when `cc >= counter_`.
     fn sweep_event(&mut self) {
+        let event_cc = self.sweep_counter;
         let period = ((self.nr10 & 0x70) >> 4) as u32;
         if period != 0 {
             let freq = self.sweep_calc_freq();
             if freq & 2048 == 0 && (self.nr10 & 0x07) != 0 {
                 self.sweep_shadow_frequency = freq;
                 self.set_freq_at(freq, self.sweep_counter);
-                self.sweep_calc_freq();
+                // The second calculation ("overflow is checked after adding
+                // the sweep delta twice"): on hardware the check takes
+                // (NR10 & 7) 1 MHz cycles; defer the disable (SameBoy
+                // sweep_calculation_done via square_sweep_calculate_countdown).
+                let freq2 = self.sweep_calc_freq_raw();
+                if freq2 & 2048 != 0 {
+                    self.sweep_kill_counter =
+                        event_cc.wrapping_add(2 * (self.nr10 & 0x07) as u32);
+                }
             }
             self.sweep_counter = self.sweep_counter.wrapping_add(period << 14);
         } else {
@@ -709,17 +752,24 @@ impl SquareWave {
     }
 
     /// Gambatte `Channel1::SweepUnit::nr0Change`: a neg→non-neg transition after
-    /// a negative calc disables master.
+    /// a negative calc disables master. Writing a zero sweep shift pauses the
+    /// in-flight overflow calculation (SameBoy: "calculation is paused if the
+    /// lower bits are 0" — SameSuite channel_1_sweep_restart rounds 3/7: the
+    /// pending disable never lands).
     fn sweep_nr0_change(&mut self, new_nr0: u8) {
         if self.sweep_neg && (new_nr0 & 0x08) == 0 {
             self.enabled = false;
             self.master = false;
+        }
+        if new_nr0 & 0x07 == 0 {
+            self.sweep_kill_counter = COUNTER_DISABLED;
         }
     }
 
     /// Gambatte `Channel1::SweepUnit::nr4Init`. Schedules the absolute-cc sweep
     /// event counter at the trigger cc.
     fn sweep_nr4_init(&mut self) {
+        self.sweep_kill_counter = COUNTER_DISABLED;
         self.sweep_neg = false;
         self.sweep_shadow_frequency = self.freq();
         let period = ((self.nr10 & 0x70) >> 4) as u32;
@@ -734,7 +784,18 @@ impl SquareWave {
             self.sweep_counter = COUNTER_DISABLED;
         }
         if rsh != 0 {
-            self.sweep_calc_freq();
+            // Trigger-time overflow check ("if shift is nonzero, the check
+            // also occurs on trigger"): on hardware the calculation takes
+            // (NR10 & 7) 1 MHz cycles — the channel stays alive until it
+            // lands (SameSuite channel_1_sweep_restart rounds 2/6: NR52
+            // reads 1 for ~2*(NR10&7) cc after a restart into overflow).
+            let freq = self.sweep_calc_freq_raw();
+            if freq & 2048 != 0 {
+                // 2*(NR10&7) for the calculation plus 4 cc: SameBoy's
+                // trigger-path square_sweep_calculate_countdown_reload_timer
+                // of 2 (1 MHz) cycles before the countdown starts.
+                self.sweep_kill_counter = self.cc.wrapping_add(2 * rsh + 4);
+            }
         }
     }
 
