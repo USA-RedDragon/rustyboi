@@ -20,6 +20,19 @@ pub struct Noise {
     length_enabled: bool,
     fs_step: u8,
 
+    // --- Envelope (SameBoy div-anchored model, see square.rs) ---
+    #[serde(default)]
+    volume_countdown: u8,
+    #[serde(default)]
+    env_clock: bool,
+    #[serde(default)]
+    env_should_lock: bool,
+    #[serde(default)]
+    env_locked: bool,
+    // cc of the last NR44 trigger (frame-boundary race window, see square.rs).
+    #[serde(default = "len_disabled")]
+    env_trigger_cc: u32,
+
     // Free-running 2 MHz cycle counter (controller cc), pushed each sync;
     // drives the cc-based length expiry and the ripple-counter advance.
     #[serde(default)]
@@ -118,6 +131,11 @@ impl Noise {
             volume_timer: 0,
             length_enabled: false,
             fs_step: 0,
+            volume_countdown: 0,
+            env_clock: false,
+            env_should_lock: false,
+            env_locked: false,
+            env_trigger_cc: LEN_DISABLED,
             cc: 0,
             len_counter: LEN_DISABLED,
             len_cc: 0,
@@ -179,6 +197,10 @@ impl Noise {
         self.last_run_cc = self.cc;
         self.volume = 0;
         self.volume_timer = 0;
+        self.volume_countdown = 0;
+        self.env_clock = false;
+        self.env_should_lock = false;
+        self.env_locked = false;
         self.enabled = false;
     }
 
@@ -249,31 +271,115 @@ impl Noise {
         self.last_run_cc = self.last_run_cc.wrapping_sub(delta);
     }
 
-    pub fn step_frame_sequencer(&mut self, step: u8) {
-        if !self.enabled {
+    pub fn step_frame_sequencer(&mut self, _step: u8) {
+        // Length is a cc-driven absolute expiry event (see `length_event`);
+        // the envelope is DIV-APU-event driven (env_div_tick /
+        // env_secondary_reload, dispatched by the controller).
+    }
+
+    // --- Envelope (SameBoy div-anchored model; see square.rs for the
+    // sibling implementation and event cadence) ---
+
+    fn is_active(&self) -> bool {
+        self.enabled
+    }
+
+    fn set_env_clock(&mut self, value: bool, direction: bool, volume: u8) {
+        if self.env_clock == value {
             return;
         }
-        // Length is a cc-driven absolute expiry event (see `length_event`).
-        // Volume envelope (step 7)
-        if step == 7 {
-            self.step_volume_envelope();
+        if value {
+            self.env_clock = true;
+            self.env_should_lock =
+                (volume == 0xF && direction) || (volume == 0x0 && !direction);
+        } else {
+            self.env_clock = false;
+            self.env_locked |= self.env_should_lock;
         }
     }
 
-    fn step_volume_envelope(&mut self) {
-        if self.volume_timer > 0 {
-            self.volume_timer -= 1;
-            if self.volume_timer == 0 {
-                let envelope_period = self.get_envelope_period();
-                if envelope_period > 0 {
-                    self.volume_timer = envelope_period;
-                    if self.volume_direction && self.volume < 15 {
-                        self.volume += 1;
-                    } else if !self.volume_direction && self.volume > 0 {
-                        self.volume -= 1;
-                    }
+    /// SameBoy `_nrx2_glitch` ("zombie mode") for NR42.
+    fn nrx2_glitch_step(&mut self, value: u8, old: u8) {
+        if self.env_clock {
+            self.volume_countdown = value & 7;
+        }
+        let mut should_tick = (value & 7) != 0 && (old & 7) == 0 && !self.env_locked;
+        let should_invert = ((value & 8) ^ (old & 8)) != 0;
+
+        if (value & 0xF) == 8 && (old & 0xF) == 8 && !self.env_locked {
+            should_tick = true;
+        }
+
+        if should_invert {
+            if value & 8 != 0 {
+                if (old & 7) == 0 && !self.env_locked {
+                    self.volume ^= 0xF;
+                } else {
+                    self.volume = 0xEu8.wrapping_sub(self.volume) & 0xF;
                 }
+                should_tick = false;
+            } else {
+                self.volume = 0x10u8.wrapping_sub(self.volume) & 0xF;
             }
+        }
+        if should_tick {
+            if value & 8 != 0 {
+                self.volume = self.volume.wrapping_add(1) & 0xF;
+            } else {
+                self.volume = self.volume.wrapping_sub(1) & 0xF;
+            }
+        } else if (value & 7) == 0 && self.env_clock {
+            self.set_env_clock(false, false, 0);
+        }
+    }
+
+    fn nrx2_glitch(&mut self, value: u8, old: u8) {
+        if self.cgb {
+            self.nrx2_glitch_step(value, old);
+        } else {
+            self.nrx2_glitch_step(0xFF, old);
+            self.nrx2_glitch_step(value, 0xFF);
+        }
+    }
+
+    /// DIV-APU event leg (div_divider & 7 == 7, 64 Hz). A trigger 2 cc or
+    /// less before the boundary escapes this decrement (see square.rs).
+    pub fn env_frame_countdown(&mut self, event_cc: u32) {
+        if event_cc.wrapping_sub(self.env_trigger_cc) <= 2 {
+            return;
+        }
+        if !self.env_clock {
+            self.volume_countdown = self.volume_countdown.wrapping_sub(1) & 7;
+        }
+    }
+
+    /// DIV-APU secondary event (rising edge, 512 Hz).
+    pub fn env_secondary_reload(&mut self) {
+        if self.is_active() && self.volume_countdown == 0 {
+            let nr2 = self.nr42;
+            self.volume_countdown = nr2 & 7;
+            let vol = self.volume;
+            self.set_env_clock(self.volume_countdown != 0, nr2 & 8 != 0, vol);
+        }
+    }
+
+    /// DIV-APU event: consume an armed tick (SameBoy `tick_noise_envelope`).
+    pub fn env_div_tick(&mut self) {
+        if !self.env_clock {
+            return;
+        }
+        self.set_env_clock(false, false, 0);
+        if self.env_locked {
+            return;
+        }
+        let nr2 = self.nr42;
+        if nr2 & 7 == 0 {
+            return;
+        }
+        if nr2 & 8 != 0 {
+            self.volume = self.volume.wrapping_add(1) & 0xF;
+        } else {
+            self.volume = self.volume.wrapping_sub(1) & 0xF;
         }
     }
 
@@ -492,6 +598,11 @@ impl Noise {
         let dac_off =
             self.get_envelope_initial_volume() == 0 && !self.get_envelope_direction();
 
+        // SameBoy NR44 trigger: the envelope clock unlock/disarm happens
+        // unconditionally (before the DMG delayed-start deferral).
+        self.env_locked = false;
+        self.env_clock = false;
+
         // DMG-only: an unaligned trigger is deferred 6 cycles (SameBoy
         // `dmg_delayed_start`); the whole start runs at the crossing.
         if !self.cgb && (self.alignment & 3) != 0 && self.dmg_delayed_start == 0 {
@@ -503,10 +614,12 @@ impl Noise {
         self.prepare_noise_start();
         self.current_sample = false;
 
-        // Volume envelope init.
+        // Volume envelope init (SameBoy: reload volume + countdown from NR42).
         self.volume = self.get_envelope_initial_volume();
         self.volume_direction = self.get_envelope_direction();
         self.volume_timer = self.get_envelope_period();
+        self.volume_countdown = self.nr42 & 7;
+        self.env_trigger_cc = self.cc;
 
         self.did_step_counter = (self.alignment & 3) == 2;
 
@@ -673,6 +786,11 @@ impl Addressable for Noise {
                             }
                             self.enabled = false;
                             self.counter_active = false;
+                        } else if self.is_active() {
+                            // SameBoy: NR42 write on a playing channel applies
+                            // the zombie-mode volume transform.
+                            let old = self.nr42;
+                            self.nrx2_glitch(value, old);
                         }
                         self.nr42 = value;
                     }

@@ -123,9 +123,24 @@ pub struct SquareWave {
     #[serde(skip)]
     log_ticks: u8,
 
-    // --- Envelope unit ---
+    // --- Envelope unit (SameBoy div-anchored model, Core/apu.c) ---
+    // `volume_countdown`: decremented (mod 8) on every 8th DIV-APU event
+    // (div_divider & 7 == 7) while no tick is pending; reloaded from NRx2 & 7
+    // at trigger and at the secondary (rising-edge) event when it hits 0.
+    #[serde(default)]
+    volume_countdown: u8,
+    // SameBoy `GB_envelope_clock_t`: `clock` = a tick is armed (set at the
+    // secondary event, consumed at the next DIV-APU event); `locked` = the
+    // envelope hit its rail (0/F) and stays frozen until the next trigger.
+    #[serde(default)]
+    env_clock: bool,
+    #[serde(default)]
+    env_should_lock: bool,
+    #[serde(default)]
+    env_locked: bool,
+    // cc of the last NRx4 trigger (for the frame-boundary race window).
     #[serde(default = "disabled")]
-    env_counter: u32,
+    env_trigger_cc: u32,
     #[serde(default)]
     volume: u8,
     // The DAC/master enable: false once the DAC is off (NRx2 high nibble 0 and
@@ -215,7 +230,11 @@ impl SquareWave {
             log_ticks: 0,
             lf_div: 1,
             ds: false,
-            env_counter: COUNTER_DISABLED,
+            volume_countdown: 0,
+            env_clock: false,
+            env_should_lock: false,
+            env_locked: false,
+            env_trigger_cc: COUNTER_DISABLED,
             volume: 0,
             master: false,
             length_counter: 0,
@@ -326,8 +345,11 @@ impl SquareWave {
         self.did_tick = false;
         self.just_reloaded = false;
         self.last_pos_cc = self.cc;
-        // EnvelopeUnit::reset
-        self.env_counter = COUNTER_DISABLED;
+        // Envelope reset (SameBoy GB_apu_init memset).
+        self.volume_countdown = 0;
+        self.env_clock = false;
+        self.env_should_lock = false;
+        self.env_locked = false;
     }
 
     fn freq(&self) -> u16 {
@@ -434,114 +456,146 @@ impl SquareWave {
         }
     }
 
-    // --- Envelope unit ---
+    // --- Envelope unit (SameBoy div-anchored model) ---
 
-    fn env_event(&mut self) {
-        let period = (self.nr2() & 0x07) as u32;
-        if period != 0 {
-            let inc = (self.nr2() & 0x08) != 0;
-            let new_vol = if inc { self.volume as i16 + 1 } else { self.volume as i16 - 1 };
-            if (0..0x10).contains(&new_vol) {
-                self.volume = new_vol as u8;
-                self.env_counter = self.env_counter.wrapping_add(period << 15);
-            } else {
-                self.env_counter = COUNTER_DISABLED;
-            }
+    /// SameBoy `is_active[i]`: the channel is playing (triggered with the DAC
+    /// on, not yet stopped by length expiry or DAC-off).
+    fn is_active(&self) -> bool {
+        self.enabled && self.master
+    }
+
+    /// SameBoy `set_envelope_clock`.
+    fn set_env_clock(&mut self, value: bool, direction: bool, volume: u8) {
+        if self.env_clock == value {
+            return;
+        }
+        if value {
+            self.env_clock = true;
+            self.env_should_lock =
+                (volume == 0xF && direction) || (volume == 0x0 && !direction);
         } else {
-            self.env_counter = self.env_counter.wrapping_add(8u32 << 15);
+            self.env_clock = false;
+            self.env_locked |= self.env_should_lock;
         }
     }
 
-    /// Gambatte `EnvelopeUnit::nr4Init`. Returns true if the DAC is off.
-    fn env_nr4_init(&mut self) -> bool {
-        let nr2 = self.nr2();
-        let mut period = if nr2 & 0x07 != 0 { (nr2 & 0x07) as u32 } else { 8 };
-        if (self.cc.wrapping_add(2) & 0x7000) == 0x0000 {
-            period += 1;
+    /// SameBoy `_nrx2_glitch` ("zombie mode"): the volume transform an NRx2
+    /// write applies to a playing channel.
+    fn nrx2_glitch_step(&mut self, value: u8, old: u8) {
+        if self.env_clock {
+            self.volume_countdown = value & 7;
         }
-        self.env_counter = self.cc
-            .wrapping_sub(self.cc.wrapping_sub(0x1000) & 0x7FFF)
-            .wrapping_add(period * 0x8000);
-        self.volume = nr2 >> 4;
-        (nr2 & 0xF8) == 0
+        let mut should_tick = (value & 7) != 0 && (old & 7) == 0 && !self.env_locked;
+        let should_invert = ((value & 8) ^ (old & 8)) != 0;
+
+        if (value & 0xF) == 8 && (old & 0xF) == 8 && !self.env_locked {
+            should_tick = true;
+        }
+
+        if should_invert {
+            if value & 8 != 0 {
+                if (old & 7) == 0 && !self.env_locked {
+                    self.volume ^= 0xF;
+                } else {
+                    self.volume = 0xEu8.wrapping_sub(self.volume) & 0xF;
+                }
+                should_tick = false;
+            } else {
+                self.volume = 0x10u8.wrapping_sub(self.volume) & 0xF;
+            }
+        }
+        if should_tick {
+            if value & 8 != 0 {
+                self.volume = self.volume.wrapping_add(1) & 0xF;
+            } else {
+                self.volume = self.volume.wrapping_sub(1) & 0xF;
+            }
+        } else if (value & 7) == 0 && self.env_clock {
+            self.set_env_clock(false, false, 0);
+        }
+    }
+
+    /// SameBoy `nrx2_glitch`: CGB-D/E apply the transform once; older
+    /// revisions (and DMG) pass through an FF intermediate value, applying it
+    /// twice. rustyboi's CGB target follows the SameSuite-calibrated D/E
+    /// behavior; DMG takes the pre-CGB double application.
+    fn nrx2_glitch(&mut self, value: u8, old: u8) {
+        if self.cgb {
+            self.nrx2_glitch_step(value, old);
+        } else {
+            self.nrx2_glitch_step(0xFF, old);
+            self.nrx2_glitch_step(value, 0xFF);
+        }
+    }
+
+    /// DIV-APU event leg (div_divider & 7 == 7, 64 Hz): the envelope frame
+    /// countdown decrements (mod 8) while no tick is armed. A trigger 2 cc or
+    /// less before the boundary shares the event's hardware M-cycle: the
+    /// fresh countdown escapes this decrement (see controller fs_div_event_at).
+    pub fn env_frame_countdown(&mut self, event_cc: u32) {
+        if event_cc.wrapping_sub(self.env_trigger_cc) <= 2 {
+            return;
+        }
+        if !self.env_clock {
+            self.volume_countdown = self.volume_countdown.wrapping_sub(1) & 7;
+        }
+    }
+
+    /// DIV-APU secondary event (rising edge, 512 Hz): a zero countdown on an
+    /// active channel reloads from NRx2 and arms the tick for the next event.
+    pub fn env_secondary_reload(&mut self) {
+        if self.is_active() && self.volume_countdown == 0 {
+            let nr2 = self.nr2();
+            self.volume_countdown = nr2 & 7;
+            let vol = self.volume;
+            self.set_env_clock(self.volume_countdown != 0, nr2 & 8 != 0, vol);
+        }
+    }
+
+    /// DIV-APU event: consume an armed tick (SameBoy `tick_square_envelope`).
+    pub fn env_div_tick(&mut self) {
+        if !self.env_clock {
+            return;
+        }
+        self.set_env_clock(false, false, 0);
+        if self.env_locked {
+            return;
+        }
+        let nr2 = self.nr2();
+        if nr2 & 7 == 0 {
+            return;
+        }
+        if nr2 & 8 != 0 {
+            self.volume = self.volume.wrapping_add(1) & 0xF;
+        } else {
+            self.volume = self.volume.wrapping_sub(1) & 0xF;
+        }
     }
 
     fn write_nrx2(&mut self, value: u8) {
-        // Gambatte `EnvelopeUnit::nr2Change` (DMG zombie mode), only when master.
         let old = self.nr2();
-        if self.master {
-            let will_clock = self.env_will_clock();
-            if will_clock {
-                let period = (old & 0x07) as u32;
-                self.env_counter = self.cc
-                    .wrapping_sub(self.cc.wrapping_sub(0x1000) & 0x7FFF)
-                    .wrapping_add(period * 0x8000);
+        if (value & 0xF8) == 0 {
+            // DAC off disables the channel.
+            if self.channel1 {
+                self.nr12 = value;
+            } else {
+                self.nr22 = value;
             }
-
-            let mut tick = (value & 0x07) != 0
-                && (old & 0x07) == 0
-                && self.env_counter != COUNTER_DISABLED;
-            let invert = ((value & 0x08) ^ (old & 0x08)) != 0;
-
-            if (value & 0x0F) == 0x08
-                && (old & 0x0F) == 0x08
-                && self.env_counter != COUNTER_DISABLED
-            {
-                tick = true;
-            }
-
-            if invert {
-                if value & 0x08 != 0 {
-                    if (old & 0x07) == 0 && self.env_counter != COUNTER_DISABLED {
-                        self.volume ^= 0xF;
-                    } else {
-                        self.volume = (0xE_i16 - self.volume as i16) as u8 & 0xF;
-                    }
-                    tick = false;
-                } else {
-                    self.volume = (0x10_i16 - self.volume as i16) as u8 & 0xF;
-                }
-            }
-
-            if tick {
-                if value & 0x08 != 0 {
-                    self.volume = self.volume.wrapping_add(1);
-                } else {
-                    self.volume = self.volume.wrapping_sub(1);
-                }
-                self.volume &= 0xF;
-            } else if (value & 0x07) == 0 && will_clock {
-                if invert {
-                    if self.volume == (if value & 0x08 != 0 { 0xE } else { 0x1 }) {
-                        self.env_counter = COUNTER_DISABLED;
-                    }
-                } else if self.volume == (if value & 0x08 != 0 { 0xF } else { 0x0 }) {
-                    self.env_counter = COUNTER_DISABLED;
-                }
-            }
+            self.master = false;
+            self.enabled = false;
+            return;
         }
-
+        if self.is_active() {
+            // SameBoy NRx2 write on a playing channel: the zombie-mode volume
+            // transform. The envelope countdown itself continues undisturbed
+            // (no reschedule) — ticks stay anchored to the DIV-APU events.
+            self.nrx2_glitch(value, old);
+        }
         if self.channel1 {
             self.nr12 = value;
         } else {
             self.nr22 = value;
         }
-
-        // DAC off disables the channel (master).
-        if (value & 0xF8) == 0 {
-            self.master = false;
-            self.enabled = false;
-        }
-    }
-
-    /// Will the envelope clock on the FS step that NRx2 writes coincide with?
-    /// In Gambatte this is `EnvelopeUnit::clock(cc)`; the envelope event fires on
-    /// FS step 7, i.e. when `(cc >> 12) & 7` rounds into that frame region.
-    fn env_will_clock(&self) -> bool {
-        // Gambatte's clock_ flag is set when the unit is in the active phase. We
-        // approximate via the counter being live; the precise zombie sub-cases
-        // are handled by the volume math above.
-        self.env_counter != COUNTER_DISABLED
     }
 
     // --- Length counter (Gambatte length_counter.cpp, cc-driven) ---
@@ -599,10 +653,8 @@ impl SquareWave {
             return;
         }
 
-        // Envelope event(s).
-        while self.env_counter != COUNTER_DISABLED && self.cc >= self.env_counter {
-            self.env_event();
-        }
+        // The envelope is DIV-APU-event driven (see env_div_tick /
+        // env_secondary_reload, dispatched by the controller).
 
         // Frequency sweep event(s) (Channel 1 only) — cc-driven, like Gambatte's
         // SweepUnit (channel1.cpp). Polled here, not FS-clocked.
@@ -793,8 +845,15 @@ impl SquareWave {
         // the register write) so the countdown/index reflect the exact trigger cc.
         self.update_pos();
 
-        // Envelope: nr4Init sets volume + counter; master = DAC on.
-        let dac_off = self.env_nr4_init();
+        // Envelope trigger init (SameBoy NRx4 bit 7): unlock, disarm, reload
+        // volume + countdown from NRx2. master = DAC on.
+        let nr2 = self.nr2();
+        self.env_locked = false;
+        self.env_clock = false;
+        self.volume = nr2 >> 4;
+        self.volume_countdown = nr2 & 7;
+        self.env_trigger_cc = self.cc;
+        let dac_off = (nr2 & 0xF8) == 0;
 
         // Duty period from the (possibly just-written) frequency.
         self.period = to_period(self.freq());
@@ -860,6 +919,14 @@ impl SquareWave {
             } else {
                 self.lf_div
             };
+            // REVISION NOTE: this is the cgb04c (CPU-CGB-C) placement, pinned
+            // by the gambatte DS/speedchange pos6->pos7 brackets together with
+            // the controller's DS power-on lf seed 0. CPU-CGB-E hardware
+            // (SameSuite channel_*_align/align_cpu, DS power-on sweeps) wants
+            // SameBoy's literal D/E pair instead: seed 1 with DS
+            // `6 - 2*was_active - lf` (the two demands differ by 2 cells at
+            // odd power-on->trigger parity — a real revision divergence,
+            // SameBoy models it as `6 + lf * (model < CGB_D && ds ? 1 : -1)`).
             5 - 2 * (was_active as u32) - phase
         };
         self.sample_countdown = (sl ^ 0x7FF) * 2 + self.delay;
@@ -929,7 +996,10 @@ impl SquareWave {
     /// current duty high-state times the envelope volume.
     ///
     pub fn pcm_nibble(&self) -> u8 {
-        if !self.master || self.sample_surpressed {
+        // A length-expired channel (enabled=false, SameBoy is_active=false)
+        // reports 0 — the digital sample stops with the channel, even though
+        // the DAC (master) state survives (SameSuite channel_*_stop_div).
+        if !self.is_active() || self.sample_surpressed {
             return 0;
         }
         if self.high {
@@ -945,7 +1015,7 @@ impl SquareWave {
     /// countdown from the per-dot state to `read_cc` without mutating the
     /// channel (the read must not disturb the real per-dot stream).
     pub fn pcm_nibble_at(&self, read_cc: u32) -> u8 {
-        if !self.master {
+        if !self.is_active() {
             return 0;
         }
         let mut high = self.high;
