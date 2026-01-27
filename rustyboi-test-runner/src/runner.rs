@@ -625,6 +625,21 @@ fn evaluate_mooneye(gb: &mut GB, marker: u8) -> Result<(), String> {
     if !run_until_ldbb(gb, 250_000_000, marker) {
         return Err("no done-marker (timeout)".to_string());
     }
+    // Diagnostic: SameSuite tests store per-subtest results at $C000 before
+    // comparing against their embedded CorrectResults table. RB_SS_DUMP=N
+    // dumps N rows of 8 bytes so a failure pinpoints WHICH subtest diverged.
+    if let Some(rows) = std::env::var("RB_SS_DUMP")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+    {
+        for row in 0..rows {
+            let base = 0xC000u16 + row * 8;
+            let bytes: Vec<String> = (0..8)
+                .map(|i| format!("{:02X}", gb.read_memory(base + i)))
+                .collect();
+            eprintln!("SS_DUMP {base:04X}: {}", bytes.join(" "));
+        }
+    }
     let r = gb.get_cpu_registers();
     if r.b == 3 && r.c == 5 && r.d == 8 && r.e == 13 && r.h == 21 && r.l == 34 {
         Ok(())
