@@ -692,6 +692,26 @@ pub struct Ppu {
     // break target without the FIFO-warmup latency over-reading later writes.
     #[serde(default)]
     m3_arm_dot: u128,
+    // DMG window-startup fetch phase anchor: the trigger dot of a mid-line
+    // window start. Hardware restarts the fetcher ON the trigger dot
+    // (TileNumber dots t..t+1, data-low t+2..t+3, data-high t+4..t+5, push at
+    // t+6), so the first window pixel pops exactly 6 dots after the trigger
+    // regardless of the global fetch parity (mealybug m3_window_timing: the
+    // BGP-boundary column shows a flat 6-dot startup for every WX). While set,
+    // the fetch cadence is (ticks - anchor) % 2 == 0 instead of ticks % 2 == 0;
+    // cleared at the first window tile's PushToFIFO (the FIFO's 8-pixel slack
+    // absorbs the re-sync to global parity). DMG-only; CGB keeps its decoupled
+    // fetcher_cadence_tick.
+    #[serde(default)]
+    win_fetch_anchor: Option<u128>,
+    // One-shot latch for the DMG WX=0 + SCX&7>0 window-activation quirk: the
+    // window activates one T-cycle later than the plain x==0 start (mealybug
+    // m3_window_timing_wx_0: the BGP-boundary column is one dot short on every
+    // SCX&7 != 0 row). Set on the would-be trigger dot (which becomes a dead
+    // dot: no pop, no activation); the trigger then fires on the next dot.
+    // Reset at M3 arm.
+    #[serde(default)]
+    win_wx0_delayed: bool,
     // scx%8 sampled at M3 arm, used by the closed-form mode-0 schedule's
     // discard prefix. If the live f1 break resolves to a different count, the
     // schedule is nudged by the difference so M3 ends at the right dot.
@@ -1160,6 +1180,8 @@ impl Ppu {
             m3_discard_target: -1,
             m3_arm_scx_full: -1,
             m3_arm_dot: 0,
+            win_fetch_anchor: None,
+            win_wx0_delayed: false,
             m3_arm_scx: 0,
             m3_scheduled_wx: 0,
             m3_scheduled_win: false,
@@ -4301,6 +4323,8 @@ impl Ppu {
                     self.m3_last_sprite_commit_tick = 0;
                     self.sprite_fetch_stall = 0;
                     self.fetcher_cadence_tick = 0;
+                    self.win_fetch_anchor = None;
+                    self.win_wx0_delayed = false;
                     // CGB arms two dots later, so use a shorter warmup to keep the first visible pixel aligned.
                     self.pixel_transfer_warmup = if is_cgb {
                         CGB_PIXEL_TRANSFER_WARMUP
@@ -5014,6 +5038,10 @@ impl Ppu {
                     let even = self.fetcher_cadence_tick % 2 == 0;
                     self.fetcher_cadence_tick = self.fetcher_cadence_tick.wrapping_add(1);
                     even
+                } else if let Some(anchor) = self.win_fetch_anchor {
+                    // Window-startup fetch: phase-locked to the trigger dot so
+                    // the first window pixel pops exactly 6 dots after it.
+                    self.ticks.wrapping_sub(anchor).is_multiple_of(2)
                 } else {
                     self.ticks.is_multiple_of(2)
                 };
@@ -5031,6 +5059,13 @@ impl Ppu {
                     && let Some(event) = self.fetcher.step(mmio, self.win_y_pos, fetcher_lcdc_state, self.x, pending_discard, self.scy_delayed, self.scx_delayed) {
                         if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::TileNumber) {
                             self.subcc_last_tn_cc = self.abs_cc;
+                        }
+                        // First window tile pushed: startup complete, re-sync the
+                        // fetch cadence to global parity.
+                        if self.win_fetch_anchor.is_some()
+                            && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
+                        {
+                            self.win_fetch_anchor = None;
                         }
                         // sub-cc column lever: a BG tile whose column was committed
                         // at TileNumber under the OLD scx, but whose pixels are
@@ -5282,6 +5317,23 @@ impl Ppu {
                             self.x + 7 == wx
                         };
 
+                    // DMG WX=0 + SCX&7>0 quirk: the window activates one T-cycle
+                    // later (mealybug m3_window_timing_wx_0). The would-be trigger
+                    // dot is dead (no pop, no activation); trigger next dot.
+                    if should_start_window
+                        && !is_cgb
+                        && wx == 0
+                        && !self.win_wx0_delayed
+                        && (if self.m3_discard_target >= 0 {
+                            self.m3_discard_target as u8
+                        } else {
+                            mmio.read(SCX) & 0x07
+                        }) != 0
+                    {
+                        self.win_wx0_delayed = true;
+                        break 'label;
+                    }
+
                     if should_start_window {
                         // Window draw-start: Gambatte increments winYPos here
                         // (M3Start::f0 / plotPixel win_draw_start), once per line
@@ -5291,6 +5343,33 @@ impl Ppu {
                         // Start window rendering
                         self.fetcher.start_window(self.x);
                         self.window_started_this_line = true;
+                        // DMG: hardware restarts the fetcher ON the trigger dot
+                        // (TileNumber now; low/high/push at t+2/t+4/t+6), so the
+                        // first window pixel pops exactly 6 dots after the
+                        // trigger regardless of the global fetch parity. Run the
+                        // TileNumber substep immediately and phase-lock the rest
+                        // of the startup to this dot (see win_fetch_anchor).
+                        if !is_cgb {
+                            let fls = self.fetcher_lcdc_state();
+                            if let Some(event) = self.fetcher.step(
+                                mmio,
+                                self.win_y_pos,
+                                fls,
+                                self.x,
+                                0,
+                                self.scy_delayed,
+                                self.scx_delayed,
+                            ) {
+                                if matches!(
+                                    event.kind,
+                                    crate::ppu::fetcher::FetcherDebugEventKind::TileNumber
+                                ) {
+                                    self.subcc_last_tn_cc = self.abs_cc;
+                                }
+                                self.record_fetch_debug_event(event, mmio);
+                            }
+                            self.win_fetch_anchor = Some(self.ticks);
+                        }
                         // The post-window sprite group restarts the BG-tile grid
                         // (Gambatte resets prevSpriteTileNo to tileno_none after
                         // the window split), so the first post-window sprite in a
