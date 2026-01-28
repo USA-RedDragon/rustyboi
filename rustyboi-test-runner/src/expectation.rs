@@ -389,6 +389,9 @@ fn parse_revision(token: &str) -> Option<Hardware> {
         "sgb2" => Some(Hardware::SGB2),
         "cgb0" => Some(Hardware::CGB0),
         "cgb" => Some(Hardware::CGB),
+        // CPU-CGB-D/E APU revision (SameSuite's validation silicon); boot
+        // state == CGB, differs only in the C-vs-D/E APU gates.
+        "cgbe" => Some(Hardware::CGBE),
         "agb" => Some(Hardware::AGB),
         _ => None,
     }
