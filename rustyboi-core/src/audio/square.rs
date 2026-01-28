@@ -119,6 +119,10 @@ pub struct SquareWave {
     // CGB double-speed flag (SameBoy `cgb_double_speed`), pushed by the controller.
     #[serde(default)]
     ds: bool,
+    // CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`): selects the
+    // D/E double-speed trigger-delay placement (see the nr4 trigger below).
+    #[serde(default)]
+    cgb_de: bool,
     // Diagnostic (RB_APU_TRIG_LOG): remaining post-trigger duty ticks to log.
     #[serde(skip)]
     log_ticks: u8,
@@ -237,6 +241,7 @@ impl SquareWave {
             log_ticks: 0,
             lf_div: 1,
             ds: false,
+            cgb_de: false,
             volume_countdown: 0,
             env_clock: false,
             env_should_lock: false,
@@ -274,6 +279,11 @@ impl SquareWave {
     /// SameBoy `cgb_double_speed`.
     pub fn set_ds(&mut self, ds: bool) {
         self.ds = ds;
+    }
+
+    /// CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`).
+    pub fn set_cgb_de(&mut self, de: bool) {
+        self.cgb_de = de;
     }
 
 
@@ -980,15 +990,21 @@ impl SquareWave {
             } else {
                 self.lf_div
             };
-            // REVISION NOTE: this is the cgb04c (CPU-CGB-C) placement, pinned
-            // by the gambatte DS/speedchange pos6->pos7 brackets together with
-            // the controller's DS power-on lf seed 0. CPU-CGB-E hardware
-            // (SameSuite channel_*_align/align_cpu, DS power-on sweeps) wants
-            // SameBoy's literal D/E pair instead: seed 1 with DS
-            // `6 - 2*was_active - lf` (the two demands differ by 2 cells at
-            // odd power-on->trigger parity — a real revision divergence,
-            // SameBoy models it as `6 + lf * (model < CGB_D && ds ? 1 : -1)`).
-            5 - 2 * (was_active as u32) - phase
+            // REVISION FORK (SameBoy `6 + lf * (model < CGB_D && ds ? 1 : -1)`):
+            // the default `5 - 2a - phase` is the cgb04c (CPU-CGB-C) placement,
+            // pinned by the gambatte DS/speedchange pos6->pos7 brackets
+            // together with the controller's DS power-on lf seed 0. CPU-CGB-
+            // D/E silicon (SameSuite channel_*_align/align_cpu, DS power-on
+            // sweeps) takes SameBoy's literal pair instead: seed 1 always with
+            // DS `6 - 2*was_active - lf` — the two demands differ by 2 cells
+            // at odd power-on->trigger parity, a real revision divergence with
+            // no shared value. `cgb_de` (Hardware::CGBE) selects the D/E side;
+            // single speed is revision-independent.
+            if self.cgb_de && self.ds {
+                6 - 2 * (was_active as u32) - phase
+            } else {
+                5 - 2 * (was_active as u32) - phase
+            }
         };
         self.sample_countdown = (sl ^ 0x7FF) * 2 + self.delay;
 

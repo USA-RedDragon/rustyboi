@@ -116,6 +116,10 @@ pub struct Audio {
     // with div_divider pre-set to 1. 0=inactive, 1=skipped, 2=skip.
     #[serde(default)]
     skip_div_event: u8,
+    // CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`), set once
+    // from Hardware::CGBE. false = the default cgb04c (CPU-CGB-C) model.
+    #[serde(default)]
+    cgb_de: bool,
 }
 
 fn default_ctl_lf_div() -> u32 {
@@ -206,6 +210,7 @@ impl Audio {
             pcm_read_cc: None,
             div_divider: 0,
             skip_div_event: 0,
+            cgb_de: false,
         }
     }
 
@@ -539,17 +544,18 @@ impl Audio {
         // speed. Measured: the SS seed carries the SameSuite channel_*_align/
         // duty/delay set; the DS seed is pinned by the gambatte cgb04c
         // ch1_duty0_pos6_to_pos7_timing_ds ladder (write-capture brackets).
-        // NOTE: SameSuite's DS align tests (CPU-CGB-E hardware) want the
-        // SameBoy-literal pair (seed 1, DS delay 6-2a-lf) instead — a REAL
-        // C-vs-E revision divergence (SameBoy's square delay is
-        // `6 + lf * (model < CGB_D && ds ? 1 : -1)`). The default CGB model
-        // is cgb04c (C): the gambatte DS brackets are the hard gate.
+        // REVISION FORK: the DS seed 0 is the cgb04c (CPU-CGB-C) placement,
+        // one half of the C pair (with the square DS delay 5-2a-lf). CPU-CGB-
+        // D/E silicon (SameSuite's DS align tests) takes the SameBoy-literal
+        // pair instead: seed 1 always, DS delay 6-2a-lf (SameBoy's square
+        // delay is `6 + lf * (model < CGB_D && ds ? 1 : -1)`). Both are real
+        // hardware; `cgb_de` (Hardware::CGBE) selects the D/E side.
         self.lf_div = match psgreset_lfdiv_mode() {
             0 => 0,
             2 => (self.cc & 1) ^ 1,
             3 => 1,
             _ => {
-                if self.cached_ds { 0 } else { 1 }
+                if self.cached_ds && !self.cgb_de { 0 } else { 1 }
             }
         };
         // SameBoy GB_apu_init power-on DIV-APU glitch: enabling the APU while
@@ -744,6 +750,17 @@ impl Audio {
     pub fn set_boot_cgb(&mut self, cgb: bool) {
         self.boot_cgb = cgb;
         self.channel4.set_cgb(cgb);
+    }
+
+    /// Seed the CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`)
+    /// into the revision-forked units: the square duty-trigger DS delay pair
+    /// (psg_reset lf seed + DS delay formula) and the ch4 divisor-0 DS
+    /// countdown. Called once from `GB::new` for Hardware::CGBE.
+    pub fn set_cgb_de(&mut self, de: bool) {
+        self.cgb_de = de;
+        self.channel1.set_cgb_de(de);
+        self.channel2.set_cgb_de(de);
+        self.channel4.set_cgb_de(de);
     }
 
     /// Seed the AGB flag into the wave channel (Gambatte channel3 agb_).
