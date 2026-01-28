@@ -531,9 +531,11 @@ impl Noise {
             } else if divisor == 1 && self.enabled && (self.nr43 & 0xF0) == 0 {
                 countdown -= 4;
             }
-        } else if self.ds {
-            countdown += 2; // <= CGB_C in double speed
         }
+        // divisor 0, even alignment, double speed: SameBoy adds 2 here for
+        // model <= CGB_C; CGB-D/E hardware does not (SameSuite channel_4_align
+        // \2-even rows pin the shorter countdown; no gambatte cgb04c test
+        // reaches this path, so the E behavior carries no conflict).
 
         // Background counting glitches.
         if divisor > 1 {
