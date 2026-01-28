@@ -1954,6 +1954,34 @@ impl Mmio {
     /// Bus-supplied decision for the NEXT FF55 disable write: `Some(true)` => the
     /// m0 edge has already fired so the block must still run (do not cancel),
     /// `Some(false)`/`None` => cancel as before. Set just before the write.
+    /// PPU-view OAM read: the raw OAM array, including bytes an in-flight
+    /// OAM-DMA has already written (the CPU view returns 0xFF for the whole DMA
+    /// window). Used by the sprite-list build for ghost-sampled slots, whose
+    /// hardware tile/attribute fetch sees the DMA's in-flight data.
+    pub fn ppu_read_oam_live(&self, addr: u16) -> u8 {
+        self.oam.read(addr)
+    }
+
+    /// CGB: a BCPD/OCPD (FF69/FF6B) write during mode 3 is BLOCKED — the palette
+    /// byte is not written — but the BGPI/OBPI auto-increment still happens
+    /// (SameBoy memory.c `GB_IO_BGPD` `cgb_palettes_blocked` path; SameSuite
+    /// ppu/blocking_bgpi_increase subtest 3 reads BCPS=+1 after a mode-3 write).
+    /// Called by the bus from the blocked-write drop path.
+    pub fn palette_blocked_write_increment(&mut self, addr: u16) {
+        if !self.cgb_features_enabled {
+            return;
+        }
+        let spec = if addr == REG_BCPD {
+            &mut self.bg_palette_spec
+        } else {
+            &mut self.obj_palette_spec
+        };
+        if (*spec & 0x80) != 0 {
+            let new_index = ((*spec & 0x3F) + 1) & 0x3F;
+            *spec = (*spec & 0x80) | new_index;
+        }
+    }
+
     pub fn set_hdma_disable_fires(&mut self, v: Option<bool>) {
         self.hdma_disable_fires = v;
     }
@@ -4293,7 +4321,20 @@ impl memory::Addressable for Mmio {
                                         // bus stashes that decision in
                                         // `hdma_disable_fires` by evaluating the
                                         // PPU m0Time at this write's access cc.
-                                        if self.hdma_disable_fires == Some(true) {
+                                        // The race only exists while the period's
+                                        // block is still OWED (latched by the m0
+                                        // edge, not yet run). Once the block for
+                                        // this period has already been serviced
+                                        // (`hdma_block_done_this_period`, e.g. an
+                                        // in-period FF55 kick fired it), the next
+                                        // dma event is the NEXT line's m0 edge —
+                                        // in the future — so the disable always
+                                        // wins (SameSuite dma/hdma_mode0: enable+
+                                        // kick in mode 0, then disable a few
+                                        // M-cycles later must stop the transfer).
+                                        if self.hdma_disable_fires == Some(true)
+                                            && !self.hdma_block_done_this_period
+                                        {
                                             // m0 edge already passed: keep the
                                             // request latched so the block fires
                                             // this M-cycle (step_hdma), exactly as
@@ -4305,9 +4346,17 @@ impl memory::Addressable for Mmio {
                                             // M-cycle fire gate passes; the
                                             // post-block length wrap clears it.
                                         } else {
-                                            // Disable wins (edge not yet reached):
-                                            // Gambatte preserves the remaining
-                                            // length and flips bit 7 on read.
+                                            // Disable wins. Hardware latches the
+                                            // WRITTEN length bits on every FF55
+                                            // write, including the cancel (SameBoy
+                                            // `hdma_steps_left = (value&0x7F)+1`
+                                            // before the abort early-return), so a
+                                            // later read returns 0x80|written, NOT
+                                            // the preserved remaining count
+                                            // (SameSuite dma/hdma_lcd_off expects
+                                            // 0x80 after FF55=00 with 3 blocks
+                                            // left).
+                                            self.hdma_length = length_blocks_minus_1;
                                             self.hdma_enabled = false;
                                             self.hdma_req_pending = false;
                                         }
