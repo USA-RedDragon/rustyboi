@@ -791,20 +791,32 @@ fn evaluate_png_shootout(
     }
 
     let mut worst: Option<frame::FrameMismatch> = None;
-    for frame_index in 0..frames.max(1) {
-        let (frame, _bp) = gb
-            .run_until_lcd_frame(false, MAX_CYCLES_UNTIL_LCD_FRAME)
-            .map_err(|e| format!("{e} while running frame {frame_index}"))?;
-        let actual = frame::normalize_frame(frame);
-        // OR-match across pass refs; the shootout passes on the first match.
-        for expected in &expected_refs {
-            match frame::shootout_mismatch(&actual, expected) {
-                None => return Ok(()),
-                Some(m) => worst = Some(m),
+    // Budget in frame units. Several SameSuite APU ROMs keep the LCD OFF for
+    // multi-million-cycle measurement stretches before drawing their result
+    // screen; a timed-out frame wait burned MAX_CYCLES_UNTIL_LCD_FRAME
+    // (64 frames) of the budget without producing a frame — keep running
+    // instead of failing (the shootout's runtime-seconds budget does).
+    let mut budget = frames.max(1) as i64;
+    while budget > 0 {
+        match gb.run_until_lcd_frame(false, MAX_CYCLES_UNTIL_LCD_FRAME) {
+            Ok((frame, _bp)) => {
+                budget -= 1;
+                let actual = frame::normalize_frame(frame);
+                // OR-match across pass refs; the shootout passes on the first
+                // match.
+                for expected in &expected_refs {
+                    match frame::shootout_mismatch(&actual, expected) {
+                        None => return Ok(()),
+                        Some(m) => worst = Some(m),
+                    }
+                }
             }
+            Err(_) => budget -= (MAX_CYCLES_UNTIL_LCD_FRAME / CYCLES_PER_FRAME) as i64,
         }
     }
-    let m = worst.expect("at least one frame graded with non-empty refs");
+    let Some(m) = worst else {
+        return Err("no LCD frame within the case budget".to_string());
+    };
     if let Some(dir) = &options.dump_dir {
         let stem = refs[0].file_stem().and_then(|s| s.to_str()).unwrap_or("case");
         let last = gb.get_current_frame();
