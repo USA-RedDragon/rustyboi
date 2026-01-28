@@ -735,6 +735,37 @@ pub struct Ppu {
     // by the next draw_fifo_pixel.
     #[serde(default)]
     insert_bg_pixel: bool,
+    // DMG per-dot visibility history of LCDC.5 (window enable) inside mode 3,
+    // shifted at the top of each PixelTransfer dot: [k] = the visible bit k
+    // dots ago ([0] = current dot). Our visible bit (self.lcdc, via the
+    // 2-dot pending-event commit) turns OFF 2 dots before and ON 1 dot
+    // before the hardware-visible bit, so an 8-cycle WE-off pulse spans 9
+    // visible OFF dots. Three taps, calibrated dot-exact by the mealybug
+    // win_en_change_multiple[_wx] staircases (each row shifts the WE pulse
+    // one dot along the window-trigger/fetch grid):
+    //  - WX comparator (trigger + prologue paths): we[2] INSTEAD of the live
+    //    bit — hardware needs WE asserted on the check dot and the one
+    //    before (an 8-cycle pulse blocks 9 comparator dots);
+    //  - window fetcher TileNumber kill: OFF at BOTH [3] and [4] (hardware
+    //    samples WE one dot delayed at its T1 dot, one dot before our TN);
+    //  - WE-off zero-pixel insert: we[2] at the tile-boundary pop dot.
+    // Seeded at M3 arm.
+    #[serde(default)]
+    we_dot_hist: [bool; 5],
+    // Display-x values at which a pushed BG/window tile's FIRST pixel will
+    // pop (SameBoy's push-at-empty dots, where the WE-off zero-pixel insert
+    // glitch is evaluated). Queued at PushToFIFO, consumed at the pop of
+    // that x; at most two tiles are in flight.
+    #[serde(default)]
+    we_glitch_tile_starts: [Option<u8>; 2],
+    // Which WE tap the window TileNumber kill samples (see we_dot_hist).
+    // A MID-LINE window restart runs its fetch on the trigger-anchored grid,
+    // where the hardware tile-number dot sits one dot BEFORE our TN step
+    // (tap [3]); a LINE-BEGIN (M3Start f0) window runs on the global fetch
+    // grid where they coincide (tap [2]). wxA6_weoff_at_xposA6 line 0 vs the
+    // win_en_change_multiple[_wx] staircases bracket the two cases.
+    #[serde(default)]
+    win_kill_tap_late: bool,
     // One-shot latch for the DMG WX=0 + SCX&7>0 window-activation quirk: the
     // window activates one T-cycle later than the plain x==0 start (mealybug
     // m3_window_timing_wx_0: the BGP-boundary column is one dot short on every
@@ -1215,6 +1246,9 @@ impl Ppu {
             win_first_tile_chop: 0,
             win_being_fetched: false,
             insert_bg_pixel: false,
+            we_dot_hist: [true; 5],
+            we_glitch_tile_starts: [None; 2],
+            win_kill_tap_late: false,
             win_wx0_delayed: false,
             m3_arm_scx: 0,
             m3_scheduled_wx: 0,
@@ -2092,18 +2126,26 @@ impl Ppu {
                         // for a WE-off lives in StartWindowDraw::inc behind an
                         // explicit `&& p.cgb` gate, and the (26 - win_x_start) /
                         // (256 - win_x_start) xpos/wscx mapping is the CGB
-                        // fetcher geometry. On DMG the warmup/cgb_adj phase
-                        // differs and the prior immediate-revert is byte-exact
-                        // (wx17/weon DMG pass at baseline), so leave DMG on extra=0.
-                        let extra = if cgb_features_enabled {
+                        // fetcher geometry. On DMG the revert is NOT latched at
+                        // the write at all: the fetcher re-samples the WE bit at
+                        // each TileNumber step (SameBoy GET_TILE_T1 kill, see
+                        // we_dot_hist) — a pulse that misses every TileNumber
+                        // leaves the window running (mealybug
+                        // win_en_change_multiple[_wx]).
+                        if cgb_features_enabled {
                             let wxs = self.fetcher.window_x_start_dbg() as i32;
                             let phase = (self.x as i32 + 2 - 2 * wxs).rem_euclid(8);
-                            if phase == 0 { 0u8 } else { 1u8 }
-                        } else {
-                            0u8
-                        };
-                        self.fetcher.stop_window_with_extra(extra);
-                        self.window_started_this_line = false;
+                            let extra = if phase == 0 { 0u8 } else { 1u8 };
+                            self.fetcher.stop_window_with_extra(extra);
+                            self.window_started_this_line = false;
+                        } else if at_line_end {
+                            // DMG at line end (the wxA6 xpos-166 dance): no
+                            // TileNumber will run again this line, so the
+                            // deferred kill cannot land; stop immediately as
+                            // Gambatte's winDrawState clear does.
+                            self.fetcher.stop_window_with_extra(0);
+                            self.window_started_this_line = false;
+                        }
                     }
                 }
             } else {
@@ -3124,7 +3166,15 @@ impl Ppu {
     // catches late-frame WY writes that land after the three weMaster
     // checkpoints (e.g. WY=ly written during the same line's mode 3).
     fn window_y_active(&self, mmio: &mmio::Mmio) -> bool {
-        if (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) == 0 {
+        self.window_y_active_with(mmio, (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0)
+    }
+
+    // window_y_active with an explicit window-enable sample. The DMG mid-mode-3
+    // trigger paths pass the DELAYED per-dot tap (we_dot_hist[2]) instead of the
+    // live bit — hardware's comparator sees a WE write later than our visible
+    // lcdc commit does (see we_dot_hist).
+    fn window_y_active_with(&self, mmio: &mmio::Mmio, win_en: bool) -> bool {
+        if !win_en {
             return false;
         }
         if self.window_y_triggered {
@@ -4386,6 +4436,12 @@ impl Ppu {
                     self.win_being_fetched = false;
                     self.insert_bg_pixel = false;
                     self.win_wx0_delayed = false;
+                    {
+                        let we_now =
+                            (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
+                        self.we_dot_hist = [we_now; 5];
+                        self.we_glitch_tile_starts = [None; 2];
+                    }
                     // CGB arms two dots later, so use a shorter warmup to keep the first visible pixel aligned.
                     self.pixel_transfer_warmup = if is_cgb {
                         CGB_PIXEL_TRANSFER_WARMUP
@@ -4415,6 +4471,7 @@ impl Ppu {
                             let scx = (mmio.read(SCX) & 0x07) as u32;
                             let start_tile = ((8 + scx) / 8) as u8;
                             self.fetcher.start_window_at_tile(0, start_tile);
+                            self.win_kill_tap_late = false;
                             self.window_started_this_line = true;
                             self.win_start_dot = Some(self.ticks);
                         } else {
@@ -4629,6 +4686,14 @@ impl Ppu {
                 }
             },
             State::PixelTransfer => 'label: {
+                // Shift the DMG WE per-dot visibility history (see we_dot_hist).
+                self.we_dot_hist = [
+                    (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0,
+                    self.we_dot_hist[0],
+                    self.we_dot_hist[1],
+                    self.we_dot_hist[2],
+                    self.we_dot_hist[3],
+                ];
                 // A mid-mode-3 WX change before the window starts invalidates the
                 // closed-form schedule; fall back to the live emergent transition.
                 // The `win_wx_enable_resolved` latch suppresses re-entry on the dots
@@ -5111,10 +5176,16 @@ impl Ppu {
                     && !self.fetcher.is_fetching_window()
                     && !self.first_line_after_enable
                     && self.m3_discard_target >= 0
-                    && self.window_y_active(mmio)
+                    // Comparator WE tap (see we_dot_hist): delayed, not live.
+                    && self.window_y_active_with(mmio, self.we_dot_hist[1] && self.we_dot_hist[2])
                 {
                     let wx = mmio.read(WX);
-                    if (1..7).contains(&wx) {
+                    // WX==0 with SCX&7==0 takes the same early-comparator
+                    // activation with chop 7 (window column 7 lands at screen
+                    // x0 — the WX=0 window's left 7 columns are off-screen).
+                    // SCX&7>0 keeps the pos-0 trigger + one-dot delay quirk
+                    // (win_wx0_delayed).
+                    if (1..7).contains(&wx) || (wx == 0 && self.m3_discard_target == 0) {
                         let s = self.m3_discard_target as i64;
                         // pos-0 dot (first visible pop absent windows): TN runs
                         // at the first even dot after arm, push +6, warmup 4,
@@ -5135,6 +5206,8 @@ impl Ppu {
                             self.win_y_pos = self.win_y_pos.wrapping_add(1);
                             self.win_draw_started = true;
                             self.fetcher.start_window(0);
+                            self.we_glitch_tile_starts = [None; 2];
+                            self.win_kill_tap_late = true;
                             self.window_started_this_line = true;
                             self.win_being_fetched = true;
                             self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
@@ -5195,6 +5268,28 @@ impl Ppu {
                     self.ticks.is_multiple_of(2)
                 };
 
+                // DMG mid-mode-3 WE-off window kill (SameBoy GET_TILE_T1
+                // `wx_triggered = false`): the window fetcher re-samples the
+                // window-enable bit at each TileNumber step with a one-dot
+                // delayed sample (we_dot_hist[2]); reading OFF reverts the fetch
+                // to BG from THIS tile on (the already-pushed window pixels in
+                // the FIFO drain out, so a killed window always shows a multiple
+                // of 8 pixels). A WE-off pulse short enough that its delayed
+                // sample misses every TileNumber dot leaves the window running —
+                // hardware behavior the mealybug win_en_change_multiple[_wx]
+                // staircases verify (Gambatte instead latches winDrawState at
+                // the write, which kills the window on any pulse).
+                if cadence_even
+                    && !mmio.is_cgb_features_enabled()
+                    && self.fetcher.is_fetching_window()
+                    && self.fetcher.fetch_state_is_tile_number()
+                    && !self.we_dot_hist[if self.win_kill_tap_late { 3 } else { 2 }]
+                {
+                    self.fetcher.stop_window_with_extra(0);
+                    self.window_started_this_line = false;
+                    self.win_being_fetched = false;
+                }
+
                 let fetcher_lcdc_state = self.fetcher_lcdc_state();
                 // Pixels still to be discarded for SCX fine-scroll: they sit in
                 // the FIFO but won't be displayed, so the BG tile column (derived
@@ -5211,6 +5306,23 @@ impl Ppu {
                         }
                         if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo) {
                             push_this_dot = true;
+                            // Queue the display-x at which this tile's first pixel
+                            // will pop (the SameBoy push-at-empty dot) for the DMG
+                            // WE-off zero-pixel insert glitch.
+                            if !mmio.is_cgb_features_enabled() {
+                                let first_x = (self.x as i32 + event.fifo_size as i32
+                                    - 8
+                                    - pending_discard as i32)
+                                    .max(0) as u8;
+                                if first_x < 160
+                                    && let Some(slot) = self
+                                        .we_glitch_tile_starts
+                                        .iter_mut()
+                                        .find(|s| s.is_none())
+                                {
+                                    *slot = Some(first_x);
+                                }
+                            }
                         }
                         // NOTE: the window fetch anchor persists for the rest of
                         // the line — the hardware fetch grid stays phase-locked
@@ -5455,8 +5567,35 @@ impl Ppu {
                     break 'label;
                 }
 
-                // Check if we should start window rendering
-                if self.window_y_active(mmio) && !self.fetcher.is_fetching_window() {
+                // Check if we should start window rendering. On DMG the
+                // window-enable bit feeding the WX comparator is the DELAYED
+                // per-dot tap (we_dot_hist, samples one and two dots back) —
+                // an 8-cycle WE-off pulse blocks 9 consecutive comparator dots
+                // on hardware (mealybug win_en_change_multiple_wx). CGB keeps
+                // the live bit. When the x==0 trigger fires with SCX fine
+                // discards still pending, our check runs `pending` dots BEFORE
+                // the hardware comparator dot (position 0 pops that much
+                // later), so the taps shift toward the present accordingly
+                // (gambatte window late_disable_scx3_0/scx5_0: the disable
+                // right before the x==0 check dot must still block the start).
+                let trigger_we = if mmio.is_cgb_features_enabled() {
+                    (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0
+                } else {
+                    let pending = if self.x == 0 && self.m3_discard_target >= 0 {
+                        (self.m3_discard_target as u8)
+                            .saturating_sub(self.m3_pixels_discarded)
+                    } else {
+                        0
+                    };
+                    match pending {
+                        0 => self.we_dot_hist[1] && self.we_dot_hist[2],
+                        1 => self.we_dot_hist[0] && self.we_dot_hist[1],
+                        _ => self.we_dot_hist[0],
+                    }
+                };
+                if self.window_y_active_with(mmio, trigger_we)
+                    && !self.fetcher.is_fetching_window()
+                {
                     let wx = mmio.read(WX);
                     let is_cgb = mmio.is_cgb_features_enabled();
                     // DMG never starts the window drawing at WX==166; CGB does.
@@ -5469,11 +5608,16 @@ impl Ppu {
                     // (mealybug m3_wx_6_change). WX=0 and CGB keep the immediate
                     // x==0 start.
                     let is_dmg = !is_cgb;
+                    // DMG one-dot-late activation (SameBoy's position+6 check):
+                    // when the exact x+7==WX dot did not activate (the comparator
+                    // read the WE-off pulse), the very next dot still matches via
+                    // WX == x+6 and starts the window one pixel late (the _wx rows
+                    // 16 and 44 start at WX-6).
                     let should_start_window = wx_allowed
                         && if wx < 7 {
                             self.x == 0 && !(is_dmg && (1..7).contains(&wx))
                         } else {
-                            self.x + 7 == wx
+                            self.x + 7 == wx || (is_dmg && self.x >= 1 && self.x + 6 == wx)
                         };
 
                     // DMG WX=0 + SCX&7>0 quirk: the window activates one T-cycle
@@ -5501,6 +5645,8 @@ impl Ppu {
                         self.win_draw_started = true;
                         // Start window rendering
                         self.fetcher.start_window(self.x);
+                        self.we_glitch_tile_starts = [None; 2];
+                        self.win_kill_tap_late = true;
                         self.window_started_this_line = true;
                         self.win_being_fetched = true;
                         // DMG: hardware restarts the fetcher ON the trigger dot
@@ -5620,6 +5766,42 @@ impl Ppu {
                     && mmio.read(WX) == self.x + 7
                 {
                     self.insert_bg_pixel = true;
+                }
+                // DMG WE-off zero-pixel insertion glitch (SameBoy display.c PUSH
+                // branch, SameBoy issue #278): with the window Y-latch triggered
+                // but the window enable OFF (delayed tap, see we_dot_hist), a
+                // tile-boundary pop (SameBoy's push-at-empty dot; our queued
+                // first-pixel x) where WX == x+7 renders one color-0 pixel
+                // WITHOUT consuming the FIFO (mealybug win_en_change_multiple_wx
+                // rows 15/39: the single white pixel at x = WX-7 on the
+                // trigger-missed rows).
+                let mut at_tile_boundary = false;
+                for slot in self.we_glitch_tile_starts.iter_mut() {
+                    if let Some(fx) = *slot {
+                        if fx == self.x {
+                            at_tile_boundary = true;
+                            *slot = None;
+                        } else if fx < self.x {
+                            // Stale (chop/discard consumed the boundary pop).
+                            *slot = None;
+                        }
+                    }
+                }
+                if !mmio.is_cgb_features_enabled()
+                    && self.window_y_triggered
+                    && !self.fetcher.is_fetching_window()
+                    && !self.we_dot_hist[2]
+                    && at_tile_boundary
+                    && mmio.read(WX) == self.x + 7
+                {
+                    self.insert_bg_pixel = true;
+                    // The inserted pixel shifts every later boundary one to the
+                    // right.
+                    for slot in self.we_glitch_tile_starts.iter_mut() {
+                        if let Some(fx) = slot {
+                            *fx = fx.saturating_add(1);
+                        }
+                    }
                 }
                 if self.draw_fifo_pixel(mmio) && self.x == 160 {
                     // Fallback end-of-mode-3 at the x==160 pixel push, used in two
