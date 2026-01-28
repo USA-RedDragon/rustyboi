@@ -53,18 +53,30 @@ pub enum MaskMode {
 /// buffer, and the derived effects (MLT_REQ player multiplexing, mask, palettes).
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Sgb {
-    // ---- Packet reception state machine (SameBoy `GB_sgb_write` model) ----
-    // A packet bit is only latched on a P14/P15 pulse when the line has first
-    // returned to both-high (`ready_for_pulse`) AND a start pulse (both-low) has
-    // armed the receiver (`ready_for_write`). This three-flag handshake handles
-    // both the both-high-return and both-low-return bit framings the game uses.
-    /// Set by a both-high (0x30) write: the next single-line pulse may latch a bit.
+    // ---- Packet reception state machine ----
+    // Derived cell-by-cell from the real-SGB sgb-ext-test reference screenshot
+    // (all 27 adversarial framing variants match). The ICD2 receiver:
+    //   * arms a bit on a single-line-low pulse after a both-high return
+    //     (`ready_for_pulse`) with the receiver started (`ready_for_write`),
+    //   * but only COMMITS the bit value on the following both-high (0x30)
+    //     write — the data value is sampled on the line's return to idle. A
+    //     second single-line pulse before that both-high OVERRIDES the pending
+    //     value without advancing the bit counter (last pulse wins: the
+    //     $20->$10->$30 variant latches a 1, $10->$20->$30 latches a 0),
+    //   * treats both-low (0x00) as an unconditional start/reset — it fires
+    //     even when the line never returned to both-high first (the
+    //     $10->$00->$30 variant aborts the packet on real hardware).
+    /// Set by a both-high (0x30) write: the next single-line pulse may arm a bit.
     ready_for_pulse: bool,
     /// Set by a both-low (0x00) start pulse: bit latching is enabled.
     ready_for_write: bool,
-    /// Set when a full 128-bit packet has been clocked; the next both-low pulse
-    /// finalises the packet (and dispatches the command if the count is met).
+    /// Set when a full 128-bit packet has been clocked; the next single-line
+    /// pulse finalises the packet (and dispatches the command if the count is met).
     ready_for_stop: bool,
+    /// Bit value armed by a single-line pulse, committed at the next both-high
+    /// write. `None` when no pulse is in flight.
+    #[serde(default)]
+    pending_bit: Option<bool>,
     /// Last value written to JOYP (full byte), for P14 rising-edge detection.
     last_p1: u8,
     /// Bits clocked into the current command so far (across all its packets).
@@ -128,6 +140,7 @@ impl Sgb {
             ready_for_pulse: true,
             ready_for_write: false,
             ready_for_stop: false,
+            pending_bit: None,
             last_p1: 0x30,
             write_index: 0,
             command: default_command(),
@@ -156,12 +169,12 @@ impl Sgb {
         0x0F - (self.joypad_index & 0x0F)
     }
 
-    /// Advance the JOYP write state machine on a $FF00 write. Faithful port of
-    /// SameBoy `GB_sgb_write`: bits are decoded from `(value >> 4) & 3` where
-    /// 3=both-high (arm pulse), 2=P14-low ("0" bit / advance), 1=P15-low ("1"
-    /// bit), 0=both-low (start/stop pulse). The three-flag handshake makes the
-    /// receiver tolerant of the multiple bit-framing conventions the stress test
-    /// uses, and rejects malformed frames exactly as hardware does.
+    /// Advance the JOYP write state machine on a $FF00 write. Bits are decoded
+    /// from `(value >> 4) & 3` where 3=both-high (commit pending bit + re-arm),
+    /// 2=P14-low ("0" bit), 1=P15-low ("1" bit), 0=both-low (start/reset).
+    /// Data-bit values are sampled at the both-high return (last pulse wins),
+    /// which is what the real-SGB sgb-ext-test reference pins for all 27
+    /// adversarial framing variants (see the state-machine field docs).
     pub fn write_p1(&mut self, value: u8) {
         // The command's declared size in bits: byte0 bits 2-0 give the packet
         // count (0 treated as 1), times 128 bits/packet.
@@ -182,66 +195,62 @@ impl Sgb {
 
         match (value >> 4) & 3 {
             3 => {
+                // Both-high: commit the in-flight bit (the ICD2 samples the data
+                // value on the line's return to idle-high) and re-arm.
+                if let Some(one) = self.pending_bit.take() {
+                    if (self.write_index as usize) < self.command.len() * 8 {
+                        if one {
+                            let byte = (self.write_index / 8) as usize;
+                            let bit = (self.write_index & 7) as u8;
+                            self.command[byte] |= 1 << bit;
+                        }
+                        self.write_index += 1;
+                        if self.write_index & (128 - 1) == 0 {
+                            self.ready_for_stop = true;
+                        }
+                    }
+                }
                 self.ready_for_pulse = true;
             }
-            2 => {
-                // "Zero" bit (or, once the packet is full, the stop pulse).
-                if !self.ready_for_pulse || !self.ready_for_write {
-                    return;
-                }
-                if self.ready_for_stop {
-                    if self.write_index == command_size {
-                        self.dispatch();
-                        self.write_index = 0;
-                        self.command = default_command();
+            line @ (1 | 2) => {
+                // Single-line pulse: P15-low (1) = "one" bit, P14-low (2) =
+                // "zero" bit; after the 128th bit, the stop pulse.
+                let one = line == 1;
+                if self.ready_for_pulse && self.ready_for_write {
+                    if self.ready_for_stop {
+                        // Stop pulse: on hardware EITHER a P14-low (0x20) OR a
+                        // P15-low (0x10) pulse after the 128th bit terminates
+                        // the packet and dispatches (sgb-ext-test CorruptStop
+                        // uses a 0x10 stop and real SGB accepts it; SameBoy
+                        // treats it as corrupt).
+                        if self.write_index == command_size {
+                            self.dispatch();
+                            self.write_index = 0;
+                            self.command = default_command();
+                        }
+                        self.ready_for_pulse = false;
+                        self.ready_for_write = false;
+                        self.ready_for_stop = false;
+                    } else {
+                        // Arm the bit; it commits at the next both-high write.
+                        self.pending_bit = Some(one);
+                        self.ready_for_pulse = false;
                     }
-                    self.ready_for_pulse = false;
-                    self.ready_for_write = false;
-                    self.ready_for_stop = false;
-                } else if (self.write_index as usize) < self.command.len() * 8 {
-                    self.write_index += 1;
-                    self.ready_for_pulse = false;
-                    if self.write_index & (128 - 1) == 0 {
-                        self.ready_for_stop = true;
-                    }
-                }
-            }
-            1 => {
-                // "One" bit.
-                if !self.ready_for_pulse || !self.ready_for_write {
-                    return;
-                }
-                if self.ready_for_stop {
-                    // Stop pulse: on hardware EITHER a P14-low (0x20) OR a P15-low
-                    // (0x10) pulse after the 128th bit terminates the packet and
-                    // dispatches (the sgb-ext-test `421A` variant uses a 0x10
-                    // stop and expects it to be accepted). SameBoy treats a 0x10
-                    // stop as a corrupt command; hardware does not.
-                    if self.write_index == command_size {
-                        self.dispatch();
-                        self.write_index = 0;
-                        self.command = default_command();
-                    }
-                    self.ready_for_pulse = false;
-                    self.ready_for_write = false;
-                    self.ready_for_stop = false;
-                } else if (self.write_index as usize) < self.command.len() * 8 {
-                    let byte = (self.write_index / 8) as usize;
-                    let bit = (self.write_index & 7) as u8;
-                    self.command[byte] |= 1 << bit;
-                    self.write_index += 1;
-                    self.ready_for_pulse = false;
-                    if self.write_index & (128 - 1) == 0 {
-                        self.ready_for_stop = true;
-                    }
+                } else if self.pending_bit.is_some() {
+                    // Second pulse before the both-high return: the last pulse
+                    // wins ($20->$10->$30 latches a 1, $10->$20->$30 a 0 — real
+                    // SGB, sgb-ext-test cells 6-11). The bit counter does not
+                    // advance.
+                    self.pending_bit = Some(one);
                 }
             }
             0 => {
                 // Both-low start pulse: arm writing; reset a partial/misaligned
-                // command so the next bits start a clean packet.
-                if !self.ready_for_pulse {
-                    return;
-                }
+                // command so the next bits start a clean packet. This fires
+                // regardless of `ready_for_pulse` — a $10->$00 or $20->$00
+                // sequence aborts the packet on real SGB (sgb-ext-test cells
+                // 18-23) — and always kills an in-flight bit.
+                self.pending_bit = None;
                 self.ready_for_write = true;
                 self.ready_for_pulse = false;
                 if self.write_index & (128 - 1) != 0
@@ -460,6 +469,124 @@ mod tests {
             sgb.write_p1(0x30);
             assert_eq!(sgb.joypad_id_nibble(), 0x0F);
         }
+    }
+
+    /// Send an MLT_REQ packet where the first bit of byte 1 (the player mask)
+    /// is transmitted as the write triple (a, b, 0x30) instead of a normal
+    /// pulse, mirroring the sgb-ext-test XXToYY framing variants. The actual
+    /// bit value of byte 1 bit 0 is discarded, exactly as the test ROM does.
+    fn send_packet_first_mask_bit(sgb: &mut Sgb, bytes: &[u8; 16], a: u8, b: u8) {
+        sgb.write_p1(0x30);
+        sgb.write_p1(0x00);
+        sgb.write_p1(0x30);
+        for bit in 0..8 {
+            let one = (bytes[0] >> bit) & 1 != 0;
+            sgb.write_p1(if one { 0x10 } else { 0x20 });
+            sgb.write_p1(0x30);
+        }
+        sgb.write_p1(a);
+        sgb.write_p1(b);
+        sgb.write_p1(0x30);
+        for bit in 1..8 {
+            let one = (bytes[1] >> bit) & 1 != 0;
+            sgb.write_p1(if one { 0x10 } else { 0x20 });
+            sgb.write_p1(0x30);
+        }
+        for &byte in bytes[2..].iter() {
+            for bit in 0..8 {
+                let one = (byte >> bit) & 1 != 0;
+                sgb.write_p1(if one { 0x10 } else { 0x20 });
+                sgb.write_p1(0x30);
+            }
+        }
+        sgb.write_p1(0x20); // stop pulse
+        sgb.write_p1(0x30);
+    }
+
+    fn mlt_req_packet(mask: u8) -> [u8; 16] {
+        let mut pkt = [0u8; 16];
+        pkt[0] = (cmd::MLT_REQ << 3) | 1;
+        pkt[1] = mask;
+        pkt
+    }
+
+    /// Real SGB (sgb-ext-test ref cells 6-8): a $20->$10->$30 bit write latches
+    /// a 1 — the last pulse before the both-high return wins. A 1P mask ($00)
+    /// therefore arrives as $01 and selects 2 players.
+    #[test]
+    fn pulse_override_20_to_10_latches_one() {
+        let mut sgb = Sgb::new();
+        send_packet_first_mask_bit(&mut sgb, &mlt_req_packet(0x00), 0x20, 0x10);
+        assert_eq!(sgb.players(), 2);
+        let mut sgb = Sgb::new();
+        send_packet_first_mask_bit(&mut sgb, &mlt_req_packet(0x03), 0x20, 0x10);
+        assert_eq!(sgb.players(), 4);
+    }
+
+    /// Real SGB (ref cells 9-11): $10->$20->$30 latches a 0. A 2P mask ($01)
+    /// arrives as $00 (1 player); a 4P mask ($03) as $02 (glitched 3-player).
+    #[test]
+    fn pulse_override_10_to_20_latches_zero() {
+        let mut sgb = Sgb::new();
+        send_packet_first_mask_bit(&mut sgb, &mlt_req_packet(0x01), 0x10, 0x20);
+        assert_eq!(sgb.players(), 1);
+        let mut sgb = Sgb::new();
+        send_packet_first_mask_bit(&mut sgb, &mlt_req_packet(0x03), 0x10, 0x20);
+        assert_eq!(sgb.players(), 3);
+    }
+
+    /// Real SGB (ref cells 12-23): a both-low mid-packet — whether after a
+    /// both-high ($00->$10/$20) or straight after a pulse ($10/$20->$00) —
+    /// resets the receiver, so the packet misframes and is never dispatched.
+    #[test]
+    fn both_low_mid_packet_aborts() {
+        for (a, b) in [(0x00, 0x10), (0x00, 0x20), (0x10, 0x00), (0x20, 0x00)] {
+            let mut sgb = Sgb::new();
+            send_packet_first_mask_bit(&mut sgb, &mlt_req_packet(0x03), a, b);
+            assert_eq!(sgb.players(), 1, "variant {a:#04x}->{b:#04x}");
+        }
+    }
+
+    /// Real SGB (ref cells 24-26): omitting the $30 after the start pulse drops
+    /// the first data bit (a pulse before the both-high return never arms), so
+    /// the packet misframes and is rejected.
+    #[test]
+    fn short_start_rejected() {
+        let mut sgb = Sgb::new();
+        let pkt = mlt_req_packet(0x03);
+        sgb.write_p1(0x30);
+        sgb.write_p1(0x00); // start with NO $30 after
+        for &byte in pkt.iter() {
+            for bit in 0..8 {
+                let one = (byte >> bit) & 1 != 0;
+                sgb.write_p1(if one { 0x10 } else { 0x20 });
+                sgb.write_p1(0x30);
+            }
+        }
+        sgb.write_p1(0x20);
+        sgb.write_p1(0x30);
+        assert_eq!(sgb.players(), 1);
+    }
+
+    /// Real SGB (ref cells 2-3): a $10 (P15-low) stop pulse after the 128th bit
+    /// is accepted just like the normal $20 stop.
+    #[test]
+    fn corrupt_stop_10_accepted() {
+        let mut sgb = Sgb::new();
+        let pkt = mlt_req_packet(0x03);
+        sgb.write_p1(0x30);
+        sgb.write_p1(0x00);
+        sgb.write_p1(0x30);
+        for &byte in pkt.iter() {
+            for bit in 0..8 {
+                let one = (byte >> bit) & 1 != 0;
+                sgb.write_p1(if one { 0x10 } else { 0x20 });
+                sgb.write_p1(0x30);
+            }
+        }
+        sgb.write_p1(0x10); // corrupt stop
+        sgb.write_p1(0x30);
+        assert_eq!(sgb.players(), 4);
     }
 
     #[test]
