@@ -625,6 +625,21 @@ fn evaluate_mooneye(gb: &mut GB, marker: u8) -> Result<(), String> {
     if !run_until_ldbb(gb, 250_000_000, marker) {
         return Err("no done-marker (timeout)".to_string());
     }
+    // Diagnostic: SameSuite tests store per-subtest results at $C000 before
+    // comparing against their embedded CorrectResults table. RB_SS_DUMP=N
+    // dumps N rows of 8 bytes so a failure pinpoints WHICH subtest diverged.
+    if let Some(rows) = std::env::var("RB_SS_DUMP")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+    {
+        for row in 0..rows {
+            let base = 0xC000u16 + row * 8;
+            let bytes: Vec<String> = (0..8)
+                .map(|i| format!("{:02X}", gb.read_memory(base + i)))
+                .collect();
+            eprintln!("SS_DUMP {base:04X}: {}", bytes.join(" "));
+        }
+    }
     let r = gb.get_cpu_registers();
     if r.b == 3 && r.c == 5 && r.d == 8 && r.e == 13 && r.h == 21 && r.l == 34 {
         Ok(())
@@ -776,20 +791,32 @@ fn evaluate_png_shootout(
     }
 
     let mut worst: Option<frame::FrameMismatch> = None;
-    for frame_index in 0..frames.max(1) {
-        let (frame, _bp) = gb
-            .run_until_lcd_frame(false, MAX_CYCLES_UNTIL_LCD_FRAME)
-            .map_err(|e| format!("{e} while running frame {frame_index}"))?;
-        let actual = frame::normalize_frame(frame);
-        // OR-match across pass refs; the shootout passes on the first match.
-        for expected in &expected_refs {
-            match frame::shootout_mismatch(&actual, expected) {
-                None => return Ok(()),
-                Some(m) => worst = Some(m),
+    // Budget in frame units. Several SameSuite APU ROMs keep the LCD OFF for
+    // multi-million-cycle measurement stretches before drawing their result
+    // screen; a timed-out frame wait burned MAX_CYCLES_UNTIL_LCD_FRAME
+    // (64 frames) of the budget without producing a frame — keep running
+    // instead of failing (the shootout's runtime-seconds budget does).
+    let mut budget = frames.max(1) as i64;
+    while budget > 0 {
+        match gb.run_until_lcd_frame(false, MAX_CYCLES_UNTIL_LCD_FRAME) {
+            Ok((frame, _bp)) => {
+                budget -= 1;
+                let actual = frame::normalize_frame(frame);
+                // OR-match across pass refs; the shootout passes on the first
+                // match.
+                for expected in &expected_refs {
+                    match frame::shootout_mismatch(&actual, expected) {
+                        None => return Ok(()),
+                        Some(m) => worst = Some(m),
+                    }
+                }
             }
+            Err(_) => budget -= (MAX_CYCLES_UNTIL_LCD_FRAME / CYCLES_PER_FRAME) as i64,
         }
     }
-    let m = worst.expect("at least one frame graded with non-empty refs");
+    let Some(m) = worst else {
+        return Err("no LCD frame within the case budget".to_string());
+    };
     if let Some(dir) = &options.dump_dir {
         let stem = refs[0].file_stem().and_then(|s| s.to_str()).unwrap_or("case");
         let last = gb.get_current_frame();
