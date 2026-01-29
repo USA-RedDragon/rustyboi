@@ -39,6 +39,14 @@ pub(crate) struct FetcherDebugEvent {
 pub(crate) struct FetcherLcdcState {
     pub lcdc: u8,
     pub cgb_tile_index_is_tile_data: bool,
+    // DMG window bus-glitch OR-read: when set, this substep's VRAM read
+    // coincides with an LCDC.6/LCDC.4 bus transition (the CPU write's address
+    // lines change mid-read), and the read returns the bitwise OR of the bytes
+    // at the pre- and post-transition addresses. `lcdc` carries the
+    // post-transition bits; `or_lcdc` the pre-transition ones. Derived from the
+    // mealybug m3_lcdc_win_map_change / m3_lcdc_tile_sel_win_change DMG
+    // reference captures (both pulse edges show the union of both sources).
+    pub or_lcdc: Option<u8>,
 }
 
 // Tile data addressing constants
@@ -311,6 +319,20 @@ impl Fetcher {
                 self.last_vram_addr = map_addr;
                 self.last_vram_bank = 0;
                 self.tile_num = mmio.read_vram_bank(0, map_addr);
+                // DMG bus-glitch OR-read: mid-read map-select transition drives
+                // both map addresses within the read dot; the latched tile
+                // number is the union of both cells' 1-bits. The corrupted
+                // number feeds this tile's data reads (hardware pipeline latch).
+                if let Some(l2) = lcdc_state.or_lcdc {
+                    let alt_base = if self.fetching_window {
+                        self.get_window_tile_map_base(l2)
+                    } else {
+                        self.get_tile_map_base(l2)
+                    };
+                    if alt_base != tile_map_base {
+                        self.tile_num |= mmio.read_vram_bank(0, alt_base + map_offset);
+                    }
+                }
 
                 // In CGB mode, read tile attributes from VRAM bank 1
                 self.tile_attributes = if mmio.is_cgb_features_enabled() {
@@ -354,11 +376,20 @@ impl Fetcher {
                 // we do NOT update `last_vram_addr` here (matching the hardware bus
                 // hold windows: tile-number held through tile-data-low, then the
                 // tile-data-high address takes over).
-                let low_byte = if lcdc_state.cgb_tile_index_is_tile_data && self.tile_num < 0x80 {
+                let mut low_byte = if lcdc_state.cgb_tile_index_is_tile_data && self.tile_num < 0x80 {
                     self.tile_num
                 } else {
                     mmio.read_vram_bank(tile_data_bank, addr)
                 };
+                // DMG bus-glitch OR-read: mid-read tile-data-select transition
+                // (LCDC.4, address bit A12) returns the union of both banks'
+                // bytes for this bitplane.
+                if let Some(l2) = lcdc_state.or_lcdc {
+                    let alt = self.get_tile_data_address(self.tile_num, eff_line, l2);
+                    if alt != addr {
+                        low_byte |= mmio.read_vram_bank(tile_data_bank, alt);
+                    }
+                }
 
                 for i in 0..8 {
                     let bit = if x_flip { i } else { 7 - i };
@@ -395,11 +426,18 @@ impl Fetcher {
                 };
                 self.last_vram_addr = addr;
                 self.last_vram_bank = tile_data_bank;
-                let high_byte = if lcdc_state.cgb_tile_index_is_tile_data && self.tile_num < 0x80 {
+                let mut high_byte = if lcdc_state.cgb_tile_index_is_tile_data && self.tile_num < 0x80 {
                     self.tile_num
                 } else {
                     mmio.read_vram_bank(tile_data_bank, addr)
                 };
+                // DMG bus-glitch OR-read (see TileDataLow).
+                if let Some(l2) = lcdc_state.or_lcdc {
+                    let alt = self.get_tile_data_address(self.tile_num, eff_line, l2) + 1;
+                    if alt != addr {
+                        high_byte |= mmio.read_vram_bank(tile_data_bank, alt);
+                    }
+                }
 
                 for i in 0..8 {
                     let bit = if x_flip { i } else { 7 - i };
@@ -483,6 +521,18 @@ impl Fetcher {
         matches!(self.state, State::TileNumber)
     }
 
+    // The substep the next step() will run: 0 = TileNumber, 1 = TileDataLow,
+    // 2 = TileDataHigh, 3 = PushToFIFO. Drives the DMG window bus-glitch
+    // hardware-dot reconstruction (each substep is one VRAM read, 2 dots apart).
+    pub fn fetch_substep(&self) -> u8 {
+        match self.state {
+            State::TileNumber => 0,
+            State::TileDataLow => 1,
+            State::TileDataHigh => 2,
+            State::PushToFIFO => 3,
+        }
+    }
+
     // The (xpos, cgb_adj, scx) the last BG TileNumber used to derive its column.
     // The controller recomputes the column under a NEW scx with the
     // same xpos/cgb_adj to re-key the just-pushed tile.
@@ -520,6 +570,7 @@ mod tests {
         FetcherLcdcState {
             lcdc: mmio.read(ppu::LCD_CONTROL),
             cgb_tile_index_is_tile_data,
+            or_lcdc: None,
         }
     }
 
