@@ -134,6 +134,12 @@ fn win_y_pos_init() -> u8 { 0xFF }
 // render-phase offsets. These were once env-tunable sweep knobs; the sweeps are
 // deleted and each is now its single calibrated constant.
 const M0IRQ_SCX2_CGB_OFFSET: i64 = -1;
+// DMG window bus-glitch (wg_apply): dots from the LCDC write's register commit
+// to the VRAM address-line transition, and the renderer's absorbed pre-window
+// sprite-stall (the anchored x==0 restart trigger fires a constant 11 dots
+// later when an OAM X<=8 sprite stalled the prologue).
+const WG_TRANSITION_DELAY: u64 = 4;
+const WG_RB_PRESTALL_ABSORB: u64 = 11;
 const WY1_DELAY: i64 = 2;
 const WY2_DELAY_CGB: i64 = 7;
 const WY2_DELAY_DMG: i64 = 4;
@@ -1121,6 +1127,25 @@ pub struct Ppu {
     // data) to the HIGH byte only — the mixed-tile behavior cgb-acid-hell tests.
     #[serde(default)]
     tidxtd_history: Vec<(u64, bool)>,
+    // DMG window bus-glitch journal: each mid-mode-3 LCDC write that toggles
+    // bit 6 (window map select) or bit 4 (tile data select) records
+    // (transition_cc, old_lcdc, new_lcdc) — the abs_cc at which the new address
+    // lines reach the VRAM bus. Window fetch reads are re-evaluated against it
+    // at their reconstructed hardware dots (see wg_apply). Cleared at each
+    // mode-3 arm.
+    #[serde(default)]
+    wg_hist: Vec<(u64, u8, u8)>,
+    // The undelayed window-restart TileNumber dot (abs_cc) for the current
+    // line's window — the hardware fetch-grid origin F. None when the window
+    // did not start through the x==0 restart path this line (the glitch model
+    // is scoped to it) or when the pre-window sprite configuration is outside
+    // the calibrated single-sprite case.
+    #[serde(default)]
+    wg_anchor_cc: Option<u64>,
+    // Hardware pre-window delay D_pre from an offscreen-left sprite (OAM X<=7)
+    // fetched before the window restart. 0 when none.
+    #[serde(default)]
+    wg_dpre: u64,
     // Exact-cc window-enable (LCDC bit 5) toggle for the weMaster checkpoints.
     // rustyboi's pending_lcdc_events commit the window bit one PPU dot before
     // Gambatte's `setLcdc(data, cc + 2)` (the queue runs through one
@@ -1327,6 +1352,9 @@ impl Ppu {
             pending_lcdc_events: Vec::new(),
             lcdc_b4_exact: None,
             tidxtd_history: Vec::new(),
+            wg_hist: Vec::new(),
+            wg_anchor_cc: None,
+            wg_dpre: 0,
             we_win_bit_exact: None,
             cgb_color_conversion: CgbColorConversion::Linear,
             fetch_debug_events_enabled: false,
@@ -1436,6 +1464,24 @@ impl Ppu {
         let display_enable = LCDCFlags::DisplayEnable as u8;
         let old_lcdc = self.lcdc;
         let display_stays_enabled = (old_lcdc & display_enable) != 0 && (value & display_enable) != 0;
+
+        // DMG window bus-glitch journal (see wg_apply): record the exact bus
+        // transition time of a mid-mode-3 bit6/bit4 toggle. The address lines
+        // reach the VRAM bus WG_TRANSITION_DELAY dots after the write's
+        // register commit (calibrated against the mealybug win_map/tile_sel
+        // win-change reference captures: the hardware transition dot lands on
+        // the window fetch grid 3 dots after our register-visible apply cc).
+        if !mmio.is_cgb_features_enabled()
+            && display_stays_enabled
+            && self.state == State::PixelTransfer
+        {
+            let wg_bits = (LCDCFlags::WindowTileMapDisplaySelect as u8)
+                | (LCDCFlags::BGWindowTileDataSelect as u8);
+            if (old_lcdc ^ value) & wg_bits != 0 {
+                let t_cc = self.write_cc(false) + WG_TRANSITION_DELAY;
+                self.wg_hist.push((t_cc, old_lcdc, value));
+            }
+        }
 
         // Per-pixel BG-enable history (RB_LINERENDER per-pixel). A mid-mode-3
         // LCDC.0 (BG-enable) toggle must be applied per display column: the
@@ -1743,6 +1789,7 @@ impl Ppu {
                 return fetcher::FetcherLcdcState {
                     lcdc,
                     cgb_tile_index_is_tile_data: quirk,
+                    or_lcdc: None,
                 };
             } else {
                 // Post-commit: new bit4.
@@ -1750,13 +1797,113 @@ impl Ppu {
                 return fetcher::FetcherLcdcState {
                     lcdc,
                     cgb_tile_index_is_tile_data: quirk,
+                    or_lcdc: None,
                 };
             }
         }
         fetcher::FetcherLcdcState {
             lcdc: self.lcdc,
             cgb_tile_index_is_tile_data: quirk,
+            or_lcdc: None,
         }
+    }
+
+    // DMG mid-mode-3 window VRAM-bus glitch (mealybug m3_lcdc_win_map_change /
+    // m3_lcdc_tile_sel_win_change, reverse-engineered from the DMG reference
+    // captures). The hardware window fetch grid differs from the renderer's
+    // anchored grid when sprites stall the line, so each window fetch read is
+    // re-evaluated at its reconstructed HARDWARE dot `h` against the exact
+    // LCDC.6/LCDC.4 bus-transition times (`wg_hist`):
+    //  - h = F + D_pre + 8*tile + 2*substep + midline sprite shifts, where F is
+    //    the undelayed window-restart TileNumber dot (`wg_anchor_cc`).
+    //  - An offscreen-left sprite (OAM X <= 7) is fetched BEFORE the window
+    //    restart and delays the whole grid by D_pre = max(7, 13 - 2*ceil(X/2))
+    //    (2-dot fetcher-boundary quantized; single-sprite calibration).
+    //  - An on-screen sprite at window position pos = X - 8 >= 0 lets the
+    //    in-progress tile fetch complete through TileDataHigh, then inserts its
+    //    stall: tiles >= pos/8 + 2 shift by the classic 11 - min(5, pos % 8).
+    //  - A read strictly between the transitions sees the post-write bits; a
+    //    read ON a transition dot returns the OR of both addresses' bytes (the
+    //    address lines change mid-read; both cells drive 1-bits onto the bus).
+    // Every one of the 18 sprite-X bands of both reference images is
+    // reproduced by these rules (2 tests x 18 bands, dot-exact).
+    // Derive the hardware window fetch-grid origin F at a DMG x==0 window
+    // start (the immediate TileNumber catch-up runs on the current dot, `chop`
+    // dots after the conceptual grid origin). See wg_apply.
+    fn wg_set_anchor(&mut self, chop: u64) {
+        self.wg_anchor_cc = None;
+        self.wg_dpre = 0;
+        if self.x != 0 {
+            return; // scoped to the x==0 restart family
+        }
+        let obj_en = (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0;
+        let mut pre_x: Option<u8> = None;
+        if obj_en {
+            let mut count = 0usize;
+            for s in &self.sprites_on_line {
+                if s.x <= 8 {
+                    count += 1;
+                    pre_x = Some(s.x);
+                }
+            }
+            if count > 1 {
+                return; // outside the calibrated single-pre-sprite case
+            }
+        }
+        let rb_absorb = if pre_x.is_some() { WG_RB_PRESTALL_ABSORB } else { 0 };
+        self.wg_dpre = match pre_x {
+            // Offscreen-left sprite: fetched before the window restart;
+            // 2-dot fetcher-boundary quantized delay, floor 7 (= 6-dot fetch
+            // + 1). X=0 -> 13, 1/2 -> 11, 3/4 -> 9, 5/6/7 -> 7.
+            Some(x) if x <= 7 => (13i64 - ((x as i64 + 1) & !1)).max(7) as u64,
+            // OAM X == 8 (window position 0): handled as a midline stall in
+            // wg_apply (the in-progress tile-1 fetch completes first).
+            _ => 0,
+        };
+        self.wg_anchor_cc = Some(self.abs_cc.saturating_sub(rb_absorb + chop));
+    }
+
+    fn wg_apply(&self, mut fls: fetcher::FetcherLcdcState) -> fetcher::FetcherLcdcState {
+        let Some(anchor) = self.wg_anchor_cc else {
+            return fls;
+        };
+        if self.wg_hist.is_empty() || !self.fetcher.is_fetching_window() {
+            return fls;
+        }
+        let k = self.fetcher.fetch_substep();
+        if k > 2 {
+            return fls; // PushToFIFO: no VRAM read
+        }
+        let n = self.fetcher.get_tile_index() as u64;
+        let mut h = anchor + self.wg_dpre + 8 * n + 2 * k as u64;
+        if (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0 {
+            for s in &self.sprites_on_line {
+                let pos = s.x as i64 - 8;
+                if pos >= 0 && (n as i64) >= pos / 8 + 2 {
+                    h += (11 - (pos % 8).min(5)) as u64;
+                }
+            }
+        }
+        const WG_BITS: u8 =
+            (LCDCFlags::WindowTileMapDisplaySelect as u8) | (LCDCFlags::BGWindowTileDataSelect as u8);
+        let mut bits = self.wg_hist[0].1; // before the first transition
+        let mut edge: Option<u8> = None;
+        for &(cc, old, new) in &self.wg_hist {
+            if h > cc {
+                bits = new;
+            } else {
+                if h == cc {
+                    bits = new;
+                    edge = Some(old);
+                }
+                break;
+            }
+        }
+        fls.lcdc = (fls.lcdc & !WG_BITS) | (bits & WG_BITS);
+        if let Some(old) = edge {
+            fls.or_lcdc = Some((fls.lcdc & !WG_BITS) | (old & WG_BITS));
+        }
+        fls
     }
 
     fn set_lcdc_visible(&mut self, value: u8, cgb_features_enabled: bool, ds: bool) {
@@ -4534,6 +4681,10 @@ impl Ppu {
                     // (apply_cc, quirk) so each byte fetch resolves it per-substep.
                     self.tidxtd_history.clear();
                     self.tidxtd_history.push((0, self.cgb_tile_index_is_tile_data));
+                    // DMG window bus-glitch state is per-line (see wg_apply).
+                    self.wg_hist.clear();
+                    self.wg_anchor_cc = None;
+                    self.wg_dpre = 0;
                     // Per-pixel DMG palette histories: seed each at boundary 0 with
                     // the 1-dot-delayed register value (`*_delayed`, refreshed at the
                     // end of every dot), NOT the live register. A BGP/OBP write on the
@@ -5223,7 +5374,8 @@ impl Ppu {
                             // The activation dot itself was one dot ago: its
                             // TileNumber is due now (catch-up), low/high/push at
                             // +1/+3/+5 via the anchored cadence.
-                            let fls = self.fetcher_lcdc_state();
+                            self.wg_set_anchor(0);
+                            let fls = self.wg_apply(self.fetcher_lcdc_state());
                             if let Some(event) = self.fetcher.step(
                                 mmio,
                                 self.win_y_pos,
@@ -5290,7 +5442,7 @@ impl Ppu {
                     self.win_being_fetched = false;
                 }
 
-                let fetcher_lcdc_state = self.fetcher_lcdc_state();
+                let fetcher_lcdc_state = self.wg_apply(self.fetcher_lcdc_state());
                 // Pixels still to be discarded for SCX fine-scroll: they sit in
                 // the FIFO but won't be displayed, so the BG tile column (derived
                 // from display_x + FIFO depth) must not count them.
@@ -5667,9 +5819,16 @@ impl Ppu {
                             // cluster; see win_wx0_delayed).
                             let chop = if (1..7).contains(&wx) { 7 - wx } else { 0 };
                             self.win_first_tile_chop = chop;
+                            // DMG window bus-glitch grid origin (see wg_apply):
+                            // this TileNumber's conceptual dot is `chop` dots in
+                            // the past; a pre-window offscreen sprite stall
+                            // delayed the anchored trigger by a constant 11 dots
+                            // that hardware does NOT share (its own delay is
+                            // D_pre, folded in at read evaluation).
+                            self.wg_set_anchor(chop as u64);
                             let mut phase = 0u8;
                             loop {
-                                let fls = self.fetcher_lcdc_state();
+                                let fls = self.wg_apply(self.fetcher_lcdc_state());
                                 if let Some(event) = self.fetcher.step(
                                     mmio,
                                     self.win_y_pos,
