@@ -414,7 +414,18 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         }
         Oracle::MooneyeFib => return evaluate_mooneye(&mut gb, 0x40),
         Oracle::MooneyeFibEd => return evaluate_mooneye(&mut gb, 0xED),
-        Oracle::CspPng { path } => return evaluate_csp_png(&mut gb, options, path, false),
+        Oracle::CspPng { path } => {
+            let trace_case = options
+                .trace_rom
+                .as_deref()
+                .map(|needle| case.rom_path.to_string_lossy().contains(needle))
+                .unwrap_or(false);
+            if trace_case {
+                let mut trace = TimingTrace::new(options.trace_limit, options.trace_ly);
+                return evaluate_csp_png_traced(&mut gb, options, path, &mut trace);
+            }
+            return evaluate_csp_png(&mut gb, options, path, false);
+        }
         Oracle::CspPngFixed { path } => return evaluate_csp_png(&mut gb, options, path, true),
         Oracle::PngShootout { refs, frames } => {
             return evaluate_png_shootout(&mut gb, options, refs, *frames);
@@ -864,6 +875,69 @@ fn evaluate_csp_png(
             let _ = frame::write_ppm(&dir.join(format!("{stem}.actual.ppm")), &actual);
             let _ = frame::write_ppm(&dir.join(format!("{stem}.expected.ppm")), &expected);
         }
+        Err(format!(
+            "screen did not match PNG {}: {}",
+            refpng.display(),
+            mismatch.describe()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Trace-enabled variant of the csp PNG path: runs the same ldbb frame loop but
+/// emits TRACE/FETCH/PIXEL events for the selected frame (diagnostic only).
+fn evaluate_csp_png_traced(
+    gb: &mut GB,
+    options: &RunOptions,
+    refpng: &std::path::Path,
+    trace: &mut TimingTrace,
+) -> Result<(), String> {
+    let mut last: Option<Vec<u32>> = None;
+    let mut done = false;
+    for frame_index in 0..options.frames {
+        let trace_this_frame = options
+            .trace_frame
+            .map(|trace_frame| trace_frame == frame_index)
+            .unwrap_or(true);
+        gb.set_fetch_debug_events_enabled(trace_this_frame);
+        let mut cycles = 0u32;
+        loop {
+            let pc = gb.get_cpu_registers().pc;
+            if gb.read_memory(pc) == 0x40 {
+                done = true;
+                break;
+            }
+            if trace_this_frame {
+                let before = trace_snapshot(gb);
+                let (_breakpoint, c) = gb.step_instruction(false);
+                let fetch_events = gb.take_fetch_debug_events();
+                let pixel_events = gb.take_pixel_debug_events();
+                let after = trace_snapshot(gb);
+                trace.emit(frame_index, before, after, c);
+                trace.emit_fetch_events(frame_index, before.pc, &fetch_events);
+                trace.emit_pixel_events(frame_index, before.pc, &pixel_events);
+                cycles += c;
+            } else {
+                let (_breakpoint, c) = gb.step_instruction(false);
+                cycles += c;
+            }
+            if gb.get_ppu_debug_info().0.frame_ready() {
+                break;
+            }
+            if cycles >= MAX_CYCLES_UNTIL_LCD_FRAME {
+                return Err(format!("frame {frame_index} timeout"));
+            }
+        }
+        last = Some(frame::normalize_frame(gb.get_current_frame()));
+        if done {
+            break;
+        }
+    }
+    let actual = last.ok_or_else(|| "no frame produced".to_string())?;
+    let expected = frame::read_png_rgb(refpng)
+        .map_err(|e| format!("reference PNG {}: {e}", refpng.display()))?;
+    if let Some(mismatch) = frame::frame_buffer_mismatch(&actual, &expected) {
         Err(format!(
             "screen did not match PNG {}: {}",
             refpng.display(),
