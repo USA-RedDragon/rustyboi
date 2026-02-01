@@ -135,11 +135,9 @@ fn win_y_pos_init() -> u8 { 0xFF }
 // deleted and each is now its single calibrated constant.
 const M0IRQ_SCX2_CGB_OFFSET: i64 = -1;
 // DMG window bus-glitch (wg_apply): dots from the LCDC write's register commit
-// to the VRAM address-line transition, and the renderer's absorbed pre-window
-// sprite-stall (the anchored x==0 restart trigger fires a constant 11 dots
-// later when an OAM X<=8 sprite stalled the prologue).
+// to the VRAM address-line transition. (The renderer's absorbed pre-window
+// sprite stall is read from the live SpriteFetchRec, not a constant.)
 const WG_TRANSITION_DELAY: u64 = 4;
-const WG_RB_PRESTALL_ABSORB: u64 = 11;
 const WY1_DELAY: i64 = 2;
 const WY2_DELAY_CGB: i64 = 7;
 const WY2_DELAY_DMG: i64 = 4;
@@ -2035,7 +2033,10 @@ impl Ppu {
     //    (2-dot fetcher-boundary quantized; single-sprite calibration).
     //  - An on-screen sprite at window position pos = X - 8 >= 0 lets the
     //    in-progress tile fetch complete through TileDataHigh, then inserts its
-    //    stall: tiles >= pos/8 + 2 shift by the classic 11 - min(5, pos % 8).
+    //    stall: tiles >= pos/8 + 2 shift by the sprite's actually-charged
+    //    penalty, read from its live fetch record (`sprite_fetch_recs` — the
+    //    classic max(11 - dist, 6) leading rate / flat-6 follower, or nothing
+    //    if the walk dropped/aborted the sprite).
     //  - A read strictly between the transitions sees the post-write bits; a
     //    read ON a transition dot returns the OR of both addresses' bytes (the
     //    address lines change mid-read; both cells drive 1-bits onto the bus).
@@ -2050,30 +2051,48 @@ impl Ppu {
         if self.x != 0 {
             return; // scoped to the x==0 restart family
         }
-        let obj_en = (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0;
-        let mut pre_x: Option<u8> = None;
-        if obj_en {
-            let mut count = 0usize;
-            for s in &self.sprites_on_line {
-                if s.x <= 8 {
-                    count += 1;
-                    pre_x = Some(s.x);
-                }
+        // Pre-window sprites (OAM X <= 8) resolved from the LIVE per-sprite
+        // fetch records (`sprite_fetch_recs`), not a closed-form stall model:
+        // the renderer's anchored restart trigger fired exactly the sprite's
+        // actually-charged penalty later (rb_absorb), and a sprite that never
+        // fetched (OBJ off at its match dot) delayed neither the renderer nor
+        // the hardware grid.
+        let mut pre: Option<(u8, u64)> = None;
+        for (i, s) in self.sprites_on_line.iter().enumerate() {
+            if s.x > 8 {
+                continue;
             }
-            if count > 1 {
-                return; // outside the calibrated single-pre-sprite case
+            let Some(rec) = self.sprite_fetch_recs.get(i) else {
+                continue;
+            };
+            match rec.phase {
+                SpriteFetchPhase::Fetched => {
+                    if pre.is_some() {
+                        return; // outside the calibrated single-pre-sprite case
+                    }
+                    pre = Some((s.x, rec.penalty as u64));
+                }
+                // Mid-fetch abort: a PARTIAL stall was charged; no calibration
+                // evidence for the partial absorb — leave the model off.
+                SpriteFetchPhase::Aborted if rec.penalty > 0 => return,
+                // Dropped (match dot passed with OBJ off) or still pending:
+                // no stall happened.
+                _ => {}
             }
         }
-        let rb_absorb = if pre_x.is_some() { WG_RB_PRESTALL_ABSORB } else { 0 };
-        self.wg_dpre = match pre_x {
-            // Offscreen-left sprite: fetched before the window restart;
-            // 2-dot fetcher-boundary quantized delay, floor 7 (= 6-dot fetch
-            // + 1). X=0 -> 13, 1/2 -> 11, 3/4 -> 9, 5/6/7 -> 7.
-            Some(x) if x <= 7 => (13i64 - ((x as i64 + 1) & !1)).max(7) as u64,
-            // OAM X == 8 (window position 0): handled as a midline stall in
-            // wg_apply (the in-progress tile-1 fetch completes first).
-            _ => 0,
+        let (rb_absorb, dpre) = match pre {
+            // Offscreen-left sprite: hardware fetches it BEFORE the window
+            // restart; the grid delay D_pre is 2-dot fetcher-boundary
+            // quantized with floor 7 (= 6-dot fetch + 1). X=0 -> 13,
+            // 1/2 -> 11, 3/4 -> 9, 5/6/7 -> 7.
+            Some((x, p)) if x <= 7 => (p, (13i64 - ((x as i64 + 1) & !1)).max(7) as u64),
+            // OAM X == 8 (window position 0): the hardware-side stall is a
+            // midline shift resolved per-read in wg_apply (the in-progress
+            // tile-1 fetch completes first).
+            Some((_, p)) => (p, 0),
+            None => (0, 0),
         };
+        self.wg_dpre = dpre;
         self.wg_anchor_cc = Some(self.abs_cc.saturating_sub(rb_absorb + chop));
     }
 
@@ -2090,12 +2109,22 @@ impl Ppu {
         }
         let n = self.fetcher.get_tile_index() as u64;
         let mut h = anchor + self.wg_dpre + 8 * n + 2 * k as u64;
-        if (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0 {
-            for s in &self.sprites_on_line {
-                let pos = s.x as i64 - 8;
-                if pos >= 0 && (n as i64) >= pos / 8 + 2 {
-                    h += (11 - (pos % 8).min(5)) as u64;
-                }
+        // Midline sprite stalls (window pos = X - 8 >= 0): each sprite the
+        // live walk actually FETCHED (`sprite_fetch_recs`) shifts every window
+        // tile from pos/8 + 2 on by its actually-charged penalty (the
+        // in-progress tile's reads do NOT shift; any gated read evaluates
+        // after the sprite's match dot, so its record is final here).
+        // Dropped/aborted sprites shift nothing.
+        for (i, s) in self.sprites_on_line.iter().enumerate() {
+            let pos = s.x as i64 - 8;
+            if pos < 0 {
+                continue; // offscreen-left: folded into wg_dpre
+            }
+            let Some(rec) = self.sprite_fetch_recs.get(i) else {
+                continue;
+            };
+            if rec.phase == SpriteFetchPhase::Fetched && (n as i64) >= pos / 8 + 2 {
+                h += rec.penalty as u64;
             }
         }
         const WG_BITS: u8 =
@@ -6116,10 +6145,11 @@ impl Ppu {
                             self.win_first_tile_chop = chop;
                             // DMG window bus-glitch grid origin (see wg_apply):
                             // this TileNumber's conceptual dot is `chop` dots in
-                            // the past; a pre-window offscreen sprite stall
-                            // delayed the anchored trigger by a constant 11 dots
-                            // that hardware does NOT share (its own delay is
-                            // D_pre, folded in at read evaluation).
+                            // the past; a pre-window sprite stall delayed the
+                            // anchored trigger by its live charged penalty
+                            // (SpriteFetchRec) that hardware does NOT share
+                            // (its own delay is D_pre, folded in at read
+                            // evaluation).
                             self.wg_set_anchor(chop as u64);
                             let mut phase = 0u8;
                             loop {
