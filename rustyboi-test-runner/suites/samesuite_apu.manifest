@@ -7,7 +7,7 @@ ss6|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_1/channel_1_
 ss7|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_1/channel_1_freq_change.gb|
 ss8|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_1/channel_1_freq_change_timing-A.gb|
 ss9|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_1/channel_1_freq_change_timing-cgb0BC.gb|
-ss10|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_1/channel_1_freq_change_timing-cgbDE.gb|
+ss10|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_1/channel_1_freq_change_timing-cgbDE.gb|rev=cgbe
 ss11|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_1/channel_1_nrx2_glitch.gb|
 ss12|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_1/channel_1_nrx2_speed_change.gb|
 ss13|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_1/channel_1_restart.gb|
@@ -54,7 +54,7 @@ ss53|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_4/channel_4
 ss54|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_4/channel_4_delay.gb|
 ss55|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_4/channel_4_equivalent_frequencies.gb|
 ss56|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_4/channel_4_extra_length_clocking-cgb0B.gb|
-ss57|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_4/channel_4_freq_change.gb|
+ss57|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_4/channel_4_freq_change.gb|rev=cgbe
 ss58|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_4/channel_4_frequency_alignment.gb|
 ss59|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_4/channel_4_lfsr_15_7.gb|
 ss60|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/apu/channel_4/channel_4_lfsr15.gb|
