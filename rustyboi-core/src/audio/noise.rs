@@ -81,6 +81,12 @@ pub struct Noise {
     countdown_reloaded: bool,
     #[serde(default)]
     did_step_counter: bool,
+    // SameBoy `lfsr_stepped_in_narrow` / `lfsr_bit_7_before_step`: LFSR-width
+    // switch history for the CGB-E NR43 category-1 glitch (see nr43_glitch_write).
+    #[serde(default)]
+    lfsr_stepped_in_narrow: bool,
+    #[serde(default)]
+    lfsr_bit7_before_step: bool,
     // DMG-only delayed channel start (SameBoy `dmg_delayed_start`).
     #[serde(default)]
     dmg_delayed_start: u32,
@@ -153,6 +159,8 @@ impl Noise {
             background_active: false,
             countdown_reloaded: false,
             did_step_counter: false,
+            lfsr_stepped_in_narrow: false,
+            lfsr_bit7_before_step: false,
             dmg_delayed_start: 0,
             started_with_dac_off: false,
             last_run_cc: 0,
@@ -202,6 +210,8 @@ impl Noise {
         self.background_active = false;
         self.countdown_reloaded = false;
         self.did_step_counter = false;
+        self.lfsr_stepped_in_narrow = false;
+        self.lfsr_bit7_before_step = false;
         self.dmg_delayed_start = 0;
         self.started_with_dac_off = false;
         self.last_run_cc = self.cc;
@@ -461,9 +471,16 @@ impl Noise {
         }
     }
 
+    /// SameBoy `update_lfsr`: refresh the latched output bit from LFSR bit 0
+    /// (used by the NR43 glitch paths that mutate the LFSR without stepping).
+    fn update_lfsr(&mut self) {
+        self.current_sample = self.lfsr & 1 != 0;
+    }
+
     /// SameBoy `step_lfsr`: feedback `(lfsr ^ lfsr>>1 ^ 1) & 1` into bit 14
     /// (and bit 6 in narrow mode); output = bit 0.
     fn step_lfsr(&mut self) {
+        self.lfsr_bit7_before_step = self.lfsr & 0x80 != 0;
         let high_mask: u16 = if self.narrow { 0x4040 } else { 0x4000 };
         let new_high = (self.lfsr ^ (self.lfsr >> 1) ^ 1) & 1 != 0;
         self.lfsr >>= 1;
@@ -473,7 +490,8 @@ impl Noise {
             // Relevant when switching LFSR widths.
             self.lfsr &= !high_mask;
         }
-        self.current_sample = self.lfsr & 1 != 0;
+        self.update_lfsr();
+        self.lfsr_stepped_in_narrow = self.narrow;
     }
 
     /// SameBoy `prepare_noise_start` (Core/apu.c), CGB-C-and-older + DMG
@@ -646,10 +664,170 @@ impl Noise {
         }
     }
 
-    /// SameBoy NR43 write: if the counter countdown just reloaded, re-derive
-    /// it from the new divisor with the alignment-phase table, and apply the
-    /// <=CGB-C reload-coincident LFSR step glitch. The ripple counter itself
-    /// keeps running (frequency changes are inherently glitch-accurate).
+    /// SameBoy master `nr43_write` (Core/apu.c, the issue-#397 rework),
+    /// CGB-E model: an NR43 write whose frequency nibble changes sends glitch
+    /// signals to the LFSR, categorized by the (old_bit, new_bit, glitch_bit)
+    /// triple read from the ripple counter. `glitch_bit` reads the counter at
+    /// an intermediate register value mixing the old low bits with the new
+    /// top bit. CGB-D maps, the AGB approximation and the <=CGB-C FF-
+    /// intermediate leg are omitted (see `write_nr43` — only `cgb_de` routes
+    /// here; SameSuite channel_4_freq_change is the rev=cgbe pin).
+    fn nr43_glitch_write(&mut self, new: u8) {
+        let old_narrow = self.narrow;
+        self.narrow = new & 8 != 0;
+        let old = self.nr43;
+        self.nr43 = new;
+
+        if (old & 0xF0) == (new & 0xF0) {
+            return;
+        }
+
+        let effective_counter = self.counter;
+        let old_bit = (effective_counter >> (old >> 4)) & 1 != 0;
+        let glitch_value = (old & 0x7F) | (new & 0x80);
+        let glitch_bit = (effective_counter >> (glitch_value >> 4)) & 1 != 0;
+        let new_bit = (effective_counter >> (new >> 4)) & 1 != 0;
+
+        if old_bit == new_bit && new_bit != glitch_bit {
+            // Glitching write. Two categories; these are SameBoy's
+            // deterministic common variants.
+            if new_bit {
+                // Category 1.
+                if new & 0x80 == 0 {
+                    self.step_lfsr();
+                } else {
+                    // Only happens under this odd condition (SameBoy).
+                    let t1 = (old >> 4) & 7;
+                    let t2 = (new >> 4) & 7;
+                    if (t1 ^ 7) + t2 > 7 || ((t1 ^ 7) & t2) != 0 {
+                        // Copy bit 8 to bit 7.
+                        self.lfsr = (self.lfsr & !0x80) | ((self.lfsr >> 1) & 0x80);
+                        // The specific cases below have non-deterministic
+                        // variants; these are SameBoy's deterministic picks.
+                        if (t1 == 0 || t1 == 4) && t2 == 3 {
+                            self.lfsr &= (self.lfsr >> 1) | 0x545;
+                            self.update_lfsr();
+                        } else if t1 == 2 && t2 == 3 {
+                            let mut mask: u16 = 0x555;
+                            if self.lfsr & 0xC == 0xC {
+                                mask |= 8;
+                            }
+                            if self.lfsr & 0xC00 == 0xC00 {
+                                mask |= 0x800;
+                            }
+                            self.lfsr &= (self.lfsr >> 1) | mask;
+                            self.update_lfsr();
+                        }
+                        if !self.narrow && old_narrow && self.lfsr_stepped_in_narrow {
+                            if self.lfsr_bit7_before_step {
+                                self.lfsr |= 0x40;
+                            } else {
+                                self.lfsr &= !0x40;
+                            }
+                        }
+                        self.lfsr |= if self.narrow { 0x4040 } else { 0x4000 };
+                        self.lfsr_stepped_in_narrow = self.narrow;
+                    }
+                }
+            } else {
+                // Category 2: transition-indexed glitch map,
+                // glitch_map[old_high*8 + new_high], only for NR43 bit 7 set.
+                const GLITCH_MAP: [u8; 64] = [
+                    0, 0, 4, 2, 2, 2, 0, 0, // old high 0, new high 0..7
+                    0, 0, 2, 4, 2, 2, 0, 0, // 1
+                    1, 2, 0, 1, 5, 3, 0, 0, // 2
+                    0, 0, 0, 0, 2, 2, 0, 0, // 3
+                    0, 2, 2, 2, 0, 0, 0, 0, // 4
+                    6, 0, 2, 2, 0, 0, 0, 0, // 5
+                    0, 0, 0, 0, 0, 0, 0, 0, // 6
+                    0, 0, 0, 0, 0, 0, 0, 0, // 7
+                ];
+                let glitch = if new & 0x80 != 0 {
+                    GLITCH_MAP[(((old & 0x70) >> 1) | ((new & 0x70) >> 4)) as usize]
+                } else {
+                    0
+                };
+                match glitch {
+                    1 | 6 => {
+                        // Step, followed by bit1 &= bit0 (glitch 6 first
+                        // unsets a mid bit under specific patterns).
+                        self.step_lfsr();
+                        if glitch == 6 {
+                            if (self.narrow && (self.lfsr & 0x71) == 0x20)
+                                || (self.lfsr & 0x71) == 0x61
+                            {
+                                self.lfsr &= !0x20;
+                            }
+                            if (self.lfsr & 0x7001) == 0x2000
+                                || (self.lfsr & 0x7001) == 0x6001
+                            {
+                                self.lfsr &= !0x2000;
+                            }
+                        }
+                        if (self.lfsr & 0x3) == 2 {
+                            self.lfsr &= !2;
+                        }
+                    }
+                    2 => {
+                        // Step, bitwise AND with previous, except bit 0.
+                        let prev = self.lfsr;
+                        self.step_lfsr();
+                        self.lfsr &= prev | 1;
+                    }
+                    3 | 5 => {
+                        // No step; bit0 = bit1 (glitch 5 first applies the
+                        // non-deterministic high-bit/bit-3 variants).
+                        if glitch == 5 {
+                            if (self.lfsr & 0x3) == 2 {
+                                self.lfsr &=
+                                    if self.narrow { !0x4040 } else { !0x4000 };
+                            }
+                            if (self.lfsr & 0x19) == 8 {
+                                self.lfsr &= !8;
+                            }
+                        }
+                        self.lfsr &= !1;
+                        self.lfsr |= (self.lfsr >> 1) & 1;
+                        self.update_lfsr();
+                        self.lfsr_stepped_in_narrow = self.narrow;
+                    }
+                    4 => {
+                        // Step, bit1 &= bit0, LFSR bit-1 &= LFSR bit.
+                        let prev = self.lfsr;
+                        self.step_lfsr();
+                        self.lfsr &= prev | if self.narrow { !0x2022 } else { !0x2002 };
+                    }
+                    _ => {
+                        self.step_lfsr();
+                    }
+                }
+            }
+        } else if !old_bit && new_bit {
+            self.step_lfsr();
+        }
+    }
+
+    /// SameBoy NR43 write (`GB_apu_write` case GB_IO_NR43): if the counter
+    /// countdown just reloaded, re-derive it from the new divisor with the
+    /// alignment-phase table ({2,1,4,3} on <=CGB-C, {2,1,0,3} on D/E), then
+    /// run the revision write model. The ripple counter itself keeps running
+    /// (frequency changes are inherently glitch-accurate).
+    ///
+    /// CGB-E (`cgb_de`, SameSuite's validation silicon) takes the master-
+    /// SameBoy `nr43_write` glitch categories — SameSuite channel_4_freq_-
+    /// change (rev=cgbe) pins all 64 subtests of it.
+    ///
+    /// <=CGB-C keeps only the reload-coincident LFSR step glitch. SameBoy
+    /// master additionally routes every <=CGB-C write through an $FF
+    /// intermediate value ("all writes go through 3 intermediate values" on
+    /// pre-CGB-D silicon), but its own comments call the pre-D behavior
+    /// non-deterministic and instance-specific ("only 100% accurate in CGB-E
+    /// mode"), and porting that leg regresses the C-model SameSuite rows
+    /// channel_4_lfsr_15_7 / channel_4_lfsr_7_15 (measured: the $FF
+    /// intermediate makes every width-only NR43 write glitch, since the $F
+    /// top nibble always differs). Our C-side oracles (gambatte cgb04c
+    /// captures + those rows) pin the glitch-free behavior, so the FF leg is
+    /// deliberately not applied.
     fn write_nr43(&mut self, value: u8) {
         self.advance();
         if self.countdown_reloaded {
@@ -657,15 +835,21 @@ impl Noise {
             if divisor == 0 {
                 divisor = 2;
             }
-            // <= CGB_C table {2,1,4,3} (CGB-D/E use {2,1,0,3}).
+            let table: [u32; 4] = if self.cgb_de { [2, 1, 0, 3] } else { [2, 1, 4, 3] };
             let adj = if divisor == 2 {
                 0
             } else {
-                [2u32, 1, 4, 3][(self.alignment & 3) as usize]
+                table[(self.alignment & 3) as usize]
             };
             self.counter_countdown = divisor + adj;
-
-            // <= CGB_C: reload-coincident bit-transition glitch.
+        }
+        if self.cgb_de {
+            self.nr43_glitch_write(value);
+            return;
+        }
+        if self.countdown_reloaded {
+            // <= CGB_C: reload-coincident bit-transition glitch (RAW counter,
+            // not the effective OR-decrement view).
             let old_bit = (self.counter >> (self.nr43 >> 4)) & 1 != 0;
             let glitch_bit = (self.counter >> 7) & 1 != 0;
             let new_bit = (self.counter >> (value >> 4)) & 1 != 0;
