@@ -311,40 +311,51 @@ impl GB {
         // Post-boot DIV phase. `write(DIV)` above resets the counter, so set the
         // hardware boot value of the 16-bit internal counter directly (its low
         // 16 bits drive DIV and the TIMA/serial/APU pre-tick phase).
-        // The default CGB counter (0x1EA0) is anchored to rustyboi's CGB
-        // PPU/CPU timing (Gambatte-aligned): it is load-bearing for the gambatte
-        // hwtest CGB references and must stay. The boot-rev-only models (DMG0,
-        // SGB/SGB2, CGB0) are never used for the rendering suites, so they carry
-        // their real-hardware post-boot DIV phase, sourced empirically from the
-        // mooneye boot_div assert chains (each boot_div-<rev> ROM reads DIV six
-        // times at fixed NOP offsets; the value below is the unique post-boot
-        // 16-bit counter that reproduces that revision's fingerprint on
-        // rustyboi's timer). AGB is opt-in (never in the default mode set), so it
-        // likewise takes its real-hardware boot_div phase.
+        // Values are sourced empirically from the mooneye boot_div assert
+        // chains (each boot_div-<rev> ROM reads DIV six times at fixed NOP
+        // offsets; the value is the unique post-boot 16-bit counter that
+        // reproduces that revision's fingerprint on rustyboi's timer) and from
+        // the Gambatte hwtest CGB anchors (start_inc_1/_2 read DIV directly).
+        //
+        // CGB/AGB counters are CART-TYPE dependent (resolved 2026-07-02; this
+        // was previously documented as a two-oracle conflict). The CGB boot ROM
+        // has two hand-off paths: for CGB-flagged carts it hands off with the
+        // DIV counter at 0x1EA0; for DMG-flagged carts it additionally runs the
+        // DMG-compat setup (logo-checksum palette lookup + KEY0 latch), handing
+        // off 0x7D8 cc later at 0x2678. Both anchors are real hardware:
+        //   - CGB cart  -> 0x1EA0: Gambatte's hwtest CGB refs (start_inc_1/_2
+        //     out1E/out1F, tc00_start_2, fexx_ffxx_dumper, 11 ch1/ch2 boot-phase
+        //     sound tests) and BullyGB's initial-DIV check — all CGB-flagged
+        //     carts. (== Gambatte setPostBiosState cycleCounter 0x102A0 -
+        //     divLastUpdate -0x1C00, low 16 bits.)
+        //   - DMG cart  -> 0x2678: mooneye misc/boot_div-cgbABCDE — a
+        //     DMG-flagged cart, so Gekkio's fingerprint measured the compat
+        //     path.
+        // Mechanical confirmation: executing the real CGB boot ROM
+        // (bios/cgb_boot.bin) in-emulator hands off at DIV_CTR 0x1E9D for a
+        // CGB cart vs 0x2675 for a DMG cart (--validate-bios), reproducing
+        // both anchors with the same ~3 cc residual.
+        let cgb_cart = self.should_enable_cgb_features();
         let boot_counter: u16 = match self.hardware {
-            // KNOWN CONFLICT (measured 2026-07-02): the hardware-authentic
-            // bare-boot CGB counter is 0x2678 (== AGB 0x267C - 4; == CGB0
-            // 0x2884 - ~2 DIV; VERIFIED: 0x2678 passes mooneye
-            // boot_div-cgbABCDE, the one remaining shootout mooneye fail).
-            // But 0x2678 breaks EXACTLY 15 gambatte CGB hwtests whose refs
-            // encode this synthetic counter (Gambatte setPostBiosState
-            // cycleCounter 0x102A0 - divLastUpdate -0x1C00, low 16 = 0x1EA0):
-            // start_inc_1/_2 (out1E/out1F literally read this DIV), tc00_start_2,
-            // fexx_ffxx_dumper, and 11 ch1/ch2 init/reset sweep/env/length
-            // boot-phase audio tests. The six boot_div reads pin the counter to
-            // a 4cc window, so no phase-preserving compromise exists — a hard
-            // either/or between the two reference sets until the gambatte
-            // boot-anchored refs are re-derived. --real-bios does not resolve
-            // it (the emulated bios path is not DIV-calibrated; both boot_div
-            // tests fail under it).
-            Hardware::CGB | Hardware::CGBE => 0x1EA0,
-            // boot_div-cgb0 fingerprint (29 2a 2a 2b 2c 2e); leads CGB-A..E by
-            // ~2 DIV increments. Verified: passes mooneye boot_div-cgb0.
+            Hardware::CGB | Hardware::CGBE => {
+                if cgb_cart { 0x1EA0 } else { 0x2678 }
+            }
+            // boot_div-cgb0 fingerprint (29 2a 2a 2b 2c 2e), a DMG cart, so
+            // this pins the CGB0 compat path only. CGB0's boot ROM differs from
+            // CGB-A..E's, so its CGB-cart value cannot be inferred from the
+            // 0x7D8 delta; CGB0 is only used for the mooneye boot rows (all DMG
+            // carts). Verified: passes mooneye boot_div-cgb0.
             Hardware::CGB0 => 0x2884,
-            // boot_div-A fingerprint (27 28 28 29 2a 2c) == CGB-A..E + 4 master-cc
-            // (Gambatte setPostBiosState 0x102A0 + agb*4). Verified: passes
-            // mooneye boot_div-A. AGB is opt-in, outside the default suites.
-            Hardware::AGB => 0x267C,
+            // boot_div-A fingerprint (27 28 28 29 2a 2c), a DMG cart: AGB
+            // compat path == CGB + 4 master-cc. The AGB boot ROM is the CGB
+            // boot ROM with a trivial tail difference (B=1 hand-off), so the +4
+            // carries to the CGB-cart path: 0x1EA4 == Gambatte setPostBiosState
+            // 0x102A0 + agb*4 (the Gambatte-AGB bootstrap oracle's counter).
+            // Verified: passes mooneye boot_div-A. AGB is opt-in, outside the
+            // default suites.
+            Hardware::AGB => {
+                if cgb_cart { 0x1EA4 } else { 0x267C }
+            }
             Hardware::DMG | Hardware::MGB => 0xABCC,
             // boot_div-S / boot_div2-S fingerprint (d9 da da db dc de). The SGB
             // CPU uses the DMG-style single-speed timer; this is the post-boot
