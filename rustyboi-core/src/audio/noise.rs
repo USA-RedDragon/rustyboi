@@ -113,20 +113,6 @@ fn len_disabled() -> u32 {
     LEN_DISABLED
 }
 
-/// Calibration knob: `RB_APU_CH4_ALIGN=N` (0..3) offsets the power-on
-/// `alignment` seed to map SameBoy's write-instant frame onto rustyboi's
-/// dot-sync frame.
-fn ch4_align_seed() -> u32 {
-    static FLAG: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| {
-        std::env::var("RB_APU_CH4_ALIGN")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0)
-            & 3
-    })
-}
-
 impl Noise {
     pub fn new() -> Self {
         Noise {
@@ -204,7 +190,7 @@ impl Noise {
         self.current_sample = false;
         self.counter = 0;
         self.counter_countdown = 0;
-        self.alignment = ch4_align_seed();
+        self.alignment = 0;
         self.narrow = false;
         self.counter_active = false;
         self.background_active = false;
