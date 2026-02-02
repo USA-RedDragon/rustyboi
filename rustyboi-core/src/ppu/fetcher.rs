@@ -586,16 +586,16 @@ mod tests {
 
         let mut fetcher = Fetcher::new();
         let state = lcdc_state(&mmio, false);
-        let tile_number = fetcher.step(&mut mmio, 0, state, 0).unwrap();
+        let tile_number = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
         assert_eq!(tile_number.kind, FetcherDebugEventKind::TileNumber);
         assert_eq!(tile_number.tile_num, TILE_ID);
         assert_eq!(tile_number.tile_attributes, 0x07);
 
-        let tile_data_low = fetcher.step(&mut mmio, 0, state, 0).unwrap();
+        let tile_data_low = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
         assert_eq!(tile_data_low.kind, FetcherDebugEventKind::TileDataLow);
         assert_eq!(tile_data_low.value, Some(0b1010_1010));
 
-        let tile_data_high = fetcher.step(&mut mmio, 0, state, 0).unwrap();
+        let tile_data_high = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
         assert_eq!(tile_data_high.kind, FetcherDebugEventKind::TileDataHigh);
         assert_eq!(tile_data_high.value, Some(0b0101_0101));
     }
@@ -612,16 +612,16 @@ mod tests {
 
         let mut fetcher = Fetcher::new();
         let state = lcdc_state(&mmio, false);
-        let tile_number = fetcher.step(&mut mmio, 0, state, 0).unwrap();
+        let tile_number = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
         assert_eq!(tile_number.kind, FetcherDebugEventKind::TileNumber);
         assert_eq!(tile_number.tile_num, TILE_ID);
         assert_eq!(tile_number.tile_attributes, 0x08);
 
-        let tile_data_low = fetcher.step(&mut mmio, 0, state, 0).unwrap();
+        let tile_data_low = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
         assert_eq!(tile_data_low.kind, FetcherDebugEventKind::TileDataLow);
         assert_eq!(tile_data_low.value, Some(0x33));
 
-        let tile_data_high = fetcher.step(&mut mmio, 0, state, 0).unwrap();
+        let tile_data_high = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
         assert_eq!(tile_data_high.kind, FetcherDebugEventKind::TileDataHigh);
         assert_eq!(tile_data_high.value, Some(0x44));
     }
@@ -639,14 +639,14 @@ mod tests {
 
         let mut fetcher = Fetcher::new();
         let state = lcdc_state(&mmio, true);
-        let tile_number = fetcher.step(&mut mmio, 0, state, 0).unwrap();
+        let tile_number = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
         assert!(tile_number.tile_index_is_tile_data);
 
-        let tile_data_low = fetcher.step(&mut mmio, 0, state, 0).unwrap();
+        let tile_data_low = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
         assert_eq!(tile_data_low.kind, FetcherDebugEventKind::TileDataLow);
         assert_eq!(tile_data_low.value, Some(TILE_ID));
 
-        let tile_data_high = fetcher.step(&mut mmio, 0, state, 0).unwrap();
+        let tile_data_high = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
         assert_eq!(tile_data_high.kind, FetcherDebugEventKind::TileDataHigh);
         assert_eq!(tile_data_high.value, Some(TILE_ID));
 
