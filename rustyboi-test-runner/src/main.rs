@@ -76,7 +76,7 @@ struct Args {
     /// Parallel case workers. Cases are independent (one GB instance each);
     /// results are printed/recorded in case order, so the text and JSON output
     /// are byte-identical to a sequential run. Default: the RB_JOBS env var,
-    /// else min(8, cores/2) to stay polite on a shared box. Forced to 1 when
+    /// else cores-1. Forced to 1 when
     /// --trace-rom, --fail-fast, or RB_SS_DUMP is active (their streamed
     /// diagnostics / early-stop semantics require sequential execution).
     #[arg(long, value_name = "N")]
@@ -217,7 +217,7 @@ fn run() -> Result<u8, String> {
     Ok(summary.exit_code())
 }
 
-/// Resolve the worker count: --jobs, else RB_JOBS, else min(8, cores/2).
+/// Resolve the worker count: --jobs, else RB_JOBS, else cores-1.
 /// Trace/diagnostic modes and --fail-fast force 1 (streamed stderr output
 /// would interleave; fail-fast must stop at the first failure in case order).
 fn resolve_jobs(args: &Args) -> usize {
@@ -239,7 +239,7 @@ fn resolve_jobs(args: &Args) -> usize {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2);
-    (cores / 2).clamp(1, 8)
+    cores.saturating_sub(1).max(1)
 }
 
 /// Run all cases and record them into `summary` in case order. `jobs <= 1`
