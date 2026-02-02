@@ -274,15 +274,28 @@ impl Sgb {
             cmd::MLT_REQ => {
                 // Byte 1 bits 0-1 select the player count: 0->1, 1->2, 2->3, 3->4.
                 // NOTE: SameBoy's HLE folds the invalid `2` case up to 4 players;
-                // real SGB silicon keeps it as a *glitched 3-player* mode (the
-                // wrap uses a non-power-of-two modulus), which SameSuite's
-                // command_mlt_req captures. We model the hardware, not the HLE:
-                // keep player_count = (byte1 & 3) + 1 with no fold, and reconcile
-                // the index against the new count with a modulo (so 3 players
-                // cycles 0,1,2 rather than the `& 2` glitch an AND-mask would
-                // give).
+                // real SGB silicon keeps it as a *glitched 3-player* mode, which
+                // SameSuite's command_mlt_req captures. We model the hardware,
+                // not the HLE: player_count = (byte1 & 3) + 1 with no fold.
+                //
+                // Index reconcile at dispatch: for the valid counts (1/2/4) the
+                // index is AND-masked into range. For the invalid count 3 the
+                // dispatch additionally clocks the glitched counter ONCE —
+                // `(index+1) & 2`, the same broken step a P15 edge performs in
+                // that mode. This is pinned by command_mlt_req results 15-18
+                // (real SGB): entering mode 2 from 4-player index 0 and from
+                // index 1 must BOTH read player 3 (0xD), which no pure
+                // mask/modulo reconcile of a shared counter can produce; the
+                // extra glitch-step maps 1->2 and 2->2 (results 15/16) while
+                // keeping 3->0 and 0->0 (results 17/18). The 648-model sweep
+                // over edge/gate/wrap/read/reconcile families has NO other
+                // survivors (see f-mlt sweep).
                 self.players = (self.command[1] & 3) + 1;
-                self.joypad_index %= self.players;
+                if self.players == 3 {
+                    self.joypad_index = self.joypad_index.wrapping_add(1) & 2;
+                } else {
+                    self.joypad_index &= self.players - 1;
+                }
             }
             cmd::MASK_EN => {
                 self.mask = match self.command[1] & 0x03 {
