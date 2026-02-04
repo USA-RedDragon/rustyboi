@@ -415,6 +415,20 @@ pub struct Mmio {
     #[serde(skip, default)]
     halt_wakeup_skew: bool,
 
+    // True when an SS->DS speed-switch STOP was executed while `halt_wakeup_skew`
+    // was live (halt-wake -> STOP with no intervening HALT), i.e. the post-switch
+    // DS stream still carries the un-charged CGB halt-exit M-cycle (Gambatte
+    // memory.cpp:301 `cc += 4 * isCgb()`). Consumed by `get_ly_reg_at_cc` as the
+    // DS analog of the single-speed `cgb_halt_exit` -5 read bias (daid
+    // speed_switch_timing_ly: the vblank-STOP LY-read train samples 4cc closer to
+    // the line wrap than the engine cc reflects; without it read 46 lands on the
+    // `ly&(ly+1)` glitch dot instead of pre-incrementing). Armed at the STOP,
+    // cleared when the CPU next halts (the stream ends). The gambatte
+    // speedchange_ly*/enable_display DS LY probes never halt before their switch
+    // (skew=false at STOP) and stay on the generic -1 path.
+    #[serde(skip, default)]
+    ssds_haltskew_ly_advance: bool,
+
     // True when the current HALT wakeup involved HDMA (a block was Low/Requested
     // at halt or HDMA was enabled across the wakeup). The CGB halt-exit +4 getLyReg
     // bias is already folded into the HDMA wakeup phase (the in-halt block transfer
@@ -760,6 +774,7 @@ impl Mmio {
             hdma_req_pending: false,
             halt_hdma_state: HaltHdmaState::Low,
             halt_wakeup_skew: false,
+            ssds_haltskew_ly_advance: false,
             halt_wakeup_hdma: false,
             pending_m0_irq_fire_cc: None,
             halt_wake_plus4_dmg: false,
@@ -1837,6 +1852,18 @@ impl Mmio {
         self.halt_wakeup_skew
     }
 
+    /// Arm the halt-woken SS->DS LY-read advance (see field doc). Called at the
+    /// speed-switch STOP when the executing stream is halt-woken.
+    pub fn set_ssds_haltskew_ly_advance(&mut self) {
+        self.ssds_haltskew_ly_advance = true;
+    }
+
+    /// True while the live DS stream is a halt-woken one that crossed an SS->DS
+    /// speed switch (consumed by `get_ly_reg_at_cc`).
+    pub fn ssds_haltskew_ly_advance(&self) -> bool {
+        self.ssds_haltskew_ly_advance
+    }
+
     /// FAITHFUL EVENTCC: record the DMG HALT-exit `cc += 4` wakeup-latency decision
     /// (Gambatte memory.cpp:308, `cc - eventTime < 2` branch).
     pub fn set_halt_wake_plus4_dmg(&mut self, v: bool) {
@@ -2062,6 +2089,7 @@ impl Mmio {
         // C1: a fresh HALT re-arms the wakeup-skew guard (the previous HALT-woken
         // stream has ended).
         self.halt_wakeup_skew = false;
+        self.ssds_haltskew_ly_advance = false;
         // FAITHFUL EVENTCC: a fresh HALT ends the previous wakeup's +4 read bias.
         self.halt_wake_plus4_dmg = false;
         self.dmg_m0_halt_ly_advance = None;
