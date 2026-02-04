@@ -47,6 +47,10 @@ pub(crate) struct FetcherLcdcState {
     // mealybug m3_lcdc_win_map_change / m3_lcdc_tile_sel_win_change DMG
     // reference captures (both pulse edges show the union of both sources).
     pub or_lcdc: Option<u8>,
+    // DMG BG-path SCY bus state (see bg_wg_apply): the SCY value in effect at
+    // this substep's reconstructed hardware dot. None = use the live `scy`
+    // argument.
+    pub scy_bus: Option<u8>,
 }
 
 // Tile data addressing constants
@@ -105,6 +109,12 @@ pub struct Fetcher {
     last_vram_addr: u16,
     #[serde(default)]
     last_vram_bank: u8,
+
+    // The BG tile-map COLUMN the last BG TileNumber used. The DMG BG
+    // bus-glitch retro repair re-derives the map cell for the in-flight tile
+    // (the row is SCY-dependent and re-resolved; the column is not).
+    #[serde(default)]
+    last_bg_tn_col: u8,
 }
 
 impl Fetcher {
@@ -126,6 +136,7 @@ impl Fetcher {
             subcc_used_scx: 0,
             last_vram_addr: 0xFFFF,
             last_vram_bank: 0,
+            last_bg_tn_col: 0,
         }
     }
 
@@ -213,7 +224,7 @@ impl Fetcher {
     }
 
     // Calculate the correct tile data address based on LCDC.4 (BGWindowTileDataSelect)
-    fn get_tile_data_address(&self, tile_id: u8, tile_line: u8, lcdc: u8) -> u16 {
+    pub(crate) fn get_tile_data_address(&self, tile_id: u8, tile_line: u8, lcdc: u8) -> u16 {
         let bg_window_tile_data_select = (lcdc & (ppu::LCDCFlags::BGWindowTileDataSelect as u8)) != 0;
         
         if bg_window_tile_data_select {
@@ -248,10 +259,13 @@ impl Fetcher {
         // possible (through TileDataHigh) lets a mid-M3 SCY write land on the
         // last fetched tile, matching Gambatte's late tileline sample. Window
         // fetches use the internal `window_line` counter, independent of SCY.
+        // A DMG mid-mode-3 SCY write resolves at the substep's reconstructed
+        // hardware dot instead (`scy_bus`, see bg_wg_apply).
+        let scy_eff = lcdc_state.scy_bus.unwrap_or(scy);
         let y = if self.fetching_window {
             window_line
         } else if matches!(self.state, State::TileNumber | State::TileDataLow | State::TileDataHigh) {
-            let new_y = ly.wrapping_add(scy);
+            let new_y = ly.wrapping_add(scy_eff);
             self.latched_y = new_y;
             new_y
         } else {
@@ -312,9 +326,10 @@ impl Fetcher {
                     self.subcc_used_scx = scx;
                     let bg_tile_y = (y as u16 / 8) % 32;
                     let map_offset = bg_tile_y * 32 + bg_tile_x;
+                    self.last_bg_tn_col = bg_tile_x as u8;
                     (bg_tile_map_base, map_offset)
                 };
-                
+
                 let map_addr = tile_map_base + map_offset;
                 self.last_vram_addr = map_addr;
                 self.last_vram_bank = 0;
@@ -505,6 +520,33 @@ impl Fetcher {
     pub fn get_tile_index(&self) -> u8 {
         self.tile_index
     }
+
+    // Retroactive in-flight-tile patches (DMG BG bus-glitch model): the
+    // controller re-resolves the tile's completed reads at their reconstructed
+    // hardware dots when a mid-fetch LCDC.3/4 or SCY write lands after our
+    // (earlier) read executed. Only valid before the tile's PushToFIFO.
+    pub fn patch_tile_num(&mut self, tile_num: u8) {
+        self.tile_num = tile_num;
+    }
+
+    pub fn last_bg_tn_col(&self) -> u8 {
+        self.last_bg_tn_col
+    }
+
+    // Replace the low bitplane of the in-flight pixel buffer (DMG: no x-flip).
+    pub fn patch_pixel_buffer_low(&mut self, low_byte: u8) {
+        for i in 0..8 {
+            self.pixel_buffer[i] = (self.pixel_buffer[i] & !1) | ((low_byte >> (7 - i)) & 0x01);
+        }
+    }
+
+    // Replace the high bitplane of the in-flight pixel buffer (DMG: no x-flip).
+    pub fn patch_pixel_buffer_high(&mut self, high_byte: u8) {
+        for i in 0..8 {
+            self.pixel_buffer[i] =
+                (self.pixel_buffer[i] & !2) | (((high_byte >> (7 - i)) & 0x01) << 1);
+        }
+    }
     
     pub fn is_fetching_window(&self) -> bool {
         self.fetching_window
@@ -571,6 +613,7 @@ mod tests {
             lcdc: mmio.read(ppu::LCD_CONTROL),
             cgb_tile_index_is_tile_data,
             or_lcdc: None,
+            scy_bus: None,
         }
     }
 
