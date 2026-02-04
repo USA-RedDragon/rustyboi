@@ -185,6 +185,15 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         if ssds_mode3_switch {
             mmio.ppu.set_ssds_mode3_ly_advance();
         }
+        // SS->DS switch executed on a still-live halt-woken stream (halt-wake ->
+        // STOP with no intervening HALT): the post-switch DS stream keeps carrying
+        // the un-charged CGB halt-exit M-cycle (Gambatte memory.cpp:301
+        // `cc += 4 * isCgb()`). Arm the DS analog of the single-speed
+        // `cgb_halt_exit` getLyReg read bias (see get_ly_reg_at_cc / mmio field
+        // doc; daid speed_switch_timing_ly).
+        if to_double && mmio.mmio.halt_wakeup_skew() {
+            mmio.mmio.set_ssds_haltskew_ly_advance();
+        }
         // Fire the deferred SS->DS prefetched block now — post-switch, so it runs
         // at the new (double) speed at the post-bridge cc, matching Gambatte's
         // `intevent_dma` after `ioamhram_[0x14D] ^= 0x81` (dma fires at ds=1).
