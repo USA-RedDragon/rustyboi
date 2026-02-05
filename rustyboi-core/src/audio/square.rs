@@ -417,11 +417,6 @@ impl SquareWave {
         self.freq() as u32
     }
 
-    fn set_freq(&mut self, new_freq: u16) {
-        self.update_pos();
-        self.period = to_period(new_freq);
-    }
-
     /// SameBoy NR13/NR23 write (Core/apu.c ~1796): update the sample length low
     /// byte (the register is already stored) and, if the countdown JUST reloaded
     /// this cycle, re-derive it from the new length so the running tone tracks the
