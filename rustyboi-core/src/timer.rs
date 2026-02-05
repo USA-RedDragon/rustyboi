@@ -151,6 +151,21 @@ pub struct Timer {
     // quirk; false for DMG/CGB so those targets are byte-identical.
     #[serde(skip, default)]
     is_agb: bool,
+    // FAITHFUL HALT-EXIT (timer-read facet). Gambatte's halted CPU resumes at
+    // ceil-to-M-cycle of the waking IRQ's eventTime, +4 more when the snap lands
+    // within 2cc of the event (cpu.cpp:531 `cc += cycles + (-cycles & 3)`,
+    // memory.cpp:301 `cc += 4*(isCgb() || cc - eventTime < 2)`). rustyboi's
+    // halted CPU steps per-cycle and wakes at the EXACT IF-set cc, so the whole
+    // woken instruction stream runs 2-5cc early; PPU reads on that stream are
+    // re-anchored by their own facets (halt_wake_plus4_dmg /
+    // dmg_m0_halt_ly_advance), and this is the DIV/TIMA-read analog: reads
+    // resolve at `access_cc + halt_read_bias` (gbmicrotest int_*_halt /
+    // *_int_halt_b cluster, verified vs Gambatte). Armed at each DMG Lcd/VBlank
+    // halt-wake with the per-phase advance, zeroed for other wakes; cleared by
+    // any timer register WRITE (a woken-stream write commits at the un-advanced
+    // cc, so post-write reads must return to that same anchor).
+    #[serde(default)]
+    halt_read_bias: u32,
 }
 
 fn disabled_time() -> u64 {
@@ -179,7 +194,13 @@ impl Timer {
             ei_promoted: false,
             isr_on_early_grid: false,
             is_agb: false,
+            halt_read_bias: 0,
         }
+    }
+
+    /// Arm/clear the halt-woken DIV/TIMA read re-anchor (see `halt_read_bias`).
+    pub fn set_halt_read_bias(&mut self, bias: u32) {
+        self.halt_read_bias = bias;
     }
 
     /// Set the AGB hardware flag (Gambatte `agbFlag`). Propagated from
@@ -718,7 +739,8 @@ impl Addressable for Timer {
     fn read(&self, addr: u16) -> u8 {
         match addr {
             DIV => {
-                let div = (self.access_cc().wrapping_sub(self.div_anchor) & 0xFFFF) as u16;
+                let cc = self.access_cc() + self.halt_read_bias as u64;
+                let div = (cc.wrapping_sub(self.div_anchor) & 0xFFFF) as u16;
                 (div >> 8) as u8
             }
             // TIMA derives lazily; `read` takes `&self`, so reproduce
@@ -727,7 +749,7 @@ impl Addressable for Timer {
                 if self.tac & TAC_ENABLE == 0 {
                     self.tima
                 } else {
-                    let cc = self.access_cc();
+                    let cc = self.access_cc() + self.halt_read_bias as u64;
                     let clk = self.clk();
                     let ticks = (cc - self.tima_last_update) >> clk;
                     let mut tima = self.tima;
@@ -756,6 +778,9 @@ impl Addressable for Timer {
     }
 
     fn write(&mut self, addr: u16, value: u8) {
+        // A woken-stream timer write commits at the un-advanced access cc;
+        // subsequent reads must resolve on that same anchor (see halt_read_bias).
+        self.halt_read_bias = 0;
         match addr {
             DIV => {
                 let cc = self.access_cc();
