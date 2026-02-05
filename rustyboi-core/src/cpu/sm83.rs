@@ -22,6 +22,11 @@ pub struct SM83 {
     pub opcode: u8,
     #[serde(default)]
     pub prefetched: bool,
+    /// FAITHFUL HALT-EXIT: the m2-woken wake charged its +4 as a REAL stall
+    /// (the `return 4` below), so the woken stream is already at the hardware
+    /// cc and the timer-read facet must not re-add the advance.
+    #[serde(default)]
+    pub m2_halt_stall_charged: bool,
 }
 
 impl SM83 {
@@ -34,6 +39,7 @@ impl SM83 {
             stop_unhalt_cycles: 0,
             opcode: 0,
             prefetched: false,
+            m2_halt_stall_charged: false,
         }
     }
 
@@ -105,6 +111,7 @@ impl SM83 {
                         .last_m2_irq_fire_cc()
                         .is_some_and(|fire| mmio.master_cc_dbg().wrapping_sub(fire) < 2)
                 {
+                    self.m2_halt_stall_charged = true;
                     return 4;
                 }
                 self.halted = false;
@@ -126,6 +133,58 @@ impl SM83 {
                 // getStat-at-cc line-tail override defers to the renderer register
                 // (which is already correct there). Cleared on the next HALT.
                 mmio.set_halt_wakeup_skew(true);
+                // FAITHFUL HALT-EXIT (timer-read facet): re-anchor the woken
+                // stream's DIV/TIMA reads by the full Gambatte HALT-exit advance
+                // — the ceil-to-M-cycle snap plus the conditional +4
+                // (cpu.cpp:531 / memory.cpp:301), i.e. {E%4 -> adv}: 0->+4,
+                // 1->+3, 2->+2, 3->+5 from the waking IRQ's eventTime E. An
+                // m0/m2-woken stream wakes ON that grid (mcc == E, proven by
+                // int_hblank_halt_scx0-7 spanning all four phases); the
+                // LYC/m1/VBlank IF-sets are delivered one dot AFTER their
+                // eventTime (the same +1 phase the closed-form m0 `ev` carries,
+                // see the R4 comment below), so their E = mcc-1 and the bias
+                // nets -1 (the lyc*/vblank*_int_halt_a/_b DIV brackets pin it
+                // to exactly that). Scoped DMG + Lcd/VBlank wakes: the
+                // Timer-woken streams (gambatte tima/tc0*_halt families) read
+                // TIMA on models co-tuned to the un-advanced wake cc, and CGB
+                // carries its own +5 read-side biases. An m2-woken wake that
+                // charged its +4 as a REAL stall (`return 4` above) is already
+                // at the hardware cc -> bias 0. Fixes the gbmicrotest
+                // int_*halt* / *_int_halt_a/_b cluster (DIV/TIMA read from the
+                // halt-woken ISR), verified value-exact vs Gambatte.
+                let m2_stall_charged = std::mem::take(&mut self.m2_halt_stall_charged);
+                if !mmio.mmio.is_cgb() {
+                    let bias = if !m2_stall_charged
+                        && matches!(
+                            pending_interrupt,
+                            Some(registers::InterruptFlag::Lcd)
+                                | Some(registers::InterruptFlag::VBlank)
+                        ) {
+                        let mcc = mmio.master_cc_dbg() as i64;
+                        // m0-woken window: the closed-form `ev` misses the scx
+                        // fine-scroll (+0..7) the real m0 IF-set carries, so the
+                        // wake lands at d = mcc - ev = scx%8 - 1 in [-1, 6]
+                        // (int_hblank_halt_scx0-7). The nearest other STAT/IF
+                        // event is >= ~85cc away, so the widened window cannot
+                        // misclassify a LYC/m1/VBlank wake.
+                        let on_grid = mmio
+                            .mmio
+                            .pending_m0_irq_fire_cc()
+                            .is_some_and(|ev| (-2..=6).contains(&(mcc - ev as i64)))
+                            || mmio
+                                .mmio
+                                .last_m2_irq_fire_cc()
+                                .is_some_and(|fire| mcc.wrapping_sub(fire as i64) < 2);
+                        let e = if on_grid { mcc } else { mcc - 1 };
+                        let align = ((4 - (e % 4)) % 4) as u32;
+                        let adv = align + 4 * (align < 2) as u32;
+                        // bias = (E + adv) - mcc
+                        (e + adv as i64 - mcc) as u32
+                    } else {
+                        0
+                    };
+                    mmio.mmio.set_halt_timer_read_bias(bias);
+                }
                 // FAITHFUL EVENTCC (R4): Gambatte's HALT-exit fixup (memory.cpp:308)
                 // advances `cc += 4 * (isCgb() || cc - eventTime < 2)` before the
                 // woken instruction stream resumes. The CGB (`isCgb()`) branch is
