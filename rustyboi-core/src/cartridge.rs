@@ -606,8 +606,10 @@ impl Cartridge {
                 if bank == 0 { 1 } else { bank % self.rom_banks }
             }
             CartridgeType::MBC3 { .. } => {
-                // MBC3 uses 7 bits for ROM bank selection, bank 0 maps to bank 1
-                let bank = (self.rom_bank_low & 0x7F) as usize;
+                // MBC3 uses 7 bits for ROM bank selection; the MBC30 variant
+                // (>2MB ROM / >32KB RAM carts) wires all 8. Bank 0 maps to 1.
+                let mask = if self.is_mbc30() { 0xFF } else { 0x7F };
+                let bank = (self.rom_bank_low & mask) as usize;
                 if bank == 0 { 1 } else { bank % self.rom_banks }
             }
             CartridgeType::MBC5 { .. } => {
@@ -633,8 +635,10 @@ impl Cartridge {
             }
             CartridgeType::MBC2 { .. } => 0, // MBC2 has built-in RAM, no banking
             CartridgeType::MBC3 { .. } => {
-                // MBC3 uses mbc3_ram_bank for both RAM and RTC
-                (self.mbc3_ram_bank & 0x03) as usize % self.ram_banks.max(1)
+                // MBC3 uses mbc3_ram_bank for both RAM and RTC. MBC30 has 8 RAM
+                // banks (64KB) so a third select bit is wired.
+                let mask = if self.is_mbc30() { 0x07 } else { 0x03 };
+                (self.mbc3_ram_bank & mask) as usize % self.ram_banks.max(1)
             }
             CartridgeType::MBC5 { .. } => {
                 // MBC5 uses 4 bits for RAM bank selection (0x00-0x0F)
@@ -1090,6 +1094,17 @@ impl Cartridge {
         matches!(self.get_cartridge_type(), CartridgeType::MBC3 { timer: true, .. })
     }
 
+    /// MBC30: the large-capacity MBC3 variant (used by e.g. Japanese Pokémon
+    /// Crystal) that wires 8 ROM-bank bits (256 banks / 4MB, vs MBC3's 7 bits /
+    /// 2MB) and 3 RAM-bank bits (8 banks / 64KB, vs 2 bits / 32KB). There is no
+    /// header flag for it; a cart wired for MBC3 addressing cannot exceed 2MB
+    /// ROM / 32KB RAM, so exceeding either limit identifies the MBC30 per
+    /// Pan Docs.
+    fn is_mbc30(&self) -> bool {
+        matches!(self.get_cartridge_type(), CartridgeType::MBC3 { .. })
+            && (self.rom_banks > 128 || self.ram_banks > 4)
+    }
+
     /// Mutable view of the RTC register bytes for `RETRO_MEMORY_RTC`. Layout is
     /// the 10 register values (live then latched) as little-endian u32 plus an
     /// 8-byte latch timestamp, matching the common BGB/libretro `.rtc` format.
@@ -1205,22 +1220,24 @@ impl memory::Addressable for Cartridge {
                     }
                     CartridgeType::MBC3 { ram: true, .. } => {
                         if self.ram_enabled {
-                            match self.mbc3_ram_bank {
-                                0x00..=0x03 => {
-                                    // RAM bank access
-                                    if !self.ram_data.is_empty() {
-                                        let ram_bank = self.get_ram_bank();
-                                        let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
-                                        self.ram_data[offset]
-                                    } else {
-                                        0xFF
-                                    }
+                            // MBC30 wires a third RAM-bank bit: selects 0x00-0x07
+                            // are RAM there, 0x00-0x03 on plain MBC3. 0x08-0x0C
+                            // are the RTC registers on both.
+                            let ram_select_max = if self.is_mbc30() { 0x07 } else { 0x03 };
+                            if self.mbc3_ram_bank <= ram_select_max {
+                                // RAM bank access
+                                if !self.ram_data.is_empty() {
+                                    let ram_bank = self.get_ram_bank();
+                                    let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
+                                    self.ram_data[offset]
+                                } else {
+                                    0xFF
                                 }
-                                0x08..=0x0C => {
-                                    // RTC register access
-                                    self.read_rtc_register()
-                                }
-                                _ => 0xFF,
+                            } else if (0x08..=0x0C).contains(&self.mbc3_ram_bank) {
+                                // RTC register access
+                                self.read_rtc_register()
+                            } else {
+                                0xFF
                             }
                         } else {
                             0xFF
@@ -1290,7 +1307,10 @@ impl memory::Addressable for Cartridge {
                         self.rom_bank_low = (value & 0x1F).max(1); // 5 bits, minimum value 1
                     }
                     CartridgeType::MBC3 { .. } => {
-                        self.rom_bank_low = (value & 0x7F).max(1); // 7 bits, minimum value 1
+                        // 7 bits (8 on MBC30), minimum value 1. The full write
+                        // is stored; get_rom_bank applies the wired width, so
+                        // e.g. 0x80 on plain MBC3 decodes as bank 0 -> 1.
+                        self.rom_bank_low = value.max(1);
                     }
                     CartridgeType::MBC5 { .. } => {
                         // MBC5 ROM bank select depends on address range
@@ -1379,20 +1399,18 @@ impl memory::Addressable for Cartridge {
                     }
                     CartridgeType::MBC3 { ram: true, .. } => {
                         if self.ram_enabled {
-                            match self.mbc3_ram_bank {
-                                0x00..=0x03 => {
-                                    // RAM bank access
-                                    if !self.ram_data.is_empty() {
-                                        let ram_bank = self.get_ram_bank();
-                                        let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
-                                        let _ = self.write_ram_byte(offset, value);
-                                    }
+                            // MBC30 RAM selects reach 0x07 (see the read path).
+                            let ram_select_max = if self.is_mbc30() { 0x07 } else { 0x03 };
+                            if self.mbc3_ram_bank <= ram_select_max {
+                                // RAM bank access
+                                if !self.ram_data.is_empty() {
+                                    let ram_bank = self.get_ram_bank();
+                                    let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
+                                    let _ = self.write_ram_byte(offset, value);
                                 }
-                                0x08..=0x0C => {
-                                    // RTC register access
-                                    self.write_rtc_register(value);
-                                }
-                                _ => {}
+                            } else if (0x08..=0x0C).contains(&self.mbc3_ram_bank) {
+                                // RTC register access
+                                self.write_rtc_register(value);
                             }
                         }
                     }
