@@ -82,7 +82,12 @@ impl Input {
         self.sgb.as_mut()
     }
 
-    pub fn set_button_state(&mut self, state: ButtonState) {
+    /// Update the pressed-button state and refresh the JOYP low nibble for the
+    /// currently-selected line group (the hardware lines are live, not latched
+    /// to JOYP writes). Returns true when any selected input line transitioned
+    /// high -> low (a newly-pressed button on an active group), which is the
+    /// joypad-interrupt condition; the caller raises IF bit 4.
+    pub fn set_button_state(&mut self, state: ButtonState) -> bool {
         self.a = state.a;
         self.b = state.b;
         self.start = state.start;
@@ -91,6 +96,45 @@ impl Input {
         self.down = state.down;
         self.left = state.left;
         self.right = state.right;
+
+        let old_low = self.joyp & 0x0F;
+        let select = self.joyp & 0b0011_0000;
+        let new_low = self.low_nibble(select);
+        self.joyp = select | new_low;
+        (old_low & !new_low) != 0
+    }
+
+    /// Low-nibble line state for the given select bits (bits 4-5 of JOYP):
+    /// pressed buttons of a selected group pull their line low. With BOTH
+    /// groups selected the lines are a logical AND of the two groups (any
+    /// pressed key pulls its line low) — this is how real hardware wires
+    /// P10-P13, and what a listen-for-everything JOYP=0x00 idle relies on.
+    /// Both groups deselected reads 1111 (or the SGB MLT_REQ player-ID
+    /// nibble).
+    fn low_nibble(&self, select: u8) -> u8 {
+        let mut low = 0b0000_1111u8;
+        if select & JoypadBits::SelectButtons as u8 == 0 {
+            low &= ((!self.start as u8) << 3)
+                | ((!self.select as u8) << 2)
+                | ((!self.b as u8) << 1)
+                | (!self.a as u8);
+        }
+        if select & JoypadBits::SelectDirections as u8 == 0 {
+            low &= ((!self.down as u8) << 3)
+                | ((!self.up as u8) << 2)
+                | ((!self.left as u8) << 1)
+                | (!self.right as u8);
+        }
+        // SGB MLT_REQ multiplexing: when the game deselects both groups
+        // (both P14/P15 high) the low nibble reports the current player
+        // ID (0x0F - joypad_index) instead of a plain 0x0F. This is what
+        // the MLT_REQ read protocol clocks through to enumerate players.
+        if let Some(sgb) = self.sgb.as_ref() {
+            if select == 0b0011_0000 {
+                low &= sgb.joypad_id_nibble();
+            }
+        }
+        low & 0x0F
     }
 }
 
@@ -117,29 +161,7 @@ impl Addressable for Input {
                 // Bits 4-5 hold exactly the written select lines (not the old
                 // ones); the low nibble is the selected group's pressed state.
                 let select = value & 0b0011_0000;
-                let mut low = if value & JoypadBits::SelectButtons as u8 == 0 {
-                    ((!self.start as u8) << 3)
-                        | ((!self.select as u8) << 2)
-                        | ((!self.b as u8) << 1)
-                        | (!self.a as u8)
-                } else if value & JoypadBits::SelectDirections as u8 == 0 {
-                    ((!self.down as u8) << 3)
-                        | ((!self.up as u8) << 2)
-                        | ((!self.left as u8) << 1)
-                        | (!self.right as u8)
-                } else {
-                    0b0000_1111
-                };
-                // SGB MLT_REQ multiplexing: when the game deselects both groups
-                // (both P14/P15 high) the low nibble reports the current player
-                // ID (0x0F - joypad_index) instead of a plain 0x0F. This is what
-                // the MLT_REQ read protocol clocks through to enumerate players.
-                if let Some(sgb) = self.sgb.as_ref() {
-                    if select == 0b0011_0000 {
-                        low &= sgb.joypad_id_nibble();
-                    }
-                }
-                self.joyp = select | (low & 0x0F);
+                self.joyp = select | self.low_nibble(select);
             },
             _ => panic!("Input: Invalid write address {:04X}", addr),
         }
