@@ -124,6 +124,7 @@ impl GB {
         mmio.set_serial_cgb(hardware.is_cgb_like());
         mmio.set_agb(hardware.is_agb());
         mmio.set_apu_cgb_de(hardware.is_cgb_d_or_later());
+        mmio.set_cgb_de(hardware.is_cgb_d_or_later());
         if matches!(hardware, Hardware::SGB | Hardware::SGB2) {
             mmio.enable_sgb();
         }
