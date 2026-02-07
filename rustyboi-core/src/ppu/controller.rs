@@ -7262,7 +7262,34 @@ impl Ppu {
     /// END boundary against `scheduled_mode0_dot` (Gambatte's `m0TimeOfCurrentLine`);
     /// the start stays on the renderer's mode set, which is window-independent.
     pub fn cpu_access_blocked(&self, kind: u8, is_read: bool, mode3_locked: bool, is_cgb: bool, double_speed: bool, access_cc: u64) -> Option<bool> {
-        if self.disabled || self.internal_ly_val >= 144 {
+        if self.disabled {
+            return Some(false);
+        }
+        if self.internal_ly_val >= 144 {
+            // Gambatte oamReadable/oamWritable resolve the OAM line-wrap pre-lock
+            // BEFORE the ly>=144 vblank accessibility: in the last `k` line-cycles
+            // of a line the access already belongs to the NEXT line, and line 153's
+            // successor is line 0 whose mode-2 OAM scan is imminent — blocked
+            // (`ly() < lcd_lines_per_frame - 1` excludes 153). Lines 144-152 wrap
+            // into mode-1 successors and stay accessible (age oam-write cgbBCE /
+            // ncmBCE: the delay-2 write at the line-0 frame-1 mode-2 edge lands on
+            // line 153's tail and must be blocked).
+            if kind == 1 && self.internal_ly_val == 153 {
+                let cc = access_cc as i64;
+                let ds = double_speed as i64;
+                let wrap_lc = if is_read {
+                    let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
+                    let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as i64;
+                    let ly_time = self.p_now as i64 + self.abs_cc as i64 + (dots_to_next << ds) + plus1;
+                    stat_irq::LCD_CYCLES_PER_LINE as i64 - ((ly_time - cc) >> ds)
+                } else {
+                    self.line_cycle as i64 - self.lytime_no_plus1 as i64
+                };
+                let k = if is_read { 4 - ds } else { 3 + is_cgb as i64 };
+                if wrap_lc + k >= stat_irq::LCD_CYCLES_PER_LINE as i64 {
+                    return Some(true);
+                }
+            }
             return Some(false);
         }
         // STAGE 4 KEYSTONE: this gate is a RENDER-visibility decision (does the
