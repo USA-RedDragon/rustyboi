@@ -1,3 +1,7 @@
-# mbc3-tester (MBC3 bank/RTC; auto result screen after 40 frames).
-mbc3-tester/mbc3-tester|cgb|png|/home/reddragon/gb-test-roms/mbc3-tester/mbc3-tester.gb|/home/reddragon/gb-test-roms/mbc3-tester/mbc3-tester-cgb.png
-mbc3-tester/mbc3-tester|dmg|png|/home/reddragon/gb-test-roms/mbc3-tester/mbc3-tester.gb|/home/reddragon/gb-test-roms/mbc3-tester/mbc3-tester-dmg.png
+# mbc3-tester (MBC30 bank test; no input needed). The ROM loops its bank
+# sweep forever, so the result screen is only stable ~frames 60-200:
+# frames=100 pins the grading point (needs MBC30 for banks 0x80-0xFF).
+# The CGB ref is a shipped-reference palette artifact: every differing
+# pixel is our #7BFF31 (the c-sp-documented compat shade) vs its #7BFF4A.
+mbc3-tester/mbc3-tester|cgb|png|/home/reddragon/gb-test-roms/mbc3-tester/mbc3-tester.gb|/home/reddragon/gb-test-roms/mbc3-tester/mbc3-tester-cgb.png|frames=100
+mbc3-tester/mbc3-tester|dmg|png|/home/reddragon/gb-test-roms/mbc3-tester/mbc3-tester.gb|/home/reddragon/gb-test-roms/mbc3-tester/mbc3-tester-dmg.png|frames=100

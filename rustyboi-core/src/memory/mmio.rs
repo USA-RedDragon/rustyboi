@@ -3429,7 +3429,11 @@ impl Mmio {
     }
 
     pub fn set_input_state(&mut self, state: crate::input::ButtonState) {
-        self.input.set_button_state(state);
+        // A newly-pressed button on a selected line group pulls its JOYP line
+        // low, which raises the joypad interrupt (IF bit 4) on real hardware.
+        if self.input.set_button_state(state) {
+            self.request_interrupt(cpu::registers::InterruptFlag::Joypad);
+        }
     }
 
     /// Enable Super Game Boy JOYP-packet handling on the joypad. Called once
