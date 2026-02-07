@@ -1,4 +1,10 @@
-# rtc3test (MBC3 RTC). NEEDS button-input navigation -- see notes; will
-# fail without input injection. Emitted for an explicit number only.
-rtc3test-basic/rtc3test|cgb|png|/home/reddragon/gb-test-roms/rtc3test/rtc3test.gb|/home/reddragon/gb-test-roms/rtc3test/rtc3test-basic-tests-cgb.png
-rtc3test-basic/rtc3test|dmg|png|/home/reddragon/gb-test-roms/rtc3test/rtc3test.gb|/home/reddragon/gb-test-roms/rtc3test/rtc3test-basic-tests-dmg.png
+# rtc3test (MBC3 RTC). The ROM is an interactive menu: each sub-suite is
+# selected with scripted button input (input= tokens; see parse_input_script).
+# Sub-suite durations (emulated): basic 13s, range 8s, sub-second writes 26s;
+# each row carries its own frames= budget (menu + run + settle).
+rtc3test-basic/rtc3test|cgb|png|/home/reddragon/gb-test-roms/rtc3test/rtc3test.gb|/home/reddragon/gb-test-roms/rtc3test/rtc3test-basic-tests-cgb.png|input=20:A,30:-|frames=850
+rtc3test-basic/rtc3test|dmg|png|/home/reddragon/gb-test-roms/rtc3test/rtc3test.gb|/home/reddragon/gb-test-roms/rtc3test/rtc3test-basic-tests-dmg.png|input=20:A,30:-|frames=850
+rtc3test-range/rtc3test|cgb|png|/home/reddragon/gb-test-roms/rtc3test/rtc3test.gb|/home/reddragon/gb-test-roms/rtc3test/rtc3test-range-tests-cgb.png|input=20:Down,30:-,40:A,50:-|frames=700
+rtc3test-range/rtc3test|dmg|png|/home/reddragon/gb-test-roms/rtc3test/rtc3test.gb|/home/reddragon/gb-test-roms/rtc3test/rtc3test-range-tests-dmg.png|input=20:Down,30:-,40:A,50:-|frames=700
+rtc3test-subsecond/rtc3test|cgb|png|/home/reddragon/gb-test-roms/rtc3test/rtc3test.gb|/home/reddragon/gb-test-roms/rtc3test/rtc3test-sub-second-writes-cgb.png|input=20:Down,30:-,40:Down,50:-,60:A,70:-|frames=1750
+rtc3test-subsecond/rtc3test|dmg|png|/home/reddragon/gb-test-roms/rtc3test/rtc3test.gb|/home/reddragon/gb-test-roms/rtc3test/rtc3test-sub-second-writes-dmg.png|input=20:Down,30:-,40:Down,50:-,60:A,70:-|frames=1750

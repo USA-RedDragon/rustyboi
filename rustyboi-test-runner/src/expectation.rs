@@ -135,6 +135,26 @@ impl Oracle {
     }
 }
 
+/// One scripted joypad event: at `frame` (70224-cycle windows since case
+/// start), optionally waiting for LY to equal `ly`, replace the held-button
+/// state with `buttons` (a `BTN_*` bitmask; 0 releases everything). Parsed
+/// from a manifest `input=` token; see `parse_input_script`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InputEvent {
+    pub frame: u32,
+    pub ly: Option<u8>,
+    pub buttons: u8,
+}
+
+pub const BTN_A: u8 = 0x01;
+pub const BTN_B: u8 = 0x02;
+pub const BTN_SELECT: u8 = 0x04;
+pub const BTN_START: u8 = 0x08;
+pub const BTN_RIGHT: u8 = 0x10;
+pub const BTN_LEFT: u8 = 0x20;
+pub const BTN_UP: u8 = 0x40;
+pub const BTN_DOWN: u8 = 0x80;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TestCase {
     pub rom_path: PathBuf,
@@ -146,6 +166,14 @@ pub struct TestCase {
     /// boot_hwio tests that check a particular silicon revision's post-boot
     /// state. Set from a `rev=<model>` manifest token; see `parse_manifest`.
     pub revision: Option<Hardware>,
+    /// Scripted joypad input (frame-keyed, deterministic), from an `input=`
+    /// manifest token. Empty for the (overwhelmingly common) input-less case.
+    /// Only PNG-graded cases (`png`/`png_fixed`/`png_shootout`) accept it.
+    pub input: Vec<InputEvent>,
+    /// Per-case frame-budget override for `png`/`png_fixed` gradings, from a
+    /// `frames=<N>` manifest token; `None` uses the run-wide `--frames`.
+    /// (`png_shootout` carries its budget inside the oracle as before.)
+    pub frames: Option<usize>,
 }
 
 pub fn is_rom_path(path: &Path) -> bool {
@@ -248,6 +276,8 @@ pub fn cases_for_rom(rom_path: &Path, requested_modes: &HashSet<Mode>) -> Vec<Te
                 mode: Mode::Agb,
                 oracle: c.oracle.clone(),
                 revision: c.revision,
+                input: c.input.clone(),
+                frames: c.frames,
             })
             .collect();
         cases.extend(cgb_twins);
@@ -367,14 +397,119 @@ pub fn parse_manifest(
         } else {
             None
         };
+        // Optional scripted joypad input, carried as an `input=` token in ANY
+        // trailing field. Only meaningful for screenshot gradings (the input
+        // schedule is keyed to the frame clock those paths drive); reject it
+        // elsewhere so a wiring mistake fails loudly instead of silently
+        // running input-less.
+        let input_tok = fields
+            .iter()
+            .skip(4)
+            .map(|f| f.trim())
+            .find(|f| f.starts_with("input="));
+        let input = if let Some(tok) = input_tok {
+            if !matches!(
+                oracle,
+                Oracle::CspPng { .. } | Oracle::CspPngFixed { .. } | Oracle::PngShootout { .. }
+            ) {
+                return Err(format!(
+                    "manifest line {}: input= is only supported for png/png_fixed/png_shootout gradings",
+                    line_no + 1
+                ));
+            }
+            parse_input_script(&tok["input=".len()..])
+                .map_err(|e| format!("manifest line {}: {e}", line_no + 1))?
+        } else {
+            Vec::new()
+        };
+        // Optional per-case frame budget for `png`/`png_fixed`, carried as a
+        // `frames=<N>` token in ANY trailing field (for `png_shootout` the
+        // positional field-5 token already feeds the oracle; it is not
+        // duplicated into the case override).
+        let frames = if matches!(oracle, Oracle::CspPng { .. } | Oracle::CspPngFixed { .. }) {
+            fields
+                .iter()
+                .skip(4)
+                .map(|f| f.trim())
+                .find_map(|f| f.strip_prefix("frames="))
+                .map(|n| {
+                    n.parse::<usize>()
+                        .map_err(|_| format!("manifest line {}: bad frames {n}", line_no + 1))
+                })
+                .transpose()?
+        } else {
+            None
+        };
         cases.push(TestCase {
             rom_path,
             mode,
             oracle,
             revision,
+            input,
+            frames,
         });
     }
     Ok(cases)
+}
+
+/// Parse an `input=` script: comma-separated events `<frame>[@<ly>]:<buttons>`
+/// where `<buttons>` is a `+`-separated list of `a`/`b`/`start`/`select`/`up`/
+/// `down`/`left`/`right` (case-insensitive), or `-` for "release everything".
+/// The event replaces the whole held-button state at `<frame>` (70224-cycle
+/// windows since case start); with `@<ly>` it waits (up to two extra frames)
+/// for LY to equal `<ly>` first, so presses can land mid-frame at a chosen
+/// scanline. Events must be in non-decreasing frame order.
+pub fn parse_input_script(script: &str) -> Result<Vec<InputEvent>, String> {
+    let mut events = Vec::new();
+    let mut last_frame = 0u32;
+    for tok in script.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        let (when, buttons_str) = tok
+            .split_once(':')
+            .ok_or_else(|| format!("bad input event {tok}: missing ':'"))?;
+        let (frame_str, ly) = match when.split_once('@') {
+            Some((f, ly)) => (
+                f,
+                Some(
+                    ly.parse::<u8>()
+                        .ok()
+                        .filter(|ly| *ly <= 153)
+                        .ok_or_else(|| format!("bad input event {tok}: LY must be 0-153"))?,
+                ),
+            ),
+            None => (when, None),
+        };
+        let frame = frame_str
+            .parse::<u32>()
+            .map_err(|_| format!("bad input event {tok}: bad frame number"))?;
+        if frame < last_frame {
+            return Err(format!(
+                "input events must be in non-decreasing frame order (event {tok})"
+            ));
+        }
+        last_frame = frame;
+        let mut buttons = 0u8;
+        if buttons_str != "-" {
+            for name in buttons_str.split('+') {
+                buttons |= match name.trim().to_ascii_lowercase().as_str() {
+                    "a" => BTN_A,
+                    "b" => BTN_B,
+                    "select" => BTN_SELECT,
+                    "start" => BTN_START,
+                    "right" => BTN_RIGHT,
+                    "left" => BTN_LEFT,
+                    "up" => BTN_UP,
+                    "down" => BTN_DOWN,
+                    other => return Err(format!("unknown button {other}")),
+                };
+            }
+        }
+        events.push(InputEvent { frame, ly, buttons });
+    }
+    Ok(events)
 }
 
 /// Map a `rev=` manifest token to a `Hardware` sub-revision. The token names
@@ -412,6 +547,8 @@ fn push_dump_cases(
             mode: Mode::Dmg,
             oracle: Oracle::SramDump { path: dmg_bin },
             revision: None,
+            input: Vec::new(),
+            frames: None,
         });
     }
     let cgb_bin = PathBuf::from(format!("{base}_cgb.bin"));
@@ -421,6 +558,8 @@ fn push_dump_cases(
             mode: Mode::Cgb,
             oracle: Oracle::SramDump { path: cgb_bin },
             revision: None,
+            input: Vec::new(),
+            frames: None,
         });
     }
 
@@ -437,6 +576,8 @@ fn push_dump_cases(
                     region,
                 },
                 revision: None,
+                input: Vec::new(),
+                frames: None,
             });
         }
         let dmg_dump = PathBuf::from(format!("{base}_dmg08.dump"));
@@ -449,6 +590,8 @@ fn push_dump_cases(
                     region,
                 },
                 revision: None,
+                input: Vec::new(),
+                frames: None,
             });
         }
     }
@@ -482,6 +625,8 @@ fn push_string_case(
             mode,
             oracle,
             revision: None,
+            input: Vec::new(),
+            frames: None,
         });
     }
 }
@@ -501,6 +646,8 @@ fn push_png_case(
                 path: png_path.to_path_buf(),
             },
             revision: None,
+            input: Vec::new(),
+            frames: None,
         });
     }
 }
@@ -586,6 +733,41 @@ mn/add|cgb|mooneye|/roms/add.gb
         assert!(parse_manifest("id|xbox|png|/r.gb|p", &all_modes()).is_err());
         assert!(parse_manifest("id|dmg|bogus|/r.gb", &all_modes()).is_err());
         assert!(parse_manifest("id|dmg|mem|/r.gb|noeq", &all_modes()).is_err());
+    }
+
+    #[test]
+    fn parses_input_scripts() {
+        let events = parse_input_script("20:A,30:-,40@21:Down+b,55:start").unwrap();
+        assert_eq!(
+            events,
+            vec![
+                InputEvent { frame: 20, ly: None, buttons: BTN_A },
+                InputEvent { frame: 30, ly: None, buttons: 0 },
+                InputEvent { frame: 40, ly: Some(21), buttons: BTN_DOWN | BTN_B },
+                InputEvent { frame: 55, ly: None, buttons: BTN_START },
+            ]
+        );
+        // Out-of-order frames, bad LY, unknown buttons, missing ':' all fail.
+        assert!(parse_input_script("30:A,20:-").is_err());
+        assert!(parse_input_script("20@200:A").is_err());
+        assert!(parse_input_script("20:X").is_err());
+        assert!(parse_input_script("20A").is_err());
+    }
+
+    #[test]
+    fn parses_manifest_input_and_frames_tokens() {
+        let manifest = "\
+rtc/basic|dmg|png|/r.gb|/ref.png|input=20:A,30:-|frames=850
+plain|dmg|png|/r.gb|/ref.png
+";
+        let cases = parse_manifest(manifest, &all_modes()).unwrap();
+        assert_eq!(cases[0].input.len(), 2);
+        assert_eq!(cases[0].input[0].buttons, BTN_A);
+        assert_eq!(cases[0].frames, Some(850));
+        assert!(cases[1].input.is_empty());
+        assert_eq!(cases[1].frames, None);
+        // input= on a non-screenshot grading is rejected.
+        assert!(parse_manifest("x|dmg|mooneye|/r.gb|input=20:A", &all_modes()).is_err());
     }
 
     #[test]
