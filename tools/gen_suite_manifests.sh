@@ -472,9 +472,16 @@ echo "  rtc3test:  $(grep -vc '^#' "$OUT/rtc3test.manifest") cases"
 
 mbc3="$ROMS/mbc3-tester"
 {
-  echo "# mbc3-tester (MBC3 bank/RTC; auto result screen after 40 frames)."
+  echo "# mbc3-tester (MBC30 bank test; no input needed). The ROM loops its bank"
+  echo "# sweep forever, so the result screen is only stable ~frames 60-200:"
+  echo "# frames=100 pins the grading point (needs MBC30 for banks 0x80-0xFF)."
+  echo "# The CGB ref is a shipped-reference palette artifact: every differing"
+  echo "# pixel is our #7BFF31 (the c-sp-documented compat shade) vs its #7BFF4A."
   if [ -d "$mbc3" ]; then
-    emit_png_dir "mbc3-tester" "$mbc3/mbc3-tester.gb" "$mbc3"/mbc3-tester-*.png
+    for dev in cgb dmg; do
+      ref="$mbc3/mbc3-tester-$dev.png"
+      [ -f "$ref" ] && echo "mbc3-tester/mbc3-tester|$dev|png|$mbc3/mbc3-tester.gb|$ref|frames=100"
+    done
   fi
 } > "$OUT/mbc3_tester.manifest"
 echo "  mbc3_tester: $(grep -vc '^#' "$OUT/mbc3_tester.manifest") cases"
