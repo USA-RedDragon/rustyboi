@@ -7261,7 +7261,7 @@ impl Ppu {
     /// mode 2|3 for oam). The cycle-exact predictor only refines the mode-3->0
     /// END boundary against `scheduled_mode0_dot` (Gambatte's `m0TimeOfCurrentLine`);
     /// the start stays on the renderer's mode set, which is window-independent.
-    pub fn cpu_access_blocked(&self, kind: u8, is_read: bool, mode3_locked: bool, is_cgb: bool, double_speed: bool, access_cc: u64) -> Option<bool> {
+    pub fn cpu_access_blocked(&self, kind: u8, is_read: bool, mode3_locked: bool, is_cgb: bool, cgb_de: bool, double_speed: bool, access_cc: u64) -> Option<bool> {
         if self.disabled {
             return Some(false);
         }
@@ -7285,7 +7285,15 @@ impl Ppu {
                 } else {
                     self.line_cycle as i64 - self.lytime_no_plus1 as i64
                 };
-                let k = if is_read { 4 - ds } else { 3 + is_cgb as i64 };
+                // CGB-D/E: the OAM-read line-wrap pre-lock keeps the SS threshold
+                // in double speed (SameBoy line-start `oam_read_blocked = !ds ||
+                // model >= CGB_D`; age oam-read-cgbE DS delay-1 m2-edge reads are
+                // blocked on E where B/C still allow them).
+                let k = if is_read {
+                    4 - if cgb_de { 0 } else { ds }
+                } else {
+                    3 + is_cgb as i64
+                };
                 if wrap_lc + k >= stat_irq::LCD_CYCLES_PER_LINE as i64 {
                     return Some(true);
                 }
@@ -7486,14 +7494,24 @@ impl Ppu {
             self.line_cycle as i64 - self.lytime_no_plus1 as i64
         };
         if kind == 1 {
-            let k = if is_read { 4 - ds } else { 3 + is_cgb as i64 };
+            // CGB-D/E read threshold: see the ly==153 wrap above.
+            let k = if is_read {
+                4 - if cgb_de { 0 } else { ds }
+            } else {
+                3 + is_cgb as i64
+            };
             if oam_line_cycle + k >= stat_irq::LCD_CYCLES_PER_LINE as i64 {
                 let ly = self.internal_ly_val as i64;
                 let accessible = ly >= 143 && ly < 153;
                 return Some(!accessible);
             }
         }
-        let ended = self.state != State::OAMSearch && cc_end + 2 >= m0t;
+        // CGB-D/E: the OAM READ mode-3 end unblocks one cc later than B/C — the
+        // age oam-read-cgbE/ncmE odd-SCX m0-edge reads (EFF spots) are still
+        // blocked on E exactly where B/C already read through. VRAM keeps the
+        // shared boundary (vram-read is BCE-common).
+        let de_read_hold = (kind == 1 && is_read && cgb_de) as i64;
+        let ended = self.state != State::OAMSearch && cc_end + 2 - de_read_hold >= m0t;
         // OAM-WRITE DMG quirk (Gambatte oamWritable): at exactly lineCycles(cc) == 76
         // (the last mode-2 OAM-scan dot, DMG only) an OAM write is accepted. CGB has
         // no such escape.
@@ -7745,6 +7763,13 @@ impl Ppu {
             let agb_last_line =
                 (mmio.is_agb() && ly == (stat_irq::LCD_LINES_PER_FRAME - 1) as i64) as i64;
             if frame_cycles >= 144 * cpl - 2 && frame_cycles < cpf - 4 + dsi + agb_last_line {
+                return Some(1);
+            }
+            // CGB-D/E: no mode-0 M-cycle at the END of mode 1 (age stat-mode M1E)
+            // — the register holds mode 1 through the line-153 tail until the next
+            // line-0 mode-2 anticipation. Single speed only (stat-mode-ds is
+            // BCE-common). The vblank-ENTRY mode-0 tail (line 143) keeps mode 0.
+            if mmio.is_cgb_de() && !ds && frame_cycles >= cpf - 4 {
                 return Some(1);
             }
             return Some(0);
@@ -8106,9 +8131,16 @@ impl Ppu {
             if !ds {
                 // video.h:135 getLyReg: single-speed bound is `cpl - 1*isAgb`.
                 // AGB shrinks the line-153 reads-0 window by one dot.
+                // CGB-D/E shrinks it by one M-cycle (4 dots): a read in the first
+                // M-cycle of line 153 still returns 153 (age ly/lcd-align-ly E99:
+                // the delay-2 edge-of-152/153 read is $99 on E, $00 on B/C).
                 let agb = mmio.is_agb() as i64;
-                if to_next - 1 <= cpl - agb {
+                let de = 4 * mmio.is_cgb_de() as i64;
+                if to_next - 1 <= cpl - agb - de {
                     return Some(0);
+                }
+                if de != 0 {
+                    return Some((ly_reg & 0xFF) as u8);
                 }
                 return None;
             }

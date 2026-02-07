@@ -536,9 +536,18 @@ impl Timer {
     /// cc). The TIMA tick grid (`tima_last_update`) and IRQ schedule are based on
     /// `anchor_cc` since post-switch reads/IRQs all arrive on that same read grid.
     fn div_reset_split(&mut self, tima_cc: u64, anchor_cc: u64) {
+        self.div_reset_split_hold(tima_cc, anchor_cc, 0);
+    }
+
+    /// `div_reset_split` with a CGB-D/E hold: the STOP speed-switch DIV reset's
+    /// immediate TIMA increment lands one M-cycle LATER on CPU-CGB-D/E for the
+    /// 65KHz/16KHz clocks (age spsw-tima: the cgbE variant probes every edge one
+    /// m-cycle after cgbBC and reads identical values). `de_hold` (0 or 4) shrinks
+    /// the divider phase back-shift so the glitch tick crosses 4 cc later.
+    fn div_reset_split_hold(&mut self, tima_cc: u64, anchor_cc: u64, de_hold: u64) {
         if self.tac & TAC_ENABLE != 0 {
             let clk = self.clk();
-            let shift = (1u64 << (clk - 1)) + 3;
+            let shift = (1u64 << (clk - 1)) + 3 - de_hold;
             self.tima_last_update = self.tima_last_update.wrapping_sub(shift);
             if self.next_irq_event_time != DISABLED_TIME {
                 self.next_irq_event_time = self.next_irq_event_time.wrapping_sub(shift);
@@ -570,7 +579,11 @@ impl Timer {
     /// ticking from the exact switch cc at the new speed. With the sub-dot engine
     /// the divReset / tick-grid / APU fold all anchor at the bare `abs_cc` (the
     /// switch cc is byte-exact to Gambatte's divReset cc — LEVER A).
-    pub fn stop_div_reset(&mut self, _old_ds: bool) {
+    /// CGB-D/E (`cgb_de`) delays the speed-switch DIV-reset immediate TIMA
+    /// increment by one M-cycle for the 65KHz/16KHz clocks (TAC&3 >= 2); the
+    /// 4KHz/262KHz clocks are revision-common (age spsw-tima applies no OFS
+    /// there). See `div_reset_split_hold`.
+    pub fn stop_div_reset(&mut self, cgb_de: bool) {
         // Consume the one-shot EI-promote flag (no longer adjusts the divReset cc).
         self.ei_promoted = false;
         // LEVER A: with the K=4 STOP per-access skew removed (the unhalt-window
@@ -580,7 +593,8 @@ impl Timer {
         // abs_cc 9312 -> Gambatte 67680, STOP2 140896 -> 199264, offset 58368. So
         // the divReset / tick-grid / APU anchor collapse to the bare `abs_cc`.
         let anchor_cc = self.abs_cc;
-        self.div_reset_split(anchor_cc, anchor_cc);
+        let de_hold = if cgb_de && (self.tac & TAC_FREQUENCY_MASK) >= 2 { 4 } else { 0 };
+        self.div_reset_split_hold(anchor_cc, anchor_cc, de_hold);
         self.div_anchor_apu = anchor_cc;
     }
 
