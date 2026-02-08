@@ -2,6 +2,7 @@
 *.rustyboisave
 
 gb-test-roms/
+gambatte-core/
 /.baselines/
 /bios/*.bin
 

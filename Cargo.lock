@@ -2852,7 +2852,6 @@ dependencies = [
  "rustyboi-core",
  "serde",
  "serde_json",
- "walkdir",
 ]
 
 [[package]]

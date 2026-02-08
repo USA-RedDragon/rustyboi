@@ -3,7 +3,7 @@ mod frame;
 mod report;
 mod runner;
 
-use crate::expectation::{Mode, TestCase, cases_for_rom, is_rom_path, parse_manifest};
+use crate::expectation::{Mode, TestCase, cases_for_rom, parse_manifest};
 use crate::report::Summary;
 use clap::Parser;
 use std::collections::HashSet;
@@ -12,20 +12,15 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
-use walkdir::WalkDir;
 
 #[derive(Debug, Parser)]
 #[command(about = "Run Gambatte-style Game Boy hardware tests against rustyboi")]
 struct Args {
-    /// Directory containing Gambatte hwtests. ROMs are discovered recursively.
-    #[arg(long, value_name = "DIR")]
-    suite: Option<PathBuf>,
-
-    /// Run a c-sp public-suite manifest (acid2/mealybug/blargg/gbmicrotest/
-    /// mooneye). Each line: `<id>|<dmg|cgb|agb>|<grading>|<rom>[|<arg>]` where
-    /// grading is one of png/serial/blargg_mem/memauto/mem/mooneye/mooneye_ed.
-    /// Bypasses the name-based Gambatte discovery; cases come from the manifest.
-    /// Regenerate manifests with `tools/gen_suite_manifests.sh`.
+    /// Run a suite manifest (acid2/mealybug/blargg/gambatte/...). Each line:
+    /// `<id>|<mode>|<grading>|<rom>[|<arg>...]` where grading is one of
+    /// png/png_fixed/png_shootout/serial/blargg_mem/memauto/mem/mooneye/
+    /// mooneye_ed/gambatte (gambatte rows use mode `auto`: oracle + modes are
+    /// filename-encoded). Regenerate manifests with `tools/gen_manifests.py`.
     #[arg(long, value_name = "FILE")]
     manifest: Option<PathBuf>,
 
@@ -373,16 +368,5 @@ fn run_manifest(
 }
 
 fn collect_roms(args: &Args) -> Result<Vec<PathBuf>, String> {
-    let mut roms = args.roms.clone();
-
-    if let Some(suite) = &args.suite {
-        for entry in WalkDir::new(suite) {
-            let entry = entry.map_err(|error| format!("failed to walk test suite: {error}"))?;
-            if entry.file_type().is_file() && is_rom_path(entry.path()) {
-                roms.push(entry.path().to_path_buf());
-            }
-        }
-    }
-
-    Ok(roms)
+    Ok(args.roms.clone())
 }
