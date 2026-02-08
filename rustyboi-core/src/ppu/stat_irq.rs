@@ -164,7 +164,7 @@ impl LycIrq {
         self.cgb = cgb;
     }
 
-    pub fn lyc_reg(&self) -> u8 {
+    pub fn lyc_reg_src(&self) -> u8 {
         self.lyc_reg_src
     }
 

@@ -278,7 +278,7 @@ fn grade_png(mode: &str, rom: &Path, refpng: &Path, frames: usize) -> (bool, Str
 
 fn write_ppm(path: &Path, frame: &[u32]) -> Result<(), String> {
     use std::io::Write;
-    let mut s = format!("P6\n160 144\n255\n").into_bytes();
+    let mut s = "P6\n160 144\n255\n".to_string().into_bytes();
     for px in frame {
         s.push(((px >> 16) & 0xFF) as u8);
         s.push(((px >> 8) & 0xFF) as u8);

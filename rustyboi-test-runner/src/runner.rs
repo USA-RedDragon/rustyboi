@@ -818,8 +818,8 @@ fn evaluate_blargg_mem(gb: &mut GB, frames: usize) -> Result<(), String> {
 /// `Emulator.runTest`: run the normal Gambatte LCD frame loop and, after EACH
 /// completed frame, screenshot-grade it against every reference PNG; PASS the
 /// instant any frame matches any ref (the shootout early-exits on a match and
-/// its `pass_result` list is an OR-match). The frame budget (`case_frames` if
-/// > 0, else `--frames`) is the shootout's own poll deadline
+/// its `pass_result` list is an OR-match). The frame budget (`case_frames` when
+/// nonzero, else `--frames`) is the shootout's own poll deadline
 /// (`runtime + startup + 5 s`), so we never grade past the window the shootout
 /// would have allowed. Polling every frame (rather than only the final one)
 /// avoids both under-running slow-rendering tests and over-running tests whose
