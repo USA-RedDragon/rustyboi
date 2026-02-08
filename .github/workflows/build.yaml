@@ -12,18 +12,36 @@ concurrency:
 
 jobs:
   build:
-    name: Build
+    name: 'build / ${{ matrix.target }}'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/usa-reddragon/rust-cross:1.94.1
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-musl
+            linker: aarch64-linux-musl-gcc
+          - target: armv7-unknown-linux-musleabihf
+            linker: arm-linux-musleabihf-gcc
+          - target: x86_64-unknown-linux-musl
+            linker: x86_64-linux-musl-gcc
     steps:
       - uses: actions/checkout@v5
-      - name: Install Rust
+      - name: Cache cargo + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cross-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cross-${{ matrix.target }}-
+      - name: Build test runner for ${{ matrix.target }}
+        env:
+          RUSTUP_TOOLCHAIN: '1.94.1'
         run: |
-          rustup default stable
-          rustup target add wasm32-unknown-unknown
-      - name: Install ALSA
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev
-      - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --all-targets --all-features --workspace
+          triple_env="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
+          export "CARGO_TARGET_${triple_env}_LINKER=${{ matrix.linker }}"
+          cargo build --release --target ${{ matrix.target }}
