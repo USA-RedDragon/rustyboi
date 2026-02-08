@@ -105,6 +105,9 @@ pub struct Noise {
     // <=CGB-C divisor-0 even-alignment DS trigger-countdown +2 (see nr44).
     #[serde(default)]
     cgb_de: bool,
+    // CGB-B-or-earlier APU revision gate (see `len_nr4_change`).
+    #[serde(default)]
+    cgb_le_b: bool,
 }
 
 const LEN_DISABLED: u32 = 0xFFFF_FFFF;
@@ -153,6 +156,7 @@ impl Noise {
             cgb: false,
             ds: false,
             cgb_de: false,
+            cgb_le_b: false,
         }
     }
 
@@ -175,6 +179,12 @@ impl Noise {
     /// CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`).
     pub fn set_cgb_de(&mut self, de: bool) {
         self.cgb_de = de;
+    }
+
+    /// CGB-B-or-earlier APU revision gate (SameBoy `GB_is_cgb && model <=
+    /// GB_MODEL_CGB_B`).
+    pub fn set_cgb_le_b(&mut self, le_b: bool) {
+        self.cgb_le_b = le_b;
     }
 
     pub fn len_expired(&self) -> bool {
@@ -240,7 +250,10 @@ impl Noise {
                 (self.len_counter >> 13).wrapping_sub(self.len_cc >> 13) as u8;
         }
         let mut dec: u8 = 0;
-        if new_nr4 & 0x40 != 0 {
+        // CGB-B and older: extra length clock regardless of the written bit-6
+        // value (SameBoy `model <= GB_MODEL_CGB_B`; SameSuite
+        // channel_4_extra_length_clocking-cgb0B).
+        if new_nr4 & 0x40 != 0 || self.cgb_le_b {
             dec = ((!self.len_cc >> 12) & 1) as u8;
             if old_nr4 & 0x40 == 0 && self.length_counter != 0 {
                 self.length_counter -= dec;

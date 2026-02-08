@@ -684,6 +684,36 @@ impl Audio {
         self.channel4.set_cgb_de(de);
     }
 
+    /// Seed the CGB-B-or-earlier APU revision gate (SameBoy `GB_is_cgb &&
+    /// model <= GB_MODEL_CGB_B`) into all four channels' NRx4 length-glitch
+    /// fork. Called once from `GB::new` for Hardware::CGB0/CGBB.
+    pub fn set_cgb_le_b(&mut self, le_b: bool) {
+        self.channel1.set_cgb_le_b(le_b);
+        self.channel2.set_cgb_le_b(le_b);
+        self.channel3.set_cgb_le_b(le_b);
+        self.channel4.set_cgb_le_b(le_b);
+    }
+
+    /// CPU-CGB-A/B (Hardware::CGBB) wave first-glitch-write swallow.
+    pub fn set_cgb_b(&mut self, b: bool) {
+        self.channel3.set_cgb_b(b);
+    }
+
+    /// CGB-C-and-older PCM read glitch (SameBoy `pcm_mask` applied for
+    /// `model <= GB_MODEL_CGB_C`; excludes AGB and CGB-D/E).
+    pub fn set_pcm_c_glitch(&mut self, on: bool) {
+        self.channel1.set_pcm_c_glitch(on);
+        self.channel2.set_pcm_c_glitch(on);
+    }
+
+    /// NRx4 sample-index step-back parity gate for the two square channels
+    /// (true for CGB0/CGBB/AGB; SameBoy gates the step-back on
+    /// `sample_countdown & 1` for those, unconditional on CGB-D/E).
+    pub fn set_step_back_parity(&mut self, on: bool) {
+        self.channel1.set_step_back_parity(on);
+        self.channel2.set_step_back_parity(on);
+    }
+
     /// Seed the AGB flag into the wave channel (Gambatte channel3 agb_).
     pub fn set_agb(&mut self, agb: bool) {
         self.channel3.set_agb(agb);

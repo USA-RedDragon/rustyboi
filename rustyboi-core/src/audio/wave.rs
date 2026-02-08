@@ -58,6 +58,18 @@ pub struct Wave {
     // the setNr0 sample-buffer restore is skipped.
     #[serde(default)]
     agb: bool,
+    // CGB-B-or-earlier APU revision gate (see `len_nr4_change`).
+    #[serde(default)]
+    cgb_le_b: bool,
+    // CPU-CGB-A/B only (NOT CGB-0): the wave channel swallows the FIRST
+    // parity-armed value-irrelevant length-glitch write after APU power-on;
+    // subsequent glitch writes clock (SameSuite channel_3_extra_length_-
+    // clocking-cgbB: "On CPU CGB B, CH3 requires TWO writes to disable the
+    // channel when the length counter is 1", vs ONE on CGB-0).
+    #[serde(default)]
+    cgb_b: bool,
+    #[serde(default)]
+    glitch_armed: bool,
 }
 
 fn disabled() -> u32 {
@@ -95,6 +107,9 @@ impl Wave {
             cgb: false,
             ds: false,
             agb: false,
+            cgb_le_b: false,
+            cgb_b: false,
+            glitch_armed: false,
         }
     }
 
@@ -127,6 +142,8 @@ impl Wave {
     /// Length counter / wave RAM are preserved.
     pub fn psg_reset(&mut self) {
         self.sample_buf = 0;
+        // CGB-B first-glitch-write swallow re-arms at APU power-on.
+        self.glitch_armed = false;
     }
 
     const LEN_MASK: u16 = 0xFF;
@@ -159,8 +176,20 @@ impl Wave {
                 ((self.len_counter >> 13).wrapping_sub(self.len_cc >> 13)) as u16;
         }
         let mut dec: u16 = 0;
-        if new_nr4 & 0x40 != 0 {
+        // CGB-B and older: extra length clock regardless of the written bit-6
+        // value (SameBoy `model <= GB_MODEL_CGB_B`; SameSuite
+        // channel_3_extra_length_clocking-cgb0/-cgbB).
+        if new_nr4 & 0x40 != 0 || self.cgb_le_b {
             dec = ((!self.len_cc >> 12) & 1) as u16;
+            // CPU-CGB-A/B wave-only quirk: the value-irrelevant glitch leg
+            // (written bit 6 clear) swallows its FIRST parity-armed write
+            // after power-on; later glitch writes clock normally. CGB-0
+            // clocks on every parity-armed write (SameSuite ch3
+            // extra_length_clocking -cgb0 vs -cgbB tables).
+            if self.cgb_b && new_nr4 & 0x40 == 0 && dec != 0 && !self.glitch_armed {
+                self.glitch_armed = true;
+                dec = 0;
+            }
             if old_nr4 & 0x40 == 0 && self.length_counter != 0 {
                 self.length_counter -= dec;
                 if self.length_counter == 0 {
@@ -205,6 +234,16 @@ impl Wave {
     /// (before the channel has ticked) already sees AGB semantics.
     pub fn set_agb(&mut self, agb: bool) {
         self.agb = agb;
+    }
+
+    /// CGB-B-or-earlier APU revision gate (SameBoy `model <= GB_MODEL_CGB_B`).
+    pub fn set_cgb_le_b(&mut self, le_b: bool) {
+        self.cgb_le_b = le_b;
+    }
+
+    /// CPU-CGB-A/B (Hardware::CGBB) wave first-glitch-write swallow.
+    pub fn set_cgb_b(&mut self, b: bool) {
+        self.cgb_b = b;
     }
 
     pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
