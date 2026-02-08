@@ -73,7 +73,7 @@ impl<'a> Bus<'a> {
         // PPU's even-dot stepping stays aligned with the true accumulated cc
         // across instruction boundaries (per-instruction `dot` would re-anchor
         // the phase to the instruction start every M-cycle).
-        if !double_speed || self.mmio.cpu_t_phase() % 2 == 0 {
+        if !double_speed || self.mmio.cpu_t_phase().is_multiple_of(2) {
             self.ppu.step_scheduled_stat_events(self.mmio);
             self.mmio.step_audio();
             self.ppu.step(self.mmio);
@@ -725,11 +725,10 @@ impl<'a> Bus<'a> {
         // `Interrupter::prefetch(cc)` before `dma(cc)`). The mode-readability gate
         // above still applies (mode-3 -> 0xFF); a mode-0 readable read returns the
         // old byte (0x00) the just-fired block has not yet committed.
-        if (0x8000..=0x9FFF).contains(&addr) {
-            if let Some(pre) = self.mmio.hdma_resume_pre_byte(addr) {
+        if (0x8000..=0x9FFF).contains(&addr)
+            && let Some(pre) = self.mmio.hdma_resume_pre_byte(addr) {
                 return pre;
             }
-        }
         if let Some(v) = apu_read {
             return v;
         }

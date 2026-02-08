@@ -172,6 +172,12 @@ fn disabled_time() -> u64 {
     DISABLED_TIME
 }
 
+impl Default for Timer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Timer {
     pub fn new() -> Self {
         Timer {
@@ -501,9 +507,9 @@ impl Timer {
 
             if self.tac & TAC_ENABLE != 0 {
                 let old_clk = self.clk();
-                let inc = (!((data as u64 >> 2)
+                let inc = !((data as u64 >> 2)
                     & ((cc - self.div_anchor) >> (TIMA_CLOCK[(data & 3) as usize] - 1)))
-                    & 1) as u64;
+                    & 1 ;
                 let shift = (inc << (old_clk - 1)) + 3;
                 self.tima_last_update = self.tima_last_update.wrapping_sub(shift);
                 next = next.wrapping_sub(shift);

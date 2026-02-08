@@ -62,7 +62,7 @@ impl LyCounter {
             + frame_cycle)
             << self.ds as u32;
         let mut tmp = (self.time as i64 + span) as u64;
-        let frame = (LCD_CYCLES_PER_FRAME << self.ds as u32) as u64;
+        let frame = LCD_CYCLES_PER_FRAME << self.ds as u32;
         if tmp.wrapping_sub(cc) > frame {
             tmp = tmp.wrapping_sub(frame);
         }
@@ -284,7 +284,7 @@ impl MStatIrq {
 
     pub fn do_m0_event(&mut self, ly: u32, stat: u8, lyc: u8) -> bool {
         let flag = ((stat | self.stat_reg) & STAT_M0EN != 0)
-            && (!(self.stat_reg & STAT_LYCEN != 0) || ly != self.lyc_reg as u32);
+            && ((self.stat_reg & STAT_LYCEN == 0) || ly != self.lyc_reg as u32);
         self.lyc_reg = lyc;
         self.stat_reg = stat;
         flag
@@ -292,7 +292,7 @@ impl MStatIrq {
 
     pub fn do_m1_event(&mut self, stat: u8) -> bool {
         let flag =
-            (stat & STAT_M1EN != 0) && !(self.stat_reg & (STAT_M2EN | STAT_M0EN) != 0);
+            (stat & STAT_M1EN != 0) && (self.stat_reg & (STAT_M2EN | STAT_M0EN) == 0);
         self.stat_reg = stat;
         flag
     }

@@ -146,7 +146,7 @@ impl Wave {
     fn len_nr1_change(&mut self, value: u8) {
         self.length_counter = (!value as u16 & Self::LEN_MASK) + 1;
         self.len_counter = if self.nr34 & 0x40 != 0 {
-            (((self.len_cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+            ((self.len_cc >> 13) + self.length_counter as u32) << 13 
         } else {
             LEN_DISABLED
         };
@@ -174,7 +174,7 @@ impl Wave {
             self.length_counter = Self::LEN_MASK + 1 - dec;
         }
         self.len_counter = if new_nr4 & 0x40 != 0 && self.length_counter != 0 {
-            (((self.len_cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+            ((self.len_cc >> 13) + self.length_counter as u32) << 13 
         } else {
             LEN_DISABLED
         };
@@ -256,7 +256,7 @@ impl Wave {
             if self.wave_counter == self.cc.wrapping_add(1) {
                 self.sample_buf = self.wave_ram[0];
                 if !self.cgb {
-                    let pos = ((self.wave_pos as usize + 1) / 2) % 16;
+                    let pos = (self.wave_pos as usize).div_ceil(2) % 16;
                     if pos < 4 {
                         self.wave_ram[0] = self.wave_ram[pos];
                     } else {

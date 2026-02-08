@@ -29,6 +29,12 @@ pub struct SM83 {
     pub m2_halt_stall_charged: bool,
 }
 
+impl Default for SM83 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SM83 {
     pub fn new() -> Self {
         SM83 { 
@@ -197,8 +203,7 @@ impl SM83 {
                 // mode 2 instead of the stale mode 0).
                 if pending_interrupt == Some(registers::InterruptFlag::Lcd)
                     && !mmio.mmio.is_cgb()
-                {
-                    if let Some(ev) = mmio.mmio.pending_m0_irq_fire_cc() {
+                    && let Some(ev) = mmio.mmio.pending_m0_irq_fire_cc() {
                         let mcc = mmio.master_cc_dbg() as i64;
                         if mcc - (ev as i64) < 2 {
                             mmio.mmio.set_halt_wake_plus4_dmg(true);
@@ -222,7 +227,6 @@ impl SM83 {
                             mmio.mmio.set_dmg_m0_halt_ly_advance(Some(adv));
                         }
                     }
-                }
                 // HALT-PREFETCH (Lever A, RB_PREFETCH_CC). Derive the M-cycle
                 // phase bit that separates the byte-identical _1b/_2b streams.
                 // The pre-snap HALT-entry cc H (halt_entry_cc) carries the extra
@@ -486,14 +490,12 @@ impl SM83 {
         // belongs to the lazy-PPU render stage, and which simultaneously flips
         // the sibling hdma_*_ly_*_6 tests TO passing). RB_EI_FAST=0 forces the
         // OFF / +5-grid baseline (A/B preserved); unset or =1 leaves it ON.
-        if ei_ctx && self.registers.ime {
-            if let Some(early) = mmio.next_timer_overflow_ei_cc() {
-                if boundary_access_cc >= early {
+        if ei_ctx && self.registers.ime
+            && let Some(early) = mmio.next_timer_overflow_ei_cc()
+                && boundary_access_cc >= early {
                     mmio.force_ei_timer_delivery(boundary_access_cc);
                     pending_interrupt = self.get_pending_interrupt(mmio);
                 }
-            }
-        }
 
         let mut serviceable = pending_interrupt;
         if serviceable == Some(registers::InterruptFlag::Timer) {

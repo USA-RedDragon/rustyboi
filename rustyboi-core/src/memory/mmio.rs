@@ -116,8 +116,10 @@ pub(crate) const REG_OCPD: u16 = 0xFF6B; // Object Color Palette Data
 /// Captured at HALT and consulted on unhalt to decide whether the next
 /// Mode 0 should immediately fire an HDMA block.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Default)]
 pub enum HaltHdmaState {
     /// Not in an HDMA period when halt was entered.
+    #[default]
     Low,
     /// Halt entered while in HDMA period, HDMA armed, no block scheduled.
     High,
@@ -125,11 +127,6 @@ pub enum HaltHdmaState {
     Requested,
 }
 
-impl Default for HaltHdmaState {
-    fn default() -> Self {
-        HaltHdmaState::Low
-    }
-}
 
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -715,6 +712,12 @@ pub struct Mmio {
     cgb_de: bool,
 }
 
+impl Default for Mmio {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Mmio {
     pub fn new() -> Self {
         Mmio {
@@ -988,7 +991,7 @@ impl Mmio {
     }
 
     pub fn read_vram_bank1(&self, addr: u16) -> u8 {
-        if !self.cgb_features_enabled || addr < VRAM_START || addr > VRAM_END {
+        if !self.cgb_features_enabled || !(VRAM_START..=VRAM_END).contains(&addr) {
             return 0xFF; // Invalid access
         }
         
@@ -997,7 +1000,7 @@ impl Mmio {
 
     /// Read from specific VRAM bank for debugging purposes
     pub fn read_vram_bank(&self, bank: u8, addr: u16) -> u8 {
-        if addr < VRAM_START || addr > VRAM_END {
+        if !(VRAM_START..=VRAM_END).contains(&addr) {
             return 0xFF; // Invalid address
         }
         
@@ -1077,7 +1080,7 @@ impl Mmio {
             return None;
         }
         // CGB 2304-byte layout.
-        if addr >= BIOS_HEADER_HOLE_START && addr <= BIOS_HEADER_HOLE_END {
+        if (BIOS_HEADER_HOLE_START..=BIOS_HEADER_HOLE_END).contains(&addr) {
             return None; // cartridge header window
         }
         if addr <= BIOS_OVERLAY_END {
@@ -2181,8 +2184,8 @@ impl Mmio {
                 .hdma_last_fire_cc
                 .map(|fc| fc <= halt_cc && halt_cc - fc < mcycle)
                 .unwrap_or(false);
-        if coincident_fire {
-            if let Some((src, dst, len, en)) = self.hdma_pre_fire_state {
+        if coincident_fire
+            && let Some((src, dst, len, en)) = self.hdma_pre_fire_state {
                 self.hdma_pending_writes.clear();
                 self.hdma_source = src;
                 self.hdma_dest = dst;
@@ -2196,7 +2199,6 @@ impl Mmio {
                 period = true;
                 block_done = false;
             }
-        }
         self.halt_hdma_state = if self.hdma_req_pending {
             HaltHdmaState::Requested
         } else if self.hdma_enabled && period {
@@ -2606,12 +2608,11 @@ impl Mmio {
                 // with 0xE7 (Gambatte memory.cpp:366, `!agbFlag_` branch).
                 self.oam_high[(p & 0xE7) - 0xA0] = data;
             }
-        } else if self.dma_pos as usize == OAM_SIZE {
-            if self.dma_start_pos == 0 {
+        } else if self.dma_pos as usize == OAM_SIZE
+            && self.dma_start_pos == 0 {
                 self.dma_pos = 0xFE;
                 self.dma_active = false;
             }
-        }
     }
 
     // ---- DMG OAM corruption bug (Pan Docs "OAM Corruption Bug") ----
@@ -4282,8 +4283,8 @@ impl memory::Addressable for Mmio {
                             self.serial.realign_to_div(phase);
                             self.write_timer(addr, value);
                         }
-                        timer::DIV..=timer::TAC => self.write_timer(addr, value),
-                serial::SB => self.serial.write(addr, value),
+                        timer::TIMA..=timer::TAC => self.write_timer(addr, value),
+                        serial::SB => self.serial.write(addr, value),
                         serial::SC => self.write_serial_sc(value),
                         audio::NR10..=audio::NR52 | audio::WAV_START..=audio::WAV_END => {
                             self.write_apu(addr, value);

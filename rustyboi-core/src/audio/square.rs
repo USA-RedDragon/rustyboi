@@ -593,7 +593,7 @@ impl SquareWave {
         let mask = self.length_mask();
         self.length_counter = (!value as u16 & mask) + 1;
         self.len_counter = if self.nr4() & 0x40 != 0 {
-            (((self.len_cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+            ((self.len_cc >> 13) + self.length_counter as u32) << 13 
         } else {
             LEN_DISABLED
         };
@@ -847,7 +847,7 @@ impl SquareWave {
 
         let _ = trigger;
         self.len_counter = if new_nr4 & 0x40 != 0 && self.length_counter != 0 {
-            (((self.len_cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+            ((self.len_cc >> 13) + self.length_counter as u32) << 13 
         } else {
             LEN_DISABLED
         };

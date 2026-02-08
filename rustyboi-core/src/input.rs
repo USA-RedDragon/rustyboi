@@ -48,6 +48,12 @@ enum JoypadBits {
     SelectDirections = 1<<4,
 }
 
+impl Default for Input {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Input {
     pub fn new() -> Self {
         Input {
@@ -129,11 +135,10 @@ impl Input {
         // (both P14/P15 high) the low nibble reports the current player
         // ID (0x0F - joypad_index) instead of a plain 0x0F. This is what
         // the MLT_REQ read protocol clocks through to enumerate players.
-        if let Some(sgb) = self.sgb.as_ref() {
-            if select == 0b0011_0000 {
+        if let Some(sgb) = self.sgb.as_ref()
+            && select == 0b0011_0000 {
                 low &= sgb.joypad_id_nibble();
             }
-        }
         low & 0x0F
     }
 }

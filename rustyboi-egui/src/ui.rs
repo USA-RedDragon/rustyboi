@@ -77,6 +77,12 @@ pub struct Gui {
     show_mobile_menu: bool,
 }
 
+impl Default for Gui {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Gui {
     pub fn new() -> Self {
         Self::with_pending_dialog_result(Arc::new(Mutex::new(None)))
