@@ -4,3 +4,7 @@
 gb-test-roms/
 /.baselines/
 /bios/*.bin
+
+# llvm version hacks for libretro bindgen
+.cargo/config.toml
+tools/libclang-compat/
