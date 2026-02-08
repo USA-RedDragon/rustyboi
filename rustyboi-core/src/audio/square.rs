@@ -1099,6 +1099,12 @@ impl SquareWave {
         self.enabled
     }
 
+    /// Force the channel's active/length-running flag (NR52 status bit). Used by
+    /// the SGB post-boot seed to hand off with channel 1 already stopped.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
     /// CGB PCM12 nibble for this square channel. Reports SameBoy's `samples[index]`
     /// digital amplitude: 0 while the DAC is off (`!master`) or the fresh-trigger
     /// output is still surpressed (SameBoy `sample_surpressed`); otherwise the

@@ -719,7 +719,13 @@ impl Audio {
         self.channel3.set_agb(agb);
     }
 
-    pub fn set_post_bios_state(&mut self, cgb: bool) {
+    /// Seed the post-boot APU state. `cgb` selects the CGB vs DMG channel-1
+    /// startup-tone phase; `ch1_active` is the NR52 bit-0 (channel-1 running)
+    /// state at hand-off. The DMG/MGB/CGB boot ROMs play the startup "ding" and
+    /// hand off with channel 1 still running (bit 0 = 1); the SGB boot ROM plays
+    /// no chime on the Game Boy side, so it hands off with channel 1 already
+    /// disabled (NR52 reads 0xF0, not 0xF1 — mooneye boot_hwio-S).
+    pub fn set_post_bios_state(&mut self, cgb: bool, ch1_active: bool) {
         self.audio_enabled = true;
         self.nr50 = 0x77;
         self.nr51 = 0xF3;
@@ -731,6 +737,10 @@ impl Audio {
             self.channel1.set_post_bios_ch1(37 * 2, 6, true);
         } else {
             self.channel1.set_post_bios_ch1(69 * 2, 3, false);
+        }
+        // SGB: same register bytes as DMG, but channel 1 is not left running.
+        if !ch1_active {
+            self.channel1.set_enabled(false);
         }
 
         self.channel2.set_length_counter(0x40);
