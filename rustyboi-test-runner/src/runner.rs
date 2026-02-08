@@ -112,6 +112,12 @@ pub struct RunOptions {
     /// Directory holding `dmg_boot.bin` / `cgb_boot.bin`. Defaults to `bios/`
     /// resolved against the candidate roots in `resolve_bios_path`.
     pub bios_dir: Option<PathBuf>,
+    /// Diagnostic: after a mooneye-graded case, dump this many 8-byte rows of
+    /// the SameSuite results buffer (forces --jobs 1).
+    pub ss_dump: Option<u16>,
+    /// Base address for `--ss-dump` (default 0xC000; some tests store results
+    /// in VRAM).
+    pub ss_dump_base: Option<u16>,
 }
 
 /// Locate the boot ROM file for a hardware mode. Tries `bios_dir` first (if
@@ -448,8 +454,8 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         Oracle::MemValue { addr, expected } => {
             return evaluate_mem_value(&mut gb, options.frames, *addr, *expected);
         }
-        Oracle::MooneyeFib => return evaluate_mooneye(&mut gb, 0x40),
-        Oracle::MooneyeFibEd => return evaluate_mooneye(&mut gb, 0xED),
+        Oracle::MooneyeFib => return evaluate_mooneye(&mut gb, 0x40, options),
+        Oracle::MooneyeFibEd => return evaluate_mooneye(&mut gb, 0xED, options),
         Oracle::CspPng { path } => {
             let trace_case = options
                 .trace_rom
@@ -667,24 +673,16 @@ fn run_until_ldbb(gb: &mut GB, max_cycles: u64, marker: u8) -> bool {
 
 /// mooneye: run to the done-marker opcode and check the Fibonacci magic
 /// registers. `marker` is `0x40` (`LD B,B`) or `0xED` (2016-era illegal-opcode).
-fn evaluate_mooneye(gb: &mut GB, marker: u8) -> Result<(), String> {
+fn evaluate_mooneye(gb: &mut GB, marker: u8, options: &RunOptions) -> Result<(), String> {
     // mooneye tests complete quickly; 250M cycles is ~60s of GB time, ample.
     if !run_until_ldbb(gb, 250_000_000, marker) {
         return Err("no done-marker (timeout)".to_string());
     }
     // Diagnostic: SameSuite tests store per-subtest results at $C000 before
-    // comparing against their embedded CorrectResults table. RB_SS_DUMP=N
+    // comparing against their embedded CorrectResults table. --ss-dump N
     // dumps N rows of 8 bytes so a failure pinpoints WHICH subtest diverged.
-    if let Some(rows) = std::env::var("RB_SS_DUMP")
-        .ok()
-        .and_then(|v| v.parse::<u16>().ok())
-    {
-        // RB_SS_DUMP_BASE=hex overrides the dump base (some tests store results
-        // in VRAM via RESULTS_START = vTestBuf).
-        let dump_base = std::env::var("RB_SS_DUMP_BASE")
-            .ok()
-            .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
-            .unwrap_or(0xC000);
+    if let Some(rows) = options.ss_dump {
+        let dump_base = options.ss_dump_base.unwrap_or(0xC000);
         for row in 0..rows {
             let base = dump_base + row * 8;
             let bytes: Vec<String> = (0..8)
