@@ -4018,9 +4018,23 @@ impl Ppu {
             // m2int_*_scx5 window probes — but only at single speed; at double
             // speed Gambatte's phase agrees, so the -1 over-corrects (the DS
             // m2int_wx*_scx5_m3stat reads flip mode3->mode0).
-            if is_cgb && scx == 5 && self.sprites_on_line.is_empty() {
+            // A window that starts at WX=0 extends mode-3 one dot longer than the
+            // flat StartWindowDraw +6 (Gambatte's predictor charges +6 for every
+            // in-range WX including 0, but real DMG/CGB silicon runs WX=0 one dot
+            // long — age stat-mode-window WX=0 rows on CPU-DMG-C / CPU-CGB-B/C/E).
+            // Single speed only: at double speed Gambatte's own WX=0 m0Time phase
+            // already agrees (the +1 would flip 10spritesPrLine_wx0_m3stat_ds /
+            // m2int_wxDefault_m3stat_ds), same speed asymmetry as the scx==5 case.
+            // The scx==5 CGB SS -1 (below) is a fine-scroll-dispatch correction for
+            // a window that starts mid-tile; at WX=0 the window starts at the tile
+            // grid origin so that dispatch penalty does not apply (age
+            // stat-mode-window-cgbBCE WX=0 scx5 row reads mode 3, not mode 0).
+            if is_cgb && scx == 5 && self.sprites_on_line.is_empty() && nwx != 0 {
                 let dflt = if mmio.is_double_speed_mode() { 0 } else { -1 };
                 cycles += dflt;
+            }
+            if nwx == 0 && !mmio.is_double_speed_mode() {
+                cycles += 1;
             }
             win = true;
         }
