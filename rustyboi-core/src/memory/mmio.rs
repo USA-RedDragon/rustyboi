@@ -882,7 +882,30 @@ impl Mmio {
     pub fn set_apu_cgb_de(&mut self, de: bool) {
         self.audio.set_cgb_de(de);
     }
-    
+
+    /// Seed the CGB-B-or-earlier APU revision gate (SameBoy `GB_is_cgb &&
+    /// model <= GB_MODEL_CGB_B`). Called once from `GB::new` for
+    /// Hardware::CGB0/CGBB.
+    pub fn set_apu_cgb_le_b(&mut self, le_b: bool) {
+        self.audio.set_cgb_le_b(le_b);
+    }
+
+    /// CPU-CGB-A/B (Hardware::CGBB) wave first-glitch-write swallow.
+    pub fn set_apu_cgb_b(&mut self, b: bool) {
+        self.audio.set_cgb_b(b);
+    }
+
+    /// CGB-C-and-older PCM read glitch (SameBoy `pcm_mask`, model <=
+    /// GB_MODEL_CGB_C; excludes AGB and CGB-D/E).
+    pub fn set_apu_pcm_c_glitch(&mut self, on: bool) {
+        self.audio.set_pcm_c_glitch(on);
+    }
+
+    /// NRx4 square step-back parity gate (true for CGB0/CGBB/AGB).
+    pub fn set_apu_step_back_parity(&mut self, on: bool) {
+        self.audio.set_step_back_parity(on);
+    }
+
     pub fn is_cgb_features_enabled(&self) -> bool {
         self.cgb_features_enabled
     }

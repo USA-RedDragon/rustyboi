@@ -103,6 +103,28 @@ pub struct SquareWave {
     // D/E double-speed trigger-delay placement (see the nr4 trigger below).
     #[serde(default)]
     cgb_de: bool,
+    // CGB-B-or-earlier APU revision gate (SameBoy `GB_is_cgb && model <=
+    // GB_MODEL_CGB_B`): the NRx4 length-glitch extra clock fires regardless of
+    // the written bit-6 value (see `length_nr4_change`).
+    #[serde(default)]
+    cgb_le_b: bool,
+    // CGB-C-and-older PCM read glitch (SameBoy `pcm_mask`, applied for
+    // `model <= GB_MODEL_CGB_C`; excludes AGB): see `pcm_nibble_at`.
+    #[serde(default)]
+    pcm_c_glitch: bool,
+    // NRx4 sample-index step-back parity gate (SameBoy: the step-back is
+    // unconditional on CGB-D/E but gated on `sample_countdown & 1` for CGB-C-
+    // and-earlier AND AGB). true for {CGB0, CGBB, AGB}; the default CGB keeps
+    // the unconditional (gambatte-cgb04c-captured) placement. See write_nrx4.
+    #[serde(default)]
+    step_back_parity: bool,
+    // cc of the most recent duty tick and whether the pre-tick digital sample
+    // was 0 (SameBoy's `cycles_left == 0 && samples[i] == 0` mask condition,
+    // re-derivable against any access cc).
+    #[serde(default = "disabled")]
+    last_tick_cc: u32,
+    #[serde(default)]
+    last_tick_pre_zero: bool,
     // --- Envelope unit (SameBoy div-anchored model, Core/apu.c) ---
     // `volume_countdown`: decremented (mod 8) on every 8th DIV-APU event
     // (div_divider & 7 == 7) while no tick is pending; reloaded from NRx2 & 7
@@ -214,6 +236,11 @@ impl SquareWave {
             lf_div: 1,
             ds: false,
             cgb_de: false,
+            cgb_le_b: false,
+            pcm_c_glitch: false,
+            step_back_parity: false,
+            last_tick_cc: COUNTER_DISABLED,
+            last_tick_pre_zero: false,
             volume_countdown: 0,
             env_clock: false,
             env_should_lock: false,
@@ -254,6 +281,23 @@ impl SquareWave {
         self.cgb_de = de;
     }
 
+    /// CGB-B-or-earlier APU revision gate (SameBoy `GB_is_cgb && model <=
+    /// GB_MODEL_CGB_B`).
+    pub fn set_cgb_le_b(&mut self, le_b: bool) {
+        self.cgb_le_b = le_b;
+    }
+
+    /// CGB-C-and-older PCM read glitch (SameBoy `pcm_mask`, model <=
+    /// GB_MODEL_CGB_C).
+    pub fn set_pcm_c_glitch(&mut self, on: bool) {
+        self.pcm_c_glitch = on;
+    }
+
+    /// NRx4 step-back parity gate (true for CGB0/CGBB/AGB; SameBoy gates the
+    /// step-back on `sample_countdown & 1` for those, unconditional on D/E).
+    pub fn set_step_back_parity(&mut self, on: bool) {
+        self.step_back_parity = on;
+    }
 
     pub fn set_len_cc(&mut self, cc: u32) {
         self.len_cc = cc;
@@ -331,6 +375,8 @@ impl SquareWave {
         self.did_tick = false;
         self.just_reloaded = false;
         self.last_pos_cc = self.cc;
+        self.last_tick_cc = COUNTER_DISABLED;
+        self.last_tick_pre_zero = false;
         self.sweep_kill_counter = COUNTER_DISABLED;
         self.sweep_apply_counter = COUNTER_DISABLED;
         // Envelope reset (SameBoy GB_apu_init memset).
@@ -401,12 +447,19 @@ impl SquareWave {
         }
         // SameBoy: `while (cycles_left > sample_countdown) { ... }`.
         while cycles_left > self.sample_countdown {
+            // Pre-tick digital sample (SameBoy `samples[i]` before the tick's
+            // update), recorded per tick for the CGB<=C PCM read glitch.
+            let pre_zero =
+                self.sample_surpressed || !self.high || self.volume & 0x0F == 0;
             cycles_left -= self.sample_countdown + 1;
             self.sample_countdown = (self.sample_length() ^ 0x7FF) * 2 + 1;
             self.pos = (self.pos + 1) & 7;
             self.sample_surpressed = false;
             self.did_tick = true;
             self.high = duty_out(self.duty(), self.pos);
+            // cc this tick landed on (batch span minus what remains).
+            self.last_tick_cc = cc.wrapping_sub(cycles_left);
+            self.last_tick_pre_zero = pre_zero;
         }
         self.just_reloaded = cycles_left == 0;
         self.sample_countdown -= cycles_left;
@@ -831,7 +884,11 @@ impl SquareWave {
         }
 
         let mut dec: u16 = 0;
-        if new_nr4 & 0x40 != 0 {
+        // CGB-B and older: the length-enable extra-clock glitch fires
+        // regardless of the written bit-6 value (SameBoy `(value & 0x40) ||
+        // (GB_is_cgb && model <= GB_MODEL_CGB_B)` — "current value is
+        // irrelevant"; SameSuite channel_*_extra_length_clocking-cgb0B).
+        if new_nr4 & 0x40 != 0 || self.cgb_le_b {
             dec = ((!self.len_cc >> 12) & 1) as u16;
             if old_nr4 & 0x40 == 0 && self.length_counter != 0 {
                 self.length_counter -= dec;
@@ -863,20 +920,30 @@ impl SquareWave {
 
         // SameBoy NRx4 step-back quirk (Core/apu.c ~1814): when the sample length
         // changes from ≥$700 to <$700 on a NON-trigger write of an active channel,
-        // the index steps back one (compensating a same-cycle would-be tick). CGB-D/E
-        // apply it unconditionally; older revs only when countdown bit 0 is set.
-        if !trigger && self.master && (old_nr4 & 0x7) == 7 && (value & 7) != 7 {
-            // CGB-D/E: unconditional (older revs gate on `sample_countdown & 1`).
-            if self.did_tick
-                && self.sample_countdown >> 1 == (self.sample_length() ^ 0x7FF)
-            {
-                self.pos = (self.pos.wrapping_sub(1)) & 7;
-                self.sample_surpressed = false;
-                // The output LATCH is NOT recomputed: hardware keeps emitting
-                // the pre-step-back sample until the next duty tick (SameBoy
-                // has no update_sample here; SameSuite channel_1_freq_change_-
-                // timing-cgbDE nops-28 pins the stale-high read).
-            }
+        // the index steps back one (compensating a same-cycle would-be tick).
+        // SameBoy: `if (model == CGB_E || model == CGB_D || (sample_countdown & 1))`
+        // — CGB-D/E apply it unconditionally; CGB-C-and-earlier AND AGB gate it
+        // on the countdown parity ("behaves slightly different on double speed").
+        // In DOUBLE SPEED the pre-D/AGB parity term resolves to "never step
+        // back" against rustyboi's dot-sync grid (its `sample_countdown` sits
+        // one cc off SameBoy's, so the low bit is 0 across the DS freq-change
+        // race cells; SameSuite freq_change_timing-cgb0BC/-A pin this). The
+        // default CGB keeps the unconditional (gambatte-cgb04c-captured)
+        // placement; `step_back_parity` selects the {CGB0,CGBB,AGB} fork.
+        if !trigger
+            && self.master
+            && (old_nr4 & 0x7) == 7
+            && (value & 7) != 7
+            && !(self.step_back_parity && self.ds)
+            && self.did_tick
+            && self.sample_countdown >> 1 == (self.sample_length() ^ 0x7FF)
+        {
+            self.pos = (self.pos.wrapping_sub(1)) & 7;
+            self.sample_surpressed = false;
+            // The output LATCH is NOT recomputed: hardware keeps emitting the
+            // pre-step-back sample until the next duty tick (SameBoy has no
+            // update_sample here; SameSuite channel_1_freq_change_timing-cgbDE
+            // nops-28 pins the stale-high read).
         }
 
         self.length_nr4_change(old_nr4, value, trigger);
@@ -977,6 +1044,16 @@ impl SquareWave {
         // single speed is revision-independent.
         self.delay = if self.cgb_de && self.ds {
             6 - 2 * (was_active as u32) - self.lf_div
+        } else if self.step_back_parity && self.ds && !was_active {
+            // Pre-D / AGB DOUBLE-SPEED fresh trigger: the lf term flips sign
+            // (SameBoy `6 + lf_div` for the `< CGB_D && double_speed` fork,
+            // here in the -1 frame: `5 + lf_div`). The active-trigger path
+            // (`4 - lf`) has no model fork. Applied to the {CGB0,CGBB,AGB}
+            // parity set (the SameSuite -cgb0BC and -A DS rows both need it —
+            // the real pre-04 / AGB silicon these tests target diverges from
+            // the gambatte-cgb04c default `5 - lf` here), leaving the default
+            // CGB unchanged so the gambatte DS pos6->pos7 brackets hold.
+            5 + self.lf_div
         } else {
             5 - 2 * (was_active as u32) - self.lf_div
         };
@@ -1052,6 +1129,10 @@ impl SquareWave {
         }
         let mut high = self.high;
         let mut surpressed = self.sample_surpressed;
+        // Most recent tick at-or-before the read (already-consumed ticks come
+        // from `last_tick_cc`; not-yet-consumed ones from the shadow advance).
+        let mut tick_cc = self.last_tick_cc;
+        let mut tick_pre_zero = self.last_tick_pre_zero;
         if self.sample_countdown != COUNTER_DISABLED {
             let mut cycles_left = read_cc.wrapping_sub(self.last_pos_cc);
             // Guard against a non-monotonic overlay (access cc behind the dot
@@ -1060,15 +1141,29 @@ impl SquareWave {
                 let mut countdown = self.sample_countdown;
                 let mut pos = self.pos;
                 while cycles_left > countdown {
+                    // Pre-tick digital sample (SameBoy `samples[i]` before the
+                    // tick's update) for the CGB<=C PCM read glitch below.
+                    let pre_zero = surpressed || !high || self.volume & 0x0F == 0;
                     cycles_left -= countdown + 1;
                     countdown = (self.sample_length() ^ 0x7FF) * 2 + 1;
                     pos = (pos + 1) & 7;
                     surpressed = false;
                     high = duty_out(self.duty(), pos);
+                    tick_cc = read_cc.wrapping_sub(cycles_left);
+                    tick_pre_zero = pre_zero;
                 }
             }
         }
         if surpressed {
+            return 0;
+        }
+        // CGB-C and older (NOT AGB, NOT D/E): a duty tick landing in the read
+        // access M-cycle (0 or 1 cc before the read resolution point) with a
+        // 0 pre-tick sample masks this channel's nibble to 0 (SameBoy
+        // `pcm_mask`, consumed for `model <= GB_MODEL_CGB_C`; the {0,1} window
+        // is SameBoy's read grid sitting 1 cc after rustyboi's, cell-pinned by
+        // SameSuite channel_1_freq_change_timing-cgb0BC first digits vs -A).
+        if self.pcm_c_glitch && tick_pre_zero && read_cc.wrapping_sub(tick_cc) <= 1 {
             return 0;
         }
         if high {
