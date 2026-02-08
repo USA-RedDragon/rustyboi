@@ -139,65 +139,26 @@ const M0IRQ_SCX2_CGB_OFFSET: i64 = -1;
 // sprite stall is read from the live SpriteFetchRec, not a constant.)
 const WG_TRANSITION_DELAY: u64 = 4;
 
-// CGB-compat (DMG-cart-on-CGB) flavor of the mid-mode-3 VRAM-bus model,
-// derived from the mealybug `_cgb_c` reference captures the same way the DMG
-// flavor was derived from the `_dmg_blob` ones (see wg_apply / bg_wg_apply).
-// The journals are shared; the fetch grid and transition rules differ:
-//  - 1-dot grid resolution: an offscreen-left sprite (OAM X <= 7) delays the
-//    grid by D_pre = 13 - X (the DMG grid is 2-dot quantized).
-//  - An on-screen sprite (pos = X - 8 >= 0) arms its stall at dot
-//    A = F + arm + pos and delays only the reads whose unshifted dot is at or
-//    after A by max(6, 13 - pos % 8) (the DMG rule is tile-granular).
-//  - Clean per-bit transitions, no OR edge: a rising LCDC bit is visible to a
-//    read from write_cc + rise on, a falling bit from write_cc + fall on (the
-//    1-dot rise/fall asymmetry is what the win_map pulse's 9-covered-dots
-//    span pins; both `_cgb_c` win captures reject a symmetric window).
-//  - A TDL/TDH read exactly ON a falling LCDC.4 transition dot reads the tile
-//    INDEX as that bitplane's data (the CGB-C tileIndexIsTd coincidence rule,
-//    resolved on the reconstructed grid instead of the +7 approximation).
-//  - SCY reaches the fetch address lines 2 dots later than on DMG.
-struct CgbWgTune {
-    win_rise: u64,
-    win_fall: u64,
-    bg_rise: u64,
-    bg_fall: u64,
-    bg_fall_tdl: u64,
-    bg_fall_tdh: u64,
-    scy_add: u64,
-    quirk_win: u64,
-    quirk_bg: u64,
-    arm_win: u64,
-    arm_win_hi: u64,
-    arm_bg: u64,
-    shift_base: u64,
-}
+// CGB-compat mid-mode-3 bus-glitch grid deltas, derived from the mealybug
+// `_cgb_c` references. rise/fall = dots from the LCDC write to the bit
+// becoming read-visible per fetch substep (fall split per tile-data byte);
+// quirk = fall-coincidence tile-index-as-data window; arm/shift = fetch-grid
+// anchoring for on-screen sprite stalls; scy_add = extra dots before SCY
+// reaches the fetch address lines (vs DMG).
+const CGBWG_WIN_RISE: u64 = 6;
+const CGBWG_WIN_FALL: u64 = 7;
+const CGBWG_BG_RISE: u64 = 4;
+const CGBWG_BG_FALL: u64 = 4;
+const CGBWG_BG_FALL_TDL: u64 = 3;
+const CGBWG_BG_FALL_TDH: u64 = 1;
+const CGBWG_SCY_ADD: u64 = 2;
+const CGBWG_QUIRK_WIN: u64 = 7;
+const CGBWG_QUIRK_BG: u64 = 4;
+const CGBWG_ARM_WIN: u64 = 14;
+const CGBWG_ARM_WIN_HI: u64 = 12;
+const CGBWG_ARM_BG: u64 = 14;
+const CGBWG_SHIFT_BASE: u64 = 13;
 
-fn cgbwg() -> &'static CgbWgTune {
-    static TUNE: std::sync::OnceLock<CgbWgTune> = std::sync::OnceLock::new();
-    TUNE.get_or_init(|| {
-        let knob = |name: &str, default: u64| -> u64 {
-            std::env::var(name)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(default)
-        };
-        CgbWgTune {
-            win_rise: knob("RB_CGBWG_WIN_RISE", 6),
-            win_fall: knob("RB_CGBWG_WIN_FALL", 7),
-            bg_rise: knob("RB_CGBWG_BG_RISE", 4),
-            bg_fall: knob("RB_CGBWG_BG_FALL", 4),
-            bg_fall_tdl: knob("RB_CGBWG_BG_FALL_TDL", 3),
-            bg_fall_tdh: knob("RB_CGBWG_BG_FALL_TDH", 1),
-            scy_add: knob("RB_CGBWG_SCY", 2),
-            quirk_win: knob("RB_CGBWG_QUIRK_WIN", 7),
-            quirk_bg: knob("RB_CGBWG_QUIRK_BG", 4),
-            arm_win: knob("RB_CGBWG_ARM_WIN", 14),
-            arm_win_hi: knob("RB_CGBWG_ARM_WIN_HI", 12),
-            arm_bg: knob("RB_CGBWG_ARM_BG", 14),
-            shift_base: knob("RB_CGBWG_SHIFT_BASE", 13),
-        }
-    })
-}
 /// Machine configuration for a CPU VRAM/OAM access-window query.
 #[derive(Clone, Copy)]
 pub struct AccessEnv {
@@ -535,12 +496,6 @@ impl OamReader {
                 2 * OAM_SPRITE_COUNT - 2
             };
             self.ghost = (self.buf[p], self.buf[p + 1]);
-        }
-        if std::env::var_os("RB_GHOST_DEBUG").is_some() {
-            eprintln!(
-                "GHOST cap={} fetches={} ghost=({:02X},{:02X})",
-                cap, line_has_fetches, self.ghost.0, self.ghost.1
-            );
         }
     }
 
@@ -2277,12 +2232,12 @@ impl Ppu {
                 // tile at F + arm_win_hi + 8*(pos/8). Reads whose unshifted
                 // dot is at or after A shift by the sprite's stall.
                 let arm = if pos < 8 {
-                    cgbwg().arm_win
+                    CGBWG_ARM_WIN
                 } else {
-                    cgbwg().arm_win_hi + 8 * (pos as u64 / 8)
+                    CGBWG_ARM_WIN_HI + 8 * (pos as u64 / 8)
                 };
                 if counted && base >= anchor + arm {
-                    h += (cgbwg().shift_base as i64 - (pos % 8)).max(6) as u64;
+                    h += (CGBWG_SHIFT_BASE as i64 - (pos % 8)).max(6) as u64;
                 }
             } else if rec.phase == SpriteFetchPhase::Fetched
                 && (n as i64) >= pos / 8 + 2
@@ -2293,41 +2248,8 @@ impl Ppu {
         const WG_BITS: u8 =
             (LCDCFlags::WindowTileMapDisplaySelect as u8) | (LCDCFlags::BGWindowTileDataSelect as u8);
         if self.wg_cgb {
-            let t = cgbwg();
-            if std::env::var_os("RB_CGBWG_DBG").is_some() {
-                let sprs: Vec<(u8, u8, i64)> = self
-                    .sprites_on_line
-                    .iter()
-                    .enumerate()
-                    .map(|(i, s)| {
-                        (
-                            s.x,
-                            self.sprite_fetch_recs
-                                .get(i)
-                                .map(|r| r.phase as u8)
-                                .unwrap_or(0xFF),
-                            self.sprite_fetch_recs
-                                .get(i)
-                                .map(|r| r.penalty as i64)
-                                .unwrap_or(-1),
-                        )
-                    })
-                    .collect();
-                eprintln!(
-                    "[wgcgb-win] n={} k={} base-F={} h-F={} dpre={} hist={:?} sprs={:?}",
-                    n,
-                    k,
-                    base - anchor,
-                    h - anchor,
-                    self.wg_dpre,
-                    self.wg_hist
-                        .iter()
-                        .map(|&(t, o, nn)| (t as i64 - anchor as i64, o, nn))
-                        .collect::<Vec<_>>(),
-                    sprs
-                );
-            }
-            let (bits, quirk) = self.cgb_wg_resolve(h, t.win_rise, t.win_fall, t.quirk_win, k);
+            let (bits, quirk) =
+                self.cgb_wg_resolve(h, CGBWG_WIN_RISE, CGBWG_WIN_FALL, CGBWG_QUIRK_WIN, k);
             fls.lcdc = (fls.lcdc & !WG_BITS) | (bits & WG_BITS);
             fls.or_lcdc = None;
             if k >= 1 {
@@ -2443,7 +2365,7 @@ impl Ppu {
             }
             if s.x <= 7 {
                 if n >= 1 {
-                    // CGB: 1-dot D_pre = 13 - X (see CgbWgTune); DMG: 2-dot
+                    // CGB: 1-dot D_pre = 13 - X (see the CGBWG_* consts); DMG: 2-dot
                     // fetcher-boundary quantized.
                     h += if self.wg_cgb {
                         (13 - s.x) as u64
@@ -2458,9 +2380,9 @@ impl Ppu {
                     // is at/after the sprite's arm dot A = F + arm + 8*(pos/8)
                     // (constant within the sprite's own tile) shift, by
                     // max(6, 13 - pos % 8).
-                    let arm = cgbwg().arm_bg + 8 * (pos / 8);
+                    let arm = CGBWG_ARM_BG + 8 * (pos / 8);
                     if base >= anchor + arm {
-                        h += (cgbwg().shift_base as i64 - (pos % 8) as i64).max(6) as u64;
+                        h += (CGBWG_SHIFT_BASE as i64 - (pos % 8) as i64).max(6) as u64;
                     }
                 } else if n >= pos / 8 + 2 {
                     // 13,11,11,9,9,7,7,7 for pos%8 = 0..7 — the SAME 2-dot
@@ -2496,20 +2418,20 @@ impl Ppu {
         bits
     }
 
-    // CGB-compat flavor of `bg_wg_resolve` (see CgbWgTune): per-bit rise/fall
+    // CGB-compat flavor of `bg_wg_resolve` (see the CGBWG_* consts): per-bit rise/fall
     // thresholds relative to the raw write cc, plus the falling-LCDC.4
     // coincidence quirk for data reads. The FALL visibility is per-substep on
     // the BG grid (the tile_sel_change bands pin TN thru w+3 / TDL thru w+2 /
     // TDH thru w+0 while the rise is a uniform w+4; the window grid is
     // k-uniform — see wg_apply).
     fn bg_wg_resolve_cgb(&self, h: u64, k: u8) -> (u8, bool) {
-        let t = cgbwg();
+
         let fall = match k {
-            0 => t.bg_fall,
-            1 => t.bg_fall_tdl,
-            _ => t.bg_fall_tdh,
+            0 => CGBWG_BG_FALL,
+            1 => CGBWG_BG_FALL_TDL,
+            _ => CGBWG_BG_FALL_TDH,
         };
-        self.cgb_wg_resolve(h, t.bg_rise, fall, t.quirk_bg, k)
+        self.cgb_wg_resolve(h, CGBWG_BG_RISE, fall, CGBWG_QUIRK_BG, k)
     }
 
     // Resolve the SCY journal at hardware dot `h`: the value whose write
@@ -2521,7 +2443,7 @@ impl Ppu {
         }
         // CGB-compat: SCY reaches the fetch address lines `scy_add` dots
         // later than on DMG (the PPU-doc "+2 T-cycles on CGB/AGB").
-        let add = if self.wg_cgb { cgbwg().scy_add } else { 0 };
+        let add = if self.wg_cgb { CGBWG_SCY_ADD } else { 0 };
         let mut v = self.bg_scy_hist[0].1;
         for &(t, _, new) in &self.bg_scy_hist {
             if h > t + add {
@@ -2549,20 +2471,6 @@ impl Ppu {
             | (LCDCFlags::BGWindowTileDataSelect as u8);
         if !self.wg_hist.is_empty() {
             if self.wg_cgb {
-                if std::env::var_os("RB_CGBWG_DBG").is_some() {
-                    let anchor = self.bg_anchor_cc.unwrap_or(0);
-                    eprintln!(
-                        "[wgcgb-bg] n={} k={} h-F={} hist={:?} sprs={:?}",
-                        n,
-                        k,
-                        h as i64 - anchor as i64,
-                        self.wg_hist
-                            .iter()
-                            .map(|&(t, o, nn)| (t as i64 - anchor as i64, o, nn))
-                            .collect::<Vec<_>>(),
-                        self.sprites_on_line.iter().map(|s| s.x).collect::<Vec<_>>()
-                    );
-                }
                 let (bits, quirk) = self.bg_wg_resolve_cgb(h, k);
                 fls.lcdc = (fls.lcdc & !BG_BITS) | (bits & BG_BITS);
                 fls.or_lcdc = None;
@@ -5414,7 +5322,7 @@ impl Ppu {
                     self.wg_dpre = 0;
                     self.bg_anchor_cc = None;
                     self.bg_scy_hist.clear();
-                    // CGB-compat journal flavor (see CgbWgTune): DMG cart on
+                    // CGB-compat journal flavor (see the CGBWG_* consts): DMG cart on
                     // CGB hardware (compat mode runs with CGB features OFF, so
                     // it shares the DMG render paths; the journals resolve
                     // with the CGB grid/transition rules instead).
