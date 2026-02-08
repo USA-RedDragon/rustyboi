@@ -50,9 +50,23 @@ SHOOTOUT_URL="https://github.com/gbdev/GBEmulatorShootout.git"
 
 # --- config ------------------------------------------------------------------
 ROMS="${RB_ROMS:-gb-test-roms}"
-BIN="${RB_BIN:-target/release/rustyboi-test-runner}"
 MODE="${RB_MODE:-dmg,cgb}"
 SUITES_DIR="rustyboi-test-runner/suites"
+# RB_TARGET cross-compiles to a Rust target triple (built + run under its
+# artifact dir); empty = the native host build. On a foreign arch the built
+# binary runs under qemu-user binfmt (register it with
+# `docker run --privileged --rm tonistiigi/binfmt --install all`). On Windows
+# (Git Bash) the binary carries a .exe suffix.
+TARGET="${RB_TARGET:-}"
+case "$(uname -s 2>/dev/null || echo)" in
+    MINGW*|MSYS*|CYGWIN*) EXE=".exe" ;;
+    *)                    EXE="" ;;
+esac
+if [ -n "$TARGET" ]; then
+    BIN="${RB_BIN:-target/$TARGET/release/rustyboi-test-runner$EXE}"
+else
+    BIN="${RB_BIN:-target/release/rustyboi-test-runner$EXE}"
+fi
 # Default jobs: leave a core free, floor of 1. `nproc` is absent on some macOS
 # shells, so fall back to sysctl then 4.
 if [ -z "${RB_JOBS:-}" ]; then
@@ -114,10 +128,14 @@ die()  { printf '%s\n' "!!  $*" >&2; exit 1; }
 
 usage() { sed -n '2,33p' "$0"; }
 
-# json_field <file> <key>  -> integer value (no jq dependency; python3 is on
-# every GitHub runner and is already a build prerequisite here).
+# python3 on Linux/macOS; `python` on Windows (Git Bash ships no `python3`).
+PY="$(command -v python3 || command -v python || true)"
+[ -n "$PY" ] || die "python3 (or python) is required but was not found on PATH"
+
+# json_field <file> <key>  -> integer value (no jq dependency; python is already
+# a prerequisite here, for zip extraction).
 json_field() {
-    python3 -c "import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])" "$1" "$2"
+    "$PY" -c "import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])" "$1" "$2"
 }
 
 # --- setup: fetch ROMs (idempotent) ------------------------------------------
@@ -134,7 +152,7 @@ setup() {
     # Extract with python3 (already required for JSON parsing) so this works
     # identically on Linux, macOS and Windows (Git Bash), where `unzip` may be
     # absent and GNU `tar` cannot read zips.
-    python3 -c "import sys,zipfile;zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$zip" "$ROMS"
+    "$PY" -c "import sys,zipfile;zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$zip" "$ROMS"
     rm -f "$zip"
     log "Syncing gambatte-core oracles (.bin/.dump) @ ${GAMBATTE_CORE_REF:0:12}"
     sync_gambatte_oracles
@@ -196,8 +214,15 @@ sync_gambatte_oracles() {
 
 # --- build -------------------------------------------------------------------
 build() {
-    log "Building release test runner"
-    cargo build --release -p rustyboi-test-runner
+    # Scope to -p rustyboi-test-runner: the workspace default-members include
+    # rustyboi-platform (rodio -> cpal -> alsa-sys), which a bare `cargo build`
+    # would pull in and fail to cross-compile. The runner itself is std-only.
+    log "Building release test runner${TARGET:+ for $TARGET}"
+    if [ -n "$TARGET" ]; then
+        cargo build --release -p rustyboi-test-runner --target "$TARGET"
+    else
+        cargo build --release -p rustyboi-test-runner
+    fi
 }
 
 # --- run one suite + gate ----------------------------------------------------
