@@ -197,8 +197,8 @@ impl Sgb {
             3 => {
                 // Both-high: commit the in-flight bit (the ICD2 samples the data
                 // value on the line's return to idle-high) and re-arm.
-                if let Some(one) = self.pending_bit.take() {
-                    if (self.write_index as usize) < self.command.len() * 8 {
+                if let Some(one) = self.pending_bit.take()
+                    && (self.write_index as usize) < self.command.len() * 8 {
                         if one {
                             let byte = (self.write_index / 8) as usize;
                             let bit = (self.write_index & 7) as u8;
@@ -209,7 +209,6 @@ impl Sgb {
                             self.ready_for_stop = true;
                         }
                     }
-                }
                 self.ready_for_pulse = true;
             }
             line @ (1 | 2) => {

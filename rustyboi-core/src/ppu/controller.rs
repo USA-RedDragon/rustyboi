@@ -22,9 +22,9 @@ pub const FRAMEBUFFER_SIZE: usize = 160 * 144;
 /// Convert an SGB/CGB RGB555 color word (bits: r=0-4, g=5-9, b=10-14) to RGB888
 /// using the linear 5-bit->8-bit scaling the emulator uses for CGB `Linear`.
 fn rgb555_to_rgb888(color: u16) -> (u8, u8, u8) {
-    let r = (color & 0x1F) as u16;
-    let g = ((color >> 5) & 0x1F) as u16;
-    let b = ((color >> 10) & 0x1F) as u16;
+    let r = color & 0x1F ;
+    let g = (color >> 5) & 0x1F ;
+    let b = (color >> 10) & 0x1F ;
     (((r * 255) / 31) as u8, ((g * 255) / 31) as u8, ((b * 255) / 31) as u8)
 }
 
@@ -518,7 +518,7 @@ impl OamReader {
     // line's walk).
     fn capture_ghost(&mut self, line_has_fetches: bool) {
         let cap = (self.last_change as usize).min(2 * OAM_SPRITE_COUNT);
-        if (cap >= 2 * OAM_SPRITE_COUNT || cap < 2) && line_has_fetches {
+        if !(2..2 * OAM_SPRITE_COUNT).contains(&cap) && line_has_fetches {
             self.ghost = (0xFF, 0xFF);
         } else {
             let p = if cap >= 2 {
@@ -1458,6 +1458,12 @@ pub struct Ppu {
     fetch_debug_events: Vec<FetchDebugEvent>,
     #[serde(skip, default)]
     pixel_debug_events: Vec<PixelDebugEvent>,
+}
+
+impl Default for Ppu {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Ppu {
@@ -2778,12 +2784,11 @@ impl Ppu {
                     + win_fine
                     - 1;
                 let will_start = wy_ok && wx_in_range && (self.ticks as i64) < commit_dot;
-                if will_start {
-                    if let Some(m0t) = self.m0_time_master {
+                if will_start
+                    && let Some(m0t) = self.m0_time_master {
                         let pen = (WIN_M3_PENALTY as i64) << ds as i64;
                         self.m0_time_master = Some((m0t as i64 + pen).max(0) as u64);
                     }
-                }
                 // else: keep the no-window m0_time_master as captured at arm.
             }
             // A mid-mode-3 window-DISABLE toggle (not sprite) interacts with the
@@ -4049,7 +4054,7 @@ impl Ppu {
                 cycles += WIN_M3_PENALTY;
                 if is_cgb && scx == 5 && self.sprites_on_line.is_empty() {
                     let dflt = if mmio.is_double_speed_mode() { 0 } else { -1 };
-                    cycles += dflt as i32;
+                    cycles += dflt;
                 }
             }
         }
@@ -4099,7 +4104,7 @@ impl Ppu {
             // m2int_wx*_scx5_m3stat reads flip mode3->mode0).
             if is_cgb && scx == 5 && self.sprites_on_line.is_empty() {
                 let dflt = if mmio.is_double_speed_mode() { 0 } else { -1 };
-                cycles += dflt as i32;
+                cycles += dflt;
             }
             win = true;
         }
@@ -4538,13 +4543,8 @@ impl Ppu {
         // SCX has no positive lever in the sweep (delay 1/2 == net-zero vs the
         // live read); the SCX-write straddles need the read-cc convergent root,
         // out of scope. Default 0 (live), env-overridable for future work.
-        let delay = if mmio.is_cgb_features_enabled() {
-            0u64
-        } else {
-            0
-        };
         self.scx_pending = value;
-        self.scx_apply_cc = cc + delay;
+        self.scx_apply_cc = cc;
 
         // Exact-cc f1-discard latch. The "before" value is whatever the f1 loop
         // sees right now (resolving any already-pending latch up to this write's
@@ -5454,7 +5454,7 @@ impl Ppu {
                     // saves may carry an empty vec) and clear to -1 (no BG pixel yet).
                     self.line_bg_idx.clear();
                     self.line_bg_idx.resize(160, -1);
-                    self.m3_arm_scx = (mmio.read(SCX) & 0x07) as u8;
+                    self.m3_arm_scx = mmio.read(SCX) & 0x07 ;
                     self.m3_arm_scx_full = mmio.read(SCX) as i16;
                     // First line after enable: resolve the SCX value the fine-scroll
                     // discard actually samples. Gambatte's M3Start::f1 reads SCX once
@@ -5912,8 +5912,8 @@ impl Ppu {
                 // is complete, and the pipeline's own x==160 push no longer drives
                 // timing. When no closed-form m0Time exists (first line after
                 // enable / mid-M3 invalidation), fall back to the live x==160 push.
-                if let Some(m0t) = self.m0_time_master {
-                    if mmio.master_cc() >= m0t {
+                if let Some(m0t) = self.m0_time_master
+                    && mmio.master_cc() >= m0t {
                         self.scheduled_mode0_dot = None;
                         // Timing report (FF41 mode-0, STAT/m0 IRQ) fires at the exact
                         // m0Time regardless of pixel progress.
@@ -5941,7 +5941,6 @@ impl Ppu {
                             break 'label;
                         }
                     }
-                }
 
                 // Gambatte M3Start::f1 fine-scroll break resolution. The f1 loop
                 // runs xpos = 0,1,2,... one per M3 dot, re-reading p.scx each
@@ -6156,7 +6155,7 @@ impl Ppu {
                 // sprite-fetch stall dots don't flip the fetcher's even/odd phase
                 // (matches Gambatte). On DMG, keep the original self.ticks gate.
                 let cadence_even = if mmio.is_cgb_features_enabled() {
-                    let even = self.fetcher_cadence_tick % 2 == 0;
+                    let even = self.fetcher_cadence_tick.is_multiple_of(2);
                     self.fetcher_cadence_tick = self.fetcher_cadence_tick.wrapping_add(1);
                     even
                 } else if let Some(anchor) = self.win_fetch_anchor {
@@ -6486,8 +6485,7 @@ impl Ppu {
                 // dot back), byte-identical to the immediate start for stable WX.
                 if !mmio.is_cgb_features_enabled()
                     && let Some((arm_dot, arm_wx)) = self.dmg_wx_trigger_pending.take()
-                {
-                    if self.ticks == arm_dot.wrapping_add(1)
+                    && self.ticks == arm_dot.wrapping_add(1)
                         && mmio.read(WX) == arm_wx
                         && self.x + 7 == arm_wx
                         && !self.fetcher.is_fetching_window()
@@ -6531,7 +6529,6 @@ impl Ppu {
                     }
                     // else: canceled — the WX store on the commit dot rewrote the
                     // comparator input; no window starts (fall through).
-                }
 
                 // Check if we should start window rendering. On DMG the
                 // window-enable bit feeding the WX comparator is the DELAYED
@@ -6778,10 +6775,8 @@ impl Ppu {
                     self.insert_bg_pixel = true;
                     // The inserted pixel shifts every later boundary one to the
                     // right.
-                    for slot in self.we_glitch_tile_starts.iter_mut() {
-                        if let Some(fx) = slot {
-                            *fx = fx.saturating_add(1);
-                        }
+                    for fx in self.we_glitch_tile_starts.iter_mut().flatten() {
+                        *fx = fx.saturating_add(1);
                     }
                 }
                 if self.draw_fifo_pixel(mmio) && self.x == 160 {
@@ -7117,7 +7112,7 @@ impl Ppu {
         // (video.cpp:357) passes `cc + 4`; the +1 dot here aligns the renderer
         // tick with that access cc. Net +1 on the dma suite, no regressions.
         let m0n = m0 + self.dma_scx_m0_nudge(double_speed, false) as i128;
-        Some(dot >= m0n + 1 && dot + 3 + 3 * ds < 456)
+        Some(dot > m0n && dot + 3 + 3 * ds < 456)
     }
 
     /// DEFERRED-HDMA-FIRE late-HBlank predicate for the FF55-kick / unhalt
@@ -7540,8 +7535,8 @@ impl Ppu {
         // except the few line-cycles before mode 3 (the begin window, `vram_started`)
         // — `m0_time_master` is the previous line's stale value here, so resolve from
         // the begin alone (mode 3 cannot have ended before it starts; no END test).
-        if kind == 0 && self.state == State::OAMSearch {
-            if let Some(started) = vram_started {
+        if kind == 0 && self.state == State::OAMSearch
+            && let Some(started) = vram_started {
                 // A closed-form cgbp anchor exists for the CURRENT line. At single
                 // speed an OAM scan still running past tick 80 (mode-3 starts at tick
                 // 80) means the LCD-enable offset extended this line's mode 2 (the
@@ -7574,7 +7569,6 @@ impl Ppu {
                     !double_speed && self.ticks > 80 && !self.first_line_after_enable;
                 return Some(if lcdoffset_extended { false } else { started });
             }
-        }
         let m0t = self.m0_time_master? as i64;
         // END unblocks at Gambatte's `cc + 2 >= m0Time` (exact), resolved at the
         // raw access cc. The post-tick FF41 mode register (`mode3_locked`) crosses
@@ -7624,7 +7618,7 @@ impl Ppu {
             };
             if oam_line_cycle + k >= stat_irq::LCD_CYCLES_PER_LINE as i64 {
                 let ly = self.internal_ly_val as i64;
-                let accessible = ly >= 143 && ly < 153;
+                let accessible = (143..153).contains(&ly);
                 return Some(!accessible);
             }
         }
@@ -8342,9 +8336,7 @@ impl Ppu {
             && !self.ssds_mode3_ly_advance;
         let tn = if let Some(adv) = m0_halt_adv {
             to_next - adv as i64
-        } else if cgb_halt_exit {
-            to_next - 5
-        } else if ssds_haltskew {
+        } else if cgb_halt_exit || ssds_haltskew {
             to_next - 5
         } else if halt_skew {
             to_next - 1
@@ -8426,9 +8418,9 @@ impl Ppu {
         let color_word = (high_byte as u16) << 8 | low_byte as u16;
         
         // Extract 5-bit RGB components
-        let r = (color_word & 0x1F) as u16;
-        let g = ((color_word >> 5) & 0x1F) as u16;
-        let b = ((color_word >> 10) & 0x1F) as u16;
+        let r = color_word & 0x1F ;
+        let g = (color_word >> 5) & 0x1F ;
+        let b = (color_word >> 10) & 0x1F ;
         
         match self.cgb_color_conversion {
             CgbColorConversion::Linear => {

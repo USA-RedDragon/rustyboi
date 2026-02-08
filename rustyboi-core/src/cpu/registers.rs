@@ -35,6 +35,12 @@ pub struct Registers {
     pub ime: bool, // Interrupt Master Enable Flag
 }
 
+impl Default for Registers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Registers {
     pub fn new() -> Self {
         Registers {

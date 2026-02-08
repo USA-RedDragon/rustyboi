@@ -399,13 +399,12 @@ fn run_gui_loop<'win>(
                 event: WindowEvent::Resized(size),
                 ..
             } => {
-                if let Some(pixels) = pixels.as_mut() {
-                    if let Err(err) = pixels.resize_surface(size.width.max(1), size.height.max(1)) {
+                if let Some(pixels) = pixels.as_mut()
+                    && let Err(err) = pixels.resize_surface(size.width.max(1), size.height.max(1)) {
                         println!("Failed to resize surface during window event: {}", err);
                         elwt.exit();
                         return;
                     }
-                }
                 if let Some(framework) = framework.as_mut() {
                     framework.resize(size.width.max(1), size.height.max(1));
                 }
@@ -964,7 +963,7 @@ impl World {
             let rgba_frame = match gb_frame {
                 gb::Frame::Monochrome(data) => {
                     // Convert monochrome framebuffer to RGBA using the palette
-                    convert_to_rgba(&data, &self.palette)
+                    convert_to_rgba(data, &self.palette)
                 }
                 gb::Frame::Color(data) => {
                     // Convert color framebuffer (RGB888) to RGBA8888
