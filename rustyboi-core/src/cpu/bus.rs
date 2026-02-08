@@ -433,7 +433,13 @@ impl<'a> Bus<'a> {
         // DMG. `is_cgb_features_enabled` (KEY0 compat off) is the wrong key here.
         let is_cgb = self.mmio.is_cgb();
         let cgb_de = self.mmio.is_cgb_de();
-        if let Some(blocked) = self.ppu.cpu_access_blocked(kind, is_read, mode_locked, is_cgb, cgb_de, ds, gate_cc) {
+        if let Some(blocked) = self.ppu.cpu_access_blocked(
+            kind,
+            is_read,
+            mode_locked,
+            crate::ppu::controller::AccessEnv { is_cgb, cgb_de, double_speed: ds },
+            gate_cc,
+        ) {
             return blocked;
         }
         mode_locked
