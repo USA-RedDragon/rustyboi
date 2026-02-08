@@ -359,7 +359,6 @@ fn stat_change_triggers_m2_cgb(
     false
 }
 
-#[allow(clippy::too_many_arguments)]
 fn stat_change_triggers_m0lyc_or_m1_cgb(
     old: u8,
     data: u8,

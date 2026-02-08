@@ -35,6 +35,16 @@ pub(crate) struct FetcherDebugEvent {
     pub fetching_window: bool,
 }
 
+/// Per-step position/scroll context for the fetcher.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct FetchPos {
+    pub window_line: u8,
+    pub display_x: u8,
+    pub pending_discard: u8,
+    pub scy: u8,
+    pub scx: u8,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FetcherLcdcState {
     pub lcdc: u8,
@@ -246,13 +256,10 @@ impl Fetcher {
     pub fn step(
         &mut self,
         mmio: &mut mmio::Mmio,
-        window_line: u8,
         lcdc_state: FetcherLcdcState,
-        display_x: u8,
-        pending_discard: u8,
-        scy: u8,
-        scx: u8,
+        pos: FetchPos,
     ) -> Option<FetcherDebugEvent> {
+        let FetchPos { window_line, display_x, pending_discard, scy, scx } = pos;
         let ly = mmio.read(ppu::LY);
         // Re-read (scy + ly) live at every BG fetch substep. The fetcher runs
         // ahead of the display by the FIFO depth, so sampling SCY as late as
@@ -629,16 +636,16 @@ mod tests {
 
         let mut fetcher = Fetcher::new();
         let state = lcdc_state(&mmio, false);
-        let tile_number = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
+        let tile_number = fetcher.step(&mut mmio, state, FetchPos::default()).unwrap();
         assert_eq!(tile_number.kind, FetcherDebugEventKind::TileNumber);
         assert_eq!(tile_number.tile_num, TILE_ID);
         assert_eq!(tile_number.tile_attributes, 0x07);
 
-        let tile_data_low = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
+        let tile_data_low = fetcher.step(&mut mmio, state, FetchPos::default()).unwrap();
         assert_eq!(tile_data_low.kind, FetcherDebugEventKind::TileDataLow);
         assert_eq!(tile_data_low.value, Some(0b1010_1010));
 
-        let tile_data_high = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
+        let tile_data_high = fetcher.step(&mut mmio, state, FetchPos::default()).unwrap();
         assert_eq!(tile_data_high.kind, FetcherDebugEventKind::TileDataHigh);
         assert_eq!(tile_data_high.value, Some(0b0101_0101));
     }
@@ -655,16 +662,16 @@ mod tests {
 
         let mut fetcher = Fetcher::new();
         let state = lcdc_state(&mmio, false);
-        let tile_number = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
+        let tile_number = fetcher.step(&mut mmio, state, FetchPos::default()).unwrap();
         assert_eq!(tile_number.kind, FetcherDebugEventKind::TileNumber);
         assert_eq!(tile_number.tile_num, TILE_ID);
         assert_eq!(tile_number.tile_attributes, 0x08);
 
-        let tile_data_low = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
+        let tile_data_low = fetcher.step(&mut mmio, state, FetchPos::default()).unwrap();
         assert_eq!(tile_data_low.kind, FetcherDebugEventKind::TileDataLow);
         assert_eq!(tile_data_low.value, Some(0x33));
 
-        let tile_data_high = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
+        let tile_data_high = fetcher.step(&mut mmio, state, FetchPos::default()).unwrap();
         assert_eq!(tile_data_high.kind, FetcherDebugEventKind::TileDataHigh);
         assert_eq!(tile_data_high.value, Some(0x44));
     }
@@ -682,14 +689,14 @@ mod tests {
 
         let mut fetcher = Fetcher::new();
         let state = lcdc_state(&mmio, true);
-        let tile_number = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
+        let tile_number = fetcher.step(&mut mmio, state, FetchPos::default()).unwrap();
         assert!(tile_number.tile_index_is_tile_data);
 
-        let tile_data_low = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
+        let tile_data_low = fetcher.step(&mut mmio, state, FetchPos::default()).unwrap();
         assert_eq!(tile_data_low.kind, FetcherDebugEventKind::TileDataLow);
         assert_eq!(tile_data_low.value, Some(TILE_ID));
 
-        let tile_data_high = fetcher.step(&mut mmio, 0, state, 0, 0, 0, 0).unwrap();
+        let tile_data_high = fetcher.step(&mut mmio, state, FetchPos::default()).unwrap();
         assert_eq!(tile_data_high.kind, FetcherDebugEventKind::TileDataHigh);
         assert_eq!(tile_data_high.value, Some(TILE_ID));
 
