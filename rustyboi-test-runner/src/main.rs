@@ -98,13 +98,6 @@ struct Args {
     #[arg(long)]
     validate_bios: bool,
 
-    /// AGB bootstrap validation: compare rustyboi Hardware::AGB framebuffer
-    /// hashes against a Gambatte-AGB hash file (produced by
-    /// tools/gambatte_agb_ref). Each line: `<hex-hash>\t<rom-path>`. Runs each
-    /// listed ROM in AGB mode for `--frames` frames and reports per-ROM match.
-    #[arg(long, value_name = "HASHFILE")]
-    agb_vs_gambatte: Option<PathBuf>,
-
     /// Explicit ROM paths, Gambatte testrunner style.
     #[arg(value_name = "ROM")]
     roms: Vec<PathBuf>,
@@ -143,10 +136,6 @@ fn run() -> Result<u8, String> {
 
     if let Some(limit) = args.limit {
         roms.truncate(limit);
-    }
-
-    if let Some(hashfile) = &args.agb_vs_gambatte {
-        return run_agb_vs_gambatte(hashfile, &roms, args.frames);
     }
 
     if args.validate_bios {
@@ -370,80 +359,6 @@ fn run_manifest(
     }
 
     Ok(summary.exit_code())
-}
-
-/// AGB bootstrap validation. Parse the Gambatte-AGB hash file, run each ROM
-/// through rustyboi's Hardware::AGB, and compare the framebuffer hashes. Reports
-/// the match rate and lists every divergence. A divergence is either a
-/// rustyboi-AGB bug or a known Gambatte AGB-FIXME ("Actual AGB results"); they
-/// are reported together for downstream classification against real hardware.
-fn run_agb_vs_gambatte(
-    hashfile: &PathBuf,
-    roms: &[PathBuf],
-    frames: usize,
-) -> Result<u8, String> {
-    let text = std::fs::read_to_string(hashfile)
-        .map_err(|e| format!("read hash file {}: {e}", hashfile.display()))?;
-    let mut gambatte: std::collections::HashMap<String, Option<u64>> =
-        std::collections::HashMap::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut it = line.splitn(2, '\t');
-        let hash = it.next().unwrap_or("");
-        let Some(path) = it.next() else { continue };
-        let val = if hash == "LOADFAIL" {
-            None
-        } else {
-            u64::from_str_radix(hash, 16).ok()
-        };
-        gambatte.insert(path.to_string(), val);
-    }
-
-    let mut compared = 0usize;
-    let mut matched = 0usize;
-    let mut diverged: Vec<String> = Vec::new();
-    let mut errored: Vec<String> = Vec::new();
-
-    for rom in roms {
-        let key = rom.to_string_lossy().to_string();
-        let Some(ghash) = gambatte.get(&key) else {
-            continue; // ROM not in the Gambatte-AGB reference set
-        };
-        let Some(ghash) = ghash else {
-            continue; // Gambatte failed to load this ROM; skip
-        };
-        compared += 1;
-        match runner::agb_frame_hash(rom, frames) {
-            Ok(rhash) if rhash == *ghash => matched += 1,
-            Ok(rhash) => diverged.push(format!(
-                "  DIVERGE  rusty={rhash:016x} gambatte={ghash:016x}  {key}"
-            )),
-            Err(e) => errored.push(format!("  ERROR    {e}  {key}")),
-        }
-    }
-
-    println!("\n=== AGB bootstrap validation (rustyboi-AGB vs Gambatte-AGB) ===");
-    println!("compared {compared} ROMs; {matched} matched, {} diverged, {} errored",
-        diverged.len(), errored.len());
-    if compared > 0 {
-        println!("match rate: {:.1}%", 100.0 * matched as f64 / compared as f64);
-    }
-    if !diverged.is_empty() {
-        println!("\n--- divergences (rustyboi-AGB bug OR Gambatte AGB-FIXME) ---");
-        for d in &diverged {
-            println!("{d}");
-        }
-    }
-    if !errored.is_empty() {
-        println!("\n--- errors ---");
-        for e in &errored {
-            println!("{e}");
-        }
-    }
-    Ok(0)
 }
 
 fn collect_roms(args: &Args) -> Result<Vec<PathBuf>, String> {
