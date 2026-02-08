@@ -183,12 +183,12 @@ mooneye-test-suite-wilbertpol/emulator-only/mbc1_rom_4banks.gb|dmg|mooneye_ed|gb
 mooneye-test-suite-wilbertpol/emulator-only/mbc1_rom_4banks.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/emulator-only/mbc1_rom_4banks.gb
 mooneye-test-suite-wilbertpol/madness/mgb_oam_dma_halt_sprites.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/madness/mgb_oam_dma_halt_sprites.gb
 mooneye-test-suite-wilbertpol/madness/mgb_oam_dma_halt_sprites.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/madness/mgb_oam_dma_halt_sprites.gb
-mooneye-test-suite-wilbertpol/misc/bits/unused_hwio-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/bits/unused_hwio-C.gb
-mooneye-test-suite-wilbertpol/misc/boot_hwio-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_hwio-C.gb
-mooneye-test-suite-wilbertpol/misc/boot_hwio-S.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_hwio-S.gb
-mooneye-test-suite-wilbertpol/misc/boot_regs-A.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_regs-A.gb
+mooneye-test-suite-wilbertpol/misc/bits/unused_hwio-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/bits/unused_hwio-C.gb|rev=cgb
+mooneye-test-suite-wilbertpol/misc/boot_hwio-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_hwio-C.gb|rev=cgb
+mooneye-test-suite-wilbertpol/misc/boot_hwio-S.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_hwio-S.gb|rev=sgb
+mooneye-test-suite-wilbertpol/misc/boot_regs-A.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_regs-A.gb|rev=agb
 mooneye-test-suite-wilbertpol/misc/boot_regs-cgb.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_regs-cgb.gb
-mooneye-test-suite-wilbertpol/misc/boot_regs-mgb.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_regs-mgb.gb
+mooneye-test-suite-wilbertpol/misc/boot_regs-mgb.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_regs-mgb.gb|rev=mgb
 mooneye-test-suite-wilbertpol/misc/gpu/vblank_stat_intr-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/gpu/vblank_stat_intr-C.gb
 mooneye-test-suite-wilbertpol/manual-only/sprite_priority|dmg|png|gb-test-roms/mooneye-test-suite-wilbertpol/manual-only/sprite_priority.gb|gb-test-roms/mooneye-test-suite-wilbertpol/manual-only/sprite_priority-dmg.png
 mooneye-test-suite-wilbertpol/manual-only/sprite_priority|cgb|png|gb-test-roms/mooneye-test-suite-wilbertpol/manual-only/sprite_priority.gb|gb-test-roms/mooneye-test-suite-wilbertpol/manual-only/sprite_priority-cgb.png
