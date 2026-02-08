@@ -509,6 +509,18 @@ def gen_gambatte(roms: Path, out: Path) -> None:
 SHOOTOUT_SLACK_S = 6.0
 FRAME_FLOOR = 90
 
+# E-silicon SameSuite rows (SameSuite is CGB-E-validated; these tests exercise
+# the C-vs-D/E revision forks modeled behind Hardware::CGBE - see the CGBE
+# gates in rustyboi-core).
+SHOOTOUT_REV = {
+    "samesuite/apu/channel_1/channel_1_align.gb": "cgbe",
+    "samesuite/apu/channel_1/channel_1_align_cpu.gb": "cgbe",
+    "samesuite/apu/channel_2/channel_2_align.gb": "cgbe",
+    "samesuite/apu/channel_2/channel_2_align_cpu.gb": "cgbe",
+    "samesuite/apu/channel_4/channel_4_align.gb": "cgbe",
+    "samesuite/apu/channel_4/channel_4_freq_change.gb": "cgbe",
+}
+
 
 def shootout_frames(runtime_seconds: float) -> int:
     return max(math.ceil((runtime_seconds + SHOOTOUT_SLACK_S) * 60), FRAME_FLOOR)
@@ -580,8 +592,9 @@ def gen_shootout(shootout: Path, out: Path) -> None:
             ident = t["name"].replace("|", "_")
             rom = os.path.relpath(t["rom"], HERE)
             refs_field = ";".join(os.path.relpath(r, HERE) for r in refs)
+            rev = f"|rev={SHOOTOUT_REV[ident]}" if ident in SHOOTOUT_REV else ""
             lines.append(
-                f"{ident}|{mode}|png_shootout|{rom}|{refs_field}|frames={shootout_frames(t['runtime'])}"
+                f"{ident}|{mode}|png_shootout|{rom}|{refs_field}|frames={shootout_frames(t['runtime'])}{rev}"
             )
         (out / f"{suite}.manifest").write_text("\n".join(lines) + ("\n" if lines else ""))
         print(f"  shootout/{suite}: {len(lines)} cases")
