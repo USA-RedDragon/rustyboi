@@ -170,7 +170,6 @@ struct CgbWgTune {
     arm_win_hi: u64,
     arm_bg: u64,
     shift_base: u64,
-    scx_add: u64,
 }
 
 fn cgbwg() -> &'static CgbWgTune {
@@ -196,7 +195,6 @@ fn cgbwg() -> &'static CgbWgTune {
             arm_win_hi: knob("RB_CGBWG_ARM_WIN_HI", 12),
             arm_bg: knob("RB_CGBWG_ARM_BG", 14),
             shift_base: knob("RB_CGBWG_SHIFT_BASE", 13),
-            scx_add: knob("RB_CGBWG_SCX", 2),
         }
     })
 }
