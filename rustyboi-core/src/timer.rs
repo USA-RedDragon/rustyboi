@@ -292,7 +292,7 @@ impl Timer {
     /// for a STOP speed-switch divReset carries the APU-specific switch-cc offset
     /// (`div_anchor_apu` tracks `div_anchor` for every normal FF04 write and only
     /// diverges across a STOP speed switch).
-    pub fn div_anchor(&self) -> u64 {
+    pub fn div_anchor_apu(&self) -> u64 {
         self.div_anchor_apu
     }
 

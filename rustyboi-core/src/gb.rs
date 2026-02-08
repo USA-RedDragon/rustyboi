@@ -81,8 +81,8 @@ impl Clone for GB {
 }
 
 pub enum Frame {
-    Monochrome([u8; ppu::FRAMEBUFFER_SIZE]),
-    Color([u8; ppu::FRAMEBUFFER_SIZE * 3]),
+    Monochrome(Box<[u8; ppu::FRAMEBUFFER_SIZE]>),
+    Color(Box<[u8; ppu::FRAMEBUFFER_SIZE * 3]>),
 }
 
 /// Boot-ROM-decompressed Nintendo logo tiles as they land in VRAM bank 0
@@ -473,6 +473,7 @@ impl GB {
     ///     (`setInitialCgbIoamhram` feaxDump, mem_dumps.h:3138).
     ///   - DMG: the logo is already seeded by `skip_bios`; no extra residue
     ///     (the canonical `setInitialDmgIoamhram` OAM is already applied).
+    ///
     /// Select this per-oracle (SRAM dump) in the runner; the no-boot
     /// `skip_bios` must stay in use for the `.dump` region oracles.
     pub fn skip_bios_with_boot_residue(&mut self) {

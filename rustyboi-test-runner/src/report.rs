@@ -97,12 +97,11 @@ pub fn print_summary(summary: &Summary) {
 }
 
 pub fn write_json(summary: &Summary, path: &Path) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("failed to create JSON output directory: {error}"))?;
         }
-    }
 
     let json = serde_json::to_string_pretty(summary)
         .map_err(|error| format!("failed to serialize JSON summary: {error}"))?;
