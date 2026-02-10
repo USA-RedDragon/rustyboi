@@ -44,4 +44,7 @@ jobs:
         run: |
           triple_env="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
           export "CARGO_TARGET_${triple_env}_LINKER=${{ matrix.linker }}"
-          cargo build --release --target ${{ matrix.target }}
+          # Scope to the test runner: a bare `cargo build` compiles the workspace
+          # default-members, which include rustyboi-platform (rodio -> cpal ->
+          # alsa-sys) -- a desktop GUI/audio crate that has no musl cross target.
+          cargo build --release -p rustyboi-test-runner --target ${{ matrix.target }}
