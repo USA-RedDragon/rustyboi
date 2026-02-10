@@ -427,11 +427,16 @@ pub fn parse_manifest(
         } else {
             Vec::new()
         };
-        // Optional per-case frame budget for `png`/`png_fixed`, carried as a
-        // `frames=<N>` token in ANY trailing field (for `png_shootout` the
-        // positional field-5 token already feeds the oracle; it is not
-        // duplicated into the case override).
-        let frames = if matches!(oracle, Oracle::CspPng { .. } | Oracle::CspPngFixed { .. }) {
+        // Optional per-case frame budget for `png`/`png_fixed`/`memauto`/`mem`,
+        // carried as a `frames=<N>` token in ANY trailing field (for
+        // `png_shootout` the positional field-5 token already feeds the oracle;
+        // it is not duplicated into the case override). Some gbmicrotest cases
+        // (e.g. is_if_set_during_ime0) settle their FF82 verdict later than the
+        // 60-frame default.
+        let frames = if matches!(
+            oracle,
+            Oracle::CspPng { .. } | Oracle::CspPngFixed { .. } | Oracle::MemValue { .. }
+        ) {
             fields
                 .iter()
                 .skip(4)
