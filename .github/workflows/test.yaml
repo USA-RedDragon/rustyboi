@@ -58,7 +58,7 @@ jobs:
           - { os: linux, arch: armv7, runs-on: ubuntu-24.04, target: armv7-unknown-linux-gnueabihf, qemu: true }
           - { os: windows, arch: x86_64, runs-on: windows-latest, target: x86_64-pc-windows-msvc }
           - { os: windows, arch: aarch64, runs-on: windows-11-arm, target: aarch64-pc-windows-msvc }
-          - { os: macos, arch: x86_64, runs-on: macos-13, target: x86_64-apple-darwin }
+          - { os: macos, arch: x86_64, runs-on: macos-latest, target: x86_64-apple-darwin, rosetta: true }
           - { os: macos, arch: aarch64, runs-on: macos-latest, target: aarch64-apple-darwin }
     steps:
       - uses: actions/checkout@v5
@@ -78,6 +78,10 @@ jobs:
           docker run --privileged --rm tonistiigi/binfmt --install all
           echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> "$GITHUB_ENV"
           echo "QEMU_LD_PREFIX=/usr/arm-linux-gnueabihf" >> "$GITHUB_ENV"
+      - name: Install Rosetta (x86_64 binary on Apple Silicon runner)
+        if: matrix.rosetta
+        shell: bash
+        run: sudo softwareupdate --install-rosetta --agree-to-license
       - name: Cache cargo + target
         uses: actions/cache@v4
         with:
