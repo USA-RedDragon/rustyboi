@@ -149,7 +149,17 @@ def gen_blargg(roms: Path, out: Path) -> None:
 
 def gen_gbmicrotest(roms: Path, out: Path) -> None:
     gm = roms / "gbmicrotest"
-    lines = [f"{rom.stem}|dmg|memauto|{rom}" for rom in sorted(gm.glob("*.gb"))] if gm.is_dir() else []
+    # A few cases settle their FF82 verdict later than the 60-frame default.
+    gbmicro_frames = {"is_if_set_during_ime0": 600}
+    lines = (
+        [
+            f"{rom.stem}|dmg|memauto|{rom}"
+            + (f"|frames={gbmicro_frames[rom.stem]}" if rom.stem in gbmicro_frames else "")
+            for rom in sorted(gm.glob("*.gb"))
+        ]
+        if gm.is_dir()
+        else []
+    )
     write_manifest(
         out,
         "gbmicrotest",
