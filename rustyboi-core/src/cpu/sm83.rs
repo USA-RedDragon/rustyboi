@@ -109,8 +109,20 @@ impl SM83 {
                 // oamdmasrc80_halt_m2irq_read8000) resolve against the STAT/DMA
                 // read models tuned to the un-advanced wake cc — advancing only
                 // the IME-on dispatch path keeps those byte-identical.
+                // CGB adds the m2-woken +4 halt-exit M-cycle only for a
+                // rendering-line OAM-search wake (m2 event LY 0..143, the intr_2
+                // family). The VBlank-entry mode-2 quirk raises an m2 STAT event
+                // for LY 144 too; a wake there (vblank_stat_intr-C) does NOT take
+                // the real +4 — its dispatch/read stays on the un-advanced cc that
+                // the CGB read-side biases are co-tuned to. DMG keeps the whole
+                // range (its vblank_stat_intr-GS is co-tuned to the DMG stall).
+                let m2_stall_ok = if mmio.mmio.is_cgb() {
+                    mmio.mmio.last_m2_irq_ly() < 144
+                } else {
+                    true
+                };
                 if self.registers.ime
-                    && !mmio.mmio.is_cgb()
+                    && m2_stall_ok
                     && pending_interrupt == Some(registers::InterruptFlag::Lcd)
                     && mmio
                         .mmio
@@ -118,6 +130,9 @@ impl SM83 {
                         .is_some_and(|fire| mmio.master_cc_dbg().wrapping_sub(fire) < 2)
                 {
                     self.m2_halt_stall_charged = true;
+                    if mmio.mmio.is_cgb() {
+                        mmio.mmio.set_m2_halt_stall_charged_cgb(true);
+                    }
                     return 4;
                 }
                 self.halted = false;
