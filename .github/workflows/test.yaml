@@ -2,6 +2,7 @@ name: Test Suites
 on:
   push:
     branches: [claude]
+  pull_request:
 
 permissions:
   contents: read
@@ -109,3 +110,64 @@ jobs:
         env:
           RB_TARGET: ${{ matrix.target }}
         run: RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 ./tools/run-suites.sh ${{ matrix.suite }}
+
+  # On a PR, refresh the suite-progress table in the README and commit it back to
+  # the PR branch (same GitHub App auto-commit identity as the clippy workflow).
+  # Self-contained: it re-runs the suites on linux/x86_64 rather than aggregating
+  # the matrix. `[skip ci]` on the commit prevents a re-trigger loop.
+  progress:
+    name: 'suite progress -> README'
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    steps:
+      - name: Generate GitHub App token
+        uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.AUTO_COMMIT_APP_ID }}
+          private-key: ${{ secrets.AUTO_COMMIT_APP_KEY }}
+      - uses: actions/checkout@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ github.head_ref }}
+      - name: Install Rust
+        shell: bash
+        run: rustup default stable
+      - name: Fetch ROMs
+        shell: bash
+        run: ./tools/run-suites.sh setup
+      - name: Build test runner
+        shell: bash
+        run: ./tools/run-suites.sh build
+      - name: Generate progress table
+        shell: bash
+        run: RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 ./tools/run-suites.sh report > "$RUNNER_TEMP/progress.md"
+      - name: Write table into README
+        shell: bash
+        run: |
+          python3 - "$RUNNER_TEMP/progress.md" <<'PY'
+          import pathlib, sys
+          start = '<!-- SUITE-PROGRESS:START -->'
+          end = '<!-- SUITE-PROGRESS:END -->'
+          table = open(sys.argv[1]).read().strip('\n')
+          p = pathlib.Path('README.md')
+          s = p.read_text()
+          a = s.index(start) + len(start)
+          b = s.index(end)
+          p.write_text(s[:a] + '\n' + table + '\n' + s[b:])
+          PY
+      - name: Commit + push if changed
+        shell: bash
+        run: |
+          git config user.name 'usa-reddragon-auto-commit[bot]'
+          git config user.email '198527162+github-actions[bot]@users.noreply.github.com'
+          git add README.md
+          if git diff --cached --quiet; then
+            echo 'suite progress table unchanged'
+          else
+            git commit -m 'docs: update test suite progress [skip ci]'
+            git push
+          fi
