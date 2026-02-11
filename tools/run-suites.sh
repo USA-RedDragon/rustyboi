@@ -295,6 +295,32 @@ list() {
     done
 }
 
+update_readme_report() {
+    local readme="$ROOT/README.md" tmp out
+    grep -q '<!-- SUITE-PROGRESS:START -->' "$readme" \
+        && grep -q '<!-- SUITE-PROGRESS:END -->' "$readme" \
+        || die "SUITE-PROGRESS markers not found in $readme"
+
+    tmp="$(mktemp)"
+    generate_report > "$tmp"
+
+    out="$(mktemp)"
+    awk -v report="$tmp" '
+        /<!-- SUITE-PROGRESS:START -->/ {
+            print
+            while ((getline line < report) > 0) print line
+            close(report)
+            skip = 1
+            next
+        }
+        /<!-- SUITE-PROGRESS:END -->/ { skip = 0 }
+        !skip
+    ' "$readme" > "$out"
+
+    mv "$out" "$readme"
+    rm -f "$tmp"
+}
+
 # Emit a GitHub-flavored markdown progress table (one row per suite, this
 # platform's pass counts). Consumed by the README auto-update in CI.
 generate_report() {
@@ -337,6 +363,7 @@ if [ "${RB_SKIP_BUILD:-0}" != "1" ] && [ ! -x "$BIN" ]; then build; fi
 [ -x "$BIN" ] || die "runner binary not found at $BIN (run: $0 build)"
 
 if [ "$1" = "report" ]; then generate_report; exit 0; fi
+if [ "$1" = "report-update" ]; then update_readme_report; exit 0; fi
 
 if [ "$1" = "all" ]; then
     # shellcheck disable=SC2086  # ORDER is a space-separated list of bare words
