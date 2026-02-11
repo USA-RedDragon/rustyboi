@@ -111,13 +111,8 @@ jobs:
           RB_TARGET: ${{ matrix.target }}
         run: RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 ./tools/run-suites.sh ${{ matrix.suite }}
 
-  # On a PR, refresh the suite-progress table in the README and commit it back to
-  # the PR branch (same GitHub App auto-commit identity as the clippy workflow).
-  # Self-contained: it re-runs the suites on linux/x86_64 rather than aggregating
-  # the matrix. `[skip ci]` on the commit prevents a re-trigger loop.
   progress:
     name: 'suite progress -> README'
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:
