@@ -1211,6 +1211,16 @@ pub struct Ppu {
     // source: the m1 event). Cleared when the m1 event re-arms for the next frame.
     #[serde(default)]
     m1_vblank_fired: bool,
+    // DMG "line 154" STAT-write glitch (gbmicrotest stat_write_glitch_l154_d):
+    // when the CPU writes FF41 (STAT) at the frame-wrap boundary (the LY 153->0
+    // exit of VBlank, into the first line of the new frame) a hardware glitch on
+    // the shared VBlank/STAT interrupt path clears the still-pending VBlank IF
+    // bit (bit 0). Real DMG-CPU-08 reads IF=0xE0 there; a sticky-bit model (both
+    // Gambatte and the pre-fix renderer) reads 0xE1. Armed at the VBlank->OAM
+    // frame-wrap, disarmed a few dots into line 0/1 so a normal mid-frame STAT
+    // write never clears a legitimately-pending VBlank IRQ. DMG-only.
+    #[serde(default)]
+    l154_vblank_glitch_window: bool,
     #[serde(default)]
     lyc_irq: stat_irq::LycIrq,
     #[serde(default)]
@@ -1556,6 +1566,7 @@ impl Ppu {
             sched_m0irq: stat_irq::DISABLED_TIME,
             sched_oneshot_statirq: stat_irq::DISABLED_TIME,
             m1_vblank_fired: false,
+            l154_vblank_glitch_window: false,
             lyc_irq: stat_irq::LycIrq::default(),
             mstat_irq: stat_irq::MStatIrq::default(),
             stat_reg_committed: 0,
@@ -4593,6 +4604,25 @@ impl Ppu {
         // the enable bits unchanged. Track whether this was an FF41 write so the
         // unchanged-value case still runs lcdstat_change below.
         let ff41_written = mmio.take_ff41_write_pending();
+        // DMG "line 154" STAT-write VBlank-IF glitch (gbmicrotest
+        // stat_write_glitch_l154_d). A FF41 write straddling the frame-wrap
+        // boundary (LY 153->0 VBlank exit, first dots of the new frame) clears
+        // the still-pending VBlank IF bit on real DMG-CPU-08 — the shared
+        // VBlank/STAT interrupt-line glitch. `l154_vblank_glitch_window` is armed
+        // at the frame wrap and disarmed a few dots into line 0/1, so only a write
+        // at that exact boundary is affected. DMG-only (CGB has no STAT-write bug).
+        if ff41_written
+            && self.l154_vblank_glitch_window
+            && !mmio.is_cgb_features_enabled()
+        {
+            let cur_if = mmio.read(registers::INTERRUPT_FLAG);
+            if cur_if & (registers::InterruptFlag::VBlank as u8) != 0 {
+                mmio.write(
+                    registers::INTERRUPT_FLAG,
+                    cur_if & !(registers::InterruptFlag::VBlank as u8),
+                );
+            }
+        }
         // Keep the LYC=LY readback flag (FF41 bit 2) in sync regardless of LCD
         // state; only its IRQ side-effects are gated by enable.
         if self.disabled {
@@ -5066,6 +5096,18 @@ impl Ppu {
             if self.internal_ly_val as u32 >= stat_irq::LCD_LINES_PER_FRAME {
                 self.internal_ly_val = 0;
             }
+        }
+        // Disarm the "line 154" STAT-write VBlank-IF glitch window once the new
+        // frame has advanced a few dots past the LY 0->1 boundary. The glitch is
+        // observed only for a FF41 write straddling that boundary (gbmicrotest
+        // stat_write_glitch_l154_d: internal_ly==1, line_cycle 0); keeping the
+        // window this narrow guarantees a normal mid-frame STAT write never
+        // clears a legitimately-pending VBlank IRQ.
+        if self.l154_vblank_glitch_window
+            && (self.internal_ly_val > 1
+                || (self.internal_ly_val == 1 && self.line_cycle > 4))
+        {
+            self.l154_vblank_glitch_window = false;
         }
 
         // Drive the lazy OAM sprite snapshot (Gambatte SpriteMapper::OamReader):
@@ -6844,6 +6886,12 @@ impl Ppu {
                         mmio.write_ly_from_ppu(0);
                         self.line_153_ly_zeroed = false;
                         self.state = State::OAMSearch;
+                        // Arm the DMG "line 154" STAT-write VBlank-IF glitch window
+                        // at the exact frame-wrap dot (LY 153->0, VBlank exit). A
+                        // FF41 write within this window clears the still-pending
+                        // VBlank IF (see `l154_vblank_glitch_window`). Disarmed a few
+                        // dots into the new frame by `step` (below).
+                        self.l154_vblank_glitch_window = true;
                         self.enter_scheduled_mode2(mmio);
                         self.next_sprite_fetch_index = 0;
                         self.sprite_fetch_stall = 0;
