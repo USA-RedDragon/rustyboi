@@ -2361,7 +2361,7 @@ impl Ppu {
     // The reconstructed HARDWARE dot of the BG fetch read (n = fetch index from
     // line start, k = 0/1/2 substep), or None when the model is out of scope
     // for this line. See bg_wg_apply.
-    fn bg_hw_read_dot(&self, n: u64, k: u8) -> Option<u64> {
+    fn bg_hw_read_dot(&self, n: u64, k: u8, ly: u8) -> Option<u64> {
         let anchor = self.bg_anchor_cc?;
         if self.fetcher.is_fetching_window() || self.window_started_this_line {
             return None;
@@ -2408,6 +2408,28 @@ impl Ppu {
                     let arm = CGBWG_ARM_BG + 8 * (pos / 8);
                     if base >= anchor + arm {
                         h += (CGBWG_SHIFT_BASE as i64 - (pos % 8) as i64).max(6) as u64;
+                    } else if k >= 1 && n == pos / 8 + 1 && base + 4 >= anchor + arm {
+                        // Sprite-triggering tile: SameBoy blocks the object fetch
+                        // until the current tile passes GET_TILE_DATA_HIGH_T2, so
+                        // its low+high bitplane reads stay un-stalled and 2 dots
+                        // apart. rustyboi's grid places these reads a couple dots
+                        // ahead of the true fetch dot the LCDC.4 rise-visibility
+                        // (CGBWG_BG_RISE) is calibrated against, so an LCDC.4 rise
+                        // straddling them is missed. Anchor the reads at the arm
+                        // dot so they sample the risen LCDC.4. For a sprite flush
+                        // with the tile boundary (pos % 8 == 0) both bitplanes
+                        // shift together (m3_lcdc_tile_sel_change idx=2 all-
+                        // unsigned); off-boundary (pos % 8 != 0) only the HIGH
+                        // read reaches the arm dot, so the LOW read keeps the
+                        // pre-rise level — the mixed $8000/$8800 read. The LOW
+                        // read only joins the shift on the sprite's FIRST covered
+                        // line of a boundary-flush sprite (its object fetch has
+                        // not yet split the tile): m3_lcdc_tile_sel_change y128 is
+                        // all-unsigned while y129+ stay mixed.
+                        let first_line = pos.is_multiple_of(8) && (s.y as i32 - 16) == ly as i32;
+                        if k == 2 || first_line {
+                            h = anchor + arm + 2 * (k as u64 - 1);
+                        }
                     }
                 } else if n >= pos / 8 + 2 {
                     // 13,11,11,9,9,7,7,7 for pos%8 = 0..7 — the SAME 2-dot
@@ -2480,7 +2502,7 @@ impl Ppu {
         Some(v)
     }
 
-    fn bg_wg_apply(&self, mut fls: fetcher::FetcherLcdcState) -> fetcher::FetcherLcdcState {
+    fn bg_wg_apply(&self, mut fls: fetcher::FetcherLcdcState, ly: u8) -> fetcher::FetcherLcdcState {
         if self.wg_hist.is_empty() && self.bg_scy_hist.is_empty() {
             return fls;
         }
@@ -2489,7 +2511,7 @@ impl Ppu {
             return fls; // PushToFIFO: no VRAM read
         }
         let n = self.fetcher.get_tile_index() as u64;
-        let Some(h) = self.bg_hw_read_dot(n, k) else {
+        let Some(h) = self.bg_hw_read_dot(n, k, ly) else {
             return fls;
         };
         const BG_BITS: u8 = (LCDCFlags::BGTileMapDisplaySelect as u8)
@@ -2541,7 +2563,7 @@ impl Ppu {
         let col = self.fetcher.last_bg_tn_col() as u16;
 
         // TileNumber (k=0).
-        let Some(h0) = self.bg_hw_read_dot(n, 0) else {
+        let Some(h0) = self.bg_hw_read_dot(n, 0, ly) else {
             return;
         };
         let bits0 = if self.wg_hist.is_empty() {
@@ -2563,7 +2585,7 @@ impl Ppu {
             if k_now <= k {
                 break;
             }
-            let Some(hk) = self.bg_hw_read_dot(n, k) else {
+            let Some(hk) = self.bg_hw_read_dot(n, k, ly) else {
                 return;
             };
             let (bitsk, quirkk) = if self.wg_hist.is_empty() {
@@ -4237,7 +4259,15 @@ impl Ppu {
     // term (the CGB fetcher samples the palette-RAM pipeline at a fixed stage).
     fn bgp_apply_latency(&self, mmio: &mmio::Mmio) -> i32 {
         if mmio.is_cgb() {
-            bgp_latency(true) + Self::cgb_halt_wake_write_bias(mmio)
+            // CPU-CGB-D/E samples the BG palette one dot earlier than CGB-C:
+            // age m3-bg-bgp's ncmE (rev=cgbe) reference wants the DMG 1-dot
+            // latency while ncmBC / mealybug m3_bgp_change (CGB-C) keep 2.
+            let base = if mmio.is_cgb_de() {
+                BGP_LATENCY_DMG
+            } else {
+                bgp_latency(true)
+            };
+            base + Self::cgb_halt_wake_write_bias(mmio)
         } else {
             let phase = (mmio.master_cc() % 4) as i32;
             bgp_latency(false) + (phase - 1).max(0)
@@ -6194,7 +6224,8 @@ impl Ppu {
                 {
                     self.bg_anchor_cc = Some(self.abs_cc);
                 }
-                let fetcher_lcdc_state = self.bg_wg_apply(self.wg_apply(self.fetcher_lcdc_state()));
+                let fetcher_lcdc_state =
+                    self.bg_wg_apply(self.wg_apply(self.fetcher_lcdc_state()), mmio.read(LY));
                 // Pixels still to be discarded for SCX fine-scroll: they sit in
                 // the FIFO but won't be displayed, so the BG tile column (derived
                 // from display_x + FIFO depth) must not count them.
