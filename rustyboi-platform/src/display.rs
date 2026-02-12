@@ -207,13 +207,13 @@ fn run_gui_loop<'win>(
         Some(fw) => fw.pending_dialog_result(),
         None => std::sync::Arc::new(std::sync::Mutex::new(None)),
     };
-    
+
     // Enable audio output
     if let Err(e) = world.enable_audio() {
         println!("Failed to initialize audio: {}", e);
         println!("Continuing without audio...");
     }
-    
+
     // Start paused if no ROM and no BIOS are loaded
     let should_start_paused = world.is_paused;
     let mut manually_paused = should_start_paused;
@@ -420,14 +420,14 @@ fn run_gui_loop<'win>(
                 };
                 world.draw(pixels.frame_mut());
                 let gui_paused_state = manually_paused || world.error_state.is_some();
-                
+
                 // Update window title with performance metrics
                 world.update_window_title(window, gui_paused_state);
                 // Always pass register data for the debug overlay, regardless of pause state
                 let registers = Some(world.gb.get_cpu_registers());
                 let gb_ref = Some(&*world.gb);
                 let (gui_action, menu_open) = framework.prepare(window, gui_paused_state, registers, gb_ref);
-                
+
                 // Handle GUI actions
                 match gui_action {
                     Some(GuiAction::Exit) => {
@@ -727,10 +727,10 @@ struct World {
 impl World {
     fn new_with_paths(gb: Box<gb::GB>, rom_path: Option<String>, bios_path: Option<String>, palette: config::ColorPalette) -> Self {
         let now = Instant::now();
-        
+
         // Check if both ROM and BIOS are missing - if so, start paused
         let should_start_paused = !gb.has_rom() && !gb.has_bios();
-        
+
         Self {
             gb,
             frame: None,
@@ -767,7 +767,7 @@ impl World {
         // Save the current ROM and BIOS paths before loading state
         let saved_rom_path = self.current_rom_path.clone();
         let saved_bios_path = self.current_bios_path.clone();
-        
+
         // Load the new state and get filename
         let filename = match file_data {
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -783,7 +783,7 @@ impl World {
                 name
             }
         };
-        
+
         // Reload the ROM if we had one loaded
         if let Some(rom_path) = saved_rom_path {
             match cartridge::Cartridge::load(&rom_path) {
@@ -798,7 +798,7 @@ impl World {
                 }
             }
         }
-        
+
         // Reload the BIOS if we had one loaded
         if let Some(bios_path) = saved_bios_path {
             match self.gb.load_bios(&bios_path) {
@@ -812,19 +812,19 @@ impl World {
                 }
             }
         }
-        
+
         // Clear any error state
         self.error_state = None;
-        
+
         // Clear the current frame
         self.frame = None;
-        
+
         // If emulator was auto-paused due to no content and state has content, unpause it
         if self.auto_paused_no_content && (self.gb.has_rom() || self.gb.has_bios()) {
             self.is_paused = false;
             self.auto_paused_no_content = false;
         }
-        
+
         println!("Game state loaded from: {}", filename);
         Ok(filename)
     }
@@ -896,29 +896,29 @@ impl World {
             }
         };
         self.gb.insert(cartridge);
-        
+
         // Track the current ROM path
         self.current_rom_path = if has_file_path {
             Some(filename.clone())
         } else {
             None // No file path for WASM content
         };
-        
+
         // Reset the emulator to a clean state after loading the ROM
         self.gb.reset();
-        
+
         // Clear any error state
         self.error_state = None;
-        
+
         // Clear the current frame
         self.frame = None;
-        
+
         // If emulator was auto-paused due to no content, unpause it now
         if self.auto_paused_no_content {
             self.is_paused = false;
             self.auto_paused_no_content = false;
         }
-        
+
         println!("ROM loaded from: {}", filename);
         Ok(filename)
     }
@@ -943,13 +943,13 @@ impl World {
     fn restart(&mut self) {
         // Reset the Game Boy to its initial state
         self.gb.reset();
-        
+
         // Clear any error state
         self.error_state = None;
-        
+
         // Clear the current frame
         self.frame = None;
-        
+
         // Reset pause state
         self.is_paused = false;
     }
@@ -977,7 +977,7 @@ impl World {
                     }
                     rgba
                 }
-                
+
             };
             frame.copy_from_slice(&rgba_frame);
             self.frame = None;
@@ -1108,7 +1108,7 @@ impl World {
         if let Some(count) = self.step_multiple_frames.take() {
             let mut success = true;
             let mut final_frame = None;
-            
+
             for _ in 0..count {
                 match self.run_until_frame() {
                     Some(_) => {}, // Continue to next frame
@@ -1118,11 +1118,11 @@ impl World {
                     }
                 }
             }
-            
+
             if success {
                 final_frame = Some(self.gb.get_current_frame());
             }
-            
+
             match final_frame {
                 Some(frame) => {
                     self.frame = Some(frame);
@@ -1144,13 +1144,13 @@ impl World {
         const TARGET_FRAME_TIME: Duration = Duration::from_micros(16750); // ~59.7 fps
         let now = Instant::now();
         let elapsed_since_last_frame = now.duration_since(self.last_frame_time);
-        
-        
+
+
         // Only update if enough time has passed
         if elapsed_since_last_frame < TARGET_FRAME_TIME {
             let remaining = TARGET_FRAME_TIME - elapsed_since_last_frame;
-            
-            
+
+
             // Sleep for most of the remaining time
             if remaining > Duration::from_micros(100) {
                 std::thread::sleep(remaining - Duration::from_micros(50));
@@ -1161,11 +1161,11 @@ impl World {
             }
         } else if elapsed_since_last_frame.as_millis() > 25 {
             // Frame took too long
-            println!("Slow frame: {}ms (target: {}ms)", 
-                    elapsed_since_last_frame.as_millis(), 
+            println!("Slow frame: {}ms (target: {}ms)",
+                    elapsed_since_last_frame.as_millis(),
                     TARGET_FRAME_TIME.as_millis());
         }
-        
+
         self.last_frame_time = Instant::now();
 
         // Use breakpoint-aware version if we have any breakpoints set
@@ -1189,7 +1189,7 @@ impl World {
                 Some(frame_data) => {
                     self.frame = Some(frame_data);
                     self.update_performance_metrics();
-                    
+
                     // If a breakpoint was hit, pause emulation
                     if breakpoint_hit {
                         self.is_paused = true;
@@ -1208,10 +1208,10 @@ impl World {
 
     fn update_performance_metrics(&mut self) {
         let now = Instant::now();
-        
+
         // Track frame times for FPS calculation
         self.frame_times.push(now);
-        
+
         // Keep only the last 60 frame times (1 second at 60 FPS)
         if self.frame_times.len() > 60 {
             self.frame_times.remove(0);
@@ -1223,22 +1223,22 @@ impl World {
         if frame_count < 2 {
             return 0.0;
         }
-        
+
         let duration = self.frame_times[frame_count - 1].duration_since(self.frame_times[0]);
         if duration.as_secs_f64() == 0.0 {
             return 0.0;
         }
-        
+
         (frame_count as f64 - 1.0) / duration.as_secs_f64()
     }
 
     fn update_window_title(&mut self, window: &winit::window::Window, is_paused: bool) {
         let now = Instant::now();
-        
+
         // Update title every 500ms to avoid excessive updates
         if now.duration_since(self.last_title_update).as_millis() >= 500 {
             let fps = self.get_fps();
-            
+
             let title = if self.error_state.is_some() {
                 format!("RustyBoi - ERROR | {:.1} FPS", fps)
             } else if is_paused {
@@ -1246,7 +1246,7 @@ impl World {
             } else {
                 format!("RustyBoi | {:.1} FPS", fps)
             };
-            
+
             window.set_title(&title);
             self.last_title_update = now;
         }
@@ -1275,7 +1275,7 @@ impl World {
 fn convert_to_rgba(frame: &[u8; ppu::FRAMEBUFFER_SIZE], palette: &config::ColorPalette) -> [u8; ppu::FRAMEBUFFER_SIZE * 4] {
     let mut rgba_frame = [0; ppu::FRAMEBUFFER_SIZE * 4];
     let colors = palette.get_rgba_colors();
-    
+
     for (i, &pixel) in frame.iter().enumerate() {
         let rgba = colors.get(pixel as usize).unwrap_or(&colors[3]);
         let offset = i * 4;

@@ -724,7 +724,7 @@ pub struct Ppu {
     // Reset to 0 on every OAMSearch -> PixelTransfer transition.
     #[serde(default)]
     fetcher_cadence_tick: u8,
-    
+
     // Window state tracking
     window_line_counter: u8,    // Internal counter for window Y position
     // Gambatte's `winYPos`: the window's internal Y line, incremented by 1 ONLY
@@ -3639,20 +3639,20 @@ impl Ppu {
     /// Calculate the current state of the STAT interrupt line based on all interrupt sources
     fn calculate_stat_interrupt_line(&self, mmio: &mmio::Mmio) -> bool {
         let stat_register = mmio.read(LCD_STATUS);
-        
+
         // Extract enable bits for each interrupt source
         let mode_0_int_enable = (stat_register & (1 << 3)) != 0; // HBlank
         let mode_1_int_enable = (stat_register & (1 << 4)) != 0; // VBlank
         let mode_2_int_enable = (stat_register & (1 << 5)) != 0; // OAM Search
         let lyc_int_enable = (stat_register & (1 << 6)) != 0;    // LYC=LY
-        
+
         // Extract current state flags
         let current_mode = stat_register & 0x03; // Bits 1-0: PPU mode
         let lyc_equals_ly = (stat_register & (1 << 2)) != 0;     // Bit 2: LYC=LY flag
-        
+
         // Check each interrupt source and OR them together
         let mut interrupt_line = false;
-        
+
         // Mode interrupts
         match current_mode {
             0 if mode_0_int_enable => interrupt_line = true, // HBlank
@@ -3660,12 +3660,12 @@ impl Ppu {
             2 if mode_2_int_enable => interrupt_line = true, // OAM Search
             _ => {}
         }
-        
+
         // LYC=LY interrupt
         if lyc_int_enable && lyc_equals_ly {
             interrupt_line = true;
         }
-        
+
         interrupt_line
     }
 
@@ -5172,7 +5172,7 @@ impl Ppu {
         } else {
             mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) & !(1 << 2)); // Clear the LYC=LY flag
         }
-        
+
         // Check for STAT interrupt after LYC=LY update
         self.check_and_trigger_stat_interrupt(mmio);
 
@@ -5209,7 +5209,7 @@ impl Ppu {
                     self.sprite_fetch_stall = 0;
                     self.pixel_transfer_warmup = 0;
                 }
-                
+
                 // First line after enable: VRAM/OAM lock (PPU reports mode 3)
                 // at the normal mode-2->3 boundary, even though the real pixel
                 // fetch starts later at FIRST_FRAME_ARM_DOT. Matches Gambatte's
@@ -5271,7 +5271,7 @@ impl Ppu {
                     // the one just read; Gambatte lsbuf per-slot latch).
                     self.scan_obj_size_large = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
                 }
-                
+
                 let is_cgb = mmio.is_cgb_features_enabled();
                 let pixel_transfer_arm_dot = if self.first_line_after_enable {
                     if is_cgb {
@@ -5307,7 +5307,7 @@ impl Ppu {
                             a.x.cmp(&b.x).then(a.oam_index.cmp(&b.oam_index))
                         });
                     }
-                    
+
                     self.x = 0;
                     self.fetcher.reset();
                     // Clear any pending sub-cc scx column lever from the previous
@@ -6850,7 +6850,7 @@ impl Ppu {
                 if self.ticks == 455 {
                     self.ticks = 0;
                     let current_ly = mmio.read(LY);
-                    
+
                     if current_ly >= 143 {
                         mmio.write_ly_from_ppu(144);
                         self.state = State::VBlank;
@@ -6950,7 +6950,7 @@ impl Ppu {
                             self.fb_b = self.fb_a;
                             self.fb_a = [0; FRAMEBUFFER_SIZE];
                         }
-                        
+
                         self.have_frame = true;
                         // Count this completed frame toward post-enable resync so
                         // get_frame stops blanking once a full frame has displayed.
@@ -8486,17 +8486,17 @@ impl Ppu {
     pub fn get_sprites_on_line_count(&self) -> usize {
         self.sprites_on_line.len()
     }
-    
+
     // CGB color conversion functions
     fn cgb_color_to_rgb(&self, low_byte: u8, high_byte: u8) -> (u8, u8, u8) {
         // CGB color format: GGGRRRRR BBBBBGGG (little endian)
         let color_word = (high_byte as u16) << 8 | low_byte as u16;
-        
+
         // Extract 5-bit RGB components
         let r = color_word & 0x1F ;
         let g = (color_word >> 5) & 0x1F ;
         let b = (color_word >> 10) & 0x1F ;
-        
+
         match self.cgb_color_conversion {
             CgbColorConversion::Linear => {
                 let r8 = ((r * 255) / 31) as u8;
@@ -8512,7 +8512,7 @@ impl Ppu {
             }
         }
     }
-    
+
     fn get_cgb_bg_color(&self, mmio: &mmio::Mmio, palette_idx: u8, color_idx: u8, sx: u8) -> (u8, u8, u8) {
         if !mmio.is_cgb_features_enabled() {
             // Fallback to monochrome conversion
@@ -8525,12 +8525,12 @@ impl Ppu {
             };
             return (intensity, intensity, intensity);
         }
-        
+
         // Read CGB palette data from palette RAM
         let (low_byte, high_byte) = mmio.read_bg_palette_data(palette_idx, color_idx);
         self.cgb_color_to_rgb(low_byte, high_byte)
     }
-    
+
     fn get_cgb_obj_color(&self, mmio: &mmio::Mmio, palette_idx: u8, color_idx: u8, sx: u8) -> (u8, u8, u8) {
         if color_idx == 0 {
             return (0, 0, 0); // Transparent - will be handled by caller
@@ -8547,7 +8547,7 @@ impl Ppu {
             };
             return (intensity, intensity, intensity);
         }
-        
+
         // Read CGB palette data from palette RAM
         let (low_byte, high_byte) = mmio.read_obj_palette_data(palette_idx, color_idx);
         self.cgb_color_to_rgb(low_byte, high_byte)
@@ -8559,7 +8559,7 @@ impl Ppu {
         if self.sprites_on_line.len() >= MAX_SPRITES_PER_LINE {
             return;
         }
-        
+
         let ly = mmio.read(LY);
 
         // OAM scan (Gambatte's SpriteMapper::mapSprites) builds the per-line
@@ -8583,7 +8583,7 @@ impl Ppu {
 
         // Sprites use offset coordinates: Y=0 is at line -16, X=0 is at column -8
         let sprite_screen_y = sprite_y.wrapping_sub(16);
-        
+
         // Check if sprite is visible on current scanline
         if ly >= sprite_screen_y && ly < sprite_screen_y + sprite_height {
             let sprite = Sprite {
@@ -8593,7 +8593,7 @@ impl Ppu {
                 attributes: SpriteAttributes::from_byte(attributes_byte),
                 oam_index: sprite_index as u8,
             };
-            
+
             self.sprites_on_line.push(sprite);
         }
     }
@@ -8839,24 +8839,24 @@ impl Ppu {
         let tile_attributes = bg_attrs;
         let palette_idx = tile_attributes & 0x07; // Bits 0-2 = palette index
         let bg_color_rgb = self.get_cgb_bg_color(mmio, palette_idx, bg_pixel_idx, screen_x);
-        
+
         // Check if sprites are enabled
         if (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
             return bg_color_rgb;
         }
-        
+
         // First, resolve object-to-object priority to find the highest priority opaque sprite pixel
         let mut selected_sprite: Option<(&Sprite, u8, (u8, u8, u8))> = None; // (sprite, pixel_idx, color)
-        
+
         for sprite in &self.sprites_on_line {
             // Sprite X coordinate is offset by 8, Y coordinate is offset by 16
             let sprite_actual_x = sprite.x as i16 - 8;
             let sprite_actual_y = sprite.y as i16 - 16;
-            
+
             // Check if this screen pixel is within the sprite bounds
             let relative_x = screen_x as i16 - sprite_actual_x;
             let relative_y = screen_y as i16 - sprite_actual_y;
-            
+
             // Sprite is 8 pixels wide
             if (0..8).contains(&relative_x) {
                 let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
@@ -8873,9 +8873,9 @@ impl Ppu {
                                 // DMG mode: Use bit 4 for palette selection (0-1)
                                 if sprite.attributes.palette { 1 } else { 0 }
                             };
-                            
+
                             let sprite_color_rgb = self.get_cgb_obj_color(mmio, sprite_palette_idx, sprite_pixel_idx, screen_x);
-                            
+
                             // Check if this sprite has higher priority than the currently selected one
                             let is_higher_priority = if let Some((current_sprite, _, _)) = selected_sprite {
                                 if mmio.is_cgb_features_enabled() {
@@ -8883,13 +8883,13 @@ impl Ppu {
                                     sprite.oam_index < current_sprite.oam_index
                                 } else {
                                     // DMG mode: X coordinate first, then OAM position
-                                    sprite.x < current_sprite.x || 
+                                    sprite.x < current_sprite.x ||
                                     (sprite.x == current_sprite.x && sprite.oam_index < current_sprite.oam_index)
                                 }
                             } else {
                                 true // First opaque sprite found
                             };
-                            
+
                             if is_higher_priority {
                                 selected_sprite = Some((sprite, sprite_pixel_idx, sprite_color_rgb));
                             }
@@ -8897,7 +8897,7 @@ impl Ppu {
                 }
             }
         }
-        
+
         // Now resolve BG vs OBJ priority using the selected sprite (if any)
         if let Some((sprite, _, sprite_color_rgb)) = selected_sprite {
             if mmio.is_cgb_features_enabled() {
@@ -8906,16 +8906,16 @@ impl Ppu {
                 if bg_pixel_idx == 0 {
                     return sprite_color_rgb;
                 }
-                
+
                 // In CGB mode LCDC bit 0 keeps BG/window visible, but disables BG priority over OBJ.
                 if !bg_priority_master {
                     return sprite_color_rgb;
                 }
-                
+
                 // Check BG attributes bit 7 and OAM attributes bit 7
                 let bg_priority = (tile_attributes & 0x80) != 0; // BG attr bit 7
                 let obj_priority = sprite.attributes.priority;   // OAM attr bit 7 (note: priority=true means "behind BG")
-                
+
                 // If both BG and OAM attributes have bit 7 clear, OBJ has priority
                 // Otherwise, BG has priority (when BG color is 1-3)
                 if !bg_priority && !obj_priority {
@@ -8930,7 +8930,7 @@ impl Ppu {
                 }
             }
         }
-        
+
         bg_color_rgb
     }
 
@@ -9001,7 +9001,7 @@ impl Ppu {
             // When BG display is disabled, background becomes white (palette color 0)
             self.get_palette_color(mmio, 0, screen_x)
         };
-        
+
         // For sprite priority calculation, we need the original bg_pixel_idx
         let effective_bg_pixel_idx = if bg_enabled { bg_pixel_idx } else { 0 };
 
@@ -9044,11 +9044,11 @@ impl Ppu {
             // Sprite X coordinate is offset by 8, Y coordinate is offset by 16
             let sprite_actual_x = sprite.x as i16 - 8;
             let sprite_actual_y = sprite.y as i16 - 16;
-            
+
             // Check if this screen pixel is within the sprite bounds
             let relative_x = screen_x as i16 - sprite_actual_x;
             let relative_y = screen_y as i16 - sprite_actual_y;
-            
+
             // Sprite is 8 pixels wide
             if (0..8).contains(&relative_x) {
                 // Mid-mode-3 OBJ-size (LCDC.2) toggle this line: hardware
@@ -9098,7 +9098,7 @@ impl Ppu {
                 }
             }
         }
-        
+
         bg_color
     }
 
@@ -9106,18 +9106,18 @@ impl Ppu {
     fn get_sprite_pixel(&self, mmio: &mmio::Mmio, sprite: &Sprite, sprite_x: u8, sprite_y: u8) -> Option<u8> {
         let lcdc = self.lcdc;
         let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
-        
+
         if sprite_x >= 8 || sprite_y >= sprite_height {
             return None;
         }
-        
+
         // Handle Y flipping
         let actual_y = if sprite.attributes.y_flip {
             sprite_height - 1 - sprite_y
         } else {
             sprite_y
         };
-        
+
         // For 8x16 sprites, the tile index is different
         let tile_index = if sprite_height == 16 {
             if actual_y < 8 {
@@ -9128,12 +9128,12 @@ impl Ppu {
         } else {
             sprite.tile_index
         };
-        
+
         let tile_line = actual_y % 8;
-        
+
         // Sprite tiles always use the $8000 addressing method
         let tile_addr = 0x8000 + (tile_index as u16) * 16 + (tile_line as u16) * 2;
-        
+
         // In CGB mode the sprite tile-data bank is fixed by OAM attr bit 3,
         // independent of the CPU's live VRAM-bank select (FF4F). The PPU must
         // read bank 0 when the bit is clear; using the live `mmio.read` here
@@ -9146,14 +9146,14 @@ impl Ppu {
             // DMG: single bank (the live read is correct).
             (mmio.read(tile_addr), mmio.read(tile_addr + 1))
         };
-        
+
         // Handle X flipping
         let bit_index = if sprite.attributes.x_flip {
             sprite_x
         } else {
             7 - sprite_x
         };
-        
+
         let low_bit = (low_byte >> bit_index) & 1;
         let high_bit = (high_byte >> bit_index) & 1;
 

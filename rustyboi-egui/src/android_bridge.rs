@@ -170,4 +170,3 @@ pub fn show_toast(message: impl Into<String>) {
         handler(message.into());
     }
 }
-

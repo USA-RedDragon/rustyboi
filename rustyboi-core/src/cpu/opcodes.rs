@@ -311,7 +311,7 @@ pub fn adc_a_memory_hl(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 };
     let a = cpu.registers.a;
     let result = (a as u16) + (value as u16) + (carry as u16);
-    
+
     cpu.registers.a = (result & 0xFF) as u8;
     cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.a == 0);
     cpu.registers.set_flag(registers::Flag::Negative, false);
@@ -499,7 +499,7 @@ pub fn sbc_a_memory_hl(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 };
     let a = cpu.registers.a;
     let result = (a as i16) - (value as i16) - (carry as i16);
-    
+
     cpu.registers.a = (result & 0xFF) as u8;
     cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.a == 0);
     cpu.registers.set_flag(registers::Flag::Negative, true);
@@ -567,7 +567,7 @@ pub fn ld_hl_sp_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     cpu.registers.pc += 1;
     let sp = cpu.registers.sp;
     let result = (sp as i16).wrapping_add(offset as i16) as u16;
-    
+
     cpu.registers.h = ((result & 0xFF00) >> 8) as u8;
     cpu.registers.l = (result & 0xFF) as u8;
 
@@ -617,7 +617,7 @@ pub fn adc_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 };
     let a = cpu.registers.a;
     let result = (a as u16) + (value as u16) + (carry as u16);
-    
+
     cpu.registers.a = (result & 0xFF) as u8;
     cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.a == 0);
     cpu.registers.set_flag(registers::Flag::Negative, false);
@@ -642,7 +642,7 @@ pub fn add_hl_sp(cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
     let hl = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
     let sp = cpu.registers.sp;
     let result = hl as u32 + sp as u32;
-    
+
     cpu.registers.h = ((result & 0xFF00) >> 8) as u8;
     cpu.registers.l = (result & 0xFF) as u8;
 
@@ -852,7 +852,7 @@ pub fn add_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     cpu.registers.pc += 1;
     let a = cpu.registers.a;
     let result = (a as u16) + (value as u16);
-    
+
     cpu.registers.a = (result & 0xFF) as u8;
     cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.a == 0);
     cpu.registers.set_flag(registers::Flag::Negative, false);
@@ -866,7 +866,7 @@ pub fn sub_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     cpu.registers.pc += 1;
     let a = cpu.registers.a;
     let result = (a as i16) - (value as i16);
-    
+
     cpu.registers.a = (result & 0xFF) as u8;
     cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.a == 0);
     cpu.registers.set_flag(registers::Flag::Negative, true);
@@ -907,7 +907,7 @@ pub fn sbc_a_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 };
     let a = cpu.registers.a;
     let result = (a as i16) - (value as i16) - (carry as i16);
-    
+
     cpu.registers.a = (result & 0xFF) as u8;
     cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.a == 0);
     cpu.registers.set_flag(registers::Flag::Negative, true);
@@ -1013,7 +1013,7 @@ macro_rules! make_alu_add_register {
             let a = cpu.registers.a;
             let operand = cpu.registers.$reg;
             let result = a as u16 + operand as u16;
-            
+
             cpu.registers.a = (result & 0xFF) as u8;
             cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.a == 0);
             cpu.registers.set_flag(registers::Flag::Negative, false);
@@ -1063,7 +1063,7 @@ macro_rules! make_alu_sub_register {
             let a = cpu.registers.a;
             let operand = cpu.registers.$reg;
             let result = a.wrapping_sub(operand);
-            
+
             cpu.registers.a = result;
             cpu.registers.set_flag(registers::Flag::Zero, result == 0);
             cpu.registers.set_flag(registers::Flag::Negative, true);
@@ -1109,7 +1109,7 @@ macro_rules! make_alu_add_mem_hl {
             let a = cpu.registers.a;
             let operand = mmio.read(addr);
             let result = a as u16 + operand as u16;
-            
+
             cpu.registers.a = (result & 0xFF) as u8;
             cpu.registers.set_flag(registers::Flag::Zero, cpu.registers.a == 0);
             cpu.registers.set_flag(registers::Flag::Negative, false);
@@ -1127,7 +1127,7 @@ macro_rules! make_alu_sub_mem_hl {
             let a = cpu.registers.a;
             let operand = mmio.read(addr);
             let result = a.wrapping_sub(operand);
-            
+
             cpu.registers.a = result;
             cpu.registers.set_flag(registers::Flag::Zero, result == 0);
             cpu.registers.set_flag(registers::Flag::Negative, true);

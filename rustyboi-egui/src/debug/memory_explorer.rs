@@ -13,7 +13,7 @@ impl Gui {
                 .frame(egui::Frame::window(&ctx.style()).fill(crate::ui::PANEL_BACKGROUND))
                 .show(ctx, |ui| {
                     ui.set_width(200.0);
-                    
+
                     // Address input field
                     ui.horizontal(|ui| {
                         ui.label("Address:");
@@ -24,14 +24,14 @@ impl Gui {
                             } else {
                                 &self.memory_explorer_address
                             };
-                            
+
                             if let Ok(addr) = u16::from_str_radix(clean_input, 16) {
                                 self.memory_explorer_parsed_address = addr;
                                 self.memory_scroll_offset = 0; // Reset scroll when address changes
                             }
                         }
                     });
-                    
+
                     // Scroll up button (move pointer to lower addresses)
                     if ui.button("↑ Move Up").clicked() {
                         // Ensure we don't go below 0x0000
@@ -40,16 +40,16 @@ impl Gui {
                             self.memory_explorer_address = format!("{:04X}", self.memory_explorer_parsed_address);
                         }
                     }
-                    
+
                     ui.separator();
-                    
+
                     // Show memory contents around the current address (fixed view)
                     let start_addr = self.memory_explorer_parsed_address.saturating_sub(4); // 4 entries above
                     let end_addr = std::cmp::min(start_addr.saturating_add(8), 0xFFFF); // Show 9 entries
-                    
+
                     for addr in (start_addr..=end_addr).step_by(1) {
                         let val = gb_ref.read_memory(addr);
-                        
+
                         let color = if addr == self.memory_explorer_parsed_address {
                             egui::Color32::YELLOW // Highlight target address
                         } else if addr < self.memory_explorer_parsed_address {
@@ -57,13 +57,13 @@ impl Gui {
                         } else {
                             egui::Color32::GRAY // After target
                         };
-                        
+
                         let marker = if addr == self.memory_explorer_parsed_address { "→" } else { " " };
                         ui.monospace(egui::RichText::new(format!("{} {:04X}: {:02X}", marker, addr, val)).color(color));
                     }
-                    
+
                     ui.separator();
-                    
+
                     // Scroll down button (move pointer to higher addresses)
                     if ui.button("↓ Move Down").clicked() {
                         // Ensure we don't go above 0xFFFF
@@ -72,7 +72,7 @@ impl Gui {
                             self.memory_explorer_address = format!("{:04X}", self.memory_explorer_parsed_address);
                         }
                     }
-                    
+
                     // Navigation buttons
                     ui.horizontal(|ui| {
                         if ui.button("+0x10").clicked() {
@@ -82,7 +82,7 @@ impl Gui {
                             self.memory_explorer_address = format!("{:04X}", self.memory_explorer_parsed_address);
                         }
                     });
-                    
+
                     ui.horizontal(|ui| {
                         if ui.button("-0x10").clicked() {
                             // Subtract 0x10, but clamp to minimum valid address (0x0000)
@@ -91,7 +91,7 @@ impl Gui {
                         }
                         ui.small(egui::RichText::new(format!("Current: {:04X}", self.memory_explorer_parsed_address)).color(egui::Color32::LIGHT_GRAY));
                     });
-                    
+
                     ui.separator();
                     ui.small(egui::RichText::new("Yellow = target address").color(egui::Color32::LIGHT_GRAY));
                     ui.small(egui::RichText::new("Input: hex (with/without 0x)").color(egui::Color32::LIGHT_GRAY));

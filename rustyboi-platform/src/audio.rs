@@ -29,10 +29,10 @@ impl Output {
                     mono_samples.push(left);
                     mono_samples.push(right);
                 }
-                
+
                 let audio_buffer = SamplesBuffer::new(2, SAMPLE_RATE, mono_samples);
                 sink.append(audio_buffer);
-                
+
                 self.buffer.clear();
             }
     }
@@ -42,13 +42,13 @@ impl AudioOutput for Output {
     fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let (_stream, stream_handle) = OutputStream::try_default()?;
         let sink = Sink::try_new(&stream_handle)?;
-        
+
         sink.set_volume(0.3);
         sink.play();
-        
+
         self._stream = Some(_stream);
         self.sink = Some(sink);
-        
+
         Ok(())
     }
 

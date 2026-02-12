@@ -701,5 +701,3 @@ fn invoke_load(result: Option<FileData>) {
         log::warn!("load-rom callback fired with no pending request");
     }
 }
-
-

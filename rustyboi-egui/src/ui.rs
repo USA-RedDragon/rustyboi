@@ -160,13 +160,13 @@ impl Gui {
     pub fn ui(&mut self, ctx: &Context, paused: bool, registers: Option<&cpu::registers::Registers>, gb: Option<&gb::GB>) -> (Option<GuiAction>, bool) {
         let mut action = None;
         let mut any_menu_open = false;
-        
+
         // Check for pending dialog results first
         if let Ok(mut pending) = self.pending_dialog_result.try_lock()
             && let Some(pending_action) = pending.take() {
                 action = Some(pending_action);
             }
-        
+
         // The desktop menu bar consumes the top of the screen with
         // hover-driven submenus, which is unusable on a touch device.
         // On Android the same actions are surfaced via a floating
@@ -287,7 +287,7 @@ impl Gui {
                         ui.close_menu();
                     }
                 });
-                
+
                 ui.menu_button("Emulation", |ui| {
                     *any_menu_open = true;
                     if ui.button("Restart").clicked() {
@@ -327,15 +327,15 @@ impl Gui {
         if self.show_cpu_registers {
             self.render_cpu_registers_panel(ctx, registers, gb, action, paused);
         }
-        
+
         if self.show_stack_explorer {
             self.render_stack_explorer_panel(ctx, registers, gb);
         }
-        
+
         if self.show_memory_explorer {
             self.render_memory_explorer_panel(ctx, gb);
         }
-        
+
         if self.show_ppu_debug {
             self.render_ppu_debug_panel(ctx, gb);
         }
@@ -343,11 +343,11 @@ impl Gui {
         if self.show_sprite_debug {
             self.render_sprite_debug_panel(ctx, gb);
         }
-        
+
         if self.show_palette_explorer {
             self.render_palette_explorer_panel(ctx, gb);
         }
-        
+
         if self.show_tile_explorer {
             self.render_tile_explorer_panel(ctx, gb);
         }
@@ -374,7 +374,7 @@ impl Gui {
                     }
                 });
             });
-            
+
             if clear_status {
                 self.status_message = None;
             }
@@ -386,12 +386,12 @@ impl Gui {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.heading("🚨 Emulator Crashed");
                 ui.separator();
-                
+
                 ui.label("The Game Boy emulator has encountered a fatal error and has stopped running.");
                 ui.label("The GUI remains open for debugging purposes.");
-                
+
                 ui.add_space(10.0);
-                
+
                 ui.label("Error Details:");
                 ui.group(|ui| {
                     ui.add(egui::TextEdit::multiline(&mut error_msg.as_str())
@@ -399,14 +399,14 @@ impl Gui {
                         .desired_rows(6)
                         .font(egui::TextStyle::Monospace));
                 });
-                
+
                 ui.add_space(10.0);
-                
+
                 ui.horizontal(|ui| {
                     if ui.button("🔄 Restart Emulation").clicked() {
                         *action = Some(GuiAction::Restart);
                     }
-                    
+
                     if ui.button("Clear Error (Debug Mode)").clicked() {
                         *action = Some(GuiAction::ClearError);
                     }

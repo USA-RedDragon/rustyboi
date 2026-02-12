@@ -267,19 +267,19 @@ pub struct Mmio {
     // CGB-specific state
     vram_bank: u8,          // VRAM bank select (0-1)
     wram_bank_select: u8,   // WRAM bank select (1-7)
-    
+
     // CGB speed switching state
     key0_locked: bool,      // Whether KEY0 register is locked (after boot ROM finishes)
     key0_dmg_mode: bool,    // DMG compatibility mode (KEY0 bit 0)
     key1_current_speed: bool, // Current speed mode (KEY1 bit 7): false=normal, true=double
     key1_switch_armed: bool,  // Speed switch armed (KEY1 bit 0)
-    
+
     // CGB VRAM bank 1 (bank 0 is the existing vram field)
     vram_bank1: memory::Memory<VRAM_START, VRAM_SIZE>,
-    
-    // CGB WRAM banks 2-7 (bank 1 is the existing wram_bank field)  
+
+    // CGB WRAM banks 2-7 (bank 1 is the existing wram_bank field)
     wram_banks: Vec<memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>>, // Banks 2-7
-    
+
     // CGB HDMA state
     hdma_source: u16,       // HDMA source address (advances per byte)
     hdma_dest: u16,         // HDMA destination (advances per byte; low 13 bits used for VRAM offset)
@@ -713,7 +713,7 @@ pub struct Mmio {
     obj_palette_ram: [u8; 64],   // 8 palettes × 4 colors × 2 bytes = 64 bytes
     bg_palette_spec: u8,         // BCPS register
     obj_palette_spec: u8,        // OCPS register
-    
+
     // CGB feature enablement
     cgb_features_enabled: bool, // Whether CGB-specific features should be active
     // AGB (GBA-in-GBC-mode) hardware flag. AGB behaves like CGB everywhere
@@ -772,7 +772,7 @@ impl Mmio {
             // CGB-specific fields initialization
             vram_bank: 0,
             wram_bank_select: 1, // CGB starts with WRAM bank 1 selected
-            
+
             // CGB speed switching initialization
             key0_locked: false,    // Unlocked at boot, locked after boot ROM finishes
             key0_dmg_mode: false,  // Default to full CGB mode
@@ -837,7 +837,7 @@ impl Mmio {
             obj_palette_ram: [0; 64],
             bg_palette_spec: 0,
             obj_palette_spec: 0,
-            
+
             cgb_features_enabled: false, // Will be set when cartridge is inserted
             is_agb: false,
             cgb_de: false,
@@ -862,7 +862,7 @@ impl Mmio {
     pub fn insert_cartridge(&mut self, cartridge: cartridge::Cartridge) {
         self.cartridge = Some(cartridge);
     }
-    
+
     pub fn set_cgb_features_enabled(&mut self, enabled: bool) {
         self.cgb_features_enabled = enabled;
     }
@@ -930,7 +930,7 @@ impl Mmio {
         if !self.cgb_features_enabled || palette_idx >= 8 || color_idx >= 4 {
             return (0xFF, 0xFF); // Invalid access
         }
-        
+
         let offset = (palette_idx * 8 + color_idx * 2) as usize;
         if offset + 1 < 64 {
             (self.bg_palette_ram[offset], self.bg_palette_ram[offset + 1])
@@ -938,12 +938,12 @@ impl Mmio {
             (0xFF, 0xFF)
         }
     }
-    
+
     pub fn read_obj_palette_data(&self, palette_idx: u8, color_idx: u8) -> (u8, u8) {
         if !self.cgb_features_enabled || palette_idx >= 8 || color_idx >= 4 {
             return (0xFF, 0xFF); // Invalid access
         }
-        
+
         let offset = (palette_idx * 8 + color_idx * 2) as usize;
         if offset + 1 < 64 {
             (self.obj_palette_ram[offset], self.obj_palette_ram[offset + 1])
@@ -951,7 +951,7 @@ impl Mmio {
             (0xFF, 0xFF)
         }
     }
-    
+
     /// Seed the CGB power-on palette RAM (libgambatte initstate.cpp). The boot
     /// ROM leaves BG palette RAM all-white (0x7FFF) and OBJ palette RAM holding
     /// a fixed hardware power-on dump (`cgbObjpDump`). Games (and hwtests) that
@@ -1040,7 +1040,7 @@ impl Mmio {
         if !self.cgb_features_enabled || !(VRAM_START..=VRAM_END).contains(&addr) {
             return 0xFF; // Invalid access
         }
-        
+
         self.vram_bank1.read(addr)
     }
 
@@ -1049,7 +1049,7 @@ impl Mmio {
         if !(VRAM_START..=VRAM_END).contains(&addr) {
             return 0xFF; // Invalid address
         }
-        
+
         match bank {
             0 => self.vram.read(addr),
             1 => {
@@ -4027,7 +4027,7 @@ impl memory::Addressable for Mmio {
                         match self.wram_bank_select {
                             0 | 1 => self.wram_bank.read(addr), // Bank 0 and 1 use the original wram_bank
                             2..=7 => {
-                                let bank_index = (self.wram_bank_select - 2) as usize; 
+                                let bank_index = (self.wram_bank_select - 2) as usize;
                                 self.wram_banks[bank_index].read(addr)
                             },
                             _ => self.wram_bank.read(addr), // Fallback to bank 1
@@ -4046,7 +4046,7 @@ impl memory::Addressable for Mmio {
                                 match self.wram_bank_select {
                                     0 | 1 => self.wram_bank.read(addr), // Bank 0 and 1 use the original wram_bank
                                     2..=7 => {
-                                        let bank_index = (self.wram_bank_select - 2) as usize; 
+                                        let bank_index = (self.wram_bank_select - 2) as usize;
                                         self.wram_banks[bank_index].read(addr)
                                     },
                                     _ => self.wram_bank.read(addr), // Fallback to bank 1
@@ -4327,7 +4327,7 @@ impl memory::Addressable for Mmio {
                         match self.wram_bank_select {
                             0 | 1 => self.wram_bank.write(addr, value), // Bank 0 and 1 use the original wram_bank
                             2..=7 => {
-                                let bank_index = (self.wram_bank_select - 2) as usize; 
+                                let bank_index = (self.wram_bank_select - 2) as usize;
                                 self.wram_banks[bank_index].write(addr, value)
                             },
                             _ => self.wram_bank.write(addr, value), // Fallback to bank 1
@@ -4346,7 +4346,7 @@ impl memory::Addressable for Mmio {
                                 match self.wram_bank_select {
                                     0 | 1 => self.wram_bank.write(addr, value), // Bank 0 and 1 use the original wram_bank
                                     2..=7 => {
-                                        let bank_index = (self.wram_bank_select - 2) as usize; 
+                                        let bank_index = (self.wram_bank_select - 2) as usize;
                                         self.wram_banks[bank_index].write(addr, value)
                                     },
                                     _ => self.wram_bank.write(addr, value), // Fallback to bank 1
@@ -4420,7 +4420,7 @@ impl memory::Addressable for Mmio {
                                 self.io_registers.write(addr, value);
                             }
                         },
-                        
+
                         // CGB registers - only writable when CGB features are enabled
                         REG_KEY0 => {
                             if self.cgb_features_enabled && !self.key0_locked {
@@ -4580,7 +4580,7 @@ impl memory::Addressable for Mmio {
                             if self.cgb_features_enabled {
                                 let index = (self.bg_palette_spec & 0x3F) as usize; // Bits 0-5 = address
                                 self.bg_palette_ram[index] = value;
-                                
+
                                 // Auto-increment if bit 7 is set
                                 if (self.bg_palette_spec & 0x80) != 0 {
                                     let new_index = ((self.bg_palette_spec & 0x3F) + 1) & 0x3F;
@@ -4597,7 +4597,7 @@ impl memory::Addressable for Mmio {
                             if self.cgb_features_enabled {
                                 let index = (self.obj_palette_spec & 0x3F) as usize; // Bits 0-5 = address
                                 self.obj_palette_ram[index] = value;
-                                
+
                                 // Auto-increment if bit 7 is set
                                 if (self.obj_palette_spec & 0x80) != 0 {
                                     let new_index = ((self.obj_palette_spec & 0x3F) + 1) & 0x3F;
@@ -4605,7 +4605,7 @@ impl memory::Addressable for Mmio {
                                 }
                             }
                         },
-                        
+
                         // 0xFF78-0xFF7F are unmapped: writes are dropped.
                         0xFF78..=0xFF7F => {}
 

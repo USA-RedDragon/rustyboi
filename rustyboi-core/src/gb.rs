@@ -540,9 +540,9 @@ impl GB {
         if let Err(msg) = self.validate_cartridge_compatibility(&cartridge) {
             eprintln!("Warning: {}", msg);
         }
-        
+
         self.mmio.insert_cartridge(cartridge);
-        
+
         // Update CGB features enablement based on hardware and cartridge compatibility
         let cgb_enabled = self.should_enable_cgb_features();
         self.mmio.set_cgb_features_enabled(cgb_enabled);
@@ -551,7 +551,7 @@ impl GB {
     /// Validate that the cartridge is compatible with the current hardware
     fn validate_cartridge_compatibility(&self, cartridge: &cartridge::Cartridge) -> Result<(), String> {
         let cgb_support = cartridge.get_cgb_support();
-        
+
         match (self.hardware, &cgb_support) {
             // CGB-only cartridge on non-CGB hardware
             (Hardware::DMG | Hardware::DMG0 | Hardware::MGB | Hardware::SGB | Hardware::SGB2, cartridge::CgbSupport::Only) => {
@@ -559,7 +559,7 @@ impl GB {
             }
             // CGB cartridge on CGB/AGB hardware - always OK
             (Hardware::CGB0 | Hardware::CGBB | Hardware::CGB | Hardware::CGBE | Hardware::AGB, _) => Ok(()),
-            // DMG cartridge on any hardware - always OK  
+            // DMG cartridge on any hardware - always OK
             (_, cartridge::CgbSupport::None) => Ok(()),
             // CGB-compatible cartridge on DMG hardware - OK but will run in DMG mode
             (_, cartridge::CgbSupport::Compatible) => Ok(()),
@@ -574,7 +574,7 @@ impl GB {
         if !self.hardware.is_cgb_like() {
             return false;
         }
-        
+
         // Check if cartridge supports CGB
         if let Some(cartridge) = self.mmio.get_cartridge() {
             cartridge.supports_cgb()
@@ -712,13 +712,13 @@ impl GB {
         } else {
             Vec::new()
         };
-        
+
         // Send audio samples directly to output as they're generated
         if !audio_samples.is_empty()
             && let Some(audio_output) = &mut self.audio_output {
                 audio_output.add_samples(&audio_samples);
         }
-        
+
         (false, cycles) // No breakpoint hit
     }
 
@@ -728,21 +728,21 @@ impl GB {
         // If we exceed this, we assume PPU is disabled or stuck
         // and return to avoid audio buildup
         const MAX_NORMAL_SPEED_CPU_CYCLES_PER_FRAME: u32 = 70224;
-        
+
         loop {
             let (breakpoint_hit, cycles) = self.step_instruction(collect_audio);
             cpu_cycles_this_frame += cycles;
-            
+
             if breakpoint_hit {
                 // Breakpoint hit - return current frame and indicate breakpoint hit
                 return (self.ppu.get_frame(&self.mmio), true);
             }
-            
+
             // Check if PPU has completed a frame
             if self.ppu.frame_ready() {
                 return (self.ppu.get_frame(&self.mmio), false);
             }
-            
+
             // If PPU is disabled or taking too long, cap the cycles to prevent audio buildup
             let max_cpu_cycles_per_frame = if self.mmio.is_double_speed_mode() {
                 MAX_NORMAL_SPEED_CPU_CYCLES_PER_FRAME * 2

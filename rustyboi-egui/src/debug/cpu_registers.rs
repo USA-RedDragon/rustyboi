@@ -16,20 +16,20 @@ impl Gui {
                     .frame(egui::Frame::window(&ctx.style()).fill(crate::ui::PANEL_BACKGROUND))
                     .show(ctx, |ui| {
                         ui.set_width(230.0);
-                        
+
                         // Use rich text for better color control
                         ui.monospace(egui::RichText::new(format!("A: {:02X}    F: {:02X}", regs.a, regs.f)).color(egui::Color32::WHITE));
                         ui.monospace(egui::RichText::new(format!("B: {:02X}    C: {:02X}", regs.b, regs.c)).color(egui::Color32::WHITE));
                         ui.monospace(egui::RichText::new(format!("D: {:02X}    E: {:02X}", regs.d, regs.e)).color(egui::Color32::WHITE));
                         ui.monospace(egui::RichText::new(format!("H: {:02X}    L: {:02X}", regs.h, regs.l)).color(egui::Color32::WHITE));
                         ui.separator();
-                        
+
                         // Pretty-print the flags (F register bits 7-4)
                         let z_flag = (regs.f & 0x80) != 0; // Bit 7: Zero flag
                         let n_flag = (regs.f & 0x40) != 0; // Bit 6: Subtract flag
                         let h_flag = (regs.f & 0x20) != 0; // Bit 5: Half Carry flag
                         let c_flag = (regs.f & 0x10) != 0; // Bit 4: Carry flag
-                        
+
                         ui.horizontal(|ui| {
                             ui.monospace(egui::RichText::new(format!("Z:{}", if z_flag { "1" } else { "0" }))
                                 .color(if z_flag { egui::Color32::LIGHT_GREEN } else { egui::Color32::GRAY }));
@@ -46,20 +46,20 @@ impl Gui {
                         ui.separator();
                         ui.monospace(egui::RichText::new(format!("IME: {}", if regs.ime { "ON" } else { "OFF" })).color(egui::Color32::WHITE));
                         ui.separator();
-                        
+
                         // Instruction viewer around PC
                         ui.small(egui::RichText::new("Instructions:").color(egui::Color32::LIGHT_GRAY));
                         let pc = regs.pc;
                         let display_pc = pc.saturating_sub(0); // Show the instruction that was just executed
-                        
+
                         // Display exactly 5 instructions starting from the current PC
                         let mut addr = display_pc;
                         let mut instruction_count = 0;
                         const MAX_INSTRUCTIONS: usize = 5;
-                        
+
                         while instruction_count < MAX_INSTRUCTIONS {
                             let (mnemonic, instruction_length) = Disassembler::disassemble_with_reader(addr, |address| gb_ref.read_memory(address));
-                            
+
                             let color = if addr == display_pc {
                                 egui::Color32::YELLOW // Highlight the instruction that was just executed
                             } else if addr < display_pc {
@@ -67,26 +67,26 @@ impl Gui {
                             } else {
                                 egui::Color32::GRAY // After executed instruction (upcoming)
                             };
-                            
+
                             let marker = if addr == display_pc { "→" } else { " " };
-                            
+
                             // Show the first byte and mnemonic for single-byte instructions
                             // For multi-byte instructions, show the full instruction with all bytes
                             let bytes = if instruction_length == 1 {
                                 format!("{:02X}", gb_ref.read_memory(addr))
                             } else if instruction_length == 2 {
-                                format!("{:02X} {:02X}", 
-                                    gb_ref.read_memory(addr), 
+                                format!("{:02X} {:02X}",
+                                    gb_ref.read_memory(addr),
                                     gb_ref.read_memory(addr + 1))
                             } else {
-                                format!("{:02X} {:02X} {:02X}", 
-                                    gb_ref.read_memory(addr), 
+                                format!("{:02X} {:02X} {:02X}",
+                                    gb_ref.read_memory(addr),
                                     gb_ref.read_memory(addr + 1),
                                     gb_ref.read_memory(addr + 2))
                             };
-                            
+
                             ui.monospace(egui::RichText::new(format!("{} {:04X}: {:8} {}", marker, addr, bytes, mnemonic)).color(color));
-                            
+
                             addr += instruction_length;
                             instruction_count += 1;
                         }
@@ -94,16 +94,16 @@ impl Gui {
 
                         // Step controls
                         ui.small(egui::RichText::new("Step Controls:").color(egui::Color32::LIGHT_GRAY));
-                        
+
                         // Slider for step count
                         ui.horizontal(|ui| {
                             ui.label("Steps:");
                             ui.add(egui::Slider::new(&mut self.step_count, 1..=100)
                                 .text("instructions"));
                         });
-                        
+
                         ui.separator();
-                        
+
                         // Step buttons
                         ui.horizontal(|ui| {
                             if paused {
@@ -124,7 +124,7 @@ impl Gui {
                                     // Button released - reset state
                                     self.step_cycles_held_frames = 0;
                                 }
-                                
+
                                 // Step Frames button with hold functionality
                                 let frames_response = ui.button("Step Frames");
                                 if frames_response.clicked() {
@@ -147,11 +147,11 @@ impl Gui {
                                 ui.add_enabled(false, egui::Button::new("Step Frames"));
                             }
                         });
-                        
+
                         if !paused {
                             ui.small(egui::RichText::new("(Pause to enable stepping)").color(egui::Color32::GRAY));
                         }
-                        
+
                         ui.separator();
                         ui.small(egui::RichText::new("F = step frame | N = step cycle").color(egui::Color32::LIGHT_GRAY));
                     });
