@@ -1688,7 +1688,12 @@ impl Ppu {
         self.wy1 = mmio.read(WY);
         self.wy1_apply_cc = wy2_disabled();
         self.stat_reg_committed = mmio.read(LCD_STATUS);
-        self.lyc_irq.set_cgb(cgb);
+        // The LYC/STAT interrupt machinery follows the LCD-controller silicon,
+        // which is CGB whenever the hardware is CGB-like — even for a DMG cart in
+        // DMG-compatibility mode (Gambatte gates LycIrq on `cart_.isCgb()`, which
+        // is the CGB-console signal, not cart CGB-feature support). Use hardware
+        // is-CGB, not `is_cgb_features_enabled()`.
+        self.lyc_irq.set_cgb(mmio.is_cgb());
         self.lyc_irq.seed(mmio.read(LCD_STATUS), lyc);
         self.mstat_irq.seed(mmio.read(LCD_STATUS), lyc);
         self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
@@ -4859,7 +4864,9 @@ impl Ppu {
         self.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off(mmio.is_double_speed_mode())) as u64 };
         self.sched_lycirq = self.lyc_irq.time;
 
-        let cgb = mmio.is_cgb_features_enabled();
+        // STAT-write IRQ timing follows the CGB LCD controller on CGB hardware
+        // (incl. DMG-compat mode), matching Gambatte's `cart_.isCgb()` gate.
+        let cgb = mmio.is_cgb();
         let lyc_reg = self.lyc_irq.lyc_reg_src();
         // Gambatte's statChangeTriggersStatIrqDmg recomputes the current line's
         // m0 IRQ time when it is unscheduled but mode 0 is still ahead this
@@ -4898,7 +4905,9 @@ impl Ppu {
         let cc = self.write_cc(mmio.is_double_speed_mode());
         let lc = self.ly_counter(mmio);
         let stat = self.stat_reg_committed;
-        let cgb = mmio.is_cgb_features_enabled();
+        // LYC-write coincidence/IRQ timing follows the CGB LCD controller on CGB
+        // hardware (incl. DMG-compat mode); Gambatte gates on `cart_.isCgb()`.
+        let cgb = mmio.is_cgb();
         let ds = mmio.is_double_speed_mode();
 
         // Trigger/latch against the current-line mode-0 IRQ time: the closed-form
@@ -5106,7 +5115,9 @@ impl Ppu {
                 self.scx_delayed = mmio.read(SCX);
                 self.scx_apply_cc = wy2_disabled();
                 self.stat_reg_committed = mmio.read(LCD_STATUS);
-                self.lyc_irq.set_cgb(mmio.is_cgb_features_enabled());
+                // See note in `enable_display`: LYC/STAT timing follows the CGB
+                // LCD controller on CGB hardware regardless of DMG-compat mode.
+                self.lyc_irq.set_cgb(mmio.is_cgb());
                 self.lyc_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
                 self.mstat_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
                 self.lyc_irq.lcd_reset();
