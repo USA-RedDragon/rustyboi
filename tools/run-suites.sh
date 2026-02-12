@@ -319,6 +319,9 @@ update_readme_report() {
 
     mv "$out" "$readme"
     rm -f "$tmp"
+    # Stage the regenerated table so a commit that changes it is one-shot
+    # (pre-commit aborts only on UNSTAGED hook modifications).
+    git -C "$ROOT" add "$readme" 2>/dev/null || true
 }
 
 # Emit a GitHub-flavored markdown progress table (one row per suite, this
@@ -357,13 +360,30 @@ case "$1" in
     build)     build; exit 0 ;;
 esac
 
+# report-update is the pre-commit hook (always_run): keep it FAST and SAFE.
+# Regenerate the README table only when the staged change could actually move a
+# pass count (emulator source or a suite manifest); never download ROMs or build
+# during a commit -- skip silently if the binary/ROM set isn't ready (CI keeps
+# the table honest regardless). update_readme_report stages its own edit, so a
+# table change lands in the same commit rather than aborting it.
+if [ "$1" = "report-update" ]; then
+    if git diff --cached --quiet -- rustyboi-core rustyboi-test-runner/suites 2>/dev/null; then
+        exit 0  # no source/manifest change staged -> counts can't have moved
+    fi
+    if [ -x "$BIN" ] && [ -f "$ROMS/.rb-setup-complete" ]; then
+        update_readme_report
+    else
+        echo "run-suites: report-update skipped (binary or ROM set not present)"
+    fi
+    exit 0
+fi
+
 # A suite (or 'all'/'report'): ensure ROMs + binary exist, then run.
 [ "${RB_SKIP_SETUP:-0}" = "1" ] || setup
 if [ "${RB_SKIP_BUILD:-0}" != "1" ] && [ ! -x "$BIN" ]; then build; fi
 [ -x "$BIN" ] || die "runner binary not found at $BIN (run: $0 build)"
 
 if [ "$1" = "report" ]; then generate_report; exit 0; fi
-if [ "$1" = "report-update" ]; then update_readme_report; exit 0; fi
 
 if [ "$1" = "all" ]; then
     # shellcheck disable=SC2086  # ORDER is a space-separated list of bare words
