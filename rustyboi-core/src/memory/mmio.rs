@@ -486,6 +486,20 @@ pub struct Mmio {
     #[serde(skip, default)]
     dmg_m0_halt_ly_advance: Option<u32>,
 
+    // CGB-console analog of `dmg_m0_halt_ly_advance` for an m0-woken HALT exit on
+    // a CGB console running a DMG-flagged cart (hblank_ly_scx_timing-C: console is
+    // CGB, `is_cgb_features_enabled()` is false, so neither the DMG unhalt block —
+    // gated `!is_cgb()` — nor the `cgb_halt_exit` +5 — gated on cart features —
+    // fires). Gambatte's HALT-exit fixup (memory.cpp:301) is
+    // `cc += 4 * (isCgb() || cc - eventTime < 2)`; on CGB the `isCgb()` disjunct
+    // makes the +4 UNCONDITIONAL, so the full wake advance is the ceil-to-M-cycle
+    // snap PLUS a flat +4 (vs the DMG conditional +4). Derived at unhalt from the
+    // m0 eventTime's mod-4 phase; consumed read-side by the woken FF44 read as
+    // `to_next - adv`. Yields constant tn (=9 delay_a / 5 delay_b) across the
+    // 51/50/49 per-SCX classes, exactly like the passing DMG -GS version.
+    #[serde(skip, default)]
+    cgb_m0_halt_ly_advance: Option<u32>,
+
     // HALT-PREFETCH (Lever A, RB_PREFETCH_CC). The pre-snap master_cc at real
     // HALT entry (on_cpu_halt). This is the un-snapped HALT-entry cc that
     // Gambatte's ceil_4(eventTime) snap (cpu.cpp:1075) would otherwise erase;
@@ -801,6 +815,7 @@ impl Mmio {
             last_m2_irq_fire_cc: None,
             last_m2_irq_ly: 0,
             dmg_m0_halt_ly_advance: None,
+            cgb_m0_halt_ly_advance: None,
             halt_entry_cc: None,
             halt_prefetch_phase: 0,
             timer_push_phase: 0,
@@ -1985,6 +2000,14 @@ impl Mmio {
         self.dmg_m0_halt_ly_advance = adv;
     }
 
+    pub fn set_cgb_m0_halt_ly_advance(&mut self, adv: Option<u32>) {
+        self.cgb_m0_halt_ly_advance = adv;
+    }
+
+    pub fn cgb_m0_halt_ly_advance(&self) -> Option<u32> {
+        self.cgb_m0_halt_ly_advance
+    }
+
     /// FAITHFUL HALT-EXIT: the DMG m0-woken halt-exit advance, if this stream
     /// was woken by the mode-0 STAT IRQ at its event cc.
     pub fn dmg_m0_halt_ly_advance(&self) -> Option<u32> {
@@ -2192,6 +2215,7 @@ impl Mmio {
         // FAITHFUL EVENTCC: a fresh HALT ends the previous wakeup's +4 read bias.
         self.halt_wake_plus4_dmg = false;
         self.dmg_m0_halt_ly_advance = None;
+        self.cgb_m0_halt_ly_advance = None;
         // HALT-PREFETCH (Lever A): a fresh HALT supersedes the prior wakeup's
         // prefetch-phase bias (and its captured pre-snap entry cc).
         self.halt_entry_cc = None;

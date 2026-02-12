@@ -242,6 +242,34 @@ impl SM83 {
                             mmio.mmio.set_dmg_m0_halt_ly_advance(Some(adv));
                         }
                     }
+                // FAITHFUL HALT-EXIT (CGB m0-woken stream): the CGB-console analog
+                // of the DMG `dmg_m0_halt_ly_advance` block above. Gambatte's
+                // HALT-exit fixup (memory.cpp:301) is
+                // `cc += 4 * (isCgb() || cc - eventTime < 2)`; on a CGB console the
+                // `isCgb()` disjunct makes the +4 UNCONDITIONAL, so the full wake
+                // advance is the ceil-to-M-cycle snap PLUS a flat +4 (the DMG path's
+                // +4 is instead conditional on `delta < 2`). Scoped to the DMG-cart
+                // case (`!is_cgb_features_enabled()`): a CGB-flagged cart takes the
+                // `cgb_halt_exit` +5 read bias in get_ly_reg_at_cc, co-tuned to the
+                // m1int_ly family, so this must not double-apply there. m0-woken
+                // (pending_m0_irq_fire_cc within 2cc of the wake, the same grid the
+                // DMG block uses). Consumed read-side by the woken FF44 read as
+                // `to_next - adv`, yielding constant tn across the 51/50/49 per-SCX
+                // classes of hblank_ly_scx_timing-C (matching the passing -GS DMG).
+                if pending_interrupt == Some(registers::InterruptFlag::Lcd)
+                    && mmio.mmio.is_cgb()
+                    && !mmio.mmio.is_cgb_features_enabled()
+                    && let Some(ev) = mmio.mmio.pending_m0_irq_fire_cc()
+                {
+                    let mcc = mmio.master_cc_dbg() as i64;
+                    if mcc - (ev as i64) < 2 {
+                        let align = ((4 - (mcc % 4)) % 4) as u32;
+                        // Unconditional +4 on CGB (isCgb() disjunct always true),
+                        // vs the DMG block's `4 * (align < 2)`.
+                        let adv = align + 4;
+                        mmio.mmio.set_cgb_m0_halt_ly_advance(Some(adv));
+                    }
+                }
                 // HALT-PREFETCH (Lever A, RB_PREFETCH_CC). Derive the M-cycle
                 // phase bit that separates the byte-identical _1b/_2b streams.
                 // The pre-snap HALT-entry cc H (halt_entry_cc) carries the extra

@@ -16,7 +16,7 @@ Passing cases per suite, refreshed automatically on every pull request by the
 | cgb_acid_hell | 1 | 1 |
 | mealybug | 37 | 51 |
 | mooneye | 188 | 192 |
-| mooneye_wilbertpol | 187 | 193 |
+| mooneye_wilbertpol | 188 | 193 |
 | age | 40 | 59 |
 | gbmicrotest | 481 | 513 |
 | samesuite_apu | 70 | 70 |
@@ -33,7 +33,7 @@ Passing cases per suite, refreshed automatically on every pull request by the
 | rtc3test | 6 | 6 |
 | mbc3_tester | 1 | 2 |
 | gambatte | 5241 | 5257 |
-| **Total** | **6338** | **6434** |
+| **Total** | **6339** | **6434** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core
