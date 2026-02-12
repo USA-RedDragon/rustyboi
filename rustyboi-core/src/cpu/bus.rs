@@ -121,6 +121,15 @@ impl<'a> Bus<'a> {
         self.run_to(target);
     }
 
+    /// Charge one opcode-fetch M-cycle (4 T-cycles) for a HALT-bug-prefetched
+    /// opcode consumed WITHOUT a re-fetch (Gambatte cpu.cpp:578 `cc() += 4`). The
+    /// advance is absorbed into the instruction's returned cycle count by the
+    /// `tick_remaining` reconciliation at the end of `step`, so it only shifts WHEN
+    /// the doubled instruction's operand read resolves — not the instruction length.
+    pub fn tick_opcode_fetch_mcycle(&mut self) {
+        self.tick_m();
+    }
+
     fn tick_m(&mut self) {
         // STAGE 6/7: the CPU advances `master_cc` by the access duration (one
         // M-cycle = 4 dots) and a single `run_to` resolves every peripheral up to

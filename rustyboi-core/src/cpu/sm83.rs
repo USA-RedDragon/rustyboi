@@ -22,6 +22,18 @@ pub struct SM83 {
     pub opcode: u8,
     #[serde(default)]
     pub prefetched: bool,
+    /// FAITHFUL HALT-BUG prefetch cc. The HALT-bug (IME=0 + pending IRQ) leaves the
+    /// byte after HALT PREFETCHED via a `peek` (no cc charged), unlike the normal
+    /// end-of-instruction prefetch which is `fetch_opcode`'d WITH its 4cc tick. When
+    /// that peeked opcode is consumed, its opcode-fetch M-cycle must still be charged
+    /// (Gambatte cpu.cpp:578 `cc() += 4` on the prefetched branch) so the doubled
+    /// instruction's operand read resolves one M-cycle later — on the exact cc a live
+    /// IO register (TIMA/DIV read as the immediate) has ticked to. Without it the
+    /// operand reads 4cc early (age halt-prefetch: `LD B,n` reads TIMA=06 not 07).
+    /// Set only by the HALT-bug peek; the HDMA-Requested / STOP-operand prefetches
+    /// keep their existing (un-charged) consumption which their tests are tuned to.
+    #[serde(default)]
+    pub halt_bug_prefetch: bool,
     /// FAITHFUL HALT-EXIT: the m2-woken wake charged its +4 as a REAL stall
     /// (the `return 4` below), so the woken stream is already at the hardware
     /// cc and the timer-read facet must not re-add the advance.
@@ -45,6 +57,7 @@ impl SM83 {
             stop_unhalt_cycles: 0,
             opcode: 0,
             prefetched: false,
+            halt_bug_prefetch: false,
             m2_halt_stall_charged: false,
         }
     }
@@ -55,22 +68,58 @@ impl SM83 {
         // schedule effectively suspends CPU fetch for 0x20000 + 4 T-cycles after
         // STOP completes; the per-cycle peripheral loop in gb.rs still runs.
         if self.stop_unhalt_cycles > 0 {
-            let slice = self.stop_unhalt_cycles.min(4);
-            self.stop_unhalt_cycles -= slice;
-            // Stop window over: run Gambatte's `intevent_unhalt` HDMA reflag gate at
-            // the unhalt cc (memory.cpp:224/304), then re-enable the period edge.
-            // A block held Low-at-stop reflags only if the unhalt lands back in the
-            // HDMA period (`hdma_m3speedchange_late_m0wakeup_*`); one whose unhalt is
-            // out of period stays dropped (`hdma_late_m3speedchange_*_1` -> out00).
-            if self.stop_unhalt_cycles == 0 {
-                // Unfreeze the OAM-DMA (Gambatte's unhalt resumes `updateOamDma`).
+            // FAITHFUL STOP-WINDOW EARLY WAKE. Gambatte's `Memory::stop` runs
+            // `intreq_.halt()` for the 0x20000+4 unhalt window and schedules
+            // `intevent_unhalt` at its end — but the window is ALSO a halt, so a
+            // pending enabled interrupt raises `intevent_interrupts` at its IF-set
+            // cc, which the MinKeeper picks ahead of `intevent_unhalt`
+            // (memory.cpp:293-311: the `halted()` branch fires, `intreq_.unhalt()`
+            // terminates the window, then `interrupter_.interrupt` dispatches). The
+            // AGE `spsw-interrupts` "caution" roms exploit exactly this: an interrupt
+            // (timer/serial) fires DURING the post-STOP HALT period and wakes the CPU
+            // early. rustyboi otherwise drains the full 0x20000 slice-by-slice and
+            // ignores the pending IF until the window ends. Poll for a pending
+            // enabled interrupt at each slice boundary; on one, terminate the window
+            // and fall through to the halt-exit / dispatch machinery below (the STOP
+            // window is a halt, so route it through the same `self.halted` path).
+            if self.get_pending_interrupt(mmio).is_some() {
+                // Terminate the window here and run the unhalt exit gate (OAM-DMA
+                // unfreeze + HDMA reflag) that the window-drained-to-0 path runs.
+                self.stop_unhalt_cycles = 0;
                 mmio.set_oam_dma_stop_freeze(false);
                 if mmio.in_stop_window() {
                     let in_period_unhalt = mmio.hdma_in_period_for_unhalt();
                     mmio.stop_window_exit_reflag(in_period_unhalt);
                 }
+                // Fall through to the dispatch path below WITHOUT charging an extra
+                // wake M-cycle. Gambatte's HALT-exit `cc += 4` (memory.cpp:301) plus
+                // the +1 event-processing cc is ALREADY absorbed in rustyboi's
+                // detection cc: the timer IF becomes visible at `schedCc + CC_OFF`
+                // (CC_OFF = 5), which maps exactly onto Gambatte's post-wake cc
+                // (evt + 5). Verified cc-exact on age spsw-interrupts (rustyboi
+                // detection mcc 82320 == Gambatte post-wake 140688 under the 58368
+                // boot offset). Charging another +4 here double-counts the M-cycle and
+                // reads DIV/TIMA one tick high at the boundary probes. So we simply
+                // let the pending interrupt dispatch this same step.
+            } else {
+                let slice = self.stop_unhalt_cycles.min(4);
+                self.stop_unhalt_cycles -= slice;
+                // Stop window over: run Gambatte's `intevent_unhalt` HDMA reflag gate
+                // at the unhalt cc (memory.cpp:224/304), then re-enable the period
+                // edge. A block held Low-at-stop reflags only if the unhalt lands back
+                // in the HDMA period (`hdma_m3speedchange_late_m0wakeup_*`); one whose
+                // unhalt is out of period stays dropped
+                // (`hdma_late_m3speedchange_*_1` -> out00).
+                if self.stop_unhalt_cycles == 0 {
+                    // Unfreeze the OAM-DMA (Gambatte's unhalt resumes `updateOamDma`).
+                    mmio.set_oam_dma_stop_freeze(false);
+                    if mmio.in_stop_window() {
+                        let in_period_unhalt = mmio.hdma_in_period_for_unhalt();
+                        mmio.stop_window_exit_reflag(in_period_unhalt);
+                    }
+                }
+                return slice;
             }
-            return slice;
         }
 
         // Charge the CPU stall owed for HDMA/GDMA blocks: idle (no fetch) while
@@ -583,6 +632,14 @@ impl SM83 {
 
         let op = self.opcode;
         self.prefetched = false;
+        // FAITHFUL HALT-BUG: the peeked opcode's fetch M-cycle was not ticked at the
+        // HALT (unlike the normal `fetch_opcode` prefetch). Charge it now — BEFORE
+        // execute — so the doubled instruction's operand read (which may sample a live
+        // IO register: TIMA/DIV read as the `LD B,n` immediate) resolves one M-cycle
+        // later, on the exact cc the register has ticked to (Gambatte cpu.cpp:578).
+        if std::mem::take(&mut self.halt_bug_prefetch) {
+            mmio.tick_opcode_fetch_mcycle();
+        }
         cycles += self.execute(op, mmio);
         self.apply_ime_delay();
         mmio.set_hdma_resume_lockstep_window(false);
@@ -641,6 +698,12 @@ impl SM83 {
         // 16; prefetch (4) + 16 = the full 20-cc / 5-M-cycle interrupt cost.
         self.registers.pc = self.registers.pc.wrapping_sub(1);
         self.prefetched = false;
+        // A HALT-bug prefetch that ends up serviced (IME=1 + pending: the bug peeked
+        // the byte but the interrupt now undoes it, pc rewound to the HALT) must NOT
+        // carry its deferred opcode-fetch M-cycle into the post-ISR resume — the HALT
+        // re-runs and re-decides. Drop it here so the charge applies only when the
+        // doubled opcode actually executes (IME-off HALT-bug).
+        self.halt_bug_prefetch = false;
         // HALT-PREFETCH woken-PC PUSH consume (R-PC, RB_TIMER_PUSH_PHASE). The
         // unconditional `pc -= 1` undo above is correct only when the unhalt did a
         // pc-ADVANCING boundary fetch. For the CGB+Timer phase-1 wakeup (the HALT

@@ -406,10 +406,19 @@ impl GB {
                 if cgb_cart { 0x1EA4 } else { 0x267C }
             }
             Hardware::DMG | Hardware::MGB => 0xABCC,
-            // boot_div-S / boot_div2-S fingerprint (d9 da da db dc de). The SGB
-            // CPU uses the DMG-style single-speed timer; this is the post-boot
-            // counter that reproduces the SGB boot_div fingerprint. Verified:
-            // passes mooneye boot_div-S and boot_div2-S.
+            // boot_div-S fingerprint (d9 da da db dc de). The SGB CPU uses the
+            // DMG-style single-speed timer; this is the post-boot counter that
+            // reproduces the SGB boot_div-S fingerprint. Passes mooneye boot_div-S.
+            //
+            // boot_div2-S (the same test +4 NOPs before each DIV read, i.e. sampling
+            // 16 cc later to pin the sub-cycle phase) is a PROVEN mutual-exclusion:
+            // it needs 0xD850 (16 cc lower) while boot_div-S needs 0xD860 — no single
+            // counter satisfies both. The tests' internal PUSH/POP DIV-sample shuffle
+            // crosses a DIV high-byte boundary 16 cc apart; rustyboi's per-instruction
+            // DIV read-phase places that boundary inside the 16 cc gap, so only one
+            // alignment lands correctly. Closing it needs the sub-dot per-access CPU
+            // read-cc model (Lever A), not a counter tweak; 0xD860 is kept because
+            // boot_div-S is corroborated by the Gambatte boot-anchored DIV refs.
             Hardware::SGB | Hardware::SGB2 => 0xD860,
             // boot_div-dmg0 fingerprint (19 1a 1a 1b 1c 1e). Verified: passes
             // mooneye boot_div-dmg0.
