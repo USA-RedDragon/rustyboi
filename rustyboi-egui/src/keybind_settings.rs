@@ -12,10 +12,10 @@ impl Gui {
             .show(ctx, |ui| {
                 ui.heading("Game Boy Controls");
                 ui.separator();
-                
+
                 ui.label("Configure the keyboard mappings for Game Boy controls:");
                 ui.add_space(10.0);
-                
+
                 // For now, we'll display the current keybinds as read-only
                 // In a full implementation, these would be editable
                 ui.group(|ui| {
@@ -29,18 +29,18 @@ impl Gui {
                     ui.monospace("Left: Arrow Left");
                     ui.monospace("Right: Arrow Right");
                 });
-                
+
                 ui.add_space(10.0);
-                
+
                 ui.group(|ui| {
                     ui.label("⚠️ Note:");
                     ui.label("Keybind customization is not yet fully implemented.");
                     ui.label("This panel shows the current default mappings.");
                     ui.label("Future versions will allow live editing of these bindings.");
                 });
-                
+
                 ui.add_space(10.0);
-                
+
                 if ui.button("Reset to Defaults").clicked() {
                     // This would reset keybinds to defaults
                     // For now, it's just a placeholder

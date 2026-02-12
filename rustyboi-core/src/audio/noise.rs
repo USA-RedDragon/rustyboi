@@ -237,7 +237,7 @@ impl Noise {
     fn len_nr1_change(&mut self, value: u8) {
         self.length_counter = ((!value as u16 & Self::LEN_MASK) + 1) as u8;
         self.len_counter = if self.nr44 & 0x40 != 0 {
-            ((self.len_cc >> 13) + self.length_counter as u32) << 13 
+            ((self.len_cc >> 13) + self.length_counter as u32) << 13
         } else {
             LEN_DISABLED
         };
@@ -266,7 +266,7 @@ impl Noise {
             self.length_counter = (Self::LEN_MASK as u8) + 1 - dec;
         }
         self.len_counter = if new_nr4 & 0x40 != 0 && self.length_counter != 0 {
-            ((self.len_cc >> 13) + self.length_counter as u32) << 13 
+            ((self.len_cc >> 13) + self.length_counter as u32) << 13
         } else {
             LEN_DISABLED
         };

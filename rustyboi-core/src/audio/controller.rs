@@ -39,19 +39,19 @@ pub struct Audio {
     channel2: square::SquareWave,
     channel3: wave::Wave,
     channel4: noise::Noise,
-    
+
     // Master control registers
     nr50: u8, // Master volume and VIN panning
     nr51: u8, // Sound panning
     nr52: u8, // Master control/status
-    
+
     // Frame sequencer
     frame_sequencer_step: u8,
     frame_sequencer_timer: u16,
-    
+
     // Audio enabled flag
     audio_enabled: bool,
-    
+
     // Sample generation timing
     fractional_cycles: f32,
 
@@ -940,7 +940,7 @@ impl Addressable for Audio {
                 if self.channel2.is_enabled() { value |= 0x02; }
                 if self.channel3.is_enabled() { value |= 0x04; }
                 if self.channel4.is_enabled() { value |= 0x08; }
-                
+
                 value | 0x70 // Bits 4-6 always read as 1
             }
             WAV_START..=WAV_END => self.channel3.read(addr),

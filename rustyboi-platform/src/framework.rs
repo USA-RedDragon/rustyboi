@@ -182,7 +182,7 @@ impl Framework {
         self.paint_jobs = self
             .egui_ctx
             .tessellate(full_output.shapes, self.screen_descriptor.pixels_per_point);
-            
+
         ui_result.unwrap_or((None, false))
     }
 
