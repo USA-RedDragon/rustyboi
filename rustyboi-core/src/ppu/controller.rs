@@ -1777,8 +1777,15 @@ impl Ppu {
             } else {
                 2
             };
-            let boundary_col =
-                (self.x as i32 + stall_adj + if win { 2 } else { 0 }).clamp(0, 160) as u8;
+            // CGB DMG-compat: the LCDC.0 commit reaches the displayed column one
+            // dot later than on DMG hardware (mealybug m3_lcdc_bg_en_change[2] on
+            // CGB shift the whole BG-off span one column right of the DMG
+            // reference, which passes). The DMG path is unchanged.
+            let cgb_compat_adj =
+                if mmio.is_cgb() && !mmio.is_cgb_features_enabled() { 1 } else { 0 };
+            let boundary_col = (self.x as i32 + stall_adj + cgb_compat_adj
+                + if win { 2 } else { 0 })
+            .clamp(0, 160) as u8;
             self.bgen_history.push((boundary_col as u64, new_on));
         }
 
@@ -8954,24 +8961,73 @@ impl Ppu {
 
         let effective_bg_pixel_idx = if bg_enabled { bg_pixel_idx } else { 0 };
 
-        if (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
+        // OBJ-enable gate. Mirrors the DMG mixer: with a mid-mode-3 LCDC.1
+        // toggle this line, hardware gates each sprite pixel on the bit AT THAT
+        // PIXEL'S pop dot (resolved per column from the history); otherwise the
+        // live-LCDC fast path is exact. The DMG-compat renderer runs on CGB
+        // hardware but through the same fetch/FIFO machinery, so all the DMG
+        // mid-mode-3 sprite consumers apply here too — only the final color
+        // lookup differs (CGB palette RAM vs grayscale). (mealybug
+        // m3_lcdc_obj_en_change / obj_size_change / m3_obp0_change on CGB.)
+        let objen_toggled = self.objen_history.len() > 1;
+        if !objen_toggled && (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
             return bg_color_rgb;
         }
 
-        for sprite in &self.sprites_on_line {
+        for (spr_i, sprite) in self.sprites_on_line.iter().enumerate() {
+            // Mid-mode-3 OBJ-enable toggle (see the DMG mixer for the full
+            // rationale): per-sprite fetch-abort gate + per-pixel pop-dot gate
+            // with the 15-dot stale-FIFO quirk.
+            if objen_toggled {
+                let rec = self.sprite_fetch_recs.get(spr_i);
+                if rec.map(|r| r.phase) == Some(SpriteFetchPhase::Aborted) {
+                    continue;
+                }
+                let stale = rec
+                    .filter(|r| r.phase == SpriteFetchPhase::Fetched)
+                    .is_some_and(|r| self.ticks >= r.arm_tick + 15);
+                if !self.objen_at_tick(self.ticks + stale as u128) {
+                    continue;
+                }
+            }
             let sprite_actual_x = sprite.x as i16 - 8;
             let sprite_actual_y = sprite.y as i16 - 16;
             let relative_x = screen_x as i16 - sprite_actual_x;
             let relative_y = screen_y as i16 - sprite_actual_y;
             if (0..8).contains(&relative_x) {
+                // Mid-mode-3 OBJ-size (LCDC.2) toggle: the size bit is sampled
+                // at each tile-data byte's own fetch dot (per-byte row
+                // addressing via obj_pixel_sized); list membership already
+                // implies a y-visible scan, so the bound is the scan range
+                // (0..16) not the live size.
+                let objsize_toggled = self.objsize_dot_history.len() > 1;
                 let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
-                if relative_y >= 0 && relative_y < sprite_height as i16
-                    && let Some(sprite_pixel_idx) = self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8)
-                    && sprite_pixel_idx != 0 {
+                let y_in_range = if objsize_toggled {
+                    (0..16).contains(&relative_y)
+                } else {
+                    relative_y >= 0 && relative_y < sprite_height as i16
+                };
+                if y_in_range {
+                    let px = if objsize_toggled {
+                        self.obj_pixel_sized(
+                            mmio,
+                            sprite,
+                            self.sprite_fetch_recs.get(spr_i),
+                            relative_x as u8,
+                            screen_y,
+                        )
+                    } else {
+                        self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8)
+                    };
+                    if let Some(sprite_pixel_idx) = px
+                        && sprite_pixel_idx != 0 {
                         // DMG-compat: OBP0/OBP1 selected by attr bit 4, shade
-                        // looked up in OBJ palette 0/1 of CGB palette RAM.
+                        // sampled at THIS pixel's pop dot (dot-keyed history,
+                        // like the DMG mixer), then the shade is looked up in
+                        // OBJ palette 0/1 of CGB palette RAM.
                         let use_obp1 = sprite.attributes.palette;
-                        let obj_shade = self.get_sprite_palette_color(mmio, sprite_pixel_idx, use_obp1, screen_x);
+                        let obj_shade =
+                            self.dmg_sprite_palette_shade(sprite_pixel_idx, use_obp1, self.ticks);
                         let pal = if use_obp1 { 1 } else { 0 };
                         let (slo, shi) = mmio.obj_palette_pair_raw(pal, obj_shade);
                         let sprite_color_rgb = self.cgb_color_to_rgb(slo, shi);
@@ -8979,6 +9035,7 @@ impl Ppu {
                             return sprite_color_rgb;
                         }
                     }
+                }
             }
         }
 
