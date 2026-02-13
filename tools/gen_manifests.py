@@ -344,6 +344,14 @@ def gen_scribbltests(roms: Path, out: Path) -> None:
                 if alt != stem:
                     refs += sorted(sub.glob(f"{alt}-*.png"))
                 lines += png_dir_cases("scribbltests", rom, refs)
+    # scxly-cgb: the CGB ref is the DMG layout recolored to DMG-green (a capture-
+    # emulator artifact for a DMG-compat cart); rustyboi uses the hardware-correct
+    # CGB compat palette. The SCX/LY LAYOUT is what the test measures -> grade it
+    # up to a consistent recoloring (png_layout). The DMG ref stays exact.
+    lines = [
+        ln.replace("scribbltests/scxly|cgb|png|", "scribbltests/scxly|cgb|png_layout|")
+        for ln in lines
+    ]
     write_manifest(out, "scribbltests", ["scribbltests (PPU screenshots). statcount_auto needs ~270 frames."], lines)
 
 
@@ -467,7 +475,14 @@ def gen_mbc3_tester(roms: Path, out: Path) -> None:
         for dev in ("cgb", "dmg"):
             ref = mbc3 / f"mbc3-tester-{dev}.png"
             if ref.is_file():
-                lines.append(f"mbc3-tester/mbc3-tester|{dev}|png|{mbc3}/mbc3-tester.gb|{ref}|frames=100")
+                # The CGB ref's compat green (#7BFF4A) is a capture-emulator
+                # shade; rustyboi renders the boot-ROM-correct #7BFF31. The
+                # bank-sweep checkbox LAYOUT is what the test checks -> grade it
+                # up to a consistent recoloring (png_layout).
+                grading = "png_layout" if dev == "cgb" else "png"
+                lines.append(
+                    f"mbc3-tester/mbc3-tester|{dev}|{grading}|{mbc3}/mbc3-tester.gb|{ref}|frames=100"
+                )
     write_manifest(
         out,
         "mbc3_tester",
