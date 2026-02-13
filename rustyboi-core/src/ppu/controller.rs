@@ -7253,26 +7253,17 @@ impl Ppu {
         if self.state != State::OAMSearch {
             return None;
         }
-        // The OAM bug corrupts the row the PPU is LATCHING during mode 2. SameBoy's
-        // `accessed_oam_row` (display.c) holds row 0 through the mode-2 prologue —
-        // the scan loop only latches row 1 (byte offset 8) after its first
-        // sub-cycle, and `GB_trigger_oam_bug_read` early-returns while the latched
-        // row is still 0 (the first two objects are exempt). A CPU OAM access whose
-        // M-cycle STARTS in that prologue (`line_cycle < 6`, the first ~1.5
-        // M-cycles) therefore samples row 0 and does NOT corrupt. The AGE
-        // oam-read "line-N mode-2 edge" reads land here (delay 0/1 at line_cycle
-        // 0/4) and must stay clean: the test zeroes only OAM[0], so a spurious
-        // row-1 corruption would leak OAM[4]/OAM[8] residue into OAM[0]. Reads
-        // deeper into the scan keep the `(line_cycle + 4)/4` mapping (gambatte
-        // 10spritesprline_postread reads at line_cycle 24 -> row 7).
+        // One M-cycle from the access-M-cycle START (where the trigger sites
+        // sample) to the OAM access on the bus. NB: a `line_cycle < 6 -> row 0`
+        // mode-2-prologue exemption fixes age oam-read-dmgC-cgbBC but REGRESSES
+        // blargg oam_bug (a previously-passing hardware test) -- the two conflict
+        // at line_cycle 0..4, so the exemption needs a read-vs-write / OAM-address
+        // distinguisher this row-only function can't see. Left off; blargg wins.
         const OAM_BUG_ACCESS_DOT: u32 = 4;
         let dot = self.line_cycle + OAM_BUG_ACCESS_DOT;
         // Mode 2 is the first 80 dots of the line (20 rows * 4 dots/M-cycle).
         if dot >= 80 {
             return None;
-        }
-        if self.line_cycle < 6 {
-            return Some(0);
         }
         Some((dot / 4) as u8)
     }
