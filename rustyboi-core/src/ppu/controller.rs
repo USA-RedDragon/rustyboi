@@ -1344,6 +1344,11 @@ pub struct Ppu {
     // dots (see bg_wg_apply). Cleared at each mode-3 arm.
     #[serde(default)]
     bg_scy_hist: Vec<(u64, u8, u8)>,
+    // DMG mid-mode-3 SCX write journal: (write_cc, old, new). The BG tile-map
+    // column resolves SCX against it at the tile's reconstructed hardware
+    // TileNumber dot (see bg_wg_apply / m3_scx_high_5_bits). Cleared each M3 arm.
+    #[serde(default)]
+    bg_scx_hist: Vec<(u64, u8, u8)>,
     // Exact-cc window-enable (LCDC bit 5) toggle for the weMaster checkpoints.
     // rustyboi's pending_lcdc_events commit the window bit one PPU dot before
     // Gambatte's `setLcdc(data, cc + 2)` (the queue runs through one
@@ -1604,6 +1609,7 @@ impl Ppu {
             wg_dpre: 0,
             bg_anchor_cc: None,
             bg_scy_hist: Vec::new(),
+            bg_scx_hist: Vec::new(),
             we_win_bit_exact: None,
             cgb_color_conversion: CgbColorConversion::Linear,
             fetch_debug_events_enabled: false,
@@ -2133,6 +2139,7 @@ impl Ppu {
                     cgb_tile_index_is_tile_data: quirk,
                     or_lcdc: None,
                     scy_bus: None,
+                scx_bus: None,
                 };
             } else {
                 // Post-commit: new bit4.
@@ -2142,6 +2149,7 @@ impl Ppu {
                     cgb_tile_index_is_tile_data: quirk,
                     or_lcdc: None,
                     scy_bus: None,
+                scx_bus: None,
                 };
             }
         }
@@ -2150,6 +2158,7 @@ impl Ppu {
             cgb_tile_index_is_tile_data: quirk,
             or_lcdc: None,
             scy_bus: None,
+                scx_bus: None,
         }
     }
 
@@ -2563,7 +2572,7 @@ impl Ppu {
     }
 
     fn bg_wg_apply(&self, mut fls: fetcher::FetcherLcdcState, ly: u8) -> fetcher::FetcherLcdcState {
-        if self.wg_hist.is_empty() && self.bg_scy_hist.is_empty() {
+        if self.wg_hist.is_empty() && self.bg_scy_hist.is_empty() && self.bg_scx_hist.is_empty() {
             return fls;
         }
         let k = self.fetcher.fetch_substep();
@@ -2594,7 +2603,32 @@ impl Ppu {
         // on DMG the scy_mode dot is identical to `h` (bias 0).
         let h_scy = self.bg_hw_read_dot_ex(n, k, ly, self.wg_cgb).unwrap_or(h);
         fls.scy_bus = self.bg_scy_resolve(h_scy);
+        // SCX resolves the tile-map column at the TileNumber (k==0) reconstructed
+        // hardware dot: a sprite-stalled tile reads SCX as-of that dot, not the
+        // stall-displaced live scx (m3_scx_high_5_bits). Only k==0 fetches the
+        // column, so only resolve there.
+        if k == 0 && !self.bg_scx_hist.is_empty() {
+            let h_scx = self.bg_hw_read_dot_ex(n, k, ly, self.wg_cgb).unwrap_or(h);
+            fls.scx_bus = self.bg_scx_resolve(h_scx);
+        }
         fls
+    }
+
+    // SCX in effect at reconstructed hardware dot `h` per the DMG BG journal.
+    fn bg_scx_resolve(&self, h: u64) -> Option<u8> {
+        if self.bg_scx_hist.is_empty() {
+            return None;
+        }
+        let add = if self.wg_cgb { CGBWG_SCY_ADD } else { 0 };
+        let mut v = self.bg_scx_hist[0].1;
+        for &(t, _, new) in &self.bg_scx_hist {
+            if h > t + add {
+                v = new;
+            } else {
+                break;
+            }
+        }
+        Some(v)
     }
 
     // Retroactive re-resolution of the in-flight tile's completed reads at
@@ -4633,6 +4667,20 @@ impl Ppu {
         self.scx_pending = value;
         self.scx_apply_cc = cc;
 
+        // DMG BG grid SCX journal (see bg_wg_apply): record the mid-mode-3 SCX
+        // write so the tile-map column resolves it at the tile's reconstructed
+        // hardware TileNumber dot instead of the stall-displaced live dot.
+        if !mmio.is_cgb_features_enabled() && self.state == State::PixelTransfer {
+            let old = self
+                .bg_scx_hist
+                .last()
+                .map(|&(_, _, new)| new)
+                .unwrap_or(self.scx_delayed);
+            if old != value {
+                self.bg_scx_hist.push((cc, old, value));
+            }
+        }
+
         // Exact-cc f1-discard latch. The "before" value is whatever the f1 loop
         // sees right now (resolving any already-pending latch up to this write's
         // cc); the new value becomes visible at write_cc + 2*cgb (Gambatte
@@ -5533,6 +5581,7 @@ impl Ppu {
                     self.wg_dpre = 0;
                     self.bg_anchor_cc = None;
                     self.bg_scy_hist.clear();
+                    self.bg_scx_hist.clear();
                     // CGB-compat journal flavor (see the CGBWG_* consts): DMG cart on
                     // CGB hardware (compat mode runs with CGB features OFF, so
                     // it shares the DMG render paths; the journals resolve

@@ -61,6 +61,12 @@ pub(crate) struct FetcherLcdcState {
     // this substep's reconstructed hardware dot. None = use the live `scy`
     // argument.
     pub scy_bus: Option<u8>,
+    // DMG BG-path SCX bus state (see bg_wg_apply): the SCX value in effect at
+    // the tile's reconstructed hardware TileNumber dot. Used for the tile-map
+    // column so a sprite-stalled tile reads SCX as-of its true hardware fetch
+    // dot instead of the stall-displaced live dot (mealybug m3_scx_high_5_bits).
+    // None = use the live `scx` argument.
+    pub scx_bus: Option<u8>,
 }
 
 // Tile data addressing constants
@@ -324,7 +330,11 @@ impl Fetcher {
                     let cgb_adj: u16 = if mmio.is_cgb_features_enabled() || display_x == 0 { 0 } else { 1 };
                     let xpos = (display_x as u16 + self.pixel_fifo.size() as u16)
                         .saturating_sub(pending_discard as u16);
-                    let bg_tile_x = (scx as u16 + xpos + cgb_adj) / 8 % 32;
+                    // DMG BG grid: a sprite-stalled tile reads SCX at its
+                    // reconstructed hardware dot (scx_bus), not the stall-displaced
+                    // live scx (see bg_wg_apply / m3_scx_high_5_bits).
+                    let scx_eff = lcdc_state.scx_bus.unwrap_or(scx);
+                    let bg_tile_x = (scx_eff as u16 + xpos + cgb_adj) / 8 % 32;
                     // sub-cc lever: remember the exact (xpos, scx, cgb_adj) used to
                     // derive this tile's column so the controller can recompute
                     // the column under a different (NEW) scx with identical inputs.
@@ -621,6 +631,7 @@ mod tests {
             cgb_tile_index_is_tile_data,
             or_lcdc: None,
             scy_bus: None,
+            scx_bus: None,
         }
     }
 
