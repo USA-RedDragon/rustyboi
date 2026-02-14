@@ -104,7 +104,7 @@ threshold() {
         sgb)                echo "1 -" ;;
         blargg)             echo "15 4000" ;;
         blargg_singles)     echo "41 2000" ;;
-        scribbltests)       echo "8 -" ;;
+        scribbltests)       echo "10 -" ;;
         turtle_tests)       echo "4 -" ;;
         little_things_gb)   echo "4 -" ;;
         bully)              echo "2 -" ;;
