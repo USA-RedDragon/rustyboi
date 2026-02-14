@@ -6,8 +6,9 @@ A Game Boy emulator written in Rust for learning purposes. Not usable, likely ne
 
 ## Test suite accuracy
 
-Passing cases per suite, refreshed automatically on every pull request by the
-[test workflow](.github/workflows/test.yaml) (`tools/run-suites.sh report`).
+Passing cases per suite, refreshed automatically on every pull request
+(`tools/run-suites.sh report`). See [SUITES.md](SUITES.md) for what each suite
+is, how it is graded, and where its ROMs come from.
 
 <!-- SUITE-PROGRESS:START -->
 | Suite | Passing | Total |

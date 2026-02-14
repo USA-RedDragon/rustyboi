@@ -145,24 +145,28 @@ json_field() {
 # --- setup: fetch ROMs (idempotent) ------------------------------------------
 setup() {
     if [ -f "$ROMS/.rb-setup-complete" ]; then
-        log "ROM set already present ($ROMS); skipping setup (rm $ROMS/.rb-setup-complete to force)"
-        return 0
+        log "c-sp ROM set present ($ROMS); verifying non-c-sp sources (rm $ROMS/.rb-setup-complete to re-provision)"
+    else
+        log "Fetching c-sp gameboy-test-roms $CSP_VERSION"
+        mkdir -p "$ROMS"
+        local zip="$ROMS/game-boy-test-roms-${CSP_VERSION}.zip"
+        curl -fsSL -o "$zip" "$CSP_URL"
+        # The archive is flat (suite dirs at its root) -> extract straight into $ROMS.
+        # Extract with python3 (already required for JSON parsing) so this works
+        # identically on Linux, macOS and Windows (Git Bash), where `unzip` may be
+        # absent and GNU `tar` cannot read zips.
+        "$PY" -c "import sys,zipfile;zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$zip" "$ROMS"
+        rm -f "$zip"
+        log "Syncing gambatte-core oracles (.bin/.dump) @ ${GAMBATTE_CORE_REF:0:12}"
+        sync_gambatte_oracles
+        touch "$ROMS/.rb-setup-complete"
     fi
-    log "Fetching c-sp gameboy-test-roms $CSP_VERSION"
-    mkdir -p "$ROMS"
-    local zip="$ROMS/game-boy-test-roms-${CSP_VERSION}.zip"
-    curl -fsSL -o "$zip" "$CSP_URL"
-    # The archive is flat (suite dirs at its root) -> extract straight into $ROMS.
-    # Extract with python3 (already required for JSON parsing) so this works
-    # identically on Linux, macOS and Windows (Git Bash), where `unzip` may be
-    # absent and GNU `tar` cannot read zips.
-    "$PY" -c "import sys,zipfile;zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$zip" "$ROMS"
-    rm -f "$zip"
-    log "Syncing gambatte-core oracles (.bin/.dump) @ ${GAMBATTE_CORE_REF:0:12}"
-    sync_gambatte_oracles
+    # sgb/daid/cpp ROMs are not in the c-sp set. sync_shootout_roms is file-
+    # guarded (no-ops when present) and cheap, so run it unconditionally -- this
+    # is how a newly added shootout-sourced suite lands on an already-provisioned
+    # ROM tree or a restored CI cache WITHOUT re-downloading the whole c-sp set.
     log "Sourcing cpp + daid ROMs (not in the c-sp set) @ ${SHOOTOUT_REF:0:12}"
     sync_shootout_roms
-    touch "$ROMS/.rb-setup-complete"
     log "ROM setup complete"
 }
 
