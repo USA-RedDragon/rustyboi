@@ -1,0 +1,17 @@
+# daid PPU/STOP/speed-switch screen tests (from GBEmulatorShootout; not in the
+# c-sp set). Graded with the shootout's own lenient screenshot rule
+# (png_shootout, per-pixel diff <= 50) against the shootout reference PNGs --
+# these oracles come from a reference emulator, not verified silicon, so they
+# are held to the shootout tolerance rather than strict png. frames=390 is
+# shootout_frames(runtime=0.5). rom_and_ram.gb is omitted (ships no oracle PNG).
+#
+# ppu_scanline_bgp DMG has three acceptable results (prev BGP / next BGP / OR'd
+# black line -- hardware+instance dependent); OR-matched via the ';' ref list.
+daid/ppu_scanline_bgp|dmg|png_shootout|gb-test-roms/daid/ppu_scanline_bgp.gb|gb-test-roms/daid/ppu_scanline_bgp_0.dmg.png;gb-test-roms/daid/ppu_scanline_bgp_1.dmg.png;gb-test-roms/daid/ppu_scanline_bgp_2.dmg.png|frames=390
+daid/ppu_scanline_bgp|cgb|png_shootout|gb-test-roms/daid/ppu_scanline_bgp.gb|gb-test-roms/daid/ppu_scanline_bgp.gbc.png|frames=390
+daid/stop_instr|dmg|png_shootout|gb-test-roms/daid/stop_instr.gb|gb-test-roms/daid/stop_instr.dmg.png|frames=390
+daid/stop_instr|cgb|png_shootout|gb-test-roms/daid/stop_instr.gb|gb-test-roms/daid/stop_instr.gbc.png|frames=390
+daid/stop_instr_gbc_mode3|cgb|png_shootout|gb-test-roms/daid/stop_instr_gbc_mode3.gb|gb-test-roms/daid/stop_instr_gbc_mode3.png|frames=390
+daid/speed_switch_timing_div|cgb|png_shootout|gb-test-roms/daid/speed_switch_timing_div.gbc|gb-test-roms/daid/speed_switch_timing_div.png|frames=390
+daid/speed_switch_timing_ly|cgb|png_shootout|gb-test-roms/daid/speed_switch_timing_ly.gbc|gb-test-roms/daid/speed_switch_timing_ly.png|frames=390
+daid/speed_switch_timing_stat|cgb|png_shootout|gb-test-roms/daid/speed_switch_timing_stat.gbc|gb-test-roms/daid/speed_switch_timing_stat.png|frames=390

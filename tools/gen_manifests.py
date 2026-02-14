@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """Regenerate every manifest consumed by `rustyboi-test-runner --manifest`.
 
-Two manifest families, one script:
-
-  internal  — the c-sp public-suite manifests under rustyboi-test-runner/suites/
-              (acid2, mealybug, blargg, gbmicrotest, mooneye, wilbertpol, age,
-              cgb-acid-hell, scribbltests, turtle-tests, little-things-gb,
-              bully, strikethrough, same-suite, rtc3test, mbc3-tester).
-              ROM set: c-sp/gameboy-test-roms (default v7.0), unzipped at --roms.
-  shootout  — the GBEmulatorShootout test set under suites/shootout/, graded
-              with the shootout's own screenshot rule (`png_shootout`). The
-              spec is extracted directly from the shootout checkout's Python
-              test definitions (--shootout points at the repo).
+Generates the c-sp public-suite manifests under rustyboi-test-runner/suites/
+(acid2, mealybug, blargg, gbmicrotest, mooneye, wilbertpol, age, cgb-acid-hell,
+scribbltests, turtle-tests, little-things-gb, bully, strikethrough, same-suite,
+rtc3test, mbc3-tester). ROM set: c-sp/gameboy-test-roms (default v7.0), unzipped
+at --roms. The sgb, daid and cpp suites are curated manually (their ROMs are not
+in the c-sp set; they are sourced from GBEmulatorShootout by run-suites.sh setup)
+and are not regenerated here.
 
 Manifest line format:
   <id>|<dmg|cgb|agb>|<grading>|<rom_path>[|<arg>...]
@@ -21,12 +17,11 @@ Trailing arg tokens: reference PNG path(s) (`;`-separated OR-match for
 png_shootout), ADDR=VAL (mem), rev=<model>, input=<script>, frames=<N>.
 
 Usage:
-  tools/gen_manifests.py [--roms DIR] [--shootout DIR] [--out DIR]
+  tools/gen_manifests.py [--roms DIR] [--out DIR]
                          [--only SUITE[,SUITE...]]
 """
 
 import argparse
-import math
 import os
 import sys
 from pathlib import Path
@@ -533,109 +528,6 @@ def gen_gambatte(roms: Path, out: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# shootout suites (GBEmulatorShootout checkout)
-# ---------------------------------------------------------------------------
-
-# The shootout's `Emulator.runTest` polls for a screenshot match up to
-# `runtime + startup_time(1.0) + 5.0` seconds and early-exits on a match, so
-# its true deadline is runtime+6s; we run that full window as a frame budget.
-SHOOTOUT_SLACK_S = 6.0
-FRAME_FLOOR = 90
-
-# E-silicon SameSuite rows (SameSuite is CGB-E-validated; these tests exercise
-# the C-vs-D/E revision forks modeled behind Hardware::CGBE - see the CGBE
-# gates in rustyboi-core).
-SHOOTOUT_REV = {
-    "samesuite/apu/channel_1/channel_1_align.gb": "cgbe",
-    "samesuite/apu/channel_1/channel_1_align_cpu.gb": "cgbe",
-    "samesuite/apu/channel_2/channel_2_align.gb": "cgbe",
-    "samesuite/apu/channel_2/channel_2_align_cpu.gb": "cgbe",
-    "samesuite/apu/channel_4/channel_4_align.gb": "cgbe",
-    "samesuite/apu/channel_4/channel_4_freq_change.gb": "cgbe",
-}
-
-
-def shootout_frames(runtime_seconds: float) -> int:
-    return max(math.ceil((runtime_seconds + SHOOTOUT_SLACK_S) * 60), FRAME_FLOOR)
-
-
-def extract_shootout(shootout: Path) -> dict[str, list[dict]]:
-    """Import the shootout's own test definitions with GUI deps stubbed."""
-    import types
-
-    for mod in ("pyautogui", "requests", "tqdm"):
-        m = types.ModuleType(mod)
-        if mod == "tqdm":
-            m.tqdm = lambda *a, **k: None
-        sys.modules.setdefault(mod, m)
-    sys.path.insert(0, str(shootout))
-    cwd = os.getcwd()
-    os.chdir(shootout)  # Test.__init__ asserts on testroms/-relative paths
-    try:
-        import testroms.acid, testroms.ashiepaws, testroms.ax6, testroms.blargg
-        import testroms.cpp, testroms.daid, testroms.mealybug, testroms.mooneye
-        import testroms.samesuite
-
-        suites = {
-            "acid": testroms.acid.all, "blargg": testroms.blargg.all,
-            "daid": testroms.daid.all, "ax6": testroms.ax6.all,
-            "mooneye": testroms.mooneye.all, "samesuite": testroms.samesuite.all,
-            "ashiepaws": testroms.ashiepaws.all, "cpp": testroms.cpp.all,
-            "mealybug": testroms.mealybug.all,
-        }
-        out = {}
-        for suite, tests in suites.items():
-            rows = []
-            for t in tests:
-                refs = t.pass_result_filename
-                refs = refs if isinstance(refs, list) else [refs]
-                rows.append(
-                    dict(
-                        name=str(t.name),
-                        rom=os.path.abspath(t.rom),
-                        model=t.model,
-                        runtime=t.runtime,
-                        pass_refs=[os.path.abspath(r) for r in refs],
-                    )
-                )
-            out[suite] = rows
-        return out
-    finally:
-        os.chdir(cwd)
-        sys.path.remove(str(shootout))
-
-
-def gen_shootout(shootout: Path, out: Path) -> None:
-    # rustyboi SGB rows are curated manually (sgb.manifest); the shootout SGB
-    # tests are skipped here. Tests whose pass ref does not exist are INFO-only
-    # in the shootout (not scored) and skipped.
-    model_map = {"DMG": "dmg", "CGB": "cgb"}
-    data = extract_shootout(shootout)
-    out.mkdir(parents=True, exist_ok=True)
-    grand = 0
-    for suite, tests in data.items():
-        lines = []
-        for t in tests:
-            mode = model_map.get(t["model"])
-            if mode is None:
-                continue
-            refs = [r for r in t["pass_refs"] if os.path.exists(r)]
-            if not os.path.exists(t["rom"]) or not refs:
-                continue
-            ident = t["name"].replace("|", "_")
-            rom = os.path.relpath(t["rom"], HERE)
-            refs_field = ";".join(os.path.relpath(r, HERE) for r in refs)
-            rev = f"|rev={SHOOTOUT_REV[ident]}" if ident in SHOOTOUT_REV else ""
-            lines.append(
-                f"{ident}|{mode}|png_shootout|{rom}|{refs_field}|frames={shootout_frames(t['runtime'])}{rev}"
-            )
-        (out / f"{suite}.manifest").write_text("\n".join(lines) + ("\n" if lines else ""))
-        print(f"  shootout/{suite}: {len(lines)} cases")
-        grand += len(lines)
-    print(f"  shootout total: {grand}")
-
-
-# ---------------------------------------------------------------------------
 
 INTERNAL = {
     "acid2": gen_acid2,
@@ -661,9 +553,8 @@ INTERNAL = {
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--roms", type=Path, default=Path(os.environ.get("ROMS", "gb-test-roms")))
-    ap.add_argument("--shootout", type=Path, default=HERE.parent / "GBEmulatorShootout")
     ap.add_argument("--out", type=Path, default=HERE / "rustyboi-test-runner" / "suites")
-    ap.add_argument("--only", help="comma-separated suite names (internal names or 'shootout')")
+    ap.add_argument("--only", help="comma-separated suite names")
     args = ap.parse_args()
 
     only = set(args.only.split(",")) if args.only else None
@@ -677,11 +568,6 @@ def main() -> int:
     for name, fn in INTERNAL.items():
         if only is None or name in only:
             fn(roms, args.out)
-    if only is None or "shootout" in only:
-        if args.shootout.is_dir():
-            gen_shootout(args.shootout.resolve(), args.out / "shootout")
-        else:
-            print(f"  (shootout checkout not found at {args.shootout}; skipped)")
     print("done.")
     return 0
 

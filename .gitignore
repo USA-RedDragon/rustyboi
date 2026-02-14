@@ -3,8 +3,11 @@
 
 gb-test-roms/
 gambatte-core/
+GBEmulatorShootout/
 /.baselines/
 /bios/*.bin
+
+*.pyc
 
 # llvm version hacks for libretro bindgen
 .cargo/config.toml
