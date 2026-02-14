@@ -511,7 +511,7 @@ impl GB {
         // starts in VBlank at LY=144 (CGB) / LY=153 (DMG), not a fresh LY=0 OAM
         // search. Seed that here so the first instruction's LY/STAT reads match
         // hardware (display_startstate). Must follow the LCDC=0x91 write above.
-        self.ppu.set_post_bios_state(&mut self.mmio);
+        self.ppu.set_post_bios_state(&mut self.mmio, self.hardware == Hardware::DMG0);
     }
 
     /// Write the boot-ROM Nintendo logo into VRAM bank 0 via the normal bus.
