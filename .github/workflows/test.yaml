@@ -96,7 +96,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: gb-test-roms
-          key: roms-${{ matrix.os }}-v7.0-gambatte5a41a68c-sgb7c6ee9ba
+          key: roms-${{ matrix.os }}-v7.0-gambatte5a41a68c-shootout7c6ee9ba-daidcpp
       - name: Fetch ROMs
         shell: bash
         run: ./tools/run-suites.sh setup

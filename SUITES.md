@@ -1,13 +1,42 @@
-# Public GB/GBC test suites (c-sp / gameboy-test-roms)
+# Public GB/GBC test suites (c-sp / gameboy-test-roms + friends)
 
 rustyboi is graded against the public Game Boy / Game Boy Color hardware-test
 suites in addition to the Gambatte hwtests. These are wired into the main
 `rustyboi-test-runner` as first-class, regenerable regression gates so accuracy
 can be tracked over time (e.g. while attacking mealybug / APU).
 
-ROM set: [c-sp/gameboy-test-roms](https://github.com/c-sp/gameboy-test-roms)
-**v7.0** (2024-02-25), unzipped at `/home/reddragon/gb-test-roms` (override with
-`ROMS=<dir>` when regenerating manifests).
+The per-suite pass counts shown in the README progress table are refreshed
+automatically on every pull request; this document is the human-readable
+reference for what each suite is, how it is graded, and where its ROMs come
+from. The single entrypoint shared by CI and developers is
+[`tools/run-suites.sh`](tools/run-suites.sh):
+
+```
+tools/run-suites.sh list       # print the known suites + pass floors
+tools/run-suites.sh <suite>    # run one suite, gate against its floor
+tools/run-suites.sh all        # run every suite, gate each
+tools/run-suites.sh report     # markdown progress table (all suites)
+```
+
+Every suite reads its ROMs and reference images from a single local tree,
+**`gb-test-roms/`** (override with `RB_ROMS=<dir>`) — all manifest paths are
+relative to it. `tools/run-suites.sh setup` populates it idempotently from three
+upstream sources:
+
+- **[c-sp/game-boy-test-roms](https://github.com/c-sp/game-boy-test-roms) v7.0**
+  — the bulk of the suites; a release zip fetched and extracted flat into
+  `gb-test-roms/`.
+- **[gbdev/GBEmulatorShootout](https://github.com/gbdev/GBEmulatorShootout)**
+  (`sync_shootout_roms`) — the ROMs *not* in the c-sp set: `sgb`
+  (`cpp/sgb-ext-test`), `daid`, and `cpp`. Sparse-checked-out from
+  `testroms/{cpp,daid}` and copied into `gb-test-roms/{cpp,daid}/`.
+- **[pokemon-speedrunning/gambatte-core](https://github.com/pokemon-speedrunning/gambatte-core)**
+  (`sync_gambatte_oracles`) — the `gambatte` suite's `.bin`/`.dump` dumper
+  oracles (the c-sp set ships the gambatte ROMs but none of the oracles), copied
+  into `gb-test-roms/gambatte/`.
+
+`gb-test-roms/` is gitignored (never committed); CI caches it keyed on those
+source versions.
 
 ## How it works
 
@@ -19,7 +48,9 @@ one test per line, `|`-separated:
 ```
 
 `<grading>` selects the oracle; `<arg>` is the reference-PNG path (`png` /
-`png_fixed`), `ADDR=VAL` in hex (`mem`), or empty. Run a manifest with:
+`png_fixed` / `png_layout` / `png_shootout`), `ADDR=VAL` in hex (`mem`),
+`frames=<N>` to override the per-line cycle budget, or empty. Run a manifest
+with:
 
 ```
 rustyboi-test-runner --manifest <suites/X.manifest> --mode dmg,cgb --frames <N> [--json out.json]
@@ -31,106 +62,87 @@ not fit it) and takes the model + oracle from each manifest line. The existing
 
 ### Grading methods (Oracle variants)
 
-| grading      | Oracle           | what it checks |
-|--------------|------------------|----------------|
-| `png`        | `CspPng`         | final framebuffer vs c-sp reference PNG; steps the CPU and stops on the `LD B,B` (0x40) done-marker. CGB uses `CgbColorConversion::Linear` (bucket-identical to the c-sp shift formula under the 0xF8 mask). |
-| `png_fixed`  | `CspPngFixed`    | same comparison but runs a flat `--frames` cycle budget and grades the held framebuffer — for ROMs that turn the LCD off after rendering their result (e.g. blargg oam_bug). |
-| `serial`     | `Serial`         | blargg serial-port text (FF01/FF02); scans for `Passed` / `Failed`. |
-| `blargg_mem` | `BlarggMem`      | blargg 0xA000 cart-RAM protocol (signature `DE B0 61`, code `00` = pass). |
-| `memauto`    | `MemValue{FF82,01}` | gbmicrotest convention: FF82==0x01 pass (FF80=actual, FF81=expected). |
-| `mem`        | `MemValue{addr,val}`| generic: read `addr`, compare to `val` after the budget. |
-| `mooneye`    | `MooneyeFib`     | run to `LD B,B`, require Fibonacci regs B,C,D,E,H,L = 3,5,8,13,21,34. |
+| grading        | Oracle              | what it checks |
+|----------------|---------------------|----------------|
+| `png`          | `CspPng`            | final framebuffer vs c-sp reference PNG; steps the CPU and stops on the `LD B,B` (0x40) done-marker. CGB uses `CgbColorConversion::Linear` (bucket-identical to the c-sp shift formula under the 0xF8 mask). |
+| `png_fixed`    | `CspPngFixed`       | same comparison but runs a flat `--frames` cycle budget and grades the held framebuffer — for ROMs that turn the LCD off after rendering their result (e.g. blargg oam_bug). |
+| `png_layout`   | `CspPngLayout`      | recolor-invariant layout comparison — matches on tile/pixel *structure* regardless of palette, for ROMs whose reference PNG uses a different color mapping than rustyboi's default palette. |
+| `png_shootout` | `PngShootout`       | GBEmulatorShootout's own lenient screenshot rule: per-pixel channel diff `<= 50`, with OR-match across a `;`-separated list of acceptable reference PNGs (some tests have several hardware/instance-dependent valid outputs). Used by the `daid` and `cpp` suites. |
+| `serial`       | `Serial`            | blargg serial-port text (FF01/FF02); scans for `Passed` / `Failed`. |
+| `blargg_mem`   | `BlarggMem`         | blargg 0xA000 cart-RAM protocol (signature `DE B0 61`, code `00` = pass). |
+| `memauto`      | `MemValue{FF82,01}` | gbmicrotest convention: FF82==0x01 pass (FF80=actual, FF81=expected). |
+| `mem`          | `MemValue{addr,val}`| generic: read `addr`, compare to `val` after the budget. |
+| `mooneye`      | `MooneyeFib`        | run to `LD B,B`, require Fibonacci regs B,C,D,E,H,L = 3,5,8,13,21,34. |
+| `mooneye_ed`   | `MooneyeFibEd`      | mooneye Fibonacci check reached via the `ED`-style done-marker used by the wilbertpol / age variants. |
+| `gambatte`     | (dumper oracle)     | Gambatte `.bin`/`.dump` framebuffer/register oracles from gambatte-core; gated on `failed <= 16`, see below. |
 
 The PNG decoder (`frame.rs`) handles all c-sp reference formats (color types
 0/2/3/6 at bit depths 1/2/4/8, with `PLTE`); the original 8-bit-RGBA Gambatte
 path is unchanged.
 
-## Suites, run commands, and current results
+## Suites
 
-Measured on `f-suiteint` with the default synthetic `skip_bios()` seed.
+The full suite set, in the deterministic order `tools/run-suites.sh` runs them
+(the `ORDER` variable). Each suite has a **pass floor** in the `threshold()`
+table: CI passes a suite when `passed >= floor`. Floors **auto-ratchet** up to
+the measured counts on every `report-update` (the pre-commit hook) — a landed
+improvement becomes the new floor, so the gate flags regressions without a
+manifest edit. Floors only ever *rise* automatically; a hand-edit is only
+needed to *lower* one. The `gambatte` suite is the exception: it is gated on
+`failed <= 16` (`GAMBATTE_MAX_FAIL`), not `passed >= floor`.
 
-### dmg/cgb-acid2 — `suites/acid2.manifest` (`png`)
-```
-rustyboi-test-runner --manifest rustyboi-test-runner/suites/acid2.manifest --mode dmg,cgb --frames 60
-```
-**2 / 2** real cases pass: `dmg-acid2` (DMG) and `cgb-acid2` (CGB). The third
-entry, `dmg-acid2-on-cgb`, is a known fail (CGB-compat auto-palette not applied
-under skip_bios).
+Live totals are in the README's `<!-- SUITE-PROGRESS -->` table.
 
-### mealybug-tearoom — `suites/mealybug.manifest` (`png`)
-```
-rustyboi-test-runner --manifest rustyboi-test-runner/suites/mealybug.manifest --mode dmg,cgb --frames 60
-```
-**2 / 51** (3 with `--real-bios`). The rest are mid-mode-3 PPU timing. Passing:
-`m2_win_en_toggle` (DMG) and `m3_scx_low_3_bits` (DMG; +CGB with the real boot
-ROM). DMG refs use `<stem>_dmg_blob.png`, CGB refs use `<stem>_cgb_c.png`.
+### daid — `suites/daid.manifest` (`png_shootout`)
 
-### blargg (aggregates) — `suites/blargg.manifest` (best oracle per ROM)
-```
-rustyboi-test-runner --manifest rustyboi-test-runner/suites/blargg.manifest --mode dmg,cgb --frames 4000
-```
-**13 / 15.** Pass: cpu_instrs, instr_timing, mem_timing (serial); mem_timing-2,
-cgb_sound (blargg_mem); halt_bug, interrupt_time (png); oam_bug-cgb (png_fixed —
-the OAM bug is absent on CGB). Fail: **dmg_sound** (10/12 subtests — code 08) and
-**oam_bug-dmg** (DMG OAM-bug emulation incomplete, 3/8).
+Eight PPU / STOP / double-speed screen tests authored by "daid", pulled from
+GBEmulatorShootout (`testroms/daid`, not in the c-sp set) by
+`sync_shootout_roms`. Because the reference PNGs are reference-emulator captures
+rather than verified silicon, they are graded with the shootout's lenient
+`png_shootout` rule (per-pixel diff `<= 50`, `frames=390` ≈ shootout runtime
+0.5 s) instead of strict `png`.
 
-### blargg (per-subtest singles) — `suites/blargg_singles.manifest`
-```
-rustyboi-test-runner --manifest rustyboi-test-runner/suites/blargg_singles.manifest --mode dmg,cgb --frames 2000
-```
-**39 / 41.** The 2 fails are the dmg_sound subtests `08-len ctr during power`
-and `11-regs after power` (NR41). cpu_instrs/mem_timing singles use `serial`;
-mem_timing-2 / sound singles use `blargg_mem`.
+- `ppu_scanline_bgp` (dmg + cgb) — mid-scanline BGP register changes. The DMG
+  case OR-matches three acceptable outputs (prev BGP / next BGP / OR'd black
+  line — hardware- and instance-dependent) via the `;`-separated ref list.
+- `stop_instr` (dmg + cgb) and `stop_instr_gbc_mode3` (cgb) — STOP-instruction
+  display behavior.
+- `speed_switch_timing_{div,ly,stat}` (cgb) — CGB double-speed KEY1 switch
+  timing (DIV / LY / STAT observation).
 
-### gbmicrotest — `suites/gbmicrotest.manifest` (`memauto`, DMG-CPU-08)
-```
-rustyboi-test-runner --manifest rustyboi-test-runner/suites/gbmicrotest.manifest --mode dmg --frames 60
-```
-**460 / 513** (FF82==0x01). Of the 53 non-passes, ~24 are real assertion fails
-(a HALT+interrupt-timing cluster, DMA timing) and ~29 are testbench/visual ROMs
-that never write the FF80–FF82 protocol (not pass/fail ROMs).
+`rom_and_ram.gb` is intentionally omitted (ships no oracle PNG). Currently
+**8 / 8** passing.
 
-### mooneye-test-suite — `suites/mooneye.manifest` (`mooneye`)
-```
-rustyboi-test-runner --manifest rustyboi-test-runner/suites/mooneye.manifest --mode dmg,cgb
-# boot_* cases need the real boot ROM:
-rustyboi-test-runner --manifest rustyboi-test-runner/suites/mooneye.manifest --mode dmg,cgb \
-    --real-bios --bios-dir /home/reddragon/projects/rustyboi/bios
-```
-**142 / 192.** (`mooneye` uses an internal cycle cap; `--frames` is ignored.) Of
-the 50 non-passes: ~26 real behavioral fails (PPU/timing), ~12 boot-revision
-mismatches (rustyboi models DMG-CPU-ABC + CGB-CPU-04; off-revision boot_* tests
-legitimately fail — the targeted revisions pass, and `boot_regs-cgb` passes with
-`--real-bios`), and ~7 MBC emulator-only gaps. Device-suffix model rule:
-`-dmg*/-mgb/-S/-GS` → DMG, `-cgb*/-C/-A` → CGB, `-sgb/-sgb2` skipped, no-suffix →
-both.
+### cpp — `suites/cpp.manifest` (`png_shootout`)
+
+Three MBC3 / RTC edge-case screen tests, also from GBEmulatorShootout
+(`testroms/cpp`) via `sync_shootout_roms`, graded with the same `png_shootout`
+rule (diff `<= 50`, `frames=390`):
+
+- `rtc-invalid-banks-test` (dmg) — RTC access through invalid RAM bank numbers.
+- `latch-rtc-test` (dmg) — RTC latch-register behavior.
+- `ramg-mbc3-test` (dmg) — MBC3 RAM-gate (RAMG) enable/disable.
+
+Note: the SGB `cpp/sgb-ext-test` ROM lives in the separate **`sgb`** suite, not
+in `cpp`. Currently **3 / 3** passing.
 
 ## Regenerating the manifests
 
-The manifests embed absolute ROM paths and are regenerable, not hand-authored:
+Most manifests embed relative ROM paths and are regenerable, not hand-authored:
 
 ```
-bash tools/gen_suite_manifests.sh          # uses ROMS=/home/reddragon/gb-test-roms
-ROMS=/path/to/roms bash tools/gen_suite_manifests.sh
+python3 tools/gen_manifests.py                        # uses --roms gb-test-roms
+python3 tools/gen_manifests.py --roms /path/to/roms   # override the ROM dir
+python3 tools/gen_manifests.py --only mealybug,age    # regen selected suites
 ```
 
 Re-run after updating the ROM set (e.g. a new c-sp release) to rebuild the case
-lists from scratch.
-
-## Baselines
-
-Per-suite baseline result JSONs (same shape as the Gambatte `.baselines/*.json`)
-live under `.baselines/suites/` so changes are diffable:
-
-```
-.baselines/suites/{acid2,mealybug,blargg,blargg_singles,gbmicrotest,mooneye}.json
-```
-
-`.baselines/` is gitignored (local tracking only). Regenerate any baseline by
-re-running its suite with `--json .baselines/suites/<suite>.json`.
+lists from scratch. The `sgb`, `daid` and `cpp` suites are curated by hand (their
+ROMs are not in the c-sp set) and are not regenerated by this script.
 
 ## Relationship to the Gambatte hwtests
 
-These c-sp suites are **additive**. The existing Gambatte hwtests gate is
-unchanged: `--suite gambatte-core/test/hwtests --mode dmg,cgb` still reports
-**17** failures (identical set vs `.baselines/main_17.json`).
+These suites are **additive**. The `gambatte` suite carries the existing
+Gambatte hwtests gate, unchanged in spirit: instead of a pass floor it asserts
+`failed <= 16` (`GAMBATTE_MAX_FAIL`) — the known real-silicon floor documented
+in `rustyboi-test-runner/suites/gambatte.manifest`.
