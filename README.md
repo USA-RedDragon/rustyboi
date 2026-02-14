@@ -30,10 +30,12 @@ Passing cases per suite, refreshed automatically on every pull request by the
 | little_things_gb | 4 | 4 |
 | bully | 2 | 2 |
 | strikethrough | 2 | 2 |
+| daid | 8 | 8 |
 | rtc3test | 6 | 6 |
 | mbc3_tester | 2 | 2 |
+| cpp | 3 | 3 |
 | gambatte | 5241 | 5257 |
-| **Total** | **6345** | **6434** |
+| **Total** | **6356** | **6445** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core
