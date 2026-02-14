@@ -1,5 +1,7 @@
 # age-test-roms (CGB timing; LD B,B + Fibonacci registers, else PNG).
 # Register tests: grading mooneye (0x40). Screenshot tests: grading png.
+# Excludes AGE's own blacklist (build/test-blacklist.txt): _in-progress,
+# oam/oam-write-dmgC, speed-switch/caution -- refs AGE itself disowns.
 age-test-roms/halt/ei-halt-dmgC-cgbBCE.gb|dmg|mooneye|gb-test-roms/age-test-roms/halt/ei-halt-dmgC-cgbBCE.gb
 age-test-roms/halt/ei-halt-dmgC-cgbBCE.gb|cgb|mooneye|gb-test-roms/age-test-roms/halt/ei-halt-dmgC-cgbBCE.gb
 age-test-roms/halt/halt-m0-interrupt-dmgC-cgbBCE.gb|dmg|mooneye|gb-test-roms/age-test-roms/halt/halt-m0-interrupt-dmgC-cgbBCE.gb
@@ -19,10 +21,7 @@ age-test-roms/oam/oam-read-dmgC-cgbBC.gb|cgb|mooneye|gb-test-roms/age-test-roms/
 age-test-roms/oam/oam-read-ncmBC.gb|cgb|mooneye|gb-test-roms/age-test-roms/oam/oam-read-ncmBC.gb
 age-test-roms/oam/oam-read-ncmE.gb|cgb|mooneye|gb-test-roms/age-test-roms/oam/oam-read-ncmE.gb|rev=cgbe
 age-test-roms/oam/oam-write-cgbBCE.gb|cgb|mooneye|gb-test-roms/age-test-roms/oam/oam-write-cgbBCE.gb
-age-test-roms/oam/oam-write-dmgC.gb|dmg|mooneye|gb-test-roms/age-test-roms/oam/oam-write-dmgC.gb
 age-test-roms/oam/oam-write-ncmBCE.gb|cgb|mooneye|gb-test-roms/age-test-roms/oam/oam-write-ncmBCE.gb
-age-test-roms/speed-switch/caution/spsw-interrupts-cgbBC.gb|cgb|mooneye|gb-test-roms/age-test-roms/speed-switch/caution/spsw-interrupts-cgbBC.gb
-age-test-roms/speed-switch/caution/spsw-interrupts-cgbE.gb|cgb|mooneye|gb-test-roms/age-test-roms/speed-switch/caution/spsw-interrupts-cgbE.gb|rev=cgbe
 age-test-roms/speed-switch/spsw-ch2-lc-delay-cgbBCE.gb|cgb|mooneye|gb-test-roms/age-test-roms/speed-switch/spsw-ch2-lc-delay-cgbBCE.gb
 age-test-roms/speed-switch/spsw-div-cgbBCE.gb|cgb|mooneye|gb-test-roms/age-test-roms/speed-switch/spsw-div-cgbBCE.gb
 age-test-roms/speed-switch/spsw-mode0-cgbBCE.gb|cgb|mooneye|gb-test-roms/age-test-roms/speed-switch/spsw-mode0-cgbBCE.gb
