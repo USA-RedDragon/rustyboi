@@ -7,5 +7,5 @@ scribbltests/palettely|cgb|png|gb-test-roms/scribbltests/palettely/palettely.gb|
 scribbltests/palettely|dmg|png|gb-test-roms/scribbltests/palettely/palettely.gb|gb-test-roms/scribbltests/palettely/palettely-dmg.png
 scribbltests/scxly|cgb|png_layout|gb-test-roms/scribbltests/scxly/scxly.gb|gb-test-roms/scribbltests/scxly/scxly-cgb.png
 scribbltests/scxly|dmg|png|gb-test-roms/scribbltests/scxly/scxly.gb|gb-test-roms/scribbltests/scxly/scxly-dmg.png
-scribbltests/statcount-auto|dmg|png|gb-test-roms/scribbltests/statcount/statcount-auto.gb|gb-test-roms/scribbltests/statcount/statcount_auto-cgb-dmg.png
-scribbltests/statcount-auto|cgb|png|gb-test-roms/scribbltests/statcount/statcount-auto.gb|gb-test-roms/scribbltests/statcount/statcount_auto-cgb-dmg.png
+scribbltests/statcount-auto|dmg|png_fixed|gb-test-roms/scribbltests/statcount/statcount-auto.gb|gb-test-roms/scribbltests/statcount/statcount_auto-cgb-dmg.png|frames=270
+scribbltests/statcount-auto|cgb|png_fixed|gb-test-roms/scribbltests/statcount/statcount-auto.gb|gb-test-roms/scribbltests/statcount/statcount_auto-cgb-dmg.png|frames=270

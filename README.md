@@ -26,7 +26,7 @@ is, how it is graded, and where its ROMs come from.
 | sgb | 1 | 1 |
 | blargg | 15 | 15 |
 | blargg_singles | 41 | 41 |
-| scribbltests | 8 | 10 |
+| scribbltests | 10 | 10 |
 | turtle_tests | 4 | 4 |
 | little_things_gb | 4 | 4 |
 | bully | 2 | 2 |
@@ -36,7 +36,7 @@ is, how it is graded, and where its ROMs come from.
 | mbc3_tester | 2 | 2 |
 | cpp | 3 | 3 |
 | gambatte | 5241 | 5257 |
-| **Total** | **6356** | **6445** |
+| **Total** | **6358** | **6445** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core
