@@ -18,7 +18,7 @@ is, how it is graded, and where its ROMs come from.
 | mealybug | 39 | 51 |
 | mooneye | 188 | 192 |
 | mooneye_wilbertpol | 188 | 193 |
-| age | 41 | 59 |
+| age | 42 | 59 |
 | gbmicrotest | 481 | 513 |
 | samesuite_apu | 70 | 70 |
 | samesuite_nonapu | 6 | 6 |

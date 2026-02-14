@@ -7294,7 +7294,7 @@ impl Ppu {
     /// M-cycle) to align the scan position to the completion dot. This makes the
     /// mode-2 trigger window M-cycle-exact (validated by blargg 4-scanline_timing's
     /// 1-M-cycle "just before / at first corruption" boundary). Returns None when
-    /// the LCD is off or the PPU is not in mode 2. Read-only.
+    /// the LCD is off or the PPU is not in mode 2. This is the WRITE/IDU path row.
     pub fn oam_bug_mode2_row(&self) -> Option<u8> {
         if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
             return None;
@@ -7302,12 +7302,6 @@ impl Ppu {
         if self.state != State::OAMSearch {
             return None;
         }
-        // One M-cycle from the access-M-cycle START (where the trigger sites
-        // sample) to the OAM access on the bus. NB: a `line_cycle < 6 -> row 0`
-        // mode-2-prologue exemption fixes age oam-read-dmgC-cgbBC but REGRESSES
-        // blargg oam_bug (a previously-passing hardware test) -- the two conflict
-        // at line_cycle 0..4, so the exemption needs a read-vs-write / OAM-address
-        // distinguisher this row-only function can't see. Left off; blargg wins.
         const OAM_BUG_ACCESS_DOT: u32 = 4;
         let dot = self.line_cycle + OAM_BUG_ACCESS_DOT;
         // Mode 2 is the first 80 dots of the line (20 rows * 4 dots/M-cycle).
@@ -7315,6 +7309,29 @@ impl Ppu {
             return None;
         }
         Some((dot / 4) as u8)
+    }
+
+    /// DMG OAM-bug row for a CPU OAM *read* access (as opposed to a write/IDU).
+    /// SameBoy holds `accessed_oam_row = 0` across the whole mode-2 prologue (the
+    /// three `GB_SLEEP`s before the object-scan loop advances it to 8), and both the
+    /// read and write trigger sites guard on `accessed_oam_row >= 8` — row 0 is the
+    /// exempt "first two objects" row, so a mode-2-prologue access corrupts nothing.
+    /// A CPU read landing at the mode-2 entry samples this prologue window (age's
+    /// timed oam-read boundary reads at `line_cycle` 0/4 hit it), so it must return
+    /// row 0 (clean). The write/IDU path in `oam_bug_mode2_row` does NOT get this
+    /// exemption: blargg oam_bug's INC/DEC-through-OAM writes probe those same early
+    /// `line_cycle`s from a different M-cycle phase and observe the deeper scanned
+    /// row (their `(line_cycle + 4)/4` mapping is hardware-correct and must stay).
+    /// Splitting the exemption by access type reconciles age oam-read (read prologue
+    /// clean) with blargg oam_bug (write prologue corrupts) — the row-only function
+    /// alone cannot satisfy both.
+    pub fn oam_bug_mode2_row_read(&self) -> Option<u8> {
+        let base = self.oam_bug_mode2_row()?;
+        // Mode-2 prologue: reads sample the held row-0 (accessed_oam_row < 8), clean.
+        if self.line_cycle < 6 {
+            return Some(0);
+        }
+        Some(base)
     }
 
     /// Cycle-exact HDMA-eligibility predicate, mirroring Gambatte's
