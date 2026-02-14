@@ -513,7 +513,10 @@ impl<'a> Bus<'a> {
         if self.mmio.is_cgb() {
             return;
         }
-        let row = match self.ppu.oam_bug_mode2_row() {
+        let row = match match kind {
+            OamBugKind::Read => self.ppu.oam_bug_mode2_row_read(),
+            OamBugKind::Write => self.ppu.oam_bug_mode2_row(),
+        } {
             Some(r) => r as usize,
             None => return,
         };
@@ -706,7 +709,7 @@ impl<'a> Bus<'a> {
             && !self.mmio.is_cgb()
             && !self.mmio.oam_dma_window_active()
         {
-            self.ppu.oam_bug_mode2_row()
+            self.ppu.oam_bug_mode2_row_read()
         } else {
             None
         };
