@@ -2692,6 +2692,30 @@ impl Ppu {
         let tn = mmio.read_vram_bank(0, base0 + row_off);
         self.fetcher.patch_tile_num(tn);
 
+        // wg_cgb: the tile-data-select (LCDC.4) bit reached the A12 line for BOTH
+        // data bytes at the LOW-plane fetch dot — hardware latches the tile-data
+        // address once and drives the two consecutive byte reads from it. When a
+        // sprite stalls the line, the reconstructed HIGH dot can land past a bit4
+        // falling edge the LOW dot sits before; re-resolving the HIGH plane
+        // independently would then straddle a tile the live per-substep fetch
+        // read coherently (mealybug m3_lcdc_tile_sel_change2). Pin the HIGH
+        // plane's tile-data-select bit to the LOW plane's resolution so retro
+        // reproduces the live bg_wg_apply result instead of diverging from it.
+        // (The genuine mixed per-bitplane $8000/$8800 case is produced on the
+        // live path via bg_hw_read_dot_ex's arm-dot anchoring, which retro's
+        // shared reconstruction inherits — m3_lcdc_tile_sel_change stays exact.)
+        let tds = LCDCFlags::BGWindowTileDataSelect as u8;
+        let tds_low = self.bg_hw_read_dot(n, 1, ly).map(|h1| {
+            let h1_scy = self.bg_hw_read_dot_ex(n, 1, ly, self.wg_cgb).unwrap_or(h1);
+            if self.wg_hist.is_empty() {
+                self.lcdc & tds
+            } else if self.wg_cgb {
+                self.bg_wg_resolve_cgb(h1, h1_scy, 1).0 & tds
+            } else {
+                self.bg_wg_resolve(h1) & tds
+            }
+        });
+
         // TileDataLow (k=1) / TileDataHigh (k=2), using the (re-resolved)
         // latched tile number — exactly what the hardware pipeline feeds them.
         for k in 1..=2u8 {
@@ -2702,13 +2726,16 @@ impl Ppu {
                 return;
             };
             let hk_scy = self.bg_hw_read_dot_ex(n, k, ly, self.wg_cgb).unwrap_or(hk);
-            let (bitsk, quirkk) = if self.wg_hist.is_empty() {
+            let (mut bitsk, quirkk) = if self.wg_hist.is_empty() {
                 (self.lcdc, false)
             } else if self.wg_cgb {
                 self.bg_wg_resolve_cgb(hk, hk_scy, k)
             } else {
                 (self.bg_wg_resolve(hk), false)
             };
+            if self.wg_cgb && k == 2 && let Some(low_tds) = tds_low {
+                bitsk = (bitsk & !tds) | low_tds;
+            }
             let scyk = self.bg_scy_resolve(hk_scy).unwrap_or(live_scy);
             let plane = (k - 1) as u16;
             let line = ly.wrapping_add(scyk) % 8;
