@@ -283,6 +283,10 @@ fn sprite_tile_walk_cost(
 // pixel pop gated by the new LCDC.1. Calibrated against mealybug
 // m3_lcdc_obj_en_change (the per-band cutoff sweep pins the commit exactly).
 const OBJEN_APPLY_DOTS: u128 = 2;
+// CGB (DMG-compat-on-CGB) mid-mode-3 OBJ-enable toggle commits one dot later
+// than DMG-CPU silicon (the CGB PPU's pixel gate samples LCDC.1 a dot further
+// out). Pinned by mealybug m3_lcdc_obj_en_change _cgb_c.
+const OBJEN_APPLY_DOTS_CGB: u128 = 3;
 // DMG mid-mode-3 OBJ-size toggle: dots from the write hook to the fetcher
 // seeing the new LCDC.2. Calibrated by mealybug m3_lcdc_obj_size_change band 0
 // (the group-2 sprite whose HIGH byte reads exactly one dot after the hook+1
@@ -292,6 +296,14 @@ const OBJSIZE_APPLY_DOTS: u128 = 1;
 // HIGH bytes are read (SameBoy's object fetch: low at end-3, high at end-1).
 const OBJ_READ_LOW_BACK: u128 = 3;
 const OBJ_READ_HIGH_BACK: u128 = 1;
+// CGB (DMG-compat-on-CGB) object fetch: the two tile-data bytes' size-sample
+// dots sit 3 dots earlier within the stall than on DMG-CPU silicon (the CGB
+// PPU begins the object tile-data fetch earlier relative to the stall end).
+// A mid-mode-3 LCDC.2 toggle straddling the fetch therefore splits the row
+// addressing at end-6 (LOW) / end-3 (HIGH). Pinned by mealybug
+// m3_lcdc_obj_size_change and m3_lcdc_obj_size_change_scx _cgb_c.
+const OBJ_READ_LOW_BACK_CGB: u128 = 6;
+const OBJ_READ_HIGH_BACK_CGB: u128 = 3;
 
 const MODE2_STAT_PRETRIGGER_DOT: u128 = 452;
 // Within line 153 (the last VBlank line) the LY register is held at 153 only
@@ -1844,8 +1856,13 @@ impl Ppu {
             // The write commits to the pixel gate OBJEN_APPLY_DOTS after the
             // hook (the hook runs before this dot's PPU step; mealybug
             // m3_lcdc_obj_en_change pins the first gated pop two dots out).
+            let apply = if mmio.is_cgb() && !mmio.is_cgb_features_enabled() {
+                OBJEN_APPLY_DOTS_CGB
+            } else {
+                OBJEN_APPLY_DOTS
+            };
             self.objen_history
-                .push((self.ticks + OBJEN_APPLY_DOTS, new_on));
+                .push((self.ticks + apply, new_on));
             // Abort window = the sprite's own fetch bus activity
             // [match_dot, match_dot + penalty): a left-clipped sprite (spx < 8)
             // matched during the first-tile prologue, so its fetch ENDS before
@@ -9252,9 +9269,13 @@ impl Ppu {
                 if rec.map(|r| r.phase) == Some(SpriteFetchPhase::Aborted) {
                     continue;
                 }
-                let stale = rec
-                    .filter(|r| r.phase == SpriteFetchPhase::Fetched)
-                    .is_some_and(|r| self.ticks >= r.arm_tick + 15);
+                // The 15-dot stale-FIFO pop quirk is a DMG-CPU artifact; the CGB
+                // pixel gate samples LCDC.1 at the plain pop dot (mealybug
+                // m3_lcdc_obj_en_change _cgb_c fails with the quirk applied).
+                let stale = !(mmio.is_cgb() && !mmio.is_cgb_features_enabled())
+                    && rec
+                        .filter(|r| r.phase == SpriteFetchPhase::Fetched)
+                        .is_some_and(|r| self.ticks >= r.arm_tick + 15);
                 if !self.objen_at_tick(self.ticks + stale as u128) {
                     continue;
                 }
@@ -9546,8 +9567,15 @@ impl Ppu {
             return self.obj_pixel_with_sizes(mmio, sprite, rel_x, screen_y, large, large);
         };
         let fetch_end = rec.arm_tick + rec.penalty as u128;
-        let low_large = self.objsize_large_at_tick(fetch_end.saturating_sub(OBJ_READ_LOW_BACK));
-        let high_large = self.objsize_large_at_tick(fetch_end.saturating_sub(OBJ_READ_HIGH_BACK));
+        // CGB DMG-compat shifts both object tile-data read dots 3 dots earlier
+        // in the stall than DMG-CPU silicon (see OBJ_READ_*_BACK_CGB).
+        let (low_back, high_back) = if mmio.is_cgb() && !mmio.is_cgb_features_enabled() {
+            (OBJ_READ_LOW_BACK_CGB, OBJ_READ_HIGH_BACK_CGB)
+        } else {
+            (OBJ_READ_LOW_BACK, OBJ_READ_HIGH_BACK)
+        };
+        let low_large = self.objsize_large_at_tick(fetch_end.saturating_sub(low_back));
+        let high_large = self.objsize_large_at_tick(fetch_end.saturating_sub(high_back));
         self.obj_pixel_with_sizes(mmio, sprite, rel_x, screen_y, low_large, high_large)
     }
 
