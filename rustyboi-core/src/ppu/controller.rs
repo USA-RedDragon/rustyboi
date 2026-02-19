@@ -8559,7 +8559,19 @@ impl Ppu {
         // Gambatte's lyCounter().time() in master-cc. The closed-form LyCounter.time
         // runs one master-cc below Gambatte's lyTime (see m0_time_exact), so add 1.
         let mut ly_reg = lc.ly as i64;
-        let mut time = self.p_now as i64 + lc.time as i64 + 1;
+        // A plain (non-halt-woken) FF44 read after an SS->DS mode-3 speed switch:
+        // the age ly/lcd-align-ly DS probes (which switch during mode 3 then sweep
+        // LY reads across steady DS lines, never halting) need a smaller `time`
+        // re-anchor than the halt-woken gambatte switch families the -10 below was
+        // calibrated to. Their line-boundary reads (152->153 increment, line-153
+        // head, 0-wrap) sit one dot-pair earlier under the flat -10; +3 pulls the
+        // plain-read anchor onto cgbBC/cgbE silicon (byte-exact ly-cgbE /
+        // ly-dmgC-cgbBC), leaving the halt-woken families (hdma_late_m3speedchange_ly,
+        // cctracer) on the un-adjusted -10.
+        const SSDS_PLAIN_TIME_ADJ: i64 = 3;
+        let ssds_plain = ds && self.ssds_mode3_ly_advance && !mmio.halt_wakeup_skew();
+        let ds_corr: i64 = if ssds_plain { SSDS_PLAIN_TIME_ADJ } else { 0 };
+        let mut time = self.p_now as i64 + lc.time as i64 + 1 + ds_corr;
         // SS->DS-during-mode3: rustyboi's bridged renderer line phase trails
         // Gambatte's re-anchored lyCounter.time by ~5 DS-dots (10 cc) for the LY
         // read. Pull the read's `time` anchor onto Gambatte's lyTime so the
@@ -8614,6 +8626,23 @@ impl Ppu {
                     return Some((ly_reg & 0xFF) as u8);
                 }
                 return None;
+            }
+            // Plain-ssds (age mode-3-switch DS) line 153: unlike the steady-DS
+            // Gambatte model (line 153 reads 0 except the top 2cc), cgbBC/cgbE
+            // silicon after a mode-3 switch holds LY=153 for the first ~10cc (5
+            // dots) of the line — the renderer's line-153 LY->0 flip (dot 6) as seen
+            // through the re-anchored read phase — then reads 0. `to_next` counts
+            // down from 2*cpl (line start) to 0 (frame wrap), so the reads-153 head
+            // is the HIGH-to_next window. The age ly DS 1C38 boundary sweep reads
+            // 153 at to_next >= 2*cpl-10 and 0 below. Steady-DS reads (gambatte
+            // lycint152_ly153_ds / frame1_ly_count_ds, ssds_plain=false) keep the
+            // whole-line-0 model. Revision-independent (cgbBC==cgbE DS table).
+            const SSDS_LINE153_HEAD: i64 = 10;
+            if ssds_plain {
+                if to_next >= 2 * cpl - SSDS_LINE153_HEAD {
+                    return Some((ly_reg & 0xFF) as u8);
+                }
+                return Some(0);
             }
             if to_next <= 2 * cpl - 2 {
                 return Some(0);
@@ -8724,6 +8753,25 @@ impl Ppu {
         } else {
             to_next
         };
+        // Plain-ssds (age mode-3-switch DS) line-boundary anticipation window: the
+        // re-anchored read reflects the pending LY increment only within the last
+        // ~4cc (2 dots) before the wrap, narrower than the steady-DS 6+4*ds=10cc
+        // window. Under the wide window the age sweep reads (which land ~4 dots
+        // before every line boundary) anticipated a dot-pair too early (144/153/00
+        // where cgbBC/cgbE still hold 143/152/153). Steady-DS / halt-woken reads
+        // keep the 10cc window below.
+        const SSDS_ANTICIPATE_WINDOW: i64 = 4;
+        if ssds_plain {
+            if tn <= SSDS_ANTICIPATE_WINDOW {
+                let result = if tn == SSDS_ANTICIPATE_WINDOW {
+                    ly_reg & (ly_reg + 1)
+                } else {
+                    ly_reg + 1
+                };
+                return Some((result & 0xFF) as u8);
+            }
+            return None;
+        }
         if tn <= 10 && tn <= 6 + 4 * (ds as i64) {
             let result = if tn == 6 + 4 * (ds as i64) {
                 ly_reg & (ly_reg + 1)
