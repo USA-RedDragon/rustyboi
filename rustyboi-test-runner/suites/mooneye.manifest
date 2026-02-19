@@ -182,8 +182,7 @@ mooneye-test-suite/emulator-only/mbc5/rom_64Mb.gb|dmg|mooneye|gb-test-roms/moone
 mooneye-test-suite/emulator-only/mbc5/rom_64Mb.gb|cgb|mooneye|gb-test-roms/mooneye-test-suite/emulator-only/mbc5/rom_64Mb.gb
 mooneye-test-suite/emulator-only/mbc5/rom_8Mb.gb|dmg|mooneye|gb-test-roms/mooneye-test-suite/emulator-only/mbc5/rom_8Mb.gb
 mooneye-test-suite/emulator-only/mbc5/rom_8Mb.gb|cgb|mooneye|gb-test-roms/mooneye-test-suite/emulator-only/mbc5/rom_8Mb.gb
-mooneye-test-suite/madness/mgb_oam_dma_halt_sprites.gb|dmg|mooneye|gb-test-roms/mooneye-test-suite/madness/mgb_oam_dma_halt_sprites.gb
-mooneye-test-suite/madness/mgb_oam_dma_halt_sprites.gb|cgb|mooneye|gb-test-roms/mooneye-test-suite/madness/mgb_oam_dma_halt_sprites.gb
+mooneye-test-suite/madness/mgb_oam_dma_halt_sprites.gb|dmg|png_layout|gb-test-roms/mooneye-test-suite/madness/mgb_oam_dma_halt_sprites.gb|gb-test-roms/mooneye-test-suite/madness/mgb_oam_dma_halt_sprites_expected.png|rev=mgb
 mooneye-test-suite/misc/bits/unused_hwio-C.gb|cgb|mooneye|gb-test-roms/mooneye-test-suite/misc/bits/unused_hwio-C.gb|rev=cgb
 mooneye-test-suite/misc/boot_div-A.gb|cgb|mooneye|gb-test-roms/mooneye-test-suite/misc/boot_div-A.gb|rev=agb
 mooneye-test-suite/misc/boot_div-cgb0.gb|cgb|mooneye|gb-test-roms/mooneye-test-suite/misc/boot_div-cgb0.gb|rev=cgb0

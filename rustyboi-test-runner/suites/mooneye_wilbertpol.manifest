@@ -181,8 +181,7 @@ mooneye-test-suite-wilbertpol/acceptance/timer/tma_write_reloading.gb|dmg|mooney
 mooneye-test-suite-wilbertpol/acceptance/timer/tma_write_reloading.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/timer/tma_write_reloading.gb
 mooneye-test-suite-wilbertpol/emulator-only/mbc1_rom_4banks.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/emulator-only/mbc1_rom_4banks.gb
 mooneye-test-suite-wilbertpol/emulator-only/mbc1_rom_4banks.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/emulator-only/mbc1_rom_4banks.gb
-mooneye-test-suite-wilbertpol/madness/mgb_oam_dma_halt_sprites.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/madness/mgb_oam_dma_halt_sprites.gb
-mooneye-test-suite-wilbertpol/madness/mgb_oam_dma_halt_sprites.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/madness/mgb_oam_dma_halt_sprites.gb
+mooneye-test-suite-wilbertpol/madness/mgb_oam_dma_halt_sprites.gb|dmg|png_layout|gb-test-roms/mooneye-test-suite-wilbertpol/madness/mgb_oam_dma_halt_sprites.gb|gb-test-roms/mooneye-test-suite-wilbertpol/madness/mgb_oam_dma_halt_sprites_expected.png|rev=mgb
 mooneye-test-suite-wilbertpol/misc/bits/unused_hwio-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/bits/unused_hwio-C.gb|rev=cgb
 mooneye-test-suite-wilbertpol/misc/boot_hwio-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_hwio-C.gb|rev=cgb
 mooneye-test-suite-wilbertpol/misc/boot_hwio-S.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_hwio-S.gb|rev=sgb
