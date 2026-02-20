@@ -5733,7 +5733,13 @@ impl Ppu {
                     self.bgp_history.clear();
                     self.bgp_history.push((0, self.bgp_delayed));
                     self.bgp_dot_history.clear();
-                    self.bgp_dot_history.push((0, self.bgp_delayed));
+                    // CGB-compat (wg_cgb) resolves BGP per dot from this history; unlike
+                    // the DMG per-dot `bgp_delayed` latch, real CGB silicon colors the
+                    // mode-3 column-0 pixel with the LIVE BGP register (age m3-bg-bgp-ncm:
+                    // the pre-frame BGP is already latched at mode-3 arm). DMG keeps the
+                    // 1-dot-delayed seed (dmgpalette_during_m3, via bgp_history).
+                    let bgp_dot_seed = if self.wg_cgb { mmio.read(BGP) } else { self.bgp_delayed };
+                    self.bgp_dot_history.push((0, bgp_dot_seed));
                     // Clear any leftover DMG BGP phase-hold from the previous line.
                     self.bgp_defer_countdown = 0;
                     self.obp0_history.clear();
