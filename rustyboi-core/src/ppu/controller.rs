@@ -1830,8 +1830,21 @@ impl Ppu {
             // bit; a sprite arming at x+1 pins the boundary to x+1 (mealybug
             // m3_lcdc_bg_en_change bands 0-2/8-17: the BG-off span starts AT
             // the stalled column). No stall keeps the calibrated x+2.
+            let cgb_compat = mmio.is_cgb() && !mmio.is_cgb_features_enabled();
             let stall_adj = if !mmio.is_cgb_features_enabled() {
-                if self.sprite_fetch_stall > 0 || self.dmg_unfetched_sprite_at(self.x) {
+                if cgb_compat && self.sprite_fetch_stall > 0 {
+                    // CGB-compat: the sprite-fetch stall freezes the pipeline but
+                    // the LCDC.0 commit dot keeps advancing toward the display
+                    // column it lands on. The commit offset is GRADUATED by the
+                    // remaining stall dots (2 - stall; with cgb_compat_adj=+1
+                    // below the total is 3 - stall), not the binary 0/2 the DMG
+                    // path uses. (mealybug m3_lcdc_bg_en_change _cgb_c: the first
+                    // BG-off write lands during the leftmost sprite's fetch
+                    // stall; stall=3 -> boundary 0, stall=1 -> boundary 2.)
+                    // (cgb_compat_adj below stays +1 for the stall case, so the
+                    // total commit offset is 3 - stall.)
+                    3i32 - self.sprite_fetch_stall as i32
+                } else if self.sprite_fetch_stall > 0 || self.dmg_unfetched_sprite_at(self.x) {
                     0
                 } else if self.dmg_unfetched_sprite_at(self.x.saturating_add(1)) {
                     1
@@ -1841,12 +1854,19 @@ impl Ppu {
             } else {
                 2
             };
-            // CGB DMG-compat: the LCDC.0 commit reaches the displayed column one
-            // dot later than on DMG hardware (mealybug m3_lcdc_bg_en_change[2] on
-            // CGB shift the whole BG-off span one column right of the DMG
-            // reference, which passes). The DMG path is unchanged.
-            let cgb_compat_adj =
-                if mmio.is_cgb() && !mmio.is_cgb_features_enabled() { 1 } else { 0 };
+            // CGB DMG-compat: the LCDC.0 commit lands one column later than DMG
+            // in the plain no-stall case; but when a sprite fetch stalls OR an
+            // unfetched sprite gates this column, the commit lands one column
+            // EARLIER than DMG+1 (mealybug m3_lcdc_bg_en_change _cgb_c bottom
+            // bands: self.x=8 with an unfetched sprite wants boundary 8, not 9).
+            let cgb_compat_adj = if cgb_compat {
+                let sprite_active = self.sprite_fetch_stall > 0
+                    || self.dmg_unfetched_sprite_at(self.x)
+                    || self.dmg_unfetched_sprite_at(self.x.saturating_add(1));
+                if sprite_active { 0 } else { 1 }
+            } else {
+                0
+            };
             let boundary_col = (self.x as i32 + stall_adj + cgb_compat_adj
                 + if win { 2 } else { 0 })
             .clamp(0, 160) as u8;
