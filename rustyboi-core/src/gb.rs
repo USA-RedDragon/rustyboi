@@ -410,15 +410,26 @@ impl GB {
             // DMG-style single-speed timer; this is the post-boot counter that
             // reproduces the SGB boot_div-S fingerprint. Passes mooneye boot_div-S.
             //
-            // boot_div2-S (the same test +4 NOPs before each DIV read, i.e. sampling
-            // 16 cc later to pin the sub-cycle phase) is a PROVEN mutual-exclusion:
-            // it needs 0xD850 (16 cc lower) while boot_div-S needs 0xD860 — no single
-            // counter satisfies both. The tests' internal PUSH/POP DIV-sample shuffle
-            // crosses a DIV high-byte boundary 16 cc apart; rustyboi's per-instruction
-            // DIV read-phase places that boundary inside the 16 cc gap, so only one
-            // alignment lands correctly. Closing it needs the sub-dot per-access CPU
-            // read-cc model (Lever A), not a counter tweak; 0xD860 is kept because
-            // boot_div-S is corroborated by the Gambatte boot-anchored DIV refs.
+            // boot_div2-S is a PROVEN same-revision mutual-exclusion, NOT a fixable
+            // seed. Both ROMs read DIV 6× at nop offsets and compare against a
+            // byte-IDENTICAL HRAM acceptance builder (verified: the CB-bit expected
+            // tables at 0x2B4/0x2B8 are equal), so both demand the exact same
+            // fingerprint d9 da da db dc de. The 252/260-cc jitter gaps make it a
+            // sub-block phase probe: the +0 step (read2 stays `da`) requires read0's
+            // DIV counter low byte in [0x00..0x03] — pinned to within 4 cc of a
+            // high-byte boundary. boot_div2-S is byte-for-byte boot_div-S with 4
+            // extra leading NOPs, so EVERY read is rigidly +16 cc: read0's low byte
+            // becomes [0x10..0x13], read2 crosses the boundary (`db`), fingerprint
+            // becomes d9 da db dc dd de and is rejected. The +16 is invariant under
+            // any deterministic per-instruction read-cc offset (it shifts both ROMs'
+            // windows by the same constant), so no seed AND no sub-dot read-cc model
+            // resolves it — verified by an exhaustive 1-cc seed sweep across two full
+            // DIV blocks (0 both-pass). Cross-checks: SameBoy, running the real SGB
+            // boot ROM with the identical M-cycle-start DIV sample, ALSO cannot pass
+            // both (its handoff phase lands reads mid-block → d9-shape rejected); and
+            // the GBEmulatorShootout comments out the entire boot_div-S/2-S SGB pair.
+            // 0xD860 is kept: it passes boot_div-S and is corroborated by the Gambatte
+            // boot-anchored DIV refs. This is a genuine floor.
             Hardware::SGB | Hardware::SGB2 => 0xD860,
             // boot_div-dmg0 fingerprint (19 1a 1a 1b 1c 1e). Verified: passes
             // mooneye boot_div-dmg0.
