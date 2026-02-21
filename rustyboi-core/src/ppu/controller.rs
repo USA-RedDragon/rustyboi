@@ -8640,8 +8640,17 @@ impl Ppu {
         // the LYC=LY flag stays set one extra dot at the line tail. DS and the
         // STAT-IRQ-trigger paths (statChange/lycRegChange) keep the plain `> 2`
         // (Gambatte applies the isAgb term ONLY here, in the FF41 register read).
-        let agb_term = (!lc_master.ds && mmio.is_agb()) as i64;
-        Some(lyc_reg == cmp.ly && cmp.time_to_next_ly > 2 - agb_term)
+        //
+        // CGB-D/E silicon holds the coincidence bit the SAME extra dot AGB does:
+        // SameBoy CGB-E reads the ly_lyc_0-C line-0-tail STAT (LY=0==LYC=0 at
+        // timeToNextLy 2, `ly_for_comparison` still the previous LY held into the
+        // line-1 first dot) as $C4 (mode 0 + coincidence SET) where Gambatte's
+        // CPU-CGB-C model (`> 2`) already cleared it ($C0). Gambatte captured on
+        // CPU-CGB-C, so its C-model keeps the plain `> 2`; only the D/E-routed
+        // reads (is_cgb_de, single speed) get the +1 hold. DS keeps `> 2` (the
+        // stat-mode-ds / speed-switch DS probes are BCE-common and co-tuned to it).
+        let tail_hold = (!lc_master.ds && (mmio.is_agb() || mmio.is_cgb_de())) as i64;
+        Some(lyc_reg == cmp.ly && cmp.time_to_next_ly > 2 - tail_hold)
     }
 
 
