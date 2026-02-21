@@ -1,4 +1,19 @@
 # mooneye-test-suite-wilbertpol (0xED done-marker; grading mooneye_ed).
+#
+# The acceptance/gpu ly_lyc*-C / ly_new_frame-C / ly00_mode1_2-C tests carry
+# `rev=cgbe`: Wilbert Pol's line-153/LYC/new-frame reference values were captured
+# on CGB-D/E silicon, not CPU-CGB-C. SameBoy (built from source, model-gated at
+# display.c:2222-2232 on `model <= GB_MODEL_CGB_C`) FAILS these on its CGB-C model
+# and PASSES them on CGB-D/E; the `-C` suffix is the CGB *family*, not the CPU
+# revision. This is the resolution of the apparent gambatte-vs-wilbertpol
+# contradiction: gambatte's cgb04c enable_display probes (frame1_ly_count_2 etc.)
+# genuinely ARE CPU-CGB-C (SameBoy passes them on CGB-C, fails on CGB-E), so the
+# two suites read opposite LY/STAT at the "same cc" because they target DIFFERENT
+# silicon revisions. Routing wilbertpol to CGB-E and leaving gambatte on the
+# default CGB-C passes both. (ly_lyc_0-C stays on cgbe as its true revision but
+# still fails: a sub-dot line-153-tail STAT-mode collapse rustyboi's dot-clock
+# cannot resolve — the read straddles the mode-1->0 flip at the same closed-form
+# phase as the passing ly00_mode1_2-C round.)
 mooneye-test-suite-wilbertpol/acceptance/add_sp_e_timing.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/add_sp_e_timing.gb
 mooneye-test-suite-wilbertpol/acceptance/add_sp_e_timing.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/add_sp_e_timing.gb
 mooneye-test-suite-wilbertpol/acceptance/bits/mem_oam.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/bits/mem_oam.gb
@@ -76,7 +91,7 @@ mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_01_mode0_2.gb|dmg|mooneye_ed|g
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_01_mode0_2.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_01_mode0_2.gb
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_mode0_2-GS.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_mode0_2-GS.gb
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_mode1_0-GS.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_mode1_0-GS.gb
-mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_mode1_2-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_mode1_2-C.gb
+mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_mode1_2-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_mode1_2-C.gb|rev=cgbe
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_mode2_3.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_mode2_3.gb
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_mode2_3.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_mode2_3.gb
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_mode3_0.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly00_mode3_0.gb
@@ -89,21 +104,21 @@ mooneye-test-suite-wilbertpol/acceptance/gpu/ly143_144_mode0_1.gb|dmg|mooneye_ed
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly143_144_mode0_1.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly143_144_mode0_1.gb
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly143_144_mode3_0.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly143_144_mode3_0.gb
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly143_144_mode3_0.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly143_144_mode3_0.gb
-mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc-C.gb
+mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc-C.gb|rev=cgbe
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc-GS.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc-GS.gb
-mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_0-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_0-C.gb
+mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_0-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_0-C.gb|rev=cgbe
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_0-GS.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_0-GS.gb
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_0_write-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_0_write-C.gb
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_0_write-GS.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_0_write-GS.gb
-mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_144-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_144-C.gb
+mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_144-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_144-C.gb|rev=cgbe
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_144-GS.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_144-GS.gb
-mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_153-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_153-C.gb
+mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_153-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_153-C.gb|rev=cgbe
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_153-GS.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_153-GS.gb
-mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_153_write-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_153_write-C.gb
+mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_153_write-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_153_write-C.gb|rev=cgbe
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_153_write-GS.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_153_write-GS.gb
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_write-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_write-C.gb
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_write-GS.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_lyc_write-GS.gb
-mooneye-test-suite-wilbertpol/acceptance/gpu/ly_new_frame-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_new_frame-C.gb
+mooneye-test-suite-wilbertpol/acceptance/gpu/ly_new_frame-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_new_frame-C.gb|rev=cgbe
 mooneye-test-suite-wilbertpol/acceptance/gpu/ly_new_frame-GS.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/ly_new_frame-GS.gb
 mooneye-test-suite-wilbertpol/acceptance/gpu/stat_irq_blocking.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/stat_irq_blocking.gb
 mooneye-test-suite-wilbertpol/acceptance/gpu/stat_irq_blocking.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/acceptance/gpu/stat_irq_blocking.gb
