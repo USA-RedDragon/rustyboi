@@ -5372,9 +5372,11 @@ impl Ppu {
                     self.oam_reader.cgb = mmio.is_cgb_features_enabled();
                     self.oam_reader.large_src =
                         (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
-                    self.oam_reader.src_disabled = mmio.oam_dma_window_active();
+                    let dma_writing =
+                        mmio.oam_dma_window_active() && !mmio.mgb_frozen_merge_active();
+                    self.oam_reader.src_disabled = dma_writing;
                     self.oam_reader.enable_display(cc, ds);
-                    self.prev_dma_writing = mmio.oam_dma_window_active();
+                    self.prev_dma_writing = dma_writing;
                     self.oam_reader_seeded = true;
                 }
             } else {
@@ -9045,7 +9047,8 @@ impl Ppu {
             self.oam_reader.reset(&pos, cgb);
             self.oam_reader.lu = cc;
             self.oam_reader.large_src = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
-            self.prev_dma_writing = mmio.oam_dma_window_active();
+            self.prev_dma_writing =
+                mmio.oam_dma_window_active() && !mmio.mgb_frozen_merge_active();
             self.oam_reader_seeded = true;
             return;
         }
@@ -9060,7 +9063,11 @@ impl Ppu {
         // OAM-DMA window edges: at start the source becomes disabled RAM (0xFF);
         // at end it returns to the real OAM. `change(cc)` flushes the snapshot up
         // to `cc` with the OLD source, then caps the next walk, then we toggle.
-        let dma_writing = mmio.oam_dma_window_active();
+        // The MGB OAM-DMA-during-HALT merge freezes the DMA mid-transfer; the
+        // frozen OAM bus is stuck (not the normal disabled-RAM window), so the
+        // Y/X scan reads the merged OAM rather than the ghost pair. Treat the
+        // merge window as a non-writing (readable) source.
+        let dma_writing = mmio.oam_dma_window_active() && !mmio.mgb_frozen_merge_active();
         if dma_writing != self.prev_dma_writing {
             // The DMA window edge is observed at the PPU dot, but Gambatte fires
             // startOamDma/endOamDma at the M-cycle's master cc, which precedes the
@@ -9125,7 +9132,13 @@ impl Ppu {
                 // attribute fetch sees the DMA's in-flight data, so read the live
                 // progressively-written OAM rather than the CPU view (0xFF while
                 // a DMA runs). Real-sampled slots keep the CPU-view read.
-                let (tile_index, attributes_byte) = if self.oam_reader.ghost_slot[i] {
+                let (tile_index, attributes_byte) = if let Some(ta) =
+                    mmio.mgb_frozen_oam_tile_attr(i as u8)
+                {
+                    // MGB OAM-DMA-during-HALT merge: the frozen OAM bus feeds the
+                    // PPU merged tile/attr for this entry (see mmio).
+                    ta
+                } else if self.oam_reader.ghost_slot[i] {
                     (
                         mmio.ppu_read_oam_live(0xFE00 + (i as u16) * 4 + 2),
                         mmio.ppu_read_oam_live(0xFE00 + (i as u16) * 4 + 3),

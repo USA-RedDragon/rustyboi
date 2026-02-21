@@ -738,6 +738,10 @@ pub struct Mmio {
     is_agb: bool,
     // CGB-D/E revision gate for PPU/timer (see `set_cgb_de`).
     cgb_de: bool,
+    // MGB (Game Boy Pocket) hardware flag. Only the OAM-DMA-during-HALT merge
+    // (see `mgb_frozen_oam_entry`) branches on it; unset for DMG/CGB/AGB/SGB.
+    #[serde(default)]
+    is_mgb: bool,
 }
 
 impl Default for Mmio {
@@ -856,6 +860,7 @@ impl Mmio {
             cgb_features_enabled: false, // Will be set when cartridge is inserted
             is_agb: false,
             cgb_de: false,
+            is_mgb: false,
         }
     }
 
@@ -901,6 +906,13 @@ impl Mmio {
         self.is_agb = agb;
         self.audio.set_agb(agb);
         self.timer.set_agb(agb);
+    }
+
+    /// Set the MGB (Game Boy Pocket) hardware flag. Only gates the undocumented
+    /// OAM-DMA-during-HALT OAM merge (`mgb_frozen_oam_entry`). Called once from
+    /// `GB::new` for Hardware::MGB.
+    pub fn set_mgb(&mut self, mgb: bool) {
+        self.is_mgb = mgb;
     }
 
     /// Whether this is AGB hardware (Gambatte isAgb()).
@@ -3404,9 +3416,103 @@ impl Mmio {
     pub fn peek_oam_pos(&self, out: &mut [u8; 80]) {
         for i in 0..40 {
             let base = OAM_START + (i as u16) * 4;
-            out[2 * i] = self.oam.read(base);
-            out[2 * i + 1] = self.oam.read(base + 1);
+            let (y, x) = match self.mgb_frozen_oam_entry(i as u8) {
+                Some([y, x, _, _]) => (y, x),
+                None => (self.oam.read(base), self.oam.read(base + 1)),
+            };
+            out[2 * i] = y;
+            out[2 * i + 1] = x;
         }
+    }
+
+    /// Undocumented MGB (Game Boy Pocket) OAM-DMA-during-HALT merge.
+    ///
+    /// When the CPU halts (no interrupt, never wakes) while an OAM DMA is still
+    /// mid-transfer, the DMA freezes with `dma_pos` parked on the byte it was
+    /// about to write. On MGB the frozen OAM access leaves the OAM bus stuck: the
+    /// PPU reading the sprite entry whose bytes are being written sees the pending
+    /// DMA source byte OR-ed with the stale OAM bytes, not the real OAM. Verified
+    /// only on MGB (DMG/CGB/AGB produce different results); documented by Gekkio's
+    /// `madness/mgb_oam_dma_halt_sprites`.
+    ///
+    /// For the entry `e` whose C byte (offset 2) is the pending write index
+    /// `n = dma_pos + 1`, the four bytes the PPU reads are, with `d = src[n]`,
+    /// `s_c = stale OAM[n]` (byte-to-be-replaced) and `s_f = stale OAM[n+1]`
+    /// (the following byte):
+    ///   Y = C = (s_c | d) & $FC     (Gekkio: low two bits are always 0)
+    ///   X = F = (s_f | d)
+    /// The merge only manifests as a visible sprite when a properly-aligned OAM
+    /// entry holds a "magic" value in range (`mgb_frozen_render_enabled`); if none
+    /// does, the corrupted entry is suppressed (returns the offscreen Y $00) so no
+    /// sprite draws, matching hardware.
+    fn mgb_frozen_oam_entry(&self, entry: u8) -> Option<[u8; 4]> {
+        if !self.is_mgb || !self.cpu_halted || !self.dma_active || self.halt_oam_grace > 0 {
+            return None;
+        }
+        if self.dma_pos >= 160 {
+            return None;
+        }
+        let n = self.dma_pos.wrapping_add(1);
+        // The pending write must land on a sprite entry's C byte (offset 2) for the
+        // Y/C and X/F merge pairing the frozen bus produces.
+        if n % 4 != 2 || n as usize + 1 >= OAM_SIZE {
+            return None;
+        }
+        if (n / 4) != entry {
+            return None;
+        }
+        if !self.mgb_frozen_render_enabled() {
+            // Force the entry offscreen so no sprite renders (Y = 0 -> screen -16).
+            return Some([0, 0, 0, 0]);
+        }
+        let d = self.dma_source_byte(n);
+        let s_c = self.oam.read(OAM_START + n as u16);
+        let s_f = self.oam.read(OAM_START + n as u16 + 1);
+        let yc = (s_c | d) & 0xFC;
+        let xf = s_f | d;
+        Some([yc, xf, yc, xf])
+    }
+
+    /// True while the MGB OAM-DMA-during-HALT merge is in effect (the DMA is
+    /// frozen mid-transfer and its C-byte write is pending). The PPU treats this
+    /// like a *non-disabled* OAM window: the frozen bus is stuck, so the Y/X scan
+    /// reads the merged OAM (via `peek_oam_pos`) rather than the DMA-window ghost.
+    pub fn mgb_frozen_merge_active(&self) -> bool {
+        if !self.is_mgb || !self.cpu_halted || !self.dma_active || self.halt_oam_grace > 0 {
+            return false;
+        }
+        if self.dma_pos >= 160 {
+            return false;
+        }
+        let n = self.dma_pos.wrapping_add(1);
+        n % 4 == 2 && (n as usize + 1) < OAM_SIZE
+    }
+
+    /// Public view of the MGB frozen-OAM merge for a sprite's tile (offset 2) and
+    /// attribute (offset 3) bytes. `None` when the merge does not apply, so the
+    /// caller falls back to the normal OAM read.
+    pub fn mgb_frozen_oam_tile_attr(&self, entry: u8) -> Option<(u8, u8)> {
+        self.mgb_frozen_oam_entry(entry).map(|e| (e[2], e[3]))
+    }
+
+    /// The MGB frozen-OAM "magic enable": a sprite only renders if at least one
+    /// 4-aligned OAM entry holds bytes within the ranges Gekkio documents
+    /// (Y0 $98..$9F, X0 $00..$A7, Y1 $09..$9F, X1 $00..$A7). Position does not
+    /// matter and one qualifying entry suffices.
+    fn mgb_frozen_render_enabled(&self) -> bool {
+        let oam = self.oam.as_slice();
+        for i in 0..40usize {
+            let b = i * 4;
+            let (a0, a1, a2, a3) = (oam[b], oam[b + 1], oam[b + 2], oam[b + 3]);
+            if (0x98..=0x9F).contains(&a0)
+                && a1 <= 0xA7
+                && (0x09..=0x9F).contains(&a2)
+                && a3 <= 0xA7
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Source-region classification of the active OAM DMA (mirrors

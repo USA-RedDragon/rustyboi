@@ -136,6 +136,7 @@ impl GB {
         let mut mmio = memory::mmio::Mmio::new();
         mmio.set_serial_cgb(hardware.is_cgb_like());
         mmio.set_agb(hardware.is_agb());
+        mmio.set_mgb(matches!(hardware, Hardware::MGB));
         mmio.set_apu_cgb_de(hardware.is_cgb_d_or_later());
         mmio.set_cgb_de(hardware.is_cgb_d_or_later());
         mmio.set_apu_cgb_le_b(hardware.is_cgb_b_or_earlier());
