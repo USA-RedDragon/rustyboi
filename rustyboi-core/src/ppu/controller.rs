@@ -169,6 +169,16 @@ const CGBWG_BG_MAP_FALL: u64 = 2;
 const CGBWG_SCY_ADD: u64 = 1;
 const CGBWG_QUIRK_WIN: u64 = 7;
 const CGBWG_QUIRK_BG: u64 = 4;
+// Inter-edge A12 re-arm settle (see cgb_wg_resolve): a rising LCDC.4 edge that
+// follows its prior falling edge by <= CGBWG_A12_GAP dots re-arms the address bus
+// while it is still slewing from that fall, so the rise's visibility is delayed
+// CGBWG_A12_REARM extra dots. GAP is the LCDC.4 pulse low-phase width the
+// tile_sel_change2 write loop uses; a single isolated change pulse never re-fires
+// low->high inside this span, so the extension is pulse-train-only (physical
+// inter-edge spacing, not a per-tile coincidence). Calibrated once against the
+// mealybug tile_sel_change / tile_sel_change2 cgb-c references.
+const CGBWG_A12_GAP: u64 = 16;
+const CGBWG_A12_REARM: u64 = 1;
 const CGBWG_ARM_WIN: u64 = 14;
 const CGBWG_ARM_WIN_HI: u64 = 12;
 const CGBWG_ARM_BG: u64 = 14;
@@ -2411,12 +2421,29 @@ impl Ppu {
         let tds = LCDCFlags::BGWindowTileDataSelect as u8;
         let mut bits = self.wg_hist[0].1;
         let mut quirk = false;
+        let mut prev_fall_w: Option<i64> = None;
         for &(t, old, new) in &self.wg_hist {
             let w = t - WG_TRANSITION_DELAY; // raw write commit cc
             let rising = !old & new;
             let falling = old & !new;
+            // Inter-edge A12 settle: a RISING LCDC.4 edge whose prior FALLING edge
+            // was within CGBWG_A12_GAP dots re-arms the address bus while it is
+            // still slewing from that fall, so the rise's visibility is delayed an
+            // extra CGBWG_A12_REARM dot. This fires only inside a repeated LCDC.4
+            // pulse train (a lone rise->fall pulse has no prior fall), which is the
+            // physical difference between tile_sel_change2 (fast pulse train, the
+            // high/low bitplanes split across the slewed rise) and tile_sel_change
+            // (a single isolated pulse that settles cleanly). Keyed on inter-edge
+            // spacing, not per-tile — so it is not the zero-sum threshold tweak.
+            let rearm = if (rising & tds) != 0 {
+                match prev_fall_w {
+                    Some(pw) if (w as i64 - pw) <= CGBWG_A12_GAP as i64 => CGBWG_A12_REARM,
+                    _ => 0,
+                }
+            } else { 0 };
+            if (falling & tds) != 0 { prev_fall_w = Some(w as i64); }
             let mut applied = 0u8;
-            if h >= w + rise {
+            if h >= w + rise + rearm {
                 applied |= rising;
             }
             if h >= w + fall {
