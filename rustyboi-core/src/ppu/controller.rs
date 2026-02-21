@@ -2450,20 +2450,25 @@ impl Ppu {
                 applied |= falling;
             }
             bits = (bits & !applied) | (new & applied);
-            // The tile-index-as-data quirk fires when a falling LCDC.4 write
-            // commits on the exact dot a tile-data fetch samples the tds bit.
-            // SameBoy asserts `tile_sel_glitch` only when that coincidence lands
-            // on a data-fetch T1 read that the tile still consumes; once the
-            // fetcher has passed the low-plane read the write only splits the
-            // NEXT tile (a +2-dot sprite stall pushes the coincidence onto the
-            // high-plane / push slot). On the BG grid the coincidence is
-            // consumed only by the low-plane read (k==1) — a k==2-only hit is
-            // the stalled-past-the-tile case SameBoy does not glitch
-            // (m3_lcdc_tile_sel_change2: LY32-39 glitch vs LY48-55 do not, the
-            // sole difference being the sprite-X that shifts the coincidence
-            // from the low read to the push slot). Window keeps the k>=1 rule.
-            let quirk_k = if quirk_add == CGBWG_QUIRK_BG { k == 1 } else { k >= 1 };
-            if quirk_k && (falling & tds) != 0 && h == w + quirk_add {
+            // The tile-index-as-data quirk fires when a falling LCDC.4 write's
+            // 1-cycle `tile_sel_glitch` window (SameBoy sm83_cpu.c
+            // CONFLICT_LCDC_CGB: set true, advance 1 cycle, set false) coincides
+            // with a tile-data T2 read. SameBoy calls `data_for_tile_sel_glitch`
+            // in BOTH GET_TILE_DATA_LOWER_T2 (k==1) and GET_TILE_DATA_HIGH_T2
+            // (k==2), so which bitplane glitches is decided by which T2 read lands
+            // in the 1-cycle window, not by k. The true SameBoy fetch dot `h_scy`
+            // is `h - CGBWG_QUIRK_BG`; the write's active window is [w, w+1], i.e.
+            // `w + CGBWG_QUIRK_BG <= h <= w + CGBWG_QUIRK_BG + 1` in the calibrated
+            // `h` grid. This selects k==1 when the low read straddles the fall
+            // (tile_sel_change2 LY32-phase) and k==2 when the high read does
+            // (LY40-phase), matching the instrumented CGB-C tester per line. The
+            // window path keeps its single k-uniform w+quirk_add coincidence.
+            let hit = if quirk_add == CGBWG_QUIRK_BG {
+                (k == 1 || k == 2) && h >= w + quirk_add && h <= w + quirk_add + 1
+            } else {
+                k >= 1 && h == w + quirk_add
+            };
+            if hit && (falling & tds) != 0 {
                 quirk = true;
             }
         }
