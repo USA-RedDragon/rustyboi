@@ -1,10 +1,14 @@
 # gbmicrotest (DMG-CPU-08). FF82==0x01 pass. Run: --frames 60
 # VERIFIED (src @gbmicrotest463eb6b, oracle: libgambatte externalRead FF80-82 @60 frames):
-# 480/513. The 33 remaining fails are NOT emulation bugs reachable under this grading:
-#  - 29 display-only testbenches (no test_finish/test_end in source; verdict is a raw
-#    measured value looped to VRAM $8000, never FF82). FF82=0x64 = DMG power-on HRAM residue.
-#  - 2 DMA-clobber artifacts (400-dma, dma_basic): the ROM copies its DMA routine INTO
-#    HRAM over FF80-82 and never writes a verdict; rustyboi == Gambatte byte-identical.
+# 485/513. 4 ROMs report to VRAM $8000 not FF82; graded via `mem 8000=VAL`
+# with a disassembly-justified hardware byte (poweron=80 NR10 read-mask,
+# 004-tima_boot_phase/004-tima_cycle_timer=55 calibrated-add pass byte,
+# ppu_spritex_vs_scx=55 self-check pass / FF fail). The 29 remaining fails
+# are NOT emulation bugs reachable under this grading:
+#  - display-only sweep/screenshot testbenches (no verdict; a raw measured
+#    value or screen pattern swept by a hand-varied .define, no single pass byte).
+#  - 2 DMA-clobber artifacts (400-dma, dma_basic): the ROM copies its DMA routine
+#    INTO HRAM over FF80-82 and never writes a verdict; rustyboi == Gambatte.
 #  - 2 hardware-only quirks where rustyboi == Gambatte (both fail identically):
 #    halt_op_dupe_delay, stat_write_glitch_l154_d (needs GateBoy-level LCD-enable modeling).
 # Run --frames 600 for is_if_set_during_ime0.
@@ -12,8 +16,8 @@
 000-write_to_x8000|dmg|memauto|gb-test-roms/gbmicrotest/000-write_to_x8000.gb
 001-vram_unlocked|dmg|memauto|gb-test-roms/gbmicrotest/001-vram_unlocked.gb
 002-vram_locked|dmg|memauto|gb-test-roms/gbmicrotest/002-vram_locked.gb
-004-tima_boot_phase|dmg|memauto|gb-test-roms/gbmicrotest/004-tima_boot_phase.gb
-004-tima_cycle_timer|dmg|memauto|gb-test-roms/gbmicrotest/004-tima_cycle_timer.gb
+004-tima_boot_phase|dmg|mem|gb-test-roms/gbmicrotest/004-tima_boot_phase.gb|8000=55
+004-tima_cycle_timer|dmg|mem|gb-test-roms/gbmicrotest/004-tima_cycle_timer.gb|8000=55
 007-lcd_on_stat|dmg|memauto|gb-test-roms/gbmicrotest/007-lcd_on_stat.gb
 400-dma|dmg|memauto|gb-test-roms/gbmicrotest/400-dma.gb
 500-scx-timing|dmg|memauto|gb-test-roms/gbmicrotest/500-scx-timing.gb
@@ -281,7 +285,7 @@ oam_write_l1_c|dmg|memauto|gb-test-roms/gbmicrotest/oam_write_l1_c.gb
 oam_write_l1_d|dmg|memauto|gb-test-roms/gbmicrotest/oam_write_l1_d.gb
 oam_write_l1_e|dmg|memauto|gb-test-roms/gbmicrotest/oam_write_l1_e.gb
 oam_write_l1_f|dmg|memauto|gb-test-roms/gbmicrotest/oam_write_l1_f.gb
-poweron|dmg|memauto|gb-test-roms/gbmicrotest/poweron.gb
+poweron|dmg|mem|gb-test-roms/gbmicrotest/poweron.gb|8000=80
 poweron_bgp_000|dmg|memauto|gb-test-roms/gbmicrotest/poweron_bgp_000.gb
 poweron_div_000|dmg|memauto|gb-test-roms/gbmicrotest/poweron_div_000.gb
 poweron_div_004|dmg|memauto|gb-test-roms/gbmicrotest/poweron_div_004.gb
@@ -364,7 +368,7 @@ ppu_sprite0_scx6_b|dmg|memauto|gb-test-roms/gbmicrotest/ppu_sprite0_scx6_b.gb
 ppu_sprite0_scx7_a|dmg|memauto|gb-test-roms/gbmicrotest/ppu_sprite0_scx7_a.gb
 ppu_sprite0_scx7_b|dmg|memauto|gb-test-roms/gbmicrotest/ppu_sprite0_scx7_b.gb
 ppu_sprite_testbench|dmg|memauto|gb-test-roms/gbmicrotest/ppu_sprite_testbench.gb
-ppu_spritex_vs_scx|dmg|memauto|gb-test-roms/gbmicrotest/ppu_spritex_vs_scx.gb
+ppu_spritex_vs_scx|dmg|mem|gb-test-roms/gbmicrotest/ppu_spritex_vs_scx.gb|8000=55
 ppu_win_vs_wx|dmg|memauto|gb-test-roms/gbmicrotest/ppu_win_vs_wx.gb
 ppu_wx_early|dmg|memauto|gb-test-roms/gbmicrotest/ppu_wx_early.gb
 sprite4_0_a|dmg|memauto|gb-test-roms/gbmicrotest/sprite4_0_a.gb
