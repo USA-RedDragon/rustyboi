@@ -115,7 +115,13 @@ impl SM83 {
                     mmio.set_oam_dma_stop_freeze(false);
                     if mmio.in_stop_window() {
                         let in_period_unhalt = mmio.hdma_in_period_for_unhalt();
-                        mmio.stop_window_exit_reflag(in_period_unhalt);
+                        let dsb = mmio.is_double_speed_mode();
+                        let unhalt_cc = mmio.master_cc() as i64;
+                        let edge = mmio
+                            .ppu
+                            .hdma_m0_edge(dsb)
+                            .map(|e| (e, unhalt_cc));
+                        mmio.stop_window_exit_reflag_edge(in_period_unhalt, edge);
                     }
                 }
                 return slice;

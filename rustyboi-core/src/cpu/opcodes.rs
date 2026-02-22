@@ -99,9 +99,17 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             let cc = mmio.mmio.master_cc();
             let dsb = mmio.is_double_speed_mode();
             let in_period_now = mmio.ppu.hdma_disable_fires(cc, dsb).unwrap_or(false);
+            // Gambatte `prefetched = hdmaReqFlagged`: a block is owed at the STOP only
+            // if this period's m0-edge flagged `intevent_dma` and it has NOT yet run.
+            // When the period's block already ran (`hdma_block_done_this_period`, e.g.
+            // an in-period FF55 kick serviced it this line), `hdmaReqFlagged` is false
+            // and `haltHdmaState_` captures `hdma_high` — the SS->DS synchronous fire
+            // must NOT run; the next (post-window) m0 edge fires the following block
+            // (hdma_m0speedchange_late_m3wakeup_*_2).
             if to_double && in_period_now
                 && mmio.mmio.hdma_is_enabled()
                 && !mmio.mmio.hdma_req_pending()
+                && !mmio.mmio.hdma_block_done_this_period()
             {
                 // SS->DS, m0 edge already crossed at stop: the block is latched
                 // (Gambatte `prefetched`, single speed not acked). WHEN it fires
