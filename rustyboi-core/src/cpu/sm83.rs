@@ -39,6 +39,16 @@ pub struct SM83 {
     /// cc and the timer-read facet must not re-add the advance.
     #[serde(default)]
     pub m2_halt_stall_charged: bool,
+    /// FAITHFUL HALT-EXIT (CGB dma-due deferral): a Requested multi-block HDMA at
+    /// CGB HALT-exit with a pending IME=1 interrupt fires its block at unhalt and
+    /// then executes ONE post-HALT instruction BEFORE the interrupt is serviced —
+    /// Gambatte's `intevent_dma` handler (memory.cpp:280-287) prefetches the
+    /// post-HALT opcode, runs `dma()`, then `setMinIntTime(cc)` so the interrupt
+    /// event cannot fire until after that instruction. Set on the unhalt step,
+    /// consumed on the same step to skip the immediate service and run the
+    /// prefetched resume opcode; the interrupt stays pending for the next step.
+    #[serde(default)]
+    pub hdma_dma_due_defer_service: bool,
 }
 
 impl Default for SM83 {
@@ -59,6 +69,7 @@ impl SM83 {
             prefetched: false,
             halt_bug_prefetch: false,
             m2_halt_stall_charged: false,
+            hdma_dma_due_defer_service: false,
         }
     }
 
@@ -445,6 +456,27 @@ impl SM83 {
                         if mmio.hdma_length() != 0 {
                             mmio.set_hdma_resume_shadow_window(true);
                         }
+                        // FAITHFUL HALT-EXIT (CGB dma-due deferral): when IME is on and
+                        // the wake services a CGB interrupt, Gambatte's HALT-exit does
+                        // NOT service the interrupt on the same boundary the block is
+                        // flagged: `intevent_interrupts` flags the block (dma event = 0),
+                        // then `if (cc >= eventTime(intevent_dma)) break;` (memory.cpp:314)
+                        // exits BEFORE the `if (ime()) interrupt()` — so the block's
+                        // `intevent_dma` fires first, its handler prefetches the post-HALT
+                        // opcode and pushes `setMinIntTime` past the transfer
+                        // (memory.cpp:281-286), and the CPU executes exactly ONE post-HALT
+                        // instruction before the interrupt event re-fires. Defer the
+                        // service one instruction for that shape (multi-block Requested,
+                        // the only case whose held block flags dma-due at unhalt). The
+                        // sibling with no post-HALT side effect (a NOP) is unaffected; the
+                        // `ldaaimm` target's post-HALT `ld (nn),a` write now lands before
+                        // the ISR reads it, matching hardware.
+                        if self.registers.ime
+                            && mmio.mmio.is_cgb()
+                            && mmio.hdma_length() != 0
+                        {
+                            self.hdma_dma_due_defer_service = true;
+                        }
                         // per-access STAGE 2 (FACET 3): the Requested-held block is
                         // about to fire at unhalt. Arm the sub-block-cc consume so
                         // the next-line m0 edge that re-arms the following block is
@@ -620,6 +652,30 @@ impl SM83 {
             self.opcode = mmio.fetch_opcode(self.registers.pc);
             self.registers.pc = self.registers.pc.wrapping_add(1);
             self.prefetched = true;
+        }
+
+        // FAITHFUL HALT-EXIT (CGB dma-due deferral): run the prefetched post-HALT
+        // instruction WITHOUT servicing — the interrupt stays pending and dispatches
+        // on the next boundary. Scoped by the flag to the multi-block Requested CGB
+        // IME-on wake (see the set site above). Block1 fires on its own path during
+        // this instruction (deferred stall preserves block2's next/same-line edge);
+        // only the post-HALT `ld (nn),a` write's PPU mode check is biased forward by
+        // block1's transfer span so it lands in the post-transfer mode-0 window
+        // (Gambatte's `intevent_dma` advances the PPU across that transfer first).
+        if just_unhalted && std::mem::take(&mut self.hdma_dma_due_defer_service) {
+            let ds = mmio.mmio.is_double_speed_mode();
+            let block_span: u64 = 0x10 * (2 + 2 * ds as u64) + 4;
+            mmio.mmio.set_hdma_dma_due_write_cc_bias(block_span);
+            let op = self.opcode;
+            self.prefetched = false;
+            if std::mem::take(&mut self.halt_bug_prefetch) {
+                mmio.tick_opcode_fetch_mcycle();
+            }
+            cycles += self.execute(op, mmio);
+            mmio.mmio.set_hdma_dma_due_write_cc_bias(0);
+            self.apply_ime_delay();
+            mmio.set_hdma_resume_lockstep_window(false);
+            return cycles;
         }
 
         if self.registers.ime && serviceable.is_some() {
