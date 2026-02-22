@@ -1802,6 +1802,13 @@ impl Mmio {
         self.hdma_req_pending
     }
 
+    /// Whether this HDMA period's block has already been serviced (Gambatte:
+    /// the `intevent_dma` for this m0 edge already ran and acked, so
+    /// `hdmaReqFlagged` is false — no block is owed/`prefetched` at a STOP).
+    pub fn hdma_block_done_this_period(&self) -> bool {
+        self.hdma_block_done_this_period
+    }
+
     /// Remaining HDMA blocks minus one (the FF55 length field). 0 => the next
     /// block completes the transfer.
     pub fn hdma_length(&self) -> u8 {
@@ -2361,7 +2368,23 @@ impl Mmio {
     /// `(hdmaEnabled && isHdmaPeriod(cc) && state==low) || state==requested`.
     /// `in_period_unhalt` is `isHdmaPeriod(unhalt_cc)` (renderer-exact). Clears the
     /// stop-window suppression and fires the block when the gate passes.
-    pub fn stop_window_exit_reflag(&mut self, in_period_unhalt: bool) {
+    ///
+    /// `window_end_edge`: when a `High`-at-stop block re-enters the HDMA period on a
+    /// FRESH line during the 0x20000 unhalt window (its per-dot m0 edge is suppressed
+    /// while halted), Gambatte's `memevent_hdma` — scheduled at that line's mode-0 time
+    /// — fires the block right after unhalt, but only if the edge lands at/after the
+    /// unhalt cc (`m0_grid > unhaltAt`; an edge already consumed a line earlier does
+    /// not re-fire). `window_end_edge = Some((m0_edge_cc, unhalt_cc))` carries the
+    /// window-end line's mode-0 edge (`hdma_m0_edge`, master cc) and the unhalt cc so
+    /// this boundary is resolved. When the edge wins, fire block2 here; otherwise the
+    /// natural next-line per-dot m0 edge fires it (one line later), which is exactly
+    /// the `hdma_m0speedchange_late_m3wakeup_*` `_1` (edge wins -> outFF) vs `_2`
+    /// (edge misses -> block deferred one line -> out00) split.
+    pub fn stop_window_exit_reflag_edge(
+        &mut self,
+        in_period_unhalt: bool,
+        window_end_edge: Option<(i64, i64)>,
+    ) {
         self.in_stop_window = false;
         let reflag = matches!(self.halt_hdma_state, HaltHdmaState::Requested)
             || (self.hdma_enabled
@@ -2370,7 +2393,29 @@ impl Mmio {
         if reflag {
             self.set_hdma_req();
             self.fire_pending_hdma_mcycle();
+            return;
         }
+        // High-at-stop block that re-entered the HDMA period on a fresh line during
+        // the window: fire it here iff the window-end line's mode-0 edge wins the
+        // `memevent_hdma`-vs-unhalt race. The unhalt cc runs 4 cc below Gambatte's
+        // `unhaltAt` (rustyboi's window exit = stop_cc + 0x20000, Gambatte's
+        // unhaltAt = stop_cc + 0x20000 + 4) and the m0 edge is the `m0_time_master`
+        // anchor, so the equivalent boundary is `edge > unhalt_cc - 12`.
+        if matches!(self.halt_hdma_state, HaltHdmaState::High)
+            && in_period_unhalt
+            && self.hdma_enabled
+            && !self.hdma_block_done_this_period
+            && let Some((edge, unhalt_cc)) = window_end_edge
+            && edge > unhalt_cc - 12
+        {
+            self.set_hdma_req();
+            self.hdma_block_done_this_period = true;
+            self.fire_pending_hdma_mcycle();
+        }
+    }
+
+    pub fn stop_window_exit_reflag(&mut self, in_period_unhalt: bool) {
+        self.stop_window_exit_reflag_edge(in_period_unhalt, None);
     }
 
     /// Execute one 0x10-byte HDMA block. Caller must have verified
