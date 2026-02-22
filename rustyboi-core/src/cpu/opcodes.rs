@@ -154,6 +154,15 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             // the bridge dot count (DS->SS bridge = 1), which leaves the LyCounter
             // one master-cc high; the closed-form lyTime drops its `+1` correction.
             mmio.ppu.set_dsss_lytime_adjust();
+            // Only NON-mode-3 DS->SS switches feed the LY-read sub-dot accumulator:
+            // mode-3 DS->SS switches already carry Gambatte's `now -= 1` half-dot
+            // through the FACET-1 `stat_phase_carry` (p_now) path, which shifts the
+            // LY read's `time` directly. OAM/HBlank DS->SS switches get no such carry,
+            // so their residual half-dot is the one this accumulator tracks.
+            mmio.ppu.bump_dsss_ly_total();
+            if !dsss_mode3_switch {
+                mmio.ppu.bump_dsss_ly_phase();
+            }
         }
         mmio.perform_speed_switch();
         // Re-anchor the PPU's event-scheduled STAT/mode/LYC clocks to the new

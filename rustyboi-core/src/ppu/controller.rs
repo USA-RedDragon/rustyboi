@@ -1092,6 +1092,21 @@ pub struct Ppu {
     // longer applies. Reset to 0 when the flag is set.
     #[serde(default)]
     ssds_mode3_frames: u8,
+    // Cumulative NON-mode-3 (OAM/HBlank) DS->SS speed-switch count for the LY-read
+    // sub-dot phase accumulator (Gambatte's `PPU::speedChange` half-dot `now -= 1`,
+    // applied per switch). rustyboi's whole-dot DS->SS bridge folds the integer part;
+    // the residual half-dot per switch accumulates and its parity shifts the post-STOP
+    // getLyReg boundary read one sub-dot. Mode-3 DS->SS switches carry their residual
+    // through the FACET-1 `stat_phase_carry` path instead, so they are excluded here.
+    #[serde(default)]
+    dsss_ly_phase_count: u32,
+    // Total DS->SS switch count (INCLUDING mode-3) for the early-frame anticipation
+    // narrowing. Mode-3 DS->SS switches carry their sub-dot through FACET-1 for the
+    // glitch-dot resolution, but the anticipation-window WIDTH of an early-frame read
+    // still tracks the full switch parity (row32/row37: the extra mode-3 switches vs
+    // the calibration burst flip the narrow-window parity).
+    #[serde(default)]
+    dsss_ly_total_count: u32,
     // Set when an SS->DS speed switch executes during PixelTransfer (mode 3) and
     // the bridge dropped 2 dots (see `stop_bridge_advance`). If a subsequent
     // DS->SS switch follows (the double-switch speedchange{2..5} families), that
@@ -1568,6 +1583,8 @@ impl Ppu {
             lytime_no_plus1: false,
             ssds_mode3_ly_advance: false,
             ssds_mode3_frames: 0,
+            dsss_ly_phase_count: 0,
+            dsss_ly_total_count: 0,
             sc_mode3_pullback_pending: false,
             dsss_mode3_stop_count: 0,
             render_carry_skew_cc: 0,
@@ -3616,6 +3633,31 @@ impl Ppu {
     /// the counter one master-cc high). See ENGINE_LAZY_PPU.md bug #2.
     pub fn set_dsss_lytime_adjust(&mut self) {
         self.lytime_no_plus1 = true;
+    }
+
+    /// Register a NON-mode-3 (OAM/HBlank) DS->SS speed switch for the LY-read
+    /// sub-dot phase accumulator. Gambatte's `PPU::speedChange` applies `now -= 1`
+    /// (a half-dot) on every DS->SS switch; rustyboi's whole-dot DS->SS bridge folds
+    /// the integer part, and mode-3 switches carry their residual through the FACET-1
+    /// `stat_phase_carry` (p_now) path. This tracks the OAM/HBlank switches that have
+    /// no such carry: their accumulated parity determines whether a post-STOP boundary
+    /// LY read lands one sub-dot early (anticipated) or late (stale).
+    pub fn bump_dsss_ly_phase(&mut self) {
+        self.dsss_ly_phase_count += 1;
+    }
+    /// Register any DS->SS switch (including mode-3) for the total-parity accumulator.
+    pub fn bump_dsss_ly_total(&mut self) {
+        self.dsss_ly_total_count += 1;
+    }
+    fn dsss_ly_total_par(&self) -> i64 {
+        (self.dsss_ly_total_count % 2) as i64
+    }
+    pub fn dsss_ly_phase_par(&self) -> i64 {
+        (self.dsss_ly_phase_count % 2) as i64
+    }
+    /// True once any post-STOP DS->SS switch has accumulated a sub-dot phase.
+    pub fn dsss_ly_phase_active(&self) -> bool {
+        self.dsss_ly_phase_count > 0
     }
 
     /// Latch the SS->DS-during-mode3 FF44 (LY) read phase advance. Consumed only
@@ -8898,19 +8940,52 @@ impl Ppu {
             }
             return None;
         }
-        if tn <= 10 && tn <= 6 + 4 * (ds as i64) {
-            let result = if tn == 6 + 4 * (ds as i64) {
-                // Glitch dot: the register briefly shows `ly & (ly+1)` (a partial
-                // latch that only bites at a carry boundary, e.g. 0x8F->0x90 folds to
-                // 0x80, odd->even folds the low bit). CGB-D/E does NOT fold here — it
-                // reads the stale pre-increment `ly` instead. The age lcd-align-ly
-                // sweep pins this: at the 143->144 glitch dot cgbBC reads 0x80 while
-                // cgbE reads 0x8F (143), and at the 1->2 dot cgbBC reads 0 while cgbE
-                // reads 1. Non-carry `ly` values (0,2,152) fold to themselves, so the
-                // two revisions coincide except at those carry boundaries.
-                if mmio.is_cgb_de() {
+        let glitch = 6 + 4 * (ds as i64);
+        // POST-STOP sub-dot phase (age lcd-align-ly): after DS->SS speed switches the
+        // LY-read phase carries an accumulated half-dot Gambatte applies per switch
+        // (`PPU::speedChange` `now -= 1`) that rustyboi's whole-dot DS->SS bridge folds.
+        // The residual parity (`dsss_ly_phase_count`) shifts a boundary read one sub-dot,
+        // so it never lands on the exact partial-latch glitch dot. par==1 pulls the read
+        // one sub-dot EARLIER (into the anticipation window) for a FULL-carry boundary
+        // (low nibble all set, e.g. 143=0x8F -> 0x90: the increment ripples the whole
+        // low nibble, giving a wider pre-increment window), but a SIMPLE-flip boundary
+        // (e.g. 0->1) whose window is one dot narrower falls to the stale pre-increment
+        // register instead. par==0 leaves the read one sub-dot LATER (stale). This makes
+        // the on-glitch-dot read resolve cleanly (no fold) and narrows the simple-flip
+        // anticipation window by one dot under par==1, both revision-independent.
+        let post_stop = self.dsss_ly_phase_active();
+        let par1 = post_stop && self.dsss_ly_phase_par() == 1;
+        // Under par==1 the accumulated sub-dot lands the boundary read differently by
+        // frame position: reads late in the frame (LY in the mode-1/VBlank region,
+        // >= 143) still fall inside the pre-increment window, while reads early in the
+        // frame (visible region, LY < 143) sit one dot short and read the stale
+        // register. The early-frame anticipation NARROWING keys on the TOTAL switch
+        // parity (mode-3 switches shift the read sub-dot via FACET-1 but still flip the
+        // window width): odd total parity narrows the visible-region window by one dot.
+        let total_par1 = post_stop && self.dsss_ly_total_par() == 1;
+        let early_frame = total_par1 && (ly_reg as u32) < 143;
+        // Early-frame par==1 reads sit one dot short of the pre-increment window: both
+        // the glitch dot and the last window dot (`tn == glitch-1`) read the stale
+        // register, so shrink the anticipation entry by 2 (the excluded tail falls
+        // through to the renderer register, which holds the same stale pre-increment
+        // value). Late-frame (LY >= 143) par==1 reads keep the full window and only the
+        // glitch dot resolves specially below.
+        let narrow = if early_frame { 2 } else { 0 };
+        if tn <= 10 && tn <= glitch - narrow {
+            let result = if tn == glitch {
+                if post_stop {
+                    // Off-exact glitch dot (no partial-latch fold in the post-STOP
+                    // regime): late-frame reads anticipate, early-frame reads stay stale.
+                    if par1 && (ly_reg as u32) >= 143 {
+                        ly_reg + 1
+                    } else {
+                        ly_reg
+                    }
+                } else if mmio.is_cgb_de() {
+                    // CGB-D/E does NOT fold: it reads the stale pre-increment `ly`.
                     ly_reg
                 } else {
+                    // Steady-state glitch dot: partial-latch fold `ly & (ly+1)`.
                     ly_reg & (ly_reg + 1)
                 }
             } else {
