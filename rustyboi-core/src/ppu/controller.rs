@@ -3655,6 +3655,17 @@ impl Ppu {
     pub fn dsss_ly_phase_par(&self) -> i64 {
         (self.dsss_ly_phase_count % 2) as i64
     }
+    /// Fractional-bridge whole-dot term for the row37 early-frame boundary read.
+    /// Each non-mode-3 DS->SS switch is a HALF dot (`now -= 1`); the read anticipates
+    /// only until the accumulated half-dot stream has folded a WHOLE dot with the same
+    /// phase-parity that keeps the boundary within the pre-increment window. `count % 4
+    /// == 2` marks the fold state where the visible-region increment is held one dot
+    /// longer (SameBoy reads the anticipated LY where the age ROM's real-hardware table
+    /// reads the stale value). Separates row37 (high switch count) from the
+    /// same-`total`-parity low-count records that DO anticipate.
+    pub fn dsss_ly_phase_whole_par(&self) -> i64 {
+        (self.dsss_ly_phase_count % 4 == 2) as i64
+    }
     /// True once any post-STOP DS->SS switch has accumulated a sub-dot phase.
     pub fn dsss_ly_phase_active(&self) -> bool {
         self.dsss_ly_phase_count > 0
@@ -8970,14 +8981,28 @@ impl Ppu {
         // through to the renderer register, which holds the same stale pre-increment
         // value). Late-frame (LY >= 143) par==1 reads keep the full window and only the
         // glitch dot resolves specially below.
-        let narrow = if early_frame { 2 } else { 0 };
+        // Fractional-bridge extra narrowing (row37): a high-switch-count early-frame
+        // read whose accumulated non-mode-3 half-dot phase has folded a whole dot
+        // (`dsss_ly_phase_count % 4 == 2`) holds the visible-region LY increment one
+        // dot longer than the first-order `total`-parity window. Exclude the glitch-1
+        // boundary dot (tn == glitch-2) so it falls through to the stale renderer
+        // register — the value the age ROM's real-hardware expected table captures.
+        let frac_narrow = if early_frame && self.dsss_ly_phase_whole_par() == 1 { 2 } else { 0 };
+        let narrow = if early_frame { 2 + frac_narrow } else { 0 };
         if tn <= 10 && tn <= glitch - narrow {
             let result = if tn == glitch {
                 if post_stop {
-                    // Off-exact glitch dot (no partial-latch fold in the post-STOP
-                    // regime): late-frame reads anticipate, early-frame reads stay stale.
-                    if par1 && (ly_reg as u32) >= 143 {
-                        ly_reg + 1
+                    // Post-STOP glitch dot: real silicon (age lcd-align-ly expected
+                    // table) reads the partial-latch fold `ly & (ly+1)` here (the
+                    // half-latched LY during the increment: 143->144 reads 0x80 =
+                    // 0x8F & 0x90) when the accumulated sub-dot phase lands the read ON
+                    // the latch boundary — odd non-mode-3 phase (`par1`) OR odd total
+                    // switch parity (`total_par1`). On even/even the read sits one
+                    // sub-dot off the boundary and reads the stale pre-increment `ly`.
+                    // SameBoy models neither (reads the clean anticipated value); the
+                    // age ROM's captured hardware does.
+                    if par1 || total_par1 {
+                        ly_reg & (ly_reg + 1)
                     } else {
                         ly_reg
                     }
