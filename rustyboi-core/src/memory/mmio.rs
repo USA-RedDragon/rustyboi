@@ -283,6 +283,11 @@ pub struct Mmio {
     // CGB HDMA state
     hdma_source: u16,       // HDMA source address (advances per byte)
     hdma_dest: u16,         // HDMA destination (advances per byte; low 13 bits used for VRAM offset)
+    // Back-to-back GDMA word-bus conflict: set true while an OAM DMA is active once a
+    // GDMA-conflict pass has run in this OAM-DMA lifetime, so the NEXT GDMA block (no
+    // OAM-DMA completion in between) is recognised as a back-to-back second block.
+    #[serde(skip, default)]
+    gdma_conflict_ran: bool,
     // Blocks-remaining-minus-one, matching Gambatte's `dmaLength/0x10 - 1`.
     // 0x7F means "fully done": FF55 reads as 0xFF.
     hdma_length: u8,
@@ -810,6 +815,7 @@ impl Mmio {
             wram_banks: (0..6).map(|_| memory::Memory::new()).collect(), // Banks 2-7
             hdma_source: 0,
             hdma_dest: 0,
+            gdma_conflict_ran: false,
             hdma_length: 0,
             hdma_enabled: false,
             pending_dma_stall: 0,
@@ -1733,9 +1739,22 @@ impl Mmio {
         // in-flight conflict byte (hdma_transition_speedchange_oamdma: read 0x60
         // where Gambatte's frozen position reads 0x71).
         let interleave = self.dma_active && !self.oam_dma_stop_freeze;
-        if interleave {
+        // The one-M-cycle catch-up corrects the `step_dma` tick that ran before this
+        // FF55 write resolved. A back-to-back second block follows its predecessor
+        // with no intervening `step_dma` (the two FF55 writes are adjacent), so its
+        // OAM-DMA position was already caught up by the first block — catching up
+        // again would end the OAM DMA one M-cycle early (drops the last conflict
+        // clobber, e.g. OAM[45] in oamdmasrcC000_..._2xgdmalen09).
+        if interleave && !self.gdma_conflict_ran {
             self.dma_advance_one_mcycle();
         }
+        // Back-to-back second GDMA block: the OAM DMA is still mid-flight from a
+        // FIRST GDMA-conflict pass in the same lifetime (no OAM-DMA completion in
+        // between). Hardware's 16-bit word bus then holds the first block's already
+        // word-written low OAM cells across the FF55-rewrite boundary gap, so this
+        // block's low-address re-wrap must not re-clobber them (see
+        // `dma_conflict_advance`). A single long GDMA (one pass) is never back-to-back.
+        let back_to_back = interleave && self.gdma_conflict_ran;
         // `lOam` mirrors Gambatte's relative `lastOamDmaUpdate_`: it starts at
         // `-dma_subcycle` (dots already elapsed in the current M-cycle) and the
         // per-byte cc advance is compared against `lOam + 3` (gate `cc-3 > lOam`).
@@ -1747,7 +1766,8 @@ impl Mmio {
             cc += per_byte_cc;
             if interleave && self.dma_active && cc - 3 > loam {
                 loam += 4;
-                self.dma_conflict_advance(src, data);
+                self.gdma_conflict_ran = true;
+                self.dma_conflict_advance(src, data, back_to_back);
             }
             src = src.wrapping_add(1);
             dst = dst.wrapping_add(1);
@@ -2525,7 +2545,9 @@ impl Mmio {
             cc += per_byte_cc;
             if interleave && self.dma_active && cc - 3 > loam {
                 loam += 4;
-                self.dma_conflict_advance(src, byte);
+                // HDMA blocks are single 16-byte transfers (one per H-blank), never
+                // the back-to-back GDMA-block word-bus case.
+                self.dma_conflict_advance(src, byte, false);
             }
             self.hdma_source = self.hdma_source.wrapping_add(1);
             self.hdma_dest = self.hdma_dest.wrapping_add(1);
@@ -2761,7 +2783,17 @@ impl Mmio {
     /// `Memory::dma` inner loop (memory.cpp:357-372). Cells the GDMA bus index
     /// touches get overwritten with GDMA data; cells the OAM-DMA already wrote
     /// keep their values.
-    fn dma_conflict_advance(&mut self, src: u16, data: u8) {
+    ///
+    /// `back_to_back` engages the 16-bit-word-bus quirk of two consecutive GDMA
+    /// blocks (undocumented CGB silicon, captured by the gambatte oamdumper .dump
+    /// oracles; unmodelled by gambatte/SameBoy). When the SECOND block's source
+    /// low byte re-wraps over the low OAM cells the FIRST block already word-wrote
+    /// (`src` high byte non-zero, `src & 0xFF < first-pass frontier`), hardware's
+    /// word bus keeps the first block's value instead of re-clobbering — and that
+    /// first-pass value is the word LOOK-AHEAD `mem[src_lo + 1]` (the low byte of
+    /// the next 16-bit word the GDMA drove), not `mem[src]`. Pan Docs: "the PPU
+    /// reads whatever 16-bit word the DMA unit is writing to OAM".
+    fn dma_conflict_advance(&mut self, src: u16, data: u8, back_to_back: bool) {
         self.dma_pos = self.dma_pos.wrapping_add(1);
 
         if self.dma_pos == self.dma_start_pos {
@@ -2771,7 +2803,28 @@ impl Mmio {
 
         if (self.dma_pos as usize) < OAM_SIZE {
             let p = (src & 0xFF) as usize;
-            if p < OAM_SIZE {
+            // Second-block re-wrap into the 8-byte word-bus gap shadow: the four
+            // OAM-DMA M-cycles between the two back-to-back FF55 writes advance the
+            // OAM DMA while the GDMA source is frozen, so once the second block's
+            // source carries past its page (`src & 0xFF00 != 0`) the FIRST eight
+            // source bytes (`src & 0xFF < 8`, = 4 M-cycles x 2-byte word) still see
+            // the first block's word LOOK-AHEAD latched on the bus rather than this
+            // block's re-clobber value. For the first three shadow words the latched
+            // byte is the plain look-ahead `mem[src_lo + 1]`; on the FOURTH (the
+            // block-boundary word, `src_lo == 7`) the GDMA source has just re-aligned
+            // to a word boundary out of the frozen gap, so its low address bit shifts
+            // up one and the latched byte is `mem[((src_lo + 1) << 1) | 1]` — the high
+            // byte of the re-aligned word (0x11 for the len09 oracle, matching both
+            // the srcC000 and src8000 hardware captures).
+            let lo = src & 0x00FF;
+            // First block's source page: the second block advanced the source one page
+            // (0x100 bytes) past it, so de-carry to reach the word the first block drove.
+            let first_page = (src & 0xFF00).wrapping_sub(0x100);
+            if back_to_back && (src & 0xFF00) != 0 && lo < 8 && p < OAM_SIZE {
+                let la_off = if lo == 7 { ((lo + 1) << 1) | 1 } else { lo + 1 };
+                let la = self.dma_conflict_source_byte(first_page | la_off);
+                self.oam.write(OAM_START + p as u16, la);
+            } else if p < OAM_SIZE {
                 self.oam.write(OAM_START + p as u16, data);
             } else if self.cgb_features_enabled {
                 // p >= 160 writes the `ioamhram_` tail (0xFEA0-0xFEFF) masked
@@ -2783,6 +2836,19 @@ impl Mmio {
                 self.dma_pos = 0xFE;
                 self.dma_active = false;
             }
+    }
+
+    /// Read a GDMA conflict source byte (same open-bus rules as `copy_dma_byte`:
+    /// VRAM/echo region reads 0xFF). Used for the back-to-back word look-ahead.
+    fn dma_conflict_source_byte(&mut self, src: u16) -> u8 {
+        if (0x8000..=0x9FFF).contains(&src) || src >= 0xE000 {
+            return 0xFF;
+        }
+        let saved = self.dma_active;
+        self.dma_active = false;
+        let byte = <Self as memory::Addressable>::read(self, src);
+        self.dma_active = saved;
+        byte
     }
 
     // ---- DMG OAM corruption bug (Pan Docs "OAM Corruption Bug") ----
@@ -2975,6 +3041,9 @@ impl Mmio {
         self.dma_subcycle = 0;
         self.dma_source_base = (value as u16) << 8;
         self.dma_active = true;
+        // Fresh OAM-DMA lifetime: the next GDMA-conflict pass is the FIRST, not a
+        // back-to-back second block.
+        self.gdma_conflict_ran = false;
         self.io_registers.write(REG_DMA, value);
     }
 
