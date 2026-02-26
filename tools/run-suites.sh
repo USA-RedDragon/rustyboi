@@ -113,11 +113,11 @@ threshold() {
         rtc3test)           echo "6 -" ;;
         mbc3_tester)        echo "2 -" ;;
         cpp)                echo "3 -" ;;
-        gambatte)           echo "5245 -" ;;  # gated on failed<=12 (GAMBATTE_MAX_FAIL)
+        gambatte)           echo "5246 -" ;;  # gated on failed<=11 (GAMBATTE_MAX_FAIL)
         *)                  echo "" ;;
     esac
 }
-GAMBATTE_MAX_FAIL=12
+GAMBATTE_MAX_FAIL=11
 
 # Deterministic suite order for `all`.
 ORDER="acid2 cgb_acid_hell mealybug mooneye mooneye_wilbertpol age gbmicrotest \
