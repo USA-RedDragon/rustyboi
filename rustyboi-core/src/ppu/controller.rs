@@ -3655,17 +3655,6 @@ impl Ppu {
     pub fn dsss_ly_phase_par(&self) -> i64 {
         (self.dsss_ly_phase_count % 2) as i64
     }
-    /// Fractional-bridge whole-dot term for the row37 early-frame boundary read.
-    /// Each non-mode-3 DS->SS switch is a HALF dot (`now -= 1`); the read anticipates
-    /// only until the accumulated half-dot stream has folded a WHOLE dot with the same
-    /// phase-parity that keeps the boundary within the pre-increment window. `count % 4
-    /// == 2` marks the fold state where the visible-region increment is held one dot
-    /// longer (SameBoy reads the anticipated LY where the age ROM's real-hardware table
-    /// reads the stale value). Separates row37 (high switch count) from the
-    /// same-`total`-parity low-count records that DO anticipate.
-    pub fn dsss_ly_phase_whole_par(&self) -> i64 {
-        (self.dsss_ly_phase_count % 4 == 2) as i64
-    }
     /// True once any post-STOP DS->SS switch has accumulated a sub-dot phase.
     pub fn dsss_ly_phase_active(&self) -> bool {
         self.dsss_ly_phase_count > 0
@@ -8798,7 +8787,18 @@ impl Ppu {
                 // ly probes are unaffected by the narrowing.
                 let agb = mmio.is_agb() as i64;
                 let de = mmio.is_cgb_de() as i64;
-                if to_next - 1 <= cpl - agb - de {
+                // Post-STOP (row43): when the accumulated fractional-bridge phase is
+                // shifted off the whole dot (`shift != 0`, i.e. `render_carry_skew_cc`
+                // lands mid-dot), the line-153 HEAD read (to_next-1 == cpl-de, e.g.
+                // cgbBC to_next 457 / cgbE 456) that the steady window folds to 0 still
+                // reads 153 on real cgb04c silicon. Tighten the reads-0 window by one
+                // dot only for that shifted phase; unshifted post-STOP reads (carry a
+                // whole number of dots, shift==0, e.g. cgbE to_next 456 carry 0) and the
+                // steady gambatte line-153 families (offset2_lyc98int / lycint152_ly153)
+                // keep the un-tightened window.
+                let ls_shift = -(((self.render_carry_skew_cc + 2).rem_euclid(15)) / 5);
+                let head_hold = (self.dsss_ly_phase_active() && ls_shift != 0) as i64;
+                if to_next - 1 <= cpl - agb - de - head_hold {
                     return Some(0);
                 }
                 if de != 0 {
@@ -8955,53 +8955,36 @@ impl Ppu {
         // POST-STOP sub-dot phase (age lcd-align-ly): after DS->SS speed switches the
         // LY-read phase carries an accumulated half-dot Gambatte applies per switch
         // (`PPU::speedChange` `now -= 1`) that rustyboi's whole-dot DS->SS bridge folds.
-        // The residual parity (`dsss_ly_phase_count`) shifts a boundary read one sub-dot,
-        // so it never lands on the exact partial-latch glitch dot. par==1 pulls the read
-        // one sub-dot EARLIER (into the anticipation window) for a FULL-carry boundary
-        // (low nibble all set, e.g. 143=0x8F -> 0x90: the increment ripples the whole
-        // low nibble, giving a wider pre-increment window), but a SIMPLE-flip boundary
-        // (e.g. 0->1) whose window is one dot narrower falls to the stale pre-increment
-        // register instead. par==0 leaves the read one sub-dot LATER (stale). This makes
-        // the on-glitch-dot read resolve cleanly (no fold) and narrows the simple-flip
-        // anticipation window by one dot under par==1, both revision-independent.
+        // The accumulated whole-dot STAT-phase carry (`render_carry_skew_cc`) drives the
+        // `shift` below; `par1`/`total_par1` select the per-revision partial-latch fold.
         let post_stop = self.dsss_ly_phase_active();
         let par1 = post_stop && self.dsss_ly_phase_par() == 1;
-        // Under par==1 the accumulated sub-dot lands the boundary read differently by
-        // frame position: reads late in the frame (LY in the mode-1/VBlank region,
-        // >= 143) still fall inside the pre-increment window, while reads early in the
-        // frame (visible region, LY < 143) sit one dot short and read the stale
-        // register. The early-frame anticipation NARROWING keys on the TOTAL switch
-        // parity (mode-3 switches shift the read sub-dot via FACET-1 but still flip the
-        // window width): odd total parity narrows the visible-region window by one dot.
         let total_par1 = post_stop && self.dsss_ly_total_par() == 1;
-        let early_frame = total_par1 && (ly_reg as u32) < 143;
-        // Early-frame par==1 reads sit one dot short of the pre-increment window: both
-        // the glitch dot and the last window dot (`tn == glitch-1`) read the stale
-        // register, so shrink the anticipation entry by 2 (the excluded tail falls
-        // through to the renderer register, which holds the same stale pre-increment
-        // value). Late-frame (LY >= 143) par==1 reads keep the full window and only the
-        // glitch dot resolves specially below.
-        // Fractional-bridge extra narrowing (row37): a high-switch-count early-frame
-        // read whose accumulated non-mode-3 half-dot phase has folded a whole dot
-        // (`dsss_ly_phase_count % 4 == 2`) holds the visible-region LY increment one
-        // dot longer than the first-order `total`-parity window. Exclude the glitch-1
-        // boundary dot (tn == glitch-2) so it falls through to the stale renderer
-        // register — the value the age ROM's real-hardware expected table captures.
-        let frac_narrow = if early_frame && self.dsss_ly_phase_whole_par() == 1 { 2 } else { 0 };
-        let narrow = if early_frame { 2 + frac_narrow } else { 0 };
-        if tn <= 10 && tn <= glitch - narrow {
-            let result = if tn == glitch {
+        // POST-STOP fractional-bridge phase shift (age lcd-align-ly, real cgb04c/dmg08
+        // expected table — a behavior SameBoy does not model). Each DS->SS-during-mode3
+        // STOP switch injects Gambatte's `now -= 1` half-dot; `render_carry_skew_cc`
+        // accumulates the resulting whole-dot STAT-phase carry. That carry shifts the
+        // effective sub-dot the boundary LY read samples at, sliding the anticipation /
+        // partial-latch-fold window. The shift wraps every 5 carry-dots and repeats with
+        // period 15 (validated dot-exact across all 45 rows x both cgbBC/cgbE expected
+        // tables): `shift = -(((carry+2) % 15) / 5)` in dots. `tn_eff = tn - shift` is
+        // the phase-corrected time-to-next-LY the window resolves against.
+        let shift = if post_stop {
+            -(((self.render_carry_skew_cc + 2).rem_euclid(15)) / 5)
+        } else {
+            0
+        };
+        let tn_eff = tn - shift;
+        if tn_eff <= 10 && tn_eff <= glitch {
+            let result = if tn_eff == glitch {
                 if post_stop {
-                    // Post-STOP glitch dot: real silicon (age lcd-align-ly expected
-                    // table) reads the partial-latch fold `ly & (ly+1)` here (the
-                    // half-latched LY during the increment: 143->144 reads 0x80 =
-                    // 0x8F & 0x90) when the accumulated sub-dot phase lands the read ON
-                    // the latch boundary — odd non-mode-3 phase (`par1`) OR odd total
-                    // switch parity (`total_par1`). On even/even the read sits one
-                    // sub-dot off the boundary and reads the stale pre-increment `ly`.
-                    // SameBoy models neither (reads the clean anticipated value); the
-                    // age ROM's captured hardware does.
-                    if par1 || total_par1 {
+                    // Post-STOP glitch dot: real silicon reads the partial-latch fold
+                    // `ly & (ly+1)` (the half-latched LY during the increment: 143->144
+                    // reads 0x80 = 0x8F & 0x90, 152->153 reads 0x98). CGB-C folds
+                    // unconditionally; CGB-D/E only when the accumulated sub-dot parity
+                    // lands the read ON the boundary (odd non-mode-3 phase `par1` OR odd
+                    // total switch parity `total_par1`) — else it reads the stale `ly`.
+                    if !mmio.is_cgb_de() || par1 || total_par1 {
                         ly_reg & (ly_reg + 1)
                     } else {
                         ly_reg
