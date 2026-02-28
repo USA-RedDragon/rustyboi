@@ -1342,15 +1342,13 @@ pub struct Ppu {
     // let the fetcher consult it per-substep. (commit_cc, new_lcdc, old_lcdc).
     #[serde(default)]
     lcdc_b4_exact: Option<(u64, u8, u8)>,
-    // Per-substep CGB tile-index-is-tile-data quirk history (Gambatte
-    // `p.tileIndexIsTd`). Each mid-mode-3 LCDC.4 write records
-    // (apply_cc, quirk) where quirk = cgb && old_b4 && !new_b4 && en, matching
-    // Gambatte's `setLcdc`. A byte fetch resolves the quirk at its own fetch cc
-    // (most recent apply_cc <= fetch cc), so a falling edge that lands between a
-    // tile's TileDataLow and TileDataHigh reads applies the quirk (tile index as
-    // data) to the HIGH byte only — the mixed-tile behavior cgb-acid-hell tests.
+    // CGB tile-index-is-tile-data glitch targets (SameBoy `tile_sel_glitch`).
+    // Each falling mid-mode-3 LCDC.4 write records the single BG data read
+    // (target_cc, target_k) that lands in the write's 1-T-cycle glitch window and
+    // therefore returns the tile index instead of a VRAM byte. Resolved per fetch
+    // substep in `tidxtd_quirk_at_fetch`. Cleared at each mode-3 arm.
     #[serde(default)]
-    tidxtd_history: Vec<(u64, bool)>,
+    tidxtd_glitch: Vec<(u64, u8)>,
     // DMG window bus-glitch journal: each mid-mode-3 LCDC write that toggles
     // bit 6 (window map select) or bit 4 (tile data select) records
     // (transition_cc, old_lcdc, new_lcdc) — the abs_cc at which the new address
@@ -1658,7 +1656,7 @@ impl Ppu {
             cgb_tile_index_is_tile_data: false,
             pending_lcdc_events: Vec::new(),
             lcdc_b4_exact: None,
-            tidxtd_history: Vec::new(),
+            tidxtd_glitch: Vec::new(),
             wg_hist: Vec::new(),
             wg_cgb: false,
             wg_anchor_cc: None,
@@ -2015,27 +2013,44 @@ impl Ppu {
                 let ds = mmio.is_double_speed_mode();
                 let commit_cc = self.write_cc(ds) + 2;
                 self.lcdc_b4_exact = Some((commit_cc, value, old_lcdc));
-                // Record the tile-index-is-tile-data quirk (Gambatte
-                // `p.tileIndexIsTd = cgb && old_b4 && !new_b4 && en`) on the master
-                // clock so each BG-fetch byte resolves it at its own fetch cc. The
-                // quirk apply cc is offset from the write so a falling edge lands
-                // between a straddled tile's TileDataLow and TileDataHigh reads
-                // (applying the quirk to the HIGH byte only).
-                let quirk_now = (old_lcdc & tds) != 0
+                // Tile-index-is-tile-data glitch (SameBoy `tile_sel_glitch`): a
+                // falling LCDC.4 edge arms the glitch for exactly one CPU T-cycle
+                // (sm83_cpu.c GB_CONFLICT_LCDC_CGB: write, set flag, advance 1,
+                // clear). The single BG tile-data read that lands in that window
+                // returns the tile INDEX instead of a VRAM byte (display.c
+                // data_for_tile_sel_glitch, gated on tile < 0x80). Instrumented
+                // CGB-C SameBoy places that read exactly 4 dots after the write in
+                // its own grid. rustyboi's CPU-write dot sits at a substep- and
+                // parity-dependent phase within its BG fetch grid, so the target
+                // read (cc, k) is derived from the fetcher substep at the write:
+                // a write about to run TileDataLow (substep 1) glitches that k=1
+                // read (+2); a write on the tile boundary (substep 3) glitches the
+                // next tile's k=2 read (+8) only when the write lands off the even
+                // fetch cadence (odd abs_cc) — an on-cadence boundary write applies
+                // the new addressing cleanly with no straddle. Verified dot-exact
+                // vs SameBoy CGB-C on age m3-bg-lcdc (LOW-plane glitch) and
+                // cgb-acid-hell (HIGH-plane glitch).
+                let arm = (old_lcdc & tds) != 0
                     && (value & tds) == 0
                     && (old_lcdc & en) != 0
                     && (value & en) != 0;
-                // The quirk becomes visible to the BG fetcher 7 dots after the
-                // write (single speed). The fetcher's TileDataLow read for the
-                // tile that straddles the change is 6 dots after the write and its
-                // TileDataHigh read 8 dots after, so +7 lands the falling edge
-                // between them: the HIGH byte reads the tile index as data while
-                // the LOW byte keeps the normal VRAM read (the mixed-tile behavior
-                // cgb-acid-hell verifies). At double speed the per-dot cc doubles,
-                // so scale to +14. Validated broke-0 across gambatte / mealybug /
-                // acid2 / blargg and closes cgb-acid-hell.
-                let apply_cc = self.write_cc(ds) + if ds { 14 } else { 7 };
-                self.tidxtd_history.push((apply_cc, quirk_now));
+                if arm && !ds {
+                    let s = self.fetcher.fetch_substep();
+                    let odd = self.abs_cc & 1 == 1;
+                    let target = match s {
+                        // About to read TileDataLow: glitch it (k=1), 2 dots out.
+                        1 => Some((self.abs_cc + 2, 1u8)),
+                        // About to read TileDataHigh: glitch it (k=2), 2 dots out.
+                        2 => Some((self.abs_cc + 2, 2u8)),
+                        // Tile boundary (Push next): an off-cadence write straddles
+                        // into the next tile's HIGH read (+8); on-cadence is clean.
+                        3 if odd => Some((self.abs_cc + 8, 2u8)),
+                        _ => None,
+                    };
+                    if let Some(t) = target {
+                        self.tidxtd_glitch.push(t);
+                    }
+                }
             }
             // Window-enable (bit 5) toggle: record the exact Gambatte commit cc
             // (`write_cc + 2`, abs_cc units — same anchor as `lcdc_b4_exact`) so
@@ -2189,26 +2204,16 @@ impl Ppu {
         sprite_tile_walk_cost(&sprite_xs, scx, 167, 167, true)
     }
 
-    // The CGB tile-index-is-tile-data quirk as-of the current fetch dot
-    // (`self.abs_cc`), resolved from the per-substep history: the most recent
-    // recorded falling-edge quirk whose apply cc has been reached. A byte fetch
-    // whose cc lands after a falling edge's apply cc (but before the next write)
-    // sees the quirk; this lets a single tile straddle the fall (LOW byte
-    // pre-fall = normal read, HIGH byte post-fall = tile index as data).
+    // The CGB tile-index-is-tile-data glitch for the BG data read about to run
+    // (`self.abs_cc`, substep `k`): true iff a falling LCDC.4 write armed exactly
+    // this (cc, k) read (see handle_lcdc_write / tidxtd_glitch). The glitch is a
+    // single-read event, not a sustained level, so only the one read SameBoy's
+    // 1-T-cycle `tile_sel_glitch` window catches returns the tile index as data.
     fn tidxtd_quirk_at_fetch(&self) -> bool {
-        let mut quirk = self
-            .tidxtd_history
-            .first()
-            .map(|&(_, q)| q)
-            .unwrap_or(self.cgb_tile_index_is_tile_data);
-        for &(apply_cc, q) in self.tidxtd_history.iter() {
-            if apply_cc <= self.abs_cc {
-                quirk = q;
-            } else {
-                break;
-            }
-        }
-        quirk
+        let k = self.fetcher.fetch_substep();
+        self.tidxtd_glitch
+            .iter()
+            .any(|&(cc, tk)| cc == self.abs_cc && tk == k)
     }
 
     fn fetcher_lcdc_state(&self) -> fetcher::FetcherLcdcState {
@@ -5779,12 +5784,10 @@ impl Ppu {
                         0,
                         (self.lcdc & (LCDCFlags::BGDisplay as u8)) != 0,
                     ));
-                    // Seed the tile-index-is-tile-data quirk history with the
-                    // current persistent quirk (apply_cc 0 == effective from the
-                    // start of this line's mode 3). Mid-mode-3 LCDC.4 writes append
-                    // (apply_cc, quirk) so each byte fetch resolves it per-substep.
-                    self.tidxtd_history.clear();
-                    self.tidxtd_history.push((0, self.cgb_tile_index_is_tile_data));
+                    // Per-line tile-index-is-tile-data glitch targets (SameBoy
+                    // tile_sel_glitch); mid-mode-3 falling LCDC.4 writes append the
+                    // single (cc, k) read each arms (see handle_lcdc_write).
+                    self.tidxtd_glitch.clear();
                     // DMG window bus-glitch state is per-line (see wg_apply).
                     self.wg_hist.clear();
                     self.wg_anchor_cc = None;
