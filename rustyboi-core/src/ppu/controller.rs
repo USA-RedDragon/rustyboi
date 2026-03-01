@@ -179,6 +179,12 @@ const CGBWG_QUIRK_BG: u64 = 4;
 // mealybug tile_sel_change / tile_sel_change2 cgb-c references.
 const CGBWG_A12_GAP: u64 = 16;
 const CGBWG_A12_REARM: u64 = 1;
+// Pulse-train edge advance (see cgb_wg_resolve): a fall/rise inside a fast LCDC.4
+// pulse train (opposite edge within CGBWG_A12_GAP dots) reaches the A12 bus this
+// many dots sooner than the isolated-pulse thresholds — so its glitch window and
+// bit4 visibility land on the read one dot past the write (age m3-bg-lcdc-nocgb),
+// not the isolated w+4 (mealybug tile_sel_change).
+const CGBWG_TRAIN_ADVANCE: u64 = 3;
 const CGBWG_ARM_WIN: u64 = 14;
 const CGBWG_ARM_WIN_HI: u64 = 12;
 const CGBWG_ARM_BG: u64 = 14;
@@ -2450,6 +2456,18 @@ impl Ppu {
         let mut bits = self.wg_hist[0].1;
         let mut quirk = false;
         let mut prev_fall_w: Option<i64> = None;
+        // Pulse-train scope (see CGBWG_TRAIN_ADVANCE). age m3-bg-lcdc-nocgb holds
+        // LCDC.4 HIGH across the line and pulses it LOW repeatedly — the A12 line
+        // is perpetually driven, so every falling edge's glitch/bit4 visibility
+        // lands CGBWG_TRAIN_ADVANCE dots sooner. The isolated mealybug tile_sel
+        // pulses instead blip UP from a bit4=0 baseline (line-start LCDC.4 clear:
+        // tile_sel_change 0x83, win_change 0xa3), a single settle at the w+4
+        // thresholds. Key on the line-initial LCDC.4 level (available at the first
+        // fetch, so the early tiles resolve train-correctly before the whole pulse
+        // train is journaled — unlike an edge-count which the growing journal only
+        // reaches mid-line): a high baseline is the repeatedly-pulsed train, a low
+        // baseline is the isolated blip.
+        let is_train = (self.wg_hist[0].1 & tds) != 0;
         for &(t, old, new) in &self.wg_hist {
             let w = t - WG_TRANSITION_DELAY; // raw write commit cc
             let rising = !old & new;
@@ -2457,24 +2475,37 @@ impl Ppu {
             // Inter-edge A12 settle: a RISING LCDC.4 edge whose prior FALLING edge
             // was within CGBWG_A12_GAP dots re-arms the address bus while it is
             // still slewing from that fall, so the rise's visibility is delayed an
-            // extra CGBWG_A12_REARM dot. This fires only inside a repeated LCDC.4
-            // pulse train (a lone rise->fall pulse has no prior fall), which is the
-            // physical difference between tile_sel_change2 (fast pulse train, the
-            // high/low bitplanes split across the slewed rise) and tile_sel_change
-            // (a single isolated pulse that settles cleanly). Keyed on inter-edge
-            // spacing, not per-tile — so it is not the zero-sum threshold tweak.
-            let rearm = if (rising & tds) != 0 {
+            // extra CGBWG_A12_REARM dot. Keyed on inter-edge spacing, not per-tile —
+            // so it is not the zero-sum threshold tweak. (A train rise is exempt: it
+            // is already advanced and the A12 is continuously driven — see below.)
+            let train_fall = is_train && (falling & tds) != 0;
+            let train_rise = is_train && (rising & tds) != 0;
+            // The inter-edge A12 re-arm delay is an isolated-pulse effect; in a fast
+            // train (both edges advanced, A12 continuously driven) the re-rise is
+            // already accounted by the train advance and takes no extra re-arm dot.
+            let rearm = if (rising & tds) != 0 && !train_rise {
                 match prev_fall_w {
                     Some(pw) if (w as i64 - pw) <= CGBWG_A12_GAP as i64 => CGBWG_A12_REARM,
                     _ => 0,
                 }
             } else { 0 };
+            // In a fast pulse train (see is_train), the A12 line is still driven
+            // from the prior edge, so BOTH edges settle CGBWG_TRAIN_ADVANCE dots
+            // earlier than the isolated-pulse thresholds (CGBWG_BG_FALL_*/RISE/
+            // QUIRK_BG) are calibrated for. The FALL advance lands the glitch on the
+            // same read SameBoy catches (age w+1 vs isolated mealybug w+4); the RISE
+            // advance restores tile-data-select in time for BOTH plane reads of the
+            // tile straddling the re-rise, which the age refs render as its $8000
+            // tile (the reconstruction otherwise holds the LOW plane $8800 one read
+            // too long, splitting the tile into a spurious mixed $8000/$8800 read).
+            let fall_eff = if train_fall { fall.saturating_sub(CGBWG_TRAIN_ADVANCE) } else { fall };
+            let rise_eff = if train_rise { rise.saturating_sub(CGBWG_TRAIN_ADVANCE) } else { rise };
             if (falling & tds) != 0 { prev_fall_w = Some(w as i64); }
             let mut applied = 0u8;
-            if h >= w + rise + rearm {
+            if h >= w + rise_eff + rearm {
                 applied |= rising;
             }
-            if h >= w + fall {
+            if h >= w + fall_eff {
                 applied |= falling;
             }
             bits = (bits & !applied) | (new & applied);
@@ -2491,10 +2522,11 @@ impl Ppu {
             // (tile_sel_change2 LY32-phase) and k==2 when the high read does
             // (LY40-phase), matching the instrumented CGB-C tester per line. The
             // window path keeps its single k-uniform w+quirk_add coincidence.
+            let q_add = if train_fall { quirk_add.saturating_sub(CGBWG_TRAIN_ADVANCE) } else { quirk_add };
             let hit = if quirk_add == CGBWG_QUIRK_BG {
-                (k == 1 || k == 2) && h >= w + quirk_add && h <= w + quirk_add + 1
+                (k == 1 || k == 2) && h >= w + q_add && h <= w + q_add + 1
             } else {
-                k >= 1 && h == w + quirk_add
+                k >= 1 && h == w + q_add
             };
             if hit && (falling & tds) != 0 {
                 quirk = true;
@@ -2860,7 +2892,17 @@ impl Ppu {
             } else {
                 (self.bg_wg_resolve(hk), false)
             };
-            if self.wg_cgb && k == 2 && let Some(low_tds) = tds_low {
+            // Pin the HIGH plane's tile-data-select bit to the LOW plane's ONLY
+            // when a sprite object-fetch split this tile (its HIGH read is
+            // arm-shifted off the LOW read's +2 cadence). With no sprite the two
+            // reads are simply 2 dots apart and the HIGH plane resolves its OWN
+            // tile-data-select — the genuine mixed $8000/$8800 read of a mid-tile
+            // LCDC.4 pulse (age m3-bg-lcdc-nocgb transition tiles: low $8000 /
+            // high $8800). Pinning unconditionally here flattened that mix to a
+            // solid tile and mis-rendered the age white band.
+            let low_hk = self.bg_hw_read_dot(n, 1, ly);
+            let unstalled = low_hk.is_some_and(|h1| hk == h1 + 2);
+            if self.wg_cgb && k == 2 && !unstalled && let Some(low_tds) = tds_low {
                 bitsk = (bitsk & !tds) | low_tds;
             }
             let scyk = self.bg_scy_resolve(hk_scy).unwrap_or(live_scy);
