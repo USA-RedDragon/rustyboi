@@ -150,6 +150,16 @@ const WG_TRANSITION_DELAY: u64 = 4;
 // reaches the fetch address lines (vs DMG).
 const CGBWG_WIN_RISE: u64 = 6;
 const CGBWG_WIN_FALL: u64 = 7;
+// Window map-select (LCDC.6) read visibility when the window tile-data path is
+// $8000 (LCDC.4 = 1). Under $8000 the map pulse reaches the TileNumber read
+// CGBWG_WIN_MAP_RISE/FALL_TDS dots after the write commit — later than the
+// $8800 (LCDC.4 = 0) path's WIN_RISE/WIN_FALL — so a midline-sprite-shifted
+// window fetch samples the map pulse one fetcher tile later. Calibrated once
+// against the mealybug win_map_change2 `_cgb_c` reference (its 8 window rows
+// each land the special $9C00 tile dot-exact only at 10/10); the $8800
+// win_map_change keeps WIN_RISE/WIN_FALL. See cgb_wg_resolve / wg_apply.
+const CGBWG_WIN_MAP_RISE_TDS: u64 = 10;
+const CGBWG_WIN_MAP_FALL_TDS: u64 = 10;
 // BG-path LCDC.3/4 read visibility, measured from the raw write cc, at the
 // SameBoy-exact fetch dot (bg_hw_read_dot_ex scy_mode): a bit becomes visible
 // `rise`/`fall` dots after the write commit. The fetch dot already carries its
@@ -2418,6 +2428,29 @@ impl Ppu {
         if self.wg_cgb {
             let (bits, quirk) =
                 self.cgb_wg_resolve(h, CGBWG_WIN_RISE, CGBWG_WIN_FALL, CGBWG_QUIRK_WIN, k);
+            // Window map-select (LCDC.6) pulse under $8000 tile-data (LCDC.4 = 1):
+            // the map read becomes visible later than the $8800 path, so re-resolve
+            // just the map bit with the later CGBWG_WIN_MAP_*_TDS thresholds. This is
+            // the sole discriminator between the mealybug win_map_change (LCDC.4=0,
+            // WIN_RISE/FALL correct for its special-tile diagonal) and win_map_change2
+            // (LCDC.4=1, whose midline-shifted window rows land the special $9C00 tile
+            // one fetcher tile later — exact only at 10/10). LCDC.4 is a stable per-ROM
+            // constant across each line here, so keying on the resolved bit is safe;
+            // the tile-data-select and tile-index-as-data quirk keep the WIN thresholds.
+            let map_bit = LCDCFlags::WindowTileMapDisplaySelect as u8;
+            let tds = LCDCFlags::BGWindowTileDataSelect as u8;
+            let bits = if (bits & tds) != 0 {
+                let (bits_map, _) = self.cgb_wg_resolve(
+                    h,
+                    CGBWG_WIN_MAP_RISE_TDS,
+                    CGBWG_WIN_MAP_FALL_TDS,
+                    CGBWG_QUIRK_WIN,
+                    k,
+                );
+                (bits & !map_bit) | (bits_map & map_bit)
+            } else {
+                bits
+            };
             fls.lcdc = (fls.lcdc & !WG_BITS) | (bits & WG_BITS);
             fls.or_lcdc = None;
             if k >= 1 {
