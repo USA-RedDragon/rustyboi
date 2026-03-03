@@ -9326,8 +9326,11 @@ impl Ppu {
         // sets it on the LCDC write; the walk latches it into lsbuf per slot).
         self.oam_reader.large_src = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
 
+        // `pos` (the 80-byte Y/X snapshot) is only consumed by the `change()`
+        // calls below, which fire only on a DMA-window edge or a pending OAM
+        // write. The common per-dot case hits neither, so build it lazily.
         let mut pos = [0u8; 80];
-        mmio.peek_oam_pos(&mut pos);
+        let mut pos_filled = false;
 
         // OAM-DMA window edges: at start the source becomes disabled RAM (0xFF);
         // at end it returns to the real OAM. `change(cc)` flushes the snapshot up
@@ -9338,6 +9341,8 @@ impl Ppu {
         // merge window as a non-writing (readable) source.
         let dma_writing = mmio.oam_dma_window_active() && !mmio.mgb_frozen_merge_active();
         if dma_writing != self.prev_dma_writing {
+            mmio.peek_oam_pos(&mut pos);
+            pos_filled = true;
             // The DMA window edge is observed at the PPU dot, but Gambatte fires
             // startOamDma/endOamDma at the M-cycle's master cc, which precedes the
             // PPU's observation by a fixed sub-M-cycle amount. Shift the change cc
@@ -9363,6 +9368,9 @@ impl Ppu {
 
         // CPU OAM write this M-cycle (Gambatte `lcd_.oamChange(cc)`).
         if mmio.take_oam_write_pending() {
+            if !pos_filled {
+                mmio.peek_oam_pos(&mut pos);
+            }
             self.oam_reader.change(cc, &lc, &pos);
         }
         // The snapshot is flushed only at `change` (above) and at the mode-2-end
