@@ -16,9 +16,9 @@ is, how it is graded, and where its ROMs come from.
 | acid2 | 3 | 3 |
 | cgb_acid_hell | 1 | 1 |
 | mealybug | 46 | 51 |
-| mooneye | 190 | 191 |
+| mooneye | 191 | 191 |
 | mooneye_wilbertpol | 192 | 192 |
-| age | 54 | 56 |
+| age | 55 | 56 |
 | gbmicrotest | 485 | 513 |
 | samesuite_apu | 70 | 70 |
 | samesuite_nonapu | 6 | 6 |
@@ -36,7 +36,7 @@ is, how it is graded, and where its ROMs come from.
 | mbc3_tester | 2 | 2 |
 | cpp | 3 | 3 |
 | gambatte | 5246 | 5257 |
-| **Total** | **6393** | **6440** |
+| **Total** | **6395** | **6440** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core
