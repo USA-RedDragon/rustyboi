@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use crate::audio::{NR41, NR42, NR43, NR44};
-use crate::memory::mmio;
 use crate::memory::Addressable;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -272,7 +271,7 @@ impl Noise {
         };
     }
 
-    pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
+    pub fn step(&mut self) {
         self.advance();
     }
 
