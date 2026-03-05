@@ -919,7 +919,10 @@ impl GB {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_state_file(path: &str) -> Result<Self, io::Error> {
         let saved_state = fs::read_to_string(path)?;
-        let gb = serde_json::from_str(&saved_state)?;
+        let mut gb: GB = serde_json::from_str(&saved_state)?;
+        // Cached cartridge-derived mmio flags are #[serde(skip)]; re-derive them
+        // from the just-restored cartridge.
+        gb.mmio.resync_cart_flags();
         Ok(gb)
     }
 
