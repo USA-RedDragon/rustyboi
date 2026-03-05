@@ -746,16 +746,18 @@ impl Audio {
         self.channel2.set_length_counter(0x40);
     }
 
-    pub fn step(&mut self, mmio: &mut mmio::Mmio) {
+    pub fn step(&mut self, cgb: bool, agb: bool, ds: bool) {
         if !self.audio_enabled {
             return;
         }
 
-        // Step individual channels
-        self.channel1.step(mmio);
-        self.channel2.step(mmio);
-        self.channel3.step(mmio);
-        self.channel4.step(mmio);
+        // Step individual channels. The channels read only these three
+        // read-only hardware flags from mmio; passing them by value avoids a
+        // per-dot clone of the whole Audio struct in Mmio::step_audio.
+        self.channel1.step(cgb);
+        self.channel2.step(cgb);
+        self.channel3.step(cgb, agb, ds);
+        self.channel4.step();
 
         // The frame sequencer is clocked directly by the timer on each DIV-bit-12
         // falling edge (see `clock_frame_sequencer`), so nothing to do here.

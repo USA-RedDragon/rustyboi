@@ -1396,9 +1396,17 @@ impl Mmio {
 
     pub fn step_audio(&mut self) {
         self.sync_apu_cc();
-        let mut audio = self.audio.clone();
-        audio.step(self);
-        self.audio = audio;
+        // Audio::step is a no-op when the APU is powered off.
+        if !self.audio.is_powered() {
+            return;
+        }
+        // The channels only read these three read-only flags from mmio, so pass
+        // them by value instead of cloning the whole Audio struct to sidestep
+        // the &mut-self borrow.
+        let cgb = self.is_cgb_features_enabled();
+        let agb = self.is_agb();
+        let ds = self.is_double_speed_mode();
+        self.audio.step(cgb, agb, ds);
     }
 
     /// Push the APU's 2 MHz cycle-counter inputs to the audio unit: the
