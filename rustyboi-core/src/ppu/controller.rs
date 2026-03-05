@@ -5668,8 +5668,9 @@ impl Ppu {
             mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) & !(1 << 2)); // Clear the LYC=LY flag
         }
 
-        // Check for STAT interrupt after LYC=LY update
-        self.check_and_trigger_stat_interrupt(mmio);
+        // (STAT IRQ delivery is handled entirely by the event model in
+        // dispatch_stat_events; `previous_stat_interrupt_line` is a write-only
+        // legacy latch, so the per-dot recompute here was pure dead work.)
 
         // Gambatte-style window-Y (weMaster) latch. The trigger is sticky for
         // the frame and is evaluated at three points: ly0 mode-2 start
