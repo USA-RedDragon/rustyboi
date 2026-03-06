@@ -58,7 +58,18 @@ pub enum Oracle {
     Audio { marker: &'static str, audible: bool },
     Png { path: PathBuf },
     /// Cart SRAM contents dumped by the ROM, compared against a `.bin` reference.
-    SramDump { path: PathBuf },
+    /// `skip` lists byte offsets in the reference that are NOT graded: the
+    /// `fexx_*_dumper` references include the FE00-FE9F OAM sprite table, whose
+    /// power-on contents are per-unit nondeterministic garbage (Pan Docs) and are
+    /// not a portable hardware assertion -- Gambatte's own two DMG fexx references
+    /// disagree on 105/160 of these bytes for the identical power-on. The tests'
+    /// named subject is FEXX (FEA0-FEFF unusable region) + FFXX (I/O/HRAM), which
+    /// stays fully graded. Gambatte's official testrunner does not grade the fexx
+    /// dumpers at all (no `.png`/`_out`); the `.bin` is a rustyboi-added oracle.
+    SramDump {
+        path: PathBuf,
+        skip: Vec<std::ops::Range<usize>>,
+    },
     /// A memory region (OAM/VRAM) read back after the test, compared against a
     /// `.dump` reference. Length is the reference file size.
     RegionDump { path: PathBuf, region: DumpRegion },
@@ -130,7 +141,7 @@ impl Oracle {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "png".to_string()),
-            Self::SramDump { path } | Self::RegionDump { path, .. } => path
+            Self::SramDump { path, .. } | Self::RegionDump { path, .. } => path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "dump".to_string()),
@@ -575,7 +586,10 @@ fn push_dump_cases(
         cases.push(TestCase {
             rom_path: rom_path.to_path_buf(),
             mode: Mode::Dmg,
-            oracle: Oracle::SramDump { path: dmg_bin },
+            oracle: Oracle::SramDump {
+                path: dmg_bin,
+                skip: dmg_dump_skip(base),
+            },
             revision: None,
             input: Vec::new(),
             frames: None,
@@ -586,7 +600,10 @@ fn push_dump_cases(
         cases.push(TestCase {
             rom_path: rom_path.to_path_buf(),
             mode: Mode::Cgb,
-            oracle: Oracle::SramDump { path: cgb_bin },
+            oracle: Oracle::SramDump {
+                path: cgb_bin,
+                skip: Vec::new(),
+            },
             revision: None,
             input: Vec::new(),
             frames: None,
@@ -624,6 +641,25 @@ fn push_dump_cases(
                 frames: None,
             });
         }
+    }
+}
+
+/// Byte offsets in a DMG SRAM dump reference that are NOT graded because they
+/// hold nondeterministic power-on OAM garbage rather than a portable hardware
+/// assertion. Only the `fexx_*_dumper` references dump FE00-FFFF (or FE00-FEFF)
+/// with the OAM sprite table (FE00-FE9F) untouched at power-on; that 0xA0-byte
+/// window is per-unit garbage (Pan Docs) and Gambatte's own two DMG references
+/// disagree on 105/160 of these bytes. Everything else -- FEA0-FEFF (the FEXX
+/// unusable region) and FF00-FFFF (FFXX I/O/HRAM), the tests' named subject --
+/// stays graded. `fexx_read_reset_set_dumper` writes 3 back-to-back 256-byte
+/// dumps of FE00-FEFF; only the FIRST dump's OAM is power-on garbage (dumps 2/3
+/// are the deterministic clear->0x00 / set->0xFF that verify OAM writability),
+/// so only offsets 0x00-0x9F are skipped.
+fn dmg_dump_skip(base: &str) -> Vec<std::ops::Range<usize>> {
+    if base.contains("fexx_ffxx_dumper") || base.contains("fexx_read_reset_set_dumper") {
+        vec![0x00..0xA0]
+    } else {
+        Vec::new()
     }
 }
 
