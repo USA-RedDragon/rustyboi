@@ -31,10 +31,22 @@ fn main() {
         gb.run_until_frame(false);
     }
 
+    let probe = std::env::var("RB_PROBE").is_ok();
+    let mut ds_frames = 0u64;
+    let mut audio_frames = 0u64;
+
     let start = Instant::now();
     let mut checksum: u64 = 0;
     for _ in 0..frames {
         let (frame, _bp) = gb.run_until_frame(false);
+        if probe {
+            if gb.read_memory(0xFF4D) & 0x80 != 0 {
+                ds_frames += 1;
+            }
+            if gb.read_memory(0xFF26) & 0x80 != 0 {
+                audio_frames += 1;
+            }
+        }
         // Fold a couple bytes into a checksum so the frame work can't be
         // optimized away, and so we can sanity-check determinism.
         let (b0, bm) = match &frame {
@@ -45,6 +57,17 @@ fn main() {
         checksum ^= (bm as u64) << 1;
     }
     let elapsed = start.elapsed();
+
+    if probe {
+        let cart_type = gb.read_memory(0x0147);
+        println!(
+            "  PROBE cart_type=0x{:02X} hw={:?} ds={:.0}% audio_on={:.0}%",
+            cart_type,
+            hardware,
+            100.0 * ds_frames as f64 / frames as f64,
+            100.0 * audio_frames as f64 / frames as f64,
+        );
+    }
 
     let fps = frames as f64 / elapsed.as_secs_f64();
     let ns_per_frame = elapsed.as_nanos() as f64 / frames as f64;
