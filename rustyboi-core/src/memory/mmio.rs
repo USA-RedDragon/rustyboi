@@ -1195,9 +1195,19 @@ impl Mmio {
     }
 
     pub fn step_timer(&mut self) {
-        let mut timer = self.timer.clone();
-        timer.step(self);
-        self.timer = timer;
+        // The timer never touches its own copy inside mmio during a step, so it
+        // can advance in place; it needs only these two flags from mmio and
+        // returns the mmio effects (APU FS edges + a possible TIMA IRQ), which
+        // we apply here. No per-dot clone.
+        let ds = self.is_double_speed_mode();
+        let cpu_halted = self.cpu_is_halted();
+        let (fs_edges, timer_irq) = self.timer.step(ds, cpu_halted);
+        if timer_irq {
+            self.request_interrupt(cpu::registers::InterruptFlag::Timer);
+        }
+        for _ in 0..fs_edges {
+            self.clock_apu_frame_sequencer();
+        }
     }
 
     /// Advance the cartridge's MBC3 RTC by `cycles` master (dot) clock T-cycles.
