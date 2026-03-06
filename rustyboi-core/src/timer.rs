@@ -690,7 +690,13 @@ impl Timer {
         (cb >> shift).wrapping_sub(ca >> shift)
     }
 
-    pub fn step(&mut self, mmio: &mut mmio::Mmio) {
+    /// Advance the timer one dot. Takes the two hardware flags it needs by value
+    /// (instead of borrowing mmio) and returns `(fs_edges, timer_irq)`: the
+    /// number of APU-frame-sequencer falling edges to clock and whether a TIMA
+    /// overflow IRQ should be raised. The caller (`Mmio::step_timer`) applies
+    /// both to mmio. Keeping mmio out of here lets the timer step in place with
+    /// no per-dot clone (it never touches its own copy inside mmio anyway).
+    pub fn step(&mut self, ds: bool, cpu_halted: bool) -> (u64, bool) {
         self.abs_cc = self.abs_cc.wrapping_add(1);
 
         // Scheduled TIMA IRQ: fire any event whose absolute cc has now passed.
@@ -704,24 +710,27 @@ impl Timer {
         // access-cc space) by `CC_OFF` dots, which matches Gambatte's late IRQ
         // sampling relative to the access that scheduled it.
         if self.tac & TAC_ENABLE != 0 {
-            self.update_irq_delivery(self.abs_cc, mmio.cpu_is_halted());
+            self.update_irq_delivery(self.abs_cc, cpu_halted);
         }
-        self.flush_pending_irq(mmio);
+        let timer_irq = if self.pending_irq {
+            self.pending_irq = false;
+            true
+        } else {
+            false
+        };
 
         // The APU frame sequencer (sweep + noise-envelope legs that remain
         // FS-clocked; length is now cc-driven in the controller) is clocked by
         // the falling edge of DIV bit 12 (bit 13 in double speed), derived from
         // the SAME master `abs_cc`/`div_anchor` the timer/DIV use.
-        self.last_double_speed = mmio.is_double_speed_mode();
+        self.last_double_speed = ds;
         // Closed-form FS (stage 3/7, permanent): clock once per DIV-bit-12 (bit-13
         // at DS) falling edge in (last_apu_cc, abs_cc]. The divider counter is
         // (cc - div_anchor); bit N falls each time that counter crosses a
         // multiple of 2^(N+1). Count = floor(c_now/P) - floor(c_prev/P).
         let edges = self.apu_fs_edges(self.last_apu_cc, self.abs_cc);
-        for _ in 0..edges {
-            mmio.clock_apu_frame_sequencer();
-        }
         self.last_apu_cc = self.abs_cc;
+        (edges, timer_irq)
     }
 
     /// per-access STAGE 1: bulk-advance the timer directly to `target_abs_cc`
