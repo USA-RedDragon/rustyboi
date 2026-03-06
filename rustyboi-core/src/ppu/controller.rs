@@ -1957,7 +1957,16 @@ impl Ppu {
             // bus dot is the commit dot completes (obj_en k=15 keeps its
             // pixels), hence the strict compare with +1. On abort the stall
             // resumes pops at the commit dot: one residual stall dot remains.
-            if !new_on && self.sprite_fetch_stall > 0 && self.next_sprite_fetch_index > 0
+            // Mid-fetch OBJ-disable aborts the in-progress sprite fetch only on DMG
+            // silicon. On CGB hardware (including DMG-compat mode) the object fetch
+            // treats OBJ_EN as always-on and never aborts (SameBoy memory.c gates
+            // "disabling objects while already fetching" behind `!GB_is_cgb`), so
+            // the sprite's full fetch cost is spent regardless of the OBJ-disable —
+            // a short OBJ-off pulse that re-enables mid-line does not shorten mode 3.
+            // Fixes mealybug m3_lcdc_obj_en_change_variant (bottom-16-line right-edge
+            // 6px shift) with no effect on the DMG abort path.
+            if !mmio.is_cgb()
+                && !new_on && self.sprite_fetch_stall > 0 && self.next_sprite_fetch_index > 0
                 && let Some(rec) = self
                     .sprite_fetch_recs
                     .get_mut(self.next_sprite_fetch_index - 1)
