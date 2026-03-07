@@ -131,6 +131,14 @@ pub struct Fetcher {
     // (the row is SCY-dependent and re-resolved; the column is not).
     #[serde(default)]
     last_bg_tn_col: u8,
+    // The tile-data-select (LCDC.4) bit actually used for the last tile's LOW /
+    // HIGH bitplane reads (the live, partial-journal resolution). The CGB-compat
+    // train re-resolve compares against these so it only re-plots tiles whose
+    // base moved — leaving the glitch bands the live draw already got right.
+    #[serde(default)]
+    last_low_tds: bool,
+    #[serde(default)]
+    last_high_tds: bool,
 }
 
 impl Fetcher {
@@ -152,6 +160,8 @@ impl Fetcher {
             subcc_used_scx: 0,
             last_vram_addr: 0xFFFF,
             last_vram_bank: 0,
+            last_low_tds: false,
+            last_high_tds: false,
             last_bg_tn_col: 0,
         }
     }
@@ -395,6 +405,8 @@ impl Fetcher {
                 let eff_line = if y_flip { 7 - tile_line } else { tile_line };
                 // Fetch the low byte of the tile data using the correct addressing method
                 let addr = self.get_tile_data_address(self.tile_num, eff_line, lcdc_state.lcdc);
+                self.last_low_tds =
+                    (lcdc_state.lcdc & (ppu::LCDCFlags::BGWindowTileDataSelect as u8)) != 0;
 
                 // In CGB mode, use VRAM bank specified in tile attributes (bit 3)
                 let tile_data_bank = if cgb && (self.tile_attributes & 0x08) != 0 {
@@ -449,6 +461,8 @@ impl Fetcher {
                 let eff_line = if y_flip { 7 - tile_line } else { tile_line };
                 // Fetch the high byte of the tile data using the correct addressing method
                 let addr = self.get_tile_data_address(self.tile_num, eff_line, lcdc_state.lcdc) + 1;
+                self.last_high_tds =
+                    (lcdc_state.lcdc & (ppu::LCDCFlags::BGWindowTileDataSelect as u8)) != 0;
 
                 // In CGB mode, use VRAM bank specified in tile attributes (bit 3)
                 let tile_data_bank = if cgb && (self.tile_attributes & 0x08) != 0 {
@@ -548,6 +562,20 @@ impl Fetcher {
 
     pub fn last_bg_tn_col(&self) -> u8 {
         self.last_bg_tn_col
+    }
+
+    // The (scy+ly) pixel row latched at the tile's TileNumber read — the row the
+    // fetcher used to address this tile's data bytes (CGB-compat train re-resolve).
+    pub fn latched_y(&self) -> u8 {
+        self.latched_y
+    }
+
+    // The live tile-data-select bits used for the last tile's LOW / HIGH reads.
+    pub fn last_low_tds(&self) -> bool {
+        self.last_low_tds
+    }
+    pub fn last_high_tds(&self) -> bool {
+        self.last_high_tds
     }
 
     // Replace the low bitplane of the in-flight pixel buffer (DMG: no x-flip).
