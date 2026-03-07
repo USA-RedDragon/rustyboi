@@ -2944,7 +2944,28 @@ impl Ppu {
             // solid tile and mis-rendered the age white band.
             let low_hk = self.bg_hw_read_dot(n, 1, ly);
             let unstalled = low_hk.is_some_and(|h1| hk == h1 + 2);
-            if self.wg_cgb && k == 2 && !unstalled && let Some(low_tds) = tds_low {
+            // The LOW plane's $8000 read latches the tile-data address for BOTH
+            // bytes at HIGH_T1; a falling LCDC.4 that reaches the bus only after
+            // HIGH_T1 cannot un-latch the already-$8000 HIGH plane. So when the
+            // LOW plane rose to $8000, the HIGH plane inherits $8000 too — pin it.
+            // This is the up-pulse train's HIGH-plane latch (mealybug tile_sel_
+            // change2 first/last visible bands: the fetch outruns the FALL write,
+            // retro then wrongly re-applies it to the HIGH plane). The DOWN-pulse
+            // train (age m3-bg-lcdc-nocgb, is_train) holds LCDC.4 HIGH and pulses
+            // it LOW: there the mid-tile mix (low $8000 / high $8800) is genuine —
+            // the FALL precedes HIGH_T1 — so its unstalled HIGH keeps resolving on
+            // its own. Gate the unstalled pin on the up-pulse (line-initial LCDC.4
+            // low) so it never flattens the nocgb white band.
+            let up_pulse = self
+                .wg_hist
+                .first()
+                .is_some_and(|&(_, first, _)| (first & tds) == 0);
+            if self.wg_cgb
+                && k == 2
+                && (!unstalled || up_pulse)
+                && let Some(low_tds) = tds_low
+                && (low_tds & tds) != 0
+            {
                 bitsk = (bitsk & !tds) | low_tds;
             }
             let scyk = self.bg_scy_resolve(hk_scy).unwrap_or(live_scy);
