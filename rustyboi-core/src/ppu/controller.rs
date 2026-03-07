@@ -426,6 +426,24 @@ struct CapturedBgTile {
     live_high_tds: bool,
 }
 
+// One mid-mode-3 WINDOW tile captured for the CGB-compat up-pulse LCDC.4 train
+// line-end re-resolve (see win_tile_buf / win_train_reresolve). Window tiles are
+// uniform (no per-plane split, no tile-index-as-data glitch), so a single
+// tile-data-select sample per tile suffices.
+#[derive(Clone, Copy, Serialize, Deserialize, Default)]
+struct CapturedWinTile {
+    n: u64,      // fetcher tile index from line start
+    tn: u8,      // latched tile number
+    first_x: u8, // display column of this tile's first (leftmost) pixel
+    y: u8,       // window internal line (win_y_pos) — the tile-line lookup row
+    // Live per-plane tile-data-select bits as drawn. Window tiles are UNIFORM on
+    // hardware (the base is latched once per tile), but rustyboi's per-substep
+    // resolution can split them when a journal edge falls between the LOW (k=1)
+    // and HIGH (k=2) reads — the mixed $8000/$8800 read the re-resolve corrects.
+    live_low_tds: bool,
+    live_high_tds: bool,
+}
+
 // Faithful port of Gambatte's `SpriteMapper::OamReader` (sprite_mapper.cpp).
 // Holds a lazily-sampled 80-byte snapshot of the OAM Y/X positions (`buf`,
 // even=Y odd=X) plus the per-sprite large-size flag (`lsbuf`). The snapshot is
@@ -1535,6 +1553,10 @@ pub struct Ppu {
     // number, first display column, tile-row y (0..255)). Reset each mode-3 arm.
     #[serde(default)]
     bg_tile_buf: Vec<CapturedBgTile>,
+    // Capture-phase mid-mode-3 WINDOW tile buffer (CGB-compat up-pulse LCDC.4
+    // train re-resolve; the window analog of bg_tile_buf). See win_train_reresolve.
+    #[serde(default)]
+    win_tile_buf: Vec<CapturedWinTile>,
     // Every mid-mode-3 BGP write on the current line, as (abs_cc, display_col, old|new).
     // The DMG palette-latch glitch is a TWO-WRITE interaction: a write spikes its own
     // pixel only when it has a neighboring mid-mode-3 write within the tight SET/RESTORE
@@ -1649,6 +1671,7 @@ impl Ppu {
             obp1_history: Vec::new(),
             line_bg_idx: vec![-1; 160],
             bg_tile_buf: Vec::new(),
+            win_tile_buf: Vec::new(),
             bgp_writes: Vec::new(),
             bgp_mode2_pending: None,
             abs_cc: 0,
@@ -2907,6 +2930,69 @@ impl Ppu {
             };
             for i in 0..8u8 {
                 let col = r.first_x as i32 + i as i32;
+                if !(0..160).contains(&col) { continue; }
+                let bit = 7 - i;
+                let idx = (((high_byte >> bit) & 1) << 1) | ((low_byte >> bit) & 1);
+                let ci = col as usize;
+                let old = self.line_bg_idx[ci];
+                if old < 0 || old as u8 == idx { continue; }
+                let rgb = self.compat_bg_color(mmio, idx);
+                let off = (ly as usize * 160 + ci) * 3;
+                self.color_fb_a[off] = rgb.0;
+                self.color_fb_a[off + 1] = rgb.1;
+                self.color_fb_a[off + 2] = rgb.2;
+                self.line_bg_idx[ci] = idx as i8;
+            }
+        }
+    }
+
+    // CGB-compat up-pulse LCDC.4 train capture-phase re-resolve for the WINDOW
+    // fetcher (the window analog of cgb_train_reresolve). Window tiles are UNIFORM
+    // on hardware — the tile-data-select base is latched ONCE per tile — but
+    // rustyboi's per-substep resolution splits a tile whenever an LCDC.4 journal
+    // edge falls between its LOW (k=1) and HIGH (k=2) reads (2 dots apart): the
+    // LOW plane reads $8000 while the HIGH plane reads $8800 (or vice versa),
+    // producing a mixed pixel index the reference never shows. The whole-line
+    // journal is complete at line-end, so re-collapse every split window tile to
+    // a SINGLE base (the LOW-plane resolution, which is the first substep and the
+    // base hardware latches) and re-plot with both planes read from that one base.
+    // Same tight gate as the BG path (line-initial LCDC.4 low AND >= 4 journal
+    // edges) so the isolated single-pulse win_change (2 edges) and win_map_change2
+    // stay untouched. CGB-compat only.
+    fn win_train_reresolve(&mut self, mmio: &mmio::Mmio) {
+        if !self.wg_cgb || self.win_tile_buf.is_empty() || self.wg_hist.is_empty() {
+            return;
+        }
+        let tds = LCDCFlags::BGWindowTileDataSelect as u8;
+        let init_low = (self.wg_hist[0].1 & tds) == 0;
+        if !(init_low && self.wg_hist.len() >= 4) {
+            self.win_tile_buf.clear();
+            return;
+        }
+        let ly = mmio.read(LY);
+        if ly >= 144 {
+            self.win_tile_buf.clear();
+            return;
+        }
+        let buf = std::mem::take(&mut self.win_tile_buf);
+        for t in &buf {
+            // Only the split tiles need repair; a uniform tile is already drawn
+            // with its single latched base.
+            if t.live_low_tds == t.live_high_tds {
+                continue;
+            }
+            // Collapse to the LOW-plane base (the first substep = the latched base).
+            let uni = if t.live_low_tds {
+                LCDCFlags::BGWindowTileDataSelect as u8
+            } else {
+                0
+            };
+            let line = t.y % 8;
+            let addr = self.fetcher.get_tile_data_address(t.tn, line, uni);
+            let low_byte = mmio.read_vram_bank(0, addr);
+            let high_byte = mmio.read_vram_bank(0, addr + 1);
+            for i in 0..8u8 {
+                let col = t.first_x as i32 + i as i32;
                 if !(0..160).contains(&col) { continue; }
                 let bit = 7 - i;
                 let idx = (((high_byte >> bit) & 1) << 1) | ((low_byte >> bit) & 1);
@@ -6101,6 +6187,7 @@ impl Ppu {
                     // DMG window bus-glitch state is per-line (see wg_apply).
                     self.wg_hist.clear();
                     self.bg_tile_buf.clear();
+                    self.win_tile_buf.clear();
                     self.wg_anchor_cc = None;
                     self.wg_dpre = 0;
                     self.bg_anchor_cc = None;
@@ -6667,6 +6754,7 @@ impl Ppu {
                             // apply_dmg_wxa6_lineend_windraw.
                             self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
                             self.cgb_train_reresolve(mmio);
+                            self.win_train_reresolve(mmio);
                             self.resolve_bgp_spikes(mmio);
                             self.state = State::HBlank;
                             break 'label;
@@ -6987,6 +7075,25 @@ impl Ppu {
                                         tn: event.tile_num,
                                         first_x: first_x as u8,
                                         y: self.fetcher.latched_y(),
+                                        live_low_tds: self.fetcher.last_low_tds(),
+                                        live_high_tds: self.fetcher.last_high_tds(),
+                                    });
+                                }
+                            }
+                            // WINDOW analog (win_train_reresolve): the window internal
+                            // line is win_y_pos (not latched_y, which the window fetch
+                            // does not update).
+                            if self.wg_cgb && event.fetching_window && !self.wg_hist.is_empty() {
+                                let first_x = (self.x as i32 + event.fifo_size as i32
+                                    - 8
+                                    - pending_discard as i32)
+                                    .max(0);
+                                if (0..160).contains(&first_x) {
+                                    self.win_tile_buf.push(CapturedWinTile {
+                                        n: event.tile_index as u64,
+                                        tn: event.tile_num,
+                                        first_x: first_x as u8,
+                                        y: self.win_y_pos,
                                         live_low_tds: self.fetcher.last_low_tds(),
                                         live_high_tds: self.fetcher.last_high_tds(),
                                     });
