@@ -431,9 +431,10 @@ struct CapturedBgTile {
     tn: u8,      // latched tile number
     first_x: u8, // display column of this tile's first (leftmost) pixel
     y: u8,       // BG pixel row (ly + scy) & 0xFF for the tile-line lookup
-    // Live (partial-journal) per-plane tile-data-select bits as drawn, so the
-    // line-end re-resolve only touches tiles whose base actually moved (the
-    // glitch bands where the live draw already matches hardware stay untouched).
+    // Live (partial-journal) per-plane tile-data-select bits as drawn.
+    // Diagnostic only on the BG path (the re-resolve recomputes both plane
+    // bytes from the complete journal and re-plots per column); the WINDOW
+    // analog still keys its split-tile repair on them.
     live_low_tds: bool,
     live_high_tds: bool,
 }
@@ -2899,58 +2900,116 @@ impl Ppu {
             }
             b
         };
-        // A FALL whose write commit is exactly one dot past a plane's T1-sample
-        // dot IS the tile-index-as-data glitch (SameBoy tile_sel_glitch; the
-        // falling edge coincides with the T2 byte read). Offset == -1 correlates
-        // perfectly with the CGB-C oracle glitch flag across every band.
-        let glitch_at = |dot: i64| -> bool {
-            self.wg_hist.iter().any(|&(tt, o, nn)| {
-                let w = tt as i64 - WG_TRANSITION_DELAY as i64;
-                (o & tds) != 0 && (nn & tds) == 0 && dot == w - 1
-            })
+        // The last-fetched sprite's bitplane-1 byte among sprites whose fetch
+        // (x-match arm dot) precedes `dot` — the initial stale-latch source for
+        // the RISE-coincidence glitch (Matt Currie, CGB PPU doc, TILE_SEL bit 4:
+        // "setting TILE_SEL on the same T-cycle as a bitplane data read will
+        // cause it to use bitplane 1 data from the most recently drawn sprite,
+        // if any"). Returns (arm dot, bp1 byte). Sprite tiles always read
+        // unsigned $8000; y-flip and 8x16 masking follow the OAM attributes.
+        let sprite_bp1_before = |dot: i64| -> Option<(i64, u8)> {
+            let obj_on = (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0;
+            let tall = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+            let height: i32 = if tall { 16 } else { 8 };
+            let mut best: Option<(i64, u8)> = None;
+            for (i, s) in self.sprites_on_line.iter().enumerate() {
+                let Some(rec) = self.sprite_fetch_recs.get(i) else { continue };
+                let counted = match rec.phase {
+                    SpriteFetchPhase::Fetched => true,
+                    SpriteFetchPhase::Pending => obj_on,
+                    SpriteFetchPhase::Aborted => rec.penalty == 0 && obj_on,
+                };
+                if !counted {
+                    continue;
+                }
+                let at = rec.arm_tick as i64;
+                if at >= dot || best.is_some_and(|(b, _)| at < b) {
+                    continue;
+                }
+                let mut row = ly as i32 + 16 - s.y as i32;
+                if !(0..height).contains(&row) {
+                    continue;
+                }
+                if s.attributes.y_flip {
+                    row = height - 1 - row;
+                }
+                let tn = if tall { s.tile_index & 0xFE } else { s.tile_index };
+                let a = 0x8000u16 + (tn as u16) * 16 + (row as u16) * 2 + 1;
+                best = Some((at, mmio.read_vram_bank(0, a)));
+            }
+            best
         };
-        // Pass 1: resolve each tile's per-plane base + glitch. If ANY tile on
-        // this row glitches, the whole row is a beyond-SameBoy band: SameBoy
-        // renders the tile-index-as-data byte there but the real CGB-C ref does
-        // not (verified — SameBoy fails the ref on exactly the glitch rows and
-        // matches it dot-exact on the clean rows). The live (partial-journal)
-        // draw is already at/beyond SameBoy on those rows, so leave the entire
-        // row untouched. Re-plot only the fully-clean rows SameBoy reproduces,
-        // where the live per-plane base was wrong — zero regression on the
-        // undefined glitch bands, every SameBoy-confirmed pixel landed.
-        struct Res { first_x: u8, tn: u8, line: u8, low_tds: u8, high_tds: u8, moved: bool }
-        let mut res = Vec::with_capacity(buf.len());
-        let mut row_glitches = false;
+        // Pass 1 (fetch order): resolve each tile's per-plane byte against the
+        // complete journal. An LCDC.4 edge whose write commit w lands exactly
+        // one dot past a plane's T1-sample dot (w == T1 + 1) coincides with
+        // that plane's VRAM data read — the CGB-C TILE_SEL glitch pair
+        // (mealybug PPU doc, decoded pixel-exact from the real-cgb04c change2
+        // ref across all 64 rows / 8 sprite-phase bands):
+        //  - FALL: the tile INDEX is used as that bitplane's data, and the
+        //    stale-data latch captures the $8000-region byte the read was
+        //    pulling off the bus (A12 still high while falling).
+        //  - RISE: the bitplane gets the stale-data latch — the most recent of
+        //    the last sprite fetch's bitplane-1 byte and the last FALL-glitched
+        //    read's captured byte.
+        // The change2 pulse train sweeps the coincidence through both planes:
+        // its 8 sprite bands step the fetch-grid phase one dot per band, so
+        // band ly24-31 lands the edges on the LOW-plane reads and ly40-47 on
+        // the HIGH-plane reads; the other six bands have no coincidence and
+        // resolve region-clean. SameBoy-CGB-C mismodels the RISE side (it
+        // fails the ref on exactly these rows), so the ref is the only oracle.
+        struct Res { first_x: u8, low_byte: u8, high_byte: u8 }
+        let mut res: Vec<Res> = Vec::with_capacity(buf.len());
+        let mut latch: Option<(i64, u8)> = None;
         for t in &buf {
             let n = t.n;
             let Some(h1) = self.bg_hw_read_dot(n, 1, ly) else { continue; };
             let Some(h2) = self.bg_hw_read_dot(n, 2, ly) else { continue; };
             let h1s = self.bg_hw_read_dot_ex(n, 1, ly, true).unwrap_or(h1) as i64;
             let h2s = self.bg_hw_read_dot_ex(n, 2, ly, true).unwrap_or(h2) as i64;
-            let low_tds = raw_at(h1s - CGBWG_TRAIN_T1_LEAD);
-            let high_tds = raw_at(h2s - CGBWG_TRAIN_T1_LEAD);
-            if glitch_at(h1s - CGBWG_TRAIN_T1_LEAD) || glitch_at(h2s - CGBWG_TRAIN_T1_LEAD) {
-                row_glitches = true;
+            let line = t.y % 8;
+            let mut bytes = [0u8; 2];
+            for (k, t1) in [h1s - CGBWG_TRAIN_T1_LEAD, h2s - CGBWG_TRAIN_T1_LEAD]
+                .into_iter()
+                .enumerate()
+            {
+                let plane_tds = raw_at(t1);
+                let a = self.fetcher.get_tile_data_address(t.tn, line, plane_tds) + k as u16;
+                let mut byte = mmio.read_vram_bank(0, a);
+                for &(tt, o, nn) in &self.wg_hist {
+                    let w = tt as i64 - WG_TRANSITION_DELAY as i64;
+                    if w != t1 + 1 {
+                        continue;
+                    }
+                    if (o & tds) != 0 && (nn & tds) == 0 {
+                        // FALL coincidence: index-as-data (the live fetcher
+                        // applies the same tn < 0x80 gate), latch the true
+                        // $8000-region byte.
+                        if t.tn < 0x80 {
+                            byte = t.tn;
+                        }
+                        let ua = self.fetcher.get_tile_data_address(t.tn, line, tds) + k as u16;
+                        latch = Some((w, mmio.read_vram_bank(0, ua)));
+                    } else if (o & tds) == 0 && (nn & tds) != 0 {
+                        // RISE coincidence: stale bitplane data — the most
+                        // recent of the sprite bp1 fetch and the FALL latch.
+                        let stale = match (latch, sprite_bp1_before(t1)) {
+                            (Some(l), Some(s)) => Some(if l.0 >= s.0 { l } else { s }),
+                            (l, s) => l.or(s),
+                        };
+                        if let Some((_, b)) = stale {
+                            byte = b;
+                        }
+                    }
+                }
+                bytes[k] = byte;
             }
-            let moved =
-                (low_tds != 0) != t.live_low_tds || (high_tds != 0) != t.live_high_tds;
-            res.push(Res { first_x: t.first_x, tn: t.tn, line: t.y % 8, low_tds, high_tds, moved });
+            res.push(Res { first_x: t.first_x, low_byte: bytes[0], high_byte: bytes[1] });
         }
-        if row_glitches {
-            return;
-        }
-        // Pass 2: re-plot the clean row. Only BG-won columns (line_bg_idx >= 0)
-        // whose index changed are overwritten; sprite-won columns stay as drawn.
+        // Pass 2: re-plot. Only BG-won columns (line_bg_idx >= 0) whose index
+        // changed are overwritten; sprite-won columns stay as drawn. Tiles the
+        // live draw already rendered byte-identically no-op here.
         for r in &res {
-            if !r.moved { continue; }
-            let low_byte = {
-                let a = self.fetcher.get_tile_data_address(r.tn, r.line, r.low_tds);
-                mmio.read_vram_bank(0, a)
-            };
-            let high_byte = {
-                let a = self.fetcher.get_tile_data_address(r.tn, r.line, r.high_tds) + 1;
-                mmio.read_vram_bank(0, a)
-            };
+            let (low_byte, high_byte) = (r.low_byte, r.high_byte);
             for i in 0..8u8 {
                 let col = r.first_x as i32 + i as i32;
                 if !(0..160).contains(&col) { continue; }
