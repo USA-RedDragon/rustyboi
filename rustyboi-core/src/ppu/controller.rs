@@ -3161,18 +3161,29 @@ impl Ppu {
         };
         // Resolve the LCDC.4 tile-data-select level at a reconstructed read dot,
         // and whether the read coincides with a falling edge (the tile-index-as-
-        // data glitch). Both key on the latch dot = read dot - sample lag; a FALL
-        // commit landing exactly on the latch dot returns the tile index as data
-        // (SameBoy tile_sel_glitch). The two leading window tiles (n<2) always
-        // latch the line-initial low base — their HIGH_T1 latch predates the pulse
-        // train — so they never glitch and keep the $8800 base.
-        let resolve = |this: &Self, h: u64, first_tile: bool, sample_lag: i64| -> (bool, bool) {
+        // data glitch) or a RISING edge (the stale-bus echo, below). All key on
+        // the latch dot = read dot - sample lag; a FALL commit landing exactly on
+        // the latch dot returns the tile index as data (SameBoy tile_sel_glitch);
+        // a RISE commit landing exactly on it leaves the VRAM output mid-settle,
+        // and the returned byte is the value the data bus carried 16 dots (two
+        // fetch slots) earlier — the same-plane byte of the tile fetched two
+        // slots back at ITS level-at-sample base, or the displacing sprite
+        // fetch's high byte when that slot ran the sprite. Derived from the
+        // m3_lcdc_tile_sel_win_change2 CGB-C reference rows 40-46/56-62, whose
+        // trio of corrupt tiles (samples on the 24-dot train's three rises)
+        // demand exactly those VRAM bytes; SameBoy renders clean bytes there
+        // and misses the reference by the same 179 px. The two leading window
+        // tiles (n<2) always latch the line-initial low base — their HIGH_T1
+        // latch predates the pulse train — so they never glitch and keep the
+        // $8800 base.
+        let resolve = |this: &Self, h: u64, first_tile: bool, sample_lag: i64| -> (bool, bool, bool) {
             if first_tile {
-                return (false, false);
+                return (false, false, false);
             }
             let s = h as i64 - sample_lag;
             let mut level = (this.wg_hist[0].1 & tds) != 0;
             let mut glitch = false;
+            let mut rise_hit = false;
             for &(cc, old, new) in &this.wg_hist {
                 let w = cc as i64 - WG_TRANSITION_DELAY as i64; // raw write commit
                 if s > w {
@@ -3181,10 +3192,53 @@ impl Ppu {
                 if s == w && (old & tds) != 0 && (new & tds) == 0 {
                     glitch = true; // FALL commit on the latch dot
                 }
+                if s == w && (!old & new & tds) != 0 {
+                    rise_hit = true; // RISE commit on the latch dot
+                }
             }
-            (level, glitch)
+            (level, glitch, rise_hit)
+        };
+        // The byte the VRAM bus carried 16 dots before a rise-hit read: the
+        // same-plane byte of the tile two fetch slots back, from the base its
+        // own sample resolved (its bus read is real even when its LATCH
+        // glitched to the tile index), or the mid-line sprite fetch's high
+        // byte when the two-slots-back slot ran the sprite fetch.
+        let stale_bus_byte = |this: &Self,
+                              mmio: &mmio::Mmio,
+                              prev: Option<&(u8, bool, bool)>,
+                              line: u8,
+                              high: bool|
+         -> Option<u8> {
+            if let Some(&(ptn, plt, pht)) = prev {
+                let base = if high { pht } else { plt };
+                let a = this
+                    .fetcher
+                    .get_tile_data_address(ptn, line, if base { tds } else { 0 });
+                return Some(mmio.read_vram_bank(0, a + high as u16));
+            }
+            for (i, s) in this.sprites_on_line.iter().enumerate() {
+                if (s.x as i64 - 8) < 0 {
+                    continue;
+                }
+                if !matches!(
+                    this.sprite_fetch_recs.get(i).map(|r| r.phase),
+                    Some(SpriteFetchPhase::Fetched)
+                ) {
+                    continue;
+                }
+                let mut row = ly.wrapping_add(16).wrapping_sub(s.y) & 7;
+                if s.attributes.y_flip {
+                    row = 7 - row;
+                }
+                let a = this.fetcher.get_tile_data_address(s.tile_index, row, tds);
+                return Some(mmio.read_vram_bank(0, a + 1));
+            }
+            None
         };
         let buf = std::mem::take(&mut self.win_tile_buf);
+        // Per-tile resolved (tn, low base, high base) records for the
+        // stale-bus lookup, keyed by fetch index n (buf is in fetch order).
+        let mut resolved_recs: Vec<Option<(u8, bool, bool)>> = Vec::new();
         for t in &buf {
             // The upper window rows (win line < WIN_TRAIN_GLITCH_ROW) are UNIFORM on
             // hardware: every tile latches a single $8000/$8800 base, and the oracle
@@ -3201,6 +3255,7 @@ impl Ppu {
             // from those, reading the tile INDEX as a glitched plane's byte
             // (SameBoy tile_sel_glitch).
             let (low_tds, high_tds, lo_glitch, hi_glitch);
+            let (mut lo_stale, mut hi_stale) = (None, None);
             if t.y < WIN_TRAIN_GLITCH_ROW {
                 if t.live_low_tds == t.live_high_tds {
                     continue; // uniform live tile — already correct
@@ -3214,27 +3269,52 @@ impl Ppu {
                 let h2 = anchor + dpre + 8 * t.n + 4;
                 let first_tile = t.n < 2;
                 let lag = self.win_train_sample_lag(t.y);
-                let (lt, lg) = resolve(self, h1, first_tile, lag);
-                let (ht, hg) = resolve(self, h2, first_tile, lag);
+                let (lt, lg, lr) = resolve(self, h1, first_tile, lag);
+                let (ht, hg, hr) = resolve(self, h2, first_tile, lag);
                 low_tds = lt;
                 high_tds = ht;
                 lo_glitch = lg;
                 hi_glitch = hg;
+                if resolved_recs.len() <= t.n as usize {
+                    resolved_recs.resize(t.n as usize + 1, None);
+                }
+                resolved_recs[t.n as usize] = Some((t.tn, lt, ht));
+                let line = t.y % 8;
+                // A rise-hit plane returns the stale bus byte (see resolve/
+                // stale_bus_byte): the slot two fetches back — that tile's
+                // record, or the sprite fetch when the two-back slot falls in
+                // the leading-tile prologue the mid-line sprite fetch owns.
+                let prev = if t.n >= 4 {
+                    resolved_recs.get(t.n as usize - 2).and_then(|r| r.as_ref())
+                } else {
+                    None
+                };
+                if lr {
+                    lo_stale = stale_bus_byte(self, mmio, prev, line, false);
+                }
+                if hr {
+                    hi_stale = stale_bus_byte(self, mmio, prev, line, true);
+                }
                 // Nothing to repair when the completed resolve matches the live draw
-                // and neither plane glitches.
+                // and neither plane glitches or reads the stale bus.
                 if low_tds == t.live_low_tds
                     && high_tds == t.live_high_tds
                     && !lo_glitch
                     && !hi_glitch
+                    && lo_stale.is_none()
+                    && hi_stale.is_none()
                 {
                     continue;
                 }
             }
             let line = t.y % 8;
             // The tile-index-as-data glitch replaces the glitched plane's byte
-            // with the tile INDEX (SameBoy data_for_tile_sel_glitch); otherwise
-            // each plane reads from its own resolved base.
-            let low_byte = if lo_glitch {
+            // with the tile INDEX (SameBoy data_for_tile_sel_glitch); a
+            // rise-hit plane reads the stale bus byte; otherwise each plane
+            // reads from its own resolved base.
+            let low_byte = if let Some(b) = lo_stale {
+                b
+            } else if lo_glitch {
                 t.tn
             } else {
                 let a =
@@ -3242,7 +3322,9 @@ impl Ppu {
                         .get_tile_data_address(t.tn, line, if low_tds { tds } else { 0 });
                 mmio.read_vram_bank(0, a)
             };
-            let high_byte = if hi_glitch {
+            let high_byte = if let Some(b) = hi_stale {
+                b
+            } else if hi_glitch {
                 t.tn
             } else {
                 let a =
