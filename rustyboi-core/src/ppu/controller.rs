@@ -203,6 +203,26 @@ const CGBWG_ARM_WIN: u64 = 14;
 const CGBWG_ARM_WIN_HI: u64 = 12;
 const CGBWG_ARM_BG: u64 = 14;
 const CGBWG_SHIFT_BASE: u64 = 13;
+// Sub-dot window fetch-grid phase (cgb_wg_resolve): the CGB-compat window
+// fetch grid slides 1/8 dot earlier per window line against the CPU write
+// clock (the SameBoy-measured read-dot drift quantizes this to the -1-dot
+// steps every 8 lines that the integer grid already models; the fraction is
+// the remainder). Two places see the fraction:
+//  - a read displaced by a mid-line sprite stall resumes on the slid grid, so
+//    a rising edge landing exactly ON its integer visibility dot misses the
+//    read by the fraction: shifted reads take a rise one eighth late (the
+//    m3_lcdc_tile_sel_win_change2 top-block wtx1 low read; its high-plane
+//    $8000 split then collapses to the $8800 base like every train split).
+//  - a read inside a PENDING stall shadow (hardware charges the sprite stall
+//    to this read; the reconstruction grid charges it from the next tile)
+//    samples the A12 line at its true (stalled) dot: a rising LCDC.4 edge
+//    still rings there CGBWG_A12_ECHO dots after its commit, and the read
+//    catches it only when the true dot lands exactly on the echo's 1/8-dot
+//    lattice point - phase 0, i.e. window lines = 0 mod 8 (the
+//    m3_lcdc_tile_sel_win_change (8,64) blue straddle, which no integer-grid
+//    emulator reproduces).
+const CGBWG_A12_ECHO: u64 = 18;
+
 // CGB-compat window train tile-data-select latch (lower window rows). From
 // WIN_TRAIN_GLITCH_ROW on, the pulse-train level and the tile-index-as-data glitch
 // coincidence are sampled a per-block lag (in dots) before the reconstructed byte
@@ -215,6 +235,22 @@ const CGBWG_SHIFT_BASE: u64 = 13;
 const WIN_TRAIN_GLITCH_ROW: u8 = 40;
 const WIN_TRAIN_LAG_BASE: i64 = -1;
 const WIN_TRAIN_LAG_STEP: u8 = 8;
+
+// Sub-dot state of one reconstructed window fetch read (see CGBWG_A12_ECHO):
+// the fractional grid phase in eighths of a dot (0, -1, .., -7 across each
+// 8-line block), whether the read's `h` carries a mid-line sprite-stall
+// shift, and the stall dots hardware charges this read that the grid has not
+// (the pending-stall shadow). NONE = integer grid (BG path, map re-resolve).
+#[derive(Clone, Copy)]
+struct WgSubDot {
+    phase8: i64,
+    shifted: bool,
+    pending: u64,
+}
+
+impl WgSubDot {
+    const NONE: WgSubDot = WgSubDot { phase8: 0, shifted: false, pending: 0 };
+}
 
 /// Machine configuration for a CPU VRAM/OAM access-window query.
 #[derive(Clone, Copy)]
@@ -2458,6 +2494,12 @@ impl Ppu {
         let n = self.fetcher.get_tile_index() as u64;
         let base = anchor + self.wg_dpre + 8 * n + 2 * k as u64;
         let mut h = base;
+        // Stall dots hardware charges this read but the arm rule below does
+        // not (the pending-stall shadow): a counted on-screen sprite whose
+        // arm dot the read's base has not reached, on a tile past the
+        // sprite's own (hardware displaces from tile pos/8 + 1 on). Feeds
+        // only the A12 rise-echo lattice check (see CGBWG_A12_ECHO).
+        let mut pending: u64 = 0;
         // Midline sprite stalls (window pos = X - 8 >= 0): each sprite the
         // live walk actually FETCHED (`sprite_fetch_recs`) shifts every window
         // tile from pos/8 + 2 on by its actually-charged penalty (the
@@ -2499,6 +2541,8 @@ impl Ppu {
                 };
                 if counted && base >= anchor + arm {
                     h += (CGBWG_SHIFT_BASE as i64 - (pos % 8)).max(6) as u64;
+                } else if counted && (n as i64) >= pos / 8 + 1 {
+                    pending += (CGBWG_SHIFT_BASE as i64 - (pos % 8)).max(6) as u64;
                 }
             } else if rec.phase == SpriteFetchPhase::Fetched
                 && (n as i64) >= pos / 8 + 2
@@ -2509,8 +2553,13 @@ impl Ppu {
         const WG_BITS: u8 =
             (LCDCFlags::WindowTileMapDisplaySelect as u8) | (LCDCFlags::BGWindowTileDataSelect as u8);
         if self.wg_cgb {
+            let sub = WgSubDot {
+                phase8: -((self.win_y_pos % 8) as i64),
+                shifted: h != base,
+                pending,
+            };
             let (bits, quirk) =
-                self.cgb_wg_resolve(h, CGBWG_WIN_RISE, CGBWG_WIN_FALL, CGBWG_QUIRK_WIN, k);
+                self.cgb_wg_resolve(h, CGBWG_WIN_RISE, CGBWG_WIN_FALL, CGBWG_QUIRK_WIN, k, sub);
             // Window map-select (LCDC.6) pulse under $8000 tile-data (LCDC.4 = 1):
             // the map read becomes visible later than the $8800 path, so re-resolve
             // just the map bit with the later CGBWG_WIN_MAP_*_TDS thresholds. This is
@@ -2523,12 +2572,16 @@ impl Ppu {
             let map_bit = LCDCFlags::WindowTileMapDisplaySelect as u8;
             let tds = LCDCFlags::BGWindowTileDataSelect as u8;
             let bits = if (bits & tds) != 0 {
+                // The map re-resolve stays on the integer grid: the 10/10
+                // thresholds are calibrated against win_map_change2's
+                // all-shifted rows, whose refs show no sub-dot residue.
                 let (bits_map, _) = self.cgb_wg_resolve(
                     h,
                     CGBWG_WIN_MAP_RISE_TDS,
                     CGBWG_WIN_MAP_FALL_TDS,
                     CGBWG_QUIRK_WIN,
                     k,
+                    WgSubDot::NONE,
                 );
                 (bits & !map_bit) | (bits_map & map_bit)
             } else {
@@ -2567,7 +2620,17 @@ impl Ppu {
     // — and no OR edge. Also reports whether a TDL/TDH read (`k` >= 1) at
     // `h` lands exactly on a falling LCDC.4 transition dot, which reads the
     // tile INDEX as that bitplane's data (the CGB-C coincidence rule).
-    fn cgb_wg_resolve(&self, h: u64, rise: u64, fall: u64, quirk_add: u64, k: u8) -> (u8, bool) {
+    // `sub` carries the window fetch grid's sub-dot state (see CGBWG_A12_ECHO);
+    // WgSubDot::NONE keeps every comparison on the integer grid.
+    fn cgb_wg_resolve(
+        &self,
+        h: u64,
+        rise: u64,
+        fall: u64,
+        quirk_add: u64,
+        k: u8,
+        sub: WgSubDot,
+    ) -> (u8, bool) {
         let tds = LCDCFlags::BGWindowTileDataSelect as u8;
         let mut bits = self.wg_hist[0].1;
         let mut quirk = false;
@@ -2618,11 +2681,35 @@ impl Ppu {
             let rise_eff = if train_rise { rise.saturating_sub(CGBWG_TRAIN_ADVANCE) } else { rise };
             if (falling & tds) != 0 { prev_fall_w = Some(w as i64); }
             let mut applied = 0u8;
-            if h >= w + rise_eff + rearm {
+            // 8x fixed point: read position vs the rise boundary, in eighths.
+            // An unshifted read sits ON the integer grid (byte-identical to
+            // the plain h >= w + thr comparison); a sprite-stall-shifted read
+            // resumes on the 1/8-dot-per-line slid grid, so a rise landing
+            // exactly on its integer boundary dot misses the read by the
+            // fraction: its boundary sits one eighth past the integer dot
+            // (see the CGBWG_A12_ECHO block comment).
+            let rise_vis = if sub.shifted {
+                8 * h as i64 + sub.phase8 >= 8 * (w + rise_eff + rearm) as i64 + 1
+            } else {
+                h >= w + rise_eff + rearm
+            };
+            if rise_vis {
                 applied |= rising;
             }
             if h >= w + fall_eff {
                 applied |= falling;
+            }
+            // A12 rise-echo (pending-stall shadow): the read's true hardware
+            // dot is h + the stall the reconstruction grid has not charged
+            // yet; a rising LCDC.4 edge still rings on the A12 line
+            // CGBWG_A12_ECHO dots after its commit, caught only when the true
+            // dot lands exactly on the echo's 1/8-dot lattice point.
+            if sub.pending > 0
+                && (rising & tds) != 0
+                && 8 * (h + sub.pending) as i64 + sub.phase8
+                    == 8 * (w + CGBWG_A12_ECHO) as i64
+            {
+                applied |= rising & tds;
             }
             bits = (bits & !applied) | (new & applied);
             // The tile-index-as-data quirk fires when a falling LCDC.4 write's
@@ -2825,10 +2912,17 @@ impl Ppu {
             _ => CGBWG_BG_FALL_TDH,
         };
         // Tile-data-select bit (LCDC.4) + its tile-index-as-data quirk: `h` grid.
-        let (bits_td, quirk) = self.cgb_wg_resolve(h, CGBWG_BG_RISE, fall, CGBWG_QUIRK_BG, k);
+        let (bits_td, quirk) =
+            self.cgb_wg_resolve(h, CGBWG_BG_RISE, fall, CGBWG_QUIRK_BG, k, WgSubDot::NONE);
         // Map-select bit (LCDC.3): true fetch dot, +2 rise/fall.
-        let (bits_map, _) =
-            self.cgb_wg_resolve(h_scy, CGBWG_BG_MAP_RISE, CGBWG_BG_MAP_FALL, CGBWG_QUIRK_BG, k);
+        let (bits_map, _) = self.cgb_wg_resolve(
+            h_scy,
+            CGBWG_BG_MAP_RISE,
+            CGBWG_BG_MAP_FALL,
+            CGBWG_QUIRK_BG,
+            k,
+            WgSubDot::NONE,
+        );
         let map_bit = LCDCFlags::BGTileMapDisplaySelect as u8;
         let bits = (bits_td & !map_bit) | (bits_map & map_bit);
         (bits, quirk)
