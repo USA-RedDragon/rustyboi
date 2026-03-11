@@ -338,6 +338,20 @@ impl GB {
             let banks = if cgb { 8 } else { 2 };
             let mut wram = vec![0u8; banks * 0x1000];
             crate::memory::init_wram_powerup(cgb, &mut wram);
+            if cgb {
+                // The no-boot state models the capture session behind the
+                // gambatte `.dump` region oracles, whose power-on WRAM had the
+                // C200-C20F line in the 00 phase (canonical `setInitialCgbWram`
+                // has it in the FF phase) plus one flipped bit: C208=01.
+                // Observed via the oamdmasrcC000_gdmasrcC0F0 dumps, whose GDMA
+                // overruns the ROM's C000-C1FF fill into C200-C22F.
+                // `skip_bios_with_boot_residue` restores the canonical bytes
+                // for the `.bin` dumper oracles (wram_dumper reads these
+                // cells). Same session-family split as the FEAX / VRAM-logo
+                // seeds.
+                wram[0x0200..0x0208].fill(0x00);
+                wram[0x0208] = 0x01;
+            }
             for (i, b) in wram[0x0000..0x1000].iter().enumerate() {
                 self.mmio.write(0xC000 + i as u16, *b);
             }
@@ -553,6 +567,16 @@ impl GB {
         if self.hardware.is_cgb_like() {
             self.seed_boot_logo_vram();
             self.mmio.set_cgb_boot_residue_feax();
+            // Restore the canonical `setInitialCgbWram` bytes over the
+            // `.dump`-session deltas skip_bios applies at C200-C208 (the
+            // wram_dumper `.bin` oracle reads these cells).
+            for (addr, value) in [
+                (0xC200u16, 0xFFu8), (0xC201, 0xFB), (0xC202, 0xFF), (0xC203, 0xFF),
+                (0xC204, 0xFF), (0xC205, 0xFF), (0xC206, 0xFF), (0xC207, 0xFF),
+                (0xC208, 0x00),
+            ] {
+                self.mmio.write(addr, value);
+            }
         }
     }
 
