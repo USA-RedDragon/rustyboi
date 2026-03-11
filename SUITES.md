@@ -1,5 +1,8 @@
 # Public GB/GBC test suites (c-sp / gameboy-test-roms + friends)
 
+> Per-ROM proof and explanation for every currently failing test lives in
+> [KNOWN_FAILURES.md](KNOWN_FAILURES.md).
+
 rustyboi is graded against the public Game Boy / Game Boy Color hardware-test
 suites in addition to the Gambatte hwtests. These are wired into the main
 `rustyboi-test-runner` as first-class, regenerable regression gates so accuracy
