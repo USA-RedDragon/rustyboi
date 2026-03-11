@@ -93,7 +93,7 @@ threshold() {
     case "$1" in
         acid2)              echo "3 -" ;;
         cgb_acid_hell)      echo "1 -" ;;
-        mealybug)           echo "49 -" ;;
+        mealybug)           echo "51 -" ;;
         mooneye)            echo "191 -" ;;
         mooneye_wilbertpol) echo "192 -" ;;
         age)                echo "56 -" ;;
