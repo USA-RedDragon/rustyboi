@@ -450,6 +450,10 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
     // serial / cart-RAM / FF82 / register protocols). Handle them up front.
     match &case.oracle {
         Oracle::Serial => return evaluate_serial(&mut gb, options.frames),
+        Oracle::SerialText { pass, fail } => {
+            let frames = case.frames.unwrap_or(options.frames);
+            return evaluate_serial_text(&mut gb, frames, pass, fail.as_deref());
+        }
         Oracle::BlarggMem => return evaluate_blargg_mem(&mut gb, options.frames),
         Oracle::MemValue { addr, expected } => {
             let frames = case.frames.unwrap_or(options.frames);
@@ -595,6 +599,7 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         | Oracle::CspPngLayout { .. }
         | Oracle::PngShootout { .. }
         | Oracle::Serial
+        | Oracle::SerialText { .. }
         | Oracle::BlarggMem
         | Oracle::MemValue { .. }
         | Oracle::MooneyeFib
@@ -747,36 +752,85 @@ fn evaluate_mem_value(gb: &mut GB, frames: usize, addr: u16, expected: u8) -> Re
 /// start a transfer via SC (FF02) bit7+bit0. Capture SB on each rising edge of
 /// the start bit, reconstruct the text, and scan for "Passed"/"Failed"/"Error".
 fn evaluate_serial(gb: &mut GB, frames: usize) -> Result<(), String> {
+    evaluate_serial_markers(gb, frames, "Passed", &["Failed", "Error"], true)
+}
+
+/// Parameterized serial-text grading (`serial_text`). The pass string (and
+/// optional early-fail marker) come from the manifest. Unlike blargg's
+/// SC-handshake protocol, the ROMs this serves (sketchtests) print by writing
+/// each character RAW to SB (FF01) and never touch SC (verified by
+/// disassembly: three `ldh [FF01],a` sites, zero FF02 writes), so the capture
+/// samples FF01 value CHANGES per instruction step instead of SC start edges.
+/// Limitation: back-to-back identical characters collapse into one, which is
+/// harmless for the markers in use ("Test OK!" / model names have no
+/// consecutive repeats; the "Expected..." fail prefix survives regardless).
+fn evaluate_serial_text(
+    gb: &mut GB,
+    frames: usize,
+    pass: &str,
+    fail: Option<&str>,
+) -> Result<(), String> {
+    let fails: Vec<&str> = fail.into_iter().collect();
+    evaluate_serial_markers(gb, frames, pass, &fails, false)
+}
+
+/// Shared serial-console capture: reconstruct the serial byte stream (SC
+/// start-edge handshake when `sc_edge`, raw FF01 value changes otherwise) and
+/// grade it against a pass marker and zero-or-more early-fail markers.
+fn evaluate_serial_markers(
+    gb: &mut GB,
+    frames: usize,
+    pass: &str,
+    fails: &[&str],
+    sc_edge: bool,
+) -> Result<(), String> {
     let budget = frames as u64 * CYCLES_PER_FRAME as u64;
+    // Don't scan before the stream could possibly hold the shortest marker.
+    let min_len = fails
+        .iter()
+        .map(|f| f.len())
+        .chain(std::iter::once(pass.len()))
+        .min()
+        .unwrap_or(1);
     let mut cycles = 0u64;
     let mut prev_start = false;
+    let mut prev_sb = gb.read_memory(0xFF01);
     let mut out: Vec<u8> = Vec::new();
     while cycles < budget {
-        let sc = gb.read_memory(0xFF02);
-        let start = (sc & 0x80) != 0 && (sc & 0x01) != 0;
-        if start && !prev_start {
-            out.push(gb.read_memory(0xFF01));
-            if out.len() >= 6 {
+        let byte = if sc_edge {
+            let sc = gb.read_memory(0xFF02);
+            let start = (sc & 0x80) != 0 && (sc & 0x01) != 0;
+            let edge = start && !prev_start;
+            prev_start = start;
+            edge.then(|| gb.read_memory(0xFF01))
+        } else {
+            let sb = gb.read_memory(0xFF01);
+            let changed = sb != prev_sb;
+            prev_sb = sb;
+            changed.then_some(sb)
+        };
+        if let Some(byte) = byte {
+            out.push(byte);
+            if out.len() >= min_len {
                 let s = String::from_utf8_lossy(&out);
-                if s.contains("Passed") {
+                if s.contains(pass) {
                     return Ok(());
                 }
-                if s.contains("Failed") || s.contains("Error") {
+                if fails.iter().any(|f| s.contains(f)) {
                     return Err(format!("serial verdict: {}", verdict_tail(&s)));
                 }
             }
         }
-        prev_start = start;
         let (_breakpoint, c) = gb.step_instruction(false);
         cycles += c as u64;
     }
     let s = String::from_utf8_lossy(&out);
-    if s.contains("Passed") {
+    if s.contains(pass) {
         Ok(())
     } else if s.is_empty() {
         Err("no serial output (timeout)".to_string())
     } else {
-        Err(format!("no Passed; tail: {}", verdict_tail(&s)))
+        Err(format!("no {pass:?}; tail: {}", verdict_tail(&s)))
     }
 }
 

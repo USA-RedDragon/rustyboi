@@ -1,0 +1,13 @@
+# Ashiepaws/sketchtests v0.2-alpha (2020-08-29 release zip, prebuilt).
+# daa + interrupt_priority are hardware-verified upstream (MGB 9638D and
+# CGB CPU-D per the release notes); model_detector is spec-derived
+# (boot-register + capability probing), included with that provenance
+# note. Graded `serial_text` (blargg-style FF01/FF02 ASCII): pass on
+# `Test OK!` / the expected model name, early-fail on `Expected` (the
+# mismatch printout). Run: --frames 120 (daa sweeps all A/flag inputs).
+sketchtests/daa|dmg|serial_text|gb-test-roms/sketchtests/daa.gb|pass=Test OK!|fail=Expected
+sketchtests/interrupt_priority|dmg|serial_text|gb-test-roms/sketchtests/interrupt_priority.gb|pass=Test OK!|fail=Expected
+sketchtests/daa|cgb|serial_text|gb-test-roms/sketchtests/daa.gb|pass=Test OK!|fail=Expected
+sketchtests/interrupt_priority|cgb|serial_text|gb-test-roms/sketchtests/interrupt_priority.gb|pass=Test OK!|fail=Expected
+sketchtests/model_detector|dmg|serial_text|gb-test-roms/sketchtests/model_detector.gb|pass=DMG
+sketchtests/model_detector|cgb|serial_text|gb-test-roms/sketchtests/model_detector.gb|pass=CGB

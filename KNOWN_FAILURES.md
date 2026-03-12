@@ -1,6 +1,6 @@
 # Known Failures — every failing ROM, with proof
 
-13 of 6440 test cases fail across the 23 suites: 4 in gbmicrotest, 9 in gambatte. This document details every one, with evidence. It makes **no assumptions**: every claim is tagged with its provenance, and reproducible claims include the command that re-verifies them against this tree.
+17 of 6465 test cases fail across the 26 suites: 4 in gbmicrotest, 9 in gambatte, 4 in little_things_extra. This document details every one, with evidence. It makes **no assumptions**: every claim is tagged with its provenance, and reproducible claims include the command that re-verifies them against this tree.
 
 Provenance tags:
 
@@ -14,6 +14,7 @@ Verdict classes:
 - **BLOCKED-ON-ORACLE** — a hardware-correct answer exists in principle, but no captured/documented value exists anywhere; grading the emulator's own output would assert nothing. Unblockable with real hardware.
 - **UN-GRADEABLE** — the ROM writes no stable verdict anywhere.
 - **ANALOG** — the behavior has no register-level correlate; reproducing the value without a physical derivation would be a single-observable fit.
+- **OPEN-TARGET** — a genuine modeling gap with a real-silicon (or author-endorsed deterministic) oracle. Unlike the classes above these are *fixable*; they are open accuracy work items, not excused floors.
 
 ---
 
@@ -174,6 +175,52 @@ EOF
 ```
 
 The `srcC000` twin **passes**. Poking C113=F7 flips which of the two passes — an exact 1-for-1 swap [V]. Same uninitialized cell, two sessions, two values: session flicker, not a computable operand (no deterministic mechanism produces F7 from the actual bus contents [V]).
+
+---
+
+## little_things_extra — 4 failures (0/4) — all OPEN-TARGET
+
+Adopted 2026-07 from the nitro2k01/little-things-gb releases (see SUITES.md for
+fetch + grading provenance). Both underlying behaviors are genuine accuracy
+gaps, newly discovered by suite adoption — not excused floors. The suite floor
+is 0 until they are fixed; the auto-ratchet will raise it as they land.
+
+### 14. `windesync-validate.gb` (dmg) — OPEN-TARGET (pre-CGB window-desync glitch)
+
+**Failure [R]:** `tools/run-suites.sh little_things_extra` → layout mismatch vs
+`gb-test-roms/little-things-gb/windesync-reference-sgb.png`, 705 pixels break
+the best recolor map.
+
+**Oracle [D]:** the reference was digitally captured from a **real Super Game
+Boy with a logic analyzer** by the test author (nitro2k01) — real silicon, not
+an emulator. The quirk (rediscovered via *Star Trek 25th Anniversary*): after
+the window has triggered once in a frame and is then disabled via LCDCF_WINON,
+every later WX hit with `(WX&7)==7-(SCX&7)` emits one BGP-color-0 glitch pixel
+and shifts the rest of the line right by one. BGB and SameBoy model it.
+
+**State [V]:** rustyboi renders the failure cross in the *should-trigger*
+section (glitch not modeled) — and its output does not even match the typical
+no-glitch-emulator layout (1890 recolor-breaking px vs the upstream
+`failedtest-dmg.png`): the *should-not-trigger* section also shows shifted
+artifacts, so there are additional window-disable path differences to dig into.
+
+### 15–17. `double-halt-cancel.gb` (dmg+cgb) + `double-halt-cancel-gbconly.gb` (cgb) — OPEN-TARGET (double-HALT is not a lockup)
+
+**Failure [R]:** verdict screen reads `FATE: HALTED! … RESULT: FAIL!` — rustyboi
+permanently sleeps on `halt halt` with IME=0.
+
+**Hardware behavior [D]:** the halt bug is PC-increment inhibition, so the CPU
+*refetches the second `halt` byte forever*; the ROM runs that pair inside VRAM,
+and when mode-3 VRAM locking makes the fetch read `$FF` the CPU executes
+`rst $38` and escapes. Expected screen (BGB capture, author-endorsed;
+BGB/SameBoy/Gambatte agree): `FATE: RST $38 / RET ADDR:+0001 / LY: 01 /
+DIV: 02.15 / RESULT: PASS!` (CGB timing differs by one cycle — VRAM reads lock
+one cycle later — which the separate CGB reference encodes).
+
+**Work item [V]:** model halted-CPU wake as a continuous refetch of the
+post-HALT byte (sensitive to VRAM lock state), not a static sleep; then verify
+the DIV/LY timing text matches to the cycle. Fixing the core behavior flips all
+three rows.
 
 ---
 

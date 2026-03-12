@@ -99,6 +99,12 @@ pub enum Oracle {
     /// blargg serial-port text protocol: scan the bytes written to SB (FF01) on
     /// each SC (FF02) start edge for "Passed" / "Failed".
     Serial,
+    /// Parameterized serial-text protocol (same FF01/FF02 capture as `Serial`)
+    /// for suites whose ROMs print a different verdict string (e.g. the
+    /// sketchtests "Test OK!"). Passes when `pass` appears in the stream;
+    /// fails early when the optional `fail` marker appears, else at budget
+    /// end. Manifest grading `serial_text` with `pass=`/`fail=` tokens.
+    SerialText { pass: String, fail: Option<String> },
     /// blargg cart-RAM memory protocol: the result code is written to 0xA000
     /// (0x00 == pass) once the signature 0xDE 0xB0 0x61 appears at 0xA001-3.
     BlarggMem,
@@ -146,6 +152,7 @@ impl Oracle {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "dump".to_string()),
             Self::Serial => "serial".to_string(),
+            Self::SerialText { pass, .. } => format!("serial_text[{pass}]"),
             Self::BlarggMem => "blargg_mem".to_string(),
             Self::MemValue { addr, expected } => format!("mem[{addr:04X}]={expected:02X}"),
             Self::MooneyeFib => "mooneye".to_string(),
@@ -392,6 +399,23 @@ pub fn parse_manifest(
                 path: PathBuf::from(arg),
             },
             "serial" => Oracle::Serial,
+            // Parameterized serial text: `pass=<s>` (required) and `fail=<s>`
+            // (optional) in ANY trailing field; strings may contain spaces
+            // (fields are `|`-separated).
+            "serial_text" => {
+                let find = |key: &str| {
+                    fields
+                        .iter()
+                        .skip(4)
+                        .map(|f| f.trim())
+                        .find_map(|f| f.strip_prefix(key))
+                        .map(str::to_string)
+                };
+                let pass = find("pass=").ok_or_else(|| {
+                    format!("manifest line {}: serial_text needs a pass= token", line_no + 1)
+                })?;
+                Oracle::SerialText { pass, fail: find("fail=") }
+            }
             "blargg_mem" => Oracle::BlarggMem,
             "mooneye" => Oracle::MooneyeFib,
             "mooneye_ed" => Oracle::MooneyeFibEd,
@@ -471,7 +495,11 @@ pub fn parse_manifest(
         // 60-frame default.
         let frames = if matches!(
             oracle,
-            Oracle::CspPng { .. } | Oracle::CspPngFixed { .. } | Oracle::CspPngLayout { .. } | Oracle::MemValue { .. }
+            Oracle::CspPng { .. }
+                | Oracle::CspPngFixed { .. }
+                | Oracle::CspPngLayout { .. }
+                | Oracle::MemValue { .. }
+                | Oracle::SerialText { .. }
         ) {
             fields
                 .iter()
@@ -814,6 +842,30 @@ mn/add|cgb|mooneye|/roms/add.gb
         assert!(parse_manifest("id|xbox|png|/r.gb|p", &all_modes()).is_err());
         assert!(parse_manifest("id|dmg|bogus|/r.gb", &all_modes()).is_err());
         assert!(parse_manifest("id|dmg|mem|/r.gb|noeq", &all_modes()).is_err());
+        // serial_text requires a pass= token.
+        assert!(parse_manifest("id|dmg|serial_text|/r.gb", &all_modes()).is_err());
+        assert!(parse_manifest("id|dmg|serial_text|/r.gb|fail=X", &all_modes()).is_err());
+    }
+
+    #[test]
+    fn parses_serial_text_grading() {
+        let manifest = "\
+sk/daa|dmg|serial_text|/r.gb|pass=Test OK!|fail=Expected
+sk/model|cgb|serial_text|/r.gb|pass=CGB|frames=90
+";
+        let cases = parse_manifest(manifest, &all_modes()).unwrap();
+        assert_eq!(cases.len(), 2);
+        assert!(matches!(
+            &cases[0].oracle,
+            Oracle::SerialText { pass, fail: Some(fail) }
+                if pass == "Test OK!" && fail == "Expected"
+        ));
+        assert_eq!(cases[0].frames, None);
+        assert!(matches!(
+            &cases[1].oracle,
+            Oracle::SerialText { pass, fail: None } if pass == "CGB"
+        ));
+        assert_eq!(cases[1].frames, Some(90));
     }
 
     #[test]
