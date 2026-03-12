@@ -37,8 +37,8 @@ failing ROMs is individually proven and documented in
 | rtc3test | 6 | 6 |
 | mbc3_tester | 2 | 2 |
 | cpp | 3 | 3 |
-| gambatte | 5247 | 5257 |
-| **Total** | **6426** | **6440** |
+| gambatte | 5248 | 5257 |
+| **Total** | **6427** | **6440** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core
