@@ -48,6 +48,17 @@ GAMBATTE_CORE_URL="https://github.com/pokemon-speedrunning/gambatte-core.git"
 # the GBEmulatorShootout repo.
 SHOOTOUT_REF="${SHOOTOUT_REF:-7c6ee9ba380fab277f30784c5de7d35b21a4b679}"
 SHOOTOUT_URL="https://github.com/gbdev/GBEmulatorShootout.git"
+# MagenTests: prebuilt .gbc release assets (alloncm, tag 0.5.0, 2025-03-22).
+MAGENTESTS_VERSION="${MAGENTESTS_VERSION:-0.5.0}"
+MAGENTESTS_URL="https://github.com/alloncm/MagenTests/releases/download/${MAGENTESTS_VERSION}"
+# little-things-gb release ROMs (nitro2k01) + the repo-hosted reference images
+# (real-SGB windesync capture, BGB double-halt captures) pinned to a commit.
+LTG_URL="https://github.com/nitro2k01/little-things-gb/releases/download"
+LTG_RAW_REF="${LTG_RAW_REF:-ce015ca2949b4db2babd03fe387b8b1999a8f60a}"
+LTG_RAW_URL="https://raw.githubusercontent.com/nitro2k01/little-things-gb/${LTG_RAW_REF}"
+# sketchtests: prebuilt release zip (Ashiepaws, v0.2-alpha, 2020-08-29).
+SKETCHTESTS_VERSION="${SKETCHTESTS_VERSION:-v0.2-alpha}"
+SKETCHTESTS_URL="https://github.com/Ashiepaws/sketchtests/releases/download/${SKETCHTESTS_VERSION}/sketchtests-${SKETCHTESTS_VERSION}.zip"
 
 # --- config ------------------------------------------------------------------
 ROMS="${RB_ROMS:-gb-test-roms}"
@@ -94,8 +105,8 @@ threshold() {
         acid2)              echo "3 -" ;;
         cgb_acid_hell)      echo "1 -" ;;
         mealybug)           echo "51 -" ;;
-        mooneye)            echo "191 -" ;;
-        mooneye_wilbertpol) echo "192 -" ;;
+        mooneye)            echo "193 -" ;;
+        mooneye_wilbertpol) echo "194 -" ;;
         age)                echo "56 -" ;;
         gbmicrotest)        echo "509 -" ;;
         samesuite_apu)      echo "70 -" ;;
@@ -113,6 +124,9 @@ threshold() {
         rtc3test)           echo "6 -" ;;
         mbc3_tester)        echo "2 -" ;;
         cpp)                echo "3 -" ;;
+        magentests)         echo "11 -" ;;
+        little_things_extra) echo "0 -" ;;
+        sketchtests)        echo "6 120" ;;
         gambatte)           echo "5248 -" ;;  # gated on failed<=9 (GAMBATTE_MAX_FAIL)
         *)                  echo "" ;;
     esac
@@ -123,7 +137,7 @@ GAMBATTE_MAX_FAIL=9
 ORDER="acid2 cgb_acid_hell mealybug mooneye mooneye_wilbertpol age gbmicrotest \
 samesuite_apu samesuite_nonapu samesuite_sgb sgb blargg blargg_singles \
 scribbltests turtle_tests little_things_gb bully strikethrough daid rtc3test \
-mbc3_tester cpp gambatte"
+mbc3_tester cpp magentests little_things_extra sketchtests gambatte"
 
 # --- helpers -----------------------------------------------------------------
 log()  { printf '%s\n' "==> $*"; }
@@ -165,9 +179,79 @@ setup() {
     # guarded (no-ops when present) and cheap, so run it unconditionally -- this
     # is how a newly added shootout-sourced suite lands on an already-provisioned
     # ROM tree or a restored CI cache WITHOUT re-downloading the whole c-sp set.
+    # The same self-guarding applies to every non-c-sp fetch below: the
+    # .rb-setup-complete sentinel gates ONLY the original c-sp+gambatte fetch.
     log "Sourcing cpp + daid ROMs (not in the c-sp set) @ ${SHOOTOUT_REF:0:12}"
     sync_shootout_roms
+    log "Sourcing MagenTests ${MAGENTESTS_VERSION} release ROMs"
+    sync_magentests_roms
+    log "Sourcing little-things-gb release ROMs + reference captures @ ${LTG_RAW_REF:0:12}"
+    sync_little_things_extra
+    log "Sourcing sketchtests ${SKETCHTESTS_VERSION} release ROMs"
+    sync_sketchtests_roms
     log "ROM setup complete"
+}
+
+# MagenTests (alloncm): eight prebuilt .gbc assets on the pinned release tag.
+# oam_internal_priority is fetched but NOT manifested (its only oracle is a
+# SameBoy screenshot; see suites/magentests.manifest header).
+sync_magentests_roms() {
+    local mt="$ROMS/magentests" f
+    [ -f "$mt/bg_oam_priority.gbc" ] && [ -f "$mt/ppu_disabled_state.gbc" ] && return 0
+    mkdir -p "$mt"
+    for f in bg_oam_priority hblank_vram_dma key0_lock_after_boot \
+             mbc_oob_sram_mbc1 mbc_oob_sram_mbc3 mbc_oob_sram_mbc5 \
+             oam_internal_priority ppu_disabled_state; do
+        curl -fsSL -o "$mt/$f.gbc" "$MAGENTESTS_URL/$f.gbc"
+    done
+    log "Sourced MagenTests ROMs into $mt"
+}
+
+# little-things-gb (nitro2k01) release ROMs the c-sp set does not carry
+# (windesync-validate, double-halt-cancel) plus their reference images from
+# the repo at a pinned commit: the real-SGB logic-analyzer windesync capture
+# and the 2x-scale BGB double-halt captures (downscaled into suites/refs/ by
+# gen_manifests.py). Lands in the same little-things-gb/ dir as the c-sp
+# firstwhite/tellinglys files -- purely additive.
+sync_little_things_extra() {
+    local ltg="$ROMS/little-things-gb"
+    [ -f "$ltg/windesync-validate.gb" ] && [ -f "$ltg/double-halt-cancel.gb" ] && return 0
+    mkdir -p "$ltg"
+    curl -fsSL -o "$ltg/windesync-validate.gb" \
+        "$LTG_URL/Win-desync-v1.0/windesync-validate.gb"
+    curl -fsSL -o "$ltg/double-halt-cancel.gb" \
+        "$LTG_URL/Double-halt-cancel-v1.0/double-halt-cancel.gb"
+    curl -fsSL -o "$ltg/double-halt-cancel-gbconly.gb" \
+        "$LTG_URL/Double-halt-cancel-v1.0/double-halt-cancel-gbconly.gb"
+    curl -fsSL -o "$ltg/windesync-reference-sgb.png" \
+        "$LTG_RAW_URL/windesync-validate/images/windesync-reference-sgb.png"
+    curl -fsSL -o "$ltg/double-halt-cancel-bgb-dmg-2x.png" \
+        "$LTG_RAW_URL/double-halt-cancel/images/bgb-dmg.png"
+    curl -fsSL -o "$ltg/double-halt-cancel-bgb-gbc-2x.png" \
+        "$LTG_RAW_URL/double-halt-cancel/images/bgb-gbc.png"
+    log "Sourced little-things-gb release ROMs into $ltg"
+}
+
+# sketchtests (Ashiepaws): prebuilt release zip; flatten the three ROMs into
+# $ROMS/sketchtests/ (zip layout: cpu/instr/daa.gb, interrupts/..., other/...).
+sync_sketchtests_roms() {
+    local sk="$ROMS/sketchtests"
+    [ -f "$sk/daa.gb" ] && [ -f "$sk/model_detector.gb" ] && return 0
+    mkdir -p "$sk"
+    local zip="$sk/sketchtests.zip"
+    curl -fsSL -o "$zip" "$SKETCHTESTS_URL"
+    "$PY" - "$zip" "$sk" <<'PY'
+import sys, zipfile
+zip_path, dest = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(zip_path) as z:
+    for name in z.namelist():
+        if name.endswith(".gb"):
+            base = name.rsplit("/", 1)[-1]
+            with open(f"{dest}/{base}", "wb") as f:
+                f.write(z.read(name))
+PY
+    rm -f "$zip"
+    log "Sourced sketchtests ROMs into $sk"
 }
 
 # The cpp/ and daid/ suite ROMs (sgb-ext-test, the MBC3/RTC edge tests, and the

@@ -203,6 +203,8 @@ mooneye-test-suite-wilbertpol/misc/boot_hwio-S.gb|dmg|mooneye_ed|gb-test-roms/mo
 mooneye-test-suite-wilbertpol/misc/boot_regs-A.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_regs-A.gb|rev=agb
 mooneye-test-suite-wilbertpol/misc/boot_regs-cgb.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_regs-cgb.gb
 mooneye-test-suite-wilbertpol/misc/boot_regs-mgb.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_regs-mgb.gb|rev=mgb
+mooneye-test-suite-wilbertpol/misc/boot_regs-sgb.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_regs-sgb.gb|rev=sgb
+mooneye-test-suite-wilbertpol/misc/boot_regs-sgb2.gb|dmg|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/boot_regs-sgb2.gb|rev=sgb2
 mooneye-test-suite-wilbertpol/misc/gpu/vblank_stat_intr-C.gb|cgb|mooneye_ed|gb-test-roms/mooneye-test-suite-wilbertpol/misc/gpu/vblank_stat_intr-C.gb
 mooneye-test-suite-wilbertpol/manual-only/sprite_priority|dmg|png|gb-test-roms/mooneye-test-suite-wilbertpol/manual-only/sprite_priority.gb|gb-test-roms/mooneye-test-suite-wilbertpol/manual-only/sprite_priority-dmg.png
 mooneye-test-suite-wilbertpol/manual-only/sprite_priority|cgb|png|gb-test-roms/mooneye-test-suite-wilbertpol/manual-only/sprite_priority.gb|gb-test-roms/mooneye-test-suite-wilbertpol/manual-only/sprite_priority-cgb.png

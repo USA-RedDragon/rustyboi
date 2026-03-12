@@ -18,8 +18,8 @@ failing ROMs is individually proven and documented in
 | acid2 | 3 | 3 |
 | cgb_acid_hell | 1 | 1 |
 | mealybug | 51 | 51 |
-| mooneye | 191 | 191 |
-| mooneye_wilbertpol | 192 | 192 |
+| mooneye | 193 | 193 |
+| mooneye_wilbertpol | 194 | 194 |
 | age | 56 | 56 |
 | gbmicrotest | 509 | 513 |
 | samesuite_apu | 70 | 70 |
@@ -37,8 +37,11 @@ failing ROMs is individually proven and documented in
 | rtc3test | 6 | 6 |
 | mbc3_tester | 2 | 2 |
 | cpp | 3 | 3 |
+| magentests | 11 | 11 |
+| little_things_extra | 0 | 4 |
+| sketchtests | 6 | 6 |
 | gambatte | 5248 | 5257 |
-| **Total** | **6427** | **6440** |
+| **Total** | **6448** | **6465** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core

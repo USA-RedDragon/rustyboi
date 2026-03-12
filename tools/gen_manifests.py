@@ -7,12 +7,16 @@ scribbltests, turtle-tests, little-things-gb, bully, strikethrough, same-suite,
 rtc3test, mbc3-tester). ROM set: c-sp/gameboy-test-roms (default v7.0), unzipped
 at --roms. The sgb, daid and cpp suites are curated manually (their ROMs are not
 in the c-sp set; they are sourced from GBEmulatorShootout by run-suites.sh setup)
-and are not regenerated here.
+and are not regenerated here. The magentests / little_things_extra / sketchtests
+suites ARE generated here from release-fetched ROMs (sync_magentests_roms /
+sync_little_things_extra / sync_sketchtests_roms in run-suites.sh), including
+their derived reference PNGs under suites/refs/ (documented derivations, never
+emulator captures).
 
 Manifest line format:
   <id>|<dmg|cgb|agb>|<grading>|<rom_path>[|<arg>...]
-grading: png | png_fixed | png_shootout | serial | blargg_mem | memauto | mem |
-         mooneye | mooneye_ed
+grading: png | png_fixed | png_shootout | serial | serial_text | blargg_mem |
+         memauto | mem | mooneye | mooneye_ed
 Trailing arg tokens: reference PNG path(s) (`;`-separated OR-match for
 png_shootout), ADDR=VAL (mem), rev=<model>, input=<script>, frames=<N>.
 
@@ -23,7 +27,9 @@ Usage:
 
 import argparse
 import os
+import struct
 import sys
+import zlib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
@@ -39,6 +45,112 @@ def write_manifest(out: Path, name: str, header: list[str], lines: list[str]) ->
     body = [f"# {h}" if h else "#" for h in header] + lines
     path.write_text("\n".join(body) + "\n")
     print(f"  {name}: {len(lines)} cases")
+
+
+def rel_to_cwd(path: Path) -> Path:
+    """Repo-root-relative form for manifest lines (the runner and CI run from
+    the repo root), matching the relative `gb-test-roms/...` ROM paths."""
+    try:
+        return path.resolve().relative_to(Path.cwd())
+    except ValueError:
+        return path
+
+
+def write_png_rgb(path: Path, width: int, height: int, pixels: list[int]) -> None:
+    """Minimal deterministic RGB8 PNG writer (filter 0, fixed zlib level) for
+    the generated reference screens. `pixels` is row-major 0xRRGGBB."""
+    assert len(pixels) == width * height
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)  # filter type 0 per scanline
+        for x in range(width):
+            p = pixels[y * width + x]
+            raw += bytes(((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF))
+
+    def chunk(typ: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + typ
+            + data
+            + struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+        + chunk(b"IEND", b"")
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(png)
+
+
+def read_png_rgb(path: Path) -> tuple[int, int, list[int]]:
+    """Minimal PNG reader (color types 0/2/3 at bit depths 1/2/4/8, no
+    interlace) returning row-major 0xRRGGBB. Only used at manifest-regen time
+    to derive downscaled reference screens; the runner has its own decoder."""
+    d = path.read_bytes()
+    assert d[:8] == b"\x89PNG\r\n\x1a\n", f"not a PNG: {path}"
+    pos, idat, palette = 8, b"", []
+    w = h = bd = ct = None
+    while pos < len(d):
+        (ln,) = struct.unpack(">I", d[pos : pos + 4])
+        typ = d[pos + 4 : pos + 8]
+        data = d[pos + 8 : pos + 8 + ln]
+        if typ == b"IHDR":
+            w, h, bd, ct = struct.unpack(">II", data[:8]) + (data[8], data[9])
+            assert data[12] == 0, f"interlaced PNG unsupported: {path}"
+        elif typ == b"PLTE":
+            palette = [
+                (data[i] << 16) | (data[i + 1] << 8) | data[i + 2]
+                for i in range(0, len(data), 3)
+            ]
+        elif typ == b"IDAT":
+            idat += data
+        pos += 12 + ln
+    raw = zlib.decompress(idat)
+    channels = {0: 1, 2: 3, 3: 1}[ct]
+    stride = (w * channels * bd + 7) // 8
+    bpp = max(1, channels * bd // 8)
+    out: list[int] = []
+    prev = bytearray(stride)
+    p = 0
+    for _ in range(h):
+        f = raw[p]
+        p += 1
+        line = bytearray(raw[p : p + stride])
+        p += stride
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if f == 1:
+                line[i] = (line[i] + a) & 0xFF
+            elif f == 2:
+                line[i] = (line[i] + b) & 0xFF
+            elif f == 3:
+                line[i] = (line[i] + (a + b) // 2) & 0xFF
+            elif f == 4:
+                q = a + b - c
+                pa, pb, pc = abs(q - a), abs(q - b), abs(q - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 0xFF
+        prev = line
+        if ct == 2:
+            for x in range(w):
+                out.append((line[x * 3] << 16) | (line[x * 3 + 1] << 8) | line[x * 3 + 2])
+        else:
+            maxv = (1 << bd) - 1
+            for x in range(w):
+                byte = line[(x * bd) // 8]
+                shift = 8 - bd - ((x * bd) % 8)
+                s = (byte >> shift) & maxv
+                if ct == 3:
+                    out.append(palette[s])
+                else:
+                    g = s * 255 // maxv
+                    out.append((g << 16) | (g << 8) | g)
+    return w, h, out
 
 
 def png_dir_cases(label: str, rom: Path, refs: list[Path]) -> list[str]:
@@ -405,6 +517,7 @@ def gen_gbmicrotest(roms: Path, out: Path) -> None:
 
 MOONEYE_REV = {
     "boot_div2-S": "sgb", "boot_div-S": "sgb", "boot_hwio-S": "sgb",
+    "boot_regs-sgb": "sgb", "boot_regs-sgb2": "sgb2",
     "boot_div-dmg0": "dmg0", "boot_hwio-dmg0": "dmg0", "boot_regs-dmg0": "dmg0",
     "boot_regs-mgb": "mgb",
     "boot_div-A": "agb", "boot_regs-A": "agb",
@@ -415,9 +528,11 @@ MOONEYE_REV = {
 
 def mooneye_modes(stem: str) -> list[str]:
     # Device-suffix model rule: -dmg*/-mgb/-S/-GS -> DMG, -cgb*/-C/-A -> CGB,
-    # -sgb/-sgb2 skipped (SGB rows are curated manually), no-suffix -> both.
+    # no-suffix -> both. -sgb/-sgb2 run on the DMG core as Hardware::SGB/SGB2
+    # via the MOONEYE_REV rev= token (they were excluded before rustyboi had
+    # SGB/SGB2 boot models; the runner now maps rev=sgb/rev=sgb2 to them).
     if stem.endswith(("-sgb", "-sgb2")):
-        return []
+        return ["dmg"]
     if stem.endswith(("-dmg0", "-dmgABC", "-dmgABCmgb", "-mgb", "-S", "-GS")):
         return ["dmg"]
     if stem.endswith(("-cgb0", "-cgbABCDE", "-cgb", "-C", "-A")):
@@ -476,13 +591,23 @@ def gen_mooneye(roms: Path, out: Path) -> None:
 
 def wilbertpol_modes(stem: str) -> list[str]:
     # wilbertpol adds plain -dmg/-cgb/-G suffixes; -G = original Game Boy.
+    # -sgb/-sgb2 run as Hardware::SGB/SGB2 via rev= (same lift as mooneye_modes).
     if stem.endswith(("-sgb", "-sgb2")):
-        return []
+        return ["dmg"]
     if stem.endswith(("-dmg", "-dmg0", "-dmgABC", "-dmgABCmgb", "-mgb", "-S", "-GS", "-G")):
         return ["dmg"]
     if stem.endswith(("-cgb", "-cgb0", "-cgbABCDE", "-C", "-A")):
         return ["cgb"]
     return ["dmg", "cgb"]
+
+
+# Wilbert Pol's acceptance/gpu ly*/lyc* "-C" references were captured on
+# CGB-D/E silicon, not CPU-CGB-C: these stems carry rev=cgbe (see the manifest
+# header text below for the SameBoy-verified resolution).
+WILBERTPOL_REV_CGBE_STEMS = (
+    "ly00_mode1_2-C", "ly_lyc-C", "ly_lyc_0-C", "ly_lyc_144-C",
+    "ly_lyc_153-C", "ly_lyc_153_write-C", "ly_new_frame-C",
+)
 
 
 def gen_wilbertpol(roms: Path, out: Path) -> None:
@@ -508,6 +633,8 @@ def gen_wilbertpol(roms: Path, out: Path) -> None:
                 lines.append(mgb_oam_dma_halt_row(rel, rom))
                 continue
             rev = MOONEYE_REV.get(rom.stem, "")
+            if not rev and rom.stem in WILBERTPOL_REV_CGBE_STEMS and "/acceptance/gpu/" in rom.as_posix():
+                rev = "cgbe"
             for m in wilbertpol_modes(rom.stem):
                 lines.append(
                     f"{rel}|{m}|mooneye_ed|{rom}|rev={rev}" if rev else f"{rel}|{m}|mooneye_ed|{rom}"
@@ -517,7 +644,29 @@ def gen_wilbertpol(roms: Path, out: Path) -> None:
             ref = wp / "manual-only" / f"sprite_priority-{dev}.png"
             if sp.is_file() and ref.is_file():
                 lines.append(f"mooneye-test-suite-wilbertpol/manual-only/sprite_priority|{dev}|png|{sp}|{ref}")
-    write_manifest(out, "mooneye_wilbertpol", ["mooneye-test-suite-wilbertpol (0xED done-marker; grading mooneye_ed)."], lines)
+    write_manifest(
+        out,
+        "mooneye_wilbertpol",
+        [
+            "mooneye-test-suite-wilbertpol (0xED done-marker; grading mooneye_ed).",
+            "",
+            "The acceptance/gpu ly_lyc*-C / ly_new_frame-C / ly00_mode1_2-C tests carry",
+            "`rev=cgbe`: Wilbert Pol's line-153/LYC/new-frame reference values were captured",
+            "on CGB-D/E silicon, not CPU-CGB-C. SameBoy (built from source, model-gated at",
+            "display.c:2222-2232 on `model <= GB_MODEL_CGB_C`) FAILS these on its CGB-C model",
+            "and PASSES them on CGB-D/E; the `-C` suffix is the CGB *family*, not the CPU",
+            "revision. This is the resolution of the apparent gambatte-vs-wilbertpol",
+            "contradiction: gambatte's cgb04c enable_display probes (frame1_ly_count_2 etc.)",
+            "genuinely ARE CPU-CGB-C (SameBoy passes them on CGB-C, fails on CGB-E), so the",
+            "two suites read opposite LY/STAT at the \"same cc\" because they target DIFFERENT",
+            "silicon revisions. Routing wilbertpol to CGB-E and leaving gambatte on the",
+            "default CGB-C passes both. (ly_lyc_0-C stays on cgbe as its true revision but",
+            "still fails: a sub-dot line-153-tail STAT-mode collapse rustyboi's dot-clock",
+            "cannot resolve — the read straddles the mode-1->0 flip at the same closed-form",
+            "phase as the passing ly00_mode1_2-C round.)",
+        ],
+        lines,
+    )
 
 
 # CPU-CGB-D/E-behavior rows (rev=cgbe): E-silicon expectations per the
@@ -807,6 +956,206 @@ def gen_gambatte(roms: Path, out: Path) -> None:
     )
 
 
+# MagenTests colors (src/common.asm BGR555 constants) under the runner's
+# Linear CGB conversion (x5*255/31): GREEN $03E0 -> 0x00FF00, RED $001F ->
+# 0xFF0000, BLUE $7C00 -> 0x0000FF, WHITE $7FFF -> 0xFFFFFF. DMG rows render
+# via the runner's monochrome map (shade 0 -> 0xFFFFFF).
+MAGEN_GREEN, MAGEN_BLUE, MAGEN_WHITE = 0x00FF00, 0x0000FF, 0xFFFFFF
+
+
+def magen_bg_oam_priority_ref() -> list[int]:
+    """Derive the ColorBgOamPriority expected frame from the test SOURCE
+    (src/color_bg_oam_priority/{main,graphics_data}.asm @ MagenTests 0.5.0),
+    validated square-for-square against ISSOtm's real-CGB photo (images/
+    hardware_screenshot.jpg): a white field with eight 8x8 squares at
+    x=OBJ_X_OFFSET-8=32, y=OBJn_Y-16 (0,16,..,112). Per square the sprite
+    (OBJ pal0 c1=GREEN) fights the BG cell (BG pal1, BLUE) under the LCDC.0
+    master / per-tile-attr / OAM-flag priority combination its STAT handler
+    sets; BG wins only when master=1 AND (attr-pri OR oam-pri) AND BG color
+    != 0. Tile 0 under every square is c0 rows 0-3 / c1 rows 4-7, so the
+    three squares whose priority resolves BG-ward (obj0/2/3) are GREEN on
+    top, BLUE below; the other five (obj1/4/5/6/7, master=0 or no pri flag)
+    are all GREEN -- the documented "5 green squares and 3 half green and
+    half blue squares with no red lines" (the RED c2 rows of sprite tile 1
+    are exactly the rows BLUE covers)."""
+    px = [MAGEN_WHITE] * (160 * 144)
+    half_blue = {0, 2, 3}  # obj indices whose square is green-top/blue-bottom
+    for obj in range(8):
+        y0 = obj * 16
+        for dy in range(8):
+            color = MAGEN_BLUE if obj in half_blue and dy >= 4 else MAGEN_GREEN
+            for dx in range(8):
+                px[(y0 + dy) * 160 + 32 + dx] = color
+    return px
+
+
+def gen_magentests(roms: Path, out: Path) -> None:
+    mt = roms / "magentests"
+    lines: list[str] = []
+    if mt.is_dir():
+        refs = out / "refs"
+        green = refs / "magentests-green.png"
+        white = refs / "magentests-white.png"
+        prio = refs / "magentests-bg-oam-priority.png"
+        write_png_rgb(green, 160, 144, [MAGEN_GREEN] * (160 * 144))
+        write_png_rgb(white, 160, 144, [MAGEN_WHITE] * (160 * 144))
+        write_png_rgb(prio, 160, 144, magen_bg_oam_priority_ref())
+        green_l, white_l, prio_l = rel_to_cwd(green), rel_to_cwd(white), rel_to_cwd(prio)
+
+        def emit(stem: str, mode: str, ref) -> None:
+            rom = mt / f"{stem}.gbc"
+            if rom.is_file():
+                lines.append(f"magentests/{stem}|{mode}|png|{rom}|{ref}|frames=60")
+
+        emit("bg_oam_priority", "cgb", prio_l)
+        emit("hblank_vram_dma", "cgb", green_l)
+        emit("key0_lock_after_boot", "cgb", green_l)
+        emit("ppu_disabled_state", "cgb", green_l)
+        emit("ppu_disabled_state", "dmg", white_l)
+        for mbc in ("mbc1", "mbc3", "mbc5"):
+            emit(f"mbc_oob_sram_{mbc}", "cgb", green_l)
+            emit(f"mbc_oob_sram_{mbc}", "dmg", white_l)
+    write_manifest(
+        out,
+        "magentests",
+        [
+            "MagenTests (alloncm, release 0.5.0 2025-03-22, prebuilt .gbc). Verdicts",
+            "are solid screens documented in the upstream README and derived from the",
+            "test SOURCE, never from an emulator run:",
+            " - CGB pass = solid GREEN: src/common.asm GREEN=$03E0 (BGR555) on every",
+            "   pixel (all tiles are color-1 fills; LoadPallete puts GREEN in BG pal0",
+            "   color 1). $03E0 under the runner's Linear conversion = #00FF00 ->",
+            "   refs/magentests-green.png (generated by gen_manifests.py).",
+            " - DMG pass (ppu_disabled_state, mbc_oob_sram_*; CGB flag $80) = solid",
+            "   WHITE: the pass path sets BGP=$00 so color 1 renders shade 0 ->",
+            "   refs/magentests-white.png. (Fail = BGP=$0C -> black screen.)",
+            " - bg_oam_priority: refs/magentests-bg-oam-priority.png is derived from",
+            "   the test source geometry (see magen_bg_oam_priority_ref) and matches",
+            "   ISSOtm's real-CGB hardware photo (images/hardware_screenshot.jpg)",
+            "   square-for-square; the photo itself is the provenance anchor.",
+            "oam_internal_priority is EXCLUDED: its only published oracle is a",
+            "SameBoy-generated screenshot (emulator-derived; below the oracle bar).",
+            "Re-adoptable if someone captures it on hardware like bg_oam_priority.",
+        ],
+        lines,
+    )
+
+
+def gen_little_things_extra(roms: Path, out: Path) -> None:
+    """nitro2k01/little-things-gb release ROMs absent from the c-sp set:
+    windesync-validate (Win-desync-v1.0) and double-halt-cancel
+    (Double-halt-cancel-v1.0). Fetched by run-suites.sh sync_little_things_extra."""
+    ltg = roms / "little-things-gb"
+    lines: list[str] = []
+    wd = ltg / "windesync-validate.gb"
+    wd_ref = ltg / "windesync-reference-sgb.png"
+    if wd.is_file() and wd_ref.is_file():
+        # png_layout: the ref is a REAL-SGB logic-analyzer capture whose three
+        # gray levels are the capture rig's own palette, not rustyboi's DMG
+        # shades; the quirk's on-screen checkmark LAYOUT is the verdict.
+        lines.append(
+            f"little-things-gb/windesync-validate|dmg|png_layout|{wd}|{wd_ref}|frames=120"
+        )
+    # double-halt-cancel: derive 160x144 refs from the upstream 2x-scale BGB
+    # captures (author-endorsed correct output; BGB/SameBoy/Gambatte agree).
+    for tag, src_name in (("dmg", "double-halt-cancel-bgb-dmg-2x.png"),
+                          ("cgb", "double-halt-cancel-bgb-gbc-2x.png")):
+        src = ltg / src_name
+        if not src.is_file():
+            continue
+        w, h, px = read_png_rgb(src)
+        assert (w, h) == (320, 288), f"{src_name}: expected 320x288, got {w}x{h}"
+        small: list[int] = []
+        for y in range(144):
+            for x in range(160):
+                block = {px[(2 * y + dy) * 320 + 2 * x + dx] for dy in (0, 1) for dx in (0, 1)}
+                assert len(block) == 1, f"{src_name}: non-uniform 2x2 block at {x},{y}"
+                small.append(block.pop())
+        write_png_rgb(out / "refs" / f"double-halt-cancel-{tag}.png", 160, 144, small)
+    dhc = ltg / "double-halt-cancel.gb"
+    dhc_gbc = ltg / "double-halt-cancel-gbconly.gb"
+    dmg_ref = out / "refs" / "double-halt-cancel-dmg.png"
+    cgb_ref = out / "refs" / "double-halt-cancel-cgb.png"
+    if dhc.is_file() and dmg_ref.is_file():
+        lines.append(
+            f"little-things-gb/double-halt-cancel|dmg|png_layout|{dhc}|{rel_to_cwd(dmg_ref)}|frames=120"
+        )
+    if dhc.is_file() and cgb_ref.is_file():
+        lines.append(
+            f"little-things-gb/double-halt-cancel|cgb|png_layout|{dhc}|{rel_to_cwd(cgb_ref)}|frames=120"
+        )
+    if dhc_gbc.is_file() and cgb_ref.is_file():
+        # Byte-identical to double-halt-cancel.gb except the header CGB flag
+        # (0x143 $00 -> $C0) + checksums (verified by cmp), so it shares the
+        # CGB reference.
+        lines.append(
+            f"little-things-gb/double-halt-cancel-gbconly|cgb|png_layout|{dhc_gbc}|{rel_to_cwd(cgb_ref)}|frames=120"
+        )
+    write_manifest(
+        out,
+        "little_things_extra",
+        [
+            "little-things-gb release ROMs not in the c-sp set (nitro2k01).",
+            "windesync-validate (Win-desync-v1.0 2022-12-07): pre-CGB window-desync",
+            "glitch; the reference (windesync-reference-sgb.png) was digitally",
+            "captured from a REAL Super Game Boy with a logic analyzer -- a genuine",
+            "silicon oracle. DMG-graded only (the quirk does not exist on CGB, per",
+            "the upstream README). png_layout because the capture rig's three gray",
+            "levels are its own palette; the checkmark/cross layout is the verdict",
+            "(a missing/extra/shifted glitch pixel breaks the 1:1 color mapping).",
+            "double-halt-cancel (Double-halt-cancel-v1.0 2022-12-26): double HALT",
+            "with IME=0 is NOT a lockup -- the CPU refetches the second HALT byte",
+            "forever, and when VRAM locks the fetch turns into rst $38; the ROM",
+            "traps every plausible execution path and prints the taken path + a",
+            "DIV-derived timing, so the text screen IS the verdict. refs are",
+            "derived (documented 2x->1x downscale in gen_manifests.py) from the",
+            "upstream BGB captures, which the author -- who established the",
+            "hardware behavior -- publishes as the correct result, with BGB/",
+            "SameBoy/Gambatte all agreeing. png_layout: text layout, not palette.",
+            "The -gbconly ROM differs from double-halt-cancel.gb only in the",
+            "header CGB flag + checksums (cmp-verified 3 bytes) -> same CGB ref.",
+        ],
+        lines,
+    )
+
+
+def gen_sketchtests(roms: Path, out: Path) -> None:
+    """Ashiepaws/sketchtests v0.2-alpha (prebuilt zip). Serial-graded: the ROMs
+    print blargg-style ASCII on FF01/FF02; pass prints `Test OK!`, failures
+    print `Expected $xx got $yy` (daa) / `Expected <int> got <int>`
+    (interrupt_priority). model_detector prints the detected model name."""
+    sk = roms / "sketchtests"
+    lines: list[str] = []
+
+    def emit(stem: str, mode: str, pass_s: str, fail_s: str | None) -> None:
+        rom = sk / f"{stem}.gb"
+        if rom.is_file():
+            tail = f"|pass={pass_s}" + (f"|fail={fail_s}" if fail_s else "")
+            lines.append(f"sketchtests/{stem}|{mode}|serial_text|{rom}{tail}")
+
+    for mode in ("dmg", "cgb"):
+        emit("daa", mode, "Test OK!", "Expected")
+        emit("interrupt_priority", mode, "Test OK!", "Expected")
+    # model_detector: pass = the emulated model's name on the wire. No fail
+    # marker (a wrong model name simply never matches; budget-end verdict).
+    emit("model_detector", "dmg", "DMG", None)
+    emit("model_detector", "cgb", "CGB", None)
+    write_manifest(
+        out,
+        "sketchtests",
+        [
+            "Ashiepaws/sketchtests v0.2-alpha (2020-08-29 release zip, prebuilt).",
+            "daa + interrupt_priority are hardware-verified upstream (MGB 9638D and",
+            "CGB CPU-D per the release notes); model_detector is spec-derived",
+            "(boot-register + capability probing), included with that provenance",
+            "note. Graded `serial_text` (blargg-style FF01/FF02 ASCII): pass on",
+            "`Test OK!` / the expected model name, early-fail on `Expected` (the",
+            "mismatch printout). Run: --frames 120 (daa sweeps all A/flag inputs).",
+        ],
+        lines,
+    )
+
+
 # ---------------------------------------------------------------------------
 
 INTERNAL = {
@@ -826,6 +1175,9 @@ INTERNAL = {
     "samesuite": gen_samesuite,
     "rtc3test": gen_rtc3test,
     "mbc3_tester": gen_mbc3_tester,
+    "magentests": gen_magentests,
+    "little_things_extra": gen_little_things_extra,
+    "sketchtests": gen_sketchtests,
     "gambatte": gen_gambatte,
 }
 
