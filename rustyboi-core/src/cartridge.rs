@@ -50,6 +50,21 @@ const MBC5_RUMBLE: u8 = 0x1C;
 const MBC5_RUMBLE_RAM: u8 = 0x1D;
 const MBC5_RUMBLE_RAM_BATTERY: u8 = 0x1E;
 
+// MBC7+SENSOR+RUMBLE+RAM+BATTERY (Kirby Tilt 'n' Tumble, Command Master).
+// The "RAM" is a 93LC56 serial EEPROM (256 bytes) and the sensor is a 2-axis
+// ADXL202E accelerometer; despite the official type name no MBC7 cart has a
+// rumble motor. The Japan-only Command Master uses the larger 93LC66 EEPROM
+// (512 bytes) - not modeled (remaining gap; would need header-checksum
+// sniffing since the type byte is identical).
+const MBC7_SENSOR_RUMBLE_RAM_BATTERY: u8 = 0x22;
+
+// HuC-3: ROM/RAM banking + RTC + IR + piezo speaker (Robopon, Pocket Family).
+// The type byte implies RAM+BATTERY+RTC.
+const HUC3: u8 = 0xFE;
+
+// Remaining unimplemented mapper families (fall through to NoMBC):
+//   0xFC POCKET CAMERA, 0xFD BANDAI TAMA5, 0xFF HuC1+RAM+BATTERY.
+
 // MBC1 register ranges
 const RAM_ENABLE_START: u16 = 0x0000;
 const RAM_ENABLE_END: u16 = 0x1FFF;
@@ -75,6 +90,74 @@ pub enum CartridgeType {
     MBC2 { battery: bool },
     MBC3 { ram: bool, battery: bool, timer: bool },
     MBC5 { ram: bool, battery: bool, _rumble: bool },
+    MBC7,
+    HuC3,
+}
+
+/// 93LC56 serial-EEPROM interface state for MBC7 (Pan Docs "MBC7"). The
+/// EEPROM contents themselves live in `Cartridge::ram_data` (256 bytes =
+/// 128 little-endian 16-bit words) so the existing battery-save plumbing
+/// persists them; this struct only models the bit-banged serial link
+/// exposed at the Ax8x register (bit0=DO, bit1=DI, bit6=CLK, bit7=CS).
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Default, Debug)]
+enum Mbc7EepromState {
+    /// CS low or waiting for the start bit (first 1 on DI while CS high).
+    #[default]
+    Idle,
+    /// Collecting the 10 instruction bits (2-bit opcode + 8 payload bits).
+    Command,
+    /// Collecting the 16 data bits of a WRITE/WRAL instruction.
+    Input,
+    /// Shifting out the 16 data bits of a READ, MSB first.
+    Output,
+    /// Programming instruction fully received; the actual array write
+    /// happens when CS falls (93LC56 datasheet: the internal programming
+    /// cycle starts on the CS falling edge after the last data bit).
+    Pending,
+    /// Instruction finished; further clocks are ignored until CS falls.
+    Done,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+struct Mbc7Eeprom {
+    // Last-written pin levels (readable back through Ax8x).
+    do_line: bool,
+    di_line: bool,
+    clk: bool,
+    cs: bool,
+    // Set by EWEN, cleared by EWDS. Programming ops are silently dropped
+    // while disabled (the power-on state).
+    write_enabled: bool,
+    state: Mbc7EepromState,
+    // Shared input shift register for the Command/Input phases.
+    sr: u16,
+    sr_n: u8,
+    // Latched 10-bit instruction once the Command phase completes.
+    command: u16,
+    // Latched 16-bit data word once the Input phase completes.
+    input: u16,
+    // Output shift register for READ.
+    out: u16,
+    out_n: u8,
+}
+
+impl Mbc7Eeprom {
+    /// Pin read-back for the Ax8x register: CS<<7 | CLK<<6 | DI<<1 | DO.
+    /// Bits 2-5 are not wired to the EEPROM and read 0.
+    fn pin_state(&self) -> u8 {
+        ((self.cs as u8) << 7)
+            | ((self.clk as u8) << 6)
+            | ((self.di_line as u8) << 1)
+            | (self.do_line as u8)
+    }
+}
+
+fn serde_u16_8000() -> u16 {
+    0x8000
+}
+
+fn serde_u8_one() -> u8 {
+    1
 }
 
 #[derive(Serialize, Deserialize)]
@@ -141,6 +224,62 @@ pub struct Cartridge {
     mbc5_rom_bank_high: u8,  // Upper 1 bit of ROM bank (0x3000-0x3FFF) - only bit 0 used
     mbc5_ram_bank: u8,       // RAM bank select (0x4000-0x5FFF) - 4 bits used (0x00-0x0F)
 
+    // MBC7 state. RAM-register access needs a TWO stage unlock: 0x0A to
+    // 0x0000-0x1FFF (shared `ram_enabled`) AND exactly 0x40 to 0x4000-0x5FFF.
+    #[serde(default)]
+    mbc7_ram_enabled2: bool,
+    // 8-bit ROM bank register; like MBC5, bank 0 is selectable at 0x4000-0x7FFF.
+    #[serde(default = "serde_u8_one")]
+    mbc7_rom_bank: u8,
+    // Latched accelerometer sample, 16 bits per axis. Reads 0x8000 before the
+    // first latch and after an 0x55 erase; a real sample is centered ~0x81D0.
+    #[serde(default = "serde_u16_8000")]
+    mbc7_accel_x: u16,
+    #[serde(default = "serde_u16_8000")]
+    mbc7_accel_y: u16,
+    // A new 0xAA latch is only accepted after an 0x55 erase (Pan Docs: cannot
+    // re-latch without erasing first).
+    #[serde(default)]
+    mbc7_accel_latched: bool,
+    // Live sensor input in g, fed by the frontend via `set_accelerometer`.
+    // Not persisted (transient hardware input, like buttons).
+    #[serde(skip, default)]
+    mbc7_sensor_x: f32,
+    #[serde(skip, default)]
+    mbc7_sensor_y: f32,
+    #[serde(default)]
+    mbc7_eeprom: Mbc7Eeprom,
+
+    // HuC-3 state. The 0x0000-0x1FFF register selects what A000-BFFF accesses:
+    // 0x0 RAM read-only, 0xA RAM read/write, 0xB RTC command mailbox (write),
+    // 0xC RTC command/response (read), 0xD RTC semaphore, 0xE IR.
+    #[serde(default)]
+    huc3_mode: u8,
+    #[serde(default = "serde_u8_one")]
+    huc3_rom_bank: u8, // 7-bit; bank 0 selectable like MBC5
+    #[serde(default)]
+    huc3_ram_bank: u8,
+    // RTC MCU mailbox: command (bits 6-4 of the 0xB write) + argument (3-0),
+    // executed on a 0xD write with bit 0 clear; result readable through 0xC.
+    #[serde(default)]
+    huc3_rtc_command: u8,
+    #[serde(default)]
+    huc3_rtc_argument: u8,
+    #[serde(default)]
+    huc3_rtc_result: u8,
+    // 256-nibble access pointer into the RTC MCU memory.
+    #[serde(default)]
+    huc3_rtc_address: u8,
+    // The RTC MCU's 256-nibble internal memory (one nibble per byte). The live
+    // clock is stored in-place: nibbles 0x10-0x12 = minute-of-day counter
+    // (rolls at 1440), 0x13-0x15 = 12-bit day counter, little-endian nibbles
+    // (Pan Docs "RTC Location Map"). Empty for non-HuC3 carts.
+    #[serde(default)]
+    huc3_rtc_mem: Vec<u8>,
+    // Sub-minute cycle accumulator, master-clock derived like the MBC3 RTC.
+    #[serde(default)]
+    huc3_rtc_accum: u64,
+
     // CGB support information
     cgb_support: CgbSupport, // CGB compatibility from cartridge header
 
@@ -194,6 +333,23 @@ impl Clone for Cartridge {
             mbc5_rom_bank_low: self.mbc5_rom_bank_low,
             mbc5_rom_bank_high: self.mbc5_rom_bank_high,
             mbc5_ram_bank: self.mbc5_ram_bank,
+            mbc7_ram_enabled2: self.mbc7_ram_enabled2,
+            mbc7_rom_bank: self.mbc7_rom_bank,
+            mbc7_accel_x: self.mbc7_accel_x,
+            mbc7_accel_y: self.mbc7_accel_y,
+            mbc7_accel_latched: self.mbc7_accel_latched,
+            mbc7_sensor_x: self.mbc7_sensor_x,
+            mbc7_sensor_y: self.mbc7_sensor_y,
+            mbc7_eeprom: self.mbc7_eeprom.clone(),
+            huc3_mode: self.huc3_mode,
+            huc3_rom_bank: self.huc3_rom_bank,
+            huc3_ram_bank: self.huc3_ram_bank,
+            huc3_rtc_command: self.huc3_rtc_command,
+            huc3_rtc_argument: self.huc3_rtc_argument,
+            huc3_rtc_result: self.huc3_rtc_result,
+            huc3_rtc_address: self.huc3_rtc_address,
+            huc3_rtc_mem: self.huc3_rtc_mem.clone(),
+            huc3_rtc_accum: self.huc3_rtc_accum,
             cgb_support: self.cgb_support.clone(),
             rumble_motor: self.rumble_motor,
             rtc_memory: self.rtc_memory.clone(),
@@ -366,8 +522,16 @@ impl Cartridge {
             padded_rom
         };
 
-        // Initialize RAM data
-        let ram_data = vec![0xFF; ram_banks * 0x2000]; // 8KB per bank
+        // Initialize RAM data. MBC7 carts declare RAM size 0x00 in the header;
+        // their "save RAM" is the 93LC56 EEPROM: 256 bytes = 128 little-endian
+        // 16-bit words, erased state 0xFF. Routing it through ram_data reuses
+        // the whole battery-save path (LE word order matches SameBoy/mGBA .sav
+        // files).
+        let ram_data = if cartridge_type == MBC7_SENSOR_RUMBLE_RAM_BATTERY {
+            vec![0xFF; 256]
+        } else {
+            vec![0xFF; ram_banks * 0x2000] // 8KB per bank
+        };
 
         // Detect CGB support
         let cgb_support = Self::detect_cgb_support(&data);
@@ -406,6 +570,23 @@ impl Cartridge {
             mbc5_rom_bank_low: 1,
             mbc5_rom_bank_high: 0,
             mbc5_ram_bank: 0,
+            mbc7_ram_enabled2: false,
+            mbc7_rom_bank: 1,
+            mbc7_accel_x: 0x8000,
+            mbc7_accel_y: 0x8000,
+            mbc7_accel_latched: false,
+            mbc7_sensor_x: 0.0,
+            mbc7_sensor_y: 0.0,
+            mbc7_eeprom: Mbc7Eeprom::default(),
+            huc3_mode: 0,
+            huc3_rom_bank: 1,
+            huc3_ram_bank: 0,
+            huc3_rtc_command: 0,
+            huc3_rtc_argument: 0,
+            huc3_rtc_result: 0,
+            huc3_rtc_address: 0,
+            huc3_rtc_mem: if cartridge_type == HUC3 { vec![0; 256] } else { Vec::new() },
+            huc3_rtc_accum: 0,
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -507,8 +688,12 @@ impl Cartridge {
             padded_rom
         };
 
-        // Initialize RAM data
-        let ram_data = vec![0xFF; ram_banks * 0x2000]; // 8KB per bank
+        // Initialize RAM data (MBC7: 256-byte 93LC56 EEPROM, see `load`).
+        let ram_data = if cartridge_type == MBC7_SENSOR_RUMBLE_RAM_BATTERY {
+            vec![0xFF; 256]
+        } else {
+            vec![0xFF; ram_banks * 0x2000] // 8KB per bank
+        };
 
         // Detect CGB support
         let cgb_support = Self::detect_cgb_support(&actual_data);
@@ -547,6 +732,23 @@ impl Cartridge {
             mbc5_rom_bank_low: 1,
             mbc5_rom_bank_high: 0,
             mbc5_ram_bank: 0,
+            mbc7_ram_enabled2: false,
+            mbc7_rom_bank: 1,
+            mbc7_accel_x: 0x8000,
+            mbc7_accel_y: 0x8000,
+            mbc7_accel_latched: false,
+            mbc7_sensor_x: 0.0,
+            mbc7_sensor_y: 0.0,
+            mbc7_eeprom: Mbc7Eeprom::default(),
+            huc3_mode: 0,
+            huc3_rom_bank: 1,
+            huc3_ram_bank: 0,
+            huc3_rtc_command: 0,
+            huc3_rtc_argument: 0,
+            huc3_rtc_result: 0,
+            huc3_rtc_address: 0,
+            huc3_rtc_mem: if cartridge_type == HUC3 { vec![0; 256] } else { Vec::new() },
+            huc3_rtc_accum: 0,
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -577,6 +779,8 @@ impl Cartridge {
             MBC5_RUMBLE => CartridgeType::MBC5 { ram: false, battery: false, _rumble: true },
             MBC5_RUMBLE_RAM => CartridgeType::MBC5 { ram: true, battery: false, _rumble: true },
             MBC5_RUMBLE_RAM_BATTERY => CartridgeType::MBC5 { ram: true, battery: true, _rumble: true },
+            MBC7_SENSOR_RUMBLE_RAM_BATTERY => CartridgeType::MBC7,
+            HUC3 => CartridgeType::HuC3,
             _ => CartridgeType::NoMBC,
         }
     }
@@ -618,6 +822,14 @@ impl Cartridge {
                 let bank = (self.mbc5_rom_bank_low as usize) | ((self.mbc5_rom_bank_high as usize & 0x01) << 8);
                 bank % self.rom_banks
             }
+            CartridgeType::MBC7 => {
+                // 8-bit register; like MBC5 bank 0 is selectable here.
+                (self.mbc7_rom_bank as usize) % self.rom_banks
+            }
+            CartridgeType::HuC3 => {
+                // 7-bit register; like MBC5 bank 0 is selectable here.
+                (self.huc3_rom_bank as usize) % self.rom_banks
+            }
             CartridgeType::NoMBC => 1, // Simple cartridge always uses bank 1 for upper area
         }
     }
@@ -643,6 +855,11 @@ impl Cartridge {
             CartridgeType::MBC5 { .. } => {
                 // MBC5 uses 4 bits for RAM bank selection (0x00-0x0F)
                 (self.mbc5_ram_bank & 0x0F) as usize % self.ram_banks.max(1)
+            }
+            CartridgeType::MBC7 => 0, // no banked RAM (EEPROM is serial)
+            CartridgeType::HuC3 => {
+                // "At least 2 bits" per Pan Docs; real carts have 4 banks.
+                (self.huc3_ram_bank as usize) % self.ram_banks.max(1)
             }
             CartridgeType::NoMBC => 0,
         }
@@ -907,6 +1124,9 @@ impl Cartridge {
             CartridgeType::MBC2 { battery } => battery,
             CartridgeType::MBC3 { battery, .. } => battery,
             CartridgeType::MBC5 { battery, .. } => battery,
+            // MBC7's EEPROM is inherently non-volatile; HuC-3 ($FE) implies
+            // RAM+BATTERY+RTC.
+            CartridgeType::MBC7 | CartridgeType::HuC3 => true,
             CartridgeType::NoMBC => false,
         }
     }
@@ -984,24 +1204,343 @@ impl Cartridge {
     /// Advance the cycle-derived RTC by `cycles` master (dot) clock T-cycles.
     /// Driven from the bus tick loop (`master_cc` advances at 4.194304 MHz
     /// regardless of CPU speed), so the clock is fully deterministic. No-op
-    /// unless this cart actually has an RTC. The HALT bit (bit 6 of days_high)
-    /// freezes advancement but the sub-second accumulator keeps running so the
-    /// halt/resume boundary lands on an exact second, matching hardware.
+    /// unless this cart actually has an RTC (MBC3 timer or HuC-3). For MBC3
+    /// the HALT bit (bit 6 of days_high) freezes advancement but the
+    /// sub-second accumulator keeps running so the halt/resume boundary lands
+    /// on an exact second, matching hardware.
     pub fn rtc_tick(&mut self, cycles: u64) {
-        if cycles == 0 || !self.has_rtc() {
+        if cycles == 0 {
             return;
         }
-        // HALT bit frozen: the crystal still oscillates but the counters do not
-        // advance. Do not accumulate while halted so no seconds are "banked".
-        if self.rtc_days_high & 0x40 != 0 {
+        match self.get_cartridge_type() {
+            CartridgeType::MBC3 { timer: true, .. } => {
+                // HALT bit frozen: the crystal still oscillates but the counters
+                // do not advance. Do not accumulate while halted so no seconds
+                // are "banked".
+                if self.rtc_days_high & 0x40 != 0 {
+                    return;
+                }
+                self.rtc_cycle_accum = self.rtc_cycle_accum.wrapping_add(cycles);
+                const CYCLES_PER_SECOND: u64 = 4_194_304;
+                while self.rtc_cycle_accum >= CYCLES_PER_SECOND {
+                    self.rtc_cycle_accum -= CYCLES_PER_SECOND;
+                    self.advance_rtc_second();
+                }
+            }
+            CartridgeType::HuC3 => {
+                // The HuC-3 clock counts whole minutes: minute-of-day rolls at
+                // 1440 into a 12-bit day counter (Pan Docs RTC location map).
+                self.huc3_rtc_accum = self.huc3_rtc_accum.wrapping_add(cycles);
+                const CYCLES_PER_MINUTE: u64 = 60 * 4_194_304;
+                while self.huc3_rtc_accum >= CYCLES_PER_MINUTE {
+                    self.huc3_rtc_accum -= CYCLES_PER_MINUTE;
+                    let (mut minutes, mut days) = self.huc3_clock();
+                    minutes += 1;
+                    if minutes >= 1440 {
+                        minutes = 0;
+                        days = (days + 1) & 0x0FFF;
+                    }
+                    self.huc3_set_clock(minutes, days);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Live HuC-3 clock (minute-of-day, day counter) read from its nibble
+    /// locations 0x10-0x12 / 0x13-0x15 in the RTC MCU memory.
+    fn huc3_clock(&self) -> (u16, u16) {
+        if self.huc3_rtc_mem.len() < 0x16 {
+            return (0, 0);
+        }
+        let m = &self.huc3_rtc_mem;
+        let minutes = (m[0x10] as u16 & 0xF) | ((m[0x11] as u16 & 0xF) << 4) | ((m[0x12] as u16 & 0xF) << 8);
+        let days = (m[0x13] as u16 & 0xF) | ((m[0x14] as u16 & 0xF) << 4) | ((m[0x15] as u16 & 0xF) << 8);
+        (minutes, days)
+    }
+
+    fn huc3_set_clock(&mut self, minutes: u16, days: u16) {
+        if self.huc3_rtc_mem.len() < 0x16 {
             return;
         }
-        self.rtc_cycle_accum = self.rtc_cycle_accum.wrapping_add(cycles);
-        const CYCLES_PER_SECOND: u64 = 4_194_304;
-        while self.rtc_cycle_accum >= CYCLES_PER_SECOND {
-            self.rtc_cycle_accum -= CYCLES_PER_SECOND;
-            self.advance_rtc_second();
+        let m = &mut self.huc3_rtc_mem;
+        m[0x10] = (minutes & 0xF) as u8;
+        m[0x11] = ((minutes >> 4) & 0xF) as u8;
+        m[0x12] = ((minutes >> 8) & 0xF) as u8;
+        m[0x13] = (days & 0xF) as u8;
+        m[0x14] = ((days >> 4) & 0xF) as u8;
+        m[0x15] = ((days >> 8) & 0xF) as u8;
+    }
+
+    /// Event ("alarm") time as total minutes, from nibbles 0x58-0x5A (minutes)
+    /// and 0x5B-0x5D (days).
+    fn huc3_event_total_minutes(&self) -> i64 {
+        let m = &self.huc3_rtc_mem;
+        let minutes =
+            (m[0x58] as i64 & 0xF) | ((m[0x59] as i64 & 0xF) << 4) | ((m[0x5A] as i64 & 0xF) << 8);
+        let days =
+            (m[0x5B] as i64 & 0xF) | ((m[0x5C] as i64 & 0xF) << 4) | ((m[0x5D] as i64 & 0xF) << 8);
+        days * 1440 + minutes
+    }
+
+    fn huc3_set_event_total_minutes(&mut self, total: i64) {
+        // 12-bit day counter x 1440 minutes wraps the representable range.
+        let total = total.rem_euclid(4096 * 1440);
+        let minutes = (total % 1440) as u16;
+        let days = (total / 1440) as u16;
+        let m = &mut self.huc3_rtc_mem;
+        m[0x58] = (minutes & 0xF) as u8;
+        m[0x59] = ((minutes >> 4) & 0xF) as u8;
+        m[0x5A] = ((minutes >> 8) & 0xF) as u8;
+        m[0x5B] = (days & 0xF) as u8;
+        m[0x5C] = ((days >> 4) & 0xF) as u8;
+        m[0x5D] = ((days >> 8) & 0xF) as u8;
+    }
+
+    /// Execute the pending HuC-3 RTC MCU command (mailbox command+argument,
+    /// triggered by a semaphore write with bit 0 clear). The MCU is modeled as
+    /// always-ready / instant execution; the semaphore therefore always reads
+    /// "ready". Command set per Pan Docs "RTC Communication Protocol".
+    fn huc3_execute_command(&mut self) {
+        if self.huc3_rtc_mem.len() < 0x100 {
+            return;
         }
+        let addr = self.huc3_rtc_address as usize;
+        match self.huc3_rtc_command {
+            0x1 => {
+                // Read value and increment access address.
+                self.huc3_rtc_result = self.huc3_rtc_mem[addr] & 0x0F;
+                self.huc3_rtc_address = self.huc3_rtc_address.wrapping_add(1);
+            }
+            0x3 => {
+                // Write value and increment access address.
+                self.huc3_rtc_mem[addr] = self.huc3_rtc_argument & 0x0F;
+                self.huc3_rtc_address = self.huc3_rtc_address.wrapping_add(1);
+            }
+            0x4 => {
+                // Set access address least significant nibble.
+                self.huc3_rtc_address = (self.huc3_rtc_address & 0xF0) | self.huc3_rtc_argument;
+            }
+            0x5 => {
+                // Set access address most significant nibble.
+                self.huc3_rtc_address =
+                    (self.huc3_rtc_address & 0x0F) | (self.huc3_rtc_argument << 4);
+            }
+            0x6 => {
+                // Extended command in the argument nibble.
+                match self.huc3_rtc_argument {
+                    0x0 => {
+                        // Copy current time (0x10-0x16) to I/O space 0x00-0x06.
+                        // Pan Docs specifies "locations $00-06": 7 nibbles.
+                        for i in 0..7 {
+                            self.huc3_rtc_mem[i] = self.huc3_rtc_mem[0x10 + i] & 0x0F;
+                        }
+                    }
+                    0x1 => {
+                        // Copy I/O space 0x00-0x06 to current time, and shift
+                        // the event time by the same delta so the remaining
+                        // duration until the event is preserved (Pan Docs).
+                        let (old_min, old_day) = self.huc3_clock();
+                        for i in 0..7 {
+                            self.huc3_rtc_mem[0x10 + i] = self.huc3_rtc_mem[i] & 0x0F;
+                        }
+                        let (new_min, new_day) = self.huc3_clock();
+                        let delta = (new_day as i64 * 1440 + new_min as i64)
+                            - (old_day as i64 * 1440 + old_min as i64);
+                        let event = self.huc3_event_total_minutes();
+                        self.huc3_set_event_total_minutes(event + delta);
+                        // Setting the time restarts the current minute.
+                        self.huc3_rtc_accum = 0;
+                    }
+                    0x2 => {
+                        // Status request issued by games on boot; they refuse
+                        // to start unless the response is 1 (Pan Docs).
+                    }
+                    0xE => {
+                        // Tone generator trigger. The piezo speaker is not
+                        // modeled; accept and ignore.
+                    }
+                    _ => {}
+                }
+                // Hardware-observed: extended commands leave 1 in the response
+                // nibble (this is what boot-time $62 status checks rely on).
+                self.huc3_rtc_result = 0x1;
+            }
+            // Commands $0, $2 and $7 are unobserved/unknown on hardware
+            // (Pan Docs); treat as no-ops.
+            _ => {}
+        }
+    }
+
+    /// Feed the MBC7 accelerometer with a live tilt sample, in units of g
+    /// (Earth gravity). Neutral (flat) is (0, 0); positive x tilts left,
+    /// positive y tilts up, matching Pan Docs' "lower values are towards the
+    /// right / bottom". The value is only observed by software when it latches
+    /// a sample via the Ax0x/Ax1x erase+latch protocol. No-op storage for
+    /// non-MBC7 carts.
+    pub fn set_accelerometer(&mut self, x_g: f32, y_g: f32) {
+        self.mbc7_sensor_x = x_g;
+        self.mbc7_sensor_y = y_g;
+    }
+
+    /// Convert a sensor reading in g to the latched 16-bit accelerometer
+    /// value: centered at 0x81D0, 1 g ~ 0x70 counts (Pan Docs).
+    fn mbc7_accel_counts(g: f32) -> u16 {
+        let v = 0x81D0_i32 + (g * 0x70 as f32) as i32;
+        v.clamp(0, 0xFFFF) as u16
+    }
+
+    /// One 16-bit word of the MBC7 EEPROM (128 little-endian words backed by
+    /// `ram_data`).
+    fn mbc7_eeprom_word(&self, addr: usize) -> u16 {
+        let i = (addr & 0x7F) * 2;
+        (self.ram_data[i] as u16) | ((self.ram_data[i + 1] as u16) << 8)
+    }
+
+    fn mbc7_eeprom_set_word(&mut self, addr: usize, word: u16) {
+        let i = (addr & 0x7F) * 2;
+        // write_ram_byte streams to the battery save file as well.
+        let _ = self.write_ram_byte(i, (word & 0xFF) as u8);
+        let _ = self.write_ram_byte(i + 1, (word >> 8) as u8);
+    }
+
+    /// Bit-banged 93LC56 write via the Ax8x register: bit 0 = DO (ignored on
+    /// write), bit 1 = DI, bit 6 = CLK, bit 7 = CS. Commands are 1 start bit
+    /// followed by 10 instruction bits, shifted MSB-first on rising CLK edges
+    /// while CS is high (leading 0 bits before the start bit are ignored):
+    ///
+    /// ```text
+    /// READ  10xAAAAAAA (then 16 bits out)   EWEN 0011xxxxxx
+    /// WRITE 01xAAAAAAA (then 16 bits in)    EWDS 0000xxxxxx
+    /// ERASE 11xAAAAAAA                      ERAL 0010xxxxxx
+    /// WRAL  0001xxxxxx (then 16 bits in)
+    /// ```
+    ///
+    /// Programming ops (WRITE/ERASE/WRAL/ERAL) execute on the CS falling edge
+    /// that follows the last bit, require a prior EWEN, and are modeled as
+    /// completing instantly: DO then reads 1 (RDY) for the software
+    /// busy-poll.
+    fn mbc7_eeprom_write(&mut self, value: u8) {
+        let di = value & 0x02 != 0;
+        let clk = value & 0x40 != 0;
+        let cs = value & 0x80 != 0;
+        let rising_clk = clk && !self.mbc7_eeprom.clk;
+        let falling_cs = !cs && self.mbc7_eeprom.cs;
+
+        if rising_clk && cs {
+            match self.mbc7_eeprom.state {
+                Mbc7EepromState::Idle => {
+                    if di {
+                        // Start bit.
+                        self.mbc7_eeprom.state = Mbc7EepromState::Command;
+                        self.mbc7_eeprom.sr = 0;
+                        self.mbc7_eeprom.sr_n = 0;
+                    }
+                }
+                Mbc7EepromState::Command => {
+                    self.mbc7_eeprom.sr = (self.mbc7_eeprom.sr << 1) | di as u16;
+                    self.mbc7_eeprom.sr_n += 1;
+                    if self.mbc7_eeprom.sr_n == 10 {
+                        self.mbc7_eeprom_decode();
+                    }
+                }
+                Mbc7EepromState::Input => {
+                    self.mbc7_eeprom.sr = (self.mbc7_eeprom.sr << 1) | di as u16;
+                    self.mbc7_eeprom.sr_n += 1;
+                    if self.mbc7_eeprom.sr_n == 16 {
+                        self.mbc7_eeprom.input = self.mbc7_eeprom.sr;
+                        self.mbc7_eeprom.state = Mbc7EepromState::Pending;
+                    }
+                }
+                Mbc7EepromState::Output => {
+                    self.mbc7_eeprom.do_line = self.mbc7_eeprom.out & 0x8000 != 0;
+                    self.mbc7_eeprom.out <<= 1;
+                    self.mbc7_eeprom.out_n += 1;
+                    if self.mbc7_eeprom.out_n == 16 {
+                        self.mbc7_eeprom.state = Mbc7EepromState::Done;
+                    }
+                }
+                Mbc7EepromState::Pending | Mbc7EepromState::Done => {}
+            }
+        }
+
+        if falling_cs {
+            if self.mbc7_eeprom.state == Mbc7EepromState::Pending {
+                self.mbc7_eeprom_program();
+            }
+            // Any in-flight instruction is aborted by deselecting the chip.
+            self.mbc7_eeprom.state = Mbc7EepromState::Idle;
+        }
+
+        self.mbc7_eeprom.di_line = di;
+        self.mbc7_eeprom.clk = clk;
+        self.mbc7_eeprom.cs = cs;
+    }
+
+    /// Decode a completed 10-bit instruction. The top 4 bits identify the
+    /// operation; the low 7 bits are the word address for READ/WRITE/ERASE.
+    fn mbc7_eeprom_decode(&mut self) {
+        let cmd = self.mbc7_eeprom.sr & 0x03FF;
+        self.mbc7_eeprom.command = cmd;
+        match (cmd >> 6) & 0xF {
+            0b1000..=0b1011 => {
+                // READ: present the word MSB-first on subsequent rising edges.
+                // DO drops to 0 immediately (the datasheet's dummy zero bit,
+                // which does not consume a clock).
+                self.mbc7_eeprom.out = self.mbc7_eeprom_word((cmd & 0x7F) as usize);
+                self.mbc7_eeprom.out_n = 0;
+                self.mbc7_eeprom.do_line = false;
+                self.mbc7_eeprom.state = Mbc7EepromState::Output;
+            }
+            0b0100..=0b0111 | 0b0001 => {
+                // WRITE / WRAL: 16 data bits follow.
+                self.mbc7_eeprom.sr = 0;
+                self.mbc7_eeprom.sr_n = 0;
+                self.mbc7_eeprom.state = Mbc7EepromState::Input;
+            }
+            0b1100..=0b1111 | 0b0010 => {
+                // ERASE / ERAL: programs on CS fall.
+                self.mbc7_eeprom.state = Mbc7EepromState::Pending;
+            }
+            0b0011 => {
+                self.mbc7_eeprom.write_enabled = true;
+                self.mbc7_eeprom.state = Mbc7EepromState::Done;
+            }
+            0b0000 => {
+                self.mbc7_eeprom.write_enabled = false;
+                self.mbc7_eeprom.state = Mbc7EepromState::Done;
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Execute a pending programming instruction at the CS falling edge. If
+    /// erase/write is not enabled (no EWEN) the operation is silently dropped
+    /// and DO keeps its previous level (no programming cycle ever starts).
+    fn mbc7_eeprom_program(&mut self) {
+        if !self.mbc7_eeprom.write_enabled {
+            return;
+        }
+        let cmd = self.mbc7_eeprom.command;
+        let addr = (cmd & 0x7F) as usize;
+        let input = self.mbc7_eeprom.input;
+        match (cmd >> 6) & 0xF {
+            0b0100..=0b0111 => self.mbc7_eeprom_set_word(addr, input),
+            0b1100..=0b1111 => self.mbc7_eeprom_set_word(addr, 0xFFFF),
+            0b0001 => {
+                for a in 0..128 {
+                    self.mbc7_eeprom_set_word(a, input);
+                }
+            }
+            0b0010 => {
+                for a in 0..128 {
+                    self.mbc7_eeprom_set_word(a, 0xFFFF);
+                }
+            }
+            _ => {}
+        }
+        // Programming modeled as instant: DO = RDY as soon as CS re-rises.
+        self.mbc7_eeprom.do_line = true;
     }
 
     /// Increment the live RTC by one second with the full MBC3 cascade:
@@ -1089,8 +1628,18 @@ impl Cartridge {
         }
     }
 
-    /// True if this cartridge has an MBC3 real-time clock.
+    /// True if this cartridge has a real-time clock (MBC3 timer or HuC-3).
+    /// Gates the bus-driven `rtc_tick` path.
     pub fn has_rtc(&self) -> bool {
+        matches!(
+            self.get_cartridge_type(),
+            CartridgeType::MBC3 { timer: true, .. } | CartridgeType::HuC3
+        )
+    }
+
+    /// True only for the MBC3 timer variant (the libretro RTC memory view is
+    /// MBC3-shaped).
+    fn has_mbc3_rtc(&self) -> bool {
         matches!(self.get_cartridge_type(), CartridgeType::MBC3 { timer: true, .. })
     }
 
@@ -1110,7 +1659,7 @@ impl Cartridge {
     /// 8-byte latch timestamp, matching the common BGB/libretro `.rtc` format.
     /// The scratch buffer is synced from the live registers on each call.
     pub fn rtc_memory_mut(&mut self) -> &mut [u8] {
-        if !self.has_rtc() {
+        if !self.has_mbc3_rtc() {
             self.rtc_memory.clear();
             return &mut self.rtc_memory;
         }
@@ -1260,6 +1809,65 @@ impl memory::Addressable for Cartridge {
                             0xFF
                         }
                     }
+                    CartridgeType::MBC7 => {
+                        // MBC7 exposes registers, not RAM. They only respond
+                        // when BOTH enable stages are unlocked, and only in
+                        // A000-AFFF (B000-BFFF just reads 0xFF). The register
+                        // is selected by address bits 4-7; bits 0-3 and 8-11
+                        // are ignored.
+                        if self.ram_enabled && self.mbc7_ram_enabled2 && addr < 0xB000 {
+                            match (addr >> 4) & 0x0F {
+                                0x2 => (self.mbc7_accel_x & 0xFF) as u8,
+                                0x3 => (self.mbc7_accel_x >> 8) as u8,
+                                0x4 => (self.mbc7_accel_y & 0xFF) as u8,
+                                0x5 => (self.mbc7_accel_y >> 8) as u8,
+                                // Ax6x always reads 0x00 (possibly a reserved
+                                // Z axis); Ax7x always 0xFF.
+                                0x6 => 0x00,
+                                0x8 => self.mbc7_eeprom.pin_state(),
+                                // Ax0x/Ax1x are write-only (latch control),
+                                // Ax7x and Ax9x-AxFx read 0xFF.
+                                _ => 0xFF,
+                            }
+                        } else {
+                            0xFF
+                        }
+                    }
+                    CartridgeType::HuC3 => {
+                        match self.huc3_mode {
+                            // 0x0 = RAM read-only, 0xA = RAM read/write; both
+                            // read the banked external RAM.
+                            0x0 | 0xA => {
+                                if !self.ram_data.is_empty() {
+                                    let ram_bank = self.get_ram_bank();
+                                    let offset = ((addr - EXTERNAL_RAM_START) as usize
+                                        + (ram_bank * 0x2000))
+                                        % self.ram_data.len();
+                                    self.ram_data[offset]
+                                } else {
+                                    0xFF
+                                }
+                            }
+                            // RTC command/response: bits 6-4 echo the last
+                            // command written to the mailbox, bits 3-0 hold
+                            // the result of the last executed command. D7 is
+                            // not driven by the chip (open bus, usually
+                            // high).
+                            0xC => 0x80 | (self.huc3_rtc_command << 4) | self.huc3_rtc_result,
+                            // RTC semaphore: bit 0 high = MCU ready. Modeled
+                            // as always ready (instant execution). Bits 7-1
+                            // are not specified; 0 matches observed software
+                            // expectations.
+                            0xD => 0x01,
+                            // IR receiver stub: 0xC0 = no light seen (same
+                            // idle value as HuC-1's IR register). Full IR
+                            // link emulation is out of scope.
+                            0xE => 0xC0,
+                            // 0xB is the write-only command mailbox; other
+                            // select values are unmapped. Reads are open bus.
+                            _ => 0xFF,
+                        }
+                    }
                     _ => 0xFF,
                 }
             }
@@ -1297,6 +1905,16 @@ impl memory::Addressable for Cartridge {
                     CartridgeType::MBC5 { .. } => {
                         self.ram_enabled = (value & 0x0F) == 0x0A;
                     }
+                    CartridgeType::MBC7 => {
+                        // Stage 1 of the two-stage RAM-register unlock; stage
+                        // 2 is 0x40 to 0x4000-0x5FFF.
+                        self.ram_enabled = (value & 0x0F) == 0x0A;
+                    }
+                    CartridgeType::HuC3 => {
+                        // RAM/RTC/IR select: maps what A000-BFFF accesses.
+                        // Only the low 4 bits are significant.
+                        self.huc3_mode = value & 0x0F;
+                    }
                     _ => {}
                 }
             }
@@ -1321,6 +1939,12 @@ impl memory::Addressable for Cartridge {
                             // 0x3000-0x3FFF: Upper 1 bit of ROM bank
                             self.mbc5_rom_bank_high = value & 0x01; // Only bit 0 is used
                         }
+                    }
+                    CartridgeType::MBC7 => {
+                        self.mbc7_rom_bank = value; // like MBC5, bank 0 allowed
+                    }
+                    CartridgeType::HuC3 => {
+                        self.huc3_rom_bank = value & 0x7F; // 7-bit, bank 0 allowed
                     }
                     _ => {}
                 }
@@ -1350,6 +1974,14 @@ impl memory::Addressable for Cartridge {
                             self.rumble_motor = (value & 0x08) != 0;
                         }
                         self.mbc5_ram_bank = value; // 4 bits used (0x00-0x0F)
+                    }
+                    CartridgeType::MBC7 => {
+                        // Stage 2 of the RAM-register unlock: exactly 0x40
+                        // enables; any other value disables.
+                        self.mbc7_ram_enabled2 = value == 0x40;
+                    }
+                    CartridgeType::HuC3 => {
+                        self.huc3_ram_bank = value;
                     }
                     _ => {}
                 }
@@ -1425,6 +2057,72 @@ impl memory::Addressable for Cartridge {
                             let ram_bank = self.get_ram_bank();
                             let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
                             let _ = self.write_ram_byte(offset, value);
+                        }
+                    }
+                    CartridgeType::MBC7 => {
+                        // Registers respond only with both enable stages
+                        // unlocked, and only in A000-AFFF (see the read path).
+                        if self.ram_enabled && self.mbc7_ram_enabled2 && addr < 0xB000 {
+                            match (addr >> 4) & 0x0F {
+                                0x0 => {
+                                    // Erase the accelerometer latch: values
+                                    // reset to 0x8000 and re-latching is
+                                    // re-armed.
+                                    if value == 0x55 {
+                                        self.mbc7_accel_x = 0x8000;
+                                        self.mbc7_accel_y = 0x8000;
+                                        self.mbc7_accel_latched = false;
+                                    }
+                                }
+                                0x1 => {
+                                    // Latch the current sensor sample. Only
+                                    // accepted after an erase (cannot
+                                    // re-latch without erasing first).
+                                    if value == 0xAA && !self.mbc7_accel_latched {
+                                        self.mbc7_accel_x =
+                                            Self::mbc7_accel_counts(self.mbc7_sensor_x);
+                                        self.mbc7_accel_y =
+                                            Self::mbc7_accel_counts(self.mbc7_sensor_y);
+                                        self.mbc7_accel_latched = true;
+                                    }
+                                }
+                                0x8 => self.mbc7_eeprom_write(value),
+                                _ => {}
+                            }
+                        }
+                    }
+                    CartridgeType::HuC3 => {
+                        match self.huc3_mode {
+                            // RAM read/write. Mode 0x0 (read-only) ignores
+                            // writes.
+                            0xA => {
+                                if !self.ram_data.is_empty() {
+                                    let ram_bank = self.get_ram_bank();
+                                    let offset = ((addr - EXTERNAL_RAM_START) as usize
+                                        + (ram_bank * 0x2000))
+                                        % self.ram_data.len();
+                                    let _ = self.write_ram_byte(offset, value);
+                                }
+                            }
+                            // RTC command/argument mailbox: command in bits
+                            // 6-4, argument in bits 3-0. Writing only stores
+                            // the mailbox; execution happens via the
+                            // semaphore. D7 is not connected and is ignored.
+                            0xB => {
+                                self.huc3_rtc_command = (value >> 4) & 0x07;
+                                self.huc3_rtc_argument = value & 0x0F;
+                            }
+                            // RTC semaphore: writing with bit 0 clear requests
+                            // that the MCU execute the pending command.
+                            0xD => {
+                                if value & 0x01 == 0 {
+                                    self.huc3_execute_command();
+                                }
+                            }
+                            // 0xC is read-only; 0xE is the IR transmitter
+                            // (stubbed: no receiver on the other end); other
+                            // select values are unmapped.
+                            _ => {}
                         }
                     }
                     _ => {}
