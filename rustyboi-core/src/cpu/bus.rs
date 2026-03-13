@@ -269,6 +269,21 @@ impl<'a> Bus<'a> {
         self.mmio.read(addr)
     }
 
+    /// Non-ticking HALT prefetch that RESPECTS the PPU access lockout. Gambatte's
+    /// case 0x76 prefetch is `mem_.read<peek=false,...>(pc, cc())` — a REAL bus
+    /// read at the current cc that resolves VRAM readability — not a debug peek.
+    /// The IME-off double-HALT loop re-executes HALT at a frozen pc, re-running
+    /// this fetch every M-cycle; when the pc byte lives in VRAM and mode 3 locks
+    /// it, the fetch reads open-bus 0xFF (= rst $38), which is the hardware
+    /// escape little-things-gb double-halt-cancel proves. Still no tick: the +4
+    /// fetch charge stays deferred to consumption (`halt_bug_prefetch`).
+    pub fn peek_fetch(&self, addr: u16) -> u8 {
+        if self.ppu_locks_access(addr, self.mmio.master_cc()) {
+            return 0xFF;
+        }
+        self.mmio.read(addr)
+    }
+
     /// STAGE 2 (RB_FAITHFUL): the access cc at an instruction boundary — the RAW
     /// master cc captured BEFORE this access M-cycle ticks (Gambatte's `cc` at
     /// which it resolves the access, then `cc += 4`). This is the same raw-cc
