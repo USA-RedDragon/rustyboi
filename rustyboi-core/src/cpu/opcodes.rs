@@ -537,9 +537,13 @@ pub fn halt(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let ie_reg = mmio.peek(registers::INTERRUPT_ENABLE);
     if (if_reg & ie_reg & 0x1F) != 0 {
         // In the faithful prefetch model pc already points at the byte after
-        // HALT (the 0x76 fetch advanced it). Peek that byte WITHOUT advancing
+        // HALT (the 0x76 fetch advanced it). Fetch that byte WITHOUT advancing
         // pc and mark it prefetched: the +4 charge is deferred to consumption.
-        cpu.opcode = mmio.peek(cpu.registers.pc);
+        // The fetch is a REAL bus read (PPU lockout applies): a double HALT
+        // with IME=0 re-executes HALT here forever, re-fetching the frozen-pc
+        // byte each M-cycle, and escapes when a VRAM pc byte goes mode-3
+        // locked and reads 0xFF = rst $38 (double-halt-cancel).
+        cpu.opcode = mmio.peek_fetch(cpu.registers.pc);
         cpu.prefetched = true;
         // Charge the opcode-fetch M-cycle at consumption (Gambatte cpu.cpp:578
         // `cc() += 4` on the prefetched branch): unlike the normal prefetch, this
@@ -578,7 +582,9 @@ pub fn halt(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             crate::memory::mmio::HaltHdmaState::Requested
         )
     {
-        cpu.opcode = mmio.peek(cpu.registers.pc);
+        // Same real-read semantics as the HALT-bug prefetch above (Gambatte's
+        // case-0x76 `mem_.read` is shared by both branches).
+        cpu.opcode = mmio.peek_fetch(cpu.registers.pc);
         cpu.prefetched = true;
     }
     4
