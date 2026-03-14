@@ -1038,27 +1038,24 @@ impl Mmio {
 
     /// Seed the CGB boot ROM's DMG-compatibility palette for a DMG cart running
     /// on CGB hardware. When a non-CGB cart is inserted, the CGB-CPU-04 boot ROM
-    /// hashes the cart title and writes a fixed colored palette into CGB palette
-    /// RAM (BG palette 0, OBJ palettes 0 and 1); the PPU then renders the DMG
-    /// game through that palette (indexing it via BGP/OBP), so the game shows in
-    /// the boot ROM's chosen colors rather than grayscale. These bytes are the
-    /// exact post-boot palette RAM captured by running cgb_boot.bin with an
-    /// unlicensed/test cart (dmg-acid2), which hashes to the default palette:
+    /// hashes the cart title and writes the selected colored palette into CGB
+    /// palette RAM (BG palette 0, OBJ palettes 0 and 1); the PPU then renders the
+    /// DMG game through that palette (indexing it via BGP/OBP), so the game shows
+    /// in the boot ROM's chosen colors rather than grayscale. The caller resolves
+    /// the per-game palettes (`cgb_compat_palette`); for unrecognized titles that
+    /// is the default scheme, byte-identical to the palette RAM captured by
+    /// running cgb_boot.bin with an unlicensed/test cart (dmg-acid2):
     ///   BG  : #FFFFFF #7BFF31 #0063C6 #000000
     ///   OBJ0: #FFFFFF #FF8484 #943939 #000000  (OBJ1 identical)
     /// The remaining BG palettes stay all-white and the remaining OBJ palettes
     /// keep the hardware power-on dump, matching the real boot ROM end state.
-    pub fn set_cgb_compat_dmg_palettes(&mut self) {
+    pub fn set_cgb_compat_dmg_palettes(&mut self, pal: &crate::cgb_compat_palette::CompatPalettes) {
         // Start from the normal CGB power-on palette state (BG all-white, OBJ
         // power-on dump) so palettes the boot ROM does not touch match hardware.
         self.set_post_bios_cgb_palettes();
-        // BG palette 0: white, green, blue, black (RGB555 byte pairs).
-        const BG0: [u8; 8] = [0xFF, 0x7F, 0xEF, 0x1B, 0x80, 0x61, 0x00, 0x00];
-        self.bg_palette_ram[0..8].copy_from_slice(&BG0);
-        // OBJ palettes 0 and 1: white, light-red, dark-red, black.
-        const OBJ: [u8; 8] = [0xFF, 0x7F, 0x1F, 0x42, 0xF2, 0x1C, 0x00, 0x00];
-        self.obj_palette_ram[0..8].copy_from_slice(&OBJ);
-        self.obj_palette_ram[8..16].copy_from_slice(&OBJ);
+        self.bg_palette_ram[0..8].copy_from_slice(&pal.bg);
+        self.obj_palette_ram[0..8].copy_from_slice(&pal.obj0);
+        self.obj_palette_ram[8..16].copy_from_slice(&pal.obj1);
         // The compat palette install left BCPS/OCPS advanced past what it wrote,
         // with the auto-increment flag (bit 7) still set: BG palette 0 = 8 bytes
         // -> spec index 0x08, OBJ palettes 0+1 = 16 bytes -> index 0x10. These
@@ -1066,6 +1063,21 @@ impl Mmio {
         // CGB-cart power-on 0xC0/0xC1 seeded by set_post_bios_ioamhram.
         self.bg_palette_spec = 0x88;
         self.obj_palette_spec = 0x90;
+    }
+
+    /// Currently-held buttons as the CGB boot ROM's $021D joypad poll encodes
+    /// them (dpad in the high nibble: Right/Left/Up/Down = bits 4-7; A/B/
+    /// Select/Start = bits 0-3), for the boot-time palette-combo override.
+    pub fn dmg_compat_key_combo(&self) -> u8 {
+        let i = &self.input;
+        (u8::from(i.right) << 4)
+            | (u8::from(i.left) << 5)
+            | (u8::from(i.up) << 6)
+            | (u8::from(i.down) << 7)
+            | u8::from(i.a)
+            | (u8::from(i.b) << 1)
+            | (u8::from(i.select) << 2)
+            | (u8::from(i.start) << 3)
     }
 
     /// Read a CGB BG palette color (RGB555 byte pair) ignoring the
