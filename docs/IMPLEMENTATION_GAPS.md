@@ -356,19 +356,24 @@ unused-bit masks (`mmio.rs:4540-4556`), unmapped-hole reads: **COMPLETE**
 - Effort: **M** — define an IR bus trait (pulse timeline), loopback + paired
   instance; games are timing-tolerant compared with the serial port.
 
-### 6.2 DMG-compat boot palette table — PARTIAL (single fixed palette)
+### 6.2 DMG-compat boot palette table — COMPLETE
 - Doc: [Pan Docs Power-Up Sequence](https://gbdev.io/pandocs/Power_Up_Sequence.html)
   (CGB boot ROM: per-game compatibility palettes chosen by title-checksum +
-  logo hash, plus button-combo overrides).
-- Status: with a real CGB BIOS the palette selection is inherited correctly
-  (boot ROM executes). In skip-BIOS mode a single fixed compat palette is
-  seeded (`gb.rs:498` `set_cgb_compat_dmg_palettes`) — every DMG game gets the
-  same colors instead of its hardware-assigned scheme; button-combo palettes
-  absent.
-- Impact: cosmetic-but-visible for all 619 DMG-only games when run on CGB
-  hardware mode without a BIOS file (Pokémon Red is famously red on hardware).
-- Effort: **S/M** — the checksum→palette-triplet table is public (boot ROM
-  disassembly); ~200 bytes of data + lookup at skip-BIOS time.
+  4th title letter, plus button-combo overrides).
+- Status: skip-BIOS now runs the boot ROM's full selection
+  (`cgb_compat_palette.rs`, tables and algorithm lifted from the cgb_boot.bin
+  dump: $0475-$051D code, $06C7-$08FB data): Nintendo-licensee gate, 16-byte
+  title checksum, 79-entry table + 4th-letter disambiguation rows, 29
+  offset-triplet combinations with the per-slot flag bits and overlapped
+  palette pointers, and the 12 boot button-combo overrides (buttons held when
+  `skip_bios()` runs). Unrecognized titles resolve to the boot ROM's default
+  entry — byte-identical to the previously hard-coded fixed palette, so every
+  hwtest grader is unmoved. Validated with `--validate-bios` palette-RAM diffs
+  against the real boot ROM: Tetris / Super Mario Land / Link's Awakening /
+  Pokémon Red / Pokémon Blue / Kirby / Metroid II / dmg-acid2 all 0-diff.
+- Remaining nuance: selection is sampled once at skip-BIOS time; the real boot
+  ROM lets a combo pressed at any point during the logo override the choice
+  (needs a boot-long input timeline, only observable with a real BIOS).
 
 ### 6.3 CGB compat-path boot DIV per-header variance — PARTIAL
 - Status: CGB DMG-cart hand-off DIV is a single anchor (0x2678,
