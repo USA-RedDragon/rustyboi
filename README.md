@@ -38,10 +38,10 @@ failing ROMs is individually proven and documented in
 | mbc3_tester | 2 | 2 |
 | cpp | 3 | 3 |
 | magentests | 11 | 11 |
-| little_things_extra | 3 | 4 |
+| little_things_extra | 4 | 4 |
 | sketchtests | 6 | 6 |
 | gambatte | 5248 | 5257 |
-| **Total** | **6451** | **6465** |
+| **Total** | **6452** | **6465** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core
