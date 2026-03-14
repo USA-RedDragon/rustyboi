@@ -3853,17 +3853,35 @@ impl Mmio {
         self.input.sgb()
     }
 
-    /// Service a pending SGB *_TRN VRAM transfer: if the joypad's SGB state has a
-    /// _TRN command awaiting a VBlank, hand it the 4KB VRAM block at $8000. Call
-    /// once per VBlank. No-op on non-SGB hardware.
-    pub fn service_sgb_vram_transfer(&mut self) {
-        // Snapshot the pending command, then read the 4KB block, then apply. Done
-        // in two borrows to avoid overlapping &mut self.input and &self.vram.
+    /// Service a pending SGB *_TRN VRAM transfer: if the joypad's SGB state
+    /// has a _TRN command awaiting a VBlank, capture its 4KB block. The real
+    /// SGB reads the VIDEO SIGNAL — the ICD2 re-digitizes the pixels the game
+    /// displays — so the block is built from the completed DMG shade frame:
+    /// 256 tiles in display order (20 per row), each 8-pixel row packed back
+    /// to GB 2bpp (shade bit 0 -> low plane byte, bit 1 -> high plane byte,
+    /// leftmost pixel = bit 7). Reading the screen (not VRAM at $8000) makes
+    /// the readout follow whatever the game shows — signed/unsigned tile
+    /// addressing (Donkey Kong '94 transfers with LCDC.4=0), scroll, BGP —
+    /// exactly like hardware. Call once per VBlank with the completed frame.
+    /// No-op on non-SGB hardware.
+    pub fn service_sgb_vram_transfer(&mut self, shade_frame: &[u8; crate::ppu::FRAMEBUFFER_SIZE]) {
         let pending = self.input.sgb_mut().and_then(|s| s.take_pending_trn());
         if let Some(command) = pending {
             let mut block = [0u8; 0x1000];
-            for (i, b) in block.iter_mut().enumerate() {
-                *b = self.vram.read(0x8000 + i as u16);
+            for tile in 0..256usize {
+                let tx = (tile % 20) * 8;
+                let ty = (tile / 20) * 8;
+                for y in 0..8 {
+                    let mut lo = 0u8;
+                    let mut hi = 0u8;
+                    for x in 0..8 {
+                        let shade = shade_frame[(ty + y) * 160 + tx + x] & 3;
+                        lo |= (shade & 1) << (7 - x);
+                        hi |= (shade >> 1) << (7 - x);
+                    }
+                    block[tile * 16 + y * 2] = lo;
+                    block[tile * 16 + y * 2 + 1] = hi;
+                }
             }
             if let Some(s) = self.input.sgb_mut() {
                 s.apply_trn(command, &block);

@@ -1430,6 +1430,12 @@ pub struct Ppu {
     fb_a: [u8; FRAMEBUFFER_SIZE],
     #[serde(with = "serde_bytes")]
     fb_b: [u8; FRAMEBUFFER_SIZE],
+    /// SGB MASK_EN Freeze latch: the DMG shade frame captured at the first
+    /// frame boundary after the freeze engaged, shown instead of the live
+    /// frame until the mask clears (games hide their *_TRN transfer screens
+    /// behind this). None when not frozen.
+    #[serde(default)]
+    sgb_freeze_fb: Option<Vec<u8>>,
     #[serde(with = "serde_bytes")]
     color_fb_a: [u8; FRAMEBUFFER_SIZE * 3], // RGB color framebuffer
     #[serde(with = "serde_bytes")]
@@ -1788,6 +1794,7 @@ impl Ppu {
             bgp_defer_countdown: 0,
             fb_a: [0; FRAMEBUFFER_SIZE],
             fb_b: [0; FRAMEBUFFER_SIZE],
+            sgb_freeze_fb: None,
             color_fb_a: [0; FRAMEBUFFER_SIZE * 3],
             color_fb_b: [0; FRAMEBUFFER_SIZE * 3],
             have_frame: false,
@@ -8293,6 +8300,13 @@ impl Ppu {
         self.have_frame
     }
 
+    /// The completed DMG shade-index frame (the back buffer `get_frame`
+    /// serves). The SGB *_TRN readout captures from this: the real SGB
+    /// re-digitizes the displayed video signal, not the GB's VRAM.
+    pub fn dmg_shade_frame(&self) -> &[u8; FRAMEBUFFER_SIZE] {
+        &self.fb_b
+    }
+
     pub fn get_frame(&mut self, mmio: &mmio::Mmio) -> crate::gb::Frame {
         self.have_frame = false;
         // Hardware panel blank: the LCD off state and the first frame after an
@@ -8312,6 +8326,16 @@ impl Ppu {
             }
             crate::gb::Frame::Color(Box::new(self.color_fb_b))
         } else if let Some(sgb) = mmio.sgb() {
+            // MASK_EN Freeze: latch the frame completed at the freeze and keep
+            // showing it (the transfer screens games draw behind the mask stay
+            // hidden); drop the latch as soon as the mask leaves Freeze.
+            if matches!(sgb.mask, crate::sgb::MaskMode::Freeze) {
+                if self.sgb_freeze_fb.is_none() {
+                    self.sgb_freeze_fb = Some(self.fb_b.to_vec());
+                }
+            } else if self.sgb_freeze_fb.is_some() {
+                self.sgb_freeze_fb = None;
+            }
             self.sgb_frame(sgb)
         } else {
             if blank_panel {
@@ -8330,9 +8354,14 @@ impl Ppu {
     /// what the `sgb-ext-test` grayscale reference expects.
     fn sgb_frame(&self, sgb: &crate::sgb::Sgb) -> crate::gb::Frame {
         use crate::sgb::MaskMode;
-        // MASK_EN: Freeze keeps the last frame (already in fb_b since we don't
-        // swap on mask — approximated by showing fb_b as-is); Black/Color0 blank.
+        // MASK_EN: Freeze shows the latched pre-freeze frame; Black shows pure
+        // black (the SNES blanks to color 0x0000); Color0 blanks to the shared
+        // backdrop color (color 0).
         let blank = matches!(sgb.mask, MaskMode::Black | MaskMode::Color0);
+        let src: &[u8] = match self.sgb_freeze_fb.as_deref() {
+            Some(f) if f.len() == FRAMEBUFFER_SIZE => f,
+            _ => &self.fb_b,
+        };
 
         if !sgb.colorized {
             if blank {
@@ -8340,15 +8369,20 @@ impl Ppu {
                 let fill = if matches!(sgb.mask, MaskMode::Black) { 3 } else { 0 };
                 return crate::gb::Frame::Monochrome(Box::new([fill; FRAMEBUFFER_SIZE]));
             }
-            return crate::gb::Frame::Monochrome(Box::new(self.fb_b));
+            let mut out = [0u8; FRAMEBUFFER_SIZE];
+            out.copy_from_slice(src);
+            return crate::gb::Frame::Monochrome(Box::new(out));
         }
 
         // Colorized: build an RGB888 frame from the SGB palettes.
         let mut out = [0u8; FRAMEBUFFER_SIZE * 3];
+        if matches!(sgb.mask, MaskMode::Black) {
+            return crate::gb::Frame::Color(Box::new(out));
+        }
         for y in 0..144usize {
             for x in 0..160usize {
                 let idx = y * 160 + x;
-                let shade = if blank { 0 } else { self.fb_b[idx] };
+                let shade = if blank { 0 } else { src[idx] };
                 let rgb555 = sgb.color_for(x / 8, y / 8, shade).unwrap_or(0);
                 let (r, g, b) = rgb555_to_rgb888(rgb555);
                 out[idx * 3] = r;
