@@ -402,29 +402,40 @@ the glitched 3-player mode (beyond SameBoy), MASK_EN all four modes, PAL01/23/
 (`sgb.rs`; samesuite SGB rows + sgb.manifest pass). Per-model SGB/SGB2 boot
 states incl. the header-popcount-dependent boot DIV: COMPLETE (`gb.rs:443-448`).
 
-### 7.1 ATTR_BLK/ATTR_LIN/ATTR_DIV/ATTR_CHR geometry + ATTR_TRN/ATTR_SET — PARTIAL (stubbed)
+### 7.1 ATTR_BLK/ATTR_LIN/ATTR_DIV/ATTR_CHR geometry + ATTR_TRN/ATTR_SET — COMPLETE
 - Doc: [Pan Docs SGB Color Attribute Commands](https://gbdev.io/pandocs/SGB_Command_Attribute.html).
-- Status: commands are decoded but `apply_attr` (`sgb.rs:368-375`) only sets
-  `colorized` — the 20x18 attribute map is never written, so the whole screen
-  renders with palette 0. ATTR_TRN blocks are accepted and dropped
-  (`sgb.rs:400-402`), so ATTR_SET has nothing to select.
-- Impact: most of the 185 SGB-flagged owner games use ATTR_* for their
-  multi-palette screens (Donkey Kong '94, Kirby's Dream Land 2, Pokémon
-  R/B/Y borders-and-HUD schemes). Today they show single-palette color.
-- Effort: **M** — pure data-plumbing into the existing `attr` grid +
-  a 4.5KB ATTR file store; the render path (`color_for`, `sgb.rs:407-414`)
-  already consumes the grid.
+- Status: full geometry implemented to spec (`sgb.rs`): ATTR_BLK
+  (inside/line/outside + the only-inside/only-outside implicit-line
+  exception), ATTR_LIN, ATTR_DIV, ATTR_CHR (LTR/TTB walk, multi-packet
+  data), ATTR_TRN (45-file ATF store), ATTR_SET (+cancel-mask), PAL_SET
+  byte-9 ATF-apply/9-bit palette indices, and the shared color-0 backdrop
+  across all four palettes. The *_TRN readout captures from the DISPLAYED
+  frame (the SGB re-digitizes the video signal), not a flat VRAM read —
+  Donkey Kong '94 transfers with LCDC.4=0 and only works this way. MASK_EN
+  Freeze latches the pre-freeze frame (transfer screens stay hidden).
+- Validated: Donkey Kong '94, Kirby's Dream Land 2, Pokémon Red render
+  their authentic multi-palette screens; unit tests cover each command.
 
-### 7.2 SGB border (CHR_TRN / PCT_TRN) — MISSING
+### 7.2 SGB border (CHR_TRN / PCT_TRN) — COMPLETE (core; frontend presentation opt-in)
 - Doc: [Pan Docs SGB Border commands](https://gbdev.io/pandocs/SGB_Command_Border.html)
   / [VRAM transfers](https://gbdev.io/pandocs/SGB_VRAM_Transfer.html).
-- Status: transfer blocks accepted and dropped (`sgb.rs:400-402` comment:
-  "border rendering is lowest priority"). No 256x224 composited output exists
-  in the frame path (`gb.rs::Frame` is 160x144 only).
-- Impact: every SGB game's border; also little-things `sgbears` (border fade
-  race) from the census wave-3 queue is ungradeable until borders render.
-- Effort: **M** core (decode SNES 4bpp tiles + 32x28 map + palettes into a
-  side surface) + **M** frontend (surface presentation) — L total.
+- Status: CHR_TRN (2 x 128 SNES 4bpp tiles) and PCT_TRN (32x28 map +
+  palettes 4-7) are stored (`sgb.rs`), and
+  `GB::sgb_composited_frame()` returns the full 256x224 RGB888 output —
+  backdrop (shared color 0), the masked/colorized GB screen at (48,40),
+  and the border tiles (color 0 transparent) on top, per SameBoy's
+  layering. INTEGRATION POINT: the accessor is off-screen by design — the
+  160x144 `Frame` path is byte-identical (suite graders unaffected) and
+  `frame_ready` is not consumed. A frontend presents borders by calling
+  `gb.sgb_composited_frame()` after `run_until_frame` and falling back to
+  the standard frame on `None` (non-SGB hardware, or no border transferred
+  yet); dimensions in `ppu::SGB_FRAME_WIDTH/HEIGHT`. The pixels-based
+  platform frontend keeps its fixed 160x144 surface for now.
+- Validated: DK '94 arcade-cabinet border, KDL2 checkerboard border,
+  Pokémon Red plaid border all composite correctly.
+- Remaining (below the fold): border fade/latch timing races
+  (little-things `sgbears`, pinobatch trnstress) — transfers apply at the
+  next frame boundary, not the real 5-frame window.
 
 ### 7.3 SGB sound commands (SOUND $08, SOU_TRN $09) — MISSING
 - Doc: [Pan Docs SGB Sound commands](https://gbdev.io/pandocs/SGB_Command_Sound.html).
@@ -537,7 +548,7 @@ against both hand-off anchors. Gaps: only §6.2 (compat palette table), §6.3
 | Interrupts / Sources / HALT | COMPLETE (double-halt refetch OPEN-TARGET in flight) |
 | CGB Registers | COMPLETE except IR transport §6.1 |
 | Infrared Communication | MISSING transport — §6.1 |
-| SGB (all 14 sections) | PARTIAL — §7 (protocol/palettes done; ATTR/border/sound not) |
+| SGB (all 14 sections) | PARTIAL — §7 (protocol/palettes/ATTR/border done; sound §7.3 + OBJ_TRN/PAL_PRI §7.4 not) |
 | CPU (specs, registers, instruction set) | COMPLETE (illegal-op lockup included) |
 | Cartridge header | COMPLETE parse; §7.5 SGB flag unused |
 | No MBC | WRONG for $08/$09 — §2.1 |
@@ -575,8 +586,8 @@ incl. its "OAM DMA bus conflicts: TODO" (we exceed the reference), MBC30
 | 3 | MBC3 RTC persistence: `.rtc` sidecar + wall-clock catch-up (§2.2) | 13 games incl. all Pokémon G/S/C | S |
 | 4 | HuC1 banking + IR-mode register (§2.5) | Pokémon Card GB un-broken | S |
 | 5 | Game Boy Printer serial device → PNG (§8.2) | 10+ games' print features | M |
-| 6 | SGB ATTR geometry + ATTR_TRN/ATTR_SET store (§7.1) | 185 SGB games colorize correctly | M |
-| 7 | SGB border CHR_TRN/PCT_TRN + 256x224 output (§7.2) | 185 SGB games | M+M |
+| 6 | ~~SGB ATTR geometry + ATTR_TRN/ATTR_SET store (§7.1)~~ DONE | 185 SGB games colorize correctly | — |
+| 7 | ~~SGB border CHR_TRN/PCT_TRN + 256x224 output (§7.2)~~ DONE (core; frontend presentation opt-in) | 185 SGB games | — |
 | 8 | Link-cable peer transport + external clock (§8.1) | all 2-player/trading | L |
 | 9 | Game Boy Camera mapper + M64282FP pipeline (§2.6) | owned cart | L |
 | 10 | Plain-STOP mode per the STOP chart (§3.1) | correctness + gbc-hw-tests wave | M (regression-sensitive) |
