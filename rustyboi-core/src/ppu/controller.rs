@@ -1039,6 +1039,23 @@ pub struct Ppu {
     // that x; at most two tiles are in flight.
     #[serde(default)]
     we_glitch_tile_starts: [Option<u8>; 2],
+    // DMG WE-off insert glitch, discard-prologue variant (SameBoy issue #278,
+    // little-things windesync-validate WX 0..6 rows): the line's FIRST
+    // push-at-empty boundary sits at SameBoy position -(SCX&7) — INSIDE the
+    // fine-scroll discard prologue — and the comparator match there is
+    // WX == position + 7, i.e. WX == 7 - (SCX&7). The inserted color-0 pixel
+    // is itself swallowed by the prologue: one discard dot pops it instead of
+    // a real BG pixel, so one extra leading BG pixel survives and the visible
+    // line shifts right by one with NO on-screen glitch pixel. Set at the
+    // push dot, consumed by the first discard pop; reset at M3 arm.
+    #[serde(default)]
+    we_glitch_discard_insert: bool,
+    // SameBoy disable_window_pixel_insertion_glitch: a WE-off LCDC write
+    // landing while a window tile fetch is in flight (win_being_fetched)
+    // suppresses the WE-off zero-pixel insert for the REST of the line.
+    // Reset at M3 arm.
+    #[serde(default)]
+    we_insert_suppressed: bool,
     // Which WE tap the window TileNumber kill samples (see we_dot_hist).
     // A MID-LINE window restart runs its fetch on the trigger-anchored grid,
     // where the hardware tile-number dot sits one dot BEFORE our TN step
@@ -1684,6 +1701,8 @@ impl Ppu {
             insert_bg_pixel: false,
             we_dot_hist: [true; 5],
             we_glitch_tile_starts: [None; 2],
+            we_glitch_discard_insert: false,
+            we_insert_suppressed: false,
             win_kill_tap_late: false,
             win_wx0_delayed: false,
             dmg_wx_trigger_pending: None,
@@ -1930,6 +1949,20 @@ impl Ppu {
                 self.wg_hist.push((t_cc, old_lcdc, value));
                 self.bg_retro_repair(mmio);
             }
+        }
+
+        // SameBoy disable_window_pixel_insertion_glitch: a window-DISABLE
+        // landing while a window tile fetch is in flight suppresses the
+        // WE-off zero-pixel insert glitch for the remainder of this line
+        // (reset at the next M3 arm).
+        let win_en_bit = LCDCFlags::WindowDisplayEnable as u8;
+        if !mmio.is_cgb()
+            && display_stays_enabled
+            && (old_lcdc & win_en_bit) != 0
+            && (value & win_en_bit) == 0
+            && self.win_being_fetched
+        {
+            self.we_insert_suppressed = true;
         }
 
         // Per-pixel BG-enable history (RB_LINERENDER per-pixel). A mid-mode-3
@@ -6434,6 +6467,8 @@ impl Ppu {
                             (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
                         self.we_dot_hist = [we_now; 5];
                         self.we_glitch_tile_starts = [None; 2];
+                        self.we_glitch_discard_insert = false;
+                        self.we_insert_suppressed = false;
                     }
                     // CGB arms two dots later, so use a shorter warmup to keep the first visible pixel aligned.
                     self.pixel_transfer_warmup = if is_cgb {
@@ -7384,21 +7419,46 @@ impl Ppu {
                         }
                         if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo) {
                             push_this_dot = true;
-                            // Queue the display-x at which this tile's first pixel
-                            // will pop (the SameBoy push-at-empty dot) for the DMG
-                            // WE-off zero-pixel insert glitch.
+                            // The display-x at which this tile's first pixel will
+                            // pop (the SameBoy push-at-empty dot), SIGNED: during
+                            // the SCX fine-scroll discard prologue the boundary
+                            // sits at SameBoy position -(pending discards) < 0.
                             if !mmio.is_cgb_features_enabled() {
-                                let first_x = (self.x as i32 + event.fifo_size as i32
+                                let first_x = self.x as i32 + event.fifo_size as i32
                                     - 8
-                                    - pending_discard as i32)
-                                    .max(0) as u8;
-                                if first_x < 160
-                                    && let Some(slot) = self
+                                    - pending_discard as i32;
+                                if (0..160).contains(&first_x) {
+                                    // Visible boundary: queue for the pop-side
+                                    // WE-off zero-pixel insert check.
+                                    if let Some(slot) = self
                                         .we_glitch_tile_starts
                                         .iter_mut()
                                         .find(|s| s.is_none())
-                                {
-                                    *slot = Some(first_x);
+                                    {
+                                        *slot = Some(first_x as u8);
+                                    }
+                                } else if first_x < 0 && !mmio.is_cgb() {
+                                    // Discard-prologue boundary (SameBoy issue
+                                    // #278): evaluate the WE-off insert HERE, at
+                                    // the push dot. logical position = first_x+7
+                                    // (SameBoy clamps out-of-range to 0, matching
+                                    // WX==0). A hit inserts a color-0 pixel that
+                                    // the prologue itself swallows — one discard
+                                    // dot consumes it instead of a real pixel
+                                    // (see we_glitch_discard_insert). Pre-CGB
+                                    // MACHINES only (SameBoy !GB_is_cgb): the CGB
+                                    // PPU has no insert glitch even in DMG-compat.
+                                    let logical = first_x + 7;
+                                    let logical =
+                                        if (0..=167).contains(&logical) { logical } else { 0 };
+                                    if self.window_y_triggered
+                                        && !self.fetcher.is_fetching_window()
+                                        && !self.we_dot_hist[2]
+                                        && !self.we_insert_suppressed
+                                        && mmio.read(WX) as i32 == logical
+                                    {
+                                        self.we_glitch_discard_insert = true;
+                                    }
                                 }
                             }
                             // CGB-compat up-pulse LCDC.4 train: buffer each BG tile
@@ -7925,6 +7985,17 @@ impl Ppu {
                         break 'label;
                     }
                     let target = self.m3_discard_target as u8;
+                    // WE-off insert glitch, prologue variant: the inserted
+                    // color-0 pixel sits at the FRONT of the stream and is the
+                    // first pixel this discard dot drops — no real FIFO pixel
+                    // is consumed, so one extra leading BG pixel survives and
+                    // the visible line shifts right by one.
+                    if self.m3_pixels_discarded < target && self.we_glitch_discard_insert {
+                        self.we_glitch_discard_insert = false;
+                        self.m3_pixels_discarded += 1;
+                        self.win_being_fetched = false;
+                        break 'label;
+                    }
                     if self.m3_pixels_discarded < target
                         && let Ok(_) = self.fetcher.pixel_fifo.pop() {
                             self.m3_pixels_discarded += 1;
@@ -7977,10 +8048,14 @@ impl Ppu {
                         }
                     }
                 }
-                if !mmio.is_cgb_features_enabled()
+                // Pre-CGB MACHINES only (SameBoy !GB_is_cgb): the CGB PPU has no
+                // WE-off insert glitch even in DMG-compat mode (GB Player /
+                // CGB footage in SameBoy issue #278 shows the unshifted line).
+                if !mmio.is_cgb()
                     && self.window_y_triggered
                     && !self.fetcher.is_fetching_window()
                     && !self.we_dot_hist[2]
+                    && !self.we_insert_suppressed
                     && at_tile_boundary
                     && mmio.read(WX) == self.x + 7
                 {
