@@ -843,6 +843,20 @@ impl GB {
         self.mmio.sgb()
     }
 
+    /// Full 256x224 Super Game Boy output (RGB888): the game's transferred
+    /// border composited around the (masked, colorized) GB screen at
+    /// (48, 40). None on non-SGB hardware or before the game transfers a
+    /// border, so callers fall back to the standard frame.
+    ///
+    /// Off-screen accessor by design: it does NOT consume `frame_ready` and
+    /// the 160x144 `Frame` path (`run_until_frame` / `get_current_frame`) is
+    /// byte-identical whether or not this is called. Frontends that present
+    /// SGB borders call it after `run_until_frame` returns a frame; see
+    /// `ppu::SGB_FRAME_WIDTH/HEIGHT`.
+    pub fn sgb_composited_frame(&self) -> Option<Box<[u8; ppu::SGB_FRAME_SIZE * 3]>> {
+        self.ppu.sgb_composited_frame(&self.mmio)
+    }
+
     pub fn set_cgb_color_conversion(&mut self, conversion: ppu::CgbColorConversion) {
         self.ppu.set_cgb_color_conversion(conversion);
     }
