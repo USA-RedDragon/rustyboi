@@ -785,6 +785,9 @@ impl GB {
 
             // Check if PPU has completed a frame
             if self.ppu.frame_ready() {
+                // SGB *_TRN commands read a 4KB block from the displayed frame
+                // during the VBlank after the command (no-op on non-SGB hardware).
+                self.mmio.service_sgb_vram_transfer(self.ppu.dmg_shade_frame());
                 return (self.ppu.get_frame(&self.mmio), false);
             }
 
@@ -817,10 +820,10 @@ impl GB {
             }
 
             if self.ppu.frame_ready() {
-                // SGB *_TRN commands read a 4KB VRAM block during the VBlank
-                // after the command. Service any pending transfer at the frame
-                // boundary (no-op on non-SGB hardware).
-                self.mmio.service_sgb_vram_transfer();
+                // SGB *_TRN commands read a 4KB block from the displayed frame
+                // during the VBlank after the command. Service any pending
+                // transfer at the frame boundary (no-op on non-SGB hardware).
+                self.mmio.service_sgb_vram_transfer(self.ppu.dmg_shade_frame());
                 return Ok((self.ppu.get_frame(&self.mmio), false));
             }
 
@@ -832,6 +835,12 @@ impl GB {
 
     pub fn get_current_frame(&mut self) -> Frame {
         self.ppu.get_frame(&self.mmio)
+    }
+
+    /// Immutable view of the Super Game Boy state (None on non-SGB hardware).
+    /// Frontends use this for mask/border presentation.
+    pub fn sgb(&self) -> Option<&crate::sgb::Sgb> {
+        self.mmio.sgb()
     }
 
     pub fn set_cgb_color_conversion(&mut self, conversion: ppu::CgbColorConversion) {

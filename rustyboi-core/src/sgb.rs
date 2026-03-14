@@ -107,10 +107,20 @@ pub struct Sgb {
     /// A *_TRN command is waiting for the next VBlank to read a 4KB block from
     /// VRAM $8000. Holds the command number; None when idle.
     pending_trn: Option<u8>,
+    /// Packet byte 1 of the pending _TRN command, captured at dispatch (the
+    /// command buffer is cleared before the VBlank read). CHR_TRN needs its
+    /// bit 0 (low/high tile half).
+    #[serde(default)]
+    pending_trn_param: u8,
     /// SYSTEM color palettes loaded by PAL_TRN (512 palettes of 4 RGB555 colors),
     /// selectable by PAL_SET. Boxed-in-vec to keep the struct small.
     #[serde(default)]
     sys_palettes: Vec<[u16; 4]>,
+    /// Attribute files ATF0-ATF44 loaded by ATTR_TRN: 45 files x 90 bytes
+    /// (20x18 cells x 2 bits, MSB-first within each byte, row-major). Empty
+    /// until an ATTR_TRN has run.
+    #[serde(default, with = "serde_bytes")]
+    atf: Vec<u8>,
 }
 
 fn default_attr() -> Vec<u8> {
@@ -151,7 +161,9 @@ impl Sgb {
             attr: default_attr(),
             colorized: false,
             pending_trn: None,
+            pending_trn_param: 0,
             sys_palettes: Vec::new(),
+            atf: Vec::new(),
         }
     }
 
@@ -309,14 +321,17 @@ impl Sgb {
             cmd::PAL03 => self.apply_pal(0, 3),
             cmd::PAL12 => self.apply_pal(1, 2),
             cmd::PAL_SET => self.apply_pal_set(),
-            cmd::ATTR_BLK | cmd::ATTR_LIN | cmd::ATTR_DIV | cmd::ATTR_CHR | cmd::ATTR_SET => {
-                // Attribute assignment: high-level palette-per-cell. Handled
-                // coarsely (see apply_attr); full geometry is deferred.
-                self.apply_attr(command);
-            }
+            cmd::ATTR_BLK => self.attr_blk(),
+            cmd::ATTR_LIN => self.attr_lin(),
+            cmd::ATTR_DIV => self.attr_div(),
+            cmd::ATTR_CHR => self.attr_chr(),
+            cmd::ATTR_SET => self.attr_set(),
             cmd::PAL_TRN | cmd::CHR_TRN | cmd::PCT_TRN | cmd::ATTR_TRN | cmd::DATA_TRN => {
                 // VRAM block transfer: read 4KB from $8000 at the next VBlank.
+                // Byte 1 parameterises some transfers (CHR_TRN tile half); the
+                // command buffer is recycled before the read, so capture it now.
                 self.pending_trn = Some(command);
+                self.pending_trn_param = self.command[1];
             }
             _ => {
                 // Other commands (SOUND, DATA_SND, ICON_EN, ...) are decoded but
@@ -326,8 +341,11 @@ impl Sgb {
     }
 
     /// PAL_01/23/03/12: set two of the four SGB palettes from packet colors.
-    /// Bytes 1-2 = color 0 (shared across the two palettes), then colors 1-3 of
-    /// palette A, colors 1-3 of palette B (RGB555, little-endian per color).
+    /// Bytes 1-2 = color 0, then colors 1-3 of palette A (bytes 3-8), colors
+    /// 1-3 of palette B (bytes 9-14); RGB555 little-endian per color. Color 0
+    /// is a single shared SNES CGRAM entry (the backdrop), so it applies to
+    /// ALL FOUR palettes (Pan Docs: "The value transferred as color 0 will be
+    /// applied for all four palettes").
     fn apply_pal(&mut self, pa: usize, pb: usize) {
         let mut p = [0u8; 16];
         p.copy_from_slice(&self.command[..16]);
@@ -339,21 +357,33 @@ impl Sgb {
         for (i, base) in [9usize, 11, 13].iter().enumerate() {
             self.palettes[pb][i + 1] = u16::from_le_bytes([p[*base], p[*base + 1]]) & 0x7FFF;
         }
-        self.palettes[pa][0] = color0;
-        self.palettes[pb][0] = color0;
+        for pal in self.palettes.iter_mut() {
+            pal[0] = color0;
+        }
         self.colorized = true;
     }
 
     /// PAL_SET: select four system palettes (loaded by PAL_TRN) for the four
-    /// active SGB palettes. Bytes 1-8 = four 16-bit little-endian palette indices.
+    /// active SGB palettes. Bytes 1-8 = four little-endian palette indices;
+    /// only 9 bits are decoded (0-511, SameBoy `cmd[n] + (cmd[n+1] & 1) * 0x100`).
+    /// Byte 9: bit 7 = apply the attribute file selected by bits 0-5, bit 6 =
+    /// cancel mask. Color 0 stays a shared backdrop: all palettes take
+    /// palette 0's color 0.
     fn apply_pal_set(&mut self) {
         let mut p = [0u8; 16];
         p.copy_from_slice(&self.command[..16]);
         for slot in 0..4 {
-            let idx = u16::from_le_bytes([p[1 + slot * 2], p[2 + slot * 2]]) as usize;
+            let idx = (u16::from_le_bytes([p[1 + slot * 2], p[2 + slot * 2]]) & 0x1FF) as usize;
             if let Some(pal) = self.sys_palettes.get(idx) {
                 self.palettes[slot] = *pal;
             }
+        }
+        let color0 = self.palettes[0][0];
+        for pal in self.palettes.iter_mut() {
+            pal[0] = color0;
+        }
+        if p[9] & 0x80 != 0 {
+            self.load_atf((p[9] & 0x3F) as usize);
         }
         // Byte 9 bit 6 cancels the mask.
         if p[9] & 0x40 != 0 {
@@ -362,16 +392,172 @@ impl Sgb {
         self.colorized = true;
     }
 
-    /// Coarse attribute handling. Full ATTR_BLK/LIN/DIV/CHR geometry is a large
-    /// feature; for now ATTR_DIV (screen split) and a whole-screen fill are the
-    /// common game cases. Anything unrecognised leaves `attr` unchanged.
-    fn apply_attr(&mut self, command: u8) {
-        if command == cmd::ATTR_DIV {
-            // ATTR_DIV: byte 1 selects H/V split + the three region palettes.
-            // Deferred: leave attr as-is (games still render, just uncolored per
-            // region). This keeps the stub clean without wrong colorization.
-        }
+    /// ATTR_BLK: paint rectangular regions of the 20x18 attribute map. Byte 1 =
+    /// data-set count (1-18), then 6 bytes per set: control (bit 0 inside,
+    /// bit 1 boundary line, bit 2 outside), palettes (bits 0-1 inside, 2-3
+    /// line, 4-5 outside), and the rect corners in cell coordinates (x1,y1,
+    /// x2,y2, masked to 5 bits). Pan Docs exception: painting ONLY the inside
+    /// or ONLY the outside implicitly paints the boundary line with that same
+    /// palette.
+    fn attr_blk(&mut self) {
         self.colorized = true;
+        let count = self.command[1] as usize;
+        if count > 0x12 {
+            return;
+        }
+        for i in 0..count {
+            let d: [u8; 6] = self.command[2 + i * 6..8 + i * 6].try_into().unwrap();
+            let inside = d[0] & 1 != 0;
+            let mut line = d[0] & 2 != 0;
+            let outside = d[0] & 4 != 0;
+            let inside_pal = d[1] & 3;
+            let mut line_pal = (d[1] >> 2) & 3;
+            let outside_pal = (d[1] >> 4) & 3;
+            if inside && !line && !outside {
+                line = true;
+                line_pal = inside_pal;
+            } else if outside && !line && !inside {
+                line = true;
+                line_pal = outside_pal;
+            }
+            let (x1, y1, x2, y2) = (d[2] & 0x1F, d[3] & 0x1F, d[4] & 0x1F, d[5] & 0x1F);
+            for y in 0..18u8 {
+                for x in 0..20u8 {
+                    let cell = &mut self.attr[y as usize * 20 + x as usize];
+                    if x < x1 || x > x2 || y < y1 || y > y2 {
+                        if outside {
+                            *cell = outside_pal;
+                        }
+                    } else if x > x1 && x < x2 && y > y1 && y < y2 {
+                        if inside {
+                            *cell = inside_pal;
+                        }
+                    } else if line {
+                        *cell = line_pal;
+                    }
+                }
+            }
+        }
+    }
+
+    /// ATTR_LIN: paint full rows/columns of the attribute map. Byte 1 = data-set
+    /// count, then one byte per set: bits 0-4 = line number, bits 5-6 =
+    /// palette, bit 7 = 1 for a horizontal line (row), 0 for vertical (column).
+    fn attr_lin(&mut self) {
+        self.colorized = true;
+        let count = self.command[1] as usize;
+        if count > self.command.len() - 2 {
+            return;
+        }
+        for i in 0..count {
+            let d = self.command[2 + i];
+            let line = (d & 0x1F) as usize;
+            let pal = (d >> 5) & 3;
+            if d & 0x80 != 0 {
+                if line < 18 {
+                    self.attr[line * 20..line * 20 + 20].fill(pal);
+                }
+            } else if line < 20 {
+                for y in 0..18 {
+                    self.attr[y * 20 + line] = pal;
+                }
+            }
+        }
+    }
+
+    /// ATTR_DIV: split the screen along a row/column. Byte 1: bits 0-1 =
+    /// palette below/right of the divider, bits 2-3 = above/left, bits 4-5 =
+    /// the divider line itself, bit 6 = 1 for a horizontal divider (compare
+    /// rows) / 0 for vertical (compare columns). Byte 2 = the divider
+    /// coordinate in cells.
+    fn attr_div(&mut self) {
+        self.colorized = true;
+        let b = self.command[1];
+        let below_right = b & 3;
+        let above_left = (b >> 2) & 3;
+        let on_line = (b >> 4) & 3;
+        let horizontal = b & 0x40 != 0;
+        let pos = (self.command[2] & 0x1F) as usize;
+        for y in 0..18 {
+            for x in 0..20 {
+                let c = if horizontal { y } else { x };
+                self.attr[y * 20 + x] = match c.cmp(&pos) {
+                    core::cmp::Ordering::Less => above_left,
+                    core::cmp::Ordering::Equal => on_line,
+                    core::cmp::Ordering::Greater => below_right,
+                };
+            }
+        }
+    }
+
+    /// ATTR_CHR: paint individual cells starting at (byte 1, byte 2), walking
+    /// left-to-right (byte 5 = 0) or top-to-bottom (byte 5 = 1), wrapping at
+    /// the screen edge and stopping at the opposite corner. Bytes 3-4 (LE) =
+    /// cell count; palette numbers are packed 4-per-byte MSB-first from
+    /// byte 6, continuing across packets (up to 6).
+    fn attr_chr(&mut self) {
+        self.colorized = true;
+        let mut x = self.command[1] as usize;
+        let mut y = self.command[2] as usize;
+        let count = u16::from_le_bytes([self.command[3], self.command[4]]) as usize;
+        let vertical = self.command[5] != 0;
+        if x >= 20 || y >= 18 {
+            return;
+        }
+        for i in 0..count {
+            let Some(&byte) = self.command.get(6 + i / 4) else {
+                break;
+            };
+            self.attr[y * 20 + x] = (byte >> (2 * (3 - (i & 3)))) & 3;
+            if vertical {
+                y += 1;
+                if y == 18 {
+                    y = 0;
+                    x += 1;
+                    if x == 20 {
+                        break;
+                    }
+                }
+            } else {
+                x += 1;
+                if x == 20 {
+                    x = 0;
+                    y += 1;
+                    if y == 18 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// ATTR_SET: load attribute file byte1 bits 0-5 (0-44) into the attribute
+    /// map; bit 6 additionally cancels the screen mask.
+    fn attr_set(&mut self) {
+        self.colorized = true;
+        let b = self.command[1];
+        self.load_atf((b & 0x3F) as usize);
+        if b & 0x40 != 0 {
+            self.mask = MaskMode::Cancel;
+        }
+    }
+
+    /// Expand attribute file `index` (0-44, 90 bytes of 2-bit cells, MSB-first)
+    /// from the ATTR_TRN store into the live 20x18 attribute map. Out-of-range
+    /// indices and a never-transferred store are ignored (hardware reads
+    /// whatever SNES RAM holds; we model "no change").
+    fn load_atf(&mut self, index: usize) {
+        if index > 0x2C {
+            return;
+        }
+        let base = index * 90;
+        if self.atf.len() < base + 90 {
+            return;
+        }
+        for (i, cell) in self.attr.iter_mut().enumerate() {
+            let byte = self.atf[base + i / 4];
+            *cell = (byte >> (2 * (3 - (i & 3)))) & 3;
+        }
     }
 
     /// True if a _TRN command is pending a VBlank VRAM read. The caller feeds the
@@ -382,23 +568,34 @@ impl Sgb {
 
     /// Consume a 4KB VRAM block ($8000..$9000) for a pending _TRN command.
     pub fn apply_trn(&mut self, command: u8, vram: &[u8]) {
-        if command == cmd::PAL_TRN {
-            // PAL_TRN loads 512 system palettes, 4 colors each (RGB555 LE).
-            self.sys_palettes.clear();
-            for i in 0..512 {
-                let base = i * 8;
-                if base + 8 > vram.len() {
-                    break;
+        match command {
+            cmd::PAL_TRN => {
+                // PAL_TRN loads 512 system palettes, 4 colors each (RGB555 LE).
+                self.sys_palettes.clear();
+                for i in 0..512 {
+                    let base = i * 8;
+                    if base + 8 > vram.len() {
+                        break;
+                    }
+                    let mut pal = [0u16; 4];
+                    for c in 0..4 {
+                        pal[c] =
+                            u16::from_le_bytes([vram[base + c * 2], vram[base + c * 2 + 1]]) & 0x7FFF;
+                    }
+                    self.sys_palettes.push(pal);
                 }
-                let mut pal = [0u16; 4];
-                for c in 0..4 {
-                    pal[c] = u16::from_le_bytes([vram[base + c * 2], vram[base + c * 2 + 1]]) & 0x7FFF;
-                }
-                self.sys_palettes.push(pal);
+            }
+            cmd::ATTR_TRN => {
+                // ATTR_TRN loads all 45 attribute files (4050 bytes; the tail
+                // of the 4KB block is unused).
+                let len = vram.len().min(45 * 90);
+                self.atf = vram[..len].to_vec();
+            }
+            _ => {
+                // CHR_TRN/PCT_TRN (border tiles/map) are deferred (border
+                // rendering is a separate feature); the block is dropped.
             }
         }
-        // CHR_TRN/PCT_TRN (border tiles/map) and ATTR_TRN are deferred (border
-        // rendering is lowest priority); the block is accepted and dropped.
     }
 
     /// Look up the RGB555 color for a DMG shade index (0-3) at attribute cell
@@ -609,5 +806,208 @@ mod tests {
         pkt[1] = 2; // Black
         send_packet(&mut sgb, &pkt);
         assert_eq!(sgb.mask, MaskMode::Black);
+    }
+
+    #[test]
+    fn attr_blk_inside_line_outside() {
+        let mut sgb = Sgb::new();
+        let mut pkt = [0u8; 16];
+        pkt[0] = (cmd::ATTR_BLK << 3) | 1;
+        pkt[1] = 1; // one data set
+        pkt[2] = 0x07; // inside + line + outside
+        pkt[3] = 0b11_10_01; // inside=1, line=2, outside=3
+        pkt[4] = 2; // x1
+        pkt[5] = 3; // y1
+        pkt[6] = 5; // x2
+        pkt[7] = 6; // y2
+        send_packet(&mut sgb, &pkt);
+        assert!(sgb.colorized);
+        assert_eq!(sgb.attr[0], 3, "corner is outside");
+        assert_eq!(sgb.attr[3 * 20 + 2], 2, "rect corner is on the line");
+        assert_eq!(sgb.attr[4 * 20 + 3], 1, "strict interior");
+        assert_eq!(sgb.attr[6 * 20 + 5], 2, "far corner on the line");
+        assert_eq!(sgb.attr[17 * 20 + 19], 3, "far screen corner outside");
+    }
+
+    #[test]
+    fn attr_blk_inside_only_paints_line_too() {
+        // Pan Docs: control=001 (inside only) implicitly paints the boundary
+        // line with the inside palette; the outside is untouched.
+        let mut sgb = Sgb::new();
+        let mut pkt = [0u8; 16];
+        pkt[0] = (cmd::ATTR_BLK << 3) | 1;
+        pkt[1] = 1;
+        pkt[2] = 0x01; // inside only
+        pkt[3] = 0b00_00_10; // inside palette 2
+        pkt[4] = 4;
+        pkt[5] = 4;
+        pkt[6] = 8;
+        pkt[7] = 8;
+        send_packet(&mut sgb, &pkt);
+        assert_eq!(sgb.attr[4 * 20 + 4], 2, "boundary painted with inside pal");
+        assert_eq!(sgb.attr[5 * 20 + 5], 2, "interior painted");
+        assert_eq!(sgb.attr[0], 0, "outside untouched");
+    }
+
+    #[test]
+    fn attr_lin_row_and_column() {
+        let mut sgb = Sgb::new();
+        let mut pkt = [0u8; 16];
+        pkt[0] = (cmd::ATTR_LIN << 3) | 1;
+        pkt[1] = 2; // two data sets
+        pkt[2] = 0x80 | (2 << 5) | 5; // horizontal row 5, palette 2
+        pkt[3] = (1 << 5) | 7; // vertical column 7, palette 1
+        send_packet(&mut sgb, &pkt);
+        assert_eq!(sgb.attr[5 * 20 + 0], 2);
+        assert_eq!(sgb.attr[5 * 20 + 19], 2);
+        assert_eq!(sgb.attr[0 * 20 + 7], 1);
+        // The column was painted after the row: the crossing cell is 1.
+        assert_eq!(sgb.attr[5 * 20 + 7], 1);
+        assert_eq!(sgb.attr[0], 0, "untouched elsewhere");
+    }
+
+    #[test]
+    fn attr_div_horizontal() {
+        let mut sgb = Sgb::new();
+        let mut pkt = [0u8; 16];
+        pkt[0] = (cmd::ATTR_DIV << 3) | 1;
+        // bits 0-1 below=1, bits 2-3 above=2, bits 4-5 line=3, bit 6 horizontal
+        pkt[1] = 0x40 | (3 << 4) | (2 << 2) | 1;
+        pkt[2] = 6; // divider at row 6
+        send_packet(&mut sgb, &pkt);
+        assert_eq!(sgb.attr[0], 2, "above the divider");
+        assert_eq!(sgb.attr[6 * 20], 3, "on the divider");
+        assert_eq!(sgb.attr[17 * 20], 1, "below the divider");
+    }
+
+    #[test]
+    fn attr_chr_walks_and_wraps() {
+        let mut sgb = Sgb::new();
+        let mut pkt = [0u8; 16];
+        pkt[0] = (cmd::ATTR_CHR << 3) | 1;
+        pkt[1] = 18; // start x
+        pkt[2] = 0; // start y
+        pkt[3] = 4; // count lo (4 cells)
+        pkt[4] = 0; // count hi
+        pkt[5] = 0; // left-to-right
+        pkt[6] = 0b01_10_11_00; // palettes 1,2,3,0 MSB-first
+        send_packet(&mut sgb, &pkt);
+        assert_eq!(sgb.attr[18], 1);
+        assert_eq!(sgb.attr[19], 2);
+        assert_eq!(sgb.attr[20], 3, "wrapped to the next row");
+        assert_eq!(sgb.attr[21], 0);
+    }
+
+    /// Feed ATTR_TRN a synthetic 4KB block, then ATTR_SET each file.
+    #[test]
+    fn attr_trn_then_attr_set() {
+        let mut sgb = Sgb::new();
+        // ATF5 = all cells palette 3 (0xFF bytes), ATF6 = palette 1 (0x55).
+        let mut block = vec![0u8; 0x1000];
+        block[5 * 90..6 * 90].fill(0xFF);
+        block[6 * 90..7 * 90].fill(0x55);
+        let mut pkt = [0u8; 16];
+        pkt[0] = (cmd::ATTR_TRN << 3) | 1;
+        send_packet(&mut sgb, &pkt);
+        let pending = sgb.take_pending_trn().expect("ATTR_TRN pends a VRAM read");
+        assert_eq!(pending, cmd::ATTR_TRN);
+        sgb.apply_trn(pending, &block);
+
+        let mut set = [0u8; 16];
+        set[0] = (cmd::ATTR_SET << 3) | 1;
+        set[1] = 5;
+        send_packet(&mut sgb, &set);
+        assert!(sgb.attr.iter().all(|&c| c == 3));
+
+        set[1] = 6 | 0x40; // ATF6 + cancel mask
+        sgb.mask = MaskMode::Freeze;
+        send_packet(&mut sgb, &set);
+        assert!(sgb.attr.iter().all(|&c| c == 1));
+        assert_eq!(sgb.mask, MaskMode::Cancel);
+
+        // Out-of-range file numbers are ignored.
+        set[1] = 45;
+        send_packet(&mut sgb, &set);
+        assert!(sgb.attr.iter().all(|&c| c == 1));
+    }
+
+    #[test]
+    fn pal_set_applies_atf_and_shares_color0() {
+        let mut sgb = Sgb::new();
+        // PAL_TRN: system palette 7 = [0x111, 0x222, 0x333, 0x444],
+        // palette 300 = [0x555, ...].
+        let mut block = vec![0u8; 0x1000];
+        for (i, &(idx, c0)) in [(7usize, 0x111u16), (300, 0x555)].iter().enumerate() {
+            let _ = i;
+            for c in 0..4 {
+                let v = c0 + 0x1111 * c as u16;
+                block[idx * 8 + c * 2..idx * 8 + c * 2 + 2].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        let mut pkt = [0u8; 16];
+        pkt[0] = (cmd::PAL_TRN << 3) | 1;
+        send_packet(&mut sgb, &pkt);
+        let pending = sgb.take_pending_trn().unwrap();
+        sgb.apply_trn(pending, &block);
+
+        // ATTR_TRN: ATF0 all-palette-2 (0xAA).
+        let mut ablock = vec![0u8; 0x1000];
+        ablock[..90].fill(0xAA);
+        pkt[0] = (cmd::ATTR_TRN << 3) | 1;
+        send_packet(&mut sgb, &pkt);
+        let pending = sgb.take_pending_trn().unwrap();
+        sgb.apply_trn(pending, &ablock);
+
+        // PAL_SET: slots [7, 300, 7, 300]; byte 9 = apply ATF0 + cancel mask.
+        let mut set = [0u8; 16];
+        set[0] = (cmd::PAL_SET << 3) | 1;
+        set[1..3].copy_from_slice(&7u16.to_le_bytes());
+        set[3..5].copy_from_slice(&300u16.to_le_bytes());
+        set[5..7].copy_from_slice(&7u16.to_le_bytes());
+        set[7..9].copy_from_slice(&300u16.to_le_bytes());
+        set[9] = 0x80; // apply ATF 0
+        sgb.mask = MaskMode::Freeze;
+        send_packet(&mut sgb, &set);
+        assert!(sgb.attr.iter().all(|&c| c == 2), "ATF0 applied");
+        assert_eq!(sgb.mask, MaskMode::Freeze, "bit 6 clear: mask kept");
+        assert_eq!(sgb.palettes[1][1], 0x555 + 0x1111);
+        // Shared color 0: every palette's color 0 = palette 0's.
+        for pal in &sgb.palettes {
+            assert_eq!(pal[0], 0x111);
+        }
+        // color_for consults the attribute map (palette 2 = system palette 7).
+        assert_eq!(sgb.color_for(0, 0, 1), Some(0x111 + 0x1111));
+    }
+
+    #[test]
+    fn pal01_shares_color0_across_all_palettes() {
+        let mut sgb = Sgb::new();
+        let mut pkt = [0u8; 16];
+        pkt[0] = (cmd::PAL01 << 3) | 1;
+        pkt[1..3].copy_from_slice(&0x0123u16.to_le_bytes());
+        send_packet(&mut sgb, &pkt);
+        for pal in &sgb.palettes {
+            assert_eq!(pal[0], 0x0123);
+        }
+    }
+
+    /// ATTR_CHR data continues across packet boundaries: 3 packets carry
+    /// 42 data bytes = enough for a 160-cell run.
+    #[test]
+    fn attr_chr_multi_packet() {
+        let mut sgb = Sgb::new();
+        let mut data = [0u8; 48];
+        data[0] = (cmd::ATTR_CHR << 3) | 3; // 3 packets
+        data[1] = 0; // x
+        data[2] = 0; // y
+        data[3..5].copy_from_slice(&160u16.to_le_bytes());
+        data[5] = 0; // left-to-right
+        data[6..46].fill(0xFF); // 160 cells of palette 3
+        for chunk in data.chunks(16) {
+            let pkt: [u8; 16] = chunk.try_into().unwrap();
+            send_packet(&mut sgb, &pkt);
+        }
+        assert!(sgb.attr[..160].iter().all(|&c| c == 3));
+        assert!(sgb.attr[160..].iter().all(|&c| c == 0));
     }
 }
