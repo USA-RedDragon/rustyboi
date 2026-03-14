@@ -62,8 +62,14 @@ const MBC7_SENSOR_RUMBLE_RAM_BATTERY: u8 = 0x22;
 // The type byte implies RAM+BATTERY+RTC.
 const HUC3: u8 = 0xFE;
 
+// HuC-1: ROM/RAM banking + IR link (Pokemon Card GB). The type byte implies
+// RAM+BATTERY. Differs from MBC1 (Pan Docs HuC1): there is NO RAM-enable
+// gate -- the 0x0000-0x1FFF register instead switches A000-BFFF between RAM
+// mode and the IR transceiver ($0E selects IR, anything else RAM).
+const HUC1_RAM_BATTERY: u8 = 0xFF;
+
 // Remaining unimplemented mapper families (fall through to NoMBC):
-//   0xFC POCKET CAMERA, 0xFD BANDAI TAMA5, 0xFF HuC1+RAM+BATTERY.
+//   0xFC POCKET CAMERA, 0xFD BANDAI TAMA5.
 
 // MBC1 register ranges
 const RAM_ENABLE_START: u16 = 0x0000;
@@ -91,6 +97,7 @@ pub enum CartridgeType {
     MBC3 { ram: bool, battery: bool, timer: bool },
     MBC5 { ram: bool, battery: bool, _rumble: bool },
     MBC7,
+    HuC1,
     HuC3,
 }
 
@@ -280,6 +287,25 @@ pub struct Cartridge {
     #[serde(default)]
     huc3_rtc_accum: u64,
 
+    // HuC-1 state. RAM is always enabled; the 0x0000-0x1FFF register only
+    // selects whether A000-BFFF accesses RAM (default) or the IR transceiver
+    // (low nibble == 0xE, SameBoy-verified decode).
+    #[serde(default)]
+    huc1_ir_mode: bool,
+    // 6-bit ROM bank register; bank 0 is selectable at 0x4000-0x7FFF (no
+    // MBC1-style zero remap -- SameBoy-verified wiring; the largest HuC-1
+    // cart is 1MB = 64 banks).
+    #[serde(default = "serde_u8_one")]
+    huc1_rom_bank: u8,
+    // RAM bank register, "at least 2 bits" (Pan Docs); stored raw and
+    // reduced modulo the cart's bank count like HuC-3.
+    #[serde(default)]
+    huc1_ram_bank: u8,
+    // IR LED output latch (bit 0 of writes in IR mode). No IR transport is
+    // modeled: reads always see "no light" (0xC0), the documented idle.
+    #[serde(default)]
+    huc1_ir_led: bool,
+
     // CGB support information
     cgb_support: CgbSupport, // CGB compatibility from cartridge header
 
@@ -365,6 +391,10 @@ impl Clone for Cartridge {
             huc3_rtc_address: self.huc3_rtc_address,
             huc3_rtc_mem: self.huc3_rtc_mem.clone(),
             huc3_rtc_accum: self.huc3_rtc_accum,
+            huc1_ir_mode: self.huc1_ir_mode,
+            huc1_rom_bank: self.huc1_rom_bank,
+            huc1_ram_bank: self.huc1_ram_bank,
+            huc1_ir_led: self.huc1_ir_led,
             cgb_support: self.cgb_support.clone(),
             rumble_motor: self.rumble_motor,
             rtc_memory: self.rtc_memory.clone(),
@@ -604,6 +634,10 @@ impl Cartridge {
             huc3_rtc_address: 0,
             huc3_rtc_mem: if cartridge_type == HUC3 { vec![0; 256] } else { Vec::new() },
             huc3_rtc_accum: 0,
+            huc1_ir_mode: false,
+            huc1_rom_bank: 1,
+            huc1_ram_bank: 0,
+            huc1_ir_led: false,
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -771,6 +805,10 @@ impl Cartridge {
             huc3_rtc_address: 0,
             huc3_rtc_mem: if cartridge_type == HUC3 { vec![0; 256] } else { Vec::new() },
             huc3_rtc_accum: 0,
+            huc1_ir_mode: false,
+            huc1_rom_bank: 1,
+            huc1_ram_bank: 0,
+            huc1_ir_led: false,
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -806,6 +844,7 @@ impl Cartridge {
             MBC5_RUMBLE_RAM => CartridgeType::MBC5 { ram: true, battery: false, _rumble: true },
             MBC5_RUMBLE_RAM_BATTERY => CartridgeType::MBC5 { ram: true, battery: true, _rumble: true },
             MBC7_SENSOR_RUMBLE_RAM_BATTERY => CartridgeType::MBC7,
+            HUC1_RAM_BATTERY => CartridgeType::HuC1,
             HUC3 => CartridgeType::HuC3,
             _ => CartridgeType::NoMBC,
         }
@@ -852,6 +891,10 @@ impl Cartridge {
                 // 8-bit register; like MBC5 bank 0 is selectable here.
                 (self.mbc7_rom_bank as usize) % self.rom_banks
             }
+            CartridgeType::HuC1 => {
+                // 6-bit register; bank 0 is selectable here (no zero remap).
+                (self.huc1_rom_bank as usize) % self.rom_banks
+            }
             CartridgeType::HuC3 => {
                 // 7-bit register; like MBC5 bank 0 is selectable here.
                 (self.huc3_rom_bank as usize) % self.rom_banks
@@ -883,6 +926,10 @@ impl Cartridge {
                 (self.mbc5_ram_bank & 0x0F) as usize % self.ram_banks.max(1)
             }
             CartridgeType::MBC7 => 0, // no banked RAM (EEPROM is serial)
+            CartridgeType::HuC1 => {
+                // "At least 2 bits" per Pan Docs; the real cart has 4 banks.
+                (self.huc1_ram_bank as usize) % self.ram_banks.max(1)
+            }
             CartridgeType::HuC3 => {
                 // "At least 2 bits" per Pan Docs; real carts have 4 banks.
                 (self.huc3_ram_bank as usize) % self.ram_banks.max(1)
@@ -1153,8 +1200,8 @@ impl Cartridge {
             CartridgeType::MBC3 { battery, .. } => battery,
             CartridgeType::MBC5 { battery, .. } => battery,
             // MBC7's EEPROM is inherently non-volatile; HuC-3 ($FE) implies
-            // RAM+BATTERY+RTC.
-            CartridgeType::MBC7 | CartridgeType::HuC3 => true,
+            // RAM+BATTERY+RTC and HuC-1 ($FF) implies RAM+BATTERY.
+            CartridgeType::MBC7 | CartridgeType::HuC1 | CartridgeType::HuC3 => true,
             CartridgeType::NoMBC => false,
         }
     }
@@ -2249,6 +2296,23 @@ impl memory::Addressable for Cartridge {
                             0xFF
                         }
                     }
+                    CartridgeType::HuC1 => {
+                        if self.huc1_ir_mode {
+                            // IR receiver: 0xC1 = light seen, 0xC0 = no light
+                            // (Pan Docs HuC1). No IR transport is modeled, so
+                            // this always reads the documented idle 0xC0.
+                            0xC0
+                        } else if !self.ram_data.is_empty() {
+                            // RAM is always enabled (no MBC1-style gate).
+                            let ram_bank = self.get_ram_bank();
+                            let offset = ((addr - EXTERNAL_RAM_START) as usize
+                                + (ram_bank * 0x2000))
+                                % self.ram_data.len();
+                            self.ram_data[offset]
+                        } else {
+                            0xFF
+                        }
+                    }
                     CartridgeType::HuC3 => {
                         match self.huc3_mode {
                             // 0x0 = RAM read-only, 0xA = RAM read/write; both
@@ -2326,6 +2390,12 @@ impl memory::Addressable for Cartridge {
                         // 2 is 0x40 to 0x4000-0x5FFF.
                         self.ram_enabled = (value & 0x0F) == 0x0A;
                     }
+                    CartridgeType::HuC1 => {
+                        // IR select: only 0xE in the low nibble maps the IR
+                        // transceiver at A000-BFFF; anything else selects RAM.
+                        // There is no RAM-disable state.
+                        self.huc1_ir_mode = (value & 0x0F) == 0x0E;
+                    }
                     CartridgeType::HuC3 => {
                         // RAM/RTC/IR select: maps what A000-BFFF accesses.
                         // Only the low 4 bits are significant.
@@ -2358,6 +2428,9 @@ impl memory::Addressable for Cartridge {
                     }
                     CartridgeType::MBC7 => {
                         self.mbc7_rom_bank = value; // like MBC5, bank 0 allowed
+                    }
+                    CartridgeType::HuC1 => {
+                        self.huc1_rom_bank = value & 0x3F; // 6-bit, bank 0 allowed
                     }
                     CartridgeType::HuC3 => {
                         self.huc3_rom_bank = value & 0x7F; // 7-bit, bank 0 allowed
@@ -2395,6 +2468,9 @@ impl memory::Addressable for Cartridge {
                         // Stage 2 of the RAM-register unlock: exactly 0x40
                         // enables; any other value disables.
                         self.mbc7_ram_enabled2 = value == 0x40;
+                    }
+                    CartridgeType::HuC1 => {
+                        self.huc1_ram_bank = value;
                     }
                     CartridgeType::HuC3 => {
                         self.huc3_ram_bank = value;
@@ -2505,6 +2581,21 @@ impl memory::Addressable for Cartridge {
                                 0x8 => self.mbc7_eeprom_write(value),
                                 _ => {}
                             }
+                        }
+                    }
+                    CartridgeType::HuC1 => {
+                        if self.huc1_ir_mode {
+                            // IR transmitter: bit 0 drives the LED ($01 on,
+                            // $00 off). Latched for a future IR transport;
+                            // nothing observes it yet.
+                            self.huc1_ir_led = value & 0x01 != 0;
+                        } else if !self.ram_data.is_empty() {
+                            // RAM is always enabled (no MBC1-style gate).
+                            let ram_bank = self.get_ram_bank();
+                            let offset = ((addr - EXTERNAL_RAM_START) as usize
+                                + (ram_bank * 0x2000))
+                                % self.ram_data.len();
+                            let _ = self.write_ram_byte(offset, value);
                         }
                     }
                     CartridgeType::HuC3 => {
@@ -2871,6 +2962,71 @@ mod tests {
         // Non-RTC carts expose nothing.
         let mut plain = Cartridge::from_bytes(&make_rom(MBC1, 0x02)).unwrap();
         assert!(plain.rtc_memory_mut().is_empty());
+    }
+
+    /// HuC-1 image shaped like Pokemon Card GB: 1MB ROM (64 banks) with a
+    /// marker byte per bank, 32KB RAM (4 banks).
+    fn huc1_cart() -> Cartridge {
+        let mut rom = vec![0u8; 64 * 0x4000];
+        rom[CARTRIDGE_TYPE_OFFSET] = HUC1_RAM_BATTERY;
+        rom[ROM_SIZE_OFFSET] = 0x05;
+        rom[RAM_SIZE_OFFSET] = 0x03;
+        for bank in 0..64 {
+            rom[bank * 0x4000 + 0x100] = bank as u8;
+        }
+        Cartridge::from_bytes(&rom).unwrap()
+    }
+
+    #[test]
+    fn huc1_rom_banking_is_6_bit_with_bank_0_selectable() {
+        let mut cart = huc1_cart();
+        assert_eq!(cart.read(0x4100), 1); // power-on default bank 1
+        cart.write(0x2000, 0x05);
+        assert_eq!(cart.read(0x4100), 5);
+        // Bank 0 has no zero->one remap on HuC-1.
+        cart.write(0x2000, 0x00);
+        assert_eq!(cart.read(0x4100), 0);
+        // Only 6 bits are wired: 0x7F decodes as bank 0x3F.
+        cart.write(0x2000, 0x7F);
+        assert_eq!(cart.read(0x4100), 0x3F);
+        // Fixed bank 0 at 0000-3FFF regardless.
+        assert_eq!(cart.read(0x0100), 0);
+    }
+
+    #[test]
+    fn huc1_ram_is_always_enabled_and_banked() {
+        let mut cart = huc1_cart();
+        // No 0x0A enable write anywhere: RAM must respond immediately.
+        cart.write(0xA000, 0x42);
+        assert_eq!(cart.read(0xA000), 0x42);
+        // Bank switch via 4000-5FFF.
+        cart.write(0x4000, 0x01);
+        assert_eq!(cart.read(0xA000), 0xFF); // untouched cell in bank 1
+        cart.write(0xA000, 0x77);
+        assert_eq!(cart.read(0xA000), 0x77);
+        cart.write(0x4000, 0x00);
+        assert_eq!(cart.read(0xA000), 0x42); // bank 0 cell intact
+        assert!(cart.has_battery());
+    }
+
+    #[test]
+    fn huc1_ir_mode_switches_a000_region() {
+        let mut cart = huc1_cart();
+        cart.write(0xA000, 0x42);
+        // Low nibble 0xE selects IR mode; reads see "no light" and writes
+        // drive the LED instead of RAM.
+        cart.write(0x0000, 0x0E);
+        assert_eq!(cart.read(0xA000), 0xC0);
+        cart.write(0xA000, 0x01);
+        assert!(cart.huc1_ir_led);
+        cart.write(0xA000, 0x00);
+        assert!(!cart.huc1_ir_led);
+        // Anything else selects RAM mode again; RAM was not disturbed.
+        cart.write(0x0000, 0x00);
+        assert_eq!(cart.read(0xA000), 0x42);
+        // 0x0A (a plain MBC RAM-enable value) is RAM mode too, not IR.
+        cart.write(0x0000, 0x0A);
+        assert_eq!(cart.read(0xA000), 0x42);
     }
 
     /// Unique-ish suffix for temp dirs (tests may run in parallel).
