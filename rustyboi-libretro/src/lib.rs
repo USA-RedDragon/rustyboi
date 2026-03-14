@@ -524,6 +524,13 @@ impl Core for RustyboiCore {
             gb.write_memory(gs.address, gs.value);
         }
 
+        // RTC persistence handshake: adopt `.rtc` data the frontend memcpy'd
+        // into the RETRO_MEMORY_RTC region (with wall-clock catch-up), and
+        // refresh the region so frontend (auto)saves read the current clock.
+        if let Some(cart) = gb.cartridge_mut() {
+            cart.rtc_memory_frame_sync();
+        }
+
         let (frame, _breakpoint) = gb.run_until_frame(true);
         let palette = self.dmg_palette.table();
         match frame {
