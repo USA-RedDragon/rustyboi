@@ -1,4 +1,4 @@
-use crate::{cpu, cpu::registers};
+use crate::{cpu, cpu::registers, memory::Addressable as _};
 
 pub fn nop(_cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
     4
@@ -25,7 +25,18 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let operand_byte = mmio.peek(cpu.registers.pc);
     cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
 
-    if mmio.is_speed_switch_armed() {
+    // Pan Docs STOP chart (Lior Halphon, "Reducing Power Consumption"), first
+    // question: "Is a button being held and selected in JOYP?" — any SELECTED
+    // P10-P13 line low, i.e. the live JOYP low nibble != 0xF (deselected
+    // groups read 1111; the SGB MLT_REQ id nibble counts, as it drives the
+    // real lines). SameBoy: `exit_by_joyp = (JOYP & 0xF) != 0xF`, checked
+    // BEFORE the KEY1 test (`speed_switch = KEY1.0 && !exit_by_joyp`) — a held
+    // selected button routes STOP to the joypad branch even with a speed
+    // switch armed. Non-ticking peek; suite ROMs run with no input (nibble
+    // 0xF), so the armed path below is entered exactly as before there.
+    let button_held = (mmio.peek(crate::input::JOYP) & 0x0F) != 0x0F;
+
+    if !button_held && mmio.is_speed_switch_armed() {
         // Gambatte's `Memory::stop` advances the LCD across the switch before
         // re-anchoring (memory.cpp: `lcd_.speedChange(cc + 8 * !isDoubleSpeed())`).
         // Our per-dot stepper realizes the returned 8 cycles at the *new* speed,
@@ -285,10 +296,65 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         return 8;
     }
 
-    // Normal STOP behavior - enter low power mode. Real hardware requires a
-    // joypad interrupt to wake up; we just set the stopped flag.
+    // ---- Plain STOP (no armed speed switch): Pan Docs STOP chart ----
+    // "Is an interrupt pending (IE & IF != 0)?" — IME-independent, exactly the
+    // HALT-bug pending test. Decides the opcode LENGTH on every remaining
+    // branch: pending -> "STOP is a 1-byte opcode" (the byte after $10 is NOT
+    // consumed; it executes as the next instruction), not pending -> 2-byte.
+    let irq_pending = (mmio.peek(registers::INTERRUPT_FLAG)
+        & mmio.peek(registers::INTERRUPT_ENABLE)
+        & 0x1F)
+        != 0;
+    if irq_pending {
+        // Rewind the operand skip above: 1-byte form.
+        cpu.registers.pc = cpu.registers.pc.wrapping_sub(1);
+    }
+
+    if button_held {
+        if irq_pending {
+            // Chart: button held + interrupt pending -> "STOP is a 1-byte
+            // opcode, mode doesn't change, DIV doesn't reset" — a NOP.
+            return 4;
+        }
+        // Chart: button held, no interrupt pending -> "STOP is a 2-byte
+        // opcode, HALT mode is entered, DIV is not reset". Enter the normal
+        // HALT state via the halt opcode body (its IE&IF re-check is false
+        // here by construction, so it takes the plain halted=true path and
+        // captures the HDMA halt state / Requested prefetch as any HALT
+        // does); wake is the usual any-enabled-interrupt HALT exit. Charge
+        // the operand-read M-cycle on top of the fetch (SameBoy: cycle_read
+        // then halted).
+        halt(cpu, mmio);
+        return 8;
+    }
+
+    // Chart: no button, no speed switch -> "STOP mode is entered, DIV is
+    // reset" — for BOTH the interrupt-pending (1-byte) and idle (2-byte)
+    // forms; a pending interrupt does NOT prevent or terminate STOP mode
+    // (only a joypad line does). The DIV reset goes through the FF04 write
+    // path (SameBoy `enter_stop_mode`: `GB_write_memory(DIV, 0)`) so the
+    // `Tima::divReset` phase-glitch edge and the DIV-APU fold apply exactly
+    // as for a CPU DIV write, resolved at the current cc (un-ticked: the
+    // clock freezes right after this instruction, so no read can observe the
+    // sub-M-cycle placement; the frozen divider then holds DIV at 0 for the
+    // whole STOP).
+    mmio.mmio.write(0xFF04, 0);
+    // Panel effect (DMG blanks / CGB goes black unless mid-mode-3 — see
+    // `Ppu::enter_stop_mode_panel`).
+    mmio.ppu.enter_stop_mode_panel(mmio.mmio);
+    // Low-power mode proper: `gb::step_instruction` freezes the whole clocked
+    // world (master_cc stops) until a selected P10-P13 line goes low, then
+    // resumes at pc — the byte after the operand (2-byte form) or the operand
+    // itself (1-byte form). Deferred, documented, NOT modeled here: the two
+    // armed-switch + interrupt-pending chart leaves stay on the existing
+    // armed path above — IME-on ("STOP is a 1-byte opcode, mode doesn't
+    // change, DIV is reset, CPU speed changes") is approximated by that
+    // path's pending-interrupt early wake from the 0x20000 window rather
+    // than an instant 1-byte form, and the IME-off "CPU glitches
+    // non-deterministically, oops!" corruption is intentionally not invented
+    // (SameBoy also models it as the deterministic continue).
     cpu.stopped = true;
-    4
+    if irq_pending { 4 } else { 8 }
 }
 
 pub fn undefined(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
