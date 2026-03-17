@@ -4757,7 +4757,15 @@ impl memory::Addressable for Mmio {
                 }
                 IO_REGISTERS_START..=IO_REGISTERS_END => {
                     match addr {
-                        input::JOYP => self.input.write(addr, value),
+                        input::JOYP => {
+                            // Selecting a line group whose buttons are held
+                            // pulls the newly-selected P10-P13 lines low; that
+                            // high->low edge raises the joypad interrupt just
+                            // like a fresh key press (Pan Docs "Joypad Input").
+                            if self.input.write_joyp(value) {
+                                self.request_interrupt(cpu::registers::InterruptFlag::Joypad);
+                            }
+                        }
                         timer::DIV => {
                             // Gambatte 0x04: realign the pending serial event to
                             // the new divider phase before resetting DIV. Serial
