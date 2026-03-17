@@ -139,6 +139,17 @@ pub struct Sgb {
     /// True once PCT_TRN has delivered a tilemap + palettes (border renderable).
     #[serde(default)]
     border_ready: bool,
+
+    // ---- Header unlock gate ----
+    /// Pan Docs "SGB Unlocking": the SGB system software only honors command
+    /// packets from carts whose header declares SGB support (SGB flag
+    /// $0146 == $03 AND old licensee $014B == $33); any other cart "cannot
+    /// access any of the special SGB functions". `GB::insert` locks the
+    /// receiver for non-SGB carts; a locked receiver drops all JOYP packet
+    /// traffic (the normal joypad select path is unaffected). Serde default
+    /// keeps pre-gate save states unlocked.
+    #[serde(default)]
+    locked: bool,
 }
 
 fn default_attr() -> Vec<u8> {
@@ -186,7 +197,14 @@ impl Sgb {
             border_map: Vec::new(),
             border_pals: Vec::new(),
             border_ready: false,
+            locked: false,
         }
+    }
+
+    /// Apply the header unlock gate: `true` makes the packet receiver ignore
+    /// all JOYP traffic (non-SGB cart), `false` restores normal reception.
+    pub fn set_locked(&mut self, locked: bool) {
+        self.locked = locked;
     }
 
     /// Number of players currently selected by MLT_REQ (1/2/3-glitch/4).
@@ -210,6 +228,11 @@ impl Sgb {
     /// which is what the real-SGB sgb-ext-test reference pins for all 27
     /// adversarial framing variants (see the state-machine field docs).
     pub fn write_p1(&mut self, value: u8) {
+        // Header unlock gate: a non-SGB cart's JOYP writes are never
+        // interpreted as SGB packets (Pan Docs "SGB Unlocking").
+        if self.locked {
+            return;
+        }
         // The command's declared size in bits: byte0 bits 2-0 give the packet
         // count (0 treated as 1), times 128 bits/packet.
         let count = self.command[0] & 7;
@@ -751,6 +774,61 @@ mod tests {
             sgb.write_p1(0x30);
             assert_eq!(sgb.joypad_id_nibble(), 0x0F);
         }
+    }
+
+    #[test]
+    fn locked_receiver_ignores_packet_traffic() {
+        // Header unlock gate: a locked receiver (non-SGB cart) must drop all
+        // packet traffic; unlocking restores normal reception.
+        let mut sgb = Sgb::new();
+        sgb.set_locked(true);
+        let mut pkt = [0u8; 16];
+        pkt[0] = (cmd::MLT_REQ << 3) | 1;
+        pkt[1] = 3; // request 4 players
+        send_packet(&mut sgb, &pkt);
+        assert_eq!(sgb.players(), 1, "locked receiver must drop packets");
+        assert_eq!(sgb.joypad_id_nibble(), 0x0F);
+        sgb.set_locked(false);
+        send_packet(&mut sgb, &pkt);
+        assert_eq!(sgb.players(), 4);
+    }
+
+    /// End-to-end header gate (Pan Docs "SGB Unlocking"): through the real
+    /// `GB::insert` + $FF00 bus path, an SGB-flagged cart ($0146 == $03 AND
+    /// $014B == $33) gets full packet processing while any other cart's JOYP
+    /// writes are inert as SGB packets.
+    #[test]
+    fn header_gate_end_to_end() {
+        use crate::cartridge::Cartridge;
+        use crate::gb::{Hardware, GB};
+
+        let players_after_mlt_req = |sgb_flag: u8, licensee: u8| -> u8 {
+            let mut rom = vec![0u8; 0x8000];
+            rom[0x0146] = sgb_flag;
+            rom[0x014B] = licensee;
+            let mut gb = GB::new(Hardware::SGB);
+            gb.insert(Cartridge::from_bytes(&rom).unwrap());
+            let mut pkt = [0u8; 16];
+            pkt[0] = (cmd::MLT_REQ << 3) | 1;
+            pkt[1] = 3; // request 4 players
+            gb.write_memory(0xFF00, 0x30);
+            gb.write_memory(0xFF00, 0x00);
+            gb.write_memory(0xFF00, 0x30);
+            for &byte in pkt.iter() {
+                for bit in 0..8 {
+                    let one = (byte >> bit) & 1 != 0;
+                    gb.write_memory(0xFF00, if one { 0x10 } else { 0x20 });
+                    gb.write_memory(0xFF00, 0x30);
+                }
+            }
+            gb.write_memory(0xFF00, 0x20); // stop pulse
+            gb.write_memory(0xFF00, 0x30);
+            gb.sgb().expect("SGB hardware").players()
+        };
+
+        assert_eq!(players_after_mlt_req(0x03, 0x33), 4, "SGB cart: gate open");
+        assert_eq!(players_after_mlt_req(0x00, 0x33), 1, "SGB flag unset: gate closed");
+        assert_eq!(players_after_mlt_req(0x03, 0x01), 1, "licensee != $33: gate closed");
     }
 
     /// Send an MLT_REQ packet where the first bit of byte 1 (the player mask)

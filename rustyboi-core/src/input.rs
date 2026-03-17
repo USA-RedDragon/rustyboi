@@ -76,6 +76,16 @@ impl Input {
         self.sgb = Some(crate::sgb::Sgb::new());
     }
 
+    /// Apply the SGB header unlock gate (Pan Docs "SGB Unlocking"): a non-SGB
+    /// cart's JOYP writes must not be interpreted as SGB packets. Called from
+    /// `GB::insert` with the cartridge header verdict; no-op on non-SGB
+    /// hardware.
+    pub fn set_sgb_unlocked(&mut self, unlocked: bool) {
+        if let Some(sgb) = self.sgb.as_mut() {
+            sgb.set_locked(!unlocked);
+        }
+    }
+
     /// Immutable access to the SGB state (palettes/mask), for the frame output
     /// path. `None` on non-SGB hardware.
     pub fn sgb(&self) -> Option<&crate::sgb::Sgb> {
