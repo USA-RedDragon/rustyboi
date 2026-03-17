@@ -195,6 +195,17 @@ impl RustyboiCore {
         }
     }
 
+    /// Stop the rumble motor (both effects). The frontend keeps the last
+    /// rumble state a core sent until it is overwritten, so this must be
+    /// called whenever the emulated cart stops driving the motor line
+    /// (content unload, core reset). No-op without a rumble interface.
+    fn stop_rumble(&self, ctx: &GenericContext) {
+        if self.rumble_enabled {
+            ctx.set_rumble_state(0, retro_rumble_effect::RETRO_RUMBLE_STRONG, 0);
+            ctx.set_rumble_state(0, retro_rumble_effect::RETRO_RUMBLE_WEAK, 0);
+        }
+    }
+
     fn read_options(&mut self, ctx: &mut OptionsChangedContext) {
         if let Some(value) = ctx.get_variable("rustyboi_hardware") {
             self.hardware_pref = match value {
@@ -450,17 +461,22 @@ impl Core for RustyboiCore {
         Ok(())
     }
 
-    fn on_unload_game(&mut self, _ctx: &mut UnloadGameContext) {
+    fn on_unload_game(&mut self, ctx: &mut UnloadGameContext) {
         self.gb = None;
         self.gameshark_codes.clear();
         self.audio.samples.borrow_mut().clear();
+        // The rumble state sent to the frontend persists until changed and
+        // `on_run` stops driving it once the game is gone: a rumble cart
+        // unloaded with the motor latched on would buzz forever. Stop it.
+        self.stop_rumble(ctx);
     }
 
-    fn on_reset(&mut self, _ctx: &mut ResetContext) {
+    fn on_reset(&mut self, ctx: &mut ResetContext) {
         if let Some(gb) = self.gb.as_mut() {
             gb.reset();
         }
         self.audio.samples.borrow_mut().clear();
+        self.stop_rumble(ctx);
     }
 
     fn on_options_changed(&mut self, ctx: &mut OptionsChangedContext) {
