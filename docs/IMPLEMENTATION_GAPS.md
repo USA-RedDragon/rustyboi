@@ -263,28 +263,34 @@ mooneye/wilbertpol timing all pass). Illegal opcodes $D3/$DB/$DD/$E3/$E4/$EB/
 $EC/$ED/$F4/$FC/$FD hard-lock correctly (`cpu/opcodes.rs:294-302`, Gambatte
 freeze model).
 
-### 3.1 Plain STOP (low-power mode) — WRONG (executes straight through)
+### 3.1 Plain STOP (low-power mode) — DONE (Pan Docs STOP chart)
 - Doc: [Pan Docs "Reducing Power Consumption"](https://gbdev.io/pandocs/Reducing_Power_Consumption.html)
   + the Lior Halphon STOP chart embedded there; gb-ctr instruction set (STOP).
-  STOP without an armed speed switch must idle the CPU until a P10-P13 line
-  goes low, with the documented decision table (button-held / pending-IF cases
-  degenerate to NOP/HALT/1-byte forms), DIV reset, and per-model LCD behavior
-  (DMG: line artifact if LCD left on; CGB: black screen unless mode 3).
-- Status: the CGB speed-switch arm of STOP is modeled to sub-dot depth
-  (`cpu/opcodes.rs:8-287` — the spsw campaign), but the fall-through arm just
-  sets `cpu.stopped = true` (`cpu/opcodes.rs:288-292`) **which nothing reads**
-  (only other reference: `sm83.rs:602` uses it to pick an IRQ anchor;
-  `gb.rs:963` clears it on reset). **[R]** verified: micro-ROM `STOP $00`
-  followed by `ld a,$5A; ldh ($81),a` writes the marker with no joypad input —
-  STOP behaved as a NOP.
-- Impact: Pan Docs: "No licensed rom makes use of STOP outside of CGB speed
-  switching" — so zero owner-game impact; but homebrew, accuracy suites
-  (AntonioND gbc-hw-tests `corrupted_stop`/`stop` variants queued in the census
-  wave 3), and the STOP chart cases are all unimplementable until this exists.
-- Effort: **M** — the state itself is simple (halt-until-joypad-low + DIV
-  reset + LCD gating), but it must be threaded carefully around the existing
-  sub-dot speed-switch machinery (high regression risk area; gate strictly on
-  "KEY1 bit 0 clear").
+- Status: **implemented to the chart** (`cpu/opcodes.rs::stop` fall-through,
+  `gb.rs::step_instruction` freeze/wake, `ppu/controller.rs::enter_stop_mode_panel`):
+  - Button held on a SELECTED line (`JOYP & 0xF != 0xF`, checked before the
+    KEY1 arm, SameBoy-style): pending IE&IF → 1-byte NOP (no DIV reset);
+    none pending → 2-byte, HALT mode entered, DIV not reset.
+  - No button, KEY1 armed: the existing sub-dot spsw speed-switch path,
+    untouched (age spsw / gambatte speedchange stayed byte-identical).
+  - No button, no switch: STOP mode — DIV reset through the FF04 write path
+    (Tima::divReset glitch edge + DIV-APU fold), whole-machine clock freeze
+    (master_cc stops: timer/PPU/APU/serial/DMA), 1-byte iff IE&IF pending
+    (the operand executes on wake), terminated ONLY by a selected P10-P13
+    line going low (+8 T-cycles wake advance, SameBoy-matched).
+  - Panel per Pan Docs: DMG blanks to white; CGB goes black unless mid-mode-3
+    (keeps the picture). Verified against the daid real-reference PNGs at the
+    FINAL held frame (all-white / all-black / kept-PASS-text respectively).
+  - Micro-checks: `gb.rs stop_tests` (6 tests: DIV-reset+freeze+selected-line
+    wake, 1-byte pending form, NOP form, HALT form, panel, armed tripwire).
+- Deferred (documented in `opcodes.rs`): the armed+pending IME-on chart leaf
+  ("1-byte, mode doesn't change, switch happens") is approximated by the
+  armed path's existing pending-interrupt early wake from the 0x20000 window;
+  the armed+pending IME-off "CPU glitches non-deterministically" corruption
+  is intentionally not invented (SameBoy also models it as the deterministic
+  continue). The DMG single-black-line panel artifact (row unpinned, panel
+  physics) is unmodeled. The MBC3 RTC crystal (cart-local, really keeps
+  counting through STOP) freezes with master_cc — accepted simplification.
 
 ### 3.2 Joypad line edge from JOYP select writes — PARTIAL
 - Doc: [Pan Docs Interrupt Sources](https://gbdev.io/pandocs/Interrupt_Sources.html)
@@ -583,7 +589,7 @@ against both hand-off anchors. Gaps: only §6.2 (compat palette table), §6.3
 | 4-Player Adapter | MISSING — §8.3 |
 | Game Genie / Shark | COMPLETE (core hooks) |
 | Power-Up Sequence | COMPLETE — §9 |
-| Reducing Power Consumption (STOP) | WRONG — §3.1 |
+| Reducing Power Consumption (STOP) | COMPLETE — §3.1 (glitch/panel-line leaves deferred) |
 | Accessing VRAM/OAM (locking) | COMPLETE |
 | OAM Corruption Bug | COMPLETE **[R]** |
 | External Connectors / GBC Approval | n/a (physical/process) |
@@ -608,7 +614,7 @@ incl. its "OAM DMA bus conflicts: TODO" (we exceed the reference), MBC30
 | 7 | ~~SGB border CHR_TRN/PCT_TRN + 256x224 output (§7.2)~~ DONE (core; frontend presentation opt-in) | 185 SGB games | — |
 | 8 | Link-cable peer transport + external clock (§8.1) | all 2-player/trading | L |
 | 9 | Game Boy Camera mapper + M64282FP pipeline (§2.6) | owned cart | L |
-| 10 | Plain-STOP mode per the STOP chart (§3.1) | correctness + gbc-hw-tests wave | M (regression-sensitive) |
+| 10 | ~~Plain-STOP mode per the STOP chart (§3.1)~~ DONE (broke-0; daid final frames now hardware-exact) | correctness + gbc-hw-tests wave | — |
 | 11 | CGB IR transport (loopback + paired instance) (§6.1) | Mystery Gift, Perfect Dark, SMB DX | M |
 | 12 | ROM+RAM $08/$09 NoMBC external RAM (§2.1) | homebrew/mis-dumps | S |
 | 13 | Rumble output wiring in frontends (§2.3) | 16 games | S |

@@ -756,6 +756,34 @@ impl GB {
             return (true, 0);
         }
 
+        // Plain-STOP low-power mode (Pan Docs "Reducing Power Consumption"):
+        // the main oscillator is stopped, so the CPU and every clocked
+        // peripheral — DIV/timer, PPU, APU, serial, OAM-DMA/HDMA, i.e.
+        // master_cc itself — freeze coherently until "one of the P10 to P13
+        // lines going low": a pressed button in a JOYP-SELECTED group (a ROM
+        // that deselected both groups sleeps until reset, as on hardware; the
+        // press itself raises IF.4 through the normal input edge path, so an
+        // enabled joypad interrupt dispatches after the wake). Cycles are
+        // still reported so the callers' cycle-capped frame loops keep
+        // serving the frozen panel to the frontend; no audio is generated
+        // (the APU is stopped). The cart-local MBC3 RTC crystal really keeps
+        // counting through STOP on hardware but rides master_cc here, so it
+        // freezes too (accepted simplification; no licensed ROM STOPs).
+        // On wake the world advances 8 T-cycles before the CPU resumes
+        // (SameBoy GB_cpu_run: leave_stop_mode + GB_advance_cycles(gb, 8));
+        // execution then continues at the post-STOP pc set by the opcode
+        // (opcodes::stop): past both bytes (2-byte form) or at the operand
+        // byte (1-byte interrupt-pending form).
+        if self.cpu.stopped {
+            if self.mmio.read(crate::input::JOYP) & 0x0F != 0x0F {
+                self.cpu.stopped = false;
+                let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);
+                bus.tick_remaining(8);
+                return (false, 8);
+            }
+            return (false, 4);
+        }
+
         self.ppu.step_scheduled_stat_events(&mut self.mmio);
 
         // Execute one CPU instruction. Every peripheral (incl. the PPU) is
@@ -1060,5 +1088,280 @@ impl GB {
 
     pub fn get_breakpoints(&self) -> &HashSet<u16> {
         &self.breakpoints
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    //! Plain-STOP (low-power mode) micro-checks against the Pan Docs STOP
+    //! behavior chart (Lior Halphon, "Reducing Power Consumption"): the
+    //! STOP-mode / HALT-mode / NOP forks, the 1-vs-2-byte opcode length, the
+    //! DIV reset, the whole-machine clock freeze, and the selected-line-only
+    //! joypad wake. The armed-KEY1 speed-switch path (owned by the age spsw /
+    //! gambatte speedchange suites) gets a tripwire sanity check only.
+    use super::*;
+    use crate::input::ButtonState;
+
+    /// Minimal 32KB NoMBC ROM: `code` at 0x0100, everything else zero.
+    /// `cgb_flag` goes to 0x0143 (0x80 = CGB-compat, needed for KEY1).
+    fn rom_with(code: &[u8], cgb_flag: u8) -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x143] = cgb_flag;
+        // 0x147/0x148/0x149 already 0: NoMBC, 32KB, no RAM.
+        rom[0x100..0x100 + code.len()].copy_from_slice(code);
+        rom
+    }
+
+    fn gb_with(code: &[u8], hardware: Hardware, cgb_flag: u8) -> GB {
+        let mut gb = GB::new(hardware);
+        gb.insert(cartridge::Cartridge::from_bytes(&rom_with(code, cgb_flag)).unwrap());
+        gb.skip_bios();
+        gb
+    }
+
+    fn step_n(gb: &mut GB, n: usize) {
+        for _ in 0..n {
+            gb.step_instruction(false);
+        }
+    }
+
+    /// Step until `pred` holds, bounded; panics on timeout.
+    fn step_until(gb: &mut GB, bound: usize, what: &str, pred: impl Fn(&GB) -> bool) {
+        for _ in 0..bound {
+            if pred(gb) {
+                return;
+            }
+            gb.step_instruction(false);
+        }
+        panic!("step_until timed out waiting for {what}");
+    }
+
+    const BTN_NONE: ButtonState = ButtonState {
+        a: false,
+        b: false,
+        start: false,
+        select: false,
+        up: false,
+        down: false,
+        left: false,
+        right: false,
+    };
+
+    /// Chart: no button held, no speed switch, no interrupt pending ->
+    /// "STOP is a 2-byte opcode, STOP mode is entered, DIV is reset."
+    /// Plus: full clock freeze while stopped, wake only on a SELECTED
+    /// joypad line going low, DIV still 0 on wake (the roadmap micro-check).
+    #[test]
+    fn stop_resets_div_freezes_clock_and_wakes_on_selected_button() {
+        // 0100: ld a,$10 ; ldh (00),a   JOYP=$10 -> P15 low: BUTTONS group
+        //                               selected, d-pad deselected (the select
+        //                               bits are active-low)
+        // 0104: stop $00                case C
+        // 0106: inc a                   post-wake marker
+        // 0107: jr self
+        let mut gb = gb_with(&[0x3E, 0x10, 0xE0, 0x00, 0x10, 0x00, 0x3C, 0x18, 0xFE], Hardware::DMG, 0x00);
+        step_n(&mut gb, 2);
+        assert_ne!(gb.mmio.read(0xFF04), 0, "premise: DIV nonzero before STOP");
+        assert_eq!(gb.cpu.registers.pc, 0x0104);
+
+        gb.step_instruction(false); // STOP
+        assert!(gb.cpu.stopped, "STOP mode entered");
+        assert!(!gb.cpu.halted);
+        assert_eq!(gb.cpu.registers.pc, 0x0106, "2-byte form: operand consumed");
+        assert_eq!(gb.mmio.read(0xFF04), 0, "DIV reset on STOP entry");
+
+        // Clock freeze: nothing advances while stopped.
+        let cc = gb.mmio.master_cc();
+        for _ in 0..2000 {
+            let (bp, cycles) = gb.step_instruction(false);
+            assert!(!bp);
+            assert_eq!(cycles, 4, "frozen steps report pacing cycles");
+        }
+        assert_eq!(gb.mmio.master_cc(), cc, "master_cc frozen during STOP");
+        assert_eq!(gb.mmio.read(0xFF04), 0, "DIV held at 0 (timer stopped)");
+        assert!(gb.cpu.stopped);
+
+        // A key in the DESELECTED d-pad group must NOT wake (P14 high).
+        gb.set_input_state(ButtonState { right: true, ..BTN_NONE });
+        step_n(&mut gb, 50);
+        assert!(gb.cpu.stopped, "deselected-group press does not terminate STOP");
+        assert_eq!(gb.mmio.master_cc(), cc);
+
+        // A SELECTED button line going low terminates STOP; the wake charges
+        // 8 T-cycles of world advance before the CPU resumes.
+        gb.set_input_state(ButtonState { a: true, ..BTN_NONE });
+        let (_, wake_cycles) = gb.step_instruction(false);
+        assert!(!gb.cpu.stopped, "selected-line low terminates STOP");
+        assert_eq!(wake_cycles, 8);
+        assert_eq!(gb.mmio.master_cc(), cc + 8);
+        assert_eq!(gb.mmio.read(0xFF04), 0, "DIV == 0 observed on wake");
+
+        // Execution resumes past the 2-byte STOP: the marker runs.
+        let a_before = gb.cpu.registers.a;
+        gb.step_instruction(false); // inc a
+        assert_eq!(gb.cpu.registers.a, a_before.wrapping_add(1));
+        assert_eq!(gb.cpu.registers.pc, 0x0107);
+    }
+
+    /// Chart: no button held, no speed switch, interrupt pending ->
+    /// "STOP is a 1-byte opcode, STOP mode is entered, DIV is reset" —
+    /// the pending interrupt neither prevents nor terminates STOP mode,
+    /// and the byte after $10 executes as an instruction on wake.
+    #[test]
+    fn stop_irq_pending_is_one_byte_and_still_enters_stop_mode() {
+        // 0100: xor a ; ldh (00),a      JOYP=$00 -> both groups selected
+        // 0103: ld a,1
+        // 0105: ldh (FF),a              IE = VBlank
+        // 0107: ldh (0F),a              IF = VBlank (pending, IME off)
+        // 0109: stop                    case D, operand...
+        // 010A: inc a                   ...which must EXECUTE on wake
+        // 010B: jr self
+        let mut gb = gb_with(
+            &[0xAF, 0xE0, 0x00, 0x3E, 0x01, 0xE0, 0xFF, 0xE0, 0x0F, 0x10, 0x3C, 0x18, 0xFE],
+            Hardware::DMG,
+            0x00,
+        );
+        step_n(&mut gb, 5);
+        assert_eq!(gb.cpu.registers.pc, 0x0109);
+        gb.step_instruction(false); // STOP
+        assert!(gb.cpu.stopped, "STOP mode entered despite pending IE&IF");
+        assert_eq!(gb.cpu.registers.pc, 0x010A, "1-byte form: operand NOT consumed");
+        assert_eq!(gb.mmio.read(0xFF04), 0, "DIV reset");
+
+        let cc = gb.mmio.master_cc();
+        step_n(&mut gb, 100);
+        assert!(gb.cpu.stopped, "pending interrupt does not terminate STOP mode");
+        assert_eq!(gb.mmio.master_cc(), cc);
+
+        gb.set_input_state(ButtonState { start: true, ..BTN_NONE });
+        gb.step_instruction(false); // wake
+        assert!(!gb.cpu.stopped);
+        gb.step_instruction(false); // the operand byte: inc a (IME off, no service)
+        assert_eq!(gb.cpu.registers.a, 2, "STOP operand executed as an instruction");
+        assert_eq!(gb.cpu.registers.pc, 0x010B);
+    }
+
+    /// Chart: button held (selected line low) + interrupt pending ->
+    /// "STOP is a 1-byte opcode, mode doesn't change, DIV doesn't reset."
+    #[test]
+    fn stop_button_held_irq_pending_is_a_one_byte_nop() {
+        let mut gb = gb_with(
+            &[0xAF, 0xE0, 0x00, 0x3E, 0x01, 0xE0, 0xFF, 0xE0, 0x0F, 0x10, 0x3C, 0x18, 0xFE],
+            Hardware::DMG,
+            0x00,
+        );
+        gb.set_input_state(ButtonState { a: true, ..BTN_NONE });
+        step_n(&mut gb, 5);
+        assert_eq!(gb.cpu.registers.pc, 0x0109);
+        let div = gb.mmio.read(0xFF04);
+        assert_ne!(div, 0, "premise: DIV nonzero");
+        gb.step_instruction(false); // STOP
+        assert!(!gb.cpu.stopped, "mode doesn't change");
+        assert!(!gb.cpu.halted, "mode doesn't change");
+        assert_eq!(gb.cpu.registers.pc, 0x010A, "1-byte form");
+        // DIV keeps counting (it may tick across the step) — but is NOT reset.
+        let post = gb.mmio.read(0xFF04);
+        assert!(post == div || post == div.wrapping_add(1), "DIV not reset (pre {div}, post {post})");
+        gb.step_instruction(false); // inc a executes immediately
+        assert_eq!(gb.cpu.registers.a, 2);
+    }
+
+    /// Chart: button held (selected line low), no interrupt pending ->
+    /// "STOP is a 2-byte opcode, HALT mode is entered, DIV is not reset."
+    /// HALT exits on the next enabled interrupt (VBlank here, IME off).
+    #[test]
+    fn stop_button_held_no_irq_enters_halt_mode() {
+        // 0100: xor a ; ldh (00),a      JOYP=$00
+        // 0103: ld a,1 ; ldh (FF),a     IE = VBlank, IF stays clear
+        // 0107: stop $00                case A
+        // 0109: inc a
+        // 010A: jr self
+        let mut gb = gb_with(
+            &[0xAF, 0xE0, 0x00, 0x3E, 0x01, 0xE0, 0xFF, 0x10, 0x00, 0x3C, 0x18, 0xFE],
+            Hardware::DMG,
+            0x00,
+        );
+        gb.set_input_state(ButtonState { b: true, ..BTN_NONE });
+        step_n(&mut gb, 4);
+        assert_eq!(gb.cpu.registers.pc, 0x0107);
+        // The held-button edge raised IF.4 (joypad) and the post-boot seed
+        // carries IF.0; clear IF so no interrupt is pending at the STOP (the
+        // chart branch under test).
+        gb.mmio.write(0xFF0F, 0x00);
+        let div = gb.mmio.read(0xFF04);
+        gb.step_instruction(false); // STOP
+        assert!(gb.cpu.halted, "HALT mode entered");
+        assert!(!gb.cpu.stopped);
+        assert_eq!(gb.cpu.registers.pc, 0x0109, "2-byte form");
+        assert_eq!(gb.mmio.read(0xFF04), div, "DIV not reset");
+
+        // The clock keeps running in HALT mode (unlike STOP mode): the PPU
+        // reaches VBlank, IF.0 wakes the CPU, and the marker executes.
+        step_until(&mut gb, 200_000, "HALT exit", |gb| !gb.cpu.halted);
+        step_until(&mut gb, 10, "marker", |gb| gb.cpu.registers.pc == 0x010A);
+        assert_eq!(gb.cpu.registers.a, 2);
+    }
+
+    /// Pan Docs panel behavior: a plain STOP with the LCD enabled turns a CGB
+    /// panel black and a DMG panel blank/white (outside mode 3). The pre-STOP
+    /// frame shows the boot logo, so the paint is observable.
+    #[test]
+    fn stop_panel_goes_dark_cgb_black_dmg_white() {
+        // 0100: xor a ; ldh (00),a          JOYP=$00
+        // 0103: ld a,1 ; ldh (FF),a         IE = VBlank
+        // 0107: xor a ; ldh (0F),a ; halt ; nop   (x3: let 3 frames display)
+        // ...
+        // 0113: stop $00
+        // 0115: jr self
+        let code = [
+            0xAF, 0xE0, 0x00, 0x3E, 0x01, 0xE0, 0xFF, 0xAF, 0xE0, 0x0F, 0x76, 0x00, 0xAF, 0xE0,
+            0x0F, 0x76, 0x00, 0xAF, 0xE0, 0x0F, 0x76, 0x00, 0x10, 0x00, 0x18, 0xFE,
+        ];
+        for (hw, cgb) in [(Hardware::CGB, true), (Hardware::DMG, false)] {
+            let mut gb = gb_with(&code, hw, 0x00);
+            for _ in 0..3 {
+                gb.run_until_frame(false);
+            }
+            // Premise: the pre-STOP CGB frame is NOT already all-black (a
+            // rendered blank line is white 0xFF), so all-black afterwards
+            // proves the STOP paint; the DMG frame shows the boot logo
+            // (non-zero shades), so all-white afterwards proves it too.
+            let pre_ok = match gb.get_current_frame() {
+                Frame::Color(buf) => buf.iter().any(|&b| b != 0x00),
+                Frame::Monochrome(buf) => buf.iter().any(|&s| s != 0),
+            };
+            assert!(pre_ok, "premise: pre-STOP frame distinguishable ({hw:?})");
+            step_until(&mut gb, 2_000_000, "STOP entry", |gb| gb.cpu.stopped);
+            match gb.get_current_frame() {
+                Frame::Color(buf) => {
+                    assert!(cgb, "color frame implies CGB here");
+                    assert!(buf.iter().all(|&b| b == 0x00), "CGB STOP panel is black");
+                }
+                Frame::Monochrome(buf) => {
+                    assert!(!cgb);
+                    assert!(buf.iter().all(|&s| s == 0), "DMG STOP panel is blank/white");
+                }
+            }
+        }
+    }
+
+    /// Armed-KEY1 tripwire: STOP with a speed switch armed takes the existing
+    /// CGB switch path (owned byte-exactly by age spsw / gambatte speedchange)
+    /// and must NOT enter the new low-power freeze.
+    #[test]
+    fn stop_with_armed_key1_still_speed_switches() {
+        // 0100: ld a,1 ; ldh (4D),a     KEY1.0 arm
+        // 0104: stop $00
+        // 0106: jr self
+        let mut gb = gb_with(&[0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x18, 0xFE], Hardware::CGB, 0x80);
+        step_n(&mut gb, 2);
+        assert!(!gb.mmio.is_double_speed_mode());
+        gb.step_instruction(false); // STOP -> switch
+        assert!(gb.mmio.is_double_speed_mode(), "speed switch performed");
+        assert!(!gb.cpu.stopped, "armed path does not enter low-power STOP");
+        // The 0x20000-cycle unhalt window drains while the world advances.
+        let cc = gb.mmio.master_cc();
+        step_n(&mut gb, 64);
+        assert!(gb.mmio.master_cc() > cc, "world keeps running through the window");
     }
 }
