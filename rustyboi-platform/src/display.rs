@@ -194,6 +194,10 @@ fn run_gui_loop<'win>(
 ) -> Result<(), Error> {
     let mut input = WinitInputHelper::new();
     let mut world = World::new_with_paths(gb, config.rom.clone(), config.bios.clone(), config.palette);
+    if config.printer {
+        world.gb.attach_printer();
+        println!("Game Boy Printer attached to the link port");
+    }
 
     // Persist the pending-dialog-result `Arc` across `Framework`
     // suspend/resume cycles. On Android the SAF picker takes our activity
@@ -509,6 +513,18 @@ fn run_gui_loop<'win>(
                         user_paused = !user_paused;
                         manually_paused = user_paused || world.error_state.is_some();
                         world.toggle_pause();
+                    }
+                    Some(GuiAction::TogglePrinter) => {
+                        if world.gb.printer_attached() {
+                            world.gb.detach_serial_device();
+                            framework.set_status("Game Boy Printer disconnected".to_string());
+                        } else {
+                            world.gb.attach_printer();
+                            framework.set_status(
+                                "Game Boy Printer connected - prints are saved next to the ROM"
+                                    .to_string(),
+                            );
+                        }
                     }
                     Some(GuiAction::StepCycles(count)) => {
                         world.step_multiple_cycles = Some(count);
@@ -1032,7 +1048,49 @@ impl World {
         }
     }
 
+    /// Drain prints completed by an attached Game Boy Printer and write each
+    /// as `<rom-stem>-print-<n>.png` next to the ROM (the same place the
+    /// battery `.sav` lives). No-op unless a printer is attached and a game
+    /// finished a print since the last call.
+    fn drain_printer_sheets(&mut self) {
+        let sheets = self.gb.take_printer_sheets();
+        if sheets.is_empty() {
+            return;
+        }
+        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+        {
+            log::warn!("{} print(s) captured but this platform has no print sink", sheets.len());
+        }
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        {
+            let stem = self
+                .current_rom_path
+                .as_ref()
+                .map(|p| {
+                    let path = std::path::Path::new(p);
+                    path.with_extension("").to_string_lossy().into_owned()
+                })
+                .unwrap_or_else(|| "rustyboi".to_string());
+            let mut n = 1u32;
+            for sheet in sheets {
+                // First free index so prints never clobber earlier sessions.
+                let path = loop {
+                    let candidate = format!("{stem}-print-{n}.png");
+                    n += 1;
+                    if !std::path::Path::new(&candidate).exists() {
+                        break candidate;
+                    }
+                };
+                match std::fs::write(&path, sheet.to_png()) {
+                    Ok(()) => println!("Printed {}x{} sheet to: {}", sheet.width, sheet.height, path),
+                    Err(e) => println!("Failed to write print to {}: {}", path, e),
+                }
+            }
+        }
+    }
+
     fn update(&mut self) {
+        self.drain_printer_sheets();
         // Handle single frame stepping
         if self.step_single_frame {
             self.step_single_frame = false;

@@ -921,6 +921,31 @@ impl GB {
         self.mmio.write(address, value);
     }
 
+    /// Plug a Game Boy Printer into the link port. The port defaults to a
+    /// disconnected cable (byte-identical serial behavior); attaching is an
+    /// explicit frontend action.
+    pub fn attach_printer(&mut self) {
+        self.mmio.attach_printer();
+    }
+
+    /// Unplug the link-port device (back to a disconnected cable).
+    pub fn detach_serial_device(&mut self) {
+        self.mmio.detach_serial_device();
+    }
+
+    pub fn printer_attached(&self) -> bool {
+        self.mmio.printer().is_some()
+    }
+
+    /// Drain completed printer sheets (empty when no printer is attached or
+    /// nothing has printed since the last drain).
+    pub fn take_printer_sheets(&mut self) -> Vec<crate::printer::PrintSheet> {
+        self.mmio
+            .printer_mut()
+            .map(|p| p.take_completed())
+            .unwrap_or_default()
+    }
+
     /// Mutable handle to the inserted cartridge (libretro save-RAM / RTC /
     /// rumble / Game Genie access).
     pub fn cartridge_mut(&mut self) -> Option<&mut cartridge::Cartridge> {

@@ -173,7 +173,13 @@ impl Gui {
         // ☰ soft button + full-screen overlay (see
         // `render_mobile_soft_button` / `render_mobile_menu_overlay`).
         #[cfg(not(target_os = "android"))]
-        self.render_menu_bar(ctx, &mut action, &mut any_menu_open, paused);
+        self.render_menu_bar(
+            ctx,
+            &mut action,
+            &mut any_menu_open,
+            paused,
+            gb.map(|g| g.printer_attached()),
+        );
         self.render_debug_panels(ctx, registers, gb, &mut action, paused);
         #[cfg(target_os = "android")]
         if let Some(lib_action) = self.library.show(ctx) {
@@ -214,7 +220,7 @@ impl Gui {
         (action, any_menu_open)
     }
     #[cfg(not(target_os = "android"))]
-    fn render_menu_bar(&mut self, ctx: &Context, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool) {
+    fn render_menu_bar(&mut self, ctx: &Context, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, printer_attached: Option<bool>) {
         egui::TopBottomPanel::top("menubar_container").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -299,6 +305,18 @@ impl Gui {
                     if ui.button(pause_text).clicked() {
                         *action = Some(GuiAction::TogglePause);
                         ui.close_menu();
+                    }
+                    if let Some(attached) = printer_attached {
+                        ui.separator();
+                        let printer_text = if attached {
+                            "Disconnect Game Boy Printer"
+                        } else {
+                            "Connect Game Boy Printer"
+                        };
+                        if ui.button(printer_text).clicked() {
+                            *action = Some(GuiAction::TogglePrinter);
+                            ui.close_menu();
+                        }
                     }
                 });
 

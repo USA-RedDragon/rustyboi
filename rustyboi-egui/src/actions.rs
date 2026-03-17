@@ -26,6 +26,8 @@ pub enum GuiAction {
     LoadState(FileData),
     LoadRom(FileData),
     TogglePause,
+    /// Plug/unplug a Game Boy Printer on the link port.
+    TogglePrinter,
     Restart,
     ClearError,
     StepCycles(u32),

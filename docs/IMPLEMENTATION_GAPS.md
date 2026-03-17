@@ -494,17 +494,30 @@ states incl. the header-popcount-dependent boot DIV: COMPLETE (`gb.rs:443-448`).
 - Effort: **L** — transport trait + lockstep scheduling between instances;
   the master/slave byte-swap protocol itself is simple.
 
-### 8.2 Game Boy Printer — MISSING
+### 8.2 Game Boy Printer — DONE
 - Doc: [Pan Docs Game Boy Printer](https://gbdev.io/pandocs/Gameboy_Printer.html)
   (packet protocol: sync $88 $33, commands 1/2/4/$F, checksum, status byte,
   160-wide 2bpp banded bitmap).
-- Status: nothing (no printer code anywhere).
+- Status: implemented. `serial.rs` gained a pluggable `SerialDevice` link-port
+  hook (latches the peer's response byte at transfer start, delivers the
+  shifted-out byte at completion — the real simultaneous-exchange constraint);
+  `printer.rs` is the self-contained slave device: the full INIT/DATA/PRINT/
+  BREAK/STATUS packet state machine, checksum verification, RLE decompression,
+  band accumulation, palette/exposure compositing, busy-status lifecycle, and a
+  dependency-free grayscale PNG encoder. Disconnected is the default so every
+  existing serial behavior stays byte-identical (samesuite/blargg/mooneye/
+  sketchtests serial suites all unchanged). Desktop frontend exposes it via
+  `--printer` and an Emulation-menu toggle; captured prints are written as
+  `<rom>-print-<n>.png` next to the `.sav`. Timing is master-clock derived
+  (deterministic, no wall clock). Validated against mmuszkow/gbprinter's PAT
+  test pattern and against real-hardware print captures (Raphael-Boichot's
+  GameboyPrinterSniffer) of Pokémon Crystal (Pokédex page) and Zelda DX (photo)
+  replayed through the emulated serial path — both reproduce the exact print.
 - Impact: owned printer-capable games listed in §1 (Camera, Zelda DX photos,
   SMB DX, DKC, Perfect Dark, Pokémon G/S/C/Pinball...). Standard emulator
   feature: capture to PNG.
-- Effort: **M** — a self-contained serial slave device + image writer; also the
-  first consumer of the §8.1 device trait (can be implemented against the
-  existing serial with a device-side hook before full 2-GB link lands).
+- Remaining: the printer is the desktop/CLI's device; the §8.1 two-GB link peer
+  and the libretro/Android print sinks are still future work.
 
 ### 8.3 4-Player Adapter (DMG-07) — MISSING
 - Doc: [Pan Docs 4-Player Adapter](https://gbdev.io/pandocs/Four_Player_Adapter.html)
@@ -565,7 +578,7 @@ against both hand-off anchors. Gaps: only §6.2 (compat palette table), §6.3
 | HuC1 | MISSING — §2.5 |
 | HuC-3 | IN-PROGRESS |
 | Other MBCs (Wisdom Tree, EMS, multicart magics) | MISSING — §2.11 |
-| Game Boy Printer | MISSING — §8.2 |
+| Game Boy Printer | DONE — §8.2 |
 | Game Boy Camera | MISSING — §2.6 |
 | 4-Player Adapter | MISSING — §8.3 |
 | Game Genie / Shark | COMPLETE (core hooks) |
@@ -590,7 +603,7 @@ incl. its "OAM DMA bus conflicts: TODO" (we exceed the reference), MBC30
 | 2 | Land HuC-3 (Robopon Sun) — IN-PROGRESS, verify + real-game test | 1 game | M (in flight) |
 | 3 | MBC3 RTC persistence: `.rtc` sidecar + wall-clock catch-up (§2.2) | 13 games incl. all Pokémon G/S/C | S |
 | 4 | HuC1 banking + IR-mode register (§2.5) | Pokémon Card GB un-broken | S |
-| 5 | Game Boy Printer serial device → PNG (§8.2) | 10+ games' print features | M |
+| 5 | ~~Game Boy Printer serial device → PNG (§8.2)~~ DONE | 10+ games' print features | — |
 | 6 | ~~SGB ATTR geometry + ATTR_TRN/ATTR_SET store (§7.1)~~ DONE | 185 SGB games colorize correctly | — |
 | 7 | ~~SGB border CHR_TRN/PCT_TRN + 256x224 output (§7.2)~~ DONE (core; frontend presentation opt-in) | 185 SGB games | — |
 | 8 | Link-cable peer transport + external clock (§8.1) | all 2-player/trading | L |
