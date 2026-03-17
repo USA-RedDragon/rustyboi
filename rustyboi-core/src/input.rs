@@ -141,6 +141,28 @@ impl Input {
             }
         low & 0x0F
     }
+
+    /// JOYP ($FF00) write: latch the select lines (bits 4-5) and refresh the
+    /// low nibble for the newly-selected group. Returns true when any of the
+    /// four P10-P13 input lines transitioned high -> low as a result: selecting
+    /// a group whose buttons are held pulls those lines low, and the joypad
+    /// interrupt (IF bit 4) fires on any such edge exactly as for a fresh key
+    /// press (Pan Docs "Joypad Input"). The caller raises IF bit 4.
+    pub fn write_joyp(&mut self, value: u8) -> bool {
+        // SGB packet reception: feed every JOYP write to the SGB state
+        // machine (RESET/bit pulses on P14/P15). This runs BEFORE the
+        // normal joypad response and only exists on SGB hardware.
+        if let Some(sgb) = self.sgb.as_mut() {
+            sgb.write_p1(value);
+        }
+        // Bits 4-5 hold exactly the written select lines (not the old
+        // ones); the low nibble is the selected group's pressed state.
+        let old_low = self.joyp & 0x0F;
+        let select = value & 0b0011_0000;
+        let new_low = self.low_nibble(select);
+        self.joyp = select | new_low;
+        (old_low & !new_low) != 0
+    }
 }
 
 impl Addressable for Input {
@@ -156,19 +178,38 @@ impl Addressable for Input {
 
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
+            // Edge-blind fallback; the MMIO dispatch uses `write_joyp` so the
+            // select-write high->low line edge can raise the joypad interrupt.
             JOYP => {
-                // SGB packet reception: feed every JOYP write to the SGB state
-                // machine (RESET/bit pulses on P14/P15). This runs BEFORE the
-                // normal joypad response and only exists on SGB hardware.
-                if let Some(sgb) = self.sgb.as_mut() {
-                    sgb.write_p1(value);
-                }
-                // Bits 4-5 hold exactly the written select lines (not the old
-                // ones); the low nibble is the selected group's pressed state.
-                let select = value & 0b0011_0000;
-                self.joyp = select | self.low_nibble(select);
-            },
+                self.write_joyp(value);
+            }
             _ => panic!("Input: Invalid write address {:04X}", addr),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pan Docs "Joypad Input": the joypad interrupt fires on a high->low
+    /// transition of any P10-P13 line. Selecting a group whose buttons are
+    /// already held produces exactly such an edge; reselecting the same group,
+    /// deselecting (lines return high), or selecting a group with no held
+    /// buttons must not.
+    #[test]
+    fn joyp_select_write_reports_high_to_low_edge() {
+        let mut input = Input::new();
+        // Deselect both groups, then hold A: lines stay high, no edge.
+        input.write_joyp(0x30);
+        assert!(!input.set_button_state(ButtonState { a: true, ..Default::default() }));
+        // Selecting the button group (P15 low) pulls P10 low: edge.
+        assert!(input.write_joyp(0x10));
+        // Same select again: lines already low, no new edge.
+        assert!(!input.write_joyp(0x10));
+        // Deselecting is a low -> high transition: no edge.
+        assert!(!input.write_joyp(0x30));
+        // Selecting the direction group with only A held: no edge.
+        assert!(!input.write_joyp(0x20));
     }
 }
