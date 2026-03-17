@@ -1232,6 +1232,15 @@ impl Cartridge {
         matches!(self.cgb_support, CgbSupport::Compatible | CgbSupport::Only)
     }
 
+    /// True when the header declares Super Game Boy support: SGB flag
+    /// ($0146) == $03 AND old licensee ($014B) == $33 (Pan Docs "SGB
+    /// Unlocking"). The SGB system software only honors command packets from
+    /// such carts.
+    pub fn supports_sgb(&self) -> bool {
+        self.rom_data.get(0x0146).copied() == Some(0x03)
+            && self.rom_data.get(0x014B).copied() == Some(0x33)
+    }
+
     /// Check if this cartridge requires CGB hardware
     pub fn requires_cgb(&self) -> bool {
         matches!(self.cgb_support, CgbSupport::Only)
