@@ -164,6 +164,12 @@ pub struct Mmio {
     timer: timer::Timer,
     #[serde(default = "serial::Serial::new")]
     serial: serial::Serial,
+    // Device plugged into the link port (Game Boy Printer, ...). Disconnected
+    // by default so every existing serial behavior stays byte-identical; lives
+    // beside `serial` (not inside it) so the per-dot serial clone dance never
+    // copies a device's buffers.
+    #[serde(default)]
+    serial_device: serial::SerialDevice,
     #[serde(skip, default)]
     delayed_writes: Vec<DelayedMmioWrite>,
     io_registers: memory::Memory<IO_REGISTERS_START, IO_REGISTERS_SIZE>,
@@ -784,6 +790,7 @@ impl Mmio {
             oam_high: [0; 0x60],
             timer: timer::Timer::new(),
             serial: serial::Serial::new(),
+            serial_device: serial::SerialDevice::Disconnected,
             delayed_writes: Vec::new(),
             io_registers: memory::Memory::new(),
             hram: memory::Memory::new(),
@@ -1332,7 +1339,40 @@ impl Mmio {
     pub fn write_serial_sc(&mut self, value: u8) {
         let divider = self.timer.internal_counter();
         let phase = self.timer.write_access_cc();
-        self.serial.schedule_sc(value, divider, phase);
+        let link_rx = self.serial_device.preloaded_response();
+        self.serial.schedule_sc(value, divider, phase, link_rx);
+    }
+
+    /// Completed serial byte exchange -> the attached link-port device (no-op
+    /// when disconnected). Called by `Serial::step` at the transfer's
+    /// completion cc; the device's reply to the NEXT transfer is preloaded
+    /// here, mirroring the real peer's shift-register reload.
+    pub fn serial_device_receive(&mut self, tx: u8, cc: u64) {
+        self.serial_device.receive_byte(tx, cc);
+    }
+
+    /// Plug a Game Boy Printer into the link port.
+    pub fn attach_printer(&mut self) {
+        self.serial_device = serial::SerialDevice::Printer(crate::printer::GbPrinter::new());
+    }
+
+    /// Unplug whatever is on the link port (back to a disconnected cable).
+    pub fn detach_serial_device(&mut self) {
+        self.serial_device = serial::SerialDevice::Disconnected;
+    }
+
+    pub fn printer(&self) -> Option<&crate::printer::GbPrinter> {
+        match &self.serial_device {
+            serial::SerialDevice::Printer(p) => Some(p),
+            serial::SerialDevice::Disconnected => None,
+        }
+    }
+
+    pub fn printer_mut(&mut self) -> Option<&mut crate::printer::GbPrinter> {
+        match &mut self.serial_device {
+            serial::SerialDevice::Printer(p) => Some(p),
+            serial::SerialDevice::Disconnected => None,
+        }
     }
 
     pub fn set_serial_cgb(&mut self, cgb: bool) {
