@@ -79,6 +79,30 @@ const HUC1_RAM_BATTERY: u8 = 0xFF;
 // Remaining unimplemented mapper families (fall through to NoMBC):
 //   0xFC POCKET CAMERA, 0xFD BANDAI TAMA5.
 
+// ---------------------------------------------------------------------------
+// Unlicensed / bootleg mappers. These boards spoof the header type byte
+// ($00/$01, or use out-of-spec values like $97/$99/$EA), so they are detected
+// from ROM content (logo checksums / publisher strings / title+size shapes),
+// not from $0147. References: hhugboy (src/memory/CartDetection.cpp and
+// src/memory/mbc/MbcUnl*.cpp, by taizou/NewRisingSun), mGBA (src/gb/mbc.c
+// _detectUnlMBC + src/gb/mbc/unlicensed.c), Pan Docs "Other MBCs"
+// (https://gbdev.io/pandocs/othermbc.html), and the gbdev forum thread
+// "Cartridges with Rare Mappers" (https://gbdev.gg8.se/forums/viewtopic.php?id=948).
+// ---------------------------------------------------------------------------
+
+/// Unlicensed mapper families detected from ROM content at load time. The
+/// header type byte is unreliable on these boards, so this override wins over
+/// `cartridge_type` in `get_cartridge_type`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum UnlMapper {
+    #[default]
+    None,
+    /// Wisdom Tree one-latch board: a write anywhere in $0000-$3FFF selects a
+    /// whole-$0000-$7FFF 32KB bank from the low 6 bits of the ADDRESS (data
+    /// ignored). Pan Docs "Other MBCs"; mGBA _GBWisdomTree.
+    WisdomTree,
+}
+
 // MBC1 register ranges
 const RAM_ENABLE_START: u16 = 0x0000;
 const RAM_ENABLE_END: u16 = 0x1FFF;
@@ -107,6 +131,9 @@ pub enum CartridgeType {
     MBC7,
     HuC1,
     HuC3,
+    // Unlicensed boards (selected via UnlMapper content detection, never via
+    // the header type byte alone).
+    WisdomTree,
 }
 
 /// 93LC56 serial-EEPROM interface state for MBC7 (Pan Docs "MBC7"). The
@@ -314,6 +341,16 @@ pub struct Cartridge {
     #[serde(default)]
     huc1_ir_led: bool,
 
+    // Detected unlicensed mapper family (content heuristics; overrides the
+    // header type byte in get_cartridge_type).
+    #[serde(default)]
+    unl_mapper: UnlMapper,
+
+    // Wisdom Tree: 6-bit whole-32KB bank latch, loaded from the ADDRESS of
+    // any $0000-$3FFF write.
+    #[serde(default)]
+    wt_bank: u8,
+
     // CGB support information
     cgb_support: CgbSupport, // CGB compatibility from cartridge header
 
@@ -403,6 +440,8 @@ impl Clone for Cartridge {
             huc1_rom_bank: self.huc1_rom_bank,
             huc1_ram_bank: self.huc1_ram_bank,
             huc1_ir_led: self.huc1_ir_led,
+            unl_mapper: self.unl_mapper,
+            wt_bank: self.wt_bank,
             cgb_support: self.cgb_support.clone(),
             rumble_motor: self.rumble_motor,
             rtc_memory: self.rtc_memory.clone(),
@@ -470,13 +509,75 @@ impl Cartridge {
             0x06 => 128, // 2MB = 128 banks of 16KB
             0x07 => 256, // 4MB = 256 banks of 16KB
             0x08 => 512, // 8MB = 512 banks of 16KB (MBC5 64Mbit)
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid ROM size")),
+            // Out-of-spec size byte: the physical chip is what matters, so
+            // size purely from the file. Unlicensed carts routinely have
+            // garbage here (raw Sachen dumps keep the whole header scrambled;
+            // Makon games overlap code with the header), and hhugboy likewise
+            // falls back to the file size (detectGbRomSize).
+            _ => 0,
         };
         // Number of whole 16KB banks present in the actual file, rounded up to a
         // power of two so the bank-number modulo mask matches the wired address
         // lines.
         let file_banks = data_len.div_ceil(0x4000).next_power_of_two().max(2);
         Ok(header_banks.max(file_banks))
+    }
+
+    /// Number of 8KB RAM banks from the header RAM-size byte. Out-of-spec
+    /// values are treated as "no RAM" rather than a load failure: unlicensed
+    /// carts routinely carry garbage here (Sonic 3D Blast 5 has $20 because
+    /// game code overlaps the header), and hhugboy does the same (RAMsize
+    /// stays 0 for values > 5).
+    fn compute_ram_banks(ram_size_code: u8) -> usize {
+        match ram_size_code {
+            0x00 => 0,  // No RAM
+            0x01 => 1,  // 2KB (partial bank)
+            0x02 => 1,  // 8KB = 1 bank
+            0x03 => 4,  // 32KB = 4 banks of 8KB
+            0x04 => 16, // 128KB = 16 banks of 8KB
+            0x05 => 8,  // 64KB = 8 banks of 8KB
+            _ => 0,
+        }
+    }
+
+    /// Detect unlicensed mapper families from ROM content. The heuristics are
+    /// lifted from the two reference emulators that support these boards
+    /// (hhugboy CartDetection::detectUnlCompatMode, mGBA _detectUnlMBC) and
+    /// are deliberately narrow so no licensed cart can ever match:
+    /// - Sachen/Rocket require the plain Nintendo logo to be ABSENT at $0104
+    ///   (every licensed cart has it, or it would not boot on hardware).
+    /// - Wisdom Tree requires header type $00 with a >32KB file plus the
+    ///   publisher string (a licensed $00 cart is 32KB by definition), or the
+    ///   Pan Docs $C0/$D1 header magic.
+    /// - The NT/Makon and ForceMbc1 title rules replicate hhugboy's exact
+    ///   title/licensee/size shapes.
+    fn detect_unl_mapper(data: &[u8]) -> UnlMapper {
+        if data.len() < 0x8000 {
+            // Smaller than one full 32KB image: nothing here needs (or can
+            // safely take) an unlicensed mapper.
+            return UnlMapper::None;
+        }
+
+        // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
+        // banked-size file) the publisher string in the ROM. Both variants
+        // from hhugboy; mGBA additionally requires the blank-header shape,
+        // which the string+type+size gate already implies in practice.
+        if data[0x147] == 0xC0 && data[0x14A] == 0xD1 {
+            return UnlMapper::WisdomTree;
+        }
+        if data[0x147] == 0x00
+            && (data.windows(11).any(|w| w == b"WISDOM TREE")
+                || data.windows(11).any(|w| w == b"WISDOM\0TREE"))
+        {
+            return UnlMapper::WisdomTree;
+        }
+
+        UnlMapper::None
+    }
+
+    /// The detected unlicensed mapper family (None for licensed carts).
+    pub fn unl_mapper(&self) -> UnlMapper {
+        self.unl_mapper
     }
 
     /// Extract ROM data from a zip file, looking for common ROM file extensions
@@ -556,15 +657,11 @@ impl Cartridge {
         let rom_banks = Self::compute_rom_banks(rom_size_code, data.len())?;
 
         // Calculate number of RAM banks
-        let ram_banks = match ram_size_code {
-            0x00 => 0, // No RAM
-            0x01 => 1, // 2KB (partial bank)
-            0x02 => 1, // 8KB = 1 bank
-            0x03 => 4, // 32KB = 4 banks of 8KB
-            0x04 => 16, // 128KB = 16 banks of 8KB
-            0x05 => 8,  // 64KB = 8 banks of 8KB
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid RAM size")),
-        };
+        let ram_banks = Self::compute_ram_banks(ram_size_code);
+
+        // Detect unlicensed mapper families (header-spoofing boards) from ROM
+        // content. Must run on the raw file image, before padding.
+        let unl_mapper = Self::detect_unl_mapper(&data);
 
         // Copy ROM data
         let expected_rom_size = rom_banks * 0x4000; // 16KB per bank
@@ -646,6 +743,8 @@ impl Cartridge {
             huc1_rom_bank: 1,
             huc1_ram_bank: 0,
             huc1_ir_led: false,
+            unl_mapper,
+            wt_bank: 0,
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -731,15 +830,10 @@ impl Cartridge {
         let rom_banks = Self::compute_rom_banks(rom_size_code, actual_data.len())?;
 
         // Calculate number of RAM banks
-        let ram_banks = match ram_size_code {
-            0x00 => 0, // No RAM
-            0x01 => 1, // 2KB (partial bank)
-            0x02 => 1, // 8KB = 1 bank
-            0x03 => 4, // 32KB = 4 banks of 8KB
-            0x04 => 16, // 128KB = 16 banks of 8KB
-            0x05 => 8,  // 64KB = 8 banks of 8KB
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid RAM size")),
-        };
+        let ram_banks = Self::compute_ram_banks(ram_size_code);
+
+        // Detect unlicensed mapper families (header-spoofing boards).
+        let unl_mapper = Self::detect_unl_mapper(&actual_data);
 
         // Copy ROM data
         let expected_rom_size = rom_banks * 0x4000; // 16KB per bank
@@ -817,6 +911,8 @@ impl Cartridge {
             huc1_rom_bank: 1,
             huc1_ram_bank: 0,
             huc1_ir_led: false,
+            unl_mapper,
+            wt_bank: 0,
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -834,6 +930,12 @@ impl Cartridge {
     }
 
     fn get_cartridge_type(&self) -> CartridgeType {
+        // Content-detected unlicensed boards override the (spoofed) header
+        // type byte.
+        match self.unl_mapper {
+            UnlMapper::None => {}
+            UnlMapper::WisdomTree => return CartridgeType::WisdomTree,
+        }
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
             MBC1_RAM => CartridgeType::MBC1 { ram: true, battery: false },
@@ -913,6 +1015,11 @@ impl Cartridge {
                 // 7-bit register; like MBC5 bank 0 is selectable here.
                 (self.huc3_rom_bank as usize) % self.rom_banks
             }
+            CartridgeType::WisdomTree => {
+                // Whole-$0000-$7FFF 32KB banking: this half is the odd 16KB
+                // bank of the selected 32KB pair.
+                (self.wt_bank as usize * 2 + 1) % self.rom_banks
+            }
             CartridgeType::NoMBC { .. } => 1, // Simple cartridge always uses bank 1 for upper area
         }
     }
@@ -948,6 +1055,8 @@ impl Cartridge {
                 // "At least 2 bits" per Pan Docs; real carts have 4 banks.
                 (self.huc3_ram_bank as usize) % self.ram_banks.max(1)
             }
+            // None of the unlicensed boards bank their (optional) RAM.
+            CartridgeType::WisdomTree => 0,
             CartridgeType::NoMBC { .. } => 0,
         }
     }
@@ -965,6 +1074,8 @@ impl Cartridge {
                 };
                 bank % self.rom_banks
             }
+            // Even 16KB half of the selected whole-32KB bank.
+            CartridgeType::WisdomTree => (self.wt_bank as usize * 2) % self.rom_banks,
             _ => 0,
         }
     }
@@ -1216,6 +1327,8 @@ impl Cartridge {
             // MBC7's EEPROM is inherently non-volatile; HuC-3 ($FE) implies
             // RAM+BATTERY+RTC and HuC-1 ($FF) implies RAM+BATTERY.
             CartridgeType::MBC7 | CartridgeType::HuC1 | CartridgeType::HuC3 => true,
+            // No known cart on these unlicensed boards has battery-backed RAM.
+            CartridgeType::WisdomTree => false,
             // $09 ROM+RAM+BATTERY; plain $00/$08 (and unknown fallthroughs)
             // have none.
             CartridgeType::NoMBC { battery } => battery,
@@ -2411,6 +2524,15 @@ impl memory::Addressable for Cartridge {
                     self.rom_bank_low = (value & 0x0F).max(1);
                 }
             }
+            // Wisdom Tree: a single '377 latch loaded from the ADDRESS lines
+            // on any $0000-$3FFF write; the data byte is ignored. The low 6
+            // bits select a whole-$0000-$7FFF 32KB bank (Pan Docs "Other
+            // MBCs"; mGBA _GBWisdomTree: bank = address & 0x3F).
+            RAM_ENABLE_START..=ROM_BANK_SELECT_END
+                if matches!(self.get_cartridge_type(), CartridgeType::WisdomTree) =>
+            {
+                self.wt_bank = (addr & 0x3F) as u8;
+            }
             // RAM Enable (0x0000-0x1FFF)
             RAM_ENABLE_START..=RAM_ENABLE_END => {
                 match self.get_cartridge_type() {
@@ -2701,6 +2823,79 @@ mod tests {
         rom[ROM_SIZE_OFFSET] = 0x00;
         rom[RAM_SIZE_OFFSET] = ram_size_code;
         rom
+    }
+
+    const NINTENDO_LOGO: [u8; 48] = [
+        0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83,
+        0x00, 0x0C, 0x00, 0x0D, 0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E,
+        0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99, 0xBB, 0xBB, 0x67, 0x63,
+        0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
+    ];
+
+    /// Sized ROM with a bank-index marker at offset 0x1000 of every 16KB bank.
+    fn make_sized_rom(cartridge_type: u8, rom_size_code: u8, size: usize) -> Vec<u8> {
+        let mut rom = vec![0u8; size];
+        rom[CARTRIDGE_TYPE_OFFSET] = cartridge_type;
+        rom[ROM_SIZE_OFFSET] = rom_size_code;
+        for bank in 0..(size / 0x4000) {
+            rom[bank * 0x4000 + 0x1000] = bank as u8;
+        }
+        rom
+    }
+
+    #[test]
+    fn licensed_shapes_are_not_misdetected() {
+        // Plain 32KB ROM-only cart with the Nintendo logo (e.g. Tetris).
+        let mut rom = make_rom(0x00, 0x00);
+        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x134..0x13A].copy_from_slice(b"TETRIS");
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
+
+        // 128KB MBC1 cart titled GAME (the shape of the owner's descrambled
+        // Sachen singles): must stay plain MBC1.
+        let mut rom = make_sized_rom(0x01, 0x02, 0x20000);
+        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x134..0x138].copy_from_slice(b"GAME");
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
+        let cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(cart.get_cartridge_type(), CartridgeType::MBC1 { .. }));
+
+        // Header claims 32KB but the file is 2MB with a normal logo
+        // (gbmicrotest shape, type $03): still MBC1, never Wisdom Tree.
+        let mut rom = make_sized_rom(0x03, 0x00, 0x200000);
+        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x134..0x13D].copy_from_slice(b"microtest");
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
+    }
+
+    #[test]
+    fn wisdom_tree_detects_and_switches_whole_window() {
+        // Exodus shape: type $00, header claims 32KB, 128KB file, publisher
+        // string in the ROM.
+        let mut rom = make_sized_rom(0x00, 0x00, 0x20000);
+        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x300..0x30B].copy_from_slice(b"WISDOM TREE");
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::WisdomTree);
+
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        // Power-on: 32KB bank 0 across the whole window.
+        assert_eq!(cart.read(0x1000), 0);
+        assert_eq!(cart.read(0x5000), 1);
+        // Bank select = ADDRESS low bits of any $0000-$3FFF write; the data
+        // byte is ignored.
+        cart.write(0x0003, 0xA5);
+        assert_eq!(cart.read(0x1000), 6); // 16KB banks 6/7 = 32KB bank 3
+        assert_eq!(cart.read(0x5000), 7);
+        // Out-of-range bank wraps on the wired lines (128KB = 4 x 32KB).
+        cart.write(0x0005, 0x00);
+        assert_eq!(cart.read(0x1000), 2); // bank 5 % 4 = 1 -> 16KB banks 2/3
+        assert_eq!(cart.read(0x5000), 3);
+
+        // The Pan Docs $C0/$D1 header magic alone also detects.
+        let mut rom = make_sized_rom(0x00, 0x00, 0x10000);
+        rom[0x147] = 0xC0;
+        rom[0x14A] = 0xD1;
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::WisdomTree);
     }
 
     fn mbc3_rtc_cart() -> Cartridge {
