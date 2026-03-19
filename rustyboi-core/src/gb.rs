@@ -177,6 +177,13 @@ impl GB {
         self.cpu.registers.pc = 0x0100;
         self.cpu.registers.sp = 0xFFFE;
 
+        // Unlicensed boards with boot-time lock sequencing (Sachen, Rocket)
+        // model the cart as a real boot ROM would find it; with the boot
+        // skipped they must start in the unlocked state.
+        if let Some(cart) = self.mmio.get_cartridge_mut() {
+            cart.skip_boot_handoff();
+        }
+
         self.mmio.write(crate::ppu::LCD_CONTROL, 0x91);
         self.ppu.sync_lcdc_from_mmio(&self.mmio);
         self.mmio.write(crate::ppu::SCX, 0x00);
