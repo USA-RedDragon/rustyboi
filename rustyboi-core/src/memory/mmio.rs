@@ -4546,14 +4546,15 @@ impl memory::Addressable for Mmio {
                 }
                 // 0xFEA0-0xFEFF. While an OAM-DMA transfer owns the bus the read
                 // returns 0xFF (Gambatte's `oamDmaPos_ < oam_size` gate). Otherwise
-                // it returns the `oam_high` shadow: CGB mirrors into the OAM index
-                // space masked with 0xE7; DMG indexes directly and the shadow is
-                // initialised to 0x00 (Gambatte `ioamhram_[p - mm_oam_begin]`).
+                // it returns the `oam_high` shadow directly: on CGB (pre-E
+                // revisions, incl. DMG-compat) the region is 96 independent RAM
+                // cells that read back CPU writes byte-exact (AntonioND
+                // gbc-hw-tests oam_echo_ram_read real_gbc.sav); DMG's shadow is
+                // never CPU-written and holds 0x00.
                 UNUSED_START..=UNUSED_END => {
+                    if std::env::var("RB_FEAX_TRACE").is_ok() { eprintln!("R {:04X} -> {:02X} (dma={})", addr, if self.dma_transfer_in_progress() { 0xFF } else { self.oam_high[(addr & 0xFF) as usize - 0xA0] }, self.dma_transfer_in_progress()); }
                     if self.dma_transfer_in_progress() {
                         EMPTY_BYTE
-                    } else if self.cgb_features_enabled {
-                        self.oam_high[((addr & 0xFF) & 0xE7) as usize - 0xA0]
                     } else {
                         self.oam_high[(addr & 0xFF) as usize - 0xA0]
                     }
@@ -4847,10 +4848,14 @@ impl memory::Addressable for Mmio {
                     }
                 }
                 // CGB OAM mirror (0xFEA0-0xFEFF). Writable only when the OAM bus
-                // is free (no in-progress OAM DMA); otherwise dropped. DMG
-                // ignores writes here entirely.
+                // is free (no in-progress OAM DMA); otherwise dropped; &0xE7 index
+                // fold per CPU-CGB-C (see the UNUSED read path note). Gated on CGB
+                // *hardware* (is_cgb), not cgb_features: AntonioND
+                // oam_echo_ram_read_gbc_in_dmg_mode real_gbc.sav proves CPU writes
+                // land in DMG-compat mode on CGB silicon (pattern reads back, vs
+                // stale boot residue if dropped). DMG ignores writes entirely.
                 UNUSED_START..=UNUSED_END => {
-                    if self.cgb_features_enabled && !self.dma_transfer_in_progress() {
+                    if self.is_cgb() && !self.dma_transfer_in_progress() {
                         self.oam_high[((addr & 0xFF) & 0xE7) as usize - 0xA0] = value;
                     }
                 }
