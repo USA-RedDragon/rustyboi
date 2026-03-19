@@ -119,6 +119,12 @@ const UNL_LOCKED_DMG: u8 = 0;
 const UNL_LOCKED_CGB: u8 = 1;
 const UNL_UNLOCKED: u8 = 2;
 
+/// NT/Makon "old" bank-line swap tables for the $5003 bit-4 mode, applied to
+/// the ROM bank number: output bit i = input bit table[i] (mGBA
+/// _ntOld1Reorder/_ntOld2Reorder; identical to hhugboy's flippo1/flippo2).
+const NT_OLD1_REORDER: [u8; 8] = [0, 2, 1, 4, 3, 5, 6, 7];
+const NT_OLD2_REORDER: [u8; 8] = [1, 2, 0, 3, 4, 5, 6, 7];
+
 /// Unlicensed mapper families detected from ROM content at load time. The
 /// header type byte is unreliable on these boards, so this override wins over
 /// `cartridge_type` in `get_cartridge_type`.
@@ -143,6 +149,12 @@ pub enum UnlMapper {
     /// phase presents the Nintendo logo copy at $0184). hhugboy
     /// MbcUnlSachenMMC2.cpp; mGBA _GBSachenMMC2Read.
     SachenMmc2,
+    /// NT/Makon older board, MBC1-style 5-bit bank register. hhugboy
+    /// MbcUnlNtOld1.cpp; mGBA _GBNTOld1.
+    NtOld1,
+    /// NT/Makon older board, MBC3-style 8-bit bank register (+ rumble on the
+    /// multicarts). hhugboy MbcUnlNtOld2.cpp; mGBA _GBNTOld2.
+    NtOld2,
     /// Header liars that are electrically plain MBC1 with no RAM: Sonic 3D
     /// Blast 5 (type $EA, "code in the header area" per hhugboy), Captain
     /// Knick-Knack (Sachen dump with a Tetris header), Pocket Monsters
@@ -183,6 +195,7 @@ pub enum CartridgeType {
     WisdomTree,
     Rocket,
     Sachen { mmc2: bool },
+    NtOld { v2: bool },
 }
 
 /// 93LC56 serial-EEPROM interface state for MBC7 (Pan Docs "MBC7"). The
@@ -428,6 +441,20 @@ pub struct Cartridge {
     #[serde(default)]
     sachen_transition: Cell<u8>,
 
+    // NT/Makon "old" board state. nt_bank holds the raw written bank; the
+    // $5003 bit-swap is combinational on the bank lines, so it is applied at
+    // read time (get_rom_bank), keeping swap-mode flips retroactive exactly
+    // like the real wiring (mGBA/hhugboy re-switch on the mode write to
+    // emulate the same thing in their push-model maps).
+    #[serde(default = "serde_u8_one")]
+    nt_bank: u8,
+    #[serde(default)]
+    nt_base: u8,
+    #[serde(default)]
+    nt_bank_mask: u8,
+    #[serde(default)]
+    nt_swapped: bool,
+
     // CGB support information
     cgb_support: CgbSupport, // CGB compatibility from cartridge header
 
@@ -528,6 +555,10 @@ impl Clone for Cartridge {
             sachen_bank: self.sachen_bank,
             sachen_lock: self.sachen_lock.clone(),
             sachen_transition: self.sachen_transition.clone(),
+            nt_bank: self.nt_bank,
+            nt_base: self.nt_base,
+            nt_bank_mask: self.nt_bank_mask,
+            nt_swapped: self.nt_swapped,
             cgb_support: self.cgb_support.clone(),
             rumble_motor: self.rumble_motor,
             rtc_memory: self.rtc_memory.clone(),
@@ -638,6 +669,16 @@ impl Cartridge {
             | ((addr << 6) & 0x40)
     }
 
+    /// Bank-line bit swap used by the NT/Makon and related boards: output bit
+    /// i = input bit table[i] (mGBA _reorderBits).
+    fn reorder_bits(input: u8, table: &[u8; 8]) -> u8 {
+        let mut out = 0;
+        for (newbit, &oldbit) in table.iter().enumerate() {
+            out |= ((input >> oldbit) & 1) << newbit;
+        }
+        out
+    }
+
     /// Detect unlicensed mapper families from ROM content. The heuristics are
     /// lifted from the two reference emulators that support these boards
     /// (hhugboy CartDetection::detectUnlCompatMode, mGBA _detectUnlMBC) and
@@ -698,9 +739,54 @@ impl Cartridge {
                 && &title[..s.len()] == s
                 && title[s.len()..].first().is_none_or(|&b| b == 0)
         };
+        let title_contains =
+            |s: &[u8]| -> bool { title.windows(s.len()).any(|w| w == s) };
+        let newlic_mk = &data[0x144..0x146] == b"MK";
         let rom_size_code = data[ROM_SIZE_OFFSET];
 
+        // NT/Makon older boards (hhugboy detectUnlCompatMode):
+        // multicarts with the Pocket Bomberman / Trump Boy / Q Billion menus,
+        // the NT Rockman 99 single, and the early Makon GBC singles (Makon
+        // "MK" licensee + known title + untouched 256KB header).
+        if title_eq(b"POKEBOM USA") && data.len() > 512 * 1024 {
+            if data[0x102] == 0xE0 {
+                return UnlMapper::NtOld2; // 23-in-1 with Mario
+            }
+            if data[0x102] == 0xC0 {
+                return UnlMapper::NtOld1; // 25-in-1 with Rockman
+            }
+        }
+        if (title_eq(b" - TRUMP  BOY -") || title_eq(b"QBILLION")) && data.len() > 512 * 1024 {
+            return UnlMapper::NtOld2;
+        }
+        if title_eq(b"ROCKMAN 99")
+            && !newlic_mk
+            && data.get(0x8001).is_some_and(|&b| b != 0xB7)
+        {
+            return UnlMapper::NtOld1;
+        }
+        if newlic_mk
+            && (title_eq(b"SONIC 7")
+                || title_eq(b"SUPER MARIO 3")
+                || title_eq(b"DONKEY\tKONG 5")
+                || title_eq(b"ROCKMAN 99"))
+            && rom_size_code == 0x03
+        {
+            return UnlMapper::NtOld2;
+        }
+
+        // Electrically-plain-MBC1 header liars (hhugboy UNL_MBC1NOSAVE):
+        // Sonic 3D Blast 5 / Super Donkey Kong 3 (type $EA is header-overlap
+        // garbage), Captain Knick-Knack (Sachen dump wearing a Tetris header;
+        // real Tetris is exactly 32KB so the size gate excludes it), and the
+        // 256KB Pocket Monsters GO!GO!GO! dumps.
+        if title_contains(b"SONIC5") {
+            return UnlMapper::ForceMbc1;
+        }
         if title_eq(b"TETRIS") && data.len() > 0x8000 && rom_size_code == 0 {
+            return UnlMapper::ForceMbc1;
+        }
+        if title_eq(b"POCKET MONSTER") && rom_size_code == 0x03 {
             return UnlMapper::ForceMbc1;
         }
 
@@ -902,6 +988,10 @@ impl Cartridge {
             sachen_bank: 1,
             sachen_lock: Cell::new(UNL_LOCKED_DMG),
             sachen_transition: Cell::new(0),
+            nt_bank: 1,
+            nt_base: 0,
+            nt_bank_mask: 0,
+            nt_swapped: false,
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -1081,6 +1171,10 @@ impl Cartridge {
             sachen_bank: 1,
             sachen_lock: Cell::new(UNL_LOCKED_DMG),
             sachen_transition: Cell::new(0),
+            nt_bank: 1,
+            nt_base: 0,
+            nt_bank_mask: 0,
+            nt_swapped: false,
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -1106,6 +1200,8 @@ impl Cartridge {
             UnlMapper::Rocket => return CartridgeType::Rocket,
             UnlMapper::SachenMmc1 => return CartridgeType::Sachen { mmc2: false },
             UnlMapper::SachenMmc2 => return CartridgeType::Sachen { mmc2: true },
+            UnlMapper::NtOld1 => return CartridgeType::NtOld { v2: false },
+            UnlMapper::NtOld2 => return CartridgeType::NtOld { v2: true },
             UnlMapper::ForceMbc1 => {
                 return CartridgeType::MBC1 { ram: false, battery: false }
             }
@@ -1209,6 +1305,22 @@ impl Cartridge {
                     | (self.sachen_base & self.sachen_mask)) as usize)
                     % self.rom_banks
             }
+            CartridgeType::NtOld { v2 } => {
+                // The $5003 bit-swap is combinational on the bank lines; the
+                // $5002 bank-count mask and the $5001 multicart base (32KB
+                // units = 2 x 16KB banks) apply after it (mGBA _GBNTOld1/2).
+                let mut bank = self.nt_bank;
+                if self.nt_swapped {
+                    bank = Self::reorder_bits(
+                        bank,
+                        if v2 { &NT_OLD2_REORDER } else { &NT_OLD1_REORDER },
+                    );
+                }
+                if self.nt_bank_mask != 0 {
+                    bank &= self.nt_bank_mask;
+                }
+                (bank as usize + self.nt_base as usize * 2) % self.rom_banks
+            }
             CartridgeType::NoMBC { .. } => 1, // Simple cartridge always uses bank 1 for upper area
         }
     }
@@ -1247,7 +1359,8 @@ impl Cartridge {
             // None of the unlicensed boards bank their (optional) RAM.
             CartridgeType::WisdomTree
             | CartridgeType::Rocket
-            | CartridgeType::Sachen { .. } => 0,
+            | CartridgeType::Sachen { .. }
+            | CartridgeType::NtOld { .. } => 0,
             CartridgeType::NoMBC { .. } => 0,
         }
     }
@@ -1275,6 +1388,8 @@ impl Cartridge {
             CartridgeType::Sachen { .. } => {
                 ((self.sachen_base & self.sachen_mask) as usize) % self.rom_banks
             }
+            // Multicart base (32KB units).
+            CartridgeType::NtOld { .. } => (self.nt_base as usize * 2) % self.rom_banks,
             _ => 0,
         }
     }
@@ -1529,7 +1644,8 @@ impl Cartridge {
             // No known cart on these unlicensed boards has battery-backed RAM.
             CartridgeType::WisdomTree
             | CartridgeType::Rocket
-            | CartridgeType::Sachen { .. } => false,
+            | CartridgeType::Sachen { .. }
+            | CartridgeType::NtOld { .. } => false,
             // $09 ROM+RAM+BATTERY; plain $00/$08 (and unknown fallthroughs)
             // have none.
             CartridgeType::NoMBC { battery } => battery,
@@ -2830,6 +2946,17 @@ impl memory::Addressable for Cartridge {
                             0xFF
                         }
                     }
+                    // NT/Makon old boards gate RAM MBC3-style ($0A to
+                    // $0000-$1FFF), unbanked.
+                    CartridgeType::NtOld { .. } => {
+                        if self.ram_enabled && !self.ram_data.is_empty() {
+                            let offset =
+                                (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
+                            self.ram_data[offset]
+                        } else {
+                            0xFF
+                        }
+                    }
                     _ => 0xFF,
                 }
             }
@@ -2900,6 +3027,10 @@ impl memory::Addressable for Cartridge {
                             self.sachen_base = value;
                         }
                     }
+                    CartridgeType::NtOld { .. } => {
+                        // MBC3-style RAM enable (mGBA routes this to _GBMBC3).
+                        self.ram_enabled = (value & 0x0F) == 0x0A;
+                    }
                     _ => {}
                 }
             }
@@ -2951,6 +3082,13 @@ impl memory::Addressable for Cartridge {
                         // Inner ("unmasked") bank register, 0 maps to 1.
                         self.sachen_bank = value.max(1);
                     }
+                    CartridgeType::NtOld { v2 } => {
+                        // v1 is MBC1-style 5-bit, v2 MBC3-style 8-bit; both
+                        // remap 0 to 1. The raw value is stored; the $5003
+                        // bit-swap applies combinationally in get_rom_bank.
+                        let bank = if v2 { value } else { value & 0x1F };
+                        self.nt_bank = bank.max(1);
+                    }
                     _ => {}
                 }
             }
@@ -2996,6 +3134,44 @@ impl memory::Addressable for Cartridge {
                         // inner bank register has bits 4-5 both set.
                         if (self.sachen_bank & 0x30) == 0x30 {
                             self.sachen_mask = value;
+                        }
+                    }
+                    CartridgeType::NtOld { .. } => {
+                        // Mode registers live in $5000-$5FFF, decoded by
+                        // A0-A1 (mGBA _ntOldMulticart; hhugboy
+                        // handleOldMakonCartModeSet). $4000-$4FFF is ignored
+                        // (v2 rumble data bits are not wired to a motor
+                        // here).
+                        if (addr & 0xF000) == 0x5000 {
+                            match addr & 0x03 {
+                                0x01 => {
+                                    // Multicart base, 32KB units.
+                                    self.nt_base = value & 0x3F;
+                                }
+                                0x02 => {
+                                    // High nibble $Ex declares 8KB cart RAM
+                                    // (the header on these boards says none).
+                                    if (value & 0xF0) == 0xE0 && self.ram_data.is_empty() {
+                                        self.ram_data = vec![0xFF; 0x2000];
+                                        self.ram_banks = 1;
+                                    }
+                                    // Low nibble selects the sub-game bank
+                                    // window (bank-count mask).
+                                    self.nt_bank_mask = match value & 0x0F {
+                                        0x00 => 31, // 512KB
+                                        0x08 => 15, // 256KB
+                                        0x0C => 7,  // 128KB
+                                        0x0E => 3,  // 64KB
+                                        0x0F => 1,  // 32KB
+                                        _ => 31,
+                                    };
+                                }
+                                0x03 => {
+                                    // Bank-line bit-swap mode (bit 4).
+                                    self.nt_swapped = (value & 0x10) != 0;
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     _ => {}
@@ -3167,6 +3343,14 @@ impl memory::Addressable for Cartridge {
                     // Straight-through, ungated (see the read path).
                     CartridgeType::Rocket | CartridgeType::Sachen { .. } => {
                         if !self.ram_data.is_empty() {
+                            let offset =
+                                (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
+                            let _ = self.write_ram_byte(offset, value);
+                        }
+                    }
+                    // MBC3-style enable gate, unbanked.
+                    CartridgeType::NtOld { .. } => {
+                        if self.ram_enabled && !self.ram_data.is_empty() {
                             let offset =
                                 (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
                             let _ = self.write_ram_byte(offset, value);
@@ -3355,6 +3539,72 @@ mod tests {
         let mut fresh = Cartridge::from_bytes(&rom).unwrap();
         fresh.skip_boot_handoff();
         assert_eq!(fresh.read(0x0104), NINTENDO_LOGO[0]);
+    }
+
+    #[test]
+    fn nt_old2_swap_multicart_and_ram_declare() {
+        // Super Mario Special 3 shape: MBC1-spoofing header, Makon "MK"
+        // licensee, 256KB.
+        let mut rom = make_sized_rom(0x01, 0x03, 0x40000);
+        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x134..0x141].copy_from_slice(b"SUPER MARIO 3");
+        rom[0x144] = b'M';
+        rom[0x145] = b'K';
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::NtOld2);
+
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        // MBC3-style 8-bit bank, 0 -> 1.
+        cart.write(0x2000, 0x05);
+        assert_eq!(cart.read(0x5000), 5);
+        // $5003 bit-swap mode: bank lines reorder combinationally
+        // (mGBA _ntOld2Reorder: out0=in1, out1=in2, out2=in0).
+        cart.write(0x5003, 0x10);
+        assert_eq!(cart.read(0x5000), 6); // reorder(5) = 0b110
+        cart.write(0x5003, 0x00);
+        assert_eq!(cart.read(0x5000), 5);
+        // $5001 multicart base (32KB units) offsets both windows; $5002 low
+        // nibble masks the bank window.
+        cart.write(0x5001, 0x02);
+        cart.write(0x5002, 0x0C); // 128KB window -> mask 7
+        cart.write(0x2000, 0x09);
+        assert_eq!(cart.read(0x1000), 4); // base bank
+        assert_eq!(cart.read(0x5000), 4 + 1); // (9 & 7) + base
+        // $5002 high-nibble $Ex declares 8KB RAM on a header that lists none.
+        assert!(cart.ram_data.is_empty());
+        cart.write(0x5002, 0xE8);
+        assert_eq!(cart.ram_data.len(), 0x2000);
+        cart.write(0x0000, 0x0A); // MBC3-style enable
+        cart.write(0xA123, 0x77);
+        assert_eq!(cart.read(0xA123), 0x77);
+        cart.write(0x0000, 0x00);
+        assert_eq!(cart.read(0xA123), 0xFF);
+    }
+
+    #[test]
+    fn force_mbc1_header_liars_load_and_bank() {
+        // Sonic 3D Blast 5 shape: type $EA and garbage RAM size $20 (game
+        // code overlaps the header), 256KB file with a 32KB size byte. Must
+        // LOAD (no invalid-RAM error) and bank as plain MBC1 sized from the
+        // file.
+        let mut rom = make_sized_rom(0xEA, 0x00, 0x40000);
+        rom[RAM_SIZE_OFFSET] = 0x20;
+        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x134..0x13A].copy_from_slice(b"SONIC5");
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::ForceMbc1);
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(cart.get_cartridge_type(), CartridgeType::MBC1 { ram: false, battery: false }));
+        assert!(cart.ram_data.is_empty());
+        cart.write(0x2000, 0x0B);
+        assert_eq!(cart.read(0x5000), 11);
+
+        // Captain Knick-Knack: type $00 with a Tetris header on a 128KB file.
+        let mut rom = make_sized_rom(0x00, 0x00, 0x20000);
+        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x134..0x13A].copy_from_slice(b"TETRIS");
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::ForceMbc1);
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        cart.write(0x2000, 0x07);
+        assert_eq!(cart.read(0x5000), 7);
     }
 
     fn mbc3_rtc_cart() -> Cartridge {
