@@ -1274,6 +1274,10 @@ impl Mmio {
             && !self.serial.is_active()
             && self.delayed_writes.is_empty()
             && !self.has_pending_hdma_deferred()
+            // A link peer's deposits arrive on the PEER instance's timeline;
+            // per-dot polling keeps the external-clock completion cc tight, so
+            // never bulk-skip with a cable attached (default stays identical).
+            && !self.serial_device.is_link()
     }
 
     /// per-access STAGE 1: bulk-advance the timer+serial to `target_cc` in one shot
@@ -1321,14 +1325,66 @@ impl Mmio {
         // clock (M8 serial merge). `abs_cc` is advanced at the start of the
         // timer step within this same dot's tick, so it is the live cc here.
         // Serial::step is a no-op while no transfer is active (the common case),
-        // so skip the per-dot clone entirely then.
+        // so skip the per-dot clone entirely then. With a link peer attached the
+        // idle path additionally polls the cable for a completed exchange from
+        // the peer instance's window (the external-clock data path); anything
+        // else keeps the exact pre-link fast path.
         if !self.serial.is_active() {
+            if self.serial_device.is_link() {
+                self.link_poll_idle();
+            }
             return;
+        }
+        // An internal-clock transfer holding for the link peer: release it the
+        // moment the peer's side arms (window re-anchored at this cc), or fall
+        // back to the peer's live shift register after the stall timeout so an
+        // absent partner degrades to disconnected behavior instead of a hang.
+        if self.serial.link_waiting() {
+            let phase = self.timer.abs_cc();
+            let rx = match self.serial_device.link_poll_peer() {
+                Some(rx) => Some(rx),
+                None if phase.wrapping_sub(self.serial.link_wait_since())
+                    >= serial::LINK_STALL_TIMEOUT_CC =>
+                {
+                    Some(self.serial_device.link_peer_live_sb())
+                }
+                None => None,
+            };
+            match rx {
+                Some(rx) => {
+                    let divider = self.timer.internal_counter();
+                    self.serial.resume_link(rx, divider, phase);
+                }
+                None => return,
+            }
         }
         let phase = self.timer.abs_cc();
         let mut serial = self.serial.clone();
         serial.step(phase, self);
         self.serial = serial;
+    }
+
+    /// Link-cable poll while our serial unit is idle: if we armed an
+    /// external-clock transfer (SC.7 set, SC.0 clear) and the peer master's
+    /// completed window has deposited a byte, that IS our transfer completion
+    /// — SB takes the peer's byte, SC.7 clears and the serial IRQ fires at
+    /// *this* instance's cc (external clock edges arrive asynchronously to
+    /// anything local, exactly like hardware). We consume exactly one queued
+    /// byte per arm cycle: a byte deposited while we are NOT armed stays
+    /// queued until the game re-arms for the next external transfer (the
+    /// game's serial ISR re-arms SC per byte), so no completed byte + IRQ is
+    /// lost. Only when armed do we pull — leaving unsolicited bytes untouched
+    /// rather than clobbering an idle instance's SB.
+    fn link_poll_idle(&mut self) {
+        if self.serial.sc_raw() & 0x81 != 0x80 {
+            return;
+        }
+        let Some(byte) = self.serial_device.link_take_deposit() else {
+            return;
+        };
+        self.serial.complete_external(byte);
+        self.serial_device.link_disarm(byte);
+        self.request_interrupt(cpu::registers::InterruptFlag::Serial);
     }
 
     /// SC (FF02) write: latches the value, then (re)schedules the transfer event
@@ -1339,21 +1395,52 @@ impl Mmio {
     pub fn write_serial_sc(&mut self, value: u8) {
         let divider = self.timer.internal_counter();
         let phase = self.timer.write_access_cc();
-        let link_rx = self.serial_device.preloaded_response();
-        self.serial.schedule_sc(value, divider, phase, link_rx);
+        // The device observes every SC write (a link peer mirrors our
+        // armed/clock-mode state to the cable) and answers what an
+        // internal-clock start would exchange with.
+        let link = self.serial_device.sc_write(value, self.serial.read(serial::SB));
+        self.serial.schedule_sc(value, divider, phase, link);
+    }
+
+    /// SB (FF01) write: store the register and keep a link peer's live
+    /// shift-register mirror in sync (what the peer's master window would
+    /// clock out of us right now). No-op mirror for other devices.
+    pub fn write_serial_sb(&mut self, value: u8) {
+        self.serial.write(serial::SB, value);
+        self.serial_device.link_mirror_sb(value);
     }
 
     /// Completed serial byte exchange -> the attached link-port device (no-op
     /// when disconnected). Called by `Serial::step` at the transfer's
     /// completion cc; the device's reply to the NEXT transfer is preloaded
-    /// here, mirroring the real peer's shift-register reload.
-    pub fn serial_device_receive(&mut self, tx: u8, cc: u64) {
-        self.serial_device.receive_byte(tx, cc);
+    /// here, mirroring the real peer's shift-register reload. `rx` is the
+    /// byte our shift register received (a link peer records it as our new
+    /// live shift-register contents).
+    pub fn serial_device_receive(&mut self, tx: u8, rx: u8, cc: u64) {
+        self.serial_device.receive_byte(tx, rx, cc);
     }
 
     /// Plug a Game Boy Printer into the link port.
     pub fn attach_printer(&mut self) {
         self.serial_device = serial::SerialDevice::Printer(crate::printer::GbPrinter::new());
+    }
+
+    /// Plug one end of a link cable (the other end goes to a second GB
+    /// instance). The cable side's live-SB mirror seeds from our current SB so
+    /// a master window on the peer immediately exchanges with real register
+    /// contents.
+    pub fn attach_link(&mut self, peer: serial::LinkPeer) {
+        peer.seed_live_sb(self.serial.read(serial::SB));
+        self.serial_device = serial::SerialDevice::Link(peer);
+    }
+
+    pub fn link_attached(&self) -> bool {
+        self.serial_device.is_link()
+    }
+
+    /// Debug/test: the in-flight serial transfer's completion event cc.
+    pub fn serial_transfer_complete_at(&self) -> Option<u64> {
+        self.serial.transfer_complete_at()
     }
 
     /// Unplug whatever is on the link port (back to a disconnected cable).
@@ -1364,14 +1451,14 @@ impl Mmio {
     pub fn printer(&self) -> Option<&crate::printer::GbPrinter> {
         match &self.serial_device {
             serial::SerialDevice::Printer(p) => Some(p),
-            serial::SerialDevice::Disconnected => None,
+            _ => None,
         }
     }
 
     pub fn printer_mut(&mut self) -> Option<&mut crate::printer::GbPrinter> {
         match &mut self.serial_device {
             serial::SerialDevice::Printer(p) => Some(p),
-            serial::SerialDevice::Disconnected => None,
+            _ => None,
         }
     }
 
@@ -4784,7 +4871,7 @@ impl memory::Addressable for Mmio {
                             self.write_timer(addr, value);
                         }
                         timer::TIMA..=timer::TAC => self.write_timer(addr, value),
-                        serial::SB => self.serial.write(addr, value),
+                        serial::SB => self.write_serial_sb(value),
                         serial::SC => self.write_serial_sc(value),
                         audio::NR10..=audio::NR52 | audio::WAV_START..=audio::WAV_END => {
                             self.write_apu(addr, value);

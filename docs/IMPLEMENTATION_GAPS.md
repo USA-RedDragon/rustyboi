@@ -497,22 +497,69 @@ states incl. the header-popcount-dependent boot DIV: COMPLETE (`gb.rs:443-448`).
 
 ## 8. Serial / link cable
 
-### 8.1 Link peer transport & external clock — MISSING (disconnected-cable only)
+### 8.1 Link peer transport & external clock — CORE DONE (two-GB link cable)
 - Doc: [Pan Docs Serial Data Transfer](https://gbdev.io/pandocs/Serial_Data_Transfer_(Link_Cable).html);
   gb-ctr `peripherals/serial.typ`.
-- Status: internal-clock transfers are Gambatte-exact (DIV-aligned schedule,
-  CGB fast clock, DIV-write realign — `serial.rs:85-134`) and disconnected
-  semantics are right ($FF shifts in, `serial.rs:152`; external-clock starts
-  never complete, `serial.rs:76-78` — correct with no peer). But there is no
-  peer: no API to connect two cores, no external-clock data path, no
-  cross-instance timing negotiation.
-- Impact: all 2-player features across the collection (Tetris, Pokémon trades
-  /battles, F-1 Race...); every downstream serial peripheral (§8.2-8.4).
-  Census confirms no comprehensive public link-timing suite exists
-  (make-our-own target; Pan Docs itself carries a "TODO: only measured on CGB
-  rev E" on disconnect behavior).
-- Effort: **L** — transport trait + lockstep scheduling between instances;
-  the master/slave byte-swap protocol itself is simple.
+- Status: implemented. A `SerialDevice::Link` variant (`serial.rs`) joins two
+  GB instances through a shared `LinkCable` (an `Arc<Mutex<..>>` exchange
+  buffer with a per-side `{live_sb, armed, armed_internal, deposit}` handshake
+  — no wall clock, no threads required; determinism is inherited from the
+  pump schedule). Both clock roles are modeled:
+  - **Internal clock (master).** At the SC=$8x write the device latches the
+    peer side's live shift register (`LinkStart::Ready`) and the transfer runs
+    on the *exact same* DIV-aligned schedule as a disconnected cable — a ready
+    peer never perturbs internal-clock timing (proven byte-identical vs the
+    disconnected oracle in `link_two_instance_exchange_bytes_cc_and_irq`). If
+    the peer instance has not armed yet the transfer *holds* (`AwaitPeer`): the
+    shift clock freezes (SC.7 stays set, no bits move, no IRQ) until the peer
+    arms, at which point the 8-bit window is re-anchored (DIV-snapped) at the
+    arm cc — hardware-faithful "master stalls for the slave". A stall timeout
+    (`LINK_STALL_TIMEOUT_CC`, ~4 frames) falls back to the peer's live SB so a
+    partner that never joins the link menu degrades to the disconnected UX
+    instead of hanging the game.
+  - **External clock (slave).** Idle serial polls the cable each dot; when the
+    master's completed window deposits its byte, the slave's SB takes it, SC.7
+    clears and the serial IRQ fires at *this* instance's cc (external clock
+    edges arrive asynchronously to anything local, exactly like hardware). A
+    side that never armed SC.7 still gets its shift register clocked through
+    (SB replaced, no flag/IRQ).
+  - **Both-internal clock conflict** (both sides drive the clock): each side
+    completes its own window against the other's live byte, index-locked
+    across all 8 bytes (`link_both_internal_clock_conflict_exchanges`).
+  - **CGB double-speed / fast clock** (SC.1): the master window is 8×16 cc; a
+    DMG slave follows at the master's rate
+    (`link_cgb_fast_clock_master_dmg_slave`).
+  Disconnected is still the default and stays byte-identical (the whole serial
+  suite matrix — samesuite 70+6+2, blargg 15+41, mooneye 193, sketchtests 6,
+  gambatte floor 9 — is unchanged; a link cable never touches any codepath
+  until `connect_link`/`attach_link_peer` is called). `LinkPeer` clones/
+  savestates sever the cable (a cloned instance must not ghost-drive its
+  twin), behaving like an unplugged end.
+- API: `GB::connect_link(&mut a, &mut b)` wires two in-process instances;
+  `GB::attach_link_peer(peer)` attaches one end (the other can live behind a
+  socket/process transport). `LinkCable::pair()` mints the two ends.
+- Validation: `rustyboi-core/src/serial.rs` `#[cfg(test)]` — 8 tests including
+  the headless two-instance proof (A sends 0x01..=0x08, B sends 0xA0..=0xA7,
+  both receive in order, master cc/IF byte-identical to the disconnected
+  oracle, slave completions within lockstep skew), the stall/timeout/severed
+  cases, the clock conflict, and the CGB fast clock. Real-game: two Pokémon
+  Blue instances connected via `SerialDevice::Link` boot, load the GREG
+  battery save, reach CONTINUE with correct stats and walk the Viridian
+  overworld (driven headless by the `link_demo` example).
+- Frontend integration point (secondary; follows the §8.2 printer pattern):
+  the reference driver is `rustyboi-core/examples/link_demo.rs` — it creates
+  two `GB`s, `GB::connect_link`s them, and pumps both `run_until_frame` in a
+  shared loop (per-frame is enough; the hold/arm handshake absorbs sub-frame
+  interleave), with scripted per-side input and PNG capture. A desktop
+  two-window or libretro netplay build is the same three lines
+  (`connect_link` at session start, drive both loops); a remote/socket peer
+  swaps the in-process `LinkCable` for a socket-backed transport behind the
+  `attach_link_peer` seam (the cable is the only shared state). Not yet wired
+  into the winit/egui menu (single-instance frontend today).
+- Remaining: the 4-player adapter (§8.3) and Mobile Adapter (§8.4) build on
+  this; a socket transport + desktop two-window UI; full in-game trade
+  completion (the transport is proven; reaching the Cable Club tile is pure
+  in-game navigation).
 
 ### 8.2 Game Boy Printer — DONE
 - Doc: [Pan Docs Game Boy Printer](https://gbdev.io/pandocs/Gameboy_Printer.html)
