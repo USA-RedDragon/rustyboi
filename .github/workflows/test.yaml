@@ -52,6 +52,7 @@ jobs:
           - magentests
           - little_things_extra
           - sketchtests
+          - gbc_hw_tests
           - gambatte
         exclude:
           - { os: windows, arch: armv7 }
@@ -99,7 +100,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: gb-test-roms
-          key: roms-${{ matrix.os }}-v7.0-gambatte5a41a68c-shootout7c6ee9ba-daidcpp-magen050-ltgce015ca2-sketch02a
+          key: roms-${{ matrix.os }}-v7.0-gambatte5a41a68c-shootout7c6ee9ba-daidcpp-magen050-ltgce015ca2-sketch02a-gbchw631e600
       - name: Fetch ROMs
         shell: bash
         run: ./tools/run-suites.sh setup

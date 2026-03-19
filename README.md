@@ -40,8 +40,9 @@ failing ROMs is individually proven and documented in
 | magentests | 11 | 11 |
 | little_things_extra | 4 | 4 |
 | sketchtests | 6 | 6 |
+| gbc_hw_tests | 87 | 193 |
 | gambatte | 5248 | 5257 |
-| **Total** | **6452** | **6465** |
+| **Total** | **6539** | **6658** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core

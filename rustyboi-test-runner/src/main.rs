@@ -19,8 +19,8 @@ struct Args {
     /// Run a suite manifest (acid2/mealybug/blargg/gambatte/...). Each line:
     /// `<id>|<mode>|<grading>|<rom>[|<arg>...]` where grading is one of
     /// png/png_fixed/png_shootout/serial/blargg_mem/memauto/mem/mooneye/
-    /// mooneye_ed/gambatte (gambatte rows use mode `auto`: oracle + modes are
-    /// filename-encoded). Regenerate manifests with `tools/gen_manifests.py`.
+    /// mooneye_ed/sram/gambatte (gambatte rows use mode `auto`: oracle + modes
+    /// are filename-encoded). Regenerate manifests with `tools/gen_manifests.py`.
     #[arg(long, value_name = "FILE")]
     manifest: Option<PathBuf>,
 
