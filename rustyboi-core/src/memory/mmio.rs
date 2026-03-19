@@ -751,12 +751,13 @@ pub struct Mmio {
 
     // CGB feature enablement
     cgb_features_enabled: bool, // Whether CGB-specific features should be active
-    // Cached: the inserted cart is an MBC3-with-timer (RTC). Lets the per-dot
-    // tick_rtc skip the call into the cartridge entirely for the common
-    // no-RTC cart. #[serde(skip)] + resync on cartridge access keeps it correct
-    // across state loads (an old/absent value is re-derived, never trusted).
+    // Cached: the inserted cart has a peripheral clock (MBC3/HuC-3 RTC or
+    // the POCKET CAMERA capture countdown). Lets the per-dot tick_rtc skip
+    // the call into the cartridge entirely for the common clockless cart.
+    // #[serde(skip)] + resync on cartridge access keeps it correct across
+    // state loads (an old/absent value is re-derived, never trusted).
     #[serde(skip, default)]
-    cart_has_rtc: bool,
+    cart_has_clock: bool,
     // AGB (GBA-in-GBC-mode) hardware flag. AGB behaves like CGB everywhere
     // except a small, well-defined set of timing/APU diffs (Gambatte isAgb()).
     // Set once at construction from Hardware::AGB; never toggled by cart compat
@@ -888,7 +889,7 @@ impl Mmio {
             obj_palette_spec: 0,
 
             cgb_features_enabled: false, // Will be set when cartridge is inserted
-            cart_has_rtc: false,         // Set on insert_cartridge
+            cart_has_clock: false,       // Set on insert_cartridge
             is_agb: false,
             cgb_de: false,
             is_mgb: false,
@@ -911,15 +912,15 @@ impl Mmio {
     }
 
     pub fn insert_cartridge(&mut self, cartridge: cartridge::Cartridge) {
-        self.cart_has_rtc = cartridge.has_rtc();
+        self.cart_has_clock = cartridge.needs_clock_tick();
         self.cartridge = Some(cartridge);
     }
 
-    /// Re-derive the cached `cart_has_rtc` flag from the current cartridge.
+    /// Re-derive the cached `cart_has_clock` flag from the current cartridge.
     /// Called after a state-file load, where the cartridge is restored via
     /// serde rather than `insert_cartridge`.
     pub fn resync_cart_flags(&mut self) {
-        self.cart_has_rtc = self.cartridge.as_ref().is_some_and(|c| c.has_rtc());
+        self.cart_has_clock = self.cartridge.as_ref().is_some_and(|c| c.needs_clock_tick());
     }
 
     pub fn set_cgb_features_enabled(&mut self, enabled: bool) {
@@ -1229,17 +1230,22 @@ impl Mmio {
         }
     }
 
-    /// Advance the cartridge's MBC3 RTC by `cycles` master (dot) clock T-cycles.
-    /// The RTC crystal runs at the 4.194304 MHz master rate independent of CPU
-    /// speed, which is exactly the `master_cc` dot clock, so this is called with
-    /// the same span the rest of the world advances by. No-op for carts without
-    /// an RTC.
+    /// Advance the cartridge's peripheral clocks by `cycles` master (dot)
+    /// clock T-cycles. The RTC crystal runs at the 4.194304 MHz master rate
+    /// independent of CPU speed, which is exactly the `master_cc` dot clock,
+    /// so this is called with the same span the rest of the world advances
+    /// by. The POCKET CAMERA capture countdown instead runs off the PHI
+    /// cartridge clock (the CPU M-clock), which doubles in CGB double-speed
+    /// mode, so its span is scaled accordingly. No-op for carts without a
+    /// peripheral clock.
     pub fn tick_rtc(&mut self, cycles: u64) {
-        if !self.cart_has_rtc {
+        if !self.cart_has_clock {
             return;
         }
+        let ds = self.is_double_speed_mode();
         if let Some(cart) = self.cartridge.as_mut() {
             cart.rtc_tick(cycles);
+            cart.cam_tick(cycles << (ds as u32));
         }
     }
 
