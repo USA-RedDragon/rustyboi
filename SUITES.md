@@ -48,6 +48,13 @@ upstream sources:
 - **[Ashiepaws/sketchtests](https://github.com/Ashiepaws/sketchtests) v0.2-alpha**
   (`sync_sketchtests_roms`) — the prebuilt release zip's three ROMs flattened
   into `gb-test-roms/sketchtests/`.
+- **[AntonioND/gbc-hw-tests](https://github.com/AntonioND/gbc-hw-tests)**
+  (pinned `631e600`, `sync_gbchwtests_roms`) — a **real-silicon** SRAM-capture
+  suite: prebuilt `.gbc` ROMs *and* the real-hardware SRAM dumps
+  (`real_gb`/`real_gbp`/`real_gbc`/`real_gba_sp` `.sav`, one unit per device
+  class) they are graded against, both committed in the upstream repo. Shallow
+  single-commit checkout; the ROMs + `.sav` oracles (~17 MB) are copied
+  preserving the `category/test/` layout into `gb-test-roms/gbc-hw-tests/`.
 
 `gb-test-roms/` is gitignored (never committed); CI caches it keyed on those
 source versions.
@@ -89,6 +96,7 @@ not fit it) and takes the model + oracle from each manifest line. The existing
 | `mem`          | `MemValue{addr,val}`| generic: read `addr`, compare to `val` after the budget. |
 | `mooneye`      | `MooneyeFib`        | run to `LD B,B`, require Fibonacci regs B,C,D,E,H,L = 3,5,8,13,21,34. |
 | `mooneye_ed`   | `MooneyeFibEd`      | mooneye Fibonacci check reached via the `ED`-style done-marker used by the wilbertpol / age variants. |
+| `sram`         | `SramDump`          | cart SRAM compared **byte-exact** to a real-hardware `.sav` capture (AntonioND gbc-hw-tests): the ROM writes its results to `$A000..` and halts; the whole reference file is the oracle. Reuses the gambatte `.bin`-dumper compare path (runs a flat frame-cycle budget, then reads `save_ram`). |
 | `gambatte`     | (dumper oracle)     | Gambatte `.bin`/`.dump` framebuffer/register oracles from gambatte-core; gated on `failed <= 16`, see below. |
 
 The PNG decoder (`frame.rs`) handles all c-sp reference formats (color types
@@ -216,6 +224,58 @@ touch SC — verified by disassembly):
 
 Currently **6 / 6** passing.
 
+### gbc_hw_tests — `suites/gbc_hw_tests.manifest` (`sram`)
+
+[AntonioND/gbc-hw-tests](https://github.com/AntonioND/gbc-hw-tests) (pinned
+`631e600`, fetched by `sync_gbchwtests_roms`) is a **real-silicon** hardware
+suite of ~150 tests spanning cpu / dma / interrupts / lcd / memory / serial /
+timers. Each test writes its results to cart SRAM (`$A000..`) and halts; the
+upstream repo commits the real-hardware SRAM captures — `real_gb.sav` (DMG),
+`real_gbp.sav` (Pocket), `real_gbc.sav` (CGB) and `real_gba_sp.sav` (GBA-SP),
+one unit per device class — that those results are graded against, so the
+oracle is genuine silicon, not another emulator.
+
+**Device-column mapping** (rustyboi is a CGB emulator):
+
+- every test with a `real_gbc.sav` gets a **CGB-vs-`real_gbc.sav`** case (the
+  primary grade);
+- **DMG-flagged** ROMs (header `0x143 == 0x00` — the `*_dmg_mode` tests plus the
+  DMG-valid DMA/timer tests) *also* get a **DMG-vs-`real_gb.sav`** case;
+- the GBA-SP / GBP columns are captured upstream but **not graded** (rustyboi
+  targets CGB-04 + DMG-08; GBA-SP is a distinct APU/serial revision).
+
+**Grading** reuses the `sram` oracle (the gambatte `.bin`-dumper compare path):
+after a flat frame budget the ROM's `save_ram` is compared **byte-exact** to the
+capture. Most captures are trimmed upstream to exactly `[results…][magic
+12 34 56 78]`, so the whole file is the oracle. `sc_change_freq_gbc` and
+`timer_reset_2` are raw 128 KB card dumps whose written region is followed by
+per-unit uninitialised-SRAM garbage; for those the generator emits a byte-exact
+*deterministic prefix* (through the last magic marker) under
+`suites/refs/gbc-hw-tests/` (a slice of the real dump, never an emulator
+capture). Two tests are **excluded** as ungradeable-byte-exact:
+`corrupted_stop` (raw dump, un-delimited result + garbage tail) and
+`tac_set_everything` (upstream committed *two differing* CGB captures →
+per-run nondeterministic by their own measurement). `speed_change_cancel`
+grades its input-free `not_pressed` capture.
+
+> **Revision caveat.** AntonioND's captures are from one unit per class and the
+> CGB unit's silicon revision is undocumented. Rev-sensitive tests
+> (speed-switch sub-timing, STOP sub-dot, mode-2/3 LCD timing) may disagree with
+> rustyboi's modeled CGB-04 revision — such a mismatch is a *revision
+> difference*, not necessarily an emulator bug. The suite is graded honestly
+> regardless (no fudging to inflate the count); per-ROM adjudication lives in
+> `KNOWN_FAILURES.md`.
+
+Initial adoption score: **87 / 193** (CGB 69 / 152, DMG 18 / 41), run at 800
+frames (the mode-2 / echo-RAM tests sweep a full frame across many repetitions
+before settling). The CPU category is a clean **10 / 10** — every STOP / HALT /
+DAA / undefined-opcode test passes — and the speed-switch trio
+(`speed_change_cancel`, `speed_change_timing_coarse`, `speed_change_timing_fine`)
+passes on CGB, corroborating the plain-STOP / speed-switch model. The remaining
+gaps are concentrated in the sub-dot LCD-frame-timing family (the revision-caveat
+zone) plus a handful of DMA-source-validity, echo-RAM and joypad-IRQ behaviours
+tracked as work items.
+
 ### Census skips (evaluated, not adopted)
 
 - **CasualPokePlayer/test-roms `sgb-mlt-test`** — no oracle exists anywhere:
@@ -243,8 +303,10 @@ python3 tools/gen_manifests.py --only mealybug,age    # regen selected suites
 ```
 
 Re-run after updating the ROM set (e.g. a new c-sp release) to rebuild the case
-lists from scratch. The `sgb`, `daid` and `cpp` suites are curated by hand (their
-ROMs are not in the c-sp set) and are not regenerated by this script.
+lists from scratch. The `gbc_hw_tests` suite is regenerated here too (from the
+fetched `gbc-hw-tests/` tree, including its trimmed `.sav` prefixes under
+`suites/refs/gbc-hw-tests/`). The `sgb`, `daid` and `cpp` suites are curated by
+hand (their ROMs are not in the c-sp set) and are not regenerated by this script.
 
 ## Relationship to the Gambatte hwtests
 

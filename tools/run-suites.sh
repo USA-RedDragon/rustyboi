@@ -59,6 +59,10 @@ LTG_RAW_URL="https://raw.githubusercontent.com/nitro2k01/little-things-gb/${LTG_
 # sketchtests: prebuilt release zip (Ashiepaws, v0.2-alpha, 2020-08-29).
 SKETCHTESTS_VERSION="${SKETCHTESTS_VERSION:-v0.2-alpha}"
 SKETCHTESTS_URL="https://github.com/Ashiepaws/sketchtests/releases/download/${SKETCHTESTS_VERSION}/sketchtests-${SKETCHTESTS_VERSION}.zip"
+# AntonioND/gbc-hw-tests: real-silicon SRAM-capture suite (prebuilt .gbc ROMs
+# + real_*.sav oracles captured on GB/GBP/GBC/GBA-SP, committed in-repo).
+GBCHW_REF="${GBCHW_REF:-631e60000c885154a8526df0b148847f9c34ce42}"
+GBCHW_URL="https://github.com/AntonioND/gbc-hw-tests.git"
 
 # --- config ------------------------------------------------------------------
 ROMS="${RB_ROMS:-gb-test-roms}"
@@ -127,6 +131,7 @@ threshold() {
         magentests)         echo "11 -" ;;
         little_things_extra) echo "4 -" ;;
         sketchtests)        echo "6 120" ;;
+        gbc_hw_tests)       echo "87 800" ;;  # real-silicon SRAM captures; 800 frames = slow mode2/echo tests settle
         gambatte)           echo "5248 -" ;;  # gated on failed<=9 (GAMBATTE_MAX_FAIL)
         *)                  echo "" ;;
     esac
@@ -137,7 +142,7 @@ GAMBATTE_MAX_FAIL=9
 ORDER="acid2 cgb_acid_hell mealybug mooneye mooneye_wilbertpol age gbmicrotest \
 samesuite_apu samesuite_nonapu samesuite_sgb sgb blargg blargg_singles \
 scribbltests turtle_tests little_things_gb bully strikethrough daid rtc3test \
-mbc3_tester cpp magentests little_things_extra sketchtests gambatte"
+mbc3_tester cpp magentests little_things_extra sketchtests gbc_hw_tests gambatte"
 
 # --- helpers -----------------------------------------------------------------
 log()  { printf '%s\n' "==> $*"; }
@@ -189,6 +194,8 @@ setup() {
     sync_little_things_extra
     log "Sourcing sketchtests ${SKETCHTESTS_VERSION} release ROMs"
     sync_sketchtests_roms
+    log "Sourcing gbc-hw-tests ROMs + real-device .sav oracles @ ${GBCHW_REF:0:12}"
+    sync_gbchwtests_roms
     log "ROM setup complete"
 }
 
@@ -252,6 +259,33 @@ with zipfile.ZipFile(zip_path) as z:
 PY
     rm -f "$zip"
     log "Sourced sketchtests ROMs into $sk"
+}
+
+# AntonioND/gbc-hw-tests: the repo commits both the prebuilt .gbc test ROMs and
+# the real-hardware SRAM captures (real_gb / real_gbp / real_gbc / real_gba_sp
+# .sav, one per device class) they are graded against. Shallow single-commit
+# checkout at the pinned ref; copy only the ROMs + .sav oracles (~17 MB),
+# preserving the repo's category/test dir layout under $ROMS/gbc-hw-tests/.
+sync_gbchwtests_roms() {
+    local hw="$ROMS/gbc-hw-tests"
+    [ -f "$hw/cpu/halt_bug_test/halt_bug_test.gbc" ] \
+        && [ -f "$hw/timers/div_reset_65k/real_gbc.sav" ] && return 0
+    local tmp
+    tmp="$(mktemp -d)"
+    git -C "$tmp" init -q
+    git -C "$tmp" remote add origin "$GBCHW_URL"
+    git -C "$tmp" fetch -q --depth 1 origin "$GBCHW_REF"
+    git -C "$tmp" checkout -q FETCH_HEAD
+    local n=0 rel
+    while IFS= read -r -d '' f; do
+        rel="${f#"$tmp"/}"
+        mkdir -p "$hw/$(dirname "$rel")"
+        cp -p "$f" "$hw/$rel"
+        n=$((n + 1))
+    done < <(find "$tmp" -path "$tmp/.git" -prune -o \
+        \( -name '*.gbc' -o -name 'real_*.sav' \) -print0)
+    rm -rf "$tmp"
+    log "Sourced $n gbc-hw-tests files into $hw"
 }
 
 # The cpp/ and daid/ suite ROMs (sgb-ext-test, the MBC3/RTC edge tests, and the

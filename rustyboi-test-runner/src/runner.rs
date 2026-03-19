@@ -518,7 +518,11 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         Oracle::SramDump { .. } | Oracle::RegionDump { .. }
     );
     if dump_oracle {
-        let cycle_budget = (options.frames.max(DUMP_MIN_FRAMES) as u64) * (CYCLES_PER_FRAME as u64);
+        // Manifest-driven `sram` cases may carry a per-case `frames=` budget
+        // (still clamped up to the dump minimum); filename-discovered gambatte
+        // dump cases never do (case.frames is None) and keep the run-wide value.
+        let frames = case.frames.unwrap_or(options.frames);
+        let cycle_budget = (frames.max(DUMP_MIN_FRAMES) as u64) * (CYCLES_PER_FRAME as u64);
         let mut cycles_run: u64 = 0;
         while cycles_run < cycle_budget {
             let (_breakpoint_hit, cycles) = gb.step_instruction(false);
