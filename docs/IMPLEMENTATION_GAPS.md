@@ -45,7 +45,7 @@ Scanned **1148 ROMs** (543 zips in `~/Downloads/gb/GBC/`, 605 in
 | MBC3 ($10/$11/$13) | 20 (13 with RTC) | supported incl. MBC30; **RTC state lost between sessions** (§2.2) |
 | MBC5+RUMBLE ($1C/$1E) | 16 | banking supported; **rumble motor not wired to any frontend** (§2.3) |
 | Rocket Games ($97/$99, unlicensed) | 10 | supported (logo-checksum detection + inner/outer banking) |
-| POCKET CAMERA ($FC) | 1 | **MISSING** |
+| POCKET CAMERA ($FC) | 1 | supported (MAC-GBD + M64282FP sensor pipeline — §2.6) |
 | Makon/Ka Sheng ($EA, unlicensed) | 1 | supported (SONIC5 -> plain-MBC1 routing per hhugboy) |
 | MBC7 ($22) | 1 | **IN-PROGRESS** |
 | HuC3 ($FE) | 1 | **IN-PROGRESS** |
@@ -59,7 +59,8 @@ whole-screen (not per-region) SGB colorization (§7).
 ### The "won't run correctly today" list (owner's games, by name)
 
 **Licensed, mapper missing (fully broken until fixed):**
-- `GB/Gameboy Camera (UE) [S][!]` — POCKET CAMERA $FC (§2.6)
+- ~~`GB/Gameboy Camera (UE) [S][!]` — POCKET CAMERA $FC~~ FIXED (§2.6): boots,
+  shoots off the M64282FP pipeline, saves to the album, gallery works.
 - `GBC/Pokemon Card GB (J) [C][T+Eng]` — HuC1 $FF (§2.5)
 - `GBC/Kirby's Tilt 'n' Tumble (U) [C][!]` — MBC7 $22 (IN-PROGRESS)
 - `GBC/Robopon - Sun Version (U) [C][!]` — HuC3 $FE (IN-PROGRESS)
@@ -182,18 +183,33 @@ no external RAM (`cartridge.rs:1263` read arm `_ => 0xFF`, `:1430` write arm
   IR mode can initially return "no light seen" (matches the CGB RP stub) — the
   cart is then fully playable single-player. Full IR transport is §6.1.
 
-### 2.6 POCKET CAMERA (MAC-GBD + M64282FP sensor) — MISSING
+### 2.6 POCKET CAMERA (MAC-GBD + M64282FP sensor) — DONE
 - Doc: [Pan Docs Game Boy Camera](https://gbdev.io/pandocs/Gameboy_Camera.html)
   (AntonioND's reverse-engineering): MBC-like banking (ROM bank $2000 6-bit;
   $4000-5FFF RAM bank 0-$0F or CAM register file when bit 4 set), A000 trigger
   /status register, write-only sensor registers (exposure, dither matrix, edge
   ops), 128KB RAM, capture timing formula.
-- Status: type $FC falls to NoMBC. Nothing implemented.
-- Impact: Game Boy Camera (owned). The selfie/minigame suite is fully playable
-  in emulators that model the sensor with a static/webcam image source.
+- Status: implemented in `cartridge.rs` (`CartridgeType::PocketCamera`):
+  6-bit ROM banking (bank 0 selectable), 16 RAM banks, write-only-gate RAMG
+  (reads always enabled per AntonioND), the 54-byte CAM register file
+  (mirrored every $80; only A000 readable = stored bits 1-2 + live busy),
+  RAM reads $00 / writes dropped while capturing, stop/resume via A000 bit 0.
+  Capture busy window = 4x(32446 + (N?0:512) + 16xexposure) master dots off
+  the deterministic `tick_rtc` path (PHI-doubled in CGB double speed).
+  M64282FP pipeline per the GiiBiiAdvance reference model reproduced in Pan
+  Docs, exact-integer: exposure scale + level squash, invert, the N/VH/E3
+  3x3 kernels (2D/H enhancement+extraction, V modes, the mode-1 constant-
+  color quirk) with the A000-selected P/M 1-D filter sets, 4x4x3 dither/
+  contrast matrix, 2bpp tile packing to RAM bank 0 $0100 (committed at
+  window expiry, streamed to the `.sav`). Sensor input: built-in
+  deterministic test pattern, or a frontend-fed 128x112 grayscale via
+  `Cartridge::set_camera_image` (see `camera-drive` harness bin; webcam
+  wiring in the GUI frontends remains open).
+- Verified: owner's `Gameboy Camera (UE) [S][!]` boots to the SHOOT/VIEW/PLAY
+  menu, live viewfinder renders the fed image through the sensor pipeline,
+  shutter+SAVE stores to the album ("30 left" -> "29 left"), gallery shows
+  the photo, and the album survives a process restart via the 128KB `.sav`.
   Census: no public graded camera tests exist (make-our-own target).
-- Effort: **L** — banking+registers M; faithful capture pipeline (exposure,
-  3-bit dither matrices, 1D filtering, timing) is the long pole.
 
 ### 2.7 MMM01 — MISSING
 - Doc: [Pan Docs MMM01](https://gbdev.io/pandocs/MMM01.html); gb-ctr
@@ -646,7 +662,7 @@ against both hand-off anchors. Gaps: only §6.2 (compat palette table), §6.3
 | HuC-3 | IN-PROGRESS |
 | Other MBCs (Wisdom Tree, Rocket, Sachen, Makon) | IMPLEMENTED — §2.11 (EMS/multicart magics still missing) |
 | Game Boy Printer | DONE — §8.2 |
-| Game Boy Camera | MISSING — §2.6 |
+| Game Boy Camera | DONE — §2.6 (mapper + M64282FP pipeline; webcam feed is a frontend opt-in) |
 | 4-Player Adapter | MISSING — §8.3 |
 | Game Genie / Shark | COMPLETE (core hooks) |
 | Power-Up Sequence | COMPLETE — §9 |
@@ -674,7 +690,7 @@ incl. its "OAM DMA bus conflicts: TODO" (we exceed the reference), MBC30
 | 6 | ~~SGB ATTR geometry + ATTR_TRN/ATTR_SET store (§7.1)~~ DONE | 185 SGB games colorize correctly | — |
 | 7 | ~~SGB border CHR_TRN/PCT_TRN + 256x224 output (§7.2)~~ DONE (core; frontend presentation opt-in) | 185 SGB games | — |
 | 8 | Link-cable peer transport + external clock (§8.1) | all 2-player/trading | L |
-| 9 | Game Boy Camera mapper + M64282FP pipeline (§2.6) | owned cart | L |
+| 9 | ~~Game Boy Camera mapper + M64282FP pipeline (§2.6)~~ DONE (boot→shoot→album→gallery verified; `set_camera_image` frontend hook) | owned cart | — |
 | 10 | ~~Plain-STOP mode per the STOP chart (§3.1)~~ DONE (broke-0; daid final frames now hardware-exact) | correctness + gbc-hw-tests wave | — |
 | 11 | CGB IR transport (loopback + paired instance) (§6.1) | Mystery Gift, Perfect Dark, SMB DX | M |
 | 12 | ROM+RAM $08/$09 NoMBC external RAM (§2.1) | homebrew/mis-dumps | S |
