@@ -990,6 +990,12 @@ impl GB {
         self.mmio.read(address)
     }
 
+    /// Select the inserted board's SRAM chip-select decode (test-fixture
+    /// modeling; see `Cartridge::dma_sram_bus_read`). Call after `insert`.
+    pub fn set_cart_sram_cs_lazy(&mut self, lazy: bool) {
+        self.mmio.set_cart_sram_cs_lazy(lazy);
+    }
+
     /// Master cycle counter (abs_cc) for timing trace reconciliation vs cctracer.
     pub fn master_cc(&self) -> u64 {
         self.mmio.master_cc()

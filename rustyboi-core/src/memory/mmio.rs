@@ -1479,6 +1479,14 @@ impl Mmio {
         self.serial.is_cgb()
     }
 
+    /// Select the inserted board's SRAM chip-select decode (fixture-level; see
+    /// `Cartridge::dma_sram_bus_read`). No-op without a cartridge.
+    pub fn set_cart_sram_cs_lazy(&mut self, lazy: bool) {
+        if let Some(cart) = self.cartridge.as_mut() {
+            cart.set_sram_cs_lazy(lazy);
+        }
+    }
+
     /// Snapshot a serial-influenced register (SB/SC/IF) at the read M-cycle
     /// start cc, mirroring `sync_apu_for_read`. The per-dot `step_serial` during
     /// `tick_m` can complete the transfer and set the serial IF bit within the
@@ -2832,7 +2840,22 @@ impl Mmio {
     ///   - rom/sram/vram -> normal read of `source_base + pos`.
     fn dma_source_byte(&self, pos: u8) -> u8 {
         match self.dma_src_kind() {
-            4 => 0xFF,
+            // CGB src E000-FFFF: the DMA drives the external bus with the RAM
+            // chip select asserted (gb-ctr "OAM DMA address decoding": all
+            // A000-FFFF sources are external-RAM transfers), and on CGB the
+            // WRAM is internal so only the cartridge answers - what it drives
+            // is board-specific (`Cartridge::dma_sram_bus_read`): a lazy-CS
+            // board returns SRAM[src & 0x1FFF] (AntonioND dma_valid_sources_gbc
+            // real_gbc.sav rows E0-FF read the A000-BFFF fill: E0->A0..FF->BF),
+            // a strict board leaves the bus floating 0xFF (Gambatte
+            // srcE000_readFE00 cgb04c capture, RAMG on).
+            4 => {
+                let src = self.dma_source_base.wrapping_add(pos as u16);
+                match &self.cartridge {
+                    Some(cart) => cart.dma_sram_bus_read(src),
+                    None => 0xFF,
+                }
+            }
             3 => self.dma_conflict_wram_read(self.dma_source_base.wrapping_add(pos as u16)),
             _ => self.read_during_dma(self.dma_source_base.wrapping_add(pos as u16)),
         }
@@ -3842,9 +3865,13 @@ impl Mmio {
 
     /// Source-region classification of the active OAM DMA (mirrors
     /// `oamDmaInitSetup`/`cart_.oamDmaSrc()`): 0=rom 1=sram 2=vram 3=wram
-    /// 4=invalid.
+    /// 4=external-bus E000+ (CGB hardware only; see `dma_source_byte`).
+    /// Bus topology is a *hardware* property (Gambatte isCgb()), not a
+    /// DMG-compat one: a DMG cart on CGB still has internal WRAM and the CGB
+    /// external-bus decode (AntonioND dma_valid_sources_dmg_mode real_gbc.sav
+    /// rows C0-FF match the native-CGB grid, not the DMG one).
     fn dma_src_kind(&self) -> u8 {
-        let cgb = self.cgb_features_enabled;
+        let cgb = self.is_cgb();
         let src_high = (self.dma_source_base >> 8) as u8;
         let wram_top: u16 = if cgb { 0xE0 } else { 0x100 };
         if src_high < 0xA0 {
@@ -3907,7 +3934,7 @@ impl Mmio {
             return false;
         }
         let pos = self.dma_pos as u16;
-        if self.cgb_features_enabled {
+        if self.is_cgb() {
             if addr < WRAM_START {
                 // rom/sram/vram source: OAM latches the CPU byte (0 for vram).
                 let byte = if self.dma_src_kind() == 2 { 0 } else { value };
@@ -3945,14 +3972,18 @@ impl Mmio {
     /// a read of the WRAM region with a non-WRAM source instead returns the live
     /// WRAM byte.
     fn dma_conflict_byte(&self, addr: u16) -> u8 {
-        if self.cgb_features_enabled && self.dma_src_kind() != 3 && addr >= WRAM_START {
+        // Hardware-level CGB gates (Gambatte isCgb()): the WRAM-quirk read and
+        // VRAM-source zeroing are silicon bus behaviors, active in DMG-compat
+        // too (AntonioND dma_valid_sources_dmg_mode real_gbc.sav probes D0/E8/
+        // F8/FC/FD during E-src DMA read the area-routed WRAM quirk bytes).
+        if self.is_cgb() && self.dma_src_kind() != 3 && addr >= WRAM_START {
             return self.dma_conflict_wram_read(addr);
         }
         let byte = self.oam.read(OAM_START + self.dma_pos as u16);
         // CGB with a VRAM source: the conflict read returns OAM[pos] but then
         // zeroes that OAM byte (Gambatte `nontrivial_read`). Defer the zero to
         // the next DMA advance so the &self read path can record it.
-        if self.cgb_features_enabled && self.dma_src_kind() == 2 {
+        if self.is_cgb() && self.dma_src_kind() == 2 {
             self.pending_oam_zero.set(self.dma_pos as i16);
         }
         byte
@@ -3966,7 +3997,7 @@ impl Mmio {
         if addr >= OAM_START {
             return false;
         }
-        let cgb = self.cgb_features_enabled;
+        let cgb = self.is_cgb();
         let src = self.dma_src_kind();
 
         // Per-block conflict masks (bit n set => 4KB block n conflicts).
@@ -4546,15 +4577,22 @@ impl memory::Addressable for Mmio {
                 }
                 // 0xFEA0-0xFEFF. While an OAM-DMA transfer owns the bus the read
                 // returns 0xFF (Gambatte's `oamDmaPos_ < oam_size` gate). Otherwise
-                // it returns the `oam_high` shadow directly: on CGB (pre-E
-                // revisions, incl. DMG-compat) the region is 96 independent RAM
-                // cells that read back CPU writes byte-exact (AntonioND
-                // gbc-hw-tests oam_echo_ram_read real_gbc.sav); DMG's shadow is
-                // never CPU-written and holds 0x00.
+                // it returns the `oam_high` shadow: CGB hardware (incl. DMG-compat)
+                // mirrors into the OAM index space masked with 0xE7 (Gambatte
+                // ioamhram_ tail); DMG indexes directly and the shadow is
+                // initialised to 0x00. NOTE the &0xE7 decode is CPU-CGB-C-specific
+                // (our modeled default): cgb-acid-hell's revision probe (write
+                // 55->FEA0, 44->FEB8, read FEA0; picks per-revision tile tables)
+                // renders our reference only via the folded 0x44 branch, while
+                // AntonioND gbc-hw-tests oam_echo_ram_read/_2 real_gbc.sav prove a
+                // DIFFERENT unit with 32 plain cells at A0-BF (no B8->A0 fold) +
+                // 16 nibble-decoded cells at C0-FF - mutually exclusive same-cell
+                // observables, i.e. a real per-revision decoder difference.
                 UNUSED_START..=UNUSED_END => {
-                    if std::env::var("RB_FEAX_TRACE").is_ok() { eprintln!("R {:04X} -> {:02X} (dma={})", addr, if self.dma_transfer_in_progress() { 0xFF } else { self.oam_high[(addr & 0xFF) as usize - 0xA0] }, self.dma_transfer_in_progress()); }
                     if self.dma_transfer_in_progress() {
                         EMPTY_BYTE
+                    } else if self.is_cgb() {
+                        self.oam_high[((addr & 0xFF) & 0xE7) as usize - 0xA0]
                     } else {
                         self.oam_high[(addr & 0xFF) as usize - 0xA0]
                     }
