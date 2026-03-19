@@ -553,6 +553,16 @@ pub struct Cartridge {
     // files; the host (e.g. RetroArch) owns persistence of the in-memory RAM.
     #[serde(skip, default)]
     host_managed_saves: bool,
+    // Physical SRAM chip-select decode of the emulated board for OAM-DMA
+    // E000-FFFF sources (gb-ctr: the DMA asserts the external-RAM CS there and
+    // "the resulting behaviour depends on the connected cartridge"). Strict
+    // boards (default; Gambatte's hwtest fixture: srcE000_readFE00 cgb04c
+    // capture reads 0xFF with RAMG on) exclude E000-FDFF, so the bus floats.
+    // Lazy boards decode /CS & A13 only (AntonioND's gbc-hw-tests flashcart)
+    // and drive SRAM[src & 0x1FFF] there. Set per test fixture via the
+    // manifest `cart=lazy_sram_cs` token; not a savestate property.
+    #[serde(skip, default)]
+    sram_cs_lazy: bool,
 }
 
 impl Clone for Cartridge {
@@ -570,6 +580,7 @@ impl Clone for Cartridge {
             ram_bank_or_rom_bank_high: self.ram_bank_or_rom_bank_high,
             banking_mode: self.banking_mode,
             mbc1_multicart: self.mbc1_multicart,
+            sram_cs_lazy: self.sram_cs_lazy,
             mbc2_ram: self.mbc2_ram.clone(),
             mbc3_ram_bank: self.mbc3_ram_bank,
             mbc3_rtc_latch: self.mbc3_rtc_latch,
@@ -1011,6 +1022,7 @@ impl Cartridge {
             ram_bank_or_rom_bank_high: 0,
             banking_mode: 0,
             mbc1_multicart,
+            sram_cs_lazy: false,
             mbc2_ram: vec![0xFF; MBC2_RAM_SIZE],
             mbc3_ram_bank: 0,
             mbc3_rtc_latch: 0,
@@ -1202,6 +1214,7 @@ impl Cartridge {
             ram_bank_or_rom_bank_high: 0,
             banking_mode: 0,
             mbc1_multicart,
+            sram_cs_lazy: false,
             mbc2_ram: vec![0xFF; MBC2_RAM_SIZE],
             mbc3_ram_bank: 0,
             mbc3_rtc_latch: 0,
@@ -2630,6 +2643,28 @@ impl Cartridge {
             CartridgeType::MBC2 { .. } => &self.mbc2_ram,
             _ => &self.ram_data,
         }
+    }
+
+    /// Byte the cartridge RAM chip drives when the OAM-DMA controller asserts
+    /// the external-RAM chip select (gb-ctr "OAM DMA address decoding": all
+    /// A000-FFFF sources are external-RAM accesses). Bypasses the CPU read
+    /// front-end (unlicensed boot locks / descramblers watch CPU ROM fetches,
+    /// not the RAM chip select) and models the plain RAMG-gated array: enabled
+    /// banked RAM drives its byte, anything else leaves the bus floating
+    /// (0xFF, matching Gambatte's RAM-less srcE000 cgb04c captures).
+    pub fn dma_sram_bus_read(&self, addr: u16) -> u8 {
+        if self.sram_cs_lazy && self.ram_enabled && !self.ram_data.is_empty() {
+            let offset =
+                ((addr as usize & 0x1FFF) + self.get_ram_bank() * 0x2000) % self.ram_data.len();
+            self.ram_data[offset]
+        } else {
+            0xFF
+        }
+    }
+
+    /// Select the board's SRAM chip-select decode (see `dma_sram_bus_read`).
+    pub fn set_sram_cs_lazy(&mut self, lazy: bool) {
+        self.sram_cs_lazy = lazy;
     }
 
     /// True if this cartridge has a real-time clock (MBC3 timer or HuC-3).

@@ -205,6 +205,11 @@ pub struct TestCase {
     /// `frames=<N>` manifest token; `None` uses the run-wide `--frames`.
     /// (`png_shootout` carries its budget inside the oracle as before.)
     pub frames: Option<usize>,
+    /// Physical-board fixture pin: the capture cart's SRAM chip-select decode
+    /// is lazy (/CS & A13, responding at E000-FDFF). From a `cart=lazy_sram_cs`
+    /// manifest token; analogous to `rev=` hardware pins, but for the
+    /// cartridge side of the fixture. Default = strict decode.
+    pub cart_lazy_sram_cs: bool,
 }
 
 pub fn cases_for_rom(rom_path: &Path, requested_modes: &HashSet<Mode>) -> Vec<TestCase> {
@@ -299,6 +304,7 @@ pub fn cases_for_rom(rom_path: &Path, requested_modes: &HashSet<Mode>) -> Vec<Te
                 revision: c.revision,
                 input: c.input.clone(),
                 frames: c.frames,
+                cart_lazy_sram_cs: c.cart_lazy_sram_cs,
             })
             .collect();
         cases.extend(cgb_twins);
@@ -533,6 +539,15 @@ pub fn parse_manifest(
         } else {
             None
         };
+        // Optional physical-board fixture pin: `cart=lazy_sram_cs` marks the
+        // capture cart's SRAM chip-select as lazy-decoded (/CS & A13; responds
+        // in E000-FDFF). AntonioND's gbc-hw-tests captures were taken on such
+        // a flashcart; the OAM-DMA E000+ source reads depend on it (gb-ctr).
+        let cart_lazy_sram_cs = fields
+            .iter()
+            .skip(4)
+            .map(|f| f.trim())
+            .any(|f| f == "cart=lazy_sram_cs");
         cases.push(TestCase {
             rom_path,
             mode,
@@ -540,6 +555,7 @@ pub fn parse_manifest(
             revision,
             input,
             frames,
+            cart_lazy_sram_cs,
         });
     }
     Ok(cases)
@@ -649,6 +665,7 @@ fn push_dump_cases(
             revision: None,
             input: Vec::new(),
             frames: None,
+            cart_lazy_sram_cs: false,
         });
     }
     let cgb_bin = PathBuf::from(format!("{base}_cgb.bin"));
@@ -663,6 +680,7 @@ fn push_dump_cases(
             revision: None,
             input: Vec::new(),
             frames: None,
+            cart_lazy_sram_cs: false,
         });
     }
 
@@ -681,6 +699,7 @@ fn push_dump_cases(
                 revision: None,
                 input: Vec::new(),
                 frames: None,
+                cart_lazy_sram_cs: false,
             });
         }
         let dmg_dump = PathBuf::from(format!("{base}_dmg08.dump"));
@@ -695,6 +714,7 @@ fn push_dump_cases(
                 revision: None,
                 input: Vec::new(),
                 frames: None,
+                cart_lazy_sram_cs: false,
             });
         }
     }
@@ -749,6 +769,7 @@ fn push_string_case(
             revision: None,
             input: Vec::new(),
             frames: None,
+            cart_lazy_sram_cs: false,
         });
     }
 }
@@ -770,6 +791,7 @@ fn push_png_case(
             revision: None,
             input: Vec::new(),
             frames: None,
+            cart_lazy_sram_cs: false,
         });
     }
 }
