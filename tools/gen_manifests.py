@@ -1214,8 +1214,13 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
         # (/CS & A13 -> also responds at E000-FDFF). OAM-DMA E000+ sources
         # read that SRAM on CGB (dma_valid_sources_* rows E0-FF), so the
         # board fixture is pinned suite-wide, like the `rev=` hardware pins.
+        extra = ""
+        if test_id == "interrupts/joy_interrupt_manual_delay":
+            # The test requires a button held from power-on (results.txt:
+            # "Keep any button pressed when initing the ROM").
+            extra = "|input=0:a"
         lines.append(
-            f"gbc-hw-tests/{test_id}|{mode}|sram|{rom}|{rel_to_cwd(ref)}|cart=lazy_sram_cs"
+            f"gbc-hw-tests/{test_id}|{mode}|sram|{rom}|{rel_to_cwd(ref)}|cart=lazy_sram_cs{extra}"
         )
 
     dirs = sorted({p.parent for p in hw.rglob("real_*.sav")})

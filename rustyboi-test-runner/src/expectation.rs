@@ -499,10 +499,10 @@ pub fn parse_manifest(
         let input = if let Some(tok) = input_tok {
             if !matches!(
                 oracle,
-                Oracle::CspPng { .. } | Oracle::CspPngFixed { .. } | Oracle::CspPngLayout { .. } | Oracle::PngShootout { .. }
+                Oracle::CspPng { .. } | Oracle::CspPngFixed { .. } | Oracle::CspPngLayout { .. } | Oracle::PngShootout { .. } | Oracle::SramDump { .. }
             ) {
                 return Err(format!(
-                    "manifest line {}: input= is only supported for png/png_fixed/png_shootout gradings",
+                    "manifest line {}: input= is only supported for png/png_fixed/png_shootout/sram gradings",
                     line_no + 1
                 ));
             }

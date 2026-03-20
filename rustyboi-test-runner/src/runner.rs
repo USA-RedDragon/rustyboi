@@ -529,7 +529,12 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         let frames = case.frames.unwrap_or(options.frames);
         let cycle_budget = (frames.max(DUMP_MIN_FRAMES) as u64) * (CYCLES_PER_FRAME as u64);
         let mut cycles_run: u64 = 0;
+        // Scripted input (manifest `input=`): SRAM-graded hardware tests can
+        // require held buttons (gbc-hw-tests joy_interrupt_manual_delay's
+        // results.txt: "Keep any button pressed when initing the ROM").
+        let mut input = InputScript::new(&case.input);
         while cycles_run < cycle_budget {
+            input.poll(&mut gb, cycles_run);
             let (_breakpoint_hit, cycles) = gb.step_instruction(false);
             cycles_run += cycles as u64;
         }
