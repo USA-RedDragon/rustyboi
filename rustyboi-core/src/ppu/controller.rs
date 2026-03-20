@@ -1939,6 +1939,12 @@ impl Ppu {
         self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
     }
 
+    /// True while the renderer is in pixel transfer (mode 3) — consumer: the
+    /// bus's sticky mid-m3 LCDC-writer marker (CGB halt-exit stall scoping).
+    pub fn in_pixel_transfer(&self) -> bool {
+        self.state == State::PixelTransfer
+    }
+
     pub fn handle_lcdc_write(&mut self, value: u8, mmio: &mmio::Mmio) {
         let display_enable = LCDCFlags::DisplayEnable as u8;
         let old_lcdc = self.lcdc;
@@ -5411,7 +5417,10 @@ impl Ppu {
     // uniform 4 columns early); mealybug m3_bgp_change cgb_c busy-waits (all
     // its writes probe skew=false) and keeps the validated flat latency.
     fn cgb_halt_wake_write_bias(mmio: &mmio::Mmio) -> i32 {
-        if mmio.halt_wakeup_skew() {
+        // An LYC/m1-woken stream that charged the +4 halt exit as a REAL stall
+        // (sm83.rs) already writes at the hardware cc — re-adding the M-cycle
+        // here would double it. The m2-woken stall keeps the co-tuned bias.
+        if mmio.halt_wakeup_skew() && !mmio.cgb_lcd_stall_charged_no_bias() {
             4 >> mmio.is_double_speed_mode() as i32
         } else {
             0

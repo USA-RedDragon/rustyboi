@@ -735,7 +735,14 @@ impl<'a> Bus<'a> {
             && self.mmio.halt_wakeup_skew()
             && self.mmio.read(ppu::LCD_CONTROL) & 0x80 != 0
         {
-            pre_access_cc + 6
+            // A stream that charged the CGB LYC/m1 halt-exit +4 as a REAL stall
+            // reads at the true cc already; only the residual (+2 = the one-dot-
+            // early IF flag) remains of the +6.
+            if self.mmio.cgb_lcd_stall_charged_no_bias() {
+                pre_access_cc + 2
+            } else {
+                pre_access_cc + 6
+            }
         } else {
             pre_access_cc
         };
@@ -941,6 +948,18 @@ impl<'a> Bus<'a> {
         // left untouched. One-shot: consumed by this first VRAM write.
         let write_block_cc = {
             let base = self.mmio.master_cc();
+            // CGB LYC/m1 halt-exit stall residual (mirror of the read-side
+            // VRAM +6 -> +2): the PPU access-gate boundary web (cgbp block /
+            // VRAM-OAM mode windows) is co-tuned to the UN-stalled halt-woken
+            // write cc; a stream that charged the +4 as a REAL stall resolves
+            // its gate at the legacy anchor (cgb-acid-hell's per-line LYC-halt
+            // BCPD races). The write's world-visible timing (value landing,
+            // timer/IF interactions) keeps the true stalled cc.
+            let base = if self.mmio.cgb_lcd_stall_charged_no_bias() {
+                base.saturating_sub(4)
+            } else {
+                base
+            };
             if (0x8000..=0x9FFF).contains(&addr) {
                 base + self.mmio.take_hdma_dma_due_write_cc_bias()
             } else {
@@ -1087,6 +1106,17 @@ impl<'a> Bus<'a> {
                 self.ppu.on_scx_write(value, self.mmio);
             }
             if addr == ppu::LCD_CONTROL {
+                // Sticky mid-mode-3 LCDC-writer marker: this ROM races LCDC
+                // against the fetcher (cgb-acid-hell's per-line LYC-halt LCDC
+                // bursts). The mid-m3 LCDC race web (tidxtd glitch targets,
+                // lcdc_b4_exact commits, wg journal) is co-tuned to the
+                // UN-stalled halt-woken write grid, and its glitch targets
+                // cannot be re-anchored post-hoc (they land before the write
+                // in engine order) — so such ROMs keep the legacy (bias-model)
+                // CGB LCD halt-exit timing (see sm83.rs stall scoping).
+                if self.ppu.in_pixel_transfer() {
+                    self.mmio.set_m3_lcdc_write_seen();
+                }
                 self.ppu.handle_lcdc_write(value, self.mmio);
             }
             // FF47/FF48/FF49 (BGP/OBP0/OBP1): the CPU readback is immediate (mmio
