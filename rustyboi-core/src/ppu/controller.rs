@@ -9780,6 +9780,23 @@ impl Ppu {
         // reads (is_cgb_de, single speed) get the +1 hold. DS keeps `> 2` (the
         // stat-mode-ds / speed-switch DS probes are BCE-common and co-tuned to it).
         let tail_hold = (!lc_master.ds && (mmio.is_agb() || mmio.is_cgb_de())) as i64;
+        // DMG line-tail coincidence DROP window: on DMG silicon the OLD-LY
+        // compare stops matching one M-cycle EARLIER than Gambatte's model —
+        // the FF41 flag reads 0 from raw timeToNextLy <= 8 (cmp t2n <= 6)
+        // when the line is about to wrap to a non-matching LY, while the
+        // RISE side (new-LY anticipation, raw <= 2) is unchanged. Proven by
+        // AntonioND vbl_irq_delay_timer real_gb: with LY=LYC=143 the ISR
+        // sweep reads C4 (flag set) at lineCycles 447 but C0 (flag CLEAR,
+        // still mode 0, LY still 143) at 451; real CGB holds the flag
+        // through 451 (our existing model). Old-branch only (cmp.ly is the
+        // un-anticipated LY); LY 153 keeps its own early-0 path untouched.
+        if !mmio.is_cgb()
+            && cmp.ly == lc_master.ly
+            && lc_master.ly == 143
+            && cmp.time_to_next_ly <= 6
+        {
+            return Some(false);
+        }
         Some(lyc_reg == cmp.ly && cmp.time_to_next_ly > 2 - tail_hold)
     }
 
