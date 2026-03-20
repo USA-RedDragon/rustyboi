@@ -220,6 +220,30 @@ impl SM83 {
                 // getStat-at-cc line-tail override defers to the renderer register
                 // (which is already correct there). Cleared on the next HALT.
                 mmio.set_halt_wakeup_skew(true);
+                // PTZ wake-source: the line-tail mode-2 getStat overrides model the
+                // unmodeled m0/m2-wake-exit skew of exactly those streams; mark
+                // whether THIS wake is m0/m2-proximate so an LYC/m1-woken stream's
+                // line-tail STAT read resolves the true closed-form mode instead
+                // (real DMG+CGB read mode 0 at lineCycles 449..452 — gbc-hw-tests
+                // lcd_irq_delay_timer). The m0 window is the same widened [-2,6]
+                // grid the DMG timer-read bias uses (scx fine-scroll); the m2 test
+                // mirrors the stall check above, plus the stall-charged flag (an
+                // m2 stall already advanced mcc past the <2 window).
+                {
+                    let mcc = mmio.master_cc_dbg() as i64;
+                    let m0_prox = mmio
+                        .mmio
+                        .pending_m0_irq_fire_cc()
+                        .is_some_and(|ev| (-2..=6).contains(&(mcc - ev as i64)));
+                    let m2_prox = mmio
+                        .mmio
+                        .last_m2_irq_fire_cc()
+                        .is_some_and(|fire| (mcc as u64).wrapping_sub(fire) < 2)
+                        || self.m2_halt_stall_charged;
+                    let lcd_wake =
+                        pending_interrupt == Some(registers::InterruptFlag::Lcd);
+                    mmio.set_halt_wake_m0m2(lcd_wake && (m0_prox || m2_prox));
+                }
                 // FAITHFUL HALT-EXIT (timer-read facet): re-anchor the woken
                 // stream's DIV/TIMA reads by the full Gambatte HALT-exit advance
                 // — the ceil-to-M-cycle snap plus the conditional +4
