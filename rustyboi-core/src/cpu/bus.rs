@@ -66,6 +66,7 @@ impl<'a> Bus<'a> {
     fn resolve_one_dot(&mut self) {
         self.mmio.step_timer();
         self.mmio.step_serial();
+        self.mmio.step_joypad_irq_delay();
         self.mmio.step_dma();
 
         let double_speed = self.mmio.is_double_speed_mode();
