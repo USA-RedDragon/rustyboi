@@ -271,21 +271,38 @@ impl SM83 {
                     // ROMs' fetcher-race web keeps the legacy timing.
                     let lcdc_racer = mmio.mmio.m3_lcdc_write_seen();
                     if !m0_prox && !m2_prox && !hdma_wakeup && !lcdc_racer {
-                        if std::env::var_os("STALLDBG").is_some() {
-                            eprintln!(
-                                "STALLDBG mcc={} ly={:02X} stat={:02X} ie={:02X} iff={:02X} ime={}",
-                                mmio.master_cc_dbg(),
-                                mmio.peek(0xFF44),
-                                mmio.peek(0xFF41),
-                                mmio.peek(0xFFFF),
-                                mmio.peek(0xFF0F),
-                                self.registers.ime
-                            );
-                        }
                         self.cgb_lcd_halt_stall_charged = true;
                         mmio.mmio.set_m2_halt_stall_charged_cgb(true);
                         return 4;
                     }
+                }
+                // FAITHFUL HALT-EXIT (serial-woken, DMG+CGB): a serial-woken
+                // HALT resumes one M-cycle after the completion edge on BOTH
+                // consoles. Proven by AntonioND serial_int_handle_timing
+                // (real_gb == real_gbc == 03): the test's instruction stream
+                // is phase-locked to its own serial clock (each iteration
+                // begins at a serial-completion wake), and the second
+                // transfer's IF lands on the absolute DIV-derived bit-edge
+                // grid — so the stored `inc b` count pins the wake-relative
+                // stream offset. Our edge-exact wake counts one extra inc
+                // (uniform 04) on both machines; the +4 stall yields the
+                // captured halt-half 03 while the poll-loop (no-halt) half,
+                // whose dispatch grid is not wake-relative, keeps 04. The
+                // timer-woken exit has NO such delay (halt_exit_timings refs)
+                // — this is the per-source IF-edge-vs-halt-sampling phase,
+                // not a universal exit cost. Same one-shot guard; post-STOP
+                // streams keep the cc-exact window exit. The CGB read-residual
+                // flag is set so a subsequent LCD-read consume site sees the
+                // true (+4) stream cc, mirroring the LCD stall.
+                if !self.stopped
+                    && pending_interrupt == Some(registers::InterruptFlag::Serial)
+                    && !self.cgb_lcd_halt_stall_charged
+                {
+                    self.cgb_lcd_halt_stall_charged = true;
+                    if mmio.mmio.is_cgb() {
+                        mmio.mmio.set_m2_halt_stall_charged_cgb(true);
+                    }
+                    return 4;
                 }
                 self.halted = false;
                 just_unhalted = true;
