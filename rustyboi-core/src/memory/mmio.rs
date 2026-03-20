@@ -452,6 +452,18 @@ pub struct Mmio {
     #[serde(skip, default)]
     m2_halt_stall_charged_cgb: bool,
 
+    // True when the live HALT-woken stream was woken by an m0- or m2-proximate
+    // LCD STAT IRQ (the wake landed on/near the m0/m2 event cc). The PTZ
+    // line-tail mode-2 overrides in `get_stat_mode_midframe` model the unmodeled
+    // m0-wake-exit skew of exactly those streams (m0int_m0stat_scx* /
+    // m2int_m0stat families); an LYC/m1-woken stream reading the same
+    // lineCycles zone must instead resolve the true closed-form mode (real
+    // DMG+CGB read mode 0 at lineCycles 449..452, gbc-hw-tests
+    // lcd_irq_delay_timer: the ISR read one M-cycle before the LY-lead cycle
+    // reads C0, not C2). Set at HALT wakeup, cleared when the CPU next halts.
+    #[serde(skip, default)]
+    halt_wake_m0m2: bool,
+
     // True when an SS->DS speed-switch STOP was executed while `halt_wakeup_skew`
     // was live (halt-wake -> STOP with no intervening HALT), i.e. the post-switch
     // DS stream still carries the un-charged CGB halt-exit M-cycle (Gambatte
@@ -865,6 +877,7 @@ impl Mmio {
             halt_hdma_state: HaltHdmaState::Low,
             halt_wakeup_skew: false,
             m2_halt_stall_charged_cgb: false,
+            halt_wake_m0m2: false,
             ssds_haltskew_ly_advance: false,
             halt_wakeup_hdma: false,
             pending_m0_irq_fire_cc: None,
@@ -2292,6 +2305,17 @@ impl Mmio {
         self.m2_halt_stall_charged_cgb
     }
 
+    /// Mark whether the live HALT-woken stream was woken by an m0/m2-proximate
+    /// LCD STAT IRQ (see field doc). Set at HALT wakeup, cleared on the next HALT.
+    pub fn set_halt_wake_m0m2(&mut self, v: bool) {
+        self.halt_wake_m0m2 = v;
+    }
+
+    /// True while the live HALT-woken stream is m0/m2-woken (PTZ consumer).
+    pub fn halt_wake_m0m2(&self) -> bool {
+        self.halt_wake_m0m2
+    }
+
     /// Arm the halt-woken SS->DS LY-read advance (see field doc). Called at the
     /// speed-switch STOP when the executing stream is halt-woken.
     pub fn set_ssds_haltskew_ly_advance(&mut self) {
@@ -2555,6 +2579,7 @@ impl Mmio {
         // stream has ended).
         self.halt_wakeup_skew = false;
         self.m2_halt_stall_charged_cgb = false;
+        self.halt_wake_m0m2 = false;
         self.ssds_haltskew_ly_advance = false;
         // FAITHFUL EVENTCC: a fresh HALT ends the previous wakeup's +4 read bias.
         self.halt_wake_plus4_dmg = false;
