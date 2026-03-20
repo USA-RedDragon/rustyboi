@@ -394,6 +394,29 @@ impl Timer {
         }
     }
 
+    /// Gambatte `nontrivial_ff_write` case 0x0F: an IF-register store first
+    /// pumps timer events at the write cc, so an overflow whose schedule cc has
+    /// been reached (`schedCc <= write cc`, RAW grid) flags IF BEFORE the store
+    /// and the CPU write wins the collision. AntonioND div_resets_timer_overflow
+    /// (identical on real DMG and CGB) pins the exact-collision M-cycle: the
+    /// previous cell's overflow IF lands on the same write M-cycle as the next
+    /// cell's IF=0 and is cleared. Leaves the IF raise to the caller
+    /// (`take_pending_irq`); records the dispatch bookkeeping like the per-dot
+    /// delivery so a surviving (re-set) bit keeps its fire-cc gate.
+    pub fn flush_overflow_for_ifreg_write(&mut self) {
+        if self.tac & TAC_ENABLE == 0 {
+            return;
+        }
+        let cc = self.write_access_cc();
+        while self.next_irq_event_time != DISABLED_TIME && cc >= self.next_irq_event_time {
+            if self.last_fire_cc == DISABLED_TIME {
+                self.last_fire_cc = self.next_irq_event_time.wrapping_add(CC_OFF as u64);
+                self.last_fire_cc_ei = self.next_irq_event_time.wrapping_add(IF_OFF as u64);
+            }
+            self.do_irq_event();
+        }
+    }
+
     /// EI-loop fast timer delivery. In a non-halt/non-stop EI loop the CPU calls
     /// this at the EARLY anchor (`boundary >= schedCc + IF_OFF`) to fire an
     /// imminent overflow BEFORE its normal `CC_OFF`-late per-dot delivery, so the
