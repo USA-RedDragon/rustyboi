@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub const JOYP: u16 = 0xFF00;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ButtonState {
     pub a: bool,
     pub b: bool,
