@@ -9,4 +9,4 @@ pub mod library;
 mod touch_controls;
 mod ui;
 
-pub use ui::Gui;
+pub use ui::{CentralRect, Gui, UiOutput};

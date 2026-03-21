@@ -1,5 +1,6 @@
 use crate::config;
 use crate::framework::Framework;
+use crate::game_renderer::GameRenderer;
 use rustyboi_egui_lib::actions::GuiAction;
 use rustyboi_egui_lib::actions::FileData;
 use rustyboi_core_lib::{cartridge, gb, ppu, input};
@@ -74,7 +75,7 @@ pub async fn run_with_gui_async(gb: Box<gb::GB>, config: config::CleanConfig) {
     // Trigger initial resize event
     let _ = window.request_inner_size(get_window_size());
 
-    let (pixels, framework) = async {
+    let (pixels, framework, game_renderer) = async {
         let scale_factor = window.scale_factor() as f32;
         let window_size = get_window_size().to_physical::<u32>(scale_factor as f64);
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, window.as_ref());
@@ -93,10 +94,11 @@ pub async fn run_with_gui_async(gb: Box<gb::GB>, config: config::CleanConfig) {
             &pixels,
             None,
         );
+        let game_renderer = build_game_renderer(&pixels);
 
-        (pixels, framework)
+        (pixels, framework, game_renderer)
     }.await;
-    match run_gui_loop(event_loop, &window, Some(pixels), Some(framework), gb, &config) {
+    match run_gui_loop(event_loop, &window, Some(pixels), Some(framework), Some(game_renderer), gb, &config) {
         Ok(_) => (),
         Err(e) => eprintln!("Error in GUI loop: {}", e),
     }
@@ -118,7 +120,21 @@ pub fn run_with_gui(gb: Box<gb::GB>, config: &config::CleanConfig) -> Result<(),
     // Pixels and Framework are created lazily on Event::Resumed so the
     // same loop body works on platforms (Android) where the rendering
     // surface only becomes available after the window is shown.
-    run_gui_loop(event_loop, &window, None, None, gb, config)
+    run_gui_loop(event_loop, &window, None, None, None, gb, config)
+}
+
+/// Build the emulator-framebuffer renderer bound to the pixels source texture.
+fn build_game_renderer(pixels: &Pixels) -> GameRenderer {
+    let texture_view = pixels
+        .texture()
+        .create_view(&pixels::wgpu::TextureViewDescriptor::default());
+    let extent = pixels.context().texture_extent;
+    GameRenderer::new(
+        pixels.device(),
+        &texture_view,
+        &extent,
+        pixels.render_texture_format(),
+    )
 }
 
 /// Android entry. Builds an `EventLoop` bound to the supplied `AndroidApp`,
@@ -156,7 +172,7 @@ pub fn run_with_gui_android(
             Error::UserDefined(Box::new(e))
         })?;
     raw_log("run_with_gui_android: Window built, entering loop");
-    let r = run_gui_loop(event_loop, &window, None, None, gb, config);
+    let r = run_gui_loop(event_loop, &window, None, None, None, gb, config);
     raw_log("run_with_gui_android: loop returned");
     r
 }
@@ -168,7 +184,7 @@ fn create_render_state<'win, T>(
     event_loop: &winit::event_loop::EventLoopWindowTarget<T>,
     window: &'win winit::window::Window,
     pending_dialog_result: Option<std::sync::Arc<std::sync::Mutex<Option<rustyboi_egui_lib::actions::GuiAction>>>>,
-) -> Result<(Pixels<'win>, Framework), Error> {
+) -> Result<(Pixels<'win>, Framework, GameRenderer), Error> {
     let window_size = window.inner_size();
     let scale_factor = window.scale_factor() as f32;
     let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, window);
@@ -181,7 +197,8 @@ fn create_render_state<'win, T>(
         &pixels,
         pending_dialog_result,
     );
-    Ok((pixels, framework))
+    let game_renderer = build_game_renderer(&pixels);
+    Ok((pixels, framework, game_renderer))
 }
 
 fn run_gui_loop<'win>(
@@ -189,6 +206,7 @@ fn run_gui_loop<'win>(
     window: &'win winit::window::Window,
     mut pixels: Option<Pixels<'win>>,
     mut framework: Option<Framework>,
+    mut game_renderer: Option<GameRenderer>,
     gb: Box<gb::GB>,
     config: &config::CleanConfig,
 ) -> Result<(), Error> {
@@ -242,9 +260,10 @@ fn run_gui_loop<'win>(
             Event::Resumed => {
                 if pixels.is_none() {
                     match create_render_state(elwt, window, Some(pending_dialog_result.clone())) {
-                        Ok((p, f)) => {
+                        Ok((p, f, g)) => {
                             pixels = Some(p);
                             framework = Some(f);
+                            game_renderer = Some(g);
                             window.request_redraw();
                             // On Android, hydrate the freshly-built ROM
                             // Library panel from persisted state. We do
@@ -287,6 +306,7 @@ fn run_gui_loop<'win>(
                 // Drop GPU-bound state; keep `World` (CPU/PPU/audio) alive.
                 framework = None;
                 pixels = None;
+                game_renderer = None;
             }
             _ => {}
         }
@@ -418,8 +438,8 @@ fn run_gui_loop<'win>(
                 ..
             } => {
                 // Skip drawing while we have no surface (e.g. Android suspended).
-                let (pixels, framework) = match (pixels.as_mut(), framework.as_mut()) {
-                    (Some(p), Some(f)) => (p, f),
+                let (pixels, framework, game_renderer) = match (pixels.as_mut(), framework.as_mut(), game_renderer.as_ref()) {
+                    (Some(p), Some(f), Some(g)) => (p, f, g),
                     _ => return,
                 };
                 world.draw(pixels.frame_mut());
@@ -430,7 +450,7 @@ fn run_gui_loop<'win>(
                 // Always pass register data for the debug overlay, regardless of pause state
                 let registers = Some(world.gb.get_cpu_registers());
                 let gb_ref = Some(&*world.gb);
-                let (gui_action, menu_open) = framework.prepare(window, gui_paused_state, registers, gb_ref);
+                let (gui_action, menu_open, game_region) = framework.prepare(window, gui_paused_state, registers, gb_ref);
 
                 // Handle GUI actions
                 match gui_action {
@@ -692,8 +712,21 @@ fn run_gui_loop<'win>(
                     manually_paused = user_paused || world.error_state.is_some();
                 }
 
+                // Surface size in physical pixels; the game region (already in
+                // physical pixels) is clamped to it inside the renderer.
+                let surface = window.inner_size();
+                let surface_size = (surface.width, surface.height);
                 let render_result = pixels.render_with(|encoder, render_target, context| {
-                    context.scaling_renderer.render(encoder, render_target);
+                    // Draw the emulator framebuffer only into the egui central
+                    // region (below the menu bar, above the status panel),
+                    // letterboxed. Then egui paints its panels on top.
+                    game_renderer.render(
+                        encoder,
+                        &context.queue,
+                        render_target,
+                        surface_size,
+                        game_region,
+                    );
 
                     framework.render(encoder, render_target, context);
 
