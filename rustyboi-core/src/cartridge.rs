@@ -168,6 +168,11 @@ pub enum UnlMapper {
     /// Knick-Knack (Sachen dump with a Tetris header), Pocket Monsters
     /// GO!GO!GO! 256KB dumps. hhugboy UNL_MBC1NOSAVE routing.
     ForceMbc1,
+    /// M161 (Mani 4 in 1, DMG-601): a one-shot latch that maps one of eight
+    /// whole-32KB banks. The header spoofs MBC3+RAM+BAT ($10), so it is
+    /// content-detected (256KB + title "TETRIS SET"), exactly like gambatte's
+    /// presumedM161. Ported from gambatte m161.cpp.
+    M161,
 }
 
 // MBC1 register ranges
@@ -223,6 +228,8 @@ pub enum CartridgeType {
     Rocket,
     Sachen { mmc2: bool },
     NtOld { v2: bool },
+    /// Mani 4 in 1 one-shot 32KB bank-latch (gambatte m161.cpp).
+    M161,
 }
 
 /// 93LC56 serial-EEPROM interface state for MBC7 (Pan Docs "MBC7"). The
@@ -520,6 +527,14 @@ pub struct Cartridge {
     #[serde(default)]
     nt_swapped: bool,
 
+    // M161 (gambatte m161.cpp) one-shot 32KB latch. `m161_bank` is the even
+    // 16KB half of the selected 32KB pair ((data & 7) << 1); the odd half is
+    // `m161_bank | 1`. `m161_mapped` blocks any further latch until reset.
+    #[serde(default)]
+    m161_bank: u8,
+    #[serde(default)]
+    m161_mapped: bool,
+
     // CGB support information
     cgb_support: CgbSupport, // CGB compatibility from cartridge header
 
@@ -643,6 +658,8 @@ impl Clone for Cartridge {
             nt_base: self.nt_base,
             nt_bank_mask: self.nt_bank_mask,
             nt_swapped: self.nt_swapped,
+            m161_bank: self.m161_bank,
+            m161_mapped: self.m161_mapped,
             cgb_support: self.cgb_support.clone(),
             rumble_motor: self.rumble_motor,
             rtc_memory: self.rtc_memory.clone(),
@@ -779,6 +796,17 @@ impl Cartridge {
             // Smaller than one full 32KB image: nothing here needs (or can
             // safely take) an unlicensed mapper.
             return UnlMapper::None;
+        }
+
+        // M161 (Mani 4 in 1): the header spoofs MBC3+RAM+BATTERY ($10), so
+        // gambatte (presumedM161) gates on the exact shape of the one known
+        // cart -- a 256KB image whose title is "TETRIS SET". The title check
+        // is specific enough that no real MBC3 cart can match.
+        if data.len() == 16 * 0x4000
+            && data[CARTRIDGE_TYPE_OFFSET] == 0x10
+            && &data[0x134..0x13E] == b"TETRIS SET"
+        {
+            return UnlMapper::M161;
         }
 
         let logo_sum = |base: usize, scrambled: bool| -> u32 {
@@ -1085,6 +1113,8 @@ impl Cartridge {
             nt_base: 0,
             nt_bank_mask: 0,
             nt_swapped: false,
+            m161_bank: 0,
+            m161_mapped: false,
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -1277,6 +1307,8 @@ impl Cartridge {
             nt_base: 0,
             nt_bank_mask: 0,
             nt_swapped: false,
+            m161_bank: 0,
+            m161_mapped: false,
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -1307,6 +1339,7 @@ impl Cartridge {
             UnlMapper::ForceMbc1 => {
                 return CartridgeType::MBC1 { ram: false, battery: false }
             }
+            UnlMapper::M161 => return CartridgeType::M161,
         }
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
@@ -1429,6 +1462,11 @@ impl Cartridge {
                 }
                 (bank as usize + self.nt_base as usize * 2) % self.rom_banks
             }
+            CartridgeType::M161 => {
+                // Odd 16KB half of the latched 32KB pair (gambatte
+                // setRombank: (rombank_ | 1) & (rombanks - 1)).
+                ((self.m161_bank as usize) | 1) & (self.rom_banks - 1)
+            }
             CartridgeType::NoMBC { .. } => 1, // Simple cartridge always uses bank 1 for upper area
         }
     }
@@ -1456,6 +1494,7 @@ impl Cartridge {
                 (self.mbc5_ram_bank & 0x0F) as usize % self.ram_banks.max(1)
             }
             CartridgeType::MBC7 => 0, // no banked RAM (EEPROM is serial)
+            CartridgeType::M161 => 0, // no external RAM (disabledRam)
             CartridgeType::HuC1 => {
                 // "At least 2 bits" per Pan Docs; the real cart has 4 banks.
                 (self.huc1_ram_bank as usize) % self.ram_banks.max(1)
@@ -1502,6 +1541,9 @@ impl Cartridge {
             }
             // Multicart base (32KB units).
             CartridgeType::NtOld { .. } => (self.nt_base as usize * 2) % self.rom_banks,
+            // Even 16KB half of the latched 32KB pair (gambatte setRombank:
+            // rombank_ & (rombanks - 2)).
+            CartridgeType::M161 => (self.m161_bank as usize) & (self.rom_banks - 2),
             _ => 0,
         }
     }
@@ -1761,7 +1803,10 @@ impl Cartridge {
             CartridgeType::WisdomTree
             | CartridgeType::Rocket
             | CartridgeType::Sachen { .. }
-            | CartridgeType::NtOld { .. } => false,
+            | CartridgeType::NtOld { .. }
+            // M161's RAM line is permanently disabled (gambatte disabledRam);
+            // gambatte also zeroes its header type so it never saves.
+            | CartridgeType::M161 => false,
             // $09 ROM+RAM+BATTERY; plain $00/$08 (and unknown fallthroughs)
             // have none.
             CartridgeType::NoMBC { battery } => battery,
@@ -3513,6 +3558,17 @@ impl memory::Addressable for Cartridge {
             {
                 self.wt_bank = (addr & 0x3F) as u8;
             }
+            // M161 (gambatte m161.cpp romWrite): the FIRST write anywhere in
+            // the whole $0000-$7FFF ROM area latches the 32KB bank from data
+            // bits 0-2; every later write is ignored until reset.
+            RAM_ENABLE_START..=BANKING_MODE_END
+                if matches!(self.get_cartridge_type(), CartridgeType::M161) =>
+            {
+                if !self.m161_mapped {
+                    self.m161_bank = (value & 7) << 1;
+                    self.m161_mapped = true;
+                }
+            }
             // RAM Enable (0x0000-0x1FFF)
             RAM_ENABLE_START..=RAM_ENABLE_END => {
                 match self.get_cartridge_type() {
@@ -3982,6 +4038,53 @@ mod tests {
         rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
         rom[0x134..0x13D].copy_from_slice(b"microtest");
         assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
+
+        // A real 256KB MBC3+RAM+BATTERY ($10) cart NOT titled "TETRIS SET"
+        // must stay MBC3 -- M161 detection is gated on the exact title.
+        let mut rom = make_sized_rom(0x10, 0x03, 0x40000);
+        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x134..0x13B].copy_from_slice(b"POKEMON");
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
+        assert!(matches!(
+            Cartridge::from_bytes(&rom).unwrap().get_cartridge_type(),
+            CartridgeType::MBC3 { .. }
+        ));
+    }
+
+    #[test]
+    fn m161_latches_a_32kb_bank_once() {
+        // Mani 4 in 1 shape: 256KB, header spoofs MBC3+RAM+BAT ($10), title
+        // "TETRIS SET" (gambatte presumedM161).
+        let mut rom = make_sized_rom(0x10, 0x03, 0x40000);
+        rom[0x134..0x13E].copy_from_slice(b"TETRIS SET");
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::M161);
+
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(cart.get_cartridge_type(), CartridgeType::M161));
+        assert!(!cart.has_battery()); // gambatte disabledRam + zeroed header
+
+        // Power-on (unmapped): the first 32KB pair -> 16KB banks 0 and 1.
+        assert_eq!(cart.read(0x1000), 0);
+        assert_eq!(cart.read(0x5000), 1);
+        // External RAM line is permanently disabled.
+        assert_eq!(cart.read(0xA000), 0xFF);
+
+        // First ROM write anywhere in $0000-$7FFF latches the 32KB bank from
+        // data bits 0-2: value 3 -> even/odd 16KB banks 6/7.
+        cart.write(0x2000, 0x03);
+        assert_eq!(cart.read(0x1000), 6);
+        assert_eq!(cart.read(0x5000), 7);
+
+        // Every later write is ignored until reset (one-shot latch).
+        cart.write(0x6000, 0x01);
+        assert_eq!(cart.read(0x1000), 6);
+        assert_eq!(cart.read(0x5000), 7);
+
+        // Bank 7 (data & 7) selects the top 32KB pair (banks 14/15).
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        cart.write(0x0000, 0xFF); // low 3 bits = 7; upper bits ignored
+        assert_eq!(cart.read(0x1000), 14);
+        assert_eq!(cart.read(0x5000), 15);
     }
 
     #[test]
