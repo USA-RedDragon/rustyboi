@@ -412,20 +412,24 @@ lock, OPRI, HDMA5 semantics, undocumented FF72/FF73/FF74/FF75 with exact
 unused-bit masks (`mmio.rs:4540-4556`), unmapped-hole reads: **COMPLETE**
 (mooneye boot_hwio/unused_hwio-C, docboy FF72-75 semantics match).
 
-### 6.1 Infrared communication (RP $FF56) — PARTIAL (register only, no transport)
+### 6.1 Infrared communication (RP $FF56) — DONE (transport landed)
 - Doc: [Pan Docs CGB Registers](https://gbdev.io/pandocs/CGB_Registers.html)
   (RP) + [Infrared Communication](https://gbdev.io/pandocs/IR.html).
-- Status: register bit behavior is exact (write mask $C1 `mmio.rs:4922-4926`,
-  read forces bit 1 = "no light" `mmio.rs:4533-4535`, power-on $3E
-  `gb.rs:330`) — i.e. a permanently dark room. There is no way for an emitted
-  IR pulse to be observed by anything: no loopback device, no second-instance
-  transport, no recorded-signal injection.
-- Impact: Pokémon G/S/C GBC-to-GBC Mystery Gift, Perfect Dark pickups, SMB DX
-  score exchange, Pokémon Pinball score sharing (all owned) simply report "no
-  partner". Also blocks HuC1/HuC3 IR modes (§2.5) sharing the same transport.
-  docboy has `rp_write_read` rows (register-level — those we already satisfy).
-- Effort: **M** — define an IR bus trait (pulse timeline), loopback + paired
-  instance; games are timing-tolerant compared with the serial port.
+- Status: implemented (`ir` module). The register bits are exact and RP bit 1
+  now reads a real receiver: a connected peer's emitter (RP bit 0) illuminates
+  it, gated on the read-enable bits 6-7 ($C0), one GBC never seeing its own LED.
+  `GB::connect_ir(a, b)` points two instances at each other through a shared
+  Arc<Mutex> level channel (the serial LinkCable pattern — passive, no clock,
+  determinism from the harness pump; clones/savestates sever it);
+  `attach_ir_peer` takes one end for a socket/process transport;
+  `set_ir_loopback` is a self-test. This is the transport the two-player IR
+  protocols need (Pokémon G/S/C Mystery Gift, TCG "Card Pop", Pinball score,
+  Bomberman trades — all on/off pulse coupling).
+- Grounded vs not: the digital emitter/receiver coupling is modelled; the
+  analog signal "fade" (~3ms, distance-dependent) and the ambient-light
+  $00->$C0 sensing quirk are deliberately not (no digital spec, no GBC<->GBC
+  protocol depends on them). Disconnected default keeps the RP path
+  byte-identical. Also unblocks HuC1/HuC3 IR modes sharing the same channel.
 
 ### 6.2 DMG-compat boot palette table — COMPLETE
 - Doc: [Pan Docs Power-Up Sequence](https://gbdev.io/pandocs/Power_Up_Sequence.html)
@@ -513,13 +517,19 @@ states incl. the header-popcount-dependent boot DIV: COMPLETE (`gb.rs:443-448`).
   (little-things `sgbears`, pinobatch trnstress) — transfers apply at the
   next frame boundary, not the real 5-frame window.
 
-### 7.3 SGB sound commands (SOUND $08, SOU_TRN $09) — MISSING
+### 7.3 SGB sound commands (SOUND $08, SOU_TRN $09) — PARTIAL (command decode done; audio HLE out of scope)
 - Doc: [Pan Docs SGB Sound commands](https://gbdev.io/pandocs/SGB_Command_Sound.html).
-- Status: decoded, no-op (`sgb.rs:321-325`).
-- Impact: SGB-side jingles/effects (and music in e.g. Space Invaders arcade
-  mode via SOU_TRN programs) are silent. Requires an SPC700/SNES-APU HLE.
-- Effort: **L** (canned-sample HLE for the built-in effect table is a possible
-  M-sized 80% solution).
+- Status: the SOUND command is now fully decoded (`sgb.rs`): Effect A/B codes,
+  per-effect pitch (bits 0-1 / 4-5) and volume (bits 2-3 / 6-7), and mute (A
+  volume field == 3, per Pan Docs note 1), exposed via `Sgb::sound()` as an
+  inspectable `SgbSound`. SOU_TRN is recognised as a sound-data transfer.
+- Grounded boundary: making these audible is NOT groundable from public specs —
+  it needs an SNES-APU HLE (an SPC700 running the SGB BIOS' N-SPC engine plus a
+  copyrighted sound-data ROM), which no public documentation reproduces. So the
+  command *decode* layer is complete (for a frontend hook or test); synthesising
+  audio is deliberately not attempted rather than inventing samples.
+- Impact: SGB-side jingles/effects stay silent until a SNES-APU HLE + sound ROM
+  is available. No GB-visible effect, so the suites are byte-identical.
 
 ### 7.4 Remaining SGB command set — MISSING (no-ops), mostly by design
 - OBJ_TRN ($18, SNES-OBJ mode) and PAL_PRI ($19, palette priority): visible
@@ -635,22 +645,46 @@ states incl. the header-popcount-dependent boot DIV: COMPLETE (`gb.rs:443-448`).
 - Remaining: the printer is the desktop/CLI's device; the §8.1 two-GB link peer
   and the libretro/Android print sinks are still future work.
 
-### 8.3 4-Player Adapter (DMG-07) — MISSING
+### 8.3 4-Player Adapter (DMG-07) — DONE (protocol + serial hub)
 - Doc: [Pan Docs 4-Player Adapter](https://gbdev.io/pandocs/Four_Player_Adapter.html)
   (external-clock broadcast protocol, ping/transmission phases).
-- Impact: F-1 Race, Wave Race, Yoshi's Cookie multiplayer — negligible until
-  §8.1 exists. Effort: **M** after 8.1.
+- Status: implemented (`dmg07` module). Full ping/transmission state machine:
+  the ping packet `[$FE, STAT1-3]` with the connection bitmap (bits 4-7) + per-
+  port player ID (bits 0-2), the `$88/$88/RATE/SIZE` replies, connection
+  tracking on the header ACK, the four-`$AA` -> four-`$CC` transmission entry,
+  the `SIZE*4` data broadcast with the one-packet delay (P1..P4, zeros for
+  absent players), and the `SIZE*4`-`$FF` ping restart. Unit tests reproduce Pan
+  Docs' worked byte-example sequences. `SerialDevice::FourPlayer` hooks it into
+  the external-clock deposit path (the adapter is the clock master);
+  `GB::connect_four_player(&mut [..])` wires 2-4 instances to one shared hub,
+  the frontend pumping all instances like `connect_link`.
+- Grounded vs not: the byte protocol is exact; the analog packet cadence (~17ms)
+  has no capture/test ROM, so the model advances one exchange per armed pull
+  (deposit-on-arm) — correct byte sequence, not silicon timing.
+- Impact: F-1 Race, Wave Race, Yoshi's Cookie multiplayer (needs a frontend that
+  pumps the connected instances).
 
-### 8.4 Mobile Adapter GB — MISSING
-- Doc: not in Pan Docs (dan-docs/wiki territory,
-  [gbdev wiki](https://gbdev.gg8.se/wiki/articles/Mobile_Game_Boy_Adapter)).
-  Census: confirmed gap, JP-only service, community re-implementation
-  (REON/libmobile) exists.
-- Impact: owner has zero Mobile-Adapter games (Net de Get absent). Effort: L.
-  Lowest priority.
-- Same bucket: Barcode Boy / Barcode Taisen Bardigun reader (serial), WorkBoy
-  keyboard (serial, documented 2020) — zero owner impact, effort S-M each,
-  listed for completeness.
+### 8.4 Mobile Adapter GB — PARTIAL (protocol + session/config; networking is backend)
+- Doc: not in Pan Docs; grounded in the REONTeam **libmobile** reference
+  (`serial.c`/`commands.c`), the de-facto spec.
+- Status: implemented (`mobile` module). Exact port of libmobile's 8-bit serial
+  state machine — the `$99 $66` magic, 4-byte header, data, 16-bit big-endian
+  checksum, device-ID + acknowledge exchange, `$4B` idle check, and response
+  framing (idle byte `$D2`). Wired as `SerialDevice::Mobile`, an internal-clock
+  slave like the printer (`GB::attach_mobile_adapter`). Deterministic offline
+  commands: START (the "NINTENDO" magic handshake that begins a session, used
+  for detection), END, REINIT, CHECK_STATUS (line disconnected), and EEPROM
+  config read/write over a local 512-byte config.
+- Grounded boundary: the telephone/PPP/TCP/UDP/DNS networking is NOT a
+  deterministic emulator feature and has no offline spec (libmobile delegates
+  every socket to host callbacks). Those commands return a libmobile-shaped
+  error packet so a game fails them cleanly; live connectivity needs a transport
+  backend + server (future frontend work).
+- Impact: owner has zero Mobile-Adapter games (Net de Get absent); a game can now
+  detect + configure the adapter, but online play needs the backend above.
+- Same bucket (still missing): Barcode Boy / Barcode Taisen Bardigun reader
+  (serial), WorkBoy keyboard (serial) — zero owner impact, listed for
+  completeness.
 
 ---
 
@@ -677,12 +711,12 @@ against both hand-off anchors. Gaps: only §6.2 (compat palette table), §6.3
 | OAM DMA / HDMA / GDMA | COMPLETE (beyond-reference bus-conflict modeling) |
 | Audio (registers + details) | COMPLETE |
 | Joypad Input | COMPLETE incl. §3.2 select-write IRQ edge |
-| Serial Data Transfer | PARTIAL — §8.1 |
+| Serial Data Transfer | COMPLETE (link cable §8.1, printer §8.2, 4-player §8.3, Mobile Adapter §8.4) |
 | Timer & Divider + Obscure Behaviour | COMPLETE |
 | Interrupts / Sources / HALT | COMPLETE (double-halt refetch OPEN-TARGET in flight) |
-| CGB Registers | COMPLETE except IR transport §6.1 |
-| Infrared Communication | MISSING transport — §6.1 |
-| SGB (all 14 sections) | PARTIAL — §7 (protocol/palettes/ATTR/border done; sound §7.3 + OBJ_TRN/PAL_PRI §7.4 not) |
+| CGB Registers | COMPLETE incl. IR transport §6.1 |
+| Infrared Communication | DONE — §6.1 (two-instance + loopback) |
+| SGB (all 14 sections) | PARTIAL — §7 (protocol/palettes/ATTR/border done; SOUND §7.3 decoded, synth needs SNES-APU HLE; OBJ_TRN/PAL_PRI §7.4 not) |
 | CPU (specs, registers, instruction set) | COMPLETE (illegal-op lockup included) |
 | Cartridge header | COMPLETE parse; §7.5 SGB unlock gate enforced |
 | No MBC | COMPLETE incl. $08/$09 external RAM — §2.1 |
@@ -696,7 +730,8 @@ against both hand-off anchors. Gaps: only §6.2 (compat palette table), §6.3
 | Other MBCs (Wisdom Tree, Rocket, Sachen, Makon) | IMPLEMENTED — §2.11 (EMS/multicart magics still missing) |
 | Game Boy Printer | DONE — §8.2 |
 | Game Boy Camera | DONE — §2.6 (mapper + M64282FP pipeline; webcam feed is a frontend opt-in) |
-| 4-Player Adapter | MISSING — §8.3 |
+| 4-Player Adapter | DONE — §8.3 (protocol + hub) |
+| Mobile Adapter GB | PARTIAL — §8.4 (protocol/session/config; networking = backend) |
 | Game Genie / Shark | COMPLETE (core hooks) |
 | Power-Up Sequence | COMPLETE — §9 |
 | Reducing Power Consumption (STOP) | COMPLETE — §3.1 (glitch/panel-line leaves deferred) |
@@ -739,18 +774,22 @@ the deferred CGB IR transport (owner-deferred), listed after it.
 not yet have — a real cart or a graded test ROM — so all are held rather than
 shipped blind):
 
-- CGB IR transport (loopback + paired instance) (§6.1) — **M**, owner-deferred
-  (Mystery Gift, Perfect Dark, SMB DX). The RP register is already exact; only
-  the pulse-timeline transport is missing.
-- M161 (§2.10) — **DONE** (gambatte port; the one backlog item with an in-tree
-  reference and thus shippable).
+- CGB IR transport (§6.1) — **DONE** (two-instance + loopback channel; Mystery
+  Gift, TCG Card Pop, Pinball, Bomberman trades).
+- 4-Player Adapter DMG-07 (§8.3) — **DONE** (ping/transmission protocol + serial
+  hub; needs a frontend that pumps the connected instances for live play).
+- Mobile Adapter GB (§8.4) — **PARTIAL/DONE**: protocol + session/config done;
+  live networking needs a transport backend (not a deterministic feature).
+- SGB SOUND (§7.3) — command **decode DONE**; audible synthesis needs an
+  SNES-APU HLE + sound ROM (not groundable from public specs).
+- M161 (§2.10) — **DONE** (gambatte port).
 - MMM01 (§2.7), MBC6 (§2.8), TAMA5 (§2.9) — DEFERRED, no in-tree reference or
   test ROM (see each section for the specific blocker).
-- SGB SOUND HLE (§7.3, L); OBJ_TRN/PAL_PRI (§7.4, M); SGB unlock gate — DONE.
+- OBJ_TRN/PAL_PRI (§7.4, M); SGB unlock gate — DONE.
 - Boot-ROM acceptance for DMG0/SGB/CGB0/AGB dumps (§6.4, S) — needs the actual
   dumps to derive verifiable masked-CRCs; deferred rather than guess constants.
-- DMG-07 4-player (§8.3, M, after §8.1); Mobile Adapter GB (§8.4, L);
-  compat-path boot DIV formula (§6.3, M).
+- compat-path boot DIV formula (§6.3, M); Barcode Boy / WorkBoy serial
+  peripherals (§8.4, zero owner impact).
 
 Already-tracked accuracy frontier (not re-listed here): see
 `KNOWN_FAILURES.md` (17 cases, all proven floors or in-flight open targets)
