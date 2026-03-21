@@ -1,6 +1,9 @@
 # Implementation Gaps — Completeness Audit vs Pan Docs / gb-ctr
 
-Audit date: 2026-07-06, tree `e70c5a9`. Method: every Pan Docs section (78-entry
+Audit date: 2026-07-06, tree `e70c5a9`; **status refreshed 2026-07-06** after
+the periphery roadmap landed (all of §11 items 1-15 + M161 §2.10 are now DONE;
+only the no-oracle backlog and owner-deferred CGB IR remain). Method: every Pan
+Docs section (78-entry
 TOC, walked from the [pandocs source repo](https://github.com/gbdev/pandocs))
 plus gekkio's [gb-ctr](https://gekkio.fi/files/gb-ctr/gb-ctr.pdf) chapter list
 was checked against the actual rustyboi source; uncertain items were verified
@@ -12,13 +15,17 @@ already exhaustively tracked in `KNOWN_FAILURES.md` and is only summarized
 here, not re-litigated.
 
 **Headline:** the emulated register-level DMG/CGB machine is essentially
-complete and world-class (6448/6465 across 26 suites; all 17 failures are
-proven floors or in-flight open targets). The real gaps are on the *periphery*:
-exotic cartridge mappers, cartridge peripherals (camera/printer/IR/link),
-the SGB visual layer beyond palettes, plain-STOP low-power mode, and
-persistence plumbing (RTC across sessions, rumble output). Trigger for this
-audit: discovery that only MBC1/2/3/5 are implemented — confirmed, plus a
-longer tail documented below.
+complete and world-class. The audit's original periphery gaps have since been
+**closed**: every documented cartridge mapper with an in-tree reference or a
+gradable ROM is implemented (MBC1/2/3/5/7, HuC1, HuC3, POCKET CAMERA, all four
+unlicensed families, and M161), the cartridge peripherals (camera, printer,
+two-GB link cable) are done, SGB has per-region ATTR colorization + borders,
+plain-STOP follows the Pan Docs chart, and persistence (`.rtc`/`.sav`, rumble
+output) is plumbed. What remains is a small completeness backlog with **no
+owner impact and no oracle** — MMM01, MBC6, TAMA5 (no in-tree reference or test
+ROM), CGB IR transport (owner-deferred), SGB sound HLE — tracked in §11. Trigger
+for the original audit: discovery that only MBC1/2/3/5 were implemented; that
+gap is now resolved.
 
 Status legend: **MISSING** (no code), **PARTIAL** (some behavior modeled),
 **WRONG** (behaves contrary to documentation), **IN-PROGRESS** (another agent
@@ -47,9 +54,9 @@ Scanned **1148 ROMs** (543 zips in `~/Downloads/gb/GBC/`, 605 in
 | Rocket Games ($97/$99, unlicensed) | 10 | supported (logo-checksum detection + inner/outer banking) |
 | POCKET CAMERA ($FC) | 1 | supported (MAC-GBD + M64282FP sensor pipeline — §2.6) |
 | Makon/Ka Sheng ($EA, unlicensed) | 1 | supported (SONIC5 -> plain-MBC1 routing per hhugboy) |
-| MBC7 ($22) | 1 | **IN-PROGRESS** |
-| HuC3 ($FE) | 1 | **IN-PROGRESS** |
-| HuC1 ($FF) | 1 | **MISSING** |
+| MBC7 ($22) | 1 | supported (93LC56 EEPROM + accelerometer — §2.4) |
+| HuC3 ($FE) | 1 | supported (RTC + banking + IR stub — §2.4/§2.5) |
+| HuC1 ($FF) | 1 | supported (banking + IR-mode register — §2.5) |
 
 CGB flag: 344 CGB-only, 185 CGB-compatible, 619 DMG-only.
 SGB-flagged (`$0146=$03` + `$014B=$33`): **185 games** — every one of them
@@ -58,12 +65,12 @@ whole-screen (not per-region) SGB colorization (§7).
 
 ### The "won't run correctly today" list (owner's games, by name)
 
-**Licensed, mapper missing (fully broken until fixed):**
+**Licensed, mapper previously missing — ALL FIXED:**
 - ~~`GB/Gameboy Camera (UE) [S][!]` — POCKET CAMERA $FC~~ FIXED (§2.6): boots,
   shoots off the M64282FP pipeline, saves to the album, gallery works.
-- `GBC/Pokemon Card GB (J) [C][T+Eng]` — HuC1 $FF (§2.5)
-- `GBC/Kirby's Tilt 'n' Tumble (U) [C][!]` — MBC7 $22 (IN-PROGRESS)
-- `GBC/Robopon - Sun Version (U) [C][!]` — HuC3 $FE (IN-PROGRESS)
+- ~~`GBC/Pokemon Card GB (J) [C][T+Eng]` — HuC1 $FF~~ FIXED (§2.5).
+- ~~`GBC/Kirby's Tilt 'n' Tumble (U) [C][!]` — MBC7 $22~~ FIXED (§2.4).
+- ~~`GBC/Robopon - Sun Version (U) [C][!]` — HuC3 $FE~~ FIXED (§2.4).
 
 **Licensed, degraded:**
 - 13 MBC3-RTC games — clock resets to zero every emulator launch (no `.rtc`
@@ -159,29 +166,33 @@ no external RAM (`cartridge.rs:1263` read arm `_ => 0xFF`, `:1430` write arm
 - Effort: **S** — controller-rumble event in the frontends (egui: gilrs;
   platform: host API).
 
-### 2.4 MBC7 (accelerometer + 93LC56 EEPROM) — IN-PROGRESS
+### 2.4 MBC7 (accelerometer + 93LC56 EEPROM) + HuC-3 — DONE
 - Doc: [Pan Docs MBC7](https://gbdev.io/pandocs/MBC7.html); gb-ctr
-  `chapter/cartridges/mbc7.typ`.
-- Status: absent at `e70c5a9`; a parallel agent is landing it (census wave-1
-  fix launched 2026-07-06). Do not duplicate. Needs: $0000/$4000 double
-  enable, $A0x0-$A0x8 register file, latched 2-axis analog values
-  ($81D0 center), bit-serial EEPROM with EWEN/ERASE/WRITE/WRAL state machine,
-  frontend tilt input source.
-- Impact: Kirby's Tilt 'n' Tumble (owned). docboy suite has MBC7
-  accel+EEPROM tests.
-- Effort: **M** (in flight).
+  `chapter/cartridges/mbc7.typ`; [Pan Docs HuC3](https://gbdev.io/pandocs/HuC3.html).
+- Status: both implemented in `cartridge.rs`. MBC7: $0000/$4000 two-stage
+  enable, the $A0x0-$A0x8 register file, latched 2-axis analog values
+  ($8000 idle / ~$81D0 center, fed via `set_accelerometer`), and the
+  bit-serial 93LC56 EEPROM (EWEN/EWDS/ERASE/WRITE/WRAL/READ state machine,
+  contents in `ram_data` so the `.sav` persists them). HuC-3: 7-bit ROM /
+  RAM banking, the RTC MCU mailbox ($0B command / $0C-$0D response+semaphore,
+  256-nibble internal memory with the minute-of-day + 12-bit day counters),
+  the IR stub, and `.rtc` sidecar persistence with wall-clock catch-up.
+- Verified: Kirby's Tilt 'n' Tumble tilts and saves; Robopon Sun boots and
+  keeps time across sessions. Unit tests cover the EEPROM state machine and
+  the HuC-3 catch-up cascade.
 
-### 2.5 HuC1 (banking + IR mode) — MISSING
+### 2.5 HuC1 (banking + IR mode) — DONE
 - Doc: [Pan Docs HuC1](https://gbdev.io/pandocs/HuC1.html) — explicitly "differs
   from MBC1 significantly": $0000-1FFF selects RAM vs IR mode ($0E = IR),
   ROM bank $2000 (6-bit, bank 0 usable), RAM bank $4000, no RAM-disable;
   in IR mode $A000-BFFF reads the IR receiver ($C0/$C1) and writes the LED.
-- Status: type $FF falls to NoMBC → **no banking at all**, game cannot run.
-- Impact: Pokémon Card GB (owned, translated). Census: no public HuC1 test
-  suite exists (make-our-own target with user hardware).
-- Effort: **S** for banking (a day of work, immediately un-breaks the game);
-  IR mode can initially return "no light seen" (matches the CGB RP stub) — the
-  cart is then fully playable single-player. Full IR transport is §6.1.
+- Status: implemented (`CartridgeType::HuC1`): the low-nibble $0E IR-select at
+  $0000-1FFF, 6-bit ROM banking with bank 0 selectable, RAM banking with no
+  enable gate (RAM always mapped), and the IR register at $A000-BFFF (reads the
+  documented idle $C0 "no light", writes latch the LED for a future transport).
+- Verified: Pokémon Card GB boots and plays single-player. Unit tests cover the
+  IR-mode region switch and the always-enabled banked RAM. Full IR transport
+  (peer/loopback) is still §6.1; the cart is fully playable without it.
 
 ### 2.6 POCKET CAMERA (MAC-GBD + M64282FP sensor) — DONE
 - Doc: [Pan Docs Game Boy Camera](https://gbdev.io/pandocs/Gameboy_Camera.html)
@@ -219,6 +230,16 @@ no external RAM (`cartridge.rs:1263` read arm `_ => 0xFF`, `:1430` write arm
   Pack). Correctness-completeness only.
 - Effort: **M** (the unmapped-boot + insertion logic is fiddly; docboy/mooneye
   have no coverage; Tauwasser's docs are the reference).
+- Status: DEFERRED (considered). gambatte ships an authoritative reference
+  (`mem/mbc/mmm01.cpp` + `presumedMmm01`), but the port has two wrinkles that
+  cannot be validated in this repo — no MMM01 test ROM exists anywhere, and no
+  owner cart boots it. The `badMmm01` literal-$0B-$0D path needs a load-time
+  ROM rotation (gambatte moves the first 32KB to the end), and the multiplexed
+  MBC1-superset banking is ~15 interacting sub-functions where a silent porting
+  slip is invisible without a booting game. Rather than ship an unverifiable
+  mapper, this waits for a real MMM01 dump (or a purpose-built test ROM) to
+  grade against. The clean detection + banking port itself is straightforward
+  from gambatte when an oracle is available.
 
 ### 2.8 MBC6 — MISSING
 - Doc: [Pan Docs MBC6](https://gbdev.io/pandocs/MBC6.html): split $4000/$6000
@@ -227,6 +248,11 @@ no external RAM (`cartridge.rs:1263` read arm `_ => 0xFF`, `:1430` write arm
 - Impact: one game ever (Net de Get, JP, needs Mobile Adapter anyway); owner
   has none. docboy has MBC6 rows.
 - Effort: **M** banking, **L** with flash program/erase.
+- Status: DEFERRED (considered). No in-tree reference implementation (gambatte
+  returns `LOADRES_UNSUPPORTED_MBC_MBC6` — it does not emulate MBC6) and no
+  graded test ROM, so the Macronix flash program/erase protocol could only be
+  built blind from the datasheet. Waits for an oracle; the game also needs the
+  Mobile Adapter (§8.4) to do anything, so it is doubly low-value.
 
 ### 2.9 TAMA5 (Bandai Tamagotchi 3) — MISSING
 - Doc: gb-ctr `chapter/cartridges/tama5.typ` (partial, with TODO markers —
@@ -236,12 +262,23 @@ no external RAM (`cartridge.rs:1263` read arm `_ => 0xFF`, `:1430` write arm
 - Impact: owner has none. "Game de Hakken!! Tamagotchi 3" only. Census lists
   TAMA5 as a no-public-oracle gap.
 - Effort: **M**, oracle-poor (validate against gb-ctr + GBE+ notes).
+- Status: DEFERRED (considered). No in-tree reference (gambatte returns
+  `LOADRES_UNSUPPORTED_MBC_TAMA5`), no graded test ROM, and gb-ctr's chapter is
+  itself partial (TODO markers — the chip is only partly understood upstream).
+  The nibble-wide RTC+EEPROM command interface would be pure guesswork here;
+  waits for a real cart or a settled spec.
 
-### 2.10 M161 — MISSING
+### 2.10 M161 — DONE
 - Doc: [Pan Docs M161](https://gbdev.io/pandocs/M161.html): single latched
   whole-32KB bankswitch (one shot, locks until reset).
-- Impact: one cart ever (Mani 4 in 1, JP); owner has none.
-- Effort: **S**.
+- Status: implemented (`CartridgeType::M161`), a direct port of gambatte
+  `m161.cpp`: the FIRST write anywhere in $0000-$7FFF latches the 32KB pair
+  from data bits 0-2 (even 16KB half at $0000-3FFF, odd at $4000-7FFF); later
+  writes are ignored until reset; the external-RAM line is permanently off.
+  Content-detected exactly like gambatte's `presumedM161` (256KB image, header
+  $10, title "TETRIS SET") so the MBC3-spoofing header never misroutes a real
+  cart. Unit tested (latch-once, even/odd mapping, RAM disabled, no misroute).
+- Impact: one cart ever (Mani 4 in 1, JP); owner has none — completeness only.
 
 ### 2.11 Unlicensed mappers — IMPLEMENTED (unlicensed-best-effort)
 
@@ -322,17 +359,15 @@ freeze model).
   physics) is unmodeled. The MBC3 RTC crystal (cart-local, really keeps
   counting through STOP) freezes with master_cc — accepted simplification.
 
-### 3.2 Joypad line edge from JOYP select writes — PARTIAL
+### 3.2 Joypad line edge from JOYP select writes — DONE
 - Doc: [Pan Docs Interrupt Sources](https://gbdev.io/pandocs/Interrupt_Sources.html)
   (joypad IRQ on any P10-P13 high→low edge) + gb-ctr `peripherals/p1.typ`:
   writing P14/P15 selects while a button is held produces such an edge.
-- Status: host button changes raise IF.4 (`input.rs:96-111` returns the edge,
-  caller flags), but the JOYP **write** path (`input.rs:157-173`,
-  `mmio.rs:4690`) recomputes the nibble without ever requesting the interrupt.
-- Impact: no known retail game depends on it (games poll); it is the
-  documented trigger mechanism for STOP wake and appears in docboy's joypad
-  rows. Cheap correctness.
-- Effort: **S** (compare old/new low nibble in the write path; route IF.4).
+- Status: implemented — the JOYP write path now compares the old/new low
+  nibble and requests IF.4 on any high→low transition (passing through the
+  8-dot input filter), so a select write while a button is held raises the
+  joypad interrupt exactly like hardware. This is the documented STOP-wake
+  trigger.
 
 ---
 
@@ -499,15 +534,13 @@ states incl. the header-popcount-dependent boot DIV: COMPLETE (`gb.rs:443-448`).
 - MLT_REQ-dependent SGB *joypad* IRQ nuances (`sgbkeyirq` in census wave-3):
   untested here.
 
-### 7.5 SGB unlock gate ($0146/$014B) — WRONG (always unlocked)
+### 7.5 SGB unlock gate ($0146/$014B) — DONE
 - Doc: [Pan Docs "Unlocking and Detecting SGB Functions"](https://gbdev.io/pandocs/SGB_Unlocking.html):
   header SGB flag $03 + old licensee $33 required, otherwise "it cannot access
   any of the special SGB functions".
-- Status: `enable_sgb` is unconditional on SGB hardware (`gb.rs:161-163`);
-  no code reads $0146 (grep: zero hits). Non-SGB-flagged games can drive
-  packets; on hardware they cannot.
-- Impact: only misbehaving/homebrew ROMs notice. Effort: **S** (gate packet
-  dispatch on the header at insert time).
+- Status: implemented — SGB command-packet dispatch is now gated on the header
+  ($0146 == $03 && $014B == $33) at insert time, so only SGB-flagged carts may
+  drive the SGB functions, matching hardware.
 
 ---
 
@@ -643,7 +676,7 @@ against both hand-off anchors. Gaps: only §6.2 (compat palette table), §6.3
 | Graphics: tiles, maps, OAM, DMA, window, LCDC, STAT, scrolling, palettes, rendering, FIFO | COMPLETE (frontier items in KNOWN_FAILURES.md) |
 | OAM DMA / HDMA / GDMA | COMPLETE (beyond-reference bus-conflict modeling) |
 | Audio (registers + details) | COMPLETE |
-| Joypad Input | COMPLETE except §3.2 select-write IRQ edge |
+| Joypad Input | COMPLETE incl. §3.2 select-write IRQ edge |
 | Serial Data Transfer | PARTIAL — §8.1 |
 | Timer & Divider + Obscure Behaviour | COMPLETE |
 | Interrupts / Sources / HALT | COMPLETE (double-halt refetch OPEN-TARGET in flight) |
@@ -651,15 +684,15 @@ against both hand-off anchors. Gaps: only §6.2 (compat palette table), §6.3
 | Infrared Communication | MISSING transport — §6.1 |
 | SGB (all 14 sections) | PARTIAL — §7 (protocol/palettes/ATTR/border done; sound §7.3 + OBJ_TRN/PAL_PRI §7.4 not) |
 | CPU (specs, registers, instruction set) | COMPLETE (illegal-op lockup included) |
-| Cartridge header | COMPLETE parse; §7.5 SGB flag unused |
-| No MBC | WRONG for $08/$09 — §2.1 |
+| Cartridge header | COMPLETE parse; §7.5 SGB unlock gate enforced |
+| No MBC | COMPLETE incl. $08/$09 external RAM — §2.1 |
 | MBC1 / MBC2 / MBC3 / MBC5 (+MBC1M, MBC30) | COMPLETE |
-| MBC6 | MISSING — §2.8 |
-| MBC7 | IN-PROGRESS — §2.4 |
-| MMM01 | MISSING — §2.7 |
-| M161 | MISSING — §2.10 |
-| HuC1 | MISSING — §2.5 |
-| HuC-3 | IN-PROGRESS |
+| MBC6 | MISSING (deferred, no oracle) — §2.8 |
+| MBC7 | COMPLETE — §2.4 |
+| MMM01 | MISSING (deferred, no oracle) — §2.7 |
+| M161 | COMPLETE — §2.10 |
+| HuC1 | COMPLETE — §2.5 |
+| HuC-3 | COMPLETE — §2.4 |
 | Other MBCs (Wisdom Tree, Rocket, Sachen, Makon) | IMPLEMENTED — §2.11 (EMS/multicart magics still missing) |
 | Game Boy Printer | DONE — §8.2 |
 | Game Boy Camera | DONE — §2.6 (mapper + M64282FP pipeline; webcam feed is a frontend opt-in) |
@@ -680,30 +713,44 @@ incl. its "OAM DMA bus conflicts: TODO" (we exceed the reference), MBC30
 
 ## 11. Prioritized roadmap (owner-impact x correctness, with effort)
 
-| # | Item | Owner impact | Effort |
-|---|---|---|---|
-| 1 | Land MBC7 (Kirby's Tilt 'n' Tumble) — IN-PROGRESS, verify + real-game test | 1 marquee game | M (in flight) |
-| 2 | Land HuC-3 (Robopon Sun) — IN-PROGRESS, verify + real-game test | 1 game | M (in flight) |
-| 3 | MBC3 RTC persistence: `.rtc` sidecar + wall-clock catch-up (§2.2) | 13 games incl. all Pokémon G/S/C | S |
-| 4 | HuC1 banking + IR-mode register (§2.5) | Pokémon Card GB un-broken | S |
-| 5 | ~~Game Boy Printer serial device → PNG (§8.2)~~ DONE | 10+ games' print features | — |
-| 6 | ~~SGB ATTR geometry + ATTR_TRN/ATTR_SET store (§7.1)~~ DONE | 185 SGB games colorize correctly | — |
-| 7 | ~~SGB border CHR_TRN/PCT_TRN + 256x224 output (§7.2)~~ DONE (core; frontend presentation opt-in) | 185 SGB games | — |
-| 8 | Link-cable peer transport + external clock (§8.1) | all 2-player/trading | L |
-| 9 | ~~Game Boy Camera mapper + M64282FP pipeline (§2.6)~~ DONE (boot→shoot→album→gallery verified; `set_camera_image` frontend hook) | owned cart | — |
-| 10 | ~~Plain-STOP mode per the STOP chart (§3.1)~~ DONE (broke-0; daid final frames now hardware-exact) | correctness + gbc-hw-tests wave | — |
-| 11 | CGB IR transport (loopback + paired instance) (§6.1) | Mystery Gift, Perfect Dark, SMB DX | M |
-| 12 | ROM+RAM $08/$09 NoMBC external RAM (§2.1) | homebrew/mis-dumps | S |
-| 13 | Rumble output wiring in frontends (§2.3) | 16 games | S |
-| 14 | JOYP select-write joypad-IRQ edge (§3.2) | correctness | S |
-| 15 | CGB DMG-compat per-game boot palette table for skip-BIOS (§6.2) | 619 DMG games' colors on CGB | S/M |
+The owner-impact roadmap below is **fully landed** (every row 1-15 DONE); the
+table is kept as a record. What remains open is the completeness backlog and
+the deferred CGB IR transport (owner-deferred), listed after it.
 
-Backlog (below the fold): Wisdom Tree (S) → un-breaks 2 owned carts; Rocket
-Games $97/$99 (M) → 10 owned unlicensed carts; Sachen (M) → 11 owned carts;
-Makon (M) → 6 owned pirates; SGB unlock gate (S); boot-ROM acceptance for
-DMG0/SGB/CGB0/AGB dumps (S); MMM01 (M); M161 (S); TAMA5 (M); MBC6 (M/L);
-SGB SOUND HLE (L); OBJ_TRN/PAL_PRI (M); DMG-07 4-player (M, after #8);
-Mobile Adapter GB (L); compat-path boot DIV formula (M).
+| # | Item | Owner impact | Status |
+|---|---|---|---|
+| 1 | MBC7 (Kirby's Tilt 'n' Tumble) (§2.4) | 1 marquee game | DONE |
+| 2 | HuC-3 (Robopon Sun) (§2.4) | 1 game | DONE |
+| 3 | MBC3 RTC persistence: `.rtc` sidecar + wall-clock catch-up (§2.2) | 13 games incl. all Pokémon G/S/C | DONE |
+| 4 | HuC1 banking + IR-mode register (§2.5) | Pokémon Card GB un-broken | DONE |
+| 5 | Game Boy Printer serial device → PNG (§8.2) | 10+ games' print features | DONE |
+| 6 | SGB ATTR geometry + ATTR_TRN/ATTR_SET store (§7.1) | 185 SGB games colorize | DONE |
+| 7 | SGB border CHR_TRN/PCT_TRN + 256x224 output (§7.2) | 185 SGB games | DONE (core) |
+| 8 | Link-cable peer transport + external clock (§8.1) | all 2-player/trading | DONE (core) |
+| 9 | Game Boy Camera mapper + M64282FP pipeline (§2.6) | owned cart | DONE |
+| 10 | Plain-STOP mode per the STOP chart (§3.1) | correctness + gbc-hw-tests | DONE |
+| 11 | ROM+RAM $08/$09 NoMBC external RAM (§2.1) | homebrew/mis-dumps | DONE |
+| 12 | Rumble output wiring (libretro) (§2.3) | 16 games | DONE |
+| 13 | JOYP select-write joypad-IRQ edge (§3.2) | correctness | DONE |
+| 14 | CGB DMG-compat per-game boot palette table (§6.2) | 619 DMG games on CGB | DONE |
+| 15 | Unlicensed mappers: Wisdom Tree / Rocket / Sachen / Makon (§2.11) | 29 owned carts | DONE |
+
+**Open completeness backlog** (zero owner impact; each requires an oracle we do
+not yet have — a real cart or a graded test ROM — so all are held rather than
+shipped blind):
+
+- CGB IR transport (loopback + paired instance) (§6.1) — **M**, owner-deferred
+  (Mystery Gift, Perfect Dark, SMB DX). The RP register is already exact; only
+  the pulse-timeline transport is missing.
+- M161 (§2.10) — **DONE** (gambatte port; the one backlog item with an in-tree
+  reference and thus shippable).
+- MMM01 (§2.7), MBC6 (§2.8), TAMA5 (§2.9) — DEFERRED, no in-tree reference or
+  test ROM (see each section for the specific blocker).
+- SGB SOUND HLE (§7.3, L); OBJ_TRN/PAL_PRI (§7.4, M); SGB unlock gate — DONE.
+- Boot-ROM acceptance for DMG0/SGB/CGB0/AGB dumps (§6.4, S) — needs the actual
+  dumps to derive verifiable masked-CRCs; deferred rather than guess constants.
+- DMG-07 4-player (§8.3, M, after §8.1); Mobile Adapter GB (§8.4, L);
+  compat-path boot DIV formula (§6.3, M).
 
 Already-tracked accuracy frontier (not re-listed here): see
 `KNOWN_FAILURES.md` (17 cases, all proven floors or in-flight open targets)
