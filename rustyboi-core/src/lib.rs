@@ -4,6 +4,7 @@ pub mod gb;
 pub mod cartridge;
 pub mod cpu;
 pub mod input;
+pub mod ir;
 pub mod memory;
 pub mod ppu;
 pub mod printer;

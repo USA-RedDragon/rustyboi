@@ -170,6 +170,12 @@ pub struct Mmio {
     // copies a device's buffers.
     #[serde(default)]
     serial_device: serial::SerialDevice,
+    // Partner plugged into the CGB IR port (RP/$FF56). Disconnected by default
+    // so a lone GBC's receiver always reads "no light", byte-identical to the
+    // pre-IR behaviour. Skipped from savestates like the link cable: the
+    // Arc-backed channel is a live connection, not persistable state.
+    #[serde(skip, default)]
+    ir_device: crate::ir::IrDevice,
     #[serde(skip, default)]
     delayed_writes: Vec<DelayedMmioWrite>,
     io_registers: memory::Memory<IO_REGISTERS_START, IO_REGISTERS_SIZE>,
@@ -846,6 +852,7 @@ impl Mmio {
             timer: timer::Timer::new(),
             serial: serial::Serial::new(),
             serial_device: serial::SerialDevice::Disconnected,
+            ir_device: crate::ir::IrDevice::Disconnected,
             delayed_writes: Vec::new(),
             io_registers: memory::Memory::new(),
             hram: memory::Memory::new(),
@@ -1536,6 +1543,30 @@ impl Mmio {
     /// Unplug whatever is on the link port (back to a disconnected cable).
     pub fn detach_serial_device(&mut self) {
         self.serial_device = serial::SerialDevice::Disconnected;
+    }
+
+    /// Plug one end of a shared IR channel into this GBC's IR port. The current
+    /// emitter level (RP bit 0) is published immediately so a mid-session
+    /// connect sees the right state.
+    pub fn attach_ir(&mut self, link: crate::ir::IrLink) {
+        let led = (self.io_registers.read(0xFF56) & 0x01) != 0;
+        self.ir_device = crate::ir::IrDevice::Link(link);
+        self.ir_device.set_emitter(led);
+    }
+
+    /// Diagnostic self-test: make the IR port see its own emitter (as though an
+    /// IR mirror were held to it). Not how two GBCs communicate.
+    pub fn set_ir_loopback(&mut self) {
+        self.ir_device = crate::ir::IrDevice::Loopback;
+    }
+
+    pub fn ir_attached(&self) -> bool {
+        self.ir_device.is_connected()
+    }
+
+    /// Unplug the IR partner (back to a lone GBC that never sees light).
+    pub fn detach_ir(&mut self) {
+        self.ir_device = crate::ir::IrDevice::Disconnected;
     }
 
     pub fn printer(&self) -> Option<&crate::printer::GbPrinter> {
@@ -4897,10 +4928,18 @@ impl memory::Addressable for Mmio {
                         // CGB-only registers with unused bits that read 1 (DMG
                         // returns 0xFF, handled by the FF51-77 catch-all below).
                         // RP/IR (0xFF56): bits 0,6,7 writable; bit 1 reads the IR
-                        // input (no link -> 1) and the remaining bits read 1.
-                        // Gambatte: `ioamhram_[0x156] | 0x02`, power-on 0x3E.
+                        // receiver and the remaining bits read 1. Power-on 0x3E.
+                        // Bit 1 reads 1 ("no signal") unless read is enabled
+                        // (bits 6-7 both set, Pan Docs) AND the port sees light
+                        // (a connected peer's emitter is lit), which pulls it to
+                        // 0. With no IR partner `receiving` is always false, so
+                        // this stays `raw | 0x02` — byte-identical to before.
                         0xFF56 if self.cgb_features_enabled => {
-                            self.io_registers.read(0xFF56) | 0x02
+                            let raw = self.io_registers.read(0xFF56);
+                            let read_enabled = (raw & 0xC0) == 0xC0;
+                            let signal =
+                                read_enabled && self.ir_device.receiving((raw & 0x01) != 0);
+                            (raw & !0x02) | if signal { 0x00 } else { 0x02 }
                         }
                         // OPRI (0xFF6C): only bit 0 implemented; bits 1-7 read 1.
                         0xFF6C if self.cgb_features_enabled => {
@@ -5315,6 +5354,9 @@ impl memory::Addressable for Mmio {
                         0xFF56 if self.cgb_features_enabled => {
                             let old = self.io_registers.read(0xFF56);
                             self.io_registers.write(0xFF56, (value & 0xC1) | (old & 0x3E));
+                            // Drive the emitter (bit 0) onto any connected IR
+                            // partner so its receiver can see this pulse.
+                            self.ir_device.set_emitter((value & 0x01) != 0);
                         }
 
                         _ => self.io_registers.write(addr, value),
