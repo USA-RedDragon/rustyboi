@@ -1211,6 +1211,22 @@ impl GB {
         Ok(())
     }
 
+    /// Serialize the whole machine to a savestate byte buffer. WASM-clean (no
+    /// filesystem): the caller owns the bytes. Mirrors `to_state_file` minus the
+    /// `fs::write`, so a state saved one way round-trips through the other.
+    pub fn to_state_bytes(&self) -> Result<Vec<u8>, io::Error> {
+        Ok(serde_json::to_vec(&self)?)
+    }
+
+    /// Reconstruct a machine from a savestate buffer produced by
+    /// `to_state_bytes` (or `to_state_file`). Re-derives the `#[serde(skip)]`
+    /// cartridge-flag cache exactly as `from_state_file` does. WASM-clean.
+    pub fn from_state_bytes(bytes: &[u8]) -> Result<Self, io::Error> {
+        let mut gb: GB = serde_json::from_slice(bytes)?;
+        gb.mmio.resync_cart_flags();
+        Ok(gb)
+    }
+
     pub fn reset(&mut self) {
         self.mmio.reset();
         self.ppu.reset();
