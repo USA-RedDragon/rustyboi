@@ -9,6 +9,8 @@ use rustyboi_core_lib::{cpu, gb};
 use rustyboi_egui_lib::Gui;
 use rustyboi_egui_lib::actions::GuiAction;
 
+use crate::game_renderer::PhysicalRect;
+
 pub struct Framework {
     egui_ctx: Context,
     egui_state: egui_winit::State,
@@ -119,7 +121,10 @@ impl Framework {
         self.gui.library_panel_mut()
     }
 
-    pub fn prepare(&mut self, window: &Window, paused: bool, registers: Option<&cpu::registers::Registers>, gb: Option<&gb::GB>) -> (Option<GuiAction>, bool) {
+    /// Runs the egui frame and returns the resulting action, whether a menu is
+    /// open, and the emulator framebuffer's target region in physical pixels
+    /// (the egui central region, below the menu bar and above the status panel).
+    pub fn prepare(&mut self, window: &Window, paused: bool, registers: Option<&cpu::registers::Registers>, gb: Option<&gb::GB>) -> (Option<GuiAction>, bool, PhysicalRect) {
         #[cfg_attr(not(target_os = "android"), allow(unused_mut))]
         let mut raw_input = self.egui_state.take_egui_input(window);
         // winit 0.29's android-game-activity backend drops GameTextInput
@@ -179,11 +184,30 @@ impl Framework {
         self.egui_state
             .handle_platform_output(window, full_output.platform_output);
 
+        let ppp = self.screen_descriptor.pixels_per_point;
         self.paint_jobs = self
             .egui_ctx
-            .tessellate(full_output.shapes, self.screen_descriptor.pixels_per_point);
+            .tessellate(full_output.shapes, ppp);
 
-        ui_result.unwrap_or((None, false))
+        match ui_result {
+            Some(out) => {
+                // egui reports the central region in logical points; convert to
+                // physical pixels for the wgpu scissor/viewport.
+                let c = out.central_rect;
+                let region = PhysicalRect {
+                    x: c.x * ppp,
+                    y: c.y * ppp,
+                    width: c.width * ppp,
+                    height: c.height * ppp,
+                };
+                (out.action, out.menu_open, region)
+            }
+            None => {
+                // Fall back to the whole surface if the UI produced nothing.
+                let [w, h] = self.screen_descriptor.size_in_pixels;
+                (None, false, PhysicalRect { x: 0.0, y: 0.0, width: w as f32, height: h as f32 })
+            }
+        }
     }
 
     pub fn render(

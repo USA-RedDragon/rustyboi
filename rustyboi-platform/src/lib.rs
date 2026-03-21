@@ -9,6 +9,7 @@ mod audio;
 mod config;
 mod display;
 mod framework;
+mod game_renderer;
 #[cfg(target_os = "android")]
 pub mod library;
 mod run;

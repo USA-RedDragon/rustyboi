@@ -27,6 +27,24 @@ fn mobile_toggle_row(ui: &mut egui::Ui, size: egui::Vec2, label: &str, value: &m
     }
 }
 
+/// The egui central region (in logical egui points, top-left origin) where the
+/// emulator framebuffer should be drawn — i.e. below the menu bar and above the
+/// status panel. Convert to physical pixels with `pixels_per_point`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CentralRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Result of laying out one egui frame.
+pub struct UiOutput {
+    pub action: Option<GuiAction>,
+    pub menu_open: bool,
+    pub central_rect: CentralRect,
+}
+
 pub struct Gui {
     error_message: Option<String>,
     #[cfg(not(target_os = "android"))]
@@ -157,7 +175,7 @@ impl Gui {
     }
 
     /// Create the UI using egui.
-    pub fn ui(&mut self, ctx: &Context, paused: bool, registers: Option<&cpu::registers::Registers>, gb: Option<&gb::GB>) -> (Option<GuiAction>, bool) {
+    pub fn ui(&mut self, ctx: &Context, paused: bool, registers: Option<&cpu::registers::Registers>, gb: Option<&gb::GB>) -> UiOutput {
         let mut action = None;
         let mut any_menu_open = false;
 
@@ -187,6 +205,21 @@ impl Gui {
         }
         #[cfg(not(target_os = "android"))]
         self.render_status_panel(ctx);
+
+        // The central region left over after the top menu bar and bottom status
+        // panel have claimed their space (debug panels are floating Windows and
+        // don't shrink it). Captured in egui points before the error panel — if
+        // shown — consumes the central area. The emulator framebuffer must be
+        // drawn only inside this rect. Recomputed every frame, so it tracks the
+        // menu bar opening/closing, theme/font changes, DPI and resizes.
+        let central = ctx.available_rect();
+        let central_rect = CentralRect {
+            x: central.min.x,
+            y: central.min.y,
+            width: central.width().max(0.0),
+            height: central.height().max(0.0),
+        };
+
         self.render_error_panel(ctx, &mut action);
 
         // Android mobile menu: floating soft button + full-screen
@@ -217,7 +250,11 @@ impl Gui {
             self.touch_buttons = input::ButtonState::default();
         }
 
-        (action, any_menu_open)
+        UiOutput {
+            action,
+            menu_open: any_menu_open,
+            central_rect,
+        }
     }
     #[cfg(not(target_os = "android"))]
     fn render_menu_bar(&mut self, ctx: &Context, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, printer_attached: Option<bool>) {
