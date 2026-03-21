@@ -8,6 +8,7 @@ pub mod input;
 pub mod ir;
 pub mod memory;
 pub mod mobile;
+pub mod movie;
 pub mod ppu;
 pub mod printer;
 pub mod serial;
