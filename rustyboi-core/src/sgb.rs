@@ -33,6 +33,38 @@ mod cmd {
     pub const CHR_TRN: u8 = 0x13;
     pub const PCT_TRN: u8 = 0x14;
     pub const DATA_TRN: u8 = 0x0F;
+    pub const SOUND: u8 = 0x08;
+    pub const SOU_TRN: u8 = 0x09;
+}
+
+/// State requested by the SGB SOUND command ($08). Grounded in Pan Docs "SGB
+/// Command $08 — SOUND": the SGB reproduces these on the SNES APU (an SPC700
+/// running the SGB BIOS' N-SPC engine plus a sample ROM). That audio HLE is out
+/// of scope — no public spec reproduces the SGB sound-data ROM or an SPC700
+/// model here — so this records *what was requested* (effect codes, pitch,
+/// volume, mute) for a frontend hook or a test to inspect, rather than
+/// synthesising audio. Effect code $80 stops the corresponding effect.
+#[derive(Serialize, Deserialize, Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct SgbSound {
+    /// Sound Effect A code (port 1, decrescendo). See Pan Docs' Effect A table.
+    pub effect_a: u8,
+    /// Sound Effect B code (port 2, sustain). See Pan Docs' Effect B table.
+    pub effect_b: u8,
+    /// Effect A pitch 0-3 (low..high).
+    pub a_pitch: u8,
+    /// Effect A volume 0-2 (high..low); 3 means "mute on" (see `mute`).
+    pub a_volume: u8,
+    /// Effect B pitch 0-3 (low..high).
+    pub b_pitch: u8,
+    /// Effect B volume 0-2 (high..low); 3 is "not used".
+    pub b_volume: u8,
+    /// Mute the BGM: set only when the Effect A volume field is 3 (Pan Docs
+    /// note 1: mute is active only when both attribute bits D2 and D3 are 1).
+    pub mute: bool,
+    /// Music Score Code (byte 4); 0 when unused.
+    pub music_score: u8,
+    /// True once at least one SOUND command has been received.
+    pub active: bool,
 }
 
 /// Screen-mask mode set by MASK_EN. Applied to the GB output frame.
@@ -150,6 +182,14 @@ pub struct Sgb {
     /// keeps pre-gate save states unlocked.
     #[serde(default)]
     locked: bool,
+
+    // ---- SGB sound (SOUND $08) ----
+    /// Last state requested by the SOUND command. Decoded from the packet; the
+    /// SNES-APU audio HLE that would make it audible is out of scope (see
+    /// [`SgbSound`]). `SOU_TRN` ($09) is recognised as a sound-data transfer but
+    /// likewise has no consumer without the SNES APU.
+    #[serde(default)]
+    sound: SgbSound,
 }
 
 fn default_attr() -> Vec<u8> {
@@ -198,6 +238,7 @@ impl Sgb {
             border_pals: Vec::new(),
             border_ready: false,
             locked: false,
+            sound: SgbSound::default(),
         }
     }
 
@@ -205,6 +246,13 @@ impl Sgb {
     /// all JOYP traffic (non-SGB cart), `false` restores normal reception.
     pub fn set_locked(&mut self, locked: bool) {
         self.locked = locked;
+    }
+
+    /// The state requested by the most recent SGB SOUND command (effect codes,
+    /// pitch, volume, mute). A frontend with an SNES-APU HLE would consume this;
+    /// the GB-only model records it but produces no audio (see [`SgbSound`]).
+    pub fn sound(&self) -> SgbSound {
+        self.sound
     }
 
     /// Number of players currently selected by MLT_REQ (1/2/3-glitch/4).
@@ -378,9 +426,35 @@ impl Sgb {
                 self.pending_trn = Some(command);
                 self.pending_trn_param = self.command[1];
             }
+            cmd::SOUND => {
+                // Pan Docs "SOUND": byte 1 = Effect A code, byte 2 = Effect B
+                // code, byte 3 = attributes (A pitch/volume in bits 0-3, B
+                // pitch/volume in bits 4-7), byte 4 = music score. We decode the
+                // request; the SNES-APU synthesis is out of scope (see SgbSound).
+                let attr = self.command[3];
+                let a_volume = (attr >> 2) & 0x03;
+                self.sound = SgbSound {
+                    effect_a: self.command[1],
+                    effect_b: self.command[2],
+                    a_pitch: attr & 0x03,
+                    a_volume,
+                    b_pitch: (attr >> 4) & 0x03,
+                    b_volume: (attr >> 6) & 0x03,
+                    // Note 1: mute only when both D2 and D3 are set (A volume 3).
+                    mute: a_volume == 0x03,
+                    music_score: self.command[4],
+                    active: true,
+                };
+            }
+            cmd::SOU_TRN => {
+                // Transfers SNES-APU program/score/sample data via VRAM to the
+                // SNES sound chip. With no SNES APU modelled the data has no
+                // consumer, so this is recognised but not read (unlike DATA_TRN,
+                // whose VBlank VRAM read we do perform for framing fidelity).
+            }
             _ => {
-                // Other commands (SOUND, DATA_SND, ICON_EN, ...) are decoded but
-                // have no GB-visible effect in our high-level model; ignore.
+                // Other commands (DATA_SND, ICON_EN, ...) are decoded but have
+                // no GB-visible effect in our high-level model; ignore.
             }
         }
     }
@@ -730,6 +804,37 @@ mod tests {
         }
         sgb.write_p1(0x20); // stop pulse
         sgb.write_p1(0x30);
+    }
+
+    #[test]
+    fn sound_command_decodes_effects_pitch_volume_mute() {
+        let mut sgb = Sgb::new();
+        let mut pkt = [0u8; 16];
+        // SOUND ($08), length 1. Effect A = $01 (Nintendo), Effect B = $03
+        // (Applause large). Attributes: A pitch 3 + A volume 1, B pitch 2 +
+        // B volume 0 -> byte = (0<<6)|(2<<4)|(1<<2)|3 = 0x27. Music score $05.
+        pkt[0] = (cmd::SOUND << 3) | 1;
+        pkt[1] = 0x01;
+        pkt[2] = 0x03;
+        pkt[3] = 0x27;
+        pkt[4] = 0x05;
+        send_packet(&mut sgb, &pkt);
+
+        let s = sgb.sound();
+        assert!(s.active);
+        assert_eq!(s.effect_a, 0x01);
+        assert_eq!(s.effect_b, 0x03);
+        assert_eq!(s.a_pitch, 3);
+        assert_eq!(s.a_volume, 1);
+        assert_eq!(s.b_pitch, 2);
+        assert_eq!(s.b_volume, 0);
+        assert!(!s.mute, "A volume 1 is not mute");
+        assert_eq!(s.music_score, 0x05);
+
+        // Attribute with A volume field = 3 ($0C) sets mute (Pan Docs note 1).
+        pkt[3] = 0x0C;
+        send_packet(&mut sgb, &pkt);
+        assert!(sgb.sound().mute, "A volume 3 (D2&D3) mutes the BGM");
     }
 
     #[test]
