@@ -250,11 +250,22 @@ pub enum SerialDevice {
     Disconnected,
     Printer(printer::GbPrinter),
     Link(LinkPeer),
+    /// 4-Player Adapter (DMG-07): a serial hub that clocks all transfers, so
+    /// this Game Boy runs in external-clock mode and the adapter deposits bytes
+    /// through the same external-clock path as a link peer.
+    FourPlayer(crate::dmg07::FourPlayerPort),
 }
 
 impl SerialDevice {
     pub fn is_link(&self) -> bool {
         matches!(self, SerialDevice::Link(_))
+    }
+
+    /// True for devices that drive the clock externally and complete transfers
+    /// via the idle deposit poll (a link peer or the DMG-07 adapter) rather than
+    /// this Game Boy's own internal-clock window.
+    pub fn drives_external_clock(&self) -> bool {
+        matches!(self, SerialDevice::Link(_) | SerialDevice::FourPlayer(_))
     }
 
     /// Observe an SC write and answer what an internal-clock transfer start
@@ -265,6 +276,11 @@ impl SerialDevice {
             SerialDevice::Disconnected => LinkStart::Disconnected,
             SerialDevice::Printer(p) => LinkStart::Ready(p.preloaded_response()),
             SerialDevice::Link(l) => l.sc_write(value, sb),
+            // The adapter is the clock master; driving an internal-clock
+            // transfer against it yields garbage (Pan Docs). External-clock
+            // arming schedules no internal window, so this is only consumed on
+            // that misuse.
+            SerialDevice::FourPlayer(_) => LinkStart::Ready(0xFF),
         }
     }
 
@@ -277,13 +293,18 @@ impl SerialDevice {
             SerialDevice::Disconnected => {}
             SerialDevice::Printer(p) => p.receive_byte(tx, cc),
             SerialDevice::Link(l) => l.complete_master(tx, rx),
+            // The adapter clocks externally; the Game Boy's reply is captured
+            // via `link_mirror_sb` before each deposit, so nothing to do here.
+            SerialDevice::FourPlayer(_) => {}
         }
     }
 
-    /// Keep a link peer's live-SB mirror in sync (no-op for other devices).
+    /// Keep the peer's / adapter's view of our outgoing SB in sync.
     pub fn link_mirror_sb(&mut self, sb: u8) {
-        if let SerialDevice::Link(l) = self {
-            l.mirror_sb(sb);
+        match self {
+            SerialDevice::Link(l) => l.mirror_sb(sb),
+            SerialDevice::FourPlayer(p) => p.mirror_sb(sb),
+            _ => {}
         }
     }
 
@@ -303,10 +324,13 @@ impl SerialDevice {
         }
     }
 
-    /// A completed peer window's byte awaiting our external-clock side.
+    /// A byte the external clock source (link peer or DMG-07) has ready for our
+    /// armed external-clock side. The adapter always has its next protocol byte
+    /// ready, clocking one exchange per pull (deposit-on-arm cadence).
     pub fn link_take_deposit(&mut self) -> Option<u8> {
         match self {
             SerialDevice::Link(l) => l.take_deposit(),
+            SerialDevice::FourPlayer(p) => Some(p.clock()),
             _ => None,
         }
     }

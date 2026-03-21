@@ -1347,10 +1347,11 @@ impl Mmio {
             && self.delayed_writes.is_empty()
             && self.joypad_irq_delay == 0
             && !self.has_pending_hdma_deferred()
-            // A link peer's deposits arrive on the PEER instance's timeline;
-            // per-dot polling keeps the external-clock completion cc tight, so
-            // never bulk-skip with a cable attached (default stays identical).
-            && !self.serial_device.is_link()
+            // An external clock source (link peer or DMG-07 adapter) deposits on
+            // another timeline; per-dot polling keeps the external-clock
+            // completion cc tight, so never bulk-skip with one attached (the
+            // disconnected default stays byte-identical).
+            && !self.serial_device.drives_external_clock()
     }
 
     /// per-access STAGE 1: bulk-advance the timer+serial to `target_cc` in one shot
@@ -1427,7 +1428,7 @@ impl Mmio {
         // the peer instance's window (the external-clock data path); anything
         // else keeps the exact pre-link fast path.
         if !self.serial.is_active() {
-            if self.serial_device.is_link() {
+            if self.serial_device.drives_external_clock() {
                 self.link_poll_idle();
             }
             return;
@@ -1533,6 +1534,16 @@ impl Mmio {
 
     pub fn link_attached(&self) -> bool {
         self.serial_device.is_link()
+    }
+
+    /// Plug this Game Boy into a 4-Player Adapter (DMG-07) port.
+    pub fn attach_four_player(&mut self, mut port: crate::dmg07::FourPlayerPort) {
+        port.mirror_sb(self.serial.read(serial::SB));
+        self.serial_device = serial::SerialDevice::FourPlayer(port);
+    }
+
+    pub fn four_player_attached(&self) -> bool {
+        matches!(self.serial_device, serial::SerialDevice::FourPlayer(_))
     }
 
     /// Debug/test: the in-flight serial transfer's completion event cc.

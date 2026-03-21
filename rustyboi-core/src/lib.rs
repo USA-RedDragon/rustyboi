@@ -3,6 +3,7 @@ pub mod cgb_compat_palette;
 pub mod gb;
 pub mod cartridge;
 pub mod cpu;
+pub mod dmg07;
 pub mod input;
 pub mod ir;
 pub mod memory;

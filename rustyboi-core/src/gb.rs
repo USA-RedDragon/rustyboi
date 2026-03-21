@@ -1073,6 +1073,28 @@ impl GB {
         self.mmio.detach_ir();
     }
 
+    /// Connect 2-4 Game Boys through a 4-Player Adapter (DMG-07). The adapter is
+    /// the clock master, so each Game Boy uses external-clock serial; the shared
+    /// hub runs the Pan Docs ping/transmission protocol. The frontend pumps all
+    /// instances (any interleave), exactly like [`GB::connect_link`]. Player IDs
+    /// are assigned by attach order (1..N).
+    pub fn connect_four_player(gbs: &mut [&mut GB]) {
+        let ports = crate::dmg07::FourPlayerPort::hub(gbs.len());
+        for (gb, port) in gbs.iter_mut().zip(ports) {
+            gb.mmio.attach_four_player(port);
+        }
+    }
+
+    /// Plug one DMG-07 port into this instance (the other ports go to other
+    /// instances, possibly behind a socket/process transport).
+    pub fn attach_four_player_port(&mut self, port: crate::dmg07::FourPlayerPort) {
+        self.mmio.attach_four_player(port);
+    }
+
+    pub fn four_player_attached(&self) -> bool {
+        self.mmio.four_player_attached()
+    }
+
     pub fn printer_attached(&self) -> bool {
         self.mmio.printer().is_some()
     }
@@ -1292,6 +1314,36 @@ mod stop_tests {
         b.write_memory(0xFF56, 0xC1); // B emits
         a.write_memory(0xFF56, 0xC0);
         assert_eq!(a.read_memory(0xFF56) & 0x02, 0x02, "detached -> no partner");
+    }
+
+    /// A Game Boy plugged into a DMG-07 must receive the ping stream over
+    /// external-clock serial: the adapter clocks each transfer and deposits its
+    /// protocol byte. Driving the transfers by hand (SB = reply, SC = external
+    /// clock + start), the received stream is `FE, STAT, STAT, STAT, ...` with
+    /// the STAT reporting P1 connected once we ACK. Pan Docs "4-Player Adapter".
+    #[test]
+    fn dmg07_ping_stream_reaches_the_gameboy_over_external_clock() {
+        let mut gb = gb_with(&[], Hardware::DMG, 0x00);
+        let port = crate::dmg07::FourPlayerPort::hub(2).into_iter().next().unwrap();
+        gb.attach_four_player_port(port);
+        assert!(gb.four_player_attached());
+
+        let mut received = Vec::new();
+        for _ in 0..8 {
+            gb.write_memory(0xFF01, 0x88); // ACK everything so P1 connects
+            gb.write_memory(0xFF02, 0x80); // external clock (bit0=0), start
+            step_until(&mut gb, 100_000, "serial xfer complete", |g| {
+                g.read_memory(0xFF02) & 0x80 == 0
+            });
+            received.push(gb.read_memory(0xFF01));
+        }
+        // The adapter broadcasts ping headers ($FE) followed by STAT bytes.
+        assert!(received.contains(&0xFE), "must receive the ping header, got {received:02X?}");
+        // After ACKing, a STAT byte reports P1 connected (bit 4) with player ID 1.
+        assert!(
+            received.iter().any(|&b| b & 0x17 == 0x11),
+            "must receive a P1-connected STAT byte, got {received:02X?}"
+        );
     }
 
     const BTN_NONE: ButtonState = ButtonState {
