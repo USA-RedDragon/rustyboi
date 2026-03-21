@@ -758,6 +758,20 @@ impl Cartridge {
         }
     }
 
+    /// Physical external-RAM byte size. Header RAM-size $01 is a 2KB chip (a
+    /// partial 8KB bank): it decodes only A0-A10, so the chip mirrors 4x across
+    /// the $A000-$BFFF window (Pan Docs "No MBC" / the RAM-size table). Sizing
+    /// the buffer to the true 2KB makes the existing `offset % ram_data.len()`
+    /// in every RAM read/write reproduce that mirror. All other codes are a
+    /// whole number of 8KB banks.
+    fn compute_ram_len(ram_size_code: u8, ram_banks: usize) -> usize {
+        if ram_banks > 0 && ram_size_code == 0x01 {
+            0x800
+        } else {
+            ram_banks * 0x2000
+        }
+    }
+
     /// The Sachen MMC address descramble for CPU reads in $0100-$01FF (A8
     /// high, A15..A9 low): RA0<=A6, RA1<=A4, RA4<=A1, RA6<=A0 (bit swaps, so
     /// the mapping is an involution). hhugboy MbcUnlSachenMMC1.cpp; mGBA
@@ -1028,7 +1042,7 @@ impl Cartridge {
         let ram_data = if cartridge_type == MBC7_SENSOR_RUMBLE_RAM_BATTERY {
             vec![0xFF; 256]
         } else {
-            vec![0xFF; ram_banks * 0x2000] // 8KB per bank
+            vec![0xFF; Self::compute_ram_len(ram_size_code, ram_banks)]
         };
 
         // Detect CGB support
@@ -1222,7 +1236,7 @@ impl Cartridge {
         let ram_data = if cartridge_type == MBC7_SENSOR_RUMBLE_RAM_BATTERY {
             vec![0xFF; 256]
         } else {
-            vec![0xFF; ram_banks * 0x2000] // 8KB per bank
+            vec![0xFF; Self::compute_ram_len(ram_size_code, ram_banks)]
         };
 
         // Detect CGB support
@@ -4681,6 +4695,28 @@ mod tests {
         let mut cart = Cartridge::from_bytes(&make_rom(0x00, 0x00)).unwrap();
         cart.write(0xA000, 0x77);
         assert_eq!(cart.read(0xA000), 0xFF);
+    }
+
+    #[test]
+    fn nombc_2kb_ram_mirrors_across_the_window() {
+        // $08 ROM+RAM with RAM-size $01 = a 2KB chip: it decodes only A0-A10,
+        // so the 2KB repeats 4x across $A000-$BFFF (Pan Docs "No MBC").
+        let mut cart = Cartridge::from_bytes(&make_rom(ROM_RAM, 0x01)).unwrap();
+        cart.write(0xA000, 0x11);
+        cart.write(0xA123, 0x22);
+        // Every 2KB-offset alias of $A000 / $A123 reads the same cell.
+        for base in [0xA000u16, 0xA800, 0xB000, 0xB800] {
+            assert_eq!(cart.read(base), 0x11, "mirror of A000 at {base:04X}");
+            assert_eq!(cart.read(base + 0x123), 0x22, "mirror of A123 at {base:04X}");
+        }
+        // Writing through a high alias lands in the same physical cell.
+        cart.write(0xB800, 0x33);
+        assert_eq!(cart.read(0xA000), 0x33);
+
+        // Contrast: an 8KB chip ($02) does NOT mirror -- A800 is its own cell.
+        let mut cart = Cartridge::from_bytes(&make_rom(ROM_RAM, 0x02)).unwrap();
+        cart.write(0xA000, 0x11);
+        assert_eq!(cart.read(0xA800), 0xFF);
     }
 
     /// The completeness-audit repro, end to end through the CPU/bus: a type
