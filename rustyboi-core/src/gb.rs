@@ -1095,6 +1095,19 @@ impl GB {
         self.mmio.four_player_attached()
     }
 
+    /// Plug a Mobile Adapter GB into the link port. The adapter answers the
+    /// libmobile packet protocol (session begin/end, config read/write); live
+    /// networking is out of scope (see `crate::mobile`).
+    pub fn attach_mobile_adapter(&mut self) {
+        self.mmio.attach_mobile_adapter(crate::mobile::MobileAdapter::new());
+    }
+
+    /// True once a game has completed the START "NINTENDO" handshake with an
+    /// attached Mobile Adapter (i.e. detected it and begun a session).
+    pub fn mobile_session_started(&self) -> bool {
+        self.mmio.mobile_adapter().is_some_and(|m| m.session_started())
+    }
+
     pub fn printer_attached(&self) -> bool {
         self.mmio.printer().is_some()
     }
@@ -1314,6 +1327,45 @@ mod stop_tests {
         b.write_memory(0xFF56, 0xC1); // B emits
         a.write_memory(0xFF56, 0xC0);
         assert_eq!(a.read_memory(0xFF56) & 0x02, 0x02, "detached -> no partner");
+    }
+
+    /// A Game Boy with a Mobile Adapter must complete the START "NINTENDO"
+    /// handshake over real internal-clock serial: driving the libmobile packet
+    /// by hand (SB = byte, SC = internal clock + start), the adapter begins a
+    /// session. Grounded in libmobile serial.c/commands.c.
+    #[test]
+    fn mobile_adapter_start_handshake_over_internal_clock_serial() {
+        let mut gb = gb_with(&[], Hardware::DMG, 0x00);
+        gb.attach_mobile_adapter();
+        assert!(!gb.mobile_session_started());
+
+        // Build the START packet: $99 $66, header [cmd,0,0,len], data, checksum,
+        // then the device-id / idle bytes that clock the ack + response start.
+        let data = b"NINTENDO";
+        let header = [0x10u8, 0, 0, data.len() as u8];
+        let mut sum = 0u16;
+        let mut packet = vec![0x99u8, 0x66];
+        for &b in header.iter().chain(data.iter()) {
+            packet.push(b);
+            sum = sum.wrapping_add(b as u16);
+        }
+        packet.push((sum >> 8) as u8);
+        packet.push(sum as u8);
+        packet.push(0x88); // Game Boy device-id exchange
+        packet.push(0x00); // acknowledge skip
+        packet.push(0x4B); // idle -> process + begin response
+
+        for &byte in &packet {
+            gb.write_memory(0xFF01, byte); // SB = our byte
+            gb.write_memory(0xFF02, 0x81); // SC: internal clock (bit0=1), start
+            step_until(&mut gb, 100_000, "serial xfer complete", |g| {
+                g.read_memory(0xFF02) & 0x80 == 0
+            });
+        }
+        assert!(
+            gb.mobile_session_started(),
+            "the NINTENDO handshake must begin a Mobile Adapter session"
+        );
     }
 
     /// A Game Boy plugged into a DMG-07 must receive the ping stream over

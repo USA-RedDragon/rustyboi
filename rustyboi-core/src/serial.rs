@@ -254,6 +254,9 @@ pub enum SerialDevice {
     /// this Game Boy runs in external-clock mode and the adapter deposits bytes
     /// through the same external-clock path as a link peer.
     FourPlayer(crate::dmg07::FourPlayerPort),
+    /// Mobile Adapter GB: an internal-clock serial slave (like the printer) that
+    /// answers the libmobile packet protocol byte by byte.
+    Mobile(crate::mobile::MobileAdapter),
 }
 
 impl SerialDevice {
@@ -281,6 +284,9 @@ impl SerialDevice {
             // arming schedules no internal window, so this is only consumed on
             // that misuse.
             SerialDevice::FourPlayer(_) => LinkStart::Ready(0xFF),
+            // The Mobile Adapter is an internal-clock slave: the Game Boy clocks
+            // and receives the adapter's preloaded byte, like the printer.
+            SerialDevice::Mobile(m) => LinkStart::Ready(m.preloaded_response()),
         }
     }
 
@@ -296,6 +302,9 @@ impl SerialDevice {
             // The adapter clocks externally; the Game Boy's reply is captured
             // via `link_mirror_sb` before each deposit, so nothing to do here.
             SerialDevice::FourPlayer(_) => {}
+            // Feed the Game Boy's shifted-out byte into the packet FSM, which
+            // preloads the response for the next transfer.
+            SerialDevice::Mobile(m) => m.receive_byte(tx),
         }
     }
 

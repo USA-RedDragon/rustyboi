@@ -1546,6 +1546,18 @@ impl Mmio {
         matches!(self.serial_device, serial::SerialDevice::FourPlayer(_))
     }
 
+    /// Plug a Mobile Adapter GB into the link port.
+    pub fn attach_mobile_adapter(&mut self, adapter: crate::mobile::MobileAdapter) {
+        self.serial_device = serial::SerialDevice::Mobile(adapter);
+    }
+
+    pub fn mobile_adapter(&self) -> Option<&crate::mobile::MobileAdapter> {
+        match &self.serial_device {
+            serial::SerialDevice::Mobile(m) => Some(m),
+            _ => None,
+        }
+    }
+
     /// Debug/test: the in-flight serial transfer's completion event cc.
     pub fn serial_transfer_complete_at(&self) -> Option<u64> {
         self.serial.transfer_complete_at()
