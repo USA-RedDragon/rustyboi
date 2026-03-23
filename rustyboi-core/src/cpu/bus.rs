@@ -927,6 +927,19 @@ impl<'a> Bus<'a> {
     }
 
     pub fn write(&mut self, addr: u16, value: u8) {
+        // Dirty-line probe (scanline-renderer feasibility study). Off by default
+        // (probe = None => this whole block is inert). Sample at the write's
+        // ISSUE cc, BEFORE any M-cycle tick, so `in_pixel_transfer()`/LY reflect
+        // the state the write races against — detection mechanism (a). A watched
+        // CGB palette (BCPD/OCPD) write that lands during mode 3 is DROPPED by
+        // the PPU (`ppu_blocks`), so it does not affect the current line; record
+        // it as `blocked` so the study counts it separately, not as dirtying.
+        if let Some(reg) = ppu::WatchedReg::from_addr(addr) {
+            let blocked = matches!(reg, ppu::WatchedReg::Bcpd | ppu::WatchedReg::Ocpd)
+                && !self.mmio.dma_active()
+                && self.ppu_blocks(addr, false, self.mmio.master_cc());
+            self.ppu.dirty_probe_register_write(reg, blocked);
+        }
         // Registers belonging to peripherals we tick inline (timer/serial/DMA)
         // latch at the end of the write M-cycle, so advance first. Everything
         // else (PPU registers, RAM) takes effect as the access is issued.
