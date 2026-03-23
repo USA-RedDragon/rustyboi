@@ -2844,6 +2844,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustyboi-session"
+version = "0.1.0"
+dependencies = [
+ "rustyboi-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rustyboi-test-runner"
 version = "0.1.0"
 dependencies = [
