@@ -1,0 +1,12 @@
+[package]
+name = "rustyboi-session"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "rustyboi_session"
+
+[dependencies]
+rustyboi-core = { path = "../rustyboi-core" }
+serde = { version = "1.0.227", features = ["derive"] }
+serde_json = "1.0.145"
