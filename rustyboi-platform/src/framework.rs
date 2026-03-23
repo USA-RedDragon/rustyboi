@@ -124,7 +124,7 @@ impl Framework {
     /// Runs the egui frame and returns the resulting action, whether a menu is
     /// open, and the emulator framebuffer's target region in physical pixels
     /// (the egui central region, below the menu bar and above the status panel).
-    pub fn prepare(&mut self, window: &Window, paused: bool, registers: Option<&cpu::registers::Registers>, gb: Option<&gb::GB>) -> (Option<GuiAction>, bool, PhysicalRect) {
+    pub fn prepare(&mut self, window: &Window, paused: bool, registers: Option<&cpu::registers::Registers>, gb: Option<&gb::GB>, session: &rustyboi_egui_lib::actions::SessionUiState) -> (Option<GuiAction>, bool, PhysicalRect) {
         #[cfg_attr(not(target_os = "android"), allow(unused_mut))]
         let mut raw_input = self.egui_state.take_egui_input(window);
         // winit 0.29's android-game-activity backend drops GameTextInput
@@ -177,7 +177,7 @@ impl Framework {
         }
         let mut ui_result = None;
         let full_output = self.egui_ctx.run(raw_input, |egui_ctx| {
-            ui_result = Some(self.gui.ui(egui_ctx, paused, registers, gb));
+            ui_result = Some(self.gui.ui(egui_ctx, paused, registers, gb, session));
         });
 
         self.textures.append(full_output.textures_delta);
