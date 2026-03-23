@@ -2835,6 +2835,7 @@ dependencies = [
  "rodio",
  "rustyboi-core",
  "rustyboi-egui",
+ "rustyboi-session",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",

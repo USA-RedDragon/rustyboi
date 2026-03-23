@@ -12,6 +12,8 @@ mod framework;
 #[cfg(not(target_os = "android"))]
 mod game_renderer;
 #[cfg(not(target_os = "android"))]
+mod ports;
+#[cfg(not(target_os = "android"))]
 mod run;
 
 #[cfg(not(target_os = "android"))]
