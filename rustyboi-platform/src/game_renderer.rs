@@ -2,9 +2,22 @@
 //! sub-region of the surface (the egui central region), with aspect-ratio
 //! letterboxing. Replaces `pixels`' built-in `ScalingRenderer` in the
 //! composite so the game is never hidden behind the egui menu/status panels.
+//!
+//! The renderer owns its RGBA source texture(s) and uploads each frame itself,
+//! so the presented image is fully decoupled from `pixels`' fixed 160x144
+//! framebuffer. It keeps one texture per supported source size — the normal
+//! 160x144 Game Boy screen and the 256x224 Super Game Boy border composite —
+//! and picks the one matching the frame handed to [`GameRenderer::upload`].
 
 use pixels::wgpu;
 use pixels::wgpu::util::DeviceExt;
+
+/// Normal Game Boy screen dimensions.
+pub const GB_WIDTH: u32 = 160;
+pub const GB_HEIGHT: u32 = 144;
+/// Super Game Boy border composite dimensions.
+pub const SGB_WIDTH: u32 = 256;
+pub const SGB_HEIGHT: u32 = 224;
 
 /// A rectangle in physical pixels within the surface. Origin is top-left.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -23,24 +36,101 @@ fn f32s_to_bytes(values: &[f32]) -> Vec<u8> {
     bytes
 }
 
-/// Draws the pixels source texture into a target rect of the surface.
+/// One RGBA source texture at a fixed size, plus the bind group that samples it.
+struct Source {
+    width: u32,
+    height: u32,
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+}
+
+impl Source {
+    fn new(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        uniform_buffer: &wgpu::Buffer,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("rustyboi_game_renderer_source_texture"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rustyboi_game_renderer_bind_group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        Source { width, height, texture, bind_group }
+    }
+
+    /// Upload a tightly-packed RGBA8 frame (`width * height * 4` bytes).
+    fn upload(&self, queue: &wgpu::Queue, rgba: &[u8]) {
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(self.width * 4),
+                rows_per_image: Some(self.height),
+            },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+}
+
+/// Which source is presented this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceSize {
+    /// Normal 160x144 Game Boy screen.
+    Gb,
+    /// 256x224 Super Game Boy border composite.
+    Sgb,
+}
+
+/// Draws the emulator RGBA frame into a target rect of the surface.
 pub struct GameRenderer {
-    texture_width: f32,
-    texture_height: f32,
+    gb_source: Source,
+    sgb_source: Source,
+    active: SourceSize,
     vertex_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
     render_pipeline: wgpu::RenderPipeline,
     clear_color: wgpu::Color,
 }
 
 impl GameRenderer {
-    pub fn new(
-        device: &wgpu::Device,
-        texture_view: &wgpu::TextureView,
-        texture_extent: &wgpu::Extent3d,
-        render_texture_format: wgpu::TextureFormat,
-    ) -> Self {
+    pub fn new(device: &wgpu::Device, render_texture_format: wgpu::TextureFormat) -> Self {
         let shader = wgpu::include_wgsl!("../shaders/scale.wgsl");
         let module = device.create_shader_module(shader);
 
@@ -118,24 +208,23 @@ impl GameRenderer {
                 },
             ],
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rustyboi_game_renderer_bind_group"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-            ],
-        });
+
+        let gb_source = Source::new(
+            device,
+            &bind_group_layout,
+            &sampler,
+            &uniform_buffer,
+            GB_WIDTH,
+            GB_HEIGHT,
+        );
+        let sgb_source = Source::new(
+            device,
+            &bind_group_layout,
+            &sampler,
+            &uniform_buffer,
+            SGB_WIDTH,
+            SGB_HEIGHT,
+        );
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("rustyboi_game_renderer_pipeline_layout"),
@@ -166,13 +255,31 @@ impl GameRenderer {
         });
 
         Self {
-            texture_width: texture_extent.width as f32,
-            texture_height: texture_extent.height as f32,
+            gb_source,
+            sgb_source,
+            active: SourceSize::Gb,
             vertex_buffer,
             uniform_buffer,
-            bind_group,
             render_pipeline,
             clear_color: wgpu::Color::BLACK,
+        }
+    }
+
+    /// Upload an RGBA8 frame of the given source size and make it the active
+    /// source for the next `render`. `rgba` must be `width * height * 4` bytes.
+    pub fn upload(&mut self, queue: &wgpu::Queue, size: SourceSize, rgba: &[u8]) {
+        let source = match size {
+            SourceSize::Gb => &self.gb_source,
+            SourceSize::Sgb => &self.sgb_source,
+        };
+        source.upload(queue, rgba);
+        self.active = size;
+    }
+
+    fn active_source(&self) -> &Source {
+        match self.active {
+            SourceSize::Gb => &self.gb_source,
+            SourceSize::Sgb => &self.sgb_source,
         }
     }
 
@@ -187,6 +294,9 @@ impl GameRenderer {
         region: PhysicalRect,
     ) -> ([f32; 16], (u32, u32, u32, u32)) {
         let (surface_w, surface_h) = surface;
+        let source = self.active_source();
+        let texture_width = source.width as f32;
+        let texture_height = source.height as f32;
 
         // Clamp the region to the surface so scissor stays in bounds.
         let rx = region.x.max(0.0);
@@ -196,12 +306,12 @@ impl GameRenderer {
 
         // Integer scale that fits the game inside the region (matches pixels'
         // ScalingRenderer behaviour: floor'd, at least 1x).
-        let width_ratio = (rw / self.texture_width).max(1.0);
-        let height_ratio = (rh / self.texture_height).max(1.0);
+        let width_ratio = (rw / texture_width).max(1.0);
+        let height_ratio = (rh / texture_height).max(1.0);
         let scale = width_ratio.clamp(1.0, height_ratio).floor();
 
-        let scaled_w = (self.texture_width * scale).min(rw);
-        let scaled_h = (self.texture_height * scale).min(rh);
+        let scaled_w = (texture_width * scale).min(rw);
+        let scaled_h = (texture_height * scale).min(rh);
 
         // Center the game within the region (physical pixels, top-left origin).
         let dst_x = rx + (rw - scaled_w) / 2.0;
@@ -233,8 +343,8 @@ impl GameRenderer {
         (transform, scissor)
     }
 
-    /// Draw the game texture into `region` of the surface. Clears the whole
-    /// surface to the border color first, then draws the letterboxed game.
+    /// Draw the active game texture into `region` of the surface. Clears the
+    /// whole surface to the border color first, then draws the letterboxed game.
     pub fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -268,7 +378,7 @@ impl GameRenderer {
         }
 
         rpass.set_pipeline(&self.render_pipeline);
-        rpass.set_bind_group(0, &self.bind_group, &[]);
+        rpass.set_bind_group(0, &self.active_source().bind_group, &[]);
         rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         rpass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
         rpass.draw(0..3, 0..1);
