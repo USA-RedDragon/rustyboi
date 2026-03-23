@@ -254,6 +254,27 @@ impl Session {
         frame
     }
 
+    /// Replace the underlying machine and re-bind the session to a new ROM
+    /// identity, keeping the same ports, config, and cheat set. Use this when
+    /// the frontend loads a different cartridge (or a raw state whose ROM id it
+    /// knows): the audio capture sink is re-installed, Game Genie ROM patches
+    /// re-applied, the frame counter reset, rewind history cleared, and any TAS
+    /// recording/playback dropped (they were bound to the old ROM).
+    ///
+    /// `rom_id` should be the SHA-256 of the new ROM (all-zero for none) so
+    /// savestate slots re-key to the new game.
+    pub fn replace_machine(&mut self, mut gb: GB, rom_id: [u8; 32]) {
+        let _ = gb.enable_audio(Box::new(CaptureSink::new(self.audio_buf.clone())));
+        self.cheats.apply_rom_patches(&mut gb);
+        self.gb = gb;
+        self.rom_id = rom_id;
+        self.frame_count = 0;
+        self.rewind.clear();
+        self.recording = None;
+        self.playback = None;
+        self.mode = RunMode::Normal;
+    }
+
     // --- run mode -----------------------------------------------------------
 
     pub fn mode(&self) -> RunMode {
@@ -528,6 +549,16 @@ impl Session {
     /// palette/memory accessors for presentation).
     pub fn gb(&self) -> &GB {
         &self.gb
+    }
+
+    /// Mutable access to the underlying machine, for host-side debug tooling
+    /// that operates directly on the core (breakpoints, single-cycle stepping,
+    /// direct memory pokes) and has no feature-level session equivalent.
+    /// Feature operations (run, savestate, rewind, TAS) must still go through
+    /// the session so its bookkeeping (frame count, rewind cadence, capture
+    /// sink) stays consistent.
+    pub fn gb_mut(&mut self) -> &mut GB {
+        &mut self.gb
     }
 
     /// The ROM identity hash this session is bound to.
