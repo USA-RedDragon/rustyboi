@@ -4,7 +4,10 @@ use rustyboi_core_lib::{cpu, gb, input};
 use std::env;
 use std::sync::{Arc, Mutex};
 use egui::Context;
-use crate::actions::GuiAction;
+use crate::actions::{GuiAction, SessionUiState};
+// Hardware / palette pickers live only in the desktop Settings menu bar.
+#[cfg(not(target_os = "android"))]
+use crate::actions::{HardwareChoice, PaletteChoice};
 use crate::file_dialog::{self, FileDialogBuilder};
 #[cfg(target_os = "android")]
 use crate::library::LibraryPanel;
@@ -175,7 +178,7 @@ impl Gui {
     }
 
     /// Create the UI using egui.
-    pub fn ui(&mut self, ctx: &Context, paused: bool, registers: Option<&cpu::registers::Registers>, gb: Option<&gb::GB>) -> UiOutput {
+    pub fn ui(&mut self, ctx: &Context, paused: bool, registers: Option<&cpu::registers::Registers>, gb: Option<&gb::GB>, session: &SessionUiState) -> UiOutput {
         let mut action = None;
         let mut any_menu_open = false;
 
@@ -197,6 +200,7 @@ impl Gui {
             &mut any_menu_open,
             paused,
             gb.map(|g| g.printer_attached()),
+            session,
         );
         self.render_debug_panels(ctx, registers, gb, &mut action, paused);
         #[cfg(target_os = "android")]
@@ -231,7 +235,7 @@ impl Gui {
         {
             self.render_mobile_soft_button(ctx);
             if self.show_mobile_menu {
-                self.render_mobile_menu_overlay(ctx, &mut action, paused);
+                self.render_mobile_menu_overlay(ctx, &mut action, paused, session);
                 any_menu_open = true;
             }
         }
@@ -257,7 +261,7 @@ impl Gui {
         }
     }
     #[cfg(not(target_os = "android"))]
-    fn render_menu_bar(&mut self, ctx: &Context, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, printer_attached: Option<bool>) {
+    fn render_menu_bar(&mut self, ctx: &Context, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, printer_attached: Option<bool>, session: &SessionUiState) {
         egui::TopBottomPanel::top("menubar_container").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -325,6 +329,43 @@ impl Gui {
                         ui.close_menu();
                     }
                     ui.separator();
+                    // Quick + numbered savestate slots (via the session). The
+                    // quick slot has dedicated hotkeys (F5/F8); the numbered
+                    // slots (0-9) are keyed by ROM id under the save dir.
+                    if ui.button("Quicksave (F5)").clicked() {
+                        *action = Some(GuiAction::Quicksave);
+                        ui.close_menu();
+                    }
+                    if ui.button("Quickload (F8)").clicked() {
+                        *action = Some(GuiAction::Quickload);
+                        ui.close_menu();
+                    }
+                    ui.menu_button("Save State to Slot", |ui| {
+                        for slot in 0u32..10 {
+                            let filled = session.slots.contains(&slot);
+                            let label = if filled {
+                                format!("Slot {slot} (overwrite)")
+                            } else {
+                                format!("Slot {slot}")
+                            };
+                            if ui.button(label).clicked() {
+                                *action = Some(GuiAction::SaveSlot(slot));
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    ui.menu_button("Load State from Slot", |ui| {
+                        if session.slots.is_empty() {
+                            ui.label("No saved slots");
+                        }
+                        for &slot in &session.slots {
+                            if ui.button(format!("Slot {slot}")).clicked() {
+                                *action = Some(GuiAction::LoadSlot(slot));
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    ui.separator();
                     if ui.button("Exit").clicked() {
                         *action = Some(GuiAction::Exit);
                         ui.close_menu();
@@ -341,6 +382,25 @@ impl Gui {
                     let pause_text = if paused { "Resume" } else { "Pause" };
                     if ui.button(pause_text).clicked() {
                         *action = Some(GuiAction::TogglePause);
+                        ui.close_menu();
+                    }
+                    let ff_text = if session.fast_forward {
+                        "Fast-Forward: On (Tab)"
+                    } else {
+                        "Fast-Forward: Off (Tab)"
+                    };
+                    if ui.button(ff_text).clicked() {
+                        *action = Some(GuiAction::ToggleFastForward);
+                        ui.close_menu();
+                    }
+                    if ui.button("Frame Advance (Backslash)").clicked() {
+                        *action = Some(GuiAction::FrameAdvance);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    let mut sgb_border = session.sgb_border;
+                    if ui.checkbox(&mut sgb_border, "SGB border").clicked() {
+                        *action = Some(GuiAction::ToggleSgbBorder);
                         ui.close_menu();
                     }
                     if let Some(attached) = printer_attached {
@@ -373,6 +433,62 @@ impl Gui {
                 ui.menu_button("Settings", |ui| {
                     *any_menu_open = true;
                     ui.checkbox(&mut self.show_keybind_settings, "Keybind Settings");
+
+                    ui.separator();
+                    ui.menu_button("Hardware Model", |ui| {
+                        for (choice, label) in [
+                            (HardwareChoice::Dmg, "DMG (Game Boy)"),
+                            (HardwareChoice::Cgb, "CGB (Game Boy Color)"),
+                            (HardwareChoice::Sgb, "SGB (Super Game Boy)"),
+                        ] {
+                            let selected = session.hardware == choice;
+                            if ui.radio(selected, label).clicked() && !selected {
+                                *action = Some(GuiAction::SetHardware(choice));
+                                ui.close_menu();
+                            }
+                        }
+                        ui.separator();
+                        ui.small("Changing hardware restarts the ROM.");
+                    });
+
+                    ui.menu_button("DMG Palette", |ui| {
+                        for (choice, label) in [
+                            (PaletteChoice::Grayscale, "Grayscale"),
+                            (PaletteChoice::OriginalGreen, "Original Green"),
+                            (PaletteChoice::Blue, "Blue"),
+                            (PaletteChoice::Brown, "Brown"),
+                            (PaletteChoice::Red, "Red"),
+                        ] {
+                            let selected = session.palette == choice;
+                            if ui.radio(selected, label).clicked() && !selected {
+                                *action = Some(GuiAction::SetPalette(choice));
+                                ui.close_menu();
+                            }
+                        }
+                    });
+
+                    ui.menu_button("Rewind", |ui| {
+                        let mut enabled = session.rewind_enabled;
+                        if ui.checkbox(&mut enabled, "Enable rewind").clicked() {
+                            *action = Some(GuiAction::SetRewindEnabled(enabled));
+                        }
+                        ui.separator();
+                        ui.label("Snapshot interval (frames)");
+                        for interval in [2u32, 4, 6, 10] {
+                            let selected = session.rewind_interval_frames == interval;
+                            if ui.radio(selected, format!("{interval}")).clicked() && !selected {
+                                *action = Some(GuiAction::SetRewindInterval(interval));
+                            }
+                        }
+                        ui.separator();
+                        ui.label("History depth (snapshots)");
+                        for depth in [30usize, 60, 90, 180] {
+                            let selected = session.rewind_depth == depth;
+                            if ui.radio(selected, format!("{depth}")).clicked() && !selected {
+                                *action = Some(GuiAction::SetRewindDepth(depth));
+                            }
+                        }
+                    });
                 });
             });
         });
@@ -567,6 +683,7 @@ impl Gui {
         ctx: &Context,
         action: &mut Option<GuiAction>,
         paused: bool,
+        session: &SessionUiState,
     ) {
         let screen = ctx.screen_rect();
         let unit = Self::mobile_unit(ctx);
@@ -727,6 +844,46 @@ impl Gui {
                         {
                             *action = Some(GuiAction::TogglePause);
                             close_after_action = true;
+                        }
+                        if ui
+                            .add(egui::Button::new("Quicksave").min_size(row_size))
+                            .clicked()
+                        {
+                            *action = Some(GuiAction::Quicksave);
+                            close_after_action = true;
+                        }
+                        if ui
+                            .add(egui::Button::new("Quickload").min_size(row_size))
+                            .clicked()
+                        {
+                            *action = Some(GuiAction::Quickload);
+                            close_after_action = true;
+                        }
+                        let ff_text = if session.fast_forward {
+                            "Fast-Forward: On"
+                        } else {
+                            "Fast-Forward: Off"
+                        };
+                        if ui
+                            .add(egui::Button::new(ff_text).min_size(row_size))
+                            .clicked()
+                        {
+                            *action = Some(GuiAction::ToggleFastForward);
+                            close_after_action = true;
+                        }
+                        if ui
+                            .add(egui::Button::new("Frame Advance").min_size(row_size))
+                            .clicked()
+                        {
+                            *action = Some(GuiAction::FrameAdvance);
+                            close_after_action = true;
+                        }
+                        {
+                            let mut sgb_border = session.sgb_border;
+                            mobile_toggle_row(ui, row_size, "SGB border", &mut sgb_border);
+                            if sgb_border != session.sgb_border {
+                                *action = Some(GuiAction::ToggleSgbBorder);
+                            }
                         }
 
                         ui.add_space(row_height * 0.25);
