@@ -2859,6 +2859,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "flate2",
+ "rayon",
  "rustyboi-core",
  "serde",
  "serde_json",
