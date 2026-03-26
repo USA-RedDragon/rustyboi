@@ -307,7 +307,6 @@ pub fn validate_bios(
         ));
     }
 
-    let mut io_diffs = 0;
     for i in 0..0x80usize {
         if real.io[i] != skip.io[i] {
             let addr = 0xFF00 + i as u16;
@@ -315,7 +314,6 @@ pub fn validate_bios(
                 "  IO 0x{:04X} {:<6} real=0x{:02X} skip=0x{:02X}",
                 addr, io_name(addr), real.io[i], skip.io[i]
             ));
-            io_diffs += 1;
         }
     }
 
@@ -384,7 +382,6 @@ pub fn validate_bios(
 
     let total = diffs.len() + oam_d + feax_d + hram_d + vram0_d
         + if cgb { vram1_d + bgpal_d + objpal_d } else { 0 };
-    let _ = io_diffs;
     println!("TOTAL discrepancies: {total}");
     Ok(total)
 }
