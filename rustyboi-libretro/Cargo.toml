@@ -10,5 +10,6 @@ crate-type = ["cdylib"]
 [dependencies]
 rustyboi-core = { path = "../rustyboi-core" }
 rust-libretro = { version = "0.3.2", features = ["unstable-env-commands"] }
-bincode = { version = "1.3", default-features = false }
+# Referenced by rust-libretro's `input_descriptors!` / `CoreOptions` macro
+# expansions (they emit `libc::c_char`), so it must stay a direct dependency.
 libc = "0.2"
