@@ -281,8 +281,6 @@ fn run_gui_loop<'win>(
     const REPEAT_INTERVAL: Duration = Duration::from_millis(67); // Execute every ~67ms when held (about 15fps)
     let mut f_key_press_time: Option<Instant> = None;
     let mut n_key_press_time: Option<Instant> = None;
-    let mut f_key_processed_initial = false;
-    let mut n_key_processed_initial = false;
     let mut f_last_repeat_time: Option<Instant> = None;
     let mut n_last_repeat_time: Option<Instant> = None;
 
@@ -393,7 +391,6 @@ fn run_gui_loop<'win>(
                     let now = Instant::now();
                     f_key_press_time = Some(now);
                     f_last_repeat_time = Some(now);
-                    f_key_processed_initial = true;
                     window.request_redraw();
                 }
             } else if input.key_held(KeyCode::KeyF) {
@@ -413,7 +410,6 @@ fn run_gui_loop<'win>(
             } else {
                 // Key released - reset state
                 f_key_press_time = None;
-                f_key_processed_initial = false;
                 f_last_repeat_time = None;
             }
 
@@ -425,7 +421,6 @@ fn run_gui_loop<'win>(
                     let now = Instant::now();
                     n_key_press_time = Some(now);
                     n_last_repeat_time = Some(now);
-                    n_key_processed_initial = true;
                     window.request_redraw();
                 }
             } else if input.key_held(KeyCode::KeyN) {
@@ -445,7 +440,6 @@ fn run_gui_loop<'win>(
             } else {
                 // Key released - reset state
                 n_key_press_time = None;
-                n_key_processed_initial = false;
                 n_last_repeat_time = None;
             }
 
