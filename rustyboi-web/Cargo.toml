@@ -7,6 +7,18 @@ description = "WASM/Firefox web frontend for the rustyboi Game Boy / Color emula
 [lib]
 crate-type = ["cdylib"]
 
+# wasm-pack's BUNDLED wasm-opt is too old to validate the post-MVP wasm features
+# LLVM emits (bulk-memory memory.copy/fill, sign-ext, ...). So disable it here
+# and run a current binaryen wasm-opt from `tools/build-web.sh` instead, which
+# passes `-all` (enable all features — required even on the latest binaryen).
+# Build with `tools/build-web.sh`, NOT bare `wasm-pack build`. Needs binaryen
+# (`sudo pacman -S binaryen`).
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false
+
 [dependencies]
 rustyboi-session = { path = "../rustyboi-session" }
 rustyboi-core = { path = "../rustyboi-core" }
