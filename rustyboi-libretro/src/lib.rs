@@ -2,7 +2,9 @@
 //!
 //! Builds a `cdylib` that RetroArch (and other libretro frontends) can load.
 //! Video is emitted as XRGB8888, audio as interleaved stereo i16 at 44.1 kHz,
-//! input from the libretro joypad. Save states use bincode over the `GB` state.
+//! input from the libretro joypad. Save states use the core's own
+//! `GB::to_state_bytes` / `from_state_bytes` (length-prefixed) so RetroArch's
+//! rewind, netplay and manual states all round-trip the full machine.
 //!
 //! Beyond A/V and input the core wires up: battery SRAM and MBC3 RTC persistence
 //! (`RETRO_MEMORY_SAVE_RAM` / `RETRO_MEMORY_RTC`), Game Genie + GameShark cheats,
@@ -18,7 +20,9 @@ use std::ffi::{c_void, CStr, CString};
 use rustyboi_core_lib::cartridge::Cartridge;
 use rustyboi_core_lib::gb::{Frame, Hardware, GB};
 use rustyboi_core_lib::input::ButtonState;
-use rustyboi_core_lib::ppu::{CgbColorConversion, FRAMEBUFFER_SIZE};
+use rustyboi_core_lib::ppu::{
+    CgbColorConversion, SGB_FRAME_HEIGHT, SGB_FRAME_SIZE, SGB_FRAME_WIDTH,
+};
 
 /// C layout of `retro_game_info`. The published bindings expose these fields,
 /// but bindgen can emit an opaque struct depending on the host libclang (the
@@ -36,10 +40,15 @@ struct GameInfo {
 
 const WIDTH: u32 = 160;
 const HEIGHT: u32 = 144;
-// 4194304 Hz CPU clock / 70224 dots per frame.
+// SGB composited output (GB screen + 256x224 border).
+const SGB_WIDTH: u32 = SGB_FRAME_WIDTH as u32;
+const SGB_HEIGHT: u32 = SGB_FRAME_HEIGHT as u32;
+// 4194304 Hz CPU clock / 70224 dots per frame => 59.7275 fps.
 const FPS: f64 = 4194304.0 / 70224.0;
 // rustyboi resamples APU output to a fixed host rate (see audio::controller).
 const SAMPLE_RATE: f64 = 44100.0;
+// Bytes of little-endian payload-length header prefixed to each savestate.
+const SERIALIZE_HEADER_LEN: usize = 8;
 
 // DMG four-shade palettes -> RGB. Index 0 = lightest, 3 = darkest.
 const PALETTE_GRAYSCALE: [[u8; 3]; 4] = [
@@ -123,8 +132,33 @@ struct GameSharkCode {
     "system_settings",
     {
         { "auto", "Auto (CGB / DMG by header)" },
-        { "cgb", "Game Boy Color" },
         { "dmg", "Game Boy (DMG)" },
+        { "mgb", "Game Boy Pocket (MGB)" },
+        { "sgb", "Super Game Boy (SGB)" },
+        { "cgb", "Game Boy Color (CGB)" },
+        { "agb", "Game Boy Advance (AGB / GBC mode)" },
+    }
+},{
+    "rustyboi_real_boot_rom",
+    "System > Use Real Boot ROM",
+    "Use Real Boot ROM",
+    "When enabled, run the real boot ROM from the frontend's system directory (e.g. 'dmg_boot.bin', 'cgb_boot.bin', 'sgb_boot.bin') instead of a synthetic post-boot state. Falls back to the built-in skip-boot state if the file is missing. Takes effect on content reload.",
+    "Run the real boot ROM from the system directory if present.",
+    "system_settings",
+    {
+        { "disabled", "Disabled" },
+        { "enabled", "Enabled" },
+    }
+},{
+    "rustyboi_sgb_border",
+    "Video > Super Game Boy Border",
+    "Super Game Boy Border",
+    "On Super Game Boy hardware, output the 256x224 composited frame with the game's border. No effect on non-SGB models or until the game uploads a border.",
+    "Show the Super Game Boy border (256x224 output).",
+    "video_settings",
+    {
+        { "disabled", "Disabled" },
+        { "enabled", "Enabled" },
     }
 },{
     "rustyboi_dmg_palette",
@@ -159,13 +193,21 @@ struct RustyboiCore {
     framebuffer: Vec<u8>,
     gameshark_codes: Vec<GameSharkCode>,
     rumble_enabled: bool,
+    use_real_boot_rom: bool,
+    sgb_border_enabled: bool,
+    // Tracks the geometry currently advertised to the frontend so `on_run` only
+    // issues a SET_GEOMETRY when the SGB border toggles the output dimensions.
+    sgb_border_active: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum HardwarePref {
     Auto,
-    Cgb,
     Dmg,
+    Mgb,
+    Sgb,
+    Cgb,
+    Agb,
 }
 
 retro_core!(RustyboiCore {
@@ -174,16 +216,24 @@ retro_core!(RustyboiCore {
     hardware_pref: HardwarePref::Auto,
     dmg_palette: DmgPalette::Grayscale,
     color_correction: CgbColorConversion::Linear,
-    framebuffer: vec![0u8; FRAMEBUFFER_SIZE * 4],
+    // Sized for the largest possible frame (SGB 256x224) so the same buffer
+    // serves both the plain 160x144 and the composited SGB paths.
+    framebuffer: vec![0u8; SGB_FRAME_SIZE * 4],
     gameshark_codes: Vec::new(),
     rumble_enabled: false,
+    use_real_boot_rom: false,
+    sgb_border_enabled: false,
+    sgb_border_active: false,
 });
 
 impl RustyboiCore {
     fn pick_hardware(&self, rom: &[u8]) -> Hardware {
         match self.hardware_pref {
-            HardwarePref::Cgb => Hardware::CGB,
             HardwarePref::Dmg => Hardware::DMG,
+            HardwarePref::Mgb => Hardware::MGB,
+            HardwarePref::Sgb => Hardware::SGB,
+            HardwarePref::Cgb => Hardware::CGB,
+            HardwarePref::Agb => Hardware::AGB,
             // Header byte 0x143 bit 7 set => CGB-aware cartridge.
             HardwarePref::Auto => {
                 if rom.get(0x143).is_some_and(|b| b & 0x80 != 0) {
@@ -192,6 +242,19 @@ impl RustyboiCore {
                     Hardware::DMG
                 }
             }
+        }
+    }
+
+    /// Conventional RetroArch system-directory filename for the boot ROM of a
+    /// given model (matches the Gambatte / SameBoy core naming).
+    fn boot_rom_filename(hardware: Hardware) -> &'static str {
+        match hardware {
+            Hardware::DMG0 | Hardware::DMG => "dmg_boot.bin",
+            Hardware::MGB => "mgb_boot.bin",
+            Hardware::SGB => "sgb_boot.bin",
+            Hardware::SGB2 => "sgb2_boot.bin",
+            Hardware::AGB => "agb_boot.bin",
+            Hardware::CGB0 | Hardware::CGBB | Hardware::CGB | Hardware::CGBE => "cgb_boot.bin",
         }
     }
 
@@ -206,22 +269,41 @@ impl RustyboiCore {
         }
     }
 
-    fn read_options(&mut self, ctx: &mut OptionsChangedContext) {
-        if let Some(value) = ctx.get_variable("rustyboi_hardware") {
+    /// Read every core option from the frontend and apply the effects that can
+    /// change live (colour correction). Hardware model, real-boot-ROM and SGB
+    /// border only take effect on the next content load / geometry check, which
+    /// is why this is safe to call from both `on_load_game` and
+    /// `on_options_changed`. Works off the raw environment callback so any
+    /// context can drive it.
+    ///
+    /// # Safety
+    /// `callback` must be a valid environment callback for the current session.
+    unsafe fn read_options(&mut self, callback: retro_environment_t) {
+        let get = |key: &'static str| unsafe { environment::get_variable(callback, key) };
+        if let Some(value) = get("rustyboi_hardware") {
             self.hardware_pref = match value {
-                "cgb" => HardwarePref::Cgb,
                 "dmg" => HardwarePref::Dmg,
+                "mgb" => HardwarePref::Mgb,
+                "sgb" => HardwarePref::Sgb,
+                "cgb" => HardwarePref::Cgb,
+                "agb" => HardwarePref::Agb,
                 _ => HardwarePref::Auto,
             };
         }
-        if let Some(value) = ctx.get_variable("rustyboi_dmg_palette") {
+        if let Some(value) = get("rustyboi_real_boot_rom") {
+            self.use_real_boot_rom = value == "enabled";
+        }
+        if let Some(value) = get("rustyboi_sgb_border") {
+            self.sgb_border_enabled = value == "enabled";
+        }
+        if let Some(value) = get("rustyboi_dmg_palette") {
             self.dmg_palette = match value {
                 "green" => DmgPalette::Green,
                 "pocket" => DmgPalette::Pocket,
                 _ => DmgPalette::Grayscale,
             };
         }
-        if let Some(value) = ctx.get_variable("rustyboi_gbc_color_correction") {
+        if let Some(value) = get("rustyboi_gbc_color_correction") {
             self.color_correction = match value {
                 "gambatte" => CgbColorConversion::Gambatte,
                 _ => CgbColorConversion::Linear,
@@ -401,13 +483,22 @@ impl Core for RustyboiCore {
     }
 
     fn on_get_av_info(&mut self, _ctx: &mut GetAvInfoContext) -> retro_system_av_info {
+        // Base size is whatever is currently active (plain GB, or the SGB
+        // border after a state that had it on). Max must always cover the SGB
+        // frame so a later SET_GEOMETRY can grow the output to 256x224 without
+        // reallocating (SET_GEOMETRY may not raise max_width/max_height).
+        let (base_w, base_h) = if self.sgb_border_active {
+            (SGB_WIDTH, SGB_HEIGHT)
+        } else {
+            (WIDTH, HEIGHT)
+        };
         retro_system_av_info {
             geometry: retro_game_geometry {
-                base_width: WIDTH,
-                base_height: HEIGHT,
-                max_width: WIDTH,
-                max_height: HEIGHT,
-                aspect_ratio: WIDTH as f32 / HEIGHT as f32,
+                base_width: base_w,
+                base_height: base_h,
+                max_width: SGB_WIDTH,
+                max_height: SGB_HEIGHT,
+                aspect_ratio: base_w as f32 / base_h as f32,
             },
             timing: retro_system_timing {
                 fps: FPS,
@@ -437,6 +528,19 @@ impl Core for RustyboiCore {
             return Err("XRGB8888 is not supported by the frontend".into());
         }
 
+        // Latch the current option values before building the machine so the
+        // hardware model, real-boot-ROM and border choices are all up to date
+        // (the frontend may never fire on_options_changed before first load).
+        // SAFETY: `environment_callback` returns the live callback for this
+        // session; we only read core options and the system directory with it.
+        let callback = unsafe {
+            let gctx: GenericContext = (&mut *ctx).into();
+            *gctx.environment_callback()
+        };
+        unsafe {
+            self.read_options(callback);
+        }
+
         let rom = unsafe { std::slice::from_raw_parts(info.data as *const u8, info.size) }.to_vec();
         let mut cartridge = Cartridge::from_bytes(&rom)?;
         // RetroArch owns .srm/.rtc persistence via the memory-data hooks; make
@@ -446,11 +550,36 @@ impl Core for RustyboiCore {
         let hardware = self.pick_hardware(&rom);
         let mut gb = GB::new(hardware);
         gb.insert(cartridge);
-        gb.skip_bios();
+
+        // Boot: run the real boot ROM from the system directory if the user
+        // asked for it and a matching file exists; otherwise fall back to the
+        // synthetic post-boot state so content always loads.
+        let mut booted = false;
+        if self.use_real_boot_rom {
+            // SAFETY: valid environment callback.
+            let sysdir = unsafe { environment::get_system_directory(callback) };
+            if let Some(dir) = sysdir {
+                let path = dir.join(Self::boot_rom_filename(hardware));
+                if let Some(path_str) = path.to_str()
+                    && gb.load_bios(path_str).is_ok()
+                    && gb.has_bios()
+                {
+                    gb.run_boot_rom();
+                    booted = true;
+                }
+            }
+        }
+        if !booted {
+            gb.skip_bios();
+        }
+
         gb.set_cgb_color_conversion(self.color_correction);
         gb.enable_audio(Box::new(self.audio.clone()))?;
         self.gb = Some(gb);
         self.gameshark_codes.clear();
+        // Geometry starts at the plain GB size; on_run switches to 256x224 the
+        // first frame the SGB border becomes available.
+        self.sgb_border_active = false;
 
         // Try to enable the rumble interface for MBC5 rumble carts.
         self.rumble_enabled = ctx.enable_rumble_interface().is_ok();
@@ -480,7 +609,11 @@ impl Core for RustyboiCore {
     }
 
     fn on_options_changed(&mut self, ctx: &mut OptionsChangedContext) {
-        self.read_options(ctx);
+        let gctx: GenericContext = ctx.into();
+        // SAFETY: the context's environment callback is valid for this call.
+        unsafe {
+            self.read_options(*gctx.environment_callback());
+        }
     }
 
     fn on_cheat_reset(&mut self, _ctx: &mut CheatResetContext) {
@@ -548,37 +681,81 @@ impl Core for RustyboiCore {
         }
 
         let (frame, _breakpoint) = gb.run_until_frame(true);
+
+        // SGB border compositing: only when the option is on and the game has
+        // uploaded a border (else `None` and we render the plain 160x144 GB
+        // frame). The composited buffer is RGB888, 256x224.
+        let sgb_border = if self.sgb_border_enabled {
+            gb.sgb_composited_frame()
+        } else {
+            None
+        };
+        // Rumble state is read here while `gb` is still borrowed; applied below.
+        let rumble_active = gb
+            .cartridge()
+            .map(|c| c.has_rumble() && c.rumble_active())
+            .unwrap_or(false);
+
         let palette = self.dmg_palette.table();
-        match frame {
-            Frame::Monochrome(data) => {
-                for (i, &shade) in data.iter().enumerate() {
-                    let rgb = palette[(shade as usize) & 3];
-                    let o = i * 4;
-                    self.framebuffer[o] = rgb[2]; // B
-                    self.framebuffer[o + 1] = rgb[1]; // G
-                    self.framebuffer[o + 2] = rgb[0]; // R
-                    self.framebuffer[o + 3] = 0xFF;
+        let (draw_w, draw_h) = if let Some(border) = sgb_border {
+            for (i, chunk) in border.chunks_exact(3).enumerate() {
+                let o = i * 4;
+                self.framebuffer[o] = chunk[2]; // B
+                self.framebuffer[o + 1] = chunk[1]; // G
+                self.framebuffer[o + 2] = chunk[0]; // R
+                self.framebuffer[o + 3] = 0xFF;
+            }
+            (SGB_WIDTH, SGB_HEIGHT)
+        } else {
+            match frame {
+                Frame::Monochrome(data) => {
+                    for (i, &shade) in data.iter().enumerate() {
+                        let rgb = palette[(shade as usize) & 3];
+                        let o = i * 4;
+                        self.framebuffer[o] = rgb[2]; // B
+                        self.framebuffer[o + 1] = rgb[1]; // G
+                        self.framebuffer[o + 2] = rgb[0]; // R
+                        self.framebuffer[o + 3] = 0xFF;
+                    }
+                }
+                Frame::Color(data) => {
+                    for (i, chunk) in data.chunks_exact(3).enumerate() {
+                        let o = i * 4;
+                        self.framebuffer[o] = chunk[2]; // B
+                        self.framebuffer[o + 1] = chunk[1]; // G
+                        self.framebuffer[o + 2] = chunk[0]; // R
+                        self.framebuffer[o + 3] = 0xFF;
+                    }
                 }
             }
-            Frame::Color(data) => {
-                for (i, chunk) in data.chunks_exact(3).enumerate() {
-                    let o = i * 4;
-                    self.framebuffer[o] = chunk[2]; // B
-                    self.framebuffer[o + 1] = chunk[1]; // G
-                    self.framebuffer[o + 2] = chunk[0]; // R
-                    self.framebuffer[o + 3] = 0xFF;
-                }
+            (WIDTH, HEIGHT)
+        };
+
+        // Tell the frontend when the output size changed (SGB border toggling
+        // on/off). SET_GEOMETRY keeps max_width/max_height, which on_get_av_info
+        // already sized for the SGB frame, so no reallocation occurs.
+        let border_now_active = draw_w == SGB_WIDTH;
+        if border_now_active != self.sgb_border_active {
+            self.sgb_border_active = border_now_active;
+            let geometry = retro_game_geometry {
+                base_width: draw_w,
+                base_height: draw_h,
+                max_width: SGB_WIDTH,
+                max_height: SGB_HEIGHT,
+                aspect_ratio: draw_w as f32 / draw_h as f32,
+            };
+            let gctx: GenericContext = (&mut *ctx).into();
+            // SAFETY: valid environment callback; SET_GEOMETRY is constant-time.
+            unsafe {
+                environment::set_game_geometry(*gctx.environment_callback(), geometry);
             }
         }
-        ctx.draw_frame(&self.framebuffer, WIDTH, HEIGHT, WIDTH as usize * 4);
+
+        ctx.draw_frame(&self.framebuffer, draw_w, draw_h, draw_w as usize * 4);
 
         // Drive the rumble motor for MBC5 rumble carts.
         if self.rumble_enabled {
-            let active = gb
-                .cartridge()
-                .map(|c| c.has_rumble() && c.rumble_active())
-                .unwrap_or(false);
-            let strength = if active { u16::MAX } else { 0 };
+            let strength = if rumble_active { u16::MAX } else { 0 };
             let gctx: GenericContext = (&mut *ctx).into();
             gctx.set_rumble_state(0, retro_rumble_effect::RETRO_RUMBLE_STRONG, strength);
             gctx.set_rumble_state(0, retro_rumble_effect::RETRO_RUMBLE_WEAK, strength);
@@ -651,9 +828,20 @@ impl Core for RustyboiCore {
     }
 
     fn get_serialize_size(&mut self, _ctx: &mut GetSerializeSizeContext) -> usize {
+        // The frontend queries this ONCE and pre-allocates buffers of this size
+        // for savestates, rewind and netplay, so it must be a stable upper bound
+        // that never shrinks below any later `to_state_bytes` result. The state
+        // is JSON: the bulk is the ROM bytes (constant for a given cart), and
+        // only the small RAM/register portion drifts as digit widths change
+        // (a 2-digit value growing to 3). A 1/64 + 64 KiB pad on top of the
+        // current length plus the 8-byte header covers that drift with margin;
+        // `on_serialize` also guards the write, so an under-estimate only fails
+        // a state, never overflows.
         match self.gb.as_ref() {
-            // Headroom for bincode framing; state size is stable for a given ROM.
-            Some(gb) => bincode::serialized_size(gb).map(|n| n as usize + 4096).unwrap_or(0),
+            Some(gb) => match gb.to_state_bytes() {
+                Ok(bytes) => SERIALIZE_HEADER_LEN + bytes.len() + bytes.len() / 64 + 64 * 1024,
+                Err(_) => 0,
+            },
             None => 0,
         }
     }
@@ -662,17 +850,29 @@ impl Core for RustyboiCore {
         let Some(gb) = self.gb.as_ref() else {
             return false;
         };
-        match bincode::serialize(gb) {
-            Ok(bytes) if bytes.len() <= slice.len() => {
-                slice[..bytes.len()].copy_from_slice(&bytes);
-                true
-            }
-            _ => false,
+        let Ok(bytes) = gb.to_state_bytes() else {
+            return false;
+        };
+        // Length-prefixed: the buffer is fixed-size and zero-padded, and the
+        // JSON deserializer rejects trailing NUL bytes, so store the exact
+        // payload length up front and slice to it on load.
+        if SERIALIZE_HEADER_LEN + bytes.len() > slice.len() {
+            return false;
         }
+        slice[..SERIALIZE_HEADER_LEN].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
+        slice[SERIALIZE_HEADER_LEN..SERIALIZE_HEADER_LEN + bytes.len()].copy_from_slice(&bytes);
+        true
     }
 
     fn on_unserialize(&mut self, slice: &mut [u8], _ctx: &mut UnserializeContext) -> bool {
-        match bincode::deserialize::<GB>(slice) {
+        if slice.len() < SERIALIZE_HEADER_LEN {
+            return false;
+        }
+        let len = u64::from_le_bytes(slice[..SERIALIZE_HEADER_LEN].try_into().unwrap()) as usize;
+        let Some(payload) = slice.get(SERIALIZE_HEADER_LEN..SERIALIZE_HEADER_LEN + len) else {
+            return false;
+        };
+        match GB::from_state_bytes(payload) {
             Ok(mut gb) => {
                 // Audio sink isn't serialized; re-attach so sound resumes.
                 let _ = gb.enable_audio(Box::new(self.audio.clone()));
