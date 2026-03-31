@@ -407,47 +407,20 @@ impl RustyboiCore {
 
 /// Decode a Game Genie code (`AAA-BBB` or `AAA-BBB-CCC`) into
 /// (address, new value, optional compare value). Returns None on malformed
-/// input. Format reference: 9 hex nibbles `ABCD EF GHI` where the new value is
-/// `AB`, the address is `FCDE` xor 0xF000, and the optional compare is derived
-/// from `GHI`.
+/// input. Decoding is delegated to the single canonical implementation in
+/// [`rustyboi_core_lib::cheats::decode_game_genie`] (mGBA-derived nibble
+/// layout), shared with the session frontend.
 fn parse_game_genie(code: &str) -> Option<(u16, u8, Option<u8>)> {
-    let hex: Vec<u8> = code
-        .chars()
-        .filter(|c| *c != '-')
-        .map(|c| c.to_digit(16).map(|d| d as u8))
-        .collect::<Option<Vec<u8>>>()?;
-    if hex.len() != 6 && hex.len() != 9 {
-        return None;
-    }
-    let n = |i: usize| hex[i] as u16;
-    let new = (hex[0] << 4) | hex[1];
-    // Address nibbles: hex[2] hex[4] hex[5] hex[3], with the high nibble xor 0xF.
-    let address = (n(5) << 12) | (n(2) << 8) | (n(3) << 4) | n(4);
-    let address = address ^ 0xF000;
-    let compare = if hex.len() == 9 {
-        // Compare byte: rotate the 6-nibble tail and xor 0xBA (standard GG).
-        let raw = (hex[6] << 4) | hex[8];
-        let rotated = raw.rotate_right(2);
-        Some(rotated ^ 0xBA)
-    } else {
-        None
-    };
-    Some((address, new, compare))
+    let gg = rustyboi_core_lib::cheats::decode_game_genie(code)?;
+    Some((gg.addr, gg.value, gg.compare))
 }
 
-/// Decode an 8-hex-digit GameShark code `ABCDGHIJ`:
-/// `AB` = external RAM bank (ignored here), `CD` = new value,
-/// `GHIJ` = little-endian target address. Returns (address, value).
+/// Decode an 8-hex-digit GameShark code via the canonical core decoder
+/// ([`rustyboi_core_lib::cheats::decode_gameshark`]): `AB` = external RAM bank
+/// (ignored here), `CD` = new value, `GHEF` = little-endian target address.
 fn parse_gameshark(code: &str) -> Option<GameSharkCode> {
-    let trimmed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-    if trimmed.len() != 8 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let value = u8::from_str_radix(&trimmed[2..4], 16).ok()?;
-    let addr_lo = u8::from_str_radix(&trimmed[4..6], 16).ok()?;
-    let addr_hi = u8::from_str_radix(&trimmed[6..8], 16).ok()?;
-    let address = ((addr_hi as u16) << 8) | (addr_lo as u16);
-    Some(GameSharkCode { address, value })
+    let gs = rustyboi_core_lib::cheats::decode_gameshark(code)?;
+    Some(GameSharkCode { address: gs.addr, value: gs.value })
 }
 
 impl Core for RustyboiCore {
