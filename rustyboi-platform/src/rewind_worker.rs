@@ -22,28 +22,12 @@ use std::thread::JoinHandle;
 
 use rustyboi_session::GB;
 
-/// Newtype carrying a cloned `GB` across the thread boundary.
-///
-/// `GB` is not `Send` solely because of its `Option<Box<dyn AudioOutput>>`
-/// field, whose trait object lacks a `+ Send` bound. Every clone we transport
-/// sets that field to `None` (see `GB::clone`), and all remaining fields
-/// (`SM83`, `Mmio`, `Ppu`, POD flags) are plain owned data with no `Rc`/`Weak`
-/// or thread-affine handles — a `Cell<i16>` inside `Mmio` is `Send`. So the
-/// transported value is genuinely safe to move to another thread.
-#[allow(unsafe_code)]
-struct SendGb(GB);
-
-// SAFETY: constructed only from a fresh `GB::clone`, which always leaves the
-// sole non-`Send` field (`audio_output`) as `None`; all other fields are
-// `Send` owned data. The worker only ever calls `to_state_bytes(&self)` on it
-// and drops it — it never installs an audio sink or shares it.
-#[allow(unsafe_code)]
-unsafe impl Send for SendGb {}
-
 /// A capture job: serialize this cloned machine and tag the result with `frame`.
+/// `GB` is `Send` (its audio sink is `Box<dyn AudioOutput + Send>`), so the
+/// clone moves to the worker thread directly — no `unsafe`.
 struct Job {
     frame: u64,
-    gb: SendGb,
+    gb: GB,
 }
 
 /// A completed serialization, ready to push into the rewind ring.
@@ -83,7 +67,7 @@ impl RewindWorker {
     /// clone queues and is coalesced away by a newer one (drop-oldest).
     pub fn submit(&mut self, frame: u64, gb: GB) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(Job { frame, gb: SendGb(gb) });
+            let _ = tx.send(Job { frame, gb });
         }
     }
 
@@ -123,7 +107,7 @@ fn serializer_loop(rx: Receiver<Job>, done_tx: Sender<Finished>) {
             job = newer;
         }
         // The expensive part — off the emulation thread.
-        if let Ok(bytes) = job.gb.0.to_state_bytes() {
+        if let Ok(bytes) = job.gb.to_state_bytes() {
             if done_tx.send(Finished { frame: job.frame, bytes }).is_err() {
                 break; // main side gone
             }

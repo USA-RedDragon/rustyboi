@@ -9,11 +9,14 @@
 //! collector, so it stays WASM-clean.
 
 use rustyboi_core_lib::audio::AudioOutput;
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 /// Shared, drainable buffer of stereo samples produced since the last drain.
-pub(crate) type SampleBuf = Rc<RefCell<Vec<(f32, f32)>>>;
+/// `Arc<Mutex>` (not `Rc<RefCell>`) so the installed sink — and therefore the
+/// whole `GB` — is `Send`, letting the host serialize a cloned `GB` on a worker
+/// thread with no `unsafe`. The lock is uncontended (once per frame) and works
+/// fine on single-threaded wasm.
+pub(crate) type SampleBuf = Arc<Mutex<Vec<(f32, f32)>>>;
 
 /// The `AudioOutput` the session installs into the `GB`. Holds a clone of the
 /// shared buffer; every `add_samples` appends to it. The session owns the other
@@ -33,6 +36,6 @@ impl AudioOutput for CaptureSink {
         Ok(())
     }
     fn add_samples(&mut self, samples: &[(f32, f32)]) {
-        self.buf.borrow_mut().extend_from_slice(samples);
+        self.buf.lock().unwrap().extend_from_slice(samples);
     }
 }
