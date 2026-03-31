@@ -1181,14 +1181,6 @@ impl Mmio {
         }
     }
 
-    pub fn read_vram_bank1(&self, addr: u16) -> u8 {
-        if !self.cgb_features_enabled || !(VRAM_START..=VRAM_END).contains(&addr) {
-            return 0xFF; // Invalid access
-        }
-
-        self.vram_bank1.read(addr)
-    }
-
     /// Read from specific VRAM bank for debugging purposes
     pub fn read_vram_bank(&self, bank: u8, addr: u16) -> u8 {
         if !(VRAM_START..=VRAM_END).contains(&addr) {
