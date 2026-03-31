@@ -953,6 +953,23 @@ struct World {
     auto_paused_no_content: bool,
     /// Present the 256x224 SGB border composite when the machine offers one.
     sgb_border: bool,
+    /// Background serializer for rewind snapshots (native desktop only). When
+    /// present, the session runs in offloaded-capture mode: the emulation thread
+    /// only clones the machine, this worker does the `to_state_bytes` serialize
+    /// off-thread, and finished blobs are pushed back into the rewind ring.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    rewind_worker: Option<crate::rewind_worker::RewindWorker>,
+    /// Background PNG encoder/writer for Game Boy Printer output (native
+    /// desktop). Created lazily on the first print so non-printing sessions pay
+    /// nothing. Keeps the encode + blocking disk write off the emulation thread.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    png_worker: Option<crate::png_worker::PngWorker>,
+    /// `(stem, next_index)` for `<stem>-print-<n>.png`. The index is monotonic
+    /// per stem so back-to-back prints never race on the same filename while an
+    /// earlier async write is still in flight (the on-disk `exists()` check
+    /// alone would collide). Re-seeded from disk when the ROM stem changes.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    next_print_index: Option<(String, u32)>,
 }
 
 impl World {
@@ -970,7 +987,18 @@ impl World {
         // Check if both ROM and BIOS are missing - if so, start paused
         let should_start_paused = !gb.has_rom() && !gb.has_bios();
 
-        let session = session_from_gb(gb, rom_bytes.as_deref(), config, ports);
+        // `mut` only used on native, where offloaded rewind is enabled below.
+        #[cfg_attr(any(target_arch = "wasm32", target_os = "android"), allow(unused_mut))]
+        let mut session = session_from_gb(gb, rom_bytes.as_deref(), config, ports);
+
+        // Native desktop: run rewind capture in offloaded mode so the expensive
+        // savestate serialize happens on a worker thread, not the emulation
+        // thread. Wasm has no threads; Android keeps the inline path.
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        let rewind_worker = {
+            session.set_rewind_offloaded(true);
+            Some(crate::rewind_worker::RewindWorker::new())
+        };
 
         Self {
             session,
@@ -993,6 +1021,12 @@ impl World {
             palette,
             auto_paused_no_content: should_start_paused,
             sgb_border: true,
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            rewind_worker,
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            png_worker: None,
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            next_print_index: None,
         }
     }
 
@@ -1042,6 +1076,26 @@ impl World {
     fn list_slots(&self) -> Vec<u32> {
         self.session.list_slots()
     }
+
+    /// Hand any rewind snapshot captured this frame to the background
+    /// serializer and push back any it has finished. Called once per emulated
+    /// frame. On the emulation thread this costs only a `GB::clone` (taken
+    /// inside the session) plus a channel send/recv — never a serialize.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    fn pump_rewind_worker(&mut self) {
+        let Some(worker) = self.rewind_worker.as_mut() else { return };
+        if let Some((frame, gb)) = self.session.take_pending_snapshot() {
+            worker.submit(frame, gb);
+        }
+        for done in worker.drain_finished() {
+            self.session.push_rewind_bytes(done.frame, done.bytes);
+        }
+    }
+
+    /// No-op stub on platforms without the offload worker (wasm/android keep the
+    /// session's inline capture path).
+    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+    fn pump_rewind_worker(&mut self) {}
 
     /// Step back to the most recent rewind snapshot (hold-to-rewind hotkey).
     fn rewind(&mut self) {
@@ -1484,21 +1538,31 @@ impl World {
                     path.with_extension("").to_string_lossy().into_owned()
                 })
                 .unwrap_or_else(|| "rustyboi".to_string());
-            let mut n = 1u32;
-            for sheet in sheets {
-                // First free index so prints never clobber earlier sessions.
-                let path = loop {
-                    let candidate = format!("{stem}-print-{n}.png");
-                    n += 1;
-                    if !std::path::Path::new(&candidate).exists() {
-                        break candidate;
+            // Seed the print index from disk once per stem (first free slot),
+            // then keep it monotonic in memory so back-to-back prints never
+            // collide while an earlier async write is still in flight.
+            let mut n = match &self.next_print_index {
+                Some((s, i)) if *s == stem => *i,
+                _ => {
+                    let mut i = 1u32;
+                    while std::path::Path::new(&format!("{stem}-print-{i}.png")).exists() {
+                        i += 1;
                     }
-                };
-                match std::fs::write(&path, sheet.to_png()) {
-                    Ok(()) => println!("Printed {}x{} sheet to: {}", sheet.width, sheet.height, path),
-                    Err(e) => println!("Failed to write print to {}: {}", path, e),
+                    i
                 }
+            };
+
+            // Encode + disk write happen off the emulation thread; here we only
+            // pick a free filename and hand the (cheap, Clone) sheet over.
+            let worker = self
+                .png_worker
+                .get_or_insert_with(crate::png_worker::PngWorker::new);
+            for sheet in sheets {
+                let path = format!("{stem}-print-{n}.png");
+                n += 1;
+                worker.write_sheet(std::path::PathBuf::from(path), sheet);
             }
+            self.next_print_index = Some((stem, n));
         }
     }
 
@@ -1592,6 +1656,7 @@ impl World {
             && matches!(self.session.mode(), rustyboi_session::RunMode::FrameAdvance)
         {
             let output = self.session.run_frame(self.input);
+            self.pump_rewind_worker();
             self.frame = Some(output.frame);
             if let Some(audio) = self.audio.as_mut() {
                 audio.push_samples(&output.audio);
@@ -1637,6 +1702,7 @@ impl World {
         // cheats, audio capture — runs inside `Session::run_frame`.
         if self.session.gb().get_breakpoints().is_empty() {
             let output = self.session.run_frame(self.input);
+            self.pump_rewind_worker();
             if output.advanced {
                 self.frame = Some(output.frame);
                 if let Some(audio) = self.audio.as_mut() {

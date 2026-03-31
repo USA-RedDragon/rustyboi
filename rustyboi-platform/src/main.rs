@@ -1,5 +1,8 @@
 #![warn(clippy::all)]
-#![forbid(unsafe_code)]
+// `deny` (not `forbid`) so the rewind worker's single audited `unsafe impl
+// Send for SendGb` (see rewind_worker.rs) can opt out locally; unsafe is a hard
+// error everywhere else.
+#![deny(unsafe_code)]
 
 #[cfg(not(target_os = "android"))]
 mod audio;
@@ -13,6 +16,10 @@ mod framework;
 mod game_renderer;
 #[cfg(not(target_os = "android"))]
 mod ports;
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+mod png_worker;
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+mod rewind_worker;
 #[cfg(not(target_os = "android"))]
 mod run;
 
