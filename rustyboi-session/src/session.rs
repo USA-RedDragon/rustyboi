@@ -18,8 +18,7 @@ use rustyboi_core_lib::gb::{Frame, Hardware, GB};
 use rustyboi_core_lib::input::ButtonState;
 use rustyboi_core_lib::movie::{self, Movie};
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 /// How the emulator advances each `run_frame` call.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -151,7 +150,7 @@ impl Session {
     /// audio capture sink and applies any Game Genie ROM patches from cheats
     /// (none yet at construction, but keeps the invariant).
     pub fn with_gb(mut gb: GB, config: Config, ports: Ports, rom_id: [u8; 32]) -> Session {
-        let audio_buf: SampleBuf = Rc::new(RefCell::new(Vec::new()));
+        let audio_buf: SampleBuf = Arc::new(Mutex::new(Vec::new()));
         // enable_audio only errors if a sink was already installed or start()
         // fails; our CaptureSink::start is infallible and gb is fresh here.
         let _ = gb.enable_audio(Box::new(CaptureSink::new(audio_buf.clone())));
@@ -181,7 +180,7 @@ impl Session {
     /// overrides `raw`.
     pub fn run_frame(&mut self, raw: AbstractInput) -> FrameOutput {
         let live_state = self.config.input_map.resolve(raw);
-        self.audio_buf.borrow_mut().clear();
+        self.audio_buf.lock().unwrap().clear();
 
         let (frame, advanced) = match self.mode {
             RunMode::Paused => (self.gb.get_current_frame(), false),
@@ -202,7 +201,7 @@ impl Session {
             }
         };
 
-        let audio = self.audio_buf.borrow_mut().drain(..).collect();
+        let audio = self.audio_buf.lock().unwrap().drain(..).collect();
         FrameOutput { frame, audio, frame_count: self.frame_count, advanced }
     }
 
