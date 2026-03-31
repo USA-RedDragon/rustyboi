@@ -93,7 +93,10 @@ impl DmgPalette {
 /// during a frame, and `on_run` drains them afterwards.
 #[derive(Clone, Default)]
 struct SampleBuffer {
-    samples: std::rc::Rc<std::cell::RefCell<Vec<(f32, f32)>>>,
+    // Arc<Mutex> (not Rc<RefCell>) so this AudioOutput sink is `Send` — required
+    // since `GB::enable_audio` takes `Box<dyn AudioOutput + Send>` (so a cloned
+    // GB stays Send for off-thread savestate serialization). Uncontended.
+    samples: std::sync::Arc<std::sync::Mutex<Vec<(f32, f32)>>>,
 }
 
 impl rustyboi_core_lib::audio::AudioOutput for SampleBuffer {
@@ -102,7 +105,7 @@ impl rustyboi_core_lib::audio::AudioOutput for SampleBuffer {
     }
 
     fn add_samples(&mut self, samples: &[(f32, f32)]) {
-        self.samples.borrow_mut().extend_from_slice(samples);
+        self.samples.lock().unwrap().extend_from_slice(samples);
     }
 }
 
@@ -593,7 +596,7 @@ impl Core for RustyboiCore {
     fn on_unload_game(&mut self, ctx: &mut UnloadGameContext) {
         self.gb = None;
         self.gameshark_codes.clear();
-        self.audio.samples.borrow_mut().clear();
+        self.audio.samples.lock().unwrap().clear();
         // The rumble state sent to the frontend persists until changed and
         // `on_run` stops driving it once the game is gone: a rumble cart
         // unloaded with the motor latched on would buzz forever. Stop it.
@@ -604,7 +607,7 @@ impl Core for RustyboiCore {
         if let Some(gb) = self.gb.as_mut() {
             gb.reset();
         }
-        self.audio.samples.borrow_mut().clear();
+        self.audio.samples.lock().unwrap().clear();
         self.stop_rumble(ctx);
     }
 
@@ -761,7 +764,7 @@ impl Core for RustyboiCore {
             gctx.set_rumble_state(0, retro_rumble_effect::RETRO_RUMBLE_WEAK, strength);
         }
 
-        let drained: Vec<(f32, f32)> = self.audio.samples.borrow_mut().drain(..).collect();
+        let drained: Vec<(f32, f32)> = self.audio.samples.lock().unwrap().drain(..).collect();
         let mut interleaved = Vec::with_capacity(drained.len() * 2);
         for (l, r) in drained {
             interleaved.push((l.clamp(-1.0, 1.0) * 32767.0) as i16);
