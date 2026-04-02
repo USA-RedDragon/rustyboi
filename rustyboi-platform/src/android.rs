@@ -25,8 +25,8 @@ use std::thread;
 use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::jobject;
 use jni::{JNIEnv, JavaVM};
-use rustyboi_egui_lib::actions::{FileData, LibraryEntry};
-use rustyboi_egui_lib::android_bridge::{
+use rustyboi_frontend_lib::actions::{FileData, LibraryEntry};
+use rustyboi_frontend_lib::android_bridge::{
     self, LoadRomCallback, PickFileCallback, ScanCallback, TreePickCallback,
 };
 use winit::platform::android::activity::AndroidApp;
@@ -82,6 +82,65 @@ static IME_INITIALIZED: std::sync::atomic::AtomicBool =
 /// to read via `AndroidApp::text_input_state()`.
 pub fn ime_initialized() -> bool {
     IME_INITIALIZED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Last observed GameTextInput buffer, diffed each frame to synthesize egui
+/// events. Lives here (not in the frontend `UiHost`) because reading the buffer
+/// needs the `AndroidApp` handle, which is platform-only. Formerly held by the
+/// platform `Framework`.
+static LAST_IME_TEXT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Diff the GameTextInput buffer against the last poll and emit egui Text /
+/// Backspace events. winit 0.29's android-game-activity backend drops
+/// GameTextInput `TextEvent`s ("Unknown android_activity input event
+/// TextEvent"), so the frontend `UiHost` gets these injected each frame via
+/// `App::draw`'s `extra_events`. We deliberately do NOT clear the buffer here so
+/// IME-side backspace shows up as a shrink on the next poll.
+pub fn drain_ime_egui_events() -> Vec<rustyboi_frontend_lib::egui_events::Event> {
+    use rustyboi_frontend_lib::egui_events::{Event, Key, Modifiers};
+
+    let mut events = Vec::new();
+    if !ime_initialized() {
+        return events;
+    }
+    let app = android_app();
+    let state = app.text_input_state();
+    let mut last = LAST_IME_TEXT.lock().unwrap();
+    if state.text == *last {
+        return events;
+    }
+    let common: usize = last
+        .chars()
+        .zip(state.text.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let prev_chars = last.chars().count();
+    let new_chars = state.text.chars().count();
+    let backspaces = prev_chars.saturating_sub(common);
+    for _ in 0..backspaces {
+        events.push(Event::Key {
+            key: Key::Backspace,
+            physical_key: Some(Key::Backspace),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        });
+        events.push(Event::Key {
+            key: Key::Backspace,
+            physical_key: Some(Key::Backspace),
+            pressed: false,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    if new_chars > common {
+        let new_text: String = state.text.chars().skip(common).collect();
+        if !new_text.is_empty() {
+            events.push(Event::Text(new_text));
+        }
+    }
+    *last = state.text;
+    events
 }
 
 /// Returns the `AndroidApp` handle stashed by `android_main`.

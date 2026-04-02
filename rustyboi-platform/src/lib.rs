@@ -2,7 +2,8 @@
 // `#[unsafe(no_mangle)] fn android_main(...)` requires unsafe; gate the
 // lint so non-Android targets still forbid it. No unsafe elsewhere: the rewind
 // worker moves cloned `GB`s to its thread safely because `GB: Send` (its audio
-// sink is `Box<dyn AudioOutput + Send>`).
+// sink is `Box<dyn AudioOutput + Send>`), and wgpu surface creation goes through
+// the safe `Arc<Window>` handle path.
 #![cfg_attr(not(target_os = "android"), forbid(unsafe_code))]
 
 #[cfg(target_os = "android")]
@@ -10,8 +11,7 @@ pub mod android;
 mod audio;
 mod config;
 mod display;
-mod framework;
-mod game_renderer;
+mod error;
 #[cfg(target_os = "android")]
 pub mod library;
 mod ports;

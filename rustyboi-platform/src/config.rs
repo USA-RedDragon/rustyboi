@@ -1,66 +1,12 @@
+//! CLI parsing + desktop keybinds. The presentation palette now lives in
+//! `rustyboi-frontend` (`ColorPalette`); this module only re-exports it for the
+//! call sites and owns the winit-`KeyCode` keybind table (a desktop concern).
+
 use clap::Parser;
-use winit::keyboard::KeyCode;
 use rustyboi_core_lib::gb;
+use winit::keyboard::KeyCode;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[derive(Default)]
-pub enum ColorPalette {
-    #[default]
-    Grayscale,
-    OriginalGreen,
-    Blue,
-    Brown,
-    Red,
-}
-
-
-impl ColorPalette {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "grayscale" | "gray" | "grey" => Some(Self::Grayscale),
-            "green" | "original" | "gameboy" => Some(Self::OriginalGreen),
-            "blue" => Some(Self::Blue),
-            "brown" | "sepia" => Some(Self::Brown),
-            "red" => Some(Self::Red),
-            _ => None,
-        }
-    }
-    /// Returns RGBA colors for Game Boy palette values 0-3
-    pub fn get_rgba_colors(&self) -> [[u8; 4]; 4] {
-        match self {
-            Self::Grayscale => [
-                [0xFF, 0xFF, 0xFF, 0xFF], // White
-                [0xAA, 0xAA, 0xAA, 0xFF], // Light gray
-                [0x55, 0x55, 0x55, 0xFF], // Dark gray
-                [0x00, 0x00, 0x00, 0xFF], // Black
-            ],
-            Self::OriginalGreen => [
-                [0x9B, 0xBC, 0x0F, 0xFF], // Light green
-                [0x8B, 0xAC, 0x0F, 0xFF], // Medium green
-                [0x30, 0x62, 0x30, 0xFF], // Dark green
-                [0x0F, 0x38, 0x0F, 0xFF], // Darkest green
-            ],
-            Self::Blue => [
-                [0xE0, 0xF8, 0xFF, 0xFF], // Light blue
-                [0x86, 0xC0, 0xEA, 0xFF], // Medium blue
-                [0x2E, 0x59, 0x8D, 0xFF], // Dark blue
-                [0x1A, 0x1C, 0x2C, 0xFF], // Darkest blue
-            ],
-            Self::Brown => [
-                [0xFF, 0xF6, 0xD3, 0xFF], // Light brown
-                [0xBF, 0x8B, 0x67, 0xFF], // Medium brown
-                [0x7F, 0x4F, 0x24, 0xFF], // Dark brown
-                [0x33, 0x20, 0x14, 0xFF], // Darkest brown
-            ],
-            Self::Red => [
-                [0xFF, 0xE4, 0xE1, 0xFF], // Light red
-                [0xFF, 0xA5, 0x9E, 0xFF], // Medium red
-                [0xBF, 0x30, 0x30, 0xFF], // Dark red
-                [0x7F, 0x0A, 0x0A, 0xFF], // Darkest red
-            ],
-        }
-    }
-}
+pub use rustyboi_frontend_lib::ColorPalette;
 
 #[derive(Debug, Clone)]
 pub struct KeyBinds {

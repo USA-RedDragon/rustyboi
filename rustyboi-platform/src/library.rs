@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-use rustyboi_egui_lib::actions::LibraryEntry;
+use rustyboi_frontend_lib::actions::LibraryEntry;
 
 /// Maximum number of recently-opened ROMs to retain in the MRU list.
 /// Sized so the recents section fits comfortably above the full list
