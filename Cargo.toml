@@ -5,6 +5,7 @@ members = [
     "rustyboi-session",
     "rustyboi-debugger",
     "rustyboi-egui",
+    "rustyboi-frontend",
     "rustyboi-platform",
     "rustyboi-test-runner",
     "rustyboi-libretro",
