@@ -495,11 +495,13 @@ fn compute_layout(
     let rw = region.width.clamp(0.0, (surface_w - rx).max(0.0));
     let rh = region.height.clamp(0.0, (surface_h - ry).max(0.0));
 
-    // Integer scale that fits the source inside the region (floor'd, ≥1x, as
-    // pixels' ScalingRenderer did).
-    let width_ratio = (rw / texture_width).max(1.0);
-    let height_ratio = (rh / texture_height).max(1.0);
-    let scale = width_ratio.clamp(1.0, height_ratio).floor();
+    // Aspect-preserving fit (contain): the largest scale that keeps the source
+    // inside the region on both axes. The window is aspect-locked to the source
+    // aspect, so at the default/locked sizes this fills the region *exactly*
+    // (integer at the default N× size, fractional at arbitrary user sizes) with
+    // no letterbox bars and no distortion. Only a transient off-aspect region
+    // (mid-resize) briefly bars the limiting axis.
+    let scale = (rw / texture_width).min(rh / texture_height).max(0.0);
 
     let scaled_w = (texture_width * scale).min(rw);
     let scaled_h = (texture_height * scale).min(rh);
@@ -543,16 +545,18 @@ mod tests {
         assert_eq!(scissor, (0, 0, 800, 720));
     }
 
-    // A region shorter than an exact multiple letterboxes: 160x144 into an
-    // 800x700 region scales 4x (700/144 -> 4.86 floor 4), centered with bars.
+    // An off-aspect region fits the limiting axis fractionally (aspect-preserving
+    // contain), filling it exactly with a minimal bar on the other axis: 160x144
+    // into an 800x700 region scales 700/144 = 4.861x, filling the height (700)
+    // and centering the 777px width with small side bars. (In practice the window
+    // is aspect-locked so the region matches the source aspect and both axes
+    // fill; this covers the transient mid-resize case.)
     #[test]
-    fn letterboxes_and_centers_on_non_integer_region() {
+    fn fractional_fit_fills_limiting_axis() {
         let (_t, scissor) = compute_layout((160.0, 144.0), (800.0, 720.0), rect(0.0, 20.0, 800.0, 700.0));
-        // 4x -> 640x576, centered in the 800x700 region (origin y=20).
-        assert_eq!(scissor.2, 640);
-        assert_eq!(scissor.3, 576);
-        assert_eq!(scissor.0, (800 - 640) / 2);
-        assert_eq!(scissor.1, 20 + (700 - 576) / 2);
+        assert_eq!(scissor.3, 700); // height fills exactly
+        assert_eq!(scissor.2, 777); // 160 * (700/144) = 777.7 -> 777
+        assert_eq!(scissor.1, 20); // no vertical bar on the limiting axis
     }
 
     // The SGB composite (256x224) uses its own aspect: into 1280x1120 it scales
@@ -568,8 +572,7 @@ mod tests {
     #[test]
     fn collapsed_region_is_safe() {
         let (_t, scissor) = compute_layout((160.0, 144.0), (800.0, 720.0), rect(0.0, 0.0, 0.0, 0.0));
-        // width_ratio/height_ratio floor to 1x, but scaled dims are clamped to
-        // the (zero) region, so the scissor collapses.
+        // A zero-size region yields scale 0 and a collapsed scissor.
         assert_eq!(scissor.2, 0);
         assert_eq!(scissor.3, 0);
     }

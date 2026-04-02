@@ -312,6 +312,25 @@ fn run_gui_loop(
     // DMG/CGB game never triggers a spurious resize.
     #[cfg(not(target_os = "android"))]
     let mut last_content_size = (WIDTH, HEIGHT);
+    // Last window inner size (logical) we requested, so the continuous fit only
+    // resizes when the target actually moves (avoids a resize/relayout feedback
+    // loop). `None` until the first fit.
+    #[cfg(not(target_os = "android"))]
+    let mut last_fit_logical: Option<(u32, u32)> = None;
+    // Debounced aspect-snap state. During an interactive resize the window must
+    // follow the cursor freely (requesting a size every `Resized` fights the
+    // compositor — the rapid back-and-forth). So we only record the desired
+    // aspect-correct size as `pending_snap` and apply it once the resize has
+    // settled (no `Resized` for `SNAP_DEBOUNCE`). `resize_burst_start` is the
+    // size at the start of the current drag, used to pick the driving axis.
+    #[cfg(not(target_os = "android"))]
+    let mut pending_snap: Option<winit::dpi::PhysicalSize<u32>> = None;
+    #[cfg(not(target_os = "android"))]
+    let mut last_resize_at: Option<Instant> = None;
+    #[cfg(not(target_os = "android"))]
+    let mut resize_burst_start: Option<winit::dpi::PhysicalSize<u32>> = None;
+    #[cfg(not(target_os = "android"))]
+    const SNAP_DEBOUNCE: Duration = Duration::from_millis(140);
 
     // Debounce timing for the F (frame-step) and N (cycle-step) debug keys.
     const DEBOUNCE_DURATION: Duration = Duration::from_millis(250);
@@ -495,12 +514,74 @@ fn run_gui_loop(
                 if let Some(rs) = render_state.as_mut() {
                     rs.renderer.resize(size.width.max(1), size.height.max(1));
                 }
+                // Aspect-lock (debounced): compute the aspect-correct size for
+                // this resize but DON'T apply it now — requesting a size mid-drag
+                // fights the compositor. Record it as `pending_snap`; the redraw
+                // loop applies it once the resize settles. The window follows the
+                // cursor freely during the drag (the game renders aspect-fit with
+                // a transient bar), then snaps once on release.
+                #[cfg(not(target_os = "android"))]
+                {
+                    let now = Instant::now();
+                    // A gap since the last resize means a new drag burst began;
+                    // baseline the driving-axis detection to this size.
+                    let new_burst = last_resize_at
+                        .map(|t| now.duration_since(t) > SNAP_DEBOUNCE)
+                        .unwrap_or(true);
+                    if new_burst {
+                        resize_burst_start = Some(size);
+                    }
+                    last_resize_at = Some(now);
+
+                    let (cw, ch) = app.content_size();
+                    let aspect = cw as f32 / ch as f32;
+                    let sf = window.scale_factor() as f32;
+                    let (iw, ih) = app.content_inset();
+                    let (iw_p, ih_p) = (iw * sf, ih * sf);
+                    let (new_w, new_h) = (size.width as f32, size.height as f32);
+                    let base = resize_burst_start.unwrap_or(size);
+                    let dw = (new_w - base.width as f32).abs();
+                    let dh = (new_h - base.height as f32).abs();
+                    let (corr_w, corr_h) = if dh > dw {
+                        let avail_h = (new_h - ih_p).max(1.0);
+                        ((avail_h * aspect + iw_p).round(), new_h.round())
+                    } else {
+                        let avail_w = (new_w - iw_p).max(1.0);
+                        (new_w.round(), (avail_w / aspect + ih_p).round())
+                    };
+                    let corr = winit::dpi::PhysicalSize::new(
+                        (corr_w as u32).max(1),
+                        (corr_h as u32).max(1),
+                    );
+                    pending_snap = if (corr.width as f32 - new_w).abs() > 1.0
+                        || (corr.height as f32 - new_h).abs() > 1.0
+                    {
+                        Some(corr)
+                    } else {
+                        None
+                    };
+                }
             }
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                 let Some(rs) = render_state.as_mut() else { return };
 
                 if let Some(title) = app.title_if_due() {
                     window.set_title(&title);
+                }
+
+                // Keep the render surface locked to the live window size *before*
+                // laying out egui. egui lays out using `window.inner_size()`; if
+                // the surface (self.config) lags behind — which it does after a
+                // programmatic `request_inner_size`, since the `Resized` event is
+                // async — egui renders into a differently-sized target, scaling
+                // the UI text. Syncing here (a cheap no-op when unchanged) makes
+                // the layout size and the render target size always agree.
+                {
+                    let phys = window.inner_size();
+                    let (pw, ph) = (phys.width.max(1), phys.height.max(1));
+                    if (pw, ph) != rs.renderer.surface_size() {
+                        rs.renderer.resize(pw, ph);
+                    }
                 }
 
                 // Android IME: synthesize egui events winit drops (see below).
@@ -517,14 +598,13 @@ fn run_gui_loop(
                             return;
                         }
                         PlatformRequest::ResizeContent { width, height } => {
+                            // Just record the new content size; the continuous
+                            // fit below sizes the window as content*scale + the
+                            // measured chrome inset (menu bar / status panel) so
+                            // the game fills the central rect with no letterbox.
                             #[cfg(not(target_os = "android"))]
                             {
-                                let scale = config.scale.max(1) as u32;
                                 last_content_size = (width, height);
-                                let _ = window.request_inner_size(LogicalSize::new(
-                                    (width * scale) as f64,
-                                    (height * scale) as f64,
-                                ));
                             }
                             #[cfg(target_os = "android")]
                             {
@@ -552,20 +632,45 @@ fn run_gui_loop(
                     rs.ui.set_status(format!("Breakpoint hit at PC: ${pc:04X}"));
                 }
 
-                // Auto-fit the window when the presented content size changes
-                // (an SGB border appearing/disappearing) even without an explicit
-                // toggle — e.g. an SGB ROM booting from the CLI. A plain DMG/CGB
-                // game never changes size, so it keeps its 160x144 window.
+                // Programmatic fit: size the window so the egui central rect is
+                // exactly content*scale (game fills it, no bars). Target =
+                // content*scale + the measured chrome inset. Fires ONLY on the
+                // first frame (inset now known) and when the content size changes
+                // (SGB border appearing/disappearing) — never continuously, so it
+                // does not fight a user resize. These are not during a drag, so
+                // request_inner_size is safe here.
                 #[cfg(not(target_os = "android"))]
                 {
                     let content = app.content_size();
-                    if content != last_content_size {
-                        last_content_size = content;
+                    let content_changed = content != last_content_size;
+                    last_content_size = content;
+                    if content_changed || last_fit_logical.is_none() {
                         let scale = config.scale.max(1) as u32;
+                        let (inset_w, inset_h) = app.content_inset();
+                        let target = (
+                            (content.0 * scale + inset_w.round() as u32).max(1),
+                            (content.1 * scale + inset_h.round() as u32).max(1),
+                        );
+                        last_fit_logical = Some(target);
                         let _ = window.request_inner_size(LogicalSize::new(
-                            (content.0 * scale) as f64,
-                            (content.1 * scale) as f64,
+                            target.0 as f64,
+                            target.1 as f64,
                         ));
+                    }
+
+                    // Apply a debounced aspect-snap once the user's resize has
+                    // settled (no Resized for SNAP_DEBOUNCE). This is the only
+                    // aspect correction that touches a user-driven size, and it
+                    // fires after the drag ends, so it never fights the drag.
+                    if let Some(snap) = pending_snap {
+                        let settled = last_resize_at
+                            .map(|t| t.elapsed() >= SNAP_DEBOUNCE)
+                            .unwrap_or(false);
+                        if settled {
+                            pending_snap = None;
+                            resize_burst_start = None;
+                            let _ = window.request_inner_size(snap);
+                        }
                     }
                 }
             }

@@ -92,6 +92,13 @@ pub struct App {
     last_frame_time: Instant,
     last_title_update: Instant,
     fps: f64,
+
+    /// The most recent chrome inset in *logical points*: how much wider/taller
+    /// the window is than the egui central region (menu bar + any status
+    /// panel). Measured each `draw` so the platform can size the window to
+    /// `content*scale + inset`, letting the game fill the central rect at full
+    /// integer scale with no letterbox bars. Dynamic — never a static offset.
+    content_inset: (f32, f32),
 }
 
 impl App {
@@ -131,6 +138,7 @@ impl App {
             last_frame_time: now,
             last_title_update: now,
             fps: 0.0,
+            content_inset: (0.0, 0.0),
         }
     }
 
@@ -177,6 +185,13 @@ impl App {
         } else {
             (SourceSize::Gb.dimensions().0, SourceSize::Gb.dimensions().1)
         }
+    }
+
+    /// The chrome inset (menu bar + status panel) in logical points measured on
+    /// the last `draw`, so the platform can size the window to
+    /// `content*scale + inset`. `(0, 0)` before the first frame.
+    pub fn content_inset(&self) -> (f32, f32) {
+        self.content_inset
     }
 
     /// True only when the border toggle is on AND the machine actually offers an
@@ -695,6 +710,16 @@ impl App {
             ui.set_error(err);
             self.manually_paused = self.user_paused || self.error_state.is_some();
         }
+
+        // Measure the chrome inset (menu bar + status panel) in logical points
+        // from this frame's surface vs. central region, so the platform can grow
+        // the window to make the central rect exactly content*scale. Dynamic:
+        // recomputed every frame, so an upstream egui size change is absorbed.
+        let ppp = paint.pixels_per_point.max(0.01);
+        let (surf_w, surf_h) = renderer.surface_size();
+        let inset_w = ((surf_w as f32 - ui_frame.region.width).max(0.0)) / ppp;
+        let inset_h = ((surf_h as f32 - ui_frame.region.height).max(0.0)) / ppp;
+        self.content_inset = (inset_w, inset_h);
 
         // Render: game letterboxed into the central region, egui on top.
         let game = self.present();

@@ -536,15 +536,24 @@ impl Gui {
     fn render_status_panel(&mut self, ctx: &Context) {
         if let Some(status_msg) = &self.status_message.clone() {
             let mut clear_status = false;
-            egui::TopBottomPanel::bottom("status_panel").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("✅");
-                    ui.label(status_msg);
-                    if ui.button("✕").clicked() {
-                        clear_status = true;
-                    }
+            // Floating overlay (not a bottom panel): it must paint *over* the
+            // framebuffer without claiming layout space, so `available_rect`
+            // stays full and the emulator image never shifts when a status
+            // message appears/disappears.
+            egui::Area::new(egui::Id::new("status_overlay"))
+                .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
+                .interactable(true)
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("✅");
+                            ui.label(status_msg);
+                            if ui.button("✕").clicked() {
+                                clear_status = true;
+                            }
+                        });
+                    });
                 });
-            });
 
             if clear_status {
                 self.status_message = None;
