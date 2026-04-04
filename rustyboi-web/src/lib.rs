@@ -136,14 +136,19 @@ impl Emulator {
     /// Advance one presented frame per the session's run mode, blit it to the
     /// canvas, and queue its audio. Called from the JS `requestAnimationFrame`
     /// loop (which decides how many times to call it to keep 59.7275 fps pace).
-    pub fn run_frame(&mut self) -> Result<(), JsValue> {
+    pub fn run_frame(&mut self) {
         if !self.has_rom {
-            return Ok(());
+            return;
         }
         let out = self.session.run_frame(self.input);
-        self.present(&out.frame)?;
+        // Return `()` (not `Result`) so wasm-bindgen emits a plain call, not a
+        // multivalue-return shim — Firefox takes a slow JS->wasm entry path for
+        // the latter, on every frame. Present errors are rare (surface lost);
+        // log and continue.
+        if let Err(e) = self.present(&out.frame) {
+            web_sys::console::warn_1(&e);
+        }
         self.audio.queue(&out.audio);
-        Ok(())
     }
 
     /// Convert the core `Frame` to RGBA and `putImageData` it. `Monochrome`
