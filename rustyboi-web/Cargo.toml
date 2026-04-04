@@ -19,6 +19,9 @@ wasm-opt = false
 [package.metadata.wasm-pack.profile.dev]
 wasm-opt = false
 
+[package.metadata.wasm-pack.profile.profiling]
+wasm-opt = false
+
 [dependencies]
 rustyboi-session = { path = "../rustyboi-session" }
 rustyboi-core = { path = "../rustyboi-core" }
