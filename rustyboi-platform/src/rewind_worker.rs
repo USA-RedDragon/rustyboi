@@ -27,7 +27,7 @@ use rustyboi_session::GB;
 /// clone moves to the worker thread directly — no `unsafe`.
 struct Job {
     frame: u64,
-    gb: GB,
+    gb: Box<GB>,
 }
 
 /// A completed serialization, ready to push into the rewind ring.
@@ -65,7 +65,7 @@ impl RewindWorker {
     /// Submit a cloned machine for serialization. Cheap on the emulation thread
     /// — it only moves the clone into the channel. If the worker is busy the
     /// clone queues and is coalesced away by a newer one (drop-oldest).
-    pub fn submit(&mut self, frame: u64, gb: GB) {
+    pub fn submit(&mut self, frame: u64, gb: Box<GB>) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Job { frame, gb });
         }
