@@ -1226,32 +1226,32 @@ impl GB {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_state_file(path: &str) -> Result<Self, io::Error> {
-        let saved_state = fs::read_to_string(path)?;
-        let mut gb: GB = serde_json::from_str(&saved_state)?;
-        // Cached cartridge-derived mmio flags are #[serde(skip)]; re-derive them
-        // from the just-restored cartridge.
-        gb.mmio.resync_cart_flags();
-        Ok(gb)
+        let saved_state = fs::read(path)?;
+        Self::from_state_bytes(&saved_state)
     }
 
     pub fn to_state_file(&self, path: &str) -> Result<(), io::Error> {
-        let serialized = serde_json::to_string(&self)?;
-        fs::write(path, serialized)?;
+        fs::write(path, self.to_state_bytes()?)?;
         Ok(())
     }
 
     /// Serialize the whole machine to a savestate byte buffer. WASM-clean (no
-    /// filesystem): the caller owns the bytes. Mirrors `to_state_file` minus the
-    /// `fs::write`, so a state saved one way round-trips through the other.
+    /// filesystem): the caller owns the bytes. Uses a compact binary format
+    /// (bincode) — `serde_bytes` blobs (VRAM/WRAM/OAM/framebuffers) become
+    /// length-prefixed byte runs, not JSON number-arrays, so a snapshot is
+    /// ~its raw size instead of megabytes of text (inline web rewind was
+    /// stalling on the JSON encode). Mirrors `to_state_file`, so a state saved
+    /// one way round-trips through the other.
     pub fn to_state_bytes(&self) -> Result<Vec<u8>, io::Error> {
-        Ok(serde_json::to_vec(&self)?)
+        bincode::serialize(&self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Reconstruct a machine from a savestate buffer produced by
     /// `to_state_bytes` (or `to_state_file`). Re-derives the `#[serde(skip)]`
     /// cartridge-flag cache exactly as `from_state_file` does. WASM-clean.
     pub fn from_state_bytes(bytes: &[u8]) -> Result<Self, io::Error> {
-        let mut gb: GB = serde_json::from_slice(bytes)?;
+        let mut gb: GB =
+            bincode::deserialize(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         gb.mmio.resync_cart_flags();
         Ok(gb)
     }
