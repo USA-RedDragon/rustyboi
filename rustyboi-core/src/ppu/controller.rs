@@ -508,11 +508,13 @@ struct CapturedWinTile {
 // active OAM-DMA (Gambatte points `oamram_` at the cartridge's disabled RAM).
 // `change(cc)` (on CPU OAM writes and at DMA start/end) caps the next walk via
 // `last_change`. The per-line sprite list is built from `buf` at mode-2-END.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OamReader {
     // posbuf_: Y at even index, X at odd index, for each of 40 sprites.
+    #[serde(with = "serde_bytes")]
     buf: [u8; 2 * OAM_SPRITE_COUNT],
     // lsbuf_: per-sprite large-size flag.
+    #[serde(with = "self::bool40", default = "scan_slot_large_default")]
     lsbuf: [bool; OAM_SPRITE_COUNT],
     // lu_: cc of the last update (the position-walk anchor), in PPU `abs_cc`.
     lu: u64,
@@ -536,6 +538,7 @@ pub struct OamReader {
     // sample). Ghost slots read their tile/attributes from the live
     // progressively-written OAM (`ppu_read_oam_live`) instead of the CPU view
     // (0xFF during DMA) — on hardware that fetch sees the in-flight DMA data.
+    #[serde(with = "self::bool40", default = "scan_slot_large_default")]
     ghost_slot: [bool; OAM_SPRITE_COUNT],
 }
 
@@ -549,6 +552,34 @@ const OAMDMA_CHANGE_CC_OFFSET: u32 = 3;
 
 fn scan_slot_large_default() -> [bool; OAM_SPRITE_COUNT] {
     [false; OAM_SPRITE_COUNT]
+}
+
+// serde derive stops at 32-element arrays; the per-sprite `[bool; 40]` flags
+// (OAM_SPRITE_COUNT == 40) are packed into a u64 bitmask for savestates.
+pub(crate) mod bool40 {
+    use super::OAM_SPRITE_COUNT;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &[bool; OAM_SPRITE_COUNT], s: S) -> Result<S::Ok, S::Error> {
+        let mut mask: u64 = 0;
+        for (i, &b) in v.iter().enumerate() {
+            if b {
+                mask |= 1u64 << i;
+            }
+        }
+        mask.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<[bool; OAM_SPRITE_COUNT], D::Error> {
+        let mask = u64::deserialize(d)?;
+        let mut out = [false; OAM_SPRITE_COUNT];
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = (mask & (1u64 << i)) != 0;
+        }
+        Ok(out)
+    }
 }
 
 impl Default for OamReader {
@@ -834,8 +865,11 @@ pub struct Ppu {
     // Lazy OAM Y/X snapshot (Gambatte SpriteMapper::OamReader). Drives sprite
     // visibility so an OAM-DMA overlapping mode-2 retroactively zeroes positions
     // sampled inside the DMA-disabled window. Fed by `oam_change`/`oam_update`.
-    // Not serialized; re-seeded on load via `oam_reader_seeded == false`.
-    #[serde(skip, default)]
+    // Serialized so a mid-session savestate round-trips the sprite snapshot.
+    // Was `#[serde(skip)]`: a restored machine then scanned an all-zero Y/X
+    // buffer and dropped every sprite (the rewind "sprites vanish" bug). A
+    // legacy state lacking this key loads the default (empty) snapshot.
+    #[serde(default)]
     oam_reader: OamReader,
     // Tracks the previous-dot OAM-DMA "writing" state so the PPU can fire the
     // OamReader `change` (source toggle) on DMA start/end edges.
@@ -846,7 +880,8 @@ pub struct Ppu {
     oam_reader_seeded: bool,
     // Per-slot OBJ size recorded by the incremental mode-2 scan, reused by the
     // snapshot rebuild so the calibrated size-latch timing is preserved.
-    #[serde(skip, default = "scan_slot_large_default")]
+    // Serialized so the current line's per-sprite height round-trips a savestate.
+    #[serde(with = "self::bool40", default = "scan_slot_large_default")]
     scan_slot_large: [bool; OAM_SPRITE_COUNT],
     #[serde(default)]
     next_sprite_fetch_index: usize,
