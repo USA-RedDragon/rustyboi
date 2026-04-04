@@ -100,7 +100,12 @@ pub struct Ports {
 
 /// The frontend-agnostic emulator session.
 pub struct Session {
-    gb: GB,
+    // Boxed so the ~207 KB machine (four inline framebuffers) stays heap-
+    // resident: only an 8-byte pointer is ever moved on construction/ownership
+    // transfer. Moving it by value overflowed the small Android `android_main`
+    // thread stack (SIGSEGV). Hot emulation paths are unaffected — `gb()`/
+    // `gb_mut()` still hand out `&GB`/`&mut GB` via deref coercion.
+    gb: Box<GB>,
     config: Config,
     ports: Ports,
     cheats: CheatSet,
@@ -141,7 +146,7 @@ impl Session {
     /// [`rustyboi_core_lib::movie::sha256`]); it keys savestate slots and binds
     /// movies. Pass all-zero for a no-cartridge session.
     pub fn new(config: Config, ports: Ports, rom_id: [u8; 32]) -> Session {
-        let gb = GB::new(config.hardware);
+        let gb = Box::new(GB::new(config.hardware));
         Self::with_gb(gb, config, ports, rom_id)
     }
 
@@ -149,7 +154,7 @@ impl Session {
     /// skipped, at whatever state the caller wants frame 0 to be). Installs the
     /// audio capture sink and applies any Game Genie ROM patches from cheats
     /// (none yet at construction, but keeps the invariant).
-    pub fn with_gb(mut gb: GB, config: Config, ports: Ports, rom_id: [u8; 32]) -> Session {
+    pub fn with_gb(mut gb: Box<GB>, config: Config, ports: Ports, rom_id: [u8; 32]) -> Session {
         let audio_buf: SampleBuf = Arc::new(Mutex::new(Vec::new()));
         // enable_audio only errors if a sink was already installed or start()
         // fails; our CaptureSink::start is infallible and gb is fresh here.
@@ -264,7 +269,7 @@ impl Session {
                 // A previous pending snapshot the platform never drained would
                 // be overwritten; the platform drains every frame so this is a
                 // worst-case single-frame skip, never a leak.
-                self.pending_snapshot = Some((self.frame_count, self.gb.clone()));
+                self.pending_snapshot = Some((self.frame_count, (*self.gb).clone()));
             } else if let Ok(state) = self.gb.to_state_bytes() {
                 self.rewind.push(self.frame_count, state);
             }
@@ -285,7 +290,7 @@ impl Session {
     pub fn replace_machine(&mut self, mut gb: GB, rom_id: [u8; 32]) {
         let _ = gb.enable_audio(Box::new(CaptureSink::new(self.audio_buf.clone())));
         self.cheats.apply_rom_patches(&mut gb);
-        self.gb = gb;
+        self.gb = Box::new(gb);
         self.rom_id = rom_id;
         self.frame_count = 0;
         self.rewind.clear();
@@ -414,7 +419,7 @@ impl Session {
         let mut gb = GB::from_state_bytes(state).map_err(|e| SessionError::State(e.to_string()))?;
         let _ = gb.enable_audio(Box::new(CaptureSink::new(self.audio_buf.clone())));
         self.cheats.apply_rom_patches(&mut gb);
-        self.gb = gb;
+        self.gb = Box::new(gb);
         Ok(())
     }
 
@@ -556,7 +561,7 @@ impl Session {
         gb.skip_bios();
         let _ = gb.enable_audio(Box::new(CaptureSink::new(self.audio_buf.clone())));
         self.cheats.apply_rom_patches(&mut gb);
-        self.gb = gb;
+        self.gb = Box::new(gb);
         Ok(())
     }
 
