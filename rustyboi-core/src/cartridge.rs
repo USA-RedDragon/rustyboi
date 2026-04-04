@@ -304,7 +304,13 @@ fn serde_cam_regs() -> Vec<u8> {
 
 #[derive(Serialize, Deserialize)]
 pub struct Cartridge {
-    // ROM data - all banks
+    // ROM data - all banks. Read-only (never mutated after construction) and
+    // potentially multi-MB, so it is kept OUT of savestates: serializing it into
+    // every rewind-ring snapshot would be fatal. The frontend re-attaches it via
+    // `attach_rom` after a state load from the already-resident ROM bytes; every
+    // field that derives from it (`rom_banks`, `cartridge_type`, `mbc1_multicart`,
+    // `unl_mapper`, `cgb_support`) DOES serialize, so bank math survives the load.
+    #[serde(skip, default)]
     rom_data: Vec<u8>,
     // External RAM data - all banks
     ram_data: Vec<u8>,
@@ -1337,6 +1343,35 @@ impl Cartridge {
         // only on the deterministic cycle-derived tick.
 
         Ok(cartridge)
+    }
+
+    /// Clone the raw ROM image (all banks, already padded to `rom_banks`) out of
+    /// a live cartridge so it can be re-attached to a savestate-restored one. The
+    /// ROM is `#[serde(skip)]`, so this is how a load path carries the ROM across.
+    pub fn detach_rom(&self) -> Vec<u8> {
+        self.rom_data.clone()
+    }
+
+    /// Re-attach the ROM image after a savestate load (where `rom_data` was
+    /// skipped). Pads/truncates to the serialized `rom_banks * 0x4000` exactly as
+    /// the constructors do, so the already-restored bank registers index the same
+    /// bytes. All other runtime state (RAM, bank regs, RTC) is already present
+    /// from deserialize; this only refills the read-only ROM.
+    pub fn attach_rom(&mut self, rom: Vec<u8>) {
+        let expected = self.rom_banks * 0x4000;
+        self.rom_data = if rom.len() >= expected {
+            rom[..expected].to_vec()
+        } else {
+            let mut padded = rom;
+            padded.resize(expected, 0xFF);
+            padded
+        };
+    }
+
+    /// Whether the ROM image is currently attached (present after construction or
+    /// `attach_rom`; empty right after a savestate deserialize).
+    pub fn has_rom(&self) -> bool {
+        !self.rom_data.is_empty()
     }
 
     fn get_cartridge_type(&self) -> CartridgeType {

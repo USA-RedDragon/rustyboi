@@ -29,13 +29,22 @@ pub fn run() -> Result<(), PlatformError> {
 
         let mut gb = Box::new(gb::GB::new(config.hardware));
 
+        let from_state = config.state.is_some();
         if let Some(state) = config.state.as_ref() {
             *gb = gb::GB::from_state_file(state).expect("Failed to load state file");
         }
 
         if let Some(rom) = config.rom.as_ref() {
             let cartridge = cartridge::Cartridge::load(rom).expect("Failed to load ROM file");
-            gb.insert(cartridge);
+            // When resuming a savestate the cartridge's RUNTIME state (RAM/bank
+            // regs/RTC) came back through serde but its ROM image (`rom_data`) was
+            // skipped; re-attach only the ROM so that runtime state is preserved.
+            // `insert`-ing a fresh cart here would wipe it back to power-on.
+            if from_state && gb.cartridge_needs_rom() {
+                gb.reattach_rom(&cartridge.detach_rom());
+            } else {
+                gb.insert(cartridge);
+            }
         }
 
         if let Some(bios) = config.bios.as_ref() {

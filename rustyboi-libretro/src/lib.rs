@@ -850,6 +850,15 @@ impl Core for RustyboiCore {
         };
         match GB::from_state_bytes(payload) {
             Ok(mut gb) => {
+                // The savestate carries cartridge RUNTIME state but not its ROM
+                // image (`rom_data` is skipped); re-attach it from the still-live
+                // machine (a load always resumes the same loaded ROM). Without it
+                // the restored machine open-buses the wrong bank.
+                if gb.cartridge_needs_rom()
+                    && let Some(rom) = self.gb.as_ref().and_then(|g| g.detach_rom_bytes())
+                {
+                    gb.reattach_rom(&rom);
+                }
                 // Audio sink isn't serialized; re-attach so sound resumes.
                 let _ = gb.enable_audio(Box::new(self.audio.clone()));
                 if let Some(cart) = gb.cartridge_mut() {

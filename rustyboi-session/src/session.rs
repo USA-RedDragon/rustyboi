@@ -416,9 +416,18 @@ impl Session {
     }
 
     /// Replace the current `GB` from a raw savestate blob, re-installing the
-    /// audio sink and re-applying Game Genie ROM patches.
+    /// audio sink and re-applying Game Genie ROM patches. The savestate holds the
+    /// cartridge's RUNTIME state (RAM/bank regs/RTC) but NOT its ROM image, so the
+    /// ROM is re-attached from the currently-live machine (rewind/quickload/movie
+    /// always resume the same ROM); without it the restored machine open-buses the
+    /// wrong bank and bricks.
     fn restore_state(&mut self, state: &[u8]) -> Result<(), SessionError> {
         let mut gb = GB::from_state_bytes(state).map_err(|e| SessionError::State(e.to_string()))?;
+        if gb.cartridge_needs_rom()
+            && let Some(rom) = self.gb.detach_rom_bytes()
+        {
+            gb.reattach_rom(&rom);
+        }
         let _ = gb.enable_audio(Box::new(CaptureSink::new(self.audio_buf.clone())));
         self.cheats.apply_rom_patches(&mut gb);
         self.gb = Box::new(gb);
