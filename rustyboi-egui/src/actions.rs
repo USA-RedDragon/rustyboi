@@ -1,3 +1,4 @@
+#[derive(Debug)]
 pub enum FileData {
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     Path(std::path::PathBuf),
@@ -73,6 +74,7 @@ impl Default for SessionUiState {
     }
 }
 
+#[derive(Debug)]
 pub enum GuiAction {
     Exit,
     SaveState(std::path::PathBuf),
