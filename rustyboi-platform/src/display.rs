@@ -28,7 +28,11 @@ use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::WindowExtWebSys;
 
+// Used by the desktop + wasm window sizing; the Android entry sizes to the
+// native surface, so these are unreferenced there.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 const WIDTH: u32 = 160;
+#[cfg_attr(target_os = "android", allow(dead_code))]
 const HEIGHT: u32 = 144;
 
 /// GPU + UI state that is (re)created when a rendering surface appears and torn

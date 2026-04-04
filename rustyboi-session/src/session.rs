@@ -129,8 +129,10 @@ pub struct Session {
     /// WASM / library path keeps its self-contained inline capture.
     rewind_offloaded: bool,
     /// A cheap clone snapshot captured this frame in offloaded mode, waiting to
-    /// be picked up by the platform worker. `(frame_index, cloned_gb)`.
-    pending_snapshot: Option<(u64, GB)>,
+    /// be picked up by the platform worker. `(frame_index, cloned_gb)`. Boxed so
+    /// this `Option` does not embed a full ~207 KB `GB` inline in every
+    /// `Session` (which bloated `App` by value and overflowed Android's stack).
+    pending_snapshot: Option<(u64, Box<GB>)>,
 
     /// Shared audio capture buffer; the installed `CaptureSink` writes here and
     /// `run_frame` drains it.
@@ -269,7 +271,7 @@ impl Session {
                 // A previous pending snapshot the platform never drained would
                 // be overwritten; the platform drains every frame so this is a
                 // worst-case single-frame skip, never a leak.
-                self.pending_snapshot = Some((self.frame_count, (*self.gb).clone()));
+                self.pending_snapshot = Some((self.frame_count, self.gb.clone()));
             } else if let Ok(state) = self.gb.to_state_bytes() {
                 self.rewind.push(self.frame_count, state);
             }
@@ -476,7 +478,7 @@ impl Session {
     /// (via [`rustyboi_core_lib::gb::GB::to_state_bytes`]) and feeds the result
     /// back with [`Session::push_rewind_bytes`]. `None` when no capture was due
     /// or not in offloaded mode.
-    pub fn take_pending_snapshot(&mut self) -> Option<(u64, GB)> {
+    pub fn take_pending_snapshot(&mut self) -> Option<(u64, Box<GB>)> {
         self.pending_snapshot.take()
     }
 
