@@ -1374,6 +1374,7 @@ impl Mmio {
     /// cartridge clock (the CPU M-clock), which doubles in CGB double-speed
     /// mode, so its span is scaled accordingly. No-op for carts without a
     /// peripheral clock.
+    #[inline]
     pub fn tick_rtc(&mut self, cycles: u64) {
         if !self.cart_has_clock {
             return;
@@ -1478,6 +1479,7 @@ impl Mmio {
 
     /// Count down the JOYP select-write IRQ filter delay (one call per dot)
     /// and raise the IF bit when it elapses. See `joypad_irq_delay`.
+    #[inline]
     pub fn step_joypad_irq_delay(&mut self) {
         if self.joypad_irq_delay > 0 {
             self.joypad_irq_delay -= 1;
@@ -1487,7 +1489,20 @@ impl Mmio {
         }
     }
 
+    #[inline]
     pub fn step_serial(&mut self) {
+        // Fast path (the common case: serial idle, no link peer): inlined into
+        // the per-dot loop, no wasm call. Serial::step is a no-op while no
+        // transfer is active; with no external-clock peer there is nothing to
+        // poll either. The active/peer work is outlined (cold).
+        if !self.serial.is_active() && !self.serial_device.drives_external_clock() {
+            return;
+        }
+        self.step_serial_slow();
+    }
+
+    #[cold]
+    fn step_serial_slow(&mut self) {
         // Serial now runs on the master cc (`abs_cc`), the SAME clock the timer
         // DIV/TIMA and APU derive from — no separate `cpu_t_phase` parallel
         // clock (M8 serial merge). `abs_cc` is advanced at the start of the
@@ -2122,6 +2137,7 @@ impl Mmio {
 
     /// Drain the deferred-HDMA write buffer one dot. When the delay expires the
     /// resolved bytes are committed to VRAM in order.
+    #[inline]
     pub fn step_hdma_deferred(&mut self) {
         if self.hdma_pending_writes.is_empty() {
             return;
@@ -3555,7 +3571,19 @@ impl Mmio {
         self.io_registers.write(REG_DMA, value);
     }
 
+    #[inline]
     pub fn step_dma(&mut self) {
+        // Fast path (the common case: no OAM-DMA in flight): inlined into the
+        // per-dot loop so no wasm call is made. Firefox pays a real cost per
+        // wasm call on the ~4M-dots/sec hot path; the cold work is outlined.
+        if self.oam_dma_stall_suppress == 0 && !self.dma_active {
+            return;
+        }
+        self.step_dma_slow();
+    }
+
+    #[cold]
+    fn step_dma_slow(&mut self) {
         // During the GDMA/HDMA stall the OAM-DMA was already advanced inside the
         // transfer loop (Gambatte folds it into `Memory::dma`); skip the dots that
         // re-tick the same transfer time so the OAM-DMA is not double-advanced.
@@ -4366,6 +4394,7 @@ impl Mmio {
     }
 
     // CGB Speed switching methods
+    #[inline]
     pub fn is_double_speed_mode(&self) -> bool {
         self.cgb_features_enabled && self.key1_current_speed
     }
@@ -4540,11 +4569,13 @@ impl Mmio {
     }
 
     /// The persistent CPU T-cycle phase (survives instruction boundaries).
+    #[inline]
     pub fn cpu_t_phase(&self) -> u64 {
         self.cpu_t_phase
     }
 
     /// Advance the persistent CPU T-cycle phase by one.
+    #[inline]
     pub fn advance_cpu_t_phase(&mut self) {
         self.cpu_t_phase = self.cpu_t_phase.wrapping_add(1);
     }
