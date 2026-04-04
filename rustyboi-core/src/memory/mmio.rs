@@ -989,6 +989,17 @@ impl Mmio {
         self.cart_has_clock = self.cartridge.as_ref().is_some_and(|c| c.needs_clock_tick());
     }
 
+    /// Test-only: re-attach the cartridge (+ boot ROM) from another Mmio after a
+    /// savestate load, mirroring the frontend/session re-insert of the live ROM.
+    /// The `cartridge` field is `#[serde(skip)]`, so a serde-restored machine has
+    /// no ROM until the frontend supplies it.
+    #[cfg(test)]
+    pub fn debug_graft_cartridge(&mut self, src: &Mmio) {
+        self.cartridge = src.cartridge.clone();
+        self.bios = src.bios.clone();
+        self.resync_cart_flags();
+    }
+
     pub fn set_cgb_features_enabled(&mut self, enabled: bool) {
         self.cgb_features_enabled = enabled;
     }

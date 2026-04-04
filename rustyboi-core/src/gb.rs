@@ -1672,3 +1672,124 @@ mod stop_tests {
         assert!(gb.mmio.master_cc() > cc, "world keeps running through the window");
     }
 }
+
+#[cfg(test)]
+mod savestate_roundtrip_tests {
+    //! A savestate must fully round-trip the machine — including the PPU's live
+    //! sprite pipeline (OamReader snapshot + per-slot OBJ size) and OAM — so a
+    //! mid-frame restore resumes with identical output and no sprite loss. This
+    //! is the regression for the rewind "sprites vanish / PPU corrupts" bug: the
+    //! OamReader snapshot was `#[serde(skip)]`, so a restored state scanned an
+    //! all-zero sprite buffer.
+    use super::*;
+
+    fn frame_bytes(f: &Frame) -> Vec<u8> {
+        match f {
+            Frame::Monochrome(b) => b.to_vec(),
+            Frame::Color(b) => b.to_vec(),
+        }
+    }
+
+    /// Load a ROM into a booted GB, or `None` if the ROM file is absent (the
+    /// gb-test-roms submodule is optional in some checkouts).
+    fn gb_from_rom(path: &str, hardware: Hardware) -> Option<GB> {
+        let rom = fs::read(path).ok()?;
+        let mut gb = GB::new(hardware);
+        gb.insert(cartridge::Cartridge::from_bytes(&rom).ok()?);
+        gb.skip_bios();
+        Some(gb)
+    }
+
+    /// Save the state mid-frame (partway through a scanline, LCD on with sprites
+    /// on screen), restore into a fresh machine, and prove the restored machine
+    /// produces byte-identical frames for several frames afterward. Before the
+    /// fix the OamReader snapshot was dropped, so the restored machine lost every
+    /// sprite on its next mode-2 scan.
+    #[test]
+    fn dmg_acid2_midframe_state_roundtrips_sprites() {
+        // The GB struct holds several inline framebuffers (~250KB); a few live
+        // copies plus serde_json recursion exceed a test thread's default stack.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(dmg_acid2_midframe_state_roundtrips_sprites_inner)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn dmg_acid2_midframe_state_roundtrips_sprites_inner() {
+        let Some(mut gb) = gb_from_rom("../gb-test-roms/dmg-acid2/dmg-acid2.gb", Hardware::DMG)
+        else {
+            eprintln!("skipping: dmg-acid2.gb not present");
+            return;
+        };
+
+        // Settle the reference image (draws BG + sprites).
+        for _ in 0..30 {
+            gb.run_until_frame(false);
+        }
+        // Advance partway into a scanline so the save lands mid-render with the
+        // sprite pipeline (OamReader snapshot, scan_slot_large) holding live
+        // state — the state that used to be dropped, blanking every sprite.
+        gb.run_until_frame(false);
+        for _ in 0..2000 {
+            gb.step_instruction(false);
+        }
+
+        let state = gb.to_state_bytes().expect("serialize");
+
+        // The `cartridge` field is `#[serde(skip)]` (the multi-MB ROM stays out
+        // of the state), so the frontend re-attaches the live ROM after a load.
+        // Model that here; without it the machine has no ROM and cannot run.
+        let restore = |state: &[u8]| -> GB {
+            let mut g = GB::from_state_bytes(state).expect("deserialize");
+            g.mmio.debug_graft_cartridge(&gb.mmio);
+            g
+        };
+
+        // Run the original and a freshly-restored copy in lockstep; every frame
+        // must match, proving the restored PPU/OAM sprite pipeline resumes
+        // identically. Regression guard for the vanished-sprites bug (OamReader /
+        // scan_slot_large were `#[serde(skip)]`, so the restored machine scanned
+        // an all-zero sprite buffer and lost every sprite).
+        let mut restored = restore(&state);
+        let mut any_content = false;
+        for frame in 0..10 {
+            let orig = frame_bytes(&gb.run_until_frame(false).0);
+            let redo = frame_bytes(&restored.run_until_frame(false).0);
+            assert_eq!(orig, redo, "frame {frame} differs after state restore");
+            if orig.iter().any(|&p| p != orig[0]) {
+                any_content = true;
+            }
+        }
+        assert!(any_content, "test rendered a blank frame (no content)");
+    }
+
+    /// OAM bytes must round-trip verbatim through a savestate (the sprite table
+    /// itself, independent of the render pipeline).
+    #[test]
+    fn oam_bytes_roundtrip() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(oam_bytes_roundtrip_inner)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn oam_bytes_roundtrip_inner() {
+        let Some(mut gb) = gb_from_rom("../gb-test-roms/dmg-acid2/dmg-acid2.gb", Hardware::DMG)
+        else {
+            eprintln!("skipping: dmg-acid2.gb not present");
+            return;
+        };
+        for _ in 0..30 {
+            gb.run_until_frame(false);
+        }
+        let oam_before: Vec<u8> = (0xFE00..=0xFE9F).map(|a| gb.read_memory(a)).collect();
+        let state = gb.to_state_bytes().expect("serialize");
+        let restored = GB::from_state_bytes(&state).expect("deserialize");
+        let oam_after: Vec<u8> = (0xFE00..=0xFE9F).map(|a| restored.read_memory(a)).collect();
+        assert_eq!(oam_before, oam_after, "OAM not preserved across savestate");
+    }
+}
