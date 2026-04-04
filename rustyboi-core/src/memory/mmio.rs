@@ -148,7 +148,13 @@ pub struct Mmio {
     // the overlay read path maps 0x000-0x0FF (+ 0x200-0x8FF for CGB) to these.
     #[serde(skip, default)]
     bios: Option<Vec<u8>>,
-    #[serde(skip, default)]
+    // The cartridge's RUNTIME state (RAM, bank registers, RTC, ...) is serialized
+    // so a state fully round-trips the MBC; the multi-MB read-only ROM image is
+    // held out via `Cartridge::rom_data` being `#[serde(skip)]` and re-attached on
+    // load (`GB::reattach_rom`). Old states predating this had `cartridge` skipped
+    // entirely; they deserialize to `None` here and fall back to a reattached
+    // fresh cart, matching the pre-change behavior (`#[serde(default)]`).
+    #[serde(default)]
     cartridge: Option<cartridge::Cartridge>,
     input: input::Input,
     vram: memory::Memory<VRAM_START, VRAM_SIZE>,
@@ -315,7 +321,9 @@ pub struct Mmio {
     hdma_req_pending: bool,
     // CPU-cycle stall owed for HDMA/GDMA blocks already transferred; the CPU
     // idles these cycles (peripherals keep ticking) before its next fetch.
-    #[serde(skip, default)]
+    // Serialized (additive `default`): owed cycles can straddle an instruction
+    // boundary, so a state saved with a stall pending must resume with it.
+    #[serde(default)]
     pending_dma_stall: u32,
     // C7 (DMA prefetch absorption): Gambatte runs GDMA/HDMA as `intevent_dma` with
     // a preceding `Interrupter::prefetch` that fetches the next opcode at the dma
@@ -348,7 +356,9 @@ pub struct Mmio {
     // joy_interrupt_manual_delay (identical on DMG/GBP/CGB) dispatches with
     // A=0x30 - the ISR enters after the `ld a,$30` following the trigger
     // write, never right at the write instruction's own boundary.
-    #[serde(skip, default)]
+    // Serialized (additive `default`): the filter delay counts down across
+    // instruction boundaries, so a state saved mid-delay must resume it.
+    #[serde(default)]
     joypad_irq_delay: u32,
     // OAM-DMA advance suppression for the GDMA/HDMA stall window. `execute_gdma`
     // / `run_hdma_block` fold the OAM-DMA's M-cycle advances INTO the transfer
@@ -357,14 +367,19 @@ pub struct Mmio {
     // `step_dma` would advance the OAM-DMA a SECOND time. This counts those
     // already-folded dots so `step_dma` skips them (mirrors Gambatte freezing
     // `lastOamDmaUpdate_` at its post-loop value until the next `updateOamDma`).
-    #[serde(skip, default)]
+    // Serialized (additive `default`): the suppression window drains across the
+    // CPU stall, spanning instruction boundaries.
+    #[serde(default)]
     oam_dma_stall_suppress: u32,
     // Allow the OAM-DMA to advance this many M-cycles at HALT entry before the
     // freeze takes hold (Gambatte `Memory::halt` runs `updateOamDma(cc + 4)`
     // before halting, so the HALT instruction's own M-cycle moves the OAM-DMA;
     // subsequent halt M-cycles freeze it). Set by `on_cpu_halt`, decremented by
-    // `step_dma` advances.
-    #[serde(skip, default)]
+    // `step_dma` advances. Serialized (additive `default`): the grace persists
+    // across the whole HALT window, so a state saved mid-HALT with an armed grace
+    // must resume it — otherwise the woken OAM-DMA advances one M-cycle off (proven
+    // by the mid-HALT round-trip test).
+    #[serde(default)]
     halt_oam_grace: u8,
     // True while the CPU is parked in the STOP speed-switch unhalt window
     // (0x20000 cycles). Gambatte's `Memory::stop` `intreq_.halt()`s for this
@@ -372,7 +387,9 @@ pub struct Mmio {
     // `lastOamDmaUpdate_` WITHOUT moving `oamDmaPos_`). rustyboi drains the
     // window via `stop_unhalt_cycles` without setting `cpu_halted`, so the
     // OAM-DMA must be frozen here too. Set on STOP entry, cleared at unhalt.
-    #[serde(skip, default)]
+    // Serialized (additive `default`): the freeze persists across the whole STOP
+    // window, spanning instruction boundaries.
+    #[serde(default)]
     oam_dma_stop_freeze: bool,
     // Mirror of the HALT-entry `halt_oam_grace`, but for the STOP speed-switch.
     // Gambatte's `Memory::stop` runs `updateOamDma(cc + 4)` BEFORE `intreq_.halt()`
@@ -384,7 +401,9 @@ pub struct Mmio {
     // of the completed OAM (oamdma_late_speedchange_stat_2: the line's left-edge
     // sprite goes unmapped, m0Time -11, STAT read mode 0 where Gambatte reads
     // mode 3). Set on STOP entry alongside the freeze; consumed in `step_dma`.
-    #[serde(skip, default)]
+    // Serialized (additive `default`): persists across the STOP window like the
+    // freeze it pairs with.
+    #[serde(default)]
     stop_oam_grace: u8,
     // Mirrors Gambatte's `haltHdmaState_`.
     #[serde(default)]
@@ -500,7 +519,9 @@ pub struct Mmio {
     // HDMA that the woken stream will fire only after the wake. On real
     // hardware those streams stall too; modeling that requires re-anchoring
     // the whole DMA web (documented debt, no oracle currently distinguishes).
-    #[serde(skip, default)]
+    // Serialized (additive `default`) so a state saved after the ROM first
+    // touched FF55 preserves the sticky exactly rather than self-healing.
+    #[serde(default)]
     hdma_machinery_used: bool,
 
     // Sticky: LCDC (FF40) written during mode 3 — the ROM races LCDC against
@@ -508,8 +529,8 @@ pub struct Mmio {
     // lcdc_b4_exact, wg journal) is co-tuned to the un-stalled halt-woken
     // write grid and its glitch targets cannot be re-anchored post-hoc, so
     // such ROMs keep the legacy CGB LCD halt-exit timing (same debt class as
-    // `hdma_machinery_used`).
-    #[serde(skip, default)]
+    // `hdma_machinery_used`). Serialized (additive `default`) for exactness.
+    #[serde(default)]
     m3_lcdc_write_seen: bool,
 
     // FAITHFUL EVENTCC: the cc at which the most-recent still-unserviced mode-0
@@ -989,14 +1010,60 @@ impl Mmio {
         self.cart_has_clock = self.cartridge.as_ref().is_some_and(|c| c.needs_clock_tick());
     }
 
-    /// Test-only: re-attach the cartridge (+ boot ROM) from another Mmio after a
-    /// savestate load, mirroring the frontend/session re-insert of the live ROM.
-    /// The `cartridge` field is `#[serde(skip)]`, so a serde-restored machine has
-    /// no ROM until the frontend supplies it.
+    /// Re-attach the ROM image to the serde-restored cartridge (whose `rom_data`
+    /// is `#[serde(skip)]`). Returns `false` when the state carried no cartridge
+    /// (old pre-cartridge-serialize state, or truly no cart) so the caller can
+    /// fall back to a fresh insert. Re-derives `cart_has_clock` after attaching.
+    pub fn reattach_rom(&mut self, rom: &[u8]) -> bool {
+        match self.cartridge.as_mut() {
+            Some(cart) => {
+                cart.attach_rom(rom.to_vec());
+                self.resync_cart_flags();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether a serde-restored cartridge is present but still missing its ROM
+    /// image (the state carried cartridge runtime state; the ROM must be
+    /// re-attached via `reattach_rom`).
+    pub fn cartridge_needs_rom(&self) -> bool {
+        self.cartridge.as_ref().is_some_and(|c| !c.has_rom())
+    }
+
+    /// Re-seed the sub-module hardware-revision flags (timer AGB, APU
+    /// revision/glitch gates) that are `#[serde(skip)]` on their sub-structs and
+    /// would otherwise revert to default-CGB after a load. Pure re-application of
+    /// the console's fixed hardware identity (`is_agb`/`cgb_de`, which DO survive
+    /// at this level) via the existing setters — must not change emulation.
+    pub fn reseed_hardware_flags(&mut self, hw: crate::gb::Hardware) {
+        self.set_agb(hw.is_agb());
+        self.set_apu_cgb_de(hw.is_cgb_d_or_later());
+        self.set_apu_cgb_le_b(hw.is_cgb_b_or_earlier());
+        self.set_apu_cgb_b(matches!(hw, crate::gb::Hardware::CGBB));
+        self.set_apu_pcm_c_glitch(matches!(
+            hw,
+            crate::gb::Hardware::CGB0 | crate::gb::Hardware::CGBB
+        ));
+        self.set_apu_step_back_parity(matches!(
+            hw,
+            crate::gb::Hardware::CGB0 | crate::gb::Hardware::CGBB | crate::gb::Hardware::AGB
+        ));
+        self.set_serial_cgb(hw.is_cgb_like());
+    }
+
+    /// Test-only: re-attach the ROM (+ boot ROM) from another Mmio after a
+    /// savestate load, mirroring the frontend/session re-attach of the live ROM.
+    /// The serde-restored cartridge carries its runtime state but not its ROM
+    /// image (`Cartridge::rom_data` is `#[serde(skip)]`); this supplies it from a
+    /// live machine's cartridge exactly as the frontends do.
     #[cfg(test)]
     pub fn debug_graft_cartridge(&mut self, src: &Mmio) {
-        self.cartridge = src.cartridge.clone();
         self.bios = src.bios.clone();
+        if let Some(rom) = src.cartridge.as_ref().filter(|c| c.has_rom()).map(|c| c.detach_rom()) {
+            self.reattach_rom(&rom);
+        }
         self.resync_cart_flags();
     }
 
@@ -2347,6 +2414,15 @@ impl Mmio {
     /// period-edge `flagHdmaReq` resumes (video.h:41).
     pub fn clear_cpu_halt(&mut self) {
         self.cpu_halted = false;
+    }
+
+    /// Re-sync the two CPU-mirror flags after a savestate load from their
+    /// serialized sources (`cpu.halted` / `cpu.stop_unhalt_cycles`). Both are
+    /// `#[serde(skip)]` here, so without this a state saved mid-HALT or mid-STOP
+    /// resumes with the mirror cleared. Pure re-seed of derived state.
+    pub fn sync_cpu_mirror_flags(&mut self, cpu_halted: bool, in_stop_window: bool) {
+        self.cpu_halted = cpu_halted;
+        self.in_stop_window = in_stop_window;
     }
 
     /// True while the CGB STOP speed-switch unhalt window is open (Gambatte

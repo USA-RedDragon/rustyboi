@@ -317,16 +317,26 @@ impl App {
         reload_rom: Option<(String, Vec<u8>)>,
     ) -> Result<(), String> {
         let mut gb = gb::GB::from_state_bytes(state).map_err(|e| e.to_string())?;
-        let mut rom_bytes = None;
-        if let Some((path, bytes)) = reload_rom {
-            match cartridge::Cartridge::from_bytes(&bytes) {
-                Ok(cart) => {
-                    gb.insert(cart);
-                    rom_bytes = Some(bytes);
-                    self.current_rom_path = Some(path);
-                }
-                Err(e) => {
-                    return Err(format!("failed to reattach ROM: {e}"));
+        // Prefer the ROM the caller supplied; else fall back to the already-loaded
+        // ROM bytes (a same-ROM reload has `reload_rom == None`).
+        let rom_bytes = reload_rom
+            .as_ref()
+            .map(|(_, b)| b.clone())
+            .or_else(|| self.rom_bytes.clone());
+        if let Some((path, _)) = &reload_rom {
+            self.current_rom_path = Some(path.clone());
+        }
+        if let Some(bytes) = rom_bytes.as_deref() {
+            // The savestate holds the cartridge's RUNTIME state (RAM/bank regs/RTC)
+            // but not its ROM image (`rom_data` is skipped). Re-attach the ROM to
+            // the restored cartridge to preserve that runtime state; only if the
+            // state carried NO cartridge (old pre-serialize state) build a fresh one.
+            if gb.cartridge_needs_rom() {
+                gb.reattach_rom(bytes);
+            } else {
+                match cartridge::Cartridge::from_bytes(bytes) {
+                    Ok(cart) => gb.insert(cart),
+                    Err(e) => return Err(format!("failed to reattach ROM: {e}")),
                 }
             }
         }
