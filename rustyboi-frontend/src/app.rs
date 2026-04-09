@@ -12,11 +12,15 @@
 
 use std::time::{Duration, Instant};
 
-use rustyboi_core_lib::{cartridge, gb, input, ppu};
-use rustyboi_session::{AbstractInput, GbButton, RunMode, Session};
+use rustyboi_core_lib::{gb, input, ppu};
+use rustyboi_session::action::FileData;
+use rustyboi_session::{AbstractInput, GbButton, RunMode, Session, SessionUiState};
+#[cfg(target_os = "android")]
+use rustyboi_session::UiAction;
 
-use rustyboi_egui_lib::actions::{GuiAction, HardwareChoice, SessionUiState};
+use rustyboi_egui_lib::actions::GuiAction;
 
+use crate::contract::{drive_action, Frontend, PauseHint};
 use crate::palette::ColorPalette;
 use crate::renderer::{GameFrame, Renderer, SourceSize};
 use crate::ui_host::{ExtraEvents, UiHost};
@@ -35,10 +39,16 @@ pub enum PlatformRequest {
     /// The UI requested a state save to an arbitrary path (File → Save State).
     /// The platform serializes and writes; the app hands over the bytes.
     SaveStateBytes { path: std::path::PathBuf, bytes: Vec<u8> },
+    /// The UI picked a file to load (ROM or savestate). The platform reads the
+    /// bytes (path on desktop, content on web/Android) and feeds them back via
+    /// [`App::finish_load_rom`] / [`App::finish_load_state`].
+    LoadFile(FileData),
     /// A status line to show the user.
     Status(String),
     /// An error to show the user.
     Error(String),
+    /// Clear the UI error overlay (a load succeeded / the error was dismissed).
+    ClearError,
     /// An Android ROM-library / SAF action the app can't service itself (it
     /// needs the JNI bridge + the library panel, both platform-owned). The
     /// platform matches these and drives `android_bridge` / `LibraryState`.
@@ -64,11 +74,10 @@ pub struct App {
     error_state: Option<String>,
     is_paused: bool,
 
-    // Debug stepping requests, consumed by `run_frame`.
+    // Debug single-step requests, consumed by `run_frame`. (Multi-step requests
+    // are session-owned now — set by `Session::apply`, drained in `run_frame`.)
     step_single_frame: bool,
     step_single_cycle: bool,
-    step_multiple_cycles: Option<u32>,
-    step_multiple_frames: Option<u32>,
 
     current_rom_path: Option<String>,
     current_bios_path: Option<String>,
@@ -77,8 +86,11 @@ pub struct App {
     rom_bytes: Option<Vec<u8>>,
 
     input: AbstractInput,
-    palette: ColorPalette,
-    sgb_border: bool,
+
+    /// Host requests accumulated while applying a UI action (drained by `draw`
+    /// and returned to the platform). The `Frontend` capability methods push
+    /// here; the platform performs them.
+    pending_requests: Vec<PlatformRequest>,
 
     // Pause bookkeeping (moved from the event loop): the user's explicit pause
     // vs. the transient menu-open pause.
@@ -107,13 +119,17 @@ impl App {
     /// `Renderer` are created separately by the platform and passed into
     /// [`App::draw`].
     pub fn new(
-        session: Session,
+        mut session: Session,
         palette: ColorPalette,
         rom_path: Option<String>,
         bios_path: Option<String>,
         rom_bytes: Option<Vec<u8>>,
         should_pause: bool,
     ) -> Self {
+        // Seed the session's presentation palette from the CLI/config choice so
+        // the shared `apply`/`ui_state` path renders from one source (no persist
+        // at startup — only a user SetPalette writes config).
+        session.init_palette_choice(palette.to_choice());
         let now = Instant::now();
         App {
             session,
@@ -122,14 +138,11 @@ impl App {
             is_paused: should_pause,
             step_single_frame: false,
             step_single_cycle: false,
-            step_multiple_cycles: None,
-            step_multiple_frames: None,
             current_rom_path: rom_path,
             current_bios_path: bios_path,
             rom_bytes,
             input: AbstractInput::none(),
-            palette,
-            sgb_border: true,
+            pending_requests: Vec::new(),
             user_paused: should_pause,
             manually_paused: should_pause,
             auto_paused_no_content: should_pause,
@@ -178,13 +191,9 @@ impl App {
 
     /// The content size (pre-scale) that should drive the window: the SGB
     /// composite size only when the border is actually being shown, else the
-    /// plain Game Boy screen. This is the fix for the SGB-window-too-large bug.
+    /// plain Game Boy screen. Delegates to the session (shared source of truth).
     pub fn content_size(&self) -> (u32, u32) {
-        if self.showing_sgb_border() {
-            (SourceSize::Sgb.dimensions().0, SourceSize::Sgb.dimensions().1)
-        } else {
-            (SourceSize::Gb.dimensions().0, SourceSize::Gb.dimensions().1)
-        }
+        self.session.content_size()
     }
 
     /// The chrome inset (menu bar + status panel) in logical points measured on
@@ -192,12 +201,6 @@ impl App {
     /// `content*scale + inset`. `(0, 0)` before the first frame.
     pub fn content_inset(&self) -> (f32, f32) {
         self.content_inset
-    }
-
-    /// True only when the border toggle is on AND the machine actually offers an
-    /// SGB composite this frame.
-    fn showing_sgb_border(&self) -> bool {
-        self.sgb_border && self.session.gb().sgb_composited_frame().is_some()
     }
 
     // --- input --------------------------------------------------------------
@@ -228,10 +231,7 @@ impl App {
     }
 
     pub fn toggle_fast_forward(&mut self) {
-        match self.session.mode() {
-            RunMode::FastForward(_) => self.session.set_mode(RunMode::Normal),
-            _ => self.session.fast_forward(),
-        }
+        self.session.toggle_fast_forward();
     }
 
     pub fn is_fast_forward(&self) -> bool {
@@ -276,13 +276,9 @@ impl App {
     /// desktop; web/Android pass bytes directly). `path` is the display/name for
     /// title + printer output (`None` for content-only sources).
     pub fn load_rom_bytes(&mut self, bytes: Vec<u8>, path: Option<String>) -> Result<(), String> {
-        let cartridge = cartridge::Cartridge::from_bytes(&bytes).map_err(|e| e.to_string())?;
-        let mut gb = gb::GB::new(self.session.hardware());
-        gb.insert(cartridge);
-        gb.skip_bios();
-        let rom_id = rustyboi_session::sha256(&bytes);
+        let rom_id = self.session.finish_load_rom(&bytes).map_err(|e| e.to_string())?;
+        let _ = rom_id;
         self.rom_bytes = Some(bytes);
-        self.session.replace_machine(gb, rom_id);
         self.current_rom_path = path;
         self.error_state = None;
         self.frame = None;
@@ -306,19 +302,18 @@ impl App {
         self.current_bios_path = path;
     }
 
-    /// Load a savestate from raw bytes, re-attaching the current ROM if
-    /// present. `reload_rom` supplies `(path, bytes)` for the ROM to reinsert
-    /// (the platform reads it from disk); `None` keeps no cartridge. BIOS
-    /// re-attachment (a filesystem read) is left to the platform, which calls
-    /// `gb_mut().load_bios(path)` afterwards using [`App::current_bios_path`].
+    /// Load a savestate from raw bytes, re-attaching the current ROM if present.
+    /// `reload_rom` supplies `(path, bytes)` for the ROM to reinsert (the
+    /// platform reads it from disk); `None` keeps the already-loaded ROM. The
+    /// core-side re-attach logic lives in the session; this wrapper keeps the
+    /// app's `rom_bytes` / path / pause bookkeeping in sync.
     pub fn load_state_bytes(
         &mut self,
         state: &[u8],
         reload_rom: Option<(String, Vec<u8>)>,
     ) -> Result<(), String> {
-        let mut gb = gb::GB::from_state_bytes(state).map_err(|e| e.to_string())?;
-        // Prefer the ROM the caller supplied; else fall back to the already-loaded
-        // ROM bytes (a same-ROM reload has `reload_rom == None`).
+        // Prefer the ROM the caller supplied; else keep the already-loaded bytes
+        // (a same-ROM reload has `reload_rom == None`).
         let rom_bytes = reload_rom
             .as_ref()
             .map(|(_, b)| b.clone())
@@ -326,24 +321,13 @@ impl App {
         if let Some((path, _)) = &reload_rom {
             self.current_rom_path = Some(path.clone());
         }
-        if let Some(bytes) = rom_bytes.as_deref() {
-            // The savestate holds the cartridge's RUNTIME state (RAM/bank regs/RTC)
-            // but not its ROM image (`rom_data` is skipped). Re-attach the ROM to
-            // the restored cartridge to preserve that runtime state; only if the
-            // state carried NO cartridge (old pre-serialize state) build a fresh one.
-            if gb.cartridge_needs_rom() {
-                gb.reattach_rom(bytes);
-            } else {
-                match cartridge::Cartridge::from_bytes(bytes) {
-                    Ok(cart) => gb.insert(cart),
-                    Err(e) => return Err(format!("failed to reattach ROM: {e}")),
-                }
-            }
-        }
-        let has_content = gb.has_rom() || gb.has_bios();
+        let reload_slice = reload_rom.as_ref().map(|(_, b)| b.as_slice());
         let rom_id = rom_bytes.as_deref().map(rustyboi_session::sha256).unwrap_or([0u8; 32]);
+        self.session
+            .finish_load_state(state, reload_slice, rom_id)
+            .map_err(|e| e.to_string())?;
+        let has_content = self.session.gb().has_rom() || self.session.gb().has_bios();
         self.rom_bytes = rom_bytes;
-        self.session.replace_machine(gb, rom_id);
         self.error_state = None;
         self.frame = None;
         if self.auto_paused_no_content && has_content {
@@ -359,103 +343,19 @@ impl App {
         self.session.gb().to_state_bytes().map_err(|e| e.to_string())
     }
 
-    /// Build a fresh, booted machine for the session's current hardware model,
-    /// carrying the current cartridge. Returns `(gb, rom_id)`. Constructing via
-    /// `GB::new(hardware)` re-applies every model-derived flag (CGB features,
-    /// SGB, MGB/AGB, PPU/APU revision gates) from the session's chosen hardware,
-    /// which an in-place `GB::reset` does not restore — see `restart`.
-    fn build_current_gb(&self) -> (gb::GB, [u8; 32]) {
-        let mut gb = gb::GB::new(self.session.hardware());
-        if let Some(bytes) = self.rom_bytes.as_deref()
-            && let Ok(cart) = cartridge::Cartridge::from_bytes(bytes)
-        {
-            gb.insert(cart);
-            gb.skip_bios();
-        }
-        let rom_id = self.rom_bytes.as_deref().map(rustyboi_session::sha256).unwrap_or([0u8; 32]);
-        (gb, rom_id)
-    }
-
-    fn set_hardware(&mut self, hardware: gb::Hardware) {
-        let mut cfg = self.session.config().clone();
-        cfg.hardware = hardware;
-        self.session.set_config(cfg);
-        let (gb, rom_id) = self.build_current_gb();
-        self.session.replace_machine(gb, rom_id);
-        self.error_state = None;
-        self.frame = None;
-        self.persist_config();
-    }
-
-    /// Power-cycle the current console. Rebuilds the machine from the session's
-    /// current hardware model + ROM rather than resetting in place, so every
-    /// user-configured setting is preserved: the hardware override, DMG palette,
-    /// SGB border, rewind tuning, cheats, and current ROM/BIOS all survive (they
-    /// live in the session config / `App`, none of which this touches). Only the
-    /// emulator run state is cleared.
-    fn restart(&mut self) {
-        let (gb, rom_id) = self.build_current_gb();
-        self.session.replace_machine(gb, rom_id);
-        self.session.clear_rewind();
-        self.error_state = None;
-        self.frame = None;
-        self.is_paused = false;
-        self.user_paused = false;
-        self.manually_paused = false;
-    }
-
-    fn set_palette(&mut self, palette: ColorPalette) {
-        self.palette = palette;
-        let mut cfg = self.session.config().clone();
-        cfg.dmg_palette = rustyboi_session::config::DmgPalette { shades: palette.get_rgba_colors() };
-        self.session.set_config(cfg);
-        self.persist_config();
-    }
-
-    fn set_rewind_enabled(&mut self, enabled: bool) {
-        let mut cfg = self.session.config().clone();
-        cfg.rewind.enabled = enabled;
-        self.session.set_config(cfg);
-        self.persist_config();
-    }
-
-    fn set_rewind_interval(&mut self, interval_frames: u32) {
-        let mut cfg = self.session.config().clone();
-        cfg.rewind.interval_frames = interval_frames.max(1);
-        self.session.set_config(cfg);
-        self.persist_config();
-    }
-
-    fn set_rewind_depth(&mut self, depth: usize) {
-        let mut cfg = self.session.config().clone();
-        cfg.rewind.depth = depth.max(1);
-        self.session.set_config(cfg);
-        self.persist_config();
-    }
-
-    fn persist_config(&mut self) {
-        if let Err(e) = self.session.save_config() {
-            eprintln!("Failed to save config: {e}");
-        }
-    }
-
     // --- UI state snapshot --------------------------------------------------
 
     fn ui_state(&self) -> SessionUiState {
         let cfg = self.session.config();
-        let hardware = match cfg.hardware {
-            gb::Hardware::DMG | gb::Hardware::MGB => HardwareChoice::Dmg,
-            gb::Hardware::SGB => HardwareChoice::Sgb,
-            _ => HardwareChoice::Cgb,
-        };
         SessionUiState {
-            hardware,
-            palette: self.palette.to_choice(),
+            hardware: self.session.hardware_choice(),
+            palette: self.session.palette(),
             rewind_enabled: cfg.rewind.enabled,
             rewind_interval_frames: cfg.rewind.interval_frames,
             rewind_depth: cfg.rewind.depth,
-            sgb_border: self.sgb_border,
+            sgb_border: self.session.sgb_border(),
             fast_forward: self.is_fast_forward(),
+            touch_controls: self.session.touch_controls(),
             slots: self.session.list_slots(),
         }
     }
@@ -466,7 +366,7 @@ impl App {
     /// uploads, preferring the SGB composite when the toggle is on and the
     /// machine offers one.
     fn present(&self) -> Option<GameFrame> {
-        if self.sgb_border
+        if self.session.sgb_border()
             && let Some(rgb) = self.session.gb().sgb_composited_frame()
         {
             let mut rgba = Vec::with_capacity((rgb.len() / 3) * 4);
@@ -476,9 +376,11 @@ impl App {
             return Some(GameFrame { size: SourceSize::Sgb, rgba });
         }
 
+        // The DMG presentation palette is session-owned; convert its choice.
+        let palette = ColorPalette::from_choice(self.session.palette());
         let gb_frame = self.frame.as_ref()?;
         let rgba = match gb_frame {
-            gb::Frame::Monochrome(data) => convert_to_rgba(data, &self.palette).to_vec(),
+            gb::Frame::Monochrome(data) => convert_to_rgba(data, &palette).to_vec(),
             gb::Frame::Color(data) => {
                 let mut rgba = vec![0u8; ppu::FRAMEBUFFER_SIZE * 4];
                 for (i, chunk) in data.chunks(3).enumerate() {
@@ -522,8 +424,8 @@ impl App {
             self.step_one_instruction("during cycle step");
             return FrameStep::default();
         }
-        // Debug: multi-cycle step.
-        if let Some(count) = self.step_multiple_cycles.take() {
+        // Debug: multi-cycle step (request set by `Session::apply`).
+        if let Some(count) = self.session.take_step_cycles() {
             let gb = self.session.gb_mut();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 for _ in 0..count {
@@ -540,8 +442,8 @@ impl App {
             }
             return FrameStep::default();
         }
-        // Debug: multi-frame step.
-        if let Some(count) = self.step_multiple_frames.take() {
+        // Debug: multi-frame step (request set by `Session::apply`).
+        if let Some(count) = self.session.take_step_frames() {
             let mut final_frame = None;
             let mut ok = true;
             for _ in 0..count {
@@ -719,8 +621,18 @@ impl App {
 
         // Dispatch the action.
         if let Some(action) = ui_frame.action {
-            self.dispatch_action(action, ui, &mut requests, &mut resolve_gui_action);
+            self.dispatch_action(action, &mut requests, &mut resolve_gui_action);
         }
+
+        // Apply any UI-error-overlay clears the shared driver requested.
+        requests.retain(|r| {
+            if matches!(r, PlatformRequest::ClearError) {
+                ui.clear_error();
+                false
+            } else {
+                true
+            }
+        });
 
         // Auto-pause when a menu is open, respecting manual pause.
         let should_be_paused = self.manually_paused || ui_frame.menu_open;
@@ -766,137 +678,38 @@ impl App {
         requests
     }
 
-    /// Apply a UI action. Pure/session actions are handled here; OS-requiring
-    /// ones go through `resolve` (returns bytes) or become a `PlatformRequest`.
+    /// Apply a UI action. ROM/state loads need the platform's file resolver, so
+    /// they are handled here (resolve → session load → app pause bookkeeping);
+    /// every other action is routed through the shared [`drive_action`] contract
+    /// so its behavior is implemented once in `Session::apply`.
     fn dispatch_action(
         &mut self,
         action: GuiAction,
-        ui: &mut UiHost,
         requests: &mut Vec<PlatformRequest>,
         resolve: &mut impl FnMut(&GuiAction) -> Option<ResolvedAction>,
     ) {
         match action {
-            GuiAction::Exit => requests.push(PlatformRequest::Exit),
-
-            GuiAction::TogglePause => {
-                self.user_paused = !self.user_paused;
-                self.manually_paused = self.user_paused || self.error_state.is_some();
-                self.is_paused = self.manually_paused;
-            }
-            GuiAction::Restart => {
-                self.restart();
-                self.manually_paused = self.user_paused;
-                requests.push(PlatformRequest::Status("Emulation restarted".into()));
-            }
-            GuiAction::ClearError => {
-                self.error_state = None;
-                self.is_paused = true;
-                self.manually_paused = self.user_paused;
-                ui.clear_error();
-                requests.push(PlatformRequest::Status(
-                    "Error cleared for debugging - CPU state preserved".into(),
-                ));
-            }
-
-            GuiAction::TogglePrinter => {
-                if self.session.gb().printer_attached() {
-                    self.session.gb_mut().detach_serial_device();
-                    requests.push(PlatformRequest::Status("Game Boy Printer disconnected".into()));
-                } else {
-                    self.session.gb_mut().attach_printer();
-                    requests.push(PlatformRequest::Status(
-                        "Game Boy Printer connected - prints are saved next to the ROM".into(),
-                    ));
-                }
-            }
-
-            GuiAction::StepCycles(count) => self.step_multiple_cycles = Some(count),
-            GuiAction::StepFrames(count) => self.step_multiple_frames = Some(count),
-            GuiAction::SetBreakpoint(address) => {
-                self.session.gb_mut().add_breakpoint(address);
-                requests.push(PlatformRequest::Status(format!("Breakpoint set at ${address:04X}")));
-            }
-            GuiAction::RemoveBreakpoint(address) => {
-                self.session.gb_mut().remove_breakpoint(address);
-                requests.push(PlatformRequest::Status(format!("Breakpoint removed from ${address:04X}")));
-            }
-
-            GuiAction::SaveSlot(slot) => match self.session.save_slot(slot, now_epoch_secs()) {
-                Ok(()) => requests.push(PlatformRequest::Status(format!("Saved to slot {slot}"))),
-                Err(e) => requests.push(PlatformRequest::Error(format!("Failed to save slot {slot}: {e}"))),
-            },
-            GuiAction::LoadSlot(slot) => match self.session.load_slot(slot) {
-                Ok(_) => {
-                    ui.clear_error();
-                    requests.push(PlatformRequest::Status(format!("Loaded slot {slot}")));
-                }
-                Err(e) => requests.push(PlatformRequest::Error(format!("Failed to load slot {slot}: {e}"))),
-            },
-            GuiAction::Quicksave => match self.session.quicksave(now_epoch_secs()) {
-                Ok(()) => requests.push(PlatformRequest::Status("Quicksaved".into())),
-                Err(e) => requests.push(PlatformRequest::Error(format!("Quicksave failed: {e}"))),
-            },
-            GuiAction::Quickload => match self.session.quickload() {
-                Ok(_) => {
-                    ui.clear_error();
-                    requests.push(PlatformRequest::Status("Quickloaded".into()));
-                }
-                Err(e) => requests.push(PlatformRequest::Error(format!("Quickload failed: {e}"))),
-            },
-
-            GuiAction::ToggleFastForward => {
-                self.toggle_fast_forward();
-                let on = self.is_fast_forward();
-                requests.push(PlatformRequest::Status(
-                    if on { "Fast-forward on" } else { "Fast-forward off" }.into(),
-                ));
-            }
-            GuiAction::FrameAdvance => self.frame_advance(),
-            GuiAction::ToggleSgbBorder => {
-                self.sgb_border = !self.sgb_border;
-                let (w, h) = self.content_size();
-                requests.push(PlatformRequest::ResizeContent { width: w, height: h });
-            }
-
-            GuiAction::SetHardware(choice) => {
-                let hw = match choice {
-                    HardwareChoice::Dmg => gb::Hardware::DMG,
-                    HardwareChoice::Cgb => gb::Hardware::CGB,
-                    HardwareChoice::Sgb => gb::Hardware::SGB,
-                };
-                self.set_hardware(hw);
-                ui.clear_error();
-                let (w, h) = self.content_size();
-                requests.push(PlatformRequest::ResizeContent { width: w, height: h });
-                requests.push(PlatformRequest::Status(format!("Hardware set to {choice:?}; ROM restarted")));
-            }
-            GuiAction::SetPalette(choice) => self.set_palette(ColorPalette::from_choice(choice)),
-            GuiAction::SetRewindEnabled(enabled) => self.set_rewind_enabled(enabled),
-            GuiAction::SetRewindInterval(interval) => self.set_rewind_interval(interval),
-            GuiAction::SetRewindDepth(depth) => self.set_rewind_depth(depth),
-
-            // OS-requiring: hand to the platform resolver for bytes, then apply.
-            GuiAction::SaveState(ref path) => match self.state_bytes() {
-                Ok(bytes) => requests.push(PlatformRequest::SaveStateBytes { path: path.clone(), bytes }),
-                Err(e) => requests.push(PlatformRequest::Error(format!("Failed to save state: {e}"))),
-            },
-            other @ (GuiAction::LoadRom(_) | GuiAction::LoadState(_)) => {
-                match resolve(&other) {
-                    Some(ResolvedAction::LoadRom { bytes, path }) => match self.load_rom_bytes(bytes, path) {
-                        Ok(()) => {
-                            self.manually_paused = self.user_paused;
-                            ui.clear_error();
-                            let (w, h) = self.content_size();
-                            requests.push(PlatformRequest::ResizeContent { width: w, height: h });
-                            requests.push(PlatformRequest::Status("ROM loaded".into()));
+            // OS-requiring loads: resolve to bytes here (the resolver reads the
+            // path / content), then apply with the app-side pause bookkeeping.
+            action @ (GuiAction::LoadRom(_) | GuiAction::LoadState(_)) => {
+                match resolve(&action) {
+                    Some(ResolvedAction::LoadRom { bytes, path }) => {
+                        match self.load_rom_bytes(bytes, path) {
+                            Ok(()) => {
+                                self.manually_paused = self.user_paused;
+                                requests.push(PlatformRequest::ClearError);
+                                let (w, h) = self.content_size();
+                                requests.push(PlatformRequest::ResizeContent { width: w, height: h });
+                                requests.push(PlatformRequest::Status("ROM loaded".into()));
+                            }
+                            Err(e) => requests.push(PlatformRequest::Error(format!("Failed to load ROM: {e}"))),
                         }
-                        Err(e) => requests.push(PlatformRequest::Error(format!("Failed to load ROM: {e}"))),
-                    },
+                    }
                     Some(ResolvedAction::LoadState { state, reload_rom }) => {
                         match self.load_state_bytes(&state, reload_rom) {
                             Ok(()) => {
                                 self.manually_paused = self.user_paused || self.error_state.is_some();
-                                ui.clear_error();
+                                requests.push(PlatformRequest::ClearError);
                                 requests.push(PlatformRequest::Status("State loaded".into()));
                             }
                             Err(e) => requests.push(PlatformRequest::Error(format!("Failed to load state: {e}"))),
@@ -906,12 +719,10 @@ impl App {
                 }
             }
 
-            // Android library / SAF actions need the JNI bridge + library
-            // panel; hand them back for the platform to service.
-            #[cfg(target_os = "android")]
+            // Everything else: one shared behavior path via the contract driver.
             other => {
-                let _ = &resolve; // the resolver only covers file loads
-                requests.push(PlatformRequest::AndroidLibrary(other));
+                drive_action(self, other, now_epoch_secs());
+                requests.append(&mut self.pending_requests);
             }
         }
     }
@@ -921,6 +732,87 @@ impl App {
 pub enum ResolvedAction {
     LoadRom { bytes: Vec<u8>, path: Option<String> },
     LoadState { state: Vec<u8>, reload_rom: Option<(String, Vec<u8>)> },
+}
+
+/// The app is a windowed [`Frontend`]: the shared [`drive_action`] driver
+/// performs each UI command through these capability methods. Missing one is a
+/// compile error at the `drive_action::<App>` call site in `dispatch_action`.
+impl Frontend for App {
+    fn session_mut(&mut self) -> &mut Session {
+        &mut self.session
+    }
+
+    fn set_status(&mut self, message: String) {
+        self.pending_requests.push(PlatformRequest::Status(message));
+    }
+
+    fn set_error(&mut self, message: String) {
+        self.pending_requests.push(PlatformRequest::Error(message));
+    }
+
+    fn clear_error(&mut self) {
+        self.pending_requests.push(PlatformRequest::ClearError);
+    }
+
+    fn exit(&mut self) {
+        self.pending_requests.push(PlatformRequest::Exit);
+    }
+
+    fn resize_content(&mut self, width: u32, height: u32) {
+        self.pending_requests
+            .push(PlatformRequest::ResizeContent { width, height });
+    }
+
+    fn save_state_bytes(&mut self, path: std::path::PathBuf, bytes: Vec<u8>) {
+        self.pending_requests
+            .push(PlatformRequest::SaveStateBytes { path, bytes });
+    }
+
+    fn load_file(&mut self, file: FileData) {
+        // Loads are intercepted in `dispatch_action` (they need the resolver);
+        // if one reaches here, surface it to the platform to read + feed back.
+        self.pending_requests.push(PlatformRequest::LoadFile(file));
+    }
+
+    fn on_pause_changed(&mut self, hint: PauseHint) {
+        match hint {
+            PauseHint::TogglePause => {
+                self.user_paused = !self.user_paused;
+                self.manually_paused = self.user_paused || self.error_state.is_some();
+                self.is_paused = self.manually_paused;
+            }
+            PauseHint::Restart => {
+                // The session already power-cycled; clear app run state to match.
+                self.error_state = None;
+                self.frame = None;
+                self.is_paused = false;
+                self.user_paused = false;
+                self.manually_paused = self.user_paused;
+            }
+            PauseHint::ClearError => {
+                self.error_state = None;
+                self.is_paused = true;
+                self.manually_paused = self.user_paused;
+            }
+            PauseHint::FrameAdvance => {
+                self.user_paused = true;
+                self.manually_paused = true;
+            }
+            PauseHint::SetHardware => {
+                // Rebuild cleared the machine; drop app run state but keep the
+                // user's pause choice (pre-refactor behavior).
+                self.error_state = None;
+                self.frame = None;
+            }
+            PauseHint::Load => {}
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn android_library(&mut self, action: UiAction) {
+        self.pending_requests
+            .push(PlatformRequest::AndroidLibrary(action));
+    }
 }
 
 /// What a `run_frame` produced for the platform to act on.

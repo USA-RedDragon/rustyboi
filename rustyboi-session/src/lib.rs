@@ -45,19 +45,32 @@
 //! The value types that DO benefit from monomorphization ([`input::InputMap`],
 //! [`cheats::CheatSet`], [`rewind::RewindBuffer`]) are plain concrete structs.
 
+pub mod action;
+pub mod apply;
 mod audio;
 pub mod cheats;
 pub mod config;
 pub mod input;
+pub mod overlay;
 pub mod ports;
 pub mod rewind;
 pub mod session;
 pub mod tas;
 
+#[cfg(target_os = "android")]
+pub use action::LibraryEntry;
+pub use action::{
+    ActionKind, CommandDescriptor, FileData, HardwareChoice, KeyBind, MenuCategory, PaletteChoice,
+    SessionUiState, UiAction, COMMANDS,
+};
+pub use apply::{ActionOutcome, PlatformRequest};
 pub use config::Config;
 pub use input::{AbstractInput, GbButton, InputMap};
+pub use overlay::{OverlayButton, OverlayRect, OverlayShape, TouchLayout};
 pub use ports::{NetTransport, Rumble, Storage, StorageError, Webcam};
-pub use session::{FrameOutput, Ports, RunMode, Session, SessionError, SlotMeta, QUICK_SLOT};
+pub use session::{
+    FrameOutput, Ports, RunMode, Session, SessionError, SlotMeta, GB_SIZE, QUICK_SLOT, SGB_SIZE,
+};
 
 // Re-export the core types adapters need so a frontend can depend on just this
 // crate for the common path.

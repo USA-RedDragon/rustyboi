@@ -625,6 +625,14 @@ fn run_gui_loop(
                         }
                         PlatformRequest::Status(s) => rs.ui.set_status(s),
                         PlatformRequest::Error(e) => rs.ui.set_error(e),
+                        PlatformRequest::ClearError => rs.ui.clear_error(),
+                        // ROM/state loads are resolved inside `App::draw` (they
+                        // need the file resolver), so this arm is unreachable on
+                        // desktop/Android; kept for the shared contract (the
+                        // web worker will service it). Log if it ever fires.
+                        PlatformRequest::LoadFile(_) => {
+                            log::warn!("LoadFile request reached the platform loop unexpectedly");
+                        }
                         #[cfg(target_os = "android")]
                         PlatformRequest::AndroidLibrary(action) => {
                             handle_android_library(action, &mut rs.ui, &pending_dialog_result);
