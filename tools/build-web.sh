@@ -31,5 +31,8 @@ else
 fi
 
 echo
+# The emulator runs in a module Web Worker (www/worker.js); both www/index.html
+# (main thread, WebAudio only) and worker.js import the same pkg/rustyboi_web.js.
+# No separate worker wasm build — `--target web` emits one module usable by both.
 echo "Serve for Firefox:  (cd rustyboi-web/www && python3 -m http.server 8080)"
 echo "Then open http://localhost:8080/ and click \"Load ROM…\""

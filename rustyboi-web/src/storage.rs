@@ -28,7 +28,7 @@ use rustyboi_session::{Storage, StorageError};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{IdbDatabase, IdbOpenDbRequest, IdbRequest, IdbTransactionMode};
+use web_sys::{IdbDatabase, IdbFactory, IdbOpenDbRequest, IdbRequest, IdbTransactionMode};
 
 const DB_NAME: &str = "rustyboi";
 const STORE_NAME: &str = "kv";
@@ -114,11 +114,20 @@ async fn await_request(req: &IdbRequest) -> Result<JsValue, JsValue> {
     JsFuture::from(promise).await
 }
 
+/// IndexedDB factory from whichever global scope we're in. The emulator runs in
+/// a Web Worker (which has no `window`), so we read `indexedDB` off the global
+/// object directly — it exists on both `Window` and `WorkerGlobalScope`.
+fn idb_factory() -> Result<IdbFactory, JsValue> {
+    let global = js_sys::global();
+    let idb = js_sys::Reflect::get(&global, &JsValue::from_str("indexedDB"))?;
+    if idb.is_undefined() || idb.is_null() {
+        return Err(JsValue::from_str("indexedDB unavailable"));
+    }
+    idb.dyn_into::<IdbFactory>()
+}
+
 async fn open_db() -> Result<IdbDatabase, JsValue> {
-    let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
-    let factory = window
-        .indexed_db()?
-        .ok_or_else(|| JsValue::from_str("indexedDB unavailable"))?;
+    let factory = idb_factory()?;
     let open_req: IdbOpenDbRequest = factory.open_with_u32(DB_NAME, DB_VERSION)?;
 
     // Create the object store on first open / version bump.
