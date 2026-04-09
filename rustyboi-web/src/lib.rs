@@ -32,24 +32,30 @@
 //!   Chrome-only; ROM bytes arrive via `<input type=file>` → `ArrayBuffer`.
 
 mod audio;
+mod overlay;
 mod storage;
 
-use rustyboi_core_lib::cartridge::Cartridge;
 use rustyboi_session::config::DmgPalette;
 use rustyboi_session::ports::{Rumble, Webcam};
-use rustyboi_session::{
-    movie, AbstractInput, Config, Frame, GbButton, Hardware, Ports, Session, SlotMeta, GB,
-};
+use rustyboi_session::{AbstractInput, Config, Frame, GbButton, Hardware, Ports, Session};
 
 use js_sys::Float32Array;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::{Clamped, JsCast};
 use web_sys::{ImageData, OffscreenCanvas, OffscreenCanvasRenderingContext2d};
 
+use rustyboi_session::{
+    FileData, HardwareChoice, PaletteChoice, PlatformRequest, SessionUiState, UiAction,
+};
+
+use js_sys::Array;
+
 use storage::IdbStore;
 
 // The main-thread audio sink; re-exported so JS can `new WebAudio()`.
 pub use audio::WebAudio;
+// The shared on-screen joypad overlay bridge (main-thread usable).
+pub use overlay::TouchOverlay;
 
 const GB_WIDTH: u32 = 160;
 const GB_HEIGHT: u32 = 144;
@@ -82,7 +88,12 @@ pub struct Emulator {
     session: Session,
     storage: IdbStore,
     ctx: OffscreenCanvasRenderingContext2d,
+    /// Buttons held via the keyboard (main-thread key events).
     input: AbstractInput,
+    /// Buttons held via the on-screen touch overlay (multi-touch). Kept separate
+    /// from `input` so touch and keyboard never clobber each other; the machine
+    /// sees the union each frame.
+    touch: AbstractInput,
     /// Reusable RGBA scratch buffer (avoids a per-frame allocation).
     rgba: Vec<u8>,
     /// Reusable interleaved-audio scratch buffer (`[l0,r0,l1,r1,...]`).
@@ -126,6 +137,7 @@ impl Emulator {
             storage,
             ctx,
             input: AbstractInput::none(),
+            touch: AbstractInput::none(),
             rgba: vec![0u8; RGBA_LEN],
             audio_scratch: Vec::new(),
             dmg_palette,
@@ -134,20 +146,34 @@ impl Emulator {
     }
 
     /// Load a ROM from raw bytes (an `ArrayBuffer` transferred from the main
-    /// thread). Builds a fresh booted `GB` and re-binds the session to the new
-    /// ROM identity.
-    pub fn load_rom(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
-        let cart = Cartridge::from_bytes(bytes)
-            .map_err(|e| JsValue::from_str(&format!("cartridge load failed: {e}")))?;
-        let rom_id = movie::sha256(bytes);
-
-        let mut gb = GB::new(self.session.hardware());
-        gb.insert(cart);
-        gb.skip_bios();
-        self.session.replace_machine(gb, rom_id);
-
-        self.has_rom = true;
-        Ok(())
+    /// thread), routed through the shared contract.
+    ///
+    /// `session.apply(LoadRom)` returns a [`PlatformRequest::LoadFile`]; the web
+    /// frontend already holds the bytes, so we service that request here by
+    /// feeding them to `finish_load_rom`. Returns the resulting requests
+    /// (Status/Error) for the worker to surface. `name` is only for messages.
+    pub fn load_rom(&mut self, name: &str, bytes: &[u8]) -> Array {
+        let outcome = self.session.apply(UiAction::LoadRom(rom_file(name, bytes)), 0);
+        let mut extra: Vec<PlatformRequest> = Vec::new();
+        for req in outcome.requests {
+            // The only request LoadRom produces is a LoadFile; the web frontend
+            // already holds the bytes, so service it here. Any other request is
+            // forwarded verbatim.
+            if matches!(req, PlatformRequest::LoadFile(_)) {
+                match self.session.finish_load_rom(bytes) {
+                    Ok(_) => {
+                        self.has_rom = true;
+                        extra.push(PlatformRequest::ClearError);
+                    }
+                    Err(e) => {
+                        extra.push(PlatformRequest::Error(format!("cartridge load failed: {e}")))
+                    }
+                }
+            } else {
+                extra.push(req);
+            }
+        }
+        requests_to_js(&extra)
     }
 
     /// Advance one presented frame per the session's run mode, blit it to the
@@ -160,7 +186,14 @@ impl Emulator {
         if !self.has_rom {
             return Float32Array::new_with_length(0);
         }
-        let out = self.session.run_frame(self.input);
+        // The machine sees the union of keyboard + touch input.
+        let mut combined = self.input;
+        for b in GbButton::ALL {
+            if self.touch.is_pressed(b) {
+                combined.set(b, true);
+            }
+        }
+        let out = self.session.run_frame(combined);
         if let Err(e) = self.present(&out.frame) {
             web_sys::console::warn_1(&e);
         }
@@ -215,57 +248,77 @@ impl Emulator {
         }
     }
 
-    /// Clear all pressed buttons (e.g. on focus loss / blur).
+    /// Clear all keyboard-held buttons (e.g. on focus loss / blur). Touch state
+    /// is untouched (a blur can't strand a finger the way it can a key).
     pub fn clear_input(&mut self) {
         self.input = AbstractInput::none();
     }
 
-    /// Toggle pause.
+    /// Set the on-screen overlay's held buttons from a multi-touch bitmask (see
+    /// [`overlay::TouchOverlay::button_mask`]). Replaces the whole touch layer
+    /// each call, so lifting a finger releases exactly its buttons.
+    pub fn set_touch_mask(&mut self, mask: u8) {
+        let mut touch = AbstractInput::none();
+        for b in overlay::buttons_from_mask(mask) {
+            touch.set(b, true);
+        }
+        self.touch = touch;
+    }
+
+    /// Toggle pause. (Pause is run-loop state; `apply` only signals a re-sync, so
+    /// the flip stays here.)
     pub fn toggle_pause(&mut self) {
         self.session.toggle_pause();
     }
 
-    /// Hold fast-forward while pressed; release returns to normal speed.
+    /// Toggle the on-screen touch overlay via the shared contract and report the
+    /// new state so the shell can show/hide its DOM overlay.
+    pub fn toggle_touch_controls(&mut self) -> bool {
+        self.session.apply(UiAction::ToggleTouchControls, 0);
+        self.session.touch_controls()
+    }
+
+    /// Whether the on-screen touch overlay is currently enabled (session state).
+    pub fn touch_controls(&self) -> bool {
+        self.session.touch_controls()
+    }
+
+    /// Hold fast-forward while pressed; release returns to normal speed. Uses the
+    /// `ToggleFastForward` contract action, guarded so a held key doesn't flip it
+    /// back and forth.
     pub fn set_fast_forward(&mut self, on: bool) {
-        if on {
-            self.session.fast_forward();
-        } else {
-            self.session.set_mode(rustyboi_session::RunMode::Normal);
+        if on != self.session.is_fast_forward() {
+            self.session.apply(UiAction::ToggleFastForward, 0);
         }
     }
 
-    /// Save the current machine state to a numbered slot. `timestamp` is
+    /// Save the current machine state to a numbered slot via the shared contract.
+    /// The `SaveSlot` action persists through the storage port (IndexedDB) inside
+    /// the session; we return the resulting Status/Error requests. `timestamp` is
     /// caller-supplied wall-clock millis (the session never reads a clock).
-    pub fn save_slot(&mut self, slot: u32, timestamp: f64) -> Result<(), JsValue> {
-        self.session
-            .save_slot(slot, timestamp as u64)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+    pub fn save_slot(&mut self, slot: u32, timestamp: f64) -> Array {
+        let outcome = self.session.apply(UiAction::SaveSlot(slot), timestamp as u64);
+        requests_to_js(&outcome.requests)
     }
 
-    /// Load a numbered slot, replacing the current machine. Returns the loaded
-    /// frame count.
-    pub fn load_slot(&mut self, slot: u32) -> Result<f64, JsValue> {
-        let SlotMeta { frame_count, .. } = self
-            .session
-            .load_slot(slot)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        Ok(frame_count as f64)
+    /// Load a numbered slot via the shared contract, replacing the current
+    /// machine (persisted state read through the storage port). Returns the
+    /// resulting Status/Error requests.
+    pub fn load_slot(&mut self, slot: u32) -> Array {
+        let outcome = self.session.apply(UiAction::LoadSlot(slot), 0);
+        requests_to_js(&outcome.requests)
     }
 
-    /// Quicksave to the reserved quick slot.
-    pub fn quicksave(&mut self, timestamp: f64) -> Result<(), JsValue> {
-        self.session
-            .quicksave(timestamp as u64)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+    /// Quicksave to the reserved quick slot (shared contract).
+    pub fn quicksave(&mut self, timestamp: f64) -> Array {
+        let outcome = self.session.apply(UiAction::Quicksave, timestamp as u64);
+        requests_to_js(&outcome.requests)
     }
 
-    /// Quickload from the reserved quick slot. Returns the loaded frame count.
-    pub fn quickload(&mut self) -> Result<f64, JsValue> {
-        let SlotMeta { frame_count, .. } = self
-            .session
-            .quickload()
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        Ok(frame_count as f64)
+    /// Quickload from the reserved quick slot (shared contract).
+    pub fn quickload(&mut self) -> Array {
+        let outcome = self.session.apply(UiAction::Quickload, 0);
+        requests_to_js(&outcome.requests)
     }
 
     /// The slot numbers with a saved state for the current ROM.
@@ -273,25 +326,23 @@ impl Emulator {
         self.session.list_slots()
     }
 
-    /// Switch the emulated hardware model ("dmg" or "cgb"); persists config.
-    /// Takes effect on the next ROM load.
-    pub fn set_hardware(&mut self, model: &str) -> Result<(), JsValue> {
-        let hw = match model {
-            "dmg" | "DMG" => Hardware::DMG,
-            "cgb" | "CGB" => Hardware::CGB,
+    /// Switch the emulated hardware model ("dmg" or "cgb") via the shared
+    /// contract (rebuilds + persists). Returns the resulting requests
+    /// (ClearError/ResizeContent/Status).
+    pub fn set_hardware(&mut self, model: &str) -> Result<Array, JsValue> {
+        let choice = match model {
+            "dmg" | "DMG" => HardwareChoice::Dmg,
+            "cgb" | "CGB" => HardwareChoice::Cgb,
             other => return Err(JsValue::from_str(&format!("unknown hardware: {other}"))),
         };
-        let mut cfg = self.session.config().clone();
-        cfg.hardware = hw;
-        self.session.set_config(cfg);
-        self.session
-            .save_config()
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+        let outcome = self.session.apply(UiAction::SetHardware(choice), 0);
+        Ok(requests_to_js(&outcome.requests))
     }
 
     /// Set the four-shade DMG palette (lightest→darkest, RGBA8 per shade, 16
-    /// bytes total) and persist it. Presentation-only; does not affect
-    /// emulation determinism.
+    /// bytes total). Presentation-only. Config persistence is done through the
+    /// `SetPalette` contract action; the local blit cache is refreshed so the
+    /// worker's `present` uses the new shades immediately.
     pub fn set_palette(&mut self, shades: &[u8]) -> Result<(), JsValue> {
         if shades.len() != 16 {
             return Err(JsValue::from_str("palette must be 16 bytes (4 RGBA shades)"));
@@ -300,14 +351,12 @@ impl Emulator {
         for (i, chunk) in shades.chunks_exact(4).enumerate() {
             palette[i].copy_from_slice(chunk);
         }
-        let dmg_palette = DmgPalette { shades: palette };
-        self.dmg_palette = dmg_palette;
-        let mut cfg = self.session.config().clone();
-        cfg.dmg_palette = dmg_palette;
-        self.session.set_config(cfg);
-        self.session
-            .save_config()
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+        let choice = PaletteChoice::from_shades(palette);
+        self.session.apply(UiAction::SetPalette(choice), 0);
+        // Keep the raw shades for the worker's blit even for a custom palette
+        // (from_shades falls back to Grayscale for an unknown set).
+        self.dmg_palette = DmgPalette { shades: palette };
+        Ok(())
     }
 
     /// The current hardware model as a lowercase string ("dmg" / "cgb").
@@ -315,6 +364,42 @@ impl Emulator {
         match self.session.hardware() {
             Hardware::DMG => "dmg".into(),
             _ => "cgb".into(),
+        }
+    }
+
+    /// A JSON-serializable snapshot of session UI state the shell reflects
+    /// (hardware, palette, fast-forward, touch-controls, slot list). Returned as
+    /// a plain JS object.
+    pub fn ui_state(&self) -> js_sys::Object {
+        let s = self.session_ui_state();
+        let o = js_sys::Object::new();
+        let set = |k: &str, v: JsValue| {
+            let _ = js_sys::Reflect::set(&o, &k.into(), &v);
+        };
+        set("fastForward", s.fast_forward.into());
+        set("touchControls", s.touch_controls.into());
+        let hw = match s.hardware {
+            HardwareChoice::Dmg => "dmg",
+            HardwareChoice::Sgb => "sgb",
+            HardwareChoice::Cgb => "cgb",
+        };
+        set("hardware", hw.into());
+        o
+    }
+
+    /// Assemble the shared [`SessionUiState`] view from the session. Isolated so
+    /// the new `touch_controls` field (and any future one) is set in one place.
+    fn session_ui_state(&self) -> SessionUiState {
+        SessionUiState {
+            hardware: self.session.hardware_choice(),
+            palette: self.session.palette(),
+            rewind_enabled: self.session.config().rewind.enabled,
+            rewind_interval_frames: self.session.config().rewind.interval_frames,
+            rewind_depth: self.session.config().rewind.depth,
+            sgb_border: self.session.sgb_border(),
+            fast_forward: self.session.is_fast_forward(),
+            touch_controls: self.session.touch_controls(),
+            slots: self.session.list_slots(),
         }
     }
 
@@ -327,6 +412,62 @@ impl Emulator {
     pub fn stored_key_count(&self) -> usize {
         self.storage.len()
     }
+}
+
+/// Build the [`FileData`] the web frontend passes to `LoadRom` — always the
+/// byte-carrying `Contents` variant on wasm. The `not(wasm32)` arm exists only so
+/// `cargo build --workspace` typechecks this cdylib against the host `FileData`
+/// (whose only variant is `Path`); the web crate never actually runs natively.
+#[cfg(target_arch = "wasm32")]
+fn rom_file(name: &str, bytes: &[u8]) -> FileData {
+    FileData::Contents { name: name.into(), data: bytes.to_vec() }
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn rom_file(name: &str, _bytes: &[u8]) -> FileData {
+    FileData::Path(name.into())
+}
+
+/// Translate the [`PlatformRequest`]s an `apply` produced into a JS array of
+/// plain `{ type, ... }` objects the worker forwards to the main thread. `Exit`
+/// is a no-op on web (nothing to quit) and is dropped; `SaveStateBytes`/
+/// `LoadFile` are serviced in-worker and never appear here for the actions the
+/// web frontend issues.
+fn requests_to_js(requests: &[PlatformRequest]) -> Array {
+    let out = Array::new();
+    for req in requests {
+        let o = js_sys::Object::new();
+        let set = |k: &str, v: JsValue| {
+            let _ = js_sys::Reflect::set(&o, &k.into(), &v);
+        };
+        match req {
+            PlatformRequest::Exit => continue, // no-op on web
+            PlatformRequest::Status(msg) => {
+                set("type", "Status".into());
+                set("msg", msg.as_str().into());
+            }
+            PlatformRequest::Error(msg) => {
+                set("type", "Error".into());
+                set("msg", msg.as_str().into());
+            }
+            PlatformRequest::ClearError => {
+                set("type", "ClearError".into());
+            }
+            PlatformRequest::ResizeContent { width, height } => {
+                set("type", "ResizeContent".into());
+                set("width", (*width).into());
+                set("height", (*height).into());
+            }
+            // These are serviced inside the worker for the web frontend and are
+            // not expected from the actions it issues; surface as a status so
+            // nothing is silently lost.
+            PlatformRequest::SaveStateBytes { .. } | PlatformRequest::LoadFile(_) => {
+                set("type", "Status".into());
+                set("msg", "unhandled platform request".into());
+            }
+        }
+        out.push(&o);
+    }
+    out
 }
 
 /// Map a browser `KeyboardEvent.code` to an abstract GB button. The default
