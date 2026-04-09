@@ -39,12 +39,12 @@ fn test_rom() -> Vec<u8> {
     rom
 }
 
-fn booted_gb(rom: &[u8]) -> GB {
+fn booted_gb(rom: &[u8]) -> Box<GB> {
     let cart = Cartridge::from_bytes(rom).expect("load test ROM");
     let mut gb = GB::new(Hardware::DMG);
     gb.insert(cart);
     gb.skip_bios();
-    gb
+    Box::new(gb)
 }
 
 fn fresh_ports() -> Ports {
