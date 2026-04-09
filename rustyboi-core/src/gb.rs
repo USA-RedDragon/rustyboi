@@ -1983,4 +1983,77 @@ mod savestate_roundtrip_tests {
             .join()
             .unwrap();
     }
+
+    /// Regression: the DMG noise channel (channel 4) must keep advancing its
+    /// LFSR while it plays. The per-dot APU step-skip optimization
+    /// (`Mmio::step_audio` returns early on dots where the APU clock is
+    /// unmoved) must never freeze channel 4 — a frozen LFSR latches
+    /// `current_sample`, collapsing the output to a constant "buzz". We drive a
+    /// steady-volume noise tone (no envelope decay, length disabled) and assert
+    /// the captured sample stream genuinely flips over time: the LFSR output bit
+    /// toggles, so both a nonzero and a zero level appear, with many
+    /// transitions. A latched channel would emit one constant level and fail.
+    #[test]
+    fn dmg_noise_channel_lfsr_keeps_advancing() {
+        use crate::audio::AudioOutput;
+        use std::sync::{Arc, Mutex};
+
+        struct Cap(Arc<Mutex<Vec<(f32, f32)>>>);
+        impl AudioOutput for Cap {
+            fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+                Ok(())
+            }
+            fn add_samples(&mut self, s: &[(f32, f32)]) {
+                self.0.lock().unwrap().extend_from_slice(s);
+            }
+        }
+
+        // Minimal 32KB NoMBC ROM (all NOPs); skip the boot ROM.
+        let rom = vec![0u8; 0x8000];
+        let mut gb = GB::new(Hardware::DMG);
+        gb.insert(cartridge::Cartridge::from_bytes(&rom).unwrap());
+        gb.skip_bios();
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        gb.enable_audio(Box::new(Cap(buf.clone()))).unwrap();
+
+        // Program a sustained noise tone on channel 4 only.
+        gb.write_memory(0xFF26, 0x80); // NR52: APU on
+        gb.write_memory(0xFF25, 0x88); // NR51: route only channel 4 to L+R
+        gb.write_memory(0xFF24, 0x77); // NR50: full volume both sides
+        gb.write_memory(0xFF20, 0x00); // NR41: length load (unused, length off)
+        gb.write_memory(0xFF21, 0xF0); // NR42: volume 15, no envelope stepping
+        gb.write_memory(0xFF22, 0x37); // NR43: mid divisor/shift -> audible noise
+        gb.write_memory(0xFF23, 0x80); // NR44: trigger, length disabled
+
+        // Run a handful of frames so the LFSR has stepped many times.
+        for _ in 0..8 {
+            gb.run_until_frame(true);
+        }
+
+        let samples = buf.lock().unwrap();
+        assert!(!samples.is_empty(), "no audio was generated");
+        // Channel 4's DAC is on and volume is 15, so the enabled channel emits a
+        // nonzero level whenever the LFSR output bit is high. A live (advancing)
+        // LFSR flips that bit, so the stream must contain BOTH a nonzero level
+        // and a zero level. A frozen/latched channel would hold one value.
+        let saw_high = samples.iter().any(|&(l, _)| l != 0.0);
+        let saw_low = samples.iter().any(|&(l, _)| l == 0.0);
+        assert!(saw_high, "channel 4 produced no output at all (LFSR/DAC dead)");
+        assert!(
+            saw_low && saw_high,
+            "channel 4 output is constant -> LFSR is latched (never advances)"
+        );
+
+        // Stronger check: the stream must have many transitions, not just a
+        // one-time settle. Count level changes across the captured samples.
+        let transitions = samples
+            .windows(2)
+            .filter(|w| (w[0].0 != 0.0) != (w[1].0 != 0.0))
+            .count();
+        assert!(
+            transitions > 100,
+            "channel 4 output barely changes ({transitions} transitions) -> \
+             LFSR is not advancing per-dot as it should"
+        );
+    }
 }
