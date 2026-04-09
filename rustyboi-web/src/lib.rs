@@ -1,19 +1,35 @@
-//! `rustyboi-web` — a WASM/Firefox frontend for the rustyboi Game Boy / Color
+//! `rustyboi-web` — a WASM web frontend for the rustyboi Game Boy / Color
 //! emulator, built on the shared `rustyboi-session` crate.
 //!
-//! # Why these choices are Firefox-safe
+//! # Worker-threaded architecture
 //!
-//! - **Rendering: 2D canvas `putImageData`.** No `wgpu`/WebGPU (not stable in
-//!   Firefox), no `pixels`. At 160x144 an `ImageData` blit per frame is
-//!   trivially fast; CSS `image-rendering: pixelated` handles upscaling.
+//! The emulator runs entirely in a **Web Worker** (`www/worker.js`), decoupled
+//! from the display refresh rate. This fixes compositor jank on high-refresh
+//! displays (e.g. 175 Hz): a `requestAnimationFrame` loop fires at the monitor
+//! rate, but one GB frame can take ~10 ms, blowing a ~5.7 ms rAF budget. The
+//! worker self-paces at 59.7275 fps with a `performance.now()` accumulator, so
+//! emulation cadence is independent of how fast the screen refreshes.
+//!
+//! Thread split:
+//! - **Worker** owns [`Emulator`]: the session + wasm core, IndexedDB storage
+//!   (IndexedDB works in workers), and rendering to a transferred
+//!   [`web_sys::OffscreenCanvas`] via its 2D context — so video never crosses a
+//!   `postMessage` boundary. Each frame it returns interleaved audio to JS.
+//! - **Main thread** is a thin UI shell (`www/index.html`): DOM controls,
+//!   keyboard input, and the [`WebAudio`] sink (WebAudio must be created on the
+//!   main thread). It forwards input/control messages to the worker and queues
+//!   the audio batches the worker posts back.
+//!
+//! # Why these host choices are Firefox-safe
+//!
+//! - **Rendering: OffscreenCanvas 2D `putImageData`.** No `wgpu`/WebGPU (not
+//!   stable in Firefox), no `pixels`. At 160x144 an `ImageData` blit per frame
+//!   is trivially fast; CSS `image-rendering: pixelated` handles upscaling.
 //! - **Audio: WebAudio queued `AudioBufferSourceNode`** (see [`audio`]).
 //! - **Input: DOM keyboard events → [`AbstractInput`]**, resolved by the
 //!   session's own remap. No host key codes leak into the session.
 //! - **Storage: IndexedDB** (see [`storage`]). The File System Access API is
 //!   Chrome-only; ROM bytes arrive via `<input type=file>` → `ArrayBuffer`.
-//!
-//! The JS shell drives a `requestAnimationFrame` loop that calls
-//! [`Emulator::run_frame`] to keep pace, then presents + pumps audio.
 
 mod audio;
 mod storage;
@@ -25,12 +41,15 @@ use rustyboi_session::{
     movie, AbstractInput, Config, Frame, GbButton, Hardware, Ports, Session, SlotMeta, GB,
 };
 
+use js_sys::Float32Array;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::{Clamped, JsCast};
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
+use web_sys::{ImageData, OffscreenCanvas, OffscreenCanvasRenderingContext2d};
 
-use audio::AudioPlayer;
 use storage::IdbStore;
+
+// The main-thread audio sink; re-exported so JS can `new WebAudio()`.
+pub use audio::WebAudio;
 
 const GB_WIDTH: u32 = 160;
 const GB_HEIGHT: u32 = 144;
@@ -51,40 +70,40 @@ impl Webcam for NullWebcam {
     }
 }
 
-/// The emulator handle exposed to JavaScript. Owns the session, the render
-/// target, the audio player, and the live keyboard-derived input.
+/// The worker-side emulator handle exposed to JavaScript. Owns the session, the
+/// OffscreenCanvas render target, storage, and the live keyboard-derived input.
+///
+/// Runs ONLY inside the Web Worker. It never touches `window`, `document`,
+/// `requestAnimationFrame`, or `AudioContext` — those are main-thread-only and
+/// live in the JS shell. Video is drawn straight to the OffscreenCanvas the
+/// worker owns; audio is returned to JS to be posted to the main thread.
 #[wasm_bindgen]
 pub struct Emulator {
     session: Session,
     storage: IdbStore,
-    ctx: CanvasRenderingContext2d,
-    audio: AudioPlayer,
+    ctx: OffscreenCanvasRenderingContext2d,
     input: AbstractInput,
     /// Reusable RGBA scratch buffer (avoids a per-frame allocation).
     rgba: Vec<u8>,
+    /// Reusable interleaved-audio scratch buffer (`[l0,r0,l1,r1,...]`).
+    audio_scratch: Vec<f32>,
     dmg_palette: DmgPalette,
     has_rom: bool,
 }
 
 #[wasm_bindgen]
 impl Emulator {
-    /// Construct the emulator bound to a canvas (looked up by element id).
+    /// Construct the emulator bound to a transferred [`OffscreenCanvas`].
     /// Async because it must open + hydrate IndexedDB before building the
     /// session (so persisted config/saves are visible to the first sync read).
     /// A static factory rather than a `constructor` — wasm-bindgen can't emit a
     /// valid async constructor.
-    pub async fn create(canvas_id: &str) -> Result<Emulator, JsValue> {
+    pub async fn create(canvas: OffscreenCanvas) -> Result<Emulator, JsValue> {
         console_error_panic_hook::set_once();
 
-        let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
-        let document = window.document().ok_or_else(|| JsValue::from_str("no document"))?;
-        let canvas: HtmlCanvasElement = document
-            .get_element_by_id(canvas_id)
-            .ok_or_else(|| JsValue::from_str("canvas element not found"))?
-            .dyn_into()?;
         canvas.set_width(GB_WIDTH);
         canvas.set_height(GB_HEIGHT);
-        let ctx: CanvasRenderingContext2d = canvas
+        let ctx: OffscreenCanvasRenderingContext2d = canvas
             .get_context("2d")?
             .ok_or_else(|| JsValue::from_str("no 2d context"))?
             .dyn_into()?;
@@ -101,23 +120,22 @@ impl Emulator {
             webcam: Box::new(NullWebcam),
         };
         let session = Session::new(config, ports, [0u8; 32]);
-        let audio = AudioPlayer::new()?;
 
         Ok(Emulator {
             session,
             storage,
             ctx,
-            audio,
             input: AbstractInput::none(),
             rgba: vec![0u8; RGBA_LEN],
+            audio_scratch: Vec::new(),
             dmg_palette,
             has_rom: false,
         })
     }
 
-    /// Load a ROM from raw bytes (an `ArrayBuffer` from `<input type=file>`).
-    /// Builds a fresh booted `GB`, re-binds the session to the new ROM identity,
-    /// and unlocks the audio context (this runs from a user gesture).
+    /// Load a ROM from raw bytes (an `ArrayBuffer` transferred from the main
+    /// thread). Builds a fresh booted `GB` and re-binds the session to the new
+    /// ROM identity.
     pub fn load_rom(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
         let cart = Cartridge::from_bytes(bytes)
             .map_err(|e| JsValue::from_str(&format!("cartridge load failed: {e}")))?;
@@ -128,27 +146,33 @@ impl Emulator {
         gb.skip_bios();
         self.session.replace_machine(gb, rom_id);
 
-        self.audio.resume();
         self.has_rom = true;
         Ok(())
     }
 
     /// Advance one presented frame per the session's run mode, blit it to the
-    /// canvas, and queue its audio. Called from the JS `requestAnimationFrame`
-    /// loop (which decides how many times to call it to keep 59.7275 fps pace).
-    pub fn run_frame(&mut self) {
+    /// OffscreenCanvas, and return this frame's interleaved stereo audio
+    /// (`[l0,r0,l1,r1,...]`) as a fresh `Float32Array` for the worker to
+    /// `postMessage` (transferring its buffer) to the main-thread audio sink.
+    /// Returns an empty array when no ROM is loaded or the frame produced no
+    /// audio.
+    pub fn run_frame(&mut self) -> Float32Array {
         if !self.has_rom {
-            return;
+            return Float32Array::new_with_length(0);
         }
         let out = self.session.run_frame(self.input);
-        // Return `()` (not `Result`) so wasm-bindgen emits a plain call, not a
-        // multivalue-return shim — Firefox takes a slow JS->wasm entry path for
-        // the latter, on every frame. Present errors are rare (surface lost);
-        // log and continue.
         if let Err(e) = self.present(&out.frame) {
             web_sys::console::warn_1(&e);
         }
-        self.audio.queue(&out.audio);
+
+        self.audio_scratch.clear();
+        self.audio_scratch.reserve(out.audio.len() * 2);
+        for &(l, r) in &out.audio {
+            self.audio_scratch.push(l);
+            self.audio_scratch.push(r);
+        }
+        // Copy into a JS-owned Float32Array; the worker transfers its buffer.
+        Float32Array::from(self.audio_scratch.as_slice())
     }
 
     /// Convert the core `Frame` to RGBA and `putImageData` it. `Monochrome`
@@ -228,6 +252,22 @@ impl Emulator {
         Ok(frame_count as f64)
     }
 
+    /// Quicksave to the reserved quick slot.
+    pub fn quicksave(&mut self, timestamp: f64) -> Result<(), JsValue> {
+        self.session
+            .quicksave(timestamp as u64)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Quickload from the reserved quick slot. Returns the loaded frame count.
+    pub fn quickload(&mut self) -> Result<f64, JsValue> {
+        let SlotMeta { frame_count, .. } = self
+            .session
+            .quickload()
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        Ok(frame_count as f64)
+    }
+
     /// The slot numbers with a saved state for the current ROM.
     pub fn list_slots(&self) -> Vec<u32> {
         self.session.list_slots()
@@ -247,6 +287,35 @@ impl Emulator {
         self.session
             .save_config()
             .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Set the four-shade DMG palette (lightest→darkest, RGBA8 per shade, 16
+    /// bytes total) and persist it. Presentation-only; does not affect
+    /// emulation determinism.
+    pub fn set_palette(&mut self, shades: &[u8]) -> Result<(), JsValue> {
+        if shades.len() != 16 {
+            return Err(JsValue::from_str("palette must be 16 bytes (4 RGBA shades)"));
+        }
+        let mut palette = [[0u8; 4]; 4];
+        for (i, chunk) in shades.chunks_exact(4).enumerate() {
+            palette[i].copy_from_slice(chunk);
+        }
+        let dmg_palette = DmgPalette { shades: palette };
+        self.dmg_palette = dmg_palette;
+        let mut cfg = self.session.config().clone();
+        cfg.dmg_palette = dmg_palette;
+        self.session.set_config(cfg);
+        self.session
+            .save_config()
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// The current hardware model as a lowercase string ("dmg" / "cgb").
+    pub fn hardware(&self) -> String {
+        match self.session.hardware() {
+            Hardware::DMG => "dmg".into(),
+            _ => "cgb".into(),
+        }
     }
 
     /// Whether a ROM is currently loaded.

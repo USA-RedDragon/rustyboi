@@ -68,88 +68,119 @@
   <div class="keys">
     Controls: <code>←↑↓→</code> D-pad · <code>X</code> A · <code>Z</code> B ·
     <code>Enter</code> Start · <code>Shift</code> Select · <code>P</code> pause ·
-    <code>Tab</code> (hold) fast-forward
+    <code>Tab</code> (hold) fast-forward · <code>F5</code> quicksave ·
+    <code>F8</code> quickload
   </div>
 
+  <!--
+    Thin main-thread shell. Emulation runs in worker.js; this file owns only the
+    DOM UI, keyboard input, and the AudioContext (WebAudio is main-thread only).
+    Video is drawn by the worker straight to the OffscreenCanvas we transfer to
+    it, so no framebuffer is ever posted back.
+  -->
   <script type="module">
-    import init, { Emulator } from "./pkg/rustyboi_web.js";
-
-    // Target Game Boy frame rate. The DMG/CGB LCD refresh is ~59.7275 Hz.
-    const GB_FPS = 59.7275;
-    const FRAME_MS = 1000 / GB_FPS;
-    // Cap catch-up so a long stall (backgrounded tab) doesn't run a huge burst.
-    const MAX_FRAMES_PER_TICK = 4;
+    import init, { WebAudio } from "./pkg/rustyboi_web.js";
 
     const statusEl = document.getElementById("status");
     const setStatus = (msg) => { statusEl.textContent = msg; };
 
     async function main() {
+      // Main-thread wasm instance: only used for the WebAudio sink.
       await init();
-      const emu = await Emulator.create("screen");
-      setStatus("Ready — load a ROM to start.");
+      const audio = new WebAudio();
+
+      // OffscreenCanvas + module workers are the target path (current Firefox +
+      // Chrome). Fail loudly if unavailable rather than silently degrading.
+      const canvasEl = document.getElementById("screen");
+      if (!canvasEl.transferControlToOffscreen) {
+        setStatus("This browser lacks OffscreenCanvas — please update Firefox/Chrome.");
+        return;
+      }
+      const offscreen = canvasEl.transferControlToOffscreen();
+
+      const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+      // Transfer the OffscreenCanvas to the worker; it renders directly into it.
+      worker.postMessage({ type: "Init", canvas: offscreen }, [offscreen]);
+
+      worker.onmessage = (e) => {
+        const m = e.data;
+        switch (m.type) {
+          case "Ready":
+            // Reflect persisted hardware choice in the selector.
+            if (m.hardware) document.getElementById("hardware").value = m.hardware;
+            break;
+          case "Audio":
+            audio.queue(m.samples); // Float32Array, transferred from the worker
+            break;
+          case "Status":
+            setStatus(m.msg);
+            break;
+          case "Saved":
+            setStatus(`Saved ${m.slot === "quick" ? "quicksave" : "slot " + m.slot}.`);
+            break;
+          case "Loaded":
+            setStatus(`Loaded ${m.slot === "quick" ? "quicksave" : "slot " + m.slot}.`);
+            break;
+          case "Error":
+            setStatus(`Error: ${m.msg}`);
+            break;
+          default:
+            break;
+        }
+      };
+
+      const send = (msg, transfer) => worker.postMessage(msg, transfer || []);
 
       // --- ROM loading (Firefox-safe: <input type=file>, no FS Access API) ---
       document.getElementById("rom").addEventListener("change", async (e) => {
         const file = e.target.files[0];
         if (!file) return;
-        const buf = new Uint8Array(await file.arrayBuffer());
-        try {
-          emu.load_rom(buf);   // also resumes AudioContext (user gesture)
-          setStatus(`Running: ${file.name}`);
-        } catch (err) {
-          setStatus(`Load failed: ${err}`);
-        }
+        // Resume audio here — this handler runs inside a user gesture.
+        audio.resume();
+        const buf = await file.arrayBuffer();
+        // Transfer the ArrayBuffer to the worker (no copy).
+        send({ type: "LoadRom", bytes: buf, name: file.name }, [buf]);
       });
 
       // --- Hardware model ---
       document.getElementById("hardware").addEventListener("change", (e) => {
-        try { emu.set_hardware(e.target.value); } catch (err) { setStatus(`${err}`); }
+        send({ type: "SetHardware", model: e.target.value });
       });
 
       // --- Save / load state (slot 0) ---
       document.getElementById("save").addEventListener("click", () => {
-        try { emu.save_slot(0, Date.now()); setStatus("Saved slot 0."); }
-        catch (err) { setStatus(`Save failed: ${err}`); }
+        send({ type: "SaveSlot", n: 0, timestamp: Date.now() });
       });
       document.getElementById("load").addEventListener("click", () => {
-        try { emu.load_slot(0); setStatus("Loaded slot 0."); }
-        catch (err) { setStatus(`Load failed: ${err}`); }
+        send({ type: "LoadSlot", n: 0 });
       });
 
       // --- Pause ---
-      document.getElementById("pause").addEventListener("click", () => emu.toggle_pause());
+      document.getElementById("pause").addEventListener("click", () => send({ type: "TogglePause" }));
 
-      // --- Keyboard input → abstract buttons (session applies remap) ---
+      // --- Keyboard input → worker (session applies remap) ---
       window.addEventListener("keydown", (e) => {
-        if (e.code === "KeyP") { emu.toggle_pause(); return; }
-        if (e.code === "Tab") { e.preventDefault(); emu.set_fast_forward(true); return; }
-        emu.set_button(e.code, true);
-        // Stop the browser scrolling/activating on GB keys.
+        if (e.repeat) {
+          if (isGameKey(e.code)) e.preventDefault();
+          return;
+        }
+        switch (e.code) {
+          case "KeyP": send({ type: "TogglePause" }); return;
+          case "Tab": e.preventDefault(); send({ type: "SetFastForward", on: true }); return;
+          case "F5": e.preventDefault(); send({ type: "Quicksave", timestamp: Date.now() }); return;
+          case "F8": e.preventDefault(); send({ type: "Quickload" }); return;
+        }
+        send({ type: "SetButton", code: e.code, pressed: true });
         if (isGameKey(e.code)) e.preventDefault();
       });
       window.addEventListener("keyup", (e) => {
-        if (e.code === "Tab") { emu.set_fast_forward(false); return; }
-        emu.set_button(e.code, false);
+        if (e.code === "Tab") { send({ type: "SetFastForward", on: false }); return; }
+        send({ type: "SetButton", code: e.code, pressed: false });
       });
       // Drop all held keys if the page loses focus (avoids stuck buttons).
-      window.addEventListener("blur", () => emu.clear_input());
+      window.addEventListener("blur", () => send({ type: "ClearInput" }));
 
-      // --- Main loop: run frames to keep GB pace, present + pump audio. ---
-      let last = performance.now();
-      let acc = 0;
-      function tick(now) {
-        acc += now - last;
-        last = now;
-        let ran = 0;
-        while (acc >= FRAME_MS && ran < MAX_FRAMES_PER_TICK) {
-          emu.run_frame();
-          acc -= FRAME_MS;
-          ran++;
-        }
-        if (acc > FRAME_MS * MAX_FRAMES_PER_TICK) acc = 0; // shed backlog
-        requestAnimationFrame(tick);
-      }
-      requestAnimationFrame(tick);
+      setStatus("Ready — load a ROM to start.");
     }
 
     function isGameKey(code) {

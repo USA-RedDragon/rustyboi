@@ -62,11 +62,16 @@ impl AudioPlayer {
     }
 
     /// Queue one frame's worth of interleaved stereo samples for playback.
-    pub fn queue(&mut self, samples: &[(f32, f32)]) {
-        if samples.is_empty() {
+    ///
+    /// `interleaved` is `[l0, r0, l1, r1, ...]` — the wire format the worker
+    /// posts to the main thread (a transferable `Float32Array`). Any odd tail
+    /// element (should not happen) is ignored by `chunks_exact`.
+    pub fn queue(&mut self, interleaved: &[f32]) {
+        let frames = interleaved.len() / 2;
+        if frames == 0 {
             return;
         }
-        let n = samples.len() as u32;
+        let n = frames as u32;
         let buffer = match self
             .ctx
             .create_buffer(2, n, CORE_SAMPLE_RATE)
@@ -75,16 +80,16 @@ impl AudioPlayer {
             Err(_) => return,
         };
 
-        let mut left = Vec::with_capacity(samples.len());
-        let mut right = Vec::with_capacity(samples.len());
-        for &(l, r) in samples {
-            left.push(l);
-            right.push(r);
+        let mut left = Vec::with_capacity(frames);
+        let mut right = Vec::with_capacity(frames);
+        for pair in interleaved.chunks_exact(2) {
+            left.push(pair[0]);
+            right.push(pair[1]);
         }
-        if buffer.copy_to_channel(&mut left, 0).is_err() {
+        if buffer.copy_to_channel(&left, 0).is_err() {
             return;
         }
-        if buffer.copy_to_channel(&mut right, 1).is_err() {
+        if buffer.copy_to_channel(&right, 1).is_err() {
             return;
         }
 
@@ -106,5 +111,32 @@ impl AudioPlayer {
 
         let _ = src.start_with_when(self.next_time);
         self.next_time += n as f64 / CORE_SAMPLE_RATE as f64;
+    }
+}
+
+/// Main-thread WebAudio sink exposed to JS. The emulator runs in a Web Worker
+/// and posts interleaved audio frames to the main thread; this wraps the
+/// [`AudioPlayer`] scheduler (WebAudio can only be created on the main thread).
+#[wasm_bindgen]
+pub struct WebAudio {
+    player: AudioPlayer,
+}
+
+#[wasm_bindgen]
+impl WebAudio {
+    /// Create the main-thread audio sink (suspended until [`WebAudio::resume`]).
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Result<WebAudio, JsValue> {
+        Ok(WebAudio { player: AudioPlayer::new()? })
+    }
+
+    /// Resume the context — must be called from a user-gesture handler.
+    pub fn resume(&self) {
+        self.player.resume();
+    }
+
+    /// Queue one worker-produced audio batch (`[l0, r0, l1, r1, ...]`).
+    pub fn queue(&mut self, interleaved: &[f32]) {
+        self.player.queue(interleaved);
     }
 }

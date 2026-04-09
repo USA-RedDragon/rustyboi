@@ -34,11 +34,9 @@ console_error_panic_hook = "0.1"
 [dependencies.web-sys]
 version = "0.3"
 features = [
-    "Window",
-    "Document",
-    "Element",
-    "HtmlCanvasElement",
-    "CanvasRenderingContext2d",
+    # Rendering (worker-side, OffscreenCanvas transferred from the main thread)
+    "OffscreenCanvas",
+    "OffscreenCanvasRenderingContext2d",
     "ImageData",
     "console",
     # IndexedDB storage
