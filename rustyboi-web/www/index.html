@@ -197,10 +197,57 @@
 
     main().catch((err) => setStatus(`Fatal: ${err}`));
 
-    // PWA: register the offline app-shell service worker (best-effort).
+    // PWA: register the offline service worker + a user-prompted update flow.
     if ("serviceWorker" in navigator) {
-      window.addEventListener("load", () => {
-        navigator.serviceWorker.register("sw.js").catch(() => {});
+      window.addEventListener("load", async () => {
+        let reloading = false;
+        // The new worker took control (after the user accepted) — reload once.
+        navigator.serviceWorker.addEventListener("controllerchange", () => {
+          if (reloading) return;
+          reloading = true;
+          window.location.reload();
+        });
+
+        let reg;
+        try { reg = await navigator.serviceWorker.register("sw.js"); }
+        catch { return; }
+
+        const showUpdate = (worker) => {
+          if (document.getElementById("update-bar")) return;
+          const bar = document.createElement("div");
+          bar.id = "update-bar";
+          bar.textContent = "A new version is available. ";
+          bar.style.cssText =
+            "position:fixed;left:0;right:0;bottom:0;z-index:9999;padding:10px 14px;" +
+            "background:#0f380f;color:#9bbc0f;font:14px system-ui,sans-serif;" +
+            "display:flex;gap:12px;align-items:center;justify-content:center;";
+          const reload = document.createElement("button");
+          reload.textContent = "Reload";
+          reload.style.cssText =
+            "background:#9bbc0f;color:#0f380f;border:0;border-radius:6px;" +
+            "padding:6px 14px;font-weight:600;cursor:pointer;";
+          reload.onclick = () => worker.postMessage("SKIP_WAITING");
+          const later = document.createElement("button");
+          later.textContent = "Later";
+          later.style.cssText = "background:transparent;color:#9bbc0f;border:0;cursor:pointer;";
+          later.onclick = () => bar.remove();
+          bar.append(reload, later);
+          document.body.appendChild(bar);
+        };
+
+        // A worker may already be waiting from a previous visit.
+        if (reg.waiting && navigator.serviceWorker.controller) showUpdate(reg.waiting);
+
+        // A new worker started installing this session — prompt once it's ready,
+        // but only if there is an existing controller (i.e. it's an UPDATE, not
+        // the first install).
+        reg.addEventListener("updatefound", () => {
+          const nw = reg.installing;
+          if (!nw) return;
+          nw.addEventListener("statechange", () => {
+            if (nw.state === "installed" && navigator.serviceWorker.controller) showUpdate(nw);
+          });
+        });
       });
     }
   </script>

@@ -1,5 +1,6 @@
-// Minimal offline app-shell cache. Bump CACHE on a breaking change to force a
-// clean re-cache; old caches are pruned in `activate`.
+// Minimal offline app-shell cache with a user-prompted update flow. Bump CACHE
+// on a breaking change to force a clean re-cache; old caches are pruned in
+// `activate`.
 const CACHE = "rustyboi-v1";
 const SHELL = [
   "./",
@@ -14,7 +15,10 @@ const SHELL = [
 ];
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // Do NOT skipWaiting here: a new worker parks in `waiting` until the page
+  // tells it to activate (the "Update available" prompt), so we never swap code
+  // out from under a running game without the user's say-so.
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
 });
 
 self.addEventListener("activate", (e) => {
@@ -23,6 +27,11 @@ self.addEventListener("activate", (e) => {
       .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
+});
+
+// The page posts this when the user accepts the update; take over immediately.
+self.addEventListener("message", (e) => {
+  if (e.data === "SKIP_WAITING") self.skipWaiting();
 });
 
 // Stale-while-revalidate for same-origin GETs: serve the cached copy instantly
