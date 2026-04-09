@@ -20,11 +20,13 @@
 //! [`app::App`]. Web (wgpu-WebGL2) and Android adapters reuse this crate.
 
 pub mod app;
+pub mod contract;
 pub mod palette;
 pub mod renderer;
 pub mod ui_host;
 
 pub use app::{App, FrameStep, PlatformRequest, ResolvedAction};
+pub use contract::{drive_action, Frontend, PauseHint};
 pub use palette::ColorPalette;
 pub use renderer::{GameFrame, PhysicalRect, Renderer, SourceSize};
 pub use ui_host::{UiFrame, UiHost};

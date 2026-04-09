@@ -4,7 +4,7 @@ use rustyboi_core_lib::{cpu, gb, input};
 use std::env;
 use std::sync::{Arc, Mutex};
 use egui::Context;
-use crate::actions::{GuiAction, SessionUiState};
+use crate::actions::{ActionKind, GuiAction, SessionUiState, COMMANDS};
 // Hardware / palette pickers live only in the desktop Settings menu bar.
 #[cfg(not(target_os = "android"))]
 use crate::actions::{HardwareChoice, PaletteChoice};
@@ -14,6 +14,18 @@ use crate::library::LibraryPanel;
 use crate::touch_controls;
 
 pub const PANEL_BACKGROUND: egui::Color32 = egui::Color32::from_rgba_premultiplied(64, 64, 64, 220);
+
+/// The menu label for a command, looked up in the shared [`COMMANDS`] table so a
+/// single edit there re-labels every frontend. Falls back to the debug name if a
+/// kind is somehow absent (it never is — `menu_labels_cover_every_command`
+/// pins that).
+fn command_label(kind: ActionKind) -> &'static str {
+    COMMANDS
+        .iter()
+        .find(|c| c.action_kind == kind)
+        .map(|c| c.label)
+        .unwrap_or("?")
+}
 
 /// Render a single toggle row in the mobile menu overlay. Behaves like
 /// `ui.checkbox(...)` but lays out as a full-width row with a check
@@ -84,9 +96,6 @@ pub struct Gui {
     // Tracks active multi-touch positions across frames so the touch
     // overlay can recognise more than one finger at once.
     touch_state: touch_controls::TouchState,
-    // Whether to draw the on-screen Game Boy controls. Defaults to true on
-    // Android, false on other platforms; can be toggled via the View menu.
-    show_touch_controls: bool,
     /// Android-only on-screen ROM library. Opened automatically when no
     /// ROM is loaded so the user has a path forward.
     #[cfg(target_os = "android")]
@@ -144,7 +153,6 @@ impl Gui {
             pending_dialog_result,
             touch_buttons: input::ButtonState::default(),
             touch_state: touch_controls::TouchState::default(),
-            show_touch_controls: cfg!(target_os = "android"),
             #[cfg(target_os = "android")]
             library: {
                 let mut p = LibraryPanel::default();
@@ -248,7 +256,9 @@ impl Gui {
             #[cfg(not(target_os = "android"))]
             { false }
         };
-        if self.show_touch_controls && !suppress_touch {
+        // Whether to show the on-screen controls is session-owned (toggled via
+        // the `ToggleTouchControls` action); read the latest from the snapshot.
+        if session.touch_controls && !suppress_touch {
             self.touch_buttons = touch_controls::show(ctx, &mut self.touch_state);
         } else {
             self.touch_buttons = input::ButtonState::default();
@@ -274,7 +284,7 @@ impl Gui {
                         }
                         ui.separator();
                     }
-                    if ui.button("Load ROM").clicked() {
+                    if ui.button(command_label(ActionKind::LoadRom)).clicked() {
                         let mut dialog = file_dialog::new()
                             .add_filter("Game Boy ROM", &["gb", "gbc", "zip"])
                             .add_filter("All Files", &["*"]);
@@ -291,7 +301,7 @@ impl Gui {
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Save State").clicked() {
+                    if ui.button(command_label(ActionKind::SaveState)).clicked() {
                         let timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
@@ -312,7 +322,7 @@ impl Gui {
                         });
                         ui.close_menu();
                     }
-                    if ui.button("Load State").clicked() {
+                    if ui.button(command_label(ActionKind::LoadState)).clicked() {
                         let mut dialog = file_dialog::new()
                             .add_filter("RustyBoi Save State", &["rustyboisave"])
                             .add_filter("All Files", &["*"]);
@@ -332,15 +342,15 @@ impl Gui {
                     // Quick + numbered savestate slots (via the session). The
                     // quick slot has dedicated hotkeys (F5/F8); the numbered
                     // slots (0-9) are keyed by ROM id under the save dir.
-                    if ui.button("Quicksave (F5)").clicked() {
+                    if ui.button(format!("{} (F5)", command_label(ActionKind::Quicksave))).clicked() {
                         *action = Some(GuiAction::Quicksave);
                         ui.close_menu();
                     }
-                    if ui.button("Quickload (F8)").clicked() {
+                    if ui.button(format!("{} (F8)", command_label(ActionKind::Quickload))).clicked() {
                         *action = Some(GuiAction::Quickload);
                         ui.close_menu();
                     }
-                    ui.menu_button("Save State to Slot", |ui| {
+                    ui.menu_button(command_label(ActionKind::SaveSlot), |ui| {
                         for slot in 0u32..10 {
                             let filled = session.slots.contains(&slot);
                             let label = if filled {
@@ -354,7 +364,7 @@ impl Gui {
                             }
                         }
                     });
-                    ui.menu_button("Load State from Slot", |ui| {
+                    ui.menu_button(command_label(ActionKind::LoadSlot), |ui| {
                         if session.slots.is_empty() {
                             ui.label("No saved slots");
                         }
@@ -366,7 +376,7 @@ impl Gui {
                         }
                     });
                     ui.separator();
-                    if ui.button("Exit").clicked() {
+                    if ui.button(command_label(ActionKind::Exit)).clicked() {
                         *action = Some(GuiAction::Exit);
                         ui.close_menu();
                     }
@@ -374,7 +384,7 @@ impl Gui {
 
                 ui.menu_button("Emulation", |ui| {
                     *any_menu_open = true;
-                    if ui.button("Restart").clicked() {
+                    if ui.button(command_label(ActionKind::Restart)).clicked() {
                         *action = Some(GuiAction::Restart);
                         ui.close_menu();
                     }
@@ -489,6 +499,17 @@ impl Gui {
                             }
                         }
                     });
+                });
+
+                ui.menu_button("View", |ui| {
+                    *any_menu_open = true;
+                    // Label sourced from the shared COMMANDS table so it stays
+                    // in sync with the other frontends' overlay toggle.
+                    let mut on = session.touch_controls;
+                    if ui.checkbox(&mut on, command_label(ActionKind::ToggleTouchControls)).clicked() {
+                        *action = Some(GuiAction::ToggleTouchControls);
+                        ui.close_menu();
+                    }
                 });
             });
         });
@@ -955,13 +976,14 @@ impl Gui {
                         );
                         // View toggle: lets the user hide the touch
                         // overlay even on Android (useful with a Bluetooth
-                        // gamepad).
-                        mobile_toggle_row(
-                            ui,
-                            row_size,
-                            "On-screen Controls",
-                            &mut self.show_touch_controls,
-                        );
+                        // gamepad). Session-owned; emit the toggle action.
+                        {
+                            let mut on = session.touch_controls;
+                            mobile_toggle_row(ui, row_size, "On-screen Controls", &mut on);
+                            if on != session.touch_controls {
+                                *action = Some(GuiAction::ToggleTouchControls);
+                            }
+                        }
 
                         if close_after_action {
                             close_requested = true;
@@ -1039,5 +1061,22 @@ impl Gui {
                     ui.label("Game Boy not available");
                 }
             });
+    }
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::*;
+
+    // The desktop menu is driven by the shared COMMANDS table via
+    // `command_label`; every command must resolve to a non-empty label so a
+    // table edit re-labels the menu and a missing entry can't render "?".
+    #[test]
+    fn command_labels_resolve_for_every_command() {
+        for c in COMMANDS {
+            let label = command_label(c.action_kind);
+            assert!(!label.is_empty(), "empty label for {:?}", c.action_kind);
+            assert_ne!(label, "?", "unresolved label for {:?}", c.action_kind);
+        }
     }
 }
