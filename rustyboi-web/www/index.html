@@ -50,6 +50,38 @@
     #status { font-size: 0.8rem; color: #9aa2ad; min-height: 1.2em; }
     .keys { font-size: 0.75rem; color: #7d8590; max-width: 480px; text-align: center; line-height: 1.5; }
     .keys code { background: #23272e; padding: 0.05rem 0.35rem; border-radius: 3px; }
+
+    /* --- On-screen joypad overlay ---
+       Fixed layer over the whole viewport; individual buttons are absolutely
+       positioned from the SHARED rustyboi-session TouchLayout geometry. Hidden
+       by default; toggled via the ToggleTouchControls action / session state. */
+    #overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: none;
+      pointer-events: none;             /* layer is transparent to clicks... */
+      touch-action: none;               /* we handle all touch gestures */
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    #overlay.on { display: block; }
+    #overlay .btn {
+      position: absolute;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #e6e8eb;
+      background: rgba(40, 44, 52, 0.55);
+      border: 2px solid rgba(155, 188, 15, 0.6);
+      font-weight: 700;
+      pointer-events: auto;             /* ...only the buttons take input */
+      touch-action: none;
+      transition: background 0.05s;
+    }
+    #overlay .btn.circle { border-radius: 50%; }
+    #overlay .btn.pill { border-radius: 999px; font-size: 0.7rem; letter-spacing: 0.04em; }
+    #overlay .btn.pressed { background: rgba(155, 188, 15, 0.7); color: #0f380f; }
   </style>
 </head>
 <body>
@@ -68,15 +100,19 @@
     <button id="pause">Pause</button>
     <button id="save">Save (slot 0)</button>
     <button id="load">Load (slot 0)</button>
+    <button id="touch">On-screen Controls</button>
   </div>
 
   <div id="status">Loading emulator…</div>
+
+  <!-- On-screen joypad; buttons injected from the shared TouchLayout geometry. -->
+  <div id="overlay" aria-hidden="true"></div>
 
   <div class="keys">
     Controls: <code>←↑↓→</code> D-pad · <code>X</code> A · <code>Z</code> B ·
     <code>Enter</code> Start · <code>Shift</code> Select · <code>P</code> pause ·
     <code>Tab</code> (hold) fast-forward · <code>F5</code> quicksave ·
-    <code>F8</code> quickload
+    <code>F8</code> quickload · <em>On-screen Controls</em> toggles a touch joypad
   </div>
 
   <!--
@@ -86,13 +122,14 @@
     it, so no framebuffer is ever posted back.
   -->
   <script type="module">
-    import init, { WebAudio } from "./pkg/rustyboi_web.js";
+    import init, { WebAudio, TouchOverlay } from "./pkg/rustyboi_web.js";
 
     const statusEl = document.getElementById("status");
     const setStatus = (msg) => { statusEl.textContent = msg; };
 
     async function main() {
-      // Main-thread wasm instance: only used for the WebAudio sink.
+      // Main-thread wasm instance: WebAudio sink + the shared touch-overlay
+      // geometry (TouchOverlay wraps rustyboi_session::overlay::TouchLayout).
       await init();
       const audio = new WebAudio();
 
@@ -115,6 +152,8 @@
           case "Ready":
             // Reflect persisted hardware choice in the selector.
             if (m.hardware) document.getElementById("hardware").value = m.hardware;
+            // Apply persisted UI state, then default the overlay on for touch.
+            if (m.uiState) applyUiState(m.uiState);
             break;
           case "Audio":
             audio.queue(m.samples); // Float32Array, transferred from the worker
@@ -122,14 +161,19 @@
           case "Status":
             setStatus(m.msg);
             break;
-          case "Saved":
-            setStatus(`Saved ${m.slot === "quick" ? "quicksave" : "slot " + m.slot}.`);
-            break;
-          case "Loaded":
-            setStatus(`Loaded ${m.slot === "quick" ? "quicksave" : "slot " + m.slot}.`);
-            break;
           case "Error":
             setStatus(`Error: ${m.msg}`);
+            break;
+          case "ClearError":
+            // A load succeeded / error dismissed — nothing to clear in this shell
+            // beyond leaving the next Status to overwrite the line.
+            break;
+          case "ResizeContent":
+            // Content stays 160x144 on web; keep the fixed 3x CSS box. Hook left
+            // here so an SGB-border-sized content would resize the visible canvas.
+            break;
+          case "TouchControls":
+            setOverlayVisible(!!m.on);
             break;
           default:
             break;
@@ -137,6 +181,117 @@
       };
 
       const send = (msg, transfer) => worker.postMessage(msg, transfer || []);
+
+      // --- On-screen joypad overlay (shared TouchLayout geometry) ------------
+      const overlayEl = document.getElementById("overlay");
+      let overlay = null;      // TouchOverlay (wasm) — geometry + hit-testing
+      const btnEls = [];       // DOM nodes for each overlay button
+      const pointers = new Map(); // pointerId -> {x, y} active touches
+      let lastMask = -1;
+
+      // (Re)build the DOM buttons for the current viewport size.
+      function buildOverlay() {
+        const w = window.innerWidth, h = window.innerHeight;
+        if (!overlay) overlay = new TouchOverlay(w, h);
+        else overlay.resize(w, h);
+        overlayEl.replaceChildren();
+        btnEls.length = 0;
+        const unit = overlay.unit();
+        for (const b of overlay.layout()) {
+          const el = document.createElement("div");
+          el.className = `btn ${b.shape}`;
+          el.textContent = b.label;
+          el.style.left = `${b.x}px`;
+          el.style.top = `${b.y}px`;
+          el.style.width = `${b.w}px`;
+          el.style.height = `${b.h}px`;
+          el.style.fontSize = b.shape === "pill" ? `${unit * 0.28}px` : `${unit * 0.5}px`;
+          el.dataset.button = b.button;
+          el.addEventListener("pointerdown", onDown);
+          overlayEl.appendChild(el);
+          btnEls.push(el);
+        }
+        recomputeMask();
+      }
+
+      // Recompute the pressed mask from all active pointers via the shared
+      // multi-touch button_state, forward it to the worker, and reflect the
+      // pressed visuals. Only sends when the mask actually changes.
+      function recomputeMask() {
+        if (!overlay) return;
+        const xs = new Float32Array(pointers.size);
+        const ys = new Float32Array(pointers.size);
+        let i = 0;
+        for (const p of pointers.values()) { xs[i] = p.x; ys[i] = p.y; i++; }
+        const mask = overlay.button_mask(xs, ys);
+        if (mask !== lastMask) {
+          lastMask = mask;
+          send({ type: "SetTouchMask", mask });
+          for (const el of btnEls) {
+            const bit = BUTTON_BIT[el.dataset.button];
+            el.classList.toggle("pressed", (mask & (1 << bit)) !== 0);
+          }
+        }
+      }
+
+      const BUTTON_BIT = { a:0, b:1, start:2, select:3, up:4, down:5, left:6, right:7 };
+
+      function overlayVisible() { return overlayEl.classList.contains("on"); }
+      function setOverlayVisible(on) {
+        overlayEl.classList.toggle("on", on);
+        overlayEl.setAttribute("aria-hidden", on ? "false" : "true");
+        if (on) buildOverlay();
+        else { pointers.clear(); lastMask = -1; send({ type: "SetTouchMask", mask: 0 }); }
+      }
+
+      // Pointer events (touch + mouse + pen). A press starts on a button; we
+      // capture the pointer to that button so a finger can slide across the pad
+      // and still hit-test against the full shared layout via button_mask.
+      const point = (e) => ({ x: e.clientX, y: e.clientY });
+      function onDown(e) {
+        e.preventDefault();
+        e.currentTarget.setPointerCapture?.(e.pointerId);
+        e.currentTarget.addEventListener("pointermove", onMove);
+        e.currentTarget.addEventListener("pointerup", onUp);
+        e.currentTarget.addEventListener("pointercancel", onUp);
+        e.currentTarget.addEventListener("lostpointercapture", onUp);
+        pointers.set(e.pointerId, point(e));
+        recomputeMask();
+      }
+      function onMove(e) {
+        if (!pointers.has(e.pointerId)) return;
+        e.preventDefault();
+        pointers.set(e.pointerId, point(e));
+        recomputeMask();
+      }
+      function onUp(e) {
+        const t = e.currentTarget;
+        t.removeEventListener("pointermove", onMove);
+        t.removeEventListener("pointerup", onUp);
+        t.removeEventListener("pointercancel", onUp);
+        t.removeEventListener("lostpointercapture", onUp);
+        if (pointers.delete(e.pointerId)) recomputeMask();
+      }
+
+      // Rebuild geometry on resize / orientation change while shown.
+      window.addEventListener("resize", () => { if (overlayVisible()) buildOverlay(); });
+
+      // The View toggle: drive it through the session's ToggleTouchControls
+      // action; the worker replies TouchControls{on} which shows/hides the layer.
+      document.getElementById("touch").addEventListener("click", () => {
+        send({ type: "ToggleTouchControls" });
+      });
+
+      // Reflect persisted UI state; auto-show the overlay on touch-first devices.
+      function applyUiState(s) {
+        if (s.hardware) document.getElementById("hardware").value = s.hardware;
+        const coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+        let want = !!s.touchControls;
+        // If the session default doesn't have it on but this is a touch device,
+        // turn it on once so a phone user gets controls without hunting a menu.
+        if (!want && coarse) { send({ type: "ToggleTouchControls" }); return; }
+        setOverlayVisible(want);
+      }
 
       // --- ROM loading (Firefox-safe: <input type=file>, no FS Access API) ---
       document.getElementById("rom").addEventListener("change", async (e) => {
