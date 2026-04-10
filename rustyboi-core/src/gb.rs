@@ -2056,4 +2056,93 @@ mod savestate_roundtrip_tests {
              LFSR is not advancing per-dot as it should"
         );
     }
+
+    /// Regression for the Pokémon R/B/Y GameFreak-intro drumroll latch on the
+    /// non-CGB (DMG/SGB) APU path. The DMG-only `dmg_delayed_start` deferral
+    /// re-applies the NR44 trigger 6 cycles later; that re-application is the
+    /// trigger *taking effect* and must actually start the channel. The bug had
+    /// it re-arm another deferral whenever `alignment & 3` was odd — and a fixed
+    /// 6-cycle step only flips bit 1, so an odd alignment stays odd forever. A
+    /// game that re-triggers ch4 every frame at such an alignment then re-defers
+    /// every 6 cc, clearing `env_clock` each time, so the envelope volume never
+    /// steps: instead of a decaying drum hit the channel latches into continuous
+    /// noise (the "repeating drumroll" the user heard on DMG but not CGB).
+    ///
+    /// The exact latch depends on the game's CPU-driven write alignment, which a
+    /// synthetic register-poke harness does not reproduce, so this drives the
+    /// real ROM. It runs the ~9-16 s intro on DMG and requires the noise output
+    /// to fall silent between drum hits (rhythmic), matching hardware/CGB. On the
+    /// bug the noise floor never drops. Skipped when the ROM is unavailable
+    /// (set `POKEMON_BLUE_ROM` to its path; falls back to a repo-relative path).
+    #[test]
+    fn dmg_pokemon_intro_drumroll_is_rhythmic_not_latched() {
+        use crate::audio::AudioOutput;
+        use std::sync::{Arc, Mutex};
+
+        struct Cap(Arc<Mutex<Vec<(f32, f32)>>>);
+        impl AudioOutput for Cap {
+            fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+                Ok(())
+            }
+            fn add_samples(&mut self, s: &[(f32, f32)]) {
+                self.0.lock().unwrap().extend_from_slice(s);
+            }
+        }
+
+        let path = std::env::var("POKEMON_BLUE_ROM").unwrap_or_else(|_| {
+            "../roms/pokemon-blue.gb".to_string()
+        });
+        let Ok(rom) = fs::read(&path) else {
+            eprintln!("skipping dmg_pokemon_intro_drumroll: ROM not present ({path})");
+            return;
+        };
+
+        let mut gb = GB::new(Hardware::DMG);
+        gb.insert(cartridge::Cartridge::from_bytes(&rom).expect("load ROM"));
+        gb.skip_bios();
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        gb.enable_audio(Box::new(Cap(buf.clone()))).unwrap();
+
+        // Run through the intro; the diagnostic drumroll section (percussion
+        // with clear inter-hit silence gaps) sits around 20.5-24 s.
+        for _ in 0..1600 {
+            gb.run_until_frame(true);
+        }
+
+        // Over 100 ms RMS windows in that section, a rhythmic drumroll produces
+        // both loud hits AND several near-silent gaps between them. The latch bug
+        // fills the gaps with a continuous ~0.1 noise floor, so silent windows
+        // collapse to zero. Require both a loud hit and multiple silent gaps.
+        let samples = buf.lock().unwrap();
+        assert!(!samples.is_empty(), "no audio generated");
+        let win = 44100 / 10; // 100 ms
+        let start = (44100.0 * 20.5) as usize;
+        let end = ((44100.0 * 24.0) as usize).min(samples.len());
+        assert!(start + win <= end, "capture too short for the drumroll window");
+        let mut silent = 0usize;
+        let mut loud = 0usize;
+        let mut i = start;
+        while i + win <= end {
+            let rms = (samples[i..i + win]
+                .iter()
+                .map(|&(l, _)| l * l)
+                .sum::<f32>()
+                / win as f32)
+                .sqrt();
+            if rms < 0.01 {
+                silent += 1;
+            }
+            if rms > 0.15 {
+                loud += 1;
+            }
+            i += win;
+        }
+        assert!(loud > 4, "drumroll never played (loud windows = {loud})");
+        assert!(
+            silent >= 4,
+            "noise channel did not fall silent between drum hits \
+             (silent 100 ms windows = {silent}) -> ch4 latched into a continuous \
+             buzz on the non-CGB path (Pokémon intro drumroll)"
+        );
+    }
 }
