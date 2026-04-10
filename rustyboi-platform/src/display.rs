@@ -282,7 +282,6 @@ fn run_gui_loop(
         config.palette,
         config.rom.clone(),
         config.bios.clone(),
-        rom_bytes,
         should_start_paused,
     );
 

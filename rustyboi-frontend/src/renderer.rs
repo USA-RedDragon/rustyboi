@@ -133,10 +133,11 @@ impl Source {
 }
 
 /// The RGBA frame + its source size, ready to upload. Produced by the `App`
-/// each frame from the emulator's output.
-pub struct GameFrame {
+/// each frame from the emulator's output. Borrows the app's reused RGBA scratch
+/// so presenting never heap-allocates per frame.
+pub struct GameFrame<'a> {
     pub size: SourceSize,
-    pub rgba: Vec<u8>,
+    pub rgba: &'a [u8],
 }
 
 /// Everything egui produced this frame, handed from the `App` to the renderer.
@@ -358,7 +359,7 @@ impl Renderer {
             SourceSize::Gb => &self.gb_source,
             SourceSize::Sgb => &self.sgb_source,
         };
-        source.upload(&self.queue, &frame.rgba);
+        source.upload(&self.queue, frame.rgba);
         self.active = frame.size;
     }
 
