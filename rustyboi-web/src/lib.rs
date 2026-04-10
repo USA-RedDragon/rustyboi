@@ -400,6 +400,9 @@ impl Emulator {
             fast_forward: self.session.is_fast_forward(),
             touch_controls: self.session.touch_controls(),
             slots: self.session.list_slots(),
+            // Cheats UI is a separate web follow-up; keep this compiling by
+            // defaulting the new shared field (no web cheats surface yet).
+            ..Default::default()
         }
     }
 
