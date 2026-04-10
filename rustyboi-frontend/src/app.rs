@@ -355,6 +355,7 @@ impl App {
             fast_forward: self.is_fast_forward(),
             touch_controls: self.session.touch_controls(),
             slots: self.session.list_slots(),
+            cheats: self.session.cheats().map(str::to_owned).collect(),
         }
     }
 

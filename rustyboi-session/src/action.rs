@@ -77,6 +77,8 @@ pub struct SessionUiState {
     pub touch_controls: bool,
     /// Slot numbers that currently hold a saved state, ascending.
     pub slots: Vec<u32>,
+    /// Active cheat codes, in insertion order.
+    pub cheats: Vec<String>,
 }
 
 impl Default for SessionUiState {
@@ -91,6 +93,7 @@ impl Default for SessionUiState {
             fast_forward: false,
             touch_controls: cfg!(target_os = "android"),
             slots: Vec::new(),
+            cheats: Vec::new(),
         }
     }
 }
@@ -150,6 +153,10 @@ pub enum UiAction {
     SetRewindInterval(u32),
     /// Set how many rewind snapshots are retained.
     SetRewindDepth(usize),
+    /// Add a Game Genie / GameShark cheat code (session-lifetime).
+    AddCheat(String),
+    /// Remove a previously-added cheat by its raw code string.
+    RemoveCheat(String),
     /// User asked to pick a new ROM library root (SAF tree).
     #[cfg(target_os = "android")]
     OpenRomTree,
@@ -198,6 +205,8 @@ impl UiAction {
             UiAction::SetRewindEnabled(_) => ActionKind::SetRewindEnabled,
             UiAction::SetRewindInterval(_) => ActionKind::SetRewindInterval,
             UiAction::SetRewindDepth(_) => ActionKind::SetRewindDepth,
+            UiAction::AddCheat(_) => ActionKind::AddCheat,
+            UiAction::RemoveCheat(_) => ActionKind::RemoveCheat,
             #[cfg(target_os = "android")]
             UiAction::OpenRomTree => ActionKind::OpenRomTree,
             #[cfg(target_os = "android")]
@@ -242,6 +251,8 @@ pub enum ActionKind {
     SetRewindEnabled,
     SetRewindInterval,
     SetRewindDepth,
+    AddCheat,
+    RemoveCheat,
     #[cfg(target_os = "android")]
     OpenRomTree,
     #[cfg(target_os = "android")]
@@ -443,6 +454,13 @@ pub const COMMANDS: &[CommandDescriptor] = &[
         action_kind: ActionKind::ToggleTouchControls,
         label: "On-screen Controls",
         category: MenuCategory::View,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::AddCheat,
+        label: "Cheats",
+        category: MenuCategory::Settings,
         default_keybind: None,
         overlay_button: None,
     },
