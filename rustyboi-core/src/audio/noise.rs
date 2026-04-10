@@ -89,6 +89,12 @@ pub struct Noise {
     // DMG-only delayed channel start (SameBoy `dmg_delayed_start`).
     #[serde(default)]
     dmg_delayed_start: u32,
+    // True only while re-applying the deferred NR44 trigger from `run_cycles`,
+    // so `trigger` starts the channel instead of re-arming another deferral
+    // (SameBoy's delayed start is a one-shot). Not serialized: it never spans
+    // an instruction boundary.
+    #[serde(skip)]
+    in_deferred_reapply: bool,
     // SameBoy `noise_started_with_dac_disabled`.
     #[serde(default)]
     started_with_dac_off: bool,
@@ -150,6 +156,7 @@ impl Noise {
             lfsr_stepped_in_narrow: false,
             lfsr_bit7_before_step: false,
             dmg_delayed_start: 0,
+            in_deferred_reapply: false,
             started_with_dac_off: false,
             last_run_cc: 0,
             cgb: false,
@@ -338,7 +345,26 @@ impl Noise {
                 cycles -= head;
                 self.run_batch(head);
                 let nr44 = self.nr44 | 0x80;
+                // The deferred re-application is the trigger *taking effect* — it
+                // must actually start the channel, never re-arm another 6-cycle
+                // deferral. rustyboi re-applies at the exact 6-cc crossing (so the
+                // ripple counter/LFSR start at the right cc), where `alignment`
+                // has advanced by only the 6 deferred cycles; `6 & 3 == 2` flips
+                // only bit 1, so an odd `alignment & 3` stays odd and the re-apply
+                // would re-defer forever. (SameBoy avoids this because its
+                // `start_ch4` re-write fires at the end of `GB_apu_run`, after
+                // `alignment += cycles` over the whole scheduler quantum, landing
+                // on a varied alignment.) A game that re-triggers ch4 every frame
+                // at such a sub-alignment — Pokémon R/B/Y's GameFreak-intro
+                // drumroll — otherwise has every trigger's `env_clock = false`
+                // clear the envelope every 6 cc, so the volume never steps and the
+                // noise channel latches into a continuous buzz instead of a
+                // decaying drum hit. `in_deferred_reapply` makes the crossing a
+                // one-shot start (never a re-defer), matching hardware/CGB and the
+                // SameSuite channel_4 delay/alignment tests.
+                self.in_deferred_reapply = true;
                 self.write_nrx4(nr44);
+                self.in_deferred_reapply = false;
                 if cycles == 0 {
                     return;
                 }
@@ -545,8 +571,14 @@ impl Noise {
         self.env_clock = false;
 
         // DMG-only: an unaligned trigger is deferred 6 cycles (SameBoy
-        // `dmg_delayed_start`); the whole start runs at the crossing.
-        if !self.cgb && (self.alignment & 3) != 0 && self.dmg_delayed_start == 0 {
+        // `dmg_delayed_start`); the whole start runs at the crossing. The
+        // deferred re-application (`in_deferred_reapply`) is that crossing: it
+        // must start the channel, not re-arm the deferral (see `run_cycles`).
+        if !self.cgb
+            && (self.alignment & 3) != 0
+            && self.dmg_delayed_start == 0
+            && !self.in_deferred_reapply
+        {
             self.dmg_delayed_start = 6;
             return;
         }
