@@ -2726,10 +2726,15 @@ dependencies = [
  "console_error_panic_hook",
  "js-sys",
  "rustyboi-core",
+ "rustyboi-frontend",
  "rustyboi-session",
+ "serde",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]

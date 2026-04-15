@@ -1,7 +1,7 @@
 // Minimal offline app-shell cache with a user-prompted update flow. Bump CACHE
 // on a breaking change to force a clean re-cache; old caches are pruned in
 // `activate`.
-const CACHE = "rustyboi-v2";
+const CACHE = "rustyboi-v3";
 const SHELL = [
   "./",
   "./index.html",
