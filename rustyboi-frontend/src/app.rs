@@ -56,7 +56,9 @@ pub enum PlatformRequest {
     AndroidLibrary(GuiAction),
 }
 
-/// Frame pacing target (~59.7 fps), matching the original World loop.
+/// Frame pacing target (~59.7 fps), matching the original World loop. Only the
+/// native pacing loop uses it; on web the browser paces via requestAnimationFrame.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const TARGET_FRAME_TIME: Duration = Duration::from_micros(16750);
 
 /// The portable app.

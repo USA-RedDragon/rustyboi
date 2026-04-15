@@ -382,7 +382,11 @@ impl Renderer {
 
     /// Upload an RGBA8 frame of the given source size, making it active for the
     /// next `render`. `rgba` must be `width * height * 4` bytes.
-    fn upload_game(&mut self, frame: &GameFrame) {
+    /// Upload a game frame to its source texture (marking `has_game`). Public so
+    /// the web driver can upload directly from its shared buffer and then render
+    /// with `game: None` — avoiding a per-frame clone to hand ownership across
+    /// the `RefCell` borrow. `render` still uploads internally when passed a frame.
+    pub fn upload_game(&mut self, frame: &GameFrame) {
         let source = match frame.size {
             SourceSize::Gb => &self.gb_source,
             SourceSize::Sgb => &self.sgb_source,

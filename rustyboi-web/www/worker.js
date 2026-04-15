@@ -51,14 +51,24 @@ const emit = (reqs) => {
   for (const r of reqs) post(r);
 };
 
+// Recycled frame ArrayBuffers, transferred back by the main thread after each
+// upload. Reusing them means zero per-frame framebuffer allocation (no GC churn
+// on either thread). Bounded so a stall can't grow it without limit.
+const framePool = [];
+const FRAME_POOL_MAX = 4;
+
 // Post the just-rendered frame's RGBA (transferring its buffer — no copy) and,
 // if the session UI-state changed, the fresh snapshot for the egui UI.
 function postFrameAndState() {
-  const rgba = emu.frame(); // Uint8Array copy of this frame's RGBA
-  post(
-    { type: "Frame", rgba, width: emu.frame_width(), height: emu.frame_height() },
-    [rgba.buffer],
-  );
+  const w = emu.frame_width();
+  const h = emu.frame_height();
+  const need = w * h * 4;
+  // Reuse a returned buffer of the right size (GB 160x144 vs SGB 256x224 differ).
+  let buf = framePool.pop();
+  if (!buf || buf.byteLength !== need) buf = new ArrayBuffer(need);
+  const rgba = new Uint8Array(buf);
+  emu.frame_into(rgba); // wasm copies this frame's RGBA into the pooled buffer
+  post({ type: "Frame", rgba, width: w, height: h }, [buf]);
   const uiState = emu.take_ui_state(); // JSON string, or undefined when unchanged
   if (uiState) post({ type: "UiState", json: uiState });
 }
@@ -119,6 +129,11 @@ self.onmessage = async (e) => {
       case "Init":
         await handleInit();
         return;
+    }
+    if (m.type === "ReturnBuffer") {
+      // Main thread finished uploading a frame and handed its buffer back.
+      if (m.buf && framePool.length < FRAME_POOL_MAX) framePool.push(m.buf);
+      return;
     }
     if (!emu) return; // ignore control messages until booted
 
