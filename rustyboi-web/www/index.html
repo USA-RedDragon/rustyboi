@@ -56,8 +56,16 @@
     // emits a Resized event that reconfigures the wgpu surface.
     function sizeCanvas(canvas) {
       const dpr = window.devicePixelRatio || 1;
-      const w = Math.max(1, Math.round(window.innerWidth * dpr));
-      const h = Math.max(1, Math.round(window.innerHeight * dpr));
+      let w = Math.max(1, Math.round(window.innerWidth * dpr));
+      let h = Math.max(1, Math.round(window.innerHeight * dpr));
+      // Cap the render (backing-store) resolution. wgpu-WebGL2 fragment cost
+      // scales with pixel count, and a maximized hi-DPI window (millions of px)
+      // tanked fps. The GB screen is 160x144 pixel-art that upscales fine, so a
+      // ~1440px-long backing looks the same on screen while the browser CSS-
+      // scales the canvas to fill the viewport. Bounds cost regardless of window.
+      const CAP = 1440;
+      const longer = Math.max(w, h);
+      if (longer > CAP) { const s = CAP / longer; w = Math.round(w * s); h = Math.round(h * s); }
       if (canvas.width !== w) canvas.width = w;
       if (canvas.height !== h) canvas.height = h;
     }
