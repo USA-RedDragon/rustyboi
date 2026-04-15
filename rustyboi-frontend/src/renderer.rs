@@ -75,6 +75,7 @@ impl Source {
         uniform_buffer: &wgpu::Buffer,
         width: u32,
         height: u32,
+        format: wgpu::TextureFormat,
     ) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("rustyboi_game_source_texture"),
@@ -82,7 +83,7 @@ impl Source {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -270,8 +271,27 @@ impl Renderer {
             ],
         });
 
-        let gb_source =
-            Source::new(&device, &bind_group_layout, &sampler, &uniform_buffer, GB_WIDTH, GB_HEIGHT);
+        // Match the game texture's sRGB-ness to the surface so colors pass
+        // through unchanged: an sRGB texture sampled to linear MUST be written to
+        // an sRGB surface (hardware re-encodes), and a UNORM texture to a UNORM
+        // surface. A mismatch (sRGB texture -> UNORM surface) displays linear
+        // values = too dark — this is why Android (non-sRGB surface) looked dark
+        // while desktop (sRGB fallback surface) looked right. The GB frame bytes
+        // are display-ready (already sRGB-encoded), so pass-through is correct.
+        let tex_format = if surface_format.is_srgb() {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        let gb_source = Source::new(
+            &device,
+            &bind_group_layout,
+            &sampler,
+            &uniform_buffer,
+            GB_WIDTH,
+            GB_HEIGHT,
+            tex_format,
+        );
         let sgb_source = Source::new(
             &device,
             &bind_group_layout,
@@ -279,6 +299,7 @@ impl Renderer {
             &uniform_buffer,
             SGB_WIDTH,
             SGB_HEIGHT,
+            tex_format,
         );
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
