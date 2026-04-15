@@ -338,26 +338,25 @@ fn draw(
 ) {
     // Pull the shared inputs for this frame, releasing the borrow before running
     // egui (the rfd file-picker callback can re-enter `shared` via JS).
-    let (ui_state, error, status, clear_err, mut game_frame): (
+    let (ui_state, error, status, clear_err): (
         SessionUiState,
         Option<String>,
         Option<String>,
         bool,
-        Option<(Vec<u8>, SourceSize)>,
     ) = {
         let mut s = shared.borrow_mut();
-        let frame = if s.frame_dirty {
+        // Upload the game texture straight from the shared buffer while borrowed —
+        // no clone to carry ownership past the borrow. render() below draws the
+        // retained texture (has_game) with game: None.
+        if s.frame_dirty {
             s.frame_dirty = false;
-            Some((s.frame_rgba.clone(), s.frame_size))
-        } else {
-            None
-        };
+            renderer.upload_game(&GameFrame { size: s.frame_size, rgba: &s.frame_rgba });
+        }
         (
             s.ui_state.clone(),
             s.error.take(),
             s.status.take(),
             std::mem::take(&mut s.clear_error),
-            frame,
         )
     };
 
@@ -394,11 +393,9 @@ fn draw(
         }
     }
 
-    // Render: game letterboxed into the central region, egui on top.
-    let game = game_frame
-        .as_mut()
-        .map(|(rgba, size)| GameFrame { size: *size, rgba });
-    if let Err(e) = renderer.render(game.as_ref(), ui_frame.region, paint) {
+    // Render: the game texture (uploaded above) letterboxed into the central
+    // region, egui on top. game: None — the retained texture is drawn via has_game.
+    if let Err(e) = renderer.render(None, ui_frame.region, paint) {
         match e {
             wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
                 let (w, h) = renderer.surface_size();
