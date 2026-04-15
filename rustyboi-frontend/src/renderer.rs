@@ -271,17 +271,20 @@ impl Renderer {
             ],
         });
 
-        // Match the game texture's sRGB-ness to the surface so colors pass
-        // through unchanged: an sRGB texture sampled to linear MUST be written to
-        // an sRGB surface (hardware re-encodes), and a UNORM texture to a UNORM
-        // surface. A mismatch (sRGB texture -> UNORM surface) displays linear
-        // values = too dark — this is why Android (non-sRGB surface) looked dark
-        // while desktop (sRGB fallback surface) looked right. The GB frame bytes
-        // are display-ready (already sRGB-encoded), so pass-through is correct.
-        let tex_format = if surface_format.is_srgb() {
-            wgpu::TextureFormat::Rgba8UnormSrgb
-        } else {
+        // The game-texture format that displays correctly depends on how each
+        // platform's SCANOUT treats the (non-sRGB) surface, not on the surface
+        // format alone. Empirically (verified on-device): on desktop the native
+        // swapchain applies an sRGB encode on present, so the GB frame must be
+        // sampled as sRGB (linearized) to reproduce; on Android (SurfaceFlinger)
+        // and web (WebGL2) a non-sRGB surface is presented RAW, so the GB's
+        // already-sRGB-encoded bytes must be written as UNORM (pass-through). A
+        // wrong choice shifts brightness (sRGB-on-raw = dark, UNORM-on-encoding =
+        // too bright). `surface_format` is intentionally unused for this.
+        let _ = surface_format;
+        let tex_format = if cfg!(any(target_arch = "wasm32", target_os = "android")) {
             wgpu::TextureFormat::Rgba8Unorm
+        } else {
+            wgpu::TextureFormat::Rgba8UnormSrgb
         };
         let gb_source = Source::new(
             &device,
