@@ -164,6 +164,12 @@ pub struct Renderer {
     uniform_buffer: wgpu::Buffer,
     render_pipeline: wgpu::RenderPipeline,
     clear_color: wgpu::Color,
+    /// Set once any game frame has been uploaded. Lets a render tick with no
+    /// fresh frame redraw the last texture instead of clearing to black — the
+    /// web frontend runs the emulator in a worker at 59.7fps, decoupled from the
+    /// display's requestAnimationFrame, so refreshes routinely land with no new
+    /// frame and would otherwise flash the game area black.
+    has_game: bool,
 
     egui_renderer: egui_wgpu::Renderer,
 }
@@ -344,6 +350,7 @@ impl Renderer {
             uniform_buffer,
             render_pipeline,
             clear_color: wgpu::Color::BLACK,
+            has_game: false,
             egui_renderer,
         }
     }
@@ -382,6 +389,7 @@ impl Renderer {
         };
         source.upload(&self.queue, frame.rgba);
         self.active = frame.size;
+        self.has_game = true;
     }
 
     fn active_source(&self) -> &Source {
@@ -445,7 +453,7 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             // Draw only when there is a game frame and a non-empty target.
-            if game.is_some() && scissor.2 != 0 && scissor.3 != 0 {
+            if self.has_game && scissor.2 != 0 && scissor.3 != 0 {
                 rpass.set_pipeline(&self.render_pipeline);
                 rpass.set_bind_group(0, &self.active_source().bind_group, &[]);
                 rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
