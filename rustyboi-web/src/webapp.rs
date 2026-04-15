@@ -252,7 +252,14 @@ async fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Res
     let loop_window = window.clone();
     let mut kb_mask: u8 = 0;
     event_loop.spawn(move |event, elwt| {
-        elwt.set_control_flow(winit::event_loop::ControlFlow::Poll);
+        // Wait, NOT Poll. On web, Poll makes winit reschedule an immediate wakeup
+        // via Scheduler.postTask every iteration, and dropping the previous
+        // schedule calls AbortController.abort() — which Firefox implements by
+        // walking + saving a full stack, costing ~40% of the main thread. Our
+        // render loop is driven purely by request_redraw() (mapped to
+        // requestAnimationFrame) in AboutToWait, so Wait gives the same continuous
+        // rAF cadence with none of the postTask/abort churn.
+        elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
         match event {
             Event::WindowEvent { event, .. } => {
                 // Feed egui (mouse/keyboard/touch/IME + text entry for the cheat
