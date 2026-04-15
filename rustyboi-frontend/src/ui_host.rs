@@ -85,6 +85,13 @@ impl UiHost {
         self.gui.touch_button_state()
     }
 
+    /// Whether egui currently wants keyboard input (a text field is focused,
+    /// e.g. the cheat-code entry). The web adapter uses this to suppress
+    /// keyboard→GB-button input while the user is typing in the UI.
+    pub fn wants_keyboard_input(&self) -> bool {
+        self.egui_ctx.wants_keyboard_input()
+    }
+
     /// Update the DPI scale (winit `ScaleFactorChanged`).
     pub fn set_pixels_per_point(&mut self, scale: f32) {
         self.pixels_per_point = scale;

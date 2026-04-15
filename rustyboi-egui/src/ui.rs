@@ -309,10 +309,13 @@ impl Gui {
                     }
                     ui.separator();
                     if ui.button(command_label(ActionKind::SaveState)).clicked() {
+                        // `SystemTime::now()` is unsupported on wasm (would panic
+                        // via unwrap); fall back to 0 there — the value is only a
+                        // default filename suffix.
                         let timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs();
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
                         let file_name = format!("save_{}", timestamp);
                         let mut dialog = file_dialog::new()
                             .add_filter("RustyBoi Save State", &["rustyboisave"])
