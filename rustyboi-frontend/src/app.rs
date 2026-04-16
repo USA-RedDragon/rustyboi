@@ -627,7 +627,9 @@ impl App {
         // first, collecting its output, then drop the borrow.
         let (paint, ui_frame) = {
             let gb_ref = self.session.gb();
-            ui.run(window, paused_for_ui, registers, Some(gb_ref), &ui_state, extra_events)
+            // Desktop renders every frame (force_repaint: true); repaint-gating is
+            // a web concern (its main thread also composites the worker's frames).
+            ui.run(window, paused_for_ui, registers, Some(gb_ref), &ui_state, extra_events, true)
         };
 
         // Dispatch the action.
