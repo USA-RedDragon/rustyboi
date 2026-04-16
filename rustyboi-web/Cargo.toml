@@ -72,4 +72,9 @@ features = [
     "AudioNode",
     "AudioParam",
     "GainNode",
+    # Gamepad polling (physical controllers on the main thread).
+    "Window",
+    "Navigator",
+    "Gamepad",
+    "GamepadButton",
 ]
