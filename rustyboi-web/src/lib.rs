@@ -253,6 +253,18 @@ impl Emulator {
         out.copy_from(&self.rgba[..len]);
     }
 
+    /// Step back one rewind snapshot (hold-to-rewind, driven by the worker while
+    /// Backspace is held). Returns false when the buffer is exhausted. Re-presents
+    /// the restored frame into the RGBA buffer for the next `frame_into`.
+    pub fn rewind_step(&mut self) -> bool {
+        if !self.has_rom || self.session.rewind().is_none() {
+            return false;
+        }
+        let frame = self.session.gb_mut().get_current_frame();
+        self.present(&frame);
+        true
+    }
+
     /// Width of the RGBA in [`Emulator::frame`] (160 normal, 256 for SGB border).
     pub fn frame_width(&self) -> u32 {
         self.frame_w

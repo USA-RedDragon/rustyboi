@@ -68,6 +68,8 @@ struct Shared {
     load_rom: js_sys::Function,
     /// `(bytes: Uint8Array) => void` — worker `load_state`.
     load_state: js_sys::Function,
+    /// `(on: boolean) => void` — set the worker's hold-to-rewind state.
+    set_rewind: js_sys::Function,
 }
 
 impl Shared {
@@ -76,6 +78,7 @@ impl Shared {
         post_input: js_sys::Function,
         load_rom: js_sys::Function,
         load_state: js_sys::Function,
+        set_rewind: js_sys::Function,
     ) -> Self {
         Shared {
             frame_rgba: Vec::new(),
@@ -90,6 +93,7 @@ impl Shared {
             post_input,
             load_rom,
             load_state,
+            set_rewind,
         }
     }
 }
@@ -103,15 +107,17 @@ pub struct WebApp {
 
 #[wasm_bindgen]
 impl WebApp {
-    /// Build the driver. The four callbacks bridge OUT to the worker (the JS
-    /// shell wires them to `worker.postMessage`): `post_action(json)`,
-    /// `post_input(mask)`, `load_rom(name, bytes)`, `load_state(bytes)`.
+    /// Build the driver. The callbacks bridge OUT to the worker (the JS shell
+    /// wires them to `worker.postMessage`): `post_action(json)`,
+    /// `post_input(mask)`, `load_rom(name, bytes)`, `load_state(bytes)`,
+    /// `set_rewind(on)`.
     #[wasm_bindgen(constructor)]
     pub fn new(
         post_action: js_sys::Function,
         post_input: js_sys::Function,
         load_rom: js_sys::Function,
         load_state: js_sys::Function,
+        set_rewind: js_sys::Function,
     ) -> WebApp {
         console_error_panic_hook::set_once();
         WebApp {
@@ -120,6 +126,7 @@ impl WebApp {
                 post_input,
                 load_rom,
                 load_state,
+                set_rewind,
             ))),
             started: false,
         }
@@ -251,6 +258,7 @@ async fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Res
     // on-screen touch overlay each frame in `draw`).
     let loop_window = window.clone();
     let mut kb_mask: u8 = 0;
+    let mut rewind_held = false;
     event_loop.spawn(move |event, elwt| {
         // Wait, NOT Poll. On web, Poll makes winit reschedule an immediate wakeup
         // via Scheduler.postTask every iteration, and dropping the previous
@@ -267,15 +275,21 @@ async fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Res
                 ui.handle_event(&loop_window, &event);
                 match event {
                     WindowEvent::KeyboardInput { event: key, .. } => {
-                        // Track keyboard-held GB buttons, but not while the user
-                        // is typing in an egui text field (cheat code entry).
-                        if !ui.wants_keyboard_input() {
-                            apply_key(&mut kb_mask, &key);
-                        } else {
+                        // While the user is typing in an egui text field (cheat /
+                        // keybind entry) the keyboard belongs to the UI: no GB
+                        // input, no feature hotkeys, and release any held rewind.
+                        if ui.wants_keyboard_input() {
                             kb_mask = 0;
+                            set_rewind(&shared, &mut rewind_held, false);
+                        } else {
+                            apply_key(&mut kb_mask, &key);
+                            feature_hotkey(&shared, &mut rewind_held, &key);
                         }
                     }
-                    WindowEvent::Focused(false) => kb_mask = 0,
+                    WindowEvent::Focused(false) => {
+                        kb_mask = 0;
+                        set_rewind(&shared, &mut rewind_held, false);
+                    }
                     WindowEvent::Resized(size) => {
                         renderer.resize(size.width.max(1), size.height.max(1));
                         loop_window.request_redraw();
@@ -301,6 +315,34 @@ async fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Res
     });
 
     Ok(())
+}
+
+/// Feature hotkeys (mirrors the desktop bindings): Tab toggles fast-forward,
+/// Backspace is hold-to-rewind. The GB-button keys are handled by `apply_key`.
+fn feature_hotkey(shared: &Rc<RefCell<Shared>>, rewind_held: &mut bool, key: &KeyEvent) {
+    let PhysicalKey::Code(code) = key.physical_key else { return };
+    match code {
+        KeyCode::Tab => {
+            if key.state == ElementState::Pressed && !key.repeat {
+                dispatch_action(shared, UiAction::ToggleFastForward);
+            }
+        }
+        KeyCode::Backspace => set_rewind(shared, rewind_held, key.state == ElementState::Pressed),
+        _ => {}
+    }
+}
+
+/// Post the hold-to-rewind state to the worker, but only on a change (the worker
+/// steps back through its rewind buffer while this is on).
+fn set_rewind(shared: &Rc<RefCell<Shared>>, held: &mut bool, on: bool) {
+    if *held == on {
+        return;
+    }
+    *held = on;
+    let s = shared.borrow();
+    let f = s.set_rewind.clone();
+    drop(s);
+    let _ = f.call1(&JsValue::NULL, &JsValue::from_bool(on));
 }
 
 /// Update the keyboard-held GB button mask from a key event. Fixed default web
