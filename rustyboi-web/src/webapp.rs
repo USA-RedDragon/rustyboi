@@ -529,8 +529,8 @@ fn draw(
     }
 
     // Forward GB input: union of the physical keyboard + the egui on-screen
-    // touch overlay. Only post on change.
-    let mask = kb_mask | input_mask(ui.touch_button_state());
+    // touch overlay + any connected gamepad. Only post on change.
+    let mask = kb_mask | input_mask(ui.touch_button_state()) | gamepad_mask();
     {
         let mut s = shared.borrow_mut();
         if mask != s.last_input_mask {
@@ -652,6 +652,38 @@ fn input_mask(state: rustyboi_session::ButtonState) -> u8 {
     set(GbButton::Left, state.left);
     set(GbButton::Right, state.right);
     mask
+}
+
+/// Poll connected gamepads (the Gamepad API) and fold them into the GB button
+/// mask. Standard mapping: A=btn0, B=btn1, Select=btn8, Start=btn9, D-pad =
+/// btn12..15 OR the left stick (axes 0/1, web Y is +down). Returns 0 with no
+/// gamepad. Re-polled each frame — `get_gamepads` snapshots current state.
+fn gamepad_mask() -> u8 {
+    let Some(win) = web_sys::window() else { return 0 };
+    let Ok(pads) = win.navigator().get_gamepads() else { return 0 };
+    let mut bs = rustyboi_session::ButtonState::default();
+    for i in 0..pads.length() {
+        let Ok(pad) = pads.get(i).dyn_into::<web_sys::Gamepad>() else { continue };
+        let buttons = pad.buttons();
+        let pressed = |idx: u32| {
+            buttons
+                .get(idx)
+                .dyn_into::<web_sys::GamepadButton>()
+                .map(|b| b.pressed())
+                .unwrap_or(false)
+        };
+        let axes = pad.axes();
+        let axis = |idx: u32| axes.get(idx).as_f64().unwrap_or(0.0);
+        bs.a |= pressed(0);
+        bs.b |= pressed(1);
+        bs.select |= pressed(8);
+        bs.start |= pressed(9);
+        bs.up |= pressed(12) || axis(1) < -0.5;
+        bs.down |= pressed(13) || axis(1) > 0.5;
+        bs.left |= pressed(14) || axis(0) < -0.5;
+        bs.right |= pressed(15) || axis(0) > 0.5;
+    }
+    input_mask(bs)
 }
 
 /// Extract `(name, bytes)` from a picked file. On wasm the rfd picker always
