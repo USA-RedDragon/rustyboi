@@ -106,6 +106,15 @@
       // The driver calls this only when the open-panel set changes.
       const postDebugDetail = (active, bits) =>
         send({ type: "SetDebugDetail", active: !!active, bits: bits & 0xff });
+      // Toggle canvas fullscreen (main-thread DOM; the worker is not involved).
+      const toggleFullscreen = () => {
+        if (document.fullscreenElement) {
+          document.exitFullscreen();
+        } else {
+          const el = document.getElementById("screen");
+          if (el && el.requestFullscreen) el.requestFullscreen();
+        }
+      };
 
       // Trigger a browser download of `bytes` (Uint8Array) as `name`. Browsers
       // cannot write files directly, so we Blob → object URL → synthetic <a>
@@ -126,7 +135,7 @@
       const canvas = document.getElementById("screen");
       sizeCanvas(canvas);
 
-      const app = new WebApp(postAction, postInput, loadRom, loadState, setRewind, importFile, requestExport, postDebugDetail);
+      const app = new WebApp(postAction, postInput, loadRom, loadState, setRewind, importFile, requestExport, postDebugDetail, toggleFullscreen);
 
       // Route worker → main messages into the egui driver + audio sink.
       worker.onmessage = (e) => {

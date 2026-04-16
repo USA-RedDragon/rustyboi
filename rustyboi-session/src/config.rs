@@ -5,6 +5,7 @@
 //! DMG palette choice, input remap, rewind tuning, and the fast-forward factor.
 //! No host key codes, paths, or window state — those belong to the adapter.
 
+use crate::action::ScalingMode;
 use crate::input::InputMap;
 use crate::ports::{Storage, StorageError};
 use rustyboi_core_lib::gb::Hardware;
@@ -67,6 +68,17 @@ pub struct Config {
     pub rewind: RewindConfig,
     /// Fast-forward multiplier (GB frames per presented frame); clamped ≥ 1.
     pub fast_forward_factor: u32,
+    /// Master output volume, 0..=100. Scales the session's drained audio copy
+    /// only; the core/APU are untouched. `default` so older blobs still load.
+    #[serde(default = "default_volume")]
+    pub volume: u8,
+    /// Frame letterboxing policy. `default` so older blobs still load.
+    #[serde(default)]
+    pub scaling: ScalingMode,
+}
+
+fn default_volume() -> u8 {
+    100
 }
 
 impl Default for Config {
@@ -77,6 +89,8 @@ impl Default for Config {
             input_map: InputMap::default(),
             rewind: RewindConfig::default(),
             fast_forward_factor: 4,
+            volume: 100,
+            scaling: ScalingMode::default(),
         }
     }
 }
@@ -103,6 +117,11 @@ impl Config {
     pub fn ff_factor(&self) -> u32 {
         self.fast_forward_factor.max(1)
     }
+
+    /// Master volume as a 0.0..=1.0 multiplier for the drained audio copy.
+    pub fn volume_gain(&self) -> f32 {
+        self.volume.min(100) as f32 / 100.0
+    }
 }
 
 #[cfg(test)]
@@ -117,11 +136,37 @@ mod tests {
         cfg.hardware = Hardware::DMG;
         cfg.fast_forward_factor = 8;
         cfg.rewind.depth = 42;
+        cfg.volume = 40;
+        cfg.scaling = ScalingMode::Stretch;
         cfg.save(&mut storage).unwrap();
 
         let loaded = Config::load(&storage);
         assert_eq!(loaded, cfg);
         assert_eq!(loaded.ff_factor(), 8);
+        assert_eq!(loaded.volume, 40);
+        assert_eq!(loaded.scaling, ScalingMode::Stretch);
+        assert_eq!(loaded.volume_gain(), 0.4);
+    }
+
+    // A config blob written before `volume`/`scaling` existed must still load,
+    // defaulting the new fields (serde(default)) rather than failing to default.
+    #[test]
+    fn config_without_new_fields_defaults_them() {
+        let mut storage = MemStorage::new();
+        // Build a legacy blob by serializing a default config and dropping the
+        // new keys — robust against the exact shapes of the other fields.
+        let mut value: serde_json::Value =
+            serde_json::to_value(Config::default()).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("volume");
+        obj.remove("scaling");
+        storage
+            .write(CONFIG_KEY, serde_json::to_vec(&value).unwrap().as_slice())
+            .unwrap();
+
+        let loaded = Config::load(&storage);
+        assert_eq!(loaded.volume, 100, "missing volume defaults to 100");
+        assert_eq!(loaded.scaling, ScalingMode::FitAspect, "missing scaling defaults to FitAspect");
     }
 
     #[test]

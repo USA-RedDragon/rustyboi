@@ -15,6 +15,7 @@
 //! surfaces it everywhere.
 
 use crate::input::GbButton;
+use serde::{Deserialize, Serialize};
 
 /// A file handed to the session by the frontend's picker. Desktop passes a path
 /// (the frontend reads it); web/Android pass already-loaded bytes.
@@ -73,6 +74,24 @@ pub enum HardwareChoice {
     Sgb,
 }
 
+/// How the emulated frame is fit into its render region (letterboxing policy).
+/// `FitAspect` is the historical behavior (aspect-preserving contain);
+/// `IntegerAspect` snaps to the largest whole-number scale; `Stretch` fills the
+/// region on both axes, ignoring aspect. Serde-derived so it persists in
+/// [`Config`](crate::config::Config).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScalingMode {
+    FitAspect,
+    IntegerAspect,
+    Stretch,
+}
+
+impl Default for ScalingMode {
+    fn default() -> Self {
+        ScalingMode::FitAspect
+    }
+}
+
 /// A snapshot of session-owned state the menus render current selections from
 /// (checkmarks, radio dots, slot list). The UI never mutates the session
 /// directly; it reads this and emits [`UiAction`]s the session applies.
@@ -83,6 +102,10 @@ pub struct SessionUiState {
     pub rewind_enabled: bool,
     pub rewind_interval_frames: u32,
     pub rewind_depth: usize,
+    /// Master output volume, 0..=100 (scales the session's drained audio copy).
+    pub volume: u8,
+    /// How the frame is letterboxed in the render region.
+    pub scaling: ScalingMode,
     pub sgb_border: bool,
     pub fast_forward: bool,
     /// Whether the on-screen touch overlay is shown.
@@ -107,6 +130,8 @@ impl Default for SessionUiState {
             rewind_enabled: true,
             rewind_interval_frames: 6,
             rewind_depth: 90,
+            volume: 100,
+            scaling: ScalingMode::FitAspect,
             sgb_border: true,
             fast_forward: false,
             touch_controls: cfg!(target_os = "android"),
@@ -188,6 +213,13 @@ pub enum UiAction {
     SetRewindInterval(u32),
     /// Set how many rewind snapshots are retained.
     SetRewindDepth(usize),
+    /// Set the master output volume (0..=100).
+    SetVolume(u8),
+    /// Set how the frame is letterboxed in the render region.
+    SetScalingMode(ScalingMode),
+    /// Toggle host fullscreen (platform hook: desktop window / web canvas;
+    /// Android is already fullscreen). Transient — not persisted config.
+    ToggleFullscreen,
     /// Add a Game Genie / GameShark cheat code (session-lifetime).
     AddCheat(String),
     /// Remove a previously-added cheat by its raw code string.
@@ -246,6 +278,9 @@ impl UiAction {
             UiAction::SetRewindEnabled(_) => ActionKind::SetRewindEnabled,
             UiAction::SetRewindInterval(_) => ActionKind::SetRewindInterval,
             UiAction::SetRewindDepth(_) => ActionKind::SetRewindDepth,
+            UiAction::SetVolume(_) => ActionKind::SetVolume,
+            UiAction::SetScalingMode(_) => ActionKind::SetScalingMode,
+            UiAction::ToggleFullscreen => ActionKind::ToggleFullscreen,
             UiAction::AddCheat(_) => ActionKind::AddCheat,
             UiAction::RemoveCheat(_) => ActionKind::RemoveCheat,
             #[cfg(target_os = "android")]
@@ -298,6 +333,9 @@ pub enum ActionKind {
     SetRewindEnabled,
     SetRewindInterval,
     SetRewindDepth,
+    SetVolume,
+    SetScalingMode,
+    ToggleFullscreen,
     AddCheat,
     RemoveCheat,
     #[cfg(target_os = "android")]

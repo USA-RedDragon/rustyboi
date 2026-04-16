@@ -18,7 +18,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use rustyboi_session::action::{HardwareChoice, PaletteChoice};
+fn default_volume() -> u8 {
+    100
+}
+
+use rustyboi_session::action::{HardwareChoice, PaletteChoice, ScalingMode};
 use rustyboi_session::{SessionUiState, UiAction};
 
 /// Serializable mirror of [`HardwareChoice`].
@@ -105,6 +109,8 @@ pub enum WebAction {
     SetRewindEnabled(bool),
     SetRewindInterval(u32),
     SetRewindDepth(usize),
+    SetVolume(u8),
+    SetScalingMode(ScalingMode),
     AddCheat(String),
     RemoveCheat(String),
 }
@@ -132,6 +138,8 @@ impl WebAction {
             UiAction::SetRewindEnabled(b) => WebAction::SetRewindEnabled(*b),
             UiAction::SetRewindInterval(n) => WebAction::SetRewindInterval(*n),
             UiAction::SetRewindDepth(n) => WebAction::SetRewindDepth(*n),
+            UiAction::SetVolume(v) => WebAction::SetVolume(*v),
+            UiAction::SetScalingMode(m) => WebAction::SetScalingMode(*m),
             UiAction::AddCheat(c) => WebAction::AddCheat(c.clone()),
             UiAction::RemoveCheat(c) => WebAction::RemoveCheat(c.clone()),
             _ => return None,
@@ -159,6 +167,8 @@ impl WebAction {
             WebAction::SetRewindEnabled(b) => UiAction::SetRewindEnabled(b),
             WebAction::SetRewindInterval(n) => UiAction::SetRewindInterval(n),
             WebAction::SetRewindDepth(n) => UiAction::SetRewindDepth(n),
+            WebAction::SetVolume(v) => UiAction::SetVolume(v),
+            WebAction::SetScalingMode(m) => UiAction::SetScalingMode(m),
             WebAction::AddCheat(c) => UiAction::AddCheat(c),
             WebAction::RemoveCheat(c) => UiAction::RemoveCheat(c),
         }
@@ -175,6 +185,10 @@ pub struct WebUiState {
     pub rewind_enabled: bool,
     pub rewind_interval_frames: u32,
     pub rewind_depth: usize,
+    #[serde(default = "default_volume")]
+    pub volume: u8,
+    #[serde(default)]
+    pub scaling: ScalingMode,
     pub sgb_border: bool,
     pub fast_forward: bool,
     pub touch_controls: bool,
@@ -195,6 +209,8 @@ impl WebUiState {
             rewind_enabled: s.rewind_enabled,
             rewind_interval_frames: s.rewind_interval_frames,
             rewind_depth: s.rewind_depth,
+            volume: s.volume,
+            scaling: s.scaling,
             sgb_border: s.sgb_border,
             fast_forward: s.fast_forward,
             touch_controls: s.touch_controls,
@@ -213,6 +229,8 @@ impl WebUiState {
             rewind_enabled: self.rewind_enabled,
             rewind_interval_frames: self.rewind_interval_frames,
             rewind_depth: self.rewind_depth,
+            volume: self.volume,
+            scaling: self.scaling,
             sgb_border: self.sgb_border,
             fast_forward: self.fast_forward,
             touch_controls: self.touch_controls,

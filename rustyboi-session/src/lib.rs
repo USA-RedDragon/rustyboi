@@ -62,7 +62,7 @@ pub mod tas;
 pub use action::LibraryEntry;
 pub use action::{
     ActionKind, CommandDescriptor, FileData, HardwareChoice, KeyBind, LoadPurpose, MenuCategory,
-    PaletteChoice, SessionUiState, UiAction, COMMANDS,
+    PaletteChoice, ScalingMode, SessionUiState, UiAction, COMMANDS,
 };
 pub use apply::{ActionOutcome, PlatformRequest};
 pub use config::Config;

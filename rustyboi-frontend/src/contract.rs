@@ -36,6 +36,10 @@ pub trait Frontend {
     /// The user asked to quit; perform the host exit.
     fn exit(&mut self);
 
+    /// Toggle host fullscreen: desktop flips the winit window, web the canvas
+    /// Fullscreen API, Android no-ops (already fullscreen).
+    fn toggle_fullscreen(&mut self);
+
     /// The presented content size changed (SGB border / hardware toggle); resize
     /// the window/surface to fit `width x height` (pre-scale pixels).
     fn resize_content(&mut self, width: u32, height: u32);
@@ -88,6 +92,7 @@ pub fn drive_action<F: Frontend>(frontend: &mut F, action: UiAction, timestamp: 
     for req in outcome.requests {
         match req {
             PlatformRequest::Exit => frontend.exit(),
+            PlatformRequest::ToggleFullscreen => frontend.toggle_fullscreen(),
             PlatformRequest::ResizeContent { width, height } => {
                 frontend.resize_content(width, height)
             }

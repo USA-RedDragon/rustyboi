@@ -12,6 +12,7 @@
 
 use egui::{ClippedPrimitive, TexturesDelta};
 use egui_wgpu::ScreenDescriptor;
+use rustyboi_session::ScalingMode;
 use wgpu::util::DeviceExt;
 
 /// Normal Game Boy screen dimensions.
@@ -176,6 +177,9 @@ pub struct Renderer {
     /// Last frame's egui geometry, redrawn on `reuse` frames (unchanged UI) so
     /// the per-frame vertex/index upload can be skipped.
     egui_jobs: Vec<ClippedPrimitive>,
+    /// Frame letterboxing policy the frontend pushes each frame from the session
+    /// config. `FitAspect` (default) reproduces the historical layout exactly.
+    scaling_mode: ScalingMode,
 
     egui_renderer: egui_wgpu::Renderer,
 }
@@ -358,8 +362,15 @@ impl Renderer {
             clear_color: wgpu::Color::BLACK,
             has_game: false,
             egui_jobs: Vec::new(),
+            scaling_mode: ScalingMode::FitAspect,
             egui_renderer,
         }
+    }
+
+    /// Set the frame letterboxing policy used by the next `render`. Frontends
+    /// call this each frame from the session config so the setting takes effect.
+    pub fn set_scaling_mode(&mut self, mode: ScalingMode) {
+        self.scaling_mode = mode;
     }
 
     /// A `Device` clone the platform can use to build companion GPU state if
@@ -414,7 +425,12 @@ impl Renderer {
     /// active source within `region`, plus the NDC transform placing it there.
     fn layout(&self, surface: (f32, f32), region: PhysicalRect) -> ([f32; 16], (u32, u32, u32, u32)) {
         let source = self.active_source();
-        compute_layout((source.width as f32, source.height as f32), surface, region)
+        compute_layout(
+            (source.width as f32, source.height as f32),
+            surface,
+            region,
+            self.scaling_mode,
+        )
     }
 
     /// Render one full frame: acquire the surface, clear to the border color,
@@ -536,6 +552,7 @@ fn compute_layout(
     texture: (f32, f32),
     surface: (f32, f32),
     region: PhysicalRect,
+    mode: ScalingMode,
 ) -> ([f32; 16], (u32, u32, u32, u32)) {
     let (surface_w, surface_h) = surface;
     let (texture_width, texture_height) = texture;
@@ -546,16 +563,25 @@ fn compute_layout(
     let rw = region.width.clamp(0.0, (surface_w - rx).max(0.0));
     let rh = region.height.clamp(0.0, (surface_h - ry).max(0.0));
 
-    // Aspect-preserving fit (contain): the largest scale that keeps the source
-    // inside the region on both axes. The window is aspect-locked to the source
-    // aspect, so at the default/locked sizes this fills the region *exactly*
-    // (integer at the default N× size, fractional at arbitrary user sizes) with
-    // no letterbox bars and no distortion. Only a transient off-aspect region
-    // (mid-resize) briefly bars the limiting axis.
-    let scale = (rw / texture_width).min(rh / texture_height).max(0.0);
-
-    let scaled_w = (texture_width * scale).min(rw);
-    let scaled_h = (texture_height * scale).min(rh);
+    // Placement per scaling mode. FitAspect is the historical path and MUST stay
+    // byte-identical: aspect-preserving contain (the largest scale keeping the
+    // source inside the region on both axes). IntegerAspect floors that scale to
+    // a whole number (≥1). Stretch fills the region on both axes independently.
+    let (scaled_w, scaled_h) = match mode {
+        ScalingMode::FitAspect => {
+            let scale = (rw / texture_width).min(rh / texture_height).max(0.0);
+            ((texture_width * scale).min(rw), (texture_height * scale).min(rh))
+        }
+        ScalingMode::IntegerAspect => {
+            let fit = (rw / texture_width).min(rh / texture_height).max(0.0);
+            // Floor to a whole scale, but never below 1× unless the region can't
+            // hold even 1× (then fall back to the fractional fit so it stays in
+            // bounds and a collapsed region still yields a zero scissor).
+            let scale = if fit >= 1.0 { fit.floor() } else { fit };
+            ((texture_width * scale).min(rw), (texture_height * scale).min(rh))
+        }
+        ScalingMode::Stretch => (rw, rh),
+    };
 
     // Center within the region (physical pixels, top-left origin).
     let dst_x = rx + (rw - scaled_w) / 2.0;
@@ -592,7 +618,7 @@ mod tests {
     // A 160x144 game in a full 800x720 surface region scales 5x and fills it.
     #[test]
     fn exact_integer_fit_centers_and_fills() {
-        let (_t, scissor) = compute_layout((160.0, 144.0), (800.0, 720.0), rect(0.0, 0.0, 800.0, 720.0));
+        let (_t, scissor) = compute_layout((160.0, 144.0), (800.0, 720.0), rect(0.0, 0.0, 800.0, 720.0), ScalingMode::FitAspect);
         assert_eq!(scissor, (0, 0, 800, 720));
     }
 
@@ -604,7 +630,7 @@ mod tests {
     // fill; this covers the transient mid-resize case.)
     #[test]
     fn fractional_fit_fills_limiting_axis() {
-        let (_t, scissor) = compute_layout((160.0, 144.0), (800.0, 720.0), rect(0.0, 20.0, 800.0, 700.0));
+        let (_t, scissor) = compute_layout((160.0, 144.0), (800.0, 720.0), rect(0.0, 20.0, 800.0, 700.0), ScalingMode::FitAspect);
         assert_eq!(scissor.3, 700); // height fills exactly
         assert_eq!(scissor.2, 777); // 160 * (700/144) = 777.7 -> 777
         assert_eq!(scissor.1, 20); // no vertical bar on the limiting axis
@@ -614,7 +640,7 @@ mod tests {
     // 5x and fills, proving the source-size drives the fit (the sizing-bug fix).
     #[test]
     fn sgb_source_uses_its_own_aspect() {
-        let (_t, scissor) = compute_layout((256.0, 224.0), (1280.0, 1120.0), rect(0.0, 0.0, 1280.0, 1120.0));
+        let (_t, scissor) = compute_layout((256.0, 224.0), (1280.0, 1120.0), rect(0.0, 0.0, 1280.0, 1120.0), ScalingMode::FitAspect);
         assert_eq!(scissor, (0, 0, 1280, 1120));
     }
 
@@ -622,9 +648,35 @@ mod tests {
     // so `render` skips the draw rather than panicking.
     #[test]
     fn collapsed_region_is_safe() {
-        let (_t, scissor) = compute_layout((160.0, 144.0), (800.0, 720.0), rect(0.0, 0.0, 0.0, 0.0));
+        let (_t, scissor) = compute_layout((160.0, 144.0), (800.0, 720.0), rect(0.0, 0.0, 0.0, 0.0), ScalingMode::FitAspect);
         // A zero-size region yields scale 0 and a collapsed scissor.
         assert_eq!(scissor.2, 0);
         assert_eq!(scissor.3, 0);
+    }
+
+    // IntegerAspect floors the fit scale: an off-aspect 800x700 region that
+    // FitAspect fills fractionally (4.861x) snaps to a whole 4x = 640x576,
+    // centered with bars on both axes.
+    #[test]
+    fn integer_aspect_floors_to_whole_scale() {
+        let (_t, scissor) = compute_layout((160.0, 144.0), (800.0, 720.0), rect(0.0, 0.0, 800.0, 700.0), ScalingMode::IntegerAspect);
+        assert_eq!(scissor.2, 640); // 160 * 4
+        assert_eq!(scissor.3, 576); // 144 * 4
+        assert_eq!(scissor.0, 80); // (800 - 640) / 2
+        assert_eq!(scissor.1, 62); // (700 - 576) / 2
+    }
+
+    // An exact-integer region still fills under IntegerAspect (floor of 5.0 = 5).
+    #[test]
+    fn integer_aspect_exact_fit_still_fills() {
+        let (_t, scissor) = compute_layout((160.0, 144.0), (800.0, 720.0), rect(0.0, 0.0, 800.0, 720.0), ScalingMode::IntegerAspect);
+        assert_eq!(scissor, (0, 0, 800, 720));
+    }
+
+    // Stretch fills the whole region on both axes, ignoring aspect (distorts).
+    #[test]
+    fn stretch_fills_region_ignoring_aspect() {
+        let (_t, scissor) = compute_layout((160.0, 144.0), (800.0, 720.0), rect(0.0, 20.0, 800.0, 700.0), ScalingMode::Stretch);
+        assert_eq!(scissor, (0, 20, 800, 700));
     }
 }

@@ -31,6 +31,8 @@ use crate::ui_host::{ExtraEvents, UiHost};
 pub enum PlatformRequest {
     /// The user asked to quit.
     Exit,
+    /// Toggle host fullscreen (desktop flips the winit window; Android no-ops).
+    ToggleFullscreen,
     /// The window should be resized to fit the given content aspect at the
     /// current scale (used when the SGB border toggles the presented size).
     /// Dimensions are the un-scaled content size in pixels; the platform
@@ -356,6 +358,8 @@ impl App {
             rewind_enabled: cfg.rewind.enabled,
             rewind_interval_frames: cfg.rewind.interval_frames,
             rewind_depth: cfg.rewind.depth,
+            volume: cfg.volume,
+            scaling: cfg.scaling,
             sgb_border: self.session.sgb_border(),
             fast_forward: self.is_fast_forward(),
             touch_controls: self.session.touch_controls(),
@@ -685,7 +689,9 @@ impl App {
         let inset_h = ((surf_h as f32 - ui_frame.region.height).max(0.0)) / ppp;
         self.content_inset = (inset_w, inset_h);
 
-        // Render: game letterboxed into the central region, egui on top.
+        // Render: game letterboxed into the central region, egui on top. Push the
+        // current scaling policy from the session config first (one shared site).
+        renderer.set_scaling_mode(self.session.scaling_mode());
         let game = self.present();
         if let Err(e) = renderer.render(game.as_ref(), ui_frame.region, paint) {
             match e {
@@ -799,6 +805,11 @@ impl Frontend for App {
 
     fn exit(&mut self) {
         self.pending_requests.push(PlatformRequest::Exit);
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        // Forward to the platform loop (which owns the winit window).
+        self.pending_requests.push(PlatformRequest::ToggleFullscreen);
     }
 
     fn resize_content(&mut self, width: u32, height: u32) {
