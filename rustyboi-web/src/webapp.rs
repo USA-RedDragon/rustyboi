@@ -34,7 +34,7 @@ use winit::window::{Window, WindowBuilder};
 
 use rustyboi_frontend_lib::renderer::{GameFrame, Renderer, SourceSize};
 use rustyboi_frontend_lib::ui_host::UiHost;
-use rustyboi_session::{GbButton, SessionUiState, UiAction};
+use rustyboi_session::{DebugSnapshot, GbButton, SessionUiState, UiAction};
 
 use crate::web_action::WebAction;
 
@@ -63,6 +63,14 @@ struct Shared {
     /// Last GB button bitmask posted to the worker (dedupe: only post changes).
     last_input_mask: u8,
 
+    /// Latest debug read-model from the worker (deserialized), rendered by the
+    /// egui debug panels. `None` until the first snapshot arrives / while no
+    /// panel is open.
+    debug_snapshot: Option<DebugSnapshot>,
+    /// Last `(active, bits)` debug-detail posted to the worker, so we only re-post
+    /// when the set of open panels changes.
+    last_debug_detail: Option<(bool, u8)>,
+
     // Outbound JS callbacks to the worker (installed by JS at construction):
     /// `(jsonAction: string) => void` — post a `WebAction` to the worker.
     post_action: js_sys::Function,
@@ -80,6 +88,9 @@ struct Shared {
     /// `(kind: string) => void` — ask the worker to produce export bytes
     /// (kind ∈ state|battery|rtc); the worker posts them back for JS to download.
     request_export: js_sys::Function,
+    /// `(active: boolean, bits: number) => void` — tell the worker which debug
+    /// snapshot to build (which panels are open). Posted only on change.
+    post_debug_detail: js_sys::Function,
 }
 
 impl Shared {
@@ -92,6 +103,7 @@ impl Shared {
         set_rewind: js_sys::Function,
         import_file: js_sys::Function,
         request_export: js_sys::Function,
+        post_debug_detail: js_sys::Function,
     ) -> Self {
         Shared {
             frame_rgba: Vec::new(),
@@ -103,6 +115,8 @@ impl Shared {
             clear_error: false,
             ui_dirty: true,
             last_input_mask: 0,
+            debug_snapshot: None,
+            last_debug_detail: None,
             post_action,
             post_input,
             load_rom,
@@ -110,6 +124,7 @@ impl Shared {
             set_rewind,
             import_file,
             request_export,
+            post_debug_detail,
         }
     }
 }
@@ -137,6 +152,7 @@ impl WebApp {
         set_rewind: js_sys::Function,
         import_file: js_sys::Function,
         request_export: js_sys::Function,
+        post_debug_detail: js_sys::Function,
     ) -> WebApp {
         console_error_panic_hook::set_once();
         WebApp {
@@ -148,6 +164,7 @@ impl WebApp {
                 set_rewind,
                 import_file,
                 request_export,
+                post_debug_detail,
             ))),
             started: false,
         }
@@ -170,6 +187,16 @@ impl WebApp {
         if let Ok(state) = serde_json::from_str::<crate::web_action::WebUiState>(json) {
             let mut s = self.shared.borrow_mut();
             s.ui_state = state.into_session();
+            s.ui_dirty = true;
+        }
+    }
+
+    /// Push a fresh debug snapshot (bincode bytes the worker built + transferred).
+    /// Deserialized into a [`DebugSnapshot`] the egui debug panels render from.
+    pub fn on_debug_snapshot(&self, bytes: &[u8]) {
+        if let Some(snap) = DebugSnapshot::from_bytes(bytes) {
+            let mut s = self.shared.borrow_mut();
+            s.debug_snapshot = Some(snap);
             s.ui_dirty = true;
         }
     }
@@ -428,12 +455,13 @@ fn draw(
 ) {
     // Pull the shared inputs for this frame, releasing the borrow before running
     // egui (the rfd file-picker callback can re-enter `shared` via JS).
-    let (ui_state, error, status, clear_err, force_repaint): (
+    let (ui_state, error, status, clear_err, force_repaint, debug_snapshot): (
         SessionUiState,
         Option<String>,
         Option<String>,
         bool,
         bool,
+        Option<DebugSnapshot>,
     ) = {
         let mut s = shared.borrow_mut();
         // Upload the game texture straight from the shared buffer while borrowed —
@@ -449,6 +477,7 @@ fn draw(
             s.status.take(),
             std::mem::take(&mut s.clear_error),
             std::mem::take(&mut s.ui_dirty),
+            s.debug_snapshot.clone(),
         )
     };
 
@@ -462,10 +491,37 @@ fn draw(
         ui.set_status(msg);
     }
 
-    // The web UI never shows a debug &GB (Phase B); pass None for registers/gb.
-    // "paused" is presentation-only here (auto-pause lives in the worker's run
-    // loop, driven by TogglePause); pass false so the UI isn't stuck dimmed.
-    let (paint, ui_frame) = ui.run(window, false, None, None, &ui_state, Vec::new(), force_repaint);
+    // Tell the worker which debug snapshot to build from the panels open THIS
+    // frame (the Gui lives here on the main thread). Posted only on change; when
+    // no panel is open we post (false, 0) once and the worker then builds/posts
+    // nothing — zero per-frame debug cost in the common case.
+    let debug_open = ui.any_debug_panel_open();
+    let detail_bits = ui.wanted_debug_detail().to_bits();
+    {
+        let mut s = shared.borrow_mut();
+        if s.last_debug_detail != Some((debug_open, detail_bits)) {
+            s.last_debug_detail = Some((debug_open, detail_bits));
+            // Dropping the stale snapshot when panels close stops the panels from
+            // rendering old bytes the instant one is reopened.
+            if !debug_open {
+                s.debug_snapshot = None;
+            }
+            let f = s.post_debug_detail.clone();
+            drop(s);
+            let _ = f.call2(
+                &JsValue::NULL,
+                &JsValue::from_bool(debug_open),
+                &JsValue::from_f64(detail_bits as f64),
+            );
+        }
+    }
+
+    // Pass the worker's latest debug snapshot to the panels only while a panel is
+    // open (Phase C — web debug views). "paused" is presentation-only here
+    // (auto-pause lives in the worker's run loop, driven by TogglePause); pass
+    // false so the UI isn't stuck dimmed.
+    let debug_ref = if debug_open { debug_snapshot.as_ref() } else { None };
+    let (paint, ui_frame) = ui.run(window, false, debug_ref, None, &ui_state, Vec::new(), force_repaint);
 
     // Dispatch the action egui emitted.
     if let Some(action) = ui_frame.action {

@@ -31,7 +31,9 @@ mod webapp;
 
 use rustyboi_session::config::DmgPalette;
 use rustyboi_session::ports::{Rumble, Webcam};
-use rustyboi_session::{AbstractInput, Config, Frame, GbButton, Hardware, Ports, Session};
+use rustyboi_session::{
+    AbstractInput, Config, DebugDetail, Frame, GbButton, Hardware, Ports, Session,
+};
 
 use js_sys::Float32Array;
 use wasm_bindgen::prelude::*;
@@ -96,6 +98,12 @@ pub struct Emulator {
     /// Last UI-state snapshot posted, so the worker only re-posts on change.
     last_ui_state: Option<SessionUiState>,
     has_rom: bool,
+    /// Whether any main-thread debug panel is open. While false the worker builds
+    /// and posts NO debug snapshot (the common case — zero cost).
+    debug_active: bool,
+    /// Which heavy debug-snapshot sections the open panels want (only meaningful
+    /// when `debug_active`).
+    debug_detail: DebugDetail,
 }
 
 #[wasm_bindgen]
@@ -131,6 +139,8 @@ impl Emulator {
             dmg_palette,
             last_ui_state: None,
             has_rom: false,
+            debug_active: false,
+            debug_detail: DebugDetail::default(),
         })
     }
 
@@ -336,6 +346,28 @@ impl Emulator {
             }
         }
         self.input = input;
+    }
+
+    /// Set which debug snapshot the worker should build each frame. `active` is
+    /// whether ANY debug panel is open on the main thread; `bits` is the packed
+    /// [`DebugDetail`] (see `DebugDetail::to_bits`). While `active` is false the
+    /// worker builds/posts nothing (the common no-panel case), so there is zero
+    /// per-frame debug cost until a panel is opened.
+    pub fn set_debug_detail(&mut self, active: bool, bits: u8) {
+        self.debug_active = active;
+        self.debug_detail = DebugDetail::from_bits(bits);
+    }
+
+    /// Build the debug snapshot for the current frame and return it bincode-
+    /// serialized (the worker transfers the bytes to the main thread, which
+    /// deserializes into a `DebugSnapshot` for the egui panels). Returns an empty
+    /// array when no panel is open — the worker then posts nothing.
+    pub fn take_debug_snapshot(&self) -> js_sys::Uint8Array {
+        if !self.debug_active {
+            return js_sys::Uint8Array::new_with_length(0);
+        }
+        let snap = self.session.debug_snapshot(self.debug_detail);
+        js_sys::Uint8Array::from(snap.to_bytes().as_slice())
     }
 
     /// Apply a control action (JSON-encoded [`WebAction`]) through the shared

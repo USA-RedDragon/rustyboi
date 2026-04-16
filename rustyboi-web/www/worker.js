@@ -19,6 +19,7 @@
 //     ImportFile{purpose,bytes}  import a picked file (purpose=state|battery|rtc)
 //     RequestExport{kind}  ask for export bytes (kind=state|battery|rtc)
 //     SetInput{mask}       GB button bitmask (keyboard ∪ egui touch overlay)
+//     SetDebugDetail{active,bits}  which debug snapshot to build (open panels)
 //     Action{json}         a WebAction (JSON) applied via Session::apply
 //   worker -> main:
 //     Ready{hardware}      emulator constructed, loop running
@@ -26,6 +27,8 @@
 //     Audio{samples}       transferred interleaved Float32Array [l,r,l,r,...]
 //     Export{name,bytes}   transferred export bytes for the main thread to download
 //     UiState{json}        SessionUiState snapshot (posted on change)
+//     DebugSnapshot{bytes} transferred bincode debug read-model (only while a
+//                          debug panel is open)
 //     Status{msg} / Error{msg} / ClearError / ResizeContent{width,height}
 //                          PlatformRequest objects an `apply`-backed call returned
 
@@ -44,6 +47,9 @@ let acc = 0;
 // Hold-to-rewind: while set (Backspace held on the main thread) the loop steps
 // back through the rewind buffer instead of running frames forward.
 let rewinding = false;
+// Debug detail requested before the emulator finished booting (applied in
+// handleInit). The main thread posts SetDebugDetail only on change.
+let pendingDebug = null;
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 const status = (msg) => post({ type: "Status", msg });
@@ -77,6 +83,13 @@ function postFrameAndState() {
   post({ type: "Frame", rgba, width: w, height: h }, [buf]);
   const uiState = emu.take_ui_state(); // JSON string, or undefined when unchanged
   if (uiState) post({ type: "UiState", json: uiState });
+  // Debug read-model: empty (length 0) unless a main-thread panel is open, so
+  // nothing crosses the boundary in the common case. Transfer the buffer (no
+  // copy) when present.
+  const dbg = emu.take_debug_snapshot(); // Uint8Array (empty when no panel open)
+  if (dbg && dbg.length > 0) {
+    post({ type: "DebugSnapshot", bytes: dbg }, [dbg.buffer]);
+  }
 }
 
 // Self-paced fixed-timestep loop. We accumulate real elapsed time and run whole
@@ -127,6 +140,10 @@ function startLoop() {
 async function handleInit() {
   await init();
   emu = await Emulator.create();
+  if (pendingDebug) {
+    emu.set_debug_detail(pendingDebug.active, pendingDebug.bits);
+    pendingDebug = null;
+  }
   post({ type: "Ready", hardware: emu.hardware() });
   // Push the initial UI-state so the egui menus reflect persisted config.
   const uiState = emu.take_ui_state();
@@ -150,6 +167,14 @@ self.onmessage = async (e) => {
     }
     if (m.type === "SetRewind") {
       rewinding = !!m.on; // hold-to-rewind (Backspace) toggled on the main thread
+      return;
+    }
+    if (m.type === "SetDebugDetail") {
+      // Which debug snapshot to build each frame (which panels are open). If a
+      // panel is opened before the emulator has booted, stash it so `handleInit`
+      // can apply it (the main thread only posts this on change).
+      if (emu) emu.set_debug_detail(!!m.active, m.bits & 0xff);
+      else pendingDebug = { active: !!m.active, bits: m.bits & 0xff };
       return;
     }
     if (!emu) return; // ignore control messages until booted

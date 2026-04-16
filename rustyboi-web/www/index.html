@@ -102,6 +102,10 @@
       // Ask the worker to produce export bytes; it replies with an Export message
       // (handled below) that triggers the browser download.
       const requestExport = (kind) => send({ type: "RequestExport", kind });
+      // Tell the worker which debug snapshot to build (which panels are open).
+      // The driver calls this only when the open-panel set changes.
+      const postDebugDetail = (active, bits) =>
+        send({ type: "SetDebugDetail", active: !!active, bits: bits & 0xff });
 
       // Trigger a browser download of `bytes` (Uint8Array) as `name`. Browsers
       // cannot write files directly, so we Blob → object URL → synthetic <a>
@@ -122,7 +126,7 @@
       const canvas = document.getElementById("screen");
       sizeCanvas(canvas);
 
-      const app = new WebApp(postAction, postInput, loadRom, loadState, setRewind, importFile, requestExport);
+      const app = new WebApp(postAction, postInput, loadRom, loadState, setRewind, importFile, requestExport, postDebugDetail);
 
       // Route worker → main messages into the egui driver + audio sink.
       worker.onmessage = (e) => {
@@ -140,6 +144,11 @@
             break;
           case "UiState":
             app.on_ui_state(m.json);
+            break;
+          case "DebugSnapshot":
+            // m.bytes is a Uint8Array (bincode) transferred from the worker; the
+            // driver deserializes it into the read-model the debug panels render.
+            app.on_debug_snapshot(m.bytes);
             break;
           case "Audio":
             audio.queue(m.samples); // Float32Array, transferred from the worker
