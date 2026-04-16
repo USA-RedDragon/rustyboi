@@ -13,7 +13,7 @@
 use std::time::{Duration, Instant};
 
 use rustyboi_core_lib::{gb, input, ppu};
-use rustyboi_session::action::FileData;
+use rustyboi_session::action::{FileData, LoadPurpose};
 use rustyboi_session::{AbstractInput, GbButton, RunMode, Session, SessionUiState};
 #[cfg(target_os = "android")]
 use rustyboi_session::UiAction;
@@ -39,10 +39,13 @@ pub enum PlatformRequest {
     /// The UI requested a state save to an arbitrary path (File → Save State).
     /// The platform serializes and writes; the app hands over the bytes.
     SaveStateBytes { path: std::path::PathBuf, bytes: Vec<u8> },
-    /// The UI picked a file to load (ROM or savestate). The platform reads the
-    /// bytes (path on desktop, content on web/Android) and feeds them back via
-    /// [`App::finish_load_rom`] / [`App::finish_load_state`].
-    LoadFile(FileData),
+    /// Deliver `bytes` to the user as a file named `suggested_name` (File →
+    /// Export battery/RTC/state). The platform picks a location and writes.
+    SaveBytes { suggested_name: String, bytes: Vec<u8> },
+    /// The UI picked a file to load. The platform reads the bytes (path on
+    /// desktop, content on web/Android) and feeds them back via the finisher for
+    /// `purpose`.
+    LoadFile { file: FileData, purpose: LoadPurpose },
     /// A status line to show the user.
     Status(String),
     /// An error to show the user.
@@ -358,6 +361,8 @@ impl App {
             touch_controls: self.session.touch_controls(),
             slots: self.session.list_slots(),
             cheats: self.session.cheats().map(str::to_owned).collect(),
+            has_battery: self.session.has_battery(),
+            has_rtc: self.session.has_rtc(),
         }
     }
 
@@ -702,9 +707,13 @@ impl App {
         resolve: &mut impl FnMut(&GuiAction) -> Option<ResolvedAction>,
     ) {
         match action {
-            // OS-requiring loads: resolve to bytes here (the resolver reads the
-            // path / content), then apply with the app-side pause bookkeeping.
-            action @ (GuiAction::LoadRom(_) | GuiAction::LoadState(_)) => {
+            // OS-requiring loads/imports: resolve to bytes here (the resolver
+            // reads the path / content), then apply with the app-side bookkeeping.
+            action @ (GuiAction::LoadRom(_)
+            | GuiAction::LoadState(_)
+            | GuiAction::ImportState(_)
+            | GuiAction::ImportBatterySave(_)
+            | GuiAction::ImportRtc(_)) => {
                 match resolve(&action) {
                     Some(ResolvedAction::LoadRom { bytes, path }) => {
                         match self.load_rom_bytes(bytes, path) {
@@ -728,6 +737,18 @@ impl App {
                             Err(e) => requests.push(PlatformRequest::Error(format!("Failed to load state: {e}"))),
                         }
                     }
+                    Some(ResolvedAction::ImportBattery { bytes }) => {
+                        match self.session.finish_import_battery(&bytes) {
+                            Ok(()) => requests.push(PlatformRequest::Status("Battery save imported".into())),
+                            Err(e) => requests.push(PlatformRequest::Error(format!("Failed to import battery save: {e}"))),
+                        }
+                    }
+                    Some(ResolvedAction::ImportRtc { bytes }) => {
+                        match self.session.finish_import_rtc(&bytes) {
+                            Ok(()) => requests.push(PlatformRequest::Status("RTC imported".into())),
+                            Err(e) => requests.push(PlatformRequest::Error(format!("Failed to import RTC: {e}"))),
+                        }
+                    }
                     None => {}
                 }
             }
@@ -745,6 +766,8 @@ impl App {
 pub enum ResolvedAction {
     LoadRom { bytes: Vec<u8>, path: Option<String> },
     LoadState { state: Vec<u8>, reload_rom: Option<(String, Vec<u8>)> },
+    ImportBattery { bytes: Vec<u8> },
+    ImportRtc { bytes: Vec<u8> },
 }
 
 /// The app is a windowed [`Frontend`]: the shared [`drive_action`] driver
@@ -781,10 +804,16 @@ impl Frontend for App {
             .push(PlatformRequest::SaveStateBytes { path, bytes });
     }
 
-    fn load_file(&mut self, file: FileData) {
+    fn save_bytes(&mut self, suggested_name: String, bytes: Vec<u8>) {
+        self.pending_requests
+            .push(PlatformRequest::SaveBytes { suggested_name, bytes });
+    }
+
+    fn load_file(&mut self, file: FileData, purpose: LoadPurpose) {
         // Loads are intercepted in `dispatch_action` (they need the resolver);
         // if one reaches here, surface it to the platform to read + feed back.
-        self.pending_requests.push(PlatformRequest::LoadFile(file));
+        self.pending_requests
+            .push(PlatformRequest::LoadFile { file, purpose });
     }
 
     fn on_pause_changed(&mut self, hint: PauseHint) {

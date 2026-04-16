@@ -16,12 +16,15 @@
 //     Init                 boot the emulator (no canvas — main thread renders)
 //     LoadRom{name,bytes}  transferred ArrayBuffer of ROM bytes
 //     LoadState{bytes}     transferred ArrayBuffer of a .rustyboisave savestate
+//     ImportFile{purpose,bytes}  import a picked file (purpose=state|battery|rtc)
+//     RequestExport{kind}  ask for export bytes (kind=state|battery|rtc)
 //     SetInput{mask}       GB button bitmask (keyboard ∪ egui touch overlay)
 //     Action{json}         a WebAction (JSON) applied via Session::apply
 //   worker -> main:
 //     Ready{hardware}      emulator constructed, loop running
 //     Frame{rgba,width,height}  transferred RGBA ArrayBuffer + pixel size
 //     Audio{samples}       transferred interleaved Float32Array [l,r,l,r,...]
+//     Export{name,bytes}   transferred export bytes for the main thread to download
 //     UiState{json}        SessionUiState snapshot (posted on change)
 //     Status{msg} / Error{msg} / ClearError / ResizeContent{width,height}
 //                          PlatformRequest objects an `apply`-backed call returned
@@ -159,6 +162,29 @@ self.onmessage = async (e) => {
       case "LoadState":
         emit(emu.load_state(new Uint8Array(m.bytes)));
         break;
+      case "ImportFile": {
+        // m.purpose ∈ state|battery|rtc; m.bytes is a transferred ArrayBuffer.
+        const data = new Uint8Array(m.bytes);
+        if (m.purpose === "state") emit(emu.load_state(data));
+        else if (m.purpose === "battery") emit(emu.import_battery(data));
+        else if (m.purpose === "rtc") emit(emu.import_rtc(data));
+        break;
+      }
+      case "RequestExport": {
+        // Produce the bytes on the worker (it owns the session) and post them to
+        // the main thread, which triggers the browser download.
+        let bytes, name;
+        if (m.kind === "state") { bytes = emu.export_state(); name = "savestate.rustyboisave"; }
+        else if (m.kind === "battery") { bytes = emu.export_battery(); name = "battery.sav"; }
+        else if (m.kind === "rtc") { bytes = emu.export_rtc(); name = "clock.rtc"; }
+        else break;
+        if (bytes && bytes.length > 0) {
+          post({ type: "Export", name, bytes }, [bytes.buffer]);
+        } else {
+          fail(`Nothing to export (${m.kind})`);
+        }
+        break;
+      }
       case "SetInput":
         emu.set_input_mask(m.mask & 0xff);
         break;

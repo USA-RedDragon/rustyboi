@@ -93,11 +93,36 @@
       };
       // Hold-to-rewind: the driver calls this on Backspace down/up.
       const setRewind = (on) => send({ type: "SetRewind", on: !!on });
+      // Import a picked file (state/battery/rtc). `bytes` is a Uint8Array; the
+      // rfd picker already read it — transfer its buffer to the worker (no copy).
+      const importFile = (purpose, name, bytes) => {
+        const buf = bytes.buffer;
+        send({ type: "ImportFile", purpose, name, bytes: buf }, [buf]);
+      };
+      // Ask the worker to produce export bytes; it replies with an Export message
+      // (handled below) that triggers the browser download.
+      const requestExport = (kind) => send({ type: "RequestExport", kind });
+
+      // Trigger a browser download of `bytes` (Uint8Array) as `name`. Browsers
+      // cannot write files directly, so we Blob → object URL → synthetic <a>
+      // click → revoke. Runs on the main thread (DOM access required).
+      const downloadBytes = (name, bytes) => {
+        const blob = new Blob([bytes], { type: "application/octet-stream" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name || "download.bin";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Revoke on the next tick so the click's navigation has resolved.
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      };
 
       const canvas = document.getElementById("screen");
       sizeCanvas(canvas);
 
-      const app = new WebApp(postAction, postInput, loadRom, loadState, setRewind);
+      const app = new WebApp(postAction, postInput, loadRom, loadState, setRewind, importFile, requestExport);
 
       // Route worker → main messages into the egui driver + audio sink.
       worker.onmessage = (e) => {
@@ -118,6 +143,10 @@
             break;
           case "Audio":
             audio.queue(m.samples); // Float32Array, transferred from the worker
+            break;
+          case "Export":
+            // m.bytes is a Uint8Array transferred from the worker; download it.
+            downloadBytes(m.name, m.bytes);
             break;
           case "Status":
             app.on_status(m.msg);

@@ -180,6 +180,10 @@ pub struct WebUiState {
     pub touch_controls: bool,
     pub slots: Vec<u32>,
     pub cheats: Vec<String>,
+    #[serde(default)]
+    pub has_battery: bool,
+    #[serde(default)]
+    pub has_rtc: bool,
 }
 
 impl WebUiState {
@@ -196,6 +200,8 @@ impl WebUiState {
             touch_controls: s.touch_controls,
             slots: s.slots.clone(),
             cheats: s.cheats.clone(),
+            has_battery: s.has_battery,
+            has_rtc: s.has_rtc,
         }
     }
 
@@ -212,6 +218,8 @@ impl WebUiState {
             touch_controls: self.touch_controls,
             slots: self.slots,
             cheats: self.cheats,
+            has_battery: self.has_battery,
+            has_rtc: self.has_rtc,
         }
     }
 }

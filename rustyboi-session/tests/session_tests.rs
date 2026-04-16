@@ -320,3 +320,76 @@ fn input_remap_applies_through_run_frame() {
     let state = map.resolve(AbstractInput::from_pressed([GbButton::B]));
     assert!(state.a && !state.b);
 }
+
+/// An MBC1 ROM with 8 KiB battery-backed RAM (type 0x03, RAM size code 0x02),
+/// so `has_battery()` is true and there is real SRAM to import/export.
+fn battery_rom() -> Vec<u8> {
+    let mut rom = test_rom();
+    rom[0x147] = 0x03; // MBC1 + RAM + BATTERY
+    rom[0x149] = 0x02; // 8 KiB RAM
+    let mut checksum: u8 = 0;
+    for addr in 0x134..0x14D {
+        checksum = checksum.wrapping_sub(rom[addr]).wrapping_sub(1);
+    }
+    rom[0x14D] = checksum;
+    rom
+}
+
+#[test]
+fn export_battery_none_without_battery() {
+    let rom = test_rom(); // ROM-only, no battery
+    let s = dmg_session(&rom);
+    assert!(!s.has_battery());
+    assert!(s.export_battery().is_none());
+}
+
+#[test]
+fn battery_export_import_round_trip() {
+    let rom = battery_rom();
+    let mut s = dmg_session(&rom);
+    assert!(s.has_battery());
+
+    // Seed a known SRAM pattern and snapshot it via export.
+    {
+        let cart = s.gb_mut().cartridge_mut().unwrap();
+        for (i, b) in cart.save_ram_mut().iter_mut().enumerate() {
+            *b = (i as u8) ^ 0xA5;
+        }
+    }
+    let saved = s.export_battery().expect("battery present");
+    assert!(!saved.is_empty());
+
+    // Corrupt the live SRAM, then import the snapshot back.
+    for b in s.gb_mut().cartridge_mut().unwrap().save_ram_mut().iter_mut() {
+        *b = 0;
+    }
+    s.import_battery(&saved).expect("import battery");
+
+    // The imported image is byte-identical to what was exported.
+    assert_eq!(s.gb().cartridge().unwrap().save_ram(), saved.as_slice());
+    assert_eq!(s.export_battery().unwrap(), saved);
+}
+
+#[test]
+fn import_battery_rejects_oversized_file() {
+    let rom = battery_rom();
+    let mut s = dmg_session(&rom);
+    let ram_len = s.gb().cartridge().unwrap().save_ram().len();
+    let too_big = vec![0u8; ram_len * 4];
+    assert!(s.import_battery(&too_big).is_err());
+}
+
+#[test]
+fn imported_battery_persists_through_storage_and_reload() {
+    let rom = battery_rom();
+    let mut s = dmg_session(&rom);
+    let pattern: Vec<u8> = (0..s.gb().cartridge().unwrap().save_ram().len())
+        .map(|i| (i as u8).wrapping_mul(3))
+        .collect();
+    s.import_battery(&pattern).expect("import");
+
+    // Simulate a reload: re-load the same ROM into the SAME session (shared
+    // storage port). `finish_load_rom` should hydrate the persisted battery.
+    s.finish_load_rom(&rom).expect("reload rom");
+    assert_eq!(s.gb().cartridge().unwrap().save_ram(), pattern.as_slice());
+}
