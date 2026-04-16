@@ -1,10 +1,10 @@
 use egui::Context;
-use rustyboi_core_lib::{gb, ppu};
+use rustyboi_session::DebugSnapshot;
 use crate::ui::Gui;
 
 impl Gui {
-    pub(in crate) fn render_sprite_debug_panel(&mut self, ctx: &Context, gb: Option<&gb::GB>) {
-        if let Some(gb_ref) = gb {
+    pub(in crate) fn render_sprite_debug_panel(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>) {
+        if let Some(snap) = debug {
             egui::Window::new("Sprite Debug")
                 .default_pos([900.0, 50.0])
                 .default_size([400.0, 600.0])
@@ -14,9 +14,8 @@ impl Gui {
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         // Current scanline sprites
-                        let (ppu, _) = gb_ref.get_ppu_debug_info();
-                        let ly = gb_ref.read_memory(ppu::LY);
-                        let sprites_count = ppu.get_sprites_on_line_count();
+                        let ly = snap.mmio.ly;
+                        let sprites_count = snap.ppu.sprites_on_line;
 
                         ui.heading("Current Scanline Sprites");
                         ui.monospace(egui::RichText::new(format!("Line {}: {} sprites found", ly, sprites_count))
@@ -51,16 +50,16 @@ impl Gui {
 
                                 for sprite_index in 0..40 {
                                     let oam_base = 0xFE00 + (sprite_index * 4);
-                                    let sprite_y = gb_ref.read_memory(oam_base);
-                                    let sprite_x = gb_ref.read_memory(oam_base + 1);
-                                    let tile_index = gb_ref.read_memory(oam_base + 2);
-                                    let attributes = gb_ref.read_memory(oam_base + 3);
+                                    let sprite_y = snap.oam_byte(oam_base);
+                                    let sprite_x = snap.oam_byte(oam_base + 1);
+                                    let tile_index = snap.oam_byte(oam_base + 2);
+                                    let attributes = snap.oam_byte(oam_base + 3);
 
                                     // Calculate screen position
                                     let screen_y = sprite_y.wrapping_sub(16);
 
                                     // Determine if sprite is visible on current line
-                                    let lcd_control = gb_ref.read_memory(ppu::LCD_CONTROL);
+                                    let lcd_control = snap.mmio.lcdc;
                                     let sprite_height = if (lcd_control & 0x04) != 0 { 16 } else { 8 };
                                     let on_current_line = ly >= screen_y && ly < screen_y + sprite_height;
 
@@ -104,7 +103,7 @@ impl Gui {
                                     ui.small(egui::RichText::new(status).color(row_color));
 
                                     // Render sprite preview
-                                    self.render_sprite_preview(ui, gb_ref, tile_index, attributes, sprite_height);
+                                    self.render_sprite_preview(ui, snap, tile_index, attributes, sprite_height);
 
                                     ui.end_row();
                                 }
@@ -121,10 +120,10 @@ impl Gui {
 
                             // Get the selected sprite's data
                             let oam_base = 0xFE00 + (selected_index as u16 * 4);
-                            let sprite_y = gb_ref.read_memory(oam_base);
-                            let sprite_x = gb_ref.read_memory(oam_base + 1);
-                            let tile_index = gb_ref.read_memory(oam_base + 2);
-                            let attributes = gb_ref.read_memory(oam_base + 3);
+                            let sprite_y = snap.oam_byte(oam_base);
+                            let sprite_x = snap.oam_byte(oam_base + 1);
+                            let tile_index = snap.oam_byte(oam_base + 2);
+                            let attributes = snap.oam_byte(oam_base + 3);
 
                             // Calculate screen position
                             let screen_y = sprite_y.wrapping_sub(16);
@@ -161,7 +160,7 @@ impl Gui {
                             )).color(if x_flip { egui::Color32::YELLOW } else { egui::Color32::WHITE }));
 
                             // Show different attribute meanings based on hardware
-                            if gb_ref.should_enable_cgb_features() {
+                            if snap.cgb {
                                 // CGB mode - different bit meanings
                                 let vram_bank = (attributes & 0x08) != 0;
                                 let cgb_palette = attributes & 0x07;
@@ -193,9 +192,9 @@ impl Gui {
                             ui.separator();
 
                             // Show visibility status
-                            let lcd_control = gb_ref.read_memory(ppu::LCD_CONTROL);
+                            let lcd_control = snap.mmio.lcdc;
                             let sprite_height = if (lcd_control & 0x04) != 0 { 16 } else { 8 };
-                            let ly = gb_ref.read_memory(ppu::LY);
+                            let ly = snap.mmio.ly;
                             let on_current_line = ly >= screen_y && ly < screen_y + sprite_height;
                             let visible = sprite_y != 0 && sprite_y < 160 && sprite_x != 0 && sprite_x < 168;
 
@@ -218,7 +217,7 @@ impl Gui {
                             ui.monospace("Bit 6: Y-Flip (0=Normal, 1=Vertically mirrored)");
                             ui.monospace("Bit 5: X-Flip (0=Normal, 1=Horizontally mirrored)");
 
-                            if gb_ref.should_enable_cgb_features() {
+                            if snap.cgb {
                                 ui.monospace("Bit 4: DMG Palette (0=OBP0, 1=OBP1) - compatibility only");
                                 ui.monospace("Bit 3: VRAM Bank (0=Bank 0, 1=Bank 1)");
                                 ui.monospace("Bits 2-0: CGB Palette (0-7)");
@@ -233,7 +232,7 @@ impl Gui {
     }
 
     // Helper method to render a small sprite preview
-    fn render_sprite_preview(&self, ui: &mut egui::Ui, gb_ref: &gb::GB, tile_index: u8, attributes: u8, sprite_height: u8) {
+    fn render_sprite_preview(&self, ui: &mut egui::Ui, snap: &DebugSnapshot, tile_index: u8, attributes: u8, sprite_height: u8) {
         let tile_size = 16.0; // Small preview size
 
         // Get flip flags
@@ -254,7 +253,7 @@ impl Gui {
         };
 
         // Determine VRAM bank and palette based on CGB mode
-        let (vram_bank, palette_info) = if gb_ref.should_enable_cgb_features() {
+        let (vram_bank, palette_info) = if snap.cgb {
             let vram_bank = if (attributes & 0x08) != 0 { 1 } else { 0 };
             let cgb_palette = attributes & 0x07;
             (vram_bank, format!("CGB Pal {}", cgb_palette))
@@ -271,8 +270,8 @@ impl Gui {
         for y in 0..8 {
             // Read the two bytes for this line of the tile
             let actual_y = if y_flip { 7 - y } else { y };
-            let low_byte = gb_ref.read_vram_bank(vram_bank, tile_addr + (actual_y * 2));
-            let high_byte = gb_ref.read_vram_bank(vram_bank, tile_addr + (actual_y * 2) + 1);
+            let low_byte = snap.vram_byte(vram_bank, tile_addr + (actual_y * 2));
+            let high_byte = snap.vram_byte(vram_bank, tile_addr + (actual_y * 2) + 1);
 
             for x in 0..8 {
                 // Extract pixel value (2 bits)
@@ -285,7 +284,7 @@ impl Gui {
                 let pixel_color = if pixel_value == 0 {
                     egui::Color32::TRANSPARENT
                 } else {
-                    self.get_sprite_pixel_color(gb_ref, attributes, pixel_value)
+                    self.get_sprite_pixel_color(snap, attributes, pixel_value)
                 };
 
                 // Calculate pixel position within the sprite preview
@@ -327,8 +326,8 @@ impl Gui {
         // Re-draw the sprite on top of the checkerboard
         for y in 0..8 {
             let actual_y = if y_flip { 7 - y } else { y };
-            let low_byte = gb_ref.read_vram_bank(vram_bank, tile_addr + (actual_y * 2));
-            let high_byte = gb_ref.read_vram_bank(vram_bank, tile_addr + (actual_y * 2) + 1);
+            let low_byte = snap.vram_byte(vram_bank, tile_addr + (actual_y * 2));
+            let high_byte = snap.vram_byte(vram_bank, tile_addr + (actual_y * 2) + 1);
 
             for x in 0..8 {
                 let actual_x = if x_flip { x } else { 7 - x };
@@ -337,7 +336,7 @@ impl Gui {
                 let pixel_value = (high_bit << 1) | low_bit;
 
                 if pixel_value != 0 {
-                    let pixel_color = self.get_sprite_pixel_color(gb_ref, attributes, pixel_value);
+                    let pixel_color = self.get_sprite_pixel_color(snap, attributes, pixel_value);
 
                     let pixel_size = tile_size / 8.0;
                     let pixel_x = sprite_rect.min.x + (x as f32 * pixel_size);
@@ -361,7 +360,7 @@ impl Gui {
                 if x_flip { "X-Flip " } else { "" },
                 if y_flip { "Y-Flip" } else { "" }
             );
-            let vram_info = if gb_ref.should_enable_cgb_features() {
+            let vram_info = if snap.cgb {
                 format!(" Bank {}", vram_bank)
             } else {
                 String::new()
@@ -375,25 +374,21 @@ impl Gui {
         }
     }
 
-    fn get_sprite_pixel_color(&self, gb_ref: &gb::GB, attributes: u8, pixel_value: u8) -> egui::Color32 {
-        if gb_ref.should_enable_cgb_features() {
+    fn get_sprite_pixel_color(&self, snap: &DebugSnapshot, attributes: u8, pixel_value: u8) -> egui::Color32 {
+        if snap.cgb {
             // CGB mode - use CGB palette
             let cgb_palette = attributes & 0x07;
-            let rgb555 = gb_ref.read_obj_palette_data(cgb_palette, pixel_value);
-
-            // Convert RGB555 to RGB888
-            let r = ((rgb555 & 0x1F) * 255 / 31) as u8;
-            let g = (((rgb555 >> 5) & 0x1F) * 255 / 31) as u8;
-            let b = (((rgb555 >> 10) & 0x1F) * 255 / 31) as u8;
-
+            let (r, g, b) = snap
+                .cgb_obj_rgb(cgb_palette, pixel_value)
+                .unwrap_or((0, 0, 0));
             egui::Color32::from_rgb(r, g, b)
         } else {
             // DMG mode - use monochrome palette
             let palette_bit = (attributes & 0x10) != 0;
             let palette_reg = if palette_bit {
-                gb_ref.read_memory(ppu::OBP1)
+                snap.mmio.obp1
             } else {
-                gb_ref.read_memory(ppu::OBP0)
+                snap.mmio.obp0
             };
 
             let palette_bits = (palette_reg >> (pixel_value * 2)) & 0x03;

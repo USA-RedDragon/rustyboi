@@ -1,10 +1,10 @@
 use egui::Context;
-use rustyboi_core_lib::gb;
+use rustyboi_session::DebugSnapshot;
 use crate::ui::Gui;
 
 impl Gui {
-    pub(in crate) fn render_memory_explorer_panel(&mut self, ctx: &Context, gb: Option<&gb::GB>) {
-        if let Some(gb_ref) = gb {
+    pub(in crate) fn render_memory_explorer_panel(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>) {
+        if let Some(snap) = debug {
             egui::Window::new("Memory Explorer")
                 .default_pos([410.0, 50.0])
                 .default_size([220.0, 400.0])
@@ -48,7 +48,7 @@ impl Gui {
                     let end_addr = std::cmp::min(start_addr.saturating_add(8), 0xFFFF); // Show 9 entries
 
                     for addr in (start_addr..=end_addr).step_by(1) {
-                        let val = gb_ref.read_memory(addr);
+                        let val = snap.mem(addr);
 
                         let color = if addr == self.memory_explorer_parsed_address {
                             egui::Color32::YELLOW // Highlight target address

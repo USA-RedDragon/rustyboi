@@ -1,10 +1,10 @@
 use egui::Context;
-use rustyboi_core_lib::{gb, memory, ppu};
+use rustyboi_session::DebugSnapshot;
 use crate::ui::Gui;
 
 impl Gui {
-    pub(in crate) fn render_tile_explorer_panel(&mut self, ctx: &Context, gb: Option<&gb::GB>) {
-        if let Some(gb_ref) = gb {
+    pub(in crate) fn render_tile_explorer_panel(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>) {
+        if let Some(snap) = debug {
             egui::Window::new("Tile Explorer")
                 .default_pos([1120.0, 50.0])
                 .default_size([350.0, 500.0])
@@ -18,9 +18,9 @@ impl Gui {
                     ui.small(egui::RichText::new("8x8 pixel tiles from 0x8000-0x97FF").color(egui::Color32::LIGHT_GRAY));
 
                     // CGB/DMG specific controls
-                    if gb_ref.should_enable_cgb_features() {
+                    if snap.cgb {
                         ui.separator();
-                        let current_vbk = gb_ref.read_memory(memory::mmio::REG_VBK) & 1;
+                        let current_vbk = snap.mmio.vbk & 1;
                         ui.horizontal(|ui| {
                             ui.label("VRAM Bank:");
                             ui.radio_value(&mut self.tile_explorer_vram_bank, 0, "Bank 0");
@@ -36,7 +36,7 @@ impl Gui {
                         });
                     } else {
                         // Get current palette for DMG color mapping
-                        let bgp = gb_ref.read_memory(ppu::BGP);
+                        let bgp = snap.mmio.bgp;
                         ui.small(egui::RichText::new(format!("Using BGP palette: {:02X}", bgp)).color(egui::Color32::LIGHT_GRAY));
                     }
 
@@ -67,15 +67,15 @@ impl Gui {
                                         // Draw the tile
                                         for y in 0..8 {
                                             // Read the two bytes for this line of the tile from the selected VRAM bank
-                                            let low_byte = if gb_ref.should_enable_cgb_features() {
-                                                gb_ref.read_vram_bank(self.tile_explorer_vram_bank, tile_addr + (y * 2))
+                                            let low_byte = if snap.cgb {
+                                                snap.vram_byte(self.tile_explorer_vram_bank, tile_addr + (y * 2))
                                             } else {
-                                                gb_ref.read_memory(tile_addr + (y * 2))
+                                                snap.vram_byte(0, tile_addr + (y * 2))
                                             };
-                                            let high_byte = if gb_ref.should_enable_cgb_features() {
-                                                gb_ref.read_vram_bank(self.tile_explorer_vram_bank, tile_addr + (y * 2) + 1)
+                                            let high_byte = if snap.cgb {
+                                                snap.vram_byte(self.tile_explorer_vram_bank, tile_addr + (y * 2) + 1)
                                             } else {
-                                                gb_ref.read_memory(tile_addr + (y * 2) + 1)
+                                                snap.vram_byte(0, tile_addr + (y * 2) + 1)
                                             };
 
                                             for x in 0..8 {
@@ -86,16 +86,15 @@ impl Gui {
                                                 let pixel_value = (high_bit << 1) | low_bit;
 
                                                 // Apply palette mapping based on hardware
-                                                let pixel_color = if gb_ref.should_enable_cgb_features() {
+                                                let pixel_color = if snap.cgb {
                                                     // CGB mode - use selected palette
-                                                    let rgb555 = gb_ref.read_bg_palette_data(self.tile_explorer_palette, pixel_value);
-                                                    let r = ((rgb555 & 0x1F) * 255 / 31) as u8;
-                                                    let g = (((rgb555 >> 5) & 0x1F) * 255 / 31) as u8;
-                                                    let b = (((rgb555 >> 10) & 0x1F) * 255 / 31) as u8;
+                                                    let (r, g, b) = snap
+                                                        .cgb_bg_rgb(self.tile_explorer_palette, pixel_value)
+                                                        .unwrap_or((0, 0, 0));
                                                     egui::Color32::from_rgb(r, g, b)
                                                 } else {
                                                     // DMG mode - use BGP
-                                                    let bgp = gb_ref.read_memory(ppu::BGP);
+                                                    let bgp = snap.mmio.bgp;
                                                     let palette_bits = (bgp >> (pixel_value * 2)) & 0x03;
                                                     match palette_bits {
                                                         0 => egui::Color32::from_rgb(255, 255, 255), // White
@@ -141,7 +140,7 @@ impl Gui {
 
                     ui.separator();
                     ui.small(egui::RichText::new("Hover tiles for details").color(egui::Color32::LIGHT_GRAY));
-                    if gb_ref.should_enable_cgb_features() {
+                    if snap.cgb {
                         ui.small(egui::RichText::new(format!("Showing VRAM Bank {} with CGB Palette {}",
                             self.tile_explorer_vram_bank, self.tile_explorer_palette)).color(egui::Color32::LIGHT_GRAY));
                     } else {

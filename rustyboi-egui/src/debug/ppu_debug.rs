@@ -1,11 +1,14 @@
 use egui::Context;
-use rustyboi_core_lib::{gb, memory, ppu};
+use rustyboi_session::debug::PpuMode;
+use rustyboi_session::DebugSnapshot;
 use crate::ui::Gui;
 
 impl Gui {
-    pub(in crate) fn render_ppu_debug_panel(&mut self, ctx: &Context, gb: Option<&gb::GB>) {
-        if let Some(gb_ref) = gb {
-            let (ppu, pixel_buffer) = gb_ref.get_ppu_debug_info();
+    pub(in crate) fn render_ppu_debug_panel(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>) {
+        if let Some(snap) = debug {
+            let ppu = &snap.ppu;
+            let mmio = &snap.mmio;
+            let pixel_buffer = ppu.fetcher_pixels;
             egui::Window::new("PPU Debug")
                 .default_pos([640.0, 50.0])
                 .default_size([250.0, 500.0])
@@ -16,29 +19,29 @@ impl Gui {
                     ui.set_width(230.0);
 
                     // PPU Status
-                    ui.monospace(egui::RichText::new(format!("Disabled: {}", if ppu.is_disabled() { "YES" } else { "NO" }))
-                        .color(if ppu.is_disabled() { egui::Color32::LIGHT_RED } else { egui::Color32::LIGHT_GREEN }));
+                    ui.monospace(egui::RichText::new(format!("Disabled: {}", if ppu.disabled { "YES" } else { "NO" }))
+                        .color(if ppu.disabled { egui::Color32::LIGHT_RED } else { egui::Color32::LIGHT_GREEN }));
 
-                    let state_str = match ppu.get_state() {
-                        ppu::State::OAMSearch => "OAM Search",
-                        ppu::State::PixelTransfer => "Pixel Transfer",
-                        ppu::State::HBlank => "H-Blank",
-                        ppu::State::VBlank => "V-Blank",
+                    let state_str = match ppu.mode {
+                        PpuMode::OamSearch => "OAM Search",
+                        PpuMode::PixelTransfer => "Pixel Transfer",
+                        PpuMode::HBlank => "H-Blank",
+                        PpuMode::VBlank => "V-Blank",
                     };
                     ui.monospace(egui::RichText::new(format!("State: {}", state_str)).color(egui::Color32::WHITE));
-                    ui.monospace(egui::RichText::new(format!("Ticks: {}", ppu.get_ticks())).color(egui::Color32::WHITE));
-                    ui.monospace(egui::RichText::new(format!("Current X: {}", ppu.get_x())).color(egui::Color32::WHITE));
-                    ui.monospace(egui::RichText::new(format!("Has Frame: {}", if ppu.has_frame() { "YES" } else { "NO" }))
-                        .color(if ppu.has_frame() { egui::Color32::LIGHT_GREEN } else { egui::Color32::GRAY }));
+                    ui.monospace(egui::RichText::new(format!("Ticks: {}", ppu.ticks)).color(egui::Color32::WHITE));
+                    ui.monospace(egui::RichText::new(format!("Current X: {}", ppu.x)).color(egui::Color32::WHITE));
+                    ui.monospace(egui::RichText::new(format!("Has Frame: {}", if ppu.has_frame { "YES" } else { "NO" }))
+                        .color(if ppu.has_frame { egui::Color32::LIGHT_GREEN } else { egui::Color32::GRAY }));
 
                     ui.separator();
 
                     // MMIO Registers
-                    let ly = gb_ref.read_memory(ppu::LY);
-                    let scy = gb_ref.read_memory(ppu::SCY);
-                    let lyc = gb_ref.read_memory(ppu::LYC);
-                    let lcd_control = gb_ref.read_memory(ppu::LCD_CONTROL);
-                    let lcd_status = gb_ref.read_memory(ppu::LCD_STATUS);
+                    let ly = mmio.ly;
+                    let scy = mmio.scy;
+                    let lyc = mmio.lyc;
+                    let lcd_control = mmio.lcdc;
+                    let lcd_status = mmio.stat;
 
                     ui.monospace(egui::RichText::new(format!("LY: {:02X} ({})", ly, ly)).color(egui::Color32::WHITE));
                     ui.monospace(egui::RichText::new(format!("LYC: {:02X} ({})", lyc, lyc)).color(egui::Color32::WHITE));
@@ -47,13 +50,13 @@ impl Gui {
                     ui.monospace(egui::RichText::new(format!("LCD_STAT: {:02X}", lcd_status)).color(egui::Color32::WHITE));
 
                     // Hardware-specific registers
-                    if gb_ref.should_enable_cgb_features() {
+                    if snap.cgb {
                         ui.separator();
                         ui.small(egui::RichText::new("CGB Registers:").color(egui::Color32::LIGHT_GRAY));
-                        let vbk = gb_ref.read_memory(memory::mmio::REG_VBK);
-                        let svbk = gb_ref.read_memory(memory::mmio::REG_SVBK);
-                        let bcps = gb_ref.read_memory(memory::mmio::REG_BCPS);
-                        let ocps = gb_ref.read_memory(memory::mmio::REG_OCPS);
+                        let vbk = mmio.vbk;
+                        let svbk = mmio.svbk;
+                        let bcps = mmio.bcps;
+                        let ocps = mmio.ocps;
 
                         ui.monospace(egui::RichText::new(format!("VBK: {:02X} (Bank {})", vbk, vbk & 1)).color(egui::Color32::LIGHT_GREEN));
                         ui.monospace(egui::RichText::new(format!("SVBK: {:02X} (Bank {})", svbk, if svbk & 7 == 0 { 1 } else { svbk & 7 })).color(egui::Color32::LIGHT_GREEN));
@@ -62,9 +65,9 @@ impl Gui {
                     } else {
                         ui.separator();
                         ui.small(egui::RichText::new("DMG Palettes:").color(egui::Color32::LIGHT_GRAY));
-                        let bgp = gb_ref.read_memory(ppu::BGP);
-                        let obp0 = gb_ref.read_memory(ppu::OBP0);
-                        let obp1 = gb_ref.read_memory(ppu::OBP1);
+                        let bgp = mmio.bgp;
+                        let obp0 = mmio.obp0;
+                        let obp1 = mmio.obp1;
 
                         ui.monospace(egui::RichText::new(format!("BGP: {:02X}", bgp)).color(egui::Color32::WHITE));
                         ui.monospace(egui::RichText::new(format!("OBP0: {:02X}", obp0)).color(egui::Color32::LIGHT_BLUE));
@@ -87,7 +90,7 @@ impl Gui {
                     ui.separator();
 
                     // Sprites on current line
-                    let sprites_count = ppu.get_sprites_on_line_count();
+                    let sprites_count = ppu.sprites_on_line;
                     ui.small(egui::RichText::new(format!("Sprites on line {}: {}", ly, sprites_count))
                         .color(if sprites_count > 0 { egui::Color32::LIGHT_GREEN } else { egui::Color32::GRAY }));
 

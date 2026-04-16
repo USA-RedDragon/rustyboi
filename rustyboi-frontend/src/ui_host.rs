@@ -13,9 +13,9 @@ use egui::{Context, ViewportId};
 use winit::event_loop::EventLoopWindowTarget;
 use winit::window::Window;
 
-use rustyboi_core_lib::{cpu, gb};
 use rustyboi_egui_lib::actions::{GuiAction, SessionUiState};
 use rustyboi_egui_lib::Gui;
+use rustyboi_session::{DebugDetail, DebugSnapshot};
 
 use crate::renderer::{EguiPaint, PhysicalRect};
 
@@ -110,6 +110,21 @@ impl UiHost {
         self.egui_ctx.wants_keyboard_input()
     }
 
+    /// The heavy [`DebugSnapshot`] sections the currently-open debug panels need.
+    /// The caller builds only these; on web, if [`DebugDetail::is_empty`] AND no
+    /// baseline-only panel is open (see [`UiHost::any_debug_panel_open`]) nothing
+    /// is posted.
+    pub fn wanted_debug_detail(&self) -> DebugDetail {
+        self.gui.debug_detail()
+    }
+
+    /// Whether any debug panel that renders from a snapshot is open. When true the
+    /// frontend must supply a snapshot even if [`UiHost::wanted_debug_detail`] is
+    /// empty (the CPU / PPU / Breakpoint panels use only the baseline).
+    pub fn any_debug_panel_open(&self) -> bool {
+        self.gui.any_debug_panel_open()
+    }
+
     /// Update the DPI scale (winit `ScaleFactorChanged`).
     pub fn set_pixels_per_point(&mut self, scale: f32) {
         self.pixels_per_point = scale;
@@ -141,8 +156,8 @@ impl UiHost {
         &mut self,
         window: &Window,
         paused: bool,
-        registers: Option<&cpu::registers::Registers>,
-        gb: Option<&gb::GB>,
+        debug: Option<&DebugSnapshot>,
+        printer_attached: Option<bool>,
         session: &SessionUiState,
         extra_events: ExtraEvents,
         force_repaint: bool,
@@ -177,7 +192,7 @@ impl UiHost {
 
         let mut ui_result = None;
         let full_output = self.egui_ctx.run(raw_input, |egui_ctx| {
-            ui_result = Some(self.gui.ui(egui_ctx, paused, registers, gb, session));
+            ui_result = Some(self.gui.ui(egui_ctx, paused, debug, printer_attached, session));
         });
 
         self.egui_state
