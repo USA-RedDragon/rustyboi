@@ -38,6 +38,9 @@ let emu = null;
 let running = false;
 let lastNow = 0;
 let acc = 0;
+// Hold-to-rewind: while set (Backspace held on the main thread) the loop steps
+// back through the rewind buffer instead of running frames forward.
+let rewinding = false;
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 const status = (msg) => post({ type: "Status", msg });
@@ -86,11 +89,18 @@ function loop() {
 
   let ran = 0;
   while (acc >= FRAME_MS && ran < MAX_FRAMES_PER_TICK) {
-    const samples = emu.run_frame(); // fills the RGBA framebuffer
-    if (emu.has_rom()) postFrameAndState();
-    if (samples.length > 0) {
-      // Transfer the underlying buffer — no copy across the boundary.
-      post({ type: "Audio", samples }, [samples.buffer]);
+    if (rewinding) {
+      // Step back one snapshot; if the buffer is exhausted, hold on the oldest
+      // frame (do NOT resume forward play while Backspace is still held). No
+      // audio while rewinding.
+      if (emu.rewind_step()) postFrameAndState();
+    } else {
+      const samples = emu.run_frame(); // fills the RGBA framebuffer
+      if (emu.has_rom()) postFrameAndState();
+      if (samples.length > 0) {
+        // Transfer the underlying buffer — no copy across the boundary.
+        post({ type: "Audio", samples }, [samples.buffer]);
+      }
     }
     acc -= FRAME_MS;
     ran++;
@@ -133,6 +143,10 @@ self.onmessage = async (e) => {
     if (m.type === "ReturnBuffer") {
       // Main thread finished uploading a frame and handed its buffer back.
       if (m.buf && framePool.length < FRAME_POOL_MAX) framePool.push(m.buf);
+      return;
+    }
+    if (m.type === "SetRewind") {
+      rewinding = !!m.on; // hold-to-rewind (Backspace) toggled on the main thread
       return;
     }
     if (!emu) return; // ignore control messages until booted

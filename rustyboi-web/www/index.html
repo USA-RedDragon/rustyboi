@@ -91,11 +91,13 @@
         const buf = bytes.buffer;
         send({ type: "LoadState", bytes: buf }, [buf]);
       };
+      // Hold-to-rewind: the driver calls this on Backspace down/up.
+      const setRewind = (on) => send({ type: "SetRewind", on: !!on });
 
       const canvas = document.getElementById("screen");
       sizeCanvas(canvas);
 
-      const app = new WebApp(postAction, postInput, loadRom, loadState);
+      const app = new WebApp(postAction, postInput, loadRom, loadState, setRewind);
 
       // Route worker → main messages into the egui driver + audio sink.
       worker.onmessage = (e) => {
