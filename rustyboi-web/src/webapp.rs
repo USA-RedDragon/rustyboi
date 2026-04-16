@@ -284,8 +284,18 @@ async fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Res
         match event {
             Event::WindowEvent { event, .. } => {
                 // Feed egui (mouse/keyboard/touch/IME + text entry for the cheat
-                // and keybind panels). GB input is derived separately below.
-                ui.handle_event(&loop_window, &event);
+                // and keybind panels). GB input is derived separately below. But
+                // keep the feature hotkeys (Tab = fast-forward, Backspace =
+                // rewind) AWAY from egui while playing — otherwise egui uses Tab
+                // for focus traversal (cursor jumps into the menu bar) and eats
+                // Backspace, so neither reaches `feature_hotkey`. When a text
+                // field is focused they belong to the UI, so forward them then.
+                let hotkey_for_game = !ui.wants_keyboard_input()
+                    && matches!(&event,
+                        WindowEvent::KeyboardInput { event: k, .. } if is_hotkey_key(k));
+                if !hotkey_for_game {
+                    ui.handle_event(&loop_window, &event);
+                }
                 match event {
                     WindowEvent::KeyboardInput { event: key, .. } => {
                         // While the user is typing in an egui text field (cheat /
@@ -328,6 +338,15 @@ async fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Res
     });
 
     Ok(())
+}
+
+/// The keys `feature_hotkey` claims. Held out of egui while playing so egui
+/// doesn't use Tab for focus traversal or consume Backspace as an edit.
+fn is_hotkey_key(key: &KeyEvent) -> bool {
+    matches!(
+        key.physical_key,
+        PhysicalKey::Code(KeyCode::Tab | KeyCode::Backspace)
+    )
 }
 
 /// Feature hotkeys (mirrors the desktop bindings): Tab toggles fast-forward,
