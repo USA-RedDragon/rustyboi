@@ -91,6 +91,9 @@ struct Shared {
     /// `(active: boolean, bits: number) => void` — tell the worker which debug
     /// snapshot to build (which panels are open). Posted only on change.
     post_debug_detail: js_sys::Function,
+    /// `() => void` — toggle canvas fullscreen (main-thread DOM; the worker is
+    /// not involved). Mirrors `request_export` as an outbound JS bridge.
+    toggle_fullscreen: js_sys::Function,
 }
 
 impl Shared {
@@ -104,6 +107,7 @@ impl Shared {
         import_file: js_sys::Function,
         request_export: js_sys::Function,
         post_debug_detail: js_sys::Function,
+        toggle_fullscreen: js_sys::Function,
     ) -> Self {
         Shared {
             frame_rgba: Vec::new(),
@@ -125,6 +129,7 @@ impl Shared {
             import_file,
             request_export,
             post_debug_detail,
+            toggle_fullscreen,
         }
     }
 }
@@ -153,6 +158,7 @@ impl WebApp {
         import_file: js_sys::Function,
         request_export: js_sys::Function,
         post_debug_detail: js_sys::Function,
+        toggle_fullscreen: js_sys::Function,
     ) -> WebApp {
         console_error_panic_hook::set_once();
         WebApp {
@@ -165,6 +171,7 @@ impl WebApp {
                 import_file,
                 request_export,
                 post_debug_detail,
+                toggle_fullscreen,
             ))),
             started: false,
         }
@@ -541,6 +548,10 @@ fn draw(
         }
     }
 
+    // Push the current scaling policy from the session UI snapshot before render
+    // (one shared site, mirroring the desktop App::draw).
+    renderer.set_scaling_mode(ui_state.scaling);
+
     // Render: the game texture (uploaded above) letterboxed into the central
     // region, egui on top. game: None — the retained texture is drawn via has_game.
     if let Err(e) = renderer.render(None, ui_frame.region, paint) {
@@ -592,6 +603,14 @@ fn dispatch_action(shared: &Rc<RefCell<Shared>>, action: UiAction) {
         UiAction::ExportState => request_export(shared, "state"),
         UiAction::ExportBatterySave => request_export(shared, "battery"),
         UiAction::ExportRtc => request_export(shared, "rtc"),
+        // Fullscreen is a main-thread DOM op (canvas Fullscreen API); the worker
+        // is not involved, so call the bridge here rather than posting a WebAction.
+        UiAction::ToggleFullscreen => {
+            let s = shared.borrow();
+            let cb = s.toggle_fullscreen.clone();
+            drop(s);
+            let _ = cb.call0(&JsValue::NULL);
+        }
         other => {
             if let Some(web_action) = WebAction::from_ui_action(&other) {
                 if let Ok(json) = serde_json::to_string(&web_action) {

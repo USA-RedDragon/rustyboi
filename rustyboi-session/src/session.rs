@@ -6,7 +6,7 @@
 //! through the boxed service ports; video+audio come back as return values.
 //! No wall clock, no filesystem, no threads: WASM-clean.
 
-use crate::action::{HardwareChoice, PaletteChoice};
+use crate::action::{HardwareChoice, PaletteChoice, ScalingMode};
 use crate::apply::palette_shades;
 use crate::audio::{CaptureSink, SampleBuf};
 use crate::cheats::{Cheat, CheatError, CheatSet};
@@ -51,6 +51,21 @@ pub struct FrameOutput {
     pub audio: Vec<(f32, f32)>,
     pub frame_count: u64,
     pub advanced: bool,
+}
+
+/// Scale drained stereo output samples by `gain` (0.0..=1.0). Applied ONLY to
+/// the session's output copy — the core/APU are never touched — so hardware
+/// suites stay byte-identical. A gain of exactly 1.0 is the identity path (no
+/// multiply), keeping the default (volume 100) bit-for-bit unchanged.
+fn scale_samples(
+    samples: impl Iterator<Item = (f32, f32)>,
+    gain: f32,
+) -> Vec<(f32, f32)> {
+    if gain == 1.0 {
+        samples.collect()
+    } else {
+        samples.map(|(l, r)| (l * gain, r * gain)).collect()
+    }
 }
 
 /// Metadata stored alongside a savestate slot. `timestamp` is supplied by the
@@ -235,7 +250,11 @@ impl Session {
             }
         };
 
-        let audio = self.audio_buf.lock().unwrap().drain(..).collect();
+        // Scale the drained OUTPUT copy by master volume. The core/APU are never
+        // touched, so hardware suites (APU register/SRAM checks) stay byte-
+        // identical; at volume 100 the gain is exactly 1.0 and we skip the mul.
+        let gain = self.config.volume_gain();
+        let audio = scale_samples(self.audio_buf.lock().unwrap().drain(..), gain);
         FrameOutput { frame, audio, frame_count: self.frame_count, advanced }
     }
 
@@ -735,6 +754,30 @@ impl Session {
         self.persist_config();
     }
 
+    /// Set the master output volume (clamped 0..=100); persists the config. Only
+    /// scales the session's drained audio copy in [`run_frame`](Self::run_frame);
+    /// the core/APU are never touched (keeps hardware suites byte-identical).
+    pub fn set_volume(&mut self, volume: u8) {
+        self.config.volume = volume.min(100);
+        self.persist_config();
+    }
+
+    /// Current master volume (0..=100).
+    pub fn volume(&self) -> u8 {
+        self.config.volume.min(100)
+    }
+
+    /// Set the frame letterboxing policy; persists the config.
+    pub fn set_scaling_mode(&mut self, scaling: ScalingMode) {
+        self.config.scaling = scaling;
+        self.persist_config();
+    }
+
+    /// Current frame letterboxing policy.
+    pub fn scaling_mode(&self) -> ScalingMode {
+        self.config.scaling
+    }
+
     fn persist_config(&mut self) {
         if let Err(e) = self.save_config() {
             log_config_error(&e);
@@ -1091,5 +1134,106 @@ mod offload_tests {
         let snap = s.take_pending_snapshot();
         assert!(snap.is_some(), "expected a pending clone at the due frame");
         assert_eq!(s.rewind_stats().0, 0, "still nothing in the ring until pushed back");
+    }
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+    use crate::ports::{MemRumble, MemStorage, MemWebcam};
+
+    fn test_ports() -> Ports {
+        Ports {
+            storage: Box::new(MemStorage::new()),
+            rumble: Box::new(MemRumble::default()),
+            webcam: Box::new(MemWebcam::default()),
+        }
+    }
+
+    // A fixed synthetic stereo stream standing in for drained APU output, so the
+    // scaling is verified on real signal regardless of what a ROM-less machine
+    // happens to emit. `run_frame` scales exactly this way (it calls
+    // `scale_samples` on the drained buffer).
+    fn stream() -> Vec<(f32, f32)> {
+        vec![(0.8, -0.4), (1.0, -1.0), (0.25, 0.5), (-0.6, 0.0)]
+    }
+
+    // `run_frame`'s output scaler: gain 1.0 is identity (default volume 100),
+    // gain 0.5 halves every sample (volume 50), gain 0.0 silences (volume 0).
+    #[test]
+    fn scale_samples_applies_gain() {
+        let src = stream();
+
+        // Volume 100 -> gain 1.0 -> byte-identical (the default path is untouched).
+        let full = scale_samples(src.iter().copied(), 1.0);
+        assert_eq!(full, src, "gain 1.0 is the identity path");
+
+        // Volume 50 -> gain 0.5 -> each channel exactly halved (x*0.5 is exact f32).
+        let half = scale_samples(src.iter().copied(), 0.5);
+        for ((sl, sr), (hl, hr)) in src.iter().zip(half.iter()) {
+            assert_eq!(*hl, sl * 0.5, "left halved");
+            assert_eq!(*hr, sr * 0.5, "right halved");
+        }
+
+        // Volume 0 -> gain 0.0 -> every sample silenced.
+        let mute = scale_samples(src.iter().copied(), 0.0);
+        assert!(mute.iter().all(|(l, r)| *l == 0.0 && *r == 0.0), "gain 0 silences");
+    }
+
+    // The gain `run_frame` uses tracks the config volume, so setting volume 0/50/
+    // 100 drives the scaler to 0.0/0.5/1.0 respectively.
+    #[test]
+    fn config_volume_drives_run_frame_gain() {
+        let src = stream();
+        for (vol, want_gain) in [(0u8, 0.0f32), (50, 0.5), (100, 1.0)] {
+            let mut cfg = Config::default();
+            cfg.volume = vol;
+            let s = Session::new(cfg, test_ports(), [0u8; 32]);
+            let gain = s.config().volume_gain();
+            assert_eq!(gain, want_gain, "volume {vol} -> gain {want_gain}");
+            let scaled = scale_samples(src.iter().copied(), gain);
+            for ((sl, sr), (dl, dr)) in src.iter().zip(scaled.iter()) {
+                assert_eq!(*dl, sl * want_gain);
+                assert_eq!(*dr, sr * want_gain);
+            }
+        }
+    }
+
+    // The wiring itself: `run_frame` never changes the sample COUNT, only the
+    // amplitude, so a ROM-less machine yields the same-length stream at any volume.
+    #[test]
+    fn run_frame_output_length_is_volume_independent() {
+        let len_at = |vol: u8| {
+            let mut cfg = Config::default();
+            cfg.volume = vol;
+            let mut s = Session::new(cfg, test_ports(), [0u8; 32]);
+            s.run_frame(AbstractInput::none()).audio.len()
+        };
+        assert_eq!(len_at(100), len_at(50));
+        assert_eq!(len_at(100), len_at(0));
+    }
+
+    // The setter clamps to 0..=100 and persists, and the gain multiplier tracks it.
+    #[test]
+    fn set_volume_clamps_and_reports() {
+        let mut s = Session::new(Config::default(), test_ports(), [0u8; 32]);
+        assert_eq!(s.volume(), 100);
+        s.set_volume(200);
+        assert_eq!(s.volume(), 100, "over-100 clamps to 100");
+        s.set_volume(50);
+        assert_eq!(s.volume(), 50);
+        assert_eq!(s.config().volume_gain(), 0.5);
+        s.set_volume(0);
+        assert_eq!(s.config().volume_gain(), 0.0);
+    }
+
+    // The scaling-mode setter round-trips through the persisted config.
+    #[test]
+    fn set_scaling_mode_persists() {
+        let mut s = Session::new(Config::default(), test_ports(), [0u8; 32]);
+        assert_eq!(s.scaling_mode(), ScalingMode::FitAspect);
+        s.set_scaling_mode(ScalingMode::IntegerAspect);
+        assert_eq!(s.scaling_mode(), ScalingMode::IntegerAspect);
+        assert_eq!(s.config().scaling, ScalingMode::IntegerAspect);
     }
 }

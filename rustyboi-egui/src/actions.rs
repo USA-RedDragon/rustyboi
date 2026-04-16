@@ -9,7 +9,7 @@
 
 pub use rustyboi_session::action::{
     ActionKind, CommandDescriptor, FileData, HardwareChoice, KeyBind, MenuCategory, PaletteChoice,
-    SessionUiState, UiAction, COMMANDS,
+    ScalingMode, SessionUiState, UiAction, COMMANDS,
 };
 
 #[cfg(target_os = "android")]
