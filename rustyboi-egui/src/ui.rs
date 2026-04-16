@@ -27,6 +27,37 @@ fn command_label(kind: ActionKind) -> &'static str {
         .unwrap_or("?")
 }
 
+/// A File → Import submenu button: opens a file picker filtered to
+/// `filter_name`/`ext`, and stores the picked file wrapped by `make_action`
+/// (e.g. `GuiAction::ImportBatterySave`) into `pending` for the host to apply.
+/// Shared by the desktop menu bar and the mobile menu overlay so the import
+/// wiring lives once. `make_action` is `fn(FileData) -> GuiAction` — the picked
+/// bytes flow through the session's `finish_import_*` path per platform.
+#[cfg(not(target_os = "android"))]
+fn import_menu_button(
+    ui: &mut egui::Ui,
+    pending: &Arc<Mutex<Option<GuiAction>>>,
+    label: &str,
+    filter_name: &str,
+    ext: &str,
+    make_action: fn(crate::actions::FileData) -> GuiAction,
+) {
+    if ui.button(label).clicked() {
+        let dialog = file_dialog::new()
+            .add_filter(filter_name, &[ext])
+            .add_filter("All Files", &["*"]);
+        let holder = Arc::clone(pending);
+        dialog.pick_file(move |file_data| {
+            if let Some(file_data) = file_data
+                && let Ok(mut pending) = holder.lock()
+            {
+                *pending = Some(make_action(file_data));
+            }
+        });
+        ui.close_menu();
+    }
+}
+
 /// Render a single toggle row in the mobile menu overlay. Behaves like
 /// `ui.checkbox(...)` but lays out as a full-width row with a check
 /// glyph on the right so it matches the rest of the touch-sized rows.
@@ -39,6 +70,35 @@ fn mobile_toggle_row(ui: &mut egui::Ui, size: egui::Vec2, label: &str, value: &m
         .clicked()
     {
         *value = !*value;
+    }
+}
+
+/// A full-width File → Import row for the mobile overlay: opens a file picker and
+/// stores the picked file wrapped by `make_action` into `pending`. Returns
+/// whether it was clicked (so the caller can close the overlay).
+#[cfg(target_os = "android")]
+fn mobile_import_row(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    pending: &Arc<Mutex<Option<GuiAction>>>,
+    label: &str,
+    filter_name: &str,
+    ext: &str,
+    make_action: fn(crate::actions::FileData) -> GuiAction,
+) -> bool {
+    if ui.add(egui::Button::new(label).min_size(size)).clicked() {
+        let dialog = file_dialog::new().add_filter(filter_name, &[ext]);
+        let holder = Arc::clone(pending);
+        dialog.pick_file(move |file_data| {
+            if let Some(file_data) = file_data
+                && let Ok(mut pending) = holder.lock()
+            {
+                *pending = Some(make_action(file_data));
+            }
+        });
+        true
+    } else {
+        false
     }
 }
 
@@ -348,6 +408,43 @@ impl Gui {
                         });
                         ui.close_menu();
                     }
+                    ui.separator();
+                    // Cross-platform save-data import/export. Import picks a file
+                    // (bytes flow through the session's finish_import_* path);
+                    // Export routes the bytes through SaveBytes so each platform
+                    // delivers a file its own way (rfd/SAF/browser download) —
+                    // never rfd `save_file`, which cannot write in a browser.
+                    ui.menu_button("Import", |ui| {
+                        import_menu_button(ui, &self.pending_dialog_result,
+                            command_label(ActionKind::ImportState),
+                            "RustyBoi Save State", "rustyboisave", GuiAction::ImportState);
+                        if session.has_battery {
+                            import_menu_button(ui, &self.pending_dialog_result,
+                                command_label(ActionKind::ImportBatterySave),
+                                "Battery Save", "sav", GuiAction::ImportBatterySave);
+                        }
+                        if session.has_rtc {
+                            import_menu_button(ui, &self.pending_dialog_result,
+                                command_label(ActionKind::ImportRtc),
+                                "RTC", "rtc", GuiAction::ImportRtc);
+                        }
+                    });
+                    ui.menu_button("Export", |ui| {
+                        if ui.button(command_label(ActionKind::ExportState)).clicked() {
+                            *action = Some(GuiAction::ExportState);
+                            ui.close_menu();
+                        }
+                        if session.has_battery
+                            && ui.button(command_label(ActionKind::ExportBatterySave)).clicked() {
+                            *action = Some(GuiAction::ExportBatterySave);
+                            ui.close_menu();
+                        }
+                        if session.has_rtc
+                            && ui.button(command_label(ActionKind::ExportRtc)).clicked() {
+                            *action = Some(GuiAction::ExportRtc);
+                            ui.close_menu();
+                        }
+                    });
                     ui.separator();
                     // Quick + numbered savestate slots (via the session). The
                     // quick slot has dedicated hotkeys (F5/F8); the numbered
@@ -864,6 +961,31 @@ impl Gui {
                                     *pending = Some(GuiAction::LoadState(file_data));
                                 }
                             });
+                            close_after_action = true;
+                        }
+                        // Save-data import/export (mobile). Imports pick a file
+                        // (bytes flow through finish_import_* on the SAF path);
+                        // exports emit the payload-free action → SaveBytes → SAF
+                        // create-document, never rfd `save_file`.
+                        if mobile_import_row(ui, row_size, &self.pending_dialog_result,
+                            "Import Battery Save…", "Battery Save", "sav",
+                            GuiAction::ImportBatterySave) { close_after_action = true; }
+                        if mobile_import_row(ui, row_size, &self.pending_dialog_result,
+                            "Import RTC…", "RTC", "rtc", GuiAction::ImportRtc) {
+                            close_after_action = true;
+                        }
+                        if ui
+                            .add(egui::Button::new("Export Battery Save…").min_size(row_size))
+                            .clicked()
+                        {
+                            *action = Some(GuiAction::ExportBatterySave);
+                            close_after_action = true;
+                        }
+                        if ui
+                            .add(egui::Button::new("Export RTC…").min_size(row_size))
+                            .clicked()
+                        {
+                            *action = Some(GuiAction::ExportRtc);
                             close_after_action = true;
                         }
                         if ui

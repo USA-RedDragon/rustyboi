@@ -6,7 +6,7 @@
 //! breakpoints, debug stepping requests) and returns the pieces of work only the
 //! host can do as [`PlatformRequest`]s the frontend performs after the call.
 
-use crate::action::{PaletteChoice, UiAction};
+use crate::action::{LoadPurpose, PaletteChoice, UiAction};
 use crate::session::Session;
 
 /// Something only the host (OS / window / filesystem) can carry out, surfaced by
@@ -23,12 +23,20 @@ pub enum PlatformRequest {
     /// Write the serialized machine state to a user-chosen path (File → Save
     /// State). The session hands over the bytes; the frontend writes them.
     SaveStateBytes { path: std::path::PathBuf, bytes: Vec<u8> },
+    /// Hand `bytes` to the user as a downloadable/saveable file under
+    /// `suggested_name` (File → Export battery/RTC/state). Path-free so it works
+    /// uniformly on web (browser download), desktop (rfd save dialog), and
+    /// Android (SAF create-document).
+    SaveBytes { suggested_name: String, bytes: Vec<u8> },
     /// The frontend must read the bytes behind a picked file and feed them back
-    /// via [`Session::finish_load_rom`](crate::session::Session::finish_load_rom)
-    /// / [`Session::finish_load_state`](crate::session::Session::finish_load_state).
+    /// via the finisher for `purpose`
+    /// ([`finish_load_rom`](crate::session::Session::finish_load_rom),
+    /// [`finish_load_state`](crate::session::Session::finish_load_state),
+    /// [`finish_import_battery`](crate::session::Session::finish_import_battery),
+    /// or [`finish_import_rtc`](crate::session::Session::finish_import_rtc)).
     /// Carried through the frontend's file resolver (path→bytes on desktop,
     /// content bytes on web/Android).
-    LoadFile(crate::action::FileData),
+    LoadFile { file: crate::action::FileData, purpose: crate::action::LoadPurpose },
     /// A status line to show the user.
     Status(String),
     /// An error to show the user.
@@ -243,16 +251,58 @@ impl Session {
                 }
                 Err(e) => ActionOutcome::error(format!("Failed to save state: {e}")),
             },
-            action @ (UiAction::LoadRom(_) | UiAction::LoadState(_)) => {
-                let file = match action {
-                    UiAction::LoadRom(f) | UiAction::LoadState(f) => f,
-                    _ => unreachable!(),
-                };
-                ActionOutcome {
-                    requests: vec![PlatformRequest::LoadFile(file)],
-                    pause_changed: false,
+            UiAction::LoadRom(file) => ActionOutcome {
+                requests: vec![PlatformRequest::LoadFile { file, purpose: LoadPurpose::Rom }],
+                pause_changed: false,
+            },
+            UiAction::LoadState(file) | UiAction::ImportState(file) => ActionOutcome {
+                requests: vec![PlatformRequest::LoadFile { file, purpose: LoadPurpose::State }],
+                pause_changed: false,
+            },
+            UiAction::ImportBatterySave(file) => ActionOutcome {
+                requests: vec![PlatformRequest::LoadFile { file, purpose: LoadPurpose::Battery }],
+                pause_changed: false,
+            },
+            UiAction::ImportRtc(file) => ActionOutcome {
+                requests: vec![PlatformRequest::LoadFile { file, purpose: LoadPurpose::Rtc }],
+                pause_changed: false,
+            },
+
+            // Export: produce a path-free SaveBytes request the frontend delivers
+            // as a file (download on web, save dialog on desktop/Android).
+            UiAction::ExportState => match self.gb().to_state_bytes() {
+                Ok(bytes) => {
+                    let mut o = ActionOutcome::default();
+                    o.push(PlatformRequest::SaveBytes {
+                        suggested_name: "savestate.rustyboisave".into(),
+                        bytes,
+                    });
+                    o
                 }
-            }
+                Err(e) => ActionOutcome::error(format!("Failed to export state: {e}")),
+            },
+            UiAction::ExportBatterySave => match self.export_battery() {
+                Some(bytes) => {
+                    let mut o = ActionOutcome::default();
+                    o.push(PlatformRequest::SaveBytes {
+                        suggested_name: "battery.sav".into(),
+                        bytes,
+                    });
+                    o
+                }
+                None => ActionOutcome::error("This cartridge has no battery save"),
+            },
+            UiAction::ExportRtc => match self.export_rtc() {
+                Some(bytes) => {
+                    let mut o = ActionOutcome::default();
+                    o.push(PlatformRequest::SaveBytes {
+                        suggested_name: "clock.rtc".into(),
+                        bytes,
+                    });
+                    o
+                }
+                None => ActionOutcome::error("This cartridge has no real-time clock"),
+            },
 
             // Android library / SAF actions need the JNI bridge + panel.
             #[cfg(target_os = "android")]

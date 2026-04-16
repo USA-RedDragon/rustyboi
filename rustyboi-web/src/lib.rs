@@ -142,7 +142,7 @@ impl Emulator {
         let outcome = self.session.apply(UiAction::LoadRom(rom_file(name, bytes)), 0);
         let mut extra: Vec<PlatformRequest> = Vec::new();
         for req in outcome.requests {
-            if matches!(req, PlatformRequest::LoadFile(_)) {
+            if matches!(req, PlatformRequest::LoadFile { .. }) {
                 match self.session.finish_load_rom(bytes) {
                     Ok(_) => {
                         self.has_rom = true;
@@ -173,6 +173,55 @@ impl Emulator {
             Err(e) => reqs.push(PlatformRequest::Error(format!("Failed to load state: {e}"))),
         }
         requests_to_js(&reqs)
+    }
+
+    /// Import a battery `.sav` image (bytes the main thread read from a picked
+    /// file) into the current cartridge. Persists to IndexedDB (via the session's
+    /// storage port) so it survives a reload. Returns Status/Error requests.
+    pub fn import_battery(&mut self, bytes: &[u8]) -> Array {
+        let reqs = match self.session.finish_import_battery(bytes) {
+            Ok(()) => vec![PlatformRequest::Status("Battery save imported".into())],
+            Err(e) => vec![PlatformRequest::Error(format!("Failed to import battery save: {e}"))],
+        };
+        requests_to_js(&reqs)
+    }
+
+    /// Import an `.rtc` clock blob into the current cartridge. Returns
+    /// Status/Error requests.
+    pub fn import_rtc(&mut self, bytes: &[u8]) -> Array {
+        let reqs = match self.session.finish_import_rtc(bytes) {
+            Ok(()) => vec![PlatformRequest::Status("RTC imported".into())],
+            Err(e) => vec![PlatformRequest::Error(format!("Failed to import RTC: {e}"))],
+        };
+        requests_to_js(&reqs)
+    }
+
+    /// Export the current cartridge's battery SRAM, or an empty array when the
+    /// cart has no battery. The worker posts these bytes to the main thread,
+    /// which triggers a browser download.
+    pub fn export_battery(&self) -> js_sys::Uint8Array {
+        match self.session.export_battery() {
+            Some(bytes) => js_sys::Uint8Array::from(bytes.as_slice()),
+            None => js_sys::Uint8Array::new_with_length(0),
+        }
+    }
+
+    /// Export the current cartridge's RTC blob, or an empty array when there is
+    /// no RTC.
+    pub fn export_rtc(&self) -> js_sys::Uint8Array {
+        match self.session.export_rtc() {
+            Some(bytes) => js_sys::Uint8Array::from(bytes.as_slice()),
+            None => js_sys::Uint8Array::new_with_length(0),
+        }
+    }
+
+    /// Export the full machine state (`.rustyboisave`), or an empty array when
+    /// serialization fails / no ROM is loaded.
+    pub fn export_state(&self) -> js_sys::Uint8Array {
+        match self.session.gb().to_state_bytes() {
+            Ok(bytes) => js_sys::Uint8Array::from(bytes.as_slice()),
+            Err(_) => js_sys::Uint8Array::new_with_length(0),
+        }
     }
 
     /// Advance one presented frame, fill the RGBA framebuffer, and return this
@@ -332,6 +381,8 @@ impl Emulator {
             touch_controls: self.session.touch_controls(),
             slots: self.session.list_slots(),
             cheats: self.session.cheats().map(str::to_owned).collect(),
+            has_battery: self.session.has_battery(),
+            has_rtc: self.session.has_rtc(),
         }
     }
 
@@ -414,7 +465,11 @@ fn requests_to_js(requests: &[PlatformRequest]) -> Array {
             }
             // Serviced inside the worker for the web frontend and not expected
             // from the actions it issues; surface as a status so nothing is lost.
-            PlatformRequest::SaveStateBytes { .. } | PlatformRequest::LoadFile(_) => {
+            // (Export SaveBytes is serviced by the dedicated `export_*` methods,
+            // not through `apply`, so it never reaches here.)
+            PlatformRequest::SaveStateBytes { .. }
+            | PlatformRequest::SaveBytes { .. }
+            | PlatformRequest::LoadFile { .. } => {
                 set("type", "Status".into());
                 set("msg", "unhandled platform request".into());
             }

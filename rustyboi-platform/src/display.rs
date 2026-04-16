@@ -622,14 +622,21 @@ fn run_gui_loop(
                                 Err(e) => rs.ui.set_error(format!("Failed to save state: {e}")),
                             }
                         }
+                        PlatformRequest::SaveBytes { suggested_name, bytes } => {
+                            match save_bytes_to_file(&suggested_name, &bytes) {
+                                Ok(Some(path)) => rs.ui.set_status(format!("Saved to: {}", path.display())),
+                                Ok(None) => {}
+                                Err(e) => rs.ui.set_error(format!("Failed to save file: {e}")),
+                            }
+                        }
                         PlatformRequest::Status(s) => rs.ui.set_status(s),
                         PlatformRequest::Error(e) => rs.ui.set_error(e),
                         PlatformRequest::ClearError => rs.ui.clear_error(),
-                        // ROM/state loads are resolved inside `App::draw` (they
-                        // need the file resolver), so this arm is unreachable on
-                        // desktop/Android; kept for the shared contract (the
-                        // web worker will service it). Log if it ever fires.
-                        PlatformRequest::LoadFile(_) => {
+                        // ROM/state loads + battery/RTC imports are resolved inside
+                        // `App::draw` (they need the file resolver), so this arm is
+                        // unreachable on desktop/Android; kept for the shared
+                        // contract (the web worker services it). Log if it fires.
+                        PlatformRequest::LoadFile { .. } => {
                             log::warn!("LoadFile request reached the platform loop unexpectedly");
                         }
                         #[cfg(target_os = "android")]
@@ -707,7 +714,7 @@ fn resolve_gui_action(action: &GuiAction) -> Option<ResolvedAction> {
             let (bytes, path) = read_file_data(file_data)?;
             Some(ResolvedAction::LoadRom { bytes, path })
         }
-        GuiAction::LoadState(file_data) => {
+        GuiAction::LoadState(file_data) | GuiAction::ImportState(file_data) => {
             let (state, _path) = read_file_data(file_data)?;
             // Re-attach the current ROM on a state load: the app reads it back
             // from disk via the reload_rom bytes we supply here. We don't have
@@ -716,7 +723,44 @@ fn resolve_gui_action(action: &GuiAction) -> Option<ResolvedAction> {
             // reinstates memory; the ROM bytes it already holds stay valid).
             Some(ResolvedAction::LoadState { state, reload_rom: None })
         }
+        GuiAction::ImportBatterySave(file_data) => {
+            let (bytes, _path) = read_file_data(file_data)?;
+            Some(ResolvedAction::ImportBattery { bytes })
+        }
+        GuiAction::ImportRtc(file_data) => {
+            let (bytes, _path) = read_file_data(file_data)?;
+            Some(ResolvedAction::ImportRtc { bytes })
+        }
         _ => None,
+    }
+}
+
+/// Deliver export bytes to a user-chosen file (File → Export battery/RTC/state).
+/// Desktop pops a native save dialog seeded with `suggested_name`; Android writes
+/// into the app files dir under that name. Returns the written path, or `None`
+/// when the user cancelled the dialog.
+fn save_bytes_to_file(
+    suggested_name: &str,
+    bytes: &[u8],
+) -> Result<Option<std::path::PathBuf>, std::io::Error> {
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    {
+        let Some(path) = rfd::FileDialog::new().set_file_name(suggested_name).save_file() else {
+            return Ok(None);
+        };
+        std::fs::write(&path, bytes)?;
+        Ok(Some(path))
+    }
+    #[cfg(target_os = "android")]
+    {
+        let path = crate::android::save_dir().join(suggested_name);
+        std::fs::write(&path, bytes)?;
+        Ok(Some(path))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (suggested_name, bytes);
+        Ok(None)
     }
 }
 

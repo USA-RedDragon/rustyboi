@@ -2744,6 +2744,30 @@ impl Cartridge {
         }
     }
 
+    /// Import a battery save image into the cart's RAM (File → Import Battery
+    /// Save). Copies `min(src, dst)` bytes so a footer-carrying `.sav` (mGBA RTC
+    /// footer) or a short file loads its RAM-sized prefix; a wildly-oversized
+    /// file (more than double the RAM) is rejected so a mis-picked file can't be
+    /// silently accepted. If a sidecar `.sav` is attached (desktop) the freshly
+    /// loaded image is flushed straight through it, so the import survives a
+    /// reload with no extra host plumbing. No-op for non-battery carts.
+    pub fn import_save_ram(&mut self, bytes: &[u8]) -> Result<usize, String> {
+        if !self.has_battery() {
+            return Err("cartridge has no battery-backed save RAM".into());
+        }
+        let ram_len = self.save_ram().len();
+        if ram_len == 0 {
+            return Err("cartridge has no save RAM".into());
+        }
+        if bytes.len() > ram_len.saturating_mul(2) {
+            return Err(format!(
+                "save file is {} bytes but this cart's RAM is {ram_len} bytes",
+                bytes.len()
+            ));
+        }
+        self.load_sram_bytes(bytes).map_err(|e| e.to_string())
+    }
+
     /// Byte the cartridge RAM chip drives when the OAM-DMA controller asserts
     /// the external-RAM chip select (gb-ctr "OAM DMA address decoding": all
     /// A000-FFFF sources are external-RAM accesses). Bypasses the CPU read
@@ -3153,6 +3177,39 @@ impl Cartridge {
     pub fn rtc_memory_mut(&mut self) -> &mut [u8] {
         self.rtc_memory_refresh();
         &mut self.rtc_memory
+    }
+
+    /// Read-only mirror of [`rtc_memory_mut`](Self::rtc_memory_mut): the
+    /// serialized RTC region. Empty for carts without an RTC. Takes `&mut self`
+    /// only because it must refresh the region from live state first (the
+    /// pointer stays stable), but performs no external mutation.
+    pub fn rtc_memory(&mut self) -> &[u8] {
+        self.rtc_memory_refresh();
+        &self.rtc_memory
+    }
+
+    /// The current RTC state serialized to the mGBA/BGB `.rtc` sidecar format
+    /// (File → Export RTC). `None` for carts without an RTC.
+    pub fn export_rtc(&self) -> Option<Vec<u8>> {
+        if !self.has_rtc() {
+            return None;
+        }
+        self.rtc_serialize(Self::unix_now())
+    }
+
+    /// Import a `.rtc` sidecar blob (File → Import RTC): restore the persisted
+    /// clock with wall-clock catch-up, then flush the attached sidecar (desktop)
+    /// so the import survives a reload. Errors on a blob that doesn't match this
+    /// cart's RTC layout. No-op-error for non-RTC carts.
+    pub fn import_rtc(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if !self.has_rtc() {
+            return Err("cartridge has no real-time clock".into());
+        }
+        if !self.rtc_restore_with_catch_up(bytes) {
+            return Err("RTC data does not match this cartridge".into());
+        }
+        self.flush_rtc_file();
+        Ok(())
     }
 
     /// Re-sync the RETRO_MEMORY_RTC buffer from the live state (+ a fresh
