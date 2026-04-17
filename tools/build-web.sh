@@ -51,6 +51,13 @@ else
     echo "  Install binaryen:  sudo pacman -S binaryen"
 fi
 
+# Content-hash the final wasm into the service worker's cache id: changing bytes
+# here are how the browser detects a new version and shows the OPT-IN update
+# prompt (see www/sw.js, which importScripts this). Generated + gitignored.
+sw_id=$(sha256sum "$WASM" | cut -c1-12)
+printf 'self.BUILD_ID = "%s";\n' "$sw_id" > "rustyboi-web/www/sw-version.js"
+echo "==> sw-version.js BUILD_ID=$sw_id"
+
 echo
 # One wasm module serves BOTH threads (`--target web` emits a single module):
 #  - the worker (www/worker.js) uses the `Emulator` export to run the Session;
