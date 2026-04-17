@@ -116,6 +116,11 @@ pub struct App {
     /// integer scale with no letterbox bars. Dynamic — never a static offset.
     content_inset: (f32, f32),
 
+    /// Platform safe-area insets `(left, top, right, bottom)` in PHYSICAL pixels.
+    /// The game region is shrunk by these so it is not drawn behind system bars /
+    /// display cutouts. Zero on desktop/web; set from Android `content_rect`.
+    safe_insets: [f32; 4],
+
     /// Reused RGBA upload scratch for `present`, so the per-frame frame-to-RGBA
     /// conversion (up to SGB 256×224×4) doesn't heap-allocate every frame.
     rgba_scratch: Vec<u8>,
@@ -158,6 +163,7 @@ impl App {
             last_title_update: now,
             fps: 0.0,
             content_inset: (0.0, 0.0),
+            safe_insets: [0.0; 4],
             rgba_scratch: Vec::new(),
         }
     }
@@ -225,6 +231,13 @@ impl App {
         a.set(GbButton::Left, state.left);
         a.set(GbButton::Right, state.right);
         self.input = a;
+    }
+
+    /// Set the platform safe-area insets `(left, top, right, bottom)` in PHYSICAL
+    /// pixels (Android system bars / display cutout). The game region is shrunk by
+    /// these so it is not drawn behind them. Zero on desktop/web.
+    pub fn set_safe_insets(&mut self, left: f32, top: f32, right: f32, bottom: f32) {
+        self.safe_insets = [left.max(0.0), top.max(0.0), right.max(0.0), bottom.max(0.0)];
     }
 
     // --- feature hotkeys (the platform maps keys to these) ------------------
@@ -692,8 +705,17 @@ impl App {
         // Render: game letterboxed into the central region, egui on top. Push the
         // current scaling policy from the session config first (one shared site).
         renderer.set_scaling_mode(self.session.scaling_mode());
+        // Shrink the game region by the platform safe-area insets so it is not
+        // drawn behind system bars / a display cutout (Android). No-op elsewhere.
+        // Computed before `present` borrows self.
+        let [si_l, si_t, si_r, si_b] = self.safe_insets;
+        let mut region = ui_frame.region;
+        region.x += si_l;
+        region.y += si_t;
+        region.width = (region.width - si_l - si_r).max(0.0);
+        region.height = (region.height - si_t - si_b).max(0.0);
         let game = self.present();
-        if let Err(e) = renderer.render(game.as_ref(), ui_frame.region, paint) {
+        if let Err(e) = renderer.render(game.as_ref(), region, paint) {
             match e {
                 wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
                     let (w, h) = renderer.surface_size();
