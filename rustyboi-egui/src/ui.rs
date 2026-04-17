@@ -278,6 +278,10 @@ impl Gui {
             printer_attached,
             session,
         );
+        // The mobile overlay has no printer menu item; consume it so the desktop-
+        // only menu-bar param doesn't warn on Android.
+        #[cfg(target_os = "android")]
+        let _ = printer_attached;
         self.render_debug_panels(ctx, debug, &mut action, paused);
         if self.show_cheats_panel {
             self.render_cheats_panel(ctx, &mut action, session);
