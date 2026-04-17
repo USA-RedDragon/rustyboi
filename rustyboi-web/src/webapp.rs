@@ -20,6 +20,7 @@
 //! to the worker.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -34,6 +35,9 @@ use winit::window::{Window, WindowBuilder};
 
 use rustyboi_frontend_lib::renderer::{GameFrame, Renderer, SourceSize};
 use rustyboi_frontend_lib::ui_host::UiHost;
+use rustyboi_session::input_config::{
+    FiredHotkey, HeldInputs, HotkeyAction, InputTrigger, KeyName, PadButton, ResolveState,
+};
 use rustyboi_session::{DebugSnapshot, GbButton, SessionUiState, UiAction};
 
 use crate::web_action::WebAction;
@@ -320,7 +324,10 @@ async fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Res
     // buttons currently held via the physical keyboard (OR'd with the egui
     // on-screen touch overlay each frame in `draw`).
     let loop_window = window.clone();
-    let mut kb_mask: u8 = 0;
+    // Raw keyboard keys held this frame (host-agnostic names); resolved against
+    // the session's InputConfig in `draw`. Replaces the old fixed GB-button mask.
+    let mut held_keys: HashSet<KeyName> = HashSet::new();
+    let mut resolve_state = ResolveState::new();
     let mut rewind_held = false;
     event_loop.spawn(move |event, elwt| {
         // Wait, NOT Poll. On web, Poll makes winit reschedule an immediate wakeup
@@ -335,14 +342,14 @@ async fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Res
             Event::WindowEvent { event, .. } => {
                 // Feed egui (mouse/keyboard/touch/IME + text entry for the cheat
                 // and keybind panels). GB input is derived separately below. But
-                // keep the feature hotkeys (Tab = fast-forward, Backspace =
-                // rewind) AWAY from egui while playing — otherwise egui uses Tab
-                // for focus traversal (cursor jumps into the menu bar) and eats
-                // Backspace, so neither reaches `feature_hotkey`. When a text
-                // field is focused they belong to the UI, so forward them then.
+                // keep keys the config binds to a hotkey (e.g. Tab = fast-forward)
+                // AWAY from egui while playing — otherwise egui uses Tab for focus
+                // traversal (cursor jumps into the menu bar) and eats Backspace.
+                // When a text field is focused they belong to the UI, so forward.
                 let hotkey_for_game = !ui.wants_keyboard_input()
                     && matches!(&event,
-                        WindowEvent::KeyboardInput { event: k, .. } if is_hotkey_key(k));
+                        WindowEvent::KeyboardInput { event: k, .. }
+                            if is_hotkey_key(&shared, k));
                 if !hotkey_for_game {
                     ui.handle_event(&loop_window, &event);
                 }
@@ -352,15 +359,14 @@ async fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Res
                         // keybind entry) the keyboard belongs to the UI: no GB
                         // input, no feature hotkeys, and release any held rewind.
                         if ui.wants_keyboard_input() {
-                            kb_mask = 0;
+                            held_keys.clear();
                             set_rewind(&shared, &mut rewind_held, false);
                         } else {
-                            apply_key(&mut kb_mask, &key);
-                            feature_hotkey(&shared, &mut rewind_held, &key);
+                            update_held_keys(&mut held_keys, &key);
                         }
                     }
                     WindowEvent::Focused(false) => {
-                        kb_mask = 0;
+                        held_keys.clear();
                         set_rewind(&shared, &mut rewind_held, false);
                     }
                     WindowEvent::Resized(size) => {
@@ -372,7 +378,15 @@ async fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Res
                         loop_window.request_redraw();
                     }
                     WindowEvent::RedrawRequested => {
-                        draw(&shared, &loop_window, &mut ui, &mut renderer, kb_mask);
+                        draw(
+                            &shared,
+                            &loop_window,
+                            &mut ui,
+                            &mut renderer,
+                            &held_keys,
+                            &mut resolve_state,
+                            &mut rewind_held,
+                        );
                     }
                     WindowEvent::CloseRequested => {}
                     _ => {}
@@ -390,27 +404,63 @@ async fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Res
     Ok(())
 }
 
-/// The keys `feature_hotkey` claims. Held out of egui while playing so egui
-/// doesn't use Tab for focus traversal or consume Backspace as an edit.
-fn is_hotkey_key(key: &KeyEvent) -> bool {
-    matches!(
-        key.physical_key,
-        PhysicalKey::Code(KeyCode::Tab | KeyCode::Backspace)
-    )
+/// Whether `key` is bound (as a single-key chord) to a hotkey in the current
+/// config. Such keys are held out of egui while playing so egui doesn't use Tab
+/// for focus traversal or consume Backspace as an edit.
+fn is_hotkey_key(shared: &Rc<RefCell<Shared>>, key: &KeyEvent) -> bool {
+    let Some(name) = key_name(key) else { return false };
+    let s = shared.borrow();
+    s.ui_state.input.hotkeys.iter().any(|h| {
+        h.chord
+            .iter()
+            .any(|t| matches!(t, InputTrigger::Key(k) if *k == name))
+    })
 }
 
-/// Feature hotkeys (mirrors the desktop bindings): Tab toggles fast-forward,
-/// Backspace is hold-to-rewind. The GB-button keys are handled by `apply_key`.
-fn feature_hotkey(shared: &Rc<RefCell<Shared>>, rewind_held: &mut bool, key: &KeyEvent) {
-    let PhysicalKey::Code(code) = key.physical_key else { return };
-    match code {
-        KeyCode::Tab => {
-            if key.state == ElementState::Pressed && !key.repeat {
-                dispatch_action(shared, UiAction::ToggleFastForward);
-            }
+/// Map a winit `KeyCode` (browser physical key) to the host-agnostic [`KeyName`].
+fn key_name(key: &KeyEvent) -> Option<KeyName> {
+    let PhysicalKey::Code(code) = key.physical_key else { return None };
+    use KeyName as N;
+    Some(match code {
+        KeyCode::KeyA => N::A, KeyCode::KeyB => N::B, KeyCode::KeyC => N::C,
+        KeyCode::KeyD => N::D, KeyCode::KeyE => N::E, KeyCode::KeyF => N::F,
+        KeyCode::KeyG => N::G, KeyCode::KeyH => N::H, KeyCode::KeyI => N::I,
+        KeyCode::KeyJ => N::J, KeyCode::KeyK => N::K, KeyCode::KeyL => N::L,
+        KeyCode::KeyM => N::M, KeyCode::KeyN => N::N, KeyCode::KeyO => N::O,
+        KeyCode::KeyP => N::P, KeyCode::KeyQ => N::Q, KeyCode::KeyR => N::R,
+        KeyCode::KeyS => N::S, KeyCode::KeyT => N::T, KeyCode::KeyU => N::U,
+        KeyCode::KeyV => N::V, KeyCode::KeyW => N::W, KeyCode::KeyX => N::X,
+        KeyCode::KeyY => N::Y, KeyCode::KeyZ => N::Z,
+        KeyCode::Digit0 => N::Num0, KeyCode::Digit1 => N::Num1,
+        KeyCode::Digit2 => N::Num2, KeyCode::Digit3 => N::Num3,
+        KeyCode::Digit4 => N::Num4, KeyCode::Digit5 => N::Num5,
+        KeyCode::Digit6 => N::Num6, KeyCode::Digit7 => N::Num7,
+        KeyCode::Digit8 => N::Num8, KeyCode::Digit9 => N::Num9,
+        KeyCode::ArrowUp => N::Up, KeyCode::ArrowDown => N::Down,
+        KeyCode::ArrowLeft => N::Left, KeyCode::ArrowRight => N::Right,
+        KeyCode::Enter => N::Enter, KeyCode::Space => N::Space,
+        KeyCode::Tab => N::Tab, KeyCode::Backspace => N::Backspace,
+        KeyCode::Escape => N::Escape, KeyCode::Backslash => N::Backslash,
+        KeyCode::ShiftLeft => N::ShiftLeft, KeyCode::ShiftRight => N::ShiftRight,
+        KeyCode::F1 => N::F1, KeyCode::F2 => N::F2, KeyCode::F3 => N::F3,
+        KeyCode::F4 => N::F4, KeyCode::F5 => N::F5, KeyCode::F6 => N::F6,
+        KeyCode::F7 => N::F7, KeyCode::F8 => N::F8, KeyCode::F9 => N::F9,
+        KeyCode::F10 => N::F10, KeyCode::F11 => N::F11, KeyCode::F12 => N::F12,
+        _ => return None,
+    })
+}
+
+/// Update the held-keys set from a key event (host-agnostic names). Keys with
+/// no [`KeyName`] mapping are ignored.
+fn update_held_keys(held: &mut HashSet<KeyName>, key: &KeyEvent) {
+    let Some(name) = key_name(key) else { return };
+    match key.state {
+        ElementState::Pressed => {
+            held.insert(name);
         }
-        KeyCode::Backspace => set_rewind(shared, rewind_held, key.state == ElementState::Pressed),
-        _ => {}
+        ElementState::Released => {
+            held.remove(&name);
+        }
     }
 }
 
@@ -427,30 +477,6 @@ fn set_rewind(shared: &Rc<RefCell<Shared>>, held: &mut bool, on: bool) {
     let _ = f.call1(&JsValue::NULL, &JsValue::from_bool(on));
 }
 
-/// Update the keyboard-held GB button mask from a key event. Fixed default web
-/// layout (host→abstract classification is the adapter's job): arrows = d-pad,
-/// X = A, Z = B, Enter = Start, Shift = Select. The session's own remap runs on
-/// top of this abstract set in the worker.
-fn apply_key(mask: &mut u8, key: &KeyEvent) {
-    let PhysicalKey::Code(code) = key.physical_key else { return };
-    let button = match code {
-        KeyCode::ArrowUp => GbButton::Up,
-        KeyCode::ArrowDown => GbButton::Down,
-        KeyCode::ArrowLeft => GbButton::Left,
-        KeyCode::ArrowRight => GbButton::Right,
-        KeyCode::KeyX => GbButton::A,
-        KeyCode::KeyZ => GbButton::B,
-        KeyCode::Enter => GbButton::Start,
-        KeyCode::ShiftLeft | KeyCode::ShiftRight => GbButton::Select,
-        _ => return,
-    };
-    let bit = 1u8 << button_bit(button);
-    match key.state {
-        ElementState::Pressed => *mask |= bit,
-        ElementState::Released => *mask &= !bit,
-    }
-}
-
 /// Run one egui frame + composite: apply pending status/error, run the UI,
 /// dispatch the action it emits (to the worker), forward GB input, and render.
 fn draw(
@@ -458,7 +484,9 @@ fn draw(
     window: &Window,
     ui: &mut UiHost,
     renderer: &mut Renderer,
-    kb_mask: u8,
+    held_keys: &HashSet<KeyName>,
+    resolve_state: &mut ResolveState,
+    rewind_held: &mut bool,
 ) {
     // Pull the shared inputs for this frame, releasing the borrow before running
     // egui (the rfd file-picker callback can re-enter `shared` via JS).
@@ -539,9 +567,30 @@ fn draw(
         dispatch_action(shared, action);
     }
 
-    // Forward GB input: union of the physical keyboard + the egui on-screen
-    // touch overlay + any connected gamepad. Only post on change.
-    let mask = kb_mask | input_mask(ui.touch_button_state()) | gamepad_mask();
+    // Resolve GB input + hotkeys through the shared config on the main thread
+    // (the worker only sees the resulting button mask). Raw held inputs = the
+    // physical keyboard + the Gamepad-API buttons; the resolver applies the
+    // GB-button bindings and chord hotkeys from `ui_state.input`.
+    let held = HeldInputs {
+        keys: held_keys.clone(),
+        pad: gamepad_pad_held(),
+    };
+    let (mut button_state, fired) = ui_state.input.resolve(&held, resolve_state);
+    // Union the egui on-screen touch overlay on top of the resolved buttons.
+    let touch = ui.touch_button_state();
+    button_state.a |= touch.a;
+    button_state.b |= touch.b;
+    button_state.start |= touch.start;
+    button_state.select |= touch.select;
+    button_state.up |= touch.up;
+    button_state.down |= touch.down;
+    button_state.left |= touch.left;
+    button_state.right |= touch.right;
+
+    dispatch_hotkeys(shared, &fired, rewind_held);
+
+    // Forward the resolved GB button mask to the worker. Only post on change.
+    let mask = input_mask(button_state);
     {
         let mut s = shared.borrow_mut();
         if mask != s.last_input_mask {
@@ -677,14 +726,42 @@ fn input_mask(state: rustyboi_session::ButtonState) -> u8 {
     mask
 }
 
-/// Poll connected gamepads (the Gamepad API) and fold them into the GB button
-/// mask. Standard mapping: A=btn0, B=btn1, Select=btn8, Start=btn9, D-pad =
-/// btn12..15 OR the left stick (axes 0/1, web Y is +down). Returns 0 with no
-/// gamepad. Re-polled each frame — `get_gamepads` snapshots current state.
-fn gamepad_mask() -> u8 {
-    let Some(win) = web_sys::window() else { return 0 };
-    let Ok(pads) = win.navigator().get_gamepads() else { return 0 };
-    let mut bs = rustyboi_session::ButtonState::default();
+/// Dispatch the hotkeys the resolver fired this frame. Fast-forward and rewind
+/// have worker paths (reuse `set_rewind` / the `ToggleFastForward` action);
+/// quicksave/quickload/pause route through the worker via a `WebAction`; exit and
+/// fullscreen are main-thread DOM ops (exit closes nothing on web, so it's a
+/// no-op; fullscreen calls the canvas bridge). Turbo is baked into the button
+/// state by the resolver, so it needs no dispatch here.
+fn dispatch_hotkeys(shared: &Rc<RefCell<Shared>>, fired: &[FiredHotkey], rewind_held: &mut bool) {
+    // Rewind is a hold action: engage while active, release when it stops firing.
+    let want_rewind = fired.iter().any(|f| matches!(f.action, HotkeyAction::Rewind));
+    set_rewind(shared, rewind_held, want_rewind);
+
+    for f in fired {
+        match f.action {
+            HotkeyAction::FastForward if f.rising => {
+                dispatch_action(shared, UiAction::ToggleFastForward);
+            }
+            HotkeyAction::Quicksave if f.rising => dispatch_action(shared, UiAction::Quicksave),
+            HotkeyAction::Quickload if f.rising => dispatch_action(shared, UiAction::Quickload),
+            HotkeyAction::FrameAdvance if f.rising => dispatch_action(shared, UiAction::FrameAdvance),
+            HotkeyAction::TogglePause if f.rising => dispatch_action(shared, UiAction::TogglePause),
+            HotkeyAction::ToggleFullscreen if f.rising => {
+                dispatch_action(shared, UiAction::ToggleFullscreen);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Poll connected gamepads (the Gamepad API) and collect their held buttons as
+/// abstract [`PadButton`]s. Standard mapping: 0=South,1=East,2=West,3=North,
+/// 8=Select,9=Start,12..15=D-pad,4/5=L1/R1,6/7=L2/R2; D-pad also honors the left
+/// stick (axes 0/1, web Y is +down). Empty with no gamepad; re-polled each frame.
+fn gamepad_pad_held() -> HashSet<PadButton> {
+    let mut held = HashSet::new();
+    let Some(win) = web_sys::window() else { return held };
+    let Ok(pads) = win.navigator().get_gamepads() else { return held };
     for i in 0..pads.length() {
         let Ok(pad) = pads.get(i).dyn_into::<web_sys::Gamepad>() else { continue };
         let buttons = pad.buttons();
@@ -697,16 +774,27 @@ fn gamepad_mask() -> u8 {
         };
         let axes = pad.axes();
         let axis = |idx: u32| axes.get(idx).as_f64().unwrap_or(0.0);
-        bs.a |= pressed(0);
-        bs.b |= pressed(1);
-        bs.select |= pressed(8);
-        bs.start |= pressed(9);
-        bs.up |= pressed(12) || axis(1) < -0.5;
-        bs.down |= pressed(13) || axis(1) > 0.5;
-        bs.left |= pressed(14) || axis(0) < -0.5;
-        bs.right |= pressed(15) || axis(0) > 0.5;
+        let mut hold = |cond: bool, b: PadButton| {
+            if cond {
+                held.insert(b);
+            }
+        };
+        hold(pressed(0), PadButton::South);
+        hold(pressed(1), PadButton::East);
+        hold(pressed(2), PadButton::West);
+        hold(pressed(3), PadButton::North);
+        hold(pressed(8), PadButton::Select);
+        hold(pressed(9), PadButton::Start);
+        hold(pressed(4), PadButton::LeftShoulder);
+        hold(pressed(5), PadButton::RightShoulder);
+        hold(pressed(6), PadButton::LeftTrigger);
+        hold(pressed(7), PadButton::RightTrigger);
+        hold(pressed(12) || axis(1) < -0.5, PadButton::DpadUp);
+        hold(pressed(13) || axis(1) > 0.5, PadButton::DpadDown);
+        hold(pressed(14) || axis(0) < -0.5, PadButton::DpadLeft);
+        hold(pressed(15) || axis(0) > 0.5, PadButton::DpadRight);
     }
-    input_mask(bs)
+    held
 }
 
 /// Extract `(name, bytes)` from a picked file. On wasm the rfd picker always

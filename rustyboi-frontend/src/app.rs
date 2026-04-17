@@ -275,6 +275,14 @@ impl App {
         self.session.config().rewind.enabled
     }
 
+    /// Toggle user pause (mirrors the `TogglePause` action's pause bookkeeping),
+    /// for platform hotkey dispatch that doesn't route through `dispatch_action`.
+    pub fn toggle_pause(&mut self) {
+        self.user_paused = !self.user_paused;
+        self.manually_paused = self.user_paused || self.error_state.is_some();
+        self.is_paused = self.manually_paused;
+    }
+
     /// Request a debug single-frame step (honored while paused).
     pub fn request_step_frame(&mut self) {
         self.step_single_frame = true;
@@ -380,6 +388,7 @@ impl App {
             cheats: self.session.cheats().map(str::to_owned).collect(),
             has_battery: self.session.has_battery(),
             has_rtc: self.session.has_rtc(),
+            input: self.session.input_config().clone(),
         }
     }
 

@@ -23,7 +23,7 @@ fn default_volume() -> u8 {
 }
 
 use rustyboi_session::action::{HardwareChoice, PaletteChoice, ScalingMode};
-use rustyboi_session::{SessionUiState, UiAction};
+use rustyboi_session::{InputConfig, SessionUiState, UiAction};
 
 /// Serializable mirror of [`HardwareChoice`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +111,7 @@ pub enum WebAction {
     SetRewindDepth(usize),
     SetVolume(u8),
     SetScalingMode(ScalingMode),
+    SetInputConfig(InputConfig),
     AddCheat(String),
     RemoveCheat(String),
 }
@@ -140,6 +141,7 @@ impl WebAction {
             UiAction::SetRewindDepth(n) => WebAction::SetRewindDepth(*n),
             UiAction::SetVolume(v) => WebAction::SetVolume(*v),
             UiAction::SetScalingMode(m) => WebAction::SetScalingMode(*m),
+            UiAction::SetInputConfig(i) => WebAction::SetInputConfig(i.clone()),
             UiAction::AddCheat(c) => WebAction::AddCheat(c.clone()),
             UiAction::RemoveCheat(c) => WebAction::RemoveCheat(c.clone()),
             _ => return None,
@@ -169,6 +171,7 @@ impl WebAction {
             WebAction::SetRewindDepth(n) => UiAction::SetRewindDepth(n),
             WebAction::SetVolume(v) => UiAction::SetVolume(v),
             WebAction::SetScalingMode(m) => UiAction::SetScalingMode(m),
+            WebAction::SetInputConfig(i) => UiAction::SetInputConfig(i),
             WebAction::AddCheat(c) => UiAction::AddCheat(c),
             WebAction::RemoveCheat(c) => UiAction::RemoveCheat(c),
         }
@@ -198,6 +201,8 @@ pub struct WebUiState {
     pub has_battery: bool,
     #[serde(default)]
     pub has_rtc: bool,
+    #[serde(default)]
+    pub input: InputConfig,
 }
 
 impl WebUiState {
@@ -218,6 +223,7 @@ impl WebUiState {
             cheats: s.cheats.clone(),
             has_battery: s.has_battery,
             has_rtc: s.has_rtc,
+            input: s.input.clone(),
         }
     }
 
@@ -238,6 +244,7 @@ impl WebUiState {
             cheats: self.cheats,
             has_battery: self.has_battery,
             has_rtc: self.has_rtc,
+            input: self.input,
         }
     }
 }

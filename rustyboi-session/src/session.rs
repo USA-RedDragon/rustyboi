@@ -778,6 +778,18 @@ impl Session {
         self.config.scaling
     }
 
+    /// Replace the rebindable input map (GB-button bindings + chord hotkeys);
+    /// persists the config. The adapter's next `resolve` call sees the new map.
+    pub fn set_input_config(&mut self, input: crate::input_config::InputConfig) {
+        self.config.input = input;
+        self.persist_config();
+    }
+
+    /// The current rebindable input map.
+    pub fn input_config(&self) -> &crate::input_config::InputConfig {
+        &self.config.input
+    }
+
     fn persist_config(&mut self) {
         if let Err(e) = self.save_config() {
             log_config_error(&e);

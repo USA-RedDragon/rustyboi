@@ -417,6 +417,7 @@ impl Emulator {
             cheats: self.session.cheats().map(str::to_owned).collect(),
             has_battery: self.session.has_battery(),
             has_rtc: self.session.has_rtc(),
+            input: self.session.input_config().clone(),
         }
     }
 
