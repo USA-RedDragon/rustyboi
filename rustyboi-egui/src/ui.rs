@@ -150,6 +150,14 @@ pub struct Gui {
     // Tile explorer state for CGB
     pub(super) tile_explorer_vram_bank: u8,
     pub(super) tile_explorer_palette: u8,
+    // Keybind editor working state. `input_config` is the live edited copy
+    // (seeded from the persisted `SessionUiState.input` when the panel opens,
+    // `None` while closed); the rest track in-progress rebind/record UI.
+    pub(super) input_config: Option<rustyboi_session::InputConfig>,
+    pub(super) rebinding_gb: Option<rustyboi_session::GbButton>,
+    pub(super) recording_chord: Option<usize>,
+    pub(super) recorded_chord: Vec<rustyboi_session::InputTrigger>,
+    pub(super) new_hotkey_action: rustyboi_session::HotkeyAction,
     // File dialog result tracking
     pending_dialog_result: Arc<Mutex<Option<GuiAction>>>,
     // On-screen Game Boy controls state (mirrors winit `key_held` on desktop).
@@ -215,6 +223,11 @@ impl Gui {
             selected_sprite_index: None,
             tile_explorer_vram_bank: 0,
             tile_explorer_palette: 0,
+            input_config: None,
+            rebinding_gb: None,
+            recording_chord: None,
+            recorded_chord: Vec::new(),
+            new_hotkey_action: rustyboi_session::HotkeyAction::FastForward,
             pending_dialog_result,
             touch_buttons: input::ButtonState::default(),
             touch_state: touch_controls::TouchState::default(),
@@ -282,7 +295,7 @@ impl Gui {
         // only menu-bar param doesn't warn on Android.
         #[cfg(target_os = "android")]
         let _ = printer_attached;
-        self.render_debug_panels(ctx, debug, &mut action, paused);
+        self.render_debug_panels(ctx, debug, &mut action, paused, session);
         if self.show_cheats_panel {
             self.render_cheats_panel(ctx, &mut action, session);
         }
@@ -614,7 +627,7 @@ impl Gui {
         });
     }
 
-    fn render_debug_panels(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>, action: &mut Option<GuiAction>, paused: bool) {
+    fn render_debug_panels(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>, action: &mut Option<GuiAction>, paused: bool, session: &SessionUiState) {
         if self.show_cpu_registers {
             self.render_cpu_registers_panel(ctx, debug, action, paused);
         }
@@ -644,7 +657,11 @@ impl Gui {
         }
 
         if self.show_keybind_settings {
-            self.render_keybind_settings_panel(ctx);
+            self.render_keybind_settings_panel(ctx, action, session);
+        } else {
+            // Panel closed: drop the working copy so it re-seeds from persisted
+            // state next time it opens.
+            self.input_config = None;
         }
 
         if self.show_breakpoint_panel {

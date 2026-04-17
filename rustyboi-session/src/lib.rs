@@ -52,6 +52,7 @@ pub mod cheats;
 pub mod config;
 pub mod debug;
 pub mod input;
+pub mod input_config;
 pub mod overlay;
 pub mod ports;
 pub mod rewind;
@@ -68,6 +69,10 @@ pub use apply::{ActionOutcome, PlatformRequest};
 pub use config::Config;
 pub use debug::{DebugDetail, DebugSnapshot};
 pub use input::{AbstractInput, GbButton, InputMap};
+pub use input_config::{
+    FiredHotkey, HeldInputs, Hotkey, HotkeyAction, InputConfig, InputTrigger, KeyName, PadButton,
+    ResolveState,
+};
 pub use overlay::{OverlayButton, OverlayRect, OverlayShape, TouchLayout};
 pub use ports::{NetTransport, Rumble, Storage, StorageError, Webcam};
 pub use session::{

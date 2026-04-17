@@ -6,9 +6,12 @@
 
 use crate::config;
 use crate::error::PlatformError;
-use rustyboi_core_lib::{gb, input};
+use rustyboi_core_lib::gb;
 use rustyboi_frontend_lib::actions::{FileData, GuiAction};
 use rustyboi_frontend_lib::{App, PlatformRequest, Renderer, ResolvedAction, UiHost};
+use rustyboi_session::input_config::{FiredHotkey, HeldInputs, HotkeyAction, KeyName};
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+use rustyboi_session::input_config::PadButton;
 use rustyboi_session::Session;
 
 use std::sync::Arc;
@@ -249,26 +252,141 @@ fn session_from_gb(
     Session::with_gb(gb, config, ports, rom_id)
 }
 
-/// Poll all connected gamepads and return the union of their GB-mapped buttons:
-/// A→South, B→East, Start/Select, D-pad via the hat OR the left stick. Draining
-/// `next_event` refreshes the cached state that `is_pressed`/`value` read.
+/// Collect the keyboard keys held this frame into a [`HeldInputs`] (pad filled
+/// separately). Probes every bindable [`KeyName`] via winit `key_held`.
+fn held_inputs_from_keyboard(input: &WinitInputHelper) -> HeldInputs {
+    let mut held = HeldInputs::new();
+    for k in KeyName::ALL {
+        if let Some(code) = key_code(k) {
+            if input.key_held(code) {
+                held.keys.insert(k);
+            }
+        }
+    }
+    held
+}
+
+/// The winit `KeyCode` for a [`KeyName`] (inverse of [`key_name`]).
+fn key_code(k: KeyName) -> Option<KeyCode> {
+    use KeyName as N;
+    Some(match k {
+        N::A => KeyCode::KeyA, N::B => KeyCode::KeyB, N::C => KeyCode::KeyC,
+        N::D => KeyCode::KeyD, N::E => KeyCode::KeyE, N::F => KeyCode::KeyF,
+        N::G => KeyCode::KeyG, N::H => KeyCode::KeyH, N::I => KeyCode::KeyI,
+        N::J => KeyCode::KeyJ, N::K => KeyCode::KeyK, N::L => KeyCode::KeyL,
+        N::M => KeyCode::KeyM, N::N => KeyCode::KeyN, N::O => KeyCode::KeyO,
+        N::P => KeyCode::KeyP, N::Q => KeyCode::KeyQ, N::R => KeyCode::KeyR,
+        N::S => KeyCode::KeyS, N::T => KeyCode::KeyT, N::U => KeyCode::KeyU,
+        N::V => KeyCode::KeyV, N::W => KeyCode::KeyW, N::X => KeyCode::KeyX,
+        N::Y => KeyCode::KeyY, N::Z => KeyCode::KeyZ,
+        N::Num0 => KeyCode::Digit0, N::Num1 => KeyCode::Digit1,
+        N::Num2 => KeyCode::Digit2, N::Num3 => KeyCode::Digit3,
+        N::Num4 => KeyCode::Digit4, N::Num5 => KeyCode::Digit5,
+        N::Num6 => KeyCode::Digit6, N::Num7 => KeyCode::Digit7,
+        N::Num8 => KeyCode::Digit8, N::Num9 => KeyCode::Digit9,
+        N::Up => KeyCode::ArrowUp, N::Down => KeyCode::ArrowDown,
+        N::Left => KeyCode::ArrowLeft, N::Right => KeyCode::ArrowRight,
+        N::Enter => KeyCode::Enter, N::Space => KeyCode::Space,
+        N::Tab => KeyCode::Tab, N::Backspace => KeyCode::Backspace,
+        N::Escape => KeyCode::Escape, N::Backslash => KeyCode::Backslash,
+        N::ShiftLeft => KeyCode::ShiftLeft, N::ShiftRight => KeyCode::ShiftRight,
+        N::F1 => KeyCode::F1, N::F2 => KeyCode::F2, N::F3 => KeyCode::F3,
+        N::F4 => KeyCode::F4, N::F5 => KeyCode::F5, N::F6 => KeyCode::F6,
+        N::F7 => KeyCode::F7, N::F8 => KeyCode::F8, N::F9 => KeyCode::F9,
+        N::F10 => KeyCode::F10, N::F11 => KeyCode::F11, N::F12 => KeyCode::F12,
+    })
+}
+
+/// Fold all connected gamepads' held buttons into the abstract [`PadButton`] set:
+/// standard face/shoulder/trigger buttons + D-pad via the hat OR the left stick.
+/// Draining `next_event` refreshes the cached state `is_pressed`/`value` read.
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-fn gamepad_button_state(gilrs: &mut gilrs::Gilrs) -> input::ButtonState {
+fn collect_gamepad_held(gilrs: &mut gilrs::Gilrs, pad: &mut std::collections::HashSet<PadButton>) {
     use gilrs::{Axis, Button};
     while gilrs.next_event().is_some() {}
     const DZ: f32 = 0.5;
-    let mut bs = input::ButtonState::default();
     for (_id, gp) in gilrs.gamepads() {
-        bs.a |= gp.is_pressed(Button::South);
-        bs.b |= gp.is_pressed(Button::East);
-        bs.start |= gp.is_pressed(Button::Start);
-        bs.select |= gp.is_pressed(Button::Select);
-        bs.up |= gp.is_pressed(Button::DPadUp) || gp.value(Axis::LeftStickY) > DZ;
-        bs.down |= gp.is_pressed(Button::DPadDown) || gp.value(Axis::LeftStickY) < -DZ;
-        bs.left |= gp.is_pressed(Button::DPadLeft) || gp.value(Axis::LeftStickX) < -DZ;
-        bs.right |= gp.is_pressed(Button::DPadRight) || gp.value(Axis::LeftStickX) > DZ;
+        let mut hold = |cond: bool, b: PadButton| {
+            if cond {
+                pad.insert(b);
+            }
+        };
+        hold(gp.is_pressed(Button::South), PadButton::South);
+        hold(gp.is_pressed(Button::East), PadButton::East);
+        hold(gp.is_pressed(Button::West), PadButton::West);
+        hold(gp.is_pressed(Button::North), PadButton::North);
+        hold(gp.is_pressed(Button::Start), PadButton::Start);
+        hold(gp.is_pressed(Button::Select), PadButton::Select);
+        hold(gp.is_pressed(Button::LeftTrigger), PadButton::LeftShoulder);
+        hold(gp.is_pressed(Button::RightTrigger), PadButton::RightShoulder);
+        hold(gp.is_pressed(Button::LeftTrigger2), PadButton::LeftTrigger);
+        hold(gp.is_pressed(Button::RightTrigger2), PadButton::RightTrigger);
+        hold(gp.is_pressed(Button::DPadUp) || gp.value(Axis::LeftStickY) > DZ, PadButton::DpadUp);
+        hold(gp.is_pressed(Button::DPadDown) || gp.value(Axis::LeftStickY) < -DZ, PadButton::DpadDown);
+        hold(gp.is_pressed(Button::DPadLeft) || gp.value(Axis::LeftStickX) < -DZ, PadButton::DpadLeft);
+        hold(gp.is_pressed(Button::DPadRight) || gp.value(Axis::LeftStickX) > DZ, PadButton::DpadRight);
     }
-    bs
+}
+
+/// Perform a fired hotkey on the desktop app. Returns `true` if the event loop
+/// should exit (Exit action). Turbo is handled inside the resolver (it drives
+/// the button state), so no dispatch is needed here for it. FastForward/Rewind
+/// are hold actions (fire every active frame); the rest fire on the rising edge.
+#[cfg_attr(target_os = "android", allow(unused_variables))]
+fn dispatch_hotkey(
+    app: &mut App,
+    fired: FiredHotkey,
+    window: &Window,
+    elwt: &winit::event_loop::EventLoopWindowTarget<()>,
+    is_fullscreen: &mut bool,
+) -> bool {
+    match fired.action {
+        HotkeyAction::FastForward => {
+            // Hold action: engage on the rising edge, released when the chord
+            // drops (no longer fired) — handled by the caller each frame.
+            if fired.rising && !app.is_fast_forward() {
+                app.toggle_fast_forward();
+            }
+        }
+        HotkeyAction::Rewind => {
+            if app.rewind_enabled() {
+                app.rewind();
+                window.request_redraw();
+            }
+        }
+        HotkeyAction::Quicksave if fired.rising => {
+            match app.quicksave(now_epoch_secs()) {
+                Ok(()) => println!("Quicksaved"),
+                Err(e) => println!("Quicksave failed: {e}"),
+            }
+            window.request_redraw();
+        }
+        HotkeyAction::Quickload if fired.rising => match app.quickload() {
+            Ok(()) => window.request_redraw(),
+            Err(e) => println!("Quickload failed: {e}"),
+        },
+        HotkeyAction::FrameAdvance if fired.rising => {
+            app.frame_advance();
+            window.request_redraw();
+        }
+        HotkeyAction::TogglePause if fired.rising => {
+            app.toggle_pause();
+            window.request_redraw();
+        }
+        HotkeyAction::ToggleFullscreen if fired.rising => {
+            #[cfg(not(target_os = "android"))]
+            {
+                *is_fullscreen = !*is_fullscreen;
+                window.set_fullscreen(is_fullscreen.then(|| Fullscreen::Borderless(None)));
+            }
+        }
+        HotkeyAction::Exit if fired.rising => {
+            elwt.exit();
+            return true;
+        }
+        _ => {}
+    }
+    false
 }
 
 fn run_gui_loop(
@@ -304,6 +422,10 @@ fn run_gui_loop(
     // available; buttons are OR'd into the keyboard/touch input each frame.
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     let mut gilrs = gilrs::Gilrs::new().ok();
+
+    // Per-frame edge/phase state for the shared input resolver (hotkey rising
+    // edges + the turbo autofire square wave). Persists across frames.
+    let mut resolve_state = rustyboi_session::ResolveState::new();
 
     let should_start_paused = !session.gb().has_rom() && !session.gb().has_bios();
 
@@ -422,32 +544,6 @@ fn run_gui_loop(
                 return;
             }
 
-            // --- session feature hotkeys ---
-            if input.key_pressed(KeyCode::F5) {
-                match app.quicksave(now_epoch_secs()) {
-                    Ok(()) => println!("Quicksaved"),
-                    Err(e) => println!("Quicksave failed: {e}"),
-                }
-                window.request_redraw();
-            }
-            if input.key_pressed(KeyCode::F8) {
-                match app.quickload() {
-                    Ok(()) => window.request_redraw(),
-                    Err(e) => println!("Quickload failed: {e}"),
-                }
-            }
-            if input.key_pressed(KeyCode::Tab) {
-                app.toggle_fast_forward();
-            }
-            if input.key_pressed(KeyCode::Backslash) {
-                app.frame_advance();
-                window.request_redraw();
-            }
-            if input.key_held(KeyCode::Backspace) && app.rewind_enabled() {
-                app.rewind();
-                window.request_redraw();
-            }
-
             // F: frame stepping with debounce (paused/errored only).
             if input.key_pressed(KeyCode::KeyF) {
                 if app.stepping_allowed() {
@@ -504,17 +600,18 @@ fn run_gui_loop(
                 rs.ui.set_pixels_per_point(scale_factor as f32);
             }
 
-            // Game Boy input from keybinds, OR'd with any egui touch controls.
-            let mut button_state = input::ButtonState {
-                a: input.key_held(config.keybinds.a),
-                b: input.key_held(config.keybinds.b),
-                start: input.key_held(config.keybinds.start),
-                select: input.key_held(config.keybinds.select),
-                up: input.key_held(config.keybinds.up),
-                down: input.key_held(config.keybinds.down),
-                left: input.key_held(config.keybinds.left),
-                right: input.key_held(config.keybinds.right),
-            };
+            // Build the raw held-input set (keyboard + gamepad) and resolve it
+            // through the shared config: GB-button bindings drive the button
+            // state, chord hotkeys drive features. Then OR the egui touch overlay
+            // on top and dispatch any fired hotkeys.
+            #[cfg_attr(any(target_arch = "wasm32", target_os = "android"), allow(unused_mut))]
+            let mut held = held_inputs_from_keyboard(&input);
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            if let Some(g) = gilrs.as_mut() {
+                collect_gamepad_held(g, &mut held.pad);
+            }
+            let (mut button_state, fired) =
+                app.session().config().input.resolve(&held, &mut resolve_state);
             if let Some(rs) = render_state.as_ref() {
                 let touch = rs.ui.touch_button_state();
                 button_state.a |= touch.a;
@@ -526,20 +623,28 @@ fn run_gui_loop(
                 button_state.left |= touch.left;
                 button_state.right |= touch.right;
             }
-            // OR in any connected gamepad (native only).
-            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-            if let Some(g) = gilrs.as_mut() {
-                let pad = gamepad_button_state(g);
-                button_state.a |= pad.a;
-                button_state.b |= pad.b;
-                button_state.start |= pad.start;
-                button_state.select |= pad.select;
-                button_state.up |= pad.up;
-                button_state.down |= pad.down;
-                button_state.left |= pad.left;
-                button_state.right |= pad.right;
-            }
             app.set_button_state(button_state);
+
+            // Fast-forward is a hold action: keep it engaged only while the
+            // chord is active this frame, so releasing the chord turns it off.
+            let ff_active = fired
+                .iter()
+                .any(|f| matches!(f.action, HotkeyAction::FastForward));
+            if !ff_active && app.is_fast_forward() {
+                app.toggle_fast_forward();
+            }
+            for f in fired {
+                #[cfg(not(target_os = "android"))]
+                let exit = dispatch_hotkey(&mut app, f, &window, elwt, &mut is_fullscreen);
+                #[cfg(target_os = "android")]
+                let exit = {
+                    let mut dummy = false;
+                    dispatch_hotkey(&mut app, f, &window, elwt, &mut dummy)
+                };
+                if exit {
+                    return;
+                }
+            }
 
             // Android: keep the game region inside the safe area (system bars /
             // display cutout) so it isn't clipped behind them. No-op elsewhere.
