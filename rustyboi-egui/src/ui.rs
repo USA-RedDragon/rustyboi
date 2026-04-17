@@ -376,47 +376,6 @@ impl Gui {
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button(command_label(ActionKind::SaveState)).clicked() {
-                        // `SystemTime::now()` is unsupported on wasm (would panic
-                        // via unwrap); fall back to 0 there — the value is only a
-                        // default filename suffix.
-                        let timestamp = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-                        let file_name = format!("save_{}", timestamp);
-                        let mut dialog = file_dialog::new()
-                            .add_filter("RustyBoi Save State", &["rustyboisave"])
-                            .set_file_name(file_name);
-                        if env::current_dir().is_ok() {
-                            dialog = dialog.set_directory(env::current_dir().unwrap());
-                        }
-                        let result_holder = Arc::clone(&self.pending_dialog_result);
-                        dialog.save_file(move |path| {
-                            if let Some(path) = path
-                                && let Ok(mut pending) = result_holder.lock() {
-                                    *pending = Some(GuiAction::SaveState(path));
-                                }
-                        });
-                        ui.close_menu();
-                    }
-                    if ui.button(command_label(ActionKind::LoadState)).clicked() {
-                        let mut dialog = file_dialog::new()
-                            .add_filter("RustyBoi Save State", &["rustyboisave"])
-                            .add_filter("All Files", &["*"]);
-                        if env::current_dir().is_ok() {
-                            dialog = dialog.set_directory(env::current_dir().unwrap());
-                        }
-                        let result_holder = Arc::clone(&self.pending_dialog_result);
-                        dialog.pick_file(move |file_data| {
-                            if let Some(file_data) = file_data
-                                && let Ok(mut pending) = result_holder.lock() {
-                                    *pending = Some(GuiAction::LoadState(file_data));
-                            }
-                        });
-                        ui.close_menu();
-                    }
-                    ui.separator();
                     // Cross-platform save-data import/export. Import picks a file
                     // (bytes flow through the session's finish_import_* path);
                     // Export routes the bytes through SaveBytes so each platform
@@ -987,45 +946,6 @@ impl Gui {
                                     && let Ok(mut pending) = result_holder.lock()
                                 {
                                     *pending = Some(GuiAction::LoadRom(file_data));
-                                }
-                            });
-                            close_after_action = true;
-                        }
-                        if ui
-                            .add(egui::Button::new("Save State").min_size(row_size))
-                            .clicked()
-                        {
-                            let timestamp = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs();
-                            let file_name = format!("save_{}", timestamp);
-                            let dialog = file_dialog::new()
-                                .add_filter("RustyBoi Save State", &["rustyboisave"])
-                                .set_file_name(file_name);
-                            let result_holder = Arc::clone(&self.pending_dialog_result);
-                            dialog.save_file(move |path| {
-                                if let Some(path) = path
-                                    && let Ok(mut pending) = result_holder.lock()
-                                {
-                                    *pending = Some(GuiAction::SaveState(path));
-                                }
-                            });
-                            close_after_action = true;
-                        }
-                        if ui
-                            .add(egui::Button::new("Load State").min_size(row_size))
-                            .clicked()
-                        {
-                            let dialog = file_dialog::new()
-                                .add_filter("RustyBoi Save State", &["rustyboisave"])
-                                .add_filter("All Files", &["*"]);
-                            let result_holder = Arc::clone(&self.pending_dialog_result);
-                            dialog.pick_file(move |file_data| {
-                                if let Some(file_data) = file_data
-                                    && let Ok(mut pending) = result_holder.lock()
-                                {
-                                    *pending = Some(GuiAction::LoadState(file_data));
                                 }
                             });
                             close_after_action = true;
