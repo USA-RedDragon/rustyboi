@@ -10,7 +10,8 @@ use rustyboi_core_lib::gb;
 use rustyboi_frontend_lib::actions::{FileData, GuiAction};
 use rustyboi_frontend_lib::{App, PlatformRequest, Renderer, ResolvedAction, UiHost};
 use rustyboi_session::input_config::{FiredHotkey, HeldInputs, HotkeyAction, KeyName};
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+// Desktop (gilrs) + Android (native key events) both map physical pads to this.
+#[cfg(not(target_arch = "wasm32"))]
 use rustyboi_session::input_config::PadButton;
 use rustyboi_session::Session;
 
@@ -297,6 +298,31 @@ fn key_code(k: KeyName) -> Option<KeyCode> {
     })
 }
 
+/// Map an Android `android.view.KeyEvent` gamepad keycode to a [`PadButton`].
+/// winit has no gamepad backend on Android; controller buttons arrive as unmapped
+/// native key events. Face/shoulder/trigger/start/select + a digital d-pad are
+/// covered; analog sticks (delivered as motion events winit drops) are not.
+#[cfg(target_os = "android")]
+fn android_pad_button(code: u32) -> Option<PadButton> {
+    Some(match code {
+        96 => PadButton::South,          // BUTTON_A
+        97 => PadButton::East,           // BUTTON_B
+        99 => PadButton::West,           // BUTTON_X
+        100 => PadButton::North,         // BUTTON_Y
+        102 => PadButton::LeftShoulder,  // BUTTON_L1
+        103 => PadButton::RightShoulder, // BUTTON_R1
+        104 => PadButton::LeftTrigger,   // BUTTON_L2
+        105 => PadButton::RightTrigger,  // BUTTON_R2
+        108 => PadButton::Start,         // BUTTON_START
+        109 => PadButton::Select,        // BUTTON_SELECT
+        19 => PadButton::DpadUp,         // DPAD_UP
+        20 => PadButton::DpadDown,       // DPAD_DOWN
+        21 => PadButton::DpadLeft,       // DPAD_LEFT
+        22 => PadButton::DpadRight,      // DPAD_RIGHT
+        _ => return None,
+    })
+}
+
 /// Fold all connected gamepads' held buttons into the abstract [`PadButton`] set:
 /// standard face/shoulder/trigger buttons + D-pad via the hat OR the left stick.
 /// Draining `next_event` refreshes the cached state `is_pressed`/`value` read.
@@ -422,6 +448,10 @@ fn run_gui_loop(
     // available; buttons are OR'd into the keyboard/touch input each frame.
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     let mut gilrs = gilrs::Gilrs::new().ok();
+    // Android has no gilrs backend: controller buttons arrive as native key
+    // events. Track the held pad-button set here and merge into HeldInputs.
+    #[cfg(target_os = "android")]
+    let mut android_pad: std::collections::HashSet<PadButton> = std::collections::HashSet::new();
 
     // Per-frame edge/phase state for the shared input resolver (hotkey rising
     // edges + the turbo autofire square wave). Persists across frames.
@@ -538,6 +568,26 @@ fn run_gui_loop(
             _ => {}
         }
 
+        // Android gamepad: buttons arrive as unmapped native key events. Track the
+        // held set (winit_input_helper only tracks KeyCode-mapped keys). The raw
+        // code is logged on press so an unmapped controller can be identified.
+        #[cfg(target_os = "android")]
+        if let Event::WindowEvent { event: WindowEvent::KeyboardInput { event: key, .. }, .. } = &event {
+            use winit::keyboard::{NativeKeyCode, PhysicalKey};
+            if let PhysicalKey::Unidentified(NativeKeyCode::Android(code)) = key.physical_key {
+                if key.state == winit::event::ElementState::Pressed {
+                    crate::android::raw_log(&format!("android gamepad keycode {code}"));
+                }
+                if let Some(pb) = android_pad_button(code) {
+                    if key.state == winit::event::ElementState::Pressed {
+                        android_pad.insert(pb);
+                    } else {
+                        android_pad.remove(&pb);
+                    }
+                }
+            }
+        }
+
         if input.update(&event) {
             if input.key_pressed(KeyCode::Escape) || input.close_requested() {
                 elwt.exit();
@@ -610,6 +660,8 @@ fn run_gui_loop(
             if let Some(g) = gilrs.as_mut() {
                 collect_gamepad_held(g, &mut held.pad);
             }
+            #[cfg(target_os = "android")]
+            held.pad.extend(android_pad.iter().copied());
             let (mut button_state, fired) =
                 app.session().config().input.resolve(&held, &mut resolve_state);
             if let Some(rs) = render_state.as_ref() {

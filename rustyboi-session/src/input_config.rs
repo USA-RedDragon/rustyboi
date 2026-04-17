@@ -253,17 +253,19 @@ impl Default for InputConfig {
 }
 
 fn default_gb_bindings() -> Vec<(GbButton, Vec<InputTrigger>)> {
-    use InputTrigger::Key;
+    use InputTrigger::{Key, Pad};
     use KeyName::*;
+    // Each GB button binds a key OR the matching gamepad button, so a keyboard or
+    // a controller works out of the box (desktop gilrs, web Gamepad API, Android).
     vec![
-        (GbButton::A, vec![Key(Z)]),
-        (GbButton::B, vec![Key(X)]),
-        (GbButton::Start, vec![Key(Enter)]),
-        (GbButton::Select, vec![Key(ShiftLeft)]),
-        (GbButton::Up, vec![Key(KeyName::Up)]),
-        (GbButton::Down, vec![Key(KeyName::Down)]),
-        (GbButton::Left, vec![Key(KeyName::Left)]),
-        (GbButton::Right, vec![Key(KeyName::Right)]),
+        (GbButton::A, vec![Key(Z), Pad(PadButton::South)]),
+        (GbButton::B, vec![Key(X), Pad(PadButton::East)]),
+        (GbButton::Start, vec![Key(Enter), Pad(PadButton::Start)]),
+        (GbButton::Select, vec![Key(ShiftLeft), Pad(PadButton::Select)]),
+        (GbButton::Up, vec![Key(KeyName::Up), Pad(PadButton::DpadUp)]),
+        (GbButton::Down, vec![Key(KeyName::Down), Pad(PadButton::DpadDown)]),
+        (GbButton::Left, vec![Key(KeyName::Left), Pad(PadButton::DpadLeft)]),
+        (GbButton::Right, vec![Key(KeyName::Right), Pad(PadButton::DpadRight)]),
     ]
 }
 
