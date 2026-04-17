@@ -528,7 +528,11 @@ fn draw(
     // (auto-pause lives in the worker's run loop, driven by TogglePause); pass
     // false so the UI isn't stuck dimmed.
     let debug_ref = if debug_open { debug_snapshot.as_ref() } else { None };
-    let (paint, ui_frame) = ui.run(window, false, debug_ref, None, &ui_state, Vec::new(), force_repaint);
+    // Debug panels are live views fed by the worker each frame — force a repaint
+    // while any is open so a freshly-arrived snapshot always re-renders (repaint
+    // gating would otherwise reuse the cached frame and the panel would never show).
+    let (paint, ui_frame) =
+        ui.run(window, false, debug_ref, None, &ui_state, Vec::new(), force_repaint || debug_open);
 
     // Dispatch the action egui emitted.
     if let Some(action) = ui_frame.action {
