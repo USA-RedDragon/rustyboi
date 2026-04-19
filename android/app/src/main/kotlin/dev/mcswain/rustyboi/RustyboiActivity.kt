@@ -3,6 +3,7 @@ package dev.mcswain.rustyboi
 import android.content.Intent
 import android.net.Uri
 import android.view.InputDevice
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
@@ -82,16 +83,30 @@ class RustyboiActivity : GameActivity() {
     }
 
     /**
-     * Forward gamepad analog-stick + hat axes to native. GameActivity delivers
-     * controller BUTTONS as native key events (handled in the Rust event loop),
-     * but ANALOG axis motion arrives here as generic motion events — winit drops
-     * these, so we read them in Java and push them to Rust via JNI. Fires on axis
-     * change; the last value persists (held) until the next change / recentre.
+     * Gamepad input diagnostics + analog-axis forwarding. GameActivity routes
+     * input to native (winit) internally; winit delivers key events but DROPS
+     * analog motion. We hook the top-level dispatch so we can (a) LOG everything
+     * to find where gamepad input actually flows, and (b) forward joystick axes
+     * to Rust via JNI. dispatch* is the earliest activity-level hook (before view
+     * dispatch), so it fires even if GameActivity consumes the event afterwards.
      */
-    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
-        if (event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK &&
-            event.action == MotionEvent.ACTION_MOVE
-        ) {
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        val joystick = event.source and InputDevice.SOURCE_JOYSTICK ==
+            InputDevice.SOURCE_JOYSTICK
+        Log.i(
+            TAG,
+            "genericMotion src=0x%x action=%d joystick=%b x=%.2f y=%.2f z=%.2f rz=%.2f hatX=%.2f hatY=%.2f"
+                .format(
+                    event.source, event.action, joystick,
+                    event.getAxisValue(MotionEvent.AXIS_X),
+                    event.getAxisValue(MotionEvent.AXIS_Y),
+                    event.getAxisValue(MotionEvent.AXIS_Z),
+                    event.getAxisValue(MotionEvent.AXIS_RZ),
+                    event.getAxisValue(MotionEvent.AXIS_HAT_X),
+                    event.getAxisValue(MotionEvent.AXIS_HAT_Y),
+                ),
+        )
+        if (joystick) {
             nativeOnGamepadAxes(
                 event.getAxisValue(MotionEvent.AXIS_X),
                 event.getAxisValue(MotionEvent.AXIS_Y),
@@ -100,9 +115,16 @@ class RustyboiActivity : GameActivity() {
                 event.getAxisValue(MotionEvent.AXIS_HAT_X),
                 event.getAxisValue(MotionEvent.AXIS_HAT_Y),
             )
-            return true
         }
-        return super.onGenericMotionEvent(event)
+        return super.dispatchGenericMotionEvent(event)
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        Log.i(
+            TAG,
+            "keyEvent code=%d action=%d src=0x%x".format(event.keyCode, event.action, event.source),
+        )
+        return super.dispatchKeyEvent(event)
     }
 
     /** Called from JNI to launch the single-document SAF picker. */
