@@ -958,6 +958,10 @@ fn resolve_gui_action(action: &GuiAction) -> Option<ResolvedAction> {
             let (bytes, _path) = read_file_data(file_data)?;
             Some(ResolvedAction::ImportRtc { bytes })
         }
+        GuiAction::ApplyPatch(file_data) => {
+            let (bytes, _path) = read_file_data(file_data)?;
+            Some(ResolvedAction::ApplyPatch { bytes })
+        }
         _ => None,
     }
 }

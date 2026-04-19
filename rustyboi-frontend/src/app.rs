@@ -388,6 +388,7 @@ impl App {
             cheats: self.session.cheats().map(str::to_owned).collect(),
             has_battery: self.session.has_battery(),
             has_rtc: self.session.has_rtc(),
+            has_rom: self.session.gb().has_rom(),
             input: self.session.input_config().clone(),
         }
     }
@@ -757,7 +758,8 @@ impl App {
             | GuiAction::LoadState(_)
             | GuiAction::ImportState(_)
             | GuiAction::ImportBatterySave(_)
-            | GuiAction::ImportRtc(_)) => {
+            | GuiAction::ImportRtc(_)
+            | GuiAction::ApplyPatch(_)) => {
                 match resolve(&action) {
                     Some(ResolvedAction::LoadRom { bytes, path }) => {
                         match self.load_rom_bytes(bytes, path) {
@@ -793,6 +795,17 @@ impl App {
                             Err(e) => requests.push(PlatformRequest::Error(format!("Failed to import RTC: {e}"))),
                         }
                     }
+                    Some(ResolvedAction::ApplyPatch { bytes }) => {
+                        match self.session.apply_rom_patch(&bytes) {
+                            Ok(_) => {
+                                self.error_state = None;
+                                self.frame = None;
+                                requests.push(PlatformRequest::ClearError);
+                                requests.push(PlatformRequest::Status("Patch applied".into()));
+                            }
+                            Err(e) => requests.push(PlatformRequest::Error(format!("Failed to apply patch: {e}"))),
+                        }
+                    }
                     None => {}
                 }
             }
@@ -812,6 +825,7 @@ pub enum ResolvedAction {
     LoadState { state: Vec<u8>, reload_rom: Option<(String, Vec<u8>)> },
     ImportBattery { bytes: Vec<u8> },
     ImportRtc { bytes: Vec<u8> },
+    ApplyPatch { bytes: Vec<u8> },
 }
 
 /// The app is a windowed [`Frontend`]: the shared [`drive_action`] driver

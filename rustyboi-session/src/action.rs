@@ -38,6 +38,8 @@ pub enum LoadPurpose {
     State,
     Battery,
     Rtc,
+    /// An IPS/UPS/BPS ROM patch, applied to the currently-loaded ROM.
+    Patch,
 }
 
 /// A single ROM discovered by the Android library scanner.
@@ -121,6 +123,8 @@ pub struct SessionUiState {
     /// Whether the inserted cartridge has a real-time clock (gates the
     /// Import/Export RTC menu items).
     pub has_rtc: bool,
+    /// Whether a ROM is currently loaded (gates the Apply Patch menu item).
+    pub has_rom: bool,
     /// The live rebindable input map (GB-button bindings + chord hotkeys) the
     /// keybind editor reads/writes. Mirrors [`Config::input`](crate::config::Config).
     pub input: InputConfig,
@@ -143,6 +147,7 @@ impl Default for SessionUiState {
             cheats: Vec::new(),
             has_battery: false,
             has_rtc: false,
+            has_rom: false,
             input: InputConfig::default(),
         }
     }
@@ -174,6 +179,8 @@ pub enum UiAction {
     ExportBatterySave,
     /// Import an `.rtc` clock blob into the current cartridge.
     ImportRtc(FileData),
+    /// Apply an IPS/UPS/BPS ROM patch (romhack/translation) to the loaded ROM.
+    ApplyPatch(FileData),
     /// Export the current cartridge's RTC state as a `.rtc` file.
     ExportRtc,
     /// Toggle pause / resume.
@@ -264,6 +271,7 @@ impl UiAction {
             UiAction::ImportBatterySave(_) => ActionKind::ImportBatterySave,
             UiAction::ExportBatterySave => ActionKind::ExportBatterySave,
             UiAction::ImportRtc(_) => ActionKind::ImportRtc,
+            UiAction::ApplyPatch(_) => ActionKind::ApplyPatch,
             UiAction::ExportRtc => ActionKind::ExportRtc,
             UiAction::TogglePause => ActionKind::TogglePause,
             UiAction::TogglePrinter => ActionKind::TogglePrinter,
@@ -321,6 +329,7 @@ pub enum ActionKind {
     ExportBatterySave,
     ImportRtc,
     ExportRtc,
+    ApplyPatch,
     TogglePause,
     TogglePrinter,
     Restart,
@@ -464,6 +473,13 @@ pub const COMMANDS: &[CommandDescriptor] = &[
     CommandDescriptor {
         action_kind: ActionKind::ExportRtc,
         label: "Export RTC…",
+        category: MenuCategory::File,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::ApplyPatch,
+        label: "Apply Patch…",
         category: MenuCategory::File,
         default_keybind: None,
         overlay_button: None,

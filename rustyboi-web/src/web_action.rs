@@ -202,6 +202,8 @@ pub struct WebUiState {
     #[serde(default)]
     pub has_rtc: bool,
     #[serde(default)]
+    pub has_rom: bool,
+    #[serde(default)]
     pub input: InputConfig,
 }
 
@@ -223,6 +225,7 @@ impl WebUiState {
             cheats: s.cheats.clone(),
             has_battery: s.has_battery,
             has_rtc: s.has_rtc,
+            has_rom: s.has_rom,
             input: s.input.clone(),
         }
     }
@@ -244,6 +247,7 @@ impl WebUiState {
             cheats: self.cheats,
             has_battery: self.has_battery,
             has_rtc: self.has_rtc,
+            has_rom: self.has_rom,
             input: self.input,
         }
     }
