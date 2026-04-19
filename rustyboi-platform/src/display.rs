@@ -639,7 +639,31 @@ fn run_gui_loop(
                 collect_gamepad_held(g, &mut held.pad);
             }
             #[cfg(target_os = "android")]
-            held.pad.extend(android_pad.iter().copied());
+            {
+                held.pad.extend(android_pad.iter().copied());
+                // Analog sticks + hat arrive via Java (onGenericMotionEvent →
+                // JNI). Android axes: +X right, +Y down. Hat covers controllers
+                // that report the d-pad as an axis rather than key events.
+                let [lx, ly, rx, ry, hx, hy] = crate::android::gamepad_axes();
+                let dz = 0.5;
+                let mut on = |cond: bool, b: PadButton| {
+                    if cond {
+                        held.pad.insert(b);
+                    }
+                };
+                on(ly < -dz, PadButton::LStickUp);
+                on(ly > dz, PadButton::LStickDown);
+                on(lx < -dz, PadButton::LStickLeft);
+                on(lx > dz, PadButton::LStickRight);
+                on(ry < -dz, PadButton::RStickUp);
+                on(ry > dz, PadButton::RStickDown);
+                on(rx < -dz, PadButton::RStickLeft);
+                on(rx > dz, PadButton::RStickRight);
+                on(hy < -dz, PadButton::DpadUp);
+                on(hy > dz, PadButton::DpadDown);
+                on(hx < -dz, PadButton::DpadLeft);
+                on(hx > dz, PadButton::DpadRight);
+            }
             let (mut button_state, fired) =
                 app.session().config().input.resolve(&held, &mut resolve_state);
             if let Some(rs) = render_state.as_ref() {
