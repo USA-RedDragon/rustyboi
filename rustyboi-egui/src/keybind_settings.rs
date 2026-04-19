@@ -102,48 +102,62 @@ impl Gui {
         let Some(cfg) = self.input_config.as_mut() else { return false };
         let mut changed = false;
         ui.heading("Game Boy Buttons");
-        ui.label("Click Rebind, then press a key. (First trigger shown; extra triggers preserved.)");
+        ui.label(
+            "Each button fires if ANY of its triggers is held — add keys, pad \
+             buttons, or stick directions (so the d-pad and analog stick can both \
+             map to a direction). ✕ removes a trigger.",
+        );
         ui.add_space(6.0);
 
-        // Complete a pending rebind if a key was pressed this frame.
+        // Append a captured key to the button awaiting a rebind.
         if let (Some(btn), Some(key)) = (self.rebinding_gb, pressed_key) {
-            for (b, triggers) in cfg.gb_bindings.iter_mut() {
-                if *b == btn {
-                    if triggers.is_empty() {
-                        triggers.push(InputTrigger::Key(key));
-                    } else {
-                        triggers[0] = InputTrigger::Key(key);
-                    }
-                    break;
-                }
+            if let Some((_, triggers)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == btn) {
+                triggers.push(InputTrigger::Key(key));
             }
             self.rebinding_gb = None;
             changed = true;
         }
 
-        egui::Grid::new("gb_bindings_grid")
-            .num_columns(3)
-            .spacing([12.0, 6.0])
-            .show(ui, |ui| {
-                for gb in GbButton::ALL {
-                    ui.label(gb_label(gb));
-                    let binding_text = cfg
-                        .gb_bindings
-                        .iter()
-                        .find(|(b, _)| *b == gb)
-                        .and_then(|(_, t)| t.first())
-                        .map(|t| t.label())
-                        .unwrap_or_else(|| "(unbound)".to_string());
-                    ui.monospace(binding_text);
-
-                    let recording = self.rebinding_gb == Some(gb);
-                    let label = if recording { "Press a key..." } else { "Rebind" };
-                    if ui.button(label).clicked() {
-                        self.rebinding_gb = if recording { None } else { Some(gb) };
+        let mut add_pad: Option<(GbButton, PadButton)> = None;
+        let mut remove: Option<(GbButton, usize)> = None;
+        for gb in GbButton::ALL {
+            let triggers: Vec<InputTrigger> = cfg
+                .gb_bindings
+                .iter()
+                .find(|(b, _)| *b == gb)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_default();
+            ui.horizontal_wrapped(|ui| {
+                ui.strong(gb_label(gb));
+                for (i, t) in triggers.iter().enumerate() {
+                    ui.monospace(t.label());
+                    if ui.small_button("✕").clicked() {
+                        remove = Some((gb, i));
                     }
-                    ui.end_row();
+                }
+                let recording = self.rebinding_gb == Some(gb);
+                if ui.button(if recording { "press a key…" } else { "+ key" }).clicked() {
+                    self.rebinding_gb = if recording { None } else { Some(gb) };
+                }
+                if let Some(p) = pad_pick(ui, format!("gbpad_{gb:?}")) {
+                    add_pad = Some((gb, p));
                 }
             });
+        }
+        if let Some((gb, p)) = add_pad {
+            if let Some((_, tr)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == gb) {
+                tr.push(InputTrigger::Pad(p));
+            }
+            changed = true;
+        }
+        if let Some((gb, i)) = remove {
+            if let Some((_, tr)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == gb) {
+                if i < tr.len() {
+                    tr.remove(i);
+                }
+            }
+            changed = true;
+        }
         changed
     }
 

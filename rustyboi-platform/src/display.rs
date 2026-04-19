@@ -314,10 +314,21 @@ fn collect_gamepad_held(gilrs: &mut gilrs::Gilrs, pad: &mut std::collections::Ha
         hold(gp.is_pressed(Button::RightTrigger), PadButton::RightShoulder);
         hold(gp.is_pressed(Button::LeftTrigger2), PadButton::LeftTrigger);
         hold(gp.is_pressed(Button::RightTrigger2), PadButton::RightTrigger);
-        hold(gp.is_pressed(Button::DPadUp) || gp.value(Axis::LeftStickY) > DZ, PadButton::DpadUp);
-        hold(gp.is_pressed(Button::DPadDown) || gp.value(Axis::LeftStickY) < -DZ, PadButton::DpadDown);
-        hold(gp.is_pressed(Button::DPadLeft) || gp.value(Axis::LeftStickX) < -DZ, PadButton::DpadLeft);
-        hold(gp.is_pressed(Button::DPadRight) || gp.value(Axis::LeftStickX) > DZ, PadButton::DpadRight);
+        hold(gp.is_pressed(Button::DPadUp), PadButton::DpadUp);
+        hold(gp.is_pressed(Button::DPadDown), PadButton::DpadDown);
+        hold(gp.is_pressed(Button::DPadLeft), PadButton::DpadLeft);
+        hold(gp.is_pressed(Button::DPadRight), PadButton::DpadRight);
+        // Analog sticks as discrete directions past a deadzone (gilrs: +Y up,
+        // +X right). Bound alongside the d-pad by default, but separately
+        // mappable — so the sticks and d-pad are interchangeable.
+        hold(gp.value(Axis::LeftStickY) > DZ, PadButton::LStickUp);
+        hold(gp.value(Axis::LeftStickY) < -DZ, PadButton::LStickDown);
+        hold(gp.value(Axis::LeftStickX) < -DZ, PadButton::LStickLeft);
+        hold(gp.value(Axis::LeftStickX) > DZ, PadButton::LStickRight);
+        hold(gp.value(Axis::RightStickY) > DZ, PadButton::RStickUp);
+        hold(gp.value(Axis::RightStickY) < -DZ, PadButton::RStickDown);
+        hold(gp.value(Axis::RightStickX) < -DZ, PadButton::RStickLeft);
+        hold(gp.value(Axis::RightStickX) > DZ, PadButton::RStickRight);
     }
 }
 

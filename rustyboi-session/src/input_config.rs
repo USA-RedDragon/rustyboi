@@ -108,10 +108,21 @@ pub enum PadButton {
     RightShoulder,
     LeftTrigger,
     RightTrigger,
+    // Analog-stick directions: "held" when the stick is pushed past a deadzone.
+    // Frontends translate axis values into these so a stick maps like any button
+    // (e.g. bound alongside the d-pad so the two are interchangeable).
+    LStickUp,
+    LStickDown,
+    LStickLeft,
+    LStickRight,
+    RStickUp,
+    RStickDown,
+    RStickLeft,
+    RStickRight,
 }
 
 impl PadButton {
-    pub const ALL: [PadButton; 14] = [
+    pub const ALL: [PadButton; 22] = [
         PadButton::South,
         PadButton::East,
         PadButton::West,
@@ -126,6 +137,14 @@ impl PadButton {
         PadButton::RightShoulder,
         PadButton::LeftTrigger,
         PadButton::RightTrigger,
+        PadButton::LStickUp,
+        PadButton::LStickDown,
+        PadButton::LStickLeft,
+        PadButton::LStickRight,
+        PadButton::RStickUp,
+        PadButton::RStickDown,
+        PadButton::RStickLeft,
+        PadButton::RStickRight,
     ];
 
     pub fn label(self) -> &'static str {
@@ -144,6 +163,14 @@ impl PadButton {
             PadButton::RightShoulder => "Pad R1",
             PadButton::LeftTrigger => "Pad L2",
             PadButton::RightTrigger => "Pad R2",
+            PadButton::LStickUp => "L-Stick Up",
+            PadButton::LStickDown => "L-Stick Down",
+            PadButton::LStickLeft => "L-Stick Left",
+            PadButton::LStickRight => "L-Stick Right",
+            PadButton::RStickUp => "R-Stick Up",
+            PadButton::RStickDown => "R-Stick Down",
+            PadButton::RStickLeft => "R-Stick Left",
+            PadButton::RStickRight => "R-Stick Right",
         }
     }
 }
@@ -262,10 +289,10 @@ fn default_gb_bindings() -> Vec<(GbButton, Vec<InputTrigger>)> {
         (GbButton::B, vec![Key(X), Pad(PadButton::East)]),
         (GbButton::Start, vec![Key(Enter), Pad(PadButton::Start)]),
         (GbButton::Select, vec![Key(ShiftLeft), Pad(PadButton::Select)]),
-        (GbButton::Up, vec![Key(KeyName::Up), Pad(PadButton::DpadUp)]),
-        (GbButton::Down, vec![Key(KeyName::Down), Pad(PadButton::DpadDown)]),
-        (GbButton::Left, vec![Key(KeyName::Left), Pad(PadButton::DpadLeft)]),
-        (GbButton::Right, vec![Key(KeyName::Right), Pad(PadButton::DpadRight)]),
+        (GbButton::Up, vec![Key(KeyName::Up), Pad(PadButton::DpadUp), Pad(PadButton::LStickUp)]),
+        (GbButton::Down, vec![Key(KeyName::Down), Pad(PadButton::DpadDown), Pad(PadButton::LStickDown)]),
+        (GbButton::Left, vec![Key(KeyName::Left), Pad(PadButton::DpadLeft), Pad(PadButton::LStickLeft)]),
+        (GbButton::Right, vec![Key(KeyName::Right), Pad(PadButton::DpadRight), Pad(PadButton::LStickRight)]),
     ]
 }
 
