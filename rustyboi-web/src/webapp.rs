@@ -762,10 +762,21 @@ fn gamepad_pad_held() -> HashSet<PadButton> {
         hold(pressed(5), PadButton::RightShoulder);
         hold(pressed(6), PadButton::LeftTrigger);
         hold(pressed(7), PadButton::RightTrigger);
-        hold(pressed(12) || axis(1) < -0.5, PadButton::DpadUp);
-        hold(pressed(13) || axis(1) > 0.5, PadButton::DpadDown);
-        hold(pressed(14) || axis(0) < -0.5, PadButton::DpadLeft);
-        hold(pressed(15) || axis(0) > 0.5, PadButton::DpadRight);
+        hold(pressed(12), PadButton::DpadUp);
+        hold(pressed(13), PadButton::DpadDown);
+        hold(pressed(14), PadButton::DpadLeft);
+        hold(pressed(15), PadButton::DpadRight);
+        // Analog sticks as discrete directions (web axes: 0/1 = left X/Y, 2/3 =
+        // right X/Y, +Y is down). Bound with the d-pad by default, separately
+        // mappable — sticks and d-pad interchangeable.
+        hold(axis(1) < -0.5, PadButton::LStickUp);
+        hold(axis(1) > 0.5, PadButton::LStickDown);
+        hold(axis(0) < -0.5, PadButton::LStickLeft);
+        hold(axis(0) > 0.5, PadButton::LStickRight);
+        hold(axis(3) < -0.5, PadButton::RStickUp);
+        hold(axis(3) > 0.5, PadButton::RStickDown);
+        hold(axis(2) < -0.5, PadButton::RStickLeft);
+        hold(axis(2) > 0.5, PadButton::RStickRight);
     }
     held
 }
