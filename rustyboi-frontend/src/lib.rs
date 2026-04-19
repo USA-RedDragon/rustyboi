@@ -21,6 +21,7 @@
 
 pub mod app;
 pub mod contract;
+pub mod keymap;
 pub mod palette;
 pub mod renderer;
 pub mod ui_host;

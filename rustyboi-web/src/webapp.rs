@@ -29,7 +29,7 @@ use web_sys::HtmlCanvasElement;
 
 use winit::event::{ElementState, Event, KeyEvent, WindowEvent};
 use winit::event_loop::EventLoop;
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::PhysicalKey;
 use winit::platform::web::{EventLoopExtWebSys, WindowBuilderExtWebSys};
 use winit::window::{Window, WindowBuilder};
 
@@ -420,34 +420,7 @@ fn is_hotkey_key(shared: &Rc<RefCell<Shared>>, key: &KeyEvent) -> bool {
 /// Map a winit `KeyCode` (browser physical key) to the host-agnostic [`KeyName`].
 fn key_name(key: &KeyEvent) -> Option<KeyName> {
     let PhysicalKey::Code(code) = key.physical_key else { return None };
-    use KeyName as N;
-    Some(match code {
-        KeyCode::KeyA => N::A, KeyCode::KeyB => N::B, KeyCode::KeyC => N::C,
-        KeyCode::KeyD => N::D, KeyCode::KeyE => N::E, KeyCode::KeyF => N::F,
-        KeyCode::KeyG => N::G, KeyCode::KeyH => N::H, KeyCode::KeyI => N::I,
-        KeyCode::KeyJ => N::J, KeyCode::KeyK => N::K, KeyCode::KeyL => N::L,
-        KeyCode::KeyM => N::M, KeyCode::KeyN => N::N, KeyCode::KeyO => N::O,
-        KeyCode::KeyP => N::P, KeyCode::KeyQ => N::Q, KeyCode::KeyR => N::R,
-        KeyCode::KeyS => N::S, KeyCode::KeyT => N::T, KeyCode::KeyU => N::U,
-        KeyCode::KeyV => N::V, KeyCode::KeyW => N::W, KeyCode::KeyX => N::X,
-        KeyCode::KeyY => N::Y, KeyCode::KeyZ => N::Z,
-        KeyCode::Digit0 => N::Num0, KeyCode::Digit1 => N::Num1,
-        KeyCode::Digit2 => N::Num2, KeyCode::Digit3 => N::Num3,
-        KeyCode::Digit4 => N::Num4, KeyCode::Digit5 => N::Num5,
-        KeyCode::Digit6 => N::Num6, KeyCode::Digit7 => N::Num7,
-        KeyCode::Digit8 => N::Num8, KeyCode::Digit9 => N::Num9,
-        KeyCode::ArrowUp => N::Up, KeyCode::ArrowDown => N::Down,
-        KeyCode::ArrowLeft => N::Left, KeyCode::ArrowRight => N::Right,
-        KeyCode::Enter => N::Enter, KeyCode::Space => N::Space,
-        KeyCode::Tab => N::Tab, KeyCode::Backspace => N::Backspace,
-        KeyCode::Escape => N::Escape, KeyCode::Backslash => N::Backslash,
-        KeyCode::ShiftLeft => N::ShiftLeft, KeyCode::ShiftRight => N::ShiftRight,
-        KeyCode::F1 => N::F1, KeyCode::F2 => N::F2, KeyCode::F3 => N::F3,
-        KeyCode::F4 => N::F4, KeyCode::F5 => N::F5, KeyCode::F6 => N::F6,
-        KeyCode::F7 => N::F7, KeyCode::F8 => N::F8, KeyCode::F9 => N::F9,
-        KeyCode::F10 => N::F10, KeyCode::F11 => N::F11, KeyCode::F12 => N::F12,
-        _ => return None,
-    })
+    rustyboi_frontend_lib::keymap::key_name(code)
 }
 
 /// Update the held-keys set from a key event (host-agnostic names). Keys with

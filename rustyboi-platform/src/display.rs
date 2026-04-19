@@ -258,44 +258,11 @@ fn session_from_gb(
 fn held_inputs_from_keyboard(input: &WinitInputHelper) -> HeldInputs {
     let mut held = HeldInputs::new();
     for k in KeyName::ALL {
-        if let Some(code) = key_code(k) {
-            if input.key_held(code) {
-                held.keys.insert(k);
-            }
+        if input.key_held(rustyboi_frontend_lib::keymap::key_code(k)) {
+            held.keys.insert(k);
         }
     }
     held
-}
-
-/// The winit `KeyCode` for a [`KeyName`] (inverse of [`key_name`]).
-fn key_code(k: KeyName) -> Option<KeyCode> {
-    use KeyName as N;
-    Some(match k {
-        N::A => KeyCode::KeyA, N::B => KeyCode::KeyB, N::C => KeyCode::KeyC,
-        N::D => KeyCode::KeyD, N::E => KeyCode::KeyE, N::F => KeyCode::KeyF,
-        N::G => KeyCode::KeyG, N::H => KeyCode::KeyH, N::I => KeyCode::KeyI,
-        N::J => KeyCode::KeyJ, N::K => KeyCode::KeyK, N::L => KeyCode::KeyL,
-        N::M => KeyCode::KeyM, N::N => KeyCode::KeyN, N::O => KeyCode::KeyO,
-        N::P => KeyCode::KeyP, N::Q => KeyCode::KeyQ, N::R => KeyCode::KeyR,
-        N::S => KeyCode::KeyS, N::T => KeyCode::KeyT, N::U => KeyCode::KeyU,
-        N::V => KeyCode::KeyV, N::W => KeyCode::KeyW, N::X => KeyCode::KeyX,
-        N::Y => KeyCode::KeyY, N::Z => KeyCode::KeyZ,
-        N::Num0 => KeyCode::Digit0, N::Num1 => KeyCode::Digit1,
-        N::Num2 => KeyCode::Digit2, N::Num3 => KeyCode::Digit3,
-        N::Num4 => KeyCode::Digit4, N::Num5 => KeyCode::Digit5,
-        N::Num6 => KeyCode::Digit6, N::Num7 => KeyCode::Digit7,
-        N::Num8 => KeyCode::Digit8, N::Num9 => KeyCode::Digit9,
-        N::Up => KeyCode::ArrowUp, N::Down => KeyCode::ArrowDown,
-        N::Left => KeyCode::ArrowLeft, N::Right => KeyCode::ArrowRight,
-        N::Enter => KeyCode::Enter, N::Space => KeyCode::Space,
-        N::Tab => KeyCode::Tab, N::Backspace => KeyCode::Backspace,
-        N::Escape => KeyCode::Escape, N::Backslash => KeyCode::Backslash,
-        N::ShiftLeft => KeyCode::ShiftLeft, N::ShiftRight => KeyCode::ShiftRight,
-        N::F1 => KeyCode::F1, N::F2 => KeyCode::F2, N::F3 => KeyCode::F3,
-        N::F4 => KeyCode::F4, N::F5 => KeyCode::F5, N::F6 => KeyCode::F6,
-        N::F7 => KeyCode::F7, N::F8 => KeyCode::F8, N::F9 => KeyCode::F9,
-        N::F10 => KeyCode::F10, N::F11 => KeyCode::F11, N::F12 => KeyCode::F12,
-    })
 }
 
 /// Map an Android `android.view.KeyEvent` gamepad keycode to a [`PadButton`].
