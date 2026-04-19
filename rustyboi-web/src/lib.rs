@@ -206,6 +206,20 @@ impl Emulator {
         requests_to_js(&reqs)
     }
 
+    /// Apply an IPS/UPS/BPS ROM patch (bytes the main thread read from a picked
+    /// file) to the loaded ROM and re-load the patched cartridge. Returns
+    /// Status/Error requests.
+    pub fn apply_patch(&mut self, bytes: &[u8]) -> Array {
+        let reqs = match self.session.apply_rom_patch(bytes) {
+            Ok(_) => vec![
+                PlatformRequest::ClearError,
+                PlatformRequest::Status("Patch applied".into()),
+            ],
+            Err(e) => vec![PlatformRequest::Error(format!("Failed to apply patch: {e}"))],
+        };
+        requests_to_js(&reqs)
+    }
+
     /// Export the current cartridge's battery SRAM, or an empty array when the
     /// cart has no battery. The worker posts these bytes to the main thread,
     /// which triggers a browser download.
@@ -417,6 +431,7 @@ impl Emulator {
             cheats: self.session.cheats().map(str::to_owned).collect(),
             has_battery: self.session.has_battery(),
             has_rtc: self.session.has_rtc(),
+            has_rom: self.has_rom,
             input: self.session.input_config().clone(),
         }
     }

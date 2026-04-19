@@ -425,6 +425,23 @@ impl Gui {
                             ui.close_menu();
                         }
                     });
+                    // Apply an IPS/UPS/BPS ROM patch (romhack/translation) to the
+                    // loaded ROM; the picked bytes flow through apply_rom_patch.
+                    ui.add_enabled_ui(session.has_rom, |ui| {
+                        if ui.button(command_label(ActionKind::ApplyPatch)).clicked() {
+                            let dialog = file_dialog::new()
+                                .add_filter("ROM Patch", &["ips", "ups", "bps"])
+                                .add_filter("All Files", &["*"]);
+                            let holder = Arc::clone(&self.pending_dialog_result);
+                            dialog.pick_file(move |file_data| {
+                                if let Some(file_data) = file_data
+                                    && let Ok(mut pending) = holder.lock() {
+                                        *pending = Some(GuiAction::ApplyPatch(file_data));
+                                }
+                            });
+                            ui.close_menu();
+                        }
+                    });
                     ui.separator();
                     // Quick + numbered savestate slots (via the session). The
                     // quick slot has dedicated hotkeys (F5/F8); the numbered
@@ -976,6 +993,22 @@ impl Gui {
                             GuiAction::ImportBatterySave) { close_after_action = true; }
                         if mobile_import_row(ui, row_size, &self.pending_dialog_result,
                             "Import RTC…", "RTC", "rtc", GuiAction::ImportRtc) {
+                            close_after_action = true;
+                        }
+                        // Apply an IPS/UPS/BPS ROM patch to the loaded ROM.
+                        if session.has_rom
+                            && ui.add(egui::Button::new("Apply Patch…").min_size(row_size)).clicked()
+                        {
+                            let dialog = file_dialog::new()
+                                .add_filter("ROM Patch", &["ips", "ups", "bps"]);
+                            let holder = Arc::clone(&self.pending_dialog_result);
+                            dialog.pick_file(move |file_data| {
+                                if let Some(file_data) = file_data
+                                    && let Ok(mut pending) = holder.lock()
+                                {
+                                    *pending = Some(GuiAction::ApplyPatch(file_data));
+                                }
+                            });
                             close_after_action = true;
                         }
                         if ui

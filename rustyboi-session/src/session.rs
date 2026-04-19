@@ -137,6 +137,12 @@ pub struct Session {
     /// binding movies. Set at construction.
     rom_id: [u8; 32],
 
+    /// The unpatched ROM bytes last loaded through [`finish_load_rom`], retained
+    /// so [`apply_rom_patch`](Self::apply_rom_patch) always patches the original
+    /// (an IPS/UPS/BPS patch is applied to the pristine ROM, never a re-patched
+    /// one). `None` until a ROM is loaded from bytes.
+    original_rom: Option<Vec<u8>>,
+
     mode: RunMode,
     frame_count: u64,
 
@@ -205,6 +211,7 @@ impl Session {
             ports,
             cheats: CheatSet::new(),
             rom_id,
+            original_rom: None,
             mode: RunMode::Normal,
             frame_count: 0,
             rewind,
@@ -846,6 +853,18 @@ impl Session {
     /// hardware, insert the cartridge, and re-bind the session to it. Returns
     /// the new ROM id on success.
     pub fn finish_load_rom(&mut self, bytes: &[u8]) -> Result<[u8; 32], SessionError> {
+        let rom_id = self.load_rom_bytes(bytes)?;
+        // Retain the pristine ROM so a later `apply_rom_patch` always patches the
+        // original, not an already-patched image.
+        self.original_rom = Some(bytes.to_vec());
+        Ok(rom_id)
+    }
+
+    /// Shared cartridge (re)build used by both [`finish_load_rom`] and
+    /// [`apply_rom_patch`]: insert `bytes`, re-bind the session, and hydrate the
+    /// battery image. Does NOT touch `original_rom` (the caller decides whether
+    /// these bytes are the pristine ROM or a patched derivative).
+    fn load_rom_bytes(&mut self, bytes: &[u8]) -> Result<[u8; 32], SessionError> {
         let cart = Cartridge::from_bytes(bytes).map_err(|e| SessionError::State(e.to_string()))?;
         let mut gb = GB::new(self.config.hardware);
         gb.insert(cart);
@@ -856,6 +875,21 @@ impl Session {
         // IndexedDB / desktop GUI loads that have no sidecar `.sav`).
         self.hydrate_battery();
         Ok(rom_id)
+    }
+
+    /// Apply an IPS/UPS/BPS `patch` to the pristine ROM and re-load the patched
+    /// cartridge (a romhack / translation applied in-app). The original ROM must
+    /// have been loaded through [`finish_load_rom`] first. Returns the patched
+    /// ROM's id on success; on a bad/mismatched patch the current machine is left
+    /// untouched. The retained pristine ROM is unchanged, so re-applying a
+    /// different patch still starts from the original.
+    pub fn apply_rom_patch(&mut self, patch: &[u8]) -> Result<[u8; 32], SessionError> {
+        let original = self
+            .original_rom
+            .as_ref()
+            .ok_or_else(|| SessionError::State("no ROM loaded to patch".into()))?;
+        let patched = crate::patch::apply_patch(original, patch).map_err(SessionError::State)?;
+        self.load_rom_bytes(&patched)
     }
 
     /// Load a savestate from raw bytes, re-binding to `rom_id` (derived by the
