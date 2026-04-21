@@ -3,7 +3,6 @@ package dev.mcswain.rustyboi
 import android.content.Intent
 import android.net.Uri
 import android.view.InputDevice
-import android.view.KeyEvent
 import android.view.MotionEvent
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
@@ -85,17 +84,24 @@ class RustyboiActivity : GameActivity() {
     /**
      * Gamepad input diagnostics + analog-axis forwarding. GameActivity routes
      * input to native (winit) internally; winit delivers key events but DROPS
-     * analog motion. We hook the top-level dispatch so we can (a) LOG everything
-     * to find where gamepad input actually flows, and (b) forward joystick axes
-     * to Rust via JNI. dispatch* is the earliest activity-level hook (before view
-     * dispatch), so it fires even if GameActivity consumes the event afterwards.
+     * analog motion. winit's Android backend drops joystick motion events, so we
+     * hook the earliest activity-level dispatch and forward the axes to Rust via
+     * JNI. Sticks + hat come as X/Y/Z/RZ/HAT; the L2/R2 analog triggers come as
+     * separate axes (LTRIGGER/RTRIGGER, or BRAKE/GAS on some pads) — forward the
+     * max of each pair so triggers register regardless of the controller.
      */
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
         val joystick = event.source and InputDevice.SOURCE_JOYSTICK ==
             InputDevice.SOURCE_JOYSTICK
-        // Motion events fire continuously; the Rust side logs the resolved input
-        // on change, so no per-event log here (it floods logcat).
         if (joystick) {
+            val lt = maxOf(
+                event.getAxisValue(MotionEvent.AXIS_LTRIGGER),
+                event.getAxisValue(MotionEvent.AXIS_BRAKE),
+            )
+            val rt = maxOf(
+                event.getAxisValue(MotionEvent.AXIS_RTRIGGER),
+                event.getAxisValue(MotionEvent.AXIS_GAS),
+            )
             nativeOnGamepadAxes(
                 event.getAxisValue(MotionEvent.AXIS_X),
                 event.getAxisValue(MotionEvent.AXIS_Y),
@@ -103,17 +109,11 @@ class RustyboiActivity : GameActivity() {
                 event.getAxisValue(MotionEvent.AXIS_RZ),
                 event.getAxisValue(MotionEvent.AXIS_HAT_X),
                 event.getAxisValue(MotionEvent.AXIS_HAT_Y),
+                lt,
+                rt,
             )
         }
         return super.dispatchGenericMotionEvent(event)
-    }
-
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        Log.i(
-            TAG,
-            "keyEvent code=%d action=%d src=0x%x".format(event.keyCode, event.action, event.source),
-        )
-        return super.dispatchKeyEvent(event)
     }
 
     /** Called from JNI to launch the single-document SAF picker. */
@@ -458,6 +458,8 @@ class RustyboiActivity : GameActivity() {
             ry: Float,
             hatX: Float,
             hatY: Float,
+            lt: Float,
+            rt: Float,
         )
     }
 }
