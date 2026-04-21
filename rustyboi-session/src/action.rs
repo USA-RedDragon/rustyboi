@@ -55,6 +55,10 @@ pub struct LibraryEntry {
     pub name: String,
     pub rel_path: String,
     pub size_bytes: u64,
+    /// CRC32 of the file, computed by the Kotlin scanner (and cached per URI), so
+    /// the library can show the canonical No-Intro name via
+    /// [`no_intro::name_for_crc`](crate::no_intro::name_for_crc). `0` = unknown.
+    pub crc32: u32,
 }
 
 /// A four-shade DMG palette choice surfaced in the Settings menu. Toolkit- and

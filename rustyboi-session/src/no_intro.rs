@@ -40,11 +40,17 @@ fn parse(blob: &'static [u8]) -> Option<Vec<(u32, &'static str)>> {
     Some(out)
 }
 
-/// The canonical No-Intro name for `rom`, or `None` if its CRC32 isn't indexed.
-pub fn identify(rom: &[u8]) -> Option<&'static str> {
-    let crc = crc32(rom);
+/// The canonical No-Intro name for a ROM's CRC32, or `None` if unindexed. For
+/// callers that already have the checksum (e.g. the ROM library, which CRC32s
+/// files during its scan) and want to skip re-hashing.
+pub fn name_for_crc(crc: u32) -> Option<&'static str> {
     let idx = index();
     idx.binary_search_by_key(&crc, |(c, _)| *c).ok().map(|i| idx[i].1)
+}
+
+/// The canonical No-Intro name for `rom`, or `None` if its CRC32 isn't indexed.
+pub fn identify(rom: &[u8]) -> Option<&'static str> {
+    name_for_crc(crc32(rom))
 }
 
 /// The cartridge header title (0x0134..0x0143), used as a fallback when the ROM

@@ -751,6 +751,7 @@ fn parse_library_entries(json: &str) -> Result<Vec<LibraryEntry>, serde_json::Er
             .get("size_bytes")
             .and_then(|x| x.as_u64())
             .unwrap_or(0);
+        let crc32 = item.get("crc32").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
         if uri.is_empty() {
             continue;
         }
@@ -759,6 +760,7 @@ fn parse_library_entries(json: &str) -> Result<Vec<LibraryEntry>, serde_json::Er
             name: name.to_string(),
             rel_path: rel_path.to_string(),
             size_bytes,
+            crc32,
         });
     }
     Ok(out)
