@@ -220,6 +220,19 @@ impl Emulator {
         requests_to_js(&reqs)
     }
 
+    /// Feed a downloaded libretro `.cht` body (fetched on the main thread) into
+    /// the session, parsing it into the pending fetched-cheat list the UI shows.
+    /// Returns a Status request reporting how many cheats were parsed.
+    pub fn finish_fetched_cheats(&mut self, body: &str) -> Array {
+        let n = self.session.finish_fetched_cheats(body);
+        let msg = if n == 0 {
+            "No cheats found for this game".to_string()
+        } else {
+            format!("Fetched {n} cheats")
+        };
+        requests_to_js(&[PlatformRequest::Status(msg)])
+    }
+
     /// Export the current cartridge's battery SRAM, or an empty array when the
     /// cart has no battery. The worker posts these bytes to the main thread,
     /// which triggers a browser download.
@@ -429,6 +442,7 @@ impl Emulator {
             touch_controls: self.session.touch_controls(),
             slots: self.session.list_slots(),
             cheats: self.session.cheats().map(str::to_owned).collect(),
+            fetched_cheats: self.session.fetched_cheats().to_vec(),
             has_battery: self.session.has_battery(),
             has_rtc: self.session.has_rtc(),
             has_rom: self.has_rom,
@@ -517,6 +531,21 @@ fn requests_to_js(requests: &[PlatformRequest]) -> Array {
                 set("type", "ResizeContent".into());
                 set("width", (*width).into());
                 set("height", (*height).into());
+            }
+            // The main thread owns `fetch()` (the worker forwards it there). Pass
+            // the ordered candidate URLs; the shell tries them and posts the body
+            // back via `Emulator::finish_fetched_cheats`.
+            PlatformRequest::FetchUrl { urls, purpose } => {
+                set("type", "FetchUrl".into());
+                let arr = Array::new();
+                for u in urls {
+                    arr.push(&JsValue::from_str(u));
+                }
+                set("urls", arr.into());
+                let p = match purpose {
+                    rustyboi_session::FetchPurpose::Cheats => "cheats",
+                };
+                set("purpose", p.into());
             }
             // Serviced inside the worker for the web frontend and not expected
             // from the actions it issues; surface as a status so nothing is lost.

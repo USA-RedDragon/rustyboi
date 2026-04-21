@@ -140,6 +140,26 @@
         setTimeout(() => URL.revokeObjectURL(url), 0);
       };
 
+      // Fetch a libretro `.cht` from the candidate URLs (tried in order; the DB
+      // occasionally misfiles an entry across the GB/GBC folders), then post the
+      // body to the worker for parsing. Errors surface via the worker's status.
+      const fetchCheats = async (urls) => {
+        let body = null;
+        for (const url of urls) {
+          try {
+            const resp = await fetch(url);
+            if (resp.ok) { body = await resp.text(); break; }
+          } catch (_) {
+            // Network/CORS error on this candidate; try the next.
+          }
+        }
+        if (body === null) {
+          app.on_error("Cheat fetch failed (no cheats found for this game)");
+          return;
+        }
+        send({ type: "FinishCheats", body });
+      };
+
       const canvas = document.getElementById("screen");
       sizeCanvas(canvas);
 
@@ -173,6 +193,12 @@
           case "Export":
             // m.bytes is a Uint8Array transferred from the worker; download it.
             downloadBytes(m.name, m.bytes);
+            break;
+          case "FetchUrl":
+            // The worker (which owns the Session) asked us to GET a URL. The main
+            // thread owns `fetch()`; try the candidate URLs in order and post the
+            // body back for the worker to parse. Only the cheat purpose exists.
+            if (m.purpose === "cheats") fetchCheats(m.urls || []);
             break;
           case "Status":
             app.on_status(m.msg);

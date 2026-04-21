@@ -12,7 +12,7 @@
 //! calls `Session::apply`/the session directly instead of using this driver.
 
 use rustyboi_session::action::{FileData, LoadPurpose};
-use rustyboi_session::apply::PlatformRequest;
+use rustyboi_session::apply::{FetchPurpose, PlatformRequest};
 use rustyboi_session::{Session, UiAction};
 
 /// The capabilities the shared action driver requires of a windowed frontend.
@@ -57,6 +57,12 @@ pub trait Frontend {
     /// finisher for `purpose` (`finish_load_rom` / `finish_load_state` /
     /// `finish_import_battery` / `finish_import_rtc`).
     fn load_file(&mut self, file: FileData, purpose: LoadPurpose);
+
+    /// Fetch `urls` (tried in order) over HTTP and feed the response body back to
+    /// the session for `purpose` (e.g. parse a libretro `.cht` via
+    /// `Session::finish_fetched_cheats`). Desktop/Android do the GET on a
+    /// background thread; web hands it to the JS `fetch()` bridge.
+    fn fetch_url(&mut self, urls: Vec<String>, purpose: FetchPurpose);
 
     /// The session run/pause state changed in a way the frontend's pause model
     /// must observe (toggle pause, restart, frame advance, error clear, load).
@@ -103,6 +109,7 @@ pub fn drive_action<F: Frontend>(frontend: &mut F, action: UiAction, timestamp: 
                 frontend.save_bytes(suggested_name, bytes)
             }
             PlatformRequest::LoadFile { file, purpose } => frontend.load_file(file, purpose),
+            PlatformRequest::FetchUrl { urls, purpose } => frontend.fetch_url(urls, purpose),
             PlatformRequest::Status(s) => frontend.set_status(s),
             PlatformRequest::Error(e) => frontend.set_error(e),
             PlatformRequest::ClearError => frontend.clear_error(),

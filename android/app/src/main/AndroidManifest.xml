@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Required by the libretro cheat-DB fetch (ureq HTTPS GET on a worker thread). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:label="RustyBoi"
         android:hasCode="true"

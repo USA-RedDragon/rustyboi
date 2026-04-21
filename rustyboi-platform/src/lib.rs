@@ -21,6 +21,10 @@ mod ports;
 mod png_worker;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 mod rewind_worker;
+// The cheat-DB HTTP fetch worker runs on both desktop and Android (both link
+// ureq); only wasm (no threads, uses the browser `fetch`) opts out.
+#[cfg(not(target_arch = "wasm32"))]
+mod fetch_worker;
 mod run;
 
 pub use crate::run::run;

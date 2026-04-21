@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use rustyboi_core_lib::{gb, input, ppu};
 use rustyboi_session::action::{FileData, LoadPurpose};
+use rustyboi_session::apply::FetchPurpose;
 use rustyboi_session::{AbstractInput, GbButton, RunMode, Session, SessionUiState};
 #[cfg(target_os = "android")]
 use rustyboi_session::UiAction;
@@ -48,6 +49,10 @@ pub enum PlatformRequest {
     /// desktop, content on web/Android) and feeds them back via the finisher for
     /// `purpose`.
     LoadFile { file: FileData, purpose: LoadPurpose },
+    /// The UI asked to fetch `urls` (tried in order) over HTTP. The platform
+    /// performs the GET (background thread on desktop/Android) and feeds the body
+    /// back to the session for `purpose`.
+    FetchUrl { urls: Vec<String>, purpose: FetchPurpose },
     /// A status line to show the user.
     Status(String),
     /// An error to show the user.
@@ -401,6 +406,7 @@ impl App {
             touch_controls: self.session.touch_controls(),
             slots: self.session.list_slots(),
             cheats: self.session.cheats().map(str::to_owned).collect(),
+            fetched_cheats: self.session.fetched_cheats().to_vec(),
             has_battery: self.session.has_battery(),
             has_rtc: self.session.has_rtc(),
             has_rom: self.session.gb().has_rom(),
@@ -898,6 +904,12 @@ impl Frontend for App {
         // if one reaches here, surface it to the platform to read + feed back.
         self.pending_requests
             .push(PlatformRequest::LoadFile { file, purpose });
+    }
+
+    fn fetch_url(&mut self, urls: Vec<String>, purpose: FetchPurpose) {
+        // The platform loop owns the HTTP background thread; hand the request off.
+        self.pending_requests
+            .push(PlatformRequest::FetchUrl { urls, purpose });
     }
 
     fn on_pause_changed(&mut self, hint: PauseHint) {

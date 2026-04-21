@@ -48,6 +48,7 @@
 pub mod action;
 pub mod apply;
 mod audio;
+pub mod cheat_db;
 pub mod cheats;
 pub mod config;
 pub mod debug;
@@ -67,7 +68,8 @@ pub use action::{
     ActionKind, CommandDescriptor, FileData, HardwareChoice, KeyBind, LoadPurpose, MenuCategory,
     PaletteChoice, ScalingMode, SessionUiState, UiAction, COMMANDS,
 };
-pub use apply::{ActionOutcome, PlatformRequest};
+pub use apply::{ActionOutcome, FetchPurpose, PlatformRequest};
+pub use cheat_db::FetchedCheat;
 pub use config::Config;
 pub use debug::{DebugDetail, DebugSnapshot};
 pub use input::{AbstractInput, GbButton, InputMap};
