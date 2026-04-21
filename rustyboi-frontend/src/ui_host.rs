@@ -160,6 +160,7 @@ impl UiHost {
         printer_attached: Option<bool>,
         session: &SessionUiState,
         extra_events: ExtraEvents,
+        held_pad: &std::collections::HashSet<rustyboi_session::input_config::PadButton>,
         force_repaint: bool,
     ) -> (EguiPaint, UiFrame) {
         let mut raw_input = self.egui_state.take_egui_input(window);
@@ -172,8 +173,13 @@ impl UiHost {
         // uploaded + drawn separately, so it still animates every frame. The
         // caller passes `force_repaint` for anything egui can't see (a fresh
         // session snapshot, status/error text); desktop passes `true` (no gating).
-        let dirty =
-            force_repaint || !raw_input.events.is_empty() || self.pending_repaint || !self.have_cache;
+        // Held pad buttons aren't egui events, so force a repaint while any is
+        // down — the keybind editor captures gamepad presses each frame.
+        let dirty = force_repaint
+            || !raw_input.events.is_empty()
+            || !held_pad.is_empty()
+            || self.pending_repaint
+            || !self.have_cache;
         if !dirty {
             return (
                 EguiPaint {
@@ -192,7 +198,8 @@ impl UiHost {
 
         let mut ui_result = None;
         let full_output = self.egui_ctx.run(raw_input, |egui_ctx| {
-            ui_result = Some(self.gui.ui(egui_ctx, paused, debug, printer_attached, session));
+            ui_result =
+                Some(self.gui.ui(egui_ctx, paused, debug, printer_attached, session, held_pad));
         });
 
         self.egui_state
