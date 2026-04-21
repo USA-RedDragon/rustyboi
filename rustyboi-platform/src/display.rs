@@ -405,6 +405,23 @@ fn run_gui_loop(
     let mut session_config = rustyboi_session::Config::load(ports.storage.as_ref());
     session_config.hardware = config.hardware;
 
+    // DIAGNOSTIC: confirm the loaded config actually carries pad bindings (the
+    // resolve target). Expected 8/8 on a fresh install.
+    #[cfg(target_os = "android")]
+    {
+        use rustyboi_session::input_config::InputTrigger;
+        let pad_bound = session_config
+            .input
+            .gb_bindings
+            .iter()
+            .filter(|(_, ts)| ts.iter().any(|t| matches!(t, InputTrigger::Pad(_))))
+            .count();
+        crate::android::raw_log(&format!(
+            "config: {pad_bound}/{} GB buttons pad-bound",
+            session_config.input.gb_bindings.len()
+        ));
+    }
+
     let rom_bytes = config.rom.as_ref().and_then(|p| std::fs::read(p).ok());
 
     // `mut` only used on native, where offloaded rewind is enabled below.
@@ -430,6 +447,10 @@ fn run_gui_loop(
     // events. Track the held pad-button set here and merge into HeldInputs.
     #[cfg(target_os = "android")]
     let mut android_pad: std::collections::HashSet<PadButton> = std::collections::HashSet::new();
+    // DIAGNOSTIC: last logged (held-pad, resolved-button) line, to log the input
+    // pipeline only when it changes rather than every frame.
+    #[cfg(target_os = "android")]
+    let mut prev_input_dbg = String::new();
 
     // Per-frame edge/phase state for the shared input resolver (hotkey rising
     // edges + the turbo autofire square wave). Persists across frames.
@@ -679,6 +700,30 @@ fn run_gui_loop(
                 button_state.down |= touch.down;
                 button_state.left |= touch.left;
                 button_state.right |= touch.right;
+            }
+            // DIAGNOSTIC: log the held pad-button set and the resolved GB button
+            // state whenever either changes. Conclusively separates a transport
+            // failure (pad set empty on press) from a binding failure (pad set
+            // populated but GB buttons stay false = stale/missing bindings).
+            #[cfg(target_os = "android")]
+            {
+                let mut pads: Vec<PadButton> = held.pad.iter().copied().collect();
+                pads.sort_unstable_by_key(|p| format!("{p:?}"));
+                let dbg = format!(
+                    "pad={pads:?} A={} B={} St={} Se={} U={} D={} L={} R={}",
+                    button_state.a,
+                    button_state.b,
+                    button_state.start,
+                    button_state.select,
+                    button_state.up,
+                    button_state.down,
+                    button_state.left,
+                    button_state.right,
+                );
+                if dbg != prev_input_dbg {
+                    crate::android::raw_log(&format!("input: {dbg}"));
+                    prev_input_dbg = dbg;
+                }
             }
             app.set_button_state(button_state);
 

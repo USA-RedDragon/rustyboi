@@ -93,19 +93,8 @@ class RustyboiActivity : GameActivity() {
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
         val joystick = event.source and InputDevice.SOURCE_JOYSTICK ==
             InputDevice.SOURCE_JOYSTICK
-        Log.i(
-            TAG,
-            "genericMotion src=0x%x action=%d joystick=%b x=%.2f y=%.2f z=%.2f rz=%.2f hatX=%.2f hatY=%.2f"
-                .format(
-                    event.source, event.action, joystick,
-                    event.getAxisValue(MotionEvent.AXIS_X),
-                    event.getAxisValue(MotionEvent.AXIS_Y),
-                    event.getAxisValue(MotionEvent.AXIS_Z),
-                    event.getAxisValue(MotionEvent.AXIS_RZ),
-                    event.getAxisValue(MotionEvent.AXIS_HAT_X),
-                    event.getAxisValue(MotionEvent.AXIS_HAT_Y),
-                ),
-        )
+        // Motion events fire continuously; the Rust side logs the resolved input
+        // on change, so no per-event log here (it floods logcat).
         if (joystick) {
             nativeOnGamepadAxes(
                 event.getAxisValue(MotionEvent.AXIS_X),
