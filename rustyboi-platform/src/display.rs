@@ -409,23 +409,6 @@ fn run_gui_loop(
     let mut session_config = rustyboi_session::Config::load(ports.storage.as_ref());
     session_config.hardware = config.hardware;
 
-    // DIAGNOSTIC: confirm the loaded config actually carries pad bindings (the
-    // resolve target). Expected 8/8 on a fresh install.
-    #[cfg(target_os = "android")]
-    {
-        use rustyboi_session::input_config::InputTrigger;
-        let pad_bound = session_config
-            .input
-            .gb_bindings
-            .iter()
-            .filter(|(_, ts)| ts.iter().any(|t| matches!(t, InputTrigger::Pad(_))))
-            .count();
-        crate::android::raw_log(&format!(
-            "config: {pad_bound}/{} GB buttons pad-bound",
-            session_config.input.gb_bindings.len()
-        ));
-    }
-
     let rom_bytes = config.rom.as_ref().and_then(|p| std::fs::read(p).ok());
 
     // `mut` only used on native, where offloaded rewind is enabled below.
@@ -451,10 +434,6 @@ fn run_gui_loop(
     // events. Track the held pad-button set here and merge into HeldInputs.
     #[cfg(target_os = "android")]
     let mut android_pad: std::collections::HashSet<PadButton> = std::collections::HashSet::new();
-    // DIAGNOSTIC: last logged (held-pad, resolved-button) line, to log the input
-    // pipeline only when it changes rather than every frame.
-    #[cfg(target_os = "android")]
-    let mut prev_input_dbg = String::new();
 
     // Cheat-DB HTTP fetch worker (desktop + Android; wasm uses browser fetch).
     // Created lazily on the first `Get cheats` so a session that never fetches
@@ -577,18 +556,11 @@ fn run_gui_loop(
             _ => {}
         }
 
-        // Android gamepad: buttons arrive as unmapped native key events. Track the
-        // held set (winit_input_helper only tracks KeyCode-mapped keys). The raw
-        // code is logged on press so an unmapped controller can be identified.
+        // Android gamepad: face/shoulder/start/select buttons arrive as unmapped
+        // native key events (winit_input_helper only tracks KeyCode-mapped keys).
         #[cfg(target_os = "android")]
         if let Event::WindowEvent { event: WindowEvent::KeyboardInput { event: key, .. }, .. } = &event {
             use winit::keyboard::{NativeKeyCode, PhysicalKey};
-            // DIAGNOSTIC: log EVERY key winit delivers so we can see whether (and
-            // how) gamepad buttons reach the app via winit at all.
-            crate::android::raw_log(&format!(
-                "winit key: phys={:?} logical={:?} state={:?} repeat={}",
-                key.physical_key, key.logical_key, key.state, key.repeat
-            ));
             if let PhysicalKey::Unidentified(NativeKeyCode::Android(code)) = key.physical_key {
                 if let Some(pb) = android_pad_button(code) {
                     if key.state == winit::event::ElementState::Pressed {
@@ -678,7 +650,7 @@ fn run_gui_loop(
                 // Analog sticks + hat arrive via Java (onGenericMotionEvent →
                 // JNI). Android axes: +X right, +Y down. Hat covers controllers
                 // that report the d-pad as an axis rather than key events.
-                let [lx, ly, rx, ry, hx, hy] = crate::android::gamepad_axes();
+                let [lx, ly, rx, ry, hx, hy, lt, rt] = crate::android::gamepad_axes();
                 let dz = 0.5;
                 let mut on = |cond: bool, b: PadButton| {
                     if cond {
@@ -697,6 +669,9 @@ fn run_gui_loop(
                 on(hy > dz, PadButton::DpadDown);
                 on(hx < -dz, PadButton::DpadLeft);
                 on(hx > dz, PadButton::DpadRight);
+                // Analog L2/R2 rest at 0, pressed toward 1.
+                on(lt > dz, PadButton::LeftTrigger);
+                on(rt > dz, PadButton::RightTrigger);
             }
             let (mut button_state, fired) =
                 app.session().config().input.resolve(&held, &mut resolve_state);
@@ -710,30 +685,6 @@ fn run_gui_loop(
                 button_state.down |= touch.down;
                 button_state.left |= touch.left;
                 button_state.right |= touch.right;
-            }
-            // DIAGNOSTIC: log the held pad-button set and the resolved GB button
-            // state whenever either changes. Conclusively separates a transport
-            // failure (pad set empty on press) from a binding failure (pad set
-            // populated but GB buttons stay false = stale/missing bindings).
-            #[cfg(target_os = "android")]
-            {
-                let mut pads: Vec<PadButton> = held.pad.iter().copied().collect();
-                pads.sort_unstable_by_key(|p| format!("{p:?}"));
-                let dbg = format!(
-                    "pad={pads:?} A={} B={} St={} Se={} U={} D={} L={} R={}",
-                    button_state.a,
-                    button_state.b,
-                    button_state.start,
-                    button_state.select,
-                    button_state.up,
-                    button_state.down,
-                    button_state.left,
-                    button_state.right,
-                );
-                if dbg != prev_input_dbg {
-                    crate::android::raw_log(&format!("input: {dbg}"));
-                    prev_input_dbg = dbg;
-                }
             }
             app.set_button_state(button_state);
             // Forward the held pad set so the keybind editor can capture gamepad
