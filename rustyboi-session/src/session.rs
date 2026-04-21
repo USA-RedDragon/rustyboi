@@ -143,6 +143,11 @@ pub struct Session {
     /// one). `None` until a ROM is loaded from bytes.
     original_rom: Option<Vec<u8>>,
 
+    /// Human-readable name of the loaded game: the canonical No-Intro name if the
+    /// ROM is indexed, else its cartridge header title. Drives the window title
+    /// and the ROM library. `None` until a ROM is loaded / when unidentifiable.
+    game_name: Option<String>,
+
     mode: RunMode,
     frame_count: u64,
 
@@ -212,6 +217,7 @@ impl Session {
             cheats: CheatSet::new(),
             rom_id,
             original_rom: None,
+            game_name: None,
             mode: RunMode::Normal,
             frame_count: 0,
             rewind,
@@ -635,6 +641,18 @@ impl Session {
         &self.config
     }
 
+    /// The loaded game's display name (No-Intro name, else header title), if any.
+    pub fn game_name(&self) -> Option<&str> {
+        self.game_name.as_deref()
+    }
+
+    /// Resolve the display name from raw ROM bytes. For construction paths that
+    /// receive a pre-built machine plus the ROM bytes (desktop CLI `--rom`),
+    /// where [`load_rom_bytes`](Self::load_rom_bytes) isn't on the path.
+    pub fn set_rom_identity(&mut self, rom: &[u8]) {
+        self.game_name = crate::no_intro::resolve_game_name(rom);
+    }
+
     /// Apply an updated config: reconfigures the rewind buffer to match (other
     /// fields — hardware, palette, remap, ff factor — take effect on their next
     /// use). Persist separately via [`Session::save_config`].
@@ -870,6 +888,7 @@ impl Session {
         gb.insert(cart);
         gb.skip_bios();
         let rom_id = rustyboi_core_lib::movie::sha256(bytes);
+        self.game_name = crate::no_intro::resolve_game_name(bytes);
         self.replace_machine(gb, rom_id);
         // Restore a battery image persisted through the storage port (web
         // IndexedDB / desktop GUI loads that have no sidecar `.sav`).

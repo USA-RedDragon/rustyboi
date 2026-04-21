@@ -432,6 +432,7 @@ impl Emulator {
             has_battery: self.session.has_battery(),
             has_rtc: self.session.has_rtc(),
             has_rom: self.has_rom,
+            game_name: self.session.game_name().map(str::to_owned),
             input: self.session.input_config().clone(),
         }
     }

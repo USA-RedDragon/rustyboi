@@ -204,6 +204,8 @@ pub struct WebUiState {
     #[serde(default)]
     pub has_rom: bool,
     #[serde(default)]
+    pub game_name: Option<String>,
+    #[serde(default)]
     pub input: InputConfig,
 }
 
@@ -226,6 +228,7 @@ impl WebUiState {
             has_battery: s.has_battery,
             has_rtc: s.has_rtc,
             has_rom: s.has_rom,
+            game_name: s.game_name.clone(),
             input: s.input.clone(),
         }
     }
@@ -248,6 +251,7 @@ impl WebUiState {
             has_battery: self.has_battery,
             has_rtc: self.has_rtc,
             has_rom: self.has_rom,
+            game_name: self.game_name,
             input: self.input,
         }
     }

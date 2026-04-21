@@ -389,6 +389,7 @@ impl App {
             has_battery: self.session.has_battery(),
             has_rtc: self.session.has_rtc(),
             has_rom: self.session.gb().has_rom(),
+            game_name: self.session.game_name().map(str::to_owned),
             input: self.session.input_config().clone(),
         }
     }
@@ -612,13 +613,18 @@ impl App {
             return None;
         }
         self.last_title_update = now;
+        // Lead with the identified game (No-Intro name, else header title).
+        let app = match self.session.game_name() {
+            Some(g) => format!("{g} — RustyBoi"),
+            None => "RustyBoi".to_string(),
+        };
         let paused = self.manually_paused || self.error_state.is_some();
         let title = if self.error_state.is_some() {
-            format!("RustyBoi - ERROR | {:.1} FPS", self.fps)
+            format!("{app} - ERROR | {:.1} FPS", self.fps)
         } else if paused {
-            format!("RustyBoi - PAUSED | {:.1} FPS", self.fps)
+            format!("{app} - PAUSED | {:.1} FPS", self.fps)
         } else {
-            format!("RustyBoi | {:.1} FPS", self.fps)
+            format!("{app} | {:.1} FPS", self.fps)
         };
         Some(title)
     }
