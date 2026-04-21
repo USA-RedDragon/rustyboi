@@ -21,7 +21,7 @@ pub fn apply_patch(rom: &[u8], patch: &[u8]) -> Result<Vec<u8>, String> {
 
 // --- CRC32 (IEEE, reflected) -----------------------------------------------
 
-fn crc32(data: &[u8]) -> u32 {
+pub(crate) fn crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &b in data {
         crc ^= b as u32;

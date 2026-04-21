@@ -53,6 +53,7 @@ pub mod config;
 pub mod debug;
 pub mod input;
 pub mod input_config;
+pub mod no_intro;
 pub mod overlay;
 pub mod patch;
 pub mod ports;
