@@ -214,9 +214,15 @@ self.onmessage = async (e) => {
       case "SetInput":
         emu.set_input_mask(m.mask & 0xff);
         break;
-      case "Action":
+      case "Action": {
         emit(emu.apply_action(m.json));
+        // Push fresh UI state immediately: an action can change it (e.g. the
+        // touch-controls toggle) while idle, when the frame loop — the only
+        // other place state is posted — is not running because no ROM is loaded.
+        const uiState = emu.take_ui_state();
+        if (uiState) post({ type: "UiState", json: uiState });
         break;
+      }
       default:
         break;
     }
