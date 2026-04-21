@@ -543,8 +543,20 @@ fn draw(
     // Debug panels are live views fed by the worker each frame — force a repaint
     // while any is open so a freshly-arrived snapshot always re-renders (repaint
     // gating would otherwise reuse the cached frame and the panel would never show).
-    let (paint, ui_frame) =
-        ui.run(window, false, debug_ref, None, &ui_state, Vec::new(), force_repaint || debug_open);
+    // Held gamepad buttons, computed before the UI so the keybind editor can
+    // capture controller presses (egui never sees pad input); reused for the GB
+    // input resolve below.
+    let pad = gamepad_pad_held();
+    let (paint, ui_frame) = ui.run(
+        window,
+        false,
+        debug_ref,
+        None,
+        &ui_state,
+        Vec::new(),
+        &pad,
+        force_repaint || debug_open,
+    );
 
     // Dispatch the action egui emitted.
     if let Some(action) = ui_frame.action {
@@ -557,7 +569,7 @@ fn draw(
     // GB-button bindings and chord hotkeys from `ui_state.input`.
     let held = HeldInputs {
         keys: held_keys.clone(),
-        pad: gamepad_pad_held(),
+        pad,
     };
     let (mut button_state, fired) = ui_state.input.resolve(&held, resolve_state);
     // Union the egui on-screen touch overlay on top of the resolved buttons.

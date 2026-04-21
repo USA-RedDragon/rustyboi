@@ -730,6 +730,9 @@ fn run_gui_loop(
                 }
             }
             app.set_button_state(button_state);
+            // Forward the held pad set so the keybind editor can capture gamepad
+            // presses (egui never sees pad input).
+            app.set_held_pad(held.pad.clone());
 
             // Fast-forward is a hold action: keep it engaged only while the
             // chord is active this frame, so releasing the chord turns it off.
