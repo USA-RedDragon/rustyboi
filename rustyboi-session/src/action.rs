@@ -121,6 +121,9 @@ pub struct SessionUiState {
     pub slots: Vec<u32>,
     /// Active cheat codes, in insertion order.
     pub cheats: Vec<String>,
+    /// Cheats fetched from the libretro cheat DB awaiting the user's selection
+    /// (empty until a `Get cheats` fetch completes; cleared when dismissed).
+    pub fetched_cheats: Vec<crate::cheat_db::FetchedCheat>,
     /// Whether the inserted cartridge has battery-backed SRAM (gates the
     /// Import/Export Battery Save menu items).
     pub has_battery: bool,
@@ -152,6 +155,7 @@ impl Default for SessionUiState {
             touch_controls: cfg!(target_os = "android"),
             slots: Vec::new(),
             cheats: Vec::new(),
+            fetched_cheats: Vec::new(),
             has_battery: false,
             has_rtc: false,
             has_rom: false,
@@ -245,8 +249,16 @@ pub enum UiAction {
     SetInputConfig(InputConfig),
     /// Add a Game Genie / GameShark cheat code (session-lifetime).
     AddCheat(String),
+    /// Add several cheat codes at once (the user's selection from the fetched
+    /// cheat-DB list). Each is added through the same path as [`AddCheat`].
+    AddCheats(Vec<String>),
     /// Remove a previously-added cheat by its raw code string.
     RemoveCheat(String),
+    /// Fetch this game's cheats from the libretro cheat DB (identifies the loaded
+    /// ROM via No-Intro, emits a [`FetchUrl`](crate::apply::PlatformRequest::FetchUrl)).
+    GetCheats,
+    /// Discard the fetched-cheat list (the user closed the picker).
+    ClearFetchedCheats,
     /// User asked to pick a new ROM library root (SAF tree).
     #[cfg(target_os = "android")]
     OpenRomTree,
@@ -307,7 +319,10 @@ impl UiAction {
             UiAction::ToggleFullscreen => ActionKind::ToggleFullscreen,
             UiAction::SetInputConfig(_) => ActionKind::SetInputConfig,
             UiAction::AddCheat(_) => ActionKind::AddCheat,
+            UiAction::AddCheats(_) => ActionKind::AddCheats,
             UiAction::RemoveCheat(_) => ActionKind::RemoveCheat,
+            UiAction::GetCheats => ActionKind::GetCheats,
+            UiAction::ClearFetchedCheats => ActionKind::ClearFetchedCheats,
             #[cfg(target_os = "android")]
             UiAction::OpenRomTree => ActionKind::OpenRomTree,
             #[cfg(target_os = "android")]
@@ -364,7 +379,10 @@ pub enum ActionKind {
     ToggleFullscreen,
     SetInputConfig,
     AddCheat,
+    AddCheats,
     RemoveCheat,
+    GetCheats,
+    ClearFetchedCheats,
     #[cfg(target_os = "android")]
     OpenRomTree,
     #[cfg(target_os = "android")]

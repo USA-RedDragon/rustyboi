@@ -223,6 +223,14 @@ self.onmessage = async (e) => {
         if (uiState) post({ type: "UiState", json: uiState });
         break;
       }
+      case "FinishCheats": {
+        // The main thread fetched the libretro `.cht` body; parse it into the
+        // session's fetched-cheat list and push the fresh UI state.
+        emit(emu.finish_fetched_cheats(m.body || ""));
+        const uiState = emu.take_ui_state();
+        if (uiState) post({ type: "UiState", json: uiState });
+        break;
+      }
       default:
         break;
     }
