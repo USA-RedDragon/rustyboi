@@ -99,11 +99,14 @@ impl LibraryState {
                             .to_owned();
                         let size_bytes =
                             v.get("size_bytes").and_then(Value::as_u64).unwrap_or(0);
+                        let crc32 =
+                            v.get("crc32").and_then(Value::as_u64).unwrap_or(0) as u32;
                         Some(LibraryEntry {
                             uri,
                             name,
                             rel_path,
                             size_bytes,
+                            crc32,
                         })
                     })
                     .collect()
@@ -137,6 +140,7 @@ impl LibraryState {
                     "name": e.name,
                     "rel_path": e.rel_path,
                     "size_bytes": e.size_bytes,
+                    "crc32": e.crc32,
                 })
             })
             .collect();
