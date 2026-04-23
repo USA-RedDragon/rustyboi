@@ -15,6 +15,29 @@ use std::thread::JoinHandle;
 
 use rustyboi_session::apply::FetchPurpose;
 
+/// ureq DNS resolver that goes through the JVM (`InetAddress`) — Android's native
+/// getaddrinfo fails from a Rust worker thread.
+#[cfg(target_os = "android")]
+struct JniResolver;
+
+#[cfg(target_os = "android")]
+impl ureq::Resolver for JniResolver {
+    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        use std::io::{Error, ErrorKind};
+        let (host, port) = netloc
+            .rsplit_once(':')
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "missing port"))?;
+        let port: u16 = port
+            .parse()
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "bad port"))?;
+        let ips = crate::android::resolve_host(host)?;
+        Ok(ips
+            .into_iter()
+            .map(|ip| std::net::SocketAddr::new(ip, port))
+            .collect())
+    }
+}
+
 /// A fetch request: try `urls` in order, tag the result with `purpose`.
 struct Job {
     urls: Vec<String>,
@@ -88,6 +111,12 @@ fn fetch_loop(rx: Receiver<Job>, done_tx: Sender<Finished>) {
         Ok(cfg) => builder = builder.tls_config(std::sync::Arc::new(cfg)),
         Err(e) => log::warn!("cheat-fetch: platform TLS verifier config failed: {e}"),
     }
+    // Android's native getaddrinfo fails from worker threads; resolve DNS through
+    // the JVM instead.
+    #[cfg(target_os = "android")]
+    {
+        builder = builder.resolver(JniResolver);
+    }
     let agent = builder.build();
     while let Ok(job) = rx.recv() {
         let result = fetch_first(&agent, &job.urls);
@@ -113,6 +142,8 @@ fn fetch_first(agent: &ureq::Agent, urls: &[String]) -> Result<String, String> {
             }
             Err(e) => last_err = format!("request failed: {e}"),
         }
+        // The status toast truncates; log the full per-URL error to logcat.
+        log::warn!("cheat fetch: {url} -> {last_err}");
     }
     Err(last_err)
 }
