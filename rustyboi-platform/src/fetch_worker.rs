@@ -78,9 +78,17 @@ impl Drop for FetchWorker {
 }
 
 fn fetch_loop(rx: Receiver<Job>, done_tx: Sender<Finished>) {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(20))
-        .build();
+    use rustls_platform_verifier::ConfigVerifierExt;
+    // Native-root TLS via the OS verifier: the system trust store on desktop, the
+    // Android CA store (through the JNI init in android_main) on Android. No
+    // bundled roots. Install the ring provider so ClientConfig::builder() has one.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut builder = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(20));
+    match rustls::ClientConfig::with_platform_verifier() {
+        Ok(cfg) => builder = builder.tls_config(std::sync::Arc::new(cfg)),
+        Err(e) => log::warn!("cheat-fetch: platform TLS verifier config failed: {e}"),
+    }
+    let agent = builder.build();
     while let Ok(job) = rx.recv() {
         let result = fetch_first(&agent, &job.urls);
         if done_tx.send(Finished { purpose: job.purpose, result }).is_err() {
