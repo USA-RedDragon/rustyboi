@@ -197,4 +197,8 @@ dependencies {
     // DocumentFile gives us a recursive listFiles() API over SAF tree URIs,
     // used by the ROM library scanner in RustyboiActivity.
     implementation("androidx.documentfile:documentfile:1.0.1")
+    // rustls-platform-verifier's Android JNI support (org.rustls.platformverifier
+    // .CertificateVerifier), resolved from the local .aar in app/libs. Required by
+    // the native cheat-DB HTTPS fetch — the Rust verifier calls this class.
+    implementation(group = "rustls", name = "rustls-platform-verifier-0.1.1", ext = "aar")
 }

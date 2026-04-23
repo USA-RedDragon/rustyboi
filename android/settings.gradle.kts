@@ -11,6 +11,10 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // The rustls-platform-verifier Android support library (the JNI
+        // CertificateVerifier class its Rust side calls) is shipped as a local
+        // .aar in app/libs — without it, HTTPS via the platform verifier crashes.
+        flatDir { dirs("app/libs") }
     }
 }
 
