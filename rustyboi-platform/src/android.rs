@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
-use jni::objects::{JByteArray, JClass, JObject, JString};
+use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString};
 use jni::sys::jobject;
 use jni::{JNIEnv, JavaVM};
 use rustyboi_frontend_lib::actions::{FileData, LibraryEntry};
@@ -731,10 +731,8 @@ pub fn bind_process_to_network() {
         }
     };
     let handle = active_network_handle(&mut env, ctx.context() as jobject);
-    // getActiveNetwork throws (e.g. SecurityException without ACCESS_NETWORK_STATE)
-    // leaves the exception pending; clear it before the guard detaches.
+    // Never let a pending JNI exception reach the guard's detach (that aborts).
     if env.exception_check().unwrap_or(false) {
-        let _ = env.exception_describe();
         let _ = env.exception_clear();
     }
     match handle {
@@ -742,8 +740,30 @@ pub fn bind_process_to_network() {
             let r = unsafe { ndk_sys::android_setprocnetwork(h) };
             raw_log(&format!("android_setprocnetwork(0x{h:x}) = {r}"));
         }
-        None => raw_log("bind_process_to_network: no active network handle"),
+        None => raw_log("bind_process_to_network: no usable network handle"),
     }
+}
+
+/// Take + return the pending Java exception's `toString()` (clearing it), or None.
+fn take_exception(env: &mut JNIEnv<'_>) -> Option<String> {
+    if !env.exception_check().unwrap_or(false) {
+        return None;
+    }
+    let exc = env.exception_occurred().ok();
+    let _ = env.exception_clear();
+    exc.and_then(|exc| {
+        env.call_method(&exc, "toString", "()Ljava/lang/String;", &[])
+            .and_then(|v| v.l())
+            .ok()
+            .and_then(|o| {
+                let s = unsafe { JString::from_raw(o.into_raw()) };
+                env.get_string(&s).ok().map(|js| js.to_string_lossy().into_owned())
+            })
+    })
+}
+
+fn net_handle(env: &mut JNIEnv<'_>, net: &JObject<'_>) -> Option<u64> {
+    env.call_method(net, "getNetworkHandle", "()J", &[]).ok()?.j().ok().map(|h| h as u64)
 }
 
 fn active_network_handle(env: &mut JNIEnv<'_>, context_raw: jobject) -> Option<u64> {
@@ -760,22 +780,74 @@ fn active_network_handle(env: &mut JNIEnv<'_>, context_raw: jobject) -> Option<u
         .l()
         .ok()?;
     if cm.is_null() {
+        raw_log("bind: no ConnectivityManager");
         return None;
     }
-    let net = env
+
+    // Preferred: the active/default network.
+    match env
         .call_method(&cm, "getActiveNetwork", "()Landroid/net/Network;", &[])
-        .ok()?
-        .l()
-        .ok()?;
-    if net.is_null() {
-        return None;
+        .and_then(|v| v.l())
+    {
+        Ok(net) if !net.is_null() => {
+            if let Some(h) = net_handle(env, &net) {
+                return Some(h);
+            }
+        }
+        Ok(_) => raw_log("bind: getActiveNetwork returned null; scanning all networks"),
+        Err(_) => {
+            let msg = take_exception(env).unwrap_or_else(|| "error".into());
+            raw_log(&format!("bind: getActiveNetwork threw: {msg}"));
+        }
     }
-    let handle = env
-        .call_method(&net, "getNetworkHandle", "()J", &[])
-        .ok()?
-        .j()
-        .ok()?;
-    Some(handle as u64)
+
+    // Fallback: any network reporting the INTERNET capability (NET_CAPABILITY_
+    // INTERNET = 12). getActiveNetwork can be null for a native process even when
+    // WiFi is up.
+    let arr = env
+        .call_method(&cm, "getAllNetworks", "()[Landroid/net/Network;", &[])
+        .and_then(|v| v.l());
+    let arr = match arr {
+        Ok(a) if !a.is_null() => unsafe { JObjectArray::from_raw(a.into_raw()) },
+        _ => {
+            let msg = take_exception(env).unwrap_or_else(|| "null".into());
+            raw_log(&format!("bind: getAllNetworks failed: {msg}"));
+            return None;
+        }
+    };
+    let len = env.get_array_length(&arr).unwrap_or(0);
+    for i in 0..len {
+        let Ok(net) = env.get_object_array_element(&arr, i) else {
+            continue;
+        };
+        let caps = env
+            .call_method(
+                &cm,
+                "getNetworkCapabilities",
+                "(Landroid/net/Network;)Landroid/net/NetworkCapabilities;",
+                &[(&net).into()],
+            )
+            .and_then(|v| v.l());
+        let Ok(caps) = caps else {
+            let _ = take_exception(env);
+            continue;
+        };
+        if caps.is_null() {
+            continue;
+        }
+        let has_internet = env
+            .call_method(&caps, "hasCapability", "(I)Z", &[12i32.into()])
+            .and_then(|v| v.z())
+            .unwrap_or(false);
+        if has_internet {
+            if let Some(h) = net_handle(env, &net) {
+                raw_log(&format!("bind: using network #{i} (has INTERNET)"));
+                return Some(h);
+            }
+        }
+    }
+    raw_log("bind: no network with INTERNET capability");
+    None
 }
 
 fn invoke_pending(result: Option<FileData>) {
