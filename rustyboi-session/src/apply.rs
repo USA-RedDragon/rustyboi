@@ -507,9 +507,10 @@ mod tests {
         assert!(s.cheats().next().is_none());
     }
 
-    // With no ROM loaded, GetCheats reports "Load a ROM first" and emits no fetch.
+    // With no ROM loaded, GetCheats reports "Load a ROM first" as a non-fatal
+    // status (never the fatal error screen) and emits no fetch.
     #[test]
-    fn get_cheats_without_rom_errors() {
+    fn get_cheats_without_rom_reports_status() {
         let mut s = session();
         let out = s.apply(UiAction::GetCheats, 0);
         assert!(!out
@@ -517,7 +518,7 @@ mod tests {
             .iter()
             .any(|r| matches!(r, PlatformRequest::FetchUrl { .. })));
         match out.requests.as_slice() {
-            [PlatformRequest::Error(msg)] => assert!(msg.contains("Load a ROM")),
+            [PlatformRequest::Status(msg)] => assert!(msg.contains("Load a ROM")),
             other => panic!("unexpected: {other:?}"),
         }
     }
