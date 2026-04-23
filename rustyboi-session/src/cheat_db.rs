@@ -47,16 +47,37 @@ pub fn candidate_urls(name: &str, cgb: bool) -> Vec<String> {
     } else {
         [GB_FOLDER, GBC_FOLDER]
     };
-    folders
-        .iter()
-        .map(|folder| {
-            format!(
+    let variants = name_variants(name);
+    let mut urls = Vec::with_capacity(folders.len() * variants.len());
+    for folder in folders {
+        for v in &variants {
+            urls.push(format!(
                 "{CHT_BASE}/{}/{}.cht",
                 percent_encode(folder),
-                percent_encode(name)
-            )
-        })
-        .collect()
+                percent_encode(v)
+            ));
+        }
+    }
+    urls
+}
+
+/// Filename candidates for a No-Intro `name`, most-specific first: the exact name,
+/// then progressively dropping trailing " (...)" qualifiers. libretro's cht files
+/// are frequently named from an older No-Intro DAT that omits the "(Rev N)" (and
+/// sometimes the region) suffixes, so the exact name often 404s while a shortened
+/// form matches — e.g. "Pokemon - Crystal Version (USA, Europe) (Rev 1)" has no
+/// cht, but "Pokemon - Crystal Version (USA, Europe)" does.
+fn name_variants(name: &str) -> Vec<String> {
+    let mut out = vec![name.to_string()];
+    let mut cur = name.trim();
+    while cur.ends_with(')') {
+        let Some(idx) = cur.rfind(" (") else { break };
+        cur = cur[..idx].trim_end();
+        if !cur.is_empty() && !out.iter().any(|s| s == cur) {
+            out.push(cur.to_string());
+        }
+    }
+    out
 }
 
 /// Percent-encode a path segment for a raw.githubusercontent URL. Encodes bytes
@@ -245,17 +266,28 @@ mod tests {
     #[test]
     fn urls_order_by_cgb_flag_and_encode_spaces() {
         let gb = candidate_urls("Pokemon - Red Version (USA, Europe) (SGB Enhanced)", false);
-        assert_eq!(gb.len(), 2);
+        // Exact name first, in the primary (GB) folder.
         assert!(gb[0].contains("/Nintendo%20-%20Game%20Boy/"));
         assert!(gb[0].contains("Pokemon%20-%20Red%20Version"));
         assert!(gb[0].contains("(USA%2C%20Europe)")); // comma encoded, parens kept
+        assert!(gb[0].contains("(SGB%20Enhanced)"));
         assert!(gb[0].ends_with(".cht"));
-        // GBC folder is the fallback for a non-CGB ROM.
-        assert!(gb[1].contains("/Nintendo%20-%20Game%20Boy%20Color/"));
+        // The GBC folder appears as a fallback for a non-CGB ROM.
+        assert!(gb.iter().any(|u| u.contains("/Nintendo%20-%20Game%20Boy%20Color/")));
 
         let gbc = candidate_urls("Some Color Game", true);
         assert!(gbc[0].contains("/Nintendo%20-%20Game%20Boy%20Color/"));
-        assert!(gbc[1].contains("/Nintendo%20-%20Game%20Boy/"));
+        assert!(gbc.iter().any(|u| u.contains("/Nintendo%20-%20Game%20Boy/")));
+    }
+
+    #[test]
+    fn name_variants_strip_trailing_qualifiers() {
+        let v = name_variants("Pokemon - Crystal Version (USA, Europe) (Rev 1)");
+        assert_eq!(v[0], "Pokemon - Crystal Version (USA, Europe) (Rev 1)");
+        assert_eq!(v[1], "Pokemon - Crystal Version (USA, Europe)"); // the one that exists
+        assert_eq!(v[2], "Pokemon - Crystal Version");
+        // A name with no qualifiers yields just itself.
+        assert_eq!(name_variants("Tetris"), vec!["Tetris".to_string()]);
     }
 
     #[test]

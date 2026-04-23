@@ -154,7 +154,8 @@
           }
         }
         if (body === null) {
-          app.on_error("Cheat fetch failed (no cheats found for this game)");
+          // Not fatal — a transient status, never the crash screen.
+          app.on_status("No cheats found for this game");
           return;
         }
         send({ type: "FinishCheats", body });
