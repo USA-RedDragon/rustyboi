@@ -41,6 +41,8 @@ winit_input_helper = "0.16.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { version = "2.10", default-features = false, features = ["tls", "gzip"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-platform-verifier = "0.6"
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
 winit = { version = "0.29", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }
