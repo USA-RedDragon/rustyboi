@@ -57,6 +57,7 @@ pub mod input_config;
 pub mod no_intro;
 pub mod overlay;
 pub mod patch;
+pub mod rom_zip;
 pub mod ports;
 pub mod rewind;
 pub mod session;
