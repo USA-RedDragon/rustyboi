@@ -204,6 +204,13 @@ fn android_main(app: AndroidApp) {
             // Info is plenty; Debug pulls in extremely chatty per-frame
             // logs from wgpu_core/wgpu_hal and the JNI crate.
             .with_max_level(log::LevelFilter::Info)
+            // winit's Android backend spams WARN "TODO: ..." stubs for
+            // unimplemented lifecycle hooks; silence them (they are harmless).
+            .with_filter(
+                android_logger::FilterBuilder::new()
+                    .parse("info,winit=error")
+                    .build(),
+            )
             .with_tag("rustyboi"),
     );
     raw_log("android_main: android_logger initialized");

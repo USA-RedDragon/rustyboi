@@ -812,7 +812,9 @@ fn run_gui_loop(
                                 }
                             }
                             (_, Err(e)) => {
-                                rs.ui.set_error(format!("Cheat fetch failed: {e}"));
+                                // A failed cheat fetch is not fatal — surface it in
+                                // the status bar, never the crash screen.
+                                rs.ui.set_status(format!("Cheat fetch failed: {e}"));
                             }
                         }
                     }
