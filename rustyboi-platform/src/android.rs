@@ -706,15 +706,27 @@ pub extern "system" fn Java_dev_mcswain_rustyboi_RustyboiActivity_nativeOnGamepa
 /// Used as ureq's DNS resolver for the cheat-DB fetch.
 pub fn resolve_host(host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
     use std::io::{Error, ErrorKind};
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     let mkerr = |m: String| Error::new(ErrorKind::Other, m);
-
     let ctx = ndk_context::android_context();
     let vm = unsafe { JavaVM::from_raw(ctx.vm() as *mut _) }.map_err(|e| mkerr(format!("vm: {e}")))?;
     let mut env = vm
         .attach_current_thread()
         .map_err(|e| mkerr(format!("attach: {e}")))?;
+    let res = resolve_via_jvm(&mut env, host);
+    // A JNI call that threw (e.g. UnknownHostException) leaves the exception
+    // pending; detaching this worker thread with a pending exception aborts the
+    // whole process. Log + clear it so the failure is graceful.
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+    res
+}
 
+fn resolve_via_jvm(env: &mut JNIEnv<'_>, host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+    use std::io::{Error, ErrorKind};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let mkerr = |m: String| Error::new(ErrorKind::Other, m);
     let jhost = env.new_string(host).map_err(|e| mkerr(format!("str: {e}")))?;
     let arr = env
         .call_static_method(
@@ -726,7 +738,6 @@ pub fn resolve_host(host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
         .and_then(|v| v.l())
         .map_err(|e| mkerr(format!("getAllByName: {e}")))?;
     let arr = unsafe { JObjectArray::from_raw(arr.into_raw()) };
-
     let len = env.get_array_length(&arr).map_err(|e| mkerr(format!("len: {e}")))?;
     let mut out = Vec::new();
     for i in 0..len {
