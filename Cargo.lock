@@ -2899,6 +2899,7 @@ dependencies = [
  "libc",
  "log",
  "ndk-context",
+ "ndk-sys",
  "pollster 0.3.0",
  "rfd",
  "rodio",
