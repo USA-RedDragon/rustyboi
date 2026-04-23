@@ -158,6 +158,10 @@ pub fn parse_cht(body: &str) -> Vec<FetchedCheat> {
     }
 
     let mut out = Vec::new();
+    // libretro's cht files concatenate several cheat dumps and repeat each entry
+    // many times (Pokémon Crystal: 8035 lines, only 1264 distinct). Drop exact
+    // (description, codes) duplicates, keeping first-seen order.
+    let mut seen = std::collections::HashSet::new();
     for (idx, code_list) in codes {
         if code_list.is_empty() {
             continue;
@@ -166,7 +170,9 @@ pub fn parse_cht(body: &str) -> Vec<FetchedCheat> {
             .get(&idx)
             .cloned()
             .unwrap_or_else(|| format!("Cheat {idx}"));
-        out.push(FetchedCheat { description, codes: code_list });
+        if seen.insert((description.clone(), code_list.clone())) {
+            out.push(FetchedCheat { description, codes: code_list });
+        }
     }
     out
 }
