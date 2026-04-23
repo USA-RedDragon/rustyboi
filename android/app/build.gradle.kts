@@ -200,5 +200,5 @@ dependencies {
     // rustls-platform-verifier's Android JNI support (org.rustls.platformverifier
     // .CertificateVerifier), resolved from the local .aar in app/libs. Required by
     // the native cheat-DB HTTPS fetch — the Rust verifier calls this class.
-    implementation(group = "rustls", name = "rustls-platform-verifier-0.1.1", ext = "aar")
+    implementation("rustls:rustls-platform-verifier-0.1.1@aar")
 }
