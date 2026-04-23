@@ -738,7 +738,15 @@ pub fn bind_process_to_network() {
     match handle {
         Some(h) => {
             let r = unsafe { ndk_sys::android_setprocnetwork(h) };
-            raw_log(&format!("android_setprocnetwork(0x{h:x}) = {r}"));
+            let e1 = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            raw_log(&format!("android_setprocnetwork(0x{h:x}) = {r} (errno {e1})"));
+            if r != 0 {
+                // Alternate: bind only the resolver (API 31+), which has laxer
+                // requirements than binding all sockets.
+                let rd = unsafe { ndk_sys::android_setprocdns(h) };
+                let e2 = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                raw_log(&format!("android_setprocdns(0x{h:x}) = {rd} (errno {e2})"));
+            }
         }
         None => raw_log("bind_process_to_network: no usable network handle"),
     }
