@@ -231,9 +231,6 @@ fn android_main(app: AndroidApp) {
 
     let _ = ANDROID_APP.set(app.clone());
     raw_log("android_main: ANDROID_APP stashed");
-    // Native-root TLS: hook rustls-platform-verifier into the Android trust store
-    // so the cheat-DB HTTPS fetch validates against the OS CA set.
-    init_tls_verifier();
     // Install file-picker / file-saver bridges that route through SAF.
     android_bridge::install(
         Box::new(|callback| {
@@ -560,37 +557,85 @@ where
     Some(f(&mut env, &activity))
 }
 
-/// Initialize rustls-platform-verifier with the Android runtime so HTTPS uses the
-/// OS trust store (native CA roots). Without this, rustls has no trust anchors on
-/// Android and the cheat-DB fetch would hang/fail. Called once from `android_main`.
-pub fn init_tls_verifier() {
+/// The device's trusted CA certificates (DER), from the default X509
+/// `TrustManager`. These become a rustls root store so TLS validates against the
+/// OS trust anchors — but with rustls's own (revocation-free) verification, NOT
+/// Android's `TrustManager`, which mandates OCSP revocation and hard-fails on
+/// OCSP-less certs like Let's Encrypt / github (rustls-platform-verifier #221).
+pub fn system_ca_certs() -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
     let ctx = ndk_context::android_context();
-    let vm = match unsafe { JavaVM::from_raw(ctx.vm() as *mut _) } {
-        Ok(vm) => vm,
-        Err(e) => {
-            raw_log(&format!("init_tls_verifier: JavaVM::from_raw failed: {e}"));
-            return;
-        }
+    let Ok(vm) = (unsafe { JavaVM::from_raw(ctx.vm() as *mut _) }) else {
+        return out;
     };
-    let refs = (|| {
-        let mut env = vm.attach_current_thread().ok()?;
-        let context = unsafe { JObject::from_raw(ctx.context() as jobject) };
-        let loader = env
-            .call_method(&context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return out;
+    };
+    let _ = collect_ca_certs(&mut env, &mut out);
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+    raw_log(&format!("system_ca_certs: {} certs", out.len()));
+    out
+}
+
+fn collect_ca_certs(env: &mut JNIEnv<'_>, out: &mut Vec<Vec<u8>>) -> Option<()> {
+    let algo = env
+        .call_static_method(
+            "javax/net/ssl/TrustManagerFactory",
+            "getDefaultAlgorithm",
+            "()Ljava/lang/String;",
+            &[],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+    let algo = unsafe { JString::from_raw(algo.into_raw()) };
+    let tmf = env
+        .call_static_method(
+            "javax/net/ssl/TrustManagerFactory",
+            "getInstance",
+            "(Ljava/lang/String;)Ljavax/net/ssl/TrustManagerFactory;",
+            &[(&algo).into()],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+    // init(null) -> use the platform's default trust store.
+    env.call_method(&tmf, "init", "(Ljava/security/KeyStore;)V", &[(&JObject::null()).into()])
+        .ok()?;
+    let tms = env
+        .call_method(&tmf, "getTrustManagers", "()[Ljavax/net/ssl/TrustManager;", &[])
+        .ok()?
+        .l()
+        .ok()?;
+    let tms = unsafe { JObjectArray::from_raw(tms.into_raw()) };
+    let x509 = env.find_class("javax/net/ssl/X509TrustManager").ok()?;
+    for i in 0..env.get_array_length(&tms).unwrap_or(0) {
+        let tm = env.get_object_array_element(&tms, i).ok()?;
+        if !env.is_instance_of(&tm, &x509).unwrap_or(false) {
+            continue;
+        }
+        let issuers = env
+            .call_method(&tm, "getAcceptedIssuers", "()[Ljava/security/cert/X509Certificate;", &[])
             .ok()?
             .l()
             .ok()?;
-        let context_ref = env.new_global_ref(&context).ok()?;
-        let loader_ref = env.new_global_ref(&loader).ok()?;
-        Some((context_ref, loader_ref))
-    })();
-    match refs {
-        Some((context_ref, loader_ref)) => {
-            rustls_platform_verifier::android::init_with_refs(vm, context_ref, loader_ref);
-            raw_log("init_tls_verifier: platform verifier initialized");
+        let issuers = unsafe { JObjectArray::from_raw(issuers.into_raw()) };
+        for j in 0..env.get_array_length(&issuers).unwrap_or(0) {
+            let cert = env.get_object_array_element(&issuers, j).ok()?;
+            let der = env
+                .call_method(&cert, "getEncoded", "()[B", &[])
+                .ok()?
+                .l()
+                .ok()?;
+            let der = unsafe { JByteArray::from_raw(der.into_raw()) };
+            if let Ok(bytes) = env.convert_byte_array(&der) {
+                out.push(bytes);
+            }
         }
-        None => raw_log("init_tls_verifier: failed to obtain context/classloader refs"),
     }
+    Some(())
 }
 
 // ---------------------------------------------------------------------------
