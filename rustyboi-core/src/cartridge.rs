@@ -3339,6 +3339,21 @@ impl Cartridge {
         Some(out)
     }
 
+    /// The 48 header-logo bytes the boot ROM would decompress into the VRAM
+    /// tiles at $8010: normally the cart's own $0104-$0133, or the locked-mapper
+    /// substitution for Sachen MMC1 (`boot_logo_override`). Read straight from
+    /// `rom_data` (no bus side effects) so skip_bios never perturbs mapper state.
+    pub fn boot_logo_bytes(&self) -> [u8; 48] {
+        if let Some(logo) = self.boot_logo_override() {
+            return logo;
+        }
+        let mut out = [0u8; 48];
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = self.rom_data.get(0x104 + i).copied().unwrap_or(0xFF);
+        }
+        out
+    }
+
     /// Sachen MMC read-side address transform: boot-lock phase counting plus
     /// the $01xx descramble. Interior mutability (Cell) because the lock
     /// transitions are driven by CPU READS (the A15-transition counter on the
