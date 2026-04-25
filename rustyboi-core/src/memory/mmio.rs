@@ -839,6 +839,13 @@ pub struct Mmio {
     // state loads (an old/absent value is re-derived, never trusted).
     #[serde(skip, default)]
     cart_has_clock: bool,
+    // Cached alongside `cart_has_clock` (same lifecycle): the RTC flavour and
+    // whether the cart has a camera, so `tick_rtc` never recomputes
+    // `get_cartridge_type()` per dot and skips `cam_tick` for non-camera carts.
+    #[serde(skip, default)]
+    cart_rtc_kind: cartridge::RtcTickKind,
+    #[serde(skip, default)]
+    cart_has_camera: bool,
     // AGB (GBA-in-GBC-mode) hardware flag. AGB behaves like CGB everywhere
     // except a small, well-defined set of timing/APU diffs (Gambatte isAgb()).
     // Set once at construction from Hardware::AGB; never toggled by cart compat
@@ -977,6 +984,8 @@ impl Mmio {
 
             cgb_features_enabled: false, // Will be set when cartridge is inserted
             cart_has_clock: false,       // Set on insert_cartridge
+            cart_rtc_kind: cartridge::RtcTickKind::None,
+            cart_has_camera: false,
             is_agb: false,
             cgb_de: false,
             is_mgb: false,
@@ -1000,6 +1009,8 @@ impl Mmio {
 
     pub fn insert_cartridge(&mut self, cartridge: cartridge::Cartridge) {
         self.cart_has_clock = cartridge.needs_clock_tick();
+        self.cart_rtc_kind = cartridge.rtc_kind();
+        self.cart_has_camera = cartridge.has_camera();
         self.cartridge = Some(cartridge);
     }
 
@@ -1008,6 +1019,11 @@ impl Mmio {
     /// serde rather than `insert_cartridge`.
     pub fn resync_cart_flags(&mut self) {
         self.cart_has_clock = self.cartridge.as_ref().is_some_and(|c| c.needs_clock_tick());
+        self.cart_rtc_kind = self
+            .cartridge
+            .as_ref()
+            .map_or(cartridge::RtcTickKind::None, |c| c.rtc_kind());
+        self.cart_has_camera = self.cartridge.as_ref().is_some_and(|c| c.has_camera());
     }
 
     /// Re-attach the ROM image to the serde-restored cartridge (whose `rom_data`
@@ -1380,9 +1396,13 @@ impl Mmio {
             return;
         }
         let ds = self.is_double_speed_mode();
+        let kind = self.cart_rtc_kind;
+        let has_cam = self.cart_has_camera;
         if let Some(cart) = self.cartridge.as_mut() {
-            cart.rtc_tick(cycles);
-            cart.cam_tick(cycles << (ds as u32));
+            cart.rtc_tick(cycles, kind);
+            if has_cam {
+                cart.cam_tick(cycles << (ds as u32));
+            }
         }
     }
 
