@@ -586,6 +586,16 @@ pub struct Cartridge {
     sram_cs_lazy: bool,
 }
 
+/// Which per-dot RTC advance a cartridge needs. Cached by the MMIO so the hot
+/// `tick_rtc` path avoids recomputing `get_cartridge_type()` every dot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RtcTickKind {
+    #[default]
+    None,
+    Mbc3,
+    HuC3,
+}
+
 impl Clone for Cartridge {
     fn clone(&self) -> Self {
         Cartridge {
@@ -1954,12 +1964,12 @@ impl Cartridge {
     /// the HALT bit (bit 6 of days_high) freezes advancement but the
     /// sub-second accumulator keeps running so the halt/resume boundary lands
     /// on an exact second, matching hardware.
-    pub fn rtc_tick(&mut self, cycles: u64) {
+    pub fn rtc_tick(&mut self, cycles: u64, kind: RtcTickKind) {
         if cycles == 0 {
             return;
         }
-        match self.get_cartridge_type() {
-            CartridgeType::MBC3 { timer: true, .. } => {
+        match kind {
+            RtcTickKind::Mbc3 => {
                 // HALT bit frozen: the crystal still oscillates but the counters
                 // do not advance. Do not accumulate while halted so no seconds
                 // are "banked".
@@ -1981,7 +1991,7 @@ impl Cartridge {
                     self.flush_rtc_file();
                 }
             }
-            CartridgeType::HuC3 => {
+            RtcTickKind::HuC3 => {
                 // The HuC-3 clock counts whole minutes: minute-of-day rolls at
                 // 1440 into a 12-bit day counter (Pan Docs RTC location map).
                 self.huc3_rtc_accum = self.huc3_rtc_accum.wrapping_add(cycles);
@@ -2002,7 +2012,7 @@ impl Cartridge {
                     self.flush_rtc_file();
                 }
             }
-            _ => {}
+            RtcTickKind::None => {}
         }
     }
 
@@ -2804,6 +2814,15 @@ impl Cartridge {
     /// it to gate the capture-countdown tick.
     pub fn has_camera(&self) -> bool {
         matches!(self.get_cartridge_type(), CartridgeType::PocketCamera)
+    }
+
+    /// Classify the per-dot RTC advance once, so the hot path can cache it.
+    pub fn rtc_kind(&self) -> RtcTickKind {
+        match self.get_cartridge_type() {
+            CartridgeType::MBC3 { timer: true, .. } => RtcTickKind::Mbc3,
+            CartridgeType::HuC3 => RtcTickKind::HuC3,
+            _ => RtcTickKind::None,
+        }
     }
 
     /// True if the cartridge needs the per-dot peripheral clock tick (an RTC
