@@ -171,7 +171,7 @@ pub enum UnlMapper {
     /// M161 (Mani 4 in 1, DMG-601): a one-shot latch that maps one of eight
     /// whole-32KB banks. The header spoofs MBC3+RAM+BAT ($10), so it is
     /// content-detected (256KB + title "TETRIS SET"), exactly like gambatte's
-    /// presumedM161. Ported from gambatte m161.cpp.
+    /// presumedM161
     M161,
 }
 

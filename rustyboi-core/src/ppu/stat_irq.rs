@@ -1,4 +1,4 @@
-// Event-scheduled STAT/mode/LYC interrupt model, ported from Gambatte
+// Event-scheduled STAT/mode/LYC interrupt model
 // (libgambatte/src/video.cpp + video/lyc_irq.*, video/mstat_irq.h).
 //
 // Gambatte predicts each STAT interrupt source as an absolute cycle time and

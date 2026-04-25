@@ -4897,7 +4897,7 @@ impl Ppu {
     }
 
 
-    // Cycle-exact Mode 3 length (dots from M3 start to xpos=167), ported from
+    // Cycle-exact Mode 3 length (dots from M3 start to xpos=167), similar to
     // Gambatte's predictCyclesUntilXpos_fn / addSpriteCycles. Sprites must be
     // pre-sorted by raw OAM X ascending. Returns dots to add past the 167 base.
     // Whether the window starts drawing on this line (Gambatte's win-draw-start
