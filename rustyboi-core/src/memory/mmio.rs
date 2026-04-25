@@ -3404,7 +3404,7 @@ impl Mmio {
     // PPU is on. DMG/MGB/SGB hardware only — CGB/AGB do not have the bug (gated by
     // the caller via `!is_cgb()`).
     //
-    // The corruption itself is ported faithfully from SameBoy's DMG model
+    // The corruption itself is similar to SameBoy's DMG model
     // (Core/memory.c `GB_trigger_oam_bug` / `GB_trigger_oam_bug_read`), which is
     // the reference that passes blargg's oam_bug suite. SameBoy indexes OAM by a
     // BYTE offset `accessed_oam_row` (8, 16, .. 0x98 for the 20 rows; the row the
