@@ -69,7 +69,11 @@ pub enum PlatformRequest {
 /// Frame pacing target (~59.7 fps), matching the original World loop. Only the
 /// native pacing loop uses it; on web the browser paces via requestAnimationFrame.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-const TARGET_FRAME_TIME: Duration = Duration::from_micros(16750);
+// One emulated Game Boy frame is 70224 cycles at 4.194304 MHz = 16743 µs
+// (59.7275 fps). Pacing to this exact period keeps audio production matched to
+// the core's 44100 Hz sampling (738.4 samples/frame → 44100/s); the old 16750
+// ran 0.04% slow and systematically underfed the audio device.
+const TARGET_FRAME_TIME: Duration = Duration::from_micros(16743);
 
 /// The portable app.
 ///
