@@ -1029,6 +1029,9 @@ impl Mmio {
         self.cart_rtc_kind = cartridge.rtc_kind();
         self.cart_has_camera = cartridge.has_camera();
         self.cartridge = Some(cartridge);
+        // If a boot ROM is already loaded, hand its logo to the (possibly Rocket)
+        // cartridge; load_bios does the same when the order is reversed.
+        self.seed_rocket_boot_logo();
     }
 
     /// Re-derive the cached `cart_has_clock` flag from the current cartridge.
@@ -1333,7 +1336,27 @@ impl Mmio {
             ));
         }
         self.bios = Some(data);
+        self.seed_rocket_boot_logo();
         Ok(())
+    }
+
+    /// Hand the Rocket-Games mapper the Nintendo logo from the loaded boot ROM
+    /// (DMG offset 0xA8, CGB 0x42) so its locked-CGB phase can satisfy a running
+    /// boot ROM's logo check without any logo bytes being embedded in rustyboi.
+    /// No-op unless both a boot ROM and a cartridge are present.
+    fn seed_rocket_boot_logo(&mut self) {
+        let Some(bios) = self.bios.as_ref() else { return };
+        let off = match bios.len() {
+            BIOS_SIZE => 0xA8usize,
+            CGB_BIOS_SIZE => 0x42,
+            _ => return,
+        };
+        let Some(slice) = bios.get(off..off + 48) else { return };
+        let mut logo = [0u8; 48];
+        logo.copy_from_slice(slice);
+        if let Some(cart) = self.cartridge.as_mut() {
+            cart.set_rocket_boot_logo(logo);
+        }
     }
 
     pub fn has_bios(&self) -> bool {
