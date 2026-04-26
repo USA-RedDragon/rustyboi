@@ -3405,6 +3405,17 @@ impl Cartridge {
         self.rocket_boot_logo = Some(logo);
     }
 
+    /// The 48-byte logo bitmap held in the cartridge header ($0104-$0133). This
+    /// is the loaded ROM's own data; the CGB boot ROM copies it through HRAM
+    /// while verifying it, so `Mmio` reuses it to reconstruct the post-boot HRAM
+    /// residue instead of embedding the bitmap. `None` if the ROM is too short.
+    pub fn header_logo(&self) -> Option<[u8; 48]> {
+        let slice = self.rom_data.get(0x0104..0x0134)?;
+        let mut logo = [0u8; 48];
+        logo.copy_from_slice(slice);
+        Some(logo)
+    }
+
     /// Rocket Games read-side lock counter (advanced on every cart read). While
     /// in the locked-CGB phase, $0104-$0133 present the Nintendo logo so a
     /// running boot ROM's logo check passes; the bytes come from the loaded boot
