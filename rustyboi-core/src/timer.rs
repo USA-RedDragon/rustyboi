@@ -172,6 +172,18 @@ fn disabled_time() -> u64 {
     DISABLED_TIME
 }
 
+/// Settle a raw `tima + ticks` accumulation that has run past 0x100 back into
+/// the post-reload range `(tma, 0x100]`. On the hardware each overflow reloads
+/// TIMA to TMA, so exactly `period = 256 - tma` increments elapse between one
+/// overflow and the next; the settled value is therefore the accumulation taken
+/// modulo that period, biased so that an exact overflow reports as 0x100 (the
+/// "just overflowed, in the reload window" state the caller then special-cases).
+/// Caller guarantees `tmp > 0x100`, so the subtraction cannot underflow.
+fn settle_tima_overflow(tmp: u64, tma: u8) -> u64 {
+    let period = 0x100 - tma as u64;
+    tma as u64 + (tmp - tma as u64 - 1) % period + 1
+}
+
 impl Default for Timer {
     fn default() -> Self {
         Self::new()
@@ -475,11 +487,7 @@ impl Timer {
 
         let mut tmp = self.tima as u64 + ticks;
         if tmp > 0x100 {
-            let diff = 0x100 - self.tma as u64;
-            tmp -= diff * (tmp / diff - 0x100 / diff);
-            if tmp > 0x100 {
-                tmp -= diff;
-            }
+            tmp = settle_tima_overflow(tmp, self.tma);
         }
 
         if tmp == 0x100 {
@@ -810,11 +818,7 @@ impl Addressable for Timer {
                     }
                     let mut tmp = tima as u64 + ticks;
                     if tmp > 0x100 {
-                        let diff = 0x100 - self.tma as u64;
-                        tmp -= diff * (tmp / diff - 0x100 / diff);
-                        if tmp > 0x100 {
-                            tmp -= diff;
-                        }
+                        tmp = settle_tima_overflow(tmp, self.tma);
                     }
                     if tmp == 0x100 {
                         let tmatime = self.tima_last_update + (ticks << clk) + TMA_OFF;
