@@ -1,12 +1,16 @@
-// Event-scheduled STAT/mode/LYC interrupt model
-// (libgambatte/src/video.cpp + video/lyc_irq.*, video/mstat_irq.h).
+// Event-scheduled STAT/mode/LYC interrupt model.
 //
-// Gambatte predicts each STAT interrupt source as an absolute cycle time and
-// fires whichever event is earliest; register writes recompute those times and
-// may immediately flag an IRQ. rustyboi ticks the PPU per-dot, so we keep an
-// absolute dot counter (`cc`) and, each dot, fire any event whose scheduled
-// time equals the current `cc`. Times are in dots (single-speed cycles); the
-// caller passes `ds` (double speed) so the `<< ds` scaling matches Gambatte.
+// Each STAT interrupt source (LYC=LY compare, mode 0/1/2 entry) fires at a
+// fixed offset within the LCD frame. We predict each source's next fire as an
+// absolute dot time and, ticking the PPU per-dot on an absolute counter (`cc`),
+// raise an IRQ on the dot whose scheduled time equals `cc`. Register writes to
+// FF41/FF45 recompute those times and may immediately flag an IRQ. Times are in
+// dots (single-speed cycles); `ds` (double speed) scales durations via `<< ds`.
+//
+// Sub-dot offset constants (the `2 + 2*ds`, `6 + 4*ds`, `-2`, `+6` forms) and
+// the LCD geometry are hardware timing facts. Predicate/timing functions below
+// mirror the observed silicon edge cases; the algebraic time helpers are kept
+// verbatim where any restructuring risks the sub-dot STAT tests.
 use serde::{Deserialize, Serialize};
 
 pub const LCD_CYCLES_PER_LINE: u32 = 456;
@@ -25,9 +29,8 @@ const MODE1_IRQ_FRAME_CYCLE: i64 = LCD_VRES as i64 * LCD_CYCLES_PER_LINE as i64 
 const MODE2_IRQ_LINE_CYCLE: i64 = LCD_CYCLES_PER_LINE as i64 - 4;
 const MODE2_IRQ_LINE_CYCLE_LY0: i64 = LCD_CYCLES_PER_LINE as i64 - 2;
 
-/// A snapshot of the LY counter that lets us evaluate Gambatte's
-/// `lyCounter` helpers against an absolute dot clock. `time` is the absolute
-/// `cc` (dots) at which LY next increments.
+/// A snapshot of the LY counter used to place frame/line events on the absolute
+/// dot clock. `time` is the absolute `cc` (dots) at which LY next increments.
 #[derive(Clone, Copy)]
 pub struct LyCounter {
     pub ly: u32,
@@ -49,7 +52,8 @@ impl LyCounter {
     }
 
     pub fn next_line_cycle(&self, line_cycle: i64, cc: u64) -> u64 {
-        // Unsigned wrapping arithmetic, matching Gambatte.
+        // The result may land just before `cc`; a single line-length wrap pulls
+        // it forward, done in wrapping u64 arithmetic to tolerate the underflow.
         let mut tmp = (self.time as i64 + (line_cycle << self.ds as u32)) as u64;
         if tmp.wrapping_sub(cc) > self.line_time() {
             tmp = tmp.wrapping_sub(self.line_time());
@@ -75,8 +79,9 @@ pub struct LyCmp {
     pub time_to_next_ly: i64,
 }
 
-/// getLycCmpLy: the LY value used for the LYC=LY compare, which anticipates the
-/// next line in the last few dots of the current one.
+/// The LY value the LYC=LY comparator uses. In the final few dots of a line the
+/// comparator already anticipates the upcoming line, so this returns that
+/// upcoming LY together with the remaining dots until it takes effect.
 pub fn get_lyc_cmp_ly(lc: &LyCounter, cc: u64) -> LyCmp {
     let mut ly = lc.ly;
     let mut ttnl = lc.time as i64 - cc as i64;
@@ -98,8 +103,10 @@ pub fn get_lyc_cmp_ly(lc: &LyCounter, cc: u64) -> LyCmp {
     LyCmp { ly, time_to_next_ly: ttnl }
 }
 
+/// The LY value one line later. LY counts 0..=153 and wraps to 0 after the
+/// final line, so advancing modulo the frame height gives the next line.
 pub fn inc_ly(ly: u32) -> u32 {
-    if ly == LCD_LINES_PER_FRAME - 1 { 0 } else { ly + 1 }
+    (ly + 1) % LCD_LINES_PER_FRAME
 }
 
 pub fn mode1_irq_schedule(lc: &LyCounter, cc: u64) -> u64 {
@@ -110,23 +117,28 @@ pub fn mode2_irq_schedule(stat: u8, lc: &LyCounter, cc: u64) -> u64 {
     if stat & STAT_M2EN == 0 {
         return DISABLED_TIME;
     }
-    // Gambatte does this in unsigned arithmetic; the subtraction wraps when
-    // frameCycles < lastM2Fc, which is intentional (selects the regular branch
-    // for early-frame schedules).
+    // Two frame-relative mode-2 fire points: the last visible line (LY=143) and
+    // the post-frame LY=0 slot on line 153. When we are already past the last
+    // visible line's mode-2 point but not yet at the LY=0 point, the next mode-2
+    // is the LY=0 one; mode-0 enable forces that same frame-relative schedule.
+    // Otherwise the next mode-2 is one line ahead. (last_m2_fc < ly0_m2_fc, so a
+    // plain half-open range test replaces the wrap-on-subtract idiom.)
     let last_m2_fc =
         ((LCD_VRES - 1) * LCD_CYCLES_PER_LINE) as u64 + MODE2_IRQ_LINE_CYCLE as u64;
     let ly0_m2_fc =
         ((LCD_LINES_PER_FRAME - 1) * LCD_CYCLES_PER_LINE) as u64 + MODE2_IRQ_LINE_CYCLE_LY0 as u64;
-    if lc.frame_cycles(cc).wrapping_sub(last_m2_fc) < ly0_m2_fc.wrapping_sub(last_m2_fc)
-        || (stat & STAT_M0EN != 0)
-    {
+    if (last_m2_fc..ly0_m2_fc).contains(&lc.frame_cycles(cc)) || (stat & STAT_M0EN != 0) {
         lc.next_frame_cycle(ly0_m2_fc as i64, cc)
     } else {
         lc.next_line_cycle(MODE2_IRQ_LINE_CYCLE, cc)
     }
 }
 
-// ---- LycIrq (video/lyc_irq.*) ----
+// ---- LYC=LY compare interrupt ----
+// Predicts the absolute dot at which the next LY==LYC match fires and re-arms
+// itself each frame. Keeps both the live "source" register values (as written)
+// and a delayed "committed" copy, because FF41/FF45 writes take effect a couple
+// of dots after the store on real hardware.
 #[derive(Clone, Copy, Serialize, Deserialize, Default)]
 pub struct LycIrq {
     pub time: u64,
@@ -150,12 +162,12 @@ fn lyc_schedule(stat: u8, lyc: u8, lc: &LyCounter, cc: u64) -> u64 {
     }
 }
 
+// An LYC match on a line that is also a mode-2 (visible lines 1..=144) or
+// mode-1 (line 0 / v-blank) entry is suppressed when that mode's own STAT
+// source is enabled, since the coincident mode IRQ takes precedence.
 fn lyc_blocked_by_m2_or_m1(ly: u32, stat: u8) -> bool {
-    if ly <= LCD_VRES && ly > 0 {
-        stat & STAT_M2EN != 0
-    } else {
-        stat & STAT_M1EN != 0
-    }
+    let mode_bit = if (1..=LCD_VRES).contains(&ly) { STAT_M2EN } else { STAT_M1EN };
+    stat & mode_bit != 0
 }
 
 impl LycIrq {
@@ -210,7 +222,9 @@ impl LycIrq {
     pub fn do_event(&mut self, lc: &LyCounter) -> bool {
         let mut flag = false;
         if (self.stat_reg | self.stat_reg_src) & STAT_LYCEN != 0 {
-            let cmp_ly = if lc.ly == LCD_LINES_PER_FRAME - 1 { 0 } else { lc.ly + 1 };
+            // The event fires just before the line boundary, so it compares
+            // against the LY that is about to latch.
+            let cmp_ly = inc_ly(lc.ly);
             flag = self.lyc_reg as u32 == cmp_ly
                 && !lyc_blocked_by_m2_or_m1(self.lyc_reg as u32, self.stat_reg);
         }
@@ -236,7 +250,11 @@ impl LycIrq {
     }
 }
 
-// ---- MStatIrqEvent (video/mstat_irq.h) ----
+// ---- Mode 0/1/2 STAT interrupt events ----
+// Fires the h-blank (mode 0), v-blank (mode 1) and OAM-scan (mode 2) STAT
+// sources, applying the mutual-exclusion rules between a mode IRQ and a
+// coincident LYC match on the same line. Holds a delayed copy of STAT/LYC for
+// the same write-latency reason as the LYC event above.
 #[derive(Clone, Copy, Serialize, Deserialize, Default)]
 pub struct MStatIrq {
     lyc_reg: u8,
@@ -298,7 +316,9 @@ impl MStatIrq {
 
     pub fn do_m2_event(&mut self, ly: u32, stat: u8, lyc: u8) -> bool {
         let blocked_by_m1 = ly == 0 && (self.stat_reg & STAT_M1EN != 0);
-        let cmp = if ly == 0 { 0 } else { ly - 1 };
+        // Mode 2 begins a line, so its coincident-LYC check uses the previous
+        // line's number (line 0 has no predecessor, so it clamps to 0).
+        let cmp = ly.saturating_sub(1);
         let blocked_by_lyc = (self.stat_reg & STAT_LYCEN != 0) && cmp == self.lyc_reg as u32;
         let flag = !blocked_by_m1 && !blocked_by_lyc;
         self.lyc_reg = lyc;
@@ -307,11 +327,15 @@ impl MStatIrq {
     }
 }
 
-// ---- statChangeTriggers* (immediate-fire on FF41 write) ----
+// ---- Immediate STAT IRQ on an FF41 write ----
+// Writing STAT can raise an interrupt on the same dot if the newly enabled
+// source already matches the current LCD position. These predicates decide that
+// for the two hardware variants. (Left in their original condition-by-condition
+// form: the sub-dot boundary tests are validated only against the timing test
+// ROMs, so the structure is not re-expressed here.)
 
-/// DMG: statChangeTriggersStatIrqDmg. `m0_irq_time` is the absolute event time
-/// for the current line's mode-0 IRQ (DISABLED_TIME if none scheduled),
-/// `next_ly_time` = lyCounter.time().
+/// DMG variant. `m0_irq_time` is the absolute dot of the current line's mode-0
+/// IRQ (DISABLED_TIME if none scheduled).
 pub fn stat_change_triggers_dmg(
     old: u8,
     lc: &LyCounter,
@@ -418,7 +442,10 @@ pub fn stat_change_triggers_cgb(
         || stat_change_triggers_m2_cgb(old, data, ly, time_to_next_ly, lc.ds)
 }
 
-// ---- lycRegChangeTriggersStatIrq ----
+// ---- Immediate STAT IRQ on an FF45 (LYC) write ----
+// Writing LYC can raise an LYC=LY interrupt on the same dot if the new value
+// matches the LY currently being compared. Structure left as-is (sub-dot
+// boundary handling validated only against the timing test ROMs).
 
 fn lyc_change_blocked_by_m0_or_m1(
     data: u8,
@@ -464,8 +491,10 @@ pub fn lyc_change_triggers_stat_irq(
     data as u32 == lyc_cmp.ly
 }
 
-/// doMode2IrqEvent's reschedule: compute the next m2 event time given the LY
-/// that was used for the firing and whether m0 is enabled.
+/// After a mode-2 IRQ fires, the dot delta to the next one. With mode-0 also
+/// enabled the sources coincide once per frame; otherwise mode 2 recurs each
+/// line, with LY=0 (line 153) and the last visible line shifting the delta by
+/// the LY=0 slot's offset.
 pub fn mode2_reschedule_delta(ly: u32, stat: u8, ds: bool) -> u64 {
     let mut next = LCD_CYCLES_PER_FRAME;
     if stat & STAT_M0EN == 0 {
