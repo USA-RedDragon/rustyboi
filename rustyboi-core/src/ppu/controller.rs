@@ -369,28 +369,31 @@ fn m0irq_off_ss() -> i64 { M0IRQ_OFFSET }
 fn m2irq_off_ss() -> i64 { M2IRQ_OFFSET }
 fn write_cc_off_ss() -> i64 { WRITE_CC_OFFSET }
 
-// Sentinel tile number that can never equal a real `(spx - firstTileXpos) & -8`
-// value (Gambatte's `tileno_none` = low bit set). Used to force the first sprite
-// of a fresh tile group to be charged the leading-sprite rate.
+// A tile-column index the real grid can never produce (`(spx-grid0) >> 3` is
+// always an integer, never a half-step), used to mark "no column charged yet"
+// so the first object of a fresh grid always pays the leading rate.
 const SPRITE_TILE_NONE: i32 = 1;
 fn sprite_prev_tile_default() -> i32 { SPRITE_TILE_NONE }
 
 
-/// One faithful port of Gambatte's mode-3 sprite-cost tile walk
-/// (`predictCyclesUntilXpos_fn` + `addSpriteCycles`, ppu.cpp:1313-1392, the same
-/// per-tile cost the runtime `doFullTilesUnrolled` charges at ppu.cpp:525-530).
+/// Mode-3 dot cost of the per-line objects, as the fetcher pays it while walking
+/// the BG tile grid from xpos 0 to `target_x`.
 ///
-/// Walks the BG tiles left-to-right. Within each 8-pixel tile, the FIRST sprite
-/// whose `spx` falls in the tile costs `max(11 - dist, 6)` (where `dist =
-/// (spx - firstTileXpos) % 8`, and the leading rate only applies when `dist < 5`);
-/// every FURTHER sprite in the same tile costs a flat 6. The window split (the
-/// `spx <= nwx` group vs the `spx > nwx` group) mirrors Gambatte exactly: the
-/// post-window group restarts the tile grid at `nwx + 1` with no previous tile.
+/// Hardware cost model: every visible object costs a flat 6 dots. On top of that,
+/// the FIRST object encountered in a given 8-pixel tile column earns a leading
+/// bonus of `5 - dist` dots, where `dist` is how many pixels past that column's
+/// left edge the object sits — but only while `dist < 5` (an object landing in
+/// the last 3 pixels of a column, or any later object sharing that column, pays
+/// the flat 6). Equivalently the leading object costs `max(11 - dist, 6)`.
+///
+/// A window opening mid-line splits the objects at `nwx`: objects at `spx <= nwx`
+/// walk the BG grid, and the post-window objects restart on a fresh grid rooted
+/// at `nwx + 1` with no column yet charged.
 ///
 /// `sprite_xs` MUST be sorted ascending by spx. `scx` is `SCX & 7`. `nwx` is the
 /// window X split point (0xFF when no window starts this line). `target_x` is
-/// `lcd_hres + 7 = 167`. `obj_enabled` follows `lcdcObjEn(p) | p.cgb`.
-/// Returns the total sprite cost in dots.
+/// `lcd_hres + 7 = 167`. `obj_enabled` follows LCDC.1 (always on for CGB).
+/// Returns the total object cost in dots.
 fn sprite_tile_walk_cost(
     sprite_xs: &[i32],
     scx: i32,
@@ -401,46 +404,55 @@ fn sprite_tile_walk_cost(
     if !obj_enabled || sprite_xs.is_empty() {
         return 0;
     }
-    // firstTileXpos = endx % 8 = (8 - scx%8) % 8: the BG-tile grid phase at
-    // xpos = 0 (M3 start). fno is the fine-scroll discard count Gambatte passes
-    // from M3Start (`min(scx%8, 5)`), used only for the first sprite.
-    let first_tile_xpos = (8 - scx).rem_euclid(8);
-    let fno = scx.min(5);
-    let mut cycles = 0i32;
+    // Tile-column origin at the mode-3 start (xpos 0): the grid edge sits `scx&7`
+    // pixels back, so column boundaries fall at (8 - scx) mod 8. `discard` is the
+    // fine-scroll pixel count dropped before xpos 0 (capped at 5), which shifts
+    // only the very first object's column offset.
+    let grid0 = (8 - scx).rem_euclid(8);
+    let discard = scx.min(5);
+    let column_of = |spx: i32, origin: i32| (spx - origin) >> 3;
+    let mut cost = 0i32;
     let mut idx = 0usize;
 
-    // First-sprite special case (Tile::predictCyclesUntilXpos_fn first branch):
-    // xpos is 0, so the leading sprite uses `fno + spx` for its distance.
-    let prev_tile_no_initial = (0 - first_tile_xpos) & !7; // (xpos - firstTileXpos) & -8
-    let spx0 = sprite_xs[0];
-    if fno + spx0 < 5 && spx0 <= nwx && spx0 <= target_x {
-        cycles += 11 - (fno + spx0);
+    // The leading object at xpos 0 measures its offset from the discard phase
+    // rather than the grid; when it lands in the first 5 discarded pixels it pays
+    // the leading rate and is consumed here.
+    let lead = sprite_xs[0];
+    if discard + lead < 5 && lead <= nwx && lead <= target_x {
+        cost += 6 + (5 - (discard + lead));
         idx += 1;
     }
 
-    // addSpriteCycles: accumulate for sprites with spx <= max_spx, charging the
-    // first per tile the leading rate and 6 for the rest.
-    let add = |xs: &[i32], idx: &mut usize, max_spx: i32, first_tile_xpos: i32,
-               mut prev_tile_no: i32, cycles: &mut i32| {
+    // Charge each remaining object: flat 6, plus the leading bonus for the first
+    // object seen in each tile column. `seed_col` is the column already "charged"
+    // when the walk begins (the xpos-0 column for the BG grid, none after a
+    // window split).
+    let charge = |xs: &[i32], idx: &mut usize, max_spx: i32, origin: i32,
+                  seed_col: i32, cost: &mut i32| {
+        let mut prev_col = seed_col;
         while *idx < xs.len() && xs[*idx] <= max_spx {
             let spx = xs[*idx];
-            let dist = (spx - first_tile_xpos).rem_euclid(8);
-            let tile_no = (spx - first_tile_xpos) & !7;
-            let c = if dist < 5 && tile_no != prev_tile_no { 11 - dist } else { 6 };
-            prev_tile_no = tile_no;
-            *cycles += c;
+            let col = column_of(spx, origin);
+            let dist = (spx - origin).rem_euclid(8);
+            if col != prev_col && dist < 5 {
+                *cost += 6 + (5 - dist);
+            } else {
+                *cost += 6;
+            }
+            prev_col = col;
             *idx += 1;
         }
     };
 
+    let bg_seed = column_of(0, grid0);
     if nwx < target_x {
-        add(sprite_xs, &mut idx, nwx, first_tile_xpos, prev_tile_no_initial, &mut cycles);
-        add(sprite_xs, &mut idx, target_x, nwx + 1, SPRITE_TILE_NONE, &mut cycles);
+        charge(sprite_xs, &mut idx, nwx, grid0, bg_seed, &mut cost);
+        charge(sprite_xs, &mut idx, target_x, nwx + 1, SPRITE_TILE_NONE, &mut cost);
     } else {
-        add(sprite_xs, &mut idx, target_x, first_tile_xpos, prev_tile_no_initial, &mut cycles);
+        charge(sprite_xs, &mut idx, target_x, grid0, bg_seed, &mut cost);
     }
 
-    cycles
+    cost
 }
 
 // DMG mid-mode-3 OBJ-enable toggle: dots from the write hook to the first
@@ -579,7 +591,10 @@ struct CapturedWinTile {
     live_high_tds: bool,
 }
 
-// Faithful port of Gambatte's `SpriteMapper::OamReader` (sprite_mapper.cpp).
+// Lazy per-line OAM Y/X snapshot: the sprite scan samples OAM position-by-
+// position across mode 2, and this reproduces which positions have been sampled
+// as of any given cc so a mid-scan OAM/DMA/size change is caught at the right
+// position. Structure follows the standard walk-since-last-update model.
 // Holds a lazily-sampled 80-byte snapshot of the OAM Y/X positions (`buf`,
 // even=Y odd=X) plus the per-sprite large-size flag (`lsbuf`). The snapshot is
 // advanced by `update(cc)`, which walks OAM positions up to
@@ -1975,7 +1990,7 @@ impl Ppu {
             return;
         }
         let cgb = mmio.is_cgb_features_enabled();
-        // Gambatte initstate.cpp:471: videoCycles = cgb ? 144*456+164+agb*4 :
+        // Post-boot LCD phase (dots into the frame): cgb ? 144*456+164+agb*4 :
         // 153*456+396. AGB's post-boot video phase leads CGB's by 4 dots.
         let agb_off = if mmio.is_agb() { 4 } else { 0 };
         // The DMG0 boot ROM hands off ~9 scanlines earlier in the frame than
@@ -4105,7 +4120,7 @@ impl Ppu {
                 self.m0_time_master = None;
             }
         }
-        // Gambatte setLcdc (ppu.cpp 1867-1874): a WE (window-enable) toggle with
+        // On an LCDC write: a WE (window-enable) toggle with
         // the LCD already on updates winDrawState. rustyboi splits Gambatte's
         // 2-bit winDrawState into `win_draw_start` (bit win_draw_start) and
         // `win_draw_started` (bit win_draw_started); reproduce the exact bit
@@ -4476,9 +4491,9 @@ impl Ppu {
 
     /// FAITHFUL EVENTCC: the mode-0 STAT IRQ event time
     /// (`predictedNextXposTime(166)` = Gambatte's `intevent_interrupts` m0
-    /// eventTime, video.cpp:884) in MASTER cc — the cc domain `master_cc()` /
+    /// eventTime) in MASTER cc — the cc domain `master_cc()` /
     /// `m0_time_master` / getStat `access_cc` share, so the halt-exit
-    /// `cc - eventTime < 2` fixup (memory.cpp:308) compares like-for-like.
+    /// `cc - eventTime < 2` halt-exit fixup compares like-for-like.
     ///
     /// Derived from the closed-form `m0_time_master` (= predictedNextXposTime(167)
     /// in master cc): the m0 IRQ fires one xpos earlier, so subtract the 166->167
@@ -4897,24 +4912,23 @@ impl Ppu {
     }
 
 
-    // Cycle-exact Mode 3 length (dots from M3 start to xpos=167), similar to
-    // Gambatte's predictCyclesUntilXpos_fn / addSpriteCycles. Sprites must be
-    // pre-sorted by raw OAM X ascending. Returns dots to add past the 167 base.
-    // Whether the window starts drawing on this line (Gambatte's win-draw-start
-    // gate). DMG ignores WX==166.
-    // Gambatte weMaster latch (M2_Ly0::f0 + M2_LyNon0::f0/f1). Sets the sticky
-    // `window_y_triggered` flag at the same three line-cycle checkpoints
-    // Gambatte uses, reading WY live so late writes are caught precisely.
+    // Window-Y activation latch. Hardware compares LY against WY at three fixed
+    // checkpoints per frame; once any comparison hits, the window is armed for the
+    // rest of the frame (`window_y_triggered` is sticky, cleared only at frame
+    // start). The three checkpoints are line 0 mode-2 (line cycle 1 + cgb), and
+    // the prior line's HBlank at line cycles 450 (compare LY) and 454 (compare
+    // LY+1). WX only decides where the armed window begins drawing, not whether it
+    // arms; this handles the Y side.
     fn update_window_y_latch(&mut self, mmio: &mmio::Mmio) {
         if self.disabled {
             return;
         }
         let is_cgb = mmio.is_cgb_features_enabled();
-        // Window-enable bit as Gambatte's weMaster checkpoint sees it at THIS dot.
-        // A window-enable write whose Gambatte commit (`write_cc + 2`) has not yet
-        // reached this dot's abs_cc still reads the OLD bit here (Gambatte runs the
-        // weMaster `update(cc)` event before `setLcdc`), even though rustyboi's
-        // pending_lcdc_events already committed the live `self.lcdc` one dot early.
+        // Window-enable bit (LCDC.5) as of THIS checkpoint dot. A window-enable
+        // write commits `write_cc + 2` dots after the write; the checkpoint
+        // resolves the bit BEFORE that commit, so a write landing exactly on the
+        // checkpoint dot still reads the OLD bit here even though the live
+        // `self.lcdc` was committed one dot early by pending_lcdc_events.
         let win_en = match self.we_win_bit_exact {
             Some((commit_cc, _new, old)) if self.abs_cc <= commit_cc => old,
             _ => (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0,
@@ -4923,15 +4937,14 @@ impl Ppu {
             return;
         }
         let ly = mmio.read(LY) as i32;
-        // Gambatte's weMaster checkpoints read `p.wy`, the WY value applied
-        // `1 + cgb` cc after the write (not the live mmio value). Using the
-        // delayed `wy1` makes a mid-frame WY write reach these checkpoints with
-        // Gambatte's exact phase.
+        // The checkpoints compare against WY as applied `1 + cgb` cc after the
+        // write, not the live mmio value; `wy1` is that delayed copy, so a
+        // mid-frame WY write reaches these checkpoints with the correct phase.
         let wy = self.wy1 as i32;
 
-        // ly0 check (only valid during the active frame's line 0 mode-2).
-        // weMasterCheckLy0LineCycle = 1 + cgb. Also runs on the first line
-        // after enable (where ly is held at 0 and there is no mode-2 phase).
+        // ly0 check (only valid during the active frame's line 0 mode-2), at line
+        // cycle 1 + cgb. Also runs on the first line after enable (where ly is
+        // held at 0 and there is no mode-2 phase).
         if ly == 0
             && self.state == State::OAMSearch
             && self.ticks == (1 + is_cgb as u128)
@@ -5161,8 +5174,8 @@ impl Ppu {
         (0..=166).contains(&wx) && (mmio.is_cgb() || wx != 166)
     }
 
-    // Gambatte plotPixel (ppu.cpp 883-895) evaluated at the END of mode 3, where
-    // the fetcher's xpos reaches wx==166 (lcd_hres+6) on DMG with WX==166. The
+    // The window-draw decision evaluated at the END of mode 3, where the
+    // fetcher's xpos reaches wx==166 (lcd_hres+6) on DMG with WX==166. The
     // window cannot draw a visible pixel this line (the line ends at xpos 166)
     // but it still mutates winDrawState exactly as Gambatte does when xpos hits
     // wx. The OUTER gate is `wx==xpos && (weMaster || (wy2==ly && winEn)) &&
@@ -5347,18 +5360,16 @@ impl Ppu {
         (cycles.max(0) as u128, win)
     }
 
-    /// Runtime-only mode-3 extension when a sprite sits at spx == 0 (Gambatte
-    /// `M3Start::f1`, ppu.cpp:349-350: `if (sprite0Active && (lcdcObjEn|cgb))
-    /// p.cycles -= min(scx%8, 5)`). A sprite whose X is exactly 0 straddles the
-    /// fine-scroll discard, so the fetch stalls `min(scx%8, 5)` extra dots before
-    /// the tile loop begins.
+    /// Runtime-only mode-3 extension when a sprite sits at spx == 0. A sprite
+    /// whose X is exactly 0 straddles the fine-scroll discard, so the fetch
+    /// stalls `min(scx&7, 5)` extra dots before the tile loop begins.
     ///
     /// This cost lives ONLY in the runtime fetch loop that drives the real
     /// mode-3 -> mode-0 transition (and therefore the STAT-mode read the CPU
-    /// polls). Gambatte's closed-form `predictCyclesUntilXpos_fn` (the m0-STAT-IRQ
-    /// predictor, ppu.cpp:1336) does NOT include it, so `compute_m3_length`
-    /// (which arms `sched_m0irq`) must stay clean — the m0 IRQ fires at the
-    /// predictor time, the mode transition one `min(scx%8,5)` dot later. Applied
+    /// polls). The closed-form m0-STAT-IRQ length model does NOT include it, so
+    /// `compute_m3_length` (which arms `sched_m0irq`) must stay clean — the m0
+    /// IRQ fires at the predicted time, the mode transition one `min(scx&7,5)`
+    /// dot later. Applied
     /// to `m0_time_master` (the renderer/STAT boundary) and subtracted back out in
     /// `m0_irq_event_cc_master`. Mooneye intr_2_mode0_timing_sprites_scx{1..4}.
     fn sprite0_scx_extra(&self, mmio: &mmio::Mmio, is_cgb: bool) -> i64 {
@@ -5576,8 +5587,8 @@ impl Ppu {
         }
     }
 
-    // CGB halt-woken write-stream bias, in display columns. Gambatte charges
-    // `cc += 4 * isCgb()` when an IRQ ends HALT (memory.cpp:301) — one real
+    // CGB halt-woken write-stream bias, in display columns. Hardware charges
+    // `cc += 4 * isCgb()` when an IRQ ends HALT — one real
     // M-cycle before the woken stream resumes. rustyboi's halted CPU wakes at
     // the exact IF-set cc and models that M-cycle on the READ side only
     // (getStat/getLyReg biases), so a halt-woken WRITE stream runs 4cc early:
@@ -6250,7 +6261,7 @@ impl Ppu {
     /// 0..=152 (line 153 -> 0 already came through `write_ly_from_ppu`).
     fn effective_ly_for_lyc_compare(&self, mmio: &mmio::Mmio) -> u8 {
         let ly = mmio.read(LY);
-        // video.cpp:820 getStat LYC compare: the next-line anticipation window is
+        // STAT LYC compare: the next-line anticipation window is
         // `timeToNextLy > 2 - (!isDoubleSpeed() && isAgb())`. The renderer's
         // line-cycle equivalent is `ticks >= 456 - thresh`; AGB single-speed
         // lowers the threshold from 2 to 1, extending the window one dot earlier.
@@ -8815,7 +8826,7 @@ impl Ppu {
         let ds = double_speed as i128;
         let dot = self.ticks as i128;
         // Gambatte gates HDMA on `cc >= m0Time` but its eligibility call site
-        // (video.cpp:357) passes `cc + 4`; the +1 dot here aligns the renderer
+        // the eligibility call site passes `cc + 4`; the +1 dot here aligns the renderer
         // tick with that access cc. Net +1 on the dma suite, no regressions.
         let m0n = m0 + self.dma_scx_m0_nudge(double_speed, false) as i128;
         Some(dot > m0n && dot + 3 + 3 * ds < 456)
@@ -8918,7 +8929,7 @@ impl Ppu {
         Some(depth < limit)
     }
 
-    /// Late-hdma-vs-interrupt unhalt precedence (memory.cpp:329-364). On unhalt
+    /// Late-hdma-vs-interrupt unhalt precedence. On unhalt
     /// with a Low-at-halt HDMA block, Gambatte's `intevent_unhalt` flags the block
     /// iff `isHdmaPeriod(cc)` (`cc >= m0Time`) at the unhalt cc. rustyboi's
     /// `m0_time_master` folds a +1 dot phase vs the raw m0Time, so the equivalent
@@ -9393,7 +9404,7 @@ impl Ppu {
     /// Byte-exact Gambatte `LCD::vramReadable(cc)` for a CPU VRAM read at master-cc
     /// `cc`, resolved purely from the lyTime-derived `lineCycles(cc)` and
     /// `m0TimeOfCurrentLine` — NOT the renderer's current FF41 mode register.
-    /// (video.cpp:381): readable iff LCD off, in vblank, the line-start inactive
+    /// readable iff LCD off, in vblank, the line-start inactive
     /// window, `lineCycles(cc) + ds < 76 + 3*cgb` (still in mode 2 / before the
     /// mode-3 lock), or `cc + 2 >= m0Time` (mode 0 reached). Used by the
     /// PC-in-DMA-dest opcode-prefetch absorption (`Bus::fetch_opcode`): the GDMA's
@@ -9485,7 +9496,7 @@ impl Ppu {
     /// the FF41 mode register inside `tick_m()`, so a read whose M-cycle straddles
     /// the line-143->144 (VBlank entry) or line-153->0 (VBlank exit / wrap-to-OAM)
     /// boundary latches the next line's mode; Gambatte resolves it from the LY
-    /// phase at the raw read cc (video.cpp:802-810). This is exactly the
+    /// phase at the raw read cc. This is exactly the
     /// enable_display m1stat / ly_count / m2-m3 count cluster: those reads land in
     /// the last few cc of line 143 or line 153 and must read the OLD line's mode 0.
     ///
@@ -9507,8 +9518,8 @@ impl Ppu {
             let off = if ds { GETSTAT_OFF_DS } else { 0 };
             (access_cc as i64 + off).max(0) as u64
         };
-        // CGB halt-exit +5: Gambatte's halt-exit M-cycle (memory.cpp:300-301,
-        // `cc += 4 * isCgb()`) charges a flat +4 on CGB before the woken instruction
+        // CGB halt-exit +5: the halt-exit M-cycle
+        // (`cc += 4 * isCgb()`) charges a flat +4 on CGB before the woken instruction
         // stream resumes, so a CGB halt-woken FF41 read effectively samples ~5cc
         // later in the line than the engine's access cc reflects (mirror of the
         // proven getLyReg `cgb_halt_exit` bias; the extra +1 over the raw +4 is the
@@ -9543,7 +9554,7 @@ impl Ppu {
             access_cc
         };
         // FAITHFUL EVENTCC (R4): the DMG branch of Gambatte's HALT-exit fixup
-        // (memory.cpp:308, `cc += 4 * (... || cc - eventTime < 2)`). When the DMG
+        // (halt-exit fixup `cc += 4 * (... || cc - eventTime < 2)`). When the DMG
         // wakeup landed within 2cc of the woken mode-0 STAT IRQ event time, the +4
         // wakeup latency advances the CPU clock, so the halt-woken FF41 read samples
         // +4cc later in the line — lifting the `late_m0*_halt_m0stat_scx3_2b` read
@@ -9614,8 +9625,8 @@ impl Ppu {
             return None;
         }
 
-        // VBlank window (mode 1) — video.cpp:806-810. video.cpp:808 adds +1 to
-        // the upper bound on the last line (LY 153) for AGB.
+        // VBlank window (mode 1). AGB adds +1 to the upper bound on the last
+        // line (LY 153).
         if in_vblank_window {
             let agb_last_line =
                 (mmio.is_agb() && ly == (stat_irq::LCD_LINES_PER_FRAME - 1) as i64) as i64;
@@ -9632,7 +9643,7 @@ impl Ppu {
             return Some(0);
         }
         // Mode 2 (OAM) at line END (the next line's OAM is anticipated from
-        // lineCycles >= cpl-3) — video.cpp:811-813.
+        // lineCycles >= cpl-3).
         if line_cycles >= cpl - 3 {
             if (access_cc + 1) < self.display_enable_inactive_until {
                 return Some(0);
@@ -9640,7 +9651,7 @@ impl Ppu {
             return Some(2);
         }
         // Line tail before the mode-2 anticipation window (cpl-7 .. cpl-3): mode 3
-        // iff cc+2 < m0Time, else mode 0 — video.cpp:814-816.
+        // iff cc+2 < m0Time, else mode 0.
         if let Some(m0t) = self.m0_time_master {
             if (access_cc + 1) < self.display_enable_inactive_until {
                 return Some(0);
@@ -9652,12 +9663,12 @@ impl Ppu {
         Some(0)
     }
 
-    /// C1: full Gambatte `getStat` mode resolution for a MID-FRAME line (ly < 143),
+    /// C1: full STAT mode resolution for a MID-FRAME line (ly < 143),
     /// resolved at the access-start cc. The post-tick FF41 register lags a mode 0 /
     /// mode 2 read by ~+4cc (≈+2 dots) because `bus.rs read()` samples it AFTER
     /// `tick_m()`; this resolves the mode at the access cc instead.
     ///
-    /// Mirrors the video.cpp:811-817 branch ORDER (the VBlank-window branch at 806
+    /// Branch ORDER matches the silicon STAT resolution (the VBlank-window branch
     /// never applies for ly<143):
     ///   - mode 2 iff `lineCycles < 77 || lineCycles >= cpl - 3` (guarded by
     ///     inactivePeriodAfterDisplayEnable, == rustyboi `display_enable_inactive_until`)
@@ -9754,7 +9765,7 @@ impl Ppu {
             return None;
         }
         // Mode 2 (OAM search): start-of-line lineCycles (< 77), or line-tail
-        // anticipation — video.cpp:811-813.
+        // anticipation.
         if line_cycles < 77 || line_cycles >= cpl - 3 {
             if (access_cc + 1) < self.display_enable_inactive_until {
                 return Some(0);
@@ -9762,7 +9773,7 @@ impl Ppu {
             return Some(2);
         }
         // Mode 3 (pixel transfer) iff `access_cc + read_off < m0Time` — the exact
-        // sub-test from `get_stat_mode3to0_at_cc` (video.cpp:814-816). Skipped during
+        // sub-test from `get_stat_mode3to0_at_cc`. Skipped during
         // OAMSearch where `m0_time_master` is the previous line's stale value.
         //
         // When no closed-form `m0_time_master` exists (first line after enable,
@@ -9942,7 +9953,7 @@ impl Ppu {
         };
         let cmp = stat_irq::get_lyc_cmp_ly(&lc_master, access_cc);
         let lyc_reg = mmio.read(LYC) as u32;
-        // video.cpp:820 getStat LYC flag: `timeToNextLy > 2 - (!isDoubleSpeed()
+        // STAT LYC flag: `timeToNextLy > 2 - (!isDoubleSpeed()
         // && isAgb())`. AGB single-speed lowers the compare threshold by one, so
         // the LYC=LY flag stays set one extra dot at the line tail. DS and the
         // STAT-IRQ-trigger paths (statChange/lycRegChange) keep the plain `> 2`
@@ -10039,11 +10050,11 @@ impl Ppu {
         // block stall probe (mmio.rs run_hdma_block) now owns RB_CANONICAL_CC_ADJ.
 
         if ly_reg == last_line {
-            // Line 153: FF44 reads 0 early (Gambatte getLyReg). At single speed,
-            // Gambatte's getLyReg (video.h:135, `time - cc <= cpl - isAgb`) returns
-            // 0 for the WHOLE of line 153 (for non-agb the bound is cpl, always
-            // satisfied within the line). rustyboi's `to_next` carries the +1 lyTime
-            // correction (its closed-form counter runs 1cc below Gambatte's lyTime),
+            // Line 153: FF44 reads 0 early. At single speed the LY register read
+            // (`time - cc <= cpl - isAgb`) returns 0 for the WHOLE of line 153
+            // (for non-agb the bound is cpl, always satisfied within the line).
+            // rustyboi's `to_next` carries the +1 lyTime correction (its
+            // closed-form counter runs 1cc below the reference lyTime),
             // so compare the RAW time (`to_next - 1`) against cpl. The old top-only
             // path (`to_next >= cpl`) deferred the rest of the line to the renderer's
             // dot-6 LY->0 flip, but that flip has NOT happened at a just-wrapped
@@ -10051,7 +10062,7 @@ impl Ppu {
             // still 153) where Gambatte returns 0 — the renderer-flip race. The
             // faithful whole-line-0 resolution removes it.
             if !ds {
-                // video.h:135 getLyReg: single-speed bound is `cpl - 1*isAgb`.
+                // LY-register read: single-speed bound is `cpl - 1*isAgb`.
                 // AGB shrinks the line-153 reads-0 window by one dot.
                 // CGB-D/E shrinks it by exactly one dot: only the first dot of line
                 // 153 (to_next-1 == cpl, the top of the line) still reads 153; every
@@ -10120,8 +10131,8 @@ impl Ppu {
         // raw-time boundary. Scoped to halt-skew (the non-HALT count/ly tests are
         // co-tuned to the +1 and stay byte-identical).
         // For a HALT-woken read, the post-wakeup instruction stream lands later in
-        // the line on CGB than DMG: Gambatte's halt-exit M-cycle (memory.cpp:300-301,
-        // `cc += 4 * isCgb()`) charges a flat +4 on CGB before the stream resumes,
+        // the line on CGB than DMG: the halt-exit M-cycle
+        // (`cc += 4 * isCgb()`) charges a flat +4 on CGB before the stream resumes,
         // whereas rustyboi's engine does not model that extra M-cycle here. So a
         // CGB halt-woken FF44 read effectively samples 4cc closer to the line wrap
         // than the engine's access cc reflects. Bias only the CGB single-speed
@@ -10654,10 +10665,10 @@ impl Ppu {
             // remainder of an in-progress sprite (see `remaining_sprite_cost`).
             self.m3_last_sprite_commit_tick = self.ticks;
 
-            // Single faithful tile-walk cost (mirrors `sprite_tile_walk_cost` /
-            // Gambatte `doFullTilesUnrolled` ppu.cpp:525-530): the FIRST sprite in
-            // each BG tile costs `max(11 - dist, 6)`; every further sprite sharing
-            // that tile costs a flat 6. On DMG `dist = (spx + scx) & 7` — the raw
+            // Same per-object tile-walk cost the length model uses (see
+            // `sprite_tile_walk_cost`): the FIRST sprite in each BG tile costs
+            // `max(11 - dist, 6)`; every further sprite sharing that tile costs a
+            // flat 6. On DMG `dist = (spx + scx) & 7` — the raw
             // OAM x, NOT the clamped trigger column: a left-clipped sprite
             // (spx 1..7) matches during the first-tile prologue and costs
             // max(11-spx, 6) (mealybug m3_lcdc_obj_en_change_variant's BGP bands
