@@ -13,12 +13,13 @@ pub const TAC: u16 = 0xFF07;
 const TAC_ENABLE: u8 = 1 << 2; // Bit 2: Timer enable
 const TAC_FREQUENCY_MASK: u8 = 0b00000011; // Bits 0-1: Timer frequency
 
-// Gambatte `timaClock[]`: the DIV bit feeding TIMA for `tac & 3` is at
-// `timaClock[tac&3] - 1` (i.e. 9/3/5/7). TIMA derives as `(cc-lastUpdate) >> clk`.
+// Hardware fact: TAC's 2-bit frequency select routes TIMA off DIV bit 9/3/5/7
+// (for `tac & 3` = 0/1/2/3). Storing `bit_index + 1` here lets TIMA derive as
+// `(cc - tima_last_update) >> clk`, one increment per `2^clk` T-cycles.
 const TIMA_CLOCK: [u32; 4] = [10, 4, 6, 8];
 
-// Gambatte `disabled_time`: a sentinel far in the future. The real `abs_cc` is a
-// dot counter that never approaches this within any test, and all arithmetic on
+// Sentinel "no event scheduled" marker placed far past any reachable `abs_cc`
+// (a dot counter that never approaches u64::MAX within a run). Every use of
 // `tmatime`/`next_irq_event_time` is guarded by an explicit disabled check.
 const DISABLED_TIME: u64 = u64::MAX;
 
@@ -40,7 +41,8 @@ const IF_OFF: i64 = 1;
 /// phase rather than the read's `CC_OFF`.
 const WRITE_CC_OFF: i64 = 0;
 
-// Gambatte's `+3` constant in `tmatime`/`nextIrqEventTime` (mem/tima.cpp).
+// Hardware fact: the TMA reload / IRQ visibility lags the overflow tick by 3
+// T-cycles. Constant bias applied to `tmatime` and the scheduled IRQ cc.
 const TMA_OFF: u64 = 3;
 
 // ds-engine STAGE 1/7: the timer register access cc is the RAW master cc
@@ -67,36 +69,36 @@ pub struct Timer {
     // edge clocks the APU frame sequencer.
     #[serde(default)]
     last_apu_div_bit: bool,
-    // Absolute, never-reset T-cycle counter mirroring Gambatte's `cycleCounter_`.
-    // This is the single source of time in this module: the DIV divider, the
+    // Absolute, never-reset master T-cycle counter. This is the single source of
+    // time in this module: the DIV divider, the
     // scheduled TIMA, the serial clock and the APU frame sequencer all derive
     // from it.
     #[serde(default)]
     abs_cc: u64,
-    // `abs_cc` value of the last DIV write (Gambatte `divLastUpdate_`). The DIV
-    // divider is `(abs_cc - div_anchor) & 0xFFFF`.
+    // `abs_cc` value of the last DIV write. The DIV divider is
+    // `(abs_cc - div_anchor) & 0xFFFF`.
     #[serde(default)]
     div_anchor: u64,
     // Monotonic count of DIV writes (each rebases `div_anchor`). The APU master
-    // clock reads this to detect a DIV reset and apply Gambatte's
-    // `PSG::divReset` cycle-counter fold.
+    // clock reads this to detect a DIV reset and apply the divider-reset
+    // cycle-counter fold to the frame sequencer phase.
     #[serde(default)]
     div_reset_count: u64,
-    // Scheduled-TIMA state (Gambatte `Tima`): `tima_last_update` is the cc the
-    // current TIMA value was computed at; TIMA derives as
+    // Scheduled-TIMA state: `tima_last_update` is the cc the current TIMA value
+    // was computed at; TIMA derives as
     // `tima + ((cc - tima_last_update) >> clk)`. `tmatime` is the cc at which a
     // pending overflow's TMA-reload becomes visible. `next_irq_event_time` is the
-    // cc at which the timer IRQ fires (Gambatte's scheduler slot for
-    // `intevent_tima`). All three are absolute `abs_cc` values, so the IRQ is
-    // delivered at the same anchor a start-cc CPU read of TIMA resolves on.
+    // cc at which the timer IRQ fires. All three are absolute `abs_cc` values, so
+    // the IRQ is delivered at the same anchor a start-cc CPU read of TIMA resolves
+    // on.
     #[serde(default)]
     tima_last_update: u64,
     #[serde(default = "disabled_time")]
     tmatime: u64,
     #[serde(default = "disabled_time")]
     next_irq_event_time: u64,
-    // Deferred IRQ flag for the write-path glitches (setTac/divReset) that
-    // Gambatte flags inline via `flagIrq`. The write path has no `mmio` borrow;
+    // Deferred IRQ flag for the write-path glitches (TAC write / DIV reset) that
+    // flag an IRQ inline. The write path has no `mmio` borrow;
     // `step` (and the post-write flush in `mmio`) raise the actual IF bit.
     #[serde(default)]
     pending_irq: bool,
@@ -146,7 +148,7 @@ pub struct Timer {
     /// LATE: tc00_irq_1 / tc01_irq_1 / stopstart).
     #[serde(skip, default)]
     isr_on_early_grid: bool,
-    // AGB (GBA-in-GBC-mode) hardware flag (Gambatte `agbFlag`). Set once from
+    // AGB (GBA-in-GBC-mode) hardware flag. Set once from
     // `Mmio::set_agb`. Only consulted by `set_tac` for the AGB TAC-enable timer
     // quirk; false for DMG/CGB so those targets are byte-identical.
     #[serde(skip, default)]
@@ -221,7 +223,7 @@ impl Timer {
         self.halt_read_bias = bias;
     }
 
-    /// Set the AGB hardware flag (Gambatte `agbFlag`). Propagated from
+    /// Set the AGB (GBA-in-GBC-mode) hardware flag. Propagated from
     /// `Mmio::set_agb` at construction.
     pub fn set_agb(&mut self, agb: bool) {
         self.is_agb = agb;
@@ -298,9 +300,9 @@ impl Timer {
         self.div_reset_count
     }
 
-    /// The access cc of the most recent DIV write (Gambatte `divLastUpdate_`).
-    /// The APU divReset fold must run at this cc, matching the single
-    /// `cycleCounter_` Gambatte folds on. Returns the APU-visible anchor, which
+    /// The access cc of the most recent DIV write. The APU divider-reset fold
+    /// must run at this cc, matching the single master counter it folds on.
+    /// Returns the APU-visible anchor, which
     /// for a STOP speed-switch divReset carries the APU-specific switch-cc offset
     /// (`div_anchor_apu` tracks `div_anchor` for every normal FF04 write and only
     /// diverges across a STOP speed switch).
@@ -309,7 +311,7 @@ impl Timer {
     }
 
     /// The 16-bit DIV divider: a pure derivation of the master counter and the
-    /// last DIV-write anchor (Gambatte `(cc - divLastUpdate)`'s low 16 bits).
+    /// last DIV-write anchor: the low 16 bits of `abs_cc - div_anchor`.
     fn divider(&self) -> u16 {
         (self.abs_cc.wrapping_sub(self.div_anchor) & 0xFFFF) as u16
     }
@@ -318,12 +320,35 @@ impl Timer {
         TIMA_CLOCK[(self.tac & TAC_FREQUENCY_MASK) as usize]
     }
 
+    /// T-cycles from a TIMA counter value of `from` until it next wraps past
+    /// 0xFF. TIMA advances once every `2^clk` T-cycles, and `0x100 - from`
+    /// increments remain before it rolls over, so the elapsed span is the count
+    /// of remaining increments scaled by the per-increment T-cycle stride.
+    fn cycles_to_overflow(&self, from: u8) -> u64 {
+        (0x100 - from as u64) << self.clk()
+    }
+
+    /// The post-overflow TMA reload is observable for a 4-T-cycle window that
+    /// opens at `tmatime`. Report whether `cc` has entered that window (in which
+    /// case an observed TIMA now reads back as TMA), and retire the window once
+    /// `cc` has passed fully beyond it so it is not re-triggered.
+    fn tma_reload_window_reached(&mut self, cc: u64) -> bool {
+        if cc >= self.tmatime {
+            if cc >= self.tmatime.wrapping_add(4) {
+                self.tmatime = DISABLED_TIME;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     /// cc at which a CPU register access resolves, relative to the per-dot
     /// `abs_cc` (tuning lever `CC_OFF`). This is the canonical per-access cc the
     /// timer, serial, and APU all resolve register accesses on (M7).
     pub fn access_cc(&self) -> u64 {
-        // STAGE 1/7: the access resolves at the raw master cc (Gambatte read/write
-        // cc), with no CC_OFF. The CPU positions `abs_cc` at the access M-cycle
+        // STAGE 1/7: the access resolves at the raw master cc, with no CC_OFF.
+        // The CPU positions `abs_cc` at the access M-cycle
         // start before any tick, so `abs_cc` IS the access cc. (RB_CC_OFF env
         // sweep deleted in stage 7.)
         self.abs_cc
@@ -339,20 +364,20 @@ impl Timer {
     }
 
 
-    /// Gambatte `Tima::doIrqEvent`: flag the IRQ and advance the scheduled time
-    /// by a full TIMA period. Returns `true` so the caller can raise the IF bit
-    /// at the actual fire cc.
+    /// Consume the scheduled overflow: mark the IRQ pending and re-arm the
+    /// schedule one full reload cycle later. After a reload TIMA restarts at TMA,
+    /// so the next overflow lands `cycles_to_overflow(TMA)` T-cycles on.
     fn do_irq_event(&mut self) {
         self.pending_irq = true;
         self.next_irq_event_time = self
             .next_irq_event_time
-            .wrapping_add((256u64 - self.tma as u64) << self.clk());
+            .wrapping_add(self.cycles_to_overflow(self.tma));
     }
 
-    /// Gambatte `updateIrq`: fire all IRQ events whose scheduled cc has passed.
-    /// `cc` is the access cc (now raw `abs_cc` under RB_EXACTCC). The glitch-IRQ
-    /// flagging from a register write compares against the same access cc the
-    /// schedule was set on, so it is self-consistent in either anchor space.
+    /// Flag every scheduled overflow whose fire cc is at or before `cc`. `cc` is
+    /// the register access cc (raw `abs_cc`). A glitch IRQ flagged from a register
+    /// write compares against the same access cc the schedule was set on, so it is
+    /// self-consistent in either anchor space.
     fn update_irq(&mut self, cc: u64) {
         while self.next_irq_event_time != DISABLED_TIME && cc >= self.next_irq_event_time {
             self.do_irq_event();
@@ -406,8 +431,8 @@ impl Timer {
         }
     }
 
-    /// Gambatte `nontrivial_ff_write` case 0x0F: an IF-register store first
-    /// pumps timer events at the write cc, so an overflow whose schedule cc has
+    /// IF-register (FF0F) store collision: the store first pumps timer events at
+    /// the write cc, so an overflow whose schedule cc has
     /// been reached (`schedCc <= write cc`, RAW grid) flags IF BEFORE the store
     /// and the CPU write wins the collision. AntonioND div_resets_timer_overflow
     /// (identical on real DMG and CGB) pins the exact-collision M-cycle: the
@@ -472,16 +497,18 @@ impl Timer {
         self.isr_on_early_grid && self.tac & TAC_ENABLE != 0
     }
 
-    /// Gambatte `Tima::updateTima`: advance the derived TIMA value to `cc`.
+    /// Materialize the lazily-derived TIMA counter up to time `cc`. TIMA ticks
+    /// once per `2^clk` T-cycles; the number of whole ticks since the value was
+    /// last committed drives the counter forward, and `tima_last_update` is
+    /// snapped to the last tick boundary so the residual sub-tick phase carries
+    /// into the next call.
     fn update_tima(&mut self, cc: u64) {
         let clk = self.clk();
         let ticks = (cc - self.tima_last_update) >> clk;
         self.tima_last_update += ticks << clk;
 
-        if cc >= self.tmatime {
-            if cc >= self.tmatime.wrapping_add(4) {
-                self.tmatime = DISABLED_TIME;
-            }
+        // A reload from an earlier overflow may already be visible at `cc`.
+        if self.tma_reload_window_reached(cc) {
             self.tima = self.tma;
         }
 
@@ -490,13 +517,13 @@ impl Timer {
             tmp = settle_tima_overflow(tmp, self.tma);
         }
 
+        // `tmp == 0x100` is the exact-overflow instant: the counter reads 0 and a
+        // fresh TMA-reload window opens `TMA_OFF` T-cycles after the tick, which
+        // itself may already be visible at `cc`.
         if tmp == 0x100 {
             tmp = 0;
             self.tmatime = self.tima_last_update + TMA_OFF;
-            if cc >= self.tmatime {
-                if cc >= self.tmatime.wrapping_add(4) {
-                    self.tmatime = DISABLED_TIME;
-                }
+            if self.tma_reload_window_reached(cc) {
                 tmp = self.tma as u64;
             }
         }
@@ -504,7 +531,10 @@ impl Timer {
         self.tima = tmp as u8;
     }
 
-    /// Gambatte `Tima::setTima`.
+    /// Store TIMA (FF05). While the timer runs, settle any due overflow and the
+    /// derived counter to the access cc first, cancel a reload window that is
+    /// about to close (writing during it would otherwise clobber the value), then
+    /// re-arm the overflow schedule from the freshly written value.
     fn set_tima(&mut self, data: u8) {
         let cc = self.access_cc();
         if self.tac & TAC_ENABLE != 0 {
@@ -514,12 +544,13 @@ impl Timer {
                 self.tmatime = DISABLED_TIME;
             }
             self.next_irq_event_time =
-                self.tima_last_update + ((256u64 - data as u64) << self.clk()) + TMA_OFF;
+                self.tima_last_update + self.cycles_to_overflow(data) + TMA_OFF;
         }
         self.tima = data;
     }
 
-    /// Gambatte `Tima::setTma`.
+    /// Store TMA (FF06). A running timer needs its pending overflow and derived
+    /// counter brought current before the reload value changes.
     fn set_tma(&mut self, data: u8) {
         let cc = self.access_cc();
         if self.tac & TAC_ENABLE != 0 {
@@ -529,8 +560,10 @@ impl Timer {
         self.tma = data;
     }
 
-    /// Gambatte `Tima::setTac`. The `agbFlag` branch (the AGB TAC-enable timer
-    /// quirk) is gated on `self.is_agb`, so DMG/CGB are byte-identical.
+    /// Store TAC (FF07). Changing the enable bit or the frequency selection can
+    /// produce a spurious TIMA increment: the DIV bit currently feeding TIMA sees
+    /// an edge. The `agbFlag`-style enable quirk is gated on `self.is_agb`, so
+    /// DMG/CGB stay byte-identical.
     fn set_tac(&mut self, data: u8) {
         let cc = self.access_cc();
         if (self.tac ^ data) != 0 {
@@ -538,10 +571,20 @@ impl Timer {
 
             if self.tac & TAC_ENABLE != 0 {
                 let old_clk = self.clk();
-                let inc = !((data as u64 >> 2)
-                    & ((cc - self.div_anchor) >> (TIMA_CLOCK[(data & 3) as usize] - 1)))
-                    & 1 ;
-                let shift = (inc << (old_clk - 1)) + 3;
+                // The stale edge produces a half-period back-shift (one extra
+                // tick) unless the new setting keeps the feeding bit high: the
+                // timer must remain enabled AND the newly-selected DIV bit must
+                // currently read 1. TMA_OFF is the constant schedule bias.
+                let new_enabled = data & TAC_ENABLE != 0;
+                let new_bit_high = ((cc - self.div_anchor)
+                    >> (TIMA_CLOCK[(data & 3) as usize] - 1))
+                    & 1
+                    != 0;
+                let shift = if new_enabled && new_bit_high {
+                    TMA_OFF
+                } else {
+                    (1u64 << (old_clk - 1)) + TMA_OFF
+                };
                 self.tima_last_update = self.tima_last_update.wrapping_sub(shift);
                 next = next.wrapping_sub(shift);
                 if next != DISABLED_TIME && cc >= next {
@@ -553,10 +596,10 @@ impl Timer {
             }
 
             if data & TAC_ENABLE != 0 {
-                // AGB "timer quirk" (Gambatte tima.cpp:150-160, GSR commit 144e4e9
-                // since r649): on a TAC write that (re)enables the timer, AGB bumps
-                // TIMA by one when the OLD frequency's feeding DIV bit is high but
-                // the NEW frequency's bit is low. isAgb-gated; DMG/CGB skip it.
+                // AGB-only enable quirk: re-enabling the timer bumps TIMA by one
+                // when the frequency change moves the feeding DIV bit from high to
+                // low (old-freq bit set, new-freq bit clear). is_agb-gated;
+                // DMG/CGB skip it entirely.
                 if self.is_agb {
                     let diff = cc - self.div_anchor;
                     let old_bit = (diff >> (TIMA_CLOCK[(self.tac & 3) as usize] - 1)) & 1;
@@ -565,10 +608,13 @@ impl Timer {
                         self.tima = self.tima.wrapping_add(1);
                     }
                 }
+                // Re-anchor the tick grid to the current DIV phase for the new
+                // frequency (drop the residual sub-tick bits of the divider), then
+                // schedule the next overflow from the present TIMA value.
                 let new_clk = TIMA_CLOCK[(data & 3) as usize];
                 self.tima_last_update =
                     cc - ((cc - self.div_anchor) & ((1u64 << new_clk) - 1));
-                next = self.tima_last_update + ((256u64 - self.tima as u64) << new_clk) + TMA_OFF;
+                next = self.tima_last_update + ((0x100 - self.tima as u64) << new_clk) + TMA_OFF;
             }
 
             self.next_irq_event_time = next;
@@ -576,8 +622,8 @@ impl Timer {
         self.tac = data;
     }
 
-    /// Gambatte `Tima::divReset`: applied on a DIV write (FF04). The divider phase
-    /// back-shift glitches TIMA by `(1 << (clk-1)) + 3`. `cc` is the resolution
+    /// DIV-write (FF04) reset. Resetting the divider drops the feeding DIV bit,
+    /// glitch-ticking TIMA by `(1 << (clk-1)) + 3`. `cc` is the resolution
     /// cc: `access_cc()` for a CPU FF04 write, raw `abs_cc` for the STOP-internal
     /// reset (the speed-switch DIV reset happens at the STOP cc, not a CPU
     /// register-access M-cycle end).
@@ -605,7 +651,10 @@ impl Timer {
     fn div_reset_split_hold(&mut self, tima_cc: u64, anchor_cc: u64, de_hold: u64) {
         if self.tac & TAC_ENABLE != 0 {
             let clk = self.clk();
-            let shift = (1u64 << (clk - 1)) + 3 - de_hold;
+            // Resetting the divider drops the feeding DIV bit, so TIMA glitch-ticks
+            // once: a half-period back-shift of `tima_last_update` and the schedule,
+            // biased by the constant TMA_OFF and shortened by the CGB-D/E hold.
+            let shift = (1u64 << (clk - 1)) + TMA_OFF - de_hold;
             self.tima_last_update = self.tima_last_update.wrapping_sub(shift);
             if self.next_irq_event_time != DISABLED_TIME {
                 self.next_irq_event_time = self.next_irq_event_time.wrapping_sub(shift);
@@ -613,14 +662,14 @@ impl Timer {
                     self.pending_irq = true;
                 }
             }
-            // Advance the derived TIMA up to the true switch cc (Gambatte's grid),
-            // capturing the post-switch reset TIMA value, then re-anchor the tick
-            // grid and IRQ schedule to the read-grid `anchor_cc` so subsequent
-            // `read_cc - tima_last_update` resolves on the same grid reads arrive.
+            // Settle the derived TIMA up to the true switch cc to capture the
+            // post-reset value, then re-anchor the tick grid and overflow schedule
+            // to the read-grid `anchor_cc` so subsequent `read_cc - tima_last_update`
+            // resolves on the same grid reads arrive on.
             self.update_tima(tima_cc);
             self.tima_last_update = anchor_cc;
             self.next_irq_event_time =
-                self.tima_last_update + ((256u64 - self.tima as u64) << clk) + TMA_OFF;
+                self.tima_last_update + self.cycles_to_overflow(self.tima) + TMA_OFF;
         }
         self.div_anchor = anchor_cc;
         // Normal FF04 writes share one cc for the DIV register and the APU fold;
@@ -656,8 +705,8 @@ impl Timer {
         self.div_anchor_apu = anchor_cc;
     }
 
-    /// Initialize the timer's internal 16-bit counter (used at boot to mirror
-    /// Gambatte's post-boot `cycleCounter - divLastUpdate` low 16 bits).
+    /// Initialize the timer's internal 16-bit counter (used at boot to seed the
+    /// divider: the low 16 bits of `abs_cc - div_anchor`).
     pub fn set_internal_counter(&mut self, value: u16) {
         self.abs_cc = value as u64;
         self.div_anchor = 0;
@@ -670,8 +719,8 @@ impl Timer {
         self.divider()
     }
 
-    /// CGB STOP speed switch. Gambatte's `Tima::speedChange` pulls the timer's
-    /// `lastUpdate_` (and the scheduled IRQ time) back by 4 T-cycles for an
+    /// CGB STOP speed switch. Pulls the timer's tick anchor (and the scheduled
+    /// IRQ time) back by 4 T-cycles for an
     /// enabled fast-frequency timer (`tac & 0x07 >= 0x05`). We additionally cover
     /// the double->single direction the same way (the original per-dot model did
     /// the catch-up for any enabled timer switching back to single speed).
@@ -732,14 +781,14 @@ impl Timer {
 
         // Scheduled TIMA IRQ: fire any event whose absolute cc has now passed.
         // This delivers the IRQ at the same `abs_cc` anchor a CPU read resolves
-        // TIMA on (Gambatte `intevent_tima`).
+        // TIMA on.
         // The IRQ is delivered as a real-time per-dot event keyed on the raw
         // `abs_cc` (the cc the IF bit physically becomes visible to the CPU),
         // whereas register read/write effects resolve at `access_cc()` (the CPU
         // M-cycle's start cc). These are deliberately different anchors: the
         // IF-visible cc trails the scheduled `next_irq_event_time` (set in
-        // access-cc space) by `CC_OFF` dots, which matches Gambatte's late IRQ
-        // sampling relative to the access that scheduled it.
+        // access-cc space) by `CC_OFF` dots, which matches the hardware's late
+        // IRQ sampling relative to the access that scheduled it.
         if self.tac & TAC_ENABLE != 0 {
             self.update_irq_delivery(self.abs_cc, cpu_halted);
         }
