@@ -85,7 +85,7 @@ fn name_variants(name: &str) -> Vec<String> {
 /// while leaving the URL-path-safe punctuation that pervades No-Intro names —
 /// parentheses, `!`, `'`, `*` — literal, matching how curl/browsers request these
 /// files (GitHub serves either form, but keeping the common shape is lowest-risk).
-fn percent_encode(s: &str) -> String {
+pub(crate) fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         let safe = b.is_ascii_alphanumeric()

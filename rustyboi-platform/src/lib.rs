@@ -25,6 +25,8 @@ mod rewind_worker;
 // ureq); only wasm (no threads, uses the browser `fetch`) opts out.
 #[cfg(not(target_arch = "wasm32"))]
 mod fetch_worker;
+#[cfg(not(target_arch = "wasm32"))]
+mod no_intro_cache;
 mod run;
 
 pub use crate::run::run;

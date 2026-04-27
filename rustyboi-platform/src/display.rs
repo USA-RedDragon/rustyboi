@@ -460,6 +460,23 @@ fn run_gui_loop(
         println!("Game Boy Printer attached to the link port");
     }
 
+    // No-Intro game-name index: load cached DATs immediately, download any that
+    // are missing. The data is CC-BY-SA-4.0 libretro-database material that is
+    // never embedded in the binary; `no_intro_fetch_urls` logs the attribution.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let urls = app.session().no_intro_fetch_urls();
+        let (cached, missing) = crate::no_intro_cache::split_cached(&save_base(), &urls);
+        if !cached.is_empty() {
+            app.session_mut().finish_no_intro_dats(&cached);
+        }
+        for url in missing {
+            fetch_worker
+                .get_or_insert_with(crate::fetch_worker::FetchWorker::new)
+                .submit(vec![url], rustyboi_session::FetchPurpose::NoIntro);
+        }
+    }
+
     // Audio output device (cpal/rodio). The session returns samples from
     // run_frame; we push them into this pure sink.
     let mut audio = match crate::audio::Output::new().and_then(|mut o| {
@@ -802,8 +819,9 @@ fn run_gui_loop(
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(worker) = fetch_worker.as_mut() {
                     for done in worker.drain_finished() {
+                        use rustyboi_session::FetchPurpose;
                         match (done.purpose, done.result) {
-                            (rustyboi_session::FetchPurpose::Cheats, Ok(body)) => {
+                            (FetchPurpose::Cheats, Ok(body)) => {
                                 let n = app.session_mut().finish_fetched_cheats(&body);
                                 if n == 0 {
                                     rs.ui.set_status("No cheats found for this game".into());
@@ -811,10 +829,29 @@ fn run_gui_loop(
                                     rs.ui.set_status(format!("Fetched {n} cheats"));
                                 }
                             }
-                            (_, Err(e)) => {
+                            (FetchPurpose::NoIntro, Ok(body)) => {
+                                // Cache the downloaded DAT so we don't re-fetch it
+                                // next launch, then feed it into the index and
+                                // re-resolve the current ROM's display name.
+                                if let Some(url) = done.url.as_deref() {
+                                    crate::no_intro_cache::store(&save_base(), url, &body);
+                                }
+                                app.session_mut()
+                                    .finish_no_intro_dats(std::slice::from_ref(&body));
+                                if let Some(title) = app.title_if_due() {
+                                    window.set_title(&title);
+                                }
+                            }
+                            (FetchPurpose::Cheats, Err(e)) => {
                                 // A failed cheat fetch is not fatal — surface it in
                                 // the status bar, never the crash screen.
                                 rs.ui.set_status(format!("Cheat fetch failed: {e}"));
+                            }
+                            (FetchPurpose::NoIntro, Err(e)) => {
+                                // No-Intro identification is best-effort; a failed
+                                // DAT download just leaves games on their header
+                                // titles. Log, don't nag the user.
+                                log::warn!("No-Intro DAT fetch failed: {e}");
                             }
                         }
                     }

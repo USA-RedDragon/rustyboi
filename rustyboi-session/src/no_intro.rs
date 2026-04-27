@@ -1,55 +1,132 @@
-//! Offline game identification via the bundled No-Intro CRC32→name index.
+//! Offline game identification via a No-Intro CRC32→name index.
 //!
-//! [`identify`] CRC32s a ROM and looks the checksum up in a compact blob
-//! (`data/no_intro.bin`, built by `tools/gen-nointro.py` from the No-Intro DAT
-//! for Game Boy + Game Boy Color). The canonical No-Intro name drives the window
-//! title, the ROM library, and the libretro cheat-DB fetch. Homebrew, hacks, bad
-//! dumps and overdumps won't match; callers fall back to the cartridge header
-//! title via [`resolve_game_name`].
+//! [`identify`] CRC32s a ROM and looks the checksum up in a runtime index built
+//! from the No-Intro DATs for Game Boy + Game Boy Color. The canonical No-Intro
+//! name drives the window title, the ROM library, and the libretro cheat-DB
+//! fetch. Homebrew, hacks, bad dumps and overdumps won't match; callers fall back
+//! to the cartridge header title via [`resolve_game_name`].
+//!
+//! Nothing is embedded at build time: the DATs are CC-BY-SA-4.0 libretro-database
+//! material, so shipping them would place ShareAlike obligations on rustyboi
+//! binaries. Instead the index starts empty and each frontend downloads the two
+//! DATs at runtime (see [`dat_urls`]) and feeds them in via [`load_dats`]. Until
+//! that happens the store is empty and every ROM reports as unidentified —
+//! callers gracefully fall back to the header title.
 
-use std::sync::OnceLock;
+use std::collections::BTreeMap;
+use std::sync::RwLock;
 
 use crate::patch::crc32;
 
-static BLOB: &[u8] = include_bytes!("../data/no_intro.bin");
+/// The runtime index as `(crc32, name)` sorted by crc for binary search. Empty
+/// until a frontend downloads the DATs and calls [`load_dats`].
+static INDEX: RwLock<Vec<(u32, String)>> = RwLock::new(Vec::new());
 
-/// The parsed index as `(crc32, name)` sorted by crc for binary search; names
-/// borrow the static blob. Built once on first use.
-fn index() -> &'static [(u32, &'static str)] {
-    static INDEX: OnceLock<Vec<(u32, &'static str)>> = OnceLock::new();
-    INDEX.get_or_init(|| parse(BLOB).unwrap_or_default())
+/// The base of the raw libretro-database No-Intro DAT tree.
+const DAT_BASE: &str =
+    "https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/no-intro/";
+
+/// The two DAT filenames (Game Boy + Game Boy Color) whose CRC→name tables the
+/// index is built from.
+const DAT_FILES: [&str; 2] = ["Nintendo - Game Boy.dat", "Nintendo - Game Boy Color.dat"];
+
+/// The two percent-encoded DAT URLs to download, in order. The frontend GETs each
+/// (caching the body) and feeds the bodies back through [`load_dats`].
+pub fn dat_urls() -> Vec<String> {
+    DAT_FILES
+        .iter()
+        .map(|f| format!("{DAT_BASE}{}", crate::cheat_db::percent_encode(f)))
+        .collect()
 }
 
-/// Parse the `RBNI` blob: magic, version byte, u32 count, then `count` entries of
-/// (crc32 u32, name_len u16, name utf-8). Returns `None` on any malformation.
-fn parse(blob: &'static [u8]) -> Option<Vec<(u32, &'static str)>> {
-    if blob.get(0..4)? != b"RBNI" || *blob.get(4)? != 1 {
-        return None;
+/// Parse one No-Intro DAT body into `(crc32, name)` pairs.
+///
+/// The DAT is clrmamepro text: each `game (...)` block has a `\tname "NAME"` line
+/// and a later `rom ( … crc XXXXXXXX … )` line. A tab-anchored `name "…"` sets the
+/// pending name; the next 8-hex `crc` pairs with it and clears the pending name.
+pub fn parse_dat(text: &str) -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    let mut pending: Option<String> = None;
+    for line in text.lines() {
+        if let Some(name) = parse_name_line(line) {
+            pending = Some(name);
+        } else if let Some(crc) = parse_crc(line)
+            && let Some(name) = pending.take()
+        {
+            out.push((crc, name));
+        }
     }
-    let count = u32::from_le_bytes(blob.get(5..9)?.try_into().ok()?) as usize;
-    let mut out = Vec::with_capacity(count);
-    let mut p = 9;
-    for _ in 0..count {
-        let crc = u32::from_le_bytes(blob.get(p..p + 4)?.try_into().ok()?);
-        let len = u16::from_le_bytes(blob.get(p + 4..p + 6)?.try_into().ok()?) as usize;
-        p += 6;
-        let name = std::str::from_utf8(blob.get(p..p + len)?).ok()?;
-        p += len;
-        out.push((crc, name));
-    }
-    Some(out)
+    out
 }
 
-/// The canonical No-Intro name for a ROM's CRC32, or `None` if unindexed. For
-/// callers that already have the checksum (e.g. the ROM library, which CRC32s
-/// files during its scan) and want to skip re-hashing.
-pub fn name_for_crc(crc: u32) -> Option<&'static str> {
-    let idx = index();
-    idx.binary_search_by_key(&crc, |(c, _)| *c).ok().map(|i| idx[i].1)
+/// A tab-anchored `name "NAME"` line yields `NAME`. Anchoring on the leading tab
+/// distinguishes the game's own name line from the `rom ( name "…" … )` line,
+/// whose `name` is preceded by `rom ( `, not a bare tab.
+fn parse_name_line(line: &str) -> Option<String> {
+    let rest = line.strip_prefix('\t')?.strip_prefix("name \"")?;
+    let end = rest.rfind('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// The first `crc XXXXXXXX` (8 hex digits, word-boundary before `crc`) in `line`.
+fn parse_crc(line: &str) -> Option<u32> {
+    let mut from = 0;
+    while let Some(rel) = line[from..].find("crc ") {
+        let pos = from + rel;
+        let boundary = pos == 0 || !is_word_byte(line.as_bytes()[pos - 1]);
+        if boundary {
+            let hex: String = line[pos + 4..].chars().take(8).collect();
+            if hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return u32::from_str_radix(&hex, 16).ok();
+            }
+        }
+        from = pos + 4;
+    }
+    None
+}
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Parse each DAT body and merge its entries into the runtime index, then sort by
+/// crc for binary search. Later entries (and later bodies) win on a crc collision.
+/// Merges with any already-loaded entries, so bodies may be supplied incrementally.
+pub fn load_dats(bodies: &[String]) {
+    // BTreeMap keeps the merged set sorted by crc and dedupes (last write wins).
+    let mut merged: BTreeMap<u32, String> = BTreeMap::new();
+    {
+        let existing = INDEX.read().expect("no_intro index poisoned");
+        for (crc, name) in existing.iter() {
+            merged.insert(*crc, name.clone());
+        }
+    }
+    for body in bodies {
+        for (crc, name) in parse_dat(body) {
+            merged.insert(crc, name);
+        }
+    }
+    *INDEX.write().expect("no_intro index poisoned") = merged.into_iter().collect();
+}
+
+/// Replace the runtime index outright with `entries` (sorted by crc here). Mainly
+/// for tests / callers that already hold parsed pairs; frontends use [`load_dats`].
+pub fn set_index(mut entries: Vec<(u32, String)>) {
+    entries.sort_by_key(|(c, _)| *c);
+    entries.dedup_by_key(|(c, _)| *c);
+    *INDEX.write().expect("no_intro index poisoned") = entries;
+}
+
+/// The canonical No-Intro name for a ROM's CRC32, or `None` if unindexed (or the
+/// index hasn't been downloaded yet). For callers that already have the checksum
+/// (e.g. the ROM library, which CRC32s files during its scan).
+pub fn name_for_crc(crc: u32) -> Option<String> {
+    let idx = INDEX.read().expect("no_intro index poisoned");
+    idx.binary_search_by_key(&crc, |(c, _)| *c).ok().map(|i| idx[i].1.clone())
 }
 
 /// The canonical No-Intro name for `rom`, or `None` if its CRC32 isn't indexed.
-pub fn identify(rom: &[u8]) -> Option<&'static str> {
+pub fn identify(rom: &[u8]) -> Option<String> {
     name_for_crc(crc32(rom))
 }
 
@@ -70,7 +147,7 @@ pub fn header_title(rom: &[u8]) -> Option<String> {
 /// A human-readable game name for `rom`: the canonical No-Intro name if known,
 /// else the cartridge header title, else `None`.
 pub fn resolve_game_name(rom: &[u8]) -> Option<String> {
-    identify(rom).map(str::to_string).or_else(|| header_title(rom))
+    identify(rom).or_else(|| header_title(rom))
 }
 
 #[cfg(test)]
@@ -78,10 +155,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn blob_parses_and_is_sorted() {
-        let idx = index();
-        assert!(idx.len() > 4000, "expected the full GB/GBC index, got {}", idx.len());
-        assert!(idx.windows(2).all(|w| w[0].0 <= w[1].0), "index must be crc-sorted");
+    fn dat_urls_are_percent_encoded() {
+        let urls = dat_urls();
+        assert_eq!(urls.len(), 2);
+        assert!(urls[0].ends_with("/Nintendo%20-%20Game%20Boy.dat"));
+        assert!(urls[1].ends_with("/Nintendo%20-%20Game%20Boy%20Color.dat"));
+    }
+
+    #[test]
+    fn parse_dat_pairs_name_with_following_crc() {
+        let dat = "\
+clrmamepro (
+\tname \"Nintendo - Game Boy\"
+)
+
+game (
+\tname \"Tetris (World) (Rev 1)\"
+\tdescription \"Tetris (World) (Rev 1)\"
+\trom ( name \"Tetris (World) (Rev 1).gb\" size 32768 crc D5C0A94F md5 abc )
+)
+
+game (
+\tname \"Alleyway (World)\"
+\trom ( name \"Alleyway (World).gb\" size 131072 crc 0F1E2D3C )
+)
+";
+        let pairs = parse_dat(dat);
+        assert_eq!(
+            pairs,
+            vec![
+                (0xD5C0A94F, "Tetris (World) (Rev 1)".to_string()),
+                (0x0F1E2D3C, "Alleyway (World)".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_dats_indexes_and_dedupes() {
+        // Unique crcs so this test is order-independent of any other test that
+        // also loads into the shared global index.
+        let a = "game (\n\tname \"Game A\"\n\trom ( crc AABBCC01 )\n)\n";
+        let b = "game (\n\tname \"Game B\"\n\trom ( crc AABBCC02 )\n)\n";
+        load_dats(&[a.to_string(), b.to_string()]);
+        assert_eq!(name_for_crc(0xAABBCC01).as_deref(), Some("Game A"));
+        assert_eq!(name_for_crc(0xAABBCC02).as_deref(), Some("Game B"));
+        assert_eq!(name_for_crc(0xDEAD0000), None);
     }
 
     #[test]
