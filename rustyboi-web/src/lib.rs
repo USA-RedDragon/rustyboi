@@ -234,10 +234,10 @@ impl Emulator {
     }
 
     /// The two libretro No-Intro DAT URLs to download for offline game
-    /// identification (the CC-BY-SA-4.0 game-name index, never embedded). Logs the
-    /// attribution. TODO(no-intro runtime fetch): the JS shell should call this at
-    /// startup, `fetch()` each URL (caching in IndexedDB / Cache Storage), and feed
-    /// the bodies back via `finish_no_intro_dats` — mirroring the cheat-DB flow.
+    /// identification (the CC-BY-SA-4.0 game-name index, never embedded). The
+    /// worker calls this at startup and posts a `FetchUrl{purpose:"no_intro"}`
+    /// request; the main thread `fetch()`es each URL (caching in Cache Storage)
+    /// and feeds the bodies back via `finish_no_intro_dats`.
     pub fn no_intro_fetch_urls(&self) -> Array {
         let arr = Array::new();
         for u in self.session.no_intro_fetch_urls() {

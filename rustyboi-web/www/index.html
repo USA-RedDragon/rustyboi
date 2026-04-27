@@ -161,6 +161,39 @@
         send({ type: "FinishCheats", body });
       };
 
+      // Fetch the No-Intro DAT files (the CC-BY-SA-4.0 game-name index, never
+      // embedded), caching them in Cache Storage so later loads are offline. All
+      // URLs are fetched (each DAT contributes entries), then the bodies are
+      // posted back for the worker to parse into the runtime index.
+      const fetchNoIntro = async (urls) => {
+        // Attribution: this data is CC-BY-SA-4.0 (see THIRD-PARTY-NOTICES.md).
+        console.info(
+          "No-Intro database (game names) is licensed CC-BY-SA-4.0 — " +
+          "https://creativecommons.org/licenses/by-sa/4.0/");
+        const cache = await caches.open("no-intro-v1").catch(() => null);
+        const bodies = [];
+        for (const url of urls) {
+          let body = null;
+          if (cache) {
+            const hit = await cache.match(url).catch(() => null);
+            if (hit) body = await hit.text();
+          }
+          if (body === null) {
+            try {
+              const resp = await fetch(url);
+              if (resp.ok) {
+                body = await resp.text();
+                if (cache) cache.put(url, new Response(body)).catch(() => {});
+              }
+            } catch (_) {
+              // Network/CORS error; skip this DAT (index just lacks its entries).
+            }
+          }
+          if (body) bodies.push(body);
+        }
+        if (bodies.length) send({ type: "FinishNoIntro", bodies });
+      };
+
       const canvas = document.getElementById("screen");
       sizeCanvas(canvas);
 
@@ -197,9 +230,10 @@
             break;
           case "FetchUrl":
             // The worker (which owns the Session) asked us to GET a URL. The main
-            // thread owns `fetch()`; try the candidate URLs in order and post the
-            // body back for the worker to parse. Only the cheat purpose exists.
+            // thread owns `fetch()`; fetch and post the body/bodies back for the
+            // worker to parse.
             if (m.purpose === "cheats") fetchCheats(m.urls || []);
+            else if (m.purpose === "no_intro") fetchNoIntro(m.urls || []);
             break;
           case "Status":
             app.on_status(m.msg);
