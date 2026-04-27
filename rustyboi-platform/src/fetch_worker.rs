@@ -24,6 +24,9 @@ struct Job {
 /// A completed fetch, ready to feed back into the session.
 pub struct Finished {
     pub purpose: FetchPurpose,
+    /// The URL that produced the body (the first candidate that returned 2xx), or
+    /// `None` on failure. Used to name the on-disk cache file for No-Intro DATs.
+    pub url: Option<String>,
     /// The response body on success, or an error message.
     pub result: Result<String, String>,
 }
@@ -95,8 +98,11 @@ fn fetch_loop(rx: Receiver<Job>, done_tx: Sender<Finished>) {
     crate::android::bind_process_to_network();
     let agent = builder.build();
     while let Ok(job) = rx.recv() {
-        let result = fetch_first(&agent, &job.urls);
-        if done_tx.send(Finished { purpose: job.purpose, result }).is_err() {
+        let (url, result) = match fetch_first(&agent, &job.urls) {
+            Ok((url, body)) => (Some(url), Ok(body)),
+            Err(e) => (None, Err(e)),
+        };
+        if done_tx.send(Finished { purpose: job.purpose, url, result }).is_err() {
             break; // main side gone
         }
     }
@@ -129,14 +135,14 @@ fn native_tls_config() -> Option<rustls::ClientConfig> {
     )
 }
 
-/// Try each URL in order; return the first 2xx body, else the last error. A 404
-/// falls through to the next candidate (the other system folder).
-fn fetch_first(agent: &ureq::Agent, urls: &[String]) -> Result<String, String> {
+/// Try each URL in order; return the first 2xx `(url, body)`, else the last error.
+/// A 404 falls through to the next candidate (the other system folder).
+fn fetch_first(agent: &ureq::Agent, urls: &[String]) -> Result<(String, String), String> {
     let mut last_err = "no URLs to fetch".to_string();
     for url in urls {
         match agent.get(url).call() {
             Ok(resp) => match resp.into_string() {
-                Ok(body) => return Ok(body),
+                Ok(body) => return Ok((url.clone(), body)),
                 Err(e) => last_err = format!("read failed: {e}"),
             },
             Err(ureq::Error::Status(code, _)) => {

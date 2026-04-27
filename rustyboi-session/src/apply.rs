@@ -17,6 +17,9 @@ pub enum FetchPurpose {
     /// A libretro `.cht` cheat file; the body goes to
     /// [`Session::finish_fetched_cheats`](crate::session::Session::finish_fetched_cheats).
     Cheats,
+    /// A libretro No-Intro `.dat` (game-name index) file; the body goes to
+    /// [`Session::finish_no_intro_dats`](crate::session::Session::finish_no_intro_dats).
+    NoIntro,
 }
 
 /// Something only the host (OS / window / filesystem) can carry out, surfaced by

@@ -233,6 +233,25 @@ impl Emulator {
         requests_to_js(&[PlatformRequest::Status(msg)])
     }
 
+    /// The two libretro No-Intro DAT URLs to download for offline game
+    /// identification (the CC-BY-SA-4.0 game-name index, never embedded). Logs the
+    /// attribution. TODO(no-intro runtime fetch): the JS shell should call this at
+    /// startup, `fetch()` each URL (caching in IndexedDB / Cache Storage), and feed
+    /// the bodies back via `finish_no_intro_dats` — mirroring the cheat-DB flow.
+    pub fn no_intro_fetch_urls(&self) -> Array {
+        let arr = Array::new();
+        for u in self.session.no_intro_fetch_urls() {
+            arr.push(&JsValue::from_str(&u));
+        }
+        arr
+    }
+
+    /// Feed downloaded No-Intro DAT bodies (fetched on the main thread) into the
+    /// runtime identification index; re-resolves the current ROM's display name.
+    pub fn finish_no_intro_dats(&mut self, bodies: Vec<String>) {
+        self.session.finish_no_intro_dats(&bodies);
+    }
+
     /// Export the current cartridge's battery SRAM, or an empty array when the
     /// cart has no battery. The worker posts these bytes to the main thread,
     /// which triggers a browser download.
@@ -544,6 +563,7 @@ fn requests_to_js(requests: &[PlatformRequest]) -> Array {
                 set("urls", arr.into());
                 let p = match purpose {
                     rustyboi_session::FetchPurpose::Cheats => "cheats",
+                    rustyboi_session::FetchPurpose::NoIntro => "no_intro",
                 };
                 set("purpose", p.into());
             }

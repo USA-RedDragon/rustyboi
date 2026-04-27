@@ -1099,7 +1099,29 @@ impl Session {
     pub fn cheat_fetch_urls(&self) -> Option<Vec<String>> {
         let rom = self.original_rom.as_deref()?;
         let name = crate::no_intro::identify(rom)?;
-        Some(crate::cheat_db::candidate_urls(name, crate::cheat_db::is_cgb(rom)))
+        Some(crate::cheat_db::candidate_urls(&name, crate::cheat_db::is_cgb(rom)))
+    }
+
+    /// The two libretro No-Intro DAT URLs to download for offline game
+    /// identification. Static (ROM-independent): the frontend fetches these once
+    /// (caching the bodies) and feeds them to [`finish_no_intro_dats`]. The
+    /// session performs no HTTP itself. The downloaded data is CC-BY-SA-4.0
+    /// libretro-database material — not embedded in any binary — so callers log
+    /// the attribution at download time.
+    pub fn no_intro_fetch_urls(&self) -> Vec<String> {
+        log_no_intro_attribution();
+        crate::no_intro::dat_urls()
+    }
+
+    /// Feed downloaded No-Intro DAT bodies into the runtime identification index
+    /// (merging with any already loaded), then re-resolve the current ROM's
+    /// display name now that identification may succeed. Bodies may be supplied
+    /// incrementally (one per DAT) or together.
+    pub fn finish_no_intro_dats(&mut self, bodies: &[String]) {
+        crate::no_intro::load_dats(bodies);
+        if let Some(rom) = self.original_rom.as_deref() {
+            self.game_name = crate::no_intro::resolve_game_name(rom);
+        }
     }
 
     /// Parse a downloaded libretro `.cht` body into the pending fetched-cheat
@@ -1152,6 +1174,19 @@ impl Session {
 
 /// Reserved slot number for quicksave/quickload.
 pub const QUICK_SLOT: u32 = u32::MAX;
+
+/// The No-Intro game-name data is not embedded in any rustyboi binary; each
+/// frontend downloads it at runtime from the CC-BY-SA-4.0 libretro-database. Log
+/// the attribution whenever a fetch is initiated. `eprintln` on native, dropped
+/// on wasm to stay clean (the web frontend logs it to the console separately).
+fn log_no_intro_attribution() {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        eprintln!(
+            "No-Intro database (game names) is licensed CC-BY-SA-4.0 — https://creativecommons.org/licenses/by-sa/4.0/"
+        );
+    }
+}
 
 /// Log a config-save failure. Non-fatal (a failed persist never bricks a
 /// running session); `eprintln` on native, dropped on wasm to stay clean.
