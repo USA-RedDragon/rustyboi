@@ -435,14 +435,14 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
     if matches!(case.mode, Mode::Cgb | Mode::Agb) {
         // c-sp PNG references use the `(X<<3)|(X>>2)` shift formula; Linear is
         // bucket-identical to it under the 0xF8 comparison mask (RESULTS.md).
-        // The Gambatte suite keeps its native Gambatte conversion.
+        // The gambatte suite keeps the LCD conversion its references were rendered with.
         let conversion = if matches!(
             case.oracle,
             Oracle::CspPng { .. } | Oracle::CspPngFixed { .. } | Oracle::CspPngLayout { .. }
         ) {
             CgbColorConversion::Linear
         } else {
-            CgbColorConversion::Gambatte
+            CgbColorConversion::Lcd
         };
         gb.set_cgb_color_conversion(conversion);
     }
