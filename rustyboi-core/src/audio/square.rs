@@ -2,23 +2,21 @@ use serde::{Deserialize, Serialize};
 use crate::audio::{NR10, NR11, NR12, NR13, NR14, NR21, NR22, NR23, NR24};
 use crate::memory::Addressable;
 
-// Gambatte's sound cycle counter is a free-running 2 MHz value; the frame
+// The APU sound cycle counter is a free-running 2 MHz value; the frame
 // sequencer position is `(cc >> 12) & 7`. Our FS step (the index about to be
 // clocked) is offset from that by +3 (measured empirically against the boot
 // DIV phase): `fs_step == ((cc >> 12) + 3) & 7`. Equivalently, length clocks
 // when `(cc >> 12) & 7` is in {5,7,1,3} and envelope at {2}.
 //
-// Duty timing uses absolute event counters (`next_pos_update`) exactly like
-// Gambatte's duty_unit.cpp; envelope and length use absolute `cc`-based
-// counters mirroring envelope_unit.cpp / length_counter.cpp.
+// Duty timing uses absolute event counters (`next_pos_update`); envelope and
+// length use absolute `cc`-based counters.
 
 const COUNTER_DISABLED: u32 = 0xFFFF_FFFF;
 
-// SameBoy `duties[]` (Core/apu.c): the digital output for a given
+// Duty table: the digital output for a given
 // (current_sample_index + duty*8). `current_sample_index` INCREMENTS each duty
-// tick (SameBoy runs the phase forward), unlike Gambatte's decrementing table.
-// This is the hardware-accurate model the SameSuite channel_*_align/duty/delay
-// tests are validated against on cgb04c.
+// tick (the phase runs forward). This is the hardware-accurate model the
+// SameSuite channel_*_align/duty/delay tests are validated against on cgb04c.
 const DUTIES: [u8; 32] = [
     0, 0, 0, 0, 0, 0, 0, 1,
     1, 0, 0, 0, 0, 0, 0, 1,
@@ -54,36 +52,36 @@ pub struct SquareWave {
     #[serde(default)]
     cc: u32,
 
-    // --- Duty unit (SameBoy countdown model, Core/apu.c) ---
+    // --- Duty unit (countdown model) ---
     // `period` = (2048-freq)*2, the steady-state duty tick interval in 2 MHz
     // cycles. Kept for the freq-write path.
     #[serde(default)]
     period: u32,
-    // SameBoy `current_sample_index`: the duty phase (0..7), INCREMENTING. NOT
+    // `current_sample_index`: the duty phase (0..7), INCREMENTING. NOT
     // reset on trigger — only APU-off resets it.
     #[serde(default)]
     pos: u8,
-    // Cached digital-high state for the current `pos`/`duty` (SameBoy computes it
-    // via `duties[]` at each tick).
+    // Cached digital-high state for the current `pos`/`duty` (computed via the
+    // duty table at each tick).
     #[serde(default)]
     high: bool,
-    // SameBoy `sample_countdown`: 2 MHz cycles until the next duty tick. The tick
-    // consumes `sample_countdown + 1` cycles (SameBoy `cycles_left -= countdown+1`),
+    // `sample_countdown`: 2 MHz cycles until the next duty tick. The tick
+    // consumes `sample_countdown + 1` cycles (`cycles_left -= countdown+1`),
     // reloading to `(2047-freq)*2 + 1`. `-1` (u32::MAX) means "not yet reloaded"
-    // (SameBoy inits to -1). `sample_length` here == freq.
+    // (inits to -1). `sample_length` here == freq.
     #[serde(default = "disabled")]
     sample_countdown: u32,
-    // SameBoy `delay`: extra 2 MHz cycles added to the first countdown at trigger
+    // `delay`: extra 2 MHz cycles added to the first countdown at trigger
     // so the first duty edge lands at the hardware-accurate phase.
     #[serde(default)]
     delay: u32,
-    // SameBoy `sample_surpressed`: true after a fresh trigger until the first duty
+    // `sample_surpressed`: true after a fresh trigger until the first duty
     // tick clears it; while set the channel's digital output reads 0 (this is the
     // "(sample length + 2) ticks until PCM12 is affected" delay the channel_*_delay
     // tests measure).
     #[serde(default)]
     sample_surpressed: bool,
-    // SameBoy `did_tick` / `just_reloaded`: NRx3/NRx4 edge-case flags.
+    // `did_tick` / `just_reloaded`: NRx3/NRx4 edge-case flags.
     #[serde(default)]
     did_tick: bool,
     #[serde(default)]
@@ -91,46 +89,46 @@ pub struct SquareWave {
     // The 2 MHz `cc` up to which the duty countdown has been advanced.
     #[serde(default)]
     last_pos_cc: u32,
-    // SameBoy `lf_div`: the 2 MHz sub-phase (0/1) used by the trigger delay
+    // `lf_div`: the 2 MHz sub-phase (0/1) used by the trigger delay
     // formula. Derived from the free-running `cc` parity; pushed by the controller.
     #[serde(default = "default_lf_div")]
     lf_div: u32,
-    // CGB double-speed flag (SameBoy `cgb_double_speed`), pushed by the controller.
+    // CGB double-speed flag, pushed by the controller.
     #[serde(default)]
     ds: bool,
-    // CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`): selects the
+    // CGB-D/E APU revision gate (model newer than CGB-C): selects the
     // D/E double-speed trigger-delay placement (see the nr4 trigger below).
     #[serde(default)]
     cgb_de: bool,
-    // CGB-B-or-earlier APU revision gate (SameBoy `GB_is_cgb && model <=
-    // GB_MODEL_CGB_B`): the NRx4 length-glitch extra clock fires regardless of
+    // CGB-B-or-earlier APU revision gate (CGB with model <= CGB-B): the NRx4
+    // length-glitch extra clock fires regardless of
     // the written bit-6 value (see `length_nr4_change`).
     #[serde(default)]
     cgb_le_b: bool,
-    // CGB-C-and-older PCM read glitch (SameBoy `pcm_mask`, applied for
-    // `model <= GB_MODEL_CGB_C`; excludes AGB): see `pcm_nibble_at`.
+    // CGB-C-and-older PCM read glitch (the pcm_mask, applied for
+    // model <= CGB-C; excludes AGB): see `pcm_nibble_at`.
     #[serde(default)]
     pcm_c_glitch: bool,
-    // NRx4 sample-index step-back parity gate (SameBoy: the step-back is
+    // NRx4 sample-index step-back parity gate: the step-back is
     // unconditional on CGB-D/E but gated on `sample_countdown & 1` for CGB-C-
-    // and-earlier AND AGB). true for {CGB0, CGBB, AGB}; the default CGB keeps
-    // the unconditional (gambatte-cgb04c-captured) placement. See write_nrx4.
+    // and-earlier AND AGB. true for {CGB0, CGBB, AGB}; the default CGB keeps
+    // the unconditional (cgb04c-captured) placement. See write_nrx4.
     #[serde(default)]
     step_back_parity: bool,
     // cc of the most recent duty tick and whether the pre-tick digital sample
-    // was 0 (SameBoy's `cycles_left == 0 && samples[i] == 0` mask condition,
+    // was 0 (the `cycles_left == 0 && samples[i] == 0` mask condition,
     // re-derivable against any access cc).
     #[serde(default = "disabled")]
     last_tick_cc: u32,
     #[serde(default)]
     last_tick_pre_zero: bool,
-    // --- Envelope unit (SameBoy div-anchored model, Core/apu.c) ---
+    // --- Envelope unit (DIV-anchored model) ---
     // `volume_countdown`: decremented (mod 8) on every 8th DIV-APU event
     // (div_divider & 7 == 7) while no tick is pending; reloaded from NRx2 & 7
     // at trigger and at the secondary (rising-edge) event when it hits 0.
     #[serde(default)]
     volume_countdown: u8,
-    // SameBoy `GB_envelope_clock_t`: `clock` = a tick is armed (set at the
+    // Envelope clock: `clock` = a tick is armed (set at the
     // secondary event, consumed at the next DIV-APU event); `locked` = the
     // envelope hit its rail (0/F) and stays frozen until the next trigger.
     #[serde(default)]
@@ -145,17 +143,17 @@ pub struct SquareWave {
     #[serde(default)]
     volume: u8,
     // The DAC/master enable: false once the DAC is off (NRx2 high nibble 0 and
-    // not increasing). Mirrors Gambatte's `master_`.
+    // not increasing). The channel master-enable.
     #[serde(default)]
     master: bool,
 
-    // --- Length counter (Gambatte length_counter.cpp, cc-event model) ---
+    // --- Length counter (cc-event model) ---
     #[serde(default)]
     length_counter: u16,
     #[serde(default)]
     length_enabled: bool,
-    // Absolute cc of length expiry (Gambatte `LengthCounter::counter_`):
-    // `((cc>>13)+lengthCounter)<<13` when enabled, else `LEN_DISABLED`.
+    // Absolute cc of length expiry:
+    // `((cc>>13)+length_counter)<<13` when enabled, else `LEN_DISABLED`.
     #[serde(default = "len_disabled")]
     len_counter: u32,
     // Length-subsystem cc (duty/envelope use `cc`; length uses this phased cc).
@@ -168,19 +166,19 @@ pub struct SquareWave {
     #[serde(default)]
     fs_step: u8,
 
-    // Gambatte cc-driven sweep (channel1.cpp SweepUnit). Absolute-cc event
-    // counter, `neg_` latch, and the cgb flag the nr4Init phase needs.
+    // cc-driven sweep (Channel 1). Absolute-cc event
+    // counter, negate latch, and the CGB flag the sweep trigger init needs.
     #[serde(default = "disabled")]
     sweep_counter: u32,
     // The swept frequency APPLICATION instant: the 128 Hz DIV-APU edge,
-    // 4 cc before the Gambatte event grid (SameBoy trigger_sweep_calculation
+    // 4 cc before the event grid (the sweep-calculation trigger
     // updates sample_length AT the div event; the recalculation/overflow-kill
     // side effects land later). SameSuite channel_1_sweep_restart round 1
     // pins this: the period-2 duty must NOT tick at event-3 with the old
-    // period (SameBoy-oracle duty index 3-not-4 at the retrigger).
+    // period (oracle duty index 3-not-4 at the retrigger).
     #[serde(default = "disabled")]
     sweep_apply_counter: u32,
-    // Deferred sweep overflow disable (SameBoy square_sweep_calculate_countdown):
+    // Deferred sweep overflow disable:
     // the post-event "second calculation" overflow check takes (NR10 & 7)
     // 1 MHz cycles on hardware; the channel stays audible until it lands
     // (SameSuite channel_1_sweep rows around the 128 Hz event pin the
@@ -265,35 +263,33 @@ impl SquareWave {
         self.cc = cc;
     }
 
-    /// SameBoy `lf_div` (2 MHz sub-phase) used by the trigger delay formula.
+    /// The `lf_div` (2 MHz sub-phase) used by the trigger delay formula.
     pub fn set_lf_div(&mut self, lf_div: u32) {
         self.lf_div = lf_div;
     }
 
-    /// SameBoy `cgb_double_speed`.
+    /// CGB double-speed flag.
     pub fn set_ds(&mut self, ds: bool) {
         self.ds = ds;
     }
 
-    /// CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`).
+    /// CGB-D/E APU revision gate (model newer than CGB-C).
     pub fn set_cgb_de(&mut self, de: bool) {
         self.cgb_de = de;
     }
 
-    /// CGB-B-or-earlier APU revision gate (SameBoy `GB_is_cgb && model <=
-    /// GB_MODEL_CGB_B`).
+    /// CGB-B-or-earlier APU revision gate (CGB with model <= CGB-B).
     pub fn set_cgb_le_b(&mut self, le_b: bool) {
         self.cgb_le_b = le_b;
     }
 
-    /// CGB-C-and-older PCM read glitch (SameBoy `pcm_mask`, model <=
-    /// GB_MODEL_CGB_C).
+    /// CGB-C-and-older PCM read glitch (the pcm_mask, model <= CGB-C).
     pub fn set_pcm_c_glitch(&mut self, on: bool) {
         self.pcm_c_glitch = on;
     }
 
-    /// NRx4 step-back parity gate (true for CGB0/CGBB/AGB; SameBoy gates the
-    /// step-back on `sample_countdown & 1` for those, unconditional on D/E).
+    /// NRx4 step-back parity gate (true for CGB0/CGBB/AGB; the step-back is
+    /// gated on `sample_countdown & 1` for those, unconditional on D/E).
     pub fn set_step_back_parity(&mut self, on: bool) {
         self.step_back_parity = on;
     }
@@ -306,9 +302,9 @@ impl SquareWave {
         self.len_cc >= self.len_counter
     }
 
-    /// Post-boot channel-1 mid-tone state (Gambatte `setPostBiosState`). The boot
+    /// Post-boot channel-1 mid-tone state. The boot
     /// ROM leaves ch1 playing the startup tone: master/enabled with duty pos/phase
-    /// mid-cycle. `pos_offset` is Gambatte's duty.nextPosUpdate offset (in 2 MHz
+    /// mid-cycle. `pos_offset` is the duty next-pos-update offset (in 2 MHz
     /// units) added to the current cc; `pos`/`high` are the duty-unit phase.
     pub fn set_post_bios_ch1(&mut self, pos_offset: u32, pos: u8, high: bool) {
         self.nr11 = 0xBF;
@@ -317,8 +313,8 @@ impl SquareWave {
         self.nr14 = 0x07;
         self.master = true;
         self.enabled = true;
-        // Post-boot the startup-ding envelope has already decayed to 0 (Gambatte
-        // initstate.cpp `env.volume = 0`). The channel's length counter is still
+        // Post-boot the startup-ding envelope has already decayed to 0
+        // (`env.volume = 0`). The channel's length counter is still
         // running (NR52 bit 0 / `enabled` set), but its digital DAC output is 0 —
         // matching the real-cgb04c `fexx_ffxx_dumper` capture where FF76 (PCM12)
         // reads 0x00 while NR52 reads 0xF1.
@@ -326,7 +322,7 @@ impl SquareWave {
         self.period = to_period(self.freq());
         self.pos = pos;
         self.high = high;
-        // Seed the SameBoy countdown from the post-boot phase offset: the next
+        // Seed the countdown from the post-boot phase offset: the next
         // duty tick is `pos_offset` 2 MHz cycles out. `last_pos_cc` anchors the
         // countdown to the current cc so `update_pos` deltas are correct.
         self.last_pos_cc = self.cc;
@@ -340,8 +336,8 @@ impl SquareWave {
         self.length_counter = value;
     }
 
-    /// Shift the duty event counter backward by `delta` (Gambatte
-    /// `Channel::resetCc`, which only resets the duty unit). Called when the
+    /// Shift the duty event counter backward by `delta` (the DIV-reset fold
+    /// only resets the duty unit). Called when the
     /// underlying cycle counter is reset by a DIV write. The envelope and length
     /// counters are intentionally left alone — they key on absolute `cc>>13` /
     /// `cc>>15` boundaries that survive the reset.
@@ -349,7 +345,7 @@ impl SquareWave {
         // Advance the duty countdown to the current (pre-fold) cc, then shift the
         // countdown anchor by the same delta the controller applies to `cc`, so the
         // subsequent `set_cc(folded)` sees a zero delta and the countdown/index are
-        // preserved across the DIV-reset fold (SameBoy keeps `sample_countdown`).
+        // preserved across the DIV-reset fold (the countdown is kept).
         self.update_pos();
         self.last_pos_cc = self.last_pos_cc.wrapping_sub(delta);
     }
@@ -358,13 +354,13 @@ impl SquareWave {
         self.fs_step = step;
     }
 
-    /// Gambatte `Channel1::reset`/`Channel2::reset` (called from `PSG::reset` on
+    /// Channel reset (called from the APU-enable reset on
     /// the NR52 0→1 enable). Re-initializes the duty + envelope sub-counters at
     /// the freshly-folded cc. The length counter is intentionally preserved
-    /// (Gambatte's `lengthCounter_` survives `PSG::reset`).
+    /// (the length counter survives the APU-enable reset).
     pub fn psg_reset(&mut self) {
-        // DutyUnit::reset. SameBoy resets the duty phase to 0 only on APU-off; the
-        // NR52 0→1 enable path (PSG::reset) re-anchors the countdown but keeps the
+        // Duty-unit reset. The duty phase resets to 0 only on APU-off; the
+        // NR52 0→1 enable path re-anchors the countdown but keeps the
         // sub-counter idle until a trigger. Index resets to 0 here (APU was off).
         self.pos = 0;
         self.high = false;
@@ -378,7 +374,7 @@ impl SquareWave {
         self.last_tick_pre_zero = false;
         self.sweep_kill_counter = COUNTER_DISABLED;
         self.sweep_apply_counter = COUNTER_DISABLED;
-        // Envelope reset (SameBoy GB_apu_init memset).
+        // Envelope reset (APU-init clear).
         self.volume_countdown = 0;
         self.env_clock = false;
         self.env_should_lock = false;
@@ -407,7 +403,7 @@ impl SquareWave {
 
     // --- Duty unit ---
 
-    /// SameBoy `GB_apu_run` square tick loop (Core/apu.c ~959). Advances the duty
+    /// Square tick loop. Advances the duty
     /// countdown by the 2 MHz cycles elapsed since `last_pos_cc`. On each underflow
     /// the sample index increments and the countdown reloads to `(2047-freq)*2+1`;
     /// the `delay` set at trigger is consumed first (before the countdown loop),
@@ -423,7 +419,7 @@ impl SquareWave {
             return;
         }
         self.last_pos_cc = cc;
-        // SameBoy only ticks the duty while the channel is active (is_active[i]).
+        // The duty only ticks while the channel is active (is_active).
         // While inactive the index/countdown freeze; we keep `last_pos_cc` current
         // (done above) so a later trigger doesn't replay the idle span.
         if !self.master || self.sample_countdown == COUNTER_DISABLED {
@@ -431,12 +427,12 @@ impl SquareWave {
         }
         // A zero-cycle advance (a write landing on the same cc a prior dot already
         // resolved) neither ticks nor changes the reload phase, so preserve the
-        // existing `just_reloaded` rather than spuriously asserting it. In SameBoy
+        // existing `just_reloaded` rather than spuriously asserting it —
         // `just_reloaded` reflects the last non-empty batch.
         if cycles_left == 0 {
             return;
         }
-        // SameBoy: `delay` (trigger phase offset) is consumed off the front.
+        // `delay` (trigger phase offset) is consumed off the front.
         if self.delay != 0 {
             if self.delay < cycles_left {
                 self.delay = 0;
@@ -444,14 +440,14 @@ impl SquareWave {
                 self.delay -= cycles_left;
             }
         }
-        // SameBoy: `while (cycles_left > sample_countdown) { ... }`.
+        // `while (cycles_left > sample_countdown) { ... }`.
         while cycles_left > self.sample_countdown {
-            // Pre-tick digital sample (SameBoy `samples[i]` before the tick's
+            // Pre-tick digital sample (the `samples[i]` value before the tick's
             // update), recorded per tick for the CGB<=C PCM read glitch.
             let pre_zero =
                 self.sample_surpressed || !self.high || self.volume & 0x0F == 0;
             cycles_left -= self.sample_countdown + 1;
-            self.sample_countdown = (self.sample_length() ^ 0x7FF) * 2 + 1;
+            self.sample_countdown = self.duty_tick_reload();
             self.pos = (self.pos + 1) & 7;
             self.sample_surpressed = false;
             self.did_tick = true;
@@ -464,12 +460,15 @@ impl SquareWave {
         self.sample_countdown -= cycles_left;
     }
 
-    /// The 11-bit sample length == the raw frequency (SameBoy `sample_length`).
-    fn sample_length(&self) -> u32 {
-        self.freq() as u32
+    /// Duty countdown reload after a tick. The duty tick interval is the full
+    /// period `(2048 - freq) * 2`, and a tick consumes `countdown + 1` cycles,
+    /// so the reload is exactly one less than that period. Expressed as period
+    /// arithmetic rather than a packed complement-and-shift.
+    fn duty_tick_reload(&self) -> u32 {
+        to_period(self.freq()) - 1
     }
 
-    /// SameBoy NR13/NR23 write (Core/apu.c ~1796): update the sample length low
+    /// NR13/NR23 write: update the sample length low
     /// byte (the register is already stored) and, if the countdown JUST reloaded
     /// this cycle, re-derive it from the new length so the running tone tracks the
     /// freq change immediately. Otherwise the new length takes effect on the next
@@ -478,13 +477,13 @@ impl SquareWave {
         self.update_pos();
         self.period = to_period(self.freq());
         if self.just_reloaded {
-            self.sample_countdown = (self.sample_length() ^ 0x7FF) * 2 + 1;
+            self.sample_countdown = self.duty_tick_reload();
         }
     }
 
-    // --- Envelope unit (SameBoy div-anchored model) ---
+    // --- Envelope unit (DIV-anchored model) ---
 
-    /// SameBoy `is_active[i]`: the channel is playing (triggered with the DAC
+    /// `is_active`: the channel is playing (triggered with the DAC
     /// on, not yet stopped by length expiry or DAC-off).
     fn is_active(&self) -> bool {
         self.enabled && self.master
@@ -509,7 +508,7 @@ impl SquareWave {
             return;
         }
         if self.is_active() {
-            // SameBoy NRx2 write on a playing channel: the zombie-mode volume
+            // NRx2 write on a playing channel: the zombie-mode volume
             // transform. The envelope countdown itself continues undisturbed
             // (no reschedule) — ticks stay anchored to the DIV-APU events.
             self.nrx2_glitch(value, old);
@@ -521,7 +520,7 @@ impl SquareWave {
         }
     }
 
-    // --- Length counter (Gambatte length_counter.cpp, cc-driven) ---
+    // --- Length counter (cc-driven) ---
 
     fn length_mask(&self) -> u16 {
         0x3F
@@ -531,8 +530,9 @@ impl SquareWave {
         if self.channel1 { self.nr14 } else { self.nr24 }
     }
 
-    /// Gambatte `LengthCounter::nr1Change`. The NRx1 write reloads the length
-    /// load and (re)schedules the absolute expiry cc from the current NRx4 lcen.
+    /// NRx1 write handling. The NRx1 write reloads the length
+    /// load and (re)schedules the absolute expiry cc from the current NRx4
+    /// length-enable bit.
     fn write_nrx1(&mut self, value: u8) {
         if self.channel1 {
             self.nr11 = value;
@@ -549,7 +549,7 @@ impl SquareWave {
         self.duty_nr1_change();
     }
 
-    /// Gambatte `LengthCounter::event`: expiry disables the channel.
+    /// Length-counter expiry: disables the channel.
     pub fn length_event(&mut self) {
         self.len_counter = LEN_DISABLED;
         self.length_counter = 0;
@@ -557,16 +557,16 @@ impl SquareWave {
     }
 
     fn duty_nr1_change(&mut self) {
-        // The duty change LATCHES until the next duty tick (SameBoy: samples
+        // The duty change LATCHES until the next duty tick (samples
         // are only recomputed at ticks). Recomputing `high` immediately here
         // breaks SameSuite channel_*_duty_delay + channel_*_align_cpu
-        // (measured -4) and does not fix the gambatte duty0_to_duty3 captures.
+        // (measured -4) and does not fix the duty0_to_duty3 captures.
         self.update_pos();
     }
 
     pub fn step(&mut self, cgb: bool) {
         // Both channels need the CGB-features flag (the trigger pre-increment
-        // quirk is CGB-D/E only); ch1 also uses it for the sweep nr4Init phase.
+        // quirk is CGB-D/E only); ch1 also uses it for the sweep trigger init.
         self.cgb = cgb;
         // Always keep the duty's `last_pos_cc` current (update_pos advances the
         // index only while active, but must track cc even when idle so a later
@@ -588,8 +588,8 @@ impl SquareWave {
             self.sweep_apply_counter = COUNTER_DISABLED;
             self.sweep_apply_freq();
         }
-        // Frequency sweep event(s) (Channel 1 only) — cc-driven, like Gambatte's
-        // SweepUnit (channel1.cpp). Polled here, not FS-clocked.
+        // Frequency sweep event(s) (Channel 1 only) — cc-driven. Polled here,
+        // not FS-clocked.
         while self.channel1
             && self.sweep_counter != COUNTER_DISABLED
             && self.cc >= self.sweep_counter
@@ -613,35 +613,34 @@ impl SquareWave {
         // nothing is FS-clocked here.
     }
 
-    /// `calcFreq` without the overflow disable: latches `neg_` only. Used by
-    /// the deferred second calculation (the disable lands later).
-    fn sweep_calc_freq_raw(&mut self) -> u16 {
+    /// The next swept frequency from the shadow register: `shadow ± (shadow >>
+    /// shift)`, with NR10 bit 3 selecting the decreasing (subtract) direction.
+    /// Pure arithmetic — the caller applies the negate latch / overflow-kill
+    /// side effects.
+    fn sweep_next_freq(&self) -> u16 {
         let nr0 = self.nr10;
-        let shift = (nr0 & 0x07) as u16;
-        let freq = if nr0 & 0x08 != 0 {
-            self.sweep_shadow_frequency.wrapping_sub(self.sweep_shadow_frequency >> shift)
-        } else {
-            self.sweep_shadow_frequency.wrapping_add(self.sweep_shadow_frequency >> shift)
-        };
+        let step = self.sweep_shadow_frequency >> (nr0 & 0x07) as u16;
         if nr0 & 0x08 != 0 {
-            self.sweep_neg = true;
+            self.sweep_shadow_frequency.wrapping_sub(step)
+        } else {
+            self.sweep_shadow_frequency.wrapping_add(step)
         }
-        freq
     }
 
-    /// Gambatte `Channel1::SweepUnit::calcFreq`. Uses NR10 directly, latches
-    /// `neg_`, and disables master on an overflow (freq & 2048).
-    fn sweep_calc_freq(&mut self) -> u16 {
-        let nr0 = self.nr10;
-        let shift = (nr0 & 0x07) as u16;
-        let freq = if nr0 & 0x08 != 0 {
-            self.sweep_shadow_frequency.wrapping_sub(self.sweep_shadow_frequency >> shift)
-        } else {
-            self.sweep_shadow_frequency.wrapping_add(self.sweep_shadow_frequency >> shift)
-        };
-        if nr0 & 0x08 != 0 {
+    /// Sweep calculation without the overflow disable: latches the negate flag
+    /// (set once a decreasing sweep is calculated) only. Used by the deferred
+    /// second calculation (the disable lands later).
+    fn sweep_calc_freq_raw(&mut self) -> u16 {
+        if self.nr10 & 0x08 != 0 {
             self.sweep_neg = true;
         }
+        self.sweep_next_freq()
+    }
+
+    /// Sweep calculation with the overflow disable: as `sweep_calc_freq_raw`,
+    /// but a result that overflows 11 bits (bit 11 set) silences the channel.
+    fn sweep_calc_freq(&mut self) -> u16 {
+        let freq = self.sweep_calc_freq_raw();
         if freq & 2048 != 0 {
             self.enabled = false;
             self.master = false;
@@ -649,13 +648,13 @@ impl SquareWave {
         freq
     }
 
-    /// The swept-frequency APPLICATION leg (SameBoy `trigger_sweep_calculation`
+    /// The swept-frequency APPLICATION leg (the sweep-calculation
     /// `sample_length` update): the new frequency reaches the duty unit AT the
-    /// 128 Hz DIV-APU edge, 4 cc before the Gambatte event grid where the
+    /// 128 Hz DIV-APU edge, 4 cc before the event grid where the
     /// calculation side effects (neg latch, overflow kill, shadow update) stay.
     /// A period-2 duty therefore reloads with the NEW period for the tick at
     /// edge+1 — one fewer old-period tick than an at-event application
-    /// (SameSuite channel_1_sweep_restart round 1, SameBoy-oracle verified).
+    /// (SameSuite channel_1_sweep_restart round 1, oracle-verified).
     /// Pure arithmetic only: no neg latch, no kill, no shadow update — the
     /// event 4 cc later recomputes the identical value from the unchanged
     /// shadow and applies the pinned side effects.
@@ -665,18 +664,14 @@ impl SquareWave {
         if nr0 & 0x70 == 0 || nr0 & 0x07 == 0 {
             return;
         }
-        let shift = (nr0 & 0x07) as u16;
-        let freq = if nr0 & 0x08 != 0 {
-            self.sweep_shadow_frequency.wrapping_sub(self.sweep_shadow_frequency >> shift)
-        } else {
-            self.sweep_shadow_frequency.wrapping_add(self.sweep_shadow_frequency >> shift)
-        };
+        let freq = self.sweep_next_freq();
         if freq & 2048 == 0 {
             self.set_freq_at(freq, at_cc);
         }
     }
 
-    /// Gambatte `Channel1::SweepUnit::event`. Dispatched when `cc >= counter_`.
+    /// Sweep event. Dispatched when the master clock reaches the scheduled
+    /// sweep-event cc.
     fn sweep_event(&mut self) {
         let event_cc = self.sweep_counter;
         let period = ((self.nr10 & 0x70) >> 4) as u32;
@@ -687,8 +682,8 @@ impl SquareWave {
                 self.set_freq_at(freq, self.sweep_counter);
                 // The second calculation ("overflow is checked after adding
                 // the sweep delta twice"): on hardware the check takes
-                // (NR10 & 7) 1 MHz cycles; defer the disable (SameBoy
-                // sweep_calculation_done via square_sweep_calculate_countdown).
+                // (NR10 & 7) 1 MHz cycles; defer the disable (the deferred
+                // second-calculation overflow check).
                 let freq2 = self.sweep_calc_freq_raw();
                 if freq2 & 2048 != 0 {
                     self.sweep_kill_counter =
@@ -702,9 +697,9 @@ impl SquareWave {
         self.sweep_apply_counter = self.sweep_counter.wrapping_sub(4);
     }
 
-    /// Gambatte `Channel1::SweepUnit::nr0Change`: a neg→non-neg transition after
+    /// NR10 write handling: a neg→non-neg transition after
     /// a negative calc disables master. Writing a zero sweep shift pauses the
-    /// in-flight overflow calculation (SameBoy: "calculation is paused if the
+    /// in-flight overflow calculation ("calculation is paused if the
     /// lower bits are 0" — SameSuite channel_1_sweep_restart rounds 3/7: the
     /// pending disable never lands).
     fn sweep_nr0_change(&mut self, new_nr0: u8) {
@@ -717,7 +712,7 @@ impl SquareWave {
         }
     }
 
-    /// Gambatte `Channel1::SweepUnit::nr4Init`. Schedules the absolute-cc sweep
+    /// Sweep trigger init. Schedules the absolute-cc sweep
     /// event counter at the trigger cc.
     fn sweep_nr4_init(&mut self) {
         self.sweep_kill_counter = COUNTER_DISABLED;
@@ -744,17 +739,17 @@ impl SquareWave {
             // reads 1 for ~2*(NR10&7) cc after a restart into overflow).
             let freq = self.sweep_calc_freq_raw();
             if freq & 2048 != 0 {
-                // 2*(NR10&7) for the calculation plus 4 cc: SameBoy's
-                // trigger-path square_sweep_calculate_countdown_reload_timer
-                // of 2 (1 MHz) cycles before the countdown starts.
+                // 2*(NR10&7) for the calculation plus 4 cc: the
+                // trigger-path reload timer of 2 (1 MHz) cycles before the
+                // countdown starts.
                 self.sweep_kill_counter = self.cc.wrapping_add(2 * rsh + 4);
             }
         }
     }
 
-    /// Like `set_freq`, but advances the duty position to a specified cc (the
-    /// sweep event's `counter_`) rather than the live `cc` (Gambatte calls
-    /// `dutyUnit_.setFreq(freq, counter_)`).
+    /// Applies a new frequency but advances the duty position to a specified cc
+    /// (the sweep event's scheduled cc) rather than the live `cc` — the duty
+    /// unit's frequency update is applied at that event cc.
     fn set_freq_at(&mut self, new_freq: u16, at_cc: u32) {
         let saved = self.cc;
         self.cc = at_cc;
@@ -768,9 +763,9 @@ impl SquareWave {
 
     // --- NRx4 / trigger ---
 
-    /// Gambatte `LengthCounter::nr4Change` length-unit handling, folded into the
-    /// NRx4 write. Re-derives `lengthCounter_` from the absolute expiry cc, then
-    /// applies the lcen-enable `dec = ~cc>>12 & 1` extra-clock quirk and the
+    /// NR4 write length-unit handling, folded into the
+    /// NRx4 write. Re-derives the length counter from the absolute expiry cc,
+    /// then applies the length-enable `dec = ~cc>>12 & 1` extra-clock quirk and the
     /// trigger reload, finally rescheduling the absolute expiry.
     fn length_nr4_change(&mut self, old_nr4: u8, new_nr4: u8, trigger: bool) {
         let mask = self.length_mask();
@@ -781,8 +776,8 @@ impl SquareWave {
 
         let mut dec: u16 = 0;
         // CGB-B and older: the length-enable extra-clock glitch fires
-        // regardless of the written bit-6 value (SameBoy `(value & 0x40) ||
-        // (GB_is_cgb && model <= GB_MODEL_CGB_B)` — "current value is
+        // regardless of the written bit-6 value (`(value & 0x40) ||
+        // (cgb && model <= CGB_B)` — "current value is
         // irrelevant"; SameSuite channel_*_extra_length_clocking-cgb0B).
         if new_nr4 & 0x40 != 0 || self.cgb_le_b {
             dec = ((!self.len_cc >> 12) & 1) as u16;
@@ -811,20 +806,20 @@ impl SquareWave {
         let old_nr4 = self.nr4();
 
         // Catch the duty unit up to the write cc before touching the frequency
-        // (SameBoy runs GB_apu_run before the register write).
+        // (the APU is run before the register write).
         self.update_pos();
 
-        // SameBoy NRx4 step-back quirk (Core/apu.c ~1814): when the sample length
+        // NRx4 step-back quirk: when the sample length
         // changes from ≥$700 to <$700 on a NON-trigger write of an active channel,
         // the index steps back one (compensating a same-cycle would-be tick).
-        // SameBoy: `if (model == CGB_E || model == CGB_D || (sample_countdown & 1))`
+        // `if (model == CGB_E || model == CGB_D || (sample_countdown & 1))`
         // — CGB-D/E apply it unconditionally; CGB-C-and-earlier AND AGB gate it
         // on the countdown parity ("behaves slightly different on double speed").
         // In DOUBLE SPEED the pre-D/AGB parity term resolves to "never step
         // back" against rustyboi's dot-sync grid (its `sample_countdown` sits
-        // one cc off SameBoy's, so the low bit is 0 across the DS freq-change
+        // one cc off the oracle's, so the low bit is 0 across the DS freq-change
         // race cells; SameSuite freq_change_timing-cgb0BC/-A pin this). The
-        // default CGB keeps the unconditional (gambatte-cgb04c-captured)
+        // default CGB keeps the unconditional (cgb04c-captured)
         // placement; `step_back_parity` selects the {CGB0,CGBB,AGB} fork.
         if !trigger
             && self.master
@@ -832,13 +827,13 @@ impl SquareWave {
             && (value & 7) != 7
             && !(self.step_back_parity && self.ds)
             && self.did_tick
-            && self.sample_countdown >> 1 == (self.sample_length() ^ 0x7FF)
+            && self.sample_countdown >> 1 == 2047 - self.freq() as u32
         {
             self.pos = (self.pos.wrapping_sub(1)) & 7;
             self.sample_surpressed = false;
             // The output LATCH is NOT recomputed: hardware keeps emitting the
-            // pre-step-back sample until the next duty tick (SameBoy has no
-            // update_sample here; SameSuite channel_1_freq_change_timing-cgbDE
+            // pre-step-back sample until the next duty tick (no sample update
+            // here; SameSuite channel_1_freq_change_timing-cgbDE
             // nops-28 pins the stale-high read).
         }
 
@@ -852,12 +847,12 @@ impl SquareWave {
         }
         self.period = to_period(self.freq());
 
-        // SameBoy: `just_reloaded` reload from the new sample length.
+        // `just_reloaded` reload from the new sample length.
         if self.just_reloaded {
-            self.sample_countdown = (self.sample_length() ^ 0x7FF) * 2 + 1;
+            self.sample_countdown = self.duty_tick_reload();
         }
 
-        // dutyUnit/envelope nr4 handling happens on trigger.
+        // Duty/envelope NRx4 handling happens on trigger.
         if trigger {
             self.trigger();
         }
@@ -868,15 +863,15 @@ impl SquareWave {
 
         // Length-counter reload + reschedule is handled in `length_nr4_change`.
 
-        // SameBoy `is_active[index]` before the trigger = the channel was already
+        // `is_active` before the trigger = the channel was already
         // playing (DAC on + previously triggered). `master` carries that here.
         let was_active = self.master;
 
-        // Catch the duty unit up to the trigger cc (SameBoy runs GB_apu_run before
+        // Catch the duty unit up to the trigger cc (the APU is run before
         // the register write) so the countdown/index reflect the exact trigger cc.
         self.update_pos();
 
-        // Envelope trigger init (SameBoy NRx4 bit 7): unlock, disarm, reload
+        // Envelope trigger init (NRx4 bit 7): unlock, disarm, reload
         // volume + countdown from NRx2. master = DAC on.
         let nr2 = self.nr2();
         self.env_locked = false;
@@ -889,51 +884,51 @@ impl SquareWave {
         // Duty period from the (possibly just-written) frequency.
         self.period = to_period(self.freq());
 
-        // SameBoy NRx4 trigger (Core/apu.c ~1833): the duty countdown/delay place
+        // NRx4 trigger: the duty countdown/delay place
         // the first edge at the hardware-accurate phase. `sample_length` == freq.
         // `current_sample_index` (pos) is NOT reset — it persists across triggers.
         // The reload base `(sl^0x7FF)*2` plus `delay` (6-lf_div fresh / 4-lf_div
         // when the channel was already active — "sound starts 2 ticks earlier")
-        // is the SameBoy trigger→first-edge model the SameSuite align/delay/duty
+        // is the trigger→first-edge model the SameSuite align/delay/duty
         // tests validate on cgb04c.
         //
-        // SameBoy additionally models a CGB-D/E trigger pre-increment quirk (steps
-        // the index forward on trigger when NRx4 bit 2 is clear and a countdown bit
-        // is unset). Enabling it gives ZERO SameSuite gain yet regresses 16 gambatte
-        // cgb04c/dmg08 duty-pos-pattern tests (also real-hardware oracles) — on the
-        // cases rustyboi exercises, cgb04c shows no pre-increment — so it is omitted.
-        let sl = self.sample_length();
+        // The reference additionally models a CGB-D/E trigger pre-increment quirk
+        // (steps the index forward on trigger when NRx4 bit 2 is clear and a
+        // countdown bit is unset). Enabling it gives ZERO SameSuite gain yet
+        // regresses 16 cgb04c/dmg08 duty-pos-pattern tests (also real-hardware
+        // oracles) — on the cases rustyboi exercises, cgb04c shows no
+        // pre-increment — so it is omitted.
         self.did_tick = false;
-        // The cgb04c/dmg08-validated cycle-exact placement, re-expressed
-        // in the SameBoy countdown convention (first tick lands at
+        // The cgb04c/dmg08-validated cycle-exact placement, expressed
+        // in the sample-countdown convention (first tick lands at
         // `cc + sample_countdown + 1`):
         //   delay = 5 - 2*was_active - lf_div
-        // `was_active` (the OLD master, SameBoy's is_active) is the master
+        // `was_active` (the OLD master, the is_active state) is the master
         // term for BOTH channels: the ch2 new-master variant breaks 6
-        // SameSuite ch2 fresh-trigger tests (measured) and no gambatte
+        // SameSuite ch2 fresh-trigger tests (measured) and no oracle
         // test needs it.
         //
-        // This is exactly 1 2MHz-cycle EARLIER than SameBoy's literal
-        // 6-lf_div/4-lf_div: SameBoy's write/probe grid sits 1 cycle after
+        // This is exactly 1 2MHz-cycle EARLIER than the reference's literal
+        // 6-lf_div/4-lf_div: the reference write/probe grid sits 1 cycle after
         // rustyboi's dot-sync grid, so its +1 is a frame-of-reference
         // constant, not a hardware phase. Single-speed PCM12 probes land on
         // even cc and the fresh-trigger grid is odd, so SameSuite cannot
         // distinguish the two (measured: 0 samesuite delta from the -1);
-        // the double-speed / post-speed-switch gambatte brackets probe odd
+        // the double-speed / post-speed-switch cgb04c brackets probe odd
         // cc and require this placement (16 speedchange + ds_6 measured).
         //
         // The phase term is the free-running POWER-ON-ANCHORED lf_div
-        // (SameBoy's 1 MHz sub-phase): SameSuite channel_*_align_cpu and
+        // (the 1 MHz sub-phase): SameSuite channel_*_align_cpu and
         // channel_*_duty sweep the APU-enable alignment and show the
         // trigger grid anchors to the enable instant, not absolute cc
-        // parity (Gambatte's `(cc-ref)&1` breaks exactly those).
+        // parity (an absolute `(cc-ref)&1` phase breaks exactly those).
         //
-        // REVISION FORK (SameBoy `6 + lf * (model < CGB_D && ds ? 1 : -1)`):
+        // REVISION FORK (`6 + lf * (model < CGB_D && ds ? 1 : -1)`):
         // the default `5 - 2a - lf_div` is the cgb04c (CPU-CGB-C) placement,
-        // pinned by the gambatte DS/speedchange pos6->pos7 brackets
+        // pinned by the DS/speedchange pos6->pos7 brackets
         // together with the controller's DS power-on lf seed 0. CPU-CGB-
         // D/E silicon (SameSuite channel_*_align/align_cpu, DS power-on
-        // sweeps) takes SameBoy's literal pair instead: seed 1 always with
+        // sweeps) takes the other literal pair instead: seed 1 always with
         // DS `6 - 2*was_active - lf` — the two demands differ by 2 cells
         // at odd power-on->trigger parity, a real revision divergence with
         // no shared value. `cgb_de` (Hardware::CGBE) selects the D/E side;
@@ -942,18 +937,20 @@ impl SquareWave {
             6 - 2 * (was_active as u32) - self.lf_div
         } else if self.step_back_parity && self.ds && !was_active {
             // Pre-D / AGB DOUBLE-SPEED fresh trigger: the lf term flips sign
-            // (SameBoy `6 + lf_div` for the `< CGB_D && double_speed` fork,
+            // (`6 + lf_div` for the `< CGB_D && double_speed` fork,
             // here in the -1 frame: `5 + lf_div`). The active-trigger path
             // (`4 - lf`) has no model fork. Applied to the {CGB0,CGBB,AGB}
             // parity set (the SameSuite -cgb0BC and -A DS rows both need it —
             // the real pre-04 / AGB silicon these tests target diverges from
-            // the gambatte-cgb04c default `5 - lf` here), leaving the default
-            // CGB unchanged so the gambatte DS pos6->pos7 brackets hold.
+            // the cgb04c default `5 - lf` here), leaving the default
+            // CGB unchanged so the cgb04c DS pos6->pos7 brackets hold.
             5 + self.lf_div
         } else {
             5 - 2 * (was_active as u32) - self.lf_div
         };
-        self.sample_countdown = (sl ^ 0x7FF) * 2 + self.delay;
+        // Trigger base is `(2047 - freq) * 2` (the duty period less two, the
+        // half-tick trigger convention) plus the phase `delay` computed above.
+        self.sample_countdown = (2047 - self.freq() as u32) * 2 + self.delay;
 
         self.master = !dac_off;
         // The duty output latch is NOT recomputed at trigger: it keeps the
@@ -965,12 +962,12 @@ impl SquareWave {
         // live `volume` field).
 
         // Fresh trigger with the DAC on surpresses the first output until the first
-        // duty tick clears it (SameBoy `sample_surpressed`).
+        // duty tick clears it (the `sample_surpressed` flag).
         if !dac_off && !was_active {
             self.sample_surpressed = true;
         }
 
-        // Frequency sweep (Channel 1 only) — Gambatte cc-driven SweepUnit.
+        // Frequency sweep (Channel 1 only) — cc-driven.
         if self.channel1 {
             self.sweep_nr4_init();
         }
@@ -1001,13 +998,13 @@ impl SquareWave {
         self.enabled = enabled;
     }
 
-    /// CGB PCM12 nibble for this square channel. Reports SameBoy's `samples[index]`
+    /// CGB PCM12 nibble for this square channel. Reports the `samples[index]`
     /// digital amplitude: 0 while the DAC is off (`!master`) or the fresh-trigger
-    /// output is still surpressed (SameBoy `sample_surpressed`); otherwise the
+    /// output is still surpressed (the `sample_surpressed` flag); otherwise the
     /// current duty high-state times the envelope volume.
     ///
     pub fn pcm_nibble(&self) -> u8 {
-        // A length-expired channel (enabled=false, SameBoy is_active=false)
+        // A length-expired channel (enabled=false, is_active=false)
         // reports 0 — the digital sample stops with the channel, even though
         // the DAC (master) state survives (SameSuite channel_*_stop_div).
         if !self.is_active() || self.sample_surpressed {
@@ -1043,11 +1040,11 @@ impl SquareWave {
                 let mut countdown = self.sample_countdown;
                 let mut pos = self.pos;
                 while cycles_left > countdown {
-                    // Pre-tick digital sample (SameBoy `samples[i]` before the
+                    // Pre-tick digital sample (the `samples[i]` value before the
                     // tick's update) for the CGB<=C PCM read glitch below.
                     let pre_zero = surpressed || !high || self.volume & 0x0F == 0;
                     cycles_left -= countdown + 1;
-                    countdown = (self.sample_length() ^ 0x7FF) * 2 + 1;
+                    countdown = self.duty_tick_reload();
                     pos = (pos + 1) & 7;
                     surpressed = false;
                     high = duty_out(self.duty(), pos);
@@ -1061,9 +1058,9 @@ impl SquareWave {
         }
         // CGB-C and older (NOT AGB, NOT D/E): a duty tick landing in the read
         // access M-cycle (0 or 1 cc before the read resolution point) with a
-        // 0 pre-tick sample masks this channel's nibble to 0 (SameBoy
-        // `pcm_mask`, consumed for `model <= GB_MODEL_CGB_C`; the {0,1} window
-        // is SameBoy's read grid sitting 1 cc after rustyboi's, cell-pinned by
+        // 0 pre-tick sample masks this channel's nibble to 0 (the
+        // pcm_mask, consumed for `model <= CGB_C`; the {0,1} window
+        // is the read grid sitting 1 cc after rustyboi's, cell-pinned by
         // SameSuite channel_1_freq_change_timing-cgb0BC first digits vs -A).
         if self.pcm_c_glitch && tick_pre_zero && read_cc.wrapping_sub(tick_cc) <= 1 {
             return 0;
