@@ -186,6 +186,12 @@ pub struct Session {
     /// The DMG presentation palette choice (the concrete shades live in
     /// `config.dmg_palette`; this is the menu selection they mirror).
     palette: PaletteChoice,
+    /// Real boot ROM bytes supplied by the adapter (DMG or CGB), run in place of
+    /// `skip_bios` when `config.use_real_boot_rom` is set and this is `Some`.
+    /// `None` = no boot ROM available; the session always falls back to
+    /// `skip_bios`. The session is WASM-clean, so it never reads a file itself —
+    /// the adapter resolves the bytes and installs them via `set_boot_rom`.
+    boot_rom: Option<Vec<u8>>,
 
     // --- debug-step requests set by `apply`, drained by the frontend --------
     pending_step_cycles: Option<u32>,
@@ -214,6 +220,10 @@ impl Session {
         // enable_audio only errors if a sink was already installed or start()
         // fails; our CaptureSink::start is infallible and gb is fresh here.
         let _ = gb.enable_audio(Box::new(CaptureSink::new(audio_buf.clone())));
+        // Presentation-only machine settings (CGB colour correction) apply to the
+        // caller's already-prepared machine here; every later (re)build funnels
+        // through `apply_presentation`.
+        gb.set_cgb_color_conversion(config.color_correction);
         let rewind = RewindBuffer::new(config.rewind.depth, config.rewind.interval_frames);
         let palette = PaletteChoice::from_shades(config.dmg_palette.shades);
         Session {
@@ -236,8 +246,34 @@ impl Session {
             sgb_border: true,
             touch_controls: cfg!(target_os = "android"),
             palette,
+            boot_rom: None,
             pending_step_cycles: None,
             pending_step_frames: None,
+        }
+    }
+
+    /// Re-apply presentation-only machine settings (currently CGB colour
+    /// correction) after a machine (re)build. Called from every sink that
+    /// installs a fresh `GB` so the setting survives ROM restarts and state
+    /// loads. Presentation-only: it never affects emulation determinism.
+    fn apply_presentation(&mut self) {
+        self.gb.set_cgb_color_conversion(self.config.color_correction);
+    }
+
+    /// Boot a freshly-built machine: run the supplied real boot ROM when the
+    /// feature is enabled and bytes are available (and valid for the model),
+    /// else seed the synthetic post-boot state. A wrong/mismatched boot ROM
+    /// fails validation inside `load_bios_bytes` and falls back to `skip_bios`,
+    /// so content always loads.
+    fn boot_or_skip(&self, gb: &mut GB) {
+        if self.config.use_real_boot_rom
+            && let Some(bytes) = self.boot_rom.as_deref()
+            && gb.load_bios_bytes(bytes).is_ok()
+            && gb.has_bios()
+        {
+            gb.run_boot_rom();
+        } else {
+            gb.skip_bios();
         }
     }
 
@@ -358,13 +394,14 @@ impl Session {
     pub fn replace_machine(&mut self, mut gb: GB, rom_id: [u8; 32]) {
         let _ = gb.enable_audio(Box::new(CaptureSink::new(self.audio_buf.clone())));
         self.cheats.apply_rom_patches(&mut gb);
-        self.gb = Box::new(gb);
+        *self.gb = gb;
         self.rom_id = rom_id;
         self.frame_count = 0;
         self.rewind.clear();
         self.recording = None;
         self.playback = None;
         self.mode = RunMode::Normal;
+        self.apply_presentation();
     }
 
     // --- run mode -----------------------------------------------------------
@@ -496,7 +533,8 @@ impl Session {
         }
         let _ = gb.enable_audio(Box::new(CaptureSink::new(self.audio_buf.clone())));
         self.cheats.apply_rom_patches(&mut gb);
-        self.gb = Box::new(gb);
+        *self.gb = gb;
+        self.apply_presentation();
         Ok(())
     }
 
@@ -635,10 +673,14 @@ impl Session {
             .clone();
         let mut gb = GB::new(self.config.hardware);
         gb.insert(cart);
+        // A power-on movie was recorded against the synthetic post-boot state;
+        // replay it that way regardless of the real-boot-ROM setting so the
+        // recorded input stays bit-identical.
         gb.skip_bios();
         let _ = gb.enable_audio(Box::new(CaptureSink::new(self.audio_buf.clone())));
         self.cheats.apply_rom_patches(&mut gb);
-        self.gb = Box::new(gb);
+        *self.gb = gb;
+        self.apply_presentation();
         Ok(())
     }
 
@@ -762,6 +804,78 @@ impl Session {
         self.config.dmg_palette.shades = palette_shades(choice);
     }
 
+    /// The current CGB colour-correction curve.
+    pub fn color_correction(&self) -> rustyboi_core_lib::ppu::CgbColorConversion {
+        self.config.color_correction
+    }
+
+    /// Set the CGB colour-correction curve (Linear/LCD) live and persist it.
+    /// Presentation-only: it changes CGB output bytes but not emulation.
+    pub fn set_color_correction(
+        &mut self,
+        conversion: rustyboi_core_lib::ppu::CgbColorConversion,
+    ) {
+        self.config.color_correction = conversion;
+        self.gb.set_cgb_color_conversion(conversion);
+        self.persist_config();
+    }
+
+    /// Whether the real-boot-ROM feature is enabled.
+    pub fn use_real_boot_rom(&self) -> bool {
+        self.config.use_real_boot_rom
+    }
+
+    /// Enable/disable running a real boot ROM. Rebuilds the machine (a boot mode
+    /// change only takes effect from power-on) and persists the config.
+    pub fn set_real_boot_rom(&mut self, enabled: bool) {
+        self.config.use_real_boot_rom = enabled;
+        let gb = self.rebuild_current_gb();
+        self.replace_machine(*gb, self.rom_id);
+        self.persist_config();
+    }
+
+    /// Install real boot ROM bytes (DMG or CGB) the adapter resolved from a file.
+    /// Does not itself validate the image — validation happens at boot time in
+    /// [`GB::load_bios_bytes`](rustyboi_core_lib::gb::GB::load_bios_bytes), which
+    /// falls back to `skip_bios` on a bad/mismatched ROM. Not persisted (the raw
+    /// ROM is a resource the adapter re-supplies), unlike the enable flag.
+    pub fn set_boot_rom(&mut self, bytes: Option<Vec<u8>>) {
+        self.boot_rom = bytes;
+    }
+
+    /// Finish a boot-ROM import: store the resolved bytes and, if the feature is
+    /// already enabled, rebuild the machine so it boots with the new ROM.
+    pub fn finish_load_boot_rom(&mut self, bytes: &[u8]) {
+        self.boot_rom = Some(bytes.to_vec());
+        if self.config.use_real_boot_rom {
+            let gb = self.rebuild_current_gb();
+            self.replace_machine(*gb, self.rom_id);
+        }
+    }
+
+    /// The current upscale texture filter (presentation-only).
+    pub fn texture_filter(&self) -> crate::action::TextureFilter {
+        self.config.texture_filter
+    }
+
+    /// Set the upscale texture filter and persist it (presentation-only; the
+    /// renderer reads it each frame).
+    pub fn set_texture_filter(&mut self, filter: crate::action::TextureFilter) {
+        self.config.texture_filter = filter;
+        self.persist_config();
+    }
+
+    /// The current LCD post-process effect (presentation-only).
+    pub fn lcd_effect(&self) -> crate::action::LcdEffect {
+        self.config.lcd_effect
+    }
+
+    /// Set the LCD post-process effect and persist it (presentation-only).
+    pub fn set_lcd_effect(&mut self, effect: crate::action::LcdEffect) {
+        self.config.lcd_effect = effect;
+        self.persist_config();
+    }
+
     /// Enable/disable rewind capture; persists the config.
     pub fn set_rewind_enabled(&mut self, enabled: bool) {
         self.config.rewind.enabled = enabled;
@@ -846,7 +960,7 @@ impl Session {
         let mut gb = GB::new(self.config.hardware);
         if let Some(cart) = self.gb.cartridge() {
             gb.insert(cart.clone());
-            gb.skip_bios();
+            self.boot_or_skip(&mut gb);
         }
         Box::new(gb)
     }
@@ -897,7 +1011,7 @@ impl Session {
         let cart = Cartridge::from_bytes(bytes).map_err(|e| SessionError::State(e.to_string()))?;
         let mut gb = GB::new(self.config.hardware);
         gb.insert(cart);
-        gb.skip_bios();
+        self.boot_or_skip(&mut gb);
         let rom_id = rustyboi_core_lib::movie::sha256(bytes);
         self.game_name = crate::no_intro::resolve_game_name(bytes);
         self.replace_machine(gb, rom_id);
@@ -947,6 +1061,7 @@ impl Session {
             }
         }
         self.replace_machine(gb, rom_id);
+        // `replace_machine` already re-applies presentation settings.
         Ok(())
     }
 
@@ -1079,6 +1194,13 @@ impl Session {
     /// the next ROM (re)load (an applied ROM patch cannot be reverted in place).
     pub fn remove_cheat(&mut self, code: &str) -> bool {
         self.cheats.remove(code)
+    }
+
+    /// Remove all cheats (e.g. libretro's `retro_cheat_reset`). Like
+    /// [`remove_cheat`](Self::remove_cheat), already-applied Game Genie ROM
+    /// patches are only undone on the next ROM (re)load.
+    pub fn clear_cheats(&mut self) {
+        self.cheats.clear();
     }
 
     /// The active cheat codes.
