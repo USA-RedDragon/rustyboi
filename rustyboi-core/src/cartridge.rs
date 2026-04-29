@@ -2468,9 +2468,9 @@ impl Cartridge {
         if data.len() < Self::HUC3_RTC_BLOB_LEN || self.huc3_rtc_mem.len() < 0x100 {
             return None;
         }
-        for i in 0..0x80 {
-            self.huc3_rtc_mem[i * 2] = data[i] & 0x0F;
-            self.huc3_rtc_mem[i * 2 + 1] = data[i] >> 4;
+        for (i, &d) in data[..0x80].iter().enumerate() {
+            self.huc3_rtc_mem[i * 2] = d & 0x0F;
+            self.huc3_rtc_mem[i * 2 + 1] = d >> 4;
         }
         // The restored state begins a fresh minute.
         self.huc3_rtc_accum = 0;

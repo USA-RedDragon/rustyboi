@@ -2742,7 +2742,7 @@ impl Ppu {
                 };
                 if counted && base >= anchor + arm {
                     h += (CGBWG_SHIFT_BASE as i64 - (pos % 8)).max(6) as u64;
-                } else if counted && (n as i64) >= pos / 8 + 1 {
+                } else if counted && (n as i64) > pos / 8 {
                     pending += (CGBWG_SHIFT_BASE as i64 - (pos % 8)).max(6) as u64;
                 }
             } else if rec.phase == SpriteFetchPhase::Fetched
@@ -9584,10 +9584,10 @@ impl Ppu {
     /// Branch ORDER matches the silicon STAT resolution (the VBlank-window branch
     /// never applies for ly<143):
     /// - mode 2 iff `line cycles < 77 || line cycles >= cpl - 3` (guarded by
-    /// the inactive period after display enable, == rustyboi `display_enable_inactive_until`)
+    ///   the inactive period after display enable, == rustyboi `display_enable_inactive_until`)
     /// - else mode 3 iff `access_cc + read_off < mode-0 time` — the SAME sub-test as
-    /// `get_stat_mode3to0_at_cc` (so a line-straddle that resolves back into
-    /// mode 3 stays byte-identical to the already-passing PixelTransfer path)
+    ///   `get_stat_mode3to0_at_cc` (so a line-straddle that resolves back into
+    ///   mode 3 stays byte-identical to the already-passing PixelTransfer path)
     /// - else mode 0
     ///
     /// This is only ever reached when the renderer is NOT in PixelTransfer (the
@@ -10779,7 +10779,9 @@ impl Ppu {
                 }
                 // The 15-dot stale-FIFO pop quirk is a DMG-CPU artifact; the CGB
                 // pixel gate samples LCDC.1 at the plain pop dot (no quirk).
-                let stale = !(mmio.is_cgb() && !mmio.is_cgb_features_enabled())
+                // De Morgan of `!(is_cgb && !cgb_features_enabled)`: the stale-pop
+                // quirk applies on DMG hardware or a CGB running with CGB features.
+                let stale = (!mmio.is_cgb() || mmio.is_cgb_features_enabled())
                     && rec
                         .filter(|r| r.phase == SpriteFetchPhase::Fetched)
                         .is_some_and(|r| self.ticks >= r.arm_tick + 15);
