@@ -12,8 +12,36 @@
 
 use egui::{ClippedPrimitive, TexturesDelta};
 use egui_wgpu::ScreenDescriptor;
-use rustyboi_session::ScalingMode;
+use rustyboi_session::{LcdEffect, ScalingMode, TextureFilter};
 use wgpu::util::DeviceExt;
+
+/// Size in bytes of the fragment/vertex uniform block: a 4x4 transform (64) +
+/// source size `vec2<f32>` (8) + effect `u32` (4) + padding (4) = 80, a
+/// multiple of 16 as WGSL requires.
+const UNIFORM_BYTES: usize = 80;
+
+/// Build the 80-byte uniform block from the NDC transform, the active source
+/// dimensions (for LCD-effect texel math), and the effect selector.
+fn uniform_bytes(transform: &[f32; 16], source: (f32, f32), effect: u32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(UNIFORM_BYTES);
+    for v in transform {
+        bytes.extend_from_slice(&v.to_ne_bytes());
+    }
+    bytes.extend_from_slice(&source.0.to_ne_bytes());
+    bytes.extend_from_slice(&source.1.to_ne_bytes());
+    bytes.extend_from_slice(&effect.to_ne_bytes());
+    bytes.extend_from_slice(&0u32.to_ne_bytes()); // padding to 16-byte alignment
+    bytes
+}
+
+/// Map the session's [`LcdEffect`] to the shader's effect selector.
+fn effect_code(effect: LcdEffect) -> u32 {
+    match effect {
+        LcdEffect::Off => 0,
+        LcdEffect::Grid => 1,
+        LcdEffect::Scanlines => 2,
+    }
+}
 
 /// Normal Game Boy screen dimensions.
 pub const GB_WIDTH: u32 = 160;
@@ -61,10 +89,13 @@ fn f32s_to_bytes(values: &[f32]) -> Vec<u8> {
 }
 
 /// One RGBA source texture at a fixed size, plus the bind group that samples it.
+/// The `view` is retained so the bind group can be rebuilt when the sampling
+/// filter changes without recreating (and re-uploading) the texture.
 struct Source {
     width: u32,
     height: u32,
     texture: wgpu::Texture,
+    view: wgpu::TextureView,
     bind_group: wgpu::BindGroup,
 }
 
@@ -89,13 +120,24 @@ impl Source {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group = Self::make_bind_group(device, layout, sampler, uniform_buffer, &view);
+        Source { width, height, texture, view, bind_group }
+    }
+
+    fn make_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        uniform_buffer: &wgpu::Buffer,
+        view: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rustyboi_game_bind_group"),
             layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
+                    resource: wgpu::BindingResource::TextureView(view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -106,8 +148,20 @@ impl Source {
                     resource: uniform_buffer.as_entire_binding(),
                 },
             ],
-        });
-        Source { width, height, texture, bind_group }
+        })
+    }
+
+    /// Rebuild the bind group against a new sampler (filter change). Reuses the
+    /// existing texture + view, so no re-upload is needed.
+    fn rebuild_bind_group(
+        &mut self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        uniform_buffer: &wgpu::Buffer,
+    ) {
+        self.bind_group =
+            Self::make_bind_group(device, layout, sampler, uniform_buffer, &self.view);
     }
 
     /// Upload a tightly-packed RGBA8 frame (`width * height * 4` bytes).
@@ -167,6 +221,14 @@ pub struct Renderer {
     vertex_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
     render_pipeline: wgpu::RenderPipeline,
+    /// The two upscale samplers; `texture_filter` selects which is bound.
+    nearest_sampler: wgpu::Sampler,
+    linear_sampler: wgpu::Sampler,
+    /// Retained so a filter change can rebuild the source bind groups.
+    bind_group_layout: wgpu::BindGroupLayout,
+    /// Current sampling filter + LCD effect, pushed each frame from the session.
+    texture_filter: TextureFilter,
+    lcd_effect: LcdEffect,
     clear_color: wgpu::Color,
     /// Set once any game frame has been uploaded. Lets a render tick with no
     /// fresh frame redraw the last texture instead of clearing to black — the
@@ -212,20 +274,26 @@ impl Renderer {
         let shader = wgpu::include_wgsl!("../shaders/scale.wgsl");
         let module = device.create_shader_module(shader);
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("rustyboi_game_sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            lod_min_clamp: 0.0,
-            lod_max_clamp: 1.0,
-            compare: None,
-            anisotropy_clamp: 1,
-            border_color: None,
-        });
+        let make_sampler = |filter: wgpu::FilterMode, label: &str| {
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some(label),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: filter,
+                min_filter: filter,
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                lod_min_clamp: 0.0,
+                lod_max_clamp: 1.0,
+                compare: None,
+                anisotropy_clamp: 1,
+                border_color: None,
+            })
+        };
+        let nearest_sampler = make_sampler(wgpu::FilterMode::Nearest, "rustyboi_sampler_nearest");
+        let linear_sampler = make_sampler(wgpu::FilterMode::Linear, "rustyboi_sampler_linear");
+        // Nearest is the default (crisp pixels, the historical behavior).
+        let sampler = &nearest_sampler;
 
         // One full-screen triangle (as in pixels' ScalingRenderer).
         let vertex_data: [f32; 6] = [-1.0, -1.0, 3.0, -1.0, -1.0, 3.0];
@@ -238,10 +306,9 @@ impl Renderer {
         let identity: [f32; 16] = [
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
-        let transform_bytes = f32s_to_bytes(&identity);
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("rustyboi_game_matrix_uniform_buffer"),
-            contents: &transform_bytes,
+            contents: &uniform_bytes(&identity, (GB_WIDTH as f32, GB_HEIGHT as f32), 0),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -280,7 +347,7 @@ impl Renderer {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(transform_bytes.len() as u64),
+                        min_binding_size: wgpu::BufferSize::new(UNIFORM_BYTES as u64),
                     },
                     count: None,
                 },
@@ -302,7 +369,7 @@ impl Renderer {
         let gb_source = Source::new(
             &device,
             &bind_group_layout,
-            &sampler,
+            sampler,
             &uniform_buffer,
             GB_WIDTH,
             GB_HEIGHT,
@@ -311,7 +378,7 @@ impl Renderer {
         let sgb_source = Source::new(
             &device,
             &bind_group_layout,
-            &sampler,
+            sampler,
             &uniform_buffer,
             SGB_WIDTH,
             SGB_HEIGHT,
@@ -359,6 +426,11 @@ impl Renderer {
             vertex_buffer,
             uniform_buffer,
             render_pipeline,
+            nearest_sampler,
+            linear_sampler,
+            bind_group_layout,
+            texture_filter: TextureFilter::Nearest,
+            lcd_effect: LcdEffect::Off,
             clear_color: wgpu::Color::BLACK,
             has_game: false,
             egui_jobs: Vec::new(),
@@ -371,6 +443,29 @@ impl Renderer {
     /// call this each frame from the session config so the setting takes effect.
     pub fn set_scaling_mode(&mut self, mode: ScalingMode) {
         self.scaling_mode = mode;
+    }
+
+    /// Set the upscale texture filter. On a change, rebuilds both source bind
+    /// groups against the selected sampler (cheap — the textures are reused).
+    pub fn set_texture_filter(&mut self, filter: TextureFilter) {
+        if filter == self.texture_filter {
+            return;
+        }
+        self.texture_filter = filter;
+        let sampler = match filter {
+            TextureFilter::Nearest => &self.nearest_sampler,
+            TextureFilter::Linear => &self.linear_sampler,
+        };
+        self.gb_source
+            .rebuild_bind_group(&self.device, &self.bind_group_layout, sampler, &self.uniform_buffer);
+        self.sgb_source
+            .rebuild_bind_group(&self.device, &self.bind_group_layout, sampler, &self.uniform_buffer);
+    }
+
+    /// Set the LCD post-process effect used by the next `render` (uniform-driven,
+    /// no pipeline rebuild).
+    pub fn set_lcd_effect(&mut self, effect: LcdEffect) {
+        self.lcd_effect = effect;
     }
 
     /// A `Device` clone the platform can use to build companion GPU state if
@@ -462,8 +557,13 @@ impl Renderer {
         // --- game scale pass: clear + letterboxed game ---------------------
         let surface = (self.config.width as f32, self.config.height as f32);
         let (transform, scissor) = self.layout(surface, region);
-        self.queue
-            .write_buffer(&self.uniform_buffer, 0, &f32s_to_bytes(&transform));
+        let src = self.active_source();
+        let source_dims = (src.width as f32, src.height as f32);
+        self.queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            &uniform_bytes(&transform, source_dims, effect_code(self.lcd_effect)),
+        );
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("rustyboi_game_pass"),

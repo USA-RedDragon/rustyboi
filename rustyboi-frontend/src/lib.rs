@@ -11,8 +11,9 @@
 //!   the `rustyboi-egui` `Gui`), producing the paint jobs the renderer draws.
 //! - [`app::App`] — the portable application: owns the `Session`, the UI, the
 //!   palette, and the run/pause/error bookkeeping, driving emulation and UI. It
-//!   surfaces OS-only work as [`app::PlatformRequest`]s for the platform.
-//! - [`palette::ColorPalette`] — the shared DMG presentation palettes.
+//!   surfaces OS-only work as [`app::PlatformRequest`]s for the platform. The
+//!   DMG presentation palettes are the session's
+//!   [`PaletteChoice`](rustyboi_session::PaletteChoice) (one source of truth).
 //!
 //! The `rustyboi-platform` crate is a thin adapter around this: it creates the
 //! winit window + wgpu surface/device, pumps winit events, owns audio, file
@@ -22,13 +23,11 @@
 pub mod app;
 pub mod contract;
 pub mod keymap;
-pub mod palette;
 pub mod renderer;
 pub mod ui_host;
 
 pub use app::{App, FrameStep, PlatformRequest, ResolvedAction};
 pub use contract::{drive_action, Frontend, PauseHint};
-pub use palette::ColorPalette;
 pub use renderer::{GameFrame, PhysicalRect, Renderer, SourceSize};
 pub use ui_host::{UiFrame, UiHost};
 

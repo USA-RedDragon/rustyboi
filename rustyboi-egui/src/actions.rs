@@ -8,9 +8,10 @@
 //! behavior — `Session::apply` does.
 
 pub use rustyboi_session::action::{
-    ActionKind, CommandDescriptor, FileData, HardwareChoice, KeyBind, MenuCategory, PaletteChoice,
-    ScalingMode, SessionUiState, UiAction, COMMANDS,
+    ActionKind, CommandDescriptor, FileData, HardwareChoice, HardwareFamily, KeyBind, LcdEffect,
+    MenuCategory, PaletteChoice, ScalingMode, SessionUiState, TextureFilter, UiAction, COMMANDS,
 };
+pub use rustyboi_session::CgbColorConversion;
 
 #[cfg(target_os = "android")]
 pub use rustyboi_session::action::LibraryEntry;
