@@ -11,47 +11,45 @@ pub struct SM83 {
     /// T-cycles remaining in the post-STOP-speed-switch stall.
     /// While non-zero, `step` returns short slices without fetching, so the
     /// surrounding `step_instruction` loop continues to advance peripherals.
-    /// Mirrors Gambatte's `intevent_unhalt = cc + 0x20000 + 4` schedule.
     #[serde(default)]
     pub stop_unhalt_cycles: u32,
-    /// ds-engine STAGE 2 faithful-prefetch state (RB_FAITHFUL). `opcode` holds the
-    /// byte fetched at the previous instruction's boundary; `prefetched` is true
-    /// once that fetch has happened and the opcode is awaiting execute/discard.
-    /// Unused (and always default) when the gate is OFF.
+    /// Opcode prefetched at the previous instruction's boundary; `prefetched` is
+    /// true once that fetch has happened and the opcode awaits execute/discard.
     #[serde(default)]
     pub opcode: u8,
     #[serde(default)]
     pub prefetched: bool,
-    /// FAITHFUL HALT-BUG prefetch cc. The HALT-bug (IME=0 + pending IRQ) leaves the
-    /// byte after HALT PREFETCHED via a `peek` (no cc charged), unlike the normal
-    /// end-of-instruction prefetch which is `fetch_opcode`'d WITH its 4cc tick. When
-    /// that peeked opcode is consumed, its opcode-fetch M-cycle must still be charged
-    /// (Gambatte cpu.cpp:578 `cc() += 4` on the prefetched branch) so the doubled
-    /// instruction's operand read resolves one M-cycle later — on the exact cc a live
-    /// IO register (TIMA/DIV read as the immediate) has ticked to. Without it the
-    /// operand reads 4cc early (age halt-prefetch: `LD B,n` reads TIMA=06 not 07).
-    /// Set only by the HALT-bug peek; the HDMA-Requested / STOP-operand prefetches
-    /// keep their existing (un-charged) consumption which their tests are tuned to.
+    /// HALT-bug prefetch marker. The HALT bug (IME=0 + pending IRQ) peeks the byte
+    /// after HALT without charging its fetch M-cycle, unlike the normal
+    /// end-of-instruction prefetch. When that peeked opcode is consumed its fetch
+    /// M-cycle must still be charged, so the doubled instruction's operand read
+    /// resolves one M-cycle later — on the cc a live IO register (TIMA/DIV read as
+    /// the immediate) has ticked to. Set only by the HALT-bug peek.
+    /// Pan Docs: halt bug — https://gbdev.io/pandocs/halt.html
     #[serde(default)]
     pub halt_bug_prefetch: bool,
-    /// FAITHFUL HALT-EXIT: the m2-woken wake charged its +4 as a REAL stall
-    /// (the `return 4` below), so the woken stream is already at the hardware
-    /// cc and the timer-read facet must not re-add the advance.
+    /// HALT-exit +4: an m2-woken wake charged its extra M-cycle as a real stall
+    /// (the `return 4` below), so the woken stream is already at the hardware cc
+    /// and the timer-read facet must not re-add the advance.
+    /// Base extra-4-clock HALT exit: TCAGBD §4.9. The per-wake-source split
+    /// (m2 vs LYC/m1 vs serial) is from test-ROM refs, not in Pan Docs or GBCTR.
     #[serde(default)]
     pub m2_halt_stall_charged: bool,
     /// CGB LCD-woken HALT-exit +4: the LYC/m1-woken CGB wake charged its extra
-    /// M-cycle as a REAL stall (the `return 4` below). One-shot guard so the
-    /// still-halted re-entry does not stall again; take'n at unhalt.
+    /// M-cycle as a real stall (the `return 4` below). One-shot guard so the
+    /// still-halted re-entry does not stall again; taken at unhalt.
+    /// Base extra-4-clock HALT exit: TCAGBD §4.9. The CGB LYC/m1 per-wake-source
+    /// split is from test-ROM refs, not in Pan Docs or GBCTR.
     #[serde(default)]
     pub cgb_lcd_halt_stall_charged: bool,
-    /// FAITHFUL HALT-EXIT (CGB dma-due deferral): a Requested multi-block HDMA at
-    /// CGB HALT-exit with a pending IME=1 interrupt fires its block at unhalt and
-    /// then executes ONE post-HALT instruction BEFORE the interrupt is serviced —
-    /// Gambatte's `intevent_dma` handler (memory.cpp:280-287) prefetches the
-    /// post-HALT opcode, runs `dma()`, then `setMinIntTime(cc)` so the interrupt
-    /// event cannot fire until after that instruction. Set on the unhalt step,
-    /// consumed on the same step to skip the immediate service and run the
-    /// prefetched resume opcode; the interrupt stays pending for the next step.
+    /// CGB HDMA dma-due deferral: a Requested multi-block HDMA at CGB HALT-exit
+    /// with a pending IME=1 interrupt fires its block at unhalt, then executes ONE
+    /// post-HALT instruction BEFORE the interrupt is serviced (the block's DMA
+    /// event runs first and pushes the interrupt's min-time past that instruction).
+    /// Set on the unhalt step, consumed the same step to skip the immediate service
+    /// and run the prefetched resume opcode; the interrupt stays pending.
+    /// Not in Pan Docs, TCAGBD, or GBCTR; CGB HDMA-vs-interrupt HALT-exit
+    /// ordering from test-ROM refs.
     #[serde(default)]
     pub hdma_dma_due_defer_service: bool,
 }
@@ -81,24 +79,17 @@ impl SM83 {
 
     pub fn step(&mut self, mmio: &mut crate::cpu::Bus) -> u32 {
         // While stalled after a CGB STOP-speed-switch, advance peripherals in
-        // small slices without fetching instructions. Gambatte's `intevent_unhalt`
-        // schedule effectively suspends CPU fetch for 0x20000 + 4 T-cycles after
-        // STOP completes; the per-cycle peripheral loop in gb.rs still runs.
+        // small slices without fetching instructions. CPU fetch is suspended for
+        // 0x20000 + 4 T-cycles after STOP completes; the per-cycle peripheral loop
+        // in gb.rs still runs.
         if self.stop_unhalt_cycles > 0 {
-            // FAITHFUL STOP-WINDOW EARLY WAKE. Gambatte's `Memory::stop` runs
-            // `intreq_.halt()` for the 0x20000+4 unhalt window and schedules
-            // `intevent_unhalt` at its end — but the window is ALSO a halt, so a
-            // pending enabled interrupt raises `intevent_interrupts` at its IF-set
-            // cc, which the MinKeeper picks ahead of `intevent_unhalt`
-            // (memory.cpp:293-311: the `halted()` branch fires, `intreq_.unhalt()`
-            // terminates the window, then `interrupter_.interrupt` dispatches). The
-            // AGE `spsw-interrupts` "caution" roms exploit exactly this: an interrupt
-            // (timer/serial) fires DURING the post-STOP HALT period and wakes the CPU
-            // early. rustyboi otherwise drains the full 0x20000 slice-by-slice and
-            // ignores the pending IF until the window ends. Poll for a pending
-            // enabled interrupt at each slice boundary; on one, terminate the window
-            // and fall through to the halt-exit / dispatch machinery below (the STOP
-            // window is a halt, so route it through the same `self.halted` path).
+            // STOP-window early wake: the post-STOP stall window is also a halt, so
+            // a pending enabled interrupt (timer/serial) fired during it wakes the
+            // CPU before the window drains. Poll each slice boundary; on a pending
+            // interrupt, terminate the window and fall through to the halt-exit /
+            // dispatch path below (route it through the same `self.halted` path).
+            // Speed-switch window itself: TCAGBD §3.8; the interrupt early-wake
+            // within it is not in Pan Docs, TCAGBD, or GBCTR (test-ROM refs).
             if self.get_pending_interrupt(mmio).is_some() {
                 // Terminate the window here and run the unhalt exit gate (OAM-DMA
                 // unfreeze + HDMA reflag) that the window-drained-to-0 path runs.
@@ -108,27 +99,19 @@ impl SM83 {
                     let in_period_unhalt = mmio.hdma_in_period_for_unhalt();
                     mmio.stop_window_exit_reflag(in_period_unhalt);
                 }
-                // Fall through to the dispatch path below WITHOUT charging an extra
-                // wake M-cycle. Gambatte's HALT-exit `cc += 4` (memory.cpp:301) plus
-                // the +1 event-processing cc is ALREADY absorbed in rustyboi's
-                // detection cc: the timer IF becomes visible at `schedCc + CC_OFF`
-                // (CC_OFF = 5), which maps exactly onto Gambatte's post-wake cc
-                // (evt + 5). Verified cc-exact on age spsw-interrupts (rustyboi
-                // detection mcc 82320 == Gambatte post-wake 140688 under the 58368
-                // boot offset). Charging another +4 here double-counts the M-cycle and
-                // reads DIV/TIMA one tick high at the boundary probes. So we simply
-                // let the pending interrupt dispatch this same step.
+                // Fall through to dispatch WITHOUT charging an extra wake M-cycle:
+                // the HALT-exit advance is already absorbed in the +5 cc at which
+                // rustyboi first sees the timer IF, so an added +4 would read
+                // DIV/TIMA one tick high. Let the pending interrupt dispatch now.
             } else {
                 let slice = self.stop_unhalt_cycles.min(4);
                 self.stop_unhalt_cycles -= slice;
-                // Stop window over: run Gambatte's `intevent_unhalt` HDMA reflag gate
-                // at the unhalt cc (memory.cpp:224/304), then re-enable the period
-                // edge. A block held Low-at-stop reflags only if the unhalt lands back
-                // in the HDMA period (`hdma_m3speedchange_late_m0wakeup_*`); one whose
-                // unhalt is out of period stays dropped
-                // (`hdma_late_m3speedchange_*_1` -> out00).
+                // Stop window over: run the HDMA reflag gate at the unhalt cc, then
+                // re-enable the period edge. A block held Low-at-stop reflags only if
+                // the unhalt lands back in the HDMA period; one whose unhalt is out
+                // of period stays dropped.
                 if self.stop_unhalt_cycles == 0 {
-                    // Unfreeze the OAM-DMA (Gambatte's unhalt resumes `updateOamDma`).
+                    // Unfreeze OAM DMA (unhalt resumes it).
                     mmio.set_oam_dma_stop_freeze(false);
                     if mmio.in_stop_window() {
                         let in_period_unhalt = mmio.hdma_in_period_for_unhalt();
@@ -161,33 +144,19 @@ impl SM83 {
         let mut just_unhalted = false;
         if self.halted {
             if pending_interrupt.is_some() {
-                // FAITHFUL HALT-EXIT (DMG, m2-woken): Gambatte memory.cpp:301
-                // `cc += 4 * (isCgb() || cc - eventTime < 2)`. rustyboi's halted
-                // CPU steps per-cycle, so it reaches this wake at the EXACT
-                // IF-set cc; hardware spends one more M-cycle leaving HALT when
-                // the wake landed on the IRQ's event time. The m2 STAT event is
-                // 4-aligned to the instruction stream (eventTime = lineStart-4),
-                // so its `ceil_4` snap is a no-op and the `< 2` branch always
-                // takes the +4 — without it the whole woken stream (dispatch,
-                // polls, the next m0 IRQ count) runs 4cc early (mooneye
-                // intr_2_* family). Charged as a REAL 4-cycle stall (still
-                // halted; the world advances) so downstream event cc's shift
-                // with it. Scoped to the m2-woken DMG wake: the LYC/m1 events
-                // (eventTime ≡ 2 mod 4) take `ceil_4` +2 and MISS the < 2
-                // branch on hardware, and the m0/CGB wakes are modelled by the
-                // established read-side biases (halt_wake_plus4_dmg / +5 CGB).
-                // IME-on only: hardware charges the M-cycle regardless, but the
-                // IME-off resume streams' post-wake reads (noime_m2irq_m0stat_1,
-                // oamdmasrc80_halt_m2irq_read8000) resolve against the STAT/DMA
-                // read models tuned to the un-advanced wake cc — advancing only
-                // the IME-on dispatch path keeps those byte-identical.
-                // CGB adds the m2-woken +4 halt-exit M-cycle only for a
-                // rendering-line OAM-search wake (m2 event LY 0..143, the intr_2
-                // family). The VBlank-entry mode-2 quirk raises an m2 STAT event
-                // for LY 144 too; a wake there (vblank_stat_intr-C) does NOT take
-                // the real +4 — its dispatch/read stays on the un-advanced cc that
-                // the CGB read-side biases are co-tuned to. DMG keeps the whole
-                // range (its vblank_stat_intr-GS is co-tuned to the DMG stall).
+                // HALT-exit +4 (DMG, m2-woken): hardware spends one extra M-cycle
+                // leaving HALT when the wake lands on the waking IRQ's event time.
+                // The m2 STAT event is 4-aligned to the instruction stream, so it
+                // always takes this +4; without it the whole woken stream runs 4cc
+                // early. Charged as a REAL stall (still halted; the world advances)
+                // so downstream event cc's shift with it. IME-on only (the IME-off
+                // resume reads stay co-tuned to the un-advanced wake cc). Scoped to
+                // the m2-woken wake: LYC/m1 events (event time ≡ 2 mod 4) miss the
+                // `< 2` window, and m0/CGB wakes use the read-side biases below. On
+                // CGB the +4 applies only for a rendering-line (LY 0..143) m2 wake,
+                // not the LY 144 VBlank-entry m2 quirk. DMG keeps the whole range.
+                // Base extra-4-clock HALT exit: TCAGBD §4.9. The m2-woken per-source
+                // split (and CGB LY<144 scope) is from test-ROM refs, not Pan Docs/GBCTR.
                 let m2_stall_ok = if mmio.mmio.is_cgb() {
                     mmio.mmio.last_m2_irq_ly() < 144
                 } else {
@@ -207,39 +176,19 @@ impl SM83 {
                     }
                     return 4;
                 }
-                // FAITHFUL HALT-EXIT (CGB LCD-woken, LYC/m1): a CGB console
-                // spends one REAL extra M-cycle leaving HALT on an LCD(STAT)
-                // wake where DMG resumes immediately. Proven by the AntonioND
-                // gbc-hw-tests lcd_irq_delay_timer / vbl_irq_delay_timer
-                // real-silicon sweeps: relative to the same LYC IRQ, every
-                // real-CGB capture grid (STAT/IF/LY ISR reads AND the DIV/TIMA
-                // phase-reset writes after an IME=0 wake) sits exactly 4cc
-                // after the real-DMG grid, while the IF-set cc itself is
-                // machine-identical (the IF column flips at the same lineCycles
-                // on both). The timer-woken exit is machine-identical
-                // (halt_exit_timings_ime_* refs are equal), so this is per-wake
-                // -source, NOT Gambatte's unconditional `cc += 4 * isCgb()`.
-                // Charged as a REAL stall (world advances; subsequent WRITES
-                // shift too — the TIMA-phase evidence read-side biases cannot
-                // model). IME-independent (the IME=0 resume stream carries it:
-                // that is the no_halt variants' TIMA +1 column). Scoped:
-                //   - m0/m2-proximate wakes keep their co-tuned bias-web /
-                //     existing m2 stall (paths above),
-                //   - HDMA wakeups fold the +4 into the block-transfer phase,
-                //   - post-STOP streams (`self.stopped`, the sticky context
-                //     marker also used by the EI-loop anchor split) keep the
-                //     cc-exact STOP-window wake. (A speed-switch STOP never
-                //     sets `halted`/`stopped` — its window exits through the
-                //     dispatch path, so it cannot reach this stall; the DS
-                //     sections of the gbc_mode ROMs run ordinary HALTs whose
-                //     real-CGB DS captures show the same +1-M-cycle gap, so
-                //     double speed takes the stall like single speed. The
-                //     gambatte DS halt corpus is entirely m0/m2-woken and
-                //     stays on its co-tuned paths via the exclusions above.)
-                // The mmio flag drops the read-side +4 components at the
-                // consume sites (getStat +5 -> +1, getLyReg -5 -> -1, BGP
-                // write bias, VRAM-read +6 -> +2), keeping every pure-read
-                // consumer byte-identical by the (residual + 4) decomposition.
+                // HALT-exit +4 (CGB, LYC/m1 LCD wake): a CGB console spends one
+                // extra real M-cycle leaving HALT on a STAT(LYC/m1) wake where DMG
+                // resumes immediately (AntonioND gbc-hw-tests: every CGB ISR-read
+                // grid sits 4cc after the DMG grid for the same LYC IRQ, while the
+                // IF-set cc is identical — so this is per-wake-source, not an
+                // unconditional CGB cost). Charged as a REAL stall (writes shift
+                // too). IME-independent. Scoped: m0/m2-proximate wakes, HDMA wakeups,
+                // and post-STOP streams keep their own paths (below). The mmio flag
+                // drops the matching read-side +4 at the consume sites, keeping
+                // pure-read consumers byte-identical.
+                // Base extra-4-clock HALT exit: TCAGBD §4.9 (which frames it as
+                // model-independent); this per-wake-source CGB LYC/m1 delta is from
+                // test-ROM refs, not in Pan Docs or GBCTR.
                 if mmio.mmio.is_cgb()
                     && !self.stopped
                     && pending_interrupt == Some(registers::InterruptFlag::Lcd)
@@ -255,11 +204,9 @@ impl SM83 {
                         .mmio
                         .last_m2_irq_fire_cc()
                         .is_some_and(|fire| (mcc as u64).wrapping_sub(fire) < 8);
-                    // `hdma_machinery_used` is the sticky FF55 marker: a GDMA /
-                    // late-armed HDMA fired only AFTER the wake is invisible to
-                    // the wake-time predicates, but its whole cc-web is co-tuned
-                    // to the un-stalled wake (gambatte gdma_cycles / hdma_start
-                    // / hdma_late_* families).
+                    // Sticky FF55 marker: a GDMA / late-armed HDMA that fired only
+                    // after the wake is invisible to the wake-time predicates but is
+                    // co-tuned to the un-stalled wake, so exclude it too.
                     let hdma_wakeup = mmio.hdma_is_enabled()
                         || mmio.hdma_last_fire_cc().is_some()
                         || mmio.mmio.hdma_machinery_used()
@@ -267,8 +214,7 @@ impl SM83 {
                             mmio.halt_hdma_state(),
                             memory::mmio::HaltHdmaState::Low
                         );
-                    // Sticky mid-m3 LCDC-race marker (cgb-acid-hell): those
-                    // ROMs' fetcher-race web keeps the legacy timing.
+                    // Mid-m3 LCDC-race streams keep the legacy timing.
                     let lcdc_racer = mmio.mmio.m3_lcdc_write_seen();
                     if !m0_prox && !m2_prox && !hdma_wakeup && !lcdc_racer {
                         self.cgb_lcd_halt_stall_charged = true;
@@ -276,24 +222,17 @@ impl SM83 {
                         return 4;
                     }
                 }
-                // FAITHFUL HALT-EXIT (serial-woken, DMG+CGB): a serial-woken
-                // HALT resumes one M-cycle after the completion edge on BOTH
-                // consoles. Proven by AntonioND serial_int_handle_timing
-                // (real_gb == real_gbc == 03): the test's instruction stream
-                // is phase-locked to its own serial clock (each iteration
-                // begins at a serial-completion wake), and the second
-                // transfer's IF lands on the absolute DIV-derived bit-edge
-                // grid — so the stored `inc b` count pins the wake-relative
-                // stream offset. Our edge-exact wake counts one extra inc
-                // (uniform 04) on both machines; the +4 stall yields the
-                // captured halt-half 03 while the poll-loop (no-halt) half,
-                // whose dispatch grid is not wake-relative, keeps 04. The
-                // timer-woken exit has NO such delay (halt_exit_timings refs)
-                // — this is the per-source IF-edge-vs-halt-sampling phase,
-                // not a universal exit cost. Same one-shot guard; post-STOP
-                // streams keep the cc-exact window exit. The CGB read-residual
-                // flag is set so a subsequent LCD-read consume site sees the
-                // true (+4) stream cc, mirroring the LCD stall.
+                // HALT-exit +4 (serial-woken, DMG+CGB): a serial-woken HALT resumes
+                // one M-cycle after the completion edge on both consoles (AntonioND
+                // serial_int_handle_timing). This is the per-source IF-edge-vs-halt-
+                // sampling phase, not a universal exit cost (the timer-woken exit has
+                // no such delay). Same one-shot guard; post-STOP streams keep the
+                // cc-exact window exit. The CGB read-residual flag is set so a later
+                // LCD-read consume site sees the true (+4) stream cc.
+                // Base extra-4-clock HALT exit: TCAGBD §4.9. The per-source split is
+                // from test-ROM refs, not in Pan Docs or GBCTR.
+                // NOTE: TCAGBD §4.9 frames the +4 as universal ("any interrupt");
+                // our model makes it per-source (serial delayed, timer not).
                 if !self.stopped
                     && pending_interrupt == Some(registers::InterruptFlag::Serial)
                     && !self.cgb_lcd_halt_stall_charged
@@ -311,10 +250,9 @@ impl SM83 {
                 // is cleared by the next HALT's reset_halt_wakeup).
                 self.cgb_lcd_halt_stall_charged = false;
                 mmio.clear_cpu_halt();
-                // Mark whether this wakeup involved HDMA: those families fold the
-                // CGB halt-exit +4 into their own block-transfer / unhalt-reflag
-                // phase, so the getLyReg halt-exit bias must be suppressed for them
-                // (see get_ly_reg_at_cc). A plain (no-HDMA) wakeup gets the bias.
+                // Mark whether this wakeup involved HDMA: those wakes fold the CGB
+                // halt-exit +4 into their own transfer/reflag phase, so the
+                // get_ly_reg_at_cc halt-exit bias is suppressed for them.
                 let hdma_wakeup = mmio.hdma_is_enabled()
                     || mmio.hdma_last_fire_cc().is_some()
                     || !matches!(
@@ -322,20 +260,15 @@ impl SM83 {
                         memory::mmio::HaltHdmaState::Low
                     );
                 mmio.set_halt_wakeup_hdma(hdma_wakeup);
-                // C1: the instruction stream resumed by this wakeup carries the
-                // unmodeled HALT-prefetch sub-M-cycle skew; flag it so the FF41
-                // getStat-at-cc line-tail override defers to the renderer register
-                // (which is already correct there). Cleared on the next HALT.
+                // The resumed stream carries the unmodeled HALT-prefetch sub-M-cycle
+                // skew; flag it so the FF41 STAT line-tail override defers to the
+                // renderer register (already correct there). Cleared on the next HALT.
                 mmio.set_halt_wakeup_skew(true);
-                // PTZ wake-source: the line-tail mode-2 getStat overrides model the
-                // unmodeled m0/m2-wake-exit skew of exactly those streams; mark
-                // whether THIS wake is m0/m2-proximate so an LYC/m1-woken stream's
-                // line-tail STAT read resolves the true closed-form mode instead
-                // (real DMG+CGB read mode 0 at lineCycles 449..452 — gbc-hw-tests
-                // lcd_irq_delay_timer). The m0 window is the same widened [-2,6]
-                // grid the DMG timer-read bias uses (scx fine-scroll); the m2 test
-                // mirrors the stall check above, plus the stall-charged flag (an
-                // m2 stall already advanced mcc past the <2 window).
+                // The line-tail mode-2 STAT overrides model the m0/m2-wake-exit
+                // skew of those streams; mark whether THIS wake is m0/m2-proximate so
+                // an LYC/m1-woken stream's line-tail STAT read resolves the true mode
+                // instead. The m0 window is the widened [-2,6] grid; the m2 test
+                // mirrors the stall check above plus the stall-charged flag.
                 {
                     let mcc = mmio.master_cc_dbg() as i64;
                     let m0_prox = mmio
@@ -351,25 +284,19 @@ impl SM83 {
                         pending_interrupt == Some(registers::InterruptFlag::Lcd);
                     mmio.set_halt_wake_m0m2(lcd_wake && (m0_prox || m2_prox));
                 }
-                // FAITHFUL HALT-EXIT (timer-read facet): re-anchor the woken
-                // stream's DIV/TIMA reads by the full Gambatte HALT-exit advance
-                // — the ceil-to-M-cycle snap plus the conditional +4
-                // (cpu.cpp:531 / memory.cpp:301), i.e. {E%4 -> adv}: 0->+4,
-                // 1->+3, 2->+2, 3->+5 from the waking IRQ's eventTime E. An
-                // m0/m2-woken stream wakes ON that grid (mcc == E, proven by
-                // int_hblank_halt_scx0-7 spanning all four phases); the
-                // LYC/m1/VBlank IF-sets are delivered one dot AFTER their
-                // eventTime (the same +1 phase the closed-form m0 `ev` carries,
-                // see the R4 comment below), so their E = mcc-1 and the bias
-                // nets -1 (the lyc*/vblank*_int_halt_a/_b DIV brackets pin it
-                // to exactly that). Scoped DMG + Lcd/VBlank wakes: the
-                // Timer-woken streams (gambatte tima/tc0*_halt families) read
-                // TIMA on models co-tuned to the un-advanced wake cc, and CGB
-                // carries its own +5 read-side biases. An m2-woken wake that
-                // charged its +4 as a REAL stall (`return 4` above) is already
-                // at the hardware cc -> bias 0. Fixes the gbmicrotest
-                // int_*halt* / *_int_halt_a/_b cluster (DIV/TIMA read from the
-                // halt-woken ISR), verified value-exact vs Gambatte.
+                // HALT-exit timer-read facet: re-anchor the woken stream's DIV/TIMA
+                // reads by the full HALT-exit advance — the ceil-to-M-cycle snap plus
+                // the conditional +4, i.e. {E%4 -> adv}: 0->+4, 1->+3, 2->+2, 3->+5
+                // from the waking IRQ's event time E. An m0/m2-woken stream wakes ON
+                // that grid (mcc == E); LYC/m1/VBlank IF-sets are delivered one dot
+                // AFTER their event time, so E = mcc-1 and the bias nets -1. Scoped to
+                // DMG Lcd/VBlank wakes: Timer-woken streams read TIMA on models
+                // co-tuned to the un-advanced wake cc, and CGB carries its own +5
+                // read-side biases. An m2-woken wake that charged +4 as a real stall
+                // above is already at the hardware cc -> bias 0.
+                // Base extra-4-clock HALT exit: TCAGBD §4.9. The DIV/TIMA read
+                // re-anchor by the exit advance is a sub-cycle refinement from
+                // test-ROM refs, not in Pan Docs or GBCTR.
                 let m2_stall_charged = std::mem::take(&mut self.m2_halt_stall_charged);
                 if !mmio.mmio.is_cgb() {
                     let bias = if !m2_stall_charged
@@ -380,11 +307,9 @@ impl SM83 {
                         ) {
                         let mcc = mmio.master_cc_dbg() as i64;
                         // m0-woken window: the closed-form `ev` misses the scx
-                        // fine-scroll (+0..7) the real m0 IF-set carries, so the
-                        // wake lands at d = mcc - ev = scx%8 - 1 in [-1, 6]
-                        // (int_hblank_halt_scx0-7). The nearest other STAT/IF
-                        // event is >= ~85cc away, so the widened window cannot
-                        // misclassify a LYC/m1/VBlank wake.
+                        // fine-scroll, so the wake lands at mcc-ev in [-1,6]. The
+                        // nearest other STAT/IF event is ~85cc away, so this widened
+                        // window cannot misclassify a LYC/m1/VBlank wake.
                         let on_grid = mmio
                             .mmio
                             .pending_m0_irq_fire_cc()
@@ -403,56 +328,42 @@ impl SM83 {
                     };
                     mmio.mmio.set_halt_timer_read_bias(bias);
                 }
-                // FAITHFUL EVENTCC (R4): Gambatte's HALT-exit fixup (memory.cpp:308)
-                // advances `cc += 4 * (isCgb() || cc - eventTime < 2)` before the
-                // woken instruction stream resumes. The CGB (`isCgb()`) branch is
-                // already modelled by the `+5` getStat read bias (controller.rs);
-                // here we add the DMG branch: when the wakeup landed within 2cc of
-                // the woken mode-0 STAT IRQ's event time (`pending_m0_irq_fire_cc`,
-                // master cc), the +4 also applies on DMG. Flag it so the DMG
-                // halt-woken getStat read samples +4cc later (the R4
-                // `late_m0*_halt_m0stat_scx3_2b` reads land in the next-line OAM /
-                // mode 2 instead of the stale mode 0).
+                // HALT-exit fixup, DMG m0 branch: the exit advances cc by +4 when
+                // the wake landed within 2cc of the woken mode-0 STAT IRQ's event
+                // time. (The CGB branch of this same fixup is modelled by the +5
+                // STAT read bias in controller.rs.) Flag it so the DMG halt-woken
+                // STAT read samples +4cc later, landing in the next-line OAM/mode 2
+                // instead of the stale mode 0.
+                // Base extra-4-clock HALT exit: TCAGBD §4.9. The m0-wake STAT-read
+                // re-anchor is a sub-cycle refinement from test-ROM refs, not in
+                // Pan Docs or GBCTR.
                 if pending_interrupt == Some(registers::InterruptFlag::Lcd)
                     && !mmio.mmio.is_cgb()
                     && let Some(ev) = mmio.mmio.pending_m0_irq_fire_cc() {
                         let mcc = mmio.master_cc_dbg() as i64;
                         if mcc - (ev as i64) < 2 {
                             mmio.mmio.set_halt_wake_plus4_dmg(true);
-                            // FAITHFUL HALT-EXIT (m0-woken): the full Gambatte
-                            // wake advance for this stream — the ceil-to-M-cycle
-                            // snap (`-cycles & 3`) plus the conditional +4
-                            // (`snap-delta < 2`). The m0 eventTime's mod-4 phase
-                            // (against the 0-aligned instruction grid) decides
-                            // both, which is exactly the per-SCX class structure
-                            // of hblank_ly_scx_timing-GS (snap 2/+0, 1/+4, 0/+4,
-                            // 3/+0 for E mod 4 = 2,3,0,1). Consumed by the woken
-                            // FF44 read (get_ly_reg_at_cc) as a read-side
-                            // re-anchor; the FF41/VRAM read models on this
-                            // stream stay on their co-tuned un-advanced cc.
-                            // Phase from the WAKE mcc (== the IF-set fire cc ==
-                            // Gambatte's eventTime number): the closed-form
-                            // `ev` carries a +1 phase that would mis-class the
-                            // mod-4 snap.
+                            // Full m0-woken wake advance: the ceil-to-M-cycle snap
+                            // plus the conditional +4, the m0 event time's mod-4 phase
+                            // deciding both. Consumed by the woken FF44 read
+                            // (get_ly_reg_at_cc) as a read-side re-anchor; the
+                            // FF41/VRAM models stay on the un-advanced cc. Phase from
+                            // the wake mcc (the closed-form `ev` carries a +1 phase
+                            // that would misclass the snap).
                             let align = ((4 - (mcc % 4)) % 4) as u32;
                             let adv = align + 4 * (align < 2) as u32;
                             mmio.mmio.set_dmg_m0_halt_ly_advance(Some(adv));
                         }
                     }
-                // FAITHFUL HALT-EXIT (CGB m0-woken stream): the CGB-console analog
-                // of the DMG `dmg_m0_halt_ly_advance` block above. Gambatte's
-                // HALT-exit fixup (memory.cpp:301) is
-                // `cc += 4 * (isCgb() || cc - eventTime < 2)`; on a CGB console the
-                // `isCgb()` disjunct makes the +4 UNCONDITIONAL, so the full wake
-                // advance is the ceil-to-M-cycle snap PLUS a flat +4 (the DMG path's
-                // +4 is instead conditional on `delta < 2`). Scoped to the DMG-cart
-                // case (`!is_cgb_features_enabled()`): a CGB-flagged cart takes the
-                // `cgb_halt_exit` +5 read bias in get_ly_reg_at_cc, co-tuned to the
-                // m1int_ly family, so this must not double-apply there. m0-woken
-                // (pending_m0_irq_fire_cc within 2cc of the wake, the same grid the
-                // DMG block uses). Consumed read-side by the woken FF44 read as
-                // `to_next - adv`, yielding constant tn across the 51/50/49 per-SCX
-                // classes of hblank_ly_scx_timing-C (matching the passing -GS DMG).
+                // HALT-exit, CGB m0-woken stream: the CGB analog of the DMG
+                // dmg_m0_halt_ly_advance block above. On CGB the +4 is unconditional
+                // (not gated on delta < 2), so the wake advance is the ceil-to-M-cycle
+                // snap plus a flat +4. Scoped to the DMG-cart case: a CGB-flagged cart
+                // instead takes the +5 read bias in get_ly_reg_at_cc, so this must not
+                // double-apply there. Consumed read-side by the woken FF44 read.
+                // Base extra-4-clock HALT exit: TCAGBD §4.9. The CGB unconditional-+4
+                // m0 LY-read re-anchor is a sub-cycle refinement from test-ROM refs,
+                // not in Pan Docs or GBCTR.
                 if pending_interrupt == Some(registers::InterruptFlag::Lcd)
                     && mmio.mmio.is_cgb()
                     && !mmio.mmio.is_cgb_features_enabled()
@@ -461,71 +372,51 @@ impl SM83 {
                     let mcc = mmio.master_cc_dbg() as i64;
                     if mcc - (ev as i64) < 2 {
                         let align = ((4 - (mcc % 4)) % 4) as u32;
-                        // Unconditional +4 on CGB (isCgb() disjunct always true),
-                        // vs the DMG block's `4 * (align < 2)`.
+                        // Unconditional +4 on CGB, vs the DMG block's `4 * (align < 2)`.
                         let adv = align + 4;
                         mmio.mmio.set_cgb_m0_halt_ly_advance(Some(adv));
                     }
                 }
-                // HALT-PREFETCH (Lever A, RB_PREFETCH_CC). Derive the M-cycle
-                // phase bit that separates the byte-identical _1b/_2b streams.
-                // The pre-snap HALT-entry cc H (halt_entry_cc) carries the extra
-                // M-cycle that Gambatte's ceil_4(eventTime) snap (cpu.cpp:1075
-                // `if cc() < nextEventTime()`) would erase: H < S means the snap
-                // fired (cc rounded up to S) -> phase 0; H >= S means the snap was
-                // SKIPPED (the test failed, cc stayed at the later entry) and the
-                // woken read inherits its extra M-cycle -> phase 1. _2b enters
-                // HALT one M-cycle (4cc) later than _1b, pushing H across S.
-                // Replaces the all-or-nothing +4 with a per-stream 0/1 phase at
-                // the FF41 consume site (controller.rs). Stacks on the foundation:
-                // halt_wake_plus4_dmg above is left set for the flag-OFF path.
+                // HALT-prefetch phase bit separating the _1b/_2b streams. The
+                // pre-snap HALT-entry cc H carries the extra M-cycle that the
+                // ceil_4(event time) snap to S would erase: H+4 < S means the snap
+                // fired -> phase 0; H+4 >= S means it was skipped and the woken read
+                // inherits its extra M-cycle -> phase 1. _2b enters HALT one M-cycle
+                // later than _1b, pushing H across S. Consumed at the FF41 read site.
+                // Fetch/execute overlap is described in GBCTR (CPU core timing); this
+                // HALT-entry prefetch snap phase is not in Pan Docs, TCAGBD, or GBCTR
+                // (test-ROM refs).
                 if pending_interrupt == Some(registers::InterruptFlag::Lcd)
                     && !mmio.mmio.is_cgb()
                 {
                     let phase = match (mmio.mmio.pending_m0_irq_fire_cc(), mmio.mmio.halt_entry_cc()) {
                         (Some(ev), Some(h)) => {
                             let e = ev as i64;
-                            // S = ceil_4(E) = the snap target Gambatte rounds cc up
-                            // to (cpu.cpp:1077 `cc += cycles + (-cycles & 3)`).
+                            // S = ceil_4(E), the snap target cc rounds up to.
                             let s = e + ((e.wrapping_neg()) & 3);
-                            // Faithful reconstruction of Gambatte's snap-SKIP test
-                            // (cpu.cpp:1075 `if cc() < nextEventTime()`): the HALT
-                            // M-cycle charges cc forward; when the pre-snap entry H
-                            // lands in the M-cycle directly below the snap target,
-                            // the post-charge cc reaches the event and the snap is
-                            // SKIPPED, so the woken read inherits the extra M-cycle
-                            // (phase 1). _2b enters HALT one M-cycle later than _1b
-                            // (H = S-4 vs S-8), crossing this boundary. The +4
-                            // aligns rustyboi's pre-charge entry cc to Gambatte's
-                            // post-HALT-charge cc origin.
+                            // Snap-skip test: the HALT M-cycle charges cc forward;
+                            // when the pre-snap entry H lands in the M-cycle just
+                            // below S, the post-charge cc reaches the event and the
+                            // snap is skipped, so the woken read inherits the extra
+                            // M-cycle (phase 1). The +4 aligns the pre-charge entry
+                            // cc to the post-HALT-charge origin.
                             if (h as i64) + 4 >= s { 1u32 } else { 0u32 }
                         }
                         _ => 0,
                     };
                     mmio.mmio.set_halt_prefetch_phase(phase);
                 }
-                // HALT-PREFETCH woken-PC PUSH phase (R-PC, RB_TIMER_PUSH_PHASE).
-                // Faithful conditional-prefetch-undo fix. Gambatte's interrupt
-                // service undoes the boundary prefetch CONDITIONALLY
-                // (interrupter.cpp:42 `if (prefetched_) pc_ -= 1`), where
-                // `prefetched_` is the byte fetched by `case 0x76`'s
-                // `prefetched_ = mem_.halt(cc()) = hdmaReqFlagged(...)`. rustyboi's
-                // service_interrupt instead undoes UNCONDITIONALLY (`pc -= 1`),
-                // which is correct for the common path where the unhalt did a real
-                // pc-ADVANCING boundary fetch. But a Requested-halt wakeup left a
-                // NON-advancing prefetch peek at HALT entry (opcodes.rs halt(): the
-                // byte at pc=HALT+1 is peeked, pc NOT advanced), so the unhalt skips
-                // its fetch and pc stays at the resume address. There the
-                // unconditional `pc -= 1` over-subtracts by one instruction byte,
-                // pinning the pushed resume PC one short (pc_scx1 _2: AC instead of
-                // AD; _1/_3 took the Low/real-fetch path and net to zero). Mark
+                // HALT-prefetch woken-PC push phase. The interrupt service undoes
+                // the boundary prefetch unconditionally (`pc -= 1`), correct when the
+                // unhalt did a real pc-advancing fetch. But a Requested-halt wakeup
+                // left a NON-advancing prefetch peek at HALT entry (opcodes.rs halt()
+                // peeks pc=HALT+1 without advancing pc), so the unconditional undo
+                // over-subtracts by one, pinning the pushed resume PC one short. Mark
                 // phase 1 for exactly that case so the push consume re-adds the +1.
-                // Gated Timer IRQ + CGB (the failing family's vector + hardware) and
-                // stored in a SEPARATE register so the FF41 getStat consumer that
-                // reads halt_prefetch_phase is untouched. The blast radius is the
-                // whole interrupt-service path, so the gate is the exact wakeup
-                // shape: just-unhalted Timer service whose halt left a non-advancing
-                // Requested-HDMA prefetch peek.
+                // Gated to Timer + CGB and stored in a separate register so the FF41
+                // STAT consumer of halt_prefetch_phase is untouched.
+                // Not in Pan Docs, TCAGBD, or GBCTR; HALT-wake PC-push prefetch phase
+                // from test-ROM refs.
                 let req_halt_peek = self.prefetched
                     && matches!(
                         mmio.halt_hdma_state(),
@@ -537,29 +428,22 @@ impl SM83 {
                     let phase = if req_halt_peek { 1u32 } else { 0u32 };
                     mmio.mmio.set_timer_push_phase(phase);
                 }
-                // Gambatte unhalt re-flag gate (memory.cpp:224/304):
-                //   (hdmaEnabled && isHdmaPeriod && haltHdmaState == hdma_low)
-                //   || haltHdmaState == hdma_requested
+                // Unhalt HDMA re-flag gate:
+                //   (HDMA-enabled && the HDMA-active window && halt-HDMA-state == hdma_low)
+                //   || halt-HDMA-state == hdma_requested
                 // Keys on hdma_low: the block fires on unhalt only when the HDMA
-                // period was *entered during* the halt (Low at halt time), not when
-                // it was already in-period+armed (High, which already fired).
-                // COORDINATED piece #3: evaluate the unhalt period off the
-                // renderer's cycle-exact isHdmaPeriod(cc) (bus path), not the loose
-                // cached/STAT-mode snapshot, so a Low-at-halt block that is not yet
-                // in period at unhalt fires on its natural m0 edge.
-                // EI fast-dispatch (RB_EI_FAST) delivers the timer IRQ at the EARLY
-                // anchor (schedCc + IF_OFF) instead of the LATE anchor (schedCc +
-                // CC_OFF). The timer ISR re-enables the LCD (FF40 write), so its
-                // closed-form `m0_time_master` lands `CC_OFF - IF_OFF`(=4) cc
-                // earlier under the fast path. The unhalt access cc (absolute
-                // `intevent_unhalt` schedule) is unchanged, so the unhalt-period
-                // DEPTH (`cc - m0t`) inflates by 4 — dropping the reflag of a
-                // Low-at-halt block near the line END. Widen the unhalt-period END
-                // bracket by +4 on the fast path so that block still reflags, while
-                // leaving the mode-0 ENTRY bracket intact (a depth-0 block reflags
-                // either way, matching Gambatte). (Non-fast HALT-late path:
-                // limit_adj = 0 => byte-identical.) Fast dispatch is ON by default
-                // post co-land; RB_EI_FAST=0 forces it OFF.
+                // period was entered DURING the halt (Low at halt time), not when it
+                // was already in-period+armed (High, which already fired). Evaluate
+                // the unhalt period off the renderer's cycle-exact the HDMA-active check at cc,
+                // so a Low-at-halt block not yet in period at unhalt fires on its
+                // natural m0 edge.
+                // Timer IRQ is delivered at the early anchor (scheduled cc + IF_OFF). The
+                // timer ISR re-enables the LCD (FF40 write), so its m0_time_master
+                // lands 4cc earlier while the unhalt access cc is unchanged — the
+                // unhalt-period depth inflates by 4, which would drop the reflag of a
+                // Low-at-halt block near the line end. Widen the unhalt-period END
+                // bracket by +4 so that block still reflags, leaving the mode-0 ENTRY
+                // bracket intact (a depth-0 block reflags either way).
                 let limit_adj: i64 = 4;
                 let in_period_unhalt = mmio.hdma_in_period_for_unhalt_adj(limit_adj);
                 let was_requested =
@@ -567,53 +451,43 @@ impl SM83 {
                 match mmio.halt_hdma_state() {
                     memory::mmio::HaltHdmaState::Requested => {
                         mmio.set_hdma_req();
-                        // ENDGAME R2: a multi-block Requested transfer
-                        // (hdma_length() != 0) does NOT inline-fire at unhalt (gated
-                        // off below); its first block fires on its m0 edge DURING the
-                        // resume instruction. Arm the lockstep window so the bus
-                        // advances the world through that block's transfer cc at fire
-                        // time (event-interleaved dma()), so the same-instruction
+                        // A multi-block Requested transfer (hdma_length() != 0) does
+                        // NOT inline-fire at unhalt (gated off below); its first block
+                        // fires on its m0 edge DURING the resume instruction. Arm the
+                        // lockstep window so the bus advances the world through that
+                        // block's transfer at fire time, so the same-instruction
                         // resume read sees the extended mode-3 line. Cleared when the
-                        // resume instruction completes. IME-off only (the IME-on render
-                        // phase breaks under the lockstep advance).
+                        // resume instruction completes. IME-off only.
                         if !self.registers.ime && mmio.hdma_length() != 0 {
                             mmio.set_hdma_resume_lockstep_window(true);
                         }
-                        // m25: the PRE-transfer dest-byte shadow lets the resume read
-                        // observe the old VRAM byte (the read is ordered before dma()'s
-                        // dest commits). Armed for both IME states (the IME-on
-                        // interrupt-service resume also reads an in-block dest byte);
-                        // harmless when the relevant block fires outside the window.
+                        // Pre-transfer dest-byte shadow: lets the resume read observe
+                        // the old VRAM byte (ordered before dma()'s dest commits).
+                        // Armed for both IME states; harmless when the relevant block
+                        // fires outside the window.
                         if mmio.hdma_length() != 0 {
                             mmio.set_hdma_resume_shadow_window(true);
                         }
-                        // FAITHFUL HALT-EXIT (CGB dma-due deferral): when IME is on and
-                        // the wake services a CGB interrupt, Gambatte's HALT-exit does
-                        // NOT service the interrupt on the same boundary the block is
-                        // flagged: `intevent_interrupts` flags the block (dma event = 0),
-                        // then `if (cc >= eventTime(intevent_dma)) break;` (memory.cpp:314)
-                        // exits BEFORE the `if (ime()) interrupt()` — so the block's
-                        // `intevent_dma` fires first, its handler prefetches the post-HALT
-                        // opcode and pushes `setMinIntTime` past the transfer
-                        // (memory.cpp:281-286), and the CPU executes exactly ONE post-HALT
-                        // instruction before the interrupt event re-fires. Defer the
-                        // service one instruction for that shape (multi-block Requested,
-                        // the only case whose held block flags dma-due at unhalt). The
-                        // sibling with no post-HALT side effect (a NOP) is unaffected; the
-                        // `ldaaimm` target's post-HALT `ld (nn),a` write now lands before
-                        // the ISR reads it, matching hardware.
+                        // CGB dma-due deferral: when IME is on and the wake services a
+                        // CGB interrupt, the block's DMA event fires first, prefetches
+                        // the post-HALT opcode and pushes the interrupt's min-time past
+                        // the transfer — so the CPU runs exactly ONE post-HALT
+                        // instruction before the interrupt is serviced. Defer the
+                        // service one instruction for that shape (multi-block Requested).
+                        // The post-HALT `ld (nn),a` write now lands before the ISR reads
+                        // it, matching hardware.
+                        // Not in Pan Docs, TCAGBD, or GBCTR; CGB HDMA-vs-interrupt
+                        // HALT-exit ordering from test-ROM refs.
                         if self.registers.ime
                             && mmio.mmio.is_cgb()
                             && mmio.hdma_length() != 0
                         {
                             self.hdma_dma_due_defer_service = true;
                         }
-                        // per-access STAGE 2 (FACET 3): the Requested-held block is
-                        // about to fire at unhalt. Arm the sub-block-cc consume so
-                        // the next-line m0 edge that re-arms the following block is
-                        // absorbed iff it lands inside this block's transfer span
-                        // (Gambatte m0 `memevent_hdma` consumed by the in-flight
-                        // `dma()`), deferring it one line.
+                        // The Requested-held block is about to fire at unhalt. Arm the
+                        // sub-block-cc consume so the next-line m0 edge that re-arms the
+                        // following block is absorbed iff it lands inside this block's
+                        // transfer span, deferring it one line.
                         mmio.arm_hdma_peraccess_consume();
                     }
                     memory::mmio::HaltHdmaState::Low
@@ -623,36 +497,25 @@ impl SM83 {
                     }
                     memory::mmio::HaltHdmaState::High if mmio.hdma_is_enabled() => {
                         // High-at-halt: the held block was already served and the
-                        // unhalt does NOT reflag. Gambatte also consumed the
-                        // immediately-following line's m0 `flagHdmaReq` during the
-                        // halt; our unhalt cc lands ~1 dot before that m0, so without
-                        // this the post-unhalt STAT fallback would fire a spurious
-                        // extra block one line early (hdma_late_m0halt_*lcdoffset*_1).
+                        // unhalt does NOT reflag. Hardware also consumed the following
+                        // line's m0 HDMA request during the halt; our unhalt cc lands
+                        // ~1 dot before that m0, so without this the post-unhalt STAT
+                        // fallback would fire a spurious extra block one line early.
                         mmio.arm_hdma_high_unhalt_consume();
                     }
                     _ => {}
                 }
-                // Late-hdma-vs-interrupt unhalt precedence (memory.cpp:329-364): a
-                // Low-at-halt block that is NOT in the HDMA period at unhalt
-                // (Gambatte's `isHdmaPeriod(cc)` reflag gate false => NOREFLAG) does
-                // not fire at unhalt; its m0-edge falls within the immediately-following
-                // interrupt service, so the block fires AFTER the PC pushes and
-                // copies the pushed return address (`late_hdma_vs_tima_*_halt_2`,
-                // 0x11C9). Flag it so `service_interrupt` suppresses+reorders that
-                // greedy fire past the pushes. An in-period (REFLAG) block fires AT
-                // unhalt, before the pushes (the `_halt_1` dma-wins case), and is
-                // left on the synchronous path.
-                // The unhalt-cc-vs-m0Time straddle that decides REFLAG (fire at
-                // unhalt) vs NOREFLAG (defer past the pushes) is razor-thin (1 cc).
-                // rustyboi's `m0_time_master` matches Gambatte to within the +1 dot
-                // phase ONLY on an already-rendered line (LY>=1, the TIMA content
-                // tests at LY=1). On the first visible line after an LCD re-enable
-                // (LY=0) the closed-form m0Time carries the unresolved ~6 cc phase
-                // lag, so the straddle is unreliable there — and the LY=0 case here
-                // is the mode-0-IRQ `hdma_vs_m0_*_halt` (REFLAG / dma-wins), for which
-                // no deferred-content sibling exists. Scope the defer to the timer
-                // IRQ (the `late_hdma_vs_tima_*_halt_2` family), where the straddle is
-                // sound; the mode-0-IRQ block keeps its synchronous (REFLAG) fire.
+                // Late-hdma-vs-interrupt unhalt precedence: a Low-at-halt block NOT
+                // in the HDMA period at unhalt (NOREFLAG) does not fire at unhalt;
+                // its m0-edge falls within the following interrupt service, so the
+                // block fires AFTER the PC pushes and copies the pushed return
+                // address. Flag it so service_interrupt suppresses+reorders that fire
+                // past the pushes. An in-period (REFLAG) block fires AT unhalt, before
+                // the pushes, and stays synchronous. The straddle deciding REFLAG vs
+                // NOREFLAG is ~1cc, and m0_time_master is only reliable on an
+                // already-rendered line (LY>=1); on LY=0 after an LCD re-enable it
+                // carries a ~6cc phase lag. Scope the defer to the timer IRQ, where
+                // the straddle is sound; the mode-0-IRQ block keeps its REFLAG fire.
                 let pending_is_timer =
                     pending_interrupt == Some(registers::InterruptFlag::Timer);
                 let fires_before_pushes = mmio.hdma_unhalt_fires_before_pushes();
@@ -671,31 +534,22 @@ impl SM83 {
                 }
                 mmio.set_halt_hdma_state(memory::mmio::HaltHdmaState::Low);
                 // Unhalt-cc / LY phase fix. A Requested-held HDMA block (flagged at
-                // halt entry) runs its `dma()` event DURING the halt period in
-                // Gambatte (intevent_dma fires before intevent_unhalt resumes the CPU;
-                // cctracer ground truth: the dma() lands at ~m0Time, mid-halt, the
-                // unhalt NOP resumes AFTER it). rustyboi otherwise deferred the whole
-                // transfer until AFTER the HALT-bug double-execute resume instruction,
-                // so the resume instruction — and every post-unhalt FF44/PC read on the
-                // wakeup sled — landed one HDMA-block (36 SS / 68 DS cc) too early in
-                // cc relative to the LY/PC Gambatte's stream reads, a +1 LY-dot straddle
-                // on the boundary cases (hdma_late_m3halt_m2unhalt_ly_scx1_3/scx2_3).
-                // Fire the held block NOW and tick its transfer stall inline (the dma()
-                // cc happens during the halt window) so the prefetched resume byte
-                // executes at the post-transfer cc == Gambatte's intevent_unhalt.
+                // halt entry) runs its dma() DURING the halt period on hardware
+                // (mid-halt, at ~mode-0 time; the unhalt NOP resumes after it). Deferring
+                // the whole transfer until after the HALT-bug double-execute resume
+                // would land every post-unhalt FF44/PC read one HDMA block (36 SS /
+                // 68 DS cc) too early. Fire the held block NOW and tick its transfer
+                // stall inline so the prefetched resume byte executes at the
+                // post-transfer cc.
                 //
                 // Gated to:
-                //  - `hdma_length() == 0` (the block COMPLETES the transfer): a
-                //    multi-block transfer (e.g. hdma_transition_*_late_unhalt, ff55=81)
-                //    relies on the existing per-dot firing path for its second-block
-                //    period re-arm and FF55 readback; firing the first block here
-                //    desyncs that sequence.
-                //  - `!ime` (the IME-off double-execute resume): when IME is on the
-                //    unhalt instead SERVICES an interrupt (the prefetch is rewound and
-                //    PC pushed); that path accounts the wakeup cc through
-                //    `service_interrupt`, where this inline shift double-counts. The EI
-                //    PC/LY readers (hdma_late_ei_m3halt_m2unhalt_pc_scx1_2) carry the
-                //    same +4 phase but need the service-path cc fix, not this one.
+                //  - hdma_length() == 0 (block COMPLETES the transfer): a multi-block
+                //    transfer relies on the per-dot firing path for its second-block
+                //    period re-arm and FF55 readback; firing here desyncs that.
+                //  - !ime (IME-off double-execute resume): with IME on, the unhalt
+                //    instead services an interrupt, which accounts the wakeup cc
+                //    through service_interrupt, where this inline shift would
+                //    double-count.
                 if was_requested
                     && !self.registers.ime
                     && mmio.hdma_length() == 0
@@ -714,43 +568,27 @@ impl SM83 {
             }
         }
 
-        // STAGE 2 event-cc dispatch: an IRQ is serviceable only once the
-        // boundary access cc has reached the cc its IF bit was raised
-        // (Gambatte's `intevent_interrupts` boundary), not merely once the
-        // IF bit is flagged. `pending_interrupt` was sampled at this
-        // instruction boundary; gate the timer IRQ on the boundary access cc
-        // (raw master_cc, the stage-1 read anchor) having reached its
-        // recorded fire cc, re-resolving a lower-priority armed IRQ if the
-        // timer is not yet due.
+        // Event-cc dispatch: an IRQ is serviceable only once the boundary access
+        // cc has reached the cc its IF bit was raised, not merely once the IF bit
+        // is flagged. `pending_interrupt` was sampled at this boundary; gate the
+        // timer IRQ on the boundary access cc having reached its recorded fire cc,
+        // re-resolving a lower-priority armed IRQ if the timer is not yet due.
         //
-        // PER-ACCESS DELIVERY SPLIT: a non-halt, non-stop EI loop services the
-        // timer IRQ at the EARLY anchor (`pending_timer_fire_cc_ei`, schedCc +
-        // IF_OFF) so the ISR / TAC re-write lands on Gambatte's exact divider
-        // phase (the late_tc01 / irq cluster). HALT and post-STOP streams keep
-        // the LATE anchor (`pending_timer_fire_cc`, schedCc + CC_OFF), which is
-        // where their read-after-overflow tests are byte-exact.
+        // A non-halt, non-stop EI loop services the timer IRQ at the EARLY anchor
+        // (pending_timer_fire_cc_ei, scheduled cc + IF_OFF) so the ISR/TAC re-write
+        // lands on the exact divider phase. HALT and post-STOP streams keep the
+        // LATE anchor (pending_timer_fire_cc, scheduled cc + CC_OFF), where their
+        // read-after-overflow tests are byte-exact.
+        // Base 1-cycle overflow->IF delay: TCAGBD §4.3. The EI early-anchor vs
+        // HALT/STOP late-anchor split is a sub-cycle refinement from test-ROM refs,
+        // not in Pan Docs or GBCTR.
         let boundary_access_cc = mmio.access_cc();
         let ei_ctx = !just_unhalted && !self.stopped;
 
-        // EI-loop fast delivery: in a non-halt/non-stop loop with IME on, fire
-        // an imminent overflow at the EARLY anchor (schedCc + IF_OFF) so the
-        // ensuing service runs on Gambatte's exact phase, ahead of the late
-        // per-dot delivery. Re-sample the pending interrupt afterward.
-        // NOTE: the EI-loop fast timer dispatch is now ON by default (per-access
-        // timer fast-dispatch co-land). It dissolves the timer-schedule offset
-        // for the pure-timer re-derivation cluster (tima/tc00_late_tc01_*,
-        // irq_ds, irq_retrigger: +19 by construction); the +5 IF-delivery grid
-        // it bypasses was the shared lever for three coupled subsystems, all
-        // re-tuned to the early grid in the same co-land — the IF-edge re-flag
-        // tests (tc00_irq_ifw_* / late_retrigger), the CGB STOP sub-dot
-        // derivation (speedchange_tima*, STOP_EI_PROMOTE_ADJ split), and the
-        // HDMA-vs-IRQ unhalt service-phase race (hdma_*unhalt, END-bracket +4).
-        // Net co-land vs the +5-grid baseline is strongly positive; the only
-        // residuals are the render-phase-coupled hdma_*_ly_*_1 glyph tests (the
-        // EI-fast LCD-re-enable shifts the PPU render phase 4 cc — a lever that
-        // belongs to the lazy-PPU render stage, and which simultaneously flips
-        // the sibling hdma_*_ly_*_6 tests TO passing). RB_EI_FAST=0 forces the
-        // OFF / +5-grid baseline (A/B preserved); unset or =1 leaves it ON.
+        // EI-loop fast delivery: in a non-halt/non-stop loop with IME on, fire an
+        // imminent overflow at the EARLY anchor (scheduled cc + IF_OFF) so the ensuing
+        // service runs on the exact divider phase, ahead of the late per-dot
+        // delivery. Re-sample the pending interrupt afterward.
         if ei_ctx && self.registers.ime
             && let Some(early) = mmio.next_timer_overflow_ei_cc()
                 && boundary_access_cc >= early {
@@ -760,8 +598,8 @@ impl SM83 {
 
         let mut serviceable = pending_interrupt;
         if serviceable == Some(registers::InterruptFlag::Timer) {
-            // Only the EI fast-dispatch (when enabled) services on the early
-            // anchor; otherwise the gate is the baseline late (+CC_OFF) anchor.
+            // The EI fast-dispatch services on the early anchor; otherwise the
+            // gate is the late (+CC_OFF) anchor.
             let gate_cc = if ei_ctx {
                 mmio.pending_timer_fire_cc_ei()
             } else {
@@ -774,25 +612,21 @@ impl SM83 {
             }
         }
 
-        // FAITHFUL prefetch model: fetch the opcode at the instruction
-        // boundary FIRST (Gambatte's end-of-previous-instruction prefetch,
-        // charged at the boundary cc), THEN decide whether to service. A
-        // serviced interrupt UNDOES the prefetch (rewinds pc); otherwise the
-        // prefetched opcode is consumed by execute with no re-fetch/re-charge.
+        // Prefetch model: fetch the opcode at the instruction boundary FIRST
+        // (the end-of-previous-instruction prefetch, charged at the boundary cc),
+        // THEN decide whether to service. A serviced interrupt UNDOES the prefetch
+        // (rewinds pc); otherwise execute consumes it with no re-fetch/re-charge.
         if !self.prefetched {
             self.opcode = mmio.fetch_opcode(self.registers.pc);
             self.registers.pc = self.registers.pc.wrapping_add(1);
             self.prefetched = true;
         }
 
-        // FAITHFUL HALT-EXIT (CGB dma-due deferral): run the prefetched post-HALT
-        // instruction WITHOUT servicing — the interrupt stays pending and dispatches
-        // on the next boundary. Scoped by the flag to the multi-block Requested CGB
-        // IME-on wake (see the set site above). Block1 fires on its own path during
-        // this instruction (deferred stall preserves block2's next/same-line edge);
-        // only the post-HALT `ld (nn),a` write's PPU mode check is biased forward by
-        // block1's transfer span so it lands in the post-transfer mode-0 window
-        // (Gambatte's `intevent_dma` advances the PPU across that transfer first).
+        // CGB dma-due deferral: run the prefetched post-HALT instruction WITHOUT
+        // servicing — the interrupt stays pending and dispatches next boundary.
+        // Block1 fires on its own path during this instruction; only the post-HALT
+        // `ld (nn),a` write's PPU mode check is biased forward by block1's transfer
+        // span so it lands in the post-transfer mode-0 window.
         if just_unhalted && std::mem::take(&mut self.hdma_dma_due_defer_service) {
             let ds = mmio.mmio.is_double_speed_mode();
             let block_span: u64 = 0x10 * (2 + 2 * ds as u64) + 4;
@@ -825,11 +659,12 @@ impl SM83 {
 
         let op = self.opcode;
         self.prefetched = false;
-        // FAITHFUL HALT-BUG: the peeked opcode's fetch M-cycle was not ticked at the
-        // HALT (unlike the normal `fetch_opcode` prefetch). Charge it now — BEFORE
-        // execute — so the doubled instruction's operand read (which may sample a live
-        // IO register: TIMA/DIV read as the `LD B,n` immediate) resolves one M-cycle
-        // later, on the exact cc the register has ticked to (Gambatte cpu.cpp:578).
+        // HALT-bug: the peeked opcode's fetch M-cycle was not ticked at the HALT
+        // (unlike the normal fetch_opcode prefetch). Charge it now, BEFORE execute,
+        // so the doubled instruction's operand read (which may sample a live IO
+        // register — TIMA/DIV read as the `LD B,n` immediate) resolves one M-cycle
+        // later, on the cc the register has ticked to.
+        // Pan Docs: halt bug — https://gbdev.io/pandocs/halt.html
         if std::mem::take(&mut self.halt_bug_prefetch) {
             mmio.tick_opcode_fetch_mcycle();
         }
@@ -844,31 +679,23 @@ impl SM83 {
         self.ime_enable_delay = 0;
         bus.clear_delayed_writes();
 
-        // C7-full interrupt-vs-dma precedence (Gambatte memory.cpp:312-320): an
-        // HDMA block whose m0-edge latch is LATER than the interrupt's service cc
-        // fires AFTER the interrupt's PC pushes, so a pushed return address is
-        // visible in the HDMA copy of that stack slot (`late_hdma_vs_ei/ie/tima`
-        // content-test root). A block ALREADY latched before this service began is
-        // *earlier* than the interrupt and keeps firing at its natural dot (before
-        // the pushes — the dma-wins races). So suppress the fire only when no block
-        // is pending at service entry; a block latched during the service M-cycles
-        // is then held and fired explicitly after the pushes.
+        // Interrupt-vs-dma precedence: an HDMA block whose m0-edge latch is LATER
+        // than the interrupt's service cc fires AFTER the PC pushes, so a pushed
+        // return address is visible in the HDMA copy of that stack slot. A block
+        // already latched before this service began is earlier and keeps firing at
+        // its natural dot (before the pushes). So suppress the fire only when no
+        // block is pending at service entry; a block latched during the service
+        // M-cycles is held and fired explicitly after the pushes.
         //
-        // A service that resumes from HALT this same step is eligible ONLY when the
-        // unhalt did NOT reflag the block (Gambatte's `isHdmaPeriod(cc)` reflag gate
-        // false at unhalt => NOREFLAG): that block's m0-edge falls within THIS service window
-        // and must fire AFTER the pushes (`late_hdma_vs_tima_*_halt_2`, copy 0x11C9).
-        // A REFLAG block fired AT unhalt, before the pushes (the `*_halt_1` dma-wins
-        // case), and is left on the synchronous path. Non-halt services suppress
-        // whenever no block is already pending at entry (a block latched during the
-        // service M-cycles is held and fired post-push).
-        // For the unhalt-deferred case the block's m0-edge may have already ARMED
-        // (`hdma_req_pending`) during the boundary prefetch — its FIRE was held by
-        // the suppression engaged at unhalt. Keep suppressing it here (the
-        // already-pending block is exactly the one to fire post-push); do NOT gate
-        // on `!hdma_fire_pending`. The non-halt path keeps that gate: a block
-        // already pending at entry there latched a full instruction earlier and
-        // wins the race (fires on its natural dot, not post-push).
+        // A service resuming from HALT this same step is eligible ONLY when the
+        // unhalt did NOT reflag the block (NOREFLAG): that block's m0-edge falls
+        // within THIS service window and must fire after the pushes. A REFLAG block
+        // fired at unhalt, before the pushes, and stays synchronous. For the
+        // unhalt-deferred case the block may already be armed (hdma_req_pending)
+        // from the boundary prefetch — its fire was held by the suppression engaged
+        // at unhalt, so keep suppressing here; do NOT gate on !hdma_fire_pending.
+        // The non-halt path keeps that gate: a block already pending there latched a
+        // full instruction earlier and wins the race.
         let unhalt_defer = just_unhalted && bus.hdma_unhalt_noreflag_deferred();
         let suppress = if unhalt_defer {
             true
@@ -880,15 +707,15 @@ impl SM83 {
         // (see `reorder_late_hdma_after_pushes`): a greedy m0-edge HDMA fire that
         // raced this same M-cycle window read pre-push memory and must be re-run
         // post-push. Only the unhalt-free path is eligible (the halt path's block
-        // is governed by `haltHdmaState_`).
+        // is governed by the halt-HDMA state machine).
         let service_access_cc = bus.access_cc();
 
-        // STAGE 2: the boundary prefetch already read (and charged +4 for)
-        // the opcode this interrupt discards. UNDO it: rewind pc to that
-        // opcode and drop the prefetch flag (re-fetched after the ISR
-        // returns). With the real prefetch supplying one of the 5 interrupt
-        // M-cycles, service ticks 2 internal (the 2 wait cycles) + 2 pushes =
-        // 16; prefetch (4) + 16 = the full 20-cc / 5-M-cycle interrupt cost.
+        // The boundary prefetch already read (and charged +4 for) the opcode this
+        // interrupt discards. UNDO it: rewind pc and drop the prefetch flag
+        // (re-fetched after the ISR returns). With the prefetch supplying one of the
+        // 5 interrupt M-cycles, service ticks 2 internal (wait) + 2 pushes = 16cc;
+        // prefetch 4 + 16 = the full 20cc / 5 M-cycles.
+        // Pan Docs: Interrupt handling — https://gbdev.io/pandocs/Interrupts.html
         self.registers.pc = self.registers.pc.wrapping_sub(1);
         self.prefetched = false;
         // A HALT-bug prefetch that ends up serviced (IME=1 + pending: the bug peeked
@@ -897,17 +724,13 @@ impl SM83 {
         // re-runs and re-decides. Drop it here so the charge applies only when the
         // doubled opcode actually executes (IME-off HALT-bug).
         self.halt_bug_prefetch = false;
-        // HALT-PREFETCH woken-PC PUSH consume (R-PC, RB_TIMER_PUSH_PHASE). The
-        // unconditional `pc -= 1` undo above is correct only when the unhalt did a
-        // pc-ADVANCING boundary fetch. For the CGB+Timer phase-1 wakeup (the HALT
-        // left a NON-advancing Requested-HDMA prefetch peek, so pc was never
-        // advanced past the resume byte) the undo over-subtracts by one. Re-add the
-        // +1 here, BEFORE both pushes (so a page-crossing carry propagates to the
-        // high byte too), reproducing Gambatte's CONDITIONAL prefetch undo
-        // (interrupter.cpp:42 `if (prefetched_) pc_ -= 1`, where for this wakeup
-        // hdmaReq=false => no undo => pushed resume PC = HALT+1). Phase-conditioned:
-        // phase 0 streams (pc_scx1 _1/_3, real-fetch path) are unchanged. The flag
-        // is consumed (zeroed) below so it biases exactly one interrupt service.
+        // HALT-prefetch woken-PC push consume. The unconditional `pc -= 1` undo
+        // above is correct only when the unhalt did a pc-advancing boundary fetch.
+        // For the CGB+Timer phase-1 wakeup (HALT left a NON-advancing prefetch peek,
+        // pc never advanced) the undo over-subtracts by one. Re-add the +1 here,
+        // BEFORE both pushes (so a page-crossing carry propagates to the high byte),
+        // reproducing the conditional prefetch undo. The flag is consumed below so it
+        // biases exactly one interrupt service.
         if just_unhalted && bus.mmio.timer_push_phase() == 1
         {
             self.registers.pc = self.registers.pc.wrapping_add(1);
@@ -922,20 +745,21 @@ impl SM83 {
         // The vector is latched from IE&IF *after* the high-byte push: if that
         // push wrote over IE (SP near 0xFFFF) the pending set can change, and
         // if nothing is pending the interrupt is cancelled (vector 0x0000).
+        // Known behavior (not in Pan Docs/TCAGBD/GBCTR): pinned by Gekkio's mooneye
+        // `interrupt-cancellation` test.
         let flag = self.get_pending_interrupt(bus);
 
-        // The low-byte push ACKs the IF bit partway through its M-cycle (Gambatte
-        // `Memory::ackIrq(n, cc)` after the push: it advances each source to a
-        // per-source sub-cc offset (`updateSerial(cc+3+cgb)`, `updateTimaIrq(cc+2
-        // +cgb)`, `lcd_.update(cc+2)`) — flagging any IRQ that completes by that
-        // offset — THEN clears only the dispatched bit `n`. A source completing
-        // *after* its offset re-flags IF and survives for the ISR to read (the
-        // `late_retrigger` / `start_wait..._read_if` re-fire); one completing by
-        // the offset is flagged-then-cleared and reads back gone. The per-source
-        // offset (+3+cgb serial, +2+cgb timer, +2 lcd) is the DMG-vs-CGB
-        // discriminator for the `_2` boundary cases. Done inside the push M-cycle
-        // so the clear lands at the exact sub-dot. Skip while OAM DMA is active
-        // (the split-push bypasses the DMA-conflict redirection in `bus.write`).
+        // The low-byte push ACKs the IF bit partway through its M-cycle: each source
+        // is advanced to a per-source sub-cc offset (serial +3+cgb, timer +2+cgb,
+        // lcd +2), flagging any IRQ that completes by that offset, THEN only the
+        // dispatched bit is cleared. A source completing AFTER its offset re-flags IF
+        // and survives for the ISR to read; one completing by the offset is
+        // flagged-then-cleared and reads back gone. The offset is the DMG-vs-CGB
+        // discriminator on the boundary cases. Done inside the push M-cycle so the
+        // clear lands at the exact sub-dot. Skip while OAM DMA is active (the
+        // split-push bypasses the DMA-conflict redirection in bus.write).
+        // Base IF-clear-on-dispatch: TCAGBD §4.9 / Pan Docs. The sub-M-cycle
+        // per-source ACK offset is not in Pan Docs, TCAGBD, or GBCTR (test-ROM refs).
         let split_ack = matches!(
             flag,
             Some(registers::InterruptFlag::Lcd)
@@ -956,7 +780,7 @@ impl SM83 {
         bus.fire_pending_hdma_mcycle();
         bus.set_hdma_unhalt_noreflag_deferred(false);
         // Late-hdma-vs-interrupt: if a greedy m0-edge block fired within this
-        // service's M-cycle window (the interrupt won the m0Time-vs-minIntTime
+        // service's M-cycle window (the interrupt won the mode-0 time-vs-the minimum-interrupt-time
         // race) re-run it now so its source reads see the just-pushed PC.
         if !just_unhalted {
             bus.reorder_late_hdma_after_pushes(service_access_cc);
@@ -971,15 +795,15 @@ impl SM83 {
             None => 0x0000,
         };
         if let Some(flag) = flag {
-            // The LCD/Serial/Timer vectors were already ACKed mid-push (split_ack,
-            // faithful Gambatte ackIrq ordering); clearing again here would wipe a
-            // same-window re-fire that must survive. When the split was skipped
-            // (OAM DMA active) or the vector is VBlank/Joypad, clear here as before.
+            // The LCD/Serial/Timer vectors were already ACKed mid-push (split_ack);
+            // clearing again here would wipe a same-window re-fire that must survive.
+            // When the split was skipped (OAM DMA active) or the vector is
+            // VBlank/Joypad, clear here as before.
             if !split_ack {
                 self.set_interrupt_flag(flag, false, bus);
             }
-            // STAGE 2: once the timer IRQ is dispatched, drop its recorded fire
-            // cc so the next period's fire is tracked fresh.
+            // Once the timer IRQ is dispatched, drop its recorded fire cc so the
+            // next period's fire is tracked fresh.
             if flag == registers::InterruptFlag::Timer {
                 bus.clear_timer_fire_cc();
             }
@@ -1032,8 +856,8 @@ impl SM83 {
     }
 
     /// Like `get_pending_interrupt` but skips the Timer source. Used by the
-    /// STAGE 2 event-cc dispatch gate when the timer IRQ's fire cc has not yet
-    /// been reached, so a lower-priority armed interrupt can still dispatch.
+    /// event-cc dispatch gate when the timer IRQ's fire cc has not yet been
+    /// reached, so a lower-priority armed interrupt can still dispatch.
     fn get_pending_interrupt_excluding_timer(&self, mmio: &memory::mmio::Mmio) -> Option<registers::InterruptFlag> {
         if self.get_interrupt_enable_flag(registers::InterruptFlag::VBlank, mmio) && self.get_interrupt_flag(registers::InterruptFlag::VBlank, mmio) {
             Some(registers::InterruptFlag::VBlank)

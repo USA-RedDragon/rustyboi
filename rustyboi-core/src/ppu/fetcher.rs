@@ -90,9 +90,9 @@ pub struct Fetcher {
     // Window support
     fetching_window: bool,
     window_x_start: u8,
-    // Gambatte WE-off / Tile::f0 boundary: when a mid-mode-3 window-disable
-    // lands mid-window-tile (Gambatte `xpos != endx`), the in-progress tile
-    // (whose tilemap was committed window at its f0) finishes drawing before
+    // WE-off / tile-fetch boundary: when a mid-mode-3 window-disable
+    // lands mid-window-tile (xpos != endx), the in-progress tile
+    // (whose tilemap was committed window at its fetch start) finishes drawing before
     // the revert. Count of additional window-tile fetches to draw before
     // reverting to BG. 0 = stop at the very next TileNumber (the boundary case).
     #[serde(default)]
@@ -199,7 +199,7 @@ impl Fetcher {
     // Start fetching window tiles from a specific window tilemap column. The
     // mid-line WX-match path starts at column 0; the M3Start::f0 line-begin
     // "already started" path (DMG wx==166 wraparound) starts at column
-    // wscx/8 == (tile_len + scx%8)/8 == 1, since Gambatte seeds
+    // wscx/8 == (tile_len + scx%8)/8 == 1, since the hardware seeds
     // wscx = tile_len + scx%8 there.
     pub fn start_window_at_tile(&mut self, window_x: u8, start_tile: u8) {
         self.fetching_window = true;
@@ -213,7 +213,7 @@ impl Fetcher {
     }
 
     // Stop the window, but draw `extra` additional full window tiles first.
-    // Gambatte's Tile::f0 commits each tile's window-vs-BG choice at the tile
+    // The hardware commits each tile's window-vs-BG choice at the tile
     // boundary (`xpos == endx`); a WE-off that lands mid-tile (`xpos != endx`)
     // lets the already-committed in-progress tile finish before reverting. The
     // controller passes extra=1 in that mid-tile case, 0 at a tile boundary.
@@ -280,7 +280,7 @@ impl Fetcher {
         // Re-read (scy + ly) live at every BG fetch substep. The fetcher runs
         // ahead of the display by the FIFO depth, so sampling SCY as late as
         // possible (through TileDataHigh) lets a mid-M3 SCY write land on the
-        // last fetched tile, matching Gambatte's late tileline sample. Window
+        // last fetched tile, matching the hardware's late tileline sample. Window
         // fetches use the internal `window_line` counter, independent of SCY.
         // A DMG mid-mode-3 SCY write resolves at the substep's reconstructed
         // hardware dot instead (`scy_bus`, see bg_wg_apply).
@@ -298,7 +298,7 @@ impl Fetcher {
 
         match self.state {
             State::TileNumber => {
-                // Deferred WE-off (Gambatte Tile::f0 mid-tile boundary): when a
+                // Deferred WE-off (tile-fetch mid-tile boundary): when a
                 // window-disable landed mid-window-tile, the controller armed
                 // `stop_window_after_tiles` extra window tiles. Each TileNumber
                 // that begins while armed consumes one; the LAST one keeps
@@ -325,7 +325,7 @@ impl Fetcher {
                     (window_tile_map_base, map_offset)
                 } else {
                     let bg_tile_map_base = self.get_tile_map_base(lcdc_state.lcdc);
-                    // For background, account for SCX scrolling. Gambatte computes
+                    // For background, account for SCX scrolling. The hardware derives
                     // tileMapXpos = (scx + xpos) / 8 from the DISPLAY position of the
                     // tile's first pixel, re-reading SCX live at each tile fetch. The
                     // tile being fetched will be displayed at column
@@ -333,7 +333,7 @@ impl Fetcher {
                     // column from that rather than the free-running tile_index. This
                     // makes a mid-M3 SCX write land at the correct display column
                     // despite FIFO latency.
-                    // The DMG +1 phase adjustment (Gambatte tileMapXpos =
+                    // The DMG +1 phase adjustment (tileMapXpos =
                     // (scx + xpos + 1 - cgb) / 8) applies only past the M3Start
                     // discard prologue; the first tile (display_x == 0) is fetched
                     // at scx/8 with no adjustment.

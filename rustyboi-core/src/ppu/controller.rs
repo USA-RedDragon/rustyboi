@@ -123,26 +123,23 @@ const DMG_PIXEL_TRANSFER_ARM_DOT: u128 = 80;
 const CGB_PIXEL_TRANSFER_ARM_DOT: u128 = 82;
 const DMG_PIXEL_TRANSFER_WARMUP: u8 = 4;
 const CGB_PIXEL_TRANSFER_WARMUP: u8 = 2;
-// First line after LCDC.7 0->1: Gambatte sets the PPU's internal cycle
-// counter to -(m3StartLineCycle + 2), so the first M3 begins
-// (m3StartLineCycle + 2) dots after enable. m3StartLineCycle = 83 + cgb,
+// First line after LCDC.7 0->1: hardware sets the PPU's internal cycle
+// counter to -(mode-3-start line cycle + 2), so the first M3 begins
+// (mode-3-start line cycle + 2) dots after enable. mode-3-start line cycle = 83 + cgb,
 // giving 85 (DMG) / 86 (CGB) dots from enable to first M3.
 const DMG_FIRST_FRAME_ARM_DOT: u128 = 85;
-// Gambatte's documented first-M3 start is m3StartLineCycle+2 = 86 (CGB), but the
+// The documented first-M3 start is mode-3-start line cycle+2 = 86 (CGB), but the
 // emulated first-line pixel pipeline (warmup + arm) lands the mode-0 transition
-// two dots late versus hardware at this point. Arming two dots earlier aligns the
-// first-line mode-0 IRQ. Calibrated against enable_display m0irq cases (3 fixed,
-// 1 regressed -> net -2; only the enable_display cluster moves).
+// two dots late versus hardware. Arming two dots earlier aligns the
+// first-line mode-0 IRQ.
 const CGB_FIRST_FRAME_ARM_DOT: u128 = 84;
 // On the first line after enable, VRAM/OAM lock (PPU reports mode 3) at the
-// same line-cycle as a normal line (Gambatte: lineCycles >= ~79), even though
-// the actual pixel fetch (M3Start) begins later at FIRST_FRAME_ARM_DOT.
+// same line-cycle as a normal line (on hardware: line cycles >= ~79), even though
+// the actual pixel fetch (mode-3 start) begins later at FIRST_FRAME_ARM_DOT.
 const DMG_FIRST_FRAME_LOCK_DOT: u128 = 80;
 const CGB_FIRST_FRAME_LOCK_DOT: u128 = 82;
 // At double speed the CGB first-frame VRAM/OAM lock engages one dot earlier than
-// the single-speed boundary. Calibrated against enable_display _ds CGB cases
-// (oambusy_read_ds, cgbpw_ds, vramr_ds: 3 fixed, 1 regressed -> net -2; only the
-// enable_display cluster moves).
+// the single-speed boundary.
 const CGB_FIRST_FRAME_LOCK_DOT_DS: u128 = 81;
 fn dmg_first_frame_lock_dot() -> u128 { DMG_FIRST_FRAME_LOCK_DOT }
 fn cgb_first_frame_lock_dot(double_speed: bool) -> u128 {
@@ -151,40 +148,39 @@ fn cgb_first_frame_lock_dot(double_speed: bool) -> u128 {
 // Serde default for `frames_since_enable`: a savestate captured mid-run has an
 // already-resynced panel, so restore to the "displays normally" value (>= 2).
 fn frames_since_enable_default() -> u8 { 2 }
-// Offset between rustyboi's `ticks` at M3 arm and Gambatte's lineCycle frame
+// Offset between rustyboi's `ticks` at M3 arm and the hardware line-cycle frame
 // for the scheduled Mode 3 -> Mode 0 transition. Swept against the full suite.
 const DMG_MODE0_OFFSET: i32 = 4;
 const CGB_MODE0_OFFSET: i32 = 4;
-// Mode-3 dot penalty for a window starting on this line (Gambatte StartWindowDraw).
+// Mode-3 dot penalty for a window starting on this line (the hardware window draw-start penalty).
 const WIN_M3_PENALTY: i32 = 6;
 // Display-column latency between a mid-mode-3 DMG palette-register (BGP/OBP0/OBP1)
 // write and the first pixel that sees the new value. `self.x` at the write instant
 // is the next column to be popped (the live pipeline plot position); the change
-// first reaches the column plotted this many dots later. Calibrated byte-exact
-// against mealybug m3_bgp_change / m3_obp0_change (DMG-blob + cgb-c references),
-// whose per-line palette boundary lands past the column being popped at the write
-// cc. Same shape as the LCDC `self.x + 2` commit in handle_lcdc_write. BGP and OBP
-// carry separate latencies (the BG fetcher and the sprite mixer sample at different
-// pipeline stages).
+// first reaches the column plotted this many dots later. Same shape as the LCDC
+// `self.x + 2` commit in handle_lcdc_write. BGP and OBP carry separate latencies
+// (the BG fetcher and the sprite mixer sample at different pipeline stages).
 // CGB hardware samples the palette mapping one dot later in the pipeline than DMG
 // hardware (the DMG fetcher runs a 4-dot pixel-transfer warmup + the +1 cgb_adj
 // phase vs CGB's 2-dot warmup): the same mid-mode-3 write reaches the displayed
 // column one column earlier on DMG. Keyed by `is_cgb()` (the hardware, NOT the
 // CGB-features mode) so DMG-compat-on-CGB — which renders with the CGB warmup but
-// the DMG palette regs (mealybug m3_bgp_change cgb_c) — takes the CGB latency. The
-// split also keeps Gambatte's own dmgpalette_during_m3 DMG tests (which encode the
-// real DMG latch column) passing.
+// uses the DMG palette regs — takes the CGB latency.
+// Pan Docs documents the general observability (a mid-scanline BGP write's effect
+// shifts left by any mode-3 delay); the exact per-machine latency is not documented.
+// Pan Docs: Rendering — https://gbdev.io/pandocs/Rendering.html
 const BGP_LATENCY_CGB: i32 = 2;
 const BGP_LATENCY_DMG: i32 = 1;
 const OBP_LATENCY_CGB: i32 = 2;
 const OBP_LATENCY_DMG: i32 = 1;
 // Maximum dot-gap between two consecutive mid-mode-3 palette writes for the DMG
-// palette-latch glitch to fire. The glitch is a TWO-WRITE collision: mealybug's
-// SET/RESTORE bursts write ~12 dots apart, so the settling from the first write is
-// still in-flight when the second lands. Single writes, or writes spaced wider than
-// this (gambatte dmgpalette_during_m3: one write per line / 60+ dots apart), don't
-// collide and produce no spike. 12 cleanly separates the mealybug 12-dot pairs from
-// the 60-dot inter-pair gap.
+// palette-latch glitch to fire. The glitch is a TWO-WRITE collision: back-to-back
+// SET/RESTORE writes ~12 dots apart leave the first write's settling still in-flight
+// when the second lands. Single writes, or writes spaced wider than this (~60+ dots
+// apart), don't collide and produce no spike.
+// Base mid-scanline BGP shift-left is documented (Pan Docs: Rendering, cited above);
+// the two-write collision spike itself is not in Pan Docs, TCAGBD, or GBCTR —
+// sub-dot render timing from mealybug-tearoom-tests refs.
 const BGP_SPIKE_CADENCE_CC: u64 = 12;
 fn bgp_latency(cgb: bool) -> i32 {
     if cgb { BGP_LATENCY_CGB } else { BGP_LATENCY_DMG }
@@ -209,7 +205,7 @@ const M0IRQ_DMG_FIRST_FRAME_OFFSET: i64 = -3;
 // Absolute-clock offset attributed to an FF41/FF45 register write. The write
 // hook fires after the store but before this M-cycle's dots tick, so the
 // renderer's current dot is already `abs_cc` (the M-cycle start), matching
-// Gambatte's `write(addr, data, cc)` resolving at `cc` before `cc += 4`. No
+// the write resolving at its access cc, before the M-cycle's +4 tick. No
 // extra bias is needed at single speed. Swept against the full suite (0 beats
 // the former -1 by 32 net).
 const WRITE_CC_OFFSET: i64 = 0;
@@ -220,34 +216,34 @@ fn pnow_disabled() -> u64 { u64::MAX }
 fn win_y_pos_init() -> u8 { 0xFF }
 
 // Mid-mode-3 register-write commit delays (dots, relative to the write cc) and
-// render-phase offsets. These were once env-tunable sweep knobs; the sweeps are
-// deleted and each is now its single calibrated constant.
+// render-phase offsets.
 const M0IRQ_SCX2_CGB_OFFSET: i64 = -1;
 // DMG window bus-glitch (wg_apply): dots from the LCDC write's register commit
 // to the VRAM address-line transition. (The renderer's absorbed pre-window
 // sprite stall is read from the live SpriteFetchRec, not a constant.)
 const WG_TRANSITION_DELAY: u64 = 4;
 
-// CGB-compat mid-mode-3 bus-glitch grid deltas, derived from the mealybug
-// `_cgb_c` references. rise/fall = dots from the LCDC write to the bit
-// becoming read-visible per fetch substep (fall split per tile-data byte);
-// quirk = fall-coincidence tile-index-as-data window; arm/shift = fetch-grid
-// anchoring for on-screen sprite stalls; scy_add = extra dots before SCY
-// reaches the fetch address lines (vs DMG).
+// CGB-compat mid-mode-3 bus-glitch grid deltas. rise/fall = dots from the LCDC
+// write to the bit becoming read-visible per fetch substep (fall split per
+// tile-data byte); quirk = fall-coincidence tile-index-as-data window; arm/shift
+// = fetch-grid anchoring for on-screen sprite stalls; scy_add = extra dots before
+// SCY reaches the fetch address lines (vs DMG).
+// Base: LCDC is modifiable mid-scanline (Pan Docs: LCDC) and SCY is re-read per
+// tile-fetch / per-bitplane pre-CGB-D (Pan Docs: Scrolling "Mid-frame behavior").
+// The sub-dot read-visibility grid, tile-index-as-data coincidence, and A12 re-arm
+// are not in Pan Docs, TCAGBD, or GBCTR — sub-dot render timing from mealybug-tearoom-tests refs.
 const CGBWG_WIN_RISE: u64 = 6;
 const CGBWG_WIN_FALL: u64 = 7;
 // Window map-select (LCDC.6) read visibility when the window tile-data path is
 // $8000 (LCDC.4 = 1). Under $8000 the map pulse reaches the TileNumber read
 // CGBWG_WIN_MAP_RISE/FALL_TDS dots after the write commit — later than the
 // $8800 (LCDC.4 = 0) path's WIN_RISE/WIN_FALL — so a midline-sprite-shifted
-// window fetch samples the map pulse one fetcher tile later. Calibrated once
-// against the mealybug win_map_change2 `_cgb_c` reference (its 8 window rows
-// each land the special $9C00 tile dot-exact only at 10/10); the $8800
-// win_map_change keeps WIN_RISE/WIN_FALL. See cgb_wg_resolve / wg_apply.
+// window fetch samples the map pulse one fetcher tile later; the $8800 path keeps
+// WIN_RISE/WIN_FALL. See cgb_wg_resolve / wg_apply.
 const CGBWG_WIN_MAP_RISE_TDS: u64 = 10;
 const CGBWG_WIN_MAP_FALL_TDS: u64 = 10;
 // BG-path LCDC.3/4 read visibility, measured from the raw write cc, at the
-// SameBoy-exact fetch dot (bg_hw_read_dot_ex scy_mode): a bit becomes visible
+// hardware-exact fetch dot (bg_hw_read_dot_ex scy_mode): a bit becomes visible
 // `rise`/`fall` dots after the write commit. The fetch dot already carries its
 // own +2k substep offset, so the fall thresholds no longer need a per-substep
 // split (the old 4/3/1 was an artifact of the 2-dots-per-sprite-late grid).
@@ -255,7 +251,7 @@ const CGBWG_BG_RISE: u64 = 4;
 const CGBWG_BG_FALL: u64 = 4;
 const CGBWG_BG_FALL_TDL: u64 = 3;
 const CGBWG_BG_FALL_TDH: u64 = 1;
-// Map-select (LCDC.3) read visibility at the SameBoy-exact fetch dot
+// Map-select (LCDC.3) read visibility at the hardware-exact fetch dot
 // (bg_hw_read_dot_ex scy_mode): a rise/fall is visible 2 dots after the write
 // commit. Separate from the tile-data-select (LCDC.4) grid, which keeps the
 // calibrated `h`-dot thresholds above (its per-byte / tile-index-as-data
@@ -269,21 +265,19 @@ const CGBWG_QUIRK_BG: u64 = 4;
 // follows its prior falling edge by <= CGBWG_A12_GAP dots re-arms the address bus
 // while it is still slewing from that fall, so the rise's visibility is delayed
 // CGBWG_A12_REARM extra dots. GAP is the LCDC.4 pulse low-phase width the
-// tile_sel_change2 write loop uses; a single isolated change pulse never re-fires
+// tile_sel-change write loop uses; a single isolated change pulse never re-fires
 // low->high inside this span, so the extension is pulse-train-only (physical
-// inter-edge spacing, not a per-tile coincidence). Calibrated once against the
-// mealybug tile_sel_change / tile_sel_change2 cgb-c references.
+// inter-edge spacing, not a per-tile coincidence).
 const CGBWG_A12_GAP: u64 = 16;
 const CGBWG_A12_REARM: u64 = 1;
 // Pulse-train edge advance (see cgb_wg_resolve): a fall/rise inside a fast LCDC.4
 // pulse train (opposite edge within CGBWG_A12_GAP dots) reaches the A12 bus this
 // many dots sooner than the isolated-pulse thresholds — so its glitch window and
-// bit4 visibility land on the read one dot past the write (age m3-bg-lcdc-nocgb),
-// not the isolated w+4 (mealybug tile_sel_change).
+// bit4 visibility land on the read one dot past the write, not the isolated w+4.
 const CGBWG_TRAIN_ADVANCE: u64 = 3;
 // CGB-compat up-pulse LCDC.4 train line-end re-resolve (cgb_train_reresolve):
 // each bitplane's tile-data base is sampled at its own T1, this many dots before
-// the SameBoy-exact T2 fetch dot. Calibrated dot-exact vs the CGB-C oracle.
+// the hardware-exact T2 fetch dot.
 const CGBWG_TRAIN_T1_LEAD: i64 = 2;
 const CGBWG_ARM_WIN: u64 = 14;
 const CGBWG_ARM_WIN_HI: u64 = 12;
@@ -291,22 +285,20 @@ const CGBWG_ARM_BG: u64 = 14;
 const CGBWG_SHIFT_BASE: u64 = 13;
 // Sub-dot window fetch-grid phase (cgb_wg_resolve): the CGB-compat window
 // fetch grid slides 1/8 dot earlier per window line against the CPU write
-// clock (the SameBoy-measured read-dot drift quantizes this to the -1-dot
+// clock (the hardware-measured read-dot drift quantizes this to the -1-dot
 // steps every 8 lines that the integer grid already models; the fraction is
 // the remainder). Two places see the fraction:
-//  - a read displaced by a mid-line sprite stall resumes on the slid grid, so
-//    a rising edge landing exactly ON its integer visibility dot misses the
-//    read by the fraction: shifted reads take a rise one eighth late (the
-//    m3_lcdc_tile_sel_win_change2 top-block wtx1 low read; its high-plane
-//    $8000 split then collapses to the $8800 base like every train split).
-//  - a read inside a PENDING stall shadow (hardware charges the sprite stall
-//    to this read; the reconstruction grid charges it from the next tile)
-//    samples the A12 line at its true (stalled) dot: a rising LCDC.4 edge
-//    still rings there CGBWG_A12_ECHO dots after its commit, and the read
-//    catches it only when the true dot lands exactly on the echo's 1/8-dot
-//    lattice point - phase 0, i.e. window lines = 0 mod 8 (the
-//    m3_lcdc_tile_sel_win_change (8,64) blue straddle, which no integer-grid
-//    emulator reproduces).
+// - a read displaced by a mid-line sprite stall resumes on the slid grid, so
+// a rising edge landing exactly ON its integer visibility dot misses the
+// read by the fraction: shifted reads take a rise one eighth late (the
+// m3_lcdc_tile_sel_win_change2 top-block wtx1 low read; its high-plane
+// $8000 split then collapses to the $8800 base like every train split).
+// - a read inside a PENDING stall shadow (hardware charges the sprite stall
+// to this read; the reconstruction grid charges it from the next tile)
+// samples the A12 line at its true (stalled) dot: a rising LCDC.4 edge
+// still rings there CGBWG_A12_ECHO dots after its commit, and the read
+// catches it only when the true dot lands exactly on the echo's 1/8-dot
+// lattice point - phase 0, i.e. window lines = 0 mod 8.
 const CGBWG_A12_ECHO: u64 = 18;
 
 // CGB-compat window train tile-data-select latch (lower window rows). From
@@ -314,10 +306,8 @@ const CGBWG_A12_ECHO: u64 = 18;
 // coincidence are sampled a per-block lag (in dots) before the reconstructed byte
 // read; a FALL commit landing exactly on the sample dot IS the glitch. The lag
 // walks one dot later every WIN_TRAIN_LAG_STEP window lines (the sub-dot fetch
-// phase drift). Derived against rustyboi's own LCDC journal + the SameBoy CGB-C
-// per-fetch oracle of m3_lcdc_tile_sel_win_change2 (zero lts/glitch mismatch,
-// rows 40-47 lag -1, 48-55 lag 0, 56-63 lag +1). The upper rows (< this) are
-// uniform (no oracle split/glitch) and use the collapse path instead.
+// phase drift): rows 40-47 lag -1, 48-55 lag 0, 56-63 lag +1. The upper rows
+// (< this) are uniform (no split/glitch) and use the collapse path instead.
 const WIN_TRAIN_GLITCH_ROW: u8 = 40;
 const WIN_TRAIN_LAG_BASE: i64 = -1;
 const WIN_TRAIN_LAG_STEP: u8 = 8;
@@ -456,36 +446,36 @@ fn sprite_tile_walk_cost(
 }
 
 // DMG mid-mode-3 OBJ-enable toggle: dots from the write hook to the first
-// pixel pop gated by the new LCDC.1. Calibrated against mealybug
-// m3_lcdc_obj_en_change (the per-band cutoff sweep pins the commit exactly).
+// pixel pop gated by the new LCDC.1.
+// Base documented in Pan Docs: LCDC — OBJ enable is toggleable mid-frame ("toggling
+// mid-scanline might have funky results on DMG? Investigation needed") and OBJ size
+// mid-mode-3 "leaks"/artifacts. The exact apply latency (dots) is not documented —
+// from mealybug-tearoom-tests refs.
 const OBJEN_APPLY_DOTS: u128 = 2;
 // CGB (DMG-compat-on-CGB) mid-mode-3 OBJ-enable toggle commits one dot later
-// than DMG-CPU silicon (the CGB PPU's pixel gate samples LCDC.1 a dot further
-// out). Pinned by mealybug m3_lcdc_obj_en_change _cgb_c.
+// than DMG-CPU silicon (the CGB PPU's pixel gate samples LCDC.1 a dot further out).
 const OBJEN_APPLY_DOTS_CGB: u128 = 3;
 // DMG mid-mode-3 OBJ-size toggle: dots from the write hook to the fetcher
-// seeing the new LCDC.2. Calibrated by mealybug m3_lcdc_obj_size_change band 0
-// (the group-2 sprite whose HIGH byte reads exactly one dot after the hook+1
-// apply splits its row addressing: low byte 8x8, high byte 8x16).
+// seeing the new LCDC.2. A group-2 sprite whose HIGH byte reads exactly one dot
+// after the apply splits its row addressing: low byte 8x8, high byte 8x16.
 const OBJSIZE_APPLY_DOTS: u128 = 1;
 // Dots BEFORE the end of a sprite's fetch stall at which its tile-data LOW and
-// HIGH bytes are read (SameBoy's object fetch: low at end-3, high at end-1).
+// HIGH bytes are read (object fetch: low at end-3, high at end-1).
 const OBJ_READ_LOW_BACK: u128 = 3;
 const OBJ_READ_HIGH_BACK: u128 = 1;
 // CGB (DMG-compat-on-CGB) object fetch: the two tile-data bytes' size-sample
 // dots sit 3 dots earlier within the stall than on DMG-CPU silicon (the CGB
 // PPU begins the object tile-data fetch earlier relative to the stall end).
 // A mid-mode-3 LCDC.2 toggle straddling the fetch therefore splits the row
-// addressing at end-6 (LOW) / end-3 (HIGH). Pinned by mealybug
-// m3_lcdc_obj_size_change and m3_lcdc_obj_size_change_scx _cgb_c.
+// addressing at end-6 (LOW) / end-3 (HIGH).
 const OBJ_READ_LOW_BACK_CGB: u128 = 6;
 const OBJ_READ_HIGH_BACK_CGB: u128 = 3;
 
 const MODE2_STAT_PRETRIGGER_DOT: u128 = 452;
 // Within line 153 (the last VBlank line) the LY register is held at 153 only
 // briefly; after this many dots it reads 0, even though the line itself
-// continues until dot 455. This matches Gambatte's getLycCmpLy threshold
-// (lineTime - 6 in single speed) and makes the LYC=LY interrupt for LY=0
+// continues until dot 455. This matches the hardware LYC-compare-LY threshold
+// (line time - 6 in single speed) and makes the LYC=LY interrupt for LY=0
 // fire one line earlier than a naive end-of-line transition would suggest.
 const LINE_153_LY_ZERO_DOT: u128 = 6;
 
@@ -525,14 +515,14 @@ pub struct Sprite {
 // index space as `next_sprite_fetch_index`). Tracks whether the live walk
 // actually fetched a sprite this line and at which dot its stall armed, so the
 // DMG mid-mode-3 LCDC.1/LCDC.2 toggle model can resolve per-sprite semantics:
-//  - a sprite whose x-match dot passed while OBJ was disabled never fetches
-//    (skipped: no pixels, no stall — SameBoy skips the object process on DMG);
-//  - a sprite whose fetch is IN PROGRESS when OBJ is disabled aborts (SameBoy
-//    memory.c object_fetch_aborted): the remaining stall dots are refunded and
-//    the sprite's pixels never reach the line;
-//  - a fetched sprite's two tile-data bytes each sample LCDC.2 (OBJ size) at
-//    their own fetch dot (arm + penalty - 3 / - 1), so a mid-fetch size toggle
-//    can split the row addressing between the LOW and HIGH bytes.
+// - a sprite whose x-match dot passed while OBJ was disabled never fetches
+// (skipped: no pixels, no stall — hardware skips the object process on DMG);
+// - a sprite whose fetch is IN PROGRESS when OBJ is disabled aborts (hardware
+// aborts the in-progress object fetch): the remaining stall dots are refunded and
+// the sprite's pixels never reach the line;
+// - a fetched sprite's two tile-data bytes each sample LCDC.2 (OBJ size) at
+// their own fetch dot (arm + penalty - 3 / - 1), so a mid-fetch size toggle
+// can split the row addressing between the LOW and HIGH bytes.
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 enum SpriteFetchPhase {
     Pending,
@@ -598,9 +588,9 @@ struct CapturedWinTile {
 // Holds a lazily-sampled 80-byte snapshot of the OAM Y/X positions (`buf`,
 // even=Y odd=X) plus the per-sprite large-size flag (`lsbuf`). The snapshot is
 // advanced by `update(cc)`, which walks OAM positions up to
-// `toPosCycles(cc) = (lineCycles(cc) + 1) % 456`, copying from the source. The
+// `the pos-cycle conversion at cc = (line cycles(cc) + 1) % 456`, copying from the source. The
 // source is the real OAM normally, but reads as 0xFF for the whole window of an
-// active OAM-DMA (Gambatte points `oamram_` at the cartridge's disabled RAM).
+// active OAM-DMA (hardware points the OAM read at the cartridge's disabled RAM).
 // `change(cc)` (on CPU OAM writes and at DMA start/end) caps the next walk via
 // `last_change`. The per-line sprite list is built from `buf` at mode-2-END.
 #[derive(Clone, Serialize, Deserialize)]
@@ -613,17 +603,17 @@ pub struct OamReader {
     lsbuf: [bool; OAM_SPRITE_COUNT],
     // lu_: cc of the last update (the position-walk anchor), in PPU `abs_cc`.
     lu: u64,
-    // lastChange_: position-walk cap (0xFF == no pending change).
+    // last-change: position-walk cap (0xFF == no pending change).
     last_change: u8,
-    // largeSpritesSrc_: live LCDC OBJ-size bit, latched into lsbuf on the walk.
+    // large-sprites source: live LCDC OBJ-size bit, latched into lsbuf on the walk.
     large_src: bool,
     cgb: bool,
     // Whether the source currently reads 0xFF (active OAM-DMA window).
     src_disabled: bool,
     // OAM "bus retention" ghost, latched at the OAM-DMA start edge: on hardware
     // the mode-2 scan cannot read OAM while an OAM-DMA runs, and the Y/X bus
-    // retains the last pair actually read (SameBoy display.c
-    // add_object_from_index: mode2_y_bus/mode2_x_bus only update while no DMA is
+    // retains the last pair actually read (on hardware the OAM
+    // Y/X bus only updates while no DMA is
     // active, but the object check still runs against the stale bus). Positions
     // walked inside the DMA window sample this pair instead of open-bus 0xFF
     // (ashiepaws strikethrough: the line-68 scan ghosts entry 39's (0x54, 79)
@@ -640,8 +630,8 @@ pub struct OamReader {
 const OAM_POS_CYCLES: u32 = (2 * OAM_SPRITE_COUNT) as u32; // 80
 
 // Sub-M-cycle correction (in single-speed dots) between the cc at which the PPU
-// step observes the OAM-DMA window edge and the master cc Gambatte fires
-// startOamDma/endOamDma at. Calibrated against the late_sp*x/y `_1`/`_2` and
+// step observes the OAM-DMA window edge and the master cc hardware fires
+// OAM-DMA start/OAM-DMA end at. Calibrated against the late_sp*x/y `_1`/`_2` and
 // `_ds_1`/`_ds_2` bracket pairs.
 const OAMDMA_CHANGE_CC_OFFSET: u32 = 3;
 
@@ -698,15 +688,15 @@ impl OamReader {
         self.last_change != 0xFF
     }
 
-    // toPosCycles: lineCycles(cc)+1 wrapped to [0, 456).
+    // the pos-cycle conversion: line cycles(cc)+1 wrapped to [0, 456).
     //
     // `cc` may be a past update cc (`self.lu`) lying on the PREVIOUS line relative
     // to `lc`'s anchor — rustyboi updates the OAM snapshot sparsely (only at
-    // change/doEvent), so `lu` can trail the current line by up to ~one line
+    // change/the event dispatch), so `lu` can trail the current line by up to ~one line
     // without the >=1-line full-resample (controller `update`) firing. The raw
     // `456 - ((time - cc) >> ds)` then goes negative and the u64 subtraction
     // overflow-panics in debug (silently wraps in release). Compute it signed and
-    // reduce modulo the line length — Gambatte's unsigned wrap — so the position
+    // reduce modulo the line length — the hardware unsigned wrap — so the position
     // stays in [0,456). Byte-identical to the old `if v>=456 {v-=456}` whenever
     // `cc` is within the current line (`dots` in 1..=456).
     fn to_pos_cycles(cc: u64, lc: &stat_irq::LyCounter) -> u32 {
@@ -715,7 +705,7 @@ impl OamReader {
         raw.rem_euclid(stat_irq::LCD_CYCLES_PER_LINE as i64) as u32
     }
 
-    // Re-seed the snapshot from the current OAM (SpriteMapper::reset).
+    // Re-seed the snapshot from the current OAM.
     fn reset(&mut self, oam: &[u8; 2 * OAM_SPRITE_COUNT], cgb: bool) {
         self.cgb = cgb;
         self.large_src = false;
@@ -728,7 +718,7 @@ impl OamReader {
         self.buf.copy_from_slice(oam);
     }
 
-    // SpriteMapper::OamReader::enableDisplay.
+    // Seed the OAM snapshot at LCD enable (holds inactive until the post-enable window ends).
     fn enable_display(&mut self, cc: u64, ds: bool) {
         self.buf = [0; 2 * OAM_SPRITE_COUNT];
         self.lsbuf = [false; OAM_SPRITE_COUNT];
@@ -747,13 +737,13 @@ impl OamReader {
     //
     // `line_has_fetches`: whether the line whose reads the bus last saw had any
     // visible sprites. The Y bus is ALSO written by every mode-3 sprite
-    // tile/flags fetch (SameBoy display.c:1976 `mode2_y_bus = oam_read(tile)`),
+    // tile/flags fetch (on hardware the OAM Y bus latches the fetched tile byte),
     // so on a line that fetched sprites the retained value is a tile byte —
     // effectively never a matching Y — not the scan pair. Model that clobber as
     // an invisible ghost. It applies when the window opens outside the scan
     // walk (cap at 80: this line's fetches; cap before 2: the previous line's);
     // a mid-scan window start (2..80) retains the just-scanned pair, fetches
-    // not yet run (gambatte late_sp39y_2 vs ashiepaws strikethrough, whose
+    // not yet run (late_sp39y_2 vs ashiepaws strikethrough, whose
     // DMA-start line renders no sprites so the scan pair survives to the next
     // line's walk).
     fn capture_ghost(&mut self, line_has_fetches: bool) {
@@ -770,16 +760,16 @@ impl OamReader {
         }
     }
 
-    // SpriteMapper::OamReader::update. `oam_y`/`oam_x` for sprite `i` are read
+    // Incremental OAM Y/X snapshot walk. `oam_y`/`oam_x` for sprite `i` are read
     // lazily via the closure (real OAM when enabled, 0xFF when DMA-disabled).
     fn update(&mut self, cc: u64, lc: &stat_irq::LyCounter, oam_pos: &[u8; 2 * OAM_SPRITE_COUNT]) {
         if cc <= self.lu {
             return;
         }
-        // Full-line-or-more elapsed since the last update: Gambatte walks the
+        // Full-line-or-more elapsed since the last update: hardware walks the
         // whole 80-position buffer (distance = 2*lcd_num_oam_entries). Because
-        // rustyboi updates sparsely (only at change/doEvent, not per access),
-        // `toPosCycles(lu)` can underflow when lu is multiple lines old; do the
+        // rustyboi updates sparsely (only at change/the event dispatch, not per access),
+        // `the pos-cycle conversion(lu)` can underflow when lu is multiple lines old; do the
         // full re-sample explicitly from pos 0 so every position is refreshed
         // (sampling the disabled source if a DMA spans this whole window — which
         // it cannot for >1 line, so this is the steady-state/post-enable refresh).
@@ -808,9 +798,9 @@ impl OamReader {
             let lulc = Self::to_pos_cycles(self.lu, lc);
             let mut pos = lulc.min(OAM_POS_CYCLES);
 
-            // Distance to walk: from `pos` (the lineCycle of the last update) to
+            // Distance to walk: from `pos` (the line cycle of the last update) to
             // `cclc` (now), within a single line (the >= 1-line case is handled
-            // above). Mirrors Gambatte OamReader::update.
+            // above). Mirrors the hardware OAM-reader update.
             let cclc = Self::to_pos_cycles(cc, lc);
             let mut distance = cclc.min(OAM_POS_CYCLES).wrapping_sub(pos)
                 .wrapping_add(if cclc < lulc { OAM_POS_CYCLES } else { 0 });
@@ -855,7 +845,7 @@ impl OamReader {
         self.lu = cc;
     }
 
-    // SpriteMapper::OamReader::change.
+    // Cap the snapshot walk at the current position (an OAM change point).
     fn change(&mut self, cc: u64, lc: &stat_irq::LyCounter, oam_pos: &[u8; 2 * OAM_SPRITE_COUNT]) {
         self.update(cc, lc, oam_pos);
         self.last_change = (Self::to_pos_cycles(self.lu, lc).min(OAM_POS_CYCLES)) as u8;
@@ -935,7 +925,7 @@ struct PendingLcdcEvent {
 pub enum CgbColorConversion {
     #[default]
     Linear,
-    Gambatte,
+    Lcd,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -957,7 +947,7 @@ pub struct Ppu {
     // Sprite data for current scanline
     sprites_on_line: Vec<Sprite>,
     current_oam_sprite_index: usize, // Current sprite being checked during OAM search
-    // Lazy OAM Y/X snapshot (Gambatte SpriteMapper::OamReader). Drives sprite
+    // Lazy OAM Y/X snapshot. Drives sprite
     // visibility so an OAM-DMA overlapping mode-2 retroactively zeroes positions
     // sampled inside the DMA-disabled window. Fed by `oam_change`/`oam_update`.
     // Serialized so a mid-session savestate round-trips the sprite snapshot.
@@ -980,16 +970,16 @@ pub struct Ppu {
     scan_slot_large: [bool; OAM_SPRITE_COUNT],
     #[serde(default)]
     next_sprite_fetch_index: usize,
-    // Tile number `(spx - firstTileXpos) & -8` of the most recently charged
+    // Tile number `(spx - first-tile xpos) & -8` of the most recently charged
     // sprite in the live mode-3 walk. Sprites sharing a tile with this one cost
     // a flat 6 (only the first sprite per BG tile gets the leading rate), matching
-    // Gambatte's `prevSpriteTileNo` in `doFullTilesUnrolled`/`addSpriteCycles`.
+    // The previous sprite's tile number, tracked while accumulating mode-3 sprite cost.
     // Reset to SPRITE_TILE_NONE at M3 start and on window draw-start.
     #[serde(default = "sprite_prev_tile_default")]
     m3_sprite_prev_tile: i32,
     // Tick at which the most-recently-fetched sprite's stall was armed (the dot
     // `next_sprite_fetch_index` last advanced, and the first stall dot was consumed).
-    // Gambatte's `doFullTilesUnrolled` charges that sprite's `max(11-dist,6)` stall
+    // Hardware charges that sprite's `max(11-dist,6)` stall
     // dots one at a time as `p.cycles` counts down, so a mid-mode-3 OBJ-disable
     // refunds only the not-yet-counted-down remainder of the in-progress sprite:
     // `cost - (ticks - this + 1)` (see `remaining_sprite_cost`).
@@ -1007,34 +997,34 @@ pub struct Ppu {
 
     // Window state tracking
     window_line_counter: u8,    // Internal counter for window Y position
-    // Gambatte's `winYPos`: the window's internal Y line, incremented by 1 ONLY
-    // at the moment the window actually begins drawing on a line (M3Start::f0 /
-    // plotPixel draw-start), NOT per-line whenever ly > wy. Initialized to 0xFF
-    // at frame start so the first window-draw line yields winYPos == 0. The
+    // The hardware `window Y position`: the window's internal Y line, incremented by 1 ONLY
+    // at the moment the window actually begins drawing on a line (the mode-3-start window checkpoint /
+    // pixel output draw-start), NOT per-line whenever ly > wy. Initialized to 0xFF
+    // at frame start so the first window-draw line yields window Y position == 0. The
     // fetcher uses this (masked) for the window tile row / tile line.
     #[serde(default = "win_y_pos_init")]
     win_y_pos: u8,
-    // Gambatte's `win_draw_start` bit of winDrawState. On DMG, when WX matches
+    // The `win_draw_start` bit of the window-draw state. On DMG, when WX matches
     // at xpos == 166 (lcd_hres+6) the window cannot draw this line (the line
     // ends first) but ARMS: win_draw_start is set and survives into the next
-    // line, where M3Start::f0 activates the window from x==0 (++winYPos) even
+    // line, where the mode-3-start window checkpoint activates the window from x==0 (the window-Y increment) even
     // though WX is unchanged. Set during a line, consumed at the next line's
-    // M3 start. CGB never arms this way (handled by plotPixel's !cgb guard).
+    // M3 start. CGB never arms this way (handled by pixel output's !cgb guard).
     #[serde(default)]
     win_draw_start: bool,
-    // Set at this line's M3 start (M3Start::f0) when win_draw_start was armed
+    // Set at this line's M3 start (the window checkpoint) when win_draw_start was armed
     // from the previous line and the window is enabled: the window draws from
     // x==0 this line regardless of WX. Consumed by the PixelTransfer window
     // start at x==0.
     #[serde(default)]
     win_draw_started_at_x0: bool,
-    // Gambatte's `win_draw_started` bit of winDrawState: persists across lines
+    // The `win_draw_started` bit of the window-draw state: persists across lines
     // once the window has begun drawing this frame, until a WE-off / display
     // disable / frame end clears it. Distinct from `window_started_this_line`
-    // (per-line). Mirrors Gambatte plotPixel branch 886 (start now) vs 889
-    // (re-arm an already-started window): the FIRST WX==166 match with the
-    // window not yet drawing starts it on that very line (++winYPos, no visible
-    // pixels), so the next line draws with winYPos one higher than an arm-only
+    // (per-line). Mirrors the hardware pixel-output distinction between starting
+    // the window now vs re-arming an already-started window: the FIRST WX==166 match with the
+    // window not yet drawing starts it on that very line (the window-Y increment, no visible
+    // pixels), so the next line draws with window Y position one higher than an arm-only
     // path would give. Needed by the DMG wxA6 cluster.
     #[serde(default)]
     win_draw_started: bool,
@@ -1044,7 +1034,7 @@ pub struct Ppu {
     // The StartWindowDraw mode-3 penalty becomes non-refundable once the
     // pipeline advances WIN_M3_PENALTY dots past this; used by the late_disable
     // read-at-cc recompute to decide whether a mid-M3 window-disable keeps the
-    // window-inclusive m0Time or reverts to the no-window length.
+    // window-inclusive mode-0 time or reverts to the no-window length.
     win_start_dot: Option<u128>,
     // Predicted within-line `ticks` at which the window WILL begin drawing this
     // line, computed at M3 arm from WX/SCX when a window is scheduled. Used only
@@ -1077,8 +1067,8 @@ pub struct Ppu {
     // (dot 85 on DMG / 86 on CGB instead of 80 / 82).
     #[serde(default)]
     first_line_after_enable: bool,
-    // Gambatte `OamReader::lu_` for `inactivePeriodAfterDisplayEnable(cc) = cc < lu_`:
-    // the master cc until which, right after an LCD enable, getStat suppresses
+    // The hardware OAM-reader lookup-until (`lu`) boundary for `inactive-after-enable(cc) = cc < lu`:
+    // the master cc until which, right after an LCD enable, the STAT resolve suppresses
     // mode 2/3 (reports mode 0). Seeded at enable to `enable_cc + (80<<ds) + 1`.
     #[serde(default)]
     display_enable_inactive_until: u64,
@@ -1088,15 +1078,15 @@ pub struct Ppu {
     #[serde(default)]
     line_153_ly_zeroed: bool,
     // True once the current line's Mode 0 (HBlank) FF41 mode bits and
-    // STAT IRQ have been pretriggered. Gambatte's `getStat` reports mode
+    // STAT IRQ have been pretriggered. The hardware STAT resolve reports mode
     // 0 starting two cycles before the actual Mode 3 -> Mode 0 transition
-    // (`cc + 2 < m0TimeOfCurrentLine`); pretrigger Mode 0 from the pixel
+    // (`cc + 2 < the current line's mode-0 (HBlank) time`); pretrigger Mode 0 from the pixel
     // push at x == 158 so the FF41 read-back and the wired-OR mode-0 IRQ
     // fire at the right cycle. Reset when entering PixelTransfer.
     #[serde(default)]
     mode0_pretriggered_this_line: bool,
     // Number of BG pixels discarded so far for SCX fine-scroll alignment at
-    // the start of Mode 3 (while x == 0). Faithful to Gambatte's M3Start::f1
+    // the start of Mode 3 (while x == 0). Faithful to the hardware mode-3-start fine-scroll
     // per-dot loop: each dot, the LIVE `scx % 8` is re-read; if we have not
     // yet discarded that many pixels we pop one and consume the dot, else we
     // begin output. A mid-M3 SCX write therefore changes both the discard
@@ -1104,7 +1094,7 @@ pub struct Ppu {
     // tile-map column. Reset to 0 at every M3 arm.
     #[serde(default)]
     m3_pixels_discarded: u8,
-    // Fine-scroll discard target latched at M3 start (Gambatte M3Start::f1
+    // Fine-scroll discard target latched at M3 start (the mode-3-start fine-scroll phase
     // samples `scx % 8` when the loop first runs, at M3 start, before the
     // mode-2 STAT handler's mid-M3 SCX write lands). Reading SCX live in the
     // pop loop samples it too late (after FIFO latency), capturing the
@@ -1112,8 +1102,8 @@ pub struct Ppu {
     #[serde(default)]
     m3_discard_target: i8,
     // Dot at which the current line's M3 (PixelTransfer) was armed. xpos in
-    // Gambatte's M3Start::f1 loop == ticks - this. Used to re-read SCX at the
-    // same early M3 dots Gambatte samples, so a mid-discard SCX write moves the
+    // The mode-3-start fine-scroll loop xpos == ticks - this. Used to re-read SCX at the
+    // same early M3 dots hardware samples, so a mid-discard SCX write moves the
     // break target without the FIFO-warmup latency over-reading later writes.
     #[serde(default)]
     m3_arm_dot: u128,
@@ -1121,12 +1111,10 @@ pub struct Ppu {
     // window start. Hardware restarts the fetcher ON the trigger dot
     // (TileNumber dots t..t+1, data-low t+2..t+3, data-high t+4..t+5, push at
     // t+6), so the first window pixel pops exactly 6 dots after the trigger
-    // regardless of the global fetch parity (mealybug m3_window_timing: the
-    // BGP-boundary column shows a flat 6-dot startup for every WX). While set,
-    // the fetch cadence is (ticks - anchor) % 2 == 0 instead of ticks % 2 == 0;
-    // cleared at the first window tile's PushToFIFO (the FIFO's 8-pixel slack
-    // absorbs the re-sync to global parity). DMG-only; CGB keeps its decoupled
-    // fetcher_cadence_tick.
+    // regardless of the global fetch parity. While set, the fetch cadence is
+    // (ticks - anchor) % 2 == 0 instead of ticks % 2 == 0; cleared at the first
+    // window tile's PushToFIFO (the FIFO's 8-pixel slack absorbs the re-sync to
+    // global parity). DMG-only; CGB keeps its decoupled fetcher_cadence_tick.
     #[serde(default)]
     win_fetch_anchor: Option<u128>,
     // DMG WX 1..6 immediate window start: on hardware the WX comparator matches
@@ -1135,29 +1123,28 @@ pub struct Ppu {
     // remaining chop prologue discard pops (1 per dot, from the freshly pushed
     // window tile) chop its leading pixels. Net: the first VISIBLE window pixel
     // appears at the same dot as a WX=7 start (the earlier activation exactly
-    // cancels the extra discards; mealybug m3_window_timing rows 0..7 share one
-    // boundary) but the CONTENT starts at window pixel chop (mealybug
-    // m3_wx_4_change: 3-px left chop at WX=4) and the fetch pipeline runs chop
-    // dots ahead (no FIFO underrun after the chopped tile). Emulated by running
+    // cancels the extra discards) but the CONTENT starts at window pixel chop
+    // (e.g. a 3-px left chop at WX=4) and the fetch pipeline runs chop dots
+    // ahead (no FIFO underrun after the chopped tile). Emulated by running
     // the first chop dots' worth of fetch substeps on the trigger dot
     // (win_fetch_anchor = ticks - chop) and pacing the chop pops 1/dot in the
     // x==0 prologue. Remaining chop pops this line; reset at M3 arm.
     #[serde(default)]
     win_first_tile_chop: u8,
-    // SameBoy's window_is_being_fetched: true from a window activation until the
+    // The hardware "window is being fetched" state: true from a window activation until the
     // first FIFO pop that follows it (chop/discard pops count). The reactivation
     // insert below is suppressed while set — the activation's own first tile
     // must not self-insert.
     #[serde(default)]
     win_being_fetched: bool,
-    // DMG window "reactivation zero pixel" (SameBoy insert_bg_pixel): when the
+    // DMG window "reactivation zero pixel" (the hardware BG-pixel insert): when the
     // WX comparator matches AGAIN while the window is already active (a mid-
     // mode-3 WX rewrite), and the match dot coincides with a window tile's
     // nametable-read fetch dot with the FIFO holding exactly 8 pixels, the PPU
     // renders one color-0 pixel WITHOUT popping the FIFO — inserting a pixel
-    // that shifts the rest of the line right by one (mealybug m3_wx_4_change /
-    // m3_wx_4_change_sprites: the every-8-rows diagonal at x = WX-7). Consumed
-    // by the next draw_fifo_pixel.
+    // that shifts the rest of the line right by one (an every-8-rows diagonal at
+    // x = WX-7). Consumed by the next draw_fifo_pixel.
+    // Pan Docs: Window mid-frame behavior — https://gbdev.io/pandocs/Window.html
     #[serde(default)]
     insert_bg_pixel: bool,
     // DMG per-dot visibility history of LCDC.5 (window enable) inside mode 3,
@@ -1165,27 +1152,25 @@ pub struct Ppu {
     // dots ago ([0] = current dot). Our visible bit (self.lcdc, via the
     // 2-dot pending-event commit) turns OFF 2 dots before and ON 1 dot
     // before the hardware-visible bit, so an 8-cycle WE-off pulse spans 9
-    // visible OFF dots. Three taps, calibrated dot-exact by the mealybug
-    // win_en_change_multiple[_wx] staircases (each row shifts the WE pulse
-    // one dot along the window-trigger/fetch grid):
-    //  - WX comparator (trigger + prologue paths): we[2] INSTEAD of the live
-    //    bit — hardware needs WE asserted on the check dot and the one
-    //    before (an 8-cycle pulse blocks 9 comparator dots);
-    //  - window fetcher TileNumber kill: OFF at BOTH [3] and [4] (hardware
-    //    samples WE one dot delayed at its T1 dot, one dot before our TN);
-    //  - WE-off zero-pixel insert: we[2] at the tile-boundary pop dot.
+    // visible OFF dots. Three taps (each successive window row shifts the WE
+    // pulse one dot along the window-trigger/fetch grid):
+    // - WX comparator (trigger + prologue paths): we[2] INSTEAD of the live
+    // bit — hardware needs WE asserted on the check dot and the one
+    // before (an 8-cycle pulse blocks 9 comparator dots);
+    // - window fetcher TileNumber kill: OFF at BOTH [3] and [4] (hardware
+    // samples WE one dot delayed at its T1 dot, one dot before our TN);
+    // - WE-off zero-pixel insert: we[2] at the tile-boundary pop dot.
     // Seeded at M3 arm.
     #[serde(default)]
     we_dot_hist: [bool; 5],
     // Display-x values at which a pushed BG/window tile's FIRST pixel will
-    // pop (SameBoy's push-at-empty dots, where the WE-off zero-pixel insert
+    // pop (the hardware push-at-empty dots, where the WE-off zero-pixel insert
     // glitch is evaluated). Queued at PushToFIFO, consumed at the pop of
     // that x; at most two tiles are in flight.
     #[serde(default)]
     we_glitch_tile_starts: [Option<u8>; 2],
-    // DMG WE-off insert glitch, discard-prologue variant (SameBoy issue #278,
-    // little-things windesync-validate WX 0..6 rows): the line's FIRST
-    // push-at-empty boundary sits at SameBoy position -(SCX&7) — INSIDE the
+    // DMG WE-off insert glitch, discard-prologue variant: the line's FIRST
+    // push-at-empty boundary sits at position -(SCX&7) — INSIDE the
     // fine-scroll discard prologue — and the comparator match there is
     // WX == position + 7, i.e. WX == 7 - (SCX&7). The inserted color-0 pixel
     // is itself swallowed by the prologue: one discard dot pops it instead of
@@ -1194,7 +1179,7 @@ pub struct Ppu {
     // push dot, consumed by the first discard pop; reset at M3 arm.
     #[serde(default)]
     we_glitch_discard_insert: bool,
-    // SameBoy disable_window_pixel_insertion_glitch: a WE-off LCDC write
+    // The hardware window-pixel-insertion-disable glitch: a WE-off LCDC write
     // landing while a window tile fetch is in flight (win_being_fetched)
     // suppresses the WE-off zero-pixel insert for the REST of the line.
     // Reset at M3 arm.
@@ -1203,24 +1188,20 @@ pub struct Ppu {
     // Which WE tap the window TileNumber kill samples (see we_dot_hist).
     // A MID-LINE window restart runs its fetch on the trigger-anchored grid,
     // where the hardware tile-number dot sits one dot BEFORE our TN step
-    // (tap [3]); a LINE-BEGIN (M3Start f0) window runs on the global fetch
-    // grid where they coincide (tap [2]). wxA6_weoff_at_xposA6 line 0 vs the
-    // win_en_change_multiple[_wx] staircases bracket the two cases.
+    // (tap [3]); a LINE-BEGIN (mode-3-start window checkpoint) window runs on the global fetch
+    // grid where they coincide (tap [2]).
     #[serde(default)]
     win_kill_tap_late: bool,
     // One-shot latch for the DMG WX=0 + SCX&7>0 window-activation quirk: the
-    // window activates one T-cycle later than the plain x==0 start (mealybug
-    // m3_window_timing_wx_0: the BGP-boundary column is one dot short on every
-    // SCX&7 != 0 row). Set on the would-be trigger dot (which becomes a dead
-    // dot: no pop, no activation); the trigger then fires on the next dot.
-    // Reset at M3 arm.
+    // window activates one T-cycle later than the plain x==0 start. Set on the
+    // would-be trigger dot (which becomes a dead dot: no pop, no activation);
+    // the trigger then fires on the next dot. Reset at M3 arm.
     #[serde(default)]
     win_wx0_delayed: bool,
     // DMG mid-line WX comparator deferral: the hardware comparator samples WX
     // through the end of the CPU store's M-cycle, so a match seen with the OLD
-    // WX on the store's commit dot must NOT start the window (mealybug
-    // m3_wx_6_change row 102: the WX=LY match at x==95 loses to the WX=80
-    // restore landing on that very dot). Arm (trigger dot, matched wx) on the
+    // WX on the store's commit dot must NOT start the window (a WX==LY match can
+    // lose to a WX restore landing on that very dot). Arm (trigger dot, matched wx) on the
     // exact x+7==wx match; commit one dot later iff WX still reads the matched
     // value, with a one-substep catch-up so the restart timing is byte-identical
     // to the immediate start for a stable WX. Cleared at M3 arm.
@@ -1233,7 +1214,7 @@ pub struct Ppu {
     m3_arm_scx: u8,
     // Full SCX (all 8 bits) sampled at M3 arm. The first BG tile in the FIFO is
     // fetched from column (arm_scx / 8). If a mid-M3 SCX write moves the f1 break
-    // to a different tile column (Gambatte's M3Start::f1 re-reads p.scx live at
+    // to a different tile column (the mode-3-start fine-scroll phase re-reads SCX live at
     // its case-0 tile fetch), the already-queued first tile is stale and the
     // FIFO must be refetched from the new column. -1 = not yet armed this line.
     #[serde(default)]
@@ -1246,7 +1227,7 @@ pub struct Ppu {
     #[serde(default)]
     m3_scheduled_win: bool,
     // OBJ-size (LCDC bit2) value used by the mode-2 OAM scan, latched one scan
-    // slot behind the live LCDC. Gambatte's SpriteMapper latches the per-OAM
+    // slot behind the live LCDC. The hardware OAM scanner latches the per-OAM
     // entry size (`lsbuf_[pos/2]`) when that entry's OAM slot is read; a mid-mode-2
     // size write only affects entries scanned strictly AFTER the write commits.
     // Refreshed from the live LCDC after each scan slot so a write landing within
@@ -1259,10 +1240,10 @@ pub struct Ppu {
     // AND the per-slot `scan_obj_size_large` snapshot lags one slot, which on the
     // late_sizechange* tests pushes the change one OAM slot too late: the sprite
     // whose 8x16-only y-range straddles the line is scanned with the stale 8x8
-    // size and dropped, so m0Time (and the boundary FF41 STAT read) resolves the
-    // wrong mode. Gambatte's SpriteMapper latches each entry's size at that
+    // size and dropped, so mode-0 time (and the boundary FF41 STAT read) resolves the
+    // wrong mode. The hardware OAM scanner latches each entry's size at that
     // entry's OAM-read cc; record the exact abs_cc at which the bit2 change
-    // becomes visible (`write_cc + 2*cgb`, Gambatte setLcdc(data, cc+2)) and let
+    // becomes visible (`write_cc + 2*cgb`, an LCDC write taking effect at cc+2 on hardware) and let
     // each scan slot sample bit2 as-of its OWN abs_cc. (apply_cc, old_large,
     // new_large); apply_cc == wy2_disabled() means no pending change.
     #[serde(default = "wy2_disabled")]
@@ -1272,22 +1253,22 @@ pub struct Ppu {
     #[serde(default)]
     objsize_new_large: bool,
     // Absolute `ticks` dot at which Mode 3 -> Mode 0 (HBlank) fires. Computed
-    // at M3 arm from a cycle-exact mode-3 length formula (Gambatte oracle) and
+    // at M3 arm from a cycle-exact mode-3 length formula (matching hardware) and
     // drives the FF41 mode bits + mode-0 STAT IRQ, replacing the x==160 trigger.
     #[serde(default)]
     scheduled_mode0_dot: Option<u128>,
-    // Gambatte's `m0TimeOfCurrentLine` in MASTER-cc units: the absolute clock at
+    // The hardware `mode-0 (HBlank) time` for the current line, in MASTER-cc units: the absolute clock at
     // which the predicted mode-3 -> mode-0 transition occurs, equal to
-    // `predictedNextXposTime(167) = now_at_arm + (m3_len << ds)`. Captured at M3
+    // the xpos-167 advance time `now_at_arm + (m3_len << ds)`. Captured at M3
     // arm (master_cc + m3_len<<ds). The CPU's FF41 read resolves mode 3 iff
-    // `access_cc + 2 < m0_time_master` (Gambatte `getStat`); the mode-0 STAT IRQ
-    // fires one xpos earlier (`predictedNextXposTime(166) = m0Time - (1<<ds)`).
+    // `access_cc + 2 < m0_time_master` (the hardware STAT resolve); the mode-0 STAT IRQ
+    // fires one xpos earlier (the xpos-166 advance time `mode-0 time - (1<<ds)`).
     // None when no closed-form dot is available (window / first line).
     #[serde(default)]
     m0_time_master: Option<u64>,
     // Master-cc anchor at which CGB palette RAM (FF69/FF6B) becomes INACCESSIBLE
-    // for the current line (Gambatte `cgbpAccessible`: blocked once
-    // `lineCycles(cc) + ds >= 80`). Captured at M3 arm from the same master_cc /
+    // for the current line (the hardware CGB-palette-accessible window: blocked once
+    // `line cycles(cc) + ds >= 80`). Captured at M3 arm from the same master_cc /
     // m3_arm_dot the m0_time_master uses, so the cgbp begin boundary resolves at
     // the CPU's access cc rather than the renderer dot (whose pre/post-tick phase
     // differs between the read and write paths). None when no closed-form M3 arm
@@ -1299,7 +1280,7 @@ pub struct Ppu {
     // a per-phase early-report nudge. It is decoupled from the live pixel
     // pipeline's actual M3 termination, driving ONLY the FF41 mode bits read back
     // by the CPU and the mode-0 STAT IRQ arm, so it can report mode 0 a few dots
-    // EARLIER than the renderer drains its FIFO (Gambatte computes the reported
+    // EARLIER than the renderer drains its FIFO (hardware computes the reported
     // mode from the closed-form mode-3 length, not from the pixel-pump
     // termination) without ever hanging M3. This flag latches once that report
     // has fired for the current line, so the later live termination does not
@@ -1307,25 +1288,25 @@ pub struct Ppu {
     #[serde(default)]
     mode0_reported_this_line: bool,
 
-    // STAGE 5 (RB_LINERENDER): latched once `render_full_line` has produced the
-    // current visible line's framebuffer, so the closed-form line render runs at
-    // most once per line. Reset at the start of each line (mode-2 entry).
+    // Latched once `render_full_line` has produced the current visible line's
+    // framebuffer, so the closed-form line render runs at most once per line.
+    // Reset at the start of each line (mode-2 entry).
     #[serde(default)]
     line_rendered_this_line: bool,
 
-    // DMG wx==166 plotPixel-at-xpos166 runs once at the mode-3 -> HBlank
+    // DMG wx==166 pixel output-at-xpos166 runs once at the mode-3 -> HBlank
     // transition; this guards against the two transition call sites both firing
     // it on the same line. Reset at M3 start. See apply_dmg_wxa6_lineend_windraw.
     #[serde(default)]
     wxa6_lineend_applied: bool,
 
-    // Event-scheduled STAT/mode/LYC IRQ model (Gambatte port). `abs_cc` is a
-    // monotonic absolute dot clock; `line_cycle` (0..455) tracks position
-    // within the current 456-dot line. Together they reproduce Gambatte's
-    // `lyCounter` (`time` = abs_cc when LY next increments).
+    // Event-scheduled STAT/mode/LYC IRQ model. `abs_cc` is a monotonic absolute
+    // dot clock; `line_cycle` (0..455) tracks position within the current 456-dot
+    // line. Together they reproduce the reference `the LY counter` (`time` = abs_cc
+    // when LY next increments).
     #[serde(default)]
     abs_cc: u64,
-    // LCD-enable anchor (Gambatte `p_.now()` base): the master cc value at which
+    // LCD-enable anchor (the hardware PPU-clock base): the master cc value at which
     // the PPU dot-clock `abs_cc` was last re-based. The PPU's machine-cycle clock
     // is `master_cc - p_now` (both advance 1/T-cycle), so `p_now` folds the PPU
     // onto the single master cc. Re-anchored on LCD enable / LY-write reset, and
@@ -1334,40 +1315,40 @@ pub struct Ppu {
     // enable, where it is seeded so the derived value equals the accumulator.
     #[serde(default = "pnow_disabled")]
     p_now: u64,
-    // After a DS->SS speed switch the 3-dot stop bridge lands the LyCounter one
-    // master-cc higher than Gambatte (the DS half-dot the whole-dot bridge can't
-    // express), so the closed-form `+1` LyCounter correction in `m0_time_exact`
+    // After a DS->SS speed switch the 3-dot stop bridge lands the LY counter one
+    // master-cc higher than hardware (the DS half-dot the whole-dot bridge can't
+    // express), so the closed-form `+1` the LY counter correction in `m0_time_exact`
     // over-corrects by 1. Set on the DS->SS switch, cleared at the next LCD
-    // enable / LY reset. See ENGINE_LAZY_PPU.md bug #2.
+    // enable / LY reset.
     #[serde(default)]
     lytime_no_plus1: bool,
     // Set when an SS->DS speed switch executes DURING mode 3. Across the switch
-    // Gambatte's re-anchored lyCounter.time (LCD::speedChange) sits ~5 DS-dots
+    // The hardware re-anchored LY-counter time (on a speed change) sits ~5 DS-dots
     // (10 cc) ahead of rustyboi's bridged renderer line phase for the FF44 (LY)
-    // read's getLyReg anticipation window. Consumed ONLY by `get_ly_reg_at_cc`
-    // (not the STAT/m0Time predictor, which is already correct). Cleared at the
+    // read's LY-register anticipation window. Consumed ONLY by `get_ly_reg_at_cc`
+    // (not the STAT/mode-0 time predictor, which is already correct). Cleared at the
     // next LCD enable / LY reset, like `lytime_no_plus1`.
     #[serde(default)]
     ssds_mode3_ly_advance: bool,
     // Frame boundaries completed since `ssds_mode3_ly_advance` was last set. The
-    // mode-3-switch lyCounter re-anchor is a phase artifact local to the frames
+    // mode-3-switch the LY counter re-anchor is a phase artifact local to the frames
     // right after the switch; once several frame wraps re-settle the phase it no
     // longer applies. Reset to 0 when the flag is set.
     #[serde(default)]
     ssds_mode3_frames: u8,
     // Cumulative NON-mode-3 (OAM/HBlank) DS->SS speed-switch count for the LY-read
-    // sub-dot phase accumulator (Gambatte's `PPU::speedChange` half-dot `now -= 1`,
+    // sub-dot phase accumulator (the hardware speed-change half-dot re-anchor,
     // applied per switch). rustyboi's whole-dot DS->SS bridge folds the integer part;
     // the residual half-dot per switch accumulates and its parity shifts the post-STOP
-    // getLyReg boundary read one sub-dot. Mode-3 DS->SS switches carry their residual
-    // through the FACET-1 `stat_phase_carry` path instead, so they are excluded here.
+    // LY-register boundary read one sub-dot. Mode-3 DS->SS switches carry their residual
+    // through the `stat_phase_carry` path instead, so they are excluded here.
     #[serde(default)]
     dsss_ly_phase_count: u32,
     // Total DS->SS switch count (INCLUDING mode-3) for the early-frame anticipation
-    // narrowing. Mode-3 DS->SS switches carry their sub-dot through FACET-1 for the
-    // glitch-dot resolution, but the anticipation-window WIDTH of an early-frame read
-    // still tracks the full switch parity (row32/row37: the extra mode-3 switches vs
-    // the calibration burst flip the narrow-window parity).
+    // narrowing. Mode-3 DS->SS switches carry their sub-dot through the STAT-phase
+    // carry for the glitch-dot resolution, but the anticipation-window WIDTH of an
+    // early-frame read still tracks the full switch parity (extra mode-3 switches
+    // flip the narrow-window parity).
     #[serde(default)]
     dsss_ly_total_count: u32,
     // Set when an SS->DS speed switch executes during PixelTransfer (mode 3) and
@@ -1378,29 +1359,29 @@ pub struct Ppu {
     // switch or at the next LCD enable / LY reset.
     #[serde(default)]
     sc_mode3_pullback_pending: bool,
-    // STAGE 4 (FACET 1): running count of DS->SS-during-mode3 STOP
-    // switches. The faithful Gambatte `PPU::speedChange` re-anchor is `now -= 1`
-    // (HALF an SS dot) per DS->SS switch; the whole-dot bridge rounds each to 0,
-    // accumulating a missing HALF dot per switch. `floor(count/2)` extra STAT-only
-    // carry dots (via `stat_phase_carry`) reproduce that accumulated half-dot
-    // shift on the STAT/line phase WITHOUT moving the render latch.
+    // Running count of DS->SS-during-mode3 STOP switches. The reference
+    // the speed-change re-anchor is `now -= 1` (HALF an SS dot) per DS->SS
+    // switch; the whole-dot bridge rounds each to 0, accumulating a missing HALF
+    // dot per switch. `floor(count/2)` extra STAT-only carry dots (via
+    // `stat_phase_carry`) reproduce that accumulated half-dot shift on the
+    // STAT/line phase WITHOUT moving the render latch.
     #[serde(default)]
     dsss_mode3_stop_count: u32,
-    // STAGE 4 (FACET 2 KEYSTONE): accumulated STAT-phase carry in
-    // master-cc (`1<<ds` per `stat_phase_carry` dot). The carry advances the
+    // Accumulated STAT-phase carry in master-cc (`1<<ds` per `stat_phase_carry`
+    // dot). The carry advances the
     // STAT/line phase (line_cycle/abs_cc) so the STAT/m2-enable observables shift,
     // but the pixel-fetcher render latch must stay anchored to its ORIGINAL
     // position. The CPU VRAM/OAM/cgbp access-visibility gate (`ppu_blocks` via
     // `render_carry_skew`) SUBTRACTS this skew from the access cc so a store still
     // resolves against the un-carried fetcher mode-3 lock window — the decoupling
-    // that lets FACET 1's odd STAT-phase shift land without moving the render latch.
+    // that lets the odd STAT-phase shift land without moving the render latch.
     #[serde(default)]
     render_carry_skew_cc: i64,
     // Sub-PPU-dot parity (0/1) of the currently-resolving CPU register write at
     // double speed. Set by the bus just before the FF4x write hooks run.
     #[serde(skip, default)]
     write_subdot: u8,
-    // Gambatte's `wy2`: WY delayed by `6 - isDoubleSpeed()` cc after a write.
+    // The hardware `wy2`: WY delayed by `6 - double_speed` cc after a write.
     // Event-scheduled against the write cc; consumed by the window-Y gate so
     // the M3-length predictor / window-start see the delayed value.
     #[serde(default)]
@@ -1411,8 +1392,8 @@ pub struct Ppu {
     // The WY value to latch into wy2 when wy2_apply_cc arrives.
     #[serde(default)]
     wy2_pending: u8,
-    // Gambatte's `p.wy` (the value the weMaster checkpoints read): updated at
-    // `cc + 1 + cgb` after a write (`update(cc + 1 + cgb)` in `wyChange`).
+    // The delayed WY value the window-enable master checkpoints read: updated at
+    // `cc + 1 + cgb` after a write (`update(cc + 1 + cgb)` in `WY change`).
     // Distinct from `wy2` (the per-line gate value), which is delayed further.
     #[serde(default = "win_y_pos_init")]
     wy1: u8,
@@ -1437,8 +1418,8 @@ pub struct Ppu {
     scx_apply_cc: u64,
     #[serde(default)]
     scx_pending: u8,
-    // Exact-cc f1-discard SCX latch. Gambatte's scxChange does
-    // `update(cc + 2*cgb)` BEFORE `setScx`, so on CGB the new SCX is only
+    // Exact-cc f1-discard SCX latch. On hardware the SCX change becomes visible at
+    // `cc + 2*cgb` (before the SCX write itself resolves), so on CGB the new SCX is only
     // visible to the f1 fine-scroll discard 2 PPU cc after the write's cc. The
     // f1 loop reads SCX as-of its dot's exact abs_cc through this latch instead
     // of the immediate register, so a mid-discard SCX write lands on the
@@ -1450,8 +1431,8 @@ pub struct Ppu {
     #[serde(default)]
     scx_f1_new: u8,
     // sub-cc column lever. A mid-mode-3 SCX write applies to the BG
-    // column fetcher at `write_cc + 2*cgb` (Gambatte scxChange `update(cc+2*cgb);
-    // setScx`), evaluated against the cc at which a fetched tile's pixels are
+    // column fetcher at `write_cc + 2*cgb` (on hardware the SCX change becomes visible at
+    // `cc + 2*cgb`, before the SCX write resolves), evaluated against the cc at which a fetched tile's pixels are
     // PLOTTED (the fetcher leads the display by the FIFO depth). A tile whose
     // first plotted pixel is at/before the apply cc keeps the OLD scx; after it
     // uses NEW. These persist for the whole line (unlike scx_apply_cc which
@@ -1473,7 +1454,7 @@ pub struct Ppu {
     // x==0 (the discard prologue, before any pixel has plotted) but AFTER the
     // first displayed tile has already been queued into the FIFO. The tile still
     // in flight (the 2nd displayed tile) latched its column under the OLD scx one
-    // dot before the write; on hardware/Gambatte it plots well after the write so
+    // dot before the write; on hardware it plots well after the write so
     // its column comes from the NEW scx. The first queued tile (already pushed)
     // keeps the OLD scx. Re-keys exactly that one in-flight tile on its next
     // PushToFifo. DMG single-speed only (the CGB/DS prologue uses the
@@ -1503,11 +1484,11 @@ pub struct Ppu {
     #[serde(default)]
     subcc_last_tn_cc: u64,
     // First line after enable: the SCX value the fine-scroll discard prefix
-    // actually samples (Gambatte M3Start::f1 reads SCX once at the M3-start
+    // actually samples (the mode-3-start fine-scroll phase reads SCX once at the M3-start
     // dot). A mid-discard SCX write (write_cc + 2*cgb visible) only counts if
     // it lands at/before that sample dot, which sits `prev_scx % 8` dots past
     // M3-arm. `compute_m3_length_win` uses this override (when set) instead of
-    // the live register so the late-enable + SCX m0Time matches Gambatte.
+    // the live register so the late-enable + SCX mode-0 time matches hardware.
     #[serde(default)]
     first_line_scx_override: Option<u8>,
     #[serde(default)]
@@ -1525,7 +1506,7 @@ pub struct Ppu {
     #[serde(default)]
     sched_oneshot_statirq: u64,
     // Set when the m1 event flagged VBlank this frame so the render-machine
-    // ly143->144 transition does NOT re-flag it (Gambatte has a single VBlank
+    // ly143->144 transition does NOT re-flag it (hardware has a single VBlank
     // source: the m1 event). Cleared when the m1 event re-arms for the next frame.
     #[serde(default)]
     m1_vblank_fired: bool,
@@ -1533,8 +1514,8 @@ pub struct Ppu {
     // when the CPU writes FF41 (STAT) at the frame-wrap boundary (the LY 153->0
     // exit of VBlank, into the first line of the new frame) a hardware glitch on
     // the shared VBlank/STAT interrupt path clears the still-pending VBlank IF
-    // bit (bit 0). Real DMG-CPU-08 reads IF=0xE0 there; a sticky-bit model (both
-    // Gambatte and the pre-fix renderer) reads 0xE1. Armed at the VBlank->OAM
+    // bit (bit 0). Real DMG-CPU-08 reads IF=0xE0 there; a naive sticky-bit model
+    // (like the pre-fix renderer) reads 0xE1. Armed at the VBlank->OAM
     // frame-wrap, disarmed a few dots into line 0/1 so a normal mid-frame STAT
     // write never clears a legitimately-pending VBlank IRQ. DMG-only.
     #[serde(default)]
@@ -1562,9 +1543,8 @@ pub struct Ppu {
     // M-cycle START, but the store's bus-write lands a phase-dependent number of dots
     // later; for a write whose `master_cc % 4` is non-zero the new value must not reach
     // `bgp_delayed` until `bgp_defer_countdown` more dot-refreshes have passed. The old
-    // (pre-write) value is held in `bgp_defer_hold` meanwhile. Phase-0 writes (every
-    // gambatte dmgpalette_during_m3 / mealybug m3_bgp_change write) set countdown 0 and
-    // are byte-identical to the plain one-dot latch. See `on_bgp_write`.
+    // (pre-write) value is held in `bgp_defer_hold` meanwhile. Phase-0 writes set
+    // countdown 0 and are byte-identical to the plain one-dot latch. See `on_bgp_write`.
     #[serde(default)]
     bgp_defer_hold: u8,
     #[serde(default)]
@@ -1587,8 +1567,7 @@ pub struct Ppu {
     have_frame: bool,
     // First-frame-after-LCD-enable display blanking. On real hardware the panel
     // has not resynced for the first frame produced after LCDC.7 0->1, so it shows
-    // the LCD-off "whiter than white" blank instead of that frame's pixels (the
-    // little-things-gb `firstwhite` / Pokemon Pinball 1-frame-glitch behavior).
+    // the LCD-off "whiter than white" blank instead of that frame's pixels.
     // `frames_since_enable` counts completed frames since the last enable (saturating);
     // get_frame presents blank until it reaches 2 (one full frame after enable has
     // been displayed). Seeded to 2 so a skip_bios boot (LCD already on, no enable
@@ -1603,15 +1582,14 @@ pub struct Ppu {
     pending_lcdc_events: Vec<PendingLcdcEvent>,
     // Exact-cc latch for a mid-mode-3 CGB LCDC bit4 (BGWindowTileDataSelect)
     // toggle. The per-dot pending-event queue quantizes the bit4 commit to a
-    // dot boundary, which on the bgtiledata_spx08_ds tests lands the change one
-    // BG-fetch substep late (the change should split a tile between its
-    // TileDataLow and TileDataHigh fetches, but the dot model applies it a
-    // substep too late). Record the exact abs_cc at which the change becomes
-    // visible (`write_cc + 2` PPU dots, Gambatte's `setLcdc(data, cc + 2)`) and
-    // let the fetcher consult it per-substep. (commit_cc, new_lcdc, old_lcdc).
+    // dot boundary, which at double speed lands the change one BG-fetch substep
+    // late (the change should split a tile between its TileDataLow and
+    // TileDataHigh fetches, but the dot model applies it a substep too late).
+    // Record the exact abs_cc at which the change becomes visible (`write_cc + 2`
+    // PPU dots) and let the fetcher consult it per-substep. (commit_cc, new_lcdc, old_lcdc).
     #[serde(default)]
     lcdc_b4_exact: Option<(u64, u8, u8)>,
-    // CGB tile-index-is-tile-data glitch targets (SameBoy `tile_sel_glitch`).
+    // CGB tile-index-is-tile-data glitch targets (the hardware tile-select glitch).
     // Each falling mid-mode-3 LCDC.4 write records the single BG data read
     // (target_cc, target_k) that lands in the write's 1-T-cycle glitch window and
     // therefore returns the tile index instead of a VRAM byte. Resolved per fetch
@@ -1627,15 +1605,15 @@ pub struct Ppu {
     #[serde(default)]
     wg_hist: Vec<(u64, u8, u8)>,
     // Whether this line's bus-glitch journals resolve with the CGB-compat
-    // rules (DMG cart on CGB hardware, single speed — the scope the `_cgb_c`
-    // captures calibrate) instead of the DMG ones. Latched at mode-3 arm.
+    // rules (DMG cart on CGB hardware, single speed) instead of the DMG ones.
+    // Latched at mode-3 arm.
     #[serde(default)]
     wg_cgb: bool,
     // The undelayed window-restart TileNumber dot (abs_cc) for the current
     // line's window — the hardware fetch-grid origin F. None when the window
     // did not start through the x==0 restart path this line (the glitch model
     // is scoped to it) or when the pre-window sprite configuration is outside
-    // the calibrated single-sprite case.
+    // the single-sprite case.
     #[serde(default)]
     wg_anchor_cc: Option<u64>,
     // Hardware pre-window delay D_pre from an offscreen-left sprite (OAM X<=7)
@@ -1659,25 +1637,25 @@ pub struct Ppu {
     // TileNumber dot (see bg_wg_apply / m3_scx_high_5_bits). Cleared each M3 arm.
     #[serde(default)]
     bg_scx_hist: Vec<(u64, u8, u8)>,
-    // Exact-cc window-enable (LCDC bit 5) toggle for the weMaster checkpoints.
+    // Exact-cc window-enable (LCDC bit 5) toggle for the window-enable master checkpoints.
     // rustyboi's pending_lcdc_events commit the window bit one PPU dot before
-    // Gambatte's `setLcdc(data, cc + 2)` (the queue runs through one
+    // the hardware LCDC write taking effect at cc+2 (the queue runs through one
     // step_lcdc_events on the write dot). That 1-dot-early commit is harmless to
-    // the renderer/getStat but mis-orders the lc450/lc454 weMaster checkpoints
-    // against a window-enable write whose Gambatte commit (`write_cc + 2`) lands
-    // exactly on the checkpoint dot: Gambatte runs `update(cc)` (the weMaster
-    // event) BEFORE `setLcdc`, so the checkpoint sees the OLD window bit. We
+    // the renderer/STAT resolve but mis-orders the lc450/lc454 window-enable master checkpoints
+    // against a window-enable write whose hardware commit (`write_cc + 2`) lands
+    // exactly on the checkpoint dot: hardware runs the window-enable master event
+    // BEFORE the LCDC write resolves, so the checkpoint sees the OLD window bit. We
     // record the write's master-cc commit (`write_cc + 2`) and the bit's old/new
     // values; `update_window_y_latch` reads the window-enable bit as-of the
     // checkpoint cc through this. (commit_master_cc, new_win_bit, old_win_bit).
     #[serde(default)]
     we_win_bit_exact: Option<(u64, bool, bool)>,
-    // Per-line LCDC.0 (BG-enable) plot history for the per-pixel renderer
-    // (RB_LINERENDER per-pixel). The per-dot draw is flushed in bursts (the
-    // m0Time flush draws all remaining FIFO pixels at one cc), so a live
+    // Per-line LCDC.0 (BG-enable) plot history for the per-pixel renderer.
+    // The per-dot draw is flushed in bursts (the
+    // mode-0 time flush draws all remaining FIFO pixels at one cc), so a live
     // `self.lcdc & 1` read applies the final BG-enable to every flushed column
     // and a mid-mode-3 LCDC.0 toggle (BG off then on within pixel transfer) is
-    // lost. Gambatte instead reads `lcdc & lcdc_bgen` live as the fetcher walks
+    // lost. Hardware instead reads `lcdc & bg_enable` live as the fetcher walks
     // tiles, so each plotted column sees the BG-enable bit in effect at its own
     // plot position. We record the BG-enable changes during this line's mode 3
     // as (boundary_col, bgen) entries — columns >= boundary_col see the new bit.
@@ -1686,7 +1664,7 @@ pub struct Ppu {
     #[serde(default)]
     bgen_history: Vec<(u64, bool)>,
     // DMG per-dot OBJ-enable (LCDC.1) history. Hardware gates each sprite pixel
-    // on OBJ-enable AT THAT PIXEL'S pop dot (SameBoy render_pixel_if_possible
+    // on OBJ-enable AT THAT PIXEL'S pop dot (hardware's pixel-render step
     // reads LCDC.1 live per popped pixel), so a mid-mode-3 disable/enable
     // covers an exact dot span — which maps to columns THROUGH the stall
     // schedule (a column popping late because of a sprite stall resolves the
@@ -1697,7 +1675,7 @@ pub struct Ppu {
     objen_history: Vec<(u128, bool)>,
     // DMG per-dot OBJ-size (LCDC.2) history: (apply_tick, large). The sprite
     // fetcher samples LCDC.2 independently at each tile-data byte's own fetch
-    // dot (SameBoy recomputes get_object_line_address for the low AND high
+    // dot (hardware recomputes the object line address for the low AND high
     // byte), so a mid-fetch toggle splits the row addressing between bytes.
     // Seeded at mode-3 entry (apply_tick 0).
     #[serde(default)]
@@ -1709,8 +1687,8 @@ pub struct Ppu {
     // Per-line BGP / OBP0 / OBP1 plot history for the per-pixel renderer, mirroring
     // `bgen_history`. A mid-mode-3 write to BGP (FF47) / OBP0 (FF48) / OBP1 (FF49)
     // takes effect at the exact pixel being drawn `MID_M3_PAL_LATENCY` dots later
-    // (the DMG palette-RAM pipeline latency the mealybug m3_bgp_change / m3_obp0_change
-    // tests measure). The per-dot draw is flushed in bursts at m0Time, so a single
+    // (the DMG palette-RAM pipeline latency). The per-dot draw is flushed in
+    // bursts at mode-0 time, so a single
     // live `mmio.read(BGP)` snapshot would apply the final value to every flushed
     // column. We record each mid-mode-3 change as a (boundary_col, value) entry —
     // columns >= boundary_col see the new value — and resolve per displayed column.
@@ -1726,9 +1704,9 @@ pub struct Ppu {
     // DMG dot-keyed OBP histories: (apply_tick, value). The OBP register is
     // sampled as each sprite pixel pops out of the OAM FIFO, so the correct
     // key is the pixel's POP DOT — the column mapping breaks whenever a sprite
-    // stall delays the pops (mealybug m3_obp0_change's late bands: a pixel at
-    // column 8 popping at dot 111 must see a write that applied at dot 105,
-    // even though the write's column boundary was 9). On stall-free lines this
+    // stall delays the pops (e.g. a pixel at column 8 popping at dot 111 must see
+    // a write that applied at dot 105, even though the write's column boundary was
+    // 9). On stall-free lines this
     // is exactly equivalent to the column model (columns pop 1/dot). It also
     // subsumes the old off-left-edge column-0 forcing: left-clipped sprites'
     // pixels pop early, before any mid-mode-3 write applies.
@@ -1741,11 +1719,11 @@ pub struct Ppu {
     // at its own pop dot — which is delayed by any sprite-fetch stall between the
     // write and that column. Sampling by pop-dot (not display column) makes the
     // stall absorption exact for both the on-stall write and a pre-stall write
-    // whose target column is pushed past the stall (mealybug m3_bgp_change_sprites
-    // cgb_c). The column-keyed `bgp_history` remains the DMG-hardware path.
+    // whose target column is pushed past the stall. The column-keyed `bgp_history`
+    // remains the DMG-hardware path.
     #[serde(default)]
     bgp_dot_history: Vec<(u128, u8)>,
-    // DMG mid-mode-3 BGP-write "glitch" (mealybug m3_bgp_change). On real DMG hardware a
+    // DMG mid-mode-3 BGP-write "glitch". On real DMG hardware a
     // CPU write to BGP (FF47) during mode 3 can collide with the PPU's palette read for
     // the pixel being pushed at that dot: the register is mid-transition and the pixel is
     // looked up through the bitwise OR of the old and new BGP bytes (`old | new`) rather
@@ -1776,9 +1754,9 @@ pub struct Ppu {
     // Every mid-mode-3 BGP write on the current line, as (abs_cc, display_col, old|new).
     // The DMG palette-latch glitch is a TWO-WRITE interaction: a write spikes its own
     // pixel only when it has a neighboring mid-mode-3 write within the tight SET/RESTORE
-    // cadence (`BGP_SPIKE_CADENCE_CC`; mealybug bursts writes in ~12-dot pairs). A single
-    // write, or one loosely spaced (the gambatte dmgpalette_during_m3 family: one write
-    // per line, or 60-148 dots apart), does NOT collide and shows no spike. The gate is
+    // cadence (`BGP_SPIKE_CADENCE_CC`, ~12-dot pairs). A single write, or one loosely
+    // spaced (one write per line, or 60-148 dots apart), does NOT collide and shows no
+    // spike. The gate is
     // resolved at mode-3 end (all writes known) by `resolve_bgp_spikes`, which paints the
     // glitch straight into the framebuffer. Reset at mode-3 start.
     #[serde(default)]
@@ -1978,8 +1956,8 @@ impl Ppu {
     }
 
     /// Seed the post-boot PPU frame phase for `skip_bios`. The real boot ROM
-    /// leaves the LCD enabled and the PPU deep into a frame; Gambatte's
-    /// `setInitialState` sets `videoCycles = 144*456 + 164` (CGB) /
+    /// leaves the LCD enabled and the PPU deep into a frame; the hardware initial
+    /// state sets `video cycles = 144*456 + 164` (CGB) /
     /// `153*456 + 396` (DMG) — i.e. the game starts in VBlank at LY=144 (CGB) or
     /// LY=153 (DMG), NOT at a fresh LY=0 OAM search. Mirror that here so the very
     /// first instruction's LY/STAT reads (display_startstate tests) match real
@@ -1999,10 +1977,10 @@ impl Ppu {
         // the 0x150 handoff) and asserts LY=0x01 with STAT mode 3, whereas
         // boot_hwio-dmgABCmgb asserts LY=0x0A / mode 0 at the same offsets. Both
         // hand off in VBlank; the live PPU then advances into the next frame so
-        // the loop samples line 1 (dmg0) vs line 10 (dmgABC). The DMG0 videoCycles
+        // the loop samples line 1 (dmg0) vs line 10 (dmgABC). The DMG0 video cycles
         // that lands the FF41 read mid-mode-3 on line 1 and the FF44 read still on
         // line 1 is 145*456+198; the wide (~170-dot) window around it makes the
-        // exact CPU read sub-phase irrelevant. Non-DMG0 keeps Gambatte's 153*456+396.
+        // exact CPU read sub-phase irrelevant. Non-DMG0 keeps the hardware 153*456+396.
         let video_cycles: u32 = if cgb {
             144 * stat_irq::LCD_CYCLES_PER_LINE + 164 + agb_off
         } else if dmg0 {
@@ -2023,7 +2001,7 @@ impl Ppu {
 
         // On line 153 the LY *register* flips to 0 early (at dot
         // LINE_153_LY_ZERO_DOT), well before the line itself ends. The DMG
-        // post-boot phase (LY=153, lineCycle=396) is past that dot, so the
+        // post-boot phase (LY=153, line cycle=396) is past that dot, so the
         // register already reads 0 and the LYC=0 coincidence has already armed.
         // Mirror that transient state so the first FF44/FF41 read matches.
         let line_153_zeroed =
@@ -2032,7 +2010,7 @@ impl Ppu {
         let ly_reg = if line_153_zeroed { 0 } else { ly };
 
         // Anchor the dot-clock origin: abs_cc = 0 at the post-boot instant so
-        // ly_counter().time mirrors Gambatte's lyCounter.reset(videoCycles, cc)
+        // ly_counter().time mirrors the hardware LY-counter reset to (video cycles, cc)
         // with cc as the origin. p_now = master_cc keeps abs_cc = master_cc -
         // p_now consistent; the first step() folds abs_cc -> 1 and advances
         // line_cycle by one dot.
@@ -2066,7 +2044,7 @@ impl Ppu {
         self.stat_reg_committed = mmio.read(LCD_STATUS);
         // The LYC/STAT interrupt machinery follows the LCD-controller silicon,
         // which is CGB whenever the hardware is CGB-like — even for a DMG cart in
-        // DMG-compatibility mode (Gambatte gates LycIrq on `cart_.isCgb()`, which
+        // DMG-compatibility mode (hardware gates the LYC IRQ on the console-is-CGB signal, which
         // is the CGB-console signal, not cart CGB-feature support). Use hardware
         // is-CGB, not `is_cgb_features_enabled()`.
         self.lyc_irq.set_cgb(mmio.is_cgb());
@@ -2140,9 +2118,8 @@ impl Ppu {
         // DMG window bus-glitch journal (see wg_apply): record the exact bus
         // transition time of a mid-mode-3 bit6/bit4 toggle. The address lines
         // reach the VRAM bus WG_TRANSITION_DELAY dots after the write's
-        // register commit (calibrated against the mealybug win_map/tile_sel
-        // win-change reference captures: the hardware transition dot lands on
-        // the window fetch grid 3 dots after our register-visible apply cc).
+        // register commit (the hardware transition dot lands on the window fetch
+        // grid 3 dots after our register-visible apply cc).
         if !mmio.is_cgb_features_enabled()
             && display_stays_enabled
             && self.state == State::PixelTransfer
@@ -2157,7 +2134,7 @@ impl Ppu {
             }
         }
 
-        // SameBoy disable_window_pixel_insertion_glitch: a window-DISABLE
+        // The hardware window-pixel-insertion-disable glitch: a window-DISABLE
         // landing while a window tile fetch is in flight suppresses the
         // WE-off zero-pixel insert glitch for the remainder of this line
         // (reset at the next M3 arm).
@@ -2171,14 +2148,14 @@ impl Ppu {
             self.we_insert_suppressed = true;
         }
 
-        // Per-pixel BG-enable history (RB_LINERENDER per-pixel). A mid-mode-3
-        // LCDC.0 (BG-enable) toggle must be applied per display column: the
-        // per-dot draw is flushed in bursts (the m0Time flush draws all remaining
-        // FIFO pixels at one cc), so a once-per-line / live `self.lcdc & 1` read
-        // applies the final BG-enable to every flushed column. Record each bit0
-        // change as a (boundary_col, bgen) entry — columns >= boundary_col see the
-        // new bit — so the renderer reproduces Gambatte's live per-tile `lcdc &
-        // lcdc_bgen` read. Only while pixel transfer is active for this line.
+        // Per-pixel BG-enable history. A mid-mode-3 LCDC.0 (BG-enable) toggle must
+        // be applied per display column: the per-dot draw is flushed in bursts (the
+        // mode-0 time flush draws all remaining FIFO pixels at one cc), so a
+        // once-per-line / live `self.lcdc & 1` read applies the final BG-enable to
+        // every flushed column. Record each bit0 change as a (boundary_col, bgen)
+        // entry — columns >= boundary_col see the new bit — so the renderer
+        // reproduces the live per-tile `lcdc & lcdc_bgen` read. Only while pixel
+        // transfer is active for this line.
         let bgen_bit = LCDCFlags::BGDisplay as u8;
         if display_stays_enabled
             && self.state == State::PixelTransfer
@@ -2188,22 +2165,12 @@ impl Ppu {
             // BG-enable change first becomes visible. `self.x` is the next display
             // column to be popped — the real pipeline plot position at the write
             // instant (it already carries the warmup/FIFO and window latency the
-            // latency-free closed-form predictor lacks). Gambatte commits the
-            // write at `setLcdc(cc + 2)` PPU dots; the change first affects the
-            // column plotted ~2 dots later. Near an active window the displayed
-            // column advances slower than 1/dot (the +6 StartWindowDraw penalty
-            // stalls the BG fetcher), so the 2-dot commit reaches a few more
-            // display columns; add the window penalty when this line draws a
-            // window so the BG-off span extends across the stalled window columns
-            // (bgoff_bgon line 104: F7/on at x=143 + window -> boundary 147, so the
-            // sprite columns 142/144/146 keep BG-off and the sprite shows).
-            // Gambatte commits the write at `setLcdc(cc + 2)` PPU dots, so the
-            // change first reaches the column plotted 2 dots later: boundary =
-            // `self.x + 2`. When this line draws a window the displayed column
-            // advances slower than 1/dot through the StartWindowDraw stall, so the
-            // 2-dot commit spans ~2 extra display columns; add +2 on window lines.
-            // (Both terms calibrated against bgoff_bgon_sprite_below_window: the
-            // no-window lines need boundary self.x+2, the window lines self.x+4.)
+            // latency-free closed-form predictor lacks). The write commits `cc + 2`
+            // PPU dots later, so the change first reaches the column plotted 2 dots
+            // later: boundary = `self.x + 2`. When this line draws a window the
+            // displayed column advances slower than 1/dot through the +6
+            // StartWindowDraw stall, so the 2-dot commit spans ~2 extra display
+            // columns; add +2 on window lines (net boundary self.x+4).
             let new_on = (value & bgen_bit) != 0;
             let win = self.window_started_this_line
                 || self.win_draw_start
@@ -2212,9 +2179,8 @@ impl Ppu {
             // property, not a column offset. When pops are frozen at the write
             // (a sprite fetch stall in progress at column x, or one arming
             // there), column x itself pops after the commit and takes the new
-            // bit; a sprite arming at x+1 pins the boundary to x+1 (mealybug
-            // m3_lcdc_bg_en_change bands 0-2/8-17: the BG-off span starts AT
-            // the stalled column). No stall keeps the calibrated x+2.
+            // bit; a sprite arming at x+1 pins the boundary to x+1 (the BG-off
+            // span starts AT the stalled column). No stall keeps x+2.
             let cgb_compat = mmio.is_cgb() && !mmio.is_cgb_features_enabled();
             let stall_adj = if !mmio.is_cgb_features_enabled() {
                 if cgb_compat && self.sprite_fetch_stall > 0 {
@@ -2223,11 +2189,10 @@ impl Ppu {
                     // column it lands on. The commit offset is GRADUATED by the
                     // remaining stall dots (2 - stall; with cgb_compat_adj=+1
                     // below the total is 3 - stall), not the binary 0/2 the DMG
-                    // path uses. (mealybug m3_lcdc_bg_en_change _cgb_c: the first
-                    // BG-off write lands during the leftmost sprite's fetch
-                    // stall; stall=3 -> boundary 0, stall=1 -> boundary 2.)
-                    // (cgb_compat_adj below stays +1 for the stall case, so the
-                    // total commit offset is 3 - stall.)
+                    // path uses (e.g. a BG-off write landing during the leftmost
+                    // sprite's fetch stall: stall=3 -> boundary 0, stall=1 ->
+                    // boundary 2). cgb_compat_adj below stays +1 for the stall
+                    // case, so the total commit offset is 3 - stall.
                     3i32 - self.sprite_fetch_stall as i32
                 } else if self.sprite_fetch_stall > 0 || self.dmg_unfetched_sprite_at(self.x) {
                     0
@@ -2242,8 +2207,8 @@ impl Ppu {
             // CGB DMG-compat: the LCDC.0 commit lands one column later than DMG
             // in the plain no-stall case; but when a sprite fetch stalls OR an
             // unfetched sprite gates this column, the commit lands one column
-            // EARLIER than DMG+1 (mealybug m3_lcdc_bg_en_change _cgb_c bottom
-            // bands: self.x=8 with an unfetched sprite wants boundary 8, not 9).
+            // EARLIER than DMG+1 (e.g. self.x=8 with an unfetched sprite wants
+            // boundary 8, not 9).
             let cgb_compat_adj = if cgb_compat {
                 let sprite_active = self.sprite_fetch_stall > 0
                     || self.dmg_unfetched_sprite_at(self.x)
@@ -2263,10 +2228,10 @@ impl Ppu {
         // at that pixel's own pop dot, so the toggle covers an exact column
         // span; the boundary column mirrors the bgen model (the write becomes
         // visible to the mixer a couple of dots after `self.x`). Additionally
-        // (SameBoy memory.c "disabling objects while already fetching"): a
+        // (the hardware "disabling objects while already fetching" behavior): a
         // disable landing while a sprite fetch is in progress ABORTS it — the
         // remaining stall dots are not consumed and the sprite's pixels never
-        // reach the line. The closed-form m0Time refund for the same abort is
+        // reach the line. The closed-form mode-0 time refund for the same abort is
         // handled in set_lcdc_visible (remaining_sprite_cost, graduated).
         let objen_bit = LCDCFlags::SpriteDisplayEnable as u8;
         if !mmio.is_cgb_features_enabled()
@@ -2276,8 +2241,8 @@ impl Ppu {
         {
             let new_on = (value & objen_bit) != 0;
             // The write commits to the pixel gate OBJEN_APPLY_DOTS after the
-            // hook (the hook runs before this dot's PPU step; mealybug
-            // m3_lcdc_obj_en_change pins the first gated pop two dots out).
+            // hook (the hook runs before this dot's PPU step; the first gated
+            // pop lands two dots out).
             let apply = if mmio.is_cgb() && !mmio.is_cgb_features_enabled() {
                 OBJEN_APPLY_DOTS_CGB
             } else {
@@ -2297,12 +2262,10 @@ impl Ppu {
             // resumes pops at the commit dot: one residual stall dot remains.
             // Mid-fetch OBJ-disable aborts the in-progress sprite fetch only on DMG
             // silicon. On CGB hardware (including DMG-compat mode) the object fetch
-            // treats OBJ_EN as always-on and never aborts (SameBoy memory.c gates
-            // "disabling objects while already fetching" behind `!GB_is_cgb`), so
-            // the sprite's full fetch cost is spent regardless of the OBJ-disable —
-            // a short OBJ-off pulse that re-enables mid-line does not shorten mode 3.
-            // Fixes mealybug m3_lcdc_obj_en_change_variant (bottom-16-line right-edge
-            // 6px shift) with no effect on the DMG abort path.
+            // treats OBJ_EN as always-on and never aborts ("disabling objects
+            // while already fetching" is gated behind `!is_cgb`), so the sprite's
+            // full fetch cost is spent regardless of the OBJ-disable — a short
+            // OBJ-off pulse that re-enables mid-line does not shorten mode 3.
             if !mmio.is_cgb()
                 && !new_on && self.sprite_fetch_stall > 0 && self.next_sprite_fetch_index > 0
                 && let Some(rec) = self
@@ -2320,7 +2283,7 @@ impl Ppu {
 
         // DMG mid-mode-3 OBJ-size (LCDC.2) toggle: record the apply dot so each
         // sprite tile-data byte samples the size bit at its own fetch dot (the
-        // per-byte get_object_line_address recomputation, see obj_pixel_sized).
+        // per-byte object-line-address recomputation, see obj_pixel_sized).
         let objsz_bit = LCDCFlags::SpriteSize as u8;
         if !mmio.is_cgb_features_enabled()
             && display_stays_enabled
@@ -2337,7 +2300,7 @@ impl Ppu {
         // each OAM-scan slot as-of that slot's own abs_cc — not via the 2-dot
         // pending_lcdc_events queue plus the one-slot snapshot lag, which together
         // drop a late size change one OAM slot too far. Record the exact abs_cc
-        // the change is visible (write_cc + 2*cgb, Gambatte setLcdc(data, cc+2));
+        // the change is visible (write_cc + 2*cgb, an LCDC write taking effect at cc+2 on hardware);
         // the scan samples bit2 against it per slot. Scoped to mode-2 writes; the
         // PixelTransfer mid-mode-3 size toggle keeps its closed-form recompute.
         let ssz = LCDCFlags::SpriteSize as u8;
@@ -2347,11 +2310,11 @@ impl Ppu {
             && (old_lcdc & ssz) != (value & ssz)
         {
             // The OBJ-size change becomes visible to the fetcher/scan at
-            // `write_cc + 2` (Gambatte setLcdc(data, cc+2)). The OAM scan samples
+            // `write_cc + 2` (an LCDC write taking effect at cc+2 on hardware). The OAM scan samples
             // it per slot against this apply cc (objsize_large_at_cc), so a slot
             // read strictly past the apply cc sees the new size. ENABLE (8x8 ->
             // 8x16) lands at +2; DISABLE (8x16 -> 8x8) lands one OAM slot later
-            // (+2 more cc): Gambatte's SpriteMapper keeps the larger
+            // (+2 more cc): the hardware OAM scanner keeps the larger
             // already-latched height for the entry whose read straddles the
             // shrink, so the straddling sprite is still scanned 8x16. The
             // late_sizechange (disable) vs late_sizechange2 (enable) bracket pairs
@@ -2372,7 +2335,7 @@ impl Ppu {
             // toggles during active pixel transfer, the per-dot queue quantizes
             // the commit to a dot boundary and lands it one fetch substep late.
             // Record the exact abs_cc the change should be visible to the
-            // fetcher so each substep samples it on the correct side. Gambatte
+            // fetcher so each substep samples it on the correct side. Hardware
             // applies the new LCDC at `cc + 2` (PPU dots); a +2 abs_cc offset
             // lands the bit4 change exactly on the BG-fetch substep that should
             // first see it (verified against bgtiledata_spx08_ds_3/_4).
@@ -2382,13 +2345,13 @@ impl Ppu {
                 let ds = mmio.is_double_speed_mode();
                 let commit_cc = self.write_cc(ds) + 2;
                 self.lcdc_b4_exact = Some((commit_cc, value, old_lcdc));
-                // Tile-index-is-tile-data glitch (SameBoy `tile_sel_glitch`): a
+                // Tile-index-is-tile-data glitch: a
                 // falling LCDC.4 edge arms the glitch for exactly one CPU T-cycle
-                // (sm83_cpu.c GB_CONFLICT_LCDC_CGB: write, set flag, advance 1,
+                // (on hardware the write sets the glitch flag for one T-cycle: set, advance 1,
                 // clear). The single BG tile-data read that lands in that window
-                // returns the tile INDEX instead of a VRAM byte (display.c
-                // data_for_tile_sel_glitch, gated on tile < 0x80). Instrumented
-                // CGB-C SameBoy places that read exactly 4 dots after the write in
+                // returns the tile INDEX instead of a VRAM byte (on hardware
+                // this glitch is gated on tile < 0x80). Instrumented
+                // CGB-C hardware places that read exactly 4 dots after the write in
                 // its own grid. rustyboi's CPU-write dot sits at a substep- and
                 // parity-dependent phase within its BG fetch grid, so the target
                 // read (cc, k) is derived from the fetcher substep at the write:
@@ -2397,7 +2360,7 @@ impl Ppu {
                 // next tile's k=2 read (+8) only when the write lands off the even
                 // fetch cadence (odd abs_cc) — an on-cadence boundary write applies
                 // the new addressing cleanly with no straddle. Verified dot-exact
-                // vs SameBoy CGB-C on age m3-bg-lcdc (LOW-plane glitch) and
+                // vs CGB-C hardware on age m3-bg-lcdc (LOW-plane glitch) and
                 // cgb-acid-hell (HIGH-plane glitch).
                 let arm = (old_lcdc & tds) != 0
                     && (value & tds) == 0
@@ -2421,19 +2384,19 @@ impl Ppu {
                     }
                 }
             }
-            // Window-enable (bit 5) toggle: record the exact Gambatte commit cc
+            // Window-enable (bit 5) toggle: record the exact hardware commit cc
             // (`write_cc + 2`, abs_cc units — same anchor as `lcdc_b4_exact`) so
-            // the weMaster checkpoints resolve the window-enable bit as-of their
+            // the window-enable master checkpoints resolve the window-enable bit as-of their
             // own dot (see `we_win_bit_exact`).
             let we = LCDCFlags::WindowDisplayEnable as u8;
             if (old_lcdc & we) != (value & we) {
                 let ds = mmio.is_double_speed_mode();
-                // Gambatte `setLcdc(data, cc + 2)`: the window bit is effective at
+                // An LCDC write takes effect at cc+2 on hardware: the window bit is effective at
                 // write_cc + 2 master cc. In rustyboi's abs_cc units the boundary
-                // that aligns with the weMaster checkpoint dot (write_ticks + 2 dots
+                // that aligns with the window-enable master checkpoint dot (write_ticks + 2 dots
                 // ahead) is `write_cc + 3` (single speed) / `+4` (double speed) —
                 // the abs_cc derive-phase plus the per-dot abs_cc factor. The
-                // weMaster event runs at the checkpoint BEFORE setLcdc, so equality
+                // window-enable master event runs at the checkpoint BEFORE the LCDC commit, so equality
                 // reads the OLD bit (the `<=` in `update_window_y_latch`).
                 let commit_cc = self.write_cc(ds) + if ds { 4 } else { 3 };
                 self.we_win_bit_exact =
@@ -2445,8 +2408,8 @@ impl Ppu {
                 value,
                 kind: PendingLcdcEventKind::TileDataSelectOnly,
             });
-            // Full lands 2 PPU dots after the write commits, matching Gambatte's
-            // `update(cc + 2); setLcdc(data, cc + 2)`.
+            // Full lands 2 PPU dots after the write commits, matching the hardware
+            // LCDC write taking effect at cc+2.
             self.pending_lcdc_events.push(PendingLcdcEvent {
                 cycles_remaining: 2,
                 base_value: old_lcdc,
@@ -2491,9 +2454,9 @@ impl Ppu {
     /// the given OBJ-enable state, using the one faithful tile-walk model. Sprites
     /// with index < `next_sprite_fetch_index` have already been drawn (their cost
     /// is already spent and fixed); only the remaining ones contribute. Drives the
-    /// mid-mode-3 OBJ-toggle recompute so the closed-form m0Time is shifted by the
-    /// exact remaining-sprite cost delta (matching Gambatte's predictNextM0Time
-    /// re-run at the current `p.nextSprite`).
+    /// mid-mode-3 OBJ-toggle recompute so the closed-form mode-0 time is shifted by the
+    /// exact remaining-sprite cost delta (matching the hardware next-mode-0 prediction
+    /// re-run at the current `p.the next sprite`).
     fn remaining_sprite_cost(&self, scx: i32, obj_enabled: bool, use_fetch_index: bool) -> i32 {
         if !obj_enabled {
             return 0;
@@ -2501,24 +2464,24 @@ impl Ppu {
         // The set of sprites whose cost is NOT yet committed (and so is affected by
         // a mid-mode-3 OBJ toggle). Two gates, matching how the live renderer
         // commits sprite fetches:
-        //  - DISABLE (`use_fetch_index`): OBJ was on up to here, so the fetch loop
-        //    has advanced `next_sprite_fetch_index` over every sprite whose stall
-        //    already armed (committed). Only sprites at index >= that count have
-        //    their cost removed. This gives the exact 1-cc disable boundary the
-        //    sprite_late_disable_*_{1,2} pairs bracket (the stall arms on the dot
-        //    the index advances).
-        //  - ENABLE: OBJ was off, so the fetch loop never advanced; a sprite will
-        //    still be fetched iff its trigger (display x = spx - 8) is not yet
-        //    passed, i.e. spx >= x + 8.
+        // - DISABLE (`use_fetch_index`): OBJ was on up to here, so the fetch loop
+        // has advanced `next_sprite_fetch_index` over every sprite whose stall
+        // already armed (committed). Only sprites at index >= that count have
+        // their cost removed. This gives the exact 1-cc disable boundary the
+        // sprite_late_disable_*_{1,2} pairs bracket (the stall arms on the dot
+        // the index advances).
+        // - ENABLE: OBJ was off, so the fetch loop never advanced; a sprite will
+        // still be fetched iff its trigger (display x = spx - 8) is not yet
+        // passed, i.e. spx >= x + 8.
         if use_fetch_index {
             // DISABLE: the live renderer advances `next_sprite_fetch_index` at the
             // START of each sprite's stall and locks that sprite's cost into the
-            // schedule GRADUALLY as the stall counts down -- Gambatte's
-            // `doFullTilesUnrolled` charges the sprite's `max(11-dist,6)` dots one at
+            // schedule GRADUALLY as the stall counts down -- the hardware
+            // unrolled full-tile fetch charges the sprite's `max(11-dist,6)` dots one at
             // a time as `p.cycles` is consumed. A mid-mode-3 OBJ-disable therefore
             // refunds only the part of the in-progress sprite's stall that has NOT
             // yet elapsed, plus the full cost of every sprite whose stall has not yet
-            // started (index >= nsfi). This makes the refunded m0Time depend 1:1 on
+            // started (index >= nsfi). This makes the refunded mode-0 time depend 1:1 on
             // the disable cc (the later the disable, the less the refund), which the
             // sprite_late[_late]_disable_spx{18..1B}_{1,2} bracket pairs require:
             // their disable timings differ by single dots and the refunded mode-3 end
@@ -2566,9 +2529,9 @@ impl Ppu {
             .collect();
         sprite_xs.sort_unstable();
         // The remaining group resumes the tile walk with no carried "first sprite"
-        // (prevTileNo = none), so the first remaining sprite in its tile gets the
-        // leading rate, the rest 6 — the same `addSpriteCycles` continuation
-        // Gambatte uses. No window split here (the window-bit is unchanged on this
+        // (previous tile number = none), so the first remaining sprite in its tile gets the
+        // leading rate, the rest 6 — the same sprite-cost accumulation continuation
+        // hardware uses. No window split here (the window-bit is unchanged on this
         // path, so `nwx == targetx` collapses the split).
         sprite_tile_walk_cost(&sprite_xs, scx, 167, 167, true)
     }
@@ -2576,8 +2539,8 @@ impl Ppu {
     // The CGB tile-index-is-tile-data glitch for the BG data read about to run
     // (`self.abs_cc`, substep `k`): true iff a falling LCDC.4 write armed exactly
     // this (cc, k) read (see handle_lcdc_write / tidxtd_glitch). The glitch is a
-    // single-read event, not a sustained level, so only the one read SameBoy's
-    // 1-T-cycle `tile_sel_glitch` window catches returns the tile index as data.
+    // single-read event, not a sustained level, so only the one read the hardware
+    // 1-T-cycle tile-select-glitch window catches returns the tile index as data.
     fn tidxtd_quirk_at_fetch(&self) -> bool {
         let k = self.fetcher.fetch_substep();
         self.tidxtd_glitch
@@ -2629,28 +2592,26 @@ impl Ppu {
         }
     }
 
-    // DMG mid-mode-3 window VRAM-bus glitch (mealybug m3_lcdc_win_map_change /
-    // m3_lcdc_tile_sel_win_change, reverse-engineered from the DMG reference
-    // captures). The hardware window fetch grid differs from the renderer's
-    // anchored grid when sprites stall the line, so each window fetch read is
-    // re-evaluated at its reconstructed HARDWARE dot `h` against the exact
-    // LCDC.6/LCDC.4 bus-transition times (`wg_hist`):
-    //  - h = F + D_pre + 8*tile + 2*substep + midline sprite shifts, where F is
-    //    the undelayed window-restart TileNumber dot (`wg_anchor_cc`).
-    //  - An offscreen-left sprite (OAM X <= 7) is fetched BEFORE the window
-    //    restart and delays the whole grid by D_pre = max(7, 13 - 2*ceil(X/2))
-    //    (2-dot fetcher-boundary quantized; single-sprite calibration).
-    //  - An on-screen sprite at window position pos = X - 8 >= 0 lets the
-    //    in-progress tile fetch complete through TileDataHigh, then inserts its
-    //    stall: tiles >= pos/8 + 2 shift by the sprite's actually-charged
-    //    penalty, read from its live fetch record (`sprite_fetch_recs` — the
-    //    classic max(11 - dist, 6) leading rate / flat-6 follower, or nothing
-    //    if the walk dropped/aborted the sprite).
-    //  - A read strictly between the transitions sees the post-write bits; a
-    //    read ON a transition dot returns the OR of both addresses' bytes (the
-    //    address lines change mid-read; both cells drive 1-bits onto the bus).
-    // Every one of the 18 sprite-X bands of both reference images is
-    // reproduced by these rules (2 tests x 18 bands, dot-exact).
+    // DMG mid-mode-3 window VRAM-bus glitch. The hardware window fetch grid
+    // differs from the renderer's anchored grid when sprites stall the line, so
+    // each window fetch read is re-evaluated at its reconstructed HARDWARE dot
+    // `h` against the exact LCDC.6/LCDC.4 bus-transition times (`wg_hist`):
+    // Not in Pan Docs, TCAGBD (§8.16.1 Window and §8.17.3 VRAM-in-mode-3 are TODO stubs),
+    // or GBCTR; sub-dot render timing from mealybug-tearoom-tests refs.
+    // - h = F + D_pre + 8*tile + 2*substep + midline sprite shifts, where F is
+    // the undelayed window-restart TileNumber dot (`wg_anchor_cc`).
+    // - An offscreen-left sprite (OAM X <= 7) is fetched BEFORE the window
+    // restart and delays the whole grid by D_pre = max(7, 13 - 2*ceil(X/2))
+    // (2-dot fetcher-boundary quantized; single-sprite case).
+    // - An on-screen sprite at window position pos = X - 8 >= 0 lets the
+    // in-progress tile fetch complete through TileDataHigh, then inserts its
+    // stall: tiles >= pos/8 + 2 shift by the sprite's actually-charged
+    // penalty, read from its live fetch record (`sprite_fetch_recs` — the
+    // classic max(11 - dist, 6) leading rate / flat-6 follower, or nothing
+    // if the walk dropped/aborted the sprite).
+    // - A read strictly between the transitions sees the post-write bits; a
+    // read ON a transition dot returns the OR of both addresses' bytes (the
+    // address lines change mid-read; both cells drive 1-bits onto the bus).
     // Derive the hardware window fetch-grid origin F at a DMG x==0 window
     // start (the immediate TileNumber catch-up runs on the current dot, `chop`
     // dots after the conceptual grid origin). See wg_apply.
@@ -2666,6 +2627,7 @@ impl Ppu {
         // actually-charged penalty later (rb_absorb), and a sprite that never
         // fetched (OBJ off at its match dot) delayed neither the renderer nor
         // the hardware grid.
+        // Not in Pan Docs, TCAGBD, or GBCTR; sub-dot render timing from mealybug-tearoom-tests refs.
         let mut pre: Option<(u8, u64)> = None;
         for (i, s) in self.sprites_on_line.iter().enumerate() {
             if s.x > 8 {
@@ -2677,12 +2639,12 @@ impl Ppu {
             match rec.phase {
                 SpriteFetchPhase::Fetched => {
                     if pre.is_some() {
-                        return; // outside the calibrated single-pre-sprite case
+                        return; // outside the single-pre-sprite case
                     }
                     pre = Some((s.x, rec.penalty as u64));
                 }
-                // Mid-fetch abort: a PARTIAL stall was charged; no calibration
-                // evidence for the partial absorb — leave the model off.
+                // Mid-fetch abort: a PARTIAL stall was charged; no evidence
+                // for the partial absorb — leave the model off.
                 SpriteFetchPhase::Aborted if rec.penalty > 0 => return,
                 // Dropped (match dot passed with OBJ off) or still pending:
                 // no stall happened.
@@ -2694,8 +2656,8 @@ impl Ppu {
             // restart; the grid delay D_pre is 2-dot fetcher-boundary
             // quantized with floor 7 (= 6-dot fetch + 1). X=0 -> 13,
             // 1/2 -> 11, 3/4 -> 9, 5/6/7 -> 7. The CGB grid resolves single
-            // dots: D_pre = 13 - X (both `_cgb_c` win captures separate the
-            // X=1 vs X=2 and X=3 vs X=4 bands the DMG quantization merges).
+            // dots: D_pre = 13 - X (it separates the X=1 vs X=2 and X=3 vs X=4
+            // bands the DMG quantization merges).
             Some((x, p)) if x <= 7 && self.wg_cgb => (p, (13 - x) as u64),
             Some((x, p)) if x <= 7 => (p, (13i64 - ((x as i64 + 1) & !1)).max(7) as u64),
             // OAM X == 8 (window position 0): the hardware-side stall is a
@@ -2802,18 +2764,17 @@ impl Ppu {
             // Window map-select (LCDC.6) pulse under $8000 tile-data (LCDC.4 = 1):
             // the map read becomes visible later than the $8800 path, so re-resolve
             // just the map bit with the later CGBWG_WIN_MAP_*_TDS thresholds. This is
-            // the sole discriminator between the mealybug win_map_change (LCDC.4=0,
-            // WIN_RISE/FALL correct for its special-tile diagonal) and win_map_change2
-            // (LCDC.4=1, whose midline-shifted window rows land the special $9C00 tile
-            // one fetcher tile later — exact only at 10/10). LCDC.4 is a stable per-ROM
-            // constant across each line here, so keying on the resolved bit is safe;
-            // the tile-data-select and tile-index-as-data quirk keep the WIN thresholds.
+            // the sole discriminator between the LCDC.4=0 case (WIN_RISE/FALL correct
+            // for its special-tile diagonal) and the LCDC.4=1 case, whose
+            // midline-shifted window rows land the special $9C00 tile one fetcher
+            // tile later. LCDC.4 is a stable per-ROM constant across each line here,
+            // so keying on the resolved bit is safe; the tile-data-select and
+            // tile-index-as-data quirk keep the WIN thresholds.
             let map_bit = LCDCFlags::WindowTileMapDisplaySelect as u8;
             let tds = LCDCFlags::BGWindowTileDataSelect as u8;
             let bits = if (bits & tds) != 0 {
-                // The map re-resolve stays on the integer grid: the 10/10
-                // thresholds are calibrated against win_map_change2's
-                // all-shifted rows, whose refs show no sub-dot residue.
+                // The map re-resolve stays on the integer grid: the all-shifted
+                // window rows show no sub-dot residue.
                 let (bits_map, _) = self.cgb_wg_resolve(
                     h,
                     CGBWG_WIN_MAP_RISE_TDS,
@@ -2874,13 +2835,12 @@ impl Ppu {
         let mut bits = self.wg_hist[0].1;
         let mut quirk = false;
         let mut prev_fall_w: Option<i64> = None;
-        // Pulse-train scope (see CGBWG_TRAIN_ADVANCE). age m3-bg-lcdc-nocgb holds
-        // LCDC.4 HIGH across the line and pulses it LOW repeatedly — the A12 line
-        // is perpetually driven, so every falling edge's glitch/bit4 visibility
-        // lands CGBWG_TRAIN_ADVANCE dots sooner. The isolated mealybug tile_sel
-        // pulses instead blip UP from a bit4=0 baseline (line-start LCDC.4 clear:
-        // tile_sel_change 0x83, win_change 0xa3), a single settle at the w+4
-        // thresholds. Key on the line-initial LCDC.4 level (available at the first
+        // Pulse-train scope (see CGBWG_TRAIN_ADVANCE). A line that holds LCDC.4
+        // HIGH and pulses it LOW repeatedly keeps the A12 line perpetually driven,
+        // so every falling edge's glitch/bit4 visibility lands CGBWG_TRAIN_ADVANCE
+        // dots sooner. An isolated pulse instead blips UP from a bit4=0 baseline
+        // (line-start LCDC.4 clear), a single settle at the w+4 thresholds. Key on
+        // the line-initial LCDC.4 level (available at the first
         // fetch, so the early tiles resolve train-correctly before the whole pulse
         // train is journaled — unlike an edge-count which the growing journal only
         // reaches mid-line): a high baseline is the repeatedly-pulsed train, a low
@@ -2911,11 +2871,11 @@ impl Ppu {
             // from the prior edge, so BOTH edges settle CGBWG_TRAIN_ADVANCE dots
             // earlier than the isolated-pulse thresholds (CGBWG_BG_FALL_*/RISE/
             // QUIRK_BG) are calibrated for. The FALL advance lands the glitch on the
-            // same read SameBoy catches (age w+1 vs isolated mealybug w+4); the RISE
+            // same read hardware catches (train w+1 vs isolated w+4); the RISE
             // advance restores tile-data-select in time for BOTH plane reads of the
-            // tile straddling the re-rise, which the age refs render as its $8000
-            // tile (the reconstruction otherwise holds the LOW plane $8800 one read
-            // too long, splitting the tile into a spurious mixed $8000/$8800 read).
+            // tile straddling the re-rise, which renders as its $8000 tile (the
+            // reconstruction otherwise holds the LOW plane $8800 one read too long,
+            // splitting the tile into a spurious mixed $8000/$8800 read).
             let fall_eff = if train_fall { fall.saturating_sub(CGBWG_TRAIN_ADVANCE) } else { fall };
             let rise_eff = if train_rise { rise.saturating_sub(CGBWG_TRAIN_ADVANCE) } else { rise };
             if (falling & tds) != 0 { prev_fall_w = Some(w as i64); }
@@ -2952,12 +2912,12 @@ impl Ppu {
             }
             bits = (bits & !applied) | (new & applied);
             // The tile-index-as-data quirk fires when a falling LCDC.4 write's
-            // 1-cycle `tile_sel_glitch` window (SameBoy sm83_cpu.c
-            // CONFLICT_LCDC_CGB: set true, advance 1 cycle, set false) coincides
-            // with a tile-data T2 read. SameBoy calls `data_for_tile_sel_glitch`
-            // in BOTH GET_TILE_DATA_LOWER_T2 (k==1) and GET_TILE_DATA_HIGH_T2
+            // 1-cycle tile-select-glitch window (on hardware the write sets the
+            // glitch flag: set true, advance 1 cycle, set false) coincides
+            // with a tile-data T2 read. Hardware uses the glitch data
+            // in BOTH the low-plane T2 read (k==1) and the high-plane T2 read
             // (k==2), so which bitplane glitches is decided by which T2 read lands
-            // in the 1-cycle window, not by k. The true SameBoy fetch dot `h_scy`
+            // in the 1-cycle window, not by k. The true hardware fetch dot `h_scy`
             // is `h - CGBWG_QUIRK_BG`; the write's active window is [w, w+1], i.e.
             // `w + CGBWG_QUIRK_BG <= h <= w + CGBWG_QUIRK_BG + 1` in the calibrated
             // `h` grid. This selects k==1 when the low read straddles the fall
@@ -2979,26 +2939,25 @@ impl Ppu {
 
     // DMG BG-path analog of `wg_apply`: resolve mid-mode-3 LCDC.3 (BG map) /
     // LCDC.4 (tile data) toggles at each BG fetch read's reconstructed HARDWARE
-    // dot instead of rustyboi's own (stall-displaced) read dot. Derived from
-    // the mealybug m3_lcdc_bg_map_change + m3_lcdc_tile_sel_change DMG captures
-    // (2 tests x 18 sprite-X bands, all reproduced dot-exact):
-    //  - Hardware BG fetch grid: read dot h = F + 8n + 2k (n = fetch index
-    //    from line start, k = 0/1/2 TileNumber/DataLow/DataHigh), F = the
-    //    line's first BG TileNumber dot (`bg_anchor_cc` — rustyboi reads it at
-    //    the same dot, before any sprite stall).
-    //  - An offscreen-left sprite (OAM X <= 7) is fetched during the first-tile
-    //    prologue and delays tiles n >= 1 by the same D_pre as the window grid:
-    //    max(7, 13 - 2*ceil(X/2)).
-    //  - An on-screen sprite (pos = X - 8 >= 0) lets the in-progress tile
-    //    complete, then delays tiles n >= pos/8 + 2 by 13,11,11,9,9,7,7,7
-    //    (pos%8 = 0..7) — the SAME 2-dot-quantized delay function as the
-    //    offscreen-left D_pre, keyed by the in-tile phase (NOT the live
-    //    pipeline's classic 11 - min(5, pos%8) charge). Pinned by the
-    //    mealybug bands, the m3_scy_change write-phase straddles, and the
-    //    gambatte bgtiledata/bgtilemap/scy spx08-spx0B captures.
-    //  - Transition rule: a read sees the post-write value iff its hardware
-    //    dot lies strictly past the write's commit cc; no OR edge on the BG
-    //    grid (the m3_scy_change captures reject one at this phase).
+    // dot instead of our own (stall-displaced) read dot.
+    // Base: LCDC.3/.4 are modifiable mid-scanline (Pan Docs: LCDC). The sub-dot BG
+    // fetch-grid reconstruction and transition rule are not in Pan Docs, TCAGBD, or
+    // GBCTR — sub-dot render timing from mealybug-tearoom-tests refs.
+    // - Hardware BG fetch grid: read dot h = F + 8n + 2k (n = fetch index
+    // from line start, k = 0/1/2 TileNumber/DataLow/DataHigh), F = the
+    // line's first BG TileNumber dot (`bg_anchor_cc` — rustyboi reads it at
+    // the same dot, before any sprite stall).
+    // - An offscreen-left sprite (OAM X <= 7) is fetched during the first-tile
+    // prologue and delays tiles n >= 1 by the same D_pre as the window grid:
+    // max(7, 13 - 2*ceil(X/2)).
+    // - An on-screen sprite (pos = X - 8 >= 0) lets the in-progress tile
+    // complete, then delays tiles n >= pos/8 + 2 by 13,11,11,9,9,7,7,7
+    // (pos%8 = 0..7) — the SAME 2-dot-quantized delay function as the
+    // offscreen-left D_pre, keyed by the in-tile phase (NOT the live
+    // pipeline's classic 11 - min(5, pos%8) charge).
+    // - Transition rule: a read sees the post-write value iff its hardware
+    // dot lies strictly past the write's commit cc; no OR edge on the BG
+    // grid at this phase.
     // Sprites are counted from the live fetch records; a record still Pending
     // at this (earlier) fetch dot counts iff OBJ display is enabled now (the
     // BG fetcher reads run up to ~10 dots ahead of the pixel pops that arm the
@@ -3011,18 +2970,17 @@ impl Ppu {
         self.bg_hw_read_dot_ex(n, k, ly, false)
     }
 
-    // As `bg_hw_read_dot`, but `scy_mode` returns the SameBoy-exact CGB fetch
+    // As `bg_hw_read_dot`, but `scy_mode` returns the hardware-exact CGB fetch
     // dot (2 dots earlier than the LCDC-calibrated dot for a sprite-stalled
     // tile). The LCDC journal (`bg_wg_resolve_cgb`) is tuned against the
     // un-corrected dot through its own rise/fall thresholds; the SCY journal
     // compares the dot against the raw write commit (+CGBWG_SCY_ADD), so it
-    // needs the true fetch dot. Verified dot-exact vs SameBoy CGB-C: after an
-    // offscreen-left sprite (OAM X<=7) the BG fetch is delayed by D_pre = 11 - X
-    // (not 13 - X); an on-screen sprite delays the tiles from its own by
-    // max(4, 11 - pos%8). Without this the k=1/k=2 substeps sit 2 dots too late
-    // and cross a mid-fetch SCY write the k=0 tile-number read did not — mixing
-    // the tile's map row with the wrong tile line (the m3_scy_change per-row
-    // jitter).
+    // needs the true fetch dot. After an offscreen-left sprite (OAM X<=7) the BG
+    // fetch is delayed by D_pre = 11 - X (not 13 - X); an on-screen sprite delays
+    // the tiles from its own by max(4, 11 - pos%8). Without this the k=1/k=2
+    // substeps sit 2 dots too late and cross a mid-fetch SCY write the k=0
+    // tile-number read did not — mixing the tile's map row with the wrong tile
+    // line (per-row jitter).
     fn bg_hw_read_dot_ex(&self, n: u64, k: u8, ly: u8, scy_mode: bool) -> Option<u64> {
         let anchor = self.bg_anchor_cc?;
         if self.fetcher.is_fetching_window() || self.window_started_this_line {
@@ -3054,7 +3012,7 @@ impl Ppu {
             if s.x <= 7 {
                 if n >= 1 {
                     // CGB: 1-dot D_pre = 13 - X (see the CGBWG_* consts); DMG: 2-dot
-                    // fetcher-boundary quantized. (scy_mode: SameBoy-exact 11 - X.)
+                    // fetcher-boundary quantized. (scy_mode: hardware-exact 11 - X.)
                     h += if self.wg_cgb {
                         (13 - s.x) as u64 - cgb_stall_bias
                     } else {
@@ -3067,15 +3025,15 @@ impl Ppu {
                     // CGB read-granular rule: only reads whose unshifted dot
                     // is at/after the sprite's arm dot A = F + arm + 8*(pos/8)
                     // (constant within the sprite's own tile) shift, by
-                    // max(6, 13 - pos % 8). (scy_mode: SameBoy-exact max(4, 11 - pos%8).)
+                    // max(6, 13 - pos % 8). (scy_mode: hardware-exact max(4, 11 - pos%8).)
                     let arm = CGBWG_ARM_BG + 8 * (pos / 8);
                     if base >= anchor + arm {
                         h += (CGBWG_SHIFT_BASE as i64 - (pos % 8) as i64)
                             .max(6)
                             .saturating_sub(cgb_stall_bias as i64) as u64;
                     } else if !scy_mode && k >= 1 && n == pos / 8 + 1 && base + 4 >= anchor + arm {
-                        // Sprite-triggering tile: SameBoy blocks the object fetch
-                        // until the current tile passes GET_TILE_DATA_HIGH_T2, so
+                        // Sprite-triggering tile: hardware blocks the object fetch
+                        // until the current tile passes its high-plane T2 read, so
                         // its low+high bitplane reads stay un-stalled and 2 dots
                         // apart. rustyboi's grid places these reads a couple dots
                         // ahead of the true fetch dot the LCDC.4 rise-visibility
@@ -3101,7 +3059,7 @@ impl Ppu {
                     // quantized delay as the offscreen-left D_pre, keyed by
                     // the in-tile phase. The m3_scy_change low-plane
                     // straddles separate the odd pens from the even ones;
-                    // gambatte bgtiledata_spx08 tiles 2/17 (vs spx09-0B) pin
+                    // bgtiledata_spx08 tiles 2/17 (vs spx09-0B) pin
                     // pos 0 at 13.
                     let q = (pos % 8) as i64;
                     h += (13 - ((q + 1) & !1)).max(7) as u64;
@@ -3139,8 +3097,8 @@ impl Ppu {
     // Resolve the BG-path LCDC journal, splitting the two bits by their fetch
     // dot: the tile-data-select bit (LCDC.4) at the `h` grid its per-byte /
     // tile-index-as-data coincidence is calibrated against, and the map-select
-    // bit (LCDC.3) at the SameBoy-exact fetch dot `h_scy` (the true fetch dot,
-    // which places a mid-line map pulse on the tile SameBoy fetches during the
+    // bit (LCDC.3) at the hardware-exact fetch dot `h_scy` (the true fetch dot,
+    // which places a mid-line map pulse on the tile hardware fetches during the
     // pulse rather than the tile before it — the two-object fetch grid was 2
     // dots per sprite too late). `h` and `h_scy` coincide when no sprite stalls
     // the tile, so single-object lines are unaffected.
@@ -3176,8 +3134,8 @@ impl Ppu {
         }
         // CGB-compat: the raw write commit reaches the fetch address lines
         // `scy_add` dots later than the recorded write cc (write M-cycle start).
-        // Paired with the SameBoy-exact fetch dot (bg_hw_read_dot_ex scy_mode),
-        // add=1 reproduces SameBoy's inclusive read>=write commit for both
+        // Paired with the hardware-exact fetch dot (bg_hw_read_dot_ex scy_mode),
+        // add=1 reproduces the hardware inclusive read>=write commit for both
         // sprite-stalled and un-stalled tiles.
         let add = if self.wg_cgb { CGBWG_SCY_ADD } else { 0 };
         let mut v = self.bg_scy_hist[0].1;
@@ -3221,8 +3179,8 @@ impl Ppu {
         }
         // Each plane's tile-data base is re-sampled at its OWN T1 (one substep
         // before the T2 byte read logged) — the raw journal bit4 level whose
-        // write commit is <= (SameBoy-exact fetch dot - CGBWG_TRAIN_T1_LEAD).
-        // Validated dot-exact vs the CGB-C SameBoy per-plane oracle across
+        // write commit is <= (hardware-exact fetch dot - CGBWG_TRAIN_T1_LEAD).
+        // Validated dot-exact vs CGB-C per-plane hardware across
         // change2 ly24-55 (every train tile L/H last_tileset reproduced).
         let buf = std::mem::take(&mut self.bg_tile_buf);
         let raw_at = |dot: i64| -> u8 {
@@ -3275,21 +3233,18 @@ impl Ppu {
         // Pass 1 (fetch order): resolve each tile's per-plane byte against the
         // complete journal. An LCDC.4 edge whose write commit w lands exactly
         // one dot past a plane's T1-sample dot (w == T1 + 1) coincides with
-        // that plane's VRAM data read — the CGB-C TILE_SEL glitch pair
-        // (mealybug PPU doc, decoded pixel-exact from the real-cgb04c change2
-        // ref across all 64 rows / 8 sprite-phase bands):
-        //  - FALL: the tile INDEX is used as that bitplane's data, and the
-        //    stale-data latch captures the $8000-region byte the read was
-        //    pulling off the bus (A12 still high while falling).
-        //  - RISE: the bitplane gets the stale-data latch — the most recent of
-        //    the last sprite fetch's bitplane-1 byte and the last FALL-glitched
-        //    read's captured byte.
-        // The change2 pulse train sweeps the coincidence through both planes:
-        // its 8 sprite bands step the fetch-grid phase one dot per band, so
-        // band ly24-31 lands the edges on the LOW-plane reads and ly40-47 on
-        // the HIGH-plane reads; the other six bands have no coincidence and
-        // resolve region-clean. SameBoy-CGB-C mismodels the RISE side (it
-        // fails the ref on exactly these rows), so the ref is the only oracle.
+        // that plane's VRAM data read — the CGB-compat TILE_SEL glitch pair:
+        // - FALL: the tile INDEX is used as that bitplane's data, and the
+        // stale-data latch captures the $8000-region byte the read was
+        // pulling off the bus (A12 still high while falling).
+        // - RISE: the bitplane gets the stale-data latch — the most recent of
+        // the last sprite fetch's bitplane-1 byte and the last FALL-glitched
+        // read's captured byte.
+        // A pulse train sweeps the coincidence through both planes: successive
+        // sprite bands step the fetch-grid phase one dot per band, so an early
+        // band lands the edges on the LOW-plane reads and a later band on the
+        // HIGH-plane reads; the other bands have no coincidence and resolve clean.
+        // Not in Pan Docs, TCAGBD, or GBCTR; sub-dot render timing from mealybug-tearoom-tests refs.
         struct Res { first_x: u8, low_byte: u8, high_byte: u8 }
         let mut res: Vec<Res> = Vec::with_capacity(buf.len());
         let mut latch: Option<(i64, u8)> = None;
@@ -3362,7 +3317,7 @@ impl Ppu {
     }
 
     // CGB-compat up-pulse LCDC.4 train capture-phase re-resolve for the WINDOW
-    // fetcher (the window analog of cgb_train_reresolve). rustyboi's live per-substep
+    // fetcher (the window analog of cgb_train_reresolve). The live per-substep
     // resolve draws each window tile from its LOW/HIGH reads on a line-locked grid
     // against the PARTIAL journal (the pulse train is only fully journaled at
     // line-end), which mis-latches the tile-data-select base and misses the
@@ -3371,14 +3326,10 @@ impl Ppu {
     // rows collapse each live-split tile to its single latched base; the lower rows
     // (from WIN_TRAIN_GLITCH_ROW) reconstruct each read dot and re-resolve the base +
     // glitch at the band sample lag, rendering the tile INDEX as a glitched plane's
-    // byte (SameBoy data_for_tile_sel_glitch). Same tight gate as before
-    // (line-initial LCDC.4 low AND >= 4 journal edges) so the isolated single-pulse
-    // win_change and win_map_change2 stay untouched. Cuts m3_lcdc_tile_sel_win_change2
-    // from 1068 -> 702 (the earlier landed collapse) -> 221 px; the remaining residual
-    // is the y0-6 first-pulse sub-dot base (42 px, which SameBoy renders) plus the
-    // rows 40-46/56-62 glitch band (~179 px), where SameBoy-CGB-C itself misses the
-    // reference by the same 179 px (a beyond-SameBoy real-silicon A12-settle phase).
-    // CGB-compat only.
+    // byte. Tight gate (line-initial LCDC.4 low AND >= 4 journal edges) so an
+    // isolated single pulse stays untouched. A residual glitch band remains where
+    // the exact A12-settle phase is not observable from the refs. CGB-compat only.
+    // Not in Pan Docs, TCAGBD, or GBCTR; sub-dot render timing from mealybug-tearoom-tests refs.
     fn win_train_reresolve(&mut self, mmio: &mmio::Mmio) {
         if !self.wg_cgb || self.win_tile_buf.is_empty() || self.wg_hist.is_empty() {
             return;
@@ -3402,19 +3353,14 @@ impl Ppu {
         // and whether the read coincides with a falling edge (the tile-index-as-
         // data glitch) or a RISING edge (the stale-bus echo, below). All key on
         // the latch dot = read dot - sample lag; a FALL commit landing exactly on
-        // the latch dot returns the tile index as data (SameBoy tile_sel_glitch);
-        // a RISE commit landing exactly on it leaves the VRAM output mid-settle,
-        // and the returned byte is the value the data bus carried 16 dots (two
-        // fetch slots) earlier — the same-plane byte of the tile fetched two
-        // slots back at ITS level-at-sample base, or the displacing sprite
-        // fetch's high byte when that slot ran the sprite. Derived from the
-        // m3_lcdc_tile_sel_win_change2 CGB-C reference rows 40-46/56-62, whose
-        // trio of corrupt tiles (samples on the 24-dot train's three rises)
-        // demand exactly those VRAM bytes; SameBoy renders clean bytes there
-        // and misses the reference by the same 179 px. The two leading window
-        // tiles (n<2) always latch the line-initial low base — their HIGH_T1
-        // latch predates the pulse train — so they never glitch and keep the
-        // $8800 base.
+        // the latch dot returns the tile index as data; a RISE commit landing
+        // exactly on it leaves the VRAM output mid-settle, and the returned byte is
+        // the value the data bus carried 16 dots (two fetch slots) earlier — the
+        // same-plane byte of the tile fetched two slots back at ITS level-at-sample
+        // base, or the displacing sprite fetch's high byte when that slot ran the
+        // sprite. The two leading window tiles (n<2) always latch the line-initial
+        // low base — their HIGH_T1 latch predates the pulse train — so they never
+        // glitch and keep the $8800 base.
         let resolve = |this: &Self, h: u64, first_tile: bool, sample_lag: i64| -> (bool, bool, bool) {
             if first_tile {
                 return (false, false, false);
@@ -3480,7 +3426,7 @@ impl Ppu {
         let mut resolved_recs: Vec<Option<(u8, bool, bool)>> = Vec::new();
         for t in &buf {
             // The upper window rows (win line < WIN_TRAIN_GLITCH_ROW) are UNIFORM on
-            // hardware: every tile latches a single $8000/$8800 base, and the oracle
+            // hardware: every tile latches a single $8000/$8800 base, and it
             // shows no split and no glitch there. rustyboi's live per-substep grid
             // can still SPLIT such a tile across an LCDC.4 pulse edge (LOW plane one
             // base, HIGH plane the other). Collapse each live-split tile to its
@@ -3492,7 +3438,7 @@ impl Ppu {
             // tile-index-as-data glitch. The reconstructed read dot minus the band
             // sample lag gives each plane's base + glitch flag; render both planes
             // from those, reading the tile INDEX as a glitched plane's byte
-            // (SameBoy tile_sel_glitch).
+            // (the hardware tile-select glitch).
             let (low_tds, high_tds, lo_glitch, hi_glitch);
             let (mut lo_stale, mut hi_stale) = (None, None);
             if t.y < WIN_TRAIN_GLITCH_ROW {
@@ -3548,7 +3494,7 @@ impl Ppu {
             }
             let line = t.y % 8;
             // The tile-index-as-data glitch replaces the glitched plane's byte
-            // with the tile INDEX (SameBoy data_for_tile_sel_glitch); a
+            // with the tile INDEX (the hardware tile-select glitch); a
             // rise-hit plane reads the stale bus byte; otherwise each plane
             // reads from its own resolved base.
             let low_byte = if let Some(b) = lo_stale {
@@ -3617,7 +3563,7 @@ impl Ppu {
                 fls.lcdc = (fls.lcdc & !BG_BITS) | (bits & BG_BITS);
             }
         }
-        // SCY resolves at the SameBoy-exact fetch dot (see bg_hw_read_dot_ex);
+        // SCY resolves at the hardware-exact fetch dot (see bg_hw_read_dot_ex);
         // on DMG the scy_mode dot is identical to `h` (bias 0).
         let h_scy = self.bg_hw_read_dot_ex(n, k, ly, self.wg_cgb).unwrap_or(h);
         fls.scy_bus = self.bg_scy_resolve(h_scy);
@@ -3682,7 +3628,7 @@ impl Ppu {
         let Some(h0) = self.bg_hw_read_dot(n, 0, ly) else {
             return;
         };
-        // CGB resolves the map bit at the SameBoy-exact fetch dot and the
+        // CGB resolves the map bit at the hardware-exact fetch dot and the
         // tile-data bit at the calibrated `h` (see bg_wg_resolve_cgb); DMG uses `h`.
         let h0_scy = self.bg_hw_read_dot_ex(n, 0, ly, self.wg_cgb).unwrap_or(h0);
         let bits0 = if self.wg_hist.is_empty() {
@@ -3704,12 +3650,11 @@ impl Ppu {
         // sprite stalls the line, the reconstructed HIGH dot can land past a bit4
         // falling edge the LOW dot sits before; re-resolving the HIGH plane
         // independently would then straddle a tile the live per-substep fetch
-        // read coherently (mealybug m3_lcdc_tile_sel_change2). Pin the HIGH
-        // plane's tile-data-select bit to the LOW plane's resolution so retro
-        // reproduces the live bg_wg_apply result instead of diverging from it.
-        // (The genuine mixed per-bitplane $8000/$8800 case is produced on the
-        // live path via bg_hw_read_dot_ex's arm-dot anchoring, which retro's
-        // shared reconstruction inherits — m3_lcdc_tile_sel_change stays exact.)
+        // read coherently. Pin the HIGH plane's tile-data-select bit to the LOW
+        // plane's resolution so retro reproduces the live bg_wg_apply result
+        // instead of diverging from it. (The genuine mixed per-bitplane
+        // $8000/$8800 case is produced on the live path via bg_hw_read_dot_ex's
+        // arm-dot anchoring, which retro's shared reconstruction inherits.)
         let tds = LCDCFlags::BGWindowTileDataSelect as u8;
         let tds_low = self.bg_hw_read_dot(n, 1, ly).map(|h1| {
             let h1_scy = self.bg_hw_read_dot_ex(n, 1, ly, self.wg_cgb).unwrap_or(h1);
@@ -3744,23 +3689,21 @@ impl Ppu {
             // arm-shifted off the LOW read's +2 cadence). With no sprite the two
             // reads are simply 2 dots apart and the HIGH plane resolves its OWN
             // tile-data-select — the genuine mixed $8000/$8800 read of a mid-tile
-            // LCDC.4 pulse (age m3-bg-lcdc-nocgb transition tiles: low $8000 /
-            // high $8800). Pinning unconditionally here flattened that mix to a
-            // solid tile and mis-rendered the age white band.
+            // LCDC.4 pulse (transition tiles: low $8000 / high $8800). Pinning
+            // unconditionally here would flatten that mix to a solid tile.
             let low_hk = self.bg_hw_read_dot(n, 1, ly);
             let unstalled = low_hk.is_some_and(|h1| hk == h1 + 2);
             // The LOW plane's $8000 read latches the tile-data address for BOTH
             // bytes at HIGH_T1; a falling LCDC.4 that reaches the bus only after
             // HIGH_T1 cannot un-latch the already-$8000 HIGH plane. So when the
             // LOW plane rose to $8000, the HIGH plane inherits $8000 too — pin it.
-            // This is the up-pulse train's HIGH-plane latch (mealybug tile_sel_
-            // change2 first/last visible bands: the fetch outruns the FALL write,
-            // retro then wrongly re-applies it to the HIGH plane). The DOWN-pulse
-            // train (age m3-bg-lcdc-nocgb, is_train) holds LCDC.4 HIGH and pulses
-            // it LOW: there the mid-tile mix (low $8000 / high $8800) is genuine —
-            // the FALL precedes HIGH_T1 — so its unstalled HIGH keeps resolving on
-            // its own. Gate the unstalled pin on the up-pulse (line-initial LCDC.4
-            // low) so it never flattens the nocgb white band.
+            // This is the up-pulse train's HIGH-plane latch: the fetch outruns the
+            // FALL write, and the retro pass would otherwise wrongly re-apply it to
+            // the HIGH plane. The DOWN-pulse train (is_train) holds LCDC.4 HIGH and
+            // pulses it LOW: there the mid-tile mix (low $8000 / high $8800) is
+            // genuine — the FALL precedes HIGH_T1 — so its unstalled HIGH keeps
+            // resolving on its own. Gate the unstalled pin on the up-pulse
+            // (line-initial LCDC.4 low) so it never flattens the down-pulse mix.
             let up_pulse = self
                 .wg_hist
                 .first()
@@ -3810,10 +3753,10 @@ impl Ppu {
         let spr_bits = (LCDCFlags::SpriteDisplayEnable as u8) | (LCDCFlags::SpriteSize as u8);
         // A mid-mode-3 sprite-enable (bit 1) toggle, with no window change, keeps
         // the closed-form schedule but RECOMPUTES the not-yet-drawn sprite cost
-        // from the single tile-walk model (Gambatte's predictNextM0Time re-runs the
-        // predictor with `lcdcObjEn(p)` live and the current `p.nextSprite`, so the
+        // from the single tile-walk model (the hardware next-mode-0 prediction re-runs the
+        // predictor with `LCDC OBJ-enable(p)` live and the current `p.the next sprite`, so the
         // remaining sprites' cost is added/removed precisely). Shift both the
-        // mode-0 dot and the read-at-cc m0Time by the cost delta rather than
+        // mode-0 dot and the read-at-cc mode-0 time by the cost delta rather than
         // nulling and falling back to the live x==160 transition.
         let obj_bit = LCDCFlags::SpriteDisplayEnable as u8;
         let only_obj_toggle = (old_lcdc & win_bit) == (value & win_bit)
@@ -3837,14 +3780,14 @@ impl Ppu {
             let delta = new_rem - old_rem; // dots; negative on disable
             // KEEP the closed-form schedule, shifting it by the (graduated) cost
             // delta. delta < 0 refunds the not-yet-drawn portion of the remaining
-            // sprites (predictNextM0Time re-run with the new lcdcObjEn at the current
-            // `p.nextSprite`); delta == 0 means every remaining sprite's cost is
-            // already drawn, so the original closed-form m0Time (which includes the
+            // sprites (the next-mode-0 prediction re-run with the new OBJ-enable at the current
+            // `p.the next sprite`); delta == 0 means every remaining sprite's cost is
+            // already drawn, so the original closed-form mode-0 time (which includes the
             // full sprite cost) is already correct and must be kept -- nulling it and
             // falling back to the live x==160 transition would mis-resolve the FF41
             // read for the fully-committed bracket variants (sprite_late_late_disable
             // spx1B_2). The graduated `remaining_sprite_cost` makes the refund (and so
-            // the resulting m0Time) depend 1:1 on the disable cc, which is what the
+            // the resulting mode-0 time) depend 1:1 on the disable cc, which is what the
             // sprite_late[_late]_disable bracket pairs require.
             if let Some(dot) = self.scheduled_mode0_dot {
                 self.scheduled_mode0_dot = Some((dot as i64 + delta as i64).max(0) as u128);
@@ -3867,7 +3810,7 @@ impl Ppu {
             // was captured at M3 arm WITHOUT the window (it was off), so it lacks the
             // StartWindowDraw mode-3 penalty. If the window will now actually start
             // this line (window-Y gate holds and the fetcher has not yet passed the
-            // window-start x = max(0, WX-7)), Gambatte's predictNextM0Time re-runs
+            // window-start x = max(0, WX-7)), the hardware next-mode-0 prediction re-runs
             // with the window included and the boundary moves WIN_M3_PENALTY dots
             // later. ADD that penalty to m0_time_master so the FF41 read resolves the
             // window-inclusive mode-3 end, instead of nulling and falling back to the
@@ -3882,12 +3825,12 @@ impl Ppu {
             if win_enable_clean {
                 win_enable_handled = true;
                 // Window-Y gate: the window can start this line iff WY has triggered
-                // (`window_y_triggered`, set at the line-450/454 weMaster checkpoints
+                // (`window_y_triggered`, set at the line-450/454 window-enable master checkpoints
                 // when LY==WY). set_lcdc_visible has no mmio handle, so use the
                 // cached arm-time geometry: m3_scheduled_wx (WX latched at M3 arm)
                 // and the window-Y trigger latch.
                 let wx = self.m3_scheduled_wx as i32;
-                // Window-Y gate, mirroring `window_y_active`: the weMaster trigger
+                // Window-Y gate, mirroring `window_y_active`: the window-enable master trigger
                 // latch (`window_y_triggered`, set at the line-450/454 checkpoints)
                 // OR the immediate `wy2 == LY` fallback. The latter is required on
                 // the first line after enable (LY=0), where the previous line's
@@ -3909,7 +3852,7 @@ impl Ppu {
                 } else {
                     DMG_PIXEL_TRANSFER_WARMUP as i64
                 };
-                // SCX==5 fine-scroll phase: Gambatte's M3Start dispatch runs the
+                // SCX==5 fine-scroll phase: the hardware mode-3-start dispatch runs the
                 // window-tile fetch one dot later than the linear discard model at
                 // this single phase (the same +1 the closed-form mode-3 length applies
                 // at scx==5, compute_m3_length_win). For x==0 windows (WX<=7) the
@@ -3933,29 +3876,29 @@ impl Ppu {
                 // else: keep the no-window m0_time_master as captured at arm.
             }
             // A mid-mode-3 window-DISABLE toggle (not sprite) interacts with the
-            // StartWindowDraw mode-3 penalty captured at M3 arm. Gambatte locks
+            // StartWindowDraw mode-3 penalty captured at M3 arm. Hardware locks
             // the penalty once the window has drawn for WIN_M3_PENALTY dots
             // (StartWindowDraw::inc spans those dots); a disable BEFORE that lock
             // refunds the whole window penalty, a disable after keeps it. The
-            // read-at-cc m0Time captured at arm already includes the penalty, so:
-            //   - disable >= win_start_dot + WIN_M3_PENALTY: keep m0Time as-is.
-            //   - disable <  win_start_dot + WIN_M3_PENALTY: subtract the penalty
-            //     (refund) so the FF41 read resolves the no-window boundary.
-            //   - window never started: null (fall back; live no-window path).
+            // read-at-cc mode-0 time captured at arm already includes the penalty, so:
+            // - disable >= win_start_dot + WIN_M3_PENALTY: keep mode-0 time as-is.
+            // - disable < win_start_dot + WIN_M3_PENALTY: subtract the penalty
+            // (refund) so the FF41 read resolves the no-window boundary.
+            // - window never started: null (fall back; live no-window path).
             // The live pipeline (scheduled_mode0_dot) is invalidated above either
-            // way; only the read-at-cc m0Time is adjusted. Sprite-bit toggles
-            // null m0Time (the sprite-fetch penalty genuinely changes).
+            // way; only the read-at-cc mode-0 time is adjusted. Sprite-bit toggles
+            // null mode-0 time (the sprite-fetch penalty genuinely changes).
             let only_win_toggle = (old_lcdc & spr_bits) == (value & spr_bits)
                 && (old_lcdc & win_bit) != (value & win_bit)
                 && (value & win_bit) == 0; // disable
             // GRADUATED StartWindowDraw refund: the window mode-3 penalty accrues
             // one dot per drawn window dot, capped at WIN_M3_PENALTY. A mid-M3
             // window-disable at dot `ticks` has accrued
-            //   accrued = min(WIN_M3_PENALTY, ticks - win_start)
+            // accrued = min(WIN_M3_PENALTY, ticks - win_start)
             // dots; the unaccrued remainder is refunded from the read-at-cc
-            // m0Time captured (full-penalty) at arm. This generalises the
+            // mode-0 time captured (full-penalty) at arm. This generalises the
             // refund/keep across SCX phase and WX (each phase shifts win_start
-            // and m0Time together). Scoped CGB / no sprites / single speed; DS
+            // and mode-0 time together). Scoped CGB / no sprites / single speed; DS
             // keeps the calibrated binary lock below. The live pipeline
             // (scheduled_mode0_dot) is invalidated above regardless.
             // Single-speed window-disable handling for both CGB and DMG. The
@@ -4028,7 +3971,7 @@ impl Ppu {
                 // the no-sprite branch below; the sprite cost is already baked into the
                 // M3-arm m0_time_master and is unaffected by the window toggle. Once the
                 // window has committed (win_started_for_refund) the disable keeps the
-                // full window-inclusive m0Time (mode 3 persists -> out3); a disable
+                // full window-inclusive mode-0 time (mode 3 persists -> out3); a disable
                 // before the commit took the `!win_started_for_refund` null path above
                 // (no penalty -> mode 0 -> out0). The spx10_wx0f_{1,2} reps bracket this
                 // boundary. Keep m0_time_master as captured (no-op).
@@ -4043,13 +3986,13 @@ impl Ppu {
                 // StartWindowDraw penalty locks once the fetcher fetches the window
                 // tile. `win_started_for_refund` already gated the commit dot via
                 // `cgb_spr_commit`, so reaching here means the disable landed at/after
-                // the commit -> keep the full window-inclusive m0Time (mode 3 -> out3).
+                // the commit -> keep the full window-inclusive mode-0 time (mode 3 -> out3).
                 // A disable before the commit took the `!win_started_for_refund` null
                 // path above (-> mode 0 -> out0, the passing _1 rep). Keep (no-op).
             } else if clean_ss && !cgb_features_enabled {
                 // DMG: the StartWindowDraw penalty is binary, not graduated. Once
                 // the window has reached its commit dot (win_started_for_refund),
-                // a mid-M3 window-disable keeps the FULL window-inclusive m0Time
+                // a mid-M3 window-disable keeps the FULL window-inclusive mode-0 time
                 // (mode 3 persists through the read); a disable before the commit
                 // dot already nulled above (no penalty -> mode 0). The
                 // late_disable_* DMG cluster (out0 just-before vs out3 at/after)
@@ -4064,7 +4007,7 @@ impl Ppu {
                     // this shift the accrual is `scx&7` dots early, so a disable in
                     // the `scx&7` dots just after win_start over-accrues (refund
                     // truncated) — the late_disable_scx{2,3,5}_1 CGB cluster reads
-                    // mode 3 (out3) where Gambatte's later lock still refunds to
+                    // mode 3 (out3) where the hardware's later lock still refunds to
                     // mode 0 (out0). Shifting the reference by scx&7 lands all phases
                     // (scx0 unchanged; scx5_1 at the same dot as scx0_2 now refunds).
                     // The StartWindowDraw penalty does not begin accruing until the
@@ -4074,7 +4017,7 @@ impl Ppu {
                     // consumes scx&7 dots). So the accrual reference is scx&7 dots
                     // early, and a disable in those dots over-accrues (refund
                     // truncated): the late_disable_scx{2,3,5}_1 CGB reps read mode 3
-                    // (out3) where Gambatte's later lock still refunds to mode 0
+                    // (out3) where the hardware's later lock still refunds to mode 0
                     // (out0). Shift the reference by scx&7 for x==0 windows only.
                     // For WX>7 the window starts AFTER the discard, so `win_start_dot`
                     // already reflects post-discard time (no shift — the scx03_wx1x
@@ -4121,8 +4064,8 @@ impl Ppu {
             }
         }
         // On an LCDC write: a WE (window-enable) toggle with
-        // the LCD already on updates winDrawState. rustyboi splits Gambatte's
-        // 2-bit winDrawState into `win_draw_start` (bit win_draw_start) and
+        // the LCD already on updates the window-draw state. rustyboi splits the hardware
+        // 2-bit window-draw state into `win_draw_start` (bit win_draw_start) and
         // `win_draw_started` (bit win_draw_started); reproduce the exact bit
         // arithmetic here. `xpos == xpos_end` (the line's pixel transfer is
         // done) holds whenever we are not actively in PixelTransfer, or x has
@@ -4130,22 +4073,22 @@ impl Ppu {
         if (old_lcdc & display_enable) != 0 && (old_lcdc & win_bit) != (value & win_bit) {
             let at_line_end = !matches!(self.state, State::PixelTransfer) || self.x >= 160;
             if (value & win_bit) == 0 {
-                // WE-off: clear win_draw_started iff winDrawState == win_draw_started
+                // WE-off: clear win_draw_started iff the window-draw state == win_draw_started
                 // (started but not armed) OR the line is finished. win_draw_start
                 // (the arm bit) survives, so a re-enable can resume next line.
                 if (self.win_draw_started && !self.win_draw_start) || at_line_end {
                     self.win_draw_started = false;
                     // If the fetcher is actively drawing the window mid-line, the
                     // window stops here and the next tile fetch reverts to BG
-                    // (Gambatte Tile::f0 `winDrawState & win_draw_started` gate).
+                    // (the hardware window-tile fetch gates on `window-draw-state & win_draw_started`).
                     if self.fetcher.is_fetching_window() {
-                        // Gambatte Tile::f0 commits each window tile's window-vs-BG
+                        // The hardware tile-fetch f0 stage commits each window tile's window-vs-BG
                         // choice at the tile boundary (`xpos == endx`, where the
                         // window-tile grid is `(xpos + wscx) % tile_len == 0`). A
                         // WE-off that lands EXACTLY on a window-tile boundary reverts
                         // to BG at the next tile; one that lands MID-tile lets the
                         // already-committed in-progress tile finish first (one extra
-                        // window tile). Mapping Gambatte's `(xpos + wscx) % 8` into
+                        // window tile). Mapping the hardware `(xpos + wscx) % 8` into
                         // rustyboi's integer fetcher geometry (xpos == display x +
                         // (26 - win_x_start), wscx == 256 - win_x_start) gives the
                         // boundary test `(x + 2 - 2*win_x_start) % 8 == 0`. This is
@@ -4153,16 +4096,15 @@ impl Ppu {
                         // tile) and weon_wx18 (boundary -> +0), which share an
                         // identical fetch-grid cc phase but differ in absolute
                         // display-x / window alignment.
-                        // Scoped to CGB: Gambatte's mid-tile boundary completion
+                        // Scoped to CGB: the hardware mid-tile boundary completion
                         // for a WE-off lives in StartWindowDraw::inc behind an
                         // explicit `&& p.cgb` gate, and the (26 - win_x_start) /
                         // (256 - win_x_start) xpos/wscx mapping is the CGB
                         // fetcher geometry. On DMG the revert is NOT latched at
                         // the write at all: the fetcher re-samples the WE bit at
-                        // each TileNumber step (SameBoy GET_TILE_T1 kill, see
-                        // we_dot_hist) — a pulse that misses every TileNumber
-                        // leaves the window running (mealybug
-                        // win_en_change_multiple[_wx]).
+                        // each TileNumber step (the tile-number fetch-step kill,
+                        // see we_dot_hist) — a pulse that misses every TileNumber
+                        // leaves the window running.
                         if cgb_features_enabled {
                             let wxs = self.fetcher.window_x_start_dbg() as i32;
                             let phase = (self.x as i32 + 2 - 2 * wxs).rem_euclid(8);
@@ -4173,14 +4115,14 @@ impl Ppu {
                             // DMG at line end (the wxA6 xpos-166 dance): no
                             // TileNumber will run again this line, so the
                             // deferred kill cannot land; stop immediately as
-                            // Gambatte's winDrawState clear does.
+                            // The hardware window-draw-state clear does.
                             self.fetcher.stop_window_with_extra(0);
                             self.window_started_this_line = false;
                         }
                     }
                 }
             } else {
-                // WE-on: if winDrawState == win_draw_start (armed but not started),
+                // WE-on: if the window-draw state == win_draw_start (armed but not started),
                 // promote to started and advance the window Y line.
                 if self.win_draw_start && !self.win_draw_started {
                     self.win_draw_started = true;
@@ -4196,10 +4138,10 @@ impl Ppu {
     /// `Bus::interrupt_low_push_ack`).
     pub fn abs_cc(&self) -> u64 { self.abs_cc }
 
-    /// STAGE 4 KEYSTONE — the accumulated STAT-phase carry (master-cc). The bus
+    /// The accumulated STAT-phase carry (master-cc). The bus
     /// SUBTRACTS this from a CPU VRAM/OAM access cc so the render-visibility gate
     /// (`ppu_blocks` / `get_stat` fallback mode + `cpu_access_blocked`) sees the
-    /// access in the un-carried fetcher geometry (the carry moved the lyTime
+    /// access in the un-carried fetcher geometry (the carry moved the LY time
     /// boundaries but not the fetcher's lock window). 0 when no carry is live.
     pub fn render_carry_skew(&self) -> i64 {
         self.render_carry_skew_cc
@@ -4282,13 +4224,12 @@ impl Ppu {
 
     // BG palette shade for color index `idx` at display column `sx`. On CGB hardware
     // resolves BGP per column from `bgp_history` so a mid-mode-3 BGP write remaps only
-    // the pixels drawn at/after its apply column (mealybug m3_bgp_change cgb_c, which
-    // runs DMG-compat-on-CGB). On DMG hardware the per-dot `bgp_delayed` latch
-    // (refreshed at the end of every dot, with a phase-dependent hold for late-phase
-    // writes — see `on_bgp_write`) yields the exact DMG latch column that Gambatte's
-    // own dmgpalette_during_m3 tests require, so DMG keeps it. With no mid-line write
-    // the CGB history is a single seed == the delayed register, so the steady-state
-    // output is identical either way.
+    // the pixels drawn at/after its apply column (the DMG-compat-on-CGB path). On DMG
+    // hardware the per-dot `bgp_delayed` latch (refreshed at the end of every dot,
+    // with a phase-dependent hold for late-phase writes — see `on_bgp_write`) yields
+    // the exact DMG latch column, so DMG keeps it. With no mid-line write the CGB
+    // history is a single seed == the delayed register, so the steady-state output is
+    // identical either way.
     pub fn get_palette_color(&self, mmio: &mmio::Mmio, idx: u8, sx: u8) -> u8 {
         let bgp = if mmio.is_cgb() {
             Self::pal_at(&self.bgp_history, sx, self.bgp_delayed)
@@ -4302,7 +4243,7 @@ impl Ppu {
     // display column. Used by the CGB / DMG-compat BG color path: a sprite-fetch
     // stall between a BGP write and a column delays that column's pop, so the
     // dot-space model (write applies at `ticks+latency`; pixel pops later) is exact
-    // where the column model over/under-shoots (mealybug m3_bgp_change_sprites).
+    // where the column model over/under-shoots.
     pub fn get_palette_color_at_tick(&self, idx: u8, pop_tick: u128) -> u8 {
         let bgp = Self::pal_at_tick(&self.bgp_dot_history, pop_tick, self.bgp_delayed);
         Self::bgp_shade(bgp, idx)
@@ -4319,7 +4260,7 @@ impl Ppu {
     }
 
     // Sprite palette shade at display column `sx` (CGB: per-pixel OBP sample from the
-    // true-color palette-RAM pipeline — mealybug m3_obp0_change cgb_c). Used by the
+    // true-color palette-RAM pipeline). Used by the
     // CGB and DMG-compat sprite mixers. DMG-hardware sprites use
     // `dmg_sprite_palette_shade` (a per-SPRITE latch, not per-pixel).
     pub fn get_sprite_palette_color(&self, _mmio: &mmio::Mmio, idx: u8, palette: bool, sx: u8) -> u8 {
@@ -4336,9 +4277,9 @@ impl Ppu {
 
     // DMG sprite shade: OBP is sampled at the pixel's POP DOT (the OAM-FIFO
     // pop reads the register live), via the dot-keyed history — the column
-    // model diverges wherever a sprite stall delays the pops (m3_obp0_change
-    // late bands), and the pop-dot model naturally covers the off-left-edge
-    // sprites (their pixels pop before any mid-mode-3 write applies).
+    // model diverges wherever a sprite stall delays the pops, and the pop-dot
+    // model naturally covers the off-left-edge sprites (their pixels pop before
+    // any mid-mode-3 write applies).
     fn dmg_sprite_palette_shade(&self, idx: u8, palette: bool, pop_tick: u128) -> u8 {
         if idx == 0 {
             return 0; // Transparent for sprites
@@ -4359,7 +4300,7 @@ impl Ppu {
         }
     }
 
-    // ---- Event-scheduled STAT IRQ model (Gambatte port) ----
+    // ---- Event-scheduled STAT IRQ model (hardware model) ----
 
     fn ly_counter(&self, mmio: &mmio::Mmio) -> stat_irq::LyCounter {
         let ds = mmio.is_double_speed_mode();
@@ -4373,14 +4314,13 @@ impl Ppu {
         }
     }
 
-    /// ds-subdot STAGE 1: the LyCounter as the CPU READ path must observe it —
+    /// The LY counter as the CPU READ path must observe it —
     /// sub-dot (master_cc) exact. At double speed the renderer's `abs_cc`/
     /// `line_cycle` are advanced on the even-render-dot grid, which sits one
-    /// master_cc below Gambatte's even line phase, so the bare `lyTime` (next-LY
-    /// master cc) runs 1 cc low and `lineCycles = 456 - ((lyTime-cc)>>1)` reads 1
-    /// high. Carry the missing sub-dot here so the observed `lyTime`/`lineCycles`/
-    /// LY/LYC-flag are master_cc-exact at DS (proven via cctracer: ds_1 lineCycles
-    /// 251->250, lyTime 140567->140568). At single speed the bare phase is already
+    /// master_cc below the reference even line phase, so the bare `the LY time` (next-LY
+    /// master cc) runs 1 cc low and `line cycles = 456 - ((the LY time-cc)>>1)` reads 1
+    /// high. Carry the missing sub-dot here so the observed `the LY time`/`line cycles`/
+    /// LY/LYC-flag are master_cc-exact at DS. At single speed the bare phase is already
     /// exact (no flooring), so the correction is DS-only; `lytime_no_plus1` (post
     /// DS->SS-switch line) already drops the +1. Flag-OFF this is identical to
     /// `ly_counter`. SCOPE: only the CPU-visible read observers call this; the
@@ -4400,19 +4340,19 @@ impl Ppu {
         self.internal_ly_val
     }
 
-    /// Byte-exact Gambatte `m0Time` (master-cc) for the current line, given the
-    /// closed-form mode-3 length `m3_len` (= `predictCyclesUntilXpos(167)` dots).
-    ///   m0Time = (p_now + ly_counter().time + 1) − ((456 − (m3_len + BASE)) << ds)
+    /// Byte-exact hardware `mode-0 time` (master-cc) for the current line, given the
+    /// closed-form mode-3 length `m3_len` (= the cycles-until-xpos-167 length in dots).
+    /// mode-0 time = (p_now + ly_counter().time + 1) − ((456 − (m3_len + BASE)) << ds)
     /// BASE = 84 (CGB SS+DS), 83 (DMG). `p_now + ly_counter().time` is the next-LY
-    /// master cc; the +1 corrects rustyboi's LyCounter.time running one master-cc
-    /// below Gambatte's lyTime. getStat boundary: mode3 iff `master_cc + 2 < m0Time`.
+    /// master cc; the +1 corrects rustyboi's LY counter.time running one master-cc
+    /// below the hardware LY time. STAT-resolve boundary: mode3 iff `master_cc + 2 < mode-0 time`.
     ///
-    /// `first_line` selects the first line after LCD enable: Gambatte seeds the PPU
-    /// at enable with `cycles = -(m3StartLineCycle + 2)` (PPU::setLcdc), so the
+    /// `first_line` selects the first line after LCD enable: hardware seeds the PPU
+    /// at enable with `cycles = -(mode-3-start line cycle + 2)` (the LCDC-write handling), so the
     /// first M3 begins TWO dots later than the normal-line m3-start anchor encoded
-    /// in BASE (which == `m3StartLineCycle`). The mode-0 line-cycle is therefore
+    /// in BASE (which == `mode-3-start line cycle`). The mode-0 line-cycle is therefore
     /// `m3_len + BASE + 2`. (`p_now + ly_counter().time` is enable-anchored on this
-    /// line — `setLcdc` reset `now = enable_cc`, `lyCounter.reset(0, enable_cc)`.)
+    /// line — `the LCDC-write handling` reset `now = enable_cc`, `the LY counter.reset(0, enable_cc)`.)
     fn m0_time_exact(&self, mmio: &mmio::Mmio, m3_len: u128, is_cgb: bool, first_line: bool) -> u64 {
         let ds = mmio.is_double_speed_mode() as u32;
         let base: i64 = if is_cgb { 84 } else { 83 };
@@ -4429,24 +4369,24 @@ impl Ppu {
     fn arm_m0irq_for_current_line(&mut self, mmio: &mmio::Mmio, first_frame: bool) {
         let is_cgb = mmio.is_cgb_features_enabled();
         // The mode-0 (HBlank) STAT IRQ time is co-calibrated with the
-        // `ticks + m3_len + offset` mode-0 dot, NOT the exact getStat `m0Time`.
+        // `ticks + m3_len + offset` mode-0 dot, NOT the exact STAT-resolve `mode-0 time`.
         // The lazy-PPU rewrite re-derived `scheduled_mode0_dot` from the exact
-        // getStat m0Time (which the CPU read resolves at `cc + 2 < m0Time`),
+        // STAT-resolve mode-0 time (which the CPU read resolves at `cc + 2 < mode-0 time`),
         // landing it 1-3 dots earlier than the eager mode-0 grid the m0 IRQ
         // offset (M0IRQ_OFFSET) was tuned against. Reading `reported_mode0_dot`
         // (= that exact dot) here armed the m0 IRQ early and broke the
         // m2int_m0irq / m0enable / enable_display / vramw_m3end m0-IRQ clusters.
         // Arm from the m3-length dot instead — the same anchor core-loop used —
         // so the IRQ fires on the calibrated boundary again. (Env-overridable to
-        // restore the exact-m0Time arm for diagnostics.)
+        // restore the exact-mode-0 time arm for diagnostics.)
         let mode0_within_line = {
             let m3_len = self.compute_m3_length(mmio, is_cgb);
             let offset = if is_cgb { cgb_mode0_offset() } else { dmg_mode0_offset() };
             self.ticks as i64 + m3_len as i64 + offset as i64
         };
         let mut remaining = mode0_within_line - self.ticks as i64;
-        // VBlank (LY 144..153) has no mode 0 on the current line: Gambatte's
-        // `predictedNextXposTime(166)` lands on the next *rendering* line's mode 0
+        // VBlank (LY 144..153) has no mode 0 on the current line: the hardware
+        // xpos-166 advance time lands on the next *rendering* line's mode 0
         // (line 0 of the following frame), far beyond the current VBlank. The
         // `ticks + m3_len + offset` form above computes a bogus within-VBlank-line
         // dot which would fire a spurious m0 STAT IRQ this frame (lycint152_m0irq).
@@ -4462,8 +4402,8 @@ impl Ppu {
             let full_vblank_lines = (last_line - ly) * cpl;
             remaining = dots_to_current_line_end + full_vblank_lines + line0_m0_offset;
         } else {
-            // The mode-0 STAT IRQ fires at `predictedNextXposTime(166)`, one xpos
-            // before the m0Time (xpos 167) the closed-form `m3_len` above tracks.
+            // The mode-0 STAT IRQ fires at the xpos-166 advance time, one xpos
+            // before the mode-0 time (xpos 167) the closed-form `m3_len` above tracks.
             // For plain lines those differ by one dot (already folded into
             // `M0IRQ_OFFSET`); when a window starts at WX=166 or a sprite sits at
             // the right edge, the final xpos step carries the whole penalty and
@@ -4481,7 +4421,7 @@ impl Ppu {
         let dsf = 1i64 << ds as i32;
         let abs = (self.abs_cc as i64 - dsf + (remaining + off) * dsf).max(0) as u64;
         // The IRQ-dispatch arm keeps the calibrated offset form (the faithful
-        // `predictedNextXposTime(166)` migration of THIS consumer is deferred — the
+        // xpos-166-advance-time migration of THIS consumer is deferred — the
         // per-dot dispatch phase is co-tuned with the consume-site `+ds /
         // +cgb_ss_m0_anticip` anticipation). The faithful event cc is consumed
         // independently by the halt-exit `<2` fixup via `m0_irq_event_cc_master`,
@@ -4490,12 +4430,12 @@ impl Ppu {
     }
 
     /// FAITHFUL EVENTCC: the mode-0 STAT IRQ event time
-    /// (`predictedNextXposTime(166)` = Gambatte's `intevent_interrupts` m0
-    /// eventTime) in MASTER cc — the cc domain `master_cc()` /
-    /// `m0_time_master` / getStat `access_cc` share, so the halt-exit
-    /// `cc - eventTime < 2` halt-exit fixup compares like-for-like.
+    /// (the xpos-166 advance time = the hardware m0
+    /// event time) in MASTER cc — the cc domain `master_cc()` /
+    /// `m0_time_master` / STAT-resolve `access_cc` share, so the halt-exit
+    /// `cc - event time < 2` halt-exit fixup compares like-for-like.
     ///
-    /// Derived from the closed-form `m0_time_master` (= predictedNextXposTime(167)
+    /// Derived from the closed-form `m0_time_master` (= the xpos-167 advance time
     /// in master cc): the m0 IRQ fires one xpos earlier, so subtract the 166->167
     /// step cost `((1 + xpos166_advance) << ds)`. `None` when no closed-form master
     /// exists (window mid-line / first line / VBlank), where no faithful event cc
@@ -4516,7 +4456,7 @@ impl Ppu {
     }
 
     /// Re-anchor the event-scheduled STAT/mode/LYC clocks to the new CPU speed.
-    /// Mirrors Gambatte's `LCD::speedChange`: the renderer's LCD position
+    /// Mirrors the hardware speed-change handling: the renderer's LCD position
     /// (`line_cycle`/`internal_ly`) is in speed-independent dot units and stays
     /// put, but every scheduled event time carried the old `ds` cc-factor, so
     /// recompute them from the live `abs_cc` under the new speed.
@@ -4531,11 +4471,11 @@ impl Ppu {
     }
 
     /// Advance the renderer by `dots` dots during the CGB STOP speed-switch
-    /// bridge. Gambatte's `Memory::stop` advances the LCD to `cc + 8` at the OLD
-    /// (single) speed before re-anchoring at the new speed (`lcd_.speedChange`).
+    /// bridge. The hardware STOP handling advances the LCD to `cc + 8` at the OLD
+    /// (single) speed before re-anchoring at the new speed (the LCD speed change).
     /// Our per-dot stepper realizes only `8 >> ds` of those dots through the 8
     /// returned cycles, so this injects the remaining bridge dots so the LCD
-    /// lands on the same dot Gambatte does after the 0x20000-cycle window.
+    /// lands on the same dot hardware does after the 0x20000-cycle window.
     pub fn stop_bridge_advance(&mut self, mmio: &mut mmio::Mmio, dots: u32) {
         for _ in 0..dots {
             self.step_scheduled_stat_events(mmio);
@@ -4549,17 +4489,17 @@ impl Ppu {
         }
     }
 
-    /// Mark that a DS->SS speed switch just occurred, so the closed-form lyTime
-    /// drops its `+1` LyCounter correction (the whole-dot bridge already lands
+    /// Mark that a DS->SS speed switch just occurred, so the closed-form the LY time
+    /// drops its `+1` the LY counter correction (the whole-dot bridge already lands
     /// the counter one master-cc high). See ENGINE_LAZY_PPU.md bug #2.
     pub fn set_dsss_lytime_adjust(&mut self) {
         self.lytime_no_plus1 = true;
     }
 
     /// Register a NON-mode-3 (OAM/HBlank) DS->SS speed switch for the LY-read
-    /// sub-dot phase accumulator. Gambatte's `PPU::speedChange` applies `now -= 1`
-    /// (a half-dot) on every DS->SS switch; rustyboi's whole-dot DS->SS bridge folds
-    /// the integer part, and mode-3 switches carry their residual through the FACET-1
+    /// sub-dot phase accumulator. The hardware speed-change handling applies a
+    /// half-dot re-anchor on every DS->SS switch; the whole-dot DS->SS bridge folds
+    /// the integer part, and mode-3 switches carry their residual through the
     /// `stat_phase_carry` (p_now) path. This tracks the OAM/HBlank switches that have
     /// no such carry: their accumulated parity determines whether a post-STOP boundary
     /// LY read lands one sub-dot early (anticipated) or late (stale).
@@ -4582,20 +4522,20 @@ impl Ppu {
     }
 
     /// Latch the SS->DS-during-mode3 FF44 (LY) read phase advance. Consumed only
-    /// by `get_ly_reg_at_cc` to resolve the getLyReg anticipation window against
-    /// Gambatte's re-anchored lyTime (the renderer/STAT/m0 phase is unaffected).
+    /// by `get_ly_reg_at_cc` to resolve the LY-register anticipation window against
+    /// the hardware re-anchored LY time (the renderer/STAT/m0 phase is unaffected).
     pub fn set_ssds_mode3_ly_advance(&mut self) {
         self.ssds_mode3_ly_advance = true;
         self.ssds_mode3_frames = 0;
     }
 
-    /// STAGE 4 (FACET 2 KEYSTONE) — advance the STAT/LINE-PHASE clock by ONE dot
+    /// Advance the STAT/LINE-PHASE clock by ONE dot
     /// WITHOUT moving the pixel-fetcher render latch (`self.ticks`/`self.x`/the
-    /// FIFO/the render state machine). This is the decoupling primitive: rustyboi
-    /// normally welds `line_cycle` (the STAT/LY/ttnl phase clock) to the renderer
+    /// FIFO/the render state machine). This is the decoupling primitive:
+    /// `line_cycle` (the STAT/LY/ttnl phase clock) is normally welded to the renderer
     /// inside `step` (both `line_cycle += 1` and `self.ticks += 1` per dot). A
-    /// faithful sub-dot STOP re-anchor (FACET 1) needs to shift the STAT phase by
-    /// an ODD dot WITHOUT moving the mode-3 render latch (FACET-2 coupling). This
+    /// faithful sub-dot STOP re-anchor needs to shift the STAT phase by
+    /// an ODD dot WITHOUT moving the mode-3 render latch. This
     /// mirrors `step`'s STAT-phase region (the lines between `dispatch_stat_events`
     /// and `update_window_y_latch`) exactly, but skips the `match self.state`
     /// render machine and the `self.ticks += 1`. It is the line-phase HALF of the
@@ -4647,10 +4587,10 @@ impl Ppu {
         self.update_window_y_latch(mmio);
     }
 
-    /// STAGE 4 (FACET 1) — register one DS->SS-during-mode3 STOP switch and
+    /// Register one DS->SS-during-mode3 STOP switch and
     /// return how many STAT-phase carry dots to inject this switch (the increment
     /// in `floor(count/2)`): every 2nd such switch injects ONE extra dot,
-    /// reproducing the accumulated Gambatte `now -= 1` half-dot. Stop-count
+    /// reproducing the accumulated reference `now -= 1` half-dot. Stop-count
     /// invariant by construction (the carry depends only on the running count,
     /// not on any single STOP's integer-cc). Returns 0 on the odd switches.
     pub fn register_dsss_mode3_stop(&mut self) -> u32 {
@@ -4660,13 +4600,12 @@ impl Ppu {
         after - before
     }
 
-    /// STAGE 4 — the decoupled STAT-phase carry as a bridge step. Advances the
+    /// The decoupled STAT-phase carry as a bridge step. Advances the
     /// STAT/line clock by `dots` dots (same per-dot prelude as
     /// `stop_bridge_advance`: `step_scheduled_stat_events`, `p_now` pullback,
     /// then the line-phase step, then `step_lcdc_events`) but the render latch
     /// (`self.ticks`/`self.x`/FIFO/mode-3 fetch) stays PUT. With `dots == 0` this
-    /// is a no-op, so a flag-ON build that never carries is byte-identical to the
-    /// rendered bridge (the Step-1 safety checkpoint).
+    /// is a no-op.
     pub fn stat_phase_carry(&mut self, mmio: &mut mmio::Mmio, dots: u32) {
         for _ in 0..dots {
             self.step_scheduled_stat_events(mmio);
@@ -4677,7 +4616,7 @@ impl Ppu {
             // The STAT phase (line_cycle/abs_cc) just advanced one dot; the render
             // latch did NOT. Record the divergence so the CPU-access visibility
             // gate (`ppu_blocks` -> `render_carry_skew`) re-aligns a store to the
-            // un-carried fetcher position (FACET-2 decoupling).
+            // un-carried fetcher position.
             self.render_carry_skew_cc += dot_cc;
         }
     }
@@ -4763,11 +4702,11 @@ impl Ppu {
             mmio.request_interrupt(registers::InterruptFlag::Lcd);
             self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
         }
-        // Order matches Gambatte's nextMemEvent priority for ties.
+        // Order matches the hardware next-memory-event priority for ties.
         // The m1 (VBlank) event (frame_cycle 144*456-2, an even `abs_cc`) is observed
         // two ways at double speed: a CPU FF0F read snapshots IF pre-tick (the snapshot
         // is taken BEFORE this M-cycle's dispatch, so an event at cc == read_cc fires
-        // one dispatch too late to be seen — Gambatte processes events <= cc before
+        // one dispatch too late to be seen — hardware processes events <= cc before
         // read(0xFF0F,cc) returns; needs +2*ds to land at-or-before the read cc), and
         // the VBlank IRQ is *delivered* by the CPU service path (needs the true event
         // cc). The read-snapshot brackets only exist with the m1-STAT source enabled
@@ -4783,20 +4722,20 @@ impl Ppu {
             if self.mstat_irq.do_m1_event(stat) {
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
             }
-            // Gambatte's VBlank interrupt (IF bit 0) and the mode-1 STAT IRQ both
-            // fire from the SAME lyCounter LY=144 event (`flagIrq(doM1Event?3:1)`):
+            // The hardware VBlank interrupt (IF bit 0) and the mode-1 STAT IRQ both
+            // fire from the SAME LY-counter LY=144 event:
             // bit 0 (VBlank) ALWAYS, bit 1 (STAT) only when the m1 condition holds.
             // The event fires at frame_cycle 144*456-2 (line_cycle 454 of LY=143),
             // ~3cc BEFORE rustyboi's render-machine VBlank (the HBlank ly143->144
             // line transition at line_cycle 455/0). A CPU IF read landing in that
             // gap saw the STAT bit but missed VBlank (the m1irq `_2`/`_3` bracket
             // halves: out0 vs the correct out3, outE2 vs outE3). Flag VBlank here
-            // at the faithful m1 event cc so both bits land coincident as Gambatte;
+            // at the faithful m1 event cc so both bits land coincident as on hardware;
             // the render machine's later fire is idempotent (same frame OR).
             if self.internal_ly_val >= 143 {
                 mmio.request_interrupt(registers::InterruptFlag::VBlank);
                 // Mark so the render-machine ly143->144 transition does not re-flag
-                // VBlank after a CPU IF-write cleared it (Gambatte: single VBlank
+                // VBlank after a CPU IF-write cleared it (hardware: single VBlank
                 // source). The flag covers the gap between this event (line_cycle
                 // 454) and the render transition (line_cycle 455/0).
                 self.m1_vblank_fired = true;
@@ -4817,15 +4756,15 @@ impl Ppu {
         // The mode-0 (HBlank) STAT IRQ schedules at an odd `abs_cc` (a half-dot)
         // at double speed; the per-dot dispatch flags it one M-cycle late, which
         // pushes it across a CPU instruction boundary (≈4cc service delay).
-        // Anticipating by `ds` dots lands it on the boundary Gambatte services at
+        // Anticipating by `ds` dots lands it on the boundary hardware services at
         // — the same half-dot sub-dot fix applied to the LYC=LY IRQ above.
         //
         // On CGB single speed the per-dot dispatch additionally flags the m0 IRQ one
-        // dot after Gambatte's `predictedNextXposTime(166)` (= m0Time-1): the IRQ is
+        // dot after the hardware xpos-166 advance time (= mode-0 time-1): the IRQ is
         // delivered at the mode-3->0 transition dot rather than one xpos before it.
         // Measured byte-exact via cctracer (m2int_m0irq_scx3 fires at rel+2 from the
-        // IF-clear write M-cycle start vs Gambatte's rel+1; DMG is already at rel+1).
-        // Anticipate by one dot on CGB SS so the m0 IRQ flags at m0Time-1, matching
+        // IF-clear write M-cycle start vs the hardware rel+1; DMG is already at rel+1).
+        // Anticipate by one dot on CGB SS so the m0 IRQ flags at mode-0 time-1, matching
         // the (already exact) m2/LYC phase. Fixes 10sprites/ly0/wxA5 m0irq and the
         // CGB m2int_m0irq_*_ifw IF-clear-vs-m0 ordering.
         let cgb_ss_m0_anticip = (!ds && mmio.is_cgb_features_enabled()) as u64;
@@ -4833,9 +4772,9 @@ impl Ppu {
             let stat = self.stat_reg_committed;
             let ly = self.internal_ly() as u32;
             // FAITHFUL EVENTCC: capture this line's m0 IRQ event cc
-            // (predictedNextXposTime(166)) BEFORE the mutable IF-flag borrow, so
+            // (the xpos-166 advance time) BEFORE the mutable IF-flag borrow, so
             // the halt-exit `<2` fixup can read the cc the IF bit was raised at
-            // (Gambatte `flagIrq(2, eventTimes_(memevent_m0irq))`).
+            // (hardware flags the m0 STAT IRQ at its m0 event time).
             let m0_event_cc = self.m0_irq_event_cc_master(mmio);
             let fired = self.mstat_irq.do_m0_event(ly, stat, self.lyc_irq.lyc_reg_src());
             if fired {
@@ -4866,8 +4805,8 @@ impl Ppu {
         if fired {
             mmio.request_interrupt(registers::InterruptFlag::Lcd);
             // FAITHFUL HALT-EXIT: a halted CPU wakes at this exact cc; the DMG
-            // halt-exit fixup (sm83.rs) needs the m2 eventTime to apply the
-            // real +4 (`cc - eventTime < 2`).
+            // halt-exit fixup (sm83.rs) needs the m2 event time to apply the
+            // real +4 (`cc - event time < 2`).
             mmio.set_last_m2_irq_fire_cc(mmio.master_cc());
             // Record the m2-event LY so the CGB halt-exit +4 stall (sm83.rs) can
             // distinguish a rendering-line OAM wake (ly 0..143, intr_2) from the
@@ -4961,14 +4900,14 @@ impl Ppu {
             return;
         }
 
-        // Prior-to-LY-inc check at line cycle 450: weMaster |= (ly == wy).
+        // Prior-to-LY-inc check at line cycle 450: window-enable master |= (ly == wy).
         if self.ticks == 450 {
             if ly == wy {
                 self.window_y_triggered = true;
             }
             return;
         }
-        // After-LY-inc check at line cycle 454: weMaster |= (ly + 1 == wy).
+        // After-LY-inc check at line cycle 454: window-enable master |= (ly + 1 == wy).
         if self.ticks == 454 && ly + 1 == wy {
             self.window_y_triggered = true;
         }
@@ -4979,7 +4918,7 @@ impl Ppu {
     // drawn (FIFO non-empty).
     fn draw_fifo_pixel(&mut self, mmio: &mmio::Mmio) -> bool {
         // Window-reactivation insert: render a color-0 pixel without popping
-        // (see insert_bg_pixel).
+        // (driven by the window-reactivation pixel-insert flag set below).
         let (bg_pixel_idx, bg_attrs) = if self.insert_bg_pixel {
             self.insert_bg_pixel = false;
             (0u8, 0u8)
@@ -4993,13 +4932,13 @@ impl Ppu {
         let ly = mmio.read(LY) as u16;
         let fb_offset = (ly * 160) + self.x as u16;
 
-        // Per-pixel BG-enable (RB_LINERENDER per-pixel). The per-dot draw is
-        // flushed in bursts (the m0Time flush at mode-3 end draws all remaining
+        // Per-pixel BG-enable. The per-dot draw is
+        // flushed in bursts (the mode-0 time flush at mode-3 end draws all remaining
         // FIFO pixels in one pass), so reading the LIVE `self.lcdc` would apply
         // the final BG-enable to every flushed column. Instead evaluate BG-enable
         // as-of THIS column's plot cc from the line's `bgen_history`, so a
         // mid-mode-3 LCDC.0 toggle (BG off then on) covers exactly the pixel span
-        // it should — matching Gambatte's live per-tile `lcdc & lcdc_bgen` read.
+        // it should — matching the live per-tile `lcdc & lcdc_bgen` read.
         // With no mid-line toggle `bgen_at` returns the single seeded value
         // (== live `lcdc & 1`), so the common case is unchanged.
         let bg_enabled_col = self.bgen_at(mmio, mmio.is_cgb_features_enabled(), self.x);
@@ -5065,7 +5004,7 @@ impl Ppu {
     // Replace the 8 oldest BG-FIFO entries with the tile at BG tile-map column
     // `tile_col` (0..32) on the pixel row `bg_y` (already SCY+LY, 0..256),
     // reproducing the fetcher's BG addressing (LCDC tile-map/tile-data select,
-    // CGB attribute bank + x/y flip). Used by the M3Start fine-scroll re-fetch
+    // CGB attribute bank + x/y flip). Used by the mode-3-start fine-scroll re-fetch
     // when a mid-discard SCX write moves the first displayed tile's column.
     // Compute the 8 BG pixels for tile-map column `tile_col` on pixel
     // row `bg_y`, reproducing the fetcher's addressing. Shared by the fine-scroll
@@ -5138,10 +5077,10 @@ impl Ppu {
         self.fetcher.pixel_fifo.overwrite_oldest(&pixels);
     }
 
-    // Gambatte's plotPixel/predictor window-Y gate: `weMaster || (wy2 == ly &&
-    // winEn)`. `wy2` is WY delayed ~2 dots after a write; we read WY live, which
+    // The hardware plot/predictor window-Y gate: `window-enable-master || (wy2 == ly &&
+    // window-enable)`. `wy2` is WY delayed ~2 dots after a write; we read WY live, which
     // matches by the time the fetcher reaches WX. This `wy2 == ly` fallback
-    // catches late-frame WY writes that land after the three weMaster
+    // catches late-frame WY writes that land after the three window-enable master
     // checkpoints (e.g. WY=ly written during the same line's mode 3).
     fn window_y_active(&self, mmio: &mmio::Mmio) -> bool {
         self.window_y_active_with(mmio, (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0)
@@ -5177,19 +5116,19 @@ impl Ppu {
     // The window-draw decision evaluated at the END of mode 3, where the
     // fetcher's xpos reaches wx==166 (lcd_hres+6) on DMG with WX==166. The
     // window cannot draw a visible pixel this line (the line ends at xpos 166)
-    // but it still mutates winDrawState exactly as Gambatte does when xpos hits
-    // wx. The OUTER gate is `wx==xpos && (weMaster || (wy2==ly && winEn)) &&
-    // xpos<167`; weMaster alone is sufficient (does NOT require winEn). INNER:
-    //   branch A (886): winDrawState==0 && winEn -> start now
-    //       (winDrawState = win_draw_start|win_draw_started, ++winYPos)
-    //   branch B (889): !cgb && (winDrawState==0 || xpos==166) -> |= win_draw_start
+    // but it still mutates the window-draw state exactly as the hardware does when xpos hits
+    // wx. The OUTER gate is `wx==xpos && (window-enable-master || (wy2==ly && window-enable)) &&
+    // xpos<167`; window-enable-master alone is sufficient (does NOT require window-enable). INNER:
+    // branch A (886): window-draw-state==0 && window-enable -> start now
+    // (window-draw-state = win_draw_start|win_draw_started, the window-Y increment)
+    // branch B (889): !cgb && (window-draw-state==0 || xpos==166) -> |= win_draw_start
     // The xpos==166 term makes branch B fire on EVERY qualifying line (even with
-    // WE off), arming win_draw_start. That bit survives into the next M3Start::f0
-    // (and across the frame boundary, since winDrawState is not reset at frame
-    // end) where it is consumed (++winYPos, window draws from x0). Running this at
+    // WE off), arming win_draw_start. That bit survives into the next mode-3-start window checkpoint
+    // (and across the frame boundary, since the window-draw state is not reset at frame
+    // end) where it is consumed (the window-Y increment, window draws from x0). Running this at
     // line end — AFTER the mid-mode-3 WE-off cleared win_draw_started — is what
-    // gives the wxA6 steady state TWO winYPos increments per line (f0 + the HBlank
-    // WE-on, which now sees winDrawState==win_draw_start) and lets the WE-off
+    // gives the wxA6 steady state TWO window Y position increments per line (f0 + the HBlank
+    // WE-on, which now sees window-draw-state==win_draw_start) and lets the WE-off
     // actually revert the right columns to BG. Idempotent within a line: it only
     // runs once at the mode-3->HBlank transition (the two transition call sites
     // are mutually exclusive per line).
@@ -5215,7 +5154,7 @@ impl Ppu {
             self.win_y_pos = self.win_y_pos.wrapping_add(1);
         } else {
             // branch B (889): arm win_draw_start (xpos==166 term, fires
-            // regardless of winEn) for the next line's M3Start::f0 consume.
+            // regardless of window-enable) for the next line's mode-3-start window-checkpoint consume.
             self.win_draw_start = true;
         }
     }
@@ -5225,12 +5164,12 @@ impl Ppu {
         len
     }
 
-    // Per-pixel BG-enable (RB_LINERENDER per-pixel). Returns the LCDC.0
+    // Per-pixel BG-enable. Returns the LCDC.0
     // (BG-enable) bit in effect for display column `sx`, from the line's
     // `bgen_history` (boundary_col, bgen) entries. The last entry whose boundary
     // column is <= `sx` wins. With no mid-mode-3 LCDC.0 toggle the history is a
     // single seed (boundary 0) and this always returns the seeded value —
-    // byte-identical to the old once-per-pixel live `lcdc & 1` read.
+    // byte-identical to a once-per-pixel live `lcdc & 1` read.
     fn bgen_at(&self, _mmio: &mmio::Mmio, _is_cgb: bool, sx: u8) -> bool {
         if self.bgen_history.len() <= 1 {
             return self
@@ -5251,11 +5190,11 @@ impl Ppu {
     }
 
     // Closed-form mode-3 length to reach an arbitrary `targetx`, mirroring
-    // Gambatte `predictCyclesUntilXpos_fn`: the window penalty (+6) is charged
+    // The hardware cycles-until-xpos length: the window penalty (+6) is charged
     // only when `wx < targetx`, and a sprite contributes only when `spx <=
-    // targetx`. `compute_m3_length_win` is the `targetx == 167` (m0Time, getStat)
-    // case; the mode-0 STAT IRQ fires at `predictedNextXposTime(lcd_hres+6) =
-    // predictedNextXposTime(166)`, one xpos earlier. When a window starts at
+    // targetx`. `compute_m3_length_win` is the `targetx == 167` (mode-0 time, STAT resolve)
+    // case; the mode-0 STAT IRQ fires at the xpos-(lcd_hres+6) advance time =
+    // the xpos-166 advance time, one xpos earlier. When a window starts at
     // WX=166 and/or a sprite sits at the right edge (spx > 166), that final
     // xpos step carries the whole window+sprite penalty, so xpos 166 lands many
     // dots before xpos 167 — not the usual single dot.
@@ -5267,7 +5206,7 @@ impl Ppu {
         let mut nwx: i32 = 0xFF;
         if self.window_will_start(mmio, is_cgb) {
             let wx = mmio.read(WX) as i32;
-            // Gambatte: window penalty only if `wx < targetx` (`p.wx - xpos <
+            // On hardware: window penalty only if `wx < targetx` (`wx - xpos <
             // targetx - xpos`). At targetx == 167 this matches the +6 in
             // `compute_m3_length_win` (any in-range WX <= 166 < 167).
             if wx < targetx {
@@ -5290,8 +5229,8 @@ impl Ppu {
 
     /// The extra dots (beyond the usual single dot) that the final xpos step
     /// (166 -> 167) carries on this line, i.e. how many dots earlier the mode-0
-    /// STAT IRQ (`predictedNextXposTime(166)`) fires relative to the m0Time
-    /// (`predictedNextXposTime(167)`) closed form. Zero for plain BG lines, so
+    /// STAT IRQ (the xpos-166 advance time) fires relative to the mode-0 time
+    /// (the xpos-167 advance time) closed form. Zero for plain BG lines, so
     /// the calibrated `M0IRQ_OFFSET` arm is unchanged; non-zero only when a
     /// window starts at WX=166 or a sprite sits at the right edge.
     fn m0irq_xpos166_advance(&self, mmio: &mmio::Mmio, is_cgb: bool) -> i64 {
@@ -5303,31 +5242,31 @@ impl Ppu {
     // Returns (mode-3 length in dots past base, whether the window contributed).
     fn compute_m3_length_win(&self, mmio: &mmio::Mmio, is_cgb: bool) -> (u128, bool) {
         let scx = (self.first_line_scx_override.unwrap_or_else(|| mmio.read(SCX)) & 0x07) as i32;
-        // Fine-scroll discard prefix: M3Start::f1 consumes scx%8 dots, then
-        // nextCall(1-cgb) before the tile loop (167-base) begins.
+        // Fine-scroll discard prefix: the mode-3-start fine-scroll phase consumes scx%8 dots, then
+        // the next call(1-cgb) before the tile loop (167-base) begins.
         let mut cycles: i32 = scx + (1 - is_cgb as i32);
         cycles += 167; // targetx - xpos, xpos=0 at tile-loop start
 
-        // Window: if it will start on this line in range. Gambatte sets
+        // Window: if it will start on this line in range. Hardware sets
         // `nwx = wx` and adds 6; sprites then split into a `spx <= nwx` group
-        // (firstTileXpos = endx%8) and a `spx > nwx` group (firstTileXpos =
-        // nwx+1, prevTileNo reset). nwx stays 0xFF when no window starts.
+        // (first-tile xpos = endx%8) and a `spx > nwx` group (first-tile xpos =
+        // nwx+1, previous tile number reset). nwx stays 0xFF when no window starts.
         let mut nwx: i32 = 0xFF;
         let mut win = false;
         if self.window_will_start(mmio, is_cgb) {
             nwx = mmio.read(WX) as i32;
             cycles += WIN_M3_PENALTY;
             // CGB window lines at SCX%8 == 5: the closed-form mode-3 window
-            // penalty runs one dot long versus Gambatte's M3Start fine-scroll
+            // penalty runs one dot long versus the hardware mode-3-start fine-scroll
             // dispatch at this phase, flipping the sampled STAT mode on the
             // m2int_*_scx5 window probes — but only at single speed; at double
-            // speed Gambatte's phase agrees, so the -1 over-corrects (the DS
+            // speed the hardware phase agrees, so the -1 over-corrects (the DS
             // m2int_wx*_scx5_m3stat reads flip mode3->mode0).
             // A window that starts at WX=0 extends mode-3 one dot longer than the
-            // flat StartWindowDraw +6 (Gambatte's predictor charges +6 for every
+            // flat StartWindowDraw +6 (the hardware predictor charges +6 for every
             // in-range WX including 0, but real DMG/CGB silicon runs WX=0 one dot
             // long — age stat-mode-window WX=0 rows on CPU-DMG-C / CPU-CGB-B/C/E).
-            // Single speed only: at double speed Gambatte's own WX=0 m0Time phase
+            // Single speed only: at double speed the hardware WX=0 mode-0 time phase
             // already agrees (the +1 would flip 10spritesPrLine_wx0_m3stat_ds /
             // m2int_wxDefault_m3stat_ds), same speed asymmetry as the scx==5 case.
             // The scx==5 CGB SS -1 (below) is a fine-scroll-dispatch correction for
@@ -5439,8 +5378,8 @@ impl Ppu {
         self.write_subdot = (phase % 2) as u8;
     }
 
-    /// FF4A (WY) write hook. Gambatte applies the write to `wy2` (the value the
-    /// window-Y gate reads) delayed by `6 - isDoubleSpeed()` cc after the write.
+    /// FF4A (WY) write hook. Hardware applies the write to `wy2` (the value the
+    /// window-Y gate reads) delayed by `6 - double_speed` cc after the write.
     /// Schedule that delayed apply against the resolving write's absolute clock.
     pub fn on_wy_write(&mut self, value: u8, mmio: &mmio::Mmio) {
         if self.disabled {
@@ -5452,10 +5391,10 @@ impl Ppu {
         }
         let ds = mmio.is_double_speed_mode();
         let cc = self.write_cc(ds);
-        // Gambatte `wyChange`: `update(cc + 1 + cgb)` applies `p.wy` (the value
-        // the weMaster checkpoints read) at cc + 1 + cgb. Schedule that delayed
-        // apply so a mid-frame WY write reaches the weMaster latch with the same
-        // phase Gambatte uses, rather than the live (immediate) mmio value.
+        // On a hardware WY change the delayed WY value (the value
+        // the window-enable master checkpoints read) applies at cc + 1 + cgb. Schedule that delayed
+        // apply so a mid-frame WY write reaches the window-enable master latch with the same
+        // phase hardware uses, rather than the live (immediate) mmio value.
         let cgb = mmio.is_cgb_features_enabled() as i64;
         let wy1_delay = WY1_DELAY + cgb;
         self.wy1_pending = value;
@@ -5475,7 +5414,7 @@ impl Ppu {
 
     /// FF47 (BGP) write hook. The CPU readback is immediate (handled by mmio), but
     /// the rendered BG palette mapping must change at the exact pixel being drawn
-    /// `MID_M3_PAL_LATENCY` columns after the write (mealybug m3_bgp_change). Record
+    /// `MID_M3_PAL_LATENCY` columns after the write. Record
     /// the change keyed by the display column it first becomes visible at; the
     /// per-column draw resolves it via `bgp_at`. Only while pixel transfer is active
     /// for this line — a write outside mode 3 just lands in the seed at the next
@@ -5484,8 +5423,8 @@ impl Ppu {
         // A BGP write in the OAM scan (mode 2) just before mode 3 is the leading edge
         // of a two-write spike pair when a mode-3 write follows within the cadence
         // window: it settles the glitch palette so the mode-3 partner's transition
-        // paints a visible spike (age m3-bg-bgp early band: the $FF write lands in
-        // mode 2, the restore at col 1 in mode 3). Stash it (survives the mode-3-arm
+        // paints a visible spike (e.g. a $FF write in mode 2 with its restore at
+        // col 1 in mode 3). Stash it (survives the mode-3-arm
         // bgp_writes clear); it is injected neighbor-only at mode-3 entry and
         // discarded by the cadence gate if no mode-3 partner lands within
         // BGP_SPIKE_CADENCE_CC.
@@ -5517,8 +5456,8 @@ impl Ppu {
         // A prologue write (SCX-discard warmup) does not paint its own spike, but
         // on hardware it still forms the leading half of a two-write spike cadence:
         // its restore partner (recorded below at a visible column) must find it as a
-        // neighbor or the spike vanishes (age m3-bg-bgp: the $FF write lands at x=0
-        // during the SCX discard, the restore at x=4 paints the visible black pixel).
+        // neighbor or the spike vanishes (e.g. a $FF write at x=0 during the SCX
+        // discard, restore at x=4 paints the visible black pixel).
         // Record it with a never-painted victim column (>=160) so it is a cadence
         // neighbor only.
         if !_mmio.is_cgb() && self.in_previsible_prologue() {
@@ -5528,8 +5467,7 @@ impl Ppu {
             // The spike's victim is the pixel POPPING at the write's apply dot.
             // When a sprite fetch has the pipeline stalled across that dot no
             // pixel pops — the glitched palette transition collides with
-            // nothing and there is no visible spike (mealybug
-            // m3_bgp_change_sprites: the RESTORE landing inside a late band's
+            // nothing and there is no visible spike (a RESTORE landing inside a
             // sprite stall must not paint the first post-stall column). The
             // write is still RECORDED (victim 0xFF, never painted) so its
             // partner keeps its cadence neighbor. On stall-free lines the
@@ -5538,8 +5476,8 @@ impl Ppu {
             // Pending SCX discard: at x==0 the first display column has not popped
             // while pixels remain to be discarded (m3_pixels_discarded <
             // m3_discard_target). The write's victim pixel is one of those discarded
-            // pixels, so no visible spike lands — record it neighbor-only (age
-            // m3-bg-bgp late bands LY21..23: the restore fires mid-discard).
+            // pixels, so no visible spike lands — record it neighbor-only (a restore
+            // firing mid-discard).
             let discarding = self.x == 0 && self.m3_pixels_discarded < self.m3_discard_target.max(0) as u8;
             let col = if stall <= lat && !discarding {
                 (self.x as i32 + lat - stall).clamp(0, 255) as u8
@@ -5561,20 +5499,18 @@ impl Ppu {
     // write M-cycle's START, but the DMG store's bus-write lands at a later sub-M-cycle
     // T-cycle, so the change reaches the displayed column a phase-dependent number of
     // dots after `self.x`. The phase is the write's `master_cc % 4`:
-    //   - phase 0 -> +1 (the baseline). EVERY gambatte dmgpalette_during_m3 and mealybug
-    //     m3_bgp_change write lands here (verified: all 37505 mid-m3 writes across the
-    //     full gambatte DMG suite are phase 0), so those references are untouched.
-    //   - later phases add `phase - 1` more dots: a write whose M-cycle starts deeper in
-    //     the pixel-clock grid latches proportionally later. daid ppu_scanline_bgp's
-    //     tight `LD A,(HL+); LDFF (C),A` gradient writes land at phase 3 (+3 total),
-    //     matching the SameBoy/hardware reference (2 columns past the phase-0 baseline).
-    // CGB keeps its own validated 2-dot latency (mealybug m3_bgp_change cgb_c); no phase
-    // term (the CGB fetcher samples the palette-RAM pipeline at a fixed stage).
+    // - phase 0 -> +1 (the baseline). Ordinary one-write-per-line palette streams
+    // land here.
+    // - later phases add `phase - 1` more dots: a write whose M-cycle starts deeper in
+    // the pixel-clock grid latches proportionally later. A tight
+    // `LD A,(HL+); LDFF (C),A` gradient write lands at phase 3 (+3 total),
+    // 2 columns past the phase-0 baseline.
+    // CGB keeps its own 2-dot latency; no phase term (the CGB fetcher samples the
+    // palette-RAM pipeline at a fixed stage).
     fn bgp_apply_latency(&self, mmio: &mmio::Mmio) -> i32 {
         if mmio.is_cgb() {
-            // CPU-CGB-D/E samples the BG palette one dot earlier than CGB-C:
-            // age m3-bg-bgp's ncmE (rev=cgbe) reference wants the DMG 1-dot
-            // latency while ncmBC / mealybug m3_bgp_change (CGB-C) keep 2.
+            // CGB-D/E samples the BG palette one dot earlier than CGB-C: CGB-E
+            // takes the DMG 1-dot latency while CGB-B/C keep 2.
             let base = if mmio.is_cgb_de() {
                 BGP_LATENCY_DMG
             } else {
@@ -5591,14 +5527,13 @@ impl Ppu {
     // `cc += 4 * isCgb()` when an IRQ ends HALT — one real
     // M-cycle before the woken stream resumes. rustyboi's halted CPU wakes at
     // the exact IF-set cc and models that M-cycle on the READ side only
-    // (getStat/getLyReg biases), so a halt-woken WRITE stream runs 4cc early:
+    // (STAT-resolve/LY-register biases), so a halt-woken WRITE stream runs 4cc early:
     // every mid-mode-3 palette write it makes lands 4cc (dots, halved in
     // double speed) of display columns short of the hardware column. Re-add
     // the un-charged M-cycle here, gated on the woken stream
-    // (`halt_wakeup_skew`, set at wake / cleared at the next HALT): daid
-    // ppu_scanline_bgp.gbc's LYC-woken ISR stream takes it (boundaries were a
-    // uniform 4 columns early); mealybug m3_bgp_change cgb_c busy-waits (all
-    // its writes probe skew=false) and keeps the validated flat latency.
+    // (`halt_wakeup_skew`, set at wake / cleared at the next HALT): an LYC-woken
+    // ISR write stream takes it (its boundaries would otherwise be a uniform 4
+    // columns early); a busy-waiting stream (skew=false) keeps the flat latency.
     fn cgb_halt_wake_write_bias(mmio: &mmio::Mmio) -> i32 {
         // An LYC/m1-woken stream that charged the +4 halt exit as a REAL stall
         // (sm83.rs) already writes at the hardware cc — re-adding the M-cycle
@@ -5614,11 +5549,10 @@ impl Ppu {
     // the spikes into the framebuffer. Called at the mode-3 -> HBlank transition, when
     // every write of the line is known. The glitch is a TWO-WRITE collision: a write
     // spikes its own pixel (looked up through `old | new`) only when it has a
-    // neighboring mid-mode-3 write within `BGP_SPIKE_CADENCE_CC` (mealybug's SET/RESTORE
-    // pairs, ~12 dots apart). A single write, or one spaced wider (the gambatte
-    // dmgpalette_during_m3 family: one write per line, or 60-148 dots apart), has no
-    // colliding neighbor and paints no spike — leaving the clean palette transition the
-    // dmgpalette oracles expect. Resolving at line end (all writes known) lets a SET
+    // neighboring mid-mode-3 write within `BGP_SPIKE_CADENCE_CC` (SET/RESTORE
+    // pairs, ~12 dots apart). A single write, or one spaced wider (one write per
+    // line, or 60-148 dots apart), has no colliding neighbor and paints no spike —
+    // leaving the clean palette transition. Resolving at line end (all writes known) lets a SET
     // write spike on the strength of its FUTURE RESTORE neighbor, which a per-write gate
     // could not see. DMG-only; the CGB path uses true-color palette RAM (no collapse).
     fn resolve_bgp_spikes(&mut self, mmio: &mmio::Mmio) {
@@ -5685,8 +5619,7 @@ impl Ppu {
     // Pre-visible phase of a chopped WX<7 window start: the early activation
     // zeroed the warmup, but a write landing before the line's pos-0 dot still
     // colors the whole line (the column-0 pixel pops at/after pos 0), and must
-    // not seed a two-write spike either (mealybug m3_window_timing WX=1 row) —
-    // exactly like a write during the warmup.
+    // not seed a two-write spike either — exactly like a write during the warmup.
     fn in_previsible_prologue(&self) -> bool {
         if self.pixel_transfer_warmup > 0 {
             return true;
@@ -5786,7 +5719,7 @@ impl Ppu {
     /// mmio), but the BG fetcher must see the new SCY only ~N dots later, the
     /// write-side analog of the wy1/wy2 delayed latches: rustyboi otherwise
     /// resolves the write pre-tick and the fetcher re-reads it live one M-cycle
-    /// too early vs Gambatte. Schedule the delayed apply against the write cc.
+    /// too early vs hardware. Schedule the delayed apply against the write cc.
     pub fn on_scy_write(&mut self, value: u8, mmio: &mmio::Mmio) {
         if self.disabled {
             self.scy_delayed = value;
@@ -5796,7 +5729,7 @@ impl Ppu {
         let ds = mmio.is_double_speed_mode();
         let cc = self.write_cc(ds);
         // CGB-only: rustyboi's DMG fetcher already samples SCY at the
-        // Gambatte-correct dot (delay 0); only the CGB core sees the mid-M3 write
+        // hardware-correct dot (delay 0); only the CGB core sees the mid-M3 write
         // one M-cycle too early (the `_2/_4/_6` straddle pairs vs the passing
         // `_1/_3/_5`). A DMG delay regresses the DMG scy_during_m3 cases.
         // SCY=2 is the swept optimum (fixes 20 CGB scy_during_m3 straddle cases,
@@ -5867,14 +5800,14 @@ impl Ppu {
 
         // Exact-cc f1-discard latch. The "before" value is whatever the f1 loop
         // sees right now (resolving any already-pending latch up to this write's
-        // cc); the new value becomes visible at write_cc + 2*cgb (Gambatte
-        // scxChange `update(cc + 2*cgb)`). NB: mmio already holds `value` (the
+        // cc); the new value becomes visible at write_cc + 2*cgb (a hardware SCX
+        // change becomes visible at cc + 2*cgb). NB: mmio already holds `value` (the
         // store ran before this hook), so `scx_f1_at_cc` must derive the old
         // value from the latch state, never from mmio.read(SCX).
         let cgb = mmio.is_cgb_features_enabled();
         self.scx_prev_f1 = self.scx_f1_pending_at_cc(cc);
         self.scx_f1_new = value;
-        // Gambatte scxChange `update(cc + 2*cgb)` runs in PPU dot units: the new
+        // The hardware SCX change (visible at cc + 2*cgb) runs in PPU dot units: the new
         // SCX becomes visible to the f1 fine-scroll loop one PPU dot after the
         // write (CGB). `abs_cc` is the master clock (1 dot = 1<<ds cc), so the
         // dot delay scales with double speed -- otherwise a mid-f1 SCX write
@@ -5926,7 +5859,7 @@ impl Ppu {
     }
 
     /// SCX value visible to the f1 fine-scroll discard at PPU `cc`, honoring the
-    /// CGB `update(cc + 2*cgb)`-before-`setScx` write delay. Before the pending
+    /// CGB `update(cc + 2*cgb)`-before-`the SCX-write handling` write delay. Before the pending
     /// write's apply cc the f1 sees the pre-write value; at/after it sees the
     /// new. Derived purely from the latch state (mmio already holds the latest
     /// write), seeded with the M3-start SCX in `scx_prev_f1`.
@@ -5939,7 +5872,7 @@ impl Ppu {
     }
 
     /// OBJ-size (large = 8x16) visible to the OAM scan at PPU `cc`, honoring the
-    /// CGB `setLcdc(data, cc + 2)` write delay. Before the pending size write's
+    /// CGB `an LCDC write taking effect at cc+2` write delay. Before the pending size write's
     /// apply cc the scan sees the pre-write size; at/after it sees the new. With
     /// no pending change (`apply_cc == disabled`) it falls back to the live LCDC
     /// bit2, so the steady-state per-slot snapshot is unchanged.
@@ -5948,7 +5881,7 @@ impl Ppu {
             // Strict `>`: an OAM slot read exactly AT the apply cc still sees the
             // pre-write size (the late_sizechange2_sp01_ds bracket: ds_1's slot
             // cc is strictly past apply -> new size IN; ds_2's slot cc equals
-            // apply -> old size OUT, the 1-slot boundary Gambatte resolves).
+            // apply -> old size OUT, the 1-slot boundary hardware resolves).
             if cc > self.objsize_apply_cc {
                 self.objsize_new_large
             } else {
@@ -5987,7 +5920,7 @@ impl Ppu {
         // state; only its IRQ side-effects are gated by enable.
         if self.disabled {
             self.previous_stat_interrupt_line = false;
-            // STAT-write quirk (memory.cpp case 0x41): with the LCD off, an FF41
+            // STAT-write quirk (the FF41 write path): with the LCD off, an FF41
             // write while the LYC=LY flag is set and LYC IRQ was disabled flags
             // a STAT IRQ. On CGB the written data must also set LYC-IRQ-enable;
             // on DMG it fires regardless of the written value.
@@ -6003,7 +5936,7 @@ impl Ppu {
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
             }
             // Keep the IRQ sources' shadow registers current so a later enable
-            // sees the right values (Gambatte calls lcdstat/lycRegChange even
+            // sees the right values (hardware runs its LCDSTAT / LYC-register change handling even
             // while off, just skipping event scheduling).
             self.stat_reg_committed = new_stat;
             return;
@@ -6040,20 +5973,20 @@ impl Ppu {
     }
 
     /// The m0 IRQ time to use in the stat-change immediate-trigger check.
-    /// Mirrors Gambatte: when the scheduled m0 IRQ is disabled but the current
+    /// Mirrors hardware: when the scheduled m0 IRQ is disabled but the current
     /// line's mode 0 is still ahead, predict it from the renderer; otherwise use
     /// the scheduled value.
     fn m0_irq_time_for_trigger(&self, mmio: &mmio::Mmio, lc: &stat_irq::LyCounter, cc: u64) -> u64 {
-        // Gambatte's statChangeTriggers* needs the m0 IRQ time of the *current
+        // The hardware STAT-change-triggers check needs the m0 IRQ time of the *current
         // line*. Our `sched_m0irq` may hold a stale current-line value during
         // HBlank (it is only cleared to DISABLED when the m0 source fires). The
         // DMG/CGB branch logic only cares whether m0IrqTime is before or after
-        // `lyCounter.time()` (next-LY): if mode 0 is already active (HBlank) the
+        // `the LY counter.time()` (next-LY): if mode 0 is already active (HBlank) the
         // current line's m0 has passed and the next is on a later line, i.e.
         // `>= lc.time`; during mode 2/3 it is still ahead this line (`< time`).
         // Mode 3 (PixelTransfer): the current line's m0 is ahead, and the
-        // closed-form `m0_time_master` is this line's exact m0Time — use the exact
-        // Gambatte mode-0 IRQ event time (predictedNextXposTime(166)). Mode 2
+        // closed-form `m0_time_master` is this line's exact mode-0 time — use the exact
+        // the hardware mode-0 IRQ event time (the xpos-166 advance time). Mode 2
         // (OAMSearch): `m0_time_master` still holds the PREVIOUS line's value, so
         // keep the per-dot `sched_m0irq` (this line's armed m0). Both clamp below
         // next-LY so the "m0 ahead this line" branch is taken.
@@ -6071,11 +6004,11 @@ impl Ppu {
             State::PixelTransfer => self
                 .m0_irq_time_exact(mmio)
                 .map(|t| {
-                    // Gambatte runs pending events before the FF41-write trigger
+                    // Hardware runs pending events before the FF41-write trigger
                     // check: if the write cc has already passed the mode-0 STAT
-                    // IRQ time (predictedNextXposTime(166)), that event fired and
-                    // rescheduled `eventTimes_(memevent_m0irq)` onto the next line
-                    // (> lyCounter.time()). Report a next-LY value so the trigger
+                    // IRQ time (the xpos-166 advance time), that event fired and
+                    // rescheduled the m0 event onto the next line
+                    // (> the LY counter.time()). Report a next-LY value so the trigger
                     // takes the "m0 already occurred" branch and the enable
                     // immediately flags the STAT IRQ — the `_2`/`_3`/`_4` bracket
                     // where the window/sprite-deferred m0 xpos lies just before the
@@ -6091,25 +6024,25 @@ impl Ppu {
         }
     }
 
-    /// The exact Gambatte mode-0 STAT-IRQ event time for the current line, used
-    /// by the FF41/FF45 latch + immediate-trigger comparisons. Gambatte's m0 IRQ
-    /// fires at `predictedNextXposTime(166) = m0Time - (1<<ds)`, one xpos before
-    /// the mode-3 -> mode-0 transition (`m0Time = predictedNextXposTime(167)`,
+    /// The exact hardware mode-0 STAT-IRQ event time for the current line, used
+    /// by the FF41/FF45 latch + immediate-trigger comparisons. The hardware m0 IRQ
+    /// fires at the xpos-166 advance time `mode-0 time - (1<<ds)`, one xpos before
+    /// the mode-3 -> mode-0 transition (`mode-0 time` = the xpos-167 advance time,
     /// our `m0_time_master`). Returns `None` when no closed-form master exists
     /// (window mid-line / first line after enable), in which case callers fall
     /// back to the per-dot delivery value (`sched_m0irq`).
     fn m0_irq_time_exact(&self, mmio: &mmio::Mmio) -> Option<u64> {
         let ds = mmio.is_double_speed_mode() as i64;
-        // `m0_time_master` is the master-cc m0Time (= predictedNextXposTime(167)).
+        // `m0_time_master` is the master-cc mode-0 time (= the xpos-167 advance time).
         // The STAT/LYC write-trigger comparisons run in abs-cc units (the same
         // `cc = write_cc()` / `sched_m0irq` clock), so rebase by `p_now`
         // (abs_cc = master_cc - p_now). The mode-0 IRQ fires one xpos earlier:
-        // predictedNextXposTime(166) = m0Time - (cost(166->167) << ds), where the
+        // the xpos-166 advance time = mode-0 time - (cost(166->167) << ds), where the
         // 166->167 step costs one dot plus any window-start (WX=166) / right-edge
         // sprite penalty that lands in that final xpos (`m0irq_xpos166_advance`).
         //
-        // `m0_time_master` (via `m0_time_exact`) carries a `+1` lyTime correction
-        // tuned for the C1 *read* access-cc phase (`access_cc + 2 < m0Time`). The
+        // `m0_time_master` (via `m0_time_exact`) carries a `+1` the LY time correction
+        // tuned for the C1 *read* access-cc phase (`access_cc + 2 < mode-0 time`). The
         // *write* cc (write_cc_off = 0) resolves the latch/trigger one cc earlier,
         // so that read-phase `+1` over-counts the write-boundary IRQ time by 1 —
         // subtract it back out to land the write-phase boundary exactly.
@@ -6120,8 +6053,8 @@ impl Ppu {
     }
 
     /// The current-line mode-0 IRQ time for the FF41/FF45 *latch* comparisons
-    /// (Gambatte `eventTimes_(memevent_m0irq)`). During mode 3 the closed-form
-    /// `m0_time_master`-derived exact value (predictedNextXposTime(166)) is this
+    /// (the hardware mode-0 IRQ event time). During mode 3 the closed-form
+    /// `m0_time_master`-derived exact value (the xpos-166 advance time) is this
     /// line's m0; in HBlank/mode 2/VBlank/window the per-dot `sched_m0irq` already
     /// carries the relevant scheduled (next-line) value, matching the pre-C5 latch
     /// behaviour, so keep it there to avoid disturbing those boundaries.
@@ -6135,7 +6068,7 @@ impl Ppu {
         }
     }
 
-    /// Port of LCD::lcdstatChange. `data` is the new FF41 enable bits (& 0x78).
+    /// Handles an LCD-STAT (FF41) change. `data` is the new FF41 enable bits (& 0x78).
     fn lcdstat_change(&mut self, data: u8, mmio: &mut mmio::Mmio) {
         let cc = self.write_cc(mmio.is_double_speed_mode());
         let lc = self.ly_counter(mmio);
@@ -6153,10 +6086,10 @@ impl Ppu {
         self.sched_lycirq = self.lyc_irq.time;
 
         // STAT-write IRQ timing follows the CGB LCD controller on CGB hardware
-        // (incl. DMG-compat mode), matching Gambatte's `cart_.isCgb()` gate.
+        // (incl. DMG-compat mode), matching the hardware console-is-CGB gate.
         let cgb = mmio.is_cgb();
         let lyc_reg = self.lyc_irq.lyc_reg_src();
-        // Gambatte's statChangeTriggersStatIrqDmg recomputes the current line's
+        // The hardware STAT-change-triggers-STAT-IRQ (DMG) recomputes the current line's
         // m0 IRQ time when it is unscheduled but mode 0 is still ahead this
         // line. Reproduce that so enabling m0 during mode 2/3 sees a future m0.
         let m0_for_trigger = self.m0_irq_time_for_trigger(mmio, &lc, cc);
@@ -6170,7 +6103,7 @@ impl Ppu {
         }
 
         // Latch the new STAT bits against the exact current-line mode-0 IRQ time
-        // (Gambatte's `eventTimes_(memevent_m0irq)` = predictedNextXposTime(166))
+        // (the hardware mode-0 IRQ event time = the xpos-166 advance time)
         // during mode 3, keeping the per-dot `sched_m0irq` next-line value
         // elsewhere (HBlank/mode 2/window) — see `m0_irq_time_latch`.
         let m0_latch = self.m0_irq_time_latch(mmio, &lc);
@@ -6184,7 +6117,7 @@ impl Ppu {
         );
     }
 
-    /// Port of LCD::lycRegChange.
+    /// Handles an LYC-register change.
     fn lyc_reg_change(&mut self, data: u8, mmio: &mut mmio::Mmio) {
         let old = self.lyc_irq.lyc_reg_src();
         if data == old {
@@ -6194,12 +6127,12 @@ impl Ppu {
         let lc = self.ly_counter(mmio);
         let stat = self.stat_reg_committed;
         // LYC-write coincidence/IRQ timing follows the CGB LCD controller on CGB
-        // hardware (incl. DMG-compat mode); Gambatte gates on `cart_.isCgb()`.
+        // hardware (incl. DMG-compat mode); hardware gates on the console-is-CGB signal.
         let cgb = mmio.is_cgb();
         let ds = mmio.is_double_speed_mode();
 
         // Trigger/latch against the current-line mode-0 IRQ time: the closed-form
-        // `m0_time_master`-derived exact value (Gambatte predictedNextXposTime
+        // `m0_time_master`-derived exact value (the hardware xpos-advance-time
         // (166)) during mode 3, the per-dot `sched_m0irq` (next-line scheduled m0,
         // > lc.time) elsewhere — see `m0_irq_time_latch`.
         let m0_for_trigger = self.m0_irq_time_latch(mmio, &lc);
@@ -6208,7 +6141,7 @@ impl Ppu {
             .lyc_reg_change(data, m0_for_trigger, self.sched_m2irq, cc, ds, cgb);
         self.sched_lycirq = self.lyc_irq.time;
 
-        // Immediate-trigger m0 time = Gambatte `eventTimes_(memevent_m0irq)`, which
+        // Immediate-trigger m0 time = the hardware m0 event time, which
         // is the *current line's* m0 while it is still ahead (mode 2/3) and the next
         // line's (> lc.time) once mode 0 has passed. `m0_irq_time_latch` is correct
         // in HBlank/mode 3 but reports DISABLED during OAMSearch (the current line's
@@ -6253,16 +6186,16 @@ impl Ppu {
         (self.abs_cc as i64 + off + sub).max(0) as u64
     }
 
-    /// LY value used for the LYC=LY comparison. In Gambatte the compare uses
+    /// LY value used for the LYC=LY comparison. On hardware the compare uses
     /// the next line's LY in the last 2 dots of the current line
-    /// (`getLycCmpLy` `timeToNextLy <= 2`), so the LYC=LY flag rises one line
+    /// (`the LYC-compare-LY calc` `time-to-next-LY <= 2`), so the LYC=LY flag rises one line
     /// early. Line 153's mid-line ly=0 transient is handled separately in
     /// Phase D by writing FF44 directly, so this only anticipates lines
     /// 0..=152 (line 153 -> 0 already came through `write_ly_from_ppu`).
     fn effective_ly_for_lyc_compare(&self, mmio: &mmio::Mmio) -> u8 {
         let ly = mmio.read(LY);
         // STAT LYC compare: the next-line anticipation window is
-        // `timeToNextLy > 2 - (!isDoubleSpeed() && isAgb())`. The renderer's
+        // `time-to-next-LY > 2 - (!isDoubleSpeed() && isAgb())`. The renderer's
         // line-cycle equivalent is `ticks >= 456 - thresh`; AGB single-speed
         // lowers the threshold from 2 to 1, extending the window one dot earlier.
         let agb_ss = mmio.is_agb() && !mmio.is_double_speed_mode();
@@ -6286,7 +6219,7 @@ impl Ppu {
         // captured here (affects this line); a write after this boundary (this
         // line's mode2) is applied per-slot after the scan, so sprite-0 keeps
         // the pre-boundary size. This is the late_sizechange 1-cc M2-boundary
-        // discriminator (Gambatte SpriteMapper lsbuf per-entry latch).
+        // discriminator (the hardware OAM scanner's per-entry size latch).
         self.scan_obj_size_large = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
         // Clear any exact-cc OBJ-size latch left from a prior line so it cannot
         // leak into this line's OAM scan; a mid-mode-2 size write rearms it.
@@ -6295,21 +6228,21 @@ impl Ppu {
         // IRQ delivery is handled by the event model; just latch the line.
         self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
         self.mode2_irq_pretriggered_for_next_line = false;
-        // Arm the cgbp begin boundary (Gambatte cgbpAccessible: blocked once
-        // `lineCycles(cc) + ds >= 80`) as soon as the line's mode 2 begins, so a
+        // Arm the cgbp begin boundary (the hardware CGB-palette-accessible window: blocked once
+        // `line cycles(cc) + ds >= 80`) as soon as the line's mode 2 begins, so a
         // BCPD/OCPD write landing in late mode 2 (before M3 is armed) sees it.
-        // Derive the exact begin cc from the lyTime anchor (same closed form as
+        // Derive the exact begin cc from the LY time anchor (same closed form as
         // `m0_time_exact`, but at line-cycle `80 - ds` instead of mode-0):
-        //   begin = lyTime − ((456 − (80 − ds)) << ds)
+        // begin = the LY time − ((456 − (80 − ds)) << ds)
         // This is byte-exact at both speeds; the old tick-block heuristic landed
-        // ~2 cc late at double speed because its `(4 − cgb)` ticks->lineCycles
+        // ~2 cc late at double speed because its `(4 − cgb)` ticks->line cycles
         // term was not shifted by `ds`.
         self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
     }
 
-    /// Byte-exact Gambatte cgbp-block BEGIN cc for the current line, anchored on
-    /// the same lyTime as `m0_time_exact`. Gambatte `cgbpAccessible` blocks once
-    /// `lineCycles(cc) + ds >= 80`, i.e. at line-cycle `80 - ds`.
+    /// Byte-exact hardware cgbp-block BEGIN cc for the current line, anchored on
+    /// the same LY time as `m0_time_exact`. The hardware CGB-palette-accessible window blocks once
+    /// `line cycles(cc) + ds >= 80`, i.e. at line-cycle `80 - ds`.
     fn cgbp_begin_exact(&self, mmio: &mmio::Mmio) -> u64 {
         let ds = mmio.is_double_speed_mode() as i64;
         let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
@@ -6320,7 +6253,7 @@ impl Ppu {
     pub fn step_scheduled_stat_events(&mut self, mmio: &mut mmio::Mmio) {
         // FF41 mode-bit read-back anticipation: in the last 3 dots of an
         // HBlank line (or of line 153) FF41 reports mode 2 (the next line's
-        // mode). Match Gambatte's `getStat` `lineCycles >= 453` threshold by
+        // mode). Match the hardware STAT resolve's `line cycles >= 453` threshold by
         // writing the anticipated mode at dot 453 and re-syncing the STAT
         // edge latch so the bit change does not produce a duplicate IRQ
         // rising edge — the actual mode-2 IRQ has already been delivered by
@@ -6362,14 +6295,14 @@ impl Ppu {
                 // First-frame-after-enable blanking: the panel shows the LCD-off
                 // blank for the frame produced immediately after this enable.
                 self.frames_since_enable = 0;
-                // Gambatte OamReader::enableDisplay: `lu_ = cc + (2*40 << ds) + 1`.
-                // getStat reports mode 0 (suppresses mode 2/3) for `cc < lu_`.
+                // The OAM snapshot at enable holds inactive until `cc + (2*40 << ds) + 1`.
+                // the STAT resolve reports mode 0 (suppresses mode 2/3) for `cc < lu_`.
                 {
                     let ds_u = mmio.is_double_speed_mode() as u32;
                     self.display_enable_inactive_until =
                         mmio.master_cc().wrapping_add((80u64 << ds_u) + 1);
                 }
-                // Carried-edge LYC=0 IRQ on enable (memory.cpp case 0x40): when
+                // Carried-edge LYC=0 IRQ on enable (the LCDC-enable write): when
                 // the LYC IRQ source is enabled, LYC==0 and the pre-enable STAT
                 // did NOT already hold the LYC=LY coincidence flag, enabling the
                 // LCD flags a STAT IRQ immediately. The pre-enable lycflag is
@@ -6385,11 +6318,11 @@ impl Ppu {
                 self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
                 self.check_and_trigger_stat_interrupt(mmio);
                 // Initialize the event-scheduled IRQ clock at enable: LY=0,
-                // line_cycle=0. Mirror Gambatte's lcdcChange enable branch.
+                // line_cycle=0. Mirror the hardware LCDC-change enable branch.
                 self.line_cycle = 0;
                 self.internal_ly_val = 0;
                 // Anchor the PPU dot-clock onto the master cc at LCD enable
-                // (Gambatte seeds `p_.now()` here). `abs_cc` keeps its accumulated
+                // (hardware seeds the PPU-clock base here). `abs_cc` keeps its accumulated
                 // value across an off/on cycle. The derive at the end of THIS step
                 // must reproduce the old post-increment value (pre + 1<<ds), so the
                 // anchor subtracts that one dot the old accumulator added below.
@@ -6416,9 +6349,9 @@ impl Ppu {
                 self.reschedule_all_stat_events(mmio);
                 self.sched_m0irq = stat_irq::DISABLED_TIME;
                 self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
-                // SpriteMapper::OamReader::enableDisplay: zero the snapshot and
+                // OAM snapshot at LCD enable: zero the snapshot and
                 // hold it inactive (no sprites) until `cc + (80<<ds) + 1`. abs_cc
-                // is re-derived below; enableDisplay is anchored to that dot.
+                // is re-derived below; display-enable is anchored to that dot.
                 {
                     let ds = mmio.is_double_speed_mode();
                     let cc = mmio.master_cc().wrapping_sub(self.p_now);
@@ -6443,7 +6376,7 @@ impl Ppu {
             self.previous_stat_interrupt_line = false;
             // The LCD just turned off; drop any pending LY write.
             let _ = mmio.take_ly_write_pending();
-            // Re-arm the sprite snapshot for the next enableDisplay.
+            // Re-arm the sprite snapshot for the next display-enable.
             self.oam_reader_seeded = false;
             let _ = mmio.take_oam_write_pending();
             return;
@@ -6455,7 +6388,7 @@ impl Ppu {
         self.dispatch_stat_events(mmio);
         // Fold the PPU dot-clock onto the master cc. `p_now` is the LCD-enable
         // anchor such that the PPU machine-cycle clock is `master_cc - p_now`
-        // (Gambatte `p_.now()`); the master cc advances `1<<ds` per render dot
+        // (the hardware PPU-clock base); the master cc advances `1<<ds` per render dot
         // within a speed epoch, so the derived clock advances exactly as the old
         // accumulator did. `p_now` is seeded at enable and re-based on the speed
         // change / STOP bridge (where the master cc and render-dot counts diverge).
@@ -6481,9 +6414,9 @@ impl Ppu {
             self.l154_vblank_glitch_window = false;
         }
 
-        // Drive the lazy OAM sprite snapshot (Gambatte SpriteMapper::OamReader):
+        // Drive the lazy OAM sprite snapshot:
         // fire `change(cc)` on OAM-DMA window edges (source toggle) and on CPU
-        // OAM writes, mirroring Gambatte's `startOamDma`/`endOamDma`/`oamChange`.
+        // OAM writes, mirroring the hardware OAM-DMA start / OAM-DMA end / OAM change events.
         self.process_oam_reader_events(mmio);
 
         // CPU writes to FF44 (LY) reset the line counter to 0 and re-arm the
@@ -6503,8 +6436,8 @@ impl Ppu {
         }
 
         // LYC=LY compare uses an "effective LY" that anticipates the
-        // next-line value in the last 2 dots of any line (matches Gambatte's
-        // `getLycCmpLy` `timeToNextLy <= 2` threshold). Line 153's earlier
+        // next-line value in the last 2 dots of any line (matches the hardware
+        // `the LYC-compare-LY calc` `time-to-next-LY <= 2` threshold). Line 153's earlier
         // ly=0 transient is handled separately in Phase D by writing FF44
         // directly, so this anticipation only fires on lines 0..=152.
         let effective_ly = self.effective_ly_for_lyc_compare(mmio);
@@ -6518,7 +6451,7 @@ impl Ppu {
         // dispatch_stat_events; `previous_stat_interrupt_line` is a write-only
         // legacy latch, so the per-dot recompute here was pure dead work.)
 
-        // Gambatte-style window-Y (weMaster) latch. The trigger is sticky for
+        // hardware-style window-Y (window-enable master) latch. The trigger is sticky for
         // the frame and is evaluated at three points: ly0 mode-2 start
         // (wy==0), and near each line's end at the prior-to-LY-inc (ly==wy)
         // and after-LY-inc (ly+1==wy) cycles. This catches late WY writes that
@@ -6528,13 +6461,13 @@ impl Ppu {
         match self.state {
             State::OAMSearch => {
                 // Window line-counter bookkeeping at the start of Mode 2. The WY
-                // trigger latch (`window_y_triggered`/weMaster) is handled by the
-                // Gambatte-style three-point check in `update_window_y_latch`,
+                // trigger latch (`window_y_triggered`/window-enable master) is handled by the
+                // hardware-style three-point check in `update_window_y_latch`,
                 // which runs near the previous line's end.
                 if self.ticks == 0 {
-                    // winYPos is now incremented at window draw-start (see the
-                    // PixelTransfer start_window site), matching Gambatte's
-                    // M3Start::f0 semantics. The old per-line `window_line_counter`
+                    // window Y position is now incremented at window draw-start (see the
+                    // PixelTransfer start_window site), matching the hardware
+                    // mode-3-start window-checkpoint semantics. The old per-line `window_line_counter`
                     // increment here (every line with ly > wy) is removed; the
                     // counter is no longer consumed by the fetcher.
                     // Reset window line flag for new scanline
@@ -6554,8 +6487,8 @@ impl Ppu {
 
                 // First line after enable: VRAM/OAM lock (PPU reports mode 3)
                 // at the normal mode-2->3 boundary, even though the real pixel
-                // fetch starts later at FIRST_FRAME_ARM_DOT. Matches Gambatte's
-                // vramWritable/oamReadable (lineCycles-based, not M3Start).
+                // fetch starts later at FIRST_FRAME_ARM_DOT. Matches the hardware
+                // VRAM/OAM writability (line cycles-based, not mode-3 start).
                 if self.first_line_after_enable {
                     let is_cgb = mmio.is_cgb_features_enabled();
                     let lock_dot = if is_cgb { cgb_first_frame_lock_dot(mmio.is_double_speed_mode()) } else { dmg_first_frame_lock_dot() };
@@ -6565,12 +6498,12 @@ impl Ppu {
                     }
                     // Install the closed-form master-cc anchors for the first line
                     // BEFORE M3 arms, so the CPU-access gates (OAM/VRAM/cgbp) resolve
-                    // the mode-3 END boundary (`cc + 2 >= m0Time`) during this pre-M3
-                    // OAMSearch phase too. In Gambatte the PPU machine is fully seeded
-                    // at enable (`cycles = -(m3StartLineCycle + 2)`), so
-                    // `m0TimeOfCurrentLine` is predictable from the start of the line;
+                    // the mode-3 END boundary (`cc + 2 >= mode-0 time`) during this pre-M3
+                    // OAMSearch phase too. On hardware the PPU machine is fully seeded
+                    // at enable (`cycles = -(mode-3-start line cycle + 2)`), so
+                    // `the current line's mode-0 (HBlank) time` is predictable from the start of the line;
                     // here it is enable-anchored (`p_now`) and uses the first-line
-                    // m3-start (+2). OAM is blocked from line start to m0Time (mode 2
+                    // m3-start (+2). OAM is blocked from line start to mode-0 time (mode 2
                     // and mode 3 alike) — the inactive-period guard above keeps it
                     // accessible until `lu_`. Recomputed each tick so a mid-line SCX/
                     // window change tracks (the M3-arm site re-installs the final
@@ -6595,7 +6528,7 @@ impl Ppu {
                     // snapshot. With no pending change `objsize_large_at_cc` falls
                     // back to the lagged snapshot semantics (the steady state is
                     // unchanged). Sampled BEFORE the OAM read so this entry uses
-                    // the size effective at its read cc (Gambatte lsbuf per-entry).
+                    // the size effective at its read cc (the hardware per-entry size latch).
                     if self.objsize_apply_cc != wy2_disabled() {
                         self.scan_obj_size_large = self.objsize_large_at_cc(self.abs_cc);
                     }
@@ -6610,7 +6543,7 @@ impl Ppu {
                     self.current_oam_sprite_index += 1;
                     // Latch the OBJ-size for the NEXT scan slot from the live LCDC
                     // (DMG: write applies to entries scanned after it commits, not
-                    // the one just read; Gambatte lsbuf per-slot latch).
+                    // the one just read; the hardware per-slot size latch).
                     self.scan_obj_size_large = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
                 }
 
@@ -6628,14 +6561,14 @@ impl Ppu {
                 };
 
                 if self.ticks == pixel_transfer_arm_dot {
-                    // Rebuild the sprite list from the lazy OAM snapshot (Gambatte
-                    // SpriteMapper::doEvent -> update + mapSprites). This replaces
+                    // Rebuild the sprite list from the lazy OAM snapshot (the hardware
+                    // OAM-scan-end snapshot flush + sprite mapping). This replaces
                     // the incremental per-dot scan's `sprites_on_line` so visibility
                     // honors the DMA-disabled-source window via the posbuf cap.
-                    // Rebuild the sprite list from the lazy OAM snapshot (Gambatte
-                    // SpriteMapper::doEvent -> oamReader_.update + mapSprites). On
+                    // Rebuild the sprite list from the lazy OAM snapshot (the hardware
+                    // OAM-scan-end snapshot flush + sprite mapping). On
                     // the first line after enable there is no mode-2 scan; the
-                    // snapshot is held inactive (enableDisplay) so skip the rebuild.
+                    // snapshot is held inactive (display-enable) so skip the rebuild.
                     if !self.first_line_after_enable {
                         self.build_sprites_from_snapshot(mmio);
                     }
@@ -6688,22 +6621,22 @@ impl Ppu {
                     if let Some(p) = self.dirty_probe.as_mut() {
                         p.mark_line_rendered(self.internal_ly_val);
                     }
-                    // Gambatte M3Start::f0: if win_draw_start was armed from the
+                    // The hardware mode-3-start window checkpoint: if win_draw_start was armed from the
                     // previous line (DMG wx==166 case) and the window is enabled,
-                    // the window draws from xpos 0 this line (++winYPos), even
-                    // though WX is unchanged. Otherwise winDrawState clears to 0.
+                    // the window draws from xpos 0 this line (the window-Y increment), even
+                    // though WX is unchanged. Otherwise the window-draw state clears to 0.
                     {
                         let win_en = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
-                        // Gambatte M3Start::f0 (270-275): if win_draw_start is set and
-                        // the window is enabled, winDrawState becomes win_draw_started
-                        // and winYPos increments; otherwise winDrawState clears.
+                        // The hardware mode-3-start window checkpoint: if win_draw_start is set and
+                        // the window is enabled, the window-draw state becomes win_draw_started
+                        // and window Y position increments; otherwise the window-draw state clears.
                         if self.win_draw_start && win_en && !self.first_line_after_enable {
                             self.win_y_pos = self.win_y_pos.wrapping_add(1);
                             self.win_draw_started = true;
                             self.win_draw_started_at_x0 = true;
                             // The window is `started` from line begin: fetch
                             // window tiles from xpos 0 (after the SCX discard
-                            // prefix), not BG. Gambatte M3Start::f0 seeds
+                            // prefix), not BG. The hardware mode-3-start checkpoint seeds
                             // wscx = tile_len + scx%8, so the first window tile
                             // column is wscx/8 == 1 (for scx<8).
                             let scx = (mmio.read(SCX) & 0x07) as u32;
@@ -6714,8 +6647,8 @@ impl Ppu {
                             self.win_start_dot = Some(self.ticks);
                         } else {
                             self.win_draw_started_at_x0 = false;
-                            // Gambatte M3Start::f0 line 275: when win_draw_start was
-                            // NOT armed, winDrawState clears to 0 (win_draw_started
+                            // The hardware mode-3-start checkpoint: when win_draw_start was
+                            // NOT armed, the window-draw state clears to 0 (win_draw_started
                             // bit dropped). Normal (non-wxA6) windows re-set this on
                             // the same line via the live x+7==wx start below, so this
                             // only persistently clears the bit on lines where the
@@ -6727,17 +6660,17 @@ impl Ppu {
                         }
                         self.win_draw_start = false;
                     }
-                    // DMG wx==166 (lcd_hres+6): Gambatte's plotPixel runs at EVERY
+                    // DMG wx==166 (lcd_hres+6): the hardware pixel-output runs at EVERY
                     // xpos as the fetcher walks the line; the wx==xpos==166 branch
-                    // (883-895) therefore fires at the END of mode 3 (xpos reaches
+                    // therefore fires at the END of mode 3 (xpos reaches
                     // 166), AFTER the line's mid-mode-3 WE-off has had its effect on
-                    // winDrawState — NOT at M3 start. Relocating this branch to the
+                    // the window-draw state — NOT at M3 start. Relocating this branch to the
                     // mode-3 -> HBlank transition (where xpos==166) is what lets the
-                    // steady-state wxA6 sequence converge: f0(++winYPos, state->2) ->
+                    // steady-state wxA6 sequence converge: f0(the window-Y increment, state->2) ->
                     // WE-off(state==2 -> clears started, state->0, stops window) ->
                     // THIS branch B at xpos==166(state |= win_draw_start, state->1) ->
-                    // HBlank WE-on(state==win_draw_start -> ++winYPos, state->3). That
-                    // is the TWO winYPos increments per line (8px/4rows) the window
+                    // HBlank WE-on(state==win_draw_start -> the window-Y increment, state->3). That
+                    // is the TWO window Y position increments per line (8px/4rows) the window
                     // diagonal needs, and the WE-off now actually reverts the right
                     // columns to BG (it no longer sees win_draw_start pre-armed). See
                     // the relocated block at the mode-3 -> HBlank boundary below.
@@ -6749,13 +6682,13 @@ impl Ppu {
                     self.mode0_reported_this_line = false;
                     self.line_rendered_this_line = false;
                     self.wxa6_lineend_applied = false;
-                    // SCX fine-scroll discard target (Gambatte M3Start::f1): the
+                    // SCX fine-scroll discard target (the mode-3-start fine-scroll phase): the
                     // break xpos is resolved over the first M3 dots by re-reading
                     // SCX live (see the early-window loop in PixelTransfer). Seed
                     // it unlatched (-1) and record the arm dot for xpos tracking.
                     self.m3_pixels_discarded = 0;
                     self.m3_arm_dot = self.ticks;
-                    // Per-pixel BG-enable history (RB_LINERENDER): anchor the
+                    // Per-pixel BG-enable history: anchor the
                     // plot-cc origin at mode-3 entry and seed the line's history
                     // with the BG-enable bit in effect now. Mid-mode-3 LCDC.0
                     // writes append (commit_cc, bgen) entries (handle_lcdc_write).
@@ -6766,8 +6699,8 @@ impl Ppu {
                         0,
                         (self.lcdc & (LCDCFlags::BGDisplay as u8)) != 0,
                     ));
-                    // Per-line tile-index-is-tile-data glitch targets (SameBoy
-                    // tile_sel_glitch); mid-mode-3 falling LCDC.4 writes append the
+                    // Per-line tile-index-is-tile-data glitch targets (the hardware
+                    // tile-select glitch); mid-mode-3 falling LCDC.4 writes append the
                     // single (cc, k) read each arms (see handle_lcdc_write).
                     self.tidxtd_glitch.clear();
                     // DMG window bus-glitch state is per-line (see wg_apply).
@@ -6789,7 +6722,7 @@ impl Ppu {
                     // end of every dot), NOT the live register. A BGP/OBP write on the
                     // dot the PPU enters mode 3 has already updated mmio but must not
                     // yet color column 0 — the column-0 pixel sees the prior dot's
-                    // value (Gambatte dmgpalette_during_m3: the write at mode-3 entry
+                    // value (the hardware DMG-palette-during-mode-3 behavior: the write at mode-3 entry
                     // leaves column 0 white). Mid-mode-3 writes after entry append
                     // (boundary_col, value) entries via on_{bgp,obp0,obp1}_write, which
                     // land at column >= 1 so column 0 keeps this seed.
@@ -6854,15 +6787,15 @@ impl Ppu {
                     self.m3_arm_scx = mmio.read(SCX) & 0x07 ;
                     self.m3_arm_scx_full = mmio.read(SCX) as i16;
                     // First line after enable: resolve the SCX value the fine-scroll
-                    // discard actually samples. Gambatte's M3Start::f1 reads SCX once
+                    // discard actually samples. The mode-3-start fine-scroll phase reads SCX once
                     // at the M3-start dot; a mid-discard SCX write (visible at
                     // `write_cc + 2*cgb`) counts only if it lands at/before that
                     // sample dot, which sits `prev_scx % 8` dots past M3-arm (the
                     // discard prefix of the value in effect at M3-start). Evaluate the
                     // pending f1 latch (from on_scx_write, still intact here) at
-                    // `arm_cc + prev_scx%8`. Matches Gambatte byte-exact on the
+                    // `arm_cc + prev_scx%8`. Matches hardware byte-exact on the
                     // ly0_late_scx7 SCX-write sweep (initial-SCX shifts the sample
-                    // dot, flipping whether the SCX=7 write enters the m0Time).
+                    // dot, flipping whether the SCX=7 write enters the mode-0 time).
                     if was_first_line {
                         let ds = mmio.is_double_speed_mode() as u32;
                         let prev_scx = (self.scx_prev_f1 & 0x07) as u64;
@@ -6889,30 +6822,30 @@ impl Ppu {
                         // First line after LCD enable: install the SAME closed-form
                         // master-cc anchors the normal-line path uses, computed for
                         // this line, so the CPU-access gates (cgbp/oam/vram) and the
-                        // getStat mode reads resolve at the access cc instead of
+                        // STAT-resolve mode reads resolve at the access cc instead of
                         // falling back to the hand-tuned FIRST_FRAME per-dot pipeline.
                         //
-                        // Gambatte PPU::setLcdc seeds the PPU at enable with `now =
-                        // enable_cc`, `lyCounter.reset(0, enable_cc)`, no sprites
-                        // (enableDisplay clears the buffer), and `cycles =
-                        // -(m3StartLineCycle + 2)` — so the first M3 begins 2 dots
+                        // On hardware the LCDC-write handling seeds the PPU at enable with `now =
+                        // enable_cc`, resets the LY counter to (0, enable_cc), no sprites
+                        // (display-enable clears the buffer), and `cycles =
+                        // -(mode-3-start line cycle + 2)` — so the first M3 begins 2 dots
                         // later than a normal line. `m0_time_exact(.., first_line)`
                         // adds that +2 to the mode-0 line-cycle; `cgbp_begin_exact`
-                        // (the lineCycles+ds>=80 begin boundary) is enable-anchored
-                        // already (it shares the same lyTime as a normal line).
+                        // (the line cycles+ds>=80 begin boundary) is enable-anchored
+                        // already (it shares the same the LY time as a normal line).
                         // The inactive-period gate (`display_enable_inactive_until`,
-                        // Gambatte OamReader::lu_) was seeded at enable.
+                        // the hardware OAM-reader lookup-until was seeded at enable.
                         let m3_len = self.compute_m3_length(mmio, is_cgb);
                         let m0t = self.m0_time_exact(mmio, m3_len, is_cgb, true);
                         self.m0_time_master = Some(m0t);
-                        // The override applied only to this first-line m0Time anchor;
+                        // The override applied only to this first-line mode-0 time anchor;
                         // clear it so the per-tick / next-frame m3_len reads live SCX.
                         self.first_line_scx_override = None;
                         self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
                         // The within-line reported mode-0 dot / m0 IRQ arm keep the
                         // calibrated FIRST_FRAME timing (the first-line pixel
                         // pipeline arms later than a normal line); only the
-                        // closed-form access/getStat anchors above are installed.
+                        // closed-form access/STAT-resolve anchors above are installed.
                         self.scheduled_mode0_dot = None;
                     } else {
                         // Closed-form mode-0 schedule, including window-start lines
@@ -6922,23 +6855,23 @@ impl Ppu {
                         // emergent x==160 transition.
                         let m3_len = self.compute_m3_length(mmio, is_cgb);
                         let ds = mmio.is_double_speed_mode() as u32;
-                        // Byte-exact m0Time, lyTime-anchored (ENGINE_LAZY_PPU.md):
-                        //   m0Time = (p_now + ly_counter().time + 1)
-                        //            − ((456 − (m3_len + BASE)) << ds)
+                        // Byte-exact mode-0 time, the LY time-anchored (ENGINE_LAZY_PPU.md):
+                        // mode-0 time = (p_now + ly_counter().time + 1)
+                        // − ((456 − (m3_len + BASE)) << ds)
                         // BASE = 84 (CGB SS+DS), 83 (DMG — the `1−cgb` term already
                         // lives in m3_len). `p_now + ly_counter().time` is the
-                        // next-LY master cc; +1 corrects rustyboi's LyCounter.time
-                        // running 1 master-cc below Gambatte's lyTime.
-                        // The runtime sprite0-at-scx fine-scroll stall (Gambatte
-                        // M3Start::f1) extends the real mode-3 -> mode-0 transition
-                        // past the predictor's m0Time; fold it into the renderer /
+                        // next-LY master cc; +1 corrects rustyboi's LY counter.time
+                        // running 1 master-cc below the hardware LY time.
+                        // The runtime sprite0-at-scx fine-scroll stall (the hardware
+                        // mode-3-start fine-scroll) extends the real mode-3 -> mode-0 transition
+                        // past the predictor's mode-0 time; fold it into the renderer /
                         // STAT-read boundary here (m0_irq_event_cc_master subtracts
                         // it back for the predictor-timed m0 STAT IRQ).
                         let m0t = self.m0_time_exact(mmio, m3_len, is_cgb, false)
                             + ((self.sprite0_scx_extra(mmio, is_cgb) as u64) << ds);
                         self.m0_time_master = Some(m0t);
                         // The within-line mode-0 dot is DERIVED from the same exact
-                        // m0Time (master cc) so the eager-grid consumers (reported
+                        // mode-0 time (master cc) so the eager-grid consumers (reported
                         // FF41 mode poke, m0 IRQ arm, cgbp tick fallback) ride the
                         // identical boundary: dot = arm_ticks + (m0t − arm_cc) >> ds.
                         let arm_cc = mmio.master_cc() as i64;
@@ -6973,13 +6906,13 @@ impl Ppu {
                             } else {
                                 None
                             };
-                        // cgbp begin boundary (Gambatte cgbpAccessible: blocked once
-                        // `lineCycles(cc) + ds >= 80`), byte-exact from the lyTime
+                        // cgbp begin boundary (the hardware CGB-palette-accessible window: blocked once
+                        // `line cycles(cc) + ds >= 80`), byte-exact from the LY time
                         // anchor — see `cgbp_begin_exact`.
                         self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
                     }
                     // Arm the mode-0 (HBlank) STAT IRQ event at the predicted
-                    // mode-0 start, in absolute clock terms. Gambatte schedules
+                    // mode-0 start, in absolute clock terms. Hardware schedules
                     // memevent_m0irq only when m0 is enabled, but keeps the time
                     // current for FF41/FF45 immediate-trigger checks; we always
                     // arm it (dispatch gates on the enable in mstat_irq).
@@ -7010,13 +6943,13 @@ impl Ppu {
                     // WX-write-ENABLE: the window was out of range at M3 arm
                     // (`!m3_scheduled_win`, so m0_time_master has NO StartWindowDraw
                     // penalty) and a mid-mode-3 WX write brings it into range so the
-                    // window will now start this line. Gambatte's predictNextM0Time
+                    // window will now start this line. The hardware next-mode-0 prediction
                     // re-runs with the window included, moving the mode-3 end
                     // WIN_M3_PENALTY dots later. ADD that penalty (symmetric to the
                     // LCDC window-enable path) iff the write lands before the window
                     // tile commits — otherwise the fetcher already passed the window
                     // start and no penalty accrues. Scoped CGB / no sprites; the live
-                    // pipeline is untouched, only the read-at-cc m0Time is shifted.
+                    // pipeline is untouched, only the read-at-cc mode-0 time is shifted.
                     let now_will_start =
                         self.window_will_start(mmio, mmio.is_cgb_features_enabled());
                     // Only the WX-into-range case: WX itself changed from out of range
@@ -7061,30 +6994,30 @@ impl Ppu {
                             let pen = (WIN_M3_PENALTY as i64) << (mmio.is_double_speed_mode() as i64);
                             self.m0_time_master = Some((m0t as i64 + pen).max(0) as u64);
                             // Keep the closed-form schedule (mode-3 end shifts with
-                            // the penalty); only the master m0Time moved.
+                            // the penalty); only the master mode-0 time moved.
                         }
                         // else: window starts but the write is past the commit dot, so
-                        // no penalty is added — the no-window m0Time captured at arm is
+                        // no penalty is added — the no-window mode-0 time captured at arm is
                         // the correct (mode-0-earlier) boundary; keep the schedule.
                     }
                     // WY-trigger ENABLE (symmetric to the WX-into-range branch above):
                     // WX is UNCHANGED and already in range, but the window newly starts
                     // this line because a mid-mode-3 WY write made `window_y_active`
-                    // true (the weMaster / `wy2 == ly` gate flipped). Gambatte's
-                    // predictNextM0Time then runs with the window included, moving the
+                    // true (the window-enable master / `wy2 == ly` gate flipped). The hardware
+                    // next-mode-0 prediction then runs with the window included, moving the
                     // mode-3 end WIN_M3_PENALTY dots later — BUT only if the WY trigger
                     // lands before the fetcher reaches the window-start xpos. For an
                     // x==0 window (the late_wy / late_scx_late_wy cluster, WX in 0..=7)
                     // that commit dot is `m3_arm_dot + scx&7 + COMMIT`: the f0/f1
                     // dispatch reaches xpos 0 (the window tile) `scx&7` dots into M3.
-                    // (Measured byte-exact via cctracer: m0Time = no-window + 6 for the
+                    // (Measured byte-exact via cctracer: mode-0 time = no-window + 6 for the
                     // `_1` reps that trigger 1 dot in, == no-window for the `_2`/`_3`
                     // reps that trigger 5+ dots in; the boundary is m3_arm_dot+scx+3 at
                     // both scx=0 and scx=4.) If the trigger lands at/after the commit
                     // dot, the fetcher already passed xpos 0 so no penalty accrues and
-                    // the no-window m0Time (captured at arm) is the correct boundary.
+                    // the no-window mode-0 time (captured at arm) is the correct boundary.
                     // Scoped CGB / single speed / no sprites / x==0 window; the live
-                    // pipeline is untouched, only the read-at-cc m0Time is shifted.
+                    // pipeline is untouched, only the read-at-cc mode-0 time is shifted.
                     if !keep_schedule
                         && !self.m3_scheduled_win
                         && now_will_start
@@ -7108,7 +7041,7 @@ impl Ppu {
                         // runs WIN_M3_PENALTY longer); at/after it the fetcher already
                         // passed xpos 0, so no penalty accrues. (cctracer: the `_1`
                         // reps of late_wy_*_wx00 / late_wy_*_wx07 / late_scx_late_wy
-                        // keep the +6 m0Time, the `_2`/`_3` reps drop it; the WX-shift
+                        // keep the +6 mode-0 time, the `_2`/`_3` reps drop it; the WX-shift
                         // separates the wx00 `_1` boundary from the wx07 `_1`.)
                         let commit_dot = self.m3_arm_dot as i64
                             + (self.m3_arm_scx & 7) as i64
@@ -7118,17 +7051,17 @@ impl Ppu {
                             self.m0_time_master =
                                 Some((m0t as i64 + WIN_M3_PENALTY as i64).max(0) as u64);
                         }
-                        // else: no penalty — keep the no-window m0Time captured at arm.
+                        // else: no penalty — keep the no-window mode-0 time captured at arm.
                     }
                     // DMG WY-trigger enable (mirror of the CGB branch above). A
                     // mid-mode-3 WY==LY trigger with an x==0 window (WX 0..=7,
-                    // unchanged) brings the window into play this line. Gambatte keeps
-                    // a finite (window-inclusive or no-window) m0Time, so the FF41
+                    // unchanged) brings the window into play this line. Hardware keeps
+                    // a finite (window-inclusive or no-window) mode-0 time, so the FF41
                     // line-tail read resolves a concrete mode 0/3 boundary; nulling
                     // m0_time_master here would defer to the renderer register (always
                     // mode 3), passing the out3 `_1`/`_2` reps but FAILING the out0
                     // `_3` rep (late_wy_FFto2_ly2_wx00_3 / late_scx_late_wy_FFto4_ly4
-                    // _wx00_3). Keep the no-window m0Time and add WIN_M3_PENALTY iff the
+                    // _wx00_3). Keep the no-window mode-0 time and add WIN_M3_PENALTY iff the
                     // WY trigger lands before the window-tile commit dot. The DMG commit
                     // dot is the CGB form (`m3_arm_dot + scx&7 + WX + 3`) plus the
                     // DMG pixel-transfer warmup less one (`DMG_WARMUP - 1` = 3):
@@ -7158,11 +7091,11 @@ impl Ppu {
                             self.m0_time_master =
                                 Some((m0t as i64 + WIN_M3_PENALTY as i64).max(0) as u64);
                         }
-                        // else: no penalty — keep the no-window m0Time captured at arm.
+                        // else: no penalty — keep the no-window mode-0 time captured at arm.
                     }
                     // WX-DISABLE of a WX<7 (visible x==0) window that WAS scheduled at
                     // M3 arm: the immediate-start window's StartWindowDraw penalty
-                    // locks the moment the fetcher fetches the window tile (Gambatte's
+                    // locks the moment the fetcher fetches the window tile (the hardware
                     // `xpos == wx` compare uses the WX register, so a smaller WX commits
                     // earlier). A WX-write moving WX out of range at/after that commit
                     // dot keeps the window-inclusive m0_time_master (mode 3 persists ->
@@ -7203,7 +7136,7 @@ impl Ppu {
                 // late_wx: a mid-mode-3 WX write AFTER the window has started,
                 // moving WX out of range, cancels the remaining window draw and
                 // refunds the unaccrued StartWindowDraw penalty from the
-                // read-at-cc m0Time. Graduated like late_disable (one accrued dot
+                // read-at-cc mode-0 time. Graduated like late_disable (one accrued dot
                 // per drawn window dot, capped at WIN_M3_PENALTY); a nonzero SCX
                 // fine-scroll prefix advances the accrual one dot. WX<7 windows
                 // (immediate x==0 start) lock at win_start (no refund once
@@ -7212,9 +7145,9 @@ impl Ppu {
                 // DMG late-WX window-disable refund. DMG is BINARY (not graduated like
                 // CGB): a WX-out-of-range write that lands BEFORE the window-tile
                 // commit (`ws + scx&7 + 2` dots into the x==0 window draw) fully
-                // refunds WIN_M3_PENALTY from the read-at-cc m0Time so the FF41 read
+                // refunds WIN_M3_PENALTY from the read-at-cc mode-0 time so the FF41 read
                 // resolves the no-window mode-0 boundary; at/after the commit the
-                // window-inclusive m0Time captured at M3 arm is kept (mode 3). The
+                // window-inclusive mode-0 time captured at M3 arm is kept (mode 3). The
                 // late_wx_scx{2,3,5}_{1,2} DMG reps bracket the per-SCX commit: at the
                 // 4-dots-in write, scx0/scx2 already committed (out3, keep) while
                 // scx3/scx5 have not (out0, refund); the 8-dots-in write is always
@@ -7261,7 +7194,7 @@ impl Ppu {
                             let scx_bias = if (self.m3_arm_scx & 7) != 0 { 1 } else { 0 };
                             // SCX > 3 fine-scroll: the x==0 window's StartWindowDraw
                             // penalty accrual begins later than win_start_dot by two
-                            // dots per extra discarded SCX dot (the M3Start dispatch
+                            // dots per extra discarded SCX dot (the mode-3-start dispatch
                             // runs the window-tile fetch that much later). Without
                             // this the scx5 boundary is 4 dots too early and the
                             // late_wx_scx5_1 refund is fully accrued (drops to 0).
@@ -7280,10 +7213,10 @@ impl Ppu {
                 // (`ws + scx&7 + 1` dots into the window draw) fully refunds the
                 // WIN_M3_PENALTY (<<1 cc at DS), so the FF41 read resolves the
                 // no-window mode-0 boundary; at/after the commit the penalty is locked
-                // and the window-inclusive m0Time (captured at arm) is kept. cctracer
+                // and the window-inclusive mode-0 time (captured at arm) is kept. cctracer
                 // ground truth: late_wx_scx5_ds_1 (write 2 dots into the x==0 window,
                 // scx5) takes the full 12-cc refund -> mode 0 (out0); the `_ds_2` reps
-                // (write 2 dots later, or scx0 1 dot in) keep the full m0Time -> mode 3
+                // (write 2 dots later, or scx0 1 dot in) keep the full mode-0 time -> mode 3
                 // (out3). CGB / no sprites; live pipeline untouched, only read-at-cc.
                 else if self.m0_time_master.is_some()
                     && self.window_started_this_line
@@ -7307,19 +7240,19 @@ impl Ppu {
                         self.win_wx_penalty_resolved = true;
                     }
                 }
-                // ATOMIC mode-3 END: mode 3 ends at the exact closed-form m0Time
+                // ATOMIC mode-3 END: mode 3 ends at the exact closed-form mode-0 time
                 // (master cc), and EVERYTHING (eager FF41 mode register, mode-0
                 // STAT check, VRAM/OAM/cgbp unblock, m0 IRQ) is driven off this one
                 // boundary. The pixel pipeline is now image-only: at the transition
                 // we flush any remaining FIFO pixels to x==160 so the visible line
                 // is complete, and the pipeline's own x==160 push no longer drives
-                // timing. When no closed-form m0Time exists (first line after
+                // timing. When no closed-form mode-0 time exists (first line after
                 // enable / mid-M3 invalidation), fall back to the live x==160 push.
                 if let Some(m0t) = self.m0_time_master
                     && mmio.master_cc() >= m0t {
                         self.scheduled_mode0_dot = None;
                         // Timing report (FF41 mode-0, STAT/m0 IRQ) fires at the exact
-                        // m0Time regardless of pixel progress.
+                        // mode-0 time regardless of pixel progress.
                         if !self.mode0_reported_this_line {
                             self.mode0_reported_this_line = true;
                             Self::set_lcd_status_mode(mmio, 0);
@@ -7329,14 +7262,14 @@ impl Ppu {
                         // pipeline may lag the closed-form boundary by a few dots.
                         while self.x < 160 && self.draw_fifo_pixel(mmio) {}
                         // On window-start lines the window fetch restart can leave
-                        // the FIFO momentarily empty at m0Time (the last 1-2 window
+                        // the FIFO momentarily empty at mode-0 time (the last 1-2 window
                         // pixels are still being fetched). The timing has already
                         // been reported above; keep the renderer alive (image-only)
                         // until x==160 so the final window pixel is drawn, then enter
                         // HBlank via the x==160 fallback below. For all other lines
                         // the flush completed the line, so end mode 3 now.
                         if !(self.window_started_this_line && self.x < 160) {
-                            // DMG wx==166 plotPixel-at-xpos166 (mode-3 end). See
+                            // DMG wx==166 pixel output-at-xpos166 (mode-3 end). See
                             // apply_dmg_wxa6_lineend_windraw.
                             self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
                             self.cgb_train_reresolve(mmio);
@@ -7347,11 +7280,11 @@ impl Ppu {
                         }
                     }
 
-                // Gambatte M3Start::f1 fine-scroll break resolution. The f1 loop
+                // The hardware mode-3-start fine-scroll break resolution. The f1 loop
                 // runs xpos = 0,1,2,... one per M3 dot, re-reading p.scx each
                 // step, and breaks (fixing the discard count) at the first xpos
                 // with xpos%8 == scx%8. xpos == ticks - arm dot, so reading SCX
-                // here samples it at the same early M3 dots Gambatte does -
+                // here samples it at the same early M3 dots hardware does -
                 // independent of the FIFO/warmup latency that delays the pops.
                 // Once resolved the target is frozen, so a later SCX write past
                 // the break has no effect (matching the single-write tests).
@@ -7359,14 +7292,14 @@ impl Ppu {
                     const F1_OFFSET: i64 = -1;
                     let xpos = ((self.ticks as i64 - self.m3_arm_dot as i64 + F1_OFFSET).max(0)) as u32;
                     // Exact-cc SCX read: sample SCX as-of this f1 dot's abs_cc
-                    // (honoring the CGB +2cc scxChange delay) so a mid-discard
+                    // (honoring the CGB +2cc SCX change delay) so a mid-discard
                     // write lands on the correct iteration, instead of the
                     // immediate register read whose visibility depends on the
                     // per-dot PPU-step-vs-CPU-write ordering within a dot.
                     let scx_break_full = self.scx_f1_pending_at_cc(self.abs_cc);
                     let scx_live = (scx_break_full & 0x07) as u32;
                     if xpos % 8 == scx_live || xpos >= 80 {
-                        // Gambatte M3Start::f1 re-reads p.scx live at its case-0 tile
+                        // The hardware mode-3-start fine-scroll phase re-reads SCX live at its case-0 tile
                         // fetch, so a mid-discard SCX write that crosses a tile-column
                         // boundary makes the FIRST displayed tile come from the new
                         // column (scx_break/8), not the column queued into the FIFO at
@@ -7375,11 +7308,11 @@ impl Ppu {
                         // set the discard to scx_break%8 so the next BG fetch (which
                         // derives its column from scx_delayed at x==0) lands on the
                         // correct column, then trims the fine-scroll prefix. The mode-3
-                        // length / timing is owned by getStat (m0_time_master), so this
+                        // length / timing is owned by the STAT resolve (m0_time_master), so this
                         // is render-only.
-                        // The displayed first tile's COLUMN is read at Gambatte's
+                        // The displayed first tile's COLUMN is read at the hardware's
                         // last case-0 (the greatest multiple-of-8 xpos <= break),
-                        // NOT at the break dot: M3Start::f1 only reloads `reg1`
+                        // NOT at the break dot: the mode-3-start fine-scroll phase only reloads `reg1`
                         // (tile number, from scx/8) when `xpos % tile_len == 0`.
                         // For a break inside the first tile (xpos < 8) that is
                         // xpos==0 -> the M3-arm column, so no re-fetch is needed
@@ -7397,8 +7330,8 @@ impl Ppu {
                         // a mid-f1 SCX write whose break column differs from the
                         // armed column rewrites the first queued BG tile. The
                         // sub-cc clock carries the DS sub-dot phase via the
-                        // `delta << ds` mode0/m0Time nudge below, so the same
-                        // re-fetch applies at double speed (the DMG M3Start
+                        // `delta << ds` mode0/mode-0 time nudge below, so the same
+                        // re-fetch applies at double speed (the DMG mode-3-start
                         // fine-scroll uses a different +1 tile-column phase the
                         // discard model already matches, so it stays excluded).
                         if mmio.is_cgb_features_enabled()
@@ -7428,7 +7361,7 @@ impl Ppu {
                             break 'label;
                         }
                         // Discard the full xpos count: a mid-discard SCX change can
-                        // push the break past tile_len (Gambatte loops on to the
+                        // push the break past tile_len (hardware loops on to the
                         // next matching xpos), discarding more than 7 pixels.
                         self.m3_discard_target = xpos as i8;
                         // The closed-form mode-0 schedule assumed m3_arm_scx dots
@@ -7460,13 +7393,12 @@ impl Ppu {
                 }
 
                 // DMG WX 1..6 EARLY window activation: the WX comparator matches
-                // during the discard prologue at position WX-7 (SameBoy activates
-                // while position_in_line is still negative), i.e. (7-WX) dots
+                // during the discard prologue at position WX-7 (activating while
+                // position_in_line is still negative), i.e. (7-WX) dots
                 // BEFORE the first visible pop. Evaluating it there — not at the
                 // pos-0 trigger below — matters when WX is rewritten mid-prologue:
-                // hardware activates with the OLD WX (mealybug m3_wx_4_change:
-                // the WX=4 activation beats the WX=LY rewrite by 1-3 dots on
-                // every row). pos = ticks - (m3_arm_dot + 12 + scx&7) maps our
+                // hardware activates with the OLD WX (a WX=4 activation beats a
+                // WX=LY rewrite by 1-3 dots on every row). pos = ticks - (m3_arm_dot + 12 + scx&7) maps our
                 // pipeline's pop timeline (even arm: TN arm+2 .. push arm+8,
                 // warmup 4, first visible pop arm+12+scx). The activation then
                 // runs the restart fetch on real dots (anchored cadence) and the
@@ -7498,11 +7430,10 @@ impl Ppu {
                         // CPU WX store's new value reaches the comparator within
                         // the same dot on hardware while our mmio only exposes it
                         // to the NEXT dot — so evaluate one dot later (pos ==
-                        // WX-6) with the then-visible WX. mealybug m3_wx_6_change
-                        // brackets this: the WX=6->LY rewrite (one dot after the
-                        // pos -1 match) must WIN (no window starts), while
-                        // m3_wx_4/5_change's WX must LOSE (window starts with the
-                        // old WX 4/5).
+                        // WX-6) with the then-visible WX. This brackets the
+                        // rewrite race: a WX=6->LY rewrite one dot after the pos -1
+                        // match must WIN (no window starts), while a WX=4/5 must
+                        // LOSE (window starts with the old WX 4/5).
                         let pos = self.ticks as i64 - base;
                         if pos == wx as i64 - 6 {
                             self.win_y_pos = self.win_y_pos.wrapping_add(1);
@@ -7554,13 +7485,13 @@ impl Ppu {
 
                 // Whether this dot executed a PushToFIFO fetch substep — the
                 // window-reactivation insert fires on the pop of a window tile's
-                // FIRST pixel, i.e. our push dot (SameBoy: fetcher at
-                // GB_FETCHER_GET_TILE_T1 with bg_fifo.size == 8, the cycle right
+                // FIRST pixel, i.e. our push dot (on hardware: the fetcher at its
+                // TileNumber T1 step with the BG FIFO holding 8, the cycle right
                 // after its push-at-empty).
                 let mut push_this_dot = false;
                 // Fetcher cadence: on CGB, decouple from absolute self.ticks so that
                 // sprite-fetch stall dots don't flip the fetcher's even/odd phase
-                // (matches Gambatte). On DMG, keep the original self.ticks gate.
+                // (matches hardware). On DMG, keep the original self.ticks gate.
                 let cadence_even = if mmio.is_cgb_features_enabled() {
                     let even = self.fetcher_cadence_tick.is_multiple_of(2);
                     self.fetcher_cadence_tick = self.fetcher_cadence_tick.wrapping_add(1);
@@ -7573,17 +7504,16 @@ impl Ppu {
                     self.ticks.is_multiple_of(2)
                 };
 
-                // DMG mid-mode-3 WE-off window kill (SameBoy GET_TILE_T1
-                // `wx_triggered = false`): the window fetcher re-samples the
+                // DMG mid-mode-3 WE-off window kill (the hardware TileNumber-T1
+                // window-trigger clear): the window fetcher re-samples the
                 // window-enable bit at each TileNumber step with a one-dot
                 // delayed sample (we_dot_hist[2]); reading OFF reverts the fetch
                 // to BG from THIS tile on (the already-pushed window pixels in
                 // the FIFO drain out, so a killed window always shows a multiple
                 // of 8 pixels). A WE-off pulse short enough that its delayed
-                // sample misses every TileNumber dot leaves the window running —
-                // hardware behavior the mealybug win_en_change_multiple[_wx]
-                // staircases verify (Gambatte instead latches winDrawState at
-                // the write, which kills the window on any pulse).
+                // sample misses every TileNumber dot leaves the window running.
+                // (An implementation that latched the window-draw state at the write would
+                // instead kill the window on any pulse.)
                 if cadence_even
                     && !mmio.is_cgb_features_enabled()
                     && self.fetcher.is_fetching_window()
@@ -7630,9 +7560,9 @@ impl Ppu {
                         if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo) {
                             push_this_dot = true;
                             // The display-x at which this tile's first pixel will
-                            // pop (the SameBoy push-at-empty dot), SIGNED: during
+                            // pop (the hardware push-at-empty dot), SIGNED: during
                             // the SCX fine-scroll discard prologue the boundary
-                            // sits at SameBoy position -(pending discards) < 0.
+                            // sits at the hardware position -(pending discards) < 0.
                             if !mmio.is_cgb_features_enabled() {
                                 let first_x = self.x as i32 + event.fifo_size as i32
                                     - 8
@@ -7648,15 +7578,15 @@ impl Ppu {
                                         *slot = Some(first_x as u8);
                                     }
                                 } else if first_x < 0 && !mmio.is_cgb() {
-                                    // Discard-prologue boundary (SameBoy issue
-                                    // #278): evaluate the WE-off insert HERE, at
+                                    // Discard-prologue boundary (a known hardware
+                                    // quirk): evaluate the WE-off insert HERE, at
                                     // the push dot. logical position = first_x+7
-                                    // (SameBoy clamps out-of-range to 0, matching
+                                    // (hardware clamps out-of-range to 0, matching
                                     // WX==0). A hit inserts a color-0 pixel that
                                     // the prologue itself swallows — one discard
                                     // dot consumes it instead of a real pixel
                                     // (see we_glitch_discard_insert). Pre-CGB
-                                    // MACHINES only (SameBoy !GB_is_cgb): the CGB
+                                    // MACHINES only (non-CGB hardware): the CGB
                                     // PPU has no insert glitch even in DMG-compat.
                                     let logical = first_x + 7;
                                     let logical =
@@ -7711,19 +7641,17 @@ impl Ppu {
                                 }
                             }
                         }
-                        // NOTE: the window fetch anchor persists for the rest of
+                        // The window fetch anchor persists for the rest of
                         // the line — the hardware fetch grid stays phase-locked
                         // to the restart (pushes every 8 dots from the anchor),
                         // so the reactivation-insert columns stay at
-                        // window_start + 8k (mealybug m3_wx_4_change ly%8==4
-                        // diagonal). It resets at the next M3 arm or window
+                        // window_start + 8k. It resets at the next M3 arm or window
                         // restart.
-                        // sub-cc column lever: a BG tile whose column was committed
+                        // Sub-cc column adjustment: a BG tile whose column was committed
                         // at TileNumber under the OLD scx, but whose pixels are
                         // PLOTTED after the write's apply cc (write_cc + 2*cgb),
-                        // must render under the NEW scx (Gambatte scxChange
-                        // `update(cc+2*cgb); setScx` samples the column at plot
-                        // time, not fetch time). Only the single in-flight straddle
+                        // must render under the NEW scx (a mid-mode-3 SCX write
+                        // samples the column at plot time, not fetch time). Only the single in-flight straddle
                         // tile (armed at the write) is corrected, and only at the
                         // exact plot-vs-apply phase (gap == 4); see the gap comment
                         // below.
@@ -7737,7 +7665,7 @@ impl Ppu {
                             // fetcher used (xpos == display_x + fifo - pending); its
                             // plot cc is abs_cc + (xpos - current display x). If that
                             // plot cc is strictly after the apply cc the tile must
-                            // render under the NEW scx (Gambatte scxChange samples
+                            // render under the NEW scx (the hardware SCX change samples
                             // the column at plot, not fetch); re-key the 8 newest
                             // FIFO entries with the NEW-scx column using the
                             // fetcher's exact xpos/cgb_adj. Disarm afterwards.
@@ -7774,10 +7702,10 @@ impl Ppu {
                             // tile's fetcher step. The BG fetcher advances one step
                             // every 2 dots == (2<<ds) cc; the armed tile's column
                             // was latched at TileNumber (subcc_last_tn_cc) and
-                            // Gambatte's `update(apply_cc); setScx` re-derives that
+                            // The hardware SCX-write handling re-derives that
                             // single tile NEW only when apply falls half a step
                             // (1<<ds cc) past the latch, modulo the step:
-                            //   (apply_cc - tn_cc) % (2<<ds) == (1<<ds)
+                            // (apply_cc - tn_cc) % (2<<ds) == (1<<ds)
                             // At DS this is (apply-tn)%4==2, which flips ds_3/4/5
                             // across every initial-scx (0761/0360/...) where the
                             // cruder gap/span proxies disagree. SS keeps gap==4
@@ -7869,7 +7797,7 @@ impl Ppu {
                                 // read NEW because the first-line dispatch lags the
                                 // boundary by one tile -- must be reverted to OLD so
                                 // the OLD->NEW boundary lands one tile later, exactly
-                                // as Gambatte's `update(apply_cc)` first-line xpos
+                                // as the hardware first-line xpos
                                 // does. On LY>=1 (gap==5) this revert does NOT fire,
                                 // so those lines keep the boundary one tile earlier.
                                 self.subcc_revert_next_old = true;
@@ -7880,8 +7808,8 @@ impl Ppu {
                         // armed straddle tile was fetched with the NEW scx one tile
                         // too early (FIFO depth 8 vs 9 due to a sprite-fetch dot);
                         // rewrite its 8 entries back to the OLD-scx column so the
-                        // OLD->NEW boundary lands one tile later (matching Gambatte's
-                        // `update(apply_cc)` fetcher-xpos boundary).
+                        // OLD->NEW boundary lands one tile later (matching the hardware
+                        // fetcher-xpos boundary).
                         if self.subcc_revert_next_old
                             && !armed_this_event
                             && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
@@ -7926,8 +7854,8 @@ impl Ppu {
                         // On hardware it plots after the write, so re-key its 8 newest
                         // FIFO entries to the NEW scx column (the first queued tile,
                         // pushed before the write, keeps OLD). Uses the fetcher's exact
-                        // latched xpos/cgb_adj so the column matches Gambatte's
-                        // `update(apply_cc); setScx` plot-time sample.
+                        // latched xpos/cgb_adj so the column matches the hardware
+                        // plot-time sample.
                         if self.prologue_rekey_armed
                             && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
                         {
@@ -8014,13 +7942,12 @@ impl Ppu {
                 // window-enable bit feeding the WX comparator is the DELAYED
                 // per-dot tap (we_dot_hist, samples one and two dots back) —
                 // an 8-cycle WE-off pulse blocks 9 consecutive comparator dots
-                // on hardware (mealybug win_en_change_multiple_wx). CGB keeps
-                // the live bit. When the x==0 trigger fires with SCX fine
-                // discards still pending, our check runs `pending` dots BEFORE
-                // the hardware comparator dot (position 0 pops that much
-                // later), so the taps shift toward the present accordingly
-                // (gambatte window late_disable_scx3_0/scx5_0: the disable
-                // right before the x==0 check dot must still block the start).
+                // on hardware. CGB keeps the live bit. When the x==0 trigger
+                // fires with SCX fine discards still pending, our check runs
+                // `pending` dots BEFORE the hardware comparator dot (position 0
+                // pops that much later), so the taps shift toward the present
+                // accordingly (a disable right before the x==0 check dot must
+                // still block the start).
                 let trigger_we = if mmio.is_cgb_features_enabled() {
                     (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0
                 } else {
@@ -8047,15 +7974,13 @@ impl Ppu {
                     // On DMG, WX 1..6 activates ONLY via the exact pos==WX-7
                     // prologue match (the EARLY check above); reaching pos 0 with
                     // WX 1..6 means the match was missed (WX rewritten
-                    // mid-prologue) and the window does not start this line
-                    // (mealybug m3_wx_6_change). WX=0 and CGB keep the immediate
-                    // x==0 start.
+                    // mid-prologue) and the window does not start this line.
+                    // WX=0 and CGB keep the immediate x==0 start.
                     let is_dmg = !is_cgb;
-                    // DMG one-dot-late activation (SameBoy's position+6 check):
+                    // DMG one-dot-late activation (the position+6 check):
                     // when the exact x+7==WX dot did not activate (the comparator
                     // read the WE-off pulse), the very next dot still matches via
-                    // WX == x+6 and starts the window one pixel late (the _wx rows
-                    // 16 and 44 start at WX-6).
+                    // WX == x+6 and starts the window one pixel late (at WX-6).
                     let should_start_window = wx_allowed
                         && if wx < 7 {
                             self.x == 0 && !(is_dmg && (1..7).contains(&wx))
@@ -8064,8 +7989,8 @@ impl Ppu {
                         };
 
                     // DMG WX=0 + SCX&7>0 quirk: the window activates one T-cycle
-                    // later (mealybug m3_window_timing_wx_0). The would-be trigger
-                    // dot is dead (no pop, no activation); trigger next dot.
+                    // later. The would-be trigger dot is dead (no pop, no
+                    // activation); trigger next dot.
                     if should_start_window
                         && !is_cgb
                         && wx == 0
@@ -8088,8 +8013,8 @@ impl Ppu {
                             self.dmg_wx_trigger_pending = Some((self.ticks, wx));
                             break 'label;
                         }
-                        // Window draw-start: Gambatte increments winYPos here
-                        // (M3Start::f0 / plotPixel win_draw_start), once per line
+                        // Window draw-start: hardware increments window Y position here
+                        // (the mode-3-start window checkpoint / plot win_draw_start), once per line
                         // the window actually begins drawing, not per-line in M2.
                         self.win_y_pos = self.win_y_pos.wrapping_add(1);
                         self.win_draw_started = true;
@@ -8162,7 +8087,7 @@ impl Ppu {
                                 Some(self.ticks.wrapping_sub(chop as u128));
                         }
                         // The post-window sprite group restarts the BG-tile grid
-                        // (Gambatte resets prevSpriteTileNo to tileno_none after
+                        // (hardware resets the previous sprite tile number to none after
                         // the window split), so the first post-window sprite in a
                         // tile is again charged the leading rate.
                         self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
@@ -8184,7 +8109,7 @@ impl Ppu {
                     break 'label;
                 }
 
-                // SCX fine-scroll discard (Gambatte M3Start::f1 per-dot loop):
+                // SCX fine-scroll discard (the mode-3-start fine-scroll per-dot loop):
                 // while x == 0, re-read the LIVE SCX each dot. If we have not
                 // yet discarded `scx % 8` BG pixels, pop one and consume the
                 // dot. A mid-M3 SCX write changes this count (and the fetched
@@ -8219,14 +8144,13 @@ impl Ppu {
                 if self.x >= 160 {
                     break 'label;
                 }
-                // DMG window reactivation zero pixel (SameBoy insert_bg_pixel):
+                // DMG window reactivation zero pixel (the hardware BG-pixel insert):
                 // the WX comparator matches again with the window already active
                 // (past its startup fetch), exactly at the pop of a window
-                // tile's FIRST pixel — our push-at-empty dot (SameBoy: fetcher
-                // at GET_TILE_T1 with bg_fifo.size == 8, the cycle right after
-                // its push; mealybug m3_wx_4/5_change bracket the phase: the
-                // insert diagonal sits at x == 8k + (8 - chop)). The pop below
-                // then renders a color-0 pixel WITHOUT consuming the FIFO,
+                // tile's FIRST pixel — our push-at-empty dot (fetcher at
+                // the tile-number fetch step with bg_fifo.size == 8, the cycle right after its
+                // push; the insert diagonal sits at x == 8k + (8 - chop)). The pop
+                // below then renders a color-0 pixel WITHOUT consuming the FIFO,
                 // inserting one pixel into the line.
                 if !mmio.is_cgb_features_enabled()
                     && self.window_started_this_line
@@ -8238,14 +8162,13 @@ impl Ppu {
                 {
                     self.insert_bg_pixel = true;
                 }
-                // DMG WE-off zero-pixel insertion glitch (SameBoy display.c PUSH
-                // branch, SameBoy issue #278): with the window Y-latch triggered
-                // but the window enable OFF (delayed tap, see we_dot_hist), a
-                // tile-boundary pop (SameBoy's push-at-empty dot; our queued
-                // first-pixel x) where WX == x+7 renders one color-0 pixel
-                // WITHOUT consuming the FIFO (mealybug win_en_change_multiple_wx
-                // rows 15/39: the single white pixel at x = WX-7 on the
-                // trigger-missed rows).
+                // DMG WE-off zero-pixel insertion glitch: with the window Y-latch
+                // triggered but the window enable OFF (delayed tap, see
+                // we_dot_hist), a tile-boundary pop (the push-at-empty dot; our
+                // queued first-pixel x) where WX == x+7 renders one color-0 pixel
+                // WITHOUT consuming the FIFO (a single white pixel at x = WX-7 on
+                // the trigger-missed rows).
+                // Pan Docs: Window mid-frame behavior — https://gbdev.io/pandocs/Window.html
                 let mut at_tile_boundary = false;
                 for slot in self.we_glitch_tile_starts.iter_mut() {
                     if let Some(fx) = *slot {
@@ -8258,9 +8181,8 @@ impl Ppu {
                         }
                     }
                 }
-                // Pre-CGB MACHINES only (SameBoy !GB_is_cgb): the CGB PPU has no
-                // WE-off insert glitch even in DMG-compat mode (GB Player /
-                // CGB footage in SameBoy issue #278 shows the unshifted line).
+                // Pre-CGB machines only (!is_cgb): the CGB PPU has no WE-off
+                // insert glitch even in DMG-compat mode (the line is unshifted).
                 if !mmio.is_cgb()
                     && self.window_y_triggered
                     && !self.fetcher.is_fetching_window()
@@ -8279,14 +8201,14 @@ impl Ppu {
                 if self.draw_fifo_pixel(mmio) && self.x == 160 {
                     // Fallback end-of-mode-3 at the x==160 pixel push, used in two
                     // distinct cases:
-                    //  (a) no closed-form m0Time exists (first line after enable /
-                    //      mid-M3 invalidation): report mode 0 here and end mode 3.
-                    //  (b) the m0Time timing report ALREADY fired above, but the
-                    //      window fetch restart left the FIFO short, so the renderer
-                    //      was kept alive to draw the final window pixel; now that
-                    //      x==160 we end mode 3 WITHOUT re-reporting (the FF41 mode-0
-                    //      poke / STAT IRQ already fired at the exact m0Time).
-                    // When m0Time is known and the FIFO was complete, the transition
+                    // (a) no closed-form mode-0 time exists (first line after enable /
+                    // mid-M3 invalidation): report mode 0 here and end mode 3.
+                    // (b) the mode-0 time timing report ALREADY fired above, but the
+                    // window fetch restart left the FIFO short, so the renderer
+                    // was kept alive to draw the final window pixel; now that
+                    // x==160 we end mode 3 WITHOUT re-reporting (the FF41 mode-0
+                    // poke / STAT IRQ already fired at the exact mode-0 time).
+                    // When mode-0 time is known and the FIFO was complete, the transition
                     // is driven off master_cc above and the renderer never reaches
                     // this x==160 fallback before that boundary, so we must NOT end
                     // mode 3 early here on ordinary (non-window) lines.
@@ -8344,12 +8266,12 @@ impl Ppu {
                 // line itself has not ended. Update LYC=LY immediately so the
                 // STAT line for LYC==0 fires one line earlier than the
                 // visible LY=0 scanline.
-                // Gambatte's getLycCmpLy anticipates the line-153 LY=0 compare by
-                // `lineTime - 6 - 6*isDoubleSpeed()`. At DS lineTime=912cc, so the
+                // The hardware LYC-compare-LY calc anticipates the line-153 LY=0 compare by
+                // `line time - 6 - 6*double_speed`. At DS line time=912cc, so the
                 // LY->0 flip lands 12cc = dot 6 into line 153 -- the same dot as
-                // single speed (whose `lineTime-6` likewise resolves to dot 6 in its
+                // single speed (whose `line time-6` likewise resolves to dot 6 in its
                 // own dot units). So both speeds use dot 6; the DS probes
-                // (lyc0flag_ds / lyc153flag_ds) read C5 at lineCycles>=6, C1 before.
+                // (lyc0flag_ds / lyc153flag_ds) read C5 at line cycles>=6, C1 before.
                 let line_153_zero_dot = if mmio.is_double_speed_mode() {
                     LINE153_LY0_DOT_DS.max(0) as u128
                 } else {
@@ -8391,14 +8313,14 @@ impl Ppu {
                         self.window_line_counter = 0;
                         self.win_y_pos = 0xFF;
                         // NOTE: win_draw_start / win_draw_started are intentionally
-                        // NOT reset here. Gambatte resets winYPos at M2_Ly0::f0 but
-                        // leaves winDrawState (both bits) untouched across the frame
+                        // NOT reset here. The hardware resets window Y position at the line-0 mode-2 checkpoint but
+                        // leaves the window-draw state (both bits) untouched across the frame
                         // boundary, so a window armed on the last visible line (e.g.
-                        // DMG wx==166 on line 143, where plotPixel branch B arms
+                        // DMG wx==166 on line 143, where pixel output branch B arms
                         // win_draw_start even with the window then disabled) carries
                         // through vblank and activates the window on the next frame's
-                        // line 0 (M3Start::f0 consumes win_draw_start, ++winYPos).
-                        // This is the wxA6 weMaster-persistence path.
+                        // line 0 (the mode-3-start window checkpoint consumes win_draw_start, the window-Y increment).
+                        // This is the wxA6 window-enable-master-persistence path.
                         self.window_y_triggered = false;
                         self.window_started_this_line = false;
 
@@ -8416,11 +8338,11 @@ impl Ppu {
                         // Count this completed frame toward post-enable resync so
                         // get_frame stops blanking once a full frame has displayed.
                         self.frames_since_enable = self.frames_since_enable.saturating_add(1);
-                        // The SS->DS-mode3 lyCounter re-anchor is a phase artifact
+                        // The SS->DS-mode3 the LY counter re-anchor is a phase artifact
                         // local to the frame(s) right after the switch; once two
                         // frame wraps have re-settled the line phase (age lcd-align-ly:
                         // multiple STOP windows push its LY reads several frames past
-                        // the switch) it no longer applies and the getLyReg reads
+                        // the switch) it no longer applies and the LY-register reads
                         // resolve through the standard DS window. The age `ly`
                         // mode-3-switch probes read within 0-1 wraps and keep it.
                         if self.ssds_mode3_ly_advance {
@@ -8632,7 +8554,7 @@ impl Ppu {
     /// graders keep reading those), and calling this does not consume
     /// `frame_ready`.
     ///
-    /// Layering (per real hardware / SameBoy): the SNES backdrop (shared
+    /// Layering (per real hardware): the SNES backdrop (shared
     /// color 0) fills everything; the GB picture (masked/frozen/colorized
     /// exactly like `sgb_frame`) sits in the center window; border pixels
     /// with a non-zero 4bpp color index draw OVER both — transparent border
@@ -8686,7 +8608,7 @@ impl Ppu {
         }
 
         // 3. Border tiles. Map entries with bits 8-9 set reference tiles
-        // beyond the 256 that exist and are not drawn (SameBoy `tile & 0x300`
+        // beyond the 256 that exist and are not drawn (the hardware `tile & 0x300`
         // skip). 4bpp pixel bits come from byte pairs (plane 0/1) at row*2
         // and (plane 2/3) at row*2+16; bit 7 = leftmost pixel when not
         // X-flipped.
@@ -8786,8 +8708,8 @@ impl Ppu {
     }
 
     /// DMG OAM-bug row for a CPU OAM *read* access (as opposed to a write/IDU).
-    /// SameBoy holds `accessed_oam_row = 0` across the whole mode-2 prologue (the
-    /// three `GB_SLEEP`s before the object-scan loop advances it to 8), and both the
+    /// Hardware holds the accessed-OAM-row at 0 across the whole mode-2 prologue (the
+    /// three sleep steps before the object-scan loop advances it to 8), and both the
     /// read and write trigger sites guard on `accessed_oam_row >= 8` — row 0 is the
     /// exempt "first two objects" row, so a mode-2-prologue access corrupts nothing.
     /// A CPU read landing at the mode-2 entry samples this prologue window (age's
@@ -8808,10 +8730,10 @@ impl Ppu {
         Some(base)
     }
 
-    /// Cycle-exact HDMA-eligibility predicate, mirroring Gambatte's
-    /// `isHdmaPeriod` (video.cpp): a visible line, the within-line dot is at or
+    /// Cycle-exact HDMA-eligibility predicate, mirroring the hardware
+    /// HDMA-eligibility period: a visible line, the within-line dot is at or
     /// past the predicted mode-0 (HBlank) start, and there is still room before
-    /// line end to run a block (`dot + 3 + 3*ds < lineEnd`). Returns None when
+    /// line end to run a block (`dot + 3 + 3*ds < line-end`). Returns None when
     /// no closed-form mode-0 dot is available (window/first line after enable),
     /// so callers can fall back to the STAT mode-edge model. Read-only.
     pub fn hdma_period(&self, double_speed: bool) -> Option<bool> {
@@ -8825,21 +8747,21 @@ impl Ppu {
         }
         let ds = double_speed as i128;
         let dot = self.ticks as i128;
-        // Gambatte gates HDMA on `cc >= m0Time` but its eligibility call site
-        // the eligibility call site passes `cc + 4`; the +1 dot here aligns the renderer
+        // Hardware gates HDMA on `cc >= mode-0 time` but its eligibility call site
+        // passes `cc + 4`; the +1 dot here aligns the renderer
         // tick with that access cc. Net +1 on the dma suite, no regressions.
         let m0n = m0 + self.dma_scx_m0_nudge(double_speed, false) as i128;
         Some(dot > m0n && dot + 3 + 3 * ds < 456)
     }
 
     /// DEFERRED-HDMA-FIRE late-HBlank predicate for the FF55-kick / unhalt
-    /// resolution paths only (NOT the per-dot edge machine). Mirrors Gambatte's
-    /// `enableHdma` -> `isHdmaPeriod(cc + 4)` where `m0TimeOfCurrentLine` returns
-    /// the CURRENT line's mode-0 time (`lastM0Time`) even after the renderer has
+    /// resolution paths only (NOT the per-dot edge machine). Mirrors the hardware
+    /// `the HDMA-enable path` -> `the HDMA-active check at cc+4` where `the current line's mode-0 (HBlank) time` returns
+    /// the CURRENT line's mode-0 time (the last mode-0 time) even after the renderer has
     /// crossed it — so a FF55 enable written mid-HBlank, after mode-0 entry but
     /// still on the same line, resolves IN-PERIOD and arms its block immediately
     /// (`hdma_late_enable_*`). rustyboi previously nulled `scheduled_mode0_dot` at
-    /// the m0Time crossing, returning None there, dropping those late enables.
+    /// the mode-0 time crossing, returning None there, dropping those late enables.
     ///
     /// Anchored on `m0_time_master` (master cc, shares the access cc's phase, so it
     /// is robust to the STOP/lcd-offset line-phase residual that a renderer-dot
@@ -8850,7 +8772,7 @@ impl Ppu {
     /// closed-form mode-0 anchor exists (window / first line / mid-M3 invalidation)
     /// so the caller falls back to the STAT-mode gate.
     /// COORDINATED piece #3 (HDMA-halt deferred held-flag): the unhalt re-flag
-    /// gate's `isHdmaPeriod(cc)` at the unhalt access cc. Same closed-form mode-0
+    /// gate's `the HDMA-active check at cc` at the unhalt access cc. Same closed-form mode-0
     /// anchor as `hdma_period_kick`, but the END (drop) bracket sits later: the
     /// unhalt-reflag boundary the `hdma_late_m0unhalt_{1,2}` straddle pairs probe
     /// is past the FF55-enable kick boundary (cctracer: SS depth 196 reflags /
@@ -8877,7 +8799,7 @@ impl Ppu {
     /// DEPTH (`cc - m0t`) uniformly by 4: a Low-at-halt block deep in mode-0 (near
     /// the line end) must still reflag (depth 200 -> in), while a block at the
     /// mode-0 ENTRY (depth ~0, `hdma_ei_m3halt_m0unhalt_ly_*`) must still reflag
-    /// too (Gambatte reflag=1) — which a m0t shift would wrongly push past the
+    /// too (hardware reflags) — which a m0t shift would wrongly push past the
     /// start bracket. `limit_adj == 0` is byte-identical to the calibrated
     /// baseline.
     pub fn hdma_period_unhalt_adj(
@@ -8902,10 +8824,10 @@ impl Ppu {
         Some(depth < limit)
     }
 
-    /// HALT-ENTRY `isHdmaPeriod(cc)` for `haltHdmaState_` (Gambatte `Memory::halt`).
+    /// HALT-ENTRY `the HDMA-active check at cc` for `halt-HDMA-state` (the hardware HALT handling).
     /// Same `m0_time_master`-anchored closed-form predicate as `hdma_period_unhalt`,
     /// but the line-end (drop) bracket sits a few cc LATER: the HALT instruction's
-    /// access cc reaches the `cc + 3 + 3*ds < lineEnd` boundary at a different phase
+    /// access cc reaches the `cc + 3 + 3*ds < line-end` boundary at a different phase
     /// than the unhalt access cc, so the `hdma_late_m0halt_{1,2}` straddle pair
     /// (cctracer: HALT cc 4cc apart, period 1->0) bracket their own limit. Probed
     /// per speed via the `_1` (in-period -> High -> 1 block) / `_2` (past-boundary
@@ -8930,9 +8852,9 @@ impl Ppu {
     }
 
     /// Late-hdma-vs-interrupt unhalt precedence. On unhalt
-    /// with a Low-at-halt HDMA block, Gambatte's `intevent_unhalt` flags the block
-    /// iff `isHdmaPeriod(cc)` (`cc >= m0Time`) at the unhalt cc. rustyboi's
-    /// `m0_time_master` folds a +1 dot phase vs the raw m0Time, so the equivalent
+    /// with a Low-at-halt HDMA block, the hardware unhalt interrupt event flags the block
+    /// iff `the HDMA-active check at cc` (`cc >= mode-0 time`) at the unhalt cc. rustyboi's
+    /// `m0_time_master` folds a +1 dot phase vs the raw mode-0 time, so the equivalent
     /// START boundary here is `cc + 1 >= m0t`. When TRUE the
     /// block's dma event is flagged (event time 0) and FIRES IMMEDIATELY at unhalt,
     /// i.e. BEFORE the interrupt's PC pushes — the dma-wins races
@@ -8960,7 +8882,7 @@ impl Ppu {
         // reached mode-0 start AND is not past the line-end. The START anchor is
         // `cc + 1 >= m0t` — the SAME +1 dot phase the per-dot `hdma_period`
         // predicate folds (`dot >= m0n + 1`); a bare `cc >= m0t` or the looser
-        // `cc + 4` mis-brackets the scx-shifted m0Time. cctracer boundary at unhalt
+        // `cc + 4` mis-brackets the scx-shifted mode-0 time. cctracer boundary at unhalt
         // cc=C: REFLAG for m0t<=C+1 (`scx{1,2}_halt_1`), NOREFLAG for m0t>=C+2
         // (`scx{1,2}_halt_2`).
         let in_start = cc + 1 >= m0t;
@@ -8977,8 +8899,8 @@ impl Ppu {
         }
         let m0t = self.m0_time_master? as i64;
         let cc = access_cc as i64;
-        // Start: in-period once the access cc reaches the mode-0 time. (Gambatte's
-        // `cc + 4 >= m0Time`; the renderer-tick m0Time already folds the +4 phase
+        // Start: in-period once the access cc reaches the mode-0 time. (the hardware
+        // `cc + 4 >= mode-0 time`; the renderer-tick mode-0 time already folds the +4 phase
         // for the dma cluster, so a bare `cc >= m0t` brackets the enable pairs.)
         if cc < m0t {
             return Some(false);
@@ -8990,33 +8912,33 @@ impl Ppu {
         Some(depth < limit)
     }
 
-    /// FF55=00 HDMA-DISABLE-vs-m0-edge race (Gambatte `disableHdma`): writing
+    /// FF55=00 HDMA-DISABLE-vs-m0-edge race (the hardware HDMA-disable path): writing
     /// FF55 bit7=0 only clears the FUTURE `memevent_hdma` schedule; it does NOT
     /// un-flag a block whose m0-edge has ALREADY fired (`intevent_dma` is latched
     /// and `dma()` will still run). So a late disable cannot stop a block once the
     /// current line's mode-0 edge has passed. The boundary is exactly the m0-edge
-    /// time: Gambatte processes the `memevent_hdma` event (which `flagHdmaReq`s)
-    /// before the FF55 write whenever the write cc has reached `m0Time`.
+    /// time: the hardware processes the HDMA memory event (which raises the HDMA request)
+    /// before the FF55 write whenever the write cc has reached `mode-0 time`.
     /// Returns `Some(true)` when the disable is too late (the m0 edge already
     /// flagged -> the block must still fire), `Some(false)` when the disable wins
     /// (cancel before the edge), or `None` when no closed-form mode-0 anchor exists
     /// (caller falls back to the unconditional cancel).
-    /// Boundary is Gambatte's exact m0-edge time (`m0TimeOfCurrentLine` =
-    /// `predictedNextM0Time`): the disable fires the block iff `disable_cc >=
-    /// m0Time`. rustyboi's `m0_time_master` is the STAT-read anchor (calibrated for
-    /// `abs_cc + 2 < m0Time` with the LyCounter `+1` and renderer-tick phase), and
-    /// it runs a fixed few cc ABOVE Gambatte's bare m0-edge time: cctracer pins the
+    /// Boundary is the hardware exact m0-edge time (`the current line's mode-0 (HBlank) time` =
+    /// the predicted next mode-0 time): the disable fires the block iff `disable_cc >=
+    /// mode-0 time`. rustyboi's `m0_time_master` is the STAT-read anchor (calibrated for
+    /// `abs_cc + 2 < mode-0 time` with the LY counter `+1` and renderer-tick phase), and
+    /// it runs a fixed few cc ABOVE the hardware bare m0-edge time: cctracer pins the
     /// gap at +6 (single speed) / +4 (double speed), constant across SCX (the SCX
     /// m3-length delta already lives in `m0_time_master`). So the true edge is
     /// `m0_time_master - gap`.
     ///
     /// cctracer ground truth (CGB, [_1 cancel -> out0 / _2 fire -> out1] pairs,
     /// rustyboi-clock disable cc vs m0_time_master):
-    ///   SS base   _1=12935 _2=12939 m0t=12944  edge=12938 (m0t-6)
-    ///   SS scx2   _1=12939 _2=12943 m0t=12946  edge=12940 (m0t-6)
-    ///   SS scx5   _1=12939 _2=12943 m0t=12949  edge=12943 (m0t-6)
-    ///   DS        _1=158392 _2=158396 m0t=158398 edge=158394 (m0t-4)
-    ///   DS scx5   _1=158400 _2=158404 m0t=158408 edge=158404 (m0t-4)
+    /// SS base _1=12935 _2=12939 m0t=12944 edge=12938 (m0t-6)
+    /// SS scx2 _1=12939 _2=12943 m0t=12946 edge=12940 (m0t-6)
+    /// SS scx5 _1=12939 _2=12943 m0t=12949 edge=12943 (m0t-6)
+    /// DS _1=158392 _2=158396 m0t=158398 edge=158394 (m0t-4)
+    /// DS scx5 _1=158400 _2=158404 m0t=158408 edge=158404 (m0t-4)
     pub fn hdma_disable_fires(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
         if self.disabled {
             return None;
@@ -9043,7 +8965,7 @@ impl Ppu {
         // whose block long ran - the next edge is unscheduled and the disable
         // must win (AntonioND hdma_start_3: FF55=00 at LY3 mode 2 with one
         // block left reads HDMA5=0x80). Detect it by line identity: an m0t
-        // before the current line's start cc (lyTime anchor, same phase
+        // before the current line's start cc (the LY time anchor, same phase
         // `vram_readable_at_cc` uses) belongs to a completed line. Same-line
         // late writes (incl. the STOP-speedchange wakeup family, whose owed
         // block resolves ~129cc past m0t) keep the edge-fired answer.
@@ -9072,7 +8994,7 @@ impl Ppu {
     /// SCX-phase-conditioned nudge to the mode-0 boundary dot used by the
     /// HDMA/VRAM-lock predictors (NOT the m0 STAT IRQ, which is calibrated
     /// separately). The closed-form `compute_m3_length` prefix `scx + (1-cgb)`
-    /// is a dot-count model; at some SCX phases Gambatte's M3Start fine-scroll
+    /// is a dot-count model; at some SCX phases the hardware mode-3-start fine-scroll
     /// dispatch lands the actual HBlank one renderer dot off from that linear
     /// model, and that boundary feeds the HDMA trigger / VRAM-unlock the dma
     /// suite measures. Env-overridable, gated per SCX&7 phase and per speed so
@@ -9084,16 +9006,16 @@ impl Ppu {
         // cluster with zero regressions across the co-calibrated clusters
         // (window / scx_during_m3 / cgbpal_m3 / enable_display / scy / oamdma):
         //
-        // * HDMA-trigger boundary, SCX&7==1 (vram=false): Gambatte's M3Start
-        //   fine-scroll dispatch lands the actual HBlank one renderer dot before
-        //   the linear `scx + (1-cgb)` prefix model implies, so the HDMA block at
-        //   this phase arms one dot early in our model; -1 realigns it. Only the
-        //   HDMA consumer (dma cluster) sees this; VRAM-lock is untouched here.
+        // * HDMA-trigger boundary, SCX&7==1 (vram=false): the hardware mode-3-start
+        // fine-scroll dispatch lands the actual HBlank one renderer dot before
+        // the linear `scx + (1-cgb)` prefix model implies, so the HDMA block at
+        // this phase arms one dot early in our model; -1 realigns it. Only the
+        // HDMA consumer (dma cluster) sees this; VRAM-lock is untouched here.
         //
         // * VRAM-lock end boundary, SCX&7==3 (vram=true): at this phase the
-        //   cycle-exact mode-3->0 unblock the dma reads probe sits one dot late
-        //   vs hardware; -1 realigns it. Verified to fix 1 dma with no regression
-        //   in any co-calibrated VRAM/OAM/cgbpal-access test.
+        // cycle-exact mode-3->0 unblock the dma reads probe sits one dot late
+        // vs hardware; -1 realigns it. Verified to fix 1 dma with no regression
+        // in any co-calibrated VRAM/OAM/cgbpal-access test.
         //
         // SCX&7==0 was -2 on dma-only but regresses two window m2int_wxA6
         // busyread tests, so it is deliberately left unbiased (default 0).
@@ -9110,17 +9032,17 @@ impl Ppu {
     }
 
     /// Whether the CPU may currently access VRAM/OAM/CGB-palette, mirroring
-    /// Gambatte's `vramReadable`/`vramWritable`/`oamReadable`/`oamWritable`/
-    /// `cgbpAccessible` lineCycle thresholds rather than the rounded FF41 mode.
+    /// The hardware VRAM/OAM/CGB-palette accessibility
+    /// `the CGB-palette accessible window` line cycle thresholds rather than the rounded FF41 mode.
     /// `ticks` is the renderer's within-line dot (mode-3 starts at dot 80 DMG /
-    /// 82 CGB); Gambatte's `lineCycles` frame is `ticks - (4 - cgb)`. The mode-0
+    /// 82 CGB); the hardware `line cycles` frame is `ticks - (4 - cgb)`. The mode-0
     /// end is the scheduled mode-0 dot. Returns None when no closed-form mode-0
     /// dot is available (window / first line after enable) so the caller falls
     /// back to the FF41-mode gate. `is_read` selects the read vs write
     /// threshold; `kind`: 0=vram, 1=oam, 2=cgbpal. Read-only.
     /// `mode3_locked` is the caller's FF41-mode start gate (mode 3 for vram/cgbp,
     /// mode 2|3 for oam). The cycle-exact predictor only refines the mode-3->0
-    /// END boundary against `scheduled_mode0_dot` (Gambatte's `m0TimeOfCurrentLine`);
+    /// END boundary against `scheduled_mode0_dot` (the hardware current-line mode-0 (HBlank) time);
     /// the start stays on the renderer's mode set, which is window-independent.
     pub fn cpu_access_blocked(&self, kind: u8, is_read: bool, mode3_locked: bool, env: AccessEnv, access_cc: u64) -> Option<bool> {
         let AccessEnv { is_cgb, cgb_de, double_speed } = env;
@@ -9128,7 +9050,7 @@ impl Ppu {
             return Some(false);
         }
         if self.internal_ly_val >= 144 {
-            // Gambatte oamReadable/oamWritable resolve the OAM line-wrap pre-lock
+            // The hardware OAM-readable/OAM-writable checks resolve the OAM line-wrap pre-lock
             // BEFORE the ly>=144 vblank accessibility: in the last `k` line-cycles
             // of a line the access already belongs to the NEXT line, and line 153's
             // successor is line 0 whose mode-2 OAM scan is imminent — blocked
@@ -9148,7 +9070,7 @@ impl Ppu {
                     self.line_cycle as i64 - self.lytime_no_plus1 as i64
                 };
                 // CGB-D/E: the OAM-read line-wrap pre-lock keeps the SS threshold
-                // in double speed (SameBoy line-start `oam_read_blocked = !ds ||
+                // in double speed (the hardware line-start rule `oam_read_blocked = !ds ||
                 // model >= CGB_D`; age oam-read-cgbE DS delay-1 m2-edge reads are
                 // blocked on E where B/C still allow them).
                 let k = if is_read {
@@ -9162,39 +9084,38 @@ impl Ppu {
             }
             return Some(false);
         }
-        // STAGE 4 KEYSTONE: this gate is a RENDER-visibility decision (does the
+        // This gate is a RENDER-visibility decision (does the
         // CPU VRAM/OAM/cgbp store land before/after the fetcher's mode-3 lock).
-        // The FACET-1 carry advances the STAT/line phase, so the lyTime-anchored
+        // The STAT-phase carry advances the STAT/line phase, so the LY time-anchored
         // boundaries (`cgbp_block_start_cc`/`m0_time_master`) move EARLIER in
         // master cc while the fetcher's actual lock window did NOT. The caller
         // (`ppu_blocks`) passes a render-frame `access_cc` (the raw cc minus the
         // accumulated carry skew) so the access compares against the un-carried
-        // geometry. No-op when no carry is live (flag-OFF / non-STOP paths).
+        // geometry. No-op when no carry is live (non-STOP paths).
         let cc = access_cc as i64;
         let ds = double_speed as i64;
-        // The cached `m0_time_master` is byte-exact with Gambatte's `m0Time` at a
+        // The cached `m0_time_master` is byte-exact with the hardware `mode-0 time` at a
         // boot offset N, but the raw `master_cc` the bus snapshots sits at offset
         // N+1 (one master-cc below) for the `ld (hl)` / `ld (ff69),a` style memory
         // accesses these gates serve — so the access-cc must anchor at `cc + 1` to
-        // share m0Time's offset. Without it the END boundary lands 1 cc short on
-        // odd-SCX lines whose `cc + 2` ties `m0Time` exactly (postread_scx3 etc.).
-        // (The FF41/getStat read uses a different opcode whose raw cc already shares
+        // share mode-0 time's offset. Without it the END boundary lands 1 cc short on
+        // odd-SCX lines whose `cc + 2` ties `mode-0 time` exactly (postread_scx3 etc.).
+        // (The FF41/STAT-resolve read uses a different opcode whose raw cc already shares
         // the offset, so this correction is scoped to the access gate.)
         let cc_end = cc + 1;
-        // First line after LCD enable: Gambatte's accessibility functions all OR in
-        // `inactivePeriodAfterDisplayEnable(cc + bias)` == `cc + bias < lu_`, where
+        // First line after LCD enable: the hardware accessibility functions all OR in
+        // `the inactive period after display enable(cc + bias)` == `cc + bias < lu_`, where
         // `lu_` == `display_enable_inactive_until` (seeded at enable to
         // `enable_cc + (80<<ds) + 1`). While inactive the access is ACCESSIBLE
-        // (not blocked), overriding the lineCycle / renderer-tick begin boundary
+        // (not blocked), overriding the line cycle / renderer-tick begin boundary
         // (which on the first line arms M3 two dots late and would otherwise report
         // the access blocked before `lu_`). The per-kind/direction bias mirrors
-        // Gambatte (video.cpp cgbpAccessible/vramReadable/vramWritable/oamReadable/
-        // oamWritable), shifted by +1 to share the access-cc offset the m0Time END
+        // The hardware VRAM/OAM/CGB-palette accessibility model, shifted by +1 to share the access-cc offset the mode-0 time END
         // tests use (`cc_end = cc + 1`):
-        //   cgbp (2):       cc + 1                  < lu_   (Gambatte raw cc)
-        //   vram (0, r/w):  cc + 2 - cgb + ds       < lu_   (Gambatte cc + 1 - cgb + ds)
-        //   oam  (1) read:  cc + 5                  < lu_   (Gambatte cc + 4)
-        //   oam  (1) write: cc + 5 + ds             < lu_   (Gambatte cc + 4 + ds)
+        // cgbp (2): cc + 1 < lu_ (hardware raw cc)
+        // vram (0, r/w): cc + 2 - cgb + ds < lu_ (hardware cc + 1 - cgb + ds)
+        // oam (1) read: cc + 5 < lu_ (hardware cc + 4)
+        // oam (1) write: cc + 5 + ds < lu_ (hardware cc + 4 + ds)
         if self.display_enable_inactive_until != 0 {
             let bias: i64 = match (kind, is_read) {
                 (2, _) => 1,
@@ -9207,26 +9128,26 @@ impl Ppu {
                 return Some(false);
             }
         }
-        // CGB palette RAM (FF69/FF6B): Gambatte `cgbpAccessible(cc)` — accessible
-        // iff `lineCycles(cc) + ds < 80` OR `cc >= m0Time + 2`. Both boundaries are
+        // CGB palette RAM (FF69/FF6B): the hardware CGB-palette-accessible check at cc — accessible
+        // iff `line cycles(cc) + ds < 80` OR `cc >= mode-0 time + 2`. Both boundaries are
         // resolved at the access cc against master-cc anchors (begin =
         // cgbp_block_start_cc, end = exact m0_time_master).
         if kind == 2 {
             if let Some(start) = self.cgbp_block_start_cc {
-                // `cgbp_block_start_cc` is the byte-exact Gambatte cgbp-block BEGIN
-                // cc (lyTime-anchored at line-cycle `80 - ds`); blocked once the
-                // access cc reaches it. The lyTime anchor folds the `lytime_no_plus1`
-                // phase (the DS->SS speed-change bridge drops the `+1` LyCounter
+                // `cgbp_block_start_cc` is the byte-exact hardware cgbp-block BEGIN
+                // cc (the LY time-anchored at line-cycle `80 - ds`); blocked once the
+                // access cc reaches it. The LY time anchor folds the `lytime_no_plus1`
+                // phase (the DS->SS speed-change bridge drops the `+1` the LY counter
                 // correction); the access cc must share that phase, so add the same
                 // `plus1` here instead of the fixed `cc_end` (+1). Without it the
                 // lcdoffset variants (multi-`stop` LCD-enable phase) land 1 cc off:
                 // base (plus1=1) needs `cc+1`, lcdoffset (plus1=0) needs raw `cc`.
                 let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
                 let begun = cc + plus1 >= start as i64;
-                // Gambatte `cgbpAccessible`: accessible once `cc >= m0Time + 2`.
-                // `m0Time` is `m0TimeOfCurrentLine(cc)` — the CURRENT line's
+                // The hardware CGB-palette-accessible window: accessible once `cc >= mode-0 time + 2`.
+                // `mode-0 time` is `the current line's mode-0 (HBlank) time at cc` — the CURRENT line's
                 // mode-0 time. During mode 2 (OAMSearch) `m0_time_master` still
-                // holds the PREVIOUS line's (now-past) m0Time, so the
+                // holds the PREVIOUS line's (now-past) mode-0 time, so the
                 // `cc_end >= m0t + 2` end test would spuriously unblock a write
                 // landing in late mode 2 (after `cgbp_block_start_cc` but before
                 // mode 3 even begins). Mode 3 cannot have ended before it starts:
@@ -9248,24 +9169,24 @@ impl Ppu {
             return Some(begun && !ended);
         }
         // VRAM/OAM: blocked during mode 3 (start gated on the FF41 mode register,
-        // window-safe); END unblocks at Gambatte's `cc + 2 >= m0Time` (exact).
-        // The m0Time end-boundary only applies once mode 3 has begun: during mode 2
+        // window-safe); END unblocks at the hardware `cc + 2 >= mode-0 time` (exact).
+        // The mode-0 time end-boundary only applies once mode 3 has begun: during mode 2
         // (OAMSearch) `m0_time_master` still holds the PREVIOUS line's (now-past)
         // value, so the `cc+2 >= m0t` test would spuriously report "ended" and
         // unblock OAM mid-OAM-scan. OAM is blocked through mode 2; VRAM is accessible
         // in mode 2 except the begin window resolved below.
-        // VRAM mode-3 BEGIN (kind 0). Gambatte blocks VRAM `lcdc_en` lines a few
+        // VRAM mode-3 BEGIN (kind 0). Hardware blocks VRAM on lcd-enabled lines a few
         // line-cycles before cgbp does, and the threshold differs by direction and
-        // model (libgambatte video.cpp):
-        //   vramReadable : lineCycles + ds < 76 + 3*cgb   (begin lc 76-ds dmg / 79-ds cgb)
-        //   vramWritable : lineCycles + ds < 79           (begin lc 79-ds, both)
-        //   cgbpAccessible: lineCycles + ds < 80          (begin lc 80-ds)
+        // model:
+        // VRAM-readable : line cycles + ds < 76 + 3*cgb (begin lc 76-ds dmg / 79-ds cgb)
+        // VRAM-writable : line cycles + ds < 79 (begin lc 79-ds, both)
+        // the CGB-palette accessible window: line cycles + ds < 80 (begin lc 80-ds)
         // `cgbp_block_start_cc` is the cgbp begin (lc 80-ds); the VRAM begin sits
         // `offset` line-cycles earlier, each line-cycle = `1<<ds` cc:
-        //   read  offset = 4 - 3*cgb   (4 dmg, 1 cgb)
-        //   write offset = 1
-        // The access cc shares the lyTime phase via `plus1` (the DS->SS speed-change
-        // bridge drops the `+1` LyCounter correction); see the cgbp begin above.
+        // read offset = 4 - 3*cgb (4 dmg, 1 cgb)
+        // write offset = 1
+        // The access cc shares the LY time phase via `plus1` (the DS->SS speed-change
+        // bridge drops the `+1` the LY counter correction); see the cgbp begin above.
         let vram_started = if kind == 0 {
             self.cgbp_block_start_cc.map(|start| {
                 let offset = if is_read { 4 - 3 * is_cgb as i64 } else { 1 };
@@ -9285,20 +9206,20 @@ impl Ppu {
                 // A closed-form cgbp anchor exists for the CURRENT line. At single
                 // speed an OAM scan still running past tick 80 (mode-3 starts at tick
                 // 80) means the LCD-enable offset extended this line's mode 2 (the
-                // 4-`stop` lcdoffset2 path); the lyTime anchor then carries a
-                // stop-bridge phase error and lineCycles has not yet reached the
+                // 4-`stop` lcdoffset2 path); the LY time anchor then carries a
+                // stop-bridge phase error and line cycles has not yet reached the
                 // begin window, so VRAM is still accessible (keeps
                 // prewrite_lcdoffset2_1 accessible). Double speed never legitimately
                 // sits in OAMSearch past tick 80 with this anomaly (no DS lcdoffset2
                 // tests), so there `ticks > 80` is a genuine late-mode-2 block; only
                 // apply the escape at single speed. EXCLUDE the first line after
-                // enable: there M3 legitimately arms at tick 85/86 (m3StartLineCycle
+                // enable: there M3 legitimately arms at tick 85/86 (mode-3-start line cycle
                 // + 2), so an OAMSearch tick > 80 is the normal first-line pre-M3
                 // window, NOT an lcdoffset2 stop-bridge anomaly — the `vram_started`
                 // begin (now closed-form from the enable-anchored cgbp anchor) is the
                 // correct gate there (ly0_late_vramr/vramw _2/_3 boundary).
-                // PERACCESS facet-2 (line-end boundary): under the FACET-1 STOP
-                // carry the lyTime-anchored `vram_started` begin is now exact (the
+                // Line-end boundary: under the STOP-switch STAT-phase
+                // carry the LY time-anchored `vram_started` begin is now exact (the
                 // de-skewed access cc compares against the un-carried cgbp begin),
                 // so a write that has crossed the begin window IS in the next
                 // line's mode-3 and must block — the coarse `ticks>80` escape
@@ -9315,35 +9236,35 @@ impl Ppu {
                 return Some(if lcdoffset_extended { false } else { started });
             }
         let m0t = self.m0_time_master? as i64;
-        // END unblocks at Gambatte's `cc + 2 >= m0Time` (exact), resolved at the
+        // END unblocks at the hardware `cc + 2 >= mode-0 time` (exact), resolved at the
         // raw access cc. The post-tick FF41 mode register (`mode3_locked`) crosses
         // this boundary one access-tick (2/4 cc) EARLY because `ppu_locks_access`
         // runs after `tick_m`, so it cannot gate the END — a `postread` landing at
-        // `cc = m0Time - 4` (still mode 3 at the access cc) would wrongly unblock.
-        // Resolve the mode-3 END here from `m0Time`; gate the START on the mode-2->3
-        // master-cc anchor (`cgbp_block_start_cc`, == `lineCycles + ds >= 80`) when
+        // `cc = mode-0 time - 4` (still mode 3 at the access cc) would wrongly unblock.
+        // Resolve the mode-3 END here from `mode-0 time`; gate the START on the mode-2->3
+        // master-cc anchor (`cgbp_block_start_cc`, == `line cycles + ds >= 80`) when
         // it exists, else fall back to the register's `mode3_locked`. OAM is also
         // blocked through mode 2: in `OAMSearch` (mode 2) `m0_time_master` still
         // holds the PREVIOUS line's (past) value, so the END test must not apply.
-        // OAM line-wrap (Gambatte oamReadable/oamWritable): in the last few dots of
+        // OAM line-wrap (the hardware OAM-readable/OAM-writable checks): in the last few dots of
         // a line the next line's mode-2 OAM scan is imminent, so an OAM access is
         // already locked — except on the vblank lines (ly 143..152, whose successor
-        // is mode 1, not mode 2). Gambatte gates on `lineCycles(cc) + K >= 456`:
-        //   read : lineCycles(cc) + 4 - ds   (video.cpp oamReadable)
-        //   write: lineCycles(cc) + 3 + cgb  (video.cpp oamWritable)
+        // is mode 1, not mode 2). Hardware gates on `line cycles(cc) + K >= 456`:
+        // read : line cycles(cc) + 4 - ds (OAM readable threshold)
+        // write: line cycles(cc) + 3 + cgb (OAM writable threshold)
         // The CPU read and write land on different sub-M-cycle phases, so the
-        // `lineCycles(cc)` each resolves at maps differently onto the renderer state:
-        //   WRITE commits on the renderer dot boundary, so `lineCycles(cc)` is the
-        //     post-tick `line_cycle`, minus the LyCounter `+1` phase that the
-        //     stop-bridge (lcdoffset / `lytime_no_plus1`) lines drop:
-        //     `line_cycle - lytime_no_plus1`. (Verified across the prewrite plain/
-        //     lcdoffset, SS/DS pairs: block boundary == lineCycles 452.)
-        //   READ samples mid-M-cycle, off the renderer dot grid; only the lyTime
-        //     master clock captures that phase, so use Gambatte's own
-        //     `lineCycles(cc) = 456 - ((lyTime - cc) >> ds)` with lyTime =
-        //     p_now + LyCounter.time (+plus1, the shared gate phase). (Verified
-        //     across the preread plain/lcdoffset, SS/DS pairs: block boundary at the
-        //     DS-lcdoffset case, accessible everywhere else.)
+        // `line cycles(cc)` each resolves at maps differently onto the renderer state:
+        // WRITE commits on the renderer dot boundary, so `line cycles(cc)` is the
+        // post-tick `line_cycle`, minus the LY counter `+1` phase that the
+        // stop-bridge (lcdoffset / `lytime_no_plus1`) lines drop:
+        // `line_cycle - lytime_no_plus1`. (Verified across the prewrite plain/
+        // lcdoffset, SS/DS pairs: block boundary == line cycles 452.)
+        // READ samples mid-M-cycle, off the renderer dot grid; only the LY time
+        // master clock captures that phase, so use the hardware's own
+        // `line cycles(cc) = 456 - ((the LY time - cc) >> ds)` with the LY time =
+        // p_now + the LY counter.time (+plus1, the shared gate phase). (Verified
+        // across the preread plain/lcdoffset, SS/DS pairs: block boundary at the
+        // DS-lcdoffset case, accessible everywhere else.)
         let oam_line_cycle = if kind != 1 {
             0
         } else if is_read {
@@ -9373,20 +9294,20 @@ impl Ppu {
         // shared boundary (vram-read is BCE-common).
         let de_read_hold = (kind == 1 && is_read && cgb_de) as i64;
         let ended = self.state != State::OAMSearch && cc_end + 2 - de_read_hold >= m0t;
-        // OAM-WRITE DMG quirk (Gambatte oamWritable): at exactly lineCycles(cc) == 76
+        // OAM-WRITE DMG quirk (the hardware OAM-writable check): at exactly line cycles(cc) == 76
         // (the last mode-2 OAM-scan dot, DMG only) an OAM write is accepted. CGB has
         // no such escape.
         let oam_write_escape = kind == 1 && !is_read && !is_cgb && oam_line_cycle == 76;
         let started = match (kind, vram_started) {
             // VRAM: byte-exact per-direction/model begin (see `vram_started`).
             (0, Some(s)) => s || mode3_locked,
-            // OAM (kind 1) on the first line after enable: Gambatte's oamWritable/
-            // oamReadable have NO lineCycle-begin term — OAM is blocked from the end
-            // of the inactive period (handled by the guard at the top) to m0Time,
+            // OAM (kind 1) on the first line after enable: the hardware OAM-writable/
+            // OAM-readable have NO line cycle-begin term — OAM is blocked from the end
+            // of the inactive period (handled by the guard at the top) to mode-0 time,
             // through both mode 2 and mode 3. The first line has no mode-2 FF41
             // register (it reports mode 0), so `mode3_locked`/`cgbp_block_start_cc`
             // do not gate it; once past the inactive period it is simply blocked
-            // (the `ended` test unblocks it at m0Time / mode 0).
+            // (the `ended` test unblocks it at mode-0 time / mode 0).
             (1, _) if self.first_line_after_enable => true,
             // OAM (kind 1, blocked from mode 2): the register `mode3_locked`
             // already covers the mode-2 prefix; the cgbp anchor refines the dot.
@@ -9401,19 +9322,19 @@ impl Ppu {
         Some(started && !ended)
     }
 
-    /// Byte-exact Gambatte `LCD::vramReadable(cc)` for a CPU VRAM read at master-cc
-    /// `cc`, resolved purely from the lyTime-derived `lineCycles(cc)` and
-    /// `m0TimeOfCurrentLine` — NOT the renderer's current FF41 mode register.
+    /// Byte-exact hardware VRAM-readable(cc) predicate for a CPU VRAM read at master-cc
+    /// `cc`, resolved purely from the LY time-derived `line cycles(cc)` and
+    /// `the current line's mode-0 (HBlank) time` — NOT the renderer's current FF41 mode register.
     /// readable iff LCD off, in vblank, the line-start inactive
-    /// window, `lineCycles(cc) + ds < 76 + 3*cgb` (still in mode 2 / before the
-    /// mode-3 lock), or `cc + 2 >= m0Time` (mode 0 reached). Used by the
+    /// window, `line cycles(cc) + ds < 76 + 3*cgb` (still in mode 2 / before the
+    /// mode-3 lock), or `cc + 2 >= mode-0 time` (mode 0 reached). Used by the
     /// PC-in-DMA-dest opcode-prefetch absorption (`Bus::fetch_opcode`): the GDMA's
     /// prefetch opcode at the block's first dest byte must see VRAM readable at the
-    /// prefetch cc the same way Gambatte's `Interrupter::prefetch` (run BEFORE
+    /// prefetch cc the same way the hardware interrupt prefetch (run BEFORE
     /// `dma()` overwrites VRAM) does — including the mode-2 readable window
-    /// (late_gdma_pc_7ffe_1: lineCycles 76 < 79 -> readable -> pre-byte) and the
-    /// mode-3 lock just past it (late_gdma_pc_7ffe_2: lineCycles 80 -> locked).
-    /// Returns None when no closed-form m0Time exists (window / first line after
+    /// (late_gdma_pc_7ffe_1: line cycles 76 < 79 -> readable -> pre-byte) and the
+    /// mode-3 lock just past it (late_gdma_pc_7ffe_2: line cycles 80 -> locked).
+    /// Returns None when no closed-form mode-0 time exists (window / first line after
     /// enable) so the caller falls back to the renderer-mode lock.
     pub fn vram_readable_at_cc(&self, cc: u64, is_cgb: bool, ds: bool) -> Option<bool> {
         if self.disabled || self.internal_ly_val >= 144 {
@@ -9422,7 +9343,7 @@ impl Ppu {
         let m0t = self.m0_time_master? as i64;
         let cc = cc as i64;
         let dsi = ds as i64;
-        // Gambatte `lineCycles(cc) = 456 - ((lyTime - cc) >> ds)` (the same lyTime
+        // The hardware `line cycles(cc) = 456 - ((the LY time - cc) >> ds)` (the same LY time
         // phase the OAM-read END boundary uses in `cpu_access_blocked`).
         let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
         let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as i64;
@@ -9434,15 +9355,15 @@ impl Ppu {
         Some(mode2_readable || mode0_reached)
     }
 
-    /// getStat mode-3->0 read-boundary offset (`access_cc + off < m0Time` => mode 3).
-    /// SS: rustyboi's `m0_time_master` carries the lyTime `+1` so it sits 1cc high vs
-    /// Gambatte's getStat read -> off=3 (`!lytime_no_plus1`); on a post-DS->SS line the
+    /// STAT-resolve mode-3->0 read-boundary offset (`access_cc + off < mode-0 time` => mode 3).
+    /// SS: rustyboi's `m0_time_master` carries the LY time `+1` so it sits 1cc high vs
+    /// The hardware STAT resolve read -> off=3 (`!lytime_no_plus1`); on a post-DS->SS line the
     /// `+1` is dropped -> off=2. DS samples the half-dot grid -> off=2.
     ///
-    /// On a post-DS->SS line that took the FACET1 mode-3 STAT-phase carry
-    /// (`render_carry_skew_cc != 0`), the STAT/m0Time clock was advanced `carry` dots
+    /// On a post-DS->SS line that took the mode-3 STAT-phase carry
+    /// (`render_carry_skew_cc != 0`), the STAT/mode-0 time clock was advanced `carry` dots
     /// WITHOUT moving the render latch / read-cc grid, so the FF41 read cc sits `carry`
-    /// dots BEHIND the carried m0Time. Gambatte's `cc + 2 < m0Time` holds against the
+    /// dots BEHIND the carried mode-0 time. The hardware `cc + 2 < mode-0 time` holds against the
     /// un-carried read grid, so subtract the carry from the offset (target carry=1 ->
     /// off 2->1 -> gap-3 mode-3 read; carry=0 want-mode-0 siblings keep off=2). The
     /// carry is 0 except on a post-mode-3-switch line, so this is inert elsewhere.
@@ -9455,15 +9376,15 @@ impl Ppu {
         }
     }
 
-    /// Gambatte `getStat` mode-3 <-> mode-0 resolution at the CPU's access cc.
+    /// The hardware STAT resolve, mode-3 <-> mode-0, at the CPU's access cc.
     /// Returns the FF41 lower two mode bits the CPU observes when reading FF41 at
-    /// `access_cc` (master-cc units), or None when no closed-form m0Time is
+    /// `access_cc` (master-cc units), or None when no closed-form mode-0 time is
     /// available (window / first line / not in mode 3) so the bus falls back to
     /// the renderer-set FF41 register.
     ///
-    /// Gambatte resolves mode 3 iff `cc + 2 < m0TimeOfCurrentLine(cc)`; the first
-    /// mode-0 read therefore lands at `cc = m0Time - 2`. This reproduces the
-    /// (now Gambatte-exact) persisted boundary at single speed and adds correct
+    /// Hardware resolves mode 3 iff `cc + 2 < the current line's mode-0 (HBlank) time at cc`; the first
+    /// mode-0 read therefore lands at `cc = mode-0 time - 2`. This reproduces the
+    /// (now hardware-exact) persisted boundary at single speed and adds correct
     /// sub-dot resolution at double speed, where the CPU samples FF41 at an odd
     /// master cc that the per-dot renderer would otherwise round.
     pub fn get_stat_mode3to0_at_cc(&self, access_cc: u64, ds: bool) -> Option<u8> {
@@ -9471,17 +9392,17 @@ impl Ppu {
             return None;
         }
         // Only refine when the renderer currently reports mode 3 (we are in the
-        // mode-3 window for this line) and a closed-form m0Time exists. Outside
+        // mode-3 window for this line) and a closed-form mode-0 time exists. Outside
         // mode 3 the register is already correct (mode 0/2 boundaries handled
         // elsewhere).
         if self.state != State::PixelTransfer {
             return None;
         }
         let m0t = self.m0_time_master? as i64;
-        // Gambatte getStat: mode 3 iff `cc + 2 < m0Time`. The shared m0Time carries
-        // the lyTime `+1` correction the VRAM/OAM/cgbp access gate needs; at single
+        // The hardware STAT resolve: mode 3 iff `cc + 2 < mode-0 time`. The shared mode-0 time carries
+        // the LY time `+1` correction the VRAM/OAM/cgbp access gate needs; at single
         // speed (and only when not in a post-DS->SS-switch line, where `lytime_no_plus1`
-        // already drops it) it sits 1cc high for the getStat read specifically, so the
+        // already drops it) it sits 1cc high for the STAT-resolve read specifically, so the
         // read boundary uses `+3` instead of `+2`.
         let read_off = self.stat_read_off(ds);
         if (access_cc as i64) + read_off < m0t {
@@ -9491,16 +9412,16 @@ impl Ppu {
         }
     }
 
-    /// Gambatte `LCD::getStat` mode bits, computed at the CPU's access cc, for the
+    /// The hardware STAT resolve (mode bits), computed at the CPU's access cc, for the
     /// mode 0<->1 (VBlank entry/exit) boundary ONLY. The per-dot renderer advances
     /// the FF41 mode register inside `tick_m()`, so a read whose M-cycle straddles
     /// the line-143->144 (VBlank entry) or line-153->0 (VBlank exit / wrap-to-OAM)
-    /// boundary latches the next line's mode; Gambatte resolves it from the LY
+    /// boundary latches the next line's mode; the hardware resolves it from the LY
     /// phase at the raw read cc. This is exactly the
     /// enable_display m1stat / ly_count / m2-m3 count cluster: those reads land in
     /// the last few cc of line 143 or line 153 and must read the OLD line's mode 0.
     ///
-    /// Scoped to the VBlank boundary (frameCycles window) so the tuned per-dot
+    /// Scoped to the VBlank boundary (frame cycles window) so the tuned per-dot
     /// register still serves every mid-frame mode 0/2/3 read. Returns None when the
     /// access cc does not resolve into the mode-1 window (then the bus keeps the
     /// renderer register).
@@ -9509,8 +9430,8 @@ impl Ppu {
             return None;
         }
         let ds = mmio.is_double_speed_mode();
-        // The bus passes the read M-cycle START cc (`master_cc`). Gambatte's getStat
-        // resolves at the latch cc; the lineCycles/frameCycles phase needs a small
+        // The bus passes the read M-cycle START cc (`master_cc`). The hardware STAT resolve
+        // resolves at the latch cc; the line cycles/frame cycles phase needs a small
         // per-speed bias to align the VBlank-entry boundary (swept against the
         // suite: SS 0, DS -1; the DS read samples one cc past the SS phase since
         // each dot is 2 cc, so the boundary sits a cc earlier in the read window).
@@ -9522,18 +9443,18 @@ impl Ppu {
         // (`cc += 4 * isCgb()`) charges a flat +4 on CGB before the woken instruction
         // stream resumes, so a CGB halt-woken FF41 read effectively samples ~5cc
         // later in the line than the engine's access cc reflects (mirror of the
-        // proven getLyReg `cgb_halt_exit` bias; the extra +1 over the raw +4 is the
-        // same lyTime correction the line-phase consumers carry). Without it the
-        // `lycirq_m2stat_2` STAT read lands at lineCycles 75 (OAMSearch -> mode 2)
-        // where Gambatte reads lineCycles 80 (mode 3, `cc+2 < m0Time`). The
+        // proven LY-register `cgb_halt_exit` bias; the extra +1 over the raw +4 is the
+        // same the LY time correction the line-phase consumers carry). Without it the
+        // `lycirq_m2stat_2` STAT read lands at line cycles 75 (OAMSearch -> mode 2)
+        // where hardware reads line cycles 80 (mode 3, `cc+2 < mode-0 time`). The
         // lycirq_m2stat_1/_2/_3 family arms 4cc apart, so this +5 lifts 71/75/79 ->
-        // 76/80/84: _1 stays mode 2 (<77), _2/_3 resolve mode 3 — matching Gambatte.
+        // 76/80/84: _1 stays mode 2 (<77), _2/_3 resolve mode 3 — matching hardware.
         //
         // SCOPED to the OAMSearch-state read (the line-START mode2->mode3 boundary).
-        // The HBlank line-tail halt-woken reads (`m0int_m0stat_scx*`, lineCycles
+        // The HBlank line-tail halt-woken reads (`m0int_m0stat_scx*`, line cycles
         // ~445-454) are already resolved exactly by the `tail_thresh` path below and
         // MUST keep their un-biased access cc, so gate this on `state == OAMSearch`.
-        // Same CGB-single-speed-no-HDMA predicate as getLyReg (the HDMA / DS halt
+        // Same CGB-single-speed-no-HDMA predicate as the LY-register read (the HDMA / DS halt
         // wakeups fold their own halt-exit phase through the bridge/block-transfer).
         let access_cc = if self.state == State::OAMSearch
             && mmio.halt_wakeup_skew()
@@ -9543,7 +9464,7 @@ impl Ppu {
         {
             // An m2-woken wake that charged its +4 as a REAL stall (sm83.rs
             // `return 4`) already advanced this read's access cc by 4cc, so only
-            // the +1 lyTime correction remains; a wake that did NOT (LYC/m1 path,
+            // the +1 the LY time correction remains; a wake that did NOT (LYC/m1 path,
             // or the pre-stall model) still needs the full +5.
             if mmio.m2_halt_stall_charged_cgb() {
                 access_cc + 1
@@ -9553,29 +9474,21 @@ impl Ppu {
         } else {
             access_cc
         };
-        // FAITHFUL EVENTCC (R4): the DMG branch of Gambatte's HALT-exit fixup
-        // (halt-exit fixup `cc += 4 * (... || cc - eventTime < 2)`). When the DMG
-        // wakeup landed within 2cc of the woken mode-0 STAT IRQ event time, the +4
-        // wakeup latency advances the CPU clock, so the halt-woken FF41 read samples
-        // +4cc later in the line — lifting the `late_m0*_halt_m0stat_scx3_2b` read
-        // from the stale mode-0 line tail into the next line's OAM (mode 2). Only
-        // active under RB_FAITHFUL_EVENTCC; the flag is set at unhalt and cleared on
-        // the next HALT, so it only ever biases the single woken instruction stream.
-        // HALT-PREFETCH (Lever A, RB_PREFETCH_CC): replace the all-or-nothing +4
-        // with the per-stream M-cycle phase (0 or 1) derived at unhalt from the
-        // pre-snap HALT-entry cc vs the snap target. The byte-identical _1b/_2b
-        // ROMs separate: _1b (phase 0) keeps the stale mode-0 line tail; _2b
-        // (phase 1) gets +4 lifting the read into the next line's mode 2. The
-        // foundation's uniform +4 (halt_wake_plus4_dmg) lifted BOTH, swapping the
-        // failures; the phase isolates the bias to _2b alone. Under RB_PREFETCH_CC
-        // OFF the foundation behavior is preserved verbatim.
+        // HALT-exit fixup: when a HALT wakeup lands within 2cc of the woken
+        // mode-0 STAT IRQ event, the +4 wakeup latency advances the CPU clock so
+        // the halt-woken FF41 read samples +4cc later in the line — lifting the
+        // read from the stale mode-0 line tail into the next line's OAM (mode 2).
+        // The per-stream M-cycle phase (0 or 1) is derived at unhalt from the
+        // HALT-entry cc vs the snap target, so only the streams that actually
+        // straddle the boundary take the +4. Set at unhalt, cleared on the next
+        // HALT, so it only ever biases the single woken instruction stream.
         let access_cc = access_cc + 4 * mmio.halt_prefetch_phase() as u64;
-        let lc = self.ly_counter_obs(mmio); // ds-subdot STAGE 1: read-path phase
+        let lc = self.ly_counter_obs(mmio); // read-path phase
         let ly = lc.ly as i64;
         let cpl = stat_irq::LCD_CYCLES_PER_LINE as i64;
         let cpf = stat_irq::LCD_CYCLES_PER_FRAME as i64;
-        // lyCounter.time() in master-cc; timeToNextLy = time - cc; lineCycles =
-        // 456 - (timeToNextLy >> ds); frameCycles = ly*456 + lineCycles.
+        // the LY counter.time() in master-cc; time-to-next-LY = time - cc; line cycles =
+        // 456 - (time-to-next-LY >> ds); frame cycles = ly*456 + line cycles.
         let ly_time_master = self.p_now as i64 + lc.time as i64;
         let time_to_next_ly = ly_time_master - access_cc as i64;
         let line_cycles = cpl - (time_to_next_ly >> ds as i32);
@@ -9586,25 +9499,25 @@ impl Ppu {
         // the access-start cc: at a line-boundary straddle (VBlank entry/exit, line
         // wrap) AND mid-frame, where a mode 0 / mode 2 read in a non-PixelTransfer
         // state samples the register ~+4cc (≈+2 dots) late (C1: the lycint_m0stat /
-        // m2int_m0stat / m0int_m0stat / lycEnable / misc-small clusters). The
+        // m2int_m0stat / m0int_m0stat / LYC-enable / misc-small clusters). The
         // PixelTransfer (mode-3) reads are already resolved exactly by
         // `get_stat_mode3to0_at_cc` (which runs first in the bus `.or_else` chain),
         // so this is only ever consulted in mode 0 / mode 2 / mode 1 — never inside
-        // mode 3. (`ly` is the clean event-clock LY == Gambatte's lyCounter.ly().)
+        // mode 3. (`ly` is the clean event-clock LY == the hardware LY-counter LY.)
         //
         // VBlank-adjacent lines (ly>=143): keep the original line-tail-scoped path
         // byte-identical (those boundaries are co-tuned with the renderer register).
         // Mid-frame lines (ly<143): C1 resolves the mode 0 / mode 2 read at the
-        // access-start cc via the full Gambatte getStat branch order (video.cpp
-        // 806-817), reusing the exact mode-3 sub-test so it stays byte-identical to
+        // access-start cc via the full hardware STAT-resolve branch order,
+        // reusing the exact mode-3 sub-test so it stays byte-identical to
         // the PixelTransfer path for any line-straddle that resolves back into mode 3.
         let near_line_end = line_cycles >= cpl - 7;
         // LY 0..142: full mid-frame resolution. LY 143 is ALSO a rendering line
-        // (it has its own m0Time), so its line BODY resolves mode 3 exactly like
+        // (it has its own mode-0 time), so its line BODY resolves mode 3 exactly like
         // any other rendering line — the m3stat_count / m0irq_count streams read
-        // FF41 at lineCycles 77..80 through LY 143 and Gambatte reports mode 3 for
+        // FF41 at line cycles 77..80 through LY 143 and hardware reports mode 3 for
         // all 144 lines (LY 0..143). The renderer is in the OAMSearch dead zone at
-        // those lineCycles, so without this LY=143 would fall through to the
+        // those line cycles, so without this LY=143 would fall through to the
         // VBlank-boundary path below (which returns None for the line body) and
         // count one read short. Only the LY=143 line TAIL (the 143->144 mode 0->1
         // transition) stays on the VBlank-boundary path — there the mid-frame
@@ -9643,7 +9556,7 @@ impl Ppu {
             return Some(0);
         }
         // Mode 2 (OAM) at line END (the next line's OAM is anticipated from
-        // lineCycles >= cpl-3).
+        // line cycles >= cpl-3).
         if line_cycles >= cpl - 3 {
             if (access_cc + 1) < self.display_enable_inactive_until {
                 return Some(0);
@@ -9651,7 +9564,7 @@ impl Ppu {
             return Some(2);
         }
         // Line tail before the mode-2 anticipation window (cpl-7 .. cpl-3): mode 3
-        // iff cc+2 < m0Time, else mode 0.
+        // iff cc+2 < mode-0 time, else mode 0.
         if let Some(m0t) = self.m0_time_master {
             if (access_cc + 1) < self.display_enable_inactive_until {
                 return Some(0);
@@ -9670,19 +9583,19 @@ impl Ppu {
     ///
     /// Branch ORDER matches the silicon STAT resolution (the VBlank-window branch
     /// never applies for ly<143):
-    ///   - mode 2 iff `lineCycles < 77 || lineCycles >= cpl - 3` (guarded by
-    ///     inactivePeriodAfterDisplayEnable, == rustyboi `display_enable_inactive_until`)
-    ///   - else mode 3 iff `access_cc + read_off < m0Time`  — the SAME sub-test as
-    ///     `get_stat_mode3to0_at_cc` (so a line-straddle that resolves back into
-    ///     mode 3 stays byte-identical to the already-passing PixelTransfer path)
-    ///   - else mode 0
+    /// - mode 2 iff `line cycles < 77 || line cycles >= cpl - 3` (guarded by
+    /// the inactive period after display enable, == rustyboi `display_enable_inactive_until`)
+    /// - else mode 3 iff `access_cc + read_off < mode-0 time` — the SAME sub-test as
+    /// `get_stat_mode3to0_at_cc` (so a line-straddle that resolves back into
+    /// mode 3 stays byte-identical to the already-passing PixelTransfer path)
+    /// - else mode 0
     ///
     /// This is only ever reached when the renderer is NOT in PixelTransfer (the
     /// PixelTransfer reads short-circuit through `get_stat_mode3to0_at_cc` first), so
     /// the mode-3 sub-test resolves a mode 0/mode 3 line-boundary straddle only.
     /// During mode 2 (OAMSearch) `m0_time_master` still holds the PREVIOUS line's
     /// (now-past) value, so the mode-3 sub-test is gated on `state != OAMSearch`
-    /// (mirroring the cpu_access_blocked stale-m0Time guards) — mode 3 cannot have
+    /// (mirroring the cpu_access_blocked stale-mode-0 time guards) — mode 3 cannot have
     /// ended before it begins.
     fn get_stat_mode_midframe(
         &self,
@@ -9698,14 +9611,14 @@ impl Ppu {
         // (mode 2) anticipation instead of deferring to the post-tick renderer
         // register (which lags here and reports the stale mode 0).
         //
-        // With the current engine the post-wake decisive reads PRESERVE Gambatte's
+        // With the current engine the post-wake decisive reads PRESERVE the hardware
         // exact 4cc arming spacing, so the `_1` (want-mode0) and `_2`/`2b`/`ds_2`
-        // (want-mode2) reads land at DIFFERENT, cleanly-separable lineCycles:
-        //   CGB single speed: want-mode0 at 446-448, want-mode2 at 450-451
-        //                     -> threshold cpl-7 (449)
-        //   CGB double speed: want-mode0 at 449-450, want-mode2 at 451
-        //                     -> threshold cpl-5 (451)
-        // (cctraced: `m0int_m0stat_scx*_1` vs `*_2`/`*_ds_2`, the Gambatte read
+        // (want-mode2) reads land at DIFFERENT, cleanly-separable line cycles:
+        // CGB single speed: want-mode0 at 446-448, want-mode2 at 450-451
+        // -> threshold cpl-7 (449)
+        // CGB double speed: want-mode0 at 449-450, want-mode2 at 451
+        // -> threshold cpl-5 (451)
+        // (cctraced: `m0int_m0stat_scx*_1` vs `*_2`/`*_ds_2`, the hardware read
         // lands at the line wrap == mode2, rustyboi ~3-5cc short of the wrap.)
         //
         // Scoped to CGB: DMG's mode-0 line-tail phase differs (the same read wants
@@ -9714,7 +9627,7 @@ impl Ppu {
         // PTZ wake-source scope: these zones re-map the unmodeled m0/m2-wake-exit
         // skew of the m0int_m0stat/m2int_m0stat streams; an LYC/m1-woken stream's
         // line-tail read must fall through to the true closed-form resolution
-        // (real DMG+CGB read mode 0 at lineCycles 449..452 — gbc-hw-tests
+        // (real DMG+CGB read mode 0 at line cycles 449..452 — gbc-hw-tests
         // lcd_irq_delay_timer ISR sweeps).
         let ptz_wake = mmio.halt_wake_m0m2();
         let tail_thresh = if ds { cpl - 5 } else { cpl - 7 };
@@ -9725,16 +9638,16 @@ impl Ppu {
             return Some(2);
         }
         // DMG halt-woken line-tail (the `m0int_m0stat_scx*` ly<143 mid-frame
-        // family): the post-wake decisive reads preserve Gambatte's exact 4cc arming
-        // spacing, so on DMG the want-mode0 reads land at lineCycles 445..450 and the
-        // want-mode2 reads at lineCycles 451..454 — cleanly separable at integer cc
-        // (measured via the runner's closed-form lineCycles, NOT sub-dot). DMG's
-        // mode-0 line tail runs TWO lineCycles longer than CGB (which splits at
+        // family): the post-wake decisive reads preserve the hardware exact 4cc arming
+        // spacing, so on DMG the want-mode0 reads land at line cycles 445..450 and the
+        // want-mode2 reads at line cycles 451..454 — cleanly separable at integer cc
+        // (measured via the runner's closed-form line cycles, NOT sub-dot). DMG's
+        // mode-0 line tail runs TWO line cycles longer than CGB (which splits at
         // 448/449): the dmg08-distinguished `scx3_2` (449) / `scx4_2` (450) read
         // mode0 on DMG but mode2 on CGB. Resolve mode 2 from the closed form at the
         // DMG cpl-5 (451) boundary instead of deferring to the post-tick renderer
-        // register (which lags and reports the stale mode 2 at exactly lineCycles
-        // 450 — the `m0int_m0stat_scx4_2` DMG failure; lineCycles 449/451..454 the
+        // register (which lags and reports the stale mode 2 at exactly line cycles
+        // 450 — the `m0int_m0stat_scx4_2` DMG failure; line cycles 449/451..454 the
         // renderer already resolves correctly). The want-mode0 reads (<=450) fall
         // through to the mode-3/mode-0 resolution below. The ly=153 VBlank-line
         // `*_2b` reads are NOT in this mid-frame path (handled by the VBlank branch
@@ -9746,13 +9659,13 @@ impl Ppu {
             return Some(2);
         }
         if halt_skew && ptz_wake && line_cycles >= cpl - 7 {
-            // DMG line tail at lineCycles 449/450: still mode 0 (the want-mode0
+            // DMG line tail at line cycles 449/450: still mode 0 (the want-mode0
             // group extends to 450 on DMG). Fall through to the mode-3/mode-0
             // resolution below rather than deferring to the lagging renderer.
             if (access_cc + 1) < self.display_enable_inactive_until {
                 return Some(0);
             }
-            // mode 3 iff still before m0Time, else mode 0 (the line body).
+            // mode 3 iff still before mode-0 time, else mode 0 (the line body).
             if self.state != State::OAMSearch
                 && let Some(m0t) = self.m0_time_master
             {
@@ -9764,7 +9677,7 @@ impl Ppu {
             }
             return None;
         }
-        // Mode 2 (OAM search): start-of-line lineCycles (< 77), or line-tail
+        // Mode 2 (OAM search): start-of-line line cycles (< 77), or line-tail
         // anticipation.
         if line_cycles < 77 || line_cycles >= cpl - 3 {
             if (access_cc + 1) < self.display_enable_inactive_until {
@@ -9772,7 +9685,7 @@ impl Ppu {
             }
             return Some(2);
         }
-        // Mode 3 (pixel transfer) iff `access_cc + read_off < m0Time` — the exact
+        // Mode 3 (pixel transfer) iff `access_cc + read_off < mode-0 time` — the exact
         // sub-test from `get_stat_mode3to0_at_cc`. Skipped during
         // OAMSearch where `m0_time_master` is the previous line's stale value.
         //
@@ -9792,68 +9705,68 @@ impl Ppu {
                     if (access_cc as i64) + read_off < m0t as i64 {
                         return Some(3);
                     }
-                    // else mode 0 — the body of the line past m0Time.
+                    // else mode 0 — the body of the line past mode-0 time.
                     Some(0)
                 }
                 None => None,
             }
         } else if line_cycles >= 77 {
-            // Mode-3 START dead zone during OAMSearch. Gambatte's getStat reports
-            // mode 3 from lineCycles 77 (`!(lineCycles < 77) && cc+2 < m0Time &&
-            // !inactivePeriodAfterDisplayEnable(cc+1)`), but rustyboi's renderer is
+            // Mode-3 START dead zone during OAMSearch. The hardware STAT resolve reports
+            // mode 3 from line cycles 77 (`!(line cycles < 77) && cc+2 < mode-0 time &&
+            // !the inactive period after display enable(cc+1)`), but rustyboi's renderer is
             // still in OAMSearch until the M3 arm dot (≈82 steady, ≈84/86 first
             // line), so its poked FF41 register reports a stale mode 2 in the
-            // lineCycles 77..arm window. Resolve mode 3 here from THIS line's m0Time.
+            // line cycles 77..arm window. Resolve mode 3 here from THIS line's mode-0 time.
             //
             // On the FIRST line after enable `m0_time_master` already holds this
             // line's value (installed by the first-line OAMSearch block). On steady
             // lines it still holds the PREVIOUS line's value during OAMSearch (the
             // M3-arm site only installs the current line's at ≈dot 82), so compute
-            // the current line's m0Time fresh from the live geometry — no window has
+            // the current line's mode-0 time fresh from the live geometry — no window has
             // started yet this early, so `compute_m3_length` is the settled value.
             //
-            // The inactive boundary is recomputed lineStart-anchored: Gambatte
-            // `lu_ = enableCc + (80<<ds) + 1` and `enableCc == lineStart` (setLcdc
-            // did `lyCounter.reset(0, enableCc)`). The stored
+            // The inactive boundary is recomputed line-start-anchored: on hardware
+            // `lu_ = enable cc + (80<<ds) + 1` and `enable cc == line-start` (the LCDC-write handling
+            // did `the LY counter.reset(0, enable cc)`). The stored
             // `display_enable_inactive_until` is anchored on the raw enable
             // `master_cc()`, one render dot above rustyboi's line-clock origin, so it
-            // ends the window one dot late and wrongly suppresses this lineCycles≈80
-            // mode-3 read; recompute it lineStart-local. (Only meaningful on the
+            // ends the window one dot late and wrongly suppresses this line cycles≈80
+            // mode-3 read; recompute it line-start-local. (Only meaningful on the
             // first line; on steady lines it is far in the past.) Needed for the
             // enable_display frame*_m3stat_count / m0irq_count / ly0 streams whose
-            // FF41 read lands at lineCycles 78..80 during OAMSearch.
-            let lc = self.ly_counter_obs(mmio); // ds-subdot STAGE 1: read-path phase
+            // FF41 read lands at line cycles 78..80 during OAMSearch.
+            let lc = self.ly_counter_obs(mmio); // read-path phase
             let line_start = (self.p_now as i64 + lc.time as i64) - (456i64 << ds as u32);
             let cur_m0t = if self.first_line_after_enable {
-                // Exact first-line value already installed (carries the +1 lyTime
+                // Exact first-line value already installed (carries the +1 the LY time
                 // correction the read boundary is co-tuned with, and the first-line
-                // m3StartLineCycle+2 offset).
+                // mode-3-start line cycle+2 offset).
                 match self.m0_time_master {
                     Some(m0t) => m0t as i64,
                     None => return None,
                 }
             } else {
-                // Steady-line m0Time, fresh (m0_time_master holds the previous
+                // Steady-line mode-0 time, fresh (m0_time_master holds the previous
                 // line's value during this pre-M3 OAMSearch phase). Mirrors
-                // `m0_time_exact(.., first_line=false)`: lineStart + (m3_len + BASE)
-                // << ds + 1 (BASE = 84 CGB / 83 DMG; the +1 is the lyTime correction).
+                // `m0_time_exact(.., first_line=false)`: line-start + (m3_len + BASE)
+                // << ds + 1 (BASE = 84 CGB / 83 DMG; the +1 is the LY time correction).
                 let base: i64 = if is_cgb { 84 } else { 83 };
                 let m3_len = self.compute_m3_length(mmio, is_cgb) as i64;
                 line_start + ((m3_len + base) << ds as u32) + 1
             };
             // The post-enable inactive period only exists on the first line after
-            // enable; on steady lines it ended long ago. Gate the lineStart-local
+            // enable; on steady lines it ended long ago. Gate the line-start-local
             // inactive suppression to the first line (using the global field there
             // would end the window one render dot late — see the comment above).
             let read_off: i64 = self.stat_read_off(ds);
             if self.first_line_after_enable {
-                // `line_start` here (the raw LyCounter-derived line origin) sits one
-                // master-cc ABOVE Gambatte's enable cc anchor (`lyCounter.reset(0,
-                // enableCc)`): cross-checked vs cctracer on frame0_m3stat_count_ds_2 the
-                // rustyboi enableCc maps one cc low. Gambatte's
-                // `inactivePeriodAfterDisplayEnable(cc+1)` boundary is
-                // `lu_ = enableCc + (80<<ds)+1`, so subtract that one cc here. Without
-                // it `lu_local` sat one cc high and the first line's lineCycles-80
+                // `line_start` here (the raw the LY counter-derived line origin) sits one
+                // master-cc ABOVE the hardware enable cc anchor (it resets the LY counter to
+                // (0, enable cc)): cross-checked vs cctracer on frame0_m3stat_count_ds_2 the
+                // rustyboi enable cc maps one cc low. The hardware
+                // `the inactive period after display enable(cc+1)` boundary is
+                // `lu_ = enable cc + (80<<ds)+1`, so subtract that one cc here. Without
+                // it `lu_local` sat one cc high and the first line's line cycles-80
                 // mode-3 read fell inside the inactive window, reporting mode 0 and
                 // dropping the first line's m3 count (out90: 144 m3 reads).
                 let lu_local = line_start + ((80i64 << ds as u32) + 1) - 1;
@@ -9867,27 +9780,26 @@ impl Ppu {
             Some(0)
         } else {
             // Mode 2 with no closed-form anchor resolved above already returned;
-            // a lineCycles-77..453 read during OAMSearch is a stale-m0Time straddle:
+            // a line cycles-77..453 read during OAMSearch is a stale-mode-0 time straddle:
             // defer to the renderer register.
             None
         }
     }
 
-    /// ds-engine STAGE 4: the SINGLE closed-form `LCD::getStat` mode resolver.
+    /// The SINGLE closed-form STAT-resolve mode resolver.
     /// Computes the FF41 mode bits PURELY from the line geometry at the exact
     /// access cc, with NO reliance on the per-dot renderer's poked FF41 register.
-    /// This is the keystone of the exact-event model: the CPU-visible mode is one
-    /// closed form off one cc (Gambatte video.cpp `getStat`), so the DS half-dot
+    /// The CPU-visible mode is one closed form off one cc, so the DS half-dot
     /// straddle pairs resolve by construction instead of via per-dot rounding.
     ///
-    /// Branch order mirrors Gambatte `getStat`:
-    ///   - LCD off / VBlank (ly>=144 via internal_ly) -> mode 0 / mode 1
-    ///   - inactive period after enable -> mode 0
-    ///   - lineCycles < 80 (or line-tail mode-2 anticipation) -> mode 2
-    ///   - access_cc + 2 < m0Time -> mode 3
-    ///   - else mode 0
+    /// Branch order:
+    /// - LCD off / VBlank (ly>=144 via internal_ly) -> mode 0 / mode 1
+    /// - inactive period after enable -> mode 0
+    /// - line cycles < 80 (or line-tail mode-2 anticipation) -> mode 2
+    /// - access_cc + 2 < mode-0 time -> mode 3
+    /// - else mode 0
     ///
-    /// Returns `None` ONLY when no closed-form m0Time anchor exists for the
+    /// Returns `None` ONLY when no closed-form mode-0 time anchor exists for the
     /// current line (first line after enable, window-start / WX-invalidated
     /// mid-mode-3 lines): there the renderer register is the correct emergent
     /// value and the caller defers to it. Everywhere else this is authoritative.
@@ -9897,7 +9809,7 @@ impl Ppu {
         }
         // Compose the two byte-exact closed-form resolvers in the same order the
         // bus chain used: the mode-3<->0 sub-test first (covers in-PixelTransfer
-        // reads), then the full LY-phase getStat (mode 0/1/2 boundaries + the
+        // reads), then the full LY-phase STAT resolve (mode 0/1/2 boundaries + the
         // mid-frame branch). The result is the SINGLE authoritative CPU-visible
         // mode at the access cc, with NO read of the per-dot renderer's poked FF41
         // register. When neither resolver has a closed-form anchor (first line
@@ -9908,39 +9820,39 @@ impl Ppu {
             .or_else(|| self.get_stat_mode_at_cc(mmio, access_cc))
     }
 
-    /// Gambatte `LCD::getStat` LYC=LY coincidence flag (FF41 bit 2), computed at
+    /// The hardware STAT resolve's LYC=LY coincidence flag (FF41 bit 2), computed at
     /// the CPU's access cc. The per-dot renderer writes the coincidence bit into
     /// the FF41 register at the dot it flips (e.g. the line-153 LY=0 transient at
     /// dot 6); a read whose M-cycle straddles that dot would otherwise sample the
-    /// bit one M-cycle late from the post-tick register. Gambatte instead resolves
-    /// the flag at the read's master cc via `getLycCmpLy`:
-    ///   stat |= lycflag iff lycReg == lycCmp.ly && lycCmp.timeToNextLy > 2
+    /// bit one M-cycle late from the post-tick register. Hardware instead resolves
+    /// the flag at the read's master cc via `the LYC-compare-LY calc`:
+    /// stat |= lycflag iff the LYC register == LYC compare.ly && LYC compare.time-to-next-LY > 2
     /// (the AGB `2 - 1` term is dropped: rustyboi targets DMG/CGB only).
     pub fn get_lyc_flag_at_cc(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<bool> {
         if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
             return None;
         }
-        // Reanchor the LyCounter.time to master cc (`p_now + lc.time`), matching
-        // `get_stat_mode_at_cc`: rustyboi's LyCounter.time is in abs_cc units.
-        let lc = self.ly_counter_obs(mmio); // ds-subdot STAGE 1: read-path phase
+        // Reanchor the LY counter.time to master cc (`p_now + lc.time`), matching
+        // `get_stat_mode_at_cc`: rustyboi's LY counter.time is in abs_cc units.
+        let lc = self.ly_counter_obs(mmio); // read-path phase
         // CGB first-frame-after-enable LYC-window +1: in the frame produced right
         // after LCDC.7 0->1 on CGB hardware, the LY counter is re-anchored such that
         // the line-tail LY==LYC coincidence window closes one master-cc LATER than a
-        // settled frame — rustyboi's closed-form LyCounter.time (which runs 1cc below
-        // Gambatte's lyTime, the same delta `m0_time_exact` folds into m0Time) reads
+        // settled frame — rustyboi's closed-form the LY counter.time (which runs 1cc below
+        // the hardware LY time, the same delta `m0_time_exact` folds into mode-0 time) reads
         // the pre-enable phase, so a line-tail STAT read one dot before the boundary
         // samples the coincidence bit already cleared. The wilbertpol ly_lyc-C /
         // ly_lyc_144-C / ly_lyc_153-C rounds LCD-off/on every round then read STAT
-        // deep in the first frame (LY=2 tail, timeToNextLy should be 3 not 2 -> STAT
+        // deep in the first frame (LY=2 tail, time-to-next-LY should be 3 not 2 -> STAT
         // $C4 not $C0).
         //
-        // SCOPED to (frames_since_enable == 0) so a settled frame keeps Gambatte's
-        // exact getStat phase (its own lycint*flag / m2stat_count tests read the
-        // line-tail coincidence CLEAR at timeToNextLy 2 -- gambatte floor). LY 0 is
+        // SCOPED to (frames_since_enable == 0) so a settled frame keeps the hardware
+        // exact STAT-resolve phase (its own lycint*flag / m2stat_count tests read the
+        // line-tail coincidence CLEAR at time-to-next-LY 2 -- the suite floor). LY 0 is
         // excluded: the first line after enable already carries the +2 M3-start seed
-        // (m0_time_exact first_line, Gambatte `cycles = -(m3StartLineCycle+2)`), which
+        // (m0_time_exact first_line, the hardware `cycles = -(mode-3-start line cycle+2)`), which
         // absorbs the 1cc there -- without the exclusion the frame0 line-0 read
-        // (gambatte frame0_m2stat_count_1) would over-set the coincidence bit.
+        // (frame0_m2stat_count_1) would over-set the coincidence bit.
         let ss_plus1 = (!lc.ds
             && !self.lytime_no_plus1
             && mmio.is_cgb()
@@ -9953,28 +9865,28 @@ impl Ppu {
         };
         let cmp = stat_irq::get_lyc_cmp_ly(&lc_master, access_cc);
         let lyc_reg = mmio.read(LYC) as u32;
-        // STAT LYC flag: `timeToNextLy > 2 - (!isDoubleSpeed()
+        // STAT LYC flag: `time-to-next-LY > 2 - (!isDoubleSpeed()
         // && isAgb())`. AGB single-speed lowers the compare threshold by one, so
         // the LYC=LY flag stays set one extra dot at the line tail. DS and the
-        // STAT-IRQ-trigger paths (statChange/lycRegChange) keep the plain `> 2`
-        // (Gambatte applies the isAgb term ONLY here, in the FF41 register read).
+        // STAT-IRQ-trigger paths (STAT change/LYC-register change) keep the plain `> 2`
+        // (hardware applies the AGB term ONLY here, in the FF41 register read).
         //
         // CGB-D/E silicon holds the coincidence bit the SAME extra dot AGB does:
-        // SameBoy CGB-E reads the ly_lyc_0-C line-0-tail STAT (LY=0==LYC=0 at
-        // timeToNextLy 2, `ly_for_comparison` still the previous LY held into the
-        // line-1 first dot) as $C4 (mode 0 + coincidence SET) where Gambatte's
-        // CPU-CGB-C model (`> 2`) already cleared it ($C0). Gambatte captured on
+        // CGB-E hardware reads the ly_lyc_0-C line-0-tail STAT (LY=0==LYC=0 at
+        // time-to-next-LY 2, the compare-LY still the previous LY held into the
+        // line-1 first dot) as $C4 (mode 0 + coincidence SET) where the hardware
+        // CPU-CGB-C model (`> 2`) already cleared it ($C0). The hardware was captured on
         // CPU-CGB-C, so its C-model keeps the plain `> 2`; only the D/E-routed
         // reads (is_cgb_de, single speed) get the +1 hold. DS keeps `> 2` (the
         // stat-mode-ds / speed-switch DS probes are BCE-common and co-tuned to it).
         let tail_hold = (!lc_master.ds && (mmio.is_agb() || mmio.is_cgb_de())) as i64;
         // DMG line-tail coincidence DROP window: on DMG silicon the OLD-LY
-        // compare stops matching one M-cycle EARLIER than Gambatte's model —
-        // the FF41 flag reads 0 from raw timeToNextLy <= 8 (cmp t2n <= 6)
+        // compare stops matching one M-cycle EARLIER than the hardware model —
+        // the FF41 flag reads 0 from raw time-to-next-LY <= 8 (cmp t2n <= 6)
         // when the line is about to wrap to a non-matching LY, while the
         // RISE side (new-LY anticipation, raw <= 2) is unchanged. Proven by
         // AntonioND vbl_irq_delay_timer real_gb: with LY=LYC=143 the ISR
-        // sweep reads C4 (flag set) at lineCycles 447 but C0 (flag CLEAR,
+        // sweep reads C4 (flag set) at line cycles 447 but C0 (flag CLEAR,
         // still mode 0, LY still 143) at 451; real CGB holds the flag
         // through 451 (our existing model). Old-branch only (cmp.ly is the
         // un-anticipated LY); LY 153 keeps its own early-0 path untouched.
@@ -9989,7 +9901,7 @@ impl Ppu {
     }
 
 
-    /// Byte-exact Gambatte `video.h getLyReg(cc)`. The FF44 (LY) register the CPU
+    /// Byte-exact the hardware LY-register read. The FF44 (LY) register the CPU
     /// reads is NOT simply the renderer's LY: in the last ~6-10 cc of a line the
     /// register anticipates the next line, and on line 153 it reads 0 early. The
     /// renderer-set LY register only flips at the dot boundary (one M-cycle late
@@ -10006,13 +9918,13 @@ impl Ppu {
         let cc = access_cc as i64;
         let cpl = stat_irq::LCD_CYCLES_PER_LINE as i64;
         let last_line = (stat_irq::LCD_LINES_PER_FRAME - 1) as i64; // 153
-        // Gambatte's lyCounter().time() in master-cc. The closed-form LyCounter.time
-        // runs one master-cc below Gambatte's lyTime (see m0_time_exact), so add 1.
+        // The hardware LY-counter time in master-cc. The closed-form LY-counter time
+        // runs one master-cc below the hardware LY time (see m0_time_exact), so add 1.
         let mut ly_reg = lc.ly as i64;
         // A plain (non-halt-woken) FF44 read after an SS->DS mode-3 speed switch:
         // the age ly/lcd-align-ly DS probes (which switch during mode 3 then sweep
         // LY reads across steady DS lines, never halting) need a smaller `time`
-        // re-anchor than the halt-woken gambatte switch families the -10 below was
+        // re-anchor than the halt-woken switch families the -10 below was
         // calibrated to. Their line-boundary reads (152->153 increment, line-153
         // head, 0-wrap) sit one dot-pair earlier under the flat -10; +3 pulls the
         // plain-read anchor onto cgbBC/cgbE silicon (byte-exact ly-cgbE /
@@ -10023,15 +9935,15 @@ impl Ppu {
         let ds_corr: i64 = if ssds_plain { SSDS_PLAIN_TIME_ADJ } else { 0 };
         let mut time = self.p_now as i64 + lc.time as i64 + 1 + ds_corr;
         // SS->DS-during-mode3: rustyboi's bridged renderer line phase trails
-        // Gambatte's re-anchored lyCounter.time by ~5 DS-dots (10 cc) for the LY
-        // read. Pull the read's `time` anchor onto Gambatte's lyTime so the
-        // getLyReg anticipation window resolves identically (cctracer: _2/_6
+        // The hardware re-anchors the LY-counter time by ~5 DS-dots (10 cc) for the LY
+        // read. Pull the read's `time` anchor onto the hardware LY time so the
+        // LY-register anticipation window resolves identically (cctracer: _2/_6
         // read 147, to_next 8). DS-only (the switch lands in DS). Scoped to this
-        // read path; the STAT/m0Time predictor keeps the un-advanced phase.
+        // read path; the STAT/mode-0 time predictor keeps the un-advanced phase.
         if self.ssds_mode3_ly_advance && ds {
             time -= 10;
         }
-        // Gambatte getLyReg: `if (cc >= lyCounter().time()) update(cc)` advances the
+        // The hardware LY-register read: `if (cc >= the LY counter().time()) update(cc)` advances the
         // LY counter when the read's access cc has already passed the LY increment.
         // The closed-form (ly_counter) is renderer-anchored and does NOT advance, so
         // a read whose M-cycle lands AT/AFTER the line wrap reads the stale LY (the
@@ -10043,24 +9955,19 @@ impl Ppu {
             ly_reg = stat_irq::inc_ly(ly_reg as u32) as i64;
             time += line_time;
         }
-        let to_next = time - cc; // timeToNextLy
-        // NOTE: the m2 getLyReg `to_next` RB_CANONICAL_CC_ADJ probe was removed — it
-        // was a refuted dead-end (m2) that shared RB_CANONICAL_CC_ADJ and confounded
-        // the R2 block-stall measurement (it shifted every non-halt LY read). The
-        // block stall probe (mmio.rs run_hdma_block) now owns RB_CANONICAL_CC_ADJ.
-
+        let to_next = time - cc; // time-to-next-LY
         if ly_reg == last_line {
             // Line 153: FF44 reads 0 early. At single speed the LY register read
             // (`time - cc <= cpl - isAgb`) returns 0 for the WHOLE of line 153
             // (for non-agb the bound is cpl, always satisfied within the line).
-            // rustyboi's `to_next` carries the +1 lyTime correction (its
-            // closed-form counter runs 1cc below the reference lyTime),
-            // so compare the RAW time (`to_next - 1`) against cpl. The old top-only
-            // path (`to_next >= cpl`) deferred the rest of the line to the renderer's
-            // dot-6 LY->0 flip, but that flip has NOT happened at a just-wrapped
-            // ISR-entry read (offset2_lyc98int_ly_count_2: to_next=454, renderer
-            // still 153) where Gambatte returns 0 — the renderer-flip race. The
-            // faithful whole-line-0 resolution removes it.
+            // Our `to_next` carries the +1 the LY time correction (its
+            // closed-form counter runs 1cc below the reference the LY time),
+            // so compare the RAW time (`to_next - 1`) against cpl. A top-only
+            // path (`to_next >= cpl`) would defer the rest of the line to the
+            // renderer's dot-6 LY->0 flip, but that flip has NOT happened at a
+            // just-wrapped ISR-entry read (to_next=454, renderer still 153) where
+            // hardware returns 0 — the renderer-flip race. The whole-line-0
+            // resolution removes it.
             if !ds {
                 // LY-register read: single-speed bound is `cpl - 1*isAgb`.
                 // AGB shrinks the line-153 reads-0 window by one dot.
@@ -10082,7 +9989,7 @@ impl Ppu {
                 // reads 153 on real cgb04c silicon. Tighten the reads-0 window by one
                 // dot only for that shifted phase; unshifted post-STOP reads (carry a
                 // whole number of dots, shift==0, e.g. cgbE to_next 456 carry 0) and the
-                // steady gambatte line-153 families (offset2_lyc98int / lycint152_ly153)
+                // steady line-153 families (offset2_lyc98int / lycint152_ly153)
                 // keep the un-tightened window.
                 let ls_shift = -(((self.render_carry_skew_cc + 2).rem_euclid(15)) / 5);
                 let head_hold = (self.dsss_ly_phase_active() && ls_shift != 0) as i64;
@@ -10095,13 +10002,13 @@ impl Ppu {
                 return None;
             }
             // Plain-ssds (age mode-3-switch DS) line 153: unlike the steady-DS
-            // Gambatte model (line 153 reads 0 except the top 2cc), cgbBC/cgbE
+            // hardware model (line 153 reads 0 except the top 2cc), cgbBC/cgbE
             // silicon after a mode-3 switch holds LY=153 for the first ~10cc (5
             // dots) of the line — the renderer's line-153 LY->0 flip (dot 6) as seen
             // through the re-anchored read phase — then reads 0. `to_next` counts
             // down from 2*cpl (line start) to 0 (frame wrap), so the reads-153 head
             // is the HIGH-to_next window. The age ly DS 1C38 boundary sweep reads
-            // 153 at to_next >= 2*cpl-10 and 0 below. Steady-DS reads (gambatte
+            // 153 at to_next >= 2*cpl-10 and 0 below. Steady-DS reads (
             // lycint152_ly153_ds / frame1_ly_count_ds, ssds_plain=false) keep the
             // whole-line-0 model. Revision-independent (cgbBC==cgbE DS table).
             const SSDS_LINE153_HEAD: i64 = 10;
@@ -10121,13 +10028,13 @@ impl Ppu {
         // `ly & (ly+1)` (the glitch the count tests probe). Outside the window
         // defer to the renderer register (return None).
         //
-        // PTZ: Gambatte's getLyReg compares against the RAW `lyCounter().time()`,
-        // whereas `time` above carries the +1 lyTime correction the m0Time/getStat
-        // consumers need (rustyboi's closed-form counter runs 1cc below Gambatte's
-        // lyTime). For a HALT-woken read this 1cc lifts the glitch-dot probe onto
+        // PTZ: the hardware LY-register read compares against the RAW `the LY counter().time()`,
+        // whereas `time` above carries the +1 the LY time correction the mode-0 time/STAT-resolve
+        // consumers need (rustyboi's closed-form counter runs 1cc below the hardware
+        // the LY time). For a HALT-woken read this 1cc lifts the glitch-dot probe onto
         // the wrong side: m1int_ly_3 lands at to_next=6 and reads the `ly&(ly+1)`
         // glitch (144) when CGB hardware has already pre-incremented to 145. Drop
-        // the +1 for the skewed anticipation comparison so it matches getLyReg's
+        // the +1 for the skewed anticipation comparison so it matches the LY-register read's
         // raw-time boundary. Scoped to halt-skew (the non-HALT count/ly tests are
         // co-tuned to the +1 and stay byte-identical).
         // For a HALT-woken read, the post-wakeup instruction stream lands later in
@@ -10137,16 +10044,16 @@ impl Ppu {
         // CGB halt-woken FF44 read effectively samples 4cc closer to the line wrap
         // than the engine's access cc reflects. Bias only the CGB single-speed
         // halt-woken read by that +4 (== to_next - 4) on top of the pre-existing
-        // -1 raw-time correction (the closed-form counter runs 1cc below Gambatte's
-        // lyTime; getLyReg compares against the RAW lyCounter().time()). This makes
+        // -1 raw-time correction (the closed-form counter runs 1cc below the hardware
+        // LY time; the LY-register read compares against the RAW hardware LY-counter time). This makes
         // m1int_ly_1/_2/_3 (CGB) read at to_next 14/10/6 -> 9/5/1, so _1 stays
-        // renderer (0x90) and _2/_3 anticipate (0x91), matching Gambatte; DMG keeps
+        // renderer (0x90) and _2/_3 anticipate (0x91), matching hardware; DMG keeps
         // -1 (its m1int_ly_2 reads the stale 0x90 at the SAME to_next=10). DS keeps
         // -1: the speedchange/hdma _ly families resolve their own halt-exit phase
         // through the bridge and are co-tuned to it.
         // The HDMA-active halt-woken families (hdma_*_m*unhalt_ly / hdma_*_ly) carry
         // their own wakeup-cc shift through the in-halt block transfer and the
-        // unhalt-reflag path, so the Gambatte halt-exit +4 is already folded into
+        // unhalt-reflag path, so the hardware halt-exit +4 is already folded into
         // their post-wakeup phase; applying it again here double-counts. Scope the
         // CGB halt-exit bias to the no-HDMA halt wakeup (the plain m1int_ly family).
         let halt_skew = mmio.halt_wakeup_skew();
@@ -10159,10 +10066,10 @@ impl Ppu {
             && !mmio.halt_wakeup_hdma()
             && !mmio.m2_halt_stall_charged_cgb();
         // FAITHFUL HALT-EXIT (DMG m0-woken stream): re-anchor the woken FF44
-        // read by the real Gambatte wake advance (snap + conditional +4,
-        // derived at unhalt from the m0 eventTime phase). The un-advanced wake
-        // stream reads `adv` cc earlier than Gambatte's, and this read path's
-        // `time` base already matches Gambatte's lyTime, so the effective
+        // read by the real hardware wake advance (snap + conditional +4,
+        // derived at unhalt from the m0 event time phase). The un-advanced wake
+        // stream reads `adv` cc earlier than hardware's, and this read path's
+        // `time` base already matches the hardware LY time, so the effective
         // comparison is `to_next - adv` — byte-exact for the
         // hblank_ly_scx_timing-GS per-SCX classes (to_next 9 for delay_a /
         // 5 for delay_b across all SCX and both wake-M-cycle phases, skipping
@@ -10181,7 +10088,7 @@ impl Ppu {
         // speed_switch_timing_ly read train's 134->135 boundary read lands exactly
         // on the `ly&(ly+1)` glitch dot (tn==10, reads 134) where hardware already
         // pre-increments (135); the whole 128-read hardware table pins this bias to
-        // [-2,-8]. Scoped to the no-HDMA halt-woken switch stream: the gambatte
+        // [-2,-8]. Scoped to the no-HDMA halt-woken switch stream: the
         // speedchange_ly*/enable_display DS LY probes never halt before their
         // switch, the hdma _ds _ly families fold their wakeup shift into the
         // block-transfer phase (halt_wakeup_hdma), and the mode-3-switch families
@@ -10241,16 +10148,16 @@ impl Ppu {
         }
         let glitch = 6 + 4 * (ds as i64);
         // POST-STOP sub-dot phase (age lcd-align-ly): after DS->SS speed switches the
-        // LY-read phase carries an accumulated half-dot Gambatte applies per switch
-        // (`PPU::speedChange` `now -= 1`) that rustyboi's whole-dot DS->SS bridge folds.
+        // LY-read phase carries an accumulated half-dot hardware applies per switch
+        // (the speed-change `now -= 1`) that rustyboi's whole-dot DS->SS bridge folds.
         // The accumulated whole-dot STAT-phase carry (`render_carry_skew_cc`) drives the
         // `shift` below; `par1`/`total_par1` select the per-revision partial-latch fold.
         let post_stop = self.dsss_ly_phase_active();
         let par1 = post_stop && self.dsss_ly_phase_par() == 1;
         let total_par1 = post_stop && self.dsss_ly_total_par() == 1;
         // POST-STOP fractional-bridge phase shift (age lcd-align-ly, real cgb04c/dmg08
-        // expected table — a behavior SameBoy does not model). Each DS->SS-during-mode3
-        // STOP switch injects Gambatte's `now -= 1` half-dot; `render_carry_skew_cc`
+        // expected table — a behavior hardware does not model). Each DS->SS-during-mode3
+        // STOP switch injects the hardware half-dot re-anchor; `render_carry_skew_cc`
         // accumulates the resulting whole-dot STAT-phase carry. That carry shifts the
         // effective sub-dot the boundary LY read samples at, sliding the anticipation /
         // partial-latch-fold window. The shift wraps every 5 carry-dots and repeats with
@@ -10301,7 +10208,7 @@ impl Ppu {
 
     /// True when the renderer is in the OAM-search (mode 2) phase of an active
     /// line — the pre-pixel-transfer window where the per-dot stepper's `line_cycle`
-    /// and PPU-clock phase are already byte-exact vs Gambatte (no mode-3-length
+    /// and PPU-clock phase are already byte-exact vs hardware (no mode-3-length
     /// coupling has accumulated yet). Used by the Stage-2 STOP DS->SS re-anchor.
     pub fn is_in_oam_search(&self) -> bool {
         !self.disabled
@@ -10367,7 +10274,7 @@ impl Ppu {
                 let b8 = ((b * 255) / 31) as u8;
                 (r8, g8, b8)
             }
-            CgbColorConversion::Gambatte => {
+            CgbColorConversion::Lcd => {
                 let r8 = ((r * 13 + g * 2 + b) / 2) as u8;
                 let g8 = ((g * 3 + b) * 2) as u8;
                 let b8 = ((r * 3 + g * 2 + b * 11) / 2) as u8;
@@ -10425,7 +10332,7 @@ impl Ppu {
 
         let ly = mmio.read(LY);
 
-        // OAM scan (Gambatte's SpriteMapper::mapSprites) builds the per-line
+        // OAM scan (the hardware sprite mapper) builds the per-line
         // sprite list regardless of the OBJ-enable bit (LCDC.1). The enable bit
         // only gates the M3 sprite fetch and the final pixel mix, so a sprite
         // enabled mid-mode-3 still incurs its fetch penalty. Do not early-out
@@ -10434,7 +10341,7 @@ impl Ppu {
         // Determine sprite height (8x8 or 8x16). Use the per-line scan latch
         // (lags the live LCDC by one OAM slot) so a mid-mode-2 OBJ-size write
         // affects only entries scanned strictly after it commits, matching
-        // Gambatte's per-entry lsbuf latch.
+        // the hardware per-entry size latch.
         let large = self.scan_obj_size_large;
         let sprite_height = if large { 16 } else { 8 };
 
@@ -10464,9 +10371,9 @@ impl Ppu {
         }
     }
 
-    /// Per-dot driver for the lazy OAM sprite snapshot. Mirrors Gambatte's
-    /// `startOamDma`/`endOamDma`/`oamChange` plus the implicit `update(cc)` the
-    /// mode-2 doEvent performs. Run after `abs_cc` is folded to the current dot,
+    /// Per-dot driver for the lazy OAM sprite snapshot. Mirrors the hardware
+    /// `OAM-DMA start`/`OAM-DMA end`/`OAM change` plus the implicit `update(cc)` the
+    /// mode-2 the event dispatch performs. Run after `abs_cc` is folded to the current dot,
     /// before the mode-2 scan reads the snapshot.
     fn process_oam_reader_events(&mut self, mmio: &mut mmio::Mmio) {
         let cc = self.abs_cc;
@@ -10485,7 +10392,7 @@ impl Ppu {
             return;
         }
 
-        // Keep largeSpritesSrc_ tracking the live LCDC OBJ-size bit (Gambatte
+        // Keep large-sprites source tracking the live LCDC OBJ-size bit (hardware
         // sets it on the LCDC write; the walk latches it into lsbuf per slot).
         self.oam_reader.large_src = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
 
@@ -10507,15 +10414,15 @@ impl Ppu {
             let lc = self.ly_counter(mmio);
             mmio.peek_oam_pos(&mut pos);
             pos_filled = true;
-            // The DMA window edge is observed at the PPU dot, but Gambatte fires
-            // startOamDma/endOamDma at the M-cycle's master cc, which precedes the
+            // The DMA window edge is observed at the PPU dot, but hardware fires
+            // OAM-DMA start/OAM-DMA end at the M-cycle's master cc, which precedes the
             // PPU's observation by a fixed sub-M-cycle amount. Shift the change cc
             // back by this offset so the position-walk cap lands on the same OAM
-            // slot Gambatte's does. Calibrated against the late_sp{00,01,39}x/y
+            // slot hardware does. Calibrated against the late_sp{00,01,39}x/y
             // `_1`/`_2` and `_ds_1`/`_ds_2` bracket pairs (which straddle this
-            // boundary); scaled by the speed so it is a fixed lineCycle amount.
+            // boundary); scaled by the speed so it is a fixed line cycle amount.
             let cc = cc.saturating_sub((OAMDMA_CHANGE_CC_OFFSET as u64) << lc.ds as u32);
-            // change() under the pre-toggle source (Gambatte oamChange uses the
+            // change() under the pre-toggle source (the hardware OAM change uses the
             // pointer in effect for the just-completed span).
             self.oam_reader.change(cc, &lc, &pos);
             // DMA start: latch the scan's retained Y/X bus pair (the last pair
@@ -10524,13 +10431,13 @@ impl Ppu {
                 let line_has_fetches = !self.sprites_on_line.is_empty();
                 self.oam_reader.capture_ghost(line_has_fetches);
             }
-            // Toggle source for the new span (startOamDma -> disabled,
-            // endOamDma -> real OAM).
+            // Toggle source for the new span (OAM-DMA start -> disabled,
+            // OAM-DMA end -> real OAM).
             self.oam_reader.src_disabled = dma_writing;
             self.prev_dma_writing = dma_writing;
         }
 
-        // CPU OAM write this M-cycle (Gambatte `lcd_.oamChange(cc)`).
+        // CPU OAM write this M-cycle (the hardware OAM change at cc).
         if mmio.take_oam_write_pending() {
             let lc = self.ly_counter(mmio);
             if !pos_filled {
@@ -10539,14 +10446,14 @@ impl Ppu {
             self.oam_reader.change(cc, &lc, &pos);
         }
         // The snapshot is flushed only at `change` (above) and at the mode-2-end
-        // `doEvent` (build_sprites_from_snapshot). A per-dot flush would consume
+        // `the event dispatch` (build_sprites_from_snapshot). A per-dot flush would consume
         // the `last_change` cap before the DMA-start `change`, losing the
         // load-bearing `_1`/`_2` bracket distinction.
     }
 
-    /// Flush the snapshot to the mode-2-end cc (Gambatte SpriteMapper::doEvent's
-    /// `oamReader_.update(time)`), then rebuild `sprites_on_line` from the posbuf
-    /// in one pass (mapSprites). Replaces the per-dot live OAM scan.
+    /// Flush the snapshot to the mode-2-end cc (the hardware OAM-scan-end event's
+    /// `the OAM reader.update(time)`), then rebuild `sprites_on_line` from the posbuf
+    /// in one pass (sprite mapping). Replaces the per-dot live OAM scan.
     fn build_sprites_from_snapshot(&mut self, mmio: &mut mmio::Mmio) {
         let lc = self.ly_counter(mmio);
         let cc = self.abs_cc;
@@ -10606,7 +10513,7 @@ impl Ppu {
         }
         // Ghost propagation stop: any sprite fetched on THIS line while the DMA
         // window is still open rewrites the Y bus with a mid-DMA tile byte
-        // (SameBoy display.c:1976), so the retained scan pair does not survive
+        // (on hardware a mid-DMA sprite fetch clobbers the Y bus), so the retained scan pair does not survive
         // into the NEXT line's walk (strikethrough: the ghost bar renders on
         // line 68 only; line 69's scan — still inside the ~1.4-line window —
         // sees the clobbered bus and stays clean).
@@ -10671,13 +10578,11 @@ impl Ppu {
             // flat 6. On DMG `dist = (spx + scx) & 7` — the raw
             // OAM x, NOT the clamped trigger column: a left-clipped sprite
             // (spx 1..7) matches during the first-tile prologue and costs
-            // max(11-spx, 6) (mealybug m3_lcdc_obj_en_change_variant's BGP bands
-            // pin 10,9,8,7,6,6,6 for spx 1..7; the old `self.x`-based dist
-            // collapsed them all to 11). On CGB keep the clamped-trigger dist:
-            // the gambatte scx_during_m3_spx1/spx2 hardware captures pin the
-            // full 11-dot stall for left-clipped sprites there. For spx >= 8 the
+            // max(11-spx, 6) (i.e. 10,9,8,7,6,6,6 for spx 1..7; a `self.x`-based
+            // dist would collapse them all to 11). On CGB keep the clamped-trigger
+            // dist: left-clipped sprites pay the full 11-dot stall there. For spx >= 8 the
             // two are congruent mod 8, and the tile id differs from the
-            // closed-form's `(spx - firstTileXpos) & -8` only by a per-line
+            // closed-form's `(spx - first-tile xpos) & -8` only by a per-line
             // constant, so the equality grouping (first-vs-rest) is identical.
             let scx = mmio.read(SCX);
             let dist_x = if mmio.is_cgb_features_enabled() { self.x } else { sprite_x };
@@ -10721,7 +10626,7 @@ impl Ppu {
         let lcdc = self.lcdc;
         // Per-pixel BG-master-priority: on CGB, LCDC.0 off keeps BG/window
         // visible but drops BG master priority over sprites for this column
-        // (Gambatte `bgprioritymask = p.lcdc << 7`, evaluated live per tile). Use
+        // (the hardware BG-priority mask `lcdc << 7`, evaluated live per tile). Use
         // the column's BG-enable rather than the final once-per-line value.
         let bg_priority_master = bg_enabled_col;
 
@@ -10857,8 +10762,7 @@ impl Ppu {
         // live-LCDC fast path is exact. The DMG-compat renderer runs on CGB
         // hardware but through the same fetch/FIFO machinery, so all the DMG
         // mid-mode-3 sprite consumers apply here too — only the final color
-        // lookup differs (CGB palette RAM vs grayscale). (mealybug
-        // m3_lcdc_obj_en_change / obj_size_change / m3_obp0_change on CGB.)
+        // lookup differs (CGB palette RAM vs grayscale).
         let objen_toggled = self.objen_history.len() > 1;
         if !objen_toggled && (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
             return bg_color_rgb;
@@ -10874,8 +10778,7 @@ impl Ppu {
                     continue;
                 }
                 // The 15-dot stale-FIFO pop quirk is a DMG-CPU artifact; the CGB
-                // pixel gate samples LCDC.1 at the plain pop dot (mealybug
-                // m3_lcdc_obj_en_change _cgb_c fails with the quirk applied).
+                // pixel gate samples LCDC.1 at the plain pop dot (no quirk).
                 let stale = !(mmio.is_cgb() && !mmio.is_cgb_features_enabled())
                     && rec
                         .filter(|r| r.phase == SpriteFetchPhase::Fetched)
@@ -10968,18 +10871,18 @@ impl Ppu {
         // Find the highest priority sprite at this position
         for (spr_i, sprite) in self.sprites_on_line.iter().enumerate() {
             // Mid-mode-3 OBJ-enable toggle:
-            //  - per-sprite FETCH gate: a sprite whose fetch was aborted
-            //    (disable landed mid-fetch) or whose x-match dot passed while
-            //    OBJ was disabled (skip-marked by the live walk before its
-            //    columns pop) never contributes pixels this line, even where
-            //    OBJ is re-enabled;
-            //  - per-pixel POP gate: OBJ-enable sampled at this pixel's pop
-            //    dot (SameBoy reads LCDC.1 live per popped pixel). A pixel
-            //    popping 15+ dots after its sprite's fetch match samples the
-            //    gate one dot LATE (stale-FIFO quirk — pinned by the
-            //    m3_lcdc_obj_en_change spx=1/2 bands, whose trailing pixels
-            //    go dark one dot before the disable's normal apply dot; the
-            //    spx>=8 bands' first-pop pixels at the same dot stay lit).
+            // - per-sprite FETCH gate: a sprite whose fetch was aborted
+            // (disable landed mid-fetch) or whose x-match dot passed while
+            // OBJ was disabled (skip-marked by the live walk before its
+            // columns pop) never contributes pixels this line, even where
+            // OBJ is re-enabled;
+            // - per-pixel POP gate: OBJ-enable sampled at this pixel's pop
+            // dot (hardware reads LCDC.1 live per popped pixel). A pixel
+            // popping 15+ dots after its sprite's fetch match samples the
+            // gate one dot LATE (stale-FIFO quirk — pinned by the
+            // m3_lcdc_obj_en_change spx=1/2 bands, whose trailing pixels
+            // go dark one dot before the disable's normal apply dot; the
+            // spx>=8 bands' first-pop pixels at the same dot stay lit).
             if objen_toggled {
                 let rec = self.sprite_fetch_recs.get(spr_i);
                 if rec.map(|r| r.phase) == Some(SpriteFetchPhase::Aborted) {
@@ -11033,9 +10936,9 @@ impl Ppu {
                                 // CGB: OBP sampled per pixel (true-color palette-RAM pipeline).
                                 self.get_sprite_palette_color(mmio, sprite_pixel_idx, sprite.attributes.palette, screen_x)
                             } else {
-                                // DMG mid-mode-3 OBP-write model (mealybug m3_obp0_change):
-                                // OBP sampled at this pixel's pop dot from the dot-keyed
-                                // history (see dmg_sprite_palette_shade).
+                                // DMG mid-mode-3 OBP-write model: OBP sampled at
+                                // this pixel's pop dot from the dot-keyed history
+                                // (see dmg_sprite_palette_shade).
                                 self.dmg_sprite_palette_shade(sprite_pixel_idx, sprite.attributes.palette, self.ticks)
                             };
 
@@ -11149,10 +11052,10 @@ impl Ppu {
     // DMG sprite pixel with per-byte OBJ-size resolution (mid-mode-3 LCDC.2
     // toggle lines). Hardware computes the object line address separately for
     // the tile-data LOW and HIGH byte reads, sampling LCDC.2 live each time
-    // (SameBoy get_object_line_address is called before both vram reads), so a
+    // (hardware computes the object line address before both vram reads), so a
     // toggle landing between them mixes two row addressings:
-    //   tile_y = (ly - oam_y) & (large ? 15 : 7)   [y-flip XORs the mask]
-    //   tile   = large ? index & 0xFE : index
+    // tile_y = (ly - oam_y) & (large ? 15 : 7) [y-flip XORs the mask]
+    // tile = large ? index & 0xFE : index
     // The byte fetch dots come from the sprite's live fetch record: the stall
     // spans [arm, arm + penalty); the LOW byte reads at end-3, HIGH at end-1.
     // Sprites without a live record (not walked: m0-flush burst) fall back to
@@ -11216,7 +11119,7 @@ mod tests {
 
     // The previous mode-2 STAT pretrigger unit tests were removed: the Mode-2
     // STAT IRQ is now delivered by the event-scheduled model (see `stat_irq` and
-    // `dispatch_stat_events`), validated end-to-end by the Gambatte hwtest suite
+    // `dispatch_stat_events`), validated end-to-end by the hardware hwtest suite
     // (m2int/m2enable/miscmstatirq clusters), not the old per-dot pretrigger.
 
     #[test]

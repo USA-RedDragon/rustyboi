@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 // 2-bit pattern; `attrs` is the CGB tile-attribute byte sampled when the tile
 // was fetched (palette number in bits 0-2, BG-to-OBJ priority in bit 7). DMG
 // stores 0 for attrs. The actual palette RAM / BGP color is resolved live at
-// shift-out time, per Gambatte.
+// shift-out time, as on hardware.
 #[derive(Serialize, Deserialize, Clone, Copy, Default)]
 pub struct BgPixel {
     pub color: u8,

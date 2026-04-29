@@ -5,65 +5,43 @@ pub fn nop(_cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
 }
 
 pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
-    // CGB speed switch path. Gambatte's `Memory::stop` advances the CPU clock
-    // by 8 T-cycles, performs peripheral speedChange, and schedules an unhalt
-    // event 0x20000 + 4 T-cycles in the future, during which the CPU does not
-    // fetch but other events still progress. We mirror that with a per-CPU
-    // stall counter that `SM83::step` drains in small slices.
-    // STOP is encoded as a 2-byte opcode (10 nn). Gambatte's `case 0x10`
-    // (cpu.cpp:662) runs `PC_READ_OPERAND(opcode_, ...)` BEFORE `mem_.stop()`:
-    // it reads the second byte into `opcode_` and advances pc past it. After
-    // `Memory::stop` sets `prefetched = hdmaReqFlagged(intreq_)` (memory.cpp:486),
-    // the dispatch loop (cpu.cpp:578) executes `opcode_` (the second byte)
-    // WITHOUT re-fetching IFF `prefetched_` is set — i.e. only when the HDMA
-    // block was prefetched (req flagged) at the STOP. So the second byte runs as
-    // an instruction exactly when a prefetched HDMA block fired in the STOP halt
-    // window (`hdma_late_*speedchange_inc`/`_ldaaimm`: `_2` block-in-halt -> the
-    // `inc a`/`ld a,(nn)` operand runs, out02/outFF; `_1`/`_3` no in-halt block
-    // -> operand skipped, out01). Capture the second byte now; whether it becomes
-    // the next executed opcode is decided below by the prefetched-block path.
+    // CGB speed switch. STOP advances the CPU clock by 8 T-cycles, performs the
+    // peripheral speed change, then stalls instruction fetch for a ~0x20000-cycle
+    // window during which other events still progress; a per-CPU stall counter
+    // drained by `SM83::step` models the window.
+    //
+    // STOP is a 2-byte opcode (10 nn); the second byte is normally ignored.
+    // Pan Docs: CPU instruction set — https://gbdev.io/pandocs/CPU_Instruction_Set.html
+    // Here it executes as the next instruction only when an HDMA block was
+    // prefetched (dma-req flagged) at the STOP — decided below. Capture it now;
+    // whether it runs is settled by the prefetched-block path.
+    // The (128*1024-76)-clock switch window and "no HDMA during speed switch" are
+    // documented in TCAGBD §3.8, not in Pan Docs; the per-block sub-cycle fire
+    // ordering below is from test-ROM refs.
     let operand_byte = mmio.peek(cpu.registers.pc);
     cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
 
-    // Pan Docs STOP chart (Lior Halphon, "Reducing Power Consumption"), first
-    // question: "Is a button being held and selected in JOYP?" — any SELECTED
-    // P10-P13 line low, i.e. the live JOYP low nibble != 0xF (deselected
-    // groups read 1111; the SGB MLT_REQ id nibble counts, as it drives the
-    // real lines). SameBoy: `exit_by_joyp = (JOYP & 0xF) != 0xF`, checked
-    // BEFORE the KEY1 test (`speed_switch = KEY1.0 && !exit_by_joyp`) — a held
-    // selected button routes STOP to the joypad branch even with a speed
-    // switch armed. Non-ticking peek; suite ROMs run with no input (nibble
-    // 0xF), so the armed path below is entered exactly as before there.
+    // STOP chart, first question: "Is a button being held and selected in JOYP?"
+    // — any selected P10-P13 line low, i.e. the live JOYP low nibble != 0xF
+    // (deselected groups read 1111; the SGB MLT_REQ id nibble counts, as it drives
+    // the real lines). Checked BEFORE the KEY1 speed-switch test, so a held
+    // selected button routes STOP to the joypad branch even with a switch armed.
+    // Pan Docs: Reducing Power Consumption — https://gbdev.io/pandocs/Reducing_Power_Consumption.html
     let button_held = (mmio.peek(crate::input::JOYP) & 0x0F) != 0x0F;
 
     if !button_held && mmio.is_speed_switch_armed() {
-        // Gambatte's `Memory::stop` advances the LCD across the switch before
-        // re-anchoring (memory.cpp: `lcd_.speedChange(cc + 8 * !isDoubleSpeed())`).
-        // Our per-dot stepper realizes the returned 8 cycles at the *new* speed,
-        // landing the LCD a few dots short of where Gambatte's old-speed `update`
-        // would. Inject the missing bridge dots so the post-switch LCD position
-        // (and the FF41 mode read after the 0x20000-cycle window) matches.
-        // Counts swept against the full suite; the asymmetry follows the
-        // speed-direction-dependent dot accounting of the bridge.
         let to_double = !mmio.is_double_speed_mode();
-        // UNIFORM FAITHFUL STOP-BRIDGE. Gambatte's `Memory::stop` runs
-        // `lcd_.speedChange(cc_ = cc + 8*!old_ds)` -> `update(cc_)` (advance the LCD
-        // to cc_ at the OLD speed) then `PPU::speedChange()` (`now -= old_ds`, with
-        // `lineCycle` preserved). In rustyboi's per-dot model the bridge injects only
-        // the render dots that the returned-8 STOP cycles' NEW-speed stepping does
-        // not cover, derived from that formula rather than per-config tuning:
-        //   SS->DS (old_ds=0): `update` advances 8 old-speed (SS) dots; the returned
-        //     8 cycles tick at the new DS speed and cover `8>>1 = 4`, so the bridge
-        //     injects 8-4 = 4. On a non-rendering line (VBlank / LCD-off) the per-dot
-        //     stepper has no mode-3 window to advance, so the full 8 is injected.
-        //   DS->SS (old_ds=1): `update` advances 0 dots (cc_ == cc); the `now -= 1`
-        //     re-anchor (folded into the bridge dot here) shifts the line phase by 1.
-        // The OAMSearch / pixel-transfer / mode-3-length distinctions the old tuned
-        // bridge encoded collapse to this single per-direction derivation; the prior
-        // pullback double-switch marker is gone (the faithful SS->DS=4 no longer
-        // over-advances, so there is nothing to "restore"). The HDMA-active mode-3
-        // DS->SS still couples to the HDMA block-fire / timer phase across the switch
-        // (the suppress-edge path below), out of scope here — keep its tuned 3.
+        // Bridge dots. On hardware the LCD advances across the switch at the old
+        // speed before re-anchoring. Our per-dot stepper runs the returned 8 cycles
+        // at the NEW speed, landing the LCD short; inject the missing render dots so
+        // the post-switch LCD position (and the FF41 mode read after the window)
+        // matches. Derived per direction, not tuned:
+        //   SS->DS: hardware advances 8 old-speed dots; the returned 8 cycles cover
+        //     8>>1 = 4 at the new speed, so inject 8-4 = 4. On a non-rendering line
+        //     there is no mode-3 window to advance, so inject the full 8.
+        //   DS->SS: hardware advances 0 dots; the -1 re-anchor shifts line phase by 1.
+        // HDMA-active mode-3 DS->SS couples to the block-fire/timer phase across the
+        // switch (the suppress-edge path below), out of scope here — keep 3.
         let bridge = if to_double {
             if mmio.ppu.is_on_rendering_line() { 4 } else { 8 }
         } else if mmio.mmio.hdma_is_enabled() {
@@ -71,69 +49,50 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         } else {
             1
         };
-        // Gambatte `Memory::stop` (memory.cpp:453) captures the HDMA halt state at
-        // the stop cc and `intreq_.halt()`s for the 0x20000 unhalt window, so the
-        // per-dot HDMA period edge is suppressed across the bridge + stall. rustyboi
-        // arms the FF55-enabled block lazily on the renderer m0 edge, which the
-        // per-access stepping has NOT crossed at the stop instruction on these lines
-        // — it would only cross during the bridge, where the old eager arm fired it
-        // unconditionally. Decide here instead, at the exact stop cc:
-        //   * m0 edge already crossed (`hdma_disable_fires` == true): the block is
-        //     latched (Gambatte `prefetched`, not acked at single speed). Fire it
-        //     now, pre-switch, so the readback reflects the completed block
-        //     (`hdma_late_m3speedchange_*_3` -> outFF; `_transition_hdmalen7f`).
-        //   * m0 edge NOT yet crossed: hold it across the suppressed window and let
-        //     the reflag gate at the unhalt cc decide (`SM83::step` exit): it fires
-        //     only if the unhalt lands back in the HDMA period or the block was
-        //     owed (`hdma_m3speedchange_late_m0wakeup_*`), else stays dropped
-        //     (`hdma_late_m3speedchange_*_1` -> out00).
-        // Deferred SS->DS prefetched-block fire decision. Gambatte's `Memory::stop`
-        // does NOT ack a `prefetched` dma req at single speed (memory.cpp:493:
-        // `if (!prefetched || isDoubleSpeed()) ackDmaReq` — SS leaves it pending),
-        // so the `intevent_dma` event runs AFTER the speed switch (`ioamhram_[0x14D]
-        // ^= 0x81`), i.e. at the NEW (double) speed. cctracer on
-        // hdma_late_m3speedchange_inc_scx1_2: the dma() fires at cc=stop+12 ds=1,
-        // not at the pre-switch single-speed cc. Record the fire kind here and run
-        // the block AFTER `perform_speed_switch` so the block (and its stall/timer
-        // phase) lands at the post-switch DS cc.
+        // On hardware the HDMA halt state is captured at the stop cc and the CPU
+        // halts for the unhalt window, suppressing the per-dot HDMA period edge
+        // across the bridge and stall. We arm the FF55-enabled block lazily on the
+        // renderer m0 edge, which has NOT been crossed at the stop instruction on
+        // these lines. Decide here instead, at the exact stop cc:
+        //   * m0 edge already crossed (`hdma_disable_fires`): the block is latched
+        //     (not acked at single speed). Fire it now, pre-switch, so the readback
+        //     reflects the completed block.
+        //   * m0 edge NOT yet crossed: hold it across the suppressed window; the
+        //     reflag gate at the unhalt cc (`SM83::step` exit) fires it only if the
+        //     unhalt lands back in the HDMA period or the block was owed.
+        // A prefetched dma req is not acked at single speed, so an SS->DS block's
+        // transfer runs AFTER the speed switch, at the new (double) speed. Record
+        // the fire kind here and run the block after `perform_speed_switch` so the
+        // block (and its stall/timer phase) lands at the post-switch DS cc.
         let mut deferred_stop_fire: Option<bool> = None; // Some(fires_in_halt)
-        // Gambatte `prefetched = hdmaReqFlagged(intreq_)` (memory.cpp:486): the
-        // STOP operand byte executes as the next instruction (cpu.cpp:578-584)
-        // iff the HDMA dma-req is flagged at the STOP — i.e. the block's m0 edge
-        // has been crossed and the block is still armed (in period + enabled),
-        // regardless of switch direction. The `_2` (block in/owed at stop ->
-        // operand runs, out02/outFF) vs `_1`/`_3` (no armed block -> operand
-        // skipped, out01) split keys exactly on this. Decide it here.
+        // The STOP operand byte executes as the next instruction iff the HDMA
+        // dma-req is flagged at the STOP — i.e. the block's m0 edge has been
+        // crossed and the block is still armed (in period + enabled), regardless
+        // of switch direction. Decide it here.
         let mut exec_stop_operand = false;
         let suppress_edge = mmio.ppu.is_on_rendering_line();
         if suppress_edge {
             let cc = mmio.mmio.master_cc();
             let dsb = mmio.is_double_speed_mode();
             let in_period_now = mmio.ppu.hdma_disable_fires(cc, dsb).unwrap_or(false);
-            // Gambatte `prefetched = hdmaReqFlagged`: a block is owed at the STOP only
-            // if this period's m0-edge flagged `intevent_dma` and it has NOT yet run.
-            // When the period's block already ran (`hdma_block_done_this_period`, e.g.
-            // an in-period FF55 kick serviced it this line), `hdmaReqFlagged` is false
-            // and `haltHdmaState_` captures `hdma_high` — the SS->DS synchronous fire
-            // must NOT run; the next (post-window) m0 edge fires the following block
-            // (hdma_m0speedchange_late_m3wakeup_*_2).
+            // A block is owed at the STOP only if this period's m0 edge flagged a
+            // transfer that has NOT yet run. When the period's block already ran
+            // (`hdma_block_done_this_period`, e.g. an in-period FF55 kick serviced
+            // it this line), the req is not flagged, so the SS->DS synchronous fire
+            // must NOT run; the next (post-window) m0 edge fires the following block.
             if to_double && in_period_now
                 && mmio.mmio.hdma_is_enabled()
                 && !mmio.mmio.hdma_req_pending()
                 && !mmio.mmio.hdma_block_done_this_period()
             {
                 // SS->DS, m0 edge already crossed at stop: the block is latched
-                // (Gambatte `prefetched`, single speed not acked). WHEN it fires
-                // relative to the STOP halt decides the FF55 readback (cctracer on
-                // hdma5_scx*_2 vs _3): the GDMA-like `dma()` event runs an M-cycle
-                // behind the `flagHdmaReq` m0 edge, so if the edge was crossed
-                // strictly WITHIN this stop's own M-cycle (`cc - edge < 4`) the
-                // block's copy lands inside the halt window — Gambatte's `halted()`
-                // branch (memory.cpp:384) freezes FF55 at the written length | 0x80
-                // (`_2` -> out80). If the edge was crossed a full M-cycle earlier
-                // (`cc - edge >= 4`) the block already completed before the STOP, so
-                // FF55 length-wraps to 0xFF (`_3` -> outFF). Defer the actual fire to
-                // post-switch (DS cc) — see `deferred_stop_fire` below.
+                // (single speed not acked). When it fires relative to the STOP halt
+                // decides the FF55 readback: the transfer runs an M-cycle behind the
+                // m0 edge, so if the edge was crossed within this stop's own M-cycle
+                // (`cc - edge < 4`) the copy lands inside the halt window and FF55
+                // freezes at length | 0x80. If crossed a full M-cycle earlier
+                // (`cc - edge >= 4`) the block completed before the STOP and FF55
+                // length-wraps to 0xFF. Defer the actual fire to post-switch (DS cc).
                 let edge = mmio.ppu.hdma_m0_edge(dsb).unwrap_or(cc as i64);
                 let fires_in_halt = (cc as i64) - edge < 4;
                 mmio.mmio.set_hdma_req();
@@ -144,40 +103,36 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             } else {
                 // SS->DS not-yet-in-period, or the DS->SS return switch: hold the
                 // block across the suppressed window with the captured halt state;
-                // the reflag gate at the unhalt cc decides. (`on_stop_window_enter`
-                // captures `requested`/`low` so a DS->SS block owed from the prior
-                // switch still fires at unhalt — `hdma_late_m3speedchange_*_ds_2`.)
+                // the reflag gate at the unhalt cc decides. `on_stop_window_enter`
+                // captures the requested/low state so a DS->SS block owed from the
+                // prior switch still fires at unhalt.
                 mmio.mmio.on_stop_window_enter(in_period_now);
                 // DS->SS (or not-yet-acked) with the m0 edge crossed and the block
-                // still enabled: Gambatte still has the dma-req flagged at the stop
-                // (`prefetched_` true), so the operand byte executes post-unhalt
-                // even though the block itself fires later, on the unhalt-reflag
-                // path (`hdma_late_speedchange_inc_scx1_ds_2` -> out02).
+                // still enabled: the dma-req is still flagged at the stop, so the
+                // operand byte executes post-unhalt even though the block itself
+                // fires later, on the unhalt-reflag path.
                 if in_period_now && mmio.mmio.hdma_is_enabled() {
                     exec_stop_operand = true;
                 }
             }
         }
-        // STAGE 4 (FACET 1) KEYSTONE: capture whether this STOP is a DS->SS switch
-        // taken DURING mode 3 (pixel transfer), BEFORE the bridge advances dots
-        // (which can leave mode 3). The faithful Gambatte `PPU::speedChange`
-        // `now -= 1` half-dot re-anchor per such switch is injected below as a
-        // STAT-phase-ONLY carry (decoupled from the render latch) via
-        // `stat_phase_carry`. Stop-count invariant: every 2nd such switch carries
-        // one extra STAT dot.
+        // Capture whether this STOP is a DS->SS switch taken during mode 3 (pixel
+        // transfer), BEFORE the bridge advances dots (which can leave mode 3). The
+        // -1 half-dot re-anchor per such switch is injected below as a STAT-phase-
+        // only carry (decoupled from the render latch) via `stat_phase_carry`;
+        // every 2nd such switch carries one extra STAT dot.
         let dsss_mode3_switch = !to_double && mmio.ppu.is_in_pixel_transfer();
         let ssds_mode3_switch = to_double && mmio.ppu.is_in_pixel_transfer();
         mmio.ppu.stop_bridge_advance(mmio.mmio, bridge);
         if !to_double {
-            // DS->SS: the faithful `now -= old_ds` (== 1) re-anchor is folded into
-            // the bridge dot count (DS->SS bridge = 1), which leaves the LyCounter
-            // one master-cc high; the closed-form lyTime drops its `+1` correction.
+            // DS->SS: the -1 re-anchor is folded into the bridge dot count (DS->SS
+            // bridge = 1), leaving the LY counter one master-cc high; the closed-form
+            // the LY time drops its +1 correction.
             mmio.ppu.set_dsss_lytime_adjust();
             // Only NON-mode-3 DS->SS switches feed the LY-read sub-dot accumulator:
-            // mode-3 DS->SS switches already carry Gambatte's `now -= 1` half-dot
-            // through the FACET-1 `stat_phase_carry` (p_now) path, which shifts the
-            // LY read's `time` directly. OAM/HBlank DS->SS switches get no such carry,
-            // so their residual half-dot is the one this accumulator tracks.
+            // mode-3 switches already carry the half-dot through the `stat_phase_carry`
+            // path, which shifts the LY read's `time` directly. OAM/HBlank switches
+            // get no such carry, so their residual half-dot is what this tracks.
             mmio.ppu.bump_dsss_ly_total();
             if !dsss_mode3_switch {
                 mmio.ppu.bump_dsss_ly_phase();
@@ -185,14 +140,11 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         }
         mmio.perform_speed_switch();
         // Re-anchor the PPU's event-scheduled STAT/mode/LYC clocks to the new
-        // speed (Gambatte's `lcd_.speedChange`). The scheduled event times were
-        // computed with the old double-speed cc-factor.
+        // speed; the scheduled times were computed with the old cc-factor.
         mmio.ppu.speed_change(mmio.mmio);
-        // STAGE 4 (FACET 1) KEYSTONE: inject the accumulated DS->SS-mode3 half-dot
-        // as a STAT-phase-only carry (render latch stays put). STAGE4_FACET1_CARRY
-        // gates the staging: Step 1 (decouple checkpoint) keeps it false so the
-        // path is registered/wired but injects 0 dots => flag-ON byte-identical to
-        // the rendered bridge (84). Step 2 flips it true to land the carry.
+        // Inject the accumulated DS->SS mode-3 half-dot as a STAT-phase-only carry
+        // (render latch stays put). STAGE4_FACET1_CARRY = false wires the path but
+        // injects 0 dots; true lands the carry.
         const STAGE4_FACET1_CARRY: bool = true;
         if dsss_mode3_switch {
             let carry = mmio.ppu.register_dsss_mode3_stop();
@@ -200,107 +152,77 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
                 mmio.ppu.stat_phase_carry(mmio.mmio, carry);
             }
         }
-        // SS->DS speed switch taken DURING mode 3: across the switch Gambatte's
-        // re-anchored lyCounter.time (LCD::speedChange -> update(cc+8) -> the SS
-        // dots advance the line phase) sits ~5 DS-dots (10 cc) ahead of rustyboi's
-        // bridged renderer line phase for the FF44 (LY) read. The renderer pixel
-        // latch and the STAT/m0Time predictor are already correct (the broad
-        // speedchange*_m3stat STAT-read suite is calibrated to that phase); only
-        // the getLyReg anticipation window (`time - cc <= 6+4*ds`) keys off the raw
-        // lyCounter.time, which rustyboi's closed-form runs late here. Latch the
-        // SS->DS-mode3 LY-read phase advance so `get_ly_reg_at_cc` (and ONLY it)
-        // resolves the read against Gambatte's re-anchored lyTime.
+        // SS->DS switch taken during mode 3: across the switch the re-anchored
+        // the LY counter.time sits ~5 DS-dots (10 cc) ahead of our bridged renderer line
+        // phase for the FF44 (LY) read. The renderer pixel latch and the STAT/mode-0 time
+        // predictor are already correct; only the LY-read anticipation window keys
+        // off the raw the LY counter.time, which our closed-form runs late here. Latch
+        // the phase advance so `get_ly_reg_at_cc` (and only it) resolves the read
+        // against the re-anchored the LY time.
         if ssds_mode3_switch {
             mmio.ppu.set_ssds_mode3_ly_advance();
         }
-        // SS->DS switch executed on a still-live halt-woken stream (halt-wake ->
-        // STOP with no intervening HALT): the post-switch DS stream keeps carrying
-        // the un-charged CGB halt-exit M-cycle (Gambatte memory.cpp:301
-        // `cc += 4 * isCgb()`). Arm the DS analog of the single-speed
-        // `cgb_halt_exit` getLyReg read bias (see get_ly_reg_at_cc / mmio field
-        // doc; daid speed_switch_timing_ly).
+        // SS->DS switch on a still-live halt-woken stream (halt-wake -> STOP with no
+        // intervening HALT): the post-switch DS stream keeps carrying the un-charged
+        // CGB halt-exit M-cycle. Arm the DS analog of the single-speed halt-exit
+        // LY-read bias (see `get_ly_reg_at_cc`).
         if to_double && mmio.mmio.halt_wakeup_skew() {
             mmio.mmio.set_ssds_haltskew_ly_advance();
         }
         // Fire the deferred SS->DS prefetched block now — post-switch, so it runs
-        // at the new (double) speed at the post-bridge cc, matching Gambatte's
-        // `intevent_dma` after `ioamhram_[0x14D] ^= 0x81` (dma fires at ds=1).
-        // Track the HDMA block stall produced by a deferred stop_halt fire so it
-        // can be ABSORBED into the 0x20000 unhalt window below instead of being
-        // charged on top of it. Gambatte's `intevent_dma` fires *during* the
-        // unhalt window (the block's cc advance happens before `intevent_unhalt`
-        // resumes the CPU), so the transfer's ~64 DS cc are part of the window,
-        // not an extra stall appended after it. rustyboi otherwise drains the
-        // full 0x20000 first and only then the block's `pending_dma_stall`,
-        // pushing the post-stop resume (and its LY read) ~64+fudge cc late —
-        // one LY high on the boundary (`hdma_late_m3speedchange_ly_scx1_3`).
-        // Freeze the OAM-DMA across the unhalt window BEFORE firing the deferred
-        // HDMA block: Gambatte's `Memory::stop` runs `intreq_.halt()` first, so the
-        // dma() event firing during the window interleaves through `updateOamDma`'s
-        // `halted()` branch (oamDmaPos_ frozen). Setting the freeze here makes the
-        // block's OAM-DMA interleave honor it (hdma_transition_speedchange_oamdma).
+        // at the new (double) speed at the post-bridge cc. The transfer fires DURING
+        // the unhalt window (its cc advance happens before the CPU resumes), so its
+        // ~64 DS cc are absorbed into the 0x20000 window below, not charged on top:
+        // otherwise the post-stop resume (and its LY read) lands ~64 cc late, one LY
+        // high on the boundary. `dma_stall_before` snapshots the stall so the
+        // block's contribution can be subtracted back out.
+        // Freeze the OAM-DMA across the window BEFORE firing the block: on hardware
+        // the CPU halts first, so a transfer firing during the window interleaves
+        // through the halted OAM-DMA branch (position frozen). Set the freeze here
+        // so the block's OAM-DMA interleave honors it.
         mmio.mmio.set_oam_dma_stop_freeze(true);
         let dma_stall_before = mmio.mmio.peek_dma_stall();
         if let Some(fires_in_halt) = deferred_stop_fire {
             if fires_in_halt {
                 mmio.mmio.fire_pending_hdma_mcycle_stop_halt();
-                // Drop the block's transfer stall from `pending_dma_stall`: its cc
-                // advance is folded into the 0x20000 unhalt window (kept intact
-                // below), not charged as a separate stall appended after it.
+                // Drop the block's transfer stall: its cc advance is folded into the
+                // 0x20000 window (kept intact below), not appended after it.
                 let absorb = mmio.mmio.peek_dma_stall().saturating_sub(dma_stall_before);
                 mmio.mmio.reduce_dma_stall(absorb);
             } else {
                 // Edge crossed a full M-cycle BEFORE this STOP (`cc - edge >= 4`):
-                // in Gambatte the `dma()` event already ran and acked the req
-                // before the STOP, so `prefetched_` is false and the operand byte
-                // is skipped (block-completes-pre-stop `_3` -> out01). Fire the
+                // the transfer already ran and acked the req before the STOP, so the
+                // req is not flagged and the operand byte is skipped. Fire the
                 // already-owed block but do NOT execute the operand.
                 mmio.mmio.fire_pending_hdma_mcycle();
                 exec_stop_operand = false;
             }
         }
-        // Gambatte `prefetched = hdmaReqFlagged` (memory.cpp:486) => post-unhalt
-        // dispatch runs the STOP operand byte WITHOUT re-fetching (cpu.cpp:581
-        // `opcode = opcode_; cc()+=4`). Mirror with rustyboi's prefetch state so
-        // the operand (`inc a` / `ld a,(nn)`) runs as the next instruction. PC
-        // already points past the first operand byte (multi-byte operand
-        // instructions read their own operands from there).
+        // Post-unhalt dispatch runs the STOP operand byte without re-fetching, via
+        // the prefetch state, so the operand (`inc a` / `ld a,(nn)`) runs as the
+        // next instruction. PC already points past the first operand byte
+        // (multi-byte operand instructions read their own operands from there).
         if exec_stop_operand {
             cpu.opcode = operand_byte;
             cpu.prefetched = true;
         }
-        // Gambatte's unhalt event fires 0x20000 + 4 T-cycles after STOP entry
-        // and the STOP itself advances the CPU clock by 8 (cc += 8). The 8 we
-        // return below is part of that window, so the remaining no-fetch stall
-        // is 0x20000 + 4 - 8.
-        //
-        // LEVER A: the K=4 DS-entry per-access skew. Gambatte's `case 0x10` is
-        // `cc() = mem_.stop(cc() - 4)` after `PC_READ_OPERAND` (+4): the unhalt
-        // window is `0x20000 + 4` measured from the PRE-operand cc (= the cc just
-        // after the opcode fetch). rustyboi's opcode fetch has already ticked
-        // master_cc by 4 (one M-cycle) before `stop()` runs, and `tick_remaining`
-        // charges the returned cycles against that already-ticked M-cycle — so the
-        // returned 8 only nets +4 of master_cc advance, folding the opcode-fetch
-        // tick INTO the STOP's 8. The faithful window from the post-opcode cc is
-        // exactly `0x20000 + 4`; with the returned 8 contributing (8 - 4)=4 net,
-        // the no-fetch stall must be `0x20000`. This makes the resume land at
-        // post_opcode_cc + 0x20000 + 4, exactly Gambatte's `(cc()-4) + 0x20000 + 4`,
-        // holding the offset constant at 58368.
+        // The unhalt event fires 0x20000 + 4 T-cycles after STOP entry, and STOP
+        // itself advances the CPU clock by 8; the 8 returned below is part of that
+        // window. The opcode fetch already ticked master_cc by 4 before `stop()`
+        // runs, and the returned cycles are charged against that already-ticked
+        // M-cycle, so the returned 8 nets only +4 of advance. Measured from the
+        // post-opcode cc the window is 0x20000 + 4; with the returned 8 netting 4,
+        // the remaining no-fetch stall is 0x20000, landing the resume at
+        // post_opcode_cc + 0x20000 + 4.
         cpu.stop_unhalt_cycles = 0x20000;
-        // NOTE: the m1 STOP-window RB_CANONICAL_CC_ADJ probe was removed — it was a
-        // refuted dead-end (m1) that shared RB_CANONICAL_CC_ADJ and CONFOUNDED every
-        // later block-stall measurement (it shifted the unhalt resume, cascading into
-        // the DIV reset → the false "block-cc↔tlu coupling" of m8-m11). The block
-        // stall probe (mmio.rs run_hdma_block) now owns RB_CANONICAL_CC_ADJ alone.
-        // (OAM-DMA freeze already armed above, before the deferred HDMA block fire.)
         return 8;
     }
 
-    // ---- Plain STOP (no armed speed switch): Pan Docs STOP chart ----
-    // "Is an interrupt pending (IE & IF != 0)?" — IME-independent, exactly the
-    // HALT-bug pending test. Decides the opcode LENGTH on every remaining
-    // branch: pending -> "STOP is a 1-byte opcode" (the byte after $10 is NOT
-    // consumed; it executes as the next instruction), not pending -> 2-byte.
+    // ---- Plain STOP (no armed speed switch), per the STOP chart ----
+    // Pan Docs: Reducing Power Consumption — https://gbdev.io/pandocs/Reducing_Power_Consumption.html
+    // "Is an interrupt pending (IE & IF != 0)?" — IME-independent, the same test
+    // as the HALT bug. Decides opcode LENGTH on every remaining branch: pending ->
+    // 1-byte (the byte after $10 executes as the next instruction), else 2-byte.
     let irq_pending = (mmio.peek(registers::INTERRUPT_FLAG)
         & mmio.peek(registers::INTERRUPT_ENABLE)
         & 0x1F)
@@ -316,52 +238,41 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             // opcode, mode doesn't change, DIV doesn't reset" — a NOP.
             return 4;
         }
-        // Chart: button held, no interrupt pending -> "STOP is a 2-byte
-        // opcode, HALT mode is entered, DIV is not reset". Enter the normal
-        // HALT state via the halt opcode body (its IE&IF re-check is false
-        // here by construction, so it takes the plain halted=true path and
-        // captures the HDMA halt state / Requested prefetch as any HALT
-        // does); wake is the usual any-enabled-interrupt HALT exit. Charge
-        // the operand-read M-cycle on top of the fetch (SameBoy: cycle_read
-        // then halted).
+        // Chart: button held, no interrupt pending -> "STOP is a 2-byte opcode,
+        // HALT mode is entered, DIV is not reset". Enter HALT via the halt opcode
+        // body (its IE&IF re-check is false here by construction, so it takes the
+        // plain halted path and captures the HDMA halt state as any HALT does).
+        // Charge the operand-read M-cycle on top of the fetch.
         halt(cpu, mmio);
         return 8;
     }
 
-    // Chart: no button, no speed switch -> "STOP mode is entered, DIV is
-    // reset" — for BOTH the interrupt-pending (1-byte) and idle (2-byte)
-    // forms; a pending interrupt does NOT prevent or terminate STOP mode
-    // (only a joypad line does). The DIV reset goes through the FF04 write
-    // path (SameBoy `enter_stop_mode`: `GB_write_memory(DIV, 0)`) so the
-    // `Tima::divReset` phase-glitch edge and the DIV-APU fold apply exactly
-    // as for a CPU DIV write, resolved at the current cc (un-ticked: the
-    // clock freezes right after this instruction, so no read can observe the
-    // sub-M-cycle placement; the frozen divider then holds DIV at 0 for the
-    // whole STOP).
+    // Chart: no button, no speed switch -> "STOP mode is entered, DIV is reset"
+    // — for both the 1-byte (interrupt-pending) and 2-byte (idle) forms; a pending
+    // interrupt does NOT prevent or terminate STOP (only a joypad line does). The
+    // DIV reset goes through the FF04 write path so the TIMA phase-glitch edge and
+    // DIV-APU fold apply as for any DIV write. The clock freezes right after this
+    // instruction, so no read observes the sub-M-cycle placement; the frozen
+    // divider holds DIV at 0 for the whole STOP.
     mmio.mmio.write(0xFF04, 0);
-    // Panel effect (DMG blanks / CGB goes black unless mid-mode-3 — see
-    // `Ppu::enter_stop_mode_panel`).
+    // Panel effect: DMG draws a black line, CGB goes black unless mid-mode-3.
+    // Pan Docs: Reducing Power Consumption — https://gbdev.io/pandocs/Reducing_Power_Consumption.html
     mmio.ppu.enter_stop_mode_panel(mmio.mmio);
-    // Low-power mode proper: `gb::step_instruction` freezes the whole clocked
-    // world (master_cc stops) until a selected P10-P13 line goes low, then
-    // resumes at pc — the byte after the operand (2-byte form) or the operand
-    // itself (1-byte form). Deferred, documented, NOT modeled here: the two
-    // armed-switch + interrupt-pending chart leaves stay on the existing
-    // armed path above — IME-on ("STOP is a 1-byte opcode, mode doesn't
-    // change, DIV is reset, CPU speed changes") is approximated by that
-    // path's pending-interrupt early wake from the 0x20000 window rather
-    // than an instant 1-byte form, and the IME-off "CPU glitches
-    // non-deterministically, oops!" corruption is intentionally not invented
-    // (SameBoy also models it as the deterministic continue).
+    // Low-power mode proper: the clocked world freezes (master_cc stops) until a
+    // selected P10-P13 line goes low, then resumes at pc. Not modeled here: the
+    // armed-switch + interrupt-pending chart leaves stay on the armed path above —
+    // the IME-on "1-byte, speed changes" leaf is approximated by that path's early
+    // wake from the unhalt window, and the IME-off non-deterministic glitch is
+    // intentionally treated as a deterministic continue.
     cpu.stopped = true;
     if irq_pending { 4 } else { 8 }
 }
 
 pub fn undefined(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
-    // Illegal/unspecified SM83 opcodes (D3, DB, DD, E3, E4, EB, EC, ED, F4, FC, FD)
-    // lock up the CPU on real hardware. Mirror Gambatte's `Memory::freeze`:
-    // clear IE so no interrupt can wake the CPU, then halt. Peripherals keep
-    // running via the surrounding step loop, the CPU stays parked forever.
+    // Invalid opcodes (D3, DB, DD, E3, E4, EB, EC, ED, F4, FC, FD) hard-lock the
+    // CPU until power-off. Mirror that: clear IE so no interrupt can wake the CPU,
+    // then halt. Peripherals keep running via the surrounding step loop.
+    // Pan Docs: CPU instruction set — https://gbdev.io/pandocs/CPU_Instruction_Set.html
     mmio.write(registers::INTERRUPT_ENABLE, 0);
     cpu.halted = true;
     4
@@ -592,38 +503,35 @@ pub fn sbc_a_memory_hl(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
 }
 
 pub fn halt(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
-    // HALT bug (Gambatte cpu.cpp case 0x76): on the HALT M-cycle the CPU peeks the
-    // next opcode at pc (no pc++, no cc charge). If an interrupt is pending it does
-    // NOT halt — it leaves that byte prefetched with pc un-advanced. When IME=0 the
-    // prefetched opcode then executes and re-reads its own bytes (the classic
-    // double-read); when IME=1 the next step's interrupt service undoes the prefetch
-    // (pc -= 1) so the return address is the HALT itself, and HALT re-runs after the
-    // ISR. The pending test is `IE & IF & 0x1F != 0`, independent of IME.
+    // HALT bug: on the HALT M-cycle the CPU peeks the next opcode at pc (no pc++,
+    // no cc charge). If an interrupt is pending it does NOT halt — it leaves that
+    // byte prefetched with pc un-advanced. When IME=0 the prefetched opcode then
+    // executes and re-reads its own bytes (the double-read); when IME=1 the next
+    // step's interrupt service undoes the prefetch (pc -= 1) so the return address
+    // is the HALT itself, and HALT re-runs after the ISR. The pending test is
+    // `IE & IF & 0x1F != 0`, independent of IME.
+    // Pan Docs: halt bug — https://gbdev.io/pandocs/halt.html
     let if_reg = mmio.peek(registers::INTERRUPT_FLAG);
     let ie_reg = mmio.peek(registers::INTERRUPT_ENABLE);
     if (if_reg & ie_reg & 0x1F) != 0 {
-        // In the faithful prefetch model pc already points at the byte after
-        // HALT (the 0x76 fetch advanced it). Fetch that byte WITHOUT advancing
-        // pc and mark it prefetched: the +4 charge is deferred to consumption.
-        // The fetch is a REAL bus read (PPU lockout applies): a double HALT
-        // with IME=0 re-executes HALT here forever, re-fetching the frozen-pc
-        // byte each M-cycle, and escapes when a VRAM pc byte goes mode-3
-        // locked and reads 0xFF = rst $38 (double-halt-cancel).
+        // pc already points at the byte after HALT (the 0x76 fetch advanced it).
+        // Fetch that byte WITHOUT advancing pc and mark it prefetched; the +4
+        // charge is deferred to consumption. The fetch is a REAL bus read (PPU
+        // lockout applies): a double HALT with IME=0 re-executes HALT here forever,
+        // re-fetching the frozen-pc byte each M-cycle, and escapes when a VRAM pc
+        // byte goes mode-3 locked and reads 0xFF = rst $38 (double-halt-cancel).
         cpu.opcode = mmio.peek_fetch(cpu.registers.pc);
         cpu.prefetched = true;
-        // Charge the opcode-fetch M-cycle at consumption (Gambatte cpu.cpp:578
-        // `cc() += 4` on the prefetched branch): unlike the normal prefetch, this
-        // byte was peeked with no tick, so the doubled instruction's operand read
-        // must resolve one M-cycle later (age halt-prefetch).
+        // Charge the opcode-fetch M-cycle at consumption: unlike the normal
+        // prefetch, this byte was peeked with no tick, so the doubled instruction's
+        // operand read must resolve one M-cycle later.
         cpu.halt_bug_prefetch = true;
-        // Next-M-cycle dma() scheduling for the IME-off HALT-bug resume: an HDMA
-        // block whose m0-edge falls during the doubled resume instruction runs
-        // its `dma()` (in Gambatte) at the instruction boundary AFTER that
-        // instruction, so its VRAM write lands after the resume instruction's
-        // own memory read. Defer + suppress the synchronous m0-edge fire across
-        // the resume instruction; the bus fires the held block at the next
-        // boundary (hdma_late_if_and_ie_halt_1: the doubled `ld a,(80FA)` reads
-        // the pre-DMA 0x00, not the post-DMA 0x02). Only when an HDMA is armed.
+        // HDMA scheduling for the IME-off HALT-bug resume: a block whose m0 edge
+        // falls during the doubled resume instruction runs its transfer at the
+        // instruction boundary AFTER it, so the VRAM write lands after the resume
+        // instruction's own read. Defer and suppress the synchronous m0-edge fire
+        // across the resume instruction; the bus fires the held block at the next
+        // boundary. Only when an HDMA is armed.
         if mmio.mmio.hdma_is_enabled() {
             mmio.mmio.set_hdma_unhalt_reflag_deferred(true);
             mmio.mmio.set_hdma_mcycle_fire_suppressed(true);
@@ -631,25 +539,20 @@ pub fn halt(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         return 4;
     }
     cpu.halted = true;
-    // Capture the HDMA halt-state for the unhalt path. Mirrors Gambatte's
-    // `Memory::halt`.
+    // Capture the HDMA halt-state for the unhalt path.
     mmio.on_cpu_halt();
-    // Gambatte `case 0x76`: `prefetched_ = mem_.halt(cc())` returns `hdmaReq`
-    // (a flagged HDMA block held at halt entry => our `HaltHdmaState::Requested`).
-    // When true, the byte peeked at pc on the HALT M-cycle stays PREFETCHED with
-    // pc un-advanced, exactly as in the IME-off bug branch above: on unhalt that
-    // stale opcode (read NOW, while VRAM is still accessible) executes once with
-    // NO re-fetch, then the following instruction re-reads pc (e.g. during the
-    // unhalt's mode-3 the VRAM byte now reads 0xFF). This is the m3unhalt
-    // double-execute (`hdma_transition_7fffhalt_inc_m3unhalt`: the post-HALT
-    // `inc a` runs once -> a=01 -> out01).
+    // A flagged HDMA block held at HALT entry becomes `HaltHdmaState::Requested`.
+    // When set, the byte peeked at pc on the HALT M-cycle stays prefetched with pc
+    // un-advanced, exactly as in the IME-off bug branch above: on unhalt that stale
+    // opcode (read now, while VRAM is still accessible) executes once with NO
+    // re-fetch, then the following instruction re-reads pc (e.g. during the unhalt's
+    // mode-3 the VRAM byte now reads 0xFF).
     if matches!(
             mmio.halt_hdma_state(),
             crate::memory::mmio::HaltHdmaState::Requested
         )
     {
-        // Same real-read semantics as the HALT-bug prefetch above (Gambatte's
-        // case-0x76 `mem_.read` is shared by both branches).
+        // Same real-read semantics as the HALT-bug prefetch above.
         cpu.opcode = mmio.peek_fetch(cpu.registers.pc);
         cpu.prefetched = true;
     }
@@ -832,10 +735,10 @@ pub fn di(cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
 }
 
 pub fn ei(cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
-    // EI enables IME after the instruction FOLLOWING it (the 1-instruction delay).
-    // A back-to-back EI must NOT re-arm an enable already in flight (mooneye
-    // ei_sequence: with consecutive EIs, IME turns on after the 2nd instruction,
-    // not pushed forward by each extra EI). Only arm when no enable is pending.
+    // EI enables IME after the instruction FOLLOWING it (1-instruction delay).
+    // Pan Docs: Interrupts — https://gbdev.io/pandocs/Interrupts.html
+    // Back-to-back EIs must NOT push the enable forward: with consecutive EIs, IME
+    // turns on after the 2nd instruction. Only arm when no enable is pending.
     if cpu.ime_enable_delay == 0 {
         cpu.ime_enable_delay = 2;
     }
@@ -892,7 +795,7 @@ pub fn ld_a_memory_hl_inc(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u3
     let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
     // DMG OAM-bug: the OAM read corruption fires via `mmio.read` (its OAM hook).
     // The hl post-inc does NOT trigger a separate IDU corruption here — faithful
-    // to SameBoy's `ld_a_dhli` (a single `cycle_read`, plain `hl++`).
+    // to the plain `ld a,(hl+)` model (a single read, plain `hl++`).
     cpu.registers.a = mmio.read(addr);
     let new_addr = addr.wrapping_add(1);
     cpu.registers.h = (new_addr >> 8) as u8;
@@ -1456,7 +1359,7 @@ macro_rules! make_push_combined_register {
         pub fn $name(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             // DMG OAM-bug: PUSH's internal SP-dec M-cycle asserts the (pre-dec) SP
             // on the address bus, triggering a write corruption if SP is in OAM
-            // during mode 2 (SameBoy `push_rr` -> `cycle_oam_bug(SP)`). The two
+            // during mode 2 (the PUSH triggers an OAM-bug on SP). The two
             // stack writes below add their own write corruptions via the OAM write
             // hook, at the following M-cycles.
             mmio.oam_bug_idu(cpu.registers.sp);
