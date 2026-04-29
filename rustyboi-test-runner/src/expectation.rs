@@ -733,7 +733,8 @@ fn push_dump_cases(
 /// so only offsets 0x00-0x9F are skipped.
 fn dmg_dump_skip(base: &str) -> Vec<std::ops::Range<usize>> {
     if base.contains("fexx_ffxx_dumper") || base.contains("fexx_read_reset_set_dumper") {
-        vec![0x00..0xA0]
+        // A single skip range covering OAM offsets 0x00-0x9F.
+        std::iter::once(0x00..0xA0).collect()
     } else {
         Vec::new()
     }

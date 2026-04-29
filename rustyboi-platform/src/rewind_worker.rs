@@ -17,7 +17,7 @@
 //! stalling the emulator. Finished blobs are self-describing (they carry their
 //! own frame index) so out-of-order completion never corrupts restore.
 
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
 use rustyboi_session::GB;
@@ -75,11 +75,10 @@ impl RewindWorker {
     /// bytes)` ready to push into the rewind ring.
     pub fn drain_finished(&mut self) -> Vec<Finished> {
         let mut out = Vec::new();
-        loop {
-            match self.done_rx.try_recv() {
-                Ok(f) => out.push(f),
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-            }
+        // try_recv yields Ok until the queue drains, then an Err (Empty or
+        // Disconnected) ends the loop.
+        while let Ok(f) = self.done_rx.try_recv() {
+            out.push(f);
         }
         out
     }
@@ -107,10 +106,9 @@ fn serializer_loop(rx: Receiver<Job>, done_tx: Sender<Finished>) {
             job = newer;
         }
         // The expensive part — off the emulation thread.
-        if let Ok(bytes) = job.gb.to_state_bytes() {
-            if done_tx.send(Finished { frame: job.frame, bytes }).is_err() {
+        if let Ok(bytes) = job.gb.to_state_bytes()
+            && done_tx.send(Finished { frame: job.frame, bytes }).is_err() {
                 break; // main side gone
             }
-        }
     }
 }

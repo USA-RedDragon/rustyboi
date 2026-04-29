@@ -10,7 +10,7 @@
 //! misfiles an entry across the GB/GBC folders); the worker tries them in order
 //! and returns the first 2xx body, or the last error.
 
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
 use rustyboi_session::apply::FetchPurpose;
@@ -61,11 +61,10 @@ impl FetchWorker {
     /// Non-blocking drain of completed fetches.
     pub fn drain_finished(&mut self) -> Vec<Finished> {
         let mut out = Vec::new();
-        loop {
-            match self.done_rx.try_recv() {
-                Ok(f) => out.push(f),
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-            }
+        // try_recv yields Ok until the queue drains, then an Err (Empty or
+        // Disconnected) ends the loop.
+        while let Ok(f) = self.done_rx.try_recv() {
+            out.push(f);
         }
         out
     }
