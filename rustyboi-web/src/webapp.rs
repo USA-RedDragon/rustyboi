@@ -549,13 +549,15 @@ fn draw(
     let pad = gamepad_pad_held();
     let (paint, ui_frame) = ui.run(
         window,
-        false,
-        debug_ref,
-        None,
-        &ui_state,
-        Vec::new(),
-        &pad,
-        force_repaint || debug_open,
+        rustyboi_frontend_lib::ui_host::UiRunInputs {
+            paused: false,
+            debug: debug_ref,
+            printer_attached: None,
+            session: &ui_state,
+            extra_events: Vec::new(),
+            held_pad: &pad,
+            force_repaint: force_repaint || debug_open,
+        },
     );
 
     // Dispatch the action egui emitted.
