@@ -96,11 +96,10 @@ impl Gui {
                 });
             });
 
-        if changed {
-            if let Some(cfg) = &self.input_config {
+        if changed
+            && let Some(cfg) = &self.input_config {
                 *action = Some(GuiAction::SetInputConfig(cfg.clone()));
             }
-        }
     }
 
     fn gb_bindings_section(
@@ -134,12 +133,11 @@ impl Gui {
                 (None, None) => None,
             };
             if let Some(t) = trigger {
-                if let Some((_, triggers)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == btn) {
-                    if !triggers.contains(&t) {
+                if let Some((_, triggers)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == btn)
+                    && !triggers.contains(&t) {
                         triggers.push(t);
                         changed = true;
                     }
-                }
                 self.rebinding_gb = None;
             }
         }
@@ -196,23 +194,20 @@ impl Gui {
         if let Some(gb) = start_capture {
             self.rebinding_gb = Some(gb);
         }
-        if let Some((gb, p)) = add_pad {
-            if let Some((_, tr)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == gb) {
+        if let Some((gb, p)) = add_pad
+            && let Some((_, tr)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == gb) {
                 let t = InputTrigger::Pad(p);
                 if !tr.contains(&t) {
                     tr.push(t);
                     changed = true;
                 }
             }
-        }
-        if let Some((gb, i)) = remove {
-            if let Some((_, tr)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == gb) {
-                if i < tr.len() {
+        if let Some((gb, i)) = remove
+            && let Some((_, tr)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == gb)
+                && i < tr.len() {
                     tr.remove(i);
                     changed = true;
                 }
-            }
-        }
         changed
     }
 

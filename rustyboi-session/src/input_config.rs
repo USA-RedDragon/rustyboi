@@ -404,7 +404,7 @@ impl InputConfig {
             state.prev_active = vec![false; self.hotkeys.len()];
         }
         state.turbo_phase = state.turbo_phase.wrapping_add(1);
-        let turbo_on = (state.turbo_phase / TURBO_PERIOD) % 2 == 0;
+        let turbo_on = (state.turbo_phase / TURBO_PERIOD).is_multiple_of(2);
 
         let mut fired = Vec::new();
         let mut out = raw;
@@ -424,11 +424,10 @@ impl InputConfig {
             if let Some(consumed) = hotkey.action.consumed_gb() {
                 set_gb_button(&mut out, consumed, false);
             }
-            if let HotkeyAction::Turbo(btn) = hotkey.action {
-                if turbo_on {
+            if let HotkeyAction::Turbo(btn) = hotkey.action
+                && turbo_on {
                     set_gb_button(&mut out, btn, true);
                 }
-            }
 
             if hotkey.action.is_hold() || !was {
                 fired.push(FiredHotkey {
