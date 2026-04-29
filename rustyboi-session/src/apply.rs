@@ -242,6 +242,40 @@ impl Session {
                 self.set_palette_choice(choice);
                 ActionOutcome::default()
             }
+            UiAction::SetColorCorrection(conversion) => {
+                self.set_color_correction(conversion);
+                ActionOutcome::default()
+            }
+            UiAction::SetRealBootRom(enabled) => {
+                self.set_real_boot_rom(enabled);
+                let (w, h) = self.content_size();
+                ActionOutcome {
+                    requests: vec![
+                        PlatformRequest::ResizeContent { width: w, height: h },
+                        PlatformRequest::Status(if enabled {
+                            "Real boot ROM enabled; ROM restarted".into()
+                        } else {
+                            "Real boot ROM disabled; ROM restarted".into()
+                        }),
+                    ],
+                    pause_changed: true,
+                }
+            }
+            UiAction::SetTextureFilter(filter) => {
+                self.set_texture_filter(filter);
+                ActionOutcome::default()
+            }
+            UiAction::SetLcdEffect(effect) => {
+                self.set_lcd_effect(effect);
+                ActionOutcome::default()
+            }
+            UiAction::LoadBootRom(file) => ActionOutcome {
+                requests: vec![PlatformRequest::LoadFile {
+                    file,
+                    purpose: LoadPurpose::BootRom,
+                }],
+                pause_changed: false,
+            },
             UiAction::SetRewindEnabled(enabled) => {
                 self.set_rewind_enabled(enabled);
                 ActionOutcome::default()
@@ -441,7 +475,11 @@ mod tests {
             ToggleSgbBorder,
             ToggleTouchControls,
             SetHardware(HardwareChoice::Dmg),
-            SetPalette(PaletteChoice::Blue),
+            SetPalette(PaletteChoice::Pocket),
+            SetColorCorrection(crate::CgbColorConversion::Lcd),
+            SetRealBootRom(false),
+            SetTextureFilter(crate::action::TextureFilter::Linear),
+            SetLcdEffect(crate::action::LcdEffect::Grid),
             SetRewindEnabled(false),
             SetRewindInterval(4),
             SetRewindDepth(30),
@@ -470,9 +508,9 @@ mod tests {
     #[test]
     fn set_palette_persists_choice() {
         let mut s = session();
-        s.apply(UiAction::SetPalette(PaletteChoice::Red), 0);
-        assert_eq!(s.palette(), PaletteChoice::Red);
-        assert_eq!(s.config().dmg_palette.shades, PaletteChoice::Red.rgba_shades());
+        s.apply(UiAction::SetPalette(PaletteChoice::GreenLcd), 0);
+        assert_eq!(s.palette(), PaletteChoice::GreenLcd);
+        assert_eq!(s.config().dmg_palette.shades, PaletteChoice::GreenLcd.rgba_shades());
     }
 
     #[test]

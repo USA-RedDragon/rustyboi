@@ -5,11 +5,12 @@
 //! DMG palette choice, input remap, rewind tuning, and the fast-forward factor.
 //! No host key codes, paths, or window state — those belong to the adapter.
 
-use crate::action::ScalingMode;
+use crate::action::{LcdEffect, ScalingMode, TextureFilter};
 use crate::input::InputMap;
 use crate::input_config::InputConfig;
 use crate::ports::{Storage, StorageError};
 use rustyboi_core_lib::gb::Hardware;
+use rustyboi_core_lib::ppu::CgbColorConversion;
 use serde::{Deserialize, Serialize};
 
 /// Storage key the config blob lives under.
@@ -76,6 +77,22 @@ pub struct Config {
     /// Frame letterboxing policy. `default` so older blobs still load.
     #[serde(default)]
     pub scaling: ScalingMode,
+    /// CGB colour-correction curve (raw RGB555 vs a hardware-LCD approximation).
+    /// Applied to the machine at every (re)build. `default` (`Linear`) so older
+    /// blobs still load and reproduce the historical output.
+    #[serde(default)]
+    pub color_correction: CgbColorConversion,
+    /// Whether to run a real boot ROM (when one has been supplied via
+    /// [`set_boot_rom`](crate::session::Session::set_boot_rom)) instead of the
+    /// synthetic post-boot state. `default` (false) so older blobs still load.
+    #[serde(default)]
+    pub use_real_boot_rom: bool,
+    /// Upscale texture filter (presentation-only). `default` (`Nearest`).
+    #[serde(default)]
+    pub texture_filter: TextureFilter,
+    /// LCD post-process effect (presentation-only). `default` (`Off`).
+    #[serde(default)]
+    pub lcd_effect: LcdEffect,
     /// Rebindable GB-button bindings + chord hotkeys. `default` so older blobs
     /// still load (they get the default arrows/Z=B/X=A/Enter=Start layout).
     #[serde(default)]
@@ -96,6 +113,10 @@ impl Default for Config {
             fast_forward_factor: 4,
             volume: 100,
             scaling: ScalingMode::default(),
+            color_correction: CgbColorConversion::default(),
+            use_real_boot_rom: false,
+            texture_filter: TextureFilter::default(),
+            lcd_effect: LcdEffect::default(),
             input: InputConfig::default(),
         }
     }

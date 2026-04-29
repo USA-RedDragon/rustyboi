@@ -40,6 +40,9 @@ pub enum LoadPurpose {
     Rtc,
     /// An IPS/UPS/BPS ROM patch, applied to the currently-loaded ROM.
     Patch,
+    /// A real boot ROM image (DMG or CGB), supplied to the session for the
+    /// real-boot-ROM feature.
+    BootRom,
 }
 
 /// A single ROM discovered by the Android library scanner.
@@ -61,24 +64,58 @@ pub struct LibraryEntry {
     pub crc32: u32,
 }
 
-/// A four-shade DMG palette choice surfaced in the Settings menu. Toolkit- and
-/// platform-agnostic; the adapter maps it to concrete RGBA shades.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The monochrome DMG palette (tint) applied to original Game Boy output, on
+/// DMG/MGB hardware. Toolkit- and platform-agnostic; the adapter maps it to
+/// concrete RGBA shades. These are the four hardware-grounded renderings:
+/// neutral grayscale, the classic DMG green (raw and LCD-corrected), and the
+/// cooler Game Boy Pocket grayscale — no invented colour sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaletteChoice {
     Grayscale,
-    OriginalGreen,
-    Blue,
-    Brown,
-    Red,
+    GreenLinear,
+    GreenLcd,
+    Pocket,
 }
 
-/// The hardware model choices surfaced in the Settings menu. Mirrors the core's
-/// `Hardware` without pulling its full enum surface into the UI.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The hardware model choices surfaced in the Settings menu — a lossless 1:1
+/// mirror of the core [`Hardware`](rustyboi_core_lib::gb::Hardware) so every
+/// silicon revision the core emulates is selectable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HardwareChoice {
     Dmg,
-    Cgb,
+    Dmg0,
+    Mgb,
     Sgb,
+    Sgb2,
+    Cgb0,
+    Cgbb,
+    Cgb,
+    Cgbe,
+    Agb,
+}
+
+/// The texture sampling filter used when the emulator frame is scaled up for
+/// display. `Nearest` (default) keeps the crisp pixel grid; `Linear` smooths.
+/// Presentation-only — a frontend renderer concern, never touches emulation.
+/// Serde-derived so it persists in [`Config`](crate::config::Config).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextureFilter {
+    #[default]
+    Nearest,
+    Linear,
+}
+
+/// An optional LCD post-process effect applied by the renderer. `Off` (default)
+/// is the plain scaled frame; `Grid` darkens a subpixel gap between source
+/// pixels (an LCD-cell look); `Scanlines` darkens between source rows.
+/// Presentation-only. Serde-derived so it persists in
+/// [`Config`](crate::config::Config).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LcdEffect {
+    #[default]
+    Off,
+    Grid,
+    Scanlines,
 }
 
 /// How the emulated frame is fit into its render region (letterboxing policy).
@@ -86,17 +123,12 @@ pub enum HardwareChoice {
 /// `IntegerAspect` snaps to the largest whole-number scale; `Stretch` fills the
 /// region on both axes, ignoring aspect. Serde-derived so it persists in
 /// [`Config`](crate::config::Config).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScalingMode {
+    #[default]
     FitAspect,
     IntegerAspect,
     Stretch,
-}
-
-impl Default for ScalingMode {
-    fn default() -> Self {
-        ScalingMode::FitAspect
-    }
 }
 
 /// A snapshot of session-owned state the menus render current selections from
@@ -106,6 +138,15 @@ impl Default for ScalingMode {
 pub struct SessionUiState {
     pub hardware: HardwareChoice,
     pub palette: PaletteChoice,
+    /// CGB colour-correction curve (raw RGB555 vs a hardware-LCD approximation).
+    pub color_correction: crate::CgbColorConversion,
+    /// Whether a real boot ROM is run (when one has been supplied) instead of
+    /// the synthetic post-boot state.
+    pub use_real_boot_rom: bool,
+    /// Texture sampling filter for upscaling the frame (presentation-only).
+    pub texture_filter: TextureFilter,
+    /// LCD post-process effect (presentation-only).
+    pub lcd_effect: LcdEffect,
     pub rewind_enabled: bool,
     pub rewind_interval_frames: u32,
     pub rewind_depth: usize,
@@ -145,6 +186,10 @@ impl Default for SessionUiState {
         SessionUiState {
             hardware: HardwareChoice::Cgb,
             palette: PaletteChoice::Grayscale,
+            color_correction: crate::CgbColorConversion::Linear,
+            use_real_boot_rom: false,
+            texture_filter: TextureFilter::Nearest,
+            lcd_effect: LcdEffect::Off,
             rewind_enabled: true,
             rewind_interval_frames: 6,
             rewind_depth: 90,
@@ -231,6 +276,17 @@ pub enum UiAction {
     SetHardware(HardwareChoice),
     /// Change the DMG presentation palette.
     SetPalette(PaletteChoice),
+    /// Change the CGB colour-correction curve (Linear/LCD).
+    SetColorCorrection(crate::CgbColorConversion),
+    /// Enable/disable running a real boot ROM (rebuilds the machine).
+    SetRealBootRom(bool),
+    /// Change the upscale texture filter (nearest/linear) — presentation-only.
+    SetTextureFilter(TextureFilter),
+    /// Change the LCD post-process effect — presentation-only.
+    SetLcdEffect(LcdEffect),
+    /// Supply real boot ROM bytes from a picked file (routed like a battery/RTC
+    /// import through the frontend's file resolver).
+    LoadBootRom(FileData),
     /// Enable/disable rewind capture.
     SetRewindEnabled(bool),
     /// Set the rewind snapshot interval (frames between captures).
@@ -311,6 +367,11 @@ impl UiAction {
             UiAction::ToggleTouchControls => ActionKind::ToggleTouchControls,
             UiAction::SetHardware(_) => ActionKind::SetHardware,
             UiAction::SetPalette(_) => ActionKind::SetPalette,
+            UiAction::SetColorCorrection(_) => ActionKind::SetColorCorrection,
+            UiAction::SetRealBootRom(_) => ActionKind::SetRealBootRom,
+            UiAction::SetTextureFilter(_) => ActionKind::SetTextureFilter,
+            UiAction::SetLcdEffect(_) => ActionKind::SetLcdEffect,
+            UiAction::LoadBootRom(_) => ActionKind::LoadBootRom,
             UiAction::SetRewindEnabled(_) => ActionKind::SetRewindEnabled,
             UiAction::SetRewindInterval(_) => ActionKind::SetRewindInterval,
             UiAction::SetRewindDepth(_) => ActionKind::SetRewindDepth,
@@ -371,6 +432,11 @@ pub enum ActionKind {
     ToggleTouchControls,
     SetHardware,
     SetPalette,
+    SetColorCorrection,
+    SetRealBootRom,
+    SetTextureFilter,
+    SetLcdEffect,
+    LoadBootRom,
     SetRewindEnabled,
     SetRewindInterval,
     SetRewindDepth,
@@ -623,6 +689,34 @@ pub const COMMANDS: &[CommandDescriptor] = &[
         overlay_button: None,
     },
     CommandDescriptor {
+        action_kind: ActionKind::SetColorCorrection,
+        label: "GBC Color Correction",
+        category: MenuCategory::Settings,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::SetTextureFilter,
+        label: "Texture Filter",
+        category: MenuCategory::Settings,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::SetLcdEffect,
+        label: "LCD Effect",
+        category: MenuCategory::Settings,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::SetRealBootRom,
+        label: "Real Boot ROM",
+        category: MenuCategory::Settings,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
         action_kind: ActionKind::SetRewindEnabled,
         label: "Rewind",
         category: MenuCategory::Settings,
@@ -645,15 +739,125 @@ pub const COMMANDS: &[CommandDescriptor] = &[
     },
 ];
 
+/// A console family, used to group the (10) [`HardwareChoice`] variants into
+/// submenus in the Settings UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HardwareFamily {
+    GameBoy,
+    SuperGameBoy,
+    GameBoyColor,
+    GameBoyAdvance,
+}
+
+impl HardwareFamily {
+    /// The family submenu label.
+    pub fn label(self) -> &'static str {
+        match self {
+            HardwareFamily::GameBoy => "Game Boy",
+            HardwareFamily::SuperGameBoy => "Super Game Boy",
+            HardwareFamily::GameBoyColor => "Game Boy Color",
+            HardwareFamily::GameBoyAdvance => "Game Boy Advance",
+        }
+    }
+
+    /// The choices under this family, in display order.
+    pub fn choices(self) -> &'static [HardwareChoice] {
+        match self {
+            HardwareFamily::GameBoy => {
+                &[HardwareChoice::Dmg, HardwareChoice::Dmg0, HardwareChoice::Mgb]
+            }
+            HardwareFamily::SuperGameBoy => &[HardwareChoice::Sgb, HardwareChoice::Sgb2],
+            HardwareFamily::GameBoyColor => &[
+                HardwareChoice::Cgb0,
+                HardwareChoice::Cgbb,
+                HardwareChoice::Cgb,
+                HardwareChoice::Cgbe,
+            ],
+            HardwareFamily::GameBoyAdvance => &[HardwareChoice::Agb],
+        }
+    }
+}
+
 impl HardwareChoice {
+    /// Every model, in display order. `from_option_id` searches this, and a test
+    /// pins that [`FAMILIES`](Self::FAMILIES) collectively cover it.
+    pub const ALL: [HardwareChoice; 10] = [
+        HardwareChoice::Dmg,
+        HardwareChoice::Dmg0,
+        HardwareChoice::Mgb,
+        HardwareChoice::Sgb,
+        HardwareChoice::Sgb2,
+        HardwareChoice::Cgb0,
+        HardwareChoice::Cgbb,
+        HardwareChoice::Cgb,
+        HardwareChoice::Cgbe,
+        HardwareChoice::Agb,
+    ];
+
+    /// The families, in display order, for building grouped Settings submenus.
+    pub const FAMILIES: [HardwareFamily; 4] = [
+        HardwareFamily::GameBoy,
+        HardwareFamily::SuperGameBoy,
+        HardwareFamily::GameBoyColor,
+        HardwareFamily::GameBoyAdvance,
+    ];
+
+    /// The stable lowercase string id for this model — the canonical mapping the
+    /// libretro core option keys are drawn from, so a frontend that speaks string
+    /// ids (libretro) never hand-maintains a second model table. Round-trips with
+    /// [`from_option_id`](Self::from_option_id).
+    pub fn option_id(self) -> &'static str {
+        match self {
+            HardwareChoice::Dmg => "dmg",
+            HardwareChoice::Dmg0 => "dmg0",
+            HardwareChoice::Mgb => "mgb",
+            HardwareChoice::Sgb => "sgb",
+            HardwareChoice::Sgb2 => "sgb2",
+            HardwareChoice::Cgb0 => "cgb0",
+            HardwareChoice::Cgbb => "cgbb",
+            HardwareChoice::Cgb => "cgb",
+            HardwareChoice::Cgbe => "cgbe",
+            HardwareChoice::Agb => "agb",
+        }
+    }
+
+    /// Parse a lowercase model id (see [`option_id`](Self::option_id)), or `None`
+    /// if unrecognized.
+    pub fn from_option_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.option_id() == id)
+    }
+
+    /// A short human label for this specific model.
+    pub fn label(self) -> &'static str {
+        match self {
+            HardwareChoice::Dmg => "DMG (Game Boy)",
+            HardwareChoice::Dmg0 => "DMG0 (early Japanese)",
+            HardwareChoice::Mgb => "MGB (Game Boy Pocket)",
+            HardwareChoice::Sgb => "SGB (Super Game Boy)",
+            HardwareChoice::Sgb2 => "SGB2 (Super Game Boy 2)",
+            HardwareChoice::Cgb0 => "CGB0 (earliest)",
+            HardwareChoice::Cgbb => "CGB-B",
+            HardwareChoice::Cgb => "CGB (Game Boy Color)",
+            HardwareChoice::Cgbe => "CGB-E",
+            HardwareChoice::Agb => "AGB (Game Boy Advance)",
+        }
+    }
+
     /// Map a core [`Hardware`](rustyboi_core_lib::gb::Hardware) to the menu
-    /// choice (DMG/MGB collapse to Dmg; anything else that isn't SGB is Cgb).
+    /// choice — a lossless 1:1 mapping.
     pub fn from_hardware(hw: rustyboi_core_lib::gb::Hardware) -> Self {
         use rustyboi_core_lib::gb::Hardware;
         match hw {
-            Hardware::DMG | Hardware::MGB => HardwareChoice::Dmg,
+            Hardware::DMG => HardwareChoice::Dmg,
+            Hardware::DMG0 => HardwareChoice::Dmg0,
+            Hardware::MGB => HardwareChoice::Mgb,
             Hardware::SGB => HardwareChoice::Sgb,
-            _ => HardwareChoice::Cgb,
+            Hardware::SGB2 => HardwareChoice::Sgb2,
+            Hardware::CGB0 => HardwareChoice::Cgb0,
+            Hardware::CGBB => HardwareChoice::Cgbb,
+            Hardware::CGB => HardwareChoice::Cgb,
+            Hardware::CGBE => HardwareChoice::Cgbe,
+            Hardware::AGB => HardwareChoice::Agb,
         }
     }
 
@@ -662,23 +866,74 @@ impl HardwareChoice {
         use rustyboi_core_lib::gb::Hardware;
         match self {
             HardwareChoice::Dmg => Hardware::DMG,
-            HardwareChoice::Cgb => Hardware::CGB,
+            HardwareChoice::Dmg0 => Hardware::DMG0,
+            HardwareChoice::Mgb => Hardware::MGB,
             HardwareChoice::Sgb => Hardware::SGB,
+            HardwareChoice::Sgb2 => Hardware::SGB2,
+            HardwareChoice::Cgb0 => Hardware::CGB0,
+            HardwareChoice::Cgbb => Hardware::CGBB,
+            HardwareChoice::Cgb => Hardware::CGB,
+            HardwareChoice::Cgbe => Hardware::CGBE,
+            HardwareChoice::Agb => Hardware::AGB,
         }
     }
 }
 
 impl PaletteChoice {
+    /// All choices, in display order (also the `from_shades` search order).
+    pub const ALL: [PaletteChoice; 4] = [
+        PaletteChoice::Grayscale,
+        PaletteChoice::GreenLinear,
+        PaletteChoice::GreenLcd,
+        PaletteChoice::Pocket,
+    ];
+
+    /// A short human label for the Settings menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            PaletteChoice::Grayscale => "Grayscale",
+            PaletteChoice::GreenLinear => "Green (linear)",
+            PaletteChoice::GreenLcd => "Green (LCD)",
+            PaletteChoice::Pocket => "Game Boy Pocket",
+        }
+    }
+
+    /// The stable lowercase string id for this palette — the canonical mapping
+    /// the libretro core option keys are drawn from, so a frontend that speaks
+    /// string ids never hand-maintains a second (drift-prone) palette table.
+    /// Round-trips with [`from_option_id`](Self::from_option_id).
+    pub fn option_id(self) -> &'static str {
+        match self {
+            PaletteChoice::Grayscale => "grayscale",
+            PaletteChoice::GreenLinear => "green",
+            PaletteChoice::GreenLcd => "greenlcd",
+            PaletteChoice::Pocket => "pocket",
+        }
+    }
+
+    /// Parse a lowercase palette id (see [`option_id`](Self::option_id)), or
+    /// `None` if unrecognized.
+    pub fn from_option_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.option_id() == id)
+    }
+
+    /// Parse a palette name (CLI `--palette` / config string), or `None` if
+    /// unrecognized. Accepts the historical aliases the desktop CLI used.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "grayscale" | "gray" | "grey" => Some(Self::Grayscale),
+            "green" | "greenlinear" | "original" | "gameboy" => Some(Self::GreenLinear),
+            "greenlcd" | "lcd" | "dmg" => Some(Self::GreenLcd),
+            "pocket" | "mgb" => Some(Self::Pocket),
+            _ => None,
+        }
+    }
+
     /// The choice whose [`rgba_shades`](Self::rgba_shades) match `shades`, or
     /// `Grayscale` if none do (e.g. a custom palette persisted by a frontend).
     pub fn from_shades(shades: [[u8; 4]; 4]) -> Self {
-        for choice in [
-            PaletteChoice::Grayscale,
-            PaletteChoice::OriginalGreen,
-            PaletteChoice::Blue,
-            PaletteChoice::Brown,
-            PaletteChoice::Red,
-        ] {
+        for choice in Self::ALL {
             if choice.rgba_shades() == shades {
                 return choice;
             }
@@ -695,29 +950,26 @@ impl PaletteChoice {
                 [0x55, 0x55, 0x55, 0xFF],
                 [0x00, 0x00, 0x00, 0xFF],
             ],
-            PaletteChoice::OriginalGreen => [
+            // The classic DMG green, raw (uncorrected).
+            PaletteChoice::GreenLinear => [
                 [0x9B, 0xBC, 0x0F, 0xFF],
                 [0x8B, 0xAC, 0x0F, 0xFF],
                 [0x30, 0x62, 0x30, 0xFF],
                 [0x0F, 0x38, 0x0F, 0xFF],
             ],
-            PaletteChoice::Blue => [
-                [0xE0, 0xF8, 0xFF, 0xFF],
-                [0x86, 0xC0, 0xEA, 0xFF],
-                [0x2E, 0x59, 0x8D, 0xFF],
-                [0x1A, 0x1C, 0x2C, 0xFF],
+            // The DMG green as its LCD panel renders it (lighter, gamma-tinted).
+            PaletteChoice::GreenLcd => [
+                [0xE0, 0xF8, 0xD0, 0xFF],
+                [0x88, 0xC0, 0x70, 0xFF],
+                [0x34, 0x68, 0x56, 0xFF],
+                [0x08, 0x18, 0x20, 0xFF],
             ],
-            PaletteChoice::Brown => [
-                [0xFF, 0xF6, 0xD3, 0xFF],
-                [0xBF, 0x8B, 0x67, 0xFF],
-                [0x7F, 0x4F, 0x24, 0xFF],
-                [0x33, 0x20, 0x14, 0xFF],
-            ],
-            PaletteChoice::Red => [
-                [0xFF, 0xE4, 0xE1, 0xFF],
-                [0xFF, 0xA5, 0x9E, 0xFF],
-                [0xBF, 0x30, 0x30, 0xFF],
-                [0x7F, 0x0A, 0x0A, 0xFF],
+            // The cooler Game Boy Pocket grayscale.
+            PaletteChoice::Pocket => [
+                [0xC4, 0xCF, 0xA1, 0xFF],
+                [0x8B, 0x95, 0x6D, 0xFF],
+                [0x4D, 0x53, 0x3C, 0xFF],
+                [0x1F, 0x1F, 0x1F, 0xFF],
             ],
         }
     }
@@ -734,5 +986,49 @@ mod tests {
             let _ = c.action_kind;
             let _ = c.category;
         }
+    }
+
+    // The libretro core generates its option table from these ids and parses
+    // options back through `from_option_id`, so the two MUST round-trip for every
+    // variant — otherwise an option would be un-selectable or silently ignored.
+    #[test]
+    fn hardware_option_ids_round_trip() {
+        for c in HardwareChoice::ALL {
+            assert_eq!(HardwareChoice::from_option_id(c.option_id()), Some(c));
+        }
+        // Ids are unique.
+        let mut ids: Vec<&str> = HardwareChoice::ALL.iter().map(|c| c.option_id()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), HardwareChoice::ALL.len());
+        assert_eq!(HardwareChoice::from_option_id("auto"), None);
+    }
+
+    // The family submenus must collectively cover every model exactly once, so
+    // the grouped GUI picker can reach all of `ALL`.
+    #[test]
+    fn families_cover_every_hardware_choice_once() {
+        let mut grouped: Vec<HardwareChoice> = HardwareChoice::FAMILIES
+            .iter()
+            .flat_map(|f| f.choices().iter().copied())
+            .collect();
+        grouped.sort_by_key(|c| *c as u8);
+        let mut all: Vec<HardwareChoice> = HardwareChoice::ALL.to_vec();
+        all.sort_by_key(|c| *c as u8);
+        assert_eq!(grouped, all);
+    }
+
+    #[test]
+    fn palette_option_ids_round_trip() {
+        for p in PaletteChoice::ALL {
+            assert_eq!(PaletteChoice::from_option_id(p.option_id()), Some(p));
+            // `rgba_shades` is injective across the set, so `from_shades` also
+            // recovers the choice (the frontends rely on this).
+            assert_eq!(PaletteChoice::from_shades(p.rgba_shades()), p);
+        }
+        let mut ids: Vec<&str> = PaletteChoice::ALL.iter().map(|p| p.option_id()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), PaletteChoice::ALL.len());
     }
 }

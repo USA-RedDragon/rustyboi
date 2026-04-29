@@ -57,6 +57,7 @@ pub mod input_config;
 pub mod no_intro;
 pub mod overlay;
 pub mod patch;
+pub mod present;
 pub mod rom_zip;
 pub mod ports;
 pub mod rewind;
@@ -66,10 +67,12 @@ pub mod tas;
 #[cfg(target_os = "android")]
 pub use action::LibraryEntry;
 pub use action::{
-    ActionKind, CommandDescriptor, FileData, HardwareChoice, KeyBind, LoadPurpose, MenuCategory,
-    PaletteChoice, ScalingMode, SessionUiState, UiAction, COMMANDS,
+    ActionKind, CommandDescriptor, FileData, HardwareChoice, HardwareFamily, KeyBind, LcdEffect,
+    LoadPurpose, MenuCategory, PaletteChoice, ScalingMode, SessionUiState, TextureFilter, UiAction,
+    COMMANDS,
 };
 pub use apply::{ActionOutcome, FetchPurpose, PlatformRequest};
+pub use present::{frame_to_pixels, rgb_to_pixels, PixelOrder};
 pub use cheat_db::FetchedCheat;
 pub use config::Config;
 pub use debug::{DebugDetail, DebugSnapshot};
@@ -89,4 +92,5 @@ pub use session::{
 // crate for the common path.
 pub use rustyboi_core_lib::gb::{Frame, Hardware, GB};
 pub use rustyboi_core_lib::input::ButtonState;
+pub use rustyboi_core_lib::ppu::CgbColorConversion;
 pub use rustyboi_core_lib::movie::{self, sha256, Movie};
