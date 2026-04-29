@@ -1,4 +1,4 @@
-//! Shared NRx2 volume-envelope unit (SameBoy div-anchored model, Core/apu.c).
+//! Shared NRx2 volume-envelope unit (DIV-anchored hardware model).
 //!
 //! The square and noise channels drive byte-identical envelope logic over the
 //! same five fields (`env_clock`, `env_should_lock`, `env_locked`, `volume`,
@@ -12,7 +12,7 @@
 
 macro_rules! impl_envelope_unit {
     () => {
-        /// SameBoy `set_envelope_clock`.
+        /// Arm/disarm the envelope clock and latch the should-lock condition.
         fn set_env_clock(&mut self, value: bool, direction: bool, volume: u8) {
             if self.env_clock == value {
                 return;
@@ -27,7 +27,7 @@ macro_rules! impl_envelope_unit {
             }
         }
 
-        /// SameBoy `_nrx2_glitch` ("zombie mode"): the volume transform an NRx2
+        /// The NRx2 "zombie mode" glitch: the volume transform an NRx2
         /// write applies to a playing channel.
         fn nrx2_glitch_step(&mut self, value: u8, old: u8) {
             if self.env_clock {
@@ -63,7 +63,7 @@ macro_rules! impl_envelope_unit {
             }
         }
 
-        /// SameBoy `nrx2_glitch`: CGB-D/E apply the transform once; older
+        /// The NRx2 zombie glitch: CGB-D/E apply the transform once; older
         /// revisions (and DMG) pass through an FF intermediate value, applying
         /// it twice. rustyboi's CGB target follows the SameSuite-calibrated D/E
         /// behavior; DMG takes the pre-CGB double application.
@@ -100,7 +100,7 @@ macro_rules! impl_envelope_unit {
             }
         }
 
-        /// DIV-APU event: consume an armed tick (SameBoy `tick_*_envelope`).
+        /// DIV-APU event: consume an armed tick.
         pub fn env_div_tick(&mut self) {
             if !self.env_clock {
                 return;
