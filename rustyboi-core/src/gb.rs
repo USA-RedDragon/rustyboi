@@ -681,6 +681,15 @@ impl GB {
         Ok(())
     }
 
+    /// Load a boot ROM from raw bytes (WASM-clean; no filesystem access). The
+    /// bytes must be a real DMG (256-byte) or CGB (2304-byte) boot ROM matching
+    /// the emulated model — the length-appropriate CRC is verified, so a wrong or
+    /// mismatched image returns an error and the machine keeps its prior state.
+    pub fn load_bios_bytes(&mut self, bytes: &[u8]) -> Result<(), std::io::Error> {
+        self.mmio.load_bios_bytes(bytes)?;
+        Ok(())
+    }
+
     /// Run the REAL boot ROM from power-on (PC=0x0000) until it hands off to the
     /// cartridge. Mirrors a hardware-faithful testrunner, which executes the
     /// boot ROM before every test instead of seeding a synthetic post-boot state.

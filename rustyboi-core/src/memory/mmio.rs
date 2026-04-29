@@ -1314,6 +1314,14 @@ impl Mmio {
 
     pub fn load_bios(&mut self, path: &str) -> Result<(), io::Error> {
         let data = fs::read(path)?;
+        self.load_bios_bytes(&data)
+    }
+
+    /// Load a boot ROM from raw bytes (no filesystem — the WASM-clean path the
+    /// session/GUI adapters use). Accepts only the two real hardware lengths and
+    /// verifies the length-appropriate CRC (byte 0xFD masked out, matching the
+    /// dump convention) before installing it.
+    pub fn load_bios_bytes(&mut self, data: &[u8]) -> Result<(), io::Error> {
         // Accept only the two real hardware boot-ROM lengths.
         let expected_crc = match data.len() {
             BIOS_SIZE => DMG_BIOS_CRC32,
@@ -1322,7 +1330,7 @@ impl Mmio {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "BIOS file has unexpected length {} (want {} DMG or {} CGB)",
+                        "BIOS has unexpected length {} (want {} DMG or {} CGB)",
                         other, BIOS_SIZE, CGB_BIOS_SIZE
                     ),
                 ));
@@ -1330,17 +1338,17 @@ impl Mmio {
         };
         // Faithful to the boot-ROM load convention: zero byte 0xFD before
         // hashing (it differs between revisions / patched dumps) then crc32.
-        let masked_crc = bios_masked_crc32(&data);
+        let masked_crc = bios_masked_crc32(data);
         if masked_crc != expected_crc {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "BIOS CRC mismatch for {}: got 0x{:08X}, expected 0x{:08X}",
-                    path, masked_crc, expected_crc
+                    "BIOS CRC mismatch: got 0x{:08X}, expected 0x{:08X}",
+                    masked_crc, expected_crc
                 ),
             ));
         }
-        self.bios = Some(data);
+        self.bios = Some(data.to_vec());
         self.seed_rocket_boot_logo();
         Ok(())
     }
