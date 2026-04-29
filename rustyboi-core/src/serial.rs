@@ -9,14 +9,15 @@ use std::sync::{Arc, Mutex};
 pub const SB: u16 = 0xFF01;
 pub const SC: u16 = 0xFF02;
 
-/// How long an internal-clock (master) transfer holds for a link peer that has
-/// not armed its side yet before falling back to exchanging with the peer's
-/// live SB mirror (an idle powered peer shifts out whatever its SB holds; a
-/// severed cable mirror defaults to 0xFF = disconnected ones). Master-cc, so
-/// deterministic under any pump schedule; ~4 DMG frames — far beyond any real
-/// game's re-arm latency between protocol bytes, short enough that probing a
-/// peer that never joins (partner not at the link menu) degrades to the
-/// disconnected UX instead of hanging the game.
+/// How long an internal-clock (master) transfer holds for a peer that hasn't
+/// armed before falling back to exchanging with the peer's live SB mirror (an
+/// idle powered peer shifts out its SB; a severed cable defaults to 0xFF =
+/// disconnected ones). Master-cc, so deterministic under any pump. ~4 DMG
+/// frames: beyond any real re-arm latency, short enough that a peer that never
+/// joins degrades to disconnected behavior instead of hanging the game.
+/// Pan Docs notes a transfer with no clock never completes, so software must
+/// time out — Serial Data Transfer:
+/// https://gbdev.io/pandocs/Serial_Data_Transfer_(Link_Cable).html
 pub const LINK_STALL_TIMEOUT_CC: u64 = 4 * 70224;
 
 /// What the link-port device offers an internal-clock transfer at start.
@@ -280,9 +281,9 @@ impl SerialDevice {
             SerialDevice::Printer(p) => LinkStart::Ready(p.preloaded_response()),
             SerialDevice::Link(l) => l.sc_write(value, sb),
             // The adapter is the clock master; driving an internal-clock
-            // transfer against it yields garbage (Pan Docs). External-clock
-            // arming schedules no internal window, so this is only consumed on
-            // that misuse.
+            // transfer against it yields garbage. External-clock arming
+            // schedules no internal window, so this is only consumed on that
+            // misuse.
             SerialDevice::FourPlayer(_) => LinkStart::Ready(0xFF),
             // The Mobile Adapter is an internal-clock slave: the Game Boy clocks
             // and receives the adapter's preloaded byte, like the printer.
@@ -352,13 +353,8 @@ impl SerialDevice {
     }
 }
 
-// ds-engine STAGE 3: RB_LAZYPERIPH. When set, serial anchors its completion
-// event on the TRUE write cc (the raw master cc captured at the SC-write access
-// start, supplied via stage-1 RB_EXACTCC `write_access_cc()` = raw abs_cc) and
-// drops the per-dot phase-mapping `WRITE_CC_OFFSET=7`. The offset existed only
-// to fold the legacy abs_cc-advanced-at-start-of-dot phase back to Gambatte's
-// SC-write cc; with the exact write cc it becomes 0.
-
+// SC (FF02) bits. Pan Docs: Serial Data Transfer —
+// https://gbdev.io/pandocs/Serial_Data_Transfer_(Link_Cable).html
 const SC_TRANSFER_START: u8 = 1 << 7;
 const SC_FAST_CLOCK: u8 = 1 << 1; // CGB only
 const SC_INTERNAL_CLOCK: u8 = 1 << 0;
@@ -367,10 +363,10 @@ const SC_INTERNAL_CLOCK: u8 = 1 << 0;
 pub struct Serial {
     sb: u8,
     sc: u8,
-    // Absolute completion model (mirrors Gambatte's serial event time): a
-    // transfer's interrupt fires at `complete_at` (a master-cc value), with one
-    // bit shifted out every `step_t` cc. Bits already shifted are reconstructed
-    // from the remaining time so SB reads stay correct mid-transfer.
+    // Absolute completion model: a transfer's interrupt fires at `complete_at`
+    // (a master-cc value), one bit shifted out every `step_t` cc. Bits already
+    // shifted are reconstructed from the remaining time so SB reads stay correct
+    // mid-transfer.
     active: bool,
     complete_at: u64,
     step_t: u32,
@@ -431,9 +427,9 @@ impl Serial {
         self.cgb
     }
 
-    /// per-access STAGE 1: true while a serial transfer is in flight (its
-    /// `complete_at` event is pending). Blocks the idle bulk-skip so the transfer's
-    /// bit-shift and completion IRQ land at the exact cc.
+    /// True while a serial transfer is in flight (its `complete_at` event is
+    /// pending). Blocks the idle bulk-skip so the bit-shift and completion IRQ
+    /// land at the exact cc.
     pub fn is_active(&self) -> bool {
         self.active
     }
@@ -451,35 +447,37 @@ impl Serial {
         (self.sc & SC_TRANSFER_START) != 0 && (self.sc & SC_INTERNAL_CLOCK) != 0
     }
 
-    /// The transfer completion event cc for a window whose clock starts
-    /// running at `phase`: snap `phase` down to the DIV-aligned grid
-    /// (Gambatte: `cc - (cc - divLastUpdate) % align`), then add the 8-bit
-    /// transfer span.
+    /// The transfer completion event cc for a window whose clock starts at
+    /// `phase`: snap `phase` down to the DIV-aligned grid
+    /// (`cc - (cc - div_anchor) % align`, where `div_anchor` is the cc of the
+    /// last DIV-write), then add the 8-bit transfer span.
+    /// The serial clock is modelled as a tap off DIV, so the first edge aligns to
+    /// the DIV phase. This sub-cycle DIV alignment is not documented in Pan Docs
+    /// or GBCTR.
+    /// NOTE: TCAGBD §5.1 states the serial clock is NOT DIV-derived ("Serial clock
+    /// is not derived from this counter, it is not affected by DIV register"; §6
+    /// adds the serial unit has "an internal timer that can't be reseted by any
+    /// means"). Our DIV-coupling follows the later reverse-engineered model and
+    /// is NOT supported by TCAGBD. Unresolved vs hardware.
     fn event_time(&self, divider: u16, phase: u64) -> (u32, u64) {
         let fast = self.cgb && (self.sc & SC_FAST_CLOCK) != 0;
-        // DIV-align residue mask matches Gambatte's `% 8` (fast) / `% 0x100`
-        // (slow) in memory.cpp case 0x02; the realign path already uses align=8.
+        // DIV-align residue mask: `% 8` for the fast clock, `% 0x100` for slow.
         let (step, align_mask) = if fast { (16u32, 0x07u64) } else { (512u32, 0xFFu64) };
         (step, phase - (divider as u64 & align_mask) + (step as u64) * 8)
     }
 
     /// Schedule (or cancel) the transfer event. `divider` is the timer's
-    /// internal counter and `phase` the master cc (`abs_cc`-based) at the SC
-    /// write's resolution cc — serial now shares the single master clock, not a
-    /// separate `cpu_t_phase` (M8 serial merge). Mirrors Gambatte memory.cpp
-    /// 0x02 write: `eventTime = cc - (cc - divLastUpdate) % align + step * 8`.
+    /// internal counter and `phase` the master cc at the SC write's resolution
+    /// cc. The completion cc is DIV-aligned then advanced by the 8-bit span:
+    /// `event_cc = cc - (cc - div_anchor) % align + step * 8`.
     fn schedule(&mut self, divider: u16, phase: u64, link: LinkStart) {
         if !self.internal_start() {
             self.active = false;
             self.link_wait = false;
             return;
         }
-        // The completion event: snap to the DIV grid and add the span, then
-        // subtract the master-cc write-phase offset mapping the per-dot `abs_cc`
-        // (advanced at the start of each dot's tick) to Gambatte's mid-cycle SC
-        // write cc. Swept against the serial cluster post-merge (minimum at 6/7).
-        // STAGE 3/7: the SC write resolves at the exact (raw) write cc, so the
-        // old per-dot phase-mapping WRITE_CC_OFFSET=7 is permanently 0.
+        // The SC write resolves at the exact write cc, so `event_time` gives the
+        // completion cc directly with no phase offset to fold in.
         let (step, complete_at) = self.event_time(divider, phase);
         self.step_t = step;
         self.bits_shifted = 0;
@@ -548,12 +546,16 @@ impl Serial {
         self.sc &= !SC_TRANSFER_START;
     }
 
-    /// Re-align the pending transfer event to a DIV reset, mirroring Gambatte
-    /// memory.cpp `case 0x04`:
-    /// `n = t + (cc - t) % align - 2 * ((cc - t) & half); eventTime = max(cc,n)`.
+    /// Re-align the pending transfer event to a DIV reset:
+    /// `n = t + (cc - t) % align - 2 * ((cc - t) & half); event_cc = max(cc,n)`.
     /// A DIV write resets the internal divider that gates the serial shift clock,
     /// so the next (and only the next) shift edge snaps to the new divider phase.
-    /// Only perturbs an in-flight, future-completing transfer.
+    /// Only perturbs an in-flight, future-completing transfer. This DIV/serial
+    /// coupling is not documented in Pan Docs or GBCTR.
+    /// NOTE: TCAGBD §5.1 DIRECTLY CONTRADICTS this — "Serial clock is not derived
+    /// from this counter, it is not affected by DIV register" (and §6: the serial
+    /// internal timer "can't be reseted by any means"). Our DIV-write realignment
+    /// follows the later reverse-engineered model, NOT TCAGBD. Unresolved vs hardware.
     pub fn realign_to_div(&mut self, phase: u64) {
         // A link-held transfer has no running clock to realign; its window is
         // re-anchored (DIV-snapped) wholesale when the peer's byte arrives.
@@ -562,12 +564,8 @@ impl Serial {
         }
         let fast = self.cgb && (self.sc & SC_FAST_CLOCK) != 0;
         let (align, half) = if fast { (8u64, 4u64) } else { (0x100u64, 0x80u64) };
-        // Gambatte operates on the raw serial event time `t` and write cc; our
-        // `complete_at` carries the SC-write offset, so undo it for the residue
-        // math (the matching write-cc offset cancels in `delta`). Must equal
-        // `schedule`'s WRITE_CC_OFFSET.
-        // STAGE 3/7: WRITE_CC_OFFSET is permanently 0, so `complete_at` already
-        // carries the raw write cc — no offset to undo.
+        // `complete_at` already holds the raw event time, so it is the `t` the
+        // residue math operates on directly.
         let t = self.complete_at;
         let delta = phase.wrapping_sub(t); // (cc - t), wraps since t > cc
         let n = t
@@ -592,15 +590,18 @@ impl Serial {
             8u8.saturating_sub(remaining_bits)
         };
         while self.bits_shifted < target {
-            // The outgoing bit is SB's MSB at the shift edge; the incoming bit
-            // is the peer's latched response, MSB first (0xFF when no peer
-            // connected -> ones shifted in, the disconnected-cable behavior).
+            // Outgoing bit is SB's MSB at each shift edge; incoming bit is the
+            // peer's latched response, MSB first (0xFF when disconnected -> ones
+            // shifted in). Pan Docs: SB shift table + Disconnects —
+            // https://gbdev.io/pandocs/Serial_Data_Transfer_(Link_Cable).html
             self.tx_acc = (self.tx_acc << 1) | (self.sb >> 7);
             let in_bit = (self.rx_latch >> (7 - self.bits_shifted)) & 1;
             self.sb = (self.sb << 1) | in_bit;
             self.bits_shifted += 1;
         }
         if phase >= self.complete_at {
+            // Completion clears SC.7 and requests the serial interrupt. Pan Docs:
+            // INT $58 — https://gbdev.io/pandocs/Interrupt_Sources.html
             self.active = false;
             self.sc &= !SC_TRANSFER_START;
             mmio.request_interrupt(cpu::registers::InterruptFlag::Serial);
@@ -839,8 +840,8 @@ mod tests {
     /// 0x01..=0x08, instance B (external clock) sends 0xA0..=0xA7, pumped in
     /// instruction-alternating lockstep. Each side must receive the other's
     /// bytes in order with the serial IRQ raised per byte, the master's
-    /// timing must be BYTE-IDENTICAL to the suite-validated disconnected
-    /// schedule (a ready link peer never perturbs internal-clock timing),
+    /// timing must be byte-identical to the reference disconnected schedule
+    /// (a ready link peer never perturbs internal-clock timing),
     /// and the slave's completions must land within lockstep skew of the
     /// master's exact completion cc.
     #[test]
@@ -848,10 +849,9 @@ mod tests {
         let tx_a: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
         let tx_b: [u8; 8] = [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7];
 
-        // Reference: the identical master ROM against a disconnected cable.
-        // Its schedule (start cc, completion event cc, completion/IF
-        // observation cc) is the hardware oracle the whole serial suite
-        // matrix validates.
+        // Reference: the identical master ROM against a disconnected cable. Its
+        // schedule (start cc, completion event cc, completion/IF observation cc)
+        // is the timing a ready link peer must not perturb.
         let mut d = gb_with(link_xfer_rom(0x81, &tx_a, true), Hardware::DMG);
         let mut td = LinkTrace::default();
         for _ in 0..40_000 {
@@ -877,7 +877,7 @@ mod tests {
         assert_eq!(wram(&a, 8), tx_b.to_vec(), "master received slave bytes");
         assert_eq!(wram(&b, 8), tx_a.to_vec(), "slave received master bytes");
 
-        // Master timing byte-identical to the disconnected oracle: same
+        // Master timing byte-identical to the disconnected reference: same
         // start ccs, same scheduled completion events (all Ready — never a
         // link hold), same completion/IF observation ccs.
         assert_eq!(ta.sc_up, td.sc_up, "master start cc + completion events");
@@ -1083,16 +1083,11 @@ mod tests {
         }
     }
 
-    /// Uneven pump (the doc allows "any interleave"): a slave that is starved
-    /// of steps while the master completes several windows must not lose any
-    /// completed byte or its serial IRQ — each queued byte is delivered as its
-    /// own external-clock completion when the slave next runs and re-arms. This
-    /// pins the deposit-FIFO fix: a single-slot deposit would drop bytes 1..k
-    /// and their IRQs, yielding a short/garbled slave sequence.
-    /// Deposit FIFO (candidate-D guard), tested directly at the cable API so
-    /// the timing is deterministic rather than ROM-clock roulette. A master
-    /// completing several windows into an armed-but-not-yet-polled slave must
-    /// queue every byte in order — a single slot would drop all but the last.
+    /// Uneven pump: a slave starved of steps while the master completes several
+    /// windows must not lose any completed byte or its serial IRQ — each queued
+    /// byte is delivered as its own external-clock completion when the slave next
+    /// runs. Tested directly at the cable API for deterministic timing; a
+    /// single-slot deposit would drop all but the last byte.
     #[test]
     fn link_deposit_fifo_preserves_order_and_count() {
         let (master, slave) = super::LinkCable::pair();

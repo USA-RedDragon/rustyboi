@@ -92,33 +92,31 @@ const POCKET_CAMERA: u8 = 0xFC;
 // Unlicensed / bootleg mappers. These boards spoof the header type byte
 // ($00/$01, or use out-of-spec values like $97/$99/$EA), so they are detected
 // from ROM content (logo checksums / publisher strings / title+size shapes),
-// not from $0147. References: hhugboy (src/memory/CartDetection.cpp and
-// src/memory/mbc/MbcUnl*.cpp, by taizou/NewRisingSun), mGBA (src/gb/mbc.c
-// _detectUnlMBC + src/gb/mbc/unlicensed.c), Pan Docs "Other MBCs"
+// not from $0147. References: the community reverse-engineering of these
+// boards, Pan Docs "Other MBCs"
 // (https://gbdev.io/pandocs/othermbc.html), and the gbdev forum thread
 // "Cartridges with Rare Mappers" (https://gbdev.gg8.se/forums/viewtopic.php?id=948).
 // ---------------------------------------------------------------------------
 
 /// Byte sum of the 48-byte Nintendo logo at its usual $0104 location.
 const LOGO_SUM_NINTENDO: u32 = 5446;
-/// Byte sums of the two Sachen logo variants (hhugboy CartDetection.cpp).
+/// Byte sums of the two Sachen logo variants.
 const LOGO_SUM_SACHEN_A: u32 = 5542;
 const LOGO_SUM_SACHEN_B: u32 = 7484;
-/// Byte sum of the Rocket Games logo (hhugboy: 2756). Rocket carts never
+/// Byte sum of the Rocket Games logo (2756). Rocket carts never
 /// contain the Nintendo logo in the dump; while a boot ROM runs, the mapper
 /// presents the logo (sourced from the boot ROM) during its locked-CGB phase so
 /// the boot ROM's logo check passes.
 const LOGO_SUM_ROCKET: u32 = 2756;
 
 // Lock-phase values shared by the Sachen and Rocket boot state machines
-// (hhugboy MODE_LOCKED_DMG/MODE_LOCKED_CGB/MODE_UNLOCKED, mGBA GBSachenLockState).
+// (the board powers up locked and unlocks in DMG -> CGB -> unlocked phases).
 const UNL_LOCKED_DMG: u8 = 0;
 const UNL_LOCKED_CGB: u8 = 1;
 const UNL_UNLOCKED: u8 = 2;
 
 /// NT/Makon "old" bank-line swap tables for the $5003 bit-4 mode, applied to
-/// the ROM bank number: output bit i = input bit table[i] (mGBA
-/// _ntOld1Reorder/_ntOld2Reorder; identical to hhugboy's flippo1/flippo2).
+/// the ROM bank number: output bit i = input bit table[i].
 const NT_OLD1_REORDER: [u8; 8] = [0, 2, 1, 4, 3, 5, 6, 7];
 const NT_OLD2_REORDER: [u8; 8] = [1, 2, 0, 3, 4, 5, 6, 7];
 
@@ -131,36 +129,32 @@ pub enum UnlMapper {
     None,
     /// Wisdom Tree one-latch board: a write anywhere in $0000-$3FFF selects a
     /// whole-$0000-$7FFF 32KB bank from the low 6 bits of the ADDRESS (data
-    /// ignored). Pan Docs "Other MBCs"; mGBA _GBWisdomTree.
+    /// ignored). Pan Docs "Other MBCs".
     WisdomTree,
     /// Rocket Games ($97 singles / $99 2-in-1s): 16KB inner bank at exactly
     /// $3F00 (0 maps to 1), 256KB outer bank at exactly $3FC0, plus the
-    /// A15-transition unlock counter with the logo XOR window. hhugboy
-    /// MbcUnlRocketGames.cpp; gbdev forum id=948; MiSTer unlicensed thread.
+    /// A15-transition unlock counter with the logo XOR window. gbdev forum
+    /// id=948; MiSTer unlicensed thread.
     Rocket,
     /// Sachen MMC1: base/mask outer banking + the $01xx address descramble +
-    /// the DMG lock phase (RA7 forced high). hhugboy MbcUnlSachenMMC1.cpp;
-    /// mGBA _GBSachen/_GBSachenMMC1Read.
+    /// the DMG lock phase (RA7 forced high).
     SachenMmc1,
     /// Sachen MMC2: MMC1 plus a DMG->CGB->unlocked 3-phase lock (the CGB
-    /// phase presents the Nintendo logo copy at $0184). hhugboy
-    /// MbcUnlSachenMMC2.cpp; mGBA _GBSachenMMC2Read.
+    /// phase presents the Nintendo logo copy at $0184).
     SachenMmc2,
-    /// NT/Makon older board, MBC1-style 5-bit bank register. hhugboy
-    /// MbcUnlNtOld1.cpp; mGBA _GBNTOld1.
+    /// NT/Makon older board, MBC1-style 5-bit bank register.
     NtOld1,
     /// NT/Makon older board, MBC3-style 8-bit bank register (+ rumble on the
-    /// multicarts). hhugboy MbcUnlNtOld2.cpp; mGBA _GBNTOld2.
+    /// multicarts).
     NtOld2,
     /// Header liars that are electrically plain MBC1 with no RAM: Sonic 3D
-    /// Blast 5 (type $EA, "code in the header area" per hhugboy), Captain
+    /// Blast 5 (type $EA, code overlapping the header area), Captain
     /// Knick-Knack (Sachen dump with a Tetris header), Pocket Monsters
-    /// GO!GO!GO! 256KB dumps. hhugboy UNL_MBC1NOSAVE routing.
+    /// GO!GO!GO! 256KB dumps. Routed as MBC1 with no RAM.
     ForceMbc1,
     /// M161 (Mani 4 in 1, DMG-601): a one-shot latch that maps one of eight
     /// whole-32KB banks. The header spoofs MBC3+RAM+BAT ($10), so it is
-    /// content-detected (256KB + title "TETRIS SET"), exactly like gambatte's
-    /// presumedM161
+    /// content-detected (256KB + title "TETRIS SET").
     M161,
 }
 
@@ -195,8 +189,8 @@ const CAM_H: usize = 112;
 const CAM_TILE_BYTES: usize = (CAM_W / 8) * (CAM_H / 8) * 16; // 3584
 const CAM_RAM_IMAGE_OFFSET: usize = 0x0100;
 // The sensor array is 128x123; the controller discards the corrupt top and
-// bottom rows and uses the middle 112 of a 120-row window (GiiBiiAdvance
-// GBCAM_SENSOR_EXTRA_LINES).
+// bottom rows and uses the middle 112 of a 120-row window (Pan Docs
+// "Game Boy Camera": the discarded extra sensor edge lines).
 const CAM_SENSOR_EXTRA_LINES: usize = 8;
 const CAM_SENSOR_H: usize = CAM_H + CAM_SENSOR_EXTRA_LINES; // 120
 
@@ -217,7 +211,7 @@ pub enum CartridgeType {
     Rocket,
     Sachen { mmc2: bool },
     NtOld { v2: bool },
-    /// Mani 4 in 1 one-shot 32KB bank-latch (gambatte m161.cpp).
+    /// Mani 4 in 1 one-shot 32KB bank-latch (M161 board).
     M161,
 }
 
@@ -419,11 +413,11 @@ pub struct Cartridge {
 
     // HuC-1 state. RAM is always enabled; the 0x0000-0x1FFF register only
     // selects whether A000-BFFF accesses RAM (default) or the IR transceiver
-    // (low nibble == 0xE, SameBoy-verified decode).
+    // (low nibble == 0xE).
     #[serde(default)]
     huc1_ir_mode: bool,
     // 6-bit ROM bank register; bank 0 is selectable at 0x4000-0x7FFF (no
-    // MBC1-style zero remap -- SameBoy-verified wiring; the largest HuC-1
+    // MBC1-style zero remap; the largest HuC-1
     // cart is 1MB = 64 banks).
     #[serde(default = "serde_u8_one")]
     huc1_rom_bank: u8,
@@ -481,7 +475,7 @@ pub struct Cartridge {
     wt_bank: u8,
 
     // Rocket Games state. rocket_lock/rocket_unlock_count model the
-    // A15-transition boot lock (hhugboy): the cart powers up locked and, while a
+    // A15-transition boot lock: the cart powers up locked and, while a
     // boot ROM is running, presents the Nintendo logo during the boot ROM's logo
     // check; skip_bios unlocks immediately (no boot ROM ran). Cell: the counter
     // advances on ROM READS, and Addressable::read takes &self.
@@ -518,8 +512,8 @@ pub struct Cartridge {
     // NT/Makon "old" board state. nt_bank holds the raw written bank; the
     // $5003 bit-swap is combinational on the bank lines, so it is applied at
     // read time (get_rom_bank), keeping swap-mode flips retroactive exactly
-    // like the real wiring (mGBA/hhugboy re-switch on the mode write to
-    // emulate the same thing in their push-model maps).
+    // like the real wiring (a push-model map would instead re-switch on the
+    // mode write to emulate the same thing).
     #[serde(default = "serde_u8_one")]
     nt_bank: u8,
     #[serde(default)]
@@ -529,7 +523,7 @@ pub struct Cartridge {
     #[serde(default)]
     nt_swapped: bool,
 
-    // M161 (gambatte m161.cpp) one-shot 32KB latch. `m161_bank` is the even
+    // M161 one-shot 32KB latch. `m161_bank` is the even
     // 16KB half of the selected 32KB pair ((data & 7) << 1); the odd half is
     // `m161_bank | 1`. `m161_mapped` blocks any further latch until reset.
     #[serde(default)]
@@ -573,8 +567,8 @@ pub struct Cartridge {
     // Physical SRAM chip-select decode of the emulated board for OAM-DMA
     // E000-FFFF sources (gb-ctr: the DMA asserts the external-RAM CS there and
     // "the resulting behaviour depends on the connected cartridge"). Strict
-    // boards (default; Gambatte's hwtest fixture: srcE000_readFE00 cgb04c
-    // capture reads 0xFF with RAMG on) exclude E000-FDFF, so the bus floats.
+    // boards (default; the srcE000_readFE00 cgb04c hwtest capture
+    // reads 0xFF with RAMG on) exclude E000-FDFF, so the bus floats.
     // Lazy boards decode /CS & A13 only (AntonioND's gbc-hw-tests flashcart)
     // and drive SRAM[src & 0x1FFF] there. Set per test fixture via the
     // manifest `cart=lazy_sram_cs` token; not a savestate property.
@@ -743,8 +737,8 @@ impl Cartridge {
             // Out-of-spec size byte: the physical chip is what matters, so
             // size purely from the file. Unlicensed carts routinely have
             // garbage here (raw Sachen dumps keep the whole header scrambled;
-            // Makon games overlap code with the header), and hhugboy likewise
-            // falls back to the file size (detectGbRomSize).
+            // Makon games overlap code with the header), so the loader likewise
+            // falls back to the file size.
             _ => 0,
         };
         // Number of whole 16KB banks present in the actual file, rounded up to a
@@ -757,7 +751,7 @@ impl Cartridge {
     /// Number of 8KB RAM banks from the header RAM-size byte. Out-of-spec
     /// values are treated as "no RAM" rather than a load failure: unlicensed
     /// carts routinely carry garbage here (Sonic 3D Blast 5 has $20 because
-    /// game code overlaps the header), and hhugboy does the same (RAMsize
+    /// game code overlaps the header), matching reference decoders (RAM size
     /// stays 0 for values > 5).
     fn compute_ram_banks(ram_size_code: u8) -> usize {
         match ram_size_code {
@@ -787,8 +781,7 @@ impl Cartridge {
 
     /// The Sachen MMC address descramble for CPU reads in $0100-$01FF (A8
     /// high, A15..A9 low): RA0<=A6, RA1<=A4, RA4<=A1, RA6<=A0 (bit swaps, so
-    /// the mapping is an involution). hhugboy MbcUnlSachenMMC1.cpp; mGBA
-    /// _unscrambleSachen.
+    /// the mapping is an involution).
     fn sachen_unscramble(addr: u16) -> u16 {
         (addr & 0xFFAC)
             | ((addr >> 6) & 0x01)
@@ -798,7 +791,7 @@ impl Cartridge {
     }
 
     /// Bank-line bit swap used by the NT/Makon and related boards: output bit
-    /// i = input bit table[i] (mGBA _reorderBits).
+    /// i = input bit table[i].
     fn reorder_bits(input: u8, table: &[u8; 8]) -> u8 {
         let mut out = 0;
         for (newbit, &oldbit) in table.iter().enumerate() {
@@ -807,17 +800,16 @@ impl Cartridge {
         out
     }
 
-    /// Detect unlicensed mapper families from ROM content. The heuristics are
-    /// lifted from the two reference emulators that support these boards
-    /// (hhugboy CartDetection::detectUnlCompatMode, mGBA _detectUnlMBC) and
-    /// are deliberately narrow so no licensed cart can ever match:
+    /// Detect unlicensed mapper families from ROM content. The heuristics
+    /// follow the community reverse-engineering of these boards and are
+    /// deliberately narrow so no licensed cart can ever match:
     /// - Sachen/Rocket require the plain Nintendo logo to be ABSENT at $0104
     ///   (every licensed cart has it, or it would not boot on hardware).
     /// - Wisdom Tree requires header type $00 with a >32KB file plus the
     ///   publisher string (a licensed $00 cart is 32KB by definition), or the
     ///   Pan Docs $C0/$D1 header magic.
-    /// - The NT/Makon and ForceMbc1 title rules replicate hhugboy's exact
-    ///   title/licensee/size shapes.
+    /// - The NT/Makon and ForceMbc1 title rules match the exact
+    ///   title/licensee/size shapes of the known carts.
     fn detect_unl_mapper(data: &[u8]) -> UnlMapper {
         if data.len() < 0x8000 {
             // Smaller than one full 32KB image: nothing here needs (or can
@@ -826,7 +818,7 @@ impl Cartridge {
         }
 
         // M161 (Mani 4 in 1): the header spoofs MBC3+RAM+BATTERY ($10), so
-        // gambatte (presumedM161) gates on the exact shape of the one known
+        // detection gates on the exact shape of the one known
         // cart -- a 256KB image whose title is "TETRIS SET". The title check
         // is specific enough that no real MBC3 cart can match.
         if data.len() == 16 * 0x4000
@@ -857,7 +849,7 @@ impl Cartridge {
             // Sachen MMC raw dumps: the Nintendo logo only exists at the
             // scrambled addresses (MMC1 at $01xx, MMC2 at the |0x80 copy),
             // with the Sachen logo at the other bank. Match on either logo
-            // (hhugboy uses the Sachen sums, mGBA the Nintendo bytes).
+            // (either the Sachen sums or the Nintendo bytes suffice).
             let sachen_a = |s: u32| s == LOGO_SUM_SACHEN_A || s == LOGO_SUM_SACHEN_B;
             if scrambled_0104 == LOGO_SUM_NINTENDO || sachen_a(scrambled_0184) {
                 return UnlMapper::SachenMmc1;
@@ -865,13 +857,13 @@ impl Cartridge {
             if scrambled_0184 == LOGO_SUM_NINTENDO || sachen_a(scrambled_0104) {
                 return UnlMapper::SachenMmc2;
             }
-            // Rocket Games logo (hhugboy: checksum 2756; all $97/$99 carts).
+            // Rocket Games logo (checksum 2756; all $97/$99 carts).
             if plain_0104 == LOGO_SUM_ROCKET {
                 return UnlMapper::Rocket;
             }
         }
 
-        // hhugboy strcmp semantics on the 15-byte title at $0134-$0142.
+        // strcmp semantics on the 15-byte title at $0134-$0142.
         let title = &data[0x134..0x143];
         let title_eq = |s: &[u8]| -> bool {
             s.len() <= title.len()
@@ -883,7 +875,7 @@ impl Cartridge {
         let newlic_mk = &data[0x144..0x146] == b"MK";
         let rom_size_code = data[ROM_SIZE_OFFSET];
 
-        // NT/Makon older boards (hhugboy detectUnlCompatMode):
+        // NT/Makon older boards:
         // multicarts with the Pocket Bomberman / Trump Boy / Q Billion menus,
         // the NT Rockman 99 single, and the early Makon GBC singles (Makon
         // "MK" licensee + known title + untouched 256KB header).
@@ -914,7 +906,7 @@ impl Cartridge {
             return UnlMapper::NtOld2;
         }
 
-        // Electrically-plain-MBC1 header liars (hhugboy UNL_MBC1NOSAVE):
+        // Electrically-plain-MBC1 header liars:
         // Sonic 3D Blast 5 / Super Donkey Kong 3 (type $EA is header-overlap
         // garbage), Captain Knick-Knack (Sachen dump wearing a Tetris header;
         // real Tetris is exactly 32KB so the size gate excludes it), and the
@@ -930,9 +922,9 @@ impl Cartridge {
         }
 
         // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
-        // banked-size file) the publisher string in the ROM. Both variants
-        // from hhugboy; mGBA additionally requires the blank-header shape,
-        // which the string+type+size gate already implies in practice.
+        // banked-size file) the publisher string in the ROM. The
+        // string+type+size gate already implies the blank-header shape in
+        // practice.
         if data[0x147] == 0xC0 && data[0x14A] == 0xD1 {
             return UnlMapper::WisdomTree;
         }
@@ -1048,9 +1040,9 @@ impl Cartridge {
         // Initialize RAM data. MBC7 carts declare RAM size 0x00 in the header;
         // their "save RAM" is the 93LC56 EEPROM: 256 bytes = 128 little-endian
         // 16-bit words, erased state 0xFF. Routing it through ram_data reuses
-        // the whole battery-save path (LE word order matches SameBoy/mGBA .sav
-        // files). ForceMbc1 header-liars carry garbage RAM-size bytes; hhugboy
-        // (UNL_MBC1NOSAVE) forces RAM off for them.
+        // the whole battery-save path (LE word order matches the de-facto
+        // `.sav` files). ForceMbc1 header-liars carry garbage RAM-size bytes;
+        // RAM is forced off for them.
         let ram_banks = if unl_mapper == UnlMapper::ForceMbc1 { 0 } else { ram_banks };
         let ram_data = if cartridge_type == MBC7_SENSOR_RUMBLE_RAM_BATTERY {
             vec![0xFF; 256]
@@ -1481,7 +1473,7 @@ impl Cartridge {
             }
             CartridgeType::PocketCamera => {
                 // 6-bit register; bank 0 is selectable here (AntonioND: "may
-                // contain any ROM bank (0 included)"; mGBA _GBPocketCam).
+                // contain any ROM bank (0 included)").
                 (self.cam_rom_bank as usize) % self.rom_banks
             }
             CartridgeType::WisdomTree => {
@@ -1490,8 +1482,8 @@ impl Cartridge {
                 (self.wt_bank as usize * 2 + 1) % self.rom_banks
             }
             CartridgeType::Rocket => {
-                // Outer 256KB bank (high nibble) | 16KB inner bank (hhugboy:
-                // (outerBank | rom_bank) << 14).
+                // Outer 256KB bank (high nibble) | 16KB inner bank:
+                // (outerBank | rom_bank) << 14.
                 (((self.rocket_outer as usize & 0x0F) << 4)
                     | (self.rocket_rom_bank as usize))
                     % self.rom_banks
@@ -1499,7 +1491,7 @@ impl Cartridge {
             CartridgeType::Sachen { .. } => {
                 // Masked outer/inner combination: mask bits come from the
                 // base register, the rest from the inner bank register
-                // (hhugboy: outerBank&outerMask | rom_bank&~outerMask).
+                // (outerBank&outerMask | rom_bank&~outerMask).
                 (((self.sachen_bank & !self.sachen_mask)
                     | (self.sachen_base & self.sachen_mask)) as usize)
                     % self.rom_banks
@@ -1507,7 +1499,7 @@ impl Cartridge {
             CartridgeType::NtOld { v2 } => {
                 // The $5003 bit-swap is combinational on the bank lines; the
                 // $5002 bank-count mask and the $5001 multicart base (32KB
-                // units = 2 x 16KB banks) apply after it (mGBA _GBNTOld1/2).
+                // units = 2 x 16KB banks) apply after it.
                 let mut bank = self.nt_bank;
                 if self.nt_swapped {
                     bank = Self::reorder_bits(
@@ -1521,8 +1513,8 @@ impl Cartridge {
                 (bank as usize + self.nt_base as usize * 2) % self.rom_banks
             }
             CartridgeType::M161 => {
-                // Odd 16KB half of the latched 32KB pair (gambatte
-                // setRombank: (rombank_ | 1) & (rombanks - 1)).
+                // Odd 16KB half of the latched 32KB pair:
+                // (rombank_ | 1) & (rombanks - 1).
                 ((self.m161_bank as usize) | 1) & (self.rom_banks - 1)
             }
             CartridgeType::NoMBC { .. } => 1, // Simple cartridge always uses bank 1 for upper area
@@ -1589,18 +1581,18 @@ impl Cartridge {
             }
             // Even 16KB half of the selected whole-32KB bank.
             CartridgeType::WisdomTree => (self.wt_bank as usize * 2) % self.rom_banks,
-            // Outer bank alone (hhugboy: (outerBank | 0) << 14).
+            // Outer bank alone ((outerBank | 0) << 14).
             CartridgeType::Rocket => {
                 ((self.rocket_outer as usize & 0x0F) << 4) % self.rom_banks
             }
-            // Masked base bank (hhugboy: outerBank & outerMask).
+            // Masked base bank (outerBank & outerMask).
             CartridgeType::Sachen { .. } => {
                 ((self.sachen_base & self.sachen_mask) as usize) % self.rom_banks
             }
             // Multicart base (32KB units).
             CartridgeType::NtOld { .. } => (self.nt_base as usize * 2) % self.rom_banks,
-            // Even 16KB half of the latched 32KB pair (gambatte setRombank:
-            // rombank_ & (rombanks - 2)).
+            // Even 16KB half of the latched 32KB pair:
+            // rombank_ & (rombanks - 2).
             CartridgeType::M161 => (self.m161_bank as usize) & (self.rom_banks - 2),
             _ => 0,
         }
@@ -1721,9 +1713,9 @@ impl Cartridge {
                     }
                 }
                 _ => {
-                    // A file larger than the cart RAM is normal: mGBA / VBA-M /
-                    // BGB append an RTC footer to the `.sav` (read separately by
-                    // `read_sav_rtc_footer`). Load the RAM-sized prefix.
+                    // A file larger than the cart RAM is normal: the de-facto
+                    // RTC-carrying `.sav` format appends an RTC footer (read
+                    // separately by `read_sav_rtc_footer`). Load the RAM-sized prefix.
                     let n = loaded_data.len().min(self.ram_data.len());
                     self.ram_data[..n].copy_from_slice(&loaded_data[..n]);
                     println!("Loaded save file: {}", save_path.display());
@@ -1862,8 +1854,8 @@ impl Cartridge {
             | CartridgeType::Rocket
             | CartridgeType::Sachen { .. }
             | CartridgeType::NtOld { .. }
-            // M161's RAM line is permanently disabled (gambatte disabledRam);
-            // gambatte also zeroes its header type so it never saves.
+            // M161's RAM line is permanently disabled; the board also zeroes
+            // its header type so it never saves.
             | CartridgeType::M161 => false,
             // $09 ROM+RAM+BATTERY; plain $00/$08 (and unknown fallthroughs)
             // have none.
@@ -1916,16 +1908,16 @@ impl Cartridge {
     /// Write to MBC3 RTC registers. A write updates the INTERNAL free-running
     /// counter (`rtc_*`, advanced by the cycle-derived tick) only — it does NOT
     /// touch the CPU-visible latched shadow (`rtc_*_latched`, the read path).
-    /// The written value only becomes visible on the next latch, exactly like
-    /// gambatte's `Rtc::setS`/`setM`/... (which write `data*`, never `latch*`).
+    /// The written value only becomes visible on the next latch, exactly as on
+    /// real MBC3 hardware (the write updates the internal counter, not the latch).
     /// Register widths are the documented MBC3 masks (seconds/minutes 6-bit,
     /// hours 5-bit, days_high = day bit 8 + HALT + carry).
     fn write_rtc_register(&mut self, value: u8) {
         match self.mbc3_ram_bank {
             0x08 => {
                 self.rtc_seconds = value & 0x3F;
-                // Writing seconds resets the internal sub-second divider (gambatte
-                // `setS` clears dataC_), so the next tick is a full second away.
+                // Writing seconds resets the internal sub-second divider, so the
+                // next tick is a full second away.
                 self.rtc_cycle_accum = 0;
             }
             0x09 => self.rtc_minutes = value & 0x3F,
@@ -1940,8 +1932,8 @@ impl Cartridge {
 
     /// Copy the live internal RTC counters into the CPU-visible latch registers.
     /// On real MBC3 this happens on ANY write to the 0x6000-0x7FFF region (no
-    /// 0x00->0x01 edge is required — gambatte `Mbc3::romWrite` case 3 calls
-    /// `rtc_->latch(cc)` unconditionally). The read path returns these shadows,
+    /// 0x00->0x01 edge is required, the latch fires on any such write). The
+    /// read path returns these shadows,
     /// so software must latch to observe the advancing clock.
     fn latch_rtc(&mut self) {
         self.rtc_seconds_latched = self.rtc_seconds;
@@ -1950,9 +1942,9 @@ impl Cartridge {
         self.rtc_days_low_latched = self.rtc_days_low;
         self.rtc_days_high_latched = self.rtc_days_high;
         self.mbc3_rtc_latched = true;
-        // Keep the persisted latched shadows fresh: mGBA reconstructs the
+        // Keep the persisted latched shadows fresh: other tools reconstruct the
         // clock from the blob's LATCHED fields + timestamp, so they matter
-        // for cross-emulator reads. No-op without a sidecar.
+        // for cross-tool reads. No-op without a sidecar.
         self.flush_rtc_file();
     }
 
@@ -2378,9 +2370,9 @@ impl Cartridge {
 
     // --- RTC persistence -------------------------------------------------
     //
-    // MBC3 blob: the de-facto VBA-M "RTC data" layout, 48 bytes, all fields
-    // little-endian. VBA-M, BGB and mGBA write this same block as a footer
-    // appended to the `.sav`; mGBA's libretro core exposes it verbatim as
+    // MBC3 blob: the de-facto community "RTC data" layout, 48 bytes, all fields
+    // little-endian. Common tools write this same block as a footer
+    // appended to the `.sav`, and libretro cores expose it verbatim as
     // RETRO_MEMORY_RTC, so RetroArch `.rtc` files use it too. We store it in
     // a `.rtc` sidecar next to the `.sav` (the RetroArch convention) and
     // additionally READ it from a `.sav` footer for imported saves.
@@ -2399,14 +2391,12 @@ impl Cartridge {
     //   0x28   8    u64 UNIX time the state was saved at (the legacy 44-byte
     //               variant stores a u32 here; accepted on read)
     //
-    // Provenance: VBA-M src/core/gb/gbMemory.h `struct mapperMBC3`
-    // (mapperSeconds..mapperControl, the latched mapperL* copies, then a
-    // union{time_t,u64}) written raw with a -4 read leeway for the u32 form;
-    // mGBA include/mgba/internal/gb/mbc.h `struct GBMBCRTCSaveBuffer` +
-    // src/gb/mbc.c GBMBCRTCRead/GBMBCRTCWrite (STORE/LOAD_32LE + 64LE,
-    // read accepts sizeof-4).
+    // Layout: the five live registers (seconds..control), then the latched
+    // copies, then a union{time_t,u64} timestamp, written raw with a -4 read
+    // leeway for the legacy u32 form (32LE fields + 64LE timestamp, read also
+    // accepts the sizeof-4 short form).
     //
-    // HuC-3 blob: mGBA's `struct GBMBCHuC3SaveBuffer`, 136 bytes: the RTC
+    // HuC-3 blob: the de-facto 136-byte layout: the RTC
     // MCU's 256 nibbles packed two per byte (nibble N -> byte N/2, even N in
     // the low half) followed by a u64 LE UNIX timestamp. This carries the
     // architected minute-of-day/day-counter nibbles (0x10-0x15) plus the
@@ -2530,8 +2520,8 @@ impl Cartridge {
     /// Advance the live MBC3 RTC by `n` seconds in closed form; equivalent to
     /// `n` calls of `advance_rtc_second` (unit-tested) but O(1), so
     /// multi-year wall-clock catch-up is instant. Latched shadows are not
-    /// touched (they only move on an explicit latch), matching VBA-M's
-    /// catch-up which advances only the live mapper counters.
+    /// touched (they only move on an explicit latch), matching the standard
+    /// catch-up which advances only the live counters.
     fn mbc3_rtc_advance_seconds(&mut self, n: u64) {
         if n == 0 {
             return;
@@ -2651,10 +2641,10 @@ impl Cartridge {
         })
     }
 
-    /// A VBA-M/BGB/mGBA RTC blob appended to the `.sav`, if the file is
+    /// A de-facto RTC blob appended to the `.sav`, if the file is
     /// exactly RAM+blob sized. Read-only interop: the `.rtc` sidecar is
     /// canonical for us and the footer is never (re)written, but a save
-    /// imported from those emulators restores its clock on first load.
+    /// imported from other tools restores its clock on first load.
     fn read_sav_rtc_footer(&self) -> Option<Vec<u8>> {
         let expected: &[usize] = match self.get_cartridge_type() {
             CartridgeType::MBC3 { timer: true, .. } => {
@@ -2754,7 +2744,7 @@ impl Cartridge {
     }
 
     /// Import a battery save image into the cart's RAM (File → Import Battery
-    /// Save). Copies `min(src, dst)` bytes so a footer-carrying `.sav` (mGBA RTC
+    /// Save). Copies `min(src, dst)` bytes so a footer-carrying `.sav` (RTC
     /// footer) or a short file loads its RAM-sized prefix; a wildly-oversized
     /// file (more than double the RAM) is rejected so a mis-picked file can't be
     /// silently accepted. If a sidecar `.sav` is attached (desktop) the freshly
@@ -2783,7 +2773,7 @@ impl Cartridge {
     /// front-end (unlicensed boot locks / descramblers watch CPU ROM fetches,
     /// not the RAM chip select) and models the plain RAMG-gated array: enabled
     /// banked RAM drives its byte, anything else leaves the bus floating
-    /// (0xFF, matching Gambatte's RAM-less srcE000 cgb04c captures).
+    /// (0xFF, matching the RAM-less srcE000 cgb04c captures).
     pub fn dma_sram_bus_read(&self, addr: u16) -> u8 {
         if self.sram_cs_lazy && self.ram_enabled && !self.ram_data.is_empty() {
             let offset =
@@ -2833,11 +2823,9 @@ impl Cartridge {
     // -----------------------------------------------------------------------
     // POCKET CAMERA (MAC-GBD controller + Mitsubishi M64282FP image sensor)
     //
-    // References: Pan Docs "Game Boy Camera" (the section AntonioND compiled
-    // from his reverse engineering), AntonioND/gbcam-rev-engineer doc
-    // v1.1.1 (register semantics, capture timings, GiiBiiAdvance reference
-    // pipeline), mGBA src/gb/mbc/pocket-cam.c and SameBoy Core/camera.c for
-    // mapper cross-checks.
+    // References: Pan Docs "Game Boy Camera" (including its published
+    // "Sample code for emulators" image pipeline) and the public
+    // gbcam-rev-engineer register/timing documentation (v1.1.1).
     //
     // Register file (A000-A035 while a bank with bit 4 set is selected,
     // mirrored every $80):
@@ -2918,7 +2906,7 @@ impl Cartridge {
         } else if (idx as usize) < CAM_REG_COUNT {
             self.cam_regs[idx as usize] = value;
         }
-        // A036-A07F: unmapped, writes ignored (SameBoy warns and drops).
+        // A036-A07F: unmapped, writes ignored.
     }
 
     /// Start a capture: compute the busy window and process the sensor
@@ -2971,8 +2959,8 @@ impl Cartridge {
     }
 
     /// The M64282FP sensor + MAC-GBD controller pipeline, following the
-    /// AntonioND/GiiBiiAdvance reference model reproduced in Pan Docs
-    /// ("Sample code for emulators"), in exact-integer form: exposure
+    /// image-processing model documented in Pan Docs "Game Boy Camera" as its
+    /// "Sample code for emulators", in exact-integer form: exposure
     /// scaling, optional inversion, the documented 3x3 edge kernels / 1-D
     /// filtering selected by N/VH/E3 and the A000 P/M bits, then the 4x4x3
     /// dither/contrast matrix, packed as GB 2bpp tiles (16x14 tiles, the
@@ -3007,15 +2995,15 @@ impl Cartridge {
         let i_bit = self.cam_regs[4] & 0x08 != 0;
         // Edge enhancement ratio in quarters: 0.50,0.75,1.00,1.25,2,3,4,5.
         let alpha4 = [2i32, 3, 4, 5, 8, 12, 16, 20][((self.cam_regs[4] >> 4) & 7) as usize];
-        // alpha-scaled add with GiiBiiAdvance's exact float->int semantics:
+        // alpha-scaled add in the documented sample's exact float->int form:
         // trunc(px + diff*alpha) == trunc((4*px + diff*alpha4) / 4).
         let edge = |px: i32, diff: i32| (px * 4 + diff * alpha4) / 4;
 
-        // --- Analog stage: exposure scaling + level squash (GiiBiiAdvance's
-        // measured approximation of the sensor's gain/level control against
+        // --- Analog stage: exposure scaling + level squash (the documented
+        // sample's approximation of the sensor's gain/level control against
         // the ROM's ~$80-centered dither thresholds), optional inversion,
         // then signed representation for the edge kernels. Column-major
-        // (x * CAM_SENSOR_H + y) like the reference buf[i][j].
+        // (x * CAM_SENSOR_H + y), matching the documented buffer layout.
         let h = CAM_SENSOR_H;
         let w = CAM_W;
         let at = |i: usize, j: usize| i * h + j;
@@ -3187,9 +3175,9 @@ impl Cartridge {
     }
 
     /// Mutable view of the RTC bytes for `RETRO_MEMORY_RTC`, in the exact
-    /// `.rtc` persistence format (MBC3: the 48-byte VBA-M/mGBA block; HuC-3:
-    /// the 136-byte mGBA block) stamped with the current wall clock, so the
-    /// frontend's `.rtc` files are byte-compatible with mGBA's. The buffer
+    /// `.rtc` persistence format (MBC3: the 48-byte block; HuC-3:
+    /// the 136-byte block) stamped with the current wall clock, so the
+    /// frontend's `.rtc` files are byte-compatible with the de-facto format. The buffer
     /// allocation stays stable across calls (the frontend caches the raw
     /// pointer). Empty for carts without an RTC.
     pub fn rtc_memory_mut(&mut self) -> &mut [u8] {
@@ -3206,7 +3194,7 @@ impl Cartridge {
         &self.rtc_memory
     }
 
-    /// The current RTC state serialized to the mGBA/BGB `.rtc` sidecar format
+    /// The current RTC state serialized to the de-facto `.rtc` sidecar format
     /// (File → Export RTC). `None` for carts without an RTC.
     pub fn export_rtc(&self) -> Option<Vec<u8>> {
         if !self.has_rtc() {
@@ -3308,7 +3296,7 @@ impl Cartridge {
 
     /// Boot-ROM handoff for skip_bios: the Sachen and Rocket boot locks model
     /// the cart's power-on state as seen BY a real boot ROM; when the boot is
-    /// skipped they must start unlocked (hhugboy resetVars without
+    /// skipped they must start unlocked (the lock state is reset without a
     /// bootstrap). No-op for every other mapper.
     pub fn skip_boot_handoff(&mut self) {
         match self.get_cartridge_type() {
@@ -3322,7 +3310,7 @@ impl Cartridge {
     /// LOCKED mapper, when they differ from a plain $0104 read. Sachen MMC1
     /// games check the boot-decompressed VRAM tiles for the SACHEN logo as
     /// copy protection, so skip_bios must seed those tiles instead of the
-    /// Nintendo ones (hhugboy pokes the same expansion into $8010 when no
+    /// Nintendo ones (the same expansion is poked into $8010 when no
     /// bootstrap is emulated). Locked MMC1 reads force RA7 high and pass
     /// through the $01xx descramble, so the bytes come from
     /// unscramble($0184+i) — bit 7 survives the bit-swap.
@@ -3356,13 +3344,13 @@ impl Cartridge {
     /// Sachen MMC read-side address transform: boot-lock phase counting plus
     /// the $01xx descramble. Interior mutability (Cell) because the lock
     /// transitions are driven by CPU READS (the A15-transition counter on the
-    /// real board). mGBA _GBSachenMMC1Read/_GBSachenMMC2Read.
+    /// real board).
     fn sachen_read_addr(&self, mut addr: u16, mmc2: bool) -> u16 {
         let lock = self.sachen_lock.get();
         if mmc2 {
             // MMC2: DMG -> CGB -> unlocked, 0x31 transitions each. (The
             // DMG->CGB shortcut on WRAM traffic is not visible from the
-            // cart bus here; the counter path below matches mGBA's.)
+            // cart bus here; the counter path below models the read-driven counter.)
             if lock != UNL_UNLOCKED && (addr & 0x8700) == 0x0100 {
                 let t = self.sachen_transition.get() + 1;
                 if t == 0x31 {
@@ -3421,7 +3409,7 @@ impl Cartridge {
     /// running boot ROM's logo check passes; the bytes come from the loaded boot
     /// ROM (`rocket_boot_logo`), so `None` (raw ROM read) when no boot ROM is
     /// present — that window is only ever observed while the boot ROM runs.
-    /// hhugboy MbcUnlRocketGames::readMemory (lock state machine).
+    /// (Rocket Games lock state machine.)
     fn rocket_locked_logo(&self, addr: u16) -> Option<u8> {
         let mode = self.rocket_lock.get();
         if mode != UNL_UNLOCKED {
@@ -3671,7 +3659,7 @@ impl memory::Addressable for Cartridge {
                         }
                     }
                     // Rocket/Sachen boards wire any RAM straight through with
-                    // no enable gate (hhugboy maps it unconditionally).
+                    // no enable gate (RAM is mapped unconditionally).
                     CartridgeType::Rocket | CartridgeType::Sachen { .. } => {
                         if !self.ram_data.is_empty() {
                             let offset =
@@ -3720,13 +3708,13 @@ impl memory::Addressable for Cartridge {
             // Wisdom Tree: a single '377 latch loaded from the ADDRESS lines
             // on any $0000-$3FFF write; the data byte is ignored. The low 6
             // bits select a whole-$0000-$7FFF 32KB bank (Pan Docs "Other
-            // MBCs"; mGBA _GBWisdomTree: bank = address & 0x3F).
+            // MBCs": bank = address & 0x3F).
             RAM_ENABLE_START..=ROM_BANK_SELECT_END
                 if matches!(self.get_cartridge_type(), CartridgeType::WisdomTree) =>
             {
                 self.wt_bank = (addr & 0x3F) as u8;
             }
-            // M161 (gambatte m161.cpp romWrite): the FIRST write anywhere in
+            // M161: the FIRST write anywhere in
             // the whole $0000-$7FFF ROM area latches the 32KB bank from data
             // bits 0-2; every later write is ignored until reset.
             RAM_ENABLE_START..=BANKING_MODE_END
@@ -3773,14 +3761,13 @@ impl memory::Addressable for Cartridge {
                     }
                     CartridgeType::Sachen { .. } => {
                         // Base ROM bank register, latched only while the
-                        // inner bank register has bits 4-5 both set (hhugboy
-                        // MbcUnlSachenMMC1/2 case 0).
+                        // inner bank register has bits 4-5 both set.
                         if (self.sachen_bank & 0x30) == 0x30 {
                             self.sachen_base = value;
                         }
                     }
                     CartridgeType::NtOld { .. } => {
-                        // MBC3-style RAM enable (mGBA routes this to _GBMBC3).
+                        // MBC3-style RAM enable.
                         self.ram_enabled = (value & 0x0F) == 0x0A;
                     }
                     _ => {}
@@ -3821,8 +3808,7 @@ impl memory::Addressable for Cartridge {
                         self.cam_rom_bank = value & 0x3F; // 6-bit, bank 0 allowed
                     }
                     CartridgeType::Rocket => {
-                        // Two EXACT register addresses (hhugboy
-                        // MbcUnlRocketGames::writeMemory); everything else in
+                        // Two EXACT register addresses; everything else in
                         // the region is ignored.
                         match addr {
                             // Inner 16KB bank, 0 maps to 1.
@@ -3888,7 +3874,7 @@ impl memory::Addressable for Cartridge {
                         // Bit 4 set maps the CAM register file over
                         // A000-BFFF; otherwise the low 4 bits select a RAM
                         // bank (the bank latch is untouched while registers
-                        // are selected, matching mGBA _GBPocketCam).
+                        // are selected).
                         if value & 0x10 != 0 {
                             self.cam_regs_selected = true;
                         } else {
@@ -3905,8 +3891,7 @@ impl memory::Addressable for Cartridge {
                     }
                     CartridgeType::NtOld { .. } => {
                         // Mode registers live in $5000-$5FFF, decoded by
-                        // A0-A1 (mGBA _ntOldMulticart; hhugboy
-                        // handleOldMakonCartModeSet). $4000-$4FFF is ignored
+                        // A0-A1. $4000-$4FFF is ignored
                         // (v2 rumble data bits are not wired to a motor
                         // here).
                         if (addr & 0xF000) == 0x5000 {
@@ -3956,7 +3941,7 @@ impl memory::Addressable for Cartridge {
                     CartridgeType::MBC3 { timer: true, .. } => {
                         // RTC latch: ANY write to 0x6000-0x7FFF copies the live
                         // clock into the visible latch registers. Real MBC3 does
-                        // not require a 0x00->0x01 edge (gambatte latches on every
+                        // not require a 0x00->0x01 edge (the latch fires on every
                         // write); latch-rtc-test writes random values here and
                         // expects each to re-latch.
                         self.latch_rtc();
@@ -4230,14 +4215,14 @@ mod tests {
     #[test]
     fn m161_latches_a_32kb_bank_once() {
         // Mani 4 in 1 shape: 256KB, header spoofs MBC3+RAM+BAT ($10), title
-        // "TETRIS SET" (gambatte presumedM161).
+        // "TETRIS SET" (M161 board).
         let mut rom = make_sized_rom(0x10, 0x03, 0x40000);
         rom[0x134..0x13E].copy_from_slice(b"TETRIS SET");
         assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::M161);
 
         let mut cart = Cartridge::from_bytes(&rom).unwrap();
         assert!(matches!(cart.get_cartridge_type(), CartridgeType::M161));
-        assert!(!cart.has_battery()); // gambatte disabledRam + zeroed header
+        assert!(!cart.has_battery()); // RAM disabled + zeroed header type
 
         // Power-on (unmapped): the first 32KB pair -> 16KB banks 0 and 1.
         assert_eq!(cart.read(0x1000), 0);
@@ -4366,7 +4351,7 @@ mod tests {
         assert_eq!(cart.read(0x0105), LICENSED_LOGO[1]);
         assert_eq!(cart.read(0x0133), LICENSED_LOGO[47]);
 
-        // Masked outer banking (hhugboy/mGBA): base/mask only latch while
+        // Masked outer banking: base/mask only latch while
         // the inner bank has bits 4-5 set; effective switchable bank =
         // base&mask | bank&~mask, base window = base&mask.
         cart.write(0x2000, 0x33); // open the latch gate
@@ -4398,7 +4383,7 @@ mod tests {
         cart.write(0x2000, 0x05);
         assert_eq!(cart.read(0x5000), 5);
         // $5003 bit-swap mode: bank lines reorder combinationally
-        // (mGBA _ntOld2Reorder: out0=in1, out1=in2, out2=in0).
+        // (reorder: out0=in1, out1=in2, out2=in0).
         cart.write(0x5003, 0x10);
         assert_eq!(cart.read(0x5000), 6); // reorder(5) = 0b110
         cart.write(0x5003, 0x00);
@@ -4545,7 +4530,7 @@ mod tests {
 
         let blob = cart.mbc3_rtc_serialize(0x0102_0304_0506_0708);
         assert_eq!(blob.len(), 48);
-        // Spot-check the documented layout: LE u32 fields in VBA-M order.
+        // Spot-check the documented layout: LE u32 fields in the de-facto order.
         assert_eq!(&blob[0..4], &[61, 0, 0, 0]);
         assert_eq!(&blob[16..20], &[0xC1, 0, 0, 0]);
         assert_eq!(&blob[20..24], &[33, 0, 0, 0]);
@@ -4559,8 +4544,8 @@ mod tests {
         assert_eq!(restored.rtc_days_high_latched, 0x81);
     }
 
-    /// The legacy 44-byte variant (32-bit timestamp, old VBA builds) must be
-    /// accepted, mirroring VBA-M's -4 read leeway / mGBA's sizeof-4 check.
+    /// The legacy 44-byte variant (32-bit timestamp, from older tools) must be
+    /// accepted, mirroring the de-facto format's -4 / sizeof-4 read leeway.
     #[test]
     fn mbc3_rtc_blob_accepts_legacy_44_bytes() {
         let mut cart = mbc3_rtc_cart();
@@ -4590,7 +4575,7 @@ mod tests {
         cart.huc3_rtc_mem[0x58] = 0x7; // event-time nibble
         let blob = cart.huc3_rtc_serialize(0xDEAD_BEEF);
         assert_eq!(blob.len(), 136);
-        // mGBA packing: nibble N -> byte N/2, even N in the low half. Minutes
+        // Nibble packing: nibble N -> byte N/2, even N in the low half. Minutes
         // 0x2A5 -> nibbles 0x10=0x5, 0x11=0xA, 0x12=0x2; days 0x123 ->
         // 0x13=0x3. Byte 8 = nib 0x10|0x11<<4, byte 9 = nib 0x12|0x13<<4.
         assert_eq!(blob[0x08], 0xA5);
@@ -4684,7 +4669,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A `.sav` with a VBA-M/mGBA RTC footer (RAM + 48 bytes) restores both
+    /// A `.sav` with a de-facto RTC footer (RAM + 48 bytes) restores both
     /// the RAM prefix and the clock when no `.rtc` sidecar exists yet.
     #[test]
     fn sav_rtc_footer_import() {
@@ -4727,7 +4712,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The libretro RETRO_MEMORY_RTC region: stable pointer, mGBA-format
+    /// The libretro RETRO_MEMORY_RTC region: stable pointer, de-facto-format
     /// content, and external writes are adopted with catch-up on the next
     /// frame sync.
     #[test]
@@ -4763,7 +4748,7 @@ mod tests {
         assert_eq!(mbc3_rtc(&cart), regs);
     }
 
-    /// HuC-3 carts expose the 136-byte mGBA blob through the libretro view.
+    /// HuC-3 carts expose the 136-byte blob through the libretro view.
     #[test]
     fn libretro_rtc_memory_huc3_shape() {
         let mut cart = huc3_cart();
