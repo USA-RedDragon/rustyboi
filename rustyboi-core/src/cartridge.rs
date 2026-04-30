@@ -2622,8 +2622,14 @@ impl Cartridge {
     /// paths (sidecar attach/flush, libretro RTC memory), never on the
     /// deterministic cycle-derived path.
     fn unix_now() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        // `std::time::SystemTime::now()` traps (`unreachable`) on
+        // wasm32-unknown-unknown; `web-time` reads the browser clock there.
+        #[cfg(target_arch = "wasm32")]
+        use web_time::{SystemTime, UNIX_EPOCH};
+        #[cfg(not(target_arch = "wasm32"))]
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
     }
