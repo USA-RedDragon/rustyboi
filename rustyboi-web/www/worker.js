@@ -121,12 +121,29 @@ function loop() {
     acc -= FRAME_MS;
     ran++;
   }
+  // Hand any completed Game Boy Printer sheets (PNG bytes) to the main thread
+  // as downloads. Prints are rare, so this is an empty array almost every tick.
+  if (ran > 0) drainPrints();
+
   // Shed a large backlog (backgrounded tab / long GC) instead of sprinting.
   if (acc > FRAME_MS * MAX_FRAMES_PER_TICK) acc = 0;
 
   // Sleep until roughly the next frame boundary; clamp to >= 0.
   const delay = Math.max(0, FRAME_MS - acc);
   setTimeout(loop, delay);
+}
+
+// Running count of prints this session, for stable download filenames.
+let printCount = 0;
+
+// Post each finished printer sheet (PNG bytes) as an Export the main thread
+// downloads, reusing the same message the state/battery/RTC exports use.
+function drainPrints() {
+  const prints = emu.take_prints();
+  for (let i = 0; i < prints.length; i++) {
+    const bytes = prints[i];
+    post({ type: "Export", name: `gb-print-${++printCount}.png`, bytes }, [bytes.buffer]);
+  }
 }
 
 function startLoop() {
