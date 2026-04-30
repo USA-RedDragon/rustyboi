@@ -414,6 +414,7 @@ impl App {
             sgb_border: self.session.sgb_border(),
             fast_forward: self.is_fast_forward(),
             touch_controls: self.session.touch_controls(),
+            printer_attached: self.session.gb().printer_attached(),
             slots: self.session.list_slots(),
             cheats: self.session.cheats().map(str::to_owned).collect(),
             fetched_cheats: self.session.fetched_cheats().to_vec(),
@@ -681,7 +682,6 @@ impl App {
         } else {
             None
         };
-        let printer_attached = Some(self.session.gb().printer_attached());
 
         // Run the UI first, collecting its output, then drop the borrow.
         let (paint, ui_frame) = {
@@ -692,7 +692,6 @@ impl App {
                 crate::ui_host::UiRunInputs {
                     paused: paused_for_ui,
                     debug: debug_snapshot.as_ref(),
-                    printer_attached,
                     session: &ui_state,
                     extra_events,
                     held_pad: &self.held_pad,

@@ -272,9 +272,9 @@ impl Gui {
 
     /// Create the UI using egui. `debug` is a read-only [`DebugSnapshot`] the
     /// debug panels render from (None when no panel is open, or on web until the
-    /// worker's first snapshot arrives). `printer_attached` gates the desktop
-    /// Connect/Disconnect-Printer menu item (None hides it, e.g. on web).
-    pub fn ui(&mut self, ctx: &Context, paused: bool, debug: Option<&DebugSnapshot>, printer_attached: Option<bool>, session: &SessionUiState, held_pad: &std::collections::HashSet<rustyboi_session::input_config::PadButton>) -> UiOutput {
+    /// worker's first snapshot arrives). The Connect/Disconnect-Printer menu
+    /// label reads `session.printer_attached`.
+    pub fn ui(&mut self, ctx: &Context, paused: bool, debug: Option<&DebugSnapshot>, session: &SessionUiState, held_pad: &std::collections::HashSet<rustyboi_session::input_config::PadButton>) -> UiOutput {
         let mut action = None;
         let mut any_menu_open = false;
 
@@ -290,18 +290,7 @@ impl Gui {
         // ☰ soft button + full-screen overlay (see
         // `render_mobile_soft_button` / `render_mobile_menu_overlay`).
         #[cfg(not(target_os = "android"))]
-        self.render_menu_bar(
-            ctx,
-            &mut action,
-            &mut any_menu_open,
-            paused,
-            printer_attached,
-            session,
-        );
-        // The mobile overlay has no printer menu item; consume it so the desktop-
-        // only menu-bar param doesn't warn on Android.
-        #[cfg(target_os = "android")]
-        let _ = printer_attached;
+        self.render_menu_bar(ctx, &mut action, &mut any_menu_open, paused, session);
         self.render_debug_panels(ctx, debug, &mut action, paused, session, held_pad);
         if self.show_cheats_panel {
             self.render_cheats_panel(ctx, &mut action, session);
@@ -366,7 +355,7 @@ impl Gui {
         }
     }
     #[cfg(not(target_os = "android"))]
-    fn render_menu_bar(&mut self, ctx: &Context, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, printer_attached: Option<bool>, session: &SessionUiState) {
+    fn render_menu_bar(&mut self, ctx: &Context, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, session: &SessionUiState) {
         egui::TopBottomPanel::top("menubar_container").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -524,17 +513,15 @@ impl Gui {
                         *action = Some(GuiAction::ToggleSgbBorder);
                         ui.close_menu();
                     }
-                    if let Some(attached) = printer_attached {
-                        ui.separator();
-                        let printer_text = if attached {
-                            "Disconnect Game Boy Printer"
-                        } else {
-                            "Connect Game Boy Printer"
-                        };
-                        if ui.button(printer_text).clicked() {
-                            *action = Some(GuiAction::TogglePrinter);
-                            ui.close_menu();
-                        }
+                    ui.separator();
+                    let printer_text = if session.printer_attached {
+                        "Disconnect Game Boy Printer"
+                    } else {
+                        "Connect Game Boy Printer"
+                    };
+                    if ui.button(printer_text).clicked() {
+                        *action = Some(GuiAction::TogglePrinter);
+                        ui.close_menu();
                     }
                 });
 
@@ -619,6 +606,7 @@ impl Gui {
                             let selected = session.texture_filter == filter;
                             if ui.radio(selected, label).clicked() && !selected {
                                 *action = Some(GuiAction::SetTextureFilter(filter));
+                                ui.close_menu();
                             }
                         }
                     });
@@ -632,6 +620,7 @@ impl Gui {
                             let selected = session.lcd_effect == effect;
                             if ui.radio(selected, label).clicked() && !selected {
                                 *action = Some(GuiAction::SetLcdEffect(effect));
+                                ui.close_menu();
                             }
                         }
                     });

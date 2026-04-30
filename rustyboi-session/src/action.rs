@@ -222,6 +222,9 @@ pub struct SessionUiState {
     pub fast_forward: bool,
     /// Whether the on-screen touch overlay is shown.
     pub touch_controls: bool,
+    /// Whether a Game Boy Printer is currently attached to the link port (drives
+    /// the Connect/Disconnect menu label).
+    pub printer_attached: bool,
     /// Slot numbers that currently hold a saved state, ascending.
     pub slots: Vec<u32>,
     /// Active cheat codes, in insertion order.
@@ -264,6 +267,7 @@ impl Default for SessionUiState {
             sgb_border: true,
             fast_forward: false,
             touch_controls: cfg!(target_os = "android"),
+            printer_attached: false,
             slots: Vec::new(),
             cheats: Vec::new(),
             fetched_cheats: Vec::new(),
