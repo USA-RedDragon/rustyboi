@@ -271,6 +271,19 @@ impl Emulator {
         }
     }
 
+    /// Drain any Game Boy Printer sheets finished since the last call, each
+    /// encoded as PNG bytes (a `js_sys::Array` of `Uint8Array`, empty when
+    /// nothing printed). The worker posts these to the main thread to download;
+    /// the native frontend instead writes them next to the ROM.
+    pub fn take_prints(&mut self) -> js_sys::Array {
+        let arr = js_sys::Array::new();
+        for sheet in self.session.gb_mut().take_printer_sheets() {
+            let png = sheet.to_png();
+            arr.push(&js_sys::Uint8Array::from(png.as_slice()));
+        }
+        arr
+    }
+
     /// Export the full machine state (`.rustyboisave`), or an empty array when
     /// serialization fails / no ROM is loaded.
     pub fn export_state(&self) -> js_sys::Uint8Array {
