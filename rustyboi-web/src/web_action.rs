@@ -22,12 +22,16 @@ fn default_volume() -> u8 {
     100
 }
 
+fn default_true() -> bool {
+    true
+}
+
 // The choice enums (`HardwareChoice`, `PaletteChoice`) and the value enums
 // (`ScalingMode`, `TextureFilter`, `LcdEffect`, `CgbColorConversion`) are all
 // serde-derived in the shared crate, so the web wire uses them directly — no
 // per-frontend mirror types.
 use rustyboi_session::action::{
-    HardwareChoice, LcdEffect, PaletteChoice, ScalingMode, TextureFilter,
+    GbcDmgPalette, HardwareChoice, LcdEffect, PaletteChoice, ScalingMode, TextureFilter,
 };
 use rustyboi_session::{CgbColorConversion, FetchedCheat, InputConfig, SessionUiState, UiAction};
 
@@ -50,6 +54,7 @@ pub enum WebAction {
     ToggleTouchControls,
     SetHardware(HardwareChoice),
     SetPalette(PaletteChoice),
+    SetGbcDmgPalette(GbcDmgPalette),
     SetColorCorrection(CgbColorConversion),
     SetRealBootRom(bool),
     SetTextureFilter(TextureFilter),
@@ -87,6 +92,7 @@ impl WebAction {
             UiAction::ToggleTouchControls => WebAction::ToggleTouchControls,
             UiAction::SetHardware(h) => WebAction::SetHardware(*h),
             UiAction::SetPalette(p) => WebAction::SetPalette(*p),
+            UiAction::SetGbcDmgPalette(g) => WebAction::SetGbcDmgPalette(*g),
             UiAction::SetColorCorrection(c) => WebAction::SetColorCorrection(*c),
             UiAction::SetRealBootRom(b) => WebAction::SetRealBootRom(*b),
             UiAction::SetTextureFilter(f) => WebAction::SetTextureFilter(*f),
@@ -124,6 +130,7 @@ impl WebAction {
             WebAction::ToggleTouchControls => UiAction::ToggleTouchControls,
             WebAction::SetHardware(h) => UiAction::SetHardware(h),
             WebAction::SetPalette(p) => UiAction::SetPalette(p),
+            WebAction::SetGbcDmgPalette(g) => UiAction::SetGbcDmgPalette(g),
             WebAction::SetColorCorrection(c) => UiAction::SetColorCorrection(c),
             WebAction::SetRealBootRom(b) => UiAction::SetRealBootRom(b),
             WebAction::SetTextureFilter(f) => UiAction::SetTextureFilter(f),
@@ -150,6 +157,10 @@ impl WebAction {
 pub struct WebUiState {
     pub hardware: HardwareChoice,
     pub palette: PaletteChoice,
+    #[serde(default)]
+    pub gbc_dmg_palette: GbcDmgPalette,
+    #[serde(default = "default_true")]
+    pub dmg_palette_active: bool,
     #[serde(default)]
     pub color_correction: CgbColorConversion,
     #[serde(default)]
@@ -190,6 +201,8 @@ impl WebUiState {
         WebUiState {
             hardware: s.hardware,
             palette: s.palette,
+            gbc_dmg_palette: s.gbc_dmg_palette,
+            dmg_palette_active: s.dmg_palette_active,
             color_correction: s.color_correction,
             use_real_boot_rom: s.use_real_boot_rom,
             texture_filter: s.texture_filter,
@@ -218,6 +231,8 @@ impl WebUiState {
         SessionUiState {
             hardware: self.hardware,
             palette: self.palette,
+            gbc_dmg_palette: self.gbc_dmg_palette,
+            dmg_palette_active: self.dmg_palette_active,
             color_correction: self.color_correction,
             use_real_boot_rom: self.use_real_boot_rom,
             texture_filter: self.texture_filter,

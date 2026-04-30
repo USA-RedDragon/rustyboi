@@ -11,7 +11,7 @@ use crate::actions::{
 };
 // Hardware / palette pickers live only in the desktop Settings menu bar.
 #[cfg(not(target_os = "android"))]
-use crate::actions::{HardwareChoice, PaletteChoice};
+use crate::actions::{GbcDmgPalette, HardwareChoice, PaletteChoice};
 use crate::file_dialog::{self, FileDialogBuilder};
 #[cfg(target_os = "android")]
 use crate::library::LibraryPanel;
@@ -574,14 +574,28 @@ impl Gui {
                         ui.small("Changing hardware restarts the ROM.");
                     });
 
-                    ui.menu_button("DMG Palette", |ui| {
-                        for choice in PaletteChoice::ALL {
-                            let selected = session.palette == choice;
-                            if ui.radio(selected, choice.label()).clicked() && !selected {
-                                *action = Some(GuiAction::SetPalette(choice));
-                                ui.close_menu();
+                    ui.add_enabled_ui(session.dmg_palette_active, |ui| {
+                        ui.menu_button("DMG Palette", |ui| {
+                            ui.label("Monochrome (DMG hardware)");
+                            for choice in PaletteChoice::ALL {
+                                let selected = session.palette == choice;
+                                if ui.radio(selected, choice.label()).clicked() && !selected {
+                                    *action = Some(GuiAction::SetPalette(choice));
+                                    ui.close_menu();
+                                }
                             }
-                        }
+                            ui.separator();
+                            ui.label("GBC colorization (DMG games on CGB)");
+                            for (choice, label) in GbcDmgPalette::choices() {
+                                let selected = session.gbc_dmg_palette == choice;
+                                if ui.radio(selected, label).clicked() && !selected {
+                                    *action = Some(GuiAction::SetGbcDmgPalette(choice));
+                                    ui.close_menu();
+                                }
+                            }
+                        })
+                        .response
+                        .on_disabled_hover_text("This game supplies its own colours");
                     });
 
                     ui.menu_button("GBC Color Correction", |ui| {

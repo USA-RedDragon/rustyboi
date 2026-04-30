@@ -163,6 +163,26 @@ pub fn key_combo_palette_id(combo: u8) -> Option<u8> {
         .map(|i| KEY_COMBO_ID[i])
 }
 
+/// The 12 boot-ROM DMG-compatibility palette schemes a user can hold at boot on
+/// real CGB hardware, as `(stable id, display label, palette id)`. The palette
+/// ids are exactly the [`KEY_COMBO_ID`] values the boot ROM assigns to each
+/// button combo (pinned by a test), so a frontend can offer these as explicit
+/// overrides of the title-hash auto-pick. Order matches [`KEY_COMBO_JOYP`].
+pub const COMBO_SCHEMES: [(&str, &str, u8); 12] = [
+    ("up", "Up", 0x12),
+    ("up_a", "Up + A", 0xB0),
+    ("up_b", "Up + B", 0x79),
+    ("left", "Left", 0xB8),
+    ("left_a", "Left + A", 0xAD),
+    ("left_b", "Left + B", 0x16),
+    ("down", "Down", 0x17),
+    ("down_a", "Down + A", 0x07),
+    ("down_b", "Down + B", 0xBA),
+    ("right", "Right", 0x05),
+    ("right_a", "Right + A", 0x7C),
+    ("right_b", "Right + B", 0x13),
+];
+
 /// Resolve a palette ID to the installed palettes, mirroring the boot ROM's
 /// combination expansion at $04E9-$051D: the low 5 bits pick an
 /// (obj0, obj1, bg) offset triplet, and the top 3 bits select per-slot whether
@@ -295,6 +315,22 @@ mod tests {
         assert_eq!(key_combo_palette_id(0x00), None);
         assert_eq!(key_combo_palette_id(0x43), None); // Up+A+B: no exact match
         assert_eq!(key_combo_palette_id(0x14), None); // Right+Select
+    }
+
+    // The user-facing scheme list must stay pinned to the boot ROM's button-combo
+    // palette ids (same order as KEY_COMBO_JOYP), so a "Left + A" pick colorizes a
+    // DMG game exactly as holding Left+A at boot would on real hardware.
+    #[test]
+    fn combo_schemes_match_key_combo_ids() {
+        assert_eq!(COMBO_SCHEMES.len(), KEY_COMBO_ID.len());
+        for (i, (_, _, pid)) in COMBO_SCHEMES.iter().enumerate() {
+            assert_eq!(*pid, KEY_COMBO_ID[i]);
+        }
+        // Ids are unique.
+        let mut ids: Vec<&str> = COMBO_SCHEMES.iter().map(|(id, _, _)| *id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), COMBO_SCHEMES.len());
     }
 
     /// The embedded tables must stay byte-identical to the real boot ROM dump

@@ -67,9 +67,9 @@ pub mod tas;
 #[cfg(target_os = "android")]
 pub use action::LibraryEntry;
 pub use action::{
-    ActionKind, CommandDescriptor, FileData, HardwareChoice, HardwareFamily, KeyBind, LcdEffect,
-    LoadPurpose, MenuCategory, PaletteChoice, ScalingMode, SessionUiState, TextureFilter, UiAction,
-    COMMANDS,
+    ActionKind, CommandDescriptor, FileData, GbcDmgPalette, HardwareChoice, HardwareFamily,
+    KeyBind, LcdEffect, LoadPurpose, MenuCategory, PaletteChoice, ScalingMode, SessionUiState,
+    TextureFilter, UiAction, COMMANDS,
 };
 pub use apply::{ActionOutcome, FetchPurpose, PlatformRequest};
 pub use present::{frame_to_pixels, rgb_to_pixels, PixelOrder};
