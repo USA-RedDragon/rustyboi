@@ -77,6 +77,65 @@ pub enum PaletteChoice {
     Pocket,
 }
 
+/// The CGB colorization applied to a DMG game running on CGB/AGB hardware:
+/// `Auto` keeps the boot ROM's title-hash pick; `Scheme(id)` forces one of the
+/// boot-ROM button-combo palettes
+/// ([`cgb_compat_palette::COMBO_SCHEMES`](rustyboi_core_lib::cgb_compat_palette::COMBO_SCHEMES)).
+/// No effect on DMG/MGB hardware (monochrome) or on CGB titles (own colours).
+/// The `Scheme` payload is the boot ROM's palette id.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GbcDmgPalette {
+    #[default]
+    Auto,
+    Scheme(u8),
+}
+
+impl GbcDmgPalette {
+    /// Every choice (Auto first, then the 12 boot-ROM schemes) paired with its
+    /// menu label — the single list the Settings UI and the libretro option are
+    /// both built from.
+    pub fn choices() -> Vec<(GbcDmgPalette, &'static str)> {
+        let mut v = vec![(GbcDmgPalette::Auto, "Auto (title hash)")];
+        for (_, label, pid) in rustyboi_core_lib::cgb_compat_palette::COMBO_SCHEMES {
+            v.push((GbcDmgPalette::Scheme(pid), label));
+        }
+        v
+    }
+
+    /// The forced boot-ROM palette id, or `None` for `Auto` (title-hash pick).
+    pub fn forced_id(self) -> Option<u8> {
+        match self {
+            GbcDmgPalette::Auto => None,
+            GbcDmgPalette::Scheme(id) => Some(id),
+        }
+    }
+
+    /// The stable string id for the libretro option (`auto`, or the scheme's id).
+    pub fn option_id(self) -> &'static str {
+        match self {
+            GbcDmgPalette::Auto => "auto",
+            GbcDmgPalette::Scheme(id) => {
+                rustyboi_core_lib::cgb_compat_palette::COMBO_SCHEMES
+                    .iter()
+                    .find(|(_, _, pid)| *pid == id)
+                    .map(|(s, _, _)| *s)
+                    .unwrap_or("auto")
+            }
+        }
+    }
+
+    /// Parse a string id (see [`option_id`](Self::option_id)), or `None`.
+    pub fn from_option_id(id: &str) -> Option<Self> {
+        if id == "auto" {
+            return Some(GbcDmgPalette::Auto);
+        }
+        rustyboi_core_lib::cgb_compat_palette::COMBO_SCHEMES
+            .iter()
+            .find(|(s, _, _)| *s == id)
+            .map(|(_, _, pid)| GbcDmgPalette::Scheme(*pid))
+    }
+}
+
 /// The hardware model choices surfaced in the Settings menu — a lossless 1:1
 /// mirror of the core [`Hardware`](rustyboi_core_lib::gb::Hardware) so every
 /// silicon revision the core emulates is selectable.
@@ -138,6 +197,11 @@ pub enum ScalingMode {
 pub struct SessionUiState {
     pub hardware: HardwareChoice,
     pub palette: PaletteChoice,
+    /// CGB colorization scheme for DMG games (Auto / a boot-ROM scheme).
+    pub gbc_dmg_palette: GbcDmgPalette,
+    /// Whether the DMG palette settings apply to the loaded game (false for a
+    /// CGB title, which supplies its own colours — the menu is greyed out).
+    pub dmg_palette_active: bool,
     /// CGB colour-correction curve (raw RGB555 vs a hardware-LCD approximation).
     pub color_correction: crate::CgbColorConversion,
     /// Whether a real boot ROM is run (when one has been supplied) instead of
@@ -186,6 +250,8 @@ impl Default for SessionUiState {
         SessionUiState {
             hardware: HardwareChoice::Cgb,
             palette: PaletteChoice::Grayscale,
+            gbc_dmg_palette: GbcDmgPalette::Auto,
+            dmg_palette_active: true,
             color_correction: crate::CgbColorConversion::Linear,
             use_real_boot_rom: false,
             texture_filter: TextureFilter::Nearest,
@@ -276,6 +342,8 @@ pub enum UiAction {
     SetHardware(HardwareChoice),
     /// Change the DMG presentation palette.
     SetPalette(PaletteChoice),
+    /// Change the CGB colorization for DMG games (Auto / a boot-ROM scheme).
+    SetGbcDmgPalette(GbcDmgPalette),
     /// Change the CGB colour-correction curve (Linear/LCD).
     SetColorCorrection(crate::CgbColorConversion),
     /// Enable/disable running a real boot ROM (rebuilds the machine).
@@ -367,6 +435,7 @@ impl UiAction {
             UiAction::ToggleTouchControls => ActionKind::ToggleTouchControls,
             UiAction::SetHardware(_) => ActionKind::SetHardware,
             UiAction::SetPalette(_) => ActionKind::SetPalette,
+            UiAction::SetGbcDmgPalette(_) => ActionKind::SetGbcDmgPalette,
             UiAction::SetColorCorrection(_) => ActionKind::SetColorCorrection,
             UiAction::SetRealBootRom(_) => ActionKind::SetRealBootRom,
             UiAction::SetTextureFilter(_) => ActionKind::SetTextureFilter,
@@ -432,6 +501,7 @@ pub enum ActionKind {
     ToggleTouchControls,
     SetHardware,
     SetPalette,
+    SetGbcDmgPalette,
     SetColorCorrection,
     SetRealBootRom,
     SetTextureFilter,
@@ -684,6 +754,13 @@ pub const COMMANDS: &[CommandDescriptor] = &[
     CommandDescriptor {
         action_kind: ActionKind::SetPalette,
         label: "DMG Palette",
+        category: MenuCategory::Settings,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::SetGbcDmgPalette,
+        label: "GBC Palette (DMG games)",
         category: MenuCategory::Settings,
         default_keybind: None,
         overlay_button: None,

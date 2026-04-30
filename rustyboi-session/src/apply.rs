@@ -242,6 +242,14 @@ impl Session {
                 self.set_palette_choice(choice);
                 ActionOutcome::default()
             }
+            UiAction::SetGbcDmgPalette(choice) => {
+                self.set_gbc_dmg_palette(choice);
+                let (w, h) = self.content_size();
+                ActionOutcome {
+                    requests: vec![PlatformRequest::ResizeContent { width: w, height: h }],
+                    pause_changed: true,
+                }
+            }
             UiAction::SetColorCorrection(conversion) => {
                 self.set_color_correction(conversion);
                 ActionOutcome::default()

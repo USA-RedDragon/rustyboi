@@ -16,7 +16,7 @@ use rust_libretro::sys::{
 use std::ffi::CString;
 use std::os::raw::c_char;
 
-use rustyboi_session::action::{HardwareChoice, PaletteChoice};
+use rustyboi_session::action::{GbcDmgPalette, HardwareChoice, PaletteChoice};
 use rustyboi_session::CgbColorConversion;
 
 /// libretro caps each option's value list (including the NULL terminator) at
@@ -30,6 +30,7 @@ pub const KEY_HARDWARE: &str = "rustyboi_hardware";
 pub const KEY_REAL_BOOT_ROM: &str = "rustyboi_real_boot_rom";
 pub const KEY_SGB_BORDER: &str = "rustyboi_sgb_border";
 pub const KEY_DMG_PALETTE: &str = "rustyboi_dmg_palette";
+pub const KEY_GBC_DMG_PALETTE: &str = "rustyboi_gbc_dmg_palette";
 pub const KEY_GBC_COLOR_CORRECTION: &str = "rustyboi_gbc_color_correction";
 
 /// Canonical on/off option value ids (the libretro convention). Shared by the
@@ -121,6 +122,11 @@ pub fn build() -> OwnedOptions {
         .map(|p| value(p.option_id(), p.label()))
         .collect();
 
+    let gbc_dmg_values: Vec<Value> = GbcDmgPalette::choices()
+        .into_iter()
+        .map(|(c, label)| value(c.option_id(), label))
+        .collect();
+
     let specs = vec![
         OptSpec {
             key: KEY_HARDWARE,
@@ -157,6 +163,15 @@ pub fn build() -> OwnedOptions {
             category: "video_settings",
             values: palette_values,
             default: PaletteChoice::Grayscale.option_id().into(),
+        },
+        OptSpec {
+            key: KEY_GBC_DMG_PALETTE,
+            desc: "Video > GBC Palette (DMG games)",
+            desc_categorized: "GBC Palette (DMG games)",
+            info: "CGB colorization for original Game Boy games running in Game Boy Color mode. 'Auto' uses the boot ROM's per-title palette; the others force one of the boot-ROM button-combo schemes. No effect on DMG hardware or on Game Boy Color titles.",
+            category: "video_settings",
+            values: gbc_dmg_values,
+            default: GbcDmgPalette::Auto.option_id().into(),
         },
         OptSpec {
             key: KEY_GBC_COLOR_CORRECTION,

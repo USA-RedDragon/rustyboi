@@ -266,6 +266,10 @@ impl Session {
     /// fails validation inside `load_bios_bytes` and falls back to `skip_bios`,
     /// so content always loads.
     fn boot_or_skip(&self, gb: &mut GB) {
+        // Force the chosen CGB DMG-compat palette (Auto = None) before booting so
+        // the skip_bios colorization path picks it up when a DMG game runs on CGB
+        // hardware. No effect on DMG hardware or CGB titles.
+        gb.set_forced_compat_palette(self.config.gbc_dmg_palette.forced_id());
         if self.config.use_real_boot_rom
             && let Some(bytes) = self.boot_rom.as_deref()
             && gb.load_bios_bytes(bytes).is_ok()
@@ -802,6 +806,27 @@ impl Session {
     pub fn init_palette_choice(&mut self, choice: PaletteChoice) {
         self.palette = choice;
         self.config.dmg_palette.shades = palette_shades(choice);
+    }
+
+    /// The CGB colorization scheme for DMG games (Auto / a boot-ROM scheme).
+    pub fn gbc_dmg_palette(&self) -> crate::action::GbcDmgPalette {
+        self.config.gbc_dmg_palette
+    }
+
+    /// Change the CGB colorization scheme for DMG games and rebuild the machine
+    /// (the palette is latched at boot); persists the config.
+    pub fn set_gbc_dmg_palette(&mut self, choice: crate::action::GbcDmgPalette) {
+        self.config.gbc_dmg_palette = choice;
+        let gb = self.rebuild_current_gb();
+        self.replace_machine(*gb, self.rom_id);
+        self.persist_config();
+    }
+
+    /// Whether the DMG palette settings apply to the loaded game: false for a
+    /// CGB title (it supplies its own colours), so the frontend greys the menu.
+    /// True when no cart is loaded (the setting is harmless then).
+    pub fn dmg_palette_active(&self) -> bool {
+        self.gb.cartridge().is_none_or(|c| !c.supports_cgb())
     }
 
     /// The current CGB colour-correction curve.

@@ -8,8 +8,9 @@
 //! behavior — `Session::apply` does.
 
 pub use rustyboi_session::action::{
-    ActionKind, CommandDescriptor, FileData, HardwareChoice, HardwareFamily, KeyBind, LcdEffect,
-    MenuCategory, PaletteChoice, ScalingMode, SessionUiState, TextureFilter, UiAction, COMMANDS,
+    ActionKind, CommandDescriptor, FileData, GbcDmgPalette, HardwareChoice, HardwareFamily,
+    KeyBind, LcdEffect, MenuCategory, PaletteChoice, ScalingMode, SessionUiState, TextureFilter,
+    UiAction, COMMANDS,
 };
 pub use rustyboi_session::CgbColorConversion;
 
