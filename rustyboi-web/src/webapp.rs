@@ -552,7 +552,6 @@ fn draw(
         rustyboi_frontend_lib::ui_host::UiRunInputs {
             paused: false,
             debug: debug_ref,
-            printer_attached: None,
             session: &ui_state,
             extra_events: Vec::new(),
             held_pad: &pad,
@@ -599,9 +598,13 @@ fn draw(
         }
     }
 
-    // Push the current scaling policy from the session UI snapshot before render
-    // (one shared site, mirroring the desktop App::draw).
+    // Push the current presentation policy from the session UI snapshot before
+    // render (mirroring the desktop App::draw): letterboxing, texture filter and
+    // the LCD post-process effect. On web the renderer lives on the main thread
+    // (the session is in the worker), so these must be pushed here too.
     renderer.set_scaling_mode(ui_state.scaling);
+    renderer.set_texture_filter(ui_state.texture_filter);
+    renderer.set_lcd_effect(ui_state.lcd_effect);
 
     // Render: the game texture (uploaded above) letterboxed into the central
     // region, egui on top. game: None — the retained texture is drawn via has_game.

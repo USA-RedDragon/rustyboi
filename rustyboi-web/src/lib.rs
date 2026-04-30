@@ -444,6 +444,7 @@ impl Emulator {
             sgb_border: self.session.sgb_border(),
             fast_forward: self.session.is_fast_forward(),
             touch_controls: self.session.touch_controls(),
+            printer_attached: self.session.gb().printer_attached(),
             slots: self.session.list_slots(),
             cheats: self.session.cheats().map(str::to_owned).collect(),
             fetched_cheats: self.session.fetched_cheats().to_vec(),
