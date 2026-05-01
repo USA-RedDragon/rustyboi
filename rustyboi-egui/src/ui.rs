@@ -182,6 +182,11 @@ pub struct Gui {
     /// Replaces the desktop top menu bar on mobile.
     #[cfg(target_os = "android")]
     show_mobile_menu: bool,
+    /// Whether a menu-bar dropdown was open last frame. In fullscreen the
+    /// auto-hiding menu bar stays revealed while a menu is open so it doesn't
+    /// vanish mid-interaction.
+    #[cfg(not(target_os = "android"))]
+    menu_open_last_frame: bool,
 }
 
 impl Default for Gui {
@@ -246,6 +251,8 @@ impl Gui {
             },
             #[cfg(target_os = "android")]
             show_mobile_menu: false,
+            #[cfg(not(target_os = "android"))]
+            menu_open_last_frame: false,
         }
     }
 
@@ -274,7 +281,7 @@ impl Gui {
     /// debug panels render from (None when no panel is open, or on web until the
     /// worker's first snapshot arrives). The Connect/Disconnect-Printer menu
     /// label reads `session.printer_attached`.
-    pub fn ui(&mut self, ctx: &Context, paused: bool, debug: Option<&DebugSnapshot>, session: &SessionUiState, held_pad: &std::collections::HashSet<rustyboi_session::input_config::PadButton>) -> UiOutput {
+    pub fn ui(&mut self, ctx: &Context, paused: bool, debug: Option<&DebugSnapshot>, fullscreen: bool, session: &SessionUiState, held_pad: &std::collections::HashSet<rustyboi_session::input_config::PadButton>) -> UiOutput {
         let mut action = None;
         let mut any_menu_open = false;
 
@@ -289,8 +296,27 @@ impl Gui {
         // On Android the same actions are surfaced via a floating
         // ☰ soft button + full-screen overlay (see
         // `render_mobile_soft_button` / `render_mobile_menu_overlay`).
+        //
+        // In fullscreen the bar auto-hides: it renders as a floating overlay (so
+        // the game keeps the whole screen) only while the pointer is near the top
+        // edge or a menu is open. Windowed, it's always shown as a reserved panel.
         #[cfg(not(target_os = "android"))]
-        self.render_menu_bar(ctx, &mut action, &mut any_menu_open, paused, session);
+        {
+            const REVEAL_ZONE_PX: f32 = 32.0;
+            let reveal = !fullscreen
+                || self.menu_open_last_frame
+                || ctx.pointer_latest_pos().is_some_and(|p| p.y <= REVEAL_ZONE_PX);
+            if reveal {
+                if fullscreen {
+                    self.render_menu_bar_overlay(ctx, &mut action, &mut any_menu_open, paused, session);
+                } else {
+                    self.render_menu_bar(ctx, &mut action, &mut any_menu_open, paused, session);
+                }
+            }
+            self.menu_open_last_frame = any_menu_open;
+        }
+        #[cfg(target_os = "android")]
+        let _ = fullscreen;
         self.render_debug_panels(ctx, debug, &mut action, paused, session, held_pad);
         if self.show_cheats_panel {
             self.render_cheats_panel(ctx, &mut action, session);
@@ -354,9 +380,38 @@ impl Gui {
             central_rect,
         }
     }
+    /// Windowed menu bar: a reserved top panel (the game region is the space
+    /// left below it).
     #[cfg(not(target_os = "android"))]
     fn render_menu_bar(&mut self, ctx: &Context, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, session: &SessionUiState) {
         egui::TopBottomPanel::top("menubar_container").show(ctx, |ui| {
+            self.menu_bar_contents(ui, action, any_menu_open, paused, session);
+        });
+    }
+
+    /// Fullscreen auto-hide menu bar: a floating top overlay that draws over the
+    /// game (so the game keeps the full screen — `available_rect` is unchanged,
+    /// unlike a reserved panel).
+    #[cfg(not(target_os = "android"))]
+    fn render_menu_bar_overlay(&mut self, ctx: &Context, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, session: &SessionUiState) {
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("menubar_overlay"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.left_top())
+            .show(ctx, |ui| {
+                ui.set_width(screen.width());
+                egui::Frame::none()
+                    .fill(ctx.style().visuals.panel_fill)
+                    .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                    .show(ui, |ui| {
+                        self.menu_bar_contents(ui, action, any_menu_open, paused, session);
+                    });
+            });
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn menu_bar_contents(&mut self, ui: &mut egui::Ui, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, session: &SessionUiState) {
+        {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     *any_menu_open = true;
@@ -706,7 +761,7 @@ impl Gui {
                     }
                 });
             });
-        });
+        }
     }
 
     fn render_debug_panels(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>, action: &mut Option<GuiAction>, paused: bool, session: &SessionUiState, held_pad: &std::collections::HashSet<rustyboi_session::input_config::PadButton>) {
