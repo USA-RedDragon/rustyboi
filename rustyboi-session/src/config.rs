@@ -97,6 +97,10 @@ pub struct Config {
     /// LCD post-process effect (presentation-only). `default` (`Off`).
     #[serde(default)]
     pub lcd_effect: LcdEffect,
+    /// Integer upscale factor applied to saved/downloaded Game Boy Printer
+    /// output (the native image is a tiny 160px wide). `default` (1 = native).
+    #[serde(default = "default_printer_scale")]
+    pub printer_scale: u8,
     /// Rebindable GB-button bindings + chord hotkeys. `default` so older blobs
     /// still load (they get the default arrows/Z=B/X=A/Enter=Start layout).
     #[serde(default)]
@@ -105,6 +109,12 @@ pub struct Config {
 
 fn default_volume() -> u8 {
     100
+}
+
+/// Default printer upscale, matching the desktop default window scale
+/// (`--scale`, 5×) so a saved print is a comfortable size out of the box.
+fn default_printer_scale() -> u8 {
+    5
 }
 
 impl Default for Config {
@@ -122,6 +132,7 @@ impl Default for Config {
             use_real_boot_rom: false,
             texture_filter: TextureFilter::default(),
             lcd_effect: LcdEffect::default(),
+            printer_scale: default_printer_scale(),
             input: InputConfig::default(),
         }
     }

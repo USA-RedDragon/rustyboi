@@ -910,6 +910,17 @@ impl Session {
         self.persist_config();
     }
 
+    /// The integer upscale factor applied to saved Game Boy Printer output.
+    pub fn printer_scale(&self) -> u8 {
+        self.config.printer_scale.max(1)
+    }
+
+    /// Set the printer output upscale factor (clamped ≥ 1) and persist it.
+    pub fn set_printer_scale(&mut self, scale: u8) {
+        self.config.printer_scale = scale.max(1);
+        self.persist_config();
+    }
+
     /// Enable/disable rewind capture; persists the config.
     pub fn set_rewind_enabled(&mut self, enabled: bool) {
         self.config.rewind.enabled = enabled;
@@ -1341,17 +1352,21 @@ impl Session {
     /// paper-feed margins (see [`take_prints`](Self::take_prints)). Split out for
     /// unit testing without driving a print ROM.
     fn accumulate_prints(&mut self, strips: Vec<PrintSheet>) -> Vec<PrintSheet> {
+        let scale = self.config.printer_scale;
         let mut finished = Vec::new();
+        let mut eject = |strips: Vec<PrintSheet>| {
+            finished.push(scale_sheet(stitch_prints(strips), scale));
+        };
         for strip in strips {
             // margins byte: high nibble = feed before, low nibble = feed after.
             let feed_before = strip.margins >> 4 != 0;
             let feed_after = strip.margins & 0x0F != 0;
             if feed_before && !self.printer_strips.is_empty() {
-                finished.push(stitch_prints(std::mem::take(&mut self.printer_strips)));
+                eject(std::mem::take(&mut self.printer_strips));
             }
             self.printer_strips.push(strip);
             if feed_after {
-                finished.push(stitch_prints(std::mem::take(&mut self.printer_strips)));
+                eject(std::mem::take(&mut self.printer_strips));
             }
         }
         finished
@@ -1388,6 +1403,35 @@ fn stitch_prints(strips: Vec<PrintSheet>) -> PrintSheet {
         margins: last.margins,
         palette: last.palette,
         exposure: last.exposure,
+    }
+}
+
+/// Nearest-neighbour integer upscale of a print sheet by `scale` (≥1). The
+/// native printer image is 160px wide — tiny on a modern screen — so frontends
+/// save/download this enlarged copy. `scale == 1` returns the sheet unchanged.
+fn scale_sheet(sheet: PrintSheet, scale: u8) -> PrintSheet {
+    let scale = scale.max(1) as u32;
+    if scale == 1 {
+        return sheet;
+    }
+    let (w, h) = (sheet.width, sheet.height);
+    let (nw, nh) = (w * scale, h * scale);
+    let mut shades = Vec::with_capacity((nw * nh) as usize);
+    for ny in 0..nh {
+        let row_start = (ny / scale * w) as usize;
+        let row = &sheet.shades[row_start..row_start + w as usize];
+        for nx in 0..nw {
+            shades.push(row[(nx / scale) as usize]);
+        }
+    }
+    PrintSheet {
+        width: nw,
+        height: nh,
+        shades,
+        sheets: sheet.sheets,
+        margins: sheet.margins,
+        palette: sheet.palette,
+        exposure: sheet.exposure,
     }
 }
 
@@ -1608,16 +1652,23 @@ mod printer_tests {
     use super::*;
     use crate::ports::{MemRumble, MemStorage, MemWebcam};
 
+    fn test_ports() -> Ports {
+        Ports {
+            storage: Box::new(MemStorage::new()),
+            rumble: Box::new(MemRumble::default()),
+            webcam: Box::new(MemWebcam::default()),
+        }
+    }
+
+    fn session_scaled(scale: u8) -> Session {
+        let mut cfg = Config::default();
+        cfg.printer_scale = scale;
+        Session::new(cfg, test_ports(), [0u8; 32])
+    }
+
+    /// The stitching tests use 1× so they assert raw geometry.
     fn session() -> Session {
-        Session::new(
-            Config::default(),
-            Ports {
-                storage: Box::new(MemStorage::new()),
-                rumble: Box::new(MemRumble::default()),
-                webcam: Box::new(MemWebcam::default()),
-            },
-            [0u8; 32],
-        )
+        session_scaled(1)
     }
 
     /// An 8-row strip filled with `fill`, printed with `margins`.
@@ -1670,5 +1721,16 @@ mod printer_tests {
         let out = s.accumulate_prints(vec![strip(1, 0x03)]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].height, 8);
+    }
+
+    #[test]
+    fn printer_scale_upscales_the_photo() {
+        let mut s = session_scaled(3);
+        let out = s.accumulate_prints(vec![strip(2, 0x03)]);
+        assert_eq!(out.len(), 1);
+        // 160x8 nearest-neighbour to 3x.
+        assert_eq!((out[0].width, out[0].height), (480, 24));
+        assert_eq!(out[0].shades.len(), 480 * 24);
+        assert!(out[0].shades.iter().all(|&sh| sh == 2), "shade preserved by NN upscale");
     }
 }

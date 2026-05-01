@@ -10,7 +10,7 @@
 pub use rustyboi_session::action::{
     ActionKind, CommandDescriptor, FileData, GbcDmgPalette, HardwareChoice, HardwareFamily,
     KeyBind, LcdEffect, MenuCategory, PaletteChoice, ScalingMode, SessionUiState, TextureFilter,
-    UiAction, COMMANDS,
+    UiAction, COMMANDS, PRINTER_SCALES,
 };
 pub use rustyboi_session::CgbColorConversion;
 
