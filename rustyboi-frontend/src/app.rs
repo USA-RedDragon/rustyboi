@@ -667,6 +667,7 @@ impl App {
         ui: &mut UiHost,
         renderer: &mut Renderer,
         extra_events: ExtraEvents,
+        fullscreen: bool,
         mut resolve_gui_action: impl FnMut(&GuiAction) -> Option<ResolvedAction>,
     ) -> Vec<PlatformRequest> {
         let mut requests = Vec::new();
@@ -692,6 +693,7 @@ impl App {
                 crate::ui_host::UiRunInputs {
                     paused: paused_for_ui,
                     debug: debug_snapshot.as_ref(),
+                    fullscreen,
                     session: &ui_state,
                     extra_events,
                     held_pad: &self.held_pad,

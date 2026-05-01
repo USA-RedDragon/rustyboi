@@ -547,11 +547,16 @@ fn draw(
     // capture controller presses (egui never sees pad input); reused for the GB
     // input resolve below.
     let pad = gamepad_pad_held();
+    // The menu bar auto-hides while the canvas is in the Fullscreen API.
+    let fullscreen = web_sys::window()
+        .and_then(|w| w.document())
+        .is_some_and(|d| d.fullscreen_element().is_some());
     let (paint, ui_frame) = ui.run(
         window,
         rustyboi_frontend_lib::ui_host::UiRunInputs {
             paused: false,
             debug: debug_ref,
+            fullscreen,
             session: &ui_state,
             extra_events: Vec::new(),
             held_pad: &pad,
