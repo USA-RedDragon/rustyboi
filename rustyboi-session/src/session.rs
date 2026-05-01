@@ -20,6 +20,7 @@ use rustyboi_core_lib::cartridge::Cartridge;
 use rustyboi_core_lib::gb::{Frame, Hardware, GB};
 use rustyboi_core_lib::input::ButtonState;
 use rustyboi_core_lib::movie::{self, Movie};
+use rustyboi_core_lib::printer::PrintSheet;
 
 use std::sync::{Arc, Mutex};
 
@@ -196,6 +197,12 @@ pub struct Session {
     // --- debug-step requests set by `apply`, drained by the frontend --------
     pending_step_cycles: Option<u32>,
     pending_step_frames: Option<u32>,
+
+    /// Game Boy Printer strips accumulated for the in-progress photo. The printer
+    /// emits one sheet per PRINT command; a photo is usually several contiguous
+    /// strips fed out together, so [`take_prints`](Self::take_prints) stitches
+    /// them vertically into one long sheet, breaking on the paper-feed margins.
+    printer_strips: Vec<PrintSheet>,
 }
 
 impl Session {
@@ -249,6 +256,7 @@ impl Session {
             boot_rom: None,
             pending_step_cycles: None,
             pending_step_frames: None,
+            printer_strips: Vec::new(),
         }
     }
 
@@ -405,6 +413,7 @@ impl Session {
         self.recording = None;
         self.playback = None;
         self.mode = RunMode::Normal;
+        self.printer_strips.clear();
         self.apply_presentation();
     }
 
@@ -1313,6 +1322,41 @@ impl Session {
         self.rom_id
     }
 
+    /// Drain any Game Boy Printer photos finished since the last call, each as
+    /// one tall [`PrintSheet`] with its strips stitched vertically (one long
+    /// sheet of paper). A photo is emitted when a strip carries a paper-feed
+    /// margin: a non-zero *before*-feed on a fresh strip closes the previous
+    /// photo, and a non-zero *after*-feed ends the current one. Strips with no
+    /// feed keep accumulating (a multi-band print is not ejected mid-image).
+    ///
+    /// Replaces draining `GB::take_printer_sheets` directly, so every frontend
+    /// (which polls this each frame) saves one image per photo instead of one
+    /// file/download per band.
+    pub fn take_prints(&mut self) -> Vec<PrintSheet> {
+        let strips = self.gb.take_printer_sheets();
+        self.accumulate_prints(strips)
+    }
+
+    /// Group freshly-drained printer strips into finished photos by the
+    /// paper-feed margins (see [`take_prints`](Self::take_prints)). Split out for
+    /// unit testing without driving a print ROM.
+    fn accumulate_prints(&mut self, strips: Vec<PrintSheet>) -> Vec<PrintSheet> {
+        let mut finished = Vec::new();
+        for strip in strips {
+            // margins byte: high nibble = feed before, low nibble = feed after.
+            let feed_before = strip.margins >> 4 != 0;
+            let feed_after = strip.margins & 0x0F != 0;
+            if feed_before && !self.printer_strips.is_empty() {
+                finished.push(stitch_prints(std::mem::take(&mut self.printer_strips)));
+            }
+            self.printer_strips.push(strip);
+            if feed_after {
+                finished.push(stitch_prints(std::mem::take(&mut self.printer_strips)));
+            }
+        }
+        finished
+    }
+
     /// The emulated hardware model.
     pub fn hardware(&self) -> Hardware {
         self.config.hardware
@@ -1321,6 +1365,31 @@ impl Session {
 
 /// Reserved slot number for quicksave/quickload.
 pub const QUICK_SLOT: u32 = u32::MAX;
+
+/// Stitch a photo's strips (all `PRINT_WIDTH` wide) into one tall sheet by
+/// vertically concatenating their shade rows. Metadata comes from the last strip
+/// (the one that carried the ejecting feed). `strips` is always non-empty.
+fn stitch_prints(strips: Vec<PrintSheet>) -> PrintSheet {
+    if strips.len() == 1 {
+        return strips.into_iter().next().unwrap();
+    }
+    let width = strips[0].width;
+    let height: u32 = strips.iter().map(|s| s.height).sum();
+    let mut shades = Vec::with_capacity(strips.iter().map(|s| s.shades.len()).sum());
+    for s in &strips {
+        shades.extend_from_slice(&s.shades);
+    }
+    let last = strips.last().unwrap();
+    PrintSheet {
+        width,
+        height,
+        shades,
+        sheets: last.sheets,
+        margins: last.margins,
+        palette: last.palette,
+        exposure: last.exposure,
+    }
+}
 
 /// The No-Intro game-name data is not embedded in any rustyboi binary; each
 /// frontend downloads it at runtime from the CC-BY-SA-4.0 libretro-database. Log
@@ -1528,5 +1597,78 @@ mod volume_tests {
         s.set_scaling_mode(ScalingMode::IntegerAspect);
         assert_eq!(s.scaling_mode(), ScalingMode::IntegerAspect);
         assert_eq!(s.config().scaling, ScalingMode::IntegerAspect);
+    }
+}
+
+#[cfg(test)]
+mod printer_tests {
+    //! The Game Boy Printer stitches a photo's strips into one long sheet,
+    //! breaking on the paper-feed margins (high nibble = feed before, low nibble
+    //! = feed after). Driven directly through `accumulate_prints` (no print ROM).
+    use super::*;
+    use crate::ports::{MemRumble, MemStorage, MemWebcam};
+
+    fn session() -> Session {
+        Session::new(
+            Config::default(),
+            Ports {
+                storage: Box::new(MemStorage::new()),
+                rumble: Box::new(MemRumble::default()),
+                webcam: Box::new(MemWebcam::default()),
+            },
+            [0u8; 32],
+        )
+    }
+
+    /// An 8-row strip filled with `fill`, printed with `margins`.
+    fn strip(fill: u8, margins: u8) -> PrintSheet {
+        PrintSheet {
+            width: 160,
+            height: 8,
+            shades: vec![fill; 160 * 8],
+            sheets: 1,
+            margins,
+            palette: 0xE4,
+            exposure: 0x40,
+        }
+    }
+
+    #[test]
+    fn strips_stitch_into_one_photo_on_after_feed() {
+        let mut s = session();
+        // Two mid-image strips (no feed) eject nothing yet...
+        assert!(s.accumulate_prints(vec![strip(1, 0x00), strip(2, 0x00)]).is_empty());
+        // ...the strip that feeds paper out ejects one stitched photo.
+        let out = s.accumulate_prints(vec![strip(3, 0x03)]);
+        assert_eq!(out.len(), 1);
+        let photo = &out[0];
+        assert_eq!((photo.width, photo.height), (160, 24), "three 8-row strips");
+        // Rows are concatenated in arrival order.
+        assert_eq!(photo.shades[0], 1);
+        assert_eq!(photo.shades[160 * 8], 2);
+        assert_eq!(photo.shades[160 * 16], 3);
+    }
+
+    #[test]
+    fn before_feed_closes_the_previous_photo() {
+        let mut s = session();
+        assert!(s.accumulate_prints(vec![strip(1, 0x00)]).is_empty());
+        // A fresh strip with a *before* feed ejects the pending photo and starts
+        // a new one.
+        let out = s.accumulate_prints(vec![strip(2, 0x10)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].height, 8, "just the first strip");
+        // The second strip is now pending; an after-feed ejects strip2+strip3.
+        let out = s.accumulate_prints(vec![strip(3, 0x01)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].height, 16);
+    }
+
+    #[test]
+    fn a_lone_feed_strip_is_one_photo() {
+        let mut s = session();
+        let out = s.accumulate_prints(vec![strip(1, 0x03)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].height, 8);
     }
 }

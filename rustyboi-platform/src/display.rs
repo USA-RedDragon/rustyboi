@@ -1117,8 +1117,9 @@ fn pump_workers(
         }
     }
 
-    // Printer: drain finished sheets, encode + write off-thread.
-    let sheets = app.gb_mut().take_printer_sheets();
+    // Printer: drain finished photos (strips already stitched into one long
+    // sheet by the session), encode + write off-thread.
+    let sheets = app.session_mut().take_prints();
     if sheets.is_empty() {
         return;
     }
@@ -1243,7 +1244,7 @@ fn handle_android_library(
 /// on the session's inline capture path there, so nothing else to pump).
 #[cfg(any(target_arch = "wasm32", target_os = "android"))]
 fn drain_printer_sheets_unsupported(app: &mut App) {
-    let sheets = app.gb_mut().take_printer_sheets();
+    let sheets = app.session_mut().take_prints();
     if !sheets.is_empty() {
         log::warn!("{} print(s) captured but this platform has no print sink", sheets.len());
     }
