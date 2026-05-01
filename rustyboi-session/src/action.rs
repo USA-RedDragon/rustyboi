@@ -177,6 +177,10 @@ pub enum LcdEffect {
     Scanlines,
 }
 
+/// The integer upscale factors offered for saved Game Boy Printer output — the
+/// single list the Settings menu and the libretro option are built from.
+pub const PRINTER_SCALES: [u8; 6] = [1, 2, 3, 4, 5, 8];
+
 /// How the emulated frame is fit into its render region (letterboxing policy).
 /// `FitAspect` is the historical behavior (aspect-preserving contain);
 /// `IntegerAspect` snaps to the largest whole-number scale; `Stretch` fills the
@@ -211,6 +215,8 @@ pub struct SessionUiState {
     pub texture_filter: TextureFilter,
     /// LCD post-process effect (presentation-only).
     pub lcd_effect: LcdEffect,
+    /// Integer upscale factor for saved Game Boy Printer output.
+    pub printer_scale: u8,
     pub rewind_enabled: bool,
     pub rewind_interval_frames: u32,
     pub rewind_depth: usize,
@@ -259,6 +265,7 @@ impl Default for SessionUiState {
             use_real_boot_rom: false,
             texture_filter: TextureFilter::Nearest,
             lcd_effect: LcdEffect::Off,
+            printer_scale: 5,
             rewind_enabled: true,
             rewind_interval_frames: 6,
             rewind_depth: 90,
@@ -356,6 +363,8 @@ pub enum UiAction {
     SetTextureFilter(TextureFilter),
     /// Change the LCD post-process effect — presentation-only.
     SetLcdEffect(LcdEffect),
+    /// Change the integer upscale factor for saved Game Boy Printer output.
+    SetPrinterScale(u8),
     /// Supply real boot ROM bytes from a picked file (routed like a battery/RTC
     /// import through the frontend's file resolver).
     LoadBootRom(FileData),
@@ -444,6 +453,7 @@ impl UiAction {
             UiAction::SetRealBootRom(_) => ActionKind::SetRealBootRom,
             UiAction::SetTextureFilter(_) => ActionKind::SetTextureFilter,
             UiAction::SetLcdEffect(_) => ActionKind::SetLcdEffect,
+            UiAction::SetPrinterScale(_) => ActionKind::SetPrinterScale,
             UiAction::LoadBootRom(_) => ActionKind::LoadBootRom,
             UiAction::SetRewindEnabled(_) => ActionKind::SetRewindEnabled,
             UiAction::SetRewindInterval(_) => ActionKind::SetRewindInterval,
@@ -510,6 +520,7 @@ pub enum ActionKind {
     SetRealBootRom,
     SetTextureFilter,
     SetLcdEffect,
+    SetPrinterScale,
     LoadBootRom,
     SetRewindEnabled,
     SetRewindInterval,
@@ -786,6 +797,13 @@ pub const COMMANDS: &[CommandDescriptor] = &[
     CommandDescriptor {
         action_kind: ActionKind::SetLcdEffect,
         label: "LCD Effect",
+        category: MenuCategory::Settings,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::SetPrinterScale,
+        label: "Printer Scale",
         category: MenuCategory::Settings,
         default_keybind: None,
         overlay_button: None,

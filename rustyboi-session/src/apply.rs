@@ -277,6 +277,10 @@ impl Session {
                 self.set_lcd_effect(effect);
                 ActionOutcome::default()
             }
+            UiAction::SetPrinterScale(scale) => {
+                self.set_printer_scale(scale);
+                ActionOutcome::default()
+            }
             UiAction::LoadBootRom(file) => ActionOutcome {
                 requests: vec![PlatformRequest::LoadFile {
                     file,

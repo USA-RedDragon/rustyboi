@@ -680,6 +680,17 @@ impl Gui {
                         }
                     });
 
+                    ui.menu_button("Printer Scale", |ui| {
+                        ui.label("Saved Game Boy Printer image size");
+                        for scale in crate::actions::PRINTER_SCALES {
+                            let selected = session.printer_scale == scale;
+                            if ui.radio(selected, format!("{scale}×")).clicked() && !selected {
+                                *action = Some(GuiAction::SetPrinterScale(scale));
+                                ui.close_menu();
+                            }
+                        }
+                    });
+
                     {
                         let mut on = session.use_real_boot_rom;
                         if ui.checkbox(&mut on, "Real Boot ROM").clicked() {
@@ -1331,6 +1342,14 @@ impl Gui {
                             let selected = session.lcd_effect == effect;
                             if ui.radio(selected, label).clicked() && !selected {
                                 *action = Some(GuiAction::SetLcdEffect(effect));
+                            }
+                        }
+
+                        ui.label("Printer Scale");
+                        for scale in crate::actions::PRINTER_SCALES {
+                            let selected = session.printer_scale == scale;
+                            if ui.radio(selected, format!("{scale}×")).clicked() && !selected {
+                                *action = Some(GuiAction::SetPrinterScale(scale));
                             }
                         }
 

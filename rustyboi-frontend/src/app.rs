@@ -406,6 +406,7 @@ impl App {
             use_real_boot_rom: self.session.use_real_boot_rom(),
             texture_filter: self.session.texture_filter(),
             lcd_effect: self.session.lcd_effect(),
+            printer_scale: self.session.printer_scale(),
             rewind_enabled: cfg.rewind.enabled,
             rewind_interval_frames: cfg.rewind.interval_frames,
             rewind_depth: cfg.rewind.depth,
