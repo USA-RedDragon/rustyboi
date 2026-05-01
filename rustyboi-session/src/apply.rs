@@ -281,6 +281,10 @@ impl Session {
                 self.set_printer_scale(scale);
                 ActionOutcome::default()
             }
+            UiAction::SetTouchOpacity(opacity) => {
+                self.set_touch_opacity(opacity);
+                ActionOutcome::default()
+            }
             UiAction::LoadBootRom(file) => ActionOutcome {
                 requests: vec![PlatformRequest::LoadFile {
                     file,

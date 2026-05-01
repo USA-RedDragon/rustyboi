@@ -217,6 +217,8 @@ pub struct SessionUiState {
     pub lcd_effect: LcdEffect,
     /// Integer upscale factor for saved Game Boy Printer output.
     pub printer_scale: u8,
+    /// On-screen touch control opacity, 0..=100 (percent).
+    pub touch_opacity: u8,
     pub rewind_enabled: bool,
     pub rewind_interval_frames: u32,
     pub rewind_depth: usize,
@@ -266,6 +268,7 @@ impl Default for SessionUiState {
             texture_filter: TextureFilter::Nearest,
             lcd_effect: LcdEffect::Off,
             printer_scale: 5,
+            touch_opacity: 100,
             rewind_enabled: true,
             rewind_interval_frames: 6,
             rewind_depth: 90,
@@ -365,6 +368,8 @@ pub enum UiAction {
     SetLcdEffect(LcdEffect),
     /// Change the integer upscale factor for saved Game Boy Printer output.
     SetPrinterScale(u8),
+    /// Change the on-screen touch control opacity (0..=100 percent).
+    SetTouchOpacity(u8),
     /// Supply real boot ROM bytes from a picked file (routed like a battery/RTC
     /// import through the frontend's file resolver).
     LoadBootRom(FileData),
@@ -454,6 +459,7 @@ impl UiAction {
             UiAction::SetTextureFilter(_) => ActionKind::SetTextureFilter,
             UiAction::SetLcdEffect(_) => ActionKind::SetLcdEffect,
             UiAction::SetPrinterScale(_) => ActionKind::SetPrinterScale,
+            UiAction::SetTouchOpacity(_) => ActionKind::SetTouchOpacity,
             UiAction::LoadBootRom(_) => ActionKind::LoadBootRom,
             UiAction::SetRewindEnabled(_) => ActionKind::SetRewindEnabled,
             UiAction::SetRewindInterval(_) => ActionKind::SetRewindInterval,
@@ -521,6 +527,7 @@ pub enum ActionKind {
     SetTextureFilter,
     SetLcdEffect,
     SetPrinterScale,
+    SetTouchOpacity,
     LoadBootRom,
     SetRewindEnabled,
     SetRewindInterval,
@@ -805,6 +812,13 @@ pub const COMMANDS: &[CommandDescriptor] = &[
         action_kind: ActionKind::SetPrinterScale,
         label: "Printer Scale",
         category: MenuCategory::Settings,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::SetTouchOpacity,
+        label: "On-screen Control Opacity",
+        category: MenuCategory::View,
         default_keybind: None,
         overlay_button: None,
     },
