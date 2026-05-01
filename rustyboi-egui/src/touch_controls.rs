@@ -25,7 +25,9 @@ pub struct TouchState {
 }
 
 /// Render the touch overlay and return the current button state.
-pub fn show(ctx: &Context, touch_state: &mut TouchState) -> ButtonState {
+/// Draw the on-screen controls at `opacity` (0.0 = invisible .. 1.0 = the full
+/// default look) and return the resulting button state.
+pub fn show(ctx: &Context, touch_state: &mut TouchState, opacity: f32) -> ButtonState {
     // Drain incoming touch events and update our active-touch map.
     ctx.input(|i| {
         for event in &i.events {
@@ -73,8 +75,8 @@ pub fn show(ctx: &Context, touch_state: &mut TouchState) -> ButtonState {
     for b in &layout.buttons {
         let held = pressed(&state, b.button);
         match b.shape {
-            OverlayShape::Circle => draw_button(&painter, to_rect(b.rect), b.label, held),
-            OverlayShape::Pill => draw_pill(&painter, to_rect(b.rect), b.label, held),
+            OverlayShape::Circle => draw_button(&painter, to_rect(b.rect), b.label, held, opacity),
+            OverlayShape::Pill => draw_pill(&painter, to_rect(b.rect), b.label, held, opacity),
         }
     }
 
@@ -104,36 +106,44 @@ fn pressed(s: &ButtonState, b: rustyboi_session::GbButton) -> bool {
     }
 }
 
-fn draw_pill(painter: &egui::Painter, rect: Rect, label: &str, held: bool) {
+fn draw_pill(painter: &egui::Painter, rect: Rect, label: &str, held: bool, opacity: f32) {
     let fill = if held {
         Color32::from_rgba_premultiplied(180, 180, 180, 200)
     } else {
         Color32::from_rgba_premultiplied(60, 60, 60, 140)
-    };
-    let stroke = Stroke::new(2.0, Color32::from_rgba_premultiplied(220, 220, 220, 200));
+    }
+    .linear_multiply(opacity);
+    let stroke = Stroke::new(
+        2.0,
+        Color32::from_rgba_premultiplied(220, 220, 220, 200).linear_multiply(opacity),
+    );
     painter.rect(rect, rect.height() * 0.5, fill, stroke);
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
         label,
         FontId::proportional(rect.height() * 0.55),
-        Color32::WHITE,
+        Color32::WHITE.linear_multiply(opacity),
     );
 }
 
-fn draw_button(painter: &egui::Painter, rect: Rect, label: &str, held: bool) {
+fn draw_button(painter: &egui::Painter, rect: Rect, label: &str, held: bool, opacity: f32) {
     let fill = if held {
         Color32::from_rgba_premultiplied(220, 220, 220, 220)
     } else {
         Color32::from_rgba_premultiplied(60, 60, 60, 160)
-    };
-    let stroke = Stroke::new(2.0, Color32::from_rgba_premultiplied(230, 230, 230, 220));
+    }
+    .linear_multiply(opacity);
+    let stroke = Stroke::new(
+        2.0,
+        Color32::from_rgba_premultiplied(230, 230, 230, 220).linear_multiply(opacity),
+    );
     painter.circle(rect.center(), rect.width() * 0.45, fill, stroke);
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
         label,
         FontId::proportional(rect.width() * 0.40),
-        Color32::WHITE,
+        Color32::WHITE.linear_multiply(opacity),
     );
 }

@@ -450,6 +450,7 @@ impl Emulator {
             texture_filter: self.session.texture_filter(),
             lcd_effect: self.session.lcd_effect(),
             printer_scale: self.session.printer_scale(),
+            touch_opacity: self.session.touch_opacity(),
             rewind_enabled: self.session.config().rewind.enabled,
             rewind_interval_frames: self.session.config().rewind.interval_frames,
             rewind_depth: self.session.config().rewind.depth,

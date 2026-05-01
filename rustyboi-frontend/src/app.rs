@@ -407,6 +407,7 @@ impl App {
             texture_filter: self.session.texture_filter(),
             lcd_effect: self.session.lcd_effect(),
             printer_scale: self.session.printer_scale(),
+            touch_opacity: self.session.touch_opacity(),
             rewind_enabled: cfg.rewind.enabled,
             rewind_interval_frames: cfg.rewind.interval_frames,
             rewind_depth: cfg.rewind.depth,

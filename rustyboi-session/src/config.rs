@@ -101,6 +101,10 @@ pub struct Config {
     /// output (the native image is a tiny 160px wide). `default` (1 = native).
     #[serde(default = "default_printer_scale")]
     pub printer_scale: u8,
+    /// On-screen touch control opacity, 0..=100 (percent). `default` (100) is
+    /// the full default look.
+    #[serde(default = "default_touch_opacity")]
+    pub touch_opacity: u8,
     /// Rebindable GB-button bindings + chord hotkeys. `default` so older blobs
     /// still load (they get the default arrows/Z=B/X=A/Enter=Start layout).
     #[serde(default)]
@@ -115,6 +119,10 @@ fn default_volume() -> u8 {
 /// (`--scale`, 5×) so a saved print is a comfortable size out of the box.
 fn default_printer_scale() -> u8 {
     5
+}
+
+fn default_touch_opacity() -> u8 {
+    100
 }
 
 impl Default for Config {
@@ -133,6 +141,7 @@ impl Default for Config {
             texture_filter: TextureFilter::default(),
             lcd_effect: LcdEffect::default(),
             printer_scale: default_printer_scale(),
+            touch_opacity: default_touch_opacity(),
             input: InputConfig::default(),
         }
     }

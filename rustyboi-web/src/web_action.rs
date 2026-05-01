@@ -30,6 +30,10 @@ fn default_printer_scale() -> u8 {
     5
 }
 
+fn default_touch_opacity() -> u8 {
+    100
+}
+
 // The choice enums (`HardwareChoice`, `PaletteChoice`) and the value enums
 // (`ScalingMode`, `TextureFilter`, `LcdEffect`, `CgbColorConversion`) are all
 // serde-derived in the shared crate, so the web wire uses them directly — no
@@ -64,6 +68,7 @@ pub enum WebAction {
     SetTextureFilter(TextureFilter),
     SetLcdEffect(LcdEffect),
     SetPrinterScale(u8),
+    SetTouchOpacity(u8),
     SetRewindEnabled(bool),
     SetRewindInterval(u32),
     SetRewindDepth(usize),
@@ -103,6 +108,7 @@ impl WebAction {
             UiAction::SetTextureFilter(f) => WebAction::SetTextureFilter(*f),
             UiAction::SetLcdEffect(e) => WebAction::SetLcdEffect(*e),
             UiAction::SetPrinterScale(s) => WebAction::SetPrinterScale(*s),
+            UiAction::SetTouchOpacity(o) => WebAction::SetTouchOpacity(*o),
             UiAction::SetRewindEnabled(b) => WebAction::SetRewindEnabled(*b),
             UiAction::SetRewindInterval(n) => WebAction::SetRewindInterval(*n),
             UiAction::SetRewindDepth(n) => WebAction::SetRewindDepth(*n),
@@ -142,6 +148,7 @@ impl WebAction {
             WebAction::SetTextureFilter(f) => UiAction::SetTextureFilter(f),
             WebAction::SetLcdEffect(e) => UiAction::SetLcdEffect(e),
             WebAction::SetPrinterScale(s) => UiAction::SetPrinterScale(s),
+            WebAction::SetTouchOpacity(o) => UiAction::SetTouchOpacity(o),
             WebAction::SetRewindEnabled(b) => UiAction::SetRewindEnabled(b),
             WebAction::SetRewindInterval(n) => UiAction::SetRewindInterval(n),
             WebAction::SetRewindDepth(n) => UiAction::SetRewindDepth(n),
@@ -178,6 +185,8 @@ pub struct WebUiState {
     pub lcd_effect: LcdEffect,
     #[serde(default = "default_printer_scale")]
     pub printer_scale: u8,
+    #[serde(default = "default_touch_opacity")]
+    pub touch_opacity: u8,
     pub rewind_enabled: bool,
     pub rewind_interval_frames: u32,
     pub rewind_depth: usize,
@@ -219,6 +228,7 @@ impl WebUiState {
             texture_filter: s.texture_filter,
             lcd_effect: s.lcd_effect,
             printer_scale: s.printer_scale,
+            touch_opacity: s.touch_opacity,
             rewind_enabled: s.rewind_enabled,
             rewind_interval_frames: s.rewind_interval_frames,
             rewind_depth: s.rewind_depth,
@@ -251,6 +261,7 @@ impl WebUiState {
             texture_filter: self.texture_filter,
             lcd_effect: self.lcd_effect,
             printer_scale: self.printer_scale,
+            touch_opacity: self.touch_opacity,
             rewind_enabled: self.rewind_enabled,
             rewind_interval_frames: self.rewind_interval_frames,
             rewind_depth: self.rewind_depth,
