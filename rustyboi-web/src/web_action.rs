@@ -195,6 +195,8 @@ pub struct WebUiState {
     #[serde(default)]
     pub scaling: ScalingMode,
     pub sgb_border: bool,
+    #[serde(default)]
+    pub paused: bool,
     pub fast_forward: bool,
     pub touch_controls: bool,
     #[serde(default)]
@@ -235,6 +237,7 @@ impl WebUiState {
             volume: s.volume,
             scaling: s.scaling,
             sgb_border: s.sgb_border,
+            paused: s.paused,
             fast_forward: s.fast_forward,
             touch_controls: s.touch_controls,
             printer_attached: s.printer_attached,
@@ -268,6 +271,7 @@ impl WebUiState {
             volume: self.volume,
             scaling: self.scaling,
             sgb_border: self.sgb_border,
+            paused: self.paused,
             fast_forward: self.fast_forward,
             touch_controls: self.touch_controls,
             printer_attached: self.printer_attached,

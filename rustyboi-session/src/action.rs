@@ -227,6 +227,10 @@ pub struct SessionUiState {
     /// How the frame is letterboxed in the render region.
     pub scaling: ScalingMode,
     pub sgb_border: bool,
+    /// Whether emulation is paused (drives the Pause/Resume menu label). On
+    /// desktop the frontend owns pause and passes it separately, so this is only
+    /// meaningful for the web adapter, whose pause lives in the session.
+    pub paused: bool,
     pub fast_forward: bool,
     /// Whether the on-screen touch overlay is shown.
     pub touch_controls: bool,
@@ -275,6 +279,7 @@ impl Default for SessionUiState {
             volume: 100,
             scaling: ScalingMode::FitAspect,
             sgb_border: true,
+            paused: false,
             fast_forward: false,
             touch_controls: cfg!(target_os = "android"),
             printer_attached: false,
