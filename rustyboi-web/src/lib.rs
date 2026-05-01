@@ -277,7 +277,7 @@ impl Emulator {
     /// the native frontend instead writes them next to the ROM.
     pub fn take_prints(&mut self) -> js_sys::Array {
         let arr = js_sys::Array::new();
-        for sheet in self.session.gb_mut().take_printer_sheets() {
+        for sheet in self.session.take_prints() {
             let png = sheet.to_png();
             arr.push(&js_sys::Uint8Array::from(png.as_slice()));
         }
