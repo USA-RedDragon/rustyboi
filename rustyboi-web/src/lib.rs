@@ -417,6 +417,13 @@ impl Emulator {
             .map_err(|e| JsValue::from_str(&format!("bad action json: {e}")))?;
         let palette_before = self.session.palette();
         let ui_action = action.into_ui_action();
+        // On web the worker's run loop is the only driver, so pause lives in the
+        // session's RunMode (unlike desktop, where the `App` owns pause and
+        // `apply(TogglePause)` only signals it). Drive the run mode directly here.
+        if matches!(ui_action, UiAction::TogglePause) {
+            self.session.toggle_pause();
+            return Ok(Array::new());
+        }
         let outcome = self.session.apply(ui_action, 0);
         if self.session.palette() != palette_before {
             self.dmg_palette = self.session.config().dmg_palette;
@@ -457,6 +464,7 @@ impl Emulator {
             volume: self.session.volume(),
             scaling: self.session.scaling_mode(),
             sgb_border: self.session.sgb_border(),
+            paused: self.session.is_paused(),
             fast_forward: self.session.is_fast_forward(),
             touch_controls: self.session.touch_controls(),
             printer_attached: self.session.gb().printer_attached(),

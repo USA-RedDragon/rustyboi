@@ -536,9 +536,8 @@ fn draw(
     }
 
     // Pass the worker's latest debug snapshot to the panels only while a panel is
-    // open (Phase C — web debug views). "paused" is presentation-only here
-    // (auto-pause lives in the worker's run loop, driven by TogglePause); pass
-    // false so the UI isn't stuck dimmed.
+    // open (Phase C — web debug views). The paused state (below) comes from the
+    // worker snapshot, since pause lives in the session's run mode on web.
     let debug_ref = if debug_open { debug_snapshot.as_ref() } else { None };
     // Debug panels are live views fed by the worker each frame — force a repaint
     // while any is open so a freshly-arrived snapshot always re-renders (repaint
@@ -554,7 +553,7 @@ fn draw(
     let (paint, ui_frame) = ui.run(
         window,
         rustyboi_frontend_lib::ui_host::UiRunInputs {
-            paused: false,
+            paused: ui_state.paused,
             debug: debug_ref,
             fullscreen,
             session: &ui_state,

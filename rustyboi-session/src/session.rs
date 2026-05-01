@@ -780,6 +780,13 @@ impl Session {
         matches!(self.mode, RunMode::FastForward(_))
     }
 
+    /// Whether emulation is paused (the run mode re-presents the current frame).
+    /// The web worker drives pause through this; desktop pause is owned by the
+    /// frontend `App`, so its session mode stays `Normal`.
+    pub fn is_paused(&self) -> bool {
+        matches!(self.mode, RunMode::Paused)
+    }
+
     /// Toggle fast-forward on/off (fast-forward ↔ normal).
     pub fn toggle_fast_forward(&mut self) {
         match self.mode {

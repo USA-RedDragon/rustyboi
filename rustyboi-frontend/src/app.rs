@@ -414,6 +414,7 @@ impl App {
             volume: cfg.volume,
             scaling: cfg.scaling,
             sgb_border: self.session.sgb_border(),
+            paused: self.session.is_paused(),
             fast_forward: self.is_fast_forward(),
             touch_controls: self.session.touch_controls(),
             printer_attached: self.session.gb().printer_attached(),
