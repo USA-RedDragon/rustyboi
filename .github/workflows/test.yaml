@@ -66,7 +66,7 @@ jobs:
           - { os: macos, arch: x86_64, runs-on: macos-latest, target: x86_64-apple-darwin, rosetta: true }
           - { os: macos, arch: aarch64, runs-on: macos-latest, target: aarch64-apple-darwin }
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install Rust
         shell: bash
         run: |
@@ -88,7 +88,7 @@ jobs:
         shell: bash
         run: sudo softwareupdate --install-rosetta --agree-to-license
       - name: Cache cargo + target
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -97,7 +97,7 @@ jobs:
           key: cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-${{ matrix.target }}-
       - name: Cache ROM set
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: gb-test-roms
           key: roms-${{ matrix.os }}-v7.0-gambatte5a41a68c-shootout7c6ee9ba-daidcpp-magen050-ltgce015ca2-sketch02a-gbchw631e600
@@ -123,12 +123,12 @@ jobs:
       contents: write
     steps:
       - name: Generate GitHub App token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         id: app-token
         with:
           app-id: ${{ vars.AUTO_COMMIT_APP_ID }}
           private-key: ${{ secrets.AUTO_COMMIT_APP_KEY }}
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           token: ${{ steps.app-token.outputs.token }}
           ref: ${{ github.head_ref }}
