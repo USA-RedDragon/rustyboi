@@ -88,6 +88,8 @@ pub enum SessionError {
     NoState,
     /// The recorded/played movie was authored against a different ROM.
     RomMismatch,
+    /// A TAS movie file failed to decode.
+    Movie(String),
     /// Operation needs a cartridge but none is inserted.
     NoCartridge,
 }
@@ -105,6 +107,7 @@ impl core::fmt::Display for SessionError {
             SessionError::State(e) => write!(f, "state error: {e}"),
             SessionError::NoState => write!(f, "no saved state in slot"),
             SessionError::RomMismatch => write!(f, "movie ROM does not match loaded ROM"),
+            SessionError::Movie(e) => write!(f, "movie decode error: {e}"),
             SessionError::NoCartridge => write!(f, "no cartridge inserted"),
         }
     }
@@ -1128,6 +1131,17 @@ impl Session {
         Ok(())
     }
 
+    /// Finish loading a TAS movie: decode the `.rbmovie` bytes produced by
+    /// [`stop_recording`](Self::stop_recording) → [`Movie::to_bytes`] and begin
+    /// deterministic playback (see [`play_movie`](Self::play_movie)). The parallel
+    /// to the other `finish_*` finishers for the `LoadPurpose::Movie` file-resolve
+    /// path. Fails if the bytes are not a movie or were recorded against a
+    /// different ROM than the one loaded.
+    pub fn finish_load_movie(&mut self, bytes: &[u8]) -> Result<(), SessionError> {
+        let movie = Movie::from_bytes(bytes).map_err(|e| SessionError::Movie(e.to_string()))?;
+        self.play_movie(&movie)
+    }
+
     // --- save-data import/export (battery + RTC) ----------------------------
 
     /// Finish a battery-save import: resolved `bytes` from a picked `.sav` are
@@ -1750,5 +1764,95 @@ mod printer_tests {
         assert_eq!((out[0].width, out[0].height), (480, 24));
         assert_eq!(out[0].shades.len(), 480 * 24);
         assert!(out[0].shades.iter().all(|&sh| sh == 2), "shade preserved by NN upscale");
+    }
+}
+
+#[cfg(test)]
+mod tas_tests {
+    //! The frontend-facing TAS surface: record from the live state, stop into a
+    //! serialized `.rbmovie`, then reload it for deterministic playback. This
+    //! covers the session-level plumbing the four frontends drive through
+    //! `apply(ToggleRecording)` / `finish_load_movie`; the bit-exact replay
+    //! guarantee itself is proven in `rustyboi_core_lib::movie`.
+    use super::*;
+    use crate::action::UiAction;
+    use crate::apply::PlatformRequest;
+    use crate::ports::{MemRumble, MemStorage, MemWebcam};
+    use rustyboi_core_lib::movie::Movie;
+
+    fn test_ports() -> Ports {
+        Ports {
+            storage: Box::new(MemStorage::new()),
+            rumble: Box::new(MemRumble::default()),
+            webcam: Box::new(MemWebcam::default()),
+        }
+    }
+
+    fn session() -> Session {
+        Session::new(Config::default(), test_ports(), [0u8; 32])
+    }
+
+    // One ToggleRecording arms recording; a second stops it and hands back a
+    // decodable `.rbmovie` whose frame count matches the frames stepped while
+    // armed. Loading those bytes begins playback; StopReplay ends it.
+    #[test]
+    fn toggle_recording_round_trips_and_replays() {
+        let mut s = session();
+
+        assert!(!s.is_recording());
+        s.apply(UiAction::ToggleRecording, 0);
+        assert!(s.is_recording(), "first toggle starts recording");
+
+        // Step three frames so the recording logs three inputs.
+        for _ in 0..3 {
+            s.run_frame(AbstractInput::none());
+        }
+
+        let out = s.apply(UiAction::ToggleRecording, 0);
+        assert!(!s.is_recording(), "second toggle stops recording");
+        let bytes = out
+            .requests
+            .iter()
+            .find_map(|r| match r {
+                PlatformRequest::SaveBytes { suggested_name, bytes } => {
+                    assert!(suggested_name.ends_with(".rbmovie"));
+                    Some(bytes.clone())
+                }
+                _ => None,
+            })
+            .expect("stop-recording emits a SaveBytes export");
+
+        let movie = Movie::from_bytes(&bytes).expect("exported bytes decode as a movie");
+        assert_eq!(movie.inputs.len(), 3, "one input logged per stepped frame");
+
+        // Reload the exported movie: playback begins and StopReplay ends it.
+        s.finish_load_movie(&bytes).expect("reload the just-exported movie");
+        assert!(s.is_playing(), "loading a movie begins playback");
+        s.apply(UiAction::StopReplay, 0);
+        assert!(!s.is_playing(), "StopReplay resumes live input");
+    }
+
+    // A movie recorded against a different ROM id is rejected rather than
+    // silently played against the wrong game.
+    #[test]
+    fn load_movie_rejects_rom_mismatch() {
+        let mut recorder = Session::new(Config::default(), test_ports(), [1u8; 32]);
+        recorder.start_recording_from_state().unwrap();
+        recorder.run_frame(AbstractInput::none());
+        let movie = recorder.stop_recording().unwrap();
+
+        // A session for a different ROM id must refuse it.
+        let mut other = session();
+        assert!(matches!(
+            other.finish_load_movie(&movie.to_bytes()),
+            Err(SessionError::RomMismatch)
+        ));
+    }
+
+    // Garbage bytes surface as a decode error, never a panic.
+    #[test]
+    fn load_movie_rejects_garbage() {
+        let mut s = session();
+        assert!(matches!(s.finish_load_movie(b"not a movie"), Err(SessionError::Movie(_))));
     }
 }
