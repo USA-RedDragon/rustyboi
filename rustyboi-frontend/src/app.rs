@@ -418,6 +418,8 @@ impl App {
             fast_forward: self.is_fast_forward(),
             touch_controls: self.session.touch_controls(),
             printer_attached: self.session.gb().printer_attached(),
+            recording: self.session.is_recording(),
+            replaying: self.session.is_playing(),
             slots: self.session.list_slots(),
             cheats: self.session.cheats().map(str::to_owned).collect(),
             fetched_cheats: self.session.fetched_cheats().to_vec(),
@@ -796,7 +798,8 @@ impl App {
             | GuiAction::ImportState(_)
             | GuiAction::ImportBatterySave(_)
             | GuiAction::ImportRtc(_)
-            | GuiAction::ApplyPatch(_)) => {
+            | GuiAction::ApplyPatch(_)
+            | GuiAction::LoadMovie(_)) => {
                 match resolve(&action) {
                     Some(ResolvedAction::LoadRom { bytes, path }) => {
                         match self.load_rom_bytes(bytes, path) {
@@ -843,6 +846,16 @@ impl App {
                             Err(e) => requests.push(PlatformRequest::Error(format!("Failed to apply patch: {e}"))),
                         }
                     }
+                    Some(ResolvedAction::LoadMovie { bytes }) => {
+                        match self.session.finish_load_movie(&bytes) {
+                            Ok(()) => {
+                                self.manually_paused = self.user_paused;
+                                requests.push(PlatformRequest::ClearError);
+                                requests.push(PlatformRequest::Status("Movie loaded — replaying".into()));
+                            }
+                            Err(e) => requests.push(PlatformRequest::Error(format!("Failed to load movie: {e}"))),
+                        }
+                    }
                     None => {}
                 }
             }
@@ -863,6 +876,7 @@ pub enum ResolvedAction {
     ImportBattery { bytes: Vec<u8> },
     ImportRtc { bytes: Vec<u8> },
     ApplyPatch { bytes: Vec<u8> },
+    LoadMovie { bytes: Vec<u8> },
 }
 
 /// The app is a windowed [`Frontend`]: the shared [`drive_action`] driver

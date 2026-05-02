@@ -579,6 +579,26 @@ impl Gui {
                         *action = Some(GuiAction::TogglePrinter);
                         ui.close_menu();
                     }
+                    ui.separator();
+                    // TAS record/replay: record from the current state into a
+                    // `.rbmovie` (exported like a save), or load one back and
+                    // replay it deterministically for bug repro.
+                    let record_text = if session.recording {
+                        "⏹ Stop Recording"
+                    } else {
+                        "⏺ Record Movie"
+                    };
+                    if ui.button(record_text).clicked() {
+                        *action = Some(GuiAction::ToggleRecording);
+                        ui.close_menu();
+                    }
+                    import_menu_button(ui, &self.pending_dialog_result,
+                        command_label(ActionKind::LoadMovie),
+                        "RustyBoi Movie", "rbmovie", GuiAction::LoadMovie);
+                    if session.replaying && ui.button(command_label(ActionKind::StopReplay)).clicked() {
+                        *action = Some(GuiAction::StopReplay);
+                        ui.close_menu();
+                    }
                 });
 
                 ui.menu_button("Debug", |ui| {
@@ -1232,6 +1252,30 @@ impl Gui {
                             if sgb_border != session.sgb_border {
                                 *action = Some(GuiAction::ToggleSgbBorder);
                             }
+                        }
+                        // TAS record/replay (see the desktop Emulation menu).
+                        let record_text = if session.recording {
+                            "Stop Recording"
+                        } else {
+                            "Record Movie"
+                        };
+                        if ui
+                            .add(egui::Button::new(record_text).min_size(row_size))
+                            .clicked()
+                        {
+                            *action = Some(GuiAction::ToggleRecording);
+                            close_after_action = true;
+                        }
+                        if mobile_import_row(ui, row_size, &self.pending_dialog_result,
+                            command_label(ActionKind::LoadMovie),
+                            "RustyBoi Movie", "rbmovie", GuiAction::LoadMovie) {
+                            close_after_action = true;
+                        }
+                        if session.replaying
+                            && ui.add(egui::Button::new("Stop Replay").min_size(row_size)).clicked()
+                        {
+                            *action = Some(GuiAction::StopReplay);
+                            close_after_action = true;
                         }
 
                         ui.add_space(row_height * 0.25);
