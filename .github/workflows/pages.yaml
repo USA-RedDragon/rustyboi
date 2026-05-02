@@ -1,0 +1,87 @@
+name: Deploy web (GitHub Pages)
+
+# Builds the WASM web frontend (tools/build-web.sh) and publishes
+# rustyboi-web/www/ to GitHub Pages. The app is fully relative-path
+# (start_url "./", ./pkg, ./worker.js, ./sw.js), so it works from the
+# project subpath https://<owner>.github.io/<repo>/.
+#
+# One-time setup: repo Settings -> Pages -> Build and deployment ->
+# Source: "GitHub Actions".
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel an in-flight deploy; let queued runs finish in order.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: '1.94.1'
+  WASM_PACK_VERSION: v0.13.1
+  BINARYEN_VERSION: version_119
+
+jobs:
+  build:
+    name: Build wasm bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust (${{ env.RUST_TOOLCHAIN }} + wasm target)
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \
+            --target wasm32-unknown-unknown
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Cache cargo + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: web-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: web-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Install wasm-pack ${{ env.WASM_PACK_VERSION }}
+        run: |
+          url="https://github.com/rustwasm/wasm-pack/releases/download/${WASM_PACK_VERSION}/wasm-pack-${WASM_PACK_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL "$url" | tar -xz -C /tmp
+          sudo install "/tmp/wasm-pack-${WASM_PACK_VERSION}-x86_64-unknown-linux-musl/wasm-pack" /usr/local/bin/
+          wasm-pack --version
+
+      - name: Install binaryen ${{ env.BINARYEN_VERSION }} (wasm-opt)
+        run: |
+          url="https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz"
+          curl -fsSL "$url" | tar -xz -C /tmp
+          echo "/tmp/binaryen-${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Build web bundle
+        run: |
+          wasm-opt --version
+          tools/build-web.sh
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: rustyboi-web/www
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
