@@ -1,15 +1,8 @@
-name: Deploy web (GitHub Pages)
+name: Deploy GitHub Pages
 
-# Builds the WASM web frontend (tools/build-web.sh) and publishes
-# rustyboi-web/www/ to GitHub Pages. The app is fully relative-path
-# (start_url "./", ./pkg, ./worker.js, ./sw.js), so it works from the
-# project subpath https://<owner>.github.io/<repo>/.
-#
-# One-time setup: repo Settings -> Pages -> Build and deployment ->
-# Source: "GitHub Actions".
 on:
   push:
-    branches: [main]
+    branches: [claude]
   workflow_dispatch:
 
 permissions:
@@ -17,7 +10,6 @@ permissions:
   pages: write
   id-token: write
 
-# Never cancel an in-flight deploy; let queued runs finish in order.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -33,7 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Rust (${{ env.RUST_TOOLCHAIN }} + wasm target)
         run: |
