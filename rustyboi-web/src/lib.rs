@@ -220,6 +220,20 @@ impl Emulator {
         requests_to_js(&reqs)
     }
 
+    /// Load a recorded TAS movie (`.rbmovie` bytes the main thread read from a
+    /// picked file) and begin deterministic playback. Returns Status/Error
+    /// requests.
+    pub fn load_movie(&mut self, bytes: &[u8]) -> Array {
+        let reqs = match self.session.finish_load_movie(bytes) {
+            Ok(()) => vec![
+                PlatformRequest::ClearError,
+                PlatformRequest::Status("Movie loaded — replaying".into()),
+            ],
+            Err(e) => vec![PlatformRequest::Error(format!("Failed to load movie: {e}"))],
+        };
+        requests_to_js(&reqs)
+    }
+
     /// Feed a downloaded libretro `.cht` body (fetched on the main thread) into
     /// the session, parsing it into the pending fetched-cheat list the UI shows.
     /// Returns a Status request reporting how many cheats were parsed.
@@ -468,6 +482,8 @@ impl Emulator {
             fast_forward: self.session.is_fast_forward(),
             touch_controls: self.session.touch_controls(),
             printer_attached: self.session.gb().printer_attached(),
+            recording: self.session.is_recording(),
+            replaying: self.session.is_playing(),
             slots: self.session.list_slots(),
             cheats: self.session.cheats().map(str::to_owned).collect(),
             fetched_cheats: self.session.fetched_cheats().to_vec(),
@@ -576,13 +592,17 @@ fn requests_to_js(requests: &[PlatformRequest]) -> Array {
                 };
                 set("purpose", p.into());
             }
+            // A path-free export (e.g. stop-recording hands back a `.rbmovie`):
+            // forward it as an `Export` message the main thread downloads, the
+            // same shape the dedicated `export_*` methods and print drain use.
+            PlatformRequest::SaveBytes { suggested_name, bytes } => {
+                set("type", "Export".into());
+                set("name", suggested_name.as_str().into());
+                set("bytes", js_sys::Uint8Array::from(bytes.as_slice()).into());
+            }
             // Serviced inside the worker for the web frontend and not expected
             // from the actions it issues; surface as a status so nothing is lost.
-            // (Export SaveBytes is serviced by the dedicated `export_*` methods,
-            // not through `apply`, so it never reaches here.)
-            PlatformRequest::SaveStateBytes { .. }
-            | PlatformRequest::SaveBytes { .. }
-            | PlatformRequest::LoadFile { .. } => {
+            PlatformRequest::SaveStateBytes { .. } | PlatformRequest::LoadFile { .. } => {
                 set("type", "Status".into());
                 set("msg", "unhandled platform request".into());
             }

@@ -657,6 +657,7 @@ fn dispatch_action(shared: &Rc<RefCell<Shared>>, action: UiAction) {
         UiAction::ImportBatterySave(file) => post_import(shared, "battery", file),
         UiAction::ImportRtc(file) => post_import(shared, "rtc", file),
         UiAction::ApplyPatch(file) => post_import(shared, "patch", file),
+        UiAction::LoadMovie(file) => post_import(shared, "movie", file),
         // Exports: the worker owns the session bytes, so ask it to produce them;
         // it posts them back and the JS shell triggers the browser download.
         UiAction::ExportState => request_export(shared, "state"),

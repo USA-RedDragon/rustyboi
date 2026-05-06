@@ -49,6 +49,8 @@ use rustyboi_session::{CgbColorConversion, FetchedCheat, InputConfig, SessionUiS
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WebAction {
     TogglePause,
+    ToggleRecording,
+    StopReplay,
     TogglePrinter,
     Restart,
     ClearError,
@@ -89,6 +91,8 @@ impl WebAction {
     pub fn from_ui_action(action: &UiAction) -> Option<WebAction> {
         Some(match action {
             UiAction::TogglePause => WebAction::TogglePause,
+            UiAction::ToggleRecording => WebAction::ToggleRecording,
+            UiAction::StopReplay => WebAction::StopReplay,
             UiAction::TogglePrinter => WebAction::TogglePrinter,
             UiAction::Restart => WebAction::Restart,
             UiAction::ClearError => WebAction::ClearError,
@@ -129,6 +133,8 @@ impl WebAction {
     pub fn into_ui_action(self) -> UiAction {
         match self {
             WebAction::TogglePause => UiAction::TogglePause,
+            WebAction::ToggleRecording => UiAction::ToggleRecording,
+            WebAction::StopReplay => UiAction::StopReplay,
             WebAction::TogglePrinter => UiAction::TogglePrinter,
             WebAction::Restart => UiAction::Restart,
             WebAction::ClearError => UiAction::ClearError,
@@ -201,6 +207,10 @@ pub struct WebUiState {
     pub touch_controls: bool,
     #[serde(default)]
     pub printer_attached: bool,
+    #[serde(default)]
+    pub recording: bool,
+    #[serde(default)]
+    pub replaying: bool,
     pub slots: Vec<u32>,
     pub cheats: Vec<String>,
     #[serde(default)]
@@ -241,6 +251,8 @@ impl WebUiState {
             fast_forward: s.fast_forward,
             touch_controls: s.touch_controls,
             printer_attached: s.printer_attached,
+            recording: s.recording,
+            replaying: s.replaying,
             slots: s.slots.clone(),
             cheats: s.cheats.clone(),
             fetched_cheats: s.fetched_cheats.clone(),
@@ -275,6 +287,8 @@ impl WebUiState {
             fast_forward: self.fast_forward,
             touch_controls: self.touch_controls,
             printer_attached: self.printer_attached,
+            recording: self.recording,
+            replaying: self.replaying,
             slots: self.slots,
             cheats: self.cheats,
             fetched_cheats: self.fetched_cheats,
