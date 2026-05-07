@@ -60,7 +60,7 @@ wasm-bindgen-futures = "=0.4.54"
 # Use GameActivity through winit's android-activity backend (subclassable from
 # Kotlin/Java, forwards onActivityResult, better IME/lifecycle than NativeActivity).
 winit = { version = "=0.29.15", default-features = false, features = ["android-game-activity", "rwh_06"] }
-android_logger = "=0.13.3"
+android_logger = "=0.15.1"
 jni = "=0.21.1"
 libc = "=0.2.186"
 ndk-context = "=0.1.1"
