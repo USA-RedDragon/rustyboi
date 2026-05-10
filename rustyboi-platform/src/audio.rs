@@ -1,11 +1,12 @@
-use rodio::{OutputStream, Sink};
+use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player};
 use rodio::buffer::SamplesBuffer;
+use std::num::NonZero;
 
 use rustyboi_core_lib::audio::AudioOutput;
 
 pub struct Output {
-    _stream: Option<OutputStream>,
-    sink: Option<Sink>,
+    _stream: Option<MixerDeviceSink>,
+    sink: Option<Player>,
     buffer: Vec<(f32, f32)>,
 }
 
@@ -44,7 +45,9 @@ impl Output {
                     mono_samples.push(right);
                 }
 
-                let audio_buffer = SamplesBuffer::new(2, SAMPLE_RATE, mono_samples);
+                let channels = NonZero::new(2u16).unwrap();
+                let sample_rate = NonZero::new(SAMPLE_RATE).unwrap();
+                let audio_buffer = SamplesBuffer::new(channels, sample_rate, mono_samples);
                 sink.append(audio_buffer);
 
                 self.buffer.clear();
@@ -54,13 +57,13 @@ impl Output {
 
 impl AudioOutput for Output {
     fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let (_stream, stream_handle) = OutputStream::try_default()?;
-        let sink = Sink::try_new(&stream_handle)?;
+        let stream = DeviceSinkBuilder::open_default_sink()?;
+        let sink = Player::connect_new(stream.mixer());
 
         sink.set_volume(0.3);
         sink.play();
 
-        self._stream = Some(_stream);
+        self._stream = Some(stream);
         self.sink = Some(sink);
 
         Ok(())
