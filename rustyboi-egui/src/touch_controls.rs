@@ -44,18 +44,14 @@ pub fn show(ctx: &Context, touch_state: &mut TouchState, opacity: f32) -> Button
         }
     });
 
-    let screen = ctx.screen_rect();
+    let screen = ctx.viewport_rect();
     let layout = TouchLayout::compute(screen.width(), screen.height());
 
     // Derive pressed state by hit-testing every active touch against the shared
     // layout (multi-touch aware).
-    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
+    #[cfg_attr(target_os = "android", allow(unused_mut))]
     let mut pointers: Vec<(f32, f32)> = touch_state.active.values().map(|p| (p.x, p.y)).collect();
-    // Web fallback: winit's web backend delivers a single touch as a pointer
-    // (mouse) event rather than `Event::Touch`, so `active` stays empty and the
-    // buttons never register. Hit-test the primary pointer while it is down.
-    // Web-only so a desktop mouse can't press the on-screen pad.
-    #[cfg(target_arch = "wasm32")]
+
     ctx.input(|i| {
         if i.pointer.primary_down()
             && let Some(p) = i.pointer.interact_pos()
@@ -117,7 +113,7 @@ fn draw_pill(painter: &egui::Painter, rect: Rect, label: &str, held: bool, opaci
         2.0,
         Color32::from_rgba_premultiplied(220, 220, 220, 200).linear_multiply(opacity),
     );
-    painter.rect(rect, rect.height() * 0.5, fill, stroke);
+    painter.rect(rect, rect.height() * 0.5, fill, stroke, egui::StrokeKind::Middle);
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,

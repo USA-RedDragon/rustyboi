@@ -19,19 +19,27 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 #[cfg(not(target_os = "android"))]
 use winit::dpi::LogicalSize;
-use winit::event::{Event, WindowEvent};
-use winit::event_loop::EventLoop;
+use winit::application::ApplicationHandler;
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::KeyCode;
-use winit::window::{Window, WindowBuilder};
+use winit::window::{Window, WindowId};
 // Fullscreen is only toggled on desktop (the Android window is already fullscreen).
 #[cfg(not(target_os = "android"))]
 use winit::window::Fullscreen;
 use winit_input_helper::WinitInputHelper;
 
+// The platform crate's own wasm rendering path is legacy — the web frontend is
+// `rustyboi-web`, and nothing builds this crate for wasm. These winit-0.29-era
+// imports are kept cfg-gated so native/Android builds ignore them.
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use winit::event::Event;
+#[cfg(target_arch = "wasm32")]
+use winit::window::WindowBuilder;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::WindowExtWebSys;
 
@@ -63,8 +71,7 @@ fn get_window_size() -> LogicalSize<f64> {
 /// frontend `Renderer` and `UiHost`. This is the only place a raw window handle
 /// touches wgpu; the resulting handles are window-agnostic afterwards. Safe API
 /// throughout (`Arc<Window>` gives the surface a `'static` owning handle).
-fn create_render_state<T>(
-    event_loop: &winit::event_loop::EventLoopWindowTarget<T>,
+fn create_render_state(
     window: Arc<Window>,
     pending_dialog_result: Option<
         std::sync::Arc<std::sync::Mutex<Option<GuiAction>>>,
@@ -75,33 +82,37 @@ fn create_render_state<T>(
     let height = size.height.max(1);
     let scale_factor = window.scale_factor() as f32;
 
+    // wgpu 29's `InstanceDescriptor` holds a non-Default `display` handle field,
+    // so it can't be spread from `Default::default()`; set fields explicitly.
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
-        ..Default::default()
+        flags: wgpu::InstanceFlags::default(),
+        memory_budget_thresholds: Default::default(),
+        backend_options: Default::default(),
+        display: None,
     });
     // `Arc<Window>: Into<SurfaceTarget<'static>>` — no unsafe.
     let surface = instance
         .create_surface(window.clone())
         .map_err(|e| PlatformError::new(format!("create_surface: {e}")))?;
 
+    // wgpu 29: `request_adapter` returns a `Result` (was `Option`).
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::default(),
         force_fallback_adapter: false,
         compatible_surface: Some(&surface),
     }))
-    .ok_or_else(|| PlatformError::new("no compatible wgpu adapter"))?;
+    .map_err(|e| PlatformError::new(format!("no compatible wgpu adapter: {e}")))?;
 
-    // Phase 1 is desktop (native backends): request the adapter's full default
-    // limits so the egui atlas has room on hi-DPI. The web adapter (phase 2)
-    // will request `downlevel_webgl2_defaults()` instead.
-    let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("rustyboi_device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-        },
-        None,
-    ))
+    // Desktop (native backends): request the adapter's full default limits so the
+    // egui atlas has room on hi-DPI. wgpu 29 dropped the trailing trace-path arg
+    // and added `memory_hints`/`trace`/`experimental_features` (defaulted here).
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("rustyboi_device"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::default(),
+        ..Default::default()
+    }))
     .map_err(|e| PlatformError::new(format!("request_device: {e}")))?;
 
     // Pick a non-sRGB surface format if available so the game texture (uploaded
@@ -116,25 +127,18 @@ fn create_render_state<T>(
 
     let max_texture_size = device.limits().max_texture_dimension_2d as usize;
     let renderer = Renderer::new(surface, device, queue, surface_format, width, height);
-    let ui = UiHost::new(event_loop, scale_factor, max_texture_size, pending_dialog_result);
+    let ui = UiHost::new(&window, scale_factor, max_texture_size, pending_dialog_result);
 
     Ok(RenderState { renderer, ui })
 }
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn run_with_gui(gb: Box<gb::GB>, config: &config::CleanConfig) -> Result<(), PlatformError> {
+    // winit 0.30: the window is created inside `ApplicationHandler::resumed`, so
+    // the entry point just builds the event loop and hands off to the shared
+    // handler (see `run_gui_loop`).
     let event_loop = EventLoop::new().map_err(PlatformError::from_display)?;
-    let size = LogicalSize::new(
-        (WIDTH * (config.scale as u32)) as f64,
-        (HEIGHT * (config.scale as u32)) as f64,
-    );
-    let window = WindowBuilder::new()
-        .with_title("RustyBoi")
-        .with_inner_size(size)
-        .with_min_inner_size(LogicalSize::new(WIDTH as f64, HEIGHT as f64))
-        .build(&event_loop)
-        .map_err(PlatformError::from_display)?;
-    run_gui_loop(event_loop, Arc::new(window), gb, config)
+    run_gui_loop(event_loop, gb, config)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -192,7 +196,8 @@ pub fn run_with_gui_android(
     use winit::platform::android::EventLoopBuilderExtAndroid;
 
     raw_log("run_with_gui_android: building EventLoop");
-    let event_loop = winit::event_loop::EventLoopBuilder::<()>::with_user_event()
+    // winit 0.30 moved `with_user_event` from `EventLoopBuilder` onto `EventLoop`.
+    let event_loop = winit::event_loop::EventLoop::<()>::with_user_event()
         .with_android_app(app)
         .build()
         .map_err(|e| {
@@ -200,17 +205,9 @@ pub fn run_with_gui_android(
             log::error!("EventLoop build failed: {e:?} ({e})");
             PlatformError::new(format!("EventLoop build failed: {e}"))
         })?;
-    raw_log("run_with_gui_android: EventLoop built");
-    let window = WindowBuilder::new()
-        .with_title("RustyBoi")
-        .build(&event_loop)
-        .map_err(|e| {
-            raw_log(&format!("run_with_gui_android: Window build failed: {e:?} ({e})"));
-            log::error!("Window build failed: {e:?} ({e})");
-            PlatformError::new(format!("Window build failed: {e}"))
-        })?;
-    raw_log("run_with_gui_android: Window built, entering loop");
-    let r = run_gui_loop(event_loop, Arc::new(window), gb, config);
+    // The window is created lazily in `ApplicationHandler::resumed` (winit 0.30).
+    raw_log("run_with_gui_android: EventLoop built, entering loop");
+    let r = run_gui_loop(event_loop, gb, config);
     raw_log("run_with_gui_android: loop returned");
     r
 }
@@ -345,7 +342,7 @@ fn dispatch_hotkey(
     app: &mut App,
     fired: FiredHotkey,
     window: &Window,
-    elwt: &winit::event_loop::EventLoopWindowTarget<()>,
+    event_loop: &ActiveEventLoop,
     is_fullscreen: &mut bool,
 ) -> bool {
     match fired.action {
@@ -389,7 +386,7 @@ fn dispatch_hotkey(
             }
         }
         HotkeyAction::Exit if fired.rising => {
-            elwt.exit();
+            event_loop.exit();
             return true;
         }
         _ => {}
@@ -399,11 +396,10 @@ fn dispatch_hotkey(
 
 fn run_gui_loop(
     event_loop: EventLoop<()>,
-    window: Arc<Window>,
     gb: Box<gb::GB>,
     config: &config::CleanConfig,
 ) -> Result<(), PlatformError> {
-    let mut input = WinitInputHelper::new();
+    let input = WinitInputHelper::new();
 
     let ports = crate::ports::build_ports(save_base());
     let mut session_config = rustyboi_session::Config::load(ports.storage.as_ref());
@@ -417,23 +413,23 @@ fn run_gui_loop(
 
     // Native desktop: offloaded rewind capture (worker serializes off-thread).
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-    let mut rewind_worker = {
+    let rewind_worker = {
         session.set_rewind_offloaded(true);
         Some(crate::rewind_worker::RewindWorker::new())
     };
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-    let mut png_worker: Option<crate::png_worker::PngWorker> = None;
+    let png_worker: Option<crate::png_worker::PngWorker> = None;
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-    let mut next_print_index: Option<(String, u32)> = None;
+    let next_print_index: Option<(String, u32)> = None;
 
     // Native desktop: physical gamepad support (gilrs). `None` if no backend is
     // available; buttons are OR'd into the keyboard/touch input each frame.
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-    let mut gilrs = gilrs::Gilrs::new().ok();
+    let gilrs = gilrs::Gilrs::new().ok();
     // Android has no gilrs backend: controller buttons arrive as native key
     // events. Track the held pad-button set here and merge into HeldInputs.
     #[cfg(target_os = "android")]
-    let mut android_pad: std::collections::HashSet<PadButton> = std::collections::HashSet::new();
+    let android_pad: std::collections::HashSet<PadButton> = std::collections::HashSet::new();
 
     // Cheat-DB HTTP fetch worker (desktop + Android; wasm uses browser fetch).
     // Created lazily on the first `Get cheats` so a session that never fetches
@@ -443,7 +439,7 @@ fn run_gui_loop(
 
     // Per-frame edge/phase state for the shared input resolver (hotkey rising
     // edges + the turbo autofire square wave). Persists across frames.
-    let mut resolve_state = rustyboi_session::ResolveState::new();
+    let resolve_state = rustyboi_session::ResolveState::new();
 
     let should_start_paused = !session.gb().has_rom() && !session.gb().has_bios();
 
@@ -479,7 +475,7 @@ fn run_gui_loop(
 
     // Audio output device (cpal/rodio). The session returns samples from
     // run_frame; we push them into this pure sink.
-    let mut audio = match crate::audio::Output::new().and_then(|mut o| {
+    let audio = match crate::audio::Output::new().and_then(|mut o| {
         o.start_device()?;
         Ok(o)
     }) {
@@ -496,19 +492,19 @@ fn run_gui_loop(
         std::sync::Mutex<Option<GuiAction>>,
     > = std::sync::Arc::new(std::sync::Mutex::new(None));
 
-    let mut render_state: Option<RenderState> = None;
+    let render_state: Option<RenderState> = None;
 
     // Track the presented content size (GB 160x144 vs SGB 256x224) so the window
     // auto-fits when an SGB border appears/disappears without an explicit toggle
     // (e.g. an SGB ROM booting from the CLI). Seeded to the GB size so a plain
     // DMG/CGB game never triggers a spurious resize.
     #[cfg(not(target_os = "android"))]
-    let mut last_content_size = (WIDTH, HEIGHT);
+    let last_content_size = (WIDTH, HEIGHT);
     // Last window inner size (logical) we requested, so the continuous fit only
     // resizes when the target actually moves (avoids a resize/relayout feedback
     // loop). `None` until the first fit.
     #[cfg(not(target_os = "android"))]
-    let mut last_fit_logical: Option<(u32, u32)> = None;
+    let last_fit_logical: Option<(u32, u32)> = None;
     // Debounced aspect-snap state. During an interactive resize the window must
     // follow the cursor freely (requesting a size every `Resized` fights the
     // compositor — the rapid back-and-forth). So we only record the desired
@@ -516,501 +512,622 @@ fn run_gui_loop(
     // settled (no `Resized` for `SNAP_DEBOUNCE`). `resize_burst_start` is the
     // size at the start of the current drag, used to pick the driving axis.
     #[cfg(not(target_os = "android"))]
-    let mut pending_snap: Option<winit::dpi::PhysicalSize<u32>> = None;
+    let pending_snap: Option<winit::dpi::PhysicalSize<u32>> = None;
     #[cfg(not(target_os = "android"))]
-    let mut last_resize_at: Option<Instant> = None;
+    let last_resize_at: Option<Instant> = None;
     #[cfg(not(target_os = "android"))]
-    let mut resize_burst_start: Option<winit::dpi::PhysicalSize<u32>> = None;
-    #[cfg(not(target_os = "android"))]
-    const SNAP_DEBOUNCE: Duration = Duration::from_millis(140);
+    let resize_burst_start: Option<winit::dpi::PhysicalSize<u32>> = None;
+    let mut gui = GuiApp {
+        config,
+        window: None,
+        render_state,
+        input,
+        app,
+        audio,
+        resolve_state,
+        pending_dialog_result,
+        f_key_press_time: None,
+        n_key_press_time: None,
+        f_last_repeat_time: None,
+        n_last_repeat_time: None,
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        rewind_worker,
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        png_worker,
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        next_print_index,
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        gilrs,
+        #[cfg(not(target_arch = "wasm32"))]
+        fetch_worker,
+        #[cfg(target_os = "android")]
+        android_pad,
+        #[cfg(not(target_os = "android"))]
+        is_fullscreen: false,
+        #[cfg(not(target_os = "android"))]
+        last_content_size,
+        #[cfg(not(target_os = "android"))]
+        last_fit_logical,
+        #[cfg(not(target_os = "android"))]
+        pending_snap,
+        #[cfg(not(target_os = "android"))]
+        last_resize_at,
+        #[cfg(not(target_os = "android"))]
+        resize_burst_start,
+    };
+    event_loop.run_app(&mut gui).map_err(PlatformError::from_display)
+}
 
-    // Debounce timing for the F (frame-step) and N (cycle-step) debug keys.
-    const DEBOUNCE_DURATION: Duration = Duration::from_millis(250);
-    const REPEAT_INTERVAL: Duration = Duration::from_millis(67);
-    let mut f_key_press_time: Option<Instant> = None;
-    let mut n_key_press_time: Option<Instant> = None;
-    let mut f_last_repeat_time: Option<Instant> = None;
-    let mut n_last_repeat_time: Option<Instant> = None;
+// Debounce/repeat timing for the F (frame-step) and N (cycle-step) debug keys,
+// and the aspect-snap settle delay. Module-level so the handler methods share them.
+const DEBOUNCE_DURATION: Duration = Duration::from_millis(250);
+const REPEAT_INTERVAL: Duration = Duration::from_millis(67);
+#[cfg(not(target_os = "android"))]
+const SNAP_DEBOUNCE: Duration = Duration::from_millis(140);
 
-    // Tracks whether the borderless-fullscreen toggle is currently on.
+/// The winit 0.30 `ApplicationHandler`. It owns every piece of state the old
+/// `event_loop.run` closure captured. The window + GPU `RenderState` are created
+/// lazily in `resumed` and dropped in `suspended`; the emulation `App` persists.
+struct GuiApp<'c> {
+    config: &'c config::CleanConfig,
+    window: Option<Arc<Window>>,
+    render_state: Option<RenderState>,
+    input: WinitInputHelper,
+    app: App,
+    audio: Option<crate::audio::Output>,
+    resolve_state: rustyboi_session::ResolveState,
+    pending_dialog_result: Arc<std::sync::Mutex<Option<GuiAction>>>,
+    f_key_press_time: Option<Instant>,
+    n_key_press_time: Option<Instant>,
+    f_last_repeat_time: Option<Instant>,
+    n_last_repeat_time: Option<Instant>,
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    rewind_worker: Option<crate::rewind_worker::RewindWorker>,
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    png_worker: Option<crate::png_worker::PngWorker>,
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    next_print_index: Option<(String, u32)>,
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    gilrs: Option<gilrs::Gilrs>,
+    #[cfg(not(target_arch = "wasm32"))]
+    fetch_worker: Option<crate::fetch_worker::FetchWorker>,
+    #[cfg(target_os = "android")]
+    android_pad: std::collections::HashSet<PadButton>,
     #[cfg(not(target_os = "android"))]
-    let mut is_fullscreen = false;
+    is_fullscreen: bool,
+    #[cfg(not(target_os = "android"))]
+    last_content_size: (u32, u32),
+    #[cfg(not(target_os = "android"))]
+    last_fit_logical: Option<(u32, u32)>,
+    #[cfg(not(target_os = "android"))]
+    pending_snap: Option<winit::dpi::PhysicalSize<u32>>,
+    #[cfg(not(target_os = "android"))]
+    last_resize_at: Option<Instant>,
+    #[cfg(not(target_os = "android"))]
+    resize_burst_start: Option<winit::dpi::PhysicalSize<u32>>,
+}
 
-    let res = event_loop.run(|event, elwt| {
-        match &event {
-            Event::Resumed => {
-                if render_state.is_none() {
-                    match create_render_state(elwt, window.clone(), Some(pending_dialog_result.clone())) {
-                        Ok(rs) => {
-                            render_state = Some(rs);
-                            window.request_redraw();
-                            #[cfg(target_os = "android")]
-                            if let Some(rs) = render_state.as_mut() {
-                                let state = crate::library::LibraryState::load();
-                                rs.ui.library_panel_mut().set_recents(state.recents.clone());
-                                if state.tree_uri.is_some() {
-                                    if let Ok(mut slot) = pending_dialog_result.lock() {
-                                        *slot = Some(GuiAction::SetLibraryTreeUri(state.tree_uri));
-                                    }
-                                } else {
-                                    rs.ui
-                                        .library_panel_mut()
-                                        .set_status(Some("Pick your ROMs folder to get started.".into()));
-                                }
+impl ApplicationHandler for GuiApp<'_> {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // winit 0.30 creates windows here (an `ActiveEventLoop` is required).
+        if self.window.is_none() {
+            #[cfg(not(target_os = "android"))]
+            let attrs = {
+                let size = LogicalSize::new(
+                    (WIDTH * (self.config.scale as u32)) as f64,
+                    (HEIGHT * (self.config.scale as u32)) as f64,
+                );
+                Window::default_attributes()
+                    .with_title("RustyBoi")
+                    .with_inner_size(size)
+                    .with_min_inner_size(LogicalSize::new(WIDTH as f64, HEIGHT as f64))
+            };
+            #[cfg(target_os = "android")]
+            let attrs = Window::default_attributes().with_title("RustyBoi");
+            match event_loop.create_window(attrs) {
+                Ok(w) => self.window = Some(Arc::new(w)),
+                Err(e) => {
+                    println!("Failed to create window on Resumed: {e}");
+                    event_loop.exit();
+                    return;
+                }
+            }
+        }
+        if self.render_state.is_none() {
+            let window = self.window.clone().expect("window created above");
+            match create_render_state(window.clone(), Some(self.pending_dialog_result.clone())) {
+                Ok(rs) => {
+                    self.render_state = Some(rs);
+                    window.request_redraw();
+                    #[cfg(target_os = "android")]
+                    if let Some(rs) = self.render_state.as_mut() {
+                        let state = crate::library::LibraryState::load();
+                        rs.ui.library_panel_mut().set_recents(state.recents.clone());
+                        if state.tree_uri.is_some() {
+                            if let Ok(mut slot) = self.pending_dialog_result.lock() {
+                                *slot = Some(GuiAction::SetLibraryTreeUri(state.tree_uri));
                             }
-                        }
-                        Err(err) => {
-                            println!("Failed to create render state on Resumed: {err}");
-                            elwt.exit();
-                            return;
+                        } else {
+                            rs.ui
+                                .library_panel_mut()
+                                .set_status(Some("Pick your ROMs folder to get started.".into()));
                         }
                     }
                 }
+                Err(err) => {
+                    println!("Failed to create render state on Resumed: {err}");
+                    event_loop.exit();
+                }
             }
-            Event::Suspended => {
-                render_state = None;
-            }
-            _ => {}
         }
+    }
 
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.render_state = None;
+    }
+
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
+        // winit_input_helper 0.17: clear per-step input state at the batch start.
+        self.input.step();
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
         // Android gamepad: face/shoulder/start/select buttons arrive as unmapped
         // native key events (winit_input_helper only tracks KeyCode-mapped keys).
         #[cfg(target_os = "android")]
-        if let Event::WindowEvent { event: WindowEvent::KeyboardInput { event: key, .. }, .. } = &event {
+        if let WindowEvent::KeyboardInput { event: ref key, .. } = event {
             use winit::keyboard::{NativeKeyCode, PhysicalKey};
             if let PhysicalKey::Unidentified(NativeKeyCode::Android(code)) = key.physical_key {
                 if let Some(pb) = android_pad_button(code) {
                     if key.state == winit::event::ElementState::Pressed {
-                        android_pad.insert(pb);
+                        self.android_pad.insert(pb);
                     } else {
-                        android_pad.remove(&pb);
+                        self.android_pad.remove(&pb);
                     }
                 }
             }
         }
 
-        if input.update(&event) {
-            if input.key_pressed(KeyCode::Escape) || input.close_requested() {
-                elwt.exit();
-                return;
-            }
-
-            // F: frame stepping with debounce (paused/errored only).
-            if input.key_pressed(KeyCode::KeyF) {
-                if app.stepping_allowed() {
-                    app.request_step_frame();
-                    let now = Instant::now();
-                    f_key_press_time = Some(now);
-                    f_last_repeat_time = Some(now);
-                    window.request_redraw();
-                }
-            } else if input.key_held(KeyCode::KeyF) {
-                if app.stepping_allowed()
-                    && let Some(press_time) = f_key_press_time
-                    && press_time.elapsed() >= DEBOUNCE_DURATION
-                    && let Some(last_repeat) = f_last_repeat_time
-                    && last_repeat.elapsed() >= REPEAT_INTERVAL
-                {
-                    app.request_step_frame();
-                    f_last_repeat_time = Some(Instant::now());
-                    window.request_redraw();
-                }
-            } else {
-                f_key_press_time = None;
-                f_last_repeat_time = None;
-            }
-
-            // N: cycle stepping with debounce (paused/errored only).
-            if input.key_pressed(KeyCode::KeyN) {
-                if app.stepping_allowed() {
-                    app.request_step_cycle();
-                    let now = Instant::now();
-                    n_key_press_time = Some(now);
-                    n_last_repeat_time = Some(now);
-                    window.request_redraw();
-                }
-            } else if input.key_held(KeyCode::KeyN) {
-                if app.stepping_allowed()
-                    && let Some(press_time) = n_key_press_time
-                    && press_time.elapsed() >= DEBOUNCE_DURATION
-                    && let Some(last_repeat) = n_last_repeat_time
-                    && last_repeat.elapsed() >= REPEAT_INTERVAL
-                {
-                    app.request_step_cycle();
-                    n_last_repeat_time = Some(Instant::now());
-                    window.request_redraw();
-                }
-            } else {
-                n_key_press_time = None;
-                n_last_repeat_time = None;
-            }
-
-            if let Some(scale_factor) = input.scale_factor()
-                && let Some(rs) = render_state.as_mut()
-            {
-                rs.ui.set_pixels_per_point(scale_factor as f32);
-            }
-
-            // Build the raw held-input set (keyboard + gamepad) and resolve it
-            // through the shared config: GB-button bindings drive the button
-            // state, chord hotkeys drive features. Then OR the egui touch overlay
-            // on top and dispatch any fired hotkeys.
-            #[cfg_attr(any(target_arch = "wasm32", target_os = "android"), allow(unused_mut))]
-            let mut held = held_inputs_from_keyboard(&input);
-            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-            if let Some(g) = gilrs.as_mut() {
-                collect_gamepad_held(g, &mut held.pad);
-            }
-            #[cfg(target_os = "android")]
-            {
-                held.pad.extend(android_pad.iter().copied());
-                // Analog sticks + hat arrive via Java (onGenericMotionEvent →
-                // JNI). Android axes: +X right, +Y down. Hat covers controllers
-                // that report the d-pad as an axis rather than key events.
-                let [lx, ly, rx, ry, hx, hy, lt, rt] = crate::android::gamepad_axes();
-                let dz = 0.5;
-                let mut on = |cond: bool, b: PadButton| {
-                    if cond {
-                        held.pad.insert(b);
-                    }
-                };
-                on(ly < -dz, PadButton::LStickUp);
-                on(ly > dz, PadButton::LStickDown);
-                on(lx < -dz, PadButton::LStickLeft);
-                on(lx > dz, PadButton::LStickRight);
-                on(ry < -dz, PadButton::RStickUp);
-                on(ry > dz, PadButton::RStickDown);
-                on(rx < -dz, PadButton::RStickLeft);
-                on(rx > dz, PadButton::RStickRight);
-                on(hy < -dz, PadButton::DpadUp);
-                on(hy > dz, PadButton::DpadDown);
-                on(hx < -dz, PadButton::DpadLeft);
-                on(hx > dz, PadButton::DpadRight);
-                // Analog L2/R2 rest at 0, pressed toward 1.
-                on(lt > dz, PadButton::LeftTrigger);
-                on(rt > dz, PadButton::RightTrigger);
-            }
-            let (mut button_state, fired) =
-                app.session().config().input.resolve(&held, &mut resolve_state);
-            if let Some(rs) = render_state.as_ref() {
-                let touch = rs.ui.touch_button_state();
-                button_state.a |= touch.a;
-                button_state.b |= touch.b;
-                button_state.start |= touch.start;
-                button_state.select |= touch.select;
-                button_state.up |= touch.up;
-                button_state.down |= touch.down;
-                button_state.left |= touch.left;
-                button_state.right |= touch.right;
-            }
-            app.set_button_state(button_state);
-            // Forward the held pad set so the keybind editor can capture gamepad
-            // presses (egui never sees pad input).
-            app.set_held_pad(held.pad.clone());
-
-            // Fast-forward is a hold action: keep it engaged only while the
-            // chord is active this frame, so releasing the chord turns it off.
-            let ff_active = fired
-                .iter()
-                .any(|f| matches!(f.action, HotkeyAction::FastForward));
-            if !ff_active && app.is_fast_forward() {
-                app.toggle_fast_forward();
-            }
-            for f in fired {
-                #[cfg(not(target_os = "android"))]
-                let exit = dispatch_hotkey(&mut app, f, &window, elwt, &mut is_fullscreen);
-                #[cfg(target_os = "android")]
-                let exit = {
-                    let mut dummy = false;
-                    dispatch_hotkey(&mut app, f, &window, elwt, &mut dummy)
-                };
-                if exit {
-                    return;
-                }
-            }
-
-            // Android: keep the game region inside the safe area (system bars /
-            // display cutout) so it isn't clipped behind them. No-op elsewhere.
-            #[cfg(target_os = "android")]
-            if let Some(rs) = render_state.as_ref() {
-                let (w, h) = rs.renderer.surface_size();
-                let (l, t, r, b) = crate::android::safe_area_insets(w, h);
-                app.set_safe_insets(l, t, r, b);
-            }
-
-            // Advance one presented frame (paced inside the app), play audio,
-            // pump the workers.
-            let step = app.run_frame();
-            if step.pump_workers {
-                #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-                pump_workers(
-                    &mut app,
-                    rewind_worker.as_mut(),
-                    &mut png_worker,
-                    &mut next_print_index,
-                );
-                #[cfg(any(target_arch = "wasm32", target_os = "android"))]
-                drain_printer_sheets_unsupported(&mut app);
-            }
-            if let Some(a) = audio.as_mut() {
-                a.push_samples(&step.audio);
-            }
-            window.request_redraw();
-        }
+        // Feed the input helper every event (it returns true only on
+        // RedrawRequested, which we handle explicitly below).
+        let _ = self.input.process_window_event(&event);
 
         match event {
-            Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
-                if let Some(rs) = render_state.as_mut() {
-                    rs.renderer.resize(size.width.max(1), size.height.max(1));
-                }
-                // Aspect-lock (debounced): compute the aspect-correct size for
-                // this resize but DON'T apply it now — requesting a size mid-drag
-                // fights the compositor. Record it as `pending_snap`; the redraw
-                // loop applies it once the resize settles. The window follows the
-                // cursor freely during the drag (the game renders aspect-fit with
-                // a transient bar), then snaps once on release.
-                #[cfg(not(target_os = "android"))]
+            WindowEvent::Resized(size) => self.handle_resize(size),
+            WindowEvent::RedrawRequested => self.frame_tick(event_loop),
+            other => {
+                if let (Some(rs), Some(window)) =
+                    (self.render_state.as_mut(), self.window.as_ref())
                 {
-                    let now = Instant::now();
-                    // A gap since the last resize means a new drag burst began;
-                    // baseline the driving-axis detection to this size.
-                    let new_burst = last_resize_at
-                        .map(|t| now.duration_since(t) > SNAP_DEBOUNCE)
-                        .unwrap_or(true);
-                    if new_burst {
-                        resize_burst_start = Some(size);
-                    }
-                    last_resize_at = Some(now);
-
-                    let (cw, ch) = app.content_size();
-                    let aspect = cw as f32 / ch as f32;
-                    let sf = window.scale_factor() as f32;
-                    let (iw, ih) = app.content_inset();
-                    let (iw_p, ih_p) = (iw * sf, ih * sf);
-                    let (new_w, new_h) = (size.width as f32, size.height as f32);
-                    let base = resize_burst_start.unwrap_or(size);
-                    let dw = (new_w - base.width as f32).abs();
-                    let dh = (new_h - base.height as f32).abs();
-                    let (corr_w, corr_h) = if dh > dw {
-                        let avail_h = (new_h - ih_p).max(1.0);
-                        ((avail_h * aspect + iw_p).round(), new_h.round())
-                    } else {
-                        let avail_w = (new_w - iw_p).max(1.0);
-                        (new_w.round(), (avail_w / aspect + ih_p).round())
-                    };
-                    let corr = winit::dpi::PhysicalSize::new(
-                        (corr_w as u32).max(1),
-                        (corr_h as u32).max(1),
-                    );
-                    pending_snap = if (corr.width as f32 - new_w).abs() > 1.0
-                        || (corr.height as f32 - new_h).abs() > 1.0
-                    {
-                        Some(corr)
-                    } else {
-                        None
-                    };
+                    rs.ui.handle_event(window, &other);
                 }
             }
-            Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
-                let Some(rs) = render_state.as_mut() else { return };
-
-                // Deliver any completed cheat-DB fetches into the session so the
-                // cheat picker shows them; report the outcome in the status bar.
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(worker) = fetch_worker.as_mut() {
-                    for done in worker.drain_finished() {
-                        use rustyboi_session::FetchPurpose;
-                        match (done.purpose, done.result) {
-                            (FetchPurpose::Cheats, Ok(body)) => {
-                                let n = app.session_mut().finish_fetched_cheats(&body);
-                                if n == 0 {
-                                    rs.ui.set_status("No cheats found for this game".into());
-                                } else {
-                                    rs.ui.set_status(format!("Fetched {n} cheats"));
-                                }
-                            }
-                            (FetchPurpose::NoIntro, Ok(body)) => {
-                                // Cache the downloaded DAT so we don't re-fetch it
-                                // next launch, then feed it into the index and
-                                // re-resolve the current ROM's display name.
-                                if let Some(url) = done.url.as_deref() {
-                                    crate::no_intro_cache::store(&save_base(), url, &body);
-                                }
-                                app.session_mut()
-                                    .finish_no_intro_dats(std::slice::from_ref(&body));
-                                if let Some(title) = app.title_if_due() {
-                                    window.set_title(&title);
-                                }
-                            }
-                            (FetchPurpose::Cheats, Err(e)) => {
-                                // A failed cheat fetch is not fatal — surface it in
-                                // the status bar, never the crash screen.
-                                rs.ui.set_status(format!("Cheat fetch failed: {e}"));
-                            }
-                            (FetchPurpose::NoIntro, Err(e)) => {
-                                // No-Intro identification is best-effort; a failed
-                                // DAT download just leaves games on their header
-                                // titles. Log, don't nag the user.
-                                log::warn!("No-Intro DAT fetch failed: {e}");
-                            }
-                        }
-                    }
-                }
-
-                if let Some(title) = app.title_if_due() {
-                    window.set_title(&title);
-                }
-
-                // Keep the render surface locked to the live window size *before*
-                // laying out egui. egui lays out using `window.inner_size()`; if
-                // the surface (self.config) lags behind — which it does after a
-                // programmatic `request_inner_size`, since the `Resized` event is
-                // async — egui renders into a differently-sized target, scaling
-                // the UI text. Syncing here (a cheap no-op when unchanged) makes
-                // the layout size and the render target size always agree.
-                {
-                    let phys = window.inner_size();
-                    let (pw, ph) = (phys.width.max(1), phys.height.max(1));
-                    if (pw, ph) != rs.renderer.surface_size() {
-                        rs.renderer.resize(pw, ph);
-                    }
-                }
-
-                // Android IME: synthesize egui events winit drops (see below).
-                let extra_events = collect_extra_egui_events();
-
-                // The menu-bar auto-hide flag is a desktop concern: Android is
-                // always fullscreen and uses the mobile menu, not the top bar
-                // (`is_fullscreen` only exists off-Android).
-                #[cfg(not(target_os = "android"))]
-                let fullscreen = is_fullscreen;
-                #[cfg(target_os = "android")]
-                let fullscreen = false;
-                let requests = app.draw(&window, &mut rs.ui, &mut rs.renderer, extra_events, fullscreen, |action| {
-                    resolve_gui_action(action)
-                });
-
-                for req in requests {
-                    match req {
-                        PlatformRequest::Exit => {
-                            elwt.exit();
-                            return;
-                        }
-                        PlatformRequest::ToggleFullscreen => {
-                            #[cfg(not(target_os = "android"))]
-                            {
-                                is_fullscreen = !is_fullscreen;
-                                window.set_fullscreen(
-                                    is_fullscreen.then(|| Fullscreen::Borderless(None)),
-                                );
-                            }
-                        }
-                        PlatformRequest::ResizeContent { width, height } => {
-                            // Just record the new content size; the continuous
-                            // fit below sizes the window as content*scale + the
-                            // measured chrome inset (menu bar / status panel) so
-                            // the game fills the central rect with no letterbox.
-                            #[cfg(not(target_os = "android"))]
-                            {
-                                last_content_size = (width, height);
-                            }
-                            #[cfg(target_os = "android")]
-                            {
-                                let _ = (width, height);
-                            }
-                        }
-                        PlatformRequest::SaveStateBytes { path, bytes } => {
-                            match std::fs::write(&path, &bytes) {
-                                Ok(()) => rs.ui.set_status(format!("State saved to: {}", path.display())),
-                                Err(e) => rs.ui.set_error(format!("Failed to save state: {e}")),
-                            }
-                        }
-                        PlatformRequest::SaveBytes { suggested_name, bytes } => {
-                            match save_bytes_to_file(&suggested_name, &bytes) {
-                                Ok(Some(path)) => rs.ui.set_status(format!("Saved to: {}", path.display())),
-                                Ok(None) => {}
-                                Err(e) => rs.ui.set_error(format!("Failed to save file: {e}")),
-                            }
-                        }
-                        PlatformRequest::Status(s) => rs.ui.set_status(s),
-                        PlatformRequest::Error(e) => rs.ui.set_error(e),
-                        PlatformRequest::ClearError => rs.ui.clear_error(),
-                        // ROM/state loads + battery/RTC imports are resolved inside
-                        // `App::draw` (they need the file resolver), so this arm is
-                        // unreachable on desktop/Android; kept for the shared
-                        // contract (the web worker services it). Log if it fires.
-                        PlatformRequest::LoadFile { .. } => {
-                            log::warn!("LoadFile request reached the platform loop unexpectedly");
-                        }
-                        PlatformRequest::FetchUrl { urls, purpose } => {
-                            fetch_worker
-                                .get_or_insert_with(crate::fetch_worker::FetchWorker::new)
-                                .submit(urls, purpose);
-                        }
-                        #[cfg(target_os = "android")]
-                        PlatformRequest::AndroidLibrary(action) => {
-                            handle_android_library(action, &mut rs.ui, &pending_dialog_result);
-                        }
-                    }
-                }
-
-                // Breakpoint-hit notification (surface the PC in the status bar).
-                if app.take_breakpoint_hit() {
-                    let pc = app.gb().get_cpu_registers().pc;
-                    rs.ui.set_status(format!("Breakpoint hit at PC: ${pc:04X}"));
-                }
-
-                // Programmatic fit: size the window so the egui central rect is
-                // exactly content*scale (game fills it, no bars). Target =
-                // content*scale + the measured chrome inset. Fires ONLY on the
-                // first frame (inset now known) and when the content size changes
-                // (SGB border appearing/disappearing) — never continuously, so it
-                // does not fight a user resize. These are not during a drag, so
-                // request_inner_size is safe here.
-                #[cfg(not(target_os = "android"))]
-                {
-                    let content = app.content_size();
-                    let content_changed = content != last_content_size;
-                    last_content_size = content;
-                    if content_changed || last_fit_logical.is_none() {
-                        let scale = config.scale.max(1) as u32;
-                        let (inset_w, inset_h) = app.content_inset();
-                        let target = (
-                            (content.0 * scale + inset_w.round() as u32).max(1),
-                            (content.1 * scale + inset_h.round() as u32).max(1),
-                        );
-                        last_fit_logical = Some(target);
-                        let _ = window.request_inner_size(LogicalSize::new(
-                            target.0 as f64,
-                            target.1 as f64,
-                        ));
-                    }
-
-                    // Apply a debounced aspect-snap once the user's resize has
-                    // settled (no Resized for SNAP_DEBOUNCE). This is the only
-                    // aspect correction that touches a user-driven size, and it
-                    // fires after the drag ends, so it never fights the drag.
-                    if let Some(snap) = pending_snap {
-                        let settled = last_resize_at
-                            .map(|t| t.elapsed() >= SNAP_DEBOUNCE)
-                            .unwrap_or(false);
-                        if settled {
-                            pending_snap = None;
-                            resize_burst_start = None;
-                            let _ = window.request_inner_size(snap);
-                        }
-                    }
-                }
-            }
-            Event::WindowEvent { event, .. } => {
-                if let Some(rs) = render_state.as_mut() {
-                    rs.ui.handle_event(&window, &event);
-                }
-            }
-            _ => {}
         }
-    });
-    res.map_err(PlatformError::from_display)
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // winit_input_helper 0.17: close the step, then drive a continuous redraw
+        // (the compositor paces it) so the game + UI keep advancing every frame.
+        self.input.end_step();
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+    }
+}
+
+impl GuiApp<'_> {
+    /// One presented frame (runs on each `RedrawRequested`): resolve input,
+    /// advance emulation + audio, then draw egui + the game. Merges the old
+    /// input-update block and the RedrawRequested render arm.
+    fn frame_tick(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(window) = self.window.clone() else { return };
+
+        if self.input.key_pressed(KeyCode::Escape) || self.input.close_requested() {
+            event_loop.exit();
+            return;
+        }
+
+        // F: frame stepping with debounce (paused/errored only).
+        if self.input.key_pressed(KeyCode::KeyF) {
+            if self.app.stepping_allowed() {
+                self.app.request_step_frame();
+                let now = Instant::now();
+                self.f_key_press_time = Some(now);
+                self.f_last_repeat_time = Some(now);
+            }
+        } else if self.input.key_held(KeyCode::KeyF) {
+            if self.app.stepping_allowed()
+                && let Some(press_time) = self.f_key_press_time
+                && press_time.elapsed() >= DEBOUNCE_DURATION
+                && let Some(last_repeat) = self.f_last_repeat_time
+                && last_repeat.elapsed() >= REPEAT_INTERVAL
+            {
+                self.app.request_step_frame();
+                self.f_last_repeat_time = Some(Instant::now());
+            }
+        } else {
+            self.f_key_press_time = None;
+            self.f_last_repeat_time = None;
+        }
+
+        // N: cycle stepping with debounce (paused/errored only).
+        if self.input.key_pressed(KeyCode::KeyN) {
+            if self.app.stepping_allowed() {
+                self.app.request_step_cycle();
+                let now = Instant::now();
+                self.n_key_press_time = Some(now);
+                self.n_last_repeat_time = Some(now);
+            }
+        } else if self.input.key_held(KeyCode::KeyN) {
+            if self.app.stepping_allowed()
+                && let Some(press_time) = self.n_key_press_time
+                && press_time.elapsed() >= DEBOUNCE_DURATION
+                && let Some(last_repeat) = self.n_last_repeat_time
+                && last_repeat.elapsed() >= REPEAT_INTERVAL
+            {
+                self.app.request_step_cycle();
+                self.n_last_repeat_time = Some(Instant::now());
+            }
+        } else {
+            self.n_key_press_time = None;
+            self.n_last_repeat_time = None;
+        }
+
+        if let Some(scale_factor) = self.input.scale_factor()
+            && let Some(rs) = self.render_state.as_mut()
+        {
+            rs.ui.set_pixels_per_point(scale_factor as f32);
+        }
+
+        // Build the raw held-input set (keyboard + gamepad) and resolve it through
+        // the shared config: GB-button bindings drive the button state, chord
+        // hotkeys drive features. Then OR the egui touch overlay on top and
+        // dispatch any fired hotkeys.
+        #[cfg_attr(any(target_arch = "wasm32", target_os = "android"), allow(unused_mut))]
+        let mut held = held_inputs_from_keyboard(&self.input);
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        if let Some(g) = self.gilrs.as_mut() {
+            collect_gamepad_held(g, &mut held.pad);
+        }
+        #[cfg(target_os = "android")]
+        {
+            held.pad.extend(self.android_pad.iter().copied());
+            // Analog sticks + hat arrive via Java (onGenericMotionEvent → JNI).
+            // Android axes: +X right, +Y down. Hat covers controllers that report
+            // the d-pad as an axis rather than key events.
+            let [lx, ly, rx, ry, hx, hy, lt, rt] = crate::android::gamepad_axes();
+            let dz = 0.5;
+            let mut on = |cond: bool, b: PadButton| {
+                if cond {
+                    held.pad.insert(b);
+                }
+            };
+            on(ly < -dz, PadButton::LStickUp);
+            on(ly > dz, PadButton::LStickDown);
+            on(lx < -dz, PadButton::LStickLeft);
+            on(lx > dz, PadButton::LStickRight);
+            on(ry < -dz, PadButton::RStickUp);
+            on(ry > dz, PadButton::RStickDown);
+            on(rx < -dz, PadButton::RStickLeft);
+            on(rx > dz, PadButton::RStickRight);
+            on(hy < -dz, PadButton::DpadUp);
+            on(hy > dz, PadButton::DpadDown);
+            on(hx < -dz, PadButton::DpadLeft);
+            on(hx > dz, PadButton::DpadRight);
+            // Analog L2/R2 rest at 0, pressed toward 1.
+            on(lt > dz, PadButton::LeftTrigger);
+            on(rt > dz, PadButton::RightTrigger);
+        }
+        let (mut button_state, fired) =
+            self.app.session().config().input.resolve(&held, &mut self.resolve_state);
+        if let Some(rs) = self.render_state.as_ref() {
+            let touch = rs.ui.touch_button_state();
+            button_state.a |= touch.a;
+            button_state.b |= touch.b;
+            button_state.start |= touch.start;
+            button_state.select |= touch.select;
+            button_state.up |= touch.up;
+            button_state.down |= touch.down;
+            button_state.left |= touch.left;
+            button_state.right |= touch.right;
+        }
+        self.app.set_button_state(button_state);
+        // Forward the held pad set so the keybind editor can capture gamepad
+        // presses (egui never sees pad input).
+        self.app.set_held_pad(held.pad.clone());
+
+        // Fast-forward is a hold action: keep it engaged only while the chord is
+        // active this frame, so releasing the chord turns it off.
+        let ff_active = fired
+            .iter()
+            .any(|f| matches!(f.action, HotkeyAction::FastForward));
+        if !ff_active && self.app.is_fast_forward() {
+            self.app.toggle_fast_forward();
+        }
+        for f in fired {
+            #[cfg(not(target_os = "android"))]
+            let exit = dispatch_hotkey(&mut self.app, f, &window, event_loop, &mut self.is_fullscreen);
+            #[cfg(target_os = "android")]
+            let exit = {
+                let mut dummy = false;
+                dispatch_hotkey(&mut self.app, f, &window, event_loop, &mut dummy)
+            };
+            if exit {
+                return;
+            }
+        }
+
+        // Android: keep the game region inside the safe area (system bars /
+        // display cutout) so it isn't clipped behind them. No-op elsewhere.
+        #[cfg(target_os = "android")]
+        if let Some(rs) = self.render_state.as_ref() {
+            let (w, h) = rs.renderer.surface_size();
+            let (l, t, r, b) = crate::android::safe_area_insets(w, h);
+            self.app.set_safe_insets(l, t, r, b);
+        }
+
+        // Advance one presented frame (paced inside the app), play audio, pump
+        // the workers.
+        let step = self.app.run_frame();
+        if step.pump_workers {
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            pump_workers(
+                &mut self.app,
+                self.rewind_worker.as_mut(),
+                &mut self.png_worker,
+                &mut self.next_print_index,
+            );
+            #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+            drain_printer_sheets_unsupported(&mut self.app);
+        }
+        if let Some(a) = self.audio.as_mut() {
+            a.push_samples(&step.audio);
+        }
+
+        self.draw_frame(&window, event_loop);
+    }
+
+    /// Composite egui + the game onto the surface and service the `App`'s
+    /// platform requests. (The old RedrawRequested arm.)
+    fn draw_frame(&mut self, window: &Arc<Window>, event_loop: &ActiveEventLoop) {
+        let Some(rs) = self.render_state.as_mut() else { return };
+
+        // Deliver any completed cheat-DB fetches into the session so the cheat
+        // picker shows them; report the outcome in the status bar.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(worker) = self.fetch_worker.as_mut() {
+            for done in worker.drain_finished() {
+                use rustyboi_session::FetchPurpose;
+                match (done.purpose, done.result) {
+                    (FetchPurpose::Cheats, Ok(body)) => {
+                        let n = self.app.session_mut().finish_fetched_cheats(&body);
+                        if n == 0 {
+                            rs.ui.set_status("No cheats found for this game".into());
+                        } else {
+                            rs.ui.set_status(format!("Fetched {n} cheats"));
+                        }
+                    }
+                    (FetchPurpose::NoIntro, Ok(body)) => {
+                        // Cache the downloaded DAT so we don't re-fetch it next
+                        // launch, then feed it into the index and re-resolve the
+                        // current ROM's display name.
+                        if let Some(url) = done.url.as_deref() {
+                            crate::no_intro_cache::store(&save_base(), url, &body);
+                        }
+                        self.app
+                            .session_mut()
+                            .finish_no_intro_dats(std::slice::from_ref(&body));
+                        if let Some(title) = self.app.title_if_due() {
+                            window.set_title(&title);
+                        }
+                    }
+                    (FetchPurpose::Cheats, Err(e)) => {
+                        // A failed cheat fetch is not fatal — surface it in the
+                        // status bar, never the crash screen.
+                        rs.ui.set_status(format!("Cheat fetch failed: {e}"));
+                    }
+                    (FetchPurpose::NoIntro, Err(e)) => {
+                        // No-Intro identification is best-effort; a failed DAT
+                        // download just leaves games on their header titles.
+                        log::warn!("No-Intro DAT fetch failed: {e}");
+                    }
+                }
+            }
+        }
+
+        if let Some(title) = self.app.title_if_due() {
+            window.set_title(&title);
+        }
+
+        // Keep the render surface locked to the live window size *before* laying
+        // out egui (egui lays out using `window.inner_size()`; the `Resized` event
+        // is async, so the surface can lag after a programmatic resize). Syncing
+        // here (a cheap no-op when unchanged) keeps layout and target size in step.
+        {
+            let phys = window.inner_size();
+            let (pw, ph) = (phys.width.max(1), phys.height.max(1));
+            if (pw, ph) != rs.renderer.surface_size() {
+                rs.renderer.resize(pw, ph);
+            }
+        }
+
+        // Android IME: synthesize egui events winit drops.
+        let extra_events = collect_extra_egui_events();
+
+        // The menu-bar auto-hide flag is a desktop concern (Android is always
+        // fullscreen and uses the mobile menu; `is_fullscreen` only exists there).
+        #[cfg(not(target_os = "android"))]
+        let fullscreen = self.is_fullscreen;
+        #[cfg(target_os = "android")]
+        let fullscreen = false;
+        let requests = self.app.draw(window, &mut rs.ui, &mut rs.renderer, extra_events, fullscreen, resolve_gui_action);
+
+        for req in requests {
+            match req {
+                PlatformRequest::Exit => {
+                    event_loop.exit();
+                    return;
+                }
+                PlatformRequest::ToggleFullscreen => {
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        self.is_fullscreen = !self.is_fullscreen;
+                        window.set_fullscreen(
+                            self.is_fullscreen.then(|| Fullscreen::Borderless(None)),
+                        );
+                    }
+                }
+                PlatformRequest::ResizeContent { width, height } => {
+                    // Just record the new content size; the continuous fit below
+                    // sizes the window as content*scale + the measured chrome
+                    // inset so the game fills the central rect with no letterbox.
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        self.last_content_size = (width, height);
+                    }
+                    #[cfg(target_os = "android")]
+                    {
+                        let _ = (width, height);
+                    }
+                }
+                PlatformRequest::SaveStateBytes { path, bytes } => {
+                    match std::fs::write(&path, &bytes) {
+                        Ok(()) => rs.ui.set_status(format!("State saved to: {}", path.display())),
+                        Err(e) => rs.ui.set_error(format!("Failed to save state: {e}")),
+                    }
+                }
+                PlatformRequest::SaveBytes { suggested_name, bytes } => {
+                    match save_bytes_to_file(&suggested_name, &bytes) {
+                        Ok(Some(path)) => rs.ui.set_status(format!("Saved to: {}", path.display())),
+                        Ok(None) => {}
+                        Err(e) => rs.ui.set_error(format!("Failed to save file: {e}")),
+                    }
+                }
+                PlatformRequest::Status(s) => rs.ui.set_status(s),
+                PlatformRequest::Error(e) => rs.ui.set_error(e),
+                PlatformRequest::ClearError => rs.ui.clear_error(),
+                // ROM/state loads + battery/RTC imports are resolved inside
+                // `App::draw` (they need the file resolver), so this arm is
+                // unreachable on desktop/Android; kept for the shared contract
+                // (the web worker services it). Log if it fires.
+                PlatformRequest::LoadFile { .. } => {
+                    log::warn!("LoadFile request reached the platform loop unexpectedly");
+                }
+                PlatformRequest::FetchUrl { urls, purpose } => {
+                    self.fetch_worker
+                        .get_or_insert_with(crate::fetch_worker::FetchWorker::new)
+                        .submit(urls, purpose);
+                }
+                #[cfg(target_os = "android")]
+                PlatformRequest::AndroidLibrary(action) => {
+                    handle_android_library(action, &mut rs.ui, &self.pending_dialog_result);
+                }
+            }
+        }
+
+        // Breakpoint-hit notification (surface the PC in the status bar).
+        if self.app.take_breakpoint_hit() {
+            let pc = self.app.gb().get_cpu_registers().pc;
+            rs.ui.set_status(format!("Breakpoint hit at PC: ${pc:04X}"));
+        }
+
+        // Programmatic fit: size the window so the egui central rect is exactly
+        // content*scale (game fills it, no bars). Target = content*scale + the
+        // measured chrome inset. Fires ONLY on the first frame (inset now known)
+        // and when the content size changes (SGB border appearing/disappearing) —
+        // never continuously, so it does not fight a user resize.
+        #[cfg(not(target_os = "android"))]
+        {
+            let content = self.app.content_size();
+            let content_changed = content != self.last_content_size;
+            self.last_content_size = content;
+            if content_changed || self.last_fit_logical.is_none() {
+                let scale = self.config.scale.max(1) as u32;
+                let (inset_w, inset_h) = self.app.content_inset();
+                let target = (
+                    (content.0 * scale + inset_w.round() as u32).max(1),
+                    (content.1 * scale + inset_h.round() as u32).max(1),
+                );
+                self.last_fit_logical = Some(target);
+                let _ = window.request_inner_size(LogicalSize::new(
+                    target.0 as f64,
+                    target.1 as f64,
+                ));
+            }
+
+            // Apply a debounced aspect-snap once the user's resize has settled
+            // (no Resized for SNAP_DEBOUNCE). This is the only aspect correction
+            // that touches a user-driven size, and it fires after the drag ends.
+            if let Some(snap) = self.pending_snap {
+                let settled = self
+                    .last_resize_at
+                    .map(|t| t.elapsed() >= SNAP_DEBOUNCE)
+                    .unwrap_or(false);
+                if settled {
+                    self.pending_snap = None;
+                    self.resize_burst_start = None;
+                    let _ = window.request_inner_size(snap);
+                }
+            }
+        }
+    }
+
+    /// Resize the surface and record a debounced aspect-snap (desktop). (The old
+    /// `WindowEvent::Resized` arm.)
+    fn handle_resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
+        if let Some(rs) = self.render_state.as_mut() {
+            rs.renderer.resize(size.width.max(1), size.height.max(1));
+        }
+        // Aspect-lock (debounced): compute the aspect-correct size for this resize
+        // but DON'T apply it now — requesting a size mid-drag fights the
+        // compositor. Record it as `pending_snap`; `draw_frame` applies it once the
+        // resize settles. The window follows the cursor freely during the drag
+        // (the game renders aspect-fit with a transient bar), then snaps on release.
+        #[cfg(not(target_os = "android"))]
+        {
+            let now = Instant::now();
+            // A gap since the last resize means a new drag burst began; baseline
+            // the driving-axis detection to this size.
+            let new_burst = self
+                .last_resize_at
+                .map(|t| now.duration_since(t) > SNAP_DEBOUNCE)
+                .unwrap_or(true);
+            if new_burst {
+                self.resize_burst_start = Some(size);
+            }
+            self.last_resize_at = Some(now);
+
+            let (cw, ch) = self.app.content_size();
+            let aspect = cw as f32 / ch as f32;
+            let sf = self.window.as_ref().map_or(1.0, |w| w.scale_factor()) as f32;
+            let (iw, ih) = self.app.content_inset();
+            let (iw_p, ih_p) = (iw * sf, ih * sf);
+            let (new_w, new_h) = (size.width as f32, size.height as f32);
+            let base = self.resize_burst_start.unwrap_or(size);
+            let dw = (new_w - base.width as f32).abs();
+            let dh = (new_h - base.height as f32).abs();
+            let (corr_w, corr_h) = if dh > dw {
+                let avail_h = (new_h - ih_p).max(1.0);
+                ((avail_h * aspect + iw_p).round(), new_h.round())
+            } else {
+                let avail_w = (new_w - iw_p).max(1.0);
+                (new_w.round(), (avail_w / aspect + ih_p).round())
+            };
+            let corr = winit::dpi::PhysicalSize::new((corr_w as u32).max(1), (corr_h as u32).max(1));
+            self.pending_snap = if (corr.width as f32 - new_w).abs() > 1.0
+                || (corr.height as f32 - new_h).abs() > 1.0
+            {
+                Some(corr)
+            } else {
+                None
+            };
+        }
+    }
 }
 
 /// Turn an OS-requiring UI action into bytes the app can apply. Handles the file
