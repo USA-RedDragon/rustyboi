@@ -77,7 +77,7 @@ impl Gui {
             .default_size([360.0, 520.0])
             .collapsible(true)
             .resizable(true)
-            .frame(egui::Frame::window(&ctx.style()).fill(crate::ui::PANEL_BACKGROUND))
+            .frame(egui::Frame::window(&ctx.style_of(ctx.theme())).fill(crate::ui::PANEL_BACKGROUND))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     changed |= self.gb_bindings_section(ui, pressed_key, pressed_pad);
@@ -176,13 +176,13 @@ impl Gui {
                             ui.menu_button("Add…", |ui| {
                                 if ui.button("Press a key or button").clicked() {
                                     start_capture = Some(gb);
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                                 ui.separator();
                                 ui.label(egui::RichText::new("Controller").weak());
                                 if let Some(p) = pad_menu(ui) {
                                     add_pad = Some((gb, p));
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             });
                         }
@@ -274,13 +274,13 @@ impl Gui {
                     ui.label(egui::RichText::new("Game Boy").weak());
                     if let Some(b) = gb_menu(ui) {
                         add_gb = Some((i, b));
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     ui.label(egui::RichText::new("Controller").weak());
                     if let Some(p) = pad_menu(ui) {
                         add_pad = Some((i, p));
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
                 if ui.button("Clear").clicked() {
@@ -363,7 +363,7 @@ fn chord_label(chord: &[InputTrigger]) -> String {
 /// egui widget id (usize::MAX = the "new hotkey" staging row).
 fn action_combo(ui: &mut egui::Ui, id: usize, action: &mut HotkeyAction) -> bool {
     let before = *action;
-    egui::ComboBox::from_id_source(("hotkey_action", id))
+    egui::ComboBox::from_id_salt(("hotkey_action", id))
         .selected_text(action.label())
         .show_ui(ui, |ui| {
             for a in HotkeyAction::SIMPLE {

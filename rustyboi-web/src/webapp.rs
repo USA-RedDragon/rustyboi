@@ -27,11 +27,12 @@ use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
-use winit::event::{ElementState, Event, KeyEvent, WindowEvent};
-use winit::event_loop::EventLoop;
+use winit::application::ApplicationHandler;
+use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
-use winit::platform::web::{EventLoopExtWebSys, WindowBuilderExtWebSys};
-use winit::window::{Window, WindowBuilder};
+use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
+use winit::window::{Window, WindowId};
 
 use rustyboi_frontend_lib::renderer::{GameFrame, Renderer, SourceSize};
 use rustyboi_frontend_lib::ui_host::UiHost;
@@ -252,41 +253,188 @@ impl WebApp {
             return Ok(());
         }
         self.started = true;
-        run_loop(self.shared.clone(), canvas)
-            .await
-            .map_err(|e| JsValue::from_str(&e))
+        run_loop(self.shared.clone(), canvas).map_err(|e| JsValue::from_str(&e))
     }
 }
 
-/// Build the wgpu WebGL2 state, then spawn the winit loop that renders egui +
-/// the game each animation frame. Returns after spawning (the loop runs via the
-/// browser event loop from then on).
-async fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Result<(), String> {
-    let event_loop = EventLoop::new().map_err(|e| format!("EventLoop::new: {e}"))?;
+/// The window + GPU renderer + egui host, built asynchronously once the winit
+/// window exists (wgpu adapter/device requests are async on the web).
+struct WebRender {
+    window: Arc<Window>,
+    renderer: Renderer,
+    ui: UiHost,
+}
 
-    let width = canvas.width().max(1);
-    let height = canvas.height().max(1);
+/// The winit 0.30 `ApplicationHandler` for the web driver. Creates the window in
+/// `resumed` (winit 0.30 requires an `ActiveEventLoop`) then kicks off the async
+/// wgpu init; the finished `WebRender` lands in `pending_render` and is adopted
+/// on the next event tick.
+struct WebGuiApp {
+    shared: Rc<RefCell<Shared>>,
+    /// The JS-created canvas, moved into the window on first `resumed`.
+    canvas: Option<HtmlCanvasElement>,
+    /// Filled by the async wgpu-init task, then moved into `render`.
+    pending_render: Rc<RefCell<Option<WebRender>>>,
+    render: Option<WebRender>,
+    started_init: bool,
+    /// Raw keyboard keys held this frame (host-agnostic names); resolved against
+    /// the session's InputConfig in `draw`.
+    held_keys: HashSet<KeyName>,
+    resolve_state: ResolveState,
+    rewind_held: bool,
+}
 
-    // winit adopts the JS-created canvas (don't append a second one). Prevent
-    // default so arrow keys/space don't scroll the page while playing.
-    let window = WindowBuilder::new()
-        .with_canvas(Some(canvas))
-        .with_prevent_default(true)
-        .with_append(false)
-        .build(&event_loop)
-        .map_err(|e| format!("Window build: {e}"))?;
-    let window = Arc::new(window);
+impl WebGuiApp {
+    /// Move a completed async-built `WebRender` out of the shared cell.
+    fn adopt_pending_render(&mut self) {
+        if self.render.is_none() {
+            if let Some(r) = self.pending_render.borrow_mut().take() {
+                r.window.request_redraw();
+                self.render = Some(r);
+            }
+        }
+    }
+}
 
+impl ApplicationHandler for WebGuiApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.started_init {
+            return;
+        }
+        self.started_init = true;
+        // Wait, NOT Poll. On web, Poll makes winit reschedule an immediate wakeup
+        // via Scheduler.postTask every iteration, and dropping the previous
+        // schedule calls AbortController.abort() — which Firefox implements by
+        // walking + saving a full stack, costing ~40% of the main thread. Our
+        // render loop is driven purely by request_redraw() (mapped to
+        // requestAnimationFrame) in about_to_wait, so Wait gives the same
+        // continuous rAF cadence with none of the postTask/abort churn.
+        event_loop.set_control_flow(ControlFlow::Wait);
+
+        let Some(canvas) = self.canvas.take() else { return };
+        let width = canvas.width().max(1);
+        let height = canvas.height().max(1);
+        // winit adopts the JS-created canvas (don't append a second one). Prevent
+        // default so arrow keys/space don't scroll the page while playing.
+        let attrs = Window::default_attributes()
+            .with_canvas(Some(canvas))
+            .with_prevent_default(true)
+            .with_append(false);
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                web_sys::console::error_1(&format!("Window build: {e}").into());
+                return;
+            }
+        };
+
+        // wgpu adapter/device requests are async on the web; build off-thread and
+        // drop the result into `pending_render` for the next event tick to adopt.
+        let pending = self.pending_render.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            match build_web_render(window, width, height).await {
+                Ok(r) => *pending.borrow_mut() = Some(r),
+                Err(e) => web_sys::console::error_1(&e.into()),
+            }
+        });
+    }
+
+    fn window_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        self.adopt_pending_render();
+        let Some(render) = self.render.as_mut() else { return };
+
+        // Feed egui (mouse/keyboard/touch/IME + text entry for the cheat and
+        // keybind panels). GB input is derived separately below. But keep keys the
+        // config binds to a hotkey (e.g. Tab = fast-forward) AWAY from egui while
+        // playing — otherwise egui uses Tab for focus traversal (cursor jumps into
+        // the menu bar) and eats Backspace. When a text field is focused they
+        // belong to the UI, so forward.
+        let hotkey_for_game = !render.ui.wants_keyboard_input()
+            && matches!(&event,
+                WindowEvent::KeyboardInput { event: k, .. }
+                    if is_hotkey_key(&self.shared, k));
+        if !hotkey_for_game {
+            render.ui.handle_event(&render.window, &event);
+        }
+        match event {
+            WindowEvent::KeyboardInput { event: key, .. } => {
+                // While the user is typing in an egui text field (cheat / keybind
+                // entry) the keyboard belongs to the UI: no GB input, no feature
+                // hotkeys, and release any held rewind.
+                if render.ui.wants_keyboard_input() {
+                    self.held_keys.clear();
+                    set_rewind(&self.shared, &mut self.rewind_held, false);
+                } else {
+                    update_held_keys(&mut self.held_keys, &key);
+                }
+            }
+            WindowEvent::Focused(false) => {
+                self.held_keys.clear();
+                set_rewind(&self.shared, &mut self.rewind_held, false);
+            }
+            WindowEvent::Resized(size) => {
+                render.renderer.resize(size.width.max(1), size.height.max(1));
+                render.window.request_redraw();
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                render.ui.set_pixels_per_point(scale_factor as f32);
+                render.window.request_redraw();
+            }
+            WindowEvent::RedrawRequested => {
+                draw(
+                    &self.shared,
+                    &render.window,
+                    &mut render.ui,
+                    &mut render.renderer,
+                    &self.held_keys,
+                    &mut self.resolve_state,
+                    &mut self.rewind_held,
+                );
+            }
+            WindowEvent::CloseRequested => {}
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        self.adopt_pending_render();
+        // Drive a continuous redraw so the UI + latest worker frame keep updating
+        // (the browser paces this via requestAnimationFrame).
+        if let Some(render) = self.render.as_ref() {
+            render.window.request_redraw();
+        }
+    }
+}
+
+/// Build the wgpu WebGL2 surface/device and the frontend `Renderer` + `UiHost`
+/// for `window`. Async because the browser resolves adapter/device requests via
+/// promises.
+async fn build_web_render(
+    window: Arc<Window>,
+    width: u32,
+    height: u32,
+) -> Result<WebRender, String> {
     // wgpu on wasm MUST use the GL backend (WebGL2) — WebGPU is not Firefox
     // stable. The `webgl` feature (rustyboi-frontend Cargo.toml) provides it.
+    // wgpu 29's `InstanceDescriptor` holds a non-Default `display` field, so set
+    // the fields explicitly rather than spreading `..Default::default()`.
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::GL,
-        ..Default::default()
+        flags: wgpu::InstanceFlags::default(),
+        memory_budget_thresholds: Default::default(),
+        backend_options: Default::default(),
+        display: None,
     });
     let surface = instance
         .create_surface(window.clone())
         .map_err(|e| format!("create_surface: {e}"))?;
 
+    // wgpu 29: `request_adapter` returns a `Result` (was `Option`).
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
@@ -294,20 +442,19 @@ async fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Res
             compatible_surface: Some(&surface),
         })
         .await
-        .ok_or_else(|| "no compatible WebGL2 adapter".to_string())?;
+        .map_err(|e| format!("no compatible WebGL2 adapter: {e}"))?;
 
     // WebGL2 caps: request the downlevel-webgl2 limit set so the device request
-    // succeeds on browsers (full desktop limits would be rejected).
+    // succeeds on browsers (full desktop limits would be rejected). wgpu 29
+    // dropped the trailing trace arg and added memory_hints/trace/experimental.
     let (device, queue) = adapter
-        .request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("rustyboi_web_device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-                    .using_resolution(adapter.limits()),
-            },
-            None,
-        )
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("rustyboi_web_device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                .using_resolution(adapter.limits()),
+            ..Default::default()
+        })
         .await
         .map_err(|e| format!("request_device: {e}"))?;
 
@@ -327,91 +474,26 @@ async fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Res
     let max_texture_size = device.limits().max_texture_dimension_2d as usize;
     let scale_factor = window.scale_factor() as f32;
 
-    let mut renderer = Renderer::new(surface, device, queue, surface_format, width, height);
-    let mut ui = UiHost::new(&event_loop, scale_factor, max_texture_size, None);
+    let renderer = Renderer::new(surface, device, queue, surface_format, width, height);
+    let ui = UiHost::new(&window, scale_factor, max_texture_size, None);
+    Ok(WebRender { window, renderer, ui })
+}
 
-    // Spawn the browser-driven loop. Everything below lives only inside the
-    // closure; the JS shell talks to it through `shared`. `kb_mask` holds the GB
-    // buttons currently held via the physical keyboard (OR'd with the egui
-    // on-screen touch overlay each frame in `draw`).
-    let loop_window = window.clone();
-    // Raw keyboard keys held this frame (host-agnostic names); resolved against
-    // the session's InputConfig in `draw`. Replaces the old fixed GB-button mask.
-    let mut held_keys: HashSet<KeyName> = HashSet::new();
-    let mut resolve_state = ResolveState::new();
-    let mut rewind_held = false;
-    event_loop.spawn(move |event, elwt| {
-        // Wait, NOT Poll. On web, Poll makes winit reschedule an immediate wakeup
-        // via Scheduler.postTask every iteration, and dropping the previous
-        // schedule calls AbortController.abort() — which Firefox implements by
-        // walking + saving a full stack, costing ~40% of the main thread. Our
-        // render loop is driven purely by request_redraw() (mapped to
-        // requestAnimationFrame) in AboutToWait, so Wait gives the same continuous
-        // rAF cadence with none of the postTask/abort churn.
-        elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
-        match event {
-            Event::WindowEvent { event, .. } => {
-                // Feed egui (mouse/keyboard/touch/IME + text entry for the cheat
-                // and keybind panels). GB input is derived separately below. But
-                // keep keys the config binds to a hotkey (e.g. Tab = fast-forward)
-                // AWAY from egui while playing — otherwise egui uses Tab for focus
-                // traversal (cursor jumps into the menu bar) and eats Backspace.
-                // When a text field is focused they belong to the UI, so forward.
-                let hotkey_for_game = !ui.wants_keyboard_input()
-                    && matches!(&event,
-                        WindowEvent::KeyboardInput { event: k, .. }
-                            if is_hotkey_key(&shared, k));
-                if !hotkey_for_game {
-                    ui.handle_event(&loop_window, &event);
-                }
-                match event {
-                    WindowEvent::KeyboardInput { event: key, .. } => {
-                        // While the user is typing in an egui text field (cheat /
-                        // keybind entry) the keyboard belongs to the UI: no GB
-                        // input, no feature hotkeys, and release any held rewind.
-                        if ui.wants_keyboard_input() {
-                            held_keys.clear();
-                            set_rewind(&shared, &mut rewind_held, false);
-                        } else {
-                            update_held_keys(&mut held_keys, &key);
-                        }
-                    }
-                    WindowEvent::Focused(false) => {
-                        held_keys.clear();
-                        set_rewind(&shared, &mut rewind_held, false);
-                    }
-                    WindowEvent::Resized(size) => {
-                        renderer.resize(size.width.max(1), size.height.max(1));
-                        loop_window.request_redraw();
-                    }
-                    WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                        ui.set_pixels_per_point(scale_factor as f32);
-                        loop_window.request_redraw();
-                    }
-                    WindowEvent::RedrawRequested => {
-                        draw(
-                            &shared,
-                            &loop_window,
-                            &mut ui,
-                            &mut renderer,
-                            &held_keys,
-                            &mut resolve_state,
-                            &mut rewind_held,
-                        );
-                    }
-                    WindowEvent::CloseRequested => {}
-                    _ => {}
-                }
-            }
-            Event::AboutToWait => {
-                // Drive a continuous redraw so the UI + latest worker frame keep
-                // updating (the browser paces this via requestAnimationFrame).
-                loop_window.request_redraw();
-            }
-            _ => {}
-        }
-    });
-
+/// Build the winit event loop, then hand it a [`WebGuiApp`] to drive. Returns as
+/// soon as the loop is spawned (it runs via the browser event loop from then on).
+fn run_loop(shared: Rc<RefCell<Shared>>, canvas: HtmlCanvasElement) -> Result<(), String> {
+    let event_loop = EventLoop::new().map_err(|e| format!("EventLoop::new: {e}"))?;
+    let app = WebGuiApp {
+        shared,
+        canvas: Some(canvas),
+        pending_render: Rc::new(RefCell::new(None)),
+        render: None,
+        started_init: false,
+        held_keys: HashSet::new(),
+        resolve_state: ResolveState::new(),
+        rewind_held: false,
+    };
+    event_loop.spawn_app(app);
     Ok(())
 }
 
@@ -612,16 +694,16 @@ fn draw(
 
     // Render: the game texture (uploaded above) letterboxed into the central
     // region, egui on top. game: None — the retained texture is drawn via has_game.
-    if let Err(e) = renderer.render(None, ui_frame.region, paint) {
-        match e {
-            wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+    if let Err(status) = renderer.render(None, ui_frame.region, paint) {
+        // wgpu 29: reconfigure + retry next frame on Lost/Outdated. Timeout /
+        // Occluded are handled inside render() (mapped to Ok); Validation is
+        // surfaced via the device error scope, so skip it here.
+        match status {
+            wgpu::SurfaceStatus::Lost | wgpu::SurfaceStatus::Outdated => {
                 let (w, h) = renderer.surface_size();
                 renderer.resize(w, h);
             }
-            wgpu::SurfaceError::OutOfMemory => {
-                web_sys::console::error_1(&"GPU out of memory".into());
-            }
-            wgpu::SurfaceError::Timeout => {}
+            _ => {}
         }
     }
 }

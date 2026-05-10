@@ -10,7 +10,7 @@ impl Gui {
                 .default_size([400.0, 600.0])
                 .collapsible(true)
                 .resizable(true)
-                .frame(egui::Frame::window(&ctx.style()).fill(crate::ui::PANEL_BACKGROUND))
+                .frame(egui::Frame::window(&ctx.style_of(ctx.theme())).fill(crate::ui::PANEL_BACKGROUND))
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         // Current scanline sprites
@@ -352,7 +352,7 @@ impl Gui {
         }
 
         // Draw border around the sprite
-        ui.painter().rect_stroke(sprite_rect, 0.0, egui::Stroke::new(0.5, egui::Color32::GRAY));
+        ui.painter().rect_stroke(sprite_rect, 0.0, egui::Stroke::new(0.5, egui::Color32::GRAY), egui::StrokeKind::Middle);
 
         // Show tooltip with sprite info on hover
         if response.hovered() {

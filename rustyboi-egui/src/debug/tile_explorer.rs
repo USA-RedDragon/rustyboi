@@ -10,7 +10,7 @@ impl Gui {
                 .default_size([350.0, 500.0])
                 .collapsible(true)
                 .resizable(true)
-                .frame(egui::Frame::window(&ctx.style()).fill(crate::ui::PANEL_BACKGROUND))
+                .frame(egui::Frame::window(&ctx.style_of(ctx.theme())).fill(crate::ui::PANEL_BACKGROUND))
                 .show(ctx, |ui| {
                     ui.set_min_width(320.0);
 
@@ -119,7 +119,7 @@ impl Gui {
                                         }
 
                                         // Draw tile border
-                                        ui.painter().rect_stroke(tile_rect, 0.0, egui::Stroke::new(0.5, egui::Color32::GRAY));
+                                        ui.painter().rect_stroke(tile_rect, 0.0, egui::Stroke::new(0.5, egui::Color32::GRAY), egui::StrokeKind::Middle);
 
                                         // Show tooltip with tile info on hover
                                         if response.hovered() {

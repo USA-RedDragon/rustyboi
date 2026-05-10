@@ -764,16 +764,18 @@ impl App {
         region.width = (region.width - si_l - si_r).max(0.0);
         region.height = (region.height - si_t - si_b).max(0.0);
         let game = self.present();
-        if let Err(e) = renderer.render(game.as_ref(), region, paint) {
-            match e {
-                wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+        if let Err(status) = renderer.render(game.as_ref(), region, paint) {
+            match status {
+                // Reconfigure + retry next frame (the platform loop syncs the
+                // surface to the window size before the next render).
+                wgpu::SurfaceStatus::Lost | wgpu::SurfaceStatus::Outdated => {
                     let (w, h) = renderer.surface_size();
                     renderer.resize(w, h);
                 }
-                wgpu::SurfaceError::OutOfMemory => {
-                    requests.push(PlatformRequest::Error("GPU out of memory".into()));
-                }
-                wgpu::SurfaceError::Timeout => {}
+                // Validation errors surface through the device error scope; skip
+                // this frame. (Timeout/Occluded never reach here — render() maps
+                // them to Ok.)
+                _ => {}
             }
         }
 

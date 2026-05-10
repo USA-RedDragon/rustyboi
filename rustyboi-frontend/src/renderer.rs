@@ -167,14 +167,14 @@ impl Source {
     /// Upload a tightly-packed RGBA8 frame (`width * height * 4` bytes).
     fn upload(&self, queue: &wgpu::Queue, rgba: &[u8]) {
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             rgba,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(self.width * 4),
                 rows_per_image: Some(self.height),
@@ -282,7 +282,7 @@ impl Renderer {
                 address_mode_w: wgpu::AddressMode::ClampToEdge,
                 mag_filter: filter,
                 min_filter: filter,
-                mipmap_filter: wgpu::FilterMode::Nearest,
+                mipmap_filter: wgpu::MipmapFilterMode::Nearest,
                 lod_min_clamp: 0.0,
                 lod_max_clamp: 1.0,
                 compare: None,
@@ -390,15 +390,16 @@ impl Renderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("rustyboi_game_pipeline_layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("rustyboi_game_pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &module,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
                 buffers: &[vertex_buffer_layout],
             },
             primitive: wgpu::PrimitiveState::default(),
@@ -406,17 +407,28 @@ impl Renderer {
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &module,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
 
-        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1);
+        let egui_renderer = egui_wgpu::Renderer::new(
+            &device,
+            surface_format,
+            egui_wgpu::RendererOptions {
+                msaa_samples: 1,
+                depth_stencil_format: None,
+                dithering: false,
+                predictable_texture_filtering: false,
+            },
+        );
 
         Self {
             surface,
@@ -541,12 +553,25 @@ impl Renderer {
         game: Option<&GameFrame>,
         region: PhysicalRect,
         egui: EguiPaint,
-    ) -> Result<(), wgpu::SurfaceError> {
+    ) -> Result<(), wgpu::SurfaceStatus> {
         if let Some(frame) = game {
             self.upload_game(frame);
         }
 
-        let output = self.surface.get_current_texture()?;
+        // wgpu 29 returns a `CurrentSurfaceTexture` enum rather than a
+        // `Result<_, SurfaceError>`. Present on Success/Suboptimal; hand the
+        // status back so the caller reconfigures on Outdated/Lost/Validation, and
+        // silently skip the frame on Timeout/Occluded.
+        let output = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => return Err(wgpu::SurfaceStatus::Outdated),
+            wgpu::CurrentSurfaceTexture::Lost => return Err(wgpu::SurfaceStatus::Lost),
+            wgpu::CurrentSurfaceTexture::Validation => return Err(wgpu::SurfaceStatus::Validation),
+        };
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -573,6 +598,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(self.clear_color),
                         store: wgpu::StoreOp::Store,
@@ -581,6 +607,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             // Draw only when there is a game frame and a non-empty target.
             if self.has_game && scissor.2 != 0 && scissor.3 != 0 {
@@ -602,12 +629,15 @@ impl Renderer {
             size_in_pixels: [self.config.width, self.config.height],
             pixels_per_point,
         };
+        // egui-wgpu's `update_buffers` now returns any command buffers its paint
+        // callbacks produced; they must be submitted before this frame's encoder.
+        let mut egui_cmd_bufs = Vec::new();
         if !reuse {
             for (id, image_delta) in &textures.set {
                 self.egui_renderer
                     .update_texture(&self.device, &self.queue, *id, image_delta);
             }
-            self.egui_renderer.update_buffers(
+            egui_cmd_bufs = self.egui_renderer.update_buffers(
                 &self.device,
                 &self.queue,
                 &mut encoder,
@@ -617,25 +647,33 @@ impl Renderer {
             self.egui_jobs = jobs;
         }
         {
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("rustyboi_egui_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+            // egui-wgpu's `render` requires a `RenderPass<'static>` (wgpu 22+);
+            // `forget_lifetime` drops the encoder-borrow lifetime (the pass is
+            // still dropped before `encoder.finish()`, so this stays sound).
+            let mut rpass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("rustyboi_egui_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
             self.egui_renderer
                 .render(&mut rpass, &self.egui_jobs, &screen_descriptor);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.queue
+            .submit(egui_cmd_bufs.into_iter().chain(std::iter::once(encoder.finish())));
         output.present();
 
         if !reuse {
