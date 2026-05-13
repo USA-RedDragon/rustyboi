@@ -11265,8 +11265,8 @@ mod tests {
         rom[0x102] = 0x01; // JP 0x150
         rom[base as usize..base as usize + code.len()].copy_from_slice(&code);
         let mut cs: u8 = 0;
-        for a in 0x134..0x14D {
-            cs = cs.wrapping_sub(rom[a]).wrapping_sub(1);
+        for &b in &rom[0x134..0x14D] {
+            cs = cs.wrapping_sub(b).wrapping_sub(1);
         }
         rom[0x14D] = cs;
 

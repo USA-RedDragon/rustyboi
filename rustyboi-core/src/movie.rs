@@ -603,8 +603,8 @@ mod tests {
         rom[0x148] = 0x00; // 32 KiB
         rom[0x149] = 0x00; // no RAM
         let mut checksum: u8 = 0;
-        for addr in 0x134..0x14D {
-            checksum = checksum.wrapping_sub(rom[addr]).wrapping_sub(1);
+        for &b in &rom[0x134..0x14D] {
+            checksum = checksum.wrapping_sub(b).wrapping_sub(1);
         }
         rom[0x14D] = checksum;
         rom
