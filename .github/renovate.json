@@ -3,7 +3,9 @@
   "extends": [
     "local>USA-RedDragon/renovate-configs"
   ],
-  "baseBranches": ["claude"],
+  "baseBranchPatterns": [
+    "claude"
+  ],
   "packageRules": [
     {
       "groupName": "egui",
@@ -14,6 +16,12 @@
         "egui",
         "egui-winit",
         "egui-wgpu"
+      ]
+    },
+    {
+      "allowedVersions": "<2",
+      "matchPackageNames": [
+        "bincode"
       ]
     }
   ]
