@@ -46,9 +46,20 @@ android {
         targetSdk = 37
         versionCode = 1
         versionName = "0.1.0"
+    }
 
-        ndk {
-            abiFilters += "arm64-v8a"
+    // One APK per ABI instead of a fat APK carrying every native lib. Each
+    // device downloads only its own slice; `isUniversalApk = false` means we
+    // do NOT also emit a combined APK. The `include` list is the sole ABI
+    // scope — AGP forbids also setting `defaultConfig.ndk.abiFilters alongside
+    // splits. (For Play multi-APK upload each ABI needs a distinct versionCode
+    // — not wired here since we sideload.)
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "x86_64")
+            isUniversalApk = false
         }
     }
 
@@ -126,6 +137,7 @@ fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks
     val args = mutableListOf(
         "cargo", "ndk",
         "-t", "arm64-v8a",
+        "-t", "x86_64",
         "-P", ndkPlatform,
         "-o", jniLibsDir.asFile.absolutePath,
         "build",
@@ -133,19 +145,24 @@ fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks
     )
     if (cargoProfile == "release") args += "--release"
     commandLine = args
-    // Tune codegen for modern arm64 phones. Schedule for Cortex-A55 (the LITTLE
-    // core in nearly every modern big.LITTLE SoC) so the little cluster stays
-    // responsive. +outline-atomics uses LSE atomics at runtime when the CPU has
-    // them and falls back safely on armv8.0, so the fast path costs no
-    // compatibility down to minSdk 26. max-page-size=16384 aligns the .so to
-    // 16 KiB — NDK r27 leaves this opt-in (default only from r28), and it is
-    // required for Play + newer 16 KB-page devices. Release-only because debug
-    // builds prioritize compile time.
+    // Per-ABI codegen (release only; debug prioritizes compile time). The env
+    // vars are target-scoped, so each affects only its own ABI.
+    //
+    // arm64: schedule for Cortex-A55 (the LITTLE core in nearly every modern
+    // big.LITTLE SoC) so the little cluster stays responsive. +outline-atomics
+    // uses LSE atomics at runtime when the CPU has them and falls back safely on
+    // armv8.0, so the fast path costs no compatibility down to minSdk 26.
+    //
+    // x86_64: left at baseline (emulators / ChromeOS span a wide CPU range); the
+    // arm-only flags above don't apply, so no tuning is forced.
+    //
+    // 16 KiB .so alignment (required for Play + newer 16 KB-page devices) is not
+    // forced here: NDK r27's linker already defaults to max-page-size=16384 for
+    // both ABIs (verified: LOAD segments land on 0x4000).
     if (cargoProfile == "release") {
         environment(
             "CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS",
-            "-C target-cpu=cortex-a55 -C target-feature=+outline-atomics " +
-                "-C link-arg=-Wl,-z,max-page-size=16384",
+            "-C target-cpu=cortex-a55 -C target-feature=+outline-atomics",
         )
     }
     inputs.dir(rustWorkspaceRoot.dir("rustyboi-platform/src"))
@@ -156,6 +173,7 @@ fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks
     inputs.file(rustWorkspaceRoot.file("Cargo.lock"))
     inputs.file(rustWorkspaceRoot.file("rustyboi-platform/Cargo.toml"))
     outputs.dir(jniLibsDir.dir("arm64-v8a"))
+    outputs.dir(jniLibsDir.dir("x86_64"))
 }
 
 val buildRustLibDebug = cargoNdkTask("buildRustLibDebug", "debug")
