@@ -1,0 +1,3 @@
+# First-party rustyboi test ROMs (RGBDS; mooneye/png grading). GENERATED
+# from test-roms/build/<cat>/<name>.<model>.<grading>.{gb,gbc} — the filename
+# carries the model + grading. Build with `make -C test-roms`; do not hand-edit.
