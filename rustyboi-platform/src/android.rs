@@ -552,7 +552,7 @@ where
     // Safety: `android_context()` exposes the JavaVM/context for the
     // lifetime of the process.
     let vm = unsafe { JavaVM::from_raw(ctx.vm() as *mut _) }.ok()?;
-    let activity = unsafe { JObject::from_raw(ctx.context() as jobject) };
+    let activity = unsafe { JObject::from_raw(android_app().activity_as_ptr() as jobject) };
     let mut env = vm.attach_current_thread().ok()?;
     Some(f(&mut env, &activity))
 }
