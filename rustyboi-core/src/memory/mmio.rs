@@ -2724,6 +2724,15 @@ impl Mmio {
             // (post-mode-0 time crossing) so `step_hdma`'s own block_done set never
             // fires for a kick-armed block; set it here at the in-period kick.
             self.hdma_block_done_this_period = true;
+            // An in-HBlank kick services this HBlank's one block via the
+            // cycle-exact closed-form predicate, which LEADS the CPU-visible STAT
+            // mode. Mark the HBlank serviced so the STAT-mode-3->0 fallback in
+            // `step_hdma` (which lags, firing on the register edge) does NOT arm a
+            // SECOND block for the same scanline — the Pokémon Crystal Elm's-lab
+            // arm-line double-fire. Set ONLY here (the kick), never on ordinary
+            // edge-fired blocks, so real-silicon HDMA-start timing and the halt
+            // HDMA paths are untouched. Cleared on the next LY change.
+            self.hdma_block_fired_this_hblank = true;
         }
         true
     }
@@ -3920,9 +3929,6 @@ impl Mmio {
         self.hdma_pre_fire_state =
             Some((self.hdma_source, self.hdma_dest, self.hdma_length, self.hdma_enabled));
         self.hdma_last_fire_cc = Some(self.master_cc());
-        // This HBlank's one block has now fired; suppress a second on this line
-        // (cleared on the next LY change in `step_hdma`).
-        self.hdma_block_fired_this_hblank = true;
         self.pending_dma_stall += self.run_hdma_block();
         // The DMA event: after the block, a halt-time
         // `hdma_requested` collapses to `hdma_low` so a subsequent unhalt does
