@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Build script for the Rustyboi Android app (Gradle + cargo-ndk).
 #
-# Targets arm64-v8a + x86_64. Release builds emit one standalone APK per ABI
+# Release builds emit one standalone APK per ABI
 # (ABI splits) for sideload / Obtainium / F-Droid; --bundle emits an .aab for
 # Google Play.
 #
 # Prerequisites:
-#   - rustup target add aarch64-linux-android x86_64-linux-android
+#   - rustup target add aarch64-linux-android x86_64-linux-android armv7-linux-androideabi i686-linux-android
 #   - cargo install cargo-ndk
 #   - Android SDK with build-tools and platform 37
 #   - Android NDK 27.3.13750724 (matches ndkVersion in android/app/build.gradle.kts)
@@ -46,7 +46,7 @@ if ! command -v cargo-ndk &> /dev/null; then
     exit 1
 fi
 
-for tgt in aarch64-linux-android x86_64-linux-android; do
+for tgt in aarch64-linux-android x86_64-linux-android armv7-linux-androideabi i686-linux-android; do
     if ! rustup target list --installed 2>/dev/null | grep -q "^$tgt$"; then
         echo "ERROR: $tgt Rust target not installed."
         echo "  Install with: rustup target add $tgt"

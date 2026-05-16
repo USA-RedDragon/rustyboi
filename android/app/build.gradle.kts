@@ -58,7 +58,7 @@ android {
         abi {
             isEnable = true
             reset()
-            include("arm64-v8a", "x86_64")
+            include("arm64-v8a", "x86_64", "armeabi-v7a", "x86")
             isUniversalApk = false
         }
     }
@@ -138,6 +138,8 @@ fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks
         "cargo", "ndk",
         "-t", "arm64-v8a",
         "-t", "x86_64",
+        "-t", "armeabi-v7a",
+        "-t", "x86",
         "-P", ndkPlatform,
         "-o", jniLibsDir.asFile.absolutePath,
         "build",
@@ -174,6 +176,8 @@ fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks
     inputs.file(rustWorkspaceRoot.file("rustyboi-platform/Cargo.toml"))
     outputs.dir(jniLibsDir.dir("arm64-v8a"))
     outputs.dir(jniLibsDir.dir("x86_64"))
+    outputs.dir(jniLibsDir.dir("armeabi-v7a"))
+    outputs.dir(jniLibsDir.dir("x86"))
 }
 
 val buildRustLibDebug = cargoNdkTask("buildRustLibDebug", "debug")
