@@ -55,26 +55,18 @@ both DMG and CGB games.
 
 ### Build
 
-The core is not part of the default workspace build, so build it explicitly:
+The core is not part of the default workspace build, so build it explicitly with
+`tools/build-libretro.sh`. This script builds every libretro target **inside the
+[`rust-cross`](https://github.com/USA-RedDragon/dockers/tree/main/images/rust-cross)
+container image**, which bundles all the cross toolchains (gnu + musl linkers,
+llvm-mingw, osxcross, the Android NDK).
 
 ```sh
-cargo build -p rustyboi-libretro --release
+./tools/build-libretro.sh --list                      # the target table
+./tools/build-libretro.sh linux-x86_64 windows-arm64  # specific targets
+./tools/build-libretro.sh --all                       # every target
+RUSTBOI_CROSS_IMAGE=… ./tools/build-libretro.sh …     # override the image
 ```
-
-> Note: `rust-libretro` generates its FFI bindings with bindgen, which needs
-> libclang. libclang 22 mis-parses one libretro struct and the build will fail
-> with a `transmute between types of different sizes` error. If you hit that,
-> point bindgen at an older libclang (21 or earlier works):
->
-> ```sh
-> LIBCLANG_PATH=/usr/lib/llvm21/lib cargo build -p rustyboi-libretro --release
-> ```
-
-The resulting core lands at:
-
-- Linux: `target/release/librustyboi_libretro.so`
-- macOS: `target/release/librustyboi_libretro.dylib`
-- Windows: `target/release/rustyboi_libretro.dll`
 
 ### Install
 
@@ -83,7 +75,7 @@ Copy the built library into RetroArch's `cores/` directory, and the bundled
 name, supported extensions, and capabilities. On Linux that is typically:
 
 ```sh
-cp target/release/librustyboi_libretro.so ~/.config/retroarch/cores/
+cp target/libretro/linux-x86_64/rustyboi_libretro.so ~/.config/retroarch/cores/
 cp rustyboi-libretro/rustyboi_libretro.info ~/.config/retroarch/info/
 ```
 
@@ -93,26 +85,20 @@ The library and `.info` basenames must match (`rustyboi_libretro`).
 
 ### Android (RetroArch)
 
-The desktop `.so` is glibc/x86-64 and will **not** load on Android. Cross-compile
-with the Android NDK using the helper script (needs `cargo-ndk`, the Android Rust
-targets, and an NDK):
+The desktop `.so` is glibc/x86-64 and will **not** load on Android — build the
+Android cores with the same script (they emit
+`target/libretro/android-<abi>/rustyboi_libretro_android.so`, with the mandatory
+`_android` suffix and **no** `lib` prefix that RetroArch Android requires):
 
 ```sh
-ANDROID_NDK_HOME=/path/to/ndk ./build-libretro-android.sh arm64-v8a   # or --all
+./tools/build-libretro.sh android-arm64 android-armv7 android-x86_64 android-x86
 ```
 
-This emits `target/libretro-android/<abi>/rustyboi_libretro_android.so` — note the
-mandatory `_android` suffix and **no** `lib` prefix; RetroArch Android only loads
-cores named `<name>_libretro_android.so`. The script handles the two cross-build
-gotchas: a per-ABI bindgen `--target`/`--sysroot` (so 32-bit pointer/`size_t`
-layouts are correct) and a host `libclang` ≤ 21 (libclang 22 mis-parses a libretro
-struct; set `LIBCLANG_PATH` if it isn't auto-detected).
-
-Install it via the in-app menu — RetroArch's Android cores live in an app-private
+Install via the in-app menu — RetroArch's Android cores live in an app-private
 directory you can't push into without root:
 
 ```sh
-adb push target/libretro-android/arm64-v8a/rustyboi_libretro_android.so /sdcard/Download/
+adb push target/libretro/android-arm64/rustyboi_libretro_android.so /sdcard/Download/
 ```
 
 Then **Main Menu → Load Core → Install or Restore a Core → Downloads →
@@ -123,7 +109,7 @@ copied by that flow; to add it, push `rustyboi_libretro.info` into the path unde
 
 ### Load
 
-1. In RetroArch, choose **Load Core** and select `librustyboi_libretro.so`.
+1. In RetroArch, choose **Load Core** and select the `rustyboi_libretro` core.
 2. Choose **Load Content** and pick a `.gb`, `.gbc`, or zipped ROM.
 
 Under **Quick Menu > Options** you can set the hardware model
