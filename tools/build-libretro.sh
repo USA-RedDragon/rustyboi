@@ -1,125 +1,183 @@
 #!/usr/bin/env bash
-# Cross-compile the rustyboi libretro core for Android (RetroArch).
+# Build the rustyboi libretro core (RetroArch) for every libretro target, inside
+# the USA-RedDragon/rust-cross container image — it bakes in all the cross
+# toolchains (gnu + musl linkers, llvm-mingw, osxcross, the Android NDK).
 #
-# Produces, per ABI, a `librustyboi_libretro_android.so` — note the mandatory
-# `_android` suffix: RetroArch's Android core loader only recognises cores whose
-# filename ends in `_libretro_android.so` and ignores a plain `_libretro.so`.
+# Host-agnostic: the only requirement on the machine running this is a working
+# Docker (or Podman) engine. Every target is cross-compiled *in the container*
+# via `cargo build --target <triple>`, then the artifact is renamed into
+# RetroArch's rules:
+#   Linux/BSD   <corename>_libretro.so       (no `lib` prefix)
+#   macOS       <corename>_libretro.dylib    (no `lib` prefix)
+#   Windows     <corename>_libretro.dll
+#   Android     <corename>_libretro_android.so   (mandatory `_android` suffix)
 #
-# Prerequisites:
-#   - cargo install cargo-ndk
-#   - rustup target add aarch64-linux-android armv7-linux-androideabi \
-#                       x86_64-linux-android i686-linux-android
-#   - Android NDK (resolved from ANDROID_NDK_ROOT/ANDROID_NDK_HOME, NDK_HOME,
-#     or $ANDROID_HOME/ndk/*). Tested with r26 (26.1.10909125).
-#   - A host libclang for bindgen. libclang 22 mis-parses a libretro struct, so
-#     this script prefers libclang 21 if present; override with LIBCLANG_PATH.
+# The core defines the libretro C ABI by hand (rustyboi-libretro-sys) — no
+# bindgen — so cross-compiling needs only a linker, no per-target C sysroot.
+# The only per-target tweaks the script applies:
+#   - musl targets    -> RUSTFLAGS=-C target-feature=-crt-static (musl defaults
+#                        to a static crt, which can't produce a cdylib).
+#   - riscv64 musl    -> Rust's bundled ld.lld (the image's musl-cross-make
+#                        binutils `ld` is too old for Rust's RISC-V ISA attrs).
+#   - android targets -> the NDK clang linker (the image has the NDK but not
+#                        cargo-ndk).
 #
 # Usage:
-#   ./build-libretro-android.sh                 # arm64-v8a (most phones), release
-#   ./build-libretro-android.sh --all           # all four ABIs
-#   ./build-libretro-android.sh arm64-v8a x86_64
-#   API=24 ./build-libretro-android.sh --all    # override min API (default 21)
+#   ./build-libretro.sh --list                     # the target table
+#   ./build-libretro.sh linux-x86_64 windows-x86_64 android-arm64
+#   ./build-libretro.sh --all                      # every target
+#   RUSTBOI_CROSS_IMAGE=... ./build-libretro.sh …   # override the image
 #
-# Output: target/libretro-android/<abi>/librustyboi_libretro_android.so
-#         plus rustyboi_libretro.info copied alongside.
+# Output: target/libretro/<name>/<corename>_libretro[.so|.dylib|.dll]
+#         (or _android.so), each with rustyboi_libretro.info copied alongside.
 
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)/.."
 cd "$PROJECT_ROOT"
 
-API="${API:-21}"
-ALL_ABIS=(arm64-v8a armeabi-v7a x86_64 x86)
+CORENAME="rustyboi"
+IMAGE="${RUSTBOI_CROSS_IMAGE:-ghcr.io/usa-reddragon/rust-cross:1.94.1}"
+CARGO_VOL="${RUSTBOI_CARGO_VOLUME:-rustyboi-xcross-cargo}"   # persists the crate cache
+ANDROID_API="${ANDROID_API:-21}"
+OUT="$PROJECT_ROOT/target/libretro"
+INFO="$PROJECT_ROOT/rustyboi-libretro/rustyboi_libretro.info"
+HOST_UIDGID="$(id -u):$(id -g)"
 
-# ---------- Parse ABIs ----------
-ABIS=()
+# ---------- Target table: name | rust-triple | os | variant ----------
+#   os      drives artifact naming (linux/darwin/windows/android)
+#   variant "musl" | "android" | "" — selects the per-target linker tweak
+TARGETS=(
+    "linux-x86_64|x86_64-unknown-linux-gnu|linux|"
+    "linux-aarch64|aarch64-unknown-linux-gnu|linux|"
+    "linux-armv7|armv7-unknown-linux-gnueabihf|linux|"
+    "linux-x86_64-musl|x86_64-unknown-linux-musl|linux|musl"
+    "linux-aarch64-musl|aarch64-unknown-linux-musl|linux|musl"
+    "linux-armv7-musl|armv7-unknown-linux-musleabihf|linux|musl"
+    "linux-riscv64-musl|riscv64gc-unknown-linux-musl|linux|musl"
+    "android-arm64|aarch64-linux-android|android|android"
+    "android-armv7|armv7-linux-androideabi|android|android"
+    "android-x86_64|x86_64-linux-android|android|android"
+    "android-x86|i686-linux-android|android|android"
+    "macos-x86_64|x86_64-apple-darwin|darwin|"
+    "macos-aarch64|aarch64-apple-darwin|darwin|"
+    "windows-x86_64|x86_64-pc-windows-gnullvm|windows|"
+    "windows-arm64|aarch64-pc-windows-gnullvm|windows|"
+)
+
+field() { local IFS='|'; read -ra f <<<"$1"; echo "${f[$2]:-}"; }
+target_by_name() {
+    for t in "${TARGETS[@]}"; do [ "$(field "$t" 0)" = "$1" ] && { echo "$t"; return 0; }; done
+    return 1
+}
+print_list() {
+    printf '%-20s %s\n' "NAME" "RUST TRIPLE"
+    for t in "${TARGETS[@]}"; do printf '%-20s %s\n' "$(field "$t" 0)" "$(field "$t" 1)"; done
+}
+
+# ---------- Parse args ----------
+SELECTED=()
 for arg in "$@"; do
     case "$arg" in
-        --all) ABIS=("${ALL_ABIS[@]}") ;;
-        -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
-        arm64-v8a|armeabi-v7a|x86_64|x86) ABIS+=("$arg") ;;
-        *) echo "Unknown argument: $arg"; echo "Usage: $0 [--all] [arm64-v8a armeabi-v7a x86_64 x86]"; exit 1 ;;
+        --all)  for t in "${TARGETS[@]}"; do SELECTED+=("$(field "$t" 0)"); done ;;
+        --list) print_list; exit 0 ;;
+        -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+        --*)    echo "Unknown option: $arg"; echo "Try --help or --list."; exit 1 ;;
+        *)      if target_by_name "$arg" >/dev/null; then SELECTED+=("$arg")
+                else echo "Unknown target: $arg"; echo "Run '$0 --list' for valid names."; exit 1; fi ;;
     esac
 done
-[ ${#ABIS[@]} -eq 0 ] && ABIS=(arm64-v8a)
+[ ${#SELECTED[@]} -eq 0 ] && { echo "No targets given."; echo "Run '$0 --list', or pass targets / --all."; exit 1; }
 
-# ABI -> clang target triple (for bindgen --target; correct layouts on 32-bit).
-abi_triple() {
+# ---------- Container engine ----------
+ENGINE="${RUSTBOI_CONTAINER_ENGINE:-}"
+if [ -z "$ENGINE" ]; then
+    if command -v docker >/dev/null 2>&1; then ENGINE=docker
+    elif command -v podman >/dev/null 2>&1; then ENGINE=podman
+    else echo "ERROR: need Docker or Podman (set RUSTBOI_CONTAINER_ENGINE)."; exit 1; fi
+fi
+$ENGINE image inspect "$IMAGE" >/dev/null 2>&1 || \
+    echo "note: image $IMAGE not present locally; $ENGINE will try to pull it."
+
+# ---------- Artifact naming ----------
+cargo_artifact() {   # os -> the filename cargo emits
     case "$1" in
-        arm64-v8a)    echo "aarch64-linux-android${API}" ;;
-        armeabi-v7a)  echo "armv7a-linux-androideabi${API}" ;;
-        x86_64)       echo "x86_64-linux-android${API}" ;;
-        x86)          echo "i686-linux-android${API}" ;;
+        windows) echo "${CORENAME}_libretro.dll" ;;
+        darwin)  echo "lib${CORENAME}_libretro.dylib" ;;
+        *)       echo "lib${CORENAME}_libretro.so" ;;
+    esac
+}
+retroarch_name() {   # os -> the filename RetroArch expects
+    case "$1" in
+        windows) echo "${CORENAME}_libretro.dll" ;;
+        darwin)  echo "${CORENAME}_libretro.dylib" ;;
+        android) echo "${CORENAME}_libretro_android.so" ;;
+        *)       echo "${CORENAME}_libretro.so" ;;
     esac
 }
 
-# ---------- Preflight ----------
-command -v cargo-ndk >/dev/null 2>&1 || { echo "ERROR: cargo-ndk not installed. Run: cargo install cargo-ndk"; exit 1; }
+# Android NDK clang wrapper prefix (armv7 -> armv7a is the quirk).
+android_clang_prefix() {
+    case "$1" in
+        aarch64-linux-android)    echo "aarch64-linux-android" ;;
+        armv7-linux-androideabi)  echo "armv7a-linux-androideabi" ;;
+        x86_64-linux-android)     echo "x86_64-linux-android" ;;
+        i686-linux-android)       echo "i686-linux-android" ;;
+    esac
+}
 
-NDK_ROOT="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-${NDK_HOME:-}}}"
-ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-if [ -z "$NDK_ROOT" ] && [ -n "$ANDROID_HOME" ] && [ -d "$ANDROID_HOME/ndk" ]; then
-    NDK_ROOT=$(ls -d "$ANDROID_HOME/ndk/"*/ 2>/dev/null | sort -V | tail -1 || true)
-fi
-NDK_ROOT="${NDK_ROOT%/}"
-if [ -z "$NDK_ROOT" ] || [ ! -d "$NDK_ROOT" ]; then
-    echo "ERROR: Could not locate Android NDK."
-    echo "  Set ANDROID_NDK_ROOT/ANDROID_NDK_HOME, or install: sdkmanager 'ndk;26.1.10909125'"
-    exit 1
-fi
-export ANDROID_NDK_ROOT="$NDK_ROOT" ANDROID_NDK_HOME="$NDK_ROOT"
+# ---------- Build one target in the container ----------
+build_target() {
+    local triple="$1" os="$2" variant="$3" name="$4"
+    local pre=""   # shell run inside the container before `cargo build`
+    case "$variant" in
+        musl)
+            pre='export RUSTFLAGS="-C target-feature=-crt-static ${RUSTFLAGS:-}";'
+            # riscv64's musl-cross-make binutils `ld` is too old for the RISC-V
+            # ISA attributes Rust's std emits — link with Rust's bundled ld.lld.
+            [ "$triple" = riscv64gc-unknown-linux-musl ] && \
+                pre='export RUSTFLAGS="-C target-feature=-crt-static -C link-arg=-B$(rustc --print sysroot)/lib/rustlib/$(rustc --print host-tuple)/bin/gcc-ld -C link-arg=-fuse-ld=lld ${RUSTFLAGS:-}";'
+            ;;
+        android)
+            local pfx lvar
+            pfx="$(android_clang_prefix "$triple")"
+            lvar="CARGO_TARGET_$(echo "$triple" | tr 'a-z-' 'A-Z_')_LINKER"
+            pre="export $lvar=\"\$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/${pfx}${ANDROID_API}-clang\";"
+            ;;
+    esac
 
-SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-[ -d "$SYSROOT" ] || { echo "ERROR: NDK sysroot not found at $SYSROOT"; exit 1; }
+    local incmd="set -e; $pre
+        cargo build --target $triple --release -p rustyboi-libretro
+        chown -R $HOST_UIDGID target/$triple"
 
-# bindgen runs with the *host* libclang. Prefer 21 (22 mis-parses retro_game_info).
-if [ -z "${LIBCLANG_PATH:-}" ]; then
-    for c in /usr/lib/llvm21/lib /usr/lib/llvm-21/lib /usr/lib64/llvm21/lib; do
-        [ -d "$c" ] && { LIBCLANG_PATH="$c"; break; }
-    done
-fi
-export LIBCLANG_PATH="${LIBCLANG_PATH:-}"
-[ -n "$LIBCLANG_PATH" ] && echo "Using libclang: $LIBCLANG_PATH" \
-    || echo "WARN: LIBCLANG_PATH unset; relying on system libclang (must be <= 21)."
+    echo "==> $name  ($triple, in $IMAGE)"
+    $ENGINE run --rm \
+        -v "$PROJECT_ROOT":/project -w /project \
+        -v "$CARGO_VOL":/usr/local/cargo/registry \
+        "$IMAGE" sh -c "$incmd" || return 1
 
-OUT="$PROJECT_ROOT/target/libretro-android"
-INFO="$PROJECT_ROOT/rustyboi-libretro/rustyboi_libretro.info"
-echo "Using NDK: $NDK_ROOT   API: $API   ABIs: ${ABIS[*]}"
+    local src="$PROJECT_ROOT/target/$triple/release/$(cargo_artifact "$os")"
+    [ -f "$src" ] || { echo "ERROR: expected artifact missing: $src"; return 1; }
+    local dir="$OUT/$name"
+    mkdir -p "$dir"
+    cp -f "$src" "$dir/$(retroarch_name "$os")"
+    [ -f "$INFO" ] && cp -f "$INFO" "$dir/"
+    echo "    -> $dir/$(retroarch_name "$os")"
+}
 
-# ---------- Build per ABI ----------
-# One cargo-ndk invocation per ABI so bindgen gets the correct per-ABI --target
-# (a single BINDGEN_EXTRA_CLANG_ARGS can't vary across ABIs, and a wrong target
-# corrupts pointer/size_t layouts on the 32-bit ABIs).
-for abi in "${ABIS[@]}"; do
-    triple="$(abi_triple "$abi")"
+# ---------- Run ----------
+echo "Image: $IMAGE"
+built=() failed=()
+for name in "${SELECTED[@]}"; do
+    entry="$(target_by_name "$name")"
+    triple="$(field "$entry" 1)"; os="$(field "$entry" 2)"; variant="$(field "$entry" 3)"
     echo ""
-    echo "==> $abi ($triple)"
-    BINDGEN_EXTRA_CLANG_ARGS="--target=$triple --sysroot=$SYSROOT" \
-        cargo ndk -t "$abi" -P "$API" -o "$OUT" build -p rustyboi-libretro --release
-
-    src="$OUT/$abi/librustyboi_libretro.so"
-    # RetroArch Android cores have NO `lib` prefix: `<name>_libretro_android.so`.
-    dst="$OUT/$abi/rustyboi_libretro_android.so"
-    [ -f "$src" ] || { echo "ERROR: expected artifact missing: $src"; exit 1; }
-    mv -f "$src" "$dst"
-    # Drop the stray core-lib cdylib cargo-ndk also copies; RetroArch only needs the core.
-    rm -f "$OUT/$abi/librustyboi_core_lib.so" "$OUT/$abi/librustyboi_libretro_android.so"
-    [ -f "$INFO" ] && cp -f "$INFO" "$OUT/$abi/"
-    echo "    -> $dst"
+    if build_target "$triple" "$os" "$variant" "$name"; then built+=("$name"); else
+        failed+=("$name")
+    fi
 done
 
 echo ""
-echo "Done. RetroArch Android keeps cores in an app-private dir you can't push"
-echo "into directly, so install via the menu instead:"
-echo "  1. adb push $OUT/arm64-v8a/rustyboi_libretro_android.so /sdcard/Download/"
-echo "  2. In RetroArch: Main Menu -> Load Core -> Install or Restore a Core"
-echo "     -> Downloads -> rustyboi_libretro_android.so  (RetroArch copies it in)"
-echo "  3. Load Core -> Rustyboi, then Load Content with a .gb/.gbc ROM."
-echo "  (Confirm the real cores path under Settings -> Directory -> Cores.)"
-echo ""
-echo "The .info is OPTIONAL (core runs without it; it just adds the display name"
-echo "and .gb/.gbc association). The menu install does NOT copy it. To add it,"
-echo "find Settings -> Directory -> Core Info; if writable, push it there:"
-echo "  adb push $OUT/arm64-v8a/rustyboi_libretro.info <core-info-dir>/"
-echo "Default is app-private (/data/user/0/com.retroarch.*/info) -> needs root,"
-echo "or point Core Info at a writable dir first. Fine to skip for testing."
+echo "Done. Built: ${built[*]:-(none)}"
+[ ${#failed[@]} -gt 0 ] && { echo "Failed: ${failed[*]}"; exit 1; }
+echo "Cores are under $OUT/<name>/ with rustyboi_libretro.info alongside."
