@@ -1,0 +1,10 @@
+[package]
+name = "rustyboi-libretro-sys"
+version = "0.1.0"
+edition = "2024"
+description = "Hand-written libretro C ABI + a safe Core trait, for the rustyboi core"
+
+[lib]
+name = "rustyboi_libretro_sys"
+
+[dependencies]
