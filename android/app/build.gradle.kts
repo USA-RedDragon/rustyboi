@@ -87,7 +87,7 @@ android {
             isMinifyEnabled = false
         }
         getByName("release") {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
             if (keystoreProps != null) {
                 signingConfig = signingConfigs.getByName("release")
             } else {
