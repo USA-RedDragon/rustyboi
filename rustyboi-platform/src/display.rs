@@ -569,6 +569,7 @@ const SNAP_DEBOUNCE: Duration = Duration::from_millis(140);
 /// `event_loop.run` closure captured. The window + GPU `RenderState` are created
 /// lazily in `resumed` and dropped in `suspended`; the emulation `App` persists.
 struct GuiApp<'c> {
+    #[cfg_attr(target_os = "android", allow(unused))]
     config: &'c config::CleanConfig,
     window: Option<Arc<Window>>,
     render_state: Option<RenderState>,
