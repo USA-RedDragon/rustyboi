@@ -7,7 +7,7 @@
 # Docker (or Podman) engine. Every target is cross-compiled *in the container*
 # via `cargo build --target <triple>`, then the artifact is renamed into
 # RetroArch's rules:
-#   Linux/BSD   <corename>_libretro.so       (no `lib` prefix)
+#   Linux   <corename>_libretro.so       (no `lib` prefix)
 #   macOS       <corename>_libretro.dylib    (no `lib` prefix)
 #   Windows     <corename>_libretro.dll
 #   Android     <corename>_libretro_android.so   (mandatory `_android` suffix)
