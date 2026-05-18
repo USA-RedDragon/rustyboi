@@ -49,10 +49,12 @@ HOST_UIDGID="$(id -u):$(id -g)"
 #   variant "musl" | "android" | "" — selects the per-target linker tweak
 TARGETS=(
     "linux-x86_64|x86_64-unknown-linux-gnu|linux|"
+    "linux-i686|i686-unknown-linux-gnu|linux|"
     "linux-aarch64|aarch64-unknown-linux-gnu|linux|"
     "linux-armv7|armv7-unknown-linux-gnueabihf|linux|"
     "linux-riscv64|riscv64gc-unknown-linux-gnu|linux|"
     "linux-x86_64-musl|x86_64-unknown-linux-musl|linux|musl"
+    "linux-i686-musl|i686-unknown-linux-musl|linux|musl"
     "linux-aarch64-musl|aarch64-unknown-linux-musl|linux|musl"
     "linux-armv7-musl|armv7-unknown-linux-musleabihf|linux|musl"
     "linux-riscv64-musl|riscv64gc-unknown-linux-musl|linux|musl"
@@ -64,6 +66,7 @@ TARGETS=(
     "macos-aarch64|aarch64-apple-darwin|darwin|"
     "windows-x86_64|x86_64-pc-windows-gnullvm|windows|"
     "windows-arm64|aarch64-pc-windows-gnullvm|windows|"
+    "windows-i686|i686-pc-windows-gnullvm|windows|"
 )
 
 field() { local IFS='|'; read -ra f <<<"$1"; echo "${f[$2]:-}"; }
