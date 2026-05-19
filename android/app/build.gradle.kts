@@ -1,5 +1,6 @@
 import org.gradle.api.tasks.Exec
 import org.gradle.kotlin.dsl.register
+import java.io.File
 import java.util.Properties
 
 plugins {
@@ -134,12 +135,10 @@ fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks
     // ships in its sysroot at API >= 26. cargo-ndk otherwise defaults to API 21
     // (no libaaudio.so → link failure), so pin the link platform to our minSdk.
     val ndkPlatform = (android.defaultConfig.minSdk ?: 26).toString()
-    val args = mutableListOf(
-        "cargo", "ndk",
-        "-t", "arm64-v8a",
-        "-t", "x86_64",
-        "-t", "armeabi-v7a",
-        "-t", "x86",
+    val abis = listOf("arm64-v8a", "x86_64", "armeabi-v7a", "x86")
+    val args = mutableListOf("cargo", "ndk")
+    abis.forEach { args += listOf("-t", it) }
+    args += listOf(
         "-P", ndkPlatform,
         "-o", jniLibsDir.asFile.absolutePath,
         "build",
@@ -174,10 +173,24 @@ fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks
     inputs.file(rustWorkspaceRoot.file("Cargo.toml"))
     inputs.file(rustWorkspaceRoot.file("Cargo.lock"))
     inputs.file(rustWorkspaceRoot.file("rustyboi-platform/Cargo.toml"))
-    outputs.dir(jniLibsDir.dir("arm64-v8a"))
-    outputs.dir(jniLibsDir.dir("x86_64"))
-    outputs.dir(jniLibsDir.dir("armeabi-v7a"))
-    outputs.dir(jniLibsDir.dir("x86"))
+    abis.forEach { outputs.dir(jniLibsDir.dir(it)) }
+
+    // cargo-ndk copies every cdylib the build produced, but only
+    // rustyboi_platform_lib is the JNI entry the manifest loads
+    // (android.app.lib_name); core/debugger/egui/frontend are statically linked
+    // into it already, so their standalone cdylibs are dead weight in the APK.
+    // Capture a plain path String (not the Gradle Directory) so the execution-time
+    // action stays configuration-cache serializable.
+    val jniLibsPath = jniLibsDir.asFile.absolutePath
+    doLast {
+        abis.forEach { abi ->
+            File("$jniLibsPath/$abi").listFiles()?.forEach { f ->
+                if (f.name.endsWith(".so") && f.name != "librustyboi_platform_lib.so") {
+                    f.delete()
+                }
+            }
+        }
+    }
 }
 
 val buildRustLibDebug = cargoNdkTask("buildRustLibDebug", "debug")
