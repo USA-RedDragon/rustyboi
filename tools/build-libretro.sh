@@ -45,7 +45,7 @@ INFO="$PROJECT_ROOT/rustyboi-libretro/rustyboi_libretro.info"
 HOST_UIDGID="$(id -u):$(id -g)"
 
 # ---------- Target table: name | rust-triple | os | variant ----------
-#   os      drives artifact naming (linux/darwin/windows/android)
+#   os      drives artifact naming (linux/darwin/ios/windows/android)
 #   variant "musl" | "android" | "" — selects the per-target linker tweak
 TARGETS=(
     "linux-x86_64|x86_64-unknown-linux-gnu|linux|"
@@ -64,6 +64,7 @@ TARGETS=(
     "android-x86|i686-linux-android|android|android"
     "macos-x86_64|x86_64-apple-darwin|darwin|"
     "macos-aarch64|aarch64-apple-darwin|darwin|"
+    "ios-arm64|aarch64-apple-ios|ios|"
     "windows-x86_64|x86_64-pc-windows-gnullvm|windows|"
     "windows-arm64|aarch64-pc-windows-gnullvm|windows|"
     "windows-i686|i686-pc-windows-gnullvm|windows|"
@@ -106,15 +107,16 @@ $ENGINE image inspect "$IMAGE" >/dev/null 2>&1 || \
 # ---------- Artifact naming ----------
 cargo_artifact() {   # os -> the filename cargo emits
     case "$1" in
-        windows) echo "${CORENAME}_libretro.dll" ;;
-        darwin)  echo "lib${CORENAME}_libretro.dylib" ;;
-        *)       echo "lib${CORENAME}_libretro.so" ;;
+        windows)     echo "${CORENAME}_libretro.dll" ;;
+        darwin|ios)  echo "lib${CORENAME}_libretro.dylib" ;;
+        *)           echo "lib${CORENAME}_libretro.so" ;;
     esac
 }
 retroarch_name() {   # os -> the filename RetroArch expects
     case "$1" in
         windows) echo "${CORENAME}_libretro.dll" ;;
         darwin)  echo "${CORENAME}_libretro.dylib" ;;
+        ios)     echo "${CORENAME}_libretro_ios.dylib" ;;   # RetroArch iOS suffix
         android) echo "${CORENAME}_libretro_android.so" ;;
         *)       echo "${CORENAME}_libretro.so" ;;
     esac
