@@ -10,6 +10,7 @@ import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.Keep
 import androidx.documentfile.provider.DocumentFile
 import com.google.androidgamesdk.GameActivity
 import org.json.JSONArray
@@ -36,6 +37,12 @@ import java.util.concurrent.Executors
  *    enumerate ROMs recursively, and load a chosen ROM along with a
  *    writable sibling `.sav` file descriptor.
  */
+// R8 (release `isMinifyEnabled`) can't see the JNI boundary: the SAF up-calls
+// (pickRomFromSaf/pickLibraryTree/scanLibrary/loadRomEntry/showToast) are reached
+// only from Rust via `env.call_method`, and the `native` down-calls are linked by
+// the mangled `Java_dev_mcswain_rustyboi_RustyboiActivity_*` symbol. Keep the whole
+// class (name + members) so shrinking/obfuscation can't strip or rename any of it.
+@Keep
 class RustyboiActivity : GameActivity() {
 
     /** Single-threaded background reader so multiple picks serialize. */
