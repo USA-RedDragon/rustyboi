@@ -39,4 +39,6 @@ jobs:
           restore-keys: cross-${{ matrix.target }}-
       - name: Build ${{ matrix.target }}
         run: |
+          cargo install cargo-ndk
+          cargo install wasm-pack
           ./tools/build-${{ matrix.target }}.sh ${{ matrix.args }}
