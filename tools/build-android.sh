@@ -108,19 +108,6 @@ if [ "${#APKS[@]}" -gt 0 ]; then
     echo "APKs (one standalone APK per ABI — install the one matching the device):"
     for a in "${APKS[@]}"; do echo "  $a"; done
     echo ""
-    # If a device is attached, resolve its primary ABI and point at that APK.
-    DEV_ABI=$(adb shell getprop ro.product.cpu.abi 2>/dev/null | tr -d '\r')
-    MATCH=""
-    if [ -n "$DEV_ABI" ]; then
-        for a in "${APKS[@]}"; do case "$a" in *"$DEV_ABI"*) MATCH="$a";; esac; done
-    fi
-    if [ -n "$MATCH" ]; then
-        echo "Install (device is $DEV_ABI):  adb install -r $MATCH"
-    else
-        echo "Install:  adb install -r <apk-for-your-device-abi>"
-    fi
-    echo "Logs:     adb logcat -s rustyboi"
-    echo ""
 fi
 
 # App Bundle artifact (from bundle*): a single .aab for Google Play. It carries
