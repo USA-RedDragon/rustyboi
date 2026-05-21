@@ -47,7 +47,8 @@ winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] 
 # new objc2 version to the graph.
 objc2 = "=0.6.4"
 objc2-foundation = { version = "=0.3.2", features = ["NSArray", "NSString", "NSURL", "NSData", "NSObject"] }
-objc2-ui-kit = { version = "=0.3.2", features = ["UIApplication", "UIWindow", "UIView", "UIViewController", "UIResponder", "UIDocumentPickerViewController"] }
+objc2-ui-kit = { version = "=0.3.2", features = ["UIApplication", "UIWindow", "UIView", "UIViewController", "UIResponder", "UIDocumentPickerViewController", "objc2-uniform-type-identifiers"] }
+objc2-uniform-type-identifiers = { version = "=0.3.2", features = ["UTType", "UTCoreTypes"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "=0.1.7"

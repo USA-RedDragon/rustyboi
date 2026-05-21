@@ -7,7 +7,7 @@ name: rustyboi
 options:
   bundleIdPrefix: dev.mcswain
   deploymentTarget:
-    iOS: "13.0"
+    iOS: "14.0"
   createIntermediateGroups: true
 settings:
   base:
@@ -22,7 +22,7 @@ targets:
   rustyboi:
     type: application
     platform: iOS
-    deploymentTarget: "13.0"
+    deploymentTarget: "14.0"
     sources:
       - path: Sources
     settings:
