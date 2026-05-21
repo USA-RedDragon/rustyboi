@@ -41,3 +41,14 @@ targets:
       - sdk: AVFAudio.framework
       - sdk: AudioToolbox.framework
       - sdk: CoreAudio.framework
+# A shared scheme so `xcodebuild -scheme rustyboi` resolves (XcodeGen does not
+# generate one implicitly). Required by tools/build-ios.sh and CI.
+schemes:
+  rustyboi:
+    build:
+      targets:
+        rustyboi: all
+    run:
+      config: Release
+    archive:
+      config: Release
