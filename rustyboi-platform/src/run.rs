@@ -75,6 +75,9 @@ pub fn run() -> Result<(), PlatformError> {
 /// lifecycle (it calls `UIApplicationMain` from `EventLoop::run_app`).
 #[cfg(target_os = "ios")]
 pub fn run_ios() -> Result<(), PlatformError> {
+    // Install the native document-picker bridge before the UI can call it.
+    rustyboi_frontend_lib::ios_bridge::install(Box::new(crate::ios::present_document_picker));
+
     let config = config::RawConfig::try_parse_from(std::iter::empty::<String>())
         .expect("Failed to create default config")
         .clean();

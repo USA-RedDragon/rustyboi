@@ -19,12 +19,13 @@ use crate::input_config::InputConfig;
 use serde::{Deserialize, Serialize};
 
 /// A file handed to the session by the frontend's picker. Desktop passes a path
-/// (the frontend reads it); web/Android pass already-loaded bytes.
+/// (the frontend reads it); web/Android/iOS pass already-loaded bytes (the iOS
+/// UIDocumentPicker yields a security-scoped URL we read eagerly, not a path).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileData {
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
     Path(std::path::PathBuf),
-    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+    #[cfg(any(target_arch = "wasm32", target_os = "android", target_os = "ios"))]
     Contents { name: String, data: Vec<u8> },
 }
 
@@ -289,7 +290,7 @@ impl Default for SessionUiState {
             sgb_border: true,
             paused: false,
             fast_forward: false,
-            touch_controls: cfg!(target_os = "android"),
+            touch_controls: cfg!(mobile),
             printer_attached: false,
             recording: false,
             replaying: false,

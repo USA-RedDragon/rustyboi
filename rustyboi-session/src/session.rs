@@ -254,7 +254,7 @@ impl Session {
             pending_snapshot: None,
             audio_buf,
             sgb_border: true,
-            touch_controls: cfg!(target_os = "android"),
+            touch_controls: cfg!(mobile),
             palette,
             boot_rom: None,
             pending_step_cycles: None,
