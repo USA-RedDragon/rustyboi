@@ -41,6 +41,7 @@ jobs:
         run: |
           cargo install cargo-ndk
           cargo install wasm-pack
+          rustup target add x86_64-linux-android aarch64-linux-android i686-linux-android armv7-linux-androideabi
           ./tools/build-${{ matrix.target }}.sh ${{ matrix.args }}
 
   ios-app:
