@@ -42,6 +42,12 @@ rfd = "=0.15.4"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
+# UIKit interop for the document picker (src/ios.rs). The 0.6/0.3 objc2
+# generation is already compiled transitively via egui-winit, so this adds no
+# new objc2 version to the graph.
+objc2 = "=0.6.4"
+objc2-foundation = { version = "=0.3.2", features = ["NSArray", "NSString", "NSURL", "NSData", "NSObject"] }
+objc2-ui-kit = { version = "=0.3.2", features = ["UIApplication", "UIWindow", "UIView", "UIViewController", "UIResponder", "UIDocumentPickerViewController"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "=0.1.7"
