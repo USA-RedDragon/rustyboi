@@ -50,6 +50,7 @@ fi
 # On macOS the Apple toolchain is native, so no CC/AR/SDKROOT plumbing is needed
 # (that's only for cross-compiling from Linux via the rust-cross image).
 echo "==> cargo build ($RUST_TARGET, release)"
+export IPHONEOS_DEPLOYMENT_TARGET=14.0
 cargo build --release -p rustyboi-platform --lib --target "$RUST_TARGET"
 RUST_LIB_DIR="$PROJECT_ROOT/target/$RUST_TARGET/release"
 [ -f "$RUST_LIB_DIR/librustyboi_platform_lib.a" ] || {

@@ -141,7 +141,7 @@ rc_build() {   # triple variant crt <extra cargo args...>
             pre="export $lvar=\"\$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/${pfx}${ANDROID_API}-clang\";" ;;
         ios)
             # Modern LC_BUILD_VERSION (platform iOS), not the legacy min-10.0 cmd.
-            pre='export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-13.0}";' ;;
+            pre='export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-14.0}";' ;;
     esac
     [ -n "$flags" ] && pre="$pre export RUSTFLAGS=\"$flags \${RUSTFLAGS:-}\";"
 

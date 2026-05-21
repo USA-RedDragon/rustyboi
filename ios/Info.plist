@@ -23,7 +23,7 @@
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>MinimumOSVersion</key>
-    <string>13.0</string>
+    <string>14.0</string>
     <!-- Empty launch screen (iOS 13+); winit owns the window, so no storyboard. -->
     <key>UILaunchScreen</key>
     <dict/>
