@@ -57,3 +57,8 @@ jni = "=0.21.1"
 libc = "=0.2.186"
 ndk-context = "=0.1.1"
 ndk-sys = "=0.6.0"
+# Low-latency Android audio: oboe requests AAudio's MMAP/LOW_LATENCY path (which
+# cpal never does, pinning us to the higher-latency Legacy path). Fed by a
+# lock-free SPSC ring from the emulator thread into oboe's real-time callback.
+oboe = { version = "=0.6.1", features = ["java-interface", "ndk-context"] }
+ringbuf = "=0.4.7"
