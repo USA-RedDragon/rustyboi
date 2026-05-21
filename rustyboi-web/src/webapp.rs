@@ -474,7 +474,11 @@ async fn build_web_render(
     let max_texture_size = device.limits().max_texture_dimension_2d as usize;
     let scale_factor = window.scale_factor() as f32;
 
-    let renderer = Renderer::new(surface, device, queue, surface_format, width, height);
+    // Web: the browser drives presentation via requestAnimationFrame; Fifo
+    // matches that and is universally supported.
+    let renderer = Renderer::new(
+        surface, device, queue, surface_format, width, height, wgpu::PresentMode::Fifo,
+    );
     let ui = UiHost::new(&window, scale_factor, max_texture_size, None);
     Ok(WebRender { window, renderer, ui })
 }
