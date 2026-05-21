@@ -1,0 +1,43 @@
+# XcodeGen spec for the rustyboi iOS app. Regenerate the .xcodeproj with
+# `xcodegen generate` (tools/build-ios.sh does this). The app is a thin UIKit
+# shell (Sources/main.m) that links the Rust staticlib
+# (librustyboi_platform_lib.a, built by cargo for aarch64-apple-ios) and calls
+# `rustyboi_ios_main`; winit's UIKit backend drives everything from there.
+name: rustyboi
+options:
+  bundleIdPrefix: dev.mcswain
+  deploymentTarget:
+    iOS: "13.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  rustyboi:
+    type: application
+    platform: iOS
+    deploymentTarget: "13.0"
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.mcswain.rustyboi
+        INFOPLIST_FILE: Info.plist
+        ENABLE_BITCODE: "NO"
+        # RUST_LIB_DIR is set by tools/build-ios.sh to the cargo output dir for
+        # the active SDK (target/aarch64-apple-ios[-sim]/release), so the same
+        # spec links the right staticlib for device and simulator.
+        LIBRARY_SEARCH_PATHS: "$(inherited) $(RUST_LIB_DIR)"
+        # -lrustyboi_platform_lib is the cargo staticlib; the rest is what
+        # `cargo rustc --print native-static-libs` reports the Rust code needs.
+        OTHER_LDFLAGS: "$(inherited) -lrustyboi_platform_lib -liconv -lobjc"
+    dependencies:
+      - sdk: UIKit.framework
+      - sdk: QuartzCore.framework
+      - sdk: Metal.framework
+      - sdk: Foundation.framework
+      - sdk: CoreFoundation.framework
+      - sdk: AVFAudio.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreAudio.framework

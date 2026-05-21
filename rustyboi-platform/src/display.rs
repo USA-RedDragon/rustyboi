@@ -1177,7 +1177,7 @@ fn save_bytes_to_file(
     suggested_name: &str,
     bytes: &[u8],
 ) -> Result<Option<std::path::PathBuf>, std::io::Error> {
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
     {
         let Some(path) = rfd::FileDialog::new().set_file_name(suggested_name).save_file() else {
             return Ok(None);
@@ -1191,7 +1191,8 @@ fn save_bytes_to_file(
         std::fs::write(&path, bytes)?;
         Ok(Some(path))
     }
-    #[cfg(target_arch = "wasm32")]
+    // wasm + iOS: no native save dialog wired yet (iOS awaits UIDocumentPicker).
+    #[cfg(any(target_arch = "wasm32", target_os = "ios"))]
     {
         let _ = (suggested_name, bytes);
         Ok(None)

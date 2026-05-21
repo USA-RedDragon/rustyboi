@@ -21,7 +21,7 @@ pub fn run() -> Result<(), PlatformError> {
         return Ok(());
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android"), not(target_os = "ios")))]
     {
         use rustyboi_core_lib::cartridge;
 
@@ -62,6 +62,26 @@ pub fn run() -> Result<(), PlatformError> {
     {
         unreachable!("run() should not be invoked on Android; use run_android instead")
     }
+
+    #[cfg(target_os = "ios")]
+    {
+        unreachable!("run() should not be invoked on iOS; use run_ios instead")
+    }
+}
+
+/// iOS entry point. Called from `rustyboi_ios_main` (which the Xcode app's
+/// `main()` invokes). Builds a default `CleanConfig` (no CLI on iOS) and hands
+/// control to the shared GUI loop; winit's UIKit backend drives the app
+/// lifecycle (it calls `UIApplicationMain` from `EventLoop::run_app`).
+#[cfg(target_os = "ios")]
+pub fn run_ios() -> Result<(), PlatformError> {
+    let config = config::RawConfig::try_parse_from(std::iter::empty::<String>())
+        .expect("Failed to create default config")
+        .clean();
+    let mut gb = Box::new(gb::GB::new(config.hardware));
+    // iOS has no BIOS path and no CLI flag, so always skip the BIOS.
+    gb.skip_bios();
+    display::run_with_gui(gb, &config)
 }
 
 /// Android entry point. Called from `android_main` with the `AndroidApp`

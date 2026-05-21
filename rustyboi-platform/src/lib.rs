@@ -4,7 +4,7 @@
 // worker moves cloned `GB`s to its thread safely because `GB: Send` (its audio
 // sink is `Box<dyn AudioOutput + Send>`), and wgpu surface creation goes through
 // the safe `Arc<Window>` handle path.
-#![cfg_attr(not(target_os = "android"), forbid(unsafe_code))]
+#![cfg_attr(not(any(target_os = "android", target_os = "ios")), forbid(unsafe_code))]
 
 #[cfg(target_os = "android")]
 pub mod android;
@@ -33,3 +33,18 @@ pub use crate::run::run;
 
 #[cfg(target_os = "android")]
 pub use crate::run::run_android;
+
+#[cfg(target_os = "ios")]
+pub use crate::run::run_ios;
+
+/// iOS binary entry point. The Xcode app's `main.m` calls this symbol; it hands
+/// off to the shared winit GUI loop (winit's UIKit backend takes over the app
+/// lifecycle from `EventLoop::run_app`). Returns a C `int` exit status.
+#[cfg(target_os = "ios")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rustyboi_ios_main() -> core::ffi::c_int {
+    match run_ios() {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
