@@ -73,6 +73,25 @@ jobs:
         run: |
           rustup default stable
           rustup target add ${{ matrix.target }}
+      # The first-party `rustyboi` suite assembles its ROMs from RGBDS source at
+      # setup time (test-roms/, gitignored build output), so rgbds must be on PATH.
+      # Version drift is fine: the source is portable 0.7–1.0 syntax and the suite
+      # grades rendered output, not ROM bytes.
+      - name: Install RGBDS (first-party test ROMs)
+        if: matrix.suite == 'rustyboi'
+        shell: bash
+        run: |
+          set -eu
+          case "${{ matrix.os }}" in
+            linux)   sudo apt-get update && sudo apt-get install -y rgbds ;;
+            macos)   brew install rgbds ;;
+            windows)
+              curl -fsSL -o rgbds.zip https://github.com/gbdev/rgbds/releases/download/v1.0.1/rgbds-win64.zip
+              mkdir -p "$HOME/rgbds"
+              unzip -o rgbds.zip -d "$HOME/rgbds"
+              cygpath -w "$HOME/rgbds" >> "$GITHUB_PATH"
+              ;;
+          esac
       - name: Set up qemu-user + arm cross toolchain
         if: matrix.qemu
         shell: bash
@@ -136,6 +155,10 @@ jobs:
       - name: Install Rust
         shell: bash
         run: rustup default stable
+      # report-update runs every suite, including first-party `rustyboi` (RGBDS).
+      - name: Install RGBDS
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y rgbds
       - name: Fetch ROMs
         shell: bash
         run: ./tools/run-suites.sh setup
