@@ -3677,15 +3677,12 @@ impl memory::Addressable for Cartridge {
                     }
                     // NT/Makon old boards gate RAM MBC3-style ($0A to
                     // $0000-$1FFF), unbanked.
-                    CartridgeType::NtOld { .. } => {
-                        if self.ram_enabled && !self.ram_data.is_empty() {
+                    CartridgeType::NtOld { .. }
+                        if self.ram_enabled && !self.ram_data.is_empty() => {
                             let offset =
                                 (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
                             self.ram_data[offset]
-                        } else {
-                            0xFF
                         }
-                    }
                     _ => 0xFF,
                 }
             }
@@ -3895,12 +3892,12 @@ impl memory::Addressable for Cartridge {
                             self.sachen_mask = value;
                         }
                     }
-                    CartridgeType::NtOld { .. } => {
+                    CartridgeType::NtOld { .. }
                         // Mode registers live in $5000-$5FFF, decoded by
                         // A0-A1. $4000-$4FFF is ignored
                         // (v2 rumble data bits are not wired to a motor
                         // here).
-                        if (addr & 0xF000) == 0x5000 {
+                        if (addr & 0xF000) == 0x5000 => {
                             match addr & 0x03 {
                                 0x01 => {
                                     // Multicart base, 32KB units.
@@ -3931,7 +3928,6 @@ impl memory::Addressable for Cartridge {
                                 _ => {}
                             }
                         }
-                    }
                     _ => {}
                 }
             }
@@ -4096,11 +4092,10 @@ impl memory::Addressable for Cartridge {
                             }
                             // RTC semaphore: writing with bit 0 clear requests
                             // that the MCU execute the pending command.
-                            0xD => {
-                                if value & 0x01 == 0 {
+                            0xD
+                                if value & 0x01 == 0 => {
                                     self.huc3_execute_command();
                                 }
-                            }
                             // 0xC is read-only; 0xE is the IR transmitter
                             // (stubbed: no receiver on the other end); other
                             // select values are unmapped.
@@ -4125,13 +4120,12 @@ impl memory::Addressable for Cartridge {
                         }
                     }
                     // MBC3-style enable gate, unbanked.
-                    CartridgeType::NtOld { .. } => {
-                        if self.ram_enabled && !self.ram_data.is_empty() {
+                    CartridgeType::NtOld { .. }
+                        if self.ram_enabled && !self.ram_data.is_empty() => {
                             let offset =
                                 (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
                             let _ = self.write_ram_byte(offset, value);
                         }
-                    }
                     _ => {}
                 }
             }
