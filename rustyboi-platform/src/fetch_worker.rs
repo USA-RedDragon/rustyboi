@@ -80,22 +80,22 @@ impl Drop for FetchWorker {
 }
 
 fn fetch_loop(rx: Receiver<Job>, done_tx: Sender<Finished>) {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let mut builder = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(20));
+    let mut builder =
+        ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(20)));
     // Native-root TLS: the OS trust anchors (Android's X509TrustManager via JNI,
-    // the system store on desktop) loaded into a rustls root store, with rustls's
-    // own verification. NOT the platform verifier — Android's mandates OCSP and
+    // the system store on desktop) as rustls root certs, with rustls's own
+    // verification. NOT the platform verifier — Android's mandates OCSP and
     // hard-fails on OCSP-less certs like github/Let's Encrypt (rustls-platform-
     // verifier #221). No bundled roots.
     match native_tls_config() {
-        Some(cfg) => builder = builder.tls_config(std::sync::Arc::new(cfg)),
+        Some(cfg) => builder = builder.tls_config(cfg),
         None => log::warn!("cheat-fetch: no native trust roots; TLS will fail"),
     }
     // Bind the process to the active network so native DNS/sockets work from this
     // worker thread (otherwise getaddrinfo fails with EAI_NODATA even online).
     #[cfg(target_os = "android")]
     crate::android::bind_process_to_network();
-    let agent = builder.build();
+    let agent: ureq::Agent = builder.build().into();
     while let Ok(job) = rx.recv() {
         let (url, result) = match fetch_first(&agent, &job.urls) {
             Ok((url, body)) => (Some(url), Ok(body)),
@@ -107,30 +107,31 @@ fn fetch_loop(rx: Receiver<Job>, done_tx: Sender<Finished>) {
     }
 }
 
-/// A rustls client config trusting the OS's CA roots (no revocation checking).
-fn native_tls_config() -> Option<rustls::ClientConfig> {
-    let mut roots = rustls::RootCertStore::empty();
+/// A ureq TLS config trusting the OS's CA roots (no revocation checking), using
+/// rustls's own verification against those roots rather than the platform verifier.
+fn native_tls_config() -> Option<ureq::tls::TlsConfig> {
+    let mut certs: Vec<ureq::tls::Certificate<'static>> = Vec::new();
 
     #[cfg(target_os = "android")]
     for der in crate::android::system_ca_certs() {
-        let _ = roots.add(rustls::pki_types::CertificateDer::from(der));
+        certs.push(ureq::tls::Certificate::from_der(&der).to_owned());
     }
 
     #[cfg(not(target_os = "android"))]
     {
         let loaded = rustls_native_certs::load_native_certs();
         for cert in loaded.certs {
-            let _ = roots.add(cert);
+            certs.push(ureq::tls::Certificate::from_der(cert.as_ref()).to_owned());
         }
     }
 
-    if roots.is_empty() {
+    if certs.is_empty() {
         return None;
     }
     Some(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
+        ureq::tls::TlsConfig::builder()
+            .root_certs(ureq::tls::RootCerts::new_with_certs(&certs))
+            .build(),
     )
 }
 
@@ -139,12 +140,13 @@ fn native_tls_config() -> Option<rustls::ClientConfig> {
 fn fetch_first(agent: &ureq::Agent, urls: &[String]) -> Result<(String, String), String> {
     let mut last_err = "no URLs to fetch".to_string();
     for url in urls {
-        match agent.get(url).call() {
-            Ok(resp) => match resp.into_string() {
+        match agent.get(url.as_str()).call() {
+            // No-Intro DATs run to a few MB; lift ureq's default 10MB read cap.
+            Ok(mut resp) => match resp.body_mut().with_config().limit(64 * 1024 * 1024).read_to_string() {
                 Ok(body) => return Ok((url.clone(), body)),
                 Err(e) => last_err = format!("read failed: {e}"),
             },
-            Err(ureq::Error::Status(code, _)) => {
+            Err(ureq::Error::StatusCode(code)) => {
                 last_err = format!("HTTP {code}");
                 // Non-2xx (e.g. 404): try the next candidate folder.
             }
