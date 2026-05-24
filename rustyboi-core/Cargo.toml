@@ -21,4 +21,4 @@ zip = { version = "=8.6.0", default-features = false, features = ["deflate","def
 # `std::time::SystemTime::now()` traps on wasm32-unknown-unknown; `web-time` is a
 # drop-in that reads the browser clock. Only the RTC persistence paths use it.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-web-time = "=0.2.4"
+web-time = "=1.1.0"
