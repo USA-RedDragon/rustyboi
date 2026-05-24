@@ -1308,13 +1308,10 @@ impl Mmio {
 
         match bank {
             0 => self.vram.read(addr),
-            1 => {
-                if self.cgb_features_enabled {
+            1
+                if self.cgb_features_enabled => {
                     self.vram_bank1.read(addr)
-                } else {
-                    0xFF // Bank 1 doesn't exist on DMG
                 }
-            }
             _ => 0xFF, // Invalid bank
         }
     }

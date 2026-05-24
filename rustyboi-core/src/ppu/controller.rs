@@ -2888,7 +2888,7 @@ impl Ppu {
             // fraction: its boundary sits one eighth past the integer dot
             // (see the CGBWG_A12_ECHO block comment).
             let rise_vis = if sub.shifted {
-                8 * h as i64 + sub.phase8 >= 8 * (w + rise_eff + rearm) as i64 + 1
+                8 * h as i64 + sub.phase8 > 8 * (w + rise_eff + rearm) as i64
             } else {
                 h >= w + rise_eff + rearm
             };
@@ -9762,9 +9762,9 @@ impl Ppu {
                 // Exact first-line value already installed (carries the +1 the LY time
                 // correction the read boundary is co-tuned with, and the first-line
                 // mode-3-start line cycle+2 offset).
-                match self.m0_time_master {
-                    Some(m0t) => m0t as i64,
-                    None => return None,
+                {
+                    let m0t = self.m0_time_master?;
+                    m0t as i64
                 }
             } else {
                 // Steady-line mode-0 time, fresh (m0_time_master holds the previous
