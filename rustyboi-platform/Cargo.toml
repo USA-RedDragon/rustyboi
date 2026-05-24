@@ -30,7 +30,7 @@ winit_input_helper = "=0.17.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { version = "=2.12.1", default-features = false, features = ["tls", "gzip"] }
-rustls = { version = "=0.23.41", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls = { version = "=0.23.42", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
 gilrs = "=0.11.2"
