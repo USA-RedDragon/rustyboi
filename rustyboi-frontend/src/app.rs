@@ -154,6 +154,12 @@ pub struct App {
     /// Reused RGBA upload scratch for `present`, so the per-frame frame-to-RGBA
     /// conversion (up to SGB 256×224×4) doesn't heap-allocate every frame.
     rgba_scratch: Vec<u8>,
+
+    /// Whether fast-forward is currently engaged by a *held* hotkey (the "hold
+    /// Tab to turbo" gesture), as opposed to a menu/touch toggle that latches.
+    /// Only the hold form is auto-released when the chord drops; a menu toggle
+    /// stays on until toggled again. See [`App::tick_fast_forward_hold`].
+    ff_hold: bool,
 }
 
 impl App {
@@ -197,6 +203,7 @@ impl App {
             content_inset: (0.0, 0.0),
             safe_insets: [0.0; 4],
             rgba_scratch: Vec::new(),
+            ff_hold: false,
         }
     }
 
@@ -297,6 +304,28 @@ impl App {
 
     pub fn is_fast_forward(&self) -> bool {
         matches!(self.session.mode(), RunMode::FastForward(_))
+    }
+
+    /// Reconcile fast-forward with the hold-hotkey state for this frame, called
+    /// once per frame by the platform run loop with whether the FastForward chord
+    /// (e.g. Tab) is held *right now*.
+    ///
+    /// Fast-forward can be engaged two ways, and they must not fight:
+    /// - **Held hotkey** ("hold Tab to turbo"): engage while held, release when
+    ///   the chord drops.
+    /// - **Menu / on-screen toggle** ([`UiAction::ToggleFastForward`]): latches —
+    ///   stays on until toggled off again.
+    ///
+    /// The bug this fixes: the run loop used to release fast-forward on *any*
+    /// frame the FastForward chord wasn't held. On desktop that's invisible (you
+    /// hold Tab), but on Android there is no keyboard, so a menu toggle turned
+    /// fast-forward on and it was cancelled on the very next frame. We only
+    /// auto-release fast-forward we ourselves engaged via the hold path.
+    pub fn tick_fast_forward_hold(&mut self, hotkey_held: bool) {
+        match fast_forward_hold_transition(hotkey_held, self.is_fast_forward(), &mut self.ff_hold) {
+            FfHold::Engage | FfHold::Release => self.session.toggle_fast_forward(),
+            FfHold::None => {}
+        }
     }
 
     pub fn frame_advance(&mut self) {
@@ -1050,6 +1079,134 @@ fn panic_message(panic_info: Box<dyn std::any::Any + Send>, context: &str) -> St
         format!("Emulator panic {context}: {s}")
     } else {
         format!("Emulator panic {context}: Unknown error")
+    }
+}
+
+/// The decision [`App::tick_fast_forward_hold`] makes each frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfHold {
+    /// Turn fast-forward on (a hold hotkey just went down).
+    Engage,
+    /// Turn fast-forward off (a held hotkey was released).
+    Release,
+    /// Leave fast-forward as-is (covers latched menu/touch toggles).
+    None,
+}
+
+/// Pure state machine for reconciling fast-forward with a held hotkey. `ff_held`
+/// tracks whether *we* engaged fast-forward via the hold path; a menu/touch
+/// toggle sets `currently_ff` without `ff_held`, so it is never auto-released.
+/// Extracted from the platform run loop so its truth table is unit-testable.
+pub fn fast_forward_hold_transition(
+    hotkey_held: bool,
+    currently_ff: bool,
+    ff_held: &mut bool,
+) -> FfHold {
+    match (hotkey_held, currently_ff, *ff_held) {
+        // Chord held, not yet fast-forwarding: engage and remember it was us.
+        (true, false, _) => {
+            *ff_held = true;
+            FfHold::Engage
+        }
+        // Chord held while already fast-forwarding (hold or prior menu latch):
+        // keep it, and treat it as hold-owned so releasing the chord ends it.
+        (true, true, _) => {
+            *ff_held = true;
+            FfHold::None
+        }
+        // Chord released and we had engaged it via hold: release.
+        (false, true, true) => {
+            *ff_held = false;
+            FfHold::Release
+        }
+        // Chord not held: leave any menu-latched fast-forward untouched.
+        (false, _, _) => {
+            *ff_held = false;
+            FfHold::None
+        }
+    }
+}
+
+#[cfg(test)]
+mod fast_forward_tests {
+    //! End-to-end coverage for fast-forward across the two trigger paths, and a
+    //! regression pin for the Android bug: a menu/touch toggle (no keyboard) was
+    //! cancelled on the next frame by the hold-release logic.
+    use super::{fast_forward_hold_transition, App, FfHold};
+    use rustyboi_session::action::PaletteChoice;
+    use rustyboi_session::config::Config;
+    use rustyboi_session::ports::{MemRumble, MemStorage, MemWebcam};
+    use rustyboi_session::session::{Ports, Session};
+
+    fn app() -> App {
+        let ports = Ports {
+            storage: Box::new(MemStorage::new()),
+            rumble: Box::new(MemRumble::default()),
+            webcam: Box::new(MemWebcam::default()),
+        };
+        let session = Session::new(Config::default(), ports, [0u8; 32]);
+        App::new(session, PaletteChoice::Grayscale, None, None, true)
+    }
+
+    // The pure transition, exhaustive over (hotkey_held, currently_ff, ff_held).
+    #[test]
+    fn hold_transition_truth_table() {
+        // hotkey pressed while off -> engage, now hold-owned.
+        let mut h = false;
+        assert_eq!(fast_forward_hold_transition(true, false, &mut h), FfHold::Engage);
+        assert!(h);
+        // still held while on -> no change, stays hold-owned.
+        let mut h = true;
+        assert_eq!(fast_forward_hold_transition(true, true, &mut h), FfHold::None);
+        assert!(h);
+        // released while on and hold-owned -> release.
+        let mut h = true;
+        assert_eq!(fast_forward_hold_transition(false, true, &mut h), FfHold::Release);
+        assert!(!h);
+        // released while on but NOT hold-owned (menu latch) -> leave it on.
+        let mut h = false;
+        assert_eq!(fast_forward_hold_transition(false, true, &mut h), FfHold::None);
+        assert!(!h);
+        // not held, already off -> nothing.
+        let mut h = false;
+        assert_eq!(fast_forward_hold_transition(false, false, &mut h), FfHold::None);
+        assert!(!h);
+    }
+
+    // Hold gesture (desktop "hold Tab"): engages while held, releases on drop.
+    #[test]
+    fn held_hotkey_engages_then_releases() {
+        let mut a = app();
+        assert!(!a.is_fast_forward());
+        a.tick_fast_forward_hold(true);
+        assert!(a.is_fast_forward(), "holding the chord engages fast-forward");
+        a.tick_fast_forward_hold(true);
+        assert!(a.is_fast_forward(), "still engaged while held");
+        a.tick_fast_forward_hold(false);
+        assert!(!a.is_fast_forward(), "releasing the chord ends fast-forward");
+    }
+
+    // THE Android regression: a menu/touch toggle latches fast-forward on, and a
+    // subsequent frame with no hotkey held must NOT cancel it.
+    #[test]
+    fn menu_toggled_fast_forward_survives_frames_without_hotkey() {
+        let mut a = app();
+        // Simulate the menu/touch action (UiAction::ToggleFastForward -> session).
+        a.session_mut().toggle_fast_forward();
+        assert!(a.is_fast_forward());
+
+        // Many frames pass with no FastForward chord held (Android has no Tab).
+        for _ in 0..10 {
+            a.tick_fast_forward_hold(false);
+            assert!(
+                a.is_fast_forward(),
+                "menu-latched fast-forward must persist without a held hotkey"
+            );
+        }
+        // Toggling again from the menu turns it off and it stays off.
+        a.session_mut().toggle_fast_forward();
+        a.tick_fast_forward_hold(false);
+        assert!(!a.is_fast_forward());
     }
 }
 

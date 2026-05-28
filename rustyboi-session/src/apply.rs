@@ -515,6 +515,40 @@ mod tests {
         Session::new(Config::default(), ports, [0u8; 32])
     }
 
+    // Fast-forward isn't just a flag — the run loop must actually advance
+    // `factor` GB frames per presented frame. This is the behavior the Android
+    // fast-forward bug hid: even once engaged, it has to step multiple frames.
+    #[test]
+    fn fast_forward_runs_factor_frames_per_run_frame() {
+        use crate::AbstractInput;
+        let mut s = session();
+
+        let before = s.frame_count();
+        s.run_frame(AbstractInput::none());
+        let normal = s.frame_count() - before;
+        assert_eq!(normal, 1, "Normal mode advances exactly one frame");
+
+        s.apply(UiAction::ToggleFastForward, 0);
+        assert!(s.is_fast_forward());
+        let factor = s.config().ff_factor() as u64;
+        assert!(factor >= 2, "test assumes a >1 fast-forward factor");
+
+        let before = s.frame_count();
+        s.run_frame(AbstractInput::none());
+        assert_eq!(
+            s.frame_count() - before,
+            factor,
+            "fast-forward must advance `factor` frames per presented frame"
+        );
+
+        // Toggling off returns to single-stepping.
+        s.apply(UiAction::ToggleFastForward, 0);
+        assert!(!s.is_fast_forward());
+        let before = s.frame_count();
+        s.run_frame(AbstractInput::none());
+        assert_eq!(s.frame_count() - before, 1);
+    }
+
     // The web worker drives rewind by calling `Session::rewind` once per frame
     // while the key is held — far more aggressively than the native offloaded
     // path — then resumes forward play. Hammer that cycle to pin that the shared
