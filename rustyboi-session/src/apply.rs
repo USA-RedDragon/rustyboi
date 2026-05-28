@@ -515,6 +515,35 @@ mod tests {
         Session::new(Config::default(), ports, [0u8; 32])
     }
 
+    // The web worker drives rewind by calling `Session::rewind` once per frame
+    // while the key is held — far more aggressively than the native offloaded
+    // path — then resumes forward play. Hammer that cycle to pin that the shared
+    // rewind path stays sound (no panic, terminates when the buffer empties).
+    #[test]
+    fn rewind_hammer_like_web_worker_is_sound() {
+        use crate::AbstractInput;
+        let mut s = session();
+        s.set_rewind_enabled(true);
+        s.set_rewind_interval(1); // capture every frame (aggressive buffer)
+
+        for _ in 0..120 {
+            s.run_frame(AbstractInput::none());
+        }
+        let (len, _) = s.rewind_stats();
+        assert!(len > 0, "buffer should hold snapshots after running frames");
+
+        for _ in 0..4 {
+            let mut steps = 0u32;
+            while s.rewind().is_some() {
+                steps += 1;
+                assert!(steps < 100_000, "rewind never drained — buffer grows unbounded");
+            }
+            for _ in 0..40 {
+                s.run_frame(AbstractInput::none());
+            }
+        }
+    }
+
     // Every non-file, non-Android `UiAction` must be handled by `apply` without
     // panicking. File loads route to a `LoadFile` request; this exercises the
     // rest of the match so a new variant can't silently fall through.

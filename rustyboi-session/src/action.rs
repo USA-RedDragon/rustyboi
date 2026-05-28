@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 /// A file handed to the session by the frontend's picker. Desktop passes a path
 /// (the frontend reads it); web/Android/iOS pass already-loaded bytes (the iOS
 /// UIDocumentPicker yields a security-scoped URL we read eagerly, not a path).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileData {
     #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
     Path(std::path::PathBuf),
@@ -55,7 +55,7 @@ pub enum LoadPurpose {
 /// `rel_path` is a slash-separated path from the picked tree root used purely
 /// for display.
 #[cfg(target_os = "android")]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryEntry {
     pub uri: String,
     pub name: String,
@@ -200,7 +200,11 @@ pub enum ScalingMode {
 /// A snapshot of session-owned state the menus render current selections from
 /// (checkmarks, radio dots, slot list). The UI never mutates the session
 /// directly; it reads this and emits [`UiAction`]s the session applies.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `serde`-derived so the web worker can post it verbatim across the worker
+/// boundary (JSON) — no per-frontend mirror type. Native/Android read it
+/// in-process and never serialize it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionUiState {
     pub hardware: HardwareChoice,
     pub palette: PaletteChoice,
@@ -309,7 +313,11 @@ impl Default for SessionUiState {
 /// The authoritative set of user commands. Every frontend emits these; the
 /// behavior is implemented exactly once in
 /// [`Session::apply`](crate::session::Session::apply).
-#[derive(Debug)]
+///
+/// `serde`-derived so the web worker boundary posts these directly (JSON) with
+/// no mirror enum; the web main thread's exhaustive router decides which reach
+/// the worker. Native/Android apply them in-process without serializing.
+#[derive(Debug, Serialize, Deserialize)]
 pub enum UiAction {
     /// The user asked to quit.
     Exit,
@@ -1143,6 +1151,194 @@ impl PaletteChoice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One representative value per `UiAction` variant. Kept exhaustive by the
+    /// classifier match below (no `_` arm), so a new variant fails to compile
+    /// until a sample is added — which in turn covers it in the wire round-trip.
+    fn sample_every_ui_action() -> Vec<UiAction> {
+        use UiAction::*;
+        // On host `FileData` is the path shape; the content shape only exists on
+        // wasm/mobile. The wire round-trip works for either.
+        let file = || FileData::Path(std::path::PathBuf::from("f"));
+        vec![
+            Exit,
+            SaveState(std::path::PathBuf::from("s")),
+            LoadState(file()),
+            LoadRom(file()),
+            ImportState(file()),
+            ExportState,
+            ImportBatterySave(file()),
+            ExportBatterySave,
+            ImportRtc(file()),
+            ApplyPatch(file()),
+            ExportRtc,
+            TogglePause,
+            ToggleRecording,
+            LoadMovie(file()),
+            StopReplay,
+            TogglePrinter,
+            Restart,
+            ClearError,
+            StepCycles(1),
+            StepFrames(1),
+            SetBreakpoint(0x100),
+            RemoveBreakpoint(0x100),
+            SaveSlot(1),
+            LoadSlot(1),
+            Quicksave,
+            Quickload,
+            ToggleFastForward,
+            FrameAdvance,
+            ToggleSgbBorder,
+            ToggleTouchControls,
+            SetHardware(HardwareChoice::Dmg),
+            SetPalette(PaletteChoice::Grayscale),
+            SetGbcDmgPalette(GbcDmgPalette::Auto),
+            SetColorCorrection(crate::CgbColorConversion::Lcd),
+            SetRealBootRom(true),
+            SetTextureFilter(TextureFilter::Linear),
+            SetLcdEffect(LcdEffect::Grid),
+            SetPrinterScale(4),
+            SetTouchOpacity(50),
+            LoadBootRom(file()),
+            SetRewindEnabled(true),
+            SetRewindInterval(3),
+            SetRewindDepth(42),
+            SetVolume(80),
+            SetScalingMode(ScalingMode::Stretch),
+            ToggleFullscreen,
+            SetInputConfig(InputConfig::default()),
+            AddCheat("00A-B7F".into()),
+            AddCheats(vec!["00A-B7F".into()]),
+            RemoveCheat("00A-B7F".into()),
+            GetCheats,
+            ClearFetchedCheats,
+        ]
+    }
+
+    // Verify the sample list is exhaustive over `UiAction` (this match has no
+    // `_` arm), so a new variant breaks the build here — forcing the sample list
+    // and thus the wire round-trip test to cover it.
+    #[test]
+    fn sample_list_is_exhaustive_over_ui_action() {
+        for a in sample_every_ui_action() {
+            match &a {
+                UiAction::Exit
+                | UiAction::SaveState(_)
+                | UiAction::LoadState(_)
+                | UiAction::LoadRom(_)
+                | UiAction::ImportState(_)
+                | UiAction::ExportState
+                | UiAction::ImportBatterySave(_)
+                | UiAction::ExportBatterySave
+                | UiAction::ImportRtc(_)
+                | UiAction::ApplyPatch(_)
+                | UiAction::ExportRtc
+                | UiAction::TogglePause
+                | UiAction::ToggleRecording
+                | UiAction::LoadMovie(_)
+                | UiAction::StopReplay
+                | UiAction::TogglePrinter
+                | UiAction::Restart
+                | UiAction::ClearError
+                | UiAction::StepCycles(_)
+                | UiAction::StepFrames(_)
+                | UiAction::SetBreakpoint(_)
+                | UiAction::RemoveBreakpoint(_)
+                | UiAction::SaveSlot(_)
+                | UiAction::LoadSlot(_)
+                | UiAction::Quicksave
+                | UiAction::Quickload
+                | UiAction::ToggleFastForward
+                | UiAction::FrameAdvance
+                | UiAction::ToggleSgbBorder
+                | UiAction::ToggleTouchControls
+                | UiAction::SetHardware(_)
+                | UiAction::SetPalette(_)
+                | UiAction::SetGbcDmgPalette(_)
+                | UiAction::SetColorCorrection(_)
+                | UiAction::SetRealBootRom(_)
+                | UiAction::SetTextureFilter(_)
+                | UiAction::SetLcdEffect(_)
+                | UiAction::SetPrinterScale(_)
+                | UiAction::SetTouchOpacity(_)
+                | UiAction::LoadBootRom(_)
+                | UiAction::SetRewindEnabled(_)
+                | UiAction::SetRewindInterval(_)
+                | UiAction::SetRewindDepth(_)
+                | UiAction::SetVolume(_)
+                | UiAction::SetScalingMode(_)
+                | UiAction::ToggleFullscreen
+                | UiAction::SetInputConfig(_)
+                | UiAction::AddCheat(_)
+                | UiAction::AddCheats(_)
+                | UiAction::RemoveCheat(_)
+                | UiAction::GetCheats
+                | UiAction::ClearFetchedCheats => {}
+                #[cfg(target_os = "android")]
+                UiAction::OpenRomTree
+                | UiAction::RescanLibrary
+                | UiAction::LoadRomFromUri(_)
+                | UiAction::SetLibraryTreeUri(_)
+                | UiAction::SetLibraryEntries(_) => {}
+            }
+        }
+    }
+
+    // The web worker boundary posts `UiAction` as its own serde JSON (no mirror
+    // type). Every variant must survive that JSON round-trip with the same
+    // discriminant — a `#[serde(skip)]` or a non-serializable payload would fail.
+    #[test]
+    fn ui_action_serde_json_round_trips() {
+        for a in sample_every_ui_action() {
+            let json = serde_json::to_string(&a).expect("serialize UiAction");
+            let back: UiAction = serde_json::from_str(&json).expect("deserialize UiAction");
+            assert_eq!(back.kind(), a.kind(), "{:?} did not round-trip as JSON", a.kind());
+        }
+    }
+
+    // The worker posts `SessionUiState` as its own serde JSON each time it
+    // changes. Built with EVERY field non-default, so a dropped/`skip`ped field
+    // (which serde-derive can't do accidentally, but a future attribute could)
+    // fails the round-trip.
+    #[test]
+    fn session_ui_state_serde_json_round_trips_every_field() {
+        let s = SessionUiState {
+            hardware: HardwareChoice::Agb,
+            palette: PaletteChoice::Pocket,
+            gbc_dmg_palette: GbcDmgPalette::Scheme(7),
+            dmg_palette_active: false,
+            color_correction: crate::CgbColorConversion::Lcd,
+            use_real_boot_rom: true,
+            texture_filter: TextureFilter::Linear,
+            lcd_effect: LcdEffect::Scanlines,
+            printer_scale: 8,
+            touch_opacity: 33,
+            rewind_enabled: false,
+            rewind_interval_frames: 9,
+            rewind_depth: 17,
+            volume: 42,
+            scaling: ScalingMode::IntegerAspect,
+            sgb_border: false,
+            paused: true,
+            fast_forward: true,
+            touch_controls: true,
+            printer_attached: true,
+            recording: true,
+            replaying: true,
+            slots: vec![1, 2, 5],
+            cheats: vec!["00A-B7F".into()],
+            fetched_cheats: Vec::new(),
+            has_battery: true,
+            has_rtc: true,
+            has_rom: true,
+            game_name: Some("Tetris".into()),
+            input: InputConfig::default(),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionUiState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
 
     #[test]
     fn every_command_kind_is_known() {

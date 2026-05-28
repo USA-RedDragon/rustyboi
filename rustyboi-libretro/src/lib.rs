@@ -298,16 +298,16 @@ impl Core for RustyboiCore {
         // Boot: run the real boot ROM from the system directory if asked and a
         // matching file exists; otherwise the synthetic post-boot state.
         let mut booted = false;
-        if self.use_real_boot_rom {
-            if let Some(dir) = env.system_directory() {
-                let path = dir.join(Self::boot_rom_filename(hardware));
-                if let Some(path_str) = path.to_str()
-                    && gb.load_bios(path_str).is_ok()
-                    && gb.has_bios()
-                {
-                    gb.run_boot_rom();
-                    booted = true;
-                }
+        if self.use_real_boot_rom
+            && let Some(dir) = env.system_directory()
+        {
+            let path = dir.join(Self::boot_rom_filename(hardware));
+            if let Some(path_str) = path.to_str()
+                && gb.load_bios(path_str).is_ok()
+                && gb.has_bios()
+            {
+                gb.run_boot_rom();
+                booted = true;
             }
         }
         if !booted {

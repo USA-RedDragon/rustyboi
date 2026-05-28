@@ -1624,8 +1624,7 @@ mod volume_tests {
     fn config_volume_drives_run_frame_gain() {
         let src = stream();
         for (vol, want_gain) in [(0u8, 0.0f32), (50, 0.5), (100, 1.0)] {
-            let mut cfg = Config::default();
-            cfg.volume = vol;
+            let cfg = Config { volume: vol, ..Default::default() };
             let s = Session::new(cfg, test_ports(), [0u8; 32]);
             let gain = s.config().volume_gain();
             assert_eq!(gain, want_gain, "volume {vol} -> gain {want_gain}");
@@ -1642,8 +1641,7 @@ mod volume_tests {
     #[test]
     fn run_frame_output_length_is_volume_independent() {
         let len_at = |vol: u8| {
-            let mut cfg = Config::default();
-            cfg.volume = vol;
+            let cfg = Config { volume: vol, ..Default::default() };
             let mut s = Session::new(cfg, test_ports(), [0u8; 32]);
             s.run_frame(AbstractInput::none()).audio.len()
         };
@@ -1693,8 +1691,7 @@ mod printer_tests {
     }
 
     fn session_scaled(scale: u8) -> Session {
-        let mut cfg = Config::default();
-        cfg.printer_scale = scale;
+        let cfg = Config { printer_scale: scale, ..Default::default() };
         Session::new(cfg, test_ports(), [0u8; 32])
     }
 
@@ -1792,11 +1789,26 @@ mod tas_tests {
         Session::new(Config::default(), test_ports(), [0u8; 32])
     }
 
+    // Reconstructing a `GB` from a movie's embedded savestate puts a full machine
+    // on the stack (plus serde_json's recursion), which overflows the test
+    // harness's default 2 MB thread stack in a debug build. Run such tests on a
+    // roomier thread — the same pattern the integration tests use — so plain
+    // `cargo test` passes without `RUST_MIN_STACK`.
+    fn with_big_stack<F: FnOnce() + Send + 'static>(f: F) {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     // One ToggleRecording arms recording; a second stops it and hands back a
     // decodable `.rbmovie` whose frame count matches the frames stepped while
     // armed. Loading those bytes begins playback; StopReplay ends it.
     #[test]
     fn toggle_recording_round_trips_and_replays() {
+        with_big_stack(|| {
         let mut s = session();
 
         assert!(!s.is_recording());
@@ -1830,6 +1842,7 @@ mod tas_tests {
         assert!(s.is_playing(), "loading a movie begins playback");
         s.apply(UiAction::StopReplay, 0);
         assert!(!s.is_playing(), "StopReplay resumes live input");
+        });
     }
 
     // A movie recorded against a different ROM id is rejected rather than

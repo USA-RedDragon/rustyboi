@@ -12,8 +12,9 @@
 //!   thread (a 175 Hz `requestAnimationFrame` loop would otherwise blow a
 //!   per-frame budget and jank). Each frame it produces the RGBA framebuffer,
 //!   interleaved audio, and a UI-state snapshot, and posts them to the main
-//!   thread. Control commands arrive as [`web_action::WebAction`] JSON and are
-//!   applied through the shared `Session::apply` contract.
+//!   thread. Control commands arrive as [`rustyboi_session::UiAction`] JSON
+//!   (serde-serialized directly — no mirror type) and are applied through the
+//!   shared `Session::apply` contract.
 //! - **Main thread** ([`WebApp`], driven by `www/index.html`) renders the
 //!   **egui** UI (menus, cheats, keybinds, settings) over the game with wgpu's
 //!   WebGL2 backend + the portable `rustyboi-frontend` `Renderer`/`UiHost`. It
@@ -26,7 +27,6 @@
 
 mod audio;
 mod storage;
-mod web_action;
 mod webapp;
 
 use rustyboi_session::config::DmgPalette;
@@ -43,7 +43,6 @@ use rustyboi_session::{FileData, PlatformRequest, SessionUiState, UiAction};
 use js_sys::Array;
 
 use storage::IdbStore;
-use web_action::{WebAction, WebUiState};
 
 // The main-thread audio sink; re-exported so JS can `new WebAudio()`.
 pub use audio::WebAudio;
@@ -422,15 +421,14 @@ impl Emulator {
         js_sys::Uint8Array::from(snap.to_bytes().as_slice())
     }
 
-    /// Apply a control action (JSON-encoded [`WebAction`]) through the shared
+    /// Apply a control action (JSON-encoded [`UiAction`]) through the shared
     /// `Session::apply` contract. Returns the resulting Status/Error/etc.
     /// requests for the worker to forward to the main thread. A palette change
     /// also refreshes the worker's local blit shades so the next frame uses it.
     pub fn apply_action(&mut self, json: &str) -> Result<Array, JsValue> {
-        let action: WebAction = serde_json::from_str(json)
+        let ui_action: UiAction = serde_json::from_str(json)
             .map_err(|e| JsValue::from_str(&format!("bad action json: {e}")))?;
         let palette_before = self.session.palette();
-        let ui_action = action.into_ui_action();
         // On web the worker's run loop is the only driver, so pause lives in the
         // session's RunMode (unlike desktop, where the `App` owns pause and
         // `apply(TogglePause)` only signals it). Drive the run mode directly here.
@@ -454,7 +452,7 @@ impl Emulator {
         if self.last_ui_state.as_ref() == Some(&state) {
             return None;
         }
-        let json = serde_json::to_string(&WebUiState::from_session(&state)).ok()?;
+        let json = serde_json::to_string(&state).ok()?;
         self.last_ui_state = Some(state);
         Some(json)
     }
@@ -556,9 +554,9 @@ fn requests_to_js(requests: &[PlatformRequest]) -> Array {
         };
         match req {
             PlatformRequest::Exit => continue, // no-op on web
-            // Fullscreen is handled on the main thread (canvas Fullscreen API); a
-            // web `WebAction` never lowers it to the worker, so it never reaches
-            // here — drop it defensively.
+            // Fullscreen is handled on the main thread (canvas Fullscreen API);
+            // the main-thread router never forwards it to the worker, so it never
+            // reaches here — drop it defensively.
             PlatformRequest::ToggleFullscreen => continue,
             PlatformRequest::Status(msg) => {
                 set("type", "Status".into());

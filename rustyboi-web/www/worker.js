@@ -20,7 +20,7 @@
 //     RequestExport{kind}  ask for export bytes (kind=state|battery|rtc)
 //     SetInput{mask}       GB button bitmask (keyboard ∪ egui touch overlay)
 //     SetDebugDetail{active,bits}  which debug snapshot to build (open panels)
-//     Action{json}         a WebAction (JSON) applied via Session::apply
+//     Action{json}         a UiAction (JSON) applied via Session::apply
 //   worker -> main:
 //     Ready{hardware}      emulator constructed, loop running
 //     Frame{rgba,width,height}  transferred RGBA ArrayBuffer + pixel size
