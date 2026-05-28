@@ -131,6 +131,7 @@ impl Session {
                 let (w, h) = self.content_size();
                 ActionOutcome {
                     requests: vec![
+                        PlatformRequest::ClearError,
                         PlatformRequest::ResizeContent { width: w, height: h },
                         PlatformRequest::Status("Emulation restarted".into()),
                     ],
@@ -638,6 +639,16 @@ mod tests {
         s.apply(UiAction::SetPalette(PaletteChoice::GreenLcd), 0);
         assert_eq!(s.palette(), PaletteChoice::GreenLcd);
         assert_eq!(s.config().dmg_palette.shades, PaletteChoice::GreenLcd.rgba_shades());
+    }
+
+    #[test]
+    fn restart_clears_error_overlay() {
+        let mut s = session();
+        let out = s.apply(UiAction::Restart, 0);
+        assert!(
+            out.requests.iter().any(|r| matches!(r, PlatformRequest::ClearError)),
+            "Restart must emit ClearError so the crash overlay is dismissed"
+        );
     }
 
     #[test]
