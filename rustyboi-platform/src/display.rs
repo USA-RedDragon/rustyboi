@@ -736,6 +736,27 @@ impl ApplicationHandler for GuiApp<'_> {
             window.request_redraw();
         }
     }
+
+    // Tear everything down HERE — while the event loop (and, on Wayland, its live
+    // compositor connection) still exists — rather than leaving it to the
+    // implicit drop after `run_app` returns.
+    //
+    // The GPU/UI (`render_state`) owns egui-winit's clipboard, which on Wayland
+    // spawns a `smithay-clipboard` worker thread. Dropping it late, during
+    // process teardown, raced libwayland's global cleanup and segfaulted in that
+    // worker (`wl_proxy_destroy` on primary-selection objects whose connection
+    // was already gone). Dropping it now joins the worker cleanly against a live
+    // connection. Order matters: the wgpu surface (in `render_state`) borrows the
+    // window, so it must drop before the window; audio + the background workers
+    // are stopped deterministically too.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.render_state = None;
+        self.audio = None;
+        self.rewind_worker = None;
+        self.png_worker = None;
+        self.fetch_worker = None;
+        self.window = None;
+    }
 }
 
 impl GuiApp<'_> {
