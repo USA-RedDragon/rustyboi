@@ -52,6 +52,13 @@ features = [
     # Main-thread rendering: the egui/wgpu driver draws into this canvas.
     "HtmlCanvasElement",
     "console",
+    # (tests/web_mainthread.rs): create a canvas, dispatch key events at winit.
+    "Document",
+    "HtmlElement",
+    "Node",
+    "EventTarget",
+    "KeyboardEvent",
+    "KeyboardEventInit",
     # IndexedDB storage
     "IdbFactory",
     "IdbDatabase",
