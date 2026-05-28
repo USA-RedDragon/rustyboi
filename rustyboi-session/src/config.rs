@@ -184,12 +184,14 @@ mod tests {
     #[test]
     fn config_serde_round_trips_through_storage() {
         let mut storage = MemStorage::new();
-        let mut cfg = Config::default();
-        cfg.hardware = Hardware::DMG;
-        cfg.fast_forward_factor = 8;
+        let mut cfg = Config {
+            hardware: Hardware::DMG,
+            fast_forward_factor: 8,
+            volume: 40,
+            scaling: ScalingMode::Stretch,
+            ..Default::default()
+        };
         cfg.rewind.depth = 42;
-        cfg.volume = 40;
-        cfg.scaling = ScalingMode::Stretch;
         cfg.save(&mut storage).unwrap();
 
         let loaded = Config::load(&storage);

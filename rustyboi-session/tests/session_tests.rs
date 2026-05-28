@@ -32,8 +32,8 @@ fn test_rom() -> Vec<u8> {
     rom[0x148] = 0x00;
     rom[0x149] = 0x00;
     let mut checksum: u8 = 0;
-    for addr in 0x134..0x14D {
-        checksum = checksum.wrapping_sub(rom[addr]).wrapping_sub(1);
+    for &b in &rom[0x134..0x14D] {
+        checksum = checksum.wrapping_sub(b).wrapping_sub(1);
     }
     rom[0x14D] = checksum;
     rom
@@ -56,8 +56,7 @@ fn fresh_ports() -> Ports {
 }
 
 fn dmg_session(rom: &[u8]) -> Session {
-    let mut config = Config::default();
-    config.hardware = Hardware::DMG;
+    let config = Config { hardware: Hardware::DMG, ..Default::default() };
     Session::with_gb(booted_gb(rom), config, fresh_ports(), sha256(rom))
 }
 
@@ -191,8 +190,7 @@ fn slot_listing_and_meta() {
 fn rewind_returns_to_an_earlier_frame() {
     with_big_stack(|| {
     let rom = test_rom();
-    let mut config = Config::default();
-    config.hardware = Hardware::DMG;
+    let mut config = Config { hardware: Hardware::DMG, ..Default::default() };
     config.rewind.enabled = true;
     config.rewind.interval_frames = 1; // snapshot every frame
     config.rewind.depth = 20;
@@ -309,8 +307,7 @@ fn config_serde_round_trips_via_session() {
 #[test]
 fn input_remap_applies_through_run_frame() {
     let rom = test_rom();
-    let mut cfg = Config::default();
-    cfg.hardware = Hardware::DMG;
+    let mut cfg = Config { hardware: Hardware::DMG, ..Default::default() };
     // Swap A and B.
     cfg.input_map.remap(GbButton::A, GbButton::B);
     cfg.input_map.remap(GbButton::B, GbButton::A);
@@ -328,8 +325,8 @@ fn battery_rom() -> Vec<u8> {
     rom[0x147] = 0x03; // MBC1 + RAM + BATTERY
     rom[0x149] = 0x02; // 8 KiB RAM
     let mut checksum: u8 = 0;
-    for addr in 0x134..0x14D {
-        checksum = checksum.wrapping_sub(rom[addr]).wrapping_sub(1);
+    for &b in &rom[0x134..0x14D] {
+        checksum = checksum.wrapping_sub(b).wrapping_sub(1);
     }
     rom[0x14D] = checksum;
     rom

@@ -11,6 +11,15 @@
 //! `retro_*` call), so the frontend callbacks live in `static mut` cells set by
 //! the `retro_set_*` entry points.
 #![allow(static_mut_refs)]
+// The callback cells are read via `*(&raw const CELL)` — an intentional raw
+// read of the `static mut` (no reference formed). `deref_addrof` would rewrite
+// that to a bare `CELL` access, defeating the explicit raw-pointer idiom.
+#![allow(clippy::deref_addrof)]
+// The `retro_*` entry points are the libretro C ABI: the frontend hands them
+// raw pointers and guarantees validity + single-threaded calls (see the module
+// docs). They deref those pointers by contract; marking each `unsafe fn` would
+// not change how the C frontend calls them, so allow the deref crate-wide.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 pub mod dispatch;
 pub mod ffi;

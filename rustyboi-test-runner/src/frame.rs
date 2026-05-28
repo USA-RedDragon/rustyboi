@@ -850,7 +850,7 @@ mod tests {
             raw.push(0u8); // filter: none
                            // first byte = indices 0,1,2,3 (0b00_01_10_11 = 0x1B), rest = 0.
             raw.push(0x1B);
-            raw.extend(std::iter::repeat(0u8).take(row_bytes - 1));
+            raw.extend(std::iter::repeat_n(0u8, row_bytes - 1));
         }
         let png = build_png(2, 3, &plte, &raw);
         let decoded = decode_png_rgba(&png).unwrap();
@@ -897,7 +897,7 @@ mod tests {
         for _ in 0..GB_HEIGHT {
             raw.push(0u8); // filter: none
             raw.push(0x80); // gray 0x80
-            raw.extend(std::iter::repeat(0u8).take(row_bytes - 1));
+            raw.extend(std::iter::repeat_n(0u8, row_bytes - 1));
         }
         let png = build_png(8, 0, &[], &raw);
         let decoded = decode_png_rgba(&png).unwrap();
