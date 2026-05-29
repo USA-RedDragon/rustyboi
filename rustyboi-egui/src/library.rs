@@ -14,6 +14,7 @@ use egui::Context;
 use crate::actions::{GuiAction, LibraryEntry};
 use crate::ui::PANEL_BACKGROUND;
 
+#[derive(Default)]
 pub struct LibraryPanel {
     pub open: bool,
     tree_uri: Option<String>,
@@ -25,20 +26,6 @@ pub struct LibraryPanel {
     filter: String,
     scanning: bool,
     status: Option<String>,
-}
-
-impl Default for LibraryPanel {
-    fn default() -> Self {
-        Self {
-            open: false,
-            tree_uri: None,
-            entries: Vec::new(),
-            recents: Vec::new(),
-            filter: String::new(),
-            scanning: false,
-            status: None,
-        }
-    }
 }
 
 impl LibraryPanel {
