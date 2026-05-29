@@ -91,4 +91,4 @@ features = [
 # Headless-browser tests (the wasm-only rewind/present path host tests can't
 # reach). Run with: wasm-pack test --headless --chrome rustyboi-web
 [dev-dependencies]
-wasm-bindgen-test = "0.3"
+wasm-bindgen-test = "=0.3.76"
