@@ -222,8 +222,8 @@ jobs:
           sudo safaridriver --enable
           export CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver"
           export GECKODRIVER="$GECKOWEBDRIVER/geckodriver"
-          HEADLESS=true
+          HEADLESS="--headless"
           if [[ "${{ matrix.browser }}" == "safari" ]]; then
-            HEADLESS=false
+            HEADLESS=""
           fi
-          wasm-pack test --headless=$HEADLESS --${{ matrix.browser }} rustyboi-web
+          wasm-pack test $HEADLESS --${{ matrix.browser }} rustyboi-web
