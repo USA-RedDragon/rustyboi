@@ -92,12 +92,14 @@ fn dispatch_key(canvas: &web_sys::HtmlCanvasElement, ty: &str, code: &str) {
 // reentrancy scenario. Passing = no `recursive use of an object` (or any) wasm
 // trap from a borrow held across a re-entrant JS→Rust call.
 //
-// Crucially, the test PROVES it exercised the real path rather than idling:
-//  - `draw_count > 0` — wgpu initialized and the render loop ran full `draw`
-//    passes (where input resolution + hotkey dispatch live);
-//  - the `post_action` recorder fired — a fast-forward / frame-advance hotkey
-//    actually reached `dispatch_action` and was posted to the (stub) worker.
-// If either is zero the harness fails loudly (it isn't testing what it claims).
+// Crucially, the test PROVES it exercised the real path rather than idling: the
+// `post_action` recorder must fire. `post_action` is only ever reached from
+// `dispatch_action` <- `dispatch_hotkeys` <- INSIDE `draw()`, and `draw()` only
+// runs once wgpu initialized and the renderer is live. So `posted > 0` is itself
+// proof that a full `draw()` executed the input+dispatch path — a fast-forward /
+// frame-advance hotkey actually drove it. If it stays zero (wgpu failed headless,
+// or the synthetic keys never reached winit) the harness fails loudly rather than
+// passing vacuously.
 #[wasm_bindgen_test]
 async fn mainthread_drive_no_reentrancy() {
     let posted = Rc::new(Cell::new(0u32));
@@ -133,15 +135,14 @@ async fn mainthread_drive_no_reentrancy() {
         sleep(24).await; // >= one draw: release observed
     }
 
-    assert!(
-        app.draw_count() > 0,
-        "render loop never ran a full draw() (wgpu init failed headless?) — the \
-         harness would be vacuous; fix the headless GL setup before trusting it"
-    );
+    // Proof the harness actually exercised draw() + the dispatch path (not a
+    // vacuous pass): `post_action` is only reachable from inside draw(), so a
+    // non-zero count means wgpu initialized, draw() ran, and a fast-forward /
+    // frame-advance hotkey drove dispatch_action.
     assert!(
         posted.get() > 0,
-        "no fast-forward/frame-advance hotkey reached dispatch_action — the key \
-         events didn't drive the winit input path, so the reentrancy scenario \
-         wasn't actually exercised"
+        "no fast-forward/frame-advance hotkey reached dispatch_action — draw() \
+         never ran the input path (wgpu init failed headless, or the synthetic \
+         keys didn't reach winit), so the reentrancy scenario wasn't exercised"
     );
 }
