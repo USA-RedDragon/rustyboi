@@ -217,7 +217,7 @@ jobs:
         run: |
           cargo install wasm-pack
           rustup target add wasm32-unknown-unknown
-      - name: Run headless web tests (Chrome + Firefox)
+      - name: Run web tests
         run: |
           sudo safaridriver --enable
           export CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver"
