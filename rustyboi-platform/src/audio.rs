@@ -255,11 +255,10 @@ mod oboe_backend {
             // underruns draining an empty ring).
             if !self.started
                 && prod.occupied_len() / 2 / SAMPLES_PER_FRAME >= PRIME_FRAMES
+                && let Some(stream) = self.stream.as_mut()
             {
-                if let Some(stream) = self.stream.as_mut() {
-                    let _ = stream.start();
-                    self.started = true;
-                }
+                let _ = stream.start();
+                self.started = true;
             }
 
             // Stay silent when healthy; surface underruns only if they happen

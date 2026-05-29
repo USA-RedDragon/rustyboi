@@ -892,11 +892,11 @@ fn active_network_handle(env: &mut JNIEnv<'_>, context_raw: jobject) -> Option<u
             .call_method(&caps, "hasCapability", "(I)Z", &[12i32.into()])
             .and_then(|v| v.z())
             .unwrap_or(false);
-        if has_internet {
-            if let Some(h) = net_handle(env, &net) {
-                raw_log(&format!("bind: using network #{i} (has INTERNET)"));
-                return Some(h);
-            }
+        if has_internet
+            && let Some(h) = net_handle(env, &net)
+        {
+            raw_log(&format!("bind: using network #{i} (has INTERNET)"));
+            return Some(h);
         }
     }
     raw_log("bind: no network with INTERNET capability");
