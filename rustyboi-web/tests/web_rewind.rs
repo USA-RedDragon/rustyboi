@@ -7,14 +7,12 @@
 
 #![cfg(target_arch = "wasm32")]
 
+mod common;
+
 use rustyboi_web::Emulator;
 use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_browser);
-
-// A small real ROM so frames actually advance and the rewind buffer fills with
-// distinct states.
-const ROM: &[u8] = include_bytes!("../../gb-test-roms/gbmicrotest/win9_b.gb");
 
 // Fill the rewind buffer, then hammer `rewind_step` past exhaustion and resume
 // forward play — several rounds — exactly like holding/releasing Backspace. A
@@ -24,7 +22,8 @@ const ROM: &[u8] = include_bytes!("../../gb-test-roms/gbmicrotest/win9_b.gb");
 #[wasm_bindgen_test]
 async fn rewind_hold_loop_does_not_crash() {
     let mut emu = Emulator::create().await.expect("Emulator::create");
-    let _ = emu.load_rom("win9_b.gb", ROM);
+    let rom = common::test_rom();
+    let _ = emu.load_rom("test.gb", &rom);
     assert!(emu.has_rom(), "ROM should be loaded");
 
     // Run forward to populate the rewind buffer (default interval/depth).
@@ -66,7 +65,8 @@ async fn rewind_without_rom_is_noop() {
 #[wasm_bindgen_test]
 async fn worker_applies_ui_actions_without_crashing() {
     let mut emu = Emulator::create().await.expect("Emulator::create");
-    let _ = emu.load_rom("win9_b.gb", ROM);
+    let rom = common::test_rom();
+    let _ = emu.load_rom("test.gb", &rom);
     assert!(emu.has_rom());
 
     // JSON is the wire form of `UiAction`: unit variants are bare strings,
