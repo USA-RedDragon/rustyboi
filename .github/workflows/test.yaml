@@ -38,13 +38,6 @@ jobs:
           path: test-roms/build
           retention-days: 1
 
-  # One job, one matrix: os x arch x suite. Every cell RUNS its suite -- natively
-  # where a hosted runner exists, and under qemu-user (binfmt) for the armv7 leg,
-  # which has no native runner (hence its windows/macos exclusions: qemu-user is
-  # Linux-only). `include` maps each (os, arch) to a runner + Rust target triple.
-  # Builds go through tools/run-suites.sh, which scopes to -p rustyboi-test-runner
-  # (a bare `cargo build` would pull the workspace default-member rustyboi-platform
-  # -> rodio -> cpal -> alsa-sys and fail to cross-compile).
   test:
     name: '${{ matrix.suite }} / ${{ matrix.os }} / ${{ matrix.arch }}'
     runs-on: ${{ matrix.runs-on }}
@@ -100,9 +93,6 @@ jobs:
         run: |
           rustup default stable
           rustup target add ${{ matrix.target }}
-      # The first-party `rustyboi` suite runs ROMs assembled by the build-roms
-      # job; drop them where run-suites.sh expects them (test-roms/build). Other
-      # suites use the downloaded gb-test-roms and need no artifact.
       - name: Download first-party ROMs
         if: matrix.suite == 'rustyboi'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -173,7 +163,6 @@ jobs:
       - name: Install Rust
         shell: bash
         run: rustup default stable
-      # report-update runs every suite, including first-party `rustyboi`.
       - name: Download first-party ROMs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -201,7 +190,7 @@ jobs:
             git push
           fi
 
-  web-headless:
+  web:
     name: 'web / (${{ matrix.browser }})'
     strategy:
       fail-fast: false
