@@ -221,12 +221,10 @@ jobs:
         run: |
           export CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver"
           export GECKODRIVER="$GECKOWEBDRIVER/geckodriver"
-          HEADLESS="--headless"
           if [[ "${{ matrix.browser }}" == "safari" ]]; then
-            HEADLESS=""
             sudo safaridriver --enable
           fi
-          wasm-pack test $HEADLESS --${{ matrix.browser }} rustyboi-web
+          wasm-pack test --headless --${{ matrix.browser }} rustyboi-web
 
   host-tests:
     name: 'host / cargo test'
