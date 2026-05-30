@@ -283,7 +283,7 @@ fn held_inputs_from_keyboard(input: &WinitInputHelper) -> HeldInputs {
 /// winit has no gamepad backend on Android; controller buttons arrive as unmapped
 /// native key events. Face/shoulder/trigger/start/select + a digital d-pad are
 /// covered; analog sticks (delivered as motion events winit drops) are not.
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 fn android_pad_button(code: u32) -> Option<PadButton> {
     Some(match code {
         96 => PadButton::South,          // BUTTON_A
@@ -302,6 +302,31 @@ fn android_pad_button(code: u32) -> Option<PadButton> {
         22 => PadButton::DpadRight,      // DPAD_RIGHT
         _ => return None,
     })
+}
+
+/// Pure inset math for [`crate::android::safe_area_insets`]: the gap `(left, top,
+/// right, bottom)` in surface pixels between the full surface and the content
+/// rect (system bars + display cutout). Split out here (host-compiled) so it can
+/// be unit-tested without the Android runtime that supplies the rect. A
+/// degenerate/empty rect (before the first insets arrive) yields no insets so the
+/// game region is never collapsed to nothing.
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn safe_insets_from_rect(
+    surface_w: u32,
+    surface_h: u32,
+    rect_left: i32,
+    rect_top: i32,
+    rect_right: i32,
+    rect_bottom: i32,
+) -> (f32, f32, f32, f32) {
+    if rect_right <= rect_left || rect_bottom <= rect_top {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    let left = rect_left.max(0) as f32;
+    let top = rect_top.max(0) as f32;
+    let right = (surface_w as i32 - rect_right).max(0) as f32;
+    let bottom = (surface_h as i32 - rect_bottom).max(0) as f32;
+    (left, top, right, bottom)
 }
 
 /// Fold all connected gamepads' held buttons into the abstract [`PadButton`] set:
@@ -1463,5 +1488,55 @@ fn drain_printer_sheets_unsupported(app: &mut App) {
     let sheets = app.session_mut().take_prints();
     if !sheets.is_empty() {
         log::warn!("{} print(s) captured but this platform has no print sink", sheets.len());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The Android gamepad keycode → PadButton map (Android delivers controller
+    // buttons as unmapped native key events; winit has no Android gamepad
+    // backend). Pins the face/shoulder/trigger/start/select + d-pad codes and
+    // that unknown codes map to None.
+    #[test]
+    fn android_pad_button_maps_known_codes() {
+        let cases = [
+            (96, PadButton::South),
+            (97, PadButton::East),
+            (99, PadButton::West),
+            (100, PadButton::North),
+            (102, PadButton::LeftShoulder),
+            (103, PadButton::RightShoulder),
+            (104, PadButton::LeftTrigger),
+            (105, PadButton::RightTrigger),
+            (108, PadButton::Start),
+            (109, PadButton::Select),
+            (19, PadButton::DpadUp),
+            (20, PadButton::DpadDown),
+            (21, PadButton::DpadLeft),
+            (22, PadButton::DpadRight),
+        ];
+        for (code, want) in cases {
+            assert_eq!(android_pad_button(code), Some(want), "keycode {code}");
+        }
+        // Unmapped codes (e.g. BUTTON_MODE 110, letter keys) yield None.
+        for code in [0u32, 1, 98, 101, 106, 107, 110, 200] {
+            assert_eq!(android_pad_button(code), None, "keycode {code} should be unmapped");
+        }
+    }
+
+    #[test]
+    fn safe_insets_from_rect_computes_the_gap() {
+        // 1000x600 surface, content rect inset 10 left / 20 top and ending at
+        // 980 x 560 → right gap 20, bottom gap 40.
+        assert_eq!(safe_insets_from_rect(1000, 600, 10, 20, 980, 560), (10.0, 20.0, 20.0, 40.0));
+        // Full-surface content rect → no insets.
+        assert_eq!(safe_insets_from_rect(1000, 600, 0, 0, 1000, 600), (0.0, 0.0, 0.0, 0.0));
+        // Degenerate/empty rect (before first insets) → no insets, never collapse.
+        assert_eq!(safe_insets_from_rect(1000, 600, 0, 0, 0, 0), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!(safe_insets_from_rect(1000, 600, 5, 5, 3, 3), (0.0, 0.0, 0.0, 0.0));
+        // A content rect extending past the surface never yields negative insets.
+        assert_eq!(safe_insets_from_rect(100, 100, -10, -10, 200, 200), (0.0, 0.0, 0.0, 0.0));
     }
 }

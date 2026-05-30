@@ -137,3 +137,99 @@ pub fn build() -> CoreOptions {
         ],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Option + category keys must be unique — a duplicate would make the
+    // RetroArch frontend drop or overwrite an option silently.
+    #[test]
+    fn build_keys_are_unique() {
+        let opts = build();
+        let mut keys: Vec<&str> = opts.options.iter().map(|o| o.key).collect();
+        keys.sort_unstable();
+        let n = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), n, "duplicate option key in the core-option table");
+
+        let mut cats: Vec<&str> = opts.categories.iter().map(|c| c.key).collect();
+        cats.sort_unstable();
+        let n = cats.len();
+        cats.dedup();
+        assert_eq!(cats.len(), n, "duplicate category key");
+    }
+
+    // Every option's default must be one of its own values, and its category
+    // must exist — otherwise RetroArch shows an option with no valid selection /
+    // an orphaned category.
+    #[test]
+    fn build_defaults_and_categories_are_valid() {
+        let opts = build();
+        let cat_keys: Vec<&str> = opts.categories.iter().map(|c| c.key).collect();
+        for o in &opts.options {
+            assert!(
+                o.values.iter().any(|v| v.value == o.default),
+                "option {} default {:?} is not one of its values",
+                o.key,
+                o.default
+            );
+            assert!(
+                cat_keys.contains(&o.category),
+                "option {} references unknown category {:?}",
+                o.key,
+                o.category
+            );
+        }
+    }
+
+    // The option table is generated from the shared `rustyboi_session` enums, so
+    // every model / palette / scheme the core can emulate MUST appear as a
+    // selectable value. This guards against the enum and the libretro list
+    // drifting apart.
+    #[test]
+    fn build_covers_every_shared_enum_variant() {
+        let opts = build();
+        let values_for = |key: &str| -> Vec<String> {
+            opts.options
+                .iter()
+                .find(|o| o.key == key)
+                .unwrap_or_else(|| panic!("missing option {key}"))
+                .values
+                .iter()
+                .map(|v| v.value.clone())
+                .collect()
+        };
+
+        let hw = values_for(KEY_HARDWARE);
+        assert!(hw.contains(&"auto".to_string()), "hardware list missing 'auto'");
+        for c in HardwareChoice::ALL {
+            assert!(hw.iter().any(|v| v == c.option_id()), "hardware list missing {}", c.option_id());
+        }
+
+        let pal = values_for(KEY_DMG_PALETTE);
+        for p in PaletteChoice::ALL {
+            assert!(pal.iter().any(|v| v == p.option_id()), "palette list missing {}", p.option_id());
+        }
+
+        let gbc = values_for(KEY_GBC_DMG_PALETTE);
+        for (c, _) in GbcDmgPalette::choices() {
+            assert!(gbc.iter().any(|v| v == c.option_id()), "gbc-dmg list missing {}", c.option_id());
+        }
+
+        let cc = values_for(KEY_GBC_COLOR_CORRECTION);
+        for (id, _, _) in COLOR_CORRECTION {
+            assert!(cc.iter().any(|v| v == id), "color-correction list missing {id}");
+        }
+    }
+
+    // The parser and the generated value list share the COLOR_CORRECTION table,
+    // so every id it advertises must parse back to the matching mode.
+    #[test]
+    fn parse_color_correction_round_trips() {
+        for (id, _, mode) in COLOR_CORRECTION {
+            assert_eq!(parse_color_correction(id), Some(mode));
+        }
+        assert_eq!(parse_color_correction("nope"), None);
+    }
+}
