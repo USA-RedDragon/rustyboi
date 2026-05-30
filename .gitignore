@@ -13,6 +13,4 @@ GBEmulatorShootout/
 
 *.pyc
 
-# llvm version hacks for libretro bindgen
-.cargo/config.toml
-tools/libclang-compat/
+lcov.info
