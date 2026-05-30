@@ -234,8 +234,8 @@ jobs:
               ;;
           esac
 
-  host-tests:
-    name: 'host / cargo test'
+  coverage:
+    name: 'host / coverage'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -250,13 +250,17 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: host-tests-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: host-tests-
-      - name: Install Rust
-        run: rustup default stable
-      - name: cargo test
+          key: coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: coverage-
+      - name: Install Rust + llvm-tools
         run: |
-          cargo test \
+          rustup default stable
+          rustup component add llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
+      - name: Generate coverage (lcov)
+        run: |
+          cargo llvm-cov --lcov --output-path lcov.info \
             -p rustyboi-core \
             -p rustyboi-session \
             -p rustyboi-frontend \
@@ -264,4 +268,10 @@ jobs:
             -p rustyboi-debugger \
             -p rustyboi-test-runner \
             -p rustyboi-libretro-sys \
+            -p rustyboi-libretro \
             -p rustyboi-platform
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
