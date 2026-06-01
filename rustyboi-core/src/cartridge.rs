@@ -295,6 +295,14 @@ pub struct Cartridge {
     // `unl_mapper`, `cgb_support`) DOES serialize, so bank math survives the load.
     #[serde(skip, default)]
     rom_data: Vec<u8>,
+    // Cached (bank0_base, bankN_base) ROM byte offsets for the licensed-mapper
+    // read fast path, so a ROM read is an add + bounds check instead of the
+    // full mapper-type + bank-register derivation per access. Invalidated by
+    // every `write` (the only mutation path for licensed bank registers);
+    // never used for unlicensed boards (their lock state can advance on
+    // reads). `serde(skip)` deserializes to None = recompute.
+    #[serde(skip, default)]
+    rom_bank_cache: Cell<Option<(usize, usize)>>,
     // External RAM data - all banks
     ram_data: Vec<u8>,
     // Cartridge type
@@ -590,6 +598,7 @@ impl Clone for Cartridge {
     fn clone(&self) -> Self {
         Cartridge {
             rom_data: self.rom_data.clone(),
+            rom_bank_cache: self.rom_bank_cache.clone(),
             ram_data: self.ram_data.clone(),
             cartridge_type: self.cartridge_type,
             rom_banks: self.rom_banks,
@@ -1058,6 +1067,7 @@ impl Cartridge {
 
         let mut cartridge = Cartridge {
             rom_data,
+            rom_bank_cache: Cell::new(None),
             ram_data,
             cartridge_type,
             rom_banks,
@@ -1253,6 +1263,7 @@ impl Cartridge {
 
         let cartridge = Cartridge {
             rom_data,
+            rom_bank_cache: Cell::new(None),
             ram_data,
             cartridge_type,
             rom_banks,
@@ -1596,6 +1607,23 @@ impl Cartridge {
             CartridgeType::M161 => (self.m161_bank as usize) & (self.rom_banks - 2),
             _ => 0,
         }
+    }
+
+    /// Cached (bank0, bankN) ROM byte-offset bases for the read fast path.
+    /// Licensed mappers only mutate bank registers through `write`, which
+    /// invalidates the cache; unlicensed boards can advance lock state during
+    /// reads, so they always recompute (identical to the pre-cache behavior).
+    #[inline]
+    fn rom_bank_bases(&self) -> (usize, usize) {
+        if self.unl_mapper != UnlMapper::None {
+            return (self.get_rom_bank0() * 0x4000, self.get_rom_bank() * 0x4000);
+        }
+        if let Some(bases) = self.rom_bank_cache.get() {
+            return bases;
+        }
+        let bases = (self.get_rom_bank0() * 0x4000, self.get_rom_bank() * 0x4000);
+        self.rom_bank_cache.set(Some(bases));
+        bases
     }
 
     /// Get the save file path for this cartridge
@@ -3465,8 +3493,7 @@ impl memory::Addressable for Cartridge {
             // ROM Bank 0 (0x0000-0x3FFF). Fixed to bank 0 except on MBC1 in
             // banking mode 1, where BANK2 also selects this region.
             mmio::CARTRIDGE_START..=mmio::CARTRIDGE_END => {
-                let rom_bank0 = self.get_rom_bank0();
-                let offset = (addr - mmio::CARTRIDGE_START) as usize + (rom_bank0 * 0x4000);
+                let offset = (addr - mmio::CARTRIDGE_START) as usize + self.rom_bank_bases().0;
                 if offset < self.rom_data.len() {
                     self.rom_data[offset]
                 } else {
@@ -3475,8 +3502,8 @@ impl memory::Addressable for Cartridge {
             }
             // ROM Bank 1-N (switchable)
             mmio::CARTRIDGE_BANK_START..=mmio::CARTRIDGE_BANK_END => {
-                let rom_bank = self.get_rom_bank();
-                let offset = (addr - mmio::CARTRIDGE_BANK_START) as usize + (rom_bank * 0x4000);
+                let offset =
+                    (addr - mmio::CARTRIDGE_BANK_START) as usize + self.rom_bank_bases().1;
                 if offset < self.rom_data.len() {
                     self.rom_data[offset]
                 } else {
@@ -3691,6 +3718,9 @@ impl memory::Addressable for Cartridge {
     }
 
     fn write(&mut self, addr: u16, value: u8) {
+        // Any write can change bank-register state; drop the ROM-base cache
+        // unconditionally (recomputing once per write is trivial next read).
+        self.rom_bank_cache.set(None);
         match addr {
             // MBC2 register block (0x0000-0x3FFF). MBC2 has a SINGLE register
             // region here, selected by address bit 8: bit8==0 => RAMG (RAM
