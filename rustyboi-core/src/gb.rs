@@ -1021,6 +1021,14 @@ impl GB {
         self.mmio.read(address)
     }
 
+    /// Catch lazily-advanced peripherals (the APU) up to the current cc so a
+    /// following out-of-band `read_memory` observes live state. CPU-visible
+    /// reads sync automatically; host/debug reads bypass the bus and must call
+    /// this first when they target APU registers.
+    pub fn sync_lazy_peripherals(&mut self) {
+        self.mmio.sync_apu();
+    }
+
     /// Select the inserted board's SRAM chip-select decode (test-fixture
     /// modeling; see `Cartridge::dma_sram_bus_read`). Call after `insert`.
     pub fn set_cart_sram_cs_lazy(&mut self, lazy: bool) {
