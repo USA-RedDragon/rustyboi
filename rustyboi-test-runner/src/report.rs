@@ -107,3 +107,56 @@ pub fn write_json(summary: &Summary, path: &Path) -> Result<(), String> {
         .map_err(|error| format!("failed to serialize JSON summary: {error}"))?;
     fs::write(path, json).map_err(|error| format!("failed to write JSON summary: {error}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expectation::{Oracle, TestCase};
+
+    fn result(mode: Mode, passed: bool) -> CaseResult {
+        CaseResult {
+            case: TestCase {
+                rom_path: std::path::PathBuf::from("dummy.gb"),
+                mode,
+                oracle: Oracle::Serial,
+                revision: None,
+                input: Vec::new(),
+                frames: None,
+                cart_lazy_sram_cs: false,
+            },
+            passed,
+            detail: "detail".to_string(),
+        }
+    }
+
+    #[test]
+    fn record_tallies_per_mode_totals_and_failures() {
+        let mut s = Summary::default();
+        s.record(&result(Mode::Dmg, true));
+        s.record(&result(Mode::Dmg, false));
+        s.record(&result(Mode::Cgb, false));
+        s.record(&result(Mode::Agb, true));
+
+        assert_eq!(s.total, 4);
+        assert_eq!(s.passed, 2);
+        assert_eq!(s.failed, 2);
+        assert_eq!((s.dmg_total, s.dmg_failed), (2, 1));
+        assert_eq!((s.cgb_total, s.cgb_failed), (1, 1));
+        assert_eq!((s.agb_total, s.agb_failed), (1, 0));
+        // Only the failing cases produce a FailureRecord.
+        assert_eq!(s.failures.len(), 2);
+    }
+
+    #[test]
+    fn exit_code_is_zero_iff_nothing_failed() {
+        assert_eq!(Summary::default().exit_code(), 0);
+
+        let mut all_pass = Summary::default();
+        all_pass.record(&result(Mode::Cgb, true));
+        assert_eq!(all_pass.exit_code(), 0);
+
+        let mut one_fail = Summary::default();
+        one_fail.record(&result(Mode::Dmg, false));
+        assert_eq!(one_fail.exit_code(), 1);
+    }
+}

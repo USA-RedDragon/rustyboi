@@ -138,3 +138,35 @@ fn pause_hint_for(action: &UiAction) -> Option<PauseHint> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustyboi_session::action::HardwareChoice;
+
+    fn file() -> FileData {
+        FileData::Path(std::path::PathBuf::from("x.gb"))
+    }
+
+    #[test]
+    fn pausing_actions_map_to_their_hint() {
+        assert_eq!(pause_hint_for(&UiAction::TogglePause), Some(PauseHint::TogglePause));
+        assert_eq!(pause_hint_for(&UiAction::Restart), Some(PauseHint::Restart));
+        assert_eq!(pause_hint_for(&UiAction::ClearError), Some(PauseHint::ClearError));
+        assert_eq!(pause_hint_for(&UiAction::FrameAdvance), Some(PauseHint::FrameAdvance));
+        assert_eq!(pause_hint_for(&UiAction::LoadRom(file())), Some(PauseHint::Load));
+        assert_eq!(pause_hint_for(&UiAction::LoadState(file())), Some(PauseHint::Load));
+        assert_eq!(pause_hint_for(&UiAction::ImportState(file())), Some(PauseHint::Load));
+        assert_eq!(
+            pause_hint_for(&UiAction::SetHardware(HardwareChoice::Cgb)),
+            Some(PauseHint::SetHardware)
+        );
+    }
+
+    #[test]
+    fn non_pausing_actions_have_no_hint() {
+        assert_eq!(pause_hint_for(&UiAction::ToggleFastForward), None);
+        assert_eq!(pause_hint_for(&UiAction::Quicksave), None);
+        assert_eq!(pause_hint_for(&UiAction::TogglePrinter), None);
+    }
+}

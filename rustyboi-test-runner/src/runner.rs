@@ -1471,3 +1471,58 @@ impl AudioOutput for CapturedAudio {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buttons_to_state_empty_and_full() {
+        assert_eq!(buttons_to_state(0x00), ButtonState::default());
+        let all = buttons_to_state(0xFF);
+        assert!(all.a && all.b && all.start && all.select && all.up && all.down && all.left && all.right);
+    }
+
+    #[test]
+    fn buttons_to_state_maps_each_bit_without_swaps() {
+        // Each BTN_* bit lights exactly its own field (a bit-swap regression
+        // would light the wrong direction/button).
+        assert_eq!(buttons_to_state(BTN_A), ButtonState { a: true, ..Default::default() });
+        assert_eq!(buttons_to_state(BTN_B), ButtonState { b: true, ..Default::default() });
+        assert_eq!(buttons_to_state(BTN_START), ButtonState { start: true, ..Default::default() });
+        assert_eq!(buttons_to_state(BTN_SELECT), ButtonState { select: true, ..Default::default() });
+        assert_eq!(buttons_to_state(BTN_UP), ButtonState { up: true, ..Default::default() });
+        assert_eq!(buttons_to_state(BTN_DOWN), ButtonState { down: true, ..Default::default() });
+        assert_eq!(buttons_to_state(BTN_LEFT), ButtonState { left: true, ..Default::default() });
+        assert_eq!(buttons_to_state(BTN_RIGHT), ButtonState { right: true, ..Default::default() });
+    }
+
+    #[test]
+    fn compare_dump_accepts_exact_and_longer_actual() {
+        assert!(compare_dump("t", &[1, 2, 3], &[1, 2, 3], &[]).is_ok());
+        // Extra trailing actual bytes past the expected length are ignored.
+        assert!(compare_dump("t", &[1, 2, 3], &[1, 2, 3, 9, 9], &[]).is_ok());
+    }
+
+    #[test]
+    fn compare_dump_rejects_too_small_actual() {
+        let err = compare_dump("region", &[1, 2, 3, 4], &[1, 2], &[]).unwrap_err();
+        assert!(err.contains("too small"), "{err}");
+    }
+
+    #[test]
+    fn compare_dump_reports_first_mismatch_offset() {
+        let err = compare_dump("region", &[0, 1, 2, 3], &[0, 9, 2, 3], &[]).unwrap_err();
+        assert!(err.contains("offset 0x0001"), "{err}");
+        assert!(err.contains("expected 0x01") && err.contains("got 0x09"), "{err}");
+    }
+
+    #[test]
+    fn compare_dump_skip_ranges_exclude_offsets() {
+        let skip = std::slice::from_ref(&(1usize..2));
+        // The only mismatch is at offset 1, which the skip range covers.
+        assert!(compare_dump("region", &[0, 1, 2, 3], &[0, 9, 2, 3], skip).is_ok());
+        // A mismatch outside the skip range still fails.
+        assert!(compare_dump("region", &[0, 1, 2, 3], &[0, 9, 8, 3], skip).is_err());
+    }
+}

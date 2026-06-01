@@ -42,3 +42,34 @@ pub fn key_code(k: KeyName) -> KeyCode {
 pub fn key_name(code: KeyCode) -> Option<KeyName> {
     KeyName::ALL.into_iter().find(|&k| key_code(k) == code)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn key_name_inverts_key_code_for_every_key() {
+        for k in KeyName::ALL {
+            assert_eq!(key_name(key_code(k)), Some(k), "{k:?} does not round-trip");
+        }
+    }
+
+    #[test]
+    fn key_code_is_injective() {
+        // Two KeyNames sharing a KeyCode would make key_name() ambiguous (it
+        // returns the first match), silently breaking the loser's binding.
+        let mut seen = HashSet::new();
+        for k in KeyName::ALL {
+            let code = key_code(k);
+            assert!(seen.insert(code), "{code:?} is bound by more than one KeyName");
+        }
+    }
+
+    #[test]
+    fn unmapped_keycodes_have_no_key_name() {
+        for code in [KeyCode::Pause, KeyCode::Insert, KeyCode::Home, KeyCode::NumpadEnter] {
+            assert_eq!(key_name(code), None, "{code:?} should be unmapped");
+        }
+    }
+}

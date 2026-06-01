@@ -114,6 +114,106 @@ mod fb_rle {
     }
 }
 
+#[cfg(test)]
+mod fb_rle_tests {
+    use serde::{Deserialize, Serialize};
+
+    // Wraps a fixed-size framebuffer with the codec, mirroring how the PPU's
+    // `[u8; N]` framebuffer fields opt into `fb_rle`. Round-trip through bincode
+    // (the real savestate format) and assert byte-exact restore.
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct Fb<const N: usize>(#[serde(with = "super::fb_rle")] [u8; N]);
+
+    fn roundtrip<const N: usize>(buf: [u8; N]) -> Vec<u8> {
+        let bytes = bincode::serialize(&Fb(buf)).unwrap();
+        let back: Fb<N> = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.0, buf, "framebuffer did not round-trip byte-exact");
+        bytes
+    }
+
+    #[test]
+    fn blank_buffer_uses_a_tiny_rle_encoding() {
+        // The common case: an unused mode's framebuffer pair is all-zero.
+        let enc = roundtrip([0u8; 4096]);
+        assert!(enc.len() < 64, "blank 4 KiB buffer should cost a few bytes, got {}", enc.len());
+    }
+
+    #[test]
+    fn long_constant_run_round_trips() {
+        roundtrip([0xABu8; 4096]);
+    }
+
+    #[test]
+    fn high_entropy_buffer_falls_back_to_raw() {
+        // Every byte differs from its neighbour -> one run each -> the run list
+        // would be ~5x the buffer, so the codec must bail to the Raw variant.
+        let mut buf = [0u8; 4096];
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = (i.wrapping_mul(31).wrapping_add(7)) as u8;
+        }
+        let enc = roundtrip(buf);
+        assert!(enc.len() >= 4096, "raw must carry all bytes, got {}", enc.len());
+        assert!(enc.len() < 4096 + 64, "the 5N run list must have been rejected, got {}", enc.len());
+    }
+
+    #[test]
+    fn fragmented_buffer_round_trips_across_the_crossover() {
+        // Many short runs exercise the run-list path right up against the
+        // raw-fallback threshold, without pinning which side it lands on.
+        let mut buf = [0u8; 4096];
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = ((i / 3) % 2) as u8;
+        }
+        roundtrip(buf);
+    }
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::{rgb555_to_rgb888, CgbColorConversion, Ppu};
+
+    // Pack a 5-5-5 color into the (low, high) palette byte pair the PPU stores.
+    fn bytes(r: u16, g: u16, b: u16) -> (u8, u8) {
+        let w = r | (g << 5) | (b << 10);
+        ((w & 0xFF) as u8, (w >> 8) as u8)
+    }
+
+    #[test]
+    fn rgb555_expands_endpoints_and_channels() {
+        assert_eq!(rgb555_to_rgb888(0x0000), (0, 0, 0));
+        assert_eq!(rgb555_to_rgb888(0x7FFF), (255, 255, 255));
+        assert_eq!(rgb555_to_rgb888(0x001F), (255, 0, 0)); // r = 31
+        assert_eq!(rgb555_to_rgb888(0x03E0), (0, 255, 0)); // g = 31
+        assert_eq!(rgb555_to_rgb888(0x7C00), (0, 0, 255)); // b = 31
+        assert_eq!(rgb555_to_rgb888(0x000F), (123, 0, 0)); // r = 15 -> 15*255/31
+    }
+
+    #[test]
+    fn cgb_linear_matches_the_naive_expansion() {
+        let mut ppu = Ppu::new();
+        ppu.set_cgb_color_conversion(CgbColorConversion::Linear);
+        let (lo, hi) = bytes(31, 0, 0);
+        assert_eq!(ppu.cgb_color_to_rgb(lo, hi), (255, 0, 0));
+        let (lo, hi) = bytes(31, 31, 31);
+        assert_eq!(ppu.cgb_color_to_rgb(lo, hi), (255, 255, 255));
+    }
+
+    #[test]
+    fn cgb_lcd_applies_the_correction_curve() {
+        let mut ppu = Ppu::new();
+        ppu.set_cgb_color_conversion(CgbColorConversion::Lcd);
+        // White under the LCD curve is (248,248,248), NOT the linear (255,255,255).
+        let (lo, hi) = bytes(31, 31, 31);
+        assert_eq!(ppu.cgb_color_to_rgb(lo, hi), (248, 248, 248));
+        // Pure red picks up the curve's inter-channel bleed.
+        let (lo, hi) = bytes(31, 0, 0);
+        assert_eq!(ppu.cgb_color_to_rgb(lo, hi), (201, 0, 46));
+        // Black stays black on both curves.
+        let (lo, hi) = bytes(0, 0, 0);
+        assert_eq!(ppu.cgb_color_to_rgb(lo, hi), (0, 0, 0));
+    }
+}
+
 // OAM constants
 pub const OAM_SPRITE_COUNT: usize = 40; // 40 sprites total in OAM
 pub const OAM_BYTES_PER_SPRITE: usize = 4; // 4 bytes per sprite
