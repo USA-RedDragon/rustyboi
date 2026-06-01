@@ -563,8 +563,14 @@ impl SM83 {
                     }
                 }
             } else {
-                // CPU is halted and no interrupt is pending, consume 1 cycle and return
-                return 1;
+                // CPU is halted and no interrupt is pending: consume a batch of
+                // idle cycles bounded so no IF bit can be raised inside the
+                // batch (Bus::halted_idle_dots — timer/PPU event lower bounds;
+                // serial/joypad activity disables batching). The world still
+                // resolves dot-by-dot inside the caller's tick, so peripheral
+                // behavior is byte-identical; only the poll cadence of this
+                // no-op loop coarsens, and the batch never contains a wake.
+                return mmio.halted_idle_dots();
             }
         }
 

@@ -4807,6 +4807,59 @@ impl Ppu {
         self.sched_min = 0;
     }
 
+    /// Lower bound, in MASTER cc, on the next cc at which the PPU can raise an
+    /// IF bit (STAT or VBlank). `sched_min` lower-bounds every scheduled
+    /// dispatch slot in abs-cc space (abs_cc = master - p_now); the 8-cc
+    /// margin covers the dispatch anticipation offsets (<= 2*ds + the sub-dot
+    /// half-step) with room to spare. The ly143->144 render-machine VBlank
+    /// fire lands ~3cc AFTER the m1 event, which is itself in the min, so it
+    /// is covered too. While the LCD is off the PPU raises nothing. A dirty
+    /// bound (sched_min == 0) yields a past cc, i.e. "no batching".
+    ///
+    /// `sched_m0irq` needs special care: unlike every other slot it is armed
+    /// mid-stream (at pixel-transfer entry), so while it is DISARMED with the
+    /// m0 STAT source enabled a fire is still possible later this line —
+    /// bound by the closed-form current-line mode-0 time. Once that time has
+    /// passed (we are in/past this line's HBlank, the slot already fired and
+    /// disarmed), the next possible m0 fire is next line's mode-0 entry: at
+    /// least (dots to next line start) + mode 2 (80) + minimal mode 3, kept
+    /// very conservative at +200 render dots past the line wrap. With no
+    /// closed-form anchor (window / first line) batching is refused outright.
+    pub fn next_stat_irq_lower_bound_master(&self, now: u64, ds: bool) -> u64 {
+        if self.disabled {
+            return u64::MAX;
+        }
+        let _ = (now, ds);
+        if self.sched_m0irq == stat_irq::DISABLED_TIME
+            && self.stat_reg_committed & stat_irq::STAT_M0EN != 0
+        {
+            // The m0 fire cc is unknowable while the slot is disarmed: the
+            // closed-form anchor can be stale (previous line) or absent
+            // (window / first line), the SCX fine-scroll shifts the true fire
+            // off any cheap inference, and inferring the next arm dot from
+            // `ticks` proved unsound (measured: hblank_ly_scx / late_m0int
+            // regressions). Refuse to batch; batching resumes while the slot
+            // is armed (its exact cc is then covered by sched_min above).
+            return 0;
+        }
+        self.sched_min.saturating_add(self.p_now).saturating_sub(8)
+    }
+
+    /// Conservative count of MASTER-cc dots until the PPU's frame wrap (the
+    /// ly153->0 frame swap), minus an 8-dot safety margin so the caller's
+    /// batch always ends short of the wrap and the swap dot itself resolves
+    /// under per-dot stepping (frame-loop return points stay dot-exact).
+    /// While the LCD is off there is no wrap (the caller's global cap
+    /// bounds the batch instead).
+    pub fn dots_until_frame_wrap_conservative(&self, ds: bool) -> u64 {
+        if self.disabled {
+            return u64::MAX;
+        }
+        let pos = self.internal_ly_val as u32 * stat_irq::LCD_CYCLES_PER_LINE + self.line_cycle;
+        let total = stat_irq::LCD_LINES_PER_FRAME * stat_irq::LCD_CYCLES_PER_LINE;
+        (total.saturating_sub(pos + 8) as u64) << (ds as u32)
+    }
+
     fn dispatch_stat_events_slow(&mut self, mmio: &mut mmio::Mmio) {
         let ds = mmio.is_double_speed_mode();
         let cc = self.abs_cc;
