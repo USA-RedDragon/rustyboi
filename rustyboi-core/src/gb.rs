@@ -808,9 +808,11 @@ impl GB {
     }
 
     pub fn step_instruction(&mut self, collect_audio: bool) -> (bool, u32) {
-        // Check for breakpoint at current PC before executing
+        // Check for breakpoint at current PC before executing. The is_empty
+        // guard keeps the common no-breakpoints case from paying a HashSet
+        // hash per instruction.
         let pc = self.cpu.registers.pc;
-        if self.breakpoints.contains(&pc) {
+        if !self.breakpoints.is_empty() && self.breakpoints.contains(&pc) {
             // Breakpoint hit - don't execute instruction and return (empty audio, breakpoint hit)
             return (true, 0);
         }
