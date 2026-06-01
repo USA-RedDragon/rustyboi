@@ -1873,31 +1873,22 @@ impl Mmio {
         self.audio.set_boot_cgb(cgb);
     }
 
-    pub fn step_audio(&mut self) {
-        let advanced = self.sync_apu_cc();
-        // Audio::step is a no-op when the APU is powered off. It is also a no-op
-        // on dots where the APU clock didn't advance: the channel duty/sweep
-        // events are all cc-driven, and update_pos does nothing when cc == the
-        // last resolved cc. In single speed the clock advances only every other
-        // dot, so this skips ~half the channel steps.
-        if !advanced || !self.audio.is_powered() {
-            return;
-        }
-        // The channels only read these three read-only flags from mmio, so pass
-        // them by value instead of cloning the whole Audio struct to sidestep
-        // the &mut-self borrow.
-        let cgb = self.is_cgb_features_enabled();
-        let agb = self.is_agb();
-        let ds = self.is_double_speed_mode();
-        self.audio.step(cgb, agb, ds);
+    /// Public catch-up for OUT-OF-BAND observers (test-runner verdict reads,
+    /// debug views) that read APU state through the non-syncing `&self`
+    /// `read()` path. CPU reads/writes sync automatically via `Bus`; a raw
+    /// `mmio.read(NR52)` from the host does not, and would otherwise see the
+    /// APU as of its last CPU access.
+    pub fn sync_apu(&mut self) {
+        self.sync_apu_cc();
     }
 
-    /// Push the APU's 2 MHz cycle-counter inputs to the audio unit: the
-    /// frame-sequencer step (FS phase, maintained independently of DIV writes)
-    /// and the timer's internal counter (sub-step position). The controller
-    /// reconstructs the APU frame timing from these.
-    /// Returns whether the APU clock advanced (see `Audio::sync_cc`).
-    fn sync_apu_cc(&mut self) -> bool {
+    /// Lazily catch the whole APU (clock and channels) up to the timer's
+    /// absolute cc. The APU raises no interrupts and is observable only
+    /// through its own register block and the sample mixer, so it is not
+    /// stepped in the per-dot crank at all; every observer path (APU register
+    /// reads/writes, DIV writes, speed switches, sample generation) syncs it
+    /// here first. See `Audio::sync_cc` for the byte-identical chunked model.
+    fn sync_apu_cc(&mut self) {
         let ds = self.is_double_speed_mode();
         self.sync_apu_cc_with_ds(ds)
     }
@@ -1906,11 +1897,15 @@ impl Mmio {
     /// switch the APU generates its pending samples at the speed being LEFT,
     /// BEFORE the KEY1 toggle — so the flush to the switch
     /// cc must use the OLD speed's `>>(1+ds)` rate, not the just-toggled one.
-    fn sync_apu_cc_with_ds(&mut self, ds: bool) -> bool {
+    fn sync_apu_cc_with_ds(&mut self, ds: bool) {
         let abs_cc = self.timer.abs_cc();
         let div_resets = self.timer.div_reset_count();
         let div_anchor = self.timer.div_anchor_apu();
-        self.audio.sync_cc(abs_cc, div_resets, div_anchor, ds)
+        // The channels only read these three read-only flags from mmio, so pass
+        // them by value to sidestep the &mut-self borrow.
+        let cgb = self.is_cgb_features_enabled();
+        let agb = self.is_agb();
+        self.audio.sync_cc(abs_cc, div_resets, div_anchor, ds, cgb, agb);
     }
 
     /// Sync the APU cycle counter to the exact CPU read cycle and advance the
@@ -2061,6 +2056,10 @@ impl Mmio {
     }
 
     pub fn generate_audio_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
+        // Catch the lazy APU up to the current cc first so the mixer state the
+        // down-sampler reads is the instruction-end state (the same state the
+        // per-dot crank used to leave it in).
+        self.sync_apu_cc();
         let mut audio = self.audio.clone();
         let samples = audio.generate_samples(self, cpu_cycles);
         self.audio = audio;
@@ -5362,7 +5361,15 @@ impl memory::Addressable for Mmio {
                             }
                         }
                         timer::DIV => {
-                            // DIV write (FF04): realign the pending serial event to
+                            // DIV write (FF04): the lazy APU must fold its clock
+                            // at EVERY DIV reset's own anchor cc. `div_resets` is
+                            // a counter compared once per sync, so two DIV writes
+                            // between APU accesses would otherwise collapse into
+                            // a single fold at the LAST anchor. Catch the APU up
+                            // (detecting/folding any prior pending reset) BEFORE
+                            // the timer records this one.
+                            self.sync_apu_cc();
+                            // Realign the pending serial event to
                             // the new divider phase before resetting DIV. Serial
                             // now shares the master cc, so feed the DIV write's
                             // canonical access cc (`access_cc()` = abs_cc + 5),

@@ -245,17 +245,32 @@ impl Audio {
 
     const CC_MAX: u32 = 0x8000_0000;
 
-    /// Advance the free-running 2 MHz APU cycle counter from the timer's
-    /// absolute cc and push it to the channels.
+    /// Lazily catch the whole APU (clock AND channels) up to the timer's
+    /// absolute cc. This is the ONLY driver of APU time: the per-dot crank no
+    /// longer steps audio, so every observer path (APU register reads/writes,
+    /// DIV writes, speed switches, sample generation) funnels through here
+    /// first. Byte-identical to the retired per-dot `step_audio` crank by
+    /// construction: the clock advances in chunks that stop at every cc where
+    /// the per-dot interleave could act — each DIV-APU half-period grid cell
+    /// (so envelope events fire between the duty ticks exactly as before) and
+    /// each armed ch1 sweep counter (so the `cc >= counter` polls fire at the
+    /// same cc) — and the per-dot postlude (push, length poll, channel step)
+    /// runs at each stop. In between, the channels' own advance routines are
+    /// span-exact (duty/wave/ripple are delta-driven catch-ups).
     ///
     /// A DIV write resets the timer's internal counter, dropping the sub-step
     /// part of cc. The DIV-reset fold preserves the upper cc bits (the length
     /// `cc>>13` / frame-sequencer boundaries) and shifts only the duty unit by
     /// the resulting delta.
-    /// Returns whether the APU clock advanced (or a fold/anchor ran) this call,
-    /// so `Mmio::step_audio` can skip the per-dot channel step on dots where the
-    /// clock is unmoved.
-    pub fn sync_cc(&mut self, abs_cc: u64, div_resets: u64, div_anchor: u64, ds: bool) -> bool {
+    pub fn sync_cc(
+        &mut self,
+        abs_cc: u64,
+        div_resets: u64,
+        div_anchor: u64,
+        ds: bool,
+        cgb: bool,
+        agb: bool,
+    ) {
         self.cached_ds = ds;
         if !self.clock_anchored {
             // Defer the boot anchor past the abs_cc==0 pre-boot sync: the
@@ -264,7 +279,7 @@ impl Audio {
             if abs_cc == 0 {
                 self.last_div_resets = div_resets;
                 self.push_cc();
-                return true;
+                return;
             }
             // Post-boot APU cycle counter: a fixed per-mode high constant
             // (0x1E00 CGB / 0x2400 DMG) OR the low 9 bits of `abs_cc>>1`.
@@ -290,41 +305,98 @@ impl Audio {
             // elapsed 2 MHz cycles only.
             self.lf_div = (self.cc & 1) ^ 1;
             self.push_cc();
-            return true;
+            return;
         }
 
         // A DIV write resets the divider. Sample generation then the divider
         // reset both run AT the DIV-write cc: advance to `div_anchor` (the
         // timer's access cc for the FF04 write), fire any length events
         // strictly before the fold, then fold there — not at the later dot.
-        let mut folded = false;
         if div_resets != self.last_div_resets {
             // Run the fold AT the FF04 write's access cc (`div_anchor`), not the
             // later current dot, so the length-expiry boundary
             // `((cc>>13)+len)<<13` is anchored to the same per-access cc the
             // subsequent NR52 read resolves on.
-            self.advance_to(div_anchor, ds);
+            self.advance_chunked(div_anchor, ds, cgb, agb);
             self.push_cc();
             self.fire_length_events(self.cc);
             self.div_reset_fold(ds);
             self.last_div_resets = div_resets;
-            folded = true;
         }
 
-        // Steady state: skip the per-channel push + length poll when this dot
-        // advanced the APU clock by zero cycles AND the channels' ds flag is
-        // unchanged — nothing `push_cc` broadcasts would change, and the poll
-        // (keyed on `len_cc`) can produce no new expiry.
-        let advanced = self.advance_to(abs_cc, ds);
-        let pushed = advanced || ds != self.last_pushed_ds;
-        if pushed {
+        // Steady state: chunked catch-up to the current cc. When the clock is
+        // already current but the channels' ds flag changed, still re-broadcast
+        // and re-poll (mirrors the old per-dot ds-change push).
+        let advanced = self.advance_chunked(abs_cc, ds, cgb, agb);
+        if !advanced && ds != self.last_pushed_ds {
             self.push_cc();
             self.fire_length_events(self.cc);
+            self.step_channels(cgb, agb, ds);
         }
-        // The channels only do observable work when the APU clock moved (or was
-        // just re-anchored/folded). Report that so step_audio can skip their
-        // per-dot step otherwise.
-        folded || pushed
+    }
+
+    /// Advance the APU clock from `last_update` to `abs_cc` in event-bounded
+    /// chunks, running the per-dot postlude (cc broadcast, length poll,
+    /// channel catch-up/polls) at every chunk end. Chunk stops (see `sync_cc`
+    /// doc): one cc before each DIV-APU half-period boundary AND the boundary
+    /// itself (duty ticks strictly before an envelope event must resolve
+    /// against the pre-event volume, the boundary tick against the post-event
+    /// volume — the per-dot interleave), plus every armed future ch1 sweep
+    /// counter. Returns whether the clock advanced at all.
+    fn advance_chunked(&mut self, abs_cc: u64, ds: bool, cgb: bool, agb: bool) -> bool {
+        let shift = 1 + ds as u32;
+        let mut any = false;
+        // Guard against a non-monotonic target (a DIV-write access cc that
+        // resolves just before the current dot): never run backward.
+        while abs_cc > self.last_update {
+            let cycles = (abs_cc - self.last_update) >> shift;
+            if cycles == 0 {
+                break;
+            }
+            let chunk = if self.audio_enabled {
+                let cur = self.cc;
+                // Next DIV-APU half-period boundary strictly above `cur`
+                // (b <= CC_MAX; the wrap is applied after the add below).
+                let b = ((cur >> 11) + 1) << 11;
+                let grid_stop = if cur + 1 < b { (b - 1 - cur) as u64 } else { (b - cur) as u64 };
+                let stop = match self.channel1.next_sweep_stop(cur) {
+                    Some(d) => grid_stop.min(d as u64),
+                    None => grid_stop,
+                };
+                stop.min(cycles)
+            } else {
+                // APU off: no channel work, no envelope grid (fs_walk bails on
+                // !audio_enabled), so the whole span is one chunk.
+                cycles
+            };
+            self.last_update = self.last_update.wrapping_add(chunk << shift);
+            let pre_cc = self.cc;
+            self.cc = ((self.cc as u64 + chunk) % Self::CC_MAX as u64) as u32;
+            self.len_cc = self.cc;
+            // The 1 MHz sub-phase free-runs on elapsed 2 MHz cycle parity.
+            self.lf_div ^= (chunk & 1) as u32;
+            // Dispatch the DIV-APU (envelope) events crossed by this advance
+            // (at most one — the chunker never crosses two boundaries).
+            self.fs_walk(pre_cc, chunk);
+            any = true;
+            // Per-dot postlude at the chunk end.
+            self.push_cc();
+            self.fire_length_events(self.cc);
+            self.step_channels(cgb, agb, ds);
+        }
+        any
+    }
+
+    /// The retired per-dot `Audio::step` body: channel catch-up + cc-event
+    /// polls (ch1 sweep triple), run at every catch-up chunk end.
+    fn step_channels(&mut self, cgb: bool, agb: bool, ds: bool) {
+        if !self.audio_enabled {
+            return;
+        }
+        self.channel1.step(cgb);
+        self.channel2.step(cgb);
+        self.channel3.step(cgb, agb, ds);
+        self.channel4.step();
     }
 
     /// Convert CPU cycles since `last_update` to 2 MHz APU cycles and advance
@@ -722,23 +794,6 @@ impl Audio {
         }
 
         self.channel2.set_length_counter(0x40);
-    }
-
-    pub fn step(&mut self, cgb: bool, agb: bool, ds: bool) {
-        if !self.audio_enabled {
-            return;
-        }
-
-        // Step individual channels. The channels read only these three
-        // read-only hardware flags from mmio; passing them by value avoids a
-        // per-dot clone of the whole Audio struct in Mmio::step_audio.
-        self.channel1.step(cgb);
-        self.channel2.step(cgb);
-        self.channel3.step(cgb, agb, ds);
-        self.channel4.step();
-
-        // The frame sequencer is clocked directly by the timer on each DIV-bit-12
-        // falling edge (see `clock_frame_sequencer`), so nothing to do here.
     }
 
     /// Clock the frame sequencer one step. Called by the timer at the exact dot

@@ -58,7 +58,10 @@ impl<'a> Bus<'a> {
         // the phase to the instruction start every M-cycle).
         if !double_speed || self.mmio.cpu_t_phase().is_multiple_of(2) {
             self.ppu.step_scheduled_stat_events(self.mmio);
-            self.mmio.step_audio();
+            // The APU is NOT stepped per dot: it raises no interrupts and is
+            // observable only through its own register block and the sample
+            // mixer, so it catches up lazily at those access points
+            // (`Mmio::sync_apu_cc`), byte-identically.
             self.ppu.step(self.mmio);
         } else {
             // Double-speed odd half-dot: the renderer steps once per pixel-dot
