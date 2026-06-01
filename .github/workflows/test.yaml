@@ -237,12 +237,19 @@ jobs:
   coverage:
     name: 'host / coverage'
     runs-on: ubuntu-24.04
+    needs: build-roms
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install ALSA + udev headers (rustyboi-platform → cpal/rodio)
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev
+      - name: Download first-party ROMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: first-party-roms
+          path: test-roms/build
       - name: Cache cargo + build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -252,24 +259,30 @@ jobs:
             target
           key: coverage-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: coverage-
+      - name: Cache ROM set
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: gb-test-roms
+          key: roms-linux-v7.0-gambatte5a41a68c-shootout7c6ee9ba-daidcpp-magen050-ltgce015ca2-sketch02a-gbchw631e600
       - name: Install Rust + llvm-tools
         run: |
           rustup default stable
           rustup component add llvm-tools-preview
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
-      - name: Generate coverage (lcov)
+      - name: Fetch ROMs
+        run: ./tools/run-suites.sh setup
+      - name: Generate combined coverage (unit tests + ROM suites)
         run: |
-          cargo llvm-cov --lcov --output-path lcov.info \
-            -p rustyboi-core \
-            -p rustyboi-session \
-            -p rustyboi-frontend \
-            -p rustyboi-egui \
-            -p rustyboi-debugger \
-            -p rustyboi-test-runner \
-            -p rustyboi-libretro-sys \
-            -p rustyboi-libretro \
-            -p rustyboi-platform
+          source <(cargo llvm-cov show-env --export-prefix)
+          cargo llvm-cov clean --workspace --profraw-only
+          cargo test \
+            -p rustyboi-core -p rustyboi-session -p rustyboi-frontend \
+            -p rustyboi-egui -p rustyboi-debugger -p rustyboi-test-runner \
+            -p rustyboi-libretro-sys -p rustyboi-libretro -p rustyboi-platform
+          cargo build --release -p rustyboi-test-runner
+          RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 ./tools/run-suites.sh all || true
+          cargo llvm-cov report --lcov --output-path lcov.info
       - name: Upload to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:

@@ -568,3 +568,100 @@ impl Disassembler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Disassembler;
+
+    // Disassemble `prog` as if it were laid down starting at `addr`. The reader
+    // is handed ABSOLUTE addresses (`addr + offset`), so index back into the
+    // slice with `a - addr`. `addr + 2` must stay <= 0xFFFF or the reader's
+    // `addr + offset` overflows (debug panics) — targets wrap via signed offset,
+    // not via a high `addr`.
+    fn dis_at(prog: &[u8], addr: u16) -> (String, u16) {
+        Disassembler::disassemble_with_reader(addr, |a| prog[(a - addr) as usize])
+    }
+
+    fn dis(prog: &[u8]) -> (String, u16) {
+        dis_at(prog, 0)
+    }
+
+    #[test]
+    fn signed_relative_jumps_compute_the_target() {
+        // Forward: target = pc + 2 + offset.
+        assert_eq!(dis_at(&[0x18, 0x10], 0x0100).0, "JR $0112");
+        // Backward: negative i8 offset.
+        assert_eq!(dis_at(&[0x18, 0xFB], 0x0100).0, "JR $00FD"); // -5
+        // Wrap-around below 0 without overflowing the reader.
+        assert_eq!(dis_at(&[0x18, 0xFB], 0x0000).0, "JR $FFFD");
+        // The conditional variants share the math, differ only in mnemonic.
+        assert_eq!(dis_at(&[0x20, 0x10], 0x0100).0, "JR NZ, $0112");
+        assert_eq!(dis_at(&[0x28, 0x10], 0x0100).0, "JR Z, $0112");
+        assert_eq!(dis_at(&[0x30, 0x10], 0x0100).0, "JR NC, $0112");
+        assert_eq!(dis_at(&[0x38, 0x10], 0x0100).0, "JR C, $0112");
+    }
+
+    #[test]
+    fn sixteen_bit_immediates_are_little_endian() {
+        assert_eq!(dis(&[0x01, 0x34, 0x12]), ("LD BC, $1234".to_string(), 3));
+        assert_eq!(dis(&[0x08, 0xEF, 0xBE]), ("LD ($BEEF), SP".to_string(), 3));
+        assert_eq!(dis(&[0xC3, 0x00, 0x40]), ("JP $4000".to_string(), 3));
+        assert_eq!(dis(&[0xCD, 0xCE, 0xFA]), ("CALL $FACE".to_string(), 3));
+        assert_eq!(dis(&[0xC2, 0x01, 0x02]).0, "JP NZ, $0201");
+        assert_eq!(dis(&[0xEA, 0x00, 0xC0]), ("LD ($C000), A".to_string(), 3));
+    }
+
+    #[test]
+    fn signed_stack_offsets_render_with_sign() {
+        assert_eq!(dis(&[0xE8, 0x05]), ("ADD SP, +5".to_string(), 2));
+        assert_eq!(dis(&[0xE8, 0xFB]), ("ADD SP, -5".to_string(), 2));
+        assert_eq!(dis(&[0xF8, 0x05]), ("LD HL, SP+5".to_string(), 2));
+        assert_eq!(dis(&[0xF8, 0xFF]), ("LD HL, SP-1".to_string(), 2));
+    }
+
+    #[test]
+    fn eight_bit_immediates_and_lengths() {
+        assert_eq!(dis(&[0x06, 0x42]), ("LD B, $42".to_string(), 2));
+        assert_eq!(dis(&[0xE0, 0x47]), ("LDH ($47), A".to_string(), 2));
+        assert_eq!(dis(&[0xF0, 0x44]), ("LDH A, ($44)".to_string(), 2));
+        assert_eq!(dis(&[0xFE, 0x90]), ("CP $90".to_string(), 2));
+        // A representative single-byte op.
+        assert_eq!(dis(&[0x00]), ("NOP".to_string(), 1));
+        assert_eq!(dis(&[0x76]), ("HALT".to_string(), 1));
+    }
+
+    #[test]
+    fn undefined_opcodes_are_invalid_length_one() {
+        for op in [0xD3u8, 0xDB, 0xDD, 0xE3, 0xE4, 0xEB, 0xEC, 0xED, 0xF4, 0xFC, 0xFD] {
+            assert_eq!(dis(&[op]), ("INVALID".to_string(), 1), "opcode {op:#04X}");
+        }
+    }
+
+    #[test]
+    fn cb_table_is_total_and_two_bytes() {
+        // Every CB-prefixed opcode disassembles to a non-empty, length-2 result.
+        for cb in 0u16..=255 {
+            let (m, len) = dis(&[0xCB, cb as u8]);
+            assert_eq!(len, 2, "CB {cb:#04X} length");
+            assert!(!m.is_empty(), "CB {cb:#04X} empty");
+            assert!(!m.contains("??"), "CB {cb:#04X} hit the unreachable reg fallback: {m}");
+        }
+    }
+
+    #[test]
+    fn cb_register_operand_naming() {
+        // BIT 0 across the low-nibble register cycle (B,C,D,E,H,L,(HL),A).
+        assert_eq!(dis(&[0xCB, 0x40]).0, "BIT 0, B");
+        assert_eq!(dis(&[0xCB, 0x41]).0, "BIT 0, C");
+        assert_eq!(dis(&[0xCB, 0x46]).0, "BIT 0, (HL)");
+        assert_eq!(dis(&[0xCB, 0x47]).0, "BIT 0, A");
+        // Bit index advances every 8 opcodes.
+        assert_eq!(dis(&[0xCB, 0x7F]).0, "BIT 7, A");
+        // RES / SET blocks.
+        assert_eq!(dis(&[0xCB, 0x86]).0, "RES 0, (HL)");
+        assert_eq!(dis(&[0xCB, 0xFF]).0, "SET 7, A");
+        // The direct rotate/shift block.
+        assert_eq!(dis(&[0xCB, 0x00]).0, "RLC B");
+        assert_eq!(dis(&[0xCB, 0x36]).0, "SWAP (HL)");
+    }
+}
