@@ -102,9 +102,36 @@ struct Args {
     #[arg(long)]
     validate_bios: bool,
 
+    /// Run only every Nth case: `K/N` keeps cases with index % N == K-1 (1-based
+    /// K). Lets CI split one suite across N single-threaded PROCESSES — coverage
+    /// instrumentation shares one in-process counter array, so `--jobs` threads
+    /// false-share it; per-process counters don't.
+    #[arg(long, value_name = "K/N")]
+    shard: Option<String>,
+
     /// Explicit ROM paths, Gambatte testrunner style.
     #[arg(value_name = "ROM")]
     roms: Vec<PathBuf>,
+}
+
+/// Parse `--shard K/N` and reduce `cases` to the K-th of N interleaved slices.
+/// Interleaving (not chunking) keeps shard runtimes balanced when case cost
+/// varies along the manifest (e.g. gambatte's frame-heavy blocks).
+fn apply_shard(cases: &mut Vec<TestCase>, shard: &str) -> Result<(), String> {
+    let (k, n) = shard
+        .split_once('/')
+        .and_then(|(k, n)| Some((k.parse::<usize>().ok()?, n.parse::<usize>().ok()?)))
+        .ok_or_else(|| format!("invalid --shard '{shard}' (expected K/N, e.g. 2/4)"))?;
+    if k == 0 || n == 0 || k > n {
+        return Err(format!("invalid --shard '{shard}' (need 1 <= K <= N)"));
+    }
+    let mut index = 0usize;
+    cases.retain(|_| {
+        let keep = index % n == k - 1;
+        index += 1;
+        keep
+    });
+    Ok(())
 }
 
 fn main() -> ExitCode {
@@ -175,6 +202,10 @@ fn run() -> Result<u8, String> {
         return Err(format!(
             "found {discovered_roms} ROMs, but none had supported DMG/CGB Gambatte oracles"
         ));
+    }
+
+    if let Some(shard) = &args.shard {
+        apply_shard(&mut cases, shard)?;
     }
 
     println!(
@@ -333,6 +364,9 @@ fn run_manifest(
             manifest_path.display()
         ));
     }
+    if let Some(shard) = &args.shard {
+        apply_shard(&mut cases, shard)?;
+    }
 
     println!(
         "Manifest {}: {} runnable cases.",
@@ -401,6 +435,42 @@ mod tests {
     #[test]
     fn resolve_jobs_defaults_to_at_least_one() {
         assert!(resolve_jobs(&args()) >= 1);
+    }
+
+    #[test]
+    fn shards_partition_cases_exactly() {
+        use crate::expectation::Oracle;
+        let case = |i: usize| TestCase {
+            rom_path: PathBuf::from(format!("{i}.gb")),
+            mode: Mode::Dmg,
+            oracle: Oracle::Serial,
+            revision: None,
+            input: Vec::new(),
+            frames: None,
+            cart_lazy_sram_cs: false,
+        };
+        let all: Vec<TestCase> = (0..10).map(case).collect();
+
+        // Every case lands in exactly one of the 3 shards, interleaved.
+        let mut seen = Vec::new();
+        for k in 1..=3 {
+            let mut shard = all.clone();
+            apply_shard(&mut shard, &format!("{k}/3")).unwrap();
+            for c in &shard {
+                assert!(!seen.contains(&c.rom_path), "{:?} duplicated", c.rom_path);
+                seen.push(c.rom_path.clone());
+            }
+        }
+        assert_eq!(seen.len(), 10);
+
+        let mut whole = all.clone();
+        apply_shard(&mut whole, "1/1").unwrap();
+        assert_eq!(whole.len(), 10);
+
+        for bad in ["0/4", "5/4", "x/4", "2", "2/0"] {
+            let mut v = all.clone();
+            assert!(apply_shard(&mut v, bad).is_err(), "{bad} should be rejected");
+        }
     }
 
     #[test]
