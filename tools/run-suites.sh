@@ -388,11 +388,41 @@ run_suite() {
     # Only two suites (blargg, blargg_singles) override the global frame budget;
     # branch rather than use an array so this is safe under `set -u` on bash 3.2
     # (macOS /bin/bash), where expanding an empty "${arr[@]}" is an error.
-    log "Running suite '$suite' (mode=$MODE jobs=$JOBS ${frames#-} frames)"
-    if [ "$frames" != "-" ]; then
+    if [ "${RB_SHARDS:-1}" -gt 1 ]; then
+        # Shard the suite across RB_SHARDS single-threaded PROCESSES instead of
+        # in-process threads. Coverage-instrumented builds share one counter
+        # array per process, so threads false-share it catastrophically;
+        # separate processes get private counters (merged via %p profraws).
+        log "Running suite '$suite' (mode=$MODE shards=$RB_SHARDS jobs=1 ${frames#-} frames)"
+        local k
+        for k in $(seq 1 "$RB_SHARDS"); do
+            if [ "$frames" != "-" ]; then
+                "$BIN" --manifest "$manifest" --mode "$MODE" --jobs 1 \
+                    --shard "$k/$RB_SHARDS" --frames "$frames" \
+                    --json "$out.$k" >/dev/null 2>&1 &
+            else
+                "$BIN" --manifest "$manifest" --mode "$MODE" --jobs 1 \
+                    --shard "$k/$RB_SHARDS" --json "$out.$k" >/dev/null 2>&1 &
+            fi
+        done
+        wait
+        "$PY" - "$out" "$RB_SHARDS" <<'PY'
+import json, sys
+out, n = sys.argv[1], int(sys.argv[2])
+tot = {"passed": 0, "failed": 0, "total": 0}
+for k in range(1, n + 1):
+    d = json.load(open(f"{out}.{k}"))
+    for key in tot:
+        tot[key] += d[key]
+json.dump(tot, open(out, "w"))
+PY
+        rm -f "$out".*
+    elif [ "$frames" != "-" ]; then
+        log "Running suite '$suite' (mode=$MODE jobs=$JOBS ${frames#-} frames)"
         "$BIN" --manifest "$manifest" --mode "$MODE" --jobs "$JOBS" \
             --frames "$frames" --json "$out" || true
     else
+        log "Running suite '$suite' (mode=$MODE jobs=$JOBS ${frames#-} frames)"
         "$BIN" --manifest "$manifest" --mode "$MODE" --jobs "$JOBS" \
             --json "$out" || true   # runner exits 1 on any fail; we gate on counts
     fi
