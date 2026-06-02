@@ -187,6 +187,9 @@ impl<'a> Bus<'a> {
                 self.mmio.bulk_advance_idle(next_event);
                 self.dot = self.dot.wrapping_add(span as u32);
                 self.ticked += span as u32;
+            } else if self.try_quiet_span(target_cc) {
+                // Quiet-span fast loop consumed a chunk of the span; the
+                // while condition re-checks the world at its end.
             } else {
                 let stall_before = self.mmio.peek_dma_stall();
                 self.resolve_one_dot();
@@ -221,6 +224,67 @@ impl<'a> Bus<'a> {
         }
     }
 
+    /// Quiet-span fast loop: when the only live per-dot machines are the PPU
+    /// family (+CGB HDMA tracking, RTC, t-phase) and the timer is a pure
+    /// abs_cc bump until a proven event bound, the rest of
+    /// `resolve_one_dot`'s per-dot fan-out (serial/joypad/DMA checks, timer
+    /// delivery/FS-edge checks) is hoisted out. Byte-identical: every skipped
+    /// step is a proven no-op over the span, and the excluded states only
+    /// change at CPU access boundaries or at ccs beyond the bound. Returns
+    /// whether a span was consumed (false = fall back to a single fully
+    /// checked dot).
+    fn try_quiet_span(&mut self, target_cc: u64) -> bool {
+        let quiet_end = self.mmio.quiet_span_end(target_cc);
+        let cc_now = self.mmio.master_cc();
+        if quiet_end <= cc_now {
+            return false;
+        }
+        let n = (quiet_end - cc_now) as u32;
+        let double_speed = self.mmio.is_double_speed_mode();
+        let cgb = self.mmio.is_cgb_features_enabled();
+        let ds_shift = double_speed as u32;
+        let mut i = 0u32;
+        while i < n {
+            // Inert-PPU fast-forward: whole render dots from an even t-phase
+            // (the render grid), so the skipped odd-phase sub-dot dispatches
+            // are the same bounded no-ops the skip proof covers. Deferred
+            // HDMA writes need their per-dot drain, so no skip while pending.
+            if (!double_speed || self.mmio.cpu_t_phase().is_multiple_of(2))
+                && !self.mmio.has_pending_hdma_deferred()
+            {
+                let budget = (n - i) >> ds_shift;
+                let r = self.ppu.skip_inert_dots(self.mmio, budget);
+                if r > 0 {
+                    let m = r << ds_shift;
+                    self.mmio.bump_master_cc_by(m as u64);
+                    self.mmio.tick_rtc(m as u64);
+                    self.mmio.advance_cpu_t_phase_by(m as u64);
+                    i += m;
+                    continue;
+                }
+            }
+            self.mmio.bump_master_cc_one();
+            if !double_speed || self.mmio.cpu_t_phase().is_multiple_of(2) {
+                self.ppu.step_scheduled_stat_events(self.mmio);
+                self.ppu.step(self.mmio);
+            } else {
+                self.ppu.step_subdot(self.mmio);
+            }
+            if cgb {
+                let period = self.ppu.hdma_period(double_speed);
+                self.mmio.step_hdma(period);
+            }
+            self.mmio.step_hdma_deferred();
+            self.ppu.step_lcdc_events(self.mmio);
+            self.mmio.tick_rtc(1);
+            self.mmio.advance_cpu_t_phase();
+            i += 1;
+        }
+        self.dot = self.dot.wrapping_add(n);
+        self.ticked += n;
+        true
+    }
+
     /// Tick one internal (non-memory) M-cycle, for opcodes that need their
     /// internal cycles placed at the right point (e.g. CALL's SP-dec before the
     /// stack pushes) rather than batched at instruction end.
@@ -240,6 +304,7 @@ impl<'a> Bus<'a> {
     ///   batching outright (return 1);
     /// - every other `request_interrupt` site is CPU-write-driven and
     ///   unreachable while halted.
+    ///
     /// The batch is also capped one line short of the PPU frame wrap so the
     /// frame-loop return points (input-application boundaries) stay exact,
     /// and globally at 456 dots (poll overhead is already amortized ~100x).

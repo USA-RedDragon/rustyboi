@@ -784,6 +784,46 @@ impl Timer {
         (edges, timer_irq)
     }
 
+    /// Raw one-dot master-clock bump for the quiet-span fast loop: byte-
+    /// identical to `step` for any dot proven to cross no scheduled overflow
+    /// delivery and no APU FS edge (see `quiet_until`) — `update_irq_delivery`
+    /// is then a no-op (its while-loop condition is keyed on absolute ccs and
+    /// a later call drains at the identical ccs), `pending_irq` stays false,
+    /// and `apu_fs_edges(last_apu_cc, abs_cc)` self-heals at the next real
+    /// step (the closed-form count over the widened span is still 0 + later
+    /// edges).
+    #[inline]
+    pub fn bump_cc_one(&mut self) {
+        self.abs_cc = self.abs_cc.wrapping_add(1);
+    }
+
+    /// n-dot variant of `bump_cc_one`; every bumped dot must lie strictly
+    /// below `quiet_until`.
+    #[inline]
+    pub fn bump_cc_by(&mut self, n: u64) {
+        self.abs_cc = self.abs_cc.wrapping_add(n);
+    }
+
+    /// Exclusive upper bound up to which per-dot `step` is a pure `abs_cc`
+    /// increment: the earlier of the next scheduled overflow delivery cc and
+    /// the next APU frame-sequencer edge cc. A pending undelivered IRQ or a
+    /// due event yields `abs_cc` (no quiet span).
+    pub fn quiet_until(&self, cpu_halted: bool) -> u64 {
+        if self.pending_irq {
+            return self.abs_cc;
+        }
+        let mut bound = u64::MAX;
+        if let Some(cc) = self.next_overflow_fire_cc(cpu_halted) {
+            bound = bound.min(cc);
+        }
+        let shift = if self.last_double_speed { 14 } else { 13 };
+        let cnt = self.abs_cc.wrapping_sub(self.div_anchor);
+        let next_edge = self
+            .div_anchor
+            .wrapping_add(((cnt >> shift) + 1) << shift);
+        bound.min(next_edge)
+    }
+
     /// Bulk-advance the timer directly to `target_abs_cc` (>= current abs_cc),
     /// producing the byte-identical net effect of calling `step` once per
     /// intervening dot. Every part of `step` is span-based:
