@@ -4718,6 +4718,15 @@ impl Mmio {
         target.min(self.timer.quiet_until(self.cpu_is_halted()).saturating_sub(1))
     }
 
+    /// Whether this scanline's HBlank DMA block has already fired (the
+    /// once-per-HBlank marker). Consumed by the inert-dot skip: an armed
+    /// HBlank DMA whose block fired leaves the rest of the HBlank interior
+    /// event-free.
+    #[inline]
+    pub fn hdma_block_fired_this_hblank(&self) -> bool {
+        self.hdma_block_fired_this_hblank
+    }
+
     /// Raw one-dot master-clock bump for the quiet-span fast loop (see
     /// `Timer::bump_cc_one`).
     #[inline]
