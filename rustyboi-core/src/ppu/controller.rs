@@ -4845,6 +4845,98 @@ impl Ppu {
         self.sched_min.saturating_add(self.p_now).saturating_sub(8)
     }
 
+    /// Fast-forward through inert HBlank/VBlank interior dots, where the whole
+    /// per-dot `step` body is provably bookkeeping: `ticks`/`line_cycle`
+    /// advance, the LYC compare rewrites an unchanged flag, the palette latch
+    /// re-reads unchanged registers, and the state arm does real work only at
+    /// the line edges. Returns RENDER dots consumed (0 = not skippable now).
+    ///
+    /// Soundness constraints (each maps to per-dot work that would otherwise
+    /// run):
+    /// - state is HBlank or VBlank with `ticks` in [8, 448): all state-arm
+    ///   actions live at ticks 455 (line advance / frame swap) and ticks 6 of
+    ///   line 153; the FF41 mode-2 anticipation at 453 and the window-Y latch
+    ///   checkpoints (1/450/454) and LYC next-line anticipation (454+) are
+    ///   outside the interior.
+    /// - internal LY in [2, 152]: excludes the line-153 LY-0 transient and
+    ///   the l154 glitch-window disarm checks on lines 0/1.
+    /// - no scheduled dispatch event can come due inside the span
+    ///   (`sched_min` bound with the same margin the dispatch bail uses), so
+    ///   skipping the per-dot dispatch calls skips only no-ops.
+    /// - LYC/STAT/palette registers cannot change inside the span (no CPU
+    ///   access boundary inside a quiet span) and `bgp_defer_countdown == 0`,
+    ///   so the per-dot rewrites are idempotent; the final state equals the
+    ///   per-dot outcome.
+    /// - the caller (the quiet-span loop) already excludes OAM-DMA, serial,
+    ///   the JOYP filter and the HDMA lockstep window, and guarantees no
+    ///   pending deferred HDMA writes; within an HBlank interior the HDMA
+    ///   period tracker sees no edge and no LY change, so skipped
+    ///   `step_hdma` calls are state-identical no-ops (a block fired at the
+    ///   mode-0 edge before the interior began).
+    /// - `abs_cc` is advanced with the skip: the CPU register-write hooks
+    ///   (`write_cc`) and the exact-cc override compares read it at the very
+    ///   next access boundary, before any real step would re-derive it.
+    pub fn skip_inert_dots(&mut self, mmio: &mmio::Mmio, max_render_dots: u32) -> u32 {
+        const INTERIOR_START: u32 = 8;
+        const INTERIOR_END: u32 = 448;
+        if self.disabled || self.bgp_defer_countdown > 0 || max_render_dots == 0 {
+            return 0;
+        }
+        // A pending delayed LCDC commit must land at its exact dot.
+        if !self.pending_lcdc_events.is_empty() {
+            return 0;
+        }
+        match self.state {
+            State::VBlank => {}
+            State::HBlank => {
+                // With CGB HBlank DMA armed, a block can fire a dot or two
+                // INTO HBlank via the per-dot STAT-mode-edge fallback (window
+                // lines have no closed-form mode-0 anchor), so HBlank dots
+                // are not inert then. VBlank has no mode-0 edges and stays
+                // skippable with HDMA armed.
+                if mmio.is_cgb_features_enabled()
+                    && (mmio.hdma_is_enabled() || mmio.hdma_req_pending())
+                {
+                    return 0;
+                }
+            }
+            _ => return 0,
+        }
+        if !(2..=152).contains(&self.internal_ly_val) {
+            return 0;
+        }
+        let t = self.ticks as u32;
+        if !(INTERIOR_START..INTERIOR_END).contains(&t) {
+            return 0;
+        }
+        // Event bound: render dots until the earliest scheduled event, in the
+        // same abs-cc space the dispatch compares in. `sched_min == 0`
+        // (dirty) yields no skip; the slow dispatch on the next real dot
+        // recomputes it.
+        let ds = mmio.is_double_speed_mode() as u32;
+        let abs_now = mmio.master_cc().wrapping_sub(self.p_now);
+        let event_slack = self.sched_min.saturating_sub(abs_now.saturating_add(8));
+        let to_event = event_slack >> ds;
+        let n = ((INTERIOR_END - t) as u64)
+            .min(to_event)
+            .min(max_render_dots as u64);
+        if n == 0 {
+            return 0;
+        }
+        let n = n as u32;
+        self.ticks += n as u128;
+        self.line_cycle += n;
+        // Keep abs_cc exact through the skip: the CPU write hooks anchor
+        // their delayed applies on it at the next access boundary.
+        self.abs_cc = self.abs_cc.wrapping_add((n as u64) << ds);
+        // The palette latch would have re-read the (unchanged) registers each
+        // dot; leave it equal to the per-dot outcome.
+        self.bgp_delayed = mmio.ppu_io_reg(BGP);
+        self.obp0_delayed = mmio.ppu_io_reg(OBP0);
+        self.obp1_delayed = mmio.ppu_io_reg(OBP1);
+        n
+    }
+
     /// Conservative count of MASTER-cc dots until the PPU's frame wrap (the
     /// ly153->0 frame swap), minus an 8-dot safety margin so the caller's
     /// batch always ends short of the wrap and the swap dot itself resolves
