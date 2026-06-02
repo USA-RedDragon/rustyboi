@@ -4829,20 +4829,34 @@ impl Ppu {
         if self.disabled {
             return u64::MAX;
         }
-        let _ = (now, ds);
+        let mut bound = self.sched_min.saturating_add(self.p_now);
         if self.sched_m0irq == stat_irq::DISABLED_TIME
             && self.stat_reg_committed & stat_irq::STAT_M0EN != 0
         {
-            // The m0 fire cc is unknowable while the slot is disarmed: the
-            // closed-form anchor can be stale (previous line) or absent
-            // (window / first line), the SCX fine-scroll shifts the true fire
-            // off any cheap inference, and inferring the next arm dot from
-            // `ticks` proved unsound (measured: hblank_ly_scx / late_m0int
-            // regressions). Refuse to batch; batching resumes while the slot
-            // is armed (its exact cc is then covered by sched_min above).
-            return 0;
+            // The m0 slot is only armed mid-stream at the pixel-transfer
+            // transition (ticks 80/82 normal, 84/85 first-line-after-enable;
+            // every other arm site is CPU-write-driven, i.e. at a batch
+            // boundary). While the slot is disarmed with the m0 STAT source
+            // enabled, bound the batch to end 2+ dots before the earliest
+            // possible arm; inside the arm zone itself refuse to batch
+            // (single-step through it — the traced failure mode was treating
+            // t=78/79 as "past the arm" and wrapping a full line across this
+            // line's arm AND fire). Past the zone a disarmed slot means this
+            // line's fire already happened (or a VBlank line, where the real
+            // next arm is even later), so the next arm is next line's.
+            const ARM_LO: u64 = 78; // 2 before the earliest arm dot (80)
+            const ARM_HI: u64 = 88; // 2 past the latest arm dot (85, first line)
+            let t = (self.ticks as u64) % stat_irq::LCD_CYCLES_PER_LINE as u64;
+            let to_arm = if t < ARM_LO {
+                ARM_LO - t
+            } else if t < ARM_HI {
+                return 0;
+            } else {
+                (stat_irq::LCD_CYCLES_PER_LINE as u64 - t) + ARM_LO
+            };
+            bound = bound.min(now.saturating_add(to_arm << (ds as u32)));
         }
-        self.sched_min.saturating_add(self.p_now).saturating_sub(8)
+        bound.saturating_sub(8)
     }
 
     /// Fast-forward through inert HBlank/VBlank interior dots, where the whole
@@ -4876,7 +4890,7 @@ impl Ppu {
     /// - `abs_cc` is advanced with the skip: the CPU register-write hooks
     ///   (`write_cc`) and the exact-cc override compares read it at the very
     ///   next access boundary, before any real step would re-derive it.
-    pub fn skip_inert_dots(&mut self, mmio: &mmio::Mmio, max_render_dots: u32) -> u32 {
+    pub fn skip_inert_dots(&mut self, mmio: &mut mmio::Mmio, max_render_dots: u32) -> u32 {
         const INTERIOR_START: u32 = 8;
         const INTERIOR_END: u32 = 448;
         if self.disabled || self.bgp_defer_countdown > 0 || max_render_dots == 0 {
@@ -4886,8 +4900,38 @@ impl Ppu {
         if !self.pending_lcdc_events.is_empty() {
             return 0;
         }
+        let mut interior = (INTERIOR_START, INTERIOR_END);
         match self.state {
             State::VBlank => {}
+            State::OAMSearch => {
+                // Mode-2 interior: the per-dot body is the every-2nd-dot OAM
+                // scan slot (batched below with identical per-slot work — the
+                // pushes ARE observable at a mid-mode-2 DMA-start boundary,
+                // so they must run) plus the same idempotent preamble. The
+                // tick-0/1 init and ly0 window checkpoint sit below the
+                // interior start; the pixel-transfer arm dot (80/82) and its
+                // snapshot rebuild sit past its end. A pending exact-cc
+                // OBJ-size override needs its per-dot/per-slot abs_cc
+                // resolution, so no batching then.
+                if self.first_line_after_enable || self.objsize_apply_cc != wy2_disabled() {
+                    return 0;
+                }
+                // A pending CPU OAM write must be consumed by
+                // `process_oam_reader_events` on the very next dot: its
+                // `change(cc)` cap anchors the snapshot walk position, which
+                // is cc-precise DURING the scan (gambatte late_spXX). A
+                // batch would consume it n dots late. (Mode 0/1 skips are
+                // immune: the walk is already capped at scan end there.)
+                if self.prev_dma_writing || mmio.oam_snoop_event_possible() {
+                    return 0;
+                }
+                let arm = if mmio.is_cgb_features_enabled() {
+                    CGB_PIXEL_TRANSFER_ARM_DOT as u32
+                } else {
+                    DMG_PIXEL_TRANSFER_ARM_DOT as u32
+                };
+                interior = (4, arm - 2);
+            }
             State::HBlank => {
                 // With CGB HBlank DMA armed, a block can fire a dot or two
                 // INTO HBlank via the per-dot STAT-mode-edge fallback (window
@@ -4912,7 +4956,7 @@ impl Ppu {
             return 0;
         }
         let t = self.ticks as u32;
-        if !(INTERIOR_START..INTERIOR_END).contains(&t) {
+        if !(interior.0..interior.1).contains(&t) {
             return 0;
         }
         // Event bound: render dots until the earliest scheduled event, in the
@@ -4923,13 +4967,31 @@ impl Ppu {
         let abs_now = mmio.master_cc().wrapping_sub(self.p_now);
         let event_slack = self.sched_min.saturating_sub(abs_now.saturating_add(8));
         let to_event = event_slack >> ds;
-        let n = ((INTERIOR_END - t) as u64)
+        let n = ((interior.1 - t) as u64)
             .min(to_event)
             .min(max_render_dots as u64);
         if n == 0 {
             return 0;
         }
         let n = n as u32;
+        // Mode-2: run the scan slots the skipped dots would have run, with
+        // the identical per-slot sequence (slot-size latch from the constant
+        // LCDC, visibility check + push, next-slot re-latch). One slot per
+        // even entry-tick in [t, t+n).
+        if matches!(self.state, State::OAMSearch) {
+            let slots = ((t + n).div_ceil(2)) - (t.div_ceil(2));
+            for _ in 0..slots {
+                if self.current_oam_sprite_index >= OAM_SPRITE_COUNT {
+                    break;
+                }
+                let idx = self.current_oam_sprite_index;
+                self.scan_slot_large[idx] = self.scan_obj_size_large;
+                self.check_single_sprite_for_scanline(mmio, idx);
+                self.current_oam_sprite_index += 1;
+                self.scan_obj_size_large =
+                    (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+            }
+        }
         self.ticks += n as u128;
         self.line_cycle += n;
         // Keep abs_cc exact through the skip: the CPU write hooks anchor
