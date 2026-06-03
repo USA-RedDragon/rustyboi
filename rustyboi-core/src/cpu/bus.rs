@@ -783,7 +783,7 @@ impl<'a> Bus<'a> {
         // the value within this M-cycle — defer the world resolution.
         if self.read_lag_ok(addr) {
             self.lag += 4;
-            return self.mmio.read(addr);
+            return self.mmio.passive_read(addr);
         }
         self.flush_lag();
         // APU reads (NRxx status, NR52, wave RAM) observe the channels at the read

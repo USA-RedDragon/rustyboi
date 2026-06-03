@@ -142,6 +142,20 @@ pub struct AppliedMmioWrite {
     pub value: u8,
 }
 
+/// One 4KB page of the passive-read map (see `Mmio::passive_read`). `Rom`
+/// carries the byte base of the page inside the bank-resolved ROM image; the
+/// WRAM variants name the backing buffer; `Fallback` takes the full dispatch.
+#[derive(Clone, Copy, Default)]
+enum PassivePage {
+    #[default]
+    Fallback,
+    Rom(u32),
+    Wram0,
+    WramEcho,
+    WramBankMain,
+    WramBankIdx(u8),
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Mmio {
     // Raw boot-ROM bytes (256 = DMG, 2304 = CGB). Indexed directly by address;
@@ -188,6 +202,18 @@ pub struct Mmio {
     ir_device: crate::ir::IrDevice,
     #[serde(skip, default)]
     delayed_writes: Vec<DelayedMmioWrite>,
+    // Passive-read page table: 4KB pages resolved to their backing region so
+    // the Bus's passive fast path (plain ROM/WRAM/echo reads) skips the full
+    // address dispatch and per-access bank derivation. Rebuilt lazily;
+    // invalidated by cart-register writes (bank switches), SVBK, the boot-ROM
+    // unmap, and cartridge insertion. Unlicensed mappers and the boot overlay
+    // window always fall back. Not serialized: rebuilt on first use.
+    #[serde(skip)]
+    #[serde(default)]
+    passive_pages: [PassivePage; 16],
+    #[serde(skip)]
+    #[serde(default)]
+    passive_pages_valid: bool,
     // Carried CPU lag: passive-read M-cycles whose world resolution was
     // deferred ACROSS an instruction boundary (see Bus::tick_remaining's
     // carry gate). Pulled into the next Bus's lag at construction, so the
@@ -922,6 +948,8 @@ impl Mmio {
             serial_device: serial::SerialDevice::Disconnected,
             ir_device: crate::ir::IrDevice::Disconnected,
             delayed_writes: Vec::new(),
+            passive_pages: [PassivePage::Fallback; 16],
+            passive_pages_valid: false,
             cpu_lag: 0,
             io_registers: memory::Memory::new(),
             hram: memory::Memory::new(),
@@ -1051,6 +1079,7 @@ impl Mmio {
     }
 
     pub fn insert_cartridge(&mut self, cartridge: cartridge::Cartridge) {
+        self.passive_pages_valid = false;
         self.cart_has_clock = cartridge.needs_clock_tick();
         self.cart_rtc_kind = cartridge.rtc_kind();
         self.cart_has_camera = cartridge.has_camera();
@@ -1800,6 +1829,59 @@ impl Mmio {
     /// Raise an interrupt by setting its IF bit. Equivalent to
     /// `SM83::set_interrupt_flag(flag, true, self)` but needs no CPU borrow, so
     /// peripherals (PPU) can request interrupts directly.
+    /// Passive-read fast path: resolve `addr` through the 4KB page map,
+    /// byte-identical to the full dispatch for every mapped page (the Bus
+    /// fast path has already excluded DMA conflicts and IO).
+    #[inline]
+    pub fn passive_read(&mut self, addr: u16) -> u8 {
+        // HRAM (FF80-FFFE) sits in the mixed top page; serve it directly
+        // (identical to the dispatch's HRAM arm).
+        if addr >= 0xFF80 {
+            return self.hram.read(addr);
+        }
+        if !self.passive_pages_valid {
+            self.rebuild_passive_pages();
+        }
+        match self.passive_pages[(addr >> 12) as usize] {
+            PassivePage::Rom(base) => match &self.cartridge {
+                Some(cart) => cart.rom_byte(base as usize + (addr & 0x0FFF) as usize),
+                None => EMPTY_BYTE,
+            },
+            PassivePage::Wram0 => self.wram.read(addr),
+            PassivePage::WramEcho => self.wram.read(addr - 0x2000),
+            PassivePage::WramBankMain => self.wram_bank.read(addr),
+            PassivePage::WramBankIdx(i) => self.wram_banks[i as usize].read(addr),
+            PassivePage::Fallback => self.read(addr),
+        }
+    }
+
+    fn rebuild_passive_pages(&mut self) {
+        let mut pages = [PassivePage::Fallback; 16];
+        if let Some(cart) = &self.cartridge
+            && !cart.is_unlicensed()
+            && !self.bios_mapped()
+        {
+            let (b0, bn) = cart.rom_bases();
+            for p in 0..4usize {
+                pages[p] = PassivePage::Rom((b0 + p * 0x1000) as u32);
+                pages[4 + p] = PassivePage::Rom((bn + p * 0x1000) as u32);
+            }
+        }
+        pages[0xC] = PassivePage::Wram0;
+        pages[0xE] = PassivePage::WramEcho;
+        pages[0xD] = if self.cgb_features_enabled {
+            match self.wram_bank_select {
+                0 | 1 => PassivePage::WramBankMain,
+                2..=7 => PassivePage::WramBankIdx(self.wram_bank_select - 2),
+                _ => PassivePage::WramBankMain,
+            }
+        } else {
+            PassivePage::WramBankMain
+        };
+        self.passive_pages = pages;
+        self.passive_pages_valid = true;
+    }
+
     /// Take the carried cross-instruction lag (Bus construction).
     #[inline]
     pub fn take_cpu_lag(&mut self) -> u32 {
@@ -5375,6 +5457,11 @@ impl memory::Addressable for Mmio {
     }
 
     fn write(&mut self, addr: u16, value: u8) {
+        // Cart-register writes switch banks; SVBK moves the D page; FF50
+        // unmaps the boot overlay: drop the passive-read page table.
+        if addr < 0x8000 || addr == REG_SVBK || addr == REG_BOOT_OFF {
+            self.passive_pages_valid = false;
+        }
         // While an OAM DMA is running the CPU bus operates normally except for
         // (1) the source-region conflict, which redirects the write into OAM,
         // and (2) OAM itself, which the DMA owns. Everything else (non-conflict

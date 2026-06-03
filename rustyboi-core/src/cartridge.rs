@@ -1610,6 +1610,28 @@ impl Cartridge {
     }
 
     /// Cached (bank0, bankN) ROM byte-offset bases for the read fast path.
+    /// Whether a content-detected unlicensed mapper is active (their lock
+    /// state can advance on reads, so flat-map caches must exclude them).
+    #[inline]
+    pub fn is_unlicensed(&self) -> bool {
+        self.unl_mapper != UnlMapper::None
+    }
+
+    /// Public view of the cached (bank0, bankN) ROM byte-offset bases for the
+    /// passive-read page table.
+    #[inline]
+    pub fn rom_bases(&self) -> (usize, usize) {
+        self.rom_bank_bases()
+    }
+
+    /// Bounds-checked raw ROM byte (open-bus 0xFF past the image), mirroring
+    /// the banked read arms.
+    #[inline]
+    pub fn rom_byte(&self, offset: usize) -> u8 {
+        self.rom_data.get(offset).copied().unwrap_or(0xFF)
+    }
+
+    /// Cached (bank0, bankN) ROM byte-offset bases for the read fast path.
     /// Licensed mappers only mutate bank registers through `write`, which
     /// invalidates the cache; unlicensed boards can advance lock state during
     /// reads, so they always recompute (identical to the pre-cache behavior).
