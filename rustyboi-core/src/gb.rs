@@ -839,6 +839,9 @@ impl GB {
                 self.cpu.stopped = false;
                 let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);
                 bus.tick_remaining(8);
+                // STOP-wake semantics are asserted against raw master_cc by
+                // hardware tests; never leave the wake advance carried.
+                bus.flush_all_lag();
                 return (false, 8);
             }
             return (false, 4);
@@ -855,6 +858,11 @@ impl GB {
             let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);
             let cycles = self.cpu.step(&mut bus);
             bus.tick_remaining(cycles);
+            // STOP freezes master_cc at the exact stop cc; never park the
+            // stopping instruction's tail across the frozen window.
+            if self.cpu.stopped {
+                bus.flush_all_lag();
+            }
             cycles
         };
 
@@ -1028,6 +1036,12 @@ impl GB {
     /// reads sync automatically; host/debug reads bypass the bus and must call
     /// this first when they target APU registers.
     pub fn sync_lazy_peripherals(&mut self) {
+        // Resolve any carried cross-instruction lag first so the world state
+        // an out-of-band read observes is fully current.
+        if self.mmio.cpu_lag() > 0 {
+            let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);
+            bus.flush_all_lag();
+        }
         self.mmio.sync_apu();
     }
 
@@ -1284,7 +1298,7 @@ impl GB {
             .map(|c| c.detach_rom())
     }
 
-    pub fn to_state_file(&self, path: &str) -> Result<(), io::Error> {
+    pub fn to_state_file(&mut self, path: &str) -> Result<(), io::Error> {
         fs::write(path, self.to_state_bytes()?)?;
         Ok(())
     }
@@ -1296,7 +1310,15 @@ impl GB {
     /// ~its raw size instead of megabytes of text (inline web rewind was
     /// stalling on the JSON encode). Mirrors `to_state_file`, so a state saved
     /// one way round-trips through the other.
-    pub fn to_state_bytes(&self) -> Result<Vec<u8>, io::Error> {
+    pub fn to_state_bytes(&mut self) -> Result<Vec<u8>, io::Error> {
+        // Canonicalize: resolve any carried cross-instruction lag so the
+        // serialized machine state is schedule-independent (the carry decision
+        // depends on non-serialized perf caches; leaving it in the state would
+        // make byte-compares of otherwise-identical machines diverge).
+        if self.mmio.cpu_lag() > 0 {
+            let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);
+            bus.flush_all_lag();
+        }
         bincode::serialize(&self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
@@ -1978,7 +2000,7 @@ mod savestate_roundtrip_tests {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-                let Some(gb) =
+                let Some(mut gb) =
                     gb_from_rom("../gb-test-roms/cgb-acid2/cgb-acid2.gbc", Hardware::AGB)
                 else {
                     eprintln!("skipping: cgb-acid2 not present");
