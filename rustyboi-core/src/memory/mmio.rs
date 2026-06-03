@@ -214,6 +214,16 @@ pub struct Mmio {
     #[serde(skip)]
     #[serde(default)]
     passive_pages_valid: bool,
+    // CGB HDMA-tracker sleep: master cc below which the per-dot step_hdma
+    // maintenance is a proven no-op (the PPU sets it at its own mode
+    // transitions — mode-2 entry until just before the pixel-transfer arm,
+    // and the arm until just before the closed-form mode-0 time; no period
+    // edge, LY change, or block fire can occur inside). Cleared by any IO
+    // write and by set_hdma_req (halt-exit reflags). Not serialized: 0 = no
+    // sleep.
+    #[serde(skip)]
+    #[serde(default)]
+    hdma_tracker_sleep_until: u64,
     // Carried CPU lag: passive-read M-cycles whose world resolution was
     // deferred ACROSS an instruction boundary (see Bus::tick_remaining's
     // carry gate). Pulled into the next Bus's lag at construction, so the
@@ -950,6 +960,7 @@ impl Mmio {
             delayed_writes: Vec::new(),
             passive_pages: [PassivePage::Fallback; 16],
             passive_pages_valid: false,
+            hdma_tracker_sleep_until: 0,
             cpu_lag: 0,
             io_registers: memory::Memory::new(),
             hram: memory::Memory::new(),
@@ -2572,6 +2583,21 @@ impl Mmio {
         if self.cgb_features_enabled && self.hdma_enabled {
             self.hdma_req_pending = true;
         }
+        // A requested block fires through step_hdma at any mode; wake the
+        // tracker immediately.
+        self.hdma_tracker_sleep_until = 0;
+    }
+
+    /// Master cc below which the per-dot HDMA tracker may be skipped.
+    #[inline]
+    pub fn hdma_tracker_sleep_until(&self) -> u64 {
+        self.hdma_tracker_sleep_until
+    }
+
+    /// PPU-installed HDMA-tracker sleep bound (see the field doc).
+    #[inline]
+    pub fn set_hdma_tracker_sleep(&mut self, until: u64) {
+        self.hdma_tracker_sleep_until = until;
     }
 
     pub fn ack_hdma_req(&mut self) {
@@ -5461,6 +5487,11 @@ impl memory::Addressable for Mmio {
         // unmaps the boot overlay: drop the passive-read page table.
         if addr < 0x8000 || addr == REG_SVBK || addr == REG_BOOT_OFF {
             self.passive_pages_valid = false;
+        }
+        // Any IO write may move HDMA-relevant state (FF40 LCD off, FF55 kick,
+        // KEY1, STAT...): wake the HDMA tracker.
+        if addr >= 0xFF00 {
+            self.hdma_tracker_sleep_until = 0;
         }
         // While an OAM DMA is running the CPU bus operates normally except for
         // (1) the source-region conflict, which redirects the write into OAM,

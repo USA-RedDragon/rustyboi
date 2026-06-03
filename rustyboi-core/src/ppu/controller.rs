@@ -4939,23 +4939,6 @@ impl Ppu {
         matches!(self.state, State::HBlank | State::VBlank | State::OAMSearch)
     }
 
-    /// Master-cc bound below which the CGB per-dot HDMA tracking is a proven
-    /// no-op for a span STARTING in mode 3: the closed-form period predicate
-    /// stays false until it leads the mode-0 entry by a few dots, so
-    /// `m0_time_master - 8` is a safe resume point; everything else the
-    /// tracker maintains (LY, period edges) is constant deep inside mode 3.
-    /// 0 = no skipping (unknown anchor or not in mode 3).
-    #[inline]
-    pub fn hdma_tracker_quiet_until(&self) -> u64 {
-        if !matches!(self.state, State::PixelTransfer) {
-            return 0;
-        }
-        match self.m0_time_master {
-            Some(m0) => m0.saturating_sub(8),
-            None => 0,
-        }
-    }
-
     /// Fast-forward through inert HBlank/VBlank interior dots, where the whole
     /// per-dot `step` body is provably bookkeeping: `ticks`/`line_cycle`
     /// advance, the LYC compare rewrites an unchanged flag, the palette latch
@@ -6688,6 +6671,13 @@ impl Ppu {
     }
 
     fn enter_scheduled_mode2(&mut self, mmio: &mut mmio::Mmio) {
+        // Mode 2 holds no HDMA period edges, LY changes, or block fires; the
+        // tracker can sleep until just before the pixel-transfer arm (80/82),
+        // which installs the next (mode-3) sleep bound.
+        if mmio.is_cgb_features_enabled() && !self.first_line_after_enable {
+            let ds = mmio.is_double_speed_mode() as u32;
+            mmio.set_hdma_tracker_sleep(mmio.master_cc().wrapping_add(76 << ds));
+        }
         // Seed the per-line OBJ-size scan latch from the LCDC as of the mode-2
         // entry boundary. A size write in the prior line's HBlank/VBlank is
         // captured here (affects this line); a write after this boundary (this
@@ -7372,6 +7362,11 @@ impl Ppu {
                         let m0t = self.m0_time_exact(mmio, m3_len, is_cgb, false)
                             + ((self.sprite0_scx_extra(mmio, is_cgb) as u64) << ds);
                         self.m0_time_master = Some(m0t);
+                        // Deep mode 3 is HDMA-tracker-quiet until the closed-form
+                        // period can lead the mode-0 entry (m0t - 8).
+                        if is_cgb {
+                            mmio.set_hdma_tracker_sleep(m0t.saturating_sub(8));
+                        }
                         // The within-line mode-0 dot is DERIVED from the same exact
                         // mode-0 time (master cc) so the eager-grid consumers (reported
                         // FF41 mode poke, m0 IRQ arm, cgbp tick fallback) ride the
