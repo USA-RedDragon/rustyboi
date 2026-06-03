@@ -182,9 +182,6 @@ impl RustyboiCore {
         env.set_memory_maps(&descriptors);
     }
 
-    fn gb(&self) -> Option<&GB> {
-        self.session.as_ref().map(|s| s.gb())
-    }
     fn gb_mut(&mut self) -> Option<&mut GB> {
         self.session.as_mut().map(|s| s.gb_mut())
     }
@@ -491,7 +488,7 @@ impl Core for RustyboiCore {
         // the bulk is the constant ROM bytes; only the small RAM/register portion
         // drifts as digit widths change. A 1/64 + 64 KiB pad plus the 8-byte
         // header covers that; serialize also guards the write.
-        match self.gb() {
+        match self.gb_mut() {
             Some(gb) => match gb.to_state_bytes() {
                 Ok(bytes) => SERIALIZE_HEADER_LEN + bytes.len() + bytes.len() / 64 + 64 * 1024,
                 Err(_) => 0,
@@ -501,7 +498,7 @@ impl Core for RustyboiCore {
     }
 
     fn serialize(&mut self, into: &mut [u8]) -> bool {
-        let Some(gb) = self.gb() else {
+        let Some(gb) = self.gb_mut() else {
             return false;
         };
         let Ok(bytes) = gb.to_state_bytes() else {

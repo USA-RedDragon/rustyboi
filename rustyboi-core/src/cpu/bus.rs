@@ -37,17 +37,23 @@ pub struct Bus<'a> {
     // point that reads time-derived state flushes first, so observable
     // behavior is byte-identical — only the resolution batching coarsens.
     lag: u32,
+    // Dots of CARRIED (previous instructions') lag this Bus started with.
+    // When that lag flushes, run_to counts its dots into `ticked`, which must
+    // not be attributed to the current instruction's cycle budget.
+    foreign: u32,
 }
 
 impl<'a> Bus<'a> {
 
     pub fn new(mmio: &'a mut Mmio, ppu: &'a mut Ppu) -> Self {
+        let lag = mmio.take_cpu_lag();
         Bus {
             mmio,
             ppu,
             dot: 0,
             ticked: 0,
-            lag: 0,
+            lag,
+            foreign: lag,
         }
     }
 
@@ -122,11 +128,78 @@ impl<'a> Bus<'a> {
 
     /// Tick the remaining internal (non-memory) cycles of an instruction.
     pub fn tick_remaining(&mut self, total_cycles: u32) {
-        self.flush_lag();
-        let remaining = total_cycles.saturating_sub(self.ticked);
+        // Cycles attributable to THIS instruction so far: resolved dots plus
+        // deferred (lag) dots, minus the carried-in foreign lag (counted into
+        // `ticked` if it flushed, still sitting in `lag` if not).
+        let accounted = self
+            .ticked
+            .wrapping_add(self.lag)
+            .wrapping_sub(self.foreign);
+        let remaining = total_cycles.saturating_sub(accounted) as u64;
+        let lag = std::mem::take(&mut self.lag) as u64 + remaining;
+        if lag == 0 {
+            return;
+        }
+        // Cross-instruction carry: park the whole unresolved tail when it is
+        // provably inert — no IF bit can rise inside it (the same stale-world
+        // event bounds the halted batch uses; every slot rearm is monotone
+        // except the m0 arm, which the m0-disarmed refusal covers), no
+        // pending-and-enabled interrupt is already waiting (the boundary
+        // event-cc gates would consume a stale access cc), no stall-capable
+        // machinery is live (OAM-DMA/HDMA discover stalls during resolution),
+        // no STOP window (its slice exits read world state at slice ccs), and
+        // the PPU frame swap is not inside the tail (frame-loop return points
+        // and their input application stay exact). The cap bounds the
+        // staleness of out-of-band observers (frame_ready polls, audio
+        // sample anchoring) to under two dozen M-cycles.
+        const LAG_CARRY_CAP: u64 = 96;
+        if lag <= LAG_CARRY_CAP && self.lag_carry_ok(lag) {
+            self.mmio.set_cpu_lag(lag as u32);
+            return;
+        }
         // Resolve the leftover internal dots via the run-to-cc driver.
-        let target = self.mmio.master_cc().wrapping_add(remaining as u64);
+        let target = self.mmio.master_cc().wrapping_add(lag);
         self.run_to(target);
+    }
+
+    /// Force-resolve any lag (own + carried + freshly parked) without
+    /// re-parking it. For out-of-band observers (GB::sync_lazy_peripherals)
+    /// and paths that must not leave a carried tail (STOP entry/wake,
+    /// serialization) — including after a tick_remaining that just parked.
+    pub fn flush_all_lag(&mut self) {
+        self.lag = self.lag.wrapping_add(self.mmio.take_cpu_lag());
+        self.flush_lag();
+    }
+
+    /// Whether an unresolved tail of `lag` dots may be carried across the
+    /// instruction boundary. See `tick_remaining`.
+    fn lag_carry_ok(&self, lag: u64) -> bool {
+        if self.mmio.pending_if_ie() != 0
+            || !self.mmio.halt_batchable()
+            || self.mmio.oam_dma_bus_snoop_needed()
+            || self.mmio.hdma_resume_lockstep_window()
+            || self.mmio.in_stop_window()
+            || (self.mmio.is_cgb_features_enabled()
+                && (self.mmio.hdma_is_enabled() || self.mmio.hdma_req_pending()))
+        {
+            return false;
+        }
+        let now = self.mmio.master_cc();
+        let ds = self.mmio.is_double_speed_mode();
+        let horizon = now.wrapping_add(lag + 8);
+        let mut bound = self.ppu.next_stat_irq_lower_bound_master(now, ds);
+        if let Some(cc) = self.mmio.next_timer_overflow_fire_cc() {
+            bound = bound.min(cc);
+        }
+        // The EI-loop fast dispatch fires overflows at the EARLY anchor,
+        // ahead of the delivery cc the bound above uses; cover it too.
+        if let Some(cc) = self.mmio.next_timer_overflow_ei_cc() {
+            bound = bound.min(cc);
+        }
+        if bound <= horizon {
+            return false;
+        }
+        lag + 8 < self.ppu.dots_until_frame_wrap_conservative(ds)
     }
 
     /// Charge one opcode-fetch M-cycle (4 T-cycles) for a HALT-bug-prefetched
@@ -369,7 +442,11 @@ impl<'a> Bus<'a> {
         if !self.mmio.halt_batchable() {
             return 1;
         }
-        let now = self.mmio.master_cc();
+        // Account for any carried unresolved lag: the CPU's true position is
+        // `master_cc + lag`, and the frame-wrap distance (measured from the
+        // resolved PPU position) shrinks by the same amount.
+        let lag = self.lag as u64;
+        let now = self.mmio.master_cc().wrapping_add(lag);
         let ds = self.mmio.is_double_speed_mode();
         let mut bound = self.ppu.next_stat_irq_lower_bound_master(now, ds);
         if let Some(cc) = self.mmio.next_timer_overflow_fire_cc() {
@@ -377,7 +454,11 @@ impl<'a> Bus<'a> {
         }
         let n = bound
             .saturating_sub(now)
-            .min(self.ppu.dots_until_frame_wrap_conservative(ds));
+            .min(
+                self.ppu
+                    .dots_until_frame_wrap_conservative(ds)
+                    .saturating_sub(lag),
+            );
         n.clamp(1, 456) as u32
     }
 

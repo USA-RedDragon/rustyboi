@@ -188,6 +188,13 @@ pub struct Mmio {
     ir_device: crate::ir::IrDevice,
     #[serde(skip, default)]
     delayed_writes: Vec<DelayedMmioWrite>,
+    // Carried CPU lag: passive-read M-cycles whose world resolution was
+    // deferred ACROSS an instruction boundary (see Bus::tick_remaining's
+    // carry gate). Pulled into the next Bus's lag at construction, so the
+    // first flush point resolves it. Serialized: a mid-lag savestate resumes
+    // resolution identically on load.
+    #[serde(default)]
+    cpu_lag: u32,
     io_registers: memory::Memory<IO_REGISTERS_START, IO_REGISTERS_SIZE>,
     hram: memory::Memory<HRAM_START, HRAM_SIZE>,
     ie_register: u8,
@@ -915,6 +922,7 @@ impl Mmio {
             serial_device: serial::SerialDevice::Disconnected,
             ir_device: crate::ir::IrDevice::Disconnected,
             delayed_writes: Vec::new(),
+            cpu_lag: 0,
             io_registers: memory::Memory::new(),
             hram: memory::Memory::new(),
             ie_register: 0,
@@ -1792,6 +1800,31 @@ impl Mmio {
     /// Raise an interrupt by setting its IF bit. Equivalent to
     /// `SM83::set_interrupt_flag(flag, true, self)` but needs no CPU borrow, so
     /// peripherals (PPU) can request interrupts directly.
+    /// Take the carried cross-instruction lag (Bus construction).
+    #[inline]
+    pub fn take_cpu_lag(&mut self) -> u32 {
+        std::mem::take(&mut self.cpu_lag)
+    }
+
+    /// Park unresolved passive-read dots across an instruction boundary.
+    #[inline]
+    pub fn set_cpu_lag(&mut self, lag: u32) {
+        self.cpu_lag = lag;
+    }
+
+    /// Carried cross-instruction lag, if any.
+    #[inline]
+    pub fn cpu_lag(&self) -> u32 {
+        self.cpu_lag
+    }
+
+    /// Raw pending-and-enabled interrupt bits (IF & IE, low 5), read directly
+    /// off the backing stores for the lag-carry gate.
+    #[inline]
+    pub fn pending_if_ie(&self) -> u8 {
+        self.io_registers.read(cpu::registers::INTERRUPT_FLAG) & self.ie_register & 0x1F
+    }
+
     pub fn request_interrupt(&mut self, flag: cpu::registers::InterruptFlag) {
         let current = self.read(cpu::registers::INTERRUPT_FLAG);
         self.write(cpu::registers::INTERRUPT_FLAG, current | flag as u8);
@@ -2205,7 +2238,6 @@ impl Mmio {
 
     /// Drain the deferred-HDMA write buffer one dot. When the delay expires the
     /// resolved bytes are committed to VRAM in order.
-    #[inline]
     #[inline]
     pub fn step_hdma_deferred(&mut self) {
         if self.hdma_pending_writes.is_empty() {

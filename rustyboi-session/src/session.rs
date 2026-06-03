@@ -1531,7 +1531,7 @@ mod offload_tests {
             offl.run_frame(AbstractInput::none());
             // Synchronously stand in for the worker: serialize the clone and
             // feed it back, exactly as the platform worker would.
-            if let Some((frame, gb)) = offl.take_pending_snapshot() {
+            if let Some((frame, mut gb)) = offl.take_pending_snapshot() {
                 let bytes = gb.to_state_bytes().expect("serialize clone");
                 offl.push_rewind_bytes(frame, bytes);
             }
