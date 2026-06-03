@@ -10,11 +10,19 @@
 #   3. optimized build     (-Cprofile-use)      into target/pgo-use
 #
 # Usage:
-#   ./tools/build-pgo.sh                 # workload = tools/bench.sh ROM set
-#   ./tools/build-pgo.sh rom1.zip rom2.gb ...  # custom profiling workload
+#   ./tools/build-pgo.sh --list roms.txt       # RECOMMENDED: one ROM path per line
+#   ./tools/build-pgo.sh rom1.zip rom2.gb ...  # explicit workload ROMs
+#   ./tools/build-pgo.sh                       # fallback: tools/bench.sh ROM set
 #
-# Output binaries (byte-identical emulation, verified against the full suite
-# board): target/pgo-use/release/{rustyboi,bench,rustyboi-test-runner}
+# REPRESENTATIVENESS MATTERS: profile on a broad, diverse set (15+ games across
+# DMG/CGB, mappers, halt-heavy vs busy-wait, sprite/window/HDMA-heavy titles),
+# NOT just the games you benchmark. Measured on this codebase: a 19-game
+# diverse profile transferred +35-53% to six held-out games never profiled,
+# while a 5-game profile overfit those five by ~2-5% relative. The emulation
+# is byte-identical either way (full suite board verified against PGO
+# binaries); only speed distribution across titles changes.
+#
+# Output binaries: target/pgo-use/release/{rustyboi,bench,rustyboi-test-runner}
 #
 # Requires: rustup component add llvm-tools
 set -euo pipefail
@@ -37,12 +45,20 @@ RUSTFLAGS="-Cprofile-generate=$PGO_DIR" \
     cargo build --release -p rustyboi-test-runner --bin bench --target-dir target/pgo-gen
 
 echo "==> Phase 2: profiling workload"
-if [ "$#" -gt 0 ]; then
+if [ "${1:-}" = "--list" ]; then
+    LIST="${2:?--list needs a file}"
+    while IFS= read -r rom; do
+        [ -n "$rom" ] || continue
+        echo "    $rom"
+        ./target/pgo-gen/release/bench "$rom" 800 > /dev/null
+    done < "$LIST"
+elif [ "$#" -gt 0 ]; then
     for rom in "$@"; do
         ./target/pgo-gen/release/bench "$rom" 800
     done
 else
-    # The standard bench basket (see tools/bench.sh for the ROM paths).
+    echo "    (fallback: bench-basket workload — pass --list <file> with a"
+    echo "     broad, diverse ROM set for profiles that generalize; see header)"
     BIN=./target/pgo-gen/release/bench FRAMES=800 ./tools/bench.sh
 fi
 
