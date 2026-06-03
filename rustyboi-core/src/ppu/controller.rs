@@ -1605,6 +1605,27 @@ pub struct Ppu {
     sched_m0irq: u64,
     #[serde(default)]
     sched_oneshot_statirq: u64,
+    // Remaining mode-3 fast dots: while > 0 (and the state is still
+    // PixelTransfer), `step` skips its preamble — the STAT dispatch (no
+    // event can come due inside the budget), the l154 window check (LY
+    // bounded), the pending LY-write take and LYC=LY rewrite (both only
+    // change on CPU writes, which invalidate the budget via
+    // `invalidate_fast_span`), and the window-Y latch (its checkpoints lie
+    // outside mode-3 ticks). Recomputed lazily from `sched_min` slack;
+    // zeroed by `stat_sched_touched` and by any >= 0xFE00 bus write.
+    // Not serialized: deserializes to 0 = full preamble.
+    #[serde(skip)]
+    #[serde(default)]
+    fast_dots_left: u32,
+    // Post-invalidation hold: after any fast-span invalidation (a >=0xFE00
+    // bus write or a delayed LCDC commit), run the FULL preamble for this
+    // many further dots before the budget may recompute — the one-shot
+    // mid-mode-3 write-detection checks (WX/WY/window-enable m0 adjustments)
+    // must observe the change on the dot it lands, and delayed LCDC commits
+    // land a few dots after the write that invalidated.
+    #[serde(skip)]
+    #[serde(default)]
+    fast_hold: u8,
     // Cached lower bound of the 9 scheduled STAT/apply event slots consumed by
     // `dispatch_stat_events`, so the per-dot fast bail is a single compare
     // instead of a 9-way min. Invariant: always <= the true minimum (0 =
@@ -2015,6 +2036,8 @@ impl Ppu {
             sched_m0irq: stat_irq::DISABLED_TIME,
             sched_oneshot_statirq: stat_irq::DISABLED_TIME,
             sched_min: 0,
+            fast_dots_left: 0,
+            fast_hold: 0,
             m1_vblank_fired: false,
             l154_vblank_glitch_window: false,
             lyc_irq: stat_irq::LycIrq::default(),
@@ -2557,12 +2580,16 @@ impl Ppu {
                         let tile_data_select = LCDCFlags::BGWindowTileDataSelect as u8;
                         let value = (event.base_value & !tile_data_select) | (event.value & tile_data_select);
                         self.set_lcdc_visible(value, mmio.is_cgb_features_enabled(), mmio.is_double_speed_mode());
+                        self.invalidate_fast_span();
                     }
                     PendingLcdcEventKind::Full => {
                         self.set_lcdc_visible(event.value, mmio.is_cgb_features_enabled(), mmio.is_double_speed_mode());
                         // The settled value now lives in self.lcdc /
                         // cgb_tile_index_is_tile_data; drop the exact-cc override.
                         self.lcdc_b4_exact = None;
+                        // The commit changes what the mode-3 one-shot checks
+                        // compare against; hold the preamble fast path off.
+                        self.invalidate_fast_span();
                     }
                 }
             } else {
@@ -4817,6 +4844,30 @@ impl Ppu {
     #[inline]
     fn stat_sched_touched(&mut self) {
         self.sched_min = 0;
+        self.fast_dots_left = 0;
+    }
+
+    /// Drop the mode-3 preamble fast budget. Called by the bus on any write
+    /// at or above 0xFE00 (OAM/IO — LY/LYC/STAT/WY/LCDC/IE/IF and the OAM
+    /// write-pending signal all live there), so the skipped preamble pieces
+    /// resume per-dot processing on the very next dot.
+    #[inline]
+    pub fn invalidate_fast_span(&mut self) {
+        self.fast_dots_left = 0;
+        self.fast_hold = 8;
+    }
+
+    /// Fresh mode-3 preamble fast budget in render dots: the sched_min slack
+    /// (margin 12 covers every dispatch anticipation offset and the DS
+    /// sub-dot), gated off entirely near line/frame transients.
+    fn mode3_fast_budget(&self, mmio: &mmio::Mmio) -> u32 {
+        if !(2..=152).contains(&self.internal_ly_val) || self.first_line_after_enable {
+            return 0;
+        }
+        let ds = mmio.is_double_speed_mode() as u32;
+        let abs_now = mmio.master_cc().wrapping_sub(self.p_now);
+        let slack = self.sched_min.saturating_sub(abs_now.saturating_add(12));
+        (slack >> ds).min(512) as u32
     }
 
     /// Lower bound, in MASTER cc, on the next cc at which the PPU can raise an
@@ -6795,10 +6846,32 @@ impl Ppu {
             return;
         }
 
+        // Mode-3 preamble fast path: while the budget holds (see
+        // `fast_dots_left`), every piece gated on `!fast` below is a proven
+        // no-op for this dot.
+        let fast = if matches!(self.state, State::PixelTransfer) {
+            if self.fast_hold > 0 {
+                self.fast_hold -= 1;
+                self.fast_dots_left = 0;
+            } else if self.fast_dots_left == 0 {
+                self.fast_dots_left = self.mode3_fast_budget(mmio);
+            }
+            if self.fast_dots_left > 0 {
+                self.fast_dots_left -= 1;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         // Fire any scheduled STAT IRQ events that have come due at this dot,
         // then advance the clean event clock by one dot (phase-locked with the
         // renderer's 456-dot line).
-        self.dispatch_stat_events(mmio);
+        if !fast {
+            self.dispatch_stat_events(mmio);
+        }
         // Fold the PPU dot-clock onto the master cc. `p_now` is the LCD-enable
         // anchor such that the PPU machine-cycle clock is `master_cc - p_now`
         // (the hardware PPU-clock base); the master cc advances `1<<ds` per render dot
@@ -6820,7 +6893,8 @@ impl Ppu {
         // stat_write_glitch_l154_d: internal_ly==1, line_cycle 0); keeping the
         // window this narrow guarantees a normal mid-frame STAT write never
         // clears a legitimately-pending VBlank IRQ.
-        if self.l154_vblank_glitch_window
+        if !fast
+            && self.l154_vblank_glitch_window
             && (self.internal_ly_val > 1
                 || (self.internal_ly_val == 1 && self.line_cycle > 4))
         {
@@ -6833,8 +6907,9 @@ impl Ppu {
         self.process_oam_reader_events(mmio);
 
         // CPU writes to FF44 (LY) reset the line counter to 0 and re-arm the
-        // PPU at the start of an OAM search.
-        if mmio.take_ly_write_pending() {
+        // PPU at the start of an OAM search. (An FF44 write invalidates the
+        // fast budget, so `fast` implies no pending write.)
+        if !fast && mmio.take_ly_write_pending() {
             self.reset_lcd_pipeline();
             mmio.write_ly_from_ppu(0);
             self.state = State::OAMSearch;
@@ -6853,11 +6928,13 @@ impl Ppu {
         // `the LYC-compare-LY calc` `time-to-next-LY <= 2` threshold). Line 153's earlier
         // ly=0 transient is handled separately in Phase D by writing FF44
         // directly, so this anticipation only fires on lines 0..=152.
-        let effective_ly = self.effective_ly_for_lyc_compare(mmio);
-        if mmio.ppu_io_reg(LYC) == effective_ly {
-            mmio.write_lcd_status_from_ppu(mmio.lcd_status_reg() | (1 << 2)); // Set the LYC=LY flag
-        } else {
-            mmio.write_lcd_status_from_ppu(mmio.lcd_status_reg() & !(1 << 2)); // Clear the LYC=LY flag
+        if !fast {
+            let effective_ly = self.effective_ly_for_lyc_compare(mmio);
+            if mmio.ppu_io_reg(LYC) == effective_ly {
+                mmio.write_lcd_status_from_ppu(mmio.lcd_status_reg() | (1 << 2)); // Set the LYC=LY flag
+            } else {
+                mmio.write_lcd_status_from_ppu(mmio.lcd_status_reg() & !(1 << 2)); // Clear the LYC=LY flag
+            }
         }
 
         // (STAT IRQ delivery is handled entirely by the event model in
@@ -6869,7 +6946,9 @@ impl Ppu {
         // (wy==0), and near each line's end at the prior-to-LY-inc (ly==wy)
         // and after-LY-inc (ly+1==wy) cycles. This catches late WY writes that
         // land in the small window between these checks.
-        self.update_window_y_latch(mmio);
+        if !fast {
+            self.update_window_y_latch(mmio);
+        }
 
         match self.state {
             State::OAMSearch => {
@@ -7346,7 +7425,8 @@ impl Ppu {
                 // The `win_wx_enable_resolved` latch suppresses re-entry on the dots
                 // after a clean WX-enable was handled (the WX != arm-WX condition
                 // stays true every subsequent dot until the window draws).
-                if self.scheduled_mode0_dot.is_some()
+                if !fast
+                    && self.scheduled_mode0_dot.is_some()
                     && !self.window_started_this_line
                     && !self.win_wx_enable_resolved
                     && (mmio.read(WX) != self.m3_scheduled_wx
@@ -7566,7 +7646,8 @@ impl Ppu {
                 // scx3/scx5 have not (out0, refund); the 8-dots-in write is always
                 // committed (out3). WX<7 immediate-start windows lock at win_start
                 // (no refund). DMG / no sprites / SS.
-                if self.m0_time_master.is_some()
+                if !fast
+                    && self.m0_time_master.is_some()
                     && self.window_started_this_line
                     && !mmio.is_cgb_features_enabled()
                     && self.sprites_on_line.is_empty()
@@ -7688,6 +7769,9 @@ impl Ppu {
                             self.cgb_train_reresolve(mmio);
                             self.win_train_reresolve(mmio);
                             self.resolve_bgp_spikes(mmio);
+                            // Leaving mode 3: drop any leftover preamble fast budget so the
+                            // next line recomputes against the fresh schedule.
+                            self.fast_dots_left = 0;
                             self.state = State::HBlank;
                             break 'label;
                         }
@@ -8650,6 +8734,9 @@ impl Ppu {
                     if self.m0_time_master.is_none() {
                         self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
                         self.resolve_bgp_spikes(mmio);
+                        // Leaving mode 3: drop any leftover preamble fast budget so the
+                        // next line recomputes against the fresh schedule.
+                        self.fast_dots_left = 0;
                         self.state = State::HBlank;
                         if !self.mode0_reported_this_line {
                             self.mode0_reported_this_line = true;
@@ -8659,6 +8746,9 @@ impl Ppu {
                     } else if window_deferred {
                         self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
                         self.resolve_bgp_spikes(mmio);
+                        // Leaving mode 3: drop any leftover preamble fast budget so the
+                        // next line recomputes against the fresh schedule.
+                        self.fast_dots_left = 0;
                         self.state = State::HBlank;
                     }
                 }
