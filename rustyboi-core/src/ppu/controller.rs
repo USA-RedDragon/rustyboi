@@ -2829,7 +2829,17 @@ impl Ppu {
             + (win_line.saturating_sub(WIN_TRAIN_GLITCH_ROW) / WIN_TRAIN_LAG_STEP) as i64
     }
 
-    fn wg_apply(&self, mut fls: fetcher::FetcherLcdcState) -> fetcher::FetcherLcdcState {
+    /// Window-glitch journal front door: no anchor / empty journal (the
+    /// overwhelmingly common case) is an inlined check.
+    #[inline]
+    fn wg_apply(&self, fls: fetcher::FetcherLcdcState) -> fetcher::FetcherLcdcState {
+        if self.wg_anchor_cc.is_none() || self.wg_hist.is_empty() {
+            return fls;
+        }
+        self.wg_apply_slow(fls)
+    }
+
+    fn wg_apply_slow(&self, mut fls: fetcher::FetcherLcdcState) -> fetcher::FetcherLcdcState {
         let Some(anchor) = self.wg_anchor_cc else {
             return fls;
         };
@@ -3686,7 +3696,7 @@ impl Ppu {
     /// Journal-application front door: the journals only fill on DMG
     /// mid-mode-3 SCY/SCX/window-glitch writes, so the common per-dot case is
     /// the inlined empty check.
-    #[inline]
+    #[inline(always)]
     fn bg_wg_apply(&self, fls: fetcher::FetcherLcdcState, ly: u8) -> fetcher::FetcherLcdcState {
         if self.wg_hist.is_empty() && self.bg_scy_hist.is_empty() && self.bg_scx_hist.is_empty() {
             return fls;
@@ -5388,7 +5398,7 @@ impl Ppu {
             (bg_pixel.color, bg_pixel.attrs)
         };
         self.win_being_fetched = false;
-        let ly = mmio.read(LY) as u16;
+        let ly = mmio.ppu_io_reg(LY) as u16;
         let fb_offset = (ly * 160) + self.x as u16;
 
         // Per-pixel BG-enable. The per-dot draw is
