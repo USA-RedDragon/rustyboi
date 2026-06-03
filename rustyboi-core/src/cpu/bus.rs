@@ -27,6 +27,16 @@ pub struct Bus<'a> {
     // gate. Resets per instruction.
     dot: u32,
     ticked: u32,
+    // Deferred passive-read M-cycles (in dots): a CPU read of plain memory
+    // (ROM/WRAM/HRAM with no OAM-DMA machinery live) returns a value that no
+    // peripheral can influence within its own M-cycle, so its 4-dot world
+    // resolution is deferred and coalesced into the next flush point (any
+    // non-passive access, internal cycle, peek, or the instruction-end
+    // tick_remaining). Writes always resolve (peripherals CAN read memory:
+    // HDMA sources, DMA conflicts, push-timing machinery). Every Bus entry
+    // point that reads time-derived state flushes first, so observable
+    // behavior is byte-identical — only the resolution batching coarsens.
+    lag: u32,
 }
 
 impl<'a> Bus<'a> {
@@ -37,6 +47,7 @@ impl<'a> Bus<'a> {
             ppu,
             dot: 0,
             ticked: 0,
+            lag: 0,
         }
     }
 
@@ -111,6 +122,7 @@ impl<'a> Bus<'a> {
 
     /// Tick the remaining internal (non-memory) cycles of an instruction.
     pub fn tick_remaining(&mut self, total_cycles: u32) {
+        self.flush_lag();
         let remaining = total_cycles.saturating_sub(self.ticked);
         // Resolve the leftover internal dots via the run-to-cc driver.
         let target = self.mmio.master_cc().wrapping_add(remaining as u64);
@@ -127,10 +139,37 @@ impl<'a> Bus<'a> {
     }
 
     fn tick_m(&mut self) {
-        // Advance `master_cc` by one M-cycle (4 dots); a single `run_to` resolves
-        // every peripheral up to that cc.
-        let target = self.mmio.master_cc().wrapping_add(4);
+        // Advance `master_cc` by one M-cycle (4 dots) plus any deferred
+        // passive-read dots; a single `run_to` resolves every peripheral up
+        // to that cc.
+        let lag = std::mem::take(&mut self.lag) as u64;
+        let target = self.mmio.master_cc().wrapping_add(lag + 4);
         self.run_to(target);
+    }
+
+    /// Resolve any deferred passive-read dots. Must run before anything that
+    /// observes time-derived state (peripheral registers, ppu locks, event
+    /// ccs) or mutates the world.
+    #[inline]
+    fn flush_lag(&mut self) {
+        if self.lag != 0 {
+            let lag = std::mem::take(&mut self.lag) as u64;
+            let target = self.mmio.master_cc().wrapping_add(lag);
+            self.run_to(target);
+        }
+    }
+
+    /// Whether a CPU read of `addr` may defer its world resolution: plain
+    /// memory whose value cannot change within the deferred span — cart ROM
+    /// (bank registers only move on CPU writes, which flush), WRAM/echo, and
+    /// HRAM — with no OAM-DMA machinery live (conflict reads would consult
+    /// live DMA state) and no HDMA resume-lockstep window armed (its stall
+    /// bookkeeping rides the per-access resolution).
+    #[inline]
+    fn read_lag_ok(&self, addr: u16) -> bool {
+        (addr < 0x8000 || (0xC000..=0xFDFF).contains(&addr) || (0xFF80..=0xFFFE).contains(&addr))
+            && !self.mmio.oam_dma_bus_snoop_needed()
+            && !self.mmio.hdma_resume_lockstep_window()
     }
 
     /// Advance the world to `target_cc`, resolving every peripheral up to (and
@@ -243,13 +282,27 @@ impl<'a> Bus<'a> {
         let double_speed = self.mmio.is_double_speed_mode();
         let cgb = self.mmio.is_cgb_features_enabled();
         let ds_shift = double_speed as u32;
+        // Deep-mode-3 CGB HDMA tracker skip: constant within the span (the
+        // anchor only moves on CPU writes, i.e. at span boundaries), and
+        // conservative when the state changes mid-span (a span starting
+        // outside mode 3 keeps full per-dot tracking).
+        // Also requires no pending HDMA block request: step_hdma services
+        // Requested-block fires (halt-exit reflags) at ANY mode, and those are
+        // only armed at CPU boundaries — i.e. between spans, so the span-start
+        // check suffices (found by gambatte hdma_transition_*halt_late_unhalt).
+        let hdma_quiet_until = if cgb && !self.mmio.hdma_req_pending() {
+            self.ppu.hdma_tracker_quiet_until()
+        } else {
+            0
+        };
         let mut i = 0u32;
         while i < n {
             // Inert-PPU fast-forward: whole render dots from an even t-phase
             // (the render grid), so the skipped odd-phase sub-dot dispatches
             // are the same bounded no-ops the skip proof covers. Deferred
             // HDMA writes need their per-dot drain, so no skip while pending.
-            if (!double_speed || self.mmio.cpu_t_phase().is_multiple_of(2))
+            if self.ppu.maybe_inert_state()
+                && (!double_speed || self.mmio.cpu_t_phase().is_multiple_of(2))
                 && !self.mmio.has_pending_hdma_deferred()
             {
                 let budget = (n - i) >> ds_shift;
@@ -270,7 +323,7 @@ impl<'a> Bus<'a> {
             } else {
                 self.ppu.step_subdot(self.mmio);
             }
-            if cgb {
+            if cgb && self.mmio.master_cc() >= hdma_quiet_until {
                 let period = self.ppu.hdma_period(double_speed);
                 self.mmio.step_hdma(period);
             }
@@ -331,7 +384,8 @@ impl<'a> Bus<'a> {
     /// after HALT is read at the current cc WITHOUT advancing it; the +4 charge is
     /// deferred until the prefetched opcode is consumed on the next step.
     /// Instruction memory is never PPU-gated, so a direct mmio read is faithful.
-    pub fn peek(&self, addr: u16) -> u8 {
+    pub fn peek(&mut self, addr: u16) -> u8 {
+        self.flush_lag();
         self.mmio.read(addr)
     }
 
@@ -341,7 +395,8 @@ impl<'a> Bus<'a> {
     /// this fetch every M-cycle; when the pc byte lives in VRAM and mode 3 locks
     /// it, the fetch reads open-bus 0xFF (= rst $38), the hardware escape from the
     /// loop. Still no tick: the +4 fetch charge stays deferred to consumption.
-    pub fn peek_fetch(&self, addr: u16) -> u8 {
+    pub fn peek_fetch(&mut self, addr: u16) -> u8 {
+        self.flush_lag();
         if self.ppu_locks_access(addr, self.mmio.master_cc()) {
             return 0xFF;
         }
@@ -455,6 +510,7 @@ impl<'a> Bus<'a> {
     /// HDMA-halts-with-the-CPU base-documented (Pan Docs CGB Registers, FF55; TCAGBD
     /// §9.6.2); the sub-cycle period-latch straddle boundary is from test-ROM refs.
     pub fn on_cpu_halt(&mut self) {
+        self.flush_lag();
         let lcd_on = self.mmio.read(ppu::LCD_CONTROL) & (ppu::LCDCFlags::DisplayEnable as u8) != 0;
         let ds = self.mmio.is_double_speed_mode();
         let cc = self.mmio.master_cc();
@@ -630,6 +686,7 @@ impl<'a> Bus<'a> {
     /// value before the inc/dec.
     /// Pan Docs: OAM Corruption Bug — https://gbdev.io/pandocs/OAM_Corruption_Bug.html
     pub fn oam_bug_idu(&mut self, pre_value: u16) {
+        self.flush_lag();
         if !(0xFE00..=0xFEFF).contains(&pre_value) {
             return;
         }
@@ -637,6 +694,13 @@ impl<'a> Bus<'a> {
     }
 
     pub fn read(&mut self, addr: u16) -> u8 {
+        // Passive-read fast path: plain memory, no peripheral can influence
+        // the value within this M-cycle — defer the world resolution.
+        if self.read_lag_ok(addr) {
+            self.lag += 4;
+            return self.mmio.read(addr);
+        }
+        self.flush_lag();
         // APU reads (NRxx status, NR52, wave RAM) observe the channels at the read
         // M-cycle START cc. Snapshot before ticking; the per-dot step during tick_m
         // would otherwise let a length expiry scheduled within this M-cycle disable
@@ -866,6 +930,7 @@ impl<'a> Bus<'a> {
     /// §4.7 explicitly flags the mode-0 STAT IF-ack case as untested; §4.9 / Pan Docs
     /// base-document only the 5-M-cycle IF-clear, not the per-source sub-cc offsets.)
     pub fn interrupt_low_push_ack(&mut self, sp: u16, value: u8, bit: u8) {
+        self.flush_lag();
         // Stack byte stores at the access start (the push data is fixed for the
         // whole M-cycle); RAM is never PPU-gated.
         self.mmio.write(sp, value);
@@ -937,6 +1002,7 @@ impl<'a> Bus<'a> {
     }
 
     pub fn write(&mut self, addr: u16, value: u8) {
+        self.flush_lag();
         // Dirty-line probe (scanline-renderer feasibility study). Off by default
         // (probe = None => this whole block is inert). Sample at the write's ISSUE
         // cc, before any M-cycle tick, so `in_pixel_transfer()`/LY reflect the
