@@ -28,11 +28,14 @@ pub fn test_rom() -> Vec<u8> {
 }
 
 /// RAM size for the MBC3 fixture below: header code 0x02 = 8 KiB.
+// Shared test module: not every integration-test target uses every fixture.
+#[allow(dead_code)]
 pub const MBC3_RAM_BYTES: usize = 8 * 1024;
 
 /// Like [`test_rom`], but an MBC3 cartridge WITH battery-backed RAM + RTC (cart
 /// type 0x10 = MBC3+TIMER+RAM+BATTERY), for exercising the battery `.sav` and
 /// `.rtc` import/export round-trips.
+#[allow(dead_code)]
 pub fn test_rom_mbc3() -> Vec<u8> {
     let mut rom = test_rom();
     rom[0x147] = 0x10; // MBC3 + TIMER + RAM + BATTERY
