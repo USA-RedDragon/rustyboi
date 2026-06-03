@@ -931,6 +931,7 @@ impl<'a> Bus<'a> {
     /// base-document only the 5-M-cycle IF-clear, not the per-source sub-cc offsets.)
     pub fn interrupt_low_push_ack(&mut self, sp: u16, value: u8, bit: u8) {
         self.flush_lag();
+        self.ppu.invalidate_fast_span();
         // Stack byte stores at the access start (the push data is fixed for the
         // whole M-cycle); RAM is never PPU-gated.
         self.mmio.write(sp, value);
@@ -1003,6 +1004,11 @@ impl<'a> Bus<'a> {
 
     pub fn write(&mut self, addr: u16, value: u8) {
         self.flush_lag();
+        // Any OAM/IO write can move the state the mode-3 preamble fast path
+        // skips (LY/LYC/STAT/WY/LCDC/IE and the pending-write signals).
+        if addr >= 0xFE00 {
+            self.ppu.invalidate_fast_span();
+        }
         // Dirty-line probe (scanline-renderer feasibility study). Off by default
         // (probe = None => this whole block is inert). Sample at the write's ISSUE
         // cc, before any M-cycle tick, so `in_pixel_transfer()`/LY reflect the
