@@ -4815,10 +4815,22 @@ impl Ppu {
     /// being rounded up to the next even render dot. It dispatches events at the
     /// intermediate cc (`abs_cc - 1`, i.e. one M-cycle before the next render
     /// dot's post-increment value) without advancing the renderer's clock.
+    #[inline]
     pub fn step_subdot(&mut self, mmio: &mut mmio::Mmio) {
         if self.disabled {
             return;
         }
+        // Bail without the abs_cc adjustment dance when no event is due at
+        // the odd half-dot: the dispatch fast path tests abs + 2 < sched_min,
+        // and the half-dot's abs is abs - 1, so abs + 1 < sched_min is the
+        // identical no-op condition.
+        if self.abs_cc + 1 < self.sched_min {
+            return;
+        }
+        self.step_subdot_slow(mmio);
+    }
+
+    fn step_subdot_slow(&mut self, mmio: &mut mmio::Mmio) {
         // The preceding full `step` dispatched at the even cc N and advanced
         // `abs_cc` to N+2 (the next render dot). The odd half-dot is cc N+1, one
         // machine cycle earlier; dispatch any event due there, then restore.
