@@ -282,6 +282,11 @@ impl<'a> Bus<'a> {
         let double_speed = self.mmio.is_double_speed_mode();
         let cgb = self.mmio.is_cgb_features_enabled();
         let ds_shift = double_speed as u32;
+        // Track the t-phase parity locally and batch the phase counter and
+        // the RTC advance to the span end: both are linear in dots and only
+        // observed at CPU access boundaries (RTC/camera registers resolve at
+        // reads; the phase counter's only consumer is the parity gate here).
+        let base_parity = (self.mmio.cpu_t_phase() & 1) as u32;
         // Deep-mode-3 CGB HDMA tracker skip: constant within the span (the
         // anchor only moves on CPU writes, i.e. at span boundaries), and
         // conservative when the state changes mid-span (a span starting
@@ -301,8 +306,9 @@ impl<'a> Bus<'a> {
             // (the render grid), so the skipped odd-phase sub-dot dispatches
             // are the same bounded no-ops the skip proof covers. Deferred
             // HDMA writes need their per-dot drain, so no skip while pending.
+            let even = (base_parity + i) & 1 == 0;
             if self.ppu.maybe_inert_state()
-                && (!double_speed || self.mmio.cpu_t_phase().is_multiple_of(2))
+                && (!double_speed || even)
                 && !self.mmio.has_pending_hdma_deferred()
             {
                 let budget = (n - i) >> ds_shift;
@@ -310,14 +316,12 @@ impl<'a> Bus<'a> {
                 if r > 0 {
                     let m = r << ds_shift;
                     self.mmio.bump_master_cc_by(m as u64);
-                    self.mmio.tick_rtc(m as u64);
-                    self.mmio.advance_cpu_t_phase_by(m as u64);
                     i += m;
                     continue;
                 }
             }
             self.mmio.bump_master_cc_one();
-            if !double_speed || self.mmio.cpu_t_phase().is_multiple_of(2) {
+            if !double_speed || even {
                 self.ppu.step_scheduled_stat_events(self.mmio);
                 self.ppu.step(self.mmio);
             } else {
@@ -329,10 +333,10 @@ impl<'a> Bus<'a> {
             }
             self.mmio.step_hdma_deferred();
             self.ppu.step_lcdc_events(self.mmio);
-            self.mmio.tick_rtc(1);
-            self.mmio.advance_cpu_t_phase();
             i += 1;
         }
+        self.mmio.tick_rtc(n as u64);
+        self.mmio.advance_cpu_t_phase_by(n as u64);
         self.dot = self.dot.wrapping_add(n);
         self.ticked += n;
         true

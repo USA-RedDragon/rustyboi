@@ -2206,10 +2206,15 @@ impl Mmio {
     /// Drain the deferred-HDMA write buffer one dot. When the delay expires the
     /// resolved bytes are committed to VRAM in order.
     #[inline]
+    #[inline]
     pub fn step_hdma_deferred(&mut self) {
         if self.hdma_pending_writes.is_empty() {
             return;
         }
+        self.step_hdma_deferred_slow();
+    }
+
+    fn step_hdma_deferred_slow(&mut self) {
         if self.hdma_write_delay > 0 {
             self.hdma_write_delay -= 1;
         }
