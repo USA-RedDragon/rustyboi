@@ -10,7 +10,12 @@
 #   3. optimized build     (-Cprofile-use)      into target/pgo-use
 #
 # Usage:
-#   ./tools/build-pgo.sh --list roms.txt       # RECOMMENDED: one ROM path per line
+#   ./tools/build-pgo.sh --sweep DIR...        # BEST: gameplay-representative —
+#                                              #   profiles the whole library via
+#                                              #   the sweep masher (real input,
+#                                              #   past menus into gameplay)
+#   ./tools/build-pgo.sh --list roms.txt       # one ROM path per line (no input:
+#                                              #   menus/attract only)
 #   ./tools/build-pgo.sh rom1.zip rom2.gb ...  # explicit workload ROMs
 #   ./tools/build-pgo.sh                       # fallback: tools/bench.sh ROM set
 #
@@ -42,10 +47,25 @@ mkdir -p "$PGO_DIR"
 
 echo "==> Phase 1: instrumented build"
 RUSTFLAGS="-Cprofile-generate=$PGO_DIR" \
-    cargo build --release -p rustyboi-test-runner --bin bench --target-dir target/pgo-gen
+    cargo build --release -p rustyboi-test-runner --bin bench --bin sweep --target-dir target/pgo-gen
 
 echo "==> Phase 2: profiling workload"
-if [ "${1:-}" = "--list" ]; then
+if [ "${1:-}" = "--sweep" ]; then
+    shift
+    [ "$#" -gt 0 ] || { echo "--sweep needs at least one ROM directory" >&2; exit 1; }
+    # The sweep masher drives every ROM past its title screen into gameplay
+    # (deterministic seeded input), so the profile weights real workloads —
+    # sprites in flight, window splits, HDMA streams — not menu idles.
+    #
+    # --jobs 1 is REQUIRED: -Cprofile-generate counters are atomic, and running
+    # the instrumented binary multi-threaded makes every increment ping-pong the
+    # counter cache line across cores (false sharing) — a ~100x slowdown that
+    # never finishes. Single-threaded the instrumented build runs near native
+    # (~600 fps), so a few dozen ROMs profile in ~1-2 minutes.
+    ./target/pgo-gen/release/sweep run --roms "$@" \
+        --out "$PGO_DIR/sweep-out" --frames 1800 --warmup 600 --no-screens \
+        --jobs 1 2> /dev/null
+elif [ "${1:-}" = "--list" ]; then
     LIST="${2:?--list needs a file}"
     while IFS= read -r rom; do
         [ -n "$rom" ] || continue
