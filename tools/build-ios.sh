@@ -83,6 +83,7 @@ if [ "$(uname -s)" != Darwin ]; then
     echo "==> [container] cargo build + link app ($RUST_TARGET, $CONFIG)"
     INCMD="set -e
         export IPHONEOS_DEPLOYMENT_TARGET=14.0
+        export RUSTFLAGS=\"\$(tools/pgo.sh flags 2>/dev/null || true) \${RUSTFLAGS:-}\"
         cargo build $CARGO_PROFILE --target $RUST_TARGET -p rustyboi-platform --lib
         test -f $LIBDIR/librustyboi_platform_lib.a || { echo 'staticlib missing'; exit 1; }
         $IOS_CC -c ios/Sources/main.m -o $LIBDIR/rustyboi_main.o
@@ -148,6 +149,8 @@ fi
 # (that's only for cross-compiling from Linux via the rust-cross image).
 echo "==> cargo build ($RUST_TARGET, release)"
 export IPHONEOS_DEPLOYMENT_TARGET=14.0
+# PGO best-effort (host rustc; IR profile is target-portable). RB_NO_PGO=1 opts out.
+export RUSTFLAGS="$("$SCRIPT_DIR/pgo.sh" flags 2>/dev/null || true) ${RUSTFLAGS:-}"
 cargo build --release -p rustyboi-platform --lib --target "$RUST_TARGET"
 RUST_LIB_DIR="$PROJECT_ROOT/target/$RUST_TARGET/release"
 [ -f "$RUST_LIB_DIR/librustyboi_platform_lib.a" ] || {

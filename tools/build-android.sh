@@ -94,6 +94,10 @@ fi
 echo "Building rustyboi for Android ($BUILD_PROFILE): ${GRADLE_TASKS[*]}..."
 GRADLE_ARGS=()
 for t in "${GRADLE_TASKS[@]}"; do GRADLE_ARGS+=(":app:$t"); done
+# PGO best-effort: cargo-ndk (run by Gradle) inherits RUSTFLAGS. Host rustc
+# collected the profile; IR PGO is target-portable to the Android ABIs.
+# RB_NO_PGO=1 opts out.
+export RUSTFLAGS="$("$(dirname "${BASH_SOURCE[0]}")/pgo.sh" flags 2>/dev/null || true) ${RUSTFLAGS:-}"
 ( cd android && ./gradlew --warning-mode all "${GRADLE_ARGS[@]}" )
 
 echo ""
