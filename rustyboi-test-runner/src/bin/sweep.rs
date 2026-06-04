@@ -204,12 +204,14 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-/// Parse a Logiqx XML DAT (No-Intro / DAT-o-MATIC format) into the crc->name
-/// map. Structure: `<game name="Rampart (USA)"> <rom crc="ABCD1234" .../> </game>`.
-/// A lightweight tag scan — no XML dep — tracking the current game name and
-/// attaching it to each nested rom's CRC. Unknown/other formats contribute
-/// nothing (rows just fall back to file stems).
+/// Parse a No-Intro DAT into the crc->name map. Handles both formats DATs ship
+/// in: Logiqx XML (`<game name="Rampart (USA)"><rom crc="ABCD1234".../></game>`)
+/// and ClrMamePro (`game ( name "Rampart (USA)" rom ( ... crc D5AEED2E ... ) )`,
+/// which is what libretro-database serves). Both scans run — their syntaxes are
+/// disjoint, so a file only matches one. Unknown formats contribute nothing
+/// (rows fall back to file stems).
 fn parse_dat(text: &str, map: &mut std::collections::HashMap<u32, String>) {
+    // --- Logiqx XML: split on '<', match `game`/`rom` tags by attribute. ---
     let attr = |s: &str, key: &str| -> Option<String> {
         let pat = format!("{key}=\"");
         let i = s.find(&pat)? + pat.len();
@@ -223,6 +225,25 @@ fn parse_dat(text: &str, map: &mut std::collections::HashMap<u32, String>) {
         } else if let Some(rest) = tag.strip_prefix("rom ")
             && let (Some(name), Some(crc)) = (&cur, attr(rest, "crc"))
             && let Ok(v) = u32::from_str_radix(crc.trim(), 16)
+        {
+            map.entry(v).or_insert_with(|| name.clone());
+        }
+    }
+
+    // --- ClrMamePro: line-oriented. A standalone `name "..."` line is the game
+    // name; a `rom ( ... crc <HEX> ... )` line carries the CRC. ---
+    let mut cur: Option<String> = None;
+    for line in text.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("name \"") {
+            if let Some(end) = rest.find('"') {
+                cur = Some(rest[..end].to_string());
+            }
+        } else if t.starts_with("rom ")
+            && let Some(name) = &cur
+            && let Some(after) = t.split(" crc ").nth(1)
+            && let Some(tok) = after.split_whitespace().next()
+            && let Ok(v) = u32::from_str_radix(tok, 16)
         {
             map.entry(v).or_insert_with(|| name.clone());
         }
