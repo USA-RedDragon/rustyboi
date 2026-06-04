@@ -77,9 +77,6 @@ jobs:
       - name: Run library sweep
         if: steps.gate.outputs.have == '1'
         shell: bash
-        # No-Intro names are always on: the binary auto-fetches the public
-        # GB/GBC DATs (libretro-database) and caches them, falling back to file
-        # names offline. The gallery labels cards with those names.
         run: ./target/release/sweep run --roms "$LIB/GB" "$LIB/GBC" --out sweep-out
       - name: Compare against baseline
         if: steps.gate.outputs.have == '1'
