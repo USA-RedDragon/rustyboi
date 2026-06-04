@@ -74,22 +74,13 @@ jobs:
         if: steps.gate.outputs.have == '1'
         shell: bash
         run: cargo build --release -p rustyboi-test-runner --bin sweep
-      - name: Fetch No-Intro DATs
-        if: steps.gate.outputs.have == '1'
-        shell: bash
-        run: |
-          # Public DATs (libretro-database) so the gallery/report label ROMs
-          # with canonical No-Intro names. Best-effort: on fetch failure the
-          # sweep just falls back to file names. Not committed.
-          if ./tools/fetch-nointro-dats.sh "$RUNNER_TEMP/dats"; then
-            echo "NAMES_ARGS=--names $RUNNER_TEMP/dats/gb.dat $RUNNER_TEMP/dats/gbc.dat" >> "$GITHUB_ENV"
-          else
-            echo "No-Intro DAT fetch failed; gallery will use file names"
-          fi
       - name: Run library sweep
         if: steps.gate.outputs.have == '1'
         shell: bash
-        run: ./target/release/sweep run --roms "$LIB/GB" "$LIB/GBC" --out sweep-out ${NAMES_ARGS:-}
+        # No-Intro names are always on: the binary auto-fetches the public
+        # GB/GBC DATs (libretro-database) and caches them, falling back to file
+        # names offline. The gallery labels cards with those names.
+        run: ./target/release/sweep run --roms "$LIB/GB" "$LIB/GBC" --out sweep-out
       - name: Compare against baseline
         if: steps.gate.outputs.have == '1'
         shell: bash

@@ -8,17 +8,17 @@
 //!
 //!   sweep run      --roms DIR... [--list FILE] --out DIR [--frames N]
 //!                  [--warmup N] [--jobs N] [--timeout SECS] [--no-screens]
-//!                  [--strip-names] [--names DAT...] [--only SUBSTR]
+//!                  [--strip-names] [--only SUBSTR]
 //!       Sweep the library into DIR/manifest.jsonl + DIR/screens/*.png.
-//!       --strip-names produces the committable baseline: omits the ROM
-//!       title/path (rom_sha stays as the join identity) so no trademarked
+//!       No-Intro names are always on: each ROM is labeled by its canonical
+//!       No-Intro title (matched via CRC32 of the extracted ROM against the
+//!       public GB/GBC DATs, auto-fetched+cached; see nointro_map). Unmatched
+//!       ROMs (unlicensed, hacks, bad dumps) keep their file stem. The manifest
+//!       also stores each ROM's crc so `gallery` can (re)apply names later.
+//!       --strip-names produces the committable baseline: omits ROM
+//!       title/path/crc (rom_sha stays as the join identity) so no trademarked
 //!       names are committed, and drops machine-specific fps/ns_per_frame.
 //!       Screenshots are still written (used before serialization).
-//!       --names <dat>... labels each ROM by its canonical No-Intro name,
-//!       matched via CRC32 of the extracted ROM against Logiqx XML DAT(s)
-//!       (No-Intro / DAT-o-MATIC). Unmatched ROMs fall back to the file stem.
-//!       The DAT is supplied at runtime, never committed. Used for the gallery
-//!       and comparison reports; orthogonal to --strip-names (the baseline).
 //!
 //!   sweep compare  --base A.jsonl --cand B.jsonl [--min-ratio R]
 //!                  [--ignore-perf] [--out report.md]
@@ -36,7 +36,9 @@
 //!       --ignore-perf for this reason; perf is a local, quiet-machine check.
 //!
 //!   sweep gallery  --manifest M.jsonl --screens DIR [--out gallery.html]
-//!       Self-contained HTML gallery: screenshot, hardware, fps, boot status.
+//!       Self-contained HTML gallery: screenshot, No-Intro name, hardware,
+//!       fps, boot status. Names are (re)resolved here from each row's stored
+//!       crc, so a manifest swept before the DATs were cached still gets them.
 //!
 //! Determinism: the core has no wall-clock/thread inputs (MBC3 RTC is
 //! cycle-derived; sidecars are never read by `Cartridge::from_bytes`), and the
@@ -69,6 +71,11 @@ struct Row {
     key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    /// CRC32 (hex) of the extracted ROM — the No-Intro key. Kept in working
+    /// manifests so `gallery`/`compare` can resolve No-Intro names after the
+    /// fact (no re-sweep). Stripped from the committed baseline (--strip-names).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    crc: Option<String>,
     /// First 8 bytes of the ROM file's SHA-256 (64-bit, collision-negligible
     /// across a library). THE identity used to match rows between manifests: a
     /// row present in one manifest but not the other means the library changed,
@@ -187,9 +194,56 @@ struct RunCfg {
     warmup: usize,
     timeout_secs: u64,
     screens_dir: Option<PathBuf>,
-    /// CRC32 -> No-Intro game name, from any `--names <dat>` Logiqx DAT files.
-    /// Empty = label rows by file stem.
+    /// CRC32 -> No-Intro game name (auto-fetched DATs). Empty = file stems.
     names: std::collections::HashMap<u32, String>,
+}
+
+/// Cache dir for the auto-fetched No-Intro DATs. Override with RB_NOINTRO_DIR
+/// (e.g. to point at DATs fetched offline via tools/fetch-nointro-dats.sh).
+fn nointro_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("RB_NOINTRO_DIR") {
+        return PathBuf::from(d);
+    }
+    if let Ok(x) = std::env::var("XDG_CACHE_HOME") {
+        return PathBuf::from(x).join("rustyboi/nointro");
+    }
+    if let Ok(h) = std::env::var("HOME") {
+        return PathBuf::from(h).join(".cache/rustyboi/nointro");
+    }
+    PathBuf::from("nointro-dats")
+}
+
+/// No-Intro naming, always on: ensure the public GB+GBC DATs are cached
+/// (fetch once via `curl` from libretro-database, best-effort, 30s cap) and
+/// return the crc32->name map. Offline / no curl / fetch failure => empty map
+/// (rows keep file-stem names), noted once on stderr. The DATs are cached
+/// outside the repo, never committed.
+fn nointro_map() -> std::collections::HashMap<u32, String> {
+    const URLS: [(&str, &str); 2] = [
+        ("gb.dat", "https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/no-intro/Nintendo%20-%20Game%20Boy.dat"),
+        ("gbc.dat", "https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/no-intro/Nintendo%20-%20Game%20Boy%20Color.dat"),
+    ];
+    let dir = nointro_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let mut map = std::collections::HashMap::new();
+    let mut loaded = false;
+    for (fname, url) in URLS {
+        let path = dir.join(fname);
+        if !path.exists() {
+            let _ = std::process::Command::new("curl")
+                .args(["-fsSL", "--max-time", "30", url, "-o"])
+                .arg(&path)
+                .status();
+        }
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            parse_dat(&text, &mut map);
+            loaded = true;
+        }
+    }
+    if !loaded {
+        eprintln!("sweep: no No-Intro DATs available (offline?); labeling by file name");
+    }
+    map
 }
 
 /// CRC32 (reflected, poly 0xEDB88320) — the checksum No-Intro DATs key on.
@@ -263,14 +317,7 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
         return Err("run: --warmup must be < --frames".into());
     }
 
-    let mut names = std::collections::HashMap::new();
-    for dat in multi_arg(args, "--names") {
-        let text = std::fs::read_to_string(&dat).map_err(|e| format!("read {dat}: {e}"))?;
-        parse_dat(&text, &mut names);
-    }
-    if !names.is_empty() {
-        eprintln!("loaded {} No-Intro names", names.len());
-    }
+    let names = nointro_map();
 
     let mut roms: Vec<(String, PathBuf)> = Vec::new();
     for dir in multi_arg(args, "--roms") {
@@ -348,6 +395,7 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
             let mut r = row.clone();
             r.key = None;
             r.name = None;
+            r.crc = None;
             r.fps = None;
             r.ns_per_frame = None;
             serde_json::to_string(&r)
@@ -411,6 +459,7 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
     let mut row = Row {
         key: Some(key.to_string()),
         name: Some(name),
+        crc: None,
         rom_sha: String::new(),
         hardware: String::new(),
         frames: cfg.frames,
@@ -433,13 +482,14 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
     row.rom_sha = sha[..8].iter().map(|b| format!("{b:02x}")).collect();
     let seed = u64::from_le_bytes(sha[..8].try_into().unwrap());
 
-    // No-Intro name via CRC32 of the extracted ROM (not the zip container).
-    // Only when a DAT was loaded and the CRC matches; else keep the file stem.
-    if !cfg.names.is_empty()
-        && let Ok(rom) = Cartridge::extract_rom_bytes(&bytes)
-        && let Some(nointro) = cfg.names.get(&crc32(&rom))
-    {
-        row.name = Some(nointro.clone());
+    // CRC32 of the extracted ROM (not the zip): stored for after-the-fact
+    // naming, and used now to set the No-Intro name when the DAT has it.
+    if let Ok(rom) = Cartridge::extract_rom_bytes(&bytes) {
+        let c = crc32(&rom);
+        row.crc = Some(format!("{c:08x}"));
+        if let Some(nointro) = cfg.names.get(&c) {
+            row.name = Some(nointro.clone());
+        }
     }
 
     // Wild-library ROMs are a fuzz surface; a panic in one must not kill the
@@ -735,7 +785,20 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
     let screens = arg(args, "--screens").ok_or("gallery: --screens <dir> required")?;
     let out = arg(args, "--out").unwrap_or_else(|| "gallery.html".into());
 
-    let rows = load_manifest(&manifest)?;
+    let mut rows = load_manifest(&manifest)?;
+    // Resolve/refresh No-Intro names from each row's stored crc, so a manifest
+    // swept before the DATs were cached still gets proper titles here — no
+    // re-sweep needed.
+    let names = nointro_map();
+    if !names.is_empty() {
+        for r in &mut rows {
+            if let Some(crc) = r.crc.as_ref().and_then(|c| u32::from_str_radix(c, 16).ok())
+                && let Some(nointro) = names.get(&crc)
+            {
+                r.name = Some(nointro.clone());
+            }
+        }
+    }
     let ok = rows
         .iter()
         .filter(|r| r.error.is_none() && r.boot_ok && r.changed)
