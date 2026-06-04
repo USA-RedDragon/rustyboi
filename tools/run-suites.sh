@@ -402,10 +402,15 @@ build_pgo() {
     log "RB_PGO: instrumented build"
     RUSTFLAGS="-Cprofile-generate=$pgo_dir" \
         cargo build --release -p rustyboi-test-runner "${target_args[@]}"
+    # RB_JOBS=1 during profiling: the runner parallelizes cases with scoped
+    # threads, and -Cprofile-generate counters are atomic — multi-threaded the
+    # instrumented binary false-shares counter cache lines across cores (~100x
+    # slowdown). Single-threaded the instrumented runner is near native, and
+    # this workload is only four small suites.
     log "RB_PGO: profiling workload (acid2 cgb_acid_hell scribbltests mealybug)"
     local s
     for s in acid2 cgb_acid_hell scribbltests mealybug; do
-        RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 "$0" "$s" >/dev/null 2>&1 || true
+        RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 RB_JOBS=1 "$0" "$s" >/dev/null 2>&1 || true
     done
     if ! ls "$pgo_dir"/*.profraw >/dev/null 2>&1; then
         log "RB_PGO: workload produced no profiles; plain build"
