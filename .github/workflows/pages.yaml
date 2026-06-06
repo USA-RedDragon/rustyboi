@@ -24,6 +24,8 @@ jobs:
     name: Build wasm bundle
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      ROMS_URL: ${{ secrets.ROMS_URL }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
@@ -55,6 +57,17 @@ jobs:
           url="https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz"
           curl -fsSL "$url" | tar -xz -C /tmp
           echo "/tmp/binaryen-${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Generate PGO profile
+        if: ${{ env.ROMS_URL != '' }}
+        shell: bash
+        run: |
+          rustup component add llvm-tools --toolchain "$RUST_TOOLCHAIN"
+          curl -fsSL "$ROMS_URL" -o /tmp/roms.zip
+          unzip -q /tmp/roms.zip -d "$RUNNER_TEMP/romlib"
+          LIB="$(dirname "$(find "$RUNNER_TEMP/romlib" -maxdepth 3 -type d -name GB | head -1)")"
+          [ -d "$LIB/GB" ] && [ -d "$LIB/GBC" ] || { echo "GB/ + GBC/ not in zip" >&2; exit 1; }
+          tools/pgo.sh gen --sweep "$LIB/GB" "$LIB/GBC"
 
       - name: Build web bundle
         run: |
