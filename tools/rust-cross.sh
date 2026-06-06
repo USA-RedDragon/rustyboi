@@ -209,6 +209,7 @@ rc_emit_libretro() {   # name
     echo "==> libretro $name  ($triple)"
     crt=""; if [ "$variant" = musl ]; then crt="dynamic"; fi
     tdir="target/cross/$name"
+    mkdir -p "$PROJECT_ROOT/$tdir"
     RC_CHOWN="$tdir" rc_build "$triple" "$variant" "$crt" -p rustyboi-libretro --target-dir "$tdir"
     case "$os" in
         windows)    cargo_art="rustyboi_libretro.dll" ;;
@@ -241,6 +242,7 @@ rc_emit_native() {   # name
     rc_engine
     echo "==> native $name  ($triple)"
     tdir="target/cross/$name"
+    mkdir -p "$PROJECT_ROOT/$tdir"
     RC_CHOWN="$tdir" rc_build "$triple" "" "" -p rustyboi-platform --bin rustyboi --target-dir "$tdir"
     case "$os" in windows) art="rustyboi.exe" ;; *) art="rustyboi" ;; esac
     src="$PROJECT_ROOT/$tdir/$triple/release/$art"
