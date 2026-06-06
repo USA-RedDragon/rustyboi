@@ -7,6 +7,10 @@
 # that lives under target/ (already gitignored) and is trivially regenerated.
 #
 #   tools/pgo.sh gen --sweep DIR... [--sample N] [--frames N]  # gameplay profile
+#   tools/pgo.sh gen --container --sweep DIR...        # profile for the cross
+#                                                     #   image's rustc (so
+#                                                     #   rc_build cross-compiles
+#                                                     #   get PGO too)
 #   tools/pgo.sh gen --suite                          # free-test-ROM fallback
 #   tools/pgo.sh flags                                # RUSTFLAGS fragment (or empty)
 #   tools/pgo.sh path                                 # print the profile path
@@ -54,13 +58,14 @@ cmd_path() { echo "$PROFILE"; }
 cmd_clean() { rm -rf "$PGO_DIR"; echo "removed $PGO_DIR"; }
 
 cmd_gen() {
-    local frames=1200 sample="${RB_PGO_SAMPLE:-50}" sweep_dirs=() use_suite=""
+    local frames=1200 sample="${RB_PGO_SAMPLE:-50}" sweep_dirs=() use_suite="" in_container=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --sweep) shift; while [ "$#" -gt 0 ] && [ "${1#--}" = "$1" ]; do sweep_dirs+=("$1"); shift; done ;;
             --frames) frames="$2"; shift 2 ;;
             --sample) sample="$2"; shift 2 ;;
             --suite) use_suite=1; shift ;;
+            --container) in_container=1; shift ;;
             *) echo "gen: unknown arg $1" >&2; exit 2 ;;
         esac
     done
@@ -73,6 +78,29 @@ cmd_gen() {
         echo "     RB_PGO_ROMS=\"dirA dirB\"); or --suite for the free test-ROM" >&2
         echo "     fallback (a menu/torture profile, not gameplay-representative)." >&2
         exit 2
+    fi
+
+    # --container: re-run gen INSIDE the rust-cross image, so the profile is
+    # produced by (and keyed to) the container's rustc — the one rc_build's
+    # cross-compiles use. Mounts each ROM dir read-only at /roms/N; the profile
+    # lands in the mounted target/pgo and persists on the host.
+    if [ -n "$in_container" ]; then
+        [ "${#sweep_dirs[@]}" -gt 0 ] || { echo "gen --container needs --sweep ROMs" >&2; exit 2; }
+        # shellcheck source=tools/rust-cross.sh
+        source "$ROOT/tools/rust-cross.sh"; rc_engine
+        local mounts=() incroms=() i=0 d
+        for d in "${sweep_dirs[@]}"; do
+            mounts+=(-v "$(cd "$d" && pwd)":/roms/$i:ro); incroms+=("/roms/$i"); i=$(( i + 1 ))
+        done
+        echo "==> [container $IMAGE] generating PGO profile"
+        local incmd="set -e
+            find \"\$(rustc --print sysroot)\" -name 'llvm-profdata*' | grep -q . || rustup component add llvm-tools
+            tools/pgo.sh gen --sweep ${incroms[*]} --sample $sample --frames $frames
+            chown -R $HOST_UIDGID target/pgo"
+        "$ENGINE" run --rm -v "$PROJECT_ROOT":/project -w /project \
+            -v "$CARGO_VOL":/usr/local/cargo/registry "${mounts[@]}" \
+            "$IMAGE" sh -c "$incmd"
+        return
     fi
 
     local profdata; profdata="$(find_profdata)"
