@@ -67,6 +67,9 @@ pub fn encode_rgb_png(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
     png
 }
 
+// Shared by `movie` (embeds frames as data URIs); `sweep`'s gallery links
+// screenshots by relative path, so its copy of this module leaves it unused.
+#[allow(dead_code)]
 pub fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
