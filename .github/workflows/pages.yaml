@@ -67,11 +67,11 @@ jobs:
           unzip -q /tmp/roms.zip -d "$RUNNER_TEMP/romlib"
           LIB="$(dirname "$(find "$RUNNER_TEMP/romlib" -maxdepth 3 -type d -name GB | head -1)")"
           [ -d "$LIB/GB" ] && [ -d "$LIB/GBC" ] || { echo "GB/ + GBC/ not in zip" >&2; exit 1; }
-          tools/pgo.sh gen --sweep "$LIB/GB" "$LIB/GBC"
+          make pgo-gen ROMS="$LIB/GB $LIB/GBC"
 
       - name: Build web bundle
         run: |
-          tools/build-web.sh
+          make web
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

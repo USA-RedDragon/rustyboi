@@ -7,7 +7,7 @@ A Game Boy emulator written in Rust for learning purposes. Not usable, likely ne
 ## Test suite accuracy
 
 Passing cases per suite, refreshed automatically on every pull request
-(`tools/run-suites.sh report`). See [SUITES.md](SUITES.md) for what each suite
+(`make report`). See [SUITES.md](SUITES.md) for what each suite
 is, how it is graded, and where its ROMs come from. Every one of the currently
 failing ROMs is individually proven and documented in
 [KNOWN_FAILURES.md](KNOWN_FAILURES.md).
@@ -56,16 +56,16 @@ both DMG and CGB games.
 ### Build
 
 The core is not part of the default workspace build, so build it explicitly with
-`tools/build-libretro.sh`. This script builds every libretro target **inside the
+`make libretro`. This builds every libretro target **inside the
 [`rust-cross`](https://github.com/USA-RedDragon/dockers/tree/main/images/rust-cross)
 container image**, which bundles all the cross toolchains (gnu + musl linkers,
 llvm-mingw, osxcross, the Android NDK).
 
 ```sh
-./tools/build-libretro.sh --list                      # the target table
-./tools/build-libretro.sh linux-x86_64 windows-arm64  # specific targets
-./tools/build-libretro.sh --all                       # every target
-RUSTBOI_CROSS_IMAGE=… ./tools/build-libretro.sh …     # override the image
+make targets                                    # the target table
+make libretro TARGETS="linux-x86_64 windows-arm64"   # specific targets
+make libretro TARGETS=all                       # every target
+RUSTBOI_CROSS_IMAGE=… make libretro TARGETS=…   # override the image
 ```
 
 ### Install
@@ -91,7 +91,7 @@ Android cores with the same script (they emit
 `_android` suffix and **no** `lib` prefix that RetroArch Android requires):
 
 ```sh
-./tools/build-libretro.sh android-arm64 android-armv7 android-x86_64 android-x86
+make libretro TARGETS="android-arm64 android-armv7 android-x86_64 android-x86"
 ```
 
 Install via the in-app menu — RetroArch's Android cores live in an app-private

@@ -1,5 +1,8 @@
-# XcodeGen spec for the rustyboi iOS app. Regenerate the .xcodeproj with
-# `xcodegen generate` (tools/build-ios.sh does this). The app is a thin UIKit
+# XcodeGen spec for the rustyboi iOS app — kept for local Xcode development
+# (`xcodegen generate` opens the app in Xcode). The `make ios` build does NOT use
+# Xcode: it cross-compiles + links in the rust-cross container (see ios/Makefile)
+# and reads only the bundle metadata below (MARKETING_VERSION,
+# CURRENT_PROJECT_VERSION, PRODUCT_BUNDLE_IDENTIFIER). The app is a thin UIKit
 # shell (Sources/main.m) that links the Rust staticlib
 # (librustyboi_platform_lib.a, built by cargo for aarch64-apple-ios) and calls
 # `rustyboi_ios_main`; winit's UIKit backend drives everything from there.
@@ -13,9 +16,6 @@ settings:
   base:
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
-    # We ship a single arm64 Rust staticlib (device + Apple-Silicon simulator),
-    # so build arm64 only. Without this, Xcode also builds an x86_64 simulator
-    # slice, which has no matching staticlib -> undefined `_rustyboi_ios_main`.
     ARCHS: arm64
     ONLY_ACTIVE_ARCH: "NO"
 targets:
@@ -30,15 +30,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.mcswain.rustyboi
         INFOPLIST_FILE: Info.plist
         ENABLE_BITCODE: "NO"
-        # RUST_LIB_DIR is set by tools/build-ios.sh to the cargo output dir for
-        # the active SDK (target/aarch64-apple-ios[-sim]/release), so the same
-        # spec links the right staticlib for device and simulator.
         LIBRARY_SEARCH_PATHS: "$(inherited) $(RUST_LIB_DIR)"
-        # Link the staticlib by full path (.a), not `-lrustyboi_platform_lib`:
-        # cargo also emits a cdylib (librustyboi_platform_lib.dylib) in the same
-        # dir, and `-l` makes ld prefer the .dylib (which isn't bundled). The
-        # explicit .a forces static linking. `-liconv`/`-lobjc` are what
-        # `cargo rustc --print native-static-libs` reports the Rust code needs.
         OTHER_LDFLAGS: "$(inherited) $(RUST_LIB_DIR)/librustyboi_platform_lib.a -liconv -lobjc"
     dependencies:
       - sdk: UIKit.framework
@@ -51,8 +43,6 @@ targets:
       - sdk: CoreAudio.framework
       # Provides the UTTypeData constant used by the document picker (iOS 14+).
       - sdk: UniformTypeIdentifiers.framework
-# A shared scheme so `xcodebuild -scheme rustyboi` resolves (XcodeGen does not
-# generate one implicitly). Required by tools/build-ios.sh and CI.
 schemes:
   rustyboi:
     build:

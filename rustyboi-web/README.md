@@ -32,13 +32,13 @@ Build the wasm module + JS bindings into `www/pkg/`:
 
 ```bash
 # from the workspace root — builds + optimizes with a modern wasm-opt
-tools/build-web.sh
+make web
 ```
 
-> **Why the script, not bare `wasm-pack build`?** wasm-pack bundles an ancient
+> **Why `make web`, not bare `wasm-pack build`?** wasm-pack bundles an ancient
 > `wasm-opt` that can't validate the post-MVP wasm features LLVM emits
 > (bulk-memory `memory.copy`/`fill`, sign-ext, …) — it fails even with
-> `--enable-*` flags. So `wasm-opt` is disabled in `Cargo.toml` and the script
+> `--enable-*` flags. So `wasm-opt` is disabled in `Cargo.toml` and the target
 > runs a current binaryen `wasm-opt -O3 -all` (`-all` = enable all features,
 > required even on the latest binaryen). Bare `wasm-pack build` still works but
 > ships an un-optimized module.
