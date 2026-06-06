@@ -11,19 +11,19 @@ can be tracked over time (e.g. while attacking mealybug / APU).
 The per-suite pass counts shown in the README progress table are refreshed
 automatically on every pull request; this document is the human-readable
 reference for what each suite is, how it is graded, and where its ROMs come
-from. The single entrypoint shared by CI and developers is
-[`tools/run-suites.sh`](tools/run-suites.sh):
+from. The single entrypoint shared by CI and developers is `make` (which execs
+[`tools/run-suites.sh`](tools/run-suites.sh)):
 
 ```
-tools/run-suites.sh list       # print the known suites + pass floors
-tools/run-suites.sh <suite>    # run one suite, gate against its floor
-tools/run-suites.sh all        # run every suite, gate each
-tools/run-suites.sh report     # markdown progress table (all suites)
+make suites-list          # print the known suites + pass floors
+make suite SUITE=<suite>  # run one suite, gate against its floor
+make suites               # run every suite, gate each
+make report               # markdown progress table (all suites)
 ```
 
 Every suite reads its ROMs and reference images from a single local tree,
 **`gb-test-roms/`** (override with `RB_ROMS=<dir>`) — all manifest paths are
-relative to it. `tools/run-suites.sh setup` populates it idempotently from three
+relative to it. `make setup` populates it idempotently from three
 upstream sources:
 
 - **[c-sp/game-boy-test-roms](https://github.com/c-sp/game-boy-test-roms) v7.0**
@@ -297,9 +297,9 @@ tracked as work items.
 Most manifests embed relative ROM paths and are regenerable, not hand-authored:
 
 ```
-python3 tools/gen_manifests.py                        # uses --roms gb-test-roms
-python3 tools/gen_manifests.py --roms /path/to/roms   # override the ROM dir
-python3 tools/gen_manifests.py --only mealybug,age    # regen selected suites
+make manifests                          # uses --roms gb-test-roms
+make manifests ROMS=/path/to/roms       # override the ROM dir
+make manifests ONLY=mealybug,age        # regen selected suites
 ```
 
 Re-run after updating the ROM set (e.g. a new c-sp release) to rebuild the case

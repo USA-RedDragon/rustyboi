@@ -12,7 +12,7 @@ plugins {
 // ---------------------------------------------------------------------------
 //
 // Reads from `android/keystore.properties` (or `android/app/keystore.properties`)
-// if present so `./build-android.sh --release` produces a signed APK without
+// if present so `make android RELEASE=1` produces a signed APK without
 // needing to plumb `-Pandroid.injected.signing.*` flags on the command line.
 //
 // Expected keys:

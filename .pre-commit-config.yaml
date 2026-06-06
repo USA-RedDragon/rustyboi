@@ -20,8 +20,8 @@ repos:
     hooks:
       - id: suite-progress-readme
         name: suite progress -> README
-        entry: tools/run-suites.sh report-update
-        language: script
+        entry: make report-update
+        language: system
         pass_filenames: false
         require_serial: true
         always_run: true
