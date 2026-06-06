@@ -36,9 +36,11 @@
 //!       --ignore-perf for this reason; perf is a local, quiet-machine check.
 //!
 //!   sweep gallery  --manifest M.jsonl --screens DIR [--out gallery.html]
-//!       Self-contained HTML gallery: screenshot, No-Intro name, hardware,
-//!       fps, boot status. Names are (re)resolved here from each row's stored
-//!       crc, so a manifest swept before the DATs were cached still gets them.
+//!       HTML gallery: screenshot (linked from ./screens), No-Intro name,
+//!       hardware, fps, boot status. Emit --out alongside the screens dir so
+//!       the relative image links resolve. Names are (re)resolved here from
+//!       each row's stored crc, so a manifest swept before the DATs were
+//!       cached still gets them.
 //!
 //! Determinism: the core has no wall-clock/thread inputs (MBC3 RTC is
 //! cycle-derived; sidecars are never read by `Cartridge::from_bytes`), and the
@@ -62,7 +64,7 @@ mod imaging;
 #[path = "shared/masher.rs"]
 mod masher;
 use masher::masher;
-use imaging::{base64, encode_rgb_png, frame_rgb, html_escape};
+use imaging::{encode_rgb_png, frame_rgb, html_escape};
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Row {
@@ -788,8 +790,9 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
         let img = r
             .key
             .as_deref()
-            .and_then(|k| std::fs::read(Path::new(&screens).join(format!("{}.png", sanitize(k)))).ok())
-            .map(|png| format!("<img src=\"data:image/png;base64,{}\" alt=\"\">", base64(&png)))
+            .map(|k| format!("{}.png", sanitize(k)))
+            .filter(|file| Path::new(&screens).join(file).exists())
+            .map(|file| format!("<img src=\"./screens/{}\" alt=\"\">", html_escape(&file)))
             .unwrap_or_else(|| "<div style=\"aspect-ratio:10/9\"></div>".into());
         let display_name = r.name.clone().unwrap_or_else(|| format!("sha:{}", r.rom_sha));
         let fps = r.fps.map_or(String::new(), |f| format!("{f:.0} fps"));
