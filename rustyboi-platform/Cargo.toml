@@ -51,7 +51,7 @@ objc2-uniform-type-identifiers = { version = "=0.3.2", features = ["UTType", "UT
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "=0.1.7"
-console_log = "=1.0.0"
+console_log = "=1.1.0"
 web-sys = { version = "=0.3.103", features = ["GpuTextureFormat"] }
 wasm-bindgen = "=0.2.126"
 wasm-bindgen-futures = "=0.4.76"
