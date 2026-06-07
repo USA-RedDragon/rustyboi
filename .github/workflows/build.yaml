@@ -11,64 +11,155 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: 'build / ${{ matrix.target }}'
+  matrix:
+    name: enumerate targets
     runs-on: ubuntu-24.04
-    env:
-      ROMS_URL: ${{ secrets.ROMS_URL }}
+    outputs:
+      libretro: ${{ steps.gen.outputs.libretro }}
+      native: ${{ steps.gen.outputs.native }}
+      has_roms: ${{ steps.gen.outputs.has_roms }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - id: gen
+        shell: bash
+        env:
+          ROMS_URL: ${{ secrets.ROMS_URL }}
+        run: |
+          {
+            echo "libretro=$(. tools/rust-cross.sh && rc_names        | jq -Rsc 'split("\n")|map(select(length>0))')"
+            echo "native=$(.   tools/rust-cross.sh && rc_names_native | jq -Rsc 'split("\n")|map(select(length>0))')"
+            echo "has_roms=$([ -n "$ROMS_URL" ] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+
+  pgo:
+    name: 'pgo / ${{ matrix.kind }}'
+    needs: matrix
+    if: ${{ needs.matrix.outputs.has_roms == 'true' }}
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # container = the build runs in the rust-cross image (its own rustc),
-          # so its PGO profile must be generated in-container to match.
-          - target: android
-            makeargs: RELEASE=1 BUNDLE=1
-            container: false
-          - target: libretro
-            mkflags: -j2 -k --output-sync=target
-            makeargs: TARGETS=all
-            container: true
-          - target: native
-            mkflags: -j2 -k --output-sync=target
-            makeargs: TARGETS=all
-            container: true
-          - target: web
-            makeargs: MODE=release
-            container: false
-          - target: ios
-            makeargs: ""
-            container: true
+        kind: [container, host]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Cache cargo + build
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cross-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cross-${{ matrix.target }}-
-      - name: Generate PGO profile
-        if: ${{ env.ROMS_URL != '' }}
+      - name: Fetch ROM library
+        id: roms
         shell: bash
+        env:
+          ROMS_URL: ${{ secrets.ROMS_URL }}
         run: |
-          # Representative gameplay profile so the shipped artifacts are PGO'd.
           # ROMS_URL is a zip preserving ./GB ./GBC (same as the library sweep).
           curl -fsSL "$ROMS_URL" -o /tmp/roms.zip
           unzip -q /tmp/roms.zip -d "$RUNNER_TEMP/romlib"
           LIB="$(dirname "$(find "$RUNNER_TEMP/romlib" -maxdepth 3 -type d -name GB | head -1)")"
           [ -d "$LIB/GB" ] && [ -d "$LIB/GBC" ] || { echo "GB/ + GBC/ not in zip" >&2; exit 1; }
-          if [ "${{ matrix.container }}" = "true" ]; then
-            make pgo-gen CONTAINER=1 ROMS="$LIB/GB $LIB/GBC"
+          echo "lib=$LIB" >> "$GITHUB_OUTPUT"
+      - name: Generate profile (${{ matrix.kind }} rustc)
+        shell: bash
+        run: |
+          LIB='${{ steps.roms.outputs.lib }}'
+          if [ '${{ matrix.kind }}' = container ]; then
+            make pgo-gen CONTAINER=1 ROMS="$LIB/GB $LIB/GBC"     # keyed to the image's rustc
           else
             rustup component add llvm-tools
-            make pgo-gen ROMS="$LIB/GB $LIB/GBC"
+            make pgo-gen ROMS="$LIB/GB $LIB/GBC"                 # keyed to the host rustc
           fi
-      - name: Build ${{ matrix.target }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pgo-${{ matrix.kind }}
+          path: target/pgo/
+          retention-days: 1
+          if-no-files-found: error
+
+  libretro:
+    name: 'libretro / ${{ matrix.name }}'
+    needs: [matrix, pgo]
+    if: ${{ always() && needs.matrix.result == 'success' }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.matrix.outputs.libretro) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: PGO profile (container rustc)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pgo-container
+          path: target/pgo
+        continue-on-error: true   # no profile (ROMS_URL unset / gen failed) => plain build
+      - name: Build libretro ${{ matrix.name }}
+        run: make libretro TARGETS=${{ matrix.name }}
+
+  native:
+    name: 'native / ${{ matrix.name }}'
+    needs: [matrix, pgo]
+    if: ${{ always() && needs.matrix.result == 'success' }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.matrix.outputs.native) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: PGO profile (container rustc)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pgo-container
+          path: target/pgo
+        continue-on-error: true
+      - name: Build native ${{ matrix.name }}
+        run: make native TARGETS=${{ matrix.name }}
+
+  android:
+    name: android
+    needs: [matrix, pgo]
+    if: ${{ always() && needs.matrix.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: PGO profile (host rustc)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pgo-host
+          path: target/pgo
+        continue-on-error: true
+      - name: Build android
         run: |
           cargo install cargo-ndk
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
+          make android RELEASE=1 BUNDLE=1
+
+  web:
+    name: web
+    needs: [matrix, pgo]
+    if: ${{ always() && needs.matrix.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: PGO profile (host rustc)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pgo-host
+          path: target/pgo
+        continue-on-error: true
+      - name: Build web
+        run: |
           cargo install wasm-pack
-          rustup target add x86_64-linux-android aarch64-linux-android i686-linux-android armv7-linux-androideabi
-          make ${{ matrix.mkflags }} ${{ matrix.target }} ${{ matrix.makeargs }}
+          make web
+
+  ios:
+    name: ios
+    needs: [matrix, pgo]
+    if: ${{ always() && needs.matrix.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: PGO profile (container rustc)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pgo-container
+          path: target/pgo
+        continue-on-error: true
+      - name: Build ios
+        run: make ios
