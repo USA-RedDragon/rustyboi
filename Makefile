@@ -37,7 +37,7 @@ COV_PROFDATA := $(COV_TD)/rustyboi.profdata
 # Prefix every coverage recipe: point cargo at the instrumented target dir and
 # pull in llvm-cov's coverage env (RUSTFLAGS, LLVM_PROFILE_FILE). Deterministic,
 # so re-sourcing it per recipe is fine.
-COV_SETENV = export CARGO_TARGET_DIR=$(COV_TD); source <(cargo llvm-cov show-env --export-prefix)
+COV_SETENV = export CARGO_TARGET_DIR=$(COV_TD); source <(cargo llvm-cov show-env --sh)
 
 .PHONY: help libretro native web android ios pgo targets \
         pgo-gen pgo-flags pgo-path pgo-clean \
