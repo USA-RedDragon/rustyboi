@@ -126,9 +126,9 @@ web: ## Build the wasm frontend (MODE=release|profiling)
 	echo "==> sw-version.js BUILD_ID=$$sw_id"
 	echo "Serve for Firefox:  (cd rustyboi-web/www && python3 -m http.server 8080)"
 
-android: ## Build the Android app (RELEASE=1 BUNDLE=1)
+android: ## Build the Android app (RELEASE=1 BUNDLE=1 [ABI=arm64-v8a])
 	@$(NEED_382)
-	$(MAKE) -C android build RELEASE='$(RELEASE)' BUNDLE='$(BUNDLE)'
+	$(MAKE) -C android build RELEASE='$(RELEASE)' BUNDLE='$(BUNDLE)' ABI='$(ABI)'
 
 ios: ## Build the iOS app (SIMULATOR=1 DEBUG=1)
 	@$(NEED_382)

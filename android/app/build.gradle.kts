@@ -36,6 +36,12 @@ val keystoreProps: Properties? = run {
     }
 }
 
+val allAbis = listOf("arm64-v8a", "x86_64", "armeabi-v7a", "x86")
+val selectedAbis: List<String> = (project.findProperty("abiFilter") as String?)
+    ?.split(",")?.map(String::trim)?.filter(String::isNotEmpty)
+    ?.also { sel -> require(sel.all(allAbis::contains)) { "abiFilter $sel not a subset of $allAbis" } }
+    ?: allAbis
+
 android {
     namespace = "dev.mcswain.rustyboi"
     compileSdk = 37
@@ -59,7 +65,7 @@ android {
         abi {
             isEnable = true
             reset()
-            include("arm64-v8a", "x86_64", "armeabi-v7a", "x86")
+            include(*selectedAbis.toTypedArray())
             isUniversalApk = false
         }
     }
@@ -135,7 +141,7 @@ fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks
     // ships in its sysroot at API >= 26. cargo-ndk otherwise defaults to API 21
     // (no libaaudio.so → link failure), so pin the link platform to our minSdk.
     val ndkPlatform = (android.defaultConfig.minSdk ?: 26).toString()
-    val abis = listOf("arm64-v8a", "x86_64", "armeabi-v7a", "x86")
+    val abis = selectedAbis
     val args = mutableListOf("cargo", "ndk")
     abis.forEach { args += listOf("-t", it) }
     args += listOf(
