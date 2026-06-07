@@ -197,6 +197,14 @@ rc_fetch() {
         "$IMAGE" sh -c "cargo fetch --locked || cargo fetch"
 }
 
+rc_run() {
+    rc_engine
+    "$ENGINE" run --rm \
+        -v "$PROJECT_ROOT":/project -w /project \
+        -v "$CARGO_VOL":/usr/local/cargo/registry \
+        "$IMAGE" sh -c "{ $*; }; rc=\$?; chown -R $HOST_UIDGID /project 2>/dev/null || true; exit \$rc"
+}
+
 # Build ONE libretro core for <name> into an ISOLATED target dir
 # (target/cross/<name>, so parallel builds don't contend on cargo's per-target-
 # dir build lock), then copy/rename into target/libretro/<name>/ by RetroArch's

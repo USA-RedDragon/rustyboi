@@ -14,11 +14,6 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
-env:
-  RUST_TOOLCHAIN: '1.94.1'
-  WASM_PACK_VERSION: v0.13.1
-  BINARYEN_VERSION: version_119
-
 jobs:
   build:
     name: Build wasm bundle
@@ -29,49 +24,28 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - name: Install Rust (${{ env.RUST_TOOLCHAIN }} + wasm target)
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \
-            --target wasm32-unknown-unknown
-          rustup default "$RUST_TOOLCHAIN"
+      - uses: ./.github/actions/free-disk-space
 
-      - name: Cache cargo + build
+      - name: Cache build dir
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: web-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: web-${{ env.RUST_TOOLCHAIN }}-
-
-      - name: Install wasm-pack ${{ env.WASM_PACK_VERSION }}
-        run: |
-          url="https://github.com/rustwasm/wasm-pack/releases/download/${WASM_PACK_VERSION}/wasm-pack-${WASM_PACK_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          curl -fsSL "$url" | tar -xz -C /tmp
-          sudo install "/tmp/wasm-pack-${WASM_PACK_VERSION}-x86_64-unknown-linux-musl/wasm-pack" /usr/local/bin/
-          wasm-pack --version
-
-      - name: Install binaryen ${{ env.BINARYEN_VERSION }} (wasm-opt)
-        run: |
-          url="https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz"
-          curl -fsSL "$url" | tar -xz -C /tmp
-          echo "/tmp/binaryen-${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+          path: target
+          key: web-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: web-
 
       - name: Generate PGO profile
         if: ${{ env.ROMS_URL != '' }}
         shell: bash
         run: |
-          rustup component add llvm-tools --toolchain "$RUST_TOOLCHAIN"
           curl -fsSL "$ROMS_URL" -o /tmp/roms.zip
           unzip -q /tmp/roms.zip -d "$RUNNER_TEMP/romlib"
           LIB="$(dirname "$(find "$RUNNER_TEMP/romlib" -maxdepth 3 -type d -name GB | head -1)")"
           [ -d "$LIB/GB" ] && [ -d "$LIB/GBC" ] || { echo "GB/ + GBC/ not in zip" >&2; exit 1; }
-          make pgo-gen ROMS="$LIB/GB $LIB/GBC"
+          make pgo-gen CONTAINER=1 ROMS="$LIB/GB $LIB/GBC"
 
       - name: Build web bundle
-        run: |
-          make web
+        shell: bash
+        run: . tools/rust-cross.sh && rc_run '(command -v wasm-pack >/dev/null || cargo install wasm-pack) && make web'
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
