@@ -123,7 +123,7 @@ jobs:
         continue-on-error: true
       - name: Build android ${{ matrix.abi }}
         shell: bash
-        run: . tools/rust-cross.sh && rc_run '(command -v cargo-ndk >/dev/null || cargo install cargo-ndk) && make android RELEASE=1 ABI=${{ matrix.abi }}'
+        run: . tools/rust-cross.sh && rc_run 'make android RELEASE=1 ABI=${{ matrix.abi }}'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: android-jnilib-${{ matrix.abi }}
@@ -180,7 +180,7 @@ jobs:
         continue-on-error: true
       - name: Build web
         shell: bash
-        run: . tools/rust-cross.sh && rc_run '(command -v wasm-pack >/dev/null || cargo install wasm-pack) && make web'
+        run: . tools/rust-cross.sh && rc_run 'make web'
       - name: Upload Pages artifact
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/claude' }}
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
