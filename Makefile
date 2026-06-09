@@ -179,9 +179,12 @@ pgo-gen: ## Generate the PGO profile (ROMS="dir..." [CONTAINER=1] [SUITE=1] [SAM
 	    find \"\$$(rustc --print sysroot)\" -name 'llvm-profdata*' | grep -q . || rustup component add llvm-tools
 	    make pgo-gen ROMS=\"$${incroms[*]}\" SAMPLE=$$sample FRAMES=$$frames
 	    chown -R $$HOST_UIDGID target/pgo"
-	  "$$ENGINE" run --rm -v "$$PROJECT_ROOT":/project -w /project \
+	  cname="pgo-$$$$-$$RANDOM"
+	  trap '"$$ENGINE" kill "'"$$cname"'" >/dev/null 2>&1 || true; exit 130' INT TERM
+	  "$$ENGINE" run --rm --name "$$cname" -v "$$PROJECT_ROOT":/project -w /project \
 	    -v "$$CARGO_VOL":/usr/local/cargo/registry "$${mounts[@]}" \
 	    "$$IMAGE" sh -c "$$incmd"
+	  trap - INT TERM
 	  exit 0
 	fi
 	profdata="$$(find "$$(rustc --print sysroot)" -name 'llvm-profdata*' 2>/dev/null | head -1)"
