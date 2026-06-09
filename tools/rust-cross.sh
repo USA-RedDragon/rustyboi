@@ -213,9 +213,12 @@ rc_build() {   # triple variant crt <extra cargo args...>
 # per-OS artifact naming in bash, while Make owns the DAG, per-target
 # success/failure, and `-j` parallelism.
 
-# Print all target names (rc_names) / just the GUI-capable ones (empty variant).
+# Print all target names (rc_names) / just the desktop-capable ones (rc_names_
+# native = gnu/darwin/windows + musl; android/ios have no desktop GUI target).
 rc_names()        { local t; for t in "${TARGETS[@]}"; do field "$t" 0; done; }
-rc_names_native() { local t; for t in "${TARGETS[@]}"; do [ -z "$(field "$t" 3)" ] && field "$t" 0; done; return 0; }
+rc_names_native() { local t; for t in "${TARGETS[@]}"; do case "$(field "$t" 3)" in ""|musl) field "$t" 0 ;; esac; done; return 0; }
+# Test runners: same set as native (everything with a run host: non-android/ios).
+rc_names_runner() { rc_names_native; }
 
 # Warm the shared cargo registry ONCE before the parallel per-target builds, so
 # they only READ it — concurrent cold downloads into $CARGO_VOL could race (the
@@ -281,21 +284,51 @@ rc_emit_libretro() {   # name
 }
 
 # Build ONE desktop rustyboi binary for <name> into target/native/<name>/.
-# GUI-capable targets only (empty variant); rejects musl/android/ios names.
+# Desktop targets: gnu/darwin/windows (empty variant) + musl. musl builds as
+# DYNAMIC musl (crt-static off) so winit/wgpu can dlopen X11/Wayland/GPU at
+# runtime — a static musl binary can't dlopen. android/ios have no desktop GUI.
 rc_emit_native() {   # name
-    local name="$1" entry triple os variant tdir art src dir
+    local name="$1" entry triple os variant crt tdir art src dir
     entry="$(rc_target_by_name "$name")" || { echo "Unknown target: $name" >&2; return 1; }
     variant="$(field "$entry" 3)"
-    if [ -n "$variant" ]; then echo "native: $name has no desktop GUI (variant=$variant)" >&2; return 1; fi
+    crt=""
+    case "$variant" in
+        "") ;;
+        musl) crt="dynamic" ;;
+        *) echo "native: $name has no desktop GUI (variant=$variant)" >&2; return 1 ;;
+    esac
     triple="$(field "$entry" 1)"; os="$(field "$entry" 2)"
     rc_engine
     echo "==> native $name  ($triple)"
     tdir="target/cross/$name"
     mkdir -p "$PROJECT_ROOT/$tdir"
-    RC_CHOWN="$tdir" rc_build "$triple" "" "" -p rustyboi-platform --bin rustyboi --target-dir "$tdir"
+    RC_CHOWN="$tdir" rc_build "$triple" "$variant" "$crt" -p rustyboi-platform --bin rustyboi --target-dir "$tdir"
     case "$os" in windows) art="rustyboi.exe" ;; *) art="rustyboi" ;; esac
     src="$PROJECT_ROOT/$tdir/$triple/release/$art"
     [ -f "$src" ] || { echo "ERROR: expected binary missing: $src" >&2; return 1; }
     dir="$PROJECT_ROOT/target/native/$name"; mkdir -p "$dir"; cp -f "$src" "$dir/$art"
+    echo "    -> $dir/$art"
+}
+
+rc_emit_runner() {   # name
+    local name="$1" entry triple os variant crt tdir art src dir
+    entry="$(rc_target_by_name "$name")" || { echo "Unknown target: $name" >&2; return 1; }
+    variant="$(field "$entry" 3)"
+    crt=""
+    case "$variant" in
+        "") ;;
+        musl) crt="dynamic" ;;
+        *) echo "runner: $name has no test host (variant=$variant)" >&2; return 1 ;;
+    esac
+    triple="$(field "$entry" 1)"; os="$(field "$entry" 2)"
+    rc_engine
+    echo "==> runner $name  ($triple)"
+    tdir="target/cross/$name"
+    mkdir -p "$PROJECT_ROOT/$tdir"
+    RC_CHOWN="$tdir" rc_build "$triple" "$variant" "$crt" -p rustyboi-test-runner --bin rustyboi-test-runner --target-dir "$tdir"
+    case "$os" in windows) art="rustyboi-test-runner.exe" ;; *) art="rustyboi-test-runner" ;; esac
+    src="$PROJECT_ROOT/$tdir/$triple/release/$art"
+    [ -f "$src" ] || { echo "ERROR: expected runner missing: $src" >&2; return 1; }
+    dir="$PROJECT_ROOT/target/runner/$name"; mkdir -p "$dir"; cp -f "$src" "$dir/$art"
     echo "    -> $dir/$art"
 }
