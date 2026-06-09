@@ -39,7 +39,7 @@ COV_PROFDATA := $(COV_TD)/rustyboi.profdata
 # so re-sourcing it per recipe is fine.
 COV_SETENV = export CARGO_TARGET_DIR=$(COV_TD); source <(cargo llvm-cov show-env --sh)
 
-.PHONY: help libretro native web android ios pgo targets \
+.PHONY: help libretro native runner web android ios pgo targets \
         pgo-gen pgo-flags pgo-path pgo-clean \
         setup build-runner suite suites suites-list report report-update \
         coverage bench manifests roms \
@@ -64,20 +64,22 @@ help: ## Show this help
 # Name lists come from the single source (rust-cross.sh), never copied into Make.
 # Computed only when libretro/native are actual goals (no $(shell) fork for
 # help/suite/coverage), and TARGETS is then required.
-ifneq (,$(filter libretro native,$(MAKECMDGOALS)))
+ifneq (,$(filter libretro native runner,$(MAKECMDGOALS)))
   ifeq (,$(strip $(TARGETS)))
     $(error set TARGETS="name..." or TARGETS=all  — see `make targets`)
   endif
   LIBRETRO_ALL := $(shell . tools/rust-cross.sh && rc_names)
   NATIVE_ALL   := $(shell . tools/rust-cross.sh && rc_names_native)
+  RUNNER_ALL   := $(shell . tools/rust-cross.sh && rc_names_runner)
 endif
 libretro_sel = $(if $(filter all,$(TARGETS)),$(LIBRETRO_ALL),$(TARGETS))
 native_sel   = $(if $(filter all,$(TARGETS)),$(NATIVE_ALL),$(TARGETS))
+runner_sel   = $(if $(filter all,$(TARGETS)),$(RUNNER_ALL),$(TARGETS))
 
-# NB: the per-target goals (libretro-<name>/native-<name>) must NOT be .PHONY —
-# Make skips implicit/pattern-rule search for phony targets, which would suppress
-# the libretro-%/native-% rules below. No file by those names is ever created,
-# so the pattern rules always fire regardless.
+# NB: the per-target goals (libretro-<name>/native-<name>/runner-<name>) must NOT
+# be .PHONY — Make skips implicit/pattern-rule search for phony targets, which
+# would suppress the libretro-%/native-%/runner-% rules below. No file by those
+# names is ever created, so the pattern rules always fire regardless.
 .PHONY: cross-fetch
 
 targets: ## Print the cross-compile target table
@@ -92,6 +94,11 @@ native: $(addprefix native-,$(native_sel)) ## Build the desktop rustyboi binary 
 	@echo "Binaries are under target/native/<name>/."
 native-%: | cross-fetch
 	@source tools/rust-cross.sh && rc_emit_native "$*"
+
+runner: $(addprefix runner-,$(runner_sel)) ## Cross-build the test runner (TARGETS="name..." | TARGETS=all)
+	@echo "Runners are under target/runner/<name>/."
+runner-%: | cross-fetch
+	@source tools/rust-cross.sh && rc_emit_runner "$*"
 
 # Warm the shared cargo registry once before the parallel per-target builds.
 cross-fetch:
