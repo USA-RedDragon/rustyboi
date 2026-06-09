@@ -169,10 +169,15 @@ rc_build() {   # triple variant crt <extra cargo args...>
     local incmd="set -e; $pre
         cargo build --target $triple --release $*
         chown -R $HOST_UIDGID $chown_path"
-    $ENGINE run --rm \
+    local cname="rcb-$$-$RANDOM"
+    trap '"$ENGINE" kill "'"$cname"'" >/dev/null 2>&1 || true; exit 130' INT TERM
+    $ENGINE run --rm --name "$cname" \
         -v "$PROJECT_ROOT":/project -w /project \
         -v "$CARGO_VOL":/usr/local/cargo/registry \
         "$IMAGE" sh -c "$incmd"
+    local rc=$?
+    trap - INT TERM
+    return $rc
 }
 
 # --- Makefile fan-out support (make libretro/native TARGETS=...) --------------
@@ -191,18 +196,28 @@ rc_names_native() { local t; for t in "${TARGETS[@]}"; do [ -z "$(field "$t" 3)"
 # .package-cache lock is per-container here, not shared across containers).
 rc_fetch() {
     rc_engine
-    $ENGINE run --rm \
+    local cname="rcf-$$-$RANDOM"
+    trap '"$ENGINE" kill "'"$cname"'" >/dev/null 2>&1 || true; exit 130' INT TERM
+    $ENGINE run --rm --name "$cname" \
         -v "$PROJECT_ROOT":/project -w /project \
         -v "$CARGO_VOL":/usr/local/cargo/registry \
         "$IMAGE" sh -c "cargo fetch --locked || cargo fetch"
+    local rc=$?
+    trap - INT TERM
+    return $rc
 }
 
 rc_run() {
     rc_engine
-    "$ENGINE" run --rm \
+    local cname="rcr-$$-$RANDOM"
+    trap '"$ENGINE" kill "'"$cname"'" >/dev/null 2>&1 || true; exit 130' INT TERM
+    "$ENGINE" run --rm --name "$cname" \
         -v "$PROJECT_ROOT":/project -w /project \
         -v "$CARGO_VOL":/usr/local/cargo/registry \
         "$IMAGE" sh -c "{ $*; }; rc=\$?; chown -R $HOST_UIDGID /project 2>/dev/null || true; exit \$rc"
+    local rc=$?
+    trap - INT TERM
+    return $rc
 }
 
 # Build ONE libretro core for <name> into an ISOLATED target dir
