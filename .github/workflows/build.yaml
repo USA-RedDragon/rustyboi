@@ -222,3 +222,22 @@ jobs:
         continue-on-error: true
       - name: Build ios
         run: make ios
+
+  build-success:
+    name: Build success check
+    if: always()
+    runs-on: ubuntu-24.04
+    needs: [libretro, native, android-bundle, web, ios]
+    steps:
+      - shell: bash
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          bad=$(echo "$NEEDS" | jq -r '
+            to_entries[]
+            | select(.value.result != "success")
+            | "\(.key)=\(.value.result)"')
+          if [ -n "$bad" ]; then
+            echo "::error::One or more jobs failed: "; echo "$bad"
+            exit 1
+          fi
