@@ -206,6 +206,20 @@ jobs:
         shell: bash
         run: RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 make suite SUITE=${{ matrix.suite }} RB_BIN=runner/rustyboi-test-runner${{ matrix.exe }}
 
+  test-success:
+    name: Test success check
+    if: always()
+    runs-on: ubuntu-24.04
+    needs: [test]
+    steps:
+      - name: Check all matrix jobs succeeded
+        shell: bash
+        run: |
+          if [ "${{ needs.test.result }}" != success ]; then
+            echo "::error::One or more jobs failed: "; echo "${{ needs.test.result }}"
+            exit 1
+          fi
+
   progress:
     name: 'suite progress -> README'
     runs-on: ubuntu-24.04
