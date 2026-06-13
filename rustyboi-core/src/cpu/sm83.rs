@@ -38,6 +38,13 @@ impl SM83 {
             return slice;
         }
 
+        // Charge the CPU stall owed for HDMA/GDMA blocks: idle (no fetch) while
+        // peripherals keep ticking for the transfer duration.
+        let dma_stall = mmio.take_dma_stall();
+        if dma_stall > 0 {
+            return dma_stall;
+        }
+
         let mut cycles = 0;
 
         // Check for pending interrupts
