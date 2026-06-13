@@ -201,19 +201,15 @@ pub struct Ppu {
     // fire at the right cycle. Reset when entering PixelTransfer.
     #[serde(default)]
     mode0_pretriggered_this_line: bool,
-    // SCX low-3 captured when the current line's Mode 3 armed (after the
-    // synchronous pre-fill+pop in `reset_with_scx_offset` already consumed
-    // this many BG pixels). Used to detect mid-M3 SCX low-3 *increases*
-    // and schedule extra BG-pixel discards (extending Mode 3 by the same
-    // number of dots). Tracks the high-water mark since arm; Mode 3 is not
-    // shortened on SCX decreases.
+    // Number of BG pixels discarded so far for SCX fine-scroll alignment at
+    // the start of Mode 3 (while x == 0). Faithful to Gambatte's M3Start::f1
+    // per-dot loop: each dot, the LIVE `scx % 8` is re-read; if we have not
+    // yet discarded that many pixels we pop one and consume the dot, else we
+    // begin output. A mid-M3 SCX write therefore changes both the discard
+    // count and (because the BG tile column re-reads SCX live) the fetched
+    // tile-map column. Reset to 0 at every M3 arm.
     #[serde(default)]
-    scx_low3_at_m3_arm: u8,
-    // Number of BG pixels still to discard before resuming output at x==0.
-    // Incremented when SCX low-3 increases mid-M3 while we are still at
-    // x==0 (i.e. the new low-3 forces additional alignment discards).
-    #[serde(default)]
-    bg_discard_remaining: u8,
+    m3_pixels_discarded: u8,
     
     #[serde(with = "serde_bytes")]
     fb_a: [u8; FRAMEBUFFER_SIZE],
@@ -262,8 +258,7 @@ impl Ppu {
             first_line_after_enable: false,
             line_153_ly_zeroed: false,
             mode0_pretriggered_this_line: false,
-            scx_low3_at_m3_arm: 0,
-            bg_discard_remaining: 0,
+            m3_pixels_discarded: 0,
             fb_a: [0; FRAMEBUFFER_SIZE],
             fb_b: [0; FRAMEBUFFER_SIZE],
             color_fb_a: [0; FRAMEBUFFER_SIZE * 3],
@@ -500,8 +495,7 @@ impl Ppu {
         self.first_line_after_enable = false;
         self.line_153_ly_zeroed = false;
         self.mode0_pretriggered_this_line = false;
-        self.scx_low3_at_m3_arm = 0;
-        self.bg_discard_remaining = 0;
+        self.m3_pixels_discarded = 0;
     }
 
     /// Check for STAT interrupt rising edge and trigger interrupt if needed
@@ -768,8 +762,7 @@ impl Ppu {
                     }
                     
                     self.x = 0;
-                    let fetcher_lcdc_state = self.fetcher_lcdc_state();
-                    self.fetcher.reset_with_scx_offset(mmio, fetcher_lcdc_state);
+                    self.fetcher.reset();
                     self.next_sprite_fetch_index = 0;
                     self.sprite_fetch_stall = 0;
                     self.fetcher_cadence_tick = 0;
@@ -785,14 +778,9 @@ impl Ppu {
                     // lines use normal Mode 2 timing.
                     self.first_line_after_enable = false;
                     self.mode0_pretriggered_this_line = false;
-                    // Capture SCX low-3 at M3 arm; the synchronous pre-fill
-                    // and pop in `reset_with_scx_offset` already discarded
-                    // this many BG pixels. Subsequent SCX low-3 *increases*
-                    // detected while still at x==0 will queue extra discards
-                    // in `bg_discard_remaining` and extend Mode 3 by the
-                    // same number of dots.
-                    self.scx_low3_at_m3_arm = mmio.read(SCX) & 0x07;
-                    self.bg_discard_remaining = 0;
+                    // SCX fine-scroll discard is done per-dot at the start of
+                    // Mode 3 (see `m3_pixels_discarded`), re-reading SCX live.
+                    self.m3_pixels_discarded = 0;
                     self.check_and_trigger_stat_interrupt(mmio);
                 }
             },
@@ -800,20 +788,6 @@ impl Ppu {
                 if self.sprite_fetch_stall > 0 {
                     self.sprite_fetch_stall -= 1;
                     break 'label;
-                }
-
-                // Mid-M3 SCX low-3 increase: schedule extra BG-pixel
-                // discards before x==0 push resumes. Only relevant while we
-                // have not yet output the first pixel; once x advances,
-                // SCX low-3 changes affect tile addressing only, not M3
-                // length. Tracks the high-water mark since M3 arm so a
-                // decrease followed by re-increase still extends correctly.
-                if self.x == 0 && self.bg_discard_remaining == 0 && self.pixel_transfer_warmup == 0 {
-                    let scx_now_low3 = mmio.read(SCX) & 0x07;
-                    if scx_now_low3 > self.scx_low3_at_m3_arm {
-                        self.bg_discard_remaining = scx_now_low3 - self.scx_low3_at_m3_arm;
-                        self.scx_low3_at_m3_arm = scx_now_low3;
-                    }
                 }
 
                 if self.fetcher.pixel_fifo.size() != 0 && self.pixel_transfer_warmup == 0 {
@@ -870,14 +844,18 @@ impl Ppu {
                     }
                 }
 
-                // Mid-M3 SCX low-3 extra-discard: pop one BG pixel without
-                // advancing x. Consumes one dot, extending Mode 3 by one
-                // dot per queued discard. See `bg_discard_remaining` field
-                // doc.
-                if self.bg_discard_remaining > 0
-                    && let Ok(_) = self.fetcher.pixel_fifo.pop() {
-                        self.bg_discard_remaining -= 1;
-                        break 'label;
+                // SCX fine-scroll discard (Gambatte M3Start::f1 per-dot loop):
+                // while x == 0, re-read the LIVE SCX each dot. If we have not
+                // yet discarded `scx % 8` BG pixels, pop one and consume the
+                // dot. A mid-M3 SCX write changes this count (and the fetched
+                // tile column, since TileNumber re-reads SCX live).
+                if self.x == 0 {
+                    let scx_low3 = mmio.read(SCX) & 0x07;
+                    if self.m3_pixels_discarded < scx_low3
+                        && let Ok(_) = self.fetcher.pixel_fifo.pop() {
+                            self.m3_pixels_discarded += 1;
+                            break 'label;
+                    }
                 }
 
                 // Put a pixel from the FIFO on screen with sprite mixing

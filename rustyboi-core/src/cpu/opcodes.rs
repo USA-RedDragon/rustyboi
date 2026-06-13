@@ -10,9 +10,17 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     // event 0x20000 + 4 T-cycles in the future, during which the CPU does not
     // fetch but other events still progress. We mirror that with a per-CPU
     // stall counter that `SM83::step` drains in small slices.
+    // STOP is a 2-byte opcode (10 00); consume the operand byte so the padding
+    // byte after it is not re-executed as a stray NOP.
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
+
     if mmio.is_speed_switch_armed() {
         mmio.perform_speed_switch();
-        cpu.stop_unhalt_cycles = 0x20000 + 4;
+        // Gambatte's unhalt event fires 0x20000 + 4 T-cycles after STOP entry
+        // and the STOP itself advances the CPU clock by 8 (cc += 8). The 8 we
+        // return below is part of that window, so the remaining no-fetch stall
+        // is 0x20000 + 4 - 8.
+        cpu.stop_unhalt_cycles = 0x20000 + 4 - 8;
         return 8;
     }
 
