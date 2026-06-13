@@ -192,7 +192,11 @@ pub struct Mmio {
     // by the HALT opcode handler so it does not need a `&Ppu` borrow.
     #[serde(skip, default)]
     hdma_is_in_period_cached: bool,
-    
+    // Previous STAT mode observed by `step_dma`, used to detect the Mode 3->0
+    // (HBlank) edge that arms an HDMA block. Not part of save state.
+    #[serde(skip, default)]
+    hdma_prev_stat_mode: u8,
+
     // CGB palette state
     #[serde(with = "serde_bytes")]
     bg_palette_ram: [u8; 64],    // 8 palettes × 4 colors × 2 bytes = 64 bytes
@@ -248,7 +252,8 @@ impl Mmio {
             hdma_req_pending: false,
             halt_hdma_state: HaltHdmaState::Low,
             hdma_is_in_period_cached: false,
-            
+            hdma_prev_stat_mode: 0,
+
             // CGB palette initialization
             bg_palette_ram: [0; 64],
             obj_palette_ram: [0; 64],
@@ -638,6 +643,8 @@ impl Mmio {
     }
 
     pub fn step_dma(&mut self) {
+        self.step_hdma();
+
         if !self.dma_active {
             return;
         }
@@ -649,6 +656,37 @@ impl Mmio {
         }
         self.dma_subcycle = 0;
         self.dma_advance_one_mcycle();
+    }
+
+    /// Drive the CGB HBlank-DMA engine. Called once per dot by the bus.
+    /// Detects the Mode 3->0 (HBlank entry) edge to arm a block while HDMA is
+    /// enabled, then services any pending request by transferring one 0x10-byte
+    /// block. `run_hdma_block` is otherwise never invoked, so without this the
+    /// HDMA engine never moves bytes.
+    fn step_hdma(&mut self) {
+        if !self.cgb_features_enabled {
+            return;
+        }
+
+        let lcdc = self.io_registers.read(ppu::LCD_CONTROL);
+        let lcd_on = lcdc & (ppu::LCDCFlags::DisplayEnable as u8) != 0;
+        let mode = if lcd_on {
+            self.io_registers.read(ppu::LCD_STATUS) & 0x03
+        } else {
+            // LCD off: treat as a permanent HBlank-like period (Gambatte fires
+            // HDMA immediately when armed with the LCD disabled).
+            0
+        };
+
+        // Mode 3 -> Mode 0 edge: entering HBlank. Arm one block if HDMA is on.
+        if lcd_on && self.hdma_prev_stat_mode == 3 && mode == 0 && self.hdma_enabled {
+            self.hdma_req_pending = true;
+        }
+        self.hdma_prev_stat_mode = mode;
+
+        if self.hdma_req_pending && self.hdma_enabled {
+            self.run_hdma_block();
+        }
     }
 
     /// Whether the OAM-DMA engine is armed/running (mirrors
