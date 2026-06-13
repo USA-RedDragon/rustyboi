@@ -131,14 +131,15 @@ pub struct CleanConfig {
     pub rom: Option<String>,
     // Hardware type (DMG, CGB, SGB, etc.)
     pub hardware: gb::Hardware,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     // path to save state to load on startup
     pub state: Option<String>,
     // GUI scale factor
+    #[cfg(not(target_os = "android"))]
     pub scale: u8,
     // Color palette
     pub palette: ColorPalette,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     // skip BIOS on startup
     pub skip_bios: bool,
     // keybinds configuration
@@ -148,7 +149,7 @@ pub struct CleanConfig {
 impl RawConfig {
     pub fn clean(self) -> CleanConfig {
         let mut _skip_bios = self.skip_bios;
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         {
             if self.bios.is_none() {
                 _skip_bios = true;
@@ -159,11 +160,12 @@ impl RawConfig {
             bios: self.bios,
             rom: self.rom,
             hardware: self.hardware,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             state: self.state,
+            #[cfg(not(target_os = "android"))]
             scale: self.scale,
             palette: ColorPalette::from_str(&self.palette).unwrap_or_default(),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             skip_bios: _skip_bios,
             keybinds: KeyBinds::default(),
         }

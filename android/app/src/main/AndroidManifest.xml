@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:label="RustyBoi"
+        android:hasCode="true"
+        android:allowBackup="true"
+        android:icon="@android:drawable/sym_def_app_icon"
+        android:theme="@style/Theme.Rustyboi">
+
+        <activity
+            android:name=".RustyboiActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize|density|uiMode">
+
+            <!-- winit's android-game-activity backend loads this .so on startup. -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="rustyboi_platform_lib" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

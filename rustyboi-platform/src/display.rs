@@ -5,6 +5,7 @@ use rustyboi_egui_lib::actions::FileData;
 use rustyboi_core_lib::{cartridge, gb, ppu, input};
 
 use std::time::{Duration, Instant};
+#[cfg(not(target_os = "android"))]
 use winit::dpi::LogicalSize;
 use winit::event::{Event,WindowEvent};
 use winit::event_loop::EventLoop;
@@ -24,7 +25,6 @@ use std::rc::Rc;
 const WIDTH: u32 = 160;
 const HEIGHT: u32 = 144;
 
-
 #[cfg(target_arch = "wasm32")]
 /// Retrieve current width and height dimensions of browser client window
 fn get_window_size() -> LogicalSize<f64> {
@@ -36,7 +36,7 @@ fn get_window_size() -> LogicalSize<f64> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub async fn run_with_gui_async(gb: gb::GB, config: config::CleanConfig) {
+pub async fn run_with_gui_async(gb: Box<gb::GB>, config: config::CleanConfig) {
     let event_loop = EventLoop::new().unwrap();
     let window = {
         let size = LogicalSize::new((WIDTH * (config.scale as u32)) as f64, (HEIGHT * (config.scale as u32)) as f64);
@@ -91,18 +91,19 @@ pub async fn run_with_gui_async(gb: gb::GB, config: config::CleanConfig) {
             window_size.height,
             scale_factor,
             &pixels,
+            None,
         );
 
         (pixels, framework)
     }.await;
-    match run_gui_loop(event_loop, &window, pixels, framework, gb, &config) {
+    match run_gui_loop(event_loop, &window, Some(pixels), Some(framework), gb, &config) {
         Ok(_) => (),
         Err(e) => eprintln!("Error in GUI loop: {}", e),
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Error> {
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn run_with_gui(gb: Box<gb::GB>, config: &config::CleanConfig) -> Result<(), Error> {
     let event_loop = EventLoop::new().unwrap();
     let window = {
         let size = LogicalSize::new((WIDTH * (config.scale as u32)) as f64, (HEIGHT * (config.scale as u32)) as f64);
@@ -114,34 +115,98 @@ pub fn run_with_gui(gb: gb::GB, config: &config::CleanConfig) -> Result<(), Erro
             .unwrap()
     };
 
-    let (pixels, framework) = {
-        let window_size = window.inner_size();
-        let scale_factor = window.scale_factor() as f32;
-        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
-        let pixels = Pixels::new(WIDTH, HEIGHT, surface_texture)?;
-        let framework = Framework::new(
-            &event_loop,
-            window_size.width,
-            window_size.height,
-            scale_factor,
-            &pixels,
-        );
-
-        (pixels, framework)
-    };
-    run_gui_loop(event_loop, &window, pixels, framework, gb, config)
+    // Pixels and Framework are created lazily on Event::Resumed so the
+    // same loop body works on platforms (Android) where the rendering
+    // surface only becomes available after the window is shown.
+    run_gui_loop(event_loop, &window, None, None, gb, config)
 }
 
-fn run_gui_loop(
+/// Android entry. Builds an `EventLoop` bound to the supplied `AndroidApp`,
+/// constructs the window, and hands off to the shared loop. The render
+/// surface is created lazily in `Event::Resumed`.
+#[cfg(target_os = "android")]
+pub fn run_with_gui_android(
+    app: winit::platform::android::activity::AndroidApp,
+    gb: Box<gb::GB>,
+    config: &config::CleanConfig,
+) -> Result<(), Error> {
+    use crate::android::raw_log;
+    use winit::platform::android::EventLoopBuilderExtAndroid;
+
+    raw_log("run_with_gui_android: building EventLoop");
+    let event_loop = winit::event_loop::EventLoopBuilder::<()>::with_user_event()
+        .with_android_app(app)
+        .build()
+        .map_err(|e| {
+            // `Error::UserDefined`'s Display drops the inner cause, so log
+            // the real reason before we wrap it. This is what surfaces
+            // winit's "EventLoop already created" / OS errors on
+            // recreate-from-recents on Android.
+            raw_log(&format!("run_with_gui_android: EventLoop build failed: {e:?} ({e})"));
+            log::error!("EventLoop build failed: {e:?} ({e})");
+            Error::UserDefined(Box::new(e))
+        })?;
+    raw_log("run_with_gui_android: EventLoop built");
+    let window = WindowBuilder::new()
+        .with_title("RustyBoi")
+        .build(&event_loop)
+        .map_err(|e| {
+            raw_log(&format!("run_with_gui_android: Window build failed: {e:?} ({e})"));
+            log::error!("Window build failed: {e:?} ({e})");
+            Error::UserDefined(Box::new(e))
+        })?;
+    raw_log("run_with_gui_android: Window built, entering loop");
+    let r = run_gui_loop(event_loop, &window, None, None, gb, config);
+    raw_log("run_with_gui_android: loop returned");
+    r
+}
+
+/// Create the wgpu `Pixels` surface and the egui `Framework` for `window`.
+/// Used by `Event::Resumed` to (re)create render state when the platform
+/// makes a surface available.
+fn create_render_state<'win, T>(
+    event_loop: &winit::event_loop::EventLoopWindowTarget<T>,
+    window: &'win winit::window::Window,
+    pending_dialog_result: Option<std::sync::Arc<std::sync::Mutex<Option<rustyboi_egui_lib::actions::GuiAction>>>>,
+) -> Result<(Pixels<'win>, Framework), Error> {
+    let window_size = window.inner_size();
+    let scale_factor = window.scale_factor() as f32;
+    let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, window);
+    let pixels = Pixels::new(WIDTH, HEIGHT, surface_texture)?;
+    let framework = Framework::new(
+        event_loop,
+        window_size.width.max(1),
+        window_size.height.max(1),
+        scale_factor,
+        &pixels,
+        pending_dialog_result,
+    );
+    Ok((pixels, framework))
+}
+
+fn run_gui_loop<'win>(
     event_loop: EventLoop<()>,
-    window: &winit::window::Window,
-    mut pixels: Pixels,
-    mut framework: Framework,
-    gb: gb::GB,
+    window: &'win winit::window::Window,
+    mut pixels: Option<Pixels<'win>>,
+    mut framework: Option<Framework>,
+    gb: Box<gb::GB>,
     config: &config::CleanConfig,
 ) -> Result<(), Error> {
     let mut input = WinitInputHelper::new();
-    let mut world = World::new_with_paths(gb, config.rom.clone(), config.bios.clone(), config.palette); 
+    let mut world = World::new_with_paths(gb, config.rom.clone(), config.bios.clone(), config.palette);
+
+    // Persist the pending-dialog-result `Arc` across `Framework`
+    // suspend/resume cycles. On Android the SAF picker takes our activity
+    // off-screen, which destroys the rendering surface and drops the
+    // `Framework` (and its `Gui`). If we recreated the `Arc` inside each
+    // new `Gui`, the callback registered before suspend would write into
+    // an orphaned slot and the picked file would never reach the loop.
+    let pending_dialog_result: std::sync::Arc<
+        std::sync::Mutex<Option<rustyboi_egui_lib::actions::GuiAction>>,
+    > = match framework.as_ref() {
+        Some(fw) => fw.pending_dialog_result(),
+        None => std::sync::Arc::new(std::sync::Mutex::new(None)),
+    };
     
     // Enable audio output
     if let Err(e) = world.enable_audio() {
@@ -165,6 +230,63 @@ fn run_gui_loop(
     let mut n_last_repeat_time: Option<Instant> = None;
 
     let res = event_loop.run(|event, elwt| {
+        // Surface lifecycle: on platforms like Android the rendering surface
+        // is created/destroyed at runtime. Desktop fires Resumed once at
+        // startup and Suspended at shutdown, so this path is also exercised
+        // there and the loop runs identically across targets.
+        match &event {
+            Event::Resumed => {
+                if pixels.is_none() {
+                    match create_render_state(elwt, window, Some(pending_dialog_result.clone())) {
+                        Ok((p, f)) => {
+                            pixels = Some(p);
+                            framework = Some(f);
+                            window.request_redraw();
+                            // On Android, hydrate the freshly-built ROM
+                            // Library panel from persisted state. We do
+                            // this every Resumed so that surface
+                            // recreation (background → foreground)
+                            // re-applies the persisted tree URI without
+                            // forcing the user to re-pick.
+                            #[cfg(target_os = "android")]
+                            if let Some(ref mut fw) = framework {
+                                let state = crate::library::LibraryState::load();
+                                // Always hydrate recents so the user
+                                // sees their MRU list immediately on
+                                // resume, even before the scan
+                                // finishes.
+                                fw.library_panel_mut().set_recents(state.recents.clone());
+                                if state.tree_uri.is_some() {
+                                    if let Ok(mut slot) = pending_dialog_result.lock() {
+                                        *slot = Some(
+                                            rustyboi_egui_lib::actions::GuiAction::SetLibraryTreeUri(
+                                                state.tree_uri,
+                                            ),
+                                        );
+                                    }
+                                } else {
+                                    fw.library_panel_mut().set_status(Some(
+                                        "Pick your ROMs folder to get started.".into(),
+                                    ));
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            println!("Failed to create render state on Resumed: {}", err);
+                            elwt.exit();
+                            return;
+                        }
+                    }
+                }
+            }
+            Event::Suspended => {
+                // Drop GPU-bound state; keep `World` (CPU/PPU/audio) alive.
+                framework = None;
+                pixels = None;
+            }
+            _ => {}
+        }
+
         if input.update(&event) {
             if input.key_pressed(KeyCode::Escape) || input.close_requested() {
                 elwt.exit();
@@ -235,12 +357,15 @@ fn run_gui_loop(
                 n_last_repeat_time = None;
             }
 
-            if let Some(scale_factor) = input.scale_factor() {
+            if let Some(scale_factor) = input.scale_factor()
+                && let Some(framework) = framework.as_mut()
+            {
                 framework.scale_factor(scale_factor);
             }
 
-            // Handle Game Boy input based on keybinds
-            let button_state = input::ButtonState {
+            // Handle Game Boy input based on keybinds, OR'd with any
+            // on-screen touch controls captured by the egui overlay.
+            let mut button_state = input::ButtonState {
                 a: input.key_held(config.keybinds.a),
                 b: input.key_held(config.keybinds.b),
                 start: input.key_held(config.keybinds.start),
@@ -250,7 +375,18 @@ fn run_gui_loop(
                 left: input.key_held(config.keybinds.left),
                 right: input.key_held(config.keybinds.right),
             };
-            
+            if let Some(framework) = framework.as_ref() {
+                let touch = framework.touch_button_state();
+                button_state.a |= touch.a;
+                button_state.b |= touch.b;
+                button_state.start |= touch.start;
+                button_state.select |= touch.select;
+                button_state.up |= touch.up;
+                button_state.down |= touch.down;
+                button_state.left |= touch.left;
+                button_state.right |= touch.right;
+            }
+
             world.set_input_state(button_state);
 
             // Update internal state and request a redraw (only if not resizing)
@@ -263,17 +399,26 @@ fn run_gui_loop(
                 event: WindowEvent::Resized(size),
                 ..
             } => {
-                if let Err(err) = pixels.resize_surface(size.width, size.height) {
-                    println!("Failed to resize surface during window event: {}", err);
-                    elwt.exit();
-                    return;
+                if let Some(pixels) = pixels.as_mut() {
+                    if let Err(err) = pixels.resize_surface(size.width.max(1), size.height.max(1)) {
+                        println!("Failed to resize surface during window event: {}", err);
+                        elwt.exit();
+                        return;
+                    }
                 }
-                framework.resize(size.width, size.height);
+                if let Some(framework) = framework.as_mut() {
+                    framework.resize(size.width.max(1), size.height.max(1));
+                }
             }
             Event::WindowEvent {
                 event: WindowEvent::RedrawRequested,
                 ..
             } => {
+                // Skip drawing while we have no surface (e.g. Android suspended).
+                let (pixels, framework) = match (pixels.as_mut(), framework.as_mut()) {
+                    (Some(p), Some(f)) => (p, f),
+                    _ => return,
+                };
                 world.draw(pixels.frame_mut());
                 let gui_paused_state = manually_paused || world.error_state.is_some();
                 
@@ -281,7 +426,7 @@ fn run_gui_loop(
                 world.update_window_title(window, gui_paused_state);
                 // Always pass register data for the debug overlay, regardless of pause state
                 let registers = Some(world.gb.get_cpu_registers());
-                let gb_ref = Some(&world.gb);
+                let gb_ref = Some(&*world.gb);
                 let (gui_action, menu_open) = framework.prepare(window, gui_paused_state, registers, gb_ref);
                 
                 // Handle GUI actions
@@ -321,6 +466,8 @@ fn run_gui_loop(
                         }
                     }
                     Some(GuiAction::LoadRom(path)) => {
+                        #[cfg(target_os = "android")]
+                        log::info!("event loop: handling GuiAction::LoadRom");
                         match world.load_rom(path) {
                             Ok(loaded_path) => {
                                 // If emulator was auto-paused due to no content and now has ROM, unpause
@@ -336,6 +483,8 @@ fn run_gui_loop(
                                 window.request_redraw();
                             }
                             Err(e) => {
+                                #[cfg(target_os = "android")]
+                                log::error!("event loop: load_rom returned error: {e}");
                                 framework.set_error(format!("Failed to load ROM: {}", e));
                             }
                         }
@@ -379,6 +528,124 @@ fn run_gui_loop(
                         world.remove_breakpoint(address);
                         framework.set_status(format!("Breakpoint removed from ${:04X}", address));
                         window.request_redraw();
+                    }
+                    #[cfg(target_os = "android")]
+                    Some(GuiAction::OpenRomTree) => {
+                        log::info!("event loop: OpenRomTree");
+                        let pending = framework.pending_dialog_result();
+                        rustyboi_egui_lib::android_bridge::pick_tree(Box::new(move |uri| {
+                            if let Ok(mut slot) = pending.lock() {
+                                *slot = Some(GuiAction::SetLibraryTreeUri(uri));
+                            }
+                        }));
+                    }
+                    #[cfg(target_os = "android")]
+                    Some(GuiAction::RescanLibrary) => {
+                        log::info!("event loop: RescanLibrary");
+                        let tree_uri = framework
+                            .library_panel_mut()
+                            .tree_uri()
+                            .map(str::to_owned);
+                        if let Some(uri) = tree_uri {
+                            framework.library_panel_mut().begin_scan();
+                            let pending = framework.pending_dialog_result();
+                            rustyboi_egui_lib::android_bridge::scan_library(
+                                uri,
+                                Box::new(move |entries| {
+                                    if let Ok(mut slot) = pending.lock() {
+                                        *slot = Some(GuiAction::SetLibraryEntries(entries));
+                                    }
+                                }),
+                            );
+                        } else {
+                            framework
+                                .library_panel_mut()
+                                .set_status(Some("No library folder selected".into()));
+                        }
+                    }
+                    #[cfg(target_os = "android")]
+                    Some(GuiAction::LoadRomFromUri(uri)) => {
+                        log::info!("event loop: LoadRomFromUri");
+                        // Promote the URI in the MRU recents list and
+                        // persist before we even know whether the load
+                        // will succeed: tapping a recent is itself the
+                        // intent signal, and treating a load failure
+                        // as a reason to forget the entry would mean
+                        // a flaky scan removes useful history.
+                        let mut state = crate::library::LibraryState::load();
+                        state.touch_recent(&uri);
+                        state.save();
+                        framework
+                            .library_panel_mut()
+                            .set_recents(state.recents.clone());
+                        let pending = framework.pending_dialog_result();
+                        rustyboi_egui_lib::android_bridge::load_rom_from_uri(
+                            uri,
+                            Box::new(move |file_data| {
+                                if let Ok(mut slot) = pending.lock()
+                                    && let Some(file_data) = file_data
+                                {
+                                    *slot = Some(GuiAction::LoadRom(file_data));
+                                }
+                            }),
+                        );
+                    }
+                    #[cfg(target_os = "android")]
+                    Some(GuiAction::SetLibraryTreeUri(uri)) => {
+                        log::info!("event loop: SetLibraryTreeUri({:?})", uri);
+                        let mut state = crate::library::LibraryState::load();
+                        let tree_changed = state.tree_uri != uri;
+                        state.tree_uri = uri.clone();
+                        if tree_changed {
+                            // Picking a new root invalidates the cached
+                            // entry list; otherwise we'd briefly show
+                            // ROMs from the old tree.
+                            state.cached_entries.clear();
+                        }
+                        state.save();
+                        framework.library_panel_mut().set_tree_uri(uri.clone());
+                        // Hydrate from cache so the user sees the
+                        // previous list immediately; a fresh scan runs
+                        // below to pick up new/removed ROMs.
+                        framework
+                            .library_panel_mut()
+                            .set_entries(state.cached_entries.clone());
+                        if let Some(u) = uri {
+                            framework.library_panel_mut().begin_scan();
+                            let pending = framework.pending_dialog_result();
+                            rustyboi_egui_lib::android_bridge::scan_library(
+                                u,
+                                Box::new(move |entries| {
+                                    if let Ok(mut slot) = pending.lock() {
+                                        *slot = Some(GuiAction::SetLibraryEntries(entries));
+                                    }
+                                }),
+                            );
+                        }
+                    }
+                    #[cfg(target_os = "android")]
+                    Some(GuiAction::SetLibraryEntries(entries)) => {
+                        match entries {
+                            Some(entries) => {
+                                log::info!(
+                                    "event loop: SetLibraryEntries ({} items)",
+                                    entries.len()
+                                );
+                                // Persist the fresh scan so the next
+                                // resume can show the library
+                                // immediately.
+                                let mut state = crate::library::LibraryState::load();
+                                state.cached_entries = entries.clone();
+                                state.save();
+                                framework.library_panel_mut().set_entries(entries);
+                            }
+                            None => {
+                                log::warn!("event loop: library scan failed");
+                                framework.library_panel_mut().set_status(Some(
+                                    "Scan failed: tree no longer accessible. Re-pick the folder.".into(),
+                                ));
+                            }
+                        }
                     }
                     None => {}
                 }
@@ -424,7 +691,9 @@ fn run_gui_loop(
                 }
             }
             Event::WindowEvent { event, .. } => {
-                framework.handle_event(window, &event);
+                if let Some(framework) = framework.as_mut() {
+                    framework.handle_event(window, &event);
+                }
             }
             _ => (),
         }
@@ -433,7 +702,7 @@ fn run_gui_loop(
 }
 
 struct World {
-    gb: gb::GB,
+    gb: Box<gb::GB>,
     frame: Option<gb::Frame>,
     error_state: Option<String>,
     is_paused: bool,
@@ -457,7 +726,7 @@ struct World {
 }
 
 impl World {
-    fn new_with_paths(gb: gb::GB, rom_path: Option<String>, bios_path: Option<String>, palette: config::ColorPalette) -> Self {
+    fn new_with_paths(gb: Box<gb::GB>, rom_path: Option<String>, bios_path: Option<String>, palette: config::ColorPalette) -> Self {
         let now = Instant::now();
         
         // Check if both ROM and BIOS are missing - if so, start paused
@@ -502,17 +771,16 @@ impl World {
         
         // Load the new state and get filename
         let filename = match file_data {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             FileData::Path(path) => {
                 let filename = path.to_string_lossy().to_string();
-                self.gb = gb::GB::from_state_file(&filename)?;
+                *self.gb = gb::GB::from_state_file(&filename)?;
                 filename
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(any(target_arch = "wasm32", target_os = "android"))]
             FileData::Contents { name, data } => {
-                // For WASM, parse the data directly
-                let saved_state = String::from_utf8(data)?;
-                self.gb = serde_json::from_str(&saved_state)?;
+                // For WASM/Android, parse the bytes directly
+                *self.gb = gb::GB::from_state_bytes(&data)?;
                 name
             }
         };
@@ -563,17 +831,68 @@ impl World {
     }
 
     fn load_rom(&mut self, file_data: FileData) -> Result<String, Box<dyn std::error::Error>> {
+        #[cfg(target_os = "android")]
+        log::info!("load_rom: entering");
         let (filename, cartridge, has_file_path) = match file_data {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             FileData::Path(path) => {
                 let filename = path.to_string_lossy().to_string();
                 let cartridge = cartridge::Cartridge::load(&filename)?;
                 (filename, cartridge, true)
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(any(target_arch = "wasm32", target_os = "android"))]
             FileData::Contents { name, data } => {
-                // For WASM, load from memory
-                let cartridge = cartridge::Cartridge::from_bytes(&data)?;
+                #[cfg(target_os = "android")]
+                log::info!("load_rom: parsing {} bytes ({})", data.len(), name);
+                #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+                #[allow(unused_mut)]
+                let mut cartridge = cartridge::Cartridge::from_bytes(&data).map_err(|e| {
+                    #[cfg(target_os = "android")]
+                    log::error!("load_rom: Cartridge::from_bytes failed: {e}");
+                    e
+                })?;
+                // Battery-backed RAM persistence on Android lives entirely
+                // outside the app's internal data dir: the Kotlin
+                // `loadRomEntry` path opens (or creates) a sibling
+                // `<rom-stem>.sav` next to the ROM via SAF and passes
+                // a writable file descriptor through JNI. We pop that
+                // fd here, wrap it in a `File`, and hand it to the
+                // cartridge which then streams per-byte writes for
+                // crash durability.
+                //
+                // If no fd is pending (e.g. legacy single-document
+                // picker path), the cart runs without persistence and
+                // we log a warning.
+                #[cfg(target_os = "android")]
+                {
+                    if cartridge.has_battery() {
+                        if let Some(fd) = crate::android::take_pending_sav_fd() {
+                            // SAFETY: the fd was just handed to us by
+                            // `ParcelFileDescriptor.detachFd()` in
+                            // Kotlin; ownership transfers to this File
+                            // which will close it on drop.
+                            let file = unsafe {
+                                use std::os::fd::FromRawFd;
+                                std::fs::File::from_raw_fd(fd)
+                            };
+                            log::info!(
+                                "load_rom: attaching SAF sav fd ({fd})"
+                            );
+                            if let Err(e) = cartridge.attach_save_file_from(file) {
+                                log::error!(
+                                    "load_rom: attach_save_file_from failed: {e}"
+                                );
+                            }
+                        } else {
+                            log::warn!(
+                                "load_rom: battery-backed cart loaded \
+                                 without a sav fd; saves WILL NOT \
+                                 persist. Use the ROM Library to \
+                                 enable persistence."
+                            );
+                        }
+                    }
+                }
                 (name, cartridge, false)
             }
         };

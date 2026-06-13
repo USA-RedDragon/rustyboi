@@ -56,9 +56,11 @@ pub enum Frame {
 
 impl GB {
     pub fn new(hardware: Hardware) -> Self {
+        let mut mmio = memory::mmio::Mmio::new();
+        mmio.set_serial_cgb(hardware == Hardware::CGB);
         GB {
             cpu: cpu::SM83::new(),
-            mmio: memory::mmio::Mmio::new(),
+            mmio,
             ppu: ppu::Ppu::new(),
             skip_bios: false,
             hardware,
@@ -73,6 +75,7 @@ impl GB {
         self.cpu.registers.sp = 0xFFFE;
 
         self.mmio.write(crate::ppu::LCD_CONTROL, 0x91);
+        self.ppu.sync_lcdc_from_mmio(&self.mmio);
         self.mmio.write(crate::ppu::SCX, 0x00);
         self.mmio.write(crate::ppu::WX, 0x00);
         self.mmio.write(crate::ppu::SCY, 0x00);
@@ -251,24 +254,20 @@ impl GB {
             return (true, 0);
         }
 
-        // Execute one CPU instruction and step PPU accordingly
-        let cycles = self.cpu.step(&mut self.mmio);
+        self.ppu.step_scheduled_stat_events(&mut self.mmio);
+
+        // Execute one CPU instruction. Every peripheral (incl. the PPU) is
+        // ticked inline by `Bus` at each memory access's true cycle, so reads
+        // observe — and writes mutate — live state; the remaining internal
+        // cycles are ticked afterward.
         let is_double_speed = self.mmio.is_double_speed_mode();
-        
-        for _ in 0..cycles {
-            // Timer and DMA run at double speed in double speed mode
-            self.mmio.step_timer(&mut self.cpu);
-            self.mmio.step_dma();
-            if is_double_speed {
-                self.mmio.step_timer(&mut self.cpu);
-                self.mmio.step_dma(); 
-            }
-            
-            // PPU and audio always run at normal speed
-            self.mmio.step_audio();
-            self.ppu.step(&mut self.cpu, &mut self.mmio);
-        }
-        
+        let cycles = {
+            let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);
+            let cycles = self.cpu.step(&mut bus);
+            bus.tick_remaining(cycles);
+            cycles
+        };
+
         // Generate audio samples if requested
         let audio_samples = if collect_audio {
             // In double speed mode, audio runs at normal speed, so we need to adjust the cycle count
@@ -289,10 +288,10 @@ impl GB {
 
     pub fn run_until_frame(&mut self, collect_audio: bool) -> (Frame, bool) {
         let mut cpu_cycles_this_frame = 0u32;
-        // Normal frame should be 70224 cycles (154 scanlines × 456 cycles)
+        // Normal frame should be 70224 PPU dots (154 scanlines × 456 dots)
         // If we exceed this, we assume PPU is disabled or stuck
         // and return to avoid audio buildup
-        const MAX_CYCLES_PER_FRAME: u32 = 70224;
+        const MAX_NORMAL_SPEED_CPU_CYCLES_PER_FRAME: u32 = 70224;
         
         loop {
             let (breakpoint_hit, cycles) = self.step_instruction(collect_audio);
@@ -309,9 +308,39 @@ impl GB {
             }
             
             // If PPU is disabled or taking too long, cap the cycles to prevent audio buildup
-            if cpu_cycles_this_frame >= MAX_CYCLES_PER_FRAME {
+            let max_cpu_cycles_per_frame = if self.mmio.is_double_speed_mode() {
+                MAX_NORMAL_SPEED_CPU_CYCLES_PER_FRAME * 2
+            } else {
+                MAX_NORMAL_SPEED_CPU_CYCLES_PER_FRAME
+            };
+            if cpu_cycles_this_frame >= max_cpu_cycles_per_frame {
                 // PPU disabled or stuck - return after reasonable cycle count to maintain timing
                 return (self.ppu.get_frame(&self.mmio), false);
+            }
+        }
+    }
+
+    pub fn run_until_lcd_frame(
+        &mut self,
+        collect_audio: bool,
+        max_cycles: u32,
+    ) -> Result<(Frame, bool), &'static str> {
+        let mut cpu_cycles = 0u32;
+
+        loop {
+            let (breakpoint_hit, cycles) = self.step_instruction(collect_audio);
+            cpu_cycles = cpu_cycles.saturating_add(cycles);
+
+            if breakpoint_hit {
+                return Ok((self.ppu.get_frame(&self.mmio), true));
+            }
+
+            if self.ppu.frame_ready() {
+                return Ok((self.ppu.get_frame(&self.mmio), false));
+            }
+
+            if cpu_cycles >= max_cycles {
+                return Err("timed out waiting for LCD frame");
             }
         }
     }
@@ -320,8 +349,28 @@ impl GB {
         self.ppu.get_frame(&self.mmio)
     }
 
+    pub fn set_cgb_color_conversion(&mut self, conversion: ppu::CgbColorConversion) {
+        self.ppu.set_cgb_color_conversion(conversion);
+    }
+
+    pub fn set_fetch_debug_events_enabled(&mut self, enabled: bool) {
+        self.ppu.set_fetch_debug_events_enabled(enabled);
+    }
+
+    pub fn take_fetch_debug_events(&mut self) -> Vec<ppu::FetchDebugEvent> {
+        self.ppu.take_fetch_debug_events()
+    }
+
+    pub fn take_pixel_debug_events(&mut self) -> Vec<ppu::PixelDebugEvent> {
+        self.ppu.take_pixel_debug_events()
+    }
+
     pub fn get_cpu_registers(&self) -> &cpu::registers::Registers {
         &self.cpu.registers
+    }
+
+    pub fn get_ime_enable_delay(&self) -> u8 {
+        self.cpu.ime_enable_delay
     }
 
     pub fn get_ppu_debug_info(&self) -> (&ppu::Ppu, [u8; 8]) {
@@ -367,6 +416,8 @@ impl GB {
         self.ppu.reset();
         self.cpu.halted = false;
         self.cpu.stopped = false;
+        self.cpu.ime_enable_delay = 0;
+        self.mmio.clear_delayed_writes();
         if self.skip_bios {
             self.skip_bios();
         } else {

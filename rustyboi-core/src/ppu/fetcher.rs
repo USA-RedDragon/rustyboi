@@ -12,6 +12,35 @@ enum State {
     PushToFIFO,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FetcherDebugEventKind {
+    TileNumber,
+    TileDataLow,
+    TileDataHigh,
+    PushToFifo,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FetcherDebugEvent {
+    pub kind: FetcherDebugEventKind,
+    pub tile_index: u8,
+    pub tile_num: u8,
+    pub tile_attributes: u8,
+    pub tile_line: u8,
+    pub addr: Option<u16>,
+    pub value: Option<u8>,
+    pub lcdc: u8,
+    pub tile_index_is_tile_data: bool,
+    pub fifo_size: usize,
+    pub fetching_window: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FetcherLcdcState {
+    pub lcdc: u8,
+    pub cgb_tile_index_is_tile_data: bool,
+}
+
 // Tile data addressing constants
 const TILE_DATA_8000_BASE: u16 = 0x8000; // $8000 method base (unsigned addressing)
 const TILE_DATA_8800_BASE: u16 = 0x9000; // $8800 method base (signed addressing)
@@ -33,6 +62,14 @@ pub struct Fetcher {
     // Window support
     fetching_window: bool,
     window_x_start: u8,
+
+    // Latched (LY + SCY) for the current tile fetch. Captured when the
+    // fetcher enters `TileNumber` and reused by `TileDataLow`/`High` for
+    // the tile-line offset, so a mid-tile SCY write does not shift the
+    // in-progress fetch. Window fetches ignore this and use the internal
+    // `window_line` counter instead.
+    #[serde(default)]
+    latched_y: u8,
 }
 
 impl Fetcher {
@@ -46,6 +83,7 @@ impl Fetcher {
             pixel_buffer: [0; 8],
             fetching_window: false,
             window_x_start: 0,
+            latched_y: 0,
         }
     }
 
@@ -61,7 +99,7 @@ impl Fetcher {
     }
     
     // Reset and apply SCX offset for background scrolling
-    pub fn reset_with_scx_offset(&mut self, mmio: &mut mmio::Mmio) {
+    pub fn reset_with_scx_offset(&mut self, mmio: &mut mmio::Mmio, lcdc_state: FetcherLcdcState) {
         self.reset();
         
         // Apply SCX pixel offset by pre-fetching and discarding pixels
@@ -72,7 +110,7 @@ impl Fetcher {
             // We need to pre-fetch enough tiles to have pixels to discard
             // Keep stepping the fetcher until we have enough pixels in the FIFO
             while self.pixel_fifo.size() < pixel_offset as usize {
-                self.step(mmio, 0); // Fetch tiles until we have enough pixels
+                let _ = self.step(mmio, 0, lcdc_state); // Fetch tiles until we have enough pixels
             }
             
             // Discard the first (pixel_offset) pixels from the FIFO
@@ -92,8 +130,7 @@ impl Fetcher {
     }
 
     // Calculate the correct tile map base address based on LCDC.6 (WindowTileMapDisplaySelect)
-    fn get_window_tile_map_base(&self, mmio: &mmio::Mmio) -> u16 {
-        let lcdc = mmio.read(ppu::LCD_CONTROL);
+    fn get_window_tile_map_base(&self, lcdc: u8) -> u16 {
         let window_tile_map_select = (lcdc & (ppu::LCDCFlags::WindowTileMapDisplaySelect as u8)) != 0;
         
         if window_tile_map_select {
@@ -104,8 +141,7 @@ impl Fetcher {
     }
 
     // Calculate the correct tile map base address based on LCDC.3 (BGTileMapDisplaySelect)
-    fn get_tile_map_base(&self, mmio: &mmio::Mmio) -> u16 {
-        let lcdc = mmio.read(ppu::LCD_CONTROL);
+    fn get_tile_map_base(&self, lcdc: u8) -> u16 {
         let bg_tile_map_select = (lcdc & (ppu::LCDCFlags::BGTileMapDisplaySelect as u8)) != 0;
         
         if bg_tile_map_select {
@@ -116,8 +152,7 @@ impl Fetcher {
     }
 
     // Calculate the correct tile data address based on LCDC.4 (BGWindowTileDataSelect)
-    fn get_tile_data_address(&self, tile_id: u8, tile_line: u8, mmio: &mmio::Mmio) -> u16 {
-        let lcdc = mmio.read(ppu::LCD_CONTROL);
+    fn get_tile_data_address(&self, tile_id: u8, tile_line: u8, lcdc: u8) -> u16 {
         let bg_window_tile_data_select = (lcdc & (ppu::LCDCFlags::BGWindowTileDataSelect as u8)) != 0;
         
         if bg_window_tile_data_select {
@@ -136,14 +171,26 @@ impl Fetcher {
         }
     }
 
-    pub fn step(&mut self, mmio: &mut mmio::Mmio, window_line: u8) {
+    pub fn step(
+        &mut self,
+        mmio: &mut mmio::Mmio,
+        window_line: u8,
+        lcdc_state: FetcherLcdcState,
+    ) -> Option<FetcherDebugEvent> {
         let ly = mmio.read(ppu::LY);
+        // For data-fetch states (`TileDataLow`/`High`), reuse the y latched
+        // when this fetch began at `TileNumber`. For `TileNumber` itself,
+        // re-read SCY so the latch reflects the current scroll. Window
+        // fetches always use the internal `window_line` counter, which is
+        // already independent of SCY.
         let y = if self.fetching_window {
-            // For window, use the internal window line counter
             window_line
+        } else if matches!(self.state, State::TileNumber) {
+            let new_y = ly.wrapping_add(mmio.read(ppu::SCY));
+            self.latched_y = new_y;
+            new_y
         } else {
-            // For background, use LY + SCY
-            ly.wrapping_add(mmio.read(ppu::SCY))
+            self.latched_y
         };
         let tile_line = y % 8;
 
@@ -151,7 +198,7 @@ impl Fetcher {
             State::TileNumber => {
                 // Fetch the tile number from VRAM using the correct tile map
                 let (tile_map_base, map_offset) = if self.fetching_window {
-                    let window_tile_map_base = self.get_window_tile_map_base(mmio);
+                    let window_tile_map_base = self.get_window_tile_map_base(lcdc_state.lcdc);
                     // Window always starts from tile (0, 0) in the window tile map
                     // The tile_index for window represents how many tiles we've moved horizontally from window start
                     let window_tile_x = self.tile_index;
@@ -159,7 +206,7 @@ impl Fetcher {
                     let map_offset = (window_tile_y as u16) * 32 + (window_tile_x as u16);
                     (window_tile_map_base, map_offset)
                 } else {
-                    let bg_tile_map_base = self.get_tile_map_base(mmio);
+                    let bg_tile_map_base = self.get_tile_map_base(lcdc_state.lcdc);
                     // For background, account for SCX scrolling
                     let scx = mmio.read(ppu::SCX);
                     let bg_tile_x = (self.tile_index as u16).wrapping_add(scx as u16 / 8) % 32;
@@ -169,42 +216,78 @@ impl Fetcher {
                 };
                 
                 let map_addr = tile_map_base + map_offset;
-                self.tile_num = mmio.read(map_addr);
+                self.tile_num = mmio.read_vram_bank(0, map_addr);
                 
                 // In CGB mode, read tile attributes from VRAM bank 1
                 self.tile_attributes = if mmio.is_cgb_features_enabled() {
-                    mmio.read_vram_bank1(map_addr)
+                    mmio.read_vram_bank(1, map_addr)
                 } else {
                     0 // No attributes in DMG mode
                 };
                 
                 self.state = State::TileDataLow;
+                Some(FetcherDebugEvent {
+                    kind: FetcherDebugEventKind::TileNumber,
+                    tile_index: self.tile_index,
+                    tile_num: self.tile_num,
+                    tile_attributes: self.tile_attributes,
+                    tile_line,
+                    addr: Some(map_addr),
+                    value: Some(self.tile_num),
+                    lcdc: lcdc_state.lcdc,
+                    tile_index_is_tile_data: lcdc_state.cgb_tile_index_is_tile_data,
+                    fifo_size: self.pixel_fifo.size(),
+                    fetching_window: self.fetching_window,
+                })
             }
             State::TileDataLow => {
                 // Fetch the low byte of the tile data using the correct addressing method
-                let addr = self.get_tile_data_address(self.tile_num, tile_line, mmio);
+                let addr = self.get_tile_data_address(self.tile_num, tile_line, lcdc_state.lcdc);
                 
                 // In CGB mode, use VRAM bank specified in tile attributes (bit 3)
-                let low_byte = if mmio.is_cgb_features_enabled() && (self.tile_attributes & 0x08) != 0 {
-                    mmio.read_vram_bank1(addr) // Read from VRAM bank 1
+                let tile_data_bank = if mmio.is_cgb_features_enabled() && (self.tile_attributes & 0x08) != 0 {
+                    1
                 } else {
-                    mmio.read(addr) // Read from VRAM bank 0 (or current bank on DMG)
+                    0
+                };
+                let low_byte = if lcdc_state.cgb_tile_index_is_tile_data && self.tile_num < 0x80 {
+                    self.tile_num
+                } else {
+                    mmio.read_vram_bank(tile_data_bank, addr)
                 };
                 
                 for i in 0..8 {
                     self.pixel_buffer[i] = (low_byte >> (7 - i)) & 0x01;
                 }
                 self.state = State::TileDataHigh;
+                Some(FetcherDebugEvent {
+                    kind: FetcherDebugEventKind::TileDataLow,
+                    tile_index: self.tile_index,
+                    tile_num: self.tile_num,
+                    tile_attributes: self.tile_attributes,
+                    tile_line,
+                    addr: Some(addr),
+                    value: Some(low_byte),
+                    lcdc: lcdc_state.lcdc,
+                    tile_index_is_tile_data: lcdc_state.cgb_tile_index_is_tile_data,
+                    fifo_size: self.pixel_fifo.size(),
+                    fetching_window: self.fetching_window,
+                })
             }
             State::TileDataHigh => {
                 // Fetch the high byte of the tile data using the correct addressing method
-                let addr = self.get_tile_data_address(self.tile_num, tile_line, mmio) + 1;
+                let addr = self.get_tile_data_address(self.tile_num, tile_line, lcdc_state.lcdc) + 1;
                 
                 // In CGB mode, use VRAM bank specified in tile attributes (bit 3)
-                let high_byte = if mmio.is_cgb_features_enabled() && (self.tile_attributes & 0x08) != 0 {
-                    mmio.read_vram_bank1(addr) // Read from VRAM bank 1
+                let tile_data_bank = if mmio.is_cgb_features_enabled() && (self.tile_attributes & 0x08) != 0 {
+                    1
                 } else {
-                    mmio.read(addr) // Read from VRAM bank 0 (or current bank on DMG)
+                    0
+                };
+                let high_byte = if lcdc_state.cgb_tile_index_is_tile_data && self.tile_num < 0x80 {
+                    self.tile_num
+                } else {
+                    mmio.read_vram_bank(tile_data_bank, addr)
                 };
                 
                 for i in 0..8 {
@@ -212,16 +295,43 @@ impl Fetcher {
                     self.pixel_buffer[i] |= ((high_byte >> (7 - i)) & 0x01) << 1;
                 }
                 self.state = State::PushToFIFO;
+                Some(FetcherDebugEvent {
+                    kind: FetcherDebugEventKind::TileDataHigh,
+                    tile_index: self.tile_index,
+                    tile_num: self.tile_num,
+                    tile_attributes: self.tile_attributes,
+                    tile_line,
+                    addr: Some(addr),
+                    value: Some(high_byte),
+                    lcdc: lcdc_state.lcdc,
+                    tile_index_is_tile_data: lcdc_state.cgb_tile_index_is_tile_data,
+                    fifo_size: self.pixel_fifo.size(),
+                    fetching_window: self.fetching_window,
+                })
             }
             State::PushToFIFO => {
-                // Push the fetched tile data to the FIFO
-                if self.pixel_fifo.size() <= 8 {
-                    for i in 0..8 {
-                        self.pixel_fifo.push(self.pixel_buffer[i]);
-                    }
+                if self.pixel_fifo.size() > 8 {
+                    return None;
+                }
+
+                for i in 0..8 {
+                    self.pixel_fifo.push(self.pixel_buffer[i]);
                 }
                 self.tile_index = self.tile_index.wrapping_add(1);
                 self.state = State::TileNumber;
+                Some(FetcherDebugEvent {
+                    kind: FetcherDebugEventKind::PushToFifo,
+                    tile_index: self.tile_index.wrapping_sub(1),
+                    tile_num: self.tile_num,
+                    tile_attributes: self.tile_attributes,
+                    tile_line,
+                    addr: None,
+                    value: None,
+                    lcdc: lcdc_state.lcdc,
+                    tile_index_is_tile_data: lcdc_state.cgb_tile_index_is_tile_data,
+                    fifo_size: self.pixel_fifo.size(),
+                    fetching_window: self.fetching_window,
+                })
             }
         }
     }
@@ -229,8 +339,129 @@ impl Fetcher {
     pub fn get_pixel_buffer(&self) -> [u8; 8] {
         self.pixel_buffer
     }
+
+    pub fn get_fifo_size(&self) -> usize {
+        self.pixel_fifo.size()
+    }
+
+    pub fn get_tile_index(&self) -> u8 {
+        self.tile_index
+    }
     
     pub fn is_fetching_window(&self) -> bool {
         self.fetching_window
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::Addressable;
+
+    const TILE_ID: u8 = 0x02;
+    const TILE_DATA_ADDR: u16 = TILE_DATA_8000_BASE + (TILE_ID as u16) * 16;
+
+    fn cgb_mmio() -> mmio::Mmio {
+        let mut mmio = mmio::Mmio::new();
+        mmio.set_cgb_features_enabled(true);
+        mmio.write(ppu::LCD_CONTROL, ppu::LCDCFlags::BGWindowTileDataSelect as u8);
+        mmio.write(ppu::SCX, 0);
+        mmio.write(ppu::SCY, 0);
+        mmio.write_ly_from_ppu(0);
+        mmio
+    }
+
+    fn write_bank0_tile_number_and_data(mmio: &mut mmio::Mmio, low_byte: u8, high_byte: u8) {
+        mmio.write(mmio::REG_VBK, 0);
+        mmio.write(TILE_MAP_9800_BASE, TILE_ID);
+        mmio.write(TILE_DATA_ADDR, low_byte);
+        mmio.write(TILE_DATA_ADDR + 1, high_byte);
+    }
+
+    fn lcdc_state(mmio: &mmio::Mmio, cgb_tile_index_is_tile_data: bool) -> FetcherLcdcState {
+        FetcherLcdcState {
+            lcdc: mmio.read(ppu::LCD_CONTROL),
+            cgb_tile_index_is_tile_data,
+        }
+    }
+
+    #[test]
+    fn cgb_fetch_uses_bank0_tile_numbers_when_cpu_vbk_is_bank1() {
+        let mut mmio = cgb_mmio();
+        write_bank0_tile_number_and_data(&mut mmio, 0b1010_1010, 0b0101_0101);
+
+        mmio.write(mmio::REG_VBK, 1);
+        mmio.write(TILE_MAP_9800_BASE, 0x07);
+        mmio.write(TILE_DATA_ADDR, 0x11);
+        mmio.write(TILE_DATA_ADDR + 1, 0x22);
+
+        let mut fetcher = Fetcher::new();
+        let state = lcdc_state(&mmio, false);
+        let tile_number = fetcher.step(&mut mmio, 0, state).unwrap();
+        assert_eq!(tile_number.kind, FetcherDebugEventKind::TileNumber);
+        assert_eq!(tile_number.tile_num, TILE_ID);
+        assert_eq!(tile_number.tile_attributes, 0x07);
+
+        let tile_data_low = fetcher.step(&mut mmio, 0, state).unwrap();
+        assert_eq!(tile_data_low.kind, FetcherDebugEventKind::TileDataLow);
+        assert_eq!(tile_data_low.value, Some(0b1010_1010));
+
+        let tile_data_high = fetcher.step(&mut mmio, 0, state).unwrap();
+        assert_eq!(tile_data_high.kind, FetcherDebugEventKind::TileDataHigh);
+        assert_eq!(tile_data_high.value, Some(0b0101_0101));
+    }
+
+    #[test]
+    fn cgb_fetch_uses_attribute_bank_for_tile_data() {
+        let mut mmio = cgb_mmio();
+        write_bank0_tile_number_and_data(&mut mmio, 0x11, 0x22);
+
+        mmio.write(mmio::REG_VBK, 1);
+        mmio.write(TILE_MAP_9800_BASE, 0x08);
+        mmio.write(TILE_DATA_ADDR, 0x33);
+        mmio.write(TILE_DATA_ADDR + 1, 0x44);
+
+        let mut fetcher = Fetcher::new();
+        let state = lcdc_state(&mmio, false);
+        let tile_number = fetcher.step(&mut mmio, 0, state).unwrap();
+        assert_eq!(tile_number.kind, FetcherDebugEventKind::TileNumber);
+        assert_eq!(tile_number.tile_num, TILE_ID);
+        assert_eq!(tile_number.tile_attributes, 0x08);
+
+        let tile_data_low = fetcher.step(&mut mmio, 0, state).unwrap();
+        assert_eq!(tile_data_low.kind, FetcherDebugEventKind::TileDataLow);
+        assert_eq!(tile_data_low.value, Some(0x33));
+
+        let tile_data_high = fetcher.step(&mut mmio, 0, state).unwrap();
+        assert_eq!(tile_data_high.kind, FetcherDebugEventKind::TileDataHigh);
+        assert_eq!(tile_data_high.value, Some(0x44));
+    }
+
+    #[test]
+    fn cgb_lcdc_tile_data_falling_edge_can_return_tile_index_as_data() {
+        let mut mmio = cgb_mmio();
+        write_bank0_tile_number_and_data(&mut mmio, 0xFF, 0xFF);
+
+        mmio.write(
+            ppu::LCD_CONTROL,
+            ppu::LCDCFlags::DisplayEnable as u8 | ppu::LCDCFlags::BGWindowTileDataSelect as u8,
+        );
+        mmio.write(ppu::LCD_CONTROL, ppu::LCDCFlags::DisplayEnable as u8);
+
+        let mut fetcher = Fetcher::new();
+        let state = lcdc_state(&mmio, true);
+        let tile_number = fetcher.step(&mut mmio, 0, state).unwrap();
+        assert!(tile_number.tile_index_is_tile_data);
+
+        let tile_data_low = fetcher.step(&mut mmio, 0, state).unwrap();
+        assert_eq!(tile_data_low.kind, FetcherDebugEventKind::TileDataLow);
+        assert_eq!(tile_data_low.value, Some(TILE_ID));
+
+        let tile_data_high = fetcher.step(&mut mmio, 0, state).unwrap();
+        assert_eq!(tile_data_high.kind, FetcherDebugEventKind::TileDataHigh);
+        assert_eq!(tile_data_high.value, Some(TILE_ID));
+
+        let state = lcdc_state(&mmio, false);
+        assert!(!state.cgb_tile_index_is_tile_data);
     }
 }
