@@ -223,11 +223,15 @@ impl Fetcher {
                 })
             }
             State::TileDataLow => {
+                let cgb = mmio.is_cgb_features_enabled();
+                let y_flip = cgb && (self.tile_attributes & 0x40) != 0;
+                let x_flip = cgb && (self.tile_attributes & 0x20) != 0;
+                let eff_line = if y_flip { 7 - tile_line } else { tile_line };
                 // Fetch the low byte of the tile data using the correct addressing method
-                let addr = self.get_tile_data_address(self.tile_num, tile_line, lcdc_state.lcdc);
-                
+                let addr = self.get_tile_data_address(self.tile_num, eff_line, lcdc_state.lcdc);
+
                 // In CGB mode, use VRAM bank specified in tile attributes (bit 3)
-                let tile_data_bank = if mmio.is_cgb_features_enabled() && (self.tile_attributes & 0x08) != 0 {
+                let tile_data_bank = if cgb && (self.tile_attributes & 0x08) != 0 {
                     1
                 } else {
                     0
@@ -237,9 +241,10 @@ impl Fetcher {
                 } else {
                     mmio.read_vram_bank(tile_data_bank, addr)
                 };
-                
+
                 for i in 0..8 {
-                    self.pixel_buffer[i] = (low_byte >> (7 - i)) & 0x01;
+                    let bit = if x_flip { i } else { 7 - i };
+                    self.pixel_buffer[i] = (low_byte >> bit) & 0x01;
                 }
                 self.state = State::TileDataHigh;
                 Some(FetcherDebugEvent {
@@ -257,11 +262,15 @@ impl Fetcher {
                 })
             }
             State::TileDataHigh => {
+                let cgb = mmio.is_cgb_features_enabled();
+                let y_flip = cgb && (self.tile_attributes & 0x40) != 0;
+                let x_flip = cgb && (self.tile_attributes & 0x20) != 0;
+                let eff_line = if y_flip { 7 - tile_line } else { tile_line };
                 // Fetch the high byte of the tile data using the correct addressing method
-                let addr = self.get_tile_data_address(self.tile_num, tile_line, lcdc_state.lcdc) + 1;
-                
+                let addr = self.get_tile_data_address(self.tile_num, eff_line, lcdc_state.lcdc) + 1;
+
                 // In CGB mode, use VRAM bank specified in tile attributes (bit 3)
-                let tile_data_bank = if mmio.is_cgb_features_enabled() && (self.tile_attributes & 0x08) != 0 {
+                let tile_data_bank = if cgb && (self.tile_attributes & 0x08) != 0 {
                     1
                 } else {
                     0
@@ -271,10 +280,10 @@ impl Fetcher {
                 } else {
                     mmio.read_vram_bank(tile_data_bank, addr)
                 };
-                
+
                 for i in 0..8 {
-                    // Combine low and high bytes to form the pixel data
-                    self.pixel_buffer[i] |= ((high_byte >> (7 - i)) & 0x01) << 1;
+                    let bit = if x_flip { i } else { 7 - i };
+                    self.pixel_buffer[i] |= ((high_byte >> bit) & 0x01) << 1;
                 }
                 self.state = State::PushToFIFO;
                 Some(FetcherDebugEvent {
@@ -297,7 +306,10 @@ impl Fetcher {
                 }
 
                 for i in 0..8 {
-                    self.pixel_fifo.push(self.pixel_buffer[i]);
+                    self.pixel_fifo.push(fifo::BgPixel {
+                        color: self.pixel_buffer[i],
+                        attrs: self.tile_attributes,
+                    });
                 }
                 self.tile_index = self.tile_index.wrapping_add(1);
                 self.state = State::TileNumber;

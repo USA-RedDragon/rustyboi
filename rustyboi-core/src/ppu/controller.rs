@@ -896,13 +896,15 @@ impl Ppu {
                 }
 
                 // Put a pixel from the FIFO on screen with sprite mixing
-                if let Ok(bg_pixel_idx) = self.fetcher.pixel_fifo.pop() {
+                if let Ok(bg_pixel) = self.fetcher.pixel_fifo.pop() {
+                    let bg_pixel_idx = bg_pixel.color;
+                    let bg_attrs = bg_pixel.attrs;
                     let ly = mmio.read(LY) as u16;
                     let fb_offset = (ly * 160) + self.x as u16;
 
                     if mmio.is_cgb_features_enabled() {
                         // CGB mode: write to color framebuffer with proper sprite mixing
-                        let final_color_rgb = self.mix_background_and_sprites_color(mmio, bg_pixel_idx, self.x, ly as u8);
+                        let final_color_rgb = self.mix_background_and_sprites_color(mmio, bg_pixel_idx, bg_attrs, self.x, ly as u8);
                         self.record_pixel_debug_event(
                             ly as u8,
                             bg_pixel_idx,
@@ -1276,22 +1278,12 @@ impl Ppu {
     }
 
     // Mix background pixel with sprites at the given screen coordinates (CGB color version)
-    fn mix_background_and_sprites_color(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8, screen_x: u8, screen_y: u8) -> (u8, u8, u8) {
+    fn mix_background_and_sprites_color(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8, bg_attrs: u8, screen_x: u8, screen_y: u8) -> (u8, u8, u8) {
         let lcdc = self.lcdc;
         let bg_priority_master = (lcdc & (LCDCFlags::BGDisplay as u8)) != 0;
 
-        // TEMP DEBUG
-        // if screen_y == 104 && (143..=150).contains(&screen_x) && self.lcdc & 0x01 == 1 {
-        //     // print the LCDC value at the moment we mix this pixel
-        //     // we want to see at which screen_x LCDC.0 became 1
-        //     eprintln!("PMIX y=104 x={} lcdc={:#04X} bg_idx={}", screen_x, self.lcdc, bg_pixel_idx);
-        // }
-        // if screen_y == 104 && (143..=150).contains(&screen_x) && self.lcdc & 0x01 == 0 {
-        //     eprintln!("PMIX y=104 x={} lcdc={:#04X} bg_idx={} (LCDC0=0)", screen_x, self.lcdc, bg_pixel_idx);
-        // }
-        
-        // Get background color and attributes
-        let tile_attributes = self.get_bg_tile_attributes(mmio, screen_x, screen_y);
+        // Background attributes captured at fetch time travel with the pixel.
+        let tile_attributes = bg_attrs;
         let palette_idx = tile_attributes & 0x07; // Bits 0-2 = palette index
         let bg_color_rgb = self.get_cgb_bg_color(mmio, palette_idx, bg_pixel_idx);
         
