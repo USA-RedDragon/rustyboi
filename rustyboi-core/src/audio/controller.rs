@@ -54,6 +54,15 @@ pub struct Audio {
     
     // Sample generation timing
     fractional_cycles: f32,
+
+    // Free-running 2 MHz cycle counter mirroring Gambatte's `cycleCounter_`.
+    // The timer hands us its 15-bit low value (`ic >> 1`); we widen it to a
+    // free-running 32-bit counter by tracking wraps so the square channels can
+    // use Gambatte's absolute event-counter timing model.
+    #[serde(default)]
+    cc: u32,
+    #[serde(default)]
+    last_cc15: u16,
 }
 
 impl Audio {
@@ -70,7 +79,51 @@ impl Audio {
             frame_sequencer_timer: 8192,
             audio_enabled: false,
             fractional_cycles: 0.0,
+            cc: 0,
+            last_cc15: 0,
         }
+    }
+
+    /// Reconstruct Gambatte's free-running 2 MHz `cycleCounter_` from the
+    /// timer's internal counter (`ic >> 1`, the low 15 bits) and push it to the
+    /// square channels. Measured against the boot DIV phase, the frame-sequencer
+    /// position satisfies `cc>>12&7 == ((our fs_step) + 5) & 7`.
+    ///
+    /// A DIV write resets the timer's internal counter, which drops the sub-step
+    /// part of cc. We mirror Gambatte's `divReset`/`Channel::resetCc`: preserve
+    /// the upper cc bits (the length `cc>>13` / FS-phase boundaries) and shift
+    /// only the duty unit by the resulting delta.
+    pub fn sync_cc(&mut self, ic: u16) {
+        let raw = ((ic >> 1) & 0x7FFF) as u32;
+
+        let old = self.cc;
+        let old_low = old & 0x7FFF;
+        let mut high = old & !0x7FFF;
+
+        let new;
+        if raw < old_low && old_low < 0x7F00 {
+            // A DIV write reset the timer's internal counter mid-range. Gambatte's
+            // divReset preserves the upper cc bits (the length/`cc>>13` and FS
+            // phase boundaries) while resetting the sub-step part, so keep cc's
+            // bits >=13 and take the sub-13 bits from the freshly reset counter.
+            // The duty unit (and only the duty unit) is shifted by the resulting
+            // cc delta, matching `Channel::resetCc`.
+            new = (old & !0x1FFF) | (raw & 0x1FFF);
+            let delta = old.wrapping_sub(new);
+            self.channel1.reset_cc(delta);
+            self.channel2.reset_cc(delta);
+        } else {
+            if raw < old_low {
+                // Natural wrap of the 15-bit counter (0x7FFF -> 0).
+                high = high.wrapping_add(0x8000);
+            }
+            new = high | raw;
+        }
+
+        self.cc = new;
+        self.last_cc15 = (new & 0x7FFF) as u16;
+        self.channel1.set_cc(new);
+        self.channel2.set_cc(new);
     }
 
     pub fn step(&mut self, mmio: &mut mmio::Mmio) {
@@ -219,7 +272,7 @@ impl Addressable for Audio {
             NR51 => self.nr51,
             NR52 => {
                 let mut value = self.nr52 & 0x80; // Preserve audio enabled bit
-                
+
                 // Set channel status bits (read-only)
                 if self.channel1.is_enabled() { value |= 0x01; }
                 if self.channel2.is_enabled() { value |= 0x02; }
