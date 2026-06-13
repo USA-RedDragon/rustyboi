@@ -1264,6 +1264,11 @@ impl memory::Addressable for Mmio {
                         // hardware. See Gambatte memory.cpp case 0x41.
                         ppu::LCD_STATUS => self.io_registers.read(addr) | 0x80,
 
+                        // 0xFF78-0xFF7F are unmapped on both DMG and CGB.
+                        // Gambatte's nontrivial_ff_read falls through to a
+                        // never-written 0xFF shadow; writes are dropped.
+                        0xFF78..=0xFF7F => 0xFF,
+
                         _ => self.io_registers.read(addr),
                     }
                 }
@@ -1505,6 +1510,9 @@ impl memory::Addressable for Mmio {
                             }
                         },
                         
+                        // 0xFF78-0xFF7F are unmapped: writes are dropped.
+                        0xFF78..=0xFF7F => {}
+
                         _ => self.io_registers.write(addr, value),
                     }
                 }
