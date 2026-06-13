@@ -19,6 +19,8 @@ pub struct Noise {
     volume_timer: u8,
     frequency_timer: u16,
     lfsr: u16, // Linear feedback shift register
+    length_enabled: bool,
+    fs_step: u8,
 }
 
 impl Noise {
@@ -35,7 +37,17 @@ impl Noise {
             volume_timer: 0,
             frequency_timer: 0,
             lfsr: 0x7FFF,
+            length_enabled: false,
+            fs_step: 0,
         }
+    }
+
+    pub fn set_fs_step(&mut self, step: u8) {
+        self.fs_step = step;
+    }
+
+    fn length_extra_clock_due(&self) -> bool {
+        (self.fs_step % 2) == 1
     }
 
     pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
@@ -58,7 +70,7 @@ impl Noise {
         }
 
         // Length counter (steps 0, 2, 4, 6)
-        if step.is_multiple_of(2) {
+        if step.is_multiple_of(2) && self.length_enabled {
             self.step_length_counter();
         }
 
@@ -136,14 +148,41 @@ impl Noise {
         self.nr42 & 0x07
     }
 
+    fn write_nrx4(&mut self, value: u8) {
+        let trigger = (value >> 7) & 0x01 != 0;
+        let new_length_enabled = (value >> 6) & 0x01 != 0;
+        let was_length_enabled = self.length_enabled;
+
+        if new_length_enabled
+            && !was_length_enabled
+            && self.length_extra_clock_due()
+            && self.length_counter > 0
+        {
+            self.length_counter -= 1;
+            if self.length_counter == 0 && !trigger {
+                self.enabled = false;
+            }
+        }
+
+        self.length_enabled = new_length_enabled;
+        self.nr44 = value;
+
+        if trigger {
+            self.trigger();
+        }
+    }
+
     fn trigger(&mut self) {
         self.enabled = true;
-        
+
         // Length counter
         if self.length_counter == 0 {
             self.length_counter = 64;
+            if self.length_enabled && self.length_extra_clock_due() {
+                self.length_counter -= 1;
+            }
         }
-        
+
         // Volume envelope
         self.volume = self.get_envelope_initial_volume();
         self.volume_direction = self.get_envelope_direction();
@@ -213,12 +252,7 @@ impl Addressable for Noise {
                         self.nr43 = value;
                     }
                     NR44 => {
-                        let trigger = (value >> 7) & 0x01 != 0;
-                        self.nr44 = value;
-                        
-                        if trigger {
-                            self.trigger();
-                        }
+                        self.write_nrx4(value);
                     }
                     _ => {}
                 }

@@ -651,10 +651,93 @@ impl Mmio {
         self.dma_advance_one_mcycle();
     }
 
+    /// Whether the OAM-DMA engine is armed/running (mirrors
+    /// `lastOamDmaUpdate_ != disabled_time`). Used by the bus to decide whether
+    /// the DMA M-cycle must be advanced before resolving a CPU write.
+    pub fn dma_active(&self) -> bool {
+        self.dma_active
+    }
+
     /// True while a transfer is actively placing bytes into OAM (the window in
     /// which the CPU bus conflicts with OAM DMA). Mirrors `oamDmaPos_ < 160`.
     fn dma_transfer_in_progress(&self) -> bool {
         self.dma_active && self.dma_pos < 160
+    }
+
+    /// Source-region classification of the active OAM DMA (mirrors
+    /// `oamDmaInitSetup`/`cart_.oamDmaSrc()`): 0=rom 1=sram 2=vram 3=wram
+    /// 4=invalid.
+    fn dma_src_kind(&self) -> u8 {
+        let cgb = self.cgb_features_enabled;
+        let src_high = (self.dma_source_base >> 8) as u8;
+        let wram_top: u16 = if cgb { 0xE0 } else { 0x100 };
+        if src_high < 0xA0 {
+            if src_high < 0x80 { 0 } else { 2 }
+        } else if (src_high as u16) < wram_top {
+            if src_high < 0xC0 { 1 } else { 3 }
+        } else {
+            4
+        }
+    }
+
+    /// Write into the WRAM/echo region honoring CGB bank selection. Used by the
+    /// OAM-DMA conflict path (CGB, non-WRAM source) where the write still has to
+    /// land in WRAM while the normal during-DMA routing would drop it.
+    fn write_wram_region(&mut self, addr: u16, value: u8) {
+        let addr = if addr >= ECHO_RAM_START { addr - 0x2000 } else { addr };
+        match addr {
+            WRAM_START..=WRAM_END => self.wram.write(addr, value),
+            WRAM_BANK_START..=WRAM_BANK_END => {
+                if self.cgb_features_enabled {
+                    match self.wram_bank_select {
+                        0 | 1 => self.wram_bank.write(addr, value),
+                        2..=7 => {
+                            let bank_index = (self.wram_bank_select - 2) as usize;
+                            self.wram_banks[bank_index].write(addr, value)
+                        }
+                        _ => self.wram_bank.write(addr, value),
+                    }
+                } else {
+                    self.wram_bank.write(addr, value)
+                }
+            }
+            _ => (),
+        }
+    }
+
+    /// Resolve a CPU write that lands in the OAM-DMA conflict area while a
+    /// transfer is in progress. Mirrors the conflict branch of Gambatte's
+    /// `nontrivial_write`: the write is redirected onto the shared bus, so the
+    /// DMA copies the CPU-driven byte into `OAM[dma_pos]` instead of the
+    /// original source byte. Returns true if the write was consumed here (and
+    /// must not reach normal memory).
+    fn dma_write_conflict(&mut self, addr: u16, value: u8) -> bool {
+        if !self.dma_transfer_in_progress() || !self.dma_address_conflicts(addr) {
+            return false;
+        }
+        let pos = self.dma_pos as u16;
+        if self.cgb_features_enabled {
+            if addr < WRAM_START {
+                // rom/sram/vram source: OAM latches the CPU byte (0 for vram).
+                let byte = if self.dma_src_kind() == 2 { 0 } else { value };
+                self.oam.write(OAM_START + pos, byte);
+            } else if self.dma_src_kind() != 3 {
+                // WRAM region with a non-WRAM source: the write still reaches the
+                // CPU-selected WRAM bank (it does not disturb OAM).
+                self.write_wram_region(addr, value);
+            }
+            // WRAM region with a WRAM source: write is swallowed (no effect).
+        } else {
+            // DMG: OAM latches the CPU byte; a WRAM source ANDs with the byte
+            // the DMA already placed (bus conflict).
+            let byte = if self.dma_src_kind() == 3 {
+                self.oam.read(OAM_START + pos) & value
+            } else {
+                value
+            };
+            self.oam.write(OAM_START + pos, byte);
+        }
+        true
     }
 
     /// As `dma_transfer_in_progress`, but using the read-observed position.
@@ -662,12 +745,17 @@ impl Mmio {
         self.dma_active && self.dma_pos < 160
     }
 
-    /// Byte the CPU sees on a conflicting bus read while OAM DMA is mid-transfer:
-    /// the byte currently being moved to OAM. Equal to `oam[pos]` after the
-    /// transfer, but read from the source so the read-lookahead can observe a
-    /// byte the engine has not physically copied yet.
-    fn dma_conflict_byte(&self) -> u8 {
-        self.read_during_dma(self.dma_source_base + self.dma_pos as u16)
+    /// Byte the CPU sees on a conflicting bus read while OAM DMA is mid-transfer.
+    /// Mirrors the conflict branch of Gambatte's `nontrivial_read`: the read
+    /// observes `OAM[dma_pos]`, the byte the DMA just placed this M-cycle (the
+    /// bus tick already advanced the engine before this read resolves). On CGB,
+    /// a read of the WRAM region with a non-WRAM source instead returns the live
+    /// WRAM byte.
+    fn dma_conflict_byte(&self, addr: u16) -> u8 {
+        if self.cgb_features_enabled && self.dma_src_kind() != 3 && addr >= WRAM_START {
+            return self.read_during_dma(addr);
+        }
+        self.oam.read(OAM_START + self.dma_pos as u16)
     }
 
     /// Whether a CPU access to `addr` conflicts with the in-progress OAM DMA.
@@ -679,19 +767,7 @@ impl Mmio {
             return false;
         }
         let cgb = self.cgb_features_enabled;
-        let src_high = (self.dma_source_base >> 8) as u8;
-
-        // oamDmaInitSetup: source-region classification.
-        // 0 = rom, 1 = sram, 2 = vram, 3 = wram, 4 = invalid.
-        // CGB marks 0xE0..=0xFF as invalid; DMG treats them as wram (echo).
-        let wram_top: u16 = if cgb { 0xE0 } else { 0x100 };
-        let src = if src_high < 0xA0 {
-            if src_high < 0x80 { 0 } else { 2 }
-        } else if (src_high as u16) < wram_top {
-            if src_high < 0xC0 { 1 } else { 3 }
-        } else {
-            4
-        };
+        let src = self.dma_src_kind();
 
         // Per-block conflict masks (bit n set => 4KB block n conflicts).
         let mask: u16 = match src {
@@ -852,7 +928,7 @@ impl memory::Addressable for Mmio {
         // is currently moving into OAM, not the real memory. I/O and HRAM are
         // unaffected (Gambatte gates the conflict on `p < mm_hram_begin`).
         if self.dma_read_conflict_active() && self.dma_address_conflicts(addr) {
-            return self.dma_conflict_byte();
+            return self.dma_conflict_byte(addr);
         }
         {
             // Normal memory access (the conflict above already handled).
@@ -935,7 +1011,16 @@ impl memory::Addressable for Mmio {
                         0xDE00..=0xFFFF => panic!("This is literally never possible"),
                     }
                 },
-                OAM_START..=OAM_END => self.oam.read(addr),
+                // While a transfer is placing bytes into OAM the DMA owns the
+                // OAM bus, so a CPU read returns 0xFF (Gambatte's
+                // `oamDmaPos_ < oam_size` gate).
+                OAM_START..=OAM_END => {
+                    if self.dma_transfer_in_progress() {
+                        0xFF
+                    } else {
+                        self.oam.read(addr)
+                    }
+                }
                 UNUSED_START..=UNUSED_END => EMPTY_BYTE,
                 IO_REGISTERS_START..=IO_REGISTERS_END => {
                     match addr {
@@ -1048,36 +1133,14 @@ impl memory::Addressable for Mmio {
     }
 
     fn write(&mut self, addr: u16, value: u8) {
-        // During DMA, CPU can only access HRAM and some IO registers
-        if self.dma_active {
-            match addr {
-                HRAM_START..=HRAM_END => self.hram.write(addr, value),
-                IE_REGISTER => self.ie_register = value,
-                // Allow writing to some essential IO registers during DMA
-                timer::DIV..=timer::TAC => self.timer.write(addr, value),
-                serial::SB..=serial::SC => self.serial.write(addr, value),
-                input::JOYP => self.input.write(addr, value),
-                REG_DMA => self.start_oam_dma(value),
-                ppu::LCD_CONTROL => self.write_lcd_control(value),
-                ppu::LCD_STATUS => self.write_lcd_status(value),
-                ppu::LY => self.write_ly_from_cpu(),
-                ppu::LYC => {
-                    self.io_registers.write(addr, value);
-                    self.stat_register_write_pending = true;
-                }
-                ppu::SCY..=ppu::WX => self.io_registers.write(addr, value),
-                // While a transfer is in progress the DMA owns the OAM bus, so
-                // a CPU write to OAM is dropped. Once the transfer has ended
-                // (engine still parked for a cycle) the CPU write lands.
-                OAM_START..=OAM_END => {
-                    if !self.dma_transfer_in_progress() {
-                        self.oam.write(addr, value);
-                    }
-                }
-                _ => (), // Ignore writes to other addresses during DMA
-            }
-        } else {
-            // Normal memory access when DMA is not active
+        // While an OAM DMA is running the CPU bus operates normally except for
+        // (1) the source-region conflict, which redirects the write into OAM,
+        // and (2) OAM itself, which the DMA owns. Everything else (non-conflict
+        // ROM/VRAM/SRAM/WRAM/IO writes) proceeds as usual.
+        if self.dma_active && self.dma_write_conflict(addr, value) {
+            return;
+        }
+        {
             match addr {
                 CARTRIDGE_START..=CARTRIDGE_END => {
                     if let Some(cart) = self.cartridge.as_mut() { cart.write(addr, value) }
@@ -1132,7 +1195,13 @@ impl memory::Addressable for Mmio {
                         0xDE00..=0xFFFF => panic!("This is literally never possible"),
                     }
                 },
-                OAM_START..=OAM_END => self.oam.write(addr, value),
+                // While a transfer is in progress the DMA owns the OAM bus, so a
+                // CPU write to OAM is dropped; otherwise it lands normally.
+                OAM_START..=OAM_END => {
+                    if !self.dma_transfer_in_progress() {
+                        self.oam.write(addr, value);
+                    }
+                }
                 UNUSED_START..=UNUSED_END => (), // Writes to unused memory are ignored
                 IO_REGISTERS_START..=IO_REGISTERS_END => {
                     match addr {
