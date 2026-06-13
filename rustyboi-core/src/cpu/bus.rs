@@ -68,22 +68,30 @@ impl<'a> Bus<'a> {
         self.tick_m();
     }
 
+    /// Whether the PPU currently locks CPU access to `addr`: VRAM during Mode 3,
+    /// OAM during Mode 2/3, and (CGB) the palette-data ports FF69/FF6B during
+    /// Mode 3. Only while the LCD is on. Blocked reads return 0xFF; blocked
+    /// writes are dropped.
+    fn ppu_locks_access(&self, addr: u16) -> bool {
+        let is_vram = (0x8000..=0x9FFF).contains(&addr);
+        let is_oam = (0xFE00..=0xFE9F).contains(&addr);
+        let is_cgb_pal = (addr == 0xFF69 || addr == 0xFF6B) && self.mmio.is_cgb_features_enabled();
+        if !(is_vram || is_oam || is_cgb_pal) {
+            return false;
+        }
+        if self.mmio.read(ppu::LCD_CONTROL) & 0x80 == 0 {
+            return false;
+        }
+        let mode = self.mmio.read(ppu::LCD_STATUS) & 0x03;
+        if is_oam { mode == 2 || mode == 3 } else { mode == 3 }
+    }
+
     pub fn read(&mut self, addr: u16) -> u8 {
         self.tick_m();
         // VRAM is inaccessible to the CPU during Mode 3, OAM during Mode 2/3;
         // a blocked read returns open-bus 0xFF. Only while the LCD is on.
-        if ((0x8000..=0x9FFF).contains(&addr) || (0xFE00..=0xFE9F).contains(&addr))
-            && self.mmio.read(ppu::LCD_CONTROL) & 0x80 != 0
-        {
-            let mode = self.mmio.read(ppu::LCD_STATUS) & 0x03;
-            let blocked = if (0x8000..=0x9FFF).contains(&addr) {
-                mode == 3
-            } else {
-                mode == 2 || mode == 3
-            };
-            if blocked {
-                return 0xFF;
-            }
+        if self.ppu_locks_access(addr) {
+            return 0xFF;
         }
         self.mmio.read(addr)
     }
@@ -99,22 +107,12 @@ impl<'a> Bus<'a> {
         // DMA's conflict area is then redirected into OAM[oamDmaPos_]. Ticking
         // the M-cycle first reproduces that ordering so `dma_pos` is the value
         // for this cycle when `mmio.write` resolves the conflict.
-        // VRAM writes during Mode 3 and OAM writes during Mode 2/3 are ignored
-        // by the hardware (the PPU owns the bus). Drop the write but still tick.
-        if ((0x8000..=0x9FFF).contains(&addr) || (0xFE00..=0xFE9F).contains(&addr))
-            && !self.mmio.dma_active()
-            && self.mmio.read(ppu::LCD_CONTROL) & 0x80 != 0
-        {
-            let mode = self.mmio.read(ppu::LCD_STATUS) & 0x03;
-            let blocked = if (0x8000..=0x9FFF).contains(&addr) {
-                mode == 3
-            } else {
-                mode == 2 || mode == 3
-            };
-            if blocked {
-                self.tick_m();
-                return;
-            }
+        // VRAM/OAM/CGB-palette writes are ignored while the PPU owns those
+        // resources (see `ppu_locks_access`). Drop the write but still tick.
+        // OAM-DMA conflicts are resolved separately in the tick-before path.
+        if !self.mmio.dma_active() && self.ppu_locks_access(addr) {
+            self.tick_m();
+            return;
         }
 
         let tick_before = matches!(addr, 0xFF01..=0xFF02 | 0xFF04..=0xFF07 | 0xFF46 | 0xFF4A | 0xFF4B)
