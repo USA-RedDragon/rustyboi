@@ -70,6 +70,21 @@ impl<'a> Bus<'a> {
 
     pub fn read(&mut self, addr: u16) -> u8 {
         self.tick_m();
+        // VRAM is inaccessible to the CPU during Mode 3, OAM during Mode 2/3;
+        // a blocked read returns open-bus 0xFF. Only while the LCD is on.
+        if ((0x8000..=0x9FFF).contains(&addr) || (0xFE00..=0xFE9F).contains(&addr))
+            && self.mmio.read(ppu::LCD_CONTROL) & 0x80 != 0
+        {
+            let mode = self.mmio.read(ppu::LCD_STATUS) & 0x03;
+            let blocked = if (0x8000..=0x9FFF).contains(&addr) {
+                mode == 3
+            } else {
+                mode == 2 || mode == 3
+            };
+            if blocked {
+                return 0xFF;
+            }
+        }
         self.mmio.read(addr)
     }
 
