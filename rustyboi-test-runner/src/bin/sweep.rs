@@ -310,30 +310,34 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     };
     let cfg = RunCfg { frames, warmup, timeout_secs, screens_dir, names };
 
-    if jobs > 0 {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(jobs)
-            .build_global()
-            .map_err(|e| format!("thread pool: {e}"))?;
-    }
+    let pool = {
+        let mut b = rayon::ThreadPoolBuilder::new().stack_size(64 * 1024 * 1024);
+        if jobs > 0 {
+            b = b.num_threads(jobs);
+        }
+        b.build().map_err(|e| format!("thread pool: {e}"))?
+    };
 
     let total = roms.len();
     let done = AtomicUsize::new(0);
     let started = Instant::now();
-    let mut rows: Vec<Row> = roms
-        .par_iter()
-        .map(|(key, path)| {
-            let row = run_one(key, path, &cfg);
-            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-            let status = match (&row.error, row.fps) {
-                (Some(e), _) => format!("ERROR: {e}"),
-                (None, Some(fps)) => format!("{fps:7.1} fps  {}", if row.boot_ok { "ok" } else { "BLANK" }),
-                _ => "done".into(),
-            };
-            eprintln!("[{n:4}/{total}] {key}  {status}");
-            row
-        })
-        .collect();
+    let mut rows: Vec<Row> = pool.install(|| {
+        roms.par_iter()
+            .map(|(key, path)| {
+                let row = run_one(key, path, &cfg);
+                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                let status = match (&row.error, row.fps) {
+                    (Some(e), _) => format!("ERROR: {e}"),
+                    (None, Some(fps)) => {
+                        format!("{fps:7.1} fps  {}", if row.boot_ok { "ok" } else { "BLANK" })
+                    }
+                    _ => "done".into(),
+                };
+                eprintln!("[{n:4}/{total}] {key}  {status}");
+                row
+            })
+            .collect()
+    });
     // Sort by rom_sha so the committed baseline has a stable, name-free order.
     rows.sort_by(|a, b| a.rom_sha.cmp(&b.rom_sha));
 
