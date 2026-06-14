@@ -1014,7 +1014,16 @@ impl Mmio {
                     None => EMPTY_BYTE,
                 }
             },
-            VRAM_START..=VRAM_END => self.vram.read(addr),
+            // VRAM-source OAM DMA reads through the live VBK pointer
+            // (Gambatte `vrambankptr()`), so a mid-DMA VBK write retargets
+            // subsequent source bytes.
+            VRAM_START..=VRAM_END => {
+                if self.cgb_features_enabled && self.vram_bank == 1 {
+                    self.vram_bank1.read(addr)
+                } else {
+                    self.vram.read(addr)
+                }
+            },
             EXTERNAL_RAM_START..=EXTERNAL_RAM_END => {
                 match &self.cartridge {
                     Some(cart) => cart.read(addr),
