@@ -87,7 +87,11 @@ impl SM83 {
         self.ime_enable_delay = 0;
         bus.clear_delayed_writes();
 
-        // 2 internal M-cycles, then push PC high, then push PC low.
+        // 3 internal M-cycles (Gambatte `cc += 12`: undone prefetch + 2 wait),
+        // then push PC high, then push PC low. Ticking all internal cycles
+        // before the pushes (rather than leaving one to the trailing
+        // tick_remaining) advances OAM DMA to the correct dma_pos at each push.
+        bus.internal_cycle();
         bus.internal_cycle();
         bus.internal_cycle();
 
