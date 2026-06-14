@@ -707,8 +707,6 @@ impl Mmio {
     }
 
     pub fn step_dma(&mut self) {
-        self.step_hdma();
-
         if !self.dma_active {
             return;
         }
@@ -727,7 +725,7 @@ impl Mmio {
     /// enabled, then services any pending request by transferring one 0x10-byte
     /// block. `run_hdma_block` is otherwise never invoked, so without this the
     /// HDMA engine never moves bytes.
-    fn step_hdma(&mut self) {
+    pub fn step_hdma(&mut self) {
         if !self.cgb_features_enabled {
             return;
         }
