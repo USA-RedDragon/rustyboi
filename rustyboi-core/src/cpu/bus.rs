@@ -105,10 +105,22 @@ impl<'a> Bus<'a> {
         } else {
             None
         };
-        // Serial registers and IF observe serial-completion state at the read's
-        // start cc; snapshot before tick (mirrors the APU read hook).
+        // Serial registers observe serial state at the read's start cc; snapshot
+        // before tick (mirrors the APU read hook).
         let serial_read = if matches!(addr, 0xFF01 | 0xFF02) {
             Some(self.mmio.snapshot_serial_read(addr))
+        } else {
+            None
+        };
+        // IF read: the CPU resolves it at cc, but tick_m advances peripherals and
+        // would let an IRQ flagged within this read M-cycle leak in 4 dots early.
+        // Snapshot the VBlank (0) and STAT (1) bits pre-tick so a PPU IRQ raised
+        // within this read cycle is observed at the read's start cc (matching
+        // Gambatte's read-at-cc); the timer/serial/joypad bits keep the post-tick
+        // path, where their flag timing is already tuned to the full M-cycle.
+        const IF_PRE_MASK: u8 = 0x03;
+        let if_pre = if addr == 0xFF0F {
+            Some(self.mmio.snapshot_serial_read(addr) & IF_PRE_MASK)
         } else {
             None
         };
@@ -123,6 +135,9 @@ impl<'a> Bus<'a> {
         }
         if let Some(v) = serial_read {
             return v;
+        }
+        if let Some(pre) = if_pre {
+            return pre | (self.mmio.read(addr) & !IF_PRE_MASK);
         }
         self.mmio.read(addr)
     }
