@@ -172,6 +172,10 @@ pub struct Mmio {
     // matching condition is already true.
     #[serde(skip, default)]
     stat_register_write_pending: bool,
+    // Set specifically by FF41 (STAT) writes, even when the value is unchanged.
+    // The DMG STAT-write bug fires on any FF41 write regardless of value.
+    #[serde(skip, default)]
+    ff41_write_pending: bool,
     // Persistent CPU T-cycle phase. Survives instruction boundaries (unlike the
     // per-instruction `Bus::dot`). At double speed the PPU steps every other
     // T-cycle; this counter carries the true accumulated phase so the DS gate
@@ -269,6 +273,7 @@ impl Mmio {
             pending_oam_zero: std::cell::Cell::new(-1),
             ly_write_pending: false,
             stat_register_write_pending: false,
+            ff41_write_pending: false,
             cpu_t_phase: 0,
 
             // CGB-specific fields initialization
@@ -1084,6 +1089,7 @@ impl Mmio {
         self.io_registers
             .write(ppu::LCD_STATUS, (current & 0x07) | (value & 0x78));
         self.stat_register_write_pending = true;
+        self.ff41_write_pending = true;
     }
 
     fn write_lcd_control(&mut self, value: u8) {
@@ -1131,6 +1137,14 @@ impl Mmio {
     pub fn take_stat_register_write_pending(&mut self) -> bool {
         let pending = self.stat_register_write_pending;
         self.stat_register_write_pending = false;
+        pending
+    }
+
+    /// Consume the pending FF41 (STAT) write signal. True if FF41 was written
+    /// since the last call, even if the value was unchanged.
+    pub fn take_ff41_write_pending(&mut self) -> bool {
+        let pending = self.ff41_write_pending;
+        self.ff41_write_pending = false;
         pending
     }
 }
