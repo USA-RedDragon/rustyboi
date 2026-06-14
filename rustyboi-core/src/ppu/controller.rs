@@ -622,6 +622,20 @@ impl Ppu {
         }
     }
 
+    /// Advance the renderer by `dots` dots during the CGB STOP speed-switch
+    /// bridge. Gambatte's `Memory::stop` advances the LCD to `cc + 8` at the OLD
+    /// (single) speed before re-anchoring at the new speed (`lcd_.speedChange`).
+    /// Our per-dot stepper realizes only `8 >> ds` of those dots through the 8
+    /// returned cycles, so this injects the remaining bridge dots so the LCD
+    /// lands on the same dot Gambatte does after the 0x20000-cycle window.
+    pub fn stop_bridge_advance(&mut self, mmio: &mut mmio::Mmio, dots: u32) {
+        for _ in 0..dots {
+            self.step_scheduled_stat_events(mmio);
+            self.step(mmio);
+            self.step_lcdc_events(mmio);
+        }
+    }
+
     /// Recompute all scheduled IRQ event times from scratch at the current
     /// `abs_cc` (used on LCD enable / LY-counter reset).
     fn reschedule_all_stat_events(&mut self, mmio: &mmio::Mmio) {
