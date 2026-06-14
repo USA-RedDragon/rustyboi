@@ -1372,7 +1372,7 @@ impl Ppu {
 
                 let fetcher_lcdc_state = self.fetcher_lcdc_state();
                 if cadence_even
-                    && let Some(event) = self.fetcher.step(mmio, self.window_line_counter, fetcher_lcdc_state) {
+                    && let Some(event) = self.fetcher.step(mmio, self.window_line_counter, fetcher_lcdc_state, self.x) {
                         self.record_fetch_debug_event(event, mmio);
                 }
 
