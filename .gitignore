@@ -1,2 +1,5 @@
 /target
 *.rustyboisave
+
+# External test suite (assembled locally; never a tracked symlink)
+gambatte-core
