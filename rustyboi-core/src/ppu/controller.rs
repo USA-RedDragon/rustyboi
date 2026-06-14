@@ -767,9 +767,23 @@ impl Ppu {
         true
     }
 
+    // Gambatte's plotPixel/predictor window-Y gate: `weMaster || (wy2 == ly &&
+    // winEn)`. `wy2` is WY delayed ~2 dots after a write; we read WY live, which
+    // matches by the time the fetcher reaches WX. This `wy2 == ly` fallback
+    // catches late-frame WY writes that land after the three weMaster
+    // checkpoints (e.g. WY=ly written during the same line's mode 3).
+    fn window_y_active(&self, mmio: &mmio::Mmio) -> bool {
+        if (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) == 0 {
+            return false;
+        }
+        if self.window_y_triggered {
+            return true;
+        }
+        mmio.read(WY) == mmio.read(LY)
+    }
+
     fn window_will_start(&self, mmio: &mmio::Mmio, is_cgb: bool) -> bool {
-        let window_enabled = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
-        if !window_enabled || !self.window_y_triggered {
+        if !self.window_y_active(mmio) {
             return false;
         }
         let wx = mmio.read(WX) as i32;
@@ -1386,9 +1400,7 @@ impl Ppu {
                 }
 
                 // Check if we should start window rendering
-                let lcdc = self.lcdc;
-                let window_enabled = (lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
-                if window_enabled && self.window_y_triggered && !self.fetcher.is_fetching_window() {
+                if self.window_y_active(mmio) && !self.fetcher.is_fetching_window() {
                     let wx = mmio.read(WX);
                     // DMG never starts the window at WX==166; CGB does.
                     let wx_allowed = wx <= 166 && (mmio.is_cgb_features_enabled() || wx != 166);
