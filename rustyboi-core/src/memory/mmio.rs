@@ -488,6 +488,14 @@ impl Mmio {
         self.timer.set_internal_counter(value);
     }
 
+    /// Establish the post-`skip_bios` APU state. Syncs the APU cycle counter from
+    /// the (already-set) timer counter first so the channel duty phase has the
+    /// correct cc base, then applies Gambatte's post-boot state.
+    pub fn set_post_bios_audio_state(&mut self, cgb: bool) {
+        self.sync_apu_cc();
+        self.audio.set_post_bios_state(cgb);
+    }
+
     pub fn step_audio(&mut self) {
         self.sync_apu_cc();
         let mut audio = self.audio.clone();
