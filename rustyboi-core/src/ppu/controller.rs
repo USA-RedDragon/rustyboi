@@ -607,6 +607,21 @@ impl Ppu {
         self.sched_m0irq = abs;
     }
 
+    /// Re-anchor the event-scheduled STAT/mode/LYC clocks to the new CPU speed.
+    /// Mirrors Gambatte's `LCD::speedChange`: the renderer's LCD position
+    /// (`line_cycle`/`internal_ly`) is in speed-independent dot units and stays
+    /// put, but every scheduled event time carried the old `ds` cc-factor, so
+    /// recompute them from the live `abs_cc` under the new speed.
+    pub fn speed_change(&mut self, mmio: &mmio::Mmio) {
+        if self.disabled || self.lcdc & (LCDCFlags::DisplayEnable as u8) == 0 {
+            return;
+        }
+        self.reschedule_all_stat_events(mmio);
+        if self.sched_m0irq != stat_irq::DISABLED_TIME {
+            self.arm_m0irq_for_current_line(mmio);
+        }
+    }
+
     /// Recompute all scheduled IRQ event times from scratch at the current
     /// `abs_cc` (used on LCD enable / LY-counter reset).
     fn reschedule_all_stat_events(&mut self, mmio: &mmio::Mmio) {

@@ -16,6 +16,10 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
 
     if mmio.is_speed_switch_armed() {
         mmio.perform_speed_switch();
+        // Re-anchor the PPU's event-scheduled STAT/mode/LYC clocks to the new
+        // speed (Gambatte's `lcd_.speedChange`). The scheduled event times were
+        // computed with the old double-speed cc-factor.
+        mmio.ppu.speed_change(mmio.mmio);
         // Gambatte's unhalt event fires 0x20000 + 4 T-cycles after STOP entry
         // and the STOP itself advances the CPU clock by 8 (cc += 8). The 8 we
         // return below is part of that window, so the remaining no-fetch stall
