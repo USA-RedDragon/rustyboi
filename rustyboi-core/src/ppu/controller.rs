@@ -273,6 +273,19 @@ pub struct Ppu {
     #[serde(default)]
     stat_reg_committed: u8,
 
+    // DMG palette registers delayed by one dot. A BGP/OBP write during mode 3
+    // is resolved by the CPU before the four PPU dots of the write M-cycle are
+    // stepped, but on hardware the new palette only affects the pixel one dot
+    // after the write lands. The renderer resolves palettes at pixel shift-out
+    // from these delayed copies; each are refreshed to the live register at the
+    // end of every dot, yielding the one-dot apply latency.
+    #[serde(default)]
+    bgp_delayed: u8,
+    #[serde(default)]
+    obp0_delayed: u8,
+    #[serde(default)]
+    obp1_delayed: u8,
+
     #[serde(with = "serde_bytes")]
     fb_a: [u8; FRAMEBUFFER_SIZE],
     #[serde(with = "serde_bytes")]
@@ -335,6 +348,9 @@ impl Ppu {
             lyc_irq: stat_irq::LycIrq::default(),
             mstat_irq: stat_irq::MStatIrq::default(),
             stat_reg_committed: 0,
+            bgp_delayed: 0,
+            obp0_delayed: 0,
+            obp1_delayed: 0,
             fb_a: [0; FRAMEBUFFER_SIZE],
             fb_b: [0; FRAMEBUFFER_SIZE],
             color_fb_a: [0; FRAMEBUFFER_SIZE * 3],
@@ -501,26 +517,27 @@ impl Ppu {
         });
     }
 
-    pub fn get_palette_color(&self, mmio: &mmio::Mmio, idx: u8) -> u8 {
+    pub fn get_palette_color(&self, _mmio: &mmio::Mmio, idx: u8) -> u8 {
+        let bgp = self.bgp_delayed;
         match idx {
-            0 => mmio.read(BGP)&0x03,        // White
-            1 => (mmio.read(BGP)>>2)&0x03, // Light Gray
-            2 => (mmio.read(BGP)>>4)&0x03, // Dark Gray
-            3 => (mmio.read(BGP)>>6)&0x03, // Black
+            0 => bgp&0x03,        // White
+            1 => (bgp>>2)&0x03, // Light Gray
+            2 => (bgp>>4)&0x03, // Dark Gray
+            3 => (bgp>>6)&0x03, // Black
             _ => 0x00, // Default to black for invalid indices
         }
     }
 
-    pub fn get_sprite_palette_color(&self, mmio: &mmio::Mmio, idx: u8, palette: bool) -> u8 {
+    pub fn get_sprite_palette_color(&self, _mmio: &mmio::Mmio, idx: u8, palette: bool) -> u8 {
         if idx == 0 {
             return 0; // Transparent for sprites
         }
-        
-        let palette_reg = if palette { OBP1 } else { OBP0 };
+
+        let obp = if palette { self.obp1_delayed } else { self.obp0_delayed };
         match idx {
-            1 => (mmio.read(palette_reg)>>2)&0x03, // Light Gray
-            2 => (mmio.read(palette_reg)>>4)&0x03, // Dark Gray
-            3 => (mmio.read(palette_reg)>>6)&0x03, // Black
+            1 => (obp>>2)&0x03, // Light Gray
+            2 => (obp>>4)&0x03, // Dark Gray
+            3 => (obp>>6)&0x03, // Black
             _ => 0x00, // Default to transparent for invalid indices
         }
     }
@@ -1536,6 +1553,13 @@ impl Ppu {
                 }
             },
         }
+        // Latch the live DMG palette registers for use one dot from now. A
+        // mid-mode-3 write lands before this dot's pixel push (the CPU resolves
+        // the write before stepping the M-cycle's four dots), so resolving from
+        // last dot's snapshot gives the one-dot apply latency hardware shows.
+        self.bgp_delayed = mmio.read(BGP);
+        self.obp0_delayed = mmio.read(OBP0);
+        self.obp1_delayed = mmio.read(OBP1);
         self.ticks += 1;
     }
 
