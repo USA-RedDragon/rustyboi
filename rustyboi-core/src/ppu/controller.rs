@@ -65,7 +65,7 @@ const WRITE_CC_OFFSET: i64 = 0;
 fn env_off(name: &str, default: i64) -> i64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
-fn write_cc_off_ds() -> i64 { env_off("RB_WRITE_CC_OFF_DS", -6) }
+fn write_cc_off_ds() -> i64 { env_off("RB_WRITE_CC_OFF_DS", -3) }
 fn m0irq_off_ds() -> i64 { env_off("RB_M0IRQ_OFF_DS", M0IRQ_OFFSET) }
 fn m2irq_off_ds() -> i64 { env_off("RB_M2IRQ_OFF_DS", -2) }
 // Sweep-tunable single-speed offsets (default to the compiled-in constants).
