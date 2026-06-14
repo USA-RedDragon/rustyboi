@@ -38,6 +38,12 @@ const CGB_FIRST_FRAME_ARM_DOT: u128 = 86;
 // for the scheduled Mode 3 -> Mode 0 transition. Swept against the full suite.
 const DMG_MODE0_OFFSET: i32 = 4;
 const CGB_MODE0_OFFSET: i32 = 4;
+// Mode-3 dot penalty for a window starting on this line (Gambatte StartWindowDraw).
+const WIN_M3_PENALTY: i32 = 6;
+// Extra mode-0 schedule offset on window-start lines, relative to the normal
+// DMG/CGB offset. Swept against the suite.
+const DMG_WIN_MODE0_OFFSET: i32 = 0;
+const CGB_WIN_MODE0_OFFSET: i32 = 0;
 // Offset (dots) between the renderer's scheduled mode-0 transition and the
 // event-model mode-0 STAT IRQ fire time. Tuned against the suite.
 const M0IRQ_OFFSET: i64 = -1;
@@ -414,6 +420,13 @@ impl Ppu {
             && (value & tile_data_select) == 0
             && (old_lcdc & display_enable) != 0
             && (value & display_enable) != 0;
+        // A mid-mode-3 window-enable toggle invalidates the closed-form mode-0
+        // schedule (computed at M3 start from the initial WX/LCDC). Fall back to
+        // the live emergent x==160 transition, which tracks the change.
+        let win_bit = LCDCFlags::WindowDisplayEnable as u8;
+        if self.state == State::PixelTransfer && (old_lcdc & win_bit) != (value & win_bit) {
+            self.scheduled_mode0_dot = None;
+        }
         self.lcdc = value;
     }
 
@@ -673,6 +686,12 @@ impl Ppu {
     }
 
     fn compute_m3_length(&self, mmio: &mmio::Mmio, is_cgb: bool) -> u128 {
+        let (len, _win) = self.compute_m3_length_win(mmio, is_cgb);
+        len
+    }
+
+    // Returns (mode-3 length in dots past base, whether the window contributed).
+    fn compute_m3_length_win(&self, mmio: &mmio::Mmio, is_cgb: bool) -> (u128, bool) {
         let scx = (mmio.read(SCX) & 0x07) as i32;
         // Fine-scroll discard prefix: M3Start::f1 consumes scx%8 dots, then
         // nextCall(1-cgb) before the tile loop (167-base) begins.
@@ -684,9 +703,11 @@ impl Ppu {
         // (firstTileXpos = endx%8) and a `spx > nwx` group (firstTileXpos =
         // nwx+1, prevTileNo reset). nwx stays 0xFF when no window starts.
         let mut nwx: i32 = 0xFF;
+        let mut win = false;
         if self.window_will_start(mmio, is_cgb) {
             nwx = mmio.read(WX) as i32;
-            cycles += 6;
+            cycles += WIN_M3_PENALTY;
+            win = true;
         }
 
         // Sprites. Only count if OBJ enabled (or CGB always evaluates them).
@@ -733,7 +754,7 @@ impl Ppu {
             }
         }
 
-        cycles.max(0) as u128
+        (cycles.max(0) as u128, win)
     }
 
     fn set_lcd_status_mode(mmio: &mut mmio::Mmio, mode: u8) {
@@ -1165,11 +1186,18 @@ impl Ppu {
                     // On window-start lines the emergent fetcher (window restart)
                     // tracks the mode-3 length better than the closed-form
                     // predictor, so fall back to the x==160 trigger there.
-                    if was_first_line || self.window_will_start(mmio, is_cgb) {
+                    if was_first_line {
                         self.scheduled_mode0_dot = None;
                     } else {
-                        let m3_len = self.compute_m3_length(mmio, is_cgb);
-                        let offset = if is_cgb { CGB_MODE0_OFFSET } else { DMG_MODE0_OFFSET };
+                        // Closed-form mode-0 schedule, including window-start lines.
+                        // A mid-mode-3 window-enable toggle (handled in
+                        // set_lcdc_visible) invalidates this and falls back to the
+                        // live emergent x==160 transition.
+                        let (m3_len, win) = self.compute_m3_length_win(mmio, is_cgb);
+                        let mut offset = if is_cgb { CGB_MODE0_OFFSET } else { DMG_MODE0_OFFSET };
+                        if win {
+                            offset += if is_cgb { CGB_WIN_MODE0_OFFSET } else { DMG_WIN_MODE0_OFFSET };
+                        }
                         let dot = self.ticks as i64 + m3_len as i64 + offset as i64;
                         self.scheduled_mode0_dot = Some(dot.max(0) as u128);
                     }
