@@ -57,6 +57,16 @@ const M2IRQ_OFFSET: i64 = -1;
 // full M-cycle (4 machine cycles) behind. Swept against the suite.
 const WRITE_CC_OFFSET: i64 = -1;
 const WRITE_CC_OFFSET_DS: i64 = -4;
+
+// Env-tunable override of an i64 offset (for sweeping during development). When
+// the named env var is unset, the compiled-in default is used.
+#[inline]
+fn env_off(name: &str, default: i64) -> i64 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+fn write_cc_off_ds() -> i64 { env_off("RB_WRITE_CC_OFF_DS", -6) }
+fn m0irq_off_ds() -> i64 { env_off("RB_M0IRQ_OFF_DS", M0IRQ_OFFSET) }
+fn m2irq_off_ds() -> i64 { env_off("RB_M2IRQ_OFF_DS", -2) }
 const MODE2_STAT_PRETRIGGER_DOT: u128 = 452;
 // Within line 153 (the last VBlank line) the LY register is held at 153 only
 // briefly; after this many dots it reads 0, even though the line itself
@@ -252,6 +262,10 @@ pub struct Ppu {
     // `lyCounter` (`time` = abs_cc when LY next increments).
     #[serde(default)]
     abs_cc: u64,
+    // Sub-PPU-dot parity (0/1) of the currently-resolving CPU register write at
+    // double speed. Set by the bus just before the FF4x write hooks run.
+    #[serde(skip, default)]
+    write_subdot: u8,
     #[serde(default)]
     line_cycle: u32,
     #[serde(default)]
@@ -338,6 +352,7 @@ impl Ppu {
             m3_scheduled_win: false,
             scheduled_mode0_dot: None,
             abs_cc: 0,
+            write_subdot: 0,
             line_cycle: 0,
             internal_ly_val: 0,
             sched_lycirq: stat_irq::DISABLED_TIME,
@@ -586,8 +601,8 @@ impl Ppu {
         // The renderer's "current dot" abs value is abs_cc-1 (advanced at top of
         // step). Dots remaining until mode 0 = mode0_within_line - ticks.
         let remaining = mode0_within_line - self.ticks as i64;
-        let off = M0IRQ_OFFSET;
         let ds = mmio.is_double_speed_mode();
+        let off = if ds { m0irq_off_ds() } else { M0IRQ_OFFSET };
         let dsf = 1i64 << ds as i32;
         let abs = (self.abs_cc as i64 - dsf + (remaining + off) * dsf).max(0) as u64;
         self.sched_m0irq = abs;
@@ -603,7 +618,7 @@ impl Ppu {
         self.sched_lycirq = self.lyc_irq.time;
         self.sched_m1irq = stat_irq::mode1_irq_schedule(&lc, cc);
         let m2 = stat_irq::mode2_irq_schedule(stat, &lc, cc);
-        self.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off()) as u64 };
+        self.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off(mmio.is_double_speed_mode())) as u64 };
         // m0irq is scheduled from the renderer's mode-0 prediction; (re)armed
         // when entering pixel transfer. Leave as-is here.
     }
@@ -648,8 +663,8 @@ impl Ppu {
         }
     }
 
-    fn m2_off() -> i64 {
-        M2IRQ_OFFSET
+    fn m2_off(ds: bool) -> i64 {
+        if ds { m2irq_off_ds() } else { M2IRQ_OFFSET }
     }
 
     fn do_mode2_irq_event(&mut self, mmio: &mut mmio::Mmio, ds: bool) {
@@ -930,6 +945,13 @@ impl Ppu {
     /// PPU on its next dot step; this hook closes the gap where enabling a
     /// STAT source whose underlying condition is already true must produce
     /// an immediate rising edge.
+    /// Record the sub-PPU-dot parity of the CPU write about to be resolved, so
+    /// the STAT/LYC change hooks can place the event on the correct half-dot at
+    /// double speed. `phase` is the persistent CPU T-phase at write resolution.
+    pub fn set_write_subdot(&mut self, phase: u64) {
+        self.write_subdot = (phase % 2) as u8;
+    }
+
     pub fn on_stat_register_write(&mut self, mmio: &mut mmio::Mmio) {
         // Keep the LYC=LY readback flag (FF41 bit 2) in sync regardless of LCD
         // state; only its IRQ side-effects are gated by enable.
@@ -1025,7 +1047,7 @@ impl Ppu {
             self.arm_m0irq_for_current_line(mmio);
         }
         let m2 = stat_irq::mode2_irq_schedule(data, &lc, cc);
-        self.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off()) as u64 };
+        self.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off(mmio.is_double_speed_mode())) as u64 };
         self.sched_lycirq = self.lyc_irq.time;
 
         let cgb = mmio.is_cgb_features_enabled();
@@ -1082,9 +1104,16 @@ impl Ppu {
     /// The absolute clock value attributed to a register write. The write hook
     /// fires after the FF4x store but before this M-cycle's 4 dots tick, so the
     /// renderer's current dot is `abs_cc - 1`.
+    ///
+    /// At double speed `abs_cc` advances by 2 per PPU step and the PPU only
+    /// steps on even CPU T-phases, so `abs_cc` alone can only place a write on
+    /// an even half-dot. `write_subdot` carries the true sub-dot parity of the
+    /// resolving CPU write (0 on an even T-phase, 1 on an odd one), giving the
+    /// STAT model half-PPU-dot precision.
     fn write_cc(&self, ds: bool) -> u64 {
-        let off = if ds { WRITE_CC_OFFSET_DS } else { WRITE_CC_OFFSET };
-        (self.abs_cc as i64 + off).max(0) as u64
+        let off = if ds { write_cc_off_ds() } else { WRITE_CC_OFFSET };
+        let sub = if ds { self.write_subdot as i64 } else { 0 };
+        (self.abs_cc as i64 + off + sub).max(0) as u64
     }
 
     /// LY value used for the LYC=LY comparison. In Gambatte the compare uses
