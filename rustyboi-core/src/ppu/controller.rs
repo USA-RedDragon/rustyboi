@@ -1438,6 +1438,26 @@ impl Ppu {
         self.ticks
     }
 
+    /// Cycle-exact HDMA-eligibility predicate, mirroring Gambatte's
+    /// `isHdmaPeriod` (video.cpp): a visible line, the within-line dot is at or
+    /// past the predicted mode-0 (HBlank) start, and there is still room before
+    /// line end to run a block (`dot + 3 + 3*ds < lineEnd`). Returns None when
+    /// no closed-form mode-0 dot is available (window/first line after enable),
+    /// so callers can fall back to the STAT mode-edge model. Read-only.
+    pub fn hdma_period(&self, double_speed: bool) -> Option<bool> {
+        if self.disabled {
+            return None;
+        }
+        let m0 = self.scheduled_mode0_dot? as i128;
+        let ly = self.internal_ly_val;
+        if ly >= 144 {
+            return Some(false);
+        }
+        let ds = double_speed as i128;
+        let dot = self.ticks as i128;
+        Some(dot >= m0 && dot + 3 + 3 * ds < 456)
+    }
+
     pub fn get_x(&self) -> u8 {
         self.x
     }
