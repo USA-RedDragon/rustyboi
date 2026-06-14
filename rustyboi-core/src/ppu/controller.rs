@@ -1516,8 +1516,16 @@ impl Ppu {
                 };
 
                 let fetcher_lcdc_state = self.fetcher_lcdc_state();
+                // Pixels still to be discarded for SCX fine-scroll: they sit in
+                // the FIFO but won't be displayed, so the BG tile column (derived
+                // from display_x + FIFO depth) must not count them.
+                let pending_discard = if self.x == 0 {
+                    (self.m3_discard_target.max(0) as u8).saturating_sub(self.m3_pixels_discarded)
+                } else {
+                    0
+                };
                 if cadence_even
-                    && let Some(event) = self.fetcher.step(mmio, self.window_line_counter, fetcher_lcdc_state, self.x) {
+                    && let Some(event) = self.fetcher.step(mmio, self.window_line_counter, fetcher_lcdc_state, self.x, pending_discard) {
                         self.record_fetch_debug_event(event, mmio);
                 }
 
