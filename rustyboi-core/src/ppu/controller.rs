@@ -44,8 +44,8 @@ const WIN_M3_PENALTY: i32 = 6;
 // event-model mode-0 STAT IRQ fire time. Tuned against the suite.
 const M0IRQ_OFFSET: i64 = -1;
 // Mode-2 STAT IRQ fires this many dots relative to the schedule formula; the
-// renderer-timed render tests need it 2 dots earlier. Swept against the suite.
-const M2IRQ_OFFSET: i64 = -2;
+// renderer-timed render tests need it earlier. Swept against the suite.
+const M2IRQ_OFFSET: i64 = -1;
 // Absolute-clock offset attributed to an FF41/FF45 register write. The write
 // hook fires after the store but before this M-cycle's dots tick; `abs_cc`
 // advances by 1<<ds per dot, so at double speed the write's true cycle is a
