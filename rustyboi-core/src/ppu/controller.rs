@@ -1692,7 +1692,7 @@ impl Ppu {
     /// mode 2|3 for oam). The cycle-exact predictor only refines the mode-3->0
     /// END boundary against `scheduled_mode0_dot` (Gambatte's `m0TimeOfCurrentLine`);
     /// the start stays on the renderer's mode set, which is window-independent.
-    pub fn cpu_access_blocked(&self, kind: u8, mode3_locked: bool, is_cgb: bool, double_speed: bool) -> Option<bool> {
+    pub fn cpu_access_blocked(&self, kind: u8, is_read: bool, mode3_locked: bool, is_cgb: bool, double_speed: bool) -> Option<bool> {
         if self.disabled || self.internal_ly_val >= 144 {
             return Some(false);
         }
@@ -1702,11 +1702,24 @@ impl Ppu {
         // End: vram/oam unblock at cc+2 >= m0Time; cgbp at cc >= m0Time+2.
         // DMG's m0 end sits one dot later than CGB in the renderer's tick frame.
         // VRAM/OAM unblock at Gambatte's `cc+2 >= m0Time`; DMG's m0 end lands one
-        // renderer dot later than CGB, so DMG keeps blocking one extra dot.
+        // renderer dot later than CGB (the `1 - cgb` term). At double speed the
+        // CPU read resolves a full (2-dot) M-cycle after `ticks`, so the renderer
+        // is two dots behind the access cc — add that back.
+        let eds = 2 * ds;
         let ended = match kind {
             2 => self.ticks as i64 + ds >= m0 + 2,
-            _ => self.ticks as i64 - ds - (1 - cgb) >= m0,
+            _ => self.ticks as i64 - ds - (1 - cgb) + eds >= m0,
         };
+        // CGB-palette has its own M3 start (Gambatte cgbpAccessible: blocks at
+        // lineCycles + ds >= 80). lineCycles = ticks - (4 - cgb), so the block
+        // begins at ticks + ds - (4 - cgb) >= 80; one dot after the FF41 mode-3
+        // set, leaving FF69/FF6B accessible for that extra dot.
+        if kind == 2 {
+            let begun = self.ticks as i64 + ds - (4 - cgb) >= 80;
+            return Some(begun && !ended);
+        }
+        // VRAM/OAM M3 start stays on the renderer's FF41 mode (window-safe).
+        let _ = is_read;
         Some(mode3_locked && !ended)
     }
 
