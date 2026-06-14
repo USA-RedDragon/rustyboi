@@ -15,9 +15,14 @@ const SC_INTERNAL_CLOCK: u8 = 1 << 0;
 pub struct Serial {
     sb: u8,
     sc: u8,
-    bits_left: u8,
-    // Falling edge of the selected divider bit shifts one bit out.
-    last_clock_bit: bool,
+    // Absolute completion model (mirrors Gambatte's serial event time): a
+    // transfer's interrupt fires at `complete_at` (a CPU T-phase), with one bit
+    // shifted out every `step_t` phases. Bits already shifted are reconstructed
+    // from the remaining time so SB reads stay correct mid-transfer.
+    active: bool,
+    complete_at: u64,
+    step_t: u32,
+    bits_shifted: u8,
     cgb: bool,
 }
 
@@ -26,8 +31,10 @@ impl Serial {
         Serial {
             sb: 0,
             sc: 0,
-            bits_left: 0,
-            last_clock_bit: false,
+            active: false,
+            complete_at: 0,
+            step_t: 0,
+            bits_shifted: 0,
             cgb: false,
         }
     }
@@ -36,38 +43,63 @@ impl Serial {
         self.cgb = cgb;
     }
 
-    fn transfer_active(&self) -> bool {
+    /// Latch an SC (FF02) write and (re)schedule the transfer event.
+    pub fn schedule_sc(&mut self, value: u8, divider: u16, phase: u64) {
+        self.sc = value;
+        self.schedule(divider, phase);
+    }
+
+    fn internal_start(&self) -> bool {
         (self.sc & SC_TRANSFER_START) != 0 && (self.sc & SC_INTERNAL_CLOCK) != 0
     }
 
-    fn clock_bit_index(&self) -> u8 {
-        if self.cgb && (self.sc & SC_FAST_CLOCK) != 0 {
-            3 // 262144 Hz
-        } else {
-            8 // 8192 Hz
-        }
-    }
-
-    fn clock_bit(&self, divider: u16) -> bool {
-        (divider & (1 << self.clock_bit_index())) != 0
-    }
-
-    pub fn step(&mut self, divider: u16, mmio: &mut mmio::Mmio) {
-        if !self.transfer_active() {
-            self.last_clock_bit = self.clock_bit(divider);
+    /// Schedule (or cancel) the transfer event. `divider` is the timer's
+    /// internal counter and `phase` the CPU T-phase, both sampled at the SC
+    /// write's resolution cc. Mirrors Gambatte memory.cpp 0x02 write:
+    /// `eventTime = cc - (cc - divLastUpdate) % align + step * 8`.
+    fn schedule(&mut self, divider: u16, phase: u64) {
+        if !self.internal_start() {
+            self.active = false;
             return;
         }
+        let fast = self.cgb && (self.sc & SC_FAST_CLOCK) != 0;
+        let (step, align_mask) = if fast { (16u32, 0x0Fu64) } else { (512u32, 0xFFu64) };
+        self.step_t = step;
+        self.bits_shifted = 0;
+        // Snap `phase` down to the DIV-aligned grid (Gambatte:
+        // `cc - (cc - divLastUpdate) % align`), add the 8-bit transfer span, and
+        // back off one M-cycle: the SC write resolves at this M-cycle's end
+        // (tick-before-write), one M-cycle past Gambatte's mid-cycle write cc.
+        const WRITE_CC_OFFSET: u64 = 8;
+        self.complete_at =
+            phase - (divider as u64 & align_mask) + (step as u64) * 8 - WRITE_CC_OFFSET;
+        self.active = true;
+    }
 
-        let bit = self.clock_bit(divider);
-        if self.last_clock_bit && !bit {
-            self.sb = (self.sb << 1) | 1; // no peer connected -> ones shifted in
-            self.bits_left = self.bits_left.saturating_sub(1);
-            if self.bits_left == 0 {
-                self.sc &= !SC_TRANSFER_START;
-                mmio.request_interrupt(cpu::registers::InterruptFlag::Serial);
-            }
+    /// Advance bookkeeping at CPU T-phase `phase` (sampled before this dot's
+    /// advance, matching the per-dot tick ordering). Shifts SB as bits clock out
+    /// and raises the serial IRQ exactly when `complete_at` is reached.
+    pub fn step(&mut self, phase: u64, mmio: &mut mmio::Mmio) {
+        if !self.active {
+            return;
         }
-        self.last_clock_bit = bit;
+        // Number of bits whose clock edge has passed by `phase`.
+        let target = if phase >= self.complete_at {
+            8
+        } else {
+            let remaining_t = self.complete_at - phase;
+            let remaining_bits = ((remaining_t + self.step_t as u64 - 1) / self.step_t as u64) as u8;
+            8u8.saturating_sub(remaining_bits)
+        };
+        while self.bits_shifted < target {
+            self.sb = (self.sb << 1) | 1; // no peer connected -> ones shifted in
+            self.bits_shifted += 1;
+        }
+        if phase >= self.complete_at {
+            self.active = false;
+            self.sc &= !SC_TRANSFER_START;
+            mmio.request_interrupt(cpu::registers::InterruptFlag::Serial);
+        }
     }
 }
 
@@ -86,12 +118,7 @@ impl Addressable for Serial {
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
             SB => self.sb = value,
-            SC => {
-                self.sc = value;
-                if (value & SC_TRANSFER_START) != 0 {
-                    self.bits_left = 8;
-                }
-            }
+            SC => self.sc = value,
             _ => panic!("Serial: Invalid write address {:04X}", addr),
         }
     }
