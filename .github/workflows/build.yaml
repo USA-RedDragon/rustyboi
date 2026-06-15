@@ -81,6 +81,14 @@ jobs:
         continue-on-error: true   # no profile (ROMS_URL unset / gen failed) => plain build
       - name: Build libretro ${{ matrix.name }}
         run: make libretro TARGETS=${{ matrix.name }}
+      - name: Publish libretro ${{ matrix.name }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/claude' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: libretro-${{ matrix.name }}
+          path: target/libretro/${{ matrix.name }}/
+          retention-days: 7
+          if-no-files-found: error
 
   native:
     name: 'native / ${{ matrix.name }}'
@@ -102,6 +110,14 @@ jobs:
         continue-on-error: true
       - name: Build native ${{ matrix.name }}
         run: make native TARGETS=${{ matrix.name }}
+      - name: Publish native ${{ matrix.name }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/claude' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-${{ matrix.name }}
+          path: target/native/${{ matrix.name }}/
+          retention-days: 7
+          if-no-files-found: error
 
   android:
     name: 'android / ${{ matrix.abi }}'
@@ -130,6 +146,14 @@ jobs:
           path: android/app/src/main/jniLibs
           if-no-files-found: error
           retention-days: 1
+      - name: Publish apk ${{ matrix.abi }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/claude' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: android-apk-${{ matrix.abi }}
+          path: android/app/build/outputs/apk/release/app-${{ matrix.abi }}-release*.apk
+          retention-days: 7
+          if-no-files-found: error
 
   android-bundle:
     name: android / aab
@@ -163,6 +187,14 @@ jobs:
           for a in arm64-v8a armeabi-v7a x86_64 x86; do
             grep -qw "$a" <<<"$got" || { echo "::error::$a missing from .aab"; exit 1; }
           done
+      - name: Publish .aab
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/claude' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: android-aab
+          path: android/app/build/outputs/bundle/release/app-release.aab
+          retention-days: 7
+          if-no-files-found: error
 
   web:
     name: web
@@ -222,6 +254,14 @@ jobs:
         continue-on-error: true
       - name: Build ios
         run: make ios
+      - name: Publish ios
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/claude' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ios
+          path: ios/build/
+          retention-days: 7
+          if-no-files-found: error
 
   build-success:
     name: Build success check
