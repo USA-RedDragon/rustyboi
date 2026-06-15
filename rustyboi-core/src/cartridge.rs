@@ -8,6 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::Arc;
 use zip::ZipArchive;
 
 // Cartridge header offsets
@@ -293,8 +294,13 @@ pub struct Cartridge {
     // `attach_rom` after a state load from the already-resident ROM bytes; every
     // field that derives from it (`rom_banks`, `cartridge_type`, `mbc1_multicart`,
     // `unl_mapper`, `cgb_support`) DOES serialize, so bank math survives the load.
+    // Held behind an `Arc` so `Cartridge::clone` (and thus `GB::clone`, used by
+    // the offloaded rewind capture every few frames) shares this multi-MB buffer
+    // by refcount instead of deep-copying it. The sole mutation — a Game Genie
+    // patch in `apply_rom_patch` — uses `Arc::make_mut` for copy-on-write, so a
+    // live clone is never disturbed.
     #[serde(skip, default)]
-    rom_data: Vec<u8>,
+    rom_data: Arc<[u8]>,
     // Cached (bank0_base, bankN_base) ROM byte offsets for the licensed-mapper
     // read fast path, so a ROM read is an add + bounds check instead of the
     // full mapper-type + bank-register derivation per access. Invalidated by
@@ -1066,7 +1072,7 @@ impl Cartridge {
         let mbc1_multicart = Self::detect_mbc1_multicart(cartridge_type, &data);
 
         let mut cartridge = Cartridge {
-            rom_data,
+            rom_data: rom_data.into(),
             rom_bank_cache: Cell::new(None),
             ram_data,
             cartridge_type,
@@ -1269,7 +1275,7 @@ impl Cartridge {
         let mbc1_multicart = Self::detect_mbc1_multicart(cartridge_type, &actual_data);
 
         let cartridge = Cartridge {
-            rom_data,
+            rom_data: rom_data.into(),
             rom_bank_cache: Cell::new(None),
             ram_data,
             cartridge_type,
@@ -1368,7 +1374,7 @@ impl Cartridge {
     /// a live cartridge so it can be re-attached to a savestate-restored one. The
     /// ROM is `#[serde(skip)]`, so this is how a load path carries the ROM across.
     pub fn detach_rom(&self) -> Vec<u8> {
-        self.rom_data.clone()
+        self.rom_data.to_vec()
     }
 
     /// Re-attach the ROM image after a savestate load (where `rom_data` was
@@ -1379,11 +1385,11 @@ impl Cartridge {
     pub fn attach_rom(&mut self, rom: Vec<u8>) {
         let expected = self.rom_banks * 0x4000;
         self.rom_data = if rom.len() >= expected {
-            rom[..expected].to_vec()
+            Arc::from(&rom[..expected])
         } else {
             let mut padded = rom;
             padded.resize(expected, 0xFF);
-            padded
+            padded.into()
         };
     }
 
@@ -3354,7 +3360,7 @@ impl Cartridge {
         {
             return;
         }
-        self.rom_data[offset] = new;
+        Arc::make_mut(&mut self.rom_data)[offset] = new;
     }
 
     /// Boot-ROM handoff for skip_bios: the Sachen and Rocket boot locks model

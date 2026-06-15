@@ -84,33 +84,46 @@ fn create_render_state(
 
     // wgpu 29's `InstanceDescriptor` holds a non-Default `display` handle field,
     // so it can't be spread from `Default::default()`; set fields explicitly.
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
-        flags: wgpu::InstanceFlags::default(),
-        memory_budget_thresholds: Default::default(),
-        backend_options: Default::default(),
-        display: None,
-    });
-    // `Arc<Window>: Into<SurfaceTarget<'static>>` — no unsafe.
-    let surface = instance
-        .create_surface(window.clone())
-        .map_err(|e| PlatformError::new(format!("create_surface: {e}")))?;
+    let make_instance = |backends| {
+        wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends,
+            flags: wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: Default::default(),
+            backend_options: Default::default(),
+            display: None,
+        })
+    };
+    // Prefer a Vulkan-only instance when a Vulkan adapter is actually available.
+    // `Backends::all()` also spins up the GL/Mesa backend, which drags in LLVM
+    // (the Mesa shader compiler), tens of MB of resident code we never use on a
+    // Vulkan GPU. Try Vulkan first; only fall back to all backends when Vulkan
+    // can't supply a compatible adapter (older GL-only hardware, some VMs).
+    let try_backends =
+        |backends| -> Option<(wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter)> {
+            let instance = make_instance(backends);
+            let surface = instance.create_surface(window.clone()).ok()?;
+            let adapter = pollster::block_on(instance.request_adapter(
+                &wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::default(),
+                    force_fallback_adapter: false,
+                    compatible_surface: Some(&surface),
+                },
+            ))
+            .ok()?;
+            Some((instance, surface, adapter))
+        };
+    let (_instance, surface, adapter) = try_backends(wgpu::Backends::VULKAN)
+        .or_else(|| try_backends(wgpu::Backends::all()))
+        .ok_or_else(|| PlatformError::new("no compatible wgpu adapter".to_string()))?;
+    log::info!("wgpu adapter: {:?}", adapter.get_info());
 
-    // wgpu 29: `request_adapter` returns a `Result` (was `Option`).
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::default(),
-        force_fallback_adapter: false,
-        compatible_surface: Some(&surface),
-    }))
-    .map_err(|e| PlatformError::new(format!("no compatible wgpu adapter: {e}")))?;
-
-    // Desktop (native backends): request the adapter's full default limits so the
-    // egui atlas has room on hi-DPI. wgpu 29 dropped the trailing trace-path arg
-    // and added `memory_hints`/`trace`/`experimental_features` (defaulted here).
+    let mut limits = wgpu::Limits::downlevel_defaults();
+    limits.max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("rustyboi_device"),
         required_features: wgpu::Features::empty(),
-        required_limits: wgpu::Limits::default(),
+        required_limits: limits,
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
         ..Default::default()
     }))
     .map_err(|e| PlatformError::new(format!("request_device: {e}")))?;
@@ -441,11 +454,11 @@ fn run_gui_loop(
     let mut session_config = rustyboi_session::Config::load(ports.storage.as_ref());
     session_config.hardware = config.hardware;
 
-    let rom_bytes = config.rom.as_ref().and_then(|p| std::fs::read(p).ok());
-
     // `mut` only used on native, where offloaded rewind is enabled below.
     #[cfg_attr(any(target_arch = "wasm32", target_os = "android"), allow(unused_mut))]
-    let mut session = session_from_gb(gb, rom_bytes.as_deref(), session_config, ports);
+    let mut session = {
+        session_from_gb(gb, config.rom.as_ref().and_then(|p| std::fs::read(p).ok()).as_deref(), session_config, ports)
+    };
 
     // Native desktop: offloaded rewind capture (worker serializes off-thread).
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
