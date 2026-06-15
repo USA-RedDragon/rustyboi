@@ -1522,9 +1522,12 @@ impl Ppu {
                     // SCX live (see the early-window loop in PixelTransfer). Seed
                     // it unlatched (-1) and record the arm dot for xpos tracking.
                     self.m3_pixels_discarded = 0;
-                    self.m3_discard_target = -1;
                     self.m3_arm_dot = self.ticks;
                     self.m3_arm_scx = (mmio.read(SCX) & 0x07) as u8;
+                    // The first line after display enable has bespoke warmup/arm
+                    // timing; the live f1 xpos mapping does not align there, so
+                    // latch the discard immediately (pre-write SCX), as before.
+                    self.m3_discard_target = if was_first_line { self.m3_arm_scx as i8 } else { -1 };
                     self.check_and_trigger_stat_interrupt(mmio);
 
                     if was_first_line {
