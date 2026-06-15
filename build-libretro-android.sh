@@ -98,16 +98,21 @@ for abi in "${ABIS[@]}"; do
         cargo ndk -t "$abi" -P "$API" -o "$OUT" build -p rustyboi-libretro --release
 
     src="$OUT/$abi/librustyboi_libretro.so"
-    dst="$OUT/$abi/librustyboi_libretro_android.so"
+    # RetroArch Android cores have NO `lib` prefix: `<name>_libretro_android.so`.
+    dst="$OUT/$abi/rustyboi_libretro_android.so"
     [ -f "$src" ] || { echo "ERROR: expected artifact missing: $src"; exit 1; }
     mv -f "$src" "$dst"
+    # Drop the stray core-lib cdylib cargo-ndk also copies; RetroArch only needs the core.
+    rm -f "$OUT/$abi/librustyboi_core_lib.so" "$OUT/$abi/librustyboi_libretro_android.so"
     [ -f "$INFO" ] && cp -f "$INFO" "$OUT/$abi/"
     echo "    -> $dst"
 done
 
 echo ""
-echo "Done. Install on a device (matching ABI, usually arm64-v8a):"
-echo "  adb push $OUT/arm64-v8a/librustyboi_libretro_android.so /sdcard/RetroArch/cores/"
-echo "  adb push $OUT/arm64-v8a/rustyboi_libretro.info          /sdcard/RetroArch/info/"
-echo "Then in RetroArch: Load Core -> Install or Restore a Core -> pick the .so,"
-echo "or point 'Core' at the cores dir above. Load Content with a .gb/.gbc ROM."
+echo "Done. RetroArch Android keeps cores in an app-private dir you can't push"
+echo "into directly, so install via the menu instead:"
+echo "  1. adb push $OUT/arm64-v8a/rustyboi_libretro_android.so /sdcard/Download/"
+echo "  2. In RetroArch: Main Menu -> Load Core -> Install or Restore a Core"
+echo "     -> Downloads -> rustyboi_libretro_android.so  (RetroArch copies it in)"
+echo "  3. Load Core -> Rustyboi, then Load Content with a .gb/.gbc ROM."
+echo "  (Confirm the real cores path under Settings -> Directory -> Cores.)"
