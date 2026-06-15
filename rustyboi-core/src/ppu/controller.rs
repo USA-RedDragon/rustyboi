@@ -651,7 +651,18 @@ impl Ppu {
         // step). Dots remaining until mode 0 = mode0_within_line - ticks.
         let remaining = mode0_within_line - self.ticks as i64;
         let ds = mmio.is_double_speed_mode();
-        let off = if ds { m0irq_off_ds() } else { m0irq_off_ss() };
+        let mut off = if ds { m0irq_off_ds() } else { m0irq_off_ss() };
+        // CGB single-speed, SCX%8 == 2: the mode-0 IRQ lands one dot earlier than
+        // our closed-form mode-3 prediction implies. The M3Start fine-scroll
+        // dispatch (`flut[scx%8]` after `nextCall(1-cgb, ...)`) consumes one
+        // fewer dot at this phase than the linear `scx` prefix in
+        // compute_m3_length_win models, so only this SCX phase needs the nudge.
+        // Calibrated against m2int_m0irq / enable_display / halt / irq_precedence
+        // scx2 CGB cases (10 fixed, 0 regressed); other SCX phases regress and
+        // are left untouched.
+        if is_cgb && !ds && (mmio.read(SCX) & 0x07) == 2 {
+            off += env_off("RB_M0IRQ_SCX2_CGB", -1);
+        }
         let dsf = 1i64 << ds as i32;
         let abs = (self.abs_cc as i64 - dsf + (remaining + off) * dsf).max(0) as u64;
         self.sched_m0irq = abs;
