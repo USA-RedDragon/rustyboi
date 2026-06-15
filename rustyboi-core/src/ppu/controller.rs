@@ -33,7 +33,12 @@ const CGB_PIXEL_TRANSFER_WARMUP: u8 = 2;
 // (m3StartLineCycle + 2) dots after enable. m3StartLineCycle = 83 + cgb,
 // giving 85 (DMG) / 86 (CGB) dots from enable to first M3.
 const DMG_FIRST_FRAME_ARM_DOT: u128 = 85;
-const CGB_FIRST_FRAME_ARM_DOT: u128 = 86;
+// Gambatte's documented first-M3 start is m3StartLineCycle+2 = 86 (CGB), but the
+// emulated first-line pixel pipeline (warmup + arm) lands the mode-0 transition
+// two dots late versus hardware at this point. Arming two dots earlier aligns the
+// first-line mode-0 IRQ. Calibrated against enable_display m0irq cases (3 fixed,
+// 1 regressed -> net -2; only the enable_display cluster moves).
+const CGB_FIRST_FRAME_ARM_DOT: u128 = 84;
 // On the first line after enable, VRAM/OAM lock (PPU reports mode 3) at the
 // same line-cycle as a normal line (Gambatte: lineCycles >= ~79), even though
 // the actual pixel fetch (M3Start) begins later at FIRST_FRAME_ARM_DOT.
