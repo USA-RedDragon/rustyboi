@@ -361,6 +361,7 @@ impl Core for RustyboiCore {
         if let Some(gb) = self.gb_mut() {
             gb.reset();
         }
+        self.publish_memory_maps(env);
         self.rumble_state.set(false);
         if self.rumble_enabled {
             env.set_rumble(0, 0);
@@ -484,10 +485,10 @@ impl Core for RustyboiCore {
 
     fn serialize_size(&mut self) -> usize {
         // Queried ONCE; the frontend pre-allocates savestate/rewind/netplay
-        // buffers of this size, so it must be a stable upper bound. State is JSON:
-        // the bulk is the constant ROM bytes; only the small RAM/register portion
-        // drifts as digit widths change. A 1/64 + 64 KiB pad plus the 8-byte
-        // header covers that; serialize also guards the write.
+        // buffers of this size, so it must be a stable upper bound. The state is
+        // bincode (ROM held out); only the RLE-coded framebuffer portion drifts
+        // with content. A 1/64 + 64 KiB pad plus the 8-byte header covers that;
+        // serialize also guards the write.
         match self.gb_mut() {
             Some(gb) => match gb.to_state_bytes() {
                 Ok(bytes) => SERIALIZE_HEADER_LEN + bytes.len() + bytes.len() / 64 + 64 * 1024,
@@ -558,5 +559,114 @@ mod tests {
         assert_eq!(RustyboiCore::boot_rom_filename(CGB), "cgb_boot.bin");
         assert_eq!(RustyboiCore::boot_rom_filename(CGBE), "cgb_boot.bin");
         assert_eq!(RustyboiCore::boot_rom_filename(SGB2), "sgb2_boot.bin");
+    }
+
+    // The SET_MEMORY_MAPS descriptors RetroArch holds are raw pointers into the
+    // machine's (heap-boxed) RAM. Every event that re-allocates that RAM —
+    // retro_reset (Mmio::reset builds a fresh Mmio) and retro_unserialize
+    // (replace_machine swaps in a whole new GB) — must re-publish the maps, or
+    // RetroAchievements/RAM tools read freed memory. This drives the real
+    // dispatch entry points against a mock retro_environment callback and
+    // asserts the freshly published pointers equal the live machine's buffers.
+    mod memory_map_freshness {
+        use super::*;
+        use rustyboi_libretro_sys::dispatch;
+        use rustyboi_libretro_sys::ffi;
+        use std::ffi::{c_uint, c_void};
+        use std::sync::Mutex;
+
+        // (start, ptr, len) triples per SET_MEMORY_MAPS call, copied out
+        // immediately (the descriptor array itself is transient).
+        static CAPTURED: Mutex<Vec<Vec<(usize, usize, usize)>>> = Mutex::new(Vec::new());
+
+        unsafe extern "C" fn mock_env(cmd: c_uint, data: *mut c_void) -> bool {
+            match cmd {
+                ffi::RETRO_ENVIRONMENT_SET_PIXEL_FORMAT => true,
+                ffi::RETRO_ENVIRONMENT_SET_MEMORY_MAPS => {
+                    let map = unsafe { &*(data as *const ffi::retro_memory_map) };
+                    let descs = unsafe {
+                        std::slice::from_raw_parts(map.descriptors, map.num_descriptors as usize)
+                    };
+                    CAPTURED
+                        .lock()
+                        .unwrap()
+                        .push(descs.iter().map(|d| (d.start, d.ptr as usize, d.len)).collect());
+                    true
+                }
+                _ => false,
+            }
+        }
+
+        // Smallest ROM the loader accepts: 32 KiB no-MBC with a valid header
+        // checksum (0x134..=0x14C).
+        fn minimal_rom() -> Vec<u8> {
+            let mut rom = vec![0u8; 0x8000];
+            let mut chk: u8 = 0;
+            for &b in &rom[0x134..=0x14C] {
+                chk = chk.wrapping_sub(b).wrapping_sub(1);
+            }
+            rom[0x14D] = chk;
+            rom
+        }
+
+        fn assert_last_publish_matches_live(core: &mut RustyboiCore) {
+            let captured = CAPTURED.lock().unwrap();
+            let last = captured.last().expect("no SET_MEMORY_MAPS captured").clone();
+            drop(captured);
+            let gb = core.gb_mut().expect("machine loaded");
+            let expect = [
+                (0xC000usize, gb.wram_bank0_mut().as_ptr() as usize),
+                (0xD000, gb.wram_bank1_mut().as_ptr() as usize),
+                (0xFF80, gb.hram_mut().as_ptr() as usize),
+                (0x8000, gb.vram_mut().as_ptr() as usize),
+            ];
+            for (start, live_ptr) in expect {
+                let published = last
+                    .iter()
+                    .find(|(s, _, _)| *s == start)
+                    .unwrap_or_else(|| panic!("no descriptor published for {start:#06x}"));
+                assert_eq!(
+                    published.1, live_ptr,
+                    "descriptor for {start:#06x} points at stale memory"
+                );
+            }
+        }
+
+        #[test]
+        fn maps_republished_fresh_after_reset_and_unserialize() {
+            let mut core = RustyboiCore::new();
+            dispatch::set_environment(&mut core, Some(mock_env));
+            dispatch::init(&mut core);
+
+            let rom = minimal_rom();
+            let info = ffi::retro_game_info {
+                path: std::ptr::null(),
+                data: rom.as_ptr() as *const c_void,
+                size: rom.len(),
+                meta: std::ptr::null(),
+            };
+            assert!(dispatch::load_game(&mut core, &info), "load_game failed");
+            let after_load = CAPTURED.lock().unwrap().len();
+            assert!(after_load >= 1, "load_game must publish memory maps");
+            assert_last_publish_matches_live(&mut core);
+
+            dispatch::reset(&mut core);
+            assert!(
+                CAPTURED.lock().unwrap().len() > after_load,
+                "reset must re-publish memory maps"
+            );
+            assert_last_publish_matches_live(&mut core);
+
+            let size = dispatch::serialize_size(&mut core);
+            let mut state = vec![0u8; size];
+            assert!(dispatch::serialize(&mut core, state.as_mut_ptr() as *mut c_void, size));
+            let before_load_state = CAPTURED.lock().unwrap().len();
+            assert!(dispatch::unserialize(&mut core, state.as_ptr() as *const c_void, size));
+            assert!(
+                CAPTURED.lock().unwrap().len() > before_load_state,
+                "unserialize must re-publish memory maps"
+            );
+            assert_last_publish_matches_live(&mut core);
+        }
     }
 }

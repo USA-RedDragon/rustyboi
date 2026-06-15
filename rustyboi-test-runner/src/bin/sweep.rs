@@ -311,7 +311,7 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     let cfg = RunCfg { frames, warmup, timeout_secs, screens_dir, names };
 
     let pool = {
-        let mut b = rayon::ThreadPoolBuilder::new().stack_size(64 * 1024 * 1024);
+        let mut b = rayon::ThreadPoolBuilder::new();
         if jobs > 0 {
             b = b.num_threads(jobs);
         }

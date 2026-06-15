@@ -1783,17 +1783,6 @@ mod savestate_roundtrip_tests {
     /// sprite on its next mode-2 scan.
     #[test]
     fn dmg_acid2_midframe_state_roundtrips_sprites() {
-        // The GB struct holds several inline framebuffers (~250KB); a few live
-        // copies plus serde_json recursion exceed a test thread's default stack.
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(dmg_acid2_midframe_state_roundtrips_sprites_inner)
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    fn dmg_acid2_midframe_state_roundtrips_sprites_inner() {
         let Some(mut gb) = gb_from_rom("../gb-test-roms/dmg-acid2/dmg-acid2.gb", Hardware::DMG)
         else {
             eprintln!("skipping: dmg-acid2.gb not present");
@@ -1845,15 +1834,6 @@ mod savestate_roundtrip_tests {
     /// itself, independent of the render pipeline).
     #[test]
     fn oam_bytes_roundtrip() {
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(oam_bytes_roundtrip_inner)
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    fn oam_bytes_roundtrip_inner() {
         let Some(mut gb) = gb_from_rom("../gb-test-roms/dmg-acid2/dmg-acid2.gb", Hardware::DMG)
         else {
             eprintln!("skipping: dmg-acid2.gb not present");
@@ -1924,15 +1904,6 @@ mod savestate_roundtrip_tests {
     /// guard for the "state does not fully round-trip the machine" gap.
     #[test]
     fn savestate_full_roundtrip_fidelity() {
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(savestate_full_roundtrip_fidelity_inner)
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    fn savestate_full_roundtrip_fidelity_inner() {
         // (rom, hardware) covering DMG / CGB / CGB-E / AGB / SGB. dmg-acid2 is a
         // plain (no-MBC) cart; cgb-acid2 drives the CGB feature set.
         let cases: &[(&str, Hardware)] = &[
@@ -1997,25 +1968,17 @@ mod savestate_roundtrip_tests {
     /// silently revert to default-CGB. A round-tripped AGB must still report AGB.
     #[test]
     fn savestate_reseeds_hardware_flags() {
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
-                let Some(mut gb) =
-                    gb_from_rom("../gb-test-roms/cgb-acid2/cgb-acid2.gbc", Hardware::AGB)
-                else {
-                    eprintln!("skipping: cgb-acid2 not present");
-                    return;
-                };
-                let state = gb.to_state_bytes().expect("serialize");
-                let restored = restore_with_rom(&state, &gb);
-                assert!(
-                    restored.mmio.is_agb(),
-                    "AGB hardware flag lost across savestate load"
-                );
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        let Some(mut gb) = gb_from_rom("../gb-test-roms/cgb-acid2/cgb-acid2.gbc", Hardware::AGB)
+        else {
+            eprintln!("skipping: cgb-acid2 not present");
+            return;
+        };
+        let state = gb.to_state_bytes().expect("serialize");
+        let restored = restore_with_rom(&state, &gb);
+        assert!(
+            restored.mmio.is_agb(),
+            "AGB hardware flag lost across savestate load"
+        );
     }
 
     /// Regression: the DMG noise channel (channel 4) must keep advancing its
