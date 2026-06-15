@@ -1,7 +1,7 @@
 //! Off-thread rewind savestate serialization (native desktop only).
 //!
 //! The emulation thread must stay hitch-free. Rewind capture used to call
-//! `GB::to_state_bytes` (a full `serde_json` serialize of VRAM×2 / WRAM×8 / OAM
+//! `GB::to_state_bytes` (a full bincode serialize of VRAM×2 / WRAM×8 / OAM
 //! / framebuffers / every peripheral) inline every `interval_frames` — a
 //! periodic stall on the deterministic core loop.
 //!

@@ -19,13 +19,13 @@ use crate::input::ButtonState;
 use serde::{Deserialize, Serialize};
 
 /// How a movie begins: cold power-on (then `skip_bios`), or resumed from a
-/// serialized `GB` savestate (the exact bytes `serde_json::to_vec(&gb)` yields).
+/// serialized `GB` savestate (the exact bytes `GB::to_state_bytes` yields).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum MovieStart {
     /// Power on, insert the ROM, `skip_bios()`, then feed inputs from frame 0.
     PowerOn,
-    /// Resume from a savestate blob (serde-serialized `GB`); inputs continue
-    /// from the savestate's current frame.
+    /// Resume from a savestate blob (`GB::to_state_bytes` bincode); inputs
+    /// continue from the savestate's current frame.
     SaveState(Vec<u8>),
 }
 

@@ -1,5 +1,15 @@
 use serde::{Deserialize, Serialize};
 
+/// Heap-allocate a filled fixed-size byte buffer with no stack-side temporary
+/// (`Box::new([v; N])` materializes the array on the stack first — the overflow
+/// class the boxed framebuffer/RAM fields exist to prevent).
+pub(crate) fn boxed_filled<const N: usize>(fill: u8) -> Box<[u8; N]> {
+    vec![fill; N]
+        .into_boxed_slice()
+        .try_into()
+        .unwrap_or_else(|_| unreachable!())
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Memory<const START: u16, const SIZE: usize> {
     #[serde(with = "serde_bytes")]

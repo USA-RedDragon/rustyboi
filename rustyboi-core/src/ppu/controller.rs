@@ -1,4 +1,5 @@
 use crate::cpu::registers;
+use crate::memory::boxed_filled;
 use crate::memory::mmio;
 use crate::memory::Addressable;
 use crate::ppu::fetcher;
@@ -85,16 +86,20 @@ mod fb_rle {
 
     pub fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
         d: D,
-    ) -> Result<[u8; N], D::Error> {
-        let mut buf = [0u8; N];
+    ) -> Result<Box<[u8; N]>, D::Error> {
         match EncodedOwned::deserialize(d)? {
             EncodedOwned::Raw(bytes) => {
                 if bytes.len() != N {
                     return Err(D::Error::custom("framebuffer raw length mismatch"));
                 }
-                buf.copy_from_slice(&bytes);
+                Ok(bytes
+                    .into_vec()
+                    .into_boxed_slice()
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!()))
             }
             EncodedOwned::Rle(runs) => {
+                let mut buf = vec![0u8; N];
                 let mut i = 0usize;
                 for (v, c) in runs {
                     for _ in 0..c {
@@ -108,9 +113,12 @@ mod fb_rle {
                 if i != N {
                     return Err(D::Error::custom("framebuffer RLE underflow"));
                 }
+                Ok(buf
+                    .into_boxed_slice()
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!()))
             }
         }
-        Ok(buf)
     }
 }
 
@@ -119,16 +127,29 @@ mod fb_rle_tests {
     use serde::{Deserialize, Serialize};
 
     // Wraps a fixed-size framebuffer with the codec, mirroring how the PPU's
-    // `[u8; N]` framebuffer fields opt into `fb_rle`. Round-trip through bincode
-    // (the real savestate format) and assert byte-exact restore.
+    // `Box<[u8; N]>` framebuffer fields opt into `fb_rle`. Round-trip through
+    // bincode (the real savestate format) and assert byte-exact restore.
     #[derive(Serialize, Deserialize, PartialEq, Debug)]
-    struct Fb<const N: usize>(#[serde(with = "super::fb_rle")] [u8; N]);
+    struct Fb<const N: usize>(#[serde(with = "super::fb_rle")] Box<[u8; N]>);
 
     fn roundtrip<const N: usize>(buf: [u8; N]) -> Vec<u8> {
-        let bytes = bincode::serialize(&Fb(buf)).unwrap();
+        let bytes = bincode::serialize(&Fb(Box::new(buf))).unwrap();
         let back: Fb<N> = bincode::deserialize(&bytes).unwrap();
-        assert_eq!(back.0, buf, "framebuffer did not round-trip byte-exact");
+        assert_eq!(*back.0, buf, "framebuffer did not round-trip byte-exact");
         bytes
+    }
+
+    // Pins the on-wire shape independent of any fixture: bincode's enum tag
+    // (u32 LE) + Vec len (u64 LE) + one (u8, u32 LE) run. If the codec enum or
+    // bincode defaults ever drift, this fails with no ROM/fixture involved.
+    #[test]
+    fn wire_shape_pinned() {
+        let enc = bincode::serialize(&Fb(Box::new([0u8; 4096]))).unwrap();
+        let mut expected = vec![0, 0, 0, 0]; // tag 0 = Rle
+        expected.extend_from_slice(&1u64.to_le_bytes()); // one run
+        expected.push(0); // value 0
+        expected.extend_from_slice(&4096u32.to_le_bytes()); // count
+        assert_eq!(enc, expected);
     }
 
     #[test]
@@ -1681,9 +1702,9 @@ pub struct Ppu {
     bgp_defer_countdown: u8,
 
     #[serde(with = "fb_rle")]
-    fb_a: [u8; FRAMEBUFFER_SIZE],
+    fb_a: Box<[u8; FRAMEBUFFER_SIZE]>,
     #[serde(with = "fb_rle")]
-    fb_b: [u8; FRAMEBUFFER_SIZE],
+    fb_b: Box<[u8; FRAMEBUFFER_SIZE]>,
     /// SGB MASK_EN Freeze latch: the DMG shade frame captured at the first
     /// frame boundary after the freeze engaged, shown instead of the live
     /// frame until the mask clears (games hide their *_TRN transfer screens
@@ -1691,9 +1712,9 @@ pub struct Ppu {
     #[serde(default)]
     sgb_freeze_fb: Option<Vec<u8>>,
     #[serde(with = "fb_rle")]
-    color_fb_a: [u8; FRAMEBUFFER_SIZE * 3], // RGB color framebuffer
+    color_fb_a: Box<[u8; FRAMEBUFFER_SIZE * 3]>, // RGB color framebuffer
     #[serde(with = "fb_rle")]
-    color_fb_b: [u8; FRAMEBUFFER_SIZE * 3], // RGB color framebuffer
+    color_fb_b: Box<[u8; FRAMEBUFFER_SIZE * 3]>, // RGB color framebuffer
     have_frame: bool,
     // First-frame-after-LCD-enable display blanking. On real hardware the panel
     // has not resynced for the first frame produced after LCDC.7 0->1, so it shows
@@ -2048,11 +2069,11 @@ impl Ppu {
             obp1_delayed: 0,
             bgp_defer_hold: 0,
             bgp_defer_countdown: 0,
-            fb_a: [0; FRAMEBUFFER_SIZE],
-            fb_b: [0; FRAMEBUFFER_SIZE],
+            fb_a: boxed_filled(0),
+            fb_b: boxed_filled(0),
             sgb_freeze_fb: None,
-            color_fb_a: [0; FRAMEBUFFER_SIZE * 3],
-            color_fb_b: [0; FRAMEBUFFER_SIZE * 3],
+            color_fb_a: boxed_filled(0),
+            color_fb_b: boxed_filled(0),
             have_frame: false,
             frames_since_enable: 2,
             lcdc: 0,
@@ -8867,12 +8888,12 @@ impl Ppu {
 
                         if self.renders_color(mmio) {
                             // CGB / DMG-compat-on-CGB: swap color framebuffers
-                            self.color_fb_b = self.color_fb_a;
-                            self.color_fb_a = [0; FRAMEBUFFER_SIZE * 3];
+                            std::mem::swap(&mut self.color_fb_b, &mut self.color_fb_a);
+                            self.color_fb_a.fill(0);
                         } else {
                             // DMG mode: swap monochrome framebuffers
-                            self.fb_b = self.fb_a;
-                            self.fb_a = [0; FRAMEBUFFER_SIZE];
+                            std::mem::swap(&mut self.fb_b, &mut self.fb_a);
+                            self.fb_a.fill(0);
                         }
 
                         self.have_frame = true;
@@ -8990,10 +9011,10 @@ impl Ppu {
         }
         if self.renders_color(mmio) {
             if !self.is_in_pixel_transfer() {
-                self.color_fb_b = [0x00; FRAMEBUFFER_SIZE * 3];
+                self.color_fb_b.fill(0x00);
             }
         } else {
-            self.fb_b = [0; FRAMEBUFFER_SIZE];
+            self.fb_b.fill(0);
         }
     }
 
@@ -9012,9 +9033,9 @@ impl Ppu {
         if self.renders_color(mmio) {
             if blank_panel {
                 // CGB white == RGB 0xFFFFFF.
-                return crate::gb::Frame::Color(Box::new([0xFF; FRAMEBUFFER_SIZE * 3]));
+                return crate::gb::Frame::Color(boxed_filled(0xFF));
             }
-            crate::gb::Frame::Color(Box::new(self.color_fb_b))
+            crate::gb::Frame::Color(self.color_fb_b.clone())
         } else if let Some(sgb) = mmio.sgb() {
             // MASK_EN Freeze: latch the frame completed at the freeze and keep
             // showing it (the transfer screens games draw behind the mask stay
@@ -9030,9 +9051,9 @@ impl Ppu {
         } else {
             if blank_panel {
                 // DMG white == shade index 0.
-                return crate::gb::Frame::Monochrome(Box::new([0; FRAMEBUFFER_SIZE]));
+                return crate::gb::Frame::Monochrome(boxed_filled(0));
             }
-            crate::gb::Frame::Monochrome(Box::new(self.fb_b))
+            crate::gb::Frame::Monochrome(self.fb_b.clone())
         }
     }
 
@@ -9050,24 +9071,24 @@ impl Ppu {
         let blank = matches!(sgb.mask, MaskMode::Black | MaskMode::Color0);
         let src: &[u8] = match self.sgb_freeze_fb.as_deref() {
             Some(f) if f.len() == FRAMEBUFFER_SIZE => f,
-            _ => &self.fb_b,
+            _ => &self.fb_b[..],
         };
 
         if !sgb.colorized {
             if blank {
                 // Blank to shade 0 (Color0) / darkest for Black.
                 let fill = if matches!(sgb.mask, MaskMode::Black) { 3 } else { 0 };
-                return crate::gb::Frame::Monochrome(Box::new([fill; FRAMEBUFFER_SIZE]));
+                return crate::gb::Frame::Monochrome(boxed_filled(fill));
             }
-            let mut out = [0u8; FRAMEBUFFER_SIZE];
+            let mut out: Box<[u8; FRAMEBUFFER_SIZE]> = boxed_filled(0);
             out.copy_from_slice(src);
-            return crate::gb::Frame::Monochrome(Box::new(out));
+            return crate::gb::Frame::Monochrome(out);
         }
 
         // Colorized: build an RGB888 frame from the SGB palettes.
-        let mut out = [0u8; FRAMEBUFFER_SIZE * 3];
+        let mut out: Box<[u8; FRAMEBUFFER_SIZE * 3]> = boxed_filled(0);
         if matches!(sgb.mask, MaskMode::Black) {
-            return crate::gb::Frame::Color(Box::new(out));
+            return crate::gb::Frame::Color(out);
         }
         for y in 0..144usize {
             for x in 0..160usize {
@@ -9080,7 +9101,7 @@ impl Ppu {
                 out[idx * 3 + 2] = b;
             }
         }
-        crate::gb::Frame::Color(Box::new(out))
+        crate::gb::Frame::Color(out)
     }
 
     /// Compose the full 256x224 Super Game Boy output: the SGB border
@@ -9131,7 +9152,7 @@ impl Ppu {
         const GRAY: [u16; 4] = [0x7FFF, 0x56B5, 0x294A, 0x0000];
         let src: &[u8] = match self.sgb_freeze_fb.as_deref() {
             Some(f) if f.len() == FRAMEBUFFER_SIZE => f,
-            _ => &self.fb_b,
+            _ => &self.fb_b[..],
         };
         for y in 0..144usize {
             for x in 0..160usize {
