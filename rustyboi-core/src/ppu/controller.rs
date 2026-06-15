@@ -59,6 +59,9 @@ const M2IRQ_OFFSET: i64 = -1;
 // the former -1 by 32 net).
 const WRITE_CC_OFFSET: i64 = 0;
 
+// Sentinel for "no pending wy2 update".
+fn wy2_disabled() -> u64 { u64::MAX }
+
 // Env-tunable override of an i64 offset (for sweeping during development). When
 // the named env var is unset, the compiled-in default is used.
 #[inline]
@@ -284,6 +287,17 @@ pub struct Ppu {
     // double speed. Set by the bus just before the FF4x write hooks run.
     #[serde(skip, default)]
     write_subdot: u8,
+    // Gambatte's `wy2`: WY delayed by `6 - isDoubleSpeed()` cc after a write.
+    // Event-scheduled against the write cc; consumed by the window-Y gate so
+    // the M3-length predictor / window-start see the delayed value.
+    #[serde(default)]
+    wy2: u8,
+    // Absolute clock at which a pending wy2 update applies; DISABLED when none.
+    #[serde(default = "wy2_disabled")]
+    wy2_apply_cc: u64,
+    // The WY value to latch into wy2 when wy2_apply_cc arrives.
+    #[serde(default)]
+    wy2_pending: u8,
     #[serde(default)]
     line_cycle: u32,
     #[serde(default)]
@@ -372,6 +386,9 @@ impl Ppu {
             scheduled_mode0_dot: None,
             abs_cc: 0,
             write_subdot: 0,
+            wy2: 0,
+            wy2_apply_cc: wy2_disabled(),
+            wy2_pending: 0,
             line_cycle: 0,
             internal_ly_val: 0,
             sched_lycirq: stat_irq::DISABLED_TIME,
@@ -696,6 +713,11 @@ impl Ppu {
         let ds = mmio.is_double_speed_mode();
         let cc = self.abs_cc;
 
+        if self.wy2_apply_cc != wy2_disabled() && self.wy2_apply_cc <= cc {
+            self.wy2 = self.wy2_pending;
+            self.wy2_apply_cc = wy2_disabled();
+        }
+
         if self.sched_oneshot_statirq <= cc {
             mmio.request_interrupt(registers::InterruptFlag::Lcd);
             self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
@@ -890,7 +912,7 @@ impl Ppu {
         if self.window_y_triggered {
             return true;
         }
-        mmio.read(WY) == mmio.read(LY)
+        self.wy2 == mmio.read(LY)
     }
 
     fn window_will_start(&self, mmio: &mmio::Mmio, is_cgb: bool) -> bool {
@@ -1017,6 +1039,30 @@ impl Ppu {
     /// double speed. `phase` is the persistent CPU T-phase at write resolution.
     pub fn set_write_subdot(&mut self, phase: u64) {
         self.write_subdot = (phase % 2) as u8;
+    }
+
+    /// FF4A (WY) write hook. Gambatte applies the write to `wy2` (the value the
+    /// window-Y gate reads) delayed by `6 - isDoubleSpeed()` cc after the write.
+    /// Schedule that delayed apply against the resolving write's absolute clock.
+    pub fn on_wy_write(&mut self, value: u8, mmio: &mmio::Mmio) {
+        if self.disabled {
+            self.wy2 = value;
+            self.wy2_apply_cc = wy2_disabled();
+            return;
+        }
+        let ds = mmio.is_double_speed_mode();
+        let cc = self.write_cc(ds);
+        // wy2 apply delay (cc) past the write, swept against the late_wy suite:
+        // CGB 6 (Gambatte's nominal), DMG 4. The split reflects the differing
+        // M3-start / fine-scroll phase between the two cores.
+        let base = if mmio.is_cgb_features_enabled() {
+            env_off("RB_WY2_DELAY_CGB", 6)
+        } else {
+            env_off("RB_WY2_DELAY_DMG", 4)
+        };
+        let delay = (base - ds as i64).max(0) as u64;
+        self.wy2_pending = value;
+        self.wy2_apply_cc = cc + delay;
     }
 
     pub fn on_stat_register_write(&mut self, mmio: &mut mmio::Mmio) {
@@ -1282,6 +1328,8 @@ impl Ppu {
                 // line_cycle=0. Mirror Gambatte's lcdcChange enable branch.
                 self.line_cycle = 0;
                 self.internal_ly_val = 0;
+                self.wy2 = mmio.read(WY);
+                self.wy2_apply_cc = wy2_disabled();
                 self.stat_reg_committed = mmio.read(LCD_STATUS);
                 self.lyc_irq.set_cgb(mmio.is_cgb_features_enabled());
                 self.lyc_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
