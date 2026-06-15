@@ -1466,6 +1466,13 @@ impl memory::Addressable for Mmio {
                 IO_REGISTERS_START..=IO_REGISTERS_END => {
                     match addr {
                         input::JOYP => self.input.write(addr, value),
+                        timer::DIV => {
+                            // Gambatte 0x04: realign the pending serial event to
+                            // the new divider phase before resetting DIV.
+                            let phase = self.cpu_t_phase;
+                            self.serial.realign_to_div(phase);
+                            self.timer.write(addr, value);
+                        }
                         timer::DIV..=timer::TAC => self.timer.write(addr, value),
                 serial::SB => self.serial.write(addr, value),
                         serial::SC => self.write_serial_sc(value),
