@@ -970,10 +970,10 @@ impl Cartridge {
         if offset >= self.rom_data.len() {
             return;
         }
-        if let Some(c) = compare {
-            if self.rom_data[offset] != c {
-                return;
-            }
+        if let Some(c) = compare
+            && self.rom_data[offset] != c
+        {
+            return;
         }
         self.rom_data[offset] = new;
     }
