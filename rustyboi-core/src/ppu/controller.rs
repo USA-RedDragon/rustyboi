@@ -39,6 +39,16 @@ const CGB_FIRST_FRAME_ARM_DOT: u128 = 86;
 // the actual pixel fetch (M3Start) begins later at FIRST_FRAME_ARM_DOT.
 const DMG_FIRST_FRAME_LOCK_DOT: u128 = 80;
 const CGB_FIRST_FRAME_LOCK_DOT: u128 = 82;
+// At double speed the CGB first-frame VRAM/OAM lock engages one dot earlier than
+// the single-speed boundary. Calibrated against enable_display _ds CGB cases
+// (oambusy_read_ds, cgbpw_ds, vramr_ds: 3 fixed, 1 regressed -> net -2; only the
+// enable_display cluster moves).
+const CGB_FIRST_FRAME_LOCK_DOT_DS: u128 = 81;
+fn dmg_first_frame_lock_dot() -> u128 { env_off("RB_DMG_FF_LOCK", DMG_FIRST_FRAME_LOCK_DOT as i64).max(0) as u128 }
+fn cgb_first_frame_lock_dot(double_speed: bool) -> u128 {
+    let default = if double_speed { CGB_FIRST_FRAME_LOCK_DOT_DS } else { CGB_FIRST_FRAME_LOCK_DOT };
+    env_off("RB_CGB_FF_LOCK", default as i64).max(0) as u128
+}
 // Offset between rustyboi's `ticks` at M3 arm and Gambatte's lineCycle frame
 // for the scheduled Mode 3 -> Mode 0 transition. Swept against the full suite.
 const DMG_MODE0_OFFSET: i32 = 4;
@@ -1475,7 +1485,7 @@ impl Ppu {
                 // vramWritable/oamReadable (lineCycles-based, not M3Start).
                 if self.first_line_after_enable {
                     let is_cgb = mmio.is_cgb_features_enabled();
-                    let lock_dot = if is_cgb { CGB_FIRST_FRAME_LOCK_DOT } else { DMG_FIRST_FRAME_LOCK_DOT };
+                    let lock_dot = if is_cgb { cgb_first_frame_lock_dot(mmio.is_double_speed_mode()) } else { dmg_first_frame_lock_dot() };
                     if self.ticks == lock_dot && (mmio.read(LCD_STATUS) & 0x03) != 3 {
                         Self::set_lcd_status_mode(mmio, 3);
                         self.check_and_trigger_stat_interrupt(mmio);
