@@ -101,6 +101,7 @@ jobs:
           name: library-sweep
           path: |
             sweep-out/gallery.html
+            sweep-out/screens
             sweep-out/report.md
             sweep-out/manifest.jsonl
           retention-days: 30
