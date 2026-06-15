@@ -22,6 +22,17 @@ impl<const START: u16, const SIZE: usize> Memory<START, SIZE> {
     fn normalize_addr(addr: u16) -> u16 {
         addr - START
     }
+
+    /// Raw view of the backing bytes (used to expose stable slices/pointers to
+    /// a libretro frontend for memory maps and direct RAM access).
+    pub fn as_slice(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Mutable raw view of the backing bytes.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
 }
 
 pub trait Addressable {

@@ -1154,6 +1154,36 @@ impl Mmio {
         self.ff41_write_pending = false;
         pending
     }
+
+    // --- libretro direct-memory accessors (appended) ---
+
+    /// Mutable handle to the inserted cartridge, used by the libretro frontend
+    /// to reach battery-backed save RAM and RTC bytes.
+    pub fn get_cartridge_mut(&mut self) -> Option<&mut cartridge::Cartridge> {
+        self.cartridge.as_mut()
+    }
+
+    /// Fixed work-RAM bank (0xC000-0xCFFF) as a mutable slice.
+    pub fn wram_bank0_slice_mut(&mut self) -> &mut [u8] {
+        self.wram.as_mut_slice()
+    }
+
+    /// Switchable work-RAM bank region (0xD000-0xDFFF) as a mutable slice. On
+    /// CGB this is bank 1; banks 2-7 are not contiguous so only this slice is
+    /// exposed as the canonical system-RAM bank window.
+    pub fn wram_bank1_slice_mut(&mut self) -> &mut [u8] {
+        self.wram_bank.as_mut_slice()
+    }
+
+    /// High RAM (0xFF80-0xFFFE) as a mutable slice.
+    pub fn hram_slice_mut(&mut self) -> &mut [u8] {
+        self.hram.as_mut_slice()
+    }
+
+    /// Video RAM bank 0 (0x8000-0x9FFF) as a mutable slice.
+    pub fn vram_slice_mut(&mut self) -> &mut [u8] {
+        self.vram.as_mut_slice()
+    }
 }
 
 impl memory::Addressable for Mmio {

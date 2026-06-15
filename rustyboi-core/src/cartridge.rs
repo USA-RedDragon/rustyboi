@@ -131,6 +131,22 @@ pub struct Cartridge {
     
     // CGB support information
     cgb_support: CgbSupport, // CGB compatibility from cartridge header
+
+    // MBC5 rumble motor latch. Set from bit 3 of the RAM-bank register write on
+    // rumble carts; read by the libretro frontend to drive the rumble motor.
+    // Not persisted (transient hardware line).
+    #[serde(skip, default)]
+    rumble_motor: bool,
+
+    // Scratch buffer backing the libretro `RETRO_MEMORY_RTC` view. Filled on
+    // demand from the discrete RTC registers; not part of the save state.
+    #[serde(skip, default)]
+    rtc_memory: Vec<u8>,
+
+    // When true the cartridge will not open or write sidecar `.sav`/`.rtc`
+    // files; the host (e.g. RetroArch) owns persistence of the in-memory RAM.
+    #[serde(skip, default)]
+    host_managed_saves: bool,
 }
 
 impl Clone for Cartridge {
@@ -165,6 +181,9 @@ impl Clone for Cartridge {
             mbc5_rom_bank_high: self.mbc5_rom_bank_high,
             mbc5_ram_bank: self.mbc5_ram_bank,
             cgb_support: self.cgb_support.clone(),
+            rumble_motor: self.rumble_motor,
+            rtc_memory: self.rtc_memory.clone(),
+            host_managed_saves: self.host_managed_saves,
         }
     }
 }
@@ -327,8 +346,11 @@ impl Cartridge {
             mbc5_rom_bank_high: 0,
             mbc5_ram_bank: 0,
             cgb_support,
+            rumble_motor: false,
+            rtc_memory: Vec::new(),
+            host_managed_saves: false,
         };
-        
+
         // Try to load existing save file or create new one (only for battery-backed RAM)
         cartridge.load_or_create_save_file()?;
         
@@ -470,8 +492,11 @@ impl Cartridge {
             mbc5_rom_bank_high: 0,
             mbc5_ram_bank: 0,
             cgb_support,
+            rumble_motor: false,
+            rtc_memory: Vec::new(),
+            host_managed_saves: false,
         };
-        
+
         // In-memory loading intentionally skips save files so test runners and
         // WASM callers do not create sidecar files.
         
@@ -645,7 +670,7 @@ impl Cartridge {
 
     fn attach_save_file_at(&mut self, save_path: &Path) -> Result<(), io::Error> {
         // Only process save files for cartridges with battery-backed RAM
-        if !self.has_battery() {
+        if !self.has_battery() || self.host_managed_saves {
             return Ok(());
         }
 
@@ -856,6 +881,102 @@ impl Cartridge {
         self.rtc_days_high_latched = self.rtc_days_high;
         self.mbc3_rtc_latched = true;
     }
+
+    // --- libretro accessors ---
+
+    /// Mark this cartridge as host-managed: it will not open or write any
+    /// sidecar `.sav` file. Persistence of the in-memory RAM is the frontend's
+    /// responsibility (e.g. RetroArch via `RETRO_MEMORY_SAVE_RAM`).
+    pub fn set_host_managed_saves(&mut self, enabled: bool) {
+        self.host_managed_saves = enabled;
+    }
+
+    /// Mutable view of the battery/save RAM the frontend should persist. For
+    /// MBC2 this is the built-in 512x4 RAM; otherwise the external RAM banks.
+    /// Returns an empty slice when there is no save RAM.
+    pub fn save_ram_mut(&mut self) -> &mut [u8] {
+        match self.get_cartridge_type() {
+            CartridgeType::MBC2 { .. } => &mut self.mbc2_ram,
+            _ => &mut self.ram_data,
+        }
+    }
+
+    /// Read-only view of the battery/save RAM.
+    pub fn save_ram(&self) -> &[u8] {
+        match self.get_cartridge_type() {
+            CartridgeType::MBC2 { .. } => &self.mbc2_ram,
+            _ => &self.ram_data,
+        }
+    }
+
+    /// True if this cartridge has an MBC3 real-time clock.
+    pub fn has_rtc(&self) -> bool {
+        matches!(self.get_cartridge_type(), CartridgeType::MBC3 { timer: true, .. })
+    }
+
+    /// Mutable view of the RTC register bytes for `RETRO_MEMORY_RTC`. Layout is
+    /// the 10 register values (live then latched) as little-endian u32 plus an
+    /// 8-byte latch timestamp, matching the common BGB/libretro `.rtc` format.
+    /// The scratch buffer is synced from the live registers on each call.
+    pub fn rtc_memory_mut(&mut self) -> &mut [u8] {
+        if !self.has_rtc() {
+            self.rtc_memory.clear();
+            return &mut self.rtc_memory;
+        }
+        let regs = [
+            self.rtc_seconds as u32,
+            self.rtc_minutes as u32,
+            self.rtc_hours as u32,
+            self.rtc_days_low as u32,
+            self.rtc_days_high as u32,
+            self.rtc_seconds_latched as u32,
+            self.rtc_minutes_latched as u32,
+            self.rtc_hours_latched as u32,
+            self.rtc_days_low_latched as u32,
+            self.rtc_days_high_latched as u32,
+        ];
+        self.rtc_memory.resize(48, 0);
+        for (i, r) in regs.iter().enumerate() {
+            self.rtc_memory[i * 4..i * 4 + 4].copy_from_slice(&r.to_le_bytes());
+        }
+        &mut self.rtc_memory
+    }
+
+    /// True for MBC5 rumble cartridges.
+    pub fn has_rumble(&self) -> bool {
+        matches!(self.get_cartridge_type(), CartridgeType::MBC5 { _rumble: true, .. })
+    }
+
+    /// Current state of the rumble motor (bit 3 of the last RAM-bank write on
+    /// a rumble cart). Always false for non-rumble carts.
+    pub fn rumble_active(&self) -> bool {
+        self.rumble_motor
+    }
+
+    /// Patch a ROM byte (Game Genie). `addr` is a 0x0000-0x7FFF CPU address;
+    /// the patch is applied to ROM bank 0 for 0x0000-0x3FFF and to the bank
+    /// currently mapped at 0x4000-0x7FFF otherwise. When `compare` is given the
+    /// patch only applies if the existing byte matches. Game Genie codes target
+    /// bank 0 / early ROM in practice, where the mapping is fixed.
+    pub fn apply_rom_patch(&mut self, addr: u16, new: u8, compare: Option<u8>) {
+        let offset = if addr < 0x4000 {
+            addr as usize
+        } else if addr < 0x8000 {
+            let bank = self.get_rom_bank();
+            (addr as usize - 0x4000) + bank * 0x4000
+        } else {
+            return;
+        };
+        if offset >= self.rom_data.len() {
+            return;
+        }
+        if let Some(c) = compare {
+            if self.rom_data[offset] != c {
+                return;
+            }
+        }
+        self.rom_data[offset] = new;
+    }
 }
 
 impl memory::Addressable for Cartridge {
@@ -1011,7 +1132,12 @@ impl memory::Addressable for Cartridge {
                     CartridgeType::MBC3 { .. } => {
                         self.mbc3_ram_bank = value; // Can be 0x00-0x03 for RAM or 0x08-0x0C for RTC
                     }
-                    CartridgeType::MBC5 { .. } => {
+                    CartridgeType::MBC5 { _rumble, .. } => {
+                        if _rumble {
+                            // On rumble carts bit 3 drives the motor; only the
+                            // low 3 bits select the RAM bank.
+                            self.rumble_motor = (value & 0x08) != 0;
+                        }
                         self.mbc5_ram_bank = value; // 4 bits used (0x00-0x0F)
                     }
                     _ => {}
