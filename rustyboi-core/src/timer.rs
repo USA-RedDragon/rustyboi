@@ -36,6 +36,16 @@ pub struct Timer {
     // learn the pre-switch speed.
     #[serde(default)]
     last_double_speed: bool,
+    // Absolute, never-reset T-cycle counter mirroring Gambatte's `cpuCc`. Unlike
+    // `internal_counter` (the DIV divider, which a DIV write zeroes), this advances
+    // monotonically and is the absolute clock the APU master clock anchors to.
+    #[serde(default)]
+    abs_cc: u64,
+    // Monotonic count of DIV writes (each zeroes `internal_counter`). The APU
+    // master clock reads this to detect a DIV reset and apply Gambatte's
+    // `PSG::divReset` cycle-counter fold.
+    #[serde(default)]
+    div_reset_count: u64,
 }
 
 impl Timer {
@@ -50,7 +60,21 @@ impl Timer {
             reload_pending: 0,
             last_apu_div_bit: false,
             last_double_speed: false,
+            abs_cc: 0,
+            div_reset_count: 0,
         }
+    }
+
+    /// Absolute, never-reset T-cycle counter (Gambatte `cpuCc`). The APU master
+    /// clock anchors to this so it retains the full phase a DIV write would drop.
+    pub fn abs_cc(&self) -> u64 {
+        self.abs_cc
+    }
+
+    /// Monotonic count of DIV writes. The APU master clock compares this against
+    /// its last-seen value to detect a DIV reset (Gambatte `PSG::divReset`).
+    pub fn div_reset_count(&self) -> u64 {
+        self.div_reset_count
     }
 
     fn timer_input(&self) -> bool {
@@ -91,6 +115,10 @@ impl Timer {
     /// DIV-write reset behavior intentionally; runtime DIV writes still reset.
     pub fn set_internal_counter(&mut self, value: u16) {
         self.internal_counter = value;
+        // Anchor the absolute counter congruent to the divider so the APU master
+        // clock's `abs_cc >> 1` reproduces the post-boot `ic >> 1` low bits while
+        // carrying true high-resolution bits a DIV reset would otherwise drop.
+        self.abs_cc = value as u64;
         self.div = (value >> 8) as u8;
         self.last_timer_input = self.timer_input();
     }
@@ -132,6 +160,7 @@ impl Timer {
         }
 
         self.internal_counter = self.internal_counter.wrapping_add(1);
+        self.abs_cc = self.abs_cc.wrapping_add(1);
         self.div = (self.internal_counter >> 8) as u8;
         self.update_edge();
 
@@ -163,6 +192,7 @@ impl Addressable for Timer {
             DIV => {
                 self.internal_counter = 0;
                 self.div = 0;
+                self.div_reset_count = self.div_reset_count.wrapping_add(1);
                 self.update_edge(); // counter reset can glitch a TIMA tick
             },
             TIMA => {

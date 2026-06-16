@@ -55,14 +55,23 @@ pub struct Audio {
     // Sample generation timing
     fractional_cycles: f32,
 
-    // Free-running 2 MHz cycle counter mirroring Gambatte's `cycleCounter_`.
-    // The timer hands us its 15-bit low value (`ic >> 1`); we widen it to a
-    // free-running 32-bit counter by tracking wraps so the square channels can
-    // use Gambatte's absolute event-counter timing model.
+    // APU master clock mirroring Gambatte's `PSG::cycleCounter_` — an absolute
+    // 2 MHz counter (mod 0x8000_0000) anchored at boot. Driven from the timer's
+    // absolute `abs_cc` (Gambatte `cpuCc`): each `sync_cc` advances by
+    // `(abs_cc - last_update) >> (1 + ds)`, exactly like `PSG::generateSamples`.
+    // Carries the full phase a DIV reset would otherwise drop, which the
+    // cc-driven length counter needs across the power-on fold.
     #[serde(default)]
     cc: u32,
+    // Absolute CPU cc (Gambatte `lastUpdate_`) at the last clock advance; its
+    // bit-0 parity matters for the duty/divReset/speedchange folds.
     #[serde(default)]
-    last_cc15: u16,
+    last_update: u64,
+    // Last-seen timer DIV-write count; a change triggers the `PSG::divReset` fold.
+    #[serde(default)]
+    last_div_resets: u64,
+    #[serde(default)]
+    clock_anchored: bool,
 }
 
 impl Audio {
@@ -80,9 +89,13 @@ impl Audio {
             audio_enabled: false,
             fractional_cycles: 0.0,
             cc: 0,
-            last_cc15: 0,
+            last_update: 0,
+            last_div_resets: 0,
+            clock_anchored: false,
         }
     }
+
+    const CC_MAX: u32 = 0x8000_0000;
 
     /// Reconstruct Gambatte's free-running 2 MHz `cycleCounter_` from the
     /// timer's internal counter (`ic >> 1`, the low 15 bits) and push it to the
@@ -93,39 +106,72 @@ impl Audio {
     /// part of cc. We mirror Gambatte's `divReset`/`Channel::resetCc`: preserve
     /// the upper cc bits (the length `cc>>13` / FS-phase boundaries) and shift
     /// only the duty unit by the resulting delta.
-    pub fn sync_cc(&mut self, ic: u16) {
-        let raw = ((ic >> 1) & 0x7FFF) as u32;
-
-        let old = self.cc;
-        let old_low = old & 0x7FFF;
-        let mut high = old & !0x7FFF;
-
-        let new;
-        if raw < old_low && old_low < 0x7F00 {
-            // A DIV write reset the timer's internal counter mid-range. Gambatte's
-            // divReset preserves the upper cc bits (the length/`cc>>13` and FS
-            // phase boundaries) while resetting the sub-step part, so keep cc's
-            // bits >=13 and take the sub-13 bits from the freshly reset counter.
-            // The duty unit (and only the duty unit) is shifted by the resulting
-            // cc delta, matching `Channel::resetCc`.
-            new = (old & !0x1FFF) | (raw & 0x1FFF);
-            let delta = old.wrapping_sub(new);
-            self.channel1.reset_cc(delta);
-            self.channel2.reset_cc(delta);
-            self.channel3.reset_cc(delta);
-        } else {
-            if raw < old_low {
-                // Natural wrap of the 15-bit counter (0x7FFF -> 0).
-                high = high.wrapping_add(0x8000);
-            }
-            new = high | raw;
+    pub fn sync_cc(&mut self, abs_cc: u64, div_resets: u64, ds: bool) {
+        if !self.clock_anchored {
+            // Anchor `cc` so `abs_cc >> 1` reproduces the post-boot duty phase
+            // base the channels were tuned against (the old `ic >> 1`).
+            self.cc = ((abs_cc >> 1) as u32) & (Self::CC_MAX - 1);
+            self.last_update = abs_cc;
+            self.last_div_resets = div_resets;
+            self.clock_anchored = true;
+            self.push_cc();
+            return;
         }
 
-        self.cc = new;
-        self.last_cc15 = (new & 0x7FFF) as u16;
-        self.channel1.set_cc(new);
-        self.channel2.set_cc(new);
-        self.channel3.set_cc(new);
+        // A DIV write resets the divider; mirror `PSG::divReset` — first advance
+        // the clock to (approximately) the write cc, then fold cycleCounter_.
+        if div_resets != self.last_div_resets {
+            self.advance_to(abs_cc, ds);
+            self.div_reset_fold(ds);
+            self.last_div_resets = div_resets;
+        }
+
+        self.advance_to(abs_cc, ds);
+        self.push_cc();
+    }
+
+    /// Gambatte `PSG::generateSamples`: convert CPU cycles since `last_update` to
+    /// 2 MHz APU cycles and advance `cc`. We don't buffer audio here (the live
+    /// mixer is sampled elsewhere), so this only moves the clock.
+    fn advance_to(&mut self, abs_cc: u64, _ds: bool) {
+        // rustyboi gates `step_audio` to half-rate in double speed, so the timer
+        // divider (`abs_cc`) already advances at the physical APU rate that the
+        // duty/envelope tuning was anchored to: shift by 1 in both speeds, i.e.
+        // `cc == abs_cc >> 1` at steady state (matching the prior `ic >> 1`).
+        // Count whole APU cycles using absolute even boundaries (floor(abs/2) -
+        // floor(last/2)), matching the prior direct `ic >> 1` so the floored
+        // phase aligns to absolute parity rather than the anchor's parity.
+        let cycles = (abs_cc >> 1) - (self.last_update >> 1);
+        if cycles == 0 {
+            return;
+        }
+        self.last_update = abs_cc;
+        self.cc = ((self.cc as u64 + cycles) % Self::CC_MAX as u64) as u32;
+    }
+
+    /// Gambatte `PSG::divReset`: re-fold `cycleCounter_` so the DIV-relative phase
+    /// resets while the length `cc>>13` boundaries are preserved. The duty unit is
+    /// shifted by the resulting delta (`Channel::resetCc`).
+    fn div_reset_fold(&mut self, ds: bool) {
+        let div_offset = (self.last_update as u32) & (ds as u32);
+        let cc = self.cc.wrapping_add(div_offset);
+        let folded = (cc & 0xFFFF_F000)
+            .wrapping_add(2 * (cc & 0x800))
+            .wrapping_sub(div_offset)
+            % Self::CC_MAX;
+        let old = cc.wrapping_sub(div_offset);
+        let delta = old.wrapping_sub(folded);
+        self.cc = folded;
+        self.channel1.reset_cc(delta);
+        self.channel2.reset_cc(delta);
+        self.channel3.reset_cc(delta);
+    }
+
+    fn push_cc(&mut self) {
+        let cc = self.cc;
+        self.channel1.set_cc(cc);
+        self.channel2.set_cc(cc);
+        self.channel3.set_cc(cc);
     }
 
     /// Advance only the wave channel's fetch counter to the current cc, for the
