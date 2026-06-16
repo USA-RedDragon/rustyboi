@@ -416,6 +416,20 @@ impl Mmio {
         self.timer = timer;
     }
 
+    /// Write a timer register, then immediately deliver any glitch IRQ the write
+    /// scheduled (Gambatte flags it inline at the write cc). The write resolves
+    /// at the timer's current `abs_cc`, which the CPU positions at the access
+    /// start cc.
+    pub fn write_timer(&mut self, addr: u16, value: u8) {
+        let mut timer = self.timer.clone();
+        timer.write(addr, value);
+        let irq = timer.take_pending_irq();
+        self.timer = timer;
+        if irq {
+            self.request_interrupt(cpu::registers::InterruptFlag::Timer);
+        }
+    }
+
     pub fn step_serial(&mut self) {
         let phase = self.cpu_t_phase;
         let mut serial = self.serial.clone();
@@ -1012,7 +1026,7 @@ impl Mmio {
             // Gambatte applies `Tima::speedChange` (a 4-cycle TIMA phase shift
             // for enabled fast timers) before the DIV reset; mirror that order.
             self.timer.speed_change();
-            self.timer.write(timer::DIV, 0);
+            self.write_timer(timer::DIV, 0);
         }
     }
 
@@ -1500,12 +1514,17 @@ impl memory::Addressable for Mmio {
                         input::JOYP => self.input.write(addr, value),
                         timer::DIV => {
                             // Gambatte 0x04: realign the pending serial event to
-                            // the new divider phase before resetting DIV.
-                            let phase = self.cpu_t_phase;
+                            // the new divider phase before resetting DIV. The DIV
+                            // write now resolves at the access START cc (4 dots
+                            // earlier than the prior tick-before path); serial is
+                            // not yet on start-cc, so feed it the unshifted
+                            // (end-of-M-cycle) phase to keep its timing identical
+                            // until the serial leg of the cluster moves too.
+                            let phase = self.cpu_t_phase.wrapping_add(5);
                             self.serial.realign_to_div(phase);
-                            self.timer.write(addr, value);
+                            self.write_timer(addr, value);
                         }
-                        timer::DIV..=timer::TAC => self.timer.write(addr, value),
+                        timer::DIV..=timer::TAC => self.write_timer(addr, value),
                 serial::SB => self.serial.write(addr, value),
                         serial::SC => self.write_serial_sc(value),
                         audio::NR10..=audio::NR52 | audio::WAV_START..=audio::WAV_END => {
