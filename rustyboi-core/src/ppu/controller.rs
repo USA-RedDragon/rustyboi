@@ -1067,11 +1067,15 @@ impl Ppu {
             };
 
             if idx < sprite_xs.len() {
-                // First-sprite special case: fno=1, xpos=0.
+                // First-sprite special case (Tile::predictCyclesUntilXpos_fn, the
+                // `fno + spx - xpos` first-sprite branch). The `fno` Gambatte
+                // passes from M3Start::f1 is the fine-scroll discard
+                // `min(scx % 8, 5)`, NOT a constant 1; xpos is 0 here.
                 let spx0 = sprite_xs[0];
+                let fno = scx.min(5);
                 let prev_tile_no = (0 - first_tile_xpos) & !7; // (xpos - firstTileXpos) & -8
-                if 1 + spx0 < 5 && spx0 <= nwx && spx0 <= target_x {
-                    cycles += 11 - (1 + spx0);
+                if fno + spx0 < 5 && spx0 <= nwx && spx0 <= target_x {
+                    cycles += 11 - (fno + spx0);
                     idx += 1;
                 }
                 if nwx < target_x {
