@@ -95,6 +95,7 @@ jobs:
           - windows-arm64
           - macos-x86_64
           - macos-aarch64
+          - wasm32-wasip1
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: ./.github/actions/free-disk-space
@@ -113,26 +114,10 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  build-runner-wasm:
-    name: 'runner / wasm32-wasip1'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Add wasip1 target
-        run: rustup target add wasm32-wasip1
-      - name: Build runner (wasm32-wasip1)
-        run: cargo build -p rustyboi-test-runner --bin rustyboi-test-runner --target wasm32-wasip1 --release
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: runner-wasm32-wasip1
-          path: target/wasm32-wasip1/release/rustyboi-test-runner.wasm
-          if-no-files-found: error
-          retention-days: 1
-
   test:
     name: '${{ matrix.suite }} / ${{ matrix.os }} / ${{ matrix.arch }}'
     runs-on: ${{ matrix.runs-on }}
-    needs: [build-roms, build-runner, build-runner-wasm]
+    needs: [build-roms, build-runner]
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -204,9 +189,10 @@ jobs:
         if: matrix.wasm
         shell: bash
         run: |
-          ver=v46.0.1
+          # renovate: datasource=github-releases depName=bytecodealliance/wasmtime
+          WASMTIME_VERSION=v46.0.1
           curl -fsSL -o wasmtime.tar.xz \
-            "https://github.com/bytecodealliance/wasmtime/releases/download/${ver}/wasmtime-${ver}-x86_64-linux.tar.xz"
+            "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz"
           mkdir -p "$HOME/wasmtime" && tar xf wasmtime.tar.xz -C "$HOME/wasmtime" --strip-components=1
           echo "$HOME/wasmtime" >> "$GITHUB_PATH"
       - name: Download runner
