@@ -113,15 +113,31 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  build-runner-wasm:
+    name: 'runner / wasm32-wasip1'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Add wasip1 target
+        run: rustup target add wasm32-wasip1
+      - name: Build runner (wasm32-wasip1)
+        run: cargo build -p rustyboi-test-runner --bin rustyboi-test-runner --target wasm32-wasip1 --release
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runner-wasm32-wasip1
+          path: target/wasm32-wasip1/release/rustyboi-test-runner.wasm
+          if-no-files-found: error
+          retention-days: 1
+
   test:
     name: '${{ matrix.suite }} / ${{ matrix.os }} / ${{ matrix.arch }}'
     runs-on: ${{ matrix.runs-on }}
-    needs: [build-roms, build-runner]
+    needs: [build-roms, build-runner, build-runner-wasm]
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        os: [linux, windows, macos]
+        os: [linux, windows, macos, wasm]
         arch: [x86_64, aarch64, armv7]
         suite:
           - rustyboi
@@ -153,6 +169,8 @@ jobs:
         exclude:
           - { os: windows, arch: armv7 }
           - { os: macos, arch: armv7 }
+          - { os: wasm, arch: aarch64 }
+          - { os: wasm, arch: armv7 }
         include:
           - { os: linux, arch: x86_64, runs-on: ubuntu-24.04, name: linux-x86_64 }
           - { os: linux, arch: aarch64, runs-on: ubuntu-24.04-arm, name: linux-aarch64 }
@@ -161,6 +179,7 @@ jobs:
           - { os: windows, arch: aarch64, runs-on: windows-11-arm, name: windows-arm64, exe: .exe }
           - { os: macos, arch: x86_64, runs-on: macos-latest, name: macos-x86_64, rosetta: true }
           - { os: macos, arch: aarch64, runs-on: macos-latest, name: macos-aarch64 }
+          - { os: wasm, arch: x86_64, runs-on: ubuntu-24.04, name: wasm32-wasip1, wasm: true }
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Download first-party ROMs
@@ -181,6 +200,15 @@ jobs:
         if: matrix.rosetta
         shell: bash
         run: sudo softwareupdate --install-rosetta --agree-to-license
+      - name: Install wasmtime
+        if: matrix.wasm
+        shell: bash
+        run: |
+          ver=v46.0.1
+          curl -fsSL -o wasmtime.tar.xz \
+            "https://github.com/bytecodealliance/wasmtime/releases/download/${ver}/wasmtime-${ver}-x86_64-linux.tar.xz"
+          mkdir -p "$HOME/wasmtime" && tar xf wasmtime.tar.xz -C "$HOME/wasmtime" --strip-components=1
+          echo "$HOME/wasmtime" >> "$GITHUB_PATH"
       - name: Download runner
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -195,6 +223,7 @@ jobs:
         shell: bash
         run: make setup
       - name: Prepare runner binary
+        if: ${{ !matrix.wasm }}
         shell: bash
         run: |
           bin="runner/rustyboi-test-runner${{ matrix.exe }}"
@@ -204,7 +233,16 @@ jobs:
           if [ "${{ matrix.os }}" = macos ]; then codesign --force --sign - "$bin"; fi
       - name: Run ${{ matrix.suite }}
         shell: bash
-        run: RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 make suite SUITE=${{ matrix.suite }} RB_BIN=runner/rustyboi-test-runner${{ matrix.exe }}
+        run: |
+          if [ "${{ matrix.wasm }}" = true ]; then
+            RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 RB_JOBS=1 \
+              RB_BIN=runner/rustyboi-test-runner.wasm \
+              RB_RUN_PREFIX="wasmtime run --dir=. --dir=/tmp --" \
+              make suite SUITE=${{ matrix.suite }}
+          else
+            RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 \
+              make suite SUITE=${{ matrix.suite }} RB_BIN=runner/rustyboi-test-runner${{ matrix.exe }}
+          fi
 
   test-success:
     name: Test success check
