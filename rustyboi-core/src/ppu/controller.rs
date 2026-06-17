@@ -733,6 +733,11 @@ impl Ppu {
         if is_cgb && !ds && (mmio.read(SCX) & 0x07) == 2 {
             off += env_off("RB_M0IRQ_SCX2_CGB", -1);
         }
+        // NOTE: a per-phase SCX&7==3 m0irq nudge was evaluated against Gambatte's
+        // `predictedNextXposTime(166)` schedule and rejected: -1 there is net -13
+        // (fixes 5 m2int/scx, regresses 18 scx/m0int/m0stat/m0irq_count on both
+        // DMG+CGB). The m0irq base offset is globally co-calibrated; only the
+        // SCX2-CGB phase tolerates a nudge.
         let dsf = 1i64 << ds as i32;
         let abs = (self.abs_cc as i64 - dsf + (remaining + off) * dsf).max(0) as u64;
         self.sched_m0irq = abs;
@@ -2071,7 +2076,8 @@ impl Ppu {
         if self.disabled || self.internal_ly_val >= 144 {
             return Some(false);
         }
-        let m0 = self.scheduled_mode0_dot? as i64 + self.dma_scx_m0_nudge(double_speed, true);
+        let m0_raw = self.scheduled_mode0_dot? as i64;
+        let m0 = m0_raw + self.dma_scx_m0_nudge(double_speed, true);
         let ds = double_speed as i64;
         let cgb = is_cgb as i64;
         // End: vram/oam unblock at cc+2 >= m0Time; cgbp at cc >= m0Time+2.
@@ -2080,9 +2086,12 @@ impl Ppu {
         // renderer dot later than CGB (the `1 - cgb` term). At double speed the
         // CPU read resolves a full (2-dot) M-cycle after `ticks`, so the renderer
         // is two dots behind the access cc — add that back.
+        // cgbp (Gambatte cgbpAccessible) compares against the raw m0Time WITHOUT
+        // the SCX VRAM nudge (that nudge is the VRAM/OAM consumer's; cgbp has its
+        // own unconditional `cc >= m0Time + 2`).
         let eds = 2 * ds;
         let ended = match kind {
-            2 => self.ticks as i64 + ds >= m0 + 2,
+            2 => self.ticks as i64 + ds >= m0_raw + 2,
             _ => self.ticks as i64 - ds - (1 - cgb) + eds >= m0,
         };
         // CGB-palette has its own M3 start (Gambatte cgbpAccessible: blocks at
