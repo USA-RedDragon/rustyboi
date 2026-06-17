@@ -244,15 +244,12 @@ impl Audio {
             self.push_cc();
             return;
         }
-        // PSG::reset cycleCounter_ fold (sound.cpp:67).
-        // Fold from the authoritative `abs_cc>>1` phase (`last_update>>1`), not the
-        // drifted master accumulator: `self.cc` carries a small boot/parity offset
-        // from prior folds that shifts `cc>>13` (the length quantum) one step off
-        // Gambatte. `last_update` stays exactly anchored to the CPU clock, so
-        // `last_update>>1` is the un-drifted `cycleCounter_` Gambatte would fold.
-        let base_cc = (self.last_update >> 1) as u32 & (Self::CC_MAX - 1);
+        // PSG::reset cycleCounter_ fold (sound.cpp:67). Fold the master
+        // accumulator `self.cc` (it carries the DIV-reset fold phase the div_write
+        // cases need); the boot +0x1000 artifact that would otherwise offset the
+        // length quantum is suppressed by the boot-instant guard above.
         let div_offset = (self.last_update as u32) & (ds as u32);
-        let cc = base_cc.wrapping_add(div_offset);
+        let cc = self.cc.wrapping_add(div_offset);
         // (cc & 0xFFF) + 2 * (~(cc + 1 + !ds) & 0x800)
         let not_ds = (!ds) as u32;
         let folded = (cc & 0xFFF)
