@@ -271,6 +271,43 @@ impl Audio {
         self.push_cc();
     }
 
+    /// Gambatte `PSG::speedChange` (sound.cpp:89), fired on the CGB STOP speed
+    /// switch. Flushes the APU to the switch cc (handled by the caller via
+    /// `sync_cc` before this runs), then re-folds `cycleCounter_` for the
+    /// single→double transition so the DIV-relative phase halves. `old_ds` is the
+    /// speed being LEFT (Gambatte passes `isDoubleSpeed()` before the KEY1 toggle).
+    ///
+    /// Gambatte: `lastUpdate_ -= ds; if (!ds) { cc = cycleCounter_;
+    /// divCycles = cc & 0xFFF; cycleCounter_ = cc - divCycles/2 - lastUpdate_%2;
+    /// chN.resetCc(cc, cycleCounter_); }`. The `if(!ds)` correction only applies
+    /// going single→double (the DIV runs twice as fast in cc terms afterward, so
+    /// the accumulated sub-quantum phase is halved).
+    pub fn psg_speed_change(&mut self, old_ds: bool) {
+        if !self.clock_anchored {
+            return;
+        }
+        // lastUpdate_ -= ds
+        if old_ds {
+            self.last_update = self.last_update.wrapping_sub(1);
+        }
+        // Only the single->double transition re-folds cycleCounter_.
+        if !old_ds {
+            let cc = self.cc;
+            let div_cycles = cc & 0xFFF;
+            let folded = cc
+                .wrapping_sub(div_cycles / 2)
+                .wrapping_sub((self.last_update % 2) as u32)
+                % Self::CC_MAX;
+            let delta = cc.wrapping_sub(folded);
+            self.cc = folded;
+            self.channel1.reset_cc(delta);
+            self.channel2.reset_cc(delta);
+            self.channel3.reset_cc(delta);
+            self.push_cc();
+            self.fire_length_events(self.cc);
+        }
+    }
+
     /// Advance only the wave channel's fetch counter to the current cc, for the
     /// CPU read path. Does not run square envelope/length events.
     pub fn sync_wave_for_read(&mut self) {
