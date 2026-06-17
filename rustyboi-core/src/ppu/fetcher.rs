@@ -100,9 +100,18 @@ impl Fetcher {
     
     // Start fetching window tiles when WX condition is met
     pub fn start_window(&mut self, window_x: u8) {
+        self.start_window_at_tile(window_x, 0);
+    }
+
+    // Start fetching window tiles from a specific window tilemap column. The
+    // mid-line WX-match path starts at column 0; the M3Start::f0 line-begin
+    // "already started" path (DMG wx==166 wraparound) starts at column
+    // wscx/8 == (tile_len + scx%8)/8 == 1, since Gambatte seeds
+    // wscx = tile_len + scx%8 there.
+    pub fn start_window_at_tile(&mut self, window_x: u8, start_tile: u8) {
         self.fetching_window = true;
         self.window_x_start = window_x;
-        self.tile_index = 0; // Reset tile index for window
+        self.tile_index = start_tile;
         self.pixel_fifo.reset(); // Clear FIFO when switching to window
         self.state = State::TileNumber; // Start fetching immediately
     }
