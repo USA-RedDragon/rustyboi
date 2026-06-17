@@ -133,7 +133,7 @@ impl<'a> Bus<'a> {
             // (the SAME cc the timer register access resolves on), so the
             // length-expiry boundary is decided off one uniform clock with no
             // APU-specific phase constant (M7).
-            let access_cc = self.mmio.apu_access_cc();
+            let access_cc = self.mmio.access_cc();
             self.mmio.sync_apu_read_cc(access_cc);
             Some(self.mmio.read(addr))
         } else {
