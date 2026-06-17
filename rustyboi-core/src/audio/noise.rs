@@ -86,9 +86,6 @@ impl Noise {
         self.enabled = false;
     }
 
-    pub fn len_counter(&self) -> u32 {
-        self.len_counter
-    }
 
     /// Gambatte `LengthCounter::nr1Change` (channel 4 / NR41).
     fn len_nr1_change(&mut self, value: u8) {
@@ -195,9 +192,6 @@ impl Noise {
         (self.nr43 >> 3) & 0x01 != 0
     }
 
-    fn get_length_load(&self) -> u8 {
-        self.nr41 & 0x3F
-    }
 
     fn get_envelope_initial_volume(&self) -> u8 {
         (self.nr42 >> 4) & 0x0F

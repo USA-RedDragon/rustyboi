@@ -367,12 +367,6 @@ impl SquareWave {
         self.enabled = false;
     }
 
-    /// cc of the next scheduled length expiry (Gambatte `counter_`), or
-    /// `LEN_DISABLED`. The controller fires `length_event` when `cc` reaches it.
-    pub fn len_counter(&self) -> u32 {
-        self.len_counter
-    }
-
     fn duty_nr1_change(&mut self) {
         self.update_pos();
     }
