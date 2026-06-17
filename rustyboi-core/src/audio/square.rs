@@ -372,9 +372,6 @@ impl SquareWave {
 
     /// Gambatte `LengthCounter::event`: expiry disables the channel.
     pub fn length_event(&mut self) {
-        if std::env::var("APUDBG").is_ok() && !self.channel1 {
-            eprintln!("EXPIRE ch2: len_cc={:#x} len_counter={:#x}", self.len_cc, self.len_counter);
-        }
         self.len_counter = LEN_DISABLED;
         self.length_counter = 0;
         self.enabled = false;
@@ -506,12 +503,6 @@ impl SquareWave {
         } else {
             LEN_DISABLED
         };
-        if std::env::var("APUDBG").is_ok() && !self.channel1 {
-            eprintln!(
-                "nr4: cc={:#x} len_cc={:#x} nr4={:#x} dec={} len={} len_counter={:#x}",
-                self.cc, self.len_cc, new_nr4, dec, self.length_counter, self.len_counter
-            );
-        }
     }
 
     fn write_nrx4(&mut self, value: u8) {
