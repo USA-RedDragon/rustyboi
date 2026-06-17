@@ -34,12 +34,6 @@ const CC_OFF: i64 = 5;
 // Gambatte's `+3` constant in `tmatime`/`nextIrqEventTime` (mem/tima.cpp).
 const TMA_OFF: u64 = 3;
 
-// APU-FS DIV-edge anchor offset on a DIV reset. The APU frame-sequencer leg has
-// not been migrated to the master cc yet (ENGINE_REWRITE step 4, "APU root 2"),
-// so on a DIV write its bit-12 edge is held at the pre-move (+4, end-of-M-cycle)
-// phase to leave the steady-state sound timing at the 660 baseline.
-const APU_OFF: i64 = 4;
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Timer {
     tima: u8,
@@ -64,13 +58,6 @@ pub struct Timer {
     // divider is `(abs_cc - div_anchor) & 0xFFFF`.
     #[serde(default)]
     div_anchor: u64,
-    // Separate DIV anchor for the APU frame-sequencer bit-12 edge, held at the
-    // pre-move (end-of-M-cycle) DIV-write cc. The TIMA cluster now resolves DIV
-    // writes at the access START cc, but the APU-FS edge has not yet moved
-    // (APU root 2), so keeping a +4 anchor for the APU edge preserves its exact
-    // pre-move falling-edge phase until the APU leg of the cluster migrates.
-    #[serde(default)]
-    apu_div_anchor: u64,
     // Monotonic count of DIV writes (each rebases `div_anchor`). The APU master
     // clock reads this to detect a DIV reset and apply Gambatte's
     // `PSG::divReset` cycle-counter fold.
@@ -110,7 +97,6 @@ impl Timer {
             last_apu_div_bit: false,
             abs_cc: 0,
             div_anchor: 0,
-            apu_div_anchor: 0,
             div_reset_count: 0,
             tima_last_update: 0,
             tmatime: DISABLED_TIME,
@@ -127,6 +113,13 @@ impl Timer {
         self.div_reset_count
     }
 
+    /// The access cc of the most recent DIV write (Gambatte `divLastUpdate_`).
+    /// The APU divReset fold must run at this cc, matching the single
+    /// `cycleCounter_` Gambatte folds on.
+    pub fn div_anchor(&self) -> u64 {
+        self.div_anchor
+    }
+
     /// The 16-bit DIV divider: a pure derivation of the master counter and the
     /// last DIV-write anchor (Gambatte `(cc - divLastUpdate)`'s low 16 bits).
     fn divider(&self) -> u16 {
@@ -141,6 +134,13 @@ impl Timer {
     /// `abs_cc` (tuning lever `CC_OFF`).
     fn access_cc(&self) -> u64 {
         (self.abs_cc as i64 + CC_OFF) as u64
+    }
+
+    /// Public view of the CPU-access resolution cc, for APU register accesses
+    /// (the DIV-reset fold + length scheduling must use the same cc the timer's
+    /// DIV write resolves on, mirroring Gambatte's single `cycleCounter_`).
+    pub fn access_cc_pub(&self) -> u64 {
+        self.access_cc()
     }
 
     /// Gambatte `Tima::doIrqEvent`: flag the IRQ and advance the scheduled time
@@ -277,8 +277,6 @@ impl Timer {
                 self.tima_last_update + ((256u64 - self.tima as u64) << clk) + TMA_OFF;
         }
         self.div_anchor = cc;
-        // APU-FS edge stays on the pre-move (end-of-M-cycle) DIV phase.
-        self.apu_div_anchor = (self.abs_cc as i64 + APU_OFF) as u64;
         self.div_reset_count = self.div_reset_count.wrapping_add(1);
     }
 
@@ -294,7 +292,6 @@ impl Timer {
     pub fn set_internal_counter(&mut self, value: u16) {
         self.abs_cc = value as u64;
         self.div_anchor = 0;
-        self.apu_div_anchor = 0;
         self.tima_last_update = self.abs_cc;
     }
 
@@ -350,11 +347,13 @@ impl Timer {
         }
         self.flush_pending_irq(mmio);
 
-        // The APU frame sequencer is clocked by the falling edge of DIV bit 12
-        // (bit 13 in double speed).
+        // The APU frame sequencer (sweep + noise-envelope legs that remain
+        // FS-clocked; length is now cc-driven in the controller) is clocked by
+        // the falling edge of DIV bit 12 (bit 13 in double speed), derived from
+        // the SAME master `abs_cc`/`div_anchor` the timer/DIV use.
         self.last_double_speed = mmio.is_double_speed_mode();
         let apu_bit_pos = if self.last_double_speed { 13 } else { 12 };
-        let apu_div = (self.abs_cc.wrapping_sub(self.apu_div_anchor) & 0xFFFF) as u16;
+        let apu_div = (self.abs_cc.wrapping_sub(self.div_anchor) & 0xFFFF) as u16;
         let apu_bit = (apu_div & (1 << apu_bit_pos)) != 0;
         if self.last_apu_div_bit && !apu_bit {
             mmio.clock_apu_frame_sequencer();

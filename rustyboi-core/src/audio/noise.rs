@@ -21,6 +21,20 @@ pub struct Noise {
     lfsr: u16, // Linear feedback shift register
     length_enabled: bool,
     fs_step: u8,
+
+    // Free-running 2 MHz cycle counter (Gambatte cycleCounter_), pushed by the
+    // controller; drives the cc-based length expiry.
+    #[serde(default)]
+    cc: u32,
+    // Absolute cc of length expiry (Gambatte `LengthCounter::counter_`).
+    #[serde(default = "len_disabled")]
+    len_counter: u32,
+}
+
+const LEN_DISABLED: u32 = 0xFFFF_FFFF;
+
+fn len_disabled() -> u32 {
+    LEN_DISABLED
 }
 
 impl Noise {
@@ -39,15 +53,66 @@ impl Noise {
             lfsr: 0x7FFF,
             length_enabled: false,
             fs_step: 0,
+            cc: 0,
+            len_counter: LEN_DISABLED,
         }
+    }
+
+    pub fn set_cc(&mut self, cc: u32) {
+        self.cc = cc;
     }
 
     pub fn set_fs_step(&mut self, step: u8) {
         self.fs_step = step;
     }
 
-    fn length_extra_clock_due(&self) -> bool {
-        (self.fs_step % 2) == 1
+    const LEN_MASK: u16 = 0x3F;
+
+    /// Gambatte `LengthCounter::event` for channel 4.
+    pub fn length_event(&mut self) {
+        self.len_counter = LEN_DISABLED;
+        self.length_counter = 0;
+        self.enabled = false;
+    }
+
+    pub fn len_counter(&self) -> u32 {
+        self.len_counter
+    }
+
+    /// Gambatte `LengthCounter::nr1Change` (channel 4 / NR41).
+    fn len_nr1_change(&mut self, value: u8) {
+        self.length_counter = ((!value as u16 & Self::LEN_MASK) + 1) as u8;
+        self.len_counter = if self.nr44 & 0x40 != 0 {
+            (((self.cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+        } else {
+            LEN_DISABLED
+        };
+    }
+
+    /// Gambatte `LengthCounter::nr4Change` (channel 4 / NR44) length handling.
+    fn len_nr4_change(&mut self, old_nr4: u8, new_nr4: u8) {
+        if self.len_counter != LEN_DISABLED {
+            self.length_counter =
+                (self.len_counter >> 13).wrapping_sub(self.cc >> 13) as u8;
+        }
+        let mut dec: u8 = 0;
+        if new_nr4 & 0x40 != 0 {
+            dec = ((!self.cc >> 12) & 1) as u8;
+            if old_nr4 & 0x40 == 0 && self.length_counter != 0 {
+                self.length_counter -= dec;
+                if self.length_counter == 0 {
+                    self.enabled = false;
+                }
+            }
+        }
+        if new_nr4 & 0x80 != 0 && self.length_counter == 0 {
+            self.length_counter = (Self::LEN_MASK as u8) + 1 - dec;
+        }
+        self.len_counter = if new_nr4 & 0x40 != 0 && self.length_counter != 0 {
+            (((self.cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+        } else {
+            LEN_DISABLED
+        };
     }
 
     pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
@@ -69,23 +134,10 @@ impl Noise {
             return;
         }
 
-        // Length counter (steps 0, 2, 4, 6)
-        if step.is_multiple_of(2) && self.length_enabled {
-            self.step_length_counter();
-        }
-
+        // Length is now a cc-driven absolute expiry event (see `length_event`).
         // Volume envelope (step 7)
         if step == 7 {
             self.step_volume_envelope();
-        }
-    }
-
-    fn step_length_counter(&mut self) {
-        if self.length_counter > 0 {
-            self.length_counter -= 1;
-            if self.length_counter == 0 {
-                self.enabled = false;
-            }
         }
     }
 
@@ -150,21 +202,10 @@ impl Noise {
 
     fn write_nrx4(&mut self, value: u8) {
         let trigger = (value >> 7) & 0x01 != 0;
-        let new_length_enabled = (value >> 6) & 0x01 != 0;
-        let was_length_enabled = self.length_enabled;
+        let old_nr4 = self.nr44;
 
-        if new_length_enabled
-            && !was_length_enabled
-            && self.length_extra_clock_due()
-            && self.length_counter > 0
-        {
-            self.length_counter -= 1;
-            if self.length_counter == 0 && !trigger {
-                self.enabled = false;
-            }
-        }
-
-        self.length_enabled = new_length_enabled;
+        self.len_nr4_change(old_nr4, value);
+        self.length_enabled = (value >> 6) & 0x01 != 0;
         self.nr44 = value;
 
         if trigger {
@@ -175,13 +216,7 @@ impl Noise {
     fn trigger(&mut self) {
         self.enabled = true;
 
-        // Length counter
-        if self.length_counter == 0 {
-            self.length_counter = 64;
-            if self.length_enabled && self.length_extra_clock_due() {
-                self.length_counter -= 1;
-            }
-        }
+        // Length reload handled in `len_nr4_change` (Gambatte folds it in).
 
         // Volume envelope
         self.volume = self.get_envelope_initial_volume();
@@ -240,7 +275,7 @@ impl Addressable for Noise {
                 match addr {
                     NR41 => {
                         self.nr41 = value;
-                        self.length_counter = 64 - self.get_length_load();
+                        self.len_nr1_change(value);
                     }
                     NR42 => {
                         self.nr42 = value;
