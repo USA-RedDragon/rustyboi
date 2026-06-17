@@ -29,6 +29,8 @@ pub struct Noise {
     // Absolute cc of length expiry (Gambatte `LengthCounter::counter_`).
     #[serde(default = "len_disabled")]
     len_counter: u32,
+    #[serde(default)]
+    len_cc: u32,
 }
 
 const LEN_DISABLED: u32 = 0xFFFF_FFFF;
@@ -55,11 +57,20 @@ impl Noise {
             fs_step: 0,
             cc: 0,
             len_counter: LEN_DISABLED,
+            len_cc: 0,
         }
     }
 
     pub fn set_cc(&mut self, cc: u32) {
         self.cc = cc;
+    }
+
+    pub fn set_len_cc(&mut self, cc: u32) {
+        self.len_cc = cc;
+    }
+
+    pub fn len_expired(&self) -> bool {
+        self.len_cc >= self.len_counter
     }
 
     pub fn set_fs_step(&mut self, step: u8) {
@@ -83,7 +94,7 @@ impl Noise {
     fn len_nr1_change(&mut self, value: u8) {
         self.length_counter = ((!value as u16 & Self::LEN_MASK) + 1) as u8;
         self.len_counter = if self.nr44 & 0x40 != 0 {
-            (((self.cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+            (((self.len_cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
         } else {
             LEN_DISABLED
         };
@@ -93,11 +104,11 @@ impl Noise {
     fn len_nr4_change(&mut self, old_nr4: u8, new_nr4: u8) {
         if self.len_counter != LEN_DISABLED {
             self.length_counter =
-                (self.len_counter >> 13).wrapping_sub(self.cc >> 13) as u8;
+                (self.len_counter >> 13).wrapping_sub(self.len_cc >> 13) as u8;
         }
         let mut dec: u8 = 0;
         if new_nr4 & 0x40 != 0 {
-            dec = ((!self.cc >> 12) & 1) as u8;
+            dec = ((!self.len_cc >> 12) & 1) as u8;
             if old_nr4 & 0x40 == 0 && self.length_counter != 0 {
                 self.length_counter -= dec;
                 if self.length_counter == 0 {
@@ -109,7 +120,7 @@ impl Noise {
             self.length_counter = (Self::LEN_MASK as u8) + 1 - dec;
         }
         self.len_counter = if new_nr4 & 0x40 != 0 && self.length_counter != 0 {
-            (((self.cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+            (((self.len_cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
         } else {
             LEN_DISABLED
         };

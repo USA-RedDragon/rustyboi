@@ -121,13 +121,14 @@ impl<'a> Bus<'a> {
     }
 
     pub fn read(&mut self, addr: u16) -> u8 {
-        // Wave-RAM reads observe channel 3 at the read M-cycle start cc
-        // (Gambatte resolves the read before advancing). Snapshot the value
-        // before ticking; the per-dot step during tick_m would otherwise move
-        // the wave fetch position past the read cycle. NR registers/NR52 status
-        // keep the post-tick path so length expiry is evaluated at the same cc
-        // the rest of the system observes.
-        let apu_read = if (0xFF30..=0xFF3F).contains(&addr) {
+        // APU reads (NRxx status, NR52, wave RAM) observe the channels at the
+        // read M-cycle START cc (Gambatte resolves the read before advancing).
+        // Snapshot the value before ticking; the per-dot step during tick_m would
+        // otherwise let a length expiry scheduled within this M-cycle disable a
+        // channel 4 dots early — making the cycle-exact `nr52` boundary tests
+        // (length expiry at `((cc>>13)+len)<<13` vs the NR52 read cc) read 0 one
+        // M-cycle too soon. NR52 status must reflect the pre-tick enabled state.
+        let apu_read = if (0xFF10..=0xFF3F).contains(&addr) {
             self.mmio.sync_apu_for_read();
             Some(self.mmio.read(addr))
         } else {
