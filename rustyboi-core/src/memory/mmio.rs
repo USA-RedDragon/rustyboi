@@ -235,6 +235,23 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_prev_period: bool,
 
+    // Mirrors `intreq_.halted()`. Gambatte suppresses the period-edge
+    // `flagHdmaReq` while halted (video.h:41 `if (!intreq_.halted())`); the
+    // halt-time block is governed instead by the `haltHdmaState_` machine and
+    // re-flagged only on unhalt. Set by the HALT opcode, cleared on unhalt.
+    #[serde(skip, default)]
+    cpu_halted: bool,
+
+    // Whether the HDMA block owed for the *current* eligibility period has
+    // already been serviced. rustyboi fires the period block immediately at the
+    // rising edge, whereas Gambatte defers it to the `intevent_dma` event; this
+    // flag lets `on_cpu_halt` recover Gambatte's distinction between "in period,
+    // block already done" (hdma_high) and "in period, block still owed"
+    // (hdma_requested -> fires on the deferred/unhalt path). Reset on the period
+    // falling edge.
+    #[serde(skip, default)]
+    hdma_block_done_this_period: bool,
+
     // CGB palette state
     #[serde(with = "serde_bytes")]
     bg_palette_ram: [u8; 64],    // 8 palettes × 4 colors × 2 bytes = 64 bytes
@@ -297,6 +314,8 @@ impl Mmio {
             hdma_is_in_period_cached: false,
             hdma_prev_stat_mode: 0,
             hdma_prev_period: false,
+            cpu_halted: false,
+            hdma_block_done_this_period: false,
 
             // CGB palette initialization
             bg_palette_ram: [0; 64],
@@ -706,6 +725,12 @@ impl Mmio {
         self.halt_hdma_state = s;
     }
 
+    /// CPU has left HALT. Clears the `intreq_.halted()` mirror so the
+    /// period-edge `flagHdmaReq` resumes (video.h:41).
+    pub fn clear_cpu_halt(&mut self) {
+        self.cpu_halted = false;
+    }
+
     pub fn update_hdma_period_cache(&mut self, in_period: bool) {
         self.hdma_is_in_period_cached = in_period;
     }
@@ -714,18 +739,46 @@ impl Mmio {
         self.hdma_is_in_period_cached
     }
 
+    /// "In HDMA period" as seen by the unhalt re-flag gate. Uses the cycle-exact
+    /// renderer period when available, else falls back to the FF41 STAT mode-0
+    /// gate (matching `step_hdma`'s fallback edge model) so unhalt re-flagging
+    /// works on the window / first-line paths where no closed-form mode-0 dot
+    /// exists. LCD-off counts as permanently in period.
+    pub fn hdma_in_period_for_unhalt(&self) -> bool {
+        let lcdc = self.io_registers.read(ppu::LCD_CONTROL);
+        let lcd_on = lcdc & (ppu::LCDCFlags::DisplayEnable as u8) != 0;
+        if !lcd_on {
+            return true;
+        }
+        if self.hdma_is_in_period_cached {
+            return true;
+        }
+        (self.io_registers.read(ppu::LCD_STATUS) & 0x03) == 0
+    }
+
     /// CPU has just entered HALT. Mirrors Gambatte's `Memory::halt`
     /// (memory.cpp:407): records the halt-HDMA state and acks any
     /// currently flagged req so it does not double-fire on unhalt.
     pub fn on_cpu_halt(&mut self) {
+        self.cpu_halted = true;
         if !self.cgb_features_enabled {
             self.halt_hdma_state = HaltHdmaState::Low;
             return;
         }
+        // Gambatte `Memory::halt`: haltHdmaState_ = (enabled && period) ? high : low,
+        // then `requested` if a block is currently flagged. rustyboi services the
+        // period block immediately at the edge instead of holding a flag, so a
+        // block that is *owed but not yet serviced* this period (would still be
+        // flagged in Gambatte) maps to `Requested`; one already serviced maps to
+        // `High`.
         self.halt_hdma_state = if self.hdma_req_pending {
             HaltHdmaState::Requested
         } else if self.hdma_enabled && self.hdma_is_in_period_cached {
-            HaltHdmaState::High
+            if self.hdma_block_done_this_period {
+                HaltHdmaState::High
+            } else {
+                HaltHdmaState::Requested
+            }
         } else {
             HaltHdmaState::Low
         };
@@ -862,9 +915,21 @@ impl Mmio {
         let in_period = if !lcd_on { true } else { period.unwrap_or(false) };
         self.hdma_is_in_period_cached = in_period;
 
+        // Reset the per-period "block already serviced" marker on the falling
+        // edge so the next period's block is again owed.
+        if self.hdma_prev_period && !in_period {
+            self.hdma_block_done_this_period = false;
+        }
+
+        // Gambatte's period-edge `flagHdmaReq` is suppressed while the CPU is
+        // halted (video.h:41 `if (!intreq_.halted())`): during HALT the block is
+        // governed by the `haltHdmaState_` machine and re-flagged only on unhalt,
+        // so the edge must NOT auto-arm here. Edge trackers are still advanced so
+        // the rising edge is detected cleanly once the CPU unhalts.
+        let arm_allowed = !self.cpu_halted;
         if lcd_on && period.is_some() {
             // Rising edge of the eligibility window arms a block.
-            if !self.hdma_prev_period && in_period && self.hdma_enabled {
+            if arm_allowed && !self.hdma_prev_period && in_period && self.hdma_enabled {
                 self.hdma_req_pending = true;
             }
             self.hdma_prev_period = in_period;
@@ -877,7 +942,8 @@ impl Mmio {
             } else {
                 0
             };
-            if lcd_on && self.hdma_prev_stat_mode == 3 && mode == 0 && self.hdma_enabled {
+            if arm_allowed && lcd_on && self.hdma_prev_stat_mode == 3 && mode == 0 && self.hdma_enabled
+            {
                 self.hdma_req_pending = true;
             }
             self.hdma_prev_stat_mode = mode;
@@ -886,6 +952,15 @@ impl Mmio {
 
         if self.hdma_req_pending && self.hdma_enabled {
             self.pending_dma_stall += self.run_hdma_block();
+            if in_period {
+                self.hdma_block_done_this_period = true;
+            }
+            // Gambatte intevent_dma (memory.cpp:280): after the block, a halt-time
+            // `hdma_requested` collapses to `hdma_low` so a subsequent unhalt does
+            // not re-fire it (the request has now been serviced).
+            if self.halt_hdma_state == HaltHdmaState::Requested {
+                self.halt_hdma_state = HaltHdmaState::Low;
+            }
         }
     }
 
