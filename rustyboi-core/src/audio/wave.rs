@@ -117,6 +117,12 @@ impl Wave {
         self.fs_step = step;
     }
 
+    /// Gambatte `Channel3::reset` (from `PSG::reset`): clears the sample buffer.
+    /// Length counter / wave RAM are preserved.
+    pub fn psg_reset(&mut self) {
+        self.sample_buf = 0;
+    }
+
     const LEN_MASK: u16 = 0xFF;
 
     /// Gambatte `LengthCounter::event` for channel 3: expiry disables the
