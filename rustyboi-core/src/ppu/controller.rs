@@ -607,11 +607,6 @@ impl Ppu {
             && ((old_lcdc & win_bit) != (value & win_bit)
                 || (old_lcdc & spr_bits) != (value & spr_bits))
         {
-            if std::env::var("RB_DBG_WIN").is_ok() {
-                eprintln!("[INVAL-LCDC] ly={} ticks={} old={:02x} new={:02x} m0t={:?} wstart={}",
-                    self.internal_ly_val, self.ticks, old_lcdc, value, self.m0_time_master,
-                    self.window_started_this_line);
-            }
             self.scheduled_mode0_dot = None;
             // A mid-mode-3 window-DISABLE toggle (not sprite) interacts with the
             // StartWindowDraw mode-3 penalty captured at M3 arm. Gambatte locks
@@ -1825,11 +1820,6 @@ impl Ppu {
                         );
                         self.m3_scheduled_wx = mmio.read(WX);
                         self.m3_scheduled_win = self.window_will_start(mmio, is_cgb);
-                        if std::env::var("RB_DBG_WIN").is_ok() {
-                            eprintln!("[ARM] ly={} ticks={} m3len={} win={} wx={} scx={} m0t={:?} mcc={}",
-                                self.internal_ly_val, self.ticks, m3_len, self.m3_scheduled_win,
-                                mmio.read(WX), mmio.read(SCX)&7, self.m0_time_master, mmio.master_cc());
-                        }
                     }
                     // Arm the mode-0 (HBlank) STAT IRQ event at the predicted
                     // mode-0 start, in absolute clock terms. Gambatte schedules
@@ -1848,11 +1838,6 @@ impl Ppu {
                         || self.window_will_start(mmio, mmio.is_cgb_features_enabled())
                             != self.m3_scheduled_win)
                 {
-                    if std::env::var("RB_DBG_WIN").is_ok() {
-                        eprintln!("[INVAL-WX] ly={} ticks={} wx={} sched_wx={} win={} sched_win={}",
-                            self.internal_ly_val, self.ticks, mmio.read(WX), self.m3_scheduled_wx,
-                            self.window_will_start(mmio, mmio.is_cgb_features_enabled()), self.m3_scheduled_win);
-                    }
                     self.scheduled_mode0_dot = None;
                     self.m0_time_master = None;
                 }
@@ -2037,10 +2022,6 @@ impl Ppu {
                         self.window_started_this_line = true;
                         if self.win_start_dot.is_none() {
                             self.win_start_dot = Some(self.ticks);
-                        }
-                        if std::env::var("RB_DBG_WIN").is_ok() {
-                            eprintln!("[WINSTART] ly={} ticks={} x={} wx={}",
-                                self.internal_ly_val, self.ticks, self.x, wx);
                         }
                         break 'label; // Skip this cycle to let window fetching start
                     }
@@ -2363,10 +2344,6 @@ impl Ppu {
         // elsewhere).
         if self.state != State::PixelTransfer {
             return None;
-        }
-        if std::env::var("RB_DBG_WIN").is_ok() {
-            eprintln!("[READ] ly={} ticks={} acc={} m0t={:?} win_started={}",
-                self.internal_ly_val, self.ticks, access_cc, self.m0_time_master, self.window_started_this_line);
         }
         let m0t = self.m0_time_master? as i64;
         // mode 3 iff access_cc + 2 < m0Time, else mode 0.
