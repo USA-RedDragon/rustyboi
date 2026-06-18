@@ -26,8 +26,8 @@ jobs:
           ROMS_URL: ${{ secrets.ROMS_URL }}
         run: |
           {
-            echo "libretro=$(. tools/rust-cross.sh && rc_names        | jq -Rsc 'split("\n")|map(select(length>0))')"
-            echo "native=$(.   tools/rust-cross.sh && rc_names_native | jq -Rsc 'split("\n")|map(select(length>0))')"
+            echo "libretro=$(. tools/rust-cross.sh && rc_names_libretro | jq -Rsc 'split("\n")|map(select(length>0))')"
+            echo "native=$(.   tools/rust-cross.sh && rc_names_native   | jq -Rsc 'split("\n")|map(select(length>0))')"
             echo "has_roms=$([ -n "$ROMS_URL" ] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
 

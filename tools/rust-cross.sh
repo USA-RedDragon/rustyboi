@@ -236,6 +236,7 @@ rc_names()        { local t; for t in "${TARGETS[@]}"; do field "$t" 0; done; }
 rc_names_native() { local t; for t in "${TARGETS[@]}"; do case "$(field "$t" 3)" in ""|musl) field "$t" 0 ;; esac; done; return 0; }
 # Test runners: same set as native (everything with a run host: non-android/ios).
 rc_names_runner() { rc_names_native; }
+rc_names_libretro() { local t; for t in "${TARGETS[@]}"; do case "$(field "$t" 3)" in wasm) ;; *) field "$t" 0 ;; esac; done; return 0; }
 
 # Warm the shared cargo registry ONCE before the parallel per-target builds, so
 # they only READ it — concurrent cold downloads into $CARGO_VOL could race (the

@@ -68,7 +68,7 @@ ifneq (,$(filter libretro native runner,$(MAKECMDGOALS)))
   ifeq (,$(strip $(TARGETS)))
     $(error set TARGETS="name..." or TARGETS=all  — see `make targets`)
   endif
-  LIBRETRO_ALL := $(shell . tools/rust-cross.sh && rc_names)
+  LIBRETRO_ALL := $(shell . tools/rust-cross.sh && rc_names_libretro)
   NATIVE_ALL   := $(shell . tools/rust-cross.sh && rc_names_native)
   RUNNER_ALL   := $(shell . tools/rust-cross.sh && rc_names_runner)
 endif
