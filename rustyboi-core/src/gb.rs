@@ -225,6 +225,11 @@ impl GB {
         }
         self.mmio.set_post_bios_audio_state(cgb);
 
+        // Post-boot power-on OAM / unusable-region / HRAM contents (Gambatte
+        // setInitial*Ioamhram). The boot ROM leaves these untouched, so they
+        // hold the hardware power-on pattern the fexx_* dumpers read back.
+        self.mmio.set_post_bios_ioamhram(cgb);
+
         // Post-boot VRAM contents. The boot ROM decompresses the Nintendo logo
         // from the cart header into the BG tile area (0x8010-0x819F) and writes
         // the logo tilemap (tile indices) at 0x9904-0x9910 / 0x9924-0x992F.
