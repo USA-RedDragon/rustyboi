@@ -541,6 +541,13 @@ impl Mmio {
         self.timer.set_internal_counter(value);
     }
 
+    /// Write a raw byte into the generic IO-register backing store, bypassing
+    /// per-register write masking. Used by `skip_bios` to seed power-on values
+    /// (e.g. RP unused bits) that the masked write path cannot set.
+    pub fn set_io_register(&mut self, addr: u16, value: u8) {
+        self.io_registers.write(addr, value);
+    }
+
     /// Establish the post-`skip_bios` APU state. Syncs the APU cycle counter from
     /// the (already-set) timer counter first so the channel duty phase has the
     /// correct cc base, then applies Gambatte's post-boot state.
@@ -1695,14 +1702,19 @@ impl memory::Addressable for Mmio {
                         },
                         REG_SVBK => {
                             if self.cgb_features_enabled {
-                                self.wram_bank_select | 0xF8 // Bits 0-2 = bank, bits 3-7 = 1
+                                // Read back the RAW written low 3 bits, not the
+                                // bank-0->1 remap (Gambatte stores the written
+                                // value verbatim; the remap is access-time only).
+                                (self.io_registers.read(REG_SVBK) & 0x07) | 0xF8
                             } else {
                                 0xFF
                             }
                         },
                         REG_BCPS => {
                             if self.cgb_features_enabled {
-                                self.bg_palette_spec
+                                // Bit 6 is unused and reads 1 (Gambatte stores
+                                // the ffxxDump power-on 0x40 in that bit).
+                                self.bg_palette_spec | 0x40
                             } else {
                                 0xFF
                             }
@@ -1717,7 +1729,8 @@ impl memory::Addressable for Mmio {
                         },
                         REG_OCPS => {
                             if self.cgb_features_enabled {
-                                self.obj_palette_spec
+                                // Bit 6 is unused and reads 1 (as BCPS).
+                                self.obj_palette_spec | 0x40
                             } else {
                                 0xFF
                             }
@@ -1733,6 +1746,28 @@ impl memory::Addressable for Mmio {
                         // Bit 7 of STAT is unused but always reads as 1 on real
                         // hardware. See Gambatte memory.cpp case 0x41.
                         ppu::LCD_STATUS => self.io_registers.read(addr) | 0x80,
+
+                        // CGB-only registers with unused bits that read 1 (DMG
+                        // returns 0xFF, handled by the FF51-77 catch-all below).
+                        // RP/IR (0xFF56): bits 0,6,7 writable; bit 1 reads the IR
+                        // input (no link -> 1) and the remaining bits read 1.
+                        // Gambatte: `ioamhram_[0x156] | 0x02`, power-on 0x3E.
+                        0xFF56 if self.cgb_features_enabled => {
+                            self.io_registers.read(0xFF56) | 0x02
+                        }
+                        // OPRI (0xFF6C): only bit 0 implemented; bits 1-7 read 1.
+                        0xFF6C if self.cgb_features_enabled => {
+                            self.io_registers.read(0xFF6C) | 0xFE
+                        }
+                        // Undocumented FF75: only bits 4-6 are read/writable.
+                        0xFF75 if self.cgb_features_enabled => {
+                            self.io_registers.read(0xFF75) | 0x8F
+                        }
+                        // Unmapped CGB IO holes (no register) read open-bus
+                        // 0xFF: FF57-FF67, FF6D-FF6F, FF71. (FF68/6A/6C/70 are
+                        // handled above.)
+                        0xFF57..=0xFF67 | 0xFF6D..=0xFF6F | 0xFF71
+                            if self.cgb_features_enabled => 0xFF,
 
                         // 0xFF78-0xFF7F are unmapped on both DMG and CGB.
                         // Gambatte's nontrivial_ff_read falls through to a
@@ -1982,6 +2017,9 @@ impl memory::Addressable for Mmio {
                             if self.cgb_features_enabled {
                                 let bank = value & 0x07; // Bits 0-2 = bank select
                                 self.wram_bank_select = if bank == 0 { 1 } else { bank }; // Bank 0 selects bank 1
+                                // Keep the raw written value for read-back (the
+                                // remapped bank above is access-time only).
+                                self.io_registers.write(REG_SVBK, value);
                             }
                         },
                         REG_BCPS => {
@@ -2021,6 +2059,14 @@ impl memory::Addressable for Mmio {
                         
                         // 0xFF78-0xFF7F are unmapped: writes are dropped.
                         0xFF78..=0xFF7F => {}
+
+                        // RP/IR (0xFF56): only bits 0,6,7 are writable; bits 1-5
+                        // retain their (power-on) value. Gambatte:
+                        // `(data & 0xC1) | (old & 0x3E)`.
+                        0xFF56 if self.cgb_features_enabled => {
+                            let old = self.io_registers.read(0xFF56);
+                            self.io_registers.write(0xFF56, (value & 0xC1) | (old & 0x3E));
+                        }
 
                         _ => self.io_registers.write(addr, value),
                     }
