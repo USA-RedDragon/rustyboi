@@ -616,11 +616,15 @@ impl Addressable for Audio {
                     let last_update = self.last_update;
                     let last_div_resets = self.last_div_resets;
                     let clock_anchored = self.clock_anchored;
+                    // Wave pattern RAM survives APU power-off (Gambatte's
+                    // `PSG::reset` leaves `waveRam_` untouched).
+                    let wave_ram = self.channel3.wave_ram();
                     *self = Audio::new();
                     self.cc = cc;
                     self.last_update = last_update;
                     self.last_div_resets = last_div_resets;
                     self.clock_anchored = clock_anchored;
+                    self.channel3.set_wave_ram(wave_ram);
                 } else if !was_enabled && now_enabled {
                     // APU power-on (NR52 0→1): apply Gambatte's `PSG::reset` fold.
                     self.psg_reset(self.cached_ds);
