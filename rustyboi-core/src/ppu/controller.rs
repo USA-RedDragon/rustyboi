@@ -268,6 +268,9 @@ pub struct Ppu {
     // read-at-cc recompute to decide whether a mid-M3 window-disable keeps the
     // window-inclusive m0Time or reverts to the no-window length.
     win_start_dot: Option<u128>,
+    // Set once a late-WX mid-window refund has been applied this line, so a
+    // second WX write does not refund twice.
+    win_wx_penalty_resolved: bool,
     
     // STAT interrupt state tracking
     previous_stat_interrupt_line: bool, // Previous state of STAT interrupt line for edge detection
@@ -462,6 +465,7 @@ impl Ppu {
             win_draw_started_at_x0: false,
             window_y_triggered: false,
             win_start_dot: None,
+            win_wx_penalty_resolved: false,
             window_started_this_line: false,
             previous_stat_interrupt_line: false,
             mode2_irq_pretriggered_for_next_line: false,
@@ -1646,6 +1650,7 @@ impl Ppu {
                     // Reset window line flag for new scanline
                     self.window_started_this_line = false;
                     self.win_start_dot = None;
+                    self.win_wx_penalty_resolved = false;
 
                     // Initialize OAM search state
                     self.sprites_on_line.clear();
@@ -1839,6 +1844,52 @@ impl Ppu {
                     }
                     self.scheduled_mode0_dot = None;
                     self.m0_time_master = None;
+                }
+                // late_wx: a mid-mode-3 WX write AFTER the window has started but
+                // BEFORE the StartWindowDraw penalty locks moves the window out
+                // of range (WX no longer triggers), refunding the penalty in the
+                // read-at-cc m0Time. Mirror the late_disable refund/keep rule;
+                // touch only m0Time (the live pipeline is unaffected here - the
+                // window already started drawing). Scoped CGB / SCX phase 0 / no
+                // sprites where the boundary is exactly WIN_M3_PENALTY.
+                if self.m0_time_master.is_some()
+                    && self.window_started_this_line
+                    && mmio.is_cgb_features_enabled()
+                    && !mmio.is_double_speed_mode()
+                    && (self.m3_arm_scx & 7) == 0
+                    && self.sprites_on_line.is_empty()
+                    && mmio.read(WX) != self.m3_scheduled_wx
+                    && !self.win_wx_penalty_resolved
+                    && std::env::var("RB_WIN_LATE_WX").map(|v| v != "0").unwrap_or(true)
+                {
+                    let wx_now = mmio.read(WX) as i32;
+                    let wx_in_range = (0..=166).contains(&wx_now);
+                    if let Some(ws) = self.win_start_dot {
+                        // late_wx penalty-lock offset past win_start. A WX>=7
+                        // window (fine-scroll x+7==wx start) locks ~2 dots in; a
+                        // WX<7 window (immediate x==0 start) locks at win_start.
+                        // Calibrated against the late_wx _1/_2 straddle pairs.
+                        let lock_off = if (self.m3_scheduled_wx as i32) < 7 {
+                            env_off("RB_WIN_LATEWX_LOCK_LT7", 1) as u128
+                        } else {
+                            env_off("RB_WIN_LATEWX_LOCK", 2) as u128
+                        };
+                        let lock = ws + lock_off;
+                        // Only a WX that leaves the window-start range cancels the
+                        // remaining draw; an in-range WX change does not refund.
+                        if std::env::var("RB_DBG_WIN").is_ok() {
+                            eprintln!("[LATEWX] ly={} ticks={} wx_now={} ws={} lock={} refund={}",
+                                self.internal_ly_val, self.ticks, wx_now, ws, lock,
+                                !wx_in_range && (self.ticks as u128) < lock);
+                        }
+                        if !wx_in_range && (self.ticks as u128) < lock {
+                            if let Some(m0t) = self.m0_time_master {
+                                self.m0_time_master =
+                                    Some((m0t as i64 - WIN_M3_PENALTY as i64).max(0) as u64);
+                            }
+                            self.win_wx_penalty_resolved = true;
+                        }
+                    }
                 }
                 // CPU-visible mode-0 report (decoupled from pipeline). The FF41
                 // mode bits and the mode-0 STAT check are driven from the
