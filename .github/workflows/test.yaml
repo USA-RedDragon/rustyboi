@@ -230,17 +230,52 @@ jobs:
               make suite SUITE=${{ matrix.suite }} RB_BIN=runner/rustyboi-test-runner${{ matrix.exe }}
           fi
 
+  frontend-render:
+    name: 'frontend / render / ${{ matrix.os }}'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04 }
+          - { os: macos-latest }
+          - { os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install software Vulkan (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+      - name: Cache cargo + build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: frontend-render-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: frontend-render-${{ matrix.os }}-
+      - name: Run renderer tests
+        shell: bash
+        run: cargo test -p rustyboi-frontend
+
   test-success:
     name: Test success check
     if: always()
     runs-on: ubuntu-24.04
-    needs: [test]
+    needs: [test, frontend-render]
     steps:
       - name: Check all matrix jobs succeeded
         shell: bash
         run: |
           if [ "${{ needs.test.result }}" != success ]; then
-            echo "::error::One or more jobs failed: "; echo "${{ needs.test.result }}"
+            echo "::error::One or more test jobs failed: ${{ needs.test.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.frontend-render.result }}" != success ]; then
+            echo "::error::Renderer tests failed: ${{ needs.frontend-render.result }}"
             exit 1
           fi
 
