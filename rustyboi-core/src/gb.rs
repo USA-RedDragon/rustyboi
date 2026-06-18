@@ -83,6 +83,10 @@ impl GB {
         self.mmio.write(crate::input::JOYP, 0xCF);
         self.mmio.write(crate::ppu::LYC, 0x00);
         self.mmio.write(crate::ppu::BGP, 0xFC);
+        // OBP0/OBP1 are left uninitialised by the boot ROM and read 0xFF
+        // post-boot (Gambatte setInitial ffxxDump 0x48/0x49).
+        self.mmio.write(crate::ppu::OBP0, 0xFF);
+        self.mmio.write(crate::ppu::OBP1, 0xFF);
         self.mmio.write(registers::INTERRUPT_FLAG, 0xE1);
         self.mmio.write(registers::INTERRUPT_ENABLE, 0x00);
         self.mmio.write(crate::audio::NR10, 0x80);
