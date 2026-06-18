@@ -351,6 +351,15 @@ pub struct Ppu {
     // None when no closed-form dot is available (window / first line).
     #[serde(default)]
     m0_time_master: Option<u64>,
+    // Master-cc anchor at which CGB palette RAM (FF69/FF6B) becomes INACCESSIBLE
+    // for the current line (Gambatte `cgbpAccessible`: blocked once
+    // `lineCycles(cc) + ds >= 80`). Captured at M3 arm from the same master_cc /
+    // m3_arm_dot the m0_time_master uses, so the cgbp begin boundary resolves at
+    // the CPU's access cc rather than the renderer dot (whose pre/post-tick phase
+    // differs between the read and write paths). None when no closed-form M3 arm
+    // exists (first line after enable). Paired with `m0_time_master` for the end.
+    #[serde(default)]
+    cgbp_block_start_cc: Option<u64>,
     // The CPU-visible mode-0 (HBlank) start dot is computed on demand by
     // `reported_mode0_dot_value` from the closed-form `scheduled_mode0_dot` plus
     // a per-phase early-report nudge. It is decoupled from the live pixel
@@ -515,6 +524,7 @@ impl Ppu {
             scan_obj_size_large: false,
             scheduled_mode0_dot: None,
             m0_time_master: None,
+            cgbp_block_start_cc: None,
             mode0_reported_this_line: false,
             abs_cc: 0,
             p_now: pnow_disabled(),
@@ -1300,6 +1310,7 @@ impl Ppu {
         self.m3_pixels_discarded = 0;
         self.scheduled_mode0_dot = None;
         self.m0_time_master = None;
+        self.cgbp_block_start_cc = None;
     }
 
     /// Latch the current wired-OR STAT line state for edge bookkeeping. IRQ
@@ -1924,6 +1935,7 @@ impl Ppu {
                     if was_first_line {
                         self.scheduled_mode0_dot = None;
                         self.m0_time_master = None;
+                        self.cgbp_block_start_cc = None;
                     } else {
                         // Closed-form mode-0 schedule, including window-start lines
                         // (compute_m3_length applies the window penalty). Mid-mode-3
@@ -1956,6 +1968,18 @@ impl Ppu {
                         );
                         self.m3_scheduled_wx = mmio.read(WX);
                         self.m3_scheduled_win = self.window_will_start(mmio, is_cgb);
+                        // cgbp begin boundary (Gambatte cgbpAccessible: blocked once
+                        // `lineCycles(cc) + ds >= 80`). lineCycles = ticks - (4 - cgb),
+                        // so the block begins at the renderer tick
+                        // `tick_block = 80 - ds + (4 - cgb)`; convert to master cc using
+                        // the same arm anchor m0_time_master uses (each dot = 1<<ds cc).
+                        let cgb_i = is_cgb as i64;
+                        let tick_block = 80 - ds as i64 + (4 - cgb_i);
+                        self.cgbp_block_start_cc = Some(
+                            (mmio.master_cc() as i64
+                                + ((tick_block - self.m3_arm_dot as i64) << ds))
+                                .max(0) as u64,
+                        );
                     }
                     // Arm the mode-0 (HBlank) STAT IRQ event at the predicted
                     // mode-0 start, in absolute clock terms. Gambatte schedules
@@ -2424,9 +2448,41 @@ impl Ppu {
     /// mode 2|3 for oam). The cycle-exact predictor only refines the mode-3->0
     /// END boundary against `scheduled_mode0_dot` (Gambatte's `m0TimeOfCurrentLine`);
     /// the start stays on the renderer's mode set, which is window-independent.
-    pub fn cpu_access_blocked(&self, kind: u8, is_read: bool, mode3_locked: bool, is_cgb: bool, double_speed: bool) -> Option<bool> {
+    pub fn cpu_access_blocked(&self, kind: u8, is_read: bool, mode3_locked: bool, is_cgb: bool, double_speed: bool, access_cc: u64) -> Option<bool> {
         if self.disabled || self.internal_ly_val >= 144 {
             return Some(false);
+        }
+        // CGB palette RAM (FF69/FF6B) has its own access window resolved at the
+        // CPU access cc against master-cc anchors (Gambatte `cgbpAccessible(cc)`:
+        // blocked iff `lineCycles(cc) + ds >= 80` AND `cc < m0Time + 2`). Using
+        // the master cc here (not the renderer `ticks`) makes the begin/end
+        // boundaries phase-consistent across the read path (ppu_locks_access runs
+        // post-tick) and the write path (pre-tick).
+        // CGB palette RAM (FF69/FF6B): resolve the access window at the CPU access
+        // cc against master-cc anchors (Gambatte `cgbpAccessible(cc)`: accessible
+        // iff `lineCycles(cc) + ds < 80` OR `cc >= m0Time + 2`). Anchoring on the
+        // master cc (not the renderer `ticks`) removes the read-vs-write tick-phase
+        // skew (ppu_locks_access runs post-tick for reads, pre-tick for writes) and
+        // is independent of `scheduled_mode0_dot`, so it resolves even after the
+        // renderer has cleared / advanced past it on this line.
+        if kind == 2 {
+            if let (Some(start), Some(m0t)) = (self.cgbp_block_start_cc, self.m0_time_master) {
+                let cc = access_cc as i64;
+                let begun = cc >= start as i64;
+                // END (Gambatte cgbpAccessible: accessible once `cc >= m0Time + 2`).
+                // Single speed compares against the master-cc m0Time directly,
+                // reproducing the SS m3end `_1`/`_4` accessible boundary. At double
+                // speed `m0_time_master` carries the getStat-read-calibrated sub-dot
+                // bias (KD=-1) plus the SS->DS access-cc phase, leaving it ~4 cc
+                // high for the cgbp write end; the DS-CGBP end folds that constant
+                // back in (`cc + DS_END_BIAS >= m0Time + 2`), straddling both the
+                // m3end_ds and m3end_scx5_ds `_2`/`_4` pairs.
+                let ds_end_bias = if double_speed { env_off("RB_CGBP_DS_END", 4) } else { 0 };
+                let ended = cc + ds_end_bias >= m0t as i64 + 2;
+                return Some(begun && !ended);
+            }
+            // No closed-form anchors (first line / window): fall through to the
+            // renderer-tick boundary below.
         }
         let m0_raw = self.scheduled_mode0_dot? as i64;
         let m0 = m0_raw + self.dma_scx_m0_nudge(double_speed, true);
@@ -2446,10 +2502,9 @@ impl Ppu {
             2 => self.ticks as i64 + ds >= m0_raw + 2,
             _ => self.ticks as i64 - ds - (1 - cgb) + eds >= m0,
         };
-        // CGB-palette has its own M3 start (Gambatte cgbpAccessible: blocks at
-        // lineCycles + ds >= 80). lineCycles = ticks - (4 - cgb), so the block
-        // begins at ticks + ds - (4 - cgb) >= 80; one dot after the FF41 mode-3
-        // set, leaving FF69/FF6B accessible for that extra dot.
+        // CGB-palette tick-frame fallback (reached only when no master-cc anchors
+        // exist — first line / window). Gambatte cgbpAccessible blocks at
+        // lineCycles + ds >= 80; lineCycles = ticks - (4 - cgb).
         if kind == 2 {
             let begun = self.ticks as i64 + ds - (4 - cgb) >= 80;
             return Some(begun && !ended);
