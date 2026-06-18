@@ -142,7 +142,8 @@ impl Timer {
     /// `abs_cc` (tuning lever `CC_OFF`). This is the canonical per-access cc the
     /// timer, serial, and APU all resolve register accesses on (M7).
     pub fn access_cc(&self) -> u64 {
-        (self.abs_cc as i64 + CC_OFF) as u64
+        let off = std::env::var("RB_CC_OFF").ok().and_then(|v| v.parse().ok()).unwrap_or(CC_OFF);
+        (self.abs_cc as i64 + off) as u64
     }
 
     /// cc at which a CPU register WRITE resolves. The write side is a separate
