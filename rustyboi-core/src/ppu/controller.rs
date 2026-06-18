@@ -1398,11 +1398,6 @@ impl Ppu {
         self.scx_apply_cc = cc + delay;
     }
 
-    /// Current SCY value the BG fetcher should sample during mode 3 (delayed).
-    pub fn fetcher_scy(&self) -> u8 { self.scy_delayed }
-    /// Current SCX value the BG fetcher should sample during mode 3 (delayed).
-    pub fn fetcher_scx(&self) -> u8 { self.scx_delayed }
-
     pub fn on_stat_register_write(&mut self, mmio: &mut mmio::Mmio) {
         // The DMG STAT-write bug fires on any FF41 write, even one that leaves
         // the enable bits unchanged. Track whether this was an FF41 write so the
