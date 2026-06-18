@@ -630,36 +630,41 @@ impl Ppu {
             let only_win_toggle = (old_lcdc & spr_bits) == (value & spr_bits)
                 && (old_lcdc & win_bit) != (value & win_bit)
                 && (value & win_bit) == 0; // disable
-            // Scoped to the clean sub-case where the StartWindowDraw refund/keep
-            // boundary is exactly WIN_M3_PENALTY past win_start_dot: CGB, SCX
-            // phase 0, no sprites on the line. Other phases (the scx-prefix
-            // shifts the boundary) and DMG (different M3-start phase) keep the
-            // baseline fall-back (the live persisted register already resolves
-            // their _0/_2 reads; only the straddle _1 is at stake there).
-            // The StartWindowDraw lock dot relative to win_start is independent
-            // of SCX phase for the standard WX=7 windows, and independent of WX
-            // at SCX phase 0. The COMBINED WX-offset + nonzero-SCX variants
-            // (late_disable_early_scxNN_wxNN) shift the lock further and keep the
-            // live fall-back. Allow (WX==7) OR (SCX phase 0).
-            let win_wx = self.m3_scheduled_wx as i32;
-            let clean = cgb_features_enabled
-                && self.sprites_on_line.is_empty()
-                && (win_wx == 7 || (self.m3_arm_scx & 7) == 0);
-            if !enable_off && only_win_toggle && self.window_started_this_line && clean {
+            // GRADUATED StartWindowDraw refund: the window mode-3 penalty accrues
+            // one dot per drawn window dot, capped at WIN_M3_PENALTY. A mid-M3
+            // window-disable at dot `ticks` has accrued
+            //   accrued = min(WIN_M3_PENALTY, ticks - win_start)
+            // dots; the unaccrued remainder is refunded from the read-at-cc
+            // m0Time captured (full-penalty) at arm. This generalises the
+            // refund/keep across SCX phase and WX (each phase shifts win_start
+            // and m0Time together). Scoped CGB / no sprites / single speed; DS
+            // keeps the calibrated binary lock below. The live pipeline
+            // (scheduled_mode0_dot) is invalidated above regardless.
+            let clean_ss = cgb_features_enabled
+                && !ds
+                && self.sprites_on_line.is_empty();
+            let clean_ds = cgb_features_enabled
+                && ds
+                && self.m3_arm_scx & 7 == 0
+                && self.sprites_on_line.is_empty();
+            if enable_off || !only_win_toggle || !self.window_started_this_line {
+                self.m0_time_master = None;
+            } else if clean_ss {
                 if let (Some(m0t), Some(ws)) = (self.m0_time_master, self.win_start_dot) {
-                    let dsu = ds as u32;
-                    // Penalty-lock dot past win_start: WIN_M3_PENALTY at single
-                    // speed; two dots earlier at double speed (the sub-dot
-                    // window-fetch phase reaches the lock sooner relative to the
-                    // dot-granular `ticks`). Swept against the late_disable DS
-                    // straddle pairs.
-                    let lock_dots = WIN_M3_PENALTY as u128 - if ds { env_off("RB_WIN_LOCK_DS", 2) as u128 } else { 0 };
-                    let lock = ws + lock_dots;
+                    let drawn = (self.ticks as i64) - ws as i64;
+                    let accrued = drawn.clamp(0, WIN_M3_PENALTY as i64);
+                    let refund = WIN_M3_PENALTY as i64 - accrued;
+                    self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
+                } else {
+                    self.m0_time_master = None;
+                }
+            } else if clean_ds {
+                if let (Some(m0t), Some(ws)) = (self.m0_time_master, self.win_start_dot) {
+                    let lock = ws + (WIN_M3_PENALTY as u128 - 2);
                     if (self.ticks as u128) < lock {
-                        let refund = (WIN_M3_PENALTY as i64) << dsu;
-                        self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
+                        self.m0_time_master =
+                            Some((m0t as i64 - ((WIN_M3_PENALTY as i64) << 1)).max(0) as u64);
                     }
-                    // else: keep m0t unchanged (penalty locked).
                 } else {
                     self.m0_time_master = None;
                 }
