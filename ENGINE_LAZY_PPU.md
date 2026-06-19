@@ -73,6 +73,22 @@ LP1 task: get `m0_lineCycle` exact across scx / sprite / window configs (build t
 table from cctracer; it should equal `(80-ish base) + compute_m3_length_win(...)` — verify the
 base/anchor) and switch getStat to the lyTime-anchored `abs_cc + 2 < m0Time` form.
 
+### LP1 calibration table (cctracer, CGB DS, handler read pc 0x107x)
+m0_lineCycle vs scx (no sprite, no window): scx0=251, scx1=252, scx2=253, scx3=254, scx4=255,
+scx5=256, scx6=257, scx7=258 → **linear `m0_lineCycle = 251 + scx`**. Window (wx03/wx07) = 257
+= 251 + 6 (= `WIN_M3_PENALTY`). Since CGB `compute_m3_length_win = scx + 167 (+6 win + sprites)`,
+this means **`m0_lineCycle = compute_m3_length_win + 84`** (84 = 80 mode-2 + 4). The predictor
+DELTAS (scx +1, window +6, sprites) are ALREADY correct in `compute_m3_length_win`; only the
+base anchor (84) and the formula were wrong. So:
+  **`m0Time = lyTime − ((456 − 84 − m3_len) << ds)` = `lyTime − ((372 − m3_len) << ds)` (CGB)**,
+  where `lyTime` = the next-LY cc (rustyboi `ly_counter().time()`), and getStat: **mode3 iff
+  `abs_cc + 2 < m0Time`** (raw abs_cc, no +1/+6). DMG/single-speed base: calibrate with cctracer
+  on `.gb` roms (the `(1-cgb)` term in m3_len implies the DMG base is 83, i.e. m0_lineCycle =
+  m3_len + 83 — VERIFY). All OTHER `m0_time_master` consumers (cpu_access_blocked VRAM/OAM/cgbp,
+  m0irq arm, cgbp_block) must switch to this same exact `m0Time` with Gambatte's own per-consumer
+  constants (VRAM/OAM unblock `cc + 2 >= m0Time`; cgbp accessible `cc >= m0Time + 2`), removing
+  `K`/`KD`/`ACCESS_CC_RELOC`/`*_mode0_offset`/`dma_scx_m0_nudge`/`RB_CGBP_DS_END`.
+
 ## Phasing (each on this branch; red allowed if attributed; merge only net-positive)
 
 - **LP0 — anchor calibration (read-only + cctracer):** extend cctracer to dump Gambatte
