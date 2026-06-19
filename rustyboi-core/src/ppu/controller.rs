@@ -98,13 +98,6 @@ fn cgb_mode0_offset() -> i32 { env_off("RB_CGB_MODE0_OFF", CGB_MODE0_OFFSET as i
 fn m0irq_off_ss() -> i64 { env_off("RB_M0IRQ_OFF", M0IRQ_OFFSET) }
 fn m2irq_off_ss() -> i64 { env_off("RB_M2IRQ_OFF", M2IRQ_OFFSET) }
 fn write_cc_off_ss() -> i64 { env_off("RB_WRITE_CC_OFF", WRITE_CC_OFFSET) }
-// CL1: the PPU access-gating / FF41-read consumers now receive the *honest*
-// start-of-access cc (`master_cc + 1`) instead of the old `master_cc + 5`. The
-// 4-cc difference (resolve-at-end vs resolve-at-start) is relocated into the
-// consumer boundary constants via this term, keeping every boundary at the
-// identical absolute cc (net-zero). CL2 (ISR-dispatch cc) and CL3 (opcode
-// granularity) will let the true access cc vary, dissolving this constant.
-const ACCESS_CC_RELOC: i64 = 4;
 const MODE2_STAT_PRETRIGGER_DOT: u128 = 452;
 // Within line 153 (the last VBlank line) the LY register is held at 153 only
 // briefly; after this many dots it reads 0, even though the line itself
@@ -323,7 +316,6 @@ pub struct Ppu {
     // same early M3 dots Gambatte samples, so a mid-discard SCX write moves the
     // break target without the FIFO-warmup latency over-reading later writes.
     #[serde(default)]
-    dbg_m3_len: u128,
     m3_arm_dot: u128,
     // scx%8 sampled at M3 arm, used by the closed-form mode-0 schedule's
     // discard prefix. If the live f1 break resolves to a different count, the
@@ -525,7 +517,6 @@ impl Ppu {
             mode0_pretriggered_this_line: false,
             m3_pixels_discarded: 0,
             m3_discard_target: -1,
-            dbg_m3_len: 0,
             m3_arm_dot: 0,
             m3_arm_scx: 0,
             m3_scheduled_wx: 0,
@@ -898,27 +889,12 @@ impl Ppu {
                 self.ticks as i64 + m3_len as i64 + offset as i64
             }
         };
-        // The renderer's "current dot" abs value is abs_cc-1 (advanced at top of
-        // step). Dots remaining until mode 0 = mode0_within_line - ticks.
         let remaining = mode0_within_line - self.ticks as i64;
         let ds = mmio.is_double_speed_mode();
         let mut off = if ds { m0irq_off_ds() } else { m0irq_off_ss() };
-        // CGB single-speed, SCX%8 == 2: the mode-0 IRQ lands one dot earlier than
-        // our closed-form mode-3 prediction implies. The M3Start fine-scroll
-        // dispatch (`flut[scx%8]` after `nextCall(1-cgb, ...)`) consumes one
-        // fewer dot at this phase than the linear `scx` prefix in
-        // compute_m3_length_win models, so only this SCX phase needs the nudge.
-        // Calibrated against m2int_m0irq / enable_display / halt / irq_precedence
-        // scx2 CGB cases (10 fixed, 0 regressed); other SCX phases regress and
-        // are left untouched.
         if is_cgb && !ds && (mmio.read(SCX) & 0x07) == 2 {
             off += env_off("RB_M0IRQ_SCX2_CGB", -1);
         }
-        // NOTE: a per-phase SCX&7==3 m0irq nudge was evaluated against Gambatte's
-        // `predictedNextXposTime(166)` schedule and rejected: -1 there is net -13
-        // (fixes 5 m2int/scx, regresses 18 scx/m0int/m0stat/m0irq_count on both
-        // DMG+CGB). The m0irq base offset is globally co-calibrated; only the
-        // SCX2-CGB phase tolerates a nudge.
         let dsf = 1i64 << ds as i32;
         let abs = (self.abs_cc as i64 - dsf + (remaining + off) * dsf).max(0) as u64;
         self.sched_m0irq = abs;
@@ -1978,14 +1954,6 @@ impl Ppu {
                         // (PixelTransfer) invalidate it, falling back to the live
                         // emergent x==160 transition.
                         let m3_len = self.compute_m3_length(mmio, is_cgb);
-                        let offset = if is_cgb { cgb_mode0_offset() } else { dmg_mode0_offset() };
-                        let dot = self.ticks as i64 + m3_len as i64 + offset as i64;
-                        self.scheduled_mode0_dot = Some(dot.max(0) as u128);
-                        // Gambatte `m0Time = predictedNextXposTime(167) = now +
-                        // (predictCyclesUntilXpos(167) << ds)`; m3_len IS
-                        // predictCyclesUntilXpos(167) in dots, and `now` at arm is
-                        // the current master cc. The CPU-visible boundary is derived
-                        // from this exact value rather than the tick-frame offset.
                         let ds = mmio.is_double_speed_mode() as u32;
                         // Byte-exact m0Time, lyTime-anchored (ENGINE_LAZY_PPU.md):
                         //   m0Time = (p_now + ly_counter().time + 1)
@@ -1994,9 +1962,15 @@ impl Ppu {
                         // lives in m3_len). `p_now + ly_counter().time` is the
                         // next-LY master cc; +1 corrects rustyboi's LyCounter.time
                         // running 1 master-cc below Gambatte's lyTime.
-                        self.m0_time_master = Some(self.m0_time_exact(mmio, m3_len, is_cgb));
-                        self.dbg_m3_len = m3_len;
-                        let _ = ds;
+                        let m0t = self.m0_time_exact(mmio, m3_len, is_cgb);
+                        self.m0_time_master = Some(m0t);
+                        // The within-line mode-0 dot is DERIVED from the same exact
+                        // m0Time (master cc) so the eager-grid consumers (reported
+                        // FF41 mode poke, m0 IRQ arm, cgbp tick fallback) ride the
+                        // identical boundary: dot = arm_ticks + (m0t − arm_cc) >> ds.
+                        let arm_cc = mmio.master_cc() as i64;
+                        let dot = self.ticks as i64 + (((m0t as i64) - arm_cc) >> ds);
+                        self.scheduled_mode0_dot = Some(dot.max(0) as u128);
                         self.m3_scheduled_wx = mmio.read(WX);
                         self.m3_scheduled_win = self.window_will_start(mmio, is_cgb);
                         // cgbp begin boundary (Gambatte cgbpAccessible: blocked once
@@ -2464,80 +2438,39 @@ impl Ppu {
     /// END boundary against `scheduled_mode0_dot` (Gambatte's `m0TimeOfCurrentLine`);
     /// the start stays on the renderer's mode set, which is window-independent.
     pub fn cpu_access_blocked(&self, kind: u8, is_read: bool, mode3_locked: bool, is_cgb: bool, double_speed: bool, access_cc: u64) -> Option<bool> {
+        let _ = is_read;
         if self.disabled || self.internal_ly_val >= 144 {
             return Some(false);
         }
-        // CGB palette RAM (FF69/FF6B) has its own access window resolved at the
-        // CPU access cc against master-cc anchors (Gambatte `cgbpAccessible(cc)`:
-        // blocked iff `lineCycles(cc) + ds >= 80` AND `cc < m0Time + 2`). Using
-        // the master cc here (not the renderer `ticks`) makes the begin/end
-        // boundaries phase-consistent across the read path (ppu_locks_access runs
-        // post-tick) and the write path (pre-tick).
-        // CGB palette RAM (FF69/FF6B): resolve the access window at the CPU access
-        // cc against master-cc anchors (Gambatte `cgbpAccessible(cc)`: accessible
-        // iff `lineCycles(cc) + ds < 80` OR `cc >= m0Time + 2`). Anchoring on the
-        // master cc (not the renderer `ticks`) removes the read-vs-write tick-phase
-        // skew (ppu_locks_access runs post-tick for reads, pre-tick for writes) and
-        // is independent of `scheduled_mode0_dot`, so it resolves even after the
-        // renderer has cleared / advanced past it on this line.
+        let cc = access_cc as i64;
+        let ds = double_speed as i64;
+        // CGB palette RAM (FF69/FF6B): Gambatte `cgbpAccessible(cc)` — accessible
+        // iff `lineCycles(cc) + ds < 80` OR `cc >= m0Time + 2`. Both boundaries are
+        // resolved at the raw access cc against master-cc anchors (begin =
+        // cgbp_block_start_cc, end = exact m0_time_master).
         if kind == 2 {
             if let Some(start) = self.cgbp_block_start_cc {
-                // CL1: `access_cc` is the honest start-of-access cc (master_cc+1),
-                // 4 cc below the old master_cc+5 these begin/end anchors were
-                // calibrated against; relocate the +4 here so the window is at the
-                // identical absolute cc (net-zero).
-                let cc = access_cc as i64 + ACCESS_CC_RELOC;
-                // BEGIN: blocked once the access cc reaches `lineCycles + ds == 80`
-                // (armed at mode-2 entry, so a late-mode-2 BCPD/OCPD write before
-                // M3 is armed sees it).
                 let begun = cc >= start as i64;
-                // END (Gambatte cgbpAccessible: accessible once `cc >= m0Time + 2`).
-                // The closed-form m0Time exists only once M3 is armed; before that
-                // the line cannot have ended, so treat a missing m0Time as not
-                // ended. Single speed compares against the master-cc m0Time
-                // directly (reproducing the SS m3end `_1`/`_4` accessible window);
-                // at double speed `m0_time_master` carries the getStat-read sub-dot
-                // bias (KD=-1) + the SS->DS access-cc phase, ~4 cc high for the cgbp
-                // write end, so the DS end folds that constant back in.
                 let ended = match self.m0_time_master {
-                    Some(m0t) => {
-                        let ds_end_bias = if double_speed { env_off("RB_CGBP_DS_END", 4) } else { 0 };
-                        cc + ds_end_bias >= m0t as i64 + 2
-                    }
+                    Some(m0t) => cc >= m0t as i64 + 2,
                     None => false,
                 };
                 return Some(begun && !ended);
             }
             // No begin anchor (first line after enable / window fallback): use the
             // renderer-tick boundary below.
-        }
-        let m0_raw = self.scheduled_mode0_dot? as i64;
-        let m0 = m0_raw + self.dma_scx_m0_nudge(double_speed, true);
-        let ds = double_speed as i64;
-        let cgb = is_cgb as i64;
-        // End: vram/oam unblock at cc+2 >= m0Time; cgbp at cc >= m0Time+2.
-        // DMG's m0 end sits one dot later than CGB in the renderer's tick frame.
-        // VRAM/OAM unblock at Gambatte's `cc+2 >= m0Time`; DMG's m0 end lands one
-        // renderer dot later than CGB (the `1 - cgb` term). At double speed the
-        // CPU read resolves a full (2-dot) M-cycle after `ticks`, so the renderer
-        // is two dots behind the access cc — add that back.
-        // cgbp (Gambatte cgbpAccessible) compares against the raw m0Time WITHOUT
-        // the SCX VRAM nudge (that nudge is the VRAM/OAM consumer's; cgbp has its
-        // own unconditional `cc >= m0Time + 2`).
-        let eds = 2 * ds;
-        let ended = match kind {
-            2 => self.ticks as i64 + ds >= m0_raw + 2,
-            _ => self.ticks as i64 - ds - (1 - cgb) + eds >= m0,
-        };
-        // CGB-palette tick-frame fallback (reached only when no master-cc anchors
-        // exist — first line / window). Gambatte cgbpAccessible blocks at
-        // lineCycles + ds >= 80; lineCycles = ticks - (4 - cgb).
-        if kind == 2 {
-            let begun = self.ticks as i64 + ds - (4 - cgb) >= 80;
+            let m0t = self.m0_time_master;
+            let begun = self.ticks as i64 + ds - (4 - is_cgb as i64) >= 80;
+            let ended = match m0t {
+                Some(m0t) => cc >= m0t as i64 + 2,
+                None => return Some(begun && mode3_locked),
+            };
             return Some(begun && !ended);
         }
-        // VRAM/OAM M3 start stays on the renderer's FF41 mode (window-safe).
-        let _ = is_read;
+        // VRAM/OAM: blocked during mode 3 (start gated on the FF41 mode register,
+        // window-safe); END unblocks at Gambatte's `cc + 2 >= m0Time` (exact).
+        let m0t = self.m0_time_master? as i64;
+        let ended = cc + 2 >= m0t;
         Some(mode3_locked && !ended)
     }
 
@@ -2572,14 +2505,6 @@ impl Ppu {
         }
     }
 
-    #[doc(hidden)]
-    pub fn dbg_m0_time(&self) -> Option<u64> {
-        self.m0_time_master
-    }
-    #[doc(hidden)]
-    pub fn dbg_m3len(&self) -> u128 { self.dbg_m3_len }
-    #[doc(hidden)]
-    pub fn dbg_lytime(&self, mmio: &mmio::Mmio) -> u64 { self.p_now + self.ly_counter(mmio).time + 1 }
 
     pub fn get_x(&self) -> u8 {
         self.x
