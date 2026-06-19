@@ -86,6 +86,8 @@ impl<'a> Bus<'a> {
         self.tick_m();
     }
 
+    pub fn master_cc_dbg(&self) -> u64 { self.mmio.master_cc() }
+
     /// Whether the PPU currently locks CPU access to `addr`: VRAM during Mode 3,
     /// OAM during Mode 2/3, and (CGB) the palette-data ports FF69/FF6B during
     /// Mode 3. Only while the LCD is on. Blocked reads return 0xFF; blocked

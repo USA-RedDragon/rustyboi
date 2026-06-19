@@ -1020,7 +1020,7 @@ impl Ppu {
             self.sched_m1irq = self.sched_m1irq
                 .wrapping_add((stat_irq::LCD_CYCLES_PER_FRAME) << ds as u32);
         }
-        if self.sched_lycirq <= cc {
+        if self.sched_lycirq <= cc + ds as u64 {
             let lc = self.ly_counter(mmio);
             if self.lyc_irq.do_event(&lc) {
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
