@@ -2486,8 +2486,12 @@ impl Ppu {
         }
         // VRAM/OAM: blocked during mode 3 (start gated on the FF41 mode register,
         // window-safe); END unblocks at Gambatte's `cc + 2 >= m0Time` (exact).
+        // The m0Time end-boundary only applies once mode 3 has begun: during mode 2
+        // (OAMSearch) `m0_time_master` still holds the PREVIOUS line's (now-past)
+        // value, so the `cc+2 >= m0t` test would spuriously report "ended" and
+        // unblock OAM mid-OAM-scan. In mode 2 the access is simply blocked.
         let m0t = self.m0_time_master? as i64;
-        let ended = cc + 2 >= m0t;
+        let ended = self.state != State::OAMSearch && cc + 2 >= m0t;
         Some(mode3_locked && !ended)
     }
 
