@@ -124,7 +124,6 @@ impl SM83 {
         if let Some(flag) = flag {
             self.set_interrupt_flag(flag, false, bus);
         }
-
         20
     }
 

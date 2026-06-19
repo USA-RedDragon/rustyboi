@@ -388,6 +388,13 @@ pub struct Ppu {
     // enable, where it is seeded so the derived value equals the accumulator.
     #[serde(default = "pnow_disabled")]
     p_now: u64,
+    // After a DS->SS speed switch the 3-dot stop bridge lands the LyCounter one
+    // master-cc higher than Gambatte (the DS half-dot the whole-dot bridge can't
+    // express), so the closed-form `+1` LyCounter correction in `m0_time_exact`
+    // over-corrects by 1. Set on the DS->SS switch, cleared at the next LCD
+    // enable / LY reset. See ENGINE_LAZY_PPU.md bug #2.
+    #[serde(default)]
+    lytime_no_plus1: bool,
     // Sub-PPU-dot parity (0/1) of the currently-resolving CPU register write at
     // double speed. Set by the bus just before the FF4x write hooks run.
     #[serde(skip, default)]
@@ -524,6 +531,7 @@ impl Ppu {
             scan_obj_size_large: false,
             scheduled_mode0_dot: None,
             m0_time_master: None,
+            lytime_no_plus1: false,
             cgbp_block_start_cc: None,
             mode0_reported_this_line: false,
             abs_cc: 0,
@@ -839,7 +847,8 @@ impl Ppu {
     fn m0_time_exact(&self, mmio: &mmio::Mmio, m3_len: u128, is_cgb: bool) -> u64 {
         let ds = mmio.is_double_speed_mode() as u32;
         let base: i64 = if is_cgb { 84 } else { 83 };
-        let ly_time = self.p_now as i64 + self.ly_counter(mmio).time as i64 + 1;
+        let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
+        let ly_time = self.p_now as i64 + self.ly_counter(mmio).time as i64 + plus1;
         let m0_line_cycle = m3_len as i64 + base;
         (ly_time - ((456 - m0_line_cycle) << ds)).max(0) as u64
     }
@@ -932,6 +941,13 @@ impl Ppu {
             self.step(mmio);
             self.step_lcdc_events(mmio);
         }
+    }
+
+    /// Mark that a DS->SS speed switch just occurred, so the closed-form lyTime
+    /// drops its `+1` LyCounter correction (the whole-dot bridge already lands
+    /// the counter one master-cc high). See ENGINE_LAZY_PPU.md bug #2.
+    pub fn set_dsss_lytime_adjust(&mut self) {
+        self.lytime_no_plus1 = true;
     }
 
     /// Recompute all scheduled IRQ event times from scratch at the current
@@ -1706,6 +1722,7 @@ impl Ppu {
                 // anchor subtracts that one dot the old accumulator added below.
                 let ds_inc = 1u64 << mmio.is_double_speed_mode() as u32;
                 self.p_now = mmio.master_cc().wrapping_sub(self.abs_cc + ds_inc);
+                self.lytime_no_plus1 = false;
                 self.wy2 = mmio.read(WY);
                 self.wy2_apply_cc = wy2_disabled();
                 self.wy1 = mmio.read(WY);
