@@ -2090,16 +2090,27 @@ impl Ppu {
                 if let Some(m0t) = self.m0_time_master {
                     if mmio.master_cc() >= m0t {
                         self.scheduled_mode0_dot = None;
-                        // Flush remaining FIFO pixels to fill all 160 columns; the
-                        // pipeline may lag the closed-form boundary by a few dots.
-                        while self.x < 160 && self.draw_fifo_pixel(mmio) {}
-                        self.state = State::HBlank;
+                        // Timing report (FF41 mode-0, STAT/m0 IRQ) fires at the exact
+                        // m0Time regardless of pixel progress.
                         if !self.mode0_reported_this_line {
                             self.mode0_reported_this_line = true;
                             Self::set_lcd_status_mode(mmio, 0);
                             self.check_and_trigger_stat_interrupt(mmio);
                         }
-                        break 'label;
+                        // Flush remaining FIFO pixels to fill all 160 columns; the
+                        // pipeline may lag the closed-form boundary by a few dots.
+                        while self.x < 160 && self.draw_fifo_pixel(mmio) {}
+                        // On window-start lines the window fetch restart can leave
+                        // the FIFO momentarily empty at m0Time (the last 1-2 window
+                        // pixels are still being fetched). The timing has already
+                        // been reported above; keep the renderer alive (image-only)
+                        // until x==160 so the final window pixel is drawn, then enter
+                        // HBlank via the x==160 fallback below. For all other lines
+                        // the flush completed the line, so end mode 3 now.
+                        if !(self.window_started_this_line && self.x < 160) {
+                            self.state = State::HBlank;
+                            break 'label;
+                        }
                     }
                 }
 
@@ -2234,16 +2245,30 @@ impl Ppu {
                 if self.x >= 160 {
                     break 'label;
                 }
-                if self.draw_fifo_pixel(mmio) {
-                    // Fallback (no closed-form m0Time: first line after enable /
-                    // mid-M3 invalidation): end Mode 3 at the x==160 pixel push.
-                    // When m0Time IS known the transition is driven off master_cc
-                    // above; the pipeline caps at 160 and idles until then.
-                    if self.m0_time_master.is_none() && self.x == 160 {
+                if self.draw_fifo_pixel(mmio) && self.x == 160 {
+                    // Fallback end-of-mode-3 at the x==160 pixel push, used in two
+                    // distinct cases:
+                    //  (a) no closed-form m0Time exists (first line after enable /
+                    //      mid-M3 invalidation): report mode 0 here and end mode 3.
+                    //  (b) the m0Time timing report ALREADY fired above, but the
+                    //      window fetch restart left the FIFO short, so the renderer
+                    //      was kept alive to draw the final window pixel; now that
+                    //      x==160 we end mode 3 WITHOUT re-reporting (the FF41 mode-0
+                    //      poke / STAT IRQ already fired at the exact m0Time).
+                    // When m0Time is known and the FIFO was complete, the transition
+                    // is driven off master_cc above and the renderer never reaches
+                    // this x==160 fallback before that boundary, so we must NOT end
+                    // mode 3 early here on ordinary (non-window) lines.
+                    let window_deferred = self.window_started_this_line && self.mode0_reported_this_line;
+                    if self.m0_time_master.is_none() {
                         self.state = State::HBlank;
-                        self.mode0_reported_this_line = true;
-                        Self::set_lcd_status_mode(mmio, 0);
-                        self.check_and_trigger_stat_interrupt(mmio);
+                        if !self.mode0_reported_this_line {
+                            self.mode0_reported_this_line = true;
+                            Self::set_lcd_status_mode(mmio, 0);
+                            self.check_and_trigger_stat_interrupt(mmio);
+                        }
+                    } else if window_deferred {
+                        self.state = State::HBlank;
                     }
                 }
             },
