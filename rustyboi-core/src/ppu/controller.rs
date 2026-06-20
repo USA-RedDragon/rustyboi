@@ -885,6 +885,38 @@ impl Ppu {
                 self.m0_time_master = None;
             }
         }
+        // Gambatte setLcdc (ppu.cpp 1867-1874): a WE (window-enable) toggle with
+        // the LCD already on updates winDrawState. rustyboi splits Gambatte's
+        // 2-bit winDrawState into `win_draw_start` (bit win_draw_start) and
+        // `win_draw_started` (bit win_draw_started); reproduce the exact bit
+        // arithmetic here. `xpos == xpos_end` (the line's pixel transfer is
+        // done) holds whenever we are not actively in PixelTransfer, or x has
+        // reached the line end inside it.
+        if (old_lcdc & display_enable) != 0 && (old_lcdc & win_bit) != (value & win_bit) {
+            let at_line_end = !matches!(self.state, State::PixelTransfer) || self.x >= 160;
+            if (value & win_bit) == 0 {
+                // WE-off: clear win_draw_started iff winDrawState == win_draw_started
+                // (started but not armed) OR the line is finished. win_draw_start
+                // (the arm bit) survives, so a re-enable can resume next line.
+                if (self.win_draw_started && !self.win_draw_start) || at_line_end {
+                    self.win_draw_started = false;
+                    // If the fetcher is actively drawing the window mid-line, the
+                    // window stops here and the next tile fetch reverts to BG
+                    // (Gambatte Tile::f0 `winDrawState & win_draw_started` gate).
+                    if self.fetcher.is_fetching_window() {
+                        self.fetcher.stop_window();
+                        self.window_started_this_line = false;
+                    }
+                }
+            } else {
+                // WE-on: if winDrawState == win_draw_start (armed but not started),
+                // promote to started and advance the window Y line.
+                if self.win_draw_start && !self.win_draw_started {
+                    self.win_draw_started = true;
+                    self.win_y_pos = self.win_y_pos.wrapping_add(1);
+                }
+            }
+        }
         self.lcdc = value;
     }
 

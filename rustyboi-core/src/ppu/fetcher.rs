@@ -116,6 +116,14 @@ impl Fetcher {
         self.state = State::TileNumber; // Start fetching immediately
     }
 
+    // Stop fetching window tiles mid-line (Gambatte WE-off / handleWinDrawStartReq
+    // clearing win_draw_started). The next TileNumber fetch reverts to the BG
+    // tilemap; the FIFO is left intact so the window tile already queued drains
+    // before the BG pixels arrive, matching Gambatte's per-tile-boundary switch.
+    pub fn stop_window(&mut self) {
+        self.fetching_window = false;
+    }
+
     // Calculate the correct tile map base address based on LCDC.6 (WindowTileMapDisplaySelect)
     fn get_window_tile_map_base(&self, lcdc: u8) -> u16 {
         let window_tile_map_select = (lcdc & (ppu::LCDCFlags::WindowTileMapDisplaySelect as u8)) != 0;
