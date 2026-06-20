@@ -59,6 +59,11 @@ impl<'a> Bus<'a> {
         // STAT mode-edge when no closed-form mode-0 dot is available.
         let period = self.ppu.hdma_period(double_speed);
         self.mmio.step_hdma(period);
+        // Drain any deferred HDMA block writes whose sub-M-cycle delay has
+        // elapsed (Gambatte writes byte i at fire + (2 + 2*ds)). Runs after
+        // step_hdma so a block flagged this same dot begins its countdown here
+        // and only commits to VRAM on a later dot.
+        self.mmio.step_hdma_deferred();
         self.ppu.step_lcdc_events(self.mmio);
 
         self.mmio.advance_cpu_t_phase();

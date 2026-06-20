@@ -252,6 +252,21 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_block_done_this_period: bool,
 
+    // Deferred HDMA block byte writes. Gambatte's `Memory::dma` reads each byte
+    // at `cc` but writes it to VRAM at `cc + (2 + 2*ds)` (memory.cpp:354/375),
+    // so byte 0 lands one sub-M-cycle AFTER the trigger/prefetch boundary and
+    // after VRAM unlocks. rustyboi fires the block synchronously; to place the
+    // VRAM writes at the correct sub-M-cycle (the 4cc window the hdma_start /
+    // hdma_late read tests probe) the resolved (vram_addr, value, into_bank1)
+    // triples are read at fire time and drained `hdma_write_delay` dots later.
+    // The `into_bank1` flag records the VBK bank captured at fire so a mid-delay
+    // VBK switch cannot retarget the in-flight bytes. Not part of save state
+    // (the buffer always drains within a few dots of the trigger).
+    #[serde(skip, default)]
+    hdma_pending_writes: Vec<(u16, u8, bool)>,
+    #[serde(skip, default)]
+    hdma_write_delay: u32,
+
     // CGB palette state
     #[serde(with = "serde_bytes")]
     bg_palette_ram: [u8; 64],    // 8 palettes × 4 colors × 2 bytes = 64 bytes
@@ -316,6 +331,8 @@ impl Mmio {
             hdma_prev_period: false,
             cpu_halted: false,
             hdma_block_done_this_period: false,
+            hdma_pending_writes: Vec::new(),
+            hdma_write_delay: 0,
 
             // CGB palette initialization
             bg_palette_ram: [0; 64],
@@ -676,6 +693,51 @@ impl Mmio {
         byte
     }
 
+    /// Resolve a single HDMA byte WITHOUT committing the VRAM write. Reads the
+    /// source byte at the current (fire) cc — matching Gambatte's read-at-cc —
+    /// and returns `(vram_addr, value, into_bank1)` for a deferred apply. Used by
+    /// the deferred-block model so the VRAM write lands at the correct sub-M-cycle
+    /// (`fire_cc + hdma_write_delay`) rather than coincident with the trigger.
+    fn resolve_dma_byte(&mut self, src: u16, dst: u16) -> (u16, u8, bool) {
+        let saved_dma_active = self.dma_active;
+        self.dma_active = false;
+        let byte = if (0x8000..=0x9FFF).contains(&src) || src >= 0xE000 {
+            0xFF
+        } else {
+            <Self as memory::Addressable>::read(self, src)
+        };
+        self.dma_active = saved_dma_active;
+        let vram_addr = VRAM_START | (dst & 0x1FFF);
+        let into_bank1 = self.cgb_features_enabled && self.vram_bank == 1;
+        (vram_addr, byte, into_bank1)
+    }
+
+    /// Commit one deferred HDMA byte write into VRAM (bank captured at fire).
+    fn apply_dma_write(&mut self, vram_addr: u16, byte: u8, into_bank1: bool) {
+        if into_bank1 {
+            self.vram_bank1.write(vram_addr, byte);
+        } else {
+            self.vram.write(vram_addr, byte);
+        }
+    }
+
+    /// Drain the deferred-HDMA write buffer one dot. When the delay expires the
+    /// resolved bytes are committed to VRAM in order.
+    pub fn step_hdma_deferred(&mut self) {
+        if self.hdma_pending_writes.is_empty() {
+            return;
+        }
+        if self.hdma_write_delay > 0 {
+            self.hdma_write_delay -= 1;
+        }
+        if self.hdma_write_delay == 0 {
+            let pending = std::mem::take(&mut self.hdma_pending_writes);
+            for (addr, byte, into_bank1) in pending {
+                self.apply_dma_write(addr, byte, into_bank1);
+            }
+        }
+    }
+
     /// Execute a CGB General-Purpose DMA (GDMA) transfer synchronously.
     /// Copies `length` bytes from `self.hdma_source` into VRAM starting at
     /// `self.hdma_dest`. Mirrors Gambatte's `Memory::dma`:
@@ -856,17 +918,32 @@ impl Mmio {
     /// callers charge the returned CPU-cycle stall via the outer per-cycle
     /// loop so PPU/timer/audio continue to tick during the transfer.
     pub fn run_hdma_block(&mut self) -> u32 {
+        // Deferred byte-write placement. Gambatte's `Memory::dma` (memory.cpp:354/
+        // 375) reads each byte at the dma-event `cc` but commits the VRAM write at
+        // `cc + (2 + 2*ds)` — so byte 0 lands a precise sub-M-cycle AFTER the
+        // trigger/prefetch boundary and after VRAM unlocks. rustyboi resolves CPU
+        // reads at the POST-tick cc (one M-cycle later than Gambatte's read-at-cc),
+        // so a VRAM read in the same window only sees the new byte once the write
+        // has actually landed. Reading the 16 source bytes NOW (read-at-cc) and
+        // deferring their VRAM commits by `delay` dots reproduces the byte-0
+        // boundary the hdma_start / hdma_late read tests probe: the SS offset is
+        // 3 dots, the DS offset 5 (the `2 + 2*ds` ratio rescaled for the post-tick
+        // read granularity). The OAM-DMA interleave still advances at fire time —
+        // it is tuned independently and reads its own source, not the deferred
+        // VRAM bytes.
+        let delay: u32 = if self.is_double_speed_mode() { 5 } else { 3 };
+
         for _ in 0..0x10 {
-            self.copy_dma_byte(self.hdma_source, self.hdma_dest);
+            let (vaddr, byte, into_bank1) =
+                self.resolve_dma_byte(self.hdma_source, self.hdma_dest);
+            self.hdma_pending_writes.push((vaddr, byte, into_bank1));
             self.hdma_source = self.hdma_source.wrapping_add(1);
             self.hdma_dest = self.hdma_dest.wrapping_add(1);
-
-            // Interleave one OAM-DMA M-cycle per HDMA byte. Mirrors Gambatte's
-            // `Memory::dma` which advances `oamDmaPos_` inside the HDMA loop.
             if self.dma_active {
                 self.dma_advance_one_mcycle();
             }
         }
+        self.hdma_write_delay = delay;
 
         self.hdma_length = self.hdma_length.wrapping_sub(1) & 0x7F;
         // After underflow from 0x00 -> 0xFF -> masked = 0x7F the transfer
