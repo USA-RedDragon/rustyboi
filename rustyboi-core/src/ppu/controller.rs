@@ -1813,15 +1813,23 @@ impl Ppu {
         // Arm the cgbp begin boundary (Gambatte cgbpAccessible: blocked once
         // `lineCycles(cc) + ds >= 80`) as soon as the line's mode 2 begins, so a
         // BCPD/OCPD write landing in late mode 2 (before M3 is armed) sees it.
-        // lineCycles = ticks - (4 - cgb); the block begins at the renderer tick
-        // `tick_block = 80 - ds + (4 - cgb)`, converted to master cc from the
-        // current tick (each dot = 1<<ds cc). Refined (kept) at M3 arm.
+        // Derive the exact begin cc from the lyTime anchor (same closed form as
+        // `m0_time_exact`, but at line-cycle `80 - ds` instead of mode-0):
+        //   begin = lyTime − ((456 − (80 − ds)) << ds)
+        // This is byte-exact at both speeds; the old tick-block heuristic landed
+        // ~2 cc late at double speed because its `(4 − cgb)` ticks->lineCycles
+        // term was not shifted by `ds`.
+        self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
+    }
+
+    /// Byte-exact Gambatte cgbp-block BEGIN cc for the current line, anchored on
+    /// the same lyTime as `m0_time_exact`. Gambatte `cgbpAccessible` blocks once
+    /// `lineCycles(cc) + ds >= 80`, i.e. at line-cycle `80 - ds`.
+    fn cgbp_begin_exact(&self, mmio: &mmio::Mmio) -> u64 {
         let ds = mmio.is_double_speed_mode() as i64;
-        let cgb_i = mmio.is_cgb_features_enabled() as i64;
-        let tick_block = 80 - ds + (4 - cgb_i);
-        self.cgbp_block_start_cc = Some(
-            (mmio.master_cc() as i64 + ((tick_block - self.ticks as i64) << ds)).max(0) as u64,
-        );
+        let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
+        let ly_time = self.p_now as i64 + self.ly_counter(mmio).time as i64 + plus1;
+        (ly_time - ((456 - (80 - ds)) << ds)).max(0) as u64
     }
 
     pub fn step_scheduled_stat_events(&mut self, mmio: &mut mmio::Mmio) {
@@ -2194,17 +2202,9 @@ impl Ppu {
                                 None
                             };
                         // cgbp begin boundary (Gambatte cgbpAccessible: blocked once
-                        // `lineCycles(cc) + ds >= 80`). lineCycles = ticks - (4 - cgb),
-                        // so the block begins at the renderer tick
-                        // `tick_block = 80 - ds + (4 - cgb)`; convert to master cc using
-                        // the same arm anchor m0_time_master uses (each dot = 1<<ds cc).
-                        let cgb_i = is_cgb as i64;
-                        let tick_block = 80 - ds as i64 + (4 - cgb_i);
-                        self.cgbp_block_start_cc = Some(
-                            (mmio.master_cc() as i64
-                                + ((tick_block - self.m3_arm_dot as i64) << ds))
-                                .max(0) as u64,
-                        );
+                        // `lineCycles(cc) + ds >= 80`), byte-exact from the lyTime
+                        // anchor — see `cgbp_begin_exact`.
+                        self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
                     }
                     // Arm the mode-0 (HBlank) STAT IRQ event at the predicted
                     // mode-0 start, in absolute clock terms. Gambatte schedules
@@ -2682,7 +2682,6 @@ impl Ppu {
     /// END boundary against `scheduled_mode0_dot` (Gambatte's `m0TimeOfCurrentLine`);
     /// the start stays on the renderer's mode set, which is window-independent.
     pub fn cpu_access_blocked(&self, kind: u8, is_read: bool, mode3_locked: bool, is_cgb: bool, double_speed: bool, access_cc: u64) -> Option<bool> {
-        let _ = is_read;
         if self.disabled || self.internal_ly_val >= 144 {
             return Some(false);
         }
@@ -2703,28 +2702,26 @@ impl Ppu {
         // cgbp_block_start_cc, end = exact m0_time_master).
         if kind == 2 {
             if let Some(start) = self.cgbp_block_start_cc {
-                // Gambatte cgbpAccessible BEGIN: blocked once `lineCycles(cc) + ds
-                // >= 80`. The shared `cgbp_block_start_cc` anchor is armed at the
-                // tick where `ticks == 80 - ds + (4 - cgb)`; the `(4 - cgb)`
-                // ticks->lineCycles conversion belongs to the VRAM/OAM start gate
-                // (which reuses the anchor), not to cgbp itself, so undo it here so
-                // the cgbp begin lands exactly on Gambatte's `lineCycles + ds >= 80`.
-                let cgbp_start = start as i64 - (4 - is_cgb as i64);
-                // The current line's m0Time is always after its own mode-3 start
-                // (`cgbp_start`). At the very start of mode 3 (line_cycle ~80)
-                // `m0_time_master` can still hold the PREVIOUS line's (now-past)
-                // value, which would spuriously satisfy the END test (`cc >= m0t+2`)
-                // and unblock a write that is really in this line's mode 3. Treat
-                // m0Time as "current" only once it belongs to this line's mode 3.
-                let m0t_current = self.m0_time_master.is_some_and(|m0t| (m0t as i64) >= cgbp_start);
-                // BEGIN (Gambatte cgbpAccessible: blocked once `lineCycles(cc)+ds >=
-                // 80`). When m0Time is current the access cc at exactly `cgbp_start`
-                // is the first mode-3 dot (blocked); when it is still stale this
-                // line's mode 3 has not armed yet, so that same dot is the last
-                // mode-2 dot (accessible) — use the strict boundary there.
-                let begun = if m0t_current { cc_end >= cgbp_start } else { cc_end > cgbp_start };
+                // `cgbp_block_start_cc` is the byte-exact Gambatte cgbp-block BEGIN
+                // cc (lyTime-anchored at line-cycle `80 - ds`); blocked once the
+                // access cc reaches it. The lyTime anchor folds the `lytime_no_plus1`
+                // phase (the DS->SS speed-change bridge drops the `+1` LyCounter
+                // correction); the access cc must share that phase, so add the same
+                // `plus1` here instead of the fixed `cc_end` (+1). Without it the
+                // lcdoffset variants (multi-`stop` LCD-enable phase) land 1 cc off:
+                // base (plus1=1) needs `cc+1`, lcdoffset (plus1=0) needs raw `cc`.
+                let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
+                let begun = cc + plus1 >= start as i64;
+                // Gambatte `cgbpAccessible`: accessible once `cc >= m0Time + 2`.
+                // `m0Time` is `m0TimeOfCurrentLine(cc)` — the CURRENT line's
+                // mode-0 time. During mode 2 (OAMSearch) `m0_time_master` still
+                // holds the PREVIOUS line's (now-past) m0Time, so the
+                // `cc_end >= m0t + 2` end test would spuriously unblock a write
+                // landing in late mode 2 (after `cgbp_block_start_cc` but before
+                // mode 3 even begins). Mode 3 cannot have ended before it starts:
+                // gate the end test on mode 3 having begun for the current line.
                 let ended = match self.m0_time_master {
-                    Some(m0t) => m0t_current && cc_end >= m0t as i64 + 2,
+                    Some(m0t) => self.state != State::OAMSearch && cc_end >= m0t as i64 + 2,
                     None => false,
                 };
                 return Some(begun && !ended);
@@ -2744,7 +2741,52 @@ impl Ppu {
         // The m0Time end-boundary only applies once mode 3 has begun: during mode 2
         // (OAMSearch) `m0_time_master` still holds the PREVIOUS line's (now-past)
         // value, so the `cc+2 >= m0t` test would spuriously report "ended" and
-        // unblock OAM mid-OAM-scan. In mode 2 the access is simply blocked.
+        // unblock OAM mid-OAM-scan. OAM is blocked through mode 2; VRAM is accessible
+        // in mode 2 except the begin window resolved below.
+        // VRAM mode-3 BEGIN (kind 0). Gambatte blocks VRAM `lcdc_en` lines a few
+        // line-cycles before cgbp does, and the threshold differs by direction and
+        // model (libgambatte video.cpp):
+        //   vramReadable : lineCycles + ds < 76 + 3*cgb   (begin lc 76-ds dmg / 79-ds cgb)
+        //   vramWritable : lineCycles + ds < 79           (begin lc 79-ds, both)
+        //   cgbpAccessible: lineCycles + ds < 80          (begin lc 80-ds)
+        // `cgbp_block_start_cc` is the cgbp begin (lc 80-ds); the VRAM begin sits
+        // `offset` line-cycles earlier, each line-cycle = `1<<ds` cc:
+        //   read  offset = 4 - 3*cgb   (4 dmg, 1 cgb)
+        //   write offset = 1
+        // The access cc shares the lyTime phase via `plus1` (the DS->SS speed-change
+        // bridge drops the `+1` LyCounter correction); see the cgbp begin above.
+        let vram_started = if kind == 0 {
+            self.cgbp_block_start_cc.map(|start| {
+                let offset = if is_read { 4 - 3 * is_cgb as i64 } else { 1 };
+                let vram_begin = start as i64 - (offset << ds);
+                let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
+                cc + plus1 >= vram_begin
+            })
+        } else {
+            None
+        };
+        // VRAM access in mode 2 (OAMSearch): VRAM is accessible throughout mode 2
+        // except the few line-cycles before mode 3 (the begin window, `vram_started`)
+        // — `m0_time_master` is the previous line's stale value here, so resolve from
+        // the begin alone (mode 3 cannot have ended before it starts; no END test).
+        if kind == 0 && self.state == State::OAMSearch {
+            if let Some(started) = vram_started {
+                // A closed-form cgbp anchor exists for the CURRENT line. At single
+                // speed an OAM scan still running past tick 80 (mode-3 starts at tick
+                // 80) means the LCD-enable offset extended this line's mode 2 (the
+                // 4-`stop` lcdoffset2 path); the lyTime anchor then carries a
+                // stop-bridge phase error and lineCycles has not yet reached the
+                // begin window, so VRAM is still accessible (keeps
+                // prewrite_lcdoffset2_1 accessible). Double speed never legitimately
+                // sits in OAMSearch past tick 80 with this anomaly (no DS lcdoffset2
+                // tests), so there `ticks > 80` is a genuine late-mode-2 block; only
+                // apply the escape at single speed. Gated on the anchor being present
+                // so the first-line-after-enable case (no anchor, `ly0_late_vram*`)
+                // falls through to the `mode3_locked` register path below.
+                let lcdoffset_extended = !double_speed && self.ticks > 80;
+                return Some(if lcdoffset_extended { false } else { started });
+            }
+        }
         let m0t = self.m0_time_master? as i64;
         // END unblocks at Gambatte's `cc + 2 >= m0Time` (exact), resolved at the
         // raw access cc. The post-tick FF41 mode register (`mode3_locked`) crosses
@@ -2772,11 +2814,15 @@ impl Ppu {
             }
         }
         let ended = self.state != State::OAMSearch && cc_end + 2 >= m0t;
-        let started = match self.cgbp_block_start_cc {
-            // mode 3 has begun at the access cc; for OAM (blocked from mode 2)
-            // the register `mode3_locked` already covers the mode-2 prefix.
-            Some(start) => cc >= start as i64 || mode3_locked,
-            None => mode3_locked,
+        let started = match (kind, vram_started) {
+            // VRAM: byte-exact per-direction/model begin (see `vram_started`).
+            (0, Some(s)) => s || mode3_locked,
+            // OAM (kind 1, blocked from mode 2): the register `mode3_locked`
+            // already covers the mode-2 prefix; the cgbp anchor refines the dot.
+            _ => match self.cgbp_block_start_cc {
+                Some(start) => cc >= start as i64 || mode3_locked,
+                None => mode3_locked,
+            },
         };
         Some(started && !ended)
     }
