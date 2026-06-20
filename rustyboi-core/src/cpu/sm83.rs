@@ -14,6 +14,16 @@ pub struct SM83 {
     /// Mirrors Gambatte's `intevent_unhalt = cc + 0x20000 + 4` schedule.
     #[serde(default)]
     pub stop_unhalt_cycles: u32,
+    /// Gambatte's `prefetched_`: the next opcode has been speculatively fetched
+    /// and is held in `prefetched_opcode`. Set by the HALT-bug path (HALT with
+    /// IME=0 and IE&IF != 0 does not halt; the post-HALT byte is fetched but PC
+    /// is NOT advanced, so it is consumed next step without a re-read and without
+    /// a PC increment — the instruction after HALT runs with PC failing to
+    /// increment once). Consumed at the top of `step` before a normal fetch.
+    #[serde(default)]
+    pub prefetched: bool,
+    #[serde(default)]
+    pub prefetched_opcode: u8,
 }
 
 impl SM83 {
@@ -24,6 +34,8 @@ impl SM83 {
             stopped: false,
             ime_enable_delay: 0,
             stop_unhalt_cycles: 0,
+            prefetched: false,
+            prefetched_opcode: 0,
         }
     }
 
@@ -79,11 +91,26 @@ impl SM83 {
         
         // Handle interrupts if IME is enabled and there's a pending interrupt
         if self.registers.ime && pending_interrupt.is_some() {
+            // A pending prefetch (HALT-bug) is abandoned when an interrupt is
+            // serviced instead; the speculative byte is discarded without a PC
+            // change (the HALT prefetch never advanced PC).
+            self.prefetched = false;
             return self.service_interrupt(mmio);
         }
-        
-        let opcode = mmio.read(self.registers.pc);
-        self.registers.pc += 1;
+
+        // Consume a speculatively-prefetched opcode (HALT-bug): the byte was
+        // already read during HALT, so charge the fetch M-cycle without a memory
+        // read and WITHOUT incrementing PC (so the next fetch re-reads it — the
+        // post-HALT "PC fails to increment once" behavior).
+        let opcode = if self.prefetched {
+            self.prefetched = false;
+            mmio.internal_cycle();
+            self.prefetched_opcode
+        } else {
+            let op = mmio.read(self.registers.pc);
+            self.registers.pc = self.registers.pc.wrapping_add(1);
+            op
+        };
         cycles += self.execute(opcode, mmio);
         self.apply_ime_delay();
         cycles
@@ -152,6 +179,12 @@ impl SM83 {
 
     pub fn get_interrupt_enable_flag(&self, flag: registers::InterruptFlag, mmio: &memory::mmio::Mmio) -> bool {
         (mmio.read(registers::INTERRUPT_ENABLE) & (flag as u8)) != 0
+    }
+
+    /// Whether any interrupt is pending (IE & IF != 0), independent of IME.
+    /// Used by the HALT-bug path.
+    pub fn has_pending_interrupt(&self, mmio: &memory::mmio::Mmio) -> bool {
+        self.get_pending_interrupt(mmio).is_some()
     }
 
     fn get_pending_interrupt(&self, mmio: &memory::mmio::Mmio) -> Option<registers::InterruptFlag> {
