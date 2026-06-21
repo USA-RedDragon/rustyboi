@@ -169,18 +169,27 @@ impl SoftCompositor {
     /// texture filter and LCD effect.
     ///
     /// Structure: everything expensive happens per SOURCE texel, not per dst
-    /// pixel. Each dst row first builds a `tw`-wide "texel row" (y-blended for
-    /// Linear, straight for Nearest, row effect factor folded in) and then
-    /// expands it to the dst width — span fills for Nearest, cached-pair lerps
-    /// for Linear. The default path (Nearest, no effect) additionally reuses
-    /// identical rows with a single `copy_within`.
+    /// pixel. Each dst row first builds a `tw`-wide packed "texel row"
+    /// (y-blended for Linear, straight for Nearest, row effect folded in) and
+    /// then expands it — span fills for Nearest, per-segment SWAR lerps for
+    /// Linear. The default path (Nearest, no effect) additionally reuses
+    /// identical rows with a single `copy_within`. Color math is SWAR on the
+    /// packed 0x00RRGGBB form (R+B share one u32 with 16-bit lanes, G rides a
+    /// second), so a 3-channel weighted lerp is 4 multiplies with no unpack.
     ///
-    /// The LCD grid is pixel-based here, NOT the shader's texel-fraction
+    /// Large blits split their rows across scoped threads (row-disjoint fb
+    /// chunks, one scratch texel row each): the per-pixel work is branchless
+    /// scalar that neither LLVM nor the fixed-point lane packing vectorizes
+    /// further, so rows are the remaining parallelism. Small blits stay
+    /// single-threaded — below the threshold the spawn overhead costs more
+    /// than it buys.
+    ///
+    /// The LCD grid is pixel-based (the last dst pixel/row of every source
+    /// texel is dimmed to 80%), NOT the shader's original texel-fraction
     /// smoothstep: at exact integer scales the fraction lattice never lands in
-    /// the shader's 10% edge band and the grid silently vanishes (a real bug —
-    /// the window auto-resize snaps the game to integer scale). Instead the
-    /// LAST dst pixel/row of every source texel is dimmed to 80%, which is the
-    /// shader's intent (a thin gap between cells) at every scale.
+    /// a 10% edge band and a fraction-based grid silently vanishes — and the
+    /// window auto-resize snaps the game to integer scale, so that was the
+    /// common case (`grid_is_visible_at_exact_integer_scale` pins this).
     fn blit_game(
         &self,
         fb: &mut [u32],
@@ -197,7 +206,6 @@ impl SoftCompositor {
         // pixel center (matches the GPU sampler's texel addressing).
         let step_x = ((tw as u64) << 16) / dw as u64;
         let step_y = ((th as u64) << 16) / dh as u64;
-        let src = &self.game_rgba;
 
         // Clamp the blit to the framebuffer once so the inner loops carry no
         // per-pixel bounds checks.
@@ -232,140 +240,49 @@ impl SoftCompositor {
         } else {
             Vec::new()
         };
-        // Grid row edges: the last dst row of each source texel row.
-        let row_sy = |row: u32| ((row as u64 * step_y + step_y / 2) >> 16) as u32;
-        let bilinear = self.texture_filter == TextureFilter::Linear;
 
-        // Scratch texel row: final per-texel colors for the current dst row
-        // (y-blend + row effect folded in), expanded below.
-        let mut trow: Vec<(u32, u32, u32)> = vec![(0, 0, 0); tw as usize];
+        let params = BlitParams {
+            src: &self.game_rgba,
+            tw,
+            th,
+            step_x,
+            step_y,
+            fb_w,
+            dx,
+            dwc,
+            dhc,
+            bilinear: self.texture_filter == TextureFilter::Linear,
+            grid,
+            scan,
+            col_nx: &col_nx,
+            col_edge: &col_edge,
+            row_scan: &row_scan,
+        };
 
-        let mut prev_key: Option<(u32, u32, usize)> = None; // (sy, row_mul, fb row start)
-        for row in 0..dhc {
-            let fy = row as u64 * step_y + step_y / 2;
-            let sy0 = ((fy >> 16) as u32).min(th - 1);
-            let out_start = ((dy + row) * fb_w + dx) as usize;
-
-            // Row multiplier: scanline factor, or the grid row-edge dim; 256 =
-            // identity. (Grid column edges are applied during expansion.)
-            let row_edge = grid && (row + 1 == dhc || row_sy(row + 1) != sy0);
-            let rm: u32 = if scan {
-                row_scan[row as usize]
-            } else if row_edge {
-                205
-            } else {
-                256
-            };
-
-            // Rows with identical inputs are pure repeats — one memcpy.
-            if !bilinear
-                && let Some((psy, prm, pstart)) = prev_key
-                && psy == sy0
-                && prm == rm
-            {
-                fb.copy_within(pstart..pstart + dwc, out_start);
-                prev_key = Some((sy0, rm, out_start));
-                continue;
-            }
-
-            // Build the texel row (per-texel work: tw items, not dwc).
-            if bilinear {
-                // y-blend the two neighbouring source rows once per texel.
-                let cy = fy.saturating_sub(1 << 15);
-                let y0 = ((cy >> 16) as u32).min(th - 1);
-                let y1 = (y0 + 1).min(th - 1);
-                let wy = ((cy & 0xFFFF) >> 8) as i32;
-                let row0 = &src[(y0 * tw * 4) as usize..][..(tw * 4) as usize];
-                let row1 = &src[(y1 * tw * 4) as usize..][..(tw * 4) as usize];
-                for (t, out) in trow.iter_mut().enumerate() {
-                    let i = t * 4;
-                    let blend = |a: u8, b: u8| -> u32 {
-                        (a as i32 + (((b as i32 - a as i32) * wy) >> 8)) as u32
-                    };
-                    let (mut r, mut g, mut b) = (
-                        blend(row0[i], row1[i]),
-                        blend(row0[i + 1], row1[i + 1]),
-                        blend(row0[i + 2], row1[i + 2]),
-                    );
-                    if rm != 256 {
-                        r = (r * rm) >> 8;
-                        g = (g * rm) >> 8;
-                        b = (b * rm) >> 8;
-                    }
-                    *out = (r, g, b);
+        // The blit region as row-disjoint fb chunks. Threads only when the
+        // pixel count justifies the per-frame spawn/join overhead (~0.1 ms):
+        // below ~2M pixels the single-threaded row pipeline is already a few
+        // hundred µs, and spawning would cost more than it saves — the default
+        // 5x window stays single-threaded, a maximized window fans out.
+        let region = &mut fb[((dy * fb_w) as usize)..((dy + dhc) * fb_w) as usize];
+        let px = dwc * dhc as usize;
+        let threads = if px < 2_000_000 {
+            1
+        } else {
+            std::thread::available_parallelism().map_or(1, |n| n.get().min(8))
+        };
+        if threads <= 1 {
+            blit_rows(region, 0, dhc, &params);
+        } else {
+            let rows_per = (dhc as usize).div_ceil(threads);
+            std::thread::scope(|scope| {
+                for (k, chunk) in region.chunks_mut(rows_per * fb_w as usize).enumerate() {
+                    let r0 = (k * rows_per) as u32;
+                    let r1 = (r0 + (chunk.len() / fb_w as usize) as u32).min(dhc);
+                    let params = &params;
+                    scope.spawn(move || blit_rows(chunk, r0, r1, params));
                 }
-            } else {
-                let src_row = &src[(sy0 * tw * 4) as usize..][..(tw * 4) as usize];
-                for (t, out) in trow.iter_mut().enumerate() {
-                    let i = t * 4;
-                    let (mut r, mut g, mut b) =
-                        (src_row[i] as u32, src_row[i + 1] as u32, src_row[i + 2] as u32);
-                    if rm != 256 {
-                        r = (r * rm) >> 8;
-                        g = (g * rm) >> 8;
-                        b = (b * rm) >> 8;
-                    }
-                    *out = (r, g, b);
-                }
-            }
-
-            // Expand the texel row to the dst row.
-            let out_row = &mut fb[out_start..out_start + dwc];
-            if bilinear {
-                // x-lerp between cached neighbouring texels; the weight
-                // accumulator advances by a constant per pixel. The first
-                // pixel's source coordinate is step_x/2 - 0.5 texels (GPU
-                // linear-sampler addressing), which can be negative (clamped).
-                let mut acc = (step_x / 2) as i64 - (1 << 15);
-                let mut x0 = -1i64; // current left texel (-1 = clamped edge)
-                let (mut c0, mut c1) = (trow[0], trow[0]);
-                for out in out_row.iter_mut() {
-                    let nx0 = if acc < 0 { -1 } else { (acc >> 16).min(tw as i64 - 1) };
-                    if nx0 != x0 {
-                        x0 = nx0;
-                        let l = x0.max(0) as usize;
-                        let r = ((x0 + 1).max(0) as usize).min(tw as usize - 1);
-                        c0 = trow[l];
-                        c1 = trow[r];
-                    }
-                    let wx = if acc < 0 { 0 } else { ((acc & 0xFFFF) >> 8) as i32 };
-                    let lerp = |a: u32, b: u32| -> u32 {
-                        (a as i32 + (((b as i32 - a as i32) * wx) >> 8)) as u32
-                    };
-                    let (r, g, b) = (lerp(c0.0, c1.0), lerp(c0.1, c1.1), lerp(c0.2, c1.2));
-                    *out = (r << 16) | (g << 8) | b;
-                    acc += step_x as i64;
-                }
-            } else {
-                // Span-fill each texel's run of dst pixels.
-                let mut c = 0usize;
-                while c < dwc {
-                    let sx = col_nx[c];
-                    let mut end = c + 1;
-                    while end < dwc && col_nx[end] == sx {
-                        end += 1;
-                    }
-                    let (r, g, b) = trow[sx as usize];
-                    let px = (r << 16) | (g << 8) | b;
-                    out_row[c..end].fill(px);
-                    c = end;
-                }
-            }
-
-            // Grid column edges: dim the boundary pixel of every texel.
-            if grid {
-                for (c, out) in out_row.iter_mut().enumerate() {
-                    if col_edge[c] {
-                        let v = *out;
-                        let r = (((v >> 16) & 0xFF) * 205) >> 8;
-                        let g = (((v >> 8) & 0xFF) * 205) >> 8;
-                        let b = ((v & 0xFF) * 205) >> 8;
-                        *out = (r << 16) | (g << 8) | b;
-                    }
-                }
-            }
-
-            prev_key = Some((sy0, rm, out_start));
+            });
         }
     }
 
@@ -493,6 +410,196 @@ impl SoftCompositor {
                 a_row += a_dy;
             }
         }
+    }
+}
+
+/// Everything a row-chunk blit worker needs, shared read-only across threads.
+struct BlitParams<'a> {
+    src: &'a [u8],
+    tw: u32,
+    th: u32,
+    step_x: u64,
+    step_y: u64,
+    fb_w: u32,
+    dx: u32,
+    dwc: usize,
+    dhc: u32,
+    bilinear: bool,
+    grid: bool,
+    scan: bool,
+    col_nx: &'a [u32],
+    col_edge: &'a [bool],
+    row_scan: &'a [u32],
+}
+
+/// SWAR 3-channel weighted lerp on packed 0x00RRGGBB, weight 0..=256 toward
+/// `b`. R+B share one u32 (16-bit lanes at bits 16/0), G rides a second;
+/// 255*256 = 0xFF00 keeps every lane product in bounds. Bit-identical to the
+/// per-channel form `a + ((b-a)*w >> 8)` because `256a/256` is exact.
+#[inline(always)]
+fn swar_lerp(a: u32, b: u32, w: u32) -> u32 {
+    let iw = 256 - w;
+    let rb = (((a & 0xFF00FF) * iw + (b & 0xFF00FF) * w) >> 8) & 0xFF00FF;
+    let g = (((a & 0xFF00) * iw + (b & 0xFF00) * w) >> 8) & 0xFF00;
+    rb | g
+}
+
+/// SWAR multiply of packed 0x00RRGGBB by a 0..=256 factor.
+#[inline(always)]
+fn swar_mul(v: u32, m: u32) -> u32 {
+    let rb = (((v & 0xFF00FF) * m) >> 8) & 0xFF00FF;
+    let g = (((v & 0xFF00) * m) >> 8) & 0xFF00;
+    rb | g
+}
+
+#[inline(always)]
+fn pack(px: &[u8]) -> u32 {
+    ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | (px[2] as u32)
+}
+
+/// Render dst rows `r0..r1` of the blit into `chunk`, whose first row is fb
+/// row `dy + r0` (the chunk starts at that row's column 0). See
+/// [`SoftCompositor::blit_game`] for the pipeline description.
+fn blit_rows(chunk: &mut [u32], r0: u32, r1: u32, p: &BlitParams) {
+    let &BlitParams {
+        src,
+        tw,
+        th,
+        step_x,
+        step_y,
+        fb_w,
+        dx,
+        dwc,
+        bilinear,
+        grid,
+        scan,
+        col_nx,
+        col_edge,
+        row_scan,
+        dhc,
+    } = p;
+    let row_sy = |row: u32| ((row as u64 * step_y + step_y / 2) >> 16) as u32;
+
+    // Scratch texel row: final packed per-texel colors for the current dst row
+    // (y-blend + row effect folded in), expanded below.
+    let mut trow: Vec<u32> = vec![0; tw as usize];
+
+    let mut prev_key: Option<(u32, u32, usize)> = None; // (sy, row_mul, chunk row start)
+    for row in r0..r1 {
+        let fy = row as u64 * step_y + step_y / 2;
+        let sy0 = ((fy >> 16) as u32).min(th - 1);
+        let out_start = ((row - r0) * fb_w + dx) as usize;
+
+        // Row multiplier: scanline factor, or the grid row-edge dim; 256 =
+        // identity. (Grid column edges are applied during expansion.)
+        let row_edge = grid && (row + 1 == dhc || row_sy(row + 1) != sy0);
+        let rm: u32 = if scan {
+            row_scan[row as usize]
+        } else if row_edge {
+            205
+        } else {
+            256
+        };
+
+        // Rows with identical inputs are pure repeats — one memcpy.
+        if !bilinear
+            && let Some((psy, prm, pstart)) = prev_key
+            && psy == sy0
+            && prm == rm
+        {
+            chunk.copy_within(pstart..pstart + dwc, out_start);
+            prev_key = Some((sy0, rm, out_start));
+            continue;
+        }
+
+        // Build the texel row (per-texel work: tw items, not dwc).
+        if bilinear {
+            // y-blend the two neighbouring source rows once per texel.
+            let cy = fy.saturating_sub(1 << 15);
+            let y0 = ((cy >> 16) as u32).min(th - 1);
+            let y1 = (y0 + 1).min(th - 1);
+            let wy = ((cy & 0xFFFF) >> 8) as u32;
+            let row0 = &src[(y0 * tw * 4) as usize..][..(tw * 4) as usize];
+            let row1 = &src[(y1 * tw * 4) as usize..][..(tw * 4) as usize];
+            for (t, out) in trow.iter_mut().enumerate() {
+                let mut v = swar_lerp(pack(&row0[t * 4..]), pack(&row1[t * 4..]), wy);
+                if rm != 256 {
+                    v = swar_mul(v, rm);
+                }
+                *out = v;
+            }
+        } else {
+            let src_row = &src[(sy0 * tw * 4) as usize..][..(tw * 4) as usize];
+            for (t, out) in trow.iter_mut().enumerate() {
+                let mut v = pack(&src_row[t * 4..]);
+                if rm != 256 {
+                    v = swar_mul(v, rm);
+                }
+                *out = v;
+            }
+        }
+
+        // Expand the texel row to the dst row.
+        let out_row = &mut chunk[out_start..out_start + dwc];
+        if bilinear {
+            // Per-SEGMENT x-lerp: within one texel pair the endpoints stay in
+            // registers and the weight is affine in the pixel index. The first
+            // pixel's source coordinate is step_x/2 - 0.5 texels (GPU
+            // linear-sampler addressing), which can start negative
+            // (edge-clamped).
+            debug_assert!(step_x < (1 << 16), "linear path assumes upscale");
+            let mut px = 0usize;
+            let mut coord = (step_x / 2) as i64 - (1 << 15);
+            while px < dwc {
+                let x0 = (coord >> 16).min(tw as i64 - 1); // may be -1 (left clamp)
+                let l = x0.max(0) as usize;
+                let r = ((x0 + 1).max(0) as usize).min(tw as usize - 1);
+                let (c0, c1) = (trow[l], trow[r]);
+                // Last pixel of this segment: where the coordinate reaches the
+                // next texel; right-clamped segments run to the row end.
+                let p_next = if x0 < tw as i64 - 1 {
+                    let boundary = (x0 + 1) << 16;
+                    (px + ((boundary - coord + step_x as i64 - 1) / step_x as i64) as usize)
+                        .min(dwc)
+                } else {
+                    dwc
+                };
+                if c0 == c1 {
+                    out_row[px..p_next].fill(c0);
+                } else {
+                    let w0 = (coord & 0xFFFF) as u32;
+                    let sx = step_x as u32;
+                    for (i, out) in out_row[px..p_next].iter_mut().enumerate() {
+                        *out = swar_lerp(c0, c1, (w0 + i as u32 * sx) >> 8);
+                    }
+                }
+                coord += step_x as i64 * (p_next - px) as i64;
+                px = p_next;
+            }
+        } else {
+            // Span-fill each texel's run of dst pixels.
+            let mut c = 0usize;
+            while c < dwc {
+                let sx = col_nx[c];
+                let mut end = c + 1;
+                while end < dwc && col_nx[end] == sx {
+                    end += 1;
+                }
+                out_row[c..end].fill(trow[sx as usize]);
+                c = end;
+            }
+        }
+
+        // Grid column edges: dim the boundary pixel of every texel.
+        if grid {
+            for (c, out) in out_row.iter_mut().enumerate() {
+                if col_edge[c] {
+                    *out = swar_mul(*out, 205);
+                }
+            }
+        }
+
+        prev_key = Some((sy0, rm, out_start));
     }
 }
 
@@ -863,6 +970,59 @@ mod perf_probe {
             clip_rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(2000.0, 2000.0)),
             primitive: Primitive::Mesh(mesh),
         }]
+    }
+
+    /// Debug-panel-like workloads: tiny solid rects (tile explorer draws each
+    /// tile pixel as one) and a text flood (memory explorer).
+    fn tiny_rect_jobs(n: usize) -> Vec<ClippedPrimitive> {
+        let mut mesh = Mesh::default();
+        for i in 0..n {
+            let x = (i % 200) as f32 * 4.0;
+            let y = (i / 200) as f32 * 4.0;
+            let base = mesh.vertices.len() as u32;
+            let v = |px: f32, py: f32| Vertex {
+                pos: Pos2::new(px, py),
+                uv: Pos2::new(0.0, 0.0), // WHITE_UV: solid fill
+                color: Color32::from_rgb((i % 255) as u8, 100, 200),
+            };
+            mesh.vertices.extend([
+                v(x, y),
+                v(x + 3.0, y),
+                v(x + 3.0, y + 3.0),
+                v(x, y + 3.0),
+            ]);
+            mesh.indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        vec![ClippedPrimitive {
+            clip_rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(2000.0, 2000.0)),
+            primitive: Primitive::Mesh(mesh),
+        }]
+    }
+
+    #[test]
+    #[ignore = "timing probe, run explicitly with --release"]
+    fn soft_timings_debug_panels() {
+        let mut c = SoftCompositor::new();
+        c.textures.insert(
+            TextureId::default(),
+            SoftTexture { width: 128, height: 64, pixels: vec![[255; 4]; 128 * 64], bilinear: true },
+        );
+        let (w, h) = (1600u32, 1200u32);
+        let mut fb = vec![0u32; (w * h) as usize];
+        for (label, jobs) in [
+            ("tile-explorer 25k tiny rects", tiny_rect_jobs(25_000)),
+            ("memory-explorer 3k glyphs", glyph_jobs(3_000, 1.0)),
+        ] {
+            let t = Instant::now();
+            for _ in 0..10 {
+                for p in &jobs {
+                    if let Primitive::Mesh(m) = &p.primitive {
+                        c.raster_mesh(&mut fb, w, h, m, p.clip_rect, 1.0);
+                    }
+                }
+            }
+            eprintln!("DEBUGPANEL {label}: {:?}", t.elapsed() / 10);
+        }
     }
 
     // TEMP-ish probe: print per-piece timings at representative sizes.
