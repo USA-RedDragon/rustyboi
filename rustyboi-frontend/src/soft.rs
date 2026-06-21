@@ -166,8 +166,21 @@ impl SoftCompositor {
     }
 
     /// Blit the retained game frame into `dst` = (x, y, w, h), applying the
-    /// texture filter and LCD effect. Filter/effect factors are precomputed per
-    /// row/column so the inner loop is a fetch + multiply.
+    /// texture filter and LCD effect.
+    ///
+    /// Structure: everything expensive happens per SOURCE texel, not per dst
+    /// pixel. Each dst row first builds a `tw`-wide "texel row" (y-blended for
+    /// Linear, straight for Nearest, row effect factor folded in) and then
+    /// expands it to the dst width — span fills for Nearest, cached-pair lerps
+    /// for Linear. The default path (Nearest, no effect) additionally reuses
+    /// identical rows with a single `copy_within`.
+    ///
+    /// The LCD grid is pixel-based here, NOT the shader's texel-fraction
+    /// smoothstep: at exact integer scales the fraction lattice never lands in
+    /// the shader's 10% edge band and the grid silently vanishes (a real bug —
+    /// the window auto-resize snaps the game to integer scale). Instead the
+    /// LAST dst pixel/row of every source texel is dimmed to 80%, which is the
+    /// shader's intent (a thin gap between cells) at every scale.
     fn blit_game(
         &self,
         fb: &mut [u32],
@@ -186,161 +199,173 @@ impl SoftCompositor {
         let step_y = ((th as u64) << 16) / dh as u64;
         let src = &self.game_rgba;
 
-        // Per-axis LCD-effect factors in 0..=256 fixed point, from the shader:
-        //   grid: mix(0.80, 1.0, gx*gy), gx/gy = smoothstep ramps at the texel
-        //         edges (0..0.10 up, 0.90..1.0 down)
-        //   scanlines: 1.0 - 0.40 * |fy - 0.5| * 2.0   (rows only)
-        let smoothstep = |e0: f32, e1: f32, x: f32| {
-            let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
-            t * t * (3.0 - 2.0 * t)
-        };
-        let axis_gap = |fix_pos: u64| -> f32 {
-            let f = ((fix_pos & 0xFFFF) as f32) / 65536.0;
-            smoothstep(0.0, 0.10, f) * (1.0 - smoothstep(0.90, 1.0, f))
-        };
-        let (gx, gy, sy): (Vec<f32>, Vec<f32>, Vec<u32>) = match self.lcd_effect {
-            LcdEffect::Off => (Vec::new(), Vec::new(), Vec::new()),
-            LcdEffect::Grid => (
-                (0..dw).map(|x| axis_gap((x as u64) * step_x + step_x / 2)).collect(),
-                (0..dh).map(|y| axis_gap((y as u64) * step_y + step_y / 2)).collect(),
-                Vec::new(),
-            ),
-            LcdEffect::Scanlines => (
-                Vec::new(),
-                Vec::new(),
-                (0..dh)
-                    .map(|y| {
-                        let f = ((((y as u64) * step_y + step_y / 2) & 0xFFFF) as f32) / 65536.0;
-                        let s = 1.0 - 0.40 * (f - 0.5).abs() * 2.0;
-                        (s * 256.0) as u32
-                    })
-                    .collect(),
-            ),
-        };
-
-        // Clamp the blit to the framebuffer once, so the inner loops carry no
-        // per-pixel bounds checks and can run over exact row slices.
+        // Clamp the blit to the framebuffer once so the inner loops carry no
+        // per-pixel bounds checks.
         let dwc = dw.min(fb_w.saturating_sub(dx)) as usize;
         let dhc = dh.min(fb_h.saturating_sub(dy));
         if dwc == 0 || dhc == 0 {
             return;
         }
 
-        // Per-column LUTs: all x-axis address math is hoisted out of the row
-        // loop. `col_nx` = nearest source pixel index; `col_lx` = bilinear
-        // (x0, x1, wx). The per-pixel loop is then fetch(+lerp)(+mul) + pack.
-        let bilinear = self.texture_filter == TextureFilter::Linear;
+        // Per-column source-texel index (nearest lattice). Grid edge columns =
+        // the last dst pixel of each texel (where the index steps).
         let col_nx: Vec<u32> = (0..dwc)
             .map(|c| (((c as u64 * step_x + step_x / 2) >> 16) as u32).min(tw - 1))
             .collect();
-        let col_lx: Vec<(u32, u32, u32)> = if bilinear {
+        let grid = self.lcd_effect == LcdEffect::Grid;
+        let scan = self.lcd_effect == LcdEffect::Scanlines;
+        let col_edge: Vec<bool> = if grid {
             (0..dwc)
-                .map(|c| {
-                    let cx = (c as u64 * step_x + step_x / 2).saturating_sub(1 << 15);
-                    let x0 = ((cx >> 16) as u32).min(tw - 1);
-                    (x0 * 4, (x0 + 1).min(tw - 1) * 4, ((cx & 0xFFFF) >> 8) as u32)
+                .map(|c| c + 1 == dwc || col_nx[c] != col_nx[c + 1])
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Scanline row factor (0..=256), from the shader: 1 - 0.4*|f-0.5|*2.
+        let row_scan: Vec<u32> = if scan {
+            (0..dhc)
+                .map(|y| {
+                    let f = ((((y as u64) * step_y + step_y / 2) & 0xFFFF) as f32) / 65536.0;
+                    ((1.0 - 0.40 * (f - 0.5).abs() * 2.0) * 256.0) as u32
                 })
                 .collect()
         } else {
             Vec::new()
         };
-        // Per-column grid gap as 0..=256 fixed point (row factor multiplies in).
-        let col_g: Vec<u32> = gx.iter().map(|f| (f * 256.0) as u32).collect();
+        // Grid row edges: the last dst row of each source texel row.
+        let row_sy = |row: u32| ((row as u64 * step_y + step_y / 2) >> 16) as u32;
+        let bilinear = self.texture_filter == TextureFilter::Linear;
 
-        // Row-level multiplier for the active effect: grid rows modulate the
-        // column gap; scanlines are row-only; Off short-circuits entirely.
-        let row_mul = |row: u32| -> Option<u32> {
-            match self.lcd_effect {
-                LcdEffect::Off => None,
-                LcdEffect::Grid => Some((gy[row as usize] * 256.0) as u32),
-                LcdEffect::Scanlines => Some(sy[row as usize]),
-            }
-        };
+        // Scratch texel row: final per-texel colors for the current dst row
+        // (y-blend + row effect folded in), expanded below.
+        let mut trow: Vec<(u32, u32, u32)> = vec![(0, 0, 0); tw as usize];
 
-        let mut prev_sy: Option<(u32, usize)> = None; // (source row, fb row start)
+        let mut prev_key: Option<(u32, u32, usize)> = None; // (sy, row_mul, fb row start)
         for row in 0..dhc {
             let fy = row as u64 * step_y + step_y / 2;
             let sy0 = ((fy >> 16) as u32).min(th - 1);
             let out_start = ((dy + row) * fb_w + dx) as usize;
 
-            // Fast path: nearest + no effect. Identical source rows are pure
-            // repeats — copy the previously written framebuffer row (the common
-            // case at integer scales: scale-1 of every scale rows).
-            if !bilinear && self.lcd_effect == LcdEffect::Off {
-                if let Some((psy, pstart)) = prev_sy
-                    && psy == sy0
-                {
-                    fb.copy_within(pstart..pstart + dwc, out_start);
-                    prev_sy = Some((sy0, out_start));
-                    continue;
-                }
-                let src_row = &src[(sy0 * tw * 4) as usize..][..(tw * 4) as usize];
-                for (out, &sx) in fb[out_start..out_start + dwc].iter_mut().zip(&col_nx) {
-                    let i = (sx * 4) as usize;
-                    *out = ((src_row[i] as u32) << 16)
-                        | ((src_row[i + 1] as u32) << 8)
-                        | (src_row[i + 2] as u32);
-                }
-                prev_sy = Some((sy0, out_start));
+            // Row multiplier: scanline factor, or the grid row-edge dim; 256 =
+            // identity. (Grid column edges are applied during expansion.)
+            let row_edge = grid && (row + 1 == dhc || row_sy(row + 1) != sy0);
+            let rm: u32 = if scan {
+                row_scan[row as usize]
+            } else if row_edge {
+                205
+            } else {
+                256
+            };
+
+            // Rows with identical inputs are pure repeats — one memcpy.
+            if !bilinear
+                && let Some((psy, prm, pstart)) = prev_key
+                && psy == sy0
+                && prm == rm
+            {
+                fb.copy_within(pstart..pstart + dwc, out_start);
+                prev_key = Some((sy0, rm, out_start));
                 continue;
             }
 
-            let rf = row_mul(row);
-            if !bilinear {
-                let src_row = &src[(sy0 * tw * 4) as usize..][..(tw * 4) as usize];
-                for (c, (out, &sx)) in
-                    fb[out_start..out_start + dwc].iter_mut().zip(&col_nx).enumerate()
-                {
-                    let i = (sx * 4) as usize;
-                    let (mut r, mut g, mut b) =
-                        (src_row[i] as u32, src_row[i + 1] as u32, src_row[i + 2] as u32);
-                    if let Some(rm) = rf {
-                        // grid: m = 0.80 + 0.20 * (gx*gy); scanlines: m = rm.
-                        let m = if self.lcd_effect == LcdEffect::Grid {
-                            205 + ((51 * ((col_g[c] * rm) >> 8)) >> 8)
-                        } else {
-                            rm
-                        };
-                        r = (r * m) >> 8;
-                        g = (g * m) >> 8;
-                        b = (b * m) >> 8;
-                    }
-                    *out = (r << 16) | (g << 8) | b;
-                }
-            } else {
-                // Bilinear: y-lerp factors once per row, x math from the LUT.
+            // Build the texel row (per-texel work: tw items, not dwc).
+            if bilinear {
+                // y-blend the two neighbouring source rows once per texel.
                 let cy = fy.saturating_sub(1 << 15);
                 let y0 = ((cy >> 16) as u32).min(th - 1);
                 let y1 = (y0 + 1).min(th - 1);
-                let wy = ((cy & 0xFFFF) >> 8) as u32;
+                let wy = ((cy & 0xFFFF) >> 8) as i32;
                 let row0 = &src[(y0 * tw * 4) as usize..][..(tw * 4) as usize];
                 let row1 = &src[(y1 * tw * 4) as usize..][..(tw * 4) as usize];
-                // Signed: b < a happens on any decreasing gradient.
-                let lerp =
-                    |a: u32, b: u32, t: u32| (a as i32 + (((b as i32 - a as i32) * t as i32) >> 8)) as u32;
-                for (c, (out, &(i0, i1, wx))) in
-                    fb[out_start..out_start + dwc].iter_mut().zip(&col_lx).enumerate()
-                {
-                    let (i0, i1) = (i0 as usize, i1 as usize);
-                    let ch = |o: usize| -> u32 {
-                        let top = lerp(row0[i0 + o] as u32, row0[i1 + o] as u32, wx);
-                        let bot = lerp(row1[i0 + o] as u32, row1[i1 + o] as u32, wx);
-                        lerp(top, bot, wy)
+                for (t, out) in trow.iter_mut().enumerate() {
+                    let i = t * 4;
+                    let blend = |a: u8, b: u8| -> u32 {
+                        (a as i32 + (((b as i32 - a as i32) * wy) >> 8)) as u32
                     };
-                    let (mut r, mut g, mut b) = (ch(0), ch(1), ch(2));
-                    if let Some(rm) = rf {
-                        let m = if self.lcd_effect == LcdEffect::Grid {
-                            205 + ((51 * ((col_g[c] * rm) >> 8)) >> 8)
-                        } else {
-                            rm
-                        };
-                        r = (r * m) >> 8;
-                        g = (g * m) >> 8;
-                        b = (b * m) >> 8;
+                    let (mut r, mut g, mut b) = (
+                        blend(row0[i], row1[i]),
+                        blend(row0[i + 1], row1[i + 1]),
+                        blend(row0[i + 2], row1[i + 2]),
+                    );
+                    if rm != 256 {
+                        r = (r * rm) >> 8;
+                        g = (g * rm) >> 8;
+                        b = (b * rm) >> 8;
                     }
-                    *out = (r << 16) | (g << 8) | b;
+                    *out = (r, g, b);
+                }
+            } else {
+                let src_row = &src[(sy0 * tw * 4) as usize..][..(tw * 4) as usize];
+                for (t, out) in trow.iter_mut().enumerate() {
+                    let i = t * 4;
+                    let (mut r, mut g, mut b) =
+                        (src_row[i] as u32, src_row[i + 1] as u32, src_row[i + 2] as u32);
+                    if rm != 256 {
+                        r = (r * rm) >> 8;
+                        g = (g * rm) >> 8;
+                        b = (b * rm) >> 8;
+                    }
+                    *out = (r, g, b);
                 }
             }
+
+            // Expand the texel row to the dst row.
+            let out_row = &mut fb[out_start..out_start + dwc];
+            if bilinear {
+                // x-lerp between cached neighbouring texels; the weight
+                // accumulator advances by a constant per pixel. The first
+                // pixel's source coordinate is step_x/2 - 0.5 texels (GPU
+                // linear-sampler addressing), which can be negative (clamped).
+                let mut acc = (step_x / 2) as i64 - (1 << 15);
+                let mut x0 = -1i64; // current left texel (-1 = clamped edge)
+                let (mut c0, mut c1) = (trow[0], trow[0]);
+                for out in out_row.iter_mut() {
+                    let nx0 = if acc < 0 { -1 } else { (acc >> 16).min(tw as i64 - 1) };
+                    if nx0 != x0 {
+                        x0 = nx0;
+                        let l = x0.max(0) as usize;
+                        let r = ((x0 + 1).max(0) as usize).min(tw as usize - 1);
+                        c0 = trow[l];
+                        c1 = trow[r];
+                    }
+                    let wx = if acc < 0 { 0 } else { ((acc & 0xFFFF) >> 8) as i32 };
+                    let lerp = |a: u32, b: u32| -> u32 {
+                        (a as i32 + (((b as i32 - a as i32) * wx) >> 8)) as u32
+                    };
+                    let (r, g, b) = (lerp(c0.0, c1.0), lerp(c0.1, c1.1), lerp(c0.2, c1.2));
+                    *out = (r << 16) | (g << 8) | b;
+                    acc += step_x as i64;
+                }
+            } else {
+                // Span-fill each texel's run of dst pixels.
+                let mut c = 0usize;
+                while c < dwc {
+                    let sx = col_nx[c];
+                    let mut end = c + 1;
+                    while end < dwc && col_nx[end] == sx {
+                        end += 1;
+                    }
+                    let (r, g, b) = trow[sx as usize];
+                    let px = (r << 16) | (g << 8) | b;
+                    out_row[c..end].fill(px);
+                    c = end;
+                }
+            }
+
+            // Grid column edges: dim the boundary pixel of every texel.
+            if grid {
+                for (c, out) in out_row.iter_mut().enumerate() {
+                    if col_edge[c] {
+                        let v = *out;
+                        let r = (((v >> 16) & 0xFF) * 205) >> 8;
+                        let g = (((v >> 8) & 0xFF) * 205) >> 8;
+                        let b = ((v & 0xFF) * 205) >> 8;
+                        *out = (r << 16) | (g << 8) | b;
+                    }
+                }
+            }
+
+            prev_key = Some((sy0, rm, out_start));
         }
     }
 
@@ -670,6 +695,116 @@ mod tests {
         assert_eq!(fb[5], 0x00FF00, "top-right quadrant = green");
         assert_eq!(fb[3 * 8 + 2], 0x0000FF, "bottom-left quadrant = blue");
         assert_eq!(fb[3 * 8 + 5], 0xFFFFFF, "bottom-right quadrant = white");
+    }
+
+    // Regression: the shader-mirrored grid (texel-fraction smoothstep) is
+    // invisible at exact integer scales — the fraction lattice never lands in
+    // the 10% edge band (at 5x it samples fractions {0.1,0.3,0.5,0.7,0.9},
+    // and smoothstep(0,0.1,0.1) == 1.0 exactly). The desktop window auto-sizes
+    // the game to an integer scale, so this was the common case, not an edge
+    // case. The pixel-based grid must dim the boundary pixel of every texel at
+    // ANY scale.
+    #[test]
+    fn grid_is_visible_at_exact_integer_scale() {
+        let mut c = SoftCompositor::new();
+        c.lcd_effect = LcdEffect::Grid;
+        // 2x2 white source at exactly 5x: 10x10 dst.
+        c.game_rgba = vec![255u8; 2 * 2 * 4];
+        c.game_size = Some(SourceSize::Gb);
+        let mut fb = vec![0u32; 10 * 10];
+        c.blit_game(&mut fb, 10, 10, (2, 2), (0, 0, 10, 10));
+        let white = 0xFFFFFF;
+        let dim = |v: u32| v != white && v != 0;
+        // Texel interiors stay full white; the boundary pixel of each texel
+        // (columns 4 and 9, rows 4 and 9) is dimmed.
+        assert_eq!(fb[0], white, "interior pixel untouched");
+        assert!(dim(fb[4]), "column texel boundary is dimmed");
+        assert!(dim(fb[9]), "right-edge boundary is dimmed");
+        assert!(dim(fb[4 * 10 + 1]), "row texel boundary is dimmed");
+        assert!(dim(fb[9 * 10 + 1]), "bottom-edge boundary is dimmed");
+        // And there IS a full-brightness interior (the effect is a grid, not a
+        // uniform dim).
+        let n_white = fb.iter().filter(|&&v| v == white).count();
+        let n_dim = fb.iter().filter(|&&v| dim(v)).count();
+        assert_eq!(n_white + n_dim, 100);
+        assert!(n_white >= 60 && n_dim >= 30, "white={n_white} dim={n_dim}");
+    }
+
+    // The scanline effect must vary WITHIN each source texel row (that is what
+    // distinguishes it from a uniform dim), at exact integer scale.
+    #[test]
+    fn scanlines_vary_within_texel_rows_at_integer_scale() {
+        let mut c = SoftCompositor::new();
+        c.lcd_effect = LcdEffect::Scanlines;
+        c.game_rgba = vec![255u8; 2 * 2 * 4];
+        c.game_size = Some(SourceSize::Gb);
+        let mut fb = vec![0u32; 10 * 10];
+        c.blit_game(&mut fb, 10, 10, (2, 2), (0, 0, 10, 10));
+        // Rows 0..5 map to source row 0; brightness must differ across them.
+        let row_vals: Vec<u32> = (0..5).map(|r| fb[r * 10] & 0xFF).collect();
+        assert!(
+            row_vals.iter().any(|&v| v != row_vals[0]),
+            "scanline factor must vary within a texel row: {row_vals:?}"
+        );
+    }
+
+    // The restructured Linear path (per-texel y-blend + cached-pair x-lerp)
+    // must produce exactly the classic per-pixel bilinear result.
+    #[test]
+    fn linear_matches_reference_bilinear() {
+        let mut c = SoftCompositor::new();
+        c.texture_filter = TextureFilter::Linear;
+        let (tw, th) = (4u32, 3u32);
+        let mut x = 0x243f6a8885a308d3u64;
+        let mut rnd = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        };
+        c.game_rgba = (0..tw * th * 4).map(|_| rnd()).collect();
+        c.game_size = Some(SourceSize::Gb);
+        let (dw, dh) = (13u32, 9u32); // fractional scale on both axes
+        let mut fb = vec![0u32; (dw * dh) as usize];
+        c.blit_game(&mut fb, dw, dh, (tw, th), (0, 0, dw, dh));
+
+        // Reference: naive per-pixel bilinear with the same fixed-point math.
+        let src = &c.game_rgba;
+        let step_x = ((tw as u64) << 16) / dw as u64;
+        let step_y = ((th as u64) << 16) / dh as u64;
+        for py in 0..dh {
+            let cy = (py as u64 * step_y + step_y / 2).saturating_sub(1 << 15);
+            let y0 = ((cy >> 16) as u32).min(th - 1);
+            let y1 = (y0 + 1).min(th - 1);
+            let wy = ((cy & 0xFFFF) >> 8) as i32;
+            for px in 0..dw {
+                let fx = px as u64 * step_x + step_x / 2;
+                let (x0, x1, wx) = if fx < (1 << 15) {
+                    (0u32, 0u32, 0i32)
+                } else {
+                    let cx = fx - (1 << 15);
+                    let x0 = ((cx >> 16) as u32).min(tw - 1);
+                    (x0, (x0 + 1).min(tw - 1), ((cx & 0xFFFF) >> 8) as i32)
+                };
+                let at = |xx: u32, yy: u32, o: u32| src[((yy * tw + xx) * 4 + o) as usize] as i32;
+                let mut expect = 0u32;
+                // Same separable order as the implementation (y-blend per
+                // texel, then x-lerp) — fixed-point truncation makes the two
+                // orders differ by ±1, so the reference must match the order,
+                // not just the math.
+                for (shift, o) in [(16u32, 0u32), (8, 1), (0, 2)] {
+                    let left = at(x0, y0, o) + (((at(x0, y1, o) - at(x0, y0, o)) * wy) >> 8);
+                    let right = at(x1, y0, o) + (((at(x1, y1, o) - at(x1, y0, o)) * wy) >> 8);
+                    let v = (left + (((right - left) * wx) >> 8)) as u32;
+                    expect |= v << shift;
+                }
+                assert_eq!(
+                    fb[(py * dw + px) as usize],
+                    expect,
+                    "bilinear mismatch at ({px},{py})"
+                );
+            }
+        }
     }
 
     #[test]
