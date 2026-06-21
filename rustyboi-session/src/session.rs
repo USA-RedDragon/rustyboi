@@ -69,6 +69,33 @@ fn scale_samples(
     }
 }
 
+/// Down-sample fast-forward output audio by `factor` so it plays at real time
+/// (and thus at a raised pitch) instead of piling `factor`× the samples into
+/// the output device every presented frame — the backlog that otherwise
+/// manifested as choppy (desktop) or doubled/overlapping (web) sound. Each
+/// output sample is the mean of a group of `factor` inputs (a cheap box filter
+/// that also anti-aliases a little), scaled by `gain`. Applied ONLY to the
+/// output copy — the core/APU are untouched, so hardware suites (always Normal
+/// mode) stay byte-identical.
+fn decimate_samples(samples: &[(f32, f32)], factor: u32, gain: f32) -> Vec<(f32, f32)> {
+    let n = factor.max(1) as usize;
+    if n == 1 {
+        return scale_samples(samples.iter().copied(), gain);
+    }
+    let inv = gain / n as f32;
+    samples
+        .chunks_exact(n)
+        .map(|chunk| {
+            let (mut l, mut r) = (0.0f32, 0.0f32);
+            for &(cl, cr) in chunk {
+                l += cl;
+                r += cr;
+            }
+            (l * inv, r * inv)
+        })
+        .collect()
+}
+
 /// Metadata stored alongside a savestate slot. `timestamp` is supplied by the
 /// caller (the session never reads a clock); 0 means "unknown".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -324,8 +351,20 @@ impl Session {
         // Scale the drained OUTPUT copy by master volume. The core/APU are never
         // touched, so hardware suites (APU register/SRAM checks) stay byte-
         // identical; at volume 100 the gain is exactly 1.0 and we skip the mul.
+        // Fast-forward produced `factor`× the samples this frame; resample the
+        // output copy back to one real-time frame's worth so it plays cleanly on
+        // every platform instead of backing up (uncapped has no fixed ratio, so
+        // it's muted).
         let gain = self.config.volume_gain();
-        let audio = scale_samples(self.audio_buf.lock().unwrap().drain(..), gain);
+        let audio = match self.mode {
+            RunMode::FastForward(_) if self.config.ff_uncapped() => Vec::new(),
+            RunMode::FastForward(n) => {
+                let drained: Vec<(f32, f32)> =
+                    self.audio_buf.lock().unwrap().drain(..).collect();
+                decimate_samples(&drained, n.max(1), gain)
+            }
+            _ => scale_samples(self.audio_buf.lock().unwrap().drain(..), gain),
+        };
         FrameOutput { frame, audio, frame_count: self.frame_count, advanced }
     }
 
@@ -1659,6 +1698,30 @@ mod volume_tests {
         // Volume 0 -> gain 0.0 -> every sample silenced.
         let mute = scale_samples(src.iter().copied(), 0.0);
         assert!(mute.iter().all(|(l, r)| *l == 0.0 && *r == 0.0), "gain 0 silences");
+    }
+
+    // Fast-forward's output resampler collapses each group of `factor` input
+    // samples to their mean, so `factor`× the samples become one real-time
+    // frame's worth (played back at a raised pitch instead of backing up).
+    #[test]
+    fn decimate_samples_averages_groups() {
+        let src = stream(); // 4 samples
+
+        // factor 1 is the identity (delegates to `scale_samples`).
+        assert_eq!(decimate_samples(&src, 1, 1.0), src);
+
+        // factor 2 -> two outputs, each the mean of a consecutive pair.
+        let by2 = decimate_samples(&src, 2, 1.0);
+        assert_eq!(by2.len(), 2, "output length is len/factor");
+        assert_eq!(by2[0], ((0.8 + 1.0) / 2.0, (-0.4 + -1.0) / 2.0));
+        assert_eq!(by2[1], ((0.25 + -0.6) / 2.0, (0.5 + 0.0) / 2.0));
+
+        // Gain composes with the averaging (volume 50 halves the means).
+        let by2_half = decimate_samples(&src, 2, 0.5);
+        assert_eq!(by2_half[0], (by2[0].0 * 0.5, by2[0].1 * 0.5));
+
+        // A ragged tail (len not a multiple of factor) is dropped by chunks_exact.
+        assert_eq!(decimate_samples(&src, 3, 1.0).len(), 1);
     }
 
     // Setting the fast-forward speed persists it and, when already engaged,
