@@ -41,12 +41,18 @@ fn fs_main(@location(0) tex_coord: vec2<f32>) -> @location(0) vec4<f32> {
     let f = fract(tex_coord * r_locals.source_size);
 
     if (r_locals.effect == 1u) {
-        // LCD grid: darken a thin gap along both texel edges so each source
-        // pixel reads as a discrete cell. `smoothstep` keeps it soft at any
-        // scale; the constants trade cell brightness against gap width.
-        let gx = smoothstep(0.0, 0.10, f.x) * (1.0 - smoothstep(0.90, 1.0, f.x));
-        let gy = smoothstep(0.0, 0.10, f.y) * (1.0 - smoothstep(0.90, 1.0, f.y));
-        let grid = mix(0.80, 1.0, gx * gy);
+        // LCD grid: darken the boundary PIXEL of each source texel so each
+        // cell reads as discrete. Pixel-based, not fraction-band-based: the
+        // old smoothstep-on-fract form sampled fractions on a lattice that
+        // never lands inside its 10% edge band at exact integer scales (the
+        // window auto-resize snaps the game to integer scale), making the
+        // grid invisible exactly where it is most used. A pixel is a boundary
+        // pixel when its right/lower neighbour falls in a different texel
+        // (screen-space derivatives give the per-pixel texel step).
+        let t = tex_coord * r_locals.source_size;
+        let stepv = vec2<f32>(dpdx(t.x), dpdy(t.y));
+        let edge = floor(t.x + stepv.x) != floor(t.x) || floor(t.y + stepv.y) != floor(t.y);
+        let grid = select(1.0, 0.80, edge);
         return vec4<f32>(color.rgb * grid, color.a);
     }
 
