@@ -196,6 +196,29 @@ pub struct GameFrame<'a> {
     pub rgba: &'a [u8],
 }
 
+/// The per-frame presentation contract the `App` drives — everything a display
+/// backend must do: track the surface size, take the session's presentation
+/// policy, and composite game + egui into a presented frame. Implemented by the
+/// wgpu [`Renderer`] and the CPU [`SoftRenderer`](crate::soft::SoftRenderer)
+/// (the `Software` graphics backend), so the app and platform loop are
+/// backend-agnostic. `render`'s error type stays `wgpu::SurfaceStatus` — it is
+/// the richer of the two backends' failure vocabularies and the platform's
+/// reconfigure-on-`Lost`/`Outdated` logic keys off it (a software backend
+/// simply never returns those).
+pub trait Present {
+    fn surface_size(&self) -> (u32, u32);
+    fn resize(&mut self, width: u32, height: u32);
+    fn set_scaling_mode(&mut self, mode: ScalingMode);
+    fn set_texture_filter(&mut self, filter: TextureFilter);
+    fn set_lcd_effect(&mut self, effect: LcdEffect);
+    fn render(
+        &mut self,
+        game: Option<&GameFrame>,
+        region: PhysicalRect,
+        egui: EguiPaint,
+    ) -> Result<(), wgpu::SurfaceStatus>;
+}
+
 /// Everything egui produced this frame, handed from the `App` to the renderer.
 pub struct EguiPaint {
     pub jobs: Vec<ClippedPrimitive>,
@@ -962,11 +985,41 @@ impl Renderer {
     }
 }
 
+/// Delegation so the platform/`App` can drive either backend through
+/// `dyn Present`; the inherent methods remain the canonical implementations.
+impl Present for Renderer {
+    fn surface_size(&self) -> (u32, u32) {
+        Renderer::surface_size(self)
+    }
+    fn resize(&mut self, width: u32, height: u32) {
+        Renderer::resize(self, width, height)
+    }
+    fn set_scaling_mode(&mut self, mode: ScalingMode) {
+        Renderer::set_scaling_mode(self, mode)
+    }
+    fn set_texture_filter(&mut self, filter: TextureFilter) {
+        Renderer::set_texture_filter(self, filter)
+    }
+    fn set_lcd_effect(&mut self, effect: LcdEffect) {
+        Renderer::set_lcd_effect(self, effect)
+    }
+    fn render(
+        &mut self,
+        game: Option<&GameFrame>,
+        region: PhysicalRect,
+        egui: EguiPaint,
+    ) -> Result<(), wgpu::SurfaceStatus> {
+        Renderer::render(self, game, region, egui)
+    }
+}
+
 /// Pure letterbox math: integer-scaled, aspect-preserving placement of a
 /// `texture`-sized source into `region` of a `surface` (all physical pixels).
 /// Returns the NDC transform for the fullscreen triangle and the scissor rect
 /// `(x, y, w, h)`. Separated out so it can be unit-tested without a GPU.
-fn compute_layout(
+/// `pub(crate)`: the software backend reuses the scissor rect as its blit
+/// destination so both backends share one placement behavior.
+pub(crate) fn compute_layout(
     texture: (f32, f32),
     surface: (f32, f32),
     region: PhysicalRect,

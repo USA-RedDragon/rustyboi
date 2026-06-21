@@ -24,11 +24,16 @@ pub mod app;
 pub mod contract;
 pub mod keymap;
 pub mod renderer;
+
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+pub mod soft;
 pub mod ui_host;
 
 pub use app::{App, FrameStep, PlatformRequest, ResolvedAction};
 pub use contract::{drive_action, Frontend, PauseHint};
-pub use renderer::{GameFrame, PhysicalRect, Renderer, SourceSize};
+pub use renderer::{GameFrame, PhysicalRect, Present, Renderer, SourceSize};
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+pub use soft::SoftRenderer;
 pub use ui_host::{UiFrame, UiHost};
 
 /// The egui event vocabulary the platform needs to synthesize input events it

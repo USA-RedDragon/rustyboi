@@ -4,40 +4,25 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-# The `_lib` suffix keeps the lib name distinct from any bin target that links
-# it (same rationale as the other rustyboi crates; only matters on Windows —
-# see https://github.com/rust-lang/cargo/issues/8519).
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "rustyboi_frontend_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-# The portable app + UI + renderer. Owns the raw wgpu renderer (game texture +
-# scale pipeline + egui-wgpu compositing), the egui UI (via rustyboi-egui), and
-# the `App` that drives `Session`. No winit, no window, no cpal, no file I/O —
-# the platform crate supplies the surface/device, pumps input, and owns audio.
 [dependencies]
 rustyboi-core = { path = "../rustyboi-core" }
 rustyboi-session = { path = "../rustyboi-session" }
 rustyboi-egui = { path = "../rustyboi-egui" }
 egui = "=0.35.0"
 egui-wgpu = "=0.35.0"
-# Depend on wgpu directly (pixels is gone). This resolves to the same 29 that
-# egui-wgpu 0.35 pulls, so the wgpu types the renderer and egui-wgpu exchange
-# are one and the same. Desktop/Android use the default native backends; the web
-# adapter needs the `webgl` feature (below) so wgpu targets WebGL2 on wasm —
-# WebGPU is not Firefox-stable, so the GL backend is the portable choice.
 wgpu = "=29.0.4"
-# winit is needed only for the `Window`/`WindowEvent`/`ActiveEventLoop` types
-# egui-winit bridges — the frontend never creates a window itself; the platform
-# crate does, and forwards its winit events here. Features mirror the platform's
-# per-target winit config so the two link the same winit build. `rwh_06` gates
-# winit 0.30's raw-window-handle 0.6 trait impls (needed by egui-winit + wgpu).
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
 
-# egui-winit is the egui<->winit input bridge; its feature set is configured
-# per-target so Android/web don't pull wayland/x11.
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
 egui-winit = { version = "=0.35.0", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }
+softbuffer = "=0.4.8"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 egui-winit = { version = "=0.35.0", default-features = false, features = ["links"] }

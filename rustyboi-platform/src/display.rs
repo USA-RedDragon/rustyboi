@@ -54,7 +54,7 @@ const HEIGHT: u32 = 144;
 /// down when it goes away (desktop startup/shutdown, Android foreground/back).
 /// The `App` (Session + run state) persists across these cycles.
 struct RenderState {
-    renderer: Renderer,
+    renderer: Box<dyn rustyboi_frontend_lib::Present>,
     ui: UiHost,
 }
 
@@ -76,6 +76,7 @@ fn create_render_state(
     pending_dialog_result: Option<
         std::sync::Arc<std::sync::Mutex<Option<GuiAction>>>,
     >,
+    backend: rustyboi_session::GraphicsBackend,
 ) -> Result<RenderState, PlatformError> {
     let size = window.inner_size();
     let width = size.width.max(1);
@@ -93,29 +94,75 @@ fn create_render_state(
             display: None,
         })
     };
-    // Prefer a Vulkan-only instance when a Vulkan adapter is actually available.
-    // `Backends::all()` also spins up the GL/Mesa backend, which drags in LLVM
-    // (the Mesa shader compiler), tens of MB of resident code we never use on a
-    // Vulkan GPU. Try Vulkan first; only fall back to all backends when Vulkan
-    // can't supply a compatible adapter (older GL-only hardware, some VMs).
-    let try_backends =
-        |backends| -> Option<(wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter)> {
-            let instance = make_instance(backends);
-            let surface = instance.create_surface(window.clone()).ok()?;
-            let adapter = pollster::block_on(instance.request_adapter(
-                &wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::default(),
-                    force_fallback_adapter: false,
-                    compatible_surface: Some(&surface),
-                },
-            ))
-            .ok()?;
-            Some((instance, surface, adapter))
-        };
-    let (_instance, surface, adapter) = try_backends(wgpu::Backends::VULKAN)
-        .or_else(|| try_backends(wgpu::Backends::all()))
-        .ok_or_else(|| PlatformError::new("no compatible wgpu adapter".to_string()))?;
-    log::info!("wgpu adapter: {:?}", adapter.get_info());
+    // Single-backend instances keep unused driver stacks out of the process
+    // (`Backends::all()` also spins up the GL/Mesa stack, which drags in LLVM —
+    // tens of MB of resident code we never use on a Vulkan GPU). The user's
+    // backend choice (Settings → Renderer / `--graphics`) forces one; `Auto`
+    // probes in preference order Vulkan → OpenGL → anything hardware →
+    // software rasterizer. An explicit choice that isn't available falls back
+    // to the `Auto` chain (with a warning) so a stale persisted choice can
+    // never brick startup.
+    let try_backends = |backends: wgpu::Backends,
+                        force_fallback: bool|
+     -> Option<(wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter)> {
+        let instance = make_instance(backends);
+        let surface = instance.create_surface(window.clone()).ok()?;
+        let adapter = pollster::block_on(instance.request_adapter(
+            &wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                force_fallback_adapter: force_fallback,
+                compatible_surface: Some(&surface),
+            },
+        ))
+        .ok()?;
+        Some((instance, surface, adapter))
+    };
+    use rustyboi_session::GraphicsBackend;
+    #[cfg(not(target_os = "android"))]
+    let make_soft = |window: &Arc<Window>,
+                     dialog: &Option<std::sync::Arc<std::sync::Mutex<Option<GuiAction>>>>|
+     -> Result<RenderState, PlatformError> {
+        let renderer = rustyboi_frontend_lib::SoftRenderer::new(window.clone(), width, height)
+            .map_err(PlatformError::new)?;
+        log::info!("software renderer ({backend:?} requested)");
+        // egui's font atlas is CPU-side here with no hardware ceiling; 8192
+        // comfortably covers hi-DPI atlases.
+        let ui = UiHost::new(window, scale_factor, 8192, dialog.clone());
+        Ok(RenderState { renderer: Box::new(renderer), ui })
+    };
+    #[cfg(not(target_os = "android"))]
+    if backend == GraphicsBackend::Software {
+        return make_soft(&window, &pending_dialog_result);
+    }
+
+    let auto_chain = || {
+        try_backends(wgpu::Backends::VULKAN, false)
+            .or_else(|| try_backends(wgpu::Backends::GL, false))
+            .or_else(|| try_backends(wgpu::Backends::all(), false))
+    };
+    let forced = match backend {
+        GraphicsBackend::Auto | GraphicsBackend::Software => None,
+        GraphicsBackend::Vulkan => Some(try_backends(wgpu::Backends::VULKAN, false)),
+        GraphicsBackend::OpenGl => Some(try_backends(wgpu::Backends::GL, false)),
+    };
+    let picked = match forced {
+        Some(Some(found)) => Some(found),
+        Some(None) => {
+            eprintln!(
+                "requested {backend:?} renderer is unavailable; falling back to auto (Vulkan → OpenGL → Software)"
+            );
+            auto_chain()
+        }
+        None => auto_chain(),
+    };
+    let (_instance, surface, adapter) = match picked {
+        Some(found) => found,
+        #[cfg(not(target_os = "android"))]
+        None => return make_soft(&window, &pending_dialog_result),
+        #[cfg(target_os = "android")]
+        None => return Err(PlatformError::new("no compatible wgpu adapter".to_string())),
+    };
+    log::info!("wgpu adapter ({backend:?} requested): {:?}", adapter.get_info());
 
     let mut limits = wgpu::Limits::downlevel_defaults();
     limits.max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d;
@@ -151,7 +198,7 @@ fn create_render_state(
     let renderer = Renderer::new(surface, device, queue, surface_format, width, height, present_mode);
     let ui = UiHost::new(&window, scale_factor, max_texture_size, pending_dialog_result);
 
-    Ok(RenderState { renderer, ui })
+    Ok(RenderState { renderer: Box::new(renderer), ui })
 }
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -686,7 +733,13 @@ impl ApplicationHandler for GuiApp<'_> {
         }
         if self.render_state.is_none() {
             let window = self.window.clone().expect("window created above");
-            match create_render_state(window.clone(), Some(self.pending_dialog_result.clone())) {
+            // CLI `--graphics` overrides the persisted Settings choice for this
+            // run only; both default to Auto (Vulkan → OpenGL → Software).
+            let backend = self
+                .config
+                .graphics
+                .unwrap_or_else(|| self.app.session().graphics_backend());
+            match create_render_state(window.clone(), Some(self.pending_dialog_result.clone()), backend) {
                 Ok(rs) => {
                     self.render_state = Some(rs);
                     window.request_redraw();
@@ -1081,7 +1134,7 @@ impl GuiApp<'_> {
         let fullscreen = self.is_fullscreen;
         #[cfg(target_os = "android")]
         let fullscreen = false;
-        let requests = self.app.draw(window, &mut rs.ui, &mut rs.renderer, extra_events, fullscreen, resolve_gui_action);
+        let requests = self.app.draw(window, &mut rs.ui, rs.renderer.as_mut(), extra_events, fullscreen, resolve_gui_action);
 
         for req in requests {
             match req {
