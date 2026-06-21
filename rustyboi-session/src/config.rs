@@ -72,7 +72,10 @@ pub struct Config {
     pub input_map: InputMap,
     /// Rewind buffer settings.
     pub rewind: RewindConfig,
-    /// Fast-forward multiplier (GB frames per presented frame); clamped ≥ 1.
+    /// Fast-forward speed: GB frames emulated per presented frame. `0` means
+    /// **uncapped** — run as fast as the host allows (the platform skips its
+    /// frame pacing); any other value is the literal speed multiplier (2, 4, 6,
+    /// 8, 10, …). Default 4.
     pub fast_forward_factor: u32,
     /// Master output volume, 0..=100. Scales the session's drained audio copy
     /// only; the core/APU are untouched. `default` so older blobs still load.
@@ -129,6 +132,11 @@ fn default_touch_opacity() -> u8 {
     100
 }
 
+/// Frames emulated per presented frame while fast-forward is *uncapped*. A
+/// modest batch amortizes per-present overhead (egui + GPU) so emulation isn't
+/// throttled by the present rate, while the display still refreshes often.
+const UNCAPPED_FF_BATCH: u32 = 8;
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -170,9 +178,20 @@ impl Config {
         storage.write(CONFIG_KEY, &bytes)
     }
 
-    /// Fast-forward factor, clamped to a sane minimum of 1.
+    /// Frames emulated per presented frame while fast-forwarding. For a finite
+    /// speed this is the multiplier itself; uncapped (`0`) uses a modest batch
+    /// so the display keeps refreshing while the platform runs unthrottled.
     pub fn ff_factor(&self) -> u32 {
-        self.fast_forward_factor.max(1)
+        match self.fast_forward_factor {
+            0 => UNCAPPED_FF_BATCH,
+            n => n.max(1),
+        }
+    }
+
+    /// Whether fast-forward is uncapped (speed `0`): the platform should skip
+    /// its frame pacing and advance emulation as fast as it can.
+    pub fn ff_uncapped(&self) -> bool {
+        self.fast_forward_factor == 0
     }
 
     /// Master volume as a 0.0..=1.0 multiplier for the drained audio copy.

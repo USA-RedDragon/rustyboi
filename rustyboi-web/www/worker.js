@@ -103,24 +103,37 @@ function loop() {
   acc += now - lastNow;
   lastNow = now;
 
+  // Uncapped fast-forward: run emulation as fast as the host allows — advance a
+  // batch (each `run_frame` runs several GB frames in-core) with no accumulator
+  // throttle, then re-schedule immediately. Audio is muted in-core while
+  // uncapped, so there's nothing to post. Rewind always takes the paced path.
+  const uncapped = !rewinding && emu.uncapped_fast_forward && emu.uncapped_fast_forward();
+
   let ran = 0;
   try {
-    while (acc >= FRAME_MS && ran < MAX_FRAMES_PER_TICK) {
-      if (rewinding) {
-        // Step back one snapshot; if the buffer is exhausted, hold on the oldest
-        // frame (do NOT resume forward play while Backspace is still held). No
-        // audio while rewinding.
-        if (emu.rewind_step()) postFrameAndState();
-      } else {
-        const samples = emu.run_frame(); // fills the RGBA framebuffer
-        if (emu.has_rom()) postFrameAndState();
-        if (samples.length > 0) {
-          // Transfer the underlying buffer — no copy across the boundary.
-          post({ type: "Audio", samples }, [samples.buffer]);
+    if (uncapped) {
+      emu.run_frame();
+      if (emu.has_rom()) postFrameAndState();
+      ran = 1;
+      acc = 0; // don't build a backlog while unthrottled
+    } else {
+      while (acc >= FRAME_MS && ran < MAX_FRAMES_PER_TICK) {
+        if (rewinding) {
+          // Step back one snapshot; if the buffer is exhausted, hold on the oldest
+          // frame (do NOT resume forward play while Backspace is still held). No
+          // audio while rewinding.
+          if (emu.rewind_step()) postFrameAndState();
+        } else {
+          const samples = emu.run_frame(); // fills the RGBA framebuffer
+          if (emu.has_rom()) postFrameAndState();
+          if (samples.length > 0) {
+            // Transfer the underlying buffer — no copy across the boundary.
+            post({ type: "Audio", samples }, [samples.buffer]);
+          }
         }
+        acc -= FRAME_MS;
+        ran++;
       }
-      acc -= FRAME_MS;
-      ran++;
     }
     // Hand any completed Game Boy Printer sheets (PNG bytes) to the main thread
     // as downloads. Prints are rare, so this is an empty array almost every tick.
@@ -134,8 +147,8 @@ function loop() {
   // Shed a large backlog (backgrounded tab / long GC) instead of sprinting.
   if (acc > FRAME_MS * MAX_FRAMES_PER_TICK) acc = 0;
 
-  // Sleep until roughly the next frame boundary; clamp to >= 0.
-  const delay = Math.max(0, FRAME_MS - acc);
+  // Sleep until roughly the next frame boundary (0 while uncapped so we sprint).
+  const delay = uncapped ? 0 : Math.max(0, FRAME_MS - acc);
   setTimeout(loop, delay);
 }
 

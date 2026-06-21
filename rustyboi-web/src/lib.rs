@@ -328,6 +328,13 @@ impl Emulator {
         Float32Array::from(self.audio_scratch.as_slice())
     }
 
+    /// Whether fast-forward is currently engaged AND set to *uncapped* speed, so
+    /// the worker loop knows to run emulation unthrottled (skip its per-frame
+    /// pacing) rather than at the fixed GB frame rate.
+    pub fn uncapped_fast_forward(&self) -> bool {
+        self.session.is_fast_forward() && self.session.config().ff_uncapped()
+    }
+
     /// Convert the latest presented frame to RGBA into `self.rgba`, preferring
     /// the SGB composite when the border toggle is on and the machine offers one
     /// (mirrors the desktop `App::present`). Sets `frame_w`/`frame_h`.
@@ -481,6 +488,7 @@ impl Emulator {
             sgb_border: self.session.sgb_border(),
             paused: self.session.is_paused(),
             fast_forward: self.session.is_fast_forward(),
+            fast_forward_factor: self.session.fast_forward_factor(),
             touch_controls: self.session.touch_controls(),
             printer_attached: self.session.gb().printer_attached(),
             recording: self.session.is_recording(),

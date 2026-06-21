@@ -796,6 +796,7 @@ fn dispatch_action(shared: &Rc<RefCell<Shared>>, action: UiAction) {
         | UiAction::SetRewindInterval(_)
         | UiAction::SetRewindDepth(_)
         | UiAction::SetVolume(_)
+        | UiAction::SetFastForwardFactor(_)
         | UiAction::SetScalingMode(_)
         | UiAction::SetGraphicsBackend(_)
         | UiAction::SetInputConfig(_)

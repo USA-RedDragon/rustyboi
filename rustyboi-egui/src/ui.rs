@@ -763,6 +763,15 @@ impl Gui {
                         }
                     });
 
+                    ui.menu_button("Fast-forward speed", |ui| {
+                        for (factor, label) in crate::actions::FAST_FORWARD_SPEEDS {
+                            let selected = session.fast_forward_factor == factor;
+                            if ui.radio(selected, label).clicked() && !selected {
+                                *action = Some(GuiAction::SetFastForwardFactor(factor));
+                            }
+                        }
+                    });
+
                     ui.menu_button("Scaling", |ui| {
                         for (mode, label) in [
                             (ScalingMode::FitAspect, "Fit (keep aspect)"),
@@ -1446,6 +1455,14 @@ impl Gui {
                         let mut vol = session.volume;
                         if ui.add(egui::Slider::new(&mut vol, 0..=100)).changed() {
                             *action = Some(GuiAction::SetVolume(vol));
+                        }
+
+                        ui.label("Fast-forward speed");
+                        for (factor, label) in crate::actions::FAST_FORWARD_SPEEDS {
+                            let selected = session.fast_forward_factor == factor;
+                            if ui.radio(selected, label).clicked() && !selected {
+                                *action = Some(GuiAction::SetFastForwardFactor(factor));
+                            }
                         }
 
                         if close_after_action {
