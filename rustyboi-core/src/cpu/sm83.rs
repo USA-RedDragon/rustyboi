@@ -55,6 +55,11 @@ impl SM83 {
             if pending_interrupt.is_some() {
                 self.halted = false;
                 mmio.clear_cpu_halt();
+                // C1: the instruction stream resumed by this wakeup carries the
+                // unmodeled HALT-prefetch sub-M-cycle skew; flag it so the FF41
+                // getStat-at-cc line-tail override defers to the renderer register
+                // (which is already correct there). Cleared on the next HALT.
+                mmio.set_halt_wakeup_skew(true);
                 // Gambatte unhalt re-flag gate (memory.cpp:224/304):
                 //   (hdmaEnabled && isHdmaPeriod && haltHdmaState == hdma_low)
                 //   || haltHdmaState == hdma_requested
