@@ -194,7 +194,7 @@ pub const FAST_FORWARD_SPEEDS: [(u32, &str); 6] = [
     (6, "6×"),
     (8, "8×"),
     (10, "10×"),
-    (0, "Uncapped"),
+    (0, "Uncapped (muted)"),
 ];
 
 /// How the emulated frame is fit into its render region (letterboxing policy).
