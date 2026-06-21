@@ -475,6 +475,9 @@ impl Emulator {
             rewind_depth: self.session.config().rewind.depth,
             volume: self.session.volume(),
             scaling: self.session.scaling_mode(),
+            // Surfaced for menu consistency; the browser picks the actual
+            // backend (WebGPU/WebGL), so the choice has no effect on web.
+            graphics_backend: self.session.graphics_backend(),
             sgb_border: self.session.sgb_border(),
             paused: self.session.is_paused(),
             fast_forward: self.session.is_fast_forward(),

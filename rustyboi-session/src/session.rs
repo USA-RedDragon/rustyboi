@@ -999,6 +999,19 @@ impl Session {
         self.config.scaling
     }
 
+    /// Choose the rendering backend; persists the config. The running window
+    /// keeps its current surface/device — the choice applies at the next
+    /// launch (see [`crate::action::GraphicsBackend`]).
+    pub fn set_graphics_backend(&mut self, backend: crate::action::GraphicsBackend) {
+        self.config.graphics_backend = backend;
+        self.persist_config();
+    }
+
+    /// Currently requested rendering backend.
+    pub fn graphics_backend(&self) -> crate::action::GraphicsBackend {
+        self.config.graphics_backend
+    }
+
     /// Replace the rebindable input map (GB-button bindings + chord hotkeys);
     /// persists the config. The adapter's next `resolve` call sees the new map.
     pub fn set_input_config(&mut self, input: crate::input_config::InputConfig) {

@@ -5,8 +5,6 @@ edition = "2021"
 description = "WASM frontend for the rustyboi Game Boy / Color emulator"
 
 [lib]
-# `rlib` (alongside `cdylib`) so the wasm-bindgen integration tests in `tests/`
-# can link the crate as a library; wasm-pack still uses the `cdylib` for builds.
 crate-type = ["cdylib", "rlib"]
 
 # wasm-pack's BUNDLED wasm-opt is too old to validate the post-MVP wasm features
@@ -14,7 +12,6 @@ crate-type = ["cdylib", "rlib"]
 # and run a current binaryen wasm-opt from `make web` instead, which
 # passes `-all` (enable all features — required even on the latest binaryen).
 # Build with `make web`, NOT bare `wasm-pack build`. Needs binaryen
-# (`sudo pacman -S binaryen`).
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
 
@@ -27,12 +24,8 @@ wasm-opt = false
 [dependencies]
 rustyboi-session = { path = "../rustyboi-session" }
 rustyboi-core = { path = "../rustyboi-core" }
-# The portable UI + renderer: the main-thread egui driver (`webapp.rs`) uses its
-# `Renderer` (wgpu WebGL2) + `UiHost` (egui) so web renders the same egui UI as
-# desktop. Its `webgl` wgpu feature is enabled per-target in its own Cargo.toml.
 rustyboi-frontend = { path = "../rustyboi-frontend" }
 
-# wgpu (WebGL2 backend, GL instance) + winit (canvas) for the main-thread driver.
 wgpu = { version = "=29.0.4", features = ["webgl"] }
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
 
@@ -41,8 +34,6 @@ wasm-bindgen-futures = "=0.4.76"
 js-sys = "=0.3.103"
 console_error_panic_hook = "=0.1.7"
 
-# Transport (de)serialization for UiAction / SessionUiState across the worker
-# boundary (rustyboi-session's types are intentionally not serde-derived).
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 
@@ -88,7 +79,5 @@ features = [
     "GamepadButton",
 ]
 
-# Headless-browser tests (the wasm-only rewind/present path host tests can't
-# reach). Run with: wasm-pack test --headless --chrome rustyboi-web
 [dev-dependencies]
 wasm-bindgen-test = "=0.3.76"

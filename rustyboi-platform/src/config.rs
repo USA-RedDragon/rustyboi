@@ -44,6 +44,12 @@ pub struct RawConfig {
     /// written as PNGs next to the ROM
     #[arg(long, default_value_t = false)]
     printer: bool,
+
+    /// Rendering backend for this run: auto, vulkan, opengl, or software.
+    /// Overrides (without persisting) the saved Settings choice; auto probes
+    /// in that preference order.
+    #[arg(long)]
+    graphics: Option<String>,
 }
 
 pub struct CleanConfig {
@@ -66,6 +72,9 @@ pub struct CleanConfig {
     pub skip_bios: bool,
     // attach a Game Boy Printer to the link port at startup
     pub printer: bool,
+    // rendering backend override for this run (None = use the saved Settings
+    // choice); never persisted
+    pub graphics: Option<rustyboi_session::GraphicsBackend>,
 }
 
 impl RawConfig {
@@ -90,6 +99,13 @@ impl RawConfig {
             #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
             skip_bios: _skip_bios,
             printer: self.printer,
+            graphics: self.graphics.as_deref().and_then(|s| {
+                let parsed = rustyboi_session::GraphicsBackend::from_option_id(s);
+                if parsed.is_none() {
+                    eprintln!("unknown --graphics value '{s}' (expected auto|vulkan|opengl|software); using saved setting");
+                }
+                parsed
+            }),
         }
     }
 }

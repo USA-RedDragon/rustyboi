@@ -23,7 +23,7 @@ use rustyboi_egui_lib::actions::GuiAction;
 
 use crate::contract::{drive_action, Frontend, PauseHint};
 use rustyboi_session::{frame_to_pixels, rgb_to_pixels, PaletteChoice, PixelOrder};
-use crate::renderer::{GameFrame, Renderer, SourceSize};
+use crate::renderer::{GameFrame, Present, SourceSize};
 use crate::ui_host::{ExtraEvents, UiHost};
 
 /// Something only the platform (OS/window/fs) can do, surfaced by the app for
@@ -459,6 +459,7 @@ impl App {
             rewind_depth: cfg.rewind.depth,
             volume: cfg.volume,
             scaling: cfg.scaling,
+            graphics_backend: cfg.graphics_backend,
             sgb_border: self.session.sgb_border(),
             paused: self.session.is_paused(),
             fast_forward: self.is_fast_forward(),
@@ -741,7 +742,7 @@ impl App {
         &mut self,
         window: &winit::window::Window,
         ui: &mut UiHost,
-        renderer: &mut Renderer,
+        renderer: &mut dyn Present,
         extra_events: ExtraEvents,
         fullscreen: bool,
         mut resolve_gui_action: impl FnMut(&GuiAction) -> Option<ResolvedAction>,

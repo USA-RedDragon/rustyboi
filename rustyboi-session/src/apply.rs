@@ -359,6 +359,10 @@ impl Session {
                 self.set_scaling_mode(scaling);
                 ActionOutcome::default()
             }
+            UiAction::SetGraphicsBackend(backend) => {
+                self.set_graphics_backend(backend);
+                ActionOutcome::default()
+            }
             UiAction::ToggleFullscreen => ActionOutcome {
                 requests: vec![PlatformRequest::ToggleFullscreen],
                 pause_changed: false,
