@@ -184,6 +184,19 @@ pub enum LcdEffect {
 /// single list the Settings menu and the libretro option are built from.
 pub const PRINTER_SCALES: [u8; 6] = [1, 2, 3, 4, 5, 8];
 
+/// The fast-forward speeds offered in the Settings menu, as
+/// `(fast_forward_factor, label)`. `0` is the uncapped sentinel (see
+/// [`Config::fast_forward_factor`](crate::config::Config::fast_forward_factor));
+/// every other value is the literal speed multiplier.
+pub const FAST_FORWARD_SPEEDS: [(u32, &str); 6] = [
+    (2, "2×"),
+    (4, "4×"),
+    (6, "6×"),
+    (8, "8×"),
+    (10, "10×"),
+    (0, "Uncapped"),
+];
+
 /// How the emulated frame is fit into its render region (letterboxing policy).
 /// `FitAspect` is the historical behavior (aspect-preserving contain);
 /// `IntegerAspect` snaps to the largest whole-number scale; `Stretch` fills the
@@ -292,6 +305,9 @@ pub struct SessionUiState {
     /// meaningful for the web adapter, whose pause lives in the session.
     pub paused: bool,
     pub fast_forward: bool,
+    /// Fast-forward speed setting (GB frames per presented frame; `0` = uncapped),
+    /// so the settings menu can show the active choice.
+    pub fast_forward_factor: u32,
     /// Whether the on-screen touch overlay is shown.
     pub touch_controls: bool,
     /// Whether a Game Boy Printer is currently attached to the link port (drives
@@ -348,6 +364,7 @@ impl Default for SessionUiState {
             sgb_border: true,
             paused: false,
             fast_forward: false,
+            fast_forward_factor: 4,
             touch_controls: cfg!(mobile),
             printer_attached: false,
             recording: false,
@@ -468,6 +485,9 @@ pub enum UiAction {
     SetRewindDepth(usize),
     /// Set the master output volume (0..=100).
     SetVolume(u8),
+    /// Set the fast-forward speed (GB frames per presented frame; `0` = uncapped,
+    /// otherwise the literal multiplier: 2, 4, 6, 8, 10, …).
+    SetFastForwardFactor(u32),
     /// Set how the frame is letterboxed in the render region.
     SetScalingMode(ScalingMode),
     /// Choose the rendering backend (persisted; applied at next launch).
@@ -557,6 +577,7 @@ impl UiAction {
             UiAction::SetRewindInterval(_) => ActionKind::SetRewindInterval,
             UiAction::SetRewindDepth(_) => ActionKind::SetRewindDepth,
             UiAction::SetVolume(_) => ActionKind::SetVolume,
+            UiAction::SetFastForwardFactor(_) => ActionKind::SetFastForwardFactor,
             UiAction::SetScalingMode(_) => ActionKind::SetScalingMode,
             UiAction::SetGraphicsBackend(_) => ActionKind::SetGraphicsBackend,
             UiAction::ToggleFullscreen => ActionKind::ToggleFullscreen,
@@ -629,6 +650,7 @@ pub enum ActionKind {
     SetRewindInterval,
     SetRewindDepth,
     SetVolume,
+    SetFastForwardFactor,
     SetScalingMode,
     SetGraphicsBackend,
     ToggleFullscreen,
@@ -1263,6 +1285,7 @@ mod tests {
             SetRewindInterval(3),
             SetRewindDepth(42),
             SetVolume(80),
+            SetFastForwardFactor(6),
             SetScalingMode(ScalingMode::Stretch),
             SetGraphicsBackend(GraphicsBackend::Software),
             ToggleFullscreen,
@@ -1326,6 +1349,7 @@ mod tests {
                 | UiAction::SetRewindInterval(_)
                 | UiAction::SetRewindDepth(_)
                 | UiAction::SetVolume(_)
+                | UiAction::SetFastForwardFactor(_)
                 | UiAction::SetScalingMode(_)
                 | UiAction::SetGraphicsBackend(_)
                 | UiAction::ToggleFullscreen
@@ -1383,6 +1407,7 @@ mod tests {
             sgb_border: false,
             paused: true,
             fast_forward: true,
+            fast_forward_factor: 0,
             touch_controls: true,
             printer_attached: true,
             recording: true,

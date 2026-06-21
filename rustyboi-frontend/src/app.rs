@@ -434,6 +434,7 @@ impl App {
             sgb_border: self.session.sgb_border(),
             paused: self.session.is_paused(),
             fast_forward: self.is_fast_forward(),
+            fast_forward_factor: cfg.fast_forward_factor,
             touch_controls: self.session.touch_controls(),
             printer_attached: self.session.gb().printer_attached(),
             recording: self.session.is_recording(),
@@ -592,6 +593,12 @@ impl App {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn pace(&self) {
+        // Uncapped fast-forward: run emulation as fast as the host allows — skip
+        // the frame limiter entirely (each `run_frame` still advances a batch of
+        // GB frames, so the display keeps refreshing).
+        if self.is_fast_forward() && self.session.config().ff_uncapped() {
+            return;
+        }
         // Android: audio-clocked. When the audio device is driving and its
         // backlog is at/above the cushion target we pace to real time (the device
         // is the clock); when a hitch has drained the backlog below target we

@@ -355,6 +355,10 @@ impl Session {
                 self.set_volume(volume);
                 ActionOutcome::default()
             }
+            UiAction::SetFastForwardFactor(factor) => {
+                self.set_fast_forward_factor(factor);
+                ActionOutcome::default()
+            }
             UiAction::SetScalingMode(scaling) => {
                 self.set_scaling_mode(scaling);
                 ActionOutcome::default()
@@ -616,6 +620,7 @@ mod tests {
             SetRewindInterval(4),
             SetRewindDepth(30),
             SetVolume(50),
+            SetFastForwardFactor(6),
             SetScalingMode(crate::action::ScalingMode::IntegerAspect),
             ToggleFullscreen,
         ];

@@ -994,6 +994,22 @@ impl Session {
         self.config.volume.min(100)
     }
 
+    /// Set the fast-forward speed (GB frames per presented frame; `0` = uncapped)
+    /// and persist it. If fast-forward is already engaged, re-derive the run mode
+    /// so the new speed takes effect immediately.
+    pub fn set_fast_forward_factor(&mut self, factor: u32) {
+        self.config.fast_forward_factor = factor;
+        if matches!(self.mode, RunMode::FastForward(_)) {
+            self.mode = RunMode::FastForward(self.config.ff_factor());
+        }
+        self.persist_config();
+    }
+
+    /// Current fast-forward speed setting (`0` = uncapped).
+    pub fn fast_forward_factor(&self) -> u32 {
+        self.config.fast_forward_factor
+    }
+
     /// Set the frame letterboxing policy; persists the config.
     pub fn set_scaling_mode(&mut self, scaling: ScalingMode) {
         self.config.scaling = scaling;
@@ -1643,6 +1659,24 @@ mod volume_tests {
         // Volume 0 -> gain 0.0 -> every sample silenced.
         let mute = scale_samples(src.iter().copied(), 0.0);
         assert!(mute.iter().all(|(l, r)| *l == 0.0 && *r == 0.0), "gain 0 silences");
+    }
+
+    // Setting the fast-forward speed persists it and, when already engaged,
+    // re-derives the live run mode. Speed 0 = uncapped (a batch factor).
+    #[test]
+    fn set_fast_forward_factor_updates_live_mode() {
+        let mut s = Session::new(Config::default(), test_ports(), [0u8; 32]);
+        s.fast_forward();
+        assert!(matches!(s.mode(), RunMode::FastForward(4)), "default speed is 4×");
+
+        s.set_fast_forward_factor(10);
+        assert!(matches!(s.mode(), RunMode::FastForward(10)), "live mode follows the new speed");
+        assert_eq!(s.fast_forward_factor(), 10);
+        assert!(!s.config().ff_uncapped());
+
+        s.set_fast_forward_factor(0);
+        assert!(s.config().ff_uncapped(), "speed 0 is uncapped");
+        assert!(matches!(s.mode(), RunMode::FastForward(_)), "still fast-forwarding while uncapped");
     }
 
     // The gain `run_frame` uses tracks the config volume, so setting volume 0/50/
