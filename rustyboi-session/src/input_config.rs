@@ -211,10 +211,7 @@ impl HotkeyAction {
     /// Actions whose effect is a level ("held while active"); the rest are
     /// edge-triggered toggles that fire once when the chord becomes active.
     pub fn is_hold(self) -> bool {
-        matches!(
-            self,
-            HotkeyAction::FastForward | HotkeyAction::Rewind | HotkeyAction::Turbo(_)
-        )
+        matches!(self, HotkeyAction::Rewind | HotkeyAction::Turbo(_))
     }
 
     /// The GB button this action consumes (suppressed from normal output while
@@ -607,7 +604,7 @@ mod tests {
         let (_, fired) = cfg.resolve(&keys(&[KeyName::Enter, KeyName::ShiftLeft]), &mut st);
         assert!(fired.iter().any(|f| f.action == HotkeyAction::Exit && f.rising));
 
-        // Start + Pad R2 -> Fast-forward (hold).
+        // Start + Pad R2 -> Fast-forward (edge-triggered toggle).
         let mut st2 = ResolveState::new();
         let held = HeldInputs {
             keys: [KeyName::Enter].into_iter().collect(),
@@ -622,15 +619,35 @@ mod tests {
         let cfg = InputConfig {
             gb_bindings: default_gb_bindings(),
             hotkeys: vec![Hotkey {
+                chord: vec![InputTrigger::Key(KeyName::Backspace)],
+                action: HotkeyAction::Rewind,
+            }],
+        };
+        let mut st = ResolveState::new();
+        for _ in 0..3 {
+            let (_, fired) = cfg.resolve(&keys(&[KeyName::Backspace]), &mut st);
+            assert_eq!(fired.len(), 1);
+            assert_eq!(fired[0].action, HotkeyAction::Rewind);
+        }
+    }
+
+    #[test]
+    fn toggle_action_fires_only_on_rising_edge() {
+        let cfg = InputConfig {
+            gb_bindings: default_gb_bindings(),
+            hotkeys: vec![Hotkey {
                 chord: vec![InputTrigger::Key(KeyName::Tab)],
                 action: HotkeyAction::FastForward,
             }],
         };
         let mut st = ResolveState::new();
+        // Rising frame fires; subsequent held frames do not.
+        let (_, fired) = cfg.resolve(&keys(&[KeyName::Tab]), &mut st);
+        assert_eq!(fired.len(), 1);
+        assert!(fired[0].rising);
         for _ in 0..3 {
             let (_, fired) = cfg.resolve(&keys(&[KeyName::Tab]), &mut st);
-            assert_eq!(fired.len(), 1);
-            assert_eq!(fired[0].action, HotkeyAction::FastForward);
+            assert!(fired.is_empty());
         }
     }
 }
