@@ -81,15 +81,6 @@ impl UiHost {
         pending_dialog_result: Option<Arc<Mutex<Option<GuiAction>>>>,
     ) -> Self {
         let egui_ctx = Context::default();
-        // Window/popup drop shadows are large feathered-gradient meshes (tens of
-        // thousands of blended pixels per open window, re-rasterized every
-        // frame). With several debug windows open they dominated the software
-        // rasterizer's frame (~80% of samples) and cost the GPU path real fill
-        // too — for a pixel-art emulator UI the flat look costs nothing.
-        egui_ctx.all_styles_mut(|s| {
-            s.visuals.window_shadow = egui::Shadow::NONE;
-            s.visuals.popup_shadow = egui::Shadow::NONE;
-        });
         // winit 0.30's `EventLoopWindowTarget` is gone; egui-winit 0.35 accepts
         // any `HasDisplayHandle` as the display target and gained a `theme` arg.
         let egui_state = egui_winit::State::new(
@@ -121,6 +112,18 @@ impl UiHost {
     /// `UiHost` teardown (Android surface suspend/resume).
     pub fn pending_dialog_result(&self) -> Arc<Mutex<Option<GuiAction>>> {
         self.gui.pending_dialog_result()
+    }
+
+    /// Turn off window/popup drop shadows. Called by the platform when it
+    /// picked the Software (CPU) rendering backend: shadows are large
+    /// feathered-gradient meshes re-rasterized every frame, real per-pixel
+    /// work for the CPU rasterizer with several windows open. GPU backends
+    /// keep the default shadowed look — for them the fill is effectively free.
+    pub fn disable_window_shadows(&self) {
+        self.egui_ctx.all_styles_mut(|s| {
+            s.visuals.window_shadow = egui::Shadow::NONE;
+            s.visuals.popup_shadow = egui::Shadow::NONE;
+        });
     }
 
     /// Forward a winit window event to egui (mouse/keyboard/touch/IME).
