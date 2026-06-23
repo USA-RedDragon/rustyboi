@@ -139,4 +139,21 @@ impl WebAudio {
     pub fn queue(&mut self, interleaved: &[f32]) {
         self.player.queue(interleaved);
     }
+
+    /// Audio backlog in stereo sample pairs: how much is scheduled ahead of
+    /// the context clock. `-1.0` while the context isn't running (pre-gesture)
+    /// — the pacing regulator then runs on the wall clock alone. This is the
+    /// web equivalent of the native ring depth, posted back to the worker so
+    /// the shared regulator's DAC trim sees the same signal on every platform.
+    pub fn backlog_pairs(&self) -> f64 {
+        if self.player.ctx.state() != AudioContextState::Running {
+            return -1.0;
+        }
+        let ahead = self.player.next_time - self.player.ctx.current_time();
+        if ahead <= 0.0 {
+            0.0
+        } else {
+            ahead * CORE_SAMPLE_RATE as f64
+        }
+    }
 }

@@ -211,12 +211,24 @@ pub trait Present {
     fn set_scaling_mode(&mut self, mode: ScalingMode);
     fn set_texture_filter(&mut self, filter: TextureFilter);
     fn set_lcd_effect(&mut self, effect: LcdEffect);
+    /// Upload a game frame, retaining it as the active source for subsequent
+    /// `render(game: None, ..)` calls. The web driver uploads directly from
+    /// its worker-shared buffer and then renders with `game: None` to avoid a
+    /// per-frame clone; both backends retain the last frame either way.
+    fn upload_game(&mut self, frame: &GameFrame);
     fn render(
         &mut self,
         game: Option<&GameFrame>,
         region: PhysicalRect,
         egui: EguiPaint,
     ) -> Result<(), wgpu::SurfaceStatus>;
+    /// Whether the most recent `render` presented through a mechanism that
+    /// blocks the loop at the display's refresh once it outpaces it (a Fifo
+    /// swapchain). When true the present IS the tick clock and the platform
+    /// loop must not sleep on top of it; when false (Mailbox swapchain,
+    /// software blit, or a skipped/occluded frame) the platform throttles the
+    /// tick itself. Part of the pacing scheme — see `rustyboi_session::pacing`.
+    fn vsync_paced(&self) -> bool;
 }
 
 /// Everything egui produced this frame, handed from the `App` to the renderer.
@@ -259,6 +271,11 @@ pub struct Renderer {
     /// display's requestAnimationFrame, so refreshes routinely land with no new
     /// frame and would otherwise flash the game area black.
     has_game: bool,
+    /// Whether the most recent `render` actually presented a frame (false when
+    /// the surface skipped it: Timeout/Occluded/Outdated/Lost). The platform
+    /// tick-throttle reads this — a presented Fifo frame blocks at vsync and
+    /// needs no sleep, a skipped one must be throttled or the loop runs hot.
+    last_presented: bool,
     /// Frame letterboxing policy the frontend pushes each frame from the session
     /// config. `FitAspect` (default) reproduces the historical layout exactly.
     scaling_mode: ScalingMode,
@@ -661,10 +678,12 @@ impl Renderer {
             lcd_effect: LcdEffect::Off,
             clear_color: wgpu::Color::BLACK,
             has_game: false,
+            last_presented: false,
             scaling_mode: ScalingMode::FitAspect,
             egui,
         }
     }
+
 
     /// Set the frame letterboxing policy used by the next `render`. Frontends
     /// call this each frame from the session config so the setting takes effect.
@@ -802,6 +821,7 @@ impl Renderer {
             FrameAcquire::Offscreen => None,
             FrameAcquire::Skip(result) => {
                 self.egui.free(&textures);
+                self.last_presented = false;
                 return result;
             }
         };
@@ -915,6 +935,7 @@ impl Renderer {
         if let Some(t) = surface_frame {
             t.present();
         }
+        self.last_presented = true;
 
         if !reuse {
             self.egui.free(&textures);
@@ -1003,6 +1024,9 @@ impl Present for Renderer {
     fn set_lcd_effect(&mut self, effect: LcdEffect) {
         Renderer::set_lcd_effect(self, effect)
     }
+    fn upload_game(&mut self, frame: &GameFrame) {
+        Renderer::upload_game(self, frame)
+    }
     fn render(
         &mut self,
         game: Option<&GameFrame>,
@@ -1010,6 +1034,12 @@ impl Present for Renderer {
         egui: EguiPaint,
     ) -> Result<(), wgpu::SurfaceStatus> {
         Renderer::render(self, game, region, egui)
+    }
+    fn vsync_paced(&self) -> bool {
+        // A Fifo present blocks the loop at the display refresh once the loop
+        // outpaces it; Mailbox never blocks. A skipped frame (occluded window,
+        // surface error) paces nothing regardless of mode.
+        self.last_presented && self.config.present_mode == wgpu::PresentMode::Fifo
     }
 }
 

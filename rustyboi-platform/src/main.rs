@@ -1,5 +1,6 @@
 #![warn(clippy::all)]
-#![forbid(unsafe_code)]
+#![cfg_attr(not(target_os = "windows"), forbid(unsafe_code))]
+#![cfg_attr(target_os = "windows", deny(unsafe_code))]
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 #[cfg(not(target_os = "android"))]

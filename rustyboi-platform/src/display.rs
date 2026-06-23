@@ -189,13 +189,21 @@ fn create_render_state(
     // Pick a non-sRGB surface format if available so the game texture (uploaded
     // as *_Srgb) composites the same as before; fall back to the first format.
     let caps = surface.get_capabilities(&adapter);
-    // Prefer Mailbox: it presents without blocking on vsync, so emulation isn't
-    // stalled during the present and the audio ring can hold a much smaller
-    // cushion. Fall back to Fifo (always supported) where Mailbox isn't offered.
-    let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-        wgpu::PresentMode::Mailbox
-    } else {
+    // Present-mode policy per platform, in service of the tick clock (see the
+    // throttle in `frame_tick`):
+    // - Windows: prefer Fifo — DXGI's blocking present paces ticks at true
+    //   vsync, sidestepping the 15.6ms default timer granularity the sleep
+    //   throttle would otherwise depend on under Mailbox.
+    // - Elsewhere: prefer Mailbox (never blocks; the sleep throttle paces and
+    //   is accurate on Linux/Android). On macOS/iOS Metal only offers Fifo, so
+    //   the display paces there naturally. Wayland keeps Mailbox deliberately:
+    //   its Fifo can block indefinitely while hidden.
+    let present_mode = if cfg!(target_os = "windows")
+        || !caps.present_modes.contains(&wgpu::PresentMode::Mailbox)
+    {
         wgpu::PresentMode::Fifo
+    } else {
+        wgpu::PresentMode::Mailbox
     };
     log::info!("surface present modes: {:?}; using {:?}", caps.present_modes, present_mode);
     let surface_format = caps
@@ -661,6 +669,13 @@ fn run_gui_loop(
         last_resize_at,
         #[cfg(not(target_os = "android"))]
         resize_burst_start,
+        regulator: rustyboi_session::pacing::Regulator::new(),
+        stretcher: rustyboi_session::pacing::Stretcher::new(),
+        pacing_epoch: Instant::now(),
+        last_tick: Instant::now(),
+        tick_interval_ema: 1.0 / 60.0,
+        occluded: false,
+        diag_ticks: 0,
     };
     event_loop.run_app(&mut gui).map_err(PlatformError::from_display)
 }
@@ -713,6 +728,28 @@ struct GuiApp<'c> {
     last_resize_at: Option<Instant>,
     #[cfg(not(target_os = "android"))]
     resize_burst_start: Option<winit::dpi::PhysicalSize<u32>>,
+    /// The shared frame-pacing regulator (see `rustyboi_session::pacing`) and
+    /// the epoch its `now` timestamps are measured from.
+    regulator: rustyboi_session::pacing::Regulator,
+    /// Micro-resampler bridging the audio to the device clock (the game rate
+    /// is pure wall clock; the DAC has zero authority over the timeline).
+    stretcher: rustyboi_session::pacing::Stretcher,
+    pacing_epoch: Instant,
+    /// When the previous tick's throttle completed — the reference the tick
+    /// throttle at the end of `frame_tick` paces against.
+    last_tick: Instant,
+    /// EMA of the tick interval, for the VRR guard: a VRR display's Fifo
+    /// present may never block, so `vsync_paced()` alone would let the loop
+    /// free-run — if ticks average implausibly fast, the throttle engages
+    /// anyway (CPU bound only; the regulator already guarantees game speed).
+    tick_interval_ema: f64,
+    /// The window reported itself occluded (`WindowEvent::Occluded(true)`):
+    /// skip rendering entirely — never touch the swapchain while hidden (the
+    /// Wayland Fifo hidden-block hazard) — while emulation + audio keep
+    /// running on the throttle clock.
+    occluded: bool,
+    /// `RB_LOG_FPS` diagnostics: ticks since the last log line.
+    diag_ticks: u32,
 }
 
 impl ApplicationHandler for GuiApp<'_> {
@@ -819,6 +856,11 @@ impl ApplicationHandler for GuiApp<'_> {
 
         match event {
             WindowEvent::Resized(size) => self.handle_resize(size),
+            // Minimized/hidden: stop rendering (the swapchain must not be
+            // touched while hidden — Wayland Fifo can block indefinitely) but
+            // keep the tick loop, emulation, and audio running via the
+            // throttle clock. `frame_tick` checks the flag.
+            WindowEvent::Occluded(occluded) => self.occluded = occluded,
             WindowEvent::RedrawRequested => self.frame_tick(event_loop),
             other => {
                 if let (Some(rs), Some(window)) =
@@ -1013,13 +1055,43 @@ impl GuiApp<'_> {
             self.app.set_safe_insets(l, t, r, b);
         }
 
-        // Advance one presented frame (paced inside the app), play audio, pump
-        // the workers. Report the audio backlog first so the app can pace off it
-        // (audio-clocked pacing): run ahead to refill the cushion after a hitch,
-        // pace to real time once it's full.
-        self.app.set_audio_backlog(self.audio.as_ref().map(|a| a.queued_frames()));
-        let step = self.app.run_frame();
-        if step.pump_workers {
+        // Emulate exactly as many frames as the shared regulator grants this
+        // tick: a wall-clock token bucket with a bounded DAC trim (see
+        // `rustyboi_session::pacing`). The app never sleeps and never reads a
+        // pacing clock; game speed is therefore exact 59.7275 regardless of
+        // tick cadence, host timer quality, or audio-pipeline misbehavior —
+        // the same regulator paces every platform, including the web worker.
+        //
+        // When paused, the regulator grants 0 but `run_frame` must still be
+        // called once: it services the debug-step requests and frame-advance
+        // mode (all of which early-return cheaply when idle).
+        let now = self.pacing_epoch.elapsed().as_secs_f64();
+        let paused = self.app.is_effectively_paused();
+        let granted = self.regulator.frames_to_run(
+            now,
+            self.audio.as_ref().map(|a| a.queued_pairs()),
+            self.app.is_fast_forward(),
+            paused,
+        );
+        let runs = if paused { 1 } else { granted };
+        let mut emulated = 0u32;
+        let mut pump = false;
+        for _ in 0..runs {
+            let step = self.app.run_frame();
+            pump |= step.pump_workers;
+            emulated += u32::from(step.advanced);
+            if let Some(a) = self.audio.as_mut() {
+                // Bridge to the device clock: micro-resample by the
+                // regulator's stretch ratio (1.0 on healthy hosts).
+                a.push_samples(self.stretcher.process(&step.audio, self.regulator.audio_stretch()));
+            }
+            // A breakpoint can pause mid-grant; don't burn the rest of the
+            // grant on no-op calls.
+            if self.app.is_effectively_paused() {
+                break;
+            }
+        }
+        if pump {
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             pump_workers(
                 &mut self.app,
@@ -1030,39 +1102,78 @@ impl GuiApp<'_> {
             #[cfg(any(target_arch = "wasm32", target_os = "android"))]
             drain_printer_sheets_unsupported(&mut self.app);
         }
-        if let Some(a) = self.audio.as_mut() {
-            a.push_samples(&step.audio);
-        }
 
-        // Android: the render/present is vsync-gated (Fifo) and dips below 60fps
-        // on a 60Hz surface whenever a frame grazes the vsync budget. With one
-        // emulation frame per present, that would slow the game AND starve audio
-        // in lockstep. Decouple them: while the audio backlog is short, advance
-        // extra emulation frames *without* rendering, feeding their audio. The
-        // game then runs at true 60fps with a fed audio cushion; the display just
-        // shows a couple fewer frames. Audio-clocked pacing keeps these extra
-        // `run_frame`s from sleeping. Capped so a long present stall can't spiral.
-        #[cfg(target_os = "android")]
+        // While occluded, never touch the swapchain (render skipped entirely);
+        // otherwise composite as usual.
+        if !self.occluded {
+            self.draw_frame(&window, event_loop);
+        }
+        self.diag_ticks += 1;
+
+        self.app.note_frames(now, emulated);
+
+        // Tick throttle: emulation itself never sleeps — the tick cadence must
+        // come from somewhere. A blocking Fifo present (macOS/iOS Metal)
+        // supplies it at true vsync; when the present can't pace us (Mailbox
+        // never blocks — Linux/Android —, softbuffer blits return immediately,
+        // the window is occluded) sleep out the remainder of the tick period
+        // here instead. Sleep overshoot (macOS coalescing) is harmless in this
+        // position: it delays only the next *tick*; the regulator banks the
+        // elapsed time and game speed is unaffected.
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            const AUDIO_CATCHUP_TARGET: usize = 2;
-            const AUDIO_CATCHUP_MAX_FRAMES: u32 = 4;
-            let mut extra = 0;
-            while extra < AUDIO_CATCHUP_MAX_FRAMES
-                && self.audio.as_ref().is_some_and(|a| a.queued_frames() < AUDIO_CATCHUP_TARGET)
-            {
-                self.app.set_audio_backlog(self.audio.as_ref().map(|a| a.queued_frames()));
-                let catchup = self.app.run_frame();
-                if catchup.audio.is_empty() {
-                    break; // paused / not advancing — nothing to feed.
+            // One tick per emulated frame period. Sub-frame precision is
+            // pointless here (the regulator absorbs tick jitter), so the
+            // rounded period is fine.
+            const TICK_PERIOD: Duration = Duration::from_micros(16_743);
+            let tick_elapsed = self.last_tick.elapsed().as_secs_f64();
+            self.tick_interval_ema += 0.125 * (tick_elapsed - self.tick_interval_ema);
+            // VRR guard: a VRR display's Fifo present may never block, letting
+            // ticks free-run while `vsync_paced()` still reads true. Ticks
+            // averaging < ~6ms are not a plausible fixed-refresh vsync — engage
+            // the throttle (bounds CPU/GPU; speed is already token-guaranteed).
+            let free_running = self.tick_interval_ema < 0.006;
+            let vsync_paced = !self.occluded
+                && !free_running
+                && self
+                    .render_state
+                    .as_ref()
+                    .is_some_and(|rs| rs.renderer.vsync_paced());
+            if !vsync_paced {
+                // Windows defaults to 15.6ms timer granularity — request 1ms
+                // once, the first time the throttle actually engages (Fifo is
+                // preferred there, so many runs never need it at all).
+                // Sole unsafe in this crate: a WinMM FFI call with no memory
+                // arguments (takes a u32, returns a status we don't need).
+                #[cfg(target_os = "windows")]
+                #[allow(unsafe_code)]
+                {
+                    static TIMER_RES: std::sync::Once = std::sync::Once::new();
+                    TIMER_RES.call_once(|| unsafe {
+                        windows_sys::Win32::Media::timeBeginPeriod(1);
+                    });
                 }
-                if let Some(a) = self.audio.as_mut() {
-                    a.push_samples(&catchup.audio);
+                // Sleep margin: Linux/macOS wake within ~50µs of a 1ms-class
+                // sleep; Windows still overshoots ~1ms even at 1ms resolution,
+                // so leave a wider spin margin there. (Spin overshoot only
+                // delays the tick — the regulator keeps game speed exact.)
+                #[cfg(target_os = "windows")]
+                const SLEEP_MARGIN: Duration = Duration::from_micros(2000);
+                #[cfg(not(target_os = "windows"))]
+                const SLEEP_MARGIN: Duration = Duration::from_micros(50);
+                let elapsed = self.last_tick.elapsed();
+                if elapsed < TICK_PERIOD {
+                    let remaining = TICK_PERIOD - elapsed;
+                    if remaining > SLEEP_MARGIN * 2 {
+                        std::thread::sleep(remaining - SLEEP_MARGIN);
+                    }
+                    while self.last_tick.elapsed() < TICK_PERIOD {
+                        std::hint::spin_loop();
+                    }
                 }
-                extra += 1;
             }
+            self.last_tick = Instant::now();
         }
-
-        self.draw_frame(&window, event_loop);
     }
 
     /// Composite egui + the game onto the surface and service the `App`'s
@@ -1115,6 +1226,40 @@ impl GuiApp<'_> {
 
         if let Some(title) = self.app.title_if_due() {
             window.set_title(&title);
+            // Headless-observable pacing check: mirrors the title (which carries
+            // the FPS readout) to stdout at its existing twice-a-second cadence,
+            // plus the regulator's state. `drift` is the proof of "locked":
+            // cumulative emulated frames minus a perfect 59.7275fps timeline —
+            // it must oscillate within a couple of frames and mean-revert; a
+            // walk means the rate is wrong no matter what the fps readout says.
+            // On Android there is no env/stdout — the line goes to logcat at
+            // DEBUG level, silent under android_main's Info filter; flip that
+            // filter to Debug when diagnosing pacing on-device.
+            #[cfg(target_os = "android")]
+            let diag = true;
+            #[cfg(not(target_os = "android"))]
+            let diag = std::env::var_os("RB_LOG_FPS").is_some();
+            if diag {
+                let now = self.pacing_epoch.elapsed().as_secs_f64();
+                let backlog = self.audio.as_ref().map(|a| a.queued_pairs());
+                let consumed = self.audio.as_ref().map(|a| a.consumed_pairs());
+                // Note: underruns also tick while paused (the ring legitimately
+                // drains to silence); "gapless" means the count doesn't grow
+                // during active play.
+                let underruns = self.audio.as_ref().map(|a| a.underrun_samples());
+                let line = format!(
+                    "{title} | t={now:.2} drift={:+.2} tokens={:.2} stretch={:.4} backlog_pairs={backlog:?} consumed_pairs={consumed:?} underrun_samples={underruns:?} ticks={}",
+                    self.app.drift_frames(now),
+                    self.regulator.tokens(),
+                    self.regulator.audio_stretch(),
+                    self.diag_ticks
+                );
+                #[cfg(target_os = "android")]
+                log::debug!("{line}");
+                #[cfg(not(target_os = "android"))]
+                println!("{line}");
+                self.diag_ticks = 0;
+            }
         }
 
         // Keep the render surface locked to the live window size *before* laying
