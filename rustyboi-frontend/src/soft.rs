@@ -1191,6 +1191,150 @@ mod tests {
         }
     }
 
+    fn tex(w: usize, h: usize, pixels: Vec<[u8; 4]>, bilinear: bool) -> SoftTexture {
+        SoftTexture { width: w, height: h, pixels, bilinear }
+    }
+
+    // Nearest sampling with the -0.5 texel-center offset: the center UV of texel
+    // i (u = (i+0.5)/w) must land exactly on texel i, and out-of-range UVs clamp
+    // to the edge texels.
+    #[test]
+    fn sample_nearest_centers_and_clamps() {
+        // 4x1 row with a distinct red per texel.
+        let px: Vec<[u8; 4]> = (0..4).map(|i| [i as u8 * 10, 0, 0, 255]).collect();
+        let t = tex(4, 1, px, false);
+        for i in 0..4u32 {
+            let u = (i as f32 + 0.5) / 4.0;
+            assert_eq!(sample(&t, u, 0.0)[0], i as u8 * 10, "texel {i} center");
+        }
+        // Clamp: below 0 → texel 0, past 1 → last texel.
+        assert_eq!(sample(&t, -1.0, 0.0)[0], 0, "left clamp");
+        assert_eq!(sample(&t, 2.0, 0.0)[0], 30, "right clamp");
+    }
+
+    // Bilinear sampling blends neighbours and clamps at the edges (no wrap).
+    #[test]
+    fn sample_bilinear_blends_and_clamps() {
+        // 2x1 row: 0 and 100 in the red channel.
+        let t = tex(2, 1, vec![[0, 0, 0, 255], [100, 0, 0, 255]], true);
+        // Texel centers (u=0.25, u=0.75) reproduce the source exactly.
+        assert_eq!(sample(&t, 0.25, 0.0)[0], 0);
+        assert_eq!(sample(&t, 0.75, 0.0)[0], 100);
+        // Halfway between centers → 50% blend.
+        assert_eq!(sample(&t, 0.5, 0.0)[0], 50);
+        // Edges clamp to the nearest texel (no interpolation past the border).
+        assert_eq!(sample(&t, 0.0, 0.0)[0], 0, "left edge clamps to texel 0");
+        assert_eq!(sample(&t, 1.0, 0.0)[0], 100, "right edge clamps to texel 1");
+    }
+
+    // The raster_mesh quad fast path (solid fill: lt.uv == rb.uv) must produce
+    // exactly what rasterizing the same two triangles yields. Fed a real
+    // add_rect_with_uv quad (indices [n,n+1,n+2,n+2,n+1,n+3]).
+    #[test]
+    fn quad_solid_fill_matches_triangle_path() {
+        let c = white_tex_compositor();
+        let (w, h) = (8u32, 8u32);
+        let clip = Rect::from_min_max(Pos2::ZERO, Pos2::new(w as f32, h as f32));
+        let white_uv = Pos2::new(0.5, 0.5);
+        let mut mesh = Mesh::default();
+        mesh.add_rect_with_uv(
+            Rect::from_min_max(Pos2::new(1.0, 1.0), Pos2::new(6.0, 5.0)),
+            Rect::from_min_max(white_uv, white_uv), // degenerate uv → solid fill
+            Color32::from_rgb(200, 40, 40),
+        );
+
+        let mut fb_quad = vec![0u32; (w * h) as usize];
+        c.raster_mesh(&mut fb_quad, w, h, &mesh, clip, 1.0);
+
+        // Reference: the same geometry through the general triangle path.
+        let mut fb_tri = vec![0u32; (w * h) as usize];
+        let tex_ref = c.textures.get(&mesh.texture_id).unwrap();
+        let clip_t = (0i64, 0i64, w as i64, h as i64);
+        c.raster_tri(&mut fb_tri, w, tex_ref, &mesh.vertices, &mesh.indices[0..3], clip_t, 1.0);
+        c.raster_tri(&mut fb_tri, w, tex_ref, &mesh.vertices, &mesh.indices[3..6], clip_t, 1.0);
+
+        assert_eq!(fb_quad, fb_tri, "solid-fill quad must equal the triangle result");
+        assert_ne!(fb_quad[8 + 1], 0, "and the rect was actually drawn");
+    }
+
+    // The raster_mesh quad fast path (textured 1:1 glyph) must equal the triangle
+    // path. A 4x4 opaque texture drawn into a 4x4 rect with full (0,0)-(1,1) UV is
+    // exactly one texel per pixel, taking the one_to_one shortcut.
+    #[test]
+    fn quad_glyph_1to1_matches_triangle_path() {
+        let mut c = SoftCompositor::new();
+        let px: Vec<[u8; 4]> = (0..16).map(|i| [i as u8 * 15, 0, 255 - i as u8 * 15, 255]).collect();
+        c.textures.insert(TextureId::default(), tex(4, 4, px, false));
+
+        let (w, h) = (4u32, 4u32);
+        let clip = Rect::from_min_max(Pos2::ZERO, Pos2::new(w as f32, h as f32));
+        let mut mesh = Mesh::default();
+        mesh.add_rect_with_uv(
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(4.0, 4.0)),
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+
+        let mut fb_quad = vec![0u32; (w * h) as usize];
+        c.raster_mesh(&mut fb_quad, w, h, &mesh, clip, 1.0);
+
+        let mut fb_tri = vec![0u32; (w * h) as usize];
+        let tex_ref = c.textures.get(&mesh.texture_id).unwrap();
+        let clip_t = (0i64, 0i64, w as i64, h as i64);
+        c.raster_tri(&mut fb_tri, w, tex_ref, &mesh.vertices, &mesh.indices[0..3], clip_t, 1.0);
+        c.raster_tri(&mut fb_tri, w, tex_ref, &mesh.vertices, &mesh.indices[3..6], clip_t, 1.0);
+
+        assert_eq!(fb_quad, fb_tri, "1:1 glyph quad must equal the triangle result");
+        // The texture pattern actually reached the framebuffer.
+        assert_eq!(fb_quad[0], 0x0000FF, "texel (0,0) = blue");
+    }
+
+    fn color_delta(w: usize, h: usize, color: Color32, pos: Option<[usize; 2]>) -> egui::epaint::ImageDelta {
+        use std::sync::Arc;
+        let image = egui::ColorImage::new([w, h], vec![color; w * h]);
+        egui::epaint::ImageDelta {
+            image: egui::epaint::ImageData::Color(Arc::new(image)),
+            options: egui::TextureOptions::default(),
+            pos,
+        }
+    }
+
+    fn delta_set(id: TextureId, d: egui::epaint::ImageDelta) -> egui::TexturesDelta {
+        egui::TexturesDelta { set: vec![(id, d)], free: vec![] }
+    }
+
+    // apply_textures with pos=Some copies a sub-rectangle into the existing
+    // texture, leaving the rest untouched.
+    #[test]
+    fn apply_textures_partial_update_patches_subrect() {
+        let mut c = SoftCompositor::new();
+        let id = TextureId::default();
+        let base = Color32::from_rgb(10, 10, 10);
+        let patch = Color32::from_rgb(200, 100, 50);
+        c.apply_textures(&delta_set(id, color_delta(4, 4, base, None)));
+        c.apply_textures(&delta_set(id, color_delta(2, 2, patch, Some([1, 1]))));
+
+        let t = c.textures.get(&id).unwrap();
+        let at = |x: usize, y: usize| t.pixels[y * t.width + x];
+        // The 2x2 block at (1,1)..(3,3) is the patch; everything else is base.
+        assert_eq!(at(1, 1), patch.to_array());
+        assert_eq!(at(2, 2), patch.to_array());
+        assert_eq!(at(0, 0), base.to_array(), "corner untouched");
+        assert_eq!(at(3, 1), base.to_array(), "column past the patch untouched");
+        assert_eq!(at(1, 3), base.to_array(), "row past the patch untouched");
+    }
+
+    // free_textures removes the named texture from the store.
+    #[test]
+    fn free_textures_removes_the_texture() {
+        let mut c = SoftCompositor::new();
+        let id = TextureId::default();
+        c.apply_textures(&delta_set(id, color_delta(2, 2, Color32::WHITE, None)));
+        assert!(c.textures.contains_key(&id));
+        c.free_textures(&egui::TexturesDelta { set: vec![], free: vec![id] });
+        assert!(!c.textures.contains_key(&id), "freed texture is gone");
+    }
+
     #[test]
     fn compose_reuse_redraws_cached_jobs() {
         let mut c = white_tex_compositor();

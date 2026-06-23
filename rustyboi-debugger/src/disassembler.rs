@@ -648,6 +648,110 @@ mod tests {
         }
     }
 
+    // The documented-undefined base opcodes (no CPU instruction): each renders
+    // "INVALID" with length 1. Used by the totality sweep below.
+    const UNDEFINED: [u8; 11] =
+        [0xD3, 0xDB, 0xDD, 0xE3, 0xE4, 0xEB, 0xEC, 0xED, 0xF4, 0xFC, 0xFD];
+
+    // The base opcodes carrying a 16-bit little-endian immediate (length 3).
+    const LEN3: [u8; 17] = [
+        0x01, 0x08, 0x11, 0x21, 0x31, 0xC2, 0xC3, 0xC4, 0xCA, 0xCC, 0xCD, 0xD2, 0xD4, 0xDA, 0xDC,
+        0xEA, 0xFA,
+    ];
+
+    // The base opcodes carrying one operand byte — an 8-bit immediate, a signed
+    // relative offset, or the CB prefix (length 2).
+    const LEN2: [u8; 26] = [
+        0x06, 0x0E, 0x16, 0x18, 0x1E, 0x20, 0x26, 0x28, 0x2E, 0x30, 0x36, 0x38, 0x3E, 0xC6, 0xCB,
+        0xCE, 0xD6, 0xDE, 0xE0, 0xE6, 0xE8, 0xEE, 0xF0, 0xF6, 0xF8, 0xFE,
+    ];
+
+    fn expected_len(op: u8) -> u16 {
+        if LEN3.contains(&op) {
+            3
+        } else if LEN2.contains(&op) {
+            2
+        } else {
+            1
+        }
+    }
+
+    // Sweep the whole base table: every opcode disassembles to a non-empty
+    // mnemonic of the correct length, and the undefined opcodes — and only those
+    // — render as ("INVALID", 1). Lay each op at 0x0100 with two trailing operand
+    // bytes so a 3-byte op has bytes to read without overflowing the reader.
+    #[test]
+    fn base_opcode_table_is_total_with_correct_lengths() {
+        for op in 0u16..=0xFF {
+            let op = op as u8;
+            let (mnemonic, len) = dis_at(&[op, 0x00, 0x00], 0x0100);
+            assert!(!mnemonic.is_empty(), "opcode {op:#04X} empty mnemonic");
+            assert_eq!(len, expected_len(op), "opcode {op:#04X} length");
+
+            let is_undefined = UNDEFINED.contains(&op);
+            assert_eq!(
+                mnemonic == "INVALID",
+                is_undefined,
+                "opcode {op:#04X}: mnemonic {mnemonic:?} vs undefined={is_undefined}"
+            );
+            if is_undefined {
+                assert_eq!(len, 1, "undefined opcode {op:#04X} must be length 1");
+            }
+        }
+    }
+
+    // The reader contract: a length-N op touches exactly the opcode byte (offset
+    // 0) plus operand offsets 1..N and nothing beyond. In particular a 1-byte op
+    // never reads an operand, and a 3-byte op reads exactly offsets 1 and 2.
+    #[test]
+    fn reader_reads_exactly_the_operand_bytes() {
+        let addr = 0x0100u16;
+        let check = |prog: &[u8], expect_offsets: &[u16]| {
+            let mut reads: Vec<u16> = Vec::new();
+            let (_m, _len) = Disassembler::disassemble_with_reader(addr, |a| {
+                reads.push(a - addr);
+                prog[(a - addr) as usize]
+            });
+            assert_eq!(reads, expect_offsets, "prog {prog:02X?}");
+        };
+        // 1-byte op (NOP): only the opcode fetch, no operand read.
+        check(&[0x00, 0xFF, 0xFF], &[0]);
+        // 2-byte op (LD B, d8): opcode + offset 1.
+        check(&[0x06, 0x42, 0xFF], &[0, 1]);
+        // 3-byte op (LD BC, d16): opcode + offsets 1 and 2, no more.
+        check(&[0x01, 0x34, 0x12], &[0, 1, 2]);
+        // A relative jump is also 2-byte: opcode + offset 1 only.
+        check(&[0x18, 0x05, 0xFF], &[0, 1]);
+    }
+
+    // Exact mnemonics across the LD r,r block (0x40-0x7F, HALT at 0x76) and the
+    // ALU block (0x80-0xBF) — the register-decode of the two big single-byte
+    // blocks.
+    #[test]
+    fn ld_and_alu_block_mnemonics() {
+        // LD r,r corners + a mid-block sample.
+        assert_eq!(dis(&[0x40]).0, "LD B, B");
+        assert_eq!(dis(&[0x47]).0, "LD B, A");
+        assert_eq!(dis(&[0x50]).0, "LD D, B");
+        assert_eq!(dis(&[0x56]).0, "LD D, (HL)");
+        assert_eq!(dis(&[0x6F]).0, "LD L, A");
+        assert_eq!(dis(&[0x76]).0, "HALT"); // the hole in the LD grid
+        assert_eq!(dis(&[0x78]).0, "LD A, B");
+        assert_eq!(dis(&[0x7F]).0, "LD A, A");
+        // ALU block: one entry per operation family.
+        assert_eq!(dis(&[0x80]).0, "ADD A, B");
+        assert_eq!(dis(&[0x88]).0, "ADC A, B");
+        assert_eq!(dis(&[0x90]).0, "SUB B");
+        assert_eq!(dis(&[0x96]).0, "SUB (HL)");
+        assert_eq!(dis(&[0x98]).0, "SBC A, B");
+        assert_eq!(dis(&[0xA0]).0, "AND B");
+        assert_eq!(dis(&[0xA8]).0, "XOR B");
+        assert_eq!(dis(&[0xAF]).0, "XOR A");
+        assert_eq!(dis(&[0xB0]).0, "OR B");
+        assert_eq!(dis(&[0xB8]).0, "CP B");
+        assert_eq!(dis(&[0xBF]).0, "CP A");
+    }
+
     #[test]
     fn cb_register_operand_naming() {
         // BIT 0 across the low-nibble register cycle (B,C,D,E,H,L,(HL),A).
