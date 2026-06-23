@@ -3401,6 +3401,45 @@ impl Ppu {
         Some(dot >= m0n + 1 && dot + 3 + 3 * ds < 456)
     }
 
+    /// DEFERRED-HDMA-FIRE late-HBlank predicate for the FF55-kick / unhalt
+    /// resolution paths only (NOT the per-dot edge machine). Mirrors Gambatte's
+    /// `enableHdma` -> `isHdmaPeriod(cc + 4)` where `m0TimeOfCurrentLine` returns
+    /// the CURRENT line's mode-0 time (`lastM0Time`) even after the renderer has
+    /// crossed it — so a FF55 enable written mid-HBlank, after mode-0 entry but
+    /// still on the same line, resolves IN-PERIOD and arms its block immediately
+    /// (`hdma_late_enable_*`). rustyboi previously nulled `scheduled_mode0_dot` at
+    /// the m0Time crossing, returning None there, dropping those late enables.
+    ///
+    /// Anchored on `m0_time_master` (master cc, shares the access cc's phase, so it
+    /// is robust to the STOP/lcd-offset line-phase residual that a renderer-dot
+    /// test is not): a visible line, the access cc at/past the mode-0 start, and
+    /// not so deep into mode-0 that the next line is imminent. Threshold per speed
+    /// brackets the late-enable pairs (SS: arm `cc-m0t` 191/188, drop 195/192 ->
+    /// `< 192`; DS: arm 394/391, drop 398/395 -> `< 395`). Returns None when no
+    /// closed-form mode-0 anchor exists (window / first line / mid-M3 invalidation)
+    /// so the caller falls back to the STAT-mode gate.
+    pub fn hdma_period_kick(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
+        if self.disabled {
+            return None;
+        }
+        if self.internal_ly_val >= 144 {
+            return Some(false);
+        }
+        let m0t = self.m0_time_master? as i64;
+        let cc = access_cc as i64;
+        // Start: in-period once the access cc reaches the mode-0 time. (Gambatte's
+        // `cc + 4 >= m0Time`; the renderer-tick m0Time already folds the +4 phase
+        // for the dma cluster, so a bare `cc >= m0t` brackets the enable pairs.)
+        if cc < m0t {
+            return Some(false);
+        }
+        // End: drop once the access cc is within `~12 master cc` of the next line
+        // (i.e. too deep into mode-0). Empirical per-speed bracket on `cc - m0t`.
+        let depth = cc - m0t;
+        let limit: i64 = if double_speed { 395 } else { 192 };
+        Some(depth < limit)
+    }
+
     /// SCX-phase-conditioned nudge to the mode-0 boundary dot used by the
     /// HDMA/VRAM-lock predictors (NOT the m0 STAT IRQ, which is calibrated
     /// separately). The closed-form `compute_m3_length` prefix `scx + (1-cgb)`

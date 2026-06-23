@@ -437,9 +437,10 @@ impl<'a> Bus<'a> {
             // so the flag never leaks (see the else branch for the rationale).
             if self.mmio.hdma_kick_eval_pending() {
                 let ds = self.mmio.is_double_speed_mode();
+                let cc = self.mmio.master_cc();
                 let in_period = self
                     .ppu
-                    .hdma_period(ds)
+                    .hdma_period_kick(cc, ds)
                     .unwrap_or_else(|| self.mmio.hdma_is_in_period_cached());
                 self.mmio.resolve_hdma_kick(in_period);
             }
@@ -474,9 +475,13 @@ impl<'a> Bus<'a> {
             // to the cached period so those paths still kick.
             if self.mmio.hdma_kick_eval_pending() {
                 let ds = self.mmio.is_double_speed_mode();
+                let cc = self.mmio.master_cc();
+                // DEFERRED-HDMA-FIRE: use the late-HBlank-aware kick predicate so an
+                // FF55 enable written mid-HBlank (after mode-0 entry, same line)
+                // still arms its block (Gambatte `isHdmaPeriod` via `lastM0Time`).
                 let in_period = self
                     .ppu
-                    .hdma_period(ds)
+                    .hdma_period_kick(cc, ds)
                     .unwrap_or_else(|| self.mmio.hdma_is_in_period_cached());
                 self.mmio.resolve_hdma_kick(in_period);
             }
