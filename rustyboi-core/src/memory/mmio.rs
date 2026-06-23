@@ -1025,15 +1025,38 @@ impl Mmio {
         // VRAM bytes.
         let delay: u32 = if self.is_double_speed_mode() { 5 } else { 3 };
 
+        // OAM-DMA interleave (Gambatte `Memory::dma`): HDMA and GDMA share the SAME
+        // `dma()` inner loop (memory.cpp:280 `intevent_dma` -> `dma(cc)`; only the
+        // byte count differs). When an OAM-DMA is concurrently active each gated
+        // HDMA byte writes the HDMA-read `data` into `OAM[src & 0xFF]`
+        // (memory.cpp:357-372), NOT the OAM-DMA's own source byte. `execute_gdma`
+        // already mirrors this; `run_hdma_block` previously advanced the OAM-DMA
+        // with `dma_advance_one_mcycle` (its own source), dropping the conflict
+        // overwrite the oamdma-transition tests probe. Use the same gated cadence.
+        let ds = self.is_double_speed_mode();
+        let per_byte_cc: i64 = if ds { 4 } else { 2 };
+        let interleave = self.dma_active;
+        if interleave {
+            self.dma_advance_one_mcycle();
+        }
+        let mut cc: i64 = 0;
+        let mut loam: i64 = -(self.dma_subcycle as i64);
+
         for _ in 0..0x10 {
+            let src = self.hdma_source;
             let (vaddr, byte, into_bank1) =
                 self.resolve_dma_byte(self.hdma_source, self.hdma_dest);
             self.hdma_pending_writes.push((vaddr, byte, into_bank1));
+            cc += per_byte_cc;
+            if interleave && self.dma_active && cc - 3 > loam {
+                loam += 4;
+                self.dma_conflict_advance(src, byte);
+            }
             self.hdma_source = self.hdma_source.wrapping_add(1);
             self.hdma_dest = self.hdma_dest.wrapping_add(1);
-            if self.dma_active {
-                self.dma_advance_one_mcycle();
-            }
+        }
+        if interleave && self.dma_active {
+            self.dma_subcycle = (cc - loam).rem_euclid(4) as u8;
         }
         self.hdma_write_delay = delay;
 
