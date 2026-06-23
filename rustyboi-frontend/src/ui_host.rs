@@ -41,6 +41,9 @@ pub struct UiRunInputs<'a> {
     /// Force a repaint even when egui sees no change (fresh session snapshot,
     /// status/error text the caller knows about). Desktop always passes `true`.
     pub force_repaint: bool,
+    /// Current presented frames-per-second, drawn by the optional FPS overlay
+    /// (gated on `session.show_fps`). Measured per-platform by the caller.
+    pub fps: f32,
 }
 
 /// The egui host: context + winit input bridge + the UI.
@@ -195,6 +198,7 @@ impl UiHost {
             extra_events,
             held_pad,
             force_repaint,
+            fps,
         } = inputs;
         let mut raw_input = self.egui_state.take_egui_input(window);
         raw_input.events.extend(extra_events);
@@ -233,7 +237,7 @@ impl UiHost {
         // `Ui`-scoped); `Gui::ui` shows its panels inside it.
         let mut ui_result = None;
         let full_output = self.egui_ctx.run_ui(raw_input, |ui| {
-            ui_result = Some(self.gui.ui(ui, paused, debug, fullscreen, session, held_pad));
+            ui_result = Some(self.gui.ui(ui, paused, debug, fullscreen, session, held_pad, fps));
         });
 
         self.egui_state

@@ -270,6 +270,10 @@ impl Session {
                 self.set_touch_controls(!self.touch_controls());
                 ActionOutcome::default()
             }
+            UiAction::ToggleShowFps => {
+                self.set_show_fps(!self.show_fps());
+                ActionOutcome::default()
+            }
 
             UiAction::SetHardware(choice) => {
                 self.set_hardware_choice(choice);
@@ -610,6 +614,7 @@ mod tests {
             FrameAdvance,
             ToggleSgbBorder,
             ToggleTouchControls,
+            ToggleShowFps,
             SetHardware(HardwareChoice::Dmg),
             SetPalette(PaletteChoice::Pocket),
             SetColorCorrection(crate::CgbColorConversion::Lcd),

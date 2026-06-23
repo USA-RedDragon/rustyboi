@@ -261,6 +261,41 @@ struct WebRender {
     window: Arc<Window>,
     renderer: Renderer,
     ui: UiHost,
+    /// Rolling presented-FPS estimate for the on-screen overlay.
+    fps: FpsCounter,
+}
+
+/// A rolling frames-per-second estimate for the FPS overlay. On web the emulator
+/// runs in the worker (self-paced at ~59.7 fps) while this main thread composites
+/// at the display's rAF rate, so the meaningful rate is how often a *new* worker
+/// frame is presented — `tick` is called once per `frame_dirty` arrival and
+/// averages over a ~1s window so the reading stays steady.
+#[derive(Default)]
+struct FpsCounter {
+    /// Timestamps (ms, `Date::now`) of recently presented frames.
+    samples: Vec<f64>,
+    fps: f32,
+}
+
+impl FpsCounter {
+    /// Record a presented frame at `now_ms` and refresh the averaged rate.
+    fn tick(&mut self, now_ms: f64) {
+        self.samples.push(now_ms);
+        // Bound the buffer, then drop anything older than the 1s window.
+        if self.samples.len() > 240 {
+            self.samples.remove(0);
+        }
+        while self.samples.len() > 2 && now_ms - self.samples[0] > 1000.0 {
+            self.samples.remove(0);
+        }
+        let n = self.samples.len();
+        if n >= 2 {
+            let dur = now_ms - self.samples[0];
+            if dur > 0.0 {
+                self.fps = ((n - 1) as f64 / dur * 1000.0) as f32;
+            }
+        }
+    }
 }
 
 /// The winit 0.30 `ApplicationHandler` for the web driver. Creates the window in
@@ -392,6 +427,7 @@ impl ApplicationHandler for WebGuiApp {
                     &self.held_keys,
                     &mut self.resolve_state,
                     &mut self.rewind_held,
+                    &mut render.fps,
                 );
             }
             WindowEvent::CloseRequested => {}
@@ -478,7 +514,7 @@ async fn build_web_render(
         surface, device, queue, surface_format, width, height, wgpu::PresentMode::Fifo,
     );
     let ui = UiHost::new(&window, scale_factor, max_texture_size, None);
-    Ok(WebRender { window, renderer, ui })
+    Ok(WebRender { window, renderer, ui, fps: FpsCounter::default() })
 }
 
 /// Build the winit event loop, then hand it a [`WebGuiApp`] to drive. Returns as
@@ -547,6 +583,7 @@ fn set_rewind(shared: &Rc<RefCell<Shared>>, held: &mut bool, on: bool) {
 
 /// Run one egui frame + composite: apply pending status/error, run the UI,
 /// dispatch the action it emits (to the worker), forward GB input, and render.
+#[allow(clippy::too_many_arguments)]
 fn draw(
     shared: &Rc<RefCell<Shared>>,
     window: &Window,
@@ -555,6 +592,7 @@ fn draw(
     held_keys: &HashSet<KeyName>,
     resolve_state: &mut ResolveState,
     rewind_held: &mut bool,
+    fps: &mut FpsCounter,
 ) {
     // Pull the shared inputs for this frame, releasing the borrow before running
     // egui (the rfd file-picker callback can re-enter `shared` via JS).
@@ -572,6 +610,9 @@ fn draw(
         // retained texture (has_game) with game: None.
         if s.frame_dirty {
             s.frame_dirty = false;
+            // A fresh worker frame arrived — this is the true (self-paced ~59.7 fps)
+            // emulation rate, distinct from this thread's rAF composite rate.
+            fps.tick(js_sys::Date::now());
             renderer.upload_game(&GameFrame { size: s.frame_size, rgba: &s.frame_rgba });
         }
         (
@@ -643,7 +684,10 @@ fn draw(
             session: &ui_state,
             extra_events: Vec::new(),
             held_pad: &pad,
-            force_repaint: force_repaint || debug_open,
+            // The FPS overlay reads a value that changes every frame, so it must
+            // repaint continuously while shown (egui geometry is otherwise reused).
+            force_repaint: force_repaint || debug_open || ui_state.show_fps,
+            fps: fps.fps,
         },
     );
 
@@ -783,6 +827,7 @@ fn dispatch_action(shared: &Rc<RefCell<Shared>>, action: UiAction) {
         | UiAction::FrameAdvance
         | UiAction::ToggleSgbBorder
         | UiAction::ToggleTouchControls
+        | UiAction::ToggleShowFps
         | UiAction::SetHardware(_)
         | UiAction::SetPalette(_)
         | UiAction::SetGbcDmgPalette(_)
