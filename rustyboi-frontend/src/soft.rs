@@ -286,9 +286,19 @@ impl SoftCompositor {
         }
     }
 
-    /// Rasterize one egui mesh: textured triangles, premultiplied sRGBA,
-    /// `ONE, ONE_MINUS_SRC_ALPHA` blending in gamma space (matching the wgpu
-    /// path on a non-sRGB surface), scissored by `clip_rect`.
+    /// Rasterize one egui mesh: premultiplied sRGBA, `ONE, ONE_MINUS_SRC_ALPHA`
+    /// blending in gamma space (matching the wgpu path on a non-sRGB surface),
+    /// scissored by `clip_rect`.
+    ///
+    /// egui geometry is dominated by axis-aligned quads emitted as the exact
+    /// index pattern `[n, n+1, n+2, n+2, n+1, n+3]` over vertices
+    /// `[lt, rt, lb, rb]` (`Mesh::add_rect_with_uv`): solid panel/separator
+    /// rects, per-pixel debug-view cells, and glyphs. Those take rectangle fast
+    /// paths (constant-color rows, or linear-UV texture rows with a 1:1
+    /// nearest shortcut for unscaled glyphs) — the debug panels emit tens of
+    /// thousands of them per frame, which is exactly where the general
+    /// barycentric walk melts. Anything else falls back to the triangle
+    /// rasterizer.
     fn raster_mesh(
         &self,
         fb: &mut [u32],
@@ -307,108 +317,365 @@ impl SoftCompositor {
         if cx0 >= cx1 || cy0 >= cy1 {
             return;
         }
+        let clip = (cx0, cy0, cx1, cy1);
 
-        for tri in mesh.indices.chunks_exact(3) {
-            let v = [
-                &mesh.vertices[tri[0] as usize],
-                &mesh.vertices[tri[1] as usize],
-                &mesh.vertices[tri[2] as usize],
-            ];
-            let p: Vec<(f32, f32)> = v.iter().map(|v| (v.pos.x * ppp, v.pos.y * ppp)).collect();
-            // Signed doubled area; sign gives the winding, near-zero is
-            // degenerate. egui emits both windings, so normalize by sign.
-            let area = (p[1].0 - p[0].0) * (p[2].1 - p[0].1)
-                - (p[1].1 - p[0].1) * (p[2].0 - p[0].0);
-            if area.abs() < 1e-6 {
-                continue;
+        let idx = &mesh.indices;
+        let verts = &mesh.vertices;
+        let mut i = 0;
+        while i + 6 <= idx.len() {
+            // egui's add_rect_with_uv pattern: [n, n+1, n+2, n+2, n+1, n+3].
+            let n = idx[i];
+            let is_quad = idx[i + 1] == n + 1
+                && idx[i + 2] == n + 2
+                && idx[i + 3] == n + 2
+                && idx[i + 4] == n + 1
+                && idx[i + 5] == n + 3
+                && (n as usize + 3) < verts.len();
+            if is_quad {
+                let (lt, rt, lb, rb) = (
+                    &verts[n as usize],
+                    &verts[n as usize + 1],
+                    &verts[n as usize + 2],
+                    &verts[n as usize + 3],
+                );
+                let axis_aligned = lt.pos.y == rt.pos.y
+                    && lb.pos.y == rb.pos.y
+                    && lt.pos.x == lb.pos.x
+                    && rt.pos.x == rb.pos.x;
+                let flat_color = lt.color == rt.color && lt.color == lb.color && lt.color == rb.color;
+                if axis_aligned && flat_color && self.raster_quad(fb, fb_w, tex, lt, rb, clip, ppp) {
+                    i += 6;
+                    continue;
+                }
             }
-            let inv_area = 1.0 / area;
+            self.raster_tri(fb, fb_w, tex, verts, &idx[i..i + 3], clip, ppp);
+            i += 3;
+        }
+        // Stray triangles (index count not a multiple of 6 / trailing tri).
+        while i + 3 <= idx.len() {
+            self.raster_tri(fb, fb_w, tex, verts, &idx[i..i + 3], clip, ppp);
+            i += 3;
+        }
+    }
 
-            let min_x = p.iter().map(|q| q.0).fold(f32::MAX, f32::min).floor() as i64;
-            let max_x = p.iter().map(|q| q.0).fold(f32::MIN, f32::max).ceil() as i64;
-            let min_y = p.iter().map(|q| q.1).fold(f32::MAX, f32::min).floor() as i64;
-            let max_y = p.iter().map(|q| q.1).fold(f32::MIN, f32::max).ceil() as i64;
-            let (min_x, max_x) = (min_x.max(cx0), max_x.min(cx1));
-            let (min_y, max_y) = (min_y.max(cy0), max_y.min(cy1));
+    /// Axis-aligned flat-color quad fast path. `lt`/`rb` carry the pos/uv
+    /// corners. Returns false when the quad needs the general path (only when
+    /// the rect is degenerate). Handles the two dominant cases: solid fills
+    /// (uniform UV — egui's WHITE_UV) and glyph/image rects (linear UV span,
+    /// with a nearest shortcut when the mapping is 1:1 texel-per-pixel).
+    #[allow(clippy::too_many_arguments)]
+    fn raster_quad(
+        &self,
+        fb: &mut [u32],
+        fb_w: u32,
+        tex: &SoftTexture,
+        lt: &egui::epaint::Vertex,
+        rb: &egui::epaint::Vertex,
+        (cx0, cy0, cx1, cy1): (i64, i64, i64, i64),
+        ppp: f32,
+    ) -> bool {
+        let x0f = lt.pos.x * ppp;
+        let y0f = lt.pos.y * ppp;
+        let x1f = rb.pos.x * ppp;
+        let y1f = rb.pos.y * ppp;
+        // Pixel coverage: center-in-rect, matching the triangle rasterizer.
+        let px0 = ((x0f - 0.5).ceil() as i64).max(cx0);
+        let py0 = ((y0f - 0.5).ceil() as i64).max(cy0);
+        let px1 = ((x1f - 0.5).ceil() as i64).min(cx1);
+        let py1 = ((y1f - 0.5).ceil() as i64).min(cy1);
+        if px0 >= px1 || py0 >= py1 {
+            return true; // clipped away / degenerate: nothing to draw
+        }
+        let vc = lt.color.to_array();
+        let (cr, cg, cb, ca) = (vc[0] as u32, vc[1] as u32, vc[2] as u32, vc[3] as u32);
 
-            // Incremental rasterization: the normalized barycentric weights are
-            // affine in x/y, so every interpolated quantity (weights, UV,
-            // color) advances by a constant per step — one add each per pixel
-            // instead of re-evaluating the barycentric form.
-            //
-            // d(w_i)/dx and /dy from the edge functions, normalized by area:
-            let dw0 = ((p[1].1 - p[2].1) * inv_area, (p[2].0 - p[1].0) * inv_area);
-            let dw1 = ((p[2].1 - p[0].1) * inv_area, (p[0].0 - p[2].0) * inv_area);
-            // Weights at the top-left sample point (min_x+0.5, min_y+0.5).
-            let (sx0, sy0) = (min_x as f32 + 0.5, min_y as f32 + 0.5);
-            let w0_at = |x: f32, y: f32| {
-                ((p[1].0 - x) * (p[2].1 - y) - (p[1].1 - y) * (p[2].0 - x)) * inv_area
-            };
-            let w1_at = |x: f32, y: f32| {
-                ((p[2].0 - x) * (p[0].1 - y) - (p[2].1 - y) * (p[0].0 - x)) * inv_area
-            };
-            let (mut w0_row, mut w1_row) = (w0_at(sx0, sy0), w1_at(sx0, sy0));
+        if lt.uv == rb.uv {
+            // Solid fill (WHITE_UV or any single texel): one sample, constant
+            // source for the whole rect.
+            let [tr, tg, tb, ta] = sample(tex, lt.uv.x, lt.uv.y);
+            let sr = (tr as u32 * cr) / 255;
+            let sg = (tg as u32 * cg) / 255;
+            let sb = (tb as u32 * cb) / 255;
+            let sa = (ta as u32 * ca) / 255;
+            if sa == 0 {
+                return true;
+            }
+            let src = (sr << 16) | (sg << 8) | sb;
+            for py in py0..py1 {
+                let row = &mut fb[(py as u32 * fb_w + px0 as u32) as usize
+                    ..(py as u32 * fb_w + px1 as u32) as usize];
+                if sa >= 255 {
+                    row.fill(src);
+                } else {
+                    let inv = ((255 - sa) * 257 + 128) >> 8; // ≈ (255-sa)*256/255
+                    for out in row.iter_mut() {
+                        *out = src + swar_mul(*out, inv);
+                    }
+                }
+            }
+            return true;
+        }
 
-            // Per-attribute value at the top-left sample + d/dx + d/dy, all via
-            // attr = w0*a0 + w1*a1 + (1-w0-w1)*a2 = a2 + w0*(a0-a2) + w1*(a1-a2).
-            let attr = |a0: f32, a1: f32, a2: f32| {
-                (
-                    a2 + w0_row * (a0 - a2) + w1_row * (a1 - a2),
-                    dw0.0 * (a0 - a2) + dw1.0 * (a1 - a2), // d/dx
-                    dw0.1 * (a0 - a2) + dw1.1 * (a1 - a2), // d/dy
-                )
-            };
-            let vc = |i: usize, ch: usize| v[i].color[ch] as f32;
-            let (u_v, u_dx, u_dy) = attr(v[0].uv.x, v[1].uv.x, v[2].uv.x);
-            let (v_v, v_dx, v_dy) = attr(v[0].uv.y, v[1].uv.y, v[2].uv.y);
-            let (r_v, r_dx, r_dy) = attr(vc(0, 0), vc(1, 0), vc(2, 0));
-            let (g_v, g_dx, g_dy) = attr(vc(0, 1), vc(1, 1), vc(2, 1));
-            let (b_v, b_dx, b_dy) = attr(vc(0, 2), vc(1, 2), vc(2, 2));
-            let (a_v, a_dx, a_dy) = attr(vc(0, 3), vc(1, 3), vc(2, 3));
-            let (mut u_row, mut v_row) = (u_v, v_v);
-            let (mut r_row, mut g_row, mut b_row, mut a_row) = (r_v, g_v, b_v, a_v);
+        // Textured rect: UV interpolates linearly across the rect. Sampled at
+        // pixel centers like the triangle path.
+        let wq = x1f - x0f;
+        let hq = y1f - y0f;
+        if wq <= 0.0 || hq <= 0.0 {
+            return true;
+        }
+        let du = (rb.uv.x - lt.uv.x) / wq;
+        let dv = (rb.uv.y - lt.uv.y) / hq;
+        // 1:1 mapping (unscaled glyph/image): one atlas texel per dst pixel.
+        let one_to_one = tex.width > 0
+            && tex.height > 0
+            && (du * tex.width as f32 - 1.0).abs() < 1e-3
+            && (dv * tex.height as f32 - 1.0).abs() < 1e-3;
+        for py in py0..py1 {
+            let v = lt.uv.y + (py as f32 + 0.5 - y0f) * dv;
+            let row_base = (py as u32 * fb_w) as usize;
+            if one_to_one {
+                // Walk the atlas row directly: nearest texels, no per-pixel
+                // filtering (the mapping is exact).
+                let ty = (((v * tex.height as f32 - 0.5).round() as i64).max(0) as usize)
+                    .min(tex.height - 1);
+                let trow = &tex.pixels[ty * tex.width..(ty + 1) * tex.width];
+                let u0 = lt.uv.x + (px0 as f32 + 0.5 - x0f) * du;
+                let tx0 = ((u0 * tex.width as f32 - 0.5).round() as i64).max(0) as usize;
+                for (tx, px) in (tx0..).zip(px0..px1) {
+                    let t = trow[tx.min(tex.width - 1)];
+                    let sa = (t[3] as u32 * ca) / 255;
+                    if sa == 0 {
+                        continue;
+                    }
+                    let sr = (t[0] as u32 * cr) / 255;
+                    let sg = (t[1] as u32 * cg) / 255;
+                    let sb = (t[2] as u32 * cb) / 255;
+                    let src = (sr << 16) | (sg << 8) | sb;
+                    let di = row_base + px as usize;
+                    if sa >= 255 {
+                        fb[di] = src;
+                    } else {
+                        let inv = ((255 - sa) * 257 + 128) >> 8;
+                        fb[di] = src + swar_mul(fb[di], inv);
+                    }
+                }
+            } else {
+                let mut u = lt.uv.x + (px0 as f32 + 0.5 - x0f) * du;
+                for px in px0..px1 {
+                    let [tr, tg, tb, ta] = sample(tex, u, v);
+                    u += du;
+                    let sa = (ta as u32 * ca) / 255;
+                    if sa == 0 {
+                        continue;
+                    }
+                    let sr = (tr as u32 * cr) / 255;
+                    let sg = (tg as u32 * cg) / 255;
+                    let sb = (tb as u32 * cb) / 255;
+                    let src = (sr << 16) | (sg << 8) | sb;
+                    let di = row_base + px as usize;
+                    if sa >= 255 {
+                        fb[di] = src;
+                    } else {
+                        let inv = ((255 - sa) * 257 + 128) >> 8;
+                        fb[di] = src + swar_mul(fb[di], inv);
+                    }
+                }
+            }
+        }
+        true
+    }
 
+    /// General textured-triangle path (non-quad geometry: rounded corners,
+    /// strokes, plots). Incremental: the normalized barycentric weights are
+    /// affine in x/y, so weights, UV, and color advance by constant adds.
+    #[allow(clippy::too_many_arguments)]
+    fn raster_tri(
+        &self,
+        fb: &mut [u32],
+        fb_w: u32,
+        tex: &SoftTexture,
+        verts: &[egui::epaint::Vertex],
+        tri: &[u32],
+        (cx0, cy0, cx1, cy1): (i64, i64, i64, i64),
+        ppp: f32,
+    ) {
+        let v = [
+            &verts[tri[0] as usize],
+            &verts[tri[1] as usize],
+            &verts[tri[2] as usize],
+        ];
+        let p: Vec<(f32, f32)> = v.iter().map(|v| (v.pos.x * ppp, v.pos.y * ppp)).collect();
+        // Signed doubled area; sign gives the winding, near-zero is
+        // degenerate. egui emits both windings, so normalize by sign.
+        let area = (p[1].0 - p[0].0) * (p[2].1 - p[0].1)
+            - (p[1].1 - p[0].1) * (p[2].0 - p[0].0);
+        if area.abs() < 1e-6 {
+            return;
+        }
+        let inv_area = 1.0 / area;
+
+        let min_x = p.iter().map(|q| q.0).fold(f32::MAX, f32::min).floor() as i64;
+        let max_x = p.iter().map(|q| q.0).fold(f32::MIN, f32::max).ceil() as i64;
+        let min_y = p.iter().map(|q| q.1).fold(f32::MAX, f32::min).floor() as i64;
+        let max_y = p.iter().map(|q| q.1).fold(f32::MIN, f32::max).ceil() as i64;
+        let (min_x, max_x) = (min_x.max(cx0), max_x.min(cx1));
+        let (min_y, max_y) = (min_y.max(cy0), max_y.min(cy1));
+
+        // d(w_i)/dx and /dy from the edge functions, normalized by area:
+        let dw0 = ((p[1].1 - p[2].1) * inv_area, (p[2].0 - p[1].0) * inv_area);
+        let dw1 = ((p[2].1 - p[0].1) * inv_area, (p[0].0 - p[2].0) * inv_area);
+        // Weights at the top-left sample point (min_x+0.5, min_y+0.5).
+        let (sx0, sy0) = (min_x as f32 + 0.5, min_y as f32 + 0.5);
+        let w0_at = |x: f32, y: f32| {
+            ((p[1].0 - x) * (p[2].1 - y) - (p[1].1 - y) * (p[2].0 - x)) * inv_area
+        };
+        let w1_at = |x: f32, y: f32| {
+            ((p[2].0 - x) * (p[0].1 - y) - (p[2].1 - y) * (p[0].0 - x)) * inv_area
+        };
+        let (mut w0_row, mut w1_row) = (w0_at(sx0, sy0), w1_at(sx0, sy0));
+
+        // Row-span clipping: egui fills rounded rects with triangle FANS whose
+        // members have huge bounding boxes but thin actual coverage — walking
+        // the whole bbox per row made a 2-instruction "advance weight, test,
+        // skip" spin the hottest loop in the process (~half of all samples with
+        // several panels open). Each edge function is linear in x, so per row
+        // the covered interval is the intersection of three half-planes —
+        // computed directly, the loop then touches (almost) only covered
+        // pixels. Half-open, relative to `min_x`, clamped to the bbox; a ±1
+        // guard plus the per-pixel test keeps exactness.
+        let width = (max_x - min_x) as f32;
+        let row_span = |w0: f32, w1: f32| -> (i64, i64) {
+            let mut lo = 0.0f32;
+            let mut hi = width;
+            for (w, d) in [(w0, dw0.0), (w1, dw1.0), (1.0 - w0 - w1, -dw0.0 - dw1.0)] {
+                if d.abs() < 1e-12 {
+                    if w < 0.0 {
+                        return (0, 0); // this edge excludes the whole row
+                    }
+                } else {
+                    let x = -w / d; // where the edge crosses zero (in pixels from min_x)
+                    if d > 0.0 {
+                        lo = lo.max(x);
+                    } else {
+                        hi = hi.min(x);
+                    }
+                }
+            }
+            let lo = (lo.floor() as i64 - 1).clamp(0, max_x - min_x);
+            let hi = (hi.ceil() as i64 + 2).clamp(0, max_x - min_x);
+            (lo, hi)
+        };
+
+        // Flat-fill fast path: egui tessellates every solid rounded rect / panel
+        // background / shadow body into triangles whose three vertices share one
+        // colour and one UV (the AA fringe is separate thin triangles that vary).
+        // Those interior triangles are the pixel-heavy ones, and they miss the
+        // axis-aligned-quad path in `raster_mesh`. When a triangle is flat we
+        // sample + modulate ONCE and the pixel loop is a coverage test + constant
+        // blend — no per-pixel `sample()` (was ~19% of a panel frame) and no
+        // colour/UV interpolation.
+        if v[0].color == v[1].color
+            && v[1].color == v[2].color
+            && v[0].uv == v[1].uv
+            && v[1].uv == v[2].uv
+        {
+            let c = v[0].color.to_array();
+            let [tr, tg, tb, ta] = sample(tex, v[0].uv.x, v[0].uv.y);
+            let sa = (ta as u32 * c[3] as u32) / 255;
+            if sa == 0 {
+                return; // fully transparent triangle
+            }
+            let sr = ((tr as u32 * c[0] as u32) / 255).min(255);
+            let sg = ((tg as u32 * c[1] as u32) / 255).min(255);
+            let sb = ((tb as u32 * c[2] as u32) / 255).min(255);
+            let src = (sr << 16) | (sg << 8) | sb;
+            let inv = ((255 - sa) * 257 + 128) >> 8;
             for py in min_y..max_y {
-                let (mut w0, mut w1) = (w0_row, w1_row);
-                let (mut uu, mut vv) = (u_row, v_row);
-                let (mut cr, mut cg, mut cb, mut ca) = (r_row, g_row, b_row, a_row);
+                let (lo, hi) = row_span(w0_row, w1_row);
+                let (mut w0, mut w1) =
+                    (w0_row + lo as f32 * dw0.0, w1_row + lo as f32 * dw1.0);
                 let row_base = (py as u32 * fb_w) as usize;
-                for px in min_x..max_x {
-                    let w2 = 1.0 - w0 - w1;
-                    if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
-                        let [tr, tg, tb, ta] = sample(tex, uu, vv);
-                        // Modulate premultiplied texel × premultiplied vertex
-                        // color, then src-over in gamma space.
-                        let sr = (tr as f32 * cr) / 255.0;
-                        let sg = (tg as f32 * cg) / 255.0;
-                        let sb = (tb as f32 * cb) / 255.0;
-                        let sa = (ta as f32 * ca) / 255.0;
+                for px in (min_x + lo)..(min_x + hi) {
+                    if w0 >= 0.0 && w1 >= 0.0 && (1.0 - w0 - w1) >= 0.0 {
                         let di = row_base + px as usize;
-                        let d = fb[di];
-                        let inv = 1.0 - sa / 255.0;
-                        let dr = (sr + ((d >> 16) & 0xFF) as f32 * inv).min(255.0) as u32;
-                        let dg = (sg + ((d >> 8) & 0xFF) as f32 * inv).min(255.0) as u32;
-                        let db = (sb + (d & 0xFF) as f32 * inv).min(255.0) as u32;
-                        fb[di] = (dr << 16) | (dg << 8) | db;
+                        fb[di] = if sa >= 255 { src } else { src + swar_mul(fb[di], inv) };
                     }
                     w0 += dw0.0;
                     w1 += dw1.0;
-                    uu += u_dx;
-                    vv += v_dx;
-                    cr += r_dx;
-                    cg += g_dx;
-                    cb += b_dx;
-                    ca += a_dx;
                 }
                 w0_row += dw0.1;
                 w1_row += dw1.1;
-                u_row += u_dy;
-                v_row += v_dy;
-                r_row += r_dy;
-                g_row += g_dy;
-                b_row += b_dy;
-                a_row += a_dy;
             }
+            return;
+        }
+
+        // Per-attribute value at the top-left sample + d/dx + d/dy, all via
+        // attr = w0*a0 + w1*a1 + (1-w0-w1)*a2 = a2 + w0*(a0-a2) + w1*(a1-a2).
+        let attr = |a0: f32, a1: f32, a2: f32| {
+            (
+                a2 + w0_row * (a0 - a2) + w1_row * (a1 - a2),
+                dw0.0 * (a0 - a2) + dw1.0 * (a1 - a2), // d/dx
+                dw0.1 * (a0 - a2) + dw1.1 * (a1 - a2), // d/dy
+            )
+        };
+        let vc = |i: usize, ch: usize| v[i].color[ch] as f32;
+        let (u_v, u_dx, u_dy) = attr(v[0].uv.x, v[1].uv.x, v[2].uv.x);
+        let (v_v, v_dx, v_dy) = attr(v[0].uv.y, v[1].uv.y, v[2].uv.y);
+        let (r_v, r_dx, r_dy) = attr(vc(0, 0), vc(1, 0), vc(2, 0));
+        let (g_v, g_dx, g_dy) = attr(vc(0, 1), vc(1, 1), vc(2, 1));
+        let (b_v, b_dx, b_dy) = attr(vc(0, 2), vc(1, 2), vc(2, 2));
+        let (a_v, a_dx, a_dy) = attr(vc(0, 3), vc(1, 3), vc(2, 3));
+        let (mut u_row, mut v_row) = (u_v, v_v);
+        let (mut r_row, mut g_row, mut b_row, mut a_row) = (r_v, g_v, b_v, a_v);
+
+        for py in min_y..max_y {
+            let (lo, hi) = row_span(w0_row, w1_row);
+            let l = lo as f32;
+            let (mut w0, mut w1) = (w0_row + l * dw0.0, w1_row + l * dw1.0);
+            let (mut uu, mut vv) = (u_row + l * u_dx, v_row + l * v_dx);
+            let (mut cr, mut cg, mut cb, mut ca) = (
+                r_row + l * r_dx,
+                g_row + l * g_dx,
+                b_row + l * b_dx,
+                a_row + l * a_dx,
+            );
+            let row_base = (py as u32 * fb_w) as usize;
+            for px in (min_x + lo)..(min_x + hi) {
+                let w2 = 1.0 - w0 - w1;
+                if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                    let [tr, tg, tb, ta] = sample(tex, uu, vv);
+                    let sa = ((ta as f32 * ca) / 255.0) as u32;
+                    if sa > 0 {
+                        let sr = ((tr as f32 * cr) / 255.0) as u32;
+                        let sg = ((tg as f32 * cg) / 255.0) as u32;
+                        let sb = ((tb as f32 * cb) / 255.0) as u32;
+                        let src = (sr.min(255) << 16) | (sg.min(255) << 8) | sb.min(255);
+                        let di = row_base + px as usize;
+                        if sa >= 255 {
+                            fb[di] = src;
+                        } else {
+                            let inv = ((255 - sa) * 257 + 128) >> 8;
+                            fb[di] = src + swar_mul(fb[di], inv);
+                        }
+                    }
+                }
+                w0 += dw0.0;
+                w1 += dw1.0;
+                uu += u_dx;
+                vv += v_dx;
+                cr += r_dx;
+                cg += g_dx;
+                cb += b_dx;
+                ca += a_dx;
+            }
+            w0_row += dw0.1;
+            w1_row += dw1.1;
+            u_row += u_dy;
+            v_row += v_dy;
+            r_row += r_dy;
+            g_row += g_dy;
+            b_row += b_dy;
+            a_row += a_dy;
         }
     }
 }
@@ -958,13 +1225,19 @@ mod perf_probe {
                 uv: Pos2::new(u, vv),
                 color: Color32::from_rgba_premultiplied(200, 200, 200, 255),
             };
+            // epaint's add_rect_with_uv layout: [lt, rt, lb, rb] and
+            // indices [n, n+1, n+2, n+2, n+1, n+3]. Glyph UVs are 1:1 with
+            // atlas texels (an 8x14 glyph covers an 8x14 texel region), which
+            // is what real egui text emits at any pixels_per_point.
+            let (u0, v0) = ((i % 16) as f32 * 8.0 / 128.0, 0.0f32);
+            let (u1, v1) = (u0 + 8.0 / 128.0, v0 + 14.0 / 64.0);
             mesh.vertices.extend([
-                v(x, y, 0.0, 0.0),
-                v(x + 8.0, y, 1.0, 0.0),
-                v(x + 8.0, y + 14.0, 1.0, 1.0),
-                v(x, y + 14.0, 0.0, 1.0),
+                v(x, y, u0, v0),
+                v(x + 8.0, y, u1, v0),
+                v(x, y + 14.0, u0, v1),
+                v(x + 8.0, y + 14.0, u1, v1),
             ]);
-            mesh.indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            mesh.indices.extend([base, base + 1, base + 2, base + 2, base + 1, base + 3]);
         }
         vec![ClippedPrimitive {
             clip_rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(2000.0, 2000.0)),
@@ -985,13 +1258,15 @@ mod perf_probe {
                 uv: Pos2::new(0.0, 0.0), // WHITE_UV: solid fill
                 color: Color32::from_rgb((i % 255) as u8, 100, 200),
             };
+            // epaint's add_rect_with_uv layout: [lt, rt, lb, rb] and
+            // indices [n, n+1, n+2, n+2, n+1, n+3].
             mesh.vertices.extend([
                 v(x, y),
                 v(x + 3.0, y),
-                v(x + 3.0, y + 3.0),
                 v(x, y + 3.0),
+                v(x + 3.0, y + 3.0),
             ]);
-            mesh.indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            mesh.indices.extend([base, base + 1, base + 2, base + 2, base + 1, base + 3]);
         }
         vec![ClippedPrimitive {
             clip_rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(2000.0, 2000.0)),

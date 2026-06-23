@@ -2,6 +2,12 @@ use egui::Context;
 use rustyboi_session::DebugSnapshot;
 use crate::ui::Gui;
 
+/// Sprite-preview atlas: 40 sprites stacked as 8x8 cells in one column.
+const SPRITE_ATLAS_W: usize = 8;
+const SPRITE_ATLAS_H: usize = 40 * 8; // 320
+/// On-screen preview size (matches the old 16px cells).
+const PREVIEW_DISPLAY: f32 = 16.0;
+
 impl Gui {
     pub(in crate) fn render_sprite_debug_panel(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>) {
         if let Some(snap) = debug {
@@ -33,6 +39,20 @@ impl Gui {
                         // OAM Table
                         ui.heading("OAM Table (40 sprites)");
                         ui.small("Format: [Y] [X] [Tile] [Attr] - Status");
+
+                        // Bake all 40 sprite previews into one column atlas
+                        // (8 x 320) and upload it once; each grid row then draws
+                        // its 8x8 cell as a UV sub-image instead of ~192 rects.
+                        let sprite_height =
+                            if (snap.mmio.lcdc & 0x04) != 0 { 16u8 } else { 8 };
+                        let atlas = self.build_sprite_atlas(snap, sprite_height);
+                        let sprite_tex = self.sprite_atlas_tex.update(
+                            ctx,
+                            "sprite_atlas",
+                            SPRITE_ATLAS_W,
+                            SPRITE_ATLAS_H,
+                            atlas,
+                        );
 
                         egui::Grid::new("oam_grid")
                             .striped(true)
@@ -102,8 +122,17 @@ impl Gui {
                                     };
                                     ui.small(egui::RichText::new(status).color(row_color));
 
-                                    // Render sprite preview
-                                    self.render_sprite_preview(ui, snap, tile_index, attributes, sprite_height);
+                                    // Render sprite preview: one UV sub-image
+                                    // into the pre-baked atlas (16x16 on screen).
+                                    draw_sprite_preview(
+                                        ui,
+                                        snap,
+                                        sprite_tex,
+                                        sprite_index as usize,
+                                        tile_index,
+                                        attributes,
+                                        sprite_height,
+                                    );
 
                                     ui.end_row();
                                 }
@@ -231,148 +260,48 @@ impl Gui {
         }
     }
 
-    // Helper method to render a small sprite preview
-    fn render_sprite_preview(&self, ui: &mut egui::Ui, snap: &DebugSnapshot, tile_index: u8, attributes: u8, sprite_height: u8) {
-        let tile_size = 16.0; // Small preview size
+    /// Bake all 40 sprite previews into one column atlas (8 x 320): each
+    /// sprite is an 8x8 cell stacked vertically, checkerboard behind the
+    /// transparent (colour 0) pixels. Uploaded once; each grid row draws its
+    /// cell as a UV sub-image.
+    fn build_sprite_atlas(&self, snap: &DebugSnapshot, sprite_height: u8) -> Vec<egui::Color32> {
+        let light = egui::Color32::from_rgb(240, 240, 240);
+        let dark = egui::Color32::from_rgb(200, 200, 200);
+        let mut pixels = vec![light; SPRITE_ATLAS_W * SPRITE_ATLAS_H];
+        for sprite_index in 0..40usize {
+            let oam_base = 0xFE00 + (sprite_index as u16 * 4);
+            let tile_index = snap.oam_byte(oam_base + 2);
+            let attributes = snap.oam_byte(oam_base + 3);
+            let x_flip = (attributes & 0x20) != 0;
+            let y_flip = (attributes & 0x40) != 0;
+            // 8x16 sprites: show the top tile (even index).
+            let display_tile = if sprite_height == 16 { tile_index & 0xFE } else { tile_index };
+            let vram_bank = if snap.cgb && (attributes & 0x08) != 0 { 1 } else { 0 };
+            let tile_addr = 0x8000u16 + (display_tile as u16 * 16);
 
-        // Get flip flags
-        let x_flip = (attributes & 0x20) != 0;
-        let y_flip = (attributes & 0x40) != 0;
-
-        // Allocate space for the sprite preview
-        let (sprite_rect, response) = ui.allocate_exact_size(
-            egui::Vec2::new(tile_size, tile_size),
-            egui::Sense::hover()
-        );
-
-        // For 8x16 sprites, we only show the top tile for now
-        let display_tile = if sprite_height == 16 {
-            tile_index & 0xFE // Even tile (top half)
-        } else {
-            tile_index
-        };
-
-        // Determine VRAM bank and palette based on CGB mode
-        let (vram_bank, palette_info) = if snap.cgb {
-            let vram_bank = if (attributes & 0x08) != 0 { 1 } else { 0 };
-            let cgb_palette = attributes & 0x07;
-            (vram_bank, format!("CGB Pal {}", cgb_palette))
-        } else {
-            let palette_bit = (attributes & 0x10) != 0;
-            let palette_name = if palette_bit { "OBP1" } else { "OBP0" };
-            (0, palette_name.to_string())
-        };
-
-        // Calculate VRAM address for this tile (sprites always use $8000 method)
-        let tile_addr = 0x8000u16 + (display_tile as u16 * 16);
-
-        // Draw the sprite tile
-        for y in 0..8 {
-            // Read the two bytes for this line of the tile
-            let actual_y = if y_flip { 7 - y } else { y };
-            let low_byte = snap.vram_byte(vram_bank, tile_addr + (actual_y * 2));
-            let high_byte = snap.vram_byte(vram_bank, tile_addr + (actual_y * 2) + 1);
-
-            for x in 0..8 {
-                // Extract pixel value (2 bits)
-                let actual_x = if x_flip { x } else { 7 - x };
-                let low_bit = (low_byte >> actual_x) & 1;
-                let high_bit = (high_byte >> actual_x) & 1;
-                let pixel_value = (high_bit << 1) | low_bit;
-
-                // Apply sprite palette mapping (0 is transparent)
-                let pixel_color = if pixel_value == 0 {
-                    egui::Color32::TRANSPARENT
-                } else {
-                    self.get_sprite_pixel_color(snap, attributes, pixel_value)
-                };
-
-                // Calculate pixel position within the sprite preview
-                let pixel_size = tile_size / 8.0;
-                let pixel_x = sprite_rect.min.x + (x as f32 * pixel_size);
-                let pixel_y = sprite_rect.min.y + (y as f32 * pixel_size);
-                let pixel_rect = egui::Rect::from_min_size(
-                    egui::Pos2::new(pixel_x, pixel_y),
-                    egui::Vec2::new(pixel_size, pixel_size)
-                );
-
-                // Only draw non-transparent pixels
-                if pixel_value != 0 {
-                    ui.painter().rect_filled(pixel_rect, 0.0, pixel_color);
+            for y in 0..8usize {
+                let actual_y = if y_flip { 7 - y } else { y } as u16;
+                let low_byte = snap.vram_byte(vram_bank, tile_addr + actual_y * 2);
+                let high_byte = snap.vram_byte(vram_bank, tile_addr + actual_y * 2 + 1);
+                let px_y = sprite_index * 8 + y;
+                for x in 0..8usize {
+                    let actual_x = if x_flip { x } else { 7 - x };
+                    let low_bit = (low_byte >> actual_x) & 1;
+                    let high_bit = (high_byte >> actual_x) & 1;
+                    let pixel_value = (high_bit << 1) | low_bit;
+                    // Colour 0 is transparent → show the checkerboard base.
+                    let color = if pixel_value == 0 {
+                        if (x + y) % 2 == 0 { light } else { dark }
+                    } else {
+                        self.get_sprite_pixel_color(snap, attributes, pixel_value)
+                    };
+                    pixels[px_y * SPRITE_ATLAS_W + x] = color;
                 }
             }
         }
-
-        // Draw sprite border (checkerboard background for transparency)
-        for y in 0..8 {
-            for x in 0..8 {
-                let pixel_size = tile_size / 8.0;
-                let pixel_x = sprite_rect.min.x + (x as f32 * pixel_size);
-                let pixel_y = sprite_rect.min.y + (y as f32 * pixel_size);
-                let pixel_rect = egui::Rect::from_min_size(
-                    egui::Pos2::new(pixel_x, pixel_y),
-                    egui::Vec2::new(pixel_size, pixel_size)
-                );
-
-                // Checkerboard pattern for transparency
-                if (x + y) % 2 == 0 {
-                    ui.painter().rect_filled(pixel_rect, 0.0, egui::Color32::from_rgb(240, 240, 240));
-                } else {
-                    ui.painter().rect_filled(pixel_rect, 0.0, egui::Color32::from_rgb(200, 200, 200));
-                }
-            }
-        }
-
-        // Re-draw the sprite on top of the checkerboard
-        for y in 0..8 {
-            let actual_y = if y_flip { 7 - y } else { y };
-            let low_byte = snap.vram_byte(vram_bank, tile_addr + (actual_y * 2));
-            let high_byte = snap.vram_byte(vram_bank, tile_addr + (actual_y * 2) + 1);
-
-            for x in 0..8 {
-                let actual_x = if x_flip { x } else { 7 - x };
-                let low_bit = (low_byte >> actual_x) & 1;
-                let high_bit = (high_byte >> actual_x) & 1;
-                let pixel_value = (high_bit << 1) | low_bit;
-
-                if pixel_value != 0 {
-                    let pixel_color = self.get_sprite_pixel_color(snap, attributes, pixel_value);
-
-                    let pixel_size = tile_size / 8.0;
-                    let pixel_x = sprite_rect.min.x + (x as f32 * pixel_size);
-                    let pixel_y = sprite_rect.min.y + (y as f32 * pixel_size);
-                    let pixel_rect = egui::Rect::from_min_size(
-                        egui::Pos2::new(pixel_x, pixel_y),
-                        egui::Vec2::new(pixel_size, pixel_size)
-                    );
-
-                    ui.painter().rect_filled(pixel_rect, 0.0, pixel_color);
-                }
-            }
-        }
-
-        // Draw border around the sprite
-        ui.painter().rect_stroke(sprite_rect, 0.0, egui::Stroke::new(0.5, egui::Color32::GRAY), egui::StrokeKind::Middle);
-
-        // Show tooltip with sprite info on hover
-        if response.hovered() {
-            let flips = format!("{}{}",
-                if x_flip { "X-Flip " } else { "" },
-                if y_flip { "Y-Flip" } else { "" }
-            );
-            let vram_info = if snap.cgb {
-                format!(" Bank {}", vram_bank)
-            } else {
-                String::new()
-            };
-            response.on_hover_text(format!(
-                "Tile: 0x{:02X}\nPalette: {}\nFlips: {}\nVRAM: 0x{:04X}{}",
-                display_tile, palette_info,
-                if flips.is_empty() { "None" } else { &flips },
-                tile_addr, vram_info
-            ));
-        }
+        pixels
     }
+
 
     fn get_sprite_pixel_color(&self, snap: &DebugSnapshot, attributes: u8, pixel_value: u8) -> egui::Color32 {
         if snap.cgb {
@@ -400,5 +329,57 @@ impl Gui {
                 _ => egui::Color32::RED, // Should never happen
             }
         }
+    }
+}
+
+/// Draw one sprite's preview cell from the pre-baked atlas at `sprite_tex`, as
+/// a 16x16 nearest-filtered UV sub-image, with the same hover tooltip the old
+/// per-pixel preview showed.
+#[allow(clippy::too_many_arguments)]
+fn draw_sprite_preview(
+    ui: &mut egui::Ui,
+    snap: &DebugSnapshot,
+    sprite_tex: egui::TextureId,
+    sprite_index: usize,
+    tile_index: u8,
+    attributes: u8,
+    sprite_height: u8,
+) {
+    let v0 = sprite_index as f32 / 40.0;
+    let v1 = (sprite_index + 1) as f32 / 40.0;
+    let image = egui::Image::new(egui::load::SizedTexture::new(
+        sprite_tex,
+        egui::vec2(PREVIEW_DISPLAY, PREVIEW_DISPLAY),
+    ))
+    .uv(egui::Rect::from_min_max(egui::pos2(0.0, v0), egui::pos2(1.0, v1)))
+    .texture_options(egui::TextureOptions::NEAREST)
+    .sense(egui::Sense::hover());
+    let resp = ui.add(image);
+
+    if resp.hovered() {
+        let display_tile = if sprite_height == 16 { tile_index & 0xFE } else { tile_index };
+        let tile_addr = 0x8000u16 + (display_tile as u16 * 16);
+        let x_flip = (attributes & 0x20) != 0;
+        let y_flip = (attributes & 0x40) != 0;
+        let (palette_info, vram_info) = if snap.cgb {
+            let bank = if (attributes & 0x08) != 0 { 1 } else { 0 };
+            (format!("CGB Pal {}", attributes & 0x07), format!(" Bank {}", bank))
+        } else {
+            let name = if (attributes & 0x10) != 0 { "OBP1" } else { "OBP0" };
+            (name.to_string(), String::new())
+        };
+        let flips = format!(
+            "{}{}",
+            if x_flip { "X-Flip " } else { "" },
+            if y_flip { "Y-Flip" } else { "" }
+        );
+        resp.on_hover_text(format!(
+            "Tile: 0x{:02X}\nPalette: {}\nFlips: {}\nVRAM: 0x{:04X}{}",
+            display_tile,
+            palette_info,
+            if flips.is_empty() { "None" } else { &flips },
+            tile_addr,
+            vram_info
+        ));
     }
 }

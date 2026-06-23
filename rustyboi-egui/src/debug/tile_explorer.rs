@@ -2,6 +2,15 @@ use egui::Context;
 use rustyboi_session::DebugSnapshot;
 use crate::ui::Gui;
 
+/// Tiles per atlas row / column, and the native pixel size of the tile atlas.
+const TILES_PER_ROW: usize = 16;
+const TOTAL_TILES: usize = 384; // 0x8000-0x97FF = 6 KB / 16 bytes per tile
+const TILE_ROWS: usize = TOTAL_TILES / TILES_PER_ROW; // 24
+const ATLAS_W: usize = TILES_PER_ROW * 8; // 128
+const ATLAS_H: usize = TILE_ROWS * 8; // 192
+/// On-screen size of one 8x8 tile (matches the old 20px cells).
+const TILE_DISPLAY: f32 = 20.0;
+
 impl Gui {
     pub(in crate) fn render_tile_explorer_panel(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>) {
         if let Some(snap) = debug {
@@ -42,101 +51,70 @@ impl Gui {
 
                     ui.separator();
 
-                    // Display tiles in a grid (16 tiles per row)
-                    let tiles_per_row = 16;
-                    let tile_size = 20.0; // Each tile displayed as 20x20 pixels
-                    let total_tiles = 384; // Total tiles in VRAM (0x8000-0x97FF = 6KB / 16 bytes per tile)
+                    // Bake all 384 tiles into one atlas texture and draw it as a
+                    // single scaled image, rather than emitting 384*64 rects.
+                    let bank = if snap.cgb { self.tile_explorer_vram_bank } else { 0 };
+                    let pixels = build_tile_atlas(self, snap, bank);
+                    let tex = self
+                        .tile_atlas_tex
+                        .update(ctx, "tile_atlas", ATLAS_W, ATLAS_H, pixels);
 
-                    egui::ScrollArea::vertical()
-                        .show(ui, |ui| {
-                            for tile_row in 0..(total_tiles / tiles_per_row) {
-                                ui.horizontal(|ui| {
-                                    for tile_col in 0..tiles_per_row {
-                                        let tile_index = tile_row * tiles_per_row + tile_col;
-                                        if tile_index >= total_tiles { break; }
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        let size = egui::vec2(
+                            TILES_PER_ROW as f32 * TILE_DISPLAY,
+                            TILE_ROWS as f32 * TILE_DISPLAY,
+                        );
+                        let image = egui::Image::new(egui::load::SizedTexture::new(tex, size))
+                            .texture_options(egui::TextureOptions::NEAREST)
+                            .sense(egui::Sense::hover());
+                        let resp = ui.add(image);
+                        let rect = resp.rect;
 
-                                        // Calculate VRAM address for this tile (each tile is 16 bytes)
-                                        let tile_addr = 0x8000u16 + (tile_index as u16 * 16);
+                        // Grid lines between tiles (a few dozen strokes, not
+                        // thousands of rects).
+                        let painter = ui.painter_at(rect);
+                        let grid = egui::Stroke::new(0.5, egui::Color32::from_gray(90));
+                        for c in 0..=TILES_PER_ROW {
+                            let x = rect.min.x + c as f32 * TILE_DISPLAY;
+                            painter.vline(x, rect.min.y..=rect.max.y, grid);
+                        }
+                        for r in 0..=TILE_ROWS {
+                            let y = rect.min.y + r as f32 * TILE_DISPLAY;
+                            painter.hline(rect.min.x..=rect.max.x, y, grid);
+                        }
 
-                                        // Allocate space for the tile
-                                        let (tile_rect, response) = ui.allocate_exact_size(
-                                            egui::Vec2::new(tile_size, tile_size),
-                                            egui::Sense::hover()
-                                        );
-
-                                        // Draw the tile
-                                        for y in 0..8 {
-                                            // Read the two bytes for this line of the tile from the selected VRAM bank
-                                            let low_byte = if snap.cgb {
-                                                snap.vram_byte(self.tile_explorer_vram_bank, tile_addr + (y * 2))
-                                            } else {
-                                                snap.vram_byte(0, tile_addr + (y * 2))
-                                            };
-                                            let high_byte = if snap.cgb {
-                                                snap.vram_byte(self.tile_explorer_vram_bank, tile_addr + (y * 2) + 1)
-                                            } else {
-                                                snap.vram_byte(0, tile_addr + (y * 2) + 1)
-                                            };
-
-                                            for x in 0..8 {
-                                                // Extract pixel value (2 bits)
-                                                let bit = 7 - x; // Pixels are stored MSB first
-                                                let low_bit = (low_byte >> bit) & 1;
-                                                let high_bit = (high_byte >> bit) & 1;
-                                                let pixel_value = (high_bit << 1) | low_bit;
-
-                                                // Apply palette mapping based on hardware
-                                                let pixel_color = if snap.cgb {
-                                                    // CGB mode - use selected palette
-                                                    let (r, g, b) = snap
-                                                        .cgb_bg_rgb(self.tile_explorer_palette, pixel_value)
-                                                        .unwrap_or((0, 0, 0));
-                                                    egui::Color32::from_rgb(r, g, b)
-                                                } else {
-                                                    // DMG mode - use BGP
-                                                    let bgp = snap.mmio.bgp;
-                                                    let palette_bits = (bgp >> (pixel_value * 2)) & 0x03;
-                                                    match palette_bits {
-                                                        0 => egui::Color32::from_rgb(255, 255, 255), // White
-                                                        1 => egui::Color32::from_rgb(170, 170, 170), // Light Gray
-                                                        2 => egui::Color32::from_rgb(85, 85, 85),    // Dark Gray
-                                                        3 => egui::Color32::from_rgb(0, 0, 0),       // Black
-                                                        _ => egui::Color32::RED, // Should never happen
-                                                    }
-                                                };
-
-                                                // Calculate pixel position within the tile
-                                                let pixel_size = tile_size / 8.0;
-                                                let pixel_x = tile_rect.min.x + (x as f32 * pixel_size);
-                                                let pixel_y = tile_rect.min.y + (y as f32 * pixel_size);
-                                                let pixel_rect = egui::Rect::from_min_size(
-                                                    egui::Pos2::new(pixel_x, pixel_y),
-                                                    egui::Vec2::new(pixel_size, pixel_size)
-                                                );
-
-                                                ui.painter().rect_filled(pixel_rect, 0.0, pixel_color);
-                                            }
-                                        }
-
-                                        // Draw tile border
-                                        ui.painter().rect_stroke(tile_rect, 0.0, egui::Stroke::new(0.5, egui::Color32::GRAY), egui::StrokeKind::Middle);
-
-                                        // Show tooltip with tile info on hover
-                                        if response.hovered() {
-                                            response.on_hover_text(format!(
-                                                "Tile #{}\nVRAM: 0x{:04X}-0x{:04X}",
-                                                tile_index,
-                                                tile_addr,
-                                                tile_addr + 15
-                                            ));
-                                        }
-
-                                        ui.add_space(2.0); // Small gap between tiles
-                                    }
-                                });
-                                ui.add_space(2.0); // Small gap between rows
+                        // Hover: map the pointer to a tile and show its details,
+                        // plus a highlight box (replaces the per-tile hover).
+                        if let Some(pos) = resp.hover_pos() {
+                            let col = ((pos.x - rect.min.x) / TILE_DISPLAY).floor() as i32;
+                            let row = ((pos.y - rect.min.y) / TILE_DISPLAY).floor() as i32;
+                            if (0..TILES_PER_ROW as i32).contains(&col)
+                                && (0..TILE_ROWS as i32).contains(&row)
+                            {
+                                let tile_index = row as usize * TILES_PER_ROW + col as usize;
+                                let tile_addr = 0x8000u16 + (tile_index as u16 * 16);
+                                let hl = egui::Rect::from_min_size(
+                                    egui::pos2(
+                                        rect.min.x + col as f32 * TILE_DISPLAY,
+                                        rect.min.y + row as f32 * TILE_DISPLAY,
+                                    ),
+                                    egui::vec2(TILE_DISPLAY, TILE_DISPLAY),
+                                );
+                                painter.rect_stroke(
+                                    hl,
+                                    0.0,
+                                    egui::Stroke::new(1.5, egui::Color32::YELLOW),
+                                    egui::StrokeKind::Middle,
+                                );
+                                resp.on_hover_text(format!(
+                                    "Tile #{}\nVRAM: 0x{:04X}-0x{:04X}",
+                                    tile_index,
+                                    tile_addr,
+                                    tile_addr + 15
+                                ));
                             }
-                        });
+                        }
+                    });
 
                     ui.separator();
                     ui.small(egui::RichText::new("Hover tiles for details").color(egui::Color32::LIGHT_GRAY));
@@ -149,4 +127,44 @@ impl Gui {
                 });
         }
     }
+}
+
+/// Decode all 384 VRAM tiles into a `ATLAS_W`×`ATLAS_H` row-major pixel buffer,
+/// 16 tiles per row. Same palette mapping the panel used per-pixel, done once.
+fn build_tile_atlas(gui: &Gui, snap: &DebugSnapshot, bank: u8) -> Vec<egui::Color32> {
+    let mut pixels = vec![egui::Color32::BLACK; ATLAS_W * ATLAS_H];
+    let bgp = snap.mmio.bgp;
+    for tile_index in 0..TOTAL_TILES {
+        let tile_col = tile_index % TILES_PER_ROW;
+        let tile_row = tile_index / TILES_PER_ROW;
+        let tile_addr = 0x8000u16 + (tile_index as u16 * 16);
+        for y in 0..8u16 {
+            let low_byte = snap.vram_byte(bank, tile_addr + (y * 2));
+            let high_byte = snap.vram_byte(bank, tile_addr + (y * 2) + 1);
+            let px_y = tile_row * 8 + y as usize;
+            for x in 0..8usize {
+                let bit = 7 - x; // Pixels are stored MSB first
+                let low_bit = (low_byte >> bit) & 1;
+                let high_bit = (high_byte >> bit) & 1;
+                let pixel_value = (high_bit << 1) | low_bit;
+
+                let color = if snap.cgb {
+                    let (r, g, b) = snap
+                        .cgb_bg_rgb(gui.tile_explorer_palette, pixel_value)
+                        .unwrap_or((0, 0, 0));
+                    egui::Color32::from_rgb(r, g, b)
+                } else {
+                    let palette_bits = (bgp >> (pixel_value * 2)) & 0x03;
+                    match palette_bits {
+                        0 => egui::Color32::from_rgb(255, 255, 255),
+                        1 => egui::Color32::from_rgb(170, 170, 170),
+                        2 => egui::Color32::from_rgb(85, 85, 85),
+                        _ => egui::Color32::from_rgb(0, 0, 0),
+                    }
+                };
+                pixels[px_y * ATLAS_W + tile_col * 8 + x] = color;
+            }
+        }
+    }
+    pixels
 }
