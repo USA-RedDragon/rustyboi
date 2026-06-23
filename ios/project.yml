@@ -36,6 +36,8 @@ targets:
       - sdk: UIKit.framework
       - sdk: QuartzCore.framework
       - sdk: Metal.framework
+      # softbuffer's iOS presenter (software renderer backend) uses CoreGraphics.
+      - sdk: CoreGraphics.framework
       - sdk: Foundation.framework
       - sdk: CoreFoundation.framework
       - sdk: AVFAudio.framework

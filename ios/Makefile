@@ -43,6 +43,7 @@ build:
 	    $$IOS_CC $$LIBDIR/rustyboi_main.o $$LIBDIR/librustyboi_platform_lib.a \
 	        -liconv -lobjc \
 	        -framework UIKit -framework QuartzCore -framework Metal \
+	        -framework CoreGraphics \
 	        -framework Foundation -framework CoreFoundation \
 	        -framework AVFAudio -framework AudioToolbox -framework CoreAudio \
 	        -framework UniformTypeIdentifiers \
