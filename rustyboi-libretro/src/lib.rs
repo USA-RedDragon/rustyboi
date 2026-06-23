@@ -66,7 +66,7 @@ impl Rumble for LibretroRumble {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum HardwarePref {
     Auto,
     Model(HardwareChoice),
@@ -545,6 +545,13 @@ libretro_core!(RustyboiCore);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // The frontend callbacks live in `rustyboi_libretro_sys` process-global cells
+    // (`retro_set_environment` installs one env callback for the whole core), so
+    // any test that drives the dispatch entry points against a mock env must hold
+    // this lock — otherwise concurrently-running tests clobber each other's ENV.
+    static ENV_GUARD: Mutex<()> = Mutex::new(());
 
     // Every emulated model must map to a boot-ROM filename the frontend looks up
     // in its system directory, and the DMG/CGB families share the standard names.
@@ -634,6 +641,7 @@ mod tests {
 
         #[test]
         fn maps_republished_fresh_after_reset_and_unserialize() {
+            let _guard = super::ENV_GUARD.lock().unwrap();
             let mut core = RustyboiCore::new();
             dispatch::set_environment(&mut core, Some(mock_env));
             dispatch::init(&mut core);
@@ -667,6 +675,217 @@ mod tests {
                 "unserialize must re-publish memory maps"
             );
             assert_last_publish_matches_live(&mut core);
+        }
+    }
+
+    // The adapter logic between the libretro C ABI and the shared session: model
+    // selection, option fallbacks, savestate framing, cheat splitting, geometry,
+    // and RETRO_MEMORY_* gating. Env-touching cases hold ENV_GUARD (see above).
+    mod adapter_behavior {
+        use super::*;
+        use rustyboi_libretro_sys::{dispatch, ffi};
+        use std::ffi::{c_uint, c_void};
+
+        // Nonsense on every GET_VARIABLE, so read_options exercises its
+        // unwrap_or fallbacks; the writes it needs to load succeed.
+        unsafe extern "C" fn mock_env(cmd: c_uint, data: *mut c_void) -> bool {
+            match cmd {
+                ffi::RETRO_ENVIRONMENT_SET_PIXEL_FORMAT
+                | ffi::RETRO_ENVIRONMENT_SET_MEMORY_MAPS
+                | ffi::RETRO_ENVIRONMENT_SET_GEOMETRY => true,
+                ffi::RETRO_ENVIRONMENT_GET_VARIABLE => {
+                    let var = unsafe { &mut *(data as *mut ffi::retro_variable) };
+                    var.value = c"__unrecognized__".as_ptr();
+                    true
+                }
+                _ => false,
+            }
+        }
+
+        fn header_checksummed(mut rom: Vec<u8>) -> Vec<u8> {
+            let mut chk: u8 = 0;
+            for &b in &rom[0x134..=0x14C] {
+                chk = chk.wrapping_sub(b).wrapping_sub(1);
+            }
+            rom[0x14D] = chk;
+            rom
+        }
+
+        // 32 KiB no-MBC cart (no battery, no RTC).
+        fn minimal_rom() -> Vec<u8> {
+            header_checksummed(vec![0u8; 0x8000])
+        }
+
+        // MBC3 + TIMER + RAM + BATTERY ($10): has both battery-backed SRAM and RTC.
+        fn mbc3_battery_rtc_rom() -> Vec<u8> {
+            let mut rom = vec![0u8; 0x8000];
+            rom[0x147] = 0x10;
+            rom[0x149] = 0x02; // 8 KiB save RAM
+            header_checksummed(rom)
+        }
+
+        fn load_core(rom: &[u8]) -> RustyboiCore {
+            let mut core = RustyboiCore::new();
+            dispatch::set_environment(&mut core, Some(mock_env));
+            dispatch::init(&mut core);
+            let info = ffi::retro_game_info {
+                path: std::ptr::null(),
+                data: rom.as_ptr() as *const c_void,
+                size: rom.len(),
+                meta: std::ptr::null(),
+            };
+            assert!(dispatch::load_game(&mut core, &info), "load_game failed");
+            core
+        }
+
+        #[test]
+        fn pick_hardware_auto_header_and_model_override() {
+            let mut core = RustyboiCore::new();
+            let mut rom = vec![0u8; 0x200];
+
+            // Auto: byte 0x143 bit 7 set => CGB, else DMG.
+            rom[0x143] = 0x80;
+            assert_eq!(core.pick_hardware(&rom), Hardware::CGB);
+            rom[0x143] = 0xC0; // bit 7 still set
+            assert_eq!(core.pick_hardware(&rom), Hardware::CGB);
+            rom[0x143] = 0x00;
+            assert_eq!(core.pick_hardware(&rom), Hardware::DMG);
+
+            // ROM too short to hold 0x143 => DMG (rom.get(0x143) is None).
+            assert_eq!(core.pick_hardware(&[0u8; 0x100]), Hardware::DMG);
+
+            // An explicit model overrides the header (CGB header, forced SGB2).
+            rom[0x143] = 0x80;
+            core.hardware_pref = HardwarePref::Model(HardwareChoice::Sgb2);
+            assert_eq!(core.pick_hardware(&rom), Hardware::SGB2);
+        }
+
+        #[test]
+        fn av_info_geometry_tracks_sgb_border() {
+            let mut core = RustyboiCore::new();
+
+            let plain = core.av_info().geometry;
+            assert_eq!((plain.base_width, plain.base_height), (WIDTH, HEIGHT));
+            assert_eq!(plain.aspect_ratio, WIDTH as f32 / HEIGHT as f32);
+            // Max always covers the SGB frame so a later grow never reallocs.
+            assert_eq!((plain.max_width, plain.max_height), (SGB_WIDTH, SGB_HEIGHT));
+
+            core.sgb_border_active = true;
+            let border = core.av_info().geometry;
+            assert_eq!((border.base_width, border.base_height), (SGB_WIDTH, SGB_HEIGHT));
+            assert_eq!(border.aspect_ratio, SGB_WIDTH as f32 / SGB_HEIGHT as f32);
+            assert_eq!((border.max_width, border.max_height), (SGB_WIDTH, SGB_HEIGHT));
+        }
+
+        #[test]
+        fn read_options_falls_back_on_unknown_ids() {
+            let _guard = super::ENV_GUARD.lock().unwrap();
+            let mut core = RustyboiCore::new();
+            // Non-default starting values, so a fallback proves the Some(bad) ->
+            // unwrap_or path actually fired (not just an untouched default).
+            core.hardware_pref = HardwarePref::Model(HardwareChoice::Sgb);
+            core.palette = PaletteChoice::Pocket;
+            core.color_correction = CgbColorConversion::Lcd;
+            core.gbc_dmg_palette = GbcDmgPalette::Scheme(1);
+
+            dispatch::set_environment(&mut core, Some(mock_env));
+            dispatch::init(&mut core);
+            let rom = minimal_rom();
+            let info = ffi::retro_game_info {
+                path: std::ptr::null(),
+                data: rom.as_ptr() as *const c_void,
+                size: rom.len(),
+                meta: std::ptr::null(),
+            };
+            assert!(dispatch::load_game(&mut core, &info), "load_game failed");
+
+            assert_eq!(core.hardware_pref, HardwarePref::Auto);
+            assert_eq!(core.palette, PaletteChoice::Grayscale);
+            assert_eq!(core.color_correction, CgbColorConversion::Linear);
+            assert_eq!(core.gbc_dmg_palette, GbcDmgPalette::Auto);
+        }
+
+        #[test]
+        fn serialize_round_trip_and_framing() {
+            let _guard = super::ENV_GUARD.lock().unwrap();
+            let mut core = load_core(&minimal_rom());
+
+            let size = dispatch::serialize_size(&mut core);
+            assert!(size > SERIALIZE_HEADER_LEN);
+
+            // Full round-trip through the length-framed buffer.
+            let mut buf = vec![0u8; size];
+            assert!(dispatch::serialize(&mut core, buf.as_mut_ptr() as *mut c_void, size));
+            assert!(dispatch::unserialize(&mut core, buf.as_ptr() as *const c_void, size));
+
+            // A buffer that can't hold header + payload is rejected outright.
+            let mut tiny = vec![0u8; SERIALIZE_HEADER_LEN];
+            assert!(!dispatch::serialize(
+                &mut core,
+                tiny.as_mut_ptr() as *mut c_void,
+                tiny.len()
+            ));
+
+            // Below-header input is rejected.
+            let short = [0u8; SERIALIZE_HEADER_LEN - 1];
+            assert!(!dispatch::unserialize(
+                &mut core,
+                short.as_ptr() as *const c_void,
+                short.len()
+            ));
+
+            // A length header exceeding the remaining buffer is rejected.
+            let mut bogus = [0u8; SERIALIZE_HEADER_LEN + 4];
+            bogus[..SERIALIZE_HEADER_LEN].copy_from_slice(&9999u64.to_le_bytes());
+            assert!(!dispatch::unserialize(
+                &mut core,
+                bogus.as_ptr() as *const c_void,
+                bogus.len()
+            ));
+        }
+
+        #[test]
+        fn cheat_set_splits_trims_and_gates() {
+            let _guard = super::ENV_GUARD.lock().unwrap();
+            let mut core = load_core(&minimal_rom());
+
+            // One entry may hold several codes joined by '+', newline or space;
+            // parts are trimmed and empties dropped. Mixed GameShark + Game Genie.
+            core.cheat_set(0, true, "010AF4C6+01FF56D3");
+            core.cheat_set(1, true, "  01FF57D3 \n 00A-B7F ");
+            let cheats: Vec<String> =
+                core.session.as_ref().unwrap().cheats().map(str::to_owned).collect();
+            for expect in ["010AF4C6", "01FF56D3", "01FF57D3", "00A-B7F"] {
+                assert!(cheats.iter().any(|c| c == expect), "missing {expect}: {cheats:?}");
+            }
+
+            // enabled=false is a no-op.
+            let before = core.session.as_ref().unwrap().cheats().count();
+            core.cheat_set(2, false, "01FFDEC0");
+            assert_eq!(core.session.as_ref().unwrap().cheats().count(), before);
+
+            // No session => no panic, no-op.
+            let mut empty = RustyboiCore::new();
+            empty.cheat_set(0, true, "010AF4C6");
+            assert!(empty.session.is_none());
+        }
+
+        #[test]
+        fn memory_gates_on_cartridge_features() {
+            let _guard = super::ENV_GUARD.lock().unwrap();
+
+            // No battery, no RTC: only system/video regions; unknown id => None.
+            let mut core = load_core(&minimal_rom());
+            assert!(core.memory(RETRO_MEMORY_SAVE_RAM).is_none());
+            assert!(core.memory(RETRO_MEMORY_RTC).is_none());
+            assert!(core.memory(RETRO_MEMORY_SYSTEM_RAM).is_some());
+            assert!(core.memory(RETRO_MEMORY_VIDEO_RAM).is_some());
+            assert!(core.memory(9999).is_none());
+
+            // MBC3 + timer + RAM + battery exposes both SAVE_RAM and RTC.
+            let mut core = load_core(&mbc3_battery_rtc_rom());
+            assert!(core.memory(RETRO_MEMORY_SAVE_RAM).is_some());
+            assert!(core.memory(RETRO_MEMORY_RTC).is_some());
         }
     }
 }

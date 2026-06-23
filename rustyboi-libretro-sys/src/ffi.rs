@@ -179,3 +179,73 @@ pub struct retro_core_options_v2 {
     pub categories: *mut retro_core_option_v2_category,
     pub definitions: *mut retro_core_option_v2_definition,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::{align_of, size_of};
+
+    // The environment-command ids the wrappers pass must match libretro.h; a
+    // wrong id silently talks to the wrong frontend command. SET_MEMORY_MAPS is
+    // the EXPERIMENTAL bit (0x10000) OR'd with 36.
+    #[test]
+    fn environment_command_ids() {
+        assert_eq!(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, 65572);
+        assert_eq!(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, 0x10000 | 36);
+    }
+
+    // Joypad button ids are the RETRO_DEVICE_ID_JOYPAD_* ordinals the frontend
+    // reports state under; these are the fixed libretro.h numbering.
+    #[test]
+    fn joypad_id_numbering() {
+        assert_eq!(RETRO_DEVICE_ID_JOYPAD_B, 0);
+        assert_eq!(RETRO_DEVICE_ID_JOYPAD_SELECT, 2);
+        assert_eq!(RETRO_DEVICE_ID_JOYPAD_START, 3);
+        assert_eq!(RETRO_DEVICE_ID_JOYPAD_UP, 4);
+        assert_eq!(RETRO_DEVICE_ID_JOYPAD_DOWN, 5);
+        assert_eq!(RETRO_DEVICE_ID_JOYPAD_LEFT, 6);
+        assert_eq!(RETRO_DEVICE_ID_JOYPAD_RIGHT, 7);
+        assert_eq!(RETRO_DEVICE_ID_JOYPAD_A, 8);
+    }
+
+    // Memory-descriptor flag bits distinguish the region kinds in a memory map.
+    #[test]
+    fn memdesc_flag_bits() {
+        assert_eq!(RETRO_MEMDESC_SYSTEM_RAM, 4);
+        assert_eq!(RETRO_MEMDESC_SAVE_RAM, 8);
+        assert_eq!(RETRO_MEMDESC_VIDEO_RAM, 16);
+    }
+
+    // repr(C) layout self-consistency for the fixed-width (pointer-free) structs:
+    // these totals are identical on every target, so a stray field or reorder
+    // relative to libretro.h shows up as a size/align mismatch.
+    #[test]
+    fn fixed_struct_layout() {
+        // 4 u32 + 1 f32.
+        assert_eq!(size_of::<retro_game_geometry>(), 20);
+        assert_eq!(align_of::<retro_game_geometry>(), 4);
+        // 2 f64.
+        assert_eq!(size_of::<retro_system_timing>(), 16);
+        assert_eq!(align_of::<retro_system_timing>(), 8);
+        // geometry (20, pad to 8) + timing (16) => 24 + 16.
+        assert_eq!(size_of::<retro_system_av_info>(), 40);
+        assert_eq!(align_of::<retro_system_av_info>(), 8);
+    }
+
+    // Pointer-bearing structs are checked against the platform pointer width so
+    // the assertions hold on both 32- and 64-bit targets.
+    #[test]
+    fn pointer_struct_layout() {
+        let p = size_of::<*const c_char>();
+        assert_eq!(size_of::<retro_variable>(), 2 * p);
+        assert_eq!(size_of::<retro_core_option_value>(), 2 * p);
+    }
+
+    // The frontend indexes into a fixed 128-entry value array; the length is
+    // part of the ABI contract, so pin it here.
+    #[test]
+    fn option_v2_definition_values_len() {
+        let def: retro_core_option_v2_definition = unsafe { std::mem::zeroed() };
+        assert_eq!(def.values.len(), 128);
+    }
+}
