@@ -1988,3 +1988,178 @@ mod tas_tests {
         assert!(matches!(s.finish_load_movie(b"not a movie"), Err(SessionError::Movie(_))));
     }
 }
+
+#[cfg(test)]
+mod slot_and_import_tests {
+    //! Slot storage round-trips against in-memory storage, blob-header
+    //! validation, and the import/patch error branches. Driven ROM-less through
+    //! `Session::new`, which serializes a fresh `GB` just like the real path.
+    use super::*;
+    use crate::ports::{MemRumble, MemStorage, MemWebcam};
+
+    fn test_ports() -> Ports {
+        Ports {
+            storage: Box::new(MemStorage::new()),
+            rumble: Box::new(MemRumble::default()),
+            webcam: Box::new(MemWebcam::default()),
+        }
+    }
+
+    fn session() -> Session {
+        Session::new(Config::default(), test_ports(), [0xEEu8; 32])
+    }
+
+    #[test]
+    fn save_slot_round_trips_through_storage() {
+        let mut s = session();
+        for _ in 0..4 {
+            s.run_frame(AbstractInput::none());
+        }
+        s.save_slot(3, 777).unwrap();
+
+        // Metadata is readable without a full load.
+        let meta = s.slot_meta(3).expect("slot 3 exists");
+        assert_eq!(meta.frame_count, 4);
+        assert_eq!(meta.timestamp, 777);
+        assert!(s.slot_meta(1).is_none(), "an unsaved slot has no meta");
+
+        // Diverge, then load restores the saved frame count.
+        for _ in 0..5 {
+            s.run_frame(AbstractInput::none());
+        }
+        assert_eq!(s.frame_count(), 9);
+        let loaded = s.load_slot(3).unwrap();
+        assert_eq!(loaded, SlotMeta { frame_count: 4, timestamp: 777 });
+        assert_eq!(s.frame_count(), 4);
+    }
+
+    #[test]
+    fn list_slots_is_sorted_and_scoped_to_saved_slots() {
+        let mut s = session();
+        s.run_frame(AbstractInput::none());
+        s.save_slot(5, 1).unwrap();
+        s.save_slot(1, 1).unwrap();
+        s.save_slot(9, 1).unwrap();
+        assert_eq!(s.list_slots(), vec![1, 5, 9]);
+    }
+
+    #[test]
+    fn load_missing_slot_is_no_state() {
+        let mut s = session();
+        assert!(matches!(s.load_slot(2), Err(SessionError::NoState)));
+    }
+
+    #[test]
+    fn split_slot_blob_rejects_short_and_accepts_full_header() {
+        // Fewer than the 16 header bytes → truncated error.
+        assert!(matches!(
+            Session::split_slot_blob(&[0u8; 15]),
+            Err(SessionError::State(_))
+        ));
+        // Exactly the header (frame_count then timestamp, both LE u64) with an
+        // empty state tail parses.
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&7u64.to_le_bytes());
+        blob.extend_from_slice(&42u64.to_le_bytes());
+        let (meta, state) = Session::split_slot_blob(&blob).unwrap();
+        assert_eq!(meta, SlotMeta { frame_count: 7, timestamp: 42 });
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn corrupt_slot_blob_is_rejected_on_load() {
+        // A stored blob shorter than the header is surfaced as a state error,
+        // never a panic; `slot_meta` treats it as absent.
+        let mut s = session();
+        let key = s.slot_key(4);
+        s.ports.storage.write(&key, &[1u8, 2, 3]).unwrap();
+        assert!(matches!(s.load_slot(4), Err(SessionError::State(_))));
+        assert!(s.slot_meta(4).is_none());
+    }
+
+    #[test]
+    fn finish_load_state_rejects_garbage_bytes() {
+        let mut s = session();
+        assert!(matches!(
+            s.finish_load_state(b"not a savestate", None, [0u8; 32]),
+            Err(SessionError::State(_))
+        ));
+    }
+
+    #[test]
+    fn apply_rom_patch_without_a_loaded_rom_errors() {
+        let mut s = session(); // original_rom is None ROM-less
+        assert!(matches!(s.apply_rom_patch(&[0u8; 8]), Err(SessionError::State(_))));
+    }
+
+    #[test]
+    fn import_battery_and_rtc_error_without_a_cartridge() {
+        let mut s = session(); // no cartridge inserted
+        assert!(matches!(s.finish_import_battery(&[0u8; 16]), Err(SessionError::State(_))));
+        assert!(matches!(s.finish_import_rtc(&[0u8; 48]), Err(SessionError::State(_))));
+    }
+}
+
+#[cfg(test)]
+mod cheat_tests {
+    //! The session-level cheat surface: add/remove/clear over the stored set and
+    //! parsing a fetched `.cht` body. Applying Game Genie patches to a cartridge
+    //! is covered elsewhere; here we drive the ROM-less bookkeeping.
+    use super::*;
+    use crate::ports::{MemRumble, MemStorage, MemWebcam};
+
+    fn test_ports() -> Ports {
+        Ports {
+            storage: Box::new(MemStorage::new()),
+            rumble: Box::new(MemRumble::default()),
+            webcam: Box::new(MemWebcam::default()),
+        }
+    }
+
+    fn session() -> Session {
+        Session::new(Config::default(), test_ports(), [0u8; 32])
+    }
+
+    #[test]
+    fn add_remove_and_clear_track_the_active_set() {
+        let mut s = session();
+        // A GameShark RAM poke and a Game Genie ROM patch.
+        s.add_cheat("01FFDEC0").expect("gameshark parses");
+        s.add_cheat("00A-B7F-C61").expect("game genie parses");
+        assert_eq!(s.cheats().count(), 2);
+
+        // Adding the same raw code again is idempotent.
+        s.add_cheat("01FFDEC0").unwrap();
+        assert_eq!(s.cheats().count(), 2);
+
+        assert!(s.remove_cheat("01FFDEC0"), "an active code is removed");
+        assert!(!s.remove_cheat("01FFDEC0"), "a second remove reports nothing removed");
+        assert_eq!(s.cheats().count(), 1);
+
+        s.clear_cheats();
+        assert_eq!(s.cheats().count(), 0);
+    }
+
+    #[test]
+    fn add_cheat_rejects_a_malformed_code() {
+        let mut s = session();
+        assert!(s.add_cheat("nope").is_err());
+        assert_eq!(s.cheats().count(), 0);
+    }
+
+    #[test]
+    fn finish_fetched_cheats_counts_and_stores_them() {
+        let mut s = session();
+        let body = "cheats = 2\n\
+                    cheat0_desc = \"Infinite Health\"\n\
+                    cheat0_code = \"010AF4C6\"\n\
+                    cheat1_desc = \"Max Lives\"\n\
+                    cheat1_code = \"010999DA\"\n";
+        assert_eq!(s.finish_fetched_cheats(body), 2);
+        assert_eq!(s.fetched_cheats().len(), 2);
+
+        // A later fetch replaces the previous pending list.
+        assert_eq!(s.finish_fetched_cheats("cheats = 0\n"), 0);
+        assert!(s.fetched_cheats().is_empty());
+    }
+}

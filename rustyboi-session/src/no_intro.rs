@@ -154,6 +154,22 @@ pub fn resolve_game_name(rom: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
+    // The runtime INDEX is a process-global RwLock. Tests that replace it via
+    // `set_index` must not interleave with each other or with `load_dats`
+    // readers, so index-touching tests serialize on this lock. (Tests that only
+    // parse text or read a header don't touch the index and skip it.)
+    static INDEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        INDEX_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A 0x150-byte ROM carrying `title` in the header title region.
+    fn header_rom(title: &[u8]) -> Vec<u8> {
+        let mut rom = vec![0u8; 0x150];
+        rom[0x134..0x134 + title.len()].copy_from_slice(title);
+        rom
+    }
+
     #[test]
     fn dat_urls_are_percent_encoded() {
         let urls = dat_urls();
@@ -192,6 +208,7 @@ game (
 
     #[test]
     fn load_dats_indexes_and_dedupes() {
+        let _g = lock();
         // Unique crcs so this test is order-independent of any other test that
         // also loads into the shared global index.
         let a = "game (\n\tname \"Game A\"\n\trom ( crc AABBCC01 )\n)\n";
@@ -207,5 +224,83 @@ game (
         let mut rom = vec![0u8; 0x150];
         rom[0x134..0x13b].copy_from_slice(b"TETRIS\0");
         assert_eq!(header_title(&rom).as_deref(), Some("TETRIS"));
+    }
+
+    #[test]
+    fn parse_crc_requires_a_word_boundary_before_crc() {
+        // A standalone `crc` token (start of line) is accepted.
+        assert_eq!(parse_crc("crc DEADBEEF"), Some(0xDEAD_BEEF));
+        // ...and one preceded by a non-word byte (space) inside a rom line.
+        assert_eq!(
+            parse_crc("\trom ( name \"x.gb\" size 8 crc AABBCC33 )"),
+            Some(0xAABB_CC33)
+        );
+        // A "crc" that is the tail of a word (preceded by 's') must NOT match,
+        // and with no other candidate the line yields None.
+        assert_eq!(parse_crc("\tname \"Descrc AABBCC44\""), None);
+    }
+
+    #[test]
+    fn parse_name_line_only_matches_the_tab_anchored_name() {
+        // The game's own name line (leading tab, then `name "`).
+        assert_eq!(parse_name_line("\tname \"My Game\"").as_deref(), Some("My Game"));
+        // The `rom ( name "…" )` line's name is preceded by `rom ( `, not a bare
+        // tab, so it must be rejected (otherwise the wrong name would pair).
+        assert!(parse_name_line("\trom ( name \"My Game.gb\" size 8 )").is_none());
+    }
+
+    #[test]
+    fn header_title_trims_spaces_and_nul() {
+        // Trailing spaces are within the printable range but trimmed off.
+        let mut rom = vec![0u8; 0x150];
+        rom[0x134..0x13c].copy_from_slice(b"GAME    ");
+        assert_eq!(header_title(&rom).as_deref(), Some("GAME"));
+        // A NUL terminates the title early.
+        assert_eq!(header_title(&header_rom(b"POKEMON\0RED")).as_deref(), Some("POKEMON"));
+    }
+
+    #[test]
+    fn header_title_edge_cases() {
+        // An all-zero header region has no title.
+        assert_eq!(header_title(&vec![0u8; 0x150]), None);
+        // A non-printable / high byte terminates the title (so a title that
+        // starts with one is empty → None).
+        assert_eq!(header_title(&header_rom(&[0xFF, b'X'])), None);
+        // A ROM too short to hold the header title region yields None.
+        assert_eq!(header_title(&vec![0u8; 0x140]), None);
+    }
+
+    #[test]
+    fn resolve_game_name_fallback_chain() {
+        let _g = lock();
+        // (1) A No-Intro index hit wins over the header title.
+        let indexed = header_rom(b"HEADERTITLE");
+        let crc = crate::patch::crc32(&indexed);
+        set_index(vec![(crc, "Canonical No-Intro Name".to_string())]);
+        assert_eq!(resolve_game_name(&indexed).as_deref(), Some("Canonical No-Intro Name"));
+
+        // (2) A ROM absent from the index falls back to its header title.
+        let headered = header_rom(b"HOMEBREW");
+        assert_ne!(crate::patch::crc32(&headered), crc, "distinct crc so it is unindexed");
+        assert_eq!(resolve_game_name(&headered).as_deref(), Some("HOMEBREW"));
+
+        // (3) Neither indexed nor a usable header title → None.
+        assert_eq!(resolve_game_name(&vec![0u8; 0x150]), None);
+    }
+
+    #[test]
+    fn set_index_sorts_and_dedupes() {
+        let _g = lock();
+        set_index(vec![
+            (0x00FF_EE03, "C".to_string()),
+            (0x00FF_EE01, "A".to_string()),
+            (0x00FF_EE02, "B".to_string()),
+            (0x00FF_EE01, "A duplicate".to_string()),
+        ]);
+        // binary search succeeding on every key proves the store is sorted;
+        // the first of the equal keys survives the dedupe.
+        assert_eq!(name_for_crc(0x00FF_EE01).as_deref(), Some("A"));
+        assert_eq!(name_for_crc(0x00FF_EE02).as_deref(), Some("B"));
+        assert_eq!(name_for_crc(0x00FF_EE03).as_deref(), Some("C"));
     }
 }

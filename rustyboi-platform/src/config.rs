@@ -110,3 +110,61 @@ impl RawConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> CleanConfig {
+        RawConfig::try_parse_from(args).expect("args parse").clean()
+    }
+
+    #[test]
+    fn clap_defaults_match_declarations() {
+        let c = parse(&["rustyboi"]);
+        assert_eq!(c.hardware, gb::Hardware::CGB);
+        assert_eq!(c.palette, PaletteChoice::Grayscale);
+        #[cfg(not(target_os = "android"))]
+        assert_eq!(c.scale, 5);
+    }
+
+    #[test]
+    fn garbage_palette_falls_back_to_grayscale() {
+        let c = parse(&["rustyboi", "--palette", "chartreuse"]);
+        assert_eq!(c.palette, PaletteChoice::Grayscale);
+    }
+
+    #[test]
+    fn known_palette_alias_is_honored() {
+        // A recognized alias must NOT fall through to the Grayscale default.
+        let c = parse(&["rustyboi", "--palette", "green"]);
+        assert_eq!(c.palette, PaletteChoice::GreenLinear);
+    }
+
+    #[test]
+    fn unknown_graphics_value_is_none() {
+        let c = parse(&["rustyboi", "--graphics", "banana"]);
+        assert!(c.graphics.is_none(), "an unrecognized backend falls back to the saved setting");
+    }
+
+    #[test]
+    fn known_graphics_value_parses() {
+        let c = parse(&["rustyboi", "--graphics", "software"]);
+        assert_eq!(c.graphics, Some(rustyboi_session::GraphicsBackend::Software));
+    }
+
+    #[test]
+    fn no_graphics_flag_is_none() {
+        assert!(parse(&["rustyboi"]).graphics.is_none());
+    }
+
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+    #[test]
+    fn desktop_skips_bios_when_no_bios_given() {
+        // No --bios ⇒ skip_bios is forced true so the machine still boots.
+        assert!(parse(&["rustyboi"]).skip_bios);
+        // Supplying a BIOS leaves the (false) default in place.
+        assert!(!parse(&["rustyboi", "--bios", "boot.bin"]).skip_bios);
+    }
+}
