@@ -143,3 +143,43 @@ fn draw_button(painter: &egui::Painter, rect: Rect, label: &str, held: bool, opa
         Color32::WHITE.linear_multiply(opacity),
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustyboi_session::GbButton;
+
+    /// Set exactly one field of a fresh `ButtonState`, keyed by the button it
+    /// should correspond to.
+    fn only(button: GbButton) -> ButtonState {
+        let mut s = ButtonState::default();
+        match button {
+            GbButton::A => s.a = true,
+            GbButton::B => s.b = true,
+            GbButton::Start => s.start = true,
+            GbButton::Select => s.select = true,
+            GbButton::Up => s.up = true,
+            GbButton::Down => s.down = true,
+            GbButton::Left => s.left = true,
+            GbButton::Right => s.right = true,
+        }
+        s
+    }
+
+    // `pressed` selects one `ButtonState` field per `GbButton`; verify the wiring
+    // is a bijection so no button reads a neighbour's bit (a classic copy/paste
+    // hazard for eight near-identical arms).
+    #[test]
+    fn pressed_selects_exactly_the_matching_button() {
+        for held in GbButton::ALL {
+            let state = only(held);
+            for probe in GbButton::ALL {
+                assert_eq!(
+                    pressed(&state, probe),
+                    probe == held,
+                    "{held:?} pressed; probing {probe:?}"
+                );
+            }
+        }
+    }
+}

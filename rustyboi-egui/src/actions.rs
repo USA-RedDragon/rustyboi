@@ -14,7 +14,6 @@ pub use rustyboi_session::action::{
 };
 pub use rustyboi_session::CgbColorConversion;
 
-#[cfg(target_os = "android")]
 pub use rustyboi_session::action::LibraryEntry;
 
 /// Historical name for the canonical [`UiAction`]. Kept so existing egui/host
