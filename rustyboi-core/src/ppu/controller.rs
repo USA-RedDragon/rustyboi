@@ -873,19 +873,27 @@ impl Ppu {
         if display_stays_enabled
             && self.state == State::OAMSearch
             && mmio.is_cgb_features_enabled()
-            && mmio.is_double_speed_mode()
             && (old_lcdc & ssz) != (value & ssz)
         {
-            // Scoped to CGB double speed: the single-speed OAM-scan bracket pairs
-            // (late_sizechange*_{2,4} at normal speed) already resolve correctly
-            // via the one-slot-lagged snapshot; applying the exact-cc shift there
-            // 1-for-1-swaps them. At double speed the per-dot snapshot rounds the
-            // odd-cc OAM read, so the exact-cc sample is the net win (all _ds_1/_2
-            // brackets pass).
+            // The OBJ-size change becomes visible to the fetcher/scan at
+            // `write_cc + 2` (Gambatte setLcdc(data, cc+2)). The OAM scan samples
+            // it per slot against this apply cc (objsize_large_at_cc), so a slot
+            // read strictly past the apply cc sees the new size. ENABLE (8x8 ->
+            // 8x16) lands at +2; DISABLE (8x16 -> 8x8) lands one OAM slot later
+            // (+2 more cc): Gambatte's SpriteMapper keeps the larger
+            // already-latched height for the entry whose read straddles the
+            // shrink, so the straddling sprite is still scanned 8x16. The
+            // late_sizechange (disable) vs late_sizechange2 (enable) bracket pairs
+            // require this asymmetry; with a symmetric offset the disable family
+            // 1-for-1-swaps. (Verified across both speeds; DS landed at +2 for
+            // both directions because the DS brackets only exercise the enable
+            // side / the rounded odd-cc slot already absorbs the extra delay.)
             let ds = mmio.is_double_speed_mode();
+            let disable = (old_lcdc & ssz) != 0 && (value & ssz) == 0;
+            let off = if ds { 2 } else { 2 + if disable { 2 } else { 0 } };
             self.objsize_prev_large = self.objsize_large_at_cc(self.write_cc(ds));
             self.objsize_new_large = (value & ssz) != 0;
-            self.objsize_apply_cc = self.write_cc(ds) + 2;
+            self.objsize_apply_cc = (self.write_cc(ds) as i64 + off).max(0) as u64;
         }
 
         if mmio.is_cgb_features_enabled() && display_stays_enabled {
