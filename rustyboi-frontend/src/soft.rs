@@ -951,6 +951,16 @@ impl Present for SoftRenderer {
         self.compositor.lcd_effect = effect;
     }
 
+    fn upload_game(&mut self, frame: &GameFrame) {
+        self.compositor.upload_game(frame);
+    }
+
+    fn vsync_paced(&self) -> bool {
+        // A softbuffer blit copies into the window and returns — it never
+        // blocks at the display refresh, so the platform must throttle ticks.
+        false
+    }
+
     fn render(
         &mut self,
         game: Option<&GameFrame>,

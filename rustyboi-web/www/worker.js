@@ -1,10 +1,11 @@
 // rustyboi web — emulator Web Worker.
 //
 // Owns the whole emulator: the wasm core + session and IndexedDB storage. It
-// self-paces at the GB frame rate with a performance.now() accumulator +
-// setTimeout — workers have no requestAnimationFrame, and that is exactly the
-// point: emulation cadence is decoupled from the display refresh, so a 175 Hz
-// monitor can't cause jank.
+// self-paces with setTimeout ticks — workers have no requestAnimationFrame,
+// and that is exactly the point: emulation cadence is decoupled from the
+// display refresh, so a 175 Hz monitor can't cause jank. Frames-per-tick come
+// from the shared pacing regulator inside the wasm module (the same
+// wall-clock + DAC-trim token bucket every native platform runs).
 //
 // Rendering happens on the MAIN thread (egui + wgpu WebGL2). Each frame the
 // worker posts the RGBA framebuffer (transferable ArrayBuffer, zero-copy), the
@@ -34,16 +35,13 @@
 
 import init, { Emulator } from "./pkg/rustyboi_web.js";
 
-// DMG/CGB LCD refresh is ~59.7275 Hz.
+// DMG/CGB LCD refresh is ~59.7275 Hz (tick cadence only — the regulator owns
+// the frame budget and banks time across late ticks).
 const GB_FPS = 59.7275;
 const FRAME_MS = 1000 / GB_FPS;
-// Cap catch-up so a long stall (e.g. a save) doesn't run a huge burst.
-const MAX_FRAMES_PER_TICK = 4;
 
 let emu = null;
 let running = false;
-let lastNow = 0;
-let acc = 0;
 // Hold-to-rewind: while set (Backspace held on the main thread) the loop steps
 // back through the rewind buffer instead of running frames forward.
 let rewinding = false;
@@ -92,32 +90,33 @@ function postFrameAndState() {
   }
 }
 
-// Self-paced fixed-timestep loop. We accumulate real elapsed time and run whole
-// GB frames while the accumulator holds at least one frame's worth, capped per
-// tick. setTimeout(0) yields between ticks so the worker event loop stays
-// responsive to control messages; the accumulator absorbs timer coarseness so
-// the *average* rate stays locked to GB_FPS regardless of timer jitter.
+// Self-paced loop. The SHARED pacing regulator (rustyboi-session's wall-clock
+// token bucket with bounded DAC trim — the same one every native platform
+// runs) decides how many frames each tick emulates from performance.now() and
+// the audio backlog the main thread posts back on ReturnBuffer. setTimeout(0)
+// yields between ticks so the worker event loop stays responsive to control
+// messages; timer coarseness/jitter cannot affect game speed (the bucket banks
+// elapsed time).
 function loop() {
   if (!running) return;
-  const now = performance.now();
-  acc += now - lastNow;
-  lastNow = now;
 
   // Uncapped fast-forward: run emulation as fast as the host allows — advance a
-  // batch (each `run_frame` runs several GB frames in-core) with no accumulator
-  // throttle, then re-schedule immediately. Audio is muted in-core while
-  // uncapped, so there's nothing to post. Rewind always takes the paced path.
+  // batch (each `run_frame` runs several GB frames in-core) unregulated, then
+  // re-schedule immediately. Audio is muted in-core while uncapped, so there's
+  // nothing to post. Rewind always takes the paced path.
   const uncapped = !rewinding && emu.uncapped_fast_forward && emu.uncapped_fast_forward();
 
   let ran = 0;
   try {
     if (uncapped) {
+      emu.frames_to_run(performance.now()); // keep the bucket clock current
       emu.run_frame();
       if (emu.has_rom()) postFrameAndState();
       ran = 1;
-      acc = 0; // don't build a backlog while unthrottled
     } else {
-      while (acc >= FRAME_MS && ran < MAX_FRAMES_PER_TICK) {
+      const grant = emu.frames_to_run(performance.now());
+      const runs = grant > 0 ? grant : emu.is_paused() ? 1 : 0;
+      while (ran < runs) {
         if (rewinding) {
           // Step back one snapshot; if the buffer is exhausted, hold on the oldest
           // frame (do NOT resume forward play while Backspace is still held). No
@@ -131,7 +130,6 @@ function loop() {
             post({ type: "Audio", samples }, [samples.buffer]);
           }
         }
-        acc -= FRAME_MS;
         ran++;
       }
     }
@@ -144,11 +142,7 @@ function loop() {
     return;
   }
 
-  // Shed a large backlog (backgrounded tab / long GC) instead of sprinting.
-  if (acc > FRAME_MS * MAX_FRAMES_PER_TICK) acc = 0;
-
-  // Sleep until roughly the next frame boundary (0 while uncapped so we sprint).
-  const delay = uncapped ? 0 : Math.max(0, FRAME_MS - acc);
+  const delay = uncapped ? 0 : Math.min(FRAME_MS, emu.ms_until_next_frame());
   setTimeout(loop, delay);
 }
 
@@ -168,8 +162,6 @@ function drainPrints() {
 function startLoop() {
   if (running) return;
   running = true;
-  lastNow = performance.now();
-  acc = 0;
   loop();
 }
 
@@ -205,6 +197,9 @@ self.onmessage = async (e) => {
     if (m.type === "ReturnBuffer") {
       // Main thread finished uploading a frame and handed its buffer back.
       if (m.buf && framePool.length < FRAME_POOL_MAX) framePool.push(m.buf);
+      // The audio backlog rides along: feed the pacing regulator's DAC trim
+      // (-1 while the AudioContext isn't running yet).
+      if (emu && typeof m.backlogPairs === "number") emu.set_audio_backlog_pairs(m.backlogPairs);
       return;
     }
     if (m.type === "SetRewind") {

@@ -56,6 +56,7 @@ pub mod input;
 pub mod input_config;
 pub mod no_intro;
 pub mod overlay;
+pub mod pacing;
 pub mod patch;
 pub mod present;
 pub mod rom_zip;

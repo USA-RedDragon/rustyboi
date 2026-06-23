@@ -945,10 +945,13 @@ impl Gui {
             .interactable(false)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{:.0} FPS", fps.max(0.0)))
-                            .monospace()
-                            .strong(),
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("{:.1} FPS", fps.max(0.0)))
+                                .monospace()
+                                .strong(),
+                        )
+                        .wrap_mode(egui::TextWrapMode::Extend),
                     );
                 });
             });

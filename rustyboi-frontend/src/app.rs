@@ -10,7 +10,7 @@
 //! byte-level methods — so the app itself does no filesystem I/O, spawns no
 //! threads, and reads no clock beyond frame pacing.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use rustyboi_core_lib::{gb, input, ppu};
 use rustyboi_session::action::{FileData, LoadPurpose};
@@ -66,25 +66,6 @@ pub enum PlatformRequest {
     AndroidLibrary(GuiAction),
 }
 
-/// Frame pacing target (~59.7 fps), matching the original World loop. Only the
-/// native pacing loop uses it; on web the browser paces via requestAnimationFrame.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-// One emulated Game Boy frame is 70224 cycles at 4.194304 MHz = 16743 µs
-// (59.7275 fps). Pacing to this exact period keeps audio production matched to
-// the core's 44100 Hz sampling (738.4 samples/frame → 44100/s); the old 16750
-// ran 0.04% slow and systematically underfed the audio device.
-const TARGET_FRAME_TIME: Duration = Duration::from_micros(16743);
-
-/// Audio-clocked pacing target (Android): the emulator paces to real time while
-/// the audio backlog holds at/above this many frames, and runs ahead (no sleep)
-/// to refill when a scheduler hitch has drained it below. With a non-blocking
-/// (Mailbox) present, emulation isn't stalled during the present, so the ring
-/// only needs to bridge the ~16.7ms between per-frame refills — two frames of
-/// cushion rides out jitter with room to spare. Keep in sync with the catch-up
-/// target in `display.rs`.
-#[cfg(target_os = "android")]
-const AUDIO_CUSHION_TARGET_FRAMES: usize = 2;
-
 /// The portable app.
 ///
 /// It deliberately does NOT own the [`UiHost`] or [`Renderer`]: those are
@@ -127,17 +108,11 @@ pub struct App {
     auto_paused_no_content: bool,
     breakpoint_hit: bool,
 
-    // Perf / pacing.
-    frame_times: Vec<Instant>,
-    last_frame_time: Instant,
+    // Perf readout. The app holds NO pacing logic and reads no pacing clock:
+    // the platform's tick loop owns the shared `rustyboi_session::pacing`
+    // Regulator and feeds this meter via [`App::note_frames`].
+    meter: rustyboi_session::pacing::RateMeter,
     last_title_update: Instant,
-    fps: f64,
-    /// Audio backlog in frames, reported by the platform each tick (`None` when
-    /// there's no audio device). Drives audio-clocked pacing on Android: pace to
-    /// real time while the cushion is full, run ahead to refill it after a hitch.
-    /// Only read on Android; stored (unused) elsewhere so the setter is uniform.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-    audio_backlog: Option<usize>,
 
     /// The most recent chrome inset in *logical points*: how much wider/taller
     /// the window is than the egui central region (menu bar + any status
@@ -189,11 +164,8 @@ impl App {
             manually_paused: should_pause,
             auto_paused_no_content: should_pause,
             breakpoint_hit: false,
-            frame_times: Vec::with_capacity(60),
-            last_frame_time: now,
+            meter: rustyboi_session::pacing::RateMeter::new(),
             last_title_update: now,
-            fps: 0.0,
-            audio_backlog: None,
             content_inset: (0.0, 0.0),
             safe_insets: [0.0; 4],
             rgba_scratch: Vec::new(),
@@ -231,7 +203,25 @@ impl App {
     }
 
     pub fn fps(&self) -> f64 {
-        self.fps
+        self.meter.fps()
+    }
+
+    /// Record one tick into the shared rate meter: `emulated` frames advanced
+    /// (the FPS readout is game speed). The platform's tick loop calls this
+    /// every tick, including idle ones.
+    pub fn note_frames(&mut self, now_seconds: f64, emulated: u32) {
+        self.meter.record(now_seconds, emulated);
+    }
+
+    /// Cumulative drift versus a perfect 59.7275fps timeline (diagnostics).
+    pub fn drift_frames(&self, now_seconds: f64) -> f64 {
+        self.meter.drift_frames(now_seconds)
+    }
+
+    /// Whether emulation is effectively halted this tick (explicit pause or a
+    /// crash overlay) — the regulator banks nothing during these.
+    pub fn is_effectively_paused(&self) -> bool {
+        self.error_state.is_some() || self.is_paused
     }
 
     /// The content size (pre-scale) that should drive the window: the SGB
@@ -551,37 +541,32 @@ impl App {
         if self.error_state.is_none() && matches!(self.session.mode(), RunMode::FrameAdvance) {
             let output = self.session.run_frame(self.input);
             self.frame = Some(output.frame);
-            return FrameStep { audio: output.audio, pump_workers: true };
+            return FrameStep { audio: output.audio, pump_workers: true, advanced: output.advanced };
         }
 
         if self.error_state.is_some() || self.is_paused {
             return FrameStep::default();
         }
 
-        // Pace to ~60fps (host concern; kept here as it belongs to the run loop
-        // rather than the window). Wasm builds skip the spin/sleep.
-        self.pace();
-        self.last_frame_time = Instant::now();
-
+        // No pacing here — by design. The platform's tick loop owns the shared
+        // `rustyboi_session::pacing::Regulator` (wall-clock token bucket with a
+        // bounded DAC trim) and calls `run_frame` exactly as many times per
+        // tick as the regulator grants. The app never sleeps and never reads a
+        // pacing clock, so game speed is identical on every platform and
+        // host-timer quirks (macOS sleep coalescing) cannot slow it.
         if self.session.gb().get_breakpoints().is_empty() {
             let output = self.session.run_frame(self.input);
-            if output.advanced {
-                self.frame = Some(output.frame);
-                self.record_fps();
-            } else {
-                self.frame = Some(output.frame);
-            }
-            FrameStep { audio: output.audio, pump_workers: true }
+            self.frame = Some(output.frame);
+            FrameStep { audio: output.audio, pump_workers: true, advanced: output.advanced }
         } else {
             match self.run_frame_on_core() {
                 Some((frame, bp)) => {
                     self.frame = Some(frame);
-                    self.record_fps();
                     if bp {
                         self.is_paused = true;
                         self.breakpoint_hit = true;
                     }
-                    FrameStep::default()
+                    FrameStep { advanced: true, ..FrameStep::default() }
                 }
                 None => {
                     self.error_state = Some("Emulator crashed".to_string());
@@ -590,54 +575,6 @@ impl App {
                 }
             }
         }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn pace(&self) {
-        // Uncapped fast-forward: run emulation as fast as the host allows — skip
-        // the frame limiter entirely (each `run_frame` still advances a batch of
-        // GB frames, so the display keeps refreshing).
-        if self.is_fast_forward() && self.session.config().ff_uncapped() {
-            return;
-        }
-        // Android: audio-clocked. When the audio device is driving and its
-        // backlog is at/above the cushion target we pace to real time (the device
-        // is the clock); when a hitch has drained the backlog below target we
-        // skip the sleep so emulation runs ahead and refills the cushion. Latency
-        // stays bounded at the target because we resume real-time pacing as soon
-        // as it's full. With no audio (`None`) we fall back to fixed pacing.
-        #[cfg(target_os = "android")]
-        if let Some(backlog) = self.audio_backlog {
-            if backlog >= AUDIO_CUSHION_TARGET_FRAMES {
-                self.fixed_pace();
-            }
-            return;
-        }
-        self.fixed_pace();
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn fixed_pace(&self) {
-        let elapsed = self.last_frame_time.elapsed();
-        if elapsed < TARGET_FRAME_TIME {
-            let remaining = TARGET_FRAME_TIME - elapsed;
-            if remaining > Duration::from_micros(100) {
-                std::thread::sleep(remaining - Duration::from_micros(50));
-            }
-            while self.last_frame_time.elapsed() < TARGET_FRAME_TIME {
-                std::hint::spin_loop();
-            }
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn pace(&self) {}
-
-    /// Report the platform's audio backlog (frames queued in the output device),
-    /// or `None` when there's no audio. Drives audio-clocked pacing; call before
-    /// [`App::run_frame`].
-    pub fn set_audio_backlog(&mut self, frames: Option<usize>) {
-        self.audio_backlog = frames;
     }
 
     fn run_frame_on_core(&mut self) -> Option<(gb::Frame, bool)> {
@@ -660,21 +597,6 @@ impl App {
         }
     }
 
-    fn record_fps(&mut self) {
-        let now = Instant::now();
-        self.frame_times.push(now);
-        if self.frame_times.len() > 60 {
-            self.frame_times.remove(0);
-        }
-        let n = self.frame_times.len();
-        if n >= 2 {
-            let dur = self.frame_times[n - 1].duration_since(self.frame_times[0]);
-            if dur.as_secs_f64() > 0.0 {
-                self.fps = (n as f64 - 1.0) / dur.as_secs_f64();
-            }
-        }
-    }
-
     /// Whether the title should be refreshed (rate-limited to twice a second),
     /// returning the title text when due. The platform sets the window title.
     pub fn title_if_due(&mut self) -> Option<String> {
@@ -690,11 +612,11 @@ impl App {
         };
         let paused = self.manually_paused || self.error_state.is_some();
         let title = if self.error_state.is_some() {
-            format!("{app} - ERROR | {:.1} FPS", self.fps)
+            format!("{app} - ERROR | {:.1} FPS", self.fps())
         } else if paused {
-            format!("{app} - PAUSED | {:.1} FPS", self.fps)
+            format!("{app} - PAUSED | {:.1} FPS", self.fps())
         } else {
-            format!("{app} | {:.1} FPS", self.fps)
+            format!("{app} | {:.1} FPS", self.fps())
         };
         Some(title)
     }
@@ -754,7 +676,7 @@ impl App {
                     extra_events,
                     held_pad: &self.held_pad,
                     force_repaint: true,
-                    fps: self.fps as f32,
+                    fps: self.fps() as f32,
                 },
             )
         };
@@ -1035,6 +957,10 @@ pub struct FrameStep {
     /// Whether the platform should pump its rewind/printer workers this frame
     /// (true only when an emulation frame actually advanced through the session).
     pub pump_workers: bool,
+    /// Whether an emulation frame actually advanced (feeds the rate meter —
+    /// audio emptiness can't stand in for this: the breakpoint path advances
+    /// without routing audio, and uncapped fast-forward advances muted).
+    pub advanced: bool,
 }
 
 /// Current epoch seconds for savestate-slot timestamps (0 if before epoch). The

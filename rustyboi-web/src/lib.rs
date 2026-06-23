@@ -103,6 +103,16 @@ pub struct Emulator {
     /// Which heavy debug-snapshot sections the open panels want (only meaningful
     /// when `debug_active`).
     debug_detail: DebugDetail,
+    /// The shared frame-pacing regulator (`rustyboi_session::pacing`) — the
+    /// same wall-clock token bucket every native platform runs. The worker's
+    /// timer loop asks it how many frames to run per tick.
+    regulator: rustyboi_session::pacing::Regulator,
+    /// Micro-resampler bridging the audio to the sink clock (the game rate is
+    /// pure wall clock; no audio clock can bend the timeline).
+    stretcher: rustyboi_session::pacing::Stretcher,
+    /// Latest audio backlog (stereo pairs scheduled ahead of the context
+    /// clock), posted back from the main thread; `None` until audio runs.
+    audio_backlog_pairs: Option<usize>,
 }
 
 #[wasm_bindgen]
@@ -140,7 +150,46 @@ impl Emulator {
             has_rom: false,
             debug_active: false,
             debug_detail: DebugDetail::default(),
+            regulator: rustyboi_session::pacing::Regulator::new(),
+            stretcher: rustyboi_session::pacing::Stretcher::new(),
+            audio_backlog_pairs: None,
         })
+    }
+
+    /// How many frames the worker should emulate this tick, from the shared
+    /// pacing regulator (wall-clock token bucket + bounded DAC trim — one
+    /// implementation across desktop/iOS/Android/web). `now_ms` is
+    /// `performance.now()`. The uncapped-fast-forward sprint path bypasses
+    /// this (the worker checks `uncapped_fast_forward` first).
+    pub fn frames_to_run(&mut self, now_ms: f64) -> u32 {
+        self.regulator.frames_to_run(
+            now_ms / 1000.0,
+            self.audio_backlog_pairs,
+            self.session.is_fast_forward(),
+            self.session.is_paused() || !self.has_rom,
+        )
+    }
+
+    /// Report the main-thread audio sink's backlog in stereo sample pairs
+    /// (samples scheduled ahead of the `AudioContext` clock). Negative means
+    /// "no running audio" — the regulator then paces on the wall clock alone.
+    pub fn set_audio_backlog_pairs(&mut self, pairs: f64) {
+        self.audio_backlog_pairs = (pairs >= 0.0).then_some(pairs as usize);
+    }
+
+    /// Whether emulation is effectively halted (paused or no ROM). On a
+    /// 0-frame grant the worker still runs one `run_frame` when paused — it
+    /// early-returns cheaply but services debug stepping / frame-advance and
+    /// keeps frame + UI-state posts flowing, mirroring the native tick loop.
+    pub fn is_paused(&self) -> bool {
+        self.session.is_paused() || !self.has_rom
+    }
+
+    /// Milliseconds until the regulator matures its next frame — the worker's
+    /// tick-timer delay, so it wakes ~once per frame instead of oversampling
+    /// (battery: timer wakeups are what mobile browsers coalesce against).
+    pub fn ms_until_next_frame(&self) -> f64 {
+        self.regulator.seconds_until_next_frame() * 1000.0
     }
 
     /// Load a ROM from raw bytes (an `ArrayBuffer` transferred from the main
@@ -319,9 +368,14 @@ impl Emulator {
         let out = self.session.run_frame(self.input);
         self.present(&out.frame);
 
+        // Bridge to the sink clock: micro-resample by the regulator's stretch
+        // ratio (1.0 on healthy hosts) — same as every native platform.
+        let stretched = self
+            .stretcher
+            .process(&out.audio, self.regulator.audio_stretch());
         self.audio_scratch.clear();
-        self.audio_scratch.reserve(out.audio.len() * 2);
-        for &(l, r) in &out.audio {
+        self.audio_scratch.reserve(stretched.len() * 2);
+        for &(l, r) in stretched {
             self.audio_scratch.push(l);
             self.audio_scratch.push(r);
         }

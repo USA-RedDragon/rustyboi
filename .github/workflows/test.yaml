@@ -257,9 +257,9 @@ jobs:
             target
           key: frontend-render-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: frontend-render-${{ matrix.os }}-
-      - name: Run renderer tests
+      - name: Run renderer + pacing tests
         shell: bash
-        run: cargo test -p rustyboi-frontend
+        run: cargo test -p rustyboi-frontend -p rustyboi-session
 
   test-success:
     name: Test success check

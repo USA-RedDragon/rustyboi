@@ -23,7 +23,8 @@ clap = { version = "=4.6.2", features = ["derive"] }
 log = "=0.4.33"
 wgpu = "=29.0.4"
 pollster = "=1.0.1"
-rodio = { version = "=0.22.2", default-features = false, features = ["playback"] }
+cpal = "=0.17.3"
+ringbuf = "=0.5.1"
 serde_json = "=1.0.150"
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
 winit_input_helper = "=0.17.0"
@@ -38,6 +39,9 @@ rustls-native-certs = "=0.8.4"
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android"), not(target_os = "ios")))'.dependencies]
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }
 rfd = "=0.17.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Media"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
@@ -61,4 +65,3 @@ libc = "=0.2.186"
 ndk-context = "=0.1.1"
 ndk-sys = "=0.6.0"
 oboe = { version = "=0.6.1", features = ["java-interface", "ndk-context"] }
-ringbuf = "=0.5.1"
