@@ -3,6 +3,26 @@ use crate::memory::mmio::Mmio;
 use crate::ppu::{self, Ppu};
 use std::ops::{Deref, DerefMut};
 
+/// ds-engine STAGE 2: the faithful CPU exact-cc spine gate (RB_FAITHFUL). When
+/// OFF (default) the CPU step/service paths are byte-identical to HEAD. When ON
+/// the CPU runs the faithful prefetch model (prefetch-at-boundary +
+/// execute-no-refetch + service pc-rewind) and event-cc interrupt dispatch (an
+/// IRQ is serviceable only once the boundary access cc has reached its recorded
+/// fire cc, not merely once its IF bit is set). This stage does NOT touch the
+/// timer access anchor — RB_EXACTCC (stage 1) already owns that — so the +106
+/// well from the prior ptz-faithful (which welded CC_OFF 5->1 into this gate) is
+/// avoided: here RB_FAITHFUL only changes the CPU's boundary/dispatch phasing.
+/// Read once, OnceLock-cached.
+pub(crate) fn faithful_enabled() -> bool {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("RB_FAITHFUL")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 /// A tick-aware view over the system. CPU memory accesses go through `read`/
 /// `write`, which advance every peripheral one M-cycle (4 dots) so each access
 /// observes/mutates live state at its true intra-instruction cycle. Everything
@@ -92,6 +112,27 @@ impl<'a> Bus<'a> {
     }
 
     pub fn master_cc_dbg(&self) -> u64 { self.mmio.master_cc() }
+
+    /// STAGE 2 (RB_FAITHFUL): the access cc at an instruction boundary — the RAW
+    /// master cc captured BEFORE this access M-cycle ticks (Gambatte's `cc` at
+    /// which it resolves the access, then `cc += 4`). This is the same raw-cc
+    /// anchor stage 1 (RB_EXACTCC) proved for register reads, so the event-cc
+    /// dispatch gate compares the boundary access cc against a timer fire cc that
+    /// lives in the same space.
+    pub fn access_cc(&self) -> u64 {
+        self.mmio.master_cc()
+    }
+
+    /// STAGE 2: the cc at which the most recent still-undispatched TIMA IRQ fired
+    /// (Gambatte's `intevent_interrupts` time for the timer), or `None`.
+    pub fn pending_timer_fire_cc(&self) -> Option<u64> {
+        self.mmio.pending_timer_fire_cc()
+    }
+
+    /// STAGE 2: clear the recorded timer fire cc after the CPU dispatches it.
+    pub fn clear_timer_fire_cc(&mut self) {
+        self.mmio.clear_timer_fire_cc();
+    }
 
     /// Whether the PPU currently locks CPU access to `addr`: VRAM during Mode 3,
     /// OAM during Mode 2/3, and (CGB) the palette-data ports FF69/FF6B during

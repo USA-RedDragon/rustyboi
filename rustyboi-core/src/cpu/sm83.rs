@@ -14,6 +14,14 @@ pub struct SM83 {
     /// Mirrors Gambatte's `intevent_unhalt = cc + 0x20000 + 4` schedule.
     #[serde(default)]
     pub stop_unhalt_cycles: u32,
+    /// ds-engine STAGE 2 faithful-prefetch state (RB_FAITHFUL). `opcode` holds the
+    /// byte fetched at the previous instruction's boundary; `prefetched` is true
+    /// once that fetch has happened and the opcode is awaiting execute/discard.
+    /// Unused (and always default) when the gate is OFF.
+    #[serde(default)]
+    pub opcode: u8,
+    #[serde(default)]
+    pub prefetched: bool,
 }
 
 impl SM83 {
@@ -24,6 +32,8 @@ impl SM83 {
             stopped: false,
             ime_enable_delay: 0,
             stop_unhalt_cycles: 0,
+            opcode: 0,
+            prefetched: false,
         }
     }
 
@@ -84,11 +94,51 @@ impl SM83 {
             }
         }
         
+        if crate::cpu::bus::faithful_enabled() {
+            // STAGE 2 event-cc dispatch: an IRQ is serviceable only once the
+            // boundary access cc has reached the cc its IF bit was raised
+            // (Gambatte's `intevent_interrupts` boundary), not merely once the
+            // IF bit is flagged. `pending_interrupt` was sampled at this
+            // instruction boundary; gate the timer IRQ on the boundary access cc
+            // (raw master_cc, the stage-1 read anchor) having reached its
+            // recorded fire cc, re-resolving a lower-priority armed IRQ if the
+            // timer is not yet due.
+            let boundary_access_cc = mmio.access_cc();
+            let mut serviceable = pending_interrupt;
+            if serviceable == Some(registers::InterruptFlag::Timer)
+                && let Some(fire_cc) = mmio.pending_timer_fire_cc()
+                && boundary_access_cc < fire_cc
+            {
+                serviceable = self.get_pending_interrupt_excluding_timer(mmio);
+            }
+
+            // FAITHFUL prefetch model: fetch the opcode at the instruction
+            // boundary FIRST (Gambatte's end-of-previous-instruction prefetch,
+            // charged at the boundary cc), THEN decide whether to service. A
+            // serviced interrupt UNDOES the prefetch (rewinds pc); otherwise the
+            // prefetched opcode is consumed by execute with no re-fetch/re-charge.
+            if !self.prefetched {
+                self.opcode = mmio.read(self.registers.pc);
+                self.registers.pc = self.registers.pc.wrapping_add(1);
+                self.prefetched = true;
+            }
+
+            if self.registers.ime && serviceable.is_some() {
+                return self.service_interrupt(mmio, just_unhalted);
+            }
+
+            let op = self.opcode;
+            self.prefetched = false;
+            cycles += self.execute(op, mmio);
+            self.apply_ime_delay();
+            return cycles;
+        }
+
         // Handle interrupts if IME is enabled and there's a pending interrupt
         if self.registers.ime && pending_interrupt.is_some() {
             return self.service_interrupt(mmio, just_unhalted);
         }
-        
+
         let opcode = mmio.read(self.registers.pc);
         self.registers.pc += 1;
         cycles += self.execute(opcode, mmio);
@@ -120,13 +170,26 @@ impl SM83 {
         let suppress = !just_unhalted && !bus.hdma_fire_pending();
         bus.set_hdma_mcycle_fire_suppressed(suppress);
 
-        // 3 internal M-cycles (Gambatte `cc += 12`: undone prefetch + 2 wait),
-        // then push PC high, then push PC low. Ticking all internal cycles
-        // before the pushes (rather than leaving one to the trailing
-        // tick_remaining) advances OAM DMA to the correct dma_pos at each push.
-        bus.internal_cycle();
-        bus.internal_cycle();
-        bus.internal_cycle();
+        if crate::cpu::bus::faithful_enabled() {
+            // STAGE 2: the boundary prefetch already read (and charged +4 for)
+            // the opcode this interrupt discards. UNDO it: rewind pc to that
+            // opcode and drop the prefetch flag (re-fetched after the ISR
+            // returns). With the real prefetch supplying one of the 5 interrupt
+            // M-cycles, service ticks 2 internal (the 2 wait cycles) + 2 pushes =
+            // 16; prefetch (4) + 16 = the full 20-cc / 5-M-cycle interrupt cost.
+            self.registers.pc = self.registers.pc.wrapping_sub(1);
+            self.prefetched = false;
+            bus.internal_cycle();
+            bus.internal_cycle();
+        } else {
+            // 3 internal M-cycles (Gambatte `cc += 12`: undone prefetch + 2 wait),
+            // then push PC high, then push PC low. Ticking all internal cycles
+            // before the pushes (rather than leaving one to the trailing
+            // tick_remaining) advances OAM DMA to the correct dma_pos at each push.
+            bus.internal_cycle();
+            bus.internal_cycle();
+            bus.internal_cycle();
+        }
 
         self.registers.sp = self.registers.sp.wrapping_sub(1);
         bus.write(self.registers.sp, (self.registers.pc >> 8) as u8);
@@ -154,6 +217,11 @@ impl SM83 {
         };
         if let Some(flag) = flag {
             self.set_interrupt_flag(flag, false, bus);
+            // STAGE 2: once the timer IRQ is dispatched, drop its recorded fire
+            // cc so the next period's fire is tracked fresh.
+            if flag == registers::InterruptFlag::Timer && crate::cpu::bus::faithful_enabled() {
+                bus.clear_timer_fire_cc();
+            }
         }
         20
     }
@@ -193,6 +261,23 @@ impl SM83 {
             Some(registers::InterruptFlag::Lcd)
         } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Timer, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Timer, mmio) {
             Some(registers::InterruptFlag::Timer)
+        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Serial, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Serial, mmio) {
+            Some(registers::InterruptFlag::Serial)
+        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Joypad, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Joypad, mmio) {
+            Some(registers::InterruptFlag::Joypad)
+        } else {
+            None
+        }
+    }
+
+    /// Like `get_pending_interrupt` but skips the Timer source. Used by the
+    /// STAGE 2 event-cc dispatch gate when the timer IRQ's fire cc has not yet
+    /// been reached, so a lower-priority armed interrupt can still dispatch.
+    fn get_pending_interrupt_excluding_timer(&self, mmio: &memory::mmio::Mmio) -> Option<registers::InterruptFlag> {
+        if self.get_interrupt_enable_flag(registers::InterruptFlag::VBlank, mmio) && self.get_interrupt_flag(registers::InterruptFlag::VBlank, mmio) {
+            Some(registers::InterruptFlag::VBlank)
+        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Lcd, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Lcd, mmio) {
+            Some(registers::InterruptFlag::Lcd)
         } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Serial, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Serial, mmio) {
             Some(registers::InterruptFlag::Serial)
         } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Joypad, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Joypad, mmio) {

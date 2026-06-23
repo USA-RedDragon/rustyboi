@@ -8,7 +8,7 @@ pub enum Flag {
     Zero = 1<<7,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptFlag {
     Joypad = 1<<4,
     Serial = 1<<3,
