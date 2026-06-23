@@ -1528,4 +1528,140 @@ mod tests {
         // A mismatch outside the skip range still fails.
         assert!(compare_dump("region", &[0, 1, 2, 3], &[0, 9, 8, 3], skip).is_err());
     }
+
+    // --- pure string helpers --------------------------------------------
+
+    #[test]
+    fn verdict_tail_trims_newlines_and_caps_length() {
+        assert_eq!(verdict_tail("Passed\n"), "Passed");
+        assert_eq!(verdict_tail("a\nb\n"), "a b");
+        // Only the last 60 characters survive.
+        let long: String = std::iter::repeat_n('x', 100).collect();
+        assert_eq!(verdict_tail(&long).len(), 60);
+    }
+
+    #[test]
+    fn sanitize_artifact_component_keeps_safe_chars() {
+        assert_eq!(sanitize_artifact_component("abc-XYZ_1.9"), "abc-XYZ_1.9");
+        // Path separators, spaces and colons become underscores.
+        assert_eq!(sanitize_artifact_component("a/b c:d"), "a_b_c_d");
+    }
+
+    #[test]
+    fn artifact_stem_composes_rom_mode_oracle() {
+        let case = TestCase {
+            rom_path: PathBuf::from("/roms/my rom.gb"),
+            mode: Mode::Cgb,
+            oracle: Oracle::Serial,
+            revision: None,
+            input: Vec::new(),
+            frames: None,
+            cart_lazy_sram_cs: false,
+        };
+        assert_eq!(artifact_stem(&case), "my_rom_cgb_serial");
+    }
+
+    #[test]
+    fn run_case_inner_rejects_zero_frames() {
+        let case = TestCase {
+            rom_path: PathBuf::from("does-not-exist.gb"),
+            mode: Mode::Dmg,
+            oracle: Oracle::Serial,
+            revision: None,
+            input: Vec::new(),
+            frames: None,
+            cart_lazy_sram_cs: false,
+        };
+        // frames == 0 short-circuits before the ROM is ever read.
+        let err = run_case_inner(&case, &RunOptions::default()).unwrap_err();
+        assert!(err.contains("frame count"), "{err}");
+    }
+
+    // --- InputScript firing logic against a real GB ---------------------
+
+    // A minimal 32 KiB ROM-only cart that jumps to a tight spin loop.
+    fn spin_gb() -> GB {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x100] = 0xC3; // jp 0x0150
+        rom[0x101] = 0x50;
+        rom[0x102] = 0x01;
+        rom[0x150] = 0x18; // jr -2 (spin)
+        rom[0x151] = 0xFE;
+        let cart = Cartridge::from_bytes(&rom).unwrap();
+        let mut gb = GB::new(Hardware::DMG);
+        gb.insert(cart);
+        gb.skip_bios();
+        gb
+    }
+
+    #[test]
+    fn poll_fires_events_when_their_frame_window_is_reached() {
+        let mut gb = spin_gb();
+        let events = vec![
+            InputEvent { frame: 0, ly: None, buttons: BTN_A },
+            InputEvent { frame: 2, ly: None, buttons: BTN_START },
+        ];
+        let mut s = InputScript::new(&events);
+        s.poll(&mut gb, 0);
+        assert_eq!(s.next, 1); // frame-0 event is due at cycle 0
+        s.poll(&mut gb, CYCLES_PER_FRAME as u64);
+        assert_eq!(s.next, 1); // frame-2 event not due at frame 1
+        s.poll(&mut gb, 2 * CYCLES_PER_FRAME as u64);
+        assert_eq!(s.next, 2);
+    }
+
+    #[test]
+    fn poll_same_frame_events_all_fire_at_once() {
+        let mut gb = spin_gb();
+        let events = vec![
+            InputEvent { frame: 0, ly: None, buttons: BTN_A },
+            InputEvent { frame: 0, ly: None, buttons: BTN_B },
+        ];
+        let mut s = InputScript::new(&events);
+        s.poll(&mut gb, 0);
+        assert_eq!(s.next, 2);
+    }
+
+    #[test]
+    fn poll_at_ly_fires_on_match() {
+        let mut gb = spin_gb();
+        // Not stepping keeps LY fixed, so an event targeting the live LY matches.
+        let ly = gb.read_memory(LY);
+        let events = vec![InputEvent { frame: 0, ly: Some(ly), buttons: BTN_A }];
+        let mut s = InputScript::new(&events);
+        s.poll(&mut gb, 0);
+        assert_eq!(s.next, 1);
+    }
+
+    #[test]
+    fn poll_at_ly_force_fires_two_frames_past_due() {
+        let mut gb = spin_gb();
+        // Target an LY the (un-stepped) machine never shows, so only the
+        // two-frames-past-due safety valve can fire the event.
+        let never = gb.read_memory(LY).wrapping_add(1);
+        let events = vec![InputEvent { frame: 0, ly: Some(never), buttons: BTN_A }];
+        let mut s = InputScript::new(&events);
+        s.poll(&mut gb, 0);
+        assert_eq!(s.next, 0); // due, but LY mismatch holds it
+        s.poll(&mut gb, 2 * CYCLES_PER_FRAME as u64 - 1);
+        assert_eq!(s.next, 0);
+        s.poll(&mut gb, 2 * CYCLES_PER_FRAME as u64);
+        assert_eq!(s.next, 1); // force-fired at due + 2 frames
+    }
+
+    #[test]
+    fn poll_frame_ignores_ly_and_gates_on_frame_index() {
+        let mut gb = spin_gb();
+        let events = vec![
+            InputEvent { frame: 1, ly: Some(99), buttons: BTN_A }, // @ly ignored here
+            InputEvent { frame: 3, ly: None, buttons: BTN_B },
+        ];
+        let mut s = InputScript::new(&events);
+        s.poll_frame(&mut gb, 0);
+        assert_eq!(s.next, 0); // frame 1 not yet reached
+        s.poll_frame(&mut gb, 1);
+        assert_eq!(s.next, 1); // reached, @ly disregarded
+        s.poll_frame(&mut gb, 5);
+        assert_eq!(s.next, 2);
+    }
 }

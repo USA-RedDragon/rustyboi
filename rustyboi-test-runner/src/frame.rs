@@ -926,4 +926,244 @@ mod tests {
         assert_eq!(decoded[0], 0x808080);
         assert_eq!(decoded[1], 0x000000);
     }
+
+    // --- normalize_frame -------------------------------------------------
+
+    #[test]
+    fn normalize_monochrome_maps_shades_light_to_dark() {
+        let mut data = Box::new([0u8; FRAMEBUFFER_SIZE]);
+        data[0] = 0; // white
+        data[1] = 1;
+        data[2] = 2;
+        data[3] = 3; // black
+        let out = normalize_frame(Frame::Monochrome(data));
+        assert_eq!(out.len(), FRAMEBUFFER_SIZE);
+        assert_eq!(&out[..4], &[0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000]);
+    }
+
+    #[test]
+    fn normalize_color_packs_rgb_chunks() {
+        let mut data = Box::new([0u8; FRAMEBUFFER_SIZE * 3]);
+        data[0] = 0x12;
+        data[1] = 0x34;
+        data[2] = 0x56;
+        let out = normalize_frame(Frame::Color(data));
+        assert_eq!(out.len(), FRAMEBUFFER_SIZE);
+        assert_eq!(out[0], 0x123456);
+        assert_eq!(out[1], 0x000000);
+    }
+
+    // --- PNG decoder error paths ----------------------------------------
+
+    // A raw PNG chunk (length + type + data + a zeroed CRC the decoder ignores).
+    fn raw_chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut v = (data.len() as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(ty);
+        v.extend_from_slice(data);
+        v.extend_from_slice(&[0, 0, 0, 0]);
+        v
+    }
+
+    fn ihdr(w: u32, h: u32, bit: u8, ct: u8) -> Vec<u8> {
+        let mut d = w.to_be_bytes().to_vec();
+        d.extend_from_slice(&h.to_be_bytes());
+        d.extend_from_slice(&[bit, ct, 0, 0, 0]); // compression/filter/interlace = 0
+        d
+    }
+
+    #[test]
+    fn rejects_bad_png_signature() {
+        assert!(decode_png_rgba(b"\x00PNG\r\n\x1a\n").unwrap_err().contains("not a PNG"));
+        assert!(decode_png_rgba(b"short").is_err());
+    }
+
+    #[test]
+    fn rejects_truncated_chunk() {
+        let mut png = PNG_SIGNATURE.to_vec();
+        // Claim a 0x1000-byte chunk but supply almost nothing.
+        png.extend_from_slice(&0x1000u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&[0, 0, 0]);
+        assert!(decode_png_rgba(&png).unwrap_err().contains("truncated"));
+    }
+
+    #[test]
+    fn rejects_wrong_dimensions() {
+        let mut png = PNG_SIGNATURE.to_vec();
+        png.extend(raw_chunk(b"IHDR", &ihdr(100, 144, 8, 6)));
+        let err = decode_png_rgba(&png).unwrap_err();
+        assert!(err.contains("expected 160x144"), "{err}");
+    }
+
+    #[test]
+    fn rejects_unsupported_color_type_and_bit_depth() {
+        let mut png = PNG_SIGNATURE.to_vec();
+        png.extend(raw_chunk(b"IHDR", &ihdr(160, 144, 8, 5)));
+        assert!(decode_png_rgba(&png).unwrap_err().contains("unsupported PNG color type"));
+
+        let mut png = PNG_SIGNATURE.to_vec();
+        png.extend(raw_chunk(b"IHDR", &ihdr(160, 144, 16, 0)));
+        assert!(decode_png_rgba(&png).unwrap_err().contains("unsupported PNG color type"));
+    }
+
+    #[test]
+    fn rejects_missing_ihdr() {
+        let mut png = PNG_SIGNATURE.to_vec();
+        png.extend(raw_chunk(b"IEND", &[]));
+        assert!(decode_png_rgba(&png).unwrap_err().contains("missing PNG IHDR"));
+    }
+
+    // --- PNG unfilter (filters 1-4) + paeth -----------------------------
+
+    // Build grayscale-8bit raw scanlines with a per-row filter byte.
+    fn gray_rows(filter: u8, first_value: u8, rest_value: u8) -> Vec<u8> {
+        let mut raw = Vec::new();
+        for _ in 0..GB_HEIGHT {
+            raw.push(filter);
+            raw.push(first_value);
+            raw.extend(std::iter::repeat_n(rest_value, GB_WIDTH - 1));
+        }
+        raw
+    }
+
+    #[test]
+    fn unfilters_sub_filter() {
+        // Filter 1 (Sub): each byte adds the pixel to its left; a row of 1s
+        // decodes to the running sum 1, 2, 3, ...
+        let png = build_png(8, 0, &[], &gray_rows(1, 1, 1));
+        let d = decode_png_rgba(&png).unwrap();
+        assert_eq!(d[0], 0x010101);
+        assert_eq!(d[1], 0x020202);
+        assert_eq!(d[9], 0x0A0A0A);
+    }
+
+    #[test]
+    fn unfilters_up_filter() {
+        // Row 0 (filter 0) is a flat 0x10; every later row (filter 2, Up) adds
+        // 0x05 to the pixel above it.
+        let mut raw = Vec::new();
+        raw.push(0u8);
+        raw.extend(std::iter::repeat_n(0x10u8, GB_WIDTH));
+        for _ in 1..GB_HEIGHT {
+            raw.push(2u8);
+            raw.extend(std::iter::repeat_n(0x05u8, GB_WIDTH));
+        }
+        let d = decode_png_rgba(&build_png(8, 0, &[], &raw)).unwrap();
+        assert_eq!(d[0], 0x101010);
+        assert_eq!(d[GB_WIDTH], 0x151515);
+        assert_eq!(d[GB_WIDTH * 2], 0x1A1A1A);
+    }
+
+    #[test]
+    fn unfilters_average_filter() {
+        // Row 0 flat 0x10; row 1 (filter 3, Average) adds (left+up)/2 to a 0
+        // scanline: x0 -> (0+16)/2 = 8, x1 -> (8+16)/2 = 12.
+        let mut raw = Vec::new();
+        raw.push(0u8);
+        raw.extend(std::iter::repeat_n(0x10u8, GB_WIDTH));
+        raw.push(3u8);
+        raw.extend(std::iter::repeat_n(0x00u8, GB_WIDTH));
+        for _ in 2..GB_HEIGHT {
+            raw.push(0u8);
+            raw.extend(std::iter::repeat_n(0x00u8, GB_WIDTH));
+        }
+        let d = decode_png_rgba(&build_png(8, 0, &[], &raw)).unwrap();
+        assert_eq!(d[GB_WIDTH], 0x080808);
+        assert_eq!(d[GB_WIDTH + 1], 0x0C0C0C);
+    }
+
+    #[test]
+    fn unfilters_paeth_filter() {
+        // A filter-4 (Paeth) row decodes without error against a flat row above.
+        let mut raw = Vec::new();
+        raw.push(0u8);
+        raw.extend(std::iter::repeat_n(0x10u8, GB_WIDTH));
+        raw.push(4u8);
+        raw.extend(std::iter::repeat_n(0x00u8, GB_WIDTH));
+        for _ in 2..GB_HEIGHT {
+            raw.push(0u8);
+            raw.extend(std::iter::repeat_n(0x00u8, GB_WIDTH));
+        }
+        let d = decode_png_rgba(&build_png(8, 0, &[], &raw)).unwrap();
+        // x0: paeth(left=0, up=16, upleft=0) = 16; x1+: paeth(16,16,16) = 16.
+        assert_eq!(d[GB_WIDTH], 0x101010);
+        assert_eq!(d[GB_WIDTH + 1], 0x101010);
+    }
+
+    #[test]
+    fn paeth_predictor_picks_each_neighbor() {
+        assert_eq!(paeth_predictor(2, 2, 0), 2); // left wins
+        assert_eq!(paeth_predictor(0, 10, 0), 10); // up wins
+        assert_eq!(paeth_predictor(8, 1, 4), 4); // up-left wins
+    }
+
+    #[test]
+    fn rejects_unsupported_filter_type() {
+        let png = build_png(8, 0, &[], &gray_rows(5, 0, 0));
+        assert!(decode_png_rgba(&png).unwrap_err().contains("unsupported PNG filter type 5"));
+    }
+
+    // --- color types 2 (RGB) and 6 (RGBA) -------------------------------
+
+    #[test]
+    fn decodes_rgb_color_type_2() {
+        let mut raw = Vec::new();
+        for _ in 0..GB_HEIGHT {
+            raw.push(0u8); // filter none
+            raw.extend_from_slice(&[0x12, 0x34, 0x56]);
+            raw.extend(std::iter::repeat_n(0u8, GB_WIDTH * 3 - 3));
+        }
+        let d = decode_png_rgba(&build_png(8, 2, &[], &raw)).unwrap();
+        assert_eq!(d[0], 0x123456);
+        assert_eq!(d[1], 0x000000);
+    }
+
+    #[test]
+    fn decodes_rgba_color_type_6_dropping_alpha() {
+        let mut raw = Vec::new();
+        for _ in 0..GB_HEIGHT {
+            raw.push(0u8); // filter none
+            raw.extend_from_slice(&[0x11, 0x22, 0x33, 0x7F]); // alpha 0x7F ignored
+            raw.extend(std::iter::repeat_n(0u8, GB_WIDTH * 4 - 4));
+        }
+        let d = decode_png_rgba(&build_png(8, 6, &[], &raw)).unwrap();
+        assert_eq!(d[0], 0x112233);
+    }
+
+    // --- mismatch length short-circuits + accumulation ------------------
+
+    #[test]
+    fn frame_buffer_mismatch_short_circuits_on_wrong_length() {
+        let full = vec![0u32; FRAMEBUFFER_SIZE];
+        let m = frame_buffer_mismatch(&[0u32; 4], &full).unwrap();
+        assert_eq!(m.differing_pixels, FRAMEBUFFER_SIZE);
+        assert_eq!((m.max_x, m.max_y), (GB_WIDTH - 1, GB_HEIGHT - 1));
+        // The shootout grader short-circuits the same way.
+        assert!(shootout_mismatch(&[0u32; 4], &full).is_some());
+    }
+
+    #[test]
+    fn frame_mismatch_accumulates_bounds_over_multiple_pixels() {
+        let mut left = vec![0u32; FRAMEBUFFER_SIZE];
+        let right = vec![0u32; FRAMEBUFFER_SIZE];
+        left[5] = 0xFFFFFF; // (x=5, y=0)
+        left[3 * GB_WIDTH + 10] = 0xFFFFFF; // (x=10, y=3)
+        let m = frame_buffer_mismatch(&left, &right).unwrap();
+        assert_eq!(m.differing_pixels, 2);
+        assert_eq!((m.first_x, m.first_y), (5, 0));
+        assert_eq!((m.max_x, m.max_y), (10, 3));
+        assert_eq!((m.actual, m.expected), (0xFFFFFF, 0));
+    }
+
+    #[test]
+    fn hex_output_errors_on_too_wide_and_no_digits() {
+        // Twenty tiles fill the framebuffer exactly; a 21st tile overflows it.
+        let frame = frame_with_hex(&"0".repeat(20));
+        let msg = hex_output_mismatch(&frame, &"0".repeat(21)).unwrap();
+        assert!(msg.contains("too wide"), "{msg}");
+
+        let white = vec![0xFFFFFF; FRAMEBUFFER_SIZE];
+        assert!(hex_output_mismatch(&white, "").unwrap().contains("did not contain any hex digits"));
+        assert!(hex_output_mismatch(&white, "zz").unwrap().contains("did not contain any hex digits"));
+    }
 }

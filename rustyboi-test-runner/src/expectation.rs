@@ -1065,4 +1065,203 @@ plain|dmg|png|/r.gb|/ref.png
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn gambatte_grading_expands_via_cases_for_rom() {
+        // `auto` mode + `gambatte` grading defers oracle/mode detection to the
+        // filename walker, expanding one line into several cases.
+        let manifest = "hex|auto|gambatte|foo_dmg08_cgb04c_outA.gb";
+        let cases = parse_manifest(manifest, &all_modes()).unwrap();
+        assert_eq!(cases.len(), 2);
+        assert_eq!(cases[0].mode, Mode::Cgb);
+        assert_eq!(cases[1].mode, Mode::Dmg);
+        // gambatte grading with any non-`auto` mode is rejected.
+        assert!(parse_manifest("hex|dmg|gambatte|x.gb", &all_modes()).is_err());
+        assert!(parse_manifest("hex|cgb|gambatte|x.gb", &all_modes()).is_err());
+    }
+
+    #[test]
+    fn parses_png_shootout_refs_and_frames() {
+        // Field 4 is the `;`-separated ref list; field 5 the positional budget.
+        let manifest =
+            "sh|cgb|png_shootout|/r.gb|/refs/a.png; /refs/b.png ;|frames=300";
+        let cases = parse_manifest(manifest, &all_modes()).unwrap();
+        assert_eq!(cases.len(), 1);
+        assert!(matches!(
+            &cases[0].oracle,
+            Oracle::PngShootout { refs, frames: 300 }
+                if refs == &[PathBuf::from("/refs/a.png"), PathBuf::from("/refs/b.png")]
+        ));
+        // The positional field-5 budget lives inside the oracle, not the case.
+        assert_eq!(cases[0].frames, None);
+
+        // Missing budget defaults to 0 frames.
+        let no_frames = parse_manifest("sh|cgb|png_shootout|/r.gb|/refs/a.png", &all_modes()).unwrap();
+        assert!(matches!(no_frames[0].oracle, Oracle::PngShootout { frames: 0, .. }));
+
+        // Empty ref list and a non-numeric budget both fail.
+        assert!(parse_manifest("sh|cgb|png_shootout|/r.gb|;;", &all_modes()).is_err());
+        assert!(parse_manifest("sh|cgb|png_shootout|/r.gb|/a.png|frames=xx", &all_modes()).is_err());
+    }
+
+    #[test]
+    fn parses_png_layout_and_oamdump_gradings() {
+        let manifest = "\
+lay|cgb|png_layout|/r.gb|/refs/scxly.png
+dma|cgb|oamdump|/r.gb|/refs/dma.dump
+";
+        let cases = parse_manifest(manifest, &all_modes()).unwrap();
+        assert!(matches!(
+            &cases[0].oracle,
+            Oracle::CspPngLayout { path } if path == Path::new("/refs/scxly.png")
+        ));
+        assert!(matches!(
+            &cases[1].oracle,
+            Oracle::RegionDump { region: DumpRegion::Oam, path }
+                if path == Path::new("/refs/dma.dump")
+        ));
+    }
+
+    #[test]
+    fn parses_every_rev_token_and_rejects_unknown() {
+        let table = [
+            ("dmg", Hardware::DMG),
+            ("dmg0", Hardware::DMG0),
+            ("mgb", Hardware::MGB),
+            ("sgb", Hardware::SGB),
+            ("sgb2", Hardware::SGB2),
+            ("cgb0", Hardware::CGB0),
+            ("cgbb", Hardware::CGBB),
+            ("cgb", Hardware::CGB),
+            ("cgbe", Hardware::CGBE),
+            ("agb", Hardware::AGB),
+        ];
+        for (tok, hw) in table {
+            let line = format!("m|cgb|mooneye|/r.gb|rev={tok}");
+            let cases = parse_manifest(&line, &all_modes()).unwrap();
+            assert_eq!(cases[0].revision, Some(hw), "rev={tok}");
+        }
+        // Cases with no rev= token keep the mode default.
+        let plain = parse_manifest("m|cgb|mooneye|/r.gb", &all_modes()).unwrap();
+        assert_eq!(plain[0].revision, None);
+        // An unrecognized revision name is a hard error.
+        assert!(parse_manifest("m|cgb|mooneye|/r.gb|rev=xyz", &all_modes()).is_err());
+    }
+
+    #[test]
+    fn parses_cart_lazy_sram_cs_flag() {
+        let manifest = "\
+lazy|cgb|sram|/r.gb|/refs/real.sav|cart=lazy_sram_cs
+strict|cgb|sram|/r.gb|/refs/real.sav
+";
+        let cases = parse_manifest(manifest, &all_modes()).unwrap();
+        assert!(cases[0].cart_lazy_sram_cs);
+        assert!(!cases[1].cart_lazy_sram_cs);
+    }
+
+    #[test]
+    fn agb_twinning_generates_and_drops_cgb_templates() {
+        // Hex-output filename: pure string oracle, no sibling files needed.
+        let rom = Path::new("foo_dmg08_cgb04c_outA.gb");
+
+        // AGB-only: the CGB template is generated (to twin) then dropped.
+        let agb_only: HashSet<Mode> = [Mode::Agb].into_iter().collect();
+        let cases = cases_for_rom(rom, &agb_only);
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].mode, Mode::Agb);
+
+        // CGB + AGB: the CGB case survives and is twinned to AGB.
+        let cgb_agb: HashSet<Mode> = [Mode::Cgb, Mode::Agb].into_iter().collect();
+        let cases = cases_for_rom(rom, &cgb_agb);
+        assert_eq!(cases.len(), 2);
+        assert!(cases.iter().any(|c| c.mode == Mode::Cgb));
+        assert!(cases.iter().any(|c| c.mode == Mode::Agb));
+
+        // No AGB requested: no twinning at all.
+        let cases = cases_for_rom(rom, &all_modes());
+        assert!(cases.iter().all(|c| c.mode != Mode::Agb));
+    }
+
+    #[test]
+    fn dmg_dump_skip_selects_oam_window_for_fexx_dumpers() {
+        assert_eq!(dmg_dump_skip("x_fexx_ffxx_dumper_1"), vec![0x00..0xA0]);
+        assert_eq!(dmg_dump_skip("x_fexx_read_reset_set_dumper"), vec![0x00..0xA0]);
+        assert!(dmg_dump_skip("x_wram_dumper_1").is_empty());
+    }
+
+    #[test]
+    fn string_oracle_branches_on_audio_hex_and_empty() {
+        assert_eq!(
+            string_oracle("s_dmg08_outaudio0", "dmg08_out"),
+            Some(Oracle::Audio { marker: "dmg08_out", audible: false })
+        );
+        assert_eq!(
+            string_oracle("s_dmg08_outaudio1", "dmg08_out"),
+            Some(Oracle::Audio { marker: "dmg08_out", audible: true })
+        );
+        assert_eq!(
+            string_oracle("s_dmg08_out1A", "dmg08_out"),
+            Some(Oracle::Hex { marker: "dmg08_out", expected: "1A".to_string() })
+        );
+        // No hex digits after the marker -> not a hex oracle.
+        assert_eq!(string_oracle("s_dmg08_outZ", "dmg08_out"), None);
+        // Marker not present at all.
+        assert_eq!(string_oracle("nothing", "dmg08_out"), None);
+    }
+
+    #[test]
+    fn oracle_labels_are_descriptive() {
+        assert_eq!(
+            Oracle::Hex { marker: "out", expected: "1A".to_string() }.label(),
+            "out1A"
+        );
+        assert_eq!(Oracle::Audio { marker: "out", audible: true }.label(), "outaudio1");
+        assert_eq!(Oracle::Audio { marker: "out", audible: false }.label(), "outaudio0");
+        assert_eq!(Oracle::Png { path: PathBuf::from("/a/b/acid2.png") }.label(), "acid2.png");
+        assert_eq!(
+            Oracle::SramDump { path: PathBuf::from("/x/real.sav"), skip: Vec::new() }.label(),
+            "real.sav"
+        );
+        assert_eq!(Oracle::Serial.label(), "serial");
+        assert_eq!(
+            Oracle::SerialText { pass: "OK".to_string(), fail: None }.label(),
+            "serial_text[OK]"
+        );
+        assert_eq!(Oracle::BlarggMem.label(), "blargg_mem");
+        assert_eq!(Oracle::MemValue { addr: 0xFF82, expected: 0x01 }.label(), "mem[FF82]=01");
+        assert_eq!(Oracle::MooneyeFib.label(), "mooneye");
+        assert_eq!(Oracle::MooneyeFibEd.label(), "mooneye_ed");
+        assert_eq!(
+            Oracle::PngShootout { refs: vec![PathBuf::from("/x/tetris.png")], frames: 60 }.label(),
+            "tetris.png"
+        );
+    }
+
+    #[test]
+    fn mode_progress_chars_and_dump_region_bases() {
+        assert_eq!(Mode::Dmg.progress_char(), 'd');
+        assert_eq!(Mode::Cgb.progress_char(), 'c');
+        assert_eq!(Mode::Agb.progress_char(), 'a');
+        assert_eq!(DumpRegion::Oam.base_address(), 0xFE00);
+        assert_eq!(DumpRegion::Vram.base_address(), 0x8000);
+    }
+
+    #[test]
+    fn input_script_release_multibutton_and_whitespace() {
+        // '-' releases everything; '+' joins buttons (button names may be padded
+        // and mixed-case); whole tokens may carry surrounding whitespace; LY 153
+        // is the inclusive upper bound.
+        let events = parse_input_script(" 10@153:Up + A , 20:- ").unwrap();
+        assert_eq!(
+            events,
+            vec![
+                InputEvent { frame: 10, ly: Some(153), buttons: BTN_UP | BTN_A },
+                InputEvent { frame: 20, ly: None, buttons: 0 },
+            ]
+        );
+        // Empty tokens (trailing comma) are skipped.
+        assert_eq!(parse_input_script("5:a,").unwrap().len(), 1);
+        // LY 154 exceeds the 0-153 scanline range.
+        assert!(parse_input_script("10@154:a").is_err());
+    }
 }
