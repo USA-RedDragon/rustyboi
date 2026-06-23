@@ -54,7 +54,9 @@ pub enum LoadPurpose {
 /// `content://com.android.externalstorage.documents/tree/.../document/...`).
 /// `rel_path` is a slash-separated path from the picked tree root used purely
 /// for display.
-#[cfg(target_os = "android")]
+///
+/// The type is host-compilable (its consumers stay Android-gated) so the pure
+/// library list/label logic can be unit-tested off-device.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryEntry {
     pub uri: String,

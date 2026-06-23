@@ -6,7 +6,7 @@ pub mod ios_bridge;
 mod debug;
 mod file_dialog;
 mod keybind_settings;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 pub mod library;
 mod touch_controls;
 mod ui;
