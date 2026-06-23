@@ -617,6 +617,16 @@ pub struct Ppu {
     cgb_tile_index_is_tile_data: bool,
     #[serde(default)]
     pending_lcdc_events: Vec<PendingLcdcEvent>,
+    // Exact-cc latch for a mid-mode-3 CGB LCDC bit4 (BGWindowTileDataSelect)
+    // toggle. The per-dot pending-event queue quantizes the bit4 commit to a
+    // dot boundary, which on the bgtiledata_spx08_ds tests lands the change one
+    // BG-fetch substep late (the change should split a tile between its
+    // TileDataLow and TileDataHigh fetches, but the dot model applies it a
+    // substep too late). Record the exact abs_cc at which the change becomes
+    // visible (`write_cc + 2` PPU dots, Gambatte's `setLcdc(data, cc + 2)`) and
+    // let the fetcher consult it per-substep. (commit_cc, new_lcdc, old_lcdc).
+    #[serde(default)]
+    lcdc_b4_exact: Option<(u64, u8, u8)>,
     #[serde(default)]
     cgb_color_conversion: CgbColorConversion,
     #[serde(skip, default)]
@@ -708,6 +718,7 @@ impl Ppu {
             lcdc: 0,
             cgb_tile_index_is_tile_data: false,
             pending_lcdc_events: Vec::new(),
+            lcdc_b4_exact: None,
             cgb_color_conversion: CgbColorConversion::Linear,
             fetch_debug_events_enabled: false,
             fetch_debug_events: Vec::new(),
@@ -815,6 +826,20 @@ impl Ppu {
         let display_stays_enabled = (old_lcdc & display_enable) != 0 && (value & display_enable) != 0;
 
         if mmio.is_cgb_features_enabled() && display_stays_enabled {
+            // Exact-cc latch for the BG-fetch bit4 effect (PoC). When bit4
+            // toggles during active pixel transfer, the per-dot queue quantizes
+            // the commit to a dot boundary and lands it one fetch substep late.
+            // Record the exact abs_cc the change should be visible to the
+            // fetcher so each substep samples it on the correct side. Gambatte
+            // applies the new LCDC at `cc + 2` (PPU dots); a +2 abs_cc offset
+            // lands the bit4 change exactly on the BG-fetch substep that should
+            // first see it (verified against bgtiledata_spx08_ds_3/_4).
+            let tds = LCDCFlags::BGWindowTileDataSelect as u8;
+            if self.state == State::PixelTransfer && (old_lcdc & tds) != (value & tds) {
+                let ds = mmio.is_double_speed_mode();
+                let commit_cc = self.write_cc(ds) + 2;
+                self.lcdc_b4_exact = Some((commit_cc, value, old_lcdc));
+            }
             self.pending_lcdc_events.push(PendingLcdcEvent {
                 cycles_remaining: 1,
                 base_value: old_lcdc,
@@ -852,6 +877,9 @@ impl Ppu {
                     }
                     PendingLcdcEventKind::Full => {
                         self.set_lcdc_visible(event.value, mmio.is_cgb_features_enabled(), mmio.is_double_speed_mode());
+                        // The settled value now lives in self.lcdc /
+                        // cgb_tile_index_is_tile_data; drop the exact-cc override.
+                        self.lcdc_b4_exact = None;
                     }
                 }
             } else {
@@ -924,6 +952,33 @@ impl Ppu {
     }
 
     fn fetcher_lcdc_state(&self) -> fetcher::FetcherLcdcState {
+        // Exact-cc resolution of a pending mid-mode-3 bit4 toggle (PoC). If a
+        // bit4 change is latched and this substep's abs_cc has not yet reached
+        // its exact commit cc, present the PRE-commit bit4 (and suppress the
+        // CGB tile-index-as-data quirk, which only arms on the realized fall).
+        // This lets a single tile straddle the change: TileDataLow before the
+        // commit uses the old method, TileDataHigh after it uses the new one.
+        if let Some((commit_cc, new_val, old_val)) = self.lcdc_b4_exact {
+            let tds = LCDCFlags::BGWindowTileDataSelect as u8;
+            if self.abs_cc < commit_cc {
+                // Pre-commit: old bit4, no quirk yet.
+                let lcdc = (self.lcdc & !tds) | (old_val & tds);
+                return fetcher::FetcherLcdcState {
+                    lcdc,
+                    cgb_tile_index_is_tile_data: false,
+                };
+            } else {
+                // Post-commit: new bit4. Re-derive the falling-edge quirk
+                // (set in set_lcdc_visible) so a 1->0 fall returns the tile
+                // index as data for tiles < 0x80.
+                let lcdc = (self.lcdc & !tds) | (new_val & tds);
+                let quirk = (old_val & tds) != 0 && (new_val & tds) == 0;
+                return fetcher::FetcherLcdcState {
+                    lcdc,
+                    cgb_tile_index_is_tile_data: quirk,
+                };
+            }
+        }
         fetcher::FetcherLcdcState {
             lcdc: self.lcdc,
             cgb_tile_index_is_tile_data: self.cgb_tile_index_is_tile_data,
