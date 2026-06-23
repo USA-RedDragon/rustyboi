@@ -619,3 +619,136 @@ macro_rules! libretro_core {
         }
     };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cstr(ptr: *const std::ffi::c_char) -> String {
+        assert!(!ptr.is_null(), "pointer should be interned, not null");
+        unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned()
+    }
+
+    fn sample_options() -> CoreOptions {
+        CoreOptions {
+            categories: vec![OptionCategory { key: "cat", desc: "Category", info: "cat info" }],
+            options: vec![OptionDef {
+                key: "opt",
+                desc: "Option",
+                desc_categorized: "Opt",
+                info: "opt info",
+                category: "cat",
+                values: vec![
+                    OptionValue { value: "a".into(), label: "Label A".into() },
+                    OptionValue { value: "b".into(), label: "Label B".into() },
+                ],
+                default: "b".into(),
+            }],
+        }
+    }
+
+    // Both C tables are NUL-key terminated (the frontend scans until key==null),
+    // and every string the definition points at is interned and readable.
+    #[test]
+    fn build_terminators_and_interning() {
+        let owned = OwnedOptions::build(&sample_options());
+
+        // A trailing all-zero (null-key) terminator on each table.
+        assert_eq!(owned.categories.len(), 2);
+        assert!(owned.categories.last().unwrap().key.is_null());
+        assert_eq!(owned.definitions.len(), 2);
+        assert!(owned.definitions.last().unwrap().key.is_null());
+
+        let cat = &owned.categories[0];
+        assert_eq!(cstr(cat.key), "cat");
+        assert_eq!(cstr(cat.desc), "Category");
+        assert_eq!(cstr(cat.info), "cat info");
+
+        let def = &owned.definitions[0];
+        assert_eq!(cstr(def.key), "opt");
+        assert_eq!(cstr(def.desc), "Option");
+        assert_eq!(cstr(def.desc_categorized), "Opt");
+        assert_eq!(cstr(def.info), "opt info");
+        assert_eq!(cstr(def.category_key), "cat");
+        assert_eq!(cstr(def.default_value), "b");
+
+        // Each value/label is interned in order; slots past the list stay null.
+        assert_eq!(cstr(def.values[0].value), "a");
+        assert_eq!(cstr(def.values[0].label), "Label A");
+        assert_eq!(cstr(def.values[1].value), "b");
+        assert_eq!(cstr(def.values[1].label), "Label B");
+        assert!(def.values[2].value.is_null());
+        assert!(def.values[2].label.is_null());
+    }
+
+    // An empty table still yields the two NUL-key terminators the frontend needs.
+    #[test]
+    fn build_empty_yields_terminators() {
+        let owned = OwnedOptions::build(&CoreOptions::default());
+        assert_eq!(owned.categories.len(), 1);
+        assert!(owned.categories[0].key.is_null());
+        assert_eq!(owned.definitions.len(), 1);
+        assert!(owned.definitions[0].key.is_null());
+    }
+
+    // A value list of exactly MAX_VALUES leaves no room for the null terminator
+    // in the fixed 128-slot array, so build must reject it.
+    #[test]
+    #[should_panic(expected = "too many values")]
+    fn build_rejects_oversized_value_list() {
+        let values = (0..128)
+            .map(|i| OptionValue { value: i.to_string(), label: i.to_string() })
+            .collect();
+        let opts = CoreOptions {
+            categories: vec![],
+            options: vec![OptionDef {
+                key: "k",
+                desc: "",
+                desc_categorized: "",
+                info: "",
+                category: "",
+                values,
+                default: "0".into(),
+            }],
+        };
+        OwnedOptions::build(&opts);
+    }
+
+    // A C string cannot carry an interior NUL; build must panic rather than
+    // silently truncate the option key.
+    #[test]
+    #[should_panic(expected = "interior NUL")]
+    fn build_rejects_interior_nul() {
+        let opts = CoreOptions {
+            categories: vec![],
+            options: vec![OptionDef {
+                key: "bad\0key",
+                desc: "",
+                desc_categorized: "",
+                info: "",
+                category: "",
+                values: vec![OptionValue { value: "v".into(), label: "l".into() }],
+                default: "v".into(),
+            }],
+        };
+        OwnedOptions::build(&opts);
+    }
+
+    // Geometry maps field-for-field into the C struct, aspect_ratio included.
+    #[test]
+    fn geometry_into_ffi() {
+        let g = Geometry {
+            base_width: 160,
+            base_height: 144,
+            max_width: 256,
+            max_height: 224,
+            aspect_ratio: 10.0 / 9.0,
+        };
+        let c: retro_game_geometry = g.into();
+        assert_eq!(c.base_width, 160);
+        assert_eq!(c.base_height, 144);
+        assert_eq!(c.max_width, 256);
+        assert_eq!(c.max_height, 224);
+        assert_eq!(c.aspect_ratio, 10.0f32 / 9.0);
+    }
+}

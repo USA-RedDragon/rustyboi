@@ -141,3 +141,173 @@ pub fn memory_data<C: Core>(core: &mut C, id: c_uint) -> *mut c_void {
 pub fn memory_size<C: Core>(core: &mut C, id: c_uint) -> usize {
     core.memory(id).map_or(0, |r| r.len())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AvInfo, Environment, Frame, Game, Geometry, SystemInfo};
+
+    // A minimal Core that records what dispatch handed it, so the guard/decode
+    // logic in the wrappers can be observed without a real emulator.
+    #[derive(Default)]
+    struct FakeCore {
+        loaded_path: Option<String>,
+        loaded_len: usize,
+        load_calls: u32,
+        cheats: Vec<(u32, bool, String)>,
+        system_ram: Vec<u8>,
+        empty_region: Vec<u8>,
+    }
+
+    impl Core for FakeCore {
+        fn info() -> SystemInfo {
+            SystemInfo {
+                library_name: c"fake",
+                library_version: c"0",
+                valid_extensions: c"gb",
+                need_fullpath: false,
+                block_extract: false,
+            }
+        }
+        fn new() -> Self {
+            FakeCore { system_ram: vec![1, 2, 3, 4], ..Default::default() }
+        }
+        fn av_info(&self) -> AvInfo {
+            AvInfo {
+                geometry: Geometry {
+                    base_width: 1,
+                    base_height: 1,
+                    max_width: 1,
+                    max_height: 1,
+                    aspect_ratio: 1.0,
+                },
+                fps: 60.0,
+                sample_rate: 44100.0,
+            }
+        }
+        fn load_game(&mut self, game: &Game, _env: &Environment) -> bool {
+            self.load_calls += 1;
+            self.loaded_path = game.path.map(str::to_owned);
+            self.loaded_len = game.data.len();
+            true
+        }
+        fn run(&mut self, _frame: &mut Frame) {}
+        fn cheat_set(&mut self, index: u32, enabled: bool, code: &str) {
+            self.cheats.push((index, enabled, code.to_owned()));
+        }
+        fn memory(&mut self, id: c_uint) -> Option<&mut [u8]> {
+            match id {
+                2 => Some(&mut self.system_ram),
+                9 => Some(&mut self.empty_region),
+                _ => None,
+            }
+        }
+    }
+
+    fn game_info(path: *const c_char, data: &[u8]) -> retro_game_info {
+        retro_game_info {
+            path,
+            data: data.as_ptr() as *const c_void,
+            size: data.len(),
+            meta: std::ptr::null(),
+        }
+    }
+
+    #[test]
+    fn api_version_is_one() {
+        assert_eq!(api_version(), 1);
+    }
+
+    #[test]
+    fn get_system_info_null_is_ignored() {
+        // Null out-ptr must early-return, not deref.
+        get_system_info::<FakeCore>(std::ptr::null_mut());
+
+        let mut info: retro_system_info = unsafe { std::mem::zeroed() };
+        get_system_info::<FakeCore>(&mut info);
+        assert_eq!(info.library_name, FakeCore::info().library_name.as_ptr());
+    }
+
+    #[test]
+    fn load_game_null_and_empty_guards() {
+        let mut core = FakeCore::new();
+        assert!(!load_game(&mut core, std::ptr::null()));
+
+        let mut null_data = game_info(std::ptr::null(), &[]);
+        null_data.data = std::ptr::null();
+        null_data.size = 4;
+        assert!(!load_game(&mut core, &null_data));
+
+        let data = [0u8; 4];
+        let mut zero_size = game_info(std::ptr::null(), &data);
+        zero_size.size = 0;
+        assert!(!load_game(&mut core, &zero_size));
+
+        assert_eq!(core.load_calls, 0, "no guard-rejected call should reach the core");
+    }
+
+    #[test]
+    fn load_game_path_decode() {
+        let data = [0xAAu8; 8];
+
+        // path set.
+        let mut core = FakeCore::new();
+        let path = std::ffi::CString::new("/roms/game.gb").unwrap();
+        assert!(load_game(&mut core, &game_info(path.as_ptr(), &data)));
+        assert_eq!(core.loaded_path.as_deref(), Some("/roms/game.gb"));
+        assert_eq!(core.loaded_len, 8);
+
+        // null path.
+        let mut core = FakeCore::new();
+        assert!(load_game(&mut core, &game_info(std::ptr::null(), &data)));
+        assert_eq!(core.loaded_path, None);
+
+        // invalid UTF-8 path decodes to None (0xFF is not valid UTF-8).
+        let mut core = FakeCore::new();
+        let bad: [c_char; 2] = [0xFFu8 as c_char, 0];
+        assert!(load_game(&mut core, &game_info(bad.as_ptr(), &data)));
+        assert_eq!(core.loaded_path, None);
+    }
+
+    #[test]
+    fn serialize_unserialize_null_guards() {
+        let mut core = FakeCore::new();
+        assert!(!serialize(&mut core, std::ptr::null_mut(), 16));
+        assert!(!unserialize(&mut core, std::ptr::null(), 16));
+    }
+
+    #[test]
+    fn cheat_set_guards_and_decode() {
+        let mut core = FakeCore::new();
+        // null code pointer.
+        cheat_set(&mut core, 0, true, std::ptr::null());
+        // invalid UTF-8.
+        let bad: [c_char; 2] = [0xFFu8 as c_char, 0];
+        cheat_set(&mut core, 1, true, bad.as_ptr());
+        assert!(core.cheats.is_empty());
+
+        // valid code reaches the core with its args intact.
+        let code = std::ffi::CString::new("ABCD-1234").unwrap();
+        cheat_set(&mut core, 7, true, code.as_ptr());
+        assert_eq!(core.cheats, vec![(7, true, "ABCD-1234".to_string())]);
+    }
+
+    #[test]
+    fn memory_data_and_size_agree() {
+        let mut core = FakeCore::new();
+
+        // Present, non-empty region: data ptr non-null and matches size.
+        let ptr = memory_data(&mut core, 2);
+        assert!(!ptr.is_null());
+        assert_eq!(memory_size(&mut core, 2), 4);
+        assert_eq!(ptr as usize, core.system_ram.as_ptr() as usize);
+
+        // Present but empty region collapses to null / 0.
+        assert!(memory_data(&mut core, 9).is_null());
+        assert_eq!(memory_size(&mut core, 9), 0);
+
+        // Unknown id.
+        assert!(memory_data(&mut core, 123).is_null());
+        assert_eq!(memory_size(&mut core, 123), 0);
+    }
+}
