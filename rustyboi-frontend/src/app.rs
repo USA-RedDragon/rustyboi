@@ -1107,6 +1107,167 @@ mod restart_tests {
 }
 
 #[cfg(test)]
+mod pause_and_load_tests {
+    use super::App;
+    use crate::contract::{Frontend, PauseHint};
+    use rustyboi_session::action::PaletteChoice;
+    use rustyboi_session::config::Config;
+    use rustyboi_session::ports::{MemRumble, MemStorage, MemWebcam};
+    use rustyboi_session::session::{Ports, Session};
+
+    fn ports() -> Ports {
+        Ports {
+            storage: Box::new(MemStorage::new()),
+            rumble: Box::new(MemRumble::default()),
+            webcam: Box::new(MemWebcam::default()),
+        }
+    }
+
+    // A paused app with no content (the `should_pause = true` startup state):
+    // every pause flag set and the auto-pause latch armed.
+    fn paused_app() -> App {
+        let session = Session::new(Config::default(), ports(), [0u8; 32]);
+        App::new(session, PaletteChoice::Grayscale, None, None, true)
+    }
+
+    /// Minimal valid 32KB NoMBC ROM.
+    fn tiny_rom() -> Vec<u8> {
+        vec![0u8; 0x8000]
+    }
+
+    // TogglePause flips user pause and mirrors it onto manual + effective pause.
+    #[test]
+    fn on_pause_changed_toggle_flips_all_three() {
+        let mut a = paused_app();
+        assert!(a.user_paused && a.manually_paused && a.is_paused);
+        a.on_pause_changed(PauseHint::TogglePause);
+        assert!(!a.user_paused && !a.manually_paused && !a.is_paused, "toggle off");
+        a.on_pause_changed(PauseHint::TogglePause);
+        assert!(a.user_paused && a.manually_paused && a.is_paused, "toggle back on");
+    }
+
+    // Restart clears error/frame and every pause flag (fresh, running machine).
+    #[test]
+    fn on_pause_changed_restart_clears_everything() {
+        let mut a = paused_app();
+        a.error_state = Some("boom".into());
+        a.on_pause_changed(PauseHint::Restart);
+        assert!(a.error_state.is_none());
+        assert!(a.frame.is_none());
+        assert!(!a.user_paused && !a.manually_paused && !a.is_paused);
+    }
+
+    // ClearError drops the error but leaves the machine paused for debugging.
+    #[test]
+    fn on_pause_changed_clear_error_pauses() {
+        let mut a = paused_app();
+        a.user_paused = false;
+        a.error_state = Some("boom".into());
+        a.on_pause_changed(PauseHint::ClearError);
+        assert!(a.error_state.is_none());
+        assert!(a.is_paused, "cleared error keeps a pause");
+        assert!(!a.manually_paused, "manual mirrors user_paused (false)");
+    }
+
+    // FrameAdvance forces a manual/user pause (the machine stops after the step).
+    #[test]
+    fn on_pause_changed_frame_advance_forces_manual() {
+        let mut a = paused_app();
+        a.user_paused = false;
+        a.manually_paused = false;
+        a.on_pause_changed(PauseHint::FrameAdvance);
+        assert!(a.user_paused && a.manually_paused);
+    }
+
+    // SetHardware rebuilds the machine (clear error + frame) but leaves the pause
+    // state exactly as the user had it.
+    #[test]
+    fn on_pause_changed_set_hardware_keeps_pause() {
+        let mut a = paused_app();
+        a.error_state = Some("boom".into());
+        a.frame = None;
+        a.user_paused = false;
+        a.manually_paused = false;
+        a.is_paused = false;
+        a.on_pause_changed(PauseHint::SetHardware);
+        assert!(a.error_state.is_none(), "error cleared");
+        assert!(!a.is_paused && !a.user_paused && !a.manually_paused, "pause untouched");
+    }
+
+    // Load is a no-op in the pause state machine (loads do their own bookkeeping).
+    #[test]
+    fn on_pause_changed_load_is_a_noop() {
+        let mut a = paused_app();
+        a.on_pause_changed(PauseHint::Load);
+        assert!(a.user_paused && a.manually_paused && a.is_paused, "unchanged");
+    }
+
+    // A successful ROM load auto-unpauses (the no-content latch releases) and
+    // clears any error/frame.
+    #[test]
+    fn load_rom_bytes_auto_unpauses() {
+        let mut a = paused_app();
+        a.error_state = Some("stale".into());
+        a.load_rom_bytes(tiny_rom(), Some("game.gb".into())).expect("valid ROM loads");
+        assert!(!a.is_paused && !a.user_paused && !a.manually_paused);
+        assert!(!a.auto_paused_no_content, "no-content latch released");
+        assert!(a.error_state.is_none() && a.frame.is_none());
+    }
+
+    // A failed ROM load surfaces the error to the caller and preserves the
+    // pre-load pause bookkeeping (the auto-pause latch stays armed).
+    #[test]
+    fn load_rom_bytes_failure_preserves_state() {
+        let mut a = paused_app();
+        let err = a.load_rom_bytes(vec![0u8; 4], None); // too small to be a cartridge
+        assert!(err.is_err(), "an invalid ROM must fail");
+        assert!(a.is_paused && a.auto_paused_no_content, "pause state preserved");
+    }
+
+    // A successful state load (with the ROM re-supplied) auto-unpauses once the
+    // machine has content again.
+    #[test]
+    fn load_state_bytes_auto_unpauses_with_content() {
+        // Produce a valid savestate from a running machine.
+        let mut src = paused_app();
+        src.load_rom_bytes(tiny_rom(), Some("game.gb".into())).unwrap();
+        let state = src.state_bytes().expect("serialize state");
+
+        let mut a = paused_app();
+        a.load_state_bytes(&state, Some(("game.gb".into(), tiny_rom())))
+            .expect("state loads with re-supplied ROM");
+        assert!(!a.is_paused, "content restored → auto-unpause");
+        assert!(!a.auto_paused_no_content);
+    }
+
+    // A failed state load returns the error and preserves the pause bookkeeping.
+    #[test]
+    fn load_state_bytes_failure_preserves_state() {
+        let mut a = paused_app();
+        assert!(a.load_state_bytes(&[0u8; 8], None).is_err(), "garbage state fails");
+        assert!(a.is_paused && a.auto_paused_no_content, "pause state preserved");
+    }
+
+    // Safe-area insets are clamped to non-negative (a system can report negatives).
+    #[test]
+    fn set_safe_insets_clamps_negatives_to_zero() {
+        let mut a = paused_app();
+        a.set_safe_insets(-5.0, 2.0, -3.0, 7.0);
+        assert_eq!(a.safe_insets, [0.0, 2.0, 0.0, 7.0]);
+    }
+
+    // A breakpoint-hit flag is latching: read-once returns true then clears.
+    #[test]
+    fn take_breakpoint_hit_clears_on_read() {
+        let mut a = paused_app();
+        assert!(!a.take_breakpoint_hit(), "starts clear");
+        a.breakpoint_hit = true;
+        assert!(a.take_breakpoint_hit(), "first read sees the hit");
+        assert!(!a.take_breakpoint_hit(), "and clears it");
+    }
+}
+
+#[cfg(test)]
 mod panic_message_tests {
     use super::panic_message;
 
