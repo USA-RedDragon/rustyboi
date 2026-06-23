@@ -80,6 +80,19 @@ fn exactcc_enabled() -> bool {
     })
 }
 
+// ds-engine STAGE 3: RB_LAZYPERIPH. Gates the closed-form (update-to-cc)
+// peripheral models: the APU frame sequencer here, plus serial/DMA in their
+// own modules. See the per-site comments for what each conversion replaces.
+fn lazyperiph_enabled() -> bool {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("RB_LAZYPERIPH")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Timer {
     tima: u8,
@@ -141,6 +154,13 @@ pub struct Timer {
     // of off the instruction-start IF snapshot. DISABLED_TIME = none pending.
     #[serde(default = "disabled_time")]
     last_fire_cc: u64,
+    // ds-engine STAGE 3 (RB_LAZYPERIPH): the `abs_cc` up to and including which
+    // the APU frame sequencer has been clocked. The closed-form FS counts
+    // DIV-bit-12/13 falling edges in `(last_apu_cc, abs_cc]` instead of per-dot
+    // edge detection. A DIV reset rebases this to the reset cc (the divider — and
+    // thus the FS phase — restarts from the new anchor).
+    #[serde(default)]
+    last_apu_cc: u64,
 }
 
 fn disabled_time() -> u64 {
@@ -164,6 +184,7 @@ impl Timer {
             pending_irq: false,
             div_anchor_apu: 0,
             last_fire_cc: DISABLED_TIME,
+            last_apu_cc: 0,
         }
     }
 
@@ -397,6 +418,10 @@ impl Timer {
         // the STOP path overrides `div_anchor_apu` afterward with its own offset.
         self.div_anchor_apu = cc;
         self.div_reset_count = self.div_reset_count.wrapping_add(1);
+        // Closed-form FS (RB_LAZYPERIPH): the divider restarts from this cc, so
+        // re-anchor the FS sync point to the reset cc — the divider counter (and
+        // thus the bit-12/13 falling-edge grid) is now relative to the new anchor.
+        self.last_apu_cc = cc;
     }
 
     /// CGB STOP speed-switch DIV reset. Re-anchors DIV/TIMA at the switch cc:
@@ -423,6 +448,7 @@ impl Timer {
         self.div_anchor = 0;
         self.div_anchor_apu = 0;
         self.tima_last_update = self.abs_cc;
+        self.last_apu_cc = self.abs_cc;
     }
 
     pub fn internal_counter(&self) -> u16 {
@@ -459,6 +485,20 @@ impl Timer {
         p
     }
 
+    /// Count DIV-bit-12 (single speed) / bit-13 (double speed) falling edges in
+    /// the cc interval `(a, b]`. The divider counter is `cc - div_anchor`; bit N
+    /// falls each time that counter passes a multiple of `2^(N+1)`. Used by the
+    /// closed-form APU frame-sequencer clock (RB_LAZYPERIPH).
+    fn apu_fs_edges(&self, a: u64, b: u64) -> u64 {
+        if b <= a {
+            return 0;
+        }
+        let shift = if self.last_double_speed { 14 } else { 13 }; // N+1
+        let ca = a.wrapping_sub(self.div_anchor);
+        let cb = b.wrapping_sub(self.div_anchor);
+        (cb >> shift).wrapping_sub(ca >> shift)
+    }
+
     pub fn step(&mut self, mmio: &mut mmio::Mmio) {
         self.abs_cc = self.abs_cc.wrapping_add(1);
 
@@ -482,13 +522,25 @@ impl Timer {
         // the falling edge of DIV bit 12 (bit 13 in double speed), derived from
         // the SAME master `abs_cc`/`div_anchor` the timer/DIV use.
         self.last_double_speed = mmio.is_double_speed_mode();
-        let apu_bit_pos = if self.last_double_speed { 13 } else { 12 };
-        let apu_div = (self.abs_cc.wrapping_sub(self.div_anchor) & 0xFFFF) as u16;
-        let apu_bit = (apu_div & (1 << apu_bit_pos)) != 0;
-        if self.last_apu_div_bit && !apu_bit {
-            mmio.clock_apu_frame_sequencer();
+        if lazyperiph_enabled() {
+            // Closed-form FS: clock once per DIV-bit-12 (bit-13 at DS) falling
+            // edge in (last_apu_cc, abs_cc]. The divider counter is
+            // (cc - div_anchor); bit N falls each time that counter crosses a
+            // multiple of 2^(N+1). Count = floor(c_now/P) - floor(c_prev/P).
+            let edges = self.apu_fs_edges(self.last_apu_cc, self.abs_cc);
+            for _ in 0..edges {
+                mmio.clock_apu_frame_sequencer();
+            }
+            self.last_apu_cc = self.abs_cc;
+        } else {
+            let apu_bit_pos = if self.last_double_speed { 13 } else { 12 };
+            let apu_div = (self.abs_cc.wrapping_sub(self.div_anchor) & 0xFFFF) as u16;
+            let apu_bit = (apu_div & (1 << apu_bit_pos)) != 0;
+            if self.last_apu_div_bit && !apu_bit {
+                mmio.clock_apu_frame_sequencer();
+            }
+            self.last_apu_div_bit = apu_bit;
         }
-        self.last_apu_div_bit = apu_bit;
     }
 }
 
