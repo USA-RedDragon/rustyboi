@@ -340,6 +340,8 @@ pub struct SessionUiState {
     pub fast_forward_factor: u32,
     /// Whether the on-screen touch overlay is shown.
     pub touch_controls: bool,
+    /// Whether the on-screen FPS overlay is shown (top-right corner).
+    pub show_fps: bool,
     /// Whether a Game Boy Printer is currently attached to the link port (drives
     /// the Connect/Disconnect menu label).
     pub printer_attached: bool,
@@ -396,6 +398,7 @@ impl Default for SessionUiState {
             fast_forward: false,
             fast_forward_factor: 4,
             touch_controls: cfg!(mobile),
+            show_fps: false,
             printer_attached: false,
             recording: false,
             replaying: false,
@@ -486,6 +489,8 @@ pub enum UiAction {
     ToggleSgbBorder,
     /// Toggle the on-screen touch controls overlay.
     ToggleTouchControls,
+    /// Toggle the on-screen FPS overlay.
+    ToggleShowFps,
     /// Change the emulated hardware model (rebuilds the machine).
     SetHardware(HardwareChoice),
     /// Change the DMG presentation palette.
@@ -593,6 +598,7 @@ impl UiAction {
             UiAction::FrameAdvance => ActionKind::FrameAdvance,
             UiAction::ToggleSgbBorder => ActionKind::ToggleSgbBorder,
             UiAction::ToggleTouchControls => ActionKind::ToggleTouchControls,
+            UiAction::ToggleShowFps => ActionKind::ToggleShowFps,
             UiAction::SetHardware(_) => ActionKind::SetHardware,
             UiAction::SetPalette(_) => ActionKind::SetPalette,
             UiAction::SetGbcDmgPalette(_) => ActionKind::SetGbcDmgPalette,
@@ -666,6 +672,7 @@ pub enum ActionKind {
     FrameAdvance,
     ToggleSgbBorder,
     ToggleTouchControls,
+    ToggleShowFps,
     SetHardware,
     SetPalette,
     SetGbcDmgPalette,
@@ -1014,6 +1021,13 @@ pub const COMMANDS: &[CommandDescriptor] = &[
         overlay_button: None,
     },
     CommandDescriptor {
+        action_kind: ActionKind::ToggleShowFps,
+        label: "Show FPS",
+        category: MenuCategory::View,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
         action_kind: ActionKind::AddCheat,
         label: "Cheats",
         category: MenuCategory::Settings,
@@ -1301,6 +1315,7 @@ mod tests {
             FrameAdvance,
             ToggleSgbBorder,
             ToggleTouchControls,
+            ToggleShowFps,
             SetHardware(HardwareChoice::Dmg),
             SetPalette(PaletteChoice::Grayscale),
             SetGbcDmgPalette(GbcDmgPalette::Auto),
@@ -1365,6 +1380,7 @@ mod tests {
                 | UiAction::FrameAdvance
                 | UiAction::ToggleSgbBorder
                 | UiAction::ToggleTouchControls
+                | UiAction::ToggleShowFps
                 | UiAction::SetHardware(_)
                 | UiAction::SetPalette(_)
                 | UiAction::SetGbcDmgPalette(_)
@@ -1439,6 +1455,7 @@ mod tests {
             fast_forward: true,
             fast_forward_factor: 0,
             touch_controls: true,
+            show_fps: true,
             printer_attached: true,
             recording: true,
             replaying: true,

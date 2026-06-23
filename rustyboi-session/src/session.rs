@@ -995,6 +995,17 @@ impl Session {
         self.persist_config();
     }
 
+    /// Whether the on-screen FPS overlay is shown.
+    pub fn show_fps(&self) -> bool {
+        self.config.show_fps
+    }
+
+    /// Enable/disable the on-screen FPS overlay; persists the config.
+    pub fn set_show_fps(&mut self, on: bool) {
+        self.config.show_fps = on;
+        self.persist_config();
+    }
+
     /// Enable/disable rewind capture; persists the config.
     pub fn set_rewind_enabled(&mut self, enabled: bool) {
         self.config.rewind.enabled = enabled;

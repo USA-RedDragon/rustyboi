@@ -116,6 +116,10 @@ pub struct Config {
     /// still load (they get the default arrows/Z=B/X=A/Enter=Start layout).
     #[serde(default)]
     pub input: InputConfig,
+    /// Whether the on-screen FPS overlay is shown (top-right corner). Off by
+    /// default; `default` so older blobs still load. Presentation-only.
+    #[serde(default)]
+    pub show_fps: bool,
 }
 
 fn default_volume() -> u8 {
@@ -156,6 +160,7 @@ impl Default for Config {
             printer_scale: default_printer_scale(),
             touch_opacity: default_touch_opacity(),
             input: InputConfig::default(),
+            show_fps: false,
         }
     }
 }
