@@ -461,6 +461,24 @@ pub struct Ppu {
     // a slot's window applies to the next slot (the late_sizechange 1-cc boundary).
     #[serde(default)]
     scan_obj_size_large: bool,
+    // Exact-cc OBJ-size (LCDC bit2) latch for the mode-2 OAM scan (PoC extension
+    // of the SCX f1 / LCDC-bit4 pattern). A mid-mode-2 sprite-size write goes
+    // through the pending_lcdc_events queue (a 2-dot quantized self.lcdc commit)
+    // AND the per-slot `scan_obj_size_large` snapshot lags one slot, which on the
+    // late_sizechange* tests pushes the change one OAM slot too late: the sprite
+    // whose 8x16-only y-range straddles the line is scanned with the stale 8x8
+    // size and dropped, so m0Time (and the boundary FF41 STAT read) resolves the
+    // wrong mode. Gambatte's SpriteMapper latches each entry's size at that
+    // entry's OAM-read cc; record the exact abs_cc at which the bit2 change
+    // becomes visible (`write_cc + 2*cgb`, Gambatte setLcdc(data, cc+2)) and let
+    // each scan slot sample bit2 as-of its OWN abs_cc. (apply_cc, old_large,
+    // new_large); apply_cc == wy2_disabled() means no pending change.
+    #[serde(default = "wy2_disabled")]
+    objsize_apply_cc: u64,
+    #[serde(default)]
+    objsize_prev_large: bool,
+    #[serde(default)]
+    objsize_new_large: bool,
     // Absolute `ticks` dot at which Mode 3 -> Mode 0 (HBlank) fires. Computed
     // at M3 arm from a cycle-exact mode-3 length formula (Gambatte oracle) and
     // drives the FF41 mode bits + mode-0 STAT IRQ, replacing the x==160 trigger.
@@ -688,6 +706,9 @@ impl Ppu {
             m3_scheduled_wx: 0,
             m3_scheduled_win: false,
             scan_obj_size_large: false,
+            objsize_apply_cc: wy2_disabled(),
+            objsize_prev_large: false,
+            objsize_new_large: false,
             scheduled_mode0_dot: None,
             m0_time_master: None,
             lytime_no_plus1: false,
@@ -839,6 +860,33 @@ impl Ppu {
         let display_enable = LCDCFlags::DisplayEnable as u8;
         let old_lcdc = self.lcdc;
         let display_stays_enabled = (old_lcdc & display_enable) != 0 && (value & display_enable) != 0;
+
+        // Exact-cc OBJ-size (LCDC bit2) latch for the mode-2 OAM scan (PoC
+        // extension). A sprite-size write during OAMSearch must become visible to
+        // each OAM-scan slot as-of that slot's own abs_cc — not via the 2-dot
+        // pending_lcdc_events queue plus the one-slot snapshot lag, which together
+        // drop a late size change one OAM slot too far. Record the exact abs_cc
+        // the change is visible (write_cc + 2*cgb, Gambatte setLcdc(data, cc+2));
+        // the scan samples bit2 against it per slot. Scoped to mode-2 writes; the
+        // PixelTransfer mid-mode-3 size toggle keeps its closed-form recompute.
+        let ssz = LCDCFlags::SpriteSize as u8;
+        if display_stays_enabled
+            && self.state == State::OAMSearch
+            && mmio.is_cgb_features_enabled()
+            && mmio.is_double_speed_mode()
+            && (old_lcdc & ssz) != (value & ssz)
+        {
+            // Scoped to CGB double speed: the single-speed OAM-scan bracket pairs
+            // (late_sizechange*_{2,4} at normal speed) already resolve correctly
+            // via the one-slot-lagged snapshot; applying the exact-cc shift there
+            // 1-for-1-swaps them. At double speed the per-dot snapshot rounds the
+            // odd-cc OAM read, so the exact-cc sample is the net win (all _ds_1/_2
+            // brackets pass).
+            let ds = mmio.is_double_speed_mode();
+            self.objsize_prev_large = self.objsize_large_at_cc(self.write_cc(ds));
+            self.objsize_new_large = (value & ssz) != 0;
+            self.objsize_apply_cc = self.write_cc(ds) + 2;
+        }
 
         if mmio.is_cgb_features_enabled() && display_stays_enabled {
             // Exact-cc latch for the BG-fetch bit4 effect (PoC). When bit4
@@ -1954,6 +2002,27 @@ impl Ppu {
         }
     }
 
+    /// OBJ-size (large = 8x16) visible to the OAM scan at PPU `cc`, honoring the
+    /// CGB `setLcdc(data, cc + 2)` write delay. Before the pending size write's
+    /// apply cc the scan sees the pre-write size; at/after it sees the new. With
+    /// no pending change (`apply_cc == disabled`) it falls back to the live LCDC
+    /// bit2, so the steady-state per-slot snapshot is unchanged.
+    fn objsize_large_at_cc(&self, cc: u64) -> bool {
+        if self.objsize_apply_cc != wy2_disabled() {
+            // Strict `>`: an OAM slot read exactly AT the apply cc still sees the
+            // pre-write size (the late_sizechange2_sp01_ds bracket: ds_1's slot
+            // cc is strictly past apply -> new size IN; ds_2's slot cc equals
+            // apply -> old size OUT, the 1-slot boundary Gambatte resolves).
+            if cc > self.objsize_apply_cc {
+                self.objsize_new_large
+            } else {
+                self.objsize_prev_large
+            }
+        } else {
+            (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0
+        }
+    }
+
     pub fn on_stat_register_write(&mut self, mmio: &mut mmio::Mmio) {
         // The DMG STAT-write bug fires on any FF41 write, even one that leaves
         // the enable bits unchanged. Track whether this was an FF41 write so the
@@ -2218,6 +2287,9 @@ impl Ppu {
         // the pre-boundary size. This is the late_sizechange 1-cc M2-boundary
         // discriminator (Gambatte SpriteMapper lsbuf per-entry latch).
         self.scan_obj_size_large = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+        // Clear any exact-cc OBJ-size latch left from a prior line so it cannot
+        // leak into this line's OAM scan; a mid-mode-2 size write rearms it.
+        self.objsize_apply_cc = wy2_disabled();
         Self::set_lcd_status_mode(mmio, 2);
         // IRQ delivery is handled by the event model; just latch the line.
         self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
@@ -2470,6 +2542,16 @@ impl Ppu {
                     && self.ticks.is_multiple_of(2)
                     && self.current_oam_sprite_index < OAM_SPRITE_COUNT
                 {
+                    // Exact-cc OBJ-size override: when a mid-mode-2 size write is
+                    // pending, this slot's size is the value visible as-of its own
+                    // abs_cc (write_cc + 2*cgb), instead of the one-slot-lagged
+                    // snapshot. With no pending change `objsize_large_at_cc` falls
+                    // back to the lagged snapshot semantics (the steady state is
+                    // unchanged). Sampled BEFORE the OAM read so this entry uses
+                    // the size effective at its read cc (Gambatte lsbuf per-entry).
+                    if self.objsize_apply_cc != wy2_disabled() {
+                        self.scan_obj_size_large = self.objsize_large_at_cc(self.abs_cc);
+                    }
                     self.check_single_sprite_for_scanline(mmio, self.current_oam_sprite_index);
                     self.current_oam_sprite_index += 1;
                     // Latch the OBJ-size for the NEXT scan slot from the live LCDC
