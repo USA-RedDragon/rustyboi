@@ -128,6 +128,9 @@ fn create_render_state(
         // egui's font atlas is CPU-side here with no hardware ceiling; 8192
         // comfortably covers hi-DPI atlases.
         let ui = UiHost::new(window, scale_factor, 8192, dialog.clone());
+        // Shadows are per-frame gradient fills — meaningful CPU work on this
+        // backend only, so the flat look is software-exclusive.
+        ui.disable_window_shadows();
         Ok(RenderState { renderer: Box::new(renderer), ui })
     };
     #[cfg(not(target_os = "android"))]
