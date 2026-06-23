@@ -135,21 +135,29 @@ fn create_render_state(
         return make_soft(&window, &pending_dialog_result);
     }
 
+    // Auto probes the platform's native API first (Metal on Apple, Vulkan
+    // elsewhere), then anything hardware `all()` can find (covers DX12 on
+    // Windows and GL), then the CPU renderer below.
     let auto_chain = || {
-        try_backends(wgpu::Backends::VULKAN, false)
+        #[cfg(target_vendor = "apple")]
+        let native = wgpu::Backends::METAL;
+        #[cfg(not(target_vendor = "apple"))]
+        let native = wgpu::Backends::VULKAN;
+        try_backends(native, false)
             .or_else(|| try_backends(wgpu::Backends::GL, false))
             .or_else(|| try_backends(wgpu::Backends::all(), false))
     };
     let forced = match backend {
         GraphicsBackend::Auto | GraphicsBackend::Software => None,
         GraphicsBackend::Vulkan => Some(try_backends(wgpu::Backends::VULKAN, false)),
+        GraphicsBackend::Metal => Some(try_backends(wgpu::Backends::METAL, false)),
         GraphicsBackend::OpenGl => Some(try_backends(wgpu::Backends::GL, false)),
     };
     let picked = match forced {
         Some(Some(found)) => Some(found),
         Some(None) => {
             eprintln!(
-                "requested {backend:?} renderer is unavailable; falling back to auto (Vulkan → OpenGL → Software)"
+                "requested {backend:?} renderer is unavailable; falling back to auto"
             );
             auto_chain()
         }

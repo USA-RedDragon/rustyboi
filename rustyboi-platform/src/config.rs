@@ -45,9 +45,10 @@ pub struct RawConfig {
     #[arg(long, default_value_t = false)]
     printer: bool,
 
-    /// Rendering backend for this run: auto, vulkan, opengl, or software.
-    /// Overrides (without persisting) the saved Settings choice; auto probes
-    /// in that preference order.
+    /// Rendering backend for this run: auto, vulkan, metal, opengl, or
+    /// software. Overrides (without persisting) the saved Settings choice;
+    /// auto probes the platform's native API first (Vulkan, or Metal on
+    /// Apple), then OpenGL, then the CPU software renderer.
     #[arg(long)]
     graphics: Option<String>,
 }
@@ -102,7 +103,7 @@ impl RawConfig {
             graphics: self.graphics.as_deref().and_then(|s| {
                 let parsed = rustyboi_session::GraphicsBackend::from_option_id(s);
                 if parsed.is_none() {
-                    eprintln!("unknown --graphics value '{s}' (expected auto|vulkan|opengl|software); using saved setting");
+                    eprintln!("unknown --graphics value '{s}' (expected auto|vulkan|metal|opengl|software); using saved setting");
                 }
                 parsed
             }),
