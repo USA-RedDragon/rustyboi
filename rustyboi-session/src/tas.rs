@@ -126,3 +126,105 @@ impl Playback {
         self.inputs.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pressed_a() -> ButtonState {
+        ButtonState { a: true, ..Default::default() }
+    }
+
+    #[test]
+    fn power_on_records_a_power_on_start() {
+        let r = Recording::power_on([7u8; 32], Hardware::DMG);
+        let movie = r.finish();
+        assert!(matches!(movie.start, MovieStart::PowerOn));
+        assert_eq!(movie.rom_sha256, [7u8; 32]);
+        assert_eq!(movie.hardware, Hardware::DMG);
+    }
+
+    #[test]
+    fn from_savestate_carries_the_blob() {
+        let blob = vec![1u8, 2, 3, 4];
+        let r = Recording::from_savestate([0u8; 32], Hardware::CGB, blob.clone());
+        let movie = r.finish();
+        match movie.start {
+            MovieStart::SaveState(bytes) => assert_eq!(bytes, blob),
+            MovieStart::PowerOn => panic!("expected a savestate start"),
+        }
+    }
+
+    #[test]
+    fn push_input_grows_frame_count_and_finish_stamps_it() {
+        let mut r = Recording::power_on([0u8; 32], Hardware::DMG);
+        assert_eq!(r.frame_count(), 0);
+        r.push_input(ButtonState::default());
+        r.push_input(pressed_a());
+        r.push_input(ButtonState::default());
+        assert_eq!(r.frame_count(), 3);
+
+        let movie = r.finish();
+        assert_eq!(movie.inputs.len(), 3);
+        assert_eq!(movie.meta.frame_count, 3, "finish stamps frame_count = inputs.len()");
+        assert!(movie.inputs[1].a, "the logged input is preserved in order");
+    }
+
+    #[test]
+    fn with_meta_survives_finish_except_frame_count() {
+        let meta = MovieMeta {
+            author: "tester".into(),
+            rom_name: "Test Game".into(),
+            frame_count: 999, // a stale value finish must overwrite
+            note: "category any%".into(),
+        };
+        let mut r = Recording::power_on([0u8; 32], Hardware::DMG).with_meta(meta);
+        r.push_input(ButtonState::default());
+        let movie = r.finish();
+        assert_eq!(movie.meta.author, "tester");
+        assert_eq!(movie.meta.rom_name, "Test Game");
+        assert_eq!(movie.meta.note, "category any%");
+        assert_eq!(movie.meta.frame_count, 1, "finish overrides the meta frame_count");
+    }
+
+    fn movie_with_inputs(inputs: Vec<ButtonState>) -> Movie {
+        let mut r = Recording::power_on([0u8; 32], Hardware::DMG);
+        for i in inputs {
+            r.push_input(i);
+        }
+        r.finish()
+    }
+
+    #[test]
+    fn playback_advances_the_cursor_then_ends() {
+        let movie = movie_with_inputs(vec![pressed_a(), ButtonState::default()]);
+        let mut pb = Playback::new(&movie);
+        assert_eq!(pb.len(), 2);
+        assert!(!pb.is_empty());
+        assert_eq!(pb.position(), 0);
+        assert!(!pb.finished());
+
+        assert_eq!(pb.next_input(), Some(pressed_a()));
+        assert_eq!(pb.position(), 1);
+        assert!(!pb.finished());
+
+        assert_eq!(pb.next_input(), Some(ButtonState::default()));
+        assert_eq!(pb.position(), 2);
+        assert!(pb.finished(), "cursor reached the end");
+
+        // Past the end: None, cursor does not advance further.
+        assert_eq!(pb.next_input(), None);
+        assert_eq!(pb.position(), 2);
+    }
+
+    #[test]
+    fn playback_of_zero_input_movie_is_empty_and_finished() {
+        let movie = movie_with_inputs(vec![]);
+        let mut pb = Playback::new(&movie);
+        assert_eq!(pb.len(), 0);
+        assert!(pb.is_empty());
+        assert!(pb.finished(), "an empty movie is finished before it starts");
+        assert_eq!(pb.next_input(), None);
+        assert_eq!(pb.position(), 0);
+    }
+}
