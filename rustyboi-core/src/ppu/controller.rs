@@ -2089,7 +2089,7 @@ impl Ppu {
             bg_scy_hist: Vec::new(),
             bg_scx_hist: Vec::new(),
             we_win_bit_exact: None,
-            cgb_color_conversion: CgbColorConversion::Linear,
+            cgb_color_conversion: CgbColorConversion::Lcd,
             fetch_debug_events_enabled: false,
             fetch_debug_events: Vec::new(),
             pixel_debug_events: Vec::new(),
