@@ -1562,8 +1562,19 @@ impl Mmio {
     }
 
     fn write_lcd_control(&mut self, value: u8) {
+        let de = ppu::LCDCFlags::DisplayEnable as u8;
+        let was_on = self.io_registers.read(ppu::LCD_CONTROL) & de != 0;
+        let now_off = value & de == 0;
         self.io_registers.write(ppu::LCD_CONTROL, value);
         self.stat_register_write_pending = true;
+        // Gambatte `lcdcChange` (memory.cpp:1144-1158): disabling the LCD while an
+        // HDMA is armed flags an HDMA request directly (`if (hdmaEnabled) flagHdmaReq`).
+        // With the LCD off `isHdmaPeriod` is permanently true, so the latched block
+        // fires on the next `step_hdma` (the LCD-off arming paths there require
+        // `lcd_on`, so without this edge the block would never arm — hdma_disable_display).
+        if was_on && now_off && self.cgb_features_enabled && self.hdma_enabled {
+            self.hdma_req_pending = true;
+        }
     }
 
     pub fn write_lcd_status_from_ppu(&mut self, value: u8) {
