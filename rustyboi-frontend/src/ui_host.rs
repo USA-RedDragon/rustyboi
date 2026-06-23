@@ -81,6 +81,15 @@ impl UiHost {
         pending_dialog_result: Option<Arc<Mutex<Option<GuiAction>>>>,
     ) -> Self {
         let egui_ctx = Context::default();
+        // Window/popup drop shadows are large feathered-gradient meshes (tens of
+        // thousands of blended pixels per open window, re-rasterized every
+        // frame). With several debug windows open they dominated the software
+        // rasterizer's frame (~80% of samples) and cost the GPU path real fill
+        // too — for a pixel-art emulator UI the flat look costs nothing.
+        egui_ctx.all_styles_mut(|s| {
+            s.visuals.window_shadow = egui::Shadow::NONE;
+            s.visuals.popup_shadow = egui::Shadow::NONE;
+        });
         // winit 0.30's `EventLoopWindowTarget` is gone; egui-winit 0.35 accepts
         // any `HasDisplayHandle` as the display target and gained a `theme` arg.
         let egui_state = egui_winit::State::new(

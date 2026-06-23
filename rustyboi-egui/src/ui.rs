@@ -156,6 +156,11 @@ pub struct Gui {
     // Tile explorer state for CGB
     pub(super) tile_explorer_vram_bank: u8,
     pub(super) tile_explorer_palette: u8,
+    // Retained textures for the pixel-grid debug panels: each is re-filled from
+    // a baked pixel buffer per frame and drawn as a single scaled image instead
+    // of thousands of per-pixel rects (see `debug::pixels`).
+    pub(super) tile_atlas_tex: crate::debug::pixels::PixelTexture,
+    pub(super) sprite_atlas_tex: crate::debug::pixels::PixelTexture,
     // Keybind editor working state. `input_config` is the live edited copy
     // (seeded from the persisted `SessionUiState.input` when the panel opens,
     // `None` while closed); the rest track in-progress rebind/record UI.
@@ -235,6 +240,8 @@ impl Gui {
             selected_sprite_index: None,
             tile_explorer_vram_bank: 0,
             tile_explorer_palette: 0,
+            tile_atlas_tex: crate::debug::pixels::PixelTexture::default(),
+            sprite_atlas_tex: crate::debug::pixels::PixelTexture::default(),
             input_config: None,
             rebinding_gb: None,
             recording_chord: None,
