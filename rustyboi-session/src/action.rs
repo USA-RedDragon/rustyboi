@@ -211,32 +211,60 @@ pub enum ScalingMode {
 }
 
 /// Which rendering backend the desktop frontend asks wgpu for. `Auto` probes in
-/// preference order (Vulkan, then anything hardware, then a software
-/// rasterizer); the explicit choices force one and fall back to the `Auto`
-/// chain (with a logged warning) if it is unavailable, so a stale persisted
-/// choice can never brick startup. Takes effect at the next launch — the
-/// surface/device pair is created once per window. Serde-derived so it
-/// persists in [`Config`](crate::config::Config); ignored by the web frontend
-/// (the browser picks WebGPU/WebGL itself).
+/// preference order (the platform's native API — Vulkan, or Metal on Apple —
+/// then anything hardware, then the CPU software renderer); the explicit
+/// choices force one and fall back to the `Auto` chain (with a logged warning)
+/// if it is unavailable, so a stale persisted choice — including one synced
+/// from a different OS — can never brick startup. Takes effect at the next
+/// launch — the surface/device pair is created once per window. Serde-derived
+/// so it persists in [`Config`](crate::config::Config); ignored by the web
+/// frontend (the browser picks WebGPU/WebGL itself).
+///
+/// Every variant exists on every platform (the persisted config is
+/// cross-platform); [`choices`](Self::choices) filters what the Settings menu
+/// OFFERS to what can actually work on the running OS.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GraphicsBackend {
     #[default]
     Auto,
     Vulkan,
+    /// Apple's native API (macOS / iOS); unavailable elsewhere.
+    Metal,
     OpenGl,
     Software,
 }
 
 impl GraphicsBackend {
-    /// Every choice paired with its menu label — the single list the Settings
-    /// UI is built from.
-    pub fn choices() -> [(GraphicsBackend, &'static str); 4] {
-        [
-            (GraphicsBackend::Auto, "Auto (Vulkan → OpenGL → Software)"),
-            (GraphicsBackend::Vulkan, "Vulkan"),
-            (GraphicsBackend::OpenGl, "OpenGL"),
-            (GraphicsBackend::Software, "Software (CPU)"),
-        ]
+    /// The choices the Settings menu offers on THIS platform, paired with menu
+    /// labels — Apple exposes Metal (its only real GPU API there), Android
+    /// exposes Vulkan/GLES (no CPU renderer there), desktop exposes
+    /// Vulkan/OpenGL/Software.
+    pub fn choices() -> &'static [(GraphicsBackend, &'static str)] {
+        #[cfg(target_vendor = "apple")]
+        {
+            &[
+                (GraphicsBackend::Auto, "Auto (Metal → Software)"),
+                (GraphicsBackend::Metal, "Metal"),
+                (GraphicsBackend::Software, "Software (CPU)"),
+            ]
+        }
+        #[cfg(target_os = "android")]
+        {
+            &[
+                (GraphicsBackend::Auto, "Auto (Vulkan → GLES)"),
+                (GraphicsBackend::Vulkan, "Vulkan"),
+                (GraphicsBackend::OpenGl, "OpenGL ES"),
+            ]
+        }
+        #[cfg(not(any(target_vendor = "apple", target_os = "android")))]
+        {
+            &[
+                (GraphicsBackend::Auto, "Auto (Vulkan → OpenGL → Software)"),
+                (GraphicsBackend::Vulkan, "Vulkan"),
+                (GraphicsBackend::OpenGl, "OpenGL"),
+                (GraphicsBackend::Software, "Software (CPU)"),
+            ]
+        }
     }
 
     /// Stable string id (CLI flag value / future libretro option).
@@ -244,6 +272,7 @@ impl GraphicsBackend {
         match self {
             GraphicsBackend::Auto => "auto",
             GraphicsBackend::Vulkan => "vulkan",
+            GraphicsBackend::Metal => "metal",
             GraphicsBackend::OpenGl => "opengl",
             GraphicsBackend::Software => "software",
         }
@@ -254,6 +283,7 @@ impl GraphicsBackend {
         match id {
             "auto" => Some(GraphicsBackend::Auto),
             "vulkan" => Some(GraphicsBackend::Vulkan),
+            "metal" => Some(GraphicsBackend::Metal),
             "opengl" => Some(GraphicsBackend::OpenGl),
             "software" => Some(GraphicsBackend::Software),
             _ => None,
