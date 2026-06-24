@@ -34,28 +34,35 @@ const CC_OFF: i64 = 5;
 /// `late_reset_nr52` a/b pairs; the trigger's length boundary lands at this
 /// phase rather than the read's `CC_OFF`.
 const WRITE_CC_OFF: i64 = 0;
-/// STOP-write DIV-reset canonical cc offset (M8 speedchange). The STOP
-/// speed-switch DIV reset resolves at this phase relative to the per-dot
-/// `abs_cc`; swept against `speedchange2_tima00_2a/2b`.
-const STOP_CC_OFF: i64 = 0;
-/// Extra master-cc added to the STOP divReset/speed-switch cc when the STOP is
-/// entered in DOUBLE speed (DS->SS direction). Gambatte's STOP-entry cc carries
-/// one more prefetch M-cycle in double speed than in single (cctracer: SS-entry
-/// divReset at instr_start+4, DS-entry at instr_start+8), so the per-dot `abs_cc`
-/// (which trails by the single-speed amount) is 4 master-cc short of the true
-/// switch cc in the DS->SS direction. The DIV/TIMA register READ resolves at
-/// `access_cc()` (CC_OFF=5), which itself trails Gambatte's read cc by 3 for these
-/// post-switch reads; only `read_cc - div_anchor` matters for the high-byte/tick
-/// boundary, so the boundary-matching re-anchor is `4 - 3 = +1`. Swept against the
-/// full speedchange2 tima/div families: +1 passes BOTH sub-dot probe sides of
-/// every `_1/_2/_1a/_1b/_2a/_2b` pair (10 fixes, zero regressions).
-const STOP_DS_OFF: i64 = 1;
-/// APU-specific STOP speed-switch cc offset (DS->SS direction). The APU divReset
-/// fold (square duty + length `cc>>13` boundary) re-anchors at a different
-/// sub-cycle phase than the TIMA/DIV high-byte boundary, so it carries its own
-/// offset (swept: +2 fixes the `ch2_nr52_2b` length-expiry probes with no
-/// regression; the TIMA/DIV `STOP_DS_OFF` of +1 is calibrated separately).
-const STOP_APU_DS_OFF: i64 = 2;
+/// STOP speed-switch DIV/TIMA *derivation anchor* offset, relative to the per-dot
+/// `abs_cc` (the STOP instruction's start cc). This is the cc the post-switch
+/// divider derivation (`read_cc - div_anchor`) and the TIMA tick grid resolve
+/// against. The engine's post-switch TIMA register READ resolves at a cc that
+/// trails Gambatte's read cc by a fixed amount K (the prefetch access-cc skew:
+/// K=8 single-speed entry, K=4 double-speed entry), while Gambatte's switch cc is
+/// `instr_start + (ds ? 0 : 4)`. The boundary-exact derivation anchor is therefore
+/// `switch_cc - K = abs_cc - 4` in BOTH speed directions (traced byte-exact on the
+/// full speedchange `_1a/_1b/_2a/_2b` bracket families against the Gambatte
+/// cctracer: this single value passes BOTH sub-dot probe sides simultaneously,
+/// confirming it is the exact divider-phase derivation and not a swap).
+const STOP_DERIV_OFF: i64 = -4;
+/// Extra master-cc added (on top of `STOP_DERIV_OFF`) to the cc the post-switch
+/// *reset TIMA value* is computed at, so it lands on Gambatte's true switch cc.
+/// Gambatte derives the reset TIMA at `instr_start + (ds ? 0 : 4)`, i.e. 4 cc
+/// later than the derivation anchor in the single-speed (SS->DS) direction and
+/// 0 cc later in the double-speed (DS->SS) direction (where `abs_cc` already maps
+/// to Gambatte's switch cc). Decoupling the reset-TIMA cc from the derivation
+/// anchor is what makes both bracket sides of the DS->SS families resolve at once
+/// (a single shared cc gives the reset TIMA one short OR the read derivation one
+/// long — they straddle a sub-cc boundary; see the trace in this module's notes).
+const STOP_TIMA_SS_EXTRA: i64 = 0;
+const STOP_TIMA_DS_EXTRA: i64 = 1;
+/// APU-specific STOP speed-switch divReset anchor offset (relative to the
+/// derivation anchor). The APU divReset fold (square duty + length `cc>>13`
+/// boundary) re-anchors at a different sub-cycle phase than the TIMA/DIV
+/// high-byte boundary, so it carries its own offset.
+const STOP_APU_SS_EXTRA: i64 = 0;
+const STOP_APU_DS_EXTRA: i64 = 2;
 
 // Gambatte's `+3` constant in `tmatime`/`nextIrqEventTime` (mem/tima.cpp).
 const TMA_OFF: u64 = 3;
@@ -372,46 +379,67 @@ impl Timer {
     /// reset (the speed-switch DIV reset happens at the STOP cc, not a CPU
     /// register-access M-cycle end).
     fn div_reset_at(&mut self, cc: u64) {
+        self.div_reset_split(cc, cc);
+    }
+
+    /// Generalized `Tima::divReset` allowing the TIMA-glitch/reset value to be
+    /// resolved at `tima_cc` while the divider/derivation anchor lands at
+    /// `anchor_cc`. For a normal FF04 write these are equal (`div_reset_at`); the
+    /// CGB STOP speed switch passes the true switch cc as `tima_cc` (so the reset
+    /// TIMA matches Gambatte's grid) and the read-grid anchor as `anchor_cc` (so
+    /// post-switch `read_cc - div_anchor` resolves the divider at the exact read
+    /// cc). The TIMA tick grid (`tima_last_update`) and IRQ schedule are based on
+    /// `anchor_cc` since post-switch reads/IRQs all arrive on that same read grid.
+    fn div_reset_split(&mut self, tima_cc: u64, anchor_cc: u64) {
         if self.tac & TAC_ENABLE != 0 {
             let clk = self.clk();
             let shift = (1u64 << (clk - 1)) + 3;
             self.tima_last_update = self.tima_last_update.wrapping_sub(shift);
             if self.next_irq_event_time != DISABLED_TIME {
                 self.next_irq_event_time = self.next_irq_event_time.wrapping_sub(shift);
-                if cc >= self.next_irq_event_time {
+                if tima_cc >= self.next_irq_event_time {
                     self.pending_irq = true;
                 }
             }
-            self.update_tima(cc);
-            self.tima_last_update = cc;
+            // Advance the derived TIMA up to the true switch cc (Gambatte's grid),
+            // capturing the post-switch reset TIMA value, then re-anchor the tick
+            // grid and IRQ schedule to the read-grid `anchor_cc` so subsequent
+            // `read_cc - tima_last_update` resolves on the same grid reads arrive.
+            self.update_tima(tima_cc);
+            self.tima_last_update = anchor_cc;
             self.next_irq_event_time =
                 self.tima_last_update + ((256u64 - self.tima as u64) << clk) + TMA_OFF;
         }
-        self.div_anchor = cc;
+        self.div_anchor = anchor_cc;
         // Normal FF04 writes share one cc for the DIV register and the APU fold;
         // the STOP path overrides `div_anchor_apu` afterward with its own offset.
-        self.div_anchor_apu = cc;
+        self.div_anchor_apu = anchor_cc;
         self.div_reset_count = self.div_reset_count.wrapping_add(1);
         // Closed-form FS (RB_LAZYPERIPH): the divider restarts from this cc, so
         // re-anchor the FS sync point to the reset cc — the divider counter (and
         // thus the bit-12/13 falling-edge grid) is now relative to the new anchor.
-        self.last_apu_cc = cc;
+        self.last_apu_cc = anchor_cc;
     }
 
-    /// CGB STOP speed-switch DIV reset. Re-anchors DIV/TIMA at the switch cc:
-    /// `abs_cc + STOP_CC_OFF`, plus `STOP_DS_OFF` extra master-cc when the STOP is
-    /// entered in DOUBLE speed (`old_ds`, the DS->SS direction); see `STOP_DS_OFF`
-    /// for the derivation. The APU divReset fold's anchor (`div_anchor_apu`) gets
-    /// its own `STOP_APU_DS_OFF` offset, set after `div_reset_at` (which would
-    /// otherwise overwrite it with the TIMA/DIV `cc`).
+    /// CGB STOP speed switch divider/TIMA re-derivation. The divider continues
+    /// ticking from the exact switch cc at the new speed: the derivation anchor
+    /// (`div_anchor`, the post-switch divider/TIMA tick base) lands at
+    /// `abs_cc + STOP_DERIV_OFF`, while the *reset TIMA value* is resolved at the
+    /// true Gambatte switch cc (`anchor + STOP_TIMA_{SS,DS}_EXTRA`). Decoupling the
+    /// two makes both sub-dot bracket sides of every speedchange family resolve at
+    /// once (no frozen window, no single shared offset that swaps one side for the
+    /// other). The APU divReset fold keeps its own anchor offset
+    /// (`STOP_APU_{SS,DS}_EXTRA`), set after the split (which would otherwise leave
+    /// `div_anchor_apu` at the derivation anchor).
     pub fn stop_div_reset(&mut self, old_ds: bool) {
-        let cc = (self.abs_cc as i64 + STOP_CC_OFF
-            + if old_ds { STOP_DS_OFF } else { 0 }) as u64;
-        // APU divReset fold anchor: independently offset from the TIMA/DIV cc.
-        let apu_cc = (self.abs_cc as i64 + STOP_CC_OFF
-            + if old_ds { STOP_APU_DS_OFF } else { 0 }) as u64;
-        self.div_reset_at(cc);
-        // div_reset_at set div_anchor_apu = cc; override with the APU-specific cc.
+        let anchor_cc = (self.abs_cc as i64 + STOP_DERIV_OFF) as u64;
+        let tima_cc = (anchor_cc as i64
+            + if old_ds { STOP_TIMA_DS_EXTRA } else { STOP_TIMA_SS_EXTRA }) as u64;
+        // APU divReset fold anchor: independently offset from the derivation anchor.
+        let apu_cc = (anchor_cc as i64
+            + if old_ds { STOP_APU_DS_EXTRA } else { STOP_APU_SS_EXTRA }) as u64;
+        self.div_reset_split(tima_cc, anchor_cc);
+        // div_reset_split set div_anchor_apu = anchor_cc; override with APU cc.
         self.div_anchor_apu = apu_cc;
     }
 
