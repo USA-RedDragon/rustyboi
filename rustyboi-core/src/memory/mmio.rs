@@ -154,6 +154,11 @@ pub struct Mmio {
     dma_start_pos: u8,
     #[serde(default)]
     dma_subcycle: u8, // dots elapsed within the current M-cycle (0..=3)
+    // Set when a CPU write lands in OAM (0xFE00-0xFE9F) this M-cycle, so the PPU
+    // can fire the sprite-snapshot `change(cc)` (Gambatte `oamChange` on a write).
+    // Drained by the PPU each dot.
+    #[serde(default)]
+    oam_write_pending: bool,
     // CGB VRAM-source OAM-DMA conflict reads return OAM[oamDmaPos_] and then
     // zero that OAM byte (Gambatte `nontrivial_read`). The read path is &self,
     // so record the position here and apply the zero on the next DMA advance.
@@ -364,6 +369,7 @@ impl Mmio {
             dma_pos: 0xFE,
             dma_start_pos: 0,
             dma_subcycle: 0,
+            oam_write_pending: false,
             pending_oam_zero: std::cell::Cell::new(-1),
             ly_write_pending: false,
             stat_register_write_pending: false,
@@ -1417,6 +1423,34 @@ impl Mmio {
         self.dma_active && self.dma_pos < 160
     }
 
+    /// Public view of the OAM-DMA "placing bytes" window (`startOamDma` ..
+    /// `endOamDma`). The PPU's lazy sprite snapshot uses this to know when the
+    /// OAM source reads as disabled RAM (0xFF), mirroring Gambatte pointing
+    /// `oamReader_.oamram_` at `cart_.rdisabledRam()` for the DMA window.
+    pub fn oam_dma_window_active(&self) -> bool {
+        self.dma_transfer_in_progress()
+    }
+
+    /// Take (and clear) the pending-CPU-OAM-write flag. The PPU drains this each
+    /// dot to fire the sprite-snapshot `change(cc)` (Gambatte `oamChange`).
+    pub fn take_oam_write_pending(&mut self) -> bool {
+        let p = self.oam_write_pending;
+        self.oam_write_pending = false;
+        p
+    }
+
+    /// Copy the 80 OAM position bytes (Y at even index, X at odd index, for each
+    /// of the 40 sprites) into `out`. Reads the raw OAM buffer directly,
+    /// bypassing the DMA-conflict bus logic — the PPU sprite snapshot wants the
+    /// true post-write OAM contents (Gambatte `oamram_[2*i]`/`[2*i+1]`).
+    pub fn peek_oam_pos(&self, out: &mut [u8; 80]) {
+        for i in 0..40 {
+            let base = OAM_START + (i as u16) * 4;
+            out[2 * i] = self.oam.read(base);
+            out[2 * i + 1] = self.oam.read(base + 1);
+        }
+    }
+
     /// Source-region classification of the active OAM DMA (mirrors
     /// `oamDmaInitSetup`/`cart_.oamDmaSrc()`): 0=rom 1=sram 2=vram 3=wram
     /// 4=invalid.
@@ -2251,6 +2285,11 @@ impl memory::Addressable for Mmio {
                 OAM_START..=OAM_END => {
                     if !self.dma_transfer_in_progress() {
                         self.oam.write(addr, value);
+                        // Flag the position-buffer change for the PPU snapshot
+                        // (Gambatte `lcd_.oamChange(cc)` on an OAM write). Only Y/X
+                        // (bytes 0,1 of each entry) feed the snapshot, but Gambatte
+                        // calls oamChange on any OAM write, so flag unconditionally.
+                        self.oam_write_pending = true;
                     }
                 }
                 // CGB OAM mirror (0xFEA0-0xFEFF). Writable only when the OAM bus

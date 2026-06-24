@@ -256,6 +256,176 @@ pub struct Sprite {
     pub oam_index: u8, // For priority resolution
 }
 
+// Faithful port of Gambatte's `SpriteMapper::OamReader` (sprite_mapper.cpp).
+// Holds a lazily-sampled 80-byte snapshot of the OAM Y/X positions (`buf`,
+// even=Y odd=X) plus the per-sprite large-size flag (`lsbuf`). The snapshot is
+// advanced by `update(cc)`, which walks OAM positions up to
+// `toPosCycles(cc) = (lineCycles(cc) + 1) % 456`, copying from the source. The
+// source is the real OAM normally, but reads as 0xFF for the whole window of an
+// active OAM-DMA (Gambatte points `oamram_` at the cartridge's disabled RAM).
+// `change(cc)` (on CPU OAM writes and at DMA start/end) caps the next walk via
+// `last_change`. The per-line sprite list is built from `buf` at mode-2-END.
+#[derive(Clone)]
+pub struct OamReader {
+    // posbuf_: Y at even index, X at odd index, for each of 40 sprites.
+    buf: [u8; 2 * OAM_SPRITE_COUNT],
+    // lsbuf_: per-sprite large-size flag.
+    lsbuf: [bool; OAM_SPRITE_COUNT],
+    // lu_: cc of the last update (the position-walk anchor), in PPU `abs_cc`.
+    lu: u64,
+    // lastChange_: position-walk cap (0xFF == no pending change).
+    last_change: u8,
+    // largeSpritesSrc_: live LCDC OBJ-size bit, latched into lsbuf on the walk.
+    large_src: bool,
+    cgb: bool,
+    // Whether the source currently reads 0xFF (active OAM-DMA window).
+    src_disabled: bool,
+}
+
+const OAM_POS_CYCLES: u32 = (2 * OAM_SPRITE_COUNT) as u32; // 80
+
+// Sub-M-cycle correction (in single-speed dots) between the cc at which the PPU
+// step observes the OAM-DMA window edge and the master cc Gambatte fires
+// startOamDma/endOamDma at. Calibrated against the late_sp*x/y `_1`/`_2` and
+// `_ds_1`/`_ds_2` bracket pairs.
+const OAMDMA_CHANGE_CC_OFFSET: u32 = 3;
+
+fn scan_slot_large_default() -> [bool; OAM_SPRITE_COUNT] {
+    [false; OAM_SPRITE_COUNT]
+}
+
+impl Default for OamReader {
+    fn default() -> Self {
+        OamReader {
+            buf: [0; 2 * OAM_SPRITE_COUNT],
+            lsbuf: [false; OAM_SPRITE_COUNT],
+            lu: 0,
+            last_change: 0xFF,
+            large_src: false,
+            cgb: false,
+            src_disabled: false,
+        }
+    }
+}
+
+impl OamReader {
+    fn changed(&self) -> bool {
+        self.last_change != 0xFF
+    }
+
+    // toPosCycles: lineCycles(cc)+1 wrapped to [0, 456).
+    fn to_pos_cycles(cc: u64, lc: &stat_irq::LyCounter) -> u32 {
+        let mut v = lc.line_cycles(cc) as u32 + 1;
+        if v >= stat_irq::LCD_CYCLES_PER_LINE {
+            v -= stat_irq::LCD_CYCLES_PER_LINE;
+        }
+        v
+    }
+
+    // Re-seed the snapshot from the current OAM (SpriteMapper::reset).
+    fn reset(&mut self, oam: &[u8; 2 * OAM_SPRITE_COUNT], cgb: bool) {
+        self.cgb = cgb;
+        self.large_src = false;
+        self.src_disabled = false;
+        self.lu = 0;
+        self.last_change = 0xFF;
+        self.lsbuf = [self.large_src; OAM_SPRITE_COUNT];
+        self.buf.copy_from_slice(oam);
+    }
+
+    // SpriteMapper::OamReader::enableDisplay.
+    fn enable_display(&mut self, cc: u64, ds: bool) {
+        self.buf = [0; 2 * OAM_SPRITE_COUNT];
+        self.lsbuf = [false; OAM_SPRITE_COUNT];
+        self.lu = cc + ((OAM_POS_CYCLES as u64) << ds as u32) + 1;
+        self.last_change = OAM_POS_CYCLES as u8;
+    }
+
+    // SpriteMapper::OamReader::update. `oam_y`/`oam_x` for sprite `i` are read
+    // lazily via the closure (real OAM when enabled, 0xFF when DMA-disabled).
+    fn update(&mut self, cc: u64, lc: &stat_irq::LyCounter, oam_pos: &[u8; 2 * OAM_SPRITE_COUNT]) {
+        if cc <= self.lu {
+            return;
+        }
+        // Full-line-or-more elapsed since the last update: Gambatte walks the
+        // whole 80-position buffer (distance = 2*lcd_num_oam_entries). Because
+        // rustyboi updates sparsely (only at change/doEvent, not per access),
+        // `toPosCycles(lu)` can underflow when lu is multiple lines old; do the
+        // full re-sample explicitly from pos 0 so every position is refreshed
+        // (sampling the disabled source if a DMA spans this whole window — which
+        // it cannot for >1 line, so this is the steady-state/post-enable refresh).
+        if self.changed()
+            && ((cc - self.lu) >> lc.ds as u32) >= stat_irq::LCD_CYCLES_PER_LINE as u64
+        {
+            for i in 0..OAM_SPRITE_COUNT {
+                self.lsbuf[i] = self.large_src;
+                if self.src_disabled {
+                    self.buf[2 * i] = 0xFF;
+                    self.buf[2 * i + 1] = 0xFF;
+                } else {
+                    self.buf[2 * i] = oam_pos[2 * i];
+                    self.buf[2 * i + 1] = oam_pos[2 * i + 1];
+                }
+            }
+            self.last_change = 0xFF;
+            self.lu = cc;
+            return;
+        }
+        if self.changed() {
+            let lulc = Self::to_pos_cycles(self.lu, lc);
+            let mut pos = lulc.min(OAM_POS_CYCLES);
+
+            // Distance to walk: from `pos` (the lineCycle of the last update) to
+            // `cclc` (now), within a single line (the >= 1-line case is handled
+            // above). Mirrors Gambatte OamReader::update.
+            let cclc = Self::to_pos_cycles(cc, lc);
+            let mut distance = cclc.min(OAM_POS_CYCLES).wrapping_sub(pos)
+                .wrapping_add(if cclc < lulc { OAM_POS_CYCLES } else { 0 });
+
+            {
+                let lcg = self.last_change as u32;
+                let target = lcg.wrapping_sub(pos)
+                    .wrapping_add(if lcg <= pos { OAM_POS_CYCLES } else { 0 });
+                if target <= distance {
+                    distance = target;
+                    self.last_change = 0xFF;
+                }
+            }
+
+            let mut d = distance;
+            while d > 0 {
+                d -= 1;
+                if pos & 1 == 0 {
+                    if pos == OAM_POS_CYCLES {
+                        pos = 0;
+                    }
+                    if self.cgb {
+                        self.lsbuf[(pos / 2) as usize] = self.large_src;
+                    }
+                    let (y, x) = if self.src_disabled {
+                        (0xFF, 0xFF)
+                    } else {
+                        (oam_pos[pos as usize], oam_pos[pos as usize + 1])
+                    };
+                    self.buf[pos as usize] = y;
+                    self.buf[pos as usize + 1] = x;
+                } else {
+                    let cur = self.lsbuf[(pos / 2) as usize];
+                    self.lsbuf[(pos / 2) as usize] = (cur && self.cgb) || self.large_src;
+                }
+                pos += 1;
+            }
+        }
+        self.lu = cc;
+    }
+
+    // SpriteMapper::OamReader::change.
+    fn change(&mut self, cc: u64, lc: &stat_irq::LyCounter, oam_pos: &[u8; 2 * OAM_SPRITE_COUNT]) {
+        self.update(cc, lc, oam_pos);
+        self.last_change = (Self::to_pos_cycles(self.lu, lc).min(OAM_POS_CYCLES)) as u8;
+    }
+}
+
 pub enum LCDCFlags {
     BGDisplay = 1<<0,
     SpriteDisplayEnable = 1<<1,
@@ -343,6 +513,23 @@ pub struct Ppu {
     // Sprite data for current scanline
     sprites_on_line: Vec<Sprite>,
     current_oam_sprite_index: usize, // Current sprite being checked during OAM search
+    // Lazy OAM Y/X snapshot (Gambatte SpriteMapper::OamReader). Drives sprite
+    // visibility so an OAM-DMA overlapping mode-2 retroactively zeroes positions
+    // sampled inside the DMA-disabled window. Fed by `oam_change`/`oam_update`.
+    // Not serialized; re-seeded on load via `oam_reader_seeded == false`.
+    #[serde(skip, default)]
+    oam_reader: OamReader,
+    // Tracks the previous-dot OAM-DMA "writing" state so the PPU can fire the
+    // OamReader `change` (source toggle) on DMA start/end edges.
+    #[serde(default)]
+    prev_dma_writing: bool,
+    // Set once the OamReader has been seeded for the current LCD-on session.
+    #[serde(default)]
+    oam_reader_seeded: bool,
+    // Per-slot OBJ size recorded by the incremental mode-2 scan, reused by the
+    // snapshot rebuild so the calibrated size-latch timing is preserved.
+    #[serde(skip, default = "scan_slot_large_default")]
+    scan_slot_large: [bool; OAM_SPRITE_COUNT],
     #[serde(default)]
     next_sprite_fetch_index: usize,
     // Tile number `(spx - firstTileXpos) & -8` of the most recently charged
@@ -719,6 +906,10 @@ impl Ppu {
             x: 0,
             sprites_on_line: Vec::new(),
             current_oam_sprite_index: 0,
+            oam_reader: OamReader::default(),
+            prev_dma_writing: false,
+            oam_reader_seeded: false,
+            scan_slot_large: [false; OAM_SPRITE_COUNT],
             next_sprite_fetch_index: 0,
             m3_sprite_prev_tile: SPRITE_TILE_NONE,
             m3_last_sprite_commit_tick: 0,
@@ -2652,6 +2843,20 @@ impl Ppu {
                 self.reschedule_all_stat_events(mmio);
                 self.sched_m0irq = stat_irq::DISABLED_TIME;
                 self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
+                // SpriteMapper::OamReader::enableDisplay: zero the snapshot and
+                // hold it inactive (no sprites) until `cc + (80<<ds) + 1`. abs_cc
+                // is re-derived below; enableDisplay is anchored to that dot.
+                {
+                    let ds = mmio.is_double_speed_mode();
+                    let cc = mmio.master_cc().wrapping_sub(self.p_now);
+                    self.oam_reader.cgb = mmio.is_cgb_features_enabled();
+                    self.oam_reader.large_src =
+                        (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+                    self.oam_reader.src_disabled = mmio.oam_dma_window_active();
+                    self.oam_reader.enable_display(cc, ds);
+                    self.prev_dma_writing = mmio.oam_dma_window_active();
+                    self.oam_reader_seeded = true;
+                }
             } else {
                 return;
             }
@@ -2663,6 +2868,9 @@ impl Ppu {
             self.previous_stat_interrupt_line = false;
             // The LCD just turned off; drop any pending LY write.
             let _ = mmio.take_ly_write_pending();
+            // Re-arm the sprite snapshot for the next enableDisplay.
+            self.oam_reader_seeded = false;
+            let _ = mmio.take_oam_write_pending();
             return;
         }
 
@@ -2685,6 +2893,11 @@ impl Ppu {
                 self.internal_ly_val = 0;
             }
         }
+
+        // Drive the lazy OAM sprite snapshot (Gambatte SpriteMapper::OamReader):
+        // fire `change(cc)` on OAM-DMA window edges (source toggle) and on CPU
+        // OAM writes, mirroring Gambatte's `startOamDma`/`endOamDma`/`oamChange`.
+        self.process_oam_reader_events(mmio);
 
         // CPU writes to FF44 (LY) reset the line counter to 0 and re-arm the
         // PPU at the start of an OAM search.
@@ -2797,6 +3010,21 @@ impl Ppu {
                     if self.objsize_apply_cc != wy2_disabled() {
                         self.scan_obj_size_large = self.objsize_large_at_cc(self.abs_cc);
                     }
+                    // Record this slot's size for the snapshot rebuild, set for
+                    // every scanned slot (even once 10 sprites are found, so the
+                    // rebuild has a valid size for all 40 entries).
+                    {
+                        let idx = self.current_oam_sprite_index;
+                        let use_latch = std::env::var("RB_OBJSIZE_SCAN")
+                            .map(|v| v != "0")
+                            .unwrap_or(true);
+                        let large = if use_latch {
+                            self.scan_obj_size_large
+                        } else {
+                            (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0
+                        };
+                        self.scan_slot_large[idx] = large;
+                    }
                     self.check_single_sprite_for_scanline(mmio, self.current_oam_sprite_index);
                     self.current_oam_sprite_index += 1;
                     // Latch the OBJ-size for the NEXT scan slot from the live LCDC
@@ -2819,6 +3047,17 @@ impl Ppu {
                 };
 
                 if self.ticks == pixel_transfer_arm_dot {
+                    // Rebuild the sprite list from the lazy OAM snapshot (Gambatte
+                    // SpriteMapper::doEvent -> update + mapSprites). This replaces
+                    // the incremental per-dot scan's `sprites_on_line` so visibility
+                    // honors the DMA-disabled-source window via the posbuf cap.
+                    // Rebuild the sprite list from the lazy OAM snapshot (Gambatte
+                    // SpriteMapper::doEvent -> oamReader_.update + mapSprites). On
+                    // the first line after enable there is no mode-2 scan; the
+                    // snapshot is held inactive (enableDisplay) so skip the rebuild.
+                    if !self.first_line_after_enable {
+                        self.build_sprites_from_snapshot(mmio);
+                    }
                     // Sort sprites by priority after OAM search is complete
                     if is_cgb {
                         // CGB mode: Sort by OAM index only (already in order, but ensure it)
@@ -4292,6 +4531,104 @@ impl Ppu {
             };
             
             self.sprites_on_line.push(sprite);
+        }
+    }
+
+    /// Per-dot driver for the lazy OAM sprite snapshot. Mirrors Gambatte's
+    /// `startOamDma`/`endOamDma`/`oamChange` plus the implicit `update(cc)` the
+    /// mode-2 doEvent performs. Run after `abs_cc` is folded to the current dot,
+    /// before the mode-2 scan reads the snapshot.
+    fn process_oam_reader_events(&mut self, mmio: &mut mmio::Mmio) {
+        let lc = self.ly_counter(mmio);
+        let cc = self.abs_cc;
+        let cgb = mmio.is_cgb_features_enabled();
+
+        // Lazy seed for the current LCD-on session.
+        if !self.oam_reader_seeded {
+            let mut pos = [0u8; 80];
+            mmio.peek_oam_pos(&mut pos);
+            self.oam_reader.reset(&pos, cgb);
+            self.oam_reader.lu = cc;
+            self.oam_reader.large_src = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+            self.prev_dma_writing = mmio.oam_dma_window_active();
+            self.oam_reader_seeded = true;
+            return;
+        }
+
+        // Keep largeSpritesSrc_ tracking the live LCDC OBJ-size bit (Gambatte
+        // sets it on the LCDC write; the walk latches it into lsbuf per slot).
+        self.oam_reader.large_src = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+
+        let mut pos = [0u8; 80];
+        mmio.peek_oam_pos(&mut pos);
+
+        // OAM-DMA window edges: at start the source becomes disabled RAM (0xFF);
+        // at end it returns to the real OAM. `change(cc)` flushes the snapshot up
+        // to `cc` with the OLD source, then caps the next walk, then we toggle.
+        let dma_writing = mmio.oam_dma_window_active();
+        if dma_writing != self.prev_dma_writing {
+            // The DMA window edge is observed at the PPU dot, but Gambatte fires
+            // startOamDma/endOamDma at the M-cycle's master cc, which precedes the
+            // PPU's observation by a fixed sub-M-cycle amount. Shift the change cc
+            // back by this offset so the position-walk cap lands on the same OAM
+            // slot Gambatte's does. Calibrated against the late_sp{00,01,39}x/y
+            // `_1`/`_2` and `_ds_1`/`_ds_2` bracket pairs (which straddle this
+            // boundary); scaled by the speed so it is a fixed lineCycle amount.
+            let cc = cc.saturating_sub((OAMDMA_CHANGE_CC_OFFSET as u64) << lc.ds as u32);
+            // change() under the pre-toggle source (Gambatte oamChange uses the
+            // pointer in effect for the just-completed span).
+            self.oam_reader.change(cc, &lc, &pos);
+            // Toggle source for the new span (startOamDma -> disabled,
+            // endOamDma -> real OAM).
+            self.oam_reader.src_disabled = dma_writing;
+            self.prev_dma_writing = dma_writing;
+        }
+
+        // CPU OAM write this M-cycle (Gambatte `lcd_.oamChange(cc)`).
+        if mmio.take_oam_write_pending() {
+            self.oam_reader.change(cc, &lc, &pos);
+        }
+        // The snapshot is flushed only at `change` (above) and at the mode-2-end
+        // `doEvent` (build_sprites_from_snapshot). A per-dot flush would consume
+        // the `last_change` cap before the DMA-start `change`, losing the
+        // load-bearing `_1`/`_2` bracket distinction.
+    }
+
+    /// Flush the snapshot to the mode-2-end cc (Gambatte SpriteMapper::doEvent's
+    /// `oamReader_.update(time)`), then rebuild `sprites_on_line` from the posbuf
+    /// in one pass (mapSprites). Replaces the per-dot live OAM scan.
+    fn build_sprites_from_snapshot(&mut self, mmio: &mut mmio::Mmio) {
+        let lc = self.ly_counter(mmio);
+        let cc = self.abs_cc;
+        let mut pos = [0u8; 80];
+        mmio.peek_oam_pos(&mut pos);
+        self.oam_reader.update(cc, &lc, &pos);
+
+        self.sprites_on_line.clear();
+        let ly = mmio.read(LY);
+        for i in 0..OAM_SPRITE_COUNT {
+            if self.sprites_on_line.len() >= MAX_SPRITES_PER_LINE {
+                break;
+            }
+            let sprite_y = self.oam_reader.buf[2 * i];
+            let sprite_x = self.oam_reader.buf[2 * i + 1];
+            // Per-sprite OBJ size from the calibrated incremental scan (preserves
+            // the late_sizechange per-slot size-latch timing); the snapshot only
+            // governs Y/X visibility.
+            let large = self.scan_slot_large[i];
+            let sprite_height: u8 = if large { 16 } else { 8 };
+            let screen_y = sprite_y.wrapping_sub(16);
+            if ly >= screen_y && ly < screen_y.wrapping_add(sprite_height) {
+                let tile_index = mmio.read(0xFE00 + (i as u16) * 4 + 2);
+                let attributes_byte = mmio.read(0xFE00 + (i as u16) * 4 + 3);
+                self.sprites_on_line.push(Sprite {
+                    y: sprite_y,
+                    x: sprite_x,
+                    tile_index,
+                    attributes: SpriteAttributes::from_byte(attributes_byte),
+                    oam_index: i as u8,
+                });
+            }
         }
     }
 
