@@ -3940,6 +3940,26 @@ impl Ppu {
     /// 200 does not; DS 398 reflags / 402 does not), so it carries its own limit.
     /// Returns None when no closed-form mode-0 anchor exists (caller falls back).
     pub fn hdma_period_unhalt(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
+        self.hdma_period_unhalt_adj(access_cc, double_speed, 0)
+    }
+
+    /// As `hdma_period_unhalt`, with the line-END (drop) bracket widened by
+    /// `limit_adj` dots (the EI fast-dispatch ISR-phase compensation; see
+    /// `Bus::hdma_in_period_for_unhalt_adj`). The compensation widens the END
+    /// bracket ONLY — the START bracket (`cc >= m0t`, mode-0 entry) is left
+    /// untouched, because the EI-fast ISR-phase shift inflates the unhalt-period
+    /// DEPTH (`cc - m0t`) uniformly by 4: a Low-at-halt block deep in mode-0 (near
+    /// the line end) must still reflag (depth 200 -> in), while a block at the
+    /// mode-0 ENTRY (depth ~0, `hdma_ei_m3halt_m0unhalt_ly_*`) must still reflag
+    /// too (Gambatte reflag=1) — which a m0t shift would wrongly push past the
+    /// start bracket. `limit_adj == 0` is byte-identical to the calibrated
+    /// baseline.
+    pub fn hdma_period_unhalt_adj(
+        &self,
+        access_cc: u64,
+        double_speed: bool,
+        limit_adj: i64,
+    ) -> Option<bool> {
         if self.disabled {
             return None;
         }
@@ -3952,7 +3972,7 @@ impl Ppu {
             return Some(false);
         }
         let depth = cc - m0t;
-        let limit: i64 = if double_speed { 400 } else { 198 };
+        let limit: i64 = (if double_speed { 400 } else { 198 }) + limit_adj;
         Some(depth < limit)
     }
 

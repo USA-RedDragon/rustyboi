@@ -82,7 +82,21 @@ impl SM83 {
                 // renderer's cycle-exact isHdmaPeriod(cc) (bus path), not the loose
                 // cached/STAT-mode snapshot, so a Low-at-halt block that is not yet
                 // in period at unhalt fires on its natural m0 edge.
-                let in_period_unhalt = mmio.hdma_in_period_for_unhalt();
+                // EI fast-dispatch (RB_EI_FAST) delivers the timer IRQ at the EARLY
+                // anchor (schedCc + IF_OFF) instead of the LATE anchor (schedCc +
+                // CC_OFF). The timer ISR re-enables the LCD (FF40 write), so its
+                // closed-form `m0_time_master` lands `CC_OFF - IF_OFF`(=4) cc
+                // earlier under the fast path. The unhalt access cc (absolute
+                // `intevent_unhalt` schedule) is unchanged, so the unhalt-period
+                // DEPTH (`cc - m0t`) inflates by 4 — dropping the reflag of a
+                // Low-at-halt block near the line END. Widen the unhalt-period END
+                // bracket by +4 on the fast path so that block still reflags, while
+                // leaving the mode-0 ENTRY bracket intact (a depth-0 block reflags
+                // either way, matching Gambatte). (Non-fast HALT-late path:
+                // limit_adj = 0 => byte-identical.)
+                let ei_fast = std::env::var("RB_EI_FAST").map(|v| v == "1").unwrap_or(false);
+                let limit_adj: i64 = if ei_fast { 4 } else { 0 };
+                let in_period_unhalt = mmio.hdma_in_period_for_unhalt_adj(limit_adj);
                 match mmio.halt_hdma_state() {
                     memory::mmio::HaltHdmaState::Requested => mmio.set_hdma_req(),
                     memory::mmio::HaltHdmaState::Low
