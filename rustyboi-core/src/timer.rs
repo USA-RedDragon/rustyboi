@@ -60,28 +60,15 @@ const STOP_APU_DS_OFF: i64 = 2;
 // Gambatte's `+3` constant in `tmatime`/`nextIrqEventTime` (mem/tima.cpp).
 const TMA_OFF: u64 = 3;
 
-// ds-engine STAGE 1: RB_EXACTCC. When set, the timer register access cc is the
-// RAW master cc (`abs_cc`, captured at the START of the CPU access M-cycle —
-// proven by the cctracer LP0 oracle to be Gambatte's read/write cc), retiring
-// the `access_cc()` = abs_cc + CC_OFF (=5) anchor. All register-effect
-// arithmetic (set_tima/tma/tac, div_reset, TIMA/DIV reads) then resolves at the
-// same raw cc. The IRQ DELIVERY path in `step()` compares the raw `abs_cc`
-// against `next_irq_event_time`; since the scheduled time is now derived from
-// raw-cc-anchored writes (CC_OFF lower than before), the delivery comparison
-// folds the CC_OFF delta back in so the absolute IRQ fire cc — hence steady
-// state — is preserved.
-fn exactcc_enabled() -> bool {
-    // ds-engine STAGE 7: permanently on.
-    true
-}
-
-// ds-engine STAGE 3: RB_LAZYPERIPH. Gates the closed-form (update-to-cc)
-// peripheral models: the APU frame sequencer here, plus serial/DMA in their
-// own modules. See the per-site comments for what each conversion replaces.
-fn lazyperiph_enabled() -> bool {
-    // ds-engine STAGE 7: permanently on.
-    true
-}
+// ds-engine STAGE 1/7: the timer register access cc is the RAW master cc
+// (`abs_cc`, captured at the START of the CPU access M-cycle — proven by the
+// cctracer LP0 oracle to be Gambatte's read/write cc); the old
+// `access_cc()` = abs_cc + CC_OFF (=5) anchor and its RB_CC_OFF env sweep are
+// gone. The IRQ DELIVERY path in `step()` still folds CC_OFF back in
+// (`update_irq_delivery`) to keep the absolute fire cc unchanged.
+//
+// ds-engine STAGE 3/7: the closed-form (update-to-cc) APU frame sequencer is the
+// single FS path (the per-dot edge-detect fallback is deleted).
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Timer {
@@ -225,14 +212,11 @@ impl Timer {
     /// `abs_cc` (tuning lever `CC_OFF`). This is the canonical per-access cc the
     /// timer, serial, and APU all resolve register accesses on (M7).
     pub fn access_cc(&self) -> u64 {
-        if exactcc_enabled() {
-            // STAGE 1: the access resolves at the raw master cc (Gambatte read/write
-            // cc), with no CC_OFF. The CPU positions `abs_cc` at the access M-cycle
-            // start before any tick, so `abs_cc` IS the access cc.
-            return self.abs_cc;
-        }
-        let off = std::env::var("RB_CC_OFF").ok().and_then(|v| v.parse().ok()).unwrap_or(CC_OFF);
-        (self.abs_cc as i64 + off) as u64
+        // STAGE 1/7: the access resolves at the raw master cc (Gambatte read/write
+        // cc), with no CC_OFF. The CPU positions `abs_cc` at the access M-cycle
+        // start before any tick, so `abs_cc` IS the access cc. (RB_CC_OFF env
+        // sweep deleted in stage 7.)
+        self.abs_cc
     }
 
     /// cc at which a CPU register WRITE resolves. The write side is a separate
@@ -271,7 +255,7 @@ impl Timer {
     /// CC_OFF back to keep the absolute fire cc — and thus steady state —
     /// unchanged. Flag-off this is identical to `update_irq(abs_cc)`.
     fn update_irq_delivery(&mut self, abs_cc: u64) {
-        let fold = if exactcc_enabled() { CC_OFF as u64 } else { 0 };
+        let fold = CC_OFF as u64;
         while self.next_irq_event_time != DISABLED_TIME
             && abs_cc >= self.next_irq_event_time.wrapping_add(fold)
         {
@@ -512,25 +496,15 @@ impl Timer {
         // the falling edge of DIV bit 12 (bit 13 in double speed), derived from
         // the SAME master `abs_cc`/`div_anchor` the timer/DIV use.
         self.last_double_speed = mmio.is_double_speed_mode();
-        if lazyperiph_enabled() {
-            // Closed-form FS: clock once per DIV-bit-12 (bit-13 at DS) falling
-            // edge in (last_apu_cc, abs_cc]. The divider counter is
-            // (cc - div_anchor); bit N falls each time that counter crosses a
-            // multiple of 2^(N+1). Count = floor(c_now/P) - floor(c_prev/P).
-            let edges = self.apu_fs_edges(self.last_apu_cc, self.abs_cc);
-            for _ in 0..edges {
-                mmio.clock_apu_frame_sequencer();
-            }
-            self.last_apu_cc = self.abs_cc;
-        } else {
-            let apu_bit_pos = if self.last_double_speed { 13 } else { 12 };
-            let apu_div = (self.abs_cc.wrapping_sub(self.div_anchor) & 0xFFFF) as u16;
-            let apu_bit = (apu_div & (1 << apu_bit_pos)) != 0;
-            if self.last_apu_div_bit && !apu_bit {
-                mmio.clock_apu_frame_sequencer();
-            }
-            self.last_apu_div_bit = apu_bit;
+        // Closed-form FS (stage 3/7, permanent): clock once per DIV-bit-12 (bit-13
+        // at DS) falling edge in (last_apu_cc, abs_cc]. The divider counter is
+        // (cc - div_anchor); bit N falls each time that counter crosses a
+        // multiple of 2^(N+1). Count = floor(c_now/P) - floor(c_prev/P).
+        let edges = self.apu_fs_edges(self.last_apu_cc, self.abs_cc);
+        for _ in 0..edges {
+            mmio.clock_apu_frame_sequencer();
         }
+        self.last_apu_cc = self.abs_cc;
     }
 }
 

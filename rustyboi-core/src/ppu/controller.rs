@@ -82,8 +82,10 @@ fn win_y_pos_init() -> u8 { 0xFF }
 // Env-tunable override of an i64 offset (for sweeping during development). When
 // the named env var is unset, the compiled-in default is used.
 #[inline]
-fn env_off(name: &str, default: i64) -> i64 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+fn env_off(_name: &str, default: i64) -> i64 {
+    // ds-engine STAGE 7: env-var offset sweeps deleted; the calibrated constant
+    // default is the single value.
+    default
 }
 
 // ds-engine STAGE 4: RB_GETSTAT. When set, the FF41 mode bits (and the VRAM/OAM/
