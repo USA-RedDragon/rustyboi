@@ -112,8 +112,12 @@ pub fn getstat_enabled() -> bool {
 // (byte-identical to stage 4). Timing is unaffected either way (it lives wholly
 // in getStat / the STAT event schedule).
 pub fn linerender_enabled() -> bool {
-    // ds-engine STAGE 7: permanently on.
-    true
+    // ds-engine converge: OFF. The closed-form per-line render ignored mid-mode-3
+    // register writes (SCX/LCDC/BGP/WX) -> 219 pixel-content regressions. The
+    // per-dot fetcher/FIFO render handles mid-line writes correctly and getStat
+    // still owns all CPU-visible timing, so the framebuffer goes back to the
+    // per-dot path while keeping the exact-cc/getStat spine.
+    false
 }
 // DS offsets re-derived after the double-speed STAT sub-dot step (step_subdot)
 // gave the IRQ model true odd-cc resolution: m2 relaxes -2 -> -1 (the odd-cc
