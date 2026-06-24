@@ -236,6 +236,22 @@ pub struct Mmio {
     // after the first STAT mode read consumes it.
     #[serde(skip, default)]
     dma_prefetch_stat_bias: bool,
+    // OAM-DMA advance suppression for the GDMA/HDMA stall window. `execute_gdma`
+    // / `run_hdma_block` fold the OAM-DMA's M-cycle advances INTO the transfer
+    // loop (Gambatte's `cc - 3 > lOam` gate inside `Memory::dma`). The same
+    // transfer cc are then drained as a CPU `pending_dma_stall`, during which
+    // `step_dma` would advance the OAM-DMA a SECOND time. This counts those
+    // already-folded dots so `step_dma` skips them (mirrors Gambatte freezing
+    // `lastOamDmaUpdate_` at its post-loop value until the next `updateOamDma`).
+    #[serde(skip, default)]
+    oam_dma_stall_suppress: u32,
+    // Allow the OAM-DMA to advance this many M-cycles at HALT entry before the
+    // freeze takes hold (Gambatte `Memory::halt` runs `updateOamDma(cc + 4)`
+    // before halting, so the HALT instruction's own M-cycle moves the OAM-DMA;
+    // subsequent halt M-cycles freeze it). Set by `on_cpu_halt`, decremented by
+    // `step_dma` advances.
+    #[serde(skip, default)]
+    halt_oam_grace: u8,
     // Mirrors Gambatte's `haltHdmaState_`.
     #[serde(default)]
     halt_hdma_state: HaltHdmaState,
@@ -393,6 +409,8 @@ impl Mmio {
             hdma_enabled: false,
             pending_dma_stall: 0,
             dma_prefetch_stat_bias: false,
+            oam_dma_stall_suppress: 0,
+            halt_oam_grace: 0,
             hdma_req_pending: false,
             halt_hdma_state: HaltHdmaState::Low,
             halt_wakeup_skew: false,
@@ -916,6 +934,15 @@ impl Mmio {
         let (per_byte, setup) = if self.is_double_speed_mode() { (4, 5) } else { (2, 4) };
         let prefetch_fudge = if self.dma_prefetch_stat_bias { 0 } else { 5 };
         self.pending_dma_stall += (effective_length as u32) * per_byte + setup + prefetch_fudge;
+        // The OAM-DMA M-cycles for the transfer were folded into the loop above.
+        // Suppress `step_dma` for Gambatte's true dma-event duration (the transfer
+        // `per_byte` cc plus the single trailing `cc += 4`), NOT the extra `+5`
+        // CPU-stall prefetch fudge. Gambatte freezes `lastOamDmaUpdate_` for the
+        // event then catches the OAM-DMA up on the next `updateOamDma`; the residual
+        // post-stall cc advance the OAM-DMA normally toward the next access.
+        if interleave {
+            self.oam_dma_stall_suppress = (effective_length as u32) * per_byte + 4;
+        }
     }
 
     // ----------------------------------------------------------------------
@@ -1034,6 +1061,9 @@ impl Mmio {
     /// currently flagged req so it does not double-fire on unhalt.
     pub fn on_cpu_halt(&mut self) {
         self.cpu_halted = true;
+        // Gambatte advances the OAM-DMA one M-cycle at halt entry (the HALT
+        // instruction's own M-cycle); allow that single advance through the freeze.
+        self.halt_oam_grace = 1;
         // C1: a fresh HALT re-arms the wakeup-skew guard (the previous HALT-woken
         // stream has ended).
         self.halt_wakeup_skew = false;
@@ -1114,6 +1144,13 @@ impl Mmio {
         }
         if interleave && self.dma_active {
             self.dma_subcycle = (cc - loam).rem_euclid(4) as u8;
+        }
+        // The OAM-DMA M-cycles for this 0x10-byte block were folded into the loop
+        // above; suppress `step_dma` for Gambatte's true dma-event duration (the
+        // 0x10-byte transfer plus the single trailing `cc += 4`) so the OAM-DMA is
+        // not advanced twice (see `execute_gdma`).
+        if interleave {
+            self.oam_dma_stall_suppress += (0x10u32) * (per_byte_cc as u32) + 4;
         }
         self.hdma_write_delay = delay;
 
@@ -1227,6 +1264,13 @@ impl Mmio {
     }
 
     pub fn step_dma(&mut self) {
+        // During the GDMA/HDMA stall the OAM-DMA was already advanced inside the
+        // transfer loop (Gambatte folds it into `Memory::dma`); skip the dots that
+        // re-tick the same transfer time so the OAM-DMA is not double-advanced.
+        if self.oam_dma_stall_suppress > 0 {
+            self.oam_dma_stall_suppress -= 1;
+            return;
+        }
         if !self.dma_active {
             return;
         }
@@ -1237,6 +1281,21 @@ impl Mmio {
             return;
         }
         self.dma_subcycle = 0;
+        // While the CPU is halted the OAM-DMA position is FROZEN: Gambatte's
+        // `updateOamDma` halt branch consumes the elapsed M-cycles
+        // (`lastOamDmaUpdate_ += 4*cycles`) WITHOUT advancing `oamDmaPos_`. Keep
+        // the sub-M-cycle phase (reset above) but do not place a byte. Gambatte's
+        // `Memory::halt` still advances ONE M-cycle at halt entry
+        // (`updateOamDma(cc + 4)` runs before `intreq_.halt()`), i.e. the HALT
+        // instruction's own M-cycle moves the OAM-DMA; only subsequent halt
+        // M-cycles freeze. `halt_oam_grace` lets exactly that one through.
+        if self.cpu_halted {
+            if self.halt_oam_grace > 0 {
+                self.halt_oam_grace -= 1;
+            } else {
+                return;
+            }
+        }
         self.dma_advance_one_mcycle();
     }
 
