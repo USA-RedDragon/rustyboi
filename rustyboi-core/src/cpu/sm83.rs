@@ -108,13 +108,56 @@ impl SM83 {
             // (raw master_cc, the stage-1 read anchor) having reached its
             // recorded fire cc, re-resolving a lower-priority armed IRQ if the
             // timer is not yet due.
+            //
+            // PER-ACCESS DELIVERY SPLIT: a non-halt, non-stop EI loop services the
+            // timer IRQ at the EARLY anchor (`pending_timer_fire_cc_ei`, schedCc +
+            // IF_OFF) so the ISR / TAC re-write lands on Gambatte's exact divider
+            // phase (the late_tc01 / irq cluster). HALT and post-STOP streams keep
+            // the LATE anchor (`pending_timer_fire_cc`, schedCc + CC_OFF), which is
+            // where their read-after-overflow tests are byte-exact.
             let boundary_access_cc = mmio.access_cc();
+            let ei_ctx = !just_unhalted && !self.stopped;
+
+            // EI-loop fast delivery: in a non-halt/non-stop loop with IME on, fire
+            // an imminent overflow at the EARLY anchor (schedCc + IF_OFF) so the
+            // ensuing service runs on Gambatte's exact phase, ahead of the late
+            // per-dot delivery. Re-sample the pending interrupt afterward.
+            // NOTE: the EI-loop fast timer dispatch is gated OFF by default. It
+            // correctly dissolves the timer-schedule offset for the pure-timer
+            // re-derivation cluster (tima/tc00_late_tc01_*, irq_ds, irq_retrigger:
+            // +19 fixed) BUT the +5 IF-delivery grid it bypasses is simultaneously
+            // REQUIRED by three coupled subsystems tuned against it — the IF-edge
+            // re-flag tests (tima/tc00_irq_ifw_*), the CGB STOP sub-dot derivation
+            // (speedchange_tima*), and the HDMA-vs-IRQ service-phase race
+            // (hdma_*unhalt) — so enabling it alone is net +3 (regressive). It is
+            // the per-access-cc "lever A": net-positive only once those three are
+            // re-tuned in the same coordinated stage. Enable for that work via
+            // RB_EI_FAST=1 (OFF = byte-identical to the +5-grid baseline).
+            let ei_fast = std::env::var("RB_EI_FAST").map(|v| v == "1").unwrap_or(false);
+            let mut pending_interrupt = pending_interrupt;
+            if ei_fast && ei_ctx && self.registers.ime {
+                if let Some(early) = mmio.next_timer_overflow_ei_cc() {
+                    if boundary_access_cc >= early {
+                        mmio.force_ei_timer_delivery(boundary_access_cc);
+                        pending_interrupt = self.get_pending_interrupt(mmio);
+                    }
+                }
+            }
+
             let mut serviceable = pending_interrupt;
-            if serviceable == Some(registers::InterruptFlag::Timer)
-                && let Some(fire_cc) = mmio.pending_timer_fire_cc()
-                && boundary_access_cc < fire_cc
-            {
-                serviceable = self.get_pending_interrupt_excluding_timer(mmio);
+            if serviceable == Some(registers::InterruptFlag::Timer) {
+                // Only the EI fast-dispatch (when enabled) services on the early
+                // anchor; otherwise the gate is the baseline late (+CC_OFF) anchor.
+                let gate_cc = if ei_fast && ei_ctx {
+                    mmio.pending_timer_fire_cc_ei()
+                } else {
+                    mmio.pending_timer_fire_cc()
+                };
+                if let Some(fire_cc) = gate_cc
+                    && boundary_access_cc < fire_cc
+                {
+                    serviceable = self.get_pending_interrupt_excluding_timer(mmio);
+                }
             }
 
             // FAITHFUL prefetch model: fetch the opcode at the instruction

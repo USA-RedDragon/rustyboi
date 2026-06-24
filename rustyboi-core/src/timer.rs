@@ -30,6 +30,11 @@ const DISABLED_TIME: u64 = u64::MAX;
 // (13 failures, below the 17 baseline) sits exactly at +5, confirming the
 // scheduled-TIMA arithmetic is exact at this anchor.
 const CC_OFF: i64 = 5;
+/// EI-loop IF-visibility offset. The timer IF bit becomes visible at
+/// `schedCc + IF_OFF` (vs the `CC_OFF`-late gate cc used by HALT/STOP). A non-halt
+/// EI loop dispatches the IRQ at this early anchor so the ISR (and any TAC
+/// re-write) runs on Gambatte's exact divider phase. HALT/STOP keep `CC_OFF`.
+const IF_OFF: i64 = 1;
 /// Write-side canonical access-cc offset (M8). Swept against the ch2
 /// `late_reset_nr52` a/b pairs; the trigger's length boundary lands at this
 /// phase rather than the read's `CC_OFF`.
@@ -46,6 +51,12 @@ const WRITE_CC_OFF: i64 = 0;
 /// cctracer: this single value passes BOTH sub-dot probe sides simultaneously,
 /// confirming it is the exact divider-phase derivation and not a swap).
 const STOP_DERIV_OFF: i64 = -4;
+/// STOP derivation-anchor adjustment when the enclosing EI-loop ISR was force-
+/// delivered the timer IRQ early (`Timer::ei_promoted`). The early service shifts
+/// the STOP's `abs_cc`; +1 recovers the speedchange_tima post-switch divider phase
+/// (swept against the speedchange `tima00..03` + `tima01_nop` families with the
+/// EI fast-dispatch active). Env-overridable via RB_STOP_PROMOTE for calibration.
+const STOP_EI_PROMOTE_ADJ: i64 = 0;
 /// Extra master-cc added (on top of `STOP_DERIV_OFF`) to the cc the post-switch
 /// *reset TIMA value* is computed at, so it lands on Gambatte's true switch cc.
 /// Gambatte derives the reset TIMA at `instr_start + (ds ? 0 : 4)`, i.e. 4 cc
@@ -138,6 +149,10 @@ pub struct Timer {
     // of off the instruction-start IF snapshot. DISABLED_TIME = none pending.
     #[serde(default = "disabled_time")]
     last_fire_cc: u64,
+    // The EARLY (EI-loop) gate cc for the same undispatched IRQ: `schedCc + IF_OFF`.
+    // The non-halt/non-stop dispatch gate uses this instead of `last_fire_cc`.
+    #[serde(default = "disabled_time")]
+    last_fire_cc_ei: u64,
     // ds-engine STAGE 3 (RB_LAZYPERIPH): the `abs_cc` up to and including which
     // the APU frame sequencer has been clocked. The closed-form FS counts
     // DIV-bit-12/13 falling edges in `(last_apu_cc, abs_cc]` instead of per-dot
@@ -145,6 +160,14 @@ pub struct Timer {
     // thus the FS phase — restarts from the new anchor).
     #[serde(default)]
     last_apu_cc: u64,
+    // Set when a timer IRQ was force-delivered to the EI loop at the early anchor
+    // (`force_ei_delivery`); the ensuing ISR runs ~4cc earlier than the normal
+    // +5-late service, so a STOP speed-switch issued inside that ISR enters its
+    // divider-derivation `abs_cc` shifted, and `stop_div_reset` must compensate the
+    // derivation anchor by `+STOP_EI_PROMOTE_ADJ`. Cleared by the STOP (consumed)
+    // and never persists past one STOP.
+    #[serde(skip, default)]
+    ei_promoted: bool,
 }
 
 fn disabled_time() -> u64 {
@@ -168,7 +191,9 @@ impl Timer {
             pending_irq: false,
             div_anchor_apu: 0,
             last_fire_cc: DISABLED_TIME,
+            last_fire_cc_ei: DISABLED_TIME,
             last_apu_cc: 0,
+            ei_promoted: false,
         }
     }
 
@@ -182,9 +207,45 @@ impl Timer {
         }
     }
 
+    /// The EARLY (EI-loop) gate cc for the undispatched timer IRQ, or `None`.
+    pub fn pending_fire_cc_ei(&self) -> Option<u64> {
+        if self.last_fire_cc_ei != DISABLED_TIME {
+            Some(self.last_fire_cc_ei)
+        } else {
+            None
+        }
+    }
+
     /// STAGE 2: clear the recorded fire cc after the CPU dispatches the IRQ.
     pub fn clear_fire_cc(&mut self) {
         self.last_fire_cc = DISABLED_TIME;
+        self.last_fire_cc_ei = DISABLED_TIME;
+    }
+
+    /// The DELIVERY cc of the NEXT scheduled timer overflow (the cc at which its IF
+    /// bit will be raised: `next_irq_event_time + CC_OFF`), or `None` if disabled.
+    /// Used by the EI-loop fast-dispatch to promote an imminent overflow so the
+    /// non-halt service runs on Gambatte's exact phase rather than +5 late.
+    pub fn next_overflow_deliver_cc(&self) -> Option<u64> {
+        if self.tac & TAC_ENABLE != 0 && self.next_irq_event_time != DISABLED_TIME {
+            Some(self.next_irq_event_time.wrapping_add(CC_OFF as u64))
+        } else {
+            None
+        }
+    }
+
+    /// EARLY (EI-loop) anchor cc of the next scheduled overflow: `schedCc + IF_OFF`.
+    /// The non-halt fast dispatch fires the overflow once the boundary reaches this.
+    pub fn next_overflow_ei_cc(&self) -> Option<u64> {
+        if self.tac & TAC_ENABLE != 0 && self.next_irq_event_time != DISABLED_TIME {
+            let if_off = std::env::var("RB_IF_OFF")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(IF_OFF);
+            Some(self.next_irq_event_time.wrapping_add(if_off as u64))
+        } else {
+            None
+        }
     }
 
     pub fn abs_cc(&self) -> u64 {
@@ -262,6 +323,14 @@ impl Timer {
     /// CC_OFF back to keep the absolute fire cc — and thus steady state —
     /// unchanged. Flag-off this is identical to `update_irq(abs_cc)`.
     fn update_irq_delivery(&mut self, abs_cc: u64) {
+        // The IF bit is raised at the LATE anchor (`CC_OFF`) — UNCHANGED from
+        // baseline so the HALT-wakeup detection AND the IF re-flag observation
+        // (irq_1-style tests) stay on the late grid. The non-halt EI-loop fast
+        // dispatch is handled separately by `force_ei_delivery` (the CPU calls it
+        // in a non-halt/non-stop EI loop): it does the same do_irq_event early so
+        // the ISR / TAC re-write runs on Gambatte's exact phase, but ONLY when the
+        // CPU is about to service it — it never raises IF early on the bus that the
+        // HALT/re-flag paths observe.
         let fold = CC_OFF as u64;
         while self.next_irq_event_time != DISABLED_TIME
             && abs_cc >= self.next_irq_event_time.wrapping_add(fold)
@@ -272,10 +341,54 @@ impl Timer {
             // (raw master_cc) against this. Only record while none is pending so
             // a back-to-back overflow keeps the earliest undispatched fire.
             if crate::cpu::bus::faithful_enabled() && self.last_fire_cc == DISABLED_TIME {
-                self.last_fire_cc = self.next_irq_event_time.wrapping_add(fold);
+                self.last_fire_cc = self.next_irq_event_time.wrapping_add(CC_OFF as u64);
+                self.last_fire_cc_ei = self.next_irq_event_time.wrapping_add(IF_OFF as u64);
+                // A normally-delivered (not force-promoted) IRQ resets the one-shot
+                // EI-promotion flag so a stale promotion from an earlier ISR cannot
+                // mis-bias a later, normally-entered STOP.
+                self.ei_promoted = false;
+            }
+            if std::env::var("RB_TIMATRACE").is_ok() {
+                eprintln!("[RB IRQ-fire] schedCc={} deliverCc={} ifCc={} (abs_cc={})",
+                    self.next_irq_event_time, self.next_irq_event_time.wrapping_add(CC_OFF as u64),
+                    self.next_irq_event_time.wrapping_add(fold), abs_cc);
             }
             self.do_irq_event();
         }
+    }
+
+    /// EI-loop fast timer delivery. In a non-halt/non-stop EI loop the CPU calls
+    /// this at the EARLY anchor (`boundary >= schedCc + IF_OFF`) to fire an
+    /// imminent overflow BEFORE its normal `CC_OFF`-late per-dot delivery, so the
+    /// serviced ISR (and any TAC re-write) runs on Gambatte's exact divider phase.
+    /// Mirrors `update_irq_delivery` but keyed on the early anchor and only
+    /// reachable from the non-halt dispatch path. Returns true if it fired one (so
+    /// the CPU can raise the IF bit and service). Idempotent vs the per-dot path:
+    /// `do_irq_event` advances `next_irq_event_time`, so the later +5 delivery
+    /// will not re-fire the same overflow.
+    pub fn force_ei_delivery(&mut self, boundary: u64) -> bool {
+        if self.tac & TAC_ENABLE == 0 {
+            return false;
+        }
+        let if_off = std::env::var("RB_IF_OFF")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(IF_OFF);
+        let mut fired = false;
+        while self.next_irq_event_time != DISABLED_TIME
+            && boundary >= self.next_irq_event_time.wrapping_add(if_off as u64)
+        {
+            if self.last_fire_cc == DISABLED_TIME {
+                self.last_fire_cc = self.next_irq_event_time.wrapping_add(CC_OFF as u64);
+                self.last_fire_cc_ei = self.next_irq_event_time.wrapping_add(IF_OFF as u64);
+            }
+            self.do_irq_event();
+            fired = true;
+        }
+        if fired {
+            self.ei_promoted = true;
+        }
+        fired
     }
 
     /// Gambatte `Tima::updateTima`: advance the derived TIMA value to `cc`.
@@ -342,6 +455,12 @@ impl Timer {
     /// Gambatte `Tima::setTac` (DMG / CGB; `agbFlag` is false for both targets).
     fn set_tac(&mut self, data: u8) {
         let cc = self.access_cc();
+        if std::env::var("RB_TIMATRACE").is_ok() {
+            eprintln!("[RB setTac] cc={} data={:02X} oldtac={:02X} tima={:02X} tma={:02X} lastUpd={} nextIrq={} tmatime={} divAnchor={}",
+                cc, data, self.tac, self.tima, self.tma, self.tima_last_update,
+                if self.next_irq_event_time==DISABLED_TIME {0} else {self.next_irq_event_time},
+                if self.tmatime==DISABLED_TIME {0} else {self.tmatime}, self.div_anchor);
+        }
         if (self.tac ^ data) != 0 {
             let mut next = self.next_irq_event_time;
 
@@ -432,7 +551,18 @@ impl Timer {
     /// (`STOP_APU_{SS,DS}_EXTRA`), set after the split (which would otherwise leave
     /// `div_anchor_apu` at the derivation anchor).
     pub fn stop_div_reset(&mut self, old_ds: bool) {
-        let anchor_cc = (self.abs_cc as i64 + STOP_DERIV_OFF) as u64;
+        // A STOP issued inside an EI-loop ISR that was force-delivered the timer
+        // IRQ at the early anchor enters with `abs_cc` shifted vs the normal +5-late
+        // service; compensate the derivation anchor by `STOP_EI_PROMOTE_ADJ` so the
+        // post-switch divider phase (and the much-later TIMA read it feeds) matches
+        // Gambatte. Consumes the one-shot promotion flag.
+        let promote_adj_const = std::env::var("RB_STOP_PROMOTE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(STOP_EI_PROMOTE_ADJ);
+        let promote_adj = if self.ei_promoted { promote_adj_const } else { 0 };
+        self.ei_promoted = false;
+        let anchor_cc = (self.abs_cc as i64 + STOP_DERIV_OFF + promote_adj) as u64;
         let tima_cc = (anchor_cc as i64
             + if old_ds { STOP_TIMA_DS_EXTRA } else { STOP_TIMA_SS_EXTRA }) as u64;
         // APU divReset fold anchor: independently offset from the derivation anchor.
@@ -567,6 +697,11 @@ impl Addressable for Timer {
                     if tmp == 0x100 {
                         let tmatime = self.tima_last_update + (ticks << clk) + TMA_OFF;
                         tmp = if cc >= tmatime { self.tma as u64 } else { 0 };
+                    }
+                    if std::env::var("RB_TIMATRACE").is_ok() {
+                        eprintln!("[RB TIMA read] cc={} -> {:02X} (lastUpd={} tmatime={} tma={:02X})",
+                            cc, tmp as u8, self.tima_last_update,
+                            if self.tmatime==DISABLED_TIME {0} else {self.tmatime}, self.tma);
                     }
                     tmp as u8
                 }

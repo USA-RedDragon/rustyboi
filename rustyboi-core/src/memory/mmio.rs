@@ -732,6 +732,36 @@ impl Mmio {
         self.timer.pending_fire_cc()
     }
 
+    /// Delivery cc of the next scheduled timer overflow (EI-loop fast-dispatch).
+    pub fn next_timer_overflow_cc(&self) -> Option<u64> {
+        self.timer.next_overflow_deliver_cc()
+    }
+
+    /// EARLY (EI-loop) anchor cc of the next scheduled overflow (schedCc + IF_OFF).
+    pub fn next_timer_overflow_ei_cc(&self) -> Option<u64> {
+        self.timer.next_overflow_ei_cc()
+    }
+
+    /// EARLY (EI-loop) gate cc of the undispatched timer IRQ.
+    pub fn pending_timer_fire_cc_ei(&self) -> Option<u64> {
+        self.timer.pending_fire_cc_ei()
+    }
+
+    /// EI-loop fast timer delivery: fire any imminent overflow at the early anchor
+    /// (`boundary >= schedCc + IF_OFF`) and raise its IF bit. Called by the CPU in
+    /// a non-halt/non-stop EI loop so the serviced ISR runs on Gambatte's exact
+    /// phase, ahead of the normal `CC_OFF`-late per-dot delivery.
+    pub fn force_ei_timer_delivery(&mut self, boundary: u64) {
+        let mut timer = self.timer.clone();
+        let fired = timer.force_ei_delivery(boundary);
+        self.timer = timer;
+        if fired {
+            let mut t = self.timer.clone();
+            t.flush_pending_irq(self);
+            self.timer = t;
+        }
+    }
+
     /// STAGE 2: clear the recorded timer fire cc once the CPU dispatches the IRQ.
     pub fn clear_timer_fire_cc(&mut self) {
         self.timer.clear_fire_cc();
