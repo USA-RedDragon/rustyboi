@@ -3335,7 +3335,14 @@ impl Ppu {
                             self.win_wx_penalty_resolved = true;
                         } else {
                             let scx_bias = if (self.m3_arm_scx & 7) != 0 { 1 } else { 0 };
-                            let drawn = (self.ticks as i64) - ws as i64 + scx_bias;
+                            // SCX > 3 fine-scroll: the x==0 window's StartWindowDraw
+                            // penalty accrual begins later than win_start_dot by two
+                            // dots per extra discarded SCX dot (the M3Start dispatch
+                            // runs the window-tile fetch that much later). Without
+                            // this the scx5 boundary is 4 dots too early and the
+                            // late_wx_scx5_1 refund is fully accrued (drops to 0).
+                            let scx_late = 2 * (((self.m3_arm_scx & 7) as i64) - 3).max(0);
+                            let drawn = (self.ticks as i64) - ws as i64 + scx_bias - scx_late;
                             let accrued = drawn.clamp(0, WIN_M3_PENALTY as i64);
                             let refund = WIN_M3_PENALTY as i64 - accrued;
                             self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
