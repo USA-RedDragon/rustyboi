@@ -5,6 +5,7 @@ import java.util.Properties
 
 plugins {
     id("com.android.application")
+    jacoco
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +93,9 @@ android {
     buildTypes {
         getByName("debug") {
             isMinifyEnabled = false
+            // Instrument debug unit tests so JaCoCo can emit coverage (surfaced
+            // in Codecov by the `jacocoTestReport` task below).
+            enableUnitTestCoverage = true
         }
         getByName("release") {
             isMinifyEnabled = true
@@ -202,13 +206,11 @@ fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks
 val buildRustLibDebug = cargoNdkTask("buildRustLibDebug", "debug")
 val buildRustLibRelease = cargoNdkTask("buildRustLibRelease", "release")
 
-// We ship no unit or instrumented tests. Disabling their variant components
-// stops AGP from creating test components at all — which both trims
-// configuration time and avoids AGP 9.2.1's internal use of the deprecated
-// Project-object dependency notation when wiring test → main dependencies
-// (deprecated in Gradle 9, an error in Gradle 10).
+// JVM unit tests (JaCoCo coverage) are enabled; instrumented (androidTest)
+// tests remain off — we ship none, and disabling their component trims
+// configuration time and avoids AGP's internal use of the deprecated
+// Project-object dependency notation for the androidTest → main wiring.
 androidComponents.beforeVariants { variantBuilder ->
-    (variantBuilder as com.android.build.api.variant.HasUnitTestBuilder).enableUnitTest = false
     (variantBuilder as com.android.build.api.variant.HasAndroidTestBuilder).enableAndroidTest = false
 }
 
@@ -235,4 +237,49 @@ dependencies {
     // DocumentFile gives us a recursive listFiles() API over SAF tree URIs,
     // used by the ROM library scanner in RustyboiActivity.
     implementation("androidx.documentfile:documentfile:1.1.0")
+
+    // JVM unit tests for the pure RomScan helpers.
+    testImplementation("junit:junit:4.13.2")
+}
+
+// ---------------------------------------------------------------------------
+// JaCoCo coverage for the JVM unit tests
+// ---------------------------------------------------------------------------
+//
+// `testDebugUnitTest` (with `enableUnitTestCoverage` above) writes an exec file
+// under build/outputs/unit_test_code_coverage; this task turns it into the XML
+// report Codecov ingests (flags: android). Only the Kotlin app classes are
+// measured — GameActivity/JNI native code has no JVM bytecode to cover.
+tasks.register<JacocoReport>("jacocoTestReport") {
+    dependsOn("testDebugUnitTest")
+    group = "verification"
+    description = "Generate JaCoCo XML coverage from the debug JVM unit tests."
+
+    reports {
+        xml.required.set(true)
+        html.required.set(true)
+        csv.required.set(false)
+        xml.outputLocation.set(
+            layout.buildDirectory.file("reports/jacoco/jacocoTestReport/jacocoTestReport.xml"),
+        )
+    }
+
+    // Kotlin app classes (no Java sources in this module). AGP has moved this
+    // output between versions (built_in_kotlinc in AGP 9.x, tmp/kotlin-classes
+    // earlier), so measure whichever candidate root exists.
+    classDirectories.setFrom(
+        files(
+            layout.buildDirectory.dir("intermediates/built_in_kotlinc/debug/compileDebugKotlin/classes"),
+            layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        ),
+    )
+    sourceDirectories.setFrom(files("src/main/kotlin"))
+    executionData.setFrom(
+        fileTree(layout.buildDirectory) {
+            include(
+                "outputs/unit_test_code_coverage/debugUnitTest/testDebugUnitTest.exec",
+                "jacoco/testDebugUnitTest.exec",
+            )
+        },
+    )
 }

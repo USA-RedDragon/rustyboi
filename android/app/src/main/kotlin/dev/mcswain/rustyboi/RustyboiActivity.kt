@@ -208,7 +208,7 @@ class RustyboiActivity : GameActivity() {
                     val childRel = if (prefix.isEmpty()) name else "$prefix/$name"
                     if (child.isDirectory) {
                         queue.addLast(Frame(child, childRel))
-                    } else if (child.isFile && isRomFile(name)) {
+                    } else if (child.isFile && RomScan.isRomFile(name)) {
                         val size = child.length()
                         val key = child.uri.toString()
                         var crc = 0L
@@ -239,45 +239,16 @@ class RustyboiActivity : GameActivity() {
         }
     }
 
-    /** CRC32 of a stream, read to completion. */
-    private fun crcOf(input: java.io.InputStream): Long {
-        val crc = java.util.zip.CRC32()
-        val buf = ByteArray(65536)
-        var n = input.read(buf)
-        while (n >= 0) {
-            crc.update(buf, 0, n)
-            n = input.read(buf)
-        }
-        return crc.value
-    }
-
     /**
      * CRC32 of a ROM file, matching No-Intro's checksum of the raw ROM image.
      * For a `.zip`, hashes the first contained ROM entry (No-Intro CRCs are of
-     * the uncompressed ROM, not the archive). Returns 0 on any error.
+     * the uncompressed ROM, not the archive). Returns 0 on any error. The
+     * zip/raw CRC logic lives in [RomScan.crcOfRomStream].
      */
     private fun computeCrc32(uri: Uri, name: String): Long {
         return try {
             contentResolver.openInputStream(uri)?.use { input ->
-                if (name.lowercase().endsWith(".zip")) {
-                    java.util.zip.ZipInputStream(input).use { zis ->
-                        var result = 0L
-                        var e = zis.nextEntry
-                        while (e != null) {
-                            val en = e.name.lowercase()
-                            if (!e.isDirectory &&
-                                (en.endsWith(".gb") || en.endsWith(".gbc") || en.endsWith(".sgb"))
-                            ) {
-                                result = crcOf(zis)
-                                break
-                            }
-                            e = zis.nextEntry
-                        }
-                        result
-                    }
-                } else {
-                    crcOf(input)
-                }
+                RomScan.crcOfRomStream(input, name)
             } ?: 0L
         } catch (e: Exception) {
             Log.w(TAG, "computeCrc32 failed for $name", e)
@@ -319,7 +290,7 @@ class RustyboiActivity : GameActivity() {
     }
 
     private fun openSiblingSavFd(romUri: Uri, displayName: String): Int {
-        val stem = savStem(displayName)
+        val stem = RomScan.savStem(displayName)
         val savName = "$stem.sav"
         return try {
             // Derive the parent doc id by trimming the trailing path
@@ -370,22 +341,6 @@ class RustyboiActivity : GameActivity() {
             }
         }
         return contentResolver.persistedUriPermissions.firstOrNull()?.uri
-    }
-
-    private fun savStem(displayName: String): String {
-        // Strip the outermost extension. For `Pokemon Crystal.zip` we
-        // want `Pokemon Crystal.sav`; for `Pokemon Crystal.gbc` we
-        // also want `Pokemon Crystal.sav`.
-        val dot = displayName.lastIndexOf('.')
-        return if (dot <= 0) displayName else displayName.substring(0, dot)
-    }
-
-    private fun isRomFile(name: String): Boolean {
-        val lower = name.lowercase()
-        return lower.endsWith(".gb") ||
-                lower.endsWith(".gbc") ||
-                lower.endsWith(".sgb") ||
-                lower.endsWith(".zip")
     }
 
     private fun readAllBytes(uri: Uri): ByteArray? = try {
