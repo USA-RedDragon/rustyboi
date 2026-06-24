@@ -49,6 +49,24 @@ pub use audio::WebAudio;
 // The main-thread egui driver (canvas + wgpu-WebGL2 + egui). JS `WebApp.start()`.
 pub use webapp::WebApp;
 
+// Coverage-only: force the minicov profiling runtime into EVERY rustyboi-web
+// artifact. A `make coverage-web` build instruments this crate, so each of its
+// wasm outputs — including the `cdylib` and the lib's own test binary, neither of
+// which references `wasm-bindgen-test` — emits a `__llvm_profile_runtime`
+// reference that only minicov resolves. `#[used]` + touching `capture_coverage`
+// pulls minicov's runtime object into the link; the closure is never called.
+// Gated on the same cfg the coverage build sets, so `make web` never sees it.
+#[cfg(all(target_arch = "wasm32", wasm_bindgen_unstable_test_coverage))]
+#[used]
+static _MINICOV_ANCHOR: fn() = || {
+    let mut sink = Vec::new();
+    // SAFETY: not thread-safe, but never actually invoked — this exists only to
+    // anchor minicov (and thus __llvm_profile_runtime) into the link.
+    unsafe {
+        let _ = minicov::capture_coverage(&mut sink);
+    }
+};
+
 const GB_WIDTH: u32 = 160;
 const GB_HEIGHT: u32 = 144;
 const SGB_WIDTH: u32 = 256;

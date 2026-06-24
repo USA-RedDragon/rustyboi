@@ -14,4 +14,5 @@ GBEmulatorShootout/
 *.pyc
 
 lcov.info
+rustyboi-web.lcov
 sweep-out/
