@@ -153,6 +153,15 @@ impl<'a> Bus<'a> {
 
     pub fn master_cc_dbg(&self) -> u64 { self.mmio.master_cc() }
 
+    /// Non-ticking instruction-stream peek. Mirrors Gambatte's HALT-bug prefetch
+    /// `mem_.read(pc, cc())` (cpu.cpp case 0x76): the byte after HALT is read at
+    /// the current cc WITHOUT advancing it; the +4 charge is deferred until the
+    /// prefetched opcode is consumed on the next step. Instruction memory is never
+    /// PPU-gated, so a direct mmio read is the faithful peek.
+    pub fn peek(&self, addr: u16) -> u8 {
+        self.mmio.read(addr)
+    }
+
     /// STAGE 2 (RB_FAITHFUL): the access cc at an instruction boundary — the RAW
     /// master cc captured BEFORE this access M-cycle ticks (Gambatte's `cc` at
     /// which it resolves the access, then `cc += 4`). This is the same raw-cc

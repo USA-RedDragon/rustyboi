@@ -306,6 +306,25 @@ pub fn sbc_a_memory_hl(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
 }
 
 pub fn halt(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
+    // HALT bug (Gambatte cpu.cpp case 0x76): on the HALT M-cycle the CPU peeks the
+    // next opcode at pc (no pc++, no cc charge). If an interrupt is pending it does
+    // NOT halt — it leaves that byte prefetched with pc un-advanced. When IME=0 the
+    // prefetched opcode then executes and re-reads its own bytes (the classic
+    // double-read); when IME=1 the next step's interrupt service undoes the prefetch
+    // (pc -= 1) so the return address is the HALT itself, and HALT re-runs after the
+    // ISR. The pending test is `IE & IF & 0x1F != 0`, independent of IME.
+    if crate::cpu::bus::faithful_enabled() {
+        let if_reg = mmio.peek(registers::INTERRUPT_FLAG);
+        let ie_reg = mmio.peek(registers::INTERRUPT_ENABLE);
+        if (if_reg & ie_reg & 0x1F) != 0 {
+            // In the faithful prefetch model pc already points at the byte after
+            // HALT (the 0x76 fetch advanced it). Peek that byte WITHOUT advancing
+            // pc and mark it prefetched: the +4 charge is deferred to consumption.
+            cpu.opcode = mmio.peek(cpu.registers.pc);
+            cpu.prefetched = true;
+            return 4;
+        }
+    }
     cpu.halted = true;
     // Capture the HDMA halt-state for the unhalt path. Mirrors Gambatte's
     // `Memory::halt`.
