@@ -94,13 +94,8 @@ fn env_off(name: &str, default: i64) -> i64 {
 // run (they feed the legacy edge bookkeeping) but the CPU-visible mode no longer
 // reads them. Flag-off keeps the prior (stage-3) behavior byte-identical.
 pub fn getstat_enabled() -> bool {
-    use std::sync::OnceLock;
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| {
-        std::env::var("RB_GETSTAT")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    })
+    // ds-engine STAGE 7: permanently on.
+    true
 }
 
 // ds-engine STAGE 5: RB_LINERENDER. With getStat (stage 4) owning all CPU-visible
@@ -115,13 +110,8 @@ pub fn getstat_enabled() -> bool {
 // (byte-identical to stage 4). Timing is unaffected either way (it lives wholly
 // in getStat / the STAT event schedule).
 pub fn linerender_enabled() -> bool {
-    use std::sync::OnceLock;
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| {
-        std::env::var("RB_LINERENDER")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    })
+    // ds-engine STAGE 7: permanently on.
+    true
 }
 // DS offsets re-derived after the double-speed STAT sub-dot step (step_subdot)
 // gave the IRQ model true odd-cc resolution: m2 relaxes -2 -> -1 (the odd-cc

@@ -14,13 +14,8 @@ use std::ops::{Deref, DerefMut};
 /// avoided: here RB_FAITHFUL only changes the CPU's boundary/dispatch phasing.
 /// Read once, OnceLock-cached.
 pub(crate) fn faithful_enabled() -> bool {
-    use std::sync::OnceLock;
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| {
-        std::env::var("RB_FAITHFUL")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    })
+    // ds-engine STAGE 7: permanently on.
+    true
 }
 
 /// ds-engine STAGE 6: the run-to-next-event scheduler gate (RB_EVENTLOOP). When
@@ -41,13 +36,8 @@ pub(crate) fn faithful_enabled() -> bool {
 /// hidden per-instruction (not per-cc) state — that is the diagnostic this
 /// stage exists to surface. Read once, OnceLock-cached.
 pub(crate) fn eventloop_enabled() -> bool {
-    use std::sync::OnceLock;
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| {
-        std::env::var("RB_EVENTLOOP")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    })
+    // ds-engine STAGE 7: permanently on.
+    true
 }
 
 /// A tick-aware view over the system. CPU memory accesses go through `read`/
