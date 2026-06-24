@@ -51,12 +51,29 @@ const WRITE_CC_OFF: i64 = 0;
 /// cctracer: this single value passes BOTH sub-dot probe sides simultaneously,
 /// confirming it is the exact divider-phase derivation and not a swap).
 const STOP_DERIV_OFF: i64 = -4;
-/// STOP derivation-anchor adjustment when the enclosing EI-loop ISR was force-
-/// delivered the timer IRQ early (`Timer::ei_promoted`). The early service shifts
-/// the STOP's `abs_cc`; +1 recovers the speedchange_tima post-switch divider phase
-/// (swept against the speedchange `tima00..03` + `tima01_nop` families with the
-/// EI fast-dispatch active). Env-overridable via RB_STOP_PROMOTE for calibration.
-const STOP_EI_PROMOTE_ADJ: i64 = 0;
+/// Extra `tima_cc` (reset-TIMA-value resolution) adjustment when the enclosing
+/// EI-loop ISR was force-delivered the timer IRQ early (`Timer::ei_promoted`),
+/// split by speed-switch DIRECTION (single->double vs double->single) exactly
+/// like `STOP_TIMA_*_EXTRA`. Applied to `tima_cc` ONLY — the tick-grid/divider
+/// `anchor_cc` is unchanged (the promoted read straddles the SAME post-switch
+/// divider boundary as the non-promoted case; only the TIMA count BASE shifts).
+///
+/// Ground truth (gambatte-core cctracer, `speedchange_tima00` SS->DS, boot offset
+/// 58368 measured at the divReset `lastUpdate_`): the promoted path enters at the
+/// SAME rustyboi `abs_cc` as the non-promoted path (the EI fast-dispatch only
+/// changes WHEN the ISR is serviced relative to the per-dot delivery, not the
+/// captured `abs_cc`), yet Gambatte's STOP `divReset` cc is **+4** vs the
+/// non-promoted case: non-promoted `tima00_1a` divReset cc=68092, promoted
+/// `tima00_2a` divReset cc=68096. That +4 lifts Gambatte's reset TIMA value one
+/// count. Folding +4 into `tima_cc` (not `anchor_cc`) raises rustyboi's post-
+/// switch TIMA base +1 while leaving the tick boundary phase aligned, so the
+/// `_2a` (mid-tick) read 0x80->0x81 AND the `_2b` (on-boundary) read 0x81->0x82
+/// both match Gambatte — see this module's TIMA-read trace.
+const STOP_EI_PROMOTE_ADJ_SS: i64 = 4;
+/// DS->SS direction (no promoted DS->SS STOP exists in the speedchange_tima
+/// bucket — the `speedchange2` second STOP is reached via a normal +5-late
+/// service, `ei_promoted=false` — so this stays at the baseline `0`).
+const STOP_EI_PROMOTE_ADJ_DS: i64 = 0;
 /// Extra master-cc added (on top of `STOP_DERIV_OFF`) to the cc the post-switch
 /// *reset TIMA value* is computed at, so it lands on Gambatte's true switch cc.
 /// Gambatte derives the reset TIMA at `instr_start + (ds ? 0 : 4)`, i.e. 4 cc
@@ -552,18 +569,36 @@ impl Timer {
     /// `div_anchor_apu` at the derivation anchor).
     pub fn stop_div_reset(&mut self, old_ds: bool) {
         // A STOP issued inside an EI-loop ISR that was force-delivered the timer
-        // IRQ at the early anchor enters with `abs_cc` shifted vs the normal +5-late
-        // service; compensate the derivation anchor by `STOP_EI_PROMOTE_ADJ` so the
-        // post-switch divider phase (and the much-later TIMA read it feeds) matches
-        // Gambatte. Consumes the one-shot promotion flag.
+        // IRQ at the early anchor lands the post-switch divider phase on a
+        // DIRECTION-dependent grid vs the non-promoted +5-late service: SS->DS
+        // shifts +4 master-cc in Gambatte's frame, DS->SS does not (cctracer
+        // ground truth — see `STOP_EI_PROMOTE_ADJ_{SS,DS}`). Mirror the existing
+        // `STOP_TIMA_{SS,DS}_EXTRA` direction split. Consumes the one-shot flag.
+        let promote_adj_const = if old_ds {
+            STOP_EI_PROMOTE_ADJ_DS
+        } else {
+            STOP_EI_PROMOTE_ADJ_SS
+        };
+        // RB_STOP_PROMOTE forces a single value across both directions (calibration
+        // only): if set it overrides the direction split.
         let promote_adj_const = std::env::var("RB_STOP_PROMOTE")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(STOP_EI_PROMOTE_ADJ);
+            .unwrap_or(promote_adj_const);
         let promote_adj = if self.ei_promoted { promote_adj_const } else { 0 };
         self.ei_promoted = false;
-        let anchor_cc = (self.abs_cc as i64 + STOP_DERIV_OFF + promote_adj) as u64;
+        // The promote adjustment shifts ONLY the reset-TIMA-value resolution cc
+        // (`tima_cc`), NOT the tick-grid / divider anchor (`anchor_cc`). The
+        // promoted SS->DS read straddles the SAME post-switch divider boundary as
+        // the non-promoted case (so the tick-grid phase, hence `anchor_cc`, is
+        // unchanged at the baseline `STOP_DERIV_OFF`); what shifts is the TIMA
+        // *count base* — Gambatte's promoted divReset resolves the reset TIMA value
+        // 4 master-cc later, lifting it +1 count. Folding the adjustment into
+        // `tima_cc` alone makes BOTH bracket sides (`_2a` mid-tick read AND `_2b`
+        // on-boundary read) resolve at once: `_2a` 0x80->0x81, `_2b` 0x81->0x82.
+        let anchor_cc = (self.abs_cc as i64 + STOP_DERIV_OFF) as u64;
         let tima_cc = (anchor_cc as i64
+            + promote_adj
             + if old_ds { STOP_TIMA_DS_EXTRA } else { STOP_TIMA_SS_EXTRA }) as u64;
         // APU divReset fold anchor: independently offset from the derivation anchor.
         let apu_cc = (anchor_cc as i64
