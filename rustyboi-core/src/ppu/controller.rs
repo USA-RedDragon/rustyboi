@@ -36,58 +36,198 @@ fn rgb555_to_rgb888(color: u16) -> (u8, u8, u8) {
 }
 
 /// Lossless serde codec for the fixed-size framebuffers. Savestates (rewind
-/// ring, quicksaves) carry all four framebuffers; on any given machine exactly
-/// one mode's pair is live and the other pair is all-zero (mono vs. color are
-/// mutually exclusive by hardware), and DMG shade frames have long constant
-/// runs. This encodes each buffer as either a run-length list or the raw bytes,
-/// picking whichever is smaller — so a blank pair costs a few bytes instead of
-/// its full 46/138 KB, while a high-entropy CGB frame falls back to raw and is
-/// never larger than before. Byte-exact restore; runs only at save/load, so the
-/// render hot path is untouched.
+/// ring, quicksaves) carry all four framebuffers; the rewind ring captures one
+/// every frame on battery-powered mobile devices, so this must be a single
+/// linear pass with no entropy/deflate coding. A GB frame holds very few
+/// distinct colors (DMG: 4 shades; CGB: at most 64 palette entries live), so
+/// this is a palette-index codec: it collects the distinct colors (a byte
+/// buffer read as 3-byte RGB triples) in one pass, then emits a palette plus one
+/// index per pixel — 1 byte/pixel when <=256 colors (INDEXED8, the real-frame
+/// case) or 2 bytes/pixel when <=65536 (INDEXED16). Any trailing bytes that
+/// don't fill a triple ride along raw. It then picks the smallest of a handful
+/// of cheap linear encodings — Solid (one repeated color, the all-zero unused
+/// pair), Indexed8/Indexed16 (palette + indices), byte-level Rle (which still
+/// wins on the DMG shade buffers: 1-byte-per-pixel data with long horizontal
+/// runs), or Raw — so every buffer is never larger than the old RLE encoding,
+/// while the high-entropy CGB color frame that bloated RLE now falls to
+/// INDEXED8. No entropy/deflate coding, no per-pixel allocation; runs only at
+/// save/load, so the render hot path is untouched. (Kept named `fb_rle` so the
+/// framebuffer field attributes are unchanged.)
 mod fb_rle {
     use serde::de::Error as _;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
 
-    // (value, count) runs; each costs 5 bytes in bincode. Falling back to raw
-    // when the run list would exceed the byte buffer keeps this a pure win. The
-    // serialize side borrows the buffer; the deserialize side owns it. Both
-    // shapes share the same two-variant bincode layout (tag 0 = Rle, 1 = Raw).
+    // The codec picks the smallest arm per buffer. `Solid` is the blank/constant
+    // fast path (an unused mode's all-zero pair). `Rle` is byte-level runs, kept
+    // because it still beats palette-indexing on the DMG shade buffers. The
+    // serialize side borrows byte runs; the deserialize side owns them. Both
+    // shapes share one bincode layout (tag 0 = Solid, 1 = Indexed8,
+    // 2 = Indexed16, 3 = Rle, 4 = Raw).
     #[derive(Serialize)]
     enum EncodedRef<'a> {
+        Solid {
+            color: [u8; 3],
+            tail: &'a serde_bytes::Bytes,
+        },
+        Indexed8 {
+            palette: Vec<[u8; 3]>,
+            indices: Vec<u8>,
+            tail: &'a serde_bytes::Bytes,
+        },
+        Indexed16 {
+            palette: Vec<[u8; 3]>,
+            indices: Vec<u16>,
+            tail: &'a serde_bytes::Bytes,
+        },
         Rle(Vec<(u8, u32)>),
         Raw(&'a serde_bytes::Bytes),
     }
 
     #[derive(Deserialize)]
     enum EncodedOwned {
+        Solid {
+            color: [u8; 3],
+            tail: serde_bytes::ByteBuf,
+        },
+        Indexed8 {
+            palette: Vec<[u8; 3]>,
+            indices: Vec<u8>,
+            tail: serde_bytes::ByteBuf,
+        },
+        Indexed16 {
+            palette: Vec<[u8; 3]>,
+            indices: Vec<u16>,
+            tail: serde_bytes::ByteBuf,
+        },
         Rle(Vec<(u8, u32)>),
         Raw(serde_bytes::ByteBuf),
     }
+
+    // bincode framing constants: an enum tag is a u32 (4 bytes); a Vec/byte
+    // length prefix is a u64 (8 bytes). Used only to compare candidate arm sizes.
+    const TAG: usize = 4;
+    const LEN: usize = 8;
 
     pub fn serialize<S: Serializer, const N: usize>(
         buf: &[u8; N],
         s: S,
     ) -> Result<S::Ok, S::Error> {
+        let pixels = N / 3;
+        let tail_bytes = &buf[pixels * 3..];
+        let tail = serde_bytes::Bytes::new(tail_bytes);
+
+        // Pass A: byte-level run list, abandoned the moment it can't beat raw so
+        // the run vector never grows past N/5 entries.
         let mut runs: Vec<(u8, u32)> = Vec::new();
+        let mut rle_dead = false;
         for &b in buf.iter() {
             match runs.last_mut() {
                 Some((v, c)) if *v == b => *c += 1,
                 _ => {
-                    // Once the run list can't beat raw, stop building it.
                     if runs.len() * 5 >= N {
-                        return EncodedRef::Raw(serde_bytes::Bytes::new(buf)).serialize(s);
+                        rle_dead = true;
+                        break;
                     }
                     runs.push((b, 1));
                 }
             }
         }
-        EncodedRef::Rle(runs).serialize(s)
+
+        // Pass B: intern each RGB triple into the palette, recording its index.
+        // Palette growth is the only allocation, bounded by distinct-color count;
+        // the per-pixel lookup allocates nothing.
+        let mut lut: HashMap<[u8; 3], u32> = HashMap::new();
+        let mut palette: Vec<[u8; 3]> = Vec::new();
+        let mut indices: Vec<u32> = Vec::with_capacity(pixels);
+        for p in 0..pixels {
+            let color = [buf[p * 3], buf[p * 3 + 1], buf[p * 3 + 2]];
+            let idx = *lut.entry(color).or_insert_with(|| {
+                let i = palette.len() as u32;
+                palette.push(color);
+                i
+            });
+            indices.push(idx);
+        }
+        let ncol = palette.len();
+
+        // Byte cost of every applicable arm; MAX marks an inapplicable one.
+        let solid_cost = if ncol == 1 { TAG + 3 + LEN + tail_bytes.len() } else { usize::MAX };
+        let idx8_cost = if ncol <= 256 {
+            TAG + LEN + ncol * 3 + LEN + pixels + LEN + tail_bytes.len()
+        } else {
+            usize::MAX
+        };
+        let idx16_cost = if ncol <= 65536 {
+            TAG + LEN + ncol * 3 + LEN + pixels * 2 + LEN + tail_bytes.len()
+        } else {
+            usize::MAX
+        };
+        let rle_cost = if rle_dead { usize::MAX } else { TAG + LEN + runs.len() * 5 };
+        let raw_cost = TAG + LEN + N;
+        let best = solid_cost.min(idx8_cost).min(idx16_cost).min(rle_cost).min(raw_cost);
+
+        // Prefer the smallest; ties fall to the earlier arm here, which is fine —
+        // correctness is identical, only the encoded size is being minimized.
+        if best == solid_cost {
+            EncodedRef::Solid { color: palette[0], tail }.serialize(s)
+        } else if best == idx8_cost {
+            EncodedRef::Indexed8 {
+                palette,
+                indices: indices.iter().map(|&i| i as u8).collect(),
+                tail,
+            }
+            .serialize(s)
+        } else if best == idx16_cost {
+            EncodedRef::Indexed16 {
+                palette,
+                indices: indices.iter().map(|&i| i as u16).collect(),
+                tail,
+            }
+            .serialize(s)
+        } else if best == rle_cost {
+            EncodedRef::Rle(runs).serialize(s)
+        } else {
+            EncodedRef::Raw(serde_bytes::Bytes::new(buf)).serialize(s)
+        }
+    }
+
+    // Rebuild the flat buffer from palette + indices (+ tail), validating every
+    // index and the final length so a corrupt state fails loudly rather than
+    // silently truncating.
+    fn expand<const N: usize, I: Copy + Into<u32>>(
+        palette: &[[u8; 3]],
+        indices: &[I],
+        tail: &[u8],
+    ) -> Result<Box<[u8; N]>, &'static str> {
+        if indices.len() * 3 + tail.len() != N {
+            return Err("framebuffer index length mismatch");
+        }
+        let mut buf = vec![0u8; N];
+        for (p, &i) in indices.iter().enumerate() {
+            let color = palette.get(i.into() as usize).ok_or("framebuffer index out of range")?;
+            buf[p * 3..p * 3 + 3].copy_from_slice(color);
+        }
+        buf[indices.len() * 3..].copy_from_slice(tail);
+        Ok(buf.into_boxed_slice().try_into().unwrap_or_else(|_| unreachable!()))
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
         d: D,
     ) -> Result<Box<[u8; N]>, D::Error> {
         match EncodedOwned::deserialize(d)? {
+            EncodedOwned::Solid { color, tail } => {
+                let pixels = N / 3;
+                if tail.len() != N - pixels * 3 {
+                    return Err(D::Error::custom("framebuffer solid tail length mismatch"));
+                }
+                let mut buf = vec![0u8; N];
+                for px in buf[..pixels * 3].chunks_mut(3) {
+                    px.copy_from_slice(&color);
+                }
+                buf[pixels * 3..].copy_from_slice(&tail);
+                Ok(buf.into_boxed_slice().try_into().unwrap_or_else(|_| unreachable!()))
+            }
             EncodedOwned::Raw(bytes) => {
                 if bytes.len() != N {
                     return Err(D::Error::custom("framebuffer raw length mismatch"));
@@ -97,6 +237,12 @@ mod fb_rle {
                     .into_boxed_slice()
                     .try_into()
                     .unwrap_or_else(|_| unreachable!()))
+            }
+            EncodedOwned::Indexed8 { palette, indices, tail } => {
+                expand::<N, u8>(&palette, &indices, &tail).map_err(D::Error::custom)
+            }
+            EncodedOwned::Indexed16 { palette, indices, tail } => {
+                expand::<N, u16>(&palette, &indices, &tail).map_err(D::Error::custom)
             }
             EncodedOwned::Rle(runs) => {
                 let mut buf = vec![0u8; N];
@@ -113,10 +259,7 @@ mod fb_rle {
                 if i != N {
                     return Err(D::Error::custom("framebuffer RLE underflow"));
                 }
-                Ok(buf
-                    .into_boxed_slice()
-                    .try_into()
-                    .unwrap_or_else(|_| unreachable!()))
+                Ok(buf.into_boxed_slice().try_into().unwrap_or_else(|_| unreachable!()))
             }
         }
     }
@@ -139,52 +282,126 @@ mod fb_rle_tests {
         bytes
     }
 
-    // Pins the on-wire shape independent of any fixture: bincode's enum tag
-    // (u32 LE) + Vec len (u64 LE) + one (u8, u32 LE) run. If the codec enum or
-    // bincode defaults ever drift, this fails with no ROM/fixture involved.
+    // A realistic RGB frame: 160x144 pixels drawn from a tiny CGB-like palette.
+    // The codec must land on INDEXED8 and beat the raw 3-bytes/pixel buffer.
     #[test]
-    fn wire_shape_pinned() {
-        let enc = bincode::serialize(&Fb(Box::new([0u8; 4096]))).unwrap();
-        let mut expected = vec![0, 0, 0, 0]; // tag 0 = Rle
-        expected.extend_from_slice(&1u64.to_le_bytes()); // one run
-        expected.push(0); // value 0
-        expected.extend_from_slice(&4096u32.to_le_bytes()); // count
+    fn dmg_like_four_color_frame_uses_indexed8_and_shrinks() {
+        const N: usize = 160 * 144 * 3;
+        let palette = [[224, 248, 208], [136, 192, 112], [52, 104, 86], [8, 24, 32]];
+        let mut buf = [0u8; N];
+        for (p, px) in buf.chunks_mut(3).enumerate() {
+            px.copy_from_slice(&palette[(p * 7 + p / 160) % 4]);
+        }
+        let enc = roundtrip(buf);
+        assert!(enc.len() < N, "indexed frame must be smaller than raw, got {} vs {N}", enc.len());
+        // 1 byte/pixel + a 4-entry palette + a little framing: comfortably ~1/3.
+        assert!(enc.len() < N / 2, "four-color frame should be well under half raw, got {}", enc.len());
+    }
+
+    #[test]
+    fn empty_buffer_round_trips() {
+        roundtrip([0u8; 0]);
+    }
+
+    #[test]
+    fn single_color_frame_uses_solid_and_is_tiny() {
+        // The blank/constant case (an unused mode's all-zero pair, or any solid
+        // fill) -> one Solid color, a handful of bytes regardless of size.
+        let enc = roundtrip([0x42u8; 160 * 144 * 3]);
+        assert!(enc.len() < 64, "solid frame must cost a few bytes, got {}", enc.len());
+    }
+
+    #[test]
+    fn blank_all_zero_frame_is_tiny() {
+        // The dominant real case: the unused framebuffer pair is all-zero.
+        let enc = roundtrip([0u8; 160 * 144 * 3]);
+        assert!(enc.len() < 64, "blank frame must cost a few bytes, got {}", enc.len());
+    }
+
+    #[test]
+    fn high_entropy_many_color_frame_round_trips() {
+        // Many distinct triples but still <=256 colors -> INDEXED8.
+        let mut buf = [0u8; 300 * 3];
+        for (p, px) in buf.chunks_mut(3).enumerate() {
+            let v = (p % 200) as u8;
+            px.copy_from_slice(&[v, v.wrapping_add(1), v.wrapping_add(2)]);
+        }
+        roundtrip(buf);
+    }
+
+    #[test]
+    fn length_not_multiple_of_three_round_trips() {
+        // Two trailing bytes must ride along raw and restore byte-exact.
+        let mut buf = [0u8; 3 * 5 + 2];
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = (i * 17 + 3) as u8;
+        }
+        roundtrip(buf);
+    }
+
+    #[test]
+    fn over_256_distinct_colors_forces_indexed16() {
+        // 400 distinct colors (> u8 palette limit) spread across 4000 pixels, so
+        // the 2-byte indices still beat raw -> INDEXED16. Encode the tag directly
+        // to prove which arm fired, then round-trip.
+        let mut buf = [0u8; 4000 * 3];
+        for (p, px) in buf.chunks_mut(3).enumerate() {
+            let c = p % 400;
+            px.copy_from_slice(&[(c >> 8) as u8, (c & 0xFF) as u8, 0]);
+        }
+        let enc = bincode::serialize(&Fb(Box::new(buf))).unwrap();
+        assert_eq!(&enc[0..4], &[2, 0, 0, 0], "expected INDEXED16 tag (2)");
+        assert!(enc.len() < buf.len(), "INDEXED16 must still beat raw here, got {}", enc.len());
+        roundtrip(buf);
+    }
+
+    // Pins the on-wire shape independent of any fixture: an all-zero 4-pixel
+    // buffer -> tag 0 (Solid) + the [0,0,0] color + an empty tail (len u64). If
+    // the codec enum or bincode defaults ever drift, this fails with no
+    // ROM/fixture involved.
+    #[test]
+    fn wire_shape_pinned_solid() {
+        let enc = bincode::serialize(&Fb(Box::new([0u8; 12]))).unwrap();
+        let mut expected = vec![0, 0, 0, 0]; // tag 0 = Solid
+        expected.extend_from_slice(&[0, 0, 0]); // the [0,0,0] color
+        expected.extend_from_slice(&0u64.to_le_bytes()); // tail len = 0
         assert_eq!(enc, expected);
     }
 
+    // The Indexed8 wire shape: two colors A/B alternating over sixteen pixels.
+    // Each pixel differs from its neighbour so byte-RLE needs one run per byte and
+    // loses, and there are enough pixels that 1-byte indices beat the 3-byte raw
+    // bytes -> tag 1 + palette (len u64 + two triples) + indices (len u64 +
+    // sixteen bytes) + empty tail.
     #[test]
-    fn blank_buffer_uses_a_tiny_rle_encoding() {
-        // The common case: an unused mode's framebuffer pair is all-zero.
-        let enc = roundtrip([0u8; 4096]);
-        assert!(enc.len() < 64, "blank 4 KiB buffer should cost a few bytes, got {}", enc.len());
-    }
-
-    #[test]
-    fn long_constant_run_round_trips() {
-        roundtrip([0xABu8; 4096]);
-    }
-
-    #[test]
-    fn high_entropy_buffer_falls_back_to_raw() {
-        // Every byte differs from its neighbour -> one run each -> the run list
-        // would be ~5x the buffer, so the codec must bail to the Raw variant.
-        let mut buf = [0u8; 4096];
-        for (i, b) in buf.iter_mut().enumerate() {
-            *b = (i.wrapping_mul(31).wrapping_add(7)) as u8;
+    fn wire_shape_pinned_indexed8() {
+        let a = [10u8, 20, 30];
+        let b = [40u8, 50, 60];
+        let mut buf = [0u8; 48];
+        for (p, px) in buf.chunks_mut(3).enumerate() {
+            px.copy_from_slice(if p % 2 == 0 { &a } else { &b });
         }
-        let enc = roundtrip(buf);
-        assert!(enc.len() >= 4096, "raw must carry all bytes, got {}", enc.len());
-        assert!(enc.len() < 4096 + 64, "the 5N run list must have been rejected, got {}", enc.len());
+        let enc = bincode::serialize(&Fb(Box::new(buf))).unwrap();
+        let mut expected = vec![1, 0, 0, 0]; // tag 1 = Indexed8
+        expected.extend_from_slice(&2u64.to_le_bytes()); // palette len = 2
+        expected.extend_from_slice(&[10, 20, 30, 40, 50, 60]); // colors 0 and 1
+        expected.extend_from_slice(&16u64.to_le_bytes()); // indices len = 16
+        expected.extend_from_slice(&[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]);
+        expected.extend_from_slice(&0u64.to_le_bytes()); // tail len = 0
+        assert_eq!(enc, expected);
     }
 
+    // The DMG shade buffers (1 byte/pixel, long horizontal runs) must still pick
+    // the byte-level Rle arm and stay at or below their raw size.
     #[test]
-    fn fragmented_buffer_round_trips_across_the_crossover() {
-        // Many short runs exercise the run-list path right up against the
-        // raw-fallback threshold, without pinning which side it lands on.
-        let mut buf = [0u8; 4096];
+    fn run_heavy_mono_buffer_prefers_rle() {
+        let mut buf = [0u8; 300];
         for (i, b) in buf.iter_mut().enumerate() {
-            *b = ((i / 3) % 2) as u8;
+            *b = (i / 30) as u8; // ten long runs of thirty bytes each
         }
+        let enc = bincode::serialize(&Fb(Box::new(buf))).unwrap();
+        assert_eq!(&enc[0..4], &[3, 0, 0, 0], "expected Rle tag (3)");
+        assert!(enc.len() < buf.len(), "run-heavy buffer must beat raw, got {}", enc.len());
         roundtrip(buf);
     }
 }
