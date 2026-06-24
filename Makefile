@@ -39,10 +39,21 @@ COV_PROFDATA := $(COV_TD)/rustyboi.profdata
 # so re-sourcing it per recipe is fine.
 COV_SETENV = export CARGO_TARGET_DIR=$(COV_TD); source <(cargo llvm-cov show-env --sh)
 
+# Web (wasm) coverage — a SEPARATE pipeline from `make coverage`. The host
+# llvm-cov build can't compile rustyboi-web (web-sys/wasm-bindgen are wasm-only),
+# so the web glue is instead measured by instrumenting the wasm build and running
+# the headless-browser tests under minicov (wasm-bindgen-test's coverage path).
+# Needs the nightly toolchain (`-Z` flags) + its llvm-tools, the wasm target,
+# wasm-pack, and a headless browser + driver (same as the `web` CI job).
+COVW_TC      ?= nightly
+COVW_BROWSER ?= chrome
+COVW_TD      := target/wasm-cov
+COVW_LCOV    := rustyboi-web.lcov
+
 .PHONY: help libretro native runner web android ios pgo targets \
         pgo-gen pgo-flags pgo-path pgo-clean \
         setup build-runner suite suites suites-list report report-update \
-        coverage bench manifests roms \
+        coverage coverage-web bench manifests roms \
         $(COV_RUNNER) $(COV_PROFDATA)
 
 help: ## Show this help
@@ -338,3 +349,51 @@ manifests: ## Regenerate suite manifests (ONLY=mealybug,age ROMS=gb-test-roms)
 
 roms: ## Assemble the first-party test ROMs (rgbds)
 	@$(MAKE) -C test-roms roms
+
+# Web (wasm) coverage -> rustyboi-web.lcov (Codecov flag `web`). Not a file DAG
+# like `coverage` above: the run drives a real headless browser, so it is one
+# always-fresh recipe. Only rustyboi-web is instrumented (tools/wasm-cov-rustc.sh
+# strips the instrumentation flags from its cdylib/staticlib dependencies, whose
+# wasm links would otherwise need a profiling runtime they do not carry). The
+# covmap cannot be read back out of a `.wasm` (llvm-cov limitation), so we emit
+# LLVM IR and turn it into an object with `llc` from the SAME toolchain (no
+# version skew), then export against that plus the runtime counters. See
+# rustyboi-web/Cargo.toml (cfg-gated minicov), lib.rs (_MINICOV_ANCHOR) and
+# tools/wasm-math-shims.rs (naga libm gap).
+coverage-web: ## Web (wasm) coverage via headless browser -> rustyboi-web.lcov (BROWSER=chrome|firefox)
+	@$(NEED_382)
+	rustup run $(COVW_TC) rustc -V >/dev/null 2>&1 || { echo "coverage-web needs the '$(COVW_TC)' toolchain (rustup toolchain install $(COVW_TC))" >&2; exit 1; }
+	command -v wasm-pack >/dev/null || { echo "coverage-web needs wasm-pack" >&2; exit 1; }
+	NBIN="$$(rustup run $(COVW_TC) rustc --print target-libdir)/../bin"
+	[ -x "$$NBIN/llc" ] || { echo "coverage-web needs llvm-tools on $(COVW_TC) (rustup component add llvm-tools --toolchain $(COVW_TC))" >&2; exit 1; }
+	rustup run $(COVW_TC) rustc --print target-list | grep -qx wasm32-unknown-unknown || { echo "coverage-web needs the wasm target (rustup target add wasm32-unknown-unknown --toolchain $(COVW_TC))" >&2; exit 1; }
+	ROOT="$$(pwd)"; TD="$$ROOT/$(COVW_TD)"; SHIM="$$TD/wasm-math-shims.o"; PROFDIR="$$TD/profraw"
+	rm -rf "$$PROFDIR"; mkdir -p "$$PROFDIR"
+	echo "==> [1/4] naga libm trap shims -> wasm object"
+	rustup run $(COVW_TC) rustc --target=wasm32-unknown-unknown --crate-type=staticlib --emit=obj -O tools/wasm-math-shims.rs -o "$$SHIM"
+	echo "==> [2/4] instrument rustyboi-web + run headless $(COVW_BROWSER)"
+	export RUSTUP_TOOLCHAIN=$(COVW_TC)
+	export CARGO_TARGET_DIR="$$TD"
+	export RUSTC_WRAPPER="$$ROOT/tools/wasm-cov-rustc.sh"
+	export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="-Cinstrument-coverage -Zno-profiler-runtime --cfg=wasm_bindgen_unstable_test_coverage --emit=llvm-ir -Clink-arg=$$SHIM"
+	export CFLAGS_wasm32_unknown_unknown="-matomics -mbulk-memory"
+	export LLVM_PROFILE_FILE="$$PROFDIR/web-%p-%m.profraw"
+	wasm-pack test --headless --$(COVW_BROWSER) rustyboi-web
+	ls "$$PROFDIR"/*.profraw >/dev/null 2>&1 || { echo "no .profraw captured -- coverage did not run (browser/driver?)" >&2; exit 1; }
+	echo "==> [3/4] merge counters + compile covmap objects (llc)"
+	NBIN="$$(rustup run $(COVW_TC) rustc --print target-libdir)/../bin"
+	HOST="$$(rustup run $(COVW_TC) rustc -vV | sed -n 's/^host: //p')"
+	"$$NBIN/llvm-profdata" merge -sparse -o "$$TD/web.profdata" "$$PROFDIR"/*.profraw
+	# Retarget the wasm IR to the HOST triple: llvm-cov can read the coverage map
+	# out of a native object but NOT a wasm one, so llc must not honour the .ll's
+	# wasm target. The map itself (function names, regions, hashes) is
+	# target-independent, so it still matches the wasm run's counters.
+	objs=()
+	for ll in "$$TD"/wasm32-unknown-unknown/debug/deps/rustyboi_web*.ll; do \
+	  [ -e "$$ll" ] || continue; \
+	  o="$${ll%.ll}.covobj.o"; "$$NBIN/llc" -mtriple="$$HOST" -filetype=obj "$$ll" -o "$$o"; objs+=(-object "$$o"); \
+	done
+	[ $${#objs[@]} -gt 0 ] || { echo "no rustyboi_web LLVM IR emitted -- nothing to map" >&2; exit 1; }
+	echo "==> [4/4] export lcov"
+	"$$NBIN/llvm-cov" export -format=lcov -instr-profile="$$TD/web.profdata" "$${objs[@]}" --ignore-filename-regex='(\.cargo/registry|\.rustup/|/rustc/|rustyboi-web/tests/)' > "$(COVW_LCOV)"
+	echo "wrote $(COVW_LCOV) ($$(grep -c '^SF:' "$(COVW_LCOV)") source files)"

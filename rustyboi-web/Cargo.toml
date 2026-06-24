@@ -79,5 +79,23 @@ features = [
     "GamepadButton",
 ]
 
+# `wasm_bindgen_unstable_test_coverage` is set only by `make coverage-web` (see
+# the minicov dep + the _MINICOV_ANCHOR in lib.rs). Declare it so ordinary
+# `cargo`/`clippy` runs don't flag it as an unexpected cfg.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(wasm_bindgen_unstable_test_coverage)',
+] }
+
 [dev-dependencies]
 wasm-bindgen-test = "=0.3.76"
+
+# WASM code-coverage runtime. `wasm-bindgen-test` pulls minicov itself under the
+# same cfg to provide `__wbgtest_cov_dump`, but the coverage build also
+# instruments rustyboi-web's own `cdylib` artifact (cargo emits cdylib+rlib in
+# one rustc call), and that final link needs the LLVM profiling runtime symbol
+# `__llvm_profile_runtime` which only minicov supplies. Gate it on the exact same
+# cfg the coverage build sets (`--cfg=wasm_bindgen_unstable_test_coverage`) so a
+# normal `make web` never links it. See `make coverage-web`.
+[target.'cfg(all(target_arch = "wasm32", wasm_bindgen_unstable_test_coverage))'.dependencies]
+minicov = "=0.3.8"

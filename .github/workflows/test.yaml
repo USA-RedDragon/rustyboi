@@ -450,3 +450,41 @@ jobs:
           files: android/app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml
           flags: android
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  # rustyboi-web is wasm-only, so the host `coverage` job above can't build it.
+  # Instrument the wasm build, run the headless-browser tests under minicov, and
+  # export lcov (see `make coverage-web`). Reuses the same headless Chrome + driver
+  # the `web` job relies on. Uploaded under the Codecov `web` flag.
+  web-coverage:
+    name: 'web / coverage'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: ./.github/actions/free-disk-space
+      - name: Install clang (minicov compiles its wasm profiling runtime via cc)
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Cache cargo + build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/wasm-cov
+          key: web-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: web-coverage-
+      - name: Install nightly + llvm-tools + wasm target
+        run: |
+          rustup toolchain install nightly --component llvm-tools --target wasm32-unknown-unknown
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+      - name: Generate web coverage
+        run: |
+          # GitHub's ubuntu image ships Chrome + chromedriver; point the runner at it.
+          export CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver"
+          make coverage-web
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          files: rustyboi-web.lcov
+          flags: web
+          token: ${{ secrets.CODECOV_TOKEN }}
