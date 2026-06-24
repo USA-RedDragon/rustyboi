@@ -242,6 +242,7 @@ fn compare_dump(label: &str, expected: &[u8], actual: &[u8]) -> Result<(), Strin
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TraceSnapshot {
     pc: u16,
+    abs_cc: u64,
     ime: bool,
     ime_delay: u8,
     ppu_state: rustyboi_core_lib::ppu::State,
@@ -298,7 +299,8 @@ impl TimingTrace {
         }
 
         eprintln!(
-            "TRACE frame={frame_index} pc={:#06X}->{:#06X} cyc={} ime={}->{} delay={}->{} ppu={:?}@{} x={} ly={} fifo={} tile={} stall={} -> {:?}@{} x={} ly={} fifo={} tile={} stall={} stat={:#04X}->{:#04X} lcdc={:#04X}->{:#04X} if={:#04X}->{:#04X} ie={:#04X}->{:#04X}",
+            "TRACE frame={frame_index} cc={} pc={:#06X}->{:#06X} cyc={} ime={}->{} delay={}->{} ppu={:?}@{} x={} ly={} fifo={} tile={} stall={} -> {:?}@{} x={} ly={} fifo={} tile={} stall={} stat={:#04X}->{:#04X} lcdc={:#04X}->{:#04X} if={:#04X}->{:#04X} ie={:#04X}->{:#04X}",
+            before.abs_cc,
             before.pc,
             after.pc,
             cycles,
@@ -459,6 +461,7 @@ fn trace_snapshot(gb: &GB) -> TraceSnapshot {
 
     TraceSnapshot {
         pc: registers.pc,
+        abs_cc: gb.master_cc(),
         ime: registers.ime,
         ime_delay: gb.get_ime_enable_delay(),
         ppu_state: *ppu.get_state(),
