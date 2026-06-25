@@ -45,6 +45,15 @@ impl SM83 {
         if self.stop_unhalt_cycles > 0 {
             let slice = self.stop_unhalt_cycles.min(4);
             self.stop_unhalt_cycles -= slice;
+            // Stop window over: run Gambatte's `intevent_unhalt` HDMA reflag gate at
+            // the unhalt cc (memory.cpp:224/304), then re-enable the period edge.
+            // A block held Low-at-stop reflags only if the unhalt lands back in the
+            // HDMA period (`hdma_m3speedchange_late_m0wakeup_*`); one whose unhalt is
+            // out of period stays dropped (`hdma_late_m3speedchange_*_1` -> out00).
+            if self.stop_unhalt_cycles == 0 && mmio.in_stop_window() {
+                let in_period_unhalt = mmio.hdma_in_period_for_unhalt();
+                mmio.stop_window_exit_reflag(in_period_unhalt);
+            }
             return slice;
         }
 
