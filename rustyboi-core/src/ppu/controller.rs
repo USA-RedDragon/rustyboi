@@ -4086,6 +4086,15 @@ impl Ppu {
         self.hdma_period_unhalt_adj(access_cc, double_speed, 0)
     }
 
+    /// This line's closed-form mode-0 (HBlank) start in master cc, or None when no
+    /// closed-form anchor exists (window / first line after enable). Used by the
+    /// HALT-entry HDMA capture to derive a per-period "block already served" signal
+    /// (the live `hdma_block_done_this_period` flag is reset too early by the per-dot
+    /// period falling edge — see `Mmio::on_cpu_halt_with_period_done`).
+    pub fn m0_time_master_cc(&self) -> Option<u64> {
+        self.m0_time_master
+    }
+
     /// As `hdma_period_unhalt`, with the line-END (drop) bracket widened by
     /// `limit_adj` dots (the EI fast-dispatch ISR-phase compensation; see
     /// `Bus::hdma_in_period_for_unhalt_adj`). The compensation widens the END
