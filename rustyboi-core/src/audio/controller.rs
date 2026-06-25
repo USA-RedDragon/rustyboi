@@ -172,16 +172,19 @@ impl Audio {
         // phase aligns to absolute parity rather than the anchor's parity.
         // Guard against a non-monotonic target (e.g. a DIV-write access cc that
         // resolves slightly before the current dot anchor): never run backward.
-        if (abs_cc >> 1) <= (self.last_update >> 1) {
+        // The duty/envelope/sweep `cc` AND the length `len_cc` both mirror
+        // Gambatte's single `cycleCounter_`, which advances at
+        // `(cpuCc - lastUpdate) >> (1 + ds)` (PSG::generateSamples). At double
+        // speed the divider runs twice as fast in CPU-cc terms, so the APU clock
+        // advances at HALF the rate — the duty period `(2048-freq)*2` is in the
+        // same 2 MHz units regardless of speed. (The earlier `>>1` duty rate ran
+        // the duty 2x too fast in DS, off the pos6→pos7 boundary.)
+        let shift = 1 + ds as u32;
+        if (abs_cc >> shift) <= (self.last_update >> shift) {
             return;
         }
-        let cycles = (abs_cc >> 1) - (self.last_update >> 1);
-        // Length clock advances at Gambatte's `generateSamples` rate
-        // `(cpuCc - lastUpdate) >> (1 + ds)` — HALF of `cc`'s `>>1` rate at double
-        // speed. Compute from absolute floored boundaries (like `cc`) so the
-        // floored phase aligns to absolute parity across calls.
-        let shift = 1 + ds as u32;
-        let len_cycles = (abs_cc >> shift) - (self.last_update >> shift);
+        let cycles = (abs_cc >> shift) - (self.last_update >> shift);
+        let len_cycles = cycles;
         self.last_update = abs_cc;
         self.cc = ((self.cc as u64 + cycles) % Self::CC_MAX as u64) as u32;
         self.len_cc = ((self.len_cc as u64 + len_cycles) % Self::CC_MAX as u64) as u32;
@@ -238,6 +241,12 @@ impl Audio {
         self.channel2.set_cc(cc);
         self.channel3.set_cc(cc);
         self.channel4.set_cc(cc);
+        // Gambatte `setNr4` passes `ref = !(lastUpdate_ & ds)` to the duty unit's
+        // nr4Change. Single speed: always 1. Double speed: tracks the CPU
+        // `lastUpdate_` parity, shifting the duty-trigger placement by one cc.
+        let nr4_ref = if (self.last_update & (self.cached_ds as u64)) != 0 { 0 } else { 1 };
+        self.channel1.set_nr4_ref(nr4_ref);
+        self.channel2.set_nr4_ref(nr4_ref);
         let lcc = self.len_cc.wrapping_add(Self::LEN_CC_OFF);
         self.channel1.set_len_cc(lcc);
         self.channel2.set_len_cc(lcc);
@@ -292,7 +301,14 @@ impl Audio {
         // cases need); the boot +0x1000 artifact that would otherwise offset the
         // length quantum is suppressed by the boot-instant guard above.
         let div_offset = (self.last_update as u32) & (ds as u32);
-        let cc = self.cc.wrapping_add(div_offset);
+        // The duty `cc` is reconstructed from the per-dot `abs_cc>>(1+ds)`; the
+        // floored reconstruction lands one APU-cc BELOW Gambatte's
+        // `cycleCounter_` only when the re-anchor happens at DOUBLE speed (the
+        // `>>2` floor drops a sub-quantum the single-speed `>>1` does not).
+        // Re-add it ONCE here at the `PSG::reset` re-anchor so the post-enable
+        // duty cc is byte-exact at both speeds.
+        let duty_bias = if ds { Self::LEN_FOLD_BIAS } else { 0 };
+        let cc = self.cc.wrapping_add(duty_bias).wrapping_add(div_offset);
         // (cc & 0xFFF) + 2 * (~(cc + 1 + !ds) & 0x800)
         let not_ds = (!ds) as u32;
         let folded = (cc & 0xFFF)
