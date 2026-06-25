@@ -684,6 +684,13 @@ pub struct Ppu {
     // schedule is nudged by the difference so M3 ends at the right dot.
     #[serde(default)]
     m3_arm_scx: u8,
+    // Full SCX (all 8 bits) sampled at M3 arm. The first BG tile in the FIFO is
+    // fetched from column (arm_scx / 8). If a mid-M3 SCX write moves the f1 break
+    // to a different tile column (Gambatte's M3Start::f1 re-reads p.scx live at
+    // its case-0 tile fetch), the already-queued first tile is stale and the
+    // FIFO must be refetched from the new column. -1 = not yet armed this line.
+    #[serde(default)]
+    m3_arm_scx_full: i16,
     // WX snapshot taken when the closed-form mode-0 schedule was computed; a
     // mid-mode-3 WX change before the window starts invalidates the schedule.
     m3_scheduled_wx: u8,
@@ -958,6 +965,7 @@ impl Ppu {
             mode0_pretriggered_this_line: false,
             m3_pixels_discarded: 0,
             m3_discard_target: -1,
+            m3_arm_scx_full: -1,
             m3_arm_dot: 0,
             m3_arm_scx: 0,
             m3_scheduled_wx: 0,
@@ -2199,6 +2207,45 @@ impl Ppu {
         true
     }
 
+    // Replace the 8 oldest BG-FIFO entries with the tile at BG tile-map column
+    // `tile_col` (0..32) on the pixel row `bg_y` (already SCY+LY, 0..256),
+    // reproducing the fetcher's BG addressing (LCDC tile-map/tile-data select,
+    // CGB attribute bank + x/y flip). Used by the M3Start fine-scroll re-fetch
+    // when a mid-discard SCX write moves the first displayed tile's column.
+    fn rewrite_first_fifo_tile(&mut self, mmio: &mmio::Mmio, tile_col: u16, bg_y: u16) {
+        let lcdc = self.lcdc;
+        let cgb = mmio.is_cgb_features_enabled();
+        let map_base: u16 = if (lcdc & (LCDCFlags::BGTileMapDisplaySelect as u8)) != 0 {
+            0x9C00
+        } else {
+            0x9800
+        };
+        let map_y = (bg_y / 8) & 0x1F;
+        let map_addr = map_base + (map_y * 32 + (tile_col & 0x1F));
+        let tile_num = mmio.read_vram_bank(0, map_addr);
+        let tile_attrs = if cgb { mmio.read_vram_bank(1, map_addr) } else { 0 };
+        let y_flip = cgb && (tile_attrs & 0x40) != 0;
+        let x_flip = cgb && (tile_attrs & 0x20) != 0;
+        let tile_line = (bg_y % 8) as u8;
+        let eff_line = if y_flip { 7 - tile_line } else { tile_line };
+        let data_addr: u16 = if (lcdc & (LCDCFlags::BGWindowTileDataSelect as u8)) != 0 {
+            0x8000 + (tile_num as u16) * 16 + (eff_line as u16) * 2
+        } else {
+            let signed = tile_num as i8;
+            ((0x9000u16 as i16).wrapping_add((signed as i16) * 16 + (eff_line as i16) * 2)) as u16
+        };
+        let bank = if cgb && (tile_attrs & 0x08) != 0 { 1 } else { 0 };
+        let low = mmio.read_vram_bank(bank, data_addr);
+        let high = mmio.read_vram_bank(bank, data_addr + 1);
+        let mut pixels = [crate::ppu::fifo::BgPixel::default(); 8];
+        for (i, px) in pixels.iter_mut().enumerate() {
+            let bit = if x_flip { i as u8 } else { 7 - i as u8 };
+            let idx = (((high >> bit) & 1) << 1) | ((low >> bit) & 1);
+            *px = crate::ppu::fifo::BgPixel { color: idx, attrs: tile_attrs };
+        }
+        self.fetcher.pixel_fifo.overwrite_oldest(&pixels);
+    }
+
     // STAGE 5 (RB_LINERENDER): compute one displayed BG/window pixel
     // (color index + CGB attrs) at screen column `screen_x` on the current line,
     // reproducing the fetcher's tile addressing in closed form. `win_active`
@@ -3361,6 +3408,7 @@ impl Ppu {
                     self.m3_pixels_discarded = 0;
                     self.m3_arm_dot = self.ticks;
                     self.m3_arm_scx = (mmio.read(SCX) & 0x07) as u8;
+                    self.m3_arm_scx_full = mmio.read(SCX) as i16;
                     // First line after enable: resolve the SCX value the fine-scroll
                     // discard actually samples. Gambatte's M3Start::f1 reads SCX once
                     // at the M3-start dot; a mid-discard SCX write (visible at
@@ -3815,8 +3863,69 @@ impl Ppu {
                     // write lands on the correct iteration, instead of the
                     // immediate register read whose visibility depends on the
                     // per-dot PPU-step-vs-CPU-write ordering within a dot.
-                    let scx_live = (self.scx_f1_pending_at_cc(self.abs_cc) & 0x07) as u32;
+                    let scx_break_full = self.scx_f1_pending_at_cc(self.abs_cc);
+                    let scx_live = (scx_break_full & 0x07) as u32;
                     if xpos % 8 == scx_live || xpos >= 80 {
+                        // Gambatte M3Start::f1 re-reads p.scx live at its case-0 tile
+                        // fetch, so a mid-discard SCX write that crosses a tile-column
+                        // boundary makes the FIRST displayed tile come from the new
+                        // column (scx_break/8), not the column queued into the FIFO at
+                        // M3 arm. When that happens, discard the whole stale first tile
+                        // and refetch from the live column: reset the fetcher/FIFO and
+                        // set the discard to scx_break%8 so the next BG fetch (which
+                        // derives its column from scx_delayed at x==0) lands on the
+                        // correct column, then trims the fine-scroll prefix. The mode-3
+                        // length / timing is owned by getStat (m0_time_master), so this
+                        // is render-only.
+                        // The displayed first tile's COLUMN is read at Gambatte's
+                        // last case-0 (the greatest multiple-of-8 xpos <= break),
+                        // NOT at the break dot: M3Start::f1 only reloads `reg1`
+                        // (tile number, from scx/8) when `xpos % tile_len == 0`.
+                        // For a break inside the first tile (xpos < 8) that is
+                        // xpos==0 -> the M3-arm column, so no re-fetch is needed
+                        // even if a later f1 dot saw a column-crossing SCX. Only a
+                        // break that loops PAST tile_len (xpos >= 8) reloads at
+                        // xpos==8 from the then-live SCX. Sample SCX at that dot.
+                        let case0_xpos = (xpos / 8) * 8;
+                        let ds_u = mmio.is_double_speed_mode() as u32;
+                        let back = ((xpos - case0_xpos) as u64) << ds_u;
+                        let scx_col_full =
+                            self.scx_f1_pending_at_cc(self.abs_cc.wrapping_sub(back));
+                        let arm_col = ((self.m3_arm_scx_full.max(0) as u16) >> 3) & 0x1F;
+                        let brk_col = (scx_col_full as u16 >> 3) & 0x1F;
+                        // CGB single-speed only: the DMG M3Start fine-scroll uses
+                        // a different (+1) tile-column phase that the discard model
+                        // already matches, and at double speed the post-discard
+                        // tile-walk lands the line-end one tile off after the
+                        // re-fetch (the SS-derived discard nudge does not carry the
+                        // DS sub-dot phase). Both are left to the existing model.
+                        if mmio.is_cgb_features_enabled()
+                            && !mmio.is_double_speed_mode()
+                            && self.m3_arm_scx_full >= 0
+                            && brk_col != arm_col
+                        {
+                            // Only the FIRST queued BG tile is stale: rewrite the
+                            // 8 oldest FIFO entries in place with the tile at the
+                            // break column, then discard scx_break%8 fine pixels.
+                            // Subsequent tiles keep their live-SCX columns (the
+                            // fetcher re-reads scx_delayed), so a later SCX write
+                            // that moves the steady-state column is preserved.
+                            let bg_y = (self.scy_delayed as u16
+                                + mmio.read(LY) as u16) & 0xFF;
+                            self.rewrite_first_fifo_tile(mmio, brk_col, bg_y);
+                            self.m3_pixels_discarded = 0;
+                            self.m3_discard_target = (scx_break_full & 0x07) as i8;
+                            if let Some(dot) = self.scheduled_mode0_dot {
+                                let delta = xpos as i64 - self.m3_arm_scx as i64;
+                                self.scheduled_mode0_dot = Some((dot as i64 + delta).max(0) as u128);
+                                if let Some(m0t) = self.m0_time_master {
+                                    let ds = mmio.is_double_speed_mode() as u32;
+                                    self.m0_time_master =
+                                        Some((m0t as i64 + (delta << ds)).max(0) as u64);
+                                }
+                            }
+                            break 'label;
+                        }
                         // Discard the full xpos count: a mid-discard SCX change can
                         // push the break past tile_len (Gambatte loops on to the
                         // next matching xpos), discarding more than 7 pixels.
