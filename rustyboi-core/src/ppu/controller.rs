@@ -3557,7 +3557,39 @@ impl Ppu {
                 // (immediate x==0 start) lock at win_start (no refund once
                 // started). CGB single-speed / no sprites; live pipeline
                 // untouched; applied once per line.
+                // DMG late-WX window-disable refund. DMG is BINARY (not graduated like
+                // CGB): a WX-out-of-range write that lands BEFORE the window-tile
+                // commit (`ws + scx&7 + 2` dots into the x==0 window draw) fully
+                // refunds WIN_M3_PENALTY from the read-at-cc m0Time so the FF41 read
+                // resolves the no-window mode-0 boundary; at/after the commit the
+                // window-inclusive m0Time captured at M3 arm is kept (mode 3). The
+                // late_wx_scx{2,3,5}_{1,2} DMG reps bracket the per-SCX commit: at the
+                // 4-dots-in write, scx0/scx2 already committed (out3, keep) while
+                // scx3/scx5 have not (out0, refund); the 8-dots-in write is always
+                // committed (out3). WX<7 immediate-start windows lock at win_start
+                // (no refund). DMG / no sprites / SS.
                 if self.m0_time_master.is_some()
+                    && self.window_started_this_line
+                    && !mmio.is_cgb_features_enabled()
+                    && self.sprites_on_line.is_empty()
+                    && mmio.read(WX) != self.m3_scheduled_wx
+                    && !self.win_wx_penalty_resolved
+                    && (self.m3_scheduled_wx as i32) >= 7
+                {
+                    let wx_now = mmio.read(WX) as i32;
+                    let wx_in_range = (0..=166).contains(&wx_now);
+                    if let (Some(ws), Some(m0t)) = (self.win_start_dot, self.m0_time_master)
+                        && !wx_in_range
+                    {
+                        let commit = ws as i64 + (self.m3_arm_scx & 7) as i64 + 2;
+                        if (self.ticks as i64) < commit {
+                            self.m0_time_master =
+                                Some((m0t as i64 - WIN_M3_PENALTY as i64).max(0) as u64);
+                        }
+                        self.win_wx_penalty_resolved = true;
+                    }
+                }
+                else if self.m0_time_master.is_some()
                     && self.window_started_this_line
                     && mmio.is_cgb_features_enabled()
                     && !mmio.is_double_speed_mode()
