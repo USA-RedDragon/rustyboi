@@ -4484,6 +4484,7 @@ impl Ppu {
         // the PixelTransfer path for any line-straddle that resolves back into mode 3.
         if ly < 143 {
             return self.get_stat_mode_midframe(
+                mmio,
                 access_cc,
                 ly,
                 line_cycles,
@@ -4549,6 +4550,7 @@ impl Ppu {
     /// ended before it begins.
     fn get_stat_mode_midframe(
         &self,
+        mmio: &mmio::Mmio,
         access_cc: u64,
         ly: i64,
         line_cycles: i64,
@@ -4618,6 +4620,65 @@ impl Ppu {
                 }
                 None => None,
             }
+        } else if line_cycles >= 77 {
+            // Mode-3 START dead zone during OAMSearch. Gambatte's getStat reports
+            // mode 3 from lineCycles 77 (`!(lineCycles < 77) && cc+2 < m0Time &&
+            // !inactivePeriodAfterDisplayEnable(cc+1)`), but rustyboi's renderer is
+            // still in OAMSearch until the M3 arm dot (≈82 steady, ≈84/86 first
+            // line), so its poked FF41 register reports a stale mode 2 in the
+            // lineCycles 77..arm window. Resolve mode 3 here from THIS line's m0Time.
+            //
+            // On the FIRST line after enable `m0_time_master` already holds this
+            // line's value (installed by the first-line OAMSearch block). On steady
+            // lines it still holds the PREVIOUS line's value during OAMSearch (the
+            // M3-arm site only installs the current line's at ≈dot 82), so compute
+            // the current line's m0Time fresh from the live geometry — no window has
+            // started yet this early, so `compute_m3_length` is the settled value.
+            //
+            // The inactive boundary is recomputed lineStart-anchored: Gambatte
+            // `lu_ = enableCc + (80<<ds) + 1` and `enableCc == lineStart` (setLcdc
+            // did `lyCounter.reset(0, enableCc)`). The stored
+            // `display_enable_inactive_until` is anchored on the raw enable
+            // `master_cc()`, one render dot above rustyboi's line-clock origin, so it
+            // ends the window one dot late and wrongly suppresses this lineCycles≈80
+            // mode-3 read; recompute it lineStart-local. (Only meaningful on the
+            // first line; on steady lines it is far in the past.) Needed for the
+            // enable_display frame*_m3stat_count / m0irq_count / ly0 streams whose
+            // FF41 read lands at lineCycles 78..80 during OAMSearch.
+            let lc = self.ly_counter(mmio);
+            let line_start = (self.p_now as i64 + lc.time as i64) - (456i64 << ds as u32);
+            let cur_m0t = if self.first_line_after_enable {
+                // Exact first-line value already installed (carries the +1 lyTime
+                // correction the read boundary is co-tuned with, and the first-line
+                // m3StartLineCycle+2 offset).
+                match self.m0_time_master {
+                    Some(m0t) => m0t as i64,
+                    None => return None,
+                }
+            } else {
+                // Steady-line m0Time, fresh (m0_time_master holds the previous
+                // line's value during this pre-M3 OAMSearch phase). Mirrors
+                // `m0_time_exact(.., first_line=false)`: lineStart + (m3_len + BASE)
+                // << ds + 1 (BASE = 84 CGB / 83 DMG; the +1 is the lyTime correction).
+                let base: i64 = if is_cgb { 84 } else { 83 };
+                let m3_len = self.compute_m3_length(mmio, is_cgb) as i64;
+                line_start + ((m3_len + base) << ds as u32) + 1
+            };
+            // The post-enable inactive period only exists on the first line after
+            // enable; on steady lines it ended long ago. Gate the lineStart-local
+            // inactive suppression to the first line (using the global field there
+            // would end the window one render dot late — see the comment above).
+            let read_off: i64 = if !ds && !self.lytime_no_plus1 { 3 } else { 2 };
+            if self.first_line_after_enable {
+                let lu_local = line_start + ((80i64 << ds as u32) + 1);
+                if (access_cc as i64 + 1) < lu_local {
+                    return Some(0);
+                }
+            }
+            if (access_cc as i64) + read_off < cur_m0t {
+                return Some(3);
+            }
+            Some(0)
         } else {
             // Mode 2 with no closed-form anchor resolved above already returned;
             // a lineCycles-77..453 read during OAMSearch is a stale-m0Time straddle:
