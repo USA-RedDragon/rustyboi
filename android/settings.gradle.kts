@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "rustyboi"
 include(":app")
+include(":romscan")
