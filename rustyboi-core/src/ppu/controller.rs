@@ -2802,7 +2802,24 @@ impl Ppu {
             .lyc_reg_change(data, m0_for_trigger, self.sched_m2irq, cc, ds, cgb);
         self.sched_lycirq = self.lyc_irq.time;
 
-        if stat_irq::lyc_change_triggers_stat_irq(old, data, &lc, cc, stat, m0_for_trigger, cgb) {
+        // Immediate-trigger m0 time = Gambatte `eventTimes_(memevent_m0irq)`, which
+        // is the *current line's* m0 while it is still ahead (mode 2/3) and the next
+        // line's (> lc.time) once mode 0 has passed. `m0_irq_time_latch` is correct
+        // in HBlank/mode 3 but reports DISABLED during OAMSearch (the current line's
+        // m0 has not yet been armed into `sched_m0irq`); there the current line's m0
+        // is still ahead but before next-LY, so substitute `lc.time - 1`. This makes
+        // `lyc_change_blocked_by_m0_or_m1` resolve the line-start LYC=LY coincidence
+        // (lycwirq_trigger_m0_late_lyc45 `_5`) without disturbing the HBlank
+        // line-end LYC writes (lycwirq_trigger_m0_late `_1`/`_2`/`_3`).
+        let m0_latch = self.m0_irq_time_latch(mmio, &lc);
+        let m0_for_imm = if matches!(self.state, State::OAMSearch)
+            && m0_latch == stat_irq::DISABLED_TIME
+        {
+            lc.time.saturating_sub(1)
+        } else {
+            m0_latch
+        };
+        if stat_irq::lyc_change_triggers_stat_irq(old, data, &lc, cc, stat, m0_for_imm, cgb) {
             if cgb && !ds {
                 self.sched_oneshot_statirq = cc + 5;
             } else {
