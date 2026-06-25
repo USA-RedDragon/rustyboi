@@ -4023,6 +4023,45 @@ impl Ppu {
         Some(depth < limit)
     }
 
+    /// Late-hdma-vs-interrupt unhalt precedence (memory.cpp:329-364). On unhalt
+    /// with a Low-at-halt HDMA block, Gambatte's `intevent_unhalt` flags the block
+    /// iff `isHdmaPeriod(cc)` (`cc >= m0Time`) at the unhalt cc. rustyboi's
+    /// `m0_time_master` folds a +1 dot phase vs the raw m0Time, so the equivalent
+    /// START boundary here is `cc + 1 >= m0t`. When TRUE the
+    /// block's dma event is flagged (event time 0) and FIRES IMMEDIATELY at unhalt,
+    /// i.e. BEFORE the interrupt's PC pushes — the dma-wins races
+    /// (`late_hdma_vs_tima_*_halt_1`, copy the pre-push 0x1234). When FALSE the
+    /// block is NOT yet in period at unhalt; its m0-edge falls during/after the
+    /// interrupt service, so the block fires AFTER the pushes and copies the pushed
+    /// return address (`*_halt_2`, 0x11C9). This predicate reports the former (fire
+    /// AT unhalt / before pushes) decision so the service can suppress+reorder the
+    /// latter. Anchored on `m0_time_master` (shares the access cc phase). None when
+    /// no closed-form mode-0 anchor exists (caller keeps the synchronous fire).
+    pub fn hdma_unhalt_fires_before_pushes(
+        &self,
+        access_cc: u64,
+        double_speed: bool,
+    ) -> Option<bool> {
+        if self.disabled {
+            return None;
+        }
+        if self.internal_ly_val >= 144 {
+            return Some(false);
+        }
+        let m0t = self.m0_time_master? as i64;
+        let cc = access_cc as i64;
+        // REFLAG (fire-at-unhalt / before pushes) iff the unhalt access cc has
+        // reached mode-0 start AND is not past the line-end. The START anchor is
+        // `cc + 1 >= m0t` — the SAME +1 dot phase the per-dot `hdma_period`
+        // predicate folds (`dot >= m0n + 1`); a bare `cc >= m0t` or the looser
+        // `cc + 4` mis-brackets the scx-shifted m0Time. cctracer boundary at unhalt
+        // cc=C: REFLAG for m0t<=C+1 (`scx{1,2}_halt_1`), NOREFLAG for m0t>=C+2
+        // (`scx{1,2}_halt_2`).
+        let in_start = cc + 1 >= m0t;
+        let in_end = (cc - m0t) < (if double_speed { 400 } else { 198 });
+        Some(in_start && in_end)
+    }
+
     pub fn hdma_period_kick(&self, access_cc: u64, double_speed: bool) -> Option<bool> {
         if self.disabled {
             return None;

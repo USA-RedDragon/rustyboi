@@ -357,6 +357,15 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_mcycle_fire_suppressed: bool,
 
+    // Late-hdma-vs-interrupt unhalt precedence: set at unhalt when a Low-at-halt
+    // HDMA block did NOT reflag (Gambatte `isHdmaPeriod(cc)` false at unhalt), so
+    // its m0-edge falls within the immediately-following interrupt service window.
+    // The service then suppresses+reorders that block to fire AFTER its PC pushes
+    // (the `late_hdma_vs_tima_*_halt_2` content tests: copy the pushed 0x11C9).
+    // Cleared once consumed by the service (or the next unhalt).
+    #[serde(skip, default)]
+    hdma_unhalt_noreflag_deferred: bool,
+
     // C7-full late-hdma-vs-interrupt re-order: the master_cc at which the most
     // recent m0-edge HDMA block fired (read its 16 source bytes). Gambatte orders
     // the `intevent_dma` (HDMA, flagged at `m0Time`) vs `intevent_interrupts`
@@ -451,6 +460,7 @@ impl Mmio {
             hdma_kick_eval_pending: 0,
             hdma_disable_fires: None,
             hdma_mcycle_fire_suppressed: false,
+            hdma_unhalt_noreflag_deferred: false,
             hdma_last_fire_cc: None,
             hdma_pre_fire_state: None,
 
@@ -1604,6 +1614,17 @@ impl Mmio {
     /// interrupt service's PC pushes.
     pub fn set_hdma_mcycle_fire_suppressed(&mut self, v: bool) {
         self.hdma_mcycle_fire_suppressed = v;
+    }
+
+    /// Late-hdma-vs-interrupt unhalt precedence: whether the just-unhalted HDMA
+    /// block did NOT reflag at unhalt (its m0-edge falls within the following
+    /// interrupt service and must fire AFTER the PC pushes).
+    pub fn hdma_unhalt_noreflag_deferred(&self) -> bool {
+        self.hdma_unhalt_noreflag_deferred
+    }
+
+    pub fn set_hdma_unhalt_noreflag_deferred(&mut self, v: bool) {
+        self.hdma_unhalt_noreflag_deferred = v;
     }
 
     /// Consume the CPU-cycle stall owed for completed HDMA/GDMA transfers.
