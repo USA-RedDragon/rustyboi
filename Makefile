@@ -375,7 +375,11 @@ coverage-web: ## Web (wasm) coverage via headless browser -> rustyboi-web.lcov (
 	export RUSTUP_TOOLCHAIN=$(COVW_TC)
 	export CARGO_TARGET_DIR="$$TD"
 	export RUSTC_WRAPPER="$$ROOT/tools/wasm-cov-rustc.sh"
-	export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="-Cinstrument-coverage -Zno-profiler-runtime --cfg=wasm_bindgen_unstable_test_coverage --emit=llvm-ir -Clink-arg=$$SHIM"
+	# The shim link-arg + --allow-multiple-definition are web-only: the shim's
+	# panic runtime redefines rust_begin_unwind, so it may only sit on the
+	# rustyboi-web link (which tolerates the collision via the allow flag).
+	# tools/wasm-cov-rustc.sh strips BOTH from every non-web crate's cdylib.
+	export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="-Cinstrument-coverage -Zno-profiler-runtime --cfg=wasm_bindgen_unstable_test_coverage --emit=llvm-ir -Clink-arg=$$SHIM -Clink-arg=--allow-multiple-definition"
 	export CFLAGS_wasm32_unknown_unknown="-matomics -mbulk-memory"
 	export LLVM_PROFILE_FILE="$$PROFDIR/web-%p-%m.profraw"
 	wasm-pack test --headless --$(COVW_BROWSER) rustyboi-web
