@@ -58,7 +58,7 @@ impl SM83 {
         let mut cycles = 0;
 
         // Check for pending interrupts
-        let pending_interrupt = self.get_pending_interrupt(mmio);
+        let mut pending_interrupt = self.get_pending_interrupt(mmio);
         
         // If halted, check if we should exit halt state
         let mut just_unhalted = false;
@@ -95,8 +95,7 @@ impl SM83 {
                 // either way, matching Gambatte). (Non-fast HALT-late path:
                 // limit_adj = 0 => byte-identical.) Fast dispatch is ON by default
                 // post co-land; RB_EI_FAST=0 forces it OFF.
-                let ei_fast = crate::timer::ei_fast_enabled();
-                let limit_adj: i64 = if ei_fast { 4 } else { 0 };
+                let limit_adj: i64 = 4;
                 let in_period_unhalt = mmio.hdma_in_period_for_unhalt_adj(limit_adj);
                 match mmio.halt_hdma_state() {
                     memory::mmio::HaltHdmaState::Requested => mmio.set_hdma_req(),
@@ -152,9 +151,7 @@ impl SM83 {
             // belongs to the lazy-PPU render stage, and which simultaneously flips
             // the sibling hdma_*_ly_*_6 tests TO passing). RB_EI_FAST=0 forces the
             // OFF / +5-grid baseline (A/B preserved); unset or =1 leaves it ON.
-            let ei_fast = crate::timer::ei_fast_enabled();
-            let mut pending_interrupt = pending_interrupt;
-            if ei_fast && ei_ctx && self.registers.ime {
+            if ei_ctx && self.registers.ime {
                 if let Some(early) = mmio.next_timer_overflow_ei_cc() {
                     if boundary_access_cc >= early {
                         mmio.force_ei_timer_delivery(boundary_access_cc);
@@ -167,7 +164,7 @@ impl SM83 {
             if serviceable == Some(registers::InterruptFlag::Timer) {
                 // Only the EI fast-dispatch (when enabled) services on the early
                 // anchor; otherwise the gate is the baseline late (+CC_OFF) anchor.
-                let gate_cc = if ei_fast && ei_ctx {
+                let gate_cc = if ei_ctx {
                     mmio.pending_timer_fire_cc_ei()
                 } else {
                     mmio.pending_timer_fire_cc()
