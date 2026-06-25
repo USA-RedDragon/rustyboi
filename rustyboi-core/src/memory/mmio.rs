@@ -299,6 +299,21 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_block_done_this_period: bool,
 
+    // An HDMA-period rising edge that occurred WHILE the CPU was halted and whose
+    // block was ALREADY serviced this period (the halt was entered in-period with
+    // the block done -> `haltHdmaState_ == High`). Gambatte's during-halt period
+    // `flagHdmaReq` is suppressed (video.h:41 `!intreq_.halted()`) AND consumed —
+    // it never re-fires after unhalt; the next-line m0 edge fires the next block.
+    // rustyboi's per-dot edge machine can resurrect that suppressed edge via the
+    // STAT mode-3->0 fallback the first dot after unhalt (when the renderer's
+    // closed-form `hdma_period` has handed off to None mid-HBlank). This flag marks
+    // such a consumed edge so the STAT fallback skips it. NOT set for a Low-at-halt
+    // period entry (`late_hdma_vs_tima_*_halt`: the halt was out-of-period, so the
+    // post-unhalt m0 edge is a genuine first block and MUST fire). Cleared once the
+    // suppressed edge has been consumed or on the next falling edge.
+    #[serde(skip, default)]
+    hdma_halt_edge_consumed: bool,
+
     // Deferred HDMA block byte writes. Gambatte's `Memory::dma` reads each byte
     // at `cc` but writes it to VRAM at `cc + (2 + 2*ds)` (memory.cpp:354/375),
     // so byte 0 lands one sub-M-cycle AFTER the trigger/prefetch boundary and
@@ -430,6 +445,7 @@ impl Mmio {
             hdma_prev_period: false,
             cpu_halted: false,
             hdma_block_done_this_period: false,
+            hdma_halt_edge_consumed: false,
             hdma_pending_writes: Vec::new(),
             hdma_write_delay: 0,
             hdma_kick_eval_pending: 0,
@@ -1403,6 +1419,12 @@ impl Mmio {
         if self.hdma_prev_period && !in_period {
             self.hdma_block_done_this_period = false;
         }
+        // A genuine period falling edge (closed-form `period` Some(true)->Some(false),
+        // i.e. line-end past the HBlank window, not the Some->None renderer handoff)
+        // means we are decisively out of the consumed-edge's period: drop the guard.
+        if period == Some(false) {
+            self.hdma_halt_edge_consumed = false;
+        }
 
         // Gambatte's period-edge `flagHdmaReq` is suppressed while the CPU is
         // halted (video.h:41 `if (!intreq_.halted())`): during HALT the block is
@@ -1414,6 +1436,26 @@ impl Mmio {
             // Rising edge of the eligibility window arms a block.
             if arm_allowed && !self.hdma_prev_period && in_period && self.hdma_enabled {
                 self.hdma_req_pending = true;
+            } else if !arm_allowed && !self.hdma_prev_period && in_period && self.hdma_enabled {
+                // A period rising edge while HALTED. Gambatte suppresses (and
+                // CONSUMES) the `flagHdmaReq` here. Whether this consumed edge must
+                // STILL fire its block after unhalt depends on `haltHdmaState_`:
+                //   - High (halt entered in-period, block already serviced this
+                //     period): the unhalt does NOT reflag (memory.cpp:304 gate fails
+                //     on High) and this period's block is gone — the NEXT line's m0
+                //     edge fires the next block. Mark the edge consumed so rustyboi's
+                //     STAT-mode-3->0 fallback (which can resurrect this same m0 edge
+                //     the first dot after unhalt, once the closed-form `hdma_period`
+                //     has handed off to None) skips it (hdma_m0halt_late_m3unhalt_*).
+                //   - Low / Requested (out-of-period at halt, or armed-and-owed): the
+                //     unhalt reflag path fires the block; the post-unhalt edge is the
+                //     genuine first block and MUST NOT be skipped
+                //     (late_hdma_vs_tima_*_halt). Leave the flag clear.
+                if self.halt_hdma_state == HaltHdmaState::High
+                    || self.hdma_block_done_this_period
+                {
+                    self.hdma_halt_edge_consumed = true;
+                }
             }
             self.hdma_prev_period = in_period;
             // Keep the STAT-mode tracker current so a later fallback line edges
@@ -1425,9 +1467,33 @@ impl Mmio {
             } else {
                 0
             };
-            if arm_allowed && lcd_on && self.hdma_prev_stat_mode == 3 && mode == 0 && self.hdma_enabled
+            // The STAT mode-3->0 fallback edge and the closed-form `period` rising
+            // edge are the SAME mode-0 transition; when the renderer hands off from
+            // its closed-form `hdma_period` (Some) to None mid-HBlank, `period`
+            // flips Some(true)->None on the very dot the STAT register flips 3->0,
+            // so the fallback can resurrect an m0 edge the closed-form path already
+            // recognized. When that edge was a during-halt period entry whose block
+            // was already serviced (`hdma_halt_edge_consumed`, set above for a
+            // High-at-halt period re-entry), Gambatte has already consumed it; skip
+            // the fallback arm so it is not re-fired post-unhalt (the spurious extra
+            // block in hdma_m0halt_late_m3unhalt_*). A Low/Requested-at-halt period
+            // entry leaves the flag clear, so its post-unhalt first block still fires
+            // (late_hdma_vs_tima_*_halt). The genuine window / first-line fallback
+            // paths never set the flag either.
+            if arm_allowed
+                && lcd_on
+                && !self.hdma_halt_edge_consumed
+                && self.hdma_prev_stat_mode == 3
+                && mode == 0
+                && self.hdma_enabled
             {
                 self.hdma_req_pending = true;
+            }
+            // The consumed-edge guard is single-use: it suppresses exactly the one
+            // STAT 3->0 fallback that mirrors the consumed period edge, then clears
+            // so subsequent lines arm normally.
+            if self.hdma_prev_stat_mode == 3 && mode == 0 {
+                self.hdma_halt_edge_consumed = false;
             }
             self.hdma_prev_stat_mode = mode;
             self.hdma_prev_period = in_period;
