@@ -1540,6 +1540,20 @@ impl Ppu {
                 // `only_win_toggle` is false for an enable).
             } else if !only_win_toggle || !win_started_for_refund {
                 self.m0_time_master = None;
+            } else if !ds
+                && !cgb_features_enabled
+                && !self.sprites_on_line.is_empty()
+                && win_started_for_refund
+            {
+                // DMG late window-disable WITH a sprite on the line (late_disable_spx10
+                // cluster). The StartWindowDraw penalty is binary on DMG exactly as in
+                // the no-sprite branch below; the sprite cost is already baked into the
+                // M3-arm m0_time_master and is unaffected by the window toggle. Once the
+                // window has committed (win_started_for_refund) the disable keeps the
+                // full window-inclusive m0Time (mode 3 persists -> out3); a disable
+                // before the commit took the `!win_started_for_refund` null path above
+                // (no penalty -> mode 0 -> out0). The spx10_wx0f_{1,2} reps bracket this
+                // boundary. Keep m0_time_master as captured (no-op).
             } else if clean_ss && !cgb_features_enabled {
                 // DMG: the StartWindowDraw penalty is binary, not graduated. Once
                 // the window has reached its commit dot (win_started_for_refund),
