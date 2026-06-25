@@ -3439,6 +3439,59 @@ impl Ppu {
                         // no penalty is added — the no-window m0Time captured at arm is
                         // the correct (mode-0-earlier) boundary; keep the schedule.
                     }
+                    // WY-trigger ENABLE (symmetric to the WX-into-range branch above):
+                    // WX is UNCHANGED and already in range, but the window newly starts
+                    // this line because a mid-mode-3 WY write made `window_y_active`
+                    // true (the weMaster / `wy2 == ly` gate flipped). Gambatte's
+                    // predictNextM0Time then runs with the window included, moving the
+                    // mode-3 end WIN_M3_PENALTY dots later — BUT only if the WY trigger
+                    // lands before the fetcher reaches the window-start xpos. For an
+                    // x==0 window (the late_wy / late_scx_late_wy cluster, WX in 0..=7)
+                    // that commit dot is `m3_arm_dot + scx&7 + COMMIT`: the f0/f1
+                    // dispatch reaches xpos 0 (the window tile) `scx&7` dots into M3.
+                    // (Measured byte-exact via cctracer: m0Time = no-window + 6 for the
+                    // `_1` reps that trigger 1 dot in, == no-window for the `_2`/`_3`
+                    // reps that trigger 5+ dots in; the boundary is m3_arm_dot+scx+3 at
+                    // both scx=0 and scx=4.) If the trigger lands at/after the commit
+                    // dot, the fetcher already passed xpos 0 so no penalty accrues and
+                    // the no-window m0Time (captured at arm) is the correct boundary.
+                    // Scoped CGB / single speed / no sprites / x==0 window; the live
+                    // pipeline is untouched, only the read-at-cc m0Time is shifted.
+                    if !keep_schedule
+                        && !self.m3_scheduled_win
+                        && now_will_start
+                        && arm_wx == wx_now
+                        && (0..=7).contains(&wx_now)
+                        && mmio.is_cgb_features_enabled()
+                        && !mmio.is_double_speed_mode()
+                        && self.sprites_on_line.is_empty()
+                        && let Some(m0t) = self.m0_time_master
+                    {
+                        // This WY-trigger enable is resolved for the line; suppress
+                        // re-entry on later dots (window_will_start stays != arm).
+                        self.win_wx_enable_resolved = true;
+                        keep_schedule = true;
+                        // Commit dot = the M3 dot at which the fetcher reaches the
+                        // window-start xpos. For an x==0 window (WX 0..=7) that is
+                        // `m3_arm_dot + scx&7 + WX + 3`: the SCX fine-scroll discard
+                        // (scx&7 dots) then the WX-pixel BG prefix before the window
+                        // tile, plus the fixed f0/f1 dispatch lead (3). A WY trigger
+                        // before this dot adds the StartWindowDraw penalty (mode 3
+                        // runs WIN_M3_PENALTY longer); at/after it the fetcher already
+                        // passed xpos 0, so no penalty accrues. (cctracer: the `_1`
+                        // reps of late_wy_*_wx00 / late_wy_*_wx07 / late_scx_late_wy
+                        // keep the +6 m0Time, the `_2`/`_3` reps drop it; the WX-shift
+                        // separates the wx00 `_1` boundary from the wx07 `_1`.)
+                        let commit_dot = self.m3_arm_dot as i64
+                            + (self.m3_arm_scx & 7) as i64
+                            + wx_now as i64
+                            + env_off("RB_WYTRIG_COMMIT", 3);
+                        if (self.ticks as i64) < commit_dot {
+                            self.m0_time_master =
+                                Some((m0t as i64 + WIN_M3_PENALTY as i64).max(0) as u64);
+                        }
+                        // else: no penalty — keep the no-window m0Time captured at arm.
+                    }
                     if !keep_schedule {
                         self.scheduled_mode0_dot = None;
                         self.m0_time_master = None;
