@@ -1384,6 +1384,23 @@ impl Mmio {
     /// callers charge the returned CPU-cycle stall via the outer per-cycle
     /// loop so PPU/timer/audio continue to tick during the transfer.
     pub fn run_hdma_block(&mut self) -> u32 {
+        self.run_hdma_block_inner(false)
+    }
+
+    /// Execute one HDMA block whose `dma()` event fires while the CPU is in the
+    /// STOP speed-switch halt window (Gambatte `Memory::dma` `halted()` branch,
+    /// memory.cpp:384). The 0x10 source bytes are still copied (the
+    /// `read_hdmadst00` destination-content tests depend on it), but FF55 is NOT
+    /// decremented: the halted branch leaves `ioamhram_[0x155]` at its written
+    /// value and only sets bit 7 (`| 0x80`), then `disableHdma` clears the
+    /// enable. So a single-block HDMA caught mid-stop reads back the written
+    /// length with bit 7 set (`hdma_late_m3speedchange_hdma5_scx*_2` -> out80),
+    /// not the completed 0xFF the normal length-wrap would produce.
+    pub fn run_hdma_block_stop_halt(&mut self) -> u32 {
+        self.run_hdma_block_inner(true)
+    }
+
+    fn run_hdma_block_inner(&mut self, halted: bool) -> u32 {
         // Deferred byte-write placement. Gambatte's `Memory::dma` (memory.cpp:354/
         // 375) reads each byte at the dma-event `cc` but commits the VRAM write at
         // `cc + (2 + 2*ds)` — so byte 0 lands a precise sub-M-cycle AFTER the
@@ -1441,11 +1458,22 @@ impl Mmio {
         }
         self.hdma_write_delay = delay;
 
-        self.hdma_length = self.hdma_length.wrapping_sub(1) & 0x7F;
-        // After underflow from 0x00 -> 0xFF -> masked = 0x7F the transfer
-        // is complete: FF55 reads 0xFF.
-        if self.hdma_length == 0x7F {
+        if halted {
+            // Gambatte `Memory::dma` `halted()` branch (memory.cpp:384-393): the
+            // length is NOT recomputed — `ioamhram_[0x155]` keeps its written value
+            // and only bit 7 is set; the subsequent `disableHdma` clears the enable.
+            // `hdma_length` already holds the written `length_blocks_minus_1`, so
+            // leaving it and clearing `hdma_enabled` makes FF55 read
+            // `hdma_length | 0x80` (the written length with bit 7), not the 0xFF a
+            // completing length-wrap would give.
             self.hdma_enabled = false;
+        } else {
+            self.hdma_length = self.hdma_length.wrapping_sub(1) & 0x7F;
+            // After underflow from 0x00 -> 0xFF -> masked = 0x7F the transfer
+            // is complete: FF55 reads 0xFF.
+            if self.hdma_length == 0x7F {
+                self.hdma_enabled = false;
+            }
         }
         self.hdma_req_pending = false;
 
@@ -1778,6 +1806,23 @@ impl Mmio {
         // Gambatte intevent_dma (memory.cpp:280): after the block, a halt-time
         // `hdma_requested` collapses to `hdma_low` so a subsequent unhalt does
         // not re-fire it (the request has now been serviced).
+        if self.halt_hdma_state == HaltHdmaState::Requested {
+            self.halt_hdma_state = HaltHdmaState::Low;
+        }
+    }
+
+    /// Fire the latched HDMA block whose `dma()` event lands inside the STOP
+    /// speed-switch halt window. Same copy as `fire_pending_hdma_mcycle` but with
+    /// the `halted()` FF55 semantics (no length decrement; see
+    /// `run_hdma_block_stop_halt`).
+    pub fn fire_pending_hdma_mcycle_stop_halt(&mut self) {
+        if !(self.hdma_req_pending && self.hdma_enabled) {
+            return;
+        }
+        self.hdma_pre_fire_state =
+            Some((self.hdma_source, self.hdma_dest, self.hdma_length, self.hdma_enabled));
+        self.hdma_last_fire_cc = Some(self.master_cc());
+        self.pending_dma_stall += self.run_hdma_block_stop_halt();
         if self.halt_hdma_state == HaltHdmaState::Requested {
             self.halt_hdma_state = HaltHdmaState::Low;
         }
