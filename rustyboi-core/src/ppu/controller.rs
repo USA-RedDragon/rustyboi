@@ -842,6 +842,14 @@ pub struct Ppu {
     scx_f1_apply_cc: u64, // abs_cc at which scx_pending becomes visible to f1
     #[serde(default)]
     scx_f1_new: u8,
+    // First line after enable: the SCX value the fine-scroll discard prefix
+    // actually samples (Gambatte M3Start::f1 reads SCX once at the M3-start
+    // dot). A mid-discard SCX write (write_cc + 2*cgb visible) only counts if
+    // it lands at/before that sample dot, which sits `prev_scx % 8` dots past
+    // M3-arm. `compute_m3_length_win` uses this override (when set) instead of
+    // the live register so the late-enable + SCX m0Time matches Gambatte.
+    #[serde(default)]
+    first_line_scx_override: Option<u8>,
     #[serde(default)]
     line_cycle: u32,
     #[serde(default)]
@@ -983,6 +991,7 @@ impl Ppu {
             scx_prev_f1: 0,
             scx_f1_apply_cc: wy2_disabled(),
             scx_f1_new: 0,
+            first_line_scx_override: None,
             line_cycle: 0,
             internal_ly_val: 0,
             sched_lycirq: stat_irq::DISABLED_TIME,
@@ -2327,7 +2336,7 @@ impl Ppu {
 
     // Returns (mode-3 length in dots past base, whether the window contributed).
     fn compute_m3_length_win(&self, mmio: &mmio::Mmio, is_cgb: bool) -> (u128, bool) {
-        let scx = (mmio.read(SCX) & 0x07) as i32;
+        let scx = (self.first_line_scx_override.unwrap_or_else(|| mmio.read(SCX)) & 0x07) as i32;
         // Fine-scroll discard prefix: M3Start::f1 consumes scx%8 dots, then
         // nextCall(1-cgb) before the tile loop (167-base) begins.
         let mut cycles: i32 = scx + (1 - is_cgb as i32);
@@ -3281,6 +3290,27 @@ impl Ppu {
                     self.m3_pixels_discarded = 0;
                     self.m3_arm_dot = self.ticks;
                     self.m3_arm_scx = (mmio.read(SCX) & 0x07) as u8;
+                    // First line after enable: resolve the SCX value the fine-scroll
+                    // discard actually samples. Gambatte's M3Start::f1 reads SCX once
+                    // at the M3-start dot; a mid-discard SCX write (visible at
+                    // `write_cc + 2*cgb`) counts only if it lands at/before that
+                    // sample dot, which sits `prev_scx % 8` dots past M3-arm (the
+                    // discard prefix of the value in effect at M3-start). Evaluate the
+                    // pending f1 latch (from on_scx_write, still intact here) at
+                    // `arm_cc + prev_scx%8`. Matches Gambatte byte-exact on the
+                    // ly0_late_scx7 SCX-write sweep (initial-SCX shifts the sample
+                    // dot, flipping whether the SCX=7 write enters the m0Time).
+                    if was_first_line {
+                        let ds = mmio.is_double_speed_mode() as u32;
+                        let prev_scx = (self.scx_prev_f1 & 0x07) as u64;
+                        // `prev_scx` is a count of PPU dots; convert to master cc
+                        // (1 dot = 1<<ds cc) so the sample dot is phase-correct at
+                        // double speed (where the f1 latch's apply cc is write_cc+4).
+                        let sample_cc = self.abs_cc + (prev_scx << ds);
+                        self.first_line_scx_override = Some(self.scx_f1_pending_at_cc(sample_cc));
+                    } else {
+                        self.first_line_scx_override = None;
+                    }
                     // Seed the exact-cc f1 latch at the SCX value live at M3
                     // start; clear any pending write latch left from a prior
                     // line so it cannot leak into this line's discard.
@@ -3312,6 +3342,9 @@ impl Ppu {
                         let m3_len = self.compute_m3_length(mmio, is_cgb);
                         let m0t = self.m0_time_exact(mmio, m3_len, is_cgb, true);
                         self.m0_time_master = Some(m0t);
+                        // The override applied only to this first-line m0Time anchor;
+                        // clear it so the per-tick / next-frame m3_len reads live SCX.
+                        self.first_line_scx_override = None;
                         self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
                         // The within-line reported mode-0 dot / m0 IRQ arm keep the
                         // calibrated FIRST_FRAME timing (the first-line pixel
