@@ -37,7 +37,14 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // tuned reads are unaffected; the single-switch base family keeps the -2.
         // The VBlank/boot SS->DS path (DS sprite/m2int tests) keeps the full 8.
         let bridge = if to_double {
-            if mmio.ppu.is_in_pixel_transfer() {
+            // SS->DS during an active rendering line (OAMSearch / PixelTransfer /
+            // HBlank of LY 0..143): the per-dot renderer overshoots the post-window
+            // mode-3->mode-0 boundary by 2 dots, so drop 2 (bridge 6) and arm the
+            // pullback marker (a following DS->SS restores them). Previously gated to
+            // PixelTransfer only; the HBlank/OAMSearch of a rendering line shares the
+            // overshoot (cctracer speedchange5_ly44: the terminal HBlank SS->DS read
+            // landed at lineCycles 252 vs Gambatte 250). VBlank / LCD-off keeps 8.
+            if mmio.ppu.is_in_pixel_transfer() || mmio.ppu.is_on_rendering_line() {
                 mmio.ppu.arm_sc_mode3_pullback();
                 6
             } else {
