@@ -93,8 +93,9 @@ impl SM83 {
                 // bracket by +4 on the fast path so that block still reflags, while
                 // leaving the mode-0 ENTRY bracket intact (a depth-0 block reflags
                 // either way, matching Gambatte). (Non-fast HALT-late path:
-                // limit_adj = 0 => byte-identical.)
-                let ei_fast = std::env::var("RB_EI_FAST").map(|v| v == "1").unwrap_or(false);
+                // limit_adj = 0 => byte-identical.) Fast dispatch is ON by default
+                // post co-land; RB_EI_FAST=0 forces it OFF.
+                let ei_fast = std::env::var("RB_EI_FAST").map(|v| v == "1").unwrap_or(true);
                 let limit_adj: i64 = if ei_fast { 4 } else { 0 };
                 let in_period_unhalt = mmio.hdma_in_period_for_unhalt_adj(limit_adj);
                 match mmio.halt_hdma_state() {
@@ -136,18 +137,22 @@ impl SM83 {
             // an imminent overflow at the EARLY anchor (schedCc + IF_OFF) so the
             // ensuing service runs on Gambatte's exact phase, ahead of the late
             // per-dot delivery. Re-sample the pending interrupt afterward.
-            // NOTE: the EI-loop fast timer dispatch is gated OFF by default. It
-            // correctly dissolves the timer-schedule offset for the pure-timer
-            // re-derivation cluster (tima/tc00_late_tc01_*, irq_ds, irq_retrigger:
-            // +19 fixed) BUT the +5 IF-delivery grid it bypasses is simultaneously
-            // REQUIRED by three coupled subsystems tuned against it — the IF-edge
-            // re-flag tests (tima/tc00_irq_ifw_*), the CGB STOP sub-dot derivation
-            // (speedchange_tima*), and the HDMA-vs-IRQ service-phase race
-            // (hdma_*unhalt) — so enabling it alone is net +3 (regressive). It is
-            // the per-access-cc "lever A": net-positive only once those three are
-            // re-tuned in the same coordinated stage. Enable for that work via
-            // RB_EI_FAST=1 (OFF = byte-identical to the +5-grid baseline).
-            let ei_fast = std::env::var("RB_EI_FAST").map(|v| v == "1").unwrap_or(false);
+            // NOTE: the EI-loop fast timer dispatch is now ON by default (per-access
+            // timer fast-dispatch co-land). It dissolves the timer-schedule offset
+            // for the pure-timer re-derivation cluster (tima/tc00_late_tc01_*,
+            // irq_ds, irq_retrigger: +19 by construction); the +5 IF-delivery grid
+            // it bypasses was the shared lever for three coupled subsystems, all
+            // re-tuned to the early grid in the same co-land — the IF-edge re-flag
+            // tests (tc00_irq_ifw_* / late_retrigger), the CGB STOP sub-dot
+            // derivation (speedchange_tima*, STOP_EI_PROMOTE_ADJ split), and the
+            // HDMA-vs-IRQ unhalt service-phase race (hdma_*unhalt, END-bracket +4).
+            // Net co-land vs the +5-grid baseline is strongly positive; the only
+            // residuals are the render-phase-coupled hdma_*_ly_*_1 glyph tests (the
+            // EI-fast LCD-re-enable shifts the PPU render phase 4 cc — a lever that
+            // belongs to the lazy-PPU render stage, and which simultaneously flips
+            // the sibling hdma_*_ly_*_6 tests TO passing). RB_EI_FAST=0 forces the
+            // OFF / +5-grid baseline (A/B preserved); unset or =1 leaves it ON.
+            let ei_fast = std::env::var("RB_EI_FAST").map(|v| v == "1").unwrap_or(true);
             let mut pending_interrupt = pending_interrupt;
             if ei_fast && ei_ctx && self.registers.ime {
                 if let Some(early) = mmio.next_timer_overflow_ei_cc() {

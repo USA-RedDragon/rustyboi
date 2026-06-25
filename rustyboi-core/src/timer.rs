@@ -22,13 +22,16 @@ const TIMA_CLOCK: [u32; 4] = [10, 4, 6, 8];
 // `tmatime`/`next_irq_event_time` is guarded by an explicit disabled check.
 const DISABLED_TIME: u64 = u64::MAX;
 
-/// EI-loop fast-dispatch active (RB_EI_FAST=1). When set, a non-halt/non-stop EI
-/// loop services the timer IRQ at the EARLY (`IF_OFF`) anchor. Cached once.
+/// EI-loop fast-dispatch active. Now ON by default (the per-access timer
+/// fast-dispatch co-land: the irq_ifw / speedchange_tima / hdma-unhalt buckets
+/// re-tuned the +5 IF-delivery grid, so the fast path is net-positive vs the
+/// baseline). RB_EI_FAST=0 forces it OFF (A/B preserved); RB_EI_FAST=1 (or
+/// unset) leaves it ON. Cached once.
 fn ei_fast_enabled() -> bool {
     use std::sync::OnceLock;
     static EI_FAST: OnceLock<bool> = OnceLock::new();
     *EI_FAST.get_or_init(|| {
-        std::env::var("RB_EI_FAST").map(|v| v == "1").unwrap_or(false)
+        std::env::var("RB_EI_FAST").map(|v| v == "1").unwrap_or(true)
     })
 }
 
