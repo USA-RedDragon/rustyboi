@@ -614,6 +614,19 @@ impl<'a> Bus<'a> {
             // M-cycle's dots tick. Pass that phase's sub-dot parity so the PPU
             // STAT/LYC hooks place the event on the correct half-dot at DS.
             self.ppu.set_write_subdot(self.mmio.cpu_t_phase());
+            // FF55 disable-vs-m0-edge race (Gambatte `disableHdma`): an FF55
+            // bit7=0 write to an enabled HDMA only kills the FUTURE m0-edge
+            // schedule. A block whose m0 edge has already fired at/before this
+            // write's access cc is already latched and still runs. Resolve that at
+            // the write's access cc (raw master_cc, the same anchor getStat uses)
+            // and stash it so the write handler keeps the request instead of
+            // canceling. Evaluated BEFORE the write so the handler sees it.
+            if addr == 0xFF55 && (value & 0x80) == 0 && self.mmio.hdma_is_enabled() {
+                let ds = self.mmio.is_double_speed_mode();
+                let cc = self.mmio.master_cc();
+                self.mmio
+                    .set_hdma_disable_fires(self.ppu.hdma_disable_fires(cc, ds));
+            }
             self.mmio.write(addr, value);
             // FF42/FF43 (SCY/SCX): the CPU readback above is immediate, but the
             // BG fetcher must see the new value ~N dots later (write-side analog
