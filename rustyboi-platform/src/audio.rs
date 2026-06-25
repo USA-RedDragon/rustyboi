@@ -129,7 +129,7 @@ mod cpal_backend {
             };
             let underrun_samples = self.underrun_samples.clone();
             let stream = device.build_output_stream(
-                &config,
+                config,
                 move |data: &mut [f32], _| {
                     // Real-time callback: drain the ring, zero-fill the rest.
                     let got = cons.pop_slice(data);
