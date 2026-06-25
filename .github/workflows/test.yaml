@@ -429,25 +429,19 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
-        with:
-          # compileSdk 37 + build-tools for aapt2; ndkVersion is pinned in the
-          # app build so install it too (the native tasks are excluded below,
-          # but AGP resolves the pinned NDK while configuring the project).
-          packages: 'platforms;android-37 build-tools;36.0.0 ndk;27.3.13750724'
-      - name: Run Android unit tests + JaCoCo
+      - name: Run RomScan unit tests + JaCoCo
         working-directory: android
-        # Only the pure JVM helpers are under test; skip the cargo-ndk native
-        # library build (no Rust toolchain / cargo-ndk on this runner).
+        # The ROM-scan helpers live in the pure-JVM :romscan module (only
+        # java.util.zip + Kotlin stdlib), so coverage needs ONLY a JDK — no
+        # Android SDK/NDK/platforms;android-37. configure-on-demand keeps the
+        # android :app project (which would need the SDK) out of the graph.
         run: >-
           ./gradlew --no-daemon
-          :app:testDebugUnitTest :app:jacocoTestReport
-          -x :app:buildRustLibDebug -x :app:buildRustLibRelease
+          :romscan:test :romscan:jacocoTestReport
       - name: Upload to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
-          files: android/app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml
+          files: android/romscan/build/reports/jacoco/test/jacocoTestReport.xml
           flags: android
           token: ${{ secrets.CODECOV_TOKEN }}
 
