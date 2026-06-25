@@ -49,10 +49,9 @@ const CGB_FIRST_FRAME_LOCK_DOT: u128 = 82;
 // (oambusy_read_ds, cgbpw_ds, vramr_ds: 3 fixed, 1 regressed -> net -2; only the
 // enable_display cluster moves).
 const CGB_FIRST_FRAME_LOCK_DOT_DS: u128 = 81;
-fn dmg_first_frame_lock_dot() -> u128 { env_off("RB_DMG_FF_LOCK", DMG_FIRST_FRAME_LOCK_DOT as i64).max(0) as u128 }
+fn dmg_first_frame_lock_dot() -> u128 { DMG_FIRST_FRAME_LOCK_DOT }
 fn cgb_first_frame_lock_dot(double_speed: bool) -> u128 {
-    let default = if double_speed { CGB_FIRST_FRAME_LOCK_DOT_DS } else { CGB_FIRST_FRAME_LOCK_DOT };
-    env_off("RB_CGB_FF_LOCK", default as i64).max(0) as u128
+    if double_speed { CGB_FIRST_FRAME_LOCK_DOT_DS } else { CGB_FIRST_FRAME_LOCK_DOT }
 }
 // Offset between rustyboi's `ticks` at M3 arm and Gambatte's lineCycle frame
 // for the scheduled Mode 3 -> Mode 0 transition. Swept against the full suite.
@@ -79,16 +78,18 @@ fn wy2_disabled() -> u64 { u64::MAX }
 fn pnow_disabled() -> u64 { u64::MAX }
 fn win_y_pos_init() -> u8 { 0xFF }
 
-// Env-tunable override of an i64 offset (for sweeping during development). When
-// the named env var is unset, the compiled-in default is used.
-#[inline]
-fn env_off(_name: &str, default: i64) -> i64 {
-    // ds-engine STAGE 7: env-var offset sweeps deleted; the calibrated constant
-    // default is the single value. (Offset-deletion work is done by direct
-    // constant edits + rebuild, not env overrides — the env path was in the
-    // per-access getStat hot path and slowed the suite ~30x.)
-    default
-}
+// Mid-mode-3 register-write commit delays (dots, relative to the write cc) and
+// render-phase offsets. These were once env-tunable sweep knobs; the sweeps are
+// deleted and each is now its single calibrated constant.
+const M0IRQ_SCX2_CGB_OFFSET: i64 = -1;
+const WY1_DELAY: i64 = 2;
+const WY2_DELAY_CGB: i64 = 7;
+const WY2_DELAY_DMG: i64 = 4;
+const SCY_DELAY: i64 = 2;
+const WXEN_COMMIT_DELAY: i64 = 3;
+const WYTRIG_COMMIT_DELAY: i64 = 3;
+const LINE153_LY0_DOT_DS: i64 = 6;
+const GETSTAT_OFF_DS: i64 = -1;
 
 // ds-engine STAGE 4: RB_GETSTAT. When set, the FF41 mode bits (and the VRAM/OAM/
 // cgbp access gate) are resolved by a single closed-form `get_stat(cc)` off the
@@ -125,15 +126,15 @@ pub fn linerender_enabled() -> bool {
 // gave the IRQ model true odd-cc resolution: m2 relaxes -2 -> -1 (the odd-cc
 // fire is now caught by the sub-dot rather than rounded down), and the write cc
 // tightens -3 -> -4.
-fn write_cc_off_ds() -> i64 { env_off("RB_WRITE_CC_OFF_DS", 0) }
-fn m0irq_off_ds() -> i64 { env_off("RB_M0IRQ_OFF_DS", M0IRQ_OFFSET) }
-fn m2irq_off_ds() -> i64 { env_off("RB_M2IRQ_OFF_DS", -1) }
-// Sweep-tunable single-speed offsets (default to the compiled-in constants).
-fn dmg_mode0_offset() -> i32 { env_off("RB_DMG_MODE0_OFF", DMG_MODE0_OFFSET as i64) as i32 }
-fn cgb_mode0_offset() -> i32 { env_off("RB_CGB_MODE0_OFF", CGB_MODE0_OFFSET as i64) as i32 }
-fn m0irq_off_ss() -> i64 { env_off("RB_M0IRQ_OFF", M0IRQ_OFFSET) }
-fn m2irq_off_ss() -> i64 { env_off("RB_M2IRQ_OFF", M2IRQ_OFFSET) }
-fn write_cc_off_ss() -> i64 { env_off("RB_WRITE_CC_OFF", WRITE_CC_OFFSET) }
+fn write_cc_off_ds() -> i64 { 0 }
+fn m0irq_off_ds() -> i64 { M0IRQ_OFFSET }
+fn m2irq_off_ds() -> i64 { -1 }
+// Single-speed offsets (the compiled-in calibrated constants).
+fn dmg_mode0_offset() -> i32 { DMG_MODE0_OFFSET }
+fn cgb_mode0_offset() -> i32 { CGB_MODE0_OFFSET }
+fn m0irq_off_ss() -> i64 { M0IRQ_OFFSET }
+fn m2irq_off_ss() -> i64 { M2IRQ_OFFSET }
+fn write_cc_off_ss() -> i64 { WRITE_CC_OFFSET }
 
 // Sentinel tile number that can never equal a real `(spx - firstTileXpos) & -8`
 // value (Gambatte's `tileno_none` = low bit set). Used to force the first sprite
@@ -1810,7 +1811,7 @@ impl Ppu {
         let ds = mmio.is_double_speed_mode();
         let mut off = if ds { m0irq_off_ds() } else { m0irq_off_ss() };
         if is_cgb && !ds && (mmio.read(SCX) & 0x07) == 2 {
-            off += env_off("RB_M0IRQ_SCX2_CGB", -1);
+            off += M0IRQ_SCX2_CGB_OFFSET;
         }
         let dsf = 1i64 << ds as i32;
         let abs = (self.abs_cc as i64 - dsf + (remaining + off) * dsf).max(0) as u64;
@@ -2285,10 +2286,10 @@ impl Ppu {
             // `compute_m3_length_win` (any in-range WX <= 166 < 167).
             if wx < targetx {
                 nwx = wx;
-                cycles += WIN_M3_PENALTY + env_off("RB_WIN_M3_PEN", 0) as i32;
+                cycles += WIN_M3_PENALTY;
                 if is_cgb && scx == 5 && self.sprites_on_line.is_empty() {
                     let dflt = if mmio.is_double_speed_mode() { 0 } else { -1 };
-                    cycles += env_off("RB_WIN_M3_SCX5_CGB", dflt) as i32;
+                    cycles += dflt as i32;
                 }
             }
         }
@@ -2329,7 +2330,7 @@ impl Ppu {
         let mut win = false;
         if self.window_will_start(mmio, is_cgb) {
             nwx = mmio.read(WX) as i32;
-            cycles += WIN_M3_PENALTY + env_off("RB_WIN_M3_PEN", 0) as i32;
+            cycles += WIN_M3_PENALTY;
             // CGB window lines at SCX%8 == 5: the closed-form mode-3 window
             // penalty runs one dot long versus Gambatte's M3Start fine-scroll
             // dispatch at this phase, flipping the sampled STAT mode on the
@@ -2338,7 +2339,7 @@ impl Ppu {
             // m2int_wx*_scx5_m3stat reads flip mode3->mode0).
             if is_cgb && scx == 5 && self.sprites_on_line.is_empty() {
                 let dflt = if mmio.is_double_speed_mode() { 0 } else { -1 };
-                cycles += env_off("RB_WIN_M3_SCX5_CGB", dflt) as i32;
+                cycles += dflt as i32;
             }
             win = true;
         }
@@ -2425,16 +2426,16 @@ impl Ppu {
         // apply so a mid-frame WY write reaches the weMaster latch with the same
         // phase Gambatte uses, rather than the live (immediate) mmio value.
         let cgb = mmio.is_cgb_features_enabled() as i64;
-        let wy1_delay = env_off("RB_WY1_DELAY", 2) + cgb;
+        let wy1_delay = WY1_DELAY + cgb;
         self.wy1_pending = value;
         self.wy1_apply_cc = cc + wy1_delay.max(0) as u64;
         // wy2 apply delay (cc) past the write, swept against the late_wy suite:
         // CGB 7, DMG 4 (-ds at double speed). The split reflects the differing
         // M3-start / fine-scroll phase between the two cores.
         let base = if mmio.is_cgb_features_enabled() {
-            env_off("RB_WY2_DELAY_CGB", 7)
+            WY2_DELAY_CGB
         } else {
-            env_off("RB_WY2_DELAY_DMG", 4)
+            WY2_DELAY_DMG
         };
         let delay = (base - ds as i64).max(0) as u64;
         self.wy2_pending = value;
@@ -2461,7 +2462,7 @@ impl Ppu {
         // SCY=2 is the swept optimum (fixes 20 CGB scy_during_m3 straddle cases,
         // zero regression; 1 -> -4, 3 -> -14, 4 -> +8 regresses).
         let delay = if mmio.is_cgb_features_enabled() {
-            env_off("RB_SCY_DELAY", 2).max(0) as u64
+            SCY_DELAY.max(0) as u64
         } else {
             0
         };
@@ -2482,7 +2483,7 @@ impl Ppu {
         // live read); the SCX-write straddles need the read-cc convergent root,
         // out of scope. Default 0 (live), env-overridable for future work.
         let delay = if mmio.is_cgb_features_enabled() {
-            env_off("RB_SCX_DELAY", 0).max(0) as u64
+            0u64
         } else {
             0
         };
@@ -3428,7 +3429,7 @@ impl Ppu {
                             + self.m3_arm_scx as i64
                             + x_at_start as i64
                             + win_fine
-                            + env_off("RB_WXEN_COMMIT", 3);
+                            + WXEN_COMMIT_DELAY;
                         if (self.ticks as i64) < commit_dot {
                             let pen = (WIN_M3_PENALTY as i64) << (mmio.is_double_speed_mode() as i64);
                             self.m0_time_master = Some((m0t as i64 + pen).max(0) as u64);
@@ -3485,7 +3486,7 @@ impl Ppu {
                         let commit_dot = self.m3_arm_dot as i64
                             + (self.m3_arm_scx & 7) as i64
                             + wx_now as i64
-                            + env_off("RB_WYTRIG_COMMIT", 3);
+                            + WYTRIG_COMMIT_DELAY;
                         if (self.ticks as i64) < commit_dot {
                             self.m0_time_master =
                                 Some((m0t as i64 + WIN_M3_PENALTY as i64).max(0) as u64);
@@ -3788,7 +3789,7 @@ impl Ppu {
                 // own dot units). So both speeds use dot 6; the DS probes
                 // (lyc0flag_ds / lyc153flag_ds) read C5 at lineCycles>=6, C1 before.
                 let line_153_zero_dot = if mmio.is_double_speed_mode() {
-                    env_off("RB_LINE153_LY0_DOT_DS", 6).max(0) as u128
+                    LINE153_LY0_DOT_DS.max(0) as u128
                 } else {
                     LINE_153_LY_ZERO_DOT
                 };
@@ -4405,7 +4406,7 @@ impl Ppu {
         // suite: SS 0, DS -1; the DS read samples one cc past the SS phase since
         // each dot is 2 cc, so the boundary sits a cc earlier in the read window).
         let access_cc = {
-            let off = if ds { env_off("RB_GETSTAT_OFF_DS", -1) } else { env_off("RB_GETSTAT_OFF", 0) };
+            let off = if ds { GETSTAT_OFF_DS } else { 0 };
             (access_cc as i64 + off).max(0) as u64
         };
         let lc = self.ly_counter(mmio);
