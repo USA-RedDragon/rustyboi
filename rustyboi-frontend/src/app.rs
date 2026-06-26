@@ -1004,7 +1004,7 @@ mod fast_forward_tests {
             webcam: Box::new(MemWebcam::default()),
         };
         let session = Session::new(Config::default(), ports, [0u8; 32]);
-        App::new(session, PaletteChoice::Grayscale, None, None, true)
+        App::new(session, PaletteChoice::GreenLcd, None, None, true)
     }
 
     #[test]
@@ -1127,7 +1127,7 @@ mod pause_and_load_tests {
     // every pause flag set and the auto-pause latch armed.
     fn paused_app() -> App {
         let session = Session::new(Config::default(), ports(), [0u8; 32]);
-        App::new(session, PaletteChoice::Grayscale, None, None, true)
+        App::new(session, PaletteChoice::GreenLcd, None, None, true)
     }
 
     /// Minimal valid 32KB NoMBC ROM.
