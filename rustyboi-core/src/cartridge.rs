@@ -731,6 +731,63 @@ impl Cartridge {
         copies >= 2
     }
 
+    /// Reconstruct a trimmed MBC1 multicart dump into the physical 8Mbit
+    /// image, or `None` when the data is not one (the overwhelmingly common
+    /// case). Some dumps of MBC1M carts (e.g. "Mortal Kombat I & II") strip
+    /// each 256KB segment's padding banks, collapsing the games to be
+    /// contiguous after the menu. The header still declares MBC1 with 64
+    /// banks, but the file is short of that, so `detect_mbc1_multicart`
+    /// rejects it and plain-MBC1 BANK2 wiring maps the menu's launch writes to
+    /// the wrong banks. This re-bases each segment to its 0x40000 slot (0xFF
+    /// fill, like the real ROM's padding) so the multicart detection and the
+    /// already-correct MBC1M banking see the physical layout.
+    ///
+    /// The predicate cannot fire on a normal ROM: it requires the MBC1 type,
+    /// a header ROM-size byte of exactly 64 banks with a file SHORTER than
+    /// that (never true for a well-formed dump), and two to four
+    /// checksum-valid headers carrying the base header's logo at 0x4000-bank
+    /// boundaries whose segments each fit a 256KB slot.
+    fn reconstruct_trimmed_mbc1m(data: &[u8]) -> Option<Vec<u8>> {
+        const SEGMENT: usize = 0x40000;
+        const FULL: usize = 64 * 0x4000;
+        if data.len() < 0x150 || data.len() >= FULL {
+            return None;
+        }
+        if !matches!(data[CARTRIDGE_TYPE_OFFSET], MBC1 | MBC1_RAM | MBC1_RAM_BATTERY) {
+            return None;
+        }
+        if data[ROM_SIZE_OFFSET] != 0x05 {
+            return None;
+        }
+        let logo = &data[0x0104..0x0134];
+        if logo.iter().all(|&b| b == logo[0]) {
+            return None; // uniform filler would self-match anywhere
+        }
+        let header_ok = |base: usize| {
+            data[base + 0x0104..base + 0x0134] == *logo && {
+                let sum = data[base + 0x0134..base + 0x014D]
+                    .iter()
+                    .fold(0u8, |a, &b| a.wrapping_sub(b).wrapping_sub(1));
+                sum == data[base + 0x014D]
+            }
+        };
+        let starts: Vec<usize> =
+            (0..data.len().saturating_sub(0x14F)).step_by(0x4000).filter(|&o| header_ok(o)).collect();
+        if !(2..=4).contains(&starts.len()) || starts[0] != 0 {
+            return None;
+        }
+        let seg_end = |i: usize| starts.get(i + 1).copied().unwrap_or(data.len());
+        if (0..starts.len()).any(|i| seg_end(i) - starts[i] > SEGMENT) {
+            return None;
+        }
+        let mut out = vec![0xFF; FULL];
+        for (i, &s) in starts.iter().enumerate() {
+            let seg = &data[s..seg_end(i)];
+            out[i * SEGMENT..i * SEGMENT + seg.len()].copy_from_slice(seg);
+        }
+        Some(out)
+    }
+
     /// Determine the number of 16KB ROM banks. The cartridge header byte at
     /// 0x0148 is the nominal size, but it is only metadata: the physical ROM
     /// chip determines how many banks the MBC can actually address. Some test
@@ -1026,6 +1083,9 @@ impl Cartridge {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "ROM too small"));
         }
 
+        // Re-expand trimmed MBC1 multicart dumps before any derived fields.
+        let data = Self::reconstruct_trimmed_mbc1m(&data).unwrap_or(data);
+
         // Read cartridge header information
         let cartridge_type = data[CARTRIDGE_TYPE_OFFSET];
         let rom_size_code = data[ROM_SIZE_OFFSET];
@@ -1236,6 +1296,9 @@ impl Cartridge {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "ROM too small"));
         }
 
+        // Re-expand trimmed MBC1 multicart dumps before any derived fields.
+        let actual_data = Self::reconstruct_trimmed_mbc1m(&actual_data).unwrap_or(actual_data);
+
         // Read cartridge header information
         let cartridge_type = actual_data[CARTRIDGE_TYPE_OFFSET];
         let rom_size_code = actual_data[ROM_SIZE_OFFSET];
@@ -1385,6 +1448,11 @@ impl Cartridge {
     /// bytes. All other runtime state (RAM, bank regs, RTC) is already present
     /// from deserialize; this only refills the read-only ROM.
     pub fn attach_rom(&mut self, rom: Vec<u8>) {
+        // A caller may re-attach the ORIGINAL file bytes (not a `detach_rom`
+        // image), so apply the same trimmed-MBC1M expansion as the
+        // constructors; the serialized bank registers assume the physical
+        // layout. Already-expanded images never match the predicate.
+        let rom = Self::reconstruct_trimmed_mbc1m(&rom).unwrap_or(rom);
         let expected = self.rom_banks * 0x4000;
         self.rom_data = if rom.len() >= expected {
             Arc::from(&rom[..expected])
@@ -5148,5 +5216,110 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         N.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Trimmed MBC1M dump shape (Mortal Kombat I & II): menu bank + two
+    /// contiguous 256KB games, 33 banks total; header MBC1 with a 64-bank
+    /// size byte; checksum-valid headers carrying the base logo at file
+    /// offsets 0, 0x4000 and 0x44000.
+    fn make_trimmed_mbc1m() -> Vec<u8> {
+        let mut rom = make_sized_rom(0x01, 0x05, 33 * 0x4000);
+        for base in [0usize, 0x4000, 0x44000] {
+            rom[base + 0x104..base + 0x134].copy_from_slice(&LICENSED_LOGO);
+            rom[base + 0x147] = 0x01;
+            rom[base + 0x148] = if base == 0 { 0x05 } else { 0x03 };
+            let sum = rom[base + 0x134..base + 0x14D]
+                .iter()
+                .fold(0u8, |a, &b| a.wrapping_sub(b).wrapping_sub(1));
+            rom[base + 0x14D] = sum;
+        }
+        rom
+    }
+
+    #[test]
+    fn trimmed_mbc1m_dump_reconstructs_physical_layout() {
+        let rom = make_trimmed_mbc1m();
+        let out = Cartridge::reconstruct_trimmed_mbc1m(&rom).unwrap();
+        assert_eq!(out.len(), 0x100000);
+        // Menu keeps slot 0; the rest of its slot is 0xFF padding.
+        assert_eq!(out[0x1000], 0);
+        assert!(out[0x4000..0x40000].iter().all(|&b| b == 0xFF));
+        // Game 1 re-bases 0x4000 -> 0x40000 (file banks 1..17).
+        assert_eq!(out[0x40000 + 0x1000], 1);
+        assert_eq!(out[0x7C000 + 0x1000], 16);
+        // Game 2 re-bases 0x44000 -> 0x80000 (file banks 17..33).
+        assert_eq!(out[0x80000 + 0x1000], 17);
+        assert_eq!(out[0xBC000 + 0x1000], 32);
+        // Empty slot 3.
+        assert!(out[0xC0000..].iter().all(|&b| b == 0xFF));
+    }
+
+    #[test]
+    fn trimmed_mbc1m_loads_as_multicart_and_banks_physically() {
+        let rom = make_trimmed_mbc1m();
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(cart.mbc1_multicart);
+        assert_eq!(cart.rom_banks, 64);
+        // The menu's launch sequence: BANK2 = 1 + mode 1 re-homes 0x0000 to
+        // game 1's first bank (physical 0x10); BANK1 selects within the game.
+        cart.write(0x2000, 0x01);
+        cart.write(0x4000, 0x01);
+        cart.write(0x6000, 0x01);
+        assert_eq!(cart.read(0x1000), 1); // bank0 window = game 1 home bank
+        assert_eq!(cart.read(0x5000), 2); // banked window = game 1 bank 1
+    }
+
+    #[test]
+    fn attach_rom_expands_trimmed_mbc1m() {
+        let rom = make_trimmed_mbc1m();
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        let expanded = cart.detach_rom();
+        // Re-attaching the ORIGINAL file bytes (savestate reload path) must
+        // produce the same physical image as the constructor did.
+        cart.attach_rom(rom);
+        assert_eq!(&cart.rom_data[..], &expanded[..]);
+    }
+
+    #[test]
+    fn trimmed_mbc1m_predicate_rejects_normal_shapes() {
+        let rom = make_trimmed_mbc1m();
+
+        // Proper 1MB image: nothing to reconstruct (existing detection path).
+        let mut full = rom.clone();
+        full.resize(0x100000, 0xFF);
+        assert!(Cartridge::reconstruct_trimmed_mbc1m(&full).is_none());
+
+        // Non-MBC1 type byte.
+        let mut t = rom.clone();
+        t[CARTRIDGE_TYPE_OFFSET] = 0x13;
+        assert!(Cartridge::reconstruct_trimmed_mbc1m(&t).is_none());
+
+        // Header ROM-size byte other than 64 banks.
+        let mut t = rom.clone();
+        t[ROM_SIZE_OFFSET] = 0x04;
+        assert!(Cartridge::reconstruct_trimmed_mbc1m(&t).is_none());
+
+        // Uniform filler logo must not self-match.
+        let mut t = rom.clone();
+        for base in [0usize, 0x4000, 0x44000] {
+            t[base + 0x104..base + 0x134].copy_from_slice(&[0u8; 48]);
+        }
+        assert!(Cartridge::reconstruct_trimmed_mbc1m(&t).is_none());
+
+        // Corrupting game 2's header checksum leaves a >256KB segment: bail.
+        let mut t = rom.clone();
+        t[0x44000 + 0x14D] ^= 0xFF;
+        assert!(Cartridge::reconstruct_trimmed_mbc1m(&t).is_none());
+
+        // Single-header short-of-header MBC1 dump: stays plain MBC1.
+        let mut single = make_sized_rom(0x01, 0x05, 33 * 0x4000);
+        single[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
+        let sum = single[0x134..0x14D]
+            .iter()
+            .fold(0u8, |a, &b| a.wrapping_sub(b).wrapping_sub(1));
+        single[0x14D] = sum;
+        assert!(Cartridge::reconstruct_trimmed_mbc1m(&single).is_none());
+        let cart = Cartridge::from_bytes(&single).unwrap();
+        assert!(!cart.mbc1_multicart);
     }
 }
