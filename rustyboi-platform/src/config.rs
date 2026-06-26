@@ -32,8 +32,8 @@ pub struct RawConfig {
     #[arg(short, long, default_value_t = 5)]
     scale: u8,
 
-    /// Color palette (grayscale, green, blue, brown, red)
-    #[arg(short, long, default_value = "grayscale")]
+    /// Color palette (greenlcd, grayscale, green, pocket, ...)
+    #[arg(short, long, default_value = "greenlcd")]
     palette: String,
 
     /// Skip BIOS on startup
