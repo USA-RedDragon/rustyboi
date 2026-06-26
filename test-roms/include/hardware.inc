@@ -25,6 +25,8 @@ DEF rHDMA2 EQU $FF52   ; HDMA source low
 DEF rHDMA3 EQU $FF53   ; HDMA dest high
 DEF rHDMA4 EQU $FF54   ; HDMA dest low
 DEF rHDMA5 EQU $FF55   ; HDMA length/mode/start
+DEF rBCPS  EQU $FF68   ; CGB BG palette index
+DEF rBCPD  EQU $FF69   ; CGB BG palette data
 DEF rIE    EQU $FFFF   ; interrupt enable
 
 ; --- LCDC bits ---------------------------------------------------------------
