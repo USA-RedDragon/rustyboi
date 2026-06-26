@@ -137,7 +137,7 @@ impl RustyboiCore {
             self.sgb_border_enabled = value == core_options::ON;
         }
         if let Some(value) = env.get_variable(core_options::KEY_DMG_PALETTE) {
-            self.palette = PaletteChoice::from_option_id(&value).unwrap_or(PaletteChoice::Grayscale);
+            self.palette = PaletteChoice::from_option_id(&value).unwrap_or(PaletteChoice::GreenLcd);
             if let Some(session) = self.session.as_mut() {
                 session.init_palette_choice(self.palette);
             }
@@ -208,7 +208,7 @@ impl Core for RustyboiCore {
         RustyboiCore {
             session: None,
             hardware_pref: HardwarePref::Auto,
-            palette: PaletteChoice::Grayscale,
+            palette: PaletteChoice::GreenLcd,
             gbc_dmg_palette: GbcDmgPalette::Auto,
             color_correction: CgbColorConversion::Linear,
             // Sized for the largest possible frame (SGB 256x224) so the same
@@ -800,7 +800,7 @@ mod tests {
             assert!(dispatch::load_game(&mut core, &info), "load_game failed");
 
             assert_eq!(core.hardware_pref, HardwarePref::Auto);
-            assert_eq!(core.palette, PaletteChoice::Grayscale);
+            assert_eq!(core.palette, PaletteChoice::GreenLcd);
             assert_eq!(core.color_correction, CgbColorConversion::Lcd);
             assert_eq!(core.gbc_dmg_palette, GbcDmgPalette::Auto);
         }

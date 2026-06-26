@@ -96,7 +96,7 @@ impl RawConfig {
             state: self.state,
             #[cfg(not(target_os = "android"))]
             scale: self.scale,
-            palette: PaletteChoice::from_str(&self.palette).unwrap_or(PaletteChoice::Grayscale),
+            palette: PaletteChoice::from_str(&self.palette).unwrap_or(PaletteChoice::GreenLcd),
             #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
             skip_bios: _skip_bios,
             printer: self.printer,
@@ -124,15 +124,15 @@ mod tests {
     fn clap_defaults_match_declarations() {
         let c = parse(&["rustyboi"]);
         assert_eq!(c.hardware, gb::Hardware::CGB);
-        assert_eq!(c.palette, PaletteChoice::Grayscale);
+        assert_eq!(c.palette, PaletteChoice::GreenLcd);
         #[cfg(not(target_os = "android"))]
         assert_eq!(c.scale, 5);
     }
 
     #[test]
-    fn garbage_palette_falls_back_to_grayscale() {
+    fn garbage_palette_falls_back_to_green_lcd() {
         let c = parse(&["rustyboi", "--palette", "chartreuse"]);
-        assert_eq!(c.palette, PaletteChoice::Grayscale);
+        assert_eq!(c.palette, PaletteChoice::GreenLcd);
     }
 
     #[test]

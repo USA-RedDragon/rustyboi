@@ -1230,14 +1230,14 @@ impl PaletteChoice {
     }
 
     /// The choice whose [`rgba_shades`](Self::rgba_shades) match `shades`, or
-    /// `Grayscale` if none do (e.g. a custom palette persisted by a frontend).
+    /// `GreenLcd` if none do (e.g. a custom palette persisted by a frontend).
     pub fn from_shades(shades: [[u8; 4]; 4]) -> Self {
         for choice in Self::ALL {
             if choice.rgba_shades() == shades {
                 return choice;
             }
         }
-        PaletteChoice::Grayscale
+        PaletteChoice::GreenLcd
     }
 
     /// RGBA shades for this palette, GB colors 0-3 (lightest→darkest).
@@ -1319,7 +1319,7 @@ mod tests {
             ToggleTouchControls,
             ToggleShowFps,
             SetHardware(HardwareChoice::Dmg),
-            SetPalette(PaletteChoice::Grayscale),
+            SetPalette(PaletteChoice::GreenLcd),
             SetGbcDmgPalette(GbcDmgPalette::Auto),
             SetColorCorrection(crate::CgbColorConversion::Lcd),
             SetRealBootRom(true),

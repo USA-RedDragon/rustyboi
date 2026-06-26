@@ -114,7 +114,7 @@ pub fn build() -> CoreOptions {
                 info: "Colour palette for original Game Boy (monochrome) output. No effect on Game Boy Color titles, which supply their own colours.",
                 category: "video_settings",
                 values: palette_values,
-                default: PaletteChoice::Grayscale.option_id().into(),
+                default: PaletteChoice::GreenLcd.option_id().into(),
             },
             OptionDef {
                 key: KEY_GBC_DMG_PALETTE,
@@ -132,7 +132,7 @@ pub fn build() -> CoreOptions {
                 info: "Colour conversion for Game Boy Color output. 'LCD' approximates the real hardware LCD; 'Linear' is the raw RGB555 values.",
                 category: "video_settings",
                 values: color_values,
-                default: COLOR_CORRECTION[0].0.into(),
+                default: COLOR_CORRECTION[1].0.into(),
             },
         ],
     }
