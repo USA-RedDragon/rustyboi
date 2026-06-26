@@ -1,4 +1,6 @@
 # First-party rustyboi test ROMs (RGBDS; mooneye/png grading). GENERATED
 # from test-roms/build/<cat>/<name>.<model>.<grading>.{gb,gbc} — the filename
 # carries the model + grading. Build with `make -C test-roms`; do not hand-edit.
+dma-hdma_ff55_countdown_ds-cgb|cgb|mooneye|test-roms/build/dma/hdma_ff55_countdown_ds.cgb.mooneye.gbc
+dma-hdma_ff55_countdown_ss-cgb|cgb|mooneye|test-roms/build/dma/hdma_ff55_countdown_ss.cgb.mooneye.gbc
 ppu-window_scx_ignore-dmg|dmg|png|test-roms/build/ppu/window_scx_ignore.dmg.png.gb|test-roms/refs/ppu/window_scx_ignore.dmg.png

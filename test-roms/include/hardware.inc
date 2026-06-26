@@ -18,6 +18,7 @@ DEF rLYC   EQU $FF45
 DEF rBGP   EQU $FF47   ; BG palette (DMG)
 DEF rWY    EQU $FF4A   ; window Y
 DEF rWX    EQU $FF4B   ; window X (+7)
+DEF rKEY1  EQU $FF4D   ; CGB speed switch
 DEF rVBK   EQU $FF4F   ; CGB VRAM bank
 DEF rHDMA1 EQU $FF51   ; HDMA source high
 DEF rHDMA2 EQU $FF52   ; HDMA source low
