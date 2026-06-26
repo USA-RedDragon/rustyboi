@@ -2870,9 +2870,9 @@ impl Mmio {
             // mode. Mark the HBlank serviced so the STAT-mode-3->0 fallback in
             // `step_hdma` (which lags, firing on the register edge) does NOT arm a
             // SECOND block for the same scanline — the Pokémon Crystal Elm's-lab
-            // arm-line double-fire. Set ONLY here (the kick), never on ordinary
-            // edge-fired blocks, so real-silicon HDMA-start timing and the halt
-            // HDMA paths are untouched. Cleared on the next LY change.
+            // arm-line double-fire. `step_hdma`'s own edge arms set it too (the
+            // rise/fallback double-fire is the same lead/lag aliasing). Cleared on
+            // the next LY change.
             self.hdma_block_fired_this_hblank = true;
         }
         true
@@ -3959,6 +3959,14 @@ impl Mmio {
                     // block one line. Suppress this arm.
                 } else {
                     self.hdma_req_pending = true;
+                    // One block per HBlank: the closed-form rise LEADS the STAT
+                    // register, and the renderer hands `hdma_period` off Some->None
+                    // at the mode-0 time crossing, so the STAT-3->0 fallback below
+                    // would re-observe this SAME m0 edge and fire a SECOND block
+                    // (FF55 readback then skips $00 — the Stuart Little middleware
+                    // boot spin). Mark the HBlank serviced, exactly as the FF55
+                    // in-period kick does.
+                    self.hdma_block_fired_this_hblank = true;
                 }
             } else if !arm_allowed && !self.hdma_prev_period && in_period && self.hdma_enabled {
                 // A period rising edge while HALTED. Hardware suppresses (and
@@ -4022,6 +4030,8 @@ impl Mmio {
                     // period-rising-edge branch.
                 } else {
                     self.hdma_req_pending = true;
+                    // Same one-block-per-HBlank marking as the rise path.
+                    self.hdma_block_fired_this_hblank = true;
                 }
             }
             // The consumed-edge guard is single-use: it suppresses exactly the one
