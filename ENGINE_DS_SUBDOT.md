@@ -39,10 +39,30 @@ re-anchors all three at the EXACT Gambatte switch cc (`instr_start + (ds?0:4)`) 
 dot-count, and the offsets above are deleted.
 
 ## Staging (flag-gated RB_SUBDOT; flag-OFF == 131 always, bounded valley)
-- Stage 0 (THIS): scaffolding — `RB_SUBDOT` flag (off=identity), this doc. Zero behavior change.
+- Stage 0 (THIS): scaffolding — `RB_SUBDOT` ENV flag (off=identity; env OK on-branch for testing,
+  INLINE/remove before main like RB_EXACTCC), this doc. Zero behavior change.
+- NOTE: Stages 1-4 are validated by cctracer BYTE-EXACTNESS of intermediate quantities (line_cycle,
+  m2 event cc, DIV-phase, APU cc) — NOT suite count, which only moves at Stage 5. (Earlier coupled
+  one-shots valleyed precisely because they were suite-judged mid-coupling.)
 - Stage 1 (FOUNDATION, hardest): make `line_cycle`/mode-boundary tracking sub-dot exact at DS —
   remove the parity-gate ROUNDING for line_cycle/STAT (keep renderer pixel cadence). Validate
   line_cycle == Gambatte lineCycle at odd+even master_cc via cctracer FF44/FF41 on a DS canary.
+  STATUS: DONE (commit on ds-subdot-engine). Root found: CPU FF41/FF44 reads ALWAYS land on even
+  master_cc at DS (Gambatte resolves all register reads at even cc), so the "odd-dot stale" is the
+  renderer GRID PARITY — `abs_cc`/`line_cycle` advance on the even-render-dot grid which sits 1
+  master_cc below Gambatte's even LINE phase at DS, so the bare `lyTime` runs 1cc low and
+  `lineCycles=456-((lyTime-cc)>>1)` reads +1 high. FIX: `ly_counter_obs()` (flag-gated, DS-only +1,
+  honors `lytime_no_plus1`) used by the CPU READ observers (get_stat_mode_at_cc, the midframe
+  first-line branch, get_lyc_flag_at_cc); the internal STAT-event SCHEDULE keeps the un-corrected
+  `ly_counter` (its fire-cc re-anchor is Stage 2-4), so read CCs do NOT shift. m0Time/cgbp anchors
+  untouched (their `plus1` already encoded the DS +1; not double-counted). PROOF (cctracer, CGB DS):
+  m2int_scx{1..5}_m3stat_ds_{1,2} ALL byte-exact lineCycles+mode+m0Time+lyTime — e.g. scx1 ds_1
+  lineCycles 251->250, lyTime 140567->140568(==198944-boot), mode3; ds_2 253->252, mode0. SS
+  byte-identical flag-on/off (DS-only correction). REGRESSION GUARD: flag-OFF suite = 131 (114 CGB +
+  17 DMG), exact identity. Flag-ON suite = 132 (+1): ONE first-line count-boundary straddle
+  `enable_display/frame0_m3stat_count_ds_2` (a 1-for-1 bracket whose first-line `lu_`/
+  `display_enable_inactive_until` anchor is re-anchored in Stage 2); 0 fixed (expected — offsets
+  still compensate the old phase until Stage 5).
 - Stage 2: STOP switch sub-dot re-anchor — line_cycle + p_now advance EXACTLY across the switch
   (delete bridge dot-counts + pullback + lytime_adjust). Validate m2 event cc == Gambatte
   (speedchange2_lcdoff canaries; the 6cc lag → 0).
