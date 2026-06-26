@@ -109,6 +109,17 @@ const LOGO_SUM_SACHEN_B: u32 = 7484;
 /// presents the logo (sourced from the boot ROM) during its locked-CGB phase so
 /// the boot ROM's logo check passes.
 const LOGO_SUM_ROCKET: u32 = 2756;
+/// Byte sum of the secondary Vast Fame logo at $0184 on the VF001-class
+/// Legend of Heroes board. Not one of hhugboy's known VF001 sums
+/// (4844/6127/4406) — this cart speaks a different, earlier register-file
+/// protocol (see `UnlMapper::Vf001`), so it gets its own detection.
+const LOGO_SUM_VF001_LOH: u32 = 4593;
+/// File offset and first bytes of the Legend of Heroes boot protection stub
+/// (`ld de,$7080; ld a,$9a; ld (de),a; ...`). Required together with the
+/// $0184 logo sum so a licensed cart whose header area happens to sum to
+/// 4593 can never match.
+const VF001_STUB_OFFSET: usize = 0x32FC;
+const VF001_STUB: [u8; 6] = [0x11, 0x80, 0x70, 0x3E, 0x9A, 0x12];
 
 // Lock-phase values shared by the Sachen and Rocket boot state machines
 // (the board powers up locked and unlocks in DMG -> CGB -> unlocked phases).
@@ -157,6 +168,42 @@ pub enum UnlMapper {
     /// whole-32KB banks. The header spoofs MBC3+RAM+BAT ($10), so it is
     /// content-detected (256KB + title "TETRIS SET").
     M161,
+    /// Vast Fame VF001-class protection board (Legend of Heroes). Electrically
+    /// a normal MBC5+RAM+BATTERY plus a 4-port protection register file
+    /// decoded from A10-A11: writes at $7080/$7480/$7880/$7C80, value
+    /// readback through the cart-RAM window at $A000/$A400/$A800/$AC00.
+    /// Port 0 is a command port (last three bytes form the command); writes
+    /// to ports 1-3 select which derived value the next protection read
+    /// returns. Reverse-engineered protocol of the one known cart (all four
+    /// sequences in the ROM; static RE of the required `jp (hl)` targets):
+    ///
+    ///   cmd $9A,$B8,$B9 (boot gate, $32FC): reads of port 2 ($A800) return
+    ///       $C1 after select $B9 and $F8 after select $83; the stub decodes
+    ///       hl = ($0C, $AE) via swap/offset and `jp (hl)` -> $0CAE (init).
+    ///   cmd $7E,$29,$79 (gate at $0D16): side effect — the device drives the
+    ///       MBC5 ROM-bank register to 6 (the following `jp $60d0` needs the
+    ///       bank-6 continuation; bank 1 holds a decoy that decompresses
+    ///       garbage). The $AFFF read that follows is a decoy (discarded).
+    ///   cmd $37,$52,$CD (gate at $0D36): reads of port 2 return $82 after
+    ///       select $BA and $8F after select $A9 -> `jp (hl)` -> $08E9
+    ///       (title/graphics setup).
+    ///   cmd ...,$B9,$81 ($1015): read of port 0 ($A000) supplies the TMA
+    ///       seed (timer IRQs are never taken; value is not branched on).
+    ///
+    /// A trailing command write of $31 closes each sequence. Reads that match
+    /// no armed command fall through to normal cart RAM, so saves work.
+    Vf001(Vf001State),
+}
+
+/// Protection register-file state for `UnlMapper::Vf001`. Carried inside the
+/// enum variant (not as a `Cartridge` field) so the bincode savestate layout
+/// of every other cart stays byte-identical.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Vf001State {
+    /// Last three bytes written to the command port (port 0), oldest first.
+    cmd: [u8; 3],
+    /// Most recent byte written to any select port (ports 1-3).
+    select: u8,
 }
 
 // MBC1 register ranges
@@ -1009,6 +1056,16 @@ impl Cartridge {
             return UnlMapper::ForceMbc1;
         }
 
+        // Vast Fame VF001-class (Legend of Heroes): the secondary VF logo at
+        // $0184 AND the exact boot protection stub bytes. The stub check makes
+        // a licensed cart matching by logo-sum coincidence impossible.
+        if data.len() > VF001_STUB_OFFSET + VF001_STUB.len()
+            && logo_sum(0x184, false) == LOGO_SUM_VF001_LOH
+            && data[VF001_STUB_OFFSET..VF001_STUB_OFFSET + VF001_STUB.len()] == VF001_STUB
+        {
+            return UnlMapper::Vf001(Vf001State::default());
+        }
+
         // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
         // banked-size file) the publisher string in the ROM. The
         // string+type+size gate already implies the blank-header shape in
@@ -1195,6 +1252,13 @@ impl Cartridge {
             cgb_support,
             mbc1_multicart,
         } = identity;
+        // VF001's protection register file is volatile logic; normalize it to
+        // its power-on state so reset() (which carries the possibly-mutated
+        // identity in) always powers up clean, exactly like a fresh load.
+        let unl_mapper = match unl_mapper {
+            UnlMapper::Vf001(_) => UnlMapper::Vf001(Vf001State::default()),
+            other => other,
+        };
         Cartridge {
             rom_data,
             rom_bank_cache: Cell::new(None),
@@ -1403,6 +1467,10 @@ impl Cartridge {
                 return CartridgeType::MBC1 { ram: false, battery: false }
             }
             UnlMapper::M161 => return CartridgeType::M161,
+            // VF001 is electrically a normal MBC5+RAM+BATTERY (header $1B is
+            // truthful); only the $6000-$7FFF write / $A000-$BFFF read
+            // intercepts differ, so fall through to the header type.
+            UnlMapper::Vf001(_) => {}
         }
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
@@ -3548,6 +3616,53 @@ impl Cartridge {
             None
         }
     }
+
+    /// VF001 protection register-file write ($6000-$7FFF). A10-A11 select the
+    /// port: port 0 accumulates the 3-byte command, ports 1-3 latch the select
+    /// byte. The $7E,$29,$79 command drives the MBC5 ROM-bank register to 6 as
+    /// a side effect (the boot flow's `jp $60d0` needs the bank-6
+    /// continuation; see the UnlMapper::Vf001 doc).
+    fn vf001_write(&mut self, addr: u16, value: u8) {
+        let UnlMapper::Vf001(ref mut st) = self.unl_mapper else {
+            return;
+        };
+        if (addr >> 10) & 3 == 0 {
+            st.cmd = [st.cmd[1], st.cmd[2], value];
+            if st.cmd == [0x7E, 0x29, 0x79] {
+                self.mbc5_rom_bank_low = 6;
+            }
+        } else {
+            st.select = value;
+        }
+    }
+
+    /// VF001 protection read front-end for $A000-$BFFF. Returns the derived
+    /// value when the armed (command, select, port) triple matches one of the
+    /// cart's protection sequences; None falls through to normal cart RAM.
+    fn vf001_protection_read(st: Vf001State, addr: u16) -> Option<u8> {
+        let port = (addr >> 10) & 3;
+        match (st.cmd, port) {
+            // Boot gate ($32FC): hl bytes for `jp (hl)` -> $0CAE.
+            ([0x9A, 0xB8, 0xB9], 2) => match st.select {
+                0xB9 => Some(0xC1),
+                0x83 => Some(0xF8),
+                _ => None,
+            },
+            // Second gate ($0D36): hl bytes for `jp (hl)` -> $08E9.
+            ([0x37, 0x52, 0xCD], 2) => match st.select {
+                0xBA => Some(0x82),
+                0xA9 => Some(0x8F),
+                _ => None,
+            },
+            // Bank-switch command ($0D16): the $AFFF readback is a decoy on
+            // the good path (bank-6 $60D0 discards it); serve a constant.
+            ([0x7E, 0x29, 0x79], 3) => Some(0x31),
+            // TMA seed ($1015): never branched on (timer IRQ vector is a bare
+            // reti and IE.2 is never set); TIMA is only polled as an RNG tap.
+            ([_, 0xB9, 0x81], 0) => Some(0x00),
+            _ => None,
+        }
+    }
 }
 
 impl memory::Addressable for Cartridge {
@@ -3567,6 +3682,15 @@ impl memory::Addressable for Cartridge {
                 // Advances the lock counter; presents the boot ROM's logo during
                 // the locked-CGB window so the boot ROM's check passes.
                 if let Some(byte) = self.rocket_locked_logo(addr) {
+                    return byte;
+                }
+            }
+            UnlMapper::Vf001(st)
+                if (EXTERNAL_RAM_START..=EXTERNAL_RAM_END).contains(&addr) =>
+            {
+                // Protection value readback through the cart-RAM window;
+                // unmatched reads fall through to normal MBC5 RAM.
+                if let Some(byte) = Self::vf001_protection_read(st, addr) {
                     return byte;
                 }
             }
@@ -4044,6 +4168,13 @@ impl memory::Addressable for Cartridge {
                     _ => {}
                 }
             }
+            // VF001 protection register file lives in the (MBC5-unused)
+            // $6000-$7FFF range; A10-A11 select the port.
+            BANKING_MODE_START..=BANKING_MODE_END
+                if matches!(self.unl_mapper, UnlMapper::Vf001(_)) =>
+            {
+                self.vf001_write(addr, value);
+            }
             // Banking Mode Select (0x6000-0x7FFF)
             BANKING_MODE_START..=BANKING_MODE_END => {
                 match self.get_cartridge_type() {
@@ -4289,6 +4420,105 @@ mod tests {
         rom
     }
 
+    // Sum == LOGO_SUM_VF001_LOH (4593): 47*0x60 + 0x51. The Vast Fame
+    // secondary logo at $0184 on the Legend of Heroes board.
+    const VF001_LOGO: [u8; 48] = logo_with_sum(0x60, 0x51);
+
+    /// 1MB MBC5+RAM+BATTERY image carrying the VF001 detection signature: the
+    /// secondary VF logo sum at $0184 and the boot protection stub at $32FC.
+    /// This is the exact shape `detect_unl_mapper` keys on for Legend of Heroes.
+    fn make_vf001_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x100000];
+        rom[CARTRIDGE_TYPE_OFFSET] = MBC5_RAM_BATTERY;
+        rom[ROM_SIZE_OFFSET] = 0x05; // 1MB / 64 banks
+        rom[RAM_SIZE_OFFSET] = 0x02; // 8KB
+        rom[0x184..0x1B4].copy_from_slice(&VF001_LOGO);
+        rom[VF001_STUB_OFFSET..VF001_STUB_OFFSET + VF001_STUB.len()]
+            .copy_from_slice(&VF001_STUB);
+        rom
+    }
+
+    #[test]
+    fn vf001_detects_only_with_logo_and_stub() {
+        // Full signature -> VF001.
+        let rom = make_vf001_rom();
+        assert_eq!(
+            Cartridge::detect_unl_mapper(&rom),
+            UnlMapper::Vf001(Vf001State::default())
+        );
+        // Electrically an MBC5+RAM+BATTERY: the header type is truthful.
+        let cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(matches!(
+            cart.get_cartridge_type(),
+            CartridgeType::MBC5 { ram: true, battery: true, .. }
+        ));
+        assert!(cart.has_battery());
+
+        // Correct logo sum but no boot stub -> not VF001 (stays plain MBC5).
+        let mut no_stub = make_vf001_rom();
+        no_stub[VF001_STUB_OFFSET..VF001_STUB_OFFSET + VF001_STUB.len()].fill(0);
+        assert_eq!(Cartridge::detect_unl_mapper(&no_stub), UnlMapper::None);
+
+        // Stub present but the $0184 sum is wrong -> not VF001.
+        let mut wrong_logo = make_vf001_rom();
+        wrong_logo[0x184] = wrong_logo[0x184].wrapping_add(1);
+        assert_eq!(Cartridge::detect_unl_mapper(&wrong_logo), UnlMapper::None);
+    }
+
+    #[test]
+    fn vf001_serves_protection_transform_table() {
+        let mut cart = Cartridge::from_bytes(&make_vf001_rom()).unwrap();
+
+        // Arm each command by writing its three bytes to port 0 ($7080), pick
+        // a select port ($7480/$7880), and read the value back through the RAM
+        // window. Ports: A10-A11 of the write address; the read port likewise.
+        let arm = |cart: &mut Cartridge, bytes: [u8; 3]| {
+            for b in bytes {
+                cart.write(0x7080, b);
+            }
+        };
+
+        // Boot gate: cmd $9A,$B8,$B9 -> $A800 returns $C1 (sel $B9) / $F8 (sel $83).
+        arm(&mut cart, [0x9A, 0xB8, 0xB9]);
+        cart.write(0x7480, 0xB9); // select via port 1
+        assert_eq!(cart.read(0xA800), 0xC1);
+        cart.write(0x7480, 0x83);
+        assert_eq!(cart.read(0xA800), 0xF8);
+
+        // Second gate: cmd $37,$52,$CD -> $A800 returns $82 (sel $BA) / $8F (sel $A9).
+        arm(&mut cart, [0x37, 0x52, 0xCD]);
+        cart.write(0x7880, 0xBA); // select via port 2
+        assert_eq!(cart.read(0xA800), 0x82);
+        cart.write(0x7880, 0xA9);
+        assert_eq!(cart.read(0xA800), 0x8F);
+
+        // Bank-switch command drives the MBC5 ROM-bank register to 6.
+        arm(&mut cart, [0x7E, 0x29, 0x79]);
+        assert_eq!(cart.mbc5_rom_bank_low, 6);
+        assert_eq!(cart.read(0xAFFF), 0x31); // port 3 decoy readback
+
+        // An unarmed read falls through to normal cart RAM (saves still work).
+        cart.write(0x0000, 0x0A); // RAMG on
+        arm(&mut cart, [0x00, 0x00, 0x00]);
+        cart.write(0xA400, 0x5A);
+        assert_eq!(cart.read(0xA400), 0x5A);
+    }
+
+    #[test]
+    fn vf001_protection_state_is_volatile_across_reset() {
+        let mut cart = Cartridge::from_bytes(&make_vf001_rom()).unwrap();
+        cart.write(0x7080, 0x9A);
+        cart.write(0x7080, 0xB8);
+        cart.write(0x7080, 0xB9);
+        cart.write(0x7480, 0xB9);
+        assert_eq!(cart.read(0xA800), 0xC1); // armed
+        cart.reset();
+        // After a power cycle the register file is blank: the same read no
+        // longer matches any command and falls through to RAM (0xFF, RAMG off).
+        assert_eq!(cart.read(0xA800), 0xFF);
+        assert_eq!(cart.unl_mapper, UnlMapper::Vf001(Vf001State::default()));
+    }
+
     #[test]
     fn licensed_shapes_are_not_misdetected() {
         // Plain 32KB ROM-only cart with the Nintendo logo (e.g. Tetris).
@@ -4323,6 +4553,14 @@ mod tests {
             Cartridge::from_bytes(&rom).unwrap().get_cartridge_type(),
             CartridgeType::MBC3 { .. }
         ));
+
+        // A genuine 1MB MBC5+RAM+BATTERY cart with the Nintendo logo must stay
+        // MBC5: VF001 needs BOTH the VF secondary logo sum at $0184 AND the
+        // boot stub, so a licensed MBC5 can never match.
+        let mut rom = make_sized_rom(MBC5_RAM_BATTERY, 0x05, 0x100000);
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
+        rom[0x134..0x139].copy_from_slice(b"MBC5G");
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
     }
 
     #[test]
@@ -5342,6 +5580,7 @@ mod tests {
             make_rom(HUC3, 0x03),
             make_rom(POCKET_CAMERA, 0x03),
             make_trimmed_mbc1m(),
+            make_vf001_rom(),
         ];
         for rom in roms {
             let mut cart = Cartridge::from_bytes(&rom).unwrap();

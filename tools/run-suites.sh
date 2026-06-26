@@ -140,7 +140,7 @@ JOBS="$RB_JOBS"
 # which is the /bin/bash that GitHub's macOS runners ship.
 threshold() {
     case "$1" in
-        rustyboi)           echo "5 20" ;;  # first-party RGBDS ROMs (test-roms/); png ROMs settle in <20 frames
+        rustyboi)           echo "6 20" ;;  # first-party RGBDS ROMs (test-roms/); png ROMs settle in <20 frames
         acid2)              echo "3 -" ;;
         cgb_acid_hell)      echo "1 -" ;;
         mealybug)           echo "51 -" ;;
