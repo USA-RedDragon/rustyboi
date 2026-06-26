@@ -3433,6 +3433,90 @@ impl Cartridge {
         Arc::make_mut(&mut self.rom_data)[offset] = new;
     }
 
+    /// Power-cycle the mapper: return every VOLATILE latch (bank registers,
+    /// enable gates, banking modes, boot locks, in-flight peripheral state) to
+    /// the exact power-on values the constructors initialize. The battery-fed
+    /// domain survives — cartridge RAM, MBC2 built-in RAM, the MBC3 RTC time
+    /// registers, the HuC-3 RTC memory, and their sub-second accumulators —
+    /// just like pressing the console's reset/power button, which cuts mapper
+    /// power but not the cart battery. Transient hardware inputs (accelerometer
+    /// tilt, camera image) and host plumbing (file handles, rom_path,
+    /// host_managed_saves, sram_cs_lazy) are untouched.
+    ///
+    /// Boot locks (Sachen/Rocket) re-arm here; a subsequent `skip_bios` runs
+    /// `skip_boot_handoff` to unlock them when no boot ROM will execute.
+    pub fn reset(&mut self) {
+        self.rom_bank_cache.set(None);
+        // MBC1 registers, also shared by MBC2 (RAMG/ROMB) and MBC3 (RAMG/ROMB).
+        self.ram_enabled = false;
+        self.rom_bank_low = 1;
+        self.ram_bank_or_rom_bank_high = 0;
+        self.banking_mode = 0;
+        // MBC3: latch registers clear; the RTC time itself is battery-backed.
+        self.mbc3_ram_bank = 0;
+        self.mbc3_rtc_latch = 0;
+        self.mbc3_rtc_latched = false;
+        self.rtc_seconds_latched = 0;
+        self.rtc_minutes_latched = 0;
+        self.rtc_hours_latched = 0;
+        self.rtc_days_low_latched = 0;
+        self.rtc_days_high_latched = 0;
+        // MBC5.
+        self.mbc5_rom_bank_low = 1;
+        self.mbc5_rom_bank_high = 0;
+        self.mbc5_ram_bank = 0;
+        self.rumble_motor = false;
+        // MBC7: EEPROM CONTENTS live in ram_data (persist); the serial-link
+        // state machine and accel latch are volatile, and the 93LC56 powers up
+        // write-disabled (EWDS).
+        self.mbc7_ram_enabled2 = false;
+        self.mbc7_rom_bank = 1;
+        self.mbc7_accel_x = 0x8000;
+        self.mbc7_accel_y = 0x8000;
+        self.mbc7_accel_latched = false;
+        self.mbc7_eeprom = Mbc7Eeprom::default();
+        // HuC-3: RTC MCU memory (huc3_rtc_mem) + accumulator persist.
+        self.huc3_mode = 0;
+        self.huc3_rom_bank = 1;
+        self.huc3_ram_bank = 0;
+        self.huc3_rtc_command = 0;
+        self.huc3_rtc_argument = 0;
+        self.huc3_rtc_result = 0;
+        self.huc3_rtc_address = 0;
+        // HuC-1.
+        self.huc1_ir_mode = false;
+        self.huc1_rom_bank = 1;
+        self.huc1_ram_bank = 0;
+        self.huc1_ir_led = false;
+        // Pocket Camera: photos live in ram_data (persist); an in-flight
+        // capture dies with the power.
+        self.cam_rom_bank = 1;
+        self.cam_ram_bank = 0;
+        self.cam_regs_selected = false;
+        self.cam_regs = serde_cam_regs();
+        self.cam_clocks_left = 0;
+        self.cam_running = false;
+        self.cam_pending = Vec::new();
+        // Unlicensed boards.
+        self.wt_bank = 0;
+        self.rocket_rom_bank = 1;
+        self.rocket_outer = 0;
+        self.rocket_lock.set(UNL_LOCKED_DMG);
+        self.rocket_unlock_count.set(0);
+        self.sachen_base = 0;
+        self.sachen_mask = 0;
+        self.sachen_bank = 1;
+        self.sachen_lock.set(UNL_LOCKED_DMG);
+        self.sachen_transition.set(0);
+        self.nt_bank = 1;
+        self.nt_base = 0;
+        self.nt_bank_mask = 0;
+        self.nt_swapped = false;
+        // M161: the one-shot latch is re-armed by reset on real hardware.
+        self.m161_bank = 0;
+        self.m161_mapped = false;
+    }
+
     /// Boot-ROM handoff for skip_bios: the Sachen and Rocket boot locks model
     /// the cart's power-on state as seen BY a real boot ROM; when the boot is
     /// skipped they must start unlocked (the lock state is reset without a
@@ -5267,6 +5351,83 @@ mod tests {
         cart.write(0x6000, 0x01);
         assert_eq!(cart.read(0x1000), 1); // bank0 window = game 1 home bank
         assert_eq!(cart.read(0x5000), 2); // banked window = game 1 bank 1
+    }
+
+    /// `Cartridge::reset` = power cycle: after the MBC1M menu's launch
+    /// sequence re-homed the bank-0 window to a game, reset must return every
+    /// MBC1 latch to its power-on value so the window reads the menu again
+    /// (Mortal Kombat I & II: frontend Reset previously restarted into the
+    /// last-selected game).
+    #[test]
+    fn reset_rehomes_mbc1m_to_menu() {
+        let rom = make_trimmed_mbc1m();
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        cart.write(0x0000, 0x0A); // RAMG on
+        cart.write(0x2000, 0x01); // BANK1
+        cart.write(0x4000, 0x01); // BANK2 -> game 1
+        cart.write(0x6000, 0x01); // MODE 1 re-homes the 0x0000 window
+        assert_eq!(cart.read(0x1000), 1); // game 1 home bank, not the menu
+
+        cart.reset();
+        assert_eq!(cart.read(0x1000), 0); // menu bank back in the 0x0000 window
+        assert!(!cart.ram_enabled);
+        assert_eq!(cart.rom_bank_low, 1);
+        assert_eq!(cart.ram_bank_or_rom_bank_high, 0);
+        assert_eq!(cart.banking_mode, 0);
+    }
+
+    /// MBC3 reset: the latch registers and bank selects clear, but the RTC
+    /// time itself (and cart RAM) is battery-fed and survives.
+    #[test]
+    fn reset_clears_mbc3_latches_but_keeps_rtc_time() {
+        let mut cart = mbc3_rtc_cart();
+        set_mbc3_rtc(&mut cart, (12, 34, 5, 0x67, 0x01));
+        cart.write(0x0000, 0x0A); // RAMG on
+        cart.write(0x2000, 0x15); // ROM bank
+        cart.write(0x4000, 0x08); // map RTC seconds
+        cart.write(0x6000, 0x00); // latch edge
+        cart.write(0x6000, 0x01);
+        assert!(cart.mbc3_rtc_latched);
+        assert_eq!(cart.rtc_seconds_latched, 12);
+        cart.ram_data[0] = 0x5A; // battery RAM must survive
+
+        cart.reset();
+        assert!(!cart.ram_enabled);
+        assert_eq!(cart.rom_bank_low, 1);
+        assert_eq!(cart.mbc3_ram_bank, 0);
+        assert_eq!(cart.mbc3_rtc_latch, 0);
+        assert!(!cart.mbc3_rtc_latched);
+        assert_eq!(
+            (
+                cart.rtc_seconds_latched,
+                cart.rtc_minutes_latched,
+                cart.rtc_hours_latched,
+                cart.rtc_days_low_latched,
+                cart.rtc_days_high_latched,
+            ),
+            (0, 0, 0, 0, 0)
+        );
+        assert_eq!(mbc3_rtc(&cart), (12, 34, 5, 0x67, 0x01)); // clock kept ticking
+        assert_eq!(cart.ram_data[0], 0x5A);
+    }
+
+    /// MBC5 reset: bank registers re-home (ROMB0=1, ROMB1=0, RAMB=0) and the
+    /// rumble motor line drops.
+    #[test]
+    fn reset_rehomes_mbc5_banks_and_stops_rumble() {
+        let mut cart = Cartridge::from_bytes(&make_rom(MBC5_RUMBLE_RAM, 0x03)).unwrap();
+        cart.write(0x0000, 0x0A);
+        cart.write(0x2000, 0x42);
+        cart.write(0x3000, 0x01);
+        cart.write(0x4000, 0x0A); // RAM bank 2 + motor on
+        assert!(cart.rumble_active());
+
+        cart.reset();
+        assert!(!cart.ram_enabled);
+        assert_eq!(cart.mbc5_rom_bank_low, 1);
+        assert_eq!(cart.mbc5_rom_bank_high, 0);
+        assert_eq!(cart.mbc5_ram_bank, 0);
+        assert!(!cart.rumble_active());
     }
 
     #[test]

@@ -1084,8 +1084,19 @@ impl Mmio {
         // performed by the GUI's "Load ROM" path).
         new.bios = self.bios.take();
         new.cartridge = self.cartridge.take();
+        // Reset = power cycle for the cart too: volatile MBC latches (bank
+        // registers, RAMG, banking mode) re-home to power-on values while the
+        // battery-fed domain (RAM, RTC time) survives inside the moved cart.
+        if let Some(cart) = new.cartridge.as_mut() {
+            cart.reset();
+        }
         new.is_agb = self.is_agb;
         new.cgb_de = self.cgb_de;
+        // The console/cart pairing is unchanged across a reset, so the
+        // cart-derived caches must not revert to the no-cart defaults of
+        // `Self::new` (losing cart_has_clock would silently stop the RTC).
+        new.cgb_features_enabled = self.cgb_features_enabled;
+        new.resync_cart_flags();
         *self = new;
     }
 
