@@ -131,6 +131,32 @@ BLOCKER for net-positive flag-on: Stage 5 (rebase controller DS firing offsets -
 SS→DS / mid-mode-3 bridge faithful) — large coupled build, deliberately separate.
 - Stage 4: APU rebase (mechanics proven above) — now lands (DIV-phase exact). Validate whole sound
   suite (length/nr52/duty/env/sweep/wave) byte-exact.
+  STATUS: DONE (commit on ds-subdot-engine). Under RB_SUBDOT the APU clock is the FAITHFUL
+  single-counter model (audio/controller.rs): `advance_to` = Gambatte generateSamples
+  (`cycles=(abs_cc-last_update)>>(1+ds); last_update += cycles<<(1+ds)`, so `last_update` is the
+  FLOORED boundary, parity preserved); `len_cc` collapses to mirror `cc` (no LEN_FOLD_BIAS/
+  LEN_CC_OFF/dual clock); boot anchor `last_update = abs_cc-1` deferred past the abs_cc==0 pre-boot
+  sync; `psg_reset` faithful (no drift bias, `last_update=((lastUpdate_+3)&-4)-!ds` parity
+  re-anchor); divReset/`set_read_len_cc`/`set_write_len_cc` use the single counter with the
+  BEFORE-shift delta. The atomic STOP switch is `psg_speed_change_at(old_ds, stop_cc)` (mmio.rs
+  `perform_speed_switch` under subdot): sync at OLD ds so the divReset fold runs at the old speed
+  (KEY1 is already toggled, so it must pass the captured `old_ds`), then flush
+  `generateSamples(stop_cc + 8*!old_ds)`, then the single↔double divCycles/2 fold.
+  PROOF (cctracer PSG hook on setNr14/setNr24/divReset/speedChange, since REVERTED + cctracer
+  rebuilt pristine): the DUTY single→double canary (speedchange_ch1_duty0_pos6_to_pos7_timing_2)
+  is now BYTE-EXACT through the whole switch — divReset 4024->4096, spdchg pre cc=4096, flushed
+  cc=4100/last_update=8055 (==Gambatte 4100/66423−58368), fold post cc=4097, post-switch trigger
+  cc=37282 (==Gambatte, pos7). BEFORE Stage 4 RB_SUBDOT gave 37283 (+1, pos6) because the old
+  reconstruction did not absorb Lever A's exact STOP cc. The base nr52 canary
+  (speedchange2_ch2_nr52_2b) trigger cc=4164 (==Gambatte), len_cc 4165->4164 (single counter).
+  RESULTS: flag-ON SOUND subset (sound+speedchange+div dirs) net −30 vs the Lever-A flag-on base
+  (82->52): +30 FIXED = all ch1_duty0_pos6_to_pos7 (single→double + _ds + _nop variants),
+  ch2_nr52_*a/*b length-boundary, ch2_late_*_nr52, ch2_reset_length_counter; ZERO sound
+  regressions. The remaining 52 flag-on sound failures are the ly44_m3 mid-mode-3 SS→DS bridge +
+  scx PPU firing-offsets (Stage 5, deferred — pre-existing at the Lever-A base, NOT Stage-4).
+  REGRESSION GUARD: flag-OFF full suite = 131 (114 CGB + 17 DMG), exact identity. The whole
+  rebase is behind RB_SUBDOT; flag-off keeps the legacy `>>1`-anchored dual-clock reconstruction
+  byte-identical.
 - Stage 5: delete `step_subdot` + parity-gate + all firing/DS offsets; flip RB_SUBDOT default on.
   Full-suite re-validate; expect the ~50-70 coupled cluster to fall together.
 
