@@ -3931,6 +3931,25 @@ impl Mmio {
         if self.hdma_last_dma_ly != cur_ly {
             self.hdma_last_dma_ly = cur_ly;
             self.hdma_block_fired_this_hblank = false;
+            // The per-period "block serviced" marker is per-HBlank too. In the
+            // single-speed fallback regime (`period == None`) no closed-form falling
+            // edge ever resets it, so clear it on the LY change alongside the
+            // per-line flag — else it stays stale-true into the next line and a
+            // HALT/STOP landing there would capture `High` for a block still owed.
+            // Gated to the unhalted crank: during a HALT / STOP window the
+            // halt-HDMA state machine owns block_done (High-vs-Requested capture and
+            // its cross-line consume logic), so leave it alone there.
+            if !self.cpu_halted && !self.in_stop_window {
+                self.hdma_block_done_this_period = false;
+            }
+        }
+        // An LCD off/on cycle restarts the PPU: no HBlank periods exist while the
+        // display is disabled, so the per-HBlank "block already fired" bookkeeping
+        // must not survive into the first post-enable HBlank. LY can hold the same
+        // value across the off/on cycle (it reads 0 throughout), so the LY-change
+        // reset above would never clear a flag set at that LY — clear it while off.
+        if !lcd_on {
+            self.hdma_block_fired_this_hblank = false;
         }
         let block_fired_this_hblank = lcd_on && self.hdma_block_fired_this_hblank;
 
@@ -4063,7 +4082,15 @@ impl Mmio {
         // fired explicitly after the pushes so the pushed
         // return address is visible in the HDMA copy of that stack slot.
         if self.hdma_req_pending && self.hdma_enabled {
-            if in_period {
+            // Mark this eligibility period's block serviced. At single speed the
+            // renderer hands `hdma_period` off to None at the mode-0 crossing a hair
+            // BEFORE this fire, so the ordinary per-line block fires with
+            // `in_period == false` through the STAT-3->0 fallback. Keying the mark
+            // off `hdma_block_fired_this_hblank` (set at whichever arm site latched
+            // this line's block) marks the period serviced for a normally-fired
+            // block too, closing the FF55=00-cancel / SS->DS-STOP re-fire gates that
+            // test `!hdma_block_done_this_period` for a block that already ran.
+            if in_period || self.hdma_block_fired_this_hblank {
                 self.hdma_block_done_this_period = true;
             }
             if !self.hdma_mcycle_fire_suppressed {
@@ -5950,5 +5977,83 @@ mod hblank_dma_tests {
         // Back on line 46 in a fresh frame, the flag is clear (it was reset on
         // every LY change), so an edge here would arm normally.
         assert!(!m.hdma_block_fired_this_hblank, "flag must not persist across a frame");
+    }
+
+    // ---- Adversarial audit tests (double-fire campaign review) ----
+    //
+    // At single speed the renderer nulls `scheduled_mode0_dot` at the m0-time
+    // crossing BEFORE the bus reads `hdma_period`, so the ordinary per-line block
+    // fires through the STAT-3->0 fallback with `period == None` =>
+    // `in_period == false` at the fire site. `step_hdma`'s bottom only set
+    // `hdma_block_done_this_period` when `in_period` was true, so a normally
+    // fired block left the period marked UN-serviced. Everything that gates a
+    // re-fire on `!hdma_block_done_this_period` (the FF55=00 cancel race branch,
+    // the SS->DS STOP synchronous fire, `on_stop_window_enter`) could then run a
+    // SECOND block for a period whose block already ran.
+    //
+    // The two SILICON-OBSERVABLE consequences of this internal root cause are
+    // covered end-to-end by first-party ROMs (per "regression checks as suite
+    // ROMs"), which replace their hand-staged Mmio unit tests:
+    //   - FF55=00 cancel after the block fired  -> test-roms .../dma/
+    //       hdma_ff55_cancel_after_block.cgb.mooneye.asm
+    //   - SS->DS STOP after the block fired      -> test-roms .../dma/
+    //       hdma_ff55_ssds_stop_after_block.cgb.mooneye.asm
+    // The two tests below stay host-side: the root-cause flag contract has no
+    // standalone silicon observable, and the LCD-off case is not reachable from a
+    // cold ROM (see its comment).
+
+    /// A block fired via the normal fallback edge must mark this period's block
+    /// as serviced — that is the flag's documented contract ("whether the HDMA
+    /// block owed for the *current* eligibility period has already been
+    /// serviced"). Pure internal state (no standalone silicon observable), so it
+    /// is pinned here rather than by a ROM.
+    #[test]
+    fn edge_fired_block_marks_period_serviced() {
+        let mut m = armed_at_hblank_edge();
+        m.step_hdma(None); // STAT 3->0 fallback fires this line's block
+        assert_eq!(m.hdma_length, 3, "the line's block fired");
+        assert!(
+            m.hdma_block_done_this_period,
+            "an edge-fired block must mark hdma_block_done_this_period; leaving it \
+             clear re-opens every !block_done re-fire gate (FF55 cancel race, \
+             SS->DS STOP fire) for a block that already ran"
+        );
+    }
+
+    /// LCD disable/enable does not reset `hdma_block_fired_this_hblank`; when
+    /// LY holds the same value across the off/on cycle (it reads 0 on hardware
+    /// throughout), the stale flag suppresses the first post-enable HBlank
+    /// block. Fixed by clearing the flag while the LCD is off (no HBlank periods
+    /// exist there, so the per-HBlank marker is meaningless — a display restart
+    /// begins a fresh frame).
+    ///
+    /// Kept host-side, NOT ROMed: this is not reachable from a cold ROM. The only
+    /// LY at which the flag can go stale across an off/on cycle is LY 0 (any other
+    /// LY self-heals — disabling the LCD drops LY to 0, and that LY change clears
+    /// the flag). Firing the first block at LY 0 AND toggling LCD off/on before LY
+    /// advances to 1 is not robustly achievable: the post-block spin-exit + LCDC
+    /// write latency crosses into LY 1, which auto-resets the flag. A cold-ROM
+    /// reproduction (block at LY 0, LCD off/on, then completion timing) produced
+    /// byte-identical VRAM end-states with and without the fix — the divergence is
+    /// a one-block TIMING shift (the suppressed block fires one HBlank later), so
+    /// the end state is identical once the transfer completes; there is no
+    /// end-state bus observable to grade.
+    #[test]
+    fn lcd_off_on_same_ly_stale_flag_suppresses_first_block() {
+        let mut m = armed_at_hblank_edge();
+        // This line's block fired just before the game disables the LCD.
+        m.hdma_block_fired_this_hblank = true;
+        m.io_registers.write(ppu::LCD_CONTROL, 0);
+        m.step_hdma(None); // an LCD-off tracker step; LY unchanged
+        // LCD back on; LY unchanged across the off/on cycle. First HBlank edge:
+        m.io_registers.write(ppu::LCD_CONTROL, ppu::LCDCFlags::DisplayEnable as u8);
+        m.io_registers.write(ppu::LCD_STATUS, 0);
+        m.hdma_prev_stat_mode = 3;
+        m.step_hdma(None);
+        assert_eq!(
+            m.hdma_length, 3,
+            "first post-enable HBlank block suppressed by a stale \
+             hdma_block_fired_this_hblank (no reset on LCD disable/enable)"
+        );
     }
 }
