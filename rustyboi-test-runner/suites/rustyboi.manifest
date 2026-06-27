@@ -5,6 +5,7 @@ cartridge-vf001_protection-cgb|cgb|mooneye|test-roms/build/cartridge/vf001_prote
 dma-hdma_ff55_countdown_ds-cgb|cgb|mooneye|test-roms/build/dma/hdma_ff55_countdown_ds.cgb.mooneye.gbc
 dma-hdma_ff55_countdown_ss-cgb|cgb|mooneye|test-roms/build/dma/hdma_ff55_countdown_ss.cgb.mooneye.gbc
 ppu-lcd_enable_frame_after-cgb|cgb|png|test-roms/build/ppu/lcd_enable_frame_after.cgb.png.gbc|test-roms/refs/ppu/lcd_enable_frame_after.cgb.png
+ppu-lcd_enable_frame_after-dmg|dmg|png|test-roms/build/ppu/lcd_enable_frame_after.dmg.png.gb|test-roms/refs/ppu/lcd_enable_frame_after.dmg.png
 ppu-lcd_enable_frame_blank-dmg|dmg|png|test-roms/build/ppu/lcd_enable_frame_blank.dmg.png.gb|test-roms/refs/ppu/lcd_enable_frame_blank.dmg.png
 ppu-lcd_enable_frame_repeat-cgb|cgb|png|test-roms/build/ppu/lcd_enable_frame_repeat.cgb.png.gbc|test-roms/refs/ppu/lcd_enable_frame_repeat.cgb.png
 ppu-window_scx_ignore-dmg|dmg|png|test-roms/build/ppu/window_scx_ignore.dmg.png.gb|test-roms/refs/ppu/window_scx_ignore.dmg.png
