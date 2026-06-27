@@ -8,12 +8,15 @@
 ; This ROM pins the asymmetry so the CGB repeat behavior is never overreached
 ; onto DMG.
 ;
-; Same script as the CGB ROM: paint the screen solid black (BGP=$FF, tile 0
-; everywhere), display it for 6 frames, LCD off inside VBlank for ~2
-; scanlines, LCD back on, and hand the frame to the grader (`LD B,B`) at
-; LY=72 of the skipped first frame. The DMG panel shows white
+; Same script as the CGB ROM: paint the shared NON-UNIFORM signature pattern
+; (lcd_enable_pattern.inc — 4 tile shapes keyed by (tx+ty)&3, BGP=$E4),
+; display it for 6 frames, LCD off inside VBlank for ~2 scanlines, LCD back
+; on, and hand the frame to the grader (`LD B,B`) at LY=72 of the skipped
+; first frame. The DMG panel shows white
 ; (refs/ppu/lcd_enable_frame_blank.dmg.png, all white — derived from the
-; Pan Docs blank rule), NOT the black image and NOT the frame in flight.
+; Pan Docs blank rule), NOT the pattern and NOT the frame in flight. Because
+; the held image is now a rich pattern, a wrong CGB-style repeat on DMG can
+; no longer masquerade as a pass.
 
 INCLUDE "hardware.inc"
 INCLUDE "rustyboi_test.inc"
@@ -32,13 +35,13 @@ Start:
     xor a
     ldh [rLCDC], a
 
-    ; All four BGP shades = 3 (black). VRAM is zeroed (tile 0, map 0), so the
-    ; whole BG resolves to shade 3.
-    ld a, $FF
+    call PaintSignature
+    ; Identity palette: color i renders shade i.
+    ld a, $E4
     ldh [rBGP], a
 
-    ; LCD on, BG enabled: solid black screen.
-    ld a, LCDCF_ON | LCDCF_BGON
+    ; LCD on, BG enabled ($8000 tiles): the signature pattern displays.
+    ld a, LCDCF_ON | LCDCF_BG8000 | LCDCF_BGON
     ldh [rLCDC], a
 
     ; Display the image for 6 full frames.
@@ -55,7 +58,7 @@ Start:
 .off_spin:
     dec c
     jr nz, .off_spin
-    ld a, LCDCF_ON | LCDCF_BGON
+    ld a, LCDCF_ON | LCDCF_BG8000 | LCDCF_BGON
     ldh [rLCDC], a
 
     ; Mid-way through the skipped first frame: the DMG panel shows blank.
@@ -66,14 +69,4 @@ Start:
 
     test_success
 
-; Wait for a fresh VBlank edge: spin until LY leaves 144, then until it returns.
-WaitVBlankEdge:
-.not144:
-    ldh a, [rLY]
-    cp 144
-    jr z, .not144
-.to144:
-    ldh a, [rLY]
-    cp 144
-    jr nz, .to144
-    ret
+INCLUDE "lcd_enable_pattern.inc"
