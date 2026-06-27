@@ -1944,20 +1944,25 @@ pub struct Ppu {
     frames_since_enable: u8,
     // CGB panel persistence. The skipped first frame after an LCDC.7 enable is
     // not driven to the panel; the panel keeps showing whatever it last showed,
-    // and only decays to the "whiter than white" blank when left undriven for
-    // about a full frame period (SameBoy `frame_repeat_countdown`, measured on
-    // CGB-E: one frame + 3640 8 MHz cycles). The EA CGB middleware (Madden/NHL
-    // 2000, Men in Black) flips its double-buffered tilemap every ~7 frames via
-    // a 2.5-line LCD off/on inside VBlank; blanking those skipped frames (the
-    // pre-fix behavior) strobed the menu white at ~9 Hz where hardware shows a
-    // seamless image. `last_frame_done_cc` is the master cc of the last
-    // completed PPU frame; `panel_holds_image` is true once a frame has
-    // actually been DISPLAYED (not blanked), so a panel that never displayed
-    // anything (power-on, little-things-gb `firstwhite`'s one-frame enables)
-    // still blanks. Both are serde(skip): savestate bytes stay identical, and
-    // a restored state falls back to the blank for at most one frame.
+    // and decays to the "whiter than white" blank when the drive countdown
+    // (SameBoy `frame_repeat_countdown`, measured on CGB-E: 144*456*2 + 3640
+    // 8 MHz cycles, AGB 5982; re-armed at the START of every VBlank line
+    // 144-152, run down in real time even with the LCD off) expires before the
+    // skipped frame's own VBlank entry. The 144-line budget spans that render,
+    // so an off may only last ~1820 4 MHz cc (just under 4 lines, AGB 2991)
+    // measured from the start of the VBlank line it begins on. The EA CGB
+    // middleware (Madden/NHL 2000, Men in Black) flips its double-buffered
+    // tilemap every ~7 frames via a 2.5-line LCD off/on inside VBlank;
+    // blanking those skipped frames (the pre-fix behavior) strobed the menu
+    // white at ~9 Hz where hardware shows a seamless image. `last_drive_cc`
+    // is the master cc of the last driven VBlank line start;
+    // `panel_holds_image` is true once a frame has actually been DISPLAYED
+    // (not blanked), so a panel that never displayed anything (power-on,
+    // little-things-gb `firstwhite`'s one-frame enables) still blanks. Both
+    // are serde(skip): savestate bytes stay identical, and a restored state
+    // falls back to the blank for at most one frame.
     #[serde(skip, default)]
-    last_frame_done_cc: u64,
+    last_drive_cc: u64,
     #[serde(skip, default)]
     panel_holds_image: bool,
     // Latched at the skipped frame's VBlank entry (the repeat decision samples
@@ -2316,7 +2321,7 @@ impl Ppu {
             color_fb_b: boxed_filled(0),
             have_frame: false,
             frames_since_enable: 2,
-            last_frame_done_cc: 0,
+            last_drive_cc: 0,
             panel_holds_image: false,
             repeat_skip_pending: false,
             lcdc: 0,
@@ -9042,24 +9047,23 @@ impl Ppu {
                     if current_ly >= 143 {
                         mmio.write_ly_from_ppu(144);
                         self.state = State::VBlank;
-                        // Panel drive marker: the panel refresh is anchored at
-                        // each VBlank ENTRY while the LCD runs (SameBoy re-arms
-                        // `frame_repeat_countdown` here every frame, including
-                        // repeated/skipped ones). Anchoring at frame COMPLETION
-                        // instead lets the image decay to blank when a game
-                        // turns the LCD off inside VBlank two frames in a row
-                        // (the second off lands before the restarted frame
-                        // completes, e.g. the EA menu double-flip). The skipped
-                        // frame's repeat decision samples the window BEFORE this
-                        // entry re-arms it; a skipped frame denied the repeat
-                        // (panel already decayed) does not re-arm — the panel
-                        // stays undriven until a displayed frame.
+                        // Panel drive marker: SameBoy re-arms
+                        // `frame_repeat_countdown` at the start of EVERY VBlank
+                        // line 144-152 (including the skipped frame's), not once
+                        // per frame; this is the line-144 anchor and the VBlank
+                        // else-branch below advances it through line 152. The
+                        // skipped frame's repeat decision samples the window
+                        // BEFORE this entry re-arms it (SameBoy checks the
+                        // countdown before the re-arm on the same line); a
+                        // skipped frame denied the repeat (panel already
+                        // decayed) does not re-arm — the panel stays undriven
+                        // until a displayed frame.
                         if self.frames_since_enable == 0 {
                             self.repeat_skip_pending =
                                 self.renders_color(mmio) && self.panel_recently_driven(mmio);
                         }
                         if self.frames_since_enable != 0 || self.repeat_skip_pending {
-                            self.last_frame_done_cc = mmio.master_cc();
+                            self.last_drive_cc = mmio.master_cc();
                         }
                         Self::set_lcd_status_mode(mmio, 1);
                         // The m1 event already flagged VBlank (line_cycle 454, ~3cc
@@ -9150,8 +9154,9 @@ impl Ppu {
 
                         // CGB panel repeat (see `panel_holds_image`): the first
                         // frame completed after an LCDC.7 enable is never driven
-                        // to the panel. When the panel was driven within the last
-                        // ~frame period (a brief LCD off), it REPEATS the
+                        // to the panel. When the drive countdown had not expired
+                        // at this frame's VBlank entry (a brief LCD off — under
+                        // ~4 lines from its VBlank-line start), it REPEATS the
                         // previously displayed image for that skipped frame:
                         // discard the rendered pixels, keep the front buffer, and
                         // treat the panel as resynced (the next frame displays).
@@ -9201,6 +9206,17 @@ impl Ppu {
                     } else if (144..153).contains(&current_ly) {
                         let next_ly = current_ly.saturating_add(1);
                         mmio.write_ly_from_ppu(next_ly);
+                        // Panel drive re-arm at the start of every VBlank line
+                        // through 152 (SameBoy re-arms `frame_repeat_countdown`
+                        // per vblank line, not per frame): an LCD off STARTING
+                        // mid-VBlank measures its decay from the most recent
+                        // line start, so late-VBlank offs (the EA flip at
+                        // LY 145+) still repeat. Line 153 does not re-arm.
+                        if next_ly <= 152
+                            && (self.frames_since_enable != 0 || self.repeat_skip_pending)
+                        {
+                            self.last_drive_cc = mmio.master_cc();
+                        }
                     }
                     return;
                 }
@@ -9304,18 +9320,25 @@ impl Ppu {
     }
 
     /// Whether the CGB panel was driven with a displayed frame recently enough
-    /// to still hold that image. SameBoy's `frame_repeat_countdown` is one
-    /// frame period plus a 3640 8 MHz-cycle margin (measured on CGB-E); our
-    /// drive anchor is the VBlank entry but presentation runs at frame
-    /// completion (one full VBlank later), so the window carries an extra
-    /// 10-line allowance. Anything ≥ ~2 frames undriven has decayed to blank
-    /// (little-things-gb `firstwhite`'s alternating one-frame enables stay
-    /// blank: its drive gaps are two full frames). Master cc runs at 4 MHz
-    /// single speed / 8 MHz double speed.
+    /// to still hold that image. SameBoy's `frame_repeat_countdown` (measured
+    /// on CGB-E) is 144*456*2 + 3640 cycles at 8 MHz — AGB: 5982 instead of
+    /// 3640 — re-armed at the start of every VBlank line 144-152 and run down
+    /// in real time regardless of LCD state. `last_drive_cc` is that per-line
+    /// anchor, and the repeat verdict is taken at the skipped frame's VBlank
+    /// entry, so in 4 MHz-dot terms the window is 144*456 + 1820 (AGB 2991)
+    /// from the anchored line start: the 144-line budget spans the skipped
+    /// frame's own render and the ~4-line margin is all an LCD off may
+    /// consume. A continuously running LCD re-anchors at latest on line 152,
+    /// 145 lines before the next VBlank entry, so it never decays; anything
+    /// off longer than the margin has decayed to blank (little-things-gb
+    /// `firstwhite`'s alternating one-frame enables stay blank via
+    /// `panel_holds_image`). Master cc runs at 4 MHz single speed / 8 MHz
+    /// double speed, hence the shift.
     fn panel_recently_driven(&self, mmio: &mmio::Mmio) -> bool {
-        let window = (70224 + 10 * 456 * 2 + 1820) << (mmio.is_double_speed_mode() as u32);
+        let margin = if mmio.is_agb() { 5982 / 2 } else { 3640 / 2 };
+        let window = (144 * 456 + margin) << (mmio.is_double_speed_mode() as u32);
         self.panel_holds_image
-            && mmio.master_cc().wrapping_sub(self.last_frame_done_cc) <= window
+            && mmio.master_cc().wrapping_sub(self.last_drive_cc) <= window
     }
 
     pub fn get_frame(&mut self, mmio: &mmio::Mmio) -> crate::gb::Frame {
@@ -9332,11 +9355,12 @@ impl Ppu {
             mmio.sgb().is_none() && (self.disabled || self.frames_since_enable < 2);
         if self.renders_color(mmio) {
             if blank_panel {
-                // CGB panel persistence: a panel driven within the last ~frame
-                // period (LCD just turned off, or re-enabled with the skipped
+                // CGB panel persistence: a panel whose drive countdown has not
+                // expired (LCD just turned off, or re-enabled with the skipped
                 // first frame still in flight) keeps showing the previous
-                // image; the blank only sets in once the panel has been
-                // undriven for about a full frame (see `panel_holds_image`).
+                // image; the blank sets in 144*456 + 1820 cc (AGB 2991) after
+                // the last driven VBlank-line start (see
+                // `panel_recently_driven`).
                 if self.panel_recently_driven(mmio) {
                     return crate::gb::Frame::Color(self.color_fb_b.clone());
                 }
