@@ -33,6 +33,7 @@ jobs:
     timeout-minutes: 120
     env:
       ROMS_URL: ${{ secrets.ROMS_URL }}
+      ROMS_PASSWORD: ${{ secrets.ROMS_PASSWORD }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Check for ROMS_URL secret
@@ -59,7 +60,7 @@ jobs:
         shell: bash
         run: |
           curl -fsSL "$ROMS_URL" -o /tmp/roms.zip
-          unzip -q /tmp/roms.zip -d "$RUNNER_TEMP/romlib"
+          unzip -P "$ROMS_PASSWORD" -q /tmp/roms.zip -d "$RUNNER_TEMP/romlib"
           # Tolerate an extra top-level directory inside the zip: find the
           # parent that actually holds GB/ and GBC/.
           LIB="$(dirname "$(find "$RUNNER_TEMP/romlib" -maxdepth 3 -type d -name GB | head -1)")"

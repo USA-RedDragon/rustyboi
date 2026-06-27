@@ -62,10 +62,11 @@ jobs:
         shell: bash
         env:
           ROMS_URL: ${{ secrets.ROMS_URL }}
+          ROMS_PASSWORD: ${{ secrets.ROMS_PASSWORD }}
         run: |
           # ROMS_URL is a zip preserving ./GB ./GBC (same as the library sweep).
           curl -fsSL "$ROMS_URL" -o /tmp/roms.zip
-          unzip -q /tmp/roms.zip -d "$RUNNER_TEMP/romlib"
+          unzip -P "$ROMS_PASSWORD" -q /tmp/roms.zip -d "$RUNNER_TEMP/romlib"
           LIB="$(dirname "$(find "$RUNNER_TEMP/romlib" -maxdepth 3 -type d -name GB | head -1)")"
           [ -d "$LIB/GB" ] && [ -d "$LIB/GBC" ] || { echo "GB/ + GBC/ not in zip" >&2; exit 1; }
           echo "lib=$LIB" >> "$GITHUB_OUTPUT"
