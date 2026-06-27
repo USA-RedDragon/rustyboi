@@ -5201,6 +5201,16 @@ impl Ppu {
         !self.disabled && self.state == State::PixelTransfer
     }
 
+    /// True when the renderer is in the OAM-search (mode 2) phase of an active
+    /// line — the pre-pixel-transfer window where the per-dot stepper's `line_cycle`
+    /// and PPU-clock phase are already byte-exact vs Gambatte (no mode-3-length
+    /// coupling has accumulated yet). Used by the Stage-2 STOP DS->SS re-anchor.
+    pub fn is_in_oam_search(&self) -> bool {
+        !self.disabled
+            && (self.lcdc & (LCDCFlags::DisplayEnable as u8)) != 0
+            && self.state == State::OAMSearch
+    }
+
     /// True when the renderer is on an ACTIVE rendering line (LCD on, LY 0..143):
     /// OAMSearch / PixelTransfer / HBlank of a visible line. An SS->DS speed switch
     /// here makes the per-dot renderer overshoot the post-window mode-3->mode-0
