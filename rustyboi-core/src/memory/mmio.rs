@@ -1443,7 +1443,15 @@ impl Mmio {
         let ds = self.is_double_speed_mode();
         let per_byte_cc: i64 = if ds { 4 } else { 2 };
         let interleave = self.dma_active;
-        if interleave {
+        // OAM-DMA catch-up. rustyboi resolves the FF55 write at the end of the
+        // bus M-cycle; whether the current OAM-DMA byte for that M-cycle has
+        // already been placed depends on the sub-cycle phase. When
+        // `dma_subcycle == 0` an OAM-DMA M-cycle just completed, so rustyboi's
+        // `dma_pos` lags Gambatte's `oamDmaPos_` by one and must catch up;
+        // when a byte is mid-flight (`dma_subcycle != 0`) the gated loop below
+        // already advances `dma_pos` on the same boundary Gambatte does, so an
+        // extra catch-up over-advances by one (suppresses the final conflict).
+        if interleave && self.dma_subcycle == 0 {
             self.dma_advance_one_mcycle();
         }
         let mut cc: i64 = 0;
