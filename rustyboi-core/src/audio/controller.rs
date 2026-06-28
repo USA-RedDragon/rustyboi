@@ -86,6 +86,10 @@ pub struct Audio {
     // fold (which happens on the write path, without `ds`) uses the right speed.
     #[serde(default)]
     cached_ds: bool,
+    // CGB vs DMG flag for the post-BIOS SPU `cycleCounter_` boot anchor (the
+    // high-bit constant differs: 0x1E00 CGB / 0x2400 DMG, initstate.cpp).
+    #[serde(default)]
+    boot_cgb: bool,
 }
 
 impl Audio {
@@ -108,6 +112,7 @@ impl Audio {
             last_div_resets: 0,
             clock_anchored: false,
             cached_ds: false,
+            boot_cgb: false,
         }
     }
 
@@ -134,9 +139,15 @@ impl Audio {
                 self.push_cc();
                 return;
             }
-            // Anchor `cc` so `abs_cc >> 1` reproduces the post-boot duty phase
-            // base the channels were tuned against (the old `ic >> 1`).
-            self.cc = ((abs_cc >> 1) as u32) & (Self::CC_MAX - 1);
+            // Faithful post-BIOS SPU `cycleCounter_` (Gambatte initstate.cpp
+            // setPostBiosState): `(cgb ? 0x1E00 : 0x2400) | (cpuCc>>1 & 0x1FF)`.
+            // The high bits are a fixed per-mode constant; only the low 9 bits
+            // come from `cpuCc>>1`. rustyboi's `abs_cc` boot origin is the DIV
+            // boot counter, whose low 9 bits of `>>1` match Gambatte's
+            // `cpuCc>>1 & 0x1FF` (verified CGB 0x150 / DMG 0x1E6), so we take the
+            // mode constant for the high bits and `abs_cc>>1` for the low 9.
+            let high = if self.boot_cgb { 0x1E00u32 } else { 0x2400u32 };
+            self.cc = (high | ((abs_cc >> 1) as u32 & 0x1FF)) & (Self::CC_MAX - 1);
             self.len_cc = self.cc;
             // Faithful boot anchor (Gambatte loadState `lastUpdate_ = cpuCc - 1`):
             // the floored boundary sits one cc below the current cpu cc so the
@@ -437,6 +448,12 @@ impl Audio {
     /// and leaves channel 1 mid-tone (the startup "ding"). `sync_cc` must run
     /// first so the channels' duty event counter has the correct cc base.
     /// `cgb` selects the CGB vs DMG duty phase (Gambatte `setPostBiosState`).
+    /// Record the CGB/DMG flag before the boot `sync_cc` anchors the SPU clock,
+    /// so the post-BIOS `cycleCounter_` high-bit constant is correct.
+    pub fn set_boot_cgb(&mut self, cgb: bool) {
+        self.boot_cgb = cgb;
+    }
+
     pub fn set_post_bios_state(&mut self, cgb: bool) {
         self.audio_enabled = true;
         self.nr50 = 0x77;

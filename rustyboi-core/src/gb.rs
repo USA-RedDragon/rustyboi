@@ -213,6 +213,9 @@ impl GB {
             Hardware::DMG0 => 0x1800,
         };
         self.mmio.set_timer_internal_counter(boot_counter);
+        // Record the CGB flag before any audio write anchors the SPU clock, so
+        // the boot SPU `cycleCounter_` high-bit constant (0x1E00/0x2400) is right.
+        self.mmio.set_audio_boot_cgb(self.hardware == Hardware::CGB);
 
         // Post-boot APU state. The boot ROM enables the APU and leaves channel 1
         // mid-tone; channel registers are gated behind APU-enable, so the writes
