@@ -170,7 +170,34 @@ sub-dot cc. With that, the compensating offsets are deleted and the bracket pair
 OFF = identity), this doc. Zero behavior change; flag-OFF == 86. (Same pattern as the
 historical `RB_SUBDOT`/`RB_FAITHFUL`; inline/remove before merge to main.)
 
-### Stage 1 (FOUNDATION, smallest validatable — RECOMMENDED FIRST) — true min-event `run_to`.
+### Stage 1 (FOUNDATION) — true min-event `run_to`. DONE (701672d → committed; flag-on == 86, byte-identical).
+**Status (this session):** `Bus::run_to` is now a min-event-jump driver behind
+`RB_PERACCESS` (`run_to_min_event`, `cpu/bus.rs`). At each loop iteration it computes
+the next scheduled peripheral event cc and advances `master_cc` directly to
+`min(target_cc, next_event_cc)`, firing exactly that span. The advance MECHANISM is the
+event loop; the per-dot resolution (`resolve_one_dot`, parity-gate KEPT) is still the
+inner primitive while any per-dot machine is live (PPU renderer / OAM-DMA / HDMA /
+powered APU), because those are intrinsically per-dot stateful (mode edges, duty
+counters, period-edge detect, sub-cycle catch-up) and only become jumpable when the
+later facet stages give them an advance-to-cc closed form. The genuine jump win this
+stage lands is over **fully-idle spans** (`Mmio::idle_bulk_skippable`: LCD off, no
+DMA/HDMA, APU off, serial idle): there only the timer + serial advance and both are
+already span-collapsible, so the whole idle span is jumped in one `Mmio::bulk_advance_idle`
+to the next timer-overflow fire cc (`Timer::step_to`, `next_overflow_fire_cc` — uses the
+SAME `fold` `update_irq_delivery` applies, so the overflow fires at the identical cc).
+**Validated:** full suite RB_PERACCESS=1 == 86, byte-identical failure set to flag-OFF
+(diffn net 0 / broke 0 / fixed 0); flag-OFF stays 86; debug build (overflow checks) clean
+on the idle-heavy enable_display + div subsets. **Event sources enumerated:** the only
+event firable INSIDE `run_to` during a `skippable` span is the timer overflow IRQ (PPU
+off ⇒ no STAT/m0/lyc/m2 edges; DMA/HDMA/serial/APU all gated out; STOP/HALT wakeups are
+CPU-boundary, outside `run_to`). Every other event path keeps the proven per-dot crank,
+so no event source can be missed or mis-ordered. **Perf:** the idle skip is a real but
+modest win at Stage 1 (guard is deliberately conservative — only fully-idle LCD-off
+spans); active rendering still cranks per-dot, so wall-clock is ≈parity on
+render-dominated subsets. The structural foundation (events firable off a min-cc target)
+is what Stages 2–4 build on.
+
+----- original Stage 1 plan (for reference) -----
 Convert `run_to` from a per-dot crank into a true min-event-jump driver: maintain a
 single ordered "next scheduled peripheral event cc" (PPU mode/m0 edge, STAT-IRQ,
 timer overflow, serial, DMA, HDMA m0 re-flag) and advance `master_cc` directly to

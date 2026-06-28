@@ -213,6 +213,21 @@ impl Timer {
         }
     }
 
+    /// per-access STAGE 1: the EXACT cc at which the next scheduled overflow's IF
+    /// bit will be raised inside `update_irq_delivery` / `step_to`, accounting for
+    /// the same `fold` that path applies (`IF_OFF` on the non-halt early-ISR grid,
+    /// else `CC_OFF`). The min-event idle fast path lands precisely on this cc so
+    /// the overflow fires at the identical cc the per-dot crank would have, never
+    /// skipping past it. `None` when the timer is disabled / no overflow scheduled.
+    pub fn next_overflow_fire_cc(&self, cpu_halted: bool) -> Option<u64> {
+        if self.tac & TAC_ENABLE == 0 || self.next_irq_event_time == DISABLED_TIME {
+            return None;
+        }
+        let early = !cpu_halted && self.isr_on_early_grid;
+        let fold = if early { IF_OFF as u64 } else { CC_OFF as u64 };
+        Some(self.next_irq_event_time.wrapping_add(fold))
+    }
+
     /// EARLY (EI-loop) anchor cc of the next scheduled overflow: `schedCc + IF_OFF`.
     /// The non-halt fast dispatch fires the overflow once the boundary reaches this.
     pub fn next_overflow_ei_cc(&self) -> Option<u64> {
@@ -635,6 +650,36 @@ impl Timer {
         // at DS) falling edge in (last_apu_cc, abs_cc]. The divider counter is
         // (cc - div_anchor); bit N falls each time that counter crosses a
         // multiple of 2^(N+1). Count = floor(c_now/P) - floor(c_prev/P).
+        let edges = self.apu_fs_edges(self.last_apu_cc, self.abs_cc);
+        for _ in 0..edges {
+            mmio.clock_apu_frame_sequencer();
+        }
+        self.last_apu_cc = self.abs_cc;
+    }
+
+    /// per-access STAGE 1: bulk-advance the timer directly to `target_abs_cc`
+    /// (>= current abs_cc), producing the byte-identical net effect of calling
+    /// `step` once per intervening dot. Every part of `step` is span-based:
+    /// `update_irq_delivery` is a `while` loop keyed on the absolute cc (it drains
+    /// all overflows due <= abs_cc, so a single call at the final cc fires the same
+    /// set as the per-dot calls), and `apu_fs_edges(last_apu_cc, abs_cc)` is a
+    /// closed-form count over the half-open span (one call over the whole span
+    /// equals the sum of per-dot calls). The only per-dot bookkeeping is the
+    /// `abs_cc += 1`, which is collapsed to a single assignment here. This is the
+    /// timer half of the min-event-jump idle fast path (`Bus::run_to`); it is only
+    /// invoked when the world is provably idle except for the timer (LCD off, no
+    /// DMA/HDMA, audio off, serial idle), so no other peripheral's per-dot state is
+    /// skipped.
+    pub fn step_to(&mut self, target_abs_cc: u64, mmio: &mut mmio::Mmio) {
+        if target_abs_cc <= self.abs_cc {
+            return;
+        }
+        self.abs_cc = target_abs_cc;
+        if self.tac & TAC_ENABLE != 0 {
+            self.update_irq_delivery(self.abs_cc, mmio.cpu_is_halted());
+        }
+        self.flush_pending_irq(mmio);
+        self.last_double_speed = mmio.is_double_speed_mode();
         let edges = self.apu_fs_edges(self.last_apu_cc, self.abs_cc);
         for _ in 0..edges {
             mmio.clock_apu_frame_sequencer();
