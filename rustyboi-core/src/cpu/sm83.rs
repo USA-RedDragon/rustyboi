@@ -106,6 +106,8 @@ impl SM83 {
                 // post co-land; RB_EI_FAST=0 forces it OFF.
                 let limit_adj: i64 = 4;
                 let in_period_unhalt = mmio.hdma_in_period_for_unhalt_adj(limit_adj);
+                let was_requested =
+                    matches!(mmio.halt_hdma_state(), memory::mmio::HaltHdmaState::Requested);
                 match mmio.halt_hdma_state() {
                     memory::mmio::HaltHdmaState::Requested => {
                         mmio.set_hdma_req();
@@ -171,6 +173,45 @@ impl SM83 {
                     mmio.set_hdma_mcycle_fire_suppressed(true);
                 }
                 mmio.set_halt_hdma_state(memory::mmio::HaltHdmaState::Low);
+                // Unhalt-cc / LY phase fix. A Requested-held HDMA block (flagged at
+                // halt entry) runs its `dma()` event DURING the halt period in
+                // Gambatte (intevent_dma fires before intevent_unhalt resumes the CPU;
+                // cctracer ground truth: the dma() lands at ~m0Time, mid-halt, the
+                // unhalt NOP resumes AFTER it). rustyboi otherwise deferred the whole
+                // transfer until AFTER the HALT-bug double-execute resume instruction,
+                // so the resume instruction — and every post-unhalt FF44/PC read on the
+                // wakeup sled — landed one HDMA-block (36 SS / 68 DS cc) too early in
+                // cc relative to the LY/PC Gambatte's stream reads, a +1 LY-dot straddle
+                // on the boundary cases (hdma_late_m3halt_m2unhalt_ly_scx1_3/scx2_3).
+                // Fire the held block NOW and tick its transfer stall inline (the dma()
+                // cc happens during the halt window) so the prefetched resume byte
+                // executes at the post-transfer cc == Gambatte's intevent_unhalt.
+                //
+                // Gated to:
+                //  - `hdma_length() == 0` (the block COMPLETES the transfer): a
+                //    multi-block transfer (e.g. hdma_transition_*_late_unhalt, ff55=81)
+                //    relies on the existing per-dot firing path for its second-block
+                //    period re-arm and FF55 readback; firing the first block here
+                //    desyncs that sequence.
+                //  - `!ime` (the IME-off double-execute resume): when IME is on the
+                //    unhalt instead SERVICES an interrupt (the prefetch is rewound and
+                //    PC pushed); that path accounts the wakeup cc through
+                //    `service_interrupt`, where this inline shift double-counts. The EI
+                //    PC/LY readers (hdma_late_ei_m3halt_m2unhalt_pc_scx1_2) carry the
+                //    same +4 phase but need the service-path cc fix, not this one.
+                if crate::cpu::bus::faithful_enabled()
+                    && was_requested
+                    && !self.registers.ime
+                    && mmio.hdma_length() == 0
+                    && mmio.hdma_req_pending()
+                    && !mmio.hdma_mcycle_fire_suppressed()
+                {
+                    mmio.fire_pending_hdma_mcycle();
+                    let stall = mmio.take_dma_stall();
+                    if stall > 0 {
+                        mmio.tick_remaining(stall);
+                    }
+                }
             } else {
                 // CPU is halted and no interrupt is pending, consume 1 cycle and return
                 return 1;
