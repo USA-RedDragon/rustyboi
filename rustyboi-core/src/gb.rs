@@ -240,6 +240,15 @@ impl GB {
         // hold the hardware power-on pattern the fexx_* dumpers read back.
         self.mmio.set_post_bios_ioamhram(cgb);
 
+        // Post-boot CGB palette RAM. The boot ROM leaves BG palette RAM
+        // all-white and OBJ palette RAM holding the hardware power-on dump
+        // (Gambatte initstate cgbObjpDump). A program that renders a sprite
+        // without writing FF6A/FF6B observes these values; without this the
+        // OBJ palette is all-zero (black). Matches scx_during_m3_spx2 etc.
+        if cgb {
+            self.mmio.set_post_bios_cgb_palettes();
+        }
+
         // Post-boot VRAM contents. The boot ROM decompresses the Nintendo logo
         // from the cart header into the BG tile area (0x8010-0x819F) and writes
         // the logo tilemap (tile indices) at 0x9904-0x9910 / 0x9924-0x992F.
