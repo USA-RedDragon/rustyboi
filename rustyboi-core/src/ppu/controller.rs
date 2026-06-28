@@ -1814,7 +1814,7 @@ impl Ppu {
     /// (its fire-cc anchors are re-anchored in Stages 2-4, not here).
     fn ly_counter_obs(&self, mmio: &mmio::Mmio) -> stat_irq::LyCounter {
         let mut lc = self.ly_counter(mmio);
-        if crate::cpu::bus::subdot_enabled() && lc.ds && !self.lytime_no_plus1 {
+        if lc.ds && !self.lytime_no_plus1 {
             lc.time += 1;
         }
         lc
