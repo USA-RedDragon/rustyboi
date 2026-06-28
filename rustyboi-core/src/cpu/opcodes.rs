@@ -482,6 +482,24 @@ pub fn halt(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     // Capture the HDMA halt-state for the unhalt path. Mirrors Gambatte's
     // `Memory::halt`.
     mmio.on_cpu_halt();
+    // Gambatte `case 0x76`: `prefetched_ = mem_.halt(cc())` returns `hdmaReq`
+    // (a flagged HDMA block held at halt entry => our `HaltHdmaState::Requested`).
+    // When true, the byte peeked at pc on the HALT M-cycle stays PREFETCHED with
+    // pc un-advanced, exactly as in the IME-off bug branch above: on unhalt that
+    // stale opcode (read NOW, while VRAM is still accessible) executes once with
+    // NO re-fetch, then the following instruction re-reads pc (e.g. during the
+    // unhalt's mode-3 the VRAM byte now reads 0xFF). This is the m3unhalt
+    // double-execute (`hdma_transition_7fffhalt_inc_m3unhalt`: the post-HALT
+    // `inc a` runs once -> a=01 -> out01).
+    if crate::cpu::bus::faithful_enabled()
+        && matches!(
+            mmio.halt_hdma_state(),
+            crate::memory::mmio::HaltHdmaState::Requested
+        )
+    {
+        cpu.opcode = mmio.peek(cpu.registers.pc);
+        cpu.prefetched = true;
+    }
     4
 }
 
