@@ -114,10 +114,8 @@ impl SM83 {
                         // the next-line m0 edge that re-arms the following block is
                         // absorbed iff it lands inside this block's transfer span
                         // (Gambatte m0 `memevent_hdma` consumed by the in-flight
-                        // `dma()`), deferring it one line. RB_PERACCESS-gated inside.
-                        if crate::cpu::bus::peraccess_enabled() {
-                            mmio.arm_hdma_peraccess_consume();
-                        }
+                        // `dma()`), deferring it one line.
+                        mmio.arm_hdma_peraccess_consume();
                     }
                     memory::mmio::HaltHdmaState::Low
                         if in_period_unhalt && mmio.hdma_is_enabled() =>

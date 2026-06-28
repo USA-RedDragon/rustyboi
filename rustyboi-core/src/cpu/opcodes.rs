@@ -139,15 +139,14 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
                 }
             }
         }
-        // STAGE 4 (FACET 1, RB_PERACCESS) KEYSTONE: capture whether this STOP is a
-        // DS->SS switch taken DURING mode 3 (pixel transfer), BEFORE the bridge
-        // advances dots (which can leave mode 3). The faithful Gambatte
-        // `PPU::speedChange` `now -= 1` half-dot re-anchor per such switch is
-        // injected below as a STAT-phase-ONLY carry (decoupled from the render
-        // latch) via `stat_phase_carry`. Stop-count invariant: every 2nd such
-        // switch carries one extra STAT dot. Flag-OFF: this whole block is skipped.
-        let dsss_mode3_switch =
-            crate::cpu::bus::peraccess_enabled() && !to_double && mmio.ppu.is_in_pixel_transfer();
+        // STAGE 4 (FACET 1) KEYSTONE: capture whether this STOP is a DS->SS switch
+        // taken DURING mode 3 (pixel transfer), BEFORE the bridge advances dots
+        // (which can leave mode 3). The faithful Gambatte `PPU::speedChange`
+        // `now -= 1` half-dot re-anchor per such switch is injected below as a
+        // STAT-phase-ONLY carry (decoupled from the render latch) via
+        // `stat_phase_carry`. Stop-count invariant: every 2nd such switch carries
+        // one extra STAT dot.
+        let dsss_mode3_switch = !to_double && mmio.ppu.is_in_pixel_transfer();
         mmio.ppu.stop_bridge_advance(mmio.mmio, bridge);
         if !to_double {
             // DS->SS: the faithful `now -= old_ds` (== 1) re-anchor is folded into
