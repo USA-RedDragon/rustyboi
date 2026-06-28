@@ -50,9 +50,8 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // 6cc-late m2). For SS->DS (`old_ds==0`): `cc_ = cc + 8`, so the renderer must
         // advance the remaining old-speed (SS) dots the returned 8 DS cycles did not
         // cover; keep the tuned bridge there for now (validated in a later sub-step).
-        let subdot = crate::cpu::bus::subdot_enabled();
         // Stage 2 faithful DS->SS re-anchor taken (no bridge, no lytime compensation).
-        let faithful_dsss = subdot && !to_double && mmio.ppu.is_in_oam_search();
+        let faithful_dsss = !to_double && mmio.ppu.is_in_oam_search();
         let bridge = if to_double {
             // SS->DS during an active rendering line (OAMSearch / PixelTransfer /
             // HBlank of LY 0..143): the per-dot renderer overshoots the post-window
@@ -64,10 +63,9 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             if mmio.ppu.is_in_pixel_transfer() || mmio.ppu.is_on_rendering_line() {
                 mmio.ppu.arm_sc_mode3_pullback();
                 // ds-subdot STAGE 5b: with Lever A holding abs_cc byte-exact, the
-                // SS->DS mid-mode-3 bridge over-advances the renderer line phase by 2
-                // dots (the old `6` encoded the now-eliminated 4-short abs_cc). Rebase
-                // -2 so the post-switch renderer lineCycle/m0Time land exact.
-                if subdot { 4 } else { 6 }
+                // SS->DS mid-mode-3 bridge advances the renderer line phase by 4 dots
+                // so the post-switch renderer lineCycle/m0Time land exact.
+                4
             } else {
                 8
             }
@@ -101,10 +99,12 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             // (hdma_late_m3speedchange_*_ds): those couple to the HDMA block-fire/timer
             // phase across the switch (the suppress-edge path above), where the -2
             // over-shifts them — keep the tuned bridge there (later HDMA coupling work).
-            if subdot && !mmio.mmio.hdma_is_enabled() {
+            if !mmio.mmio.hdma_is_enabled() {
                 1
+            } else if pullback {
+                5
             } else {
-                if pullback { 5 } else { 3 }
+                3
             }
         };
         // Gambatte `Memory::stop` (memory.cpp:453) captures the HDMA halt state at
@@ -179,25 +179,19 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // return below is part of that window, so the remaining no-fetch stall
         // is 0x20000 + 4 - 8.
         //
-        // LEVER A (RB_SUBDOT): the K=4 DS-entry per-access skew. Gambatte's
-        // `case 0x10` is `cc() = mem_.stop(cc() - 4)` after `PC_READ_OPERAND`
-        // (+4): the unhalt window is `0x20000 + 4` measured from the PRE-operand
-        // cc (= the cc just after the opcode fetch). rustyboi's opcode fetch has
-        // already ticked master_cc by 4 (one M-cycle) before `stop()` runs, and
-        // `tick_remaining` charges the returned cycles against that already-ticked
-        // M-cycle — so the returned 8 only nets +4 of master_cc advance, folding
-        // the opcode-fetch tick INTO the STOP's 8 and losing 4cc across the whole
-        // window. (Measured: abs_cc↔Gambatte offset 58368 at STOP-start, drifts to
-        // 58372 by the resume.) The faithful window from the post-opcode cc is
+        // LEVER A: the K=4 DS-entry per-access skew. Gambatte's `case 0x10` is
+        // `cc() = mem_.stop(cc() - 4)` after `PC_READ_OPERAND` (+4): the unhalt
+        // window is `0x20000 + 4` measured from the PRE-operand cc (= the cc just
+        // after the opcode fetch). rustyboi's opcode fetch has already ticked
+        // master_cc by 4 (one M-cycle) before `stop()` runs, and `tick_remaining`
+        // charges the returned cycles against that already-ticked M-cycle — so the
+        // returned 8 only nets +4 of master_cc advance, folding the opcode-fetch
+        // tick INTO the STOP's 8. The faithful window from the post-opcode cc is
         // exactly `0x20000 + 4`; with the returned 8 contributing (8 - 4)=4 net,
-        // the no-fetch stall must be `0x20000` (not `0x20000 + 4 - 8`). This makes
-        // the resume land at post_opcode_cc + 0x20000 + 4, exactly Gambatte's
-        // `(cc()-4) + 0x20000 + 4`, holding the offset constant at 58368.
-        cpu.stop_unhalt_cycles = if crate::cpu::bus::subdot_enabled() {
-            0x20000
-        } else {
-            0x20000 + 4 - 8
-        };
+        // the no-fetch stall must be `0x20000`. This makes the resume land at
+        // post_opcode_cc + 0x20000 + 4, exactly Gambatte's `(cc()-4) + 0x20000 + 4`,
+        // holding the offset constant at 58368.
+        cpu.stop_unhalt_cycles = 0x20000;
         return 8;
     }
 
