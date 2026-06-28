@@ -2144,6 +2144,21 @@ impl Ppu {
             if self.mstat_irq.do_m1_event(stat) {
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
             }
+            // PERACCESS facet-2 (line-end VBlank boundary): Gambatte's VBlank
+            // interrupt (IF bit 0) and the mode-1 STAT IRQ both fire from the SAME
+            // lyCounter LY=144 event. rustyboi normally flags VBlank from the
+            // render machine (HBlank `ticks==455`), which the FACET-1 STAT-phase
+            // carry does NOT advance — so under a live carry the carried STAT/m1
+            // boundary leads the un-carried render VBlank by `skew` dots, and a
+            // CPU IF read landing in that gap sees the STAT bit but misses VBlank
+            // (the `offset2_*_m1irq_2` `_2`-half bracket: E2 vs the correct E3).
+            // Fire VBlank here at the carried line-clock m1 boundary so the two
+            // bits land coincident as Gambatte. Idempotent with the render
+            // machine's later fire (same frame). Scoped to a live carry so
+            // flag-OFF / non-carried frames keep the render-machine VBlank exactly.
+            if self.render_carry_skew_cc != 0 && self.internal_ly_val >= 143 {
+                mmio.request_interrupt(registers::InterruptFlag::VBlank);
+            }
             self.sched_m1irq = self.sched_m1irq
                 .wrapping_add((stat_irq::LCD_CYCLES_PER_FRAME) << ds as u32);
         }
@@ -4797,6 +4812,19 @@ impl Ppu {
                 // window, NOT an lcdoffset2 stop-bridge anomaly — the `vram_started`
                 // begin (now closed-form from the enable-anchored cgbp anchor) is the
                 // correct gate there (ly0_late_vramr/vramw _2/_3 boundary).
+                // PERACCESS facet-2 (line-end boundary): under the FACET-1 STOP
+                // carry the lyTime-anchored `vram_started` begin is now exact (the
+                // de-skewed access cc compares against the un-carried cgbp begin),
+                // so a write that has crossed the begin window IS in the next
+                // line's mode-3 and must block — the coarse `ticks>80` escape
+                // (which forced accessible for the whole carried mode-2 tail) flips
+                // the `_2` bracket half wrong. With the exact begin, resolve from
+                // `started` alone: `_1` (before begin) accessible, `_2` (past
+                // begin) blocked. Scoped to a live carry so flag-OFF / non-carried
+                // lcdoffset lines keep the proven coarse escape.
+                if self.render_carry_skew_cc != 0 {
+                    return Some(started);
+                }
                 let lcdoffset_extended =
                     !double_speed && self.ticks > 80 && !self.first_line_after_enable;
                 return Some(if lcdoffset_extended { false } else { started });
