@@ -380,7 +380,6 @@ impl GB {
         }
         output.start()?;
         self.audio_output = Some(output);
-        println!("Audio output enabled");
         Ok(())
     }
 
