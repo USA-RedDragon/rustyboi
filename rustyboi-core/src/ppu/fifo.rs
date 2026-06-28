@@ -62,7 +62,7 @@ impl Fifo {
     // already-queued first tile is stale and must be replaced with the tile at
     // the break column without disturbing the later tiles (which keep their
     // live-SCX columns). `n` must not exceed the current size.
-    // RB_SUBCC: overwrite the `n` newest (most recently pushed) entries in place.
+    // Overwrite the `n` newest (most recently pushed) entries in place.
     // Used by the sub-cc SCX column lever to re-key the just-fetched tile to the
     // NEW scx column when a mid-mode-3 write's apply cc precedes the tile's plot.
     pub fn overwrite_newest(&mut self, pixels: &[BgPixel]) {
