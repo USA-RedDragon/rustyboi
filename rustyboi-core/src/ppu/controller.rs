@@ -863,6 +863,26 @@ pub struct Ppu {
     scx_f1_apply_cc: u64, // abs_cc at which scx_pending becomes visible to f1
     #[serde(default)]
     scx_f1_new: u8,
+    // RB_SUBCC sub-cc column lever. A mid-mode-3 SCX write applies to the BG
+    // column fetcher at `write_cc + 2*cgb` (Gambatte scxChange `update(cc+2*cgb);
+    // setScx`), evaluated against the cc at which a fetched tile's pixels are
+    // PLOTTED (the fetcher leads the display by the FIFO depth). A tile whose
+    // first plotted pixel is at/before the apply cc keeps the OLD scx; after it
+    // uses NEW. These persist for the whole line (unlike scx_apply_cc which
+    // resets on apply) so the fetcher can choose per-tile. `subcc_scx_apply_cc`
+    // == disabled when no write is pending this line.
+    #[serde(default = "wy2_disabled")]
+    subcc_scx_apply_cc: u64,
+    #[serde(default)]
+    subcc_scx_old: u8,
+    #[serde(default)]
+    subcc_scx_new: u8,
+    // Armed by a mid-mode-3 SCX write while a BG tile is in flight (column
+    // already committed under the OLD scx, not yet pushed). The next PushToFifo
+    // re-keys that single tile to the NEW scx column iff it plots after the
+    // apply cc, then disarms. Exactly one tile per write can straddle.
+    #[serde(default)]
+    subcc_rekey_armed: bool,
     // First line after enable: the SCX value the fine-scroll discard prefix
     // actually samples (Gambatte M3Start::f1 reads SCX once at the M3-start
     // dot). A mid-discard SCX write (write_cc + 2*cgb visible) only counts if
@@ -1016,6 +1036,10 @@ impl Ppu {
             scx_prev_f1: 0,
             scx_f1_apply_cc: wy2_disabled(),
             scx_f1_new: 0,
+            subcc_scx_apply_cc: wy2_disabled(),
+            subcc_scx_old: 0,
+            subcc_scx_new: 0,
+            subcc_rekey_armed: false,
             first_line_scx_override: None,
             line_cycle: 0,
             internal_ly_val: 0,
@@ -2380,6 +2404,43 @@ impl Ppu {
     // reproducing the fetcher's BG addressing (LCDC tile-map/tile-data select,
     // CGB attribute bank + x/y flip). Used by the M3Start fine-scroll re-fetch
     // when a mid-discard SCX write moves the first displayed tile's column.
+    // RB_SUBCC: compute the 8 BG pixels for tile-map column `tile_col` on pixel
+    // row `bg_y`, reproducing the fetcher's addressing. Shared by the fine-scroll
+    // first-tile rewrite and the sub-cc SCX column re-key.
+    fn bg_pixels_at_col(&self, mmio: &mmio::Mmio, tile_col: u16, bg_y: u16) -> [crate::ppu::fifo::BgPixel; 8] {
+        let lcdc = self.lcdc;
+        let cgb = mmio.is_cgb_features_enabled();
+        let map_base: u16 = if (lcdc & (LCDCFlags::BGTileMapDisplaySelect as u8)) != 0 {
+            0x9C00
+        } else {
+            0x9800
+        };
+        let map_y = (bg_y / 8) & 0x1F;
+        let map_addr = map_base + (map_y * 32 + (tile_col & 0x1F));
+        let tile_num = mmio.read_vram_bank(0, map_addr);
+        let tile_attrs = if cgb { mmio.read_vram_bank(1, map_addr) } else { 0 };
+        let y_flip = cgb && (tile_attrs & 0x40) != 0;
+        let x_flip = cgb && (tile_attrs & 0x20) != 0;
+        let tile_line = (bg_y % 8) as u8;
+        let eff_line = if y_flip { 7 - tile_line } else { tile_line };
+        let data_addr: u16 = if (lcdc & (LCDCFlags::BGWindowTileDataSelect as u8)) != 0 {
+            0x8000 + (tile_num as u16) * 16 + (eff_line as u16) * 2
+        } else {
+            let signed = tile_num as i8;
+            ((0x9000u16 as i16).wrapping_add((signed as i16) * 16 + (eff_line as i16) * 2)) as u16
+        };
+        let bank = if cgb && (tile_attrs & 0x08) != 0 { 1 } else { 0 };
+        let low = mmio.read_vram_bank(bank, data_addr);
+        let high = mmio.read_vram_bank(bank, data_addr + 1);
+        let mut pixels = [crate::ppu::fifo::BgPixel::default(); 8];
+        for (i, px) in pixels.iter_mut().enumerate() {
+            let bit = if x_flip { i as u8 } else { 7 - i as u8 };
+            let idx = (((high >> bit) & 1) << 1) | ((low >> bit) & 1);
+            *px = crate::ppu::fifo::BgPixel { color: idx, attrs: tile_attrs };
+        }
+        pixels
+    }
+
     fn rewrite_first_fifo_tile(&mut self, mmio: &mmio::Mmio, tile_col: u16, bg_y: u16) {
         let lcdc = self.lcdc;
         let cgb = mmio.is_cgb_features_enabled();
@@ -2795,6 +2856,25 @@ impl Ppu {
         // lands one f1 iteration too early at DS (scx_0367c0/scx_0761c0 _ds).
         let ds = mmio.is_double_speed_mode() as u32;
         self.scx_f1_apply_cc = cc + if cgb { 2u64 << ds } else { 0 };
+
+        // RB_SUBCC sub-cc column lever: record the apply boundary on the PLOT
+        // clock. The BG fetcher chooses old/new per tile by comparing the tile's
+        // plot cc to this. Persists for the line (does not reset on apply).
+        if crate::cpu::bus::subcc_enabled() {
+            self.subcc_scx_old = self.scx_delayed;
+            self.subcc_scx_new = value;
+            self.subcc_scx_apply_cc = cc + if cgb { 2u64 << ds } else { 0 };
+            // Arm the single-tile re-key only when a BG tile is mid-fetch (its
+            // column was already committed under the OLD scx and it has not yet
+            // pushed). If the fetcher is at TileNumber, the next fetch will read
+            // the (about-to-be-NEW) scx itself; no in-flight straddle exists.
+            self.subcc_rekey_armed = !self.disabled
+                && self.state == State::PixelTransfer
+                && self.x > 0
+                && !self.fetcher.is_fetching_window()
+                && !self.fetcher.fetch_state_is_tile_number()
+                && self.fetcher.subcc_last_column_inputs().2 == self.subcc_scx_old;
+        }
     }
 
     /// SCX value visible to the f1 fine-scroll discard at PPU `cc`, honoring the
@@ -3472,6 +3552,9 @@ impl Ppu {
                     
                     self.x = 0;
                     self.fetcher.reset();
+                    // RB_SUBCC: clear any pending sub-cc scx column lever from the
+                    // previous line; a new write this line re-arms it.
+                    self.subcc_scx_apply_cc = wy2_disabled();
                     self.next_sprite_fetch_index = 0;
                     self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
                     self.m3_last_sprite_commit_tick = 0;
@@ -4148,6 +4231,55 @@ impl Ppu {
                 };
                 if cadence_even
                     && let Some(event) = self.fetcher.step(mmio, self.win_y_pos, fetcher_lcdc_state, self.x, pending_discard, self.scy_delayed, self.scx_delayed) {
+                        // RB_SUBCC sub-cc column lever: a BG tile whose column was
+                        // committed at TileNumber under the OLD scx, but whose
+                        // pixels are PLOTTED after the write's apply cc
+                        // (write_cc + 2*cgb), must render under the NEW scx
+                        // (Gambatte scxChange `update(cc+2*cgb); setScx` samples
+                        // the column at plot time, not fetch time). Only the single
+                        // in-flight straddle tile (armed at the write) is corrected,
+                        // and only at the exact plot-vs-apply phase (gap == 4); see
+                        // the gap comment below.
+                        if crate::cpu::bus::subcc_enabled()
+                            && self.subcc_rekey_armed
+                            && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
+                        {
+                            // The single in-flight tile (column committed under the
+                            // OLD scx before the write) just pushed. Its first
+                            // displayed pixel sits at display column == the xpos the
+                            // fetcher used (xpos == display_x + fifo - pending); its
+                            // plot cc is abs_cc + (xpos - current display x). If that
+                            // plot cc is strictly after the apply cc the tile must
+                            // render under the NEW scx (Gambatte scxChange samples
+                            // the column at plot, not fetch); re-key the 8 newest
+                            // FIFO entries with the NEW-scx column using the
+                            // fetcher's exact xpos/cgb_adj. Disarm afterwards.
+                            self.subcc_rekey_armed = false;
+                            let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
+                            let plot_cc = self.abs_cc as i64 + (xpos as i64 - self.x as i64);
+                            // The straddle tile flips to NEW only at the exact
+                            // sub-dot resonance where its first plotted pixel lands
+                            // 4 master-cc after the apply cc (= write_cc + 2*cgb).
+                            // At gap 2 (tile fully before the apply boundary) and
+                            // gap 6 (the next tile, already committed under the new
+                            // scx_delayed by the fetcher itself) the tile must keep
+                            // its fetched scx; only gap 4 is the in-flight straddle
+                            // whose column was committed OLD but plots NEW. Measured
+                            // broke-0 across the full suite; gap 3/5 are destructive
+                            // (they fall on aligned tile boundaries that must stay
+                            // OLD), so this is an exact phase, not a threshold.
+                            let gap = plot_cc - self.subcc_scx_apply_cc as i64;
+                            if gap == 4 {
+                                let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                                let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                                if new_col != old_col {
+                                    let bg_y = (self.scy_delayed as u16
+                                        + mmio.read(LY) as u16) & 0xFF;
+                                    let pixels = self.bg_pixels_at_col(mmio, new_col, bg_y);
+                                    self.fetcher.pixel_fifo.overwrite_newest(&pixels);
+                                }
+                            }
+                        }
                         self.record_fetch_debug_event(event, mmio);
                 }
 

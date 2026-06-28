@@ -70,6 +70,12 @@ pub struct Fetcher {
     // `window_line` counter instead.
     #[serde(default)]
     latched_y: u8,
+    #[serde(default)]
+    subcc_xpos: u16,
+    #[serde(default)]
+    subcc_cgb_adj: u8,
+    #[serde(default)]
+    subcc_used_scx: u8,
 }
 
 impl Fetcher {
@@ -84,6 +90,9 @@ impl Fetcher {
             fetching_window: false,
             window_x_start: 0,
             latched_y: 0,
+            subcc_xpos: 0,
+            subcc_cgb_adj: 0,
+            subcc_used_scx: 0,
         }
     }
 
@@ -222,6 +231,12 @@ impl Fetcher {
                     let xpos = (display_x as u16 + self.pixel_fifo.size() as u16)
                         .saturating_sub(pending_discard as u16);
                     let bg_tile_x = (scx as u16 + xpos + cgb_adj) / 8 % 32;
+                    // RB_SUBCC: remember the exact (xpos, scx, cgb_adj) used to
+                    // derive this tile's column so the controller can recompute
+                    // the column under a different (NEW) scx with identical inputs.
+                    self.subcc_xpos = xpos;
+                    self.subcc_cgb_adj = cgb_adj as u8;
+                    self.subcc_used_scx = scx;
                     let bg_tile_y = (y as u16 / 8) % 32;
                     let map_offset = bg_tile_y * 32 + bg_tile_x;
                     (bg_tile_map_base, map_offset)
@@ -374,6 +389,20 @@ impl Fetcher {
     
     pub fn is_fetching_window(&self) -> bool {
         self.fetching_window
+    }
+
+    // RB_SUBCC: true when the next step() will run the TileNumber substep (the
+    // one that derives the BG tile-map column). The sub-cc column lever only
+    // reroutes SCX on that substep.
+    pub fn fetch_state_is_tile_number(&self) -> bool {
+        matches!(self.state, State::TileNumber)
+    }
+
+    // RB_SUBCC: the (xpos, cgb_adj, scx) the last BG TileNumber used to derive
+    // its column. The controller recomputes the column under a NEW scx with the
+    // same xpos/cgb_adj to re-key the just-pushed tile.
+    pub fn subcc_last_column_inputs(&self) -> (u16, u8, u8) {
+        (self.subcc_xpos, self.subcc_cgb_adj, self.subcc_used_scx)
     }
 }
 
