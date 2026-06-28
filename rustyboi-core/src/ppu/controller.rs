@@ -2186,7 +2186,17 @@ impl Ppu {
             self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
         }
         // Order matches Gambatte's nextMemEvent priority for ties.
-        if self.sched_m1irq <= cc {
+        // The m1 (VBlank) event schedules at an even `abs_cc` (frame_cycle
+        // 144*456-2). At double speed two corrections stack: (1) the even-cc event
+        // sits one half-dot past the odd-cc CPU access that should already observe
+        // it (the +ds the LYC=LY/mode-0 events also carry); (2) a read-at-cc IF
+        // snapshot is taken pre-tick, BEFORE this M-cycle's dispatch runs, so an
+        // event whose cc EQUALS the read cc fires one dispatch too late to be seen
+        // — Gambatte processes events with eventTime <= cc before the read returns.
+        // Anticipate by `2*ds` so the m1/VBlank bits land at-or-before the read cc
+        // Gambatte sets them (lycint143_m1irq `_2`/`_3`, m1irq_disable `_2`). DS-only
+        // (ds=0 leaves the single-speed phase byte-identical).
+        if self.sched_m1irq <= cc + 2 * ds as u64 {
             let stat = self.stat_reg_committed;
             if self.mstat_irq.do_m1_event(stat) {
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
