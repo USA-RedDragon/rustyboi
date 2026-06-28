@@ -152,6 +152,7 @@ impl<'a> Bus<'a> {
     }
 
     pub fn master_cc_dbg(&self) -> u64 { self.mmio.master_cc() }
+    pub fn oam_dma_active(&self) -> bool { self.mmio.dma_active() }
 
     /// Non-ticking instruction-stream peek. Mirrors Gambatte's HALT-bug prefetch
     /// `mem_.read(pc, cc())` (cpu.cpp case 0x76): the byte after HALT is read at
@@ -531,6 +532,69 @@ impl<'a> Bus<'a> {
             return ly;
         }
         self.mmio.read(addr)
+    }
+
+    /// Interrupt-service low-byte push that ACKs the LCD IF bit partway through
+    /// its M-cycle, faithful to Gambatte's `Interrupter::interrupt` ordering
+    /// (`memory.write(low push); ackIrq(n, cc)` where `ackIrq` runs
+    /// `lcd_.update(cc+2)` then `intreq_.ackIrq(bit)`). A STAT/m2 IRQ whose fire
+    /// cc lands at or before the ack sub-point (cc+2 into this M-cycle) is
+    /// overwritten by the ack-clear; one firing later in the M-cycle (the trailing
+    /// dots) re-flags IF and survives for the ISR to read (the `late_retrigger`
+    /// re-fire). `ack_lcd` is false for non-LCD vectors (clears nothing here).
+    /// The stack write itself targets RAM (SP), so it resolves directly via mmio
+    /// without PPU gating — matching Gambatte's `write<false,false>`.
+    pub fn interrupt_low_push_lcd_ack(&mut self, sp: u16, value: u8, ack_lcd: bool) {
+        // Stack byte stores at the access start (the push data is fixed for the
+        // whole M-cycle); RAM is never PPU-gated.
+        self.mmio.write(sp, value);
+        // Advance to the ack sub-point and ACK. Gambatte's `ackIrq` runs
+        // `lcd_.update(cc + 2)` (set any IRQ firing by cc+2) THEN clears the bit:
+        // a STAT/m2 IRQ whose fire cc is <= cc+2 is wiped, one firing in the
+        // trailing dots survives (the `late_retrigger` re-fire). The ack point is
+        // Gambatte's `cc + 2`; clear once that dot's events have been flagged.
+        let ds = self.mmio.is_double_speed_mode();
+        let start = self.mmio.master_cc();
+        let target = start.wrapping_add(4);
+        // Ack-point trigger differs by speed because the PPU STAT events fire at a
+        // finer granularity than the dot clock at double speed (step_subdot at the
+        // odd master cc). Single speed: the dot clock IS the master clock, so the
+        // ack point is `abs_cc > start_abs + 2` (the dot that has flagged events up
+        // through cc+2). Double speed: events fire on sub-dots, so trigger on the
+        // raw `master_cc >= start + 2` (Gambatte's exact `cc + 2`) which correctly
+        // orders against the sub-dot fires. (cctracer-measured against the
+        // `_1`/`_2` refire/no-refire pairs at both speeds; the cross-speed mix
+        // beats either single rule on the full suite.)
+        let ack_abs_threshold = self.ppu.abs_cc().wrapping_add(2);
+        let ack_master_threshold = start.wrapping_add(2);
+        let mut acked = !ack_lcd;
+        while self.mmio.master_cc() < target {
+            self.resolve_one_dot();
+            self.dot = self.dot.wrapping_add(1);
+            self.ticked += 1;
+            let crossed = if ds {
+                self.mmio.master_cc() >= ack_master_threshold
+            } else {
+                self.ppu.abs_cc() > ack_abs_threshold
+            };
+            if !acked && crossed {
+                let cur = self.mmio.read(crate::cpu::registers::INTERRUPT_FLAG);
+                self.mmio.write(
+                    crate::cpu::registers::INTERRUPT_FLAG,
+                    cur & !(crate::cpu::registers::InterruptFlag::Lcd as u8),
+                );
+                acked = true;
+            }
+        }
+        if !acked {
+            // Threshold not crossed within this M-cycle (the trailing dots were
+            // all <= threshold): ACK now so the bit is still cleared.
+            let cur = self.mmio.read(crate::cpu::registers::INTERRUPT_FLAG);
+            self.mmio.write(
+                crate::cpu::registers::INTERRUPT_FLAG,
+                cur & !(crate::cpu::registers::InterruptFlag::Lcd as u8),
+            );
+        }
     }
 
     pub fn write(&mut self, addr: u16, value: u8) {

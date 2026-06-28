@@ -348,8 +348,21 @@ impl SM83 {
         // if nothing is pending the interrupt is cancelled (vector 0x0000).
         let flag = self.get_pending_interrupt(bus);
 
+        // The low-byte push ACKs the IF bit partway through its M-cycle (Gambatte
+        // `ackIrq(n, cc)` after the push: `lcd_.update(cc+2)` then clear). For the
+        // LCD vector this is the `late_retrigger` lever — a STAT/m2 IRQ firing at
+        // the ack sub-point (cc+2) is wiped, one firing in the trailing dots
+        // survives. Done inside the push M-cycle so the clear lands at the exact
+        // sub-dot. Skip it while OAM DMA is active (the split-push bypasses the
+        // DMA-conflict redirection in `bus.write`); those tests don't retrigger.
+        // Non-LCD vectors clear at end-of-service (below).
+        let split_ack = flag == Some(registers::InterruptFlag::Lcd) && !bus.oam_dma_active();
         self.registers.sp = self.registers.sp.wrapping_sub(1);
-        bus.write(self.registers.sp, (self.registers.pc & 0x00FF) as u8);
+        if split_ack {
+            bus.interrupt_low_push_lcd_ack(self.registers.sp, (self.registers.pc & 0x00FF) as u8, true);
+        } else {
+            bus.write(self.registers.sp, (self.registers.pc & 0x00FF) as u8);
+        }
 
         // Pushes complete: re-enable the M-cycle fire and fire any HDMA block
         // latched during the service, so it reads memory as of the post-push cc.
@@ -372,7 +385,13 @@ impl SM83 {
             None => 0x0000,
         };
         if let Some(flag) = flag {
-            self.set_interrupt_flag(flag, false, bus);
+            // The LCD vector was already ACKed mid-push (split_ack, faithful
+            // Gambatte ackIrq ordering); clearing it again here would wipe a
+            // same-window STAT re-fire. When the split was skipped (OAM DMA
+            // active) clear it here as before. Other sources clear here.
+            if !(split_ack && flag == registers::InterruptFlag::Lcd) {
+                self.set_interrupt_flag(flag, false, bus);
+            }
             // STAGE 2: once the timer IRQ is dispatched, drop its recorded fire
             // cc so the next period's fire is tracked fresh.
             if flag == registers::InterruptFlag::Timer && crate::cpu::bus::faithful_enabled() {

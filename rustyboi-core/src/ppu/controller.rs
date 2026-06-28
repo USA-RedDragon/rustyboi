@@ -1699,6 +1699,11 @@ impl Ppu {
         self.lcdc = value;
     }
 
+    /// Current PPU master clock (`abs_cc`). Used by the interrupt-service LCD
+    /// ack to position the IF clear at the exact dot (see
+    /// `Bus::interrupt_low_push_lcd_ack`).
+    pub fn abs_cc(&self) -> u64 { self.abs_cc }
+
     pub fn set_fetch_debug_events_enabled(&mut self, enabled: bool) {
         self.fetch_debug_events_enabled = enabled;
         if !enabled {
