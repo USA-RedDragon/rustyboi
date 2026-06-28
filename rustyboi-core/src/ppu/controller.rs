@@ -784,6 +784,14 @@ pub struct Ppu {
     // switch or at the next LCD enable / LY reset.
     #[serde(default)]
     sc_mode3_pullback_pending: bool,
+    // STAGE 4 (FACET 1, RB_PERACCESS): running count of DS->SS-during-mode3 STOP
+    // switches. The faithful Gambatte `PPU::speedChange` re-anchor is `now -= 1`
+    // (HALF an SS dot) per DS->SS switch; the whole-dot bridge rounds each to 0,
+    // accumulating a missing HALF dot per switch. `floor(count/2)` extra STAT-only
+    // carry dots (via `stat_phase_carry`) reproduce that accumulated half-dot
+    // shift on the STAT/line phase WITHOUT moving the render latch.
+    #[serde(default)]
+    dsss_mode3_stop_count: u32,
     // Sub-PPU-dot parity (0/1) of the currently-resolving CPU register write at
     // double speed. Set by the bus just before the FF4x write hooks run.
     #[serde(skip, default)]
@@ -966,6 +974,7 @@ impl Ppu {
             m0_time_master: None,
             lytime_no_plus1: false,
             sc_mode3_pullback_pending: false,
+            dsss_mode3_stop_count: 0,
             cgbp_block_start_cc: None,
             mode0_reported_this_line: false,
             line_rendered_this_line: false,
@@ -1953,6 +1962,93 @@ impl Ppu {
     /// the counter one master-cc high). See ENGINE_LAZY_PPU.md bug #2.
     pub fn set_dsss_lytime_adjust(&mut self) {
         self.lytime_no_plus1 = true;
+    }
+
+    /// STAGE 4 (FACET 2 KEYSTONE) — advance the STAT/LINE-PHASE clock by ONE dot
+    /// WITHOUT moving the pixel-fetcher render latch (`self.ticks`/`self.x`/the
+    /// FIFO/the render state machine). This is the decoupling primitive: rustyboi
+    /// normally welds `line_cycle` (the STAT/LY/ttnl phase clock) to the renderer
+    /// inside `step` (both `line_cycle += 1` and `self.ticks += 1` per dot). A
+    /// faithful sub-dot STOP re-anchor (FACET 1) needs to shift the STAT phase by
+    /// an ODD dot WITHOUT moving the mode-3 render latch (FACET-2 coupling). This
+    /// mirrors `step`'s STAT-phase region (the lines between `dispatch_stat_events`
+    /// and `update_window_y_latch`) exactly, but skips the `match self.state`
+    /// render machine and the `self.ticks += 1`. It is the line-phase HALF of the
+    /// lockstep that `step` runs as a whole.
+    ///
+    /// Caller contract (mirrors `stop_bridge_advance`'s per-dot prelude): pull
+    /// `p_now` back by one dot BEFORE calling so the derived `abs_cc` still
+    /// advances `1<<ds` for this STAT dot (the carry is a non-master-cc-advancing
+    /// bridge dot, same as the rendered bridge dots). `step_scheduled_stat_events`
+    /// / `step_lcdc_events` are run by the caller around it, identically to the
+    /// rendered-bridge per-dot loop, so the only difference from a bridge `step`
+    /// is the absence of render-latch motion.
+    fn step_stat_phase_only(&mut self, mmio: &mut mmio::Mmio) {
+        if self.disabled || self.lcdc & (LCDCFlags::DisplayEnable as u8) == 0 {
+            return;
+        }
+        // --- STAT-phase region of `step` (no render match, no `ticks += 1`) ---
+        self.dispatch_stat_events(mmio);
+        self.abs_cc = mmio.master_cc().wrapping_sub(self.p_now);
+        self.line_cycle += 1;
+        if self.line_cycle >= stat_irq::LCD_CYCLES_PER_LINE {
+            self.line_cycle = 0;
+            self.internal_ly_val += 1;
+            if self.internal_ly_val as u32 >= stat_irq::LCD_LINES_PER_FRAME {
+                self.internal_ly_val = 0;
+            }
+        }
+        self.process_oam_reader_events(mmio);
+        if mmio.take_ly_write_pending() {
+            self.reset_lcd_pipeline();
+            mmio.write_ly_from_ppu(0);
+            self.state = State::OAMSearch;
+            self.enter_scheduled_mode2(mmio);
+            self.line_cycle = 0;
+            self.internal_ly_val = 0;
+            self.stat_reg_committed = mmio.read(LCD_STATUS);
+            self.lyc_irq.lcd_reset();
+            self.mstat_irq.lcd_reset(self.lyc_irq.lyc_reg());
+            self.reschedule_all_stat_events(mmio);
+            self.sched_m0irq = stat_irq::DISABLED_TIME;
+        }
+        let effective_ly = self.effective_ly_for_lyc_compare(mmio);
+        if mmio.read(LYC) == effective_ly {
+            mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) | (1 << 2));
+        } else {
+            mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) & !(1 << 2));
+        }
+        self.check_and_trigger_stat_interrupt(mmio);
+        self.update_window_y_latch(mmio);
+    }
+
+    /// STAGE 4 (FACET 1) — register one DS->SS-during-mode3 STOP switch and
+    /// return how many STAT-phase carry dots to inject this switch (the increment
+    /// in `floor(count/2)`): every 2nd such switch injects ONE extra dot,
+    /// reproducing the accumulated Gambatte `now -= 1` half-dot. Stop-count
+    /// invariant by construction (the carry depends only on the running count,
+    /// not on any single STOP's integer-cc). Returns 0 on the odd switches.
+    pub fn register_dsss_mode3_stop(&mut self) -> u32 {
+        let before = self.dsss_mode3_stop_count / 2;
+        self.dsss_mode3_stop_count += 1;
+        let after = self.dsss_mode3_stop_count / 2;
+        after - before
+    }
+
+    /// STAGE 4 — the decoupled STAT-phase carry as a bridge step. Advances the
+    /// STAT/line clock by `dots` dots (same per-dot prelude as
+    /// `stop_bridge_advance`: `step_scheduled_stat_events`, `p_now` pullback,
+    /// then the line-phase step, then `step_lcdc_events`) but the render latch
+    /// (`self.ticks`/`self.x`/FIFO/mode-3 fetch) stays PUT. With `dots == 0` this
+    /// is a no-op, so a flag-ON build that never carries is byte-identical to the
+    /// rendered bridge (the Step-1 safety checkpoint).
+    pub fn stat_phase_carry(&mut self, mmio: &mut mmio::Mmio, dots: u32) {
+        for _ in 0..dots {
+            self.step_scheduled_stat_events(mmio);
+            self.p_now = self.p_now.wrapping_sub(1 << mmio.is_double_speed_mode() as u32);
+            self.step_stat_phase_only(mmio);
+            self.step_lcdc_events(mmio);
+        }
     }
 
     /// Recompute all scheduled IRQ event times from scratch at the current

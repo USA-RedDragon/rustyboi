@@ -139,6 +139,15 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
                 }
             }
         }
+        // STAGE 4 (FACET 1, RB_PERACCESS) KEYSTONE: capture whether this STOP is a
+        // DS->SS switch taken DURING mode 3 (pixel transfer), BEFORE the bridge
+        // advances dots (which can leave mode 3). The faithful Gambatte
+        // `PPU::speedChange` `now -= 1` half-dot re-anchor per such switch is
+        // injected below as a STAT-phase-ONLY carry (decoupled from the render
+        // latch) via `stat_phase_carry`. Stop-count invariant: every 2nd such
+        // switch carries one extra STAT dot. Flag-OFF: this whole block is skipped.
+        let dsss_mode3_switch =
+            crate::cpu::bus::peraccess_enabled() && !to_double && mmio.ppu.is_in_pixel_transfer();
         mmio.ppu.stop_bridge_advance(mmio.mmio, bridge);
         if !to_double {
             // DS->SS: the faithful `now -= old_ds` (== 1) re-anchor is folded into
@@ -151,6 +160,18 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // speed (Gambatte's `lcd_.speedChange`). The scheduled event times were
         // computed with the old double-speed cc-factor.
         mmio.ppu.speed_change(mmio.mmio);
+        // STAGE 4 (FACET 1) KEYSTONE: inject the accumulated DS->SS-mode3 half-dot
+        // as a STAT-phase-only carry (render latch stays put). STAGE4_FACET1_CARRY
+        // gates the staging: Step 1 (decouple checkpoint) keeps it false so the
+        // path is registered/wired but injects 0 dots => flag-ON byte-identical to
+        // the rendered bridge (84). Step 2 flips it true to land the carry.
+        const STAGE4_FACET1_CARRY: bool = false;
+        if dsss_mode3_switch {
+            let carry = mmio.ppu.register_dsss_mode3_stop();
+            if STAGE4_FACET1_CARRY {
+                mmio.ppu.stat_phase_carry(mmio.mmio, carry);
+            }
+        }
         // Fire the deferred SS->DS prefetched block now — post-switch, so it runs
         // at the new (double) speed at the post-bridge cc, matching Gambatte's
         // `intevent_dma` after `ioamhram_[0x14D] ^= 0x81` (dma fires at ds=1).
