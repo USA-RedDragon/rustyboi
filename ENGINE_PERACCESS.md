@@ -230,6 +230,64 @@ bracket + the `hdma_*_for_unhalt_adj` widen and the `+6`/`bias_cc` read biases).
   Largest single facet (~25 cases incl. the dma/halt family). Independently landable
   after Stage 1.
 
+#### Stage 2 status (this session) — FALSIFIED for the m0-edge-CONSTANT lever. Reverted to a6d344f (86/86).
+The decisive canary pair was probed end-to-end with cctracer + an `RB_HDMA_TRACE`
+env hook in `run_hdma_block_inner` / `on_cpu_halt` / the unhalt reflag. The exact
+clock map (rustyboi cc, all hooks):
+
+```
+                HALT cc   m0t@halt  unhalt cc  next-line m0_edge  next m0t  block2 fire
+ _1 (out00)     11872     11873     12296      12323             12329     12328  (FAIL)
+ _2 (outFF)     11876     11877     12296      12327             12333     12332  (PASS)
+```
+Gambatte (cctracer) fires exactly TWO HDMA blocks: block1@70664 (both), block2 at
+**71152 (_1, LY=3, pc=0x7404, a full line after unhalt)** vs **70700 (_2, LY=2,
+pc=0x1187, in-service)**. rustyboi instead fires THREE blocks (block1 twice — the
+coincident-rollback re-fire at unhalt — then block2 at the LY=2 m0 for BOTH), which
+happens to leave `_2`'s final VRAM correct but copies the wrong source for `_1`.
+
+**Root cause of the canary, MEASURED & DECISIVE:** the two ROMs differ ONLY by a
+~4 cc program-length shift. Because the LCD phase is locked to the program clock,
+that 4 cc shifts the HALT cc, `m0_time_master`, the exact m0 edge (`m0t - gap`),
+the line-end `lyTime`, AND the unhalt cc **all in lockstep**. Every RELATIVE
+quantity is therefore INVARIANT between `_1` and `_2`:
+  - `halt_cc - exact_edge` = 5 for BOTH (edge = m0t-6: _1 11867, _2 11871).
+  - `unhalt_cc - next_m0_edge` = identical bracket for BOTH.
+  - the line-end `cc+3+3*ds < lyTime` bracket is identical for BOTH.
+There is **no integer-cc (or exact-edge-constant) predicate that can discriminate
+`_1` from `_2`.** The only quantity that differs is the absolute cc's sub-dot phase
+— i.e. the within-dot ORDERING of block1's m0 `intevent_dma` event vs the HALT
+instruction's prefetch M-cycle (Gambatte's `hdmaReqFlagged` at `Memory::halt`
+captures `hdma_requested` iff that event is still pending when halt runs; `hdma_high`
+if it already fired+acked one M-cycle earlier). rustyboi's `access_cc == master_cc`
+is dot-granular, and the HDMA per-dot machine does NOT yet fire inside Stage-1's
+sub-dot min-event loop (Stage 1 deliberately kept the per-dot crank for the HDMA
+machine), so block1's m0 event is rounded to the HALT dot in both → both classify
+as `Requested`.
+
+**Empirical confirmation it is a strict 1-for-1 swap (not a win):** an
+`RB_PERACCESS`-gated change moving the `hdma_period_halt`/`hdma_period_unhalt` START
+bracket from the bare `m0t` to the exact edge `m0t - gap` (keeping the END absolute)
+— the literal Stage-2 plan — scored **net +2** on the full suite (RB_PERACCESS=1):
+fixed 0, broke `hdma_late_m3halt_m2unhalt_scx{1,2}_1` (the widened start now
+over-fires them). Flag-OFF stayed 86. This matches the campaign memory
+(`endgame-one-coupled-ds-subdot-build`, `per-access-cc-is-linchpin`): the m0-edge is
+**necessary but insufficient alone**; the canon `_1`/`_2` resolution needs the HDMA
+machine to participate in the sub-dot event order (block-flag vs HALT-prefetch
+interleave). That is NOT a "drop the bracket constant" change — it is the deeper
+"HDMA per-dot machine becomes advance-to-cc / fires at its exact event cc inside the
+Stage-1 loop" work, which Stage 1's status section explicitly defers ("only become
+jumpable when the later facet stages give them an advance-to-cc closed form").
+
+**Verdict / next step for Stage 2:** the safe, suite-positive Stage-2 win requires
+first promoting the HDMA m0 `intevent_dma` event into the Stage-1 sub-dot min-event
+driver so the block-flag fires at its EXACT sub-dot cc and the HALT/unhalt
+classification reads the true within-M-cycle ordering (then `Requested` vs `High` for
+`_1`/`_2` falls out, and the dma/m3speedchange/m0stat family follows). The
+m0-edge-constant brackets are already at their calibrated optimum on the dot grid;
+nudging them is a strict trade. Reverted; tree clean at a6d344f, flag-OFF=86,
+flag-ON=86.
+
 ### Stage 3 — FACET 1: sub-dot STOP re-anchor (CPU boundary locked to LCD).
 Replace the whole-dot `stop_bridge_advance` with the exact fractional renderer
 re-anchor across the STOP, so the CPU instruction boundary's `abs_cc` parity stays
