@@ -147,6 +147,7 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // `stat_phase_carry`. Stop-count invariant: every 2nd such switch carries
         // one extra STAT dot.
         let dsss_mode3_switch = !to_double && mmio.ppu.is_in_pixel_transfer();
+        let ssds_mode3_switch = to_double && mmio.ppu.is_in_pixel_transfer();
         mmio.ppu.stop_bridge_advance(mmio.mmio, bridge);
         if !to_double {
             // DS->SS: the faithful `now -= old_ds` (== 1) re-anchor is folded into
@@ -170,6 +171,19 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             if STAGE4_FACET1_CARRY {
                 mmio.ppu.stat_phase_carry(mmio.mmio, carry);
             }
+        }
+        // SS->DS speed switch taken DURING mode 3: across the switch Gambatte's
+        // re-anchored lyCounter.time (LCD::speedChange -> update(cc+8) -> the SS
+        // dots advance the line phase) sits ~5 DS-dots (10 cc) ahead of rustyboi's
+        // bridged renderer line phase for the FF44 (LY) read. The renderer pixel
+        // latch and the STAT/m0Time predictor are already correct (the broad
+        // speedchange*_m3stat STAT-read suite is calibrated to that phase); only
+        // the getLyReg anticipation window (`time - cc <= 6+4*ds`) keys off the raw
+        // lyCounter.time, which rustyboi's closed-form runs late here. Latch the
+        // SS->DS-mode3 LY-read phase advance so `get_ly_reg_at_cc` (and ONLY it)
+        // resolves the read against Gambatte's re-anchored lyTime.
+        if ssds_mode3_switch {
+            mmio.ppu.set_ssds_mode3_ly_advance();
         }
         // Fire the deferred SS->DS prefetched block now — post-switch, so it runs
         // at the new (double) speed at the post-bridge cc, matching Gambatte's

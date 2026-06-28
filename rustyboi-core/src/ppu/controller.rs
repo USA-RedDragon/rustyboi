@@ -776,6 +776,14 @@ pub struct Ppu {
     // enable / LY reset. See ENGINE_LAZY_PPU.md bug #2.
     #[serde(default)]
     lytime_no_plus1: bool,
+    // Set when an SS->DS speed switch executes DURING mode 3. Across the switch
+    // Gambatte's re-anchored lyCounter.time (LCD::speedChange) sits ~5 DS-dots
+    // (10 cc) ahead of rustyboi's bridged renderer line phase for the FF44 (LY)
+    // read's getLyReg anticipation window. Consumed ONLY by `get_ly_reg_at_cc`
+    // (not the STAT/m0Time predictor, which is already correct). Cleared at the
+    // next LCD enable / LY reset, like `lytime_no_plus1`.
+    #[serde(default)]
+    ssds_mode3_ly_advance: bool,
     // Set when an SS->DS speed switch executes during PixelTransfer (mode 3) and
     // the bridge dropped 2 dots (see `stop_bridge_advance`). If a subsequent
     // DS->SS switch follows (the double-switch speedchange{2..5} families), that
@@ -983,6 +991,7 @@ impl Ppu {
             scheduled_mode0_dot: None,
             m0_time_master: None,
             lytime_no_plus1: false,
+            ssds_mode3_ly_advance: false,
             sc_mode3_pullback_pending: false,
             dsss_mode3_stop_count: 0,
             render_carry_skew_cc: 0,
@@ -1098,6 +1107,7 @@ impl Ppu {
         self.abs_cc = 0;
         self.p_now = mmio.master_cc();
         self.lytime_no_plus1 = false;
+        self.ssds_mode3_ly_advance = false;
 
         // Publish LY and the VBlank STAT mode (FF41 mode bits = 1).
         mmio.write_ly_from_ppu(ly_reg);
@@ -1982,6 +1992,13 @@ impl Ppu {
     /// the counter one master-cc high). See ENGINE_LAZY_PPU.md bug #2.
     pub fn set_dsss_lytime_adjust(&mut self) {
         self.lytime_no_plus1 = true;
+    }
+
+    /// Latch the SS->DS-during-mode3 FF44 (LY) read phase advance. Consumed only
+    /// by `get_ly_reg_at_cc` to resolve the getLyReg anticipation window against
+    /// Gambatte's re-anchored lyTime (the renderer/STAT/m0 phase is unaffected).
+    pub fn set_ssds_mode3_ly_advance(&mut self) {
+        self.ssds_mode3_ly_advance = true;
     }
 
     /// STAGE 4 (FACET 2 KEYSTONE) — advance the STAT/LINE-PHASE clock by ONE dot
@@ -5305,6 +5322,15 @@ impl Ppu {
         // runs one master-cc below Gambatte's lyTime (see m0_time_exact), so add 1.
         let mut ly_reg = lc.ly as i64;
         let mut time = self.p_now as i64 + lc.time as i64 + 1;
+        // SS->DS-during-mode3: rustyboi's bridged renderer line phase trails
+        // Gambatte's re-anchored lyCounter.time by ~5 DS-dots (10 cc) for the LY
+        // read. Pull the read's `time` anchor onto Gambatte's lyTime so the
+        // getLyReg anticipation window resolves identically (cctracer: _2/_6
+        // read 147, to_next 8). DS-only (the switch lands in DS). Scoped to this
+        // read path; the STAT/m0Time predictor keeps the un-advanced phase.
+        if self.ssds_mode3_ly_advance && ds {
+            time -= 10;
+        }
         // Gambatte getLyReg: `if (cc >= lyCounter().time()) update(cc)` advances the
         // LY counter when the read's access cc has already passed the LY increment.
         // The closed-form (ly_counter) is renderer-anchored and does NOT advance, so
