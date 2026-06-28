@@ -968,6 +968,19 @@ pub struct Ppu {
     // let the fetcher consult it per-substep. (commit_cc, new_lcdc, old_lcdc).
     #[serde(default)]
     lcdc_b4_exact: Option<(u64, u8, u8)>,
+    // Exact-cc window-enable (LCDC bit 5) toggle for the weMaster checkpoints.
+    // rustyboi's pending_lcdc_events commit the window bit one PPU dot before
+    // Gambatte's `setLcdc(data, cc + 2)` (the queue runs through one
+    // step_lcdc_events on the write dot). That 1-dot-early commit is harmless to
+    // the renderer/getStat but mis-orders the lc450/lc454 weMaster checkpoints
+    // against a window-enable write whose Gambatte commit (`write_cc + 2`) lands
+    // exactly on the checkpoint dot: Gambatte runs `update(cc)` (the weMaster
+    // event) BEFORE `setLcdc`, so the checkpoint sees the OLD window bit. We
+    // record the write's master-cc commit (`write_cc + 2`) and the bit's old/new
+    // values; `update_window_y_latch` reads the window-enable bit as-of the
+    // checkpoint cc through this. (commit_master_cc, new_win_bit, old_win_bit).
+    #[serde(default)]
+    we_win_bit_exact: Option<(u64, bool, bool)>,
     #[serde(default)]
     cgb_color_conversion: CgbColorConversion,
     #[serde(skip, default)]
@@ -1084,6 +1097,7 @@ impl Ppu {
             cgb_tile_index_is_tile_data: false,
             pending_lcdc_events: Vec::new(),
             lcdc_b4_exact: None,
+            we_win_bit_exact: None,
             cgb_color_conversion: CgbColorConversion::Linear,
             fetch_debug_events_enabled: false,
             fetch_debug_events: Vec::new(),
@@ -1240,6 +1254,23 @@ impl Ppu {
                 let ds = mmio.is_double_speed_mode();
                 let commit_cc = self.write_cc(ds) + 2;
                 self.lcdc_b4_exact = Some((commit_cc, value, old_lcdc));
+            }
+            // Window-enable (bit 5) toggle: record the exact Gambatte commit cc
+            // (`write_cc + 2`, abs_cc units — same anchor as `lcdc_b4_exact`) so
+            // the weMaster checkpoints resolve the window-enable bit as-of their
+            // own dot (see `we_win_bit_exact`).
+            let we = LCDCFlags::WindowDisplayEnable as u8;
+            if (old_lcdc & we) != (value & we) {
+                let ds = mmio.is_double_speed_mode();
+                // Gambatte `setLcdc(data, cc + 2)`: the window bit is effective at
+                // write_cc + 2 dots. rustyboi's `abs_cc` carries a +1 derive-phase
+                // relative to `ticks`, so the abs_cc that equals the checkpoint dot
+                // (write_ticks + 2) is `write_cc + 3`. The weMaster event runs at
+                // the checkpoint BEFORE setLcdc, so equality reads the OLD bit (the
+                // `<=` in `update_window_y_latch`).
+                let commit_cc = self.write_cc(ds) + 3;
+                self.we_win_bit_exact =
+                    Some((commit_cc, (value & we) != 0, (old_lcdc & we) != 0));
             }
             self.pending_lcdc_events.push(PendingLcdcEvent {
                 cycles_remaining: 1,
@@ -2347,7 +2378,15 @@ impl Ppu {
             return;
         }
         let is_cgb = mmio.is_cgb_features_enabled();
-        let win_en = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
+        // Window-enable bit as Gambatte's weMaster checkpoint sees it at THIS dot.
+        // A window-enable write whose Gambatte commit (`write_cc + 2`) has not yet
+        // reached this dot's abs_cc still reads the OLD bit here (Gambatte runs the
+        // weMaster `update(cc)` event before `setLcdc`), even though rustyboi's
+        // pending_lcdc_events already committed the live `self.lcdc` one dot early.
+        let win_en = match self.we_win_bit_exact {
+            Some((commit_cc, _new, old)) if self.abs_cc <= commit_cc => old,
+            _ => (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0,
+        };
         if !win_en {
             return;
         }
