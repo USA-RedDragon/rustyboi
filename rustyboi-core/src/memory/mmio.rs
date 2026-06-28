@@ -339,6 +339,26 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_high_unhalt_consume: bool,
 
+    // per-access STAGE 2 (RB_PERACCESS, FACET 3): when a Requested-at-halt HDMA
+    // block is reflagged+fired at unhalt, the NEXT line's m0 rising edge that
+    // re-arms the following block may fall WITHIN that block's transfer span. In
+    // Gambatte that m0 `memevent_hdma` is absorbed by the in-flight `dma()` (the
+    // event is processed at the block's end cc, its `flagHdmaReq` reschedules to
+    // the line AFTER), so the genuine next block fires a full line later. rustyboi
+    // fires synchronously at the per-dot m0 edge, so without this it arms the next
+    // block at that absorbed edge — one line early. This is the sub-block-cc
+    // discriminator the `hdma_transition_halt_late_unhalt_scx1_1` (m0 edge inside
+    // block span -> defer) vs `_2` (m0 edge past block span -> fire this line)
+    // canary pair probes: the only differing quantity at the dot grid is the
+    // absolute sub-dot phase of the post-unhalt m0 edge vs block1's transfer end.
+    // The window is `[block1_fire_cc, block1_fire_cc + 16*(2+2*ds)]` (the dma()
+    // transfer length, inclusive end — Gambatte's edge AT the transfer end is still
+    // absorbed); armed at the Requested unhalt reflag, `step_hdma` consumes every m0
+    // arm inside it and disarms on the first arm strictly past it. Off (no effect)
+    // when RB_PERACCESS is disabled.
+    #[serde(skip, default)]
+    hdma_peraccess_consume_pending: bool,
+
     // Deferred HDMA block byte writes. Gambatte's `Memory::dma` reads each byte
     // at `cc` but writes it to VRAM at `cc + (2 + 2*ds)` (memory.cpp:354/375),
     // so byte 0 lands one sub-M-cycle AFTER the trigger/prefetch boundary and
@@ -490,6 +510,7 @@ impl Mmio {
             hdma_block_done_this_period: false,
             hdma_halt_edge_consumed: false,
             hdma_high_unhalt_consume: false,
+            hdma_peraccess_consume_pending: false,
             hdma_pending_writes: Vec::new(),
             hdma_write_delay: 0,
             hdma_kick_eval_pending: 0,
@@ -1163,6 +1184,61 @@ impl Mmio {
         self.hdma_high_unhalt_consume = true;
     }
 
+    /// per-access STAGE 2 (FACET 3): arm the Requested-unhalt sub-block-cc consume.
+    /// Called at the unhalt site when a `Requested`-at-halt block is reflagged so
+    /// `step_hdma` can absorb the next-line m0 arm iff it falls within the freshly
+    /// fired block's transfer span (Gambatte's m0 `memevent_hdma` consumed by the
+    /// in-flight `dma()`), deferring the genuine next block one line. RB_PERACCESS.
+    pub fn arm_hdma_peraccess_consume(&mut self) {
+        self.hdma_peraccess_consume_pending = true;
+    }
+
+    /// per-access STAGE 2 (FACET 3): when a post-unhalt m0 rising edge would arm the
+    /// next HDMA block, decide whether it must instead be CONSUMED because it falls
+    /// within the just-fired (Requested-unhalt reflag) block's transfer span. Gambatte
+    /// processes the m0 `memevent_hdma` at the in-flight `dma()`'s end cc, so an edge
+    /// landing inside `[fire_cc, fire_cc + 16*(2+2*ds))` is absorbed and its block
+    /// deferred to the next line; an edge at/after that span fires this line. Returns
+    /// true (consume this arm, clearing the pending flag) iff RB_PERACCESS is on, a
+    /// Requested-unhalt consume is armed, and the current dot cc is strictly inside the
+    /// span. Otherwise leaves the arm to proceed. The pending flag is one-shot: it is
+    /// cleared whether the arm is consumed (inside span) or allowed (past span), so it
+    /// only ever gates the single immediate post-unhalt m0 edge.
+    fn peraccess_consume_m0_arm(&mut self) -> bool {
+        if !self.hdma_peraccess_consume_pending {
+            return false;
+        }
+        if !crate::cpu::bus::peraccess_enabled() {
+            self.hdma_peraccess_consume_pending = false;
+            return false;
+        }
+        let fire_cc = match self.hdma_last_fire_cc {
+            Some(c) => c,
+            None => {
+                self.hdma_peraccess_consume_pending = false;
+                return false;
+            }
+        };
+        let ds = self.is_double_speed_mode() as u64;
+        let span: u64 = 0x10 * (2 + 2 * ds);
+        let now = self.master_cc();
+        // Inclusive end: Gambatte's m0 `memevent_hdma` lands AT the in-flight
+        // block's transfer-end cc is still absorbed (the edge == block end is
+        // consumed; only an edge strictly PAST the transfer fires its own block).
+        let end = fire_cc.wrapping_add(span);
+        if now >= fire_cc && now <= end {
+            // Inside block1's transfer span: absorb this m0 arm (and any further
+            // re-detect of the SAME edge through the period->STAT-fallback handoff).
+            // Keep pending armed so every in-span dot is consumed.
+            true
+        } else {
+            // At/past the span end: the genuine next-line block. Let it arm and
+            // disarm the consume so subsequent lines are untouched.
+            self.hdma_peraccess_consume_pending = false;
+            false
+        }
+    }
+
     /// Master cc of the last HDMA block fire (None if none in-flight this period).
     pub fn hdma_last_fire_cc(&self) -> Option<u64> {
         self.hdma_last_fire_cc
@@ -1333,6 +1409,7 @@ impl Mmio {
         // A fresh HALT supersedes any pending High-unhalt edge-consume (the prior
         // unhalt's stream has ended); never let it span halts.
         self.hdma_high_unhalt_consume = false;
+        self.hdma_peraccess_consume_pending = false;
         if !self.cgb_features_enabled {
             self.halt_hdma_state = HaltHdmaState::Low;
             return;
@@ -1780,6 +1857,10 @@ impl Mmio {
                 // our slightly-early unhalt cc). Suppress this arm and clear.
                 if self.hdma_high_unhalt_consume {
                     self.hdma_high_unhalt_consume = false;
+                } else if self.peraccess_consume_m0_arm() {
+                    // Requested-unhalt sub-block-cc consume (RB_PERACCESS): this m0
+                    // edge fell inside block1's transfer span; Gambatte absorbs it
+                    // and defers the next block one line. Suppress this arm.
                 } else {
                     self.hdma_req_pending = true;
                 }
@@ -1840,6 +1921,9 @@ impl Mmio {
                 // None), one dot after the unhalt.
                 if self.hdma_high_unhalt_consume {
                     self.hdma_high_unhalt_consume = false;
+                } else if self.peraccess_consume_m0_arm() {
+                    // Requested-unhalt sub-block-cc consume (RB_PERACCESS): see the
+                    // period-rising-edge branch.
                 } else {
                     self.hdma_req_pending = true;
                 }

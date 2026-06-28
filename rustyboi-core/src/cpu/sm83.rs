@@ -107,7 +107,18 @@ impl SM83 {
                 let limit_adj: i64 = 4;
                 let in_period_unhalt = mmio.hdma_in_period_for_unhalt_adj(limit_adj);
                 match mmio.halt_hdma_state() {
-                    memory::mmio::HaltHdmaState::Requested => mmio.set_hdma_req(),
+                    memory::mmio::HaltHdmaState::Requested => {
+                        mmio.set_hdma_req();
+                        // per-access STAGE 2 (FACET 3): the Requested-held block is
+                        // about to fire at unhalt. Arm the sub-block-cc consume so
+                        // the next-line m0 edge that re-arms the following block is
+                        // absorbed iff it lands inside this block's transfer span
+                        // (Gambatte m0 `memevent_hdma` consumed by the in-flight
+                        // `dma()`), deferring it one line. RB_PERACCESS-gated inside.
+                        if crate::cpu::bus::peraccess_enabled() {
+                            mmio.arm_hdma_peraccess_consume();
+                        }
+                    }
                     memory::mmio::HaltHdmaState::Low
                         if in_period_unhalt && mmio.hdma_is_enabled() =>
                     {
