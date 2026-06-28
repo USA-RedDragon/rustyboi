@@ -191,6 +191,65 @@ column is reached. Adopt `on_scx_write delay = 2*cgb` (match the f1 path) under 
   aligned cases (column unchanged by the write) MUST stay byte-exact: the frozen xpos must
   reproduce the live projection when no straddle occurs. Independently landable.
 
+### Stage 1 ATTEMPT LOG (session 2026-06-28) — frozen-column built, calibration UNSOLVED, reverted to 59e6eec.
+
+Built the full frozen-plot scaffolding and three candidate mechanisms behind RB_SUBCC.
+All reverted (broke 0 was NOT achievable for any candidate; flag-off stayed 73). Concrete
+empirical map of the `scx_0761c0` CGB cluster, measured this session (boot offset removed
+via the runner's own 15-frame steady state, LY=1):
+
+**Ground truth (flag-OFF, == HEAD) for scx_0761c0 CGB:** fails 6 = `_3` (8px @ x=143 y=0),
+`_4` (1144px @ x=135..142 y=1..143), `_ds_2.._5`. `_1 _2 _5 _6` PASS. The per-line 2nd
+SCX write (0x61->0xc0, new_scx=192 over old=97) lands at a clean **4-cc integer stride**
+across variants, with the draw cursor `self.x` at the write:
+```
+variant  write_abs_cc  self.x  fifo  OLD-result
+ _1        760          144     7     PASS  (straddle falls at x>=~150, off the visible tail)
+ _2        756          140     3     PASS
+ _3        752          134     9     FAIL only x=143 y=0 (8px)
+ _4        748          130     5     FAIL x=135..142 all lines (the 0xc0 straddle tile)
+ _5        744          122     7     PASS
+ _6        740          118     3     PASS
+```
+The TRUE displayed straddle boundary (where scx 97->192 switches the tile) is a near-CONSTANT
+display column ~143 across ALL variants (measured: `_3` first-bad col 143, `_4` 135). It is
+NOT at `self.x`. rustyboi's OLD bug: the fetcher reads scx_delayed LIVE at fetch; scx_delayed
+flips at write_cc (delay 0), so every tile fetched after write_cc (cols 135+ for `_4`, fetched
+AHEAD) uses NEW scx, but those cols PLOT before the boundary and Gambatte keeps OLD. i.e. the
+failing cols are fetched AFTER the write but plot BEFORE the apply -> must stay OLD.
+
+**Mechanisms tried (all behind RB_SUBCC, env-swept):**
+1. *Frozen-xpos + draw-time re-derive* (BgPixel.plot_x/fetch_scx/bit_i, re-fetch in
+   `draw_fifo_pixel` under live scx). BROKE broadly because the mode-3->HBlank **batch flush**
+   (`while x<160 { draw_fifo_pixel }` at m0Time, controller.rs:~4000) drains all leftover FIFO
+   at ONE abs_cc -> every flushed pixel sees the FINAL scx, not its own plot-time scx. Draw-time
+   re-derive is fundamentally incompatible with the batch flush.
+2. *on_scx_write delay = 2*cgb alone* (defer scx_delayed flip). BROKE `_3` 8px->1152px:
+   the column fetcher reads the now-stale scx_delayed; the f1 first-tile path also keys off it.
+3. *Deferred apply `write_cc + (2*cgb + LEAD)<<ds` + fetcher reads scx_delayed live + queued-
+   tile rewrite gated by per-entry plot_cc*. SWEEP RB_LEAD: `LEAD(cc)=0`->fixes `_1 _5 _6`,
+   still fails `_2 _3 _4`, regresses DS. The fetcher 2-dot cadence + warmup means `self.x` /
+   `abs_cc` do NOT map linearly to the Gambatte plot cursor, so the "tile being fetched at
+   apply_cc" splits across the 4-cc stride (phase-dependent). A single LEAD constant cannot
+   align all 6 SS variants (best was 3/6, with DS collateral).
+
+**KEY UNSOLVED PIECE (hand to next session):** the apply boundary is NOT `self.x`-relative
+nor a fixed cc-offset from write_cc; it is the cc at which the **fetcher's xpos** (not the
+display cursor) reaches the boundary tile. The fetcher leads the display by the FIFO depth AND
+runs on a 2-dot cadence, so the mapping write_cc -> boundary-column needs the fetcher's own
+xpos clock (an m3 per-line anchor: cc-when-fetcher-xpos==0, then `xpos = (cc - anchor)/2`
+honoring warmup/sprite-stall dots). Establish that anchor, set `scx_apply_cc` = cc the fetcher
+xpos reaches the write's column, and have the fetcher read NEW scx for fetches at/after it
+(already-queued tiles need NO rewrite — they all plot before the boundary). The frozen
+BgPixel fields + `bg_pixel_at_col` re-fetch helper are the right primitives but were applied at
+the wrong clock. DO NOT use `self.x`/`abs_cc` directly as the plot cursor.
+
+**Validated invariants:** flag-OFF == 73 at every step. The frozen-xpos approach (carry plot
+geometry per FIFO entry) is sound; the +81 `restart_current_tile` trap was avoided (the
+no-change cases were byte-exact when the boundary was correct). The blocker is purely the
+fetcher-xpos-clock calibration, which is the sub-dot phase the cluster-root notes flag as
+lever B-adjacent.
+
 ### Stage 2 — DS f1 / fine-scroll straddle (`scx_during_m3_ds_2..5`, `spx2_ds`, ~6).
 Extend Stage 1's frozen-column geometry across the f1 fine-scroll discard at double speed:
 the f1 loop already honors `scx_f1_apply_cc = write_cc + (2<<ds)` (controller.rs:2797); fold
