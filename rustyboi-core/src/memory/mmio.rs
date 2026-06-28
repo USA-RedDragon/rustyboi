@@ -783,6 +783,13 @@ impl Mmio {
         self.serial.set_cgb(cgb);
     }
 
+    /// CGB *hardware* flag (mirrors Gambatte `isCgb()`): true whenever running on
+    /// CGB hardware, including CGB-in-DMG-compat. Tracks `hardware == CGB` (set via
+    /// `set_serial_cgb`), distinct from `is_cgb_features_enabled` (DMG-compat off).
+    pub fn is_cgb(&self) -> bool {
+        self.serial.is_cgb()
+    }
+
     /// Snapshot a serial-influenced register (SB/SC/IF) at the read M-cycle
     /// start cc, mirroring `sync_apu_for_read`. The per-dot `step_serial` during
     /// `tick_m` can complete the transfer and set the serial IF bit within the

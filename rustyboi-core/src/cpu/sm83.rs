@@ -424,17 +424,27 @@ impl SM83 {
         let flag = self.get_pending_interrupt(bus);
 
         // The low-byte push ACKs the IF bit partway through its M-cycle (Gambatte
-        // `ackIrq(n, cc)` after the push: `lcd_.update(cc+2)` then clear). For the
-        // LCD vector this is the `late_retrigger` lever — a STAT/m2 IRQ firing at
-        // the ack sub-point (cc+2) is wiped, one firing in the trailing dots
-        // survives. Done inside the push M-cycle so the clear lands at the exact
-        // sub-dot. Skip it while OAM DMA is active (the split-push bypasses the
-        // DMA-conflict redirection in `bus.write`); those tests don't retrigger.
-        // Non-LCD vectors clear at end-of-service (below).
-        let split_ack = flag == Some(registers::InterruptFlag::Lcd) && !bus.oam_dma_active();
+        // `Memory::ackIrq(n, cc)` after the push: it advances each source to a
+        // per-source sub-cc offset (`updateSerial(cc+3+cgb)`, `updateTimaIrq(cc+2
+        // +cgb)`, `lcd_.update(cc+2)`) — flagging any IRQ that completes by that
+        // offset — THEN clears only the dispatched bit `n`. A source completing
+        // *after* its offset re-flags IF and survives for the ISR to read (the
+        // `late_retrigger` / `start_wait..._read_if` re-fire); one completing by
+        // the offset is flagged-then-cleared and reads back gone. The per-source
+        // offset (+3+cgb serial, +2+cgb timer, +2 lcd) is the DMG-vs-CGB
+        // discriminator for the `_2` boundary cases. Done inside the push M-cycle
+        // so the clear lands at the exact sub-dot. Skip while OAM DMA is active
+        // (the split-push bypasses the DMA-conflict redirection in `bus.write`).
+        let split_ack = matches!(
+            flag,
+            Some(registers::InterruptFlag::Lcd)
+                | Some(registers::InterruptFlag::Serial)
+                | Some(registers::InterruptFlag::Timer)
+        ) && !bus.oam_dma_active();
         self.registers.sp = self.registers.sp.wrapping_sub(1);
         if split_ack {
-            bus.interrupt_low_push_lcd_ack(self.registers.sp, (self.registers.pc & 0x00FF) as u8, true);
+            let bit = flag.map(|f| f as u8).unwrap_or(0);
+            bus.interrupt_low_push_ack(self.registers.sp, (self.registers.pc & 0x00FF) as u8, bit);
         } else {
             bus.write(self.registers.sp, (self.registers.pc & 0x00FF) as u8);
         }
@@ -460,11 +470,11 @@ impl SM83 {
             None => 0x0000,
         };
         if let Some(flag) = flag {
-            // The LCD vector was already ACKed mid-push (split_ack, faithful
-            // Gambatte ackIrq ordering); clearing it again here would wipe a
-            // same-window STAT re-fire. When the split was skipped (OAM DMA
-            // active) clear it here as before. Other sources clear here.
-            if !(split_ack && flag == registers::InterruptFlag::Lcd) {
+            // The LCD/Serial/Timer vectors were already ACKed mid-push (split_ack,
+            // faithful Gambatte ackIrq ordering); clearing again here would wipe a
+            // same-window re-fire that must survive. When the split was skipped
+            // (OAM DMA active) or the vector is VBlank/Joypad, clear here as before.
+            if !split_ack {
                 self.set_interrupt_flag(flag, false, bus);
             }
             // STAGE 2: once the timer IRQ is dispatched, drop its recorded fire
