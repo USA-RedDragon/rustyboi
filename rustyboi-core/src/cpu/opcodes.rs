@@ -63,7 +63,11 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             // landed at lineCycles 252 vs Gambatte 250). VBlank / LCD-off keeps 8.
             if mmio.ppu.is_in_pixel_transfer() || mmio.ppu.is_on_rendering_line() {
                 mmio.ppu.arm_sc_mode3_pullback();
-                6
+                // ds-subdot STAGE 5b: with Lever A holding abs_cc byte-exact, the
+                // SS->DS mid-mode-3 bridge over-advances the renderer line phase by 2
+                // dots (the old `6` encoded the now-eliminated 4-short abs_cc). Rebase
+                // -2 so the post-switch renderer lineCycle/m0Time land exact.
+                if subdot { 4 } else { 6 }
             } else {
                 8
             }
@@ -83,24 +87,24 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         } else {
             // DS->SS: restore the 2 dots the preceding mode-3 SS->DS bridge
             // dropped, if any (double-switch families); else the plain bridge.
-            let base: u32 = if mmio.ppu.take_sc_mode3_pullback() { 5 } else { 3 };
-            // ds-subdot STAGE 5a: with Lever A holding abs_cc byte-exact, the tuned
+            let pullback = mmio.ppu.take_sc_mode3_pullback();
+            // ds-subdot STAGE 5a/5b: with Lever A holding abs_cc byte-exact, the tuned
             // mode-3 DS->SS bridge over-advances the renderer line phase by 2 dots
             // (the old +3/+5 encoded the now-eliminated 4-short abs_cc). Rebase -2 so
             // the post-double-stop PixelTransfer DS->SS re-anchor lands the renderer
-            // lineCycle exact — recovers the lcdoffset1/offset[123]/m2int_m3stat
-            // firing-offset cluster whose deferred read straddles this phase. Proven
-            // via the offset[123]_lyc98int_ly_count bracket (all three sides pass) and
-            // the lcdoffset1/lcdoffset3 enable brackets. (ly44_m3 mid-mode-3 switches
-            // take the SS->DS-pullback path and are unaffected — Stage 5b.)
-            // Scope OUT the HDMA-active mode-3 switch (hdma_late_m3speedchange_*_ds):
-            // those couple to the HDMA block-fire/timer phase across the switch (the
-            // suppress-edge path above), where the -2 over-shifts them — keep the
-            // tuned bridge there (Stage 5b mode-3 + HDMA coupling).
+            // lineCycle exact. Under subdot the preceding SS->DS bridge is now itself
+            // faithful (STAGE 5b: rebased to 4), so there is nothing to "restore" — the
+            // pullback `+2` is dropped and base stays 3 regardless of the marker; the
+            // -2 rebase then lands the DS->SS line phase exact for BOTH the Stage-5a
+            // VBlank-then-mode3 cluster (no pullback) AND the ly44_m3 mode3-then-mode3
+            // double switch (pullback). Scope OUT the HDMA-active mode-3 switch
+            // (hdma_late_m3speedchange_*_ds): those couple to the HDMA block-fire/timer
+            // phase across the switch (the suppress-edge path above), where the -2
+            // over-shifts them — keep the tuned bridge there (later HDMA coupling work).
             if subdot && !mmio.mmio.hdma_is_enabled() {
-                base.saturating_sub(2)
+                1
             } else {
-                base
+                if pullback { 5 } else { 3 }
             }
         };
         // Gambatte `Memory::stop` (memory.cpp:453) captures the HDMA halt state at

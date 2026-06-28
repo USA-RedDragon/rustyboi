@@ -189,6 +189,38 @@ SS→DS / mid-mode-3 bridge faithful) — large coupled build, deliberately sepa
   cc-resolved counter instead of deferring to the renderer register) was attempted first and
   NET-REGRESSED (-2: fixed offset3 brackets but broke offset1_ds_2/offset2_1/offset2_3) because the
   read-resolution was never the lever — the renderer LINE PHASE (the mode-3 bridge) is. Reverted.
+- Stage 5b (mid-mode-3 SS->DS / DS->SS bridge — the ly44_m3 mode3-then-mode3 switch):
+  STATUS: DONE (commit on ds-subdot-engine). ROOT FOUND (cctracer + runner RB_DBG_M3STAT
+  m3stat-read hook, since reverted): the ~41 `*_ly44_m3_*_m3stat_scx{1..4}` cases switch speed
+  WHILE the PPU is in mode-3 (PixelTransfer) at LY44, then defer the m3stat FF41 read to a much
+  later line (LY 37/58). With Lever A holding abs_cc + access_cc byte-exact, the m3stat read's
+  access_cc is now EXACTLY Gambatte's, but the renderer LINE PHASE (line_cycle / m0Time_master)
+  was 2 dots over-advanced across the switch — so `getStat`'s `cc+2 < m0Time` boundary flipped
+  mode3->mode0 (the m0Time inherits the line phase, landing 4cc low at DS / 2cc low at SS).
+  The over-advance came from the TWO tuned mid-mode-3 bridge dot-counts (calibrated for the old
+  4-short abs_cc): the SS->DS PixelTransfer/rendering-line bridge (6) and the DS->SS pullback
+  "restore" (+2 -> base 5). FIX (opcodes::stop, RB_SUBDOT only): (1) SS->DS mid-mode-3 bridge
+  rebased 6 -> 4 (the renderer no longer overshoots the post-switch line phase by 2 dots); (2)
+  DS->SS bridge: the pullback `+2` restore is dropped under subdot (the preceding SS->DS bridge
+  is now itself faithful, so there is nothing to restore) — base stays 3 and the Stage-5a -2
+  rebase lands it at 1, serving BOTH the Stage-5a VBlank-then-mode3 cluster (no pullback) AND the
+  ly44_m3 mode3-then-mode3 double switch (pullback). PROOF (cctracer byte-exact, boot offset
+  58368): single-switch `speedchange_ly44_m3_m3stat_scx1_1` read access_cc=174972 m0Time=174976
+  lineCycles=250 == Gambatte (233340/233344/250) -> mode3 PASS (BEFORE: m0t=174972 lineCycle=252
+  -> mode0 FAIL). Double-switch `speedchange2_ly44_m3_m3stat_scx3_1` access_cc=305572 m0Time=305575
+  lineCycles=251 == Gambatte (363940/363943/251) -> mode3 PASS. `..._nop_m3stat_scx1_1` access_cc=
+  305572 m0Time=305575 lineCycles=249 == Gambatte (305572/305575/249). The SINGLE faithful re-anchor
+  serves ALL scx{1..4} + _nop/_nopx2 (the roadmap invariant — abs_cc exact -> one formula, no
+  per-scx fudge): all 66 `*ly44_m3*m3stat_scx*` CGB cases PASS flag-on (0 FAIL). RESULTS: flag-ON
+  full suite 148 -> 106 (net -42). vs main_131: net -25 (fixed 28 = the Stage-4 APU + Stage-5a
+  + 6 hdma_late_m3speedchange wins flag-on holds over main; broke 3 = the documented residuals
+  ONLY: frame0_m3stat_count_ds_2 [Stage-1 first-line enable-anchor leftover] + the two
+  speedchange2[_nop]_lcdoff_nop_m2int_m3stat_scx4_2 [LCD-OFF-around-stop separate root, NOT the
+  mode-3 bridge]). ZERO ly44_m3 in the broke set; the 29 wins + 37 Stage-5a recoveries intact.
+  REGRESSION GUARD: flag-OFF full suite = 131 (114 CGB + 17 DMG), EXACT identity vs main_131 (the
+  4->bridge rebase and the dropped pullback +2 are both behind `subdot`). The lcdoff_m2int and
+  HDMA-gated DS->SS paths are untouched (verified: lcdoff takes bridge=8 SS->DS-VBlank then the
+  faithful_dsss=0 OAMSearch path; never the changed mid-mode-3 branch).
 - Stage 5: delete `step_subdot` + parity-gate + all firing/DS offsets; flip RB_SUBDOT default on.
   Full-suite re-validate; expect the ~50-70 coupled cluster to fall together.
 
