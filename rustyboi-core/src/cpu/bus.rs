@@ -151,15 +151,7 @@ impl<'a> Bus<'a> {
     /// `tick_remaining` and the PPU's per-instruction `dot` semantics are
     /// preserved.
     fn run_to(&mut self, target_cc: u64) {
-        if peraccess_enabled() {
-            self.run_to_min_event(target_cc);
-            return;
-        }
-        while self.mmio.master_cc() < target_cc {
-            self.resolve_one_dot();
-            self.dot = self.dot.wrapping_add(1);
-            self.ticked += 1;
-        }
+        self.run_to_min_event(target_cc);
     }
 
     /// per-access STAGE 1: the true min-event-jump driver (behind `RB_PERACCESS`).
