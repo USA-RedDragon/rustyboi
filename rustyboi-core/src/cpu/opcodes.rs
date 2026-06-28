@@ -197,6 +197,12 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // full 0x20000 first and only then the block's `pending_dma_stall`,
         // pushing the post-stop resume (and its LY read) ~64+fudge cc late —
         // one LY high on the boundary (`hdma_late_m3speedchange_ly_scx1_3`).
+        // Freeze the OAM-DMA across the unhalt window BEFORE firing the deferred
+        // HDMA block: Gambatte's `Memory::stop` runs `intreq_.halt()` first, so the
+        // dma() event firing during the window interleaves through `updateOamDma`'s
+        // `halted()` branch (oamDmaPos_ frozen). Setting the freeze here makes the
+        // block's OAM-DMA interleave honor it (hdma_transition_speedchange_oamdma).
+        mmio.mmio.set_oam_dma_stop_freeze(true);
         let dma_stall_before = mmio.mmio.peek_dma_stall();
         if let Some(fires_in_halt) = deferred_stop_fire {
             if fires_in_halt {
@@ -244,11 +250,7 @@ pub fn stop(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // post_opcode_cc + 0x20000 + 4, exactly Gambatte's `(cc()-4) + 0x20000 + 4`,
         // holding the offset constant at 58368.
         cpu.stop_unhalt_cycles = 0x20000;
-        // Freeze the OAM-DMA across the unhalt window (Gambatte `Memory::stop`
-        // `intreq_.halt()` -> `updateOamDma` `halted()` branch: `oamDmaPos_`
-        // stays put). An OAM-DMA in flight at the STOP keeps its position so the
-        // post-switch conflict read sees the same in-flight byte Gambatte does.
-        mmio.mmio.set_oam_dma_stop_freeze(true);
+        // (OAM-DMA freeze already armed above, before the deferred HDMA block fire.)
         return 8;
     }
 
