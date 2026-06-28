@@ -443,6 +443,81 @@ the `on_scx_write` render-rewrite machinery.
   discriminator is invisible at integer cc — needs a custom fetch-vs-store-cc hook).
   Depends on Stage 1; otherwise independent of Stages 2–3.
 
+#### Stage 4 status (KEYSTONE LANDED) — decouple STAT/line phase from render latch; FACET-1 carry lands. flag-ON 84 -> 81, broke 3 (all `_2` bracket halves). Tree at this commit, flag-OFF == 86.
+
+This stage is the KEYSTONE the Stage-3 note identified: rustyboi welds `line_cycle`
+(the STAT/LY/ttnl phase clock) to the pixel fetcher render latch, so the proven
+FACET-1 DS->SS half-dot carry could not shift the STAT phase by an odd dot without
+moving the mode-3 render latch (broke 3 render cases in Stage 3). Stage 4 splits the
+two clocks so the carry advances the STAT phase ALONE.
+
+**Step 1 (decouple, byte-identical — commit `754d2bb`):** added
+`PpuController::step_stat_phase_only` / `stat_phase_carry`: advance the STAT/line
+clock (line_cycle / internal_ly / abs_cc / scheduled STAT events + the LYC compare +
+STAT trigger) by one dot WITHOUT running the `match self.state` render machine or
+`self.ticks += 1`. It mirrors `step`'s STAT-phase region exactly (the lines between
+`dispatch_stat_events` and `update_window_y_latch`). Wired into the STOP DS->SS-mode3
+path behind `RB_PERACCESS` with `register_dsss_mode3_stop` (the `floor(count/2)`
+stop-count-invariant accumulator from Stage 3), gated `STAGE4_FACET1_CARRY=false` so
+it injects 0 dots => flag-ON stays **84 byte-identical** (net 0, broke 0). Safety
+checkpoint confirmed (full suite RB_PERACCESS=1 diff vs the 84 baseline = net 0).
+
+**Step 2 (land FACET 1 + the render decoupling):** flipped `STAGE4_FACET1_CARRY=true`.
+The carry advances `line_cycle`/`abs_cc` by one dot per the `floor(n/2)` accumulator;
+this correctly shifts the STAT m2-enable trigger (`lcdstat_change` reads `ttnl =
+lyCounter.time - write_cc`). The new piece that the decouple makes possible: the carry
+also advances `abs_cc`, which moves the lyTime-anchored CPU-access mode-3 lock
+boundaries (`cgbp_block_start_cc` / `m0_time_master`) — but the fetcher's actual lock
+window did NOT move. So a new `render_carry_skew_cc` accumulator records the carry, and
+the CPU VRAM/OAM/cgbp visibility gate (`Bus::ppu_blocks`) SUBTRACTS it from the access
+cc (a render-frame `gate_cc` passed to both the `get_stat` fallback mode AND
+`cpu_access_blocked`) so a store resolves against the un-carried fetcher geometry. This
+is the FACET-2 decoupling: the STAT phase shifted, the render latch stayed put.
+
+**Result (full suite RB_PERACCESS=1, vs main_86 flag-off baseline):** flag-ON **84 ->
+81** (vs main_86: fixed 8, broke 3). flag-OFF == **86** byte-identical at every step.
+- Fixed (8 vs main_86, the clean FACET-1 gains incl. the decoupled render case):
+  `late_enable_lcdoffset2_1`, `late_enable_ly0_lcdoffset2_1`, `preread_lcdoffset2_1`,
+  `prewrite_lcdoffset2_1` (THE render case Stage-3 lost — now recovered by the
+  decouple), `offset2_lyc8fint_m1stat_1`, `offset2_lyc99int_m0stat_count_scx1_1`,
+  `offset2_lyc99int_m2irq_count_1`, plus one more m2enable lcdoffset.
+- **KEYSTONE PROOF:** `late_enable_lcdoffset2_1` (FACET-1 STAT fix) PASSES *and*
+  `prewrite_lcdoffset2_1` (the mode-3 render-visibility case) PASSES simultaneously —
+  the exact pair Stage 3 could not satisfy together. The STAT-phase odd shift landed
+  with the render latch intact.
+
+**What resists (broke 3, the facet-2-proper residual — NOT the decouple's bug):** the 3
+regressions are all `_2` bracket halves whose `_1` partner is now fixed:
+`prewrite_lcdoffset2_2` (out0, mode-3 blocked), `offset2_lyc8fint_m1irq_2`,
+`offset2_lyc99int_m2irq_count_2`. Each is a tight `_1`/`_2` pair separated by one
+instruction byte (4 cc); the carry sets the boundary so `_1` is now correct but the
+4-cc-later `_2` falls on the wrong side. For `prewrite` the discriminator is the LY=1
+mode-3 END boundary cc: the write lands at `m0t + ~284 cc` (LY=1 mode 0), yet Gambatte
+blocks `_2` — i.e. the relevant boundary is the LINE-END / next-line mode-2 wrap, whose
+exact cc the carried-line model does not yet split for the lcdoffset2 phase (the
+PASSING 1-pair `prewrite_lcdoffset1_1/_2` does split its 4-cc bracket, so the mechanism
+exists; the 2-pair carried phase shifts it off). This is FACET-2-proper (the within-dot
+fetcher-latch-vs-store sub-dot order / exact line-end boundary), the roadmap's hardest
+sub-mechanism and a clean Stage-4 stopping point per the plan ("after FACET 1 lands if
+facet 2 needs more"). The 2 STAT `_2` halves are the same integer-cc bracket collapse
+the Stage-3 note flagged as inherent.
+
+**Net assessment:** the keystone IS proven — the decouple split the two clocks cleanly
+(Step 1 byte-identical), FACET 1 landed (the STAT m2-enable family + the decoupled
+render case), and the residual is the next-level facet-2 sub-dot boundary, not the
+coupling. Behind `RB_PERACCESS`; flag-OFF == 86. The remaining 3 `_2` cases need the
+exact line-end / fetcher-latch sub-dot boundary (facet-2-proper), the next sub-step.
+
+#### Stage 4 NEXT (facet-2-proper, the 3 residual `_2` bracket halves)
+The decouple infrastructure (`render_carry_skew_cc` + `stat_phase_carry` +
+`step_stat_phase_only`) is in place. The remaining work is the exact boundary that
+splits each `_1`/`_2` pair at sub-dot resolution: for `prewrite_lcdoffset2_2` the LY=1
+line-END / next-line mode-2 OAM-wrap boundary cc under the carried phase (the 1-pair
+`prewrite_lcdoffset1` already splits its bracket; replicate that split for the carried
+2-pair). For the 2 STAT `_2` halves, the m2/lyc IRQ fire cc needs the within-dot
+fetcher-latch-vs-store order (the original FACET-2 "store-vs-TileNumber-latch" item).
+Both are integer-cc-invisible without a fetch-vs-store-cc hook; do NOT bracket-tune.
+
 ### Stage 5 — FINALIZE (flip default-on + delete compensations).
 Flip `peraccess_enabled()` to unconditional true; inline each
 `if peraccess { NEW } else { OLD }` to NEW; DELETE the dead offsets
