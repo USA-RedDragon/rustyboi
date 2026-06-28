@@ -18,6 +18,21 @@ pub(crate) fn faithful_enabled() -> bool {
     true
 }
 
+/// sub-master-cc engine STAGE 0 scaffolding (RB_SUBCC). When OFF (default) every
+/// path is byte-identical to HEAD (suite == 73). When ON the per-dot fetcher's
+/// BG-column projection and the SCX/SCY/LCDC/WY store-apply cc follow Gambatte's
+/// `update(cc + 2*cgb); setScx` integer-cc geometry (the store-vs-TileNumber-latch
+/// order). See ENGINE_SUBCC.md. VERDICT: order-solvable on the integer cc grid, NOT
+/// a sub-master-cc clock. Env-gated for on-branch testing ONLY; inline/remove before
+/// any merge to main (same pattern as the retired RB_PERACCESS/RB_SUBDOT). No stages
+/// are implemented yet — this accessor gates zero behavior at Stage 0.
+#[allow(dead_code)]
+pub(crate) fn subcc_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RB_SUBCC").is_ok())
+}
+
 /// ds-engine STAGE 6/7: the run-to-next-event scheduler is the single CPU world-
 /// advance path. `tick_m` advances `master_cc` by the access duration (one
 /// M-cycle = 4 dots) and a single `run_to(target_cc)` resolves every peripheral
