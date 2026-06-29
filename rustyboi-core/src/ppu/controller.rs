@@ -5954,16 +5954,19 @@ impl Ppu {
         let to_next = time - cc; // timeToNextLy
 
         if ly_reg == last_line {
-            // Line 153: FF44 reads 0 early (Gambatte getLyReg). At single speed the
-            // renderer's dot-6 LY->0 flip handles MOST of line 153 correctly, EXCEPT
-            // at the very top of the line (`to_next >= cpl`, the just-wrapped sub-dot
-            // where the closed-form LY counter has rolled to 153 but the renderer
-            // register is still one M-cycle stale on the prior line). There the
-            // renderer reads the wrong (prior) LY, so resolve from the counter:
-            // Gambatte's getLyReg returns 0 for the whole of line 153 single speed.
-            // For the rest of the line defer to the renderer (return None).
+            // Line 153: FF44 reads 0 early (Gambatte getLyReg). At single speed,
+            // Gambatte's getLyReg (video.h:135, `time - cc <= cpl - isAgb`) returns
+            // 0 for the WHOLE of line 153 (for non-agb the bound is cpl, always
+            // satisfied within the line). rustyboi's `to_next` carries the +1 lyTime
+            // correction (its closed-form counter runs 1cc below Gambatte's lyTime),
+            // so compare the RAW time (`to_next - 1`) against cpl. The old top-only
+            // path (`to_next >= cpl`) deferred the rest of the line to the renderer's
+            // dot-6 LY->0 flip, but that flip has NOT happened at a just-wrapped
+            // ISR-entry read (offset2_lyc98int_ly_count_2: to_next=454, renderer
+            // still 153) where Gambatte returns 0 — the renderer-flip race. The
+            // faithful whole-line-0 resolution removes it.
             if !ds {
-                if to_next >= cpl {
+                if to_next - 1 <= cpl {
                     return Some(0);
                 }
                 return None;
