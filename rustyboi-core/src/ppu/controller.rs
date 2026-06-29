@@ -5937,7 +5937,13 @@ impl Ppu {
         };
         let cmp = stat_irq::get_lyc_cmp_ly(&lc_master, access_cc);
         let lyc_reg = mmio.read(LYC) as u32;
-        Some(lyc_reg == cmp.ly && cmp.time_to_next_ly > 2)
+        // video.cpp:820 getStat LYC flag: `timeToNextLy > 2 - (!isDoubleSpeed()
+        // && isAgb())`. AGB single-speed lowers the compare threshold by one, so
+        // the LYC=LY flag stays set one extra dot at the line tail. DS and the
+        // STAT-IRQ-trigger paths (statChange/lycRegChange) keep the plain `> 2`
+        // (Gambatte applies the isAgb term ONLY here, in the FF41 register read).
+        let agb_term = (!lc_master.ds && mmio.is_agb()) as i64;
+        Some(lyc_reg == cmp.ly && cmp.time_to_next_ly > 2 - agb_term)
     }
 
 
