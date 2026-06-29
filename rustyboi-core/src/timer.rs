@@ -146,6 +146,11 @@ pub struct Timer {
     /// LATE: tc00_irq_1 / tc01_irq_1 / stopstart).
     #[serde(skip, default)]
     isr_on_early_grid: bool,
+    // AGB (GBA-in-GBC-mode) hardware flag (Gambatte `agbFlag`). Set once from
+    // `Mmio::set_agb`. Only consulted by `set_tac` for the AGB TAC-enable timer
+    // quirk; false for DMG/CGB so those targets are byte-identical.
+    #[serde(skip, default)]
+    is_agb: bool,
 }
 
 fn disabled_time() -> u64 {
@@ -173,7 +178,14 @@ impl Timer {
             last_apu_cc: 0,
             ei_promoted: false,
             isr_on_early_grid: false,
+            is_agb: false,
         }
+    }
+
+    /// Set the AGB hardware flag (Gambatte `agbFlag`). Propagated from
+    /// `Mmio::set_agb` at construction.
+    pub fn set_agb(&mut self, agb: bool) {
+        self.is_agb = agb;
     }
 
     /// STAGE 2 (RB_FAITHFUL): the cc the most recent still-undispatched TIMA IRQ
@@ -458,7 +470,8 @@ impl Timer {
         self.tma = data;
     }
 
-    /// Gambatte `Tima::setTac` (DMG / CGB; `agbFlag` is false for both targets).
+    /// Gambatte `Tima::setTac`. The `agbFlag` branch (the AGB TAC-enable timer
+    /// quirk) is gated on `self.is_agb`, so DMG/CGB are byte-identical.
     fn set_tac(&mut self, data: u8) {
         let cc = self.access_cc();
         if (self.tac ^ data) != 0 {
@@ -481,6 +494,18 @@ impl Timer {
             }
 
             if data & TAC_ENABLE != 0 {
+                // AGB "timer quirk" (Gambatte tima.cpp:150-160, GSR commit 144e4e9
+                // since r649): on a TAC write that (re)enables the timer, AGB bumps
+                // TIMA by one when the OLD frequency's feeding DIV bit is high but
+                // the NEW frequency's bit is low. isAgb-gated; DMG/CGB skip it.
+                if self.is_agb {
+                    let diff = cc - self.div_anchor;
+                    let old_bit = (diff >> (TIMA_CLOCK[(self.tac & 3) as usize] - 1)) & 1;
+                    let new_bit = (diff >> (TIMA_CLOCK[(data & 3) as usize] - 1)) & 1;
+                    if old_bit == 1 && new_bit == 0 {
+                        self.tima = self.tima.wrapping_add(1);
+                    }
+                }
                 let new_clk = TIMA_CLOCK[(data & 3) as usize];
                 self.tima_last_update =
                     cc - ((cc - self.div_anchor) & ((1u64 << new_clk) - 1));
