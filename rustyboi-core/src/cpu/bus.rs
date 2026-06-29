@@ -18,6 +18,38 @@ pub(crate) fn faithful_enabled() -> bool {
     true
 }
 
+/// ENDGAME milestone-1 gate (`RB_CANONICAL_CC`). OFF (unset / `=0`) => the CPU
+/// paths are byte-identical to `main_31`. ON => the experimental per-access-cc
+/// corrections for the final-15 boundary families are active. This flag is a
+/// DEV-ONLY knob on the `endgame-cc` branch; it must be inlined/removed before
+/// any merge to main. Read once, cached.
+pub(crate) fn canonical_cc_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(std::env::var("RB_CANONICAL_CC").as_deref(), Ok("1") | Ok("on") | Ok("true"))
+    })
+}
+
+/// ENDGAME R1 STOP-window parity sweep (`RB_CANONICAL_CC_ADJ`, signed int,
+/// default 0). Only consulted when `canonical_cc_enabled()`. Adds `ADJ` T-cycles
+/// to the post-STOP unhalt window so the per-access CPU cc accumulated across the
+/// 4 back-to-back STOPs in the `offset2_*` family can be swept ±1cc against the
+/// cctracer FF44-read oracle. A pure de-risk lever: it proves whether the
+/// remaining offset2 error is a STOP-window parity (a single ADJ moves the
+/// failing case AND leaves the passing sibling) or a deeper coupling (any ADJ
+/// swaps the sibling). Cached.
+pub(crate) fn canonical_cc_stop_adj() -> i64 {
+    use std::sync::OnceLock;
+    static ADJ: OnceLock<i64> = OnceLock::new();
+    *ADJ.get_or_init(|| {
+        std::env::var("RB_CANONICAL_CC_ADJ")
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0)
+    })
+}
+
 /// ds-engine STAGE 6/7: the run-to-next-event scheduler is the single CPU world-
 /// advance path. `tick_m` advances `master_cc` by the access duration (one
 /// M-cycle = 4 dots) and a single `run_to(target_cc)` resolves every peripheral
