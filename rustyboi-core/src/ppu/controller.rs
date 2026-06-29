@@ -1790,7 +1790,35 @@ impl Ppu {
                     // window stops here and the next tile fetch reverts to BG
                     // (Gambatte Tile::f0 `winDrawState & win_draw_started` gate).
                     if self.fetcher.is_fetching_window() {
-                        self.fetcher.stop_window();
+                        // Gambatte Tile::f0 commits each window tile's window-vs-BG
+                        // choice at the tile boundary (`xpos == endx`, where the
+                        // window-tile grid is `(xpos + wscx) % tile_len == 0`). A
+                        // WE-off that lands EXACTLY on a window-tile boundary reverts
+                        // to BG at the next tile; one that lands MID-tile lets the
+                        // already-committed in-progress tile finish first (one extra
+                        // window tile). Mapping Gambatte's `(xpos + wscx) % 8` into
+                        // rustyboi's integer fetcher geometry (xpos == display x +
+                        // (26 - win_x_start), wscx == 256 - win_x_start) gives the
+                        // boundary test `(x + 2 - 2*win_x_start) % 8 == 0`. This is
+                        // the byte-exact discriminator between wx17 (mid-tile -> +1
+                        // tile) and weon_wx18 (boundary -> +0), which share an
+                        // identical fetch-grid cc phase but differ in absolute
+                        // display-x / window alignment.
+                        // Scoped to CGB: Gambatte's mid-tile boundary completion
+                        // for a WE-off lives in StartWindowDraw::inc behind an
+                        // explicit `&& p.cgb` gate, and the (26 - win_x_start) /
+                        // (256 - win_x_start) xpos/wscx mapping is the CGB
+                        // fetcher geometry. On DMG the warmup/cgb_adj phase
+                        // differs and the prior immediate-revert is byte-exact
+                        // (wx17/weon DMG pass at baseline), so leave DMG on extra=0.
+                        let extra = if cgb_features_enabled {
+                            let wxs = self.fetcher.window_x_start_dbg() as i32;
+                            let phase = (self.x as i32 + 2 - 2 * wxs).rem_euclid(8);
+                            if phase == 0 { 0u8 } else { 1u8 }
+                        } else {
+                            0u8
+                        };
+                        self.fetcher.stop_window_with_extra(extra);
                         self.window_started_this_line = false;
                     }
                 }
