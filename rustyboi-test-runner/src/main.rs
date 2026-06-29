@@ -63,6 +63,22 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     json: Option<PathBuf>,
 
+    /// Run the REAL boot ROM (bios/dmg_boot.bin, bios/cgb_boot.bin) before each
+    /// test instead of the synthetic skip_bios seed (mirrors Gambatte). Falls
+    /// back to skip_bios per case if the matching bios file is absent.
+    #[arg(long)]
+    real_bios: bool,
+
+    /// Directory holding dmg_boot.bin / cgb_boot.bin (default: bios/).
+    #[arg(long, value_name = "DIR")]
+    bios_dir: Option<PathBuf>,
+
+    /// Diagnostic: run the real boot ROM to handoff and diff the FULL post-boot
+    /// state against skip_bios() for the requested mode(s); print every
+    /// discrepancy and exit. Requires a ROM (uses the first discovered/given).
+    #[arg(long)]
+    validate_bios: bool,
+
     /// Explicit ROM paths, Gambatte testrunner style.
     #[arg(value_name = "ROM")]
     roms: Vec<PathBuf>,
@@ -95,6 +111,23 @@ fn run() -> Result<u8, String> {
 
     if let Some(limit) = args.limit {
         roms.truncate(limit);
+    }
+
+    if args.validate_bios {
+        let rom = roms
+            .first()
+            .ok_or_else(|| "no ROM available for --validate-bios".to_string())?;
+        let mut total = 0usize;
+        for mode in [Mode::Dmg, Mode::Cgb] {
+            if enabled_modes.contains(&mode) {
+                match runner::validate_bios(rom, mode, args.bios_dir.as_ref()) {
+                    Ok(n) => total += n,
+                    Err(e) => eprintln!("validate-bios {:?}: {e}", mode),
+                }
+            }
+        }
+        println!("\nGRAND TOTAL discrepancies across modes: {total}");
+        return Ok(0);
     }
 
     let discovered_roms = roms.len();
@@ -132,6 +165,8 @@ fn run() -> Result<u8, String> {
         trace_limit: args.trace_limit,
         trace_frame: args.trace_frame,
         trace_ly: args.trace_ly,
+        real_bios: args.real_bios,
+        bios_dir: args.bios_dir.clone(),
     };
 
     for case in cases {
