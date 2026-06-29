@@ -531,3 +531,58 @@ right). The fix is in the bridge cc bookkeeping (`stop_bridge_advance` / `perfor
 cc for EVERY STOP-timing — i.e. the faithful continuous re-anchor, after which
 `lytime_no_plus1` (the binary stand-in) is deleted. This is the genuine coupled bridge build;
 the per-test 1cc cannot be sliced. All probes flag-OFF byte-identical to main_28; reverted clean.
+
+### Milestone-7 (LANDED: the per-test 1cc IS sliceable — it's the FACET1 mode-3 STAT-phase carry) — `offset2_lyc99int_m0stat_count_scx2_1` FIXED, flag-ON net −1 broke 0
+m6b said "the per-test 1cc cannot be sliced." **That was wrong** — the ARM-site differential
+this session found the distinguisher and it slices cleanly.
+
+**ARM-site trace (both siblings IDENTICAL):** `p_now`, `abs_cc`, `lc.time`, `m0t-master=168`,
+`ticks=82` — the m0Time computed at M3-arm is byte-identical for target and victims. So the
+1cc is NOT in the m0Time derivation (correcting m6b).
+
+**Read-site trace — the distinguisher is `render_carry_skew_cc`:**
+| | read cc | m0t−cc | `ticks` (read lineCycle) | `line_cycle` | **`render_carry_skew_cc`** |
+|---|---|---|---|---|---|
+| target `_1` | 564908 | 2 | **250** | 251 | **1** |
+| victim offset1 `_2` | 288696 | 2 | 251 | 251 | **0** |
+| victim offset3 `_2` | 288696 | 2 | 249 | 249 | **0** |
+
+The target is a `dsss_mode3_switch` (DS→SS during mode 3): its FACET1 STAT-phase carry
+(`stat_phase_carry`, "every 2nd mode-3 switch carries one STAT dot") advanced `line_cycle`/
+m0Time by 1 dot WITHOUT moving the render latch (`ticks`) or the read-cc grid — so `ticks`
+(250) is 1 BEHIND `line_cycle` (251) and the FF41 read cc sits 1 dot behind the carried
+m0Time. The victims took no mode-3 carry (`render_carry_skew_cc==0`), so `ticks==line_cycle`
+and their read is already aligned. **That carry IS the per-test 1cc — recorded in live state,
+fully sliceable.**
+
+**THE FIX (faithful, env-gated `RB_CANONICAL_CC`):** subtract the carry in the getStat mode-3
+read boundary: `read_off = base − render_carry_skew_cc` when `lytime_no_plus1`. The carry
+advanced the STAT/m0Time clock relative to the read grid, so Gambatte's `cc + 2 < m0Time` is
+evaluated with the read cc shifted back onto the carried grid (`cc + (2 − carry) < m0Time`).
+Target: off 2→1 → mode 3 ✓. Victims: off 2−0=2 → mode 0 ✓. Centralized in `stat_read_off(ds)`,
+used by all four getStat mode-3 read sites (mode3to0 + 3 midframe paths).
+
+**VALIDATION (full suite):** flag-OFF byte-identical to main_28 (net +0, broke 0); flag-ON
+net −1, fixed 1 (`offset2_lyc99int_m0stat_count_scx2_1`), broke 0. cctracer proof: Gambatte
+target read `cc=623280 m0Time=623283 cc+2=623282<623283 → STAT=0x83 mode3`, lineCycle(m0Time)
+=253; rustyboi flag-ON resolves mode 3 there. Release + debug clean.
+
+**Which of the ~10 moved:** 1 — R1-m0stat. R2's 8 HDMA brackets + R3 did NOT move: R3's
+post-STOP read is in HBlank state (not the PixelTransfer mode3to0 path); R2's are the
+m2-service/unhalt TIMA path with no `render_carry_skew_cc`. They share the post-DS→SS theme
+but not this mode-3-carry read path — each needs its own audit (R3 = HBlank-state getStat
+under carry; R2 = unhalt service cc).
+
+**MAIN-MERGE CANDIDATE (env-free):** faithful (subtract the real FACET1 carry the STAT phase
+already tracks), flag-ON net −1, broke 0. Env-free = drop the `canonical_cc_enabled()` guard
+so the subtraction always runs (carry is 0 except on a post-mode-3-switch line ⇒ inert
+elsewhere ⇒ byte-identical to flag-OFF on all but the fixed case). Exact env-free helper:
+```rust
+fn stat_read_off(&self, ds: bool) -> i64 {
+    let base = if !ds && !self.lytime_no_plus1 { 3 } else { 2 };
+    // FACET1 mode-3 STAT-phase carry advanced m0Time relative to the read grid;
+    // realign the getStat boundary by the carry (0 on non-carry lines => inert).
+    if self.lytime_no_plus1 { base - self.render_carry_skew_cc } else { base }
+}
+```
+(+ the 4 call sites using `self.stat_read_off(ds)`). Verify env-free full suite = main_27, broke 0.
