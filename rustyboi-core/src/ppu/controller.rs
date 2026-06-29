@@ -5435,6 +5435,39 @@ impl Ppu {
         Some(started && !ended)
     }
 
+    /// Byte-exact Gambatte `LCD::vramReadable(cc)` for a CPU VRAM read at master-cc
+    /// `cc`, resolved purely from the lyTime-derived `lineCycles(cc)` and
+    /// `m0TimeOfCurrentLine` — NOT the renderer's current FF41 mode register.
+    /// (video.cpp:381): readable iff LCD off, in vblank, the line-start inactive
+    /// window, `lineCycles(cc) + ds < 76 + 3*cgb` (still in mode 2 / before the
+    /// mode-3 lock), or `cc + 2 >= m0Time` (mode 0 reached). Used by the
+    /// PC-in-DMA-dest opcode-prefetch absorption (`Bus::fetch_opcode`): the GDMA's
+    /// prefetch opcode at the block's first dest byte must see VRAM readable at the
+    /// prefetch cc the same way Gambatte's `Interrupter::prefetch` (run BEFORE
+    /// `dma()` overwrites VRAM) does — including the mode-2 readable window
+    /// (late_gdma_pc_7ffe_1: lineCycles 76 < 79 -> readable -> pre-byte) and the
+    /// mode-3 lock just past it (late_gdma_pc_7ffe_2: lineCycles 80 -> locked).
+    /// Returns None when no closed-form m0Time exists (window / first line after
+    /// enable) so the caller falls back to the renderer-mode lock.
+    pub fn vram_readable_at_cc(&self, cc: u64, is_cgb: bool, ds: bool) -> Option<bool> {
+        if self.disabled || self.internal_ly_val >= 144 {
+            return Some(true);
+        }
+        let m0t = self.m0_time_master? as i64;
+        let cc = cc as i64;
+        let dsi = ds as i64;
+        // Gambatte `lineCycles(cc) = 456 - ((lyTime - cc) >> ds)` (the same lyTime
+        // phase the OAM-read END boundary uses in `cpu_access_blocked`).
+        let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
+        let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as i64;
+        let ly_time = self.p_now as i64 + self.abs_cc as i64 + (dots_to_next << dsi) + plus1;
+        let line_cycles = stat_irq::LCD_CYCLES_PER_LINE as i64 - ((ly_time - cc) >> dsi);
+        // mode-2 readable window (before the mode-3 lock) OR mode-0 reached.
+        let mode2_readable = line_cycles + dsi < 76 + 3 * is_cgb as i64;
+        let mode0_reached = cc + 2 >= m0t;
+        Some(mode2_readable || mode0_reached)
+    }
+
     /// Gambatte `getStat` mode-3 <-> mode-0 resolution at the CPU's access cc.
     /// Returns the FF41 lower two mode bits the CPU observes when reading FF41 at
     /// `access_cc` (master-cc units), or None when no closed-form m0Time is
