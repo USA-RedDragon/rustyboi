@@ -1033,3 +1033,68 @@ mechanisms (separate). No new clean block-context slice found this session beyon
 byte-identical to main_25; no flag-ON change landed (the `_6` block lever was the wrong direction,
 reverted). The remaining R2 brackets converge on the STOP-window/bridge cc + unhalt-service cc —
 the levers the campaign has repeatedly flagged as shared/high-risk, now confirmed for `_6` too.
+
+### Milestone-16 (dedicated audit of the 6 unhalt-service-cc brackets) — grouped; B = definitive byte-identical floor, A = HALT-bug resume-PC, C = m2-service PC
+Applied the `_3` per-context-discrimination rigor to all 6. None is a clean block-cost slice; the
+three groups are distinct CPU/DMA-state mechanisms:
+
+**Group A — `hdma_transition_*_ldaaimm` ×3 (out00/02): HALT-bug / late-unhalt RESUME-PC accounting.**
+Test: TIMA int → HDMA (FF55=81, 2 blocks) → HALT → late unhalt → `ld a,(0080)` (3-byte ldaaimm) →
+print. The pass/fail keys on WHICH instruction the unhalt resumes at. cctracer vs engine
+(`hdma_transition_halt_late_unhalt_ldaaimm_hdma_scx1_1`, FAIL out00):
+- Gambatte resumes at **pc=0x1187 opcode=0xFA** (runs the ldaaimm once), then 0x1189.
+- rustyboi resumes at **pc=0x1189** (SKIPS the 0xFA at 0x1188 — runs the operand byte as an opcode).
+The HDMA blocks are byte-identical between siblings (same fires, same `len_after`); the divergence
+is the **resume PC after the late unhalt** — rustyboi's HALT-bug/late-unhalt prefetch lands the PC
+1-2 bytes off for the multi-byte resume instruction. This is a concrete CPU-level bug (NOT a
+byte-identical floor) but in the HALT-bug prefetch/double-execute path (`opcodes.rs::halt`,
+`sm83.rs` unhalt) shared by every HALT test — high-risk, needs a focused HALT-bug-PC audit, not the
+block-cost lever.
+
+**Group B — `hdma_m0speedchange_late_m3wakeup_scx{1,2}_2` ×2 (out00): DEFINITIVE BYTE-IDENTICAL FLOOR.**
+Test: ISR → HDMA (FF55=81, 2 blocks) → STOP speed-switch → NOPs → read FF55 → print. `_1`(outFF,pass)
+vs `_2`(out00,FAIL) differ by 1 `.text` byte (1 NOP). At the deciding FF55 read, rustyboi state is
+**byte-identical** between `_1` and `_2`:
+| | read cc | FF55 val | hlen | hen | hreq | halt_hdma_state | in_stop |
+|---|---|---|---|---|---|---|---|
+| _1 (pass FF) | 174792 | FF | 127 | false | false | Low | false |
+| _2 (FAIL→00) | 174796 | **FF** | 127 | false | false | Low | false |
+Both fire BOTH blocks (transfer wraps, FF55=FF); the only difference is the read cc (+4). Gambatte's
+`_2` has the 2nd block NOT yet completed at the read (FF55=00) — its 2nd-block fire / STOP-freeze
+lands the read on the other side of the transfer-complete boundary. rustyboi's 2nd block fires far
+too early (cc ~43626, vs the read at ~174796), identically for both siblings, so there is **NO
+live-state key** distinguishing `_2` from `_1` at the read. Like R4: byte-identical engine state,
+opposite answers — a genuine sub-master-cc (here, STOP-freeze-vs-2nd-block-fire) floor. The 2nd-block
+fire cc is the same for both → not sliceable.
+
+**Group C — `hdma_late_ei_m3halt_m2unhalt_pc_scx1_2` ×1 (outAD): m2-service-vs-HDMA-unhalt PC bracket.**
+The `pc` variant prints the PC pushed by the m2 (STAT) interrupt service during the HALT. `_1`(AC,pass)
+/ `_2`(AD,FAIL) / `_3`(AE,pass) are CONSECUTIVE PC values — `_2` lands on the wrong side of the
+m2-service-vs-HDMA-block push ordering (the `hdma-unhalt-bracket-floor` 1-cc bracket: whether the
+HDMA block fires before or after the m2 ISR's PC push). The pushed-PC depends on the exact m2-service
+cc vs the block m0-edge — a sub-master-cc ordering, indistinguishable at the engine level (the
+`ly`-variant siblings `_1.._6` all PASS, so the dispatch is right; only the `pc` push-cc straddle
+fails). Sub-master-cc m2-service floor.
+
+**VERDICT (per group):**
+- **A (3 cases): a real HALT-bug late-unhalt RESUME-PC bug** — fixable in principle but in the
+  high-risk HALT-bug prefetch path; needs a dedicated HALT-bug-PC audit (resume PC for a multi-byte
+  instruction after a non-bug late unhalt). NOT a floor, NOT a block slice. Deferred to a focused
+  HALT-bug session.
+- **B (2 cases): DEFINITIVE byte-identical floor** — rustyboi's 2nd-block-fire/STOP-freeze cc is the
+  same for the failing and passing siblings; the FF55 read lands on opposite sides of the
+  transfer-complete boundary with no distinguishing engine state. Sub-master-cc; like R4.
+- **C (1 case): sub-master-cc m2-service-PC floor** — the pushed PC straddles the m2-service-vs-block
+  push ordering by 1cc, indistinguishable at the engine level (the dispatch itself is correct — only
+  the push-cc straddle).
+
+No clean per-context slice (like `_3`) exists in these 6. `_3` was special: the discriminator
+(`halt_hdma_state == Requested`) was a real engine-state flag AND the lever (block transfer cc) was
+block-local. The 6 here are either sub-master-cc floors (B, C — byte-identical/1-cc-straddle) or a
+HALT-bug PC bug (A — concrete but high-risk CPU path). flag-OFF byte-identical to main_25; audit
+only, no code changed.
+
+**R2/R3/R4 final tally:** R2 = 1 landed (`_3`, on main), `_6` = bridge-cc tlu (m15), 3 = HALT-bug PC
+(A), 2 = STOP-freeze FF55 floor (B), 1 = m2-service PC floor (C). R3 = m4b m0Time phase. R4 = m12 DMG
+halt-wakeup floor. The remaining default-suite work is: the HALT-bug-PC audit (group A, 3 cases) and
+the bridge-cc/sub-master-cc deep levers (everything else).
