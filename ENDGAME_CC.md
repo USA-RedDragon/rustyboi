@@ -586,3 +586,58 @@ fn stat_read_off(&self, ds: bool) -> i64 {
 }
 ```
 (+ the 4 call sites using `self.stat_read_off(ds)`). Verify env-free full suite = main_27, broke 0.
+
+### Milestone-8 (rebased onto main@28→27; R2 HDMA-TIMA bracket audit) — DEFINITIVE BLOCKER: STOP-window/bridge cc residue, NOT a TIMA-local sliceable key
+Rebased onto main@2a5030b (m7 landed env-free on main; conflict resolved by taking main's
+unconditional `stat_read_off`). flag-OFF re-verified byte-identical to **main_27** (net +0,
+broke 0). New gate baseline = main_27.
+
+Applied the m7 carry-key technique to R2's `hdma_late_m3speedchange_tima_scx1_ds` bracket
+(`_1`..`_6`, expected F3 F4 F6 F7 F8 F9; `_3`/`_6` FAIL). The siblings differ by NOP count +
+1-byte `.text` shifts that walk the TIMA read cc across a tick edge. Test: TIMA=F0, TMA=F0,
+TAC=05 (fast, clk=4 → 16-cc period), HALT, ISR fires HDMA (FF55=80) + a CGB STOP speed-switch,
+then NOPs, then `ldff a,(05)` and prints TIMA.
+
+**Differential (TIMA read internals, rustyboi vs Gambatte):**
+| sib | rb access_cc | rb tlu | rb (cc−tlu) | rem | rb ticks | rb val | want | carry_skew |
+|---|---|---|---|---|---|---|---|---|
+| _2 | 281648 | 150560 | 131088 | 0 | 8193 | F4 | F4 ✓ | 0 |
+| _3 | 281706 | 150564 | 131142 | 6 | 8196 | F7 | **F6** ✗ (+1) | 0 |
+| _4 | 281710 | 150564 | 131146 | 10 | 8196 | F7 | F7 ✓ | 0 |
+| _5 | 281726 | 150568 | 131158 | 6 | 8197 | F8 | F8 ✓ | 0 |
+| _6 | 281730 | 150568 | 131162 | 10 | 8197 | F8 | **F9** ✗ (−1) | 0 |
+
+**NO sliceable live-state key exists (unlike m7):**
+1. `render_carry_skew_cc == 0` for ALL — the m7 FACET1 mode-3 carry does NOT apply (these
+   STOPs aren't mode-3-render switches). The m7 key does not extend to R2.
+2. The TIMA read math is byte-identical to Gambatte (`ticks = (cc − lastUpdate) >> clk`,
+   tima.cpp:79). The only inputs are `access_cc` (read cc, = the faithful NOP walk) and `tlu`
+   (`tima_last_update`, set at the STOP).
+3. **Same rem, opposite outcomes ⇒ unsliceable by any uniform shift:** `_3` and `_5` BOTH have
+   rem=6 but want opposite (drop a tick vs keep); `_4` and `_6` BOTH have rem=10 but want
+   opposite (keep vs gain). A uniform tlu/cc/floor-phase shift moves all equally and cannot
+   split same-rem siblings. Confirmed by sweep: `RB_CANONICAL_CC_ADJ` on the post-STOP tlu
+   over −16..+8 NEVER fixed `_3`/`_6` (a tlu shift feeds back into access_cc through abs_cc,
+   so `rem` is invariant); negative adj only broke `_2`.
+
+**ROOT (definitive):** the per-test error is the **STOP-window / DS→SS-bridge cc residue**
+landing in `tlu` (and `access_cc`) — the SAME root as R1-m0stat (`ly_time` phase) and R3
+(m0Time phase). Measured: rustyboi's `_3` STOP window = 131126 vs Gambatte 131112 (+14cc); that
+inflation pushes `_3`'s `(cc − tlu)` ~6cc high → 1 extra TIMA tick. `_6` is short the other
+way. `tlu` is anchored AT the STOP cc (`div_reset_split` sets `tima_last_update = abs_cc`,
+which is correct Gambatte behaviour), so the error is upstream in the STOP cc itself, not the
+timer re-anchor. R2 is therefore the SAME post-DS→SS bridge cc build as R1/R3, NOT a separate
+TIMA fix.
+
+**How many of the 8 R2 brackets moved:** 0 — correctly. There is no faithful TIMA-local slice;
+a uniform shift swaps a same-rem sibling (proven). The blocker is precise: rustyboi's STOP
+abs_cc (the bridge-window length) is per-test off by a few cc, and that residue is in BOTH the
+read cc and the TIMA anchor, so the TIMA value cannot be corrected downstream.
+
+**This unifies the endgame:** R1-m0stat, R2 (8 brackets), R3 ALL reduce to the post-DS→SS
+**STOP-window/bridge cc** being byte-exact per STOP-timing. The faithful fix is the bridge cc
+re-anchor (`opcodes.rs::stop` window arithmetic + `stop_bridge_advance`), with acceptance
+tests: m0stat `lineCycle(m0Time)==253`, R2 `_3` STOP window == 131112 (Gambatte) / TIMA
+read == F6, R3 m0Time gap +4. m7's m0stat fix was sliceable ONLY because its specific read had
+the FACET1 carry as a live-state proxy for the residue; R2/R3 have no such proxy and need the
+window cc fixed at the source. flag-OFF byte-identical to main_27; experiments reverted clean.
