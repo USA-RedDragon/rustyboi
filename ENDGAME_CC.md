@@ -1098,3 +1098,41 @@ only, no code changed.
 (A), 2 = STOP-freeze FF55 floor (B), 1 = m2-service PC floor (C). R3 = m4b m0Time phase. R4 = m12 DMG
 halt-wakeup floor. The remaining default-suite work is: the HALT-bug-PC audit (group A, 3 cases) and
 the bridge-cc/sub-master-cc deep levers (everything else).
+
+### Milestone-17 (group-A deep dive) — CORRECTION: group A is NOT a resume-PC bug; it is the HDMA-transfer-vs-resume-VRAM-read timing (same class as B)
+Built and tested the m16-hypothesized resume-PC fix (advance pc past the HALT-Requested-prefetched
+opcode so a multi-byte `ld a,(imm16)` reads operands from pc+1). **It REFUTED the m16 "resume-PC bug"
+reading.** The fix made `_1` read addr **0x0080** (a=01, ROM) — but that is WRONG; the test's
+HALT-bug double-read is SUPPOSED to read **0x80FA** (VRAM).
+
+**The truth (cctracer + engine):** for `hdma_transition_halt_late_unhalt_ldaaimm_hdma_scx1_1` (FAIL):
+- Gambatte: HALT@0x1186 → resume@0x1187 opcode=0xFA (the HALT-bug keeps pc at 0x1187, so the FA
+  reads its operand bytes as `mem(1187)=FA, mem(1188)=80` → **addr 0x80FA**), result **a=0x02**.
+- rustyboi flag-OFF: resume@0x1187, FA reads **addr 0x80FA**, result **a=0xFF**.
+- The passing sibling `_2` (out02): rustyboi reads 0x80FA → a=0x02 → PASSES.
+So **rustyboi's PC handling is already correct** (pc-not-advanced → the HALT-bug double-read of
+0x80FA, matching Gambatte). My m16 "rustyboi resumes at 0x1189" was the POST-FA pc; the FA does run
+at 0x1187. The pc-advance fix was the WRONG direction (it made `_1` read ROM 0x0080).
+
+**The actual residual:** the resume `ld a,(0x80FA)` reads VRAM where the HDMA just transferred 0x02,
+but rustyboi's VRAM is still LOCKED (returns 0xFF) at the resume read cc, where Gambatte's is unlocked
+and returns the transferred byte 0x02. This is the **HDMA-block-transfer-vs-resume-VRAM-read timing** —
+the resume read's VRAM-lock/transfer-completion cc, NOT a PC bug. It is the SAME transfer-timing class
+as group B (the FF55-readback floor): rustyboi's HDMA block transfer / VRAM-unlock cc relative to the
+resume read is off, and the `_1`/`_2` siblings (1 `.text` byte apart) straddle the lock/transfer
+boundary. The `ei_halt_late_unhalt` variants read 0x80EA → FF (same: VRAM locked) where Gambatte has
+the transferred byte.
+
+**CORRECTED VERDICT for all 6 unhalt-service brackets:** none is a clean PC bug. All three groups are
+**transfer-timing / sub-master-cc**:
+- A (3): HDMA-transfer-vs-resume-VRAM-read value (resume reads locked-FF VRAM vs Gambatte's
+  transferred byte) — the VRAM-unlock/transfer-completion cc at the resume read.
+- B (2): STOP-freeze-vs-2nd-block-fire FF55 readback (byte-identical engine state, floor).
+- C (1): m2-service-vs-block-push PC straddle (1cc, floor).
+All converge on the **HDMA block transfer cc / VRAM-unlock cc vs the read cc** at the unhalt — the
+same synchronous-block-vs-event-scheduler issue (m10/m11), now confirmed to also govern the VRAM-read
+value at the resume (not just the timer tlu). `_3` was fixable because its read was a TIMA tick (cc
+only); these read VRAM/FF55/PC where the block's transfer-completion/lock cc (not just the read cc)
+matters — needs the event-interleaved `dma()` (the deferred MinKeeper transfer model), not a
+per-context block-cost slice. No clean slice exists. flag-OFF byte-identical to main_25; the
+resume-PC fix was reverted (wrong direction); audit only, no code landed.
