@@ -39,11 +39,12 @@ std::uint64_t fnv1a(gambatte::uint_least32_t const *buf, std::size_t n) {
     return h;
 }
 
-// Run a ROM in AGB mode, no-bios (post-boot state), 15 frames; hash the frame.
-bool runAgb(std::string const &romfile, std::uint64_t &outHash) {
+// Run a ROM in CGB or AGB mode, no-bios (post-boot state), 15 frames; hash it.
+// agb=true adds GBA_FLAG (AGB mode); agb=false is plain CGB mode.
+bool runAgb(std::string const &romfile, std::uint64_t &outHash, bool agb) {
     gambatte::GB gb;
     int const flags = gambatte::GB::LoadFlag::CGB_MODE
-                    | gambatte::GB::LoadFlag::GBA_FLAG
+                    | (agb ? gambatte::GB::LoadFlag::GBA_FLAG : 0)
                     | gambatte::GB::LoadFlag::NO_BIOS;
     if (gb.load(romfile, flags))
         return false;
@@ -75,12 +76,15 @@ bool runAgb(std::string const &romfile, std::uint64_t &outHash) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s <rom> [rom...]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s [--cgb] <rom> [rom...]\n", argv[0]);
         return 2;
     }
-    for (int a = 1; a < argc; ++a) {
+    int start = 1;
+    bool agb = true;
+    if (std::string(argv[1]) == "--cgb") { agb = false; start = 2; }
+    for (int a = start; a < argc; ++a) {
         std::uint64_t hash = 0;
-        if (runAgb(argv[a], hash)) {
+        if (runAgb(argv[a], hash, agb)) {
             std::printf("%016llx\t%s\n",
                         static_cast<unsigned long long>(hash), argv[a]);
         } else {

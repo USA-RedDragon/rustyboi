@@ -312,6 +312,41 @@ pub fn validate_bios(
     Ok(total)
 }
 
+/// Run a ROM in AGB mode for `frames` frames and return the FNV-1a-64 hash of
+/// the final framebuffer, masked with 0xF8F8F8 per pixel. This matches the
+/// Gambatte-AGB reference generator (tools/gambatte_agb_ref) byte-for-byte
+/// (same mask, same hash, same frame ordering), so the two hashes are directly
+/// comparable. Used by the AGB bootstrap validation (`--agb-vs-gambatte`).
+pub fn agb_frame_hash(rom_path: &PathBuf, frames: usize) -> Result<u64, String> {
+    let rom_data = fs::read(rom_path).map_err(|e| format!("read ROM: {e}"))?;
+    let cartridge = Cartridge::from_bytes(&rom_data).map_err(|e| format!("load ROM: {e}"))?;
+    let mut gb = GB::new(Hardware::AGB);
+    gb.insert(cartridge);
+    gb.skip_bios();
+    gb.set_cgb_color_conversion(
+        rustyboi_core_lib::ppu::CgbColorConversion::Gambatte,
+    );
+
+    let mut last_frame: Option<Vec<u32>> = None;
+    for frame_index in 0..frames.max(1) {
+        let (frame, _bp) = gb
+            .run_until_lcd_frame(false, MAX_CYCLES_UNTIL_LCD_FRAME)
+            .map_err(|e| format!("{e} while running frame {frame_index}"))?;
+        last_frame = Some(frame::normalize_frame(frame));
+    }
+    let frame = last_frame.ok_or_else(|| "no frame produced".to_string())?;
+
+    let mut h: u64 = 1469598103934665603;
+    for px in &frame {
+        let v = px & 0xF8F8F8;
+        for b in 0..4 {
+            h ^= ((v >> (b * 8)) & 0xFF) as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+    }
+    Ok(h)
+}
+
 pub fn run_case(case: TestCase, options: &RunOptions) -> CaseResult {
     match run_case_inner(&case, options) {
         Ok(()) => CaseResult {
