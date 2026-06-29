@@ -65,7 +65,16 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         Mode::Cgb => Hardware::CGB,
     });
     gb.insert(cartridge);
-    gb.skip_bios();
+    // SRAM `.bin` dumper oracles were captured WITH the boot ROM having run, so
+    // they read back the boot-ROM-final residue (VRAM Nintendo logo, CGB feax
+    // 0x08 tail). The `.dump` region oracles and every other case were captured
+    // WITHOUT the boot ROM and need the no-boot zeroed/0x18 state, so they keep
+    // plain `skip_bios`. Select per oracle type.
+    if matches!(case.oracle, Oracle::SramDump { .. }) {
+        gb.skip_bios_with_boot_residue();
+    } else {
+        gb.skip_bios();
+    }
 
     if case.mode == Mode::Cgb {
         gb.set_cgb_color_conversion(CgbColorConversion::Gambatte);
