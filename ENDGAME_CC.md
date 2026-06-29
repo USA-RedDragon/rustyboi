@@ -663,3 +663,57 @@ is NO sliceable per-test live-state key for R2/R3 (carry_skew=0; same-rem opposi
 siblings) — the residue is upstream in the STOP cc, in both the read cc and the timer/PPU
 anchors, so it cannot be corrected downstream. This is the genuine remaining floor for ~9 of
 the reducible cases; it is the bridge-cc surgery, deliberately multi-session.
+
+### Milestone-9 (BUILD attempt: post-DS→SS STOP-window cc surgery) — DEFINITIVE FLOOR: block cost is co-tuned across multiple fire-paths; same-block siblings straddle a TIMA edge no uniform block-cost can split
+Gave the bridge-cc surgery a genuine build attempt. **Located the +14cc precisely** (instr-cc
+aligned, cctracer vs PC-gated engine trace on `hdma_late_m3speedchange_tima_scx1_ds_3`):
+
+- rustyboi STOP-fetch(0x106F)@150560 → resume-fetch(0x1071)@281686 = **131126**.
+- Gambatte STOP-instr@208948 → resume@340060 = **131112**. → rustyboi **+14cc**.
+- The 0x20000 (131072) halt window itself is BYTE-EXACT (STOP-internal→UNHALT = 131072 in
+  rustyboi). The +14 is entirely POST-UNHALT: an HDMA block stall (42cc, `[DMASTALL]@pc=1071`)
+  fires AFTER the window where Gambatte folds the block's `intevent_dma` INSIDE the window
+  (CPU halted throughout → block costs 0 CPU cc), plus the operand-exec.
+
+**Per-sibling block-fire structure (the killer detail):**
+| sib | exec_operand | block fires | path | rb val | want |
+|---|---|---|---|---|---|
+| _2 | false | block @pc=7402 (AFTER the TIMA read) | — | F4 | F4 ✓ |
+| _3 | **true**  | 42cc @pc=1071 (before read) | operand-exec / per-dot edge | F7 | **F6** ✗ |
+| _4 | true  | 42cc @pc=1071 (before read) | operand-exec / per-dot edge | F7 | F7 ✓ |
+| _5 | false | 74cc @STOP (during window) | reflag | F8 | F8 ✓ |
+| _6 | false | reflag @unhalt | reflag | F8 | **F9** ✗ |
+
+**Build attempts (flag-gated, measured):**
+1. **Full reflag-absorb** (fire the unhalt-reflag block, `reduce_dma_stall(produced)` — the
+   faithful "block is free, inside the window"): full suite flag-ON **net +1, broke `_4`**,
+   fixed 0. It over-corrects (drops the read 42cc = ~2.6 ticks) AND only touches the reflag
+   path (`_5`/`_6`-style), not `_3`/`_4` (operand-exec path).
+2. **Parameterized partial absorb** sweep (7..14cc) on the reflag path: absorb 7-9 flipped
+   `_6`→PASS with `_2`/`_4`/`_5` intact, but `_3` was UNAFFECTED (its block fires via the
+   operand-exec/per-dot path, not the reflag) — and 7-9 is a tuned constant, not the block
+   size (42) nor the window excess (14).
+
+**DEFINITIVE FLOOR (why the STOP-window can't be made faithful without a larger rewrite):**
+- The HDMA block's CPU cost is **split across ≥2 co-tuned fire-paths** — `stop_window_exit_reflag`
+  (for `_5`/`_6`) and the operand-exec / per-dot m0-edge path (for `_3`/`_4`). A fix to one path
+  leaves the other's siblings wrong. There is no single block-cost site to correct.
+- `_3`(want F6) and `_4`(want F7) are **byte-identical** through the STOP/unhalt/block (same cc,
+  same 42cc stall) and differ ONLY by the read NOP (read at rem 6 vs 10, same TIMA tick in
+  rustyboi). For both to land correctly, the block must cost a value that places `_3`'s read
+  BELOW a TIMA tick edge and `_4`'s ABOVE it — but any block-cost change shifts BOTH reads
+  equally (they share the block), so it cannot split them. Gambatte splits them because its
+  block is free (read 42cc earlier) AND its tlu/edge phase falls between their reads; rustyboi's
+  block-cc granularity + tlu phase cannot reproduce that sub-tick edge position.
+- Confirms m8: there is no downstream slice. Making the window byte-exact (full absorb) BREAKS
+  the currently-passing same-block sibling (`_4`), because the block cost and the TIMA-tick
+  edge phase are co-tuned — the faithful free-block requires ALSO re-deriving tlu so the tick
+  edge lands between `_3`/`_4`'s reads, i.e. the full Gambatte `Tima`+`Memory::dma`+`speedChange`
+  port, not a window-arithmetic tweak.
+
+**How many moved:** 0 net (full absorb +1/broke `_4`; partial fixes `_6` only at a tuned
+constant). The precise blocker: **the post-DS→SS HDMA-block CPU cost is co-tuned across the
+reflag and operand-exec fire-paths, and same-block TIMA siblings straddle a tick edge that no
+uniform block-cost can split** — the faithful fix is the coupled `Tima`+`dma`+bridge re-derivation
+(block-free window + tlu tick-edge re-anchor together), a larger speedchange rewrite. flag-OFF
+byte-identical to main_27; all experiments reverted clean.
