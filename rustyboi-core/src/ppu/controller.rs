@@ -902,6 +902,15 @@ pub struct Ppu {
     // just-pushed entries back to the OLD-scx column.
     #[serde(default)]
     subcc_revert_next_old: bool,
+    // Two-tile DS straddle (CGB double-speed, low-X sprite): at DS a mid-mode-3
+    // SCX write straddles TWO display tiles because the sprite-fetch dot shifts
+    // the BG fetch phase one tile while the DS FIFO carries an extra tile. Both
+    // straddle tiles must render under the OLD scx at their plot column shifted
+    // back one tile (xpos-8). The first (in-flight) tile is rekeyed at the DS
+    // flip; this flag rekeys the SECOND tile (fetched NEXT under the NEW scx) on
+    // its push back to the OLD-scx column at its own xpos-8.
+    #[serde(default)]
+    ds_straddle_next_old: bool,
     // abs_cc at which the most recent BG TileNumber latch happened (the fetch
     // cc of the tile currently in flight). The armed straddle tile's column was
     // committed at this cc; the rekey compares it to the write's apply cc.
@@ -1084,6 +1093,7 @@ impl Ppu {
             subcc_rekey_armed: false,
             prologue_rekey_armed: false,
             subcc_revert_next_old: false,
+            ds_straddle_next_old: false,
             subcc_last_tn_cc: 0,
             first_line_scx_override: None,
             line_cycle: 0,
@@ -4450,10 +4460,63 @@ impl Ppu {
                                     - self.subcc_last_tn_cc as i64).rem_euclid(step);
                                 phase == (1i64 << dsf)
                             };
+                            // DS two-tile straddle gate: a low-X sprite on the line
+                            // shifts the BG fetch phase one tile while the DS FIFO
+                            // carries an extra tile, so the OLD->NEW scx boundary lands
+                            // one tile LATER than the non-sprite DS cadence and the
+                            // in-flight straddle tile stays OLD instead of flipping to
+                            // NEW (with a further one-tile LY0 shift handled below).
+                            // The non-sprite DS cases (lowspr==0) are a single-tile
+                            // straddle handled correctly by the NEW rewrite below and
+                            // MUST keep it.
+                            let ds_two_tile = dsf == 1
+                                && mmio.is_cgb_features_enabled()
+                                && self.sprites_on_line.iter().any(|s| s.x <= 16);
                             if flip {
                                 let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
                                 let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                                if new_col != old_col {
+                                if ds_two_tile {
+                                    // DS spx straddle: a low-X sprite shifts the BG
+                                    // fetch phase one tile while the DS FIFO carries an
+                                    // extra tile, so the OLD->NEW scx boundary lands one
+                                    // tile LATER than the non-sprite DS cadence. The
+                                    // in-flight straddle tile -- which the non-sprite DS
+                                    // flip would push to the NEW scx -- actually plots
+                                    // just before the boundary, so it stays the OLD scx
+                                    // (natural xpos column) on EVERY line. On the first
+                                    // rendered line (LY==0) the boundary lands one tile
+                                    // later still, so the NEXT tile (already fetched
+                                    // under the NEW scx) must also revert to the OLD scx;
+                                    // on LY>=1 that next tile keeps the NEW scx.
+                                    if old_col != new_col {
+                                        let bg_y = (self.scy_delayed as u16
+                                            + mmio.read(LY) as u16) & 0xFF;
+                                        let pixels = self.bg_pixels_at_col(mmio, old_col, bg_y);
+                                        let off = (xpos as usize).saturating_sub(self.x as usize);
+                                        self.fetcher.pixel_fifo.overwrite_at(off, &pixels);
+                                    }
+                                    // First-line second-tile revert: on LY==0 the
+                                    // fetcher dispatch can land the OLD->NEW boundary
+                                    // one tile later than on LY>=1, so the second
+                                    // straddle tile (already fetched NEW) reverts to
+                                    // OLD. Whether that one-tile shift happens depends
+                                    // on the sprite-fetch sub-tile phase: an even
+                                    // shifting sprite x consumes the extra dot that
+                                    // pushes the second tile's fetch past the apply on
+                                    // LY0 (sprite x==2), an odd one does not (x==1),
+                                    // so the revert is gated on the low sprite x parity.
+                                    let lowspr_even = self
+                                        .sprites_on_line
+                                        .iter()
+                                        .filter(|s| s.x <= 16)
+                                        .map(|s| s.x)
+                                        .min()
+                                        .is_some_and(|x| x % 2 == 0);
+                                    if mmio.read(LY) == 0 && lowspr_even {
+                                        self.ds_straddle_next_old = true;
+                                        armed_this_event = true;
+                                    }
+                                } else if new_col != old_col {
                                     let bg_y = (self.scy_delayed as u16
                                         + mmio.read(LY) as u16) & 0xFF;
                                     let pixels = self.bg_pixels_at_col(mmio, new_col, bg_y);
@@ -4501,6 +4564,29 @@ impl Ppu {
                                     + mmio.read(LY) as u16) & 0xFF;
                                 let pixels = self.bg_pixels_at_col(mmio, old_col, bg_y);
                                 self.fetcher.pixel_fifo.overwrite_newest(&pixels);
+                            }
+                        }
+                        // DS two-tile straddle, SECOND tile (LY0 only): this tile was
+                        // fetched under the NEW scx (the per-dot fetcher advanced past
+                        // the apply) but on the first rendered line the OLD->NEW
+                        // boundary lands one tile later, so it plots under the OLD scx
+                        // at its natural column. Rewrite it in place by exact display
+                        // offset (xpos - self.x) so the low-X sprite's FIFO shift does
+                        // not misplace it.
+                        if self.ds_straddle_next_old
+                            && !armed_this_event
+                            && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
+                        {
+                            self.ds_straddle_next_old = false;
+                            let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
+                            let new_col2 = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                            let old_col2 = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                            if new_col2 != old_col2 {
+                                let bg_y = (self.scy_delayed as u16
+                                    + mmio.read(LY) as u16) & 0xFF;
+                                let pixels = self.bg_pixels_at_col(mmio, old_col2, bg_y);
+                                let off = (xpos as usize).saturating_sub(self.x as usize);
+                                self.fetcher.pixel_fifo.overwrite_at(off, &pixels);
                             }
                         }
                         // First-tile (f1) prologue straddle (DMG SS): the in-flight

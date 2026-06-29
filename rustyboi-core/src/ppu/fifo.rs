@@ -76,6 +76,24 @@ impl Fifo {
         }
     }
 
+    // Overwrite `pixels.len()` entries starting `offset` slots ahead of the
+    // FIFO front (the next pixel to be popped). `offset == 0` targets the front.
+    // Used by the DS two-tile straddle rekey to place each rewritten straddle
+    // tile at its exact display column regardless of FIFO depth / sprite shift
+    // (which makes the "newest N" target ambiguous). Entries beyond the current
+    // queue are silently skipped.
+    pub fn overwrite_at(&mut self, offset: usize, pixels: &[BgPixel]) {
+        for (i, p) in pixels.iter().enumerate() {
+            if offset + i >= self.size {
+                break;
+            }
+            let idx = self.head + offset + i;
+            if idx < self.data.len() {
+                self.data[idx] = *p;
+            }
+        }
+    }
+
     pub fn overwrite_oldest(&mut self, pixels: &[BgPixel]) {
         for (i, p) in pixels.iter().enumerate() {
             if i >= self.size {
