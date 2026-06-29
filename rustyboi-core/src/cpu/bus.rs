@@ -394,6 +394,33 @@ impl<'a> Bus<'a> {
         mode_locked
     }
 
+    /// CPU opcode fetch at `pc`. Identical to `read` for every normal fetch, but
+    /// applies the PC-in-DMA-dest prefetch absorption: if a synchronous GDMA/HDMA
+    /// fired on the previous instruction and `pc` is the block's first
+    /// destination byte, the opcode observes the PRE-transfer VRAM byte (Gambatte
+    /// `intevent_dma` runs `interrupter_.prefetch(cc)` BEFORE `dma(cc)`). The
+    /// prefetch's VRAM-lock decision is taken at the dma-event (fire) cc, not the
+    /// post-stall fetch cc: locked at fire -> open-bus 0xFF (late_gdma_pc_7ffe_2),
+    /// else the pre-transfer byte (hdma_pc_7ffe / late_gdma_pc_7ffe_1). Scoped to
+    /// the OPCODE fetch (PC straddling ROM-bank0 -> VRAM); a normal VRAM DATA read
+    /// after a transfer (hdma_start) keeps the post-transfer byte via `read`.
+    pub fn fetch_opcode(&mut self, pc: u16) -> u8 {
+        if let Some((pre, fire_cc)) = self.mmio.take_dma_prefetch_shadow(pc) {
+            // Charge the M-cycle exactly as a normal fetch would (the read path
+            // ticks before resolving), then resolve against the fire-cc lock.
+            self.tick_m();
+            if self.ppu_locks_access(pc, fire_cc) {
+                return 0xFF;
+            }
+            return pre;
+        }
+        // The shadow is valid for exactly the immediately-following opcode fetch;
+        // a fetch that did not land on the block's first dest byte invalidates it
+        // so it can never leak to a later same-address fetch.
+        self.mmio.clear_dma_prefetch_shadow();
+        self.read(pc)
+    }
+
     pub fn read(&mut self, addr: u16) -> u8 {
         // APU reads (NRxx status, NR52, wave RAM) observe the channels at the
         // read M-cycle START cc (Gambatte resolves the read before advancing).
@@ -552,6 +579,17 @@ impl<'a> Bus<'a> {
             pre_access_cc
         };
         self.tick_m();
+        // PC-in-DMA-dest prefetch absorption (Gambatte `intevent_dma`:
+        // `interrupter_.prefetch(cc)` runs BEFORE `dma(cc)`). When a synchronous
+        // GDMA/HDMA block fired on the previous instruction and its first
+        // destination byte is this read's address, the CPU's next opcode fetch
+        // must observe the PRE-transfer VRAM byte (the prefetch happened before
+        // the transfer overwrote it). Gambatte takes the prefetch's VRAM-lock
+        // decision at the dma-event cc (the fire cc), NOT rustyboi's post-stall
+        // prefetch cc: if VRAM is locked at the fire cc the prefetch reads
+        // open-bus 0xFF (late_gdma_pc_7ffe_2 -> out00), else the pre-transfer
+        // byte (late_gdma_pc_7ffe_1 / hdma_pc_7ffe -> out02). The operand bytes
+        // (dest+1..) read normally (post-transfer). One-shot.
         // VRAM is inaccessible to the CPU during Mode 3, OAM during Mode 2/3;
         // a blocked read returns open-bus 0xFF. Only while the LCD is on.
         if self.ppu_locks_access(addr, vram_read_cc) {
