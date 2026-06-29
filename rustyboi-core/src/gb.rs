@@ -19,6 +19,22 @@ pub enum Hardware {
     SGB,  // Super Game Boy
     SGB2, // Super Game Boy 2
     CGB,  // Game Boy Color, CGB-CPU-01
+    AGB,  // Game Boy Advance in GBC-compatibility mode (CGB + isAgb() diffs)
+}
+
+impl Hardware {
+    /// AGB (GBA-in-GBC-mode) hardware. AGB behaves like CGB everywhere except
+    /// the small Gambatte isAgb() diff set (PPU line-153/last-line/LYC timing,
+    /// APU ch3 wave-RAM, GBA_FLAG power-on registers).
+    pub fn is_agb(self) -> bool {
+        matches!(self, Hardware::AGB)
+    }
+
+    /// Whether this hardware runs the CGB feature set (CGB or AGB). Used to
+    /// decide CGB-vs-DMG behavior; AGB is a CGB for all CGB-feature purposes.
+    pub fn is_cgb_like(self) -> bool {
+        matches!(self, Hardware::CGB | Hardware::AGB)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -90,7 +106,8 @@ const BOOT_LOGO_TILES: [u8; 0x190] = [
 impl GB {
     pub fn new(hardware: Hardware) -> Self {
         let mut mmio = memory::mmio::Mmio::new();
-        mmio.set_serial_cgb(hardware == Hardware::CGB);
+        mmio.set_serial_cgb(hardware.is_cgb_like());
+        mmio.set_agb(hardware.is_agb());
         GB {
             cpu: cpu::SM83::new(),
             mmio,
@@ -121,7 +138,7 @@ impl GB {
         // ROM zeroes the obj-palette I/O so FF48/FF49 read 0x00 (the
         // fexx_ffxx_dumper_cgb oracle reads 0x00 at FF48/FF49).
         let obp_init = match self.hardware {
-            Hardware::CGB => 0x00,
+            Hardware::CGB | Hardware::AGB => 0x00,
             _ => 0xFF,
         };
         self.mmio.write(crate::ppu::OBP0, obp_init);
@@ -147,55 +164,59 @@ impl GB {
         self.mmio.write(crate::audio::NR50, 0x77);
         self.mmio.write(crate::audio::NR51, 0xF3);
         self.mmio.write(crate::audio::NR52, match self.hardware {
-            Hardware::DMG0 | Hardware::DMG | Hardware::MGB | Hardware::CGB => 0xF1,
+            Hardware::DMG0 | Hardware::DMG | Hardware::MGB | Hardware::CGB | Hardware::AGB => 0xF1,
             Hardware::SGB | Hardware::SGB2 => 0xF0,
         });
         self.mmio.write(crate::timer::TIMA, 0x00);
         self.mmio.write(crate::timer::TMA, 0x00);
         self.mmio.write(crate::timer::TAC, 0xF8);
         self.mmio.write(crate::timer::DIV, match self.hardware {
-            Hardware::DMG | Hardware::MGB | Hardware::SGB | Hardware::SGB2 | Hardware::CGB => 0xAB,
+            Hardware::DMG | Hardware::MGB | Hardware::SGB | Hardware::SGB2 | Hardware::CGB | Hardware::AGB => 0xAB,
             Hardware::DMG0 => 0x18,
         });
 
         self.cpu.registers.a = match self.hardware {
             Hardware::DMG0 | Hardware::DMG | Hardware::SGB => 0x01,
             Hardware::MGB | Hardware::SGB2 => 0xFF,
-            Hardware::CGB => 0x11,
+            // Gambatte setPostBiosState: a = cgb*0x10 | 0x01 (0x11 for CGB & AGB).
+            Hardware::CGB | Hardware::AGB => 0x11,
         };
         self.cpu.registers.b = match self.hardware {
+            // Gambatte setPostBiosState: b = cgb & agb. AGB sets B bit0 (the
+            // GBA-detection flag games read at boot); CGB/others leave B=0.
+            Hardware::AGB => 0x01,
             Hardware::CGB | Hardware::DMG | Hardware::MGB | Hardware::SGB | Hardware::SGB2 => 0x00,
             Hardware::DMG0 => 0xFF,
         };
         self.cpu.registers.c = match self.hardware {
-            Hardware::CGB => 0x00,
+            Hardware::CGB | Hardware::AGB => 0x00,
             Hardware::DMG0 | Hardware::DMG | Hardware::MGB => 0x13,
             Hardware::SGB | Hardware::SGB2 => 0x14,
         };
         self.cpu.registers.d = match self.hardware {
-            Hardware::CGB => 0xFF,
+            Hardware::CGB | Hardware::AGB => 0xFF,
             Hardware::SGB | Hardware::SGB2 | Hardware::DMG0 | Hardware::DMG | Hardware::MGB => 0x00,
         };
         self.cpu.registers.e = match self.hardware {
             Hardware::DMG | Hardware::MGB => 0xD8,
             Hardware::DMG0 => 0xC1,
             Hardware::SGB | Hardware::SGB2 => 0x00,
-            Hardware::CGB => 0x56,
+            Hardware::CGB | Hardware::AGB => 0x56,
         };
         self.cpu.registers.h = match self.hardware {
-            Hardware::CGB => 0x00,
+            Hardware::CGB | Hardware::AGB => 0x00,
             Hardware::DMG0 => 0x84,
             Hardware::DMG | Hardware::MGB => 0x01,
             Hardware::SGB | Hardware::SGB2 => 0xC0,
         };
         self.cpu.registers.l = match self.hardware {
-            Hardware::CGB => 0x0D,
+            Hardware::CGB | Hardware::AGB => 0x0D,
             Hardware::DMG0 => 0x03,
             Hardware::DMG | Hardware::MGB => 0x4D,
             Hardware::SGB | Hardware::SGB2 => 0x60,
         };
         self.cpu.registers.set_flag(registers::Flag::Zero, match self.hardware {
-            Hardware::DMG | Hardware::CGB | Hardware::MGB => true,
+            Hardware::DMG | Hardware::CGB | Hardware::AGB | Hardware::MGB => true,
             Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 => false,
         });
         self.cpu.registers.set_flag(registers::Flag::Negative, false);
@@ -205,14 +226,14 @@ impl GB {
         // (H). The previous `== 0x00` was inverted (gave F=0x80 where real hardware
         // gives 0xB0). DMG0/SGB/CGB leave H/C clear.
         self.cpu.registers.set_flag(registers::Flag::HalfCarry, match self.hardware {
-            Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 | Hardware::CGB => false,
+            Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 | Hardware::CGB | Hardware::AGB => false,
             Hardware::DMG | Hardware::MGB => (self.mmio.read(0x014D) & 0x0F) != 0,
         });
         self.cpu.registers.set_flag(registers::Flag::Carry, match self.hardware {
-            Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 | Hardware::CGB => false,
+            Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 | Hardware::CGB | Hardware::AGB => false,
             Hardware::DMG | Hardware::MGB => self.mmio.read(0x014D) != 0x00,
         });
-        if self.hardware == Hardware::CGB {
+        if self.hardware.is_cgb_like() {
             self.mmio.write(crate::memory::mmio::REG_VBK, 0x7E);
             self.mmio.write(crate::memory::mmio::REG_SVBK, 0xF8);
             // RP/IR (0xFF56) power-on: bits 1-5 hold 0x3E so the masked read
@@ -224,7 +245,7 @@ impl GB {
         // normal bus, walking SVBK so each CGB bank receives its slice; fixed
         // bank 0 lives at 0xC000, the banked region at 0xD000.
         {
-            let cgb = self.hardware == Hardware::CGB;
+            let cgb = self.hardware.is_cgb_like();
             let banks = if cgb { 8 } else { 2 };
             let mut wram = vec![0u8; banks * 0x1000];
             crate::memory::init_wram_powerup(cgb, &mut wram);
@@ -253,20 +274,23 @@ impl GB {
         // 16 bits drive DIV and the TIMA/serial/APU pre-tick phase).
         let boot_counter: u16 = match self.hardware {
             Hardware::CGB => 0x1EA0,
+            // Gambatte setPostBiosState: cpu.cycleCounter = 0x102A0 + agb*4, so
+            // AGB's post-boot timer/DIV phase leads CGB's by 4 master-cc.
+            Hardware::AGB => 0x1EA0 + 4,
             Hardware::DMG | Hardware::MGB | Hardware::SGB | Hardware::SGB2 => 0xABCC,
             Hardware::DMG0 => 0x1800,
         };
         self.mmio.set_timer_internal_counter(boot_counter);
         // Record the CGB flag before any audio write anchors the SPU clock, so
         // the boot SPU `cycleCounter_` high-bit constant (0x1E00/0x2400) is right.
-        self.mmio.set_audio_boot_cgb(self.hardware == Hardware::CGB);
+        self.mmio.set_audio_boot_cgb(self.hardware.is_cgb_like());
 
         // Post-boot APU state. The boot ROM enables the APU and leaves channel 1
         // mid-tone; channel registers are gated behind APU-enable, so the writes
         // above were dropped. Apply Gambatte's exact post-boot APU state directly
         // (must follow the timer-counter set so the duty phase has the right cc).
         // Wave RAM differs between DMG and CGB (Gambatte ioamhram dumps).
-        let cgb = self.hardware == Hardware::CGB;
+        let cgb = self.hardware.is_cgb_like();
         let wave_ram: [u8; 16] = if cgb {
             [0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF,
              0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF]
@@ -347,7 +371,7 @@ impl GB {
     /// `skip_bios` must stay in use for the `.dump` region oracles.
     pub fn skip_bios_with_boot_residue(&mut self) {
         self.skip_bios();
-        if self.hardware == Hardware::CGB {
+        if self.hardware.is_cgb_like() {
             self.seed_boot_logo_vram();
             self.mmio.set_cgb_boot_residue_feax();
         }
@@ -375,8 +399,8 @@ impl GB {
             (Hardware::DMG | Hardware::DMG0 | Hardware::MGB | Hardware::SGB | Hardware::SGB2, cartridge::CgbSupport::Only) => {
                 Err("CGB-only cartridge cannot run on DMG hardware".to_string())
             }
-            // CGB cartridge on CGB hardware - always OK
-            (Hardware::CGB, _) => Ok(()),
+            // CGB cartridge on CGB/AGB hardware - always OK
+            (Hardware::CGB | Hardware::AGB, _) => Ok(()),
             // DMG cartridge on any hardware - always OK  
             (_, cartridge::CgbSupport::None) => Ok(()),
             // CGB-compatible cartridge on DMG hardware - OK but will run in DMG mode
@@ -389,7 +413,7 @@ impl GB {
     /// 1. Hardware is CGB, AND
     /// 2. Cartridge supports CGB (Compatible or Only)
     pub fn should_enable_cgb_features(&self) -> bool {
-        if !matches!(self.hardware, Hardware::CGB) {
+        if !self.hardware.is_cgb_like() {
             return false;
         }
         
@@ -432,7 +456,7 @@ impl GB {
         self.cpu.registers.sp = 0x0000;
         self.skip_bios = false;
 
-        let cgb = self.hardware == Hardware::CGB;
+        let cgb = self.hardware.is_cgb_like();
         if cgb {
             // Let the CGB boot ROM drive the full CGB register set.
             self.mmio.set_cgb_features_enabled(true);

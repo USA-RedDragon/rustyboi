@@ -1153,9 +1153,11 @@ impl Ppu {
             return;
         }
         let cgb = mmio.is_cgb_features_enabled();
-        // Gambatte initstate.cpp: videoCycles = cgb ? 144*456+164 : 153*456+396.
+        // Gambatte initstate.cpp:471: videoCycles = cgb ? 144*456+164+agb*4 :
+        // 153*456+396. AGB's post-boot video phase leads CGB's by 4 dots.
+        let agb_off = if mmio.is_agb() { 4 } else { 0 };
         let video_cycles: u32 = if cgb {
-            144 * stat_irq::LCD_CYCLES_PER_LINE + 164
+            144 * stat_irq::LCD_CYCLES_PER_LINE + 164 + agb_off
         } else {
             153 * stat_irq::LCD_CYCLES_PER_LINE + 396
         };
@@ -3341,7 +3343,13 @@ impl Ppu {
     /// 0..=152 (line 153 -> 0 already came through `write_ly_from_ppu`).
     fn effective_ly_for_lyc_compare(&self, mmio: &mmio::Mmio) -> u8 {
         let ly = mmio.read(LY);
-        if self.ticks < 454 {
+        // video.cpp:820 getStat LYC compare: the next-line anticipation window is
+        // `timeToNextLy > 2 - (!isDoubleSpeed() && isAgb())`. The renderer's
+        // line-cycle equivalent is `ticks >= 456 - thresh`; AGB single-speed
+        // lowers the threshold from 2 to 1, extending the window one dot earlier.
+        let agb_ss = mmio.is_agb() && !mmio.is_double_speed_mode();
+        let anticipate_from = if agb_ss { 455 } else { 454 };
+        if self.ticks < anticipate_from {
             return ly;
         }
         match self.state {
@@ -5635,9 +5643,12 @@ impl Ppu {
             return None;
         }
 
-        // VBlank window (mode 1) — video.cpp:806-810.
+        // VBlank window (mode 1) — video.cpp:806-810. video.cpp:808 adds +1 to
+        // the upper bound on the last line (LY 153) for AGB.
         if in_vblank_window {
-            if frame_cycles >= 144 * cpl - 2 && frame_cycles < cpf - 4 + dsi {
+            let agb_last_line =
+                (mmio.is_agb() && ly == (stat_irq::LCD_LINES_PER_FRAME - 1) as i64) as i64;
+            if frame_cycles >= 144 * cpl - 2 && frame_cycles < cpf - 4 + dsi + agb_last_line {
                 return Some(1);
             }
             return Some(0);
@@ -5987,7 +5998,10 @@ impl Ppu {
             // still 153) where Gambatte returns 0 — the renderer-flip race. The
             // faithful whole-line-0 resolution removes it.
             if !ds {
-                if to_next - 1 <= cpl {
+                // video.h:135 getLyReg: single-speed bound is `cpl - 1*isAgb`.
+                // AGB shrinks the line-153 reads-0 window by one dot.
+                let agb = mmio.is_agb() as i64;
+                if to_next - 1 <= cpl - agb {
                     return Some(0);
                 }
                 return None;
