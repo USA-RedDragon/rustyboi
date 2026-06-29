@@ -498,3 +498,36 @@ getStat needs no read_off/anchor patch, and `lytime_no_plus1` can be dropped. Ri
 feeds the render lock + IRQ schedule too, so the +2 must come from the genuine speedChange
 mode-3 carry (a real PPU phase) so all consumers move faithfully together — that is the
 coupled build, with this table as the acceptance test (boundary==253 both siblings).
+
+### Milestone-6b (SHARPENED: the deficit is per-test `ly_time` sub-cc phase, NOT m3_len) — definitive
+A 4th probe — extend `m0_line_cycle += 2` on the post-switch line (the m6 "add the 2 missing
+mode-3 dots" hypothesis) — was tested and ALSO swapped the victims (target fix, victims break).
+That falsifies the "+2 to m3_len" framing and pins the true mechanism by recomputing the m0
+boundary in **`lineCycle(m0Time)`** terms (correcting an arithmetic slip in m6):
+
+The getStat transition lineCycle = `lineCycle(m0Time) − 2` (from `cc+2 < m0Time`). Gambatte:
+- target: `lineCycle(m0Time)=253` → transition at 251; read at **250** < 251 → mode 3 ✓
+- victim: `lineCycle(m0Time)=253` → transition at 251; read at **251** ≥ 251 → mode 0 ✓
+
+Both Gambatte m0Times are at **lineCycle 253**; the reads (250 vs 251) straddle the transition
+at 251. rustyboi (flag-OFF):
+- target: m0t=564910 @ read cc 564908 (lineCycle 250) → `lineCycle(m0t)=252` — **1 SHORT**
+- victim: m0t=288698 @ read cc 288696 (lineCycle 251) → `lineCycle(m0t)=253` — **CORRECT**
+
+**THE definitive root:** the target's `m0Time` is 1 lineCycle low; the victim's is already
+exact — though both share `m0_line_cycle=251` and `m3_len=167`. The difference lives ENTIRELY
+in `ly_time = p_now + ly_counter().time` (+plus1): the victim's post-switch `ly_time` is
+naturally 1cc higher than the target's, from each test's distinct STOP timing / bridge cc
+bookkeeping. It is a **continuous per-test sub-cc phase in `p_now`/`ly_counter().time` after
+the DS→SS bridge** — NOT m3_len, NOT a boolean, NOT read_off. Any uniform shift (read_off,
++1, +2 m3_len, atomic m0Time) moves BOTH equally and swaps, because the two tests genuinely
+differ by 1cc of bridge-anchored line phase that rustyboi's bridge collapses.
+
+**Acceptance test (sharpened):** `lineCycle(m0Time) == 253` for BOTH siblings — which requires
+the target's post-switch `p_now + ly_counter().time` to be 1cc higher (the victim's is already
+right). The fix is in the bridge cc bookkeeping (`stop_bridge_advance` / `perform_speed_switch`
+/ the `now -= old_ds` re-anchor + the returned-8 STOP cycles' new-speed realization in
+`opcodes.rs::stop`), making `p_now`/`ly_counter` land Gambatte's exact post-`lcd_.speedChange`
+cc for EVERY STOP-timing — i.e. the faithful continuous re-anchor, after which
+`lytime_no_plus1` (the binary stand-in) is deleted. This is the genuine coupled bridge build;
+the per-test 1cc cannot be sliced. All probes flag-OFF byte-identical to main_28; reverted clean.
