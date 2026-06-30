@@ -17,10 +17,20 @@ pub struct Noise {
     volume: u8,
     volume_direction: bool,
     volume_timer: u8,
-    frequency_timer: u16,
-    lfsr: u16, // Linear feedback shift register
+    lfsr: u16, // Linear feedback shift register (Gambatte Lfsr::reg_)
     length_enabled: bool,
     fs_step: u8,
+
+    // Gambatte `Channel4::Lfsr` cc-based model (channel4.cpp). The LFSR register
+    // is advanced lazily to the access cc via `update_backup_counter`, so a
+    // PCM34 read resolves the exact sub-counter phase rather than a per-clock
+    // countdown.
+    #[serde(default = "counter_disabled")]
+    lfsr_backup_counter: u32,
+    #[serde(default = "counter_disabled")]
+    lfsr_counter: u32,
+    #[serde(default)]
+    lfsr_master: bool,
 
     // Free-running 2 MHz cycle counter (Gambatte cycleCounter_), pushed by the
     // controller; drives the cc-based length expiry.
@@ -34,9 +44,26 @@ pub struct Noise {
 }
 
 const LEN_DISABLED: u32 = 0xFFFF_FFFF;
+const COUNTER_DISABLED: u32 = 0xFFFF_FFFF;
 
 fn len_disabled() -> u32 {
     LEN_DISABLED
+}
+
+fn counter_disabled() -> u32 {
+    COUNTER_DISABLED
+}
+
+/// Gambatte channel4.cpp `toPeriod`: the LFSR step period in `cycleCounter_`
+/// units. `s = nr3>>4 + 3`, `r = nr3 & 7` (r==0 acts as r=1 with s-1).
+fn lfsr_to_period(nr3: u8) -> u32 {
+    let mut s = (nr3 >> 4) as u32 + 3;
+    let mut r = (nr3 & 0x07) as u32;
+    if r == 0 {
+        r = 1;
+        s -= 1;
+    }
+    r << s
 }
 
 impl Noise {
@@ -51,10 +78,12 @@ impl Noise {
             volume: 0,
             volume_direction: false,
             volume_timer: 0,
-            frequency_timer: 0,
             lfsr: 0x7FFF,
             length_enabled: false,
             fs_step: 0,
+            lfsr_backup_counter: COUNTER_DISABLED,
+            lfsr_counter: COUNTER_DISABLED,
+            lfsr_master: false,
             cc: 0,
             len_counter: LEN_DISABLED,
             len_cc: 0,
@@ -78,10 +107,14 @@ impl Noise {
     /// counter is preserved.
     pub fn psg_reset(&mut self) {
         self.lfsr = 0x7FFF;
-        self.frequency_timer = 0;
         self.volume = 0;
         self.volume_timer = 0;
         self.enabled = false;
+        // Gambatte `Channel4::reset` -> `Lfsr::reset(cc)`: nr3_=0, master off,
+        // backupCounter_ = cc + toPeriod(0); the step counter stays disabled.
+        self.lfsr_master = false;
+        self.lfsr_backup_counter = self.cc.wrapping_add(lfsr_to_period(0));
+        self.lfsr_counter = COUNTER_DISABLED;
     }
 
     pub fn set_fs_step(&mut self, step: u8) {
@@ -95,6 +128,7 @@ impl Noise {
         self.len_counter = LEN_DISABLED;
         self.length_counter = 0;
         self.enabled = false;
+        self.lfsr_master = false;
     }
 
 
@@ -121,6 +155,7 @@ impl Noise {
                 self.length_counter -= dec;
                 if self.length_counter == 0 {
                     self.enabled = false;
+                    self.lfsr_master = false;
                 }
             }
         }
@@ -135,17 +170,32 @@ impl Noise {
     }
 
     pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
-        if !self.enabled {
-            return;
-        }
+        // The LFSR register is advanced LAZILY at the access cc via
+        // `update_backup_counter` (Gambatte `Lfsr::updateBackupCounter`), so no
+        // per-clock stepping is needed here — `event()`/`lfsr_counter` is only
+        // the audio-mixer's scheduling bookkeeping, kept in sync inside the
+        // bulk update. Advancing it here too would double-count the shifts.
+    }
 
-        // Update frequency timer
-        if self.frequency_timer > 0 {
-            self.frequency_timer -= 1;
-        } else {
-            self.frequency_timer = self.get_frequency_timer_period();
-            self.step_lfsr();
+    /// Resolve the LFSR register to the current cc for the CPU read path
+    /// (PCM34), mirroring `Channel3::sync_for_read`.
+    pub fn sync_for_read(&mut self) {
+        if self.lfsr_master {
+            self.lfsr_update_backup_counter(self.cc);
         }
+    }
+
+    /// Resolve the LFSR register at a specific (precise per-access) cc, the
+    /// length subsystem's overlaid read cc rather than the per-dot `self.cc`.
+    pub fn sync_lfsr_at(&mut self, at_cc: u32) {
+        if self.lfsr_master {
+            self.lfsr_update_backup_counter(at_cc);
+        }
+    }
+
+    /// Gambatte `Channel4::Lfsr::resetCc` hook for a DIV write.
+    pub fn reset_cc(&mut self, cc: u32, delta: u32) {
+        self.lfsr_reset_cc(cc, delta);
     }
 
     pub fn step_frame_sequencer(&mut self, step: u8) {
@@ -177,32 +227,69 @@ impl Noise {
         }
     }
 
-    fn step_lfsr(&mut self) {
-        let bit0 = self.lfsr & 0x01;
-        let bit1 = (self.lfsr >> 1) & 0x01;
-        let result = bit0 ^ bit1;
-        
-        self.lfsr >>= 1;
-        self.lfsr |= result << 14;
-        
-        // 7-bit mode
-        if self.get_width_mode() {
-            self.lfsr &= 0x7F7F;
-            self.lfsr |= result << 6;
+    // --- Gambatte `Channel4::Lfsr` (channel4.cpp) cc-based register model ---
+
+    /// channel4.cpp `Lfsr::updateBackupCounter`: bulk-advance the LFSR register
+    /// to `cc` (lazy catch-up). Only steps while the shift code is < 14
+    /// (`nr3_ < 0xE0`); a code >= 14 freezes the register (Gambatte quirk).
+    fn lfsr_update_backup_counter(&mut self, cc: u32) {
+        if self.lfsr_backup_counter <= cc {
+            let period = lfsr_to_period(self.nr43);
+            let mut periods = (cc - self.lfsr_backup_counter) / period + 1;
+            self.lfsr_backup_counter = self
+                .lfsr_backup_counter
+                .wrapping_add(periods * period);
+
+            if self.lfsr_master && self.nr43 < 0xE0 {
+                let mut reg = self.lfsr as u32;
+                if self.nr43 & 0x08 != 0 {
+                    // 7-bit width.
+                    while periods > 6 {
+                        let xored = (reg << 1 ^ reg) & 0x7E;
+                        reg = (reg >> 6 & !0x7E) | xored | xored << 8;
+                        periods -= 6;
+                    }
+                    let xored = ((reg ^ reg >> 1) << (7 - periods)) & 0x7F;
+                    reg = (reg >> periods & !(0x80u32.wrapping_sub(0x80 >> periods)))
+                        | xored
+                        | xored << 8;
+                } else {
+                    // 15-bit width.
+                    while periods > 15 {
+                        reg = reg ^ reg >> 1;
+                        periods -= 15;
+                    }
+                    reg = reg >> periods | (((reg ^ reg >> 1) << (15 - periods)) & 0x7FFF);
+                }
+                self.lfsr = reg as u16;
+            }
         }
     }
 
-    fn get_frequency_timer_period(&self) -> u16 {
-        let divisor_code = self.nr43 & 0x07;
-        let divisor = if divisor_code == 0 { 8 } else { 16 * divisor_code as u16 };
-        let shift = (self.nr43 >> 4) & 0x0F;
-        divisor << shift
+    /// channel4.cpp `Lfsr::nr3Change`: re-anchor the step counter (`counter_=cc`,
+    /// the GSR "Mickey fix") after catching the register up.
+    fn lfsr_nr3_change(&mut self, cc: u32) {
+        self.lfsr_update_backup_counter(cc);
+        self.lfsr_counter = cc;
     }
 
-    fn get_width_mode(&self) -> bool {
-        (self.nr43 >> 3) & 0x01 != 0
+    /// channel4.cpp `Lfsr::nr4Init`: enable + schedule the first step at `cc+4`.
+    fn lfsr_nr4_init(&mut self, cc: u32) {
+        self.lfsr_master = false;
+        self.lfsr_update_backup_counter(cc);
+        self.lfsr_master = true;
+        self.lfsr_backup_counter = self.lfsr_backup_counter.wrapping_add(4);
+        self.lfsr_counter = self.lfsr_backup_counter;
     }
 
+    /// channel4.cpp `Lfsr::resetCc`: shift the cc anchors back on a DIV write.
+    fn lfsr_reset_cc(&mut self, cc: u32, delta: u32) {
+        self.lfsr_update_backup_counter(cc);
+        self.lfsr_backup_counter = self.lfsr_backup_counter.wrapping_sub(delta);
+        if self.lfsr_counter != COUNTER_DISABLED {
+            self.lfsr_counter = self.lfsr_counter.wrapping_sub(delta);
+        }
+    }
 
     fn get_envelope_initial_volume(&self) -> u8 {
         (self.nr42 >> 4) & 0x0F
@@ -238,14 +325,17 @@ impl Noise {
         self.volume = self.get_envelope_initial_volume();
         self.volume_direction = self.get_envelope_direction();
         self.volume_timer = self.get_envelope_period();
-        
-        // LFSR
-        self.lfsr = 0x7FFF;
-        self.frequency_timer = self.get_frequency_timer_period();
-        
-        // If DAC is disabled, disable channel
-        if self.get_envelope_initial_volume() == 0 && !self.get_envelope_direction() {
+
+        // LFSR: Gambatte channel4.cpp `setNr4` triggers `lfsr_.nr4Init(cc)` only
+        // when the DAC stays on (`master_ = !envelope.nr4Init`). The register is
+        // NOT reloaded to 0x7FFF on trigger (only on `Lfsr::reset` at power-on).
+        let dac_off =
+            self.get_envelope_initial_volume() == 0 && !self.get_envelope_direction();
+        if dac_off {
             self.enabled = false;
+            self.lfsr_master = false;
+        } else {
+            self.lfsr_nr4_init(self.cc);
         }
     }
 
@@ -273,7 +363,10 @@ impl Noise {
     /// clears) and `vol_ = lfsr.isHighState(cc) ? envelope.volume : 0`. The LFSR
     /// high state is the inverted bit-0 (Gambatte `Lfsr::isHighState`).
     pub fn pcm_nibble(&self) -> u8 {
-        if !self.enabled {
+        // Gambatte channel4.cpp `update`: `vol_ = isHighState(cc) ? volume : 0`,
+        // gated by `isActive()` == `master_` (the DAC/trigger gate). The register
+        // is already advanced to the read cc by `sync_for_read`.
+        if !self.lfsr_master {
             return 0;
         }
         if (!self.lfsr) & 0x01 == 1 {
@@ -310,11 +403,16 @@ impl Addressable for Noise {
                     }
                     NR42 => {
                         self.nr42 = value;
+                        // channel4.cpp setNr2: a DAC-off envelope disables master.
                         if self.get_envelope_initial_volume() == 0 && !self.get_envelope_direction() {
                             self.enabled = false;
+                            self.lfsr_master = false;
                         }
                     }
                     NR43 => {
+                        // channel4.cpp setNr3 -> lfsr_.nr3Change(value, cc): catch
+                        // the register up at the OLD period, then re-anchor.
+                        self.lfsr_nr3_change(self.cc);
                         self.nr43 = value;
                     }
                     NR44 => {
