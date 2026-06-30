@@ -425,6 +425,21 @@ pub struct Mmio {
     #[serde(skip, default)]
     halt_wake_plus4_dmg: bool,
 
+    // HALT-PREFETCH (Lever A, RB_PREFETCH_CC). The pre-snap master_cc at real
+    // HALT entry (on_cpu_halt). This is the un-snapped HALT-entry cc that
+    // Gambatte's ceil_4(eventTime) snap (cpu.cpp:1075) would otherwise erase;
+    // compared against the captured m0 eventTime at unhalt to derive the
+    // M-cycle-granular phase bit that separates the byte-identical _1b/_2b
+    // streams. None when not in a real-halt window. Flag-OFF: stays None.
+    #[serde(skip, default)]
+    halt_entry_cc: Option<u64>,
+    // Per-stream HALT-prefetch phase (0 or 1), derived at unhalt from
+    // halt_entry_cc vs the snapped eventTime; carried onto the single woken
+    // FF41 read as access_cc += 4 * phase. Cleared at the consume site so it
+    // biases only the one woken instruction stream. Flag-OFF: stays 0.
+    #[serde(skip, default)]
+    halt_prefetch_phase: u32,
+
     // Whether the HDMA block owed for the *current* eligibility period has
     // already been serviced. rustyboi fires the period block immediately at the
     // rising edge, whereas Gambatte defers it to the `intevent_dma` event; this
@@ -699,6 +714,8 @@ impl Mmio {
             halt_wakeup_hdma: false,
             pending_m0_irq_fire_cc: None,
             halt_wake_plus4_dmg: false,
+            halt_entry_cc: None,
+            halt_prefetch_phase: 0,
             hdma_is_in_period_cached: false,
             hdma_prev_stat_mode: 0,
             hdma_prev_period: false,
@@ -1706,6 +1723,27 @@ impl Mmio {
         self.halt_wake_plus4_dmg
     }
 
+    /// HALT-PREFETCH (Lever A): record the pre-snap master_cc at real HALT entry.
+    pub fn set_halt_entry_cc(&mut self, cc: Option<u64>) {
+        self.halt_entry_cc = cc;
+    }
+
+    /// HALT-PREFETCH (Lever A): the pre-snap HALT-entry master_cc, if captured.
+    pub fn halt_entry_cc(&self) -> Option<u64> {
+        self.halt_entry_cc
+    }
+
+    /// HALT-PREFETCH (Lever A): set the per-stream prefetch phase count (0 or 1).
+    pub fn set_halt_prefetch_phase(&mut self, phase: u32) {
+        self.halt_prefetch_phase = phase;
+    }
+
+    /// HALT-PREFETCH (Lever A): the per-stream prefetch phase carried onto the
+    /// single woken FF41 read (access_cc += 4 * phase).
+    pub fn halt_prefetch_phase(&self) -> u32 {
+        self.halt_prefetch_phase
+    }
+
     pub fn set_halt_wakeup_hdma(&mut self, v: bool) {
         self.halt_wakeup_hdma = v;
     }
@@ -1838,6 +1876,10 @@ impl Mmio {
         self.halt_wakeup_skew = false;
         // FAITHFUL EVENTCC: a fresh HALT ends the previous wakeup's +4 read bias.
         self.halt_wake_plus4_dmg = false;
+        // HALT-PREFETCH (Lever A): a fresh HALT supersedes the prior wakeup's
+        // prefetch-phase bias (and its captured pre-snap entry cc).
+        self.halt_entry_cc = None;
+        self.halt_prefetch_phase = 0;
         // A fresh HALT supersedes any pending High-unhalt edge-consume (the prior
         // unhalt's stream has ended); never let it span halts.
         self.hdma_high_unhalt_consume = false;
