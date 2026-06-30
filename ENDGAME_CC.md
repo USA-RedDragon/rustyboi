@@ -1478,3 +1478,18 @@ than the HALT-bug double-execute. Deferred as the next increment.
 (IME-on, service-path read ordering) + the pc_scx1_2 (also `ei`/service-path). The m23 reframing holds:
 all are FIXABLE (Gambatte reads the correct value untraced); _1 proves the mechanism (pre-transfer
 dest byte + mode-0 readability).
+
+---
+
+## m26 — rebased onto main@19037b5 (=23); landing the rest of the 5-bracket cluster on the lockstep+shadow
+
+Rebased endgame-cc onto main@19037b5 (main 25->23 via wxA6 weoff + R3 oamdma_late_speedchange_stat_2).
+No conflicts (R3's stop-armed OAM-DMA-freeze path and my HDMA lockstep/shadow are disjoint regions of
+mmio.rs). Re-established: flag-OFF == main_23 (net 0, broke 0); flag-ON net -1 (the m25 group A _1 win
+preserved). Oracle = UNHOOKED testrunner (m23: cctracer's trace callback perturbs the value); all 5
+brackets + group C confirmed 0-failures in unhooked Gambatte (genuinely fixable).
+
+Targets remaining on top of lockstep+shadow:
+- 2 ei_ ldaaimm (IME-on interrupt-service resume read of in-block VRAM dest 0x80EA)
+- 2 group-B hdma_m0speedchange_late_m3wakeup_scx1_2/scx2_2 (out00)
+- group C hdma_late_ei_m2unhalt / pc_scx1_2 (check if shared ISR-resume mechanism)
