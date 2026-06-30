@@ -293,6 +293,18 @@ pub struct Mmio {
     // OAM-DMA must be frozen here too. Set on STOP entry, cleared at unhalt.
     #[serde(skip, default)]
     oam_dma_stop_freeze: bool,
+    // Mirror of the HALT-entry `halt_oam_grace`, but for the STOP speed-switch.
+    // Gambatte's `Memory::stop` runs `updateOamDma(cc + 4)` BEFORE `intreq_.halt()`
+    // (memory.cpp:467-468), so the STOP instruction's own M-cycle advances the
+    // OAM-DMA one step before the freeze, and a transfer whose final byte's
+    // M-cycle lands in that window completes (endOamDma) rather than stalling to
+    // unhalt. Without it rustyboi froze one byte short (pos 158 vs Gambatte 160),
+    // so the post-window mode-2 sprite scan read the in-flight 0xFF source instead
+    // of the completed OAM (oamdma_late_speedchange_stat_2: the line's left-edge
+    // sprite goes unmapped, m0Time -11, STAT read mode 0 where Gambatte reads
+    // mode 3). Set on STOP entry alongside the freeze; consumed in `step_dma`.
+    #[serde(skip, default)]
+    stop_oam_grace: u8,
     // Mirrors Gambatte's `haltHdmaState_`.
     #[serde(default)]
     halt_hdma_state: HaltHdmaState,
@@ -592,6 +604,7 @@ impl Mmio {
             oam_dma_stall_suppress: 0,
             halt_oam_grace: 0,
             oam_dma_stop_freeze: false,
+            stop_oam_grace: 0,
             hdma_req_pending: false,
             halt_hdma_state: HaltHdmaState::Low,
             halt_wakeup_skew: false,
@@ -1526,6 +1539,27 @@ impl Mmio {
     /// (Gambatte `updateOamDma` `halted()` branch — `oamDmaPos_` stays put).
     pub fn set_oam_dma_stop_freeze(&mut self, freeze: bool) {
         self.oam_dma_stop_freeze = freeze;
+        if freeze {
+            // Gambatte's `Memory::stop` advances the OAM-DMA by the STOP's own
+            // M-cycle (`updateOamDma(cc + 4)`) before `intreq_.halt()`; arm the
+            // single grace step that `step_dma` consumes (mirrors `halt_oam_grace`).
+            //
+            // SCOPED to a transfer at its FINAL byte (`dma_pos >= 158`). rustyboi's
+            // eager per-dot OAM-DMA sits one M-cycle behind Gambatte's lazy
+            // `updateOamDma(cc + 4)` frozen position at the stop (pos 158 vs
+            // Gambatte's 159) — the grace + `dma_pos==159` final-byte bypass below
+            // completes the transfer (158 -> 159 -> 160 = endOamDma) before the
+            // freeze, so the post-window mode-2 sprite scan reads the COMPLETED OAM
+            // (oamdma_late_speedchange_stat_2: the line's left-edge sprite maps,
+            // m0Time +11, STAT read mode 3). A mid-transfer DMA (pos << 158, e.g.
+            // the in-flight conflict-byte reads oamdmasrcC0_speedchange_readC000 /
+            // hdma_transition_speedchange_oamdma) must stay frozen at its calibrated
+            // position — those read the in-flight byte after the switch — so the
+            // grace is gated OFF for them, keeping them byte-identical to baseline.
+            if self.dma_active && self.dma_pos >= 158 {
+                self.stop_oam_grace = 1;
+            }
+        }
     }
 
     /// CPU has left HALT. Clears the `intreq_.halted()` mirror so the
@@ -2081,11 +2115,21 @@ impl Mmio {
         // 0x20000 cycles, so Gambatte's `updateOamDma` takes its `halted()` branch
         // and freezes `oamDmaPos_`. Mid-transfer OAM-DMA must stay put across the
         // window (oamdma_*_speedchange_* read the in-flight conflict byte after the
-        // switch). The sub-M-cycle phase already advanced (reset above) but no byte
-        // is placed.
+        // switch).
+        // STOP speed-switch freeze: mirror the HALT-entry grace. Gambatte's
+        // `Memory::stop` runs `updateOamDma(cc + 4)` before `intreq_.halt()`, so
+        // the STOP's own M-cycle advances the OAM-DMA one step, and a transfer
+        // whose final byte (pos 159 -> 160 = endOamDma) lands in that window
+        // completes before the freeze. Same shape as the `cpu_halted` branch
+        // below: one grace M-cycle, plus the pos==159 final-byte bypass.
         if self.oam_dma_stop_freeze {
-            return;
-        }
+            if self.stop_oam_grace > 0 {
+                self.stop_oam_grace -= 1;
+            } else if self.dma_pos != 159 {
+                return;
+            }
+            // grace M-cycle, or the final byte: fall through to advance.
+        } else
         // While the CPU is halted the OAM-DMA position is FROZEN: Gambatte's
         // `updateOamDma` halt branch consumes the elapsed M-cycles
         // (`lastOamDmaUpdate_ += 4*cycles`) WITHOUT advancing `oamDmaPos_`. Keep
