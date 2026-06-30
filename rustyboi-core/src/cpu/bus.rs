@@ -213,15 +213,11 @@ impl<'a> Bus<'a> {
                 self.dot = self.dot.wrapping_add(span as u32);
                 self.ticked += span as u32;
             } else {
-                let stall_before = if crate::cpu::bus::canonical_cc_enabled() {
-                    self.mmio.peek_dma_stall()
-                } else {
-                    0
-                };
+                let stall_before = self.mmio.peek_dma_stall();
                 self.resolve_one_dot();
                 self.dot = self.dot.wrapping_add(1);
                 self.ticked += 1;
-                // ENDGAME R2 (RB_CANONICAL_CC): event-interleaved HDMA transfer. A
+                // ENDGAME R2: event-interleaved HDMA transfer. A
                 // block that just fired in `step_hdma` queued its transfer cc as
                 // `pending_dma_stall` (the CPU pays it at a LATER step, so the PPU
                 // catches up only then — m20: the resume read sees the un-advanced
@@ -238,14 +234,9 @@ impl<'a> Bus<'a> {
                 // scx brackets it targets retain a SECOND-tile residual = the scx
                 // first-tile mode-3 render phase (the deferred renderer rebase), so it
                 // lands net-0/broke-0 alone — see ENDGAME_CC.md m21.
-                if crate::cpu::bus::canonical_cc_enabled()
-                    && self.mmio.hdma_resume_lockstep_window()
-                {
+                if self.mmio.hdma_resume_lockstep_window() {
                     let stall_after = self.mmio.peek_dma_stall();
                     let delta = stall_after.saturating_sub(stall_before);
-                    if delta > 0 && std::env::var("RB_CC_AUDIT").is_ok() {
-                        eprintln!("[LOCKSTEP] cc={} delta={}", self.mmio.master_cc(), delta);
-                    }
                     if delta > 0 {
                         self.mmio.reduce_dma_stall(delta);
                         self.mmio.set_hdma_lockstep_active(true);
@@ -689,7 +680,7 @@ impl<'a> Bus<'a> {
         if self.ppu_locks_access(addr, vram_read_cc) {
             return 0xFF;
         }
-        // ENDGAME m25 (RB_CANONICAL_CC): a VRAM read inside the HALT-bug resume
+        // ENDGAME m25: a VRAM read inside the HALT-bug resume
         // window of an in-block dest byte observes the PRE-transfer value — the
         // resume read is ordered before dma()'s dest commits (Gambatte
         // `Interrupter::prefetch(cc)` before `dma(cc)`). The mode-readability gate
