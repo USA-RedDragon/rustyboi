@@ -1493,3 +1493,38 @@ Targets remaining on top of lockstep+shadow:
 - 2 ei_ ldaaimm (IME-on interrupt-service resume read of in-block VRAM dest 0x80EA)
 - 2 group-B hdma_m0speedchange_late_m3wakeup_scx1_2/scx2_2 (out00)
 - group C hdma_late_ei_m2unhalt / pc_scx1_2 (check if shared ISR-resume mechanism)
+
+## m26 (cont.) — full 5-bracket triage: FOUR distinct mechanisms; group A _1 ENV-FREE landed
+
+Investigated all 5 with the UNHOOKED testrunner oracle (m23). Result: the 5 brackets are NOT one
+mechanism — they are FOUR distinct deep roots, only one of which is the resume-VRAM shadow:
+
+1. **Group A `_1` (IME-off, ldaaimm)** — VRAM[0x80FA] read POST-block, needs PRE-transfer byte + mode-0
+   readability. **FIXED** by the m25 shadow + m21 lockstep. ENV-FREE extracted (drop RB_CANONICAL_CC):
+   full suite net -1, broke 0 vs main_23; flag now a no-op. MAIN-MERGE CANDIDATE.
+
+2. **`ei_` ldaaimm `_1`/`_2` (IME-on)** — DIFFERENT root: the readout is the TIMER ISR's `ld a,(80ea)`
+   (vectored on the IME-on unhalt). Traced: VRAM[0x80EA] init=0x01; the block that writes it
+   (dest 0x80E0, ROM[0x2A]=0x00) fires at cc≈12784 in rustyboi — AFTER the ISR read at ≈12404 — so
+   rustyboi reads the stale 0x01; Gambatte's block writes 0x80EA BEFORE the read → 0x00 (out00). The
+   sibling `_2` block fires at ≈12332 (BEFORE its read) — a 452cc swing from a 1-cc setup tweak = the
+   block fires on a DIFFERENT scanline. This is the **m0-edge/block-fire-timing-vs-interrupt-service**
+   precedence (`unhalt_defer`/`suppress`/`reorder_late_hdma_after_pushes` in service_interrupt), the
+   `late_hdma_vs_*` cluster — razor-thin, TIMA-overflow-phase-coupled, HIGH blast radius. NOT the shadow.
+
+3. **Group B `hdma_m0speedchange_late_m3wakeup_scx1_2`/`scx2_2` (out00)** — DIFFERENT root: readout is
+   `ldff a,(55)` (FF55 HDMA-active/length readback) after a `stop` speed-switch + m3-wakeup. rustyboi
+   reads 0xFF (HDMA done/disabled); Gambatte reads 0x00 (HDMA still active, length 0). This is the
+   **FF55-active-state after post-STOP m3-wakeup** (related to the just-merged
+   hdma_late_m3speedchange_tima_scx1_ds_3 cluster) — a length/enable-state mechanism, NOT a VRAM read.
+
+4. **`hdma_late_ei_m3halt_m2unhalt_pc_scx1_2` (outAD)** — DIFFERENT root: readout is the pushed-PC
+   (`_pc`) the interrupt service stored, read by the ISR (`ldff a,(fd)`). The **interrupt PC-push value
+   during an in-flight HDMA** — yet another mechanism.
+
+VERDICT: group A's lockstep+shadow is the prerequisite infrastructure and landed _1 clean (env-free,
+net -1). The other 4 are SEPARATE deep, family-coupled roots (block-fire-timing precedence / FF55
+active-state / PC-push) — each high-blast-radius; none reachable by the resume-VRAM shadow. They are
+individually-addressable but each is its own build (not a shared extension of _1). Delivered: the
+env-free group A _1 candidate + this triage. (group C / m2unhalt is the same late_hdma precedence
+family as #2.)
