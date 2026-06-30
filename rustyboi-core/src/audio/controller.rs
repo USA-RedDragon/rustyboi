@@ -648,6 +648,35 @@ impl Addressable for Audio {
 
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
+            // NRx1 (length-load) registers stay writable while the APU is powered
+            // off on DMG; on CGB they are ignored like every other reg (Gambatte
+            // memory.cpp cases 0x11/0x16/0x1B/0x20: `if (!isEnabled() && isCgb())
+            // return;`, with NR11/NR21 additionally masked to `data & 0x3F` —
+            // only the length bits, not the duty bits, are applied while off).
+            NR11 => {
+                if self.audio_enabled {
+                    self.channel1.write(addr, value);
+                } else if !self.boot_cgb {
+                    self.channel1.write(addr, value & 0x3F);
+                }
+            },
+            NR21 => {
+                if self.audio_enabled {
+                    self.channel2.write(addr, value);
+                } else if !self.boot_cgb {
+                    self.channel2.write(addr, value & 0x3F);
+                }
+            },
+            NR31 => {
+                if self.audio_enabled || !self.boot_cgb {
+                    self.channel3.write(addr, value);
+                }
+            },
+            NR41 => {
+                if self.audio_enabled || !self.boot_cgb {
+                    self.channel4.write(addr, value);
+                }
+            },
             NR10..=NR14 => {
                 if self.audio_enabled {
                     self.channel1.write(addr, value)
@@ -683,26 +712,27 @@ impl Addressable for Audio {
                 let now_enabled = (value >> 7) & 0x01 != 0;
 
                 if was_enabled && !now_enabled {
-                    // APU power-off: clear all channel + control registers, but
-                    // preserve the free-running master clock state (Gambatte's
-                    // `cycleCounter_`/`lastUpdate_` keep running while disabled).
-                    // The clock continuity is what lets the next enable's
-                    // `PSG::reset` fold from the correct large anchor.
-                    let cc = self.cc;
-                    let len_cc = self.len_cc;
-                    let last_update = self.last_update;
-                    let last_div_resets = self.last_div_resets;
-                    let clock_anchored = self.clock_anchored;
-                    // Wave pattern RAM survives APU power-off (Gambatte's
-                    // `PSG::reset` leaves `waveRam_` untouched).
-                    let wave_ram = self.channel3.wave_ram();
-                    *self = Audio::new();
-                    self.cc = cc;
-                    self.len_cc = len_cc;
-                    self.last_update = last_update;
-                    self.last_div_resets = last_div_resets;
-                    self.clock_anchored = clock_anchored;
-                    self.channel3.set_wave_ram(wave_ram);
+                    // APU power-off (Gambatte memory.cpp case 0x26): while still
+                    // enabled, write 0 to every sound register 0x10-0x25, THEN
+                    // disable. The per-register writes go through the normal
+                    // (enabled) path, so each NRx1 length-load reloads its length
+                    // counter to its max (e.g. NR41=0 -> lengthCounter=64). This
+                    // is what makes the length counters survive on DMG the way the
+                    // blargg `08-len ctr during power` / `11-regs after power`
+                    // tests expect — a flat struct reset would zero them instead.
+                    // The free-running master clock (cc/lastUpdate) and wave RAM
+                    // are left untouched (Gambatte keeps `cycleCounter_` running
+                    // and `PSG::reset` never clears `waveRam_`).
+                    for reg in NR10..=NR51 {
+                        // Skip the unused gaps (FF15, FF1F) — open bus, no effect.
+                        if reg == 0xFF15 || reg == 0xFF1F {
+                            continue;
+                        }
+                        self.write(reg, 0);
+                    }
+                    // `audio_enabled` stays true through the loop above (so the
+                    // zero-writes take the enabled path) and is cleared by the
+                    // `audio_enabled = now_enabled` at the end of this branch.
                 } else if !was_enabled && now_enabled {
                     // APU power-on (NR52 0→1): apply Gambatte's `PSG::reset` fold.
                     self.psg_reset(self.cached_ds);
