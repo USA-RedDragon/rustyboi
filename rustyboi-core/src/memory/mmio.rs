@@ -219,6 +219,21 @@ pub struct Mmio {
     // consumed by the first conflicting read.
     #[serde(skip, default)]
     fetcher_bus_warmup: bool,
+    // DMG-only mode-2 fetcher-prefetch onset. On DMG the BG fetcher's first
+    // tile-NUMBER fetch begins one M-cycle (4 dots) BEFORE the official mode-3
+    // VRAM lock — the mode-2->mode-3 prefetch. A VRAM-source OAM-DMA M-cycle in
+    // that prefetch window already sees the fetcher driving the first tilemap
+    // address, so the conflict engages one M-cycle EARLIER than the CGB
+    // `state==PixelTransfer` lock: the onset byte is `VRAM[dma_addr & tilemap0]`
+    // (tile-number address-line AND), not the clean source. The dumps show the
+    // crossed line's first conflict byte at the LAST mode-2 M-cycle on DMG, while
+    // the subsequent first locked M-cycle is still the warmup (clean) byte. The
+    // PPU publishes the predicted first tilemap address here for the 4-dot window
+    // preceding the mode-3 arm; `dmg_prefetch_addr` is 0 when inactive.
+    #[serde(skip, default)]
+    dmg_prefetch_active: bool,
+    #[serde(skip, default)]
+    dmg_prefetch_addr: u16,
     // Second-order conflict: when an OAM-DMA M-cycle reads VRAM while the BG
     // fetcher is driving a TILE-NUMBER (tilemap) address, both the DMA byte and the
     // tile number the fetcher would latch are `VRAM[tilemap_addr & dma_src]`. That
@@ -688,6 +703,8 @@ impl Mmio {
             dma_subcycle: 0,
             oam_write_pending: false,
             pending_oam_zero: std::cell::Cell::new(-1),
+            dmg_prefetch_active: false,
+            dmg_prefetch_addr: 0,
             fetcher_bus_addr: 0,
             fetcher_bus_bank: 0,
             fetcher_bus_locked: false,
@@ -2267,6 +2284,20 @@ impl Mmio {
     fn dma_vram_conflict_or_source_byte(&mut self, pos: u8) -> u8 {
         let dma_addr = self.dma_source_base.wrapping_add(pos as u16);
         if self.dma_src_kind() != 2 || !self.fetcher_bus_locked {
+            // DMG mode-2 fetcher-prefetch onset: one M-cycle before the mode-3
+            // lock, the fetcher already drives the first tile-NUMBER (tilemap)
+            // address, so a VRAM-source DMA read here conflicts as the
+            // address-line AND `VRAM[dma_addr & tilemap0]`. Only the LAST mode-2
+            // M-cycle (`dmg_prefetch_active`, still unlocked) takes this; the
+            // following first locked M-cycle is the warmup (clean) byte.
+            if self.dma_src_kind() == 2
+                && !self.cgb_features_enabled
+                && self.dmg_prefetch_active
+            {
+                self.poison_tiledata_base = None;
+                let eff_addr = dma_addr & self.dmg_prefetch_addr;
+                return self.vram.read(eff_addr);
+            }
             // Non-VRAM source, or VRAM free (HBlank/mode 0): true source byte.
             self.poison_tiledata_base = None;
             return self.dma_source_byte(pos);
@@ -2857,6 +2888,18 @@ impl Mmio {
         self.fetcher_bus_addr = addr;
         self.fetcher_bus_bank = bank;
         self.fetcher_bus_locked = locked;
+    }
+
+    /// DMG-only: the PPU publishes the predicted first-tilemap address here for the
+    /// 4-dot fetcher-prefetch window immediately preceding the mode-3 lock. A
+    /// VRAM-source OAM-DMA M-cycle in this window (still mode 2, `locked` false)
+    /// resolves to the tile-number bus conflict (`VRAM[dma_addr & tilemap0]`), so
+    /// the conflict engages one M-cycle earlier than the lock. `active` false
+    /// clears the window. The CGB path never sets this (the AND lock at mode-3
+    /// entry already byte-matches its dumps).
+    pub fn set_dmg_prefetch_bus(&mut self, addr: u16, active: bool) {
+        self.dmg_prefetch_active = active;
+        self.dmg_prefetch_addr = if active { addr } else { 0 };
     }
 
     /// True while a transfer is actively placing bytes into OAM (the window in
