@@ -329,15 +329,19 @@ impl Wave {
     /// `isActive()` is `master_` and `vol_ = waveSample(wavePos_, sampleBuf_,
     /// rshift_)` = `(pos%2 ? s&0xF : s>>4) >> rshift`, where `rshift` is
     /// `min((nr32>>5 & 3) - 1, 4)` so output level 0 mutes (shift past the data).
+    ///
+    /// The sample comes from the LATCHED `sample_buf` (not a live wave-RAM read):
+    /// after a fresh trigger `wave_pos=0` and `sample_buf` still holds its old /
+    /// power-on-zeroed value until the first fetch (`update_wave_counter`) at
+    /// `wave_counter`, so the very first samples read 0 (channel3.h waveSample).
     pub fn pcm_nibble(&self) -> u8 {
         if !self.master {
             return 0;
         }
-        let byte_index = (self.wave_pos / 2) as usize;
         let sample = if self.wave_pos.is_multiple_of(2) {
-            (self.wave_ram[byte_index] >> 4) & 0x0F
+            (self.sample_buf >> 4) & 0x0F
         } else {
-            self.wave_ram[byte_index] & 0x0F
+            self.sample_buf & 0x0F
         };
         let output_level = self.get_output_level();
         if output_level == 0 {
