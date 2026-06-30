@@ -2174,12 +2174,14 @@ impl Mmio {
             && self.key1_switch_armed
         {
             // A halt-woken Low block fired while a CGB speed switch is armed (a
-            // `stop` is pending downstream): its block cost feeds `abs_cc` into the
-            // pending STOP's `divReset` re-anchor, so the downstream value-read is a
-            // TIMA read past that STOP — not the immediate STAT/FF44 read the +6 is
-            // tuned for. The full 12cc CPU-prefetch overlap lands the post-STOP TIMA
-            // divider phase on Gambatte's grid (anchor%16 = 12, one TIMA tick higher
-            // than the +6's %16 = 6). See `tima_lowfudge_enabled`.
+            // `stop` is pending downstream): its cost is drained as a timer-ticking
+            // idle slice, so it shifts the cc of every downstream instruction —
+            // including the post-STOP TIMA read. That read resolves against the 2nd
+            // STOP's `divReset` anchor (identical either way), so the block cost sets
+            // its phase directly: the +6 leaves `read - anchor = 131162`, one TIMA
+            // tick below the 131168 boundary (ds_6 reads F8 vs hardware F9). The full
+            // 12cc CPU-prefetch overlap lands the read on 131168 — and the byte-exact
+            // F3..F9 sequence across ds_1..ds_6. See `tima_lowfudge_enabled`.
             12
         } else {
             6
