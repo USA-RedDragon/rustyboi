@@ -476,6 +476,19 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_snapshot_armed: bool,
 
+    // ENDGAME m25 (RB_CANONICAL_CC): resume-read pre-transfer shadow. When an HDMA
+    // block fires inside the Requested-context HALT-bug resume window
+    // (`hdma_resume_lockstep_window`), Gambatte's `Interrupter::prefetch(cc)` runs
+    // the resume instruction's reads at the dma-event cc, BEFORE `dma()` commits
+    // the dest writes. So a resume read of any in-block VRAM dest byte must observe
+    // the PRE-transfer value (the m21 lockstep advances the PPU to mode-0
+    // readable, but the dest byte read at 0x80FA must still be its pre-write
+    // value, not the just-transferred byte). Capture the pre-transfer bytes of the
+    // whole dest range at fire; `read()` serves them for the window's duration
+    // (one resume instruction). 1FFF-masked VRAM offset -> pre-byte.
+    #[serde(skip, default)]
+    hdma_resume_pre_shadow: std::collections::HashMap<u16, u8>,
+
     // C7-full FF55-kick fire-timing: set when an FF55 bit7=1 write (enable or
     // restart) wants to arm the first block immediately. Gambatte's `enableHdma`
     // gates that immediate flag on the LIVE `isHdmaPeriod(cc + 4)` predicate, not
@@ -641,6 +654,7 @@ impl Mmio {
             hdma_fire_dest0_prebyte: 0xFF,
             hdma_fire_cc: 0,
             hdma_snapshot_armed: false,
+            hdma_resume_pre_shadow: std::collections::HashMap::new(),
             hdma_write_delay: 0,
             hdma_kick_eval_pending: 0,
             hdma_disable_fires: None,
@@ -1940,10 +1954,19 @@ impl Mmio {
         let mut cc: i64 = 0;
         let mut loam: i64 = -(self.dma_subcycle as i64);
 
+        // ENDGAME m25: in the HALT-bug resume window, snapshot each dest byte's
+        // PRE-transfer VRAM value before the write is queued, so the resume read
+        // (ordered before dma()'s commits in Gambatte) observes the old byte.
+        let capture_resume_pre =
+            crate::cpu::bus::canonical_cc_enabled() && self.hdma_resume_lockstep_window;
         for _ in 0..0x10 {
             let src = self.hdma_source;
             let (vaddr, byte, into_bank1) =
                 self.resolve_dma_byte(self.hdma_source, self.hdma_dest);
+            if capture_resume_pre && !into_bank1 {
+                let pre = self.vram.read(vaddr);
+                self.hdma_resume_pre_shadow.entry(vaddr & 0x1FFF).or_insert(pre);
+            }
             self.hdma_pending_writes.push((vaddr, byte, into_bank1));
             cc += per_byte_cc;
             if interleave && self.dma_active && cc - 3 > loam {
@@ -2485,9 +2508,23 @@ impl Mmio {
     /// transfer) so the same-instruction resume read observes the extended line.
     pub fn set_hdma_resume_lockstep_window(&mut self, v: bool) {
         self.hdma_resume_lockstep_window = v;
+        if !v {
+            // Window closed (resume instruction done) — drop the pre-transfer shadow.
+            self.hdma_resume_pre_shadow.clear();
+        }
     }
     pub fn hdma_resume_lockstep_window(&self) -> bool {
         self.hdma_resume_lockstep_window
+    }
+
+    /// ENDGAME m25: pre-transfer VRAM byte for a resume-window read of an in-block
+    /// dest address (the resume read is ordered before dma()'s commits). Returns
+    /// None outside the window or for an address not in the just-fired block.
+    pub fn hdma_resume_pre_byte(&self, addr: u16) -> Option<u8> {
+        if !self.hdma_resume_lockstep_window {
+            return None;
+        }
+        self.hdma_resume_pre_shadow.get(&(addr & 0x1FFF)).copied()
     }
 
     /// Drop `amount` cc from the pending DMA stall (saturating). Used to absorb a
