@@ -6,12 +6,12 @@ use crate::memory::Addressable;
 pub const NR10: u16 = 0xFF10; // Channel 1 sweep register
 pub const NR11: u16 = 0xFF11; // Channel 1 sound length/wave pattern duty
 pub const NR12: u16 = 0xFF12; // Channel 1 volume and envelope
-pub const NR13: u16 = 0xFF13; // Channel 1 period low
+pub(crate) const NR13: u16 = 0xFF13; // Channel 1 period low
 pub const NR14: u16 = 0xFF14; // Channel 1 period high and control
 
 pub const NR21: u16 = 0xFF16; // Channel 2 sound length/wave pattern duty
 pub const NR22: u16 = 0xFF17; // Channel 2 volume and envelope
-pub const NR23: u16 = 0xFF18; // Channel 2 period low
+pub(crate) const NR23: u16 = 0xFF18; // Channel 2 period low
 pub const NR24: u16 = 0xFF19; // Channel 2 period high and control
 
 pub const NR30: u16 = 0xFF1A; // Channel 3 dac enable
