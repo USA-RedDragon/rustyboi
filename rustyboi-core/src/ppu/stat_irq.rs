@@ -12,8 +12,6 @@ use serde::{Deserialize, Serialize};
 pub const LCD_CYCLES_PER_LINE: u32 = 456;
 pub const LCD_LINES_PER_FRAME: u32 = 154;
 pub const LCD_VRES: u32 = 144;
-#[allow(dead_code)]
-pub const LCD_HRES: u32 = 160;
 pub const LCD_CYCLES_PER_FRAME: u64 = LCD_LINES_PER_FRAME as u64 * LCD_CYCLES_PER_LINE as u64;
 
 pub const STAT_M0EN: u8 = 0x08;
