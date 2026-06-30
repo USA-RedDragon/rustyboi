@@ -553,6 +553,26 @@ impl Audio {
         }
     }
 
+    /// CGB PCM12 register (0xFF76): low nibble = channel 1 digital amplitude,
+    /// high nibble = channel 2 (Gambatte `memory.cpp` case 0x76 ->
+    /// `PSG::pcm12Read`). Returns 0 when the APU is powered off; the
+    /// CGB-only / power gating is applied by the caller in `mmio.rs`.
+    pub fn pcm12(&self) -> u8 {
+        if !self.audio_enabled {
+            return 0;
+        }
+        self.channel1.pcm_nibble() | (self.channel2.pcm_nibble() << 4)
+    }
+
+    /// CGB PCM34 register (0xFF77): low nibble = channel 3, high nibble =
+    /// channel 4 (Gambatte `PSG::pcm34Read`).
+    pub fn pcm34(&self) -> u8 {
+        if !self.audio_enabled {
+            return 0;
+        }
+        self.channel3.pcm_nibble() | (self.channel4.pcm_nibble() << 4)
+    }
+
     pub fn get_mixed_output(&self) -> (f32, f32) {
         if !self.audio_enabled {
             return (0.0, 0.0);

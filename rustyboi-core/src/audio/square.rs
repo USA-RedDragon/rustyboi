@@ -178,7 +178,12 @@ impl SquareWave {
         self.nr14 = 0x07;
         self.master = true;
         self.enabled = true;
-        self.volume = 0x0F;
+        // Post-boot the startup-ding envelope has already decayed to 0 (Gambatte
+        // initstate.cpp `env.volume = 0`). The channel's length counter is still
+        // running (NR52 bit 0 / `enabled` set), but its digital DAC output is 0 —
+        // matching the real-cgb04c `fexx_ffxx_dumper` capture where FF76 (PCM12)
+        // reads 0x00 while NR52 reads 0xF1.
+        self.volume = 0x00;
         self.period = to_period(self.freq());
         self.pos = pos;
         self.high = high;
@@ -627,6 +632,20 @@ impl SquareWave {
 
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// CGB PCM12 nibble for this square channel (Gambatte `channel{1,2}.cpp`):
+    /// `isActive()` is `master_` (the DAC/trigger gate) and the reported digital
+    /// amplitude is `vol_ = dutyUnit_.isHighState(cc) ? envelope.volume : 0`.
+    pub fn pcm_nibble(&self) -> u8 {
+        if !self.master {
+            return 0;
+        }
+        if self.high {
+            self.volume & 0x0F
+        } else {
+            0
+        }
     }
 }
 
