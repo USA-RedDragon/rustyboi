@@ -5825,7 +5825,17 @@ impl Ppu {
         // from the stale mode-0 line tail into the next line's OAM (mode 2). Only
         // active under RB_FAITHFUL_EVENTCC; the flag is set at unhalt and cleared on
         // the next HALT, so it only ever biases the single woken instruction stream.
-        let access_cc = if faithful_eventcc_enabled() && mmio.halt_wake_plus4_dmg() {
+        // HALT-PREFETCH (Lever A, RB_PREFETCH_CC): replace the all-or-nothing +4
+        // with the per-stream M-cycle phase (0 or 1) derived at unhalt from the
+        // pre-snap HALT-entry cc vs the snap target. The byte-identical _1b/_2b
+        // ROMs separate: _1b (phase 0) keeps the stale mode-0 line tail; _2b
+        // (phase 1) gets +4 lifting the read into the next line's mode 2. The
+        // foundation's uniform +4 (halt_wake_plus4_dmg) lifted BOTH, swapping the
+        // failures; the phase isolates the bias to _2b alone. Under RB_PREFETCH_CC
+        // OFF the foundation behavior is preserved verbatim.
+        let access_cc = if prefetch_cc_enabled() {
+            access_cc + 4 * mmio.halt_prefetch_phase() as u64
+        } else if faithful_eventcc_enabled() && mmio.halt_wake_plus4_dmg() {
             access_cc + 4
         } else {
             access_cc
