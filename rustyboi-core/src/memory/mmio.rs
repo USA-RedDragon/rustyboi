@@ -2477,6 +2477,187 @@ impl Mmio {
         }
     }
 
+    // ---- DMG OAM corruption bug (Pan Docs "OAM Corruption Bug") ----
+    //
+    // OAM is 20 rows of 8 bytes (4 little-endian 16-bit words each). During PPU
+    // mode 2 the PPU reads one row per M-cycle; a CPU OAM-bus access (a real
+    // read/write to 0xFE00-0xFEFF, or the implicit address-bus assert of a 16-bit
+    // IDU inc/dec while the register holds an OAM address) corrupts the row the
+    // PPU is on. DMG/MGB/SGB hardware only — CGB/AGB do not have the bug (gated by
+    // the caller via `!is_cgb()`).
+    //
+    // The corruption itself is ported faithfully from SameBoy's DMG model
+    // (Core/memory.c `GB_trigger_oam_bug` / `GB_trigger_oam_bug_read`), which is
+    // the reference that passes blargg's oam_bug suite. SameBoy indexes OAM by a
+    // BYTE offset `accessed_oam_row` (8, 16, .. 0x98 for the 20 rows; the row the
+    // PPU scans LAGS the current M-cycle by one, so row 0 / offset 0 never
+    // corrupts). rustyboi's caller passes the row index 0..19; offset = row*8.
+    // The bitwise glitch formulas match Pan Docs ("Corruption Patterns") plus the
+    // DMG-revision-specific read cases SameBoy documents.
+
+    /// Read an OAM 16-bit word at byte offset `off` (little-endian). `off` is a
+    /// signed offset from the accessed row's base; out-of-range offsets read 0
+    /// (the SameBoy formulas only reach in-bounds rows for the gated cases).
+    fn oam_w(&self, off: isize) -> u16 {
+        if off < 0 || off as usize + 1 >= OAM_SIZE {
+            return 0;
+        }
+        let oam = self.oam.as_slice();
+        let i = off as usize;
+        (oam[i] as u16) | ((oam[i + 1] as u16) << 8)
+    }
+
+    /// Write an OAM 16-bit word at byte offset `off` (little-endian).
+    fn oam_set_w(&mut self, off: isize, val: u16) {
+        if off < 0 || off as usize + 1 >= OAM_SIZE {
+            return;
+        }
+        let oam = self.oam.as_mut_slice();
+        let i = off as usize;
+        oam[i] = val as u8;
+        oam[i + 1] = (val >> 8) as u8;
+    }
+
+    /// Copy one OAM byte from src offset to dst offset (bounds-checked).
+    fn oam_copy_byte(&mut self, dst: isize, src: isize) {
+        if dst < 0 || src < 0 || dst as usize >= OAM_SIZE || src as usize >= OAM_SIZE {
+            return;
+        }
+        let v = self.oam.as_slice()[src as usize];
+        self.oam.as_mut_slice()[dst as usize] = v;
+    }
+
+    /// SameBoy `bitwise_glitch` (write corruption word0): `((a^c)&(b^c))^c`.
+    #[inline]
+    fn bitwise_glitch(a: u16, b: u16, c: u16) -> u16 {
+        ((a ^ c) & (b ^ c)) ^ c
+    }
+    /// SameBoy `bitwise_glitch_read` (simple read corruption word0): `b|(a&c)`.
+    #[inline]
+    fn bitwise_glitch_read(a: u16, b: u16, c: u16) -> u16 {
+        b | (a & c)
+    }
+    /// SameBoy `bitwise_glitch_read_secondary`: `(b&(a|c|d))|(a&c&d)`.
+    #[inline]
+    fn bitwise_glitch_read_secondary(a: u16, b: u16, c: u16, d: u16) -> u16 {
+        (b & (a | c | d)) | (a & c & d)
+    }
+
+    /// Write corruption (Pan Docs "Write Corruption" / SameBoy `GB_trigger_oam_bug`).
+    /// `row` is the PPU-scanned OAM row index (0..19); only rows >= 1 corrupt.
+    /// word0 = bitwise_glitch(this, preceding-word0, preceding-word2); words 1..3
+    /// copied from the preceding row.
+    pub fn oam_bug_write_corrupt(&mut self, row: usize) {
+        if row == 0 || row >= 20 {
+            return;
+        }
+        let base = (row * 8) as isize;
+        let v = Self::bitwise_glitch(self.oam_w(base), self.oam_w(base - 8), self.oam_w(base - 4));
+        self.oam_set_w(base, v);
+        // for i in 2..8: oam[row+i] = oam[row-8+i]  (copy the last three words)
+        for i in 2..8 {
+            self.oam_copy_byte(base + i, base - 8 + i);
+        }
+    }
+
+    /// Read corruption (SameBoy `GB_trigger_oam_bug_read`), faithful to the DMG
+    /// model including the revision-specific secondary/tertiary cases. `row` is the
+    /// PPU-scanned row index (0..19); only rows >= 1 corrupt.
+    pub fn oam_bug_read_corrupt(&mut self, row: usize) {
+        if row == 0 || row >= 20 {
+            return;
+        }
+        let aor = row * 8; // SameBoy accessed_oam_row byte offset (8..0x98)
+        let base = aor as isize;
+        if (aor & 0x18) == 0x10 {
+            // oam_bug_secondary_read_corruption: base[-4] = read_secondary(
+            //   base[-8], base[-4], base[0], base[-2]); then copy the preceding
+            //   row down into two-rows-before.
+            if aor < 0x98 {
+                let v = Self::bitwise_glitch_read_secondary(
+                    self.oam_w(base - 16),
+                    self.oam_w(base - 8),
+                    self.oam_w(base),
+                    self.oam_w(base - 4),
+                );
+                self.oam_set_w(base - 8, v);
+                for i in 0..8 {
+                    self.oam_copy_byte(base - 0x10 + i, base - 0x08 + i);
+                }
+            }
+        } else if (aor & 0x18) == 0x00 {
+            // Tertiary read corruption. DMG (non-MGB, non-SGB2): row 0x20 uses
+            // tertiary_2, row 0x60 uses tertiary_3, others use tertiary_1; row
+            // 0x40 uses the quaternary DMG formula. (rows with aor&0x18==0: 0x00,
+            // 0x20, 0x40, 0x60, 0x80 — i.e. row indices 0,4,8,12,16. row 0 is
+            // already excluded above.)
+            if aor < 0x98 {
+                if aor == 0x40 {
+                    // oam_bug_quaternary_read_corruption (DMG variant):
+                    // base[-4] = quaternary(oam[0], base[0], base[-2], base[-3],
+                    //   base[-4], base[-7], base[-8], base[-16]); then copy the
+                    //   preceding row into both -0x10 and -0x20.
+                    let a = self.oam_w(0); // *(uint16_t*)gb->oam
+                    let b = self.oam_w(base);
+                    let c = self.oam_w(base - 4);
+                    let d = self.oam_w(base - 6); // base[-3] words = -6 bytes
+                    let e = self.oam_w(base - 8);
+                    let f = self.oam_w(base - 14); // base[-7] = -14 bytes
+                    let g = self.oam_w(base - 16);
+                    let h = self.oam_w(base - 32);
+                    // bitwise_glitch_quaternary_read_dmg (a unused):
+                    let _ = a;
+                    let v = (e & (h | g | (!d & f) | c | b)) | (c & g & h);
+                    self.oam_set_w(base - 8, v);
+                    for i in 0..8 {
+                        self.oam_copy_byte(base - 0x10 + i, base - 0x08 + i);
+                        self.oam_copy_byte(base - 0x20 + i, base - 0x08 + i);
+                    }
+                } else {
+                    // oam_bug_tertiary_read_corruption with the per-row formula.
+                    // base[-4] = tertiary(base[0], base[-2], base[-4], base[-8],
+                    //   base[-16]); copy preceding row to -0x10 and -0x20.
+                    let a = self.oam_w(base);
+                    let b = self.oam_w(base - 4);
+                    let c = self.oam_w(base - 8);
+                    let d = self.oam_w(base - 16);
+                    let e = self.oam_w(base - 32);
+                    let v = if aor == 0x20 {
+                        // tertiary_2: (c&(a|b|d|e))|(a&b&d&e)
+                        (c & (a | b | d | e)) | (a & b & d & e)
+                    } else if aor == 0x60 {
+                        // tertiary_3: (c&(a|b|d|e))|(b&d&e)
+                        (c & (a | b | d | e)) | (b & d & e)
+                    } else {
+                        // tertiary_1: c|(a&b&d&e)
+                        c | (a & b & d & e)
+                    };
+                    self.oam_set_w(base - 8, v);
+                    for i in 0..8 {
+                        self.oam_copy_byte(base - 0x10 + i, base - 0x08 + i);
+                        self.oam_copy_byte(base - 0x20 + i, base - 0x08 + i);
+                    }
+                }
+            }
+        } else {
+            // Simple read corruption: base[-4] = base[0] = read(base[0], base[-4],
+            // base[-2]).
+            let v = Self::bitwise_glitch_read(self.oam_w(base), self.oam_w(base - 8), self.oam_w(base - 4));
+            self.oam_set_w(base - 8, v);
+            self.oam_set_w(base, v);
+        }
+        // for i in 0..8: oam[aor+i] = oam[aor-8+i]  (copy the preceding row down).
+        for i in 0..8 {
+            self.oam_copy_byte(base + i, base - 8 + i);
+        }
+        // Row 0x80 (DMG): the corruption row is also copied to the first row.
+        if aor == 0x80 {
+            for i in 0..8 {
+                self.oam_copy_byte(i, base + i);
+            }
+        }
+    }
+
     /// Handle a CPU write to FF46. Arms the engine: the transfer of byte 0
     /// begins two M-cycles later (`dma_start_pos = dma_pos + 2`). A write while
     /// a transfer is already running schedules a restart at that point, leaving

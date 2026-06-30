@@ -575,13 +575,17 @@ pub fn ld_sp_hl(cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
     8
 }
 
-pub fn inc_sp(cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
+pub fn inc_sp(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
+    // DMG OAM-bug: SP is a 16-bit register driven by the IDU; an inc with SP in
+    // OAM during mode 2 corrupts OAM (Pan Docs "Affected Operations").
+    mmio.oam_bug_idu(cpu.registers.sp);
     cpu.registers.sp = cpu.registers.sp.wrapping_add(1);
     // INC SP does not affect any flags
     8
 }
 
-pub fn dec_sp(cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
+pub fn dec_sp(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
+    mmio.oam_bug_idu(cpu.registers.sp);
     cpu.registers.sp = cpu.registers.sp.wrapping_sub(1);
     // DEC SP does not affect any flags
     8
@@ -783,6 +787,9 @@ pub fn ld_sp_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
 
 pub fn ld_a_memory_hl_inc(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
+    // DMG OAM-bug: the OAM read corruption fires via `mmio.read` (its OAM hook).
+    // The hl post-inc does NOT trigger a separate IDU corruption here — faithful
+    // to SameBoy's `ld_a_dhli` (a single `cycle_read`, plain `hl++`).
     cpu.registers.a = mmio.read(addr);
     let new_addr = addr.wrapping_add(1);
     cpu.registers.h = (new_addr >> 8) as u8;
@@ -1206,8 +1213,12 @@ macro_rules! make_ret_cond {
 
 macro_rules! make_dec_combined_register {
     ($name:ident, $reg1:ident, $reg2:ident) => {
-        pub fn $name(cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
+        pub fn $name(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             let value = ((cpu.registers.$reg1 as u16) << 8) | (cpu.registers.$reg2 as u16);
+            // DMG OAM-bug: the 16-bit IDU asserts the pre-op register value on the
+            // address bus. If it points at OAM during PPU mode 2 this triggers a
+            // write corruption (Pan Docs "Affected Operations"). No-op otherwise.
+            mmio.oam_bug_idu(value);
             let new_value = value.wrapping_sub(1);
             cpu.registers.$reg1 = (new_value >> 8) as u8;
             cpu.registers.$reg2 = (new_value & 0x00FF) as u8;
@@ -1256,8 +1267,12 @@ macro_rules! make_bit_memory_hl {
 
 macro_rules! make_inc_combined_register {
     ($name:ident, $reg1:ident, $reg2:ident) => {
-        pub fn $name(cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
+        pub fn $name(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             let value = ((cpu.registers.$reg1 as u16) << 8) | (cpu.registers.$reg2 as u16);
+            // DMG OAM-bug: the 16-bit IDU asserts the pre-op register value on the
+            // address bus. If it points at OAM during PPU mode 2 this triggers a
+            // write corruption (Pan Docs "Affected Operations"). No-op otherwise.
+            mmio.oam_bug_idu(value);
             let new_value = value.wrapping_add(1);
             cpu.registers.$reg1 = (new_value >> 8) as u8;
             cpu.registers.$reg2 = (new_value & 0x00FF) as u8;
@@ -1336,6 +1351,12 @@ macro_rules! make_ld_register_memory_combined {
 macro_rules! make_push_combined_register {
     ($name:ident, $reg1:ident, $reg2:ident) => {
         pub fn $name(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
+            // DMG OAM-bug: PUSH's internal SP-dec M-cycle asserts the (pre-dec) SP
+            // on the address bus, triggering a write corruption if SP is in OAM
+            // during mode 2 (SameBoy `push_rr` -> `cycle_oam_bug(SP)`). The two
+            // stack writes below add their own write corruptions via the OAM write
+            // hook, at the following M-cycles.
+            mmio.oam_bug_idu(cpu.registers.sp);
             mmio.internal_cycle(); // M2 internal (SP dec), before the pushes
             cpu.registers.sp = cpu.registers.sp.wrapping_sub(2);
             mmio.write(cpu.registers.sp.wrapping_add(1), cpu.registers.$reg1); // high byte first

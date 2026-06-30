@@ -5274,6 +5274,36 @@ impl Ppu {
         self.ticks
     }
 
+    /// DMG OAM-bug support: the OAM row (0..19) the PPU is scanning when a CPU
+    /// OAM-bus access COMPLETES, else None. During mode 2 the PPU reads one of the
+    /// 20 OAM rows per M-cycle; `line_cycle` is the speed-independent within-line
+    /// dot, so the row is `dot / 4`.
+    ///
+    /// The trigger sites sample at the START of the access M-cycle (the persistent
+    /// `line_cycle` before this M-cycle's 4 dots tick), but the OAM access on the
+    /// bus lands at the END of that M-cycle — so add `OAM_BUG_ACCESS_DOT` (4, one
+    /// M-cycle) to align the scan position to the completion dot. This makes the
+    /// mode-2 trigger window M-cycle-exact (validated by blargg 4-scanline_timing's
+    /// 1-M-cycle "just before / at first corruption" boundary). Returns None when
+    /// the LCD is off or the PPU is not in mode 2. Read-only.
+    pub fn oam_bug_mode2_row(&self) -> Option<u8> {
+        if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
+            return None;
+        }
+        if self.state != State::OAMSearch {
+            return None;
+        }
+        // One M-cycle from the access-M-cycle START (where the trigger sites sample)
+        // to the OAM access on the bus.
+        const OAM_BUG_ACCESS_DOT: u32 = 4;
+        let dot = self.line_cycle + OAM_BUG_ACCESS_DOT;
+        // Mode 2 is the first 80 dots of the line (20 rows * 4 dots/M-cycle).
+        if dot >= 80 {
+            return None;
+        }
+        Some((dot / 4) as u8)
+    }
+
     /// Cycle-exact HDMA-eligibility predicate, mirroring Gambatte's
     /// `isHdmaPeriod` (video.cpp): a visible line, the within-line dot is at or
     /// past the predicted mode-0 (HBlank) start, and there is still room before
