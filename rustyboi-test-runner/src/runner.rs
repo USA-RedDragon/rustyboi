@@ -371,11 +371,15 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
     let cartridge = Cartridge::from_bytes(&rom_data)
         .map_err(|error| format!("failed to load ROM bytes: {error}"))?;
 
-    let mut gb = GB::new(match case.mode {
+    // A `rev=` manifest token pins a specific boot sub-revision (the mooneye
+    // boot_regs/boot_div/boot_hwio tests each target one silicon revision);
+    // otherwise the case runs on the default model for its mode.
+    let hardware = case.revision.unwrap_or(match case.mode {
         Mode::Dmg => Hardware::DMG,
         Mode::Cgb => Hardware::CGB,
         Mode::Agb => Hardware::AGB,
     });
+    let mut gb = GB::new(hardware);
     gb.insert(cartridge);
     // Initial state: real boot ROM (Gambatte-faithful) when --real-bios is set
     // and the bios file is present, else the synthetic skip_bios seed. The
