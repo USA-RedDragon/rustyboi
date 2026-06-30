@@ -198,6 +198,23 @@ impl Timer {
         }
     }
 
+    /// HALT-PREFETCH (R-PC, RB_TIMER_PUSH_PHASE) diagnostic anchor: the RAW
+    /// Gambatte intevent timer eventTime of the most recent still-undispatched
+    /// TIMA IRQ — the unsnapped `next_irq_event_time` the overflow fired at, NOT
+    /// the `+CC_OFF` delivery cc. `last_fire_cc` was recorded as
+    /// `next_irq_event_time + CC_OFF` (see `update_irq_delivery`), so the eventTime
+    /// is `last_fire_cc - CC_OFF` (in master_cc space, since `master_cc() ==
+    /// abs_cc`). Used only by the R-PC unhalt trace to log the wakeup's eventTime;
+    /// the phase discriminator itself is the Requested-halt prefetch-peek state.
+    /// `None` when no IRQ is pending.
+    pub fn pending_fire_event_cc(&self) -> Option<u64> {
+        if self.last_fire_cc != DISABLED_TIME {
+            Some(self.last_fire_cc.wrapping_sub(CC_OFF as u64))
+        } else {
+            None
+        }
+    }
+
     /// The EARLY (EI-loop) gate cc for the undispatched timer IRQ, or `None`.
     pub fn pending_fire_cc_ei(&self) -> Option<u64> {
         if self.last_fire_cc_ei != DISABLED_TIME {

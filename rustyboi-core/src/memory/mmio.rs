@@ -439,6 +439,17 @@ pub struct Mmio {
     // biases only the one woken instruction stream. Flag-OFF: stays 0.
     #[serde(skip, default)]
     halt_prefetch_phase: u32,
+    // HALT-PREFETCH (R-PC, RB_TIMER_PUSH_PHASE): per-stream woken-PC push phase
+    // (0 or 1) for the CGB+Timer HALT-exit. Set 1 at unhalt when the HALT left a
+    // NON-advancing prefetch peek (Requested-HDMA halt-state): there the
+    // service_interrupt `pc -= 1` prefetch undo over-subtracts, so phase 1 tells
+    // it to re-add the +1, matching Gambatte's CONDITIONAL undo
+    // (interrupter.cpp:42 `if (prefetched_) pc_ -= 1`). Separate register from
+    // halt_prefetch_phase (the DMG+Lcd FF41 getStat consumer) so that path is
+    // untouched. Cleared at the push consume so it biases only the one woken
+    // interrupt service. Flag-OFF: stays 0.
+    #[serde(skip, default)]
+    timer_push_phase: u32,
 
     // Whether the HDMA block owed for the *current* eligibility period has
     // already been serviced. rustyboi fires the period block immediately at the
@@ -716,6 +727,7 @@ impl Mmio {
             halt_wake_plus4_dmg: false,
             halt_entry_cc: None,
             halt_prefetch_phase: 0,
+            timer_push_phase: 0,
             hdma_is_in_period_cached: false,
             hdma_prev_stat_mode: 0,
             hdma_prev_period: false,
@@ -1221,6 +1233,13 @@ impl Mmio {
     /// eligibility on the boundary access cc having reached this cc.
     pub fn pending_timer_fire_cc(&self) -> Option<u64> {
         self.timer.pending_fire_cc()
+    }
+
+    /// HALT-PREFETCH (R-PC) diagnostic anchor: the RAW Gambatte intevent timer
+    /// eventTime of the most recent undispatched TIMA IRQ (no `+CC_OFF` delivery
+    /// offset), in master_cc space. Logged by the R-PC unhalt trace only.
+    pub fn pending_timer_event_cc(&self) -> Option<u64> {
+        self.timer.pending_fire_event_cc()
     }
 
     /// Delivery cc of the next scheduled timer overflow (EI-loop fast-dispatch).
@@ -1744,6 +1763,18 @@ impl Mmio {
         self.halt_prefetch_phase
     }
 
+    /// HALT-PREFETCH (R-PC): set the per-stream woken-PC push phase (0 or 1).
+    pub fn set_timer_push_phase(&mut self, phase: u32) {
+        self.timer_push_phase = phase;
+    }
+
+    /// HALT-PREFETCH (R-PC): the per-stream woken-PC push phase carried onto the
+    /// single CGB+Timer interrupt service (pushed resume PC += 1 instruction byte
+    /// when 1).
+    pub fn timer_push_phase(&self) -> u32 {
+        self.timer_push_phase
+    }
+
     pub fn set_halt_wakeup_hdma(&mut self, v: bool) {
         self.halt_wakeup_hdma = v;
     }
@@ -1880,6 +1911,7 @@ impl Mmio {
         // prefetch-phase bias (and its captured pre-snap entry cc).
         self.halt_entry_cc = None;
         self.halt_prefetch_phase = 0;
+        self.timer_push_phase = 0;
         // HALT-PREFETCH (Lever A): record the pre-snap HALT-entry master_cc here
         // (above the DMG `!cgb_features_enabled` early-return) so the DMG R4
         // streams capture it. This is the un-snapped cc Gambatte's
