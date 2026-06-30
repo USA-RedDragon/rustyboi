@@ -5023,6 +5023,19 @@ impl Ppu {
         self.ticks += 1;
     }
 
+    /// Push the BG fetcher's current VRAM data-bus address to the bus for the
+    /// OAM-DMA-source conflict model. Called once per dot after `step`. The lock is
+    /// active only while the PPU is in PixelTransfer (mode 3) and the LCD is on —
+    /// the only window in which the fetcher drives VRAM. Outside it a VRAM-source
+    /// OAM-DMA read sees true VRAM (the clean HBlank/mode-0 identity window).
+    pub fn update_dma_fetcher_bus(&self, mmio: &mut mmio::Mmio) {
+        let locked = !self.disabled
+            && (self.lcdc & (LCDCFlags::DisplayEnable as u8)) != 0
+            && self.state == State::PixelTransfer;
+        let (addr, bank) = self.fetcher.last_vram_bus();
+        mmio.set_fetcher_vram_bus(addr, bank, locked);
+    }
+
     pub fn frame_ready(&self) -> bool {
         self.have_frame
     }
