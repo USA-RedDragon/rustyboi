@@ -1,0 +1,4 @@
+# dmg/cgb-acid2 PPU reference screens (c-sp). Run: --frames 60
+dmg-acid2|dmg|png|/home/reddragon/gb-test-roms/dmg-acid2/dmg-acid2.gb|/home/reddragon/gb-test-roms/dmg-acid2/dmg-acid2-dmg.png
+dmg-acid2-on-cgb|cgb|png|/home/reddragon/gb-test-roms/dmg-acid2/dmg-acid2.gb|/home/reddragon/gb-test-roms/dmg-acid2/dmg-acid2-cgb.png
+cgb-acid2|cgb|png|/home/reddragon/gb-test-roms/cgb-acid2/cgb-acid2.gbc|/home/reddragon/gb-test-roms/cgb-acid2/cgb-acid2.png
