@@ -19,6 +19,15 @@ pub const WX: u16 = 0xFF4B;  // Window X Position
 
 pub const FRAMEBUFFER_SIZE: usize = 160 * 144;
 
+/// Convert an SGB/CGB RGB555 color word (bits: r=0-4, g=5-9, b=10-14) to RGB888
+/// using the linear 5-bit->8-bit scaling the emulator uses for CGB `Linear`.
+fn rgb555_to_rgb888(color: u16) -> (u8, u8, u8) {
+    let r = (color & 0x1F) as u16;
+    let g = ((color >> 5) & 0x1F) as u16;
+    let b = ((color >> 10) & 0x1F) as u16;
+    (((r * 255) / 31) as u8, ((g * 255) / 31) as u8, ((b * 255) / 31) as u8)
+}
+
 // OAM constants
 pub const OAM_SPRITE_COUNT: usize = 40; // 40 sprites total in OAM
 pub const OAM_BYTES_PER_SPRITE: usize = 4; // 4 bytes per sprite
@@ -5274,9 +5283,48 @@ impl Ppu {
         self.have_frame = false;
         if self.renders_color(mmio) {
             crate::gb::Frame::Color(self.color_fb_b)
+        } else if let Some(sgb) = mmio.sgb() {
+            self.sgb_frame(sgb)
         } else {
             crate::gb::Frame::Monochrome(self.fb_b)
         }
+    }
+
+    /// Post-process the DMG shade-index framebuffer for Super Game Boy output:
+    /// apply the MASK_EN screen mask and, when a palette command has run, map
+    /// each pixel's DMG shade (0-3) through the SGB palette assigned to its 8x8
+    /// attribute cell (producing RGB888). When no palette command has run the
+    /// frame stays monochrome, matching plain-GB (grayscale) behavior — which is
+    /// what the `sgb-ext-test` grayscale reference expects.
+    fn sgb_frame(&self, sgb: &crate::sgb::Sgb) -> crate::gb::Frame {
+        use crate::sgb::MaskMode;
+        // MASK_EN: Freeze keeps the last frame (already in fb_b since we don't
+        // swap on mask — approximated by showing fb_b as-is); Black/Color0 blank.
+        let blank = matches!(sgb.mask, MaskMode::Black | MaskMode::Color0);
+
+        if !sgb.colorized {
+            if blank {
+                // Blank to shade 0 (Color0) / darkest for Black.
+                let fill = if matches!(sgb.mask, MaskMode::Black) { 3 } else { 0 };
+                return crate::gb::Frame::Monochrome([fill; FRAMEBUFFER_SIZE]);
+            }
+            return crate::gb::Frame::Monochrome(self.fb_b);
+        }
+
+        // Colorized: build an RGB888 frame from the SGB palettes.
+        let mut out = [0u8; FRAMEBUFFER_SIZE * 3];
+        for y in 0..144usize {
+            for x in 0..160usize {
+                let idx = y * 160 + x;
+                let shade = if blank { 0 } else { self.fb_b[idx] };
+                let rgb555 = sgb.color_for(x / 8, y / 8, shade).unwrap_or(0);
+                let (r, g, b) = rgb555_to_rgb888(rgb555);
+                out[idx * 3] = r;
+                out[idx * 3 + 1] = g;
+                out[idx * 3 + 2] = b;
+            }
+        }
+        crate::gb::Frame::Color(out)
     }
 
     // Debug methods
