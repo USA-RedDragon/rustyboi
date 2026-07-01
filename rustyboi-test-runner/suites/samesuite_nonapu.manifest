@@ -1,0 +1,7 @@
+# same-suite non-APU (ppu/dma/interrupt). grading mooneye (0x40).
+same-suite/dma/gbc_dma_cont.gb|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/dma/gbc_dma_cont.gb
+same-suite/dma/gdma_addr_mask.gb|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/dma/gdma_addr_mask.gb
+same-suite/dma/hdma_lcd_off.gb|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/dma/hdma_lcd_off.gb
+same-suite/dma/hdma_mode0.gb|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/dma/hdma_mode0.gb
+same-suite/interrupt/ei_delay_halt.gb|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/interrupt/ei_delay_halt.gb
+same-suite/ppu/blocking_bgpi_increase.gb|cgb|mooneye|/home/reddragon/gb-test-roms/same-suite/ppu/blocking_bgpi_increase.gb
