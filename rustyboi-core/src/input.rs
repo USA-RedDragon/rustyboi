@@ -36,6 +36,11 @@ pub struct Input {
     pub right: bool,
 
     joyp: u8,
+
+    /// Super Game Boy state. `Some` only on Hardware::SGB/SGB2 (set via
+    /// `enable_sgb`); on DMG/CGB this is `None` and the JOYP path is unchanged.
+    #[serde(default)]
+    sgb: Option<crate::sgb::Sgb>,
 }
 
 enum JoypadBits {
@@ -55,7 +60,26 @@ impl Input {
             left: false,
             right: false,
             joyp: 0b00001111,
+            sgb: None,
         }
+    }
+
+    /// Turn on Super Game Boy JOYP-packet handling. Called once from `GB::new`
+    /// for Hardware::SGB/SGB2 only; leaves DMG/CGB behavior untouched.
+    pub fn enable_sgb(&mut self) {
+        self.sgb = Some(crate::sgb::Sgb::new());
+    }
+
+    /// Immutable access to the SGB state (palettes/mask), for the frame output
+    /// path. `None` on non-SGB hardware.
+    pub fn sgb(&self) -> Option<&crate::sgb::Sgb> {
+        self.sgb.as_ref()
+    }
+
+    /// Mutable access to the SGB state, for servicing pending VRAM (_TRN)
+    /// transfers from the memory unit. `None` on non-SGB hardware.
+    pub fn sgb_mut(&mut self) -> Option<&mut crate::sgb::Sgb> {
+        self.sgb.as_mut()
     }
 
     pub fn set_button_state(&mut self, state: ButtonState) {
@@ -84,10 +108,16 @@ impl Addressable for Input {
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
             JOYP => {
+                // SGB packet reception: feed every JOYP write to the SGB state
+                // machine (RESET/bit pulses on P14/P15). This runs BEFORE the
+                // normal joypad response and only exists on SGB hardware.
+                if let Some(sgb) = self.sgb.as_mut() {
+                    sgb.write_p1(value);
+                }
                 // Bits 4-5 hold exactly the written select lines (not the old
                 // ones); the low nibble is the selected group's pressed state.
                 let select = value & 0b0011_0000;
-                let low = if value & JoypadBits::SelectButtons as u8 == 0 {
+                let mut low = if value & JoypadBits::SelectButtons as u8 == 0 {
                     ((!self.start as u8) << 3)
                         | ((!self.select as u8) << 2)
                         | ((!self.b as u8) << 1)
@@ -100,6 +130,15 @@ impl Addressable for Input {
                 } else {
                     0b0000_1111
                 };
+                // SGB MLT_REQ multiplexing: when the game deselects both groups
+                // (both P14/P15 high) the low nibble reports the current player
+                // ID (0x0F - joypad_index) instead of a plain 0x0F. This is what
+                // the MLT_REQ read protocol clocks through to enumerate players.
+                if let Some(sgb) = self.sgb.as_ref() {
+                    if select == 0b0011_0000 {
+                        low &= sgb.joypad_id_nibble();
+                    }
+                }
                 self.joyp = select | (low & 0x0F);
             },
             _ => panic!("Input: Invalid write address {:04X}", addr),
