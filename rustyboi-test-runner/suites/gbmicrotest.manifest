@@ -1,4 +1,23 @@
 # gbmicrotest (DMG-CPU-08). FF82==0x01 pass. Run: --frames 60
+# VERIFIED (src @gbmicrotest463eb6b, oracle: libgambatte externalRead FF80-82 @60 frames):
+# 480/513. The 33 remaining fails are NOT emulation bugs reachable under this grading:
+#  - 29 display-only testbenches (no test_finish/test_end in source; verdict is a raw
+#    measured value looped to VRAM $8000, never FF82): 000-*, 001/002-vram_*, 004-tima_*,
+#    007-lcd_on_stat, 500-scx-timing, 800-803-ppu-latch-*, audio_testbench, cpu_bus_1,
+#    flood_vram, lcdon_write_timing, ly_while_lcd_off, minimal, mode2_stat_int_to_oam_unlock,
+#    oam_sprite_trashing, poweron, ppu_*, temp, toggle_lcdc, wave_write_to_0xC003.
+#    FF82=0x64 = DMG power-on HRAM residue (never written).
+#  - 2 DMA-clobber artifacts (400-dma, dma_basic): the ROM copies its DMA routine INTO
+#    HRAM over FF80-82 (bytes E0/46/18) and never writes a verdict; rustyboi ==
+#    Gambatte byte-identical.
+#  - 2 hardware-only quirks where rustyboi == Gambatte (both fail identically):
+#    halt_op_dupe_delay (hw DIV=0x55 implies a ~48-line wait no known emulator models),
+#    stat_write_glitch_l154_d (hw reads IF=E0 at LCD-on+154 lines+110M => frame-1
+#    vblank-IF visibility conflicts with the lcdon_halt_to_vblank_int_a/b DIV brackets
+#    that pass; needs GateBoy-level LCD-enable modeling).
+# The 17-test halt-wake cluster (int_*halt*, *_int_halt_a/_b) = faithful HALT-exit
+# DIV/TIMA read re-anchor (timer.rs halt_read_bias), landed f-micro@8133560.
+# Run --frames 600 for is_if_set_during_ime0 on slower configs.
 000-oam_lock|dmg|memauto|/home/reddragon/gb-test-roms/gbmicrotest/000-oam_lock.gb
 000-write_to_x8000|dmg|memauto|/home/reddragon/gb-test-roms/gbmicrotest/000-write_to_x8000.gb
 001-vram_unlocked|dmg|memauto|/home/reddragon/gb-test-roms/gbmicrotest/001-vram_unlocked.gb
