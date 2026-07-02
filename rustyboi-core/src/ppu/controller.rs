@@ -231,6 +231,20 @@ fn sprite_tile_walk_cost(
     cycles
 }
 
+// DMG mid-mode-3 OBJ-enable toggle: dots from the write hook to the first
+// pixel pop gated by the new LCDC.1. Calibrated against mealybug
+// m3_lcdc_obj_en_change (the per-band cutoff sweep pins the commit exactly).
+const OBJEN_APPLY_DOTS: u128 = 2;
+// DMG mid-mode-3 OBJ-size toggle: dots from the write hook to the fetcher
+// seeing the new LCDC.2. Calibrated by mealybug m3_lcdc_obj_size_change band 0
+// (the group-2 sprite whose HIGH byte reads exactly one dot after the hook+1
+// apply splits its row addressing: low byte 8x8, high byte 8x16).
+const OBJSIZE_APPLY_DOTS: u128 = 1;
+// Dots BEFORE the end of a sprite's fetch stall at which its tile-data LOW and
+// HIGH bytes are read (SameBoy's object fetch: low at end-3, high at end-1).
+const OBJ_READ_LOW_BACK: u128 = 3;
+const OBJ_READ_HIGH_BACK: u128 = 1;
+
 const MODE2_STAT_PRETRIGGER_DOT: u128 = 452;
 // Within line 153 (the last VBlank line) the LY register is held at 153 only
 // briefly; after this many dots it reads 0, even though the line itself
@@ -269,6 +283,42 @@ pub struct Sprite {
     pub tile_index: u8,
     pub attributes: SpriteAttributes,
     pub oam_index: u8, // For priority resolution
+}
+
+// Live mode-3 per-sprite fetch record (parallel to `sprites_on_line`, same
+// index space as `next_sprite_fetch_index`). Tracks whether the live walk
+// actually fetched a sprite this line and at which dot its stall armed, so the
+// DMG mid-mode-3 LCDC.1/LCDC.2 toggle model can resolve per-sprite semantics:
+//  - a sprite whose x-match dot passed while OBJ was disabled never fetches
+//    (skipped: no pixels, no stall — SameBoy skips the object process on DMG);
+//  - a sprite whose fetch is IN PROGRESS when OBJ is disabled aborts (SameBoy
+//    memory.c object_fetch_aborted): the remaining stall dots are refunded and
+//    the sprite's pixels never reach the line;
+//  - a fetched sprite's two tile-data bytes each sample LCDC.2 (OBJ size) at
+//    their own fetch dot (arm + penalty - 3 / - 1), so a mid-fetch size toggle
+//    can split the row addressing between the LOW and HIGH bytes.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+enum SpriteFetchPhase {
+    Pending,
+    Fetched,
+    Aborted,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct SpriteFetchRec {
+    phase: SpriteFetchPhase,
+    // Dot (self.ticks) the sprite's x-match landed. For left-clipped sprites
+    // (OAM x < 8) the hardware match happens (8 - x) dots before the pixel
+    // pipeline head reaches column 0, during the first-tile prologue; the
+    // recorded tick carries that adjustment so the byte-fetch dots line up.
+    arm_tick: u128,
+    penalty: u8,
+}
+
+impl Default for SpriteFetchRec {
+    fn default() -> Self {
+        SpriteFetchRec { phase: SpriteFetchPhase::Pending, arm_tick: 0, penalty: 0 }
+    }
 }
 
 // Faithful port of Gambatte's `SpriteMapper::OamReader` (sprite_mapper.cpp).
@@ -1147,6 +1197,27 @@ pub struct Ppu {
     // Empty/single-entry => no mid-line toggle => identical to the live read.
     #[serde(default)]
     bgen_history: Vec<(u64, bool)>,
+    // DMG per-dot OBJ-enable (LCDC.1) history. Hardware gates each sprite pixel
+    // on OBJ-enable AT THAT PIXEL'S pop dot (SameBoy render_pixel_if_possible
+    // reads LCDC.1 live per popped pixel), so a mid-mode-3 disable/enable
+    // covers an exact dot span — which maps to columns THROUGH the stall
+    // schedule (a column popping late because of a sprite stall resolves the
+    // gate at its actual pop dot). Entries are (apply_tick, enabled); pops at
+    // ticks >= apply_tick see the new bit. Seeded at mode-3 entry (tick 0);
+    // single-entry == no toggle == the live-read fast path.
+    #[serde(default)]
+    objen_history: Vec<(u128, bool)>,
+    // DMG per-dot OBJ-size (LCDC.2) history: (apply_tick, large). The sprite
+    // fetcher samples LCDC.2 independently at each tile-data byte's own fetch
+    // dot (SameBoy recomputes get_object_line_address for the low AND high
+    // byte), so a mid-fetch toggle splits the row addressing between bytes.
+    // Seeded at mode-3 entry (apply_tick 0).
+    #[serde(default)]
+    objsize_dot_history: Vec<(u128, bool)>,
+    // Per-sprite live fetch records, parallel to `sprites_on_line` (see
+    // `SpriteFetchRec`). Rebuilt (all Pending) at mode-3 entry.
+    #[serde(default)]
+    sprite_fetch_recs: Vec<SpriteFetchRec>,
     // Per-line BGP / OBP0 / OBP1 plot history for the per-pixel renderer, mirroring
     // `bgen_history`. A mid-mode-3 write to BGP (FF47) / OBP0 (FF48) / OBP1 (FF49)
     // takes effect at the exact pixel being drawn `MID_M3_PAL_LATENCY` dots later
@@ -1164,6 +1235,19 @@ pub struct Ppu {
     obp0_history: Vec<(u64, u8)>,
     #[serde(default)]
     obp1_history: Vec<(u64, u8)>,
+    // DMG dot-keyed OBP histories: (apply_tick, value). The OBP register is
+    // sampled as each sprite pixel pops out of the OAM FIFO, so the correct
+    // key is the pixel's POP DOT — the column mapping breaks whenever a sprite
+    // stall delays the pops (mealybug m3_obp0_change's late bands: a pixel at
+    // column 8 popping at dot 111 must see a write that applied at dot 105,
+    // even though the write's column boundary was 9). On stall-free lines this
+    // is exactly equivalent to the column model (columns pop 1/dot). It also
+    // subsumes the old off-left-edge column-0 forcing: left-clipped sprites'
+    // pixels pop early, before any mid-mode-3 write applies.
+    #[serde(default)]
+    obp0_dot_history: Vec<(u128, u8)>,
+    #[serde(default)]
+    obp1_dot_history: Vec<(u128, u8)>,
     // DMG mid-mode-3 BGP-write "glitch" (mealybug m3_bgp_change). On real DMG hardware a
     // CPU write to BGP (FF47) during mode 3 can collide with the PPU's palette read for
     // the pixel being pushed at that dot: the register is mid-transition and the pixel is
@@ -1269,6 +1353,11 @@ impl Ppu {
             line_rendered_this_line: false,
             wxa6_lineend_applied: false,
             bgen_history: Vec::new(),
+            objen_history: Vec::new(),
+            objsize_dot_history: Vec::new(),
+            sprite_fetch_recs: Vec::new(),
+            obp0_dot_history: Vec::new(),
+            obp1_dot_history: Vec::new(),
             bgp_history: Vec::new(),
             obp0_history: Vec::new(),
             obp1_history: Vec::new(),
@@ -1476,6 +1565,66 @@ impl Ppu {
                 || self.window_y_active(mmio);
             let boundary_col = (self.x as i32 + 2 + if win { 2 } else { 0 }).clamp(0, 160) as u8;
             self.bgen_history.push((boundary_col as u64, new_on));
+        }
+
+        // DMG mid-mode-3 OBJ-enable (LCDC.1) toggle: per-column pop gate +
+        // in-progress fetch abort. Hardware gates each sprite pixel on LCDC.1
+        // at that pixel's own pop dot, so the toggle covers an exact column
+        // span; the boundary column mirrors the bgen model (the write becomes
+        // visible to the mixer a couple of dots after `self.x`). Additionally
+        // (SameBoy memory.c "disabling objects while already fetching"): a
+        // disable landing while a sprite fetch is in progress ABORTS it — the
+        // remaining stall dots are not consumed and the sprite's pixels never
+        // reach the line. The closed-form m0Time refund for the same abort is
+        // handled in set_lcdc_visible (remaining_sprite_cost, graduated).
+        let objen_bit = LCDCFlags::SpriteDisplayEnable as u8;
+        if !mmio.is_cgb_features_enabled()
+            && display_stays_enabled
+            && self.state == State::PixelTransfer
+            && (old_lcdc & objen_bit) != (value & objen_bit)
+        {
+            let new_on = (value & objen_bit) != 0;
+            // The write commits to the pixel gate OBJEN_APPLY_DOTS after the
+            // hook (the hook runs before this dot's PPU step; mealybug
+            // m3_lcdc_obj_en_change pins the first gated pop two dots out).
+            self.objen_history
+                .push((self.ticks + OBJEN_APPLY_DOTS, new_on));
+            // Abort window = the sprite's own fetch bus activity
+            // [match_dot, match_dot + penalty): a left-clipped sprite (spx < 8)
+            // matched during the first-tile prologue, so its fetch ENDS before
+            // the pipeline-refill tail of its stall — a disable landing in that
+            // tail does NOT abort (the variant's k=0..2 bands keep the full
+            // penalty). rec.arm_tick already carries the match adjustment. The
+            // disable commits ~1 dot past the write hook; a fetch whose last
+            // bus dot is the commit dot completes (obj_en k=15 keeps its
+            // pixels), hence the strict compare with +1. On abort the stall
+            // resumes pops at the commit dot: one residual stall dot remains.
+            if !new_on && self.sprite_fetch_stall > 0 && self.next_sprite_fetch_index > 0
+                && let Some(rec) = self
+                    .sprite_fetch_recs
+                    .get_mut(self.next_sprite_fetch_index - 1)
+                && rec.phase == SpriteFetchPhase::Fetched
+            {
+                let fetch_end = rec.arm_tick + rec.penalty as u128;
+                if fetch_end > self.ticks + 1 {
+                    rec.phase = SpriteFetchPhase::Aborted;
+                    self.sprite_fetch_stall = self.sprite_fetch_stall.min(1);
+                }
+            }
+        }
+
+        // DMG mid-mode-3 OBJ-size (LCDC.2) toggle: record the apply dot so each
+        // sprite tile-data byte samples the size bit at its own fetch dot (the
+        // per-byte get_object_line_address recomputation, see obj_pixel_sized).
+        let objsz_bit = LCDCFlags::SpriteSize as u8;
+        if !mmio.is_cgb_features_enabled()
+            && display_stays_enabled
+            && self.state == State::PixelTransfer
+            && (old_lcdc & objsz_bit) != (value & objsz_bit)
+        {
+            let apply_tick = self.ticks + OBJSIZE_APPLY_DOTS;
+            self.objsize_dot_history
+                .push((apply_tick, (value & objsz_bit) != 0));
         }
 
         // Exact-cc OBJ-size (LCDC bit2) latch for the mode-2 OAM scan (PoC
@@ -2289,18 +2438,18 @@ impl Ppu {
         Self::obp_shade(obp, idx)
     }
 
-    // DMG sprite palette shade resolved off the column-keyed obp history (seeded at
-    // mode-3 entry) at `sample_col`. The caller passes the display column at which the
-    // OBP register is effectively sampled for this sprite pixel — normally the pixel's
-    // own `screen_x`, but 0 for a sprite fetched off the left edge (mealybug
-    // m3_obp0_change dmg_blob). See the call site in `mix_background_and_sprites`.
-    fn dmg_sprite_palette_shade(&self, idx: u8, palette: bool, sample_col: u64) -> u8 {
+    // DMG sprite shade: OBP is sampled at the pixel's POP DOT (the OAM-FIFO
+    // pop reads the register live), via the dot-keyed history — the column
+    // model diverges wherever a sprite stall delays the pops (m3_obp0_change
+    // late bands), and the pop-dot model naturally covers the off-left-edge
+    // sprites (their pixels pop before any mid-mode-3 write applies).
+    fn dmg_sprite_palette_shade(&self, idx: u8, palette: bool, pop_tick: u128) -> u8 {
         if idx == 0 {
             return 0; // Transparent for sprites
         }
-        let hist = if palette { &self.obp1_history } else { &self.obp0_history };
+        let hist = if palette { &self.obp1_dot_history } else { &self.obp0_dot_history };
         let fallback = if palette { self.obp1_delayed } else { self.obp0_delayed };
-        let obp = Self::pal_at_col(hist, sample_col, fallback);
+        let obp = Self::pal_at_tick(hist, pop_tick, fallback);
         Self::obp_shade(obp, idx)
     }
 
@@ -3373,6 +3522,9 @@ impl Ppu {
         self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
         self.m3_last_sprite_commit_tick = 0;
         self.sprite_fetch_stall = 0;
+        self.objen_history.clear();
+        self.objsize_dot_history.clear();
+        self.sprite_fetch_recs.clear();
         self.pixel_transfer_warmup = 0;
         self.window_line_counter = 0;
         self.win_y_pos = 0xFF;
@@ -3476,11 +3628,23 @@ impl Ppu {
         // `resolve_bgp_spikes`, once all of the line's writes are known. Capture the old
         // (settled) value BEFORE recording the new one in the history.
         if !_mmio.is_cgb() && !self.in_previsible_prologue() {
-            let col = self.pal_write_boundary(lat) as u8;
-            if col < 160 {
-                let old = self.bgp_history.last().map(|&(_, v)| v).unwrap_or(self.bgp_delayed);
-                self.bgp_writes.push((self.abs_cc, col, old | value));
-            }
+            // The spike's victim is the pixel POPPING at the write's apply dot.
+            // When a sprite fetch has the pipeline stalled across that dot no
+            // pixel pops — the glitched palette transition collides with
+            // nothing and there is no visible spike (mealybug
+            // m3_bgp_change_sprites: the RESTORE landing inside a late band's
+            // sprite stall must not paint the first post-stall column). The
+            // write is still RECORDED (victim 0xFF, never painted) so its
+            // partner keeps its cadence neighbor. On stall-free lines the
+            // victim is exactly `self.x + lat` (the old column model).
+            let stall = self.sprite_fetch_stall as i32;
+            let col = if stall <= lat {
+                (self.x as i32 + lat - stall).clamp(0, 255) as u8
+            } else {
+                0xFF
+            };
+            let old = self.bgp_history.last().map(|&(_, v)| v).unwrap_or(self.bgp_delayed);
+            self.bgp_writes.push((self.abs_cc, col, old | value));
         }
         let boundary = self.pal_write_boundary(lat);
         Self::push_pal_history(&mut self.bgp_history, boundary, value);
@@ -3554,8 +3718,11 @@ impl Ppu {
         if self.state != State::PixelTransfer || self.disabled {
             return;
         }
-        let boundary = self.pal_write_boundary(obp_latency(_mmio.is_cgb()));
+        let lat = obp_latency(_mmio.is_cgb());
+        let boundary = self.pal_write_boundary(lat);
         Self::push_pal_history(&mut self.obp0_history, boundary, value);
+        let apply = self.pal_write_apply_tick(lat);
+        Self::push_pal_dot_history(&mut self.obp0_dot_history, apply, value);
     }
 
     /// FF49 (OBP1) write hook. See `on_bgp_write`; affects sprite palette 1.
@@ -3563,8 +3730,11 @@ impl Ppu {
         if self.state != State::PixelTransfer || self.disabled {
             return;
         }
-        let boundary = self.pal_write_boundary(obp_latency(_mmio.is_cgb()));
+        let lat = obp_latency(_mmio.is_cgb());
+        let boundary = self.pal_write_boundary(lat);
         Self::push_pal_history(&mut self.obp1_history, boundary, value);
+        let apply = self.pal_write_apply_tick(lat);
+        Self::push_pal_dot_history(&mut self.obp1_dot_history, apply, value);
     }
 
     // Display column at which a mid-mode-3 palette write becomes visible: the next
@@ -3594,6 +3764,45 @@ impl Ppu {
             return 0;
         }
         (self.x as i32 + latency).clamp(0, 160) as u64
+    }
+
+    // Dot at which a mid-mode-3 palette write becomes visible to the pixel
+    // pops (the dot-space analog of `pal_write_boundary`; see
+    // `obp0_dot_history`). During the previsible prologue the write applies
+    // before any visible pop, i.e. tick 0.
+    fn pal_write_apply_tick(&self, latency: i32) -> u128 {
+        if self.in_previsible_prologue() {
+            return 0;
+        }
+        self.ticks + latency.max(0) as u128
+    }
+
+    // Append an (apply_tick, value) dot-keyed palette entry; same last-write-
+    // wins collapse as `push_pal_history`.
+    fn push_pal_dot_history(hist: &mut Vec<(u128, u8)>, apply: u128, value: u8) {
+        if let Some(last) = hist.last_mut()
+            && last.0 == apply
+        {
+            last.1 = value;
+            return;
+        }
+        hist.push((apply, value));
+    }
+
+    // Resolve a dot-keyed DMG palette history at pop dot `tick`.
+    fn pal_at_tick(hist: &[(u128, u8)], tick: u128, fallback: u8) -> u8 {
+        if hist.len() <= 1 {
+            return hist.last().map(|&(_, v)| v).unwrap_or(fallback);
+        }
+        let mut val = hist[0].1;
+        for &(apply_tick, v) in hist.iter() {
+            if apply_tick <= tick {
+                val = v;
+            } else {
+                break;
+            }
+        }
+        val
     }
 
     // Append a (boundary_col, value) palette-history entry. If the last entry shares
@@ -4551,6 +4760,27 @@ impl Ppu {
                     self.obp0_history.push((0, self.obp0_delayed));
                     self.obp1_history.clear();
                     self.obp1_history.push((0, self.obp1_delayed));
+                    self.obp0_dot_history.clear();
+                    self.obp0_dot_history.push((0, self.obp0_delayed));
+                    self.obp1_dot_history.clear();
+                    self.obp1_dot_history.push((0, self.obp1_delayed));
+                    // DMG mid-mode-3 OBJ-enable/OBJ-size toggle model: seed the
+                    // per-column OBJ-enable history and the per-dot OBJ-size
+                    // history with the bits in effect at mode-3 entry, and reset
+                    // the per-sprite live fetch records (all Pending).
+                    self.objen_history.clear();
+                    self.objen_history.push((
+                        0,
+                        (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0,
+                    ));
+                    self.objsize_dot_history.clear();
+                    self.objsize_dot_history.push((
+                        0,
+                        (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0,
+                    ));
+                    self.sprite_fetch_recs.clear();
+                    self.sprite_fetch_recs
+                        .resize(self.sprites_on_line.len(), SpriteFetchRec::default());
                     self.bgp_writes.clear();
                     // 160-entry per-column BG-index scratch; ensure sized (deserialized
                     // saves may carry an empty vec) and clear to -1 (no BG pixel yet).
@@ -7580,6 +7810,16 @@ impl Ppu {
             let trigger_x = sprite_x.saturating_sub(8);
 
             if trigger_x < self.x {
+                // The sprite's x-match dot passed without a fetch (OBJ was
+                // disabled when the head crossed it): dropped for the line —
+                // no stall, and (DMG) its pixels never reach the mixer.
+                if let Some(rec) = self
+                    .sprite_fetch_recs
+                    .get_mut(self.next_sprite_fetch_index)
+                    && rec.phase == SpriteFetchPhase::Pending
+                {
+                    rec.phase = SpriteFetchPhase::Aborted;
+                }
                 self.next_sprite_fetch_index += 1;
                 continue;
             }
@@ -7597,29 +7837,49 @@ impl Ppu {
             // Single faithful tile-walk cost (mirrors `sprite_tile_walk_cost` /
             // Gambatte `doFullTilesUnrolled` ppu.cpp:525-530): the FIRST sprite in
             // each BG tile costs `max(11 - dist, 6)`; every further sprite sharing
-            // that tile costs a flat 6. `dist = pixel_in_tile = (x + scx) & 7`. The
-            // tile id `(x + scx) & !7` differs from the closed-form's `(spx -
-            // firstTileXpos) & -8` only by a per-line constant, so the equality
-            // grouping (first-vs-rest) is identical.
+            // that tile costs a flat 6. On DMG `dist = (spx + scx) & 7` — the raw
+            // OAM x, NOT the clamped trigger column: a left-clipped sprite
+            // (spx 1..7) matches during the first-tile prologue and costs
+            // max(11-spx, 6) (mealybug m3_lcdc_obj_en_change_variant's BGP bands
+            // pin 10,9,8,7,6,6,6 for spx 1..7; the old `self.x`-based dist
+            // collapsed them all to 11). On CGB keep the clamped-trigger dist:
+            // the gambatte scx_during_m3_spx1/spx2 hardware captures pin the
+            // full 11-dot stall for left-clipped sprites there. For spx >= 8 the
+            // two are congruent mod 8, and the tile id differs from the
+            // closed-form's `(spx - firstTileXpos) & -8` only by a per-line
+            // constant, so the equality grouping (first-vs-rest) is identical.
             let scx = mmio.read(SCX);
-            let pixel_in_tile = self.x.wrapping_add(scx) & 0x07;
-            let tile_no = (self.x as i32 + scx as i32) & !7;
+            let dist_x = if mmio.is_cgb_features_enabled() { self.x } else { sprite_x };
+            let pixel_in_tile = dist_x.wrapping_add(scx) & 0x07;
+            let tile_no = (dist_x as i32 + scx as i32) & !7;
             let first_in_tile = tile_no != self.m3_sprite_prev_tile;
             self.m3_sprite_prev_tile = tile_no;
 
-            if sprite_x == 0 {
-                return Some(11);
-            }
-
-            // pixel_in_tile 0..7 -> leading rate 11,10,9,8,7,6,6,6 (= max(11-dist,6));
-            // a non-leading sprite in the same tile is always a flat 6.
-            let base_penalty = if first_in_tile {
+            let penalty = if sprite_x == 0 {
+                11
+            } else if first_in_tile {
+                // pixel_in_tile 0..7 -> leading rate 11,10,9,8,7,6,6,6
+                // (= max(11-dist,6)); a non-leading sprite in the same tile is
+                // always a flat 6.
                 let wait_for_bg_fetch = (7u8 - pixel_in_tile).saturating_sub(2);
                 wait_for_bg_fetch + 6
             } else {
                 6
             };
-            return Some(base_penalty);
+            // Per-sprite fetch record: a left-clipped sprite (spx < 8) matched
+            // (8 - spx) dots before the head reached column 0 (during the
+            // first-tile prologue), so its byte-fetch dots are earlier by that
+            // amount than the arm tick observed here.
+            if let Some(rec) = self
+                .sprite_fetch_recs
+                .get_mut(self.next_sprite_fetch_index - 1)
+            {
+                let left_adj = (8u128).saturating_sub(sprite_x as u128).min(self.ticks);
+                rec.phase = SpriteFetchPhase::Fetched;
+                rec.arm_tick = self.ticks - if sprite_x < 8 { left_adj } else { 0 };
+                rec.penalty = penalty;
+            }
+            return Some(penalty);
         }
 
         None
@@ -7803,14 +8063,43 @@ impl Ppu {
         
         // For sprite priority calculation, we need the original bg_pixel_idx
         let effective_bg_pixel_idx = if bg_enabled { bg_pixel_idx } else { 0 };
-        
-        // Check if sprites are enabled
-        if (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
+
+        // OBJ-enable gate. With a mid-mode-3 LCDC.1 toggle this line, hardware
+        // gates each sprite pixel on the bit AT THAT PIXEL'S pop dot — resolve
+        // per column from the history. Otherwise keep the live-LCDC fast path
+        // (identical to the single seeded entry).
+        let objen_toggled = self.objen_history.len() > 1;
+        if !objen_toggled && (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
             return bg_color;
         }
-        
+
         // Find the highest priority sprite at this position
-        for sprite in &self.sprites_on_line {
+        for (spr_i, sprite) in self.sprites_on_line.iter().enumerate() {
+            // Mid-mode-3 OBJ-enable toggle:
+            //  - per-sprite FETCH gate: a sprite whose fetch was aborted
+            //    (disable landed mid-fetch) or whose x-match dot passed while
+            //    OBJ was disabled (skip-marked by the live walk before its
+            //    columns pop) never contributes pixels this line, even where
+            //    OBJ is re-enabled;
+            //  - per-pixel POP gate: OBJ-enable sampled at this pixel's pop
+            //    dot (SameBoy reads LCDC.1 live per popped pixel). A pixel
+            //    popping 15+ dots after its sprite's fetch match samples the
+            //    gate one dot LATE (stale-FIFO quirk — pinned by the
+            //    m3_lcdc_obj_en_change spx=1/2 bands, whose trailing pixels
+            //    go dark one dot before the disable's normal apply dot; the
+            //    spx>=8 bands' first-pop pixels at the same dot stay lit).
+            if objen_toggled {
+                let rec = self.sprite_fetch_recs.get(spr_i);
+                if rec.map(|r| r.phase) == Some(SpriteFetchPhase::Aborted) {
+                    continue;
+                }
+                let stale = rec
+                    .filter(|r| r.phase == SpriteFetchPhase::Fetched)
+                    .is_some_and(|r| self.ticks >= r.arm_tick + 15);
+                if !self.objen_at_tick(self.ticks + stale as u128) {
+                    continue;
+                }
+            }
             // Sprite X coordinate is offset by 8, Y coordinate is offset by 16
             let sprite_actual_x = sprite.x as i16 - 8;
             let sprite_actual_y = sprite.y as i16 - 16;
@@ -7821,31 +8110,41 @@ impl Ppu {
             
             // Sprite is 8 pixels wide
             if (0..8).contains(&relative_x) {
+                // Mid-mode-3 OBJ-size (LCDC.2) toggle this line: hardware
+                // samples the size bit at each tile-data byte's own fetch dot
+                // (per-byte row addressing, see obj_pixel_sized); list
+                // membership already implies the sprite was scanned y-visible,
+                // so the bound is the scan range (0..16), not the live size.
+                let objsize_toggled = self.objsize_dot_history.len() > 1;
                 let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
-                if relative_y >= 0 && relative_y < sprite_height as i16 {
+                let y_in_range = if objsize_toggled {
+                    (0..16).contains(&relative_y)
+                } else {
+                    relative_y >= 0 && relative_y < sprite_height as i16
+                };
+                if y_in_range {
                     // Get sprite pixel data
-                    if let Some(sprite_pixel_idx) = self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8)
+                    let px = if objsize_toggled {
+                        self.obj_pixel_sized(
+                            mmio,
+                            sprite,
+                            self.sprite_fetch_recs.get(spr_i),
+                            relative_x as u8,
+                            screen_y,
+                        )
+                    } else {
+                        self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8)
+                    };
+                    if let Some(sprite_pixel_idx) = px
                         && sprite_pixel_idx != 0 { // Sprite pixel is not transparent
                             let sprite_color = if mmio.is_cgb() {
                                 // CGB: OBP sampled per pixel (true-color palette-RAM pipeline).
                                 self.get_sprite_palette_color(mmio, sprite_pixel_idx, sprite.attributes.palette, screen_x)
                             } else {
-                                // DMG mid-mode-3 OBP-write model (mealybug m3_obp0_change).
-                                // The OBP register is sampled per pixel as the sprite is
-                                // composited out of the OAM FIFO: a pixel drawn at display
-                                // column `screen_x` picks up the new palette iff the mid-mode-3
-                                // write already became visible there (its `pal_write_boundary`
-                                // column, resolved via the column-keyed obp history). The one DMG
-                                // wrinkle vs CGB: a sprite whose origin is off the left edge
-                                // (origin < 0) is fetched at the very start of the line, before
-                                // any mid-mode-3 write, so its whole run keeps the pre-write
-                                // (seed) palette regardless of where its visible pixels land.
-                                let sample_col = if sprite_actual_x < 0 {
-                                    0 // off-screen-left fetch: force the pre-write (seed) value
-                                } else {
-                                    screen_x as u64
-                                };
-                                self.dmg_sprite_palette_shade(sprite_pixel_idx, sprite.attributes.palette, sample_col)
+                                // DMG mid-mode-3 OBP-write model (mealybug m3_obp0_change):
+                                // OBP sampled at this pixel's pop dot from the dot-keyed
+                                // history (see dmg_sprite_palette_shade).
+                                self.dmg_sprite_palette_shade(sprite_pixel_idx, sprite.attributes.palette, self.ticks)
                             };
 
                             // Handle sprite priority
@@ -7916,8 +8215,98 @@ impl Ppu {
         
         let low_bit = (low_byte >> bit_index) & 1;
         let high_bit = (high_byte >> bit_index) & 1;
-        
+
         Some((high_bit << 1) | low_bit)
+    }
+
+    // OBJ-enable (LCDC.1) as-of dot `tick`, resolved from the per-dot history
+    // (see `objen_history`).
+    fn objen_at_tick(&self, tick: u128) -> bool {
+        let mut on = self
+            .objen_history
+            .first()
+            .map(|&(_, b)| b)
+            .unwrap_or((self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0);
+        for &(apply_tick, b) in self.objen_history.iter() {
+            if apply_tick <= tick {
+                on = b;
+            } else {
+                break;
+            }
+        }
+        on
+    }
+
+    // OBJ-size (LCDC.2) as-of dot `tick`, resolved from the per-dot history.
+    fn objsize_large_at_tick(&self, tick: u128) -> bool {
+        let mut large = self
+            .objsize_dot_history
+            .first()
+            .map(|&(_, l)| l)
+            .unwrap_or((self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0);
+        for &(apply_tick, l) in self.objsize_dot_history.iter() {
+            if apply_tick <= tick {
+                large = l;
+            } else {
+                break;
+            }
+        }
+        large
+    }
+
+    // DMG sprite pixel with per-byte OBJ-size resolution (mid-mode-3 LCDC.2
+    // toggle lines). Hardware computes the object line address separately for
+    // the tile-data LOW and HIGH byte reads, sampling LCDC.2 live each time
+    // (SameBoy get_object_line_address is called before both vram reads), so a
+    // toggle landing between them mixes two row addressings:
+    //   tile_y = (ly - oam_y) & (large ? 15 : 7)   [y-flip XORs the mask]
+    //   tile   = large ? index & 0xFE : index
+    // The byte fetch dots come from the sprite's live fetch record: the stall
+    // spans [arm, arm + penalty); the LOW byte reads at end-3, HIGH at end-1.
+    // Sprites without a live record (not walked: m0-flush burst) fall back to
+    // the live-LCDC path.
+    fn obj_pixel_sized(
+        &self,
+        mmio: &mmio::Mmio,
+        sprite: &Sprite,
+        rec: Option<&SpriteFetchRec>,
+        rel_x: u8,
+        screen_y: u8,
+    ) -> Option<u8> {
+        let Some(rec) = rec.filter(|r| r.phase == SpriteFetchPhase::Fetched) else {
+            // No per-fetch record: resolve both bytes with the live size.
+            let large = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+            return self.obj_pixel_with_sizes(mmio, sprite, rel_x, screen_y, large, large);
+        };
+        let fetch_end = rec.arm_tick + rec.penalty as u128;
+        let low_large = self.objsize_large_at_tick(fetch_end.saturating_sub(OBJ_READ_LOW_BACK));
+        let high_large = self.objsize_large_at_tick(fetch_end.saturating_sub(OBJ_READ_HIGH_BACK));
+        self.obj_pixel_with_sizes(mmio, sprite, rel_x, screen_y, low_large, high_large)
+    }
+
+    fn obj_pixel_with_sizes(
+        &self,
+        mmio: &mmio::Mmio,
+        sprite: &Sprite,
+        rel_x: u8,
+        screen_y: u8,
+        low_large: bool,
+        high_large: bool,
+    ) -> Option<u8> {
+        let line_addr = |large: bool| -> u16 {
+            let mask: u8 = if large { 15 } else { 7 };
+            // (ly - oam_y) & mask == (ly - (oam_y - 16)) & mask (16 ≡ 0 mod both).
+            let mut tile_y = screen_y.wrapping_sub(sprite.y) & mask;
+            if sprite.attributes.y_flip {
+                tile_y ^= mask;
+            }
+            let tile = if large { sprite.tile_index & 0xFE } else { sprite.tile_index };
+            0x8000 + (tile as u16) * 16 + (tile_y as u16) * 2
+        };
+        let low_byte = mmio.read(line_addr(low_large));
+        let high_byte = mmio.read(line_addr(high_large) + 1);
+        let bit_index = if sprite.attributes.x_flip { rel_x } else { 7 - rel_x };
+        Some((((high_byte >> bit_index) & 1) << 1) | ((low_byte >> bit_index) & 1))
     }
 }
 
