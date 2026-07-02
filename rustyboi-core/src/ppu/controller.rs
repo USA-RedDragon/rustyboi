@@ -198,6 +198,14 @@ fn cgbwg() -> &'static CgbWgTune {
         }
     })
 }
+/// Machine configuration for a CPU VRAM/OAM access-window query.
+#[derive(Clone, Copy)]
+pub struct AccessEnv {
+    pub is_cgb: bool,
+    pub cgb_de: bool,
+    pub double_speed: bool,
+}
+
 const WY1_DELAY: i64 = 2;
 const WY2_DELAY_CGB: i64 = 7;
 const WY2_DELAY_DMG: i64 = 4;
@@ -6124,12 +6132,14 @@ impl Ppu {
                             let fls = self.wg_apply(self.fetcher_lcdc_state());
                             if let Some(event) = self.fetcher.step(
                                 mmio,
-                                self.win_y_pos,
                                 fls,
-                                self.x,
-                                0,
-                                self.scy_delayed,
-                                self.scx_delayed,
+                                crate::ppu::fetcher::FetchPos {
+                                    window_line: self.win_y_pos,
+                                    display_x: self.x,
+                                    pending_discard: 0,
+                                    scy: self.scy_delayed,
+                                    scx: self.scx_delayed,
+                                },
                             ) {
                                 if matches!(
                                     event.kind,
@@ -6209,7 +6219,13 @@ impl Ppu {
                     0
                 };
                 if cadence_even
-                    && let Some(event) = self.fetcher.step(mmio, self.win_y_pos, fetcher_lcdc_state, self.x, pending_discard, self.scy_delayed, self.scx_delayed) {
+                    && let Some(event) = self.fetcher.step(mmio, fetcher_lcdc_state, crate::ppu::fetcher::FetchPos {
+                        window_line: self.win_y_pos,
+                        display_x: self.x,
+                        pending_discard,
+                        scy: self.scy_delayed,
+                        scx: self.scx_delayed,
+                    }) {
                         if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::TileNumber) {
                             self.subcc_last_tn_cc = self.abs_cc;
                         }
@@ -6505,12 +6521,14 @@ impl Ppu {
                         let fls = self.wg_apply(self.fetcher_lcdc_state());
                         if let Some(event) = self.fetcher.step(
                             mmio,
-                            self.win_y_pos,
                             fls,
-                            self.x,
-                            0,
-                            self.scy_delayed,
-                            self.scx_delayed,
+                            crate::ppu::fetcher::FetchPos {
+                                window_line: self.win_y_pos,
+                                display_x: self.x,
+                                pending_discard: 0,
+                                scy: self.scy_delayed,
+                                scx: self.scx_delayed,
+                            },
                         ) {
                             if matches!(
                                 event.kind,
@@ -6650,12 +6668,14 @@ impl Ppu {
                                 let fls = self.wg_apply(self.fetcher_lcdc_state());
                                 if let Some(event) = self.fetcher.step(
                                     mmio,
-                                    self.win_y_pos,
                                     fls,
-                                    self.x,
-                                    0,
-                                    self.scy_delayed,
-                                    self.scx_delayed,
+                                    crate::ppu::fetcher::FetchPos {
+                                        window_line: self.win_y_pos,
+                                        display_x: self.x,
+                                        pending_discard: 0,
+                                        scy: self.scy_delayed,
+                                        scx: self.scx_delayed,
+                                    },
                                 ) {
                                     if matches!(
                                         event.kind,
@@ -7378,7 +7398,8 @@ impl Ppu {
     /// mode 2|3 for oam). The cycle-exact predictor only refines the mode-3->0
     /// END boundary against `scheduled_mode0_dot` (Gambatte's `m0TimeOfCurrentLine`);
     /// the start stays on the renderer's mode set, which is window-independent.
-    pub fn cpu_access_blocked(&self, kind: u8, is_read: bool, mode3_locked: bool, is_cgb: bool, cgb_de: bool, double_speed: bool, access_cc: u64) -> Option<bool> {
+    pub fn cpu_access_blocked(&self, kind: u8, is_read: bool, mode3_locked: bool, env: AccessEnv, access_cc: u64) -> Option<bool> {
+        let AccessEnv { is_cgb, cgb_de, double_speed } = env;
         if self.disabled {
             return Some(false);
         }
@@ -7861,7 +7882,6 @@ impl Ppu {
             return self.get_stat_mode_midframe(
                 mmio,
                 access_cc,
-                ly,
                 line_cycles,
                 ds,
                 mmio.halt_wakeup_skew(),
@@ -7936,13 +7956,11 @@ impl Ppu {
         &self,
         mmio: &mmio::Mmio,
         access_cc: u64,
-        ly: i64,
         line_cycles: i64,
         ds: bool,
         halt_skew: bool,
         is_cgb: bool,
     ) -> Option<u8> {
-        let _ = ly;
         let cpl = stat_irq::LCD_CYCLES_PER_LINE as i64;
         // PTZ: Line-tail zone under a HALT-woken stream — resolve the next-line OAM
         // (mode 2) anticipation instead of deferring to the post-tick renderer
