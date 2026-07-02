@@ -1323,7 +1323,7 @@ impl Mmio {
     fn sync_apu_cc_with_ds(&mut self, ds: bool) {
         let abs_cc = self.timer.abs_cc();
         let div_resets = self.timer.div_reset_count();
-        let div_anchor = self.timer.div_anchor();
+        let div_anchor = self.timer.div_anchor_apu();
         self.audio.sync_cc(abs_cc, div_resets, div_anchor, ds);
     }
 
@@ -2470,6 +2470,7 @@ impl Mmio {
     ///     `VRAM[tiledata(poisoned_tile,row) & dma_addr]`, where the poisoned tile's
     ///     base was carried from the preceding tilemap read and the row low bits come
     ///     from this read's own fetcher address.
+    ///
     /// The first locked M-cycle of a line (`fetcher_bus_warmup`) and any non-mode-3
     /// read fall back to the true VRAM source.
     fn dma_vram_conflict_or_source_byte(&mut self, pos: u8) -> u8 {

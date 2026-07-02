@@ -3448,7 +3448,7 @@ impl Ppu {
             self.internal_ly_val = 0;
             self.stat_reg_committed = mmio.read(LCD_STATUS);
             self.lyc_irq.lcd_reset();
-            self.mstat_irq.lcd_reset(self.lyc_irq.lyc_reg());
+            self.mstat_irq.lcd_reset(self.lyc_irq.lyc_reg_src());
             self.reschedule_all_stat_events(mmio);
             self.sched_m0irq = stat_irq::DISABLED_TIME;
         }
@@ -3632,7 +3632,7 @@ impl Ppu {
             // the halt-exit `<2` fixup can read the cc the IF bit was raised at
             // (Gambatte `flagIrq(2, eventTimes_(memevent_m0irq))`).
             let m0_event_cc = self.m0_irq_event_cc_master(mmio);
-            let fired = self.mstat_irq.do_m0_event(ly, stat, self.lyc_irq.lyc_reg());
+            let fired = self.mstat_irq.do_m0_event(ly, stat, self.lyc_irq.lyc_reg_src());
             if fired {
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
                 mmio.set_pending_m0_irq_fire_cc(m0_event_cc);
@@ -3657,7 +3657,7 @@ impl Ppu {
             lc.ly
         };
         let stat = self.stat_reg_committed;
-        let fired = self.mstat_irq.do_m2_event(ly, stat, self.lyc_irq.lyc_reg());
+        let fired = self.mstat_irq.do_m2_event(ly, stat, self.lyc_irq.lyc_reg_src());
         if fired {
             mmio.request_interrupt(registers::InterruptFlag::Lcd);
             // FAITHFUL HALT-EXIT: a halted CPU wakes at this exact cc; the DMG
@@ -4674,7 +4674,7 @@ impl Ppu {
         let new_stat = mmio.read(LCD_STATUS) & 0x78;
         let new_lyc = mmio.read(LYC);
         let old_stat = self.stat_reg_committed & 0x78;
-        let old_lyc = self.lyc_irq.lyc_reg();
+        let old_lyc = self.lyc_irq.lyc_reg_src();
 
         // FF41 (STAT) write. Run unconditionally on any FF41 write (even a
         // same-value write) to reproduce the DMG STAT-write IRQ bug; the CGB
@@ -4815,7 +4815,7 @@ impl Ppu {
         self.sched_lycirq = self.lyc_irq.time;
 
         let cgb = mmio.is_cgb_features_enabled();
-        let lyc_reg = self.lyc_irq.lyc_reg();
+        let lyc_reg = self.lyc_irq.lyc_reg_src();
         // Gambatte's statChangeTriggersStatIrqDmg recomputes the current line's
         // m0 IRQ time when it is unscheduled but mode 0 is still ahead this
         // line. Reproduce that so enabling m0 during mode 2/3 sees a future m0.
@@ -4846,7 +4846,7 @@ impl Ppu {
 
     /// Port of LCD::lycRegChange.
     fn lyc_reg_change(&mut self, data: u8, mmio: &mut mmio::Mmio) {
-        let old = self.lyc_irq.lyc_reg();
+        let old = self.lyc_irq.lyc_reg_src();
         if data == old {
             return;
         }
@@ -5062,7 +5062,7 @@ impl Ppu {
                 self.lyc_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
                 self.mstat_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
                 self.lyc_irq.lcd_reset();
-                self.mstat_irq.lcd_reset(self.lyc_irq.lyc_reg());
+                self.mstat_irq.lcd_reset(self.lyc_irq.lyc_reg_src());
                 self.reschedule_all_stat_events(mmio);
                 self.sched_m0irq = stat_irq::DISABLED_TIME;
                 self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
@@ -5133,7 +5133,7 @@ impl Ppu {
             self.internal_ly_val = 0;
             self.stat_reg_committed = mmio.read(LCD_STATUS);
             self.lyc_irq.lcd_reset();
-            self.mstat_irq.lcd_reset(self.lyc_irq.lyc_reg());
+            self.mstat_irq.lcd_reset(self.lyc_irq.lyc_reg_src());
             self.reschedule_all_stat_events(mmio);
             self.sched_m0irq = stat_irq::DISABLED_TIME;
         }
@@ -6987,11 +6987,11 @@ impl Ppu {
     pub fn get_frame(&mut self, mmio: &mmio::Mmio) -> crate::gb::Frame {
         self.have_frame = false;
         if self.renders_color(mmio) {
-            crate::gb::Frame::Color(self.color_fb_b)
+            crate::gb::Frame::Color(Box::new(self.color_fb_b))
         } else if let Some(sgb) = mmio.sgb() {
             self.sgb_frame(sgb)
         } else {
-            crate::gb::Frame::Monochrome(self.fb_b)
+            crate::gb::Frame::Monochrome(Box::new(self.fb_b))
         }
     }
 
@@ -7011,9 +7011,9 @@ impl Ppu {
             if blank {
                 // Blank to shade 0 (Color0) / darkest for Black.
                 let fill = if matches!(sgb.mask, MaskMode::Black) { 3 } else { 0 };
-                return crate::gb::Frame::Monochrome([fill; FRAMEBUFFER_SIZE]);
+                return crate::gb::Frame::Monochrome(Box::new([fill; FRAMEBUFFER_SIZE]));
             }
-            return crate::gb::Frame::Monochrome(self.fb_b);
+            return crate::gb::Frame::Monochrome(Box::new(self.fb_b));
         }
 
         // Colorized: build an RGB888 frame from the SGB palettes.
@@ -7029,7 +7029,7 @@ impl Ppu {
                 out[idx * 3 + 2] = b;
             }
         }
-        crate::gb::Frame::Color(out)
+        crate::gb::Frame::Color(Box::new(out))
     }
 
     // Debug methods

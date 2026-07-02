@@ -297,9 +297,9 @@ pub fn read_png_rgb(path: &Path) -> Result<Vec<u32>, String> {
 /// `util.compareImage` runs `convert("L")` on both images before diffing, so we
 /// must match PIL bit-for-bit or a ±1 luma error could flip the diff-50 verdict.
 fn pil_luminance(rgb: u32) -> u8 {
-    let r = ((rgb >> 16) & 0xFF) as u32;
-    let g = ((rgb >> 8) & 0xFF) as u32;
-    let b = (rgb & 0xFF) as u32;
+    let r = (rgb >> 16) & 0xFF ;
+    let g = (rgb >> 8) & 0xFF ;
+    let b = rgb & 0xFF ;
     // PIL C: L24(rgb) = (r*19595 + g*38470 + b*7471 + 0x8000) >> 16
     ((r * 19595 + g * 38470 + b * 7471 + 0x8000) >> 16) as u8
 }
@@ -363,12 +363,11 @@ pub fn write_ppm(path: &Path, frame: &[u32]) -> Result<(), String> {
         ));
     }
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("failed to create artifact directory: {error}"))?;
         }
-    }
 
     let mut file = fs::File::create(path)
         .map_err(|error| format!("failed to create PPM {}: {error}", path.display()))?;
@@ -443,7 +442,7 @@ fn collect_mismatch(pixels: impl Iterator<Item = (u32, u32)>) -> Option<FrameMis
     for (index, (actual, expected)) in pixels.enumerate() {
         if ((actual ^ expected) & RGB_MASK) != 0 {
             differing_pixels += 1;
-            first_mismatch.get_or_insert_with(|| FrameMismatch {
+            first_mismatch.get_or_insert(FrameMismatch {
                 differing_pixels: 0,
                 first_x: index % GB_WIDTH,
                 first_y: index / GB_WIDTH,
@@ -594,7 +593,7 @@ fn samples_to_rgb(
     palette: &[u32],
 ) -> Result<Vec<u32>, String> {
     let mut out = Vec::with_capacity(width * height);
-    let max = ((1u32 << bit_depth) - 1) as u32;
+    let max = (1u32 << bit_depth) - 1 ;
     for y in 0..height {
         let row = &bytes[y * stride..y * stride + stride];
         for x in 0..width {
