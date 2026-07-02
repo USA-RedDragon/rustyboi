@@ -369,17 +369,25 @@ echo "  turtle_tests: $(grep -vc '^#' "$OUT/turtle_tests.manifest") cases"
 # firstwhite turns the LCD off after its result screen (no LD B,B), so it needs
 # the flat-budget `png_fixed` grading, not the LD-B,B `png` path.
 ltg="$ROMS/little-things-gb"
+# tellinglys' joypad-IRQ entropy check needs all 8 keys pressed at distinct LY
+# positions (>=5 bits of LY spread across presses), hence the @<ly> targets.
+TELLINGLYS_INPUT='input=30@5:A,45:-,60@21:B,75:-,90@42:Up,105:-,120@84:Down,135:-,150@105:Left,165:-,180@120:Right,195:-,210@135:Start,225:-,240@10:Select,255:-'
 {
-  echo "# little-things-gb PPU screenshots. tellinglys needs button input (see notes)."
+  echo "# little-things-gb PPU screenshots. tellinglys uses scripted button input"
+  echo "# (input= token): its joypad-IRQ entropy check needs all 8 keys pressed at"
+  echo "# distinct LY positions (>=5 bits of LY spread), hence the @<ly> targets."
+  echo "# firstwhite is input-less; it fails on the first-frame-after-LCD-enable"
+  echo "# display blanking (hardware shows white; PPU presentation gap, see notes)."
   if [ -d "$ltg" ]; then
     for ref in "$ltg"/firstwhite-*.png; do
       [ -e "$ref" ] || continue
       echo "little-things-gb/firstwhite|dmg|png_fixed|$ltg/firstwhite.gb|$ref"
       echo "little-things-gb/firstwhite|cgb|png_fixed|$ltg/firstwhite.gb|$ref"
     done
-    # tellinglys requires emulated button presses; still emitted so the number is
-    # explicit (it will fail without input injection -- documented as feature-work).
-    emit_png_dir "little-things-gb" "$ltg/tellinglys.gb" "$ltg"/tellinglys-*.png
+    [ -f "$ltg/tellinglys.gb" ] && for dev in cgb dmg; do
+      ref="$ltg/tellinglys-$dev.png"
+      [ -f "$ref" ] && echo "little-things-gb/tellinglys|$dev|png|$ltg/tellinglys.gb|$ref|$TELLINGLYS_INPUT|frames=700"
+    done
   fi
 } > "$OUT/little_things_gb.manifest"
 echo "  little_things_gb: $(grep -vc '^#' "$OUT/little_things_gb.manifest") cases"
@@ -422,26 +430,42 @@ ss="$ROMS/same-suite"
 echo "  samesuite_nonapu: $(grep -vc '^#' "$OUT/samesuite_nonapu.manifest") cases"
 
 {
-  echo "# same-suite sgb/ (needs Super Game Boy hardware; NOT modeled)."
+  echo "# same-suite sgb/ (Super Game Boy). High-level SGB (JOYP packet protocol +"
+  echo "# MLT_REQ command handling); constructed as Hardware::SGB via \`rev=sgb\`."
   if [ -d "$ss/sgb" ]; then
     for rom in $(find "$ss/sgb" -name '*.gb' 2>/dev/null | sort); do
       rel="${rom#"$ROMS"/}"
-      echo "$rel|dmg|mooneye|$rom"
+      echo "$rel|dmg|mooneye|$rom|rev=sgb"
     done
   fi
 } > "$OUT/samesuite_sgb.manifest"
 echo "  samesuite_sgb: $(grep -vc '^#' "$OUT/samesuite_sgb.manifest") cases"
 
 # --- rtc3test / mbc3-tester (MBC3 RTC) --------------------------------------
-# rtc3test needs button navigation to select each subtest + an RTC clock; it
-# cannot be auto-graded without input injection. mbc3-tester loops and shows a
-# result screen with no input required, so it IS auto-gradable via PNG.
+# rtc3test is an interactive menu: each sub-suite is selected with scripted
+# button input (input= tokens). Sub-suite durations (emulated): basic 13s,
+# range 8s, sub-second writes 26s; each row carries its own frames= budget
+# (menu + run + settle). mbc3-tester loops and shows a result screen with no
+# input required, so it is auto-gradable via plain PNG.
 rtc="$ROMS/rtc3test"
 {
-  echo "# rtc3test (MBC3 RTC). NEEDS button-input navigation -- see notes; will"
-  echo "# fail without input injection. Emitted for an explicit number only."
+  echo "# rtc3test (MBC3 RTC). The ROM is an interactive menu: each sub-suite is"
+  echo "# selected with scripted button input (input= tokens; see parse_input_script)."
+  echo "# Sub-suite durations (emulated): basic 13s, range 8s, sub-second writes 26s;"
+  echo "# each row carries its own frames= budget (menu + run + settle)."
   if [ -d "$rtc" ]; then
-    emit_png_dir "rtc3test-basic" "$rtc/rtc3test.gb" "$rtc"/rtc3test-basic-tests-*.png
+    for dev in cgb dmg; do
+      ref="$rtc/rtc3test-basic-tests-$dev.png"
+      [ -f "$ref" ] && echo "rtc3test-basic/rtc3test|$dev|png|$rtc/rtc3test.gb|$ref|input=20:A,30:-|frames=850"
+    done
+    for dev in cgb dmg; do
+      ref="$rtc/rtc3test-range-tests-$dev.png"
+      [ -f "$ref" ] && echo "rtc3test-range/rtc3test|$dev|png|$rtc/rtc3test.gb|$ref|input=20:Down,30:-,40:A,50:-|frames=700"
+    done
+    for dev in cgb dmg; do
+      ref="$rtc/rtc3test-sub-second-writes-$dev.png"
+      [ -f "$ref" ] && echo "rtc3test-subsecond/rtc3test|$dev|png|$rtc/rtc3test.gb|$ref|input=20:Down,30:-,40:Down,50:-,60:A,70:-|frames=1750"
+    done
   fi
 } > "$OUT/rtc3test.manifest"
 echo "  rtc3test:  $(grep -vc '^#' "$OUT/rtc3test.manifest") cases"

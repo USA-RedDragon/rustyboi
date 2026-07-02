@@ -1,7 +1,11 @@
-use crate::expectation::{Mode, Oracle, TestCase};
+use crate::expectation::{
+    BTN_A, BTN_B, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_SELECT, BTN_START, BTN_UP, InputEvent, Mode,
+    Oracle, TestCase,
+};
 use crate::frame;
 use rustyboi_core_lib::audio::AudioOutput;
 use rustyboi_core_lib::cartridge::Cartridge;
+use rustyboi_core_lib::input::ButtonState;
 use rustyboi_core_lib::cpu::registers::{INTERRUPT_ENABLE, INTERRUPT_FLAG};
 use rustyboi_core_lib::gb::{GB, Hardware};
 use rustyboi_core_lib::ppu::{
@@ -23,6 +27,73 @@ pub struct CaseResult {
     pub case: TestCase,
     pub passed: bool,
     pub detail: String,
+}
+
+/// Scripted joypad input for one case (from a manifest `input=` token).
+/// Deterministic and purely per-case (parallel-executor safe): events fire off
+/// the case's own cycle count. An event is due once `total_cycles` reaches its
+/// frame window (`frame * 70224`); with an `@ly` condition it additionally
+/// waits for LY to equal the target so a press lands mid-frame at a chosen
+/// scanline (LY equality is observed at instruction granularity, well within a
+/// 456-cycle scanline). If LY never matches — e.g. the LCD is off — the event
+/// force-fires two frames past due so a script cannot hang a case.
+struct InputScript {
+    events: Vec<InputEvent>,
+    next: usize,
+}
+
+impl InputScript {
+    fn new(events: &[InputEvent]) -> Self {
+        Self {
+            events: events.to_vec(),
+            next: 0,
+        }
+    }
+
+    /// Apply every due event. Called once per stepped instruction (cheap: a
+    /// single bounds check when no event is pending).
+    fn poll(&mut self, gb: &mut GB, total_cycles: u64) {
+        while let Some(event) = self.events.get(self.next) {
+            let due = event.frame as u64 * CYCLES_PER_FRAME as u64;
+            if total_cycles < due {
+                break;
+            }
+            if let Some(ly) = event.ly
+                && gb.read_memory(LY) != ly
+                && total_cycles < due + 2 * CYCLES_PER_FRAME as u64
+            {
+                break;
+            }
+            gb.set_input_state(buttons_to_state(event.buttons));
+            self.next += 1;
+        }
+    }
+
+    /// Frame-boundary variant for loops that run whole LCD frames at a time
+    /// (`png_shootout`): applies every event whose frame has been reached.
+    /// `@ly` conditions are ignored at this granularity.
+    fn poll_frame(&mut self, gb: &mut GB, frame_index: usize) {
+        while let Some(event) = self.events.get(self.next) {
+            if (event.frame as usize) > frame_index {
+                break;
+            }
+            gb.set_input_state(buttons_to_state(event.buttons));
+            self.next += 1;
+        }
+    }
+}
+
+fn buttons_to_state(buttons: u8) -> ButtonState {
+    ButtonState {
+        a: buttons & BTN_A != 0,
+        b: buttons & BTN_B != 0,
+        start: buttons & BTN_START != 0,
+        select: buttons & BTN_SELECT != 0,
+        up: buttons & BTN_UP != 0,
+        down: buttons & BTN_DOWN != 0,
+        left: buttons & BTN_LEFT != 0,
+        right: buttons & BTN_RIGHT != 0,
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -422,13 +493,13 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
                 .unwrap_or(false);
             if trace_case {
                 let mut trace = TimingTrace::new(options.trace_limit, options.trace_ly);
-                return evaluate_csp_png_traced(&mut gb, options, path, &mut trace);
+                return evaluate_csp_png_traced(&mut gb, options, case, path, &mut trace);
             }
-            return evaluate_csp_png(&mut gb, options, path, false);
+            return evaluate_csp_png(&mut gb, options, case, path, false);
         }
-        Oracle::CspPngFixed { path } => return evaluate_csp_png(&mut gb, options, path, true),
+        Oracle::CspPngFixed { path } => return evaluate_csp_png(&mut gb, options, case, path, true),
         Oracle::PngShootout { refs, frames } => {
-            return evaluate_png_shootout(&mut gb, options, refs, *frames);
+            return evaluate_png_shootout(&mut gb, options, case, refs, *frames);
         }
         _ => {}
     }
@@ -791,6 +862,7 @@ fn evaluate_blargg_mem(gb: &mut GB, frames: usize) -> Result<(), String> {
 fn evaluate_png_shootout(
     gb: &mut GB,
     options: &RunOptions,
+    case: &TestCase,
     refs: &[std::path::PathBuf],
     case_frames: usize,
 ) -> Result<(), String> {
@@ -807,14 +879,19 @@ fn evaluate_png_shootout(
         );
     }
 
+    let mut input = InputScript::new(&case.input);
     let mut worst: Option<frame::FrameMismatch> = None;
     // Budget in frame units. Several SameSuite APU ROMs keep the LCD OFF for
     // multi-million-cycle measurement stretches before drawing their result
     // screen; a timed-out frame wait burned MAX_CYCLES_UNTIL_LCD_FRAME
     // (64 frames) of the budget without producing a frame — keep running
     // instead of failing (the shootout's runtime-seconds budget does).
-    let mut budget = frames.max(1) as i64;
+    let total_budget = frames.max(1) as i64;
+    let mut budget = total_budget;
     while budget > 0 {
+        // Scripted input applies at frame-boundary granularity here (the loop
+        // runs whole LCD frames); the frame index is budget-derived.
+        input.poll_frame(gb, (total_budget - budget) as usize);
         match gb.run_until_lcd_frame(false, MAX_CYCLES_UNTIL_LCD_FRAME) {
             Ok((frame, _bp)) => {
                 budget -= 1;
@@ -851,25 +928,31 @@ fn evaluate_png_shootout(
 /// c-sp framebuffer-PNG grading. Runs LCD frames, early-stopping once the
 /// `LD B,B` (0x40) done-marker is the next opcode (mealybug/acid2 convention),
 /// then compares the final frame to the reference. When `fixed` is set (the
-/// `png_fixed` grading), instead runs a flat `--frames`-cycle budget and grades
+/// `png_fixed` grading), instead runs a flat frame-cycle budget and grades
 /// the final held framebuffer — for ROMs that turn the LCD off after rendering
-/// their result screen and never complete another frame.
+/// their result screen and never complete another frame. The budget is the
+/// case's own `frames=` override when present, else `--frames`; scripted
+/// `input=` events (if any) fire off the case cycle clock as the run steps.
 fn evaluate_csp_png(
     gb: &mut GB,
     options: &RunOptions,
+    case: &TestCase,
     refpng: &std::path::Path,
     fixed: bool,
 ) -> Result<(), String> {
+    let frames = case.frames.unwrap_or(options.frames);
+    let mut input = InputScript::new(&case.input);
     let actual = if fixed {
-        let budget = options.frames as u64 * CYCLES_PER_FRAME as u64;
+        let budget = frames as u64 * CYCLES_PER_FRAME as u64;
         let mut cycles = 0u64;
         while cycles < budget {
+            input.poll(gb, cycles);
             let (_breakpoint, c) = gb.step_instruction(false);
             cycles += c as u64;
         }
         frame::normalize_frame(gb.get_current_frame())
     } else {
-        run_csp_frames_until_ldbb(gb, options.frames)?
+        run_csp_frames_until_ldbb(gb, frames, &mut input)?
     };
 
     let expected = frame::read_png_rgb(refpng)
@@ -896,12 +979,16 @@ fn evaluate_csp_png(
 fn evaluate_csp_png_traced(
     gb: &mut GB,
     options: &RunOptions,
+    case: &TestCase,
     refpng: &std::path::Path,
     trace: &mut TimingTrace,
 ) -> Result<(), String> {
+    let frames = case.frames.unwrap_or(options.frames);
+    let mut input = InputScript::new(&case.input);
+    let mut total_cycles = 0u64;
     let mut last: Option<Vec<u32>> = None;
     let mut done = false;
-    for frame_index in 0..options.frames {
+    for frame_index in 0..frames {
         let trace_this_frame = options
             .trace_frame
             .map(|trace_frame| trace_frame == frame_index)
@@ -909,6 +996,7 @@ fn evaluate_csp_png_traced(
         gb.set_fetch_debug_events_enabled(trace_this_frame);
         let mut cycles = 0u32;
         loop {
+            input.poll(gb, total_cycles);
             let pc = gb.get_cpu_registers().pc;
             if gb.read_memory(pc) == 0x40 {
                 done = true;
@@ -924,9 +1012,11 @@ fn evaluate_csp_png_traced(
                 trace.emit_fetch_events(frame_index, before.pc, &fetch_events);
                 trace.emit_pixel_events(frame_index, before.pc, &pixel_events);
                 cycles += c;
+                total_cycles += c as u64;
             } else {
                 let (_breakpoint, c) = gb.step_instruction(false);
                 cycles += c;
+                total_cycles += c as u64;
             }
             if gb.get_ppu_debug_info().0.frame_ready() {
                 break;
@@ -956,13 +1046,20 @@ fn evaluate_csp_png_traced(
 
 /// Run up to `frames` LCD frames, stepping instruction-by-instruction within a
 /// frame so the `LD B,B` (0x40) done-marker can stop the run early. Returns the
-/// last completed (or marker-time) frame.
-fn run_csp_frames_until_ldbb(gb: &mut GB, frames: usize) -> Result<Vec<u32>, String> {
+/// last completed (or marker-time) frame. Scripted input events fire off the
+/// cumulative case cycle count as the frames run.
+fn run_csp_frames_until_ldbb(
+    gb: &mut GB,
+    frames: usize,
+    input: &mut InputScript,
+) -> Result<Vec<u32>, String> {
     let mut last: Option<Vec<u32>> = None;
     let mut done = false;
+    let mut total_cycles = 0u64;
     for frame_index in 0..frames {
         let mut cycles = 0u32;
         loop {
+            input.poll(gb, total_cycles);
             let pc = gb.get_cpu_registers().pc;
             if gb.read_memory(pc) == 0x40 {
                 done = true;
@@ -970,6 +1067,7 @@ fn run_csp_frames_until_ldbb(gb: &mut GB, frames: usize) -> Result<Vec<u32>, Str
             }
             let (_breakpoint, c) = gb.step_instruction(false);
             cycles += c;
+            total_cycles += c as u64;
             if gb.get_ppu_debug_info().0.frame_ready() {
                 break;
             }
