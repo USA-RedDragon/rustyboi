@@ -880,6 +880,12 @@ impl<'a> Bus<'a> {
             if (0xFE00..=0xFEFF).contains(&addr) {
                 self.oam_bug_corrupt(OamBugKind::Write);
             }
+            // CGB: a mode-3-blocked BCPD/OCPD write drops the palette byte but
+            // still performs the BGPI/OBPI auto-increment (SameBoy memory.c
+            // GB_IO_BGPD blocked path; SameSuite ppu/blocking_bgpi_increase).
+            if addr == 0xFF69 || addr == 0xFF6B {
+                self.mmio.palette_blocked_write_increment(addr);
+            }
             self.tick_m();
             return;
         }

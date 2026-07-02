@@ -632,8 +632,14 @@ fn evaluate_mooneye(gb: &mut GB, marker: u8) -> Result<(), String> {
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
     {
+        // RB_SS_DUMP_BASE=hex overrides the dump base (some tests store results
+        // in VRAM via RESULTS_START = vTestBuf).
+        let dump_base = std::env::var("RB_SS_DUMP_BASE")
+            .ok()
+            .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0xC000);
         for row in 0..rows {
-            let base = 0xC000u16 + row * 8;
+            let base = dump_base + row * 8;
             let bytes: Vec<String> = (0..8)
                 .map(|i| format!("{:02X}", gb.read_memory(base + i)))
                 .collect();
