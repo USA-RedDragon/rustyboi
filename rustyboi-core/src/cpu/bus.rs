@@ -426,7 +426,12 @@ impl<'a> Bus<'a> {
                 .unwrap_or_else(|| self.mmio.read(ppu::LCD_STATUS) & 0x03);
         let mode_locked = if is_oam { mode == 2 || mode == 3 } else { mode == 3 };
         let ds = self.mmio.is_double_speed_mode();
-        let is_cgb = self.mmio.is_cgb_features_enabled();
+        // HARDWARE CGB flag (Gambatte `isCgb()` / SameBoy `GB_is_cgb`): the
+        // VRAM/OAM access-window boundaries are silicon properties that stay CGB
+        // on CGB hardware even in DMG-compat (non-CGB) mode — age oam-write-ncmBCE
+        // / vram-read-ncmBCE prove the compat-mode boundaries match cgb-mode, not
+        // DMG. `is_cgb_features_enabled` (KEY0 compat off) is the wrong key here.
+        let is_cgb = self.mmio.is_cgb();
         if let Some(blocked) = self.ppu.cpu_access_blocked(kind, is_read, mode_locked, is_cgb, ds, gate_cc) {
             return blocked;
         }
@@ -458,7 +463,8 @@ impl<'a> Bus<'a> {
             // lineCycle: late_gdma_pc_7ffe_1 lineCycles 76 (< 79 -> mode-2 readable
             // -> pre-byte) vs _2 lineCycles 80 (mode-3 locked -> open-bus).
             let prefetch_cc = fire_cc.wrapping_add(5);
-            let is_cgb = self.mmio.is_cgb_features_enabled();
+            // Hardware CGB flag — see `ppu_blocks` (silicon boundary, compat-safe).
+            let is_cgb = self.mmio.is_cgb();
             let ds = self.mmio.is_double_speed_mode();
             // Resolve readability from the lyTime-derived lineCycle (Gambatte
             // `vramReadable`), which honours the mode-2 readable window the
