@@ -841,6 +841,12 @@ impl Mmio {
     pub fn is_agb(&self) -> bool {
         self.is_agb
     }
+
+    /// Seed the CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`).
+    /// Called once from `GB::new` for Hardware::CGBE.
+    pub fn set_apu_cgb_de(&mut self, de: bool) {
+        self.audio.set_cgb_de(de);
+    }
     
     pub fn is_cgb_features_enabled(&self) -> bool {
         self.cgb_features_enabled
