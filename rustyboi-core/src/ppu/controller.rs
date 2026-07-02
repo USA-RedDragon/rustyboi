@@ -295,6 +295,20 @@ pub struct OamReader {
     cgb: bool,
     // Whether the source currently reads 0xFF (active OAM-DMA window).
     src_disabled: bool,
+    // OAM "bus retention" ghost, latched at the OAM-DMA start edge: on hardware
+    // the mode-2 scan cannot read OAM while an OAM-DMA runs, and the Y/X bus
+    // retains the last pair actually read (SameBoy display.c
+    // add_object_from_index: mode2_y_bus/mode2_x_bus only update while no DMA is
+    // active, but the object check still runs against the stale bus). Positions
+    // walked inside the DMA window sample this pair instead of open-bus 0xFF
+    // (ashiepaws strikethrough: the line-68 scan ghosts entry 39's (0x54, 79)
+    // pair, re-matching the bar sprite the in-flight DMA is erasing).
+    ghost: (u8, u8),
+    // Which sprite slots currently hold a ghost-sampled pair (vs a real OAM
+    // sample). Ghost slots read their tile/attributes from the live
+    // progressively-written OAM (`ppu_read_oam_live`) instead of the CPU view
+    // (0xFF during DMA) — on hardware that fetch sees the in-flight DMA data.
+    ghost_slot: [bool; OAM_SPRITE_COUNT],
 }
 
 const OAM_POS_CYCLES: u32 = (2 * OAM_SPRITE_COUNT) as u32; // 80
@@ -319,6 +333,8 @@ impl Default for OamReader {
             large_src: false,
             cgb: false,
             src_disabled: false,
+            ghost: (0xFF, 0xFF),
+            ghost_slot: [false; OAM_SPRITE_COUNT],
         }
     }
 }
@@ -350,6 +366,8 @@ impl OamReader {
         self.cgb = cgb;
         self.large_src = false;
         self.src_disabled = false;
+        self.ghost = (0xFF, 0xFF);
+        self.ghost_slot = [false; OAM_SPRITE_COUNT];
         self.lu = 0;
         self.last_change = 0xFF;
         self.lsbuf = [self.large_src; OAM_SPRITE_COUNT];
@@ -360,8 +378,48 @@ impl OamReader {
     fn enable_display(&mut self, cc: u64, ds: bool) {
         self.buf = [0; 2 * OAM_SPRITE_COUNT];
         self.lsbuf = [false; OAM_SPRITE_COUNT];
+        self.ghost = (0xFF, 0xFF);
+        self.ghost_slot = [false; OAM_SPRITE_COUNT];
         self.lu = cc + ((OAM_POS_CYCLES as u64) << ds as u32) + 1;
         self.last_change = OAM_POS_CYCLES as u8;
+    }
+
+    // Latch the OAM-bus retention ghost at the OAM-DMA start edge. Called right
+    // after the edge `change(cc)` capped the walk (`last_change`): the pair at
+    // the last position the walk sampled before the cap is what the hardware
+    // Y/X bus still holds when the DMA takes the OAM away from the scan. A cap
+    // at/before position 1 means no pair was sampled on this line yet, so the
+    // bus holds the previous line's final OAM read.
+    //
+    // `line_has_fetches`: whether the line whose reads the bus last saw had any
+    // visible sprites. The Y bus is ALSO written by every mode-3 sprite
+    // tile/flags fetch (SameBoy display.c:1976 `mode2_y_bus = oam_read(tile)`),
+    // so on a line that fetched sprites the retained value is a tile byte —
+    // effectively never a matching Y — not the scan pair. Model that clobber as
+    // an invisible ghost. It applies when the window opens outside the scan
+    // walk (cap at 80: this line's fetches; cap before 2: the previous line's);
+    // a mid-scan window start (2..80) retains the just-scanned pair, fetches
+    // not yet run (gambatte late_sp39y_2 vs ashiepaws strikethrough, whose
+    // DMA-start line renders no sprites so the scan pair survives to the next
+    // line's walk).
+    fn capture_ghost(&mut self, line_has_fetches: bool) {
+        let cap = (self.last_change as usize).min(2 * OAM_SPRITE_COUNT);
+        if (cap >= 2 * OAM_SPRITE_COUNT || cap < 2) && line_has_fetches {
+            self.ghost = (0xFF, 0xFF);
+        } else {
+            let p = if cap >= 2 {
+                (cap - 1) & !1
+            } else {
+                2 * OAM_SPRITE_COUNT - 2
+            };
+            self.ghost = (self.buf[p], self.buf[p + 1]);
+        }
+        if std::env::var_os("RB_GHOST_DEBUG").is_some() {
+            eprintln!(
+                "GHOST cap={} fetches={} ghost=({:02X},{:02X})",
+                cap, line_has_fetches, self.ghost.0, self.ghost.1
+            );
+        }
     }
 
     // SpriteMapper::OamReader::update. `oam_y`/`oam_x` for sprite `i` are read
@@ -383,11 +441,15 @@ impl OamReader {
             for i in 0..OAM_SPRITE_COUNT {
                 self.lsbuf[i] = self.large_src;
                 if self.src_disabled {
-                    self.buf[2 * i] = 0xFF;
-                    self.buf[2 * i + 1] = 0xFF;
+                    // OAM-DMA window: the scan's Y/X bus retains its pre-DMA
+                    // pair (see `capture_ghost`), it does not read open-bus.
+                    self.buf[2 * i] = self.ghost.0;
+                    self.buf[2 * i + 1] = self.ghost.1;
+                    self.ghost_slot[i] = true;
                 } else {
                     self.buf[2 * i] = oam_pos[2 * i];
                     self.buf[2 * i + 1] = oam_pos[2 * i + 1];
+                    self.ghost_slot[i] = false;
                 }
             }
             self.last_change = 0xFF;
@@ -425,11 +487,14 @@ impl OamReader {
                     if self.cgb {
                         self.lsbuf[(pos / 2) as usize] = self.large_src;
                     }
+                    // During an OAM-DMA window the walk samples the retained
+                    // Y/X bus pair (`ghost`), not open-bus 0xFF.
                     let (y, x) = if self.src_disabled {
-                        (0xFF, 0xFF)
+                        (self.ghost.0, self.ghost.1)
                     } else {
                         (oam_pos[pos as usize], oam_pos[pos as usize + 1])
                     };
+                    self.ghost_slot[(pos / 2) as usize] = self.src_disabled;
                     self.buf[pos as usize] = y;
                     self.buf[pos as usize + 1] = x;
                 } else {
@@ -7515,6 +7580,12 @@ impl Ppu {
             // change() under the pre-toggle source (Gambatte oamChange uses the
             // pointer in effect for the just-completed span).
             self.oam_reader.change(cc, &lc, &pos);
+            // DMA start: latch the scan's retained Y/X bus pair (the last pair
+            // walked before the cap) for the ghost sampling inside the window.
+            if dma_writing {
+                let line_has_fetches = !self.sprites_on_line.is_empty();
+                self.oam_reader.capture_ghost(line_has_fetches);
+            }
             // Toggle source for the new span (startOamDma -> disabled,
             // endOamDma -> real OAM).
             self.oam_reader.src_disabled = dma_writing;
@@ -7556,8 +7627,22 @@ impl Ppu {
             let sprite_height: u8 = if large { 16 } else { 8 };
             let screen_y = sprite_y.wrapping_sub(16);
             if ly >= screen_y && ly < screen_y.wrapping_add(sprite_height) {
-                let tile_index = mmio.read(0xFE00 + (i as u16) * 4 + 2);
-                let attributes_byte = mmio.read(0xFE00 + (i as u16) * 4 + 3);
+                // A ghost-sampled slot (Y/X-bus retention during an OAM-DMA
+                // window) exists only while the DMA owns OAM; its hardware tile/
+                // attribute fetch sees the DMA's in-flight data, so read the live
+                // progressively-written OAM rather than the CPU view (0xFF while
+                // a DMA runs). Real-sampled slots keep the CPU-view read.
+                let (tile_index, attributes_byte) = if self.oam_reader.ghost_slot[i] {
+                    (
+                        mmio.ppu_read_oam_live(0xFE00 + (i as u16) * 4 + 2),
+                        mmio.ppu_read_oam_live(0xFE00 + (i as u16) * 4 + 3),
+                    )
+                } else {
+                    (
+                        mmio.read(0xFE00 + (i as u16) * 4 + 2),
+                        mmio.read(0xFE00 + (i as u16) * 4 + 3),
+                    )
+                };
                 self.sprites_on_line.push(Sprite {
                     y: sprite_y,
                     x: sprite_x,
@@ -7566,6 +7651,15 @@ impl Ppu {
                     oam_index: i as u8,
                 });
             }
+        }
+        // Ghost propagation stop: any sprite fetched on THIS line while the DMA
+        // window is still open rewrites the Y bus with a mid-DMA tile byte
+        // (SameBoy display.c:1976), so the retained scan pair does not survive
+        // into the NEXT line's walk (strikethrough: the ghost bar renders on
+        // line 68 only; line 69's scan — still inside the ~1.4-line window —
+        // sees the clobbered bus and stays clean).
+        if self.oam_reader.src_disabled && !self.sprites_on_line.is_empty() {
+            self.oam_reader.ghost = (0xFF, 0xFF);
         }
     }
 
