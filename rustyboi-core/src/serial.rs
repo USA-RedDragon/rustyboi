@@ -33,6 +33,12 @@ pub struct Serial {
     cgb: bool,
 }
 
+impl Default for Serial {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Serial {
     pub fn new() -> Self {
         Serial {
@@ -139,7 +145,7 @@ impl Serial {
             8
         } else {
             let remaining_t = self.complete_at - phase;
-            let remaining_bits = ((remaining_t + self.step_t as u64 - 1) / self.step_t as u64) as u8;
+            let remaining_bits = remaining_t.div_ceil(self.step_t as u64) as u8;
             8u8.saturating_sub(remaining_bits)
         };
         while self.bits_shifted < target {

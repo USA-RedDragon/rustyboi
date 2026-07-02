@@ -227,7 +227,7 @@ impl Noise {
     fn len_nr1_change(&mut self, value: u8) {
         self.length_counter = ((!value as u16 & Self::LEN_MASK) + 1) as u8;
         self.len_counter = if self.nr44 & 0x40 != 0 {
-            (((self.len_cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+            ((self.len_cc >> 13) + self.length_counter as u32) << 13 
         } else {
             LEN_DISABLED
         };
@@ -253,7 +253,7 @@ impl Noise {
             self.length_counter = (Self::LEN_MASK as u8) + 1 - dec;
         }
         self.len_counter = if new_nr4 & 0x40 != 0 && self.length_counter != 0 {
-            (((self.len_cc >> 13) + self.length_counter as u32) << 13).min(u32::MAX)
+            ((self.len_cc >> 13) + self.length_counter as u32) << 13 
         } else {
             LEN_DISABLED
         };
@@ -540,9 +540,7 @@ impl Noise {
                 } else {
                     countdown -= 2;
                 }
-            } else if divisor > 1 && !self.ds {
-                countdown -= 4;
-            } else if divisor == 1 && self.enabled && (self.nr43 & 0xF0) == 0 {
+            } else if (divisor > 1 && !self.ds) || (divisor == 1 && self.enabled && (self.nr43 & 0xF0) == 0) {
                 countdown -= 4;
             }
         } else if self.ds && !self.cgb_de {
@@ -643,11 +641,7 @@ impl Noise {
 
         self.did_step_counter = (self.alignment & 3) == 2;
 
-        if dac_off {
-            self.enabled = false;
-        } else {
-            self.enabled = true;
-        }
+        self.enabled = !dac_off;
     }
 
     /// SameBoy master `nr43_write` (Core/apu.c, the issue-#397 rework),

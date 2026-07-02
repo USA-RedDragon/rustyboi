@@ -3,7 +3,9 @@ use winit::keyboard::KeyCode;
 use rustyboi_core_lib::gb;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Default)]
 pub enum ColorPalette {
+    #[default]
     Grayscale,
     OriginalGreen,
     Blue,
@@ -11,11 +13,6 @@ pub enum ColorPalette {
     Red,
 }
 
-impl Default for ColorPalette {
-    fn default() -> Self {
-        Self::Grayscale
-    }
-}
 
 impl ColorPalette {
     pub fn from_str(s: &str) -> Option<Self> {

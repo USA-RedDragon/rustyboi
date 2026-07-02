@@ -126,6 +126,12 @@ fn default_ctl_lf_div() -> u32 {
     1
 }
 
+impl Default for Audio {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Audio {
     pub fn new() -> Self {
         Audio {
@@ -940,7 +946,7 @@ impl Addressable for Audio {
                     self.channel1.write(addr, value)
                 }
             },
-            NR21..=NR24 => {
+            NR22..=NR24 => {
                 if self.audio_enabled {
                     self.channel2.write(addr, value)
                 }
@@ -950,7 +956,7 @@ impl Addressable for Audio {
                     self.channel3.write(addr, value)
                 }
             },
-            NR41..=NR44 => {
+            NR42..=NR44 => {
                 if self.audio_enabled {
                     self.channel4.write(addr, value)
                 }
