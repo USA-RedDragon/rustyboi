@@ -3906,10 +3906,30 @@ impl Ppu {
     // term (the CGB fetcher samples the palette-RAM pipeline at a fixed stage).
     fn bgp_apply_latency(&self, mmio: &mmio::Mmio) -> i32 {
         if mmio.is_cgb() {
-            bgp_latency(true)
+            bgp_latency(true) + Self::cgb_halt_wake_write_bias(mmio)
         } else {
             let phase = (mmio.master_cc() % 4) as i32;
             bgp_latency(false) + (phase - 1).max(0)
+        }
+    }
+
+    // CGB halt-woken write-stream bias, in display columns. Gambatte charges
+    // `cc += 4 * isCgb()` when an IRQ ends HALT (memory.cpp:301) — one real
+    // M-cycle before the woken stream resumes. rustyboi's halted CPU wakes at
+    // the exact IF-set cc and models that M-cycle on the READ side only
+    // (getStat/getLyReg biases), so a halt-woken WRITE stream runs 4cc early:
+    // every mid-mode-3 palette write it makes lands 4cc (dots, halved in
+    // double speed) of display columns short of the hardware column. Re-add
+    // the un-charged M-cycle here, gated on the woken stream
+    // (`halt_wakeup_skew`, set at wake / cleared at the next HALT): daid
+    // ppu_scanline_bgp.gbc's LYC-woken ISR stream takes it (boundaries were a
+    // uniform 4 columns early); mealybug m3_bgp_change cgb_c busy-waits (all
+    // its writes probe skew=false) and keeps the validated flat latency.
+    fn cgb_halt_wake_write_bias(mmio: &mmio::Mmio) -> i32 {
+        if mmio.halt_wakeup_skew() {
+            4 >> mmio.is_double_speed_mode() as i32
+        } else {
+            0
         }
     }
 
@@ -3959,7 +3979,8 @@ impl Ppu {
         if self.state != State::PixelTransfer || self.disabled {
             return;
         }
-        let lat = obp_latency(_mmio.is_cgb());
+        let lat = obp_latency(_mmio.is_cgb())
+            + if _mmio.is_cgb() { Self::cgb_halt_wake_write_bias(_mmio) } else { 0 };
         let boundary = self.pal_write_boundary(lat);
         Self::push_pal_history(&mut self.obp0_history, boundary, value);
         let apply = self.pal_write_apply_tick(lat);
@@ -3971,7 +3992,8 @@ impl Ppu {
         if self.state != State::PixelTransfer || self.disabled {
             return;
         }
-        let lat = obp_latency(_mmio.is_cgb());
+        let lat = obp_latency(_mmio.is_cgb())
+            + if _mmio.is_cgb() { Self::cgb_halt_wake_write_bias(_mmio) } else { 0 };
         let boundary = self.pal_write_boundary(lat);
         Self::push_pal_history(&mut self.obp1_history, boundary, value);
         let apply = self.pal_write_apply_tick(lat);
@@ -7766,9 +7788,29 @@ impl Ppu {
         } else {
             None
         };
+        // DS analog of `cgb_halt_exit`: a halt-woken stream that crossed an SS->DS
+        // speed switch (halt-wake -> STOP, no intervening HALT) still carries the
+        // un-charged CGB halt-exit M-cycle, so its post-switch FF44 reads sample
+        // closer to the line wrap than the engine cc reflects — same -5 (raw-time
+        // -1 + the halt-exit +4) as the single-speed branch. Without it the daid
+        // speed_switch_timing_ly read train's 134->135 boundary read lands exactly
+        // on the `ly&(ly+1)` glitch dot (tn==10, reads 134) where hardware already
+        // pre-increments (135); the whole 128-read hardware table pins this bias to
+        // [-2,-8]. Scoped to the no-HDMA halt-woken switch stream: the gambatte
+        // speedchange_ly*/enable_display DS LY probes never halt before their
+        // switch, the hdma _ds _ly families fold their wakeup shift into the
+        // block-transfer phase (halt_wakeup_hdma), and the mode-3-switch families
+        // are co-tuned to the `ssds_mode3_ly_advance` -10 time re-anchor.
+        let ssds_haltskew = halt_skew
+            && ds
+            && mmio.ssds_haltskew_ly_advance()
+            && !mmio.halt_wakeup_hdma()
+            && !self.ssds_mode3_ly_advance;
         let tn = if let Some(adv) = m0_halt_adv {
             to_next - adv as i64
         } else if cgb_halt_exit {
+            to_next - 5
+        } else if ssds_haltskew {
             to_next - 5
         } else if halt_skew {
             to_next - 1
