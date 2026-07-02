@@ -993,6 +993,17 @@ pub struct Ppu {
     obp0_delayed: u8,
     #[serde(default)]
     obp1_delayed: u8,
+    // DMG mid-mode-3 BGP sub-M-cycle phase hold. `on_bgp_write` fires at the write
+    // M-cycle START, but the store's bus-write lands a phase-dependent number of dots
+    // later; for a write whose `master_cc % 4` is non-zero the new value must not reach
+    // `bgp_delayed` until `bgp_defer_countdown` more dot-refreshes have passed. The old
+    // (pre-write) value is held in `bgp_defer_hold` meanwhile. Phase-0 writes (every
+    // gambatte dmgpalette_during_m3 / mealybug m3_bgp_change write) set countdown 0 and
+    // are byte-identical to the plain one-dot latch. See `on_bgp_write`.
+    #[serde(default)]
+    bgp_defer_hold: u8,
+    #[serde(default)]
+    bgp_defer_countdown: u8,
 
     #[serde(with = "serde_bytes")]
     fb_a: [u8; FRAMEBUFFER_SIZE],
@@ -1214,6 +1225,8 @@ impl Ppu {
             bgp_delayed: 0,
             obp0_delayed: 0,
             obp1_delayed: 0,
+            bgp_defer_hold: 0,
+            bgp_defer_countdown: 0,
             fb_a: [0; FRAMEBUFFER_SIZE],
             fb_b: [0; FRAMEBUFFER_SIZE],
             color_fb_a: [0; FRAMEBUFFER_SIZE * 3],
@@ -2141,11 +2154,12 @@ impl Ppu {
     // BG palette shade for color index `idx` at display column `sx`. On CGB hardware
     // resolves BGP per column from `bgp_history` so a mid-mode-3 BGP write remaps only
     // the pixels drawn at/after its apply column (mealybug m3_bgp_change cgb_c, which
-    // runs DMG-compat-on-CGB). On DMG hardware the proven per-dot `bgp_delayed` latch
-    // (refreshed at the end of every dot) already yields the exact DMG latch column
-    // that Gambatte's own dmgpalette_during_m3 tests require, so DMG keeps it
-    // untouched. With no mid-line write the CGB history is a single seed == the
-    // delayed register, so the steady-state output is identical either way.
+    // runs DMG-compat-on-CGB). On DMG hardware the per-dot `bgp_delayed` latch
+    // (refreshed at the end of every dot, with a phase-dependent hold for late-phase
+    // writes — see `on_bgp_write`) yields the exact DMG latch column that Gambatte's
+    // own dmgpalette_during_m3 tests require, so DMG keeps it. With no mid-line write
+    // the CGB history is a single seed == the delayed register, so the steady-state
+    // output is identical either way.
     pub fn get_palette_color(&self, mmio: &mmio::Mmio, idx: u8, sx: u8) -> u8 {
         let bgp = if mmio.is_cgb() {
             Self::pal_at(&self.bgp_history, sx, self.bgp_delayed)
@@ -3329,20 +3343,56 @@ impl Ppu {
         if self.state != State::PixelTransfer || self.disabled {
             return;
         }
+        let lat = self.bgp_apply_latency(_mmio);
+        // DMG sub-M-cycle phase hold: for a write whose store lands later in the M-cycle
+        // (`master_cc % 4` != 0), the DMG per-dot latch (`bgp_delayed`) must keep the old
+        // value for `lat - 1` extra dot-refreshes so the new palette first colors the
+        // column `self.x + lat` (not `self.x + 1`). Phase-0 writes leave countdown 0 and
+        // are unchanged. CGB does not use `bgp_delayed` (it resolves BGP per column from
+        // `bgp_history`), so this is DMG-only.
+        if !_mmio.is_cgb() {
+            let extra = (lat - bgp_latency(false)).max(0) as u8;
+            if extra > 0 {
+                self.bgp_defer_hold = self.bgp_delayed;
+                self.bgp_defer_countdown = extra;
+            }
+        }
         // DMG mid-mode-3 palette-write glitch (see `bgp_writes`): record this write's
         // apply column, `old | new` glitch value, and cc. Whether it actually spikes a
         // pixel (the TWO-WRITE cadence gate) is resolved at mode-3 end in
         // `resolve_bgp_spikes`, once all of the line's writes are known. Capture the old
         // (settled) value BEFORE recording the new one in the history.
         if !_mmio.is_cgb() && self.pixel_transfer_warmup == 0 {
-            let col = self.pal_write_boundary(bgp_latency(_mmio.is_cgb())) as u8;
+            let col = self.pal_write_boundary(lat) as u8;
             if col < 160 {
                 let old = self.bgp_history.last().map(|&(_, v)| v).unwrap_or(self.bgp_delayed);
                 self.bgp_writes.push((self.abs_cc, col, old | value));
             }
         }
-        let boundary = self.pal_write_boundary(bgp_latency(_mmio.is_cgb()));
+        let boundary = self.pal_write_boundary(lat);
         Self::push_pal_history(&mut self.bgp_history, boundary, value);
+    }
+
+    // Display-column latency (dots) for a mid-mode-3 BGP write. This hook fires at the
+    // write M-cycle's START, but the DMG store's bus-write lands at a later sub-M-cycle
+    // T-cycle, so the change reaches the displayed column a phase-dependent number of
+    // dots after `self.x`. The phase is the write's `master_cc % 4`:
+    //   - phase 0 -> +1 (the baseline). EVERY gambatte dmgpalette_during_m3 and mealybug
+    //     m3_bgp_change write lands here (verified: all 37505 mid-m3 writes across the
+    //     full gambatte DMG suite are phase 0), so those references are untouched.
+    //   - later phases add `phase - 1` more dots: a write whose M-cycle starts deeper in
+    //     the pixel-clock grid latches proportionally later. daid ppu_scanline_bgp's
+    //     tight `LD A,(HL+); LDFF (C),A` gradient writes land at phase 3 (+3 total),
+    //     matching the SameBoy/hardware reference (2 columns past the phase-0 baseline).
+    // CGB keeps its own validated 2-dot latency (mealybug m3_bgp_change cgb_c); no phase
+    // term (the CGB fetcher samples the palette-RAM pipeline at a fixed stage).
+    fn bgp_apply_latency(&self, mmio: &mmio::Mmio) -> i32 {
+        if mmio.is_cgb() {
+            bgp_latency(true)
+        } else {
+            let phase = (mmio.master_cc() % 4) as i32;
+            bgp_latency(false) + (phase - 1).max(0)
+        }
     }
 
     // Resolve the DMG mid-mode-3 BGP-write glitch for the just-finished line and paint
@@ -4353,6 +4403,8 @@ impl Ppu {
                     // land at column >= 1 so column 0 keeps this seed.
                     self.bgp_history.clear();
                     self.bgp_history.push((0, self.bgp_delayed));
+                    // Clear any leftover DMG BGP phase-hold from the previous line.
+                    self.bgp_defer_countdown = 0;
                     self.obp0_history.clear();
                     self.obp0_history.push((0, self.obp0_delayed));
                     self.obp1_history.clear();
@@ -5417,7 +5469,14 @@ impl Ppu {
         // mid-mode-3 write lands before this dot's pixel push (the CPU resolves
         // the write before stepping the M-cycle's four dots), so resolving from
         // last dot's snapshot gives the one-dot apply latency hardware shows.
-        self.bgp_delayed = mmio.read(BGP);
+        // A late-sub-M-cycle-phase write (`on_bgp_write`) holds the old value for
+        // `bgp_defer_countdown` more dots before the live register is picked up.
+        if self.bgp_defer_countdown > 0 {
+            self.bgp_defer_countdown -= 1;
+            self.bgp_delayed = self.bgp_defer_hold;
+        } else {
+            self.bgp_delayed = mmio.read(BGP);
+        }
         self.obp0_delayed = mmio.read(OBP0);
         self.obp1_delayed = mmio.read(OBP1);
         self.ticks += 1;
