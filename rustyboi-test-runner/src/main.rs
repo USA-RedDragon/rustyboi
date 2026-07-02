@@ -3,13 +3,15 @@ mod frame;
 mod report;
 mod runner;
 
-use crate::expectation::{Mode, cases_for_rom, is_rom_path, parse_manifest};
+use crate::expectation::{Mode, TestCase, cases_for_rom, is_rom_path, parse_manifest};
 use crate::report::Summary;
 use clap::Parser;
 use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use walkdir::WalkDir;
 
 #[derive(Debug, Parser)]
@@ -70,6 +72,15 @@ struct Args {
     /// Write a machine-readable JSON summary.
     #[arg(long, value_name = "FILE")]
     json: Option<PathBuf>,
+
+    /// Parallel case workers. Cases are independent (one GB instance each);
+    /// results are printed/recorded in case order, so the text and JSON output
+    /// are byte-identical to a sequential run. Default: the RB_JOBS env var,
+    /// else min(8, cores/2) to stay polite on a shared box. Forced to 1 when
+    /// --trace-rom, --fail-fast, or RB_SS_DUMP is active (their streamed
+    /// diagnostics / early-stop semantics require sequential execution).
+    #[arg(long, value_name = "N")]
+    jobs: Option<usize>,
 
     /// Run the REAL boot ROM (bios/dmg_boot.bin, bios/cgb_boot.bin) before each
     /// test instead of the synthetic skip_bios seed (mirrors Gambatte). Falls
@@ -194,23 +205,7 @@ fn run() -> Result<u8, String> {
         bios_dir: args.bios_dir.clone(),
     };
 
-    for case in cases {
-        print!("{}", case.mode.progress_char());
-        io::stdout()
-            .flush()
-            .map_err(|error| format!("failed to flush stdout: {error}"))?;
-
-        let result = runner::run_case(case, &run_options);
-        let failed = !result.passed;
-        if failed {
-            report::print_failure(&result);
-        }
-        summary.record(&result);
-
-        if failed && args.fail_fast {
-            break;
-        }
-    }
+    run_cases(cases, &run_options, resolve_jobs(&args), args.fail_fast, &mut summary)?;
 
     println!();
     report::print_summary(&summary);
@@ -220,6 +215,109 @@ fn run() -> Result<u8, String> {
     }
 
     Ok(summary.exit_code())
+}
+
+/// Resolve the worker count: --jobs, else RB_JOBS, else min(8, cores/2).
+/// Trace/diagnostic modes and --fail-fast force 1 (streamed stderr output
+/// would interleave; fail-fast must stop at the first failure in case order).
+fn resolve_jobs(args: &Args) -> usize {
+    if args.trace_rom.is_some() || args.fail_fast || std::env::var_os("RB_SS_DUMP").is_some() {
+        if args.jobs.is_some_and(|jobs| jobs > 1) {
+            eprintln!("note: --jobs forced to 1 (--trace-rom / --fail-fast / RB_SS_DUMP)");
+        }
+        return 1;
+    }
+    if let Some(jobs) = args.jobs {
+        return jobs.max(1);
+    }
+    if let Some(jobs) = std::env::var("RB_JOBS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        return jobs.max(1);
+    }
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    (cores / 2).clamp(1, 8)
+}
+
+/// Run all cases and record them into `summary` in case order. `jobs <= 1`
+/// preserves the original sequential loop (including --fail-fast). Otherwise
+/// cases are executed by a worker pool (dynamic dispatch via an atomic index)
+/// and results flow back over a channel into an index-keyed reorder buffer, so
+/// progress chars, failure details, and summary/JSON records are emitted in
+/// exactly the sequential order — output is byte-identical for equal results
+/// regardless of scheduling.
+fn run_cases(
+    cases: Vec<TestCase>,
+    run_options: &runner::RunOptions,
+    jobs: usize,
+    fail_fast: bool,
+    summary: &mut Summary,
+) -> Result<(), String> {
+    let emit = |result: &runner::CaseResult, summary: &mut Summary| -> Result<(), String> {
+        print!("{}", result.case.mode.progress_char());
+        io::stdout()
+            .flush()
+            .map_err(|error| format!("failed to flush stdout: {error}"))?;
+        if !result.passed {
+            report::print_failure(result);
+        }
+        summary.record(result);
+        Ok(())
+    };
+
+    if jobs <= 1 || cases.len() <= 1 {
+        for case in cases {
+            let result = runner::run_case(case, run_options);
+            let failed = !result.passed;
+            emit(&result, summary)?;
+            if failed && fail_fast {
+                break;
+            }
+        }
+        return Ok(());
+    }
+
+    let cases = &cases[..];
+    let next_case = AtomicUsize::new(0);
+    let (sender, receiver) = mpsc::channel::<(usize, runner::CaseResult)>();
+    let mut pending: Vec<Option<runner::CaseResult>> = Vec::new();
+    pending.resize_with(cases.len(), || None);
+    let mut next_emit = 0usize;
+
+    std::thread::scope(|scope| -> Result<(), String> {
+        for _ in 0..jobs.min(cases.len()) {
+            let sender = sender.clone();
+            let next_case = &next_case;
+            scope.spawn(move || {
+                loop {
+                    let index = next_case.fetch_add(1, Ordering::Relaxed);
+                    if index >= cases.len() {
+                        break;
+                    }
+                    let result = runner::run_case(cases[index].clone(), run_options);
+                    if sender.send((index, result)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+
+        while let Ok((index, result)) = receiver.recv() {
+            pending[index] = Some(result);
+            while next_emit < pending.len() {
+                let Some(result) = pending[next_emit].take() else {
+                    break;
+                };
+                emit(&result, summary)?;
+                next_emit += 1;
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Run a c-sp public-suite manifest. Parses the `|`-separated manifest into
@@ -262,23 +360,7 @@ fn run_manifest(
         bios_dir: args.bios_dir.clone(),
     };
 
-    for case in cases {
-        print!("{}", case.mode.progress_char());
-        io::stdout()
-            .flush()
-            .map_err(|error| format!("failed to flush stdout: {error}"))?;
-
-        let result = runner::run_case(case, &run_options);
-        let failed = !result.passed;
-        if failed {
-            report::print_failure(&result);
-        }
-        summary.record(&result);
-
-        if failed && args.fail_fast {
-            break;
-        }
-    }
+    run_cases(cases, &run_options, resolve_jobs(args), args.fail_fast, &mut summary)?;
 
     println!();
     report::print_summary(&summary);
