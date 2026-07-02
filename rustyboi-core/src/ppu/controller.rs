@@ -7788,9 +7788,29 @@ impl Ppu {
         } else {
             None
         };
+        // DS analog of `cgb_halt_exit`: a halt-woken stream that crossed an SS->DS
+        // speed switch (halt-wake -> STOP, no intervening HALT) still carries the
+        // un-charged CGB halt-exit M-cycle, so its post-switch FF44 reads sample
+        // closer to the line wrap than the engine cc reflects — same -5 (raw-time
+        // -1 + the halt-exit +4) as the single-speed branch. Without it the daid
+        // speed_switch_timing_ly read train's 134->135 boundary read lands exactly
+        // on the `ly&(ly+1)` glitch dot (tn==10, reads 134) where hardware already
+        // pre-increments (135); the whole 128-read hardware table pins this bias to
+        // [-2,-8]. Scoped to the no-HDMA halt-woken switch stream: the gambatte
+        // speedchange_ly*/enable_display DS LY probes never halt before their
+        // switch, the hdma _ds _ly families fold their wakeup shift into the
+        // block-transfer phase (halt_wakeup_hdma), and the mode-3-switch families
+        // are co-tuned to the `ssds_mode3_ly_advance` -10 time re-anchor.
+        let ssds_haltskew = halt_skew
+            && ds
+            && mmio.ssds_haltskew_ly_advance()
+            && !mmio.halt_wakeup_hdma()
+            && !self.ssds_mode3_ly_advance;
         let tn = if let Some(adv) = m0_halt_adv {
             to_next - adv as i64
         } else if cgb_halt_exit {
+            to_next - 5
+        } else if ssds_haltskew {
             to_next - 5
         } else if halt_skew {
             to_next - 1
