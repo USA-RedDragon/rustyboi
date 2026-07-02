@@ -3906,10 +3906,30 @@ impl Ppu {
     // term (the CGB fetcher samples the palette-RAM pipeline at a fixed stage).
     fn bgp_apply_latency(&self, mmio: &mmio::Mmio) -> i32 {
         if mmio.is_cgb() {
-            bgp_latency(true)
+            bgp_latency(true) + Self::cgb_halt_wake_write_bias(mmio)
         } else {
             let phase = (mmio.master_cc() % 4) as i32;
             bgp_latency(false) + (phase - 1).max(0)
+        }
+    }
+
+    // CGB halt-woken write-stream bias, in display columns. Gambatte charges
+    // `cc += 4 * isCgb()` when an IRQ ends HALT (memory.cpp:301) — one real
+    // M-cycle before the woken stream resumes. rustyboi's halted CPU wakes at
+    // the exact IF-set cc and models that M-cycle on the READ side only
+    // (getStat/getLyReg biases), so a halt-woken WRITE stream runs 4cc early:
+    // every mid-mode-3 palette write it makes lands 4cc (dots, halved in
+    // double speed) of display columns short of the hardware column. Re-add
+    // the un-charged M-cycle here, gated on the woken stream
+    // (`halt_wakeup_skew`, set at wake / cleared at the next HALT): daid
+    // ppu_scanline_bgp.gbc's LYC-woken ISR stream takes it (boundaries were a
+    // uniform 4 columns early); mealybug m3_bgp_change cgb_c busy-waits (all
+    // its writes probe skew=false) and keeps the validated flat latency.
+    fn cgb_halt_wake_write_bias(mmio: &mmio::Mmio) -> i32 {
+        if mmio.halt_wakeup_skew() {
+            4 >> mmio.is_double_speed_mode() as i32
+        } else {
+            0
         }
     }
 
@@ -3959,7 +3979,8 @@ impl Ppu {
         if self.state != State::PixelTransfer || self.disabled {
             return;
         }
-        let lat = obp_latency(_mmio.is_cgb());
+        let lat = obp_latency(_mmio.is_cgb())
+            + if _mmio.is_cgb() { Self::cgb_halt_wake_write_bias(_mmio) } else { 0 };
         let boundary = self.pal_write_boundary(lat);
         Self::push_pal_history(&mut self.obp0_history, boundary, value);
         let apply = self.pal_write_apply_tick(lat);
@@ -3971,7 +3992,8 @@ impl Ppu {
         if self.state != State::PixelTransfer || self.disabled {
             return;
         }
-        let lat = obp_latency(_mmio.is_cgb());
+        let lat = obp_latency(_mmio.is_cgb())
+            + if _mmio.is_cgb() { Self::cgb_halt_wake_write_bias(_mmio) } else { 0 };
         let boundary = self.pal_write_boundary(lat);
         Self::push_pal_history(&mut self.obp1_history, boundary, value);
         let apply = self.pal_write_apply_tick(lat);
