@@ -1,4 +1,4 @@
 # Super Game Boy JOYP-packet-protocol tests. High-level SGB (no SNES core):
 # faithful JOYP packet reception + command dispatch (MLT_REQ etc). Constructed
 # as Hardware::SGB via `rev=sgb`; graded against the ref screenshot.
-cpp/sgb-ext-test.gb|dmg|png_shootout|projects/GBEmulatorShootout/testroms/cpp/sgb-ext-test.gb|projects/GBEmulatorShootout/testroms/cpp/sgb-ext-test.png|frames=400|rev=sgb
+cpp/sgb-ext-test.gb|dmg|png_shootout|../GBEmulatorShootout/testroms/cpp/sgb-ext-test.gb|../GBEmulatorShootout/testroms/cpp/sgb-ext-test.png|frames=400|rev=sgb

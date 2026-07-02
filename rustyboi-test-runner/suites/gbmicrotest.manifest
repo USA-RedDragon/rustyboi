@@ -2,22 +2,12 @@
 # VERIFIED (src @gbmicrotest463eb6b, oracle: libgambatte externalRead FF80-82 @60 frames):
 # 480/513. The 33 remaining fails are NOT emulation bugs reachable under this grading:
 #  - 29 display-only testbenches (no test_finish/test_end in source; verdict is a raw
-#    measured value looped to VRAM $8000, never FF82): 000-*, 001/002-vram_*, 004-tima_*,
-#    007-lcd_on_stat, 500-scx-timing, 800-803-ppu-latch-*, audio_testbench, cpu_bus_1,
-#    flood_vram, lcdon_write_timing, ly_while_lcd_off, minimal, mode2_stat_int_to_oam_unlock,
-#    oam_sprite_trashing, poweron, ppu_*, temp, toggle_lcdc, wave_write_to_0xC003.
-#    FF82=0x64 = DMG power-on HRAM residue (never written).
+#    measured value looped to VRAM $8000, never FF82). FF82=0x64 = DMG power-on HRAM residue.
 #  - 2 DMA-clobber artifacts (400-dma, dma_basic): the ROM copies its DMA routine INTO
-#    HRAM over FF80-82 (bytes E0/46/18) and never writes a verdict; rustyboi ==
-#    Gambatte byte-identical.
+#    HRAM over FF80-82 and never writes a verdict; rustyboi == Gambatte byte-identical.
 #  - 2 hardware-only quirks where rustyboi == Gambatte (both fail identically):
-#    halt_op_dupe_delay (hw DIV=0x55 implies a ~48-line wait no known emulator models),
-#    stat_write_glitch_l154_d (hw reads IF=E0 at LCD-on+154 lines+110M => frame-1
-#    vblank-IF visibility conflicts with the lcdon_halt_to_vblank_int_a/b DIV brackets
-#    that pass; needs GateBoy-level LCD-enable modeling).
-# The 17-test halt-wake cluster (int_*halt*, *_int_halt_a/_b) = faithful HALT-exit
-# DIV/TIMA read re-anchor (timer.rs halt_read_bias), landed f-micro@8133560.
-# Run --frames 600 for is_if_set_during_ime0 on slower configs.
+#    halt_op_dupe_delay, stat_write_glitch_l154_d (needs GateBoy-level LCD-enable modeling).
+# Run --frames 600 for is_if_set_during_ime0.
 000-oam_lock|dmg|memauto|gb-test-roms/gbmicrotest/000-oam_lock.gb
 000-write_to_x8000|dmg|memauto|gb-test-roms/gbmicrotest/000-write_to_x8000.gb
 001-vram_unlocked|dmg|memauto|gb-test-roms/gbmicrotest/001-vram_unlocked.gb
@@ -44,8 +34,8 @@ dma_basic|dmg|memauto|gb-test-roms/gbmicrotest/dma_basic.gb
 dma_timing_a|dmg|memauto|gb-test-roms/gbmicrotest/dma_timing_a.gb
 flood_vram|dmg|memauto|gb-test-roms/gbmicrotest/flood_vram.gb
 halt_bug|dmg|memauto|gb-test-roms/gbmicrotest/halt_bug.gb
-halt_op_dupe_delay|dmg|memauto|gb-test-roms/gbmicrotest/halt_op_dupe_delay.gb
 halt_op_dupe|dmg|memauto|gb-test-roms/gbmicrotest/halt_op_dupe.gb
+halt_op_dupe_delay|dmg|memauto|gb-test-roms/gbmicrotest/halt_op_dupe_delay.gb
 hblank_int_di_timing_a|dmg|memauto|gb-test-roms/gbmicrotest/hblank_int_di_timing_a.gb
 hblank_int_di_timing_b|dmg|memauto|gb-test-roms/gbmicrotest/hblank_int_di_timing_b.gb
 hblank_int_if_a|dmg|memauto|gb-test-roms/gbmicrotest/hblank_int_if_a.gb
@@ -146,13 +136,13 @@ int_lyc_nops|dmg|memauto|gb-test-roms/gbmicrotest/int_lyc_nops.gb
 int_oam_halt|dmg|memauto|gb-test-roms/gbmicrotest/int_oam_halt.gb
 int_oam_incs|dmg|memauto|gb-test-roms/gbmicrotest/int_oam_incs.gb
 int_oam_nops|dmg|memauto|gb-test-roms/gbmicrotest/int_oam_nops.gb
+int_timer_halt|dmg|memauto|gb-test-roms/gbmicrotest/int_timer_halt.gb
 int_timer_halt_div_a|dmg|memauto|gb-test-roms/gbmicrotest/int_timer_halt_div_a.gb
 int_timer_halt_div_b|dmg|memauto|gb-test-roms/gbmicrotest/int_timer_halt_div_b.gb
-int_timer_halt|dmg|memauto|gb-test-roms/gbmicrotest/int_timer_halt.gb
 int_timer_incs|dmg|memauto|gb-test-roms/gbmicrotest/int_timer_incs.gb
+int_timer_nops|dmg|memauto|gb-test-roms/gbmicrotest/int_timer_nops.gb
 int_timer_nops_div_a|dmg|memauto|gb-test-roms/gbmicrotest/int_timer_nops_div_a.gb
 int_timer_nops_div_b|dmg|memauto|gb-test-roms/gbmicrotest/int_timer_nops_div_b.gb
-int_timer_nops|dmg|memauto|gb-test-roms/gbmicrotest/int_timer_nops.gb
 int_vblank1_halt|dmg|memauto|gb-test-roms/gbmicrotest/int_vblank1_halt.gb
 int_vblank1_incs|dmg|memauto|gb-test-roms/gbmicrotest/int_vblank1_incs.gb
 int_vblank1_nops|dmg|memauto|gb-test-roms/gbmicrotest/int_vblank1_nops.gb
@@ -206,6 +196,10 @@ line_144_oam_int_c|dmg|memauto|gb-test-roms/gbmicrotest/line_144_oam_int_c.gb
 line_144_oam_int_d|dmg|memauto|gb-test-roms/gbmicrotest/line_144_oam_int_d.gb
 line_153_ly_a|dmg|memauto|gb-test-roms/gbmicrotest/line_153_ly_a.gb
 line_153_ly_b|dmg|memauto|gb-test-roms/gbmicrotest/line_153_ly_b.gb
+line_153_ly_c|dmg|memauto|gb-test-roms/gbmicrotest/line_153_ly_c.gb
+line_153_ly_d|dmg|memauto|gb-test-roms/gbmicrotest/line_153_ly_d.gb
+line_153_ly_e|dmg|memauto|gb-test-roms/gbmicrotest/line_153_ly_e.gb
+line_153_ly_f|dmg|memauto|gb-test-roms/gbmicrotest/line_153_ly_f.gb
 line_153_lyc0_int_inc_sled|dmg|memauto|gb-test-roms/gbmicrotest/line_153_lyc0_int_inc_sled.gb
 line_153_lyc0_stat_timing_a|dmg|memauto|gb-test-roms/gbmicrotest/line_153_lyc0_stat_timing_a.gb
 line_153_lyc0_stat_timing_b|dmg|memauto|gb-test-roms/gbmicrotest/line_153_lyc0_stat_timing_b.gb
@@ -230,13 +224,10 @@ line_153_lyc153_stat_timing_f|dmg|memauto|gb-test-roms/gbmicrotest/line_153_lyc1
 line_153_lyc_a|dmg|memauto|gb-test-roms/gbmicrotest/line_153_lyc_a.gb
 line_153_lyc_b|dmg|memauto|gb-test-roms/gbmicrotest/line_153_lyc_b.gb
 line_153_lyc_c|dmg|memauto|gb-test-roms/gbmicrotest/line_153_lyc_c.gb
-line_153_ly_c|dmg|memauto|gb-test-roms/gbmicrotest/line_153_ly_c.gb
 line_153_lyc_int_a|dmg|memauto|gb-test-roms/gbmicrotest/line_153_lyc_int_a.gb
 line_153_lyc_int_b|dmg|memauto|gb-test-roms/gbmicrotest/line_153_lyc_int_b.gb
-line_153_ly_d|dmg|memauto|gb-test-roms/gbmicrotest/line_153_ly_d.gb
-line_153_ly_e|dmg|memauto|gb-test-roms/gbmicrotest/line_153_ly_e.gb
-line_153_ly_f|dmg|memauto|gb-test-roms/gbmicrotest/line_153_ly_f.gb
 line_65_ly|dmg|memauto|gb-test-roms/gbmicrotest/line_65_ly.gb
+ly_while_lcd_off|dmg|memauto|gb-test-roms/gbmicrotest/ly_while_lcd_off.gb
 lyc1_int_halt_a|dmg|memauto|gb-test-roms/gbmicrotest/lyc1_int_halt_a.gb
 lyc1_int_halt_b|dmg|memauto|gb-test-roms/gbmicrotest/lyc1_int_halt_b.gb
 lyc1_int_if_edge_a|dmg|memauto|gb-test-roms/gbmicrotest/lyc1_int_if_edge_a.gb
@@ -253,7 +244,6 @@ lyc2_int_halt_a|dmg|memauto|gb-test-roms/gbmicrotest/lyc2_int_halt_a.gb
 lyc2_int_halt_b|dmg|memauto|gb-test-roms/gbmicrotest/lyc2_int_halt_b.gb
 lyc_int_halt_a|dmg|memauto|gb-test-roms/gbmicrotest/lyc_int_halt_a.gb
 lyc_int_halt_b|dmg|memauto|gb-test-roms/gbmicrotest/lyc_int_halt_b.gb
-ly_while_lcd_off|dmg|memauto|gb-test-roms/gbmicrotest/ly_while_lcd_off.gb
 mbc1_ram_banks|dmg|memauto|gb-test-roms/gbmicrotest/mbc1_ram_banks.gb
 mbc1_rom_banks|dmg|memauto|gb-test-roms/gbmicrotest/mbc1_rom_banks.gb
 minimal|dmg|memauto|gb-test-roms/gbmicrotest/minimal.gb
@@ -291,12 +281,12 @@ oam_write_l1_c|dmg|memauto|gb-test-roms/gbmicrotest/oam_write_l1_c.gb
 oam_write_l1_d|dmg|memauto|gb-test-roms/gbmicrotest/oam_write_l1_d.gb
 oam_write_l1_e|dmg|memauto|gb-test-roms/gbmicrotest/oam_write_l1_e.gb
 oam_write_l1_f|dmg|memauto|gb-test-roms/gbmicrotest/oam_write_l1_f.gb
+poweron|dmg|memauto|gb-test-roms/gbmicrotest/poweron.gb
 poweron_bgp_000|dmg|memauto|gb-test-roms/gbmicrotest/poweron_bgp_000.gb
 poweron_div_000|dmg|memauto|gb-test-roms/gbmicrotest/poweron_div_000.gb
 poweron_div_004|dmg|memauto|gb-test-roms/gbmicrotest/poweron_div_004.gb
 poweron_div_005|dmg|memauto|gb-test-roms/gbmicrotest/poweron_div_005.gb
 poweron_dma_000|dmg|memauto|gb-test-roms/gbmicrotest/poweron_dma_000.gb
-poweron|dmg|memauto|gb-test-roms/gbmicrotest/poweron.gb
 poweron_if_000|dmg|memauto|gb-test-roms/gbmicrotest/poweron_if_000.gb
 poweron_joy_000|dmg|memauto|gb-test-roms/gbmicrotest/poweron_joy_000.gb
 poweron_lcdc_000|dmg|memauto|gb-test-roms/gbmicrotest/poweron_lcdc_000.gb
@@ -377,10 +367,6 @@ ppu_sprite_testbench|dmg|memauto|gb-test-roms/gbmicrotest/ppu_sprite_testbench.g
 ppu_spritex_vs_scx|dmg|memauto|gb-test-roms/gbmicrotest/ppu_spritex_vs_scx.gb
 ppu_win_vs_wx|dmg|memauto|gb-test-roms/gbmicrotest/ppu_win_vs_wx.gb
 ppu_wx_early|dmg|memauto|gb-test-roms/gbmicrotest/ppu_wx_early.gb
-sprite_0_a|dmg|memauto|gb-test-roms/gbmicrotest/sprite_0_a.gb
-sprite_0_b|dmg|memauto|gb-test-roms/gbmicrotest/sprite_0_b.gb
-sprite_1_a|dmg|memauto|gb-test-roms/gbmicrotest/sprite_1_a.gb
-sprite_1_b|dmg|memauto|gb-test-roms/gbmicrotest/sprite_1_b.gb
 sprite4_0_a|dmg|memauto|gb-test-roms/gbmicrotest/sprite4_0_a.gb
 sprite4_0_b|dmg|memauto|gb-test-roms/gbmicrotest/sprite4_0_b.gb
 sprite4_1_a|dmg|memauto|gb-test-roms/gbmicrotest/sprite4_1_a.gb
@@ -397,6 +383,10 @@ sprite4_6_a|dmg|memauto|gb-test-roms/gbmicrotest/sprite4_6_a.gb
 sprite4_6_b|dmg|memauto|gb-test-roms/gbmicrotest/sprite4_6_b.gb
 sprite4_7_a|dmg|memauto|gb-test-roms/gbmicrotest/sprite4_7_a.gb
 sprite4_7_b|dmg|memauto|gb-test-roms/gbmicrotest/sprite4_7_b.gb
+sprite_0_a|dmg|memauto|gb-test-roms/gbmicrotest/sprite_0_a.gb
+sprite_0_b|dmg|memauto|gb-test-roms/gbmicrotest/sprite_0_b.gb
+sprite_1_a|dmg|memauto|gb-test-roms/gbmicrotest/sprite_1_a.gb
+sprite_1_b|dmg|memauto|gb-test-roms/gbmicrotest/sprite_1_b.gb
 stat_write_glitch_l0_a|dmg|memauto|gb-test-roms/gbmicrotest/stat_write_glitch_l0_a.gb
 stat_write_glitch_l0_b|dmg|memauto|gb-test-roms/gbmicrotest/stat_write_glitch_l0_b.gb
 stat_write_glitch_l0_c|dmg|memauto|gb-test-roms/gbmicrotest/stat_write_glitch_l0_c.gb

@@ -176,16 +176,6 @@ pub struct TestCase {
     pub frames: Option<usize>,
 }
 
-pub fn is_rom_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| {
-            let extension = extension.to_ascii_lowercase();
-            extension.starts_with("gb") || extension == "sgb"
-        })
-        .unwrap_or(false)
-}
-
 pub fn cases_for_rom(rom_path: &Path, requested_modes: &HashSet<Mode>) -> Vec<TestCase> {
     let base = extension_stripped_string(rom_path);
     let mut cases = Vec::new();
@@ -309,6 +299,21 @@ pub fn parse_manifest(
         let fields: Vec<&str> = line.split('|').collect();
         if fields.len() < 4 {
             return Err(format!("manifest line {}: too few fields: {raw}", line_no + 1));
+        }
+        // Gambatte hwtests: the oracle (register/audio/dumper) and the modes
+        // are encoded in the ROM FILENAME (`_dmg08_cgb04c_outNN`, dumper
+        // sibling files, ...). `auto` defers both to `cases_for_rom` — one
+        // manifest line may expand to several cases, exactly like the old
+        // --suite walker.
+        if fields[2] == "gambatte" {
+            if fields[1] != "auto" {
+                return Err(format!(
+                    "manifest line {}: gambatte grading uses mode `auto`",
+                    line_no + 1
+                ));
+            }
+            cases.extend(cases_for_rom(Path::new(fields[3]), requested_modes));
+            continue;
         }
         let mode = match fields[1] {
             "dmg" => Mode::Dmg,
@@ -819,9 +824,7 @@ plain|dmg|png|/r.gb|/ref.png
 
     #[test]
     fn identifies_game_boy_rom_extensions() {
-        assert!(is_rom_path(Path::new("a.gb")));
         assert!(is_rom_path(Path::new("a.gbc")));
-        assert!(is_rom_path(Path::new("a.sgb")));
         assert!(!is_rom_path(Path::new("a.png")));
     }
 
