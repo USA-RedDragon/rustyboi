@@ -1,4 +1,5 @@
 # gbmicrotest (DMG-CPU-08). FF82==0x01 pass. Run: --frames 60
+# VERIFIED (src @gbmicrotest463eb6b): FF82=0x64 == rustyboi DMG power-on HRAM (untouched); 29 ROMs are VISUAL-only (verdict->VRAM 0x8000, no FF82) = non-gradable; 21 real fails (FF82=0xFF, HALT/STAT cluster); 2 DMA-clobber artifacts. Run --frames 600 for is_if_set_during_ime0.
 000-oam_lock|dmg|memauto|/home/reddragon/gb-test-roms/gbmicrotest/000-oam_lock.gb
 000-write_to_x8000|dmg|memauto|/home/reddragon/gb-test-roms/gbmicrotest/000-write_to_x8000.gb
 001-vram_unlocked|dmg|memauto|/home/reddragon/gb-test-roms/gbmicrotest/001-vram_unlocked.gb
