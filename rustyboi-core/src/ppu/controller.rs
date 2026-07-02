@@ -893,6 +893,16 @@ pub struct Ppu {
     // Reset at M3 arm.
     #[serde(default)]
     win_wx0_delayed: bool,
+    // DMG mid-line WX comparator deferral: the hardware comparator samples WX
+    // through the end of the CPU store's M-cycle, so a match seen with the OLD
+    // WX on the store's commit dot must NOT start the window (mealybug
+    // m3_wx_6_change row 102: the WX=LY match at x==95 loses to the WX=80
+    // restore landing on that very dot). Arm (trigger dot, matched wx) on the
+    // exact x+7==wx match; commit one dot later iff WX still reads the matched
+    // value, with a one-substep catch-up so the restart timing is byte-identical
+    // to the immediate start for a stable WX. Cleared at M3 arm.
+    #[serde(default)]
+    dmg_wx_trigger_pending: Option<(u128, u8)>,
     // scx%8 sampled at M3 arm, used by the closed-form mode-0 schedule's
     // discard prefix. If the live f1 break resolves to a different count, the
     // schedule is nudged by the difference so M3 ends at the right dot.
@@ -1259,6 +1269,18 @@ pub struct Ppu {
     // fetched before the window restart. 0 when none.
     #[serde(default)]
     wg_dpre: u64,
+    // The line's first BG TileNumber read dot (abs_cc) — the hardware BG
+    // fetch-grid origin for bg_wg_apply / the SCY journal. Recorded at the
+    // tile-0 TileNumber substep; None before it or on lines that never fetch
+    // BG. Cleared at each mode-3 arm.
+    #[serde(default)]
+    bg_anchor_cc: Option<u64>,
+    // DMG mid-mode-3 SCY write journal: (transition_cc, old, new) — the abs_cc
+    // at which the new map-row / tile-line address bits reach the VRAM bus.
+    // BG fetch reads resolve SCY against it at their reconstructed hardware
+    // dots (see bg_wg_apply). Cleared at each mode-3 arm.
+    #[serde(default)]
+    bg_scy_hist: Vec<(u64, u8, u8)>,
     // Exact-cc window-enable (LCDC bit 5) toggle for the weMaster checkpoints.
     // rustyboi's pending_lcdc_events commit the window bit one PPU dot before
     // Gambatte's `setLcdc(data, cc + 2)` (the queue runs through one
@@ -1422,6 +1444,7 @@ impl Ppu {
             we_glitch_tile_starts: [None; 2],
             win_kill_tap_late: false,
             win_wx0_delayed: false,
+            dmg_wx_trigger_pending: None,
             m3_arm_scx: 0,
             m3_scheduled_wx: 0,
             m3_scheduled_win: false,
@@ -1507,6 +1530,8 @@ impl Ppu {
             wg_hist: Vec::new(),
             wg_anchor_cc: None,
             wg_dpre: 0,
+            bg_anchor_cc: None,
+            bg_scy_hist: Vec::new(),
             we_win_bit_exact: None,
             cgb_color_conversion: CgbColorConversion::Linear,
             fetch_debug_events_enabled: false,
@@ -1628,10 +1653,12 @@ impl Ppu {
             && self.state == State::PixelTransfer
         {
             let wg_bits = (LCDCFlags::WindowTileMapDisplaySelect as u8)
-                | (LCDCFlags::BGWindowTileDataSelect as u8);
+                | (LCDCFlags::BGWindowTileDataSelect as u8)
+                | (LCDCFlags::BGTileMapDisplaySelect as u8);
             if (old_lcdc ^ value) & wg_bits != 0 {
                 let t_cc = self.write_cc(false) + WG_TRANSITION_DELAY;
                 self.wg_hist.push((t_cc, old_lcdc, value));
+                self.bg_retro_repair(mmio);
             }
         }
 
@@ -1672,7 +1699,26 @@ impl Ppu {
             let win = self.window_started_this_line
                 || self.win_draw_start
                 || self.window_y_active(mmio);
-            let boundary_col = (self.x as i32 + 2 + if win { 2 } else { 0 }).clamp(0, 160) as u8;
+            // DMG stall-aware boundary: the +2-dot commit is a POP-schedule
+            // property, not a column offset. When pops are frozen at the write
+            // (a sprite fetch stall in progress at column x, or one arming
+            // there), column x itself pops after the commit and takes the new
+            // bit; a sprite arming at x+1 pins the boundary to x+1 (mealybug
+            // m3_lcdc_bg_en_change bands 0-2/8-17: the BG-off span starts AT
+            // the stalled column). No stall keeps the calibrated x+2.
+            let stall_adj = if !mmio.is_cgb_features_enabled() {
+                if self.sprite_fetch_stall > 0 || self.dmg_unfetched_sprite_at(self.x) {
+                    0
+                } else if self.dmg_unfetched_sprite_at(self.x.saturating_add(1)) {
+                    1
+                } else {
+                    2
+                }
+            } else {
+                2
+            };
+            let boundary_col =
+                (self.x as i32 + stall_adj + if win { 2 } else { 0 }).clamp(0, 160) as u8;
             self.bgen_history.push((boundary_col as u64, new_on));
         }
 
@@ -2002,6 +2048,7 @@ impl Ppu {
                     lcdc,
                     cgb_tile_index_is_tile_data: quirk,
                     or_lcdc: None,
+                    scy_bus: None,
                 };
             } else {
                 // Post-commit: new bit4.
@@ -2010,6 +2057,7 @@ impl Ppu {
                     lcdc,
                     cgb_tile_index_is_tile_data: quirk,
                     or_lcdc: None,
+                    scy_bus: None,
                 };
             }
         }
@@ -2017,6 +2065,7 @@ impl Ppu {
             lcdc: self.lcdc,
             cgb_tile_index_is_tile_data: quirk,
             or_lcdc: None,
+            scy_bus: None,
         }
     }
 
@@ -2147,6 +2196,207 @@ impl Ppu {
             fls.or_lcdc = Some((fls.lcdc & !WG_BITS) | (old & WG_BITS));
         }
         fls
+    }
+
+    // DMG BG-path analog of `wg_apply`: resolve mid-mode-3 LCDC.3 (BG map) /
+    // LCDC.4 (tile data) toggles at each BG fetch read's reconstructed HARDWARE
+    // dot instead of rustyboi's own (stall-displaced) read dot. Derived from
+    // the mealybug m3_lcdc_bg_map_change + m3_lcdc_tile_sel_change DMG captures
+    // (2 tests x 18 sprite-X bands, all reproduced dot-exact):
+    //  - Hardware BG fetch grid: read dot h = F + 8n + 2k (n = fetch index
+    //    from line start, k = 0/1/2 TileNumber/DataLow/DataHigh), F = the
+    //    line's first BG TileNumber dot (`bg_anchor_cc` — rustyboi reads it at
+    //    the same dot, before any sprite stall).
+    //  - An offscreen-left sprite (OAM X <= 7) is fetched during the first-tile
+    //    prologue and delays tiles n >= 1 by the same D_pre as the window grid:
+    //    max(7, 13 - 2*ceil(X/2)).
+    //  - An on-screen sprite (pos = X - 8 >= 0) lets the in-progress tile
+    //    complete, then delays tiles n >= pos/8 + 2 by 13,11,11,9,9,7,7,7
+    //    (pos%8 = 0..7) — the SAME 2-dot-quantized delay function as the
+    //    offscreen-left D_pre, keyed by the in-tile phase (NOT the live
+    //    pipeline's classic 11 - min(5, pos%8) charge). Pinned by the
+    //    mealybug bands, the m3_scy_change write-phase straddles, and the
+    //    gambatte bgtiledata/bgtilemap/scy spx08-spx0B captures.
+    //  - Transition rule: a read sees the post-write value iff its hardware
+    //    dot lies strictly past the write's commit cc; no OR edge on the BG
+    //    grid (the m3_scy_change captures reject one at this phase).
+    // Sprites are counted from the live fetch records; a record still Pending
+    // at this (earlier) fetch dot counts iff OBJ display is enabled now (the
+    // BG fetcher reads run up to ~10 dots ahead of the pixel pops that arm the
+    // stalls). Scoped to lines whose window has not started (a window restart
+    // re-anchors the hardware grid; the window path has its own model).
+    // The reconstructed HARDWARE dot of the BG fetch read (n = fetch index from
+    // line start, k = 0/1/2 substep), or None when the model is out of scope
+    // for this line. See bg_wg_apply.
+    fn bg_hw_read_dot(&self, n: u64, k: u8) -> Option<u64> {
+        let anchor = self.bg_anchor_cc?;
+        if self.fetcher.is_fetching_window() || self.window_started_this_line {
+            return None;
+        }
+        let mut h = anchor + 8 * n + 2 * k as u64;
+        for (i, s) in self.sprites_on_line.iter().enumerate() {
+            let Some(rec) = self.sprite_fetch_recs.get(i) else {
+                continue;
+            };
+            let counted = match rec.phase {
+                SpriteFetchPhase::Fetched => true,
+                SpriteFetchPhase::Pending => {
+                    (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0
+                }
+                _ => false,
+            };
+            if !counted {
+                continue;
+            }
+            if s.x <= 7 {
+                if n >= 1 {
+                    h += (13i64 - ((s.x as i64 + 1) & !1)).max(7) as u64;
+                }
+            } else {
+                let pos = (s.x - 8) as u64;
+                if n >= pos / 8 + 2 {
+                    // 13,11,11,9,9,7,7,7 for pos%8 = 0..7 — the SAME 2-dot
+                    // quantized delay as the offscreen-left D_pre, keyed by
+                    // the in-tile phase. The m3_scy_change low-plane
+                    // straddles separate the odd pens from the even ones;
+                    // gambatte bgtiledata_spx08 tiles 2/17 (vs spx09-0B) pin
+                    // pos 0 at 13.
+                    let q = (pos % 8) as i64;
+                    h += (13 - ((q + 1) & !1)).max(7) as u64;
+                }
+            }
+        }
+        Some(h)
+    }
+
+    // Resolve the LCDC journal at hardware dot `h`: the bits whose write
+    // commit cc lies strictly before `h`. (The journal stores write_cc +
+    // WG_TRANSITION_DELAY — the window-path calibration; strip it back to the
+    // raw commit cc. No OR edge on the BG grid: the m3_scy_change captures
+    // reject one at this phase, and the LCDC pulse captures cannot separate
+    // OR from clean-new/clean-old at the transition dots.)
+    fn bg_wg_resolve(&self, h: u64) -> u8 {
+        let mut bits = self.wg_hist[0].1;
+        for &(cc, _, new) in &self.wg_hist {
+            let t = cc.saturating_sub(WG_TRANSITION_DELAY);
+            if h > t {
+                bits = new;
+            } else {
+                break;
+            }
+        }
+        bits
+    }
+
+    // Resolve the SCY journal at hardware dot `h`: the value whose write
+    // commit cc lies strictly before `h`. None when no journal. (No OR edge —
+    // see the journal push comment.)
+    fn bg_scy_resolve(&self, h: u64) -> Option<u8> {
+        if self.bg_scy_hist.is_empty() {
+            return None;
+        }
+        let mut v = self.bg_scy_hist[0].1;
+        for &(t, _, new) in &self.bg_scy_hist {
+            if h > t {
+                v = new;
+            } else {
+                break;
+            }
+        }
+        Some(v)
+    }
+
+    fn bg_wg_apply(&self, mut fls: fetcher::FetcherLcdcState) -> fetcher::FetcherLcdcState {
+        if self.wg_hist.is_empty() && self.bg_scy_hist.is_empty() {
+            return fls;
+        }
+        let k = self.fetcher.fetch_substep();
+        if k > 2 {
+            return fls; // PushToFIFO: no VRAM read
+        }
+        let n = self.fetcher.get_tile_index() as u64;
+        let Some(h) = self.bg_hw_read_dot(n, k) else {
+            return fls;
+        };
+        const BG_BITS: u8 = (LCDCFlags::BGTileMapDisplaySelect as u8)
+            | (LCDCFlags::BGWindowTileDataSelect as u8);
+        if !self.wg_hist.is_empty() {
+            let bits = self.bg_wg_resolve(h);
+            fls.lcdc = (fls.lcdc & !BG_BITS) | (bits & BG_BITS);
+        }
+        fls.scy_bus = self.bg_scy_resolve(h);
+        fls
+    }
+
+    // Retroactive re-resolution of the in-flight tile's completed reads at
+    // journal-push time. The BG fetcher runs ahead of the pixel pops:
+    // rustyboi may have executed a read BEFORE the CPU write exists while the
+    // read's HARDWARE dot (sprite-stall displaced) falls at/after the bus
+    // transition (bg_map bands 0-2: rustyboi TN1 at F+8, hardware TN1 at
+    // F+8+D_pre — 13 dots later, inside the pulse). Re-derive each completed
+    // substep of the in-flight tile from the journals at its reconstructed
+    // dot and patch the latched tile number / pixel-buffer planes; reads not
+    // yet executed resolve at read time (bg_wg_apply). Idempotent (pure
+    // recompute from the journals). The stall-displacement bound (~13 dots
+    // pre-stall, <= 2 dots steady-state) keeps every affected read inside the
+    // in-flight tile — an already-pushed tile is out of reach (no observed
+    // case). DMG-only (both journals are DMG-scoped).
+    fn bg_retro_repair(&mut self, mmio: &mmio::Mmio) {
+        if self.state != State::PixelTransfer
+            || (self.wg_hist.is_empty() && self.bg_scy_hist.is_empty())
+        {
+            return;
+        }
+        let k_now = self.fetcher.fetch_substep();
+        if !(1..=3).contains(&k_now) {
+            return;
+        }
+        let n = self.fetcher.get_tile_index() as u64;
+        let ly = mmio.read(LY);
+        let live_scy = self.scy_delayed;
+        let map_bit = LCDCFlags::BGTileMapDisplaySelect as u8;
+        let col = self.fetcher.last_bg_tn_col() as u16;
+
+        // TileNumber (k=0).
+        let Some(h0) = self.bg_hw_read_dot(n, 0) else {
+            return;
+        };
+        let bits0 = if self.wg_hist.is_empty() {
+            self.lcdc
+        } else {
+            self.bg_wg_resolve(h0)
+        };
+        let scy0 = self.bg_scy_resolve(h0).unwrap_or(live_scy);
+        let row_off = ((ly.wrapping_add(scy0) as u16 / 8) % 32) * 32 + col;
+        let base0: u16 = if bits0 & map_bit != 0 { 0x9C00 } else { 0x9800 };
+        let tn = mmio.read_vram_bank(0, base0 + row_off);
+        self.fetcher.patch_tile_num(tn);
+
+        // TileDataLow (k=1) / TileDataHigh (k=2), using the (re-resolved)
+        // latched tile number — exactly what the hardware pipeline feeds them.
+        for k in 1..=2u8 {
+            if k_now <= k {
+                break;
+            }
+            let Some(hk) = self.bg_hw_read_dot(n, k) else {
+                return;
+            };
+            let bitsk = if self.wg_hist.is_empty() {
+                self.lcdc
+            } else {
+                self.bg_wg_resolve(hk)
+            };
+            let scyk = self.bg_scy_resolve(hk).unwrap_or(live_scy);
+            let plane = (k - 1) as u16;
+            let line = ly.wrapping_add(scyk) % 8;
+            let addr = self.fetcher.get_tile_data_address(tn, line, bitsk) + plane;
+            let byte = mmio.read_vram_bank(0, addr);
+            if k == 1 {
+                self.fetcher.patch_pixel_buffer_low(byte);
+            } else {
+                self.fetcher.patch_pixel_buffer_high(byte);
+            }
+        }
     }
 
     fn set_lcdc_visible(&mut self, value: u8, cgb_features_enabled: bool, ds: bool) {
@@ -4109,6 +4359,32 @@ impl Ppu {
         };
         self.scy_pending = value;
         self.scy_apply_cc = cc + delay;
+
+        // DMG BG bus-glitch SCY journal (see bg_wg_apply): record the exact
+        // bus transition time of a mid-mode-3 SCY write; BG fetch reads
+        // resolve SCY at their reconstructed hardware dots against it, and
+        // the in-flight tile's already-executed reads are re-resolved
+        // (bg_retro_repair).
+        if !mmio.is_cgb_features_enabled() && self.state == State::PixelTransfer {
+            let old = self
+                .bg_scy_hist
+                .last()
+                .map(|&(_, _, new)| new)
+                .unwrap_or(self.scy_delayed);
+            if old != value {
+                // Transition placement: the new row/line address bits are
+                // effective for reads strictly PAST the write's commit cc —
+                // the same phase the live per-substep SCY re-read gives an
+                // unshifted read (writes commit pre-tick; the first fetch dot
+                // of the write M-cycle already sees the new value). No OR
+                // edge: the LCDC pulse captures cannot separate OR from
+                // clean-new/clean-old at the transition dots (old side is
+                // 0x00 there), and the SCY capture rejects an OR at this
+                // phase (whole-row blend pollution).
+                self.bg_scy_hist.push((cc, old, value));
+                self.bg_retro_repair(mmio);
+            }
+        }
     }
 
     /// FF43 (SCX) write hook. See `on_scy_write`.
@@ -4886,6 +5162,7 @@ impl Ppu {
                     self.win_being_fetched = false;
                     self.insert_bg_pixel = false;
                     self.win_wx0_delayed = false;
+                    self.dmg_wx_trigger_pending = None;
                     {
                         let we_now =
                             (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
@@ -4988,6 +5265,8 @@ impl Ppu {
                     self.wg_hist.clear();
                     self.wg_anchor_cc = None;
                     self.wg_dpre = 0;
+                    self.bg_anchor_cc = None;
+                    self.bg_scy_hist.clear();
                     // Per-pixel DMG palette histories: seed each at boundary 0 with
                     // the 1-dot-delayed register value (`*_delayed`, refreshed at the
                     // end of every dot), NOT the live register. A BGP/OBP write on the
@@ -5766,7 +6045,18 @@ impl Ppu {
                     self.win_being_fetched = false;
                 }
 
-                let fetcher_lcdc_state = self.wg_apply(self.fetcher_lcdc_state());
+                // DMG BG fetch-grid origin (see bg_wg_apply): the line's first
+                // BG TileNumber read runs on this dot, before any sprite stall.
+                if cadence_even
+                    && !mmio.is_cgb_features_enabled()
+                    && self.bg_anchor_cc.is_none()
+                    && !self.fetcher.is_fetching_window()
+                    && self.fetcher.fetch_state_is_tile_number()
+                    && self.fetcher.get_tile_index() == 0
+                {
+                    self.bg_anchor_cc = Some(self.abs_cc);
+                }
+                let fetcher_lcdc_state = self.bg_wg_apply(self.wg_apply(self.fetcher_lcdc_state()));
                 // Pixels still to be discarded for SCX fine-scroll: they sit in
                 // the FIFO but won't be displayed, so the BG tile column (derived
                 // from display_x + FIFO depth) must not count them.
@@ -6043,6 +6333,62 @@ impl Ppu {
                     break 'label;
                 }
 
+                // DMG deferred WX-comparator commit (see dmg_wx_trigger_pending):
+                // the exact x+7==wx match armed on the previous dot commits now
+                // iff WX still reads the matched value — the hardware comparator
+                // samples WX through the end of the CPU store's M-cycle, so a
+                // store landing on the commit dot kills the match. The restart is
+                // executed as-of the arm dot (TileNumber catch-up + anchor one
+                // dot back), byte-identical to the immediate start for stable WX.
+                if !mmio.is_cgb_features_enabled()
+                    && let Some((arm_dot, arm_wx)) = self.dmg_wx_trigger_pending.take()
+                {
+                    if self.ticks == arm_dot.wrapping_add(1)
+                        && mmio.read(WX) == arm_wx
+                        && self.x + 7 == arm_wx
+                        && !self.fetcher.is_fetching_window()
+                    {
+                        self.win_y_pos = self.win_y_pos.wrapping_add(1);
+                        self.win_draw_started = true;
+                        self.fetcher.start_window(self.x);
+                        self.we_glitch_tile_starts = [None; 2];
+                        self.win_kill_tap_late = true;
+                        self.window_started_this_line = true;
+                        self.win_being_fetched = true;
+                        self.win_first_tile_chop = 0;
+                        // The activation dot was one dot ago: its TileNumber is
+                        // due now (catch-up); low/high/push at +1/+3/+5 via the
+                        // anchored cadence.
+                        self.wg_set_anchor(1);
+                        let fls = self.wg_apply(self.fetcher_lcdc_state());
+                        if let Some(event) = self.fetcher.step(
+                            mmio,
+                            self.win_y_pos,
+                            fls,
+                            self.x,
+                            0,
+                            self.scy_delayed,
+                            self.scx_delayed,
+                        ) {
+                            if matches!(
+                                event.kind,
+                                crate::ppu::fetcher::FetcherDebugEventKind::TileNumber
+                            ) {
+                                self.subcc_last_tn_cc = self.abs_cc;
+                            }
+                            self.record_fetch_debug_event(event, mmio);
+                        }
+                        self.win_fetch_anchor = Some(self.ticks.wrapping_sub(1));
+                        self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
+                        if self.win_start_dot.is_none() {
+                            self.win_start_dot = Some(self.ticks.wrapping_sub(1));
+                        }
+                        break 'label;
+                    }
+                    // else: canceled — the WX store on the commit dot rewrote the
+                    // comparator input; no window starts (fall through).
+                }
+
                 // Check if we should start window rendering. On DMG the
                 // window-enable bit feeding the WX comparator is the DELAYED
                 // per-dot tap (we_dot_hist, samples one and two dots back) —
@@ -6114,6 +6460,13 @@ impl Ppu {
                     }
 
                     if should_start_window {
+                        // DMG exact-match mid-line trigger: defer the commit one
+                        // dot so a WX store landing on the commit dot is seen by
+                        // the comparator (see dmg_wx_trigger_pending).
+                        if is_dmg && wx >= 7 && self.x + 7 == wx {
+                            self.dmg_wx_trigger_pending = Some((self.ticks, wx));
+                            break 'label;
+                        }
                         // Window draw-start: Gambatte increments winYPos here
                         // (M3Start::f0 / plotPixel win_draw_start), once per line
                         // the window actually begins drawing, not per-line in M2.
@@ -8080,6 +8433,21 @@ impl Ppu {
         if self.oam_reader.src_disabled && !self.sprites_on_line.is_empty() {
             self.oam_reader.ghost = (0xFF, 0xFF);
         }
+    }
+
+    // A sprite whose fetch has not yet run and whose x-match column is `col`
+    // (it will arm a pixel-pop stall when the pipeline head reaches that
+    // column). Mirrors `sprite_fetch_penalty_for_current_x`'s trigger match;
+    // used by the DMG stall-aware LCDC.0 boundary.
+    fn dmg_unfetched_sprite_at(&self, col: u8) -> bool {
+        if (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
+            return false;
+        }
+        self.sprites_on_line
+            .get(self.next_sprite_fetch_index..)
+            .unwrap_or(&[])
+            .iter()
+            .any(|s| s.x.saturating_sub(8) == col)
     }
 
     fn sprite_fetch_penalty_for_current_x(&mut self, mmio: &mmio::Mmio) -> Option<u8> {
