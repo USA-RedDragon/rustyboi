@@ -175,6 +175,14 @@ pub struct SquareWave {
     // counter, `neg_` latch, and the cgb flag the nr4Init phase needs.
     #[serde(default = "disabled")]
     sweep_counter: u32,
+    // The swept frequency APPLICATION instant: the 128 Hz DIV-APU edge,
+    // 4 cc before the Gambatte event grid (SameBoy trigger_sweep_calculation
+    // updates sample_length AT the div event; the recalculation/overflow-kill
+    // side effects land later). SameSuite channel_1_sweep_restart round 1
+    // pins this: the period-2 duty must NOT tick at event-3 with the old
+    // period (SameBoy-oracle duty index 3-not-4 at the retrigger).
+    #[serde(default = "disabled")]
+    sweep_apply_counter: u32,
     // Deferred sweep overflow disable (SameBoy square_sweep_calculate_countdown):
     // the post-event "second calculation" overflow check takes (NR10 & 7)
     // 1 MHz cycles on hardware; the channel stays audible until it lands
@@ -256,6 +264,7 @@ impl SquareWave {
             sweep_shadow_frequency: 0,
             fs_step: 0,
             sweep_counter: COUNTER_DISABLED,
+            sweep_apply_counter: COUNTER_DISABLED,
             sweep_kill_counter: COUNTER_DISABLED,
             sweep_neg: false,
             cgb: false,
@@ -364,6 +373,7 @@ impl SquareWave {
         self.just_reloaded = false;
         self.last_pos_cc = self.cc;
         self.sweep_kill_counter = COUNTER_DISABLED;
+        self.sweep_apply_counter = COUNTER_DISABLED;
         // Envelope reset (SameBoy GB_apu_init memset).
         self.volume_countdown = 0;
         self.env_clock = false;
@@ -675,6 +685,15 @@ impl SquareWave {
         // The envelope is DIV-APU-event driven (see env_div_tick /
         // env_secondary_reload, dispatched by the controller).
 
+        // Swept-frequency application at the 128 Hz DIV-APU edge (4 cc before
+        // the event grid; see `sweep_apply_freq`). Polled before the event.
+        if self.channel1
+            && self.sweep_apply_counter != COUNTER_DISABLED
+            && self.cc >= self.sweep_apply_counter
+        {
+            self.sweep_apply_counter = COUNTER_DISABLED;
+            self.sweep_apply_freq();
+        }
         // Frequency sweep event(s) (Channel 1 only) — cc-driven, like Gambatte's
         // SweepUnit (channel1.cpp). Polled here, not FS-clocked.
         while self.channel1
@@ -736,6 +755,33 @@ impl SquareWave {
         freq
     }
 
+    /// The swept-frequency APPLICATION leg (SameBoy `trigger_sweep_calculation`
+    /// `sample_length` update): the new frequency reaches the duty unit AT the
+    /// 128 Hz DIV-APU edge, 4 cc before the Gambatte event grid where the
+    /// calculation side effects (neg latch, overflow kill, shadow update) stay.
+    /// A period-2 duty therefore reloads with the NEW period for the tick at
+    /// edge+1 — one fewer old-period tick than an at-event application
+    /// (SameSuite channel_1_sweep_restart round 1, SameBoy-oracle verified).
+    /// Pure arithmetic only: no neg latch, no kill, no shadow update — the
+    /// event 4 cc later recomputes the identical value from the unchanged
+    /// shadow and applies the pinned side effects.
+    fn sweep_apply_freq(&mut self) {
+        let at_cc = self.sweep_counter.wrapping_sub(4);
+        let nr0 = self.nr10;
+        if nr0 & 0x70 == 0 || nr0 & 0x07 == 0 {
+            return;
+        }
+        let shift = (nr0 & 0x07) as u16;
+        let freq = if nr0 & 0x08 != 0 {
+            self.sweep_shadow_frequency.wrapping_sub(self.sweep_shadow_frequency >> shift)
+        } else {
+            self.sweep_shadow_frequency.wrapping_add(self.sweep_shadow_frequency >> shift)
+        };
+        if freq & 2048 == 0 {
+            self.set_freq_at(freq, at_cc);
+        }
+    }
+
     /// Gambatte `Channel1::SweepUnit::event`. Dispatched when `cc >= counter_`.
     fn sweep_event(&mut self) {
         let event_cc = self.sweep_counter;
@@ -759,6 +805,7 @@ impl SquareWave {
         } else {
             self.sweep_counter = self.sweep_counter.wrapping_add(8u32 << 14);
         }
+        self.sweep_apply_counter = self.sweep_counter.wrapping_sub(4);
     }
 
     /// Gambatte `Channel1::SweepUnit::nr0Change`: a neg→non-neg transition after
@@ -790,8 +837,10 @@ impl SquareWave {
                 + if period != 0 { period } else { 8 })
                 << 14)
                 .wrapping_add(2);
+            self.sweep_apply_counter = self.sweep_counter.wrapping_sub(4);
         } else {
             self.sweep_counter = COUNTER_DISABLED;
+            self.sweep_apply_counter = COUNTER_DISABLED;
         }
         if rsh != 0 {
             // Trigger-time overflow check ("if shift is nonzero, the check
@@ -878,7 +927,10 @@ impl SquareWave {
             {
                 self.pos = (self.pos.wrapping_sub(1)) & 7;
                 self.sample_surpressed = false;
-                self.high = duty_out(self.duty(), self.pos);
+                // The output LATCH is NOT recomputed: hardware keeps emitting
+                // the pre-step-back sample until the next duty tick (SameBoy
+                // has no update_sample here; SameSuite channel_1_freq_change_-
+                // timing-cgbDE nops-28 pins the stale-high read).
             }
         }
 
