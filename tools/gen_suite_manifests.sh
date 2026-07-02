@@ -16,7 +16,7 @@
 # to DMG and -cgb*/-C/-A to CGB. gbmicrotest is a DMG-CPU-08 suite (DMG only).
 set -euo pipefail
 
-ROMS="${ROMS:-/home/reddragon/gb-test-roms}"
+ROMS="${ROMS:-gb-test-roms}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${OUT:-$HERE/rustyboi-test-runner/suites}"
 mkdir -p "$OUT"

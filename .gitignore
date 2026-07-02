@@ -1,13 +1,6 @@
 /target
 *.rustyboisave
 
-# External test suite (assembled locally; never a tracked symlink)
-gambatte-core
-
-# Copyrighted boot ROMs — never commit (provided locally for hardware-accurate test init)
-/bios/*.bin
-
-# Session scratch — baselines + agent worktrees (never tracked)
+gb-test-roms/
 /.baselines/
-/.claude/worktrees/
-tools/gambatte_agb_ref
+/bios/*.bin

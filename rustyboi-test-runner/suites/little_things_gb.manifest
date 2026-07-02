@@ -3,7 +3,7 @@
 # distinct LY positions (>=5 bits of LY spread), hence the @<ly> targets.
 # firstwhite is input-less; it fails on the first-frame-after-LCD-enable
 # display blanking (hardware shows white; PPU presentation gap, see notes).
-little-things-gb/firstwhite|dmg|png_fixed|/home/reddragon/gb-test-roms/little-things-gb/firstwhite.gb|/home/reddragon/gb-test-roms/little-things-gb/firstwhite-dmg-cgb.png
-little-things-gb/firstwhite|cgb|png_fixed|/home/reddragon/gb-test-roms/little-things-gb/firstwhite.gb|/home/reddragon/gb-test-roms/little-things-gb/firstwhite-dmg-cgb.png
-little-things-gb/tellinglys|cgb|png|/home/reddragon/gb-test-roms/little-things-gb/tellinglys.gb|/home/reddragon/gb-test-roms/little-things-gb/tellinglys-cgb.png|input=30@5:A,45:-,60@21:B,75:-,90@42:Up,105:-,120@84:Down,135:-,150@105:Left,165:-,180@120:Right,195:-,210@135:Start,225:-,240@10:Select,255:-|frames=700
-little-things-gb/tellinglys|dmg|png|/home/reddragon/gb-test-roms/little-things-gb/tellinglys.gb|/home/reddragon/gb-test-roms/little-things-gb/tellinglys-dmg.png|input=30@5:A,45:-,60@21:B,75:-,90@42:Up,105:-,120@84:Down,135:-,150@105:Left,165:-,180@120:Right,195:-,210@135:Start,225:-,240@10:Select,255:-|frames=700
+little-things-gb/firstwhite|dmg|png_fixed|gb-test-roms/little-things-gb/firstwhite.gb|gb-test-roms/little-things-gb/firstwhite-dmg-cgb.png
+little-things-gb/firstwhite|cgb|png_fixed|gb-test-roms/little-things-gb/firstwhite.gb|gb-test-roms/little-things-gb/firstwhite-dmg-cgb.png
+little-things-gb/tellinglys|cgb|png|gb-test-roms/little-things-gb/tellinglys.gb|gb-test-roms/little-things-gb/tellinglys-cgb.png|input=30@5:A,45:-,60@21:B,75:-,90@42:Up,105:-,120@84:Down,135:-,150@105:Left,165:-,180@120:Right,195:-,210@135:Start,225:-,240@10:Select,255:-|frames=700
+little-things-gb/tellinglys|dmg|png|gb-test-roms/little-things-gb/tellinglys.gb|gb-test-roms/little-things-gb/tellinglys-dmg.png|input=30@5:A,45:-,60@21:B,75:-,90@42:Up,105:-,120@84:Down,135:-,150@105:Left,165:-,180@120:Right,195:-,210@135:Start,225:-,240@10:Select,255:-|frames=700

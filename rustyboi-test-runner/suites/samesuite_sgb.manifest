@@ -1,4 +1,4 @@
 # same-suite sgb/ (Super Game Boy). High-level SGB (JOYP packet protocol +
 # MLT_REQ command handling); constructed as Hardware::SGB via `rev=sgb`.
-same-suite/sgb/command_mlt_req.gb|dmg|mooneye|/home/reddragon/gb-test-roms/same-suite/sgb/command_mlt_req.gb|rev=sgb
-same-suite/sgb/command_mlt_req_1_incrementing.gb|dmg|mooneye|/home/reddragon/gb-test-roms/same-suite/sgb/command_mlt_req_1_incrementing.gb|rev=sgb
+same-suite/sgb/command_mlt_req.gb|dmg|mooneye|gb-test-roms/same-suite/sgb/command_mlt_req.gb|rev=sgb
+same-suite/sgb/command_mlt_req_1_incrementing.gb|dmg|mooneye|gb-test-roms/same-suite/sgb/command_mlt_req_1_incrementing.gb|rev=sgb
