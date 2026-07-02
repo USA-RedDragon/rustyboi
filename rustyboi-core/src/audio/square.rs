@@ -31,6 +31,26 @@ fn duty_out(duty: u8, index: u8) -> bool {
     DUTIES[(index as usize & 7) + (duty as usize) * 8] != 0
 }
 
+/// Diagnostic: `RB_APU_TRIG_LOG=1` logs each ch1 trigger's duty placement.
+fn trig_log() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("RB_APU_TRIG_LOG").is_some_and(|v| v == "1"))
+}
+
+/// Runtime A/B flag: `RB_APU_DELAY_KEEPER=1` restores the SameBoy-literal
+/// trigger delay (1cc late vs the Gambatte-validated placement).
+fn delay_keeper() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("RB_APU_DELAY_KEEPER").is_some_and(|v| v == "1"))
+}
+
+/// Runtime A/B flag: `RB_APU_DELAY_REF=1` uses Gambatte's `(cc - ref) & 1`
+/// absolute-parity phase term instead of the free-running lf_div.
+fn delay_ref() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("RB_APU_DELAY_REF").is_some_and(|v| v == "1"))
+}
+
 fn to_period(freq: u16) -> u32 {
     (2048 - freq as u32) * 2
 }
@@ -99,6 +119,9 @@ pub struct SquareWave {
     // CGB double-speed flag (SameBoy `cgb_double_speed`), pushed by the controller.
     #[serde(default)]
     ds: bool,
+    // Diagnostic (RB_APU_TRIG_LOG): remaining post-trigger duty ticks to log.
+    #[serde(skip)]
+    log_ticks: u8,
 
     // --- Envelope unit ---
     #[serde(default = "disabled")]
@@ -189,6 +212,7 @@ impl SquareWave {
             did_tick: false,
             just_reloaded: false,
             last_pos_cc: 0,
+            log_ticks: 0,
             lf_div: 1,
             ds: false,
             env_counter: COUNTER_DISABLED,
@@ -337,6 +361,12 @@ impl SquareWave {
         let cc = self.cc;
         // How many 2 MHz cycles have elapsed since we last advanced the duty.
         let mut cycles_left = cc.wrapping_sub(self.last_pos_cc);
+        // A backward overlay (per-dot cc behind a just-resolved per-access
+        // write cc) must not replay as a huge wrapped span; keep the
+        // further-ahead anchor and wait for the dot stream to catch up.
+        if cycles_left >= 0x8000_0000 {
+            return;
+        }
         self.last_pos_cc = cc;
         // SameBoy only ticks the duty while the channel is active (is_active[i]).
         // While inactive the index/countdown freeze; we keep `last_pos_cc` current
@@ -367,6 +397,15 @@ impl SquareWave {
             self.sample_surpressed = false;
             self.did_tick = true;
             self.high = duty_out(self.duty(), self.pos);
+            if self.channel1 && self.log_ticks > 0 && trig_log() {
+                self.log_ticks -= 1;
+                eprintln!(
+                    "TICK at={:#x} pos={} high={}",
+                    cc.wrapping_sub(cycles_left),
+                    self.pos,
+                    self.high
+                );
+            }
         }
         self.just_reloaded = cycles_left == 0;
         self.sample_countdown -= cycles_left;
@@ -541,6 +580,10 @@ impl SquareWave {
     }
 
     fn duty_nr1_change(&mut self) {
+        // The duty change LATCHES until the next duty tick (SameBoy: samples
+        // are only recomputed at ticks). Recomputing `high` immediately here
+        // breaks SameSuite channel_*_duty_delay + channel_*_align_cpu
+        // (measured -4) and does not fix the gambatte duty0_to_duty3 captures.
         self.update_pos();
     }
 
@@ -771,17 +814,83 @@ impl SquareWave {
         // cases rustyboi exercises, cgb04c shows no pre-increment — so it is omitted.
         let sl = self.sample_length();
         self.did_tick = false;
-        self.delay = if was_active {
-            4u32.wrapping_sub(self.lf_div)
+        self.delay = if delay_keeper() {
+            // The original SameBoy-literal delay (6-lf_div fresh / 4-lf_div
+            // active, folded-cc lf_div). Kept for A/B: it is 1 2MHz-cycle LATE
+            // versus the cgb04c/dmg08-validated Gambatte placement — invisible
+            // to single-speed probes (even-cc locked) but exposed by the
+            // double-speed / post-speed-switch pos6->pos7 bracket tests.
+            if was_active {
+                4u32.wrapping_sub(self.lf_div)
+            } else {
+                6u32.wrapping_sub(self.lf_div)
+            }
         } else {
-            6u32.wrapping_sub(self.lf_div)
+            // The cgb04c/dmg08-validated cycle-exact placement, re-expressed
+            // in the SameBoy countdown convention (first tick lands at
+            // `cc + sample_countdown + 1`):
+            //   delay = 5 - 2*was_active - phase
+            // `was_active` (the OLD master, SameBoy's is_active) is the master
+            // term for BOTH channels: the ch2 new-master variant breaks 6
+            // SameSuite ch2 fresh-trigger tests (measured) and no gambatte
+            // test needs it.
+            //
+            // This is exactly 1 2MHz-cycle EARLIER than SameBoy's literal
+            // 6-lf_div/4-lf_div: SameBoy's write/probe grid sits 1 cycle after
+            // rustyboi's dot-sync grid, so its +1 is a frame-of-reference
+            // constant, not a hardware phase. Single-speed PCM12 probes land on
+            // even cc and the fresh-trigger grid is odd, so SameSuite cannot
+            // distinguish the two (measured: 0 samesuite delta from the -1);
+            // the double-speed / post-speed-switch gambatte brackets probe odd
+            // cc and require this placement (16 speedchange + ds_6 measured).
+            //
+            // `phase` is the free-running power-on-anchored lf_div (SameBoy):
+            // SameSuite channel_*_align_cpu sweeps the APU-enable alignment in
+            // double speed and shows the grid anchors to the ENABLE time, not
+            // absolute cc parity (Gambatte's `(cc-ref)&1` — selectable with
+            // RB_APU_DELAY_REF=1 for A/B — breaks exactly those two).
+            // The phase term is the free-running POWER-ON-ANCHORED lf_div
+            // (SameBoy's 1 MHz sub-phase): SameSuite channel_*_align_cpu and
+            // channel_*_duty sweep the APU-enable alignment and show the
+            // trigger grid anchors to the enable instant, not absolute cc
+            // parity (Gambatte's `(cc-ref)&1`, selectable with
+            // RB_APU_DELAY_REF=1, breaks exactly those).
+            let phase = if delay_ref() {
+                self.cc.wrapping_sub(self.nr4_ref) & 1
+            } else {
+                self.lf_div
+            };
+            5 - 2 * (was_active as u32) - phase
         };
         self.sample_countdown = (sl ^ 0x7FF) * 2 + self.delay;
 
+        if self.channel1 && trig_log() {
+            self.log_ticks = 2;
+            // Diagnostic: keeper (SameBoy countdown) first-tick vs the Gambatte
+            // DutyUnit::nr4Change placement for the same trigger state.
+            let t_keeper = self.cc.wrapping_add(self.sample_countdown).wrapping_add(1);
+            let m = if was_active { 1u32 } else { 0 };
+            let t_gambatte = self
+                .cc
+                .wrapping_sub(self.cc.wrapping_sub(self.nr4_ref) & 1)
+                .wrapping_add(to_period(self.freq()))
+                .wrapping_add(4 - 2 * m);
+            eprintln!(
+                "TRIG cc={:#x} lf_div={} nr4_ref={} was_active={} ds={} freq={:#x} delay={} t_k={:#x} t_g={:#x} dk-g={}",
+                self.cc, self.lf_div, self.nr4_ref, was_active, self.ds,
+                self.freq(), self.delay, t_keeper, t_gambatte,
+                t_keeper.wrapping_sub(t_gambatte) as i32
+            );
+        }
+
         self.master = !dac_off;
-        // Recompute the cached high state for the current index (SameBoy calls
-        // update_square_sample; while surpressed the digital output reads 0).
-        self.high = duty_out(self.duty(), self.pos);
+        // The duty output latch is NOT recomputed at trigger: it keeps the
+        // last tick's value until the next duty tick. Recomputing it here with
+        // the current duty flips the ch1_duty0_to_duty3_pos3 cgb04c/dmg08
+        // captures (duty changed mid-position, then re-triggered: hardware
+        // keeps outputting the OLD duty's level at the frozen position).
+        // Volume changes still take effect instantly (`get_output` reads the
+        // live `volume` field).
 
         // Fresh trigger with the DAC on surpresses the first output until the first
         // duty tick clears it (SameBoy `sample_surpressed`).
@@ -818,11 +927,49 @@ impl SquareWave {
     /// digital amplitude: 0 while the DAC is off (`!master`) or the fresh-trigger
     /// output is still surpressed (SameBoy `sample_surpressed`); otherwise the
     /// current duty high-state times the envelope volume.
+    ///
     pub fn pcm_nibble(&self) -> u8 {
         if !self.master || self.sample_surpressed {
             return 0;
         }
         if self.high {
+            self.volume & 0x0F
+        } else {
+            0
+        }
+    }
+
+    /// PCM12 nibble resolved at the canonical CPU READ access cc (`read_cc`,
+    /// in the channel's 2 MHz cc units) — the same per-access clock the length
+    /// subsystem resolves on (M7). Advances a SHADOW copy of the duty
+    /// countdown from the per-dot state to `read_cc` without mutating the
+    /// channel (the read must not disturb the real per-dot stream).
+    pub fn pcm_nibble_at(&self, read_cc: u32) -> u8 {
+        if !self.master {
+            return 0;
+        }
+        let mut high = self.high;
+        let mut surpressed = self.sample_surpressed;
+        if self.sample_countdown != COUNTER_DISABLED {
+            let mut cycles_left = read_cc.wrapping_sub(self.last_pos_cc);
+            // Guard against a non-monotonic overlay (access cc behind the dot
+            // stream): treat as zero elapsed.
+            if cycles_left < 0x8000_0000 {
+                let mut countdown = self.sample_countdown;
+                let mut pos = self.pos;
+                while cycles_left > countdown {
+                    cycles_left -= countdown + 1;
+                    countdown = (self.sample_length() ^ 0x7FF) * 2 + 1;
+                    pos = (pos + 1) & 7;
+                    surpressed = false;
+                    high = duty_out(self.duty(), pos);
+                }
+            }
+        }
+        if surpressed {
+            return 0;
+        }
+        if high {
             self.volume & 0x0F
         } else {
             0

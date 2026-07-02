@@ -90,6 +90,84 @@ pub struct Audio {
     // high-bit constant differs: 0x1E00 CGB / 0x2400 DMG, initstate.cpp).
     #[serde(default)]
     boot_cgb: bool,
+    // SameBoy `lf_div` (Core/apu.c GB_apu_run: `lf_div ^= cycles & 1`): the
+    // free-running 1 MHz sub-phase of the 2 MHz APU clock. On hardware this
+    // parity NEVER folds — a DIV reset only steps the frame-sequencer phase
+    // (GB_apu_div_event) and a speed switch doesn't touch it — so it toggles
+    // ONLY in `advance_to` (the one place real 2 MHz cycles elapse) and is
+    // deliberately NOT part of the `div_reset_fold`/`speedChange` cc
+    // re-anchoring. Reset to 1 on APU power-on (SameBoy GB_apu_init) and
+    // seeded at the boot anchor to the post-BIOS hardware phase.
+    #[serde(default = "default_ctl_lf_div")]
+    lf_div: u32,
+    // Per-access read cc (channel 2 MHz units) for the current APU register
+    // read, set by `set_read_len_cc`; a PCM12 read resolves the square duty at
+    // this canonical access cc (M7). Not serialized (transient per-access).
+    #[serde(skip)]
+    pcm_read_cc: Option<u32>,
+}
+
+fn default_ctl_lf_div() -> u32 {
+    1
+}
+
+/// Runtime A/B flag: `RB_APU_FOLDED_LFDIV=1` restores the folded-cc-parity
+/// lf_div derivation (the pre-monotonic-clock behavior) for measurement.
+fn folded_lfdiv() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("RB_APU_FOLDED_LFDIV").is_some_and(|v| v == "1"))
+}
+
+/// STOP speed-switch bridge model (see `psg_speed_change_at`).
+#[derive(Clone, Copy, PartialEq)]
+enum BridgeMode {
+    /// Flush one extra 2 MHz cycle (the odd real bridge).
+    Odd,
+    /// Gambatte's pure `+8*!ds` flush.
+    Gambatte,
+    /// Gambatte flush + lf_div-only flip (phase without grid shift).
+    Flip,
+    /// lf_div flip only on the DS->SS switch (direction-dependent bridge
+    /// parity).
+    FlipDsSs,
+}
+
+fn bridge_mode() -> BridgeMode {
+    static FLAG: std::sync::OnceLock<BridgeMode> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| match std::env::var("RB_APU_BRIDGE").as_deref() {
+        Ok("gambatte") => BridgeMode::Gambatte,
+        Ok("odd") => BridgeMode::Odd,
+        Ok("flip") => BridgeMode::Flip,
+        _ => BridgeMode::FlipDsSs,
+    })
+}
+
+/// Diagnostic: `RB_APU_PCM_LOG=1` logs PCM12 reads.
+fn pcm_log() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("RB_APU_PCM_LOG").is_some_and(|v| v == "1"))
+}
+
+/// A/B knob: `RB_APU_PCM_DOT=1` makes PCM12 reads resolve the square duty at
+/// the per-dot sync (the pre-access-cc behavior) instead of the canonical
+/// per-access read cc.
+fn pcm_access_cc() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| !std::env::var_os("RB_APU_PCM_DOT").is_some_and(|v| v == "1"))
+}
+
+
+/// A/B knob: `RB_APU_PSGRESET_LFDIV` overrides the APU power-on lf_div seed:
+/// "0" seeds 0, "inv" seeds `(cc&1)^1`, "1" seeds 1 (SameBoy literal);
+/// unset = per-speed (1 single-speed / 0 double-speed).
+fn psgreset_lfdiv_mode() -> u8 {
+    static FLAG: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| match std::env::var("RB_APU_PSGRESET_LFDIV").as_deref() {
+        Ok("0") => 0,
+        Ok("inv") => 2,
+        Ok("1") => 3,
+        _ => 4,
+    })
 }
 
 impl Audio {
@@ -113,6 +191,8 @@ impl Audio {
             clock_anchored: false,
             cached_ds: false,
             boot_cgb: false,
+            lf_div: 1,
+            pcm_read_cc: None,
         }
     }
 
@@ -155,6 +235,12 @@ impl Audio {
             self.last_update = abs_cc - 1;
             self.last_div_resets = div_resets;
             self.clock_anchored = true;
+            // Seed the free-running lf_div to the post-BIOS hardware phase.
+            // Calibrated: at single-speed instruction boundaries the passing
+            // SameSuite phase is lf_div=1 (trigger delay 5 fresh / 3 active),
+            // i.e. the invariant `lf_div == (cc&1)^1` at the anchor; from here
+            // it free-runs on elapsed 2 MHz cycles only.
+            self.lf_div = (self.cc & 1) ^ 1;
             self.push_cc();
             return;
         }
@@ -218,6 +304,9 @@ impl Audio {
         self.last_update = self.last_update.wrapping_add(cycles << shift);
         self.cc = ((self.cc as u64 + cycles) % Self::CC_MAX as u64) as u32;
         self.len_cc = self.cc;
+        // SameBoy GB_apu_run: the 1 MHz sub-phase free-runs on elapsed 2 MHz
+        // cycle parity (never folded).
+        self.lf_div ^= (cycles & 1) as u32;
     }
 
     /// Gambatte `PSG::divReset`: re-fold `cycleCounter_` so the DIV-relative phase
@@ -255,12 +344,16 @@ impl Audio {
         let nr4_ref = if (self.last_update & (self.cached_ds as u64)) != 0 { 0 } else { 1 };
         self.channel1.set_nr4_ref(nr4_ref);
         self.channel2.set_nr4_ref(nr4_ref);
-        // SameBoy `lf_div` (the 2 MHz sub-phase for the trigger delay). Derived
-        // from the free-running `cc` parity; the exact polarity is calibrated
-        // against channel_*_align/delay. Single speed the cc parity is constant
-        // at instruction boundaries (delay=5); double speed it toggles and the
-        // hardware phase runs inverted from the single-speed convention.
-        let lf_div = if self.cached_ds { cc & 1 } else { (cc & 1) ^ 1 };
+        // SameBoy `lf_div` (the 1 MHz sub-phase for the trigger delay): the
+        // controller's free-running parity bit (toggled in `advance_to`,
+        // seeded at boot / APU power-on, immune to the DIV-reset and
+        // speed-switch cc folds — hardware never folds this phase).
+        // RB_APU_FOLDED_LFDIV=1 restores the old folded-cc derivation for A/B.
+        let lf_div = if folded_lfdiv() {
+            if self.cached_ds { cc & 1 } else { (cc & 1) ^ 1 }
+        } else {
+            self.lf_div
+        };
         self.channel1.set_lf_div(lf_div);
         self.channel2.set_lf_div(lf_div);
         self.channel1.set_ds(self.cached_ds);
@@ -308,6 +401,8 @@ impl Audio {
         // (the length quantum) for the rest of the run. The channel sub-counters
         // are still reset.
         if !self.clock_anchored {
+            // SameBoy GB_apu_init: APU power-on resets the 1 MHz sub-phase.
+            self.lf_div = 1;
             self.push_cc();
             self.channel1.psg_reset();
             self.channel2.psg_reset();
@@ -315,6 +410,24 @@ impl Audio {
             self.channel4.psg_reset();
             return;
         }
+        // SameBoy GB_apu_init (NR52 0->1): lf_div re-seeds at the power-on
+        // write cc. This is the ONLY event besides boot that re-seeds the
+        // free-running sub-phase. The seed is SPEED-DEPENDENT: the NR52
+        // write-effect instant sits at a different sub-position of the 2 MHz
+        // cell in double speed (a DS M-cycle covers one 2 MHz cycle, an SS
+        // M-cycle two), so the 1 MHz phase the duty unit latches differs by
+        // one: 1 in single speed (SameBoy's GB_apu_init frame), 0 in double
+        // speed. Measured: the SS seed carries the SameSuite channel_*_align/
+        // duty/delay set; the DS seed is pinned by the gambatte cgb04c
+        // ch1_duty0_pos6_to_pos7_timing_ds ladder (write-capture brackets).
+        self.lf_div = match psgreset_lfdiv_mode() {
+            0 => 0,
+            2 => (self.cc & 1) ^ 1,
+            3 => 1,
+            _ => {
+                if self.cached_ds { 0 } else { 1 }
+            }
+        };
         // Faithful `PSG::reset` (sound.cpp:67). Single counter, no reconstruction-
         // drift bias (`last_update` is the exact floored boundary, so `cc` already
         // equals Gambatte's `cycleCounter_`).
@@ -347,9 +460,25 @@ impl Audio {
         if !self.clock_anchored {
             return;
         }
-        let cc_ = stop_cc + 8 * (!old_ds as u64);
+        // The real DS->SS STOP bridge advances the 1 MHz sub-phase by an ODD
+        // number of 2 MHz cycles relative to Gambatte's flush model, flipping
+        // the free-running lf_div (default FlipDsSs; the SS->DS direction is
+        // parity-even — flipping it breaks the nr4init fresh-DS bracket).
+        // The duty GRIDS carried across the switch stay Gambatte-exact (an
+        // Odd whole-clock advance breaks the carried-grid brackets, measured
+        // +6). A/B via RB_APU_BRIDGE=gambatte|flip|odd.
+        let bridge_extra = match bridge_mode() {
+            BridgeMode::Odd => 1u64 << (1 + old_ds as u32),
+            _ => 0,
+        };
+        let cc_ = stop_cc + 8 * (!old_ds as u64) + bridge_extra;
         // generateSamples(cc_, old_ds) — flush the single counter to the switch cc.
         self.advance_to(cc_, old_ds);
+        match bridge_mode() {
+            BridgeMode::Flip => self.lf_div ^= 1,
+            BridgeMode::FlipDsSs if old_ds => self.lf_div ^= 1,
+            _ => {}
+        }
         // lastUpdate_ -= ds
         if old_ds {
             self.last_update = self.last_update.wrapping_sub(1);
@@ -407,6 +536,10 @@ impl Audio {
         // expiry boundary (the ch2 nr52 `_1a` off-by-one). Match Gambatte exactly.
         let delta = (read_abs_cc.wrapping_sub(self.last_update) >> shift) as u32;
         let lcc = self.len_cc.wrapping_add(delta);
+        // Record the per-access read cc (channel 2 MHz units) so a PCM12 read
+        // in this access resolves the square duty at the SAME canonical access
+        // clock (M7), not the earlier per-dot sync (`pcm_nibble_at`).
+        self.pcm_read_cc = Some(self.cc.wrapping_add(delta));
         self.channel1.set_len_cc(lcc);
         self.channel2.set_len_cc(lcc);
         self.channel3.set_len_cc(lcc);
@@ -580,9 +713,26 @@ impl Audio {
     /// CGB-only / power gating is applied by the caller in `mmio.rs`.
     pub fn pcm12(&self) -> u8 {
         if !self.audio_enabled {
+            if pcm_log() {
+                eprintln!("PCM12 cc={:#x} OFF", self.cc);
+            }
             return 0;
         }
-        self.channel1.pcm_nibble() | (self.channel2.pcm_nibble() << 4)
+        // Resolve the duty at the canonical per-access read cc (M7) when the
+        // read path recorded one; fall back to the per-dot state (mixer path).
+        let v = match self.pcm_read_cc {
+            Some(rcc) if pcm_access_cc() => {
+                self.channel1.pcm_nibble_at(rcc) | (self.channel2.pcm_nibble_at(rcc) << 4)
+            }
+            _ => self.channel1.pcm_nibble() | (self.channel2.pcm_nibble() << 4),
+        };
+        if pcm_log() {
+            eprintln!(
+                "PCM12 cc={:#x} rcc={:?} v={:#x} lf={}",
+                self.cc, self.pcm_read_cc, v, self.lf_div
+            );
+        }
+        v
     }
 
     /// CGB PCM34 register (0xFF77): low nibble = channel 3, high nibble =
