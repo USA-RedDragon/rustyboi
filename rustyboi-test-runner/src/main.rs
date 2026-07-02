@@ -75,12 +75,21 @@ struct Args {
 
     /// Parallel case workers. Cases are independent (one GB instance each);
     /// results are printed/recorded in case order, so the text and JSON output
-    /// are byte-identical to a sequential run. Default: the RB_JOBS env var,
-    /// else cores-1. Forced to 1 when
-    /// --trace-rom, --fail-fast, or RB_SS_DUMP is active (their streamed
+    /// are byte-identical to a sequential run. Default: cores-1. Forced to 1
+    /// when --trace-rom, --fail-fast, or --ss-dump is active (their streamed
     /// diagnostics / early-stop semantics require sequential execution).
     #[arg(long, value_name = "N")]
     jobs: Option<usize>,
+
+    /// Diagnostic: after each mooneye-graded case, dump N 8-byte rows of the
+    /// SameSuite results buffer to stderr (forces --jobs 1).
+    #[arg(long, value_name = "N")]
+    ss_dump: Option<u16>,
+
+    /// Base address for --ss-dump (hex, default C000; some tests store their
+    /// results in VRAM).
+    #[arg(long, value_name = "ADDR", value_parser = parse_hex_u16)]
+    ss_dump_base: Option<u16>,
 
     /// Run the REAL boot ROM (bios/dmg_boot.bin, bios/cgb_boot.bin) before each
     /// test instead of the synthetic skip_bios seed (mirrors Gambatte). Falls
@@ -192,6 +201,8 @@ fn run() -> Result<u8, String> {
         trace_ly: args.trace_ly,
         real_bios: args.real_bios,
         bios_dir: args.bios_dir.clone(),
+        ss_dump: args.ss_dump,
+        ss_dump_base: args.ss_dump_base,
     };
 
     run_cases(cases, &run_options, resolve_jobs(&args), args.fail_fast, &mut summary)?;
@@ -206,23 +217,21 @@ fn run() -> Result<u8, String> {
     Ok(summary.exit_code())
 }
 
-/// Resolve the worker count: --jobs, else RB_JOBS, else cores-1.
+fn parse_hex_u16(v: &str) -> Result<u16, String> {
+    u16::from_str_radix(v.trim_start_matches("0x"), 16).map_err(|e| e.to_string())
+}
+
+/// Resolve the worker count: --jobs, else cores-1.
 /// Trace/diagnostic modes and --fail-fast force 1 (streamed stderr output
 /// would interleave; fail-fast must stop at the first failure in case order).
 fn resolve_jobs(args: &Args) -> usize {
-    if args.trace_rom.is_some() || args.fail_fast || std::env::var_os("RB_SS_DUMP").is_some() {
+    if args.trace_rom.is_some() || args.fail_fast || args.ss_dump.is_some() {
         if args.jobs.is_some_and(|jobs| jobs > 1) {
-            eprintln!("note: --jobs forced to 1 (--trace-rom / --fail-fast / RB_SS_DUMP)");
+            eprintln!("note: --jobs forced to 1 (--trace-rom / --fail-fast / --ss-dump)");
         }
         return 1;
     }
     if let Some(jobs) = args.jobs {
-        return jobs.max(1);
-    }
-    if let Some(jobs) = std::env::var("RB_JOBS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-    {
         return jobs.max(1);
     }
     let cores = std::thread::available_parallelism()
@@ -347,6 +356,8 @@ fn run_manifest(
         trace_ly: args.trace_ly,
         real_bios: args.real_bios,
         bios_dir: args.bios_dir.clone(),
+        ss_dump: args.ss_dump,
+        ss_dump_base: args.ss_dump_base,
     };
 
     run_cases(cases, &run_options, resolve_jobs(args), args.fail_fast, &mut summary)?;
