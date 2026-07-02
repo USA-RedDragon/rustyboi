@@ -711,6 +711,8 @@ pub struct Mmio {
     // (an AGB is still an AGB even running a DMG-only cart).
     #[serde(default)]
     is_agb: bool,
+    // CGB-D/E revision gate for PPU/timer (see `set_cgb_de`).
+    cgb_de: bool,
 }
 
 impl Mmio {
@@ -819,6 +821,7 @@ impl Mmio {
             
             cgb_features_enabled: false, // Will be set when cartridge is inserted
             is_agb: false,
+            cgb_de: false,
         }
     }
 
@@ -833,6 +836,7 @@ impl Mmio {
         new.bios = self.bios.take();
         new.cartridge = self.cartridge.take();
         new.is_agb = self.is_agb;
+        new.cgb_de = self.cgb_de;
         *self = new;
     }
 
@@ -846,6 +850,19 @@ impl Mmio {
 
     /// Set the AGB (GBA-in-GBC-mode) hardware flag. AGB == CGB plus the small
     /// isAgb() diff set (Gambatte). Called once from `GB::new` for Hardware::AGB.
+    /// CGB-D/E silicon revision (SameBoy `model >= GB_MODEL_CGB_D`), for the
+    /// PPU/timer revision gates (LY-153 window, end-of-vblank STAT, OAM read
+    /// windows, speed-switch TIMA edge). Seeded from `GB::new` for
+    /// Hardware::CGBE; AGB stays on the C side (pinned to the Gambatte-AGB
+    /// oracles), mirroring `is_cgb_d_or_later`.
+    pub fn set_cgb_de(&mut self, de: bool) {
+        self.cgb_de = de;
+    }
+
+    pub fn is_cgb_de(&self) -> bool {
+        self.cgb_de
+    }
+
     pub fn set_agb(&mut self, agb: bool) {
         self.is_agb = agb;
         self.audio.set_agb(agb);
@@ -3482,7 +3499,7 @@ impl Mmio {
             // Gambatte applies `Tima::speedChange` (a 4-cycle TIMA phase shift
             // for enabled fast timers) before the DIV reset; mirror that order.
             self.timer.speed_change();
-            self.timer.stop_div_reset(old_ds);
+            self.timer.stop_div_reset(self.cgb_de);
             if self.timer.take_pending_irq() {
                 self.request_interrupt(cpu::registers::InterruptFlag::Timer);
             }

@@ -432,7 +432,8 @@ impl<'a> Bus<'a> {
         // / vram-read-ncmBCE prove the compat-mode boundaries match cgb-mode, not
         // DMG. `is_cgb_features_enabled` (KEY0 compat off) is the wrong key here.
         let is_cgb = self.mmio.is_cgb();
-        if let Some(blocked) = self.ppu.cpu_access_blocked(kind, is_read, mode_locked, is_cgb, ds, gate_cc) {
+        let cgb_de = self.mmio.is_cgb_de();
+        if let Some(blocked) = self.ppu.cpu_access_blocked(kind, is_read, mode_locked, is_cgb, cgb_de, ds, gate_cc) {
             return blocked;
         }
         mode_locked
