@@ -393,6 +393,16 @@ impl GB {
             for (i, t) in (13u8..=24).enumerate() {
                 self.mmio.write(0x9924 + i as u16, t);
             }
+        } else if !self.should_enable_cgb_features() {
+            // DMG cart on CGB (compat mode): the real CGB boot ROM also leaves
+            // the logo tile data — including the ® tile at 0x8190 — in VRAM
+            // bank 0 (Gambatte setInitialVram seeds 0x8010-0x819F for cgb too;
+            // only the tilemap is DMG-only). mealybug's compat sprites render
+            // tile 0x19 (®) straight from this boot residue (m3_obp0_change
+            // cgb_c); without it the sprite is all-transparent. The CGB-cart
+            // dumper compromise above is unaffected: those are CGB-feature
+            // carts, never compat mode.
+            self.seed_boot_logo_vram();
         }
 
         // Post-boot PPU frame phase. The boot ROM leaves the LCD enabled and the
