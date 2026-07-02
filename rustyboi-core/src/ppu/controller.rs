@@ -9187,7 +9187,6 @@ impl Ppu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cpu::SM83;
     use crate::memory::Addressable;
 
     // The previous mode-2 STAT pretrigger unit tests were removed: the Mode-2

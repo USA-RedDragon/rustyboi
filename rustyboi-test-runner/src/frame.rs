@@ -758,7 +758,7 @@ mod tests {
         use std::io::Write as _;
 
         let mut png = PNG_SIGNATURE.to_vec();
-        let mut chunk = |ty: &[u8; 4], data: &[u8], out: &mut Vec<u8>| {
+        let chunk = |ty: &[u8; 4], data: &[u8], out: &mut Vec<u8>| {
             out.extend_from_slice(&(data.len() as u32).to_be_bytes());
             out.extend_from_slice(ty);
             out.extend_from_slice(data);
