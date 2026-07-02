@@ -1870,6 +1870,12 @@ impl Mmio {
         self.halt_wake_plus4_dmg = v;
     }
 
+    /// FAITHFUL HALT-EXIT (timer-read facet): arm/clear the halt-woken stream's
+    /// DIV/TIMA read re-anchor (Timer::halt_read_bias).
+    pub fn set_halt_timer_read_bias(&mut self, bias: u32) {
+        self.timer.set_halt_read_bias(bias);
+    }
+
     /// FAITHFUL HALT-EXIT: record the master_cc the mode-2 STAT IRQ event
     /// raised IF at (its Gambatte eventTime; the per-dot dispatch fires at it).
     pub fn set_last_m2_irq_fire_cc(&mut self, cc: u64) {
