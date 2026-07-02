@@ -105,6 +105,17 @@ pub struct Audio {
     // this canonical access cc (M7). Not serialized (transient per-access).
     #[serde(skip)]
     pcm_read_cc: Option<u32>,
+    // SameBoy `div_divider`: counts DIV-APU events (the 0x1000-cc boundaries
+    // of the master clock = DIV bit 12/13 falling edges, including the forced
+    // edge of a DIV write). The envelope frame runs at (div_divider & 7) == 7;
+    // its parity mirrors (cc >> 12) except for the power-on skip glitch below.
+    #[serde(default)]
+    div_divider: u16,
+    // SameBoy `skip_div_event` (GB_apu_init): powering the APU on while the
+    // DIV-APU bit is high skips the first (truncated) DIV-APU event entirely,
+    // with div_divider pre-set to 1. 0=inactive, 1=skipped, 2=skip.
+    #[serde(default)]
+    skip_div_event: u8,
 }
 
 fn default_ctl_lf_div() -> u32 {
@@ -193,6 +204,87 @@ impl Audio {
             boot_cgb: false,
             lf_div: 1,
             pcm_read_cc: None,
+            div_divider: 0,
+            skip_div_event: 0,
+        }
+    }
+
+    /// SameBoy `GB_apu_div_event` (a DIV-APU falling edge, the master clock
+    /// crossing a 0x1000-cc boundary): advance `div_divider` (unless the
+    /// power-on skip glitch eats this event), run the 64 Hz envelope frame
+    /// countdown, and consume any armed envelope ticks. Length and sweep stay
+    /// on their Gambatte cc-event models.
+    fn fs_div_event(&mut self) {
+        let cc = self.cc;
+        self.fs_div_event_at(cc);
+    }
+
+    /// The DIV-APU event with its exact boundary cc. `event_cc` feeds the
+    /// envelope frame's trigger-race window: an NRx4 trigger 2 cc (one CPU
+    /// write M-cycle) or less before the frame boundary shares the hardware
+    /// M-cycle with the event, and its freshly-reloaded countdown escapes that
+    /// frame's decrement (Gambatte `nr4Init`'s `(cc + 2) & 0x7000` period
+    /// bump; pinned by the dmg08/cgb04c ch2_init_reset_env_counter brackets).
+    fn fs_div_event_at(&mut self, event_cc: u32) {
+        match self.skip_div_event {
+            2 => {
+                self.skip_div_event = 1;
+                return;
+            }
+            1 => self.skip_div_event = 0,
+            _ => self.div_divider = self.div_divider.wrapping_add(1),
+        }
+        if self.div_divider & 7 == 7 {
+            self.channel1.env_frame_countdown(event_cc);
+            self.channel2.env_frame_countdown(event_cc);
+            self.channel4.env_frame_countdown(event_cc);
+        }
+        self.channel1.env_div_tick();
+        self.channel2.env_div_tick();
+        self.channel4.env_div_tick();
+    }
+
+    /// SameBoy `GB_apu_div_secondary_event` (the rising edge, cc crossing a
+    /// 0x800-offset boundary): reload zero envelope countdowns and arm the
+    /// tick for the next DIV-APU event.
+    fn fs_secondary_event(&mut self) {
+        self.channel1.env_secondary_reload();
+        self.channel2.env_secondary_reload();
+        self.channel4.env_secondary_reload();
+    }
+
+    /// Walk the DIV-APU half-period (0x800-cc) boundaries crossed by a forward
+    /// clock advance from `pre_cc` over `cycles`, dispatching falling
+    /// (div event) and rising (secondary) edges in order.
+    ///
+    /// The hardware edge grid sits at cc ≡ -2 (mod 0x800): Gambatte's envelope
+    /// unit keys the frame quantum on `cc + 2` (`nr4Init`'s
+    /// `(cc + 2) & 0x7000` period bump), and the dmg08/cgb04c
+    /// ch2_init_env_counter_timing 1-cc brackets pin exactly that -2 offset
+    /// (a trigger 1-2 cc before a raw 0x1000 multiple must MISS that frame's
+    /// countdown decrement). cc + 2 ≡ 0 (mod 0x1000) is the falling edge
+    /// (DIV-APU event); cc + 2 ≡ 0x800 is the rising edge (secondary).
+    fn fs_walk(&mut self, pre_cc: u32, cycles: u64) {
+        if !self.audio_enabled {
+            return;
+        }
+        let pre = pre_cc.wrapping_add(0) % Self::CC_MAX;
+        let crossed = (((pre & 0x7FF) as u64) + cycles) >> 11;
+        if crossed == 0 {
+            return;
+        }
+        // First boundary index is (pre >> 11) + 1; even index = 0x1000
+        // multiple = falling edge.
+        let mut falling = (pre >> 11) & 1 == 1;
+        let mut event_cc = (pre & !0x7FF).wrapping_add(0x800) % Self::CC_MAX;
+        for _ in 0..crossed {
+            if falling {
+                self.fs_div_event_at(event_cc);
+            } else {
+                self.fs_secondary_event();
+            }
+            falling = !falling;
+            event_cc = event_cc.wrapping_add(0x800) % Self::CC_MAX;
         }
     }
 
@@ -235,6 +327,17 @@ impl Audio {
             self.last_update = abs_cc - 1;
             self.last_div_resets = div_resets;
             self.clock_anchored = true;
+            // Seed div_divider to the post-BIOS phase: the boot ROM powered
+            // NR52 on (no psg_reset runs at the boot handoff), and the real
+            // hardware's event count since that power-on leaves the envelope
+            // frame (div_divider & 7 == 7) on the absolute cc grid — frames at
+            // (cc+2) >> 12 ≡ 0 (mod 8), ticks at ≡ 1, exactly Gambatte's
+            // `nr4Init` quantum. Seed `div_divider = m - 1` for the current
+            // region m so the first crossing lands on that grid (CGB anchor
+            // 0x1E00 -> 0; DMG anchor 0x2400 -> 1 — the dmg08
+            // ch2_init_env_counter_timing brackets pin the DMG offset).
+            self.div_divider = ((self.cc.wrapping_add(0) >> 12).wrapping_sub(1) & 7) as u16;
+            self.skip_div_event = 0;
             // Seed the free-running lf_div to the post-BIOS hardware phase.
             // Calibrated: at single-speed instruction boundaries the passing
             // SameSuite phase is lf_div=1 (trigger delay 5 fresh / 3 active),
@@ -302,11 +405,14 @@ impl Audio {
             return;
         }
         self.last_update = self.last_update.wrapping_add(cycles << shift);
+        let pre_cc = self.cc;
         self.cc = ((self.cc as u64 + cycles) % Self::CC_MAX as u64) as u32;
         self.len_cc = self.cc;
         // SameBoy GB_apu_run: the 1 MHz sub-phase free-runs on elapsed 2 MHz
         // cycle parity (never folded).
         self.lf_div ^= (cycles & 1) as u32;
+        // Dispatch the DIV-APU (envelope) events crossed by this advance.
+        self.fs_walk(pre_cc, cycles);
     }
 
     /// Gambatte `PSG::divReset`: re-fold `cycleCounter_` so the DIV-relative phase
@@ -319,6 +425,16 @@ impl Audio {
             .wrapping_add(2 * (cc & 0x800))
             .wrapping_sub(div_offset)
             % Self::CC_MAX;
+        // Hardware DIV-write trigger: resetting DIV while the DIV-APU bit is
+        // high is a falling edge — the DIV-APU event fires AT the write. (The
+        // fold expresses the same thing by jumping cc forward across the
+        // 0x1000 boundary; the low-12-bit reset itself never crosses one.)
+        // The bit is read in the -2 event-grid frame (see fs_walk): a cc in
+        // the last 2 cells of the high half already fired its falling edge in
+        // advance_to and must not double-fire here.
+        if self.audio_enabled && cc.wrapping_add(0) & 0x800 != 0 {
+            self.fs_div_event();
+        }
         let old = cc.wrapping_sub(div_offset);
         let delta = old.wrapping_sub(folded);
         self.cc = folded;
@@ -404,6 +520,8 @@ impl Audio {
         if !self.clock_anchored {
             // SameBoy GB_apu_init: APU power-on resets the 1 MHz sub-phase.
             self.lf_div = 1;
+            self.div_divider = 0;
+            self.skip_div_event = 0;
             self.push_cc();
             self.channel1.psg_reset();
             self.channel2.psg_reset();
@@ -421,6 +539,11 @@ impl Audio {
         // speed. Measured: the SS seed carries the SameSuite channel_*_align/
         // duty/delay set; the DS seed is pinned by the gambatte cgb04c
         // ch1_duty0_pos6_to_pos7_timing_ds ladder (write-capture brackets).
+        // NOTE: SameSuite's DS align tests (CPU-CGB-E hardware) want the
+        // SameBoy-literal pair (seed 1, DS delay 6-2a-lf) instead — a REAL
+        // C-vs-E revision divergence (SameBoy's square delay is
+        // `6 + lf * (model < CGB_D && ds ? 1 : -1)`). The default CGB model
+        // is cgb04c (C): the gambatte DS brackets are the hard gate.
         self.lf_div = match psgreset_lfdiv_mode() {
             0 => 0,
             2 => (self.cc & 1) ^ 1,
@@ -429,6 +552,22 @@ impl Audio {
                 if self.cached_ds { 0 } else { 1 }
             }
         };
+        // SameBoy GB_apu_init power-on DIV-APU glitch: enabling the APU while
+        // the DIV-APU bit (the half-period phase, read in the -2 event-grid
+        // frame of fs_walk) is high skips the first (truncated) DIV-APU
+        // event, with div_divider pre-set to 1.
+        self.div_divider = 0;
+        self.skip_div_event = 0;
+        if self
+            .cc
+            .wrapping_add((self.last_update as u32) & (ds as u32))
+            .wrapping_add(2u32)
+            & 0x800
+            != 0
+        {
+            self.skip_div_event = 2;
+            self.div_divider = 1;
+        }
         // Faithful `PSG::reset` (sound.cpp:67). Single counter, no reconstruction-
         // drift bias (`last_update` is the exact floored boundary, so `cc` already
         // equals Gambatte's `cycleCounter_`).
