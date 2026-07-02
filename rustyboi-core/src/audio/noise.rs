@@ -95,6 +95,10 @@ pub struct Noise {
     cgb: bool,
     #[serde(default)]
     ds: bool,
+    // CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`): drops the
+    // <=CGB-C divisor-0 even-alignment DS trigger-countdown +2 (see nr44).
+    #[serde(default)]
+    cgb_de: bool,
 }
 
 const LEN_DISABLED: u32 = 0xFFFF_FFFF;
@@ -154,6 +158,7 @@ impl Noise {
             last_run_cc: 0,
             cgb: false,
             ds: false,
+            cgb_de: false,
         }
     }
 
@@ -171,6 +176,11 @@ impl Noise {
 
     pub fn set_ds(&mut self, ds: bool) {
         self.ds = ds;
+    }
+
+    /// CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`).
+    pub fn set_cgb_de(&mut self, de: bool) {
+        self.cgb_de = de;
     }
 
     pub fn len_expired(&self) -> bool {
@@ -531,11 +541,15 @@ impl Noise {
             } else if divisor == 1 && self.enabled && (self.nr43 & 0xF0) == 0 {
                 countdown -= 4;
             }
+        } else if self.ds && !self.cgb_de {
+            // divisor 0, even alignment, double speed: SameBoy adds 2 here on
+            // model <= CGB_C; CGB-D/E hardware does not (SameSuite
+            // channel_4_align \2-even rows pin the shorter countdown on its
+            // CPU-CGB-E silicon — that suite runs under Hardware::CGBE. No
+            // gambatte cgb04c capture reaches this path, so the C-side +2 is
+            // pinned by SameBoy's revision gate alone).
+            countdown += 2;
         }
-        // divisor 0, even alignment, double speed: SameBoy adds 2 here for
-        // model <= CGB_C; CGB-D/E hardware does not (SameSuite channel_4_align
-        // \2-even rows pin the shorter countdown; no gambatte cgb04c test
-        // reaches this path, so the E behavior carries no conflict).
 
         // Background counting glitches.
         if divisor > 1 {
