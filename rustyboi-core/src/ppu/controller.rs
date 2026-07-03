@@ -8526,7 +8526,27 @@ impl Ppu {
             && mmio.ssds_haltskew_ly_advance()
             && !mmio.halt_wakeup_hdma()
             && !self.ssds_mode3_ly_advance;
-        let tn = if let Some(adv) = m0_halt_adv {
+        // FAITHFUL HALT-EXIT (CGB m0-woken stream, DMG-flagged cart): the CGB
+        // analog of `m0_halt_adv`. On a CGB console with a DMG cart neither the DMG
+        // block (gated `!is_cgb()`) nor `cgb_halt_exit` (gated on cart features)
+        // fires; this consumes the unconditional-+4 CGB advance derived at unhalt
+        // (cgb_m0_halt_ly_advance) as `to_next - adv`, landing constant tn across
+        // the 51/50/49 per-SCX classes (hblank_ly_scx_timing-C). Scoped no-HDMA
+        // single-speed so it never touches the m1int_ly / hdma / speed-switch
+        // families (all CGB-flagged cart => is_cgb_features_enabled(), or DS/HDMA).
+        let cgb_m0_halt_adv = if halt_skew
+            && mmio.is_cgb()
+            && !mmio.is_cgb_features_enabled()
+            && !ds
+            && !mmio.halt_wakeup_hdma()
+        {
+            mmio.cgb_m0_halt_ly_advance()
+        } else {
+            None
+        };
+        let tn = if let Some(adv) = cgb_m0_halt_adv {
+            to_next - adv as i64
+        } else if let Some(adv) = m0_halt_adv {
             to_next - adv as i64
         } else if cgb_halt_exit || ssds_haltskew {
             to_next - 5
