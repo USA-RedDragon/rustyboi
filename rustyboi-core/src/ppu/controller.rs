@@ -7295,6 +7295,11 @@ impl Ppu {
         self.ticks
     }
 
+    /// Whether the PPU has processed its LCD-off transition. False means the PPU
+    /// still holds its running state (used to force the disable dot before an
+    /// idle bulk-skip so the transition is never jumped over).
+    pub fn is_lcd_disabled(&self) -> bool { self.disabled }
+
     /// DMG OAM-bug support: the OAM row (0..19) the PPU is scanning when a CPU
     /// OAM-bus access COMPLETES, else None. During mode 2 the PPU reads one of the
     /// 20 OAM rows per M-cycle; `line_cycle` is the speed-independent within-line

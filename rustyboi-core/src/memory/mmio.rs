@@ -1167,6 +1167,10 @@ impl Mmio {
         }
     }
 
+    pub fn lcd_display_enabled(&self) -> bool {
+        self.io_registers.read(ppu::LCD_CONTROL) & (ppu::LCDCFlags::DisplayEnable as u8) != 0
+    }
+
     /// per-access STAGE 1 (min-event idle fast path): true when the whole world is
     /// idle except the timer+serial, so a span of dots can be bulk-skipped to the
     /// next scheduled event without losing any per-dot peripheral side effect.

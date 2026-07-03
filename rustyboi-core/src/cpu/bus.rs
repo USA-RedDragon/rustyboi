@@ -178,6 +178,20 @@ impl<'a> Bus<'a> {
     /// `target_cc`, where the CPU's own access boundary re-evaluates the world.
     fn run_to_min_event(&mut self, target_cc: u64) {
         while self.mmio.master_cc() < target_cc {
+            // The PPU's LCD-off transition (set `disabled`, reset the pipeline,
+            // LY=0) is applied lazily inside `ppu.step()` on the first dot after
+            // the enable bit clears. `idle_bulk_skippable` keys on the LCDC
+            // register bit, so a disable followed immediately by an idle span
+            // would jump over that first dot and leave the PPU stuck in its
+            // pre-disable running state (stale LY, never re-initializing on the
+            // next enable). Run one real dot first so the disable is processed at
+            // the exact dot the per-dot path would have, then allow the skip.
+            if !self.ppu.is_lcd_disabled() && !self.mmio.lcd_display_enabled() {
+                self.resolve_one_dot();
+                self.dot = self.dot.wrapping_add(1);
+                self.ticked += 1;
+                continue;
+            }
             if self.mmio.idle_bulk_skippable() {
                 // Jump straight to the next event the timer can raise (an overflow
                 // IRQ delivery) or, if none, to the target. The timer overflow is
