@@ -528,6 +528,10 @@ fn parse_revision(token: &str) -> Option<Hardware> {
         "sgb" => Some(Hardware::SGB),
         "sgb2" => Some(Hardware::SGB2),
         "cgb0" => Some(Hardware::CGB0),
+        // CPU-CGB-A/B APU revision (SameSuite's *_extra_length_clocking-cgbB /
+        // freq_change_timing-cgb0BC silicon): boot state == CGB, differs only
+        // in the CGB-B-or-earlier APU length-glitch + <=C step-back/PCM gates.
+        "cgbb" => Some(Hardware::CGBB),
         "cgb" => Some(Hardware::CGB),
         // CPU-CGB-D/E APU revision (SameSuite's validation silicon); boot
         // state == CGB, differs only in the C-vs-D/E APU gates.

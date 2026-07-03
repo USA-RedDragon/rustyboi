@@ -3,10 +3,10 @@ ss2|cgb|mooneye|gb-test-roms/same-suite/apu/channel_1/channel_1_align.gb|rev=cgb
 ss3|cgb|mooneye|gb-test-roms/same-suite/apu/channel_1/channel_1_delay.gb|
 ss4|cgb|mooneye|gb-test-roms/same-suite/apu/channel_1/channel_1_duty_delay.gb|
 ss5|cgb|mooneye|gb-test-roms/same-suite/apu/channel_1/channel_1_duty.gb|
-ss6|cgb|mooneye|gb-test-roms/same-suite/apu/channel_1/channel_1_extra_length_clocking-cgb0B.gb|
+ss6|cgb|mooneye|gb-test-roms/same-suite/apu/channel_1/channel_1_extra_length_clocking-cgb0B.gb|rev=cgb0
 ss7|cgb|mooneye|gb-test-roms/same-suite/apu/channel_1/channel_1_freq_change.gb|
-ss8|cgb|mooneye|gb-test-roms/same-suite/apu/channel_1/channel_1_freq_change_timing-A.gb|
-ss9|cgb|mooneye|gb-test-roms/same-suite/apu/channel_1/channel_1_freq_change_timing-cgb0BC.gb|
+ss8|cgb|mooneye|gb-test-roms/same-suite/apu/channel_1/channel_1_freq_change_timing-A.gb|rev=agb
+ss9|cgb|mooneye|gb-test-roms/same-suite/apu/channel_1/channel_1_freq_change_timing-cgb0BC.gb|rev=cgb0
 ss10|cgb|mooneye|gb-test-roms/same-suite/apu/channel_1/channel_1_freq_change_timing-cgbDE.gb|rev=cgbe
 ss11|cgb|mooneye|gb-test-roms/same-suite/apu/channel_1/channel_1_nrx2_glitch.gb|
 ss12|cgb|mooneye|gb-test-roms/same-suite/apu/channel_1/channel_1_nrx2_speed_change.gb|
@@ -24,7 +24,7 @@ ss23|cgb|mooneye|gb-test-roms/same-suite/apu/channel_2/channel_2_align.gb|rev=cg
 ss24|cgb|mooneye|gb-test-roms/same-suite/apu/channel_2/channel_2_delay.gb|
 ss25|cgb|mooneye|gb-test-roms/same-suite/apu/channel_2/channel_2_duty_delay.gb|
 ss26|cgb|mooneye|gb-test-roms/same-suite/apu/channel_2/channel_2_duty.gb|
-ss27|cgb|mooneye|gb-test-roms/same-suite/apu/channel_2/channel_2_extra_length_clocking-cgb0B.gb|
+ss27|cgb|mooneye|gb-test-roms/same-suite/apu/channel_2/channel_2_extra_length_clocking-cgb0B.gb|rev=cgb0
 ss28|cgb|mooneye|gb-test-roms/same-suite/apu/channel_2/channel_2_freq_change.gb|
 ss29|cgb|mooneye|gb-test-roms/same-suite/apu/channel_2/channel_2_nrx2_glitch.gb|
 ss30|cgb|mooneye|gb-test-roms/same-suite/apu/channel_2/channel_2_nrx2_speed_change.gb|
@@ -36,8 +36,8 @@ ss35|cgb|mooneye|gb-test-roms/same-suite/apu/channel_2/channel_2_volume_div.gb|
 ss36|cgb|mooneye|gb-test-roms/same-suite/apu/channel_2/channel_2_volume.gb|
 ss37|cgb|mooneye|gb-test-roms/same-suite/apu/channel_3/channel_3_and_glitch.gb|
 ss38|cgb|mooneye|gb-test-roms/same-suite/apu/channel_3/channel_3_delay.gb|
-ss39|cgb|mooneye|gb-test-roms/same-suite/apu/channel_3/channel_3_extra_length_clocking-cgb0.gb|
-ss40|cgb|mooneye|gb-test-roms/same-suite/apu/channel_3/channel_3_extra_length_clocking-cgbB.gb|
+ss39|cgb|mooneye|gb-test-roms/same-suite/apu/channel_3/channel_3_extra_length_clocking-cgb0.gb|rev=cgb0
+ss40|cgb|mooneye|gb-test-roms/same-suite/apu/channel_3/channel_3_extra_length_clocking-cgbB.gb|rev=cgbb
 ss41|cgb|mooneye|gb-test-roms/same-suite/apu/channel_3/channel_3_first_sample.gb|
 ss42|cgb|mooneye|gb-test-roms/same-suite/apu/channel_3/channel_3_freq_change_delay.gb|
 ss43|cgb|mooneye|gb-test-roms/same-suite/apu/channel_3/channel_3_restart_delay.gb|
@@ -53,7 +53,7 @@ ss52|cgb|mooneye|gb-test-roms/same-suite/apu/channel_3/channel_3_wave_ram_sync.g
 ss53|cgb|mooneye|gb-test-roms/same-suite/apu/channel_4/channel_4_align.gb|rev=cgbe
 ss54|cgb|mooneye|gb-test-roms/same-suite/apu/channel_4/channel_4_delay.gb|
 ss55|cgb|mooneye|gb-test-roms/same-suite/apu/channel_4/channel_4_equivalent_frequencies.gb|
-ss56|cgb|mooneye|gb-test-roms/same-suite/apu/channel_4/channel_4_extra_length_clocking-cgb0B.gb|
+ss56|cgb|mooneye|gb-test-roms/same-suite/apu/channel_4/channel_4_extra_length_clocking-cgb0B.gb|rev=cgb0
 ss57|cgb|mooneye|gb-test-roms/same-suite/apu/channel_4/channel_4_freq_change.gb|rev=cgbe
 ss58|cgb|mooneye|gb-test-roms/same-suite/apu/channel_4/channel_4_frequency_alignment.gb|
 ss59|cgb|mooneye|gb-test-roms/same-suite/apu/channel_4/channel_4_lfsr_15_7.gb|
