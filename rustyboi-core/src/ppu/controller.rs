@@ -62,6 +62,9 @@ fn dmg_first_frame_lock_dot() -> u128 { DMG_FIRST_FRAME_LOCK_DOT }
 fn cgb_first_frame_lock_dot(double_speed: bool) -> u128 {
     if double_speed { CGB_FIRST_FRAME_LOCK_DOT_DS } else { CGB_FIRST_FRAME_LOCK_DOT }
 }
+// Serde default for `frames_since_enable`: a savestate captured mid-run has an
+// already-resynced panel, so restore to the "displays normally" value (>= 2).
+fn frames_since_enable_default() -> u8 { 2 }
 // Offset between rustyboi's `ticks` at M3 arm and Gambatte's lineCycle frame
 // for the scheduled Mode 3 -> Mode 0 transition. Swept against the full suite.
 const DMG_MODE0_OFFSET: i32 = 4;
@@ -1248,6 +1251,16 @@ pub struct Ppu {
     #[serde(with = "serde_bytes")]
     color_fb_b: [u8; FRAMEBUFFER_SIZE * 3], // RGB color framebuffer
     have_frame: bool,
+    // First-frame-after-LCD-enable display blanking. On real hardware the panel
+    // has not resynced for the first frame produced after LCDC.7 0->1, so it shows
+    // the LCD-off "whiter than white" blank instead of that frame's pixels (the
+    // little-things-gb `firstwhite` / Pokemon Pinball 1-frame-glitch behavior).
+    // `frames_since_enable` counts completed frames since the last enable (saturating);
+    // get_frame presents blank until it reaches 2 (one full frame after enable has
+    // been displayed). Seeded to 2 so a skip_bios boot (LCD already on, no enable
+    // edge observed) — and a savestate from a running system — displays normally.
+    #[serde(default = "frames_since_enable_default")]
+    frames_since_enable: u8,
     #[serde(default)]
     lcdc: u8,
     #[serde(default)]
@@ -1556,6 +1569,7 @@ impl Ppu {
             color_fb_a: [0; FRAMEBUFFER_SIZE * 3],
             color_fb_b: [0; FRAMEBUFFER_SIZE * 3],
             have_frame: false,
+            frames_since_enable: 2,
             lcdc: 0,
             cgb_tile_index_is_tile_data: false,
             pending_lcdc_events: Vec::new(),
@@ -4944,6 +4958,9 @@ impl Ppu {
                 // First line after enable: STAT reports mode 0 (not 2), no
                 // Mode 2 STAT IRQ fires, and M3 starts later than usual.
                 self.first_line_after_enable = true;
+                // First-frame-after-enable blanking: the panel shows the LCD-off
+                // blank for the frame produced immediately after this enable.
+                self.frames_since_enable = 0;
                 // Gambatte OamReader::enableDisplay: `lu_ = cc + (2*40 << ds) + 1`.
                 // getStat reports mode 0 (suppresses mode 2/3) for `cc < lu_`.
                 {
@@ -6852,6 +6869,9 @@ impl Ppu {
                         }
                         
                         self.have_frame = true;
+                        // Count this completed frame toward post-enable resync so
+                        // get_frame stops blanking once a full frame has displayed.
+                        self.frames_since_enable = self.frames_since_enable.saturating_add(1);
                     } else if (144..153).contains(&current_ly) {
                         let next_ly = current_ly.saturating_add(1);
                         mmio.write_ly_from_ppu(next_ly);
@@ -6928,11 +6948,29 @@ impl Ppu {
 
     pub fn get_frame(&mut self, mmio: &mmio::Mmio) -> crate::gb::Frame {
         self.have_frame = false;
+        // Hardware panel blank: the LCD off state and the first frame after an
+        // enable both show "whiter than white" (blank), not the framebuffer. The
+        // panel needs one fully-displayed frame after enable to resync, so a frame
+        // is only shown once at least two frame boundaries have passed since the
+        // enable (frames_since_enable >= 2). A ROM that enables the LCD for a single
+        // frame each cycle (little-things-gb `firstwhite`, Pokemon Pinball) never
+        // reaches that, so the panel stays blank. SGB keeps its own mask/border
+        // compositing (handled in sgb_frame), so this blanking is gated off there.
+        let blank_panel =
+            mmio.sgb().is_none() && (self.disabled || self.frames_since_enable < 2);
         if self.renders_color(mmio) {
+            if blank_panel {
+                // CGB white == RGB 0xFFFFFF.
+                return crate::gb::Frame::Color(Box::new([0xFF; FRAMEBUFFER_SIZE * 3]));
+            }
             crate::gb::Frame::Color(Box::new(self.color_fb_b))
         } else if let Some(sgb) = mmio.sgb() {
             self.sgb_frame(sgb)
         } else {
+            if blank_panel {
+                // DMG white == shade index 0.
+                return crate::gb::Frame::Monochrome(Box::new([0; FRAMEBUFFER_SIZE]));
+            }
             crate::gb::Frame::Monochrome(Box::new(self.fb_b))
         }
     }
