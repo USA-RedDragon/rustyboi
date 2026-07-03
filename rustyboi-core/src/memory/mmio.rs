@@ -412,6 +412,14 @@ pub struct Mmio {
     #[serde(skip, default)]
     halt_wakeup_skew: bool,
 
+    // Set at an m2-woken CGB HALT exit that charged the +4 halt-exit M-cycle as a
+    // REAL cpu stall (sm83.rs `return 4`). Because the stall advances the whole
+    // woken stream 4cc, the `access_cc + 5` OAMSearch getStat read bias would
+    // double-count the +4; while this is live it drops to the +1 lyTime term.
+    // Cleared when the CPU next halts.
+    #[serde(skip, default)]
+    m2_halt_stall_charged_cgb: bool,
+
     // True when an SS->DS speed-switch STOP was executed while `halt_wakeup_skew`
     // was live (halt-wake -> STOP with no intervening HALT), i.e. the post-switch
     // DS stream still carries the un-charged CGB halt-exit M-cycle (Gambatte
@@ -459,6 +467,12 @@ pub struct Mmio {
     // stream — not just biased reads — resumes on Gambatte's cc.
     #[serde(skip, default)]
     last_m2_irq_fire_cc: Option<u64>,
+
+    // The LY the last mode-2 STAT IRQ event fired for. 0..143 = a rendering-line
+    // OAM search (intr_2); 144 = the VBlank-entry mode-2 quirk (vblank_stat_intr).
+    // The CGB halt-exit +4 stall (sm83.rs) applies only to the rendering-line wake.
+    #[serde(skip, default)]
+    last_m2_irq_ly: u8,
 
     // FAITHFUL HALT-EXIT (mooneye hblank_ly_scx): the total halt-exit cc
     // advance Gambatte charges a DMG m0-STAT-IRQ-woken wake — the ceil-to-
@@ -779,11 +793,13 @@ impl Mmio {
             hdma_req_pending: false,
             halt_hdma_state: HaltHdmaState::Low,
             halt_wakeup_skew: false,
+            m2_halt_stall_charged_cgb: false,
             ssds_haltskew_ly_advance: false,
             halt_wakeup_hdma: false,
             pending_m0_irq_fire_cc: None,
             halt_wake_plus4_dmg: false,
             last_m2_irq_fire_cc: None,
+            last_m2_irq_ly: 0,
             dmg_m0_halt_ly_advance: None,
             halt_entry_cc: None,
             halt_prefetch_phase: 0,
@@ -1902,6 +1918,21 @@ impl Mmio {
         self.halt_wakeup_skew
     }
 
+    /// Set at an m2-woken CGB HALT exit that charged the +4 M-cycle as a REAL
+    /// stall (`return 4` in sm83.rs). The stall already advanced the whole woken
+    /// stream (dispatch, reads) by 4cc, so the `access_cc + 5` OAMSearch getStat
+    /// read bias must NOT re-add the +4 — it drops to the +1 lyTime correction.
+    /// Cleared when the CPU next halts.
+    pub fn set_m2_halt_stall_charged_cgb(&mut self, v: bool) {
+        self.m2_halt_stall_charged_cgb = v;
+    }
+
+    /// True while a CGB m2-woken stream that took the real +4 halt-exit stall is
+    /// live (see setter).
+    pub fn m2_halt_stall_charged_cgb(&self) -> bool {
+        self.m2_halt_stall_charged_cgb
+    }
+
     /// Arm the halt-woken SS->DS LY-read advance (see field doc). Called at the
     /// speed-switch STOP when the executing stream is halt-woken.
     pub fn set_ssds_haltskew_ly_advance(&mut self) {
@@ -1935,6 +1966,17 @@ impl Mmio {
     /// FAITHFUL HALT-EXIT: the last mode-2 STAT IRQ IF-set master_cc.
     pub fn last_m2_irq_fire_cc(&self) -> Option<u64> {
         self.last_m2_irq_fire_cc
+    }
+
+    /// Record the LY the last mode-2 STAT IRQ event was raised for.
+    pub fn set_last_m2_irq_ly(&mut self, ly: u8) {
+        self.last_m2_irq_ly = ly;
+    }
+
+    /// The LY of the last mode-2 STAT IRQ event (rendering line 0..143, or 144
+    /// for the VBlank-entry mode-2 quirk).
+    pub fn last_m2_irq_ly(&self) -> u8 {
+        self.last_m2_irq_ly
     }
 
     /// FAITHFUL HALT-EXIT: set the DMG m0-woken wake's halt-exit cc advance
@@ -2145,6 +2187,7 @@ impl Mmio {
         // C1: a fresh HALT re-arms the wakeup-skew guard (the previous HALT-woken
         // stream has ended).
         self.halt_wakeup_skew = false;
+        self.m2_halt_stall_charged_cgb = false;
         self.ssds_haltskew_ly_advance = false;
         // FAITHFUL EVENTCC: a fresh HALT ends the previous wakeup's +4 read bias.
         self.halt_wake_plus4_dmg = false;

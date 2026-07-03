@@ -3594,6 +3594,10 @@ impl Ppu {
             // halt-exit fixup (sm83.rs) needs the m2 eventTime to apply the
             // real +4 (`cc - eventTime < 2`).
             mmio.set_last_m2_irq_fire_cc(mmio.master_cc());
+            // Record the m2-event LY so the CGB halt-exit +4 stall (sm83.rs) can
+            // distinguish a rendering-line OAM wake (ly 0..143, intr_2) from the
+            // VBlank-entry mode-2 quirk wake (ly 144, vblank_stat_intr).
+            mmio.set_last_m2_irq_ly(ly as u8);
         }
         let delta = stat_irq::mode2_reschedule_delta(ly, stat, ds);
         self.sched_m2irq = self.sched_m2irq.wrapping_add(delta);
@@ -7777,7 +7781,15 @@ impl Ppu {
             && !ds
             && !mmio.halt_wakeup_hdma()
         {
-            access_cc + 5
+            // An m2-woken wake that charged its +4 as a REAL stall (sm83.rs
+            // `return 4`) already advanced this read's access cc by 4cc, so only
+            // the +1 lyTime correction remains; a wake that did NOT (LYC/m1 path,
+            // or the pre-stall model) still needs the full +5.
+            if mmio.m2_halt_stall_charged_cgb() {
+                access_cc + 1
+            } else {
+                access_cc + 5
+            }
         } else {
             access_cc
         };
@@ -8277,8 +8289,14 @@ impl Ppu {
         // their post-wakeup phase; applying it again here double-counts. Scope the
         // CGB halt-exit bias to the no-HDMA halt wakeup (the plain m1int_ly family).
         let halt_skew = mmio.halt_wakeup_skew();
-        let cgb_halt_exit =
-            halt_skew && mmio.is_cgb_features_enabled() && !ds && !mmio.halt_wakeup_hdma();
+        // An m2-woken CGB wake that charged its +4 as a REAL stall already advanced
+        // this read's access cc by 4cc, so the -5 (raw -1 + halt-exit +4) would
+        // double-count the +4 — it drops to the raw -1 (the `halt_skew` else-arm).
+        let cgb_halt_exit = halt_skew
+            && mmio.is_cgb_features_enabled()
+            && !ds
+            && !mmio.halt_wakeup_hdma()
+            && !mmio.m2_halt_stall_charged_cgb();
         // FAITHFUL HALT-EXIT (DMG m0-woken stream): re-anchor the woken FF44
         // read by the real Gambatte wake advance (snap + conditional +4,
         // derived at unhalt from the m0 eventTime phase). The un-advanced wake
