@@ -273,12 +273,32 @@ AGE_REV_CGBE_STEMS = (
 )
 
 
+# Mirror AGE's own runner exclusions (c-sp/age: build/test-blacklist.txt). AGE
+# blacklists these paths from its own suite, so their references are not reliable
+# targets: _in-progress is unfinished, and oam-write-dmgC / speed-switch/caution
+# capture Nintendo-undefined post-STOP / metastable real-silicon behavior the AGE
+# author declines to hold his own emulator to. We exclude the same paths rather
+# than gate on a ref its own maker disowns. Paths are relative to age-test-roms/.
+AGE_BLACKLIST = (
+    "_in-progress",
+    "oam/oam-write-dmgC",
+    "speed-switch/caution",
+)
+
+
+def _age_blacklisted(rel_age: Path) -> bool:
+    s = rel_age.as_posix()
+    return any(s == b or s.startswith(b + "/") or s.startswith(b + ".") for b in AGE_BLACKLIST)
+
+
 def gen_age(roms: Path, out: Path) -> None:
     age = roms / "age-test-roms"
     lines = []
     if age.is_dir():
         # Register-graded .gb: dirs with no PNGs; device tokens name the modes.
         for rom in sorted(age.rglob("*.gb")):
+            if _age_blacklisted(rom.relative_to(age)):
+                continue
             if any(rom.parent.glob("*.png")):
                 continue
             stem = rom.stem
@@ -294,6 +314,8 @@ def gen_age(roms: Path, out: Path) -> None:
         # Screenshot pass: for every PNG pick the longest-prefix ROM in its dir;
         # mode from the PNG's own device token (ncm = DMG cart on CGB -> cgb).
         for png in sorted(age.rglob("*.png")):
+            if _age_blacklisted(png.relative_to(age)):
+                continue
             pstem = png.stem
             best = None
             for cand in png.parent.glob("*.gb"):
@@ -314,6 +336,8 @@ def gen_age(roms: Path, out: Path) -> None:
         [
             "age-test-roms (CGB timing; LD B,B + Fibonacci registers, else PNG).",
             "Register tests: grading mooneye (0x40). Screenshot tests: grading png.",
+            "Excludes AGE's own blacklist (build/test-blacklist.txt): _in-progress,",
+            "oam/oam-write-dmgC, speed-switch/caution -- refs AGE itself disowns.",
         ],
         lines,
     )
