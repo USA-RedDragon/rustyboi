@@ -4035,7 +4035,12 @@ impl Ppu {
             return false;
         }
         let wx = mmio.read(WX) as i32;
-        (0..=166).contains(&wx) && (is_cgb || wx != 166)
+        // WX=166 (lcd_hres+6): the window starts on the CGB PPU but not the DMG PPU.
+        // This follows the HARDWARE PPU (real CGB silicon, even in DMG-compat/ncm),
+        // not the CGB-features flag — age stat-mode-window-ncm keys WX=166 on DEF(CGB)
+        // (hardware) and extends mode-3 there, matching cgbBCE not dmgC.
+        let _ = is_cgb;
+        (0..=166).contains(&wx) && (mmio.is_cgb() || wx != 166)
     }
 
     // Gambatte plotPixel (ppu.cpp 883-895) evaluated at the END of mode 3, where
@@ -4202,7 +4207,11 @@ impl Ppu {
                 let dflt = if mmio.is_double_speed_mode() { 0 } else { -1 };
                 cycles += dflt;
             }
-            if nwx == 0 && !mmio.is_double_speed_mode() {
+            // WX=0 window init runs one dot long when the SCX fine-scroll discard is
+            // active (age stat-mode-window WX=0 rows: the AGE fetcher inits the window
+            // at 8 clks instead of 7 when `alignment_x >= 1`). Speed-independent in
+            // dots — the previous `!ds` gate left the DS WX=0 scx>0 rows one dot short.
+            if nwx == 0 && scx > 0 {
                 cycles += 1;
             }
             win = true;
