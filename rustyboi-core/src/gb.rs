@@ -65,6 +65,31 @@ impl Hardware {
     }
 }
 
+/// How a cartridge pairs with a given piece of hardware. No variant means the
+/// ROM won't run — it describes what the pairing does, so a consumer can decide
+/// whether (and how) to tell the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compatibility {
+    /// DMG cartridge on any hardware, or a CGB cartridge on CGB/AGB hardware.
+    Full,
+    /// A CGB-compatible cartridge on DMG-class hardware: runs, but in DMG
+    /// (monochrome) mode with no CGB features.
+    DmgModeFallback,
+    /// A CGB-only cartridge on DMG-class hardware: boots to the cartridge's own
+    /// hardware-mismatch screen instead of the game.
+    CgbOnlyOnDmg,
+}
+
+/// Classify how `cartridge` pairs with `hardware`. Pure function of the
+/// cartridge header's CGB flag and the hardware model.
+pub fn cartridge_compatibility(hardware: Hardware, cartridge: &cartridge::Cartridge) -> Compatibility {
+    match (hardware, cartridge.get_cgb_support()) {
+        (h, cartridge::CgbSupport::Only) if !h.is_cgb_like() => Compatibility::CgbOnlyOnDmg,
+        (h, cartridge::CgbSupport::Compatible) if !h.is_cgb_like() => Compatibility::DmgModeFallback,
+        _ => Compatibility::Full,
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct GB {
     cpu: cpu::SM83,
@@ -645,11 +670,15 @@ impl GB {
         }
     }
 
-    pub fn insert(&mut self, cartridge: cartridge::Cartridge) {
-        // Validate hardware compatibility
-        if let Err(msg) = self.validate_cartridge_compatibility(&cartridge) {
-            eprintln!("Warning: {}", msg);
-        }
+    /// Insert a cartridge and return how it pairs with the current hardware.
+    ///
+    /// The core never logs about mismatches — the returned [`Compatibility`]
+    /// lets the consumer decide whether to surface anything to the user. Note
+    /// that no variant prevents the ROM from running: even [`Compatibility::CgbOnlyOnDmg`]
+    /// boots (to the cartridge's own hardware-mismatch screen), which is a
+    /// faithful thing for an emulator to show.
+    pub fn insert(&mut self, cartridge: cartridge::Cartridge) -> Compatibility {
+        let compatibility = cartridge_compatibility(self.hardware, &cartridge);
 
         // SGB command-unlock gate (Pan Docs "SGB Unlocking"): only carts whose
         // header declares SGB support ($0146 == $03, $014B == $33) may drive
@@ -662,23 +691,17 @@ impl GB {
         // Update CGB features enablement based on hardware and cartridge compatibility
         let cgb_enabled = self.should_enable_cgb_features();
         self.mmio.set_cgb_features_enabled(cgb_enabled);
+
+        compatibility
     }
 
-    /// Validate that the cartridge is compatible with the current hardware
-    fn validate_cartridge_compatibility(&self, cartridge: &cartridge::Cartridge) -> Result<(), String> {
-        let cgb_support = cartridge.get_cgb_support();
-
-        match (self.hardware, &cgb_support) {
-            // CGB-only cartridge on non-CGB hardware
-            (Hardware::DMG | Hardware::DMG0 | Hardware::MGB | Hardware::SGB | Hardware::SGB2, cartridge::CgbSupport::Only) => {
-                Err("CGB-only cartridge cannot run on DMG hardware".to_string())
-            }
-            // CGB cartridge on CGB/AGB hardware - always OK
-            (Hardware::CGB0 | Hardware::CGBB | Hardware::CGB | Hardware::CGBE | Hardware::AGB, _) => Ok(()),
-            // DMG cartridge on any hardware - always OK
-            (_, cartridge::CgbSupport::None) => Ok(()),
-            // CGB-compatible cartridge on DMG hardware - OK but will run in DMG mode
-            (_, cartridge::CgbSupport::Compatible) => Ok(()),
+    /// How the currently-inserted cartridge pairs with the current hardware.
+    ///
+    /// Returns [`Compatibility::Full`] when no cartridge is loaded.
+    pub fn cartridge_compatibility(&self) -> Compatibility {
+        match self.mmio.get_cartridge() {
+            Some(cartridge) => cartridge_compatibility(self.hardware, cartridge),
+            None => Compatibility::Full,
         }
     }
 

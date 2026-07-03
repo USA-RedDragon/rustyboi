@@ -1221,7 +1221,9 @@ impl Session {
             }
         } else if let Some(rom) = reload_rom {
             match Cartridge::from_bytes(rom) {
-                Ok(cart) => gb.insert(cart),
+                Ok(cart) => {
+                    gb.insert(cart);
+                }
                 Err(e) => return Err(SessionError::State(format!("failed to reattach ROM: {e}"))),
             }
         }
