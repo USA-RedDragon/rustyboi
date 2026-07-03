@@ -139,21 +139,7 @@ jobs:
         run: ./tools/run-suites.sh build
       - name: Generate progress table
         shell: bash
-        run: RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 ./tools/run-suites.sh report > "$RUNNER_TEMP/progress.md"
-      - name: Write table into README
-        shell: bash
-        run: |
-          python3 - "$RUNNER_TEMP/progress.md" <<'PY'
-          import pathlib, sys
-          start = '<!-- SUITE-PROGRESS:START -->'
-          end = '<!-- SUITE-PROGRESS:END -->'
-          table = open(sys.argv[1]).read().strip('\n')
-          p = pathlib.Path('README.md')
-          s = p.read_text()
-          a = s.index(start) + len(start)
-          b = s.index(end)
-          p.write_text(s[:a] + '\n' + table + '\n' + s[b:])
-          PY
+        run: RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 ./tools/run-suites.sh report-update
       - name: Commit + push if changed
         shell: bash
         run: |
