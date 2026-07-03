@@ -11,13 +11,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  suites-linux:
-    name: 'suite / ${{ matrix.suite }} / ubuntu-24.04 x64'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
+  # One job, one matrix: os x arch x suite. Every cell RUNS its suite -- natively
+  # where a hosted runner exists, and under qemu-user (binfmt) for the armv7 leg,
+  # which has no native runner (hence its windows/macos exclusions: qemu-user is
+  # Linux-only). `include` maps each (os, arch) to a runner + Rust target triple.
+  # Builds go through tools/run-suites.sh, which scopes to -p rustyboi-test-runner
+  # (a bare `cargo build` would pull the workspace default-member rustyboi-platform
+  # -> rodio -> cpal -> alsa-sys and fail to cross-compile).
+  test:
+    name: '${{ matrix.suite }} / ${{ matrix.os }} / ${{ matrix.arch }}'
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        os: [linux, windows, macos]
+        arch: [x86_64, aarch64, armv7]
         suite:
           - acid2
           - cgb_acid_hell
@@ -40,72 +49,59 @@ jobs:
           - rtc3test
           - mbc3_tester
           - gambatte
+        exclude:
+          - { os: windows, arch: armv7 }
+          - { os: macos, arch: armv7 }
+        include:
+          - { os: linux, arch: x86_64, runs-on: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: linux, arch: aarch64, runs-on: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: linux, arch: armv7, runs-on: ubuntu-24.04, target: armv7-unknown-linux-gnueabihf, qemu: true }
+          - { os: windows, arch: x86_64, runs-on: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows, arch: aarch64, runs-on: windows-11-arm, target: aarch64-pc-windows-msvc }
+          - { os: macos, arch: x86_64, runs-on: macos-13, target: x86_64-apple-darwin }
+          - { os: macos, arch: aarch64, runs-on: macos-latest, target: aarch64-apple-darwin }
     steps:
       - uses: actions/checkout@v5
       - name: Install Rust
-        run: rustup default stable
-      - name: Cache cargo + build
+        shell: bash
+        run: |
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+      - name: Set up qemu-user + arm cross toolchain
+        if: matrix.qemu
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf
+          # Register the qemu-user binfmt handlers so the cross-built armv7 binary
+          # executes transparently on this x86_64 runner.
+          docker run --privileged --rm tonistiigi/binfmt --install all
+          echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> "$GITHUB_ENV"
+          echo "QEMU_LD_PREFIX=/usr/arm-linux-gnueabihf" >> "$GITHUB_ENV"
+      - name: Cache cargo + target
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-ubuntu-24.04-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-ubuntu-24.04-
+          key: cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.target }}-
       - name: Cache ROM set
         uses: actions/cache@v4
         with:
           path: gb-test-roms
-          key: roms-v7.0-gambatte-5a41a68c
-      - name: Fetch ROMs
-        run: ./tools/run-suites.sh setup
-      - name: Build test runner
-        run: ./tools/run-suites.sh build
-      - name: Run ${{ matrix.suite }}
-        run: RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 ./tools/run-suites.sh ${{ matrix.suite }}
-
-  suites-cross-os:
-    name: 'suite / ${{ matrix.suite }} / ${{ matrix.os }}'
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-24.04-arm
-          - macos-latest
-          - windows-latest
-        suite:
-          - acid2
-          - mealybug
-          - mooneye
-          - blargg
-          - gambatte
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install Rust
-        run: rustup default stable
-      - name: Cache cargo + build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-${{ matrix.os }}-
-      - name: Cache ROM set
-        uses: actions/cache@v4
-        with:
-          path: gb-test-roms
-          key: roms-v7.0-gambatte-5a41a68c-${{ matrix.os }}
+          key: roms-${{ matrix.os }}-v7.0-gambatte5a41a68c-sgb7c6ee9ba
       - name: Fetch ROMs
         shell: bash
         run: ./tools/run-suites.sh setup
       - name: Build test runner
         shell: bash
+        env:
+          RB_TARGET: ${{ matrix.target }}
         run: ./tools/run-suites.sh build
       - name: Run ${{ matrix.suite }}
         shell: bash
+        env:
+          RB_TARGET: ${{ matrix.target }}
         run: RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 ./tools/run-suites.sh ${{ matrix.suite }}
