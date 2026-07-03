@@ -80,10 +80,12 @@ struct Row {
     /// fact (no re-sweep). Stripped from the committed baseline (--strip-names).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     crc: Option<String>,
-    /// First 8 bytes of the ROM file's SHA-256 (64-bit, collision-negligible
-    /// across a library). THE identity used to match rows between manifests: a
-    /// row present in one manifest but not the other means the library changed,
-    /// not the emulator. Opaque, so safe to commit.
+    /// First 8 bytes of the *embedded* ROM's SHA-256 (post-unzip payload, not the
+    /// zip container — see `rom_sha`; 64-bit, collision-negligible across a
+    /// library). THE identity used to match rows between manifests: a row present
+    /// in one manifest but not the other means the library changed, not the
+    /// emulator. Container-independent (a re-zip keeps it) and opaque, so safe to
+    /// commit.
     rom_sha: String,
     hardware: String,
     frames: usize,
@@ -199,6 +201,17 @@ fn nointro_map() -> std::collections::HashMap<u32, String> {
         eprintln!("sweep: no No-Intro DATs available (offline?); labeling by file name");
     }
     map
+}
+
+/// The baseline join identity: first 8 bytes of the SHA-256 of the *embedded*
+/// ROM (the payload `Cartridge::from_bytes` feeds the core), hex-encoded. Hashing
+/// the extracted ROM rather than the container means a bare ROM and any (re)zip
+/// of the same bytes share one key — recompressing the library never churns the
+/// baseline. A corrupt/unreadable archive falls back to the container hash so
+/// every row still gets a stable key.
+fn rom_sha(bytes: &[u8]) -> String {
+    let rom = Cartridge::extract_rom_bytes(bytes).unwrap_or_else(|_| bytes.to_vec());
+    sha256(&rom)[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// CRC32 (reflected, poly 0xEDB88320) — the checksum No-Intro DATs key on.
@@ -438,8 +451,13 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
         }
     };
     let sha = sha256(&bytes);
-    row.rom_sha = sha[..8].iter().map(|b| format!("{b:02x}")).collect();
+    // The masher seed stays keyed on the file bytes (unchanged run behavior).
     let seed = u64::from_le_bytes(sha[..8].try_into().unwrap());
+    // rom_sha — the baseline join key — is keyed on the *embedded* ROM (the
+    // post-unzip payload the core actually loads), not the zip container, so a
+    // recompressed/re-zipped file with byte-identical ROM content keeps its
+    // identity. Bare .gb/.gbc hash the same either way.
+    row.rom_sha = rom_sha(&bytes);
 
     // CRC32 of the extracted ROM (not the zip): stored for after-the-fact
     // naming, and used now to set the No-Intro name when the DAT has it.
@@ -837,5 +855,83 @@ fn parse_num(args: &[String], name: &str, default: usize) -> Result<usize, Strin
     match arg(args, name) {
         Some(v) => v.parse().map_err(|_| format!("bad {name} {v:?}")),
         None => Ok(default),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal single-file STORED (uncompressed) zip. Well-formed enough for
+    /// `Cartridge::extract_rom_bytes` to unzip, without pulling in a zip writer.
+    fn stored_zip(name: &str, data: &[u8]) -> Vec<u8> {
+        let crc = crc32(data);
+        let nlen = name.len() as u16;
+        let size = data.len() as u32;
+        let mut z = Vec::new();
+        // Local file header.
+        z.extend_from_slice(b"PK\x03\x04");
+        z.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // ver, flags, store, time, date
+        z.extend_from_slice(&crc.to_le_bytes());
+        z.extend_from_slice(&size.to_le_bytes()); // compressed size
+        z.extend_from_slice(&size.to_le_bytes()); // uncompressed size
+        z.extend_from_slice(&nlen.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes()); // extra len
+        z.extend_from_slice(name.as_bytes());
+        z.extend_from_slice(data);
+        // Central directory.
+        let cd_off = z.len() as u32;
+        let mut cd = Vec::new();
+        cd.extend_from_slice(b"PK\x01\x02");
+        cd.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // made/needed, flags, store, time, date
+        cd.extend_from_slice(&crc.to_le_bytes());
+        cd.extend_from_slice(&size.to_le_bytes());
+        cd.extend_from_slice(&size.to_le_bytes());
+        cd.extend_from_slice(&nlen.to_le_bytes());
+        cd.extend_from_slice(&[0u8; 2]); // extra
+        cd.extend_from_slice(&[0u8; 2]); // comment
+        cd.extend_from_slice(&[0u8; 2]); // disk start
+        cd.extend_from_slice(&[0u8; 2]); // internal attrs
+        cd.extend_from_slice(&[0u8; 4]); // external attrs
+        cd.extend_from_slice(&0u32.to_le_bytes()); // local header offset
+        cd.extend_from_slice(name.as_bytes());
+        let cd_size = cd.len() as u32;
+        z.extend_from_slice(&cd);
+        // End of central directory.
+        z.extend_from_slice(b"PK\x05\x06");
+        z.extend_from_slice(&[0u8; 4]); // disk numbers
+        z.extend_from_slice(&1u16.to_le_bytes()); // entries on this disk
+        z.extend_from_slice(&1u16.to_le_bytes()); // total entries
+        z.extend_from_slice(&cd_size.to_le_bytes());
+        z.extend_from_slice(&cd_off.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        z
+    }
+
+    #[test]
+    fn rom_sha_is_container_independent() {
+        // A byte pattern standing in for a ROM image.
+        let rom: Vec<u8> = (0..4096u32).map(|i| (i.wrapping_mul(31) ^ 0xa5) as u8).collect();
+
+        let bare = rom_sha(&rom);
+        let zipped = rom_sha(&stored_zip("game.gb", &rom));
+        let renamed = rom_sha(&stored_zip("other-name.gbc", &rom));
+
+        // Bare vs zipped vs a differently-named zip of the same ROM: one identity.
+        assert_eq!(bare, zipped, "zipping a ROM must not change its rom_sha");
+        assert_eq!(bare, renamed, "the archive's inner filename must not matter");
+        assert_eq!(bare.len(), 16, "rom_sha is 8 bytes hex-encoded");
+
+        // A different ROM must key differently.
+        let other: Vec<u8> = rom.iter().map(|b| b ^ 0xff).collect();
+        assert_ne!(bare, rom_sha(&other));
+    }
+
+    #[test]
+    fn rom_sha_falls_back_for_non_archive() {
+        // Not a PK zip: hashed as-is, and identical to a direct sha256 prefix.
+        let raw = b"\x00\x01\x02\x03 not a zip";
+        let want: String = sha256(raw)[..8].iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(rom_sha(raw), want);
     }
 }
