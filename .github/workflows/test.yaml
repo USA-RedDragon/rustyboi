@@ -1,0 +1,168 @@
+name: Test Suites
+on:
+  push:
+    branches: [claude]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.ref }}'
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Primary regression gate: every suite on Linux x64, one matrix leg per suite
+  # (granular pass/fail + parallelism). ROMs are fetched once and cached.
+  # ---------------------------------------------------------------------------
+  suites-linux:
+    name: 'suite / ${{ matrix.suite }} / ubuntu-24.04 x64'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - acid2
+          - cgb_acid_hell
+          - mealybug
+          - mooneye
+          - mooneye_wilbertpol
+          - age
+          - gbmicrotest
+          - samesuite_apu
+          - samesuite_nonapu
+          - samesuite_sgb
+          - sgb
+          - blargg
+          - blargg_singles
+          - scribbltests
+          - turtle_tests
+          - little_things_gb
+          - bully
+          - strikethrough
+          - rtc3test
+          - mbc3_tester
+          - gambatte
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        run: rustup default stable
+      - name: Cache cargo + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-ubuntu-24.04-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-ubuntu-24.04-
+      - name: Cache ROM set
+        uses: actions/cache@v4
+        with:
+          path: gb-test-roms
+          key: roms-v7.0-gambatte-5a41a68c
+      - name: Fetch ROMs
+        run: ./tools/run-suites.sh setup
+      - name: Build test runner
+        run: ./tools/run-suites.sh build
+      - name: Run ${{ matrix.suite }}
+        run: RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 ./tools/run-suites.sh ${{ matrix.suite }}
+
+  # ---------------------------------------------------------------------------
+  # Cross-OS / cross-arch NATIVE execution: a representative subset of suites
+  # runs for real on arm64 Linux, arm64 macOS, and x64 Windows. A full 21xOS
+  # cross-product would be wasteful; this subset (incl. the heavy gambatte gate)
+  # proves the emulator + runner behave identically across OS and architecture.
+  # ---------------------------------------------------------------------------
+  suites-cross-os:
+    name: 'suite / ${{ matrix.suite }} / ${{ matrix.os }}'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04-arm
+          - macos-latest
+          - windows-latest
+        suite:
+          - acid2
+          - mealybug
+          - mooneye
+          - blargg
+          - gambatte
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        run: rustup default stable
+      - name: Cache cargo + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.os }}-
+      - name: Cache ROM set
+        uses: actions/cache@v4
+        with:
+          path: gb-test-roms
+          key: roms-v7.0-gambatte-5a41a68c-${{ matrix.os }}
+      # Every step forces `shell: bash` so the one script runs unchanged on all
+      # three OSes -- Windows runners default to PowerShell, but ship Git Bash,
+      # and the script is written for bash 3.2 (macOS /bin/bash) portability.
+      - name: Fetch ROMs
+        shell: bash
+        run: ./tools/run-suites.sh setup
+      - name: Build test runner
+        shell: bash
+        run: ./tools/run-suites.sh build
+      - name: Run ${{ matrix.suite }}
+        shell: bash
+        run: RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 ./tools/run-suites.sh ${{ matrix.suite }}
+
+  # ---------------------------------------------------------------------------
+  # Cross-compile (build-only) coverage for additional architectures, using the
+  # maintainer's rust-cross image (ghcr.io/usa-reddragon/rust-cross). This
+  # confirms rustyboi keeps compiling for the musl targets whose std + GCC
+  # cross-linker the image actually ships (aarch64, armv7, x86_64); it does not
+  # run the suites (that is covered natively by the jobs above). The image sets
+  # no CARGO_TARGET_<t>_LINKER for these, so each leg points cargo at the
+  # matching musl-gcc on PATH (/opt/cross/bin) -- without it the host x86_64 ld
+  # is used and linking fails.
+  cross-build:
+    name: 'cross-build / ${{ matrix.target }}'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/usa-reddragon/rust-cross:1.94.1
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-musl
+            linker: aarch64-linux-musl-gcc
+          - target: armv7-unknown-linux-musleabihf
+            linker: arm-linux-musleabihf-gcc
+          - target: x86_64-unknown-linux-musl
+            linker: x86_64-linux-musl-gcc
+    steps:
+      - uses: actions/checkout@v5
+      - name: Cache cargo + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cross-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cross-${{ matrix.target }}-
+      - name: Build test runner for ${{ matrix.target }}
+        env:
+          RUSTUP_TOOLCHAIN: '1.94.1'
+        run: |
+          triple_env="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
+          export "CARGO_TARGET_${triple_env}_LINKER=${{ matrix.linker }}"
+          cargo build --release -p rustyboi-test-runner --target ${{ matrix.target }}
