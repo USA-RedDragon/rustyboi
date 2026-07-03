@@ -452,7 +452,8 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         Oracle::Serial => return evaluate_serial(&mut gb, options.frames),
         Oracle::BlarggMem => return evaluate_blargg_mem(&mut gb, options.frames),
         Oracle::MemValue { addr, expected } => {
-            return evaluate_mem_value(&mut gb, options.frames, *addr, *expected);
+            let frames = case.frames.unwrap_or(options.frames);
+            return evaluate_mem_value(&mut gb, frames, *addr, *expected);
         }
         Oracle::MooneyeFib => return evaluate_mooneye(&mut gb, 0x40, options),
         Oracle::MooneyeFibEd => return evaluate_mooneye(&mut gb, 0xED, options),

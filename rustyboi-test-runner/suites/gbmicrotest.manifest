@@ -149,7 +149,7 @@ int_vblank1_nops|dmg|memauto|gb-test-roms/gbmicrotest/int_vblank1_nops.gb
 int_vblank2_halt|dmg|memauto|gb-test-roms/gbmicrotest/int_vblank2_halt.gb
 int_vblank2_incs|dmg|memauto|gb-test-roms/gbmicrotest/int_vblank2_incs.gb
 int_vblank2_nops|dmg|memauto|gb-test-roms/gbmicrotest/int_vblank2_nops.gb
-is_if_set_during_ime0|dmg|memauto|gb-test-roms/gbmicrotest/is_if_set_during_ime0.gb
+is_if_set_during_ime0|dmg|memauto|gb-test-roms/gbmicrotest/is_if_set_during_ime0.gb|frames=600
 lcdon_halt_to_vblank_int_a|dmg|memauto|gb-test-roms/gbmicrotest/lcdon_halt_to_vblank_int_a.gb
 lcdon_halt_to_vblank_int_b|dmg|memauto|gb-test-roms/gbmicrotest/lcdon_halt_to_vblank_int_b.gb
 lcdon_nops_to_vblank_int_a|dmg|memauto|gb-test-roms/gbmicrotest/lcdon_nops_to_vblank_int_a.gb
