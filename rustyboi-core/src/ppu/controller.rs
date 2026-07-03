@@ -150,10 +150,22 @@ const WG_TRANSITION_DELAY: u64 = 4;
 // reaches the fetch address lines (vs DMG).
 const CGBWG_WIN_RISE: u64 = 6;
 const CGBWG_WIN_FALL: u64 = 7;
+// BG-path LCDC.3/4 read visibility, measured from the raw write cc, at the
+// SameBoy-exact fetch dot (bg_hw_read_dot_ex scy_mode): a bit becomes visible
+// `rise`/`fall` dots after the write commit. The fetch dot already carries its
+// own +2k substep offset, so the fall thresholds no longer need a per-substep
+// split (the old 4/3/1 was an artifact of the 2-dots-per-sprite-late grid).
 const CGBWG_BG_RISE: u64 = 4;
 const CGBWG_BG_FALL: u64 = 4;
 const CGBWG_BG_FALL_TDL: u64 = 3;
 const CGBWG_BG_FALL_TDH: u64 = 1;
+// Map-select (LCDC.3) read visibility at the SameBoy-exact fetch dot
+// (bg_hw_read_dot_ex scy_mode): a rise/fall is visible 2 dots after the write
+// commit. Separate from the tile-data-select (LCDC.4) grid, which keeps the
+// calibrated `h`-dot thresholds above (its per-byte / tile-index-as-data
+// coincidence is tuned to that grid).
+const CGBWG_BG_MAP_RISE: u64 = 2;
+const CGBWG_BG_MAP_FALL: u64 = 2;
 const CGBWG_SCY_ADD: u64 = 1;
 const CGBWG_QUIRK_WIN: u64 = 7;
 const CGBWG_QUIRK_BG: u64 = 4;
@@ -2502,14 +2514,28 @@ impl Ppu {
     // the BG grid (the tile_sel_change bands pin TN thru w+3 / TDL thru w+2 /
     // TDH thru w+0 while the rise is a uniform w+4; the window grid is
     // k-uniform — see wg_apply).
-    fn bg_wg_resolve_cgb(&self, h: u64, k: u8) -> (u8, bool) {
-
+    // Resolve the BG-path LCDC journal, splitting the two bits by their fetch
+    // dot: the tile-data-select bit (LCDC.4) at the `h` grid its per-byte /
+    // tile-index-as-data coincidence is calibrated against, and the map-select
+    // bit (LCDC.3) at the SameBoy-exact fetch dot `h_scy` (the true fetch dot,
+    // which places a mid-line map pulse on the tile SameBoy fetches during the
+    // pulse rather than the tile before it — the two-object fetch grid was 2
+    // dots per sprite too late). `h` and `h_scy` coincide when no sprite stalls
+    // the tile, so single-object lines are unaffected.
+    fn bg_wg_resolve_cgb(&self, h: u64, h_scy: u64, k: u8) -> (u8, bool) {
         let fall = match k {
             0 => CGBWG_BG_FALL,
             1 => CGBWG_BG_FALL_TDL,
             _ => CGBWG_BG_FALL_TDH,
         };
-        self.cgb_wg_resolve(h, CGBWG_BG_RISE, fall, CGBWG_QUIRK_BG, k)
+        // Tile-data-select bit (LCDC.4) + its tile-index-as-data quirk: `h` grid.
+        let (bits_td, quirk) = self.cgb_wg_resolve(h, CGBWG_BG_RISE, fall, CGBWG_QUIRK_BG, k);
+        // Map-select bit (LCDC.3): true fetch dot, +2 rise/fall.
+        let (bits_map, _) =
+            self.cgb_wg_resolve(h_scy, CGBWG_BG_MAP_RISE, CGBWG_BG_MAP_FALL, CGBWG_QUIRK_BG, k);
+        let map_bit = LCDCFlags::BGTileMapDisplaySelect as u8;
+        let bits = (bits_td & !map_bit) | (bits_map & map_bit);
+        (bits, quirk)
     }
 
     // Resolve the SCY journal at hardware dot `h`: the value whose write
@@ -2552,7 +2578,8 @@ impl Ppu {
             | (LCDCFlags::BGWindowTileDataSelect as u8);
         if !self.wg_hist.is_empty() {
             if self.wg_cgb {
-                let (bits, quirk) = self.bg_wg_resolve_cgb(h, k);
+                let h_scy = self.bg_hw_read_dot_ex(n, k, ly, self.wg_cgb).unwrap_or(h);
+                let (bits, quirk) = self.bg_wg_resolve_cgb(h, h_scy, k);
                 fls.lcdc = (fls.lcdc & !BG_BITS) | (bits & BG_BITS);
                 fls.or_lcdc = None;
                 if k >= 1 {
@@ -2603,14 +2630,16 @@ impl Ppu {
         let Some(h0) = self.bg_hw_read_dot(n, 0, ly) else {
             return;
         };
+        // CGB resolves the map bit at the SameBoy-exact fetch dot and the
+        // tile-data bit at the calibrated `h` (see bg_wg_resolve_cgb); DMG uses `h`.
+        let h0_scy = self.bg_hw_read_dot_ex(n, 0, ly, self.wg_cgb).unwrap_or(h0);
         let bits0 = if self.wg_hist.is_empty() {
             self.lcdc
         } else if self.wg_cgb {
-            self.bg_wg_resolve_cgb(h0, 0).0
+            self.bg_wg_resolve_cgb(h0, h0_scy, 0).0
         } else {
             self.bg_wg_resolve(h0)
         };
-        let h0_scy = self.bg_hw_read_dot_ex(n, 0, ly, self.wg_cgb).unwrap_or(h0);
         let scy0 = self.bg_scy_resolve(h0_scy).unwrap_or(live_scy);
         let row_off = ((ly.wrapping_add(scy0) as u16 / 8) % 32) * 32 + col;
         let base0: u16 = if bits0 & map_bit != 0 { 0x9C00 } else { 0x9800 };
@@ -2626,14 +2655,14 @@ impl Ppu {
             let Some(hk) = self.bg_hw_read_dot(n, k, ly) else {
                 return;
             };
+            let hk_scy = self.bg_hw_read_dot_ex(n, k, ly, self.wg_cgb).unwrap_or(hk);
             let (bitsk, quirkk) = if self.wg_hist.is_empty() {
                 (self.lcdc, false)
             } else if self.wg_cgb {
-                self.bg_wg_resolve_cgb(hk, k)
+                self.bg_wg_resolve_cgb(hk, hk_scy, k)
             } else {
                 (self.bg_wg_resolve(hk), false)
             };
-            let hk_scy = self.bg_hw_read_dot_ex(n, k, ly, self.wg_cgb).unwrap_or(hk);
             let scyk = self.bg_scy_resolve(hk_scy).unwrap_or(live_scy);
             let plane = (k - 1) as u16;
             let line = ly.wrapping_add(scyk) % 8;
