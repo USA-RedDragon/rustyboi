@@ -94,9 +94,9 @@ threshold() {
         acid2)              echo "3 -" ;;
         cgb_acid_hell)      echo "1 -" ;;
         mealybug)           echo "39 -" ;;
-        mooneye)            echo "188 -" ;;
+        mooneye)            echo "189 -" ;;
         mooneye_wilbertpol) echo "188 -" ;;
-        age)                echo "41 -" ;;
+        age)                echo "42 -" ;;
         gbmicrotest)        echo "481 -" ;;
         samesuite_apu)      echo "70 -" ;;
         samesuite_nonapu)   echo "6 -" ;;
