@@ -1638,7 +1638,7 @@ impl Ppu {
     /// LY=153 (DMG), NOT at a fresh LY=0 OAM search. Mirror that here so the very
     /// first instruction's LY/STAT reads (display_startstate tests) match real
     /// hardware. Must run after LCDC=0x91 and `sync_lcdc_from_mmio`.
-    pub fn set_post_bios_state(&mut self, mmio: &mut mmio::Mmio) {
+    pub fn set_post_bios_state(&mut self, mmio: &mut mmio::Mmio, dmg0: bool) {
         // LCD must be on for this to apply (skip_bios writes LCDC=0x91 first).
         if self.lcdc & (LCDCFlags::DisplayEnable as u8) == 0 {
             return;
@@ -1647,8 +1647,20 @@ impl Ppu {
         // Gambatte initstate.cpp:471: videoCycles = cgb ? 144*456+164+agb*4 :
         // 153*456+396. AGB's post-boot video phase leads CGB's by 4 dots.
         let agb_off = if mmio.is_agb() { 4 } else { 0 };
+        // The DMG0 boot ROM hands off ~9 scanlines earlier in the frame than
+        // DMG-ABC/MGB: mooneye boot_hwio-dmg0 reads FF44/FF41 at fixed offsets
+        // into its unrolled compare loop (FF41 at ~4528 T, FF44 at ~4712 T past
+        // the 0x150 handoff) and asserts LY=0x01 with STAT mode 3, whereas
+        // boot_hwio-dmgABCmgb asserts LY=0x0A / mode 0 at the same offsets. Both
+        // hand off in VBlank; the live PPU then advances into the next frame so
+        // the loop samples line 1 (dmg0) vs line 10 (dmgABC). The DMG0 videoCycles
+        // that lands the FF41 read mid-mode-3 on line 1 and the FF44 read still on
+        // line 1 is 145*456+198; the wide (~170-dot) window around it makes the
+        // exact CPU read sub-phase irrelevant. Non-DMG0 keeps Gambatte's 153*456+396.
         let video_cycles: u32 = if cgb {
             144 * stat_irq::LCD_CYCLES_PER_LINE + 164 + agb_off
+        } else if dmg0 {
+            145 * stat_irq::LCD_CYCLES_PER_LINE + 198
         } else {
             153 * stat_irq::LCD_CYCLES_PER_LINE + 396
         };
