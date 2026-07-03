@@ -94,7 +94,7 @@ pub struct Cartridge {
     // Open file handle for save file (for battery-backed cartridges)
     #[serde(skip)]
     save_file: Option<File>,
-    
+
     // MBC1 state
     ram_enabled: bool,
     rom_bank_low: u8,    // 5 bits (0x01-0x1F)
@@ -105,22 +105,22 @@ pub struct Cartridge {
     // from the Nintendo-logo-per-segment header layout (see is_mbc1_multicart).
     #[serde(default)]
     mbc1_multicart: bool,
-    
+
     // MBC2 state (MBC2 has built-in 512x4 RAM)
     mbc2_ram: Vec<u8>, // MBC2 built-in RAM (512 x 4 bits, stored as full bytes)
-    
+
     // MBC3 state
     mbc3_ram_bank: u8,   // 0x00-0x03 for RAM, 0x08-0x0C for RTC
     mbc3_rtc_latch: u8,  // RTC latch register
     mbc3_rtc_latched: bool, // Whether RTC registers are latched
-    
+
     // MBC3 RTC registers
     rtc_seconds: u8,     // 0-59
-    rtc_minutes: u8,     // 0-59  
+    rtc_minutes: u8,     // 0-59
     rtc_hours: u8,       // 0-23
     rtc_days_low: u8,    // Lower 8 bits of day counter
     rtc_days_high: u8,   // Upper 1 bit of day counter + halt flag + day carry
-    
+
     // MBC3 RTC latched values
     rtc_seconds_latched: u8,
     rtc_minutes_latched: u8,
@@ -140,7 +140,7 @@ pub struct Cartridge {
     mbc5_rom_bank_low: u8,   // Lower 8 bits of ROM bank (0x2000-0x2FFF)
     mbc5_rom_bank_high: u8,  // Upper 1 bit of ROM bank (0x3000-0x3FFF) - only bit 0 used
     mbc5_ram_bank: u8,       // RAM bank select (0x4000-0x5FFF) - 4 bits used (0x00-0x0F)
-    
+
     // CGB support information
     cgb_support: CgbSupport, // CGB compatibility from cartridge header
 
@@ -208,7 +208,7 @@ impl Cartridge {
         if data.len() <= CGB_FLAG_OFFSET {
             return CgbSupport::None;
         }
-        
+
         match data[CGB_FLAG_OFFSET] {
             CGB_COMPATIBLE => CgbSupport::Compatible,
             CGB_ONLY => CgbSupport::Only,
@@ -273,15 +273,15 @@ impl Cartridge {
     fn extract_rom_from_zip(path: &str) -> Result<Vec<u8>, io::Error> {
         let file = File::open(path)?;
         let mut archive = ZipArchive::new(file)?;
-        
+
         // Common Game Boy ROM extensions
         let rom_extensions = [".gb", ".gbc", ".sgb"];
-        
+
         // First, try to find a file with a ROM extension
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
             let name = file.name().to_lowercase();
-            
+
             if rom_extensions.iter().any(|ext| name.ends_with(ext)) {
                 let mut data = Vec::with_capacity(file.size() as usize);
                 file.read_to_end(&mut data)?;
@@ -289,11 +289,11 @@ impl Cartridge {
                 return Ok(data);
             }
         }
-        
+
         // If no ROM extension found, look for the largest file (common case)
         let mut largest_file_index = 0;
         let mut largest_size = 0;
-        
+
         for i in 0..archive.len() {
             let file = archive.by_index(i)?;
             if !file.is_dir() && file.size() > largest_size {
@@ -301,7 +301,7 @@ impl Cartridge {
                 largest_file_index = i;
             }
         }
-        
+
         if largest_size > 0 {
             let mut file = archive.by_index(largest_file_index)?;
             let mut data = Vec::with_capacity(file.size() as usize);
@@ -309,7 +309,7 @@ impl Cartridge {
             println!("Using largest file in zip as ROM: {} ({} bytes)", file.name(), data.len());
             return Ok(data);
         }
-        
+
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "No suitable ROM file found in zip archive"
@@ -331,16 +331,16 @@ impl Cartridge {
         } else {
             fs::read(path)?
         };
-        
+
         if data.len() < 0x0150 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "ROM too small"));
         }
-        
+
         // Read cartridge header information
         let cartridge_type = data[CARTRIDGE_TYPE_OFFSET];
         let rom_size_code = data[ROM_SIZE_OFFSET];
         let ram_size_code = data[RAM_SIZE_OFFSET];
-        
+
         // Calculate number of ROM banks (header size, widened to the real file).
         let rom_banks = Self::compute_rom_banks(rom_size_code, data.len())?;
 
@@ -365,10 +365,10 @@ impl Cartridge {
             padded_rom.resize(expected_rom_size, 0xFF);
             padded_rom
         };
-        
+
         // Initialize RAM data
         let ram_data = vec![0xFF; ram_banks * 0x2000]; // 8KB per bank
-        
+
         // Detect CGB support
         let cgb_support = Self::detect_cgb_support(&data);
 
@@ -414,36 +414,36 @@ impl Cartridge {
 
         // Try to load existing save file or create new one (only for battery-backed RAM)
         cartridge.load_or_create_save_file()?;
-        
+
         Ok(cartridge)
     }
 
     /// Extract ROM data from zip bytes.
     fn extract_rom_from_zip_bytes(data: &[u8]) -> Result<Vec<u8>, io::Error> {
         use std::io::Cursor;
-        
+
         let cursor = Cursor::new(data);
         let mut archive = ZipArchive::new(cursor)?;
-        
+
         // Common Game Boy ROM extensions
         let rom_extensions = [".gb", ".gbc", ".sgb"];
-        
+
         // First, try to find a file with a ROM extension
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
             let name = file.name().to_lowercase();
-            
+
             if rom_extensions.iter().any(|ext| name.ends_with(ext)) {
                 let mut rom_data = Vec::with_capacity(file.size() as usize);
                 file.read_to_end(&mut rom_data)?;
                 return Ok(rom_data);
             }
         }
-        
+
         // If no ROM extension found, look for the largest file
         let mut largest_file_index = 0;
         let mut largest_size = 0;
-        
+
         for i in 0..archive.len() {
             let file = archive.by_index(i)?;
             if !file.is_dir() && file.size() > largest_size {
@@ -451,14 +451,14 @@ impl Cartridge {
                 largest_file_index = i;
             }
         }
-        
+
         if largest_size > 0 {
             let mut file = archive.by_index(largest_file_index)?;
             let mut rom_data = Vec::with_capacity(file.size() as usize);
             file.read_to_end(&mut rom_data)?;
             return Ok(rom_data);
         }
-        
+
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "No suitable ROM file found in zip archive"
@@ -476,12 +476,12 @@ impl Cartridge {
         if actual_data.len() < 0x0150 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "ROM too small"));
         }
-        
+
         // Read cartridge header information
         let cartridge_type = actual_data[CARTRIDGE_TYPE_OFFSET];
         let rom_size_code = actual_data[ROM_SIZE_OFFSET];
         let ram_size_code = actual_data[RAM_SIZE_OFFSET];
-        
+
         // Calculate number of ROM banks (header size, widened to the real file).
         let rom_banks = Self::compute_rom_banks(rom_size_code, actual_data.len())?;
 
@@ -506,10 +506,10 @@ impl Cartridge {
             padded_rom.resize(expected_rom_size, 0xFF);
             padded_rom
         };
-        
+
         // Initialize RAM data
         let ram_data = vec![0xFF; ram_banks * 0x2000]; // 8KB per bank
-        
+
         // Detect CGB support
         let cgb_support = Self::detect_cgb_support(&actual_data);
 
@@ -555,10 +555,10 @@ impl Cartridge {
 
         // In-memory loading intentionally skips save files so test runners and
         // WASM callers do not create sidecar files.
-        
+
         Ok(cartridge)
     }
-    
+
     fn get_cartridge_type(&self) -> CartridgeType {
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
@@ -580,7 +580,7 @@ impl Cartridge {
             _ => CartridgeType::NoMBC,
         }
     }
-    
+
     fn get_rom_bank(&self) -> usize {
         match self.get_cartridge_type() {
             CartridgeType::MBC1 { .. } => {
@@ -621,7 +621,7 @@ impl Cartridge {
             CartridgeType::NoMBC => 1, // Simple cartridge always uses bank 1 for upper area
         }
     }
-    
+
     fn get_ram_bank(&self) -> usize {
         match self.get_cartridge_type() {
             CartridgeType::MBC1 { .. } => {
@@ -677,7 +677,7 @@ impl Cartridge {
             save_path
         })
     }
-    
+
     /// Load save file data into RAM if it exists, or create empty save file (only for battery-backed RAM)
     fn load_or_create_save_file(&mut self) -> Result<(), io::Error> {
         if let Some(save_path) = self.get_save_file_path() {
@@ -867,13 +867,13 @@ impl Cartridge {
         self.save_file = Some(file);
         Ok(())
     }
-    
+
     /// Write a byte to both RAM and save file simultaneously (if battery-backed)
     fn write_ram_byte(&mut self, offset: usize, value: u8) -> Result<(), io::Error> {
         if !self.ram_data.is_empty() {
             // Write to RAM buffer (offset is already wrapped by caller)
             self.ram_data[offset] = value;
-            
+
             // Also write to save file if we have one open
             if let Some(ref mut file) = self.save_file {
                 file.seek(SeekFrom::Start(offset as u64))?;
@@ -883,13 +883,13 @@ impl Cartridge {
         }
         Ok(())
     }
-    
+
     /// Write a byte to MBC2 RAM and save file simultaneously (if battery-backed)
     fn write_mbc2_ram_byte(&mut self, offset: usize, value: u8) -> Result<(), io::Error> {
         if !self.mbc2_ram.is_empty() {
             // Write to MBC2 RAM buffer (offset is already wrapped by caller)
             self.mbc2_ram[offset] = value & 0x0F; // Only 4 bits valid
-            
+
             // Also write to save file if we have one open
             if let Some(ref mut file) = self.save_file {
                 file.seek(SeekFrom::Start(offset as u64))?;
@@ -925,7 +925,7 @@ impl Cartridge {
     pub fn requires_cgb(&self) -> bool {
         matches!(self.cgb_support, CgbSupport::Only)
     }
-    
+
     /// Read from MBC3 RTC registers
     fn read_rtc_register(&self) -> u8 {
         // Reads always return the CPU-visible (latched) shadow register. On real
@@ -943,7 +943,7 @@ impl Cartridge {
             _ => 0xFF,
         }
     }
-    
+
     /// Write to MBC3 RTC registers. A write updates the INTERNAL free-running
     /// counter (`rtc_*`, advanced by the cycle-derived tick) only — it does NOT
     /// touch the CPU-visible latched shadow (`rtc_*_latched`, the read path).
@@ -1318,7 +1318,7 @@ impl memory::Addressable for Cartridge {
                             // 0x2000-0x2FFF: Lower 8 bits of ROM bank
                             self.mbc5_rom_bank_low = value; // MBC5 allows bank 0
                         } else {
-                            // 0x3000-0x3FFF: Upper 1 bit of ROM bank  
+                            // 0x3000-0x3FFF: Upper 1 bit of ROM bank
                             self.mbc5_rom_bank_high = value & 0x01; // Only bit 0 is used
                         }
                     }

@@ -80,7 +80,7 @@ pub struct Fetcher {
     tile_index: u8,
     tile_attributes: u8, // CGB tile attributes from VRAM bank 1
     pixel_buffer: [u8; 8],
-    
+
     // Window support
     fetching_window: bool,
     window_x_start: u8,
@@ -214,7 +214,7 @@ impl Fetcher {
     // Calculate the correct tile map base address based on LCDC.6 (WindowTileMapDisplaySelect)
     fn get_window_tile_map_base(&self, lcdc: u8) -> u16 {
         let window_tile_map_select = (lcdc & (ppu::LCDCFlags::WindowTileMapDisplaySelect as u8)) != 0;
-        
+
         if window_tile_map_select {
             TILE_MAP_9C00_BASE // LCDC.6 = 1: Use $9C00-$9FFF
         } else {
@@ -225,7 +225,7 @@ impl Fetcher {
     // Calculate the correct tile map base address based on LCDC.3 (BGTileMapDisplaySelect)
     fn get_tile_map_base(&self, lcdc: u8) -> u16 {
         let bg_tile_map_select = (lcdc & (ppu::LCDCFlags::BGTileMapDisplaySelect as u8)) != 0;
-        
+
         if bg_tile_map_select {
             TILE_MAP_9C00_BASE // LCDC.3 = 1: Use $9C00-$9FFF
         } else {
@@ -236,7 +236,7 @@ impl Fetcher {
     // Calculate the correct tile data address based on LCDC.4 (BGWindowTileDataSelect)
     pub(crate) fn get_tile_data_address(&self, tile_id: u8, tile_line: u8, lcdc: u8) -> u16 {
         let bg_window_tile_data_select = (lcdc & (ppu::LCDCFlags::BGWindowTileDataSelect as u8)) != 0;
-        
+
         if bg_window_tile_data_select {
             // $8000 method: unsigned addressing
             // Tiles 0-127 are in block 0 ($8000-$87FF)
@@ -362,7 +362,7 @@ impl Fetcher {
                 } else {
                     0 // No attributes in DMG mode
                 };
-                
+
                 self.state = State::TileDataLow;
                 Some(FetcherDebugEvent {
                     kind: FetcherDebugEventKind::TileNumber,
@@ -554,7 +554,7 @@ impl Fetcher {
                 (self.pixel_buffer[i] & !2) | (((high_byte >> (7 - i)) & 0x01) << 1);
         }
     }
-    
+
     pub fn is_fetching_window(&self) -> bool {
         self.fetching_window
     }

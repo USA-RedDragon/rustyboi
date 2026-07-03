@@ -10,13 +10,13 @@ impl Disassembler {
         let opcode = read_fn(addr);
         Self::disassemble_opcode(opcode, addr, |offset| read_fn(addr + offset))
     }
-    
+
     /// Internal helper to disassemble an opcode using a read function
     fn disassemble_opcode<F>(opcode: u8, pc: u16, mut read_fn: F) -> (String, u16)
     where
         F: FnMut(u16) -> u8,
     {
-        
+
         match opcode {
             0x00 => ("NOP".to_string(), 1),
             0x01 => {
@@ -151,7 +151,7 @@ impl Disassembler {
                 (format!("LD A, ${:02X}", imm), 2)
             },
             0x3F => ("CCF".to_string(), 1),
-            
+
             // LD r,r instructions (0x40-0x7F except 0x76)
             0x40 => ("LD B, B".to_string(), 1),
             0x41 => ("LD B, C".to_string(), 1),
@@ -217,7 +217,7 @@ impl Disassembler {
             0x7D => ("LD A, L".to_string(), 1),
             0x7E => ("LD A, (HL)".to_string(), 1),
             0x7F => ("LD A, A".to_string(), 1),
-            
+
             // ALU operations
             0x80 => ("ADD A, B".to_string(), 1),
             0x81 => ("ADD A, C".to_string(), 1),
@@ -283,7 +283,7 @@ impl Disassembler {
             0xBD => ("CP L".to_string(), 1),
             0xBE => ("CP (HL)".to_string(), 1),
             0xBF => ("CP A".to_string(), 1),
-            
+
             // Conditional returns and jumps
             0xC0 => ("RET NZ".to_string(), 1),
             0xC1 => ("POP BC".to_string(), 1),
@@ -452,7 +452,7 @@ impl Disassembler {
             0xFF => ("RST 38H".to_string(), 1),
         }
     }
-    
+
     /// Disassemble CB-prefixed instructions
     fn disassemble_cb_instruction(opcode: u8) -> String {
         match opcode {
@@ -520,7 +520,7 @@ impl Disassembler {
             0x3D => "SRL L".to_string(),
             0x3E => "SRL (HL)".to_string(),
             0x3F => "SRL A".to_string(),
-            
+
             // BIT instructions (0x40-0x7F)
             0x40..=0x47 => format!("BIT 0, {}", Self::get_register_name(opcode & 0x07)),
             0x48..=0x4F => format!("BIT 1, {}", Self::get_register_name(opcode & 0x07)),
@@ -530,7 +530,7 @@ impl Disassembler {
             0x68..=0x6F => format!("BIT 5, {}", Self::get_register_name(opcode & 0x07)),
             0x70..=0x77 => format!("BIT 6, {}", Self::get_register_name(opcode & 0x07)),
             0x78..=0x7F => format!("BIT 7, {}", Self::get_register_name(opcode & 0x07)),
-            
+
             // RES instructions (0x80-0xBF)
             0x80..=0x87 => format!("RES 0, {}", Self::get_register_name(opcode & 0x07)),
             0x88..=0x8F => format!("RES 1, {}", Self::get_register_name(opcode & 0x07)),
@@ -540,7 +540,7 @@ impl Disassembler {
             0xA8..=0xAF => format!("RES 5, {}", Self::get_register_name(opcode & 0x07)),
             0xB0..=0xB7 => format!("RES 6, {}", Self::get_register_name(opcode & 0x07)),
             0xB8..=0xBF => format!("RES 7, {}", Self::get_register_name(opcode & 0x07)),
-            
+
             // SET instructions (0xC0-0xFF)
             0xC0..=0xC7 => format!("SET 0, {}", Self::get_register_name(opcode & 0x07)),
             0xC8..=0xCF => format!("SET 1, {}", Self::get_register_name(opcode & 0x07)),
@@ -552,7 +552,7 @@ impl Disassembler {
             0xF8..=0xFF => format!("SET 7, {}", Self::get_register_name(opcode & 0x07)),
         }
     }
-    
+
     /// Helper function to get register name for CB instructions
     fn get_register_name(reg_index: u8) -> &'static str {
         match reg_index {

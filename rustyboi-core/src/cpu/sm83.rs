@@ -37,9 +37,9 @@ impl Default for SM83 {
 
 impl SM83 {
     pub fn new() -> Self {
-        SM83 { 
-            registers: registers::Registers::new(), 
-            halted: false, 
+        SM83 {
+            registers: registers::Registers::new(),
+            halted: false,
             stopped: false,
             ime_enable_delay: 0,
             stop_unhalt_cycles: 0,
@@ -84,7 +84,7 @@ impl SM83 {
 
         // Check for pending interrupts
         let mut pending_interrupt = self.get_pending_interrupt(mmio);
-        
+
         // If halted, check if we should exit halt state
         let mut just_unhalted = false;
         if self.halted {
