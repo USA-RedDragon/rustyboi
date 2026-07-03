@@ -524,6 +524,11 @@ pub fn halt(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
         // pc and mark it prefetched: the +4 charge is deferred to consumption.
         cpu.opcode = mmio.peek(cpu.registers.pc);
         cpu.prefetched = true;
+        // Charge the opcode-fetch M-cycle at consumption (Gambatte cpu.cpp:578
+        // `cc() += 4` on the prefetched branch): unlike the normal prefetch, this
+        // byte was peeked with no tick, so the doubled instruction's operand read
+        // must resolve one M-cycle later (age halt-prefetch).
+        cpu.halt_bug_prefetch = true;
         // Next-M-cycle dma() scheduling for the IME-off HALT-bug resume: an HDMA
         // block whose m0-edge falls during the doubled resume instruction runs
         // its `dma()` (in Gambatte) at the instruction boundary AFTER that
