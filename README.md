@@ -17,13 +17,13 @@ Passing cases per suite, refreshed automatically on every pull request by the
 | mealybug | 38 | 51 |
 | mooneye | 188 | 192 |
 | mooneye_wilbertpol | 188 | 193 |
-| age | 42 | 59 |
+| age | 41 | 59 |
 | gbmicrotest | 481 | 513 |
 | samesuite_apu | 70 | 70 |
 | samesuite_nonapu | 6 | 6 |
 | samesuite_sgb | 2 | 2 |
 | sgb | 1 | 1 |
-| blargg | 14 | 15 |
+| blargg | 15 | 15 |
 | blargg_singles | 41 | 41 |
 | scribbltests | 7 | 10 |
 | turtle_tests | 4 | 4 |
