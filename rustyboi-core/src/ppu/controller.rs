@@ -2386,7 +2386,20 @@ impl Ppu {
                 applied |= falling;
             }
             bits = (bits & !applied) | (new & applied);
-            if k >= 1 && (falling & tds) != 0 && h == w + quirk_add {
+            // The tile-index-as-data quirk fires when a falling LCDC.4 write
+            // commits on the exact dot a tile-data fetch samples the tds bit.
+            // SameBoy asserts `tile_sel_glitch` only when that coincidence lands
+            // on a data-fetch T1 read that the tile still consumes; once the
+            // fetcher has passed the low-plane read the write only splits the
+            // NEXT tile (a +2-dot sprite stall pushes the coincidence onto the
+            // high-plane / push slot). On the BG grid the coincidence is
+            // consumed only by the low-plane read (k==1) — a k==2-only hit is
+            // the stalled-past-the-tile case SameBoy does not glitch
+            // (m3_lcdc_tile_sel_change2: LY32-39 glitch vs LY48-55 do not, the
+            // sole difference being the sprite-X that shifts the coincidence
+            // from the low read to the push slot). Window keeps the k>=1 rule.
+            let quirk_k = if quirk_add == CGBWG_QUIRK_BG { k == 1 } else { k >= 1 };
+            if quirk_k && (falling & tds) != 0 && h == w + quirk_add {
                 quirk = true;
             }
         }
