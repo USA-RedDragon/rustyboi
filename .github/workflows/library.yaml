@@ -30,10 +30,28 @@ concurrency:
 jobs:
   sweep:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       ROMS_URL: ${{ secrets.ROMS_URL }}
       ROMS_PASSWORD: ${{ secrets.ROMS_PASSWORD }}
+      # Media fan-out knob. The regression GATE (manifest -> compare) is
+      # UNAFFECTED by this — it is always one canonical row per ROM, produced by
+      # a media-free code path. This only controls the gallery media.
+      #
+      # The dominant cost is the hardware MATRIX: each extra model is a full
+      # extra emulation pass per ROM (measured ~2.4s/ROM @ 3000 frames). Adding
+      # HEVC+AAC video on top of a pass is only ~+0.65s/ROM (+27%). Sizes @ 1148
+      # ROMs: posters ~450 MB per hardware model; videos ~0.7 GB per model.
+      #
+      # Default = CGB + DMG posters (the two most informative tabs — DMG renders
+      # the "cannot run on this system" panel for CGB-only carts — at ~3x the old
+      # single-hardware sweep: 1 canonical manifest pass + 2 media passes). To
+      # ship the full DMG/CGB/SGB/AGB matrix WITH videos, set
+      # SWEEP_MEDIA_ARGS='--hardware dmg,cgb,sgb,agb' (drop --no-videos); confirm
+      # the job stays under timeout-minutes and the artifact under your limit
+      # first (full treatment ~= 5x runtime, ~4.5 GB artifact). To run only the
+      # gate with no gallery, use '--no-screens'.
+      SWEEP_MEDIA_ARGS: "--hardware cgb,dmg --no-videos"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Check for ROMS_URL secret
@@ -45,6 +63,10 @@ jobs:
           else
             echo "ROMS_URL secret not set; skipping library sweep"
           fi
+      - name: Install ffmpeg
+        if: steps.gate.outputs.have == '1'
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Roomy docker disk
         if: steps.gate.outputs.have == '1'
         uses: ./.github/actions/free-disk-space
@@ -78,7 +100,7 @@ jobs:
       - name: Run library sweep
         if: steps.gate.outputs.have == '1'
         shell: bash
-        run: ./target/release/sweep run --roms "$LIB/GB" "$LIB/GBC" --out sweep-out
+        run: ./target/release/sweep run --roms "$LIB/GB" "$LIB/GBC" --out sweep-out $SWEEP_MEDIA_ARGS
       - name: Compare against baseline
         if: steps.gate.outputs.have == '1'
         shell: bash
@@ -103,6 +125,7 @@ jobs:
           path: |
             sweep-out/gallery.html
             sweep-out/screens
+            sweep-out/videos
             sweep-out/report.md
             sweep-out/manifest.jsonl
           retention-days: 30
