@@ -1,0 +1,8 @@
+# cpp MBC3/RTC edge-case screen tests (from GBEmulatorShootout; not in the c-sp
+# set). Graded with the shootout's lenient screenshot rule (png_shootout, diff
+# <= 50) against the shootout reference PNGs -- reference-emulator oracles, held
+# to the shootout tolerance rather than strict png. frames=390 = runtime 0.5s.
+# (cpp/sgb-ext-test is the SGB packet test and lives in sgb.manifest, not here.)
+cpp/rtc-invalid-banks-test|dmg|png_shootout|gb-test-roms/cpp/rtc-invalid-banks-test.gb|gb-test-roms/cpp/rtc-invalid-banks-test.png|frames=390
+cpp/latch-rtc-test|dmg|png_shootout|gb-test-roms/cpp/latch-rtc-test.gb|gb-test-roms/cpp/latch-rtc-test.png|frames=390
+cpp/ramg-mbc3-test|dmg|png_shootout|gb-test-roms/cpp/ramg-mbc3-test.gb|gb-test-roms/cpp/ramg-mbc3-test.png|frames=390

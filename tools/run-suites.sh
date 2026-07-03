@@ -84,7 +84,8 @@ JOBS="$RB_JOBS"
 
 # --- threshold table ---------------------------------------------------------
 # threshold <suite> -> "<min-passed> <frames-override-or-'-'>", or "" if unknown.
-# Measured on campaign-ci HEAD (c-sp v7.0 + gambatte-core oracles). `>=` gate.
+# Floors auto-ratchet up to the measured counts on every report-update (the
+# pre-commit hook); hand-edits are only needed to LOWER a floor. `>=` gate.
 # gambatte is special-cased in run_suite (assert failed<=16, not passed>=).
 # A plain `case` (not an associative array) keeps this portable to bash 3.2,
 # which is the /bin/bash that GitHub's macOS runners ship.
@@ -92,24 +93,26 @@ threshold() {
     case "$1" in
         acid2)              echo "3 -" ;;
         cgb_acid_hell)      echo "1 -" ;;
-        mealybug)           echo "32 -" ;;
-        mooneye)            echo "183 -" ;;
-        mooneye_wilbertpol) echo "167 -" ;;
-        age)                echo "37 -" ;;
-        gbmicrotest)        echo "480 -" ;;
+        mealybug)           echo "39 -" ;;
+        mooneye)            echo "188 -" ;;
+        mooneye_wilbertpol) echo "188 -" ;;
+        age)                echo "41 -" ;;
+        gbmicrotest)        echo "481 -" ;;
         samesuite_apu)      echo "70 -" ;;
         samesuite_nonapu)   echo "6 -" ;;
         samesuite_sgb)      echo "2 -" ;;
         sgb)                echo "1 -" ;;
         blargg)             echo "15 4000" ;;
         blargg_singles)     echo "41 2000" ;;
-        scribbltests)       echo "7 -" ;;
+        scribbltests)       echo "8 -" ;;
         turtle_tests)       echo "4 -" ;;
         little_things_gb)   echo "4 -" ;;
         bully)              echo "2 -" ;;
         strikethrough)      echo "2 -" ;;
+        daid)               echo "8 -" ;;
         rtc3test)           echo "6 -" ;;
-        mbc3_tester)        echo "1 -" ;;
+        mbc3_tester)        echo "2 -" ;;
+        cpp)                echo "3 -" ;;
         gambatte)           echo "5241 -" ;;  # gated on failed<=16 (GAMBATTE_MAX_FAIL)
         *)                  echo "" ;;
     esac
@@ -119,8 +122,8 @@ GAMBATTE_MAX_FAIL=16
 # Deterministic suite order for `all`.
 ORDER="acid2 cgb_acid_hell mealybug mooneye mooneye_wilbertpol age gbmicrotest \
 samesuite_apu samesuite_nonapu samesuite_sgb sgb blargg blargg_singles \
-scribbltests turtle_tests little_things_gb bully strikethrough rtc3test \
-mbc3_tester gambatte"
+scribbltests turtle_tests little_things_gb bully strikethrough daid rtc3test \
+mbc3_tester cpp gambatte"
 
 # --- helpers -----------------------------------------------------------------
 log()  { printf '%s\n' "==> $*"; }
@@ -157,32 +160,34 @@ setup() {
     rm -f "$zip"
     log "Syncing gambatte-core oracles (.bin/.dump) @ ${GAMBATTE_CORE_REF:0:12}"
     sync_gambatte_oracles
-    log "Sourcing sgb-ext-test ROM (not in the c-sp set) @ ${SHOOTOUT_REF:0:12}"
-    sync_sgb_rom
+    log "Sourcing cpp + daid ROMs (not in the c-sp set) @ ${SHOOTOUT_REF:0:12}"
+    sync_shootout_roms
     touch "$ROMS/.rb-setup-complete"
     log "ROM setup complete"
 }
 
-# The sgb suite's ROM (cpp/sgb-ext-test.gb + .png) is absent from the c-sp set;
-# it lives in GBEmulatorShootout/testroms/cpp. Pull just that dir with the same
-# shallow / blobless / sparse checkout used for the gambatte oracles.
-sync_sgb_rom() {
-    local dst="$ROMS/cpp"
-    [ -f "$dst/sgb-ext-test.gb" ] && return 0
+# The cpp/ and daid/ suite ROMs (sgb-ext-test, the MBC3/RTC edge tests, and the
+# daid PPU/STOP/speed-switch screen tests) are absent from the c-sp set; they
+# live in GBEmulatorShootout/testroms/{cpp,daid}. Pull just those dirs with the
+# same shallow / blobless / sparse checkout used for the gambatte oracles.
+sync_shootout_roms() {
+    [ -f "$ROMS/cpp/sgb-ext-test.gb" ] && [ -f "$ROMS/daid/ppu_scanline_bgp.gb" ] && return 0
     local tmp
     tmp="$(mktemp -d)"
     git -C "$tmp" init -q
     git -C "$tmp" remote add origin "$SHOOTOUT_URL"
     git -C "$tmp" config core.sparseCheckout true
     git -C "$tmp" sparse-checkout init --cone >/dev/null 2>&1 || true
-    git -C "$tmp" sparse-checkout set testroms/cpp >/dev/null 2>&1 || true
+    git -C "$tmp" sparse-checkout set testroms/cpp testroms/daid >/dev/null 2>&1 || true
     git -C "$tmp" fetch -q --depth 1 --filter=blob:none origin "$SHOOTOUT_REF"
     git -C "$tmp" checkout -q FETCH_HEAD
-    mkdir -p "$dst"
-    cp -p "$tmp/testroms/cpp/sgb-ext-test.gb"  "$dst/" || warn "sgb-ext-test.gb missing in shootout checkout"
-    cp -p "$tmp/testroms/cpp/sgb-ext-test.png" "$dst/" 2>/dev/null || true
+    mkdir -p "$ROMS/cpp" "$ROMS/daid"
+    cp -p "$tmp/testroms/cpp/"*.gb "$tmp/testroms/cpp/"*.png "$ROMS/cpp/" 2>/dev/null \
+        || warn "cpp ROMs missing in shootout checkout"
+    cp -p "$tmp/testroms/daid/"*.gb "$tmp/testroms/daid/"*.gbc "$tmp/testroms/daid/"*.png "$ROMS/daid/" 2>/dev/null \
+        || warn "daid ROMs missing in shootout checkout"
     rm -rf "$tmp"
-    log "Sourced sgb-ext-test into $dst"
+    log "Sourced cpp + daid ROMs into $ROMS"
 }
 
 # The c-sp set ships gambatte ROMs but none of the 32 dumper oracle files
@@ -318,10 +323,50 @@ update_readme_report() {
     ' "$readme" > "$out"
 
     mv "$out" "$readme"
+    ratchet_thresholds "$tmp"
     rm -f "$tmp"
     # Stage the regenerated table so a commit that changes it is one-shot
     # (pre-commit aborts only on UNSTAGED hook modifications).
     git -C "$ROOT" add "$readme" 2>/dev/null || true
+}
+
+# Ratchet the per-suite pass floors in threshold() (and GAMBATTE_MAX_FAIL) up to
+# the counts just measured into the report table, so every landed improvement
+# becomes the new regression floor. Monotonic: pass floors only rise, the
+# gambatte fail ceiling only falls -- a regression can never relax a floor here
+# (run_suite still gates on it at test time). Stages its own edit like the table.
+ratchet_thresholds() {
+    local table="$1"
+    "$PY" - "$table" "$ROOT/tools/run-suites.sh" <<'PY'
+import os, re, sys
+table, script = sys.argv[1], sys.argv[2]
+counts = {}
+for ln in open(table):
+    m = re.match(r'\| (\w+) \| (\d+) \| (\d+) \|', ln)
+    if m:
+        counts[m.group(1)] = (int(m.group(2)), int(m.group(3)))
+
+def bump(m):
+    n = int(m.group('n'))
+    if m.group('suite') in counts:
+        n = max(n, counts[m.group('suite')][0])
+    return f'{m.group("pre")}{n}{m.group("f")}'
+
+s = open(script).read()
+s = re.sub(r'(?P<pre>(?P<suite>\w+)\)\s*echo ")(?P<n>\d+)(?P<f> \S+" ;;)', bump, s)
+if 'gambatte' in counts:
+    p, t = counts['gambatte']
+    s = re.sub(r'(GAMBATTE_MAX_FAIL=)(\d+)',
+               lambda m: m.group(1) + str(min(int(m.group(2)), t - p)), s, count=1)
+# atomic replace via a new inode: bash keeps reading its original open fd, so
+# rewriting the script it is currently executing is safe (new content next run).
+tmp = script + ".ratchet.tmp"
+with open(tmp, "w") as f:
+    f.write(s)
+os.chmod(tmp, os.stat(script).st_mode)
+os.replace(tmp, script)
+PY
+    git -C "$ROOT" add "$ROOT/tools/run-suites.sh" 2>/dev/null || true
 }
 
 # Emit a GitHub-flavored markdown progress table (one row per suite, this
@@ -361,11 +406,12 @@ case "$1" in
 esac
 
 # report-update is the pre-commit hook (always_run): keep it FAST and SAFE.
-# Regenerate the README table only when the staged change could actually move a
-# pass count (emulator source or a suite manifest); never download ROMs or build
-# during a commit -- skip silently if the binary/ROM set isn't ready (CI keeps
-# the table honest regardless). update_readme_report stages its own edit, so a
-# table change lands in the same commit rather than aborting it.
+# Regenerate the README table (and ratchet the threshold() floors up to the
+# measured counts) only when the staged change could actually move a pass count
+# (emulator source or a suite manifest); never download ROMs or build during a
+# commit -- skip silently if the binary/ROM set isn't ready (CI keeps the table
+# honest regardless). update_readme_report stages its own edits, so the table
+# and ratchet land in the same commit rather than aborting it.
 if [ "$1" = "report-update" ]; then
     if git diff --cached --quiet -- rustyboi-core rustyboi-test-runner/suites 2>/dev/null; then
         exit 0  # no source/manifest change staged -> counts can't have moved
