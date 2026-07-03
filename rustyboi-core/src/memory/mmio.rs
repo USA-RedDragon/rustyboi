@@ -984,6 +984,13 @@ impl Mmio {
         const OBJ: [u8; 8] = [0xFF, 0x7F, 0x1F, 0x42, 0xF2, 0x1C, 0x00, 0x00];
         self.obj_palette_ram[0..8].copy_from_slice(&OBJ);
         self.obj_palette_ram[8..16].copy_from_slice(&OBJ);
+        // The compat palette install left BCPS/OCPS advanced past what it wrote,
+        // with the auto-increment flag (bit 7) still set: BG palette 0 = 8 bytes
+        // -> spec index 0x08, OBJ palettes 0+1 = 16 bytes -> index 0x10. These
+        // read back (| bit 6) as 0xC8 / 0xD0 (mooneye boot_hwio-C), overriding the
+        // CGB-cart power-on 0xC0/0xC1 seeded by set_post_bios_ioamhram.
+        self.bg_palette_spec = 0x88;
+        self.obj_palette_spec = 0x90;
     }
 
     /// Read a CGB BG palette color (RGB555 byte pair) ignoring the
@@ -1312,9 +1319,9 @@ impl Mmio {
     /// Establish the post-`skip_bios` APU state. Syncs the APU cycle counter from
     /// the (already-set) timer counter first so the channel duty phase has the
     /// correct cc base, then applies Gambatte's post-boot state.
-    pub fn set_post_bios_audio_state(&mut self, cgb: bool) {
+    pub fn set_post_bios_audio_state(&mut self, cgb: bool, ch1_active: bool) {
         self.sync_apu_cc();
-        self.audio.set_post_bios_state(cgb);
+        self.audio.set_post_bios_state(cgb, ch1_active);
     }
 
     /// Record the CGB flag for the APU boot anchor. Must run before any audio
@@ -3613,7 +3620,15 @@ impl Mmio {
                 match addr {
                     input::JOYP => self.input.read(addr),
                     timer::DIV..=timer::TAC => self.timer.read(addr),
-                serial::SB..=serial::SC => self.serial.read(addr),
+                        serial::SB => self.serial.read(addr),
+                        // SC (FF02) fast-clock select (bit 1) exists only with CGB
+                        // features active (a real CGB cart). In DMG-compat mode
+                        // (DMG cart on CGB) the bit is absent and reads 1, so OR it
+                        // into serial's hardware read (which already forces bits
+                        // 2-6). mooneye boot_hwio-*/unused_hwio-C: SC reads 0x7E.
+                        serial::SC => {
+                            self.serial.read(addr) | if self.cgb_features_enabled { 0x00 } else { 0x02 }
+                        }
                 cpu::registers::INTERRUPT_FLAG => self.io_registers.read(addr) | 0xE0,
                     REG_DMA => self.io_registers.read(addr),
                     _ => self.io_registers.read(addr),
@@ -4031,7 +4046,15 @@ impl memory::Addressable for Mmio {
                         // bits always read 1 (Gambatte ORs 0xF8).
                         timer::TAC => self.timer.read(addr) | 0xF8,
                         timer::DIV..=timer::TAC => self.timer.read(addr),
-                serial::SB..=serial::SC => self.serial.read(addr),
+                        serial::SB => self.serial.read(addr),
+                        // SC (FF02) fast-clock select (bit 1) exists only with CGB
+                        // features active (a real CGB cart). In DMG-compat mode
+                        // (DMG cart on CGB) the bit is absent and reads 1, so OR it
+                        // into serial's hardware read (which already forces bits
+                        // 2-6). mooneye boot_hwio-*/unused_hwio-C: SC reads 0x7E.
+                        serial::SC => {
+                            self.serial.read(addr) | if self.cgb_features_enabled { 0x00 } else { 0x02 }
+                        }
                 cpu::registers::INTERRUPT_FLAG => self.io_registers.read(addr) | 0xE0,
                         audio::NR10..=audio::NR14 => self.audio.read(addr),
                         audio::NR21..=audio::NR24 => self.audio.read(addr),
@@ -4068,8 +4091,12 @@ impl memory::Addressable for Mmio {
                                 0xFF // DMG hardware returns 0xFF for CGB registers
                             }
                         },
+                        // VBK (FF4F): bit 0 = current VRAM bank, bits 1-7 read 1.
+                        // The register is present on all CGB silicon (Gambatte
+                        // gates on isCgb()); a DMG cart in DMG-compat mode still
+                        // reads it (bank locked at 0, so 0xFE). mooneye boot_hwio-C.
                         REG_VBK => {
-                            if self.cgb_features_enabled {
+                            if self.is_cgb() {
                                 self.vram_bank | 0xFE // Bit 0 = bank, bits 1-7 = 1
                             } else {
                                 0xFF // DMG hardware returns 0xFF for CGB registers
@@ -4106,10 +4133,13 @@ impl memory::Addressable for Mmio {
                                 0xFF
                             }
                         },
+                        // BCPS (FF68): present on all CGB silicon. In DMG-compat
+                        // the boot ROM installs the compat palette, leaving the
+                        // spec index advanced (BG palette 0 written = index 8),
+                        // and the register stays readable. mooneye boot_hwio-C
+                        // reads 0xC8. Bit 6 is unused and reads 1.
                         REG_BCPS => {
-                            if self.cgb_features_enabled {
-                                // Bit 6 is unused and reads 1 (Gambatte stores
-                                // the ffxxDump power-on 0x40 in that bit).
+                            if self.is_cgb() {
                                 self.bg_palette_spec | 0x40
                             } else {
                                 0xFF
@@ -4123,9 +4153,11 @@ impl memory::Addressable for Mmio {
                                 0xFF
                             }
                         },
+                        // OCPS (FF6A): as BCPS. In DMG-compat the boot ROM writes
+                        // OBJ palettes 0 and 1 (16 bytes), leaving the spec index
+                        // at 16. mooneye boot_hwio-C reads 0xD0. Bit 6 reads 1.
                         REG_OCPS => {
-                            if self.cgb_features_enabled {
-                                // Bit 6 is unused and reads 1 (as BCPS).
+                            if self.is_cgb() {
                                 self.obj_palette_spec | 0x40
                             } else {
                                 0xFF
@@ -4155,8 +4187,16 @@ impl memory::Addressable for Mmio {
                         0xFF6C if self.cgb_features_enabled => {
                             self.io_registers.read(0xFF6C) | 0xFE
                         }
-                        // Undocumented FF75: only bits 4-6 are read/writable.
-                        0xFF75 if self.cgb_features_enabled => {
+                        // Undocumented FF72/FF73: plain 8-bit R/W scratch
+                        // registers present on all CGB silicon (Gambatte gates
+                        // them on isCgb(), not the cart CGB flag), so a DMG cart
+                        // running in CGB DMG-compat mode still reads them back.
+                        // mooneye boot_hwio-C / unused_hwio-C read 0x00 post-boot.
+                        0xFF72 | 0xFF73 if self.is_cgb() => self.io_registers.read(addr),
+                        // Undocumented FF75: only bits 4-6 are read/writable; the
+                        // rest read 1. Present on all CGB silicon regardless of
+                        // the cart CGB flag (mooneye unused_hwio-C: 0x8F post-boot).
+                        0xFF75 if self.is_cgb() => {
                             self.io_registers.read(0xFF75) | 0x8F
                         }
                         // Unmapped CGB IO holes (no register) read open-bus
@@ -4194,8 +4234,10 @@ impl memory::Addressable for Mmio {
                         // The channels were advanced to the read access cc in
                         // `Bus::read` (`sync_apu_read_cc`); the controller returns
                         // 0 when the APU is powered off.
-                        0xFF76 if self.cgb_features_enabled => self.audio.pcm12(),
-                        0xFF77 if self.cgb_features_enabled => self.audio.pcm34(),
+                        // Present on all CGB silicon (Gambatte gates on isCgb()),
+                        // so a DMG cart in CGB DMG-compat mode reads them too.
+                        0xFF76 if self.is_cgb() => self.audio.pcm12(),
+                        0xFF77 if self.is_cgb() => self.audio.pcm34(),
 
                         // CGB-only registers (0xFF51-0xFF77, the ones not
                         // explicitly handled above) read 0xFF on DMG.

@@ -182,7 +182,23 @@ impl GB {
         self.mmio.write(crate::ppu::WX, 0x00);
         self.mmio.write(crate::ppu::SCY, 0x00);
         self.mmio.write(crate::ppu::WY, 0x00);
-        self.mmio.write(crate::input::JOYP, 0xCF);
+        // Post-boot JOYP (FF00). The DMG/MGB boot ROM hands off with both select
+        // lines low (reads 0xCF). The SGB boot ROM leaves both lines high (0xFF)
+        // after its packet handshake. On CGB the hand-off is cart-type dependent
+        // (like the boot DIV counter): a CGB-flagged cart takes the full-CGB path
+        // and leaves the lines low (0xCF, gambatte fexx_ffxx_dumper_cgb), while a
+        // DMG-flagged cart runs the DMG-compat path and leaves them high (0xFF,
+        // mooneye boot_hwio-C). Write a select-line pattern (bits 4-5); the read
+        // path forces bits 6-7 to 1, so 0x30 -> 0xFF and 0x00 -> 0xCF.
+        let joyp_lines_high = match self.hardware {
+            Hardware::DMG0 | Hardware::DMG | Hardware::MGB => false,
+            Hardware::SGB | Hardware::SGB2 => true,
+            Hardware::CGB0 | Hardware::CGB | Hardware::CGBB | Hardware::CGBE | Hardware::AGB => {
+                !self.should_enable_cgb_features()
+            }
+        };
+        let joyp_init = if joyp_lines_high { 0x3F } else { 0xCF };
+        self.mmio.write(crate::input::JOYP, joyp_init);
         self.mmio.write(crate::ppu::LYC, 0x00);
         self.mmio.write(crate::ppu::BGP, 0xFC);
         // OBP0/OBP1 post-boot value (Gambatte setInitial ffxxDump 0x48/0x49,
@@ -420,7 +436,10 @@ impl GB {
         for (i, b) in wave_ram.iter().enumerate() {
             self.mmio.write(crate::audio::WAV_START + i as u16, *b);
         }
-        self.mmio.set_post_bios_audio_state(cgb);
+        // SGB/SGB2 hand off with channel 1 already stopped (no Game-Boy-side boot
+        // chime), so NR52 reads 0xF0; every other model leaves ch1 running (0xF1).
+        let ch1_active = !matches!(self.hardware, Hardware::SGB | Hardware::SGB2);
+        self.mmio.set_post_bios_audio_state(cgb, ch1_active);
 
         // Post-boot power-on OAM / unusable-region / HRAM contents (Gambatte
         // setInitial*Ioamhram). The boot ROM leaves these untouched, so they

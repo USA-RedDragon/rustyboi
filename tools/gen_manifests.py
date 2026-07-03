@@ -241,8 +241,16 @@ def gen_wilbertpol(roms: Path, out: Path) -> None:
         ]
         for rom in sorted(set(found)):
             rel = rom.relative_to(roms)
+            # The per-silicon boot tests (boot_regs-A/-mgb, boot_hwio-S/-C,
+            # unused_hwio-C) share the mooneye ROMs and target a specific
+            # revision's post-boot state, so they carry the same rev= token as in
+            # the mooneye manifest. Without it they run on the plain dmg/cgb model
+            # and the revision-specific register/HWIO table never matches.
+            rev = MOONEYE_REV.get(rom.stem, "")
             for m in wilbertpol_modes(rom.stem):
-                lines.append(f"{rel}|{m}|mooneye_ed|{rom}")
+                lines.append(
+                    f"{rel}|{m}|mooneye_ed|{rom}|rev={rev}" if rev else f"{rel}|{m}|mooneye_ed|{rom}"
+                )
         sp = wp / "manual-only" / "sprite_priority.gb"
         for dev in ("dmg", "cgb"):
             ref = wp / "manual-only" / f"sprite_priority-{dev}.png"
