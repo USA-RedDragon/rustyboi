@@ -823,6 +823,8 @@ fn spawn_encoder(out: &Path) -> std::io::Result<std::process::Child> {
 
 /// Second pass (`-c:v copy`, no re-encode): mux the HEVC video with the PCM
 /// audio as AAC. Returns true only if the muxed file was produced.
+/// No `-shortest`: the whole run's video is the point, so keep every frame even
+/// when the audio track is marginally shorter (it just falls silent at the tail).
 fn mux_av(video: &Path, pcm: &Path, out: &Path) -> bool {
     let status = Command::new("ffmpeg")
         .args(["-loglevel", "error", "-i"])
@@ -831,7 +833,7 @@ fn mux_av(video: &Path, pcm: &Path, out: &Path) -> bool {
         .arg(pcm)
         .args([
             "-c:v", "copy", "-c:a", "aac", "-b:a", "96k",
-            "-shortest", "-movflags", "+faststart",
+            "-movflags", "+faststart",
         ])
         .arg(out)
         .stdout(Stdio::null())
