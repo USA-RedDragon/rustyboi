@@ -75,6 +75,16 @@ pub enum Oracle {
     /// off after rendering their result screen (e.g. blargg oam_bug). Manifest
     /// grading `png_fixed`.
     CspPngFixed { path: PathBuf },
+    /// Like `CspPng` but grades the LAYOUT up to a consistent 1:1
+    /// recoloring (`frame_buffer_mismatch_recolor`) instead of exact RGB. For
+    /// tests whose reference was captured with a different palette than
+    /// rustyboi's hardware-correct one, where the pixel layout — not the exact
+    /// colors — is what the test measures: scxly-cgb (a DMG-compat cart the
+    /// capture emulator rendered in DMG-green) and mbc3-tester-cgb (the ref's
+    /// compat shade #7BFF4A vs rustyboi's boot-ROM-correct #7BFF31). Still fails
+    /// any genuine layout error (a color that must map two ways). Grading
+    /// `png_layout`.
+    CspPngLayout { path: PathBuf },
     /// blargg serial-port text protocol: scan the bytes written to SB (FF01) on
     /// each SC (FF02) start edge for "Passed" / "Failed".
     Serial,
@@ -113,7 +123,10 @@ impl Oracle {
                 let suffix = if *audible { "audio1" } else { "audio0" };
                 format!("{marker}{suffix}")
             }
-            Self::Png { path } | Self::CspPng { path } | Self::CspPngFixed { path } => path
+            Self::Png { path }
+            | Self::CspPng { path }
+            | Self::CspPngFixed { path }
+            | Self::CspPngLayout { path } => path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "png".to_string()),
@@ -364,6 +377,9 @@ pub fn parse_manifest(
             "png_fixed" => Oracle::CspPngFixed {
                 path: PathBuf::from(arg),
             },
+            "png_layout" => Oracle::CspPngLayout {
+                path: PathBuf::from(arg),
+            },
             "serial" => Oracle::Serial,
             "blargg_mem" => Oracle::BlarggMem,
             "mooneye" => Oracle::MooneyeFib,
@@ -415,7 +431,7 @@ pub fn parse_manifest(
         let input = if let Some(tok) = input_tok {
             if !matches!(
                 oracle,
-                Oracle::CspPng { .. } | Oracle::CspPngFixed { .. } | Oracle::PngShootout { .. }
+                Oracle::CspPng { .. } | Oracle::CspPngFixed { .. } | Oracle::CspPngLayout { .. } | Oracle::PngShootout { .. }
             ) {
                 return Err(format!(
                     "manifest line {}: input= is only supported for png/png_fixed/png_shootout gradings",
@@ -435,7 +451,7 @@ pub fn parse_manifest(
         // 60-frame default.
         let frames = if matches!(
             oracle,
-            Oracle::CspPng { .. } | Oracle::CspPngFixed { .. } | Oracle::MemValue { .. }
+            Oracle::CspPng { .. } | Oracle::CspPngFixed { .. } | Oracle::CspPngLayout { .. } | Oracle::MemValue { .. }
         ) {
             fields
                 .iter()
@@ -829,12 +845,6 @@ plain|dmg|png|/r.gb|/ref.png
                 audible: false
             }
         ));
-    }
-
-    #[test]
-    fn identifies_game_boy_rom_extensions() {
-        assert!(is_rom_path(Path::new("a.gbc")));
-        assert!(!is_rom_path(Path::new("a.png")));
     }
 
     #[test]

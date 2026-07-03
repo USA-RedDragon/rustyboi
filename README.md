@@ -25,15 +25,15 @@ Passing cases per suite, refreshed automatically on every pull request by the
 | sgb | 1 | 1 |
 | blargg | 15 | 15 |
 | blargg_singles | 41 | 41 |
-| scribbltests | 7 | 10 |
+| scribbltests | 8 | 10 |
 | turtle_tests | 4 | 4 |
 | little_things_gb | 4 | 4 |
 | bully | 2 | 2 |
 | strikethrough | 2 | 2 |
 | rtc3test | 6 | 6 |
-| mbc3_tester | 1 | 2 |
+| mbc3_tester | 2 | 2 |
 | gambatte | 5241 | 5257 |
-| **Total** | **6343** | **6434** |
+| **Total** | **6345** | **6434** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core

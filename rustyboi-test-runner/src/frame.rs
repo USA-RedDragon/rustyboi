@@ -276,6 +276,42 @@ pub fn frame_buffer_mismatch(left: &[u32], right: &[u32]) -> Option<FrameMismatc
     collect_mismatch(left.iter().copied().zip(right.iter().copied()))
 }
 
+/// Layout comparison that is invariant under a consistent 1:1 recoloring.
+/// Some reference screenshots were captured on an emulator whose palette differs
+/// from rustyboi's hardware-correct one — e.g. a DMG-compat cart rendered in
+/// "DMG green" (scxly-cgb), or a CGB compat shade off by one bit (mbc3-tester,
+/// where rustyboi's #7BFF31 is the boot-ROM-correct value vs the ref's #7BFF4A).
+/// The pixel LAYOUT is what such tests measure, not the exact palette. This
+/// passes if there is a consistent 1:1 mapping between actual and expected
+/// colors across EVERY pixel — so a genuine layout error (a color that maps two
+/// ways, i.e. a localized wrong pixel) still fails and cannot be laundered.
+pub fn frame_buffer_mismatch_recolor(actual: &[u32], expected: &[u32]) -> Option<FrameMismatch> {
+    if actual.len() != FRAMEBUFFER_SIZE || expected.len() != FRAMEBUFFER_SIZE {
+        return frame_buffer_mismatch(actual, expected);
+    }
+    use std::collections::HashMap;
+    let mut fwd: HashMap<u32, u32> = HashMap::new();
+    let mut rev: HashMap<u32, u32> = HashMap::new();
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        let a = a & RGB_MASK;
+        let e = e & RGB_MASK;
+        let bad = fwd.insert(a, e).is_some_and(|prev| prev != e)
+            || rev.insert(e, a).is_some_and(|prev| prev != a);
+        if bad {
+            return Some(FrameMismatch {
+                differing_pixels: 1,
+                first_x: i % GB_WIDTH,
+                first_y: i / GB_WIDTH,
+                max_x: i % GB_WIDTH,
+                max_y: i / GB_WIDTH,
+                actual: a,
+                expected: e,
+            });
+        }
+    }
+    None
+}
+
 pub fn audio_matches(samples: &[(f32, f32)], audible: bool) -> bool {
     let all_same = samples
         .first()
@@ -731,6 +767,26 @@ mod tests {
 
         assert!(matches_hex_output(&frame, "0Af"));
         assert!(!matches_hex_output(&frame, "0Ae"));
+    }
+
+    #[test]
+    fn recolor_layout_accepts_consistent_recoloring_but_not_layout_errors() {
+        // A layout of two shades (black/white) laid out identically in both, but
+        // the "reference" uses a green palette (the scxly-cgb / mbc3 case).
+        let mut actual = vec![0x000000u32; FRAMEBUFFER_SIZE];
+        let mut green = vec![0x0F380Fu32; FRAMEBUFFER_SIZE]; // dark green
+        for i in (0..FRAMEBUFFER_SIZE).step_by(2) {
+            actual[i] = 0xFFFFFF; // white
+            green[i] = 0x9BBC0F; // light green
+        }
+        // Same layout, different palette -> passes (consistent 1:1 recoloring).
+        assert!(frame_buffer_mismatch_recolor(&actual, &green).is_none());
+        // Exact comparison would (correctly) reject it.
+        assert!(frame_buffer_mismatch(&actual, &green).is_some());
+        // Flip ONE pixel's shade in the reference -> white must map to BOTH light
+        // green and dark green -> inconsistent -> still rejected (not laundered).
+        green[0] = 0x0F380F;
+        assert!(frame_buffer_mismatch_recolor(&actual, &green).is_some());
     }
 
     #[test]

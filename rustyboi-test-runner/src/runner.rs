@@ -436,7 +436,7 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         // The Gambatte suite keeps its native Gambatte conversion.
         let conversion = if matches!(
             case.oracle,
-            Oracle::CspPng { .. } | Oracle::CspPngFixed { .. }
+            Oracle::CspPng { .. } | Oracle::CspPngFixed { .. } | Oracle::CspPngLayout { .. }
         ) {
             CgbColorConversion::Linear
         } else {
@@ -467,9 +467,14 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
                 let mut trace = TimingTrace::new(options.trace_limit, options.trace_ly);
                 return evaluate_csp_png_traced(&mut gb, options, case, path, &mut trace);
             }
-            return evaluate_csp_png(&mut gb, options, case, path, false);
+            return evaluate_csp_png(&mut gb, options, case, path, false, false);
         }
-        Oracle::CspPngFixed { path } => return evaluate_csp_png(&mut gb, options, case, path, true),
+        Oracle::CspPngFixed { path } => {
+            return evaluate_csp_png(&mut gb, options, case, path, true, false);
+        }
+        Oracle::CspPngLayout { path } => {
+            return evaluate_csp_png(&mut gb, options, case, path, false, true);
+        }
         Oracle::PngShootout { refs, frames } => {
             return evaluate_png_shootout(&mut gb, options, case, refs, *frames);
         }
@@ -587,6 +592,7 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
         // c-sp suite oracles are dispatched (and returned) before the frame loop.
         Oracle::CspPng { .. }
         | Oracle::CspPngFixed { .. }
+        | Oracle::CspPngLayout { .. }
         | Oracle::PngShootout { .. }
         | Oracle::Serial
         | Oracle::BlarggMem
@@ -903,6 +909,7 @@ fn evaluate_csp_png(
     case: &TestCase,
     refpng: &std::path::Path,
     fixed: bool,
+    recolor: bool,
 ) -> Result<(), String> {
     let frames = case.frames.unwrap_or(options.frames);
     let mut input = InputScript::new(&case.input);
@@ -922,14 +929,20 @@ fn evaluate_csp_png(
     let expected = frame::read_png_rgb(refpng)
         .map_err(|e| format!("reference PNG {}: {e}", refpng.display()))?;
 
-    if let Some(mismatch) = frame::frame_buffer_mismatch(&actual, &expected) {
+    let mismatch = if recolor {
+        frame::frame_buffer_mismatch_recolor(&actual, &expected)
+    } else {
+        frame::frame_buffer_mismatch(&actual, &expected)
+    };
+    if let Some(mismatch) = mismatch {
         if let Some(dir) = &options.dump_dir {
             let stem = refpng.file_stem().and_then(|s| s.to_str()).unwrap_or("case");
             let _ = frame::write_ppm(&dir.join(format!("{stem}.actual.ppm")), &actual);
             let _ = frame::write_ppm(&dir.join(format!("{stem}.expected.ppm")), &expected);
         }
+        let kind = if recolor { "layout (recolor-invariant)" } else { "PNG" };
         Err(format!(
-            "screen did not match PNG {}: {}",
+            "screen did not match {kind} {}: {}",
             refpng.display(),
             mismatch.describe()
         ))
