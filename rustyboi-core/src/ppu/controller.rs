@@ -3322,8 +3322,12 @@ impl Ppu {
         let ds = mmio.is_double_speed_mode() as i64;
         let is_cgb = mmio.is_cgb_features_enabled();
         let adv = self.m0irq_xpos166_advance(mmio, is_cgb);
+        // m0_time_master carries the runtime sprite0-at-scx fine-scroll extra
+        // (see sprite0_scx_extra); the m0 STAT IRQ fires at the PREDICTOR time,
+        // so peel it back out here.
+        let spr0 = self.sprite0_scx_extra(mmio, is_cgb) << ds;
         self.m0_time_master
-            .map(|m0t| (m0t as i64 - ((1 + adv) << ds)).max(0) as u64)
+            .map(|m0t| (m0t as i64 - spr0 - ((1 + adv) << ds)).max(0) as u64)
     }
 
     /// Re-anchor the event-scheduled STAT/mode/LYC clocks to the new CPU speed.
@@ -4107,6 +4111,32 @@ impl Ppu {
         cycles += sprite_tile_walk_cost(&sprite_xs, scx, nwx, target_x, obj_enabled || is_cgb);
 
         (cycles.max(0) as u128, win)
+    }
+
+    /// Runtime-only mode-3 extension when a sprite sits at spx == 0 (Gambatte
+    /// `M3Start::f1`, ppu.cpp:349-350: `if (sprite0Active && (lcdcObjEn|cgb))
+    /// p.cycles -= min(scx%8, 5)`). A sprite whose X is exactly 0 straddles the
+    /// fine-scroll discard, so the fetch stalls `min(scx%8, 5)` extra dots before
+    /// the tile loop begins.
+    ///
+    /// This cost lives ONLY in the runtime fetch loop that drives the real
+    /// mode-3 -> mode-0 transition (and therefore the STAT-mode read the CPU
+    /// polls). Gambatte's closed-form `predictCyclesUntilXpos_fn` (the m0-STAT-IRQ
+    /// predictor, ppu.cpp:1336) does NOT include it, so `compute_m3_length`
+    /// (which arms `sched_m0irq`) must stay clean — the m0 IRQ fires at the
+    /// predictor time, the mode transition one `min(scx%8,5)` dot later. Applied
+    /// to `m0_time_master` (the renderer/STAT boundary) and subtracted back out in
+    /// `m0_irq_event_cc_master`. Mooneye intr_2_mode0_timing_sprites_scx{1..4}.
+    fn sprite0_scx_extra(&self, mmio: &mmio::Mmio, is_cgb: bool) -> i64 {
+        let obj_enabled = (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0;
+        if !(obj_enabled || is_cgb) {
+            return 0;
+        }
+        if !self.sprites_on_line.iter().any(|s| s.x == 0) {
+            return 0;
+        }
+        let scx = (self.first_line_scx_override.unwrap_or_else(|| mmio.read(SCX)) & 0x07) as i64;
+        scx.min(5)
     }
 
     fn set_lcd_status_mode(mmio: &mut mmio::Mmio, mode: u8) {
@@ -5562,7 +5592,13 @@ impl Ppu {
                         // lives in m3_len). `p_now + ly_counter().time` is the
                         // next-LY master cc; +1 corrects rustyboi's LyCounter.time
                         // running 1 master-cc below Gambatte's lyTime.
-                        let m0t = self.m0_time_exact(mmio, m3_len, is_cgb, false);
+                        // The runtime sprite0-at-scx fine-scroll stall (Gambatte
+                        // M3Start::f1) extends the real mode-3 -> mode-0 transition
+                        // past the predictor's m0Time; fold it into the renderer /
+                        // STAT-read boundary here (m0_irq_event_cc_master subtracts
+                        // it back for the predictor-timed m0 STAT IRQ).
+                        let m0t = self.m0_time_exact(mmio, m3_len, is_cgb, false)
+                            + ((self.sprite0_scx_extra(mmio, is_cgb) as u64) << ds);
                         self.m0_time_master = Some(m0t);
                         // The within-line mode-0 dot is DERIVED from the same exact
                         // m0Time (master cc) so the eager-grid consumers (reported
@@ -8243,9 +8279,32 @@ impl Ppu {
         // Reanchor the LyCounter.time to master cc (`p_now + lc.time`), matching
         // `get_stat_mode_at_cc`: rustyboi's LyCounter.time is in abs_cc units.
         let lc = self.ly_counter_obs(mmio); // ds-subdot STAGE 1: read-path phase
+        // CGB first-frame-after-enable LYC-window +1: in the frame produced right
+        // after LCDC.7 0->1 on CGB hardware, the LY counter is re-anchored such that
+        // the line-tail LY==LYC coincidence window closes one master-cc LATER than a
+        // settled frame — rustyboi's closed-form LyCounter.time (which runs 1cc below
+        // Gambatte's lyTime, the same delta `m0_time_exact` folds into m0Time) reads
+        // the pre-enable phase, so a line-tail STAT read one dot before the boundary
+        // samples the coincidence bit already cleared. The wilbertpol ly_lyc-C /
+        // ly_lyc_144-C / ly_lyc_153-C rounds LCD-off/on every round then read STAT
+        // deep in the first frame (LY=2 tail, timeToNextLy should be 3 not 2 -> STAT
+        // $C4 not $C0).
+        //
+        // SCOPED to (frames_since_enable == 0) so a settled frame keeps Gambatte's
+        // exact getStat phase (its own lycint*flag / m2stat_count tests read the
+        // line-tail coincidence CLEAR at timeToNextLy 2 -- gambatte floor). LY 0 is
+        // excluded: the first line after enable already carries the +2 M3-start seed
+        // (m0_time_exact first_line, Gambatte `cycles = -(m3StartLineCycle+2)`), which
+        // absorbs the 1cc there -- without the exclusion the frame0 line-0 read
+        // (gambatte frame0_m2stat_count_1) would over-set the coincidence bit.
+        let ss_plus1 = (!lc.ds
+            && !self.lytime_no_plus1
+            && mmio.is_cgb()
+            && self.frames_since_enable == 0
+            && self.internal_ly_val != 0) as i64;
         let lc_master = stat_irq::LyCounter {
             ly: lc.ly,
-            time: (self.p_now as i64 + lc.time as i64).max(0) as u64,
+            time: (self.p_now as i64 + lc.time as i64 + ss_plus1).max(0) as u64,
             ds: lc.ds,
         };
         let cmp = stat_irq::get_lyc_cmp_ly(&lc_master, access_cc);
