@@ -154,7 +154,7 @@ const CGBWG_BG_RISE: u64 = 4;
 const CGBWG_BG_FALL: u64 = 4;
 const CGBWG_BG_FALL_TDL: u64 = 3;
 const CGBWG_BG_FALL_TDH: u64 = 1;
-const CGBWG_SCY_ADD: u64 = 2;
+const CGBWG_SCY_ADD: u64 = 1;
 const CGBWG_QUIRK_WIN: u64 = 7;
 const CGBWG_QUIRK_BG: u64 = 4;
 const CGBWG_ARM_WIN: u64 = 14;
@@ -2374,12 +2374,29 @@ impl Ppu {
     // line start, k = 0/1/2 substep), or None when the model is out of scope
     // for this line. See bg_wg_apply.
     fn bg_hw_read_dot(&self, n: u64, k: u8, ly: u8) -> Option<u64> {
+        self.bg_hw_read_dot_ex(n, k, ly, false)
+    }
+
+    // As `bg_hw_read_dot`, but `scy_mode` returns the SameBoy-exact CGB fetch
+    // dot (2 dots earlier than the LCDC-calibrated dot for a sprite-stalled
+    // tile). The LCDC journal (`bg_wg_resolve_cgb`) is tuned against the
+    // un-corrected dot through its own rise/fall thresholds; the SCY journal
+    // compares the dot against the raw write commit (+CGBWG_SCY_ADD), so it
+    // needs the true fetch dot. Verified dot-exact vs SameBoy CGB-C: after an
+    // offscreen-left sprite (OAM X<=7) the BG fetch is delayed by D_pre = 11 - X
+    // (not 13 - X); an on-screen sprite delays the tiles from its own by
+    // max(4, 11 - pos%8). Without this the k=1/k=2 substeps sit 2 dots too late
+    // and cross a mid-fetch SCY write the k=0 tile-number read did not — mixing
+    // the tile's map row with the wrong tile line (the m3_scy_change per-row
+    // jitter).
+    fn bg_hw_read_dot_ex(&self, n: u64, k: u8, ly: u8, scy_mode: bool) -> Option<u64> {
         let anchor = self.bg_anchor_cc?;
         if self.fetcher.is_fetching_window() || self.window_started_this_line {
             return None;
         }
         let base = anchor + 8 * n + 2 * k as u64;
         let mut h = base;
+        let cgb_stall_bias: u64 = if scy_mode { 2 } else { 0 };
         for (i, s) in self.sprites_on_line.iter().enumerate() {
             let Some(rec) = self.sprite_fetch_recs.get(i) else {
                 continue;
@@ -2403,9 +2420,9 @@ impl Ppu {
             if s.x <= 7 {
                 if n >= 1 {
                     // CGB: 1-dot D_pre = 13 - X (see the CGBWG_* consts); DMG: 2-dot
-                    // fetcher-boundary quantized.
+                    // fetcher-boundary quantized. (scy_mode: SameBoy-exact 11 - X.)
                     h += if self.wg_cgb {
-                        (13 - s.x) as u64
+                        (13 - s.x) as u64 - cgb_stall_bias
                     } else {
                         (13i64 - ((s.x as i64 + 1) & !1)).max(7) as u64
                     };
@@ -2416,11 +2433,13 @@ impl Ppu {
                     // CGB read-granular rule: only reads whose unshifted dot
                     // is at/after the sprite's arm dot A = F + arm + 8*(pos/8)
                     // (constant within the sprite's own tile) shift, by
-                    // max(6, 13 - pos % 8).
+                    // max(6, 13 - pos % 8). (scy_mode: SameBoy-exact max(4, 11 - pos%8).)
                     let arm = CGBWG_ARM_BG + 8 * (pos / 8);
                     if base >= anchor + arm {
-                        h += (CGBWG_SHIFT_BASE as i64 - (pos % 8) as i64).max(6) as u64;
-                    } else if k >= 1 && n == pos / 8 + 1 && base + 4 >= anchor + arm {
+                        h += (CGBWG_SHIFT_BASE as i64 - (pos % 8) as i64)
+                            .max(6)
+                            .saturating_sub(cgb_stall_bias as i64) as u64;
+                    } else if !scy_mode && k >= 1 && n == pos / 8 + 1 && base + 4 >= anchor + arm {
                         // Sprite-triggering tile: SameBoy blocks the object fetch
                         // until the current tile passes GET_TILE_DATA_HIGH_T2, so
                         // its low+high bitplane reads stay un-stalled and 2 dots
@@ -2500,8 +2519,11 @@ impl Ppu {
         if self.bg_scy_hist.is_empty() {
             return None;
         }
-        // CGB-compat: SCY reaches the fetch address lines `scy_add` dots
-        // later than on DMG (the PPU-doc "+2 T-cycles on CGB/AGB").
+        // CGB-compat: the raw write commit reaches the fetch address lines
+        // `scy_add` dots later than the recorded write cc (write M-cycle start).
+        // Paired with the SameBoy-exact fetch dot (bg_hw_read_dot_ex scy_mode),
+        // add=1 reproduces SameBoy's inclusive read>=write commit for both
+        // sprite-stalled and un-stalled tiles.
         let add = if self.wg_cgb { CGBWG_SCY_ADD } else { 0 };
         let mut v = self.bg_scy_hist[0].1;
         for &(t, _, new) in &self.bg_scy_hist {
@@ -2541,7 +2563,10 @@ impl Ppu {
                 fls.lcdc = (fls.lcdc & !BG_BITS) | (bits & BG_BITS);
             }
         }
-        fls.scy_bus = self.bg_scy_resolve(h);
+        // SCY resolves at the SameBoy-exact fetch dot (see bg_hw_read_dot_ex);
+        // on DMG the scy_mode dot is identical to `h` (bias 0).
+        let h_scy = self.bg_hw_read_dot_ex(n, k, ly, self.wg_cgb).unwrap_or(h);
+        fls.scy_bus = self.bg_scy_resolve(h_scy);
         fls
     }
 
@@ -2585,7 +2610,8 @@ impl Ppu {
         } else {
             self.bg_wg_resolve(h0)
         };
-        let scy0 = self.bg_scy_resolve(h0).unwrap_or(live_scy);
+        let h0_scy = self.bg_hw_read_dot_ex(n, 0, ly, self.wg_cgb).unwrap_or(h0);
+        let scy0 = self.bg_scy_resolve(h0_scy).unwrap_or(live_scy);
         let row_off = ((ly.wrapping_add(scy0) as u16 / 8) % 32) * 32 + col;
         let base0: u16 = if bits0 & map_bit != 0 { 0x9C00 } else { 0x9800 };
         let tn = mmio.read_vram_bank(0, base0 + row_off);
@@ -2607,7 +2633,8 @@ impl Ppu {
             } else {
                 (self.bg_wg_resolve(hk), false)
             };
-            let scyk = self.bg_scy_resolve(hk).unwrap_or(live_scy);
+            let hk_scy = self.bg_hw_read_dot_ex(n, k, ly, self.wg_cgb).unwrap_or(hk);
+            let scyk = self.bg_scy_resolve(hk_scy).unwrap_or(live_scy);
             let plane = (k - 1) as u16;
             let line = ly.wrapping_add(scyk) % 8;
             let addr = self.fetcher.get_tile_data_address(tn, line, bitsk) + plane;
