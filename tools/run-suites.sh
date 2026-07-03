@@ -8,6 +8,7 @@
 #   tools/run-suites.sh setup            # fetch/extract the ROM set (idempotent)
 #   tools/run-suites.sh build            # cargo build --release the test runner
 #   tools/run-suites.sh list             # print the known suites + thresholds
+#   tools/run-suites.sh report           # markdown progress table (all suites)
 #   tools/run-suites.sh <suite>          # run one suite, gate against its floor
 #   tools/run-suites.sh all              # run every suite, gate each
 #   tools/run-suites.sh <suite> [<suite>...]   # run several
@@ -294,6 +295,32 @@ list() {
     done
 }
 
+# Emit a GitHub-flavored markdown progress table (one row per suite, this
+# platform's pass counts). Consumed by the README auto-update in CI.
+generate_report() {
+    printf '| Suite | Passing | Total |\n'
+    printf '| :--- | ---: | ---: |\n'
+    local suite row frames out passed total tp=0 tt=0
+    for suite in $ORDER; do
+        row="$(threshold "$suite")"
+        frames="$(printf '%s' "$row" | cut -d' ' -f2)"
+        out="$(mktemp)"
+        if [ "$frames" != "-" ]; then
+            "$BIN" --manifest "$SUITES_DIR/$suite.manifest" --mode "$MODE" \
+                --jobs "$JOBS" --frames "$frames" --json "$out" >/dev/null 2>&1 || true
+        else
+            "$BIN" --manifest "$SUITES_DIR/$suite.manifest" --mode "$MODE" \
+                --jobs "$JOBS" --json "$out" >/dev/null 2>&1 || true
+        fi
+        passed="$(json_field "$out" passed)"
+        total="$(json_field "$out" total)"
+        rm -f "$out"
+        tp=$((tp + passed)); tt=$((tt + total))
+        printf '| %s | %s | %s |\n' "$suite" "$passed" "$total"
+    done
+    printf '| **Total** | **%s** | **%s** |\n' "$tp" "$tt"
+}
+
 # --- main --------------------------------------------------------------------
 [ $# -ge 1 ] || { usage; exit 1; }
 
@@ -304,10 +331,12 @@ case "$1" in
     build)     build; exit 0 ;;
 esac
 
-# A suite (or 'all'): ensure ROMs + binary exist, then run + gate.
+# A suite (or 'all'/'report'): ensure ROMs + binary exist, then run.
 [ "${RB_SKIP_SETUP:-0}" = "1" ] || setup
 if [ "${RB_SKIP_BUILD:-0}" != "1" ] && [ ! -x "$BIN" ]; then build; fi
 [ -x "$BIN" ] || die "runner binary not found at $BIN (run: $0 build)"
+
+if [ "$1" = "report" ]; then generate_report; exit 0; fi
 
 if [ "$1" = "all" ]; then
     # shellcheck disable=SC2086  # ORDER is a space-separated list of bare words

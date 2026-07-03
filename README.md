@@ -4,6 +4,38 @@
 
 A Game Boy emulator written in Rust for learning purposes. Not usable, likely never will be. Use something else.
 
+## Test suite accuracy
+
+Passing cases per suite, refreshed automatically on every pull request by the
+[test workflow](.github/workflows/test.yaml) (`tools/run-suites.sh report`).
+
+<!-- SUITE-PROGRESS:START -->
+| Suite | Passing | Total |
+| :--- | ---: | ---: |
+| acid2 | 3 | 3 |
+| cgb_acid_hell | 1 | 1 |
+| mealybug | 32 | 51 |
+| mooneye | 183 | 192 |
+| mooneye_wilbertpol | 167 | 193 |
+| age | 37 | 59 |
+| gbmicrotest | 479 | 513 |
+| samesuite_apu | 70 | 70 |
+| samesuite_nonapu | 6 | 6 |
+| samesuite_sgb | 2 | 2 |
+| sgb | 1 | 1 |
+| blargg | 15 | 15 |
+| blargg_singles | 41 | 41 |
+| scribbltests | 7 | 10 |
+| turtle_tests | 4 | 4 |
+| little_things_gb | 4 | 4 |
+| bully | 2 | 2 |
+| strikethrough | 2 | 2 |
+| rtc3test | 6 | 6 |
+| mbc3_tester | 1 | 2 |
+| gambatte | 5241 | 5257 |
+| **Total** | **6304** | **6434** |
+<!-- SUITE-PROGRESS:END -->
+
 ## RetroArch / libretro core
 
 The `rustyboi-libretro` crate builds a [libretro](https://www.libretro.com/) core
