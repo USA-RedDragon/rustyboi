@@ -67,6 +67,7 @@ use rustyboi_core_lib::audio::AudioOutput;
 use rustyboi_core_lib::cartridge::Cartridge;
 use rustyboi_core_lib::gb::{Hardware, GB};
 use rustyboi_core_lib::movie::{frame_hash, frame_is_non_blank, sha256};
+use rustyboi_core_lib::ppu;
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -641,6 +642,12 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
                             row.rom_sha, m.hash_all, out_hash_of(&row).unwrap_or_default()
                         );
                     }
+                    // SGB border still (display-only, SGB-only, additional to
+                    // the 160x144 poster): a 256x224 bordered frame, written
+                    // only when the game uploaded a border.
+                    if let Some(rgb) = m.border.as_ref() {
+                        write_border_png(dir, &row.rom_sha, rgb);
+                    }
                     if std::env::var_os("RB_SWEEP_MEDIA_LOG").is_some() {
                         let vdur = m.frames as f64 * FPS_DEN as f64 / FPS_NUM as f64;
                         let adur = m.audio_samples as f64 / AUDIO_RATE as f64;
@@ -762,6 +769,10 @@ struct MediaOut {
     /// FNV fold over the run — compared to the manifest row for the canonical
     /// model to prove audio drain never perturbs the frame hashes.
     hash_all: u64,
+    /// SGB-only: the 256x224 RGB888 border frame (GB screen composited at
+    /// (48,40)) captured at the end of the run, `Some` only when the game
+    /// actually uploaded a border. Display-only; never touches the manifest.
+    border: Option<Vec<u8>>,
     frames: usize,
     audio_samples: usize,
     video_written: bool,
@@ -848,6 +859,17 @@ fn write_poster_png(dir: &Path, sha: &str, tag: &str, poster: Option<&Vec<u8>>) 
         if let Err(e) = std::fs::write(&file, encode_rgb_png(160, 144, rgb)) {
             eprintln!("screenshot {}: {e}", file.display());
         }
+    }
+}
+
+/// Write the SGB 256x224 border still, keyed `<sha>_sgb_border.png`. Display-only
+/// and SGB-only; the gallery composites the 160x144 video into its center window.
+/// Errors are logged, not fatal.
+fn write_border_png(dir: &Path, sha: &str, rgb: &[u8]) {
+    let file = dir.join(format!("{sha}_sgb_border.png"));
+    let (w, h) = (ppu::SGB_FRAME_WIDTH as u32, ppu::SGB_FRAME_HEIGHT as u32);
+    if let Err(e) = std::fs::write(&file, encode_rgb_png(w, h, rgb)) {
+        eprintln!("border {}: {e}", file.display());
     }
 }
 
@@ -949,6 +971,16 @@ fn capture_media(
         }
     }
 
+    // SGB border still: after the run the border (uploaded once, static) is
+    // established, so grab the full 256x224 composited frame. `None` when the
+    // game never sent a border (or on non-SGB hardware) — the caller then writes
+    // no border still and that card renders as a normal 160x144 card. This is a
+    // pure non-consuming read: it never perturbs the 160x144 frame path.
+    let border = (hardware == Hardware::SGB)
+        .then(|| gb.sgb_composited_frame())
+        .flatten()
+        .map(|f| f.to_vec());
+
     // Flush the PCM sidecar before muxing.
     if let Some(w) = pcm {
         let _ = w.into_inner().map(|mut f| f.flush());
@@ -979,6 +1011,7 @@ fn capture_media(
     Ok(MediaOut {
         poster,
         hash_all,
+        border,
         frames: cfg.frames,
         audio_samples,
         video_written,
@@ -1187,6 +1220,9 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
     let mut poster_tags: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
         std::collections::BTreeMap::new();
     let mut tabs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // SGB border stills (`<sha>_sgb_border.png`, 256x224): not a hardware tab —
+    // tracked separately so the SGB tab can frame the 160x144 video inside it.
+    let mut border_shas: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if let Ok(rd) = std::fs::read_dir(&screens_dir) {
         for e in rd.flatten() {
             let fname = e.file_name().to_string_lossy().into_owned();
@@ -1198,6 +1234,10 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
             let Some(tag) = rest.strip_prefix('_') else { continue };
             if tag.is_empty() || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
                 continue;
+            }
+            if tag == "sgb_border" {
+                border_shas.insert(sha.to_string());
+                continue; // display detail of the sgb tab, not its own tab
             }
             poster_tags.entry(sha.to_string()).or_default().insert(tag.to_string());
             tabs.insert(tag.to_string());
@@ -1227,6 +1267,9 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
          .card{background:#1c1c1c;border-radius:8px;padding:12px;border:1px solid #333}\
          .hero{width:100%;aspect-ratio:10/9;object-fit:contain;image-rendering:pixelated;border-radius:4px;background:#000;display:block;cursor:pointer}\
          .hero.audible{outline:3px solid #4ade80;outline-offset:-3px}\
+         .sgb-frame{position:relative;width:100%;aspect-ratio:256/224;border-radius:4px;background:#000;overflow:hidden;display:block}\
+         .sgb-frame .sgb-border{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;image-rendering:pixelated;pointer-events:none;z-index:0}\
+         .hero.sgb-screen{position:absolute;left:18.75%;top:17.857%;width:62.5%;height:64.286%;aspect-ratio:auto;object-fit:fill;border-radius:0;z-index:1}\
          .name{font-size:14px;margin-top:8px;word-break:break-all}\
          .meta{font-size:12px;color:#999;display:flex;justify-content:space-between;margin-top:4px}\
          .ok{color:#4ade80}.fail{color:#f87171}.err{color:#fbbf24}\
@@ -1282,7 +1325,25 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
             };
             let poster = format!("./screens/{}_{tag}.png", r.rom_sha);
             let video_file = format!("{}_{tag}.mp4", r.rom_sha);
-            let hero = if videos_dir.join(&video_file).exists() {
+            let has_video = videos_dir.join(&video_file).exists();
+            // SGB cards whose game uploaded a border render inside a 256x224 frame
+            // still, with the 160x144 video composited into the GB-screen window
+            // at (48,40). The border img is lazy (loading="lazy") and pointer-none
+            // so clicks reach the video; every other card is unchanged.
+            let sgb_border = tag == "sgb" && border_shas.contains(&r.rom_sha);
+            let border_src = format!("./screens/{}_sgb_border.png", r.rom_sha);
+            let hero = if sgb_border && has_video {
+                format!(
+                    "<div class=\"sgb-frame\">\
+                     <img class=\"sgb-border\" loading=\"lazy\" src=\"{border_src}\" alt=\"\">\
+                     <video class=\"hero sgb-screen\" muted loop playsinline preload=\"none\" \
+                     data-poster=\"{poster}\" data-src=\"./videos/{}\"></video></div>",
+                    html_escape(&video_file),
+                )
+            } else if sgb_border {
+                // Border still but no video: the framed still is the hero.
+                format!("<img class=\"hero\" loading=\"lazy\" src=\"{border_src}\" alt=\"\">")
+            } else if has_video {
                 // No eager poster/src: the observer assigns them from data-* when the
                 // card nears the viewport, so the page loads O(viewport) not O(page).
                 format!(
