@@ -1283,13 +1283,15 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
             let poster = format!("./screens/{}_{tag}.png", r.rom_sha);
             let video_file = format!("{}_{tag}.mp4", r.rom_sha);
             let hero = if videos_dir.join(&video_file).exists() {
+                // No eager poster/src: the observer assigns them from data-* when the
+                // card nears the viewport, so the page loads O(viewport) not O(page).
                 format!(
                     "<video class=\"hero\" muted loop playsinline preload=\"none\" \
-                     poster=\"{poster}\" src=\"./videos/{}\"></video>",
+                     data-poster=\"{poster}\" data-src=\"./videos/{}\"></video>",
                     html_escape(&video_file),
                 )
             } else {
-                format!("<img class=\"hero\" src=\"{poster}\" alt=\"\">")
+                format!("<img class=\"hero\" loading=\"lazy\" src=\"{poster}\" alt=\"\">")
             };
             let display_name = r.name.clone().unwrap_or_else(|| format!("sha:{}", r.rom_sha));
             let fps = r.fps.map_or(String::new(), |f| format!("{f:.0} fps"));
@@ -1303,23 +1305,33 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
         s.push_str("</div></div>");
     }
 
-    // Dependency-free JS: tab switch + autoplay-on-visible + click-to-unmute
-    // (exactly one audible video; hidden/off-screen videos pause AND re-mute).
+    // Dependency-free JS: the IntersectionObserver drives LOADING (not just
+    // play/pause) so only near-viewport media is fetched. Entering + active
+    // assigns poster/src from data-* then plays; leaving pauses, re-mutes, and
+    // releases the download (keeps the poster). Exactly one audible video.
     s.push_str(
         "<script>\
         (function(){\
         var vids=function(){return Array.prototype.slice.call(document.querySelectorAll('video.hero'));};\
+        function loadAndPlay(v){\
+          if(!v.src){v.poster=v.dataset.poster;v.src=v.dataset.src;v.load();}\
+          v.play().catch(function(){});\
+        }\
+        function release(v){\
+          v.pause();if(!v.muted){v.muted=true;v.classList.remove('audible');}\
+          if(v.src){v.removeAttribute('src');v.load();}\
+        }\
         var io=new IntersectionObserver(function(es){\
           es.forEach(function(e){var v=e.target;\
             var panel=v.closest('.tab-panel');var active=panel&&panel.classList.contains('active');\
-            if(e.isIntersecting&&active){v.play().catch(function(){});}\
-            else{v.pause();if(!v.muted){v.muted=true;v.classList.remove('audible');}}\
+            if(e.isIntersecting&&active){loadAndPlay(v);}\
+            else{release(v);}\
           });\
-        },{threshold:0.25});\
+        },{rootMargin:'400px 0px'});\
         vids().forEach(function(v){io.observe(v);\
           v.addEventListener('click',function(ev){ev.preventDefault();\
             if(v.muted){vids().forEach(function(o){if(o!==v){o.muted=true;o.classList.remove('audible');}});\
-              v.muted=false;v.classList.add('audible');v.play().catch(function(){});}\
+              v.muted=false;v.classList.add('audible');loadAndPlay(v);}\
             else{v.muted=true;v.classList.remove('audible');}\
           });\
         });\
@@ -1327,11 +1339,11 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
           document.querySelectorAll('.tab').forEach(function(b){b.classList.toggle('active',b.dataset.tab===tab);});\
           document.querySelectorAll('.tab-panel').forEach(function(p){\
             var on=p.id==='panel-'+tab;p.classList.toggle('active',on);\
-            if(!on){p.querySelectorAll('video.hero').forEach(function(v){v.pause();v.muted=true;v.classList.remove('audible');});}\
+            if(!on){p.querySelectorAll('video.hero').forEach(function(v){release(v);});}\
           });\
           var panel=document.getElementById('panel-'+tab);\
           if(panel){panel.querySelectorAll('video.hero').forEach(function(v){\
-            var r=v.getBoundingClientRect();if(r.top<innerHeight&&r.bottom>0){v.play().catch(function(){});}\
+            var r=v.getBoundingClientRect();if(r.top<innerHeight&&r.bottom>0){loadAndPlay(v);}\
           });}\
         }\
         document.querySelectorAll('.tab').forEach(function(b){b.addEventListener('click',function(){activate(b.dataset.tab);});});\
