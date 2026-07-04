@@ -146,14 +146,33 @@ def gen_gbmicrotest(roms: Path, out: Path) -> None:
     gm = roms / "gbmicrotest"
     # A few cases settle their FF82 verdict later than the 60-frame default.
     gbmicro_frames = {"is_if_set_during_ime0": 600}
+    # A handful of ROMs report their verdict to VRAM $8000 instead of FF82 (they
+    # predate / skip the test_finish macro). Each has ONE disassembly-justified
+    # hardware-correct byte, so grade them via `mem` at $8000 = that byte:
+    #  poweron              APU NR10 read-mask: write $00, read back -> $00|0x80.
+    #                       Mask 0x80 is the in-source SameBoy read_mask table.
+    #  004-tima_boot_phase  4 TIMA adds; `add $55 - PASS`(PASS=10 DMG) lands the
+    #                       correct boot-phase sum on $55.
+    #  004-tima_cycle_timer 4 TIMA adds; `sub OVERHEAD`(9) calibrates correct to $55.
+    #  ppu_spritex_vs_scx   real self-check (176 `cp result/jp nz,fail`): writes
+    #                       $55 to $8000 on all-pass, $FF on any fail.
+    gbmicro_vram_verdict = {
+        "poweron": 0x80,
+        "004-tima_boot_phase": 0x55,
+        "004-tima_cycle_timer": 0x55,
+        "ppu_spritex_vs_scx": 0x55,
+    }
+
+    def line_for(rom: Path) -> str:
+        stem = rom.stem
+        if stem in gbmicro_vram_verdict:
+            return f"{stem}|dmg|mem|{rom}|8000={gbmicro_vram_verdict[stem]:02X}"
+        return f"{stem}|dmg|memauto|{rom}" + (
+            f"|frames={gbmicro_frames[stem]}" if stem in gbmicro_frames else ""
+        )
+
     lines = (
-        [
-            f"{rom.stem}|dmg|memauto|{rom}"
-            + (f"|frames={gbmicro_frames[rom.stem]}" if rom.stem in gbmicro_frames else "")
-            for rom in sorted(gm.glob("*.gb"))
-        ]
-        if gm.is_dir()
-        else []
+        [line_for(rom) for rom in sorted(gm.glob("*.gb"))] if gm.is_dir() else []
     )
     write_manifest(
         out,
@@ -161,11 +180,15 @@ def gen_gbmicrotest(roms: Path, out: Path) -> None:
         [
             "gbmicrotest (DMG-CPU-08). FF82==0x01 pass. Run: --frames 60",
             "VERIFIED (src @gbmicrotest463eb6b, oracle: libgambatte externalRead FF80-82 @60 frames):",
-            "480/513. The 33 remaining fails are NOT emulation bugs reachable under this grading:",
-            " - 29 display-only testbenches (no test_finish/test_end in source; verdict is a raw",
-            "   measured value looped to VRAM $8000, never FF82). FF82=0x64 = DMG power-on HRAM residue.",
-            " - 2 DMA-clobber artifacts (400-dma, dma_basic): the ROM copies its DMA routine INTO",
-            "   HRAM over FF80-82 and never writes a verdict; rustyboi == Gambatte byte-identical.",
+            "485/513. 4 ROMs report to VRAM $8000 not FF82; graded via `mem 8000=VAL`",
+            "with a disassembly-justified hardware byte (poweron=80 NR10 read-mask,",
+            "004-tima_boot_phase/004-tima_cycle_timer=55 calibrated-add pass byte,",
+            "ppu_spritex_vs_scx=55 self-check pass / FF fail). The 29 remaining fails",
+            "are NOT emulation bugs reachable under this grading:",
+            " - display-only sweep/screenshot testbenches (no verdict; a raw measured",
+            "   value or screen pattern swept by a hand-varied .define, no single pass byte).",
+            " - 2 DMA-clobber artifacts (400-dma, dma_basic): the ROM copies its DMA routine",
+            "   INTO HRAM over FF80-82 and never writes a verdict; rustyboi == Gambatte.",
             " - 2 hardware-only quirks where rustyboi == Gambatte (both fail identically):",
             "   halt_op_dupe_delay, stat_write_glitch_l154_d (needs GateBoy-level LCD-enable modeling).",
             "Run --frames 600 for is_if_set_during_ime0.",
