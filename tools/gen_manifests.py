@@ -196,6 +196,25 @@ def mooneye_modes(stem: str) -> list[str]:
     return ["dmg", "cgb"]
 
 
+# madness/mgb_oam_dma_halt_sprites is NOT a register test: it starts OAM DMA at
+# VBlank then HALTs forever with no interrupts, so no done-marker is ever reached
+# and the Fibonacci `mooneye`/`mooneye_ed` oracle can never apply. It is a
+# screenshot test (`*_expected.png` ships beside the ROM), and per Gekkio's own
+# source (madness/mgb_oam_dma_halt_sprites.s) the rendered sprite is MGB-specific:
+# "MGB: as visualized by *_expected.png; DMG: a different sprite; CGB: no sprite".
+# Verified against SameBoy (DMG=746 differing px, CGB=0 sprite px, neither the
+# 18-px MGB glyph). So the only valid grading is a single MGB run (dmg mode +
+# rev=mgb) against the MGB reference, up to a consistent recoloring (png_layout):
+# the reference is grayscale but rustyboi renders the DMG-compat palette. This
+# stays a fail — the underlying "magic value" DMA/HALT merge quirk is undocumented
+# ("Why & $FC? I have no idea" -- Gekkio) and unmodeled by SameBoy too, so pixel-
+# matching it would be test-fitting one silicon capture. Emitting the honest MGB
+# png_layout row (vs the old dmg+cgb register rows) makes the failure truthful.
+def mgb_oam_dma_halt_row(rel: Path, rom: Path) -> str:
+    ref = rom.with_name(f"{rom.stem}_expected.png")
+    return f"{rel}|dmg|png_layout|{rom}|{ref}|rev=mgb"
+
+
 def gen_mooneye(roms: Path, out: Path) -> None:
     mn = roms / "mooneye-test-suite"
     lines = []
@@ -209,6 +228,9 @@ def gen_mooneye(roms: Path, out: Path) -> None:
         for rom in sorted(set(found)):
             stem = rom.stem
             rel = rom.relative_to(roms)
+            if stem == "mgb_oam_dma_halt_sprites":
+                lines.append(mgb_oam_dma_halt_row(rel, rom))
+                continue
             rev = MOONEYE_REV.get(stem, "")
             for m in mooneye_modes(stem):
                 lines.append(f"{rel}|{m}|mooneye|{rom}|rev={rev}" if rev else f"{rel}|{m}|mooneye|{rom}")
@@ -251,6 +273,11 @@ def gen_wilbertpol(roms: Path, out: Path) -> None:
             # revision's post-boot state, so they carry the same rev= token as in
             # the mooneye manifest. Without it they run on the plain dmg/cgb model
             # and the revision-specific register/HWIO table never matches.
+            if rom.stem == "mgb_oam_dma_halt_sprites":
+                # Screenshot/MGB-only (see mgb_oam_dma_halt_row); the ROM halts
+                # forever, so the mooneye_ed done-marker never fires either.
+                lines.append(mgb_oam_dma_halt_row(rel, rom))
+                continue
             rev = MOONEYE_REV.get(rom.stem, "")
             for m in wilbertpol_modes(rom.stem):
                 lines.append(
