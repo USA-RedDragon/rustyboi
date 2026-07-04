@@ -327,7 +327,7 @@ impl Fetcher {
                     // (scx + xpos + 1 - cgb) / 8) applies only past the M3Start
                     // discard prologue; the first tile (display_x == 0) is fetched
                     // at scx/8 with no adjustment.
-                    let cgb_adj: u16 = if mmio.is_cgb_features_enabled() || display_x == 0 { 0 } else { 1 };
+                    let cgb_adj: u16 = if mmio.is_cgb() || display_x == 0 { 0 } else { 1 };
                     let xpos = (display_x as u16 + self.pixel_fifo.size() as u16)
                         .saturating_sub(pending_discard as u16);
                     // DMG BG grid: a sprite-stalled tile reads SCX at its
