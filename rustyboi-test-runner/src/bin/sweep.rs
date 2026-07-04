@@ -2,16 +2,14 @@
 //!
 //! Runs every ROM in a game library under a deterministic input masher,
 //! recording per-ROM performance, a cumulative every-frame framebuffer hash,
-//! checkpoint hashes, a final-frame screenshot, and one screenshot per
-//! checkpoint (rendered by `gallery` as a per-ROM strip so a blank/fading
-//! final frame doesn't hide what the run actually did). Two sweeps compare
-//! into a regression report: any hash difference is a behavior change (the
-//! library is ~1200 canaries wide), any fps drop beyond tolerance is a perf
-//! regression.
+//! checkpoint hashes, and a poster screenshot (plus, when `ffmpeg` is present, a
+//! whole-run video the gallery plays). Two sweeps compare into a regression
+//! report: any hash difference is a behavior change (the library is ~1200
+//! canaries wide), any fps drop beyond tolerance is a perf regression.
 //!
 //! MEDIA (privacy + hardware matrix): every emitted media file is keyed on the
-//! ROM's `rom_sha`, never the (trademarked) file name — `screens/<sha>_<hw>.png`,
-//! `screens/<sha>_<hw>_cpN.png`, `videos/<sha>_<hw>.mp4`. Media is captured on a
+//! ROM's `rom_sha`, never the (trademarked) file name — `screens/<sha>_<hw>.png`
+//! (one poster) and `videos/<sha>_<hw>.mp4`. Media is captured on a
 //! SET of hardware models (default DMG,CGB,SGB,AGB via `--hardware`) so the
 //! gallery can tab between them; a CGB-only game on DMG legitimately renders the
 //! "cannot run on this system" panel — a real artifact, not an error. The media
@@ -454,6 +452,13 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     // Sort by rom_sha so the committed baseline has a stable, name-free order.
     rows.sort_by(|a, b| a.rom_sha.cmp(&b.rom_sha));
 
+    // Remove the encode-temp subdir wholesale: any `.tmp`/`.pcm` left behind by
+    // an interrupted/panicked capture goes with it, so `videos/` holds only
+    // final `<sha>_<hw>.mp4` files.
+    if let Some(vdir) = &cfg.videos_dir {
+        let _ = std::fs::remove_dir_all(vdir.join(".sweep-tmp"));
+    }
+
     let manifest = out_dir.join("manifest.jsonl");
     let mut f = std::fs::File::create(&manifest).map_err(|e| format!("create manifest: {e}"))?;
     for row in &rows {
@@ -591,7 +596,7 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
             // Canonical-hardware media, keyed on rom_sha (never the filename, so
             // the user's collection is never fingerprinted on disk or in HTML).
             if let Some(dir) = &cfg.screens_dir {
-                write_media_pngs(dir, &row.rom_sha, &canon_tag, out.final_rgb.as_ref(), &out.checkpoint_rgbs);
+                write_poster_png(dir, &row.rom_sha, &canon_tag, out.final_rgb.as_ref());
             }
         }
         Ok(Err(e)) => row.error = Some(e),
@@ -621,12 +626,12 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
             }));
             match res {
                 Ok(Ok(m)) => {
-                    // The canonical model's poster/strip were already written by
-                    // the byte-identical manifest pass; don't overwrite them
+                    // The canonical model's poster was already written by the
+                    // byte-identical manifest pass; don't overwrite it
                     // (audio-drained media passes could differ if the APU ever
                     // fed back into the PPU — keep the canary pristine).
                     if !is_canon {
-                        write_media_pngs(dir, &row.rom_sha, &tag, m.poster.as_ref(), &m.checkpoint_rgbs);
+                        write_poster_png(dir, &row.rom_sha, &tag, m.poster.as_ref());
                     } else if out_hash_of(&row) != Some(m.hash_all) {
                         // Divergence gate: draining audio changed the canonical
                         // frame hashes. The manifest is safe (produced without
@@ -674,10 +679,6 @@ struct EmuOut {
     fps: f64,
     ns_per_frame: f64,
     final_rgb: Option<Vec<u8>>,
-    /// One RGB frame per entry in `checkpoints` (same order); empty when
-    /// screenshots are disabled. Pure copies taken at instants where the
-    /// checkpoint hash is already computed — no effect on emulation or hashes.
-    checkpoint_rgbs: Vec<Vec<u8>>,
 }
 
 fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
@@ -696,7 +697,6 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut hash_all: u64 = 0xcbf2_9ce4_8422_2325;
     let mut checkpoints = Vec::with_capacity(checkpoint_at.len());
-    let mut checkpoint_rgbs = Vec::new();
     let mut first_hash = None;
     let mut changed = false;
     let mut boot_ok = false;
@@ -714,9 +714,6 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
         hash_all = (hash_all ^ h).wrapping_mul(FNV_PRIME);
         if checkpoint_at.contains(&(f + 1)) {
             checkpoints.push((f + 1, hash_all));
-            if cfg.screens_dir.is_some() {
-                checkpoint_rgbs.push(frame_rgb(&frame));
-            }
         }
         match first_hash {
             None => first_hash = Some(h),
@@ -751,7 +748,6 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
         fps: measured / elapsed.as_secs_f64(),
         ns_per_frame: elapsed.as_nanos() as f64 / measured,
         final_rgb,
-        checkpoint_rgbs,
     })
 }
 
@@ -763,7 +759,6 @@ struct MediaOut {
     /// Final non-blank frame (poster); mirrors `emulate`'s selection so the
     /// canonical model's media and manifest agree.
     poster: Option<Vec<u8>>,
-    checkpoint_rgbs: Vec<Vec<u8>>,
     /// FNV fold over the run — compared to the manifest row for the canonical
     /// model to prove audio drain never perturbs the frame hashes.
     hash_all: u64,
@@ -842,25 +837,20 @@ fn mux_av(video: &Path, pcm: &Path, out: &Path) -> bool {
     matches!(status, Ok(s) if s.success()) && out.exists()
 }
 
-/// Write a poster and its checkpoint strip, all keyed on `sha`_`tag` (never a
-/// filename). Errors are logged, not fatal.
-fn write_media_pngs(dir: &Path, sha: &str, tag: &str, poster: Option<&Vec<u8>>, cps: &[Vec<u8>]) {
+/// Write the single poster PNG, keyed on `sha`_`tag` (never a filename). This is
+/// the video `poster=` and the no-ffmpeg/old-dir `<img>` fallback. Errors are
+/// logged, not fatal.
+fn write_poster_png(dir: &Path, sha: &str, tag: &str, poster: Option<&Vec<u8>>) {
     if let Some(rgb) = poster {
         let file = dir.join(format!("{sha}_{tag}.png"));
         if let Err(e) = std::fs::write(&file, encode_rgb_png(160, 144, rgb)) {
             eprintln!("screenshot {}: {e}", file.display());
         }
     }
-    for (i, rgb) in cps.iter().enumerate() {
-        let file = dir.join(format!("{sha}_{tag}_cp{i}.png"));
-        if let Err(e) = std::fs::write(&file, encode_rgb_png(160, 144, rgb)) {
-            eprintln!("screenshot {}: {e}", file.display());
-        }
-    }
 }
 
-/// Emulate `hardware` purely to produce media: poster + checkpoint strip, and —
-/// when `cfg.videos_dir` is set — an HEVC+AAC mp4 of the whole run. This never
+/// Emulate `hardware` purely to produce media: a poster, and — when
+/// `cfg.videos_dir` is set — an HEVC+AAC mp4 of the whole run. This never
 /// contributes to the manifest; it may drain audio (which the canonical
 /// manifest pass never does), and its frame hash is returned only so the caller
 /// can assert the drain didn't perturb rendering.
@@ -877,12 +867,20 @@ fn capture_media(
     gb.skip_bios();
 
     let tag = hw_tag(hardware);
-    // Audio is drained only when a video is actually being encoded.
+    // Audio is drained only when a video is actually being encoded. Encode temps
+    // live in a dedicated `videos/.sweep-tmp/` subdir (same filesystem as the
+    // final mp4, so the mux-failure rename is cheap and never crosses devices);
+    // the whole subdir is removed at the end of the run, so an
+    // interrupted/panicked capture never leaks a `.tmp`/`.pcm` into the artifact.
     let (tmp_video, tmp_pcm) = match &cfg.videos_dir {
-        Some(d) => (
-            Some(d.join(format!(".tmp_{sha}_{tag}.mp4"))),
-            Some(d.join(format!(".tmp_{sha}_{tag}.pcm"))),
-        ),
+        Some(d) => {
+            let tmp = d.join(".sweep-tmp");
+            let _ = std::fs::create_dir_all(&tmp);
+            (
+                Some(tmp.join(format!("{sha}_{tag}.mp4"))),
+                Some(tmp.join(format!("{sha}_{tag}.pcm"))),
+            )
+        }
         None => (None, None),
     };
     let mut encoder = None;
@@ -902,11 +900,8 @@ fn capture_media(
         gb.enable_audio(Box::new(sink.clone())).map_err(|e| format!("audio: {e}"))?;
     }
 
-    let span = cfg.frames - cfg.warmup;
-    let checkpoint_at: Vec<usize> = (0..=4).map(|i| cfg.warmup + span * i / 4).collect();
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut hash_all: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut checkpoint_rgbs = Vec::new();
     let mut poster: Option<Vec<u8>> = None;
     let mut audio_samples = 0usize;
     let started = Instant::now();
@@ -915,9 +910,8 @@ fn capture_media(
         gb.set_input_state(masher(f, seed));
         let (frame, _bp) = gb.run_until_frame(collect_audio);
 
-        let is_cp = checkpoint_at.contains(&(f + 1));
         let in_tail = f + 120 >= cfg.frames;
-        let need_rgb = encoder.is_some() || is_cp || in_tail;
+        let need_rgb = encoder.is_some() || in_tail;
         let rgb = need_rgb.then(|| frame_rgb(&frame));
 
         if let Some(child) = &mut encoder
@@ -943,9 +937,6 @@ fn capture_media(
 
         let h = frame_hash(&frame);
         hash_all = (hash_all ^ h).wrapping_mul(FNV_PRIME);
-        if is_cp && let Some(rgb) = &rgb {
-            checkpoint_rgbs.push(rgb.clone());
-        }
         // Poster = last non-blank frame of the tail; falls back to the very
         // last frame if the run ended blank (mirrors `emulate`'s selection).
         if in_tail && (frame_is_non_blank(&frame) || (f + 1 == cfg.frames && poster.is_none())) {
@@ -985,7 +976,6 @@ fn capture_media(
 
     Ok(MediaOut {
         poster,
-        checkpoint_rgbs,
         hash_all,
         frames: cfg.frames,
         audio_samples,
@@ -1189,8 +1179,8 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
     let med = median(rows.iter().filter_map(|r| r.fps).collect());
 
     // Media is probed off disk purely by rom_sha (never the filename): scan the
-    // screens dir for `<sha>_<tag>.png` posters (skipping `_cpN` checkpoints) to
-    // learn which hardware tabs actually have content. This keeps the compared
+    // screens dir for `<sha>_<tag>.png` posters (any legacy `_cpN` files skipped)
+    // to learn which hardware tabs actually have content. This keeps the compared
     // manifest schema untouched — no per-hardware rows, no media sidecar.
     let mut poster_tags: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
         std::collections::BTreeMap::new();
@@ -1200,7 +1190,7 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
             let fname = e.file_name().to_string_lossy().into_owned();
             let Some(stem) = fname.strip_suffix(".png") else { continue };
             if stem.contains("_cp") || stem.len() < 18 {
-                continue; // checkpoint strip frame, or too short to be sha_tag
+                continue; // legacy checkpoint frame, or too short to be sha_tag
             }
             let (sha, rest) = stem.split_at(16);
             let Some(tag) = rest.strip_prefix('_') else { continue };
@@ -1238,8 +1228,6 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
          .name{font-size:14px;margin-top:8px;word-break:break-all}\
          .meta{font-size:12px;color:#999;display:flex;justify-content:space-between;margin-top:4px}\
          .ok{color:#4ade80}.fail{color:#f87171}.err{color:#fbbf24}\
-         .strip{display:flex;gap:2px;margin-top:6px}\
-         .strip img{flex:1;min-width:0;image-rendering:pixelated;border-radius:2px;background:#000}\
          .empty{color:#888;margin-top:24px}",
     );
     s.push_str("</style></head><body>");
@@ -1301,28 +1289,10 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
             } else {
                 format!("<img class=\"hero\" src=\"{poster}\" alt=\"\">")
             };
-            // Checkpoint strip: probe `<sha>_<tag>_cpN.png` on disk.
-            let strip = (0..r.checkpoints.len())
-                .map(|c| format!("{}_{tag}_cp{c}.png", r.rom_sha))
-                .filter(|file| screens_dir.join(file).exists())
-                .enumerate()
-                .map(|(c, file)| {
-                    format!(
-                        "<img src=\"./screens/{}\" alt=\"\" title=\"checkpoint {c} @ frame {}\">",
-                        html_escape(&file),
-                        r.checkpoints[c].0
-                    )
-                })
-                .collect::<String>();
-            let strip = if strip.is_empty() {
-                String::new()
-            } else {
-                format!("<div class=\"strip\">{strip}</div>")
-            };
             let display_name = r.name.clone().unwrap_or_else(|| format!("sha:{}", r.rom_sha));
             let fps = r.fps.map_or(String::new(), |f| format!("{f:.0} fps"));
             s.push_str(&format!(
-                "<div class=\"card\">{hero}{strip}<div class=\"name\">{}</div>\
+                "<div class=\"card\">{hero}<div class=\"name\">{}</div>\
                  <div class=\"meta\"><span>{} {fps}</span><span class=\"{cls}\">{status}</span></div></div>",
                 html_escape(&display_name),
                 html_escape(&tag.to_ascii_uppercase()),
