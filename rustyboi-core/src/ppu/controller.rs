@@ -1438,6 +1438,15 @@ pub struct Ppu {
     obp0_dot_history: Vec<(u128, u8)>,
     #[serde(default)]
     obp1_dot_history: Vec<(u128, u8)>,
+    // Dot-keyed BGP history for the CGB / DMG-compat BG color path. A mid-mode-3
+    // BGP write applies at `ticks + latency` (a DOT), and each BG pixel is colored
+    // at its own pop dot — which is delayed by any sprite-fetch stall between the
+    // write and that column. Sampling by pop-dot (not display column) makes the
+    // stall absorption exact for both the on-stall write and a pre-stall write
+    // whose target column is pushed past the stall (mealybug m3_bgp_change_sprites
+    // cgb_c). The column-keyed `bgp_history` remains the DMG-hardware path.
+    #[serde(default)]
+    bgp_dot_history: Vec<(u128, u8)>,
     // DMG mid-mode-3 BGP-write "glitch" (mealybug m3_bgp_change). On real DMG hardware a
     // CPU write to BGP (FF47) during mode 3 can collide with the PPU's palette read for
     // the pixel being pushed at that dot: the register is mid-transition and the pixel is
@@ -1555,6 +1564,7 @@ impl Ppu {
             sprite_fetch_recs: Vec::new(),
             obp0_dot_history: Vec::new(),
             obp1_dot_history: Vec::new(),
+            bgp_dot_history: Vec::new(),
             bgp_history: Vec::new(),
             obp0_history: Vec::new(),
             obp1_history: Vec::new(),
@@ -3288,12 +3298,26 @@ impl Ppu {
         } else {
             self.bgp_delayed
         };
+        Self::bgp_shade(bgp, idx)
+    }
+
+    // As `get_palette_color` but resolves BGP at the pixel's pop DOT rather than its
+    // display column. Used by the CGB / DMG-compat BG color path: a sprite-fetch
+    // stall between a BGP write and a column delays that column's pop, so the
+    // dot-space model (write applies at `ticks+latency`; pixel pops later) is exact
+    // where the column model over/under-shoots (mealybug m3_bgp_change_sprites).
+    pub fn get_palette_color_at_tick(&self, idx: u8, pop_tick: u128) -> u8 {
+        let bgp = Self::pal_at_tick(&self.bgp_dot_history, pop_tick, self.bgp_delayed);
+        Self::bgp_shade(bgp, idx)
+    }
+
+    fn bgp_shade(bgp: u8, idx: u8) -> u8 {
         match idx {
-            0 => bgp&0x03,        // White
-            1 => (bgp>>2)&0x03, // Light Gray
-            2 => (bgp>>4)&0x03, // Dark Gray
-            3 => (bgp>>6)&0x03, // Black
-            _ => 0x00, // Default to black for invalid indices
+            0 => bgp & 0x03,
+            1 => (bgp >> 2) & 0x03,
+            2 => (bgp >> 4) & 0x03,
+            3 => (bgp >> 6) & 0x03,
+            _ => 0x00,
         }
     }
 
@@ -4452,6 +4476,10 @@ impl Ppu {
         }
         let boundary = self.pal_write_boundary(lat);
         Self::push_pal_history(&mut self.bgp_history, boundary, value);
+        // Dot-keyed history for the CGB / DMG-compat BG path: the write applies at
+        // its own dot; each pixel samples it at its (stall-delayed) pop dot.
+        let apply = self.pal_write_apply_tick(lat);
+        Self::push_pal_dot_history(&mut self.bgp_dot_history, apply, value);
     }
 
     // Display-column latency (dots) for a mid-mode-3 BGP write. This hook fires at the
@@ -5676,6 +5704,8 @@ impl Ppu {
                     // land at column >= 1 so column 0 keeps this seed.
                     self.bgp_history.clear();
                     self.bgp_history.push((0, self.bgp_delayed));
+                    self.bgp_dot_history.clear();
+                    self.bgp_dot_history.push((0, self.bgp_delayed));
                     // Clear any leftover DMG BGP phase-hold from the previous line.
                     self.bgp_defer_countdown = 0;
                     self.obp0_history.clear();
@@ -9297,12 +9327,10 @@ impl Ppu {
         let lcdc = self.lcdc;
         let bg_enabled = bg_enabled_col;
 
-        // BG shade via BGP, then look up BG palette 0 in CGB palette RAM.
-        let bg_shade = if bg_enabled {
-            self.get_palette_color(mmio, bg_pixel_idx, screen_x)
-        } else {
-            self.get_palette_color(mmio, 0, screen_x)
-        };
+        // BG shade via BGP at this pixel's pop dot, then look up BG palette 0 in CGB
+        // palette RAM.
+        let idx = if bg_enabled { bg_pixel_idx } else { 0 };
+        let bg_shade = self.get_palette_color_at_tick(idx, self.ticks);
         let (lo, hi) = mmio.bg_palette_pair_raw(0, bg_shade);
         let bg_color_rgb = self.cgb_color_to_rgb(lo, hi);
 
