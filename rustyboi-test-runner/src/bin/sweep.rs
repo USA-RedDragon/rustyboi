@@ -797,17 +797,19 @@ fn ffmpeg_available() -> bool {
         .unwrap_or(false)
 }
 
-/// HEVC encoder reading rawvideo rgb24 over stdin -> a temp mp4. `pools=1`
-/// caps x265 threads since the sweep already parallelizes across ROMs.
+/// H.264 encoder reading rawvideo rgb24 over stdin -> a temp mp4. H.264 plays
+/// in every browser (HEVC did not). `-threads 1` caps x264 since the sweep
+/// already parallelizes across ROMs; `-g 300` (long GOP) + `veryslow`/`crf 28`
+/// exploit the heavy temporal redundancy of tiny 160x144 menu-heavy clips.
 fn spawn_encoder(out: &Path) -> std::io::Result<std::process::Child> {
     Command::new("ffmpeg")
         .args([
             "-loglevel", "error",
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "160x144",
             "-framerate", "4194304/70224", "-i", "-",
-            "-c:v", "libx265", "-preset", "fast", "-crf", "23",
-            "-x265-params", "log-level=error:pools=1",
-            "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-f", "mp4",
+            "-c:v", "libx264", "-preset", "veryslow", "-crf", "28",
+            "-g", "300", "-threads", "1",
+            "-pix_fmt", "yuv420p", "-f", "mp4",
         ])
         .arg(out)
         .stdin(Stdio::piped())
@@ -816,7 +818,7 @@ fn spawn_encoder(out: &Path) -> std::io::Result<std::process::Child> {
         .spawn()
 }
 
-/// Second pass (`-c:v copy`, no re-encode): mux the HEVC video with the PCM
+/// Second pass (`-c:v copy`, no re-encode): mux the H.264 video with the PCM
 /// audio as AAC. Returns true only if the muxed file was produced.
 /// No `-shortest`: the whole run's video is the point, so keep every frame even
 /// when the audio track is marginally shorter (it just falls silent at the tail).
