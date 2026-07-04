@@ -1076,6 +1076,12 @@ pub struct Ppu {
     // next LCD enable / LY reset, like `lytime_no_plus1`.
     #[serde(default)]
     ssds_mode3_ly_advance: bool,
+    // Frame boundaries completed since `ssds_mode3_ly_advance` was last set. The
+    // mode-3-switch lyCounter re-anchor is a phase artifact local to the frames
+    // right after the switch; once several frame wraps re-settle the phase it no
+    // longer applies. Reset to 0 when the flag is set.
+    #[serde(default)]
+    ssds_mode3_frames: u8,
     // Set when an SS->DS speed switch executes during PixelTransfer (mode 3) and
     // the bridge dropped 2 dots (see `stop_bridge_advance`). If a subsequent
     // DS->SS switch follows (the double-switch speedchange{2..5} families), that
@@ -1551,6 +1557,7 @@ impl Ppu {
             m0_time_master: None,
             lytime_no_plus1: false,
             ssds_mode3_ly_advance: false,
+            ssds_mode3_frames: 0,
             sc_mode3_pullback_pending: false,
             dsss_mode3_stop_count: 0,
             render_carry_skew_cc: 0,
@@ -3564,6 +3571,7 @@ impl Ppu {
     /// Gambatte's re-anchored lyTime (the renderer/STAT/m0 phase is unaffected).
     pub fn set_ssds_mode3_ly_advance(&mut self) {
         self.ssds_mode3_ly_advance = true;
+        self.ssds_mode3_frames = 0;
     }
 
     /// STAGE 4 (FACET 2 KEYSTONE) — advance the STAT/LINE-PHASE clock by ONE dot
@@ -7222,6 +7230,19 @@ impl Ppu {
                         // Count this completed frame toward post-enable resync so
                         // get_frame stops blanking once a full frame has displayed.
                         self.frames_since_enable = self.frames_since_enable.saturating_add(1);
+                        // The SS->DS-mode3 lyCounter re-anchor is a phase artifact
+                        // local to the frame(s) right after the switch; once two
+                        // frame wraps have re-settled the line phase (age lcd-align-ly:
+                        // multiple STOP windows push its LY reads several frames past
+                        // the switch) it no longer applies and the getLyReg reads
+                        // resolve through the standard DS window. The age `ly`
+                        // mode-3-switch probes read within 0-1 wraps and keep it.
+                        if self.ssds_mode3_ly_advance {
+                            self.ssds_mode3_frames = self.ssds_mode3_frames.saturating_add(1);
+                            if self.ssds_mode3_frames >= 2 {
+                                self.ssds_mode3_ly_advance = false;
+                            }
+                        }
                     } else if (144..153).contains(&current_ly) {
                         let next_ly = current_ly.saturating_add(1);
                         mmio.write_ly_from_ppu(next_ly);
