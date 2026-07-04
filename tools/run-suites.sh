@@ -97,7 +97,7 @@ threshold() {
         mooneye)            echo "189 -" ;;
         mooneye_wilbertpol) echo "188 -" ;;
         age)                echo "49 -" ;;
-        gbmicrotest)        echo "481 -" ;;
+        gbmicrotest)        echo "485 -" ;;
         samesuite_apu)      echo "70 -" ;;
         samesuite_nonapu)   echo "6 -" ;;
         samesuite_sgb)      echo "2 -" ;;
