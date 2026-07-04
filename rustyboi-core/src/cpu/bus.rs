@@ -909,7 +909,21 @@ impl<'a> Bus<'a> {
         // VRAM/OAM/CGB-palette writes are ignored while the PPU owns those
         // resources (see `ppu_locks_access`). Drop the write but still tick.
         // OAM-DMA conflicts are resolved separately in the tick-before path.
-        if !self.mmio.dma_active() && self.ppu_blocks(addr, false, self.mmio.master_cc()) {
+        // FAITHFUL HALT-EXIT (CGB dma-due deferral): the deferred post-HALT
+        // `ld (nn),a` write resolves its PPU mode-block against the post-block1-
+        // transfer cc (Gambatte advances the PPU across block1's transfer before the
+        // CPU resumes). Add block1's transfer span to this VRAM write's mode check
+        // only; block2's next/same-line timing (driven by the deferred stall) is
+        // left untouched. One-shot: consumed by this first VRAM write.
+        let write_block_cc = {
+            let base = self.mmio.master_cc();
+            if (0x8000..=0x9FFF).contains(&addr) {
+                base + self.mmio.take_hdma_dma_due_write_cc_bias()
+            } else {
+                base
+            }
+        };
+        if !self.mmio.dma_active() && self.ppu_blocks(addr, false, write_block_cc) {
             // DMG OAM-bug: the PPU owns OAM in mode 2/3 so the write is dropped,
             // but a write to OAM during mode 2 still corrupts the scanned row
             // (Pan Docs "Write Corruption"). Sample the row at the access start

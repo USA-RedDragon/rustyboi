@@ -644,6 +644,16 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_resume_shadow_window: bool,
 
+    /// FAITHFUL HALT-EXIT (CGB dma-due deferral): cc added to a VRAM WRITE's PPU
+    /// mode-block check for the deferred post-HALT `ld (nn),a`. Gambatte's
+    /// `intevent_dma` advances the PPU across block1's transfer before the CPU
+    /// resumes, so that write lands in the post-transfer mode-0 window. rustyboi
+    /// defers block1's stall (block2's next/same-line timing depends on that
+    /// deferral), so instead of advancing the world it biases only this write's
+    /// mode check by the pending transfer span. One-shot (cleared on consume).
+    #[serde(skip, default)]
+    hdma_dma_due_write_cc_bias: u64,
+
     // C7-full FF55-kick fire-timing: set when an FF55 bit7=1 write (enable or
     // restart) wants to arm the first block immediately. Gambatte's `enableHdma`
     // gates that immediate flag on the LIVE `isHdmaPeriod(cc + 4)` predicate, not
@@ -841,6 +851,7 @@ impl Mmio {
             hdma_snapshot_armed: false,
             hdma_resume_pre_shadow: std::collections::HashMap::new(),
             hdma_resume_shadow_window: false,
+            hdma_dma_due_write_cc_bias: 0,
             hdma_write_delay: 0,
             hdma_kick_eval_pending: 0,
             hdma_disable_fires: None,
@@ -3350,6 +3361,15 @@ impl Mmio {
     }
     pub fn hdma_resume_lockstep_window(&self) -> bool {
         self.hdma_resume_lockstep_window
+    }
+    /// FAITHFUL HALT-EXIT (CGB dma-due deferral): set/take the cc bias the deferred
+    /// post-HALT VRAM write adds to its PPU mode-block check (block1's transfer
+    /// span). One-shot — consumed by the first VRAM write on the resume step.
+    pub fn set_hdma_dma_due_write_cc_bias(&mut self, v: u64) {
+        self.hdma_dma_due_write_cc_bias = v;
+    }
+    pub fn take_hdma_dma_due_write_cc_bias(&mut self) -> u64 {
+        std::mem::take(&mut self.hdma_dma_due_write_cc_bias)
     }
     /// m25: arm/clear the pre-transfer shadow window (armed for both IME states;
     /// the lockstep advance window is separate and !ime-gated).
