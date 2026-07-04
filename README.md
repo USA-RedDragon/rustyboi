@@ -35,8 +35,8 @@ is, how it is graded, and where its ROMs come from.
 | rtc3test | 6 | 6 |
 | mbc3_tester | 2 | 2 |
 | cpp | 3 | 3 |
-| gambatte | 5241 | 5257 |
-| **Total** | **6383** | **6440** |
+| gambatte | 5243 | 5257 |
+| **Total** | **6385** | **6440** |
 <!-- SUITE-PROGRESS:END -->
 
 ## RetroArch / libretro core
