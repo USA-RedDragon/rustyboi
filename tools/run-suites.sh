@@ -96,7 +96,7 @@ threshold() {
         mealybug)           echo "46 -" ;;
         mooneye)            echo "189 -" ;;
         mooneye_wilbertpol) echo "188 -" ;;
-        age)                echo "47 -" ;;
+        age)                echo "49 -" ;;
         gbmicrotest)        echo "481 -" ;;
         samesuite_apu)      echo "70 -" ;;
         samesuite_nonapu)   echo "6 -" ;;
