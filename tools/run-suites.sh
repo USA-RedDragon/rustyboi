@@ -113,7 +113,7 @@ threshold() {
         rtc3test)           echo "6 -" ;;
         mbc3_tester)        echo "2 -" ;;
         cpp)                echo "3 -" ;;
-        gambatte)           echo "5243 -" ;;  # gated on failed<=16 (GAMBATTE_MAX_FAIL)
+        gambatte)           echo "5243 -" ;;  # gated on failed<=14 (GAMBATTE_MAX_FAIL)
         *)                  echo "" ;;
     esac
 }
