@@ -8720,11 +8720,17 @@ impl Ppu {
             if !ds {
                 // video.h:135 getLyReg: single-speed bound is `cpl - 1*isAgb`.
                 // AGB shrinks the line-153 reads-0 window by one dot.
-                // CGB-D/E shrinks it by one M-cycle (4 dots): a read in the first
-                // M-cycle of line 153 still returns 153 (age ly/lcd-align-ly E99:
-                // the delay-2 edge-of-152/153 read is $99 on E, $00 on B/C).
+                // CGB-D/E shrinks it by exactly one dot: only the first dot of line
+                // 153 (to_next-1 == cpl, the top of the line) still reads 153; every
+                // later dot reads 0. The age lcd-align-ly-cgbE alignment sweep pins
+                // this: its line-153-head reads at to_next 457 read 153, but 456/454
+                // (one/three dots in) already read 0 — a one-dot window, not the
+                // one-M-cycle (4-dot) window the wider tuning assumed. The age
+                // ly-cgbE E99 edge read sits at to_next 457 (inside the 1-dot window)
+                // and to_next 453 (outside, reads 0 either way), so both revisions'
+                // ly probes are unaffected by the narrowing.
                 let agb = mmio.is_agb() as i64;
-                let de = 4 * mmio.is_cgb_de() as i64;
+                let de = mmio.is_cgb_de() as i64;
                 if to_next - 1 <= cpl - agb - de {
                     return Some(0);
                 }
@@ -8880,7 +8886,19 @@ impl Ppu {
         }
         if tn <= 10 && tn <= 6 + 4 * (ds as i64) {
             let result = if tn == 6 + 4 * (ds as i64) {
-                ly_reg & (ly_reg + 1)
+                // Glitch dot: the register briefly shows `ly & (ly+1)` (a partial
+                // latch that only bites at a carry boundary, e.g. 0x8F->0x90 folds to
+                // 0x80, odd->even folds the low bit). CGB-D/E does NOT fold here — it
+                // reads the stale pre-increment `ly` instead. The age lcd-align-ly
+                // sweep pins this: at the 143->144 glitch dot cgbBC reads 0x80 while
+                // cgbE reads 0x8F (143), and at the 1->2 dot cgbBC reads 0 while cgbE
+                // reads 1. Non-carry `ly` values (0,2,152) fold to themselves, so the
+                // two revisions coincide except at those carry boundaries.
+                if mmio.is_cgb_de() {
+                    ly_reg
+                } else {
+                    ly_reg & (ly_reg + 1)
+                }
             } else {
                 ly_reg + 1
             };
