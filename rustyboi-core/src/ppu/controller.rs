@@ -9325,12 +9325,11 @@ impl Ppu {
     /// mode-2 doEvent performs. Run after `abs_cc` is folded to the current dot,
     /// before the mode-2 scan reads the snapshot.
     fn process_oam_reader_events(&mut self, mmio: &mut mmio::Mmio) {
-        let lc = self.ly_counter(mmio);
         let cc = self.abs_cc;
-        let cgb = mmio.is_cgb_features_enabled();
 
         // Lazy seed for the current LCD-on session.
         if !self.oam_reader_seeded {
+            let cgb = mmio.is_cgb_features_enabled();
             let mut pos = [0u8; 80];
             mmio.peek_oam_pos(&mut pos);
             self.oam_reader.reset(&pos, cgb);
@@ -9361,6 +9360,7 @@ impl Ppu {
         // merge window as a non-writing (readable) source.
         let dma_writing = mmio.oam_dma_window_active() && !mmio.mgb_frozen_merge_active();
         if dma_writing != self.prev_dma_writing {
+            let lc = self.ly_counter(mmio);
             mmio.peek_oam_pos(&mut pos);
             pos_filled = true;
             // The DMA window edge is observed at the PPU dot, but Gambatte fires
@@ -9388,6 +9388,7 @@ impl Ppu {
 
         // CPU OAM write this M-cycle (Gambatte `lcd_.oamChange(cc)`).
         if mmio.take_oam_write_pending() {
+            let lc = self.ly_counter(mmio);
             if !pos_filled {
                 mmio.peek_oam_pos(&mut pos);
             }
