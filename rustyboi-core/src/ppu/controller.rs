@@ -203,6 +203,18 @@ const CGBWG_ARM_WIN: u64 = 14;
 const CGBWG_ARM_WIN_HI: u64 = 12;
 const CGBWG_ARM_BG: u64 = 14;
 const CGBWG_SHIFT_BASE: u64 = 13;
+// CGB-compat window train tile-data-select latch (lower window rows). From
+// WIN_TRAIN_GLITCH_ROW on, the pulse-train level and the tile-index-as-data glitch
+// coincidence are sampled a per-block lag (in dots) before the reconstructed byte
+// read; a FALL commit landing exactly on the sample dot IS the glitch. The lag
+// walks one dot later every WIN_TRAIN_LAG_STEP window lines (the sub-dot fetch
+// phase drift). Derived against rustyboi's own LCDC journal + the SameBoy CGB-C
+// per-fetch oracle of m3_lcdc_tile_sel_win_change2 (zero lts/glitch mismatch,
+// rows 40-47 lag -1, 48-55 lag 0, 56-63 lag +1). The upper rows (< this) are
+// uniform (no oracle split/glitch) and use the collapse path instead.
+const WIN_TRAIN_GLITCH_ROW: u8 = 40;
+const WIN_TRAIN_LAG_BASE: i64 = -1;
+const WIN_TRAIN_LAG_STEP: u8 = 8;
 
 /// Machine configuration for a CPU VRAM/OAM access-window query.
 #[derive(Clone, Copy)]
@@ -2420,6 +2432,17 @@ impl Ppu {
         self.wg_anchor_cc = Some(self.abs_cc.saturating_sub(rb_absorb + chop));
     }
 
+    // CGB-compat window train tile-data-select sample lag, in dots, subtracted
+    // from a reconstructed window byte-read dot to reach the A12/LCDC.4 latch dot
+    // (see the WIN_TRAIN_* consts). Fixed for the upper window rows; from
+    // WIN_TRAIN_GLITCH_ROW it steps up one dot every WIN_TRAIN_LAG_STEP rows — the
+    // sub-dot walk that carries the special-tile boundary and the tile-index-as-
+    // data glitch down the lower window. Keyed on the window-internal line.
+    fn win_train_sample_lag(&self, win_line: u8) -> i64 {
+        WIN_TRAIN_LAG_BASE
+            + (win_line.saturating_sub(WIN_TRAIN_GLITCH_ROW) / WIN_TRAIN_LAG_STEP) as i64
+    }
+
     fn wg_apply(&self, mut fls: fetcher::FetcherLcdcState) -> fetcher::FetcherLcdcState {
         let Some(anchor) = self.wg_anchor_cc else {
             return fls;
@@ -2947,18 +2970,23 @@ impl Ppu {
     }
 
     // CGB-compat up-pulse LCDC.4 train capture-phase re-resolve for the WINDOW
-    // fetcher (the window analog of cgb_train_reresolve). Window tiles are UNIFORM
-    // on hardware — the tile-data-select base is latched ONCE per tile — but
-    // rustyboi's per-substep resolution splits a tile whenever an LCDC.4 journal
-    // edge falls between its LOW (k=1) and HIGH (k=2) reads (2 dots apart): the
-    // LOW plane reads $8000 while the HIGH plane reads $8800 (or vice versa),
-    // producing a mixed pixel index the reference never shows. The whole-line
-    // journal is complete at line-end, so re-collapse every split window tile to
-    // a SINGLE base (the LOW-plane resolution, which is the first substep and the
-    // base hardware latches) and re-plot with both planes read from that one base.
-    // Same tight gate as the BG path (line-initial LCDC.4 low AND >= 4 journal
-    // edges) so the isolated single-pulse win_change (2 edges) and win_map_change2
-    // stay untouched. CGB-compat only.
+    // fetcher (the window analog of cgb_train_reresolve). rustyboi's live per-substep
+    // resolve draws each window tile from its LOW/HIGH reads on a line-locked grid
+    // against the PARTIAL journal (the pulse train is only fully journaled at
+    // line-end), which mis-latches the tile-data-select base and misses the
+    // tile-index-as-data glitch. This runs at line-end against the COMPLETE journal.
+    // The two bands are handled differently (see the per-tile comment): the upper
+    // rows collapse each live-split tile to its single latched base; the lower rows
+    // (from WIN_TRAIN_GLITCH_ROW) reconstruct each read dot and re-resolve the base +
+    // glitch at the band sample lag, rendering the tile INDEX as a glitched plane's
+    // byte (SameBoy data_for_tile_sel_glitch). Same tight gate as before
+    // (line-initial LCDC.4 low AND >= 4 journal edges) so the isolated single-pulse
+    // win_change and win_map_change2 stay untouched. Cuts m3_lcdc_tile_sel_win_change2
+    // from 1068 -> 702 (the earlier landed collapse) -> 221 px; the remaining residual
+    // is the y0-6 first-pulse sub-dot base (42 px, which SameBoy renders) plus the
+    // rows 40-46/56-62 glitch band (~179 px), where SameBoy-CGB-C itself misses the
+    // reference by the same 179 px (a beyond-SameBoy real-silicon A12-settle phase).
+    // CGB-compat only.
     fn win_train_reresolve(&mut self, mmio: &mmio::Mmio) {
         if !self.wg_cgb || self.win_tile_buf.is_empty() || self.wg_hist.is_empty() {
             return;
@@ -2974,23 +3002,101 @@ impl Ppu {
             self.win_tile_buf.clear();
             return;
         }
+        let (Some(anchor), dpre) = (self.wg_anchor_cc, self.wg_dpre) else {
+            self.win_tile_buf.clear();
+            return;
+        };
+        // Resolve the LCDC.4 tile-data-select level at a reconstructed read dot,
+        // and whether the read coincides with a falling edge (the tile-index-as-
+        // data glitch). Both key on the latch dot = read dot - sample lag; a FALL
+        // commit landing exactly on the latch dot returns the tile index as data
+        // (SameBoy tile_sel_glitch). The two leading window tiles (n<2) always
+        // latch the line-initial low base — their HIGH_T1 latch predates the pulse
+        // train — so they never glitch and keep the $8800 base.
+        let resolve = |this: &Self, h: u64, first_tile: bool, sample_lag: i64| -> (bool, bool) {
+            if first_tile {
+                return (false, false);
+            }
+            let s = h as i64 - sample_lag;
+            let mut level = (this.wg_hist[0].1 & tds) != 0;
+            let mut glitch = false;
+            for &(cc, old, new) in &this.wg_hist {
+                let w = cc as i64 - WG_TRANSITION_DELAY as i64; // raw write commit
+                if s > w {
+                    level = (new & tds) != 0;
+                }
+                if s == w && (old & tds) != 0 && (new & tds) == 0 {
+                    glitch = true; // FALL commit on the latch dot
+                }
+            }
+            (level, glitch)
+        };
         let buf = std::mem::take(&mut self.win_tile_buf);
         for t in &buf {
-            // Only the split tiles need repair; a uniform tile is already drawn
-            // with its single latched base.
-            if t.live_low_tds == t.live_high_tds {
-                continue;
-            }
-            // Collapse to the LOW-plane base (the first substep = the latched base).
-            let uni = if t.live_low_tds {
-                LCDCFlags::BGWindowTileDataSelect as u8
+            // The upper window rows (win line < WIN_TRAIN_GLITCH_ROW) are UNIFORM on
+            // hardware: every tile latches a single $8000/$8800 base, and the oracle
+            // shows no split and no glitch there. rustyboi's live per-substep grid
+            // can still SPLIT such a tile across an LCDC.4 pulse edge (LOW plane one
+            // base, HIGH plane the other). Collapse each live-split tile to its
+            // LOW-plane base (the first substep = the base hardware keeps); uniform
+            // live tiles are already correct and are left alone.
+            //
+            // The lower rows (from WIN_TRAIN_GLITCH_ROW) carry the sub-dot-drifted
+            // grid where the completed journal re-resolves the base and fires the
+            // tile-index-as-data glitch. The reconstructed read dot minus the band
+            // sample lag gives each plane's base + glitch flag; render both planes
+            // from those, reading the tile INDEX as a glitched plane's byte
+            // (SameBoy tile_sel_glitch).
+            let (low_tds, high_tds, lo_glitch, hi_glitch);
+            if t.y < WIN_TRAIN_GLITCH_ROW {
+                if t.live_low_tds == t.live_high_tds {
+                    continue; // uniform live tile — already correct
+                }
+                low_tds = t.live_low_tds;
+                high_tds = t.live_low_tds;
+                lo_glitch = false;
+                hi_glitch = false;
             } else {
-                0
-            };
+                let h1 = anchor + dpre + 8 * t.n + 2;
+                let h2 = anchor + dpre + 8 * t.n + 4;
+                let first_tile = t.n < 2;
+                let lag = self.win_train_sample_lag(t.y);
+                let (lt, lg) = resolve(self, h1, first_tile, lag);
+                let (ht, hg) = resolve(self, h2, first_tile, lag);
+                low_tds = lt;
+                high_tds = ht;
+                lo_glitch = lg;
+                hi_glitch = hg;
+                // Nothing to repair when the completed resolve matches the live draw
+                // and neither plane glitches.
+                if low_tds == t.live_low_tds
+                    && high_tds == t.live_high_tds
+                    && !lo_glitch
+                    && !hi_glitch
+                {
+                    continue;
+                }
+            }
             let line = t.y % 8;
-            let addr = self.fetcher.get_tile_data_address(t.tn, line, uni);
-            let low_byte = mmio.read_vram_bank(0, addr);
-            let high_byte = mmio.read_vram_bank(0, addr + 1);
+            // The tile-index-as-data glitch replaces the glitched plane's byte
+            // with the tile INDEX (SameBoy data_for_tile_sel_glitch); otherwise
+            // each plane reads from its own resolved base.
+            let low_byte = if lo_glitch {
+                t.tn
+            } else {
+                let a =
+                    self.fetcher
+                        .get_tile_data_address(t.tn, line, if low_tds { tds } else { 0 });
+                mmio.read_vram_bank(0, a)
+            };
+            let high_byte = if hi_glitch {
+                t.tn
+            } else {
+                let a =
+                    self.fetcher
+                        .get_tile_data_address(t.tn, line, if high_tds { tds } else { 0 });
+                mmio.read_vram_bank(0, a + 1)
+            };
             for i in 0..8u8 {
                 let col = t.first_x as i32 + i as i32;
                 if !(0..160).contains(&col) { continue; }
