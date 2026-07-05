@@ -1503,6 +1503,11 @@ pub struct Ppu {
     // glitch straight into the framebuffer. Reset at mode-3 start.
     #[serde(default)]
     bgp_writes: Vec<(u64, u8, u8)>,
+    // Last mode-2 (OAM scan) BGP write (cc, value), carried across the mode-3-arm
+    // bgp_writes clear and injected as a neighbor-only spike entry at mode-3 entry
+    // (see on_bgp_write / the arm seed). None once consumed or if no mode-2 write.
+    #[serde(default)]
+    bgp_mode2_pending: Option<(u64, u8)>,
     #[serde(default)]
     cgb_color_conversion: CgbColorConversion,
     #[serde(skip, default)]
@@ -1602,6 +1607,7 @@ impl Ppu {
             obp1_history: Vec::new(),
             line_bg_idx: vec![-1; 160],
             bgp_writes: Vec::new(),
+            bgp_mode2_pending: None,
             abs_cc: 0,
             p_now: pnow_disabled(),
             write_subdot: 0,
@@ -4540,6 +4546,17 @@ impl Ppu {
     /// for this line — a write outside mode 3 just lands in the seed at the next
     /// mode-3 entry. Steady-state (no mid-mode-3 write) is unaffected.
     pub fn on_bgp_write(&mut self, value: u8, _mmio: &mmio::Mmio) {
+        // A BGP write in the OAM scan (mode 2) just before mode 3 is the leading edge
+        // of a two-write spike pair when a mode-3 write follows within the cadence
+        // window: it settles the glitch palette so the mode-3 partner's transition
+        // paints a visible spike (age m3-bg-bgp early band: the $FF write lands in
+        // mode 2, the restore at col 1 in mode 3). Stash it (survives the mode-3-arm
+        // bgp_writes clear); it is injected neighbor-only at mode-3 entry and
+        // discarded by the cadence gate if no mode-3 partner lands within
+        // BGP_SPIKE_CADENCE_CC.
+        if self.state == State::OAMSearch && !_mmio.is_cgb() && !self.disabled {
+            self.bgp_mode2_pending = Some((self.abs_cc, value));
+        }
         if self.state != State::PixelTransfer || self.disabled {
             return;
         }
@@ -4562,6 +4579,16 @@ impl Ppu {
         // pixel (the TWO-WRITE cadence gate) is resolved at mode-3 end in
         // `resolve_bgp_spikes`, once all of the line's writes are known. Capture the old
         // (settled) value BEFORE recording the new one in the history.
+        // A prologue write (SCX-discard warmup) does not paint its own spike, but
+        // on hardware it still forms the leading half of a two-write spike cadence:
+        // its restore partner (recorded below at a visible column) must find it as a
+        // neighbor or the spike vanishes (age m3-bg-bgp: the $FF write lands at x=0
+        // during the SCX discard, the restore at x=4 paints the visible black pixel).
+        // Record it with a never-painted victim column (>=160) so it is a cadence
+        // neighbor only.
+        if !_mmio.is_cgb() && self.in_previsible_prologue() {
+            self.bgp_writes.push((self.abs_cc, 0xFF, value));
+        }
         if !_mmio.is_cgb() && !self.in_previsible_prologue() {
             // The spike's victim is the pixel POPPING at the write's apply dot.
             // When a sprite fetch has the pipeline stalled across that dot no
@@ -4573,7 +4600,13 @@ impl Ppu {
             // partner keeps its cadence neighbor. On stall-free lines the
             // victim is exactly `self.x + lat` (the old column model).
             let stall = self.sprite_fetch_stall as i32;
-            let col = if stall <= lat {
+            // Pending SCX discard: at x==0 the first display column has not popped
+            // while pixels remain to be discarded (m3_pixels_discarded <
+            // m3_discard_target). The write's victim pixel is one of those discarded
+            // pixels, so no visible spike lands — record it neighbor-only (age
+            // m3-bg-bgp late bands LY21..23: the restore fires mid-discard).
+            let discarding = self.x == 0 && self.m3_pixels_discarded < self.m3_discard_target.max(0) as u8;
+            let col = if stall <= lat && !discarding {
                 (self.x as i32 + lat - stall).clamp(0, 255) as u8
             } else {
                 0xFF
@@ -5847,6 +5880,22 @@ impl Ppu {
                     self.sprite_fetch_recs
                         .resize(self.sprites_on_line.len(), SpriteFetchRec::default());
                     self.bgp_writes.clear();
+                    // Carry a mode-2 BGP write into this line's spike cadence as a
+                    // neighbor-only entry (see on_bgp_write); a mode-3 partner within
+                    // BGP_SPIKE_CADENCE_CC then paints its spike (age m3-bg-bgp).
+                    if let Some((cc, v)) = self.bgp_mode2_pending.take()
+                        && !mmio.is_cgb()
+                    {
+                        self.bgp_writes.push((cc, 0xFF, v));
+                        // The mode-2 write is the true settled BGP entering mode 3
+                        // (bgp_delayed lags a dot and can miss a late-mode-2 write),
+                        // so re-seed column 0's palette + the spike's `old` baseline
+                        // with it — the restore's glitch then ORs against FF, painting
+                        // its victim column with the pre-restore (glitch) shade.
+                        self.bgp_history.clear();
+                        self.bgp_history.push((0, v));
+                        self.bgp_delayed = v;
+                    }
                     // 160-entry per-column BG-index scratch; ensure sized (deserialized
                     // saves may carry an empty vec) and clear to -1 (no BG pixel yet).
                     self.line_bg_idx.clear();
