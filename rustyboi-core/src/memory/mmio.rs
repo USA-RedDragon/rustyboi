@@ -745,6 +745,12 @@ pub struct Mmio {
 
     // CGB feature enablement
     cgb_features_enabled: bool, // Whether CGB-specific features should be active
+    // Cached: the inserted cart is an MBC3-with-timer (RTC). Lets the per-dot
+    // tick_rtc skip the call into the cartridge entirely for the common
+    // no-RTC cart. #[serde(skip)] + resync on cartridge access keeps it correct
+    // across state loads (an old/absent value is re-derived, never trusted).
+    #[serde(skip, default)]
+    cart_has_rtc: bool,
     // AGB (GBA-in-GBC-mode) hardware flag. AGB behaves like CGB everywhere
     // except a small, well-defined set of timing/APU diffs (Gambatte isAgb()).
     // Set once at construction from Hardware::AGB; never toggled by cart compat
@@ -875,6 +881,7 @@ impl Mmio {
             obj_palette_spec: 0,
 
             cgb_features_enabled: false, // Will be set when cartridge is inserted
+            cart_has_rtc: false,         // Set on insert_cartridge
             is_agb: false,
             cgb_de: false,
             is_mgb: false,
@@ -897,7 +904,15 @@ impl Mmio {
     }
 
     pub fn insert_cartridge(&mut self, cartridge: cartridge::Cartridge) {
+        self.cart_has_rtc = cartridge.has_rtc();
         self.cartridge = Some(cartridge);
+    }
+
+    /// Re-derive the cached `cart_has_rtc` flag from the current cartridge.
+    /// Called after a state-file load, where the cartridge is restored via
+    /// serde rather than `insert_cartridge`.
+    pub fn resync_cart_flags(&mut self) {
+        self.cart_has_rtc = self.cartridge.as_ref().is_some_and(|c| c.has_rtc());
     }
 
     pub fn set_cgb_features_enabled(&mut self, enabled: bool) {
@@ -1191,6 +1206,9 @@ impl Mmio {
     /// the same span the rest of the world advances by. No-op for carts without
     /// an RTC.
     pub fn tick_rtc(&mut self, cycles: u64) {
+        if !self.cart_has_rtc {
+            return;
+        }
         if let Some(cart) = self.cartridge.as_mut() {
             cart.rtc_tick(cycles);
         }
