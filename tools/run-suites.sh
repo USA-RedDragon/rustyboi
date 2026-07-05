@@ -96,7 +96,7 @@ threshold() {
         mealybug)           echo "48 -" ;;
         mooneye)            echo "191 -" ;;
         mooneye_wilbertpol) echo "192 -" ;;
-        age)                echo "55 -" ;;
+        age)                echo "56 -" ;;
         gbmicrotest)        echo "485 -" ;;
         samesuite_apu)      echo "70 -" ;;
         samesuite_nonapu)   echo "6 -" ;;
@@ -113,11 +113,11 @@ threshold() {
         rtc3test)           echo "6 -" ;;
         mbc3_tester)        echo "2 -" ;;
         cpp)                echo "3 -" ;;
-        gambatte)           echo "5246 -" ;;  # gated on failed<=11 (GAMBATTE_MAX_FAIL)
+        gambatte)           echo "5247 -" ;;  # gated on failed<=10 (GAMBATTE_MAX_FAIL)
         *)                  echo "" ;;
     esac
 }
-GAMBATTE_MAX_FAIL=11
+GAMBATTE_MAX_FAIL=10
 
 # Deterministic suite order for `all`.
 ORDER="acid2 cgb_acid_hell mealybug mooneye mooneye_wilbertpol age gbmicrotest \
