@@ -8,7 +8,7 @@
 //! canaries wide), any fps drop beyond tolerance is a perf regression.
 //!
 //! MEDIA (privacy + hardware matrix): every emitted media file is keyed on the
-//! ROM's `rom_sha`, never the (trademarked) file name — `screens/<sha>_<hw>.png`
+//! ROM's `rom_sha`, never the (trademarked) file name — `screens/<sha>_<hw>.webp`
 //! (one poster) and `videos/<sha>_<hw>.mp4`. Media is captured on a
 //! SET of hardware models (default DMG,CGB,SGB,AGB via `--hardware`) so the
 //! gallery can tab between them; a CGB-only game on DMG legitimately renders the
@@ -23,7 +23,7 @@
 //!   sweep run      --roms DIR... [--list FILE] --out DIR [--frames N]
 //!                  [--warmup N] [--jobs N] [--timeout SECS] [--no-screens]
 //!                  [--strip-names] [--only SUBSTR]
-//!       Sweep the library into DIR/manifest.jsonl + DIR/screens/*.png.
+//!       Sweep the library into DIR/manifest.jsonl + DIR/screens/*.webp.
 //!       No-Intro names are always on: each ROM is labeled by its canonical
 //!       No-Intro title (matched via CRC32 of the extracted ROM against the
 //!       public GB/GBC DATs, auto-fetched+cached; see nointro_map). Unmatched
@@ -81,7 +81,7 @@ mod imaging;
 #[path = "shared/masher.rs"]
 mod masher;
 use masher::masher;
-use imaging::{encode_rgb_png, frame_rgb, html_escape};
+use imaging::{encode_rgb_webp, frame_rgb, html_escape};
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Row {
@@ -915,25 +915,25 @@ fn mux_av(video: &Path, pcm: &Path, out: &Path) -> bool {
     matches!(status, Ok(s) if s.success()) && out.exists()
 }
 
-/// Write the single poster PNG, keyed on `sha`_`tag` (never a filename). This is
+/// Write the single poster WebP, keyed on `sha`_`tag` (never a filename). This is
 /// the video `poster=` and the no-ffmpeg/old-dir `<img>` fallback. Errors are
 /// logged, not fatal.
 fn write_poster_png(dir: &Path, sha: &str, tag: &str, poster: Option<&Vec<u8>>) {
     if let Some(rgb) = poster {
-        let file = dir.join(format!("{sha}_{tag}.png"));
-        if let Err(e) = std::fs::write(&file, encode_rgb_png(160, 144, rgb)) {
+        let file = dir.join(format!("{sha}_{tag}.webp"));
+        if let Err(e) = std::fs::write(&file, encode_rgb_webp(160, 144, rgb)) {
             eprintln!("screenshot {}: {e}", file.display());
         }
     }
 }
 
-/// Write the SGB 256x224 border still, keyed `<sha>_sgb_border.png`. Display-only
+/// Write the SGB 256x224 border still, keyed `<sha>_sgb_border.webp`. Display-only
 /// and SGB-only; the gallery composites the 160x144 video into its center window.
 /// Errors are logged, not fatal.
 fn write_border_png(dir: &Path, sha: &str, rgb: &[u8]) {
-    let file = dir.join(format!("{sha}_sgb_border.png"));
+    let file = dir.join(format!("{sha}_sgb_border.webp"));
     let (w, h) = (ppu::SGB_FRAME_WIDTH as u32, ppu::SGB_FRAME_HEIGHT as u32);
-    if let Err(e) = std::fs::write(&file, encode_rgb_png(w, h, rgb)) {
+    if let Err(e) = std::fs::write(&file, encode_rgb_webp(w, h, rgb)) {
         eprintln!("border {}: {e}", file.display());
     }
 }
@@ -1176,7 +1176,7 @@ struct BiosOut {
 /// — when `videos_dir` is set (ffmpeg present, videos enabled) — streaming every
 /// frame to the H.264 encoder with the APU boot "ding" muxed in as AAC, exactly
 /// the game-clip pipeline. Stops the frame after the boot ROM hands off (FF50
-/// flips to 0xFF). Emits `screens/bios_<tag>.png` always and
+/// flips to 0xFF). Emits `screens/bios_<tag>.webp` always and
 /// `videos/bios_<tag>.mp4` when video is on.
 ///
 /// Returns Ok(None) (logged once) when the model has no provisioned boot ROM or
@@ -1525,19 +1525,19 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
     let med = median(rows.iter().filter(|r| !is_bios(r)).filter_map(|r| r.fps).collect());
 
     // Media is probed off disk purely by rom_sha (never the filename): scan the
-    // screens dir for `<sha>_<tag>.png` posters (any legacy `_cpN` files skipped)
+    // screens dir for `<sha>_<tag>.webp` posters (any legacy `_cpN` files skipped)
     // to learn which hardware tabs actually have content. This keeps the compared
     // manifest schema untouched — no per-hardware rows, no media sidecar.
     let mut poster_tags: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
         std::collections::BTreeMap::new();
     let mut tabs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    // SGB border stills (`<sha>_sgb_border.png`, 256x224): not a hardware tab —
+    // SGB border stills (`<sha>_sgb_border.webp`, 256x224): not a hardware tab —
     // tracked separately so the SGB tab can frame the 160x144 video inside it.
     let mut border_shas: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if let Ok(rd) = std::fs::read_dir(&screens_dir) {
         for e in rd.flatten() {
             let fname = e.file_name().to_string_lossy().into_owned();
-            let Some(stem) = fname.strip_suffix(".png") else { continue };
+            let Some(stem) = fname.strip_suffix(".webp") else { continue };
             if stem.contains("_cp") || stem.len() < 18 {
                 continue; // legacy checkpoint frame, or too short to be sha_tag
             }
@@ -1629,10 +1629,10 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
         // Pinned BIOS meta card: the model's boot animation (power-on -> cart
         // handoff), reserved key `bios_<tag>`. A lazy video hero exactly like a
         // game card; degrades to the poster still or absent entirely (old dirs).
-        let bios_poster = format!("./screens/bios_{tag}.png");
+        let bios_poster = format!("./screens/bios_{tag}.webp");
         let bios_video_file = format!("bios_{tag}.mp4");
         let bios_has_video = videos_dir.join(&bios_video_file).exists();
-        let bios_has_poster = screens_dir.join(format!("bios_{tag}.png")).exists();
+        let bios_has_poster = screens_dir.join(format!("bios_{tag}.webp")).exists();
         if bios_has_video || bios_has_poster {
             let hero = if bios_has_video {
                 format!(
@@ -1661,7 +1661,7 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
                 (None, true) => ("ok", "ok"),
                 (None, false) => ("blank/static", "fail"),
             };
-            let poster = format!("./screens/{}_{tag}.png", r.rom_sha);
+            let poster = format!("./screens/{}_{tag}.webp", r.rom_sha);
             let video_file = format!("{}_{tag}.mp4", r.rom_sha);
             let has_video = videos_dir.join(&video_file).exists();
             // SGB cards whose game uploaded a border render inside a 256x224 frame
@@ -1669,7 +1669,7 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
             // at (48,40). The border img is lazy (loading="lazy") and pointer-none
             // so clicks reach the video; every other card is unchanged.
             let sgb_border = tag == "sgb" && border_shas.contains(&r.rom_sha);
-            let border_src = format!("./screens/{}_sgb_border.png", r.rom_sha);
+            let border_src = format!("./screens/{}_sgb_border.webp", r.rom_sha);
             let hero = if sgb_border && has_video {
                 format!(
                     "<div class=\"sgb-frame\">\
