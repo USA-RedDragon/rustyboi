@@ -195,6 +195,10 @@ const CGBWG_A12_REARM: u64 = 1;
 // bit4 visibility land on the read one dot past the write (age m3-bg-lcdc-nocgb),
 // not the isolated w+4 (mealybug tile_sel_change).
 const CGBWG_TRAIN_ADVANCE: u64 = 3;
+// CGB-compat up-pulse LCDC.4 train line-end re-resolve (cgb_train_reresolve):
+// each bitplane's tile-data base is sampled at its own T1, this many dots before
+// the SameBoy-exact T2 fetch dot. Calibrated dot-exact vs the CGB-C oracle.
+const CGBWG_TRAIN_T1_LEAD: i64 = 2;
 const CGBWG_ARM_WIN: u64 = 14;
 const CGBWG_ARM_WIN_HI: u64 = 12;
 const CGBWG_ARM_BG: u64 = 14;
@@ -405,6 +409,21 @@ impl Default for SpriteFetchRec {
     fn default() -> Self {
         SpriteFetchRec { phase: SpriteFetchPhase::Pending, arm_tick: 0, penalty: 0 }
     }
+}
+
+// One mid-mode-3 BG tile captured for the CGB-compat up-pulse LCDC.4 train
+// line-end re-resolve (see bg_tile_buf / cgb_train_reresolve).
+#[derive(Clone, Copy, Serialize, Deserialize, Default)]
+struct CapturedBgTile {
+    n: u64,      // fetcher tile index from line start
+    tn: u8,      // latched tile number
+    first_x: u8, // display column of this tile's first (leftmost) pixel
+    y: u8,       // BG pixel row (ly + scy) & 0xFF for the tile-line lookup
+    // Live (partial-journal) per-plane tile-data-select bits as drawn, so the
+    // line-end re-resolve only touches tiles whose base actually moved (the
+    // glitch bands where the live draw already matches hardware stay untouched).
+    live_low_tds: bool,
+    live_high_tds: bool,
 }
 
 // Faithful port of Gambatte's `SpriteMapper::OamReader` (sprite_mapper.cpp).
@@ -1509,6 +1528,13 @@ pub struct Ppu {
     // through the OR palette at mode-3 end. 160 entries, reset each line.
     #[serde(default)]
     line_bg_idx: Vec<i8>,
+    // Capture-phase mid-mode-3 BG tile buffer (CGB-compat up-pulse LCDC.4 train
+    // re-resolve). Each BG tile pushed to the FIFO during mode 3 records the
+    // context needed to re-resolve its tile-data-select bits against the
+    // COMPLETE wg_hist journal at line-end and re-plot: (fetch index n, tile
+    // number, first display column, tile-row y (0..255)). Reset each mode-3 arm.
+    #[serde(default)]
+    bg_tile_buf: Vec<CapturedBgTile>,
     // Every mid-mode-3 BGP write on the current line, as (abs_cc, display_col, old|new).
     // The DMG palette-latch glitch is a TWO-WRITE interaction: a write spikes its own
     // pixel only when it has a neighboring mid-mode-3 write within the tight SET/RESTORE
@@ -1622,6 +1648,7 @@ impl Ppu {
             obp0_history: Vec::new(),
             obp1_history: Vec::new(),
             line_bg_idx: vec![-1; 160],
+            bg_tile_buf: Vec::new(),
             bgp_writes: Vec::new(),
             bgp_mode2_pending: None,
             abs_cc: 0,
@@ -2782,6 +2809,118 @@ impl Ppu {
             }
         }
         Some(v)
+    }
+
+    // CGB-compat up-pulse LCDC.4 train capture-phase re-resolve. At mode-3 end
+    // the wg_hist journal is COMPLETE, so the pulse train (>= 2 up-pulses from a
+    // bit4=0 baseline) is detectable — the future info missing when the early
+    // tiles were fetched/drawn. Re-resolve each buffered BG tile's LOW/HIGH
+    // tile-data-select bits + tile-index-as-data quirk against the complete
+    // journal at their reconstructed fetch dots, recompute the 8 pixel indices,
+    // and re-plot the columns whose BG index changed. Gated tight: only when the
+    // complete journal is an up-pulse TRAIN (line-initial bit4 low AND >= 4 edges
+    // — the isolated single pulse is 2 edges and stays untouched). Returns the
+    // number of pixels re-plotted (0 when out of scope). CGB-compat only.
+    fn cgb_train_reresolve(&mut self, mmio: &mmio::Mmio) {
+        if !self.wg_cgb || self.bg_tile_buf.is_empty() || self.wg_hist.is_empty() {
+            return;
+        }
+        let tds = LCDCFlags::BGWindowTileDataSelect as u8;
+        // Up-pulse train discriminator (complete journal): line-initial bit4 low
+        // and at least two pulses (>= 4 edges). The isolated tile_sel_change
+        // pulse is exactly 2 edges (one up, one down) and is left untouched.
+        let init_low = (self.wg_hist[0].1 & tds) == 0;
+        let n_edges = self.wg_hist.len();
+        if !(init_low && n_edges >= 4) {
+            return;
+        }
+        let ly = mmio.read(LY);
+        if ly >= 144 {
+            self.bg_tile_buf.clear();
+            return;
+        }
+        // Each plane's tile-data base is re-sampled at its OWN T1 (one substep
+        // before the T2 byte read logged) — the raw journal bit4 level whose
+        // write commit is <= (SameBoy-exact fetch dot - CGBWG_TRAIN_T1_LEAD).
+        // Validated dot-exact vs the CGB-C SameBoy per-plane oracle across
+        // change2 ly24-55 (every train tile L/H last_tileset reproduced).
+        let buf = std::mem::take(&mut self.bg_tile_buf);
+        let raw_at = |dot: i64| -> u8 {
+            let mut b = self.wg_hist[0].1 & tds;
+            for &(tt, _, nn) in &self.wg_hist {
+                let w = tt as i64 - WG_TRANSITION_DELAY as i64;
+                if dot >= w { b = nn & tds; } else { break; }
+            }
+            b
+        };
+        // A FALL whose write commit is exactly one dot past a plane's T1-sample
+        // dot IS the tile-index-as-data glitch (SameBoy tile_sel_glitch; the
+        // falling edge coincides with the T2 byte read). Offset == -1 correlates
+        // perfectly with the CGB-C oracle glitch flag across every band.
+        let glitch_at = |dot: i64| -> bool {
+            self.wg_hist.iter().any(|&(tt, o, nn)| {
+                let w = tt as i64 - WG_TRANSITION_DELAY as i64;
+                (o & tds) != 0 && (nn & tds) == 0 && dot == w - 1
+            })
+        };
+        // Pass 1: resolve each tile's per-plane base + glitch. If ANY tile on
+        // this row glitches, the whole row is a beyond-SameBoy band: SameBoy
+        // renders the tile-index-as-data byte there but the real CGB-C ref does
+        // not (verified — SameBoy fails the ref on exactly the glitch rows and
+        // matches it dot-exact on the clean rows). The live (partial-journal)
+        // draw is already at/beyond SameBoy on those rows, so leave the entire
+        // row untouched. Re-plot only the fully-clean rows SameBoy reproduces,
+        // where the live per-plane base was wrong — zero regression on the
+        // undefined glitch bands, every SameBoy-confirmed pixel landed.
+        struct Res { first_x: u8, tn: u8, line: u8, low_tds: u8, high_tds: u8, moved: bool }
+        let mut res = Vec::with_capacity(buf.len());
+        let mut row_glitches = false;
+        for t in &buf {
+            let n = t.n;
+            let Some(h1) = self.bg_hw_read_dot(n, 1, ly) else { continue; };
+            let Some(h2) = self.bg_hw_read_dot(n, 2, ly) else { continue; };
+            let h1s = self.bg_hw_read_dot_ex(n, 1, ly, true).unwrap_or(h1) as i64;
+            let h2s = self.bg_hw_read_dot_ex(n, 2, ly, true).unwrap_or(h2) as i64;
+            let low_tds = raw_at(h1s - CGBWG_TRAIN_T1_LEAD);
+            let high_tds = raw_at(h2s - CGBWG_TRAIN_T1_LEAD);
+            if glitch_at(h1s - CGBWG_TRAIN_T1_LEAD) || glitch_at(h2s - CGBWG_TRAIN_T1_LEAD) {
+                row_glitches = true;
+            }
+            let moved =
+                (low_tds != 0) != t.live_low_tds || (high_tds != 0) != t.live_high_tds;
+            res.push(Res { first_x: t.first_x, tn: t.tn, line: t.y % 8, low_tds, high_tds, moved });
+        }
+        if row_glitches {
+            return;
+        }
+        // Pass 2: re-plot the clean row. Only BG-won columns (line_bg_idx >= 0)
+        // whose index changed are overwritten; sprite-won columns stay as drawn.
+        for r in &res {
+            if !r.moved { continue; }
+            let low_byte = {
+                let a = self.fetcher.get_tile_data_address(r.tn, r.line, r.low_tds);
+                mmio.read_vram_bank(0, a)
+            };
+            let high_byte = {
+                let a = self.fetcher.get_tile_data_address(r.tn, r.line, r.high_tds) + 1;
+                mmio.read_vram_bank(0, a)
+            };
+            for i in 0..8u8 {
+                let col = r.first_x as i32 + i as i32;
+                if !(0..160).contains(&col) { continue; }
+                let bit = 7 - i;
+                let idx = (((high_byte >> bit) & 1) << 1) | ((low_byte >> bit) & 1);
+                let ci = col as usize;
+                let old = self.line_bg_idx[ci];
+                if old < 0 || old as u8 == idx { continue; }
+                let rgb = self.compat_bg_color(mmio, idx);
+                let off = (ly as usize * 160 + ci) * 3;
+                self.color_fb_a[off] = rgb.0;
+                self.color_fb_a[off + 1] = rgb.1;
+                self.color_fb_a[off + 2] = rgb.2;
+                self.line_bg_idx[ci] = idx as i8;
+            }
+        }
     }
 
     fn bg_wg_apply(&self, mut fls: fetcher::FetcherLcdcState, ly: u8) -> fetcher::FetcherLcdcState {
@@ -4221,6 +4360,15 @@ impl Ppu {
                 bg_pixel_idx,
                 [final_color_rgb.0, final_color_rgb.1, final_color_rgb.2],
             );
+            // Record BG-won + BG index for the CGB-compat train re-resolve
+            // (cgb_train_reresolve): a column BG won iff its final color equals
+            // the BG-only compat color of its index (a sprite otherwise overrode
+            // it, or the index-independent sprite result differs).
+            if (self.x as usize) < self.line_bg_idx.len() {
+                let bg_only = self.compat_bg_color(mmio, if bg_enabled_col { bg_pixel_idx } else { 0 });
+                self.line_bg_idx[self.x as usize] =
+                    if bg_enabled_col && final_color_rgb == bg_only { bg_pixel_idx as i8 } else { -1 };
+            }
             let color_offset = fb_offset as usize * 3;
             self.color_fb_a[color_offset] = final_color_rgb.0;
             self.color_fb_a[color_offset + 1] = final_color_rgb.1;
@@ -5952,6 +6100,7 @@ impl Ppu {
                     self.tidxtd_glitch.clear();
                     // DMG window bus-glitch state is per-line (see wg_apply).
                     self.wg_hist.clear();
+                    self.bg_tile_buf.clear();
                     self.wg_anchor_cc = None;
                     self.wg_dpre = 0;
                     self.bg_anchor_cc = None;
@@ -6517,6 +6666,7 @@ impl Ppu {
                             // DMG wx==166 plotPixel-at-xpos166 (mode-3 end). See
                             // apply_dmg_wxa6_lineend_windraw.
                             self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
+                            self.cgb_train_reresolve(mmio);
                             self.resolve_bgp_spikes(mmio);
                             self.state = State::HBlank;
                             break 'label;
@@ -6820,6 +6970,26 @@ impl Ppu {
                                         .find(|s| s.is_none())
                                 {
                                     *slot = Some(first_x);
+                                }
+                            }
+                            // CGB-compat up-pulse LCDC.4 train: buffer each BG tile
+                            // so a line-end re-resolve against the COMPLETE journal
+                            // can fix the tiles fetched before the whole pulse train
+                            // was journaled (see cgb_train_reresolve).
+                            if self.wg_cgb && !event.fetching_window && !self.wg_hist.is_empty() {
+                                let first_x = (self.x as i32 + event.fifo_size as i32
+                                    - 8
+                                    - pending_discard as i32)
+                                    .max(0);
+                                if (0..160).contains(&first_x) {
+                                    self.bg_tile_buf.push(CapturedBgTile {
+                                        n: event.tile_index as u64,
+                                        tn: event.tile_num,
+                                        first_x: first_x as u8,
+                                        y: self.fetcher.latched_y(),
+                                        live_low_tds: self.fetcher.last_low_tds(),
+                                        live_high_tds: self.fetcher.last_high_tds(),
+                                    });
                                 }
                             }
                         }
@@ -9715,6 +9885,15 @@ impl Ppu {
     /// but resolves the final shade through CGB palette RAM so the output is the
     /// boot ROM's DMG-compat color instead of grayscale. The shade->RGB lookups
     /// read BG palette 0 and OBJ palette 0/1 (the slots the boot ROM fills).
+    // BG-only CGB-compat color for a BG color index (no sprite mix): the shade
+    // via BGP then BG palette 0 in CGB palette RAM. Used to detect BG-won columns
+    // and to re-plot them in cgb_train_reresolve.
+    fn compat_bg_color(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8) -> (u8, u8, u8) {
+        let bg_shade = self.get_palette_color_at_tick(bg_pixel_idx, self.ticks);
+        let (lo, hi) = mmio.bg_palette_pair_raw(0, bg_shade);
+        self.cgb_color_to_rgb(lo, hi)
+    }
+
     fn mix_background_and_sprites_compat(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8, screen_x: u8, screen_y: u8, bg_enabled_col: bool) -> (u8, u8, u8) {
         let lcdc = self.lcdc;
         let bg_enabled = bg_enabled_col;
