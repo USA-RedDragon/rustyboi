@@ -1428,9 +1428,13 @@ impl Mmio {
     }
 
     pub fn step_audio(&mut self) {
-        self.sync_apu_cc();
-        // Audio::step is a no-op when the APU is powered off.
-        if !self.audio.is_powered() {
+        let advanced = self.sync_apu_cc();
+        // Audio::step is a no-op when the APU is powered off. It is also a no-op
+        // on dots where the APU clock didn't advance: the channel duty/sweep
+        // events are all cc-driven, and update_pos does nothing when cc == the
+        // last resolved cc. In single speed the clock advances only every other
+        // dot, so this skips ~half the channel steps.
+        if !advanced || !self.audio.is_powered() {
             return;
         }
         // The channels only read these three read-only flags from mmio, so pass
@@ -1446,20 +1450,21 @@ impl Mmio {
     /// frame-sequencer step (FS phase, maintained independently of DIV writes)
     /// and the timer's internal counter (sub-step position). The controller
     /// reconstructs Gambatte's `cycleCounter_` from these.
-    fn sync_apu_cc(&mut self) {
+    /// Returns whether the APU clock advanced (see `Audio::sync_cc`).
+    fn sync_apu_cc(&mut self) -> bool {
         let ds = self.is_double_speed_mode();
-        self.sync_apu_cc_with_ds(ds);
+        self.sync_apu_cc_with_ds(ds)
     }
 
     /// Like `sync_apu_cc`, but with an explicit double-speed flag. Gambatte's
     /// `PSG::speedChange` calls `generateSamples(cpuCc, isDoubleSpeed())` with
     /// the speed being LEFT, BEFORE the KEY1 toggle — so the flush to the switch
     /// cc must use the OLD speed's `>>(1+ds)` rate, not the just-toggled one.
-    fn sync_apu_cc_with_ds(&mut self, ds: bool) {
+    fn sync_apu_cc_with_ds(&mut self, ds: bool) -> bool {
         let abs_cc = self.timer.abs_cc();
         let div_resets = self.timer.div_reset_count();
         let div_anchor = self.timer.div_anchor_apu();
-        self.audio.sync_cc(abs_cc, div_resets, div_anchor, ds);
+        self.audio.sync_cc(abs_cc, div_resets, div_anchor, ds)
     }
 
     /// Sync the APU cycle counter to the exact CPU read cycle and advance the

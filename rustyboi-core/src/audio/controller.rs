@@ -256,7 +256,10 @@ impl Audio {
     /// part of cc. We mirror Gambatte's `divReset`/`Channel::resetCc`: preserve
     /// the upper cc bits (the length `cc>>13` / FS-phase boundaries) and shift
     /// only the duty unit by the resulting delta.
-    pub fn sync_cc(&mut self, abs_cc: u64, div_resets: u64, div_anchor: u64, ds: bool) {
+    /// Returns whether the APU clock advanced (or a fold/anchor ran) this call,
+    /// so `Mmio::step_audio` can skip the per-dot channel step on dots where the
+    /// clock is unmoved (the channels' per-dot work is then a no-op).
+    pub fn sync_cc(&mut self, abs_cc: u64, div_resets: u64, div_anchor: u64, ds: bool) -> bool {
         self.cached_ds = ds;
         if !self.clock_anchored {
             // Defer the boot anchor past the abs_cc==0 pre-boot sync (Gambatte
@@ -266,7 +269,7 @@ impl Audio {
             if abs_cc == 0 {
                 self.last_div_resets = div_resets;
                 self.push_cc();
-                return;
+                return true;
             }
             // Faithful post-BIOS SPU `cycleCounter_` (Gambatte initstate.cpp
             // setPostBiosState): `(cgb ? 0x1E00 : 0x2400) | (cpuCc>>1 & 0x1FF)`.
@@ -302,7 +305,7 @@ impl Audio {
             // it free-runs on elapsed 2 MHz cycles only.
             self.lf_div = (self.cc & 1) ^ 1;
             self.push_cc();
-            return;
+            return true;
         }
 
         // A DIV write resets the divider; mirror `PSG::divReset`. Gambatte runs
@@ -310,6 +313,7 @@ impl Audio {
         // advance to the DIV-write cc (`div_anchor`, the timer's access-cc for
         // the FF04 write), fire any length events strictly before the fold, then
         // fold `cycleCounter_` there — not at the (later) current dot.
+        let mut folded = false;
         if div_resets != self.last_div_resets {
             // Run the fold AT the FF04 write's canonical access cc (`div_anchor`,
             // the timer's `access_cc()`), not the later current dot — so the
@@ -321,6 +325,7 @@ impl Audio {
             self.fire_length_events(self.cc);
             self.div_reset_fold(ds);
             self.last_div_resets = div_resets;
+            folded = true;
         }
 
         // Steady state: skip the per-channel push + length poll when this dot
@@ -330,10 +335,15 @@ impl Audio {
         // (keyed on `len_cc`) can produce no new expiry. Identical to always
         // pushing, minus the redundant per-dot broadcast.
         let advanced = self.advance_to(abs_cc, ds);
-        if advanced || ds != self.last_pushed_ds {
+        let pushed = advanced || ds != self.last_pushed_ds;
+        if pushed {
             self.push_cc();
             self.fire_length_events(self.cc);
         }
+        // The channels only do observable work when the APU clock moved (or was
+        // just re-anchored/folded). Report that so step_audio can skip their
+        // per-dot step otherwise.
+        folded || pushed
     }
 
     /// Gambatte `PSG::generateSamples`: convert CPU cycles since `last_update` to
