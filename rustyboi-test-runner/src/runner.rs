@@ -120,16 +120,36 @@ pub struct RunOptions {
     pub ss_dump_base: Option<u16>,
 }
 
+/// Boot-ROM filename for a hardware model, or None when rustyboi has no distinct
+/// boot ROM provisioned for it. DMG/CGB/AGB/SGB have dumps; the revision variants
+/// (DMG0/MGB/SGB2/CGB0/CGBB/CGBE) currently fall through to `skip_bios` — add a
+/// filename here once a real dump is provisioned for one.
+pub fn bios_filename(hw: Hardware) -> Option<&'static str> {
+    match hw {
+        Hardware::DMG => Some("dmg_boot.bin"),
+        Hardware::CGB => Some("cgb_boot.bin"),
+        // AGB uses the GBA's CGB-compat boot ROM.
+        Hardware::AGB => Some("cgb_agb_boot.bin"),
+        Hardware::SGB => Some("sgb_boot.bin"),
+        Hardware::DMG0
+        | Hardware::MGB
+        | Hardware::SGB2
+        | Hardware::CGB0
+        | Hardware::CGBB
+        | Hardware::CGBE => None,
+    }
+}
+
 /// Locate the boot ROM file for a hardware mode. Tries `bios_dir` first (if
 /// given), then `bios/` relative to CWD and to the crate manifest dir, then the
 /// worktree default. Returns the first existing path.
 fn resolve_bios_path(mode: Mode, bios_dir: Option<&PathBuf>) -> Option<PathBuf> {
-    let file = match mode {
-        Mode::Dmg => "dmg_boot.bin",
-        Mode::Cgb => "cgb_boot.bin",
-        // AGB uses the GBA's CGB-compat boot ROM.
-        Mode::Agb => "cgb_agb_boot.bin",
+    let hw = match mode {
+        Mode::Dmg => Hardware::DMG,
+        Mode::Cgb => Hardware::CGB,
+        Mode::Agb => Hardware::AGB,
     };
+    let file = bios_filename(hw)?;
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(dir) = bios_dir {
         candidates.push(dir.join(file));

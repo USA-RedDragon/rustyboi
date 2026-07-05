@@ -40,6 +40,17 @@ pub const DMG_BIOS_CRC32: u32 = 0x580A33B9;
 /// Expected masked CRC32 of the CGB boot ROM (byte 0xFD zeroed before hashing),
 /// matching the expected CGB boot-ROM hash 0x31672598.
 pub const CGB_BIOS_CRC32: u32 = 0x31672598;
+/// Expected masked CRC32 of the AGB (GBA CGB-compat) boot ROM. Recomputed from
+/// bios/cgb_agb_boot.bin via `bios_masked_crc32`; it differs from cgb_boot.bin
+/// only in the AGB-detect bytes (0xF2-0xFB, 0x409-0x40A) — none at the masked
+/// 0xFD, so the mask cannot reconcile it with CGB and it needs its own entry.
+pub const AGB_BIOS_CRC32: u32 = 0x8F39DB2F;
+/// Canonical SGB boot ROM CRC32 — UNMASKED (plain crc32 of all 256 bytes).
+/// Unlike DMG/CGB/AGB we hold no local SGB dump to derive a masked value, and the
+/// SGB boot ROM has a single canonical dump (SHA-1 aa2f50a77dfb4823da96ba99309085a3c6278515),
+/// so it is accepted by its well-known unmasked crc instead of a masked one.
+/// (SGB2/MGB could be added the same way with their own crcs.)
+pub const SGB_BIOS_CRC32_UNMASKED: u32 = 0xEC8A83B9;
 pub const CARTRIDGE_START: u16 = 0x0000;
 pub const CARTRIDGE_SIZE: usize = 16384; // 16KB
 pub const CARTRIDGE_END: u16 = CARTRIDGE_START + CARTRIDGE_SIZE as u16 - 1;
@@ -61,6 +72,71 @@ fn bios_masked_crc32(data: &[u8]) -> u32 {
         }
     }
     !crc
+}
+
+/// Plain CRC32 (IEEE) with no byte masking. Used only for the SGB boot ROM,
+/// which we identify by its canonical unmasked crc (see `SGB_BIOS_CRC32_UNMASKED`).
+fn bios_crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// Masked-crc32 set (byte 0xFD zeroed — the dump convention) accepted for a
+/// given boot-ROM length. Empty for unknown lengths. Extend an arm to accept a
+/// further revision.
+fn bios_masked_crc_set(len: usize) -> &'static [u32] {
+    match len {
+        BIOS_SIZE => &[DMG_BIOS_CRC32],
+        CGB_BIOS_SIZE => &[CGB_BIOS_CRC32, AGB_BIOS_CRC32],
+        _ => &[],
+    }
+}
+
+/// Decide acceptance from precomputed crcs. Split out so the accept/reject logic
+/// is unit-testable without forging a real boot-ROM image. A boot ROM is known if
+/// its masked crc is in `bios_masked_crc_set(len)` OR (256-byte only) its UNMASKED
+/// crc equals the canonical SGB dump — SGB is the one length-256 image we accept
+/// by unmasked crc because we hold no local file to derive a masked value.
+/// (SGB2/MGB could be added the same way with their crcs.)
+fn bios_crc_is_known(len: usize, masked: u32, unmasked: u32) -> bool {
+    bios_masked_crc_set(len).contains(&masked)
+        || (len == BIOS_SIZE && unmasked == SGB_BIOS_CRC32_UNMASKED)
+}
+
+/// Validate a boot-ROM image: accepts any known-good DMG/SGB (256-byte) or
+/// CGB/AGB (2304-byte) dump; returns the rejection reason on failure.
+fn validate_bios_bytes(data: &[u8]) -> Result<(), String> {
+    match data.len() {
+        BIOS_SIZE | CGB_BIOS_SIZE => {}
+        other => {
+            return Err(format!(
+                "BIOS has unexpected length {other} (want {BIOS_SIZE} DMG/SGB or {CGB_BIOS_SIZE} CGB/AGB)"
+            ));
+        }
+    }
+    let masked = bios_masked_crc32(data);
+    let unmasked = bios_crc32(data);
+    if bios_crc_is_known(data.len(), masked, unmasked) {
+        return Ok(());
+    }
+    let mut expected: Vec<String> = bios_masked_crc_set(data.len())
+        .iter()
+        .map(|c| format!("0x{c:08X} (masked)"))
+        .collect();
+    if data.len() == BIOS_SIZE {
+        expected.push(format!("0x{SGB_BIOS_CRC32_UNMASKED:08X} (SGB, unmasked)"));
+    }
+    Err(format!(
+        "BIOS CRC mismatch: got masked 0x{masked:08X} / unmasked 0x{unmasked:08X}, expected one of [{}]",
+        expected.join(", "),
+    ))
 }
 
 pub const VRAM_START: u16 = 0x8000;
@@ -1385,36 +1461,11 @@ impl Mmio {
     }
 
     /// Load a boot ROM from raw bytes (no filesystem — the WASM-clean path the
-    /// session/GUI adapters use). Accepts only the two real hardware lengths and
-    /// verifies the length-appropriate CRC (byte 0xFD masked out, matching the
-    /// dump convention) before installing it.
+    /// session/GUI adapters use). Accepts any known-good DMG/SGB (256-byte) or
+    /// CGB/AGB (2304-byte) dump; see `validate_bios_bytes` for the accepted set.
     pub fn load_bios_bytes(&mut self, data: &[u8]) -> Result<(), io::Error> {
-        // Accept only the two real hardware boot-ROM lengths.
-        let expected_crc = match data.len() {
-            BIOS_SIZE => DMG_BIOS_CRC32,
-            CGB_BIOS_SIZE => CGB_BIOS_CRC32,
-            other => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "BIOS has unexpected length {} (want {} DMG or {} CGB)",
-                        other, BIOS_SIZE, CGB_BIOS_SIZE
-                    ),
-                ));
-            }
-        };
-        // Faithful to the boot-ROM load convention: zero byte 0xFD before
-        // hashing (it differs between revisions / patched dumps) then crc32.
-        let masked_crc = bios_masked_crc32(data);
-        if masked_crc != expected_crc {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "BIOS CRC mismatch: got 0x{:08X}, expected 0x{:08X}",
-                    masked_crc, expected_crc
-                ),
-            ));
-        }
+        validate_bios_bytes(data)
+            .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?;
         self.bios = Some(data.to_vec());
         self.seed_rocket_boot_logo();
         Ok(())
@@ -6055,5 +6106,44 @@ mod hblank_dma_tests {
             "first post-enable HBlank block suppressed by a stale \
              hdma_block_fired_this_hblank (no reset on LCD disable/enable)"
         );
+    }
+
+    // ---- Boot-ROM acceptance (per-length CRC set + SGB unmasked path) ----
+
+    /// The four known-good boot-ROM crcs sit in the accepted set for their
+    /// length: DMG/SGB at 256, CGB/AGB at 2304.
+    #[test]
+    fn known_boot_crcs_are_accepted() {
+        // DMG + SGB share length 256; CGB + AGB share length 2304.
+        assert!(bios_crc_is_known(BIOS_SIZE, DMG_BIOS_CRC32, 0));
+        assert!(bios_crc_is_known(CGB_BIOS_SIZE, CGB_BIOS_CRC32, 0));
+        assert!(bios_crc_is_known(CGB_BIOS_SIZE, AGB_BIOS_CRC32, 0));
+        // SGB is accepted via its UNMASKED crc, regardless of the masked value.
+        assert!(bios_crc_is_known(BIOS_SIZE, 0xDEAD_BEEF, SGB_BIOS_CRC32_UNMASKED));
+    }
+
+    /// The SGB unmasked path is 256-byte only and must not collide with DMG.
+    /// A DMG image (unmasked crc 0x59C8598E) is never mistaken for SGB, and the
+    /// SGB unmasked crc at the 2304 length is not accepted (vice versa).
+    #[test]
+    fn sgb_unmasked_path_is_256_only_and_distinct_from_dmg() {
+        const DMG_UNMASKED_CRC32: u32 = 0x59C8_598E; // plain crc32 of dmg_boot.bin
+        assert_ne!(SGB_BIOS_CRC32_UNMASKED, DMG_UNMASKED_CRC32);
+        // DMG's unmasked crc alone (with a non-DMG masked crc) is NOT accepted:
+        // DMG loads via its masked crc, not by being mistaken for SGB.
+        assert!(!bios_crc_is_known(BIOS_SIZE, 0xDEAD_BEEF, DMG_UNMASKED_CRC32));
+        // Vice versa: the SGB unmasked crc at CGB length is rejected.
+        assert!(!bios_crc_is_known(CGB_BIOS_SIZE, 0, SGB_BIOS_CRC32_UNMASKED));
+    }
+
+    /// Genuinely-wrong inputs are still rejected: bad length, and right length
+    /// with an unknown crc (all-zero image).
+    #[test]
+    fn wrong_length_and_wrong_crc_are_rejected() {
+        assert!(validate_bios_bytes(&[0u8; 100]).is_err());
+        assert!(validate_bios_bytes(&[0u8; BIOS_SIZE]).is_err());
+        assert!(validate_bios_bytes(&[0u8; CGB_BIOS_SIZE]).is_err());
+        // AGB's masked crc at the wrong (256) length is rejected.
+        assert!(!bios_crc_is_known(BIOS_SIZE, AGB_BIOS_CRC32, 0));
     }
 }
