@@ -132,7 +132,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "usage:\n  sweep run     --roms DIR... [--list FILE] --out DIR [--frames N] \
                  [--warmup N] [--jobs N] [--timeout SECS] [--no-screens] [--no-videos] \
-                 [--hardware dmg,cgb,sgb,agb] [--only SUBSTR]\n  \
+                 [--no-bios-meta] [--bios-dir DIR] [--hardware dmg,cgb,sgb,agb] [--only SUBSTR]\n  \
                  sweep compare --base A.jsonl --cand B.jsonl [--min-ratio R] [--ignore-perf] \
                  [--out report.md]\n  \
                  sweep gallery --manifest M.jsonl --screens DIR [--videos DIR] [--out gallery.html]"
@@ -347,6 +347,8 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     let jobs: usize = parse_num(args, "--jobs", 0)?;
     let no_screens = args.iter().any(|a| a == "--no-screens");
     let no_videos = args.iter().any(|a| a == "--no-videos");
+    let no_bios_meta = args.iter().any(|a| a == "--no-bios-meta");
+    let bios_dir = arg(args, "--bios-dir").map(PathBuf::from);
     let strip_names = args.iter().any(|a| a == "--strip-names");
     let only = arg(args, "--only");
     if warmup >= frames {
@@ -452,6 +454,69 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     });
     // Sort by rom_sha so the committed baseline has a stable, name-free order.
     rows.sort_by(|a, b| a.rom_sha.cmp(&b.rom_sha));
+
+    // BIOS meta capture (once per media-matrix hardware model): the boot
+    // animation from power-on to cart handoff. Produces BOTH a regression row in
+    // the manifest (a deterministic `hash_all` over every boot frame, so
+    // `compare` flags boot-behavior drift) AND gallery media (poster always;
+    // H.264/AAC video when videos are on). Gated on screenshots being enabled
+    // (the media default); `--no-bios-meta` opts out; `--no-screens` disables it
+    // entirely (no rows, no media). Wholly separate from `emulate` — its own
+    // synthetic cart, ADDITIONAL rows keyed `bios_<tag>` that never touch or
+    // reorder any game row's bytes.
+    let mut bios_rows: Vec<Row> = Vec::new();
+    if !no_bios_meta
+        && let Some(sdir) = &cfg.screens_dir
+    {
+        for &hw in &cfg.hardware {
+            let tag = hw_tag(hw);
+            match capture_bios(sdir, cfg.videos_dir.as_deref(), hw, bios_dir.as_deref(), timeout_secs) {
+                Ok(Some(b)) => {
+                    let vdur = b.frames as f64 * FPS_DEN as f64 / FPS_NUM as f64;
+                    match b.handoff_frame {
+                        Some(fr) => eprintln!(
+                            "sweep: bios [{tag}] handoff at frame {fr} ({} frames, {vdur:.2}s, audio_samples={}, video={}, hash_all={:016x})",
+                            b.frames, b.audio_samples, b.video_written, b.hash_all
+                        ),
+                        None => eprintln!(
+                            "sweep: bios [{tag}] NO handoff ({} frames capped, video={}, hash_all={:016x})",
+                            b.frames, b.video_written, b.hash_all
+                        ),
+                    }
+                    // Reserved identity `bios_<tag>` (starts with a non-hex `_`,
+                    // and 8 chars — can't collide with a 16-hex-char rom_sha).
+                    bios_rows.push(Row {
+                        key: Some(format!("bios/{tag}")),
+                        name: Some(format!("BIOS boot — {}", tag.to_ascii_uppercase())),
+                        crc: None,
+                        rom_sha: format!("bios_{tag}"),
+                        hardware: format!("{hw:?}"),
+                        frames: b.frames,
+                        hash_all: format!("{:016x}", b.hash_all),
+                        checkpoints: b
+                            .checkpoints
+                            .into_iter()
+                            .map(|(f, h)| (f, format!("{h:016x}")))
+                            .collect(),
+                        boot_ok: true,
+                        changed: true,
+                        fps: None,
+                        ns_per_frame: None,
+                        error: None,
+                    });
+                }
+                Ok(None) => {} // no dump for this model; capture_bios logged it
+                Err(e) => eprintln!("sweep: bios [{tag}] failed: {e}"),
+            }
+        }
+    }
+    // Append the BIOS regression rows and re-sort: game rows keep byte-identical
+    // content (only additional rows joined in), and the manifest stays ordered by
+    // rom_sha for a deterministic file.
+    if !bios_rows.is_empty() {
+        rows.extend(bios_rows);
+        rows.sort_by(|a, b| a.rom_sha.cmp(&b.rom_sha));
+    }
 
     // Remove the encode-temp subdir wholesale: any `.tmp`/`.pcm` left behind by
     // an interrupted/panicked capture goes with it, so `videos/` holds only
@@ -1019,6 +1084,249 @@ fn capture_media(
 }
 
 // ---------------------------------------------------------------------------
+// BIOS meta capture (one boot animation per hardware model, gallery-only)
+// ---------------------------------------------------------------------------
+
+/// Safety cap on a boot animation's length (~10s at 59.7fps): if the boot ROM
+/// never hands off (wrong/corrupt dump), stop rather than loop forever.
+const MAX_BIOS_FRAMES: usize = 600;
+
+/// Boot-ROM filename per hardware model. Mirrors the test-runner's
+/// `runner::bios_filename`; that module lives in a binary-only crate this bin
+/// can't import, so the four provisioned dumps are re-listed here.
+fn bios_filename(hw: Hardware) -> Option<&'static str> {
+    match hw {
+        Hardware::DMG => Some("dmg_boot.bin"),
+        Hardware::CGB => Some("cgb_boot.bin"),
+        // AGB uses the GBA's CGB-compat boot ROM.
+        Hardware::AGB => Some("cgb_agb_boot.bin"),
+        Hardware::SGB => Some("sgb_boot.bin"),
+        _ => None,
+    }
+}
+
+/// Locate a boot ROM the same way the test-runner does: `--bios-dir` first (if
+/// given), then `bios/` relative to CWD, then `../bios/` relative to the crate
+/// manifest. First existing path wins; None => the dump isn't provisioned.
+fn resolve_bios_path(file: &str, bios_dir: Option<&Path>) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = bios_dir {
+        candidates.push(dir.join(file));
+    }
+    candidates.push(PathBuf::from("bios").join(file));
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("bios").join(file),
+    );
+    candidates.into_iter().find(|p| p.exists())
+}
+
+/// Build a 32KB ROM-only cartridge whose header passes the boot ROM's logo +
+/// header-checksum gate, so the real boot animation runs to handoff instead of
+/// hanging. The 48 Nintendo-logo bytes are sourced AT RUNTIME from the loaded
+/// boot ROM (DMG/SGB 256-byte dump: offset 0xA8; CGB/AGB 2304-byte dump: 0x42) —
+/// the same runtime-sourcing the core uses to feed the Rocket mapper — so no
+/// logo bytes are ever embedded in committed source. None if the dump is too
+/// short to carry a logo (i.e. not a real boot ROM).
+fn build_boot_cart(bios: &[u8]) -> Option<Vec<u8>> {
+    let logo_off = match bios.len() {
+        256 => 0xA8usize,
+        2304 => 0x42,
+        _ => return None,
+    };
+    let logo = bios.get(logo_off..logo_off + 48)?;
+    let mut cart = vec![0u8; 0x8000];
+    // Entry point: NOP; JP $0150, then a quiet self-loop so the cart "runs"
+    // silently once the boot ROM hands control to it.
+    cart[0x100..0x104].copy_from_slice(&[0x00, 0xC3, 0x50, 0x01]);
+    cart[0x150..0x152].copy_from_slice(&[0x18, 0xFE]); // JR -2 (spin in place)
+    // Nintendo logo, runtime-sourced from the boot ROM (never committed).
+    cart[0x104..0x134].copy_from_slice(logo);
+    // Title 0x134..0x143 left zero: deterministic (the CGB boot's DMG-compat
+    // palette hash is stable, and unused here since the cart declares CGB).
+    cart[0x143] = 0x80; // CGB-compatible: CGB/AGB boot in colour; DMG/SGB ignore it
+    cart[0x147] = 0x00; // ROM only
+    cart[0x148] = 0x00; // 32KB
+    cart[0x149] = 0x00; // no cart RAM
+    // Header checksum over 0x134..=0x14C; the boot ROM hangs on a mismatch.
+    let sum = cart[0x134..0x14D].iter().fold(0u8, |a, &b| a.wrapping_sub(b).wrapping_sub(1));
+    cart[0x14D] = sum;
+    // Global checksum (0x14E/0x14F) is NOT checked by the boot ROM; left zero.
+    Some(cart)
+}
+
+struct BiosOut {
+    frames: usize,
+    audio_samples: usize,
+    /// The frame index at which the boot ROM unmapped itself (FF50 0x00->0xFF).
+    /// None => the run hit MAX_BIOS_FRAMES without handing off (bad dump).
+    handoff_frame: Option<usize>,
+    video_written: bool,
+    /// FNV fold of every boot frame's hash — the deterministic regression key
+    /// that goes into the manifest so `compare` flags boot-behavior drift. Stable
+    /// run-to-run for a fixed boot ROM + synthetic cart.
+    hash_all: u64,
+    /// (frame, hash_all-snapshot) pairs every 64 frames + the final frame, for
+    /// localizing where two boot captures diverge.
+    checkpoints: Vec<(usize, u64)>,
+}
+
+/// Capture the boot animation for one hardware model: run the real boot ROM from
+/// power-on (PC=0, no `skip_bios`) against a synthetic valid-logo cart, folding
+/// every frame into a deterministic `hash_all` (the manifest regression key) and
+/// — when `videos_dir` is set (ffmpeg present, videos enabled) — streaming every
+/// frame to the H.264 encoder with the APU boot "ding" muxed in as AAC, exactly
+/// the game-clip pipeline. Stops the frame after the boot ROM hands off (FF50
+/// flips to 0xFF). Emits `screens/bios_<tag>.png` always and
+/// `videos/bios_<tag>.mp4` when video is on.
+///
+/// Returns Ok(None) (logged once) when the model has no provisioned boot ROM or
+/// the file is absent — that's how SGB stays skipped until the user supplies
+/// `sgb_boot.bin`. Entirely separate from `emulate`: it builds its own cart and
+/// never perturbs any game row or hash.
+fn capture_bios(
+    screens_dir: &Path,
+    videos_dir: Option<&Path>,
+    hw: Hardware,
+    bios_dir: Option<&Path>,
+    timeout_secs: u64,
+) -> Result<Option<BiosOut>, String> {
+    let tag = hw_tag(hw);
+    let Some(file) = bios_filename(hw) else {
+        return Ok(None); // no distinct dump for this model (revision variants)
+    };
+    let Some(path) = resolve_bios_path(file, bios_dir) else {
+        eprintln!("sweep: no boot ROM ({file}) for {tag}, skipping BIOS meta");
+        return Ok(None);
+    };
+    let bios = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let cart_bytes = build_boot_cart(&bios).ok_or_else(|| format!("{file}: not a boot ROM"))?;
+    let cart = Cartridge::from_bytes(&cart_bytes).map_err(|e| format!("synthetic cart: {e}"))?;
+
+    let mut gb = GB::new(hw);
+    gb.insert(cart);
+    // Validates the dump's CRC for `hw` (Part 1 accepts DMG/CGB/SGB/AGB); a wrong
+    // or mismatched file Errs here and this model is skipped, not the whole run.
+    gb.load_bios(&path.to_string_lossy()).map_err(|e| format!("load_bios: {e}"))?;
+    // NO skip_bios: power-on PC=0 runs the boot ROM itself.
+
+    // Video encoder + PCM sidecar (only when videos are on). The hash is computed
+    // regardless, so the regression row exists even without ffmpeg.
+    let (tmp_video, tmp_pcm) = match videos_dir {
+        Some(d) => {
+            let tmp = d.join(".sweep-tmp");
+            let _ = std::fs::create_dir_all(&tmp);
+            (Some(tmp.join(format!("bios_{tag}.mp4"))), Some(tmp.join(format!("bios_{tag}.pcm"))))
+        }
+        None => (None, None),
+    };
+    let mut encoder = None;
+    let mut pcm = None;
+    if let (Some(tv), Some(tp)) = (&tmp_video, &tmp_pcm) {
+        match spawn_encoder(tv) {
+            Ok(child) => {
+                encoder = Some(child);
+                pcm = std::fs::File::create(tp).ok().map(std::io::BufWriter::new);
+            }
+            Err(e) => eprintln!("sweep: ffmpeg spawn bios [{tag}]: {e}"),
+        }
+    }
+    let collect_audio = encoder.is_some();
+    let sink = SampleSink::default();
+    if collect_audio {
+        gb.enable_audio(Box::new(sink.clone())).map_err(|e| format!("audio: {e}"))?;
+    }
+
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash_all: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut checkpoints: Vec<(usize, u64)> = Vec::new();
+    let mut poster: Option<Vec<u8>> = None;
+    let mut audio_samples = 0usize;
+    let mut handoff_frame = None;
+    let mut frames = 0usize;
+    let started = Instant::now();
+
+    for f in 0..MAX_BIOS_FRAMES {
+        let (frame, _bp) = gb.run_until_frame(collect_audio);
+        frames = f + 1;
+        let rgb = frame_rgb(&frame);
+        if let Some(child) = &mut encoder
+            && let Some(stdin) = child.stdin.as_mut()
+            && stdin.write_all(&rgb).is_err()
+        {
+            encoder = None; // encoder died: keep the poster/hash, stop streaming
+        }
+        if collect_audio {
+            let mut buf = sink.0.lock().unwrap();
+            if !buf.is_empty() {
+                audio_samples += buf.len();
+                if let Some(w) = &mut pcm {
+                    for (l, r) in buf.iter() {
+                        let _ = w.write_all(&f32_to_s16le(*l));
+                        let _ = w.write_all(&f32_to_s16le(*r));
+                    }
+                }
+                buf.clear();
+            }
+        }
+        let h = frame_hash(&frame);
+        hash_all = (hash_all ^ h).wrapping_mul(FNV_PRIME);
+        poster = Some(rgb);
+        // Handoff: the boot ROM has written FF50 (read flips 0x00 -> 0xFF). Record
+        // this frame (already folded/streamed) and stop.
+        if gb.read_memory(0xFF50) == 0xFF {
+            handoff_frame = Some(f);
+            checkpoints.push((f + 1, hash_all));
+            break;
+        }
+        if (f + 1) % 64 == 0 {
+            checkpoints.push((f + 1, hash_all));
+        }
+        if started.elapsed().as_secs() > timeout_secs {
+            checkpoints.push((f + 1, hash_all));
+            break;
+        }
+    }
+    if handoff_frame.is_none() {
+        eprintln!("sweep: bios [{tag}] hit {frames}-frame cap without FF50 handoff; emitting anyway");
+    }
+
+    if let Some(w) = pcm {
+        let _ = w.into_inner().map(|mut f| f.flush());
+    }
+    let mut video_written = false;
+    if let Some(mut child) = encoder {
+        drop(child.stdin.take());
+        video_written = matches!(child.wait(), Ok(s) if s.success());
+    }
+    if video_written
+        && let (Some(vdir), Some(tv), Some(tp)) = (videos_dir, &tmp_video, &tmp_pcm)
+    {
+        let final_mp4 = vdir.join(format!("bios_{tag}.mp4"));
+        if !(audio_samples > 0 && mux_av(tv, tp, &final_mp4)) {
+            let _ = std::fs::rename(tv, &final_mp4);
+        }
+    }
+    if let Some(tv) = &tmp_video {
+        let _ = std::fs::remove_file(tv);
+    }
+    if let Some(tp) = &tmp_pcm {
+        let _ = std::fs::remove_file(tp);
+    }
+
+    // Poster = the handoff frame (or the last captured frame if capped).
+    write_poster_png(screens_dir, "bios", &tag, poster.as_ref());
+
+    Ok(Some(BiosOut {
+        frames,
+        audio_samples,
+        handoff_frame,
+        video_written,
+        hash_all,
+        checkpoints,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // compare
 // ---------------------------------------------------------------------------
 
@@ -1207,11 +1515,14 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
             }
         }
     }
+    // BIOS meta rows (rom_sha `bios_<tag>`) are regression rows, not gameplay —
+    // exclude them from the header's gameplay count and the fps median.
+    let is_bios = |r: &Row| r.rom_sha.starts_with("bios_");
     let ok = rows
         .iter()
-        .filter(|r| r.error.is_none() && r.boot_ok && r.changed)
+        .filter(|r| !is_bios(r) && r.error.is_none() && r.boot_ok && r.changed)
         .count();
-    let med = median(rows.iter().filter_map(|r| r.fps).collect());
+    let med = median(rows.iter().filter(|r| !is_bios(r)).filter_map(|r| r.fps).collect());
 
     // Media is probed off disk purely by rom_sha (never the filename): scan the
     // screens dir for `<sha>_<tag>.png` posters (any legacy `_cpN` files skipped)
@@ -1265,6 +1576,8 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
          .tab-panel{display:none}.tab-panel.active{display:block}\
          .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px}\
          .card{background:#1c1c1c;border-radius:8px;padding:12px;border:1px solid #333}\
+         .card.meta-card{border-color:#f59e0b;background:#231a0d}\
+         .meta-badge{display:inline-block;font-size:11px;font-weight:600;color:#fbbf24;letter-spacing:.5px}\
          .hero{width:100%;aspect-ratio:10/9;object-fit:contain;image-rendering:pixelated;border-radius:4px;background:#000;display:block;cursor:pointer}\
          .hero.audible{outline:3px solid #4ade80;outline-offset:-3px}\
          .sgb-frame{position:relative;width:100%;aspect-ratio:256/224;border-radius:4px;background:#000;overflow:hidden;display:block}\
@@ -1278,7 +1591,7 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
     s.push_str("</style></head><body>");
     s.push_str(&format!(
         "<h1>rustyboi library sweep &mdash; {ok}/{} in gameplay, median {:.0} fps</h1>",
-        rows.len(),
+        rows.iter().filter(|r| !is_bios(r)).count(),
         med.unwrap_or(0.0)
     ));
 
@@ -1313,6 +1626,31 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
             "<div class=\"tab-panel{}\" id=\"panel-{tag}\"><div class=\"grid\">",
             if i == 0 { " active" } else { "" }
         ));
+        // Pinned BIOS meta card: the model's boot animation (power-on -> cart
+        // handoff), reserved key `bios_<tag>`. A lazy video hero exactly like a
+        // game card; degrades to the poster still or absent entirely (old dirs).
+        let bios_poster = format!("./screens/bios_{tag}.png");
+        let bios_video_file = format!("bios_{tag}.mp4");
+        let bios_has_video = videos_dir.join(&bios_video_file).exists();
+        let bios_has_poster = screens_dir.join(format!("bios_{tag}.png")).exists();
+        if bios_has_video || bios_has_poster {
+            let hero = if bios_has_video {
+                format!(
+                    "<video class=\"hero\" muted loop playsinline preload=\"none\" \
+                     data-poster=\"{bios_poster}\" data-src=\"./videos/{}\"></video>",
+                    html_escape(&bios_video_file),
+                )
+            } else {
+                format!("<img class=\"hero\" loading=\"lazy\" src=\"{bios_poster}\" alt=\"\">")
+            };
+            s.push_str(&format!(
+                "<div class=\"card meta-card\">{hero}\
+                 <div class=\"name\"><span class=\"meta-badge\">\u{25c8} Boot ROM \u{2014} {}</span></div>\
+                 <div class=\"meta\"><span>{} boot animation</span><span class=\"ok\">meta</span></div></div>",
+                html_escape(&tag.to_ascii_uppercase()),
+                html_escape(&tag.to_ascii_uppercase()),
+            ));
+        }
         for r in &rows {
             let has_poster = poster_tags.get(&r.rom_sha).is_some_and(|t| t.contains(tag));
             if !has_poster {
