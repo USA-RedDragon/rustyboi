@@ -86,6 +86,10 @@ pub struct Audio {
     // fold (which happens on the write path, without `ds`) uses the right speed.
     #[serde(default)]
     cached_ds: bool,
+    // The `ds` value last broadcast to the channels via push_cc; lets sync_cc
+    // skip the redundant per-dot push when neither cc nor ds moved.
+    #[serde(default)]
+    last_pushed_ds: bool,
     // CGB vs DMG flag for the post-BIOS SPU `cycleCounter_` boot anchor (the
     // high-bit constant differs: 0x1E00 CGB / 0x2400 DMG, initstate.cpp).
     #[serde(default)]
@@ -152,6 +156,7 @@ impl Audio {
             last_div_resets: 0,
             clock_anchored: false,
             cached_ds: false,
+            last_pushed_ds: false,
             boot_cgb: false,
             lf_div: 1,
             pcm_read_cc: None,
@@ -318,15 +323,23 @@ impl Audio {
             self.last_div_resets = div_resets;
         }
 
-        self.advance_to(abs_cc, ds);
-        self.push_cc();
-        self.fire_length_events(self.cc);
+        // Steady state: skip the per-channel push + length poll when this dot
+        // advanced the APU clock by zero cycles AND the ds flag the channels
+        // hold is unchanged. `push_cc` only broadcasts `cc`/`len_cc`/`lf_div`/
+        // `ds`; none change when `cc` is unmoved and `ds` is stable, so the poll
+        // (keyed on `len_cc`) can produce no new expiry. Identical to always
+        // pushing, minus the redundant per-dot broadcast.
+        let advanced = self.advance_to(abs_cc, ds);
+        if advanced || ds != self.last_pushed_ds {
+            self.push_cc();
+            self.fire_length_events(self.cc);
+        }
     }
 
     /// Gambatte `PSG::generateSamples`: convert CPU cycles since `last_update` to
     /// 2 MHz APU cycles and advance `cc`. We don't buffer audio here (the live
     /// mixer is sampled elsewhere), so this only moves the clock.
-    fn advance_to(&mut self, abs_cc: u64, ds: bool) {
+    fn advance_to(&mut self, abs_cc: u64, ds: bool) -> bool {
         // rustyboi gates `step_audio` to half-rate in double speed, so the timer
         // divider (`abs_cc`) already advances at the physical APU rate that the
         // duty/envelope tuning was anchored to: shift by 1 in both speeds, i.e.
@@ -350,11 +363,11 @@ impl Audio {
         // the sub-quantum remainder/parity. `cc` is the single real counter;
         // `len_cc` mirrors it exactly (no dual clock).
         if abs_cc <= self.last_update {
-            return;
+            return false;
         }
         let cycles = (abs_cc - self.last_update) >> shift;
         if cycles == 0 {
-            return;
+            return false;
         }
         self.last_update = self.last_update.wrapping_add(cycles << shift);
         let pre_cc = self.cc;
@@ -365,6 +378,7 @@ impl Audio {
         self.lf_div ^= (cycles & 1) as u32;
         // Dispatch the DIV-APU (envelope) events crossed by this advance.
         self.fs_walk(pre_cc, cycles);
+        true
     }
 
     /// Gambatte `PSG::divReset`: re-fold `cycleCounter_` so the DIV-relative phase
@@ -401,6 +415,7 @@ impl Audio {
     }
 
     fn push_cc(&mut self) {
+        self.last_pushed_ds = self.cached_ds;
         let cc = self.cc;
         self.channel1.set_cc(cc);
         self.channel2.set_cc(cc);
