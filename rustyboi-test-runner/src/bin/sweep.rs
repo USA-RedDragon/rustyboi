@@ -1093,7 +1093,7 @@ const MAX_BIOS_FRAMES: usize = 600;
 
 /// Boot-ROM filename per hardware model. Mirrors the test-runner's
 /// `runner::bios_filename`; that module lives in a binary-only crate this bin
-/// can't import, so the four provisioned dumps are re-listed here.
+/// can't import, so the provisioned dumps are re-listed here. Keep in sync.
 fn bios_filename(hw: Hardware) -> Option<&'static str> {
     match hw {
         Hardware::DMG => Some("dmg_boot.bin"),
@@ -1101,7 +1101,13 @@ fn bios_filename(hw: Hardware) -> Option<&'static str> {
         // AGB uses the GBA's CGB-compat boot ROM.
         Hardware::AGB => Some("cgb_agb_boot.bin"),
         Hardware::SGB => Some("sgb_boot.bin"),
-        _ => None,
+        Hardware::DMG0 => Some("dmg0_boot.bin"),
+        Hardware::MGB => Some("mgb_boot.bin"),
+        Hardware::SGB2 => Some("sgb2_boot.bin"),
+        Hardware::CGB0 => Some("cgb0_boot.bin"),
+        Hardware::CGBE => Some("cgbE_boot.bin"),
+        // CGB-A/B CPU revision shares the standard CGB boot ROM (no distinct dump).
+        Hardware::CGBB => Some("cgb_boot.bin"),
     }
 }
 
