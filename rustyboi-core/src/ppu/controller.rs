@@ -5475,10 +5475,6 @@ impl Ppu {
     }
 
     pub fn step_scheduled_stat_events(&mut self, mmio: &mut mmio::Mmio) {
-        if self.disabled {
-            return;
-        }
-
         // FF41 mode-bit read-back anticipation: in the last 3 dots of an
         // HBlank line (or of line 153) FF41 reports mode 2 (the next line's
         // mode). Match Gambatte's `getStat` `lineCycles >= 453` threshold by
@@ -5487,6 +5483,13 @@ impl Ppu {
         // rising edge — the actual mode-2 IRQ has already been delivered by
         // the pretrigger above when its conditions were met.
         let mode2_anticipate_dot = MODE2_STAT_PRETRIGGER_DOT + 1; // 453
+        // The only work-doing path needs `ticks == 453`; bail on every other
+        // dot before touching state/mmio. (`disabled` freezes ticks, so it can
+        // never sit at 453 while disabled — this subsumes the disabled guard.)
+        if self.disabled || self.ticks != mode2_anticipate_dot {
+            return;
+        }
+
         let should_anticipate_mode2 = match self.state {
             State::HBlank => self.ticks == mode2_anticipate_dot && mmio.read(LY) < 143,
             State::VBlank => self.ticks == mode2_anticipate_dot
