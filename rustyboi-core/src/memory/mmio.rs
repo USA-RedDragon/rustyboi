@@ -1291,6 +1291,11 @@ impl Mmio {
         // DIV/TIMA and APU derive from — no separate `cpu_t_phase` parallel
         // clock (M8 serial merge). `abs_cc` is advanced at the start of the
         // timer step within this same dot's tick, so it is the live cc here.
+        // Serial::step is a no-op while no transfer is active (the common case),
+        // so skip the per-dot clone entirely then.
+        if !self.serial.is_active() {
+            return;
+        }
         let phase = self.timer.abs_cc();
         let mut serial = self.serial.clone();
         serial.step(phase, self);
