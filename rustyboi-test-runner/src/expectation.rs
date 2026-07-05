@@ -399,6 +399,15 @@ pub fn parse_manifest(
                 addr: 0xFF82,
                 expected: 0x01,
             },
+            // OAM region compared against a `.dump` reference after a flat
+            // cycle budget (same driver as the gambatte oamdumper cases).
+            // Used by gbmicrotest 400-dma, whose reference bytes are the ROM's
+            // own DMA source block (extracted from the cart image by
+            // tools/gen_manifests.py, never an emulator capture).
+            "oamdump" => Oracle::RegionDump {
+                path: PathBuf::from(arg),
+                region: DumpRegion::Oam,
+            },
             "mem" => {
                 let (a, v) = arg
                     .split_once('=')
@@ -770,12 +779,13 @@ blargg/cpu|cgb|serial|/roms/cpu_instrs.gb
 sound/01|dmg|blargg_mem|/roms/01.gb
 000-oam|dmg|memauto|/roms/000-oam.gb
 custom|dmg|mem|/roms/custom.gb|0xFF80=0x01
+400-dma|dmg|oamdump|/roms/400-dma.gb|/refs/400-dma.oam.dump
 mn/add|cgb|mooneye|/roms/add.gb
 ";
         let dmg_only: HashSet<Mode> = [Mode::Dmg].into_iter().collect();
         let cases = parse_manifest(manifest, &dmg_only).unwrap();
-        // Only the dmg lines survive the mode filter (4 of 6 entries).
-        assert_eq!(cases.len(), 4);
+        // Only the dmg lines survive the mode filter (5 of 7 entries).
+        assert_eq!(cases.len(), 5);
         assert!(matches!(&cases[0].oracle, Oracle::CspPng { path } if path == Path::new("/refs/acid2.png")));
         assert!(matches!(cases[1].oracle, Oracle::BlarggMem));
         assert!(matches!(
@@ -786,11 +796,16 @@ mn/add|cgb|mooneye|/roms/add.gb
             cases[3].oracle,
             Oracle::MemValue { addr: 0xFF80, expected: 0x01 }
         ));
+        assert!(matches!(
+            &cases[4].oracle,
+            Oracle::RegionDump { path, region: DumpRegion::Oam }
+                if path == Path::new("/refs/400-dma.oam.dump")
+        ));
 
         let all = parse_manifest(manifest, &all_modes()).unwrap();
-        assert_eq!(all.len(), 6);
+        assert_eq!(all.len(), 7);
         assert!(matches!(all[1].oracle, Oracle::Serial));
-        assert!(matches!(all[5].oracle, Oracle::MooneyeFib));
+        assert!(matches!(all[6].oracle, Oracle::MooneyeFib));
     }
 
     #[test]

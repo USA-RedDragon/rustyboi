@@ -1,10 +1,10 @@
 # gbmicrotest (DMG-CPU-08). FF82==0x01 pass. Run: --frames 60
 # VERIFIED (src @gbmicrotest463eb6b, oracle: libgambatte externalRead FF80-82 @60 frames):
-# 494/513. 13 display-only ROMs report to VRAM $8000 (or HRAM FF80) not FF82 --
-# NONE of them call any test_end/test_finish macro (verified against the source),
-# so they never write an FF82 verdict; they are graded via `mem <addr>=VAL` with a
-# byte justified from disassembly + real DMG-CPU-08 hardware (NOT from any
-# emulator's output):
+# 509/513. 28 ROMs never call any test_end/test_finish macro (verified against
+# the source AND the shipped binaries), so they never write an FF82 verdict;
+# they are graded via `mem <addr>=VAL` / `oamdump` with bytes justified from
+# disassembly + real DMG-CPU-08 hardware documentation (NOT from any emulator
+# output). First 13 (landed earlier):
 #   poweron=80 (NR10 read-mask), 004-tima_boot_phase/004-tima_cycle_timer=55
 #   (calibrated-add pass byte), ppu_spritex_vs_scx=55 (self-check),
 #   000-write_to_x8000=55 / flood_vram=FF (constant VRAM fill -- VRAM-writable),
@@ -15,21 +15,47 @@
 #   lcdon_write_timing=00 (OAM write dropped mid-render -> reads cleared $00).
 # The OAM/LY/STAT timing behind the last five is independently validated by the
 # passing oam_read_*/oam_write_*/lcdon_to_*/stat_* verdict tests (same engine).
-# The 19 remaining fails have NO defensible memory oracle (proven per-test):
-#  - display-only screen sweeps, NO $8000/FF82 write at all (verdict is only the
-#    rendered screen, swept by a hand-varied .define): 800/801/802/803-ppu-latch-*,
-#    oam_sprite_trashing, ppu_scx_vs_bgp, ppu_sprite_testbench, ppu_win_vs_wx,
-#    ppu_wx_early, toggle_lcdc, wave_write_to_0xC003 (WRAM-only), audio_testbench
-#    (audio-listen only; $8000 stays power-on, not a hardware assertion),
-#    temp (a lone `nop` dev stub).
-#  - $8000 written but not a gradeable verdict: 001-vram_unlocked ($8000 is
-#    unconditionally $55; the pass signal is only on-screen mid-scanline);
-#    500-scx-timing / minimal (byte-identical: raw TIMA count of m3 length with
-#    SCROLL=0, author documented no DMG pass value -- grading it would just trust
-#    the emulator, i.e. oracle-gaming).
-#  - 2 DMA-clobber artifacts (400-dma, dma_basic): the ROM copies its DMA routine
-#    INTO HRAM over FF80-82 (FF80=E0/FF81=46 are the `ldh($46),a` opcode+operand)
-#    and never writes a verdict; rustyboi == Gambatte.
+# 15 more recovered on the 2026-07-05 deep-dig (the earlier "no $8000 write at
+# all" claim was WRONG for 9 of them -- the shipped binaries DO plant
+# deterministic bytes; every write target below was re-verified in the .gb
+# images, not just the .s sources):
+#  - 001-vram_unlocked=55 (discriminating; see its paragraph below),
+#  - 400-dma (`oamdump` == the ROM's own $0200-$029F DMA source block,
+#    extracted from the cart image by gen_manifests.py itself),
+#  - dma_basic=FE9F:FF (VRAM-source DMA completion byte, clean-read in HBlank),
+#  - audio_testbench=FF26:F9 (NR52 readback: ch4 undying + boot-ch1 active),
+#  - 800/801/802/803-ppu-latch=8002:7E (load_box VBlank write; the latch
+#    subject stays screen-only -- author's DELAY tables quoted below),
+#  - oam_sprite_trashing=8000:FF, ppu_scx_vs_bgp=8000:80, ppu_wx_early=8001:FF,
+#    ppu_win_vs_wx/ppu_sprite_testbench=8010:FF (LCD-off tile loads, never
+#    rewritten; the swept display subject stays screen-only),
+#  - toggle_lcdc=FF40:00 (final LCDC readback, fully R/W per Pan Docs),
+#  - wave_write_to_0xC003=C003:55 (constant WRAM write, cpu_bus_1 class).
+# The 4 remaining fails have NO hardware-derivable oracle (proven per-test):
+#  - 500-scx-timing / minimal (byte-identical ROMs, cmp-verified): dual-halt
+#    TIMA measure of mode-3 length -> $8000 (FF80-82 never written). Intended
+#    control flow confirmed by patched-ROM probes (halt1 wakes at line-1
+#    mode-2 start LY=1/STAT=A2, halt2 at line-1 HBlank STAT=88). The author
+#    hardware rows are RELATIVE-only: DMG "overhead 65; 0 1 1 1 1 2 2 2" and
+#    AGS "70; 0 0 0 1 1 1 1 2" for SCROLL=0..7 -- both delta patterns equal
+#    (scx + ((-scx-e) mod 4))/4, the M-grid quantization of the HBlank IF
+#    edge, with e=0 (DMG) / e=2 (AGS boot-phase offset), and a SCROLL=0..7
+#    patched-ROM sweep reproduces all 8 DMG deltas ($4A..$4C). But no
+#    ABSOLUTE byte is documented anywhere: "overhead 65" decodes to no
+#    consistent absolute, GateBoy/MetroBoy skip this ROM (their harnesses
+#    are FF80==FF81&&FF82-only -- verified in both repos), and a hand
+#    derivation from Pan Docs/gb-ctr alone could not reproduce the byte (it
+#    stacks >=6 sub-M-cycle constants: halt dispatch latency, mode-0 IF-edge
+#    dot, IO-write cycle placement, DIV-write TIMA tick, tick-vs-read races).
+#    Grading the emulator's $4A would be oracle-gaming. The same physics IS
+#    hardware-graded by the 40+ passing hblank_int_scx0-7/_if_a-d/_nops
+#    FF82-verdict tests.
+#  - temp: a lone `nop` dev stub. PC slides through the zero-filled ROM into
+#    VRAM-as-code and collapses into an RST38 loop whose pushes walk SP down
+#    through IO/OAM/WRAM (C000 reads back a pushed return-PC byte in
+#    practice). On real hardware the trajectory additionally depends on the
+#    boot-logo bytes in VRAM ($8010+, executed as opcodes) and on which
+#    fetches hit mode-3 lock ($FF = RST38), so no cell is hardware-derivable.
 #  - halt_op_dupe_delay: hardware-only glitch (needs the set_stat_int_hblank async
 #    STAT-IF clear); SameBoy built from source also produces 0x01 and FAILS
 #    identically. rustyboi 0x01 is cycle-accurate.
@@ -41,10 +67,16 @@
 # passing oam_read_* / oam_write_* verdict tests.
 # 000-write_to_x8000: `ld a,$55 / ld ($8000),a` loop -- constant $55 to VRAM.
 # The verdict IS the VRAM cell holding the written value (VRAM-writable sanity).
-# 001-vram_unlocked: the STAT ISR writes $00 then unconditionally $55 to $8000;
-# the discriminating result (whether the $00 was visible = VRAM unlocked) exists
-# only on-screen mid-scanline, never in a stable memory cell -- the final $8000
-# is $55 regardless of correctness, so there is no gradeable memory verdict.
+# 001-vram_unlocked: the per-line STAT-OAM ISR writes $00 then, DELAY nops
+# later, $55 to $8000 ("when does VRAM lock, relative to the OAM int?").
+# Author DMG notes: "3 - dots / 4 - no dots"; the shipped binary is DELAY=3
+# ($48: 3E 00 EA 00 80 00 00 00 3E 55 EA 00 80 D9). At DELAY=3 the $55 write
+# LANDS on real hardware (the dots ARE the $55 bitplane); at 4 it is mode-3
+# dropped and $8000 stays $00 all frame. So the final cell DOES discriminate
+# (the earlier "unconditionally $55" claim missed that the $55 write itself
+# races the lock): an emulator locking >=1 M-cycle early reads $00. One-sided
+# but hardware-grounded; the runner's flat-budget stop lands in the mode-1
+# tail (LY=0 STAT=A5, ~10 lines after the last ISR), far from the transient.
 # 002-vram_locked: reads STAT ($41) at DELAY=71 -> VRAM. At line-0 HBlank start
 # (cycle 71) mode=0 (HBlank), LYC=LY coincidence (LYC=0=LY) -> STAT bit7=1,
 # bit2=1, mode=00 = 0x84. Matches the author's DMG note "71 - stat 10000100".
@@ -66,20 +98,92 @@
 # HALTs; the ISR waits DELAY=54 then reads $FE00 -> VRAM. At 54 cycles into the
 # OAM-int the OAM is still locked, so the DMG read returns $FF (author note "54 -
 # black"). Same validated OAM-lock engine as the passing oam_read_* verdicts.
+# 400-dma: copies its DMA routine into HRAM (clobbering FF80-82 with E0 46 00;
+# no FF82 verdict is ever written), runs OAM DMA from ROM $0200, then idles
+# forever. Documented DMA semantics (Pan Docs / gekkio gb-ctr: 160 bytes
+# XX00-XX9F -> FE00-FE9F; DMA owns the OAM bus; a ROM source shares no bus
+# with the PPU) leave OAM == ROM[$0200..$029F] regardless of PPU phase, and
+# nothing writes OAM afterwards. gen_manifests.py extracts the 160 reference
+# bytes from the cart image into refs/400-dma.oam.dump (disassembly-derived,
+# NOT an emulator capture).
+# dma_basic: pokes $8000=$FF and $809F=$FF (both land pre-lock: writes at
+# ~M11/M15 after the $0100 handoff; mode 3 first begins at ~M35 per the
+# poweron_stat_000 hardware timeline, whose FF82-verdict siblings all pass
+# here), copies E0 46 18 FE to FF80-83 (clobbering the verdict cells) and
+# runs OAM DMA from $8000 with the LCD ON, looping in HRAM forever. The
+# transfer's middle overlaps mode 3 (VRAM-source/PPU contention is
+# undocumented) and $8010-$809E hold boot-logo tiles on real hardware, so
+# the bulk of OAM is NOT gradeable -- but byte 159 (source $809F, the ROM's
+# own $FF) is read at ~M205, inside line-1 HBlank (M192-242 on the same
+# hardware timeline, >=13 M margin): an uncontended, documented VRAM read.
+# FE9F==$FF asserts the 160-byte VRAM-source DMA ran to completion with its
+# final byte intact.
+# audio_testbench: sets NR50/NR51/NR52 then triggers ch4 with NR42=$F0 (DAC
+# on, volume F, envelope period 0 -> no decay), NR43=$5F, NR44=$87 (trigger,
+# length DISABLED) and spins at `jr -2`. On hardware NR52 then reads $F9
+# forever: bit7 power, bits 6-4 unused (read 1), bit3 ch4 active (nothing
+# can stop it: length off, no envelope disable path, DAC on), bit0 ch1 still
+# active from the boot chime (envelope reaches volume 0 but a channel only
+# disables via length expiry / DAC off / power off -- Pan Docs NR52 +
+# "obscure behavior"). The graded byte is that live APU readback -- the
+# test's actual subject (the noise channel IS running).
+# 800/801/802/803-ppu-latch-*: mid-line SCX/SCY/LCDC pokes from a per-line
+# STAT-OAM ISR; the swept latch subject is screen-only (author DMG tables in
+# tests/*.s: scx "5/6/7 no scroll, 8/9/10 scroll" DELAY=8; scy "9 - two
+# scrolled columns" DELAY=9) and never reaches memory. Deterministic on
+# hardware instead: load_box writes $7E to $8002-$800D during VBlank
+# (binary: 3E 7E 21 02 80 22x12, before interrupts are enabled) and the
+# ISRs only touch FF42/FF43/FF40 -- Pan Docs: VRAM is CPU-writable in mode
+# 1, so $8002 reads $7E. Graded on that cell; the latch timing itself
+# remains ungraded.
+# oam_sprite_trashing: writes OAM[0].y=70 at DELAY=7 nops into every visible
+# line. The author DMG table records the on-screen effect only ("7 - right
+# square (sprite 39) missing", "8 - square moved", 9/10 no move); the OAM
+# content left behind by a mode-2/3 CPU write is nowhere documented
+# (gekkio's OAM-corruption research covers 16-bit inc/dec patterns, not
+# write landings), so FE00 itself is not gradeable. Deterministic instead:
+# the $FF fill of $8000-$800F written with the LCD OFF (binary: 21 00 80 3E
+# FF 22x16) and never touched again (the per-line pokes go to FE00) ->
+# $8000=$FF (LCD-off VRAM writes always land, Pan Docs).
+# ppu_scx_vs_bgp: per-line mid-render SCX pokes (author header: "cycles 21 &
+# 22 are weird"); the swept behavior is screen-only. The tile-0 load to
+# $8000-$800F (first byte %10000000=$80, from ROM $02AC) happens with the
+# LCD OFF and is never rewritten -> $8000=$80 on hardware.
+# ppu_sprite_testbench: static sprite scaffold; the shipped build's per-line
+# "mess with the line" loops are pure nops, so the display is the only swept
+# output. tile 1 (all-$FF, ROM $0307) is loaded to $8010-$801F with the LCD
+# OFF and never rewritten -> $8010=$FF.
+# ppu_win_vs_wx: per-line WX + LCDC-window-map toggles; screen-only subject.
+# tile_black (all-$FF, ROM $02E5) is loaded to $8010-$801F while LCDC bit7=0
+# (both pre-enable LCDC writes keep the LCD off) and never rewritten ->
+# $8010=$FF.
+# ppu_wx_early: per-line WX 30->200->30 toggles; screen-only subject. tile1
+# (alternating 00/FF rows, ROM $02D1) is loaded to $8000-$800F with the LCD
+# OFF and never rewritten -> $8001=$FF.
+# toggle_lcdc: sixteen back-to-back LCDC $80/$00 writes ending OFF, then
+# `jr` self (binary: last write 3E 00 EA 40 FF at $019B, tail 18 FE at
+# $01A0). The rapid-toggle rendering effects are screen-only; the
+# deterministic hardware state is the final LCDC readback -- FF40 is fully
+# R/W (Pan Docs) -> $00.
+# wave_write_to_0xC003: shipped build is `ld a,$55 / ld hl,$C003 / ld
+# (hl),a / jr -3` -- a constant WRAM write loop (the wave-RAM probe in the
+# source is commented out). The verdict is the WRAM cell holding the written
+# value, same class as the accepted cpu_bus_1 (FF80=55).
+# minimal: byte-identical to 500-scx-timing.gb (cmp-verified) -- same closure.
 000-oam_lock|dmg|mem|gb-test-roms/gbmicrotest/000-oam_lock.gb|8000=FF
 000-write_to_x8000|dmg|mem|gb-test-roms/gbmicrotest/000-write_to_x8000.gb|8000=55
-001-vram_unlocked|dmg|memauto|gb-test-roms/gbmicrotest/001-vram_unlocked.gb
+001-vram_unlocked|dmg|mem|gb-test-roms/gbmicrotest/001-vram_unlocked.gb|8000=55
 002-vram_locked|dmg|mem|gb-test-roms/gbmicrotest/002-vram_locked.gb|8000=84
 004-tima_boot_phase|dmg|mem|gb-test-roms/gbmicrotest/004-tima_boot_phase.gb|8000=55
 004-tima_cycle_timer|dmg|mem|gb-test-roms/gbmicrotest/004-tima_cycle_timer.gb|8000=55
 007-lcd_on_stat|dmg|mem|gb-test-roms/gbmicrotest/007-lcd_on_stat.gb|8000=00
-400-dma|dmg|memauto|gb-test-roms/gbmicrotest/400-dma.gb
+400-dma|dmg|oamdump|gb-test-roms/gbmicrotest/400-dma.gb|rustyboi-test-runner/suites/refs/400-dma.oam.dump
 500-scx-timing|dmg|memauto|gb-test-roms/gbmicrotest/500-scx-timing.gb
-800-ppu-latch-scx|dmg|memauto|gb-test-roms/gbmicrotest/800-ppu-latch-scx.gb
-801-ppu-latch-scy|dmg|memauto|gb-test-roms/gbmicrotest/801-ppu-latch-scy.gb
-802-ppu-latch-tileselect|dmg|memauto|gb-test-roms/gbmicrotest/802-ppu-latch-tileselect.gb
-803-ppu-latch-bgdisplay|dmg|memauto|gb-test-roms/gbmicrotest/803-ppu-latch-bgdisplay.gb
-audio_testbench|dmg|memauto|gb-test-roms/gbmicrotest/audio_testbench.gb
+800-ppu-latch-scx|dmg|mem|gb-test-roms/gbmicrotest/800-ppu-latch-scx.gb|8002=7E
+801-ppu-latch-scy|dmg|mem|gb-test-roms/gbmicrotest/801-ppu-latch-scy.gb|8002=7E
+802-ppu-latch-tileselect|dmg|mem|gb-test-roms/gbmicrotest/802-ppu-latch-tileselect.gb|8002=7E
+803-ppu-latch-bgdisplay|dmg|mem|gb-test-roms/gbmicrotest/803-ppu-latch-bgdisplay.gb|8002=7E
+audio_testbench|dmg|mem|gb-test-roms/gbmicrotest/audio_testbench.gb|FF26=F9
 cpu_bus_1|dmg|mem|gb-test-roms/gbmicrotest/cpu_bus_1.gb|FF80=55
 div_inc_timing_a|dmg|memauto|gb-test-roms/gbmicrotest/div_inc_timing_a.gb
 div_inc_timing_b|dmg|memauto|gb-test-roms/gbmicrotest/div_inc_timing_b.gb
@@ -88,7 +192,7 @@ dma_0x9000|dmg|memauto|gb-test-roms/gbmicrotest/dma_0x9000.gb
 dma_0xA000|dmg|memauto|gb-test-roms/gbmicrotest/dma_0xA000.gb
 dma_0xC000|dmg|memauto|gb-test-roms/gbmicrotest/dma_0xC000.gb
 dma_0xE000|dmg|memauto|gb-test-roms/gbmicrotest/dma_0xE000.gb
-dma_basic|dmg|memauto|gb-test-roms/gbmicrotest/dma_basic.gb
+dma_basic|dmg|mem|gb-test-roms/gbmicrotest/dma_basic.gb|FE9F=FF
 dma_timing_a|dmg|memauto|gb-test-roms/gbmicrotest/dma_timing_a.gb
 flood_vram|dmg|mem|gb-test-roms/gbmicrotest/flood_vram.gb|8000=FF
 halt_bug|dmg|memauto|gb-test-roms/gbmicrotest/halt_bug.gb
@@ -327,7 +431,7 @@ oam_read_l1_c|dmg|memauto|gb-test-roms/gbmicrotest/oam_read_l1_c.gb
 oam_read_l1_d|dmg|memauto|gb-test-roms/gbmicrotest/oam_read_l1_d.gb
 oam_read_l1_e|dmg|memauto|gb-test-roms/gbmicrotest/oam_read_l1_e.gb
 oam_read_l1_f|dmg|memauto|gb-test-roms/gbmicrotest/oam_read_l1_f.gb
-oam_sprite_trashing|dmg|memauto|gb-test-roms/gbmicrotest/oam_sprite_trashing.gb
+oam_sprite_trashing|dmg|mem|gb-test-roms/gbmicrotest/oam_sprite_trashing.gb|8000=FF
 oam_write_l0_a|dmg|memauto|gb-test-roms/gbmicrotest/oam_write_l0_a.gb
 oam_write_l0_b|dmg|memauto|gb-test-roms/gbmicrotest/oam_write_l0_b.gb
 oam_write_l0_c|dmg|memauto|gb-test-roms/gbmicrotest/oam_write_l0_c.gb
@@ -404,7 +508,7 @@ poweron_vram_183|dmg|memauto|gb-test-roms/gbmicrotest/poweron_vram_183.gb
 poweron_vram_184|dmg|memauto|gb-test-roms/gbmicrotest/poweron_vram_184.gb
 poweron_wx_000|dmg|memauto|gb-test-roms/gbmicrotest/poweron_wx_000.gb
 poweron_wy_000|dmg|memauto|gb-test-roms/gbmicrotest/poweron_wy_000.gb
-ppu_scx_vs_bgp|dmg|memauto|gb-test-roms/gbmicrotest/ppu_scx_vs_bgp.gb
+ppu_scx_vs_bgp|dmg|mem|gb-test-roms/gbmicrotest/ppu_scx_vs_bgp.gb|8000=80
 ppu_sprite0_scx0_a|dmg|memauto|gb-test-roms/gbmicrotest/ppu_sprite0_scx0_a.gb
 ppu_sprite0_scx0_b|dmg|memauto|gb-test-roms/gbmicrotest/ppu_sprite0_scx0_b.gb
 ppu_sprite0_scx1_a|dmg|memauto|gb-test-roms/gbmicrotest/ppu_sprite0_scx1_a.gb
@@ -421,10 +525,10 @@ ppu_sprite0_scx6_a|dmg|memauto|gb-test-roms/gbmicrotest/ppu_sprite0_scx6_a.gb
 ppu_sprite0_scx6_b|dmg|memauto|gb-test-roms/gbmicrotest/ppu_sprite0_scx6_b.gb
 ppu_sprite0_scx7_a|dmg|memauto|gb-test-roms/gbmicrotest/ppu_sprite0_scx7_a.gb
 ppu_sprite0_scx7_b|dmg|memauto|gb-test-roms/gbmicrotest/ppu_sprite0_scx7_b.gb
-ppu_sprite_testbench|dmg|memauto|gb-test-roms/gbmicrotest/ppu_sprite_testbench.gb
+ppu_sprite_testbench|dmg|mem|gb-test-roms/gbmicrotest/ppu_sprite_testbench.gb|8010=FF
 ppu_spritex_vs_scx|dmg|mem|gb-test-roms/gbmicrotest/ppu_spritex_vs_scx.gb|8000=55
-ppu_win_vs_wx|dmg|memauto|gb-test-roms/gbmicrotest/ppu_win_vs_wx.gb
-ppu_wx_early|dmg|memauto|gb-test-roms/gbmicrotest/ppu_wx_early.gb
+ppu_win_vs_wx|dmg|mem|gb-test-roms/gbmicrotest/ppu_win_vs_wx.gb|8010=FF
+ppu_wx_early|dmg|mem|gb-test-roms/gbmicrotest/ppu_wx_early.gb|8001=FF
 sprite4_0_a|dmg|memauto|gb-test-roms/gbmicrotest/sprite4_0_a.gb
 sprite4_0_b|dmg|memauto|gb-test-roms/gbmicrotest/sprite4_0_b.gb
 sprite4_1_a|dmg|memauto|gb-test-roms/gbmicrotest/sprite4_1_a.gb
@@ -507,7 +611,7 @@ timer_tima_write_e|dmg|memauto|gb-test-roms/gbmicrotest/timer_tima_write_e.gb
 timer_tima_write_f|dmg|memauto|gb-test-roms/gbmicrotest/timer_tima_write_f.gb
 timer_tma_write_a|dmg|memauto|gb-test-roms/gbmicrotest/timer_tma_write_a.gb
 timer_tma_write_b|dmg|memauto|gb-test-roms/gbmicrotest/timer_tma_write_b.gb
-toggle_lcdc|dmg|memauto|gb-test-roms/gbmicrotest/toggle_lcdc.gb
+toggle_lcdc|dmg|mem|gb-test-roms/gbmicrotest/toggle_lcdc.gb|FF40=00
 vblank2_int_halt_a|dmg|memauto|gb-test-roms/gbmicrotest/vblank2_int_halt_a.gb
 vblank2_int_halt_b|dmg|memauto|gb-test-roms/gbmicrotest/vblank2_int_halt_b.gb
 vblank2_int_if_a|dmg|memauto|gb-test-roms/gbmicrotest/vblank2_int_if_a.gb
@@ -542,7 +646,7 @@ vram_write_l1_a|dmg|memauto|gb-test-roms/gbmicrotest/vram_write_l1_a.gb
 vram_write_l1_b|dmg|memauto|gb-test-roms/gbmicrotest/vram_write_l1_b.gb
 vram_write_l1_c|dmg|memauto|gb-test-roms/gbmicrotest/vram_write_l1_c.gb
 vram_write_l1_d|dmg|memauto|gb-test-roms/gbmicrotest/vram_write_l1_d.gb
-wave_write_to_0xC003|dmg|memauto|gb-test-roms/gbmicrotest/wave_write_to_0xC003.gb
+wave_write_to_0xC003|dmg|mem|gb-test-roms/gbmicrotest/wave_write_to_0xC003.gb|C003=55
 win0_a|dmg|memauto|gb-test-roms/gbmicrotest/win0_a.gb
 win0_b|dmg|memauto|gb-test-roms/gbmicrotest/win0_b.gb
 win0_scx3_a|dmg|memauto|gb-test-roms/gbmicrotest/win0_scx3_a.gb
