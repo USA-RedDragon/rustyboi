@@ -65,6 +65,18 @@ pub fn encode_rgb_png(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
     png
 }
 
+/// RGB888 -> lossless WebP (pure-Rust `image-webp`, VP8L). Used by the sweep's
+/// gallery stills; these few-color, flat-region frames compress far below the
+/// stored-deflate PNG. Falls back to the PNG encoder if encoding ever fails.
+#[allow(dead_code)]
+pub fn encode_rgb_webp(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    match image_webp::WebPEncoder::new(&mut out).encode(rgb, width, height, image_webp::ColorType::Rgb8) {
+        Ok(()) => out,
+        Err(_) => encode_rgb_png(width, height, rgb),
+    }
+}
+
 // Shared by `movie` (embeds frames as data URIs); `sweep`'s gallery links
 // screenshots by relative path, so its copy of this module leaves it unused.
 #[allow(dead_code)]

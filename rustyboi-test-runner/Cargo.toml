@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 clap = { version = "=4.6.2", features = ["derive"] }
 flate2 = "=1.1.9"
+image-webp = "=0.2.4"
 rayon = "=1.12.0"
 rustyboi-core = { path = "../rustyboi-core" }
 serde = { version = "=1.0.228", features = ["derive"] }
