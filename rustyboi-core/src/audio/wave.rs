@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use crate::audio::{NR30, NR31, NR32, NR33, NR34, WAV_START, WAV_END};
-use crate::memory::mmio;
 use crate::memory::Addressable;
 
 const COUNTER_DISABLED: u32 = 0xFFFF_FFFF;
@@ -246,10 +245,10 @@ impl Wave {
         self.cgb_b = b;
     }
 
-    pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
-        self.cgb = _mmio.is_cgb_features_enabled();
-        self.agb = _mmio.is_agb();
-        self.ds = _mmio.is_double_speed_mode();
+    pub fn step(&mut self, cgb: bool, agb: bool, ds: bool) {
+        self.cgb = cgb;
+        self.agb = agb;
+        self.ds = ds;
         if self.master {
             self.update_wave_counter();
         }

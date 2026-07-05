@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use crate::audio::{NR10, NR11, NR12, NR13, NR14, NR21, NR22, NR23, NR24};
-use crate::memory::mmio;
 use crate::memory::Addressable;
 
 // Gambatte's sound cycle counter is a free-running 2 MHz value; the frame
@@ -668,10 +667,10 @@ impl SquareWave {
         self.update_pos();
     }
 
-    pub fn step(&mut self, _mmio: &mut mmio::Mmio) {
+    pub fn step(&mut self, cgb: bool) {
         // Both channels need the CGB-features flag (the trigger pre-increment
         // quirk is CGB-D/E only); ch1 also uses it for the sweep nr4Init phase.
-        self.cgb = _mmio.is_cgb_features_enabled();
+        self.cgb = cgb;
         // Always keep the duty's `last_pos_cc` current (update_pos advances the
         // index only while active, but must track cc even when idle so a later
         // trigger doesn't replay the idle span).
