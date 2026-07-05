@@ -3887,6 +3887,26 @@ impl Ppu {
         let ds = mmio.is_double_speed_mode();
         let cc = self.abs_cc;
 
+        // Fast path: none of the ~10 scheduled events below can fire this dot.
+        // Every consumer gates on `sched_cc <= cc + off` with `off <= 2` (the
+        // m1/m0 double-speed anticipation), and the wy/scy/scx apply blocks use
+        // off 0. So if the earliest scheduled cc is still more than 2 dots away,
+        // the whole body is a no-op. Disabled slots hold huge sentinels
+        // (u64::MAX / DISABLED_TIME), so the min naturally excludes them.
+        let min_sched = self
+            .wy2_apply_cc
+            .min(self.wy1_apply_cc)
+            .min(self.scy_apply_cc)
+            .min(self.scx_apply_cc)
+            .min(self.sched_oneshot_statirq)
+            .min(self.sched_m1irq)
+            .min(self.sched_lycirq)
+            .min(self.sched_m2irq)
+            .min(self.sched_m0irq);
+        if cc + 2 < min_sched {
+            return;
+        }
+
         if self.wy2_apply_cc != wy2_disabled() && self.wy2_apply_cc <= cc {
             self.wy2 = self.wy2_pending;
             self.wy2_apply_cc = wy2_disabled();
