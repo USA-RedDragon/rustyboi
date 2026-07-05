@@ -8,7 +8,9 @@ A Game Boy emulator written in Rust for learning purposes. Not usable, likely ne
 
 Passing cases per suite, refreshed automatically on every pull request
 (`tools/run-suites.sh report`). See [SUITES.md](SUITES.md) for what each suite
-is, how it is graded, and where its ROMs come from.
+is, how it is graded, and where its ROMs come from. Every one of the currently
+failing ROMs is individually proven and documented in
+[KNOWN_FAILURES.md](KNOWN_FAILURES.md).
 
 <!-- SUITE-PROGRESS:START -->
 | Suite | Passing | Total |
