@@ -607,14 +607,14 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
 /// Read back the dumped memory region and compare it to the reference file.
 fn evaluate_dump_oracle(gb: &GB, oracle: &Oracle) -> Result<(), String> {
     match oracle {
-        Oracle::SramDump { path } => {
+        Oracle::SramDump { path, skip } => {
             let expected = fs::read(path)
                 .map_err(|error| format!("failed to read SRAM dump {}: {error}", path.display()))?;
             let cartridge = gb
                 .cartridge()
                 .ok_or_else(|| "no cartridge present when reading SRAM dump".to_string())?;
             let actual = cartridge.save_ram();
-            compare_dump(&format!("SRAM dump {}", path.display()), &expected, actual)
+            compare_dump(&format!("SRAM dump {}", path.display()), &expected, actual, skip)
         }
         Oracle::RegionDump { path, region } => {
             let expected = fs::read(path).map_err(|error| {
@@ -633,6 +633,7 @@ fn evaluate_dump_oracle(gb: &GB, oracle: &Oracle) -> Result<(), String> {
                 ),
                 &expected,
                 &actual,
+                &[],
             )
         }
         _ => Err("evaluate_dump_oracle called with non-dump oracle".to_string()),
@@ -640,8 +641,15 @@ fn evaluate_dump_oracle(gb: &GB, oracle: &Oracle) -> Result<(), String> {
 }
 
 /// Compare a captured byte region against a reference dump. Reports the first
-/// differing offset with expected/actual bytes, or a length mismatch.
-fn compare_dump(label: &str, expected: &[u8], actual: &[u8]) -> Result<(), String> {
+/// differing offset with expected/actual bytes, or a length mismatch. Offsets
+/// within any `skip` range are not graded (nondeterministic power-on regions;
+/// see `Oracle::SramDump`).
+fn compare_dump(
+    label: &str,
+    expected: &[u8],
+    actual: &[u8],
+    skip: &[std::ops::Range<usize>],
+) -> Result<(), String> {
     if actual.len() < expected.len() {
         return Err(format!(
             "{label}: captured region too small ({} bytes available, {} expected)",
@@ -651,6 +659,9 @@ fn compare_dump(label: &str, expected: &[u8], actual: &[u8]) -> Result<(), Strin
     }
 
     for (offset, (&want, &got)) in expected.iter().zip(actual.iter()).enumerate() {
+        if skip.iter().any(|range| range.contains(&offset)) {
+            continue;
+        }
         if want != got {
             return Err(format!(
                 "{label}: first mismatch at offset {offset:#06X}: expected {want:#04X}, got {got:#04X}",
