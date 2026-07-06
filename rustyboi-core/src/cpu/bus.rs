@@ -998,6 +998,10 @@ impl<'a> Bus<'a> {
         }
 
         if addr == 0xFF0F && !self.mmio.dma_active() {
+            // Pump timer overflows at the write cc first (Gambatte's event
+            // update before the ifReg store): an overflow whose schedule has
+            // been reached flags IF now and the store below overwrites it.
+            self.mmio.flush_timer_overflow_for_ifreg_write();
             // IF (0xFF0F) write: split the write M-cycle so the explicit `ifReg`
             // store lands partway through it (Gambatte applies the store at the
             // write cc, after the access M-cycle's leading dots). An IRQ flagged at

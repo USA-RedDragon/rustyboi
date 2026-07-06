@@ -1338,6 +1338,19 @@ impl Mmio {
         }
     }
 
+    /// FF0F store prelude (Gambatte `nontrivial_ff_write` 0x0F): pump timer
+    /// overflow events at the write cc and raise their IF BEFORE the store, so
+    /// an exact-collision CPU write wins (see Timer::flush_overflow_for_ifreg_write).
+    pub fn flush_timer_overflow_for_ifreg_write(&mut self) {
+        let mut timer = self.timer.clone();
+        timer.flush_overflow_for_ifreg_write();
+        let irq = timer.take_pending_irq();
+        self.timer = timer;
+        if irq {
+            self.request_interrupt(cpu::registers::InterruptFlag::Timer);
+        }
+    }
+
     pub fn step_serial(&mut self) {
         // Serial now runs on the master cc (`abs_cc`), the SAME clock the timer
         // DIV/TIMA and APU derive from — no separate `cpu_t_phase` parallel
