@@ -77,8 +77,16 @@ const HUC3: u8 = 0xFE;
 // mode and the IR transceiver ($0E selects IR, anything else RAM).
 const HUC1_RAM_BATTERY: u8 = 0xFF;
 
+// POCKET CAMERA (Game Boy Camera): MAC-GBD controller + M64282FP "retina"
+// image sensor. MBC3-like banking, 128KB battery-backed RAM, and a 54-byte
+// write-only sensor/dither register file mapped over A000-BFFF when the RAM
+// bank select has bit 4 set (Pan Docs "Game Boy Camera", reverse-engineered
+// by AntonioND: github.com/AntonioND/gbcam-rev-engineer). The type byte
+// implies RAM+BATTERY.
+const POCKET_CAMERA: u8 = 0xFC;
+
 // Remaining unimplemented mapper families (fall through to NoMBC):
-//   0xFC POCKET CAMERA, 0xFD BANDAI TAMA5.
+//   0xFD BANDAI TAMA5.
 
 // ---------------------------------------------------------------------------
 // Unlicensed / bootleg mappers. These boards spoof the header type byte
@@ -180,6 +188,24 @@ const EXTERNAL_RAM_END: u16 = 0xBFFF;
 const MBC2_RAM_SIZE: usize = 512; // 512 x 4 bits
 const MBC2_RAM_START: u16 = 0xA000;
 
+// POCKET CAMERA geometry/constants (Pan Docs "Game Boy Camera" /
+// AntonioND gbcam-rev-engineer doc v1.1.1).
+// The CAM register file: A000 trigger/status, A001-A005 M64282FP sensor
+// parameters, A006-A035 the 4x4x3 dither/contrast matrix. 54 bytes total,
+// mirrored every $80 across A000-BFFF while selected.
+const CAM_REG_COUNT: usize = 0x36;
+// Visible capture output: 128x112 pixels, 2bpp GB tiles (16x14 tiles x 16
+// bytes) written by the controller to RAM bank 0 at offset $0100.
+const CAM_W: usize = 128;
+const CAM_H: usize = 112;
+const CAM_TILE_BYTES: usize = (CAM_W / 8) * (CAM_H / 8) * 16; // 3584
+const CAM_RAM_IMAGE_OFFSET: usize = 0x0100;
+// The sensor array is 128x123; the controller discards the corrupt top and
+// bottom rows and uses the middle 112 of a 120-row window (GiiBiiAdvance
+// GBCAM_SENSOR_EXTRA_LINES).
+const CAM_SENSOR_EXTRA_LINES: usize = 8;
+const CAM_SENSOR_H: usize = CAM_H + CAM_SENSOR_EXTRA_LINES; // 120
+
 #[derive(Clone, Debug)]
 pub enum CartridgeType {
     NoMBC { battery: bool },
@@ -190,6 +216,7 @@ pub enum CartridgeType {
     MBC7,
     HuC1,
     HuC3,
+    PocketCamera,
     // Unlicensed boards (selected via UnlMapper content detection, never via
     // the header type byte alone).
     WisdomTree,
@@ -262,6 +289,10 @@ fn serde_u16_8000() -> u16 {
 
 fn serde_u8_one() -> u8 {
     1
+}
+
+fn serde_cam_regs() -> Vec<u8> {
+    vec![0; CAM_REG_COUNT]
 }
 
 #[derive(Serialize, Deserialize)]
@@ -402,6 +433,40 @@ pub struct Cartridge {
     // modeled: reads always see "no light" (0xC0), the documented idle.
     #[serde(default)]
     huc1_ir_led: bool,
+
+    // POCKET CAMERA (MAC-GBD + M64282FP) state.
+    // 6-bit ROM bank register; bank 0 is selectable at 4000-7FFF (AntonioND:
+    // "This area may contain any ROM bank (0 included)"). Initial bank 1.
+    #[serde(default = "serde_u8_one")]
+    cam_rom_bank: u8,
+    // 4-bit RAM bank register (banks 0-$0F of the 128KB RAM).
+    #[serde(default)]
+    cam_ram_bank: u8,
+    // Bit 4 of the 4000-5FFF write maps the CAM register file over A000-BFFF
+    // instead of RAM (the ROM uses bank $10).
+    #[serde(default)]
+    cam_regs_selected: bool,
+    // The 54-byte register file. Write-only except index 0 (trigger/status).
+    #[serde(default = "serde_cam_regs")]
+    cam_regs: Vec<u8>,
+    // Remaining master-clock T-cycles of the in-flight (or stopped) capture.
+    #[serde(default)]
+    cam_clocks_left: u64,
+    // Capture actively running (A000 bit 0 reads 1). Cleared by writing bit
+    // 0 = 0 mid-capture (stop) and when the countdown expires.
+    #[serde(default)]
+    cam_running: bool,
+    // Fully processed tile data of the in-flight capture, committed to RAM
+    // bank 0 at $0100 when the countdown expires (the real controller
+    // streams pixels into RAM during the sensor read period at the end of
+    // the window; until then RAM keeps the previous image).
+    #[serde(default)]
+    cam_pending: Vec<u8>,
+    // Live 128x112 8-bit grayscale sensor input, fed by the frontend via
+    // `set_camera_image`. Empty => the built-in deterministic test pattern.
+    // Not persisted (transient hardware input, like buttons).
+    #[serde(skip, default)]
+    cam_image: Vec<u8>,
 
     // Detected unlicensed mapper family (content heuristics; overrides the
     // header type byte in get_cartridge_type).
@@ -544,6 +609,14 @@ impl Clone for Cartridge {
             huc1_rom_bank: self.huc1_rom_bank,
             huc1_ram_bank: self.huc1_ram_bank,
             huc1_ir_led: self.huc1_ir_led,
+            cam_rom_bank: self.cam_rom_bank,
+            cam_ram_bank: self.cam_ram_bank,
+            cam_regs_selected: self.cam_regs_selected,
+            cam_regs: self.cam_regs.clone(),
+            cam_clocks_left: self.cam_clocks_left,
+            cam_running: self.cam_running,
+            cam_pending: self.cam_pending.clone(),
+            cam_image: self.cam_image.clone(),
             unl_mapper: self.unl_mapper,
             wt_bank: self.wt_bank,
             rocket_rom_bank: self.rocket_rom_bank,
@@ -977,6 +1050,14 @@ impl Cartridge {
             huc1_rom_bank: 1,
             huc1_ram_bank: 0,
             huc1_ir_led: false,
+            cam_rom_bank: 1,
+            cam_ram_bank: 0,
+            cam_regs_selected: false,
+            cam_regs: serde_cam_regs(),
+            cam_clocks_left: 0,
+            cam_running: false,
+            cam_pending: Vec::new(),
+            cam_image: Vec::new(),
             unl_mapper,
             wt_bank: 0,
             rocket_rom_bank: 1,
@@ -1160,6 +1241,14 @@ impl Cartridge {
             huc1_rom_bank: 1,
             huc1_ram_bank: 0,
             huc1_ir_led: false,
+            cam_rom_bank: 1,
+            cam_ram_bank: 0,
+            cam_regs_selected: false,
+            cam_regs: serde_cam_regs(),
+            cam_clocks_left: 0,
+            cam_running: false,
+            cam_pending: Vec::new(),
+            cam_image: Vec::new(),
             unl_mapper,
             wt_bank: 0,
             rocket_rom_bank: 1,
@@ -1226,6 +1315,7 @@ impl Cartridge {
             MBC7_SENSOR_RUMBLE_RAM_BATTERY => CartridgeType::MBC7,
             HUC1_RAM_BATTERY => CartridgeType::HuC1,
             HUC3 => CartridgeType::HuC3,
+            POCKET_CAMERA => CartridgeType::PocketCamera,
             // Bankless carts: RAM presence comes from the header RAM-size
             // byte, so $00 ROM ONLY and $08 ROM+RAM decode identically; $09
             // adds the battery. Unknown/unimplemented types fall through to
@@ -1284,6 +1374,11 @@ impl Cartridge {
             CartridgeType::HuC3 => {
                 // 7-bit register; like MBC5 bank 0 is selectable here.
                 (self.huc3_rom_bank as usize) % self.rom_banks
+            }
+            CartridgeType::PocketCamera => {
+                // 6-bit register; bank 0 is selectable here (AntonioND: "may
+                // contain any ROM bank (0 included)"; mGBA _GBPocketCam).
+                (self.cam_rom_bank as usize) % self.rom_banks
             }
             CartridgeType::WisdomTree => {
                 // Whole-$0000-$7FFF 32KB banking: this half is the odd 16KB
@@ -1355,6 +1450,10 @@ impl Cartridge {
             CartridgeType::HuC3 => {
                 // "At least 2 bits" per Pan Docs; real carts have 4 banks.
                 (self.huc3_ram_bank as usize) % self.ram_banks.max(1)
+            }
+            CartridgeType::PocketCamera => {
+                // 4-bit register, 16 banks of the 128KB RAM.
+                (self.cam_ram_bank as usize) % self.ram_banks.max(1)
             }
             // None of the unlicensed boards bank their (optional) RAM.
             CartridgeType::WisdomTree
@@ -1639,8 +1738,12 @@ impl Cartridge {
             CartridgeType::MBC3 { battery, .. } => battery,
             CartridgeType::MBC5 { battery, .. } => battery,
             // MBC7's EEPROM is inherently non-volatile; HuC-3 ($FE) implies
-            // RAM+BATTERY+RTC and HuC-1 ($FF) implies RAM+BATTERY.
-            CartridgeType::MBC7 | CartridgeType::HuC1 | CartridgeType::HuC3 => true,
+            // RAM+BATTERY+RTC, HuC-1 ($FF) implies RAM+BATTERY, and POCKET
+            // CAMERA ($FC) implies RAM+BATTERY (the photo album).
+            CartridgeType::MBC7
+            | CartridgeType::HuC1
+            | CartridgeType::HuC3
+            | CartridgeType::PocketCamera => true,
             // No known cart on these unlicensed boards has battery-backed RAM.
             CartridgeType::WisdomTree
             | CartridgeType::Rocket
@@ -2538,6 +2641,364 @@ impl Cartridge {
         )
     }
 
+    /// True for POCKET CAMERA carts (MAC-GBD + M64282FP sensor). Frontends
+    /// use this to know when `set_camera_image` is meaningful; the bus uses
+    /// it to gate the capture-countdown tick.
+    pub fn has_camera(&self) -> bool {
+        matches!(self.get_cartridge_type(), CartridgeType::PocketCamera)
+    }
+
+    /// True if the cartridge needs the per-dot peripheral clock tick (an RTC
+    /// crystal or the camera capture countdown).
+    pub fn needs_clock_tick(&self) -> bool {
+        self.has_rtc() || self.has_camera()
+    }
+
+    // -----------------------------------------------------------------------
+    // POCKET CAMERA (MAC-GBD controller + Mitsubishi M64282FP image sensor)
+    //
+    // References: Pan Docs "Game Boy Camera" (the section AntonioND compiled
+    // from his reverse engineering), AntonioND/gbcam-rev-engineer doc
+    // v1.1.1 (register semantics, capture timings, GiiBiiAdvance reference
+    // pipeline), mGBA src/gb/mbc/pocket-cam.c and SameBoy Core/camera.c for
+    // mapper cross-checks.
+    //
+    // Register file (A000-A035 while a bank with bit 4 set is selected,
+    // mirrored every $80):
+    //   A000     trigger/status: bit0 start capture / busy flag, bits 1-2
+    //            select the M64282FP 1-D filtering set (P/M/X registers).
+    //   A001     -> sensor reg 1: N (bit7), VH (bits 5-6), gain (bits 0-4).
+    //   A002/03  -> sensor regs 2/3: 16-bit exposure, MSB first.
+    //   A004     -> sensor reg 7: E3+edge ratio (bits 4-7), invert (bit 3),
+    //            output node bias V (bits 0-2, analog only).
+    //   A005     -> sensor reg 0: zero-point calibration (bits 6-7), output
+    //            reference voltage O (bits 0-5, analog only).
+    //   A006-35  4x4 dither/contrast matrix, 3 threshold bytes per cell.
+    // -----------------------------------------------------------------------
+
+    /// Feed the live sensor image: 128x112 8-bit grayscale, row-major
+    /// (`pixels[y * 128 + x]`), 0 = black. This is the frontend integration
+    /// point for a webcam/still source; without it captures use a built-in
+    /// deterministic test pattern. No-op outside camera carts' effect (the
+    /// buffer is simply never consumed).
+    pub fn set_camera_image(&mut self, pixels: &[u8; CAM_W * CAM_H]) {
+        if self.cam_image.len() != CAM_W * CAM_H {
+            self.cam_image = vec![0; CAM_W * CAM_H];
+        }
+        self.cam_image.copy_from_slice(pixels);
+    }
+
+    /// Built-in deterministic sensor input: a diagonal luminance gradient
+    /// with a dark disc, a bright disc and a mid-gray border frame, spanning
+    /// the full 0-255 range so all four GB shades appear after dithering.
+    fn cam_builtin_pattern() -> Vec<u8> {
+        let mut img = vec![0u8; CAM_W * CAM_H];
+        for y in 0..CAM_H {
+            for x in 0..CAM_W {
+                let mut v = ((x * 255) / (CAM_W - 1) + (y * 255) / (CAM_H - 1)) / 2;
+                // Dark disc, upper-left quadrant.
+                let (dx, dy) = (x as i32 - 40, y as i32 - 40);
+                if dx * dx + dy * dy < 24 * 24 {
+                    v = 24;
+                }
+                // Bright disc, lower-right quadrant.
+                let (dx, dy) = (x as i32 - 92, y as i32 - 76);
+                if dx * dx + dy * dy < 20 * 20 {
+                    v = 232;
+                }
+                // Mid-gray frame border.
+                if !(4..CAM_W - 4).contains(&x) || !(4..CAM_H - 4).contains(&y) {
+                    v = 128;
+                }
+                img[y * CAM_W + x] = v as u8;
+            }
+        }
+        img
+    }
+
+    /// Write to the CAM register file (index = addr & 0x7F).
+    fn cam_reg_write(&mut self, idx: u16, value: u8) {
+        if idx == 0 {
+            // Only the low 3 bits are wired.
+            self.cam_regs[0] = value & 0x07;
+            if value & 0x01 != 0 {
+                if !self.cam_running {
+                    if self.cam_clocks_left > 0 {
+                        // Restart after a mid-capture stop: "it will continue
+                        // the previous capture process with the old capture
+                        // parameters, even if the registers are changed in
+                        // between" -- cam_pending was already processed with
+                        // the trigger-time parameters.
+                        self.cam_running = true;
+                    } else {
+                        self.cam_start_capture();
+                    }
+                }
+            } else if self.cam_running {
+                // Stop the capture; RAM is readable again. The countdown
+                // freezes so a later '1' write resumes it.
+                self.cam_running = false;
+            }
+        } else if (idx as usize) < CAM_REG_COUNT {
+            self.cam_regs[idx as usize] = value;
+        }
+        // A036-A07F: unmapped, writes ignored (SameBoy warns and drops).
+    }
+
+    /// Start a capture: compute the busy window and process the sensor
+    /// image. The result is committed to RAM when the countdown expires (the
+    /// real controller streams pixels into RAM during the sensor read period
+    /// at the END of the window; committing at expiry keeps the previous
+    /// image visible if the capture is stopped early, as documented).
+    fn cam_start_capture(&mut self) {
+        let n_bit = self.cam_regs[1] & 0x80 != 0;
+        let exposure = ((self.cam_regs[2] as u64) << 8) | self.cam_regs[3] as u64;
+        // Pan Docs: M-cycles(1MiHz) = 32446 + (N ? 0 : 512) + 16 * exposure.
+        // Stored in master-clock T-cycles (x4); cam_tick halves the window
+        // in CGB double-speed mode where PHI runs twice as fast.
+        self.cam_clocks_left = 4 * (32446 + if n_bit { 0 } else { 512 } + 16 * exposure);
+        self.cam_running = true;
+        self.cam_pending = self.cam_process_image();
+    }
+
+    /// Advance the capture countdown by `phi_quarters` PHI/4 units (master
+    /// dots at single speed; the caller doubles the span in CGB double-speed
+    /// mode, where the PHI cartridge clock runs at 2.097152 MHz). No-op
+    /// unless a capture is actively running.
+    pub fn cam_tick(&mut self, phi_quarters: u64) {
+        if !self.cam_running || phi_quarters == 0 {
+            return;
+        }
+        if self.cam_clocks_left > phi_quarters {
+            self.cam_clocks_left -= phi_quarters;
+            return;
+        }
+        // Capture finished: the controller has streamed the processed tile
+        // data into RAM bank 0 at $0100 and the busy flag clears.
+        self.cam_clocks_left = 0;
+        self.cam_running = false;
+        if self.ram_data.len() >= CAM_RAM_IMAGE_OFFSET + CAM_TILE_BYTES
+            && self.cam_pending.len() == CAM_TILE_BYTES
+        {
+            let pending = std::mem::take(&mut self.cam_pending);
+            self.ram_data[CAM_RAM_IMAGE_OFFSET..CAM_RAM_IMAGE_OFFSET + CAM_TILE_BYTES]
+                .copy_from_slice(&pending);
+            // Stream the block to the battery .sav (single bulk write, not
+            // 3584 per-byte writes).
+            if let Some(file) = &mut self.save_file {
+                let _ = file
+                    .seek(SeekFrom::Start(CAM_RAM_IMAGE_OFFSET as u64))
+                    .and_then(|_| file.write_all(&pending))
+                    .and_then(|_| file.flush());
+            }
+        }
+    }
+
+    /// The M64282FP sensor + MAC-GBD controller pipeline, following the
+    /// AntonioND/GiiBiiAdvance reference model reproduced in Pan Docs
+    /// ("Sample code for emulators"), in exact-integer form: exposure
+    /// scaling, optional inversion, the documented 3x3 edge kernels / 1-D
+    /// filtering selected by N/VH/E3 and the A000 P/M bits, then the 4x4x3
+    /// dither/contrast matrix, packed as GB 2bpp tiles (16x14 tiles, the
+    /// layout the ROM expects at RAM bank 0 offset $0100).
+    fn cam_process_image(&self) -> Vec<u8> {
+        // --- Sensor input: 128x120 window (112 visible + 4 padding rows
+        // top/bottom standing in for the sensor's discarded edge rows).
+        let builtin;
+        let input: &[u8] = if self.cam_image.len() == CAM_W * CAM_H {
+            &self.cam_image
+        } else {
+            builtin = Self::cam_builtin_pattern();
+            &builtin
+        };
+        let src_row = |k: usize| {
+            let y = (k as i32 - (CAM_SENSOR_EXTRA_LINES / 2) as i32)
+                .clamp(0, CAM_H as i32 - 1) as usize;
+            &input[y * CAM_W..(y + 1) * CAM_W]
+        };
+
+        // --- Configuration (registers latched at trigger time).
+        // A000 bits 1-2 select the 1-D filter P/M sets (doc v1.1.1 §3.1.3).
+        let (p_bits, m_bits) = match (self.cam_regs[0] >> 1) & 3 {
+            0 => (0x00u32, 0x01u32),
+            1 => (0x01, 0x00),
+            _ => (0x01, 0x02),
+        };
+        let n_bit = (self.cam_regs[1] >> 7) as u32;
+        let vh_bits = ((self.cam_regs[1] >> 5) & 3) as u32;
+        let exposure = ((self.cam_regs[2] as i32) << 8) | self.cam_regs[3] as i32;
+        let e3_bit = (self.cam_regs[4] >> 7) as u32;
+        let i_bit = self.cam_regs[4] & 0x08 != 0;
+        // Edge enhancement ratio in quarters: 0.50,0.75,1.00,1.25,2,3,4,5.
+        let alpha4 = [2i32, 3, 4, 5, 8, 12, 16, 20][((self.cam_regs[4] >> 4) & 7) as usize];
+        // alpha-scaled add with GiiBiiAdvance's exact float->int semantics:
+        // trunc(px + diff*alpha) == trunc((4*px + diff*alpha4) / 4).
+        let edge = |px: i32, diff: i32| (px * 4 + diff * alpha4) / 4;
+
+        // --- Analog stage: exposure scaling + level squash (GiiBiiAdvance's
+        // measured approximation of the sensor's gain/level control against
+        // the ROM's ~$80-centered dither thresholds), optional inversion,
+        // then signed representation for the edge kernels. Column-major
+        // (x * CAM_SENSOR_H + y) like the reference buf[i][j].
+        let h = CAM_SENSOR_H;
+        let w = CAM_W;
+        let at = |i: usize, j: usize| i * h + j;
+        let mut buf = vec![0i32; w * h];
+        for i in 0..w {
+            for j in 0..h {
+                let mut v = src_row(j)[i] as i32;
+                v = v * exposure / 0x0300;
+                v = 128 + (v - 128) / 8;
+                v = v.clamp(0, 255);
+                if i_bit {
+                    v = 255 - v;
+                }
+                buf[at(i, j)] = v - 128;
+            }
+        }
+
+        // 1-D filtering: vout = P/M-selected sum of the pixel and its south
+        // neighbor (the sensor streams line pairs through the 1-D kernel).
+        let one_d = |src: &[i32], dst: &mut [i32]| {
+            for i in 0..w {
+                for j in 0..h {
+                    let px = src[at(i, j)];
+                    let ms = src[at(i, (j + 1).min(h - 1))];
+                    let mut value = 0;
+                    if p_bits & 1 != 0 {
+                        value += px;
+                    }
+                    if p_bits & 2 != 0 {
+                        value += ms;
+                    }
+                    if m_bits & 1 != 0 {
+                        value -= px;
+                    }
+                    if m_bits & 2 != 0 {
+                        value -= ms;
+                    }
+                    dst[at(i, j)] = value.clamp(-128, 127);
+                }
+            }
+        };
+
+        let filtering_mode = (n_bit << 3) | (vh_bits << 1) | e3_bit;
+        match filtering_mode {
+            0x0 => {
+                // Positive/negative image: plain 1-D filtering.
+                let src = buf.clone();
+                one_d(&src, &mut buf);
+            }
+            0x2 => {
+                // Horizontal enhancement (P + {2P-(MW+ME)}*alpha), then 1-D.
+                let mut temp = vec![0i32; w * h];
+                for i in 0..w {
+                    for j in 0..h {
+                        let mw = buf[at(i.saturating_sub(1), j)];
+                        let me = buf[at((i + 1).min(w - 1), j)];
+                        let px = buf[at(i, j)];
+                        temp[at(i, j)] = edge(px, 2 * px - mw - me).clamp(0, 255);
+                    }
+                }
+                one_d(&temp, &mut buf);
+            }
+            0xE => {
+                // 2D enhancement (P + {4P-(MN+MS+ME+MW)}*alpha). This is the
+                // mode the GB Camera ROM shoots with (A001 = $E0|gain).
+                let mut temp = vec![0i32; w * h];
+                for i in 0..w {
+                    for j in 0..h {
+                        let ms = buf[at(i, (j + 1).min(h - 1))];
+                        let mn = buf[at(i, j.saturating_sub(1))];
+                        let mw = buf[at(i.saturating_sub(1), j)];
+                        let me = buf[at((i + 1).min(w - 1), j)];
+                        let px = buf[at(i, j)];
+                        temp[at(i, j)] = edge(px, 4 * px - mw - me - mn - ms).clamp(-128, 127);
+                    }
+                }
+                buf = temp;
+            }
+            0x1 => {
+                // AntonioND: real cartridges output a constant color in this
+                // configuration (likely a sensor bug); model as flat 0.
+                buf.fill(0);
+            }
+            0x3 => {
+                // Horizontal extraction ({2P-(MW+ME)}*alpha), then 1-D
+                // (doc v1.1.1 Table 1; unused by the GB Camera ROM).
+                let mut temp = vec![0i32; w * h];
+                for i in 0..w {
+                    for j in 0..h {
+                        let mw = buf[at(i.saturating_sub(1), j)];
+                        let me = buf[at((i + 1).min(w - 1), j)];
+                        let px = buf[at(i, j)];
+                        temp[at(i, j)] = edge(0, 2 * px - mw - me).clamp(0, 255);
+                    }
+                }
+                one_d(&temp, &mut buf);
+            }
+            0xC | 0xD => {
+                // Vertical enhancement / extraction (Table 1, no 1-D).
+                let mut temp = vec![0i32; w * h];
+                for i in 0..w {
+                    for j in 0..h {
+                        let ms = buf[at(i, (j + 1).min(h - 1))];
+                        let mn = buf[at(i, j.saturating_sub(1))];
+                        let px = buf[at(i, j)];
+                        let base = if filtering_mode == 0xC { px } else { 0 };
+                        temp[at(i, j)] = edge(base, 2 * px - mn - ms).clamp(-128, 127);
+                    }
+                }
+                buf = temp;
+            }
+            0xF => {
+                // 2D extraction ({4P-(MN+MS+ME+MW)}*alpha, Table 1).
+                let mut temp = vec![0i32; w * h];
+                for i in 0..w {
+                    for j in 0..h {
+                        let ms = buf[at(i, (j + 1).min(h - 1))];
+                        let mn = buf[at(i, j.saturating_sub(1))];
+                        let mw = buf[at(i.saturating_sub(1), j)];
+                        let me = buf[at((i + 1).min(w - 1), j)];
+                        let px = buf[at(i, j)];
+                        temp[at(i, j)] = edge(0, 4 * px - mw - me - mn - ms).clamp(-128, 127);
+                    }
+                }
+                buf = temp;
+            }
+            _ => {
+                // Undefined combination: no filtering.
+            }
+        }
+
+        // --- Controller stage: back to unsigned, 4x4x3 threshold matrix
+        // (contrast + dithering), then GB 2bpp tile packing.
+        let mut tiles = vec![0u8; CAM_TILE_BYTES];
+        for j in 0..CAM_H {
+            for i in 0..CAM_W {
+                let value = (buf[at(i, j + CAM_SENSOR_EXTRA_LINES / 2)] + 128).clamp(0, 255);
+                let base = 6 + ((j & 3) * 4 + (i & 3)) * 3;
+                // sensor < DxyL -> black; < DxyM -> dark gray; < DxyH ->
+                // light gray; else white (shades as 2bpp color numbers).
+                let color: u8 = if value < self.cam_regs[base] as i32 {
+                    3
+                } else if value < self.cam_regs[base + 1] as i32 {
+                    2
+                } else if value < self.cam_regs[base + 2] as i32 {
+                    1
+                } else {
+                    0
+                };
+                // 16 tiles per row, 16 bytes per tile, MSB = leftmost pixel.
+                let tile_base = ((j >> 3) * 16 + (i >> 3)) * 16 + (j & 7) * 2;
+                let bit = 7 - (i & 7);
+                tiles[tile_base] |= (color & 1) << bit;
+                tiles[tile_base + 1] |= ((color >> 1) & 1) << bit;
+            }
+        }
+        tiles
+    }
+
     /// MBC30: the large-capacity MBC3 variant (used by e.g. Japanese Pokémon
     /// Crystal) that wires 8 ROM-bank bits (256 banks / 4MB, vs MBC3's 7 bits /
     /// 2MB) and 3 RAM-bank bits (8 banks / 64KB, vs 2 bits / 32KB). There is no
@@ -2887,6 +3348,32 @@ impl memory::Addressable for Cartridge {
                             0xFF
                         }
                     }
+                    CartridgeType::PocketCamera => {
+                        if self.cam_regs_selected {
+                            // Register file, mirrored every $80. Only A000 is
+                            // readable: bits 1-2 are the stored 1-D filter
+                            // set, bit 0 is the live capture-busy flag; bits
+                            // 3-7 read '0'. All other registers read $00.
+                            if (addr & 0x7F) == 0 {
+                                (self.cam_regs[0] & 0x06) | (self.cam_running as u8)
+                            } else {
+                                0x00
+                            }
+                        } else if self.cam_running {
+                            // "When the capture process is active all RAM
+                            // banks will return 00h when read."
+                            0x00
+                        } else if !self.ram_data.is_empty() {
+                            // No read gate: RAM reads are always enabled.
+                            let ram_bank = self.get_ram_bank();
+                            let offset = ((addr - EXTERNAL_RAM_START) as usize
+                                + (ram_bank * 0x2000))
+                                % self.ram_data.len();
+                            self.ram_data[offset]
+                        } else {
+                            0xFF
+                        }
+                    }
                     CartridgeType::HuC3 => {
                         match self.huc3_mode {
                             // 0x0 = RAM read-only, 0xA = RAM read/write; both
@@ -3019,6 +3506,12 @@ impl memory::Addressable for Cartridge {
                         // Only the low 4 bits are significant.
                         self.huc3_mode = value & 0x0F;
                     }
+                    CartridgeType::PocketCamera => {
+                        // Gates RAM WRITES only: "Reading from RAM or
+                        // registers is always enabled. Writing to registers
+                        // is always enabled." (Pan Docs Game Boy Camera).
+                        self.ram_enabled = (value & 0x0F) == 0x0A;
+                    }
                     CartridgeType::Sachen { .. } => {
                         // Base ROM bank register, latched only while the
                         // inner bank register has bits 4-5 both set (hhugboy
@@ -3064,6 +3557,9 @@ impl memory::Addressable for Cartridge {
                     }
                     CartridgeType::HuC3 => {
                         self.huc3_rom_bank = value & 0x7F; // 7-bit, bank 0 allowed
+                    }
+                    CartridgeType::PocketCamera => {
+                        self.cam_rom_bank = value & 0x3F; // 6-bit, bank 0 allowed
                     }
                     CartridgeType::Rocket => {
                         // Two EXACT register addresses (hhugboy
@@ -3128,6 +3624,18 @@ impl memory::Addressable for Cartridge {
                     }
                     CartridgeType::HuC3 => {
                         self.huc3_ram_bank = value;
+                    }
+                    CartridgeType::PocketCamera => {
+                        // Bit 4 set maps the CAM register file over
+                        // A000-BFFF; otherwise the low 4 bits select a RAM
+                        // bank (the bank latch is untouched while registers
+                        // are selected, matching mGBA _GBPocketCam).
+                        if value & 0x10 != 0 {
+                            self.cam_regs_selected = true;
+                        } else {
+                            self.cam_regs_selected = false;
+                            self.cam_ram_bank = value & 0x0F;
+                        }
                     }
                     CartridgeType::Sachen { .. } => {
                         // ROM bank mask register, latched only while the
@@ -3290,6 +3798,24 @@ impl memory::Addressable for Cartridge {
                             self.huc1_ir_led = value & 0x01 != 0;
                         } else if !self.ram_data.is_empty() {
                             // RAM is always enabled (no MBC1-style gate).
+                            let ram_bank = self.get_ram_bank();
+                            let offset = ((addr - EXTERNAL_RAM_START) as usize
+                                + (ram_bank * 0x2000))
+                                % self.ram_data.len();
+                            let _ = self.write_ram_byte(offset, value);
+                        }
+                    }
+                    CartridgeType::PocketCamera => {
+                        if self.cam_regs_selected {
+                            // Register writes are always enabled (no RAMG
+                            // gate) and mirror every $80.
+                            self.cam_reg_write(addr & 0x7F, value);
+                        } else if self.ram_enabled
+                            && !self.cam_running
+                            && !self.ram_data.is_empty()
+                        {
+                            // RAM writes need the $0A gate and are ignored
+                            // while the capture unit is working.
                             let ram_bank = self.get_ram_bank();
                             let offset = ((addr - EXTERNAL_RAM_START) as usize
                                 + (ram_bank * 0x2000))
@@ -4044,6 +4570,188 @@ mod tests {
         gb.run_until_frame(false);
         gb.run_until_frame(false);
         assert_eq!(gb.read_memory(0xFF80), 0x77);
+    }
+
+    /// POCKET CAMERA image shaped like the real cart: 1MB ROM (64 banks)
+    /// with a marker byte per bank, 128KB RAM (16 banks).
+    fn camera_cart() -> Cartridge {
+        let mut rom = vec![0u8; 64 * 0x4000];
+        rom[CARTRIDGE_TYPE_OFFSET] = POCKET_CAMERA;
+        rom[ROM_SIZE_OFFSET] = 0x05;
+        rom[RAM_SIZE_OFFSET] = 0x04;
+        for bank in 0..64 {
+            rom[bank * 0x4000 + 0x100] = bank as u8;
+        }
+        Cartridge::from_bytes(&rom).unwrap()
+    }
+
+    /// Program a usable capture configuration: 2D enhancement (the ROM's
+    /// shooting mode), mid exposure, and a flat $80 threshold matrix.
+    fn camera_configure(cart: &mut Cartridge) {
+        cart.write(0x4000, 0x10); // select CAM registers
+        cart.write(0xA001, 0xE8); // N=1 VH=3 gain
+        cart.write(0xA002, 0x08); // exposure MSB
+        cart.write(0xA003, 0x00); // exposure LSB
+        cart.write(0xA004, 0x24); // E3=0 alpha=1.00 I=0 V=4
+        cart.write(0xA005, 0x3F); // zero point / Vref (analog only)
+        for i in 0..48u16 {
+            cart.write(0xA006 + i, 0x80);
+        }
+    }
+
+    #[test]
+    fn pocket_camera_rom_banking_is_6_bit_with_bank_0_selectable() {
+        let mut cart = camera_cart();
+        assert!(cart.has_camera() && cart.has_battery() && !cart.has_rtc());
+        assert_eq!(cart.read(0x4100), 1); // power-on default bank 1
+        cart.write(0x2000, 0x3F);
+        assert_eq!(cart.read(0x4100), 0x3F);
+        // Bank 0 is selectable (no zero->one remap), and only 6 bits wired.
+        cart.write(0x2000, 0x40);
+        assert_eq!(cart.read(0x4100), 0);
+        assert_eq!(cart.read(0x0100), 0); // fixed bank 0 at 0000-3FFF
+    }
+
+    #[test]
+    fn pocket_camera_ram_banking_and_register_select() {
+        let mut cart = camera_cart();
+        // RAM WRITES need the $0A gate; reads are always enabled.
+        cart.write(0xA000, 0x42);
+        assert_eq!(cart.read(0xA000), 0xFF); // write dropped (gate closed)
+        cart.write(0x0000, 0x0A);
+        cart.write(0xA000, 0x42);
+        assert_eq!(cart.read(0xA000), 0x42);
+        // 16 RAM banks.
+        cart.write(0x4000, 0x0F);
+        cart.write(0xA000, 0x77);
+        cart.write(0x4000, 0x00);
+        assert_eq!(cart.read(0xA000), 0x42);
+        cart.write(0x0000, 0x00); // close the gate again
+        assert_eq!(cart.read(0xA000), 0x42); // reads still enabled
+        // Bit 4 maps the register file; all registers but A000 read $00,
+        // and the file mirrors every $80.
+        cart.write(0x4000, 0x10);
+        assert_eq!(cart.read(0xA000), 0x00); // idle: busy clear
+        assert_eq!(cart.read(0xA001), 0x00);
+        cart.write(0xA004, 0x55); // write-only, sticks despite closed gate
+        assert_eq!(cart.read(0xA004), 0x00);
+        cart.write(0xA000 + 0x80, 0x06); // mirror of A000: bits 1-2 stored
+        assert_eq!(cart.read(0xA000), 0x06);
+        // Back to RAM: bank latch survived the register window.
+        cart.write(0x4000, 0x00);
+        assert_eq!(cart.read(0xA000), 0x42);
+    }
+
+    #[test]
+    fn pocket_camera_capture_timing_busy_gate_and_commit() {
+        let mut cart = camera_cart();
+        cart.write(0x0000, 0x0A);
+        camera_configure(&mut cart);
+        cart.write(0xA000, 0x03); // trigger, positive 1-D set
+        assert_eq!(cart.read(0xA000), 0x03); // busy | stored bits 1-2
+        // RAM is unreadable (returns $00) and write-locked while capturing.
+        cart.write(0x4000, 0x00);
+        assert_eq!(cart.read(0xA000), 0x00);
+        assert_eq!(cart.read(0xA100), 0x00);
+        cart.write(0xA000, 0x99); // ignored
+        // Pan Docs: M-cycles = 32446 + (N?0:512) + 16*exposure; N=1 here.
+        let total = 4 * (32446 + 16 * 0x0800u64);
+        cart.cam_tick(total - 1);
+        cart.write(0x4000, 0x10);
+        assert_eq!(cart.read(0xA000), 0x03); // still busy on the last cycle
+        cart.cam_tick(1);
+        assert_eq!(cart.read(0xA000), 0x02); // busy cleared, bits 1-2 kept
+        // RAM readable again; the A000 write during capture was dropped and
+        // the processed tile data landed at bank 0 offset $0100.
+        cart.write(0x4000, 0x00);
+        assert_eq!(cart.read(0xA000), 0xFF); // untouched cell (not 0x99)
+        let tiles: Vec<u8> = (0..CAM_TILE_BYTES)
+            .map(|i| cart.read(0xA100 + i as u16))
+            .collect();
+        assert!(tiles.iter().any(|&b| b != tiles[0]), "flat capture output");
+    }
+
+    #[test]
+    fn pocket_camera_capture_stop_and_resume() {
+        let mut cart = camera_cart();
+        cart.write(0x0000, 0x0A);
+        camera_configure(&mut cart);
+        cart.write(0x4000, 0x00);
+        cart.write(0xA100, 0xAB); // pre-capture RAM content
+        cart.write(0x4000, 0x10);
+        cart.write(0xA000, 0x03);
+        cart.cam_tick(1000);
+        // Stop mid-capture: busy clears, RAM shows the OLD contents again.
+        cart.write(0xA000, 0x02);
+        assert_eq!(cart.read(0xA000), 0x02);
+        cart.write(0x4000, 0x00);
+        assert_eq!(cart.read(0xA100), 0xAB);
+        cart.cam_tick(1 << 40); // stopped: countdown frozen
+        cart.write(0x4000, 0x10);
+        assert_eq!(cart.read(0xA000), 0x02);
+        // Resume: finishes with the ORIGINAL parameters/image.
+        cart.write(0xA000, 0x03);
+        assert_eq!(cart.read(0xA000), 0x03);
+        cart.cam_tick(4 * (32446 + 16 * 0x0800u64)); // > remaining
+        assert_eq!(cart.read(0xA000), 0x02);
+        cart.write(0x4000, 0x00);
+        assert_ne!(cart.read(0xA100), 0xAB); // committed over the old byte
+    }
+
+    #[test]
+    fn pocket_camera_sensor_image_feeds_capture() {
+        let run_capture = |image: Option<[u8; CAM_W * CAM_H]>| -> Vec<u8> {
+            let mut cart = camera_cart();
+            cart.write(0x0000, 0x0A);
+            if let Some(img) = image {
+                cart.set_camera_image(&img);
+            }
+            camera_configure(&mut cart);
+            cart.write(0xA000, 0x01);
+            cart.cam_tick(u64::MAX / 2);
+            cart.write(0x4000, 0x00);
+            (0..CAM_TILE_BYTES)
+                .map(|i| cart.read(0xA100 + i as u16))
+                .collect()
+        };
+        let builtin = run_capture(None);
+        let dark = run_capture(Some([0u8; CAM_W * CAM_H]));
+        let bright = run_capture(Some([255u8; CAM_W * CAM_H]));
+        // A flat black input dithers to solid black tiles (both bitplanes
+        // set), flat white to solid white; the built-in pattern differs from
+        // both.
+        assert!(dark.iter().all(|&b| b == 0xFF));
+        assert!(bright.iter().all(|&b| b == 0x00));
+        assert_ne!(builtin, dark);
+        assert_ne!(builtin, bright);
+    }
+
+    #[test]
+    fn pocket_camera_photo_persists_to_sav() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustyboi-cam-test-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let sav = dir.join("camera.sav");
+
+        let mut cart = camera_cart();
+        cart.attach_save_file(&sav).unwrap();
+        cart.write(0x0000, 0x0A);
+        camera_configure(&mut cart);
+        cart.write(0xA000, 0x01);
+        cart.cam_tick(u64::MAX / 2);
+        cart.write(0x4000, 0x00);
+        let expected: Vec<u8> = (0..CAM_TILE_BYTES)
+            .map(|i| cart.read(0xA100 + i as u16))
+            .collect();
+        drop(cart);
+
+        let bytes = fs::read(&sav).unwrap();
+        assert_eq!(bytes.len(), 16 * 0x2000); // full 128KB album RAM
+        assert_eq!(&bytes[0x100..0x100 + CAM_TILE_BYTES], &expected[..]);
+        fs::remove_dir_all(&dir).ok();
     }
 
     /// Unique-ish suffix for temp dirs (tests may run in parallel).
