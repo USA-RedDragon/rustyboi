@@ -9955,11 +9955,14 @@ impl Ppu {
         let tile_index = mmio.read(0xFE00 + oam_offset as u16 + 2);
         let attributes_byte = mmio.read(0xFE00 + oam_offset as u16 + 3);
 
-        // Sprites use offset coordinates: Y=0 is at line -16, X=0 is at column -8
-        let sprite_screen_y = sprite_y.wrapping_sub(16);
+        // Sprites use offset coordinates: Y=0 is at line -16, X=0 is at column -8.
+        // Compare widened (no u8 wrap): a sprite with y < 16 straddles the top
+        // screen edge and is visible on lines 0 .. y+height-17 (hardware scans
+        // LY+16 against [y, y+height)).
+        let top = sprite_y as i32 - 16;
 
         // Check if sprite is visible on current scanline
-        if ly >= sprite_screen_y && ly < sprite_screen_y + sprite_height {
+        if (ly as i32) >= top && (ly as i32) < top + sprite_height {
             let sprite = Sprite {
                 y: sprite_y,
                 x: sprite_x,
@@ -10075,8 +10078,12 @@ impl Ppu {
             // governs Y/X visibility.
             let large = self.scan_slot_large[i];
             let sprite_height: u8 = if large { 16 } else { 8 };
-            let screen_y = sprite_y.wrapping_sub(16);
-            if ly >= screen_y && ly < screen_y.wrapping_add(sprite_height) {
+            // Widened compare (no u8 wrap): y < 16 sprites straddle the top
+            // screen edge and are visible on lines 0 .. y+height-17 (hardware
+            // scans LY+16 against [y, y+height); windesync-validate's y=15
+            // strike-tip erase sprite).
+            let top = sprite_y as i32 - 16;
+            if (ly as i32) >= top && (ly as i32) < top + sprite_height as i32 {
                 // A ghost-sampled slot (Y/X-bus retention during an OAM-DMA
                 // window) exists only while the DMA owns OAM; its hardware tile/
                 // attribute fetch sees the DMA's in-flight data, so read the live
