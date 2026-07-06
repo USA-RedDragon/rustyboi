@@ -35,6 +35,14 @@ const MBC1_RAM_BATTERY: u8 = 0x03;
 const MBC2: u8 = 0x05;
 const MBC2_BATTERY: u8 = 0x06;
 
+// Bankless ROM+RAM carts (Pan Docs "No MBC": "Optionally up to 8 KiB of RAM
+// could be connected at $A000-BFFF"): the RAM chip is wired straight through,
+// with no banking and no enable gate. $09 adds a battery. No licensed cart is
+// known to use these type bytes, but homebrew, test ROMs and mis-headered
+// dumps do.
+const ROM_RAM: u8 = 0x08;
+const ROM_RAM_BATTERY: u8 = 0x09;
+
 // Cartridge types for MBC3
 const MBC3_TIMER_BATTERY: u8 = 0x0F;
 const MBC3_TIMER_RAM_BATTERY: u8 = 0x10;
@@ -91,7 +99,7 @@ const MBC2_RAM_START: u16 = 0xA000;
 
 #[derive(Clone, Debug)]
 pub enum CartridgeType {
-    NoMBC,
+    NoMBC { battery: bool },
     MBC1 { ram: bool, battery: bool },
     MBC2 { battery: bool },
     MBC3 { ram: bool, battery: bool, timer: bool },
@@ -846,7 +854,13 @@ impl Cartridge {
             MBC7_SENSOR_RUMBLE_RAM_BATTERY => CartridgeType::MBC7,
             HUC1_RAM_BATTERY => CartridgeType::HuC1,
             HUC3 => CartridgeType::HuC3,
-            _ => CartridgeType::NoMBC,
+            // Bankless carts: RAM presence comes from the header RAM-size
+            // byte, so $00 ROM ONLY and $08 ROM+RAM decode identically; $09
+            // adds the battery. Unknown/unimplemented types fall through to
+            // NoMBC too.
+            ROM_RAM => CartridgeType::NoMBC { battery: false },
+            ROM_RAM_BATTERY => CartridgeType::NoMBC { battery: true },
+            _ => CartridgeType::NoMBC { battery: false },
         }
     }
 
@@ -899,7 +913,7 @@ impl Cartridge {
                 // 7-bit register; like MBC5 bank 0 is selectable here.
                 (self.huc3_rom_bank as usize) % self.rom_banks
             }
-            CartridgeType::NoMBC => 1, // Simple cartridge always uses bank 1 for upper area
+            CartridgeType::NoMBC { .. } => 1, // Simple cartridge always uses bank 1 for upper area
         }
     }
 
@@ -934,7 +948,7 @@ impl Cartridge {
                 // "At least 2 bits" per Pan Docs; real carts have 4 banks.
                 (self.huc3_ram_bank as usize) % self.ram_banks.max(1)
             }
-            CartridgeType::NoMBC => 0,
+            CartridgeType::NoMBC { .. } => 0,
         }
     }
 
@@ -1202,7 +1216,9 @@ impl Cartridge {
             // MBC7's EEPROM is inherently non-volatile; HuC-3 ($FE) implies
             // RAM+BATTERY+RTC and HuC-1 ($FF) implies RAM+BATTERY.
             CartridgeType::MBC7 | CartridgeType::HuC1 | CartridgeType::HuC3 => true,
-            CartridgeType::NoMBC => false,
+            // $09 ROM+RAM+BATTERY; plain $00/$08 (and unknown fallthroughs)
+            // have none.
+            CartridgeType::NoMBC { battery } => battery,
         }
     }
 
@@ -2348,6 +2364,19 @@ impl memory::Addressable for Cartridge {
                             _ => 0xFF,
                         }
                     }
+                    CartridgeType::NoMBC { .. } => {
+                        // Pan Docs "No MBC": optional RAM (up to 8KB) is wired
+                        // straight through at A000-BFFF -- no banking, no
+                        // enable gate. A smaller chip mirrors across the
+                        // window (address modulo its size).
+                        if !self.ram_data.is_empty() {
+                            let offset =
+                                (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
+                            self.ram_data[offset]
+                        } else {
+                            0xFF
+                        }
+                    }
                     _ => 0xFF,
                 }
             }
@@ -2630,6 +2659,15 @@ impl memory::Addressable for Cartridge {
                             // (stubbed: no receiver on the other end); other
                             // select values are unmapped.
                             _ => {}
+                        }
+                    }
+                    CartridgeType::NoMBC { .. } => {
+                        // Straight-through RAM, no enable gate (see the read
+                        // path). Battery variants ($09) stream to the .sav.
+                        if !self.ram_data.is_empty() {
+                            let offset =
+                                (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
+                            let _ = self.write_ram_byte(offset, value);
                         }
                     }
                     _ => {}
@@ -3027,6 +3065,53 @@ mod tests {
         // 0x0A (a plain MBC RAM-enable value) is RAM mode too, not IR.
         cart.write(0x0000, 0x0A);
         assert_eq!(cart.read(0xA000), 0x42);
+    }
+
+    #[test]
+    fn nombc_ram_is_wired_straight_through() {
+        // $08 ROM+RAM, 8KB: reads/writes hit RAM directly, no enable gate.
+        let mut cart = Cartridge::from_bytes(&make_rom(ROM_RAM, 0x02)).unwrap();
+        assert!(!cart.has_battery());
+        cart.write(0xA000, 0x77);
+        assert_eq!(cart.read(0xA000), 0x77);
+        cart.write(0xBFFF, 0x12);
+        assert_eq!(cart.read(0xBFFF), 0x12);
+
+        // $09 adds the battery.
+        let cart = Cartridge::from_bytes(&make_rom(ROM_RAM_BATTERY, 0x02)).unwrap();
+        assert!(cart.has_battery());
+
+        // $00 ROM ONLY with no header RAM keeps floating reads.
+        let mut cart = Cartridge::from_bytes(&make_rom(0x00, 0x00)).unwrap();
+        cart.write(0xA000, 0x77);
+        assert_eq!(cart.read(0xA000), 0xFF);
+    }
+
+    /// The completeness-audit repro, end to end through the CPU/bus: a type
+    /// $08 micro-ROM stores $77 to $A000, reads it back and parks it in HRAM
+    /// ($FF80). Previously the NoMBC arm returned $FF.
+    #[test]
+    fn nombc_ram_micro_rom_via_cpu() {
+        let mut rom = make_rom(ROM_RAM, 0x02);
+        // 0x100: nop; jp 0x0150
+        rom[0x100..0x104].copy_from_slice(&[0x00, 0xC3, 0x50, 0x01]);
+        rom[0x150..0x15E].copy_from_slice(&[
+            0x3E, 0x77, // ld a, $77
+            0xEA, 0x00, 0xA0, // ld ($A000), a
+            0x3E, 0x00, // ld a, $00
+            0xFA, 0x00, 0xA0, // ld a, ($A000)
+            0xE0, 0x80, // ldh ($80), a
+            0x18, 0xFE, // jr -2 (spin)
+        ]);
+        let cart = Cartridge::from_bytes(&rom).unwrap();
+        let mut gb = crate::gb::GB::new(crate::gb::Hardware::DMG);
+        gb.insert(cart);
+        gb.skip_bios();
+        // Two frames: skip_bios hands off near the end of a frame, so the
+        // first frame_ready() fires after only a handful of instructions.
+        gb.run_until_frame(false);
+        gb.run_until_frame(false);
+        assert_eq!(gb.read_memory(0xFF80), 0x77);
     }
 
     /// Unique-ish suffix for temp dirs (tests may run in parallel).
