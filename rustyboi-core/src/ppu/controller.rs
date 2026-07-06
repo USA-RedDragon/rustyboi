@@ -8313,6 +8313,30 @@ impl Ppu {
         &self.fb_b
     }
 
+    /// Plain-STOP (low-power) panel effect, Pan Docs "Reducing Power
+    /// Consumption": entering STOP with the LCD enabled blanks a DMG panel to
+    /// white (the real panel also burns a single horizontal black line —
+    /// panel physics with an unpinned row, left unmodeled; the shootout
+    /// reference renders plain white) and turns a CGB panel black — "Except
+    /// if the LCD is in Mode 3, where it will keep drawing the current
+    /// screen", so a mid-mode-3 STOP keeps the picture. The clock freeze
+    /// (`gb::step_instruction`) then holds the painted back buffer on screen
+    /// for the whole STOP; drawing resumes into the live front buffer on
+    /// wake. LCD-off STOP (the recommended sequence) leaves the already-blank
+    /// panel untouched.
+    pub fn enter_stop_mode_panel(&mut self, mmio: &mmio::Mmio) {
+        if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
+            return;
+        }
+        if self.renders_color(mmio) {
+            if !self.is_in_pixel_transfer() {
+                self.color_fb_b = [0x00; FRAMEBUFFER_SIZE * 3];
+            }
+        } else {
+            self.fb_b = [0; FRAMEBUFFER_SIZE];
+        }
+    }
+
     pub fn get_frame(&mut self, mmio: &mmio::Mmio) -> crate::gb::Frame {
         self.have_frame = false;
         // Hardware panel blank: the LCD off state and the first frame after an
