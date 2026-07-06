@@ -1,11 +1,45 @@
 use crate::cpu;
 use crate::memory::Addressable;
 use crate::memory::mmio;
+use crate::printer;
 
 use serde::{Deserialize, Serialize};
 
 pub const SB: u16 = 0xFF01;
 pub const SC: u16 = 0xFF02;
+
+/// A device plugged into the link port. The serial unit latches the device's
+/// preloaded response byte at transfer start (the peer shift register's
+/// contents) and hands the completed outgoing byte back at transfer end, so a
+/// device's reply to byte N can only depend on bytes < N — exactly the
+/// simultaneous-exchange constraint of the real bus. `Disconnected` keeps the
+/// no-peer behavior (0xFF shifts in) byte-identical.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub enum SerialDevice {
+    #[default]
+    Disconnected,
+    Printer(printer::GbPrinter),
+}
+
+impl SerialDevice {
+    /// The byte the attached device would shift out during the next transfer,
+    /// or None when nothing is plugged in.
+    pub fn preloaded_response(&self) -> Option<u8> {
+        match self {
+            SerialDevice::Disconnected => None,
+            SerialDevice::Printer(p) => Some(p.preloaded_response()),
+        }
+    }
+
+    /// Deliver a completed byte exchange to the device. `cc` is the master
+    /// clock at completion (deterministic device timing; never wall-clock).
+    pub fn receive_byte(&mut self, tx: u8, cc: u64) {
+        match self {
+            SerialDevice::Disconnected => {}
+            SerialDevice::Printer(p) => p.receive_byte(tx, cc),
+        }
+    }
+}
 
 // ds-engine STAGE 3: RB_LAZYPERIPH. When set, serial anchors its completion
 // event on the TRUE write cc (the raw master cc captured at the SC-write access
@@ -31,6 +65,19 @@ pub struct Serial {
     step_t: u32,
     bits_shifted: u8,
     cgb: bool,
+    // Link-peer exchange state. `rx_latch` is the peer's response byte,
+    // latched at transfer start from the device's preloaded shift register
+    // (0xFF when disconnected, preserving ones-shift-in). `tx_acc` collects
+    // the bits actually shifted out (SB's MSB at each shift edge), delivered
+    // to the device at completion.
+    #[serde(default = "default_rx_latch")]
+    rx_latch: u8,
+    #[serde(default)]
+    tx_acc: u8,
+}
+
+fn default_rx_latch() -> u8 {
+    0xFF
 }
 
 impl Default for Serial {
@@ -49,6 +96,8 @@ impl Serial {
             step_t: 0,
             bits_shifted: 0,
             cgb: false,
+            rx_latch: 0xFF,
+            tx_acc: 0,
         }
     }
 
@@ -68,9 +117,12 @@ impl Serial {
     }
 
     /// Latch an SC (FF02) write and (re)schedule the transfer event.
-    pub fn schedule_sc(&mut self, value: u8, divider: u16, phase: u64) {
+    /// `link_rx` is the attached serial device's preloaded response byte
+    /// (None = disconnected cable), latched here — at transfer start — the
+    /// way the peer's shift register contents would be.
+    pub fn schedule_sc(&mut self, value: u8, divider: u16, phase: u64, link_rx: Option<u8>) {
         self.sc = value;
-        self.schedule(divider, phase);
+        self.schedule(divider, phase, link_rx);
     }
 
     fn internal_start(&self) -> bool {
@@ -82,7 +134,7 @@ impl Serial {
     /// write's resolution cc — serial now shares the single master clock, not a
     /// separate `cpu_t_phase` (M8 serial merge). Mirrors Gambatte memory.cpp
     /// 0x02 write: `eventTime = cc - (cc - divLastUpdate) % align + step * 8`.
-    fn schedule(&mut self, divider: u16, phase: u64) {
+    fn schedule(&mut self, divider: u16, phase: u64, link_rx: Option<u8>) {
         if !self.internal_start() {
             self.active = false;
             return;
@@ -93,6 +145,8 @@ impl Serial {
         let (step, align_mask) = if fast { (16u32, 0x07u64) } else { (512u32, 0xFFu64) };
         self.step_t = step;
         self.bits_shifted = 0;
+        self.rx_latch = link_rx.unwrap_or(0xFF);
+        self.tx_acc = 0;
         // Snap `phase` down to the DIV-aligned grid (Gambatte:
         // `cc - (cc - divLastUpdate) % align`), add the 8-bit transfer span, then
         // subtract the master-cc write-phase offset mapping the per-dot `abs_cc`
@@ -149,13 +203,21 @@ impl Serial {
             8u8.saturating_sub(remaining_bits)
         };
         while self.bits_shifted < target {
-            self.sb = (self.sb << 1) | 1; // no peer connected -> ones shifted in
+            // The outgoing bit is SB's MSB at the shift edge; the incoming bit
+            // is the peer's latched response, MSB first (0xFF when no peer
+            // connected -> ones shifted in, the disconnected-cable behavior).
+            self.tx_acc = (self.tx_acc << 1) | (self.sb >> 7);
+            let in_bit = (self.rx_latch >> (7 - self.bits_shifted)) & 1;
+            self.sb = (self.sb << 1) | in_bit;
             self.bits_shifted += 1;
         }
         if phase >= self.complete_at {
             self.active = false;
             self.sc &= !SC_TRANSFER_START;
             mmio.request_interrupt(cpu::registers::InterruptFlag::Serial);
+            // The device sees the byte at the transfer's true completion cc
+            // (not the possibly-later observation phase after a bulk skip).
+            mmio.serial_device_receive(self.tx_acc, self.complete_at);
         }
     }
 }
@@ -178,5 +240,71 @@ impl Addressable for Serial {
             SC => self.sc = value,
             _ => panic!("Serial: Invalid write address {:04X}", addr),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cartridge::Cartridge;
+    use crate::gb::{GB, Hardware};
+
+    /// Hand-assembled ROM: sends the 10 bytes at 0x0200 over the link port
+    /// (SB write, SC=0x81, poll SC bit 7, read SB) and stores each response to
+    /// 0xC000+, then spins. The table holds a printer INIT packet.
+    fn link_probe_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x100..0x104].copy_from_slice(&[0x00, 0xC3, 0x50, 0x01]); // nop; jp 0150
+        rom[0x150..0x16E].copy_from_slice(&[
+            0x21, 0x00, 0xC0, // ld hl, C000
+            0x11, 0x00, 0x02, // ld de, 0200
+            0x06, 0x0A, // ld b, 10
+            0x1A, // ld a, (de)
+            0x13, // inc de
+            0xE0, 0x01, // ldh (SB), a
+            0x3E, 0x81, // ld a, 81
+            0xE0, 0x02, // ldh (SC), a
+            0xF0, 0x02, // ldh a, (SC)
+            0xE6, 0x80, // and 80
+            0x20, 0xFA, // jr nz, poll
+            0xF0, 0x01, // ldh a, (SB)
+            0x22, // ld (hl+), a
+            0x05, // dec b
+            0x20, 0xEC, // jr nz, next byte
+            0x18, 0xFE, // jr $ (done)
+        ]);
+        // Printer INIT packet: 88 33 | cmd 01 | comp 00 | len 0000 | cksum 0100 | 00 00
+        rom[0x200..0x20A].copy_from_slice(&[0x88, 0x33, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]);
+        rom
+    }
+
+    fn run_probe(attach_printer: bool) -> Vec<u8> {
+        let mut gb = GB::new(Hardware::DMG);
+        gb.insert(Cartridge::from_bytes(&link_probe_rom()).unwrap());
+        gb.skip_bios();
+        if attach_printer {
+            gb.attach_printer();
+        }
+        // 10 bytes at 8 KHz ≈ 41k cc; a handful of frames is plenty.
+        for _ in 0..20 {
+            gb.run_until_frame(false);
+        }
+        (0..10).map(|i| gb.read_memory(0xC000 + i)).collect()
+    }
+
+    /// Disconnected cable: every transferred byte reads back 0xFF.
+    #[test]
+    fn disconnected_link_shifts_ones() {
+        assert_eq!(run_probe(false), vec![0xFF; 10]);
+    }
+
+    /// With a printer attached the INIT packet gets 0x00 during the body and
+    /// the 0x81 alive + 0x00 status pair in the trailing slots, through the
+    /// real serial timing path (schedule/shift/IRQ), not a shortcut.
+    #[test]
+    fn printer_answers_init_packet() {
+        let responses = run_probe(true);
+        assert_eq!(responses[..8], [0x00; 8]);
+        assert_eq!(responses[8], 0x81, "alive byte");
+        assert_eq!(responses[9], 0x00, "status after INIT");
     }
 }

@@ -119,6 +119,11 @@ pub struct RawConfig {
     /// Skip BIOS on startup
     #[arg(long, default_value_t = false)]
     skip_bios: bool,
+
+    /// Attach a Game Boy Printer to the link port; captured prints are
+    /// written as PNGs next to the ROM
+    #[arg(long, default_value_t = false)]
+    printer: bool,
 }
 
 pub struct CleanConfig {
@@ -139,6 +144,8 @@ pub struct CleanConfig {
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     // skip BIOS on startup
     pub skip_bios: bool,
+    // attach a Game Boy Printer to the link port at startup
+    pub printer: bool,
     // keybinds configuration
     pub keybinds: KeyBinds,
 }
@@ -164,6 +171,7 @@ impl RawConfig {
             palette: ColorPalette::from_str(&self.palette).unwrap_or_default(),
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             skip_bios: _skip_bios,
+            printer: self.printer,
             keybinds: KeyBinds::default(),
         }
     }
