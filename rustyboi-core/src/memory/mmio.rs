@@ -323,6 +323,18 @@ pub struct Mmio {
     // after the first STAT mode read consumes it.
     #[serde(skip, default)]
     dma_prefetch_stat_bias: bool,
+    // VRAM-source GDMA first-word latch. A GDMA whose source is VRAM reads
+    // nothing (same-bus read: floats 0xFF), EXCEPT the transfer's first 16-bit
+    // word, which latches the byte the CPU's absorbed next-opcode prefetch
+    // (Gambatte `intevent_dma` -> `Interrupter::prefetch`) left on the data
+    // bus - duplicated into both bytes by the word bus. AntonioND
+    // hdma_valid_sources real_gbc.sav row 8000 reads `3E 3E FF FF ...` (0x3E =
+    // the `ld a,` opcode following the FF55 write). The prefetch byte is only
+    // known at the CPU's next fetch, so `execute_gdma` arms this with the
+    // first dest word's VRAM address (+ bank), and `Bus::fetch_opcode` patches
+    // the two bytes with the fetched opcode. Consume-once.
+    #[serde(skip, default)]
+    gdma_vram_src_fixup: Option<(u16, bool)>,
     // OAM-DMA advance suppression for the GDMA/HDMA stall window. `execute_gdma`
     // / `run_hdma_block` fold the OAM-DMA's M-cycle advances INTO the transfer
     // loop (Gambatte's `cc - 3 > lOam` gate inside `Memory::dma`). The same
@@ -834,6 +846,7 @@ impl Mmio {
             hdma_enabled: false,
             pending_dma_stall: 0,
             dma_prefetch_stat_bias: false,
+            gdma_vram_src_fixup: None,
             oam_dma_stall_suppress: 0,
             halt_oam_grace: 0,
             oam_dma_stop_freeze: false,
@@ -1788,8 +1801,19 @@ impl Mmio {
         let saved_dma_active = self.dma_active;
         self.dma_active = false;
 
-        let byte = if (0x8000..=0x9FFF).contains(&src) || src >= 0xE000 {
+        let byte = if (0x8000..=0x9FFF).contains(&src) {
             0xFF
+        } else if src >= 0xE000 {
+            // gb-ctr: E000+ HDMA/GDMA sources are external-bus reads with the
+            // RAM chip select asserted; what responds is board-specific (see
+            // `Cartridge::dma_sram_bus_read`). AntonioND hdma_valid_sources
+            // real_gbc.sav rows E000/FE00/FEA0/FFE0 read the lazy-CS cart's
+            // SRAM[src & 0x1FFF] (A000/BE00/BEA0/BFE0 fills); a strict board
+            // floats 0xFF (the previous constant).
+            match &self.cartridge {
+                Some(cart) => cart.dma_sram_bus_read(src),
+                None => 0xFF,
+            }
         } else {
             <Self as memory::Addressable>::read(self, src)
         };
@@ -1813,8 +1837,14 @@ impl Mmio {
     fn resolve_dma_byte(&mut self, src: u16, dst: u16) -> (u16, u8, bool) {
         let saved_dma_active = self.dma_active;
         self.dma_active = false;
-        let byte = if (0x8000..=0x9FFF).contains(&src) || src >= 0xE000 {
+        let byte = if (0x8000..=0x9FFF).contains(&src) {
             0xFF
+        } else if src >= 0xE000 {
+            // Board-specific external-bus response (see `copy_dma_byte`).
+            match &self.cartridge {
+                Some(cart) => cart.dma_sram_bus_read(src),
+                None => 0xFF,
+            }
         } else {
             <Self as memory::Addressable>::read(self, src)
         };
@@ -1865,6 +1895,24 @@ impl Mmio {
 
     /// Clear any stale DMA prefetch-shadow (called once the next opcode has been
     /// fetched without consuming it, so it cannot leak to a later access).
+    /// Consume the pending VRAM-source GDMA first-word latch (see the field
+    /// doc); returns the first dest word's VRAM address + bank flag.
+    pub fn take_gdma_vram_src_fixup(&mut self) -> Option<(u16, bool)> {
+        self.gdma_vram_src_fixup.take()
+    }
+
+    /// Patch the latched first word with the absorbed-prefetch byte.
+    pub fn apply_gdma_vram_src_fixup(&mut self, addr: u16, byte: u8, into_bank1: bool) {
+        for a in [addr, addr.wrapping_add(1)] {
+            let a = VRAM_START | (a & 0x1FFF);
+            if into_bank1 {
+                self.vram_bank1.write(a, byte);
+            } else {
+                self.vram.write(a, byte);
+            }
+        }
+    }
+
     pub fn clear_dma_prefetch_shadow(&mut self) {
         self.hdma_fire_dest0 = None;
         self.hdma_snapshot_armed = false;
@@ -1917,6 +1965,14 @@ impl Mmio {
             0x10000 - dst as usize
         } else {
             length
+        };
+
+        // Arm the VRAM-source first-word latch (see `gdma_vram_src_fixup`).
+        self.gdma_vram_src_fixup = if (0x8000..=0x9FFF).contains(&src) && effective_length >= 2 {
+            let into_bank1 = self.cgb_features_enabled && self.vram_bank == 1;
+            Some((VRAM_START | (dst & 0x1FFF), into_bank1))
+        } else {
+            None
         };
 
         let ds = self.is_double_speed_mode();

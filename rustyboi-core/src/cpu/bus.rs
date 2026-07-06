@@ -529,7 +529,15 @@ impl<'a> Bus<'a> {
         // a fetch that did not land on the block's first dest byte invalidates it
         // so it can never leak to a later same-address fetch.
         self.mmio.clear_dma_prefetch_shadow();
-        self.read(pc)
+        let byte = self.read(pc);
+        // VRAM-source GDMA first-word latch: this fetch IS the absorbed
+        // next-opcode prefetch (Gambatte `intevent_dma`), whose byte the word
+        // bus duplicated into the transfer's first dest word (see
+        // `Mmio::gdma_vram_src_fixup`). Patch it in now that the byte is known.
+        if let Some((addr, into_bank1)) = self.mmio.take_gdma_vram_src_fixup() {
+            self.mmio.apply_gdma_vram_src_fixup(addr, byte, into_bank1);
+        }
+        byte
     }
 
     /// DMG OAM corruption bug (Pan Docs "OAM Corruption Bug"). An OAM-bus access
