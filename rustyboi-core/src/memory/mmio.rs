@@ -335,6 +335,15 @@ pub struct Mmio {
     // the two bytes with the fetched opcode. Consume-once.
     #[serde(skip, default)]
     gdma_vram_src_fixup: Option<(u16, bool)>,
+    // Joypad IRQ input-filter delay for the JOYP select-write edge, in master
+    // cc (dots) remaining until the IF bit is raised; 0 = idle. The P1 lines
+    // pass through an analog filter, so a select write that pulls a held
+    // button's line low raises IF a beat AFTER the write: AntonioND
+    // joy_interrupt_manual_delay (identical on DMG/GBP/CGB) dispatches with
+    // A=0x30 - the ISR enters after the `ld a,$30` following the trigger
+    // write, never right at the write instruction's own boundary.
+    #[serde(skip, default)]
+    joypad_irq_delay: u32,
     // OAM-DMA advance suppression for the GDMA/HDMA stall window. `execute_gdma`
     // / `run_hdma_block` fold the OAM-DMA's M-cycle advances INTO the transfer
     // loop (Gambatte's `cc - 3 > lOam` gate inside `Memory::dma`). The same
@@ -847,6 +856,7 @@ impl Mmio {
             pending_dma_stall: 0,
             dma_prefetch_stat_bias: false,
             gdma_vram_src_fixup: None,
+            joypad_irq_delay: 0,
             oam_dma_stall_suppress: 0,
             halt_oam_grace: 0,
             oam_dma_stop_freeze: false,
@@ -1292,6 +1302,7 @@ impl Mmio {
             && !self.audio.is_powered()
             && !self.serial.is_active()
             && self.delayed_writes.is_empty()
+            && self.joypad_irq_delay == 0
             && !self.has_pending_hdma_deferred()
             // A link peer's deposits arrive on the PEER instance's timeline;
             // per-dot polling keeps the external-clock completion cc tight, so
@@ -1348,6 +1359,17 @@ impl Mmio {
         self.timer = timer;
         if irq {
             self.request_interrupt(cpu::registers::InterruptFlag::Timer);
+        }
+    }
+
+    /// Count down the JOYP select-write IRQ filter delay (one call per dot)
+    /// and raise the IF bit when it elapses. See `joypad_irq_delay`.
+    pub fn step_joypad_irq_delay(&mut self) {
+        if self.joypad_irq_delay > 0 {
+            self.joypad_irq_delay -= 1;
+            if self.joypad_irq_delay == 0 {
+                self.request_interrupt(cpu::registers::InterruptFlag::Joypad);
+            }
         }
     }
 
@@ -4972,9 +4994,12 @@ impl memory::Addressable for Mmio {
                             // Selecting a line group whose buttons are held
                             // pulls the newly-selected P10-P13 lines low; that
                             // high->low edge raises the joypad interrupt just
-                            // like a fresh key press (Pan Docs "Joypad Input").
-                            if self.input.write_joyp(value) {
-                                self.request_interrupt(cpu::registers::InterruptFlag::Joypad);
+                            // like a fresh key press (Pan Docs "Joypad Input"),
+                            // delayed by the P1 input filter (see
+                            // `joypad_irq_delay`; 8 dots keeps the IF set past
+                            // the write instruction's own dispatch boundary).
+                            if self.input.write_joyp(value) && self.joypad_irq_delay == 0 {
+                                self.joypad_irq_delay = 8;
                             }
                         }
                         timer::DIV => {
