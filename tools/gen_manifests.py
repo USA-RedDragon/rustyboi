@@ -1209,7 +1209,14 @@ def gen_gbchwtests(roms: Path, out: Path) -> None:
         return len(data)
 
     def emit(test_id: str, mode: str, rom: Path, ref: Path) -> None:
-        lines.append(f"gbc-hw-tests/{test_id}|{mode}|sram|{rom}|{rel_to_cwd(ref)}")
+        # cart=lazy_sram_cs: every capture in this suite was taken on
+        # AntonioND's flashcart, whose SRAM chip-select decode is lazy
+        # (/CS & A13 -> also responds at E000-FDFF). OAM-DMA E000+ sources
+        # read that SRAM on CGB (dma_valid_sources_* rows E0-FF), so the
+        # board fixture is pinned suite-wide, like the `rev=` hardware pins.
+        lines.append(
+            f"gbc-hw-tests/{test_id}|{mode}|sram|{rom}|{rel_to_cwd(ref)}|cart=lazy_sram_cs"
+        )
 
     dirs = sorted({p.parent for p in hw.rglob("real_*.sav")})
     for d in dirs:

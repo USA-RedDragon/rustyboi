@@ -423,6 +423,11 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
     });
     let mut gb = GB::new(hardware);
     gb.insert(cartridge);
+    if case.cart_lazy_sram_cs {
+        // Fixture pin: the capture cart's SRAM CS is lazy-decoded (see the
+        // `cart=lazy_sram_cs` manifest token / Cartridge::dma_sram_bus_read).
+        gb.set_cart_sram_cs_lazy(true);
+    }
     // Initial state: real boot ROM (Gambatte-faithful) when --real-bios is set
     // and the bios file is present, else the synthetic skip_bios seed. The
     // synthetic path selects per-oracle residue (SRAM `.bin` dumper oracles were
