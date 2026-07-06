@@ -485,6 +485,27 @@ pub struct Mmio {
     #[serde(skip, default)]
     halt_wakeup_hdma: bool,
 
+    // Sticky: FF55 (HDMA5) has been written at least once since power-on, i.e.
+    // this ROM drives the HDMA/GDMA machinery. The CGB LCD-woken halt-exit
+    // stall (sm83.rs) is scoped away from such ROMs: the engine's entire
+    // GDMA/HDMA cc-web (block fire cc's, dma_prefetch STAT biases, the
+    // hdma_start/late_* race models) is co-tuned end-to-end to the un-stalled
+    // wake cc, and the wake-time hdma predicates cannot see a GDMA / late-armed
+    // HDMA that the woken stream will fire only after the wake. On real
+    // hardware those streams stall too; modeling that requires re-anchoring
+    // the whole DMA web (documented debt, no oracle currently distinguishes).
+    #[serde(skip, default)]
+    hdma_machinery_used: bool,
+
+    // Sticky: LCDC (FF40) written during mode 3 — the ROM races LCDC against
+    // the fetcher (cgb-acid-hell). The mid-m3 LCDC race web (tidxtd targets,
+    // lcdc_b4_exact, wg journal) is co-tuned to the un-stalled halt-woken
+    // write grid and its glitch targets cannot be re-anchored post-hoc, so
+    // such ROMs keep the legacy CGB LCD halt-exit timing (same debt class as
+    // `hdma_machinery_used`).
+    #[serde(skip, default)]
+    m3_lcdc_write_seen: bool,
+
     // FAITHFUL EVENTCC: the cc at which the most-recent still-unserviced mode-0
     // STAT IRQ's IF bit was raised, equal to Gambatte's
     // `intreq_.eventTime(intevent_interrupts)` for that m0 IRQ
@@ -880,6 +901,8 @@ impl Mmio {
             halt_wake_m0m2: false,
             ssds_haltskew_ly_advance: false,
             halt_wakeup_hdma: false,
+            hdma_machinery_used: false,
+            m3_lcdc_write_seen: false,
             pending_m0_irq_fire_cc: None,
             halt_wake_plus4_dmg: false,
             last_m2_irq_fire_cc: None,
@@ -2314,6 +2337,28 @@ impl Mmio {
     /// True while the live HALT-woken stream is m0/m2-woken (PTZ consumer).
     pub fn halt_wake_m0m2(&self) -> bool {
         self.halt_wake_m0m2
+    }
+
+    /// Sticky: this ROM has driven the HDMA/GDMA machinery (FF55 written).
+    pub fn hdma_machinery_used(&self) -> bool {
+        self.hdma_machinery_used
+    }
+
+    /// Sticky: this ROM has written LCDC during mode 3 (mid-m3 fetcher race).
+    pub fn set_m3_lcdc_write_seen(&mut self) {
+        self.m3_lcdc_write_seen = true;
+    }
+
+    pub fn m3_lcdc_write_seen(&self) -> bool {
+        self.m3_lcdc_write_seen
+    }
+
+    /// True while the live stream took the NEW (LYC/m1-woken) CGB LCD halt-exit
+    /// real stall — as opposed to the m2-woken stall, whose co-tuned read/write
+    /// biases must stay untouched. The stall flag is shared
+    /// (`m2_halt_stall_charged_cgb`); the wake-source flag separates the classes.
+    pub fn cgb_lcd_stall_charged_no_bias(&self) -> bool {
+        self.m2_halt_stall_charged_cgb && !self.halt_wake_m0m2
     }
 
     /// Arm the halt-woken SS->DS LY-read advance (see field doc). Called at the
@@ -5090,6 +5135,11 @@ impl memory::Addressable for Mmio {
                         },
                         REG_HDMA1 => {
                             if self.cgb_features_enabled {
+                                // Sticky HDMA/GDMA-machinery marker: src/dst
+                                // setup usually precedes the (one-time) vsync
+                                // halt in the gambatte dma preambles, so mark
+                                // here too, not just on the FF55 trigger.
+                                self.hdma_machinery_used = true;
                                 self.hdma_source = (self.hdma_source & 0x00FF) | ((value as u16) << 8);
                             }
                         },
@@ -5114,6 +5164,10 @@ impl memory::Addressable for Mmio {
                         },
                         REG_HDMA5 => {
                             if self.cgb_features_enabled {
+                                // Sticky HDMA/GDMA-machinery marker (see
+                                // `hdma_machinery_used`): scopes the CGB LCD
+                                // halt-exit stall away from the DMA cc-web.
+                                self.hdma_machinery_used = true;
                                 let length_blocks_minus_1 = value & 0x7F;
                                 let new_mode = (value >> 7) & 0x01; // 0=GDMA, 1=HDMA
                                 let lcd_on = (self.io_registers.read(ppu::LCD_CONTROL)

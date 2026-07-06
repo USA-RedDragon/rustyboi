@@ -39,6 +39,11 @@ pub struct SM83 {
     /// cc and the timer-read facet must not re-add the advance.
     #[serde(default)]
     pub m2_halt_stall_charged: bool,
+    /// CGB LCD-woken HALT-exit +4: the LYC/m1-woken CGB wake charged its extra
+    /// M-cycle as a REAL stall (the `return 4` below). One-shot guard so the
+    /// still-halted re-entry does not stall again; take'n at unhalt.
+    #[serde(default)]
+    pub cgb_lcd_halt_stall_charged: bool,
     /// FAITHFUL HALT-EXIT (CGB dma-due deferral): a Requested multi-block HDMA at
     /// CGB HALT-exit with a pending IME=1 interrupt fires its block at unhalt and
     /// then executes ONE post-HALT instruction BEFORE the interrupt is serviced —
@@ -69,6 +74,7 @@ impl SM83 {
             prefetched: false,
             halt_bug_prefetch: false,
             m2_halt_stall_charged: false,
+            cgb_lcd_halt_stall_charged: false,
             hdma_dma_due_defer_service: false,
         }
     }
@@ -201,8 +207,92 @@ impl SM83 {
                     }
                     return 4;
                 }
+                // FAITHFUL HALT-EXIT (CGB LCD-woken, LYC/m1): a CGB console
+                // spends one REAL extra M-cycle leaving HALT on an LCD(STAT)
+                // wake where DMG resumes immediately. Proven by the AntonioND
+                // gbc-hw-tests lcd_irq_delay_timer / vbl_irq_delay_timer
+                // real-silicon sweeps: relative to the same LYC IRQ, every
+                // real-CGB capture grid (STAT/IF/LY ISR reads AND the DIV/TIMA
+                // phase-reset writes after an IME=0 wake) sits exactly 4cc
+                // after the real-DMG grid, while the IF-set cc itself is
+                // machine-identical (the IF column flips at the same lineCycles
+                // on both). The timer-woken exit is machine-identical
+                // (halt_exit_timings_ime_* refs are equal), so this is per-wake
+                // -source, NOT Gambatte's unconditional `cc += 4 * isCgb()`.
+                // Charged as a REAL stall (world advances; subsequent WRITES
+                // shift too — the TIMA-phase evidence read-side biases cannot
+                // model). IME-independent (the IME=0 resume stream carries it:
+                // that is the no_halt variants' TIMA +1 column). Scoped:
+                //   - m0/m2-proximate wakes keep their co-tuned bias-web /
+                //     existing m2 stall (paths above),
+                //   - HDMA wakeups fold the +4 into the block-transfer phase,
+                //   - post-STOP streams (`self.stopped`, the sticky context
+                //     marker also used by the EI-loop anchor split) keep the
+                //     cc-exact STOP-window wake. (A speed-switch STOP never
+                //     sets `halted`/`stopped` — its window exits through the
+                //     dispatch path, so it cannot reach this stall; the DS
+                //     sections of the gbc_mode ROMs run ordinary HALTs whose
+                //     real-CGB DS captures show the same +1-M-cycle gap, so
+                //     double speed takes the stall like single speed. The
+                //     gambatte DS halt corpus is entirely m0/m2-woken and
+                //     stays on its co-tuned paths via the exclusions above.)
+                // The mmio flag drops the read-side +4 components at the
+                // consume sites (getStat +5 -> +1, getLyReg -5 -> -1, BGP
+                // write bias, VRAM-read +6 -> +2), keeping every pure-read
+                // consumer byte-identical by the (residual + 4) decomposition.
+                if mmio.mmio.is_cgb()
+                    && !self.stopped
+                    && pending_interrupt == Some(registers::InterruptFlag::Lcd)
+                    && !self.m2_halt_stall_charged
+                    && !self.cgb_lcd_halt_stall_charged
+                {
+                    let mcc = mmio.master_cc_dbg() as i64;
+                    let m0_prox = mmio
+                        .mmio
+                        .pending_m0_irq_fire_cc()
+                        .is_some_and(|ev| (-2..=6).contains(&(mcc - ev as i64)));
+                    let m2_prox = mmio
+                        .mmio
+                        .last_m2_irq_fire_cc()
+                        .is_some_and(|fire| (mcc as u64).wrapping_sub(fire) < 8);
+                    // `hdma_machinery_used` is the sticky FF55 marker: a GDMA /
+                    // late-armed HDMA fired only AFTER the wake is invisible to
+                    // the wake-time predicates, but its whole cc-web is co-tuned
+                    // to the un-stalled wake (gambatte gdma_cycles / hdma_start
+                    // / hdma_late_* families).
+                    let hdma_wakeup = mmio.hdma_is_enabled()
+                        || mmio.hdma_last_fire_cc().is_some()
+                        || mmio.mmio.hdma_machinery_used()
+                        || !matches!(
+                            mmio.halt_hdma_state(),
+                            memory::mmio::HaltHdmaState::Low
+                        );
+                    // Sticky mid-m3 LCDC-race marker (cgb-acid-hell): those
+                    // ROMs' fetcher-race web keeps the legacy timing.
+                    let lcdc_racer = mmio.mmio.m3_lcdc_write_seen();
+                    if !m0_prox && !m2_prox && !hdma_wakeup && !lcdc_racer {
+                        if std::env::var_os("STALLDBG").is_some() {
+                            eprintln!(
+                                "STALLDBG mcc={} ly={:02X} stat={:02X} ie={:02X} iff={:02X} ime={}",
+                                mmio.master_cc_dbg(),
+                                mmio.peek(0xFF44),
+                                mmio.peek(0xFF41),
+                                mmio.peek(0xFFFF),
+                                mmio.peek(0xFF0F),
+                                self.registers.ime
+                            );
+                        }
+                        self.cgb_lcd_halt_stall_charged = true;
+                        mmio.mmio.set_m2_halt_stall_charged_cgb(true);
+                        return 4;
+                    }
+                }
                 self.halted = false;
                 just_unhalted = true;
+                // One-shot guard consumed: the woken stream is live, re-arm for
+                // the next HALT (the mmio-side flag persists on the stream and
+                // is cleared by the next HALT's reset_halt_wakeup).
+                self.cgb_lcd_halt_stall_charged = false;
                 mmio.clear_cpu_halt();
                 // Mark whether this wakeup involved HDMA: those families fold the
                 // CGB halt-exit +4 into their own block-transfer / unhalt-reflag
