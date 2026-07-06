@@ -125,7 +125,7 @@ threshold() {
         mbc3_tester)        echo "2 -" ;;
         cpp)                echo "3 -" ;;
         magentests)         echo "11 -" ;;
-        little_things_extra) echo "0 -" ;;
+        little_things_extra) echo "3 -" ;;
         sketchtests)        echo "6 120" ;;
         gambatte)           echo "5248 -" ;;  # gated on failed<=9 (GAMBATTE_MAX_FAIL)
         *)                  echo "" ;;
