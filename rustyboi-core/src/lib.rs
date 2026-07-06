@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod cgb_compat_palette;
 pub mod gb;
 pub mod cartridge;
 pub mod cpu;

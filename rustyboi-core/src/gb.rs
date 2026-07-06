@@ -488,14 +488,35 @@ impl GB {
         // OBJ palette is all-zero (black). Matches scx_during_m3_spx2 etc.
         //
         // DMG cart on CGB hardware (CGB features OFF): the CGB boot ROM instead
-        // installs a fixed DMG-compatibility colored palette, and the PPU renders
-        // the DMG game through it. Seed that palette so a DMG cart shows in the
-        // boot ROM's colors (dmg-acid2-on-CGB) rather than grayscale.
+        // installs the per-game DMG-compatibility colored palette (title-hash
+        // lookup in the Nintendo table; unrecognized titles get the default
+        // dark-green scheme), and the PPU renders the DMG game through it. Seed
+        // that palette so a DMG cart shows in the boot ROM's colors: Tetris /
+        // Zelda / Mario get their signature colorization, dmg-acid2 and the
+        // hwtest ROMs the default. Buttons held at power-on override the
+        // automatic choice like a combo held during the boot logo.
         if cgb {
             if self.should_enable_cgb_features() {
                 self.mmio.set_post_bios_cgb_palettes();
             } else {
-                self.mmio.set_cgb_compat_dmg_palettes();
+                let mut title = [0u8; 16];
+                for (i, b) in title.iter_mut().enumerate() {
+                    *b = self.mmio.read(0x0134 + i as u16);
+                }
+                let new_licensee = [self.mmio.read(0x0144), self.mmio.read(0x0145)];
+                let old_licensee = self.mmio.read(0x014B);
+                let mut id = crate::cgb_compat_palette::select_palette_id(
+                    &title,
+                    old_licensee,
+                    new_licensee,
+                );
+                if let Some(combo) = crate::cgb_compat_palette::key_combo_palette_id(
+                    self.mmio.dmg_compat_key_combo(),
+                ) {
+                    id = combo;
+                }
+                let pal = crate::cgb_compat_palette::palettes_for_id(id);
+                self.mmio.set_cgb_compat_dmg_palettes(&pal);
             }
         }
 
@@ -953,14 +974,19 @@ impl GB {
         self.mmio.timer_internal_counter()
     }
 
-    /// Raw CGB BG palette RAM byte pair for a palette/color slot.
+    /// Raw CGB BG palette RAM byte pair for a palette/color slot, ignoring the
+    /// `cgb_features_enabled` bus gate (which blanks reads to 0xFF for a DMG
+    /// cart on CGB and would hide the DMG-compat palette from snapshots).
     pub fn bg_palette_pair(&self, palette: u8, color: u8) -> u16 {
-        self.read_bg_palette_data(palette, color)
+        let (low, high) = self.mmio.bg_palette_pair_raw(palette, color);
+        (high as u16) << 8 | (low as u16)
     }
 
-    /// Raw CGB OBJ palette RAM byte pair for a palette/color slot.
+    /// Raw CGB OBJ palette RAM byte pair for a palette/color slot (see
+    /// `bg_palette_pair`).
     pub fn obj_palette_pair(&self, palette: u8, color: u8) -> u16 {
-        self.read_obj_palette_data(palette, color)
+        let (low, high) = self.mmio.obj_palette_pair_raw(palette, color);
+        (high as u16) << 8 | (low as u16)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
