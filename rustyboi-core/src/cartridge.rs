@@ -294,6 +294,21 @@ pub struct Cartridge {
     #[serde(skip, default)]
     rtc_memory: Vec<u8>,
 
+    // Copy of the bytes last synced into `rtc_memory`, used to detect the
+    // frontend writing externally-loaded RTC data into the RETRO_MEMORY_RTC
+    // region (RetroArch memcpys its `.rtc` file straight into our buffer
+    // after `retro_load_game`; there is no load callback).
+    #[serde(skip, default)]
+    rtc_memory_synced: Vec<u8>,
+
+    // Open handle for the `.rtc` sidecar on RTC carts (MBC3 timer / HuC-3),
+    // attached only on the disk-load path. None => RTC persistence disabled
+    // (in-memory test-runner/WASM loads, host-managed frontends), which also
+    // guarantees the cycle-derived RTC stays byte-deterministic: no sidecar
+    // I/O and no host-clock reads ever happen without this handle.
+    #[serde(skip)]
+    rtc_file: Option<File>,
+
     // When true the cartridge will not open or write sidecar `.sav`/`.rtc`
     // files; the host (e.g. RetroArch) owns persistence of the in-memory RAM.
     #[serde(skip, default)]
@@ -353,6 +368,8 @@ impl Clone for Cartridge {
             cgb_support: self.cgb_support.clone(),
             rumble_motor: self.rumble_motor,
             rtc_memory: self.rtc_memory.clone(),
+            rtc_memory_synced: self.rtc_memory_synced.clone(),
+            rtc_file: None, // Don't clone file handles
             host_managed_saves: self.host_managed_saves,
         }
     }
@@ -590,11 +607,16 @@ impl Cartridge {
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
+            rtc_memory_synced: Vec::new(),
+            rtc_file: None,
             host_managed_saves: false,
         };
 
         // Try to load existing save file or create new one (only for battery-backed RAM)
         cartridge.load_or_create_save_file()?;
+        // Restore the persisted RTC (with wall-clock catch-up) and attach the
+        // `.rtc` sidecar. Disk-load path only; in-memory loads skip this.
+        cartridge.attach_rtc_sidecar()?;
 
         Ok(cartridge)
     }
@@ -752,11 +774,15 @@ impl Cartridge {
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
+            rtc_memory_synced: Vec::new(),
+            rtc_file: None,
             host_managed_saves: false,
         };
 
         // In-memory loading intentionally skips save files so test runners and
-        // WASM callers do not create sidecar files.
+        // WASM callers do not create sidecar files. This also skips the `.rtc`
+        // sidecar + wall-clock catch-up: the RTC starts at zero and advances
+        // only on the deterministic cycle-derived tick.
 
         Ok(cartridge)
     }
@@ -997,10 +1023,12 @@ impl Cartridge {
                     }
                 }
                 _ => {
-                    if loaded_data.len() <= self.ram_data.len() {
-                        self.ram_data[..loaded_data.len()].copy_from_slice(&loaded_data);
-                        println!("Loaded save file: {}", save_path.display());
-                    }
+                    // A file larger than the cart RAM is normal: mGBA / VBA-M /
+                    // BGB append an RTC footer to the `.sav` (read separately by
+                    // `read_sav_rtc_footer`). Load the RAM-sized prefix.
+                    let n = loaded_data.len().min(self.ram_data.len());
+                    self.ram_data[..n].copy_from_slice(&loaded_data[..n]);
+                    println!("Loaded save file: {}", save_path.display());
                 }
             }
         } else {
@@ -1185,6 +1213,8 @@ impl Cartridge {
             0x0C => self.rtc_days_high = value & 0xC1,
             _ => {}
         }
+        // Persist software clock-sets / HALT toggles immediately.
+        self.flush_rtc_file();
     }
 
     /// Copy the live internal RTC counters into the CPU-visible latch registers.
@@ -1199,6 +1229,10 @@ impl Cartridge {
         self.rtc_days_low_latched = self.rtc_days_low;
         self.rtc_days_high_latched = self.rtc_days_high;
         self.mbc3_rtc_latched = true;
+        // Keep the persisted latched shadows fresh: mGBA reconstructs the
+        // clock from the blob's LATCHED fields + timestamp, so they matter
+        // for cross-emulator reads. No-op without a sidecar.
+        self.flush_rtc_file();
     }
 
     /// Advance the cycle-derived RTC by `cycles` master (dot) clock T-cycles.
@@ -1222,9 +1256,17 @@ impl Cartridge {
                 }
                 self.rtc_cycle_accum = self.rtc_cycle_accum.wrapping_add(cycles);
                 const CYCLES_PER_SECOND: u64 = 4_194_304;
+                let mut advanced = false;
                 while self.rtc_cycle_accum >= CYCLES_PER_SECOND {
                     self.rtc_cycle_accum -= CYCLES_PER_SECOND;
                     self.advance_rtc_second();
+                    advanced = true;
+                }
+                if advanced {
+                    // Stream the advanced clock to the `.rtc` sidecar (no-op
+                    // without one, keeping the test path I/O- and
+                    // wall-clock-free).
+                    self.flush_rtc_file();
                 }
             }
             CartridgeType::HuC3 => {
@@ -1232,6 +1274,7 @@ impl Cartridge {
                 // 1440 into a 12-bit day counter (Pan Docs RTC location map).
                 self.huc3_rtc_accum = self.huc3_rtc_accum.wrapping_add(cycles);
                 const CYCLES_PER_MINUTE: u64 = 60 * 4_194_304;
+                let mut advanced = false;
                 while self.huc3_rtc_accum >= CYCLES_PER_MINUTE {
                     self.huc3_rtc_accum -= CYCLES_PER_MINUTE;
                     let (mut minutes, mut days) = self.huc3_clock();
@@ -1241,6 +1284,10 @@ impl Cartridge {
                         days = (days + 1) & 0x0FFF;
                     }
                     self.huc3_set_clock(minutes, days);
+                    advanced = true;
+                }
+                if advanced {
+                    self.flush_rtc_file();
                 }
             }
             _ => {}
@@ -1370,6 +1417,8 @@ impl Cartridge {
             // (Pan Docs); treat as no-ops.
             _ => {}
         }
+        // Commands can rewrite the clock/event nibbles; persist immediately.
+        self.flush_rtc_file();
     }
 
     /// Feed the MBC7 accelerometer with a live tilt sample, in units of g
@@ -1601,6 +1650,356 @@ impl Cartridge {
         self.rtc_days_high = high;
     }
 
+    // --- RTC persistence -------------------------------------------------
+    //
+    // MBC3 blob: the de-facto VBA-M "RTC data" layout, 48 bytes, all fields
+    // little-endian. VBA-M, BGB and mGBA write this same block as a footer
+    // appended to the `.sav`; mGBA's libretro core exposes it verbatim as
+    // RETRO_MEMORY_RTC, so RetroArch `.rtc` files use it too. We store it in
+    // a `.rtc` sidecar next to the `.sav` (the RetroArch convention) and
+    // additionally READ it from a `.sav` footer for imported saves.
+    //
+    //   offset size field
+    //   0x00   4    seconds       (live counter)
+    //   0x04   4    minutes       (live)
+    //   0x08   4    hours         (live)
+    //   0x0C   4    days low      (live)
+    //   0x10   4    days high     (live; bit0=day bit8, bit6=HALT, bit7=carry)
+    //   0x14   4    latched seconds
+    //   0x18   4    latched minutes
+    //   0x1C   4    latched hours
+    //   0x20   4    latched days low
+    //   0x24   4    latched days high
+    //   0x28   8    u64 UNIX time the state was saved at (the legacy 44-byte
+    //               variant stores a u32 here; accepted on read)
+    //
+    // Provenance: VBA-M src/core/gb/gbMemory.h `struct mapperMBC3`
+    // (mapperSeconds..mapperControl, the latched mapperL* copies, then a
+    // union{time_t,u64}) written raw with a -4 read leeway for the u32 form;
+    // mGBA include/mgba/internal/gb/mbc.h `struct GBMBCRTCSaveBuffer` +
+    // src/gb/mbc.c GBMBCRTCRead/GBMBCRTCWrite (STORE/LOAD_32LE + 64LE,
+    // read accepts sizeof-4).
+    //
+    // HuC-3 blob: mGBA's `struct GBMBCHuC3SaveBuffer`, 136 bytes: the RTC
+    // MCU's 256 nibbles packed two per byte (nibble N -> byte N/2, even N in
+    // the low half) followed by a u64 LE UNIX timestamp. This carries the
+    // architected minute-of-day/day-counter nibbles (0x10-0x15) plus the
+    // whole MCU memory (event time, tone, scratch I/O).
+
+    const MBC3_RTC_BLOB_LEN: usize = 48;
+    const MBC3_RTC_BLOB_LEN_LEGACY: usize = 44;
+    const HUC3_RTC_BLOB_LEN: usize = 136;
+
+    fn mbc3_rtc_serialize(&self, unix_time: u64) -> [u8; Self::MBC3_RTC_BLOB_LEN] {
+        let regs = [
+            self.rtc_seconds,
+            self.rtc_minutes,
+            self.rtc_hours,
+            self.rtc_days_low,
+            self.rtc_days_high,
+            self.rtc_seconds_latched,
+            self.rtc_minutes_latched,
+            self.rtc_hours_latched,
+            self.rtc_days_low_latched,
+            self.rtc_days_high_latched,
+        ];
+        let mut out = [0u8; Self::MBC3_RTC_BLOB_LEN];
+        for (i, r) in regs.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&(*r as u32).to_le_bytes());
+        }
+        out[40..48].copy_from_slice(&unix_time.to_le_bytes());
+        out
+    }
+
+    /// Restore the MBC3 RTC registers from a 44/48-byte blob; returns the
+    /// stored save-time timestamp. Registers are masked to their physical
+    /// widths (as in `write_rtc_register`); out-of-range 6-bit values a game
+    /// wrote (e.g. seconds 60-63) survive the round trip.
+    fn mbc3_rtc_deserialize(&mut self, data: &[u8]) -> Option<u64> {
+        if data.len() < Self::MBC3_RTC_BLOB_LEN_LEGACY {
+            return None;
+        }
+        let reg = |i: usize| u32::from_le_bytes(data[i * 4..i * 4 + 4].try_into().unwrap()) as u8;
+        self.rtc_seconds = reg(0) & 0x3F;
+        self.rtc_minutes = reg(1) & 0x3F;
+        self.rtc_hours = reg(2) & 0x1F;
+        self.rtc_days_low = reg(3);
+        self.rtc_days_high = reg(4) & 0xC1;
+        self.rtc_seconds_latched = reg(5) & 0x3F;
+        self.rtc_minutes_latched = reg(6) & 0x3F;
+        self.rtc_hours_latched = reg(7) & 0x1F;
+        self.rtc_days_low_latched = reg(8);
+        self.rtc_days_high_latched = reg(9) & 0xC1;
+        // The restored state begins a fresh second.
+        self.rtc_cycle_accum = 0;
+        Some(if data.len() >= Self::MBC3_RTC_BLOB_LEN {
+            u64::from_le_bytes(data[40..48].try_into().unwrap())
+        } else {
+            u32::from_le_bytes(data[40..44].try_into().unwrap()) as u64
+        })
+    }
+
+    fn huc3_rtc_serialize(&self, unix_time: u64) -> [u8; Self::HUC3_RTC_BLOB_LEN] {
+        let mut out = [0u8; Self::HUC3_RTC_BLOB_LEN];
+        for (i, chunk) in self.huc3_rtc_mem.chunks(2).take(0x80).enumerate() {
+            out[i] = (chunk[0] & 0x0F) | (chunk.get(1).copied().unwrap_or(0) << 4);
+        }
+        out[128..136].copy_from_slice(&unix_time.to_le_bytes());
+        out
+    }
+
+    fn huc3_rtc_deserialize(&mut self, data: &[u8]) -> Option<u64> {
+        if data.len() < Self::HUC3_RTC_BLOB_LEN || self.huc3_rtc_mem.len() < 0x100 {
+            return None;
+        }
+        for i in 0..0x80 {
+            self.huc3_rtc_mem[i * 2] = data[i] & 0x0F;
+            self.huc3_rtc_mem[i * 2 + 1] = data[i] >> 4;
+        }
+        // The restored state begins a fresh minute.
+        self.huc3_rtc_accum = 0;
+        Some(u64::from_le_bytes(data[128..136].try_into().unwrap()))
+    }
+
+    /// Serialize the RTC state to its persistence blob (see the format notes
+    /// above); None for carts without an RTC.
+    fn rtc_serialize(&self, unix_time: u64) -> Option<Vec<u8>> {
+        match self.get_cartridge_type() {
+            CartridgeType::MBC3 { timer: true, .. } => {
+                Some(self.mbc3_rtc_serialize(unix_time).to_vec())
+            }
+            CartridgeType::HuC3 => Some(self.huc3_rtc_serialize(unix_time).to_vec()),
+            _ => None,
+        }
+    }
+
+    /// Restore the RTC state from a persistence blob; returns the stored
+    /// save-time timestamp on success.
+    fn rtc_deserialize(&mut self, data: &[u8]) -> Option<u64> {
+        match self.get_cartridge_type() {
+            CartridgeType::MBC3 { timer: true, .. } => self.mbc3_rtc_deserialize(data),
+            CartridgeType::HuC3 => self.huc3_rtc_deserialize(data),
+            _ => None,
+        }
+    }
+
+    /// Closed-form advance of one MBC3 cascade stage. `width` is the physical
+    /// register modulus (64 for the 6-bit seconds/minutes, 32 for the 5-bit
+    /// hours), `period` the natural roll-over (60/60/24). Returns the final
+    /// value and the carries produced into the next stage. Out-of-range
+    /// values (e.g. seconds 60-63) keep counting up and wrap to 0 at `width`
+    /// WITHOUT a carry -- exactly the `advance_rtc_second` behaviour.
+    fn counter_advance(value: u8, width: u64, period: u64, n: u64) -> (u8, u64) {
+        let v = value as u64;
+        if v < period {
+            (((v + n) % period) as u8, (v + n) / period)
+        } else if n < width - v {
+            ((v + n) as u8, 0)
+        } else {
+            let m = n - (width - v);
+            ((m % period) as u8, m / period)
+        }
+    }
+
+    /// Advance the live MBC3 RTC by `n` seconds in closed form; equivalent to
+    /// `n` calls of `advance_rtc_second` (unit-tested) but O(1), so
+    /// multi-year wall-clock catch-up is instant. Latched shadows are not
+    /// touched (they only move on an explicit latch), matching VBA-M's
+    /// catch-up which advances only the live mapper counters.
+    fn mbc3_rtc_advance_seconds(&mut self, n: u64) {
+        if n == 0 {
+            return;
+        }
+        let (s, carries) = Self::counter_advance(self.rtc_seconds & 0x3F, 64, 60, n);
+        self.rtc_seconds = s;
+        if carries == 0 {
+            return;
+        }
+        let (m, carries) = Self::counter_advance(self.rtc_minutes & 0x3F, 64, 60, carries);
+        self.rtc_minutes = m;
+        if carries == 0 {
+            return;
+        }
+        let (h, carries) = Self::counter_advance(self.rtc_hours & 0x1F, 32, 24, carries);
+        self.rtc_hours = h;
+        if carries == 0 {
+            return;
+        }
+        let day = (self.rtc_days_low as u64) | (((self.rtc_days_high & 0x01) as u64) << 8);
+        let total = day + carries;
+        self.rtc_days_low = (total & 0xFF) as u8;
+        let mut high = self.rtc_days_high & 0xC0;
+        high |= ((total >> 8) & 0x01) as u8;
+        if total > 0x1FF {
+            high |= 0x80; // day-counter overflow latches until software clears it
+        }
+        self.rtc_days_high = high;
+    }
+
+    /// Advance the HuC-3 minute-of-day/day counters by `n` minutes in closed
+    /// form; equivalent to `n` iterations of the per-minute tick.
+    fn huc3_rtc_advance_minutes(&mut self, mut n: u64) {
+        if n == 0 || self.huc3_rtc_mem.len() < 0x16 {
+            return;
+        }
+        let (mut minutes, mut days) = self.huc3_clock();
+        // An out-of-range minute-of-day (>= 1440, only reachable via a raw
+        // nibble write) normalises to 0 with a day carry on its first tick,
+        // same as the incremental path.
+        if minutes >= 1440 {
+            minutes = 0;
+            days = (days + 1) & 0x0FFF;
+            n -= 1;
+        }
+        let total = minutes as u64 + n;
+        let final_minutes = (total % 1440) as u16;
+        let final_days = ((days as u64 + total / 1440) & 0x0FFF) as u16;
+        self.huc3_set_clock(final_minutes, final_days);
+    }
+
+    /// Wall-clock catch-up applied when RTC state is restored from
+    /// persistence: advance the clock by the real seconds elapsed since the
+    /// state was saved (Pan Docs MBC3: the coin cell keeps the oscillator
+    /// running while the console is off). MBC3 honours the HALT bit (a halted
+    /// clock stays put across sessions); the HuC-3 clock has no halt. Never
+    /// reached on the deterministic in-memory path (nothing is restored
+    /// there).
+    fn rtc_catch_up(&mut self, elapsed_seconds: u64) {
+        if elapsed_seconds == 0 {
+            return;
+        }
+        match self.get_cartridge_type() {
+            CartridgeType::MBC3 { timer: true, .. } => {
+                if self.rtc_days_high & 0x40 != 0 {
+                    return; // halted
+                }
+                self.mbc3_rtc_advance_seconds(elapsed_seconds);
+            }
+            CartridgeType::HuC3 => {
+                self.huc3_rtc_advance_minutes(elapsed_seconds / 60);
+                // Sub-minute remainder feeds the cycle accumulator so the
+                // next in-session minute fires early by the carried amount.
+                self.huc3_rtc_accum = self
+                    .huc3_rtc_accum
+                    .saturating_add((elapsed_seconds % 60) * 4_194_304);
+            }
+            _ => {}
+        }
+    }
+
+    /// Restore RTC state from a blob and apply wall-clock catch-up. A zero
+    /// timestamp (writer had no wall clock, e.g. an older rustyboi
+    /// RETRO_MEMORY_RTC dump) or one from the future (host clock skew)
+    /// restores the registers without catch-up.
+    fn rtc_restore_with_catch_up(&mut self, data: &[u8]) -> bool {
+        let Some(saved_at) = self.rtc_deserialize(data) else {
+            return false;
+        };
+        let now = Self::unix_now();
+        if saved_at != 0 && saved_at < now {
+            self.rtc_catch_up(now - saved_at);
+        }
+        true
+    }
+
+    /// Current wall clock as UNIX seconds. Only ever called on persistence
+    /// paths (sidecar attach/flush, libretro RTC memory), never on the
+    /// deterministic cycle-derived path.
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// `.rtc` sidecar path: the ROM path with its extension replaced (same
+    /// derivation as the `.sav`, so the two land side by side).
+    fn get_rtc_file_path(&self) -> Option<String> {
+        self.rom_path.as_ref().map(|path| {
+            let mut rtc_path = path.clone();
+            if let Some(dot_pos) = rtc_path.rfind('.') {
+                rtc_path.truncate(dot_pos);
+            }
+            rtc_path.push_str(".rtc");
+            rtc_path
+        })
+    }
+
+    /// A VBA-M/BGB/mGBA RTC blob appended to the `.sav`, if the file is
+    /// exactly RAM+blob sized. Read-only interop: the `.rtc` sidecar is
+    /// canonical for us and the footer is never (re)written, but a save
+    /// imported from those emulators restores its clock on first load.
+    fn read_sav_rtc_footer(&self) -> Option<Vec<u8>> {
+        let expected: &[usize] = match self.get_cartridge_type() {
+            CartridgeType::MBC3 { timer: true, .. } => {
+                &[Self::MBC3_RTC_BLOB_LEN, Self::MBC3_RTC_BLOB_LEN_LEGACY]
+            }
+            CartridgeType::HuC3 => &[Self::HUC3_RTC_BLOB_LEN],
+            _ => return None,
+        };
+        let sav_path = self.get_save_file_path()?;
+        let data = fs::read(Path::new(&sav_path)).ok()?;
+        let footer_len = data.len().checked_sub(self.ram_data.len())?;
+        if expected.contains(&footer_len) {
+            Some(data[self.ram_data.len()..].to_vec())
+        } else {
+            None
+        }
+    }
+
+    /// Attach the `.rtc` sidecar (disk-load path only): restore persisted RTC
+    /// state with wall-clock catch-up and keep the file open for streaming
+    /// rewrites as the clock advances. When no sidecar exists, fall back to a
+    /// `.sav` RTC footer, then create the sidecar. No-op without an RTC, for
+    /// host-managed carts, and for in-memory carts (no `rom_path`).
+    fn attach_rtc_sidecar(&mut self) -> Result<(), io::Error> {
+        if !self.has_rtc() || self.host_managed_saves {
+            return Ok(());
+        }
+        let Some(rtc_path) = self.get_rtc_file_path() else {
+            return Ok(());
+        };
+        let rtc_path = Path::new(&rtc_path);
+        if rtc_path.exists() {
+            let data = fs::read(rtc_path)?;
+            if self.rtc_restore_with_catch_up(&data) {
+                println!("Loaded RTC file: {}", rtc_path.display());
+            }
+        } else if let Some(footer) = self.read_sav_rtc_footer()
+            && self.rtc_restore_with_catch_up(&footer)
+        {
+            println!("Loaded RTC footer from existing save file");
+        }
+        self.rtc_file = Some(
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(rtc_path)?,
+        );
+        // Seed/refresh the sidecar so it is valid from the first second.
+        self.flush_rtc_file();
+        Ok(())
+    }
+
+    /// Rewrite the `.rtc` sidecar with the current state stamped with the
+    /// current wall clock. No-op unless a sidecar is attached, so the
+    /// deterministic test path performs no I/O and never reads the host
+    /// clock. I/O errors are swallowed like the `.sav` streaming writes.
+    fn flush_rtc_file(&mut self) {
+        if self.rtc_file.is_none() {
+            return;
+        }
+        let Some(blob) = self.rtc_serialize(Self::unix_now()) else {
+            return;
+        };
+        if let Some(file) = self.rtc_file.as_mut() {
+            let _ = file.seek(SeekFrom::Start(0));
+            let _ = file.write_all(&blob);
+            let _ = file.flush();
+        }
+    }
+
     // --- libretro accessors ---
 
     /// Mark this cartridge as host-managed: it will not open or write any
@@ -1637,12 +2036,6 @@ impl Cartridge {
         )
     }
 
-    /// True only for the MBC3 timer variant (the libretro RTC memory view is
-    /// MBC3-shaped).
-    fn has_mbc3_rtc(&self) -> bool {
-        matches!(self.get_cartridge_type(), CartridgeType::MBC3 { timer: true, .. })
-    }
-
     /// MBC30: the large-capacity MBC3 variant (used by e.g. Japanese Pokémon
     /// Crystal) that wires 8 ROM-bank bits (256 banks / 4MB, vs MBC3's 7 bits /
     /// 2MB) and 3 RAM-bank bits (8 banks / 64KB, vs 2 bits / 32KB). There is no
@@ -1654,32 +2047,55 @@ impl Cartridge {
             && (self.rom_banks > 128 || self.ram_banks > 4)
     }
 
-    /// Mutable view of the RTC register bytes for `RETRO_MEMORY_RTC`. Layout is
-    /// the 10 register values (live then latched) as little-endian u32 plus an
-    /// 8-byte latch timestamp, matching the common BGB/libretro `.rtc` format.
-    /// The scratch buffer is synced from the live registers on each call.
+    /// Mutable view of the RTC bytes for `RETRO_MEMORY_RTC`, in the exact
+    /// `.rtc` persistence format (MBC3: the 48-byte VBA-M/mGBA block; HuC-3:
+    /// the 136-byte mGBA block) stamped with the current wall clock, so the
+    /// frontend's `.rtc` files are byte-compatible with mGBA's. The buffer
+    /// allocation stays stable across calls (the frontend caches the raw
+    /// pointer). Empty for carts without an RTC.
     pub fn rtc_memory_mut(&mut self) -> &mut [u8] {
-        if !self.has_mbc3_rtc() {
-            self.rtc_memory.clear();
-            return &mut self.rtc_memory;
-        }
-        let regs = [
-            self.rtc_seconds as u32,
-            self.rtc_minutes as u32,
-            self.rtc_hours as u32,
-            self.rtc_days_low as u32,
-            self.rtc_days_high as u32,
-            self.rtc_seconds_latched as u32,
-            self.rtc_minutes_latched as u32,
-            self.rtc_hours_latched as u32,
-            self.rtc_days_low_latched as u32,
-            self.rtc_days_high_latched as u32,
-        ];
-        self.rtc_memory.resize(48, 0);
-        for (i, r) in regs.iter().enumerate() {
-            self.rtc_memory[i * 4..i * 4 + 4].copy_from_slice(&r.to_le_bytes());
-        }
+        self.rtc_memory_refresh();
         &mut self.rtc_memory
+    }
+
+    /// Re-sync the RETRO_MEMORY_RTC buffer from the live state (+ a fresh
+    /// timestamp) and remember what we wrote, so an external write into the
+    /// region by the frontend is detectable.
+    fn rtc_memory_refresh(&mut self) {
+        let Some(blob) = self.rtc_serialize(Self::unix_now()) else {
+            self.rtc_memory.clear();
+            self.rtc_memory_synced.clear();
+            return;
+        };
+        if self.rtc_memory.len() == blob.len() {
+            self.rtc_memory.copy_from_slice(&blob); // in place: pointer stays valid
+        } else {
+            self.rtc_memory = blob.clone();
+        }
+        if self.rtc_memory_synced.len() == blob.len() {
+            self.rtc_memory_synced.copy_from_slice(&blob);
+        } else {
+            self.rtc_memory_synced = blob;
+        }
+    }
+
+    /// Once-per-frame RTC sync for the libretro frontend. RetroArch loads an
+    /// existing `.rtc` file by memcpying it straight into the
+    /// RETRO_MEMORY_RTC region after `retro_load_game` (there is no load
+    /// callback), so: if the buffer no longer matches what we last synced,
+    /// adopt the externally-written state with wall-clock catch-up; then
+    /// refresh the buffer so frontend (auto)saves always read current state.
+    /// No-op until the frontend has requested the region.
+    pub fn rtc_memory_frame_sync(&mut self) {
+        if self.rtc_memory.is_empty() || !self.has_rtc() {
+            return;
+        }
+        if self.rtc_memory != self.rtc_memory_synced {
+            let external = std::mem::take(&mut self.rtc_memory);
+            self.rtc_restore_with_catch_up(&external);
+            self.rtc_memory = external; // hand the allocation back (cached ptr)
+        }
+        self.rtc_memory_refresh();
     }
 
     /// True for MBC5 rumble cartridges.
@@ -2132,5 +2548,335 @@ impl memory::Addressable for Cartridge {
                 // Ignore writes to other areas (ROM is read-only)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::Addressable;
+
+    /// Minimal in-memory ROM image with the given type/RAM-size header bytes.
+    fn make_rom(cartridge_type: u8, ram_size_code: u8) -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[CARTRIDGE_TYPE_OFFSET] = cartridge_type;
+        rom[ROM_SIZE_OFFSET] = 0x00;
+        rom[RAM_SIZE_OFFSET] = ram_size_code;
+        rom
+    }
+
+    fn mbc3_rtc_cart() -> Cartridge {
+        Cartridge::from_bytes(&make_rom(MBC3_TIMER_RAM_BATTERY, 0x03)).unwrap()
+    }
+
+    fn huc3_cart() -> Cartridge {
+        Cartridge::from_bytes(&make_rom(HUC3, 0x03)).unwrap()
+    }
+
+    fn set_mbc3_rtc(cart: &mut Cartridge, regs: (u8, u8, u8, u8, u8)) {
+        cart.rtc_seconds = regs.0;
+        cart.rtc_minutes = regs.1;
+        cart.rtc_hours = regs.2;
+        cart.rtc_days_low = regs.3;
+        cart.rtc_days_high = regs.4;
+    }
+
+    fn mbc3_rtc(cart: &Cartridge) -> (u8, u8, u8, u8, u8) {
+        (
+            cart.rtc_seconds,
+            cart.rtc_minutes,
+            cart.rtc_hours,
+            cart.rtc_days_low,
+            cart.rtc_days_high,
+        )
+    }
+
+    /// The closed-form catch-up must be bit-exact with iterating the
+    /// per-second cascade, including the out-of-range 6/5-bit register bands
+    /// (values 60-63 / 24-31 wrap to 0 without a carry) and the day-counter
+    /// overflow latch.
+    #[test]
+    fn mbc3_catch_up_matches_iterative_cascade() {
+        let states = [
+            (0u8, 0u8, 0u8, 0u8, 0u8),
+            (59, 59, 23, 0xFF, 0x01),
+            (59, 59, 23, 0xFF, 0x41), // halted flag preserved (advance ignores it)
+            (60, 0, 0, 0, 0),         // out-of-range seconds
+            (63, 63, 31, 0xFE, 0x01), // everything out-of-range near wrap
+            (30, 61, 25, 0x80, 0x80), // carry already latched stays latched
+            (1, 2, 3, 4, 0xC1),
+        ];
+        let ns = [
+            0u64, 1, 2, 59, 60, 61, 119, 3599, 3600, 3661, 86399, 86400, 86401, 2 * 86400 + 123,
+            1_000_000,
+        ];
+        for &state in &states {
+            for &n in &ns {
+                let mut iter_cart = mbc3_rtc_cart();
+                set_mbc3_rtc(&mut iter_cart, state);
+                for _ in 0..n {
+                    iter_cart.advance_rtc_second();
+                }
+
+                let mut closed_cart = mbc3_rtc_cart();
+                set_mbc3_rtc(&mut closed_cart, state);
+                closed_cart.mbc3_rtc_advance_seconds(n);
+
+                assert_eq!(
+                    mbc3_rtc(&iter_cart),
+                    mbc3_rtc(&closed_cart),
+                    "state {state:?} + {n}s"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mbc3_rtc_blob_round_trips() {
+        let mut cart = mbc3_rtc_cart();
+        set_mbc3_rtc(&mut cart, (61, 5, 17, 0xAB, 0xC1)); // incl. out-of-range seconds
+        cart.rtc_seconds_latched = 33;
+        cart.rtc_minutes_latched = 44;
+        cart.rtc_hours_latched = 12;
+        cart.rtc_days_low_latched = 0x12;
+        cart.rtc_days_high_latched = 0x81;
+
+        let blob = cart.mbc3_rtc_serialize(0x0102_0304_0506_0708);
+        assert_eq!(blob.len(), 48);
+        // Spot-check the documented layout: LE u32 fields in VBA-M order.
+        assert_eq!(&blob[0..4], &[61, 0, 0, 0]);
+        assert_eq!(&blob[16..20], &[0xC1, 0, 0, 0]);
+        assert_eq!(&blob[20..24], &[33, 0, 0, 0]);
+        assert_eq!(&blob[40..48], &0x0102_0304_0506_0708u64.to_le_bytes());
+
+        let mut restored = mbc3_rtc_cart();
+        let ts = restored.mbc3_rtc_deserialize(&blob).unwrap();
+        assert_eq!(ts, 0x0102_0304_0506_0708);
+        assert_eq!(mbc3_rtc(&restored), (61, 5, 17, 0xAB, 0xC1));
+        assert_eq!(restored.rtc_seconds_latched, 33);
+        assert_eq!(restored.rtc_days_high_latched, 0x81);
+    }
+
+    /// The legacy 44-byte variant (32-bit timestamp, old VBA builds) must be
+    /// accepted, mirroring VBA-M's -4 read leeway / mGBA's sizeof-4 check.
+    #[test]
+    fn mbc3_rtc_blob_accepts_legacy_44_bytes() {
+        let mut cart = mbc3_rtc_cart();
+        set_mbc3_rtc(&mut cart, (10, 20, 15, 0x55, 0x00));
+        let mut blob = cart.mbc3_rtc_serialize(0).to_vec();
+        blob.truncate(44);
+        blob[40..44].copy_from_slice(&0xCAFE_F00Du32.to_le_bytes());
+
+        let mut restored = mbc3_rtc_cart();
+        let ts = restored.mbc3_rtc_deserialize(&blob).unwrap();
+        assert_eq!(ts, 0xCAFE_F00D);
+        assert_eq!(mbc3_rtc(&restored), (10, 20, 15, 0x55, 0x00));
+    }
+
+    #[test]
+    fn mbc3_catch_up_respects_halt() {
+        let mut cart = mbc3_rtc_cart();
+        set_mbc3_rtc(&mut cart, (5, 6, 7, 8, 0x40));
+        cart.rtc_catch_up(86_400);
+        assert_eq!(mbc3_rtc(&cart), (5, 6, 7, 8, 0x40));
+    }
+
+    #[test]
+    fn huc3_rtc_blob_round_trips_with_nibble_packing() {
+        let mut cart = huc3_cart();
+        cart.huc3_set_clock(0x2A5, 0x123);
+        cart.huc3_rtc_mem[0x58] = 0x7; // event-time nibble
+        let blob = cart.huc3_rtc_serialize(0xDEAD_BEEF);
+        assert_eq!(blob.len(), 136);
+        // mGBA packing: nibble N -> byte N/2, even N in the low half. Minutes
+        // 0x2A5 -> nibbles 0x10=0x5, 0x11=0xA, 0x12=0x2; days 0x123 ->
+        // 0x13=0x3. Byte 8 = nib 0x10|0x11<<4, byte 9 = nib 0x12|0x13<<4.
+        assert_eq!(blob[0x08], 0xA5);
+        assert_eq!(blob[0x09], 0x32);
+        let mut restored = huc3_cart();
+        let ts = restored.huc3_rtc_deserialize(&blob).unwrap();
+        assert_eq!(ts, 0xDEAD_BEEF);
+        assert_eq!(restored.huc3_clock(), (0x2A5, 0x123));
+        assert_eq!(restored.huc3_rtc_mem[0x58], 0x7);
+    }
+
+    /// Closed-form HuC-3 minute catch-up == iterating the per-minute tick,
+    /// across midnight and 12-bit day-counter wraps.
+    #[test]
+    fn huc3_catch_up_matches_iterative_tick() {
+        let states = [(0u16, 0u16), (1439, 0), (1438, 0xFFF), (720, 0x7FF), (1500, 5)];
+        let ns = [0u64, 1, 2, 1439, 1440, 1441, 3 * 1440 + 7, 100_000];
+        for &(minutes, days) in &states {
+            for &n in &ns {
+                let mut iter_cart = huc3_cart();
+                iter_cart.huc3_set_clock(minutes, days);
+                for _ in 0..n {
+                    let (mut m, mut d) = iter_cart.huc3_clock();
+                    m += 1;
+                    if m >= 1440 {
+                        m = 0;
+                        d = (d + 1) & 0x0FFF;
+                    }
+                    iter_cart.huc3_set_clock(m, d);
+                }
+
+                let mut closed_cart = huc3_cart();
+                closed_cart.huc3_set_clock(minutes, days);
+                closed_cart.huc3_rtc_advance_minutes(n);
+
+                assert_eq!(
+                    iter_cart.huc3_clock(),
+                    closed_cart.huc3_clock(),
+                    "clock ({minutes},{days}) + {n}min"
+                );
+            }
+        }
+    }
+
+    /// End-to-end sidecar flow on the disk-load path: a fresh load creates
+    /// the `.rtc`; a reload after back-dating its timestamp catches the clock
+    /// up by the elapsed wall time; a halted clock stays put.
+    #[test]
+    fn rtc_sidecar_round_trip_with_wall_clock_catch_up() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustyboi-rtc-test-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let rom_path = dir.join("game.gb");
+        fs::write(&rom_path, make_rom(MBC3_TIMER_RAM_BATTERY, 0x03)).unwrap();
+        let rom_path_str = rom_path.to_str().unwrap();
+        let rtc_path = dir.join("game.rtc");
+
+        {
+            let cart = Cartridge::load(rom_path_str).unwrap();
+            assert_eq!(mbc3_rtc(&cart), (0, 0, 0, 0, 0));
+        }
+        assert_eq!(fs::read(&rtc_path).unwrap().len(), 48);
+
+        // Back-date: registers (5,0,0), saved one hour ago.
+        let mut cart = mbc3_rtc_cart();
+        set_mbc3_rtc(&mut cart, (5, 0, 0, 0, 0));
+        let before = Cartridge::unix_now();
+        fs::write(&rtc_path, cart.mbc3_rtc_serialize(before - 3600)).unwrap();
+
+        let cart = Cartridge::load(rom_path_str).unwrap();
+        let (s, m, h, dl, dh) = mbc3_rtc(&cart);
+        let total = s as u64 + m as u64 * 60 + h as u64 * 3600;
+        let elapsed_max = 3600 + (Cartridge::unix_now() - before) + 1;
+        assert!(
+            (3605..=5 + elapsed_max).contains(&total),
+            "expected ~1h subsequent catch-up, got {}s ({s} {m} {h})",
+            total
+        );
+        assert_eq!((dl, dh), (0, 0));
+
+        // Halted clock: no catch-up applied.
+        let mut cart = mbc3_rtc_cart();
+        set_mbc3_rtc(&mut cart, (7, 8, 9, 1, 0x40));
+        fs::write(&rtc_path, cart.mbc3_rtc_serialize(Cartridge::unix_now() - 86_400)).unwrap();
+        let cart = Cartridge::load(rom_path_str).unwrap();
+        assert_eq!(mbc3_rtc(&cart), (7, 8, 9, 1, 0x40));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A `.sav` with a VBA-M/mGBA RTC footer (RAM + 48 bytes) restores both
+    /// the RAM prefix and the clock when no `.rtc` sidecar exists yet.
+    #[test]
+    fn sav_rtc_footer_import() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustyboi-footer-test-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let rom_path = dir.join("game.gb");
+        fs::write(&rom_path, make_rom(MBC3_TIMER_RAM_BATTERY, 0x03)).unwrap();
+
+        let mut donor = mbc3_rtc_cart();
+        set_mbc3_rtc(&mut donor, (11, 22, 13, 0x44, 0x01));
+        let mut sav = vec![0x5A; 32 * 1024];
+        sav.extend_from_slice(&donor.mbc3_rtc_serialize(Cartridge::unix_now()));
+        fs::write(dir.join("game.sav"), &sav).unwrap();
+
+        let mut cart = Cartridge::load(rom_path.to_str().unwrap()).unwrap();
+        // RAM prefix loaded (footer not spilled into RAM).
+        assert_eq!(cart.ram_data[0], 0x5A);
+        assert_eq!(cart.ram_data.len(), 32 * 1024);
+        // Clock restored (catch-up window: allow a couple of live seconds).
+        let (s, m, h, dl, dh) = mbc3_rtc(&cart);
+        assert!(s >= 11 && s <= 13, "seconds {s}");
+        assert_eq!((m, h, dl, dh), (22, 13, 0x44, 0x01));
+        // Sidecar was created and now wins over the footer.
+        assert!(dir.join("game.rtc").exists());
+
+        // The live RAM write path still streams to the .sav without
+        // clobbering the (read-only) footer.
+        cart.write(0x0000, 0x0A);
+        cart.write(0x4000, 0x00);
+        cart.write(0xA000, 0x77);
+        let sav_after = fs::read(dir.join("game.sav")).unwrap();
+        assert_eq!(sav_after.len(), sav.len());
+        assert_eq!(sav_after[0], 0x77);
+        assert_eq!(&sav_after[32 * 1024..], &sav[32 * 1024..]);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The libretro RETRO_MEMORY_RTC region: stable pointer, mGBA-format
+    /// content, and external writes are adopted with catch-up on the next
+    /// frame sync.
+    #[test]
+    fn libretro_rtc_memory_sync_adopts_external_writes() {
+        let mut cart = mbc3_rtc_cart();
+        let ptr_before = cart.rtc_memory_mut().as_ptr();
+        assert_eq!(cart.rtc_memory_mut().len(), 48);
+
+        // Simulate RetroArch memcpying a `.rtc` file into the region:
+        // registers (9,0,0), saved two minutes ago.
+        let mut donor = mbc3_rtc_cart();
+        set_mbc3_rtc(&mut donor, (9, 0, 0, 0, 0));
+        let before = Cartridge::unix_now();
+        let blob = donor.mbc3_rtc_serialize(before - 120);
+        // The frontend writes through its cached raw pointer; poking the
+        // buffer directly models that (bypassing the refresh in
+        // rtc_memory_mut).
+        cart.rtc_memory.copy_from_slice(&blob);
+
+        cart.rtc_memory_frame_sync();
+        let (s, m, h, _, _) = mbc3_rtc(&cart);
+        let total = s as u64 + m as u64 * 60 + h as u64 * 3600;
+        let elapsed_max = 120 + (Cartridge::unix_now() - before) + 1;
+        assert!(
+            (129..=9 + elapsed_max).contains(&total),
+            "expected ~2min catch-up, got {total}s"
+        );
+        assert_eq!(cart.rtc_memory_mut().as_ptr(), ptr_before);
+
+        // Idle frames (no external write) leave the clock alone.
+        let regs = mbc3_rtc(&cart);
+        cart.rtc_memory_frame_sync();
+        assert_eq!(mbc3_rtc(&cart), regs);
+    }
+
+    /// HuC-3 carts expose the 136-byte mGBA blob through the libretro view.
+    #[test]
+    fn libretro_rtc_memory_huc3_shape() {
+        let mut cart = huc3_cart();
+        cart.huc3_set_clock(100, 2);
+        let mem = cart.rtc_memory_mut();
+        assert_eq!(mem.len(), 136);
+        // Non-RTC carts expose nothing.
+        let mut plain = Cartridge::from_bytes(&make_rom(MBC1, 0x02)).unwrap();
+        assert!(plain.rtc_memory_mut().is_empty());
+    }
+
+    /// Unique-ish suffix for temp dirs (tests may run in parallel).
+    fn unique_suffix() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        N.fetch_add(1, Ordering::Relaxed)
     }
 }
