@@ -121,6 +121,24 @@ pub struct Sgb {
     /// until an ATTR_TRN has run.
     #[serde(default, with = "serde_bytes")]
     atf: Vec<u8>,
+
+    // ---- SGB border (CHR_TRN / PCT_TRN) ----
+    /// Border tile data: 256 SNES 4bpp tiles x 32 bytes (0x2000). CHR_TRN
+    /// fills one 128-tile half per transfer (packet byte 1 bit 0 selects the
+    /// high half). Empty until a CHR_TRN has run.
+    #[serde(default, with = "serde_bytes")]
+    border_tiles: Vec<u8>,
+    /// Border tilemap from PCT_TRN offset 0x000: 32x28 LE16 entries used (the
+    /// 0x800-byte region holds 32x32). Entry: bits 0-9 tile (only 0-255
+    /// drawable), 10-12 palette (4-7), 14 X-flip, 15 Y-flip.
+    #[serde(default, with = "serde_bytes")]
+    border_map: Vec<u8>,
+    /// Border palettes 4-7 from PCT_TRN offset 0x800: 4 x 16 RGB555 colors.
+    #[serde(default)]
+    border_pals: Vec<u16>,
+    /// True once PCT_TRN has delivered a tilemap + palettes (border renderable).
+    #[serde(default)]
+    border_ready: bool,
 }
 
 fn default_attr() -> Vec<u8> {
@@ -164,6 +182,10 @@ impl Sgb {
             pending_trn_param: 0,
             sys_palettes: Vec::new(),
             atf: Vec::new(),
+            border_tiles: Vec::new(),
+            border_map: Vec::new(),
+            border_pals: Vec::new(),
+            border_ready: false,
         }
     }
 
@@ -591,11 +613,62 @@ impl Sgb {
                 let len = vram.len().min(45 * 90);
                 self.atf = vram[..len].to_vec();
             }
+            cmd::CHR_TRN => {
+                // CHR_TRN: 128 border tiles (SNES 4bpp, 32 bytes each) into
+                // the half selected by packet byte 1 bit 0 (0 = tiles 0-127,
+                // 1 = tiles 128-255). Bit 1 (BG/OBJ tile type) is irrelevant
+                // to border rendering.
+                if self.border_tiles.len() != 0x2000 {
+                    self.border_tiles = vec![0u8; 0x2000];
+                }
+                let off = if self.pending_trn_param & 1 != 0 { 0x1000 } else { 0 };
+                let len = vram.len().min(0x1000);
+                self.border_tiles[off..off + len].copy_from_slice(&vram[..len]);
+            }
+            cmd::PCT_TRN => {
+                // PCT_TRN: border tilemap (offset 0x000, 32x28 LE16 entries)
+                // + border palettes 4-7 (offset 0x800, 4 x 16 RGB555 colors).
+                let len = vram.len().min(0x800);
+                self.border_map = vram[..len].to_vec();
+                self.border_pals = (0..64)
+                    .map(|i| {
+                        let b = 0x800 + i * 2;
+                        if b + 2 <= vram.len() {
+                            u16::from_le_bytes([vram[b], vram[b + 1]]) & 0x7FFF
+                        } else {
+                            0
+                        }
+                    })
+                    .collect();
+                self.border_ready = true;
+            }
             _ => {
-                // CHR_TRN/PCT_TRN (border tiles/map) are deferred (border
-                // rendering is a separate feature); the block is dropped.
+                // DATA_TRN writes SNES RAM: no GB-visible effect in our
+                // high-level model; the block is dropped.
             }
         }
+    }
+
+    /// Border data for the compositor: (4bpp tiles, tilemap bytes, palettes
+    /// 4-7). None until BOTH a CHR_TRN (tiles) and a PCT_TRN (map+palettes)
+    /// have run — games send CHR_TRN first and PCT_TRN last, so gating on
+    /// both avoids flashing a half-loaded border. (Without a CHR_TRN, real
+    /// hardware would show the boot-ROM's built-in border tiles, which our
+    /// HLE has no copy of.)
+    pub fn border(&self) -> Option<(&[u8], &[u8], &[u16])> {
+        if !self.border_ready || self.border_map.len() < 0x700 || self.border_pals.len() < 64 {
+            return None;
+        }
+        if self.border_tiles.len() != 0x2000 {
+            return None;
+        }
+        Some((&self.border_tiles, &self.border_map, &self.border_pals))
+    }
+
+    /// The shared backdrop color (SNES CGRAM entry 0 = every palette's color
+    /// 0): what transparent border pixels outside the GB window show.
+    pub fn backdrop(&self) -> u16 {
+        self.palettes[0][0]
     }
 
     /// Look up the RGB555 color for a DMG shade index (0-3) at attribute cell
@@ -989,6 +1062,54 @@ mod tests {
         for pal in &sgb.palettes {
             assert_eq!(pal[0], 0x0123);
         }
+    }
+
+    /// CHR_TRN fills the selected 128-tile half; PCT_TRN delivers map +
+    /// palettes and makes `border()` available.
+    #[test]
+    fn chr_pct_trn_store_border() {
+        let mut sgb = Sgb::new();
+        assert!(sgb.border().is_none());
+
+        // CHR_TRN low half: tile 0 row 0 plane 0 = 0xFF.
+        let mut low = vec![0u8; 0x1000];
+        low[0] = 0xFF;
+        let mut pkt = [0u8; 16];
+        pkt[0] = (cmd::CHR_TRN << 3) | 1;
+        pkt[1] = 0;
+        send_packet(&mut sgb, &pkt);
+        let c = sgb.take_pending_trn().unwrap();
+        sgb.apply_trn(c, &low);
+        assert!(sgb.border().is_none(), "no border until PCT_TRN");
+
+        // CHR_TRN high half: tile 128 row 0 plane 1 = 0xFF.
+        let mut high = vec![0u8; 0x1000];
+        high[1] = 0xFF;
+        pkt[1] = 1;
+        send_packet(&mut sgb, &pkt);
+        let c = sgb.take_pending_trn().unwrap();
+        sgb.apply_trn(c, &high);
+
+        // PCT_TRN: map entry 0 = tile 0, palette 4; 64 palette colors at 0x800.
+        let mut pct = vec![0u8; 0x1000];
+        pct[..2].copy_from_slice(&(4u16 << 10).to_le_bytes());
+        for i in 0..64u16 {
+            let v = 0x100 + i;
+            pct[0x800 + i as usize * 2..0x802 + i as usize * 2]
+                .copy_from_slice(&v.to_le_bytes());
+        }
+        pkt[0] = (cmd::PCT_TRN << 3) | 1;
+        pkt[1] = 0;
+        send_packet(&mut sgb, &pkt);
+        let c = sgb.take_pending_trn().unwrap();
+        sgb.apply_trn(c, &pct);
+
+        let (tiles, map, pals) = sgb.border().expect("border ready");
+        assert_eq!(tiles[0], 0xFF, "low-half tile data");
+        assert_eq!(tiles[0x1000 + 1], 0xFF, "high-half tile data");
+        assert_eq!((u16::from_le_bytes([map[0], map[1]]) >> 10) & 7, 4);
+        assert_eq!(pals[0], 0x100);
+        assert_eq!(pals[63], 0x13F);
     }
 
     /// ATTR_CHR data continues across packet boundaries: 3 packets carry
