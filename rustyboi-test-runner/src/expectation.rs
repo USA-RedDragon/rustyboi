@@ -315,8 +315,9 @@ pub fn cases_for_rom(rom_path: &Path, requested_modes: &HashSet<Mode>) -> Vec<Te
 /// modes. Each non-blank, non-`#` line is `|`-separated:
 ///   `<id>|<mode>|<grading>|<rom_path>[|<arg>]`
 /// where `<mode>` is `dmg`/`cgb`/`agb`, `<grading>` is one of `png`, `serial`,
-/// `blargg_mem`, `memauto`, `mem`, `mooneye`, `mooneye_ed`, and `<arg>` is the reference-PNG
-/// path (png), `ADDR=VAL` hex (mem), or empty. The `<id>` is descriptive only.
+/// `blargg_mem`, `memauto`, `mem`, `mooneye`, `mooneye_ed`, `sram`, and `<arg>`
+/// is the reference-PNG path (png), `ADDR=VAL` hex (mem), the reference `.sav`
+/// path (sram), or empty. The `<id>` is descriptive only.
 pub fn parse_manifest(
     text: &str,
     requested_modes: &HashSet<Mode>,
@@ -419,6 +420,23 @@ pub fn parse_manifest(
             "blargg_mem" => Oracle::BlarggMem,
             "mooneye" => Oracle::MooneyeFib,
             "mooneye_ed" => Oracle::MooneyeFibEd,
+            // Cart-SRAM prefix compared byte-exact against a real-hardware
+            // capture (AntonioND gbc-hw-tests `real_*.sav`): the ROM writes its
+            // results to $A000.. and the published capture is trimmed to the
+            // written window, so the WHOLE reference file is the graded region
+            // (same driver as the gambatte `.bin` dumper oracles).
+            "sram" => {
+                if arg.is_empty() {
+                    return Err(format!(
+                        "manifest line {}: sram needs a reference .sav path",
+                        line_no + 1
+                    ));
+                }
+                Oracle::SramDump {
+                    path: PathBuf::from(arg),
+                    skip: Vec::new(),
+                }
+            }
             "memauto" => Oracle::MemValue {
                 addr: 0xFF82,
                 expected: 0x01,
@@ -487,12 +505,12 @@ pub fn parse_manifest(
         } else {
             Vec::new()
         };
-        // Optional per-case frame budget for `png`/`png_fixed`/`memauto`/`mem`,
-        // carried as a `frames=<N>` token in ANY trailing field (for
+        // Optional per-case frame budget for `png`/`png_fixed`/`memauto`/`mem`/
+        // `sram`, carried as a `frames=<N>` token in ANY trailing field (for
         // `png_shootout` the positional field-5 token already feeds the oracle;
         // it is not duplicated into the case override). Some gbmicrotest cases
         // (e.g. is_if_set_during_ime0) settle their FF82 verdict later than the
-        // 60-frame default.
+        // 60-frame default; `sram` budgets clamp up to DUMP_MIN_FRAMES.
         let frames = if matches!(
             oracle,
             Oracle::CspPng { .. }
@@ -500,6 +518,7 @@ pub fn parse_manifest(
                 | Oracle::CspPngLayout { .. }
                 | Oracle::MemValue { .. }
                 | Oracle::SerialText { .. }
+                | Oracle::SramDump { .. }
         ) {
             fields
                 .iter()
@@ -845,6 +864,26 @@ mn/add|cgb|mooneye|/roms/add.gb
         // serial_text requires a pass= token.
         assert!(parse_manifest("id|dmg|serial_text|/r.gb", &all_modes()).is_err());
         assert!(parse_manifest("id|dmg|serial_text|/r.gb|fail=X", &all_modes()).is_err());
+    }
+
+    #[test]
+    fn parses_sram_grading() {
+        let manifest = "\
+hw/timer_init|cgb|sram|/r.gbc|/refs/real_gbc.sav
+hw/timer_init|dmg|sram|/r.gbc|/refs/real_gb.sav|frames=120
+";
+        let cases = parse_manifest(manifest, &all_modes()).unwrap();
+        assert_eq!(cases.len(), 2);
+        assert!(matches!(
+            &cases[0].oracle,
+            Oracle::SramDump { path, skip }
+                if path == Path::new("/refs/real_gbc.sav") && skip.is_empty()
+        ));
+        assert_eq!(cases[0].frames, None);
+        assert_eq!(cases[1].frames, Some(120));
+        // A missing reference path is rejected.
+        assert!(parse_manifest("x|cgb|sram|/r.gbc", &all_modes()).is_err());
+        assert!(parse_manifest("x|cgb|sram|/r.gbc|", &all_modes()).is_err());
     }
 
     #[test]

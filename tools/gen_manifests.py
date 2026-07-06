@@ -8,15 +8,16 @@ rtc3test, mbc3-tester). ROM set: c-sp/gameboy-test-roms (default v7.0), unzipped
 at --roms. The sgb, daid and cpp suites are curated manually (their ROMs are not
 in the c-sp set; they are sourced from GBEmulatorShootout by run-suites.sh setup)
 and are not regenerated here. The magentests / little_things_extra / sketchtests
-suites ARE generated here from release-fetched ROMs (sync_magentests_roms /
-sync_little_things_extra / sync_sketchtests_roms in run-suites.sh), including
-their derived reference PNGs under suites/refs/ (documented derivations, never
+/ gbc_hw_tests suites ARE generated here from release/repo-fetched ROMs
+(sync_magentests_roms / sync_little_things_extra / sync_sketchtests_roms /
+sync_gbchwtests_roms in run-suites.sh), including their derived reference PNGs
+and trimmed .sav prefixes under suites/refs/ (documented derivations, never
 emulator captures).
 
 Manifest line format:
   <id>|<dmg|cgb|agb>|<grading>|<rom_path>[|<arg>...]
 grading: png | png_fixed | png_shootout | serial | serial_text | blargg_mem |
-         memauto | mem | mooneye | mooneye_ed
+         memauto | mem | mooneye | mooneye_ed | sram
 Trailing arg tokens: reference PNG path(s) (`;`-separated OR-match for
 png_shootout), ADDR=VAL (mem), rev=<model>, input=<script>, frames=<N>.
 
@@ -1156,6 +1157,146 @@ def gen_sketchtests(roms: Path, out: Path) -> None:
     )
 
 
+def gen_gbchwtests(roms: Path, out: Path) -> None:
+    """AntonioND/gbc-hw-tests: real-silicon SRAM-capture suite. Each test dir
+    ships a prebuilt `<name>.gbc` ROM + real-hardware SRAM dumps captured on one
+    unit per device class (`real_gb.sav` DMG, `real_gbp.sav` pocket,
+    `real_gbc.sav` CGB, `real_gba_sp.sav` GBA-SP). The ROM writes its results to
+    cart SRAM ($A000..) and halts; grading compares rustyboi's `save_ram` to the
+    device capture.
+
+    Device-column mapping (rustyboi is a CGB emulator):
+      * every test with a captured `real_gbc.sav` -> a CGB-vs-real_gbc.sav case;
+      * DMG-flagged ROMs (header 0x143 == 0x00 -> the *_dmg_mode + DMA/timer
+        DMG-valid tests) ALSO get a DMG-vs-real_gb.sav case.
+    The GBA-SP / GBP columns are captured too but not graded (rustyboi targets
+    CGB-04 + DMG-08; GBA-SP is a distinct APU/serial revision).
+
+    Grading window: the published captures are mostly TRIMMED to exactly
+    `[results...][magic 12 34 56 78]`, so the whole file is the byte-exact
+    oracle (reused via the runner's `SramDump` path, same as the gambatte `.bin`
+    dumpers). A minority are raw full-bank/full-card dumps whose written region
+    is followed by per-unit uninitialised-SRAM garbage; for those we emit a
+    TRIMMED reference copy under suites/refs/gbc-hw-tests/ holding only the
+    deterministic prefix (through the last magic marker). Genuinely
+    nondeterministic tests are excluded (see EXCLUDE)."""
+    hw = roms / "gbc-hw-tests"
+    lines: list[str] = []
+    if not hw.is_dir():
+        write_manifest(out, "gbc_hw_tests", _GBCHW_HEADER, lines)
+        return
+
+    MAGIC = bytes([0x12, 0x34, 0x56, 0x78])
+    # Raw full-dump captures whose meaningful data is a magic-terminated prefix
+    # followed by per-unit power-on garbage: grade only `[0 .. last_magic+4)`.
+    PREFIX_ONLY = {
+        "serial/sc_change_freq_gbc",  # 128K card dump; prefix 0x1004
+        "timers/timer_reset_2",       # 128K card dump; prefix 0x1084
+    }
+    # Genuinely nondeterministic / ungradeable byte-exact (documented):
+    #  - corrupted_stop: 128K raw card dump, nonzero to 0x1FFFF (garbage tail);
+    #    the STOP-corruption result lives in an un-delimited tiny prefix.
+    #  - tac_set_everything: the author committed TWO differing CGB captures
+    #    (real_gbc_1 != real_gbc_2) -> per-run nondeterministic by their own
+    #    measurement; residue after the data is per-unit garbage.
+    EXCLUDE = {"cpu/corrupted_stop", "timers/tac_set_everything"}
+
+    refs_root = out / "refs" / "gbc-hw-tests"
+
+    def sav_len(d_key: str, data: bytes) -> int:
+        if d_key in PREFIX_ONLY:
+            return data.rfind(MAGIC) + 4
+        return len(data)
+
+    def emit(test_id: str, mode: str, rom: Path, ref: Path) -> None:
+        lines.append(f"gbc-hw-tests/{test_id}|{mode}|sram|{rom}|{rel_to_cwd(ref)}")
+
+    dirs = sorted({p.parent for p in hw.rglob("real_*.sav")})
+    for d in dirs:
+        d_key = str(d.relative_to(hw)).replace(os.sep, "/")
+        if d_key in EXCLUDE:
+            continue
+        gbcs = sorted(d.glob("*.gbc"))
+        if len(gbcs) != 1:
+            continue
+        rom = gbcs[0]
+        cgb_flag = rom.read_bytes()[0x143]
+        test_id = d_key  # dir path (category/test) is the flattened id
+
+        def graded_ref(sav_name: str, tag: str) -> Path | None:
+            src = d / sav_name
+            if not src.is_file():
+                return None
+            data = src.read_bytes()
+            glen = sav_len(d_key, data)
+            if glen <= 0:
+                return None
+            if glen == len(data):
+                # Whole file is the oracle -> point straight at the checkout.
+                return src
+            # Emit a trimmed deterministic-prefix copy (never an emulator
+            # capture: a byte-exact prefix of the real-hardware dump).
+            ref = refs_root / f"{test_id}.{tag}.sav"
+            ref.parent.mkdir(parents=True, exist_ok=True)
+            ref.write_bytes(data[:glen])
+            return ref
+
+        # CGB column: real_gbc.sav (or the input-free / first-capture variant).
+        cgb_sav = next(
+            (n for n in ("real_gbc.sav", "real_gbc_not_pressed.sav", "real_gbc_1.sav")
+             if (d / n).is_file()),
+            None,
+        )
+        if cgb_sav:
+            ref = graded_ref(cgb_sav, "gbc")
+            if ref is not None:
+                emit(test_id, "cgb", rom, ref)
+
+        # DMG column: only for DMG-flagged ROMs, graded vs real_gb.sav.
+        if cgb_flag == 0x00:
+            dmg_sav = next(
+                (n for n in ("real_gb.sav", "real_gb_not_pressed.sav")
+                 if (d / n).is_file()),
+                None,
+            )
+            if dmg_sav:
+                ref = graded_ref(dmg_sav, "dmg")
+                if ref is not None:
+                    emit(test_id, "dmg", rom, ref)
+
+    write_manifest(out, "gbc_hw_tests", _GBCHW_HEADER, lines)
+
+
+_GBCHW_HEADER = [
+    "AntonioND/gbc-hw-tests (pinned 631e600, last updated 2015; prebuilt .gbc",
+    "ROMs + real-hardware SRAM captures committed in-repo). A REAL-SILICON suite:",
+    "each test writes its results to cart SRAM ($A000..) and halts; grading",
+    "(`sram`) compares rustyboi's save_ram to the device capture byte-exact.",
+    "Fetched by run-suites.sh sync_gbchwtests_roms.",
+    "",
+    "Device columns captured per dir: real_gb (DMG), real_gbp (Pocket),",
+    "real_gbc (CGB), real_gba_sp (GBA-SP). rustyboi is a CGB emulator, so the",
+    "PRIMARY grade is CGB vs real_gbc.sav; DMG-flagged ROMs (header 0x143==0x00,",
+    "the *_dmg_mode + DMG-valid dma/timer tests) ALSO grade DMG vs real_gb.sav.",
+    "GBA-SP/GBP columns are not graded (distinct APU/serial revision + DMG).",
+    "",
+    "IMPORTANT revision caveat: AntonioND's captures are from ONE unit per class",
+    "and the CGB unit's silicon revision is undocumented. Some rev-sensitive",
+    "tests (speed-switch sub-timing, STOP sub-dot, mode2/3 LCD timing) may not",
+    "match rustyboi's modeled CGB-04 revision -- such a mismatch is a revision",
+    "difference, not necessarily an emulator bug. Graded honestly regardless.",
+    "",
+    "Grading window: most captures are TRIMMED to [results...][magic 12 34 56 78]",
+    "so the whole file is the oracle. sc_change_freq_gbc + timer_reset_2 are raw",
+    "128K card dumps -> a byte-exact deterministic PREFIX (through the last magic)",
+    "is emitted under refs/gbc-hw-tests/ (never an emulator capture). Excluded:",
+    "corrupted_stop (raw dump, un-delimited result + garbage tail) and",
+    "tac_set_everything (author committed two DIFFERING CGB captures -> per-run",
+    "nondeterministic by their own measurement). speed_change_cancel grades its",
+    "not_pressed (input-free) capture. Regenerate: tools/gen_manifests.py.",
+]
+
+
 # ---------------------------------------------------------------------------
 
 INTERNAL = {
@@ -1178,6 +1319,7 @@ INTERNAL = {
     "magentests": gen_magentests,
     "little_things_extra": gen_little_things_extra,
     "sketchtests": gen_sketchtests,
+    "gbc_hw_tests": gen_gbchwtests,
     "gambatte": gen_gambatte,
 }
 
