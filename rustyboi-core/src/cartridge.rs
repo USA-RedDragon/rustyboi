@@ -2,6 +2,7 @@ use crate::memory;
 use crate::memory::mmio;
 use serde::{Deserialize, Serialize};
 
+use std::cell::Cell;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -90,6 +91,31 @@ const HUC1_RAM_BATTERY: u8 = 0xFF;
 // "Cartridges with Rare Mappers" (https://gbdev.gg8.se/forums/viewtopic.php?id=948).
 // ---------------------------------------------------------------------------
 
+/// Byte sum of the 48-byte Nintendo logo at its usual $0104 location.
+const LOGO_SUM_NINTENDO: u32 = 5446;
+/// Byte sum of the Rocket Games logo (hhugboy: 2756). Rocket carts never
+/// contain the Nintendo logo in the dump; the mapper XOR-decodes it for the
+/// boot ROM check (see ROCKET_LOGO_XOR).
+const LOGO_SUM_ROCKET: u32 = 2756;
+
+/// XOR pad that maps the Rocket Games logo bytes at $0104-$0133 to the
+/// Nintendo logo. While the mapper is in its locked-CGB phase it presents the
+/// XOR-decoded (Nintendo) logo so the boot ROM check passes; once unlocked
+/// the game reads its own (Rocket) logo back. Verbatim from hhugboy
+/// MbcUnlRocketGames.cpp (rocketXorNintendoLogo).
+const ROCKET_LOGO_XOR: [u8; 48] = [
+    0xdf, 0xce, 0x97, 0x78, 0xcd, 0x2f, 0xf0, 0x0b, 0x0b, 0xea, 0x78, 0x83,
+    0x08, 0x1d, 0x9a, 0x45, 0x11, 0x2b, 0xe1, 0x11, 0xf8, 0x88, 0xf8, 0x8e,
+    0xfe, 0x88, 0x2a, 0xc4, 0xff, 0xfc, 0xd9, 0x87, 0x22, 0xab, 0x67, 0x7d,
+    0x77, 0x2c, 0xa8, 0xee, 0xff, 0x9b, 0x99, 0x91, 0xaa, 0x9b, 0x33, 0x3e,
+];
+
+// Lock-phase values shared by the Sachen and Rocket boot state machines
+// (hhugboy MODE_LOCKED_DMG/MODE_LOCKED_CGB/MODE_UNLOCKED, mGBA GBSachenLockState).
+const UNL_LOCKED_DMG: u8 = 0;
+const UNL_LOCKED_CGB: u8 = 1;
+const UNL_UNLOCKED: u8 = 2;
+
 /// Unlicensed mapper families detected from ROM content at load time. The
 /// header type byte is unreliable on these boards, so this override wins over
 /// `cartridge_type` in `get_cartridge_type`.
@@ -101,6 +127,11 @@ pub enum UnlMapper {
     /// whole-$0000-$7FFF 32KB bank from the low 6 bits of the ADDRESS (data
     /// ignored). Pan Docs "Other MBCs"; mGBA _GBWisdomTree.
     WisdomTree,
+    /// Rocket Games ($97 singles / $99 2-in-1s): 16KB inner bank at exactly
+    /// $3F00 (0 maps to 1), 256KB outer bank at exactly $3FC0, plus the
+    /// A15-transition unlock counter with the logo XOR window. hhugboy
+    /// MbcUnlRocketGames.cpp; gbdev forum id=948; MiSTer unlicensed thread.
+    Rocket,
 }
 
 // MBC1 register ranges
@@ -134,6 +165,7 @@ pub enum CartridgeType {
     // Unlicensed boards (selected via UnlMapper content detection, never via
     // the header type byte alone).
     WisdomTree,
+    Rocket,
 }
 
 /// 93LC56 serial-EEPROM interface state for MBC7 (Pan Docs "MBC7"). The
@@ -351,6 +383,20 @@ pub struct Cartridge {
     #[serde(default)]
     wt_bank: u8,
 
+    // Rocket Games state. rocket_lock/rocket_unlock_count model the
+    // A15-transition boot lock (hhugboy): the cart powers up locked and
+    // presents the XOR-decoded Nintendo logo during the boot ROM check;
+    // skip_bios unlocks immediately (no boot ROM ran). Cell: the counter
+    // advances on ROM READS, and Addressable::read takes &self.
+    #[serde(default = "serde_u8_one")]
+    rocket_rom_bank: u8,
+    #[serde(default)]
+    rocket_outer: u8,
+    #[serde(default)]
+    rocket_lock: Cell<u8>,
+    #[serde(default)]
+    rocket_unlock_count: Cell<u8>,
+
     // CGB support information
     cgb_support: CgbSupport, // CGB compatibility from cartridge header
 
@@ -442,6 +488,10 @@ impl Clone for Cartridge {
             huc1_ir_led: self.huc1_ir_led,
             unl_mapper: self.unl_mapper,
             wt_bank: self.wt_bank,
+            rocket_rom_bank: self.rocket_rom_bank,
+            rocket_outer: self.rocket_outer,
+            rocket_lock: self.rocket_lock.clone(),
+            rocket_unlock_count: self.rocket_unlock_count.clone(),
             cgb_support: self.cgb_support.clone(),
             rumble_motor: self.rumble_motor,
             rtc_memory: self.rtc_memory.clone(),
@@ -556,6 +606,20 @@ impl Cartridge {
             // Smaller than one full 32KB image: nothing here needs (or can
             // safely take) an unlicensed mapper.
             return UnlMapper::None;
+        }
+
+        let logo_sum = |base: usize| -> u32 {
+            (0..0x30)
+                .map(|i| data.get(base + i).copied().unwrap_or(0) as u32)
+                .sum()
+        };
+        let plain_0104 = logo_sum(0x104);
+
+        if plain_0104 != LOGO_SUM_NINTENDO {
+            // Rocket Games logo (hhugboy: checksum 2756; all $97/$99 carts).
+            if plain_0104 == LOGO_SUM_ROCKET {
+                return UnlMapper::Rocket;
+            }
         }
 
         // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
@@ -745,6 +809,10 @@ impl Cartridge {
             huc1_ir_led: false,
             unl_mapper,
             wt_bank: 0,
+            rocket_rom_bank: 1,
+            rocket_outer: 0,
+            rocket_lock: Cell::new(UNL_LOCKED_DMG),
+            rocket_unlock_count: Cell::new(0),
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -913,6 +981,10 @@ impl Cartridge {
             huc1_ir_led: false,
             unl_mapper,
             wt_bank: 0,
+            rocket_rom_bank: 1,
+            rocket_outer: 0,
+            rocket_lock: Cell::new(UNL_LOCKED_DMG),
+            rocket_unlock_count: Cell::new(0),
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -935,6 +1007,7 @@ impl Cartridge {
         match self.unl_mapper {
             UnlMapper::None => {}
             UnlMapper::WisdomTree => return CartridgeType::WisdomTree,
+            UnlMapper::Rocket => return CartridgeType::Rocket,
         }
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
@@ -1020,6 +1093,13 @@ impl Cartridge {
                 // bank of the selected 32KB pair.
                 (self.wt_bank as usize * 2 + 1) % self.rom_banks
             }
+            CartridgeType::Rocket => {
+                // Outer 256KB bank (high nibble) | 16KB inner bank (hhugboy:
+                // (outerBank | rom_bank) << 14).
+                (((self.rocket_outer as usize & 0x0F) << 4)
+                    | (self.rocket_rom_bank as usize))
+                    % self.rom_banks
+            }
             CartridgeType::NoMBC { .. } => 1, // Simple cartridge always uses bank 1 for upper area
         }
     }
@@ -1056,7 +1136,8 @@ impl Cartridge {
                 (self.huc3_ram_bank as usize) % self.ram_banks.max(1)
             }
             // None of the unlicensed boards bank their (optional) RAM.
-            CartridgeType::WisdomTree => 0,
+            CartridgeType::WisdomTree
+            | CartridgeType::Rocket => 0,
             CartridgeType::NoMBC { .. } => 0,
         }
     }
@@ -1076,6 +1157,10 @@ impl Cartridge {
             }
             // Even 16KB half of the selected whole-32KB bank.
             CartridgeType::WisdomTree => (self.wt_bank as usize * 2) % self.rom_banks,
+            // Outer bank alone (hhugboy: (outerBank | 0) << 14).
+            CartridgeType::Rocket => {
+                ((self.rocket_outer as usize & 0x0F) << 4) % self.rom_banks
+            }
             _ => 0,
         }
     }
@@ -1328,7 +1413,8 @@ impl Cartridge {
             // RAM+BATTERY+RTC and HuC-1 ($FF) implies RAM+BATTERY.
             CartridgeType::MBC7 | CartridgeType::HuC1 | CartridgeType::HuC3 => true,
             // No known cart on these unlicensed boards has battery-backed RAM.
-            CartridgeType::WisdomTree => false,
+            CartridgeType::WisdomTree
+            | CartridgeType::Rocket => false,
             // $09 ROM+RAM+BATTERY; plain $00/$08 (and unknown fallthroughs)
             // have none.
             CartridgeType::NoMBC { battery } => battery,
@@ -2318,11 +2404,56 @@ impl Cartridge {
         }
         self.rom_data[offset] = new;
     }
+
+    /// Boot-ROM handoff for skip_bios: the Rocket boot lock models the
+    /// cart's power-on state as seen BY a real boot ROM; when the boot is
+    /// skipped it must start unlocked (hhugboy resetVars without
+    /// bootstrap). No-op for every other mapper.
+    pub fn skip_boot_handoff(&mut self) {
+        match self.get_cartridge_type() {
+            CartridgeType::Rocket => self.rocket_lock.set(UNL_UNLOCKED),
+            _ => {}
+        }
+    }
+
+    /// Rocket Games read-side lock counter. Returns the XOR pad byte to apply
+    /// (locked-CGB phase presents the XOR-decoded Nintendo logo at
+    /// $0104-$0133); 0 otherwise. hhugboy MbcUnlRocketGames::readMemory.
+    fn rocket_read_xor(&self, addr: u16) -> u8 {
+        let mode = self.rocket_lock.get();
+        if mode != UNL_UNLOCKED {
+            let count = self.rocket_unlock_count.get();
+            if count == 0x30 {
+                if mode == UNL_LOCKED_DMG {
+                    self.rocket_lock.set(UNL_LOCKED_CGB);
+                    self.rocket_unlock_count.set(0);
+                } else {
+                    self.rocket_lock.set(UNL_UNLOCKED);
+                }
+            } else {
+                self.rocket_unlock_count.set(count + 1);
+            }
+        }
+        if self.rocket_lock.get() == UNL_LOCKED_CGB && (0x0104..0x0134).contains(&addr) {
+            ROCKET_LOGO_XOR[(addr - 0x0104) as usize]
+        } else {
+            0
+        }
+    }
 }
 
 impl memory::Addressable for Cartridge {
     fn read(&self, addr: u16) -> u8 {
-        match addr {
+        // Unlicensed-board read front-end: Rocket boot lock + logo XOR
+        // window. Licensed carts (UnlMapper::None) skip this entirely.
+        let mut xor = 0u8;
+        match self.unl_mapper {
+            UnlMapper::Rocket if addr < 0x8000 => {
+                xor = self.rocket_read_xor(addr);
+            }
+            _ => {}
+        }
+        xor ^ match addr {
             // ROM Bank 0 (0x0000-0x3FFF). Fixed to bank 0 except on MBC1 in
             // banking mode 1, where BANK2 also selects this region.
             mmio::CARTRIDGE_START..=mmio::CARTRIDGE_END => {
@@ -2499,6 +2630,17 @@ impl memory::Addressable for Cartridge {
                             0xFF
                         }
                     }
+                    // Rocket boards wire any RAM straight through with
+                    // no enable gate (hhugboy maps it unconditionally).
+                    CartridgeType::Rocket => {
+                        if !self.ram_data.is_empty() {
+                            let offset =
+                                (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
+                            self.ram_data[offset]
+                        } else {
+                            0xFF
+                        }
+                    }
                     _ => 0xFF,
                 }
             }
@@ -2594,6 +2736,19 @@ impl memory::Addressable for Cartridge {
                     }
                     CartridgeType::HuC3 => {
                         self.huc3_rom_bank = value & 0x7F; // 7-bit, bank 0 allowed
+                    }
+                    CartridgeType::Rocket => {
+                        // Two EXACT register addresses (hhugboy
+                        // MbcUnlRocketGames::writeMemory); everything else in
+                        // the region is ignored.
+                        match addr {
+                            // Inner 16KB bank, 0 maps to 1.
+                            0x3F00 => self.rocket_rom_bank = value.max(1),
+                            // Outer 256KB bank (effective bank bits 4-7; the
+                            // $99 2-in-1s use it to pick the sub-game).
+                            0x3FC0 => self.rocket_outer = value,
+                            _ => {}
+                        }
                     }
                     _ => {}
                 }
@@ -2801,6 +2956,14 @@ impl memory::Addressable for Cartridge {
                             let _ = self.write_ram_byte(offset, value);
                         }
                     }
+                    // Straight-through, ungated (see the read path).
+                    CartridgeType::Rocket => {
+                        if !self.ram_data.is_empty() {
+                            let offset =
+                                (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
+                            let _ = self.write_ram_byte(offset, value);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -2896,6 +3059,48 @@ mod tests {
         rom[0x147] = 0xC0;
         rom[0x14A] = 0xD1;
         assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::WisdomTree);
+    }
+
+    #[test]
+    fn rocket_games_registers_and_boot_lock() {
+        // Real Rocket carts store their own logo = Nintendo ^ pad (sums to
+        // 2756), which is what the detection keys on.
+        let mut rom = make_sized_rom(0x97, 0x04, 0x80000);
+        for i in 0..48 {
+            rom[0x104 + i] = NINTENDO_LOGO[i] ^ ROCKET_LOGO_XOR[i];
+        }
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::Rocket);
+
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        cart.skip_boot_handoff(); // no boot ROM: start unlocked
+        // Unlocked reads return the raw (Rocket) logo.
+        assert_eq!(cart.read(0x0104), NINTENDO_LOGO[0] ^ ROCKET_LOGO_XOR[0]);
+        // Inner bank at exactly $3F00 (0 -> 1), outer 256KB bank at $3FC0.
+        assert_eq!(cart.read(0x5000), 1);
+        cart.write(0x3F00, 0x05);
+        assert_eq!(cart.read(0x5000), 5);
+        cart.write(0x3F00, 0x00);
+        assert_eq!(cart.read(0x5000), 1);
+        cart.write(0x3FC0, 0x01);
+        assert_eq!(cart.read(0x1000), 16); // outer bank alone at $0000
+        assert_eq!(cart.read(0x5000), 17); // outer | inner at $4000
+        // Writes elsewhere in the region are ignored.
+        cart.write(0x2000, 0x07);
+        assert_eq!(cart.read(0x5000), 17);
+
+        // Boot lock: a fresh cart is locked; after 0x30 ROM reads it enters
+        // the CGB phase where $0104-$0133 reads are XOR-decoded to the
+        // Nintendo logo (the boot ROM check), and after 0x30 more it unlocks.
+        let cart = Cartridge::from_bytes(&rom).unwrap();
+        for _ in 0..0x31 {
+            cart.read(0x0000);
+        }
+        assert_eq!(cart.read(0x0104), NINTENDO_LOGO[0]);
+        assert_eq!(cart.read(0x0105), NINTENDO_LOGO[1]);
+        for _ in 0..0x31 {
+            cart.read(0x0000);
+        }
+        assert_eq!(cart.read(0x0104), NINTENDO_LOGO[0] ^ ROCKET_LOGO_XOR[0]);
     }
 
     fn mbc3_rtc_cart() -> Cartridge {
