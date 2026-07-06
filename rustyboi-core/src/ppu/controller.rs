@@ -8831,6 +8831,33 @@ impl Ppu {
         let gap: i64 = if double_speed { 4 } else { 6 };
         let edge = m0t - gap;
         let cc = access_cc as i64;
+        // Staleness bound: `m0_time_master` is rebased at the mode-3 arm, so
+        // during the NEXT line's mode 2 (and early mode 3) it still holds the
+        // PREVIOUS line's m0 time. A disable write there is hundreds of cc past
+        // that edge whose block long ran - the next edge is unscheduled and the
+        // disable must win (AntonioND hdma_start_3: FF55=00 at LY3 mode 2 with
+        // one block left reads HDMA5=0x80). The genuine race only exists within
+        // a write-resolution beat of the edge (the latched block stalls the CPU
+        // immediately after), so a small window past m0t keeps every
+        // edge-racing bracket while rejecting stale-line reads.
+        // Staleness guard: `m0_time_master` is rebased at the mode-3 arm, so
+        // during the NEXT line's mode 2 (and early mode 3) it still holds the
+        // PREVIOUS line's m0 time. A disable write there is far past an edge
+        // whose block long ran - the next edge is unscheduled and the disable
+        // must win (AntonioND hdma_start_3: FF55=00 at LY3 mode 2 with one
+        // block left reads HDMA5=0x80). Detect it by line identity: an m0t
+        // before the current line's start cc (lyTime anchor, same phase
+        // `vram_readable_at_cc` uses) belongs to a completed line. Same-line
+        // late writes (incl. the STOP-speedchange wakeup family, whose owed
+        // block resolves ~129cc past m0t) keep the edge-fired answer.
+        let dsi = double_speed as i64;
+        let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
+        let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as i64;
+        let ly_time = self.p_now as i64 + self.abs_cc as i64 + (dots_to_next << dsi) + plus1;
+        let line_start = ly_time - ((stat_irq::LCD_CYCLES_PER_LINE as i64) << dsi);
+        if m0t < line_start {
+            return Some(false);
+        }
         Some(cc >= edge)
     }
 
