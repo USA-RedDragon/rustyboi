@@ -2707,6 +2707,25 @@ mod tests {
         Cartridge::from_bytes(&make_rom(MBC3_TIMER_RAM_BATTERY, 0x03)).unwrap()
     }
 
+    /// Pan Docs MBC5: on rumble carts bit 3 of the $4000-$5FFF RAM-bank write
+    /// drives the motor. `rumble_active()` is what the libretro frontend polls
+    /// each frame; plain MBC5 carts must never report a motor.
+    #[test]
+    fn mbc5_rumble_latch_via_bus() {
+        let mut cart = Cartridge::from_bytes(&make_rom(MBC5_RUMBLE_RAM, 0x03)).unwrap();
+        assert!(cart.has_rumble());
+        assert!(!cart.rumble_active());
+        cart.write(0x4000, 0x08);
+        assert!(cart.rumble_active());
+        cart.write(0x5FFF, 0x07); // bank bits only, motor off
+        assert!(!cart.rumble_active());
+
+        let mut plain = Cartridge::from_bytes(&make_rom(MBC5_RAM, 0x03)).unwrap();
+        assert!(!plain.has_rumble());
+        plain.write(0x4000, 0x08);
+        assert!(!plain.rumble_active());
+    }
+
     fn huc3_cart() -> Cartridge {
         Cartridge::from_bytes(&make_rom(HUC3, 0x03)).unwrap()
     }
