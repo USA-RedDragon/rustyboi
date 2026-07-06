@@ -9514,8 +9514,14 @@ impl Ppu {
         // Scoped to CGB: DMG's mode-0 line-tail phase differs (the same read wants
         // mode0 on DMG, mode2 on CGB — e.g. `m0int_m0stat_scx3_2_dmg08_out0_cgb04c_out2`),
         // so DMG keeps the prior defer-to-renderer behavior (sub-dot-irreducible there).
+        // PTZ wake-source scope: these zones re-map the unmodeled m0/m2-wake-exit
+        // skew of the m0int_m0stat/m2int_m0stat streams; an LYC/m1-woken stream's
+        // line-tail read must fall through to the true closed-form resolution
+        // (real DMG+CGB read mode 0 at lineCycles 449..452 — gbc-hw-tests
+        // lcd_irq_delay_timer ISR sweeps).
+        let ptz_wake = mmio.halt_wake_m0m2();
         let tail_thresh = if ds { cpl - 5 } else { cpl - 7 };
-        if halt_skew && is_cgb && line_cycles >= tail_thresh {
+        if halt_skew && ptz_wake && is_cgb && line_cycles >= tail_thresh {
             if (access_cc + 1) < self.display_enable_inactive_until {
                 return Some(0);
             }
@@ -9536,13 +9542,13 @@ impl Ppu {
         // through to the mode-3/mode-0 resolution below. The ly=153 VBlank-line
         // `*_2b` reads are NOT in this mid-frame path (handled by the VBlank branch
         // in get_stat_mode_at_cc), so their genuine sub-dot collapse is untouched.
-        if halt_skew && line_cycles >= cpl - 5 {
+        if halt_skew && ptz_wake && line_cycles >= cpl - 5 {
             if (access_cc + 1) < self.display_enable_inactive_until {
                 return Some(0);
             }
             return Some(2);
         }
-        if halt_skew && line_cycles >= cpl - 7 {
+        if halt_skew && ptz_wake && line_cycles >= cpl - 7 {
             // DMG line tail at lineCycles 449/450: still mode 0 (the want-mode0
             // group extends to 450 on DMG). Fall through to the mode-3/mode-0
             // resolution below rather than deferring to the lagging renderer.
