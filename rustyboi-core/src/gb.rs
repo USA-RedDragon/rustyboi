@@ -1008,6 +1008,28 @@ impl GB {
         self.mmio.attach_printer();
     }
 
+    /// Connect two GB instances with a link cable (both ends attached).
+    /// The frontend/harness pumps both instances (`step_instruction` /
+    /// `run_until_frame`, any interleave); byte exchange happens at the
+    /// correct cc through the shared [`crate::serial::LinkCable`]. Whichever
+    /// side starts an internal-clock transfer is the master for that byte;
+    /// an external-clock side completes when the master's window deposits.
+    pub fn connect_link(a: &mut GB, b: &mut GB) {
+        let (pa, pb) = crate::serial::LinkCable::pair();
+        a.mmio.attach_link(pa);
+        b.mmio.attach_link(pb);
+    }
+
+    /// Plug one end of a link cable into this instance (the other end goes to
+    /// a second instance, possibly owned by another window/process transport).
+    pub fn attach_link_peer(&mut self, peer: crate::serial::LinkPeer) {
+        self.mmio.attach_link(peer);
+    }
+
+    pub fn link_attached(&self) -> bool {
+        self.mmio.link_attached()
+    }
+
     /// Unplug the link-port device (back to a disconnected cable).
     pub fn detach_serial_device(&mut self) {
         self.mmio.detach_serial_device();
@@ -1015,6 +1037,12 @@ impl GB {
 
     pub fn printer_attached(&self) -> bool {
         self.mmio.printer().is_some()
+    }
+
+    /// Debug/test: the in-flight serial transfer's completion event cc
+    /// (None while idle or while a link transfer holds for the peer).
+    pub fn serial_transfer_complete_at(&self) -> Option<u64> {
+        self.mmio.serial_transfer_complete_at()
     }
 
     /// Drain completed printer sheets (empty when no printer is attached or
