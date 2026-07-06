@@ -40,13 +40,13 @@ Scanned **1148 ROMs** (543 zips in `~/Downloads/gb/GBC/`, 605 in
 |---|---|---|
 | MBC1 ($01/$02/$03) | 554 | supported (incl. MBC1M multicart detection) |
 | MBC5 ($19/$1A/$1B) | 474 | supported |
-| ROM only ($00) | 49 | supported (but see Sachen/Wisdom Tree liars below) |
+| ROM only ($00) | 49 | supported (Sachen/Wisdom Tree header-liars content-detected — §2.11) |
 | MBC2 ($06) | 20 | supported |
 | MBC3 ($10/$11/$13) | 20 (13 with RTC) | supported incl. MBC30; **RTC state lost between sessions** (§2.2) |
 | MBC5+RUMBLE ($1C/$1E) | 16 | banking supported; **rumble motor not wired to any frontend** (§2.3) |
-| Rocket Games ($97/$99, unlicensed) | 10 | **MISSING** |
+| Rocket Games ($97/$99, unlicensed) | 10 | supported (logo-checksum detection + inner/outer banking) |
 | POCKET CAMERA ($FC) | 1 | **MISSING** |
-| Makon/Ka Sheng ($EA, unlicensed) | 1 | **MISSING** |
+| Makon/Ka Sheng ($EA, unlicensed) | 1 | supported (SONIC5 -> plain-MBC1 routing per hhugboy) |
 | MBC7 ($22) | 1 | **IN-PROGRESS** |
 | HuC3 ($FE) | 1 | **IN-PROGRESS** |
 | HuC1 ($FF) | 1 | **MISSING** |
@@ -83,24 +83,22 @@ whole-screen (not per-region) SGB colorization (§7).
 - IR-capable games — no CGB IR transport: Pokémon G/S/C Mystery Gift, Perfect
   Dark, Super Mario Bros. DX score exchange, Pokémon Pinball (§6.1).
 
-**Unlicensed / bootleg, mapper missing (out of Pan Docs scope, documented in
-emulator/forum sources):**
-- Rocket Games $97: ATV Racing, Hang Time Basketball, Karate Joe, Painter,
-  Pocket Smash Out, Space Invasion; $99 (2-in-1s): ATV Racing & Karate Joe,
-  Pocket Smash Out & Race Time, Race Time, Space Invasion & Karate Joe.
-  (Type bytes and mapper identified in [gbdev forum "Cartridges with Rare
-  Mappers"](https://gbdev.gg8.se/forums/viewtopic.php?id=948) and the
-  [MiSTer unlicensed-support thread](https://misterfpga.org/viewtopic.php?t=3129);
-  hhugboy implements it.)
-- Makon/Ka Sheng $EA: Sonic 3D Blast 5; also Sonic 6, Sonic 7, Super Mario
-  Special 3, Pokemon Adventure, Pocket Monsters GO!GO!GO! (headers claim $01
-  but need Makon/Sintax-family handling).
-- Sachen (header-spoofing, need Sachen MMC): 2nd Space, A-Force, Ant Soldiers,
-  Black Forest Tale, Captain Knick-Knack, Crazy Burger, Deep, Duck Adventures,
-  Magical Tower, Sky Ace, Worm Visitor (11 carts claiming $00/$01 with 64-128KB
-  ROMs **[R]** — banking silently no-ops beyond 32KB on $00).
-- Wisdom Tree (whole-32KB bankswitch, [Pan Docs Other MBCs](https://gbdev.io/pandocs/othermbc.html)):
-  Exodus (128KB), Spiritual Warfare (256KB), both header $00 **[R]**.
+**Unlicensed / bootleg — FIXED (content-detected mappers, §2.11; all owner
+carts below verified booting into menus/gameplay):**
+- Rocket Games $97/$99 (10 games / 12 dumps incl. 2-in-1 sub-game switching):
+  ATV Racing, Hang Time Basketball, Karate Joe, Painter, Pocket Smash Out,
+  Race Time, Space Invasion + the three 2-in-1s — `UnlMapper::Rocket`.
+- Makon/Ka Sheng: Sonic 3D Blast 5 ($EA -> plain-MBC1 routing; previously the
+  $20 RAM-size byte made the loader error out), Super Mario Special 3
+  (NT-old-2 board), Sonic 6, Sonic 7, Pokemon Adventure, Pocket Monsters
+  GO!GO!GO! (fixed dumps, header MBC1 verified working).
+- Sachen: Captain Knick-Knack ($00/TETRIS header liar -> plain-MBC1 routing;
+  was bankless-broken); the ten $01 singles are descrambled GoodGBx dumps that
+  run correctly as plain MBC1 (verified); raw scrambled dumps take the real
+  Sachen MMC1/MMC2 emulation (verified frame-exact vs the descrambled dump).
+- Wisdom Tree: Exodus, Spiritual Warfare — whole-32KB address-latch mapper.
+
+**Unlicensed / bootleg, still missing:**
 - Misc pirate multicarts/devices: 1993 Collection 128-in-1, 46/58/72-in-1,
   Magic Ball, Super Ayanami SlideShow, SHARK MX (Datel GBMail modem cart —
   also a serial peripheral), Nectaris GB `[b2]` (bad dump: header $00 but
@@ -229,20 +227,36 @@ no external RAM (`cartridge.rs:1263` read arm `_ => 0xFF`, `:1430` write arm
 - Impact: one cart ever (Mani 4 in 1, JP); owner has none.
 - Effort: **S**.
 
-### 2.11 Unlicensed mappers — MISSING (documented outside Pan Docs)
-- Wisdom Tree ([Pan Docs Other MBCs](https://gbdev.io/pandocs/othermbc.html)):
-  whole-32KB switch, bank selected by **address** low byte on any $0000-7FFF
-  write. Owner impact: Exodus, Spiritual Warfare. Effort **S** (plus the
-  detection heuristics Pan Docs proposes: title "WISDOM TREE"/$C0+$D1 magic).
-- EMS ($1B+region $E1 magic, Pan Docs Other MBCs, flagged "to be verified"
-  upstream — [pandocs#423](https://github.com/gbdev/pandocs/issues/423)).
-  Owner impact: none. Effort S.
-- Rocket Games $97/$99, Sachen MMC1/MMC2 (logo-spoof + address-scramble),
-  Makon/Sintax family: documented only in emulator sources (hhugboy) and the
-  [gbdev wiki/forum](https://gbdev.gg8.se/forums/viewtopic.php?id=948). Owner
-  impact: 22 unlicensed carts (list in §1). Effort **M** each family,
-  oracle = real carts or hhugboy cross-check (below our usual provenance bar —
-  mark any implementation as unlicensed-best-effort).
+### 2.11 Unlicensed mappers — IMPLEMENTED (unlicensed-best-effort)
+
+Content-based detection (`cartridge.rs detect_unl_mapper` -> `UnlMapper`)
+overrides the spoofed header type byte; references are the two emulators with
+verified support (hhugboy `CartDetection.cpp`/`MbcUnl*.cpp`, mGBA
+`_detectUnlMBC`/`unlicensed.c`), [Pan Docs Other MBCs](https://gbdev.io/pandocs/othermbc.html),
+and the [gbdev forum thread](https://gbdev.gg8.se/forums/viewtopic.php?id=948).
+Detection was swept over the owner's full 1148-zip collection + all 4535 suite
+ROMs: exactly the 15 target unlicensed dumps hit, zero licensed carts.
+
+- Wisdom Tree: whole-32KB switch, bank = low 6 bits of the **address** of any
+  $0000-3FFF write. Detected via the $C0+$D1 header magic or (type $00, >32KB)
+  the "WISDOM TREE" publisher string.
+- Rocket Games $97/$99: inner 16KB bank at $3F00, outer 256KB bank at $3FC0
+  (2-in-1 sub-game select), boot lock with the logo-XOR window. Detected via
+  the Rocket logo checksum (2756).
+- Sachen MMC1/MMC2: base/mask outer banking, $01xx address descramble, boot
+  lock phases (locked reads force RA7 high); `skip_bios` seeds the SACHEN
+  logo tiles MMC1 games check in VRAM. Detected via Nintendo/Sachen logo
+  sums at the scrambled offsets — fires only on raw scrambled dumps; the
+  GoodGBx descrambled singles correctly stay plain MBC1.
+- Makon/NT old 1/2: MBC1/MBC3-style banking + $5000-$5FFF multicart base /
+  bank-window / bank-line-swap registers. Plus hhugboy's plain-MBC1 routes
+  for the header liars (SONIC5 $EA, TETRIS/Captain Knick-Knack, 256KB POCKET
+  MONSTER), with garbage ROM/RAM-size header bytes now non-fatal.
+
+Still missing (owner impact none): EMS ($1B+region $E1 magic,
+[pandocs#423](https://github.com/gbdev/pandocs/issues/423)); NT-new and
+Sintax-proper boards (no owner carts; no auto-detection exists in either
+reference emulator — GBX-footer/manual-only there).
 
 ### 2.12 Cartridge misc
 - MBC1M multicart heuristic, MBC30, MBC2 nibble RAM+echo, MBC5 9-bit banks,
@@ -583,7 +597,7 @@ against both hand-off anchors. Gaps: only §6.2 (compat palette table), §6.3
 | M161 | MISSING — §2.10 |
 | HuC1 | MISSING — §2.5 |
 | HuC-3 | IN-PROGRESS |
-| Other MBCs (Wisdom Tree, EMS, multicart magics) | MISSING — §2.11 |
+| Other MBCs (Wisdom Tree, Rocket, Sachen, Makon) | IMPLEMENTED — §2.11 (EMS/multicart magics still missing) |
 | Game Boy Printer | DONE — §8.2 |
 | Game Boy Camera | MISSING — §2.6 |
 | 4-Player Adapter | MISSING — §8.3 |
