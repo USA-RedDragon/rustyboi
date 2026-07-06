@@ -17,6 +17,8 @@ mooneye-test-suite/acceptance/boot_hwio-dmgABCmgb.gb|dmg|mooneye|gb-test-roms/mo
 mooneye-test-suite/acceptance/boot_regs-dmg0.gb|dmg|mooneye|gb-test-roms/mooneye-test-suite/acceptance/boot_regs-dmg0.gb|rev=dmg0
 mooneye-test-suite/acceptance/boot_regs-dmgABC.gb|dmg|mooneye|gb-test-roms/mooneye-test-suite/acceptance/boot_regs-dmgABC.gb
 mooneye-test-suite/acceptance/boot_regs-mgb.gb|dmg|mooneye|gb-test-roms/mooneye-test-suite/acceptance/boot_regs-mgb.gb|rev=mgb
+mooneye-test-suite/acceptance/boot_regs-sgb.gb|dmg|mooneye|gb-test-roms/mooneye-test-suite/acceptance/boot_regs-sgb.gb|rev=sgb
+mooneye-test-suite/acceptance/boot_regs-sgb2.gb|dmg|mooneye|gb-test-roms/mooneye-test-suite/acceptance/boot_regs-sgb2.gb|rev=sgb2
 mooneye-test-suite/acceptance/call_cc_timing.gb|dmg|mooneye|gb-test-roms/mooneye-test-suite/acceptance/call_cc_timing.gb
 mooneye-test-suite/acceptance/call_cc_timing.gb|cgb|mooneye|gb-test-roms/mooneye-test-suite/acceptance/call_cc_timing.gb
 mooneye-test-suite/acceptance/call_cc_timing2.gb|dmg|mooneye|gb-test-roms/mooneye-test-suite/acceptance/call_cc_timing2.gb

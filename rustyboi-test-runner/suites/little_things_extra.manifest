@@ -1,0 +1,23 @@
+# little-things-gb release ROMs not in the c-sp set (nitro2k01).
+# windesync-validate (Win-desync-v1.0 2022-12-07): pre-CGB window-desync
+# glitch; the reference (windesync-reference-sgb.png) was digitally
+# captured from a REAL Super Game Boy with a logic analyzer -- a genuine
+# silicon oracle. DMG-graded only (the quirk does not exist on CGB, per
+# the upstream README). png_layout because the capture rig's three gray
+# levels are its own palette; the checkmark/cross layout is the verdict
+# (a missing/extra/shifted glitch pixel breaks the 1:1 color mapping).
+# double-halt-cancel (Double-halt-cancel-v1.0 2022-12-26): double HALT
+# with IME=0 is NOT a lockup -- the CPU refetches the second HALT byte
+# forever, and when VRAM locks the fetch turns into rst $38; the ROM
+# traps every plausible execution path and prints the taken path + a
+# DIV-derived timing, so the text screen IS the verdict. refs are
+# derived (documented 2x->1x downscale in gen_manifests.py) from the
+# upstream BGB captures, which the author -- who established the
+# hardware behavior -- publishes as the correct result, with BGB/
+# SameBoy/Gambatte all agreeing. png_layout: text layout, not palette.
+# The -gbconly ROM differs from double-halt-cancel.gb only in the
+# header CGB flag + checksums (cmp-verified 3 bytes) -> same CGB ref.
+little-things-gb/windesync-validate|dmg|png_layout|gb-test-roms/little-things-gb/windesync-validate.gb|gb-test-roms/little-things-gb/windesync-reference-sgb.png|frames=120
+little-things-gb/double-halt-cancel|dmg|png_layout|gb-test-roms/little-things-gb/double-halt-cancel.gb|rustyboi-test-runner/suites/refs/double-halt-cancel-dmg.png|frames=120
+little-things-gb/double-halt-cancel|cgb|png_layout|gb-test-roms/little-things-gb/double-halt-cancel.gb|rustyboi-test-runner/suites/refs/double-halt-cancel-cgb.png|frames=120
+little-things-gb/double-halt-cancel-gbconly|cgb|png_layout|gb-test-roms/little-things-gb/double-halt-cancel-gbconly.gb|rustyboi-test-runner/suites/refs/double-halt-cancel-cgb.png|frames=120
