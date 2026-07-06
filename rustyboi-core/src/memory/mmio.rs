@@ -3900,6 +3900,12 @@ impl Mmio {
         self.input.enable_sgb();
     }
 
+    /// Apply the SGB command-unlock gate from the cartridge header (Pan Docs
+    /// "SGB Unlocking"). No-op on non-SGB hardware.
+    pub fn set_sgb_unlocked(&mut self, unlocked: bool) {
+        self.input.set_sgb_unlocked(unlocked);
+    }
+
     /// Immutable access to SGB palette/mask state for the frame-output path.
     pub fn sgb(&self) -> Option<&crate::sgb::Sgb> {
         self.input.sgb()

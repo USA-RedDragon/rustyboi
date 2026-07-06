@@ -607,7 +607,13 @@ impl GB {
             eprintln!("Warning: {}", msg);
         }
 
+        // SGB command-unlock gate (Pan Docs "SGB Unlocking"): only carts whose
+        // header declares SGB support ($0146 == $03, $014B == $33) may drive
+        // SGB packets. No-op on non-SGB hardware.
+        let sgb_unlocked = cartridge.supports_sgb();
+
         self.mmio.insert_cartridge(cartridge);
+        self.mmio.set_sgb_unlocked(sgb_unlocked);
 
         // Update CGB features enablement based on hardware and cartridge compatibility
         let cgb_enabled = self.should_enable_cgb_features();
