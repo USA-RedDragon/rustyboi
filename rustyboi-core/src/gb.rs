@@ -570,9 +570,48 @@ impl GB {
 
     /// Write the boot-ROM Nintendo logo into VRAM bank 0 via the normal bus.
     /// VBK is bank 0 at this point in `skip_bios`, so plain writes land there.
+    ///
+    /// Header-logo-substituting carts (Sachen MMC1) get the boot expansion of
+    /// THEIR logo instead: the real boot ROM reads the header through the
+    /// locked mapper and decompresses whatever it sees, and those games check
+    /// the resulting VRAM tiles as copy protection (hhugboy pokes the same
+    /// expansion when no bootstrap is emulated).
     fn seed_boot_logo_vram(&mut self) {
-        for (i, b) in BOOT_LOGO_TILES.iter().enumerate() {
-            self.mmio.write(0x8010 + i as u16, *b);
+        let logo_override = self.mmio.get_cartridge().and_then(|c| c.boot_logo_override());
+        match logo_override {
+            Some(logo) => {
+                // The DMG boot ROM's logo decompression: each header byte
+                // yields two pixel-doubled bitplane-0 bytes, each written
+                // twice (row doubling) at even offsets from 0x8010.
+                for (i, &b) in logo.iter().enumerate() {
+                    let b = b as u16;
+                    let hi = ((b) & 0x80)
+                        | ((b >> 1) & 0x60)
+                        | ((b >> 2) & 0x18)
+                        | ((b >> 3) & 0x06)
+                        | ((b >> 4) & 0x01);
+                    let lo = ((b << 4) & 0x80)
+                        | ((b << 3) & 0x60)
+                        | ((b << 2) & 0x18)
+                        | ((b << 1) & 0x06)
+                        | (b & 0x01);
+                    let base = 0x8010 + (i as u16) * 8;
+                    self.mmio.write(base, hi as u8);
+                    self.mmio.write(base + 2, hi as u8);
+                    self.mmio.write(base + 4, lo as u8);
+                    self.mmio.write(base + 6, lo as u8);
+                }
+                // The ® tile is boot-ROM-internal data, independent of the
+                // cart header.
+                for (i, b) in BOOT_LOGO_TILES[0x180..].iter().enumerate() {
+                    self.mmio.write(0x8190 + i as u16, *b);
+                }
+            }
+            None => {
+                for (i, b) in BOOT_LOGO_TILES.iter().enumerate() {
+                    self.mmio.write(0x8010 + i as u16, *b);
+                }
+            }
         }
     }
 

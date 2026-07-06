@@ -93,6 +93,9 @@ const HUC1_RAM_BATTERY: u8 = 0xFF;
 
 /// Byte sum of the 48-byte Nintendo logo at its usual $0104 location.
 const LOGO_SUM_NINTENDO: u32 = 5446;
+/// Byte sums of the two Sachen logo variants (hhugboy CartDetection.cpp).
+const LOGO_SUM_SACHEN_A: u32 = 5542;
+const LOGO_SUM_SACHEN_B: u32 = 7484;
 /// Byte sum of the Rocket Games logo (hhugboy: 2756). Rocket carts never
 /// contain the Nintendo logo in the dump; the mapper XOR-decodes it for the
 /// boot ROM check (see ROCKET_LOGO_XOR).
@@ -132,6 +135,19 @@ pub enum UnlMapper {
     /// A15-transition unlock counter with the logo XOR window. hhugboy
     /// MbcUnlRocketGames.cpp; gbdev forum id=948; MiSTer unlicensed thread.
     Rocket,
+    /// Sachen MMC1: base/mask outer banking + the $01xx address descramble +
+    /// the DMG lock phase (RA7 forced high). hhugboy MbcUnlSachenMMC1.cpp;
+    /// mGBA _GBSachen/_GBSachenMMC1Read.
+    SachenMmc1,
+    /// Sachen MMC2: MMC1 plus a DMG->CGB->unlocked 3-phase lock (the CGB
+    /// phase presents the Nintendo logo copy at $0184). hhugboy
+    /// MbcUnlSachenMMC2.cpp; mGBA _GBSachenMMC2Read.
+    SachenMmc2,
+    /// Header liars that are electrically plain MBC1 with no RAM: Sonic 3D
+    /// Blast 5 (type $EA, "code in the header area" per hhugboy), Captain
+    /// Knick-Knack (Sachen dump with a Tetris header), Pocket Monsters
+    /// GO!GO!GO! 256KB dumps. hhugboy UNL_MBC1NOSAVE routing.
+    ForceMbc1,
 }
 
 // MBC1 register ranges
@@ -166,6 +182,7 @@ pub enum CartridgeType {
     // the header type byte alone).
     WisdomTree,
     Rocket,
+    Sachen { mmc2: bool },
 }
 
 /// 93LC56 serial-EEPROM interface state for MBC7 (Pan Docs "MBC7"). The
@@ -397,6 +414,20 @@ pub struct Cartridge {
     #[serde(default)]
     rocket_unlock_count: Cell<u8>,
 
+    // Sachen MMC1/MMC2 state. sachen_bank is the raw inner-bank latch
+    // ("unmasked bank"); base/mask writes only latch while
+    // (sachen_bank & 0x30) == 0x30. Lock phases as for Rocket.
+    #[serde(default)]
+    sachen_base: u8,
+    #[serde(default)]
+    sachen_mask: u8,
+    #[serde(default = "serde_u8_one")]
+    sachen_bank: u8,
+    #[serde(default)]
+    sachen_lock: Cell<u8>,
+    #[serde(default)]
+    sachen_transition: Cell<u8>,
+
     // CGB support information
     cgb_support: CgbSupport, // CGB compatibility from cartridge header
 
@@ -492,6 +523,11 @@ impl Clone for Cartridge {
             rocket_outer: self.rocket_outer,
             rocket_lock: self.rocket_lock.clone(),
             rocket_unlock_count: self.rocket_unlock_count.clone(),
+            sachen_base: self.sachen_base,
+            sachen_mask: self.sachen_mask,
+            sachen_bank: self.sachen_bank,
+            sachen_lock: self.sachen_lock.clone(),
+            sachen_transition: self.sachen_transition.clone(),
             cgb_support: self.cgb_support.clone(),
             rumble_motor: self.rumble_motor,
             rtc_memory: self.rtc_memory.clone(),
@@ -590,6 +626,18 @@ impl Cartridge {
         }
     }
 
+    /// The Sachen MMC address descramble for CPU reads in $0100-$01FF (A8
+    /// high, A15..A9 low): RA0<=A6, RA1<=A4, RA4<=A1, RA6<=A0 (bit swaps, so
+    /// the mapping is an involution). hhugboy MbcUnlSachenMMC1.cpp; mGBA
+    /// _unscrambleSachen.
+    fn sachen_unscramble(addr: u16) -> u16 {
+        (addr & 0xFFAC)
+            | ((addr >> 6) & 0x01)
+            | ((addr >> 3) & 0x02)
+            | ((addr << 3) & 0x10)
+            | ((addr << 6) & 0x40)
+    }
+
     /// Detect unlicensed mapper families from ROM content. The heuristics are
     /// lifted from the two reference emulators that support these boards
     /// (hhugboy CartDetection::detectUnlCompatMode, mGBA _detectUnlMBC) and
@@ -608,18 +656,52 @@ impl Cartridge {
             return UnlMapper::None;
         }
 
-        let logo_sum = |base: usize| -> u32 {
+        let logo_sum = |base: usize, scrambled: bool| -> u32 {
             (0..0x30)
-                .map(|i| data.get(base + i).copied().unwrap_or(0) as u32)
+                .map(|i| {
+                    let a = base + i;
+                    let a = if scrambled {
+                        Self::sachen_unscramble(a as u16) as usize
+                    } else {
+                        a
+                    };
+                    data.get(a).copied().unwrap_or(0) as u32
+                })
                 .sum()
         };
-        let plain_0104 = logo_sum(0x104);
+        let plain_0104 = logo_sum(0x104, false);
+        let scrambled_0104 = logo_sum(0x104, true);
+        let scrambled_0184 = logo_sum(0x184, true);
 
         if plain_0104 != LOGO_SUM_NINTENDO {
+            // Sachen MMC raw dumps: the Nintendo logo only exists at the
+            // scrambled addresses (MMC1 at $01xx, MMC2 at the |0x80 copy),
+            // with the Sachen logo at the other bank. Match on either logo
+            // (hhugboy uses the Sachen sums, mGBA the Nintendo bytes).
+            let sachen_a = |s: u32| s == LOGO_SUM_SACHEN_A || s == LOGO_SUM_SACHEN_B;
+            if scrambled_0104 == LOGO_SUM_NINTENDO || sachen_a(scrambled_0184) {
+                return UnlMapper::SachenMmc1;
+            }
+            if scrambled_0184 == LOGO_SUM_NINTENDO || sachen_a(scrambled_0104) {
+                return UnlMapper::SachenMmc2;
+            }
             // Rocket Games logo (hhugboy: checksum 2756; all $97/$99 carts).
             if plain_0104 == LOGO_SUM_ROCKET {
                 return UnlMapper::Rocket;
             }
+        }
+
+        // hhugboy strcmp semantics on the 15-byte title at $0134-$0142.
+        let title = &data[0x134..0x143];
+        let title_eq = |s: &[u8]| -> bool {
+            s.len() <= title.len()
+                && &title[..s.len()] == s
+                && title[s.len()..].first().is_none_or(|&b| b == 0)
+        };
+        let rom_size_code = data[ROM_SIZE_OFFSET];
+
+        if title_eq(b"TETRIS") && data.len() > 0x8000 && rom_size_code == 0 {
+            return UnlMapper::ForceMbc1;
         }
 
         // Wisdom Tree: the Pan Docs $C0-type/$D1 magic, or (type $00 with a
@@ -742,7 +824,9 @@ impl Cartridge {
         // their "save RAM" is the 93LC56 EEPROM: 256 bytes = 128 little-endian
         // 16-bit words, erased state 0xFF. Routing it through ram_data reuses
         // the whole battery-save path (LE word order matches SameBoy/mGBA .sav
-        // files).
+        // files). ForceMbc1 header-liars carry garbage RAM-size bytes; hhugboy
+        // (UNL_MBC1NOSAVE) forces RAM off for them.
+        let ram_banks = if unl_mapper == UnlMapper::ForceMbc1 { 0 } else { ram_banks };
         let ram_data = if cartridge_type == MBC7_SENSOR_RUMBLE_RAM_BATTERY {
             vec![0xFF; 256]
         } else {
@@ -813,6 +897,11 @@ impl Cartridge {
             rocket_outer: 0,
             rocket_lock: Cell::new(UNL_LOCKED_DMG),
             rocket_unlock_count: Cell::new(0),
+            sachen_base: 0,
+            sachen_mask: 0,
+            sachen_bank: 1,
+            sachen_lock: Cell::new(UNL_LOCKED_DMG),
+            sachen_transition: Cell::new(0),
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -914,7 +1003,9 @@ impl Cartridge {
             padded_rom
         };
 
-        // Initialize RAM data (MBC7: 256-byte 93LC56 EEPROM, see `load`).
+        // Initialize RAM data (MBC7: 256-byte 93LC56 EEPROM, see `load`;
+        // ForceMbc1 header-liars get no RAM, see `load`).
+        let ram_banks = if unl_mapper == UnlMapper::ForceMbc1 { 0 } else { ram_banks };
         let ram_data = if cartridge_type == MBC7_SENSOR_RUMBLE_RAM_BATTERY {
             vec![0xFF; 256]
         } else {
@@ -985,6 +1076,11 @@ impl Cartridge {
             rocket_outer: 0,
             rocket_lock: Cell::new(UNL_LOCKED_DMG),
             rocket_unlock_count: Cell::new(0),
+            sachen_base: 0,
+            sachen_mask: 0,
+            sachen_bank: 1,
+            sachen_lock: Cell::new(UNL_LOCKED_DMG),
+            sachen_transition: Cell::new(0),
             cgb_support,
             rumble_motor: false,
             rtc_memory: Vec::new(),
@@ -1008,6 +1104,11 @@ impl Cartridge {
             UnlMapper::None => {}
             UnlMapper::WisdomTree => return CartridgeType::WisdomTree,
             UnlMapper::Rocket => return CartridgeType::Rocket,
+            UnlMapper::SachenMmc1 => return CartridgeType::Sachen { mmc2: false },
+            UnlMapper::SachenMmc2 => return CartridgeType::Sachen { mmc2: true },
+            UnlMapper::ForceMbc1 => {
+                return CartridgeType::MBC1 { ram: false, battery: false }
+            }
         }
         match self.cartridge_type {
             MBC1 => CartridgeType::MBC1 { ram: false, battery: false },
@@ -1100,6 +1201,14 @@ impl Cartridge {
                     | (self.rocket_rom_bank as usize))
                     % self.rom_banks
             }
+            CartridgeType::Sachen { .. } => {
+                // Masked outer/inner combination: mask bits come from the
+                // base register, the rest from the inner bank register
+                // (hhugboy: outerBank&outerMask | rom_bank&~outerMask).
+                (((self.sachen_bank & !self.sachen_mask)
+                    | (self.sachen_base & self.sachen_mask)) as usize)
+                    % self.rom_banks
+            }
             CartridgeType::NoMBC { .. } => 1, // Simple cartridge always uses bank 1 for upper area
         }
     }
@@ -1137,7 +1246,8 @@ impl Cartridge {
             }
             // None of the unlicensed boards bank their (optional) RAM.
             CartridgeType::WisdomTree
-            | CartridgeType::Rocket => 0,
+            | CartridgeType::Rocket
+            | CartridgeType::Sachen { .. } => 0,
             CartridgeType::NoMBC { .. } => 0,
         }
     }
@@ -1160,6 +1270,10 @@ impl Cartridge {
             // Outer bank alone (hhugboy: (outerBank | 0) << 14).
             CartridgeType::Rocket => {
                 ((self.rocket_outer as usize & 0x0F) << 4) % self.rom_banks
+            }
+            // Masked base bank (hhugboy: outerBank & outerMask).
+            CartridgeType::Sachen { .. } => {
+                ((self.sachen_base & self.sachen_mask) as usize) % self.rom_banks
             }
             _ => 0,
         }
@@ -1414,7 +1528,8 @@ impl Cartridge {
             CartridgeType::MBC7 | CartridgeType::HuC1 | CartridgeType::HuC3 => true,
             // No known cart on these unlicensed boards has battery-backed RAM.
             CartridgeType::WisdomTree
-            | CartridgeType::Rocket => false,
+            | CartridgeType::Rocket
+            | CartridgeType::Sachen { .. } => false,
             // $09 ROM+RAM+BATTERY; plain $00/$08 (and unknown fallthroughs)
             // have none.
             CartridgeType::NoMBC { battery } => battery,
@@ -2405,15 +2520,81 @@ impl Cartridge {
         self.rom_data[offset] = new;
     }
 
-    /// Boot-ROM handoff for skip_bios: the Rocket boot lock models the
-    /// cart's power-on state as seen BY a real boot ROM; when the boot is
-    /// skipped it must start unlocked (hhugboy resetVars without
+    /// Boot-ROM handoff for skip_bios: the Sachen and Rocket boot locks model
+    /// the cart's power-on state as seen BY a real boot ROM; when the boot is
+    /// skipped they must start unlocked (hhugboy resetVars without
     /// bootstrap). No-op for every other mapper.
     pub fn skip_boot_handoff(&mut self) {
         match self.get_cartridge_type() {
+            CartridgeType::Sachen { .. } => self.sachen_lock.set(UNL_UNLOCKED),
             CartridgeType::Rocket => self.rocket_lock.set(UNL_UNLOCKED),
             _ => {}
         }
+    }
+
+    /// The 48 header-logo bytes a DMG boot ROM would have read through the
+    /// LOCKED mapper, when they differ from a plain $0104 read. Sachen MMC1
+    /// games check the boot-decompressed VRAM tiles for the SACHEN logo as
+    /// copy protection, so skip_bios must seed those tiles instead of the
+    /// Nintendo ones (hhugboy pokes the same expansion into $8010 when no
+    /// bootstrap is emulated). Locked MMC1 reads force RA7 high and pass
+    /// through the $01xx descramble, so the bytes come from
+    /// unscramble($0184+i) — bit 7 survives the bit-swap.
+    pub fn boot_logo_override(&self) -> Option<[u8; 48]> {
+        if !matches!(self.get_cartridge_type(), CartridgeType::Sachen { mmc2: false }) {
+            return None;
+        }
+        let mut out = [0u8; 48];
+        for (i, b) in out.iter_mut().enumerate() {
+            let a = Self::sachen_unscramble((0x184 + i) as u16) as usize;
+            *b = self.rom_data.get(a).copied().unwrap_or(0xFF);
+        }
+        Some(out)
+    }
+
+    /// Sachen MMC read-side address transform: boot-lock phase counting plus
+    /// the $01xx descramble. Interior mutability (Cell) because the lock
+    /// transitions are driven by CPU READS (the A15-transition counter on the
+    /// real board). mGBA _GBSachenMMC1Read/_GBSachenMMC2Read.
+    fn sachen_read_addr(&self, mut addr: u16, mmc2: bool) -> u16 {
+        let lock = self.sachen_lock.get();
+        if mmc2 {
+            // MMC2: DMG -> CGB -> unlocked, 0x31 transitions each. (The
+            // DMG->CGB shortcut on WRAM traffic is not visible from the
+            // cart bus here; the counter path below matches mGBA's.)
+            if lock != UNL_UNLOCKED && (addr & 0x8700) == 0x0100 {
+                let t = self.sachen_transition.get() + 1;
+                if t == 0x31 {
+                    self.sachen_lock.set(lock + 1);
+                    self.sachen_transition.set(0);
+                } else {
+                    self.sachen_transition.set(t);
+                }
+            }
+            if (addr & 0xFF00) == 0x0100 {
+                if self.sachen_lock.get() == UNL_LOCKED_CGB {
+                    // Locked: RA7 forced high (presents the second header
+                    // copy).
+                    addr |= 0x80;
+                }
+                addr = Self::sachen_unscramble(addr);
+            }
+        } else {
+            // MMC1: single locked phase; the 0x31st $01xx read unlocks.
+            if lock != UNL_UNLOCKED && (addr & 0xFF00) == 0x0100 {
+                let t = self.sachen_transition.get() + 1;
+                self.sachen_transition.set(t);
+                if t == 0x31 {
+                    self.sachen_lock.set(UNL_UNLOCKED);
+                } else {
+                    addr |= 0x80;
+                }
+            }
+            if (addr & 0xFF00) == 0x0100 {
+                addr = Self::sachen_unscramble(addr);
+            }
+        }
+        addr
     }
 
     /// Rocket Games read-side lock counter. Returns the XOR pad byte to apply
@@ -2444,10 +2625,18 @@ impl Cartridge {
 
 impl memory::Addressable for Cartridge {
     fn read(&self, addr: u16) -> u8 {
-        // Unlicensed-board read front-end: Rocket boot lock + logo XOR
-        // window. Licensed carts (UnlMapper::None) skip this entirely.
+        // Unlicensed-board read front-end: Sachen boot lock + $01xx address
+        // descramble, Rocket boot lock + logo XOR window. Licensed carts
+        // (UnlMapper::None) skip this entirely.
+        let mut addr = addr;
         let mut xor = 0u8;
         match self.unl_mapper {
+            UnlMapper::SachenMmc1 if addr < 0x8000 => {
+                addr = self.sachen_read_addr(addr, false);
+            }
+            UnlMapper::SachenMmc2 if addr < 0x8000 => {
+                addr = self.sachen_read_addr(addr, true);
+            }
             UnlMapper::Rocket if addr < 0x8000 => {
                 xor = self.rocket_read_xor(addr);
             }
@@ -2630,9 +2819,9 @@ impl memory::Addressable for Cartridge {
                             0xFF
                         }
                     }
-                    // Rocket boards wire any RAM straight through with
+                    // Rocket/Sachen boards wire any RAM straight through with
                     // no enable gate (hhugboy maps it unconditionally).
-                    CartridgeType::Rocket => {
+                    CartridgeType::Rocket | CartridgeType::Sachen { .. } => {
                         if !self.ram_data.is_empty() {
                             let offset =
                                 (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
@@ -2703,6 +2892,14 @@ impl memory::Addressable for Cartridge {
                         // Only the low 4 bits are significant.
                         self.huc3_mode = value & 0x0F;
                     }
+                    CartridgeType::Sachen { .. } => {
+                        // Base ROM bank register, latched only while the
+                        // inner bank register has bits 4-5 both set (hhugboy
+                        // MbcUnlSachenMMC1/2 case 0).
+                        if (self.sachen_bank & 0x30) == 0x30 {
+                            self.sachen_base = value;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -2750,6 +2947,10 @@ impl memory::Addressable for Cartridge {
                             _ => {}
                         }
                     }
+                    CartridgeType::Sachen { .. } => {
+                        // Inner ("unmasked") bank register, 0 maps to 1.
+                        self.sachen_bank = value.max(1);
+                    }
                     _ => {}
                 }
             }
@@ -2789,6 +2990,13 @@ impl memory::Addressable for Cartridge {
                     }
                     CartridgeType::HuC3 => {
                         self.huc3_ram_bank = value;
+                    }
+                    CartridgeType::Sachen { .. } => {
+                        // ROM bank mask register, latched only while the
+                        // inner bank register has bits 4-5 both set.
+                        if (self.sachen_bank & 0x30) == 0x30 {
+                            self.sachen_mask = value;
+                        }
                     }
                     _ => {}
                 }
@@ -2957,7 +3165,7 @@ impl memory::Addressable for Cartridge {
                         }
                     }
                     // Straight-through, ungated (see the read path).
-                    CartridgeType::Rocket => {
+                    CartridgeType::Rocket | CartridgeType::Sachen { .. } => {
                         if !self.ram_data.is_empty() {
                             let offset =
                                 (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
@@ -3101,6 +3309,52 @@ mod tests {
             cart.read(0x0000);
         }
         assert_eq!(cart.read(0x0104), NINTENDO_LOGO[0] ^ ROCKET_LOGO_XOR[0]);
+    }
+
+    #[test]
+    fn sachen_mmc1_descramble_lock_and_masked_banking() {
+        // Raw-dump shape: the Nintendo logo lives at the DESCRAMBLED
+        // positions of $0104 (CPU reads through the $01xx address swizzle),
+        // and the Sachen logo (here: marker bytes) at the |0x80 copy.
+        let mut rom = make_sized_rom(0x00, 0x00, 0x20000);
+        for i in 0..48u16 {
+            rom[Cartridge::sachen_unscramble(0x104 + i) as usize] = NINTENDO_LOGO[i as usize];
+            rom[Cartridge::sachen_unscramble(0x184 + i) as usize] = 0xB0 | (i as u8 & 0x0F);
+        }
+        assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::SachenMmc1);
+
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        // The boot-logo override presents the locked view (Sachen logo).
+        let logo = cart.boot_logo_override().unwrap();
+        assert_eq!(logo[0], 0xB0);
+        assert_eq!(logo[47], 0xB0 | (47 & 0x0F));
+
+        // Locked (power-on): $01xx reads are forced to the |0x80 copy. The
+        // 0x31st such read unlocks.
+        for i in 0..0x30u16 {
+            assert_eq!(cart.read(0x0104 + i), 0xB0 | (i as u8 & 0x0F));
+        }
+        // Unlock transition read, then the descrambled Nintendo logo is
+        // visible at $0104.
+        cart.read(0x0104);
+        assert_eq!(cart.read(0x0104), NINTENDO_LOGO[0]);
+        assert_eq!(cart.read(0x0105), NINTENDO_LOGO[1]);
+        assert_eq!(cart.read(0x0133), NINTENDO_LOGO[47]);
+
+        // Masked outer banking (hhugboy/mGBA): base/mask only latch while
+        // the inner bank has bits 4-5 set; effective switchable bank =
+        // base&mask | bank&~mask, base window = base&mask.
+        cart.write(0x2000, 0x33); // open the latch gate
+        cart.write(0x0000, 0x04); // base
+        cart.write(0x4000, 0x04); // mask
+        cart.write(0x2000, 0x03); // inner bank (gate now closed)
+        cart.write(0x0000, 0x00); // ignored: gate closed
+        assert_eq!(cart.read(0x1000), 4); // base & mask
+        assert_eq!(cart.read(0x5000), 7); // 4 | 3
+        // skip_boot_handoff unlocks immediately (no boot ROM).
+        let mut fresh = Cartridge::from_bytes(&rom).unwrap();
+        fresh.skip_boot_handoff();
+        assert_eq!(fresh.read(0x0104), NINTENDO_LOGO[0]);
     }
 
     fn mbc3_rtc_cart() -> Cartridge {
