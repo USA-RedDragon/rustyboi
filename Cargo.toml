@@ -9,7 +9,6 @@ members = [
     "rustyboi-test-runner",
     "rustyboi-libretro",
     "rustyboi-web",
-    "run-wasm",
 ]
 default-members = ["rustyboi-core", "rustyboi-debugger", "rustyboi-egui", "rustyboi-platform"]
 
