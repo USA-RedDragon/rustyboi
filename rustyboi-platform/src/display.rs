@@ -538,6 +538,15 @@ fn run_gui_loop(
             }
             app.set_button_state(button_state);
 
+            // Android: keep the game region inside the safe area (system bars /
+            // display cutout) so it isn't clipped behind them. No-op elsewhere.
+            #[cfg(target_os = "android")]
+            if let Some(rs) = render_state.as_ref() {
+                let (w, h) = rs.renderer.surface_size();
+                let (l, t, r, b) = crate::android::safe_area_insets(w, h);
+                app.set_safe_insets(l, t, r, b);
+            }
+
             // Advance one presented frame (paced inside the app), play audio,
             // pump the workers.
             let step = app.run_frame();
