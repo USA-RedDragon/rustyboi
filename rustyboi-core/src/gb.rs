@@ -75,8 +75,12 @@ pub struct GB {
     skip_bios: bool,
     #[serde(skip, default)]
     breakpoints: HashSet<u16>,
+    // `+ Send` so a cloned GB (whose audio_output is always None) can be moved
+    // to a worker thread for off-thread savestate serialization with NO unsafe:
+    // GB is `Send` iff every field is, and this was the only field that wasn't.
+    // Every AudioOutput sink (platform Output, session CaptureSink) is Send.
     #[serde(skip)]
-    audio_output: Option<Box<dyn audio::AudioOutput>>,
+    audio_output: Option<Box<dyn audio::AudioOutput + Send>>,
 }
 
 impl Clone for GB {
@@ -790,7 +794,7 @@ impl GB {
     }
 
     // Audio management methods
-    pub fn enable_audio(&mut self, mut output: Box<dyn audio::AudioOutput>) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn enable_audio(&mut self, mut output: Box<dyn audio::AudioOutput + Send>) -> Result<(), Box<dyn std::error::Error>> {
         if self.audio_output.is_some() {
             // Audio already enabled
             return Ok(());

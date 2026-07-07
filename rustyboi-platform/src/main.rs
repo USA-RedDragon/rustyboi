@@ -1,8 +1,5 @@
 #![warn(clippy::all)]
-// `deny` (not `forbid`) so the rewind worker's single audited `unsafe impl
-// Send for SendGb` (see rewind_worker.rs) can opt out locally; unsafe is a hard
-// error everywhere else.
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 #[cfg(not(target_os = "android"))]
 mod audio;
