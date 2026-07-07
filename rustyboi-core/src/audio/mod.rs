@@ -1,4 +1,5 @@
 pub mod controller;
+mod envelope;
 mod noise;
 mod output;
 mod square;
