@@ -31,8 +31,11 @@ else
 fi
 
 echo
-# The emulator runs in a module Web Worker (www/worker.js); both www/index.html
-# (main thread, WebAudio only) and worker.js import the same pkg/rustyboi_web.js.
-# No separate worker wasm build — `--target web` emits one module usable by both.
+# One wasm module serves BOTH threads (`--target web` emits a single module):
+#  - the worker (www/worker.js) uses the `Emulator` export to run the Session;
+#  - the main thread (www/index.html) uses the `WebApp` export to render the
+#    egui UI over the game with wgpu's WebGL2 backend, plus `WebAudio`.
+# The wasm is larger than the old 2D-canvas build (it now bundles egui + wgpu +
+# naga); that is expected. `wasm-opt -O3 -all` above trims it.
 echo "Serve for Firefox:  (cd rustyboi-web/www && python3 -m http.server 8080)"
-echo "Then open http://localhost:8080/ and click \"Load ROM…\""
+echo "Then open http://localhost:8080/ — use the File menu (top bar) to load a ROM."
