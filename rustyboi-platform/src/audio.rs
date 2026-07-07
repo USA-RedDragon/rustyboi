@@ -21,6 +21,20 @@ impl Output {
         })
     }
 
+    /// Start the audio device. Inherent wrapper over the `AudioOutput::start`
+    /// impl so callers that feed samples directly (the session path, where the
+    /// core's sink lives in `Session`, not the `GB`) don't need the trait in
+    /// scope.
+    pub fn start_device(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        <Self as AudioOutput>::start(self)
+    }
+
+    /// Push stereo samples produced by a `Session::run_frame` call into the
+    /// output. Inherent wrapper over `AudioOutput::add_samples`.
+    pub fn push_samples(&mut self, samples: &[(f32, f32)]) {
+        <Self as AudioOutput>::add_samples(self, samples)
+    }
+
     fn flush_buffer(&mut self) {
         if let Some(sink) = &self.sink
             && !self.buffer.is_empty() {
