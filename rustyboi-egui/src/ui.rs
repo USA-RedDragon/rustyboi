@@ -73,6 +73,8 @@ pub struct Gui {
     show_tile_explorer: bool,
     show_keybind_settings: bool,
     show_breakpoint_panel: bool,
+    show_cheats_panel: bool,
+    cheat_code_input: String,
     breakpoint_address_input: String,
     pub(super) stack_scroll_offset: i16,
     pub(super) memory_explorer_address: String,
@@ -139,6 +141,8 @@ impl Gui {
             show_tile_explorer: false,
             show_keybind_settings: false,
             show_breakpoint_panel: false,
+            show_cheats_panel: false,
+            cheat_code_input: String::new(),
             breakpoint_address_input: String::from("0000"),
             stack_scroll_offset: 0,
             memory_explorer_address: String::from("0000"),
@@ -211,6 +215,9 @@ impl Gui {
             session,
         );
         self.render_debug_panels(ctx, registers, gb, &mut action, paused);
+        if self.show_cheats_panel {
+            self.render_cheats_panel(ctx, &mut action, session);
+        }
         #[cfg(target_os = "android")]
         if let Some(lib_action) = self.library.show(ctx) {
             action = Some(lib_action);
@@ -443,6 +450,7 @@ impl Gui {
                 ui.menu_button("Settings", |ui| {
                     *any_menu_open = true;
                     ui.checkbox(&mut self.show_keybind_settings, "Keybind Settings");
+                    ui.checkbox(&mut self.show_cheats_panel, command_label(ActionKind::AddCheat));
 
                     ui.separator();
                     ui.menu_button("Hardware Model", |ui| {
@@ -719,11 +727,17 @@ impl Gui {
         let unit = Self::mobile_unit(ctx);
         let row_height = unit * 0.6;
 
-        // Dimmed backdrop. Allocates a full-screen click-sense rect
-        // so taps outside the menu panel close the menu.
+        // Dimmed backdrop. Allocates a full-screen click-sense rect so taps
+        // outside the menu panel close the menu. It sits at `Order::Background`,
+        // strictly BELOW the menu window (a `Window` is `Order::Middle`) — egui
+        // routes a pointer press to the topmost layer under it, so keeping the
+        // backdrop under the window is what lets the menu buttons receive taps
+        // instead of the backdrop swallowing them. (Previously the backdrop was
+        // Foreground and the window defaulted to Middle, so the backdrop
+        // covered the window and stole every tap.)
         let mut close_requested = false;
         egui::Area::new(egui::Id::new("mobile_menu_backdrop"))
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Background)
             .fixed_pos(screen.left_top())
             .show(ctx, |ui| {
                 let (rect, resp) =
@@ -741,9 +755,10 @@ impl Gui {
         let panel_width = (screen.width() * 0.8).clamp(320.0, 640.0);
         let panel_max_height = screen.height() * 0.85;
 
-        // Menu panel. Rendered AFTER the backdrop in this frame so it
-        // paints on top of the dimming layer despite both layers being
-        // at `Order::Foreground`.
+        // Menu panel. A `Window` is always `Order::Middle` (egui 0.26 exposes
+        // no per-window order), which is strictly ABOVE the backdrop's
+        // `Order::Background`, so it paints over the dimming layer AND receives
+        // pointer taps.
         egui::Window::new("mobile_menu_window")
             .title_bar(false)
             .collapsible(false)
@@ -974,6 +989,12 @@ impl Gui {
                             "Keybind Settings",
                             &mut self.show_keybind_settings,
                         );
+                        mobile_toggle_row(
+                            ui,
+                            row_size,
+                            command_label(ActionKind::AddCheat),
+                            &mut self.show_cheats_panel,
+                        );
                         // View toggle: lets the user hide the touch
                         // overlay even on Android (useful with a Bluetooth
                         // gamepad). Session-owned; emit the toggle action.
@@ -994,6 +1015,72 @@ impl Gui {
         if close_requested {
             self.show_mobile_menu = false;
         }
+    }
+
+    /// Cheat manager: enter a Game Genie (`ABC-DEF[-GHI]`) or GameShark
+    /// (`ABCDEFGH`) code, list active cheats, remove one. Emits
+    /// [`GuiAction::AddCheat`] / [`GuiAction::RemoveCheat`]; the session decodes,
+    /// applies, and reports success/failure via the shared Status/Error path.
+    fn render_cheats_panel(
+        &mut self,
+        ctx: &Context,
+        action: &mut Option<GuiAction>,
+        session: &SessionUiState,
+    ) {
+        let mut open = self.show_cheats_panel;
+        egui::Window::new("Cheats")
+            .open(&mut open)
+            .default_width(320.0)
+            .frame(egui::Frame::window(&ctx.style()).fill(PANEL_BACKGROUND))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Code:");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.cheat_code_input)
+                            .desired_width(160.0)
+                            .hint_text("ABC-DEF-GHI")
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    // winit's android-game-activity backend doesn't raise the
+                    // soft keyboard on `set_ime_allowed`; drive it manually on
+                    // focus like the ROM library filter does.
+                    #[cfg(target_os = "android")]
+                    {
+                        if resp.gained_focus() {
+                            crate::android_bridge::set_ime_visible(true);
+                        }
+                        if resp.lost_focus() {
+                            crate::android_bridge::set_ime_visible(false);
+                        }
+                    }
+                    let submit = resp.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if (ui.button("Add").clicked() || submit)
+                        && !self.cheat_code_input.trim().is_empty()
+                    {
+                        *action =
+                            Some(GuiAction::AddCheat(self.cheat_code_input.trim().to_string()));
+                        self.cheat_code_input.clear();
+                    }
+                });
+                ui.small("Game Genie (ABC-DEF or ABC-DEF-GHI) or GameShark (8 hex digits).");
+                ui.separator();
+
+                ui.label("Active cheats:");
+                if session.cheats.is_empty() {
+                    ui.label("No cheats active");
+                } else {
+                    for code in &session.cheats {
+                        ui.horizontal(|ui| {
+                            ui.monospace(code);
+                            if ui.small_button("✕").clicked() {
+                                *action = Some(GuiAction::RemoveCheat(code.clone()));
+                            }
+                        });
+                    }
+                }
+            });
+        self.show_cheats_panel = open;
     }
 
     fn render_breakpoint_panel(&mut self, ctx: &Context, action: &mut Option<GuiAction>, gb: Option<&gb::GB>) {

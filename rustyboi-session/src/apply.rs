@@ -222,6 +222,18 @@ impl Session {
                 ActionOutcome::default()
             }
 
+            UiAction::AddCheat(code) => match self.add_cheat(&code) {
+                Ok(_) => ActionOutcome::status(format!("Cheat added: {code}")),
+                Err(e) => ActionOutcome::error(format!("Invalid cheat code '{code}': {e}")),
+            },
+            UiAction::RemoveCheat(code) => {
+                if self.remove_cheat(&code) {
+                    ActionOutcome::status(format!("Cheat removed: {code}"))
+                } else {
+                    ActionOutcome::error(format!("No such cheat: {code}"))
+                }
+            }
+
             // OS-requiring: hand off to the frontend.
             UiAction::SaveState(path) => match self.gb().to_state_bytes() {
                 Ok(bytes) => {
@@ -333,5 +345,33 @@ mod tests {
         let mut s = session();
         let out = s.apply(UiAction::Exit, 0);
         assert!(matches!(out.requests.as_slice(), [PlatformRequest::Exit]));
+    }
+
+    // A valid Game Genie code (from `rustyboi_core::cheats` tests) added via the
+    // action shows up in `cheats()` and yields a Status; an unparseable code
+    // yields an Error and adds nothing.
+    #[test]
+    fn add_cheat_action_registers_and_rejects() {
+        let mut s = session();
+
+        let out = s.apply(UiAction::AddCheat("00A-B7F".into()), 0);
+        assert!(out
+            .requests
+            .iter()
+            .any(|r| matches!(r, PlatformRequest::Status(_))));
+        assert!(s.cheats().any(|c| c == "00A-B7F"));
+
+        let bad = s.apply(UiAction::AddCheat("nope".into()), 0);
+        assert!(bad
+            .requests
+            .iter()
+            .any(|r| matches!(r, PlatformRequest::Error(_))));
+
+        let removed = s.apply(UiAction::RemoveCheat("00A-B7F".into()), 0);
+        assert!(removed
+            .requests
+            .iter()
+            .any(|r| matches!(r, PlatformRequest::Status(_))));
+        assert!(s.cheats().next().is_none());
     }
 }
