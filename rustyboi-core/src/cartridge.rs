@@ -217,7 +217,7 @@ pub enum CartridgeType {
     MBC1 { ram: bool, battery: bool },
     MBC2 { battery: bool },
     MBC3 { ram: bool, battery: bool, timer: bool },
-    MBC5 { ram: bool, battery: bool, _rumble: bool },
+    MBC5 { ram: bool, battery: bool, rumble: bool },
     MBC7,
     HuC1,
     HuC3,
@@ -1366,12 +1366,12 @@ impl Cartridge {
             MBC3 => CartridgeType::MBC3 { ram: false, battery: false, timer: false },
             MBC3_RAM => CartridgeType::MBC3 { ram: true, battery: false, timer: false },
             MBC3_RAM_BATTERY => CartridgeType::MBC3 { ram: true, battery: true, timer: false },
-            MBC5 => CartridgeType::MBC5 { ram: false, battery: false, _rumble: false },
-            MBC5_RAM => CartridgeType::MBC5 { ram: true, battery: false, _rumble: false },
-            MBC5_RAM_BATTERY => CartridgeType::MBC5 { ram: true, battery: true, _rumble: false },
-            MBC5_RUMBLE => CartridgeType::MBC5 { ram: false, battery: false, _rumble: true },
-            MBC5_RUMBLE_RAM => CartridgeType::MBC5 { ram: true, battery: false, _rumble: true },
-            MBC5_RUMBLE_RAM_BATTERY => CartridgeType::MBC5 { ram: true, battery: true, _rumble: true },
+            MBC5 => CartridgeType::MBC5 { ram: false, battery: false, rumble: false },
+            MBC5_RAM => CartridgeType::MBC5 { ram: true, battery: false, rumble: false },
+            MBC5_RAM_BATTERY => CartridgeType::MBC5 { ram: true, battery: true, rumble: false },
+            MBC5_RUMBLE => CartridgeType::MBC5 { ram: false, battery: false, rumble: true },
+            MBC5_RUMBLE_RAM => CartridgeType::MBC5 { ram: true, battery: false, rumble: true },
+            MBC5_RUMBLE_RAM_BATTERY => CartridgeType::MBC5 { ram: true, battery: true, rumble: true },
             MBC7_SENSOR_RUMBLE_RAM_BATTERY => CartridgeType::MBC7,
             HUC1_RAM_BATTERY => CartridgeType::HuC1,
             HUC3 => CartridgeType::HuC3,
@@ -3157,7 +3157,7 @@ impl Cartridge {
 
     /// True for MBC5 rumble cartridges.
     pub fn has_rumble(&self) -> bool {
-        matches!(self.get_cartridge_type(), CartridgeType::MBC5 { _rumble: true, .. })
+        matches!(self.get_cartridge_type(), CartridgeType::MBC5 { rumble: true, .. })
     }
 
     /// Current state of the rumble motor (bit 3 of the last RAM-bank write on
@@ -3711,8 +3711,8 @@ impl memory::Addressable for Cartridge {
                         // 0x08 (rtc-invalid-banks-test relies on this masking).
                         self.mbc3_ram_bank = value & 0x0F;
                     }
-                    CartridgeType::MBC5 { _rumble, .. } => {
-                        if _rumble {
+                    CartridgeType::MBC5 { rumble, .. } => {
+                        if rumble {
                             // On rumble carts bit 3 drives the motor; only the
                             // low 3 bits select the RAM bank.
                             self.rumble_motor = (value & 0x08) != 0;
