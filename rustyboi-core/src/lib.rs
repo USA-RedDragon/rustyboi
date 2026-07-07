@@ -7,6 +7,7 @@ pub mod dmg07;
 pub mod input;
 pub mod ir;
 pub mod memory;
+pub mod mobile;
 pub mod ppu;
 pub mod printer;
 pub mod serial;
