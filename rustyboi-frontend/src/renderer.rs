@@ -146,6 +146,9 @@ pub struct EguiPaint {
     pub jobs: Vec<ClippedPrimitive>,
     pub textures: TexturesDelta,
     pub pixels_per_point: f32,
+    /// The UI is byte-identical to last frame: the renderer skips egui's
+    /// texture/vertex upload and redraws its cached jobs (`jobs` is empty here).
+    pub reuse: bool,
 }
 
 /// Owns the wgpu surface + device + queue and every GPU object needed to draw
@@ -170,6 +173,9 @@ pub struct Renderer {
     /// display's requestAnimationFrame, so refreshes routinely land with no new
     /// frame and would otherwise flash the game area black.
     has_game: bool,
+    /// Last frame's egui geometry, redrawn on `reuse` frames (unchanged UI) so
+    /// the per-frame vertex/index upload can be skipped.
+    egui_jobs: Vec<ClippedPrimitive>,
 
     egui_renderer: egui_wgpu::Renderer,
 }
@@ -351,6 +357,7 @@ impl Renderer {
             render_pipeline,
             clear_color: wgpu::Color::BLACK,
             has_game: false,
+            egui_jobs: Vec::new(),
             egui_renderer,
         }
     }
@@ -467,21 +474,29 @@ impl Renderer {
         }
 
         // --- egui pass: composite the UI on top ----------------------------
+        // When `reuse` is set the UI is unchanged since last frame: skip the
+        // texture + vertex/index uploads (egui-wgpu's buffers still hold last
+        // frame's geometry) and just redraw the cached jobs. The game underneath
+        // still redraws every frame, so only egui's per-frame upload is elided.
+        let EguiPaint { jobs, textures, pixels_per_point, reuse } = egui;
         let screen_descriptor = ScreenDescriptor {
             size_in_pixels: [self.config.width, self.config.height],
-            pixels_per_point: egui.pixels_per_point,
+            pixels_per_point,
         };
-        for (id, image_delta) in &egui.textures.set {
-            self.egui_renderer
-                .update_texture(&self.device, &self.queue, *id, image_delta);
+        if !reuse {
+            for (id, image_delta) in &textures.set {
+                self.egui_renderer
+                    .update_texture(&self.device, &self.queue, *id, image_delta);
+            }
+            self.egui_renderer.update_buffers(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &jobs,
+                &screen_descriptor,
+            );
+            self.egui_jobs = jobs;
         }
-        self.egui_renderer.update_buffers(
-            &self.device,
-            &self.queue,
-            &mut encoder,
-            &egui.jobs,
-            &screen_descriptor,
-        );
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("rustyboi_egui_pass"),
@@ -498,14 +513,16 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             self.egui_renderer
-                .render(&mut rpass, &egui.jobs, &screen_descriptor);
+                .render(&mut rpass, &self.egui_jobs, &screen_descriptor);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
-        for id in &egui.textures.free {
-            self.egui_renderer.free_texture(id);
+        if !reuse {
+            for id in &textures.free {
+                self.egui_renderer.free_texture(id);
+            }
         }
         Ok(())
     }

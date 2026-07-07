@@ -55,6 +55,10 @@ struct Shared {
     status: Option<String>,
     /// Whether a `clear_error` was requested.
     clear_error: bool,
+    /// Something changed the UI (new session snapshot / status / error) since the
+    /// last render, so egui must re-run — see the repaint gating in `draw`. Frame
+    /// arrivals do NOT set this (the game texture is uploaded separately).
+    ui_dirty: bool,
 
     /// Last GB button bitmask posted to the worker (dedupe: only post changes).
     last_input_mask: u8,
@@ -88,6 +92,7 @@ impl Shared {
             error: None,
             status: None,
             clear_error: false,
+            ui_dirty: true,
             last_input_mask: 0,
             post_action,
             post_input,
@@ -147,23 +152,31 @@ impl WebApp {
     /// the egui menus/cheats/settings reflect live session state.
     pub fn on_ui_state(&self, json: &str) {
         if let Ok(state) = serde_json::from_str::<crate::web_action::WebUiState>(json) {
-            self.shared.borrow_mut().ui_state = state.into_session();
+            let mut s = self.shared.borrow_mut();
+            s.ui_state = state.into_session();
+            s.ui_dirty = true;
         }
     }
 
     /// Surface a status line in the UI.
     pub fn on_status(&self, msg: String) {
-        self.shared.borrow_mut().status = Some(msg);
+        let mut s = self.shared.borrow_mut();
+        s.status = Some(msg);
+        s.ui_dirty = true;
     }
 
     /// Surface an error overlay in the UI.
     pub fn on_error(&self, msg: String) {
-        self.shared.borrow_mut().error = Some(msg);
+        let mut s = self.shared.borrow_mut();
+        s.error = Some(msg);
+        s.ui_dirty = true;
     }
 
     /// Clear the error overlay (a load succeeded / the error was dismissed).
     pub fn clear_error(&self) {
-        self.shared.borrow_mut().clear_error = true;
+        let mut s = self.shared.borrow_mut();
+        s.clear_error = true;
+        s.ui_dirty = true;
     }
 
     /// Create the canvas + wgpu WebGL2 surface, build the renderer/UI, and spawn
@@ -380,10 +393,11 @@ fn draw(
 ) {
     // Pull the shared inputs for this frame, releasing the borrow before running
     // egui (the rfd file-picker callback can re-enter `shared` via JS).
-    let (ui_state, error, status, clear_err): (
+    let (ui_state, error, status, clear_err, force_repaint): (
         SessionUiState,
         Option<String>,
         Option<String>,
+        bool,
         bool,
     ) = {
         let mut s = shared.borrow_mut();
@@ -399,6 +413,7 @@ fn draw(
             s.error.take(),
             s.status.take(),
             std::mem::take(&mut s.clear_error),
+            std::mem::take(&mut s.ui_dirty),
         )
     };
 
@@ -415,7 +430,7 @@ fn draw(
     // The web UI never shows a debug &GB (Phase B); pass None for registers/gb.
     // "paused" is presentation-only here (auto-pause lives in the worker's run
     // loop, driven by TogglePause); pass false so the UI isn't stuck dimmed.
-    let (paint, ui_frame) = ui.run(window, false, None, None, &ui_state, Vec::new());
+    let (paint, ui_frame) = ui.run(window, false, None, None, &ui_state, Vec::new(), force_repaint);
 
     // Dispatch the action egui emitted.
     if let Some(action) = ui_frame.action {

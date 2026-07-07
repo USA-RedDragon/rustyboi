@@ -30,6 +30,14 @@ pub struct UiHost {
     egui_state: egui_winit::State,
     pixels_per_point: f32,
     gui: Gui,
+    /// Repaint-gating state (see `run`). `pending_repaint` carries egui's own
+    /// "animate me another frame" request forward; the `cached_*` values are the
+    /// last laid-out frame's metadata, returned when the UI is reused.
+    pending_repaint: bool,
+    have_cache: bool,
+    cached_ppp: f32,
+    cached_region: PhysicalRect,
+    cached_menu_open: bool,
 }
 
 /// One laid-out egui frame's UI result: the action to apply, whether a menu is
@@ -65,7 +73,17 @@ impl UiHost {
             Some(arc) => Gui::with_pending_dialog_result(arc),
             None => Gui::new(),
         };
-        Self { egui_ctx, egui_state, pixels_per_point, gui }
+        Self {
+            egui_ctx,
+            egui_state,
+            pixels_per_point,
+            gui,
+            pending_repaint: false,
+            have_cache: false,
+            cached_ppp: pixels_per_point,
+            cached_region: PhysicalRect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+            cached_menu_open: false,
+        }
     }
 
     /// Clone of the pending-dialog Arc so a caller can keep it alive across a
@@ -127,9 +145,35 @@ impl UiHost {
         gb: Option<&gb::GB>,
         session: &SessionUiState,
         extra_events: ExtraEvents,
+        force_repaint: bool,
     ) -> (EguiPaint, UiFrame) {
         let mut raw_input = self.egui_state.take_egui_input(window);
         raw_input.events.extend(extra_events);
+
+        // Repaint gating: when nothing can have changed the UI this frame — no
+        // input events, egui isn't animating (no pending repaint), and the caller
+        // didn't force it — reuse last frame's egui geometry so the renderer can
+        // skip egui's per-frame vertex/texture upload. The game texture is
+        // uploaded + drawn separately, so it still animates every frame. The
+        // caller passes `force_repaint` for anything egui can't see (a fresh
+        // session snapshot, status/error text); desktop passes `true` (no gating).
+        let dirty =
+            force_repaint || !raw_input.events.is_empty() || self.pending_repaint || !self.have_cache;
+        if !dirty {
+            return (
+                EguiPaint {
+                    jobs: Vec::new(),
+                    textures: egui::TexturesDelta::default(),
+                    pixels_per_point: self.cached_ppp,
+                    reuse: true,
+                },
+                UiFrame {
+                    action: None,
+                    menu_open: self.cached_menu_open,
+                    region: self.cached_region,
+                },
+            );
+        }
 
         let mut ui_result = None;
         let full_output = self.egui_ctx.run(raw_input, |egui_ctx| {
@@ -138,6 +182,7 @@ impl UiHost {
 
         self.egui_state
             .handle_platform_output(window, full_output.platform_output);
+        self.pending_repaint = self.egui_ctx.has_requested_repaint();
 
         // Use egui's *authoritative* pixels-per-point for both tessellation and
         // the renderer's ScreenDescriptor. egui-winit keeps this in sync with the
@@ -153,6 +198,7 @@ impl UiHost {
             jobs,
             textures: full_output.textures_delta,
             pixels_per_point: ppp,
+            reuse: false,
         };
 
         let frame = match ui_result {
@@ -160,16 +206,18 @@ impl UiHost {
                 // egui reports the central region in logical points; convert to
                 // physical pixels for the renderer's scissor/viewport.
                 let c = out.central_rect;
-                UiFrame {
-                    action: out.action,
-                    menu_open: out.menu_open,
-                    region: PhysicalRect {
-                        x: c.x * ppp,
-                        y: c.y * ppp,
-                        width: c.width * ppp,
-                        height: c.height * ppp,
-                    },
-                }
+                let region = PhysicalRect {
+                    x: c.x * ppp,
+                    y: c.y * ppp,
+                    width: c.width * ppp,
+                    height: c.height * ppp,
+                };
+                // Cache for reuse frames.
+                self.cached_region = region;
+                self.cached_menu_open = out.menu_open;
+                self.cached_ppp = ppp;
+                self.have_cache = true;
+                UiFrame { action: out.action, menu_open: out.menu_open, region }
             }
             None => UiFrame {
                 action: None,
