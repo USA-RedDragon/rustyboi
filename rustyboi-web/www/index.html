@@ -56,8 +56,16 @@
     // emits a Resized event that reconfigures the wgpu surface.
     function sizeCanvas(canvas) {
       const dpr = window.devicePixelRatio || 1;
-      let w = Math.max(1, Math.round(window.innerWidth * dpr));
-      let h = Math.max(1, Math.round(window.innerHeight * dpr));
+      // Use the canvas's own laid-out size (its CSS is 100vw/100vh normally, but
+      // the browser overrides it to screen size in element-fullscreen). Reading
+      // window.inner* instead left the backing store wrong after exiting
+      // fullscreen (the window size never changed for element-fullscreen), so
+      // egui's layout was stale and the menu bar fell off-screen. Fall back to
+      // the window if the canvas isn't laid out yet.
+      const cw = canvas.clientWidth || window.innerWidth;
+      const ch = canvas.clientHeight || window.innerHeight;
+      let w = Math.max(1, Math.round(cw * dpr));
+      let h = Math.max(1, Math.round(ch * dpr));
       // Cap the render (backing-store) resolution. wgpu-WebGL2 fragment cost
       // scales with pixel count, and a maximized hi-DPI window (millions of px)
       // tanked fps. The GB screen is 160x144 pixel-art that upscales fine, so a
@@ -199,6 +207,13 @@
 
       // Keep the canvas backing store matched to the viewport on resize.
       window.addEventListener("resize", () => sizeCanvas(canvas));
+      // Re-sync the backing store when entering/exiting fullscreen (the window
+      // doesn't resize for element-fullscreen). Defer one tick so the canvas has
+      // its post-transition layout size, and again to catch late reflows.
+      document.addEventListener("fullscreenchange", () => {
+        sizeCanvas(canvas);
+        requestAnimationFrame(() => sizeCanvas(canvas));
+      });
 
       // WebAudio must be resumed inside a user gesture. Resume on the first
       // interaction anywhere (click/key/touch), then stop listening.
