@@ -132,7 +132,15 @@ impl UiHost {
         self.egui_state
             .handle_platform_output(window, full_output.platform_output);
 
-        let ppp = self.pixels_per_point;
+        // Use egui's *authoritative* pixels-per-point for both tessellation and
+        // the renderer's ScreenDescriptor. egui-winit keeps this in sync with the
+        // window's DPI (`take_egui_input` feeds the viewport's native ppp; DPI
+        // changes arrive as window events), so it is always correct for the
+        // frame we just laid out. Our own `self.pixels_per_point` was seeded once
+        // at construction and only refreshed on `ScaleFactorChanged` — using it
+        // here caused a layout/raster mismatch (glyphs too wide + aliased) when
+        // the two drifted. Keep the field only to seed the constructor.
+        let ppp = self.egui_ctx.pixels_per_point();
         let jobs = self.egui_ctx.tessellate(full_output.shapes, ppp);
         let paint = EguiPaint {
             jobs,
