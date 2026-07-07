@@ -408,6 +408,8 @@ impl Emulator {
             rewind_enabled: self.session.config().rewind.enabled,
             rewind_interval_frames: self.session.config().rewind.interval_frames,
             rewind_depth: self.session.config().rewind.depth,
+            volume: self.session.volume(),
+            scaling: self.session.scaling_mode(),
             sgb_border: self.session.sgb_border(),
             fast_forward: self.session.is_fast_forward(),
             touch_controls: self.session.touch_controls(),
@@ -479,6 +481,10 @@ fn requests_to_js(requests: &[PlatformRequest]) -> Array {
         };
         match req {
             PlatformRequest::Exit => continue, // no-op on web
+            // Fullscreen is handled on the main thread (canvas Fullscreen API); a
+            // web `WebAction` never lowers it to the worker, so it never reaches
+            // here — drop it defensively.
+            PlatformRequest::ToggleFullscreen => continue,
             PlatformRequest::Status(msg) => {
                 set("type", "Status".into());
                 set("msg", msg.as_str().into());

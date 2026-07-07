@@ -5,7 +5,7 @@ use rustyboi_session::{DebugDetail, DebugSnapshot};
 use std::env;
 use std::sync::{Arc, Mutex};
 use egui::Context;
-use crate::actions::{ActionKind, GuiAction, SessionUiState, COMMANDS};
+use crate::actions::{ActionKind, GuiAction, ScalingMode, SessionUiState, COMMANDS};
 // Hardware / palette pickers live only in the desktop Settings menu bar.
 #[cfg(not(target_os = "android"))]
 use crate::actions::{HardwareChoice, PaletteChoice};
@@ -611,6 +611,26 @@ impl Gui {
                             }
                         }
                     });
+
+                    ui.menu_button("Scaling", |ui| {
+                        for (mode, label) in [
+                            (ScalingMode::FitAspect, "Fit (keep aspect)"),
+                            (ScalingMode::IntegerAspect, "Integer (keep aspect)"),
+                            (ScalingMode::Stretch, "Stretch (fill)"),
+                        ] {
+                            let selected = session.scaling == mode;
+                            if ui.radio(selected, label).clicked() && !selected {
+                                *action = Some(GuiAction::SetScalingMode(mode));
+                            }
+                        }
+                    });
+
+                    ui.separator();
+                    ui.label("Volume");
+                    let mut vol = session.volume;
+                    if ui.add(egui::Slider::new(&mut vol, 0..=100)).changed() {
+                        *action = Some(GuiAction::SetVolume(vol));
+                    }
                 });
 
                 ui.menu_button("View", |ui| {
@@ -620,6 +640,10 @@ impl Gui {
                     let mut on = session.touch_controls;
                     if ui.checkbox(&mut on, command_label(ActionKind::ToggleTouchControls)).clicked() {
                         *action = Some(GuiAction::ToggleTouchControls);
+                        ui.close_menu();
+                    }
+                    if ui.button("Toggle Fullscreen").clicked() {
+                        *action = Some(GuiAction::ToggleFullscreen);
                         ui.close_menu();
                     }
                 });
@@ -1168,6 +1192,24 @@ impl Gui {
                             if on != session.touch_controls {
                                 *action = Some(GuiAction::ToggleTouchControls);
                             }
+                        }
+
+                        ui.label("Scaling");
+                        for (mode, label) in [
+                            (ScalingMode::FitAspect, "Fit (keep aspect)"),
+                            (ScalingMode::IntegerAspect, "Integer (keep aspect)"),
+                            (ScalingMode::Stretch, "Stretch (fill)"),
+                        ] {
+                            let selected = session.scaling == mode;
+                            if ui.radio(selected, label).clicked() && !selected {
+                                *action = Some(GuiAction::SetScalingMode(mode));
+                            }
+                        }
+
+                        ui.label("Volume");
+                        let mut vol = session.volume;
+                        if ui.add(egui::Slider::new(&mut vol, 0..=100)).changed() {
+                            *action = Some(GuiAction::SetVolume(vol));
                         }
 
                         if close_after_action {

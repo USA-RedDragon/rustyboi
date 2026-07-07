@@ -43,6 +43,10 @@ pub enum PlatformRequest {
     Error(String),
     /// Clear any UI error overlay (a load succeeded / error was dismissed).
     ClearError,
+    /// Toggle host fullscreen. Serviced by the windowed frontend's
+    /// [`Frontend::toggle_fullscreen`](crate::apply::PlatformRequest): desktop
+    /// flips the winit window, web the canvas Fullscreen API, Android no-ops.
+    ToggleFullscreen,
     /// An Android ROM-library / SAF action the session can't service itself (it
     /// needs the JNI bridge + library panel, both host-owned).
     #[cfg(target_os = "android")]
@@ -229,6 +233,18 @@ impl Session {
                 self.set_rewind_depth(depth);
                 ActionOutcome::default()
             }
+            UiAction::SetVolume(volume) => {
+                self.set_volume(volume);
+                ActionOutcome::default()
+            }
+            UiAction::SetScalingMode(scaling) => {
+                self.set_scaling_mode(scaling);
+                ActionOutcome::default()
+            }
+            UiAction::ToggleFullscreen => ActionOutcome {
+                requests: vec![PlatformRequest::ToggleFullscreen],
+                pause_changed: false,
+            },
 
             UiAction::AddCheat(code) => match self.add_cheat(&code) {
                 Ok(_) => ActionOutcome::status(format!("Cheat added: {code}")),
@@ -363,6 +379,9 @@ mod tests {
             SetRewindEnabled(false),
             SetRewindInterval(4),
             SetRewindDepth(30),
+            SetVolume(50),
+            SetScalingMode(crate::action::ScalingMode::IntegerAspect),
+            ToggleFullscreen,
         ];
         let mut s = session();
         for a in actions {

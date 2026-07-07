@@ -18,7 +18,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::EventLoop;
 use winit::keyboard::KeyCode;
-use winit::window::{Window, WindowBuilder};
+use winit::window::{Fullscreen, Window, WindowBuilder};
 use winit_input_helper::WinitInputHelper;
 
 #[cfg(target_arch = "wasm32")]
@@ -372,6 +372,10 @@ fn run_gui_loop(
     let mut f_last_repeat_time: Option<Instant> = None;
     let mut n_last_repeat_time: Option<Instant> = None;
 
+    // Tracks whether the borderless-fullscreen toggle is currently on.
+    #[cfg(not(target_os = "android"))]
+    let mut is_fullscreen = false;
+
     let res = event_loop.run(|event, elwt| {
         match &event {
             Event::Resumed => {
@@ -641,6 +645,15 @@ fn run_gui_loop(
                         PlatformRequest::Exit => {
                             elwt.exit();
                             return;
+                        }
+                        PlatformRequest::ToggleFullscreen => {
+                            #[cfg(not(target_os = "android"))]
+                            {
+                                is_fullscreen = !is_fullscreen;
+                                window.set_fullscreen(
+                                    is_fullscreen.then(|| Fullscreen::Borderless(None)),
+                                );
+                            }
                         }
                         PlatformRequest::ResizeContent { width, height } => {
                             // Just record the new content size; the continuous
