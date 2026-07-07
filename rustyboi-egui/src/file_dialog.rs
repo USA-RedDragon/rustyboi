@@ -11,7 +11,10 @@ pub trait FileDialogBuilder {
     #[allow(dead_code)]
     fn set_directory<P: AsRef<std::path::Path>>(self, path: P) -> Self;
 
-    /// Set the default filename for save dialogs
+    /// Set the default filename for save dialogs. Unused since save/load state
+    /// moved to the cross-platform Import/Export path (SaveBytes), kept for the
+    /// dialog abstraction.
+    #[allow(dead_code)]
     fn set_file_name<S: AsRef<str>>(self, name: S) -> Self;
 
     /// Show the file picker dialog and execute callback with result
@@ -19,7 +22,9 @@ pub trait FileDialogBuilder {
     where
         F: FnOnce(Option<FileData>) + Send + 'static;
 
-    /// Show the save file dialog and execute callback with result
+    /// Show the save file dialog and execute callback with result. Unused since
+    /// exports route through `SaveBytes` (rfd `save_file` can't write on web).
+    #[allow(dead_code)]
     fn save_file<F>(self, callback: F)
     where
         F: FnOnce(Option<PathBuf>) + Send + 'static;
