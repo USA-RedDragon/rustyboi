@@ -159,7 +159,6 @@ fn lyc_blocked_by_m2_or_m1(ly: u32, stat: u8) -> bool {
 }
 
 impl LycIrq {
-    #[allow(dead_code)]
     pub fn set_cgb(&mut self, cgb: bool) {
         self.cgb = cgb;
     }
