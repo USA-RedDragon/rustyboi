@@ -406,7 +406,10 @@ fn print_histogram(rendered: &[&GameResult]) {
 fn write_csv(path: &Path, results: &[GameResult]) {
     let mut s = String::new();
     s.push_str("name,hardware,ok,error,total_visible_lines,dirty_lines,dirty_pct,ever_dirty,");
-    s.push_str("LCDC,SCY,SCX,BGP,OBP0,OBP1,WX,BCPD_blocked_lines,OCPD_blocked_lines,palette_blocked_events\n");
+    // Per-reg columns are EFFECTIVE dirty-line counts (a line counted once per
+    // reg). For BCPD/OCPD these are the rare non-blocked cases; the separate
+    // palette_blocked_events column holds the (dropped) mid-m3 palette writes.
+    s.push_str("LCDC,SCY,SCX,BGP,OBP0,OBP1,WX,BCPD_eff,OCPD_eff,palette_blocked_events\n");
     for r in results {
         s.push_str(&format!(
             "{},{},{},{},{},{},{:.4},{},{},{},{},{},{},{},{},{},{},{}\n",
