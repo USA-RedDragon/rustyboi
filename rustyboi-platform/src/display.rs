@@ -18,7 +18,10 @@ use winit::dpi::LogicalSize;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::EventLoop;
 use winit::keyboard::KeyCode;
-use winit::window::{Fullscreen, Window, WindowBuilder};
+use winit::window::{Window, WindowBuilder};
+// Fullscreen is only toggled on desktop (the Android window is already fullscreen).
+#[cfg(not(target_os = "android"))]
+use winit::window::Fullscreen;
 use winit_input_helper::WinitInputHelper;
 
 #[cfg(target_arch = "wasm32")]
