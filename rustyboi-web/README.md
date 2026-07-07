@@ -20,22 +20,30 @@ startup and mirrored back on every write. The session stays WASM-clean.
 
 ## Build
 
-Prerequisites (already present in this repo's dev env):
+Prerequisites:
 
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install wasm-pack          # or wasm-bindgen-cli
+sudo pacman -S binaryen          # a CURRENT wasm-opt (see note below)
 ```
 
 Build the wasm module + JS bindings into `www/pkg/`:
 
 ```bash
-# from the workspace root
-wasm-pack build rustyboi-web --target web --out-dir www/pkg --release
-# (use --dev instead of --release for a faster, unoptimized build)
+# from the workspace root — builds + optimizes with a modern wasm-opt
+tools/build-web.sh
 ```
 
-The raw cargo gate (no bindings) also works:
+> **Why the script, not bare `wasm-pack build`?** wasm-pack bundles an ancient
+> `wasm-opt` that can't validate the post-MVP wasm features LLVM emits
+> (bulk-memory `memory.copy`/`fill`, sign-ext, …) — it fails even with
+> `--enable-*` flags. So `wasm-opt` is disabled in `Cargo.toml` and the script
+> runs a current binaryen `wasm-opt -O3 -all` (`-all` = enable all features,
+> required even on the latest binaryen). Bare `wasm-pack build` still works but
+> ships an un-optimized module.
+
+The raw cargo gate (no bindings, no optimization) also works:
 
 ```bash
 cargo build -p rustyboi-web --target wasm32-unknown-unknown
