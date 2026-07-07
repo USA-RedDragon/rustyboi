@@ -17,6 +17,7 @@
 //! place (the patch lives in `rom_data`), so it takes effect on the next ROM
 //! (re)load — documented, not silently wrong.
 
+use rustyboi_core_lib::cheats::{decode_game_genie_nibbles, decode_gameshark_nibbles};
 use rustyboi_core_lib::gb::GB;
 use serde::{Deserialize, Serialize};
 
@@ -65,46 +66,23 @@ impl Cheat {
             .map(|c| c.to_digit(16).map(|d| d as u8).ok_or(CheatError::BadHexDigit))
             .collect::<Result<_, _>>()?;
 
+        // Decoding is delegated to the single canonical implementation in
+        // `rustyboi_core_lib::cheats`, shared with the libretro frontend.
         match hex.len() {
-            6 | 9 => Ok(Self::parse_game_genie(&hex)),
-            8 => Ok(Self::parse_gameshark(&hex)),
+            6 | 9 => {
+                let gg = decode_game_genie_nibbles(&hex).ok_or(CheatError::BadFormat)?;
+                Ok(Cheat::GameGenie {
+                    addr: gg.addr,
+                    value: gg.value,
+                    compare: gg.compare,
+                })
+            }
+            8 => {
+                let gs = decode_gameshark_nibbles(&hex).ok_or(CheatError::BadFormat)?;
+                Ok(Cheat::GameShark { addr: gs.addr, value: gs.value })
+            }
             _ => Err(CheatError::BadFormat),
         }
-    }
-
-    /// Decode a Game Genie code from its hex nibbles.
-    ///
-    /// Layout (nibble indices): `0 1 = value`; `3 4 5 2 = address` with the
-    /// high nibble (index 2) XORed into place last; a 9-nibble code adds a
-    /// compare byte at nibbles `6 8` (each rotated right by 2 bits) XOR 0xBA.
-    /// This matches the standard GB Game Genie encoding.
-    fn parse_game_genie(n: &[u8]) -> Cheat {
-        let value = (n[0] << 4) | n[1];
-        // Address: nibbles 5,2,3,4 form 0x?XYZ where the top nibble (n[2]) is
-        // XORed with 0xF. Standard layout: addr = n[5..] combine.
-        let addr = ((n[3] as u16) << 8)
-            | ((n[4] as u16) << 4)
-            | (n[5] as u16)
-            | (((n[2] ^ 0xF) as u16) << 12);
-        let compare = if n.len() == 9 {
-            let raw = (n[6] << 4) | n[8];
-            // Rotate right by 2 and XOR with 0xBA (GB Game Genie compare enc.).
-            Some((raw.rotate_right(2)) ^ 0xBA)
-        } else {
-            None
-        };
-        Cheat::GameGenie { addr, value, compare }
-    }
-
-    /// Decode a GameShark code: `AB CD EF GH` -> bank `AB` (ignored by the flat
-    /// bus write), value `CD`, address `GHEF` (little-endian).
-    fn parse_gameshark(n: &[u8]) -> Cheat {
-        let value = (n[2] << 4) | n[3];
-        let addr = ((n[6] as u16) << 12)
-            | ((n[7] as u16) << 8)
-            | ((n[4] as u16) << 4)
-            | (n[5] as u16);
-        Cheat::GameShark { addr, value }
     }
 }
 
