@@ -323,7 +323,9 @@
       // --- Keyboard input → worker (session applies remap) ---
       window.addEventListener("keydown", (e) => {
         if (e.repeat) {
-          if (isGameKey(e.code)) e.preventDefault();
+          // Swallow repeats for every key we handle — including Tab/F5/F8, else
+          // held-Tab fast-forward lets the browser's default Tab focus-walk fire.
+          if (isGameKey(e.code) || ["Tab", "F5", "F8", "KeyP"].includes(e.code)) e.preventDefault();
           return;
         }
         switch (e.code) {
