@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>rustyboi — web</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #14161a;
+      color: #e6e8eb;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+      padding: 1.5rem;
+    }
+    h1 { font-size: 1.1rem; font-weight: 600; margin: 0; letter-spacing: 0.02em; }
+    /* GB screen is 160x144; scale up with nearest-neighbour so pixels stay crisp. */
+    #screen {
+      width: 480px;   /* 3x */
+      height: 432px;  /* 3x */
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      background: #000;
+      border: 1px solid #2a2e35;
+      border-radius: 4px;
+    }
+    .controls { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; justify-content: center; }
+    button, label.file, select {
+      background: #23272e;
+      color: #e6e8eb;
+      border: 1px solid #333941;
+      border-radius: 4px;
+      padding: 0.4rem 0.7rem;
+      font-size: 0.85rem;
+      cursor: pointer;
+    }
+    button:hover, label.file:hover { background: #2c313a; }
+    input[type=file] { display: none; }
+    #status { font-size: 0.8rem; color: #9aa2ad; min-height: 1.2em; }
+    .keys { font-size: 0.75rem; color: #7d8590; max-width: 480px; text-align: center; line-height: 1.5; }
+    .keys code { background: #23272e; padding: 0.05rem 0.35rem; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>rustyboi — Game Boy / Color (web)</h1>
+  <canvas id="screen" width="160" height="144"></canvas>
+
+  <div class="controls">
+    <label class="file">
+      Load ROM…
+      <input id="rom" type="file" accept=".gb,.gbc,.bin,.rom" />
+    </label>
+    <select id="hardware" title="Hardware model (applies on next ROM load)">
+      <option value="cgb">CGB</option>
+      <option value="dmg">DMG</option>
+    </select>
+    <button id="pause">Pause</button>
+    <button id="save">Save (slot 0)</button>
+    <button id="load">Load (slot 0)</button>
+  </div>
+
+  <div id="status">Loading emulator…</div>
+
+  <div class="keys">
+    Controls: <code>←↑↓→</code> D-pad · <code>X</code> A · <code>Z</code> B ·
+    <code>Enter</code> Start · <code>Shift</code> Select · <code>P</code> pause ·
+    <code>Tab</code> (hold) fast-forward
+  </div>
+
+  <script type="module">
+    import init, { Emulator } from "./pkg/rustyboi_web.js";
+
+    // Target Game Boy frame rate. The DMG/CGB LCD refresh is ~59.7275 Hz.
+    const GB_FPS = 59.7275;
+    const FRAME_MS = 1000 / GB_FPS;
+    // Cap catch-up so a long stall (backgrounded tab) doesn't run a huge burst.
+    const MAX_FRAMES_PER_TICK = 4;
+
+    const statusEl = document.getElementById("status");
+    const setStatus = (msg) => { statusEl.textContent = msg; };
+
+    async function main() {
+      await init();
+      const emu = await Emulator.create("screen");
+      setStatus("Ready — load a ROM to start.");
+
+      // --- ROM loading (Firefox-safe: <input type=file>, no FS Access API) ---
+      document.getElementById("rom").addEventListener("change", async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const buf = new Uint8Array(await file.arrayBuffer());
+        try {
+          emu.load_rom(buf);   // also resumes AudioContext (user gesture)
+          setStatus(`Running: ${file.name}`);
+        } catch (err) {
+          setStatus(`Load failed: ${err}`);
+        }
+      });
+
+      // --- Hardware model ---
+      document.getElementById("hardware").addEventListener("change", (e) => {
+        try { emu.set_hardware(e.target.value); } catch (err) { setStatus(`${err}`); }
+      });
+
+      // --- Save / load state (slot 0) ---
+      document.getElementById("save").addEventListener("click", () => {
+        try { emu.save_slot(0, Date.now()); setStatus("Saved slot 0."); }
+        catch (err) { setStatus(`Save failed: ${err}`); }
+      });
+      document.getElementById("load").addEventListener("click", () => {
+        try { emu.load_slot(0); setStatus("Loaded slot 0."); }
+        catch (err) { setStatus(`Load failed: ${err}`); }
+      });
+
+      // --- Pause ---
+      document.getElementById("pause").addEventListener("click", () => emu.toggle_pause());
+
+      // --- Keyboard input → abstract buttons (session applies remap) ---
+      window.addEventListener("keydown", (e) => {
+        if (e.code === "KeyP") { emu.toggle_pause(); return; }
+        if (e.code === "Tab") { e.preventDefault(); emu.set_fast_forward(true); return; }
+        emu.set_button(e.code, true);
+        // Stop the browser scrolling/activating on GB keys.
+        if (isGameKey(e.code)) e.preventDefault();
+      });
+      window.addEventListener("keyup", (e) => {
+        if (e.code === "Tab") { emu.set_fast_forward(false); return; }
+        emu.set_button(e.code, false);
+      });
+      // Drop all held keys if the page loses focus (avoids stuck buttons).
+      window.addEventListener("blur", () => emu.clear_input());
+
+      // --- Main loop: run frames to keep GB pace, present + pump audio. ---
+      let last = performance.now();
+      let acc = 0;
+      function tick(now) {
+        acc += now - last;
+        last = now;
+        let ran = 0;
+        while (acc >= FRAME_MS && ran < MAX_FRAMES_PER_TICK) {
+          emu.run_frame();
+          acc -= FRAME_MS;
+          ran++;
+        }
+        if (acc > FRAME_MS * MAX_FRAMES_PER_TICK) acc = 0; // shed backlog
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }
+
+    function isGameKey(code) {
+      return ["ArrowUp","ArrowDown","ArrowLeft","ArrowRight",
+              "KeyX","KeyZ","Enter","ShiftLeft","ShiftRight"].includes(code);
+    }
+
+    main().catch((err) => setStatus(`Fatal: ${err}`));
+  </script>
+</body>
+</html>
