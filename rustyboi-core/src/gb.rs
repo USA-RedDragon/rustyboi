@@ -974,6 +974,31 @@ impl GB {
         self.ppu.take_pixel_debug_events()
     }
 
+    // ---- Dirty-line probe (scanline-renderer feasibility study) ----
+    // Optional observer; off by default. When no probe is attached the
+    // register-write path is byte-identical to an un-instrumented build.
+
+    /// Attach a fresh dirty-line probe.
+    pub fn attach_dirty_probe(&mut self) {
+        self.ppu.attach_dirty_probe();
+    }
+
+    /// Detach and return the probe with its accumulated counters.
+    pub fn take_dirty_probe(&mut self) -> Option<Box<ppu::DirtyLineProbe>> {
+        self.ppu.take_dirty_probe()
+    }
+
+    /// Borrow the probe for reading counters.
+    pub fn dirty_probe(&self) -> Option<&ppu::DirtyLineProbe> {
+        self.ppu.dirty_probe()
+    }
+
+    /// Fold the just-completed frame into the probe totals. Call once per frame
+    /// returned by `run_until_frame`.
+    pub fn dirty_probe_end_frame(&mut self) {
+        self.ppu.dirty_probe_end_frame();
+    }
+
     pub fn get_cpu_registers(&self) -> &cpu::registers::Registers {
         &self.cpu.registers
     }
