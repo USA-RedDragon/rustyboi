@@ -244,12 +244,13 @@ impl Emulator {
         self.frame_h = GB_HEIGHT;
     }
 
-    /// The RGBA bytes of the most recent frame (`frame_width * frame_height * 4`).
-    /// A fresh `Uint8Array` copy the worker transfers to the main thread; the
-    /// underlying buffer is then detached from the worker (no shared mutation).
-    pub fn frame(&self) -> js_sys::Uint8Array {
+    /// Copy the most recent frame's RGBA (`frame_width * frame_height * 4` bytes)
+    /// into `out`. The worker passes a pooled `Uint8Array` (recycled from the
+    /// main thread after each upload) so no framebuffer is allocated per frame —
+    /// that per-frame allocation was the main-thread GC sawtooth.
+    pub fn frame_into(&self, out: &js_sys::Uint8Array) {
         let len = (self.frame_w * self.frame_h * 4) as usize;
-        js_sys::Uint8Array::from(&self.rgba[..len])
+        out.copy_from(&self.rgba[..len]);
     }
 
     /// Width of the RGBA in [`Emulator::frame`] (160 normal, 256 for SGB border).
