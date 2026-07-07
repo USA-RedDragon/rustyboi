@@ -1041,6 +1041,38 @@ impl GB {
         self.mmio.detach_serial_device();
     }
 
+    /// Point two GBC instances' IR ports at each other (Pan Docs "GBC Infrared
+    /// Communication"). Each side's emitter (RP bit 0) illuminates the other's
+    /// receiver (RP bit 1). The harness pumps both instances (any interleave);
+    /// the shared channel carries the emitter level between their timelines. Use
+    /// for GBC<->GBC IR: Pokémon G/S/C Mystery Gift, TCG "Card Pop", Pokémon
+    /// Pinball score exchange, Bomberman trades.
+    pub fn connect_ir(a: &mut GB, b: &mut GB) {
+        let (la, lb) = crate::ir::IrLink::pair();
+        a.mmio.attach_ir(la);
+        b.mmio.attach_ir(lb);
+    }
+
+    /// Plug one end of a shared IR channel into this instance (the other end
+    /// goes to a second instance, possibly behind a socket/process transport).
+    pub fn attach_ir_peer(&mut self, link: crate::ir::IrLink) {
+        self.mmio.attach_ir(link);
+    }
+
+    /// Diagnostic self-test: make this instance's IR port see its own emitter.
+    pub fn set_ir_loopback(&mut self) {
+        self.mmio.set_ir_loopback();
+    }
+
+    pub fn ir_attached(&self) -> bool {
+        self.mmio.ir_attached()
+    }
+
+    /// Unplug the IR partner (back to a lone GBC that never sees light).
+    pub fn detach_ir(&mut self) {
+        self.mmio.detach_ir();
+    }
+
     pub fn printer_attached(&self) -> bool {
         self.mmio.printer().is_some()
     }
@@ -1220,6 +1252,46 @@ mod stop_tests {
             gb.step_instruction(false);
         }
         panic!("step_until timed out waiting for {what}");
+    }
+
+    /// Two CGB instances with their IR ports connected: one side's emitter
+    /// (RP bit 0) must illuminate the other side's receiver (RP bit 1), only
+    /// while the reader has read enabled (bits 6-7 set), and never its own.
+    /// Pan Docs "GBC Infrared Communication".
+    #[test]
+    fn cgb_ir_couples_emitter_to_peer_receiver_via_rp() {
+        let mut a = gb_with(&[], Hardware::CGB, 0x80);
+        let mut b = gb_with(&[], Hardware::CGB, 0x80);
+        GB::connect_ir(&mut a, &mut b);
+        assert!(a.ir_attached() && b.ir_attached());
+
+        // Both enable reading ($C0), emitters off: each receiver reads bit 1 = 1
+        // ("no signal").
+        a.write_memory(0xFF56, 0xC0);
+        b.write_memory(0xFF56, 0xC0);
+        assert_eq!(a.read_memory(0xFF56) & 0x02, 0x02);
+        assert_eq!(b.read_memory(0xFF56) & 0x02, 0x02);
+
+        // A lights its emitter ($C1 = read-enable + LED on). B, with read
+        // enabled, now sees the signal (bit 1 -> 0); A does not see its own LED.
+        a.write_memory(0xFF56, 0xC1);
+        assert_eq!(b.read_memory(0xFF56) & 0x02, 0x00, "B must see A's emitter");
+        assert_eq!(a.read_memory(0xFF56) & 0x02, 0x02, "A must not see its own");
+
+        // With read disabled (bits 6-7 clear) bit 1 reads 1 regardless of light.
+        b.write_memory(0xFF56, 0x01);
+        assert_eq!(b.read_memory(0xFF56) & 0x02, 0x02, "read disabled -> no signal");
+
+        // A turns the emitter off: B (read re-enabled) sees darkness again.
+        a.write_memory(0xFF56, 0xC0);
+        b.write_memory(0xFF56, 0xC0);
+        assert_eq!(b.read_memory(0xFF56) & 0x02, 0x02);
+
+        // A lone instance (detached) never sees light.
+        a.detach_ir();
+        b.write_memory(0xFF56, 0xC1); // B emits
+        a.write_memory(0xFF56, 0xC0);
+        assert_eq!(a.read_memory(0xFF56) & 0x02, 0x02, "detached -> no partner");
     }
 
     const BTN_NONE: ButtonState = ButtonState {
