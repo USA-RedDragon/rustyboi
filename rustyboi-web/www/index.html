@@ -242,6 +242,11 @@
         let reg;
         try { reg = await navigator.serviceWorker.register("sw.js"); }
         catch { return; }
+        // Force an update check on every load: re-fetches sw.js + its imported
+        // sw-version.js (whose hash changes per build), so a rebuild reliably
+        // surfaces the opt-in "new version" prompt instead of silently staying
+        // on the cached version.
+        reg.update().catch(() => {});
 
         const showUpdate = (worker) => {
           if (document.getElementById("update-bar")) return;
