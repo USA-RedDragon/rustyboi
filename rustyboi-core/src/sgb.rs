@@ -1106,6 +1106,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::erasing_op, clippy::identity_op)] // grid coords: row * 20 + col
     fn attr_lin_row_and_column() {
         let mut sgb = Sgb::new();
         let mut pkt = [0u8; 16];
