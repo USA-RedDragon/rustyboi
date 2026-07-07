@@ -349,26 +349,43 @@ impl App {
         self.session.gb().to_state_bytes().map_err(|e| e.to_string())
     }
 
-    fn set_hardware(&mut self, hardware: gb::Hardware) {
-        let mut cfg = self.session.config().clone();
-        cfg.hardware = hardware;
-        self.session.set_config(cfg);
-        let mut gb = gb::GB::new(hardware);
-        if let Some(bytes) = self.rom_bytes.clone()
-            && let Ok(cart) = cartridge::Cartridge::from_bytes(&bytes)
+    /// Build a fresh, booted machine for the session's current hardware model,
+    /// carrying the current cartridge. Returns `(gb, rom_id)`. Constructing via
+    /// `GB::new(hardware)` re-applies every model-derived flag (CGB features,
+    /// SGB, MGB/AGB, PPU/APU revision gates) from the session's chosen hardware,
+    /// which an in-place `GB::reset` does not restore — see `restart`.
+    fn build_current_gb(&self) -> (gb::GB, [u8; 32]) {
+        let mut gb = gb::GB::new(self.session.hardware());
+        if let Some(bytes) = self.rom_bytes.as_deref()
+            && let Ok(cart) = cartridge::Cartridge::from_bytes(bytes)
         {
             gb.insert(cart);
             gb.skip_bios();
         }
         let rom_id = self.rom_bytes.as_deref().map(rustyboi_session::sha256).unwrap_or([0u8; 32]);
+        (gb, rom_id)
+    }
+
+    fn set_hardware(&mut self, hardware: gb::Hardware) {
+        let mut cfg = self.session.config().clone();
+        cfg.hardware = hardware;
+        self.session.set_config(cfg);
+        let (gb, rom_id) = self.build_current_gb();
         self.session.replace_machine(gb, rom_id);
         self.error_state = None;
         self.frame = None;
         self.persist_config();
     }
 
+    /// Power-cycle the current console. Rebuilds the machine from the session's
+    /// current hardware model + ROM rather than resetting in place, so every
+    /// user-configured setting is preserved: the hardware override, DMG palette,
+    /// SGB border, rewind tuning, cheats, and current ROM/BIOS all survive (they
+    /// live in the session config / `App`, none of which this touches). Only the
+    /// emulator run state is cleared.
     fn restart(&mut self) {
-        self.session.gb_mut().reset();
+        let (gb, rom_id) = self.build_current_gb();
+        self.session.replace_machine(gb, rom_id);
         self.session.clear_rewind();
         self.error_state = None;
         self.frame = None;
@@ -944,4 +961,84 @@ fn convert_to_rgba(
         out[offset..offset + 4].copy_from_slice(rgba);
     }
     out
+}
+
+#[cfg(test)]
+mod restart_tests {
+    //! Regression coverage for the Restart action preserving user settings.
+    //!
+    //! Restart must power-cycle the *same console* the user configured, not fall
+    //! back to a default machine. The old implementation reset the `GB` in place
+    //! (`GB::reset`), which does not re-apply the model-derived hardware flags set
+    //! only in `GB::new` (SGB/CGB/MGB/AGB + PPU/APU revision gates) — so an SGB
+    //! (or any non-default model) silently degraded on restart. These tests pin
+    //! the rebuild path Restart now uses to the session's chosen hardware.
+    use rustyboi_core_lib::cartridge::Cartridge;
+    use rustyboi_core_lib::gb::{Hardware, GB};
+    use rustyboi_session::config::{Config, DmgPalette};
+    use rustyboi_session::ports::{MemRumble, MemStorage, MemWebcam};
+    use rustyboi_session::session::{Ports, Session};
+
+    fn ports() -> Ports {
+        Ports {
+            storage: Box::new(MemStorage::new()),
+            rumble: Box::new(MemRumble::default()),
+            webcam: Box::new(MemWebcam::default()),
+        }
+    }
+
+    /// Minimal 32KB NoMBC ROM (SGB-flagged), enough to insert a cartridge.
+    fn tiny_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x146] = 0x03; // SGB support flag
+        rom
+    }
+
+    // The mechanism the fix relies on: `GB::reset` (old restart) drops the SGB
+    // model state, while rebuilding via `GB::new(hardware)` (new restart)
+    // restores it. If this ever flips, in-place reset would again be viable and
+    // the frontend rebuild could be reconsidered.
+    #[test]
+    fn in_place_reset_loses_model_state_rebuild_keeps_it() {
+        let mut gb = GB::new(Hardware::SGB);
+        assert!(gb.sgb().is_some(), "fresh SGB machine must expose SGB state");
+
+        gb.reset();
+        assert!(
+            gb.sgb().is_none(),
+            "in-place reset drops SGB model state (the old-restart bug)"
+        );
+
+        // The rebuild path Restart now takes.
+        let rebuilt = GB::new(Hardware::SGB);
+        assert!(rebuilt.sgb().is_some(), "rebuild restores SGB model state");
+    }
+
+    // A session-level stand-in for `App::restart`: replacing the machine with a
+    // fresh `GB::new(session.hardware())` preserves the hardware model AND leaves
+    // the session config (hardware override + DMG palette) untouched.
+    #[test]
+    fn restart_rebuild_preserves_hardware_and_palette() {
+        let mut cfg = Config::default();
+        cfg.hardware = Hardware::SGB;
+        let custom = DmgPalette { shades: [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]] };
+        cfg.dmg_palette = custom;
+
+        let mut session = Session::new(cfg, ports(), [0u8; 32]);
+        let mut gb = GB::new(session.hardware());
+        gb.insert(Cartridge::from_bytes(&tiny_rom()).unwrap());
+        gb.skip_bios();
+        session.replace_machine(gb, [0u8; 32]);
+        assert!(session.gb().sgb().is_some());
+
+        // Simulate Restart: rebuild for the session's current hardware.
+        let mut rebuilt = GB::new(session.hardware());
+        rebuilt.insert(Cartridge::from_bytes(&tiny_rom()).unwrap());
+        rebuilt.skip_bios();
+        session.replace_machine(rebuilt, [0u8; 32]);
+
+        assert_eq!(session.hardware(), Hardware::SGB, "hardware override preserved");
+        assert!(session.gb().sgb().is_some(), "SGB model survives restart");
+        assert_eq!(session.config().dmg_palette, custom, "DMG palette preserved");
+    }
 }
