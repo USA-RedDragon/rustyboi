@@ -2,12 +2,12 @@ use egui::Context;
 use crate::actions::GuiAction;
 use crate::ui::Gui;
 use rustyboi_debugger_lib::disassembler::Disassembler;
-use rustyboi_core_lib::{cpu, gb};
+use rustyboi_session::DebugSnapshot;
 
 impl Gui {
-    pub(in crate) fn render_cpu_registers_panel(&mut self, ctx: &Context, registers: Option<&cpu::registers::Registers>, gb: Option<&gb::GB>, action: &mut Option<GuiAction>, paused: bool) {
-        if let Some(regs) = registers
-            && let Some(gb_ref) = gb {
+    pub(in crate) fn render_cpu_registers_panel(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>, action: &mut Option<GuiAction>, paused: bool) {
+        if let Some(snap) = debug {
+                let regs = &snap.cpu;
                 egui::Window::new("CPU Registers")
                     .default_pos([10.0, 50.0])
                     .default_size([250.0, 400.0])
@@ -58,7 +58,7 @@ impl Gui {
                         const MAX_INSTRUCTIONS: usize = 5;
 
                         while instruction_count < MAX_INSTRUCTIONS {
-                            let (mnemonic, instruction_length) = Disassembler::disassemble_with_reader(addr, |address| gb_ref.read_memory(address));
+                            let (mnemonic, instruction_length) = Disassembler::disassemble_with_reader(addr, |address| snap.code_byte(address));
 
                             let color = if addr == display_pc {
                                 egui::Color32::YELLOW // Highlight the instruction that was just executed
@@ -73,16 +73,16 @@ impl Gui {
                             // Show the first byte and mnemonic for single-byte instructions
                             // For multi-byte instructions, show the full instruction with all bytes
                             let bytes = if instruction_length == 1 {
-                                format!("{:02X}", gb_ref.read_memory(addr))
+                                format!("{:02X}", snap.code_byte(addr))
                             } else if instruction_length == 2 {
                                 format!("{:02X} {:02X}",
-                                    gb_ref.read_memory(addr),
-                                    gb_ref.read_memory(addr + 1))
+                                    snap.code_byte(addr),
+                                    snap.code_byte(addr + 1))
                             } else {
                                 format!("{:02X} {:02X} {:02X}",
-                                    gb_ref.read_memory(addr),
-                                    gb_ref.read_memory(addr + 1),
-                                    gb_ref.read_memory(addr + 2))
+                                    snap.code_byte(addr),
+                                    snap.code_byte(addr + 1),
+                                    snap.code_byte(addr + 2))
                             };
 
                             ui.monospace(egui::RichText::new(format!("{} {:04X}: {:8} {}", marker, addr, bytes, mnemonic)).color(color));

@@ -625,16 +625,23 @@ impl App {
         let mut requests = Vec::new();
 
         let paused_for_ui = self.manually_paused || self.error_state.is_some();
-        let registers = Some(self.session.gb().get_cpu_registers());
         let ui_state = self.ui_state();
 
-        // The UI needs &GB while the app also mutates itself below; run the UI
-        // first, collecting its output, then drop the borrow.
+        // Build the debug read-model only when a debug panel is open (the common
+        // case builds nothing). Detail comes from the Gui's open-panel state,
+        // read before we borrow the session so the borrows don't overlap.
+        let debug_snapshot = if ui.any_debug_panel_open() {
+            Some(self.session.debug_snapshot(ui.wanted_debug_detail()))
+        } else {
+            None
+        };
+        let printer_attached = Some(self.session.gb().printer_attached());
+
+        // Run the UI first, collecting its output, then drop the borrow.
         let (paint, ui_frame) = {
-            let gb_ref = self.session.gb();
             // Desktop renders every frame (force_repaint: true); repaint-gating is
             // a web concern (its main thread also composites the worker's frames).
-            ui.run(window, paused_for_ui, registers, Some(gb_ref), &ui_state, extra_events, true)
+            ui.run(window, paused_for_ui, debug_snapshot.as_ref(), printer_attached, &ui_state, extra_events, true)
         };
 
         // Dispatch the action.

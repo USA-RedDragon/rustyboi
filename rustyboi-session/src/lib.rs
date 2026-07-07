@@ -50,6 +50,7 @@ pub mod apply;
 mod audio;
 pub mod cheats;
 pub mod config;
+pub mod debug;
 pub mod input;
 pub mod overlay;
 pub mod ports;
@@ -65,6 +66,7 @@ pub use action::{
 };
 pub use apply::{ActionOutcome, PlatformRequest};
 pub use config::Config;
+pub use debug::{DebugDetail, DebugSnapshot};
 pub use input::{AbstractInput, GbButton, InputMap};
 pub use overlay::{OverlayButton, OverlayRect, OverlayShape, TouchLayout};
 pub use ports::{NetTransport, Rumble, Storage, StorageError, Webcam};

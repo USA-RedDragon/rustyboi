@@ -1,4 +1,5 @@
-use rustyboi_core_lib::{cpu, gb, input};
+use rustyboi_core_lib::input;
+use rustyboi_session::{DebugDetail, DebugSnapshot};
 
 #[cfg(not(target_os = "android"))]
 use std::env;
@@ -249,8 +250,11 @@ impl Gui {
         self.touch_buttons
     }
 
-    /// Create the UI using egui.
-    pub fn ui(&mut self, ctx: &Context, paused: bool, registers: Option<&cpu::registers::Registers>, gb: Option<&gb::GB>, session: &SessionUiState) -> UiOutput {
+    /// Create the UI using egui. `debug` is a read-only [`DebugSnapshot`] the
+    /// debug panels render from (None when no panel is open, or on web until the
+    /// worker's first snapshot arrives). `printer_attached` gates the desktop
+    /// Connect/Disconnect-Printer menu item (None hides it, e.g. on web).
+    pub fn ui(&mut self, ctx: &Context, paused: bool, debug: Option<&DebugSnapshot>, printer_attached: Option<bool>, session: &SessionUiState) -> UiOutput {
         let mut action = None;
         let mut any_menu_open = false;
 
@@ -271,10 +275,10 @@ impl Gui {
             &mut action,
             &mut any_menu_open,
             paused,
-            gb.map(|g| g.printer_attached()),
+            printer_attached,
             session,
         );
-        self.render_debug_panels(ctx, registers, gb, &mut action, paused);
+        self.render_debug_panels(ctx, debug, &mut action, paused);
         if self.show_cheats_panel {
             self.render_cheats_panel(ctx, &mut action, session);
         }
@@ -623,33 +627,33 @@ impl Gui {
         });
     }
 
-    fn render_debug_panels(&mut self, ctx: &Context, registers: Option<&cpu::registers::Registers>, gb: Option<&gb::GB>, action: &mut Option<GuiAction>, paused: bool) {
+    fn render_debug_panels(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>, action: &mut Option<GuiAction>, paused: bool) {
         if self.show_cpu_registers {
-            self.render_cpu_registers_panel(ctx, registers, gb, action, paused);
+            self.render_cpu_registers_panel(ctx, debug, action, paused);
         }
 
         if self.show_stack_explorer {
-            self.render_stack_explorer_panel(ctx, registers, gb);
+            self.render_stack_explorer_panel(ctx, debug);
         }
 
         if self.show_memory_explorer {
-            self.render_memory_explorer_panel(ctx, gb);
+            self.render_memory_explorer_panel(ctx, debug);
         }
 
         if self.show_ppu_debug {
-            self.render_ppu_debug_panel(ctx, gb);
+            self.render_ppu_debug_panel(ctx, debug);
         }
 
         if self.show_sprite_debug {
-            self.render_sprite_debug_panel(ctx, gb);
+            self.render_sprite_debug_panel(ctx, debug);
         }
 
         if self.show_palette_explorer {
-            self.render_palette_explorer_panel(ctx, gb);
+            self.render_palette_explorer_panel(ctx, debug);
         }
 
         if self.show_tile_explorer {
-            self.render_tile_explorer_panel(ctx, gb);
+            self.render_tile_explorer_panel(ctx, debug);
         }
 
         if self.show_keybind_settings {
@@ -657,8 +661,43 @@ impl Gui {
         }
 
         if self.show_breakpoint_panel {
-            self.render_breakpoint_panel(ctx, action, gb);
+            self.render_breakpoint_panel(ctx, action, debug);
         }
+    }
+
+    /// Which heavy [`DebugSnapshot`] sections the currently-open panels need.
+    /// The frontend builds only these (and, on web, posts nothing when the
+    /// result [`DebugDetail::is_empty`]). Includes the keyboard-shortcut CPU /
+    /// stack panels via their light sections. `any_debug_panel_open` also
+    /// accounts for the light-only panels (CPU / PPU / Breakpoints).
+    pub fn debug_detail(&self) -> DebugDetail {
+        DebugDetail {
+            // Memory Explorer needs the full image; CPU panel disassembles from
+            // the baseline PC window, so it does not force `memory`.
+            memory: self.show_memory_explorer,
+            // Tile / PPU / Sprite panels read VRAM tile data.
+            vram: self.show_tile_explorer || self.show_ppu_debug || self.show_sprite_debug,
+            oam: self.show_sprite_debug,
+            palettes: self.show_palette_explorer
+                || self.show_tile_explorer
+                || self.show_sprite_debug,
+            stack: self.show_stack_explorer,
+        }
+    }
+
+    /// Whether ANY debug panel that renders from a [`DebugSnapshot`] is open, so
+    /// the frontend knows to build (and post) a snapshot even when
+    /// [`Gui::debug_detail`] is empty (the CPU / PPU / Breakpoint panels use only
+    /// the baseline).
+    pub fn any_debug_panel_open(&self) -> bool {
+        self.show_cpu_registers
+            || self.show_stack_explorer
+            || self.show_memory_explorer
+            || self.show_ppu_debug
+            || self.show_sprite_debug
+            || self.show_palette_explorer
+            || self.show_tile_explorer
+            || self.show_breakpoint_panel
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1208,7 +1247,7 @@ impl Gui {
         self.show_cheats_panel = open;
     }
 
-    fn render_breakpoint_panel(&mut self, ctx: &Context, action: &mut Option<GuiAction>, gb: Option<&gb::GB>) {
+    fn render_breakpoint_panel(&mut self, ctx: &Context, action: &mut Option<GuiAction>, debug: Option<&DebugSnapshot>) {
         egui::Window::new("Breakpoint Manager")
             .default_width(300.0)
             .frame(egui::Frame::window(&ctx.style()).fill(PANEL_BACKGROUND))
@@ -1235,12 +1274,13 @@ impl Gui {
                 ui.small("Enter address in hex format (e.g., 0100, FFAA)");
                 ui.separator();
 
-                // Display current breakpoints if we have access to GB
-                if let Some(gb) = gb {
+                // Display current breakpoints from the snapshot (when a panel is
+                // open, the frontend supplies one).
+                if let Some(snap) = debug {
                     ui.label("Active Breakpoints:");
                     ui.separator();
 
-                    let breakpoints: Vec<u16> = gb.get_breakpoints().iter().cloned().collect();
+                    let breakpoints: Vec<u16> = snap.breakpoints.clone();
                     if breakpoints.is_empty() {
                         ui.label("No breakpoints set");
                     } else {

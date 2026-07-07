@@ -1,11 +1,11 @@
 use egui::Context;
-use rustyboi_core_lib::{cpu, gb};
+use rustyboi_session::DebugSnapshot;
 use crate::ui::Gui;
 
 impl Gui {
-    pub(in crate) fn render_stack_explorer_panel(&mut self, ctx: &Context, registers: Option<&cpu::registers::Registers>, gb: Option<&gb::GB>) {
-        if let Some(regs) = registers
-            && let Some(gb_ref) = gb {
+    pub(in crate) fn render_stack_explorer_panel(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>) {
+        if let Some(snap) = debug {
+                let sp = snap.cpu.sp;
                 egui::Window::new("Stack Explorer")
                     .default_pos([220.0, 50.0])
                     .default_size([180.0, 400.0])
@@ -15,7 +15,6 @@ impl Gui {
                     .show(ctx, |ui| {
                         ui.set_width(160.0);
 
-                        let sp = regs.sp;
                         ui.monospace(egui::RichText::new(format!("SP: {:04X}", sp)).color(egui::Color32::YELLOW));
 
                         if ui.button("↑ Scroll Up").clicked()
@@ -36,8 +35,8 @@ impl Gui {
                         let end_addr = std::cmp::min(start_addr.saturating_add(16), 0xFFFF); // Show 9 entries, capped at 0xFFFF
 
                         for addr in (start_addr..=end_addr).step_by(2) {
-                            let val1 = gb_ref.read_memory(addr);
-                            let val2 = if addr < 0xFFFF { gb_ref.read_memory(addr + 1) } else { 0 };
+                            let val1 = snap.stack_byte(addr);
+                            let val2 = if addr < 0xFFFF { snap.stack_byte(addr + 1) } else { 0 };
                             let word_val = ((val2 as u16) << 8) | (val1 as u16);
 
                             let color = if addr == sp {

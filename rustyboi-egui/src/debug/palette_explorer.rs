@@ -1,10 +1,10 @@
 use egui::Context;
-use rustyboi_core_lib::{gb, memory, ppu};
+use rustyboi_session::DebugSnapshot;
 use crate::ui::Gui;
 
 impl Gui {
-    pub(in crate) fn render_palette_explorer_panel(&mut self, ctx: &Context, gb: Option<&gb::GB>) {
-        if let Some(gb_ref) = gb {
+    pub(in crate) fn render_palette_explorer_panel(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>) {
+        if let Some(snap) = debug {
             egui::Window::new("Palette Explorer")
                 .default_pos([900.0, 50.0])
                 .default_size([250.0, 500.0])
@@ -16,20 +16,20 @@ impl Gui {
                         ui.set_width(200.0);
 
                         // Show different palettes based on hardware type
-                        if gb_ref.should_enable_cgb_features() {
-                            self.render_cgb_palettes(ui, gb_ref);
+                        if snap.cgb {
+                            self.render_cgb_palettes(ui, snap);
                         } else {
-                            self.render_dmg_palettes(ui, gb_ref);
+                            self.render_dmg_palettes(ui, snap);
                         }
                     });
                 });
         }
     }
 
-    fn render_dmg_palettes(&self, ui: &mut egui::Ui, gb: &gb::GB) {
+    fn render_dmg_palettes(&self, ui: &mut egui::Ui, snap: &DebugSnapshot) {
         // Background Palette (BGP)
         ui.heading("Background Palette (BGP)");
-        let bgp = gb.read_memory(ppu::BGP);
+        let bgp = snap.mmio.bgp;
         ui.monospace(egui::RichText::new(format!("BGP: {:02X}", bgp)).color(egui::Color32::YELLOW));
 
         ui.separator();
@@ -73,8 +73,8 @@ impl Gui {
 
         // Sprite Palettes (OBP0 and OBP1)
         ui.heading("Sprite Palettes");
-        let obp0 = gb.read_memory(ppu::OBP0);
-        let obp1 = gb.read_memory(ppu::OBP1);
+        let obp0 = snap.mmio.obp0;
+        let obp1 = snap.mmio.obp1;
 
         // OBP0 Palette
         ui.monospace(egui::RichText::new(format!("OBP0: {:02X}", obp0)).color(egui::Color32::LIGHT_BLUE));
@@ -156,12 +156,12 @@ impl Gui {
         ui.small(egui::RichText::new("Note: For sprites, P0 is always transparent").color(egui::Color32::LIGHT_GRAY));
     }
 
-    fn render_cgb_palettes(&self, ui: &mut egui::Ui, gb: &gb::GB) {
+    fn render_cgb_palettes(&self, ui: &mut egui::Ui, snap: &DebugSnapshot) {
         // CGB Background Palettes
         ui.heading("CGB Background Palettes");
 
         // Show current palette spec register
-        let bcps = gb.read_memory(memory::mmio::REG_BCPS);
+        let bcps = snap.mmio.bcps;
         ui.monospace(egui::RichText::new(format!("BCPS: {:02X} (Auto-inc: {}, Addr: {:02X})",
             bcps,
             if bcps & 0x80 != 0 { "On" } else { "Off" },
@@ -174,13 +174,9 @@ impl Gui {
         for palette in 0..8 {
             ui.collapsing(format!("BG Palette {}", palette), |ui| {
                 for color in 0..4 {
-                    // Get RGB555 color from palette RAM
-                    let rgb555 = gb.read_bg_palette_data(palette, color);
-
-                    // Convert RGB555 to RGB888
-                    let r = ((rgb555 & 0x1F) * 255 / 31) as u8;
-                    let g = (((rgb555 >> 5) & 0x1F) * 255 / 31) as u8;
-                    let b = (((rgb555 >> 10) & 0x1F) * 255 / 31) as u8;
+                    // Get RGB555 color from the captured palette table
+                    let rgb555 = snap.cgb_bg_rgb555(palette, color).unwrap_or(0);
+                    let (r, g, b) = snap.cgb_bg_rgb(palette, color).unwrap_or((0, 0, 0));
 
                     ui.horizontal(|ui| {
                         // Color swatch
@@ -206,7 +202,7 @@ impl Gui {
         ui.heading("CGB Object Palettes");
 
         // Show current palette spec register
-        let ocps = gb.read_memory(memory::mmio::REG_OCPS);
+        let ocps = snap.mmio.ocps;
         ui.monospace(egui::RichText::new(format!("OCPS: {:02X} (Auto-inc: {}, Addr: {:02X})",
             ocps,
             if ocps & 0x80 != 0 { "On" } else { "Off" },
@@ -219,13 +215,9 @@ impl Gui {
         for palette in 0..8 {
             ui.collapsing(format!("OBJ Palette {}", palette), |ui| {
                 for color in 0..4 {
-                    // Get RGB555 color from palette RAM
-                    let rgb555 = gb.read_obj_palette_data(palette, color);
-
-                    // Convert RGB555 to RGB888
-                    let r = ((rgb555 & 0x1F) * 255 / 31) as u8;
-                    let g = (((rgb555 >> 5) & 0x1F) * 255 / 31) as u8;
-                    let b = (((rgb555 >> 10) & 0x1F) * 255 / 31) as u8;
+                    // Get RGB555 color from the captured palette table
+                    let rgb555 = snap.cgb_obj_rgb555(palette, color).unwrap_or(0);
+                    let (r, g, b) = snap.cgb_obj_rgb(palette, color).unwrap_or((0, 0, 0));
 
                     let color_name = if color == 0 { " (Transparent)" } else { "" };
 
@@ -265,21 +257,19 @@ impl Gui {
 
         // CGB-specific register info
         ui.heading("CGB Registers");
-        let vbk = gb.read_memory(memory::mmio::REG_VBK);
-        let svbk = gb.read_memory(memory::mmio::REG_SVBK);
-        // KEY1 register doesn't exist yet - let's skip it for now
-        // let key1 = gb.read_memory(memory::mmio::REG_KEY1);
+        let vbk = snap.mmio.vbk;
+        let svbk = snap.mmio.svbk;
+        let key1 = snap.mmio.key1;
 
         ui.monospace(egui::RichText::new(format!("VBK: {:02X} (VRAM Bank: {})", vbk, vbk & 1))
             .color(egui::Color32::LIGHT_GREEN));
         ui.monospace(egui::RichText::new(format!("SVBK: {:02X} (WRAM Bank: {})", svbk, if svbk & 7 == 0 { 1 } else { svbk & 7 }))
             .color(egui::Color32::LIGHT_GREEN));
-        // KEY1 register will be added later
-        // ui.monospace(egui::RichText::new(format!("KEY1: {:02X} (Speed: {}x, Prepare: {})",
-        //     key1,
-        //     if key1 & 0x80 != 0 { "2" } else { "1" },
-        //     if key1 & 0x01 != 0 { "Yes" } else { "No" }
-        // )).color(egui::Color32::LIGHT_GREEN));
+        ui.monospace(egui::RichText::new(format!("KEY1: {:02X} (Speed: {}x, Prepare: {})",
+            key1,
+            if key1 & 0x80 != 0 { "2" } else { "1" },
+            if key1 & 0x01 != 0 { "Yes" } else { "No" }
+        )).color(egui::Color32::LIGHT_GREEN));
 
         ui.separator();
         ui.small(egui::RichText::new("Note: Object color 0 is always transparent").color(egui::Color32::LIGHT_GRAY));
