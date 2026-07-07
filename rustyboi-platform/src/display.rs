@@ -4,6 +4,7 @@ use crate::game_renderer::GameRenderer;
 use rustyboi_egui_lib::actions::GuiAction;
 use rustyboi_egui_lib::actions::FileData;
 use rustyboi_core_lib::{cartridge, gb, ppu, input};
+use rustyboi_session::Session;
 
 use std::time::{Duration, Instant};
 #[cfg(not(target_os = "android"))]
@@ -123,18 +124,11 @@ pub fn run_with_gui(gb: Box<gb::GB>, config: &config::CleanConfig) -> Result<(),
     run_gui_loop(event_loop, &window, None, None, None, gb, config)
 }
 
-/// Build the emulator-framebuffer renderer bound to the pixels source texture.
+/// Build the emulator-framebuffer renderer. The renderer owns its own RGBA
+/// source texture(s) (160x144 normal, 256x224 SGB) and uploads frames itself,
+/// so it is independent of the `pixels` framebuffer's fixed size.
 fn build_game_renderer(pixels: &Pixels) -> GameRenderer {
-    let texture_view = pixels
-        .texture()
-        .create_view(&pixels::wgpu::TextureViewDescriptor::default());
-    let extent = pixels.context().texture_extent;
-    GameRenderer::new(
-        pixels.device(),
-        &texture_view,
-        &extent,
-        pixels.render_texture_format(),
-    )
+    GameRenderer::new(pixels.device(), pixels.render_texture_format())
 }
 
 /// Android entry. Builds an `EventLoop` bound to the supplied `AndroidApp`,
@@ -201,6 +195,24 @@ fn create_render_state<'win, T>(
     Ok((pixels, framework, game_renderer))
 }
 
+/// Base directory the session ports read/write savestates + config under.
+fn save_base() -> std::path::PathBuf {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::save_dir()
+    }
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    {
+        crate::ports::desktop_save_dir()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        // The wasm build does not yet persist through the filesystem; a real
+        // IndexedDB-backed Storage arrives with the web frontend adapter.
+        std::path::PathBuf::from(".")
+    }
+}
+
 fn run_gui_loop<'win>(
     event_loop: EventLoop<()>,
     window: &'win winit::window::Window,
@@ -211,9 +223,32 @@ fn run_gui_loop<'win>(
     config: &config::CleanConfig,
 ) -> Result<(), Error> {
     let mut input = WinitInputHelper::new();
-    let mut world = World::new_with_paths(gb, config.rom.clone(), config.bios.clone(), config.palette);
+
+    // Build the desktop/Android service ports and load the persisted session
+    // config, then let the CLI hardware choice win for this launch.
+    let ports = crate::ports::build_ports(save_base());
+    let mut session_config = rustyboi_session::Config::load(ports.storage.as_ref());
+    session_config.hardware = config.hardware;
+
+    // ROM bytes (for the session's ROM-id slot keying). On the startup path the
+    // GB may already have a cartridge inserted; read the source bytes so the id
+    // matches what a later in-app Load ROM of the same file would produce.
+    let rom_bytes = config
+        .rom
+        .as_ref()
+        .and_then(|p| std::fs::read(p).ok());
+
+    let mut world = World::new_with_paths(
+        gb,
+        rom_bytes,
+        config.rom.clone(),
+        config.bios.clone(),
+        config.palette,
+        session_config,
+        ports,
+    );
     if config.printer {
-        world.gb.attach_printer();
+        world.gb_mut().attach_printer();
         println!("Game Boy Printer attached to the link port");
     }
 
@@ -315,6 +350,39 @@ fn run_gui_loop<'win>(
             if input.key_pressed(KeyCode::Escape) || input.close_requested() {
                 elwt.exit();
                 return;
+            }
+
+            // --- Session feature hotkeys ------------------------------------
+            // Quicksave / quickload (F5 / F8).
+            if input.key_pressed(KeyCode::F5) {
+                match world.quicksave() {
+                    Ok(()) => println!("Quicksaved"),
+                    Err(e) => println!("Quicksave failed: {e}"),
+                }
+                window.request_redraw();
+            }
+            if input.key_pressed(KeyCode::F8) {
+                match world.quickload() {
+                    Ok(()) => window.request_redraw(),
+                    Err(e) => println!("Quickload failed: {e}"),
+                }
+            }
+            // Fast-forward / turbo (Tab toggles).
+            if input.key_pressed(KeyCode::Tab) {
+                world.toggle_fast_forward();
+            }
+            // Frame advance (Backslash): one frame, then pause.
+            if input.key_pressed(KeyCode::Backslash) {
+                world.frame_advance();
+                user_paused = true;
+                manually_paused = true;
+                window.request_redraw();
+            }
+            // Hold-to-rewind (Backspace): step back one snapshot per frame while
+            // held. Gated on rewind being enabled in config.
+            if input.key_held(KeyCode::Backspace) && world.session.config().rewind.enabled {
+                world.rewind();
+                window.request_redraw();
             }
 
             // Handle F key for frame stepping with debounce
@@ -438,19 +506,22 @@ fn run_gui_loop<'win>(
                 ..
             } => {
                 // Skip drawing while we have no surface (e.g. Android suspended).
-                let (pixels, framework, game_renderer) = match (pixels.as_mut(), framework.as_mut(), game_renderer.as_ref()) {
+                let (pixels, framework, game_renderer) = match (pixels.as_mut(), framework.as_mut(), game_renderer.as_mut()) {
                     (Some(p), Some(f), Some(g)) => (p, f, g),
                     _ => return,
                 };
-                world.draw(pixels.frame_mut());
+                // Convert the latest emulator frame (or SGB composite) to the
+                // RGBA source the renderer uploads below.
+                let present = world.present();
                 let gui_paused_state = manually_paused || world.error_state.is_some();
 
                 // Update window title with performance metrics
                 world.update_window_title(window, gui_paused_state);
                 // Always pass register data for the debug overlay, regardless of pause state
-                let registers = Some(world.gb.get_cpu_registers());
-                let gb_ref = Some(&*world.gb);
-                let (gui_action, menu_open, game_region) = framework.prepare(window, gui_paused_state, registers, gb_ref);
+                let ui_state = world.ui_state();
+                let registers = Some(world.gb().get_cpu_registers());
+                let gb_ref = Some(world.gb());
+                let (gui_action, menu_open, game_region) = framework.prepare(window, gui_paused_state, registers, gb_ref, &ui_state);
 
                 // Handle GUI actions
                 match gui_action {
@@ -535,11 +606,11 @@ fn run_gui_loop<'win>(
                         world.toggle_pause();
                     }
                     Some(GuiAction::TogglePrinter) => {
-                        if world.gb.printer_attached() {
-                            world.gb.detach_serial_device();
+                        if world.gb().printer_attached() {
+                            world.gb_mut().detach_serial_device();
                             framework.set_status("Game Boy Printer disconnected".to_string());
                         } else {
-                            world.gb.attach_printer();
+                            world.gb_mut().attach_printer();
                             framework.set_status(
                                 "Game Boy Printer connected - prints are saved next to the ROM"
                                     .to_string(),
@@ -563,6 +634,82 @@ fn run_gui_loop<'win>(
                         world.remove_breakpoint(address);
                         framework.set_status(format!("Breakpoint removed from ${:04X}", address));
                         window.request_redraw();
+                    }
+                    Some(GuiAction::SaveSlot(slot)) => match world.save_slot(slot) {
+                        Ok(()) => framework.set_status(format!("Saved to slot {slot}")),
+                        Err(e) => framework.set_error(format!("Failed to save slot {slot}: {e}")),
+                    },
+                    Some(GuiAction::LoadSlot(slot)) => match world.load_slot(slot) {
+                        Ok(()) => {
+                            framework.clear_error();
+                            framework.set_status(format!("Loaded slot {slot}"));
+                            window.request_redraw();
+                        }
+                        Err(e) => framework.set_error(format!("Failed to load slot {slot}: {e}")),
+                    },
+                    Some(GuiAction::Quicksave) => match world.quicksave() {
+                        Ok(()) => framework.set_status("Quicksaved".to_string()),
+                        Err(e) => framework.set_error(format!("Quicksave failed: {e}")),
+                    },
+                    Some(GuiAction::Quickload) => match world.quickload() {
+                        Ok(()) => {
+                            framework.clear_error();
+                            framework.set_status("Quickloaded".to_string());
+                            window.request_redraw();
+                        }
+                        Err(e) => framework.set_error(format!("Quickload failed: {e}")),
+                    },
+                    Some(GuiAction::ToggleFastForward) => {
+                        world.toggle_fast_forward();
+                        framework.set_status(
+                            if world.is_fast_forward() { "Fast-forward on" } else { "Fast-forward off" }
+                                .to_string(),
+                        );
+                    }
+                    Some(GuiAction::FrameAdvance) => {
+                        world.frame_advance();
+                        // Frame-advance runs one frame then pauses; keep the GUI
+                        // pause bookkeeping in sync so it doesn't fight the mode.
+                        user_paused = true;
+                        manually_paused = true;
+                        window.request_redraw();
+                    }
+                    Some(GuiAction::ToggleSgbBorder) => {
+                        world.toggle_sgb_border();
+                        window.request_redraw();
+                    }
+                    Some(GuiAction::SetHardware(choice)) => {
+                        use rustyboi_egui_lib::actions::HardwareChoice;
+                        let hw = match choice {
+                            HardwareChoice::Dmg => gb::Hardware::DMG,
+                            HardwareChoice::Cgb => gb::Hardware::CGB,
+                            HardwareChoice::Sgb => gb::Hardware::SGB,
+                        };
+                        world.set_hardware(hw);
+                        framework.clear_error();
+                        framework.set_status(format!("Hardware set to {choice:?}; ROM restarted"));
+                        window.request_redraw();
+                    }
+                    Some(GuiAction::SetPalette(choice)) => {
+                        use rustyboi_egui_lib::actions::PaletteChoice;
+                        let palette = match choice {
+                            PaletteChoice::Grayscale => config::ColorPalette::Grayscale,
+                            PaletteChoice::OriginalGreen => config::ColorPalette::OriginalGreen,
+                            PaletteChoice::Blue => config::ColorPalette::Blue,
+                            PaletteChoice::Brown => config::ColorPalette::Brown,
+                            PaletteChoice::Red => config::ColorPalette::Red,
+                        };
+                        world.set_palette(palette);
+                        window.request_redraw();
+                    }
+                    Some(GuiAction::SetRewindEnabled(enabled)) => {
+                        world.set_rewind_enabled(enabled);
+                    }
+                    Some(GuiAction::SetRewindInterval(interval)) => {
+                        world.set_rewind_interval(interval);
+                    }
+                    Some(GuiAction::SetRewindDepth(depth)) => {
+                        world.set_rewind_depth(depth);
                     }
                     #[cfg(target_os = "android")]
                     Some(GuiAction::OpenRomTree) => {
@@ -700,7 +847,7 @@ fn run_gui_loop<'win>(
 
                 // Check for breakpoint hits and notify user
                 if world.check_and_clear_breakpoint_hit() {
-                    let pc = world.gb.get_cpu_registers().pc;
+                    let pc = world.gb().get_cpu_registers().pc;
                     manually_paused = true; // Ensure we stay paused
                     user_paused = true; // User should explicitly resume
                     framework.set_status(format!("Breakpoint hit at PC: ${:04X}", pc));
@@ -717,9 +864,13 @@ fn run_gui_loop<'win>(
                 let surface = window.inner_size();
                 let surface_size = (surface.width, surface.height);
                 let render_result = pixels.render_with(|encoder, render_target, context| {
-                    // Draw the emulator framebuffer only into the egui central
-                    // region (below the menu bar, above the status panel),
-                    // letterboxed. Then egui paints its panels on top.
+                    // Upload the latest emulator frame into the matching source
+                    // texture (160x144 normal, 256x224 SGB border), then draw it
+                    // only into the egui central region (below the menu bar,
+                    // above the status panel), letterboxed. egui paints on top.
+                    if let Some((size, rgba)) = present.as_ref() {
+                        game_renderer.upload(&context.queue, *size, rgba);
+                    }
                     game_renderer.render(
                         encoder,
                         &context.queue,
@@ -749,9 +900,39 @@ fn run_gui_loop<'win>(
     res.map_err(|e| Error::UserDefined(Box::new(e)))
 }
 
-struct World {
+/// Current epoch seconds, for savestate-slot timestamps. Falls back to 0
+/// ("unknown") if the clock is before the epoch.
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Build a `Session` around an already-prepared `GB`, deriving the ROM id from
+/// `rom_bytes` (all-zero when no cartridge is inserted). Reuses the platform's
+/// persisted [`Config`] loaded through the port storage.
+fn session_from_gb(
     gb: Box<gb::GB>,
+    rom_bytes: Option<&[u8]>,
+    config: rustyboi_session::Config,
+    ports: rustyboi_session::Ports,
+) -> Session {
+    let rom_id = rom_bytes.map(rustyboi_session::sha256).unwrap_or([0u8; 32]);
+    // `Session` owns the GB by value; unbox it (GB is heap-heavy but the move
+    // is a memcpy of the box's contents, done once per ROM load).
+    Session::with_gb(*gb, config, ports, rom_id)
+}
+
+struct World {
+    /// The frontend-agnostic feature layer: owns the `GB`, config, ports,
+    /// run-mode, savestate slots, rewind, TAS, and cheats. All per-frame
+    /// stepping, input, and state ops route through it.
+    session: Session,
+    /// Latest presented frame from `run_frame` (or a debug step).
     frame: Option<gb::Frame>,
+    /// Host audio output; fed the samples `run_frame` returns each frame.
+    audio: Option<crate::audio::Output>,
     error_state: Option<String>,
     is_paused: bool,
     step_single_frame: bool,
@@ -760,6 +941,11 @@ struct World {
     step_multiple_frames: Option<u32>,
     current_rom_path: Option<String>,
     current_bios_path: Option<String>,
+    /// Raw ROM bytes of the loaded cartridge, kept so a slot/state load can
+    /// re-derive the ROM id and reinsert the cartridge.
+    rom_bytes: Option<Vec<u8>>,
+    /// Latest input, already resolved to abstract GB buttons.
+    input: rustyboi_session::AbstractInput,
     // FPS and performance tracking
     frame_times: Vec<Instant>,
     last_title_update: Instant,
@@ -767,22 +953,35 @@ struct World {
     last_frame_time: Instant,
     // Breakpoint status
     breakpoint_hit: bool,
-    // Color palette
+    // Color palette (monochrome DMG shade ramp for presentation)
     palette: config::ColorPalette,
     // Track if emulator was auto-paused due to missing ROM/BIOS
     auto_paused_no_content: bool,
+    /// Present the 256x224 SGB border composite when the machine offers one.
+    sgb_border: bool,
 }
 
 impl World {
-    fn new_with_paths(gb: Box<gb::GB>, rom_path: Option<String>, bios_path: Option<String>, palette: config::ColorPalette) -> Self {
+    fn new_with_paths(
+        gb: Box<gb::GB>,
+        rom_bytes: Option<Vec<u8>>,
+        rom_path: Option<String>,
+        bios_path: Option<String>,
+        palette: config::ColorPalette,
+        config: rustyboi_session::Config,
+        ports: rustyboi_session::Ports,
+    ) -> Self {
         let now = Instant::now();
 
         // Check if both ROM and BIOS are missing - if so, start paused
         let should_start_paused = !gb.has_rom() && !gb.has_bios();
 
+        let session = session_from_gb(gb, rom_bytes.as_deref(), config, ports);
+
         Self {
-            gb,
+            session,
             frame: None,
+            audio: None,
             error_state: None,
             is_paused: should_start_paused,
             step_single_frame: false,
@@ -791,25 +990,200 @@ impl World {
             step_multiple_frames: None,
             current_rom_path: rom_path,
             current_bios_path: bios_path,
+            rom_bytes,
+            input: rustyboi_session::AbstractInput::none(),
             frame_times: Vec::with_capacity(60), // Store last 60 frame times for FPS calculation
             last_title_update: now,
             last_frame_time: now,
             breakpoint_hit: false,
             palette,
             auto_paused_no_content: should_start_paused,
+            sgb_border: true,
         }
     }
 
-    fn save_state(&self, path: std::path::PathBuf) -> Result<String, std::io::Error> {
+    /// Borrow the underlying `GB` for presentation / debug panels.
+    fn gb(&self) -> &gb::GB {
+        self.session.gb()
+    }
+
+    /// Mutable `GB` access for host-side debug tooling (breakpoints, cycle
+    /// stepping). Feature operations go through the session, not this.
+    fn gb_mut(&mut self) -> &mut gb::GB {
+        self.session.gb_mut()
+    }
+
+    /// Persist the current machine state to an arbitrary file path (the File
+    /// menu's "Save State"). Slot saves go through the session instead.
+    fn save_state(&self, path: std::path::PathBuf) -> Result<String, Box<dyn std::error::Error>> {
         let filename = path.to_string_lossy().to_string();
-        self.gb.to_state_file(&filename)?;
+        let bytes = self.session.gb().to_state_bytes()?;
+        std::fs::write(&filename, bytes)?;
         println!("Game state saved to: {}", filename);
         Ok(filename)
     }
 
+    /// Save the current machine into numbered session slot `slot`.
+    fn save_slot(&mut self, slot: u32) -> Result<(), String> {
+        self.session
+            .save_slot(slot, now_epoch_secs())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Load numbered session slot `slot`, restoring the machine.
+    fn load_slot(&mut self, slot: u32) -> Result<(), String> {
+        self.session.load_slot(slot).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// Quicksave / quickload via the reserved session quick slot.
+    fn quicksave(&mut self) -> Result<(), String> {
+        self.session.quicksave(now_epoch_secs()).map_err(|e| e.to_string())
+    }
+
+    fn quickload(&mut self) -> Result<(), String> {
+        self.session.quickload().map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// Slot numbers that currently hold a saved state for this ROM.
+    fn list_slots(&self) -> Vec<u32> {
+        self.session.list_slots()
+    }
+
+    /// Step back to the most recent rewind snapshot (hold-to-rewind hotkey).
+    fn rewind(&mut self) {
+        if self.session.rewind().is_some() {
+            self.frame = Some(self.session.gb_mut().get_current_frame());
+        }
+    }
+
+    /// Toggle fast-forward on/off (Normal ↔ FastForward at the config factor).
+    fn toggle_fast_forward(&mut self) {
+        use rustyboi_session::RunMode;
+        match self.session.mode() {
+            RunMode::FastForward(_) => self.session.set_mode(RunMode::Normal),
+            _ => self.session.fast_forward(),
+        }
+    }
+
+    /// Whether fast-forward is currently engaged.
+    fn is_fast_forward(&self) -> bool {
+        matches!(self.session.mode(), rustyboi_session::RunMode::FastForward(_))
+    }
+
+    /// Queue a single-frame advance. The session's `FrameAdvance` mode runs one
+    /// frame on the next `update` (honored even while the World is paused) and
+    /// then returns the session to `Paused`.
+    fn frame_advance(&mut self) {
+        self.session.frame_advance();
+    }
+
+    fn toggle_sgb_border(&mut self) {
+        self.sgb_border = !self.sgb_border;
+    }
+
+    /// Change the emulated hardware model, persist it, and rebuild the machine
+    /// from the cached ROM bytes so the change takes effect immediately.
+    fn set_hardware(&mut self, hardware: gb::Hardware) {
+        let mut cfg = self.session.config().clone();
+        cfg.hardware = hardware;
+        self.session.set_config(cfg);
+        // Rebuild the machine on the new hardware (same ROM).
+        let mut gb = Box::new(gb::GB::new(hardware));
+        if let Some(bytes) = self.rom_bytes.clone()
+            && let Ok(cartridge) = cartridge::Cartridge::from_bytes(&bytes)
+        {
+            gb.insert(cartridge);
+            gb.skip_bios();
+        }
+        let rom_id = self
+            .rom_bytes
+            .as_deref()
+            .map(rustyboi_session::sha256)
+            .unwrap_or([0u8; 32]);
+        self.session.replace_machine(*gb, rom_id);
+        self.error_state = None;
+        self.frame = None;
+        self.persist_config();
+    }
+
+    /// Set the presentation palette and persist the equivalent DMG shades.
+    fn set_palette(&mut self, palette: config::ColorPalette) {
+        self.palette = palette;
+        let mut cfg = self.session.config().clone();
+        cfg.dmg_palette = rustyboi_session::config::DmgPalette {
+            shades: palette.get_rgba_colors(),
+        };
+        self.session.set_config(cfg);
+        self.persist_config();
+    }
+
+    fn set_rewind_enabled(&mut self, enabled: bool) {
+        let mut cfg = self.session.config().clone();
+        cfg.rewind.enabled = enabled;
+        self.session.set_config(cfg);
+        self.persist_config();
+    }
+
+    fn set_rewind_interval(&mut self, interval_frames: u32) {
+        let mut cfg = self.session.config().clone();
+        cfg.rewind.interval_frames = interval_frames.max(1);
+        self.session.set_config(cfg);
+        self.persist_config();
+    }
+
+    fn set_rewind_depth(&mut self, depth: usize) {
+        let mut cfg = self.session.config().clone();
+        cfg.rewind.depth = depth.max(1);
+        self.session.set_config(cfg);
+        self.persist_config();
+    }
+
+    /// Persist the session config through the storage port, logging on failure
+    /// (a failed config write should never crash the emulator).
+    fn persist_config(&mut self) {
+        if let Err(e) = self.session.save_config() {
+            println!("Failed to save config: {e}");
+        }
+    }
+
+    /// Snapshot the session-owned state the menus render (current selections,
+    /// slot list, run mode).
+    fn ui_state(&self) -> rustyboi_egui_lib::actions::SessionUiState {
+        use rustyboi_egui_lib::actions::{HardwareChoice, PaletteChoice, SessionUiState};
+        let cfg = self.session.config();
+        let hardware = match cfg.hardware {
+            gb::Hardware::DMG | gb::Hardware::MGB => HardwareChoice::Dmg,
+            gb::Hardware::SGB => HardwareChoice::Sgb,
+            _ => HardwareChoice::Cgb,
+        };
+        let palette = match self.palette {
+            config::ColorPalette::Grayscale => PaletteChoice::Grayscale,
+            config::ColorPalette::OriginalGreen => PaletteChoice::OriginalGreen,
+            config::ColorPalette::Blue => PaletteChoice::Blue,
+            config::ColorPalette::Brown => PaletteChoice::Brown,
+            config::ColorPalette::Red => PaletteChoice::Red,
+        };
+        SessionUiState {
+            hardware,
+            palette,
+            rewind_enabled: cfg.rewind.enabled,
+            rewind_interval_frames: cfg.rewind.interval_frames,
+            rewind_depth: cfg.rewind.depth,
+            sgb_border: self.sgb_border,
+            fast_forward: self.is_fast_forward(),
+            slots: self.list_slots(),
+        }
+    }
+
     fn enable_audio(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let output = Box::new(crate::audio::Output::new()?);
-        self.gb.enable_audio(output)
+        // The session installs its own capturing audio sink into the GB and
+        // returns the produced samples from `run_frame`; the host output is a
+        // pure sink we push those samples into. So we start the device here and
+        // keep it in `World`, rather than installing it into the GB.
+        let mut output = crate::audio::Output::new()?;
+        output.start_device()?;
+        self.audio = Some(output);
+        Ok(())
     }
 
     fn load_state(&mut self, file_data: FileData) -> Result<String, Box<dyn std::error::Error>> {
@@ -817,27 +1191,30 @@ impl World {
         let saved_rom_path = self.current_rom_path.clone();
         let saved_bios_path = self.current_bios_path.clone();
 
-        // Load the new state and get filename
-        let filename = match file_data {
+        // Deserialize into a fresh GB, then reattach the ROM/BIOS below.
+        let (mut gb, filename) = match file_data {
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             FileData::Path(path) => {
                 let filename = path.to_string_lossy().to_string();
-                *self.gb = gb::GB::from_state_file(&filename)?;
-                filename
+                (gb::GB::from_state_file(&filename)?, filename)
             }
             #[cfg(any(target_arch = "wasm32", target_os = "android"))]
             FileData::Contents { name, data } => {
-                // For WASM/Android, parse the bytes directly
-                *self.gb = gb::GB::from_state_bytes(&data)?;
-                name
+                (gb::GB::from_state_bytes(&data)?, name)
             }
         };
 
-        // Reload the ROM if we had one loaded
+        // Reload the ROM if we had one loaded, re-deriving the ROM id from its
+        // bytes so session slots stay keyed to the right game.
+        let mut rom_bytes = None;
         if let Some(rom_path) = saved_rom_path {
-            match cartridge::Cartridge::load(&rom_path) {
-                Ok(cartridge) => {
-                    self.gb.insert(cartridge);
+            match std::fs::read(&rom_path)
+                .map_err(|e| e.into())
+                .and_then(|bytes| cartridge::Cartridge::from_bytes(&bytes).map(|c| (bytes, c)))
+            {
+                Ok((bytes, cartridge)) => {
+                    gb.insert(cartridge);
+                    rom_bytes = Some(bytes);
                     self.current_rom_path = Some(rom_path);
                     println!("Reloaded ROM: {}", self.current_rom_path.as_ref().unwrap());
                 }
@@ -850,7 +1227,7 @@ impl World {
 
         // Reload the BIOS if we had one loaded
         if let Some(bios_path) = saved_bios_path {
-            match self.gb.load_bios(&bios_path) {
+            match gb.load_bios(&bios_path) {
                 Ok(_) => {
                     self.current_bios_path = Some(bios_path);
                     println!("Reloaded BIOS: {}", self.current_bios_path.as_ref().unwrap());
@@ -862,6 +1239,14 @@ impl World {
             }
         }
 
+        let has_content = gb.has_rom() || gb.has_bios();
+        let rom_id = rom_bytes
+            .as_deref()
+            .map(rustyboi_session::sha256)
+            .unwrap_or([0u8; 32]);
+        self.rom_bytes = rom_bytes;
+        self.session.replace_machine(gb, rom_id);
+
         // Clear any error state
         self.error_state = None;
 
@@ -869,7 +1254,7 @@ impl World {
         self.frame = None;
 
         // If emulator was auto-paused due to no content and state has content, unpause it
-        if self.auto_paused_no_content && (self.gb.has_rom() || self.gb.has_bios()) {
+        if self.auto_paused_no_content && has_content {
             self.is_paused = false;
             self.auto_paused_no_content = false;
         }
@@ -881,12 +1266,15 @@ impl World {
     fn load_rom(&mut self, file_data: FileData) -> Result<String, Box<dyn std::error::Error>> {
         #[cfg(target_os = "android")]
         log::info!("load_rom: entering");
-        let (filename, cartridge, has_file_path) = match file_data {
+        let (filename, cartridge, rom_bytes, has_file_path) = match file_data {
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             FileData::Path(path) => {
                 let filename = path.to_string_lossy().to_string();
-                let cartridge = cartridge::Cartridge::load(&filename)?;
-                (filename, cartridge, true)
+                // Read the raw bytes ourselves so we can derive the session ROM
+                // id (SHA-256) for savestate-slot keying.
+                let bytes = std::fs::read(&filename)?;
+                let cartridge = cartridge::Cartridge::from_bytes(&bytes)?;
+                (filename, cartridge, Some(bytes), true)
             }
             #[cfg(any(target_arch = "wasm32", target_os = "android"))]
             FileData::Contents { name, data } => {
@@ -941,10 +1329,22 @@ impl World {
                         }
                     }
                 }
-                (name, cartridge, false)
+                (name, cartridge, Some(data), false)
             }
         };
-        self.gb.insert(cartridge);
+
+        // Build a fresh machine for the new cartridge, mirroring the startup
+        // path (skip BIOS so games boot), then hand it to the session which
+        // re-keys its slots to this ROM's id.
+        let mut gb = Box::new(gb::GB::new(self.session.hardware()));
+        gb.insert(cartridge);
+        gb.skip_bios();
+        let rom_id = rom_bytes
+            .as_deref()
+            .map(rustyboi_session::sha256)
+            .unwrap_or([0u8; 32]);
+        self.rom_bytes = rom_bytes;
+        self.session.replace_machine(*gb, rom_id);
 
         // Track the current ROM path
         self.current_rom_path = if has_file_path {
@@ -952,9 +1352,6 @@ impl World {
         } else {
             None // No file path for WASM content
         };
-
-        // Reset the emulator to a clean state after loading the ROM
-        self.gb.reset();
 
         // Clear any error state
         self.error_state = None;
@@ -990,8 +1387,10 @@ impl World {
     }
 
     fn restart(&mut self) {
-        // Reset the Game Boy to its initial state
-        self.gb.reset();
+        // Reset the Game Boy to its initial state (same ROM/BIOS, same id).
+        self.session.gb_mut().reset();
+        // Rewind history is now stale (it points at the pre-reset timeline).
+        self.session.clear_rewind();
 
         // Clear any error state
         self.error_state = None;
@@ -1007,42 +1406,54 @@ impl World {
         self.error_state = None;
     }
 
-    fn draw(&mut self, frame: &mut [u8]) {
-        if let Some(gb_frame) = self.frame.as_ref() {
-            let rgba_frame = match gb_frame {
-                gb::Frame::Monochrome(data) => {
-                    // Convert monochrome framebuffer to RGBA using the palette
-                    convert_to_rgba(data, &self.palette)
-                }
-                gb::Frame::Color(data) => {
-                    // Convert color framebuffer (RGB888) to RGBA8888
-                    let mut rgba = [0u8; ppu::FRAMEBUFFER_SIZE * 4];
-                    for (i, chunk) in data.chunks(3).enumerate() {
-                        let offset = i * 4;
-                        rgba[offset] = chunk[0];     // R
-                        rgba[offset + 1] = chunk[1]; // G
-                        rgba[offset + 2] = chunk[2]; // B
-                        rgba[offset + 3] = 255;      // A
-                    }
-                    rgba
-                }
+    /// Convert the latest presented frame to an RGBA source ready for the
+    /// [`GameRenderer`], preferring the 256x224 SGB border composite when the
+    /// border toggle is on and the machine offers one. Returns the source size
+    /// (so the renderer picks the matching texture) and the RGBA bytes.
+    fn present(&self) -> Option<(crate::game_renderer::SourceSize, Vec<u8>)> {
+        use crate::game_renderer::SourceSize;
 
-            };
-            frame.copy_from_slice(&rgba_frame);
-            self.frame = None;
+        // SGB border composite (only Some on SGB hardware with a border loaded).
+        if self.sgb_border
+            && let Some(rgb) = self.session.gb().sgb_composited_frame()
+        {
+            let mut rgba = Vec::with_capacity((rgb.len() / 3) * 4);
+            for chunk in rgb.chunks_exact(3) {
+                rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+            return Some((SourceSize::Sgb, rgba));
         }
+
+        let gb_frame = self.frame.as_ref()?;
+        let rgba = match gb_frame {
+            gb::Frame::Monochrome(data) => convert_to_rgba(data, &self.palette).to_vec(),
+            gb::Frame::Color(data) => {
+                let mut rgba = vec![0u8; ppu::FRAMEBUFFER_SIZE * 4];
+                for (i, chunk) in data.chunks(3).enumerate() {
+                    let offset = i * 4;
+                    rgba[offset] = chunk[0];
+                    rgba[offset + 1] = chunk[1];
+                    rgba[offset + 2] = chunk[2];
+                    rgba[offset + 3] = 255;
+                }
+                rgba
+            }
+        };
+        Some((SourceSize::Gb, rgba))
     }
 
-    fn run_until_frame(&mut self) -> Option<gb::Frame> {
+    /// Run one frame directly on the core (bypassing the session), catching an
+    /// emulator panic. Used by the debug stepping paths and the breakpoint-aware
+    /// run; `collect_audio` is false there since audio is not presented while
+    /// single-stepping. Returns the frame and whether a breakpoint was hit.
+    fn run_frame_on_core(&mut self) -> Option<(gb::Frame, bool)> {
+        let gb = self.session.gb_mut();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Collect audio when running frames
-            self.gb.run_until_frame(true)
+            gb.run_until_frame(false)
         }));
-
         match result {
-            Ok((frame, _breakpoint_hit)) => Some(frame),
+            Ok((frame, breakpoint_hit)) => Some((frame, breakpoint_hit)),
             Err(panic_info) => {
-                // Convert panic info to a string for debugging
                 let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
                     format!("Emulator panic: {}", s)
                 } else if let Some(s) = panic_info.downcast_ref::<String>() {
@@ -1050,33 +1461,8 @@ impl World {
                 } else {
                     "Emulator panic: Unknown error".to_string()
                 };
-
                 println!("Game Boy emulator crashed: {}", error_msg);
                 None
-            }
-        }
-    }
-
-    fn run_until_frame_with_breakpoints(&mut self) -> (Option<gb::Frame>, bool) {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Collect audio when running frames
-            self.gb.run_until_frame(true)
-        }));
-
-        match result {
-            Ok((frame, breakpoint_hit)) => (Some(frame), breakpoint_hit),
-            Err(panic_info) => {
-                // Convert panic info to a string for debugging
-                let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    format!("Emulator panic: {}", s)
-                } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                    format!("Emulator panic: {}", s)
-                } else {
-                    "Emulator panic: Unknown error".to_string()
-                };
-
-                println!("Game Boy emulator crashed: {}", error_msg);
-                (None, false)
             }
         }
     }
@@ -1086,7 +1472,7 @@ impl World {
     /// battery `.sav` lives). No-op unless a printer is attached and a game
     /// finished a print since the last call.
     fn drain_printer_sheets(&mut self) {
-        let sheets = self.gb.take_printer_sheets();
+        let sheets = self.session.gb_mut().take_printer_sheets();
         if sheets.is_empty() {
             return;
         }
@@ -1122,15 +1508,31 @@ impl World {
         }
     }
 
+    /// Step exactly one instruction on the core (debug N key), catching a panic
+    /// and surfacing the current (possibly incomplete) frame. Audio is not
+    /// collected while single-stepping.
+    fn step_one_instruction(&mut self, label: &str) {
+        let gb = self.session.gb_mut();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (_breakpoint_hit, _cycles) = gb.step_instruction(false);
+            gb.get_current_frame()
+        }));
+        match result {
+            Ok(frame) => self.frame = Some(frame),
+            Err(panic_info) => {
+                self.error_state = Some(panic_message(panic_info, label));
+                self.frame = None;
+            }
+        }
+    }
+
     fn update(&mut self) {
         self.drain_printer_sheets();
-        // Handle single frame stepping
+        // Handle single frame stepping (debug): run one frame on the core.
         if self.step_single_frame {
             self.step_single_frame = false;
-            match self.run_until_frame() {
-                Some(frame) => {
-                    self.frame = Some(frame);
-                }
+            match self.run_frame_on_core() {
+                Some((frame, _bp)) => self.frame = Some(frame),
                 None => {
                     self.error_state = Some("Emulator crashed during frame step".to_string());
                     self.frame = None;
@@ -1139,89 +1541,66 @@ impl World {
             return;
         }
 
-        // Handle single cycle stepping
+        // Handle single cycle stepping (debug).
         if self.step_single_cycle {
             self.step_single_cycle = false;
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // Collect audio for cycle stepping too
-                let (_breakpoint_hit, _cycles) = self.gb.step_instruction(true);
-                // For cycle stepping, we need to get the current frame even if incomplete
-                self.gb.get_current_frame()
-            }));
-            match result {
-                Ok(frame) => {
-                    self.frame = Some(frame);
-                }
-                Err(panic_info) => {
-                    let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        format!("Emulator panic during cycle step: {}", s)
-                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                        format!("Emulator panic during cycle step: {}", s)
-                    } else {
-                        "Emulator panic during cycle step: Unknown error".to_string()
-                    };
-                    self.error_state = Some(error_msg);
-                    self.frame = None;
-                }
-            }
+            self.step_one_instruction("during cycle step");
             return;
         }
 
-        // Handle multiple cycle stepping
+        // Handle multiple cycle stepping (debug).
         if let Some(count) = self.step_multiple_cycles.take() {
+            let gb = self.session.gb_mut();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 for _ in 0..count {
-                    // Collect audio for cycle stepping
-                    let (_breakpoint_hit, _cycles) = self.gb.step_instruction(true);
+                    let (_breakpoint_hit, _cycles) = gb.step_instruction(false);
                 }
-                self.gb.get_current_frame()
+                gb.get_current_frame()
             }));
             match result {
-                Ok(frame) => {
-                    self.frame = Some(frame);
-                }
+                Ok(frame) => self.frame = Some(frame),
                 Err(panic_info) => {
-                    let error_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        format!("Emulator panic during multi-cycle step ({}): {}", count, s)
-                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                        format!("Emulator panic during multi-cycle step ({}): {}", count, s)
-                    } else {
-                        format!("Emulator panic during multi-cycle step ({}): Unknown error", count)
-                    };
-                    self.error_state = Some(error_msg);
+                    self.error_state =
+                        Some(panic_message(panic_info, &format!("during multi-cycle step ({count})")));
                     self.frame = None;
                 }
             }
             return;
         }
 
-        // Handle multiple frame stepping
+        // Handle multiple frame stepping (debug).
         if let Some(count) = self.step_multiple_frames.take() {
-            let mut success = true;
             let mut final_frame = None;
-
+            let mut success = true;
             for _ in 0..count {
-                match self.run_until_frame() {
-                    Some(_) => {}, // Continue to next frame
+                match self.run_frame_on_core() {
+                    Some((frame, _bp)) => final_frame = Some(frame),
                     None => {
                         success = false;
                         break;
                     }
                 }
             }
-
             if success {
-                final_frame = Some(self.gb.get_current_frame());
+                self.frame = final_frame;
+            } else {
+                self.error_state =
+                    Some(format!("Emulator crashed during multi-frame step ({count})"));
+                self.frame = None;
             }
+            return;
+        }
 
-            match final_frame {
-                Some(frame) => {
-                    self.frame = Some(frame);
-                }
-                None => {
-                    self.error_state = Some(format!("Emulator crashed during multi-frame step ({})", count));
-                    self.frame = None;
-                }
+        // Frame-advance runs exactly one frame even while the World is paused
+        // (the session's FrameAdvance mode auto-returns to Paused after). This
+        // is what makes the Frame Advance hotkey / menu work while paused.
+        if self.error_state.is_none()
+            && matches!(self.session.mode(), rustyboi_session::RunMode::FrameAdvance)
+        {
+            let output = self.session.run_frame(self.input);
+            self.frame = Some(output.frame);
+            if let Some(audio) = self.audio.as_mut() {
+                audio.push_samples(&output.audio);
             }
             return;
         }
@@ -1236,12 +1615,11 @@ impl World {
         let now = Instant::now();
         let elapsed_since_last_frame = now.duration_since(self.last_frame_time);
 
-
-        // Only update if enough time has passed
+        // Only update if enough time has passed. Fast-forward runs several GB
+        // frames per presented frame (inside the session), so we still pace on
+        // the presented-frame cadence and let the extra frames burst.
         if elapsed_since_last_frame < TARGET_FRAME_TIME {
             let remaining = TARGET_FRAME_TIME - elapsed_since_last_frame;
-
-
             // Sleep for most of the remaining time
             if remaining > Duration::from_micros(100) {
                 std::thread::sleep(remaining - Duration::from_micros(50));
@@ -1259,33 +1637,34 @@ impl World {
 
         self.last_frame_time = Instant::now();
 
-        // Use breakpoint-aware version if we have any breakpoints set
-        if self.gb.get_breakpoints().is_empty() {
-            // No breakpoints - use regular version for better performance
-            match self.run_until_frame() {
-                Some(frame_data) => {
-                    self.frame = Some(frame_data);
-                    self.update_performance_metrics();
+        // Breakpoint debugging bypasses the session (it needs the per-frame
+        // breakpoint-hit flag the session's run loop discards); otherwise the
+        // whole feature stack — input remap, run mode, rewind capture, TAS,
+        // cheats, audio capture — runs inside `Session::run_frame`.
+        if self.session.gb().get_breakpoints().is_empty() {
+            let output = self.session.run_frame(self.input);
+            if output.advanced {
+                self.frame = Some(output.frame);
+                if let Some(audio) = self.audio.as_mut() {
+                    audio.push_samples(&output.audio);
                 }
-                None => {
-                    self.error_state = Some("Emulator crashed".to_string());
-                    println!("Game Boy emulator crashed: {}", self.error_state.as_ref().unwrap());
-                    self.frame = None;
-                }
+                self.update_performance_metrics();
+            } else {
+                // Paused mode (e.g. after a frame-advance): keep last frame.
+                self.frame = Some(output.frame);
             }
         } else {
-            // We have breakpoints - use breakpoint-aware version
-            let (frame_result, breakpoint_hit) = self.run_until_frame_with_breakpoints();
-            match frame_result {
-                Some(frame_data) => {
+            match self.run_frame_on_core() {
+                Some((frame_data, breakpoint_hit)) => {
                     self.frame = Some(frame_data);
                     self.update_performance_metrics();
-
-                    // If a breakpoint was hit, pause emulation
                     if breakpoint_hit {
                         self.is_paused = true;
                         self.breakpoint_hit = true;
-                        println!("Breakpoint hit at PC: {:04X}", self.gb.get_cpu_registers().pc);
+                        println!(
+                            "Breakpoint hit at PC: {:04X}",
+                            self.session.gb().get_cpu_registers().pc
+                        );
                     }
                 }
                 None => {
@@ -1343,23 +1722,48 @@ impl World {
         }
     }
 
+    /// Latch the host's classified button state as the session's abstract
+    /// input for the next frame. The session applies the config remap; we don't
+    /// touch the GB directly.
     fn set_input_state(&mut self, state: input::ButtonState) {
-        self.gb.set_input_state(state);
+        use rustyboi_session::GbButton;
+        let mut a = rustyboi_session::AbstractInput::none();
+        a.set(GbButton::A, state.a);
+        a.set(GbButton::B, state.b);
+        a.set(GbButton::Start, state.start);
+        a.set(GbButton::Select, state.select);
+        a.set(GbButton::Up, state.up);
+        a.set(GbButton::Down, state.down);
+        a.set(GbButton::Left, state.left);
+        a.set(GbButton::Right, state.right);
+        self.input = a;
     }
 
-    // Breakpoint management methods
+    // Breakpoint management methods (host-side debug tooling → core directly).
     fn add_breakpoint(&mut self, address: u16) {
-        self.gb.add_breakpoint(address);
+        self.session.gb_mut().add_breakpoint(address);
     }
 
     fn remove_breakpoint(&mut self, address: u16) {
-        self.gb.remove_breakpoint(address);
+        self.session.gb_mut().remove_breakpoint(address);
     }
 
     fn check_and_clear_breakpoint_hit(&mut self) -> bool {
         let hit = self.breakpoint_hit;
         self.breakpoint_hit = false;
         hit
+    }
+}
+
+/// Format a caught emulator panic into a user-facing error string, tagged with
+/// `context` (e.g. "during cycle step").
+fn panic_message(panic_info: Box<dyn std::any::Any + Send>, context: &str) -> String {
+    if let Some(s) = panic_info.downcast_ref::<&str>() {
+        format!("Emulator panic {context}: {s}")
+    } else if let Some(s) = panic_info.downcast_ref::<String>() {
+        format!("Emulator panic {context}: {s}")
+    } else {
+        format!("Emulator panic {context}: Unknown error")
     }
 }
 
