@@ -2010,8 +2010,6 @@ impl Mmio {
         None
     }
 
-    /// Clear any stale DMA prefetch-shadow (called once the next opcode has been
-    /// fetched without consuming it, so it cannot leak to a later access).
     /// Consume the pending VRAM-source GDMA first-word latch (see the field
     /// doc); returns the first dest word's VRAM address + bank flag.
     pub fn take_gdma_vram_src_fixup(&mut self) -> Option<(u16, bool)> {
@@ -2030,6 +2028,8 @@ impl Mmio {
         }
     }
 
+    /// Clear any stale DMA prefetch-shadow (called once the next opcode has been
+    /// fetched without consuming it, so it cannot leak to a later access).
     pub fn clear_dma_prefetch_shadow(&mut self) {
         self.hdma_fire_dest0 = None;
         self.hdma_snapshot_armed = false;
