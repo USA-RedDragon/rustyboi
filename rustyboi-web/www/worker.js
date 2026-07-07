@@ -14,9 +14,11 @@
 //   main -> worker:
 //     Init{canvas}            transferred OffscreenCanvas; boots the emulator
 //     LoadRom{bytes}          transferred ArrayBuffer of ROM bytes
-//     SetButton{code,pressed} KeyboardEvent.code + state
-//     ClearInput              drop all held buttons
+//     SetButton{code,pressed} KeyboardEvent.code + state (keyboard)
+//     SetTouchMask{mask}      on-screen overlay pressed-button bitmask (multi-touch)
+//     ClearInput              drop all held keyboard buttons
 //     TogglePause
+//     ToggleTouchControls     flip the on-screen overlay (session state)
 //     SetHardware{model}      "dmg" | "cgb"
 //     SetPalette{shades}      16 bytes = 4 RGBA shades (lightest->darkest)
 //     SaveSlot{n,timestamp}
@@ -25,12 +27,19 @@
 //     Quickload
 //     SetFastForward{on}
 //   worker -> main:
-//     Ready                   emulator constructed, loop running
+//     Ready{hardware,uiState} emulator constructed, loop running
 //     Audio{samples}          transferred interleaved Float32Array [l,r,l,r,...]
 //     Status{msg}
-//     Saved{slot} / Loaded{slot,frames}
+//     Error{msg} / ClearError
+//     ResizeContent{width,height}
+//     TouchControls{on}       overlay show/hide reflecting session state
+//     Saved{slot} / Loaded{slot}
 //     Slots{list}             slot numbers with saved state
-//     Error{msg}
+//
+// Most control handlers route through `Emulator` methods that call the shared
+// `session.apply(action)` contract and RETURN a list of PlatformRequest objects
+// ({type:"Status"|"Error"|"ClearError"|"ResizeContent", ...}); `emit()` posts
+// each one straight to the main thread.
 
 import init, { Emulator } from "./pkg/rustyboi_web.js";
 
@@ -48,6 +57,14 @@ let acc = 0;
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 const status = (msg) => post({ type: "Status", msg });
 const fail = (msg) => post({ type: "Error", msg: String(msg) });
+
+// Forward the PlatformRequest objects an `Emulator.apply`-backed method returns
+// (a JS Array of {type, ...}) to the main thread as-is; each is already a valid
+// worker->main message.
+const emit = (reqs) => {
+  if (!reqs) return;
+  for (const r of reqs) post(r);
+};
 
 // Self-paced fixed-timestep loop. We accumulate real elapsed time and run whole
 // GB frames while the accumulator holds at least one frame's worth, capped per
@@ -89,7 +106,7 @@ function startLoop() {
 async function handleInit(canvas) {
   await init();
   emu = await Emulator.create(canvas);
-  post({ type: "Ready", hardware: emu.hardware() });
+  post({ type: "Ready", hardware: emu.hardware(), uiState: emu.ui_state() });
   status("Ready — load a ROM to start.");
   startLoop();
 }
@@ -106,12 +123,15 @@ self.onmessage = async (e) => {
 
     switch (m.type) {
       case "LoadRom":
-        emu.load_rom(new Uint8Array(m.bytes));
-        status(`Running: ${m.name || "ROM"}`);
+        emit(emu.load_rom(m.name || "ROM", new Uint8Array(m.bytes)));
+        if (emu.has_rom()) status(`Running: ${m.name || "ROM"}`);
         post({ type: "Slots", list: Array.from(emu.list_slots()) });
         break;
       case "SetButton":
         emu.set_button(m.code, m.pressed);
+        break;
+      case "SetTouchMask":
+        emu.set_touch_mask(m.mask & 0xff);
         break;
       case "ClearInput":
         emu.clear_input();
@@ -119,8 +139,11 @@ self.onmessage = async (e) => {
       case "TogglePause":
         emu.toggle_pause();
         break;
+      case "ToggleTouchControls":
+        post({ type: "TouchControls", on: emu.toggle_touch_controls() });
+        break;
       case "SetHardware":
-        emu.set_hardware(m.model);
+        emit(emu.set_hardware(m.model));
         break;
       case "SetPalette":
         emu.set_palette(new Uint8Array(m.shades));
@@ -129,24 +152,18 @@ self.onmessage = async (e) => {
         emu.set_fast_forward(!!m.on);
         break;
       case "SaveSlot":
-        emu.save_slot(m.n, m.timestamp);
-        post({ type: "Saved", slot: m.n });
+        emit(emu.save_slot(m.n, m.timestamp));
         post({ type: "Slots", list: Array.from(emu.list_slots()) });
         break;
-      case "LoadSlot": {
-        const frames = emu.load_slot(m.n);
-        post({ type: "Loaded", slot: m.n, frames });
+      case "LoadSlot":
+        emit(emu.load_slot(m.n));
         break;
-      }
       case "Quicksave":
-        emu.quicksave(m.timestamp);
-        post({ type: "Saved", slot: "quick" });
+        emit(emu.quicksave(m.timestamp));
         break;
-      case "Quickload": {
-        const frames = emu.quickload();
-        post({ type: "Loaded", slot: "quick", frames });
+      case "Quickload":
+        emit(emu.quickload());
         break;
-      }
       default:
         break;
     }
