@@ -8,9 +8,7 @@ mod config;
 #[cfg(not(target_os = "android"))]
 mod display;
 #[cfg(not(target_os = "android"))]
-mod framework;
-#[cfg(not(target_os = "android"))]
-mod game_renderer;
+mod error;
 #[cfg(not(target_os = "android"))]
 mod ports;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -21,7 +19,7 @@ mod rewind_worker;
 mod run;
 
 #[cfg(not(target_os = "android"))]
-fn main() -> Result<(), pixels::Error> {
+fn main() -> Result<(), error::PlatformError> {
     run::run()
 }
 
