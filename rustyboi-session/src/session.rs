@@ -117,6 +117,17 @@ pub struct Session {
     recording: Option<Recording>,
     playback: Option<Playback>,
 
+    /// When set, `step_one` does NOT serialize the rewind snapshot inline.
+    /// Instead a due capture is exposed via [`Session::take_pending_snapshot`]
+    /// (a cheap `GB::clone`) so an external owner (the native platform) can run
+    /// the expensive `to_state_bytes` on a worker thread and feed the finished
+    /// blob back with [`Session::push_rewind_bytes`]. Off by default so the
+    /// WASM / library path keeps its self-contained inline capture.
+    rewind_offloaded: bool,
+    /// A cheap clone snapshot captured this frame in offloaded mode, waiting to
+    /// be picked up by the platform worker. `(frame_index, cloned_gb)`.
+    pending_snapshot: Option<(u64, GB)>,
+
     /// Shared audio capture buffer; the installed `CaptureSink` writes here and
     /// `run_frame` drains it.
     audio_buf: SampleBuf,
@@ -156,6 +167,8 @@ impl Session {
             rewind,
             recording: None,
             playback: None,
+            rewind_offloaded: false,
+            pending_snapshot: None,
             audio_buf,
         }
     }
@@ -244,11 +257,18 @@ impl Session {
 
         self.frame_count += 1;
 
-        // Rewind snapshot on the configured cadence.
-        if self.config.rewind.enabled && self.rewind.should_capture(self.frame_count)
-            && let Ok(state) = self.gb.to_state_bytes()
-        {
-            self.rewind.push(self.frame_count, state);
+        // Rewind snapshot on the configured cadence. In offloaded mode we only
+        // take the cheap `GB::clone` here and stash it for the platform worker
+        // to serialize; otherwise serialize inline as before.
+        if self.config.rewind.enabled && self.rewind.should_capture(self.frame_count) {
+            if self.rewind_offloaded {
+                // A previous pending snapshot the platform never drained would
+                // be overwritten; the platform drains every frame so this is a
+                // worst-case single-frame skip, never a leak.
+                self.pending_snapshot = Some((self.frame_count, self.gb.clone()));
+            } else if let Ok(state) = self.gb.to_state_bytes() {
+                self.rewind.push(self.frame_count, state);
+            }
         }
 
         frame
@@ -421,6 +441,48 @@ impl Session {
     /// Drop rewind history (e.g. on ROM change).
     pub fn clear_rewind(&mut self) {
         self.rewind.clear();
+        self.pending_snapshot = None;
+    }
+
+    // --- offloaded rewind capture (native platform worker) ------------------
+    //
+    // These let a host run the expensive savestate serialization off the
+    // emulation thread. The session stays thread-free: it only produces a cheap
+    // `GB::clone` snapshot and accepts the finished blob back. The host owns the
+    // worker thread and the snapshot->serialize->push handoff.
+
+    /// Switch rewind capture into offloaded mode. When enabled, `run_frame`
+    /// stops serializing snapshots inline; instead each due capture is a cheap
+    /// `GB::clone` retrievable via [`Session::take_pending_snapshot`]. Disabling
+    /// restores the self-contained inline serialize path.
+    pub fn set_rewind_offloaded(&mut self, offloaded: bool) {
+        self.rewind_offloaded = offloaded;
+        if !offloaded {
+            self.pending_snapshot = None;
+        }
+    }
+
+    /// Whether offloaded rewind capture is active.
+    pub fn rewind_offloaded(&self) -> bool {
+        self.rewind_offloaded
+    }
+
+    /// Take the cheap snapshot captured this frame (offloaded mode only), if a
+    /// capture was due. The caller serializes the returned `GB` on a worker
+    /// (via [`rustyboi_core_lib::gb::GB::to_state_bytes`]) and feeds the result
+    /// back with [`Session::push_rewind_bytes`]. `None` when no capture was due
+    /// or not in offloaded mode.
+    pub fn take_pending_snapshot(&mut self) -> Option<(u64, GB)> {
+        self.pending_snapshot.take()
+    }
+
+    /// Feed a serialized rewind blob (produced off-thread from a
+    /// [`Session::take_pending_snapshot`] clone) into the rewind ring, applying
+    /// the same drop-oldest policy as inline capture. Frames may arrive slightly
+    /// out of order relative to live play, but each blob is self-describing
+    /// (carries its own frame index) so restore is unaffected.
+    pub fn push_rewind_bytes(&mut self, frame: u64, bytes: Vec<u8>) {
+        self.rewind.push(frame, bytes);
     }
 
     // --- TAS ----------------------------------------------------------------
@@ -574,3 +636,85 @@ impl Session {
 
 /// Reserved slot number for quicksave/quickload.
 pub const QUICK_SLOT: u32 = u32::MAX;
+
+#[cfg(test)]
+mod offload_tests {
+    use super::*;
+    use crate::ports::{MemRumble, MemStorage, MemWebcam};
+
+    fn test_ports() -> Ports {
+        Ports {
+            storage: Box::new(MemStorage::new()),
+            rumble: Box::new(MemRumble::default()),
+            webcam: Box::new(MemWebcam::default()),
+        }
+    }
+
+    fn cfg() -> Config {
+        let mut c = Config::default();
+        c.rewind.enabled = true;
+        c.rewind.depth = 8;
+        c.rewind.interval_frames = 2;
+        c
+    }
+
+    // The offloaded capture path must produce byte-identical rewind blobs to the
+    // inline path: same WHAT (serialized state) captured at the same frames,
+    // only serialized elsewhere. Two ROM-less machines run identically, so we
+    // can compare the ring contents directly.
+    #[test]
+    fn offloaded_capture_matches_inline_bytes() {
+        let mut inline = Session::new(cfg(), test_ports(), [0u8; 32]);
+
+        let mut offl = Session::new(cfg(), test_ports(), [0u8; 32]);
+        offl.set_rewind_offloaded(true);
+
+        for _ in 0..12 {
+            inline.run_frame(AbstractInput::none());
+
+            offl.run_frame(AbstractInput::none());
+            // Synchronously stand in for the worker: serialize the clone and
+            // feed it back, exactly as the platform worker would.
+            if let Some((frame, gb)) = offl.take_pending_snapshot() {
+                let bytes = gb.to_state_bytes().expect("serialize clone");
+                offl.push_rewind_bytes(frame, bytes);
+            }
+        }
+
+        // Same number of retained snapshots and identical footprint.
+        assert_eq!(inline.rewind_stats(), offl.rewind_stats());
+        assert!(inline.rewind_stats().0 > 0, "expected some snapshots captured");
+
+        // Drain both rings newest-first; blobs must be byte-identical.
+        loop {
+            let a = inline.rewind.rewind();
+            let b = offl.rewind.rewind();
+            match (a, b) {
+                (Some(x), Some(y)) => {
+                    assert_eq!(x.frame, y.frame, "frame index mismatch");
+                    assert_eq!(x.state, y.state, "serialized state mismatch");
+                }
+                (None, None) => break,
+                _ => panic!("ring length mismatch"),
+            }
+        }
+    }
+
+    // A due capture in offloaded mode must NOT serialize inline (the emu-thread
+    // cost is only a clone) and must surface exactly one pending snapshot.
+    #[test]
+    fn offloaded_defers_serialization() {
+        let mut s = Session::new(cfg(), test_ports(), [0u8; 32]);
+        s.set_rewind_offloaded(true);
+
+        // interval_frames == 2 -> frame 2 is the first due capture.
+        s.run_frame(AbstractInput::none()); // frame 1, not due
+        assert!(s.take_pending_snapshot().is_none());
+        assert_eq!(s.rewind_stats().0, 0, "nothing pushed inline in offloaded mode");
+
+        s.run_frame(AbstractInput::none()); // frame 2, due
+        let snap = s.take_pending_snapshot();
+        assert!(snap.is_some(), "expected a pending clone at the due frame");
+        assert_eq!(s.rewind_stats().0, 0, "still nothing in the ring until pushed back");
+    }
+}
