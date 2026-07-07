@@ -1230,6 +1230,48 @@ impl GB {
         Self::from_state_bytes(&saved_state)
     }
 
+    /// Re-seed all the `#[serde(skip)]` derived/mirror state after a savestate
+    /// deserialize: cartridge-flag cache, sub-module hardware-revision flags (which
+    /// otherwise revert to default-CGB), and the CPU-mirror flags. The ROM image
+    /// itself is re-attached separately by the frontend via `reattach_rom`.
+    fn post_load_fixup(&mut self) {
+        self.mmio.resync_cart_flags();
+        // The `hardware` identity survives serialization; re-apply the setters
+        // GB::new ran so timer-AGB / APU-revision behavior does not silently
+        // revert to default-CGB after a load.
+        self.mmio.reseed_hardware_flags(self.hardware);
+        self.mmio.set_cgb_de(self.hardware.is_cgb_d_or_later());
+        self.mmio.set_mgb(matches!(self.hardware, Hardware::MGB));
+        // CPU-mirror flags (halt / STOP-window) re-derived from the serialized CPU.
+        self.mmio
+            .sync_cpu_mirror_flags(self.cpu.halted, self.cpu.stop_unhalt_cycles > 0);
+    }
+
+    /// Re-attach the ROM image to a savestate-restored machine. The runtime
+    /// cartridge state (RAM, bank registers, RTC) came back through serde; only
+    /// the read-only ROM (`#[serde(skip)]`) must be supplied. Returns `false` when
+    /// the state carried no cartridge (old pre-cartridge-serialize state) so the
+    /// caller falls back to a fresh `insert`. Re-derives `cart_has_clock`.
+    pub fn reattach_rom(&mut self, rom: &[u8]) -> bool {
+        self.mmio.reattach_rom(rom)
+    }
+
+    /// Whether a serde-restored cartridge is present but still awaiting its ROM
+    /// image (i.e. `reattach_rom` must be called before the machine can run).
+    pub fn cartridge_needs_rom(&self) -> bool {
+        self.mmio.cartridge_needs_rom()
+    }
+
+    /// Clone the raw ROM image out of the currently-attached cartridge so a load
+    /// path can carry it into a freshly-deserialized machine. `None` when no cart
+    /// is inserted (or its ROM is not attached).
+    pub fn detach_rom_bytes(&self) -> Option<Vec<u8>> {
+        self.mmio
+            .get_cartridge()
+            .filter(|c| c.has_rom())
+            .map(|c| c.detach_rom())
+    }
+
     pub fn to_state_file(&self, path: &str) -> Result<(), io::Error> {
         fs::write(path, self.to_state_bytes()?)?;
         Ok(())
@@ -1252,7 +1294,7 @@ impl GB {
     pub fn from_state_bytes(bytes: &[u8]) -> Result<Self, io::Error> {
         let mut gb: GB =
             bincode::deserialize(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        gb.mmio.resync_cart_flags();
+        gb.post_load_fixup();
         Ok(gb)
     }
 
@@ -1791,5 +1833,154 @@ mod savestate_roundtrip_tests {
         let restored = GB::from_state_bytes(&state).expect("deserialize");
         let oam_after: Vec<u8> = (0xFE00..=0xFE9F).map(|a| restored.read_memory(a)).collect();
         assert_eq!(oam_before, oam_after, "OAM not preserved across savestate");
+    }
+
+    /// Re-attach the live ROM to a savestate-restored machine exactly as the
+    /// frontends do (the ROM image is `#[serde(skip)]`), returning the restored
+    /// machine ready to run.
+    fn restore_with_rom(state: &[u8], live: &GB) -> GB {
+        let mut g = GB::from_state_bytes(state).expect("deserialize");
+        if g.cartridge_needs_rom() {
+            let rom = live.detach_rom_bytes().expect("live ROM");
+            assert!(g.reattach_rom(&rom), "reattach_rom");
+        }
+        g
+    }
+
+    /// Core fidelity assertion: from a machine paused at some capture point, a
+    /// state saved + restored (ROM re-attached) must step byte-identically for
+    /// `frames` frames — both the full serialized machine AND the frame pixels
+    /// must match every frame. Also proves the state carries NO ROM (small).
+    fn assert_roundtrip(mut gb: GB, frames: usize, label: &str) {
+        let state = gb.to_state_bytes().expect("serialize");
+        // The ROM image must NOT be embedded in the state (`rom_data` is
+        // `#[serde(skip)]`; serializing it into every rewind-ring snapshot would be
+        // fatal). The direct proof: the deserialized cartridge comes back present
+        // but WITHOUT its ROM, so the frontend must re-attach it.
+        {
+            let bare = GB::from_state_bytes(&state).expect("deserialize");
+            assert!(
+                bare.cartridge_needs_rom(),
+                "{label}: cartridge restored with ROM already attached — ROM was serialized"
+            );
+        }
+        let mut restored = restore_with_rom(&state, &gb);
+        // The restored machine's own re-serialization must equal the original's
+        // (every reachable field round-tripped, ignoring the skipped ROM).
+        assert_eq!(
+            state,
+            restored.to_state_bytes().expect("re-serialize"),
+            "{label}: restored state not byte-identical at frame 0"
+        );
+        for frame in 0..frames {
+            let orig = frame_bytes(&gb.run_until_frame(false).0);
+            let redo = frame_bytes(&restored.run_until_frame(false).0);
+            assert_eq!(orig, redo, "{label}: frame {frame} pixels differ after restore");
+            assert_eq!(
+                gb.to_state_bytes().expect("serialize"),
+                restored.to_state_bytes().expect("serialize"),
+                "{label}: full machine state diverged at frame {frame}"
+            );
+        }
+    }
+
+    /// Full-machine round-trip fidelity across hardware revisions and capture
+    /// points that exercise the newly-serialized anchors (cartridge runtime
+    /// state, hardware-revision flags, HALT/OAM-DMA/HDMA mirrors). Permanent
+    /// guard for the "state does not fully round-trip the machine" gap.
+    #[test]
+    fn savestate_full_roundtrip_fidelity() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(savestate_full_roundtrip_fidelity_inner)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn savestate_full_roundtrip_fidelity_inner() {
+        // (rom, hardware) covering DMG / CGB / CGB-E / AGB / SGB. dmg-acid2 is a
+        // plain (no-MBC) cart; cgb-acid2 drives the CGB feature set.
+        let cases: &[(&str, Hardware)] = &[
+            ("../gb-test-roms/dmg-acid2/dmg-acid2.gb", Hardware::DMG),
+            ("../gb-test-roms/cgb-acid2/cgb-acid2.gbc", Hardware::CGB),
+            ("../gb-test-roms/cgb-acid2/cgb-acid2.gbc", Hardware::CGBE),
+            ("../gb-test-roms/cgb-acid2/cgb-acid2.gbc", Hardware::AGB),
+            ("../gb-test-roms/dmg-acid2/dmg-acid2.gb", Hardware::SGB),
+        ];
+        let mut ran = false;
+        for &(path, hw) in cases {
+            let Some(mut gb) = gb_from_rom(path, hw) else {
+                eprintln!("skipping {path} ({hw:?}): ROM not present");
+                continue;
+            };
+            ran = true;
+            // Settle a few frames, then save mid-scanline so the capture straddles
+            // an active render (mode 2/3, OAM-DMA-adjacent, HDMA-eligible on CGB).
+            for _ in 0..20 {
+                gb.run_until_frame(false);
+            }
+            gb.run_until_frame(false);
+            for _ in 0..1500 {
+                gb.step_instruction(false);
+            }
+            assert_roundtrip(gb, 6, &format!("{path} {hw:?} midframe"));
+        }
+
+        // Capture-point variants that exercise the specific gap anchors: save
+        // while the CPU is parked in HALT and while an OAM-DMA is mid-transfer.
+        if let Some(mut gb) = gb_from_rom("../gb-test-roms/dmg-acid2/dmg-acid2.gb", Hardware::DMG) {
+            ran = true;
+            for _ in 0..20 {
+                gb.run_until_frame(false);
+            }
+            // Kick an OAM DMA (source 0xC000) then step a couple M-cycles so the
+            // save lands with dma_active + dma_pos mid-transfer.
+            gb.write_memory(0xFF46, 0xC0);
+            for _ in 0..3 {
+                gb.step_instruction(false);
+            }
+            assert_roundtrip(gb, 4, "dmg mid-OAM-DMA");
+        }
+
+        // MBC3 + RTC cartridge: proves the RAM, bank registers, and live RTC
+        // (seconds/…/day-high + sub-second accumulator) survive the round-trip.
+        if let Some(mut gb) = gb_from_rom("../gb-test-roms/rtc3test/rtc3test.gb", Hardware::DMG) {
+            ran = true;
+            for _ in 0..30 {
+                gb.run_until_frame(false);
+            }
+            assert_roundtrip(gb, 4, "rtc3test MBC3-RTC");
+        }
+
+        if !ran {
+            eprintln!("skipping savestate_full_roundtrip_fidelity: no test ROMs present");
+        }
+    }
+
+    /// The hardware-revision flags (`#[serde(skip)]` on the timer/APU sub-structs)
+    /// must be re-derived on load from the serialized `hardware` identity, not
+    /// silently revert to default-CGB. A round-tripped AGB must still report AGB.
+    #[test]
+    fn savestate_reseeds_hardware_flags() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let Some(gb) =
+                    gb_from_rom("../gb-test-roms/cgb-acid2/cgb-acid2.gbc", Hardware::AGB)
+                else {
+                    eprintln!("skipping: cgb-acid2 not present");
+                    return;
+                };
+                let state = gb.to_state_bytes().expect("serialize");
+                let restored = restore_with_rom(&state, &gb);
+                assert!(
+                    restored.mmio.is_agb(),
+                    "AGB hardware flag lost across savestate load"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
