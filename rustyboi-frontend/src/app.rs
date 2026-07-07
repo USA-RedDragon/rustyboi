@@ -81,9 +81,6 @@ pub struct App {
 
     current_rom_path: Option<String>,
     current_bios_path: Option<String>,
-    /// Raw ROM bytes, kept so a slot/state load can re-derive the ROM id and
-    /// reinsert the cartridge.
-    rom_bytes: Option<Vec<u8>>,
 
     input: AbstractInput,
 
@@ -111,6 +108,10 @@ pub struct App {
     /// `content*scale + inset`, letting the game fill the central rect at full
     /// integer scale with no letterbox bars. Dynamic — never a static offset.
     content_inset: (f32, f32),
+
+    /// Reused RGBA upload scratch for `present`, so the per-frame frame-to-RGBA
+    /// conversion (up to SGB 256×224×4) doesn't heap-allocate every frame.
+    rgba_scratch: Vec<u8>,
 }
 
 impl App {
@@ -123,7 +124,6 @@ impl App {
         palette: ColorPalette,
         rom_path: Option<String>,
         bios_path: Option<String>,
-        rom_bytes: Option<Vec<u8>>,
         should_pause: bool,
     ) -> Self {
         // Seed the session's presentation palette from the CLI/config choice so
@@ -140,7 +140,6 @@ impl App {
             step_single_cycle: false,
             current_rom_path: rom_path,
             current_bios_path: bios_path,
-            rom_bytes,
             input: AbstractInput::none(),
             pending_requests: Vec::new(),
             user_paused: should_pause,
@@ -152,6 +151,7 @@ impl App {
             last_title_update: now,
             fps: 0.0,
             content_inset: (0.0, 0.0),
+            rgba_scratch: Vec::new(),
         }
     }
 
@@ -276,9 +276,7 @@ impl App {
     /// desktop; web/Android pass bytes directly). `path` is the display/name for
     /// title + printer output (`None` for content-only sources).
     pub fn load_rom_bytes(&mut self, bytes: Vec<u8>, path: Option<String>) -> Result<(), String> {
-        let rom_id = self.session.finish_load_rom(&bytes).map_err(|e| e.to_string())?;
-        let _ = rom_id;
-        self.rom_bytes = Some(bytes);
+        self.session.finish_load_rom(&bytes).map_err(|e| e.to_string())?;
         self.current_rom_path = path;
         self.error_state = None;
         self.frame = None;
@@ -306,28 +304,28 @@ impl App {
     /// `reload_rom` supplies `(path, bytes)` for the ROM to reinsert (the
     /// platform reads it from disk); `None` keeps the already-loaded ROM. The
     /// core-side re-attach logic lives in the session; this wrapper keeps the
-    /// app's `rom_bytes` / path / pause bookkeeping in sync.
+    /// app's path / pause bookkeeping in sync.
     pub fn load_state_bytes(
         &mut self,
         state: &[u8],
         reload_rom: Option<(String, Vec<u8>)>,
     ) -> Result<(), String> {
-        // Prefer the ROM the caller supplied; else keep the already-loaded bytes
-        // (a same-ROM reload has `reload_rom == None`).
-        let rom_bytes = reload_rom
-            .as_ref()
-            .map(|(_, b)| b.clone())
-            .or_else(|| self.rom_bytes.clone());
+        // Prefer the ROM the caller supplied; else keep the currently-loaded
+        // cartridge (a same-ROM reload has `reload_rom == None`, and the session
+        // re-attaches the ROM from its own live machine). The ROM id re-keys the
+        // slot: hash the supplied bytes, else reuse the session's current id — so
+        // no frontend-side ROM copy needs to be retained.
         if let Some((path, _)) = &reload_rom {
             self.current_rom_path = Some(path.clone());
         }
         let reload_slice = reload_rom.as_ref().map(|(_, b)| b.as_slice());
-        let rom_id = rom_bytes.as_deref().map(rustyboi_session::sha256).unwrap_or([0u8; 32]);
+        let rom_id = reload_slice
+            .map(rustyboi_session::sha256)
+            .unwrap_or_else(|| self.session.rom_id());
         self.session
             .finish_load_state(state, reload_slice, rom_id)
             .map_err(|e| e.to_string())?;
         let has_content = self.session.gb().has_rom() || self.session.gb().has_bios();
-        self.rom_bytes = rom_bytes;
         self.error_state = None;
         self.frame = None;
         if self.auto_paused_no_content && has_content {
@@ -365,35 +363,45 @@ impl App {
     /// Convert the latest presented frame to the RGBA source the renderer
     /// uploads, preferring the SGB composite when the toggle is on and the
     /// machine offers one.
-    fn present(&self) -> Option<GameFrame> {
+    fn present(&mut self) -> Option<GameFrame<'_>> {
+        // All conversions fill the reused `rgba_scratch` so the desktop present
+        // path never heap-allocates the (up to 256×224×4) RGBA buffer per frame.
+        let scratch = &mut self.rgba_scratch;
         if self.session.sgb_border()
             && let Some(rgb) = self.session.gb().sgb_composited_frame()
         {
-            let mut rgba = Vec::with_capacity((rgb.len() / 3) * 4);
+            scratch.clear();
+            scratch.reserve((rgb.len() / 3) * 4);
             for chunk in rgb.chunks_exact(3) {
-                rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+                scratch.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
             }
-            return Some(GameFrame { size: SourceSize::Sgb, rgba });
+            return Some(GameFrame { size: SourceSize::Sgb, rgba: scratch });
         }
 
         // The DMG presentation palette is session-owned; convert its choice.
         let palette = ColorPalette::from_choice(self.session.palette());
         let gb_frame = self.frame.as_ref()?;
-        let rgba = match gb_frame {
-            gb::Frame::Monochrome(data) => convert_to_rgba(data, &palette).to_vec(),
+        scratch.clear();
+        scratch.resize(ppu::FRAMEBUFFER_SIZE * 4, 0);
+        match gb_frame {
+            gb::Frame::Monochrome(data) => {
+                let colors = palette.get_rgba_colors();
+                for (i, &pixel) in data.iter().enumerate() {
+                    let rgba = colors.get(pixel as usize).unwrap_or(&colors[3]);
+                    scratch[i * 4..i * 4 + 4].copy_from_slice(rgba);
+                }
+            }
             gb::Frame::Color(data) => {
-                let mut rgba = vec![0u8; ppu::FRAMEBUFFER_SIZE * 4];
                 for (i, chunk) in data.chunks(3).enumerate() {
                     let offset = i * 4;
-                    rgba[offset] = chunk[0];
-                    rgba[offset + 1] = chunk[1];
-                    rgba[offset + 2] = chunk[2];
-                    rgba[offset + 3] = 255;
+                    scratch[offset] = chunk[0];
+                    scratch[offset + 1] = chunk[1];
+                    scratch[offset + 2] = chunk[2];
+                    scratch[offset + 3] = 255;
                 }
-                rgba
             }
         };
-        Some(GameFrame { size: SourceSize::Gb, rgba })
+        Some(GameFrame { size: SourceSize::Gb, rgba: scratch })
     }
 
     // --- run one emulation frame -------------------------------------------
@@ -849,20 +857,6 @@ fn panic_message(panic_info: Box<dyn std::any::Any + Send>, context: &str) -> St
     } else {
         format!("Emulator panic {context}: Unknown error")
     }
-}
-
-fn convert_to_rgba(
-    frame: &[u8; ppu::FRAMEBUFFER_SIZE],
-    palette: &ColorPalette,
-) -> [u8; ppu::FRAMEBUFFER_SIZE * 4] {
-    let mut out = [0; ppu::FRAMEBUFFER_SIZE * 4];
-    let colors = palette.get_rgba_colors();
-    for (i, &pixel) in frame.iter().enumerate() {
-        let rgba = colors.get(pixel as usize).unwrap_or(&colors[3]);
-        let offset = i * 4;
-        out[offset..offset + 4].copy_from_slice(rgba);
-    }
-    out
 }
 
 #[cfg(test)]

@@ -34,6 +34,86 @@ fn rgb555_to_rgb888(color: u16) -> (u8, u8, u8) {
     (((r * 255) / 31) as u8, ((g * 255) / 31) as u8, ((b * 255) / 31) as u8)
 }
 
+/// Lossless serde codec for the fixed-size framebuffers. Savestates (rewind
+/// ring, quicksaves) carry all four framebuffers; on any given machine exactly
+/// one mode's pair is live and the other pair is all-zero (mono vs. color are
+/// mutually exclusive by hardware), and DMG shade frames have long constant
+/// runs. This encodes each buffer as either a run-length list or the raw bytes,
+/// picking whichever is smaller — so a blank pair costs a few bytes instead of
+/// its full 46/138 KB, while a high-entropy CGB frame falls back to raw and is
+/// never larger than before. Byte-exact restore; runs only at save/load, so the
+/// render hot path is untouched.
+mod fb_rle {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    // (value, count) runs; each costs 5 bytes in bincode. Falling back to raw
+    // when the run list would exceed the byte buffer keeps this a pure win. The
+    // serialize side borrows the buffer; the deserialize side owns it. Both
+    // shapes share the same two-variant bincode layout (tag 0 = Rle, 1 = Raw).
+    #[derive(Serialize)]
+    enum EncodedRef<'a> {
+        Rle(Vec<(u8, u32)>),
+        Raw(&'a serde_bytes::Bytes),
+    }
+
+    #[derive(Deserialize)]
+    enum EncodedOwned {
+        Rle(Vec<(u8, u32)>),
+        Raw(serde_bytes::ByteBuf),
+    }
+
+    pub fn serialize<S: Serializer, const N: usize>(
+        buf: &[u8; N],
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut runs: Vec<(u8, u32)> = Vec::new();
+        for &b in buf.iter() {
+            match runs.last_mut() {
+                Some((v, c)) if *v == b => *c += 1,
+                _ => {
+                    // Once the run list can't beat raw, stop building it.
+                    if runs.len() * 5 >= N {
+                        return EncodedRef::Raw(serde_bytes::Bytes::new(buf)).serialize(s);
+                    }
+                    runs.push((b, 1));
+                }
+            }
+        }
+        EncodedRef::Rle(runs).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
+        d: D,
+    ) -> Result<[u8; N], D::Error> {
+        let mut buf = [0u8; N];
+        match EncodedOwned::deserialize(d)? {
+            EncodedOwned::Raw(bytes) => {
+                if bytes.len() != N {
+                    return Err(D::Error::custom("framebuffer raw length mismatch"));
+                }
+                buf.copy_from_slice(&bytes);
+            }
+            EncodedOwned::Rle(runs) => {
+                let mut i = 0usize;
+                for (v, c) in runs {
+                    for _ in 0..c {
+                        if i >= N {
+                            return Err(D::Error::custom("framebuffer RLE overflow"));
+                        }
+                        buf[i] = v;
+                        i += 1;
+                    }
+                }
+                if i != N {
+                    return Err(D::Error::custom("framebuffer RLE underflow"));
+                }
+            }
+        }
+        Ok(buf)
+    }
+}
+
 // OAM constants
 pub const OAM_SPRITE_COUNT: usize = 40; // 40 sprites total in OAM
 pub const OAM_BYTES_PER_SPRITE: usize = 4; // 4 bytes per sprite
@@ -1475,9 +1555,9 @@ pub struct Ppu {
     #[serde(default)]
     bgp_defer_countdown: u8,
 
-    #[serde(with = "serde_bytes")]
+    #[serde(with = "fb_rle")]
     fb_a: [u8; FRAMEBUFFER_SIZE],
-    #[serde(with = "serde_bytes")]
+    #[serde(with = "fb_rle")]
     fb_b: [u8; FRAMEBUFFER_SIZE],
     /// SGB MASK_EN Freeze latch: the DMG shade frame captured at the first
     /// frame boundary after the freeze engaged, shown instead of the live
@@ -1485,9 +1565,9 @@ pub struct Ppu {
     /// behind this). None when not frozen.
     #[serde(default)]
     sgb_freeze_fb: Option<Vec<u8>>,
-    #[serde(with = "serde_bytes")]
+    #[serde(with = "fb_rle")]
     color_fb_a: [u8; FRAMEBUFFER_SIZE * 3], // RGB color framebuffer
-    #[serde(with = "serde_bytes")]
+    #[serde(with = "fb_rle")]
     color_fb_b: [u8; FRAMEBUFFER_SIZE * 3], // RGB color framebuffer
     have_frame: bool,
     // First-frame-after-LCD-enable display blanking. On real hardware the panel
