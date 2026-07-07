@@ -2644,6 +2644,7 @@ dependencies = [
  "rfd",
  "rustyboi-core",
  "rustyboi-debugger",
+ "rustyboi-session",
  "wasm-bindgen-futures",
 ]
 

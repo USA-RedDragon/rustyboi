@@ -6,6 +6,8 @@
 //! through the boxed service ports; video+audio come back as return values.
 //! No wall clock, no filesystem, no threads: WASM-clean.
 
+use crate::action::{HardwareChoice, PaletteChoice};
+use crate::apply::palette_shades;
 use crate::audio::{CaptureSink, SampleBuf};
 use crate::cheats::{Cheat, CheatError, CheatSet};
 use crate::config::Config;
@@ -14,11 +16,17 @@ use crate::ports::{Rumble, Storage, StorageError, Webcam, WEBCAM_PIXELS};
 use crate::rewind::RewindBuffer;
 use crate::tas::{Playback, Recording};
 
+use rustyboi_core_lib::cartridge::Cartridge;
 use rustyboi_core_lib::gb::{Frame, Hardware, GB};
 use rustyboi_core_lib::input::ButtonState;
 use rustyboi_core_lib::movie::{self, Movie};
 
 use std::sync::{Arc, Mutex};
+
+/// Plain Game Boy screen dimensions (pre-scale).
+pub const GB_SIZE: (u32, u32) = (160, 144);
+/// SGB composited (screen + border) dimensions (pre-scale).
+pub const SGB_SIZE: (u32, u32) = (256, 224);
 
 /// How the emulator advances each `run_frame` call.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -137,6 +145,19 @@ pub struct Session {
     /// Shared audio capture buffer; the installed `CaptureSink` writes here and
     /// `run_frame` drains it.
     audio_buf: SampleBuf,
+
+    // --- presentation state the shared `apply` owns -------------------------
+    /// Whether to present the SGB border composite when one is available.
+    sgb_border: bool,
+    /// Whether the on-screen touch overlay is shown.
+    touch_controls: bool,
+    /// The DMG presentation palette choice (the concrete shades live in
+    /// `config.dmg_palette`; this is the menu selection they mirror).
+    palette: PaletteChoice,
+
+    // --- debug-step requests set by `apply`, drained by the frontend --------
+    pending_step_cycles: Option<u32>,
+    pending_step_frames: Option<u32>,
 }
 
 impl Session {
@@ -162,6 +183,7 @@ impl Session {
         // fails; our CaptureSink::start is infallible and gb is fresh here.
         let _ = gb.enable_audio(Box::new(CaptureSink::new(audio_buf.clone())));
         let rewind = RewindBuffer::new(config.rewind.depth, config.rewind.interval_frames);
+        let palette = PaletteChoice::from_shades(config.dmg_palette.shades);
         Session {
             gb,
             config,
@@ -176,6 +198,11 @@ impl Session {
             rewind_offloaded: false,
             pending_snapshot: None,
             audio_buf,
+            sgb_border: true,
+            touch_controls: cfg!(target_os = "android"),
+            palette,
+            pending_step_cycles: None,
+            pending_step_frames: None,
         }
     }
 
@@ -597,6 +624,210 @@ impl Session {
         Ok(())
     }
 
+    // --- presentation state (shared `apply` owns these) ---------------------
+
+    /// Whether the SGB border composite is presented when available.
+    pub fn sgb_border(&self) -> bool {
+        self.sgb_border
+    }
+
+    /// Set whether the SGB border composite is presented.
+    pub fn set_sgb_border(&mut self, on: bool) {
+        self.sgb_border = on;
+    }
+
+    /// Whether the on-screen touch overlay is shown.
+    pub fn touch_controls(&self) -> bool {
+        self.touch_controls
+    }
+
+    /// Set whether the on-screen touch overlay is shown.
+    pub fn set_touch_controls(&mut self, on: bool) {
+        self.touch_controls = on;
+    }
+
+    /// The current DMG presentation palette choice.
+    pub fn palette(&self) -> PaletteChoice {
+        self.palette
+    }
+
+    /// Whether the SGB border is actually being presented this frame (toggle on
+    /// AND the machine offers a composite).
+    pub fn showing_sgb_border(&self) -> bool {
+        self.sgb_border && self.gb.sgb_composited_frame().is_some()
+    }
+
+    /// The content size (pre-scale) that should drive the window: the SGB
+    /// composite size only when the border is actually shown, else the plain GB
+    /// screen.
+    pub fn content_size(&self) -> (u32, u32) {
+        if self.showing_sgb_border() {
+            SGB_SIZE
+        } else {
+            GB_SIZE
+        }
+    }
+
+    /// Whether fast-forward is currently engaged.
+    pub fn is_fast_forward(&self) -> bool {
+        matches!(self.mode, RunMode::FastForward(_))
+    }
+
+    /// Toggle fast-forward on/off (fast-forward ↔ normal).
+    pub fn toggle_fast_forward(&mut self) {
+        match self.mode {
+            RunMode::FastForward(_) => self.mode = RunMode::Normal,
+            _ => self.fast_forward(),
+        }
+    }
+
+    // --- config-mutating actions (persist through storage) ------------------
+
+    /// A menu-choice view of the configured hardware model.
+    pub fn hardware_choice(&self) -> HardwareChoice {
+        HardwareChoice::from_hardware(self.config.hardware)
+    }
+
+    /// Change the emulated hardware model and rebuild the machine for it,
+    /// carrying the current cartridge. Persists the config.
+    pub fn set_hardware_choice(&mut self, choice: HardwareChoice) {
+        self.config.hardware = choice.to_hardware();
+        let gb = self.rebuild_current_gb();
+        self.replace_machine(*gb, self.rom_id);
+        self.persist_config();
+    }
+
+    /// Change the DMG presentation palette; persists the config.
+    pub fn set_palette_choice(&mut self, choice: PaletteChoice) {
+        self.init_palette_choice(choice);
+        self.persist_config();
+    }
+
+    /// Seed the presentation palette without persisting (startup, from the
+    /// CLI/config-derived choice).
+    pub fn init_palette_choice(&mut self, choice: PaletteChoice) {
+        self.palette = choice;
+        self.config.dmg_palette.shades = palette_shades(choice);
+    }
+
+    /// Enable/disable rewind capture; persists the config.
+    pub fn set_rewind_enabled(&mut self, enabled: bool) {
+        self.config.rewind.enabled = enabled;
+        self.rewind
+            .reconfigure(self.config.rewind.depth, self.config.rewind.interval_frames);
+        self.persist_config();
+    }
+
+    /// Set the rewind snapshot interval (frames between captures, ≥ 1);
+    /// persists the config.
+    pub fn set_rewind_interval(&mut self, interval_frames: u32) {
+        self.config.rewind.interval_frames = interval_frames.max(1);
+        self.rewind
+            .reconfigure(self.config.rewind.depth, self.config.rewind.interval_frames);
+        self.persist_config();
+    }
+
+    /// Set how many rewind snapshots are retained (≥ 1); persists the config.
+    pub fn set_rewind_depth(&mut self, depth: usize) {
+        self.config.rewind.depth = depth.max(1);
+        self.rewind
+            .reconfigure(self.config.rewind.depth, self.config.rewind.interval_frames);
+        self.persist_config();
+    }
+
+    fn persist_config(&mut self) {
+        if let Err(e) = self.save_config() {
+            log_config_error(&e);
+        }
+    }
+
+    /// Power-cycle the current console: rebuild the machine from the session's
+    /// hardware model + current cartridge (so every model-derived flag is
+    /// re-applied — `GB::new`, not in-place reset), clear rewind, run normally.
+    pub fn restart(&mut self) {
+        let gb = self.rebuild_current_gb();
+        self.replace_machine(*gb, self.rom_id);
+        self.clear_rewind();
+        self.mode = RunMode::Normal;
+    }
+
+    /// Build a fresh, booted machine for the current hardware carrying a clone
+    /// of the inserted cartridge (if any). Boxed to keep the ~207 KB machine off
+    /// the stack.
+    fn rebuild_current_gb(&self) -> Box<GB> {
+        let mut gb = GB::new(self.config.hardware);
+        if let Some(cart) = self.gb.cartridge() {
+            gb.insert(cart.clone());
+            gb.skip_bios();
+        }
+        Box::new(gb)
+    }
+
+    // --- debug-step requests (set by `apply`, drained by the run loop) ------
+
+    /// Queue a multi-instruction debug step (consumed by the frontend's run
+    /// loop via [`Session::take_step_cycles`]).
+    pub fn request_step_cycles(&mut self, count: u32) {
+        self.pending_step_cycles = Some(count);
+    }
+
+    /// Queue a multi-frame debug step (consumed via
+    /// [`Session::take_step_frames`]).
+    pub fn request_step_frames(&mut self, count: u32) {
+        self.pending_step_frames = Some(count);
+    }
+
+    /// Take a pending multi-instruction step request, if any.
+    pub fn take_step_cycles(&mut self) -> Option<u32> {
+        self.pending_step_cycles.take()
+    }
+
+    /// Take a pending multi-frame step request, if any.
+    pub fn take_step_frames(&mut self) -> Option<u32> {
+        self.pending_step_frames.take()
+    }
+
+    /// Load a ROM from raw bytes: build a fresh booted machine for the current
+    /// hardware, insert the cartridge, and re-bind the session to it. Returns
+    /// the new ROM id on success.
+    pub fn finish_load_rom(&mut self, bytes: &[u8]) -> Result<[u8; 32], SessionError> {
+        let cart = Cartridge::from_bytes(bytes).map_err(|e| SessionError::State(e.to_string()))?;
+        let mut gb = GB::new(self.config.hardware);
+        gb.insert(cart);
+        gb.skip_bios();
+        let rom_id = rustyboi_core_lib::movie::sha256(bytes);
+        self.replace_machine(gb, rom_id);
+        Ok(rom_id)
+    }
+
+    /// Load a savestate from raw bytes, re-binding to `rom_id` (derived by the
+    /// caller from the reload ROM, or the existing id when `None`). The current
+    /// cartridge is re-attached by [`Session::restore_state`] as needed; a
+    /// caller-supplied `reload_rom` is inserted first when the state carried no
+    /// cartridge.
+    pub fn finish_load_state(
+        &mut self,
+        state: &[u8],
+        reload_rom: Option<&[u8]>,
+        rom_id: [u8; 32],
+    ) -> Result<(), SessionError> {
+        let mut gb = GB::from_state_bytes(state).map_err(|e| SessionError::State(e.to_string()))?;
+        if gb.cartridge_needs_rom() {
+            if let Some(rom) = reload_rom {
+                gb.reattach_rom(rom);
+            } else if let Some(rom) = self.gb.detach_rom_bytes() {
+                gb.reattach_rom(&rom);
+            }
+        } else if let Some(rom) = reload_rom {
+            match Cartridge::from_bytes(rom) {
+                Ok(cart) => gb.insert(cart),
+                Err(e) => return Err(SessionError::State(format!("failed to reattach ROM: {e}"))),
+            }
+        }
+        self.replace_machine(gb, rom_id);
+        Ok(())
+    }
+
     // --- cheats -------------------------------------------------------------
 
     /// Add a Game Genie / GameShark code. Game Genie codes patch the ROM
@@ -651,6 +882,19 @@ impl Session {
 
 /// Reserved slot number for quicksave/quickload.
 pub const QUICK_SLOT: u32 = u32::MAX;
+
+/// Log a config-save failure. Non-fatal (a failed persist never bricks a
+/// running session); `eprintln` on native, dropped on wasm to stay clean.
+fn log_config_error(e: &SessionError) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        eprintln!("Failed to save config: {e}");
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = e;
+    }
+}
 
 #[cfg(test)]
 mod offload_tests {
