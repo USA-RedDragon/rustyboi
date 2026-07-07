@@ -26,6 +26,18 @@ pub enum FileData {
     Contents { name: String, data: Vec<u8> },
 }
 
+/// What a picked file is being loaded AS, so the frontend routes the resolved
+/// bytes to the right `finish_*` (a ROM, a savestate, a battery `.sav`, or an
+/// `.rtc` blob). Carried alongside the [`FileData`] on a
+/// [`LoadFile`](crate::apply::PlatformRequest::LoadFile) request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadPurpose {
+    Rom,
+    State,
+    Battery,
+    Rtc,
+}
+
 /// A single ROM discovered by the Android library scanner.
 ///
 /// The `uri` is an opaque SAF document URI string (e.g.
@@ -79,6 +91,12 @@ pub struct SessionUiState {
     pub slots: Vec<u32>,
     /// Active cheat codes, in insertion order.
     pub cheats: Vec<String>,
+    /// Whether the inserted cartridge has battery-backed SRAM (gates the
+    /// Import/Export Battery Save menu items).
+    pub has_battery: bool,
+    /// Whether the inserted cartridge has a real-time clock (gates the
+    /// Import/Export RTC menu items).
+    pub has_rtc: bool,
 }
 
 impl Default for SessionUiState {
@@ -94,6 +112,8 @@ impl Default for SessionUiState {
             touch_controls: cfg!(target_os = "android"),
             slots: Vec::new(),
             cheats: Vec::new(),
+            has_battery: false,
+            has_rtc: false,
         }
     }
 }
@@ -111,6 +131,21 @@ pub enum UiAction {
     LoadState(FileData),
     /// Load a ROM from a picked file.
     LoadRom(FileData),
+    /// Import a savestate from a picked file (explicit File → Import, distinct
+    /// from the numbered/quick slots).
+    ImportState(FileData),
+    /// Export the current machine state as a downloadable/saveable file (File →
+    /// Export). Unlike [`SaveState`](Self::SaveState) this carries no path, so it
+    /// works uniformly on web (browser download) as well as desktop/Android.
+    ExportState,
+    /// Import a battery `.sav` image into the current cartridge.
+    ImportBatterySave(FileData),
+    /// Export the current cartridge's battery SRAM as a `.sav` file.
+    ExportBatterySave,
+    /// Import an `.rtc` clock blob into the current cartridge.
+    ImportRtc(FileData),
+    /// Export the current cartridge's RTC state as a `.rtc` file.
+    ExportRtc,
     /// Toggle pause / resume.
     TogglePause,
     /// Plug/unplug a Game Boy Printer on the link port.
@@ -184,6 +219,12 @@ impl UiAction {
             UiAction::SaveState(_) => ActionKind::SaveState,
             UiAction::LoadState(_) => ActionKind::LoadState,
             UiAction::LoadRom(_) => ActionKind::LoadRom,
+            UiAction::ImportState(_) => ActionKind::ImportState,
+            UiAction::ExportState => ActionKind::ExportState,
+            UiAction::ImportBatterySave(_) => ActionKind::ImportBatterySave,
+            UiAction::ExportBatterySave => ActionKind::ExportBatterySave,
+            UiAction::ImportRtc(_) => ActionKind::ImportRtc,
+            UiAction::ExportRtc => ActionKind::ExportRtc,
             UiAction::TogglePause => ActionKind::TogglePause,
             UiAction::TogglePrinter => ActionKind::TogglePrinter,
             UiAction::Restart => ActionKind::Restart,
@@ -230,6 +271,12 @@ pub enum ActionKind {
     SaveState,
     LoadState,
     LoadRom,
+    ImportState,
+    ExportState,
+    ImportBatterySave,
+    ExportBatterySave,
+    ImportRtc,
+    ExportRtc,
     TogglePause,
     TogglePrinter,
     Restart,
@@ -327,6 +374,48 @@ pub const COMMANDS: &[CommandDescriptor] = &[
     CommandDescriptor {
         action_kind: ActionKind::LoadState,
         label: "Load State",
+        category: MenuCategory::File,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::ImportState,
+        label: "Import Save State…",
+        category: MenuCategory::File,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::ExportState,
+        label: "Export Save State…",
+        category: MenuCategory::File,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::ImportBatterySave,
+        label: "Import Battery Save…",
+        category: MenuCategory::File,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::ExportBatterySave,
+        label: "Export Battery Save…",
+        category: MenuCategory::File,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::ImportRtc,
+        label: "Import RTC…",
+        category: MenuCategory::File,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::ExportRtc,
+        label: "Export RTC…",
         category: MenuCategory::File,
         default_keybind: None,
         overlay_button: None,

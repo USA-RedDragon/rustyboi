@@ -11,7 +11,7 @@
 //! Libretro is deliberately NOT a `Frontend` (RetroArch owns its UI/input); it
 //! calls `Session::apply`/the session directly instead of using this driver.
 
-use rustyboi_session::action::FileData;
+use rustyboi_session::action::{FileData, LoadPurpose};
 use rustyboi_session::apply::PlatformRequest;
 use rustyboi_session::{Session, UiAction};
 
@@ -43,10 +43,16 @@ pub trait Frontend {
     /// Write serialized savestate `bytes` to `path` (File → Save State).
     fn save_state_bytes(&mut self, path: std::path::PathBuf, bytes: Vec<u8>);
 
-    /// Resolve + apply a picked file (a ROM or a savestate). The frontend reads
-    /// the bytes (path on desktop, content on web/Android) and feeds them into
-    /// the session via `finish_load_rom` / `finish_load_state`.
-    fn load_file(&mut self, file: FileData);
+    /// Deliver `bytes` to the user as a downloadable/saveable file named
+    /// `suggested_name` (File → Export battery/RTC/state): a browser download on
+    /// web, an rfd save dialog on desktop, a SAF create-document on Android.
+    fn save_bytes(&mut self, suggested_name: String, bytes: Vec<u8>);
+
+    /// Resolve + apply a picked file. The frontend reads the bytes (path on
+    /// desktop, content on web/Android) and feeds them into the session via the
+    /// finisher for `purpose` (`finish_load_rom` / `finish_load_state` /
+    /// `finish_import_battery` / `finish_import_rtc`).
+    fn load_file(&mut self, file: FileData, purpose: LoadPurpose);
 
     /// The session run/pause state changed in a way the frontend's pause model
     /// must observe (toggle pause, restart, frame advance, error clear, load).
@@ -88,7 +94,10 @@ pub fn drive_action<F: Frontend>(frontend: &mut F, action: UiAction, timestamp: 
             PlatformRequest::SaveStateBytes { path, bytes } => {
                 frontend.save_state_bytes(path, bytes)
             }
-            PlatformRequest::LoadFile(file) => frontend.load_file(file),
+            PlatformRequest::SaveBytes { suggested_name, bytes } => {
+                frontend.save_bytes(suggested_name, bytes)
+            }
+            PlatformRequest::LoadFile { file, purpose } => frontend.load_file(file, purpose),
             PlatformRequest::Status(s) => frontend.set_status(s),
             PlatformRequest::Error(e) => frontend.set_error(e),
             PlatformRequest::ClearError => frontend.clear_error(),
@@ -110,7 +119,9 @@ fn pause_hint_for(action: &UiAction) -> Option<PauseHint> {
         UiAction::Restart => Some(PauseHint::Restart),
         UiAction::ClearError => Some(PauseHint::ClearError),
         UiAction::FrameAdvance => Some(PauseHint::FrameAdvance),
-        UiAction::LoadRom(_) | UiAction::LoadState(_) => Some(PauseHint::Load),
+        UiAction::LoadRom(_) | UiAction::LoadState(_) | UiAction::ImportState(_) => {
+            Some(PauseHint::Load)
+        }
         UiAction::SetHardware(_) => Some(PauseHint::SetHardware),
         _ => None,
     }

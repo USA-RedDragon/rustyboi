@@ -74,15 +74,24 @@ struct Shared {
     load_state: js_sys::Function,
     /// `(on: boolean) => void` — set the worker's hold-to-rewind state.
     set_rewind: js_sys::Function,
+    /// `(purpose: string, name: string, bytes: Uint8Array) => void` — post a
+    /// picked import file to the worker (purpose ∈ state|battery|rtc).
+    import_file: js_sys::Function,
+    /// `(kind: string) => void` — ask the worker to produce export bytes
+    /// (kind ∈ state|battery|rtc); the worker posts them back for JS to download.
+    request_export: js_sys::Function,
 }
 
 impl Shared {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         post_action: js_sys::Function,
         post_input: js_sys::Function,
         load_rom: js_sys::Function,
         load_state: js_sys::Function,
         set_rewind: js_sys::Function,
+        import_file: js_sys::Function,
+        request_export: js_sys::Function,
     ) -> Self {
         Shared {
             frame_rgba: Vec::new(),
@@ -99,6 +108,8 @@ impl Shared {
             load_rom,
             load_state,
             set_rewind,
+            import_file,
+            request_export,
         }
     }
 }
@@ -116,6 +127,7 @@ impl WebApp {
     /// wires them to `worker.postMessage`): `post_action(json)`,
     /// `post_input(mask)`, `load_rom(name, bytes)`, `load_state(bytes)`,
     /// `set_rewind(on)`.
+    #[allow(clippy::too_many_arguments)]
     #[wasm_bindgen(constructor)]
     pub fn new(
         post_action: js_sys::Function,
@@ -123,6 +135,8 @@ impl WebApp {
         load_rom: js_sys::Function,
         load_state: js_sys::Function,
         set_rewind: js_sys::Function,
+        import_file: js_sys::Function,
+        request_export: js_sys::Function,
     ) -> WebApp {
         console_error_panic_hook::set_once();
         WebApp {
@@ -132,6 +146,8 @@ impl WebApp {
                 load_rom,
                 load_state,
                 set_rewind,
+                import_file,
+                request_export,
             ))),
             started: false,
         }
@@ -510,6 +526,16 @@ fn dispatch_action(shared: &Rc<RefCell<Shared>>, action: UiAction) {
                 let _ = cb.call1(&JsValue::NULL, &bytes);
             }
         }
+        // Imports: the rfd picker already read the file into `Contents`; post the
+        // bytes + purpose to the worker, which feeds the right `finish_import_*`.
+        UiAction::ImportState(file) => post_import(shared, "state", file),
+        UiAction::ImportBatterySave(file) => post_import(shared, "battery", file),
+        UiAction::ImportRtc(file) => post_import(shared, "rtc", file),
+        // Exports: the worker owns the session bytes, so ask it to produce them;
+        // it posts them back and the JS shell triggers the browser download.
+        UiAction::ExportState => request_export(shared, "state"),
+        UiAction::ExportBatterySave => request_export(shared, "battery"),
+        UiAction::ExportRtc => request_export(shared, "rtc"),
         other => {
             if let Some(web_action) = WebAction::from_ui_action(&other) {
                 if let Ok(json) = serde_json::to_string(&web_action) {
@@ -519,10 +545,36 @@ fn dispatch_action(shared: &Rc<RefCell<Shared>>, action: UiAction) {
                     let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&json));
                 }
             }
-            // Dropped: SaveState-to-file (web uses slots), Exit, and the debug
-            // actions (breakpoints/stepping) that need a Phase-B &GB snapshot.
+            // Dropped: SaveState-to-path (web uses ExportState / slots), Exit,
+            // and the debug actions (breakpoints/stepping) that need a Phase-B
+            // &GB snapshot.
         }
     }
+}
+
+/// Post a picked import file to the worker with its `purpose` (state|battery|
+/// rtc). The rfd picker already read the bytes into `Contents`.
+fn post_import(shared: &Rc<RefCell<Shared>>, purpose: &str, file: rustyboi_session::FileData) {
+    let Some((name, data)) = file_contents(file) else { return };
+    let s = shared.borrow();
+    let cb = s.import_file.clone();
+    drop(s);
+    let bytes = js_sys::Uint8Array::from(data.as_slice());
+    let _ = cb.call3(
+        &JsValue::NULL,
+        &JsValue::from_str(purpose),
+        &JsValue::from_str(&name),
+        &bytes,
+    );
+}
+
+/// Ask the worker to produce export bytes for `kind` (state|battery|rtc); it
+/// posts them back for the JS shell to download.
+fn request_export(shared: &Rc<RefCell<Shared>>, kind: &str) {
+    let s = shared.borrow();
+    let cb = s.request_export.clone();
+    drop(s);
+    let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(kind));
 }
 
 /// Pack a core `ButtonState` into the A,B,Start,Select,Up,Down,Left,Right

@@ -60,8 +60,8 @@ pub mod tas;
 #[cfg(target_os = "android")]
 pub use action::LibraryEntry;
 pub use action::{
-    ActionKind, CommandDescriptor, FileData, HardwareChoice, KeyBind, MenuCategory, PaletteChoice,
-    SessionUiState, UiAction, COMMANDS,
+    ActionKind, CommandDescriptor, FileData, HardwareChoice, KeyBind, LoadPurpose, MenuCategory,
+    PaletteChoice, SessionUiState, UiAction, COMMANDS,
 };
 pub use apply::{ActionOutcome, PlatformRequest};
 pub use config::Config;
