@@ -237,7 +237,9 @@ fn session_from_gb(
     ports: rustyboi_session::Ports,
 ) -> Session {
     let rom_id = rom_bytes.map(rustyboi_session::sha256).unwrap_or([0u8; 32]);
-    Session::with_gb(*gb, config, ports, rom_id)
+    // Pass the boxed GB straight through — never `*gb`, which would move the
+    // ~207 KB machine onto the stack and overflow Android's main-thread stack.
+    Session::with_gb(gb, config, ports, rom_id)
 }
 
 fn run_gui_loop(
