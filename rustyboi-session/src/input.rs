@@ -1,0 +1,190 @@
+//! Host-agnostic input model.
+//!
+//! Frontends speak wildly different input vocabularies (winit `KeyCode`,
+//! browser `KeyboardEvent.code`, Android `KeyEvent`, libretro `RETRO_DEVICE_ID`
+//! bits). We refuse to name any of them here. Instead the adapter classifies
+//! each host event into a small abstract set — the eight Game Boy buttons — and
+//! feeds a set of currently-pressed [`GbButton`]s to the session as
+//! [`AbstractInput`]. A remap table lives in `Config` so a physical host key
+//! can be pointed at a different GB button, but the remap is expressed purely
+//! in terms of these abstract buttons: the host↔abstract classification is the
+//! adapter's job, the abstract↔`ButtonState` mapping is ours.
+
+use rustyboi_core_lib::input::ButtonState;
+use serde::{Deserialize, Serialize};
+
+/// The eight logical Game Boy buttons. This is the entire host-agnostic
+/// vocabulary the session understands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GbButton {
+    A,
+    B,
+    Start,
+    Select,
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl GbButton {
+    /// All eight, in a stable order (for remap-table iteration / defaults).
+    pub const ALL: [GbButton; 8] = [
+        GbButton::A,
+        GbButton::B,
+        GbButton::Start,
+        GbButton::Select,
+        GbButton::Up,
+        GbButton::Down,
+        GbButton::Left,
+        GbButton::Right,
+    ];
+
+    /// Set this button's bit in a `ButtonState`.
+    fn set(self, s: &mut ButtonState, pressed: bool) {
+        match self {
+            GbButton::A => s.a = pressed,
+            GbButton::B => s.b = pressed,
+            GbButton::Start => s.start = pressed,
+            GbButton::Select => s.select = pressed,
+            GbButton::Up => s.up = pressed,
+            GbButton::Down => s.down = pressed,
+            GbButton::Left => s.left = pressed,
+            GbButton::Right => s.right = pressed,
+        }
+    }
+}
+
+/// The raw per-frame input the adapter hands the session: which abstract GB
+/// buttons the host currently has pressed (post host→abstract classification,
+/// pre remap). Small and `Copy`; order-independent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AbstractInput {
+    pressed: u8,
+}
+
+impl AbstractInput {
+    /// Empty (nothing pressed).
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Build from an iterator of pressed abstract buttons.
+    pub fn from_pressed<I: IntoIterator<Item = GbButton>>(pressed: I) -> Self {
+        let mut a = AbstractInput::none();
+        for b in pressed {
+            a.set(b, true);
+        }
+        a
+    }
+
+    /// Mark a button pressed/released.
+    pub fn set(&mut self, button: GbButton, pressed: bool) {
+        let bit = 1u8 << Self::bit_index(button);
+        if pressed {
+            self.pressed |= bit;
+        } else {
+            self.pressed &= !bit;
+        }
+    }
+
+    /// Is this abstract button currently pressed?
+    pub fn is_pressed(&self, button: GbButton) -> bool {
+        self.pressed & (1u8 << Self::bit_index(button)) != 0
+    }
+
+    fn bit_index(button: GbButton) -> u8 {
+        match button {
+            GbButton::A => 0,
+            GbButton::B => 1,
+            GbButton::Start => 2,
+            GbButton::Select => 3,
+            GbButton::Up => 4,
+            GbButton::Down => 5,
+            GbButton::Left => 6,
+            GbButton::Right => 7,
+        }
+    }
+}
+
+/// Abstract-button remap: each logical GB button is driven by some *source*
+/// abstract button. The identity map (A→A, Up→Up, …) is the default; a config
+/// can e.g. swap A/B or rotate the d-pad without the session knowing anything
+/// about host keys. Stored as an 8-entry table indexed by target button.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputMap {
+    /// `source[target]` = the abstract button whose press drives `target`.
+    source: Vec<(GbButton, GbButton)>,
+}
+
+impl Default for InputMap {
+    fn default() -> Self {
+        InputMap {
+            source: GbButton::ALL.iter().map(|&b| (b, b)).collect(),
+        }
+    }
+}
+
+impl InputMap {
+    /// Identity map.
+    pub fn identity() -> Self {
+        Self::default()
+    }
+
+    /// Point `target` at `source`: pressing the abstract `source` button now
+    /// drives the GB `target` button.
+    pub fn remap(&mut self, target: GbButton, source: GbButton) {
+        for entry in &mut self.source {
+            if entry.0 == target {
+                entry.1 = source;
+                return;
+            }
+        }
+        self.source.push((target, source));
+    }
+
+    /// Resolve an abstract input through the remap into a concrete
+    /// `ButtonState` the core consumes.
+    pub fn resolve(&self, input: AbstractInput) -> ButtonState {
+        let mut state = ButtonState::default();
+        for &(target, source) in &self.source {
+            if input.is_pressed(source) {
+                target.set(&mut state, true);
+            }
+        }
+        state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_map_is_passthrough() {
+        let map = InputMap::identity();
+        let input = AbstractInput::from_pressed([GbButton::A, GbButton::Up]);
+        let state = map.resolve(input);
+        assert!(state.a && state.up);
+        assert!(!state.b && !state.start && !state.down);
+    }
+
+    #[test]
+    fn remap_swaps_buttons() {
+        let mut map = InputMap::identity();
+        map.remap(GbButton::A, GbButton::B);
+        map.remap(GbButton::B, GbButton::A);
+        // Host classified a B press: with the swap it drives A.
+        let state = map.resolve(AbstractInput::from_pressed([GbButton::B]));
+        assert!(state.a && !state.b);
+    }
+
+    #[test]
+    fn abstract_input_set_and_clear() {
+        let mut i = AbstractInput::none();
+        i.set(GbButton::Start, true);
+        assert!(i.is_pressed(GbButton::Start));
+        i.set(GbButton::Start, false);
+        assert!(!i.is_pressed(GbButton::Start));
+    }
+}
