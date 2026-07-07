@@ -1,0 +1,51 @@
+[package]
+name = "rustyboi-web"
+version = "0.1.0"
+edition = "2021"
+description = "WASM/Firefox web frontend for the rustyboi Game Boy / Color emulator"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rustyboi-session = { path = "../rustyboi-session" }
+rustyboi-core = { path = "../rustyboi-core" }
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
+    "console",
+    # IndexedDB storage
+    "IdbFactory",
+    "IdbDatabase",
+    "IdbObjectStore",
+    "IdbTransaction",
+    "IdbTransactionMode",
+    "IdbRequest",
+    "IdbOpenDbRequest",
+    "IdbKeyRange",
+    "IdbCursorWithValue",
+    "IdbCursor",
+    "DomStringList",
+    "Event",
+    # WebAudio
+    "AudioContext",
+    "AudioContextState",
+    "AudioBuffer",
+    "AudioBufferSourceNode",
+    "AudioDestinationNode",
+    "AudioNode",
+    "AudioParam",
+    "GainNode",
+]
