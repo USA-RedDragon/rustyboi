@@ -2104,6 +2104,11 @@ impl Cartridge {
     /// right / bottom". The value is only observed by software when it latches
     /// a sample via the Ax0x/Ax1x erase+latch protocol. No-op storage for
     /// non-MBC7 carts.
+    ///
+    /// This is the sole input hook for MBC7 tilt (parallel to `set_camera_image`
+    /// for the GB Camera); it is the intended path for a frontend to drive the
+    /// accelerometer and is awaiting frontend wiring, so it is currently unused.
+    #[allow(dead_code)]
     pub fn set_accelerometer(&mut self, x_g: f32, y_g: f32) {
         self.mbc7_sensor_x = x_g;
         self.mbc7_sensor_y = y_g;

@@ -47,10 +47,6 @@ impl<'a> Bus<'a> {
         }
     }
 
-    pub fn ticked_dots(&self) -> u32 {
-        self.ticked
-    }
-
     /// Advance every peripheral by one dot (per-dot crank). Bookkeeping for the
     /// per-instruction `dot`/`ticked` counters is applied here; the actual
     /// world-advance is in `resolve_one_dot` so the event-loop `run_to` can reuse
