@@ -246,6 +246,28 @@ fn session_from_gb(
     Session::with_gb(gb, config, ports, rom_id)
 }
 
+/// Poll all connected gamepads and return the union of their GB-mapped buttons:
+/// A→South, B→East, Start/Select, D-pad via the hat OR the left stick. Draining
+/// `next_event` refreshes the cached state that `is_pressed`/`value` read.
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+fn gamepad_button_state(gilrs: &mut gilrs::Gilrs) -> input::ButtonState {
+    use gilrs::{Axis, Button};
+    while gilrs.next_event().is_some() {}
+    const DZ: f32 = 0.5;
+    let mut bs = input::ButtonState::default();
+    for (_id, gp) in gilrs.gamepads() {
+        bs.a |= gp.is_pressed(Button::South);
+        bs.b |= gp.is_pressed(Button::East);
+        bs.start |= gp.is_pressed(Button::Start);
+        bs.select |= gp.is_pressed(Button::Select);
+        bs.up |= gp.is_pressed(Button::DPadUp) || gp.value(Axis::LeftStickY) > DZ;
+        bs.down |= gp.is_pressed(Button::DPadDown) || gp.value(Axis::LeftStickY) < -DZ;
+        bs.left |= gp.is_pressed(Button::DPadLeft) || gp.value(Axis::LeftStickX) < -DZ;
+        bs.right |= gp.is_pressed(Button::DPadRight) || gp.value(Axis::LeftStickX) > DZ;
+    }
+    bs
+}
+
 fn run_gui_loop(
     event_loop: EventLoop<()>,
     window: Arc<Window>,
@@ -274,6 +296,11 @@ fn run_gui_loop(
     let mut png_worker: Option<crate::png_worker::PngWorker> = None;
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     let mut next_print_index: Option<(String, u32)> = None;
+
+    // Native desktop: physical gamepad support (gilrs). `None` if no backend is
+    // available; buttons are OR'd into the keyboard/touch input each frame.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    let mut gilrs = gilrs::Gilrs::new().ok();
 
     let should_start_paused = !session.gb().has_rom() && !session.gb().has_bios();
 
@@ -491,6 +518,19 @@ fn run_gui_loop(
                 button_state.down |= touch.down;
                 button_state.left |= touch.left;
                 button_state.right |= touch.right;
+            }
+            // OR in any connected gamepad (native only).
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            if let Some(g) = gilrs.as_mut() {
+                let pad = gamepad_button_state(g);
+                button_state.a |= pad.a;
+                button_state.b |= pad.b;
+                button_state.start |= pad.start;
+                button_state.select |= pad.select;
+                button_state.up |= pad.up;
+                button_state.down |= pad.down;
+                button_state.left |= pad.left;
+                button_state.right |= pad.right;
             }
             app.set_button_state(button_state);
 
