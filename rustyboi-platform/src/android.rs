@@ -641,9 +641,6 @@ pub extern "system" fn Java_dev_mcswain_rustyboi_RustyboiActivity_nativeOnGamepa
     hat_x: f32,
     hat_y: f32,
 ) {
-    raw_log(&format!(
-        "JNI gamepad axes: lx={lx:.2} ly={ly:.2} rx={rx:.2} ry={ry:.2} hatX={hat_x:.2} hatY={hat_y:.2}"
-    ));
     PAD_LX.store(lx.to_bits(), Ordering::Relaxed);
     PAD_LY.store(ly.to_bits(), Ordering::Relaxed);
     PAD_RX.store(rx.to_bits(), Ordering::Relaxed);
