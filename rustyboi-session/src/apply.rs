@@ -288,6 +288,10 @@ impl Session {
                 requests: vec![PlatformRequest::LoadFile { file, purpose: LoadPurpose::Rtc }],
                 pause_changed: false,
             },
+            UiAction::ApplyPatch(file) => ActionOutcome {
+                requests: vec![PlatformRequest::LoadFile { file, purpose: LoadPurpose::Patch }],
+                pause_changed: false,
+            },
 
             // Export: produce a path-free SaveBytes request the frontend delivers
             // as a file (download on web, save dialog on desktop/Android).

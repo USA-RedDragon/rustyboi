@@ -54,6 +54,7 @@ pub mod debug;
 pub mod input;
 pub mod input_config;
 pub mod overlay;
+pub mod patch;
 pub mod ports;
 pub mod rewind;
 pub mod session;
@@ -74,6 +75,7 @@ pub use input_config::{
     ResolveState,
 };
 pub use overlay::{OverlayButton, OverlayRect, OverlayShape, TouchLayout};
+pub use patch::apply_patch;
 pub use ports::{NetTransport, Rumble, Storage, StorageError, Webcam};
 pub use session::{
     FrameOutput, Ports, RunMode, Session, SessionError, SlotMeta, GB_SIZE, QUICK_SLOT, SGB_SIZE,

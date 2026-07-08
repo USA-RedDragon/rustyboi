@@ -16,7 +16,7 @@
 //     Init                 boot the emulator (no canvas — main thread renders)
 //     LoadRom{name,bytes}  transferred ArrayBuffer of ROM bytes
 //     LoadState{bytes}     transferred ArrayBuffer of a .rustyboisave savestate
-//     ImportFile{purpose,bytes}  import a picked file (purpose=state|battery|rtc)
+//     ImportFile{purpose,bytes}  import a picked file (purpose=state|battery|rtc|patch)
 //     RequestExport{kind}  ask for export bytes (kind=state|battery|rtc)
 //     SetInput{mask}       GB button bitmask (keyboard ∪ egui touch overlay)
 //     SetDebugDetail{active,bits}  which debug snapshot to build (open panels)
@@ -188,11 +188,12 @@ self.onmessage = async (e) => {
         emit(emu.load_state(new Uint8Array(m.bytes)));
         break;
       case "ImportFile": {
-        // m.purpose ∈ state|battery|rtc; m.bytes is a transferred ArrayBuffer.
+        // m.purpose ∈ state|battery|rtc|patch; m.bytes is a transferred ArrayBuffer.
         const data = new Uint8Array(m.bytes);
         if (m.purpose === "state") emit(emu.load_state(data));
         else if (m.purpose === "battery") emit(emu.import_battery(data));
         else if (m.purpose === "rtc") emit(emu.import_rtc(data));
+        else if (m.purpose === "patch") emit(emu.apply_patch(data));
         break;
       }
       case "RequestExport": {
