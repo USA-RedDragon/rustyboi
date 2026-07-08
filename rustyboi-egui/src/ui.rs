@@ -136,6 +136,9 @@ pub struct Gui {
     show_breakpoint_panel: bool,
     show_cheats_panel: bool,
     cheat_code_input: String,
+    /// Which fetched-cheat rows (indices into `SessionUiState.fetched_cheats`) the
+    /// user has ticked in the cheat-DB picker, awaiting confirmation.
+    fetched_cheat_selected: std::collections::HashSet<usize>,
     breakpoint_address_input: String,
     pub(super) stack_scroll_offset: i16,
     pub(super) memory_explorer_address: String,
@@ -212,6 +215,7 @@ impl Gui {
             show_breakpoint_panel: false,
             show_cheats_panel: false,
             cheat_code_input: String::new(),
+            fetched_cheat_selected: std::collections::HashSet::new(),
             breakpoint_address_input: String::from("0000"),
             stack_scroll_offset: 0,
             memory_explorer_address: String::from("0000"),
@@ -1246,6 +1250,22 @@ impl Gui {
                 ui.small("Game Genie (ABC-DEF or ABC-DEF-GHI) or GameShark (8 hex digits).");
                 ui.separator();
 
+                // Cheat-DB fetch: pull this game's cheats from the libretro
+                // database (identified via its No-Intro name).
+                ui.horizontal(|ui| {
+                    if ui.button("Get cheats for this game").clicked() {
+                        self.fetched_cheat_selected.clear();
+                        *action = Some(GuiAction::GetCheats);
+                    }
+                    if let Some(name) = &session.game_name {
+                        ui.small(name);
+                    }
+                });
+                if !session.fetched_cheats.is_empty() {
+                    self.render_fetched_cheats(ui, action, session);
+                }
+                ui.separator();
+
                 ui.label("Active cheats:");
                 if session.cheats.is_empty() {
                     ui.label("No cheats active");
@@ -1261,6 +1281,56 @@ impl Gui {
                 }
             });
         self.show_cheats_panel = open;
+    }
+
+    /// The fetched cheat-DB list as a checklist: tick the wanted rows, then
+    /// "Add selected" routes each row's codes through the normal add-cheat path
+    /// ([`GuiAction::AddCheats`]); "Dismiss" clears the list
+    /// ([`GuiAction::ClearFetchedCheats`]).
+    fn render_fetched_cheats(
+        &mut self,
+        ui: &mut egui::Ui,
+        action: &mut Option<GuiAction>,
+        session: &SessionUiState,
+    ) {
+        ui.separator();
+        ui.label(format!("Available cheats ({}):", session.fetched_cheats.len()));
+        egui::ScrollArea::vertical()
+            .max_height(180.0)
+            .show(ui, |ui| {
+                for (i, cheat) in session.fetched_cheats.iter().enumerate() {
+                    let mut checked = self.fetched_cheat_selected.contains(&i);
+                    let label = format!("{}  [{}]", cheat.description, cheat.codes.join("+"));
+                    if ui.checkbox(&mut checked, label).changed() {
+                        if checked {
+                            self.fetched_cheat_selected.insert(i);
+                        } else {
+                            self.fetched_cheat_selected.remove(&i);
+                        }
+                    }
+                }
+            });
+        ui.horizontal(|ui| {
+            let any = !self.fetched_cheat_selected.is_empty();
+            if ui
+                .add_enabled(any, egui::Button::new("Add selected"))
+                .clicked()
+            {
+                let codes: Vec<String> = session
+                    .fetched_cheats
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| self.fetched_cheat_selected.contains(i))
+                    .flat_map(|(_, c)| c.codes.iter().cloned())
+                    .collect();
+                self.fetched_cheat_selected.clear();
+                *action = Some(GuiAction::AddCheats(codes));
+            }
+            if ui.button("Dismiss").clicked() {
+                self.fetched_cheat_selected.clear();
+                *action = Some(GuiAction::ClearFetchedCheats);
+            }
+        });
     }
 
     fn render_breakpoint_panel(&mut self, ctx: &Context, action: &mut Option<GuiAction>, debug: Option<&DebugSnapshot>) {

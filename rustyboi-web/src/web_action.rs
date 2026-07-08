@@ -23,7 +23,7 @@ fn default_volume() -> u8 {
 }
 
 use rustyboi_session::action::{HardwareChoice, PaletteChoice, ScalingMode};
-use rustyboi_session::{InputConfig, SessionUiState, UiAction};
+use rustyboi_session::{FetchedCheat, InputConfig, SessionUiState, UiAction};
 
 /// Serializable mirror of [`HardwareChoice`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,7 +113,10 @@ pub enum WebAction {
     SetScalingMode(ScalingMode),
     SetInputConfig(InputConfig),
     AddCheat(String),
+    AddCheats(Vec<String>),
     RemoveCheat(String),
+    GetCheats,
+    ClearFetchedCheats,
 }
 
 impl WebAction {
@@ -143,7 +146,10 @@ impl WebAction {
             UiAction::SetScalingMode(m) => WebAction::SetScalingMode(*m),
             UiAction::SetInputConfig(i) => WebAction::SetInputConfig(i.clone()),
             UiAction::AddCheat(c) => WebAction::AddCheat(c.clone()),
+            UiAction::AddCheats(c) => WebAction::AddCheats(c.clone()),
             UiAction::RemoveCheat(c) => WebAction::RemoveCheat(c.clone()),
+            UiAction::GetCheats => WebAction::GetCheats,
+            UiAction::ClearFetchedCheats => WebAction::ClearFetchedCheats,
             _ => return None,
         })
     }
@@ -173,7 +179,10 @@ impl WebAction {
             WebAction::SetScalingMode(m) => UiAction::SetScalingMode(m),
             WebAction::SetInputConfig(i) => UiAction::SetInputConfig(i),
             WebAction::AddCheat(c) => UiAction::AddCheat(c),
+            WebAction::AddCheats(c) => UiAction::AddCheats(c),
             WebAction::RemoveCheat(c) => UiAction::RemoveCheat(c),
+            WebAction::GetCheats => UiAction::GetCheats,
+            WebAction::ClearFetchedCheats => UiAction::ClearFetchedCheats,
         }
     }
 }
@@ -197,6 +206,8 @@ pub struct WebUiState {
     pub touch_controls: bool,
     pub slots: Vec<u32>,
     pub cheats: Vec<String>,
+    #[serde(default)]
+    pub fetched_cheats: Vec<FetchedCheat>,
     #[serde(default)]
     pub has_battery: bool,
     #[serde(default)]
@@ -225,6 +236,7 @@ impl WebUiState {
             touch_controls: s.touch_controls,
             slots: s.slots.clone(),
             cheats: s.cheats.clone(),
+            fetched_cheats: s.fetched_cheats.clone(),
             has_battery: s.has_battery,
             has_rtc: s.has_rtc,
             has_rom: s.has_rom,
@@ -248,6 +260,7 @@ impl WebUiState {
             touch_controls: self.touch_controls,
             slots: self.slots,
             cheats: self.cheats,
+            fetched_cheats: self.fetched_cheats,
             has_battery: self.has_battery,
             has_rtc: self.has_rtc,
             has_rom: self.has_rom,

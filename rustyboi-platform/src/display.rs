@@ -456,6 +456,12 @@ fn run_gui_loop(
     #[cfg(target_os = "android")]
     let mut prev_input_dbg = String::new();
 
+    // Cheat-DB HTTP fetch worker (desktop + Android; wasm uses browser fetch).
+    // Created lazily on the first `Get cheats` so a session that never fetches
+    // pays nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut fetch_worker: Option<crate::fetch_worker::FetchWorker> = None;
+
     // Per-frame edge/phase state for the shared input resolver (hotkey rising
     // edges + the turbo autofire square wave). Persists across frames.
     let mut resolve_state = rustyboi_session::ResolveState::new();
@@ -840,6 +846,27 @@ fn run_gui_loop(
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                 let Some(rs) = render_state.as_mut() else { return };
 
+                // Deliver any completed cheat-DB fetches into the session so the
+                // cheat picker shows them; report the outcome in the status bar.
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(worker) = fetch_worker.as_mut() {
+                    for done in worker.drain_finished() {
+                        match (done.purpose, done.result) {
+                            (rustyboi_session::FetchPurpose::Cheats, Ok(body)) => {
+                                let n = app.session_mut().finish_fetched_cheats(&body);
+                                if n == 0 {
+                                    rs.ui.set_status("No cheats found for this game".into());
+                                } else {
+                                    rs.ui.set_status(format!("Fetched {n} cheats"));
+                                }
+                            }
+                            (_, Err(e)) => {
+                                rs.ui.set_error(format!("Cheat fetch failed: {e}"));
+                            }
+                        }
+                    }
+                }
+
                 if let Some(title) = app.title_if_due() {
                     window.set_title(&title);
                 }
@@ -917,6 +944,11 @@ fn run_gui_loop(
                         // contract (the web worker services it). Log if it fires.
                         PlatformRequest::LoadFile { .. } => {
                             log::warn!("LoadFile request reached the platform loop unexpectedly");
+                        }
+                        PlatformRequest::FetchUrl { urls, purpose } => {
+                            fetch_worker
+                                .get_or_insert_with(crate::fetch_worker::FetchWorker::new)
+                                .submit(urls, purpose);
                         }
                         #[cfg(target_os = "android")]
                         PlatformRequest::AndroidLibrary(action) => {

@@ -15,6 +15,8 @@ mod ports;
 mod png_worker;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 mod rewind_worker;
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+mod fetch_worker;
 #[cfg(not(target_os = "android"))]
 mod run;
 

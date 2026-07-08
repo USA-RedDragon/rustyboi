@@ -9,6 +9,16 @@
 use crate::action::{LoadPurpose, PaletteChoice, UiAction};
 use crate::session::Session;
 
+/// Why a URL is being fetched, so the frontend routes the downloaded bytes back
+/// to the right finisher. Kept typed (not just a bare URL) so the same
+/// [`PlatformRequest::FetchUrl`] mechanism can serve future network features.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FetchPurpose {
+    /// A libretro `.cht` cheat file; the body goes to
+    /// [`Session::finish_fetched_cheats`](crate::session::Session::finish_fetched_cheats).
+    Cheats,
+}
+
 /// Something only the host (OS / window / filesystem) can carry out, surfaced by
 /// [`Session::apply`] for the frontend to perform. This is the shared contract
 /// mirror of the frontend's old `PlatformRequest` — now the one definition.
@@ -37,6 +47,14 @@ pub enum PlatformRequest {
     /// Carried through the frontend's file resolver (path→bytes on desktop,
     /// content bytes on web/Android).
     LoadFile { file: crate::action::FileData, purpose: crate::action::LoadPurpose },
+    /// Fetch a URL over HTTP(S) and feed the response body back to the session
+    /// for `purpose`. `urls` are tried in order until one succeeds (the libretro
+    /// cheat DB occasionally misfiles an entry across the GB/GBC folders). The
+    /// session is WASM-clean and never performs the request itself; each frontend
+    /// downloads the bytes and calls the matching finisher
+    /// ([`finish_fetched_cheats`](crate::session::Session::finish_fetched_cheats)
+    /// for [`FetchPurpose::Cheats`]).
+    FetchUrl { urls: Vec<String>, purpose: FetchPurpose },
     /// A status line to show the user.
     Status(String),
     /// An error to show the user.
@@ -255,12 +273,46 @@ impl Session {
                 Ok(_) => ActionOutcome::status(format!("Cheat added: {code}")),
                 Err(e) => ActionOutcome::error(format!("Invalid cheat code '{code}': {e}")),
             },
+            UiAction::AddCheats(codes) => {
+                let mut added = 0;
+                let mut failed = 0;
+                for code in &codes {
+                    match self.add_cheat(code) {
+                        Ok(_) => added += 1,
+                        Err(_) => failed += 1,
+                    }
+                }
+                self.clear_fetched_cheats();
+                if failed == 0 {
+                    ActionOutcome::status(format!("Added {added} cheats"))
+                } else {
+                    ActionOutcome::status(format!("Added {added} cheats ({failed} failed to decode)"))
+                }
+            }
             UiAction::RemoveCheat(code) => {
                 if self.remove_cheat(&code) {
                     ActionOutcome::status(format!("Cheat removed: {code}"))
                 } else {
                     ActionOutcome::error(format!("No such cheat: {code}"))
                 }
+            }
+            UiAction::GetCheats => match self.cheat_fetch_urls() {
+                Some(urls) => {
+                    let mut o = ActionOutcome::status("Fetching cheats…");
+                    o.push(PlatformRequest::FetchUrl {
+                        urls,
+                        purpose: FetchPurpose::Cheats,
+                    });
+                    o
+                }
+                None if self.original_rom_bytes().is_none() => {
+                    ActionOutcome::error("Load a ROM first")
+                }
+                None => ActionOutcome::error("Game not in the No-Intro database"),
+            },
+            UiAction::ClearFetchedCheats => {
+                self.clear_fetched_cheats();
+                ActionOutcome::default()
             }
 
             // OS-requiring: hand off to the frontend.
@@ -451,5 +503,44 @@ mod tests {
             .iter()
             .any(|r| matches!(r, PlatformRequest::Status(_))));
         assert!(s.cheats().next().is_none());
+    }
+
+    // With no ROM loaded, GetCheats reports "Load a ROM first" and emits no fetch.
+    #[test]
+    fn get_cheats_without_rom_errors() {
+        let mut s = session();
+        let out = s.apply(UiAction::GetCheats, 0);
+        assert!(!out
+            .requests
+            .iter()
+            .any(|r| matches!(r, PlatformRequest::FetchUrl { .. })));
+        match out.requests.as_slice() {
+            [PlatformRequest::Error(msg)] => assert!(msg.contains("Load a ROM")),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // A fetched `.cht` body populates the picker; AddCheats routes the picked
+    // codes through the normal add-cheat path and clears the fetched list.
+    #[test]
+    fn finish_and_add_fetched_cheats() {
+        let mut s = session();
+        let body = "cheats = 1\ncheat0_desc = \"Test\"\ncheat0_code = \"01FFDEC0\"\n";
+        assert_eq!(s.finish_fetched_cheats(body), 1);
+        assert_eq!(s.fetched_cheats().len(), 1);
+
+        let out = s.apply(UiAction::AddCheats(vec!["01FFDEC0".into()]), 0);
+        assert!(out
+            .requests
+            .iter()
+            .any(|r| matches!(r, PlatformRequest::Status(_))));
+        assert!(s.cheats().any(|c| c == "01FFDEC0"));
+        // Adding clears the pending fetched list.
+        assert!(s.fetched_cheats().is_empty());
+
+        // ClearFetchedCheats is a no-op-safe dismiss.
+        s.finish_fetched_cheats(body);
+        s.apply(UiAction::ClearFetchedCheats, 0);
+        assert!(s.fetched_cheats().is_empty());
     }
 }

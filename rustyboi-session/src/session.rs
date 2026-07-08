@@ -148,6 +148,12 @@ pub struct Session {
     /// and the ROM library. `None` until a ROM is loaded / when unidentifiable.
     game_name: Option<String>,
 
+    /// Cheats downloaded from the libretro cheat DB awaiting the user's pick,
+    /// populated by [`finish_fetched_cheats`](Self::finish_fetched_cheats) and
+    /// surfaced in [`SessionUiState`](crate::action::SessionUiState). Empty until
+    /// a fetch completes; cleared on dismiss or a fresh fetch.
+    fetched_cheats: Vec<crate::cheat_db::FetchedCheat>,
+
     mode: RunMode,
     frame_count: u64,
 
@@ -218,6 +224,7 @@ impl Session {
             rom_id,
             original_rom: None,
             game_name: None,
+            fetched_cheats: Vec::new(),
             mode: RunMode::Normal,
             frame_count: 0,
             rewind,
@@ -1073,6 +1080,41 @@ impl Session {
     /// The active cheat codes.
     pub fn cheats(&self) -> impl Iterator<Item = &str> {
         self.cheats.codes()
+    }
+
+    /// The raw bytes of the currently-loaded ROM (unpatched), or `None` if no
+    /// ROM has been loaded from bytes. Used to identify the game for the cheat-DB
+    /// fetch.
+    pub fn original_rom_bytes(&self) -> Option<&[u8]> {
+        self.original_rom.as_deref()
+    }
+
+    /// The candidate libretro-cheat-DB URLs for the loaded game, or `None` if no
+    /// ROM is loaded or the ROM isn't in the No-Intro index. The frontend fetches
+    /// these (in order) and feeds the body to [`finish_fetched_cheats`].
+    pub fn cheat_fetch_urls(&self) -> Option<Vec<String>> {
+        let rom = self.original_rom.as_deref()?;
+        let name = crate::no_intro::identify(rom)?;
+        Some(crate::cheat_db::candidate_urls(name, crate::cheat_db::is_cgb(rom)))
+    }
+
+    /// Parse a downloaded libretro `.cht` body into the pending fetched-cheat
+    /// list (replacing any previous fetch). Returns the number of cheats parsed.
+    /// The frontend then shows them for the user to pick; selected codes are
+    /// added through the normal [`add_cheat`](Self::add_cheat) path.
+    pub fn finish_fetched_cheats(&mut self, body: &str) -> usize {
+        self.fetched_cheats = crate::cheat_db::parse_cht(body);
+        self.fetched_cheats.len()
+    }
+
+    /// The cheats fetched from the libretro DB awaiting the user's selection.
+    pub fn fetched_cheats(&self) -> &[crate::cheat_db::FetchedCheat] {
+        &self.fetched_cheats
+    }
+
+    /// Discard the pending fetched-cheat list (user closed the picker).
+    pub fn clear_fetched_cheats(&mut self) {
+        self.fetched_cheats.clear();
     }
 
     // --- access -------------------------------------------------------------
