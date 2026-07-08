@@ -224,6 +224,9 @@ fn android_main(app: AndroidApp) {
 
     let _ = ANDROID_APP.set(app.clone());
     raw_log("android_main: ANDROID_APP stashed");
+    // Native-root TLS: hook rustls-platform-verifier into the Android trust store
+    // so the cheat-DB HTTPS fetch validates against the OS CA set.
+    init_tls_verifier();
     // Install file-picker / file-saver bridges that route through SAF.
     android_bridge::install(
         Box::new(|callback| {
@@ -548,6 +551,39 @@ where
     let activity = unsafe { JObject::from_raw(ctx.context() as jobject) };
     let mut env = vm.attach_current_thread().ok()?;
     Some(f(&mut env, &activity))
+}
+
+/// Initialize rustls-platform-verifier with the Android runtime so HTTPS uses the
+/// OS trust store (native CA roots). Without this, rustls has no trust anchors on
+/// Android and the cheat-DB fetch would hang/fail. Called once from `android_main`.
+pub fn init_tls_verifier() {
+    let ctx = ndk_context::android_context();
+    let vm = match unsafe { JavaVM::from_raw(ctx.vm() as *mut _) } {
+        Ok(vm) => vm,
+        Err(e) => {
+            raw_log(&format!("init_tls_verifier: JavaVM::from_raw failed: {e}"));
+            return;
+        }
+    };
+    let refs = (|| {
+        let mut env = vm.attach_current_thread().ok()?;
+        let context = unsafe { JObject::from_raw(ctx.context() as jobject) };
+        let loader = env
+            .call_method(&context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .ok()?
+            .l()
+            .ok()?;
+        let context_ref = env.new_global_ref(&context).ok()?;
+        let loader_ref = env.new_global_ref(&loader).ok()?;
+        Some((context_ref, loader_ref))
+    })();
+    match refs {
+        Some((context_ref, loader_ref)) => {
+            rustls_platform_verifier::android::init_with_refs(vm, context_ref, loader_ref);
+            raw_log("init_tls_verifier: platform verifier initialized");
+        }
+        None => raw_log("init_tls_verifier: failed to obtain context/classloader refs"),
+    }
 }
 
 // ---------------------------------------------------------------------------
