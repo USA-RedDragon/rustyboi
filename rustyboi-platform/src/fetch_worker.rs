@@ -15,13 +15,18 @@ use std::thread::JoinHandle;
 
 use rustyboi_session::apply::FetchPurpose;
 
-/// ureq DNS resolver that goes through the JVM (`InetAddress`) — Android's native
-/// getaddrinfo fails from a Rust worker thread.
+/// ureq DNS resolver for Android. The device's system resolver can be unhealthy
+/// even when the network works (e.g. a Private DNS / DNS-over-TLS server that the
+/// browser sidesteps with its own DoH): try the JVM `InetAddress` resolver first,
+/// then fall back to DNS-over-HTTPS via 1.1.1.1 (an IP literal — needs no system
+/// DNS at all).
 #[cfg(target_os = "android")]
-struct JniResolver;
+struct AndroidResolver {
+    doh: std::sync::Arc<ureq::Agent>,
+}
 
 #[cfg(target_os = "android")]
-impl ureq::Resolver for JniResolver {
+impl ureq::Resolver for AndroidResolver {
     fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
         use std::io::{Error, ErrorKind};
         let (host, port) = netloc
@@ -30,12 +35,64 @@ impl ureq::Resolver for JniResolver {
         let port: u16 = port
             .parse()
             .map_err(|_| Error::new(ErrorKind::InvalidInput, "bad port"))?;
-        let ips = crate::android::resolve_host(host)?;
+        let ips = crate::android::resolve_host(host).or_else(|e| {
+            log::warn!("cheat-fetch: system DNS failed ({e}); falling back to DoH");
+            doh_resolve(&self.doh, host)
+        })?;
         Ok(ips
             .into_iter()
             .map(|ip| std::net::SocketAddr::new(ip, port))
             .collect())
     }
+}
+
+/// A ureq agent for DNS-over-HTTPS queries to 1.1.1.1. It uses no custom resolver
+/// because the endpoint is an IP literal, so it never touches the system DNS.
+#[cfg(target_os = "android")]
+fn doh_agent() -> ureq::Agent {
+    let mut b = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10));
+    if let Ok(cfg) = {
+        use rustls_platform_verifier::ConfigVerifierExt;
+        rustls::ClientConfig::with_platform_verifier()
+    } {
+        b = b.tls_config(std::sync::Arc::new(cfg));
+    }
+    b.build()
+}
+
+/// Resolve `host` to IPs via Cloudflare DoH (JSON API) over `1.1.1.1`.
+#[cfg(target_os = "android")]
+fn doh_resolve(agent: &ureq::Agent, host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+    use std::io::{Error, ErrorKind};
+    let mut ips = Vec::new();
+    for qtype in ["A", "AAAA"] {
+        let url = format!("https://1.1.1.1/dns-query?name={host}&type={qtype}");
+        let body = match agent.get(&url).set("accept", "application/dns-json").call() {
+            Ok(r) => r.into_string().unwrap_or_default(),
+            Err(e) => {
+                log::warn!("cheat-fetch: DoH {qtype} query failed: {e}");
+                continue;
+            }
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else {
+            continue;
+        };
+        if let Some(answers) = json.get("Answer").and_then(|a| a.as_array()) {
+            for a in answers {
+                if let Some(ip) = a
+                    .get("data")
+                    .and_then(|d| d.as_str())
+                    .and_then(|d| d.parse::<std::net::IpAddr>().ok())
+                {
+                    ips.push(ip);
+                }
+            }
+        }
+    }
+    if ips.is_empty() {
+        return Err(Error::new(ErrorKind::Other, "DoH returned no addresses"));
+    }
+    Ok(ips)
 }
 
 /// A fetch request: try `urls` in order, tag the result with `purpose`.
@@ -111,11 +168,13 @@ fn fetch_loop(rx: Receiver<Job>, done_tx: Sender<Finished>) {
         Ok(cfg) => builder = builder.tls_config(std::sync::Arc::new(cfg)),
         Err(e) => log::warn!("cheat-fetch: platform TLS verifier config failed: {e}"),
     }
-    // Android's native getaddrinfo fails from worker threads; resolve DNS through
-    // the JVM instead.
+    // Android's system resolver is unreliable from worker threads; resolve DNS
+    // via the JVM, falling back to DNS-over-HTTPS.
     #[cfg(target_os = "android")]
     {
-        builder = builder.resolver(JniResolver);
+        builder = builder.resolver(AndroidResolver {
+            doh: std::sync::Arc::new(doh_agent()),
+        });
     }
     let agent = builder.build();
     while let Ok(job) = rx.recv() {
