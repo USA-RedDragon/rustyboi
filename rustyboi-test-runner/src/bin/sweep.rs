@@ -467,12 +467,14 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     // capture_bios cleanly skips (logs once) any model whose boot ROM is absent.
     // Wholly separate from `emulate` — its own synthetic cart, ADDITIONAL rows
     // keyed `bios_<tag>` that never touch or reorder any game row's bytes.
-    const BOOT_MODELS: [Hardware; 10] = [
+    // SGB/SGB2 are intentionally absent: the Super Game Boy renders its boot
+    // logo/animation on the SNES side, not the GB LCD (its GB-side boot ROM just
+    // hands off in ~27 frames without a logo scroll), so a GB-framebuffer boot
+    // capture for them is meaningless. They stay fully supported for GAMES.
+    const BOOT_MODELS: [Hardware; 8] = [
         Hardware::DMG,
         Hardware::DMG0,
         Hardware::MGB,
-        Hardware::SGB,
-        Hardware::SGB2,
         Hardware::CGB0,
         Hardware::CGBB,
         Hardware::CGB,
@@ -1139,20 +1141,31 @@ fn resolve_bios_path(file: &str, bios_dir: Option<&Path>) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
+/// The 48-byte Nintendo logo the boot ROM checks the cart header against,
+/// sourced AT RUNTIME from a canonical boot ROM in the bios dir that carries it
+/// (dmg_boot.bin @0xA8, else cgb_boot.bin @0x42) — never embedded in source.
+/// The logo is identical across every Nintendo boot ROM, so this one copy is
+/// correct for ALL models. Needed because dmg0 keeps its copy at a different
+/// offset (0xCB) and SGB/SGB2 don't embed the logo at all (the SNES side
+/// verifies), so sourcing from the boot-ROM-under-test gives garbage for those.
+fn canonical_boot_logo(bios_dir: Option<&Path>) -> Option<[u8; 48]> {
+    for (file, off) in [("dmg_boot.bin", 0xA8usize), ("cgb_boot.bin", 0x42)] {
+        let Some(p) = resolve_bios_path(file, bios_dir) else { continue };
+        let Ok(b) = std::fs::read(&p) else { continue };
+        if let Some(slice) = b.get(off..off + 48) {
+            let mut logo = [0u8; 48];
+            logo.copy_from_slice(slice);
+            return Some(logo);
+        }
+    }
+    None
+}
+
 /// Build a 32KB ROM-only cartridge whose header passes the boot ROM's logo +
 /// header-checksum gate, so the real boot animation runs to handoff instead of
-/// hanging. The 48 Nintendo-logo bytes are sourced AT RUNTIME from the loaded
-/// boot ROM (DMG/SGB 256-byte dump: offset 0xA8; CGB/AGB 2304-byte dump: 0x42) —
-/// the same runtime-sourcing the core uses to feed the Rocket mapper — so no
-/// logo bytes are ever embedded in committed source. None if the dump is too
-/// short to carry a logo (i.e. not a real boot ROM).
-fn build_boot_cart(bios: &[u8]) -> Option<Vec<u8>> {
-    let logo_off = match bios.len() {
-        256 => 0xA8usize,
-        2304 => 0x42,
-        _ => return None,
-    };
-    let logo = bios.get(logo_off..logo_off + 48)?;
+/// hanging. `logo` is the runtime-sourced Nintendo logo ([`canonical_boot_logo`])
+/// — no logo bytes are ever embedded in committed source.
+fn build_boot_cart(logo: &[u8; 48]) -> Vec<u8> {
     let mut cart = vec![0u8; 0x8000];
     // Entry point: NOP; JP $0150, then a quiet self-loop so the cart "runs"
     // silently once the boot ROM hands control to it.
@@ -1170,7 +1183,7 @@ fn build_boot_cart(bios: &[u8]) -> Option<Vec<u8>> {
     let sum = cart[0x134..0x14D].iter().fold(0u8, |a, &b| a.wrapping_sub(b).wrapping_sub(1));
     cart[0x14D] = sum;
     // Global checksum (0x14E/0x14F) is NOT checked by the boot ROM; left zero.
-    Some(cart)
+    cart
 }
 
 struct BiosOut {
@@ -1218,8 +1231,11 @@ fn capture_bios(
         eprintln!("sweep: no boot ROM ({file}) for {tag}, skipping BIOS meta");
         return Ok(None);
     };
-    let bios = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let cart_bytes = build_boot_cart(&bios).ok_or_else(|| format!("{file}: not a boot ROM"))?;
+    let Some(logo) = canonical_boot_logo(bios_dir) else {
+        eprintln!("sweep: no boot ROM carrying the logo (dmg_boot.bin/cgb_boot.bin) in bios dir; skipping BIOS meta for {tag}");
+        return Ok(None);
+    };
+    let cart_bytes = build_boot_cart(&logo);
     let cart = Cartridge::from_bytes(&cart_bytes).map_err(|e| format!("synthetic cart: {e}"))?;
 
     let mut gb = GB::new(hw);
