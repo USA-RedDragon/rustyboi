@@ -306,9 +306,11 @@ impl Session {
                     o
                 }
                 None if self.original_rom_bytes().is_none() => {
-                    ActionOutcome::error("Load a ROM first")
+                    ActionOutcome::status("Load a ROM first to fetch cheats")
                 }
-                None => ActionOutcome::error("Game not in the No-Intro database"),
+                None => ActionOutcome::status(
+                    "Couldn't identify this game — no cheats found for it",
+                ),
             },
             UiAction::ClearFetchedCheats => {
                 self.clear_fetched_cheats();
