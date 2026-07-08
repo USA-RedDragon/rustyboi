@@ -2925,6 +2925,7 @@ dependencies = [
  "rustyboi-core",
  "serde",
  "serde_json",
+ "zip",
 ]
 
 [[package]]

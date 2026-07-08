@@ -657,7 +657,8 @@ impl Session {
     /// receive a pre-built machine plus the ROM bytes (desktop CLI `--rom`),
     /// where [`load_rom_bytes`](Self::load_rom_bytes) isn't on the path.
     pub fn set_rom_identity(&mut self, rom: &[u8]) {
-        self.game_name = crate::no_intro::resolve_game_name(rom);
+        let rom = crate::rom_zip::extract_rom(rom);
+        self.game_name = crate::no_intro::resolve_game_name(&rom);
     }
 
     /// Apply an updated config: reconfigures the rewind buffer to match (other
@@ -878,10 +879,13 @@ impl Session {
     /// hardware, insert the cartridge, and re-bind the session to it. Returns
     /// the new ROM id on success.
     pub fn finish_load_rom(&mut self, bytes: &[u8]) -> Result<[u8; 32], SessionError> {
-        let rom_id = self.load_rom_bytes(bytes)?;
+        // Unzip a `.zip` container so identification/patching/rom-id see the ROM,
+        // not the archive (the core also unzips when building the cartridge).
+        let rom = crate::rom_zip::extract_rom(bytes);
+        let rom_id = self.load_rom_bytes(&rom)?;
         // Retain the pristine ROM so a later `apply_rom_patch` always patches the
         // original, not an already-patched image.
-        self.original_rom = Some(bytes.to_vec());
+        self.original_rom = Some(rom);
         Ok(rom_id)
     }
 
