@@ -196,9 +196,20 @@ impl WebApp {
     /// the egui menus/cheats/settings reflect live session state.
     pub fn on_ui_state(&self, json: &str) {
         if let Ok(state) = serde_json::from_str::<crate::web_action::WebUiState>(json) {
-            let mut s = self.shared.borrow_mut();
-            s.ui_state = state.into_session();
-            s.ui_dirty = true;
+            let title = match state.game_name.as_deref() {
+                Some(g) => format!("{g} — RustyBoi"),
+                None => "RustyBoi".to_string(),
+            };
+            {
+                let mut s = self.shared.borrow_mut();
+                s.ui_state = state.into_session();
+                s.ui_dirty = true;
+            }
+            // Reflect the identified game in the browser tab title. Snapshots
+            // only arrive on change, so this runs rarely.
+            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                doc.set_title(&title);
+            }
         }
     }
 

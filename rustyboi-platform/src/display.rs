@@ -250,7 +250,11 @@ fn session_from_gb(
     let rom_id = rom_bytes.map(rustyboi_session::sha256).unwrap_or([0u8; 32]);
     // Pass the boxed GB straight through — never `*gb`, which would move the
     // ~207 KB machine onto the stack and overflow Android's main-thread stack.
-    Session::with_gb(gb, config, ports, rom_id)
+    let mut session = Session::with_gb(gb, config, ports, rom_id);
+    if let Some(bytes) = rom_bytes {
+        session.set_rom_identity(bytes);
+    }
+    session
 }
 
 /// Collect the keyboard keys held this frame into a [`HeldInputs`] (pad filled

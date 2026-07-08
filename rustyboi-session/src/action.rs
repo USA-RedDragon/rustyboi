@@ -125,6 +125,9 @@ pub struct SessionUiState {
     pub has_rtc: bool,
     /// Whether a ROM is currently loaded (gates the Apply Patch menu item).
     pub has_rom: bool,
+    /// The loaded game's display name (No-Intro name, else header title), for
+    /// the window/tab title and the ROM library. `None` when unidentifiable.
+    pub game_name: Option<String>,
     /// The live rebindable input map (GB-button bindings + chord hotkeys) the
     /// keybind editor reads/writes. Mirrors [`Config::input`](crate::config::Config).
     pub input: InputConfig,
@@ -148,6 +151,7 @@ impl Default for SessionUiState {
             has_battery: false,
             has_rtc: false,
             has_rom: false,
+            game_name: None,
             input: InputConfig::default(),
         }
     }
