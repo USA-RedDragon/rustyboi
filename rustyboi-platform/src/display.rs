@@ -552,10 +552,13 @@ fn run_gui_loop(
         #[cfg(target_os = "android")]
         if let Event::WindowEvent { event: WindowEvent::KeyboardInput { event: key, .. }, .. } = &event {
             use winit::keyboard::{NativeKeyCode, PhysicalKey};
+            // DIAGNOSTIC: log EVERY key winit delivers so we can see whether (and
+            // how) gamepad buttons reach the app via winit at all.
+            crate::android::raw_log(&format!(
+                "winit key: phys={:?} logical={:?} state={:?} repeat={}",
+                key.physical_key, key.logical_key, key.state, key.repeat
+            ));
             if let PhysicalKey::Unidentified(NativeKeyCode::Android(code)) = key.physical_key {
-                if key.state == winit::event::ElementState::Pressed {
-                    crate::android::raw_log(&format!("android gamepad keycode {code}"));
-                }
                 if let Some(pb) = android_pad_button(code) {
                     if key.state == winit::event::ElementState::Pressed {
                         android_pad.insert(pb);
