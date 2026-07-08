@@ -47,7 +47,20 @@ pub fn show(ctx: &Context, touch_state: &mut TouchState) -> ButtonState {
 
     // Derive pressed state by hit-testing every active touch against the shared
     // layout (multi-touch aware).
-    let pointers: Vec<(f32, f32)> = touch_state.active.values().map(|p| (p.x, p.y)).collect();
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
+    let mut pointers: Vec<(f32, f32)> = touch_state.active.values().map(|p| (p.x, p.y)).collect();
+    // Web fallback: winit's web backend delivers a single touch as a pointer
+    // (mouse) event rather than `Event::Touch`, so `active` stays empty and the
+    // buttons never register. Hit-test the primary pointer while it is down.
+    // Web-only so a desktop mouse can't press the on-screen pad.
+    #[cfg(target_arch = "wasm32")]
+    ctx.input(|i| {
+        if i.pointer.primary_down()
+            && let Some(p) = i.pointer.interact_pos()
+        {
+            pointers.push((p.x, p.y));
+        }
+    });
     let state = layout.button_state(&pointers);
 
     // Paint via a single foreground painter so all overlays render on top of the
