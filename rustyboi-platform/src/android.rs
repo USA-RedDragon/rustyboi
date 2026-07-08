@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
-use jni::objects::{JByteArray, JClass, JObject, JString};
+use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString};
 use jni::sys::jobject;
 use jni::{JNIEnv, JavaVM};
 use rustyboi_frontend_lib::actions::{FileData, LibraryEntry};
@@ -698,6 +698,63 @@ pub extern "system" fn Java_dev_mcswain_rustyboi_RustyboiActivity_nativeOnGamepa
     PAD_HY.store(hat_y.to_bits(), Ordering::Relaxed);
     PAD_LT.store(lt.to_bits(), Ordering::Relaxed);
     PAD_RT.store(rt.to_bits(), Ordering::Relaxed);
+}
+
+/// Resolve `host` to IPs via the JVM (`java.net.InetAddress.getAllByName`).
+/// Android's native `getaddrinfo` fails from Rust worker threads ("No address
+/// associated with hostname"); Java's resolver uses the app's network correctly.
+/// Used as ureq's DNS resolver for the cheat-DB fetch.
+pub fn resolve_host(host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+    use std::io::{Error, ErrorKind};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let mkerr = |m: String| Error::new(ErrorKind::Other, m);
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm() as *mut _) }.map_err(|e| mkerr(format!("vm: {e}")))?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| mkerr(format!("attach: {e}")))?;
+
+    let jhost = env.new_string(host).map_err(|e| mkerr(format!("str: {e}")))?;
+    let arr = env
+        .call_static_method(
+            "java/net/InetAddress",
+            "getAllByName",
+            "(Ljava/lang/String;)[Ljava/net/InetAddress;",
+            &[(&jhost).into()],
+        )
+        .and_then(|v| v.l())
+        .map_err(|e| mkerr(format!("getAllByName: {e}")))?;
+    let arr = unsafe { JObjectArray::from_raw(arr.into_raw()) };
+
+    let len = env.get_array_length(&arr).map_err(|e| mkerr(format!("len: {e}")))?;
+    let mut out = Vec::new();
+    for i in 0..len {
+        let addr = env
+            .get_object_array_element(&arr, i)
+            .map_err(|e| mkerr(format!("elem: {e}")))?;
+        let bytes = env
+            .call_method(&addr, "getAddress", "()[B", &[])
+            .and_then(|v| v.l())
+            .map_err(|e| mkerr(format!("getAddress: {e}")))?;
+        let bytes = unsafe { JByteArray::from_raw(bytes.into_raw()) };
+        let raw = env
+            .convert_byte_array(&bytes)
+            .map_err(|e| mkerr(format!("convert: {e}")))?;
+        match raw.len() {
+            4 => out.push(IpAddr::V4(Ipv4Addr::new(raw[0], raw[1], raw[2], raw[3]))),
+            16 => {
+                let mut b = [0u8; 16];
+                b.copy_from_slice(&raw);
+                out.push(IpAddr::V6(Ipv6Addr::from(b)));
+            }
+            _ => {}
+        }
+    }
+    if out.is_empty() {
+        return Err(mkerr(format!("no addresses for {host}")));
+    }
+    Ok(out)
 }
 
 fn invoke_pending(result: Option<FileData>) {
