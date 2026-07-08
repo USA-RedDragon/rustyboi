@@ -715,10 +715,23 @@ pub fn resolve_host(host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
     let res = resolve_via_jvm(&mut env, host);
     // A JNI call that threw (e.g. UnknownHostException) leaves the exception
     // pending; detaching this worker thread with a pending exception aborts the
-    // whole process. Log + clear it so the failure is graceful.
+    // whole process. Capture its message (under our tag), then clear it so the
+    // failure is graceful.
     if env.exception_check().unwrap_or(false) {
-        let _ = env.exception_describe();
+        let exc = env.exception_occurred().ok();
         let _ = env.exception_clear();
+        let detail = exc
+            .and_then(|exc| {
+                env.call_method(&exc, "toString", "()Ljava/lang/String;", &[])
+                    .and_then(|v| v.l())
+                    .ok()
+                    .and_then(|o| {
+                        let s = unsafe { JString::from_raw(o.into_raw()) };
+                        env.get_string(&s).ok().map(|js| js.to_string_lossy().into_owned())
+                    })
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        raw_log(&format!("resolve_host({host}) failed: {detail}"));
     }
     res
 }
