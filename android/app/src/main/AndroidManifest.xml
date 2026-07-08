@@ -3,6 +3,8 @@
 
     <!-- Required by the libretro cheat-DB fetch (ureq HTTPS GET on a worker thread). -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- getActiveNetwork(), to bind the process to the active network for DNS. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:label="RustyBoi"
