@@ -700,45 +700,82 @@ pub extern "system" fn Java_dev_mcswain_rustyboi_RustyboiActivity_nativeOnGamepa
     PAD_RT.store(rt.to_bits(), Ordering::Relaxed);
 }
 
-/// Bind this process to the active network via `ConnectivityManager`.
+/// Bind this process's native sockets + DNS to the active network.
 ///
-/// A native app's sockets and DNS (`getaddrinfo`, and by extension `ureq`) are
-/// not associated with any network by default, so from a worker thread they fail
-/// with `EAI_NODATA` ("No address associated with hostname") even with INTERNET
-/// granted and the device online — while the framework HTTP stack (browsers)
-/// works. Per the Android docs, `bindProcessToNetwork(getActiveNetwork())` makes
-/// all subsequent sockets and name resolution in this process use that network.
-/// Idempotent; call before networking. Requires ACCESS_NETWORK_STATE.
+/// A native app's `getaddrinfo` (and thus `ureq`) is not associated with any
+/// network by default, so from a worker thread it fails with `EAI_NODATA` ("No
+/// address associated with hostname") even with INTERNET granted and the device
+/// online — while the framework HTTP stack (browsers) works. Java
+/// `bindProcessToNetwork` does not reliably reach native resolution (per the
+/// Android docs, native socket calls may bypass Java-level bindings); the NDK
+/// `android_setprocnetwork` (from `<android/multinetwork.h>`, API 23) does, per
+/// its contract "all host name resolutions will be limited to network as well".
+///
+/// The only way to obtain the active network's `net_handle_t` is Java's
+/// `Network.getNetworkHandle()` (needs ACCESS_NETWORK_STATE), which we then pass
+/// to the native call. Idempotent; call before networking.
 pub fn bind_process_to_network() {
-    let logged = with_activity(|env, activity| -> Result<bool, jni::errors::Error> {
-        let svc = env.new_string("connectivity")?;
-        let cm = env
-            .call_method(
-                activity,
-                "getSystemService",
-                "(Ljava/lang/String;)Ljava/lang/Object;",
-                &[(&svc).into()],
-            )?
-            .l()?;
-        if cm.is_null() {
-            return Ok(false);
+    let ctx = ndk_context::android_context();
+    let vm = match unsafe { JavaVM::from_raw(ctx.vm() as *mut _) } {
+        Ok(v) => v,
+        Err(e) => {
+            raw_log(&format!("bind_process_to_network: vm: {e}"));
+            return;
         }
-        let net = env
-            .call_method(&cm, "getActiveNetwork", "()Landroid/net/Network;", &[])?
-            .l()?;
-        if net.is_null() {
-            return Ok(false);
+    };
+    let mut env = match vm.attach_current_thread() {
+        Ok(e) => e,
+        Err(e) => {
+            raw_log(&format!("bind_process_to_network: attach: {e}"));
+            return;
         }
-        let ok = env
-            .call_method(&cm, "bindProcessToNetwork", "(Landroid/net/Network;)Z", &[(&net).into()])?
-            .z()?;
-        Ok(ok)
-    });
-    match logged {
-        Some(Ok(ok)) => raw_log(&format!("bind_process_to_network: {ok}")),
-        Some(Err(e)) => raw_log(&format!("bind_process_to_network: JNI error: {e}")),
-        None => raw_log("bind_process_to_network: no activity"),
+    };
+    let handle = active_network_handle(&mut env, ctx.context() as jobject);
+    // getActiveNetwork throws (e.g. SecurityException without ACCESS_NETWORK_STATE)
+    // leaves the exception pending; clear it before the guard detaches.
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
     }
+    match handle {
+        Some(h) => {
+            let r = unsafe { ndk_sys::android_setprocnetwork(h) };
+            raw_log(&format!("android_setprocnetwork(0x{h:x}) = {r}"));
+        }
+        None => raw_log("bind_process_to_network: no active network handle"),
+    }
+}
+
+fn active_network_handle(env: &mut JNIEnv<'_>, context_raw: jobject) -> Option<u64> {
+    let activity = unsafe { JObject::from_raw(context_raw) };
+    let svc = env.new_string("connectivity").ok()?;
+    let cm = env
+        .call_method(
+            &activity,
+            "getSystemService",
+            "(Ljava/lang/String;)Ljava/lang/Object;",
+            &[(&svc).into()],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+    if cm.is_null() {
+        return None;
+    }
+    let net = env
+        .call_method(&cm, "getActiveNetwork", "()Landroid/net/Network;", &[])
+        .ok()?
+        .l()
+        .ok()?;
+    if net.is_null() {
+        return None;
+    }
+    let handle = env
+        .call_method(&net, "getNetworkHandle", "()J", &[])
+        .ok()?
+        .j()
+        .ok()?;
+    Some(handle as u64)
 }
 
 fn invoke_pending(result: Option<FileData>) {
