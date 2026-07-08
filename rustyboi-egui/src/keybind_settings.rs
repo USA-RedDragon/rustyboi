@@ -67,9 +67,9 @@ impl Gui {
 
         let mut changed = false;
 
-        egui::Window::new("Keybind Settings")
+        egui::Window::new("Controls")
             .default_pos([300.0, 50.0])
-            .default_size([340.0, 520.0])
+            .default_size([360.0, 520.0])
             .collapsible(true)
             .resizable(true)
             .frame(egui::Frame::window(&ctx.style()).fill(crate::ui::PANEL_BACKGROUND))
@@ -101,62 +101,95 @@ impl Gui {
     fn gb_bindings_section(&mut self, ui: &mut egui::Ui, pressed_key: Option<KeyName>) -> bool {
         let Some(cfg) = self.input_config.as_mut() else { return false };
         let mut changed = false;
-        ui.heading("Game Boy Buttons");
+        ui.heading("Buttons");
         ui.label(
-            "Each button fires if ANY of its triggers is held — add keys, pad \
-             buttons, or stick directions (so the d-pad and analog stick can both \
-             map to a direction). ✕ removes a trigger.",
+            egui::RichText::new(
+                "Add a keyboard key or controller button to each Game Boy button. \
+                 A button works if any of its bindings is pressed. Click a binding to remove it.",
+            )
+            .weak(),
         );
         ui.add_space(6.0);
 
-        // Append a captured key to the button awaiting a rebind.
+        // Resolve a pending key capture; Escape cancels instead of binding.
         if let (Some(btn), Some(key)) = (self.rebinding_gb, pressed_key) {
-            if let Some((_, triggers)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == btn) {
+            if key != KeyName::Escape
+                && let Some((_, triggers)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == btn)
+            {
                 triggers.push(InputTrigger::Key(key));
+                changed = true;
             }
             self.rebinding_gb = None;
-            changed = true;
         }
 
+        let rebinding = self.rebinding_gb;
         let mut add_pad: Option<(GbButton, PadButton)> = None;
         let mut remove: Option<(GbButton, usize)> = None;
-        for gb in GbButton::ALL {
-            let triggers: Vec<InputTrigger> = cfg
-                .gb_bindings
-                .iter()
-                .find(|(b, _)| *b == gb)
-                .map(|(_, t)| t.clone())
-                .unwrap_or_default();
-            ui.horizontal_wrapped(|ui| {
-                ui.strong(gb_label(gb));
-                for (i, t) in triggers.iter().enumerate() {
-                    ui.monospace(t.label());
-                    if ui.small_button("✕").clicked() {
-                        remove = Some((gb, i));
-                    }
-                }
-                let recording = self.rebinding_gb == Some(gb);
-                if ui.button(if recording { "press a key…" } else { "+ key" }).clicked() {
-                    self.rebinding_gb = if recording { None } else { Some(gb) };
-                }
-                if let Some(p) = pad_pick(ui, format!("gbpad_{gb:?}")) {
-                    add_pad = Some((gb, p));
+        let mut start_capture: Option<GbButton> = None;
+
+        egui::Grid::new("gb_binds")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .striped(true)
+            .show(ui, |ui| {
+                for gb in GbButton::ALL {
+                    ui.strong(gb_label(gb));
+                    ui.horizontal_wrapped(|ui| {
+                        let triggers: Vec<InputTrigger> = cfg
+                            .gb_bindings
+                            .iter()
+                            .find(|(b, _)| *b == gb)
+                            .map(|(_, t)| t.clone())
+                            .unwrap_or_default();
+                        for (i, t) in triggers.iter().enumerate() {
+                            if ui.small_button(t.label()).on_hover_text("Remove").clicked() {
+                                remove = Some((gb, i));
+                            }
+                        }
+                        if rebinding == Some(gb) {
+                            ui.label(
+                                egui::RichText::new("press a key…")
+                                    .italics()
+                                    .color(egui::Color32::LIGHT_BLUE),
+                            );
+                        } else {
+                            ui.menu_button("Add…", |ui| {
+                                if ui.button("Press a key").clicked() {
+                                    start_capture = Some(gb);
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                                ui.label(egui::RichText::new("Controller").weak());
+                                if let Some(p) = pad_menu(ui) {
+                                    add_pad = Some((gb, p));
+                                    ui.close_menu();
+                                }
+                            });
+                        }
+                    });
+                    ui.end_row();
                 }
             });
+
+        if let Some(gb) = start_capture {
+            self.rebinding_gb = Some(gb);
         }
         if let Some((gb, p)) = add_pad {
             if let Some((_, tr)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == gb) {
-                tr.push(InputTrigger::Pad(p));
+                let t = InputTrigger::Pad(p);
+                if !tr.contains(&t) {
+                    tr.push(t);
+                    changed = true;
+                }
             }
-            changed = true;
         }
         if let Some((gb, i)) = remove {
             if let Some((_, tr)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == gb) {
                 if i < tr.len() {
                     tr.remove(i);
+                    changed = true;
                 }
             }
-            changed = true;
         }
         changed
     }
@@ -164,8 +197,10 @@ impl Gui {
     fn hotkeys_section(&mut self, ui: &mut egui::Ui, keys_down: &[KeyName]) -> bool {
         let Some(cfg) = self.input_config.as_mut() else { return false };
         let mut changed = false;
-        ui.heading("Hotkeys");
-        ui.label("Chord = all triggers held. Record captures currently-held keys.");
+        ui.heading("Shortcuts");
+        ui.label(
+            egui::RichText::new("Hold all the listed buttons together to run the action.").weak(),
+        );
         ui.add_space(6.0);
 
         // Update the recording buffer from currently-held keys (union).
@@ -178,70 +213,88 @@ impl Gui {
             }
         }
 
+        let recording_idx = self.recording_chord;
+        let recorded_preview = chord_label(&self.recorded_chord);
         let mut remove: Option<usize> = None;
+        let mut toggle_record: Option<usize> = None;
+        let mut add_gb: Option<(usize, GbButton)> = None;
+        let mut add_pad: Option<(usize, PadButton)> = None;
+        let mut clear: Option<usize> = None;
+
         for i in 0..cfg.hotkeys.len() {
             ui.horizontal(|ui| {
-                let chord_text = chord_label(&cfg.hotkeys[i].chord);
-                ui.monospace(chord_text);
+                ui.label(egui::RichText::new(chord_label(&cfg.hotkeys[i].chord)).monospace());
                 ui.label("→");
-                ui.label(cfg.hotkeys[i].action.label());
+                let mut act = cfg.hotkeys[i].action;
+                if action_combo(ui, i, &mut act) {
+                    cfg.hotkeys[i].action = act;
+                    changed = true;
+                }
             });
             ui.horizontal(|ui| {
-                let recording = self.recording_chord == Some(i);
+                let recording = recording_idx == Some(i);
                 let rec_label = if recording {
-                    format!("Recording ({})", chord_label(&self.recorded_chord))
+                    format!("Stop ({recorded_preview})")
                 } else {
-                    "Record chord".to_string()
+                    "Record keys".to_string()
                 };
                 if ui.button(rec_label).clicked() {
-                    if recording {
-                        // Commit the recorded chord if non-empty.
-                        if !self.recorded_chord.is_empty() {
-                            cfg.hotkeys[i].chord = self.recorded_chord.clone();
-                            changed = true;
-                        }
-                        self.recording_chord = None;
-                        self.recorded_chord.clear();
-                    } else {
-                        self.recording_chord = Some(i);
-                        self.recorded_chord.clear();
-                    }
+                    toggle_record = Some(i);
                 }
-                if ui.button("Remove").clicked() {
+                ui.menu_button("Add button", |ui| {
+                    ui.label(egui::RichText::new("Game Boy").weak());
+                    if let Some(b) = gb_menu(ui) {
+                        add_gb = Some((i, b));
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Controller").weak());
+                    if let Some(p) = pad_menu(ui) {
+                        add_pad = Some((i, p));
+                        ui.close_menu();
+                    }
+                });
+                if ui.button("Clear").clicked() {
+                    clear = Some(i);
+                }
+                if ui.button("✕").on_hover_text("Delete shortcut").clicked() {
                     remove = Some(i);
-                }
-            });
-            // Action dropdown for this row.
-            let mut act = cfg.hotkeys[i].action;
-            if action_combo(ui, i, &mut act) {
-                cfg.hotkeys[i].action = act;
-                changed = true;
-            }
-            // Explicit trigger pickers for GB buttons and gamepad buttons
-            // (the live recorder only captures keyboard keys).
-            ui.horizontal(|ui| {
-                if let Some(b) = gb_pick(ui, format!("addgb_{i}")) {
-                    let t = InputTrigger::Gb(b);
-                    if !cfg.hotkeys[i].chord.contains(&t) {
-                        cfg.hotkeys[i].chord.push(t);
-                        changed = true;
-                    }
-                }
-                if let Some(p) = pad_pick(ui, format!("addpad_{i}")) {
-                    let t = InputTrigger::Pad(p);
-                    if !cfg.hotkeys[i].chord.contains(&t) {
-                        cfg.hotkeys[i].chord.push(t);
-                        changed = true;
-                    }
-                }
-                if ui.button("Clear chord").clicked() {
-                    cfg.hotkeys[i].chord.clear();
-                    changed = true;
                 }
             });
             ui.separator();
         }
 
+        if let Some(i) = toggle_record {
+            if recording_idx == Some(i) {
+                if !self.recorded_chord.is_empty() {
+                    cfg.hotkeys[i].chord = self.recorded_chord.clone();
+                    changed = true;
+                }
+                self.recording_chord = None;
+                self.recorded_chord.clear();
+            } else {
+                self.recording_chord = Some(i);
+                self.recorded_chord.clear();
+            }
+        }
+        if let Some((i, b)) = add_gb {
+            let t = InputTrigger::Gb(b);
+            if !cfg.hotkeys[i].chord.contains(&t) {
+                cfg.hotkeys[i].chord.push(t);
+                changed = true;
+            }
+        }
+        if let Some((i, p)) = add_pad {
+            let t = InputTrigger::Pad(p);
+            if !cfg.hotkeys[i].chord.contains(&t) {
+                cfg.hotkeys[i].chord.push(t);
+                changed = true;
+            }
+        }
+        if let Some(i) = clear {
+            cfg.hotkeys[i].chord.clear();
+            changed = true;
+        }
         if let Some(i) = remove {
             cfg.hotkeys.remove(i);
             if self.recording_chord == Some(i) {
@@ -254,7 +307,7 @@ impl Gui {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             action_combo(ui, usize::MAX, &mut self.new_hotkey_action);
-            if ui.button("Add hotkey").clicked() {
+            if ui.button("Add shortcut").clicked() {
                 cfg.hotkeys.push(Hotkey {
                     chord: Vec::new(),
                     action: self.new_hotkey_action,
@@ -295,32 +348,28 @@ fn action_combo(ui: &mut egui::Ui, id: usize, action: &mut HotkeyAction) -> bool
     *action != before
 }
 
-/// A one-shot GB-button picker (adds the selected GB button to a chord).
-fn gb_pick(ui: &mut egui::Ui, id: String) -> Option<GbButton> {
+/// Game Boy button list for a menu; returns the clicked button. 8 items, no
+/// scroll needed.
+fn gb_menu(ui: &mut egui::Ui) -> Option<GbButton> {
     let mut picked = None;
-    egui::ComboBox::from_id_source(id)
-        .selected_text("Add GB button")
-        .show_ui(ui, |ui| {
-            for b in GbButton::ALL {
-                if ui.selectable_label(false, gb_label(b)).clicked() {
-                    picked = Some(b);
-                }
-            }
-        });
+    for b in GbButton::ALL {
+        if ui.button(gb_label(b)).clicked() {
+            picked = Some(b);
+        }
+    }
     picked
 }
 
-/// A one-shot pad-button picker (adds the selected pad button to a chord).
-fn pad_pick(ui: &mut egui::Ui, id: String) -> Option<PadButton> {
+/// Controller-button list for a menu (face/shoulder/d-pad/stick, ~22 items so
+/// it scrolls); returns the clicked button.
+fn pad_menu(ui: &mut egui::Ui) -> Option<PadButton> {
     let mut picked = None;
-    egui::ComboBox::from_id_source(id)
-        .selected_text("Add pad button")
-        .show_ui(ui, |ui| {
-            for p in PadButton::ALL {
-                if ui.selectable_label(false, p.label()).clicked() {
-                    picked = Some(p);
-                }
+    egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+        for p in PadButton::ALL {
+            if ui.button(p.label()).clicked() {
+                picked = Some(p);
             }
-        });
+        }
+    });
     picked
 }
