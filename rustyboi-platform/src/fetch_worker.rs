@@ -78,15 +78,16 @@ impl Drop for FetchWorker {
 }
 
 fn fetch_loop(rx: Receiver<Job>, done_tx: Sender<Finished>) {
-    use rustls_platform_verifier::ConfigVerifierExt;
-    // Native-root TLS via the OS verifier: the system trust store on desktop, the
-    // Android CA store (through the JNI init in android_main) on Android. No
-    // bundled roots. Install the ring provider so ClientConfig::builder() has one.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut builder = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(20));
-    match rustls::ClientConfig::with_platform_verifier() {
-        Ok(cfg) => builder = builder.tls_config(std::sync::Arc::new(cfg)),
-        Err(e) => log::warn!("cheat-fetch: platform TLS verifier config failed: {e}"),
+    // Native-root TLS: the OS trust anchors (Android's X509TrustManager via JNI,
+    // the system store on desktop) loaded into a rustls root store, with rustls's
+    // own verification. NOT the platform verifier — Android's mandates OCSP and
+    // hard-fails on OCSP-less certs like github/Let's Encrypt (rustls-platform-
+    // verifier #221). No bundled roots.
+    match native_tls_config() {
+        Some(cfg) => builder = builder.tls_config(std::sync::Arc::new(cfg)),
+        None => log::warn!("cheat-fetch: no native trust roots; TLS will fail"),
     }
     // Bind the process to the active network so native DNS/sockets work from this
     // worker thread (otherwise getaddrinfo fails with EAI_NODATA even online).
@@ -99,6 +100,33 @@ fn fetch_loop(rx: Receiver<Job>, done_tx: Sender<Finished>) {
             break; // main side gone
         }
     }
+}
+
+/// A rustls client config trusting the OS's CA roots (no revocation checking).
+fn native_tls_config() -> Option<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+
+    #[cfg(target_os = "android")]
+    for der in crate::android::system_ca_certs() {
+        let _ = roots.add(rustls::pki_types::CertificateDer::from(der));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let loaded = rustls_native_certs::load_native_certs();
+        for cert in loaded.certs {
+            let _ = roots.add(cert);
+        }
+    }
+
+    if roots.is_empty() {
+        return None;
+    }
+    Some(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    )
 }
 
 /// Try each URL in order; return the first 2xx body, else the last error. A 404
