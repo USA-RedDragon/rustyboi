@@ -181,6 +181,10 @@ class RustyboiActivity : GameActivity() {
                 return@submit
             }
             val out = JSONArray()
+            // CRC32 cache keyed by document URI ("size:crc"), so a big library is
+            // hashed once and re-scans are instant. Size guards against edits.
+            val crcPrefs = getSharedPreferences("rom_crc", android.content.Context.MODE_PRIVATE)
+            val crcEditor = crcPrefs.edit()
             data class Frame(val dir: DocumentFile, val relPath: String)
             val queue = ArrayDeque<Frame>()
             queue.add(Frame(root, ""))
@@ -198,17 +202,79 @@ class RustyboiActivity : GameActivity() {
                     if (child.isDirectory) {
                         queue.addLast(Frame(child, childRel))
                     } else if (child.isFile && isRomFile(name)) {
+                        val size = child.length()
+                        val key = child.uri.toString()
+                        var crc = 0L
+                        val cached = crcPrefs.getString(key, null)
+                        if (cached != null) {
+                            val p = cached.split(":")
+                            if (p.size == 2 && p[0].toLongOrNull() == size) {
+                                crc = p[1].toLongOrNull() ?: 0L
+                            }
+                        }
+                        if (crc == 0L) {
+                            crc = computeCrc32(child.uri, name)
+                            if (crc != 0L) crcEditor.putString(key, "$size:$crc")
+                        }
                         val obj = JSONObject()
-                        obj.put("uri", child.uri.toString())
+                        obj.put("uri", key)
                         obj.put("name", name)
                         obj.put("rel_path", childRel)
-                        obj.put("size_bytes", child.length())
+                        obj.put("size_bytes", size)
+                        obj.put("crc32", crc)
                         out.put(obj)
                     }
                 }
             }
+            crcEditor.apply()
             Log.i(TAG, "scanLibrary: ${out.length()} entries")
             nativeOnLibraryScanResult(out.toString())
+        }
+    }
+
+    /** CRC32 of a stream, read to completion. */
+    private fun crcOf(input: java.io.InputStream): Long {
+        val crc = java.util.zip.CRC32()
+        val buf = ByteArray(65536)
+        var n = input.read(buf)
+        while (n >= 0) {
+            crc.update(buf, 0, n)
+            n = input.read(buf)
+        }
+        return crc.value
+    }
+
+    /**
+     * CRC32 of a ROM file, matching No-Intro's checksum of the raw ROM image.
+     * For a `.zip`, hashes the first contained ROM entry (No-Intro CRCs are of
+     * the uncompressed ROM, not the archive). Returns 0 on any error.
+     */
+    private fun computeCrc32(uri: Uri, name: String): Long {
+        return try {
+            contentResolver.openInputStream(uri)?.use { input ->
+                if (name.lowercase().endsWith(".zip")) {
+                    java.util.zip.ZipInputStream(input).use { zis ->
+                        var result = 0L
+                        var e = zis.nextEntry
+                        while (e != null) {
+                            val en = e.name.lowercase()
+                            if (!e.isDirectory &&
+                                (en.endsWith(".gb") || en.endsWith(".gbc") || en.endsWith(".sgb"))
+                            ) {
+                                result = crcOf(zis)
+                                break
+                            }
+                            e = zis.nextEntry
+                        }
+                        result
+                    }
+                } else {
+                    crcOf(input)
+                }
+            } ?: 0L
+        } catch (e: Exception) {
+            Log.w(TAG, "computeCrc32 failed for $name", e)
+            0L
         }
     }
 

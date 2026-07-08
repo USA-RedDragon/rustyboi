@@ -174,12 +174,7 @@ impl LibraryPanel {
                             for uri in &self.recents {
                                 let (label, present) =
                                     if let Some(entry) = by_uri.get(uri.as_str()) {
-                                        let s = if entry.rel_path.is_empty() {
-                                            entry.name.clone()
-                                        } else {
-                                            entry.rel_path.clone()
-                                        };
-                                        (s, true)
+                                        (entry_label(entry), true)
                                     } else {
                                         // Recent ROM not in the current
                                         // scan; derive a best-effort
@@ -217,16 +212,13 @@ impl LibraryPanel {
                             ui.label(egui::RichText::new("All ROMs").strong());
                         }
                         for entry in &self.entries {
+                            let label = entry_label(entry);
                             if !filter.is_empty()
+                                && !label.to_lowercase().contains(&filter)
                                 && !entry.rel_path.to_lowercase().contains(&filter)
                             {
                                 continue;
                             }
-                            let label = if entry.rel_path.is_empty() {
-                                entry.name.clone()
-                            } else {
-                                entry.rel_path.clone()
-                            };
                             let btn = egui::Button::new(label)
                                 .min_size(egui::vec2(ui.available_width(), 0.0))
                                 .wrap(true);
@@ -240,5 +232,20 @@ impl LibraryPanel {
             });
         self.open = open;
         action
+    }
+}
+
+/// Display label for a library entry: the canonical No-Intro name when the
+/// scanner's CRC32 resolves to one, else the relative path (or bare filename).
+fn entry_label(entry: &LibraryEntry) -> String {
+    if entry.crc32 != 0
+        && let Some(name) = rustyboi_session::no_intro::name_for_crc(entry.crc32)
+    {
+        return name.to_string();
+    }
+    if entry.rel_path.is_empty() {
+        entry.name.clone()
+    } else {
+        entry.rel_path.clone()
     }
 }
