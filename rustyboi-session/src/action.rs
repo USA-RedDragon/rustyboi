@@ -15,6 +15,7 @@
 //! surfaces it everywhere.
 
 use crate::input::GbButton;
+use crate::input_config::InputConfig;
 use serde::{Deserialize, Serialize};
 
 /// A file handed to the session by the frontend's picker. Desktop passes a path
@@ -120,6 +121,9 @@ pub struct SessionUiState {
     /// Whether the inserted cartridge has a real-time clock (gates the
     /// Import/Export RTC menu items).
     pub has_rtc: bool,
+    /// The live rebindable input map (GB-button bindings + chord hotkeys) the
+    /// keybind editor reads/writes. Mirrors [`Config::input`](crate::config::Config).
+    pub input: InputConfig,
 }
 
 impl Default for SessionUiState {
@@ -139,6 +143,7 @@ impl Default for SessionUiState {
             cheats: Vec::new(),
             has_battery: false,
             has_rtc: false,
+            input: InputConfig::default(),
         }
     }
 }
@@ -220,6 +225,9 @@ pub enum UiAction {
     /// Toggle host fullscreen (platform hook: desktop window / web canvas;
     /// Android is already fullscreen). Transient — not persisted config.
     ToggleFullscreen,
+    /// Replace the rebindable input map (GB-button bindings + chord hotkeys).
+    /// Emitted by the keybind editor; persisted to config in `Session::apply`.
+    SetInputConfig(InputConfig),
     /// Add a Game Genie / GameShark cheat code (session-lifetime).
     AddCheat(String),
     /// Remove a previously-added cheat by its raw code string.
@@ -281,6 +289,7 @@ impl UiAction {
             UiAction::SetVolume(_) => ActionKind::SetVolume,
             UiAction::SetScalingMode(_) => ActionKind::SetScalingMode,
             UiAction::ToggleFullscreen => ActionKind::ToggleFullscreen,
+            UiAction::SetInputConfig(_) => ActionKind::SetInputConfig,
             UiAction::AddCheat(_) => ActionKind::AddCheat,
             UiAction::RemoveCheat(_) => ActionKind::RemoveCheat,
             #[cfg(target_os = "android")]
@@ -336,6 +345,7 @@ pub enum ActionKind {
     SetVolume,
     SetScalingMode,
     ToggleFullscreen,
+    SetInputConfig,
     AddCheat,
     RemoveCheat,
     #[cfg(target_os = "android")]

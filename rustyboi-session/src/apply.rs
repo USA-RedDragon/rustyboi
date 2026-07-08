@@ -246,6 +246,11 @@ impl Session {
                 pause_changed: false,
             },
 
+            UiAction::SetInputConfig(input) => {
+                self.set_input_config(input);
+                ActionOutcome::default()
+            }
+
             UiAction::AddCheat(code) => match self.add_cheat(&code) {
                 Ok(_) => ActionOutcome::status(format!("Cheat added: {code}")),
                 Err(e) => ActionOutcome::error(format!("Invalid cheat code '{code}': {e}")),

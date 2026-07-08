@@ -7,6 +7,7 @@
 
 use crate::action::ScalingMode;
 use crate::input::InputMap;
+use crate::input_config::InputConfig;
 use crate::ports::{Storage, StorageError};
 use rustyboi_core_lib::gb::Hardware;
 use serde::{Deserialize, Serialize};
@@ -75,6 +76,10 @@ pub struct Config {
     /// Frame letterboxing policy. `default` so older blobs still load.
     #[serde(default)]
     pub scaling: ScalingMode,
+    /// Rebindable GB-button bindings + chord hotkeys. `default` so older blobs
+    /// still load (they get the default arrows/Z=B/X=A/Enter=Start layout).
+    #[serde(default)]
+    pub input: InputConfig,
 }
 
 fn default_volume() -> u8 {
@@ -91,6 +96,7 @@ impl Default for Config {
             fast_forward_factor: 4,
             volume: 100,
             scaling: ScalingMode::default(),
+            input: InputConfig::default(),
         }
     }
 }

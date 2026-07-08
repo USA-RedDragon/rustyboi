@@ -1,39 +1,12 @@
-//! CLI parsing + desktop keybinds. The presentation palette now lives in
-//! `rustyboi-frontend` (`ColorPalette`); this module only re-exports it for the
-//! call sites and owns the winit-`KeyCode` keybind table (a desktop concern).
+//! CLI parsing. The presentation palette now lives in `rustyboi-frontend`
+//! (`ColorPalette`); this module only re-exports it for the call sites. GB-button
+//! bindings + hotkeys now live in the shared `rustyboi_session::InputConfig`
+//! (persisted config), not a desktop-private table.
 
 use clap::Parser;
 use rustyboi_core_lib::gb;
-use winit::keyboard::KeyCode;
 
 pub use rustyboi_frontend_lib::ColorPalette;
-
-#[derive(Debug, Clone)]
-pub struct KeyBinds {
-    pub a: KeyCode,
-    pub b: KeyCode,
-    pub start: KeyCode,
-    pub select: KeyCode,
-    pub up: KeyCode,
-    pub down: KeyCode,
-    pub left: KeyCode,
-    pub right: KeyCode,
-}
-
-impl Default for KeyBinds {
-    fn default() -> Self {
-        Self {
-            a: KeyCode::KeyZ,
-            b: KeyCode::KeyX,
-            start: KeyCode::Enter,
-            select: KeyCode::Space,
-            up: KeyCode::ArrowUp,
-            down: KeyCode::ArrowDown,
-            left: KeyCode::ArrowLeft,
-            right: KeyCode::ArrowRight,
-        }
-    }
-}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -92,8 +65,6 @@ pub struct CleanConfig {
     pub skip_bios: bool,
     // attach a Game Boy Printer to the link port at startup
     pub printer: bool,
-    // keybinds configuration
-    pub keybinds: KeyBinds,
 }
 
 impl RawConfig {
@@ -118,7 +89,6 @@ impl RawConfig {
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             skip_bios: _skip_bios,
             printer: self.printer,
-            keybinds: KeyBinds::default(),
         }
     }
 }
