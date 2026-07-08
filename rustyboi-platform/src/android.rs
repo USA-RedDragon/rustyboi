@@ -602,6 +602,53 @@ pub extern "system" fn Java_dev_mcswain_rustyboi_RustyboiActivity_nativeOnRomPic
     invoke_pending(None);
 }
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
+// Latest gamepad axis values (f32 bit-patterns), written by the Java
+// onGenericMotionEvent callback (UI thread) and read by the render loop. winit
+// drops gamepad motion events, so analog sticks + hat come through Java/JNI here;
+// buttons still arrive as native key events handled in the event loop.
+static PAD_LX: AtomicU32 = AtomicU32::new(0);
+static PAD_LY: AtomicU32 = AtomicU32::new(0);
+static PAD_RX: AtomicU32 = AtomicU32::new(0);
+static PAD_RY: AtomicU32 = AtomicU32::new(0);
+static PAD_HX: AtomicU32 = AtomicU32::new(0);
+static PAD_HY: AtomicU32 = AtomicU32::new(0);
+
+/// Latest gamepad axes `[lx, ly, rx, ry, hat_x, hat_y]` (Android convention:
+/// +X right, +Y down, range [-1, 1]). The render loop derives stick/hat
+/// directions from these.
+pub fn gamepad_axes() -> [f32; 6] {
+    [
+        f32::from_bits(PAD_LX.load(Ordering::Relaxed)),
+        f32::from_bits(PAD_LY.load(Ordering::Relaxed)),
+        f32::from_bits(PAD_RX.load(Ordering::Relaxed)),
+        f32::from_bits(PAD_RY.load(Ordering::Relaxed)),
+        f32::from_bits(PAD_HX.load(Ordering::Relaxed)),
+        f32::from_bits(PAD_HY.load(Ordering::Relaxed)),
+    ]
+}
+
+/// Java `onGenericMotionEvent` forwards controller axes here.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_mcswain_rustyboi_RustyboiActivity_nativeOnGamepadAxes<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    lx: f32,
+    ly: f32,
+    rx: f32,
+    ry: f32,
+    hat_x: f32,
+    hat_y: f32,
+) {
+    PAD_LX.store(lx.to_bits(), Ordering::Relaxed);
+    PAD_LY.store(ly.to_bits(), Ordering::Relaxed);
+    PAD_RX.store(rx.to_bits(), Ordering::Relaxed);
+    PAD_RY.store(ry.to_bits(), Ordering::Relaxed);
+    PAD_HX.store(hat_x.to_bits(), Ordering::Relaxed);
+    PAD_HY.store(hat_y.to_bits(), Ordering::Relaxed);
+}
+
 fn invoke_pending(result: Option<FileData>) {
     let cb = {
         let mut slot = PENDING_PICK.lock().expect("PENDING_PICK poisoned");

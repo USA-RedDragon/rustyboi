@@ -2,6 +2,8 @@ package dev.mcswain.rustyboi
 
 import android.content.Intent
 import android.net.Uri
+import android.view.InputDevice
+import android.view.MotionEvent
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.util.Log
@@ -77,6 +79,30 @@ class RustyboiActivity : GameActivity() {
             nativeOnTreePicked(uri.toString())
         }
         super.onCreate(savedInstanceState)
+    }
+
+    /**
+     * Forward gamepad analog-stick + hat axes to native. GameActivity delivers
+     * controller BUTTONS as native key events (handled in the Rust event loop),
+     * but ANALOG axis motion arrives here as generic motion events — winit drops
+     * these, so we read them in Java and push them to Rust via JNI. Fires on axis
+     * change; the last value persists (held) until the next change / recentre.
+     */
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK &&
+            event.action == MotionEvent.ACTION_MOVE
+        ) {
+            nativeOnGamepadAxes(
+                event.getAxisValue(MotionEvent.AXIS_X),
+                event.getAxisValue(MotionEvent.AXIS_Y),
+                event.getAxisValue(MotionEvent.AXIS_Z),
+                event.getAxisValue(MotionEvent.AXIS_RZ),
+                event.getAxisValue(MotionEvent.AXIS_HAT_X),
+                event.getAxisValue(MotionEvent.AXIS_HAT_Y),
+            )
+            return true
+        }
+        return super.onGenericMotionEvent(event)
     }
 
     /** Called from JNI to launch the single-document SAF picker. */
@@ -346,5 +372,15 @@ class RustyboiActivity : GameActivity() {
 
         @JvmStatic
         private external fun nativeOnRomLoadFailed()
+
+        @JvmStatic
+        private external fun nativeOnGamepadAxes(
+            lx: Float,
+            ly: Float,
+            rx: Float,
+            ry: Float,
+            hatX: Float,
+            hatY: Float,
+        )
     }
 }
