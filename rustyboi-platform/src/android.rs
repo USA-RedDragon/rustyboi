@@ -614,11 +614,13 @@ static PAD_RX: AtomicU32 = AtomicU32::new(0);
 static PAD_RY: AtomicU32 = AtomicU32::new(0);
 static PAD_HX: AtomicU32 = AtomicU32::new(0);
 static PAD_HY: AtomicU32 = AtomicU32::new(0);
+static PAD_LT: AtomicU32 = AtomicU32::new(0);
+static PAD_RT: AtomicU32 = AtomicU32::new(0);
 
-/// Latest gamepad axes `[lx, ly, rx, ry, hat_x, hat_y]` (Android convention:
-/// +X right, +Y down, range [-1, 1]). The render loop derives stick/hat
-/// directions from these.
-pub fn gamepad_axes() -> [f32; 6] {
+/// Latest gamepad axes `[lx, ly, rx, ry, hat_x, hat_y, l_trigger, r_trigger]`
+/// (Android convention: sticks/hat +X right +Y down in [-1, 1]; triggers in
+/// [0, 1]). The render loop derives stick/hat/trigger directions from these.
+pub fn gamepad_axes() -> [f32; 8] {
     [
         f32::from_bits(PAD_LX.load(Ordering::Relaxed)),
         f32::from_bits(PAD_LY.load(Ordering::Relaxed)),
@@ -626,6 +628,8 @@ pub fn gamepad_axes() -> [f32; 6] {
         f32::from_bits(PAD_RY.load(Ordering::Relaxed)),
         f32::from_bits(PAD_HX.load(Ordering::Relaxed)),
         f32::from_bits(PAD_HY.load(Ordering::Relaxed)),
+        f32::from_bits(PAD_LT.load(Ordering::Relaxed)),
+        f32::from_bits(PAD_RT.load(Ordering::Relaxed)),
     ]
 }
 
@@ -640,6 +644,8 @@ pub extern "system" fn Java_dev_mcswain_rustyboi_RustyboiActivity_nativeOnGamepa
     ry: f32,
     hat_x: f32,
     hat_y: f32,
+    lt: f32,
+    rt: f32,
 ) {
     PAD_LX.store(lx.to_bits(), Ordering::Relaxed);
     PAD_LY.store(ly.to_bits(), Ordering::Relaxed);
@@ -647,6 +653,8 @@ pub extern "system" fn Java_dev_mcswain_rustyboi_RustyboiActivity_nativeOnGamepa
     PAD_RY.store(ry.to_bits(), Ordering::Relaxed);
     PAD_HX.store(hat_x.to_bits(), Ordering::Relaxed);
     PAD_HY.store(hat_y.to_bits(), Ordering::Relaxed);
+    PAD_LT.store(lt.to_bits(), Ordering::Relaxed);
+    PAD_RT.store(rt.to_bits(), Ordering::Relaxed);
 }
 
 fn invoke_pending(result: Option<FileData>) {
