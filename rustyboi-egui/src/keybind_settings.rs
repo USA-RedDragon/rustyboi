@@ -48,6 +48,7 @@ impl Gui {
         ctx: &Context,
         action: &mut Option<GuiAction>,
         session: &SessionUiState,
+        held_pad: &std::collections::HashSet<PadButton>,
     ) {
         // Seed the working copy from persisted state when the panel first opens.
         if self.input_config.is_none() {
@@ -65,6 +66,10 @@ impl Gui {
             (pressed, down)
         });
 
+        // A held gamepad button for capture (bind-by-press / chord recording):
+        // egui never sees pad input, so the platform passes the held-pad set in.
+        let pressed_pad: Option<PadButton> = held_pad.iter().next().copied();
+
         let mut changed = false;
 
         egui::Window::new("Controls")
@@ -75,10 +80,10 @@ impl Gui {
             .frame(egui::Frame::window(&ctx.style()).fill(crate::ui::PANEL_BACKGROUND))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    changed |= self.gb_bindings_section(ui, pressed_key);
+                    changed |= self.gb_bindings_section(ui, pressed_key, pressed_pad);
                     ui.add_space(12.0);
                     ui.separator();
-                    changed |= self.hotkeys_section(ui, &keys_down);
+                    changed |= self.hotkeys_section(ui, &keys_down, held_pad);
                     ui.add_space(12.0);
                     ui.separator();
                     if ui.button("Reset to Defaults").clicked() {
@@ -98,7 +103,12 @@ impl Gui {
         }
     }
 
-    fn gb_bindings_section(&mut self, ui: &mut egui::Ui, pressed_key: Option<KeyName>) -> bool {
+    fn gb_bindings_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        pressed_key: Option<KeyName>,
+        pressed_pad: Option<PadButton>,
+    ) -> bool {
         let Some(cfg) = self.input_config.as_mut() else { return false };
         let mut changed = false;
         ui.heading("Buttons");
@@ -111,15 +121,27 @@ impl Gui {
         );
         ui.add_space(6.0);
 
-        // Resolve a pending key capture; Escape cancels instead of binding.
-        if let (Some(btn), Some(key)) = (self.rebinding_gb, pressed_key) {
-            if key != KeyName::Escape
-                && let Some((_, triggers)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == btn)
-            {
-                triggers.push(InputTrigger::Key(key));
-                changed = true;
+        // Resolve a pending capture: a keyboard key (Escape cancels) or, since egui
+        // can't see the gamepad, a held pad button passed in by the platform.
+        if let Some(btn) = self.rebinding_gb {
+            let trigger = match (pressed_key, pressed_pad) {
+                (Some(KeyName::Escape), _) => {
+                    self.rebinding_gb = None;
+                    None
+                }
+                (Some(key), _) => Some(InputTrigger::Key(key)),
+                (None, Some(pad)) => Some(InputTrigger::Pad(pad)),
+                (None, None) => None,
+            };
+            if let Some(t) = trigger {
+                if let Some((_, triggers)) = cfg.gb_bindings.iter_mut().find(|(b, _)| *b == btn) {
+                    if !triggers.contains(&t) {
+                        triggers.push(t);
+                        changed = true;
+                    }
+                }
+                self.rebinding_gb = None;
             }
-            self.rebinding_gb = None;
         }
 
         let rebinding = self.rebinding_gb;
@@ -148,13 +170,13 @@ impl Gui {
                         }
                         if rebinding == Some(gb) {
                             ui.label(
-                                egui::RichText::new("press a key…")
+                                egui::RichText::new("press a key or button…")
                                     .italics()
                                     .color(egui::Color32::LIGHT_BLUE),
                             );
                         } else {
                             ui.menu_button("Add…", |ui| {
-                                if ui.button("Press a key").clicked() {
+                                if ui.button("Press a key or button").clicked() {
                                     start_capture = Some(gb);
                                     ui.close_menu();
                                 }
@@ -194,7 +216,12 @@ impl Gui {
         changed
     }
 
-    fn hotkeys_section(&mut self, ui: &mut egui::Ui, keys_down: &[KeyName]) -> bool {
+    fn hotkeys_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        keys_down: &[KeyName],
+        held_pad: &std::collections::HashSet<PadButton>,
+    ) -> bool {
         let Some(cfg) = self.input_config.as_mut() else { return false };
         let mut changed = false;
         ui.heading("Shortcuts");
@@ -203,10 +230,17 @@ impl Gui {
         );
         ui.add_space(6.0);
 
-        // Update the recording buffer from currently-held keys (union).
+        // Update the recording buffer from currently-held keys AND gamepad buttons
+        // (union), so a chord like Select + R-trigger can be recorded by pressing.
         if self.recording_chord.is_some() {
             for k in keys_down {
                 let t = InputTrigger::Key(*k);
+                if !self.recorded_chord.contains(&t) {
+                    self.recorded_chord.push(t);
+                }
+            }
+            for p in held_pad {
+                let t = InputTrigger::Pad(*p);
                 if !self.recorded_chord.contains(&t) {
                     self.recorded_chord.push(t);
                 }
@@ -236,7 +270,7 @@ impl Gui {
                 let rec_label = if recording {
                     format!("Stop ({recorded_preview})")
                 } else {
-                    "Record keys".to_string()
+                    "Record".to_string()
                 };
                 if ui.button(rec_label).clicked() {
                     toggle_record = Some(i);

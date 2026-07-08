@@ -91,6 +91,11 @@ pub struct App {
 
     input: AbstractInput,
 
+    /// Held gamepad buttons this frame, forwarded to the keybind editor so it can
+    /// capture controller presses (egui never sees pad input). Set by the platform
+    /// alongside `set_button_state`.
+    held_pad: std::collections::HashSet<rustyboi_session::input_config::PadButton>,
+
     /// Host requests accumulated while applying a UI action (drained by `draw`
     /// and returned to the platform). The `Frontend` capability methods push
     /// here; the platform performs them.
@@ -153,6 +158,7 @@ impl App {
             current_rom_path: rom_path,
             current_bios_path: bios_path,
             input: AbstractInput::none(),
+            held_pad: std::collections::HashSet::new(),
             pending_requests: Vec::new(),
             user_paused: should_pause,
             manually_paused: should_pause,
@@ -231,6 +237,15 @@ impl App {
         a.set(GbButton::Left, state.left);
         a.set(GbButton::Right, state.right);
         self.input = a;
+    }
+
+    /// Record the gamepad buttons held this frame, for the keybind editor's
+    /// bind-by-press / chord recording (egui can't observe pad input).
+    pub fn set_held_pad(
+        &mut self,
+        pad: std::collections::HashSet<rustyboi_session::input_config::PadButton>,
+    ) {
+        self.held_pad = pad;
     }
 
     /// Set the platform safe-area insets `(left, top, right, bottom)` in PHYSICAL
@@ -674,7 +689,7 @@ impl App {
         let (paint, ui_frame) = {
             // Desktop renders every frame (force_repaint: true); repaint-gating is
             // a web concern (its main thread also composites the worker's frames).
-            ui.run(window, paused_for_ui, debug_snapshot.as_ref(), printer_attached, &ui_state, extra_events, true)
+            ui.run(window, paused_for_ui, debug_snapshot.as_ref(), printer_attached, &ui_state, extra_events, &self.held_pad, true)
         };
 
         // Dispatch the action.

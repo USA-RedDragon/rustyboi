@@ -267,7 +267,7 @@ impl Gui {
     /// debug panels render from (None when no panel is open, or on web until the
     /// worker's first snapshot arrives). `printer_attached` gates the desktop
     /// Connect/Disconnect-Printer menu item (None hides it, e.g. on web).
-    pub fn ui(&mut self, ctx: &Context, paused: bool, debug: Option<&DebugSnapshot>, printer_attached: Option<bool>, session: &SessionUiState) -> UiOutput {
+    pub fn ui(&mut self, ctx: &Context, paused: bool, debug: Option<&DebugSnapshot>, printer_attached: Option<bool>, session: &SessionUiState, held_pad: &std::collections::HashSet<rustyboi_session::input_config::PadButton>) -> UiOutput {
         let mut action = None;
         let mut any_menu_open = false;
 
@@ -295,7 +295,7 @@ impl Gui {
         // only menu-bar param doesn't warn on Android.
         #[cfg(target_os = "android")]
         let _ = printer_attached;
-        self.render_debug_panels(ctx, debug, &mut action, paused, session);
+        self.render_debug_panels(ctx, debug, &mut action, paused, session, held_pad);
         if self.show_cheats_panel {
             self.render_cheats_panel(ctx, &mut action, session);
         }
@@ -644,7 +644,7 @@ impl Gui {
         });
     }
 
-    fn render_debug_panels(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>, action: &mut Option<GuiAction>, paused: bool, session: &SessionUiState) {
+    fn render_debug_panels(&mut self, ctx: &Context, debug: Option<&DebugSnapshot>, action: &mut Option<GuiAction>, paused: bool, session: &SessionUiState, held_pad: &std::collections::HashSet<rustyboi_session::input_config::PadButton>) {
         if self.show_cpu_registers {
             self.render_cpu_registers_panel(ctx, debug, action, paused);
         }
@@ -674,7 +674,7 @@ impl Gui {
         }
 
         if self.show_keybind_settings {
-            self.render_keybind_settings_panel(ctx, action, session);
+            self.render_keybind_settings_panel(ctx, action, session, held_pad);
         } else {
             // Panel closed: drop the working copy so it re-seeds from persisted
             // state next time it opens.
