@@ -293,7 +293,7 @@ library-baseline: ## Regenerate tools/library-baseline.jsonl — gate manifest o
 	# hash rows still emit (decoupled from media), so the baseline gates boots too.
 	echo "==> gate-only sweep (--no-screens, no ffmpeg) over $${#roms[@]} dir(s), bios-dir=$$bios_dir"
 	rm -rf "$$out"
-	./target/release/sweep run --roms "$${roms[@]}" --out "$$out" --bios-dir "$$bios_dir" --no-screens
+	./target/release/sweep run --roms "$${roms[@]}" --strip-names --out "$$out" --bios-dir "$$bios_dir" --no-screens
 	cp "$$out/manifest.jsonl" tools/library-baseline.jsonl
 	echo "==> wrote tools/library-baseline.jsonl ($$(wc -l < tools/library-baseline.jsonl) rows, incl. 10 bios boot rows)"
 
