@@ -277,6 +277,26 @@ setup: ## Fetch/provision the ROM set (idempotent)
 build-runner: ## Build the release test runner (RB_TARGET=, RB_PGO=1)
 	@./tools/run-suites.sh build
 
+.PHONY: library-baseline
+library-baseline: ## Regenerate tools/library-baseline.jsonl — gate manifest only, no media/ffmpeg (ROMS="<lib>/GB <lib>/GBC" [BIOS_DIR=bios])
+	@$(NEED_382)
+	roms=($(ROMS)); [ $${#roms[@]} -ne 0 ] || roms=($${RB_ROMS:-})
+	if [ $${#roms[@]} -eq 0 ]; then
+	  echo 'library-baseline: no ROMs. Pass ROMS="<lib>/GB <lib>/GBC" (or RB_ROMS).' >&2
+	  exit 2
+	fi
+	bios_dir="$(BIOS_DIR)"; [ -n "$$bios_dir" ] || bios_dir=bios
+	out="target/library-baseline-sweep"
+	echo "==> building sweep (release)"
+	cargo build --release -p rustyboi-test-runner --bin sweep
+	# --no-screens = manifest only: no posters, no videos, no ffmpeg. BIOS boot
+	# hash rows still emit (decoupled from media), so the baseline gates boots too.
+	echo "==> gate-only sweep (--no-screens, no ffmpeg) over $${#roms[@]} dir(s), bios-dir=$$bios_dir"
+	rm -rf "$$out"
+	./target/release/sweep run --roms "$${roms[@]}" --out "$$out" --bios-dir "$$bios_dir" --no-screens
+	cp "$$out/manifest.jsonl" tools/library-baseline.jsonl
+	echo "==> wrote tools/library-baseline.jsonl ($$(wc -l < tools/library-baseline.jsonl) rows, incl. 10 bios boot rows)"
+
 suite: ## Run one or more suites, gate on floors (SUITE="acid2 age")
 	@./tools/run-suites.sh $(SUITE)
 
