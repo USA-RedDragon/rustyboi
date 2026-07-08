@@ -295,7 +295,7 @@ library-baseline: ## Regenerate tools/library-baseline.jsonl — gate manifest o
 	rm -rf "$$out"
 	./target/release/sweep run --roms "$${roms[@]}" --strip-names --out "$$out" --bios-dir "$$bios_dir" --no-screens
 	cp "$$out/manifest.jsonl" tools/library-baseline.jsonl
-	echo "==> wrote tools/library-baseline.jsonl ($$(wc -l < tools/library-baseline.jsonl) rows, incl. 10 bios boot rows)"
+	echo "==> wrote tools/library-baseline.jsonl ($$(wc -l < tools/library-baseline.jsonl) rows, incl. 8 bios boot rows)"
 
 suite: ## Run one or more suites, gate on floors (SUITE="acid2 age")
 	@./tools/run-suites.sh $(SUITE)
