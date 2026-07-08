@@ -145,8 +145,8 @@ fn fetch_first(agent: &ureq::Agent, urls: &[String]) -> Result<String, String> {
             }
             Err(e) => last_err = format!("request failed: {e}"),
         }
-        // The status toast truncates; log the full per-URL error to logcat.
-        log::warn!("cheat fetch: {url} -> {last_err}");
     }
+    // A 404 fallthrough across candidates is normal; only the final failure is
+    // surfaced (as a status message by the caller).
     Err(last_err)
 }
