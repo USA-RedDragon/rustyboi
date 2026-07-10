@@ -9,7 +9,7 @@ use rustyboi_core_lib::input::ButtonState;
 use rustyboi_core_lib::cpu::registers::{INTERRUPT_ENABLE, INTERRUPT_FLAG};
 use rustyboi_core_lib::gb::{GB, Hardware};
 use rustyboi_core_lib::ppu::{
-    CgbColorConversion, FetchDebugEvent, LCD_CONTROL, LCD_STATUS, LY, PixelDebugEvent,
+    ColorCorrection, FetchDebugEvent, LCD_CONTROL, LCD_STATUS, LY, PixelDebugEvent,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -461,9 +461,9 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
             case.oracle,
             Oracle::CspPng { .. } | Oracle::CspPngFixed { .. } | Oracle::CspPngLayout { .. }
         ) {
-            CgbColorConversion::Linear
+            ColorCorrection::Linear
         } else {
-            CgbColorConversion::Lcd
+            ColorCorrection::Lcd
         };
         gb.set_cgb_color_conversion(conversion);
     }

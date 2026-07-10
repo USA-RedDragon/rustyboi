@@ -13,7 +13,7 @@ mod common;
 use rustyboi_session::action::{
     GbcDmgPalette, HardwareChoice, LcdEffect, PaletteChoice, ScalingMode, TextureFilter,
 };
-use rustyboi_session::{CgbColorConversion, InputConfig, UiAction};
+use rustyboi_session::{ColorCorrection, InputConfig, UiAction};
 use rustyboi_web::Emulator;
 use wasm_bindgen_test::*;
 
@@ -118,7 +118,7 @@ fn serviceable_actions() -> Vec<UiAction> {
         SetPalette(PaletteChoice::GreenLcd),
         SetGbcDmgPalette(GbcDmgPalette::Auto),
         SetGbcDmgPalette(GbcDmgPalette::Scheme(5)),
-        SetColorCorrection(CgbColorConversion::Lcd),
+        SetColorCorrection(ColorCorrection::Lcd),
         SetRealBootRom(false),
         SetTextureFilter(TextureFilter::Linear),
         SetLcdEffect(LcdEffect::Scanlines),

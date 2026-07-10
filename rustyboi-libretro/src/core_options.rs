@@ -9,7 +9,7 @@
 use rustyboi_libretro_sys::{CoreOptions, OptionCategory, OptionDef, OptionValue};
 
 use rustyboi_session::action::{GbcDmgPalette, HardwareChoice, PaletteChoice};
-use rustyboi_session::CgbColorConversion;
+use rustyboi_session::ColorCorrection;
 
 /// Option keys, defined once and referenced by both the generated table and the
 /// parser in [`super::RustyboiCore::read_options`], so a typo can't desync them.
@@ -26,13 +26,13 @@ pub const ON: &str = "enabled";
 
 /// The colour-correction modes as (id, label, value) — the single source for
 /// both the generated option and its parser, so the two can't disagree.
-pub const COLOR_CORRECTION: [(&str, &str, CgbColorConversion); 2] = [
-    ("linear", "Linear (raw)", CgbColorConversion::Linear),
-    ("lcd", "LCD (corrected)", CgbColorConversion::Lcd),
+pub const COLOR_CORRECTION: [(&str, &str, ColorCorrection); 2] = [
+    ("linear", "Linear (raw)", ColorCorrection::Linear),
+    ("lcd", "LCD (corrected)", ColorCorrection::Lcd),
 ];
 
 /// Parse a colour-correction id, or `None` if unrecognized.
-pub fn parse_color_correction(id: &str) -> Option<CgbColorConversion> {
+pub fn parse_color_correction(id: &str) -> Option<ColorCorrection> {
     COLOR_CORRECTION.iter().find(|(k, _, _)| *k == id).map(|(_, _, v)| *v)
 }
 

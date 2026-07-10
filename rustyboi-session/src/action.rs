@@ -310,7 +310,7 @@ pub struct SessionUiState {
     /// CGB title, which supplies its own colours — the menu is greyed out).
     pub dmg_palette_active: bool,
     /// CGB colour-correction curve (raw RGB555 vs a hardware-LCD approximation).
-    pub color_correction: crate::CgbColorConversion,
+    pub color_correction: crate::ColorCorrection,
     /// Whether a real boot ROM is run (when one has been supplied) instead of
     /// the synthetic post-boot state.
     pub use_real_boot_rom: bool,
@@ -383,7 +383,7 @@ impl Default for SessionUiState {
             palette: PaletteChoice::GreenLcd,
             gbc_dmg_palette: GbcDmgPalette::Auto,
             dmg_palette_active: true,
-            color_correction: crate::CgbColorConversion::Lcd,
+            color_correction: crate::ColorCorrection::Lcd,
             use_real_boot_rom: false,
             texture_filter: TextureFilter::Nearest,
             lcd_effect: LcdEffect::Grid,
@@ -500,7 +500,7 @@ pub enum UiAction {
     /// Change the CGB colorization for DMG games (Auto / a boot-ROM scheme).
     SetGbcDmgPalette(GbcDmgPalette),
     /// Change the CGB colour-correction curve (Linear/LCD).
-    SetColorCorrection(crate::CgbColorConversion),
+    SetColorCorrection(crate::ColorCorrection),
     /// Enable/disable running a real boot ROM (rebuilds the machine).
     SetRealBootRom(bool),
     /// Change the upscale texture filter (nearest/linear) — presentation-only.
@@ -1321,7 +1321,7 @@ mod tests {
             SetHardware(HardwareChoice::Dmg),
             SetPalette(PaletteChoice::GreenLcd),
             SetGbcDmgPalette(GbcDmgPalette::Auto),
-            SetColorCorrection(crate::CgbColorConversion::Lcd),
+            SetColorCorrection(crate::ColorCorrection::Lcd),
             SetRealBootRom(true),
             SetTextureFilter(TextureFilter::Linear),
             SetLcdEffect(LcdEffect::Grid),
@@ -1440,7 +1440,7 @@ mod tests {
             palette: PaletteChoice::Pocket,
             gbc_dmg_palette: GbcDmgPalette::Scheme(7),
             dmg_palette_active: false,
-            color_correction: crate::CgbColorConversion::Lcd,
+            color_correction: crate::ColorCorrection::Lcd,
             use_real_boot_rom: true,
             texture_filter: TextureFilter::Linear,
             lcd_effect: LcdEffect::Scanlines,
