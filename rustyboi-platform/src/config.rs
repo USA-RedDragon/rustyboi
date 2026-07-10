@@ -1,5 +1,5 @@
 //! CLI parsing. The presentation palette is the shared
-//! [`PaletteChoice`](rustyboi_session::PaletteChoice); this module re-exports it
+//! [`DmgPaletteChoice`](rustyboi_session::DmgPaletteChoice); this module re-exports it
 //! for the call sites. GB-button bindings + hotkeys now live in the shared
 //! `rustyboi_session::InputConfig` (persisted config), not a desktop-private
 //! table.
@@ -7,7 +7,7 @@
 use clap::Parser;
 use rustyboi_core_lib::gb;
 
-pub use rustyboi_frontend_lib::PaletteChoice;
+pub use rustyboi_frontend_lib::DmgPaletteChoice;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -67,7 +67,7 @@ pub struct CleanConfig {
     #[cfg(not(target_os = "android"))]
     pub scale: u8,
     // Color palette
-    pub palette: PaletteChoice,
+    pub palette: DmgPaletteChoice,
     #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
     // skip BIOS on startup
     pub skip_bios: bool,
@@ -96,7 +96,7 @@ impl RawConfig {
             state: self.state,
             #[cfg(not(target_os = "android"))]
             scale: self.scale,
-            palette: PaletteChoice::from_str(&self.palette).unwrap_or(PaletteChoice::GreenLcd),
+            palette: DmgPaletteChoice::from_str(&self.palette).unwrap_or(DmgPaletteChoice::GreenLcd),
             #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
             skip_bios: _skip_bios,
             printer: self.printer,
@@ -124,7 +124,7 @@ mod tests {
     fn clap_defaults_match_declarations() {
         let c = parse(&["rustyboi"]);
         assert_eq!(c.hardware, gb::Hardware::CGB);
-        assert_eq!(c.palette, PaletteChoice::GreenLcd);
+        assert_eq!(c.palette, DmgPaletteChoice::GreenLcd);
         #[cfg(not(target_os = "android"))]
         assert_eq!(c.scale, 5);
     }
@@ -132,14 +132,14 @@ mod tests {
     #[test]
     fn garbage_palette_falls_back_to_green_lcd() {
         let c = parse(&["rustyboi", "--palette", "chartreuse"]);
-        assert_eq!(c.palette, PaletteChoice::GreenLcd);
+        assert_eq!(c.palette, DmgPaletteChoice::GreenLcd);
     }
 
     #[test]
     fn known_palette_alias_is_honored() {
         // A recognized alias must NOT fall through to the Grayscale default.
         let c = parse(&["rustyboi", "--palette", "green"]);
-        assert_eq!(c.palette, PaletteChoice::GreenLinear);
+        assert_eq!(c.palette, DmgPaletteChoice::GreenLinear);
     }
 
     #[test]

@@ -22,7 +22,7 @@ use rustyboi_session::UiAction;
 use rustyboi_egui_lib::actions::GuiAction;
 
 use crate::contract::{drive_action, Frontend, PauseHint};
-use rustyboi_session::{frame_to_pixels, rgb_to_pixels, PaletteChoice, PixelOrder};
+use rustyboi_session::{frame_to_pixels, rgb_to_pixels, DmgPaletteChoice, PixelOrder};
 use crate::renderer::{GameFrame, Present, SourceSize};
 use crate::ui_host::{ExtraEvents, UiHost};
 
@@ -138,7 +138,7 @@ impl App {
     /// [`App::draw`].
     pub fn new(
         mut session: Session,
-        palette: PaletteChoice,
+        palette: DmgPaletteChoice,
         rom_path: Option<String>,
         bios_path: Option<String>,
         should_pause: bool,
@@ -992,7 +992,7 @@ fn panic_message(panic_info: Box<dyn std::any::Any + Send>, context: &str) -> St
 #[cfg(test)]
 mod fast_forward_tests {
     use super::App;
-    use rustyboi_session::action::PaletteChoice;
+    use rustyboi_session::action::DmgPaletteChoice;
     use rustyboi_session::config::Config;
     use rustyboi_session::ports::{MemRumble, MemStorage, MemWebcam};
     use rustyboi_session::session::{Ports, Session};
@@ -1004,7 +1004,7 @@ mod fast_forward_tests {
             webcam: Box::new(MemWebcam::default()),
         };
         let session = Session::new(Config::default(), ports, [0u8; 32]);
-        App::new(session, PaletteChoice::GreenLcd, None, None, true)
+        App::new(session, DmgPaletteChoice::GreenLcd, None, None, true)
     }
 
     #[test]
@@ -1110,7 +1110,7 @@ mod restart_tests {
 mod pause_and_load_tests {
     use super::App;
     use crate::contract::{Frontend, PauseHint};
-    use rustyboi_session::action::PaletteChoice;
+    use rustyboi_session::action::DmgPaletteChoice;
     use rustyboi_session::config::Config;
     use rustyboi_session::ports::{MemRumble, MemStorage, MemWebcam};
     use rustyboi_session::session::{Ports, Session};
@@ -1127,7 +1127,7 @@ mod pause_and_load_tests {
     // every pause flag set and the auto-pause latch armed.
     fn paused_app() -> App {
         let session = Session::new(Config::default(), ports(), [0u8; 32]);
-        App::new(session, PaletteChoice::GreenLcd, None, None, true)
+        App::new(session, DmgPaletteChoice::GreenLcd, None, None, true)
     }
 
     /// Minimal valid 32KB NoMBC ROM.

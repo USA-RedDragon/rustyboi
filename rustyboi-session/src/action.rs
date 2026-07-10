@@ -75,7 +75,7 @@ pub struct LibraryEntry {
 /// neutral grayscale, the classic DMG green (raw and LCD-corrected), and the
 /// cooler Game Boy Pocket grayscale — no invented colour sets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PaletteChoice {
+pub enum DmgPaletteChoice {
     Grayscale,
     GreenLinear,
     GreenLcd,
@@ -323,7 +323,7 @@ impl GraphicsBackend {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionUiState {
     pub hardware: HardwareChoice,
-    pub palette: PaletteChoice,
+    pub palette: DmgPaletteChoice,
     /// CGB colorization scheme for DMG games (Auto / a boot-ROM scheme).
     pub gbc_dmg_palette: GbcDmgPalette,
     /// Whether the DMG palette settings apply to the loaded game (false for a
@@ -400,7 +400,7 @@ impl Default for SessionUiState {
     fn default() -> Self {
         SessionUiState {
             hardware: HardwareChoice::Cgb,
-            palette: PaletteChoice::GreenLcd,
+            palette: DmgPaletteChoice::GreenLcd,
             gbc_dmg_palette: GbcDmgPalette::Auto,
             dmg_palette_active: true,
             color_correction: crate::ColorCorrection::Lcd,
@@ -516,7 +516,7 @@ pub enum UiAction {
     /// Change the emulated hardware model (rebuilds the machine).
     SetHardware(HardwareChoice),
     /// Change the DMG presentation palette.
-    SetPalette(PaletteChoice),
+    SetPalette(DmgPaletteChoice),
     /// Change the CGB colorization for DMG games (Auto / a boot-ROM scheme).
     SetGbcDmgPalette(GbcDmgPalette),
     /// Change the CGB colour-correction curve (Linear/LCD).
@@ -1198,22 +1198,22 @@ impl HardwareChoice {
     }
 }
 
-impl PaletteChoice {
+impl DmgPaletteChoice {
     /// All choices, in display order (also the `from_shades` search order).
-    pub const ALL: [PaletteChoice; 4] = [
-        PaletteChoice::Grayscale,
-        PaletteChoice::GreenLinear,
-        PaletteChoice::GreenLcd,
-        PaletteChoice::Pocket,
+    pub const ALL: [DmgPaletteChoice; 4] = [
+        DmgPaletteChoice::Grayscale,
+        DmgPaletteChoice::GreenLinear,
+        DmgPaletteChoice::GreenLcd,
+        DmgPaletteChoice::Pocket,
     ];
 
     /// A short human label for the Settings menu.
     pub fn label(self) -> &'static str {
         match self {
-            PaletteChoice::Grayscale => "Grayscale",
-            PaletteChoice::GreenLinear => "Green (linear)",
-            PaletteChoice::GreenLcd => "Green (LCD)",
-            PaletteChoice::Pocket => "Game Boy Pocket",
+            DmgPaletteChoice::Grayscale => "Grayscale",
+            DmgPaletteChoice::GreenLinear => "Green (linear)",
+            DmgPaletteChoice::GreenLcd => "Green (LCD)",
+            DmgPaletteChoice::Pocket => "Game Boy Pocket",
         }
     }
 
@@ -1223,10 +1223,10 @@ impl PaletteChoice {
     /// Round-trips with [`from_option_id`](Self::from_option_id).
     pub fn option_id(self) -> &'static str {
         match self {
-            PaletteChoice::Grayscale => "grayscale",
-            PaletteChoice::GreenLinear => "green",
-            PaletteChoice::GreenLcd => "greenlcd",
-            PaletteChoice::Pocket => "pocket",
+            DmgPaletteChoice::Grayscale => "grayscale",
+            DmgPaletteChoice::GreenLinear => "green",
+            DmgPaletteChoice::GreenLcd => "greenlcd",
+            DmgPaletteChoice::Pocket => "pocket",
         }
     }
 
@@ -1257,34 +1257,34 @@ impl PaletteChoice {
                 return choice;
             }
         }
-        PaletteChoice::GreenLcd
+        DmgPaletteChoice::GreenLcd
     }
 
     /// RGBA shades for this palette, GB colors 0-3 (lightest→darkest).
     pub fn rgba_shades(self) -> [[u8; 4]; 4] {
         match self {
-            PaletteChoice::Grayscale => [
+            DmgPaletteChoice::Grayscale => [
                 [0xFF, 0xFF, 0xFF, 0xFF],
                 [0xAA, 0xAA, 0xAA, 0xFF],
                 [0x55, 0x55, 0x55, 0xFF],
                 [0x00, 0x00, 0x00, 0xFF],
             ],
             // The classic DMG green, raw (uncorrected).
-            PaletteChoice::GreenLinear => [
+            DmgPaletteChoice::GreenLinear => [
                 [0x9B, 0xBC, 0x0F, 0xFF],
                 [0x8B, 0xAC, 0x0F, 0xFF],
                 [0x30, 0x62, 0x30, 0xFF],
                 [0x0F, 0x38, 0x0F, 0xFF],
             ],
             // The DMG green as its LCD panel renders it (lighter, gamma-tinted).
-            PaletteChoice::GreenLcd => [
+            DmgPaletteChoice::GreenLcd => [
                 [0xE0, 0xF8, 0xD0, 0xFF],
                 [0x88, 0xC0, 0x70, 0xFF],
                 [0x34, 0x68, 0x56, 0xFF],
                 [0x08, 0x18, 0x20, 0xFF],
             ],
             // The cooler Game Boy Pocket grayscale.
-            PaletteChoice::Pocket => [
+            DmgPaletteChoice::Pocket => [
                 [0xC4, 0xCF, 0xA1, 0xFF],
                 [0x8B, 0x95, 0x6D, 0xFF],
                 [0x4D, 0x53, 0x3C, 0xFF],
@@ -1339,7 +1339,7 @@ mod tests {
             ToggleTouchControls,
             ToggleShowFps,
             SetHardware(HardwareChoice::Dmg),
-            SetPalette(PaletteChoice::GreenLcd),
+            SetPalette(DmgPaletteChoice::GreenLcd),
             SetGbcDmgPalette(GbcDmgPalette::Auto),
             SetColorCorrection(crate::ColorCorrection::Lcd),
             SetRealBootRom(true),
@@ -1457,7 +1457,7 @@ mod tests {
     fn session_ui_state_serde_json_round_trips_every_field() {
         let s = SessionUiState {
             hardware: HardwareChoice::Agb,
-            palette: PaletteChoice::Pocket,
+            palette: DmgPaletteChoice::Pocket,
             gbc_dmg_palette: GbcDmgPalette::Scheme(7),
             dmg_palette_active: false,
             color_correction: crate::ColorCorrection::Lcd,
@@ -1536,15 +1536,15 @@ mod tests {
 
     #[test]
     fn palette_option_ids_round_trip() {
-        for p in PaletteChoice::ALL {
-            assert_eq!(PaletteChoice::from_option_id(p.option_id()), Some(p));
+        for p in DmgPaletteChoice::ALL {
+            assert_eq!(DmgPaletteChoice::from_option_id(p.option_id()), Some(p));
             // `rgba_shades` is injective across the set, so `from_shades` also
             // recovers the choice (the frontends rely on this).
-            assert_eq!(PaletteChoice::from_shades(p.rgba_shades()), p);
+            assert_eq!(DmgPaletteChoice::from_shades(p.rgba_shades()), p);
         }
-        let mut ids: Vec<&str> = PaletteChoice::ALL.iter().map(|p| p.option_id()).collect();
+        let mut ids: Vec<&str> = DmgPaletteChoice::ALL.iter().map(|p| p.option_id()).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), PaletteChoice::ALL.len());
+        assert_eq!(ids.len(), DmgPaletteChoice::ALL.len());
     }
 }

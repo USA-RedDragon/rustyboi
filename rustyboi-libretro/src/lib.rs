@@ -34,7 +34,7 @@ use rustyboi_core_lib::gb::{Hardware, GB};
 use rustyboi_core_lib::ppu::{
     ColorCorrection, SGB_FRAME_HEIGHT, SGB_FRAME_SIZE, SGB_FRAME_WIDTH,
 };
-use rustyboi_session::action::{GbcDmgPalette, HardwareChoice, PaletteChoice};
+use rustyboi_session::action::{GbcDmgPalette, HardwareChoice, DmgPaletteChoice};
 use rustyboi_session::ports::{MemStorage, MemWebcam};
 use rustyboi_session::{
     frame_to_pixels, rgb_to_pixels, AbstractInput, Config, GbButton, PixelOrder, Ports, Rumble,
@@ -75,7 +75,7 @@ enum HardwarePref {
 struct RustyboiCore {
     session: Option<Session>,
     hardware_pref: HardwarePref,
-    palette: PaletteChoice,
+    palette: DmgPaletteChoice,
     gbc_dmg_palette: GbcDmgPalette,
     color_correction: ColorCorrection,
     framebuffer: Vec<u8>,
@@ -137,7 +137,7 @@ impl RustyboiCore {
             self.sgb_border_enabled = value == core_options::ON;
         }
         if let Some(value) = env.get_variable(core_options::KEY_DMG_PALETTE) {
-            self.palette = PaletteChoice::from_option_id(&value).unwrap_or(PaletteChoice::GreenLcd);
+            self.palette = DmgPaletteChoice::from_option_id(&value).unwrap_or(DmgPaletteChoice::GreenLcd);
             if let Some(session) = self.session.as_mut() {
                 session.init_palette_choice(self.palette);
             }
@@ -208,7 +208,7 @@ impl Core for RustyboiCore {
         RustyboiCore {
             session: None,
             hardware_pref: HardwarePref::Auto,
-            palette: PaletteChoice::GreenLcd,
+            palette: DmgPaletteChoice::GreenLcd,
             gbc_dmg_palette: GbcDmgPalette::Auto,
             color_correction: ColorCorrection::Linear,
             // Sized for the largest possible frame (SGB 256x224) so the same
@@ -784,7 +784,7 @@ mod tests {
             // Non-default starting values, so a fallback proves the Some(bad) ->
             // unwrap_or path actually fired (not just an untouched default).
             core.hardware_pref = HardwarePref::Model(HardwareChoice::Sgb);
-            core.palette = PaletteChoice::Pocket;
+            core.palette = DmgPaletteChoice::Pocket;
             core.color_correction = ColorCorrection::Linear;
             core.gbc_dmg_palette = GbcDmgPalette::Scheme(1);
 
@@ -800,7 +800,7 @@ mod tests {
             assert!(dispatch::load_game(&mut core, &info), "load_game failed");
 
             assert_eq!(core.hardware_pref, HardwarePref::Auto);
-            assert_eq!(core.palette, PaletteChoice::GreenLcd);
+            assert_eq!(core.palette, DmgPaletteChoice::GreenLcd);
             assert_eq!(core.color_correction, ColorCorrection::Lcd);
             assert_eq!(core.gbc_dmg_palette, GbcDmgPalette::Auto);
         }

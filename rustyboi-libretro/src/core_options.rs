@@ -8,7 +8,7 @@
 
 use rustyboi_libretro_sys::{CoreOptions, OptionCategory, OptionDef, OptionValue};
 
-use rustyboi_session::action::{GbcDmgPalette, HardwareChoice, PaletteChoice};
+use rustyboi_session::action::{GbcDmgPalette, HardwareChoice, DmgPaletteChoice};
 use rustyboi_session::ColorCorrection;
 
 /// Option keys, defined once and referenced by both the generated table and the
@@ -53,7 +53,7 @@ pub fn build() -> CoreOptions {
     hardware_values
         .extend(HardwareChoice::ALL.into_iter().map(|c| value(c.option_id(), c.label())));
 
-    let palette_values: Vec<OptionValue> = PaletteChoice::ALL
+    let palette_values: Vec<OptionValue> = DmgPaletteChoice::ALL
         .into_iter()
         .map(|p| value(p.option_id(), p.label()))
         .collect();
@@ -114,7 +114,7 @@ pub fn build() -> CoreOptions {
                 info: "Colour palette for original Game Boy (monochrome) output. No effect on Game Boy Color titles, which supply their own colours.",
                 category: "video_settings",
                 values: palette_values,
-                default: PaletteChoice::GreenLcd.option_id().into(),
+                default: DmgPaletteChoice::GreenLcd.option_id().into(),
             },
             OptionDef {
                 key: KEY_GBC_DMG_PALETTE,
@@ -208,7 +208,7 @@ mod tests {
         }
 
         let pal = values_for(KEY_DMG_PALETTE);
-        for p in PaletteChoice::ALL {
+        for p in DmgPaletteChoice::ALL {
             assert!(pal.iter().any(|v| v == p.option_id()), "palette list missing {}", p.option_id());
         }
 

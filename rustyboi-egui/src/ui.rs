@@ -11,7 +11,7 @@ use crate::actions::{
 };
 // Hardware / palette pickers live only in the desktop Settings menu bar.
 #[cfg(not(mobile))]
-use crate::actions::{GbcDmgPalette, HardwareChoice, PaletteChoice};
+use crate::actions::{GbcDmgPalette, HardwareChoice, DmgPaletteChoice};
 use crate::file_dialog::{self, FileDialogBuilder};
 #[cfg(target_os = "android")]
 use crate::library::LibraryPanel;
@@ -664,7 +664,7 @@ impl Gui {
                     ui.add_enabled_ui(session.dmg_palette_active, |ui| {
                         ui.menu_button("DMG Palette", |ui| {
                             ui.label("Monochrome (DMG hardware)");
-                            for choice in PaletteChoice::ALL {
+                            for choice in DmgPaletteChoice::ALL {
                                 let selected = session.palette == choice;
                                 if ui.radio(selected, choice.label()).clicked() && !selected {
                                     *action = Some(GuiAction::SetPalette(choice));
