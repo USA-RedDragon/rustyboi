@@ -169,17 +169,37 @@ pub enum TextureFilter {
     Linear,
 }
 
-/// An optional LCD post-process effect applied by the renderer. `Off` (default)
-/// is the plain scaled frame; `Grid` darkens a subpixel gap between source
-/// pixels (an LCD-cell look); `Scanlines` darkens between source rows.
-/// Presentation-only. Serde-derived so it persists in
-/// [`Config`](crate::config::Config).
+/// An optional LCD post-process effect applied by the renderer. `Auto` (default)
+/// picks the most hardware-accurate look for the current model (see
+/// [`resolve`](LcdEffect::resolve)); `Off` is the plain scaled frame; `Grid`
+/// darkens a subpixel gap between source pixels (a dot-matrix LCD look);
+/// `Scanlines` darkens between source rows (a CRT/TV look). Presentation-only.
+/// Serde-derived so it persists in [`Config`](crate::config::Config).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LcdEffect {
     #[default]
+    Auto,
     Off,
     Grid,
     Scanlines,
+}
+
+impl LcdEffect {
+    /// Resolve `Auto` to the model-appropriate effect: a dot-matrix LCD grid for
+    /// the DMG/MGB/CGB (and their variants), TV scanlines for the SGB (which
+    /// drives its picture to a television through the SNES), and none for the
+    /// AGB's smooth backlit screen. Concrete variants pass through unchanged.
+    pub fn resolve(self, hardware: rustyboi_core_lib::gb::Hardware) -> LcdEffect {
+        use rustyboi_core_lib::gb::Hardware;
+        match self {
+            LcdEffect::Auto => match hardware {
+                Hardware::SGB | Hardware::SGB2 => LcdEffect::Scanlines,
+                Hardware::AGB => LcdEffect::Off,
+                _ => LcdEffect::Grid,
+            },
+            other => other,
+        }
+    }
 }
 
 /// The integer upscale factors offered for saved Game Boy Printer output — the
@@ -386,7 +406,7 @@ impl Default for SessionUiState {
             color_correction: crate::ColorCorrection::Lcd,
             use_real_boot_rom: false,
             texture_filter: TextureFilter::Nearest,
-            lcd_effect: LcdEffect::Grid,
+            lcd_effect: LcdEffect::Auto,
             printer_scale: 5,
             touch_opacity: 100,
             rewind_enabled: true,
