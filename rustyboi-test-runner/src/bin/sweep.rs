@@ -77,11 +77,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[path = "shared/imaging.rs"]
+#[allow(dead_code)] // shared toolbox: this bin uses a subset (e.g. not frame_rgb)
 mod imaging;
 #[path = "shared/masher.rs"]
 mod masher;
 use masher::masher;
-use imaging::{encode_rgb_webp, frame_rgb, html_escape};
+use imaging::{encode_rgb_webp, frame_rgb_pal, html_escape, MonoPalette};
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Row {
@@ -185,6 +186,18 @@ struct RunCfg {
 /// CGB->"cgb", SGB->"sgb", AGB->"agb", etc.
 fn hw_tag(hw: Hardware) -> String {
     format!("{hw:?}").to_ascii_lowercase()
+}
+
+/// Monochrome palette for a model's media, so mono frames match the real screen.
+/// SGB/SGB2 output DMG shades through SNES palette RAM to a TV (no green LCD), so
+/// a game that issues no PAL command shows the SGB default gray ramp — not green.
+/// (Colorized SGB and all CGB/AGB output arrives as `Frame::Color` and ignores
+/// this.) DMG-class models keep the green LCD tint.
+fn mono_palette_for(hw: Hardware) -> MonoPalette {
+    match hw {
+        Hardware::SGB | Hardware::SGB2 => MonoPalette::Gray,
+        _ => MonoPalette::DmgGreen,
+    }
 }
 
 /// Parse a hardware tag (case-insensitive) into a `Hardware`. Accepts the short
@@ -818,10 +831,10 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
             if frame_is_non_blank(&frame) {
                 boot_ok = true;
                 if cfg.screens_dir.is_some() {
-                    final_rgb = Some(frame_rgb(&frame));
+                    final_rgb = Some(frame_rgb_pal(&frame, mono_palette_for(hardware)));
                 }
             } else if f + 1 == cfg.frames && final_rgb.is_none() && cfg.screens_dir.is_some() {
-                final_rgb = Some(frame_rgb(&frame));
+                final_rgb = Some(frame_rgb_pal(&frame, mono_palette_for(hardware)));
             }
         }
         if f % 256 == 0 && started.elapsed().as_secs() > cfg.timeout_secs {
@@ -922,7 +935,7 @@ fn spawn_encoder(out: &Path) -> std::io::Result<std::process::Child> {
             "-loglevel", "error",
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "160x144",
             "-framerate", "4194304/70224", "-i", "-",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+            "-c:v", "libx264", "-preset", "veryslow", "-crf", "25",
             "-g", "300", "-threads", "1",
             "-pix_fmt", "yuv420p", "-f", "mp4",
         ])
@@ -1049,7 +1062,7 @@ fn capture_media(
 
         let in_tail = f + 120 >= cfg.frames;
         let need_rgb = encoder.is_some() || in_tail;
-        let rgb = need_rgb.then(|| frame_rgb(&frame));
+        let rgb = need_rgb.then(|| frame_rgb_pal(&frame, mono_palette_for(hardware)));
 
         if let Some(child) = &mut encoder
             && let (Some(stdin), Some(rgb)) = (child.stdin.as_mut(), &rgb)
@@ -1317,7 +1330,7 @@ fn capture_bios(
     for f in 0..MAX_BIOS_FRAMES {
         let (frame, _bp) = gb.run_until_frame(collect_audio);
         frames = f + 1;
-        let rgb = frame_rgb(&frame);
+        let rgb = frame_rgb_pal(&frame, mono_palette_for(hw));
         if let Some(child) = &mut encoder
             && let Some(stdin) = child.stdin.as_mut()
             && stdin.write_all(&rgb).is_err()
