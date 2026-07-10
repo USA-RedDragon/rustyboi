@@ -725,7 +725,7 @@ fn draw(
     // (the session is in the worker), so these must be pushed here too.
     renderer.set_scaling_mode(ui_state.scaling);
     renderer.set_texture_filter(ui_state.texture_filter);
-    renderer.set_lcd_effect(ui_state.lcd_effect);
+    renderer.set_lcd_effect(ui_state.lcd_effect.resolve(ui_state.hardware.to_hardware()));
 
     // Render: the game texture (uploaded above) letterboxed into the central
     // region, egui on top. game: None — the retained texture is drawn via has_game.
