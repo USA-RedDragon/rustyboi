@@ -699,7 +699,12 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
         && let Some(dir) = &cfg.screens_dir
     {
         let canon = out_hardware_of(&row);
-        for &hw in &cfg.hardware {
+        // Fan the per-model media passes across the SAME rayon pool as the
+        // ROM-level par_iter: work-stealing keeps total concurrency bounded by
+        // --jobs (no extra ffmpeg), but a ROM's models run in parallel whenever
+        // cores are free, cutting per-ROM latency ~Nx. Each pass writes its own
+        // <sha>_<hw> files and never mutates the manifest row, so it's race-free.
+        cfg.hardware.par_iter().for_each(|&hw| {
             let tag = hw_tag(hw);
             let is_canon = canon.as_deref() == Some(tag.as_str());
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -740,7 +745,7 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
                 Ok(Err(e)) => eprintln!("sweep: media {} [{tag}] failed: {e}", row.rom_sha),
                 Err(_) => eprintln!("sweep: media {} [{tag}] panicked; skipped", row.rom_sha),
             }
-        }
+        });
     }
     row
 }
