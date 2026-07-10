@@ -408,7 +408,7 @@ mod fb_rle_tests {
 
 #[cfg(test)]
 mod color_tests {
-    use super::{rgb555_to_rgb888, CgbColorConversion, Ppu};
+    use super::{rgb555_to_rgb888, ColorCorrection, Ppu};
 
     // Pack a 5-5-5 color into the (low, high) palette byte pair the PPU stores.
     fn bytes(r: u16, g: u16, b: u16) -> (u8, u8) {
@@ -429,26 +429,57 @@ mod color_tests {
     #[test]
     fn cgb_linear_matches_the_naive_expansion() {
         let mut ppu = Ppu::new();
-        ppu.set_cgb_color_conversion(CgbColorConversion::Linear);
+        ppu.set_cgb_color_conversion(ColorCorrection::Linear);
         let (lo, hi) = bytes(31, 0, 0);
-        assert_eq!(ppu.cgb_color_to_rgb(lo, hi), (255, 0, 0));
+        assert_eq!(ppu.cgb_color_to_rgb(lo, hi, false), (255, 0, 0));
         let (lo, hi) = bytes(31, 31, 31);
-        assert_eq!(ppu.cgb_color_to_rgb(lo, hi), (255, 255, 255));
+        assert_eq!(ppu.cgb_color_to_rgb(lo, hi, false), (255, 255, 255));
     }
 
     #[test]
     fn cgb_lcd_applies_the_correction_curve() {
         let mut ppu = Ppu::new();
-        ppu.set_cgb_color_conversion(CgbColorConversion::Lcd);
+        ppu.set_cgb_color_conversion(ColorCorrection::Lcd);
         // White under the LCD curve is (248,248,248), NOT the linear (255,255,255).
         let (lo, hi) = bytes(31, 31, 31);
-        assert_eq!(ppu.cgb_color_to_rgb(lo, hi), (248, 248, 248));
+        assert_eq!(ppu.cgb_color_to_rgb(lo, hi, false), (248, 248, 248));
         // Pure red picks up the curve's inter-channel bleed.
         let (lo, hi) = bytes(31, 0, 0);
-        assert_eq!(ppu.cgb_color_to_rgb(lo, hi), (201, 0, 46));
+        assert_eq!(ppu.cgb_color_to_rgb(lo, hi, false), (201, 0, 46));
         // Black stays black on both curves.
         let (lo, hi) = bytes(0, 0, 0);
-        assert_eq!(ppu.cgb_color_to_rgb(lo, hi), (0, 0, 0));
+        assert_eq!(ppu.cgb_color_to_rgb(lo, hi, false), (0, 0, 0));
+    }
+
+    #[test]
+    fn agb_lcd_uses_the_gba_curve_only_on_agb() {
+        let mut ppu = Ppu::new();
+        ppu.set_cgb_color_conversion(ColorCorrection::Lcd);
+        // The GBA screen is dim and warm: white is not (255,255,255) or the CGB
+        // (248,248,248) — it's the ares/byuu curve's ~(246,238,242).
+        let (lo, hi) = bytes(31, 31, 31);
+        assert_eq!(ppu.cgb_color_to_rgb(lo, hi, true), (246, 238, 242));
+        // Black is black; the curve only applies when is_agb is set.
+        let (lo, hi) = bytes(0, 0, 0);
+        assert_eq!(ppu.cgb_color_to_rgb(lo, hi, true), (0, 0, 0));
+        assert_ne!(
+            ppu.cgb_color_to_rgb(bytes(31, 0, 0).0, bytes(31, 0, 0).1, true),
+            ppu.cgb_color_to_rgb(bytes(31, 0, 0).0, bytes(31, 0, 0).1, false),
+        );
+    }
+
+    #[test]
+    fn mono_shades_are_model_and_correction_aware() {
+        use crate::gb::{mono_shades, Hardware};
+        // Linear is a neutral grey ramp for every model.
+        let gray = [[255, 255, 255], [170, 170, 170], [85, 85, 85], [0, 0, 0]];
+        for hw in [Hardware::DMG, Hardware::MGB, Hardware::SGB, Hardware::CGB] {
+            assert_eq!(mono_shades(hw, ColorCorrection::Linear), gray);
+        }
+        // LCD: DMG green, MGB olive, SGB neutral grey (no LCD).
+        assert_eq!(mono_shades(Hardware::DMG, ColorCorrection::Lcd)[0], [224, 248, 208]);
+        assert_eq!(mono_shades(Hardware::MGB, ColorCorrection::Lcd)[0], [194, 206, 147]);
+        assert_eq!(mono_shades(Hardware::SGB, ColorCorrection::Lcd), gray);
     }
 }
 
@@ -1260,10 +1291,39 @@ struct PendingLcdcEvent {
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum CgbColorConversion {
+pub enum ColorCorrection {
     #[default]
     Linear,
     Lcd,
+}
+
+/// Game Boy Advance LCD colour curve as a 15-bit-colour -> RGB888 table, built
+/// once. Ported from ares' `GameBoyAdvance` `color()` (ISC-licensed; Talarubi &
+/// byuu's measured GBA characterisation): lcdGamma 4.0, outGamma 2.2, the
+/// channel-mix matrix, scaled to 8-bit. Built with pure-Rust `libm` so the
+/// table is bit-identical on every platform — the AGB frame output must stay
+/// machine-independent for the deterministic regression gate.
+fn agb_lcd_lut() -> &'static [[u8; 3]; 32768] {
+    static LUT: std::sync::OnceLock<Box<[[u8; 3]; 32768]>> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut lut = Box::new([[0u8; 3]; 32768]);
+        let (lcd_gamma, out_gamma) = (4.0f64, 2.2f64);
+        let scale = 255.0 * 255.0 / 280.0;
+        for (word, slot) in lut.iter_mut().enumerate() {
+            let lr = libm::pow((word & 0x1F) as f64 / 31.0, lcd_gamma);
+            let lg = libm::pow(((word >> 5) & 0x1F) as f64 / 31.0, lcd_gamma);
+            let lb = libm::pow(((word >> 10) & 0x1F) as f64 / 31.0, lcd_gamma);
+            let ch = |mix: f64| -> u8 {
+                (libm::pow(mix / 255.0, 1.0 / out_gamma) * scale).round().clamp(0.0, 255.0) as u8
+            };
+            *slot = [
+                ch(50.0 * lg + 240.0 * lr),
+                ch(30.0 * lb + 230.0 * lg + 10.0 * lr),
+                ch(220.0 * lb + 10.0 * lg + 50.0 * lr),
+            ];
+        }
+        lut
+    })
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -2163,7 +2223,7 @@ pub struct Ppu {
     #[serde(default)]
     bgp_mode2_pending: Option<(u64, u8)>,
     #[serde(default)]
-    cgb_color_conversion: CgbColorConversion,
+    cgb_color_conversion: ColorCorrection,
     #[serde(skip, default)]
     fetch_debug_events_enabled: bool,
     #[serde(skip, default)]
@@ -2337,7 +2397,7 @@ impl Ppu {
             bg_scy_hist: Vec::new(),
             bg_scx_hist: Vec::new(),
             we_win_bit_exact: None,
-            cgb_color_conversion: CgbColorConversion::Lcd,
+            cgb_color_conversion: ColorCorrection::Lcd,
             fetch_debug_events_enabled: false,
             fetch_debug_events: Vec::new(),
             pixel_debug_events: Vec::new(),
@@ -2348,8 +2408,12 @@ impl Ppu {
         *self = Self::new();
     }
 
-    pub fn set_cgb_color_conversion(&mut self, conversion: CgbColorConversion) {
+    pub fn set_cgb_color_conversion(&mut self, conversion: ColorCorrection) {
         self.cgb_color_conversion = conversion;
+    }
+
+    pub fn cgb_color_conversion(&self) -> ColorCorrection {
+        self.cgb_color_conversion
     }
 
     pub fn sync_lcdc_from_mmio(&mut self, mmio: &mmio::Mmio) {
@@ -11174,8 +11238,9 @@ impl Ppu {
         self.sprites_on_line.len()
     }
 
-    // CGB color conversion functions
-    fn cgb_color_to_rgb(&self, low_byte: u8, high_byte: u8) -> (u8, u8, u8) {
+    // CGB color conversion functions. `is_agb`: under `Lcd`, GBA hardware uses
+    // its own (dimmer, warmer) LCD curve instead of the CGB matrix.
+    fn cgb_color_to_rgb(&self, low_byte: u8, high_byte: u8, is_agb: bool) -> (u8, u8, u8) {
         // CGB color format: GGGRRRRR BBBBBGGG (little endian)
         let color_word = (high_byte as u16) << 8 | low_byte as u16;
 
@@ -11185,13 +11250,17 @@ impl Ppu {
         let b = (color_word >> 10) & 0x1F ;
 
         match self.cgb_color_conversion {
-            CgbColorConversion::Linear => {
+            ColorCorrection::Linear => {
                 let r8 = ((r * 255) / 31) as u8;
                 let g8 = ((g * 255) / 31) as u8;
                 let b8 = ((b * 255) / 31) as u8;
                 (r8, g8, b8)
             }
-            CgbColorConversion::Lcd => {
+            ColorCorrection::Lcd if is_agb => {
+                let [r8, g8, b8] = agb_lcd_lut()[(color_word & 0x7FFF) as usize];
+                (r8, g8, b8)
+            }
+            ColorCorrection::Lcd => {
                 let r8 = ((r * 13 + g * 2 + b) / 2) as u8;
                 let g8 = ((g * 3 + b) * 2) as u8;
                 let b8 = ((r * 3 + g * 2 + b * 11) / 2) as u8;
@@ -11215,7 +11284,7 @@ impl Ppu {
 
         // Read CGB palette data from palette RAM
         let (low_byte, high_byte) = mmio.read_bg_palette_data(palette_idx, color_idx);
-        self.cgb_color_to_rgb(low_byte, high_byte)
+        self.cgb_color_to_rgb(low_byte, high_byte, mmio.is_agb())
     }
 
     fn get_cgb_obj_color(&self, mmio: &mmio::Mmio, palette_idx: u8, color_idx: u8, sx: u8) -> (u8, u8, u8) {
@@ -11237,7 +11306,7 @@ impl Ppu {
 
         // Read CGB palette data from palette RAM
         let (low_byte, high_byte) = mmio.read_obj_palette_data(palette_idx, color_idx);
-        self.cgb_color_to_rgb(low_byte, high_byte)
+        self.cgb_color_to_rgb(low_byte, high_byte, mmio.is_agb())
     }
 
     // Check a single sprite during distributed OAM search
@@ -11678,7 +11747,7 @@ impl Ppu {
     fn compat_bg_color(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8) -> (u8, u8, u8) {
         let bg_shade = self.get_palette_color_at_tick(bg_pixel_idx, self.ticks);
         let (lo, hi) = mmio.bg_palette_pair_raw(0, bg_shade);
-        self.cgb_color_to_rgb(lo, hi)
+        self.cgb_color_to_rgb(lo, hi, mmio.is_agb())
     }
 
     fn mix_background_and_sprites_compat(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8, screen_x: u8, screen_y: u8, bg_enabled_col: bool) -> (u8, u8, u8) {
@@ -11690,7 +11759,7 @@ impl Ppu {
         let idx = if bg_enabled { bg_pixel_idx } else { 0 };
         let bg_shade = self.get_palette_color_at_tick(idx, self.ticks);
         let (lo, hi) = mmio.bg_palette_pair_raw(0, bg_shade);
-        let bg_color_rgb = self.cgb_color_to_rgb(lo, hi);
+        let bg_color_rgb = self.cgb_color_to_rgb(lo, hi, mmio.is_agb());
 
         let effective_bg_pixel_idx = if bg_enabled { bg_pixel_idx } else { 0 };
 
@@ -11767,7 +11836,7 @@ impl Ppu {
                             self.dmg_sprite_palette_shade(sprite_pixel_idx, use_obp1, self.ticks);
                         let pal = if use_obp1 { 1 } else { 0 };
                         let (slo, shi) = mmio.obj_palette_pair_raw(pal, obj_shade);
-                        let sprite_color_rgb = self.cgb_color_to_rgb(slo, shi);
+                        let sprite_color_rgb = self.cgb_color_to_rgb(slo, shi, mmio.is_agb());
                         if !sprite.attributes.priority || effective_bg_pixel_idx == 0 {
                             return sprite_color_rgb;
                         }
