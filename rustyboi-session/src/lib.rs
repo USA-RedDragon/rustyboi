@@ -69,7 +69,7 @@ pub mod tas;
 pub use action::LibraryEntry;
 pub use action::{
     ActionKind, CommandDescriptor, FileData, GbcDmgPalette, GraphicsBackend, HardwareChoice,
-    HardwareFamily, KeyBind, LcdEffect, LoadPurpose, MenuCategory, PaletteChoice, ScalingMode,
+    HardwareFamily, KeyBind, LcdEffect, LoadPurpose, MenuCategory, DmgPaletteChoice, ScalingMode,
     SessionUiState, TextureFilter, UiAction, COMMANDS, PRINTER_SCALES,
 };
 pub use apply::{ActionOutcome, FetchPurpose, PlatformRequest};

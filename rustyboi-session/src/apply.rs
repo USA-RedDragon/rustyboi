@@ -6,7 +6,7 @@
 //! breakpoints, debug stepping requests) and returns the pieces of work only the
 //! host can do as [`PlatformRequest`]s the frontend performs after the call.
 
-use crate::action::{LoadPurpose, PaletteChoice, UiAction};
+use crate::action::{LoadPurpose, DmgPaletteChoice, UiAction};
 use crate::session::Session;
 
 /// Why a URL is being fetched, so the frontend routes the downloaded bytes back
@@ -507,7 +507,7 @@ impl Session {
 
 /// Map an application config palette to the RGBA shades stored in config, for
 /// [`Session::set_palette_choice`].
-pub(crate) fn palette_shades(choice: PaletteChoice) -> [[u8; 4]; 4] {
+pub(crate) fn palette_shades(choice: DmgPaletteChoice) -> [[u8; 4]; 4] {
     choice.rgba_shades()
 }
 
@@ -616,7 +616,7 @@ mod tests {
             ToggleTouchControls,
             ToggleShowFps,
             SetHardware(HardwareChoice::Dmg),
-            SetPalette(PaletteChoice::Pocket),
+            SetPalette(DmgPaletteChoice::Pocket),
             SetColorCorrection(crate::ColorCorrection::Lcd),
             SetRealBootRom(false),
             SetTextureFilter(crate::action::TextureFilter::Linear),
@@ -650,9 +650,9 @@ mod tests {
     #[test]
     fn set_palette_persists_choice() {
         let mut s = session();
-        s.apply(UiAction::SetPalette(PaletteChoice::GreenLcd), 0);
-        assert_eq!(s.palette(), PaletteChoice::GreenLcd);
-        assert_eq!(s.config().dmg_palette.shades, PaletteChoice::GreenLcd.rgba_shades());
+        s.apply(UiAction::SetPalette(DmgPaletteChoice::GreenLcd), 0);
+        assert_eq!(s.palette(), DmgPaletteChoice::GreenLcd);
+        assert_eq!(s.config().dmg_palette.shades, DmgPaletteChoice::GreenLcd.rgba_shades());
     }
 
     #[test]

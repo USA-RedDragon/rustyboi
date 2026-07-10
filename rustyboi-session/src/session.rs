@@ -6,7 +6,7 @@
 //! through the boxed service ports; video+audio come back as return values.
 //! No wall clock, no filesystem, no threads: WASM-clean.
 
-use crate::action::{HardwareChoice, PaletteChoice, ScalingMode};
+use crate::action::{HardwareChoice, DmgPaletteChoice, ScalingMode};
 use crate::apply::palette_shades;
 use crate::audio::{CaptureSink, SampleBuf};
 use crate::cheats::{Cheat, CheatError, CheatSet};
@@ -216,7 +216,7 @@ pub struct Session {
     touch_controls: bool,
     /// The DMG presentation palette choice (the concrete shades live in
     /// `config.dmg_palette`; this is the menu selection they mirror).
-    palette: PaletteChoice,
+    palette: DmgPaletteChoice,
     /// Real boot ROM bytes supplied by the adapter (DMG or CGB), run in place of
     /// `skip_bios` when `config.use_real_boot_rom` is set and this is `Some`.
     /// `None` = no boot ROM available; the session always falls back to
@@ -262,7 +262,7 @@ impl Session {
         // through `apply_presentation`.
         gb.set_cgb_color_conversion(config.color_correction);
         let rewind = RewindBuffer::new(config.rewind.depth, config.rewind.interval_frames);
-        let palette = PaletteChoice::from_shades(config.dmg_palette.shades);
+        let palette = DmgPaletteChoice::from_shades(config.dmg_palette.shades);
         Session {
             gb,
             config,
@@ -810,7 +810,7 @@ impl Session {
     }
 
     /// The current DMG presentation palette choice.
-    pub fn palette(&self) -> PaletteChoice {
+    pub fn palette(&self) -> DmgPaletteChoice {
         self.palette
     }
 
@@ -868,14 +868,14 @@ impl Session {
     }
 
     /// Change the DMG presentation palette; persists the config.
-    pub fn set_palette_choice(&mut self, choice: PaletteChoice) {
+    pub fn set_palette_choice(&mut self, choice: DmgPaletteChoice) {
         self.init_palette_choice(choice);
         self.persist_config();
     }
 
     /// Seed the presentation palette without persisting (startup, from the
     /// CLI/config-derived choice).
-    pub fn init_palette_choice(&mut self, choice: PaletteChoice) {
+    pub fn init_palette_choice(&mut self, choice: DmgPaletteChoice) {
         self.palette = choice;
         self.config.dmg_palette.shades = palette_shades(choice);
     }

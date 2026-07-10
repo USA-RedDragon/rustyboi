@@ -11,7 +11,7 @@
 mod common;
 
 use rustyboi_session::action::{
-    GbcDmgPalette, HardwareChoice, LcdEffect, PaletteChoice, ScalingMode, TextureFilter,
+    GbcDmgPalette, HardwareChoice, LcdEffect, DmgPaletteChoice, ScalingMode, TextureFilter,
 };
 use rustyboi_session::{ColorCorrection, InputConfig, UiAction};
 use rustyboi_web::Emulator;
@@ -115,7 +115,7 @@ fn serviceable_actions() -> Vec<UiAction> {
         ToggleTouchControls,
         SetHardware(HardwareChoice::Dmg),
         SetHardware(HardwareChoice::Cgb),
-        SetPalette(PaletteChoice::GreenLcd),
+        SetPalette(DmgPaletteChoice::GreenLcd),
         SetGbcDmgPalette(GbcDmgPalette::Auto),
         SetGbcDmgPalette(GbcDmgPalette::Scheme(5)),
         SetColorCorrection(ColorCorrection::Lcd),
