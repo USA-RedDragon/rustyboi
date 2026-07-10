@@ -191,11 +191,12 @@ fn hw_tag(hw: Hardware) -> String {
 /// Monochrome palette for a model's media, so mono frames match the real screen.
 /// SGB/SGB2 output DMG shades through SNES palette RAM to a TV (no green LCD), so
 /// a game that issues no PAL command shows the SGB default gray ramp — not green.
+/// MGB (Game Boy Pocket) has a true black-and-white LCD, also grayscale not green.
 /// (Colorized SGB and all CGB/AGB output arrives as `Frame::Color` and ignores
-/// this.) DMG-class models keep the green LCD tint.
+/// this.) The original DMG (and DMG0) keep the green LCD tint.
 fn mono_palette_for(hw: Hardware) -> MonoPalette {
     match hw {
-        Hardware::SGB | Hardware::SGB2 => MonoPalette::Gray,
+        Hardware::MGB | Hardware::SGB | Hardware::SGB2 => MonoPalette::Gray,
         _ => MonoPalette::DmgGreen,
     }
 }
