@@ -384,7 +384,7 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
             }
             hw
         }
-        None => vec![Hardware::DMG, Hardware::CGB, Hardware::SGB, Hardware::AGB],
+        None => vec![Hardware::DMG, Hardware::MGB, Hardware::CGB, Hardware::SGB, Hardware::AGB],
     };
 
     let names = nointro_map();
