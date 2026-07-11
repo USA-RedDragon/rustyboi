@@ -4712,9 +4712,8 @@ impl Mmio {
             // region on real CGB reflects boot-ROM bus residue and is NOT a clean
             // power-on constant: the gdma-oamdumper `.dump` oracles read 0x18 at
             // FEA0 (single-speed) while the `fexx_*_dumper_cgb.bin` oracles read
-            // 0x08 (the canonical Gambatte `setInitialCgbIoamhram` feaxDump,
-            // mem_dumps.h:3138). OAM-DMA never writes the >=0xA0 tail
-            // (memory.cpp:573 gates on `oamDmaPos_ < oam_size`), so no DMA-path fix
+            // 0x08 (the canonical CGB power-on feax tail). OAM-DMA never writes the >=0xA0
+            // tail (the OAM-DMA engine never advances past `oam_size`), so no DMA-path fix
             // can reconcile them — a single seed can satisfy only one family. The
             // 0x18-revision bytes are kept here because they leave more of the
             // suite (the oamdumpers) passing; the canonical-0x08 fexx_ffxx oracle
@@ -4733,13 +4732,13 @@ impl Mmio {
                 0x24, 0x1B, 0xFD, 0x3A, 0x10, 0x12, 0xAC, 0x45,
                 0x24, 0x1B, 0xFD, 0x3A, 0x10, 0x12, 0xAC, 0x45,
             ];
-            const CGB_HRAM: [u8; 0x7F] = [
-                0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B,
-                0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
-                0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E,
-                0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
-                0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC,
-                0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
+            // HRAM power-on state after the CGB boot ROM. The first 48 bytes
+            // (0xFF80..0xFFB0) are boot-ROM residue equal to the cartridge's own
+            // header logo ($0104-$0133): the boot ROM copies that bitmap through
+            // HRAM while verifying it. They are reconstructed at runtime from the
+            // loaded cart (`header_logo`) rather than embedded here. The remaining
+            // 79 bytes are boot-ROM stack/working residue (a hardware fact).
+            const CGB_HRAM_TAIL: [u8; 0x7F - 0x30] = [
                 0x45, 0xEC, 0x42, 0xFA, 0x08, 0xB7, 0x07, 0x5D,
                 0x01, 0xF5, 0xC0, 0xFF, 0x08, 0xFC, 0x00, 0xE5,
                 0x0B, 0xF8, 0xC2, 0xCA, 0xF4, 0xF9, 0x0D, 0x7F,
@@ -4752,6 +4751,12 @@ impl Mmio {
                 0x0D, 0x00, 0xD3, 0x05, 0xF9, 0x00, 0x0B,
             ];
             self.oam_high = CGB_FEAX;
+            let header_logo = self.cartridge.as_ref().and_then(|c| c.header_logo());
+            let hram = self.hram.as_mut_slice();
+            if let Some(logo) = header_logo {
+                hram[0x00..0x30].copy_from_slice(&logo);
+            }
+            hram[0x30..].copy_from_slice(&CGB_HRAM_TAIL);
             self.hram.as_mut_slice().copy_from_slice(&CGB_HRAM);
             // BCPS/OCPS (FF68/FF6A) power-on read 0xC0/0xC1 (Gambatte ffxxDump
             // index 0x68/0x6A): bit 6 is unused (always 1) and bit 7 (the
