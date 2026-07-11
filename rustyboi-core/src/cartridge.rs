@@ -105,21 +105,10 @@ const LOGO_SUM_NINTENDO: u32 = 5446;
 const LOGO_SUM_SACHEN_A: u32 = 5542;
 const LOGO_SUM_SACHEN_B: u32 = 7484;
 /// Byte sum of the Rocket Games logo (hhugboy: 2756). Rocket carts never
-/// contain the Nintendo logo in the dump; the mapper XOR-decodes it for the
-/// boot ROM check (see ROCKET_LOGO_XOR).
+/// contain the Nintendo logo in the dump; while a boot ROM runs, the mapper
+/// presents the logo (sourced from the boot ROM) during its locked-CGB phase so
+/// the boot ROM's logo check passes.
 const LOGO_SUM_ROCKET: u32 = 2756;
-
-/// XOR pad that maps the Rocket Games logo bytes at $0104-$0133 to the
-/// Nintendo logo. While the mapper is in its locked-CGB phase it presents the
-/// XOR-decoded (Nintendo) logo so the boot ROM check passes; once unlocked
-/// the game reads its own (Rocket) logo back. Verbatim from hhugboy
-/// MbcUnlRocketGames.cpp (rocketXorNintendoLogo).
-const ROCKET_LOGO_XOR: [u8; 48] = [
-    0xdf, 0xce, 0x97, 0x78, 0xcd, 0x2f, 0xf0, 0x0b, 0x0b, 0xea, 0x78, 0x83,
-    0x08, 0x1d, 0x9a, 0x45, 0x11, 0x2b, 0xe1, 0x11, 0xf8, 0x88, 0xf8, 0x8e,
-    0xfe, 0x88, 0x2a, 0xc4, 0xff, 0xfc, 0xd9, 0x87, 0x22, 0xab, 0x67, 0x7d,
-    0x77, 0x2c, 0xa8, 0xee, 0xff, 0x9b, 0x99, 0x91, 0xaa, 0x9b, 0x33, 0x3e,
-];
 
 // Lock-phase values shared by the Sachen and Rocket boot state machines
 // (hhugboy MODE_LOCKED_DMG/MODE_LOCKED_CGB/MODE_UNLOCKED, mGBA GBSachenLockState).
@@ -492,9 +481,9 @@ pub struct Cartridge {
     wt_bank: u8,
 
     // Rocket Games state. rocket_lock/rocket_unlock_count model the
-    // A15-transition boot lock (hhugboy): the cart powers up locked and
-    // presents the XOR-decoded Nintendo logo during the boot ROM check;
-    // skip_bios unlocks immediately (no boot ROM ran). Cell: the counter
+    // A15-transition boot lock (hhugboy): the cart powers up locked and, while a
+    // boot ROM is running, presents the Nintendo logo during the boot ROM's logo
+    // check; skip_bios unlocks immediately (no boot ROM ran). Cell: the counter
     // advances on ROM READS, and Addressable::read takes &self.
     #[serde(default = "serde_u8_one")]
     rocket_rom_bank: u8,
@@ -504,6 +493,13 @@ pub struct Cartridge {
     rocket_lock: Cell<u8>,
     #[serde(default)]
     rocket_unlock_count: Cell<u8>,
+    // Nintendo logo bytes the Rocket mapper presents at $0104-$0133 during its
+    // locked-CGB phase, sourced at RUNTIME from the loaded boot ROM (which
+    // contains the logo it checks against) so no logo data is embedded here.
+    // None unless a boot ROM is present; only ever observed by a running boot
+    // ROM. Not persisted (re-seeded from the boot ROM on load).
+    #[serde(skip, default)]
+    rocket_boot_logo: Option<[u8; 48]>,
 
     // Sachen MMC1/MMC2 state. sachen_bank is the raw inner-bank latch
     // ("unmasked bank"); base/mask writes only latch while
@@ -665,6 +661,7 @@ impl Clone for Cartridge {
             rocket_outer: self.rocket_outer,
             rocket_lock: self.rocket_lock.clone(),
             rocket_unlock_count: self.rocket_unlock_count.clone(),
+            rocket_boot_logo: self.rocket_boot_logo,
             sachen_base: self.sachen_base,
             sachen_mask: self.sachen_mask,
             sachen_bank: self.sachen_bank,
@@ -1134,6 +1131,7 @@ impl Cartridge {
             rocket_outer: 0,
             rocket_lock: Cell::new(UNL_LOCKED_DMG),
             rocket_unlock_count: Cell::new(0),
+            rocket_boot_logo: None,
             sachen_base: 0,
             sachen_mask: 0,
             sachen_bank: 1,
@@ -1328,6 +1326,7 @@ impl Cartridge {
             rocket_outer: 0,
             rocket_lock: Cell::new(UNL_LOCKED_DMG),
             rocket_unlock_count: Cell::new(0),
+            rocket_boot_logo: None,
             sachen_base: 0,
             sachen_mask: 0,
             sachen_bank: 1,
@@ -3399,10 +3398,20 @@ impl Cartridge {
         addr
     }
 
-    /// Rocket Games read-side lock counter. Returns the XOR pad byte to apply
-    /// (locked-CGB phase presents the XOR-decoded Nintendo logo at
-    /// $0104-$0133); 0 otherwise. hhugboy MbcUnlRocketGames::readMemory.
-    fn rocket_read_xor(&self, addr: u16) -> u8 {
+    /// Provide the boot ROM's Nintendo logo to the Rocket mapper (sourced from
+    /// the loaded boot ROM by `Mmio`). Only consulted during the mapper's
+    /// locked-CGB phase, so no logo data is embedded in the cartridge itself.
+    pub fn set_rocket_boot_logo(&mut self, logo: [u8; 48]) {
+        self.rocket_boot_logo = Some(logo);
+    }
+
+    /// Rocket Games read-side lock counter (advanced on every cart read). While
+    /// in the locked-CGB phase, $0104-$0133 present the Nintendo logo so a
+    /// running boot ROM's logo check passes; the bytes come from the loaded boot
+    /// ROM (`rocket_boot_logo`), so `None` (raw ROM read) when no boot ROM is
+    /// present — that window is only ever observed while the boot ROM runs.
+    /// hhugboy MbcUnlRocketGames::readMemory (lock state machine).
+    fn rocket_locked_logo(&self, addr: u16) -> Option<u8> {
         let mode = self.rocket_lock.get();
         if mode != UNL_UNLOCKED {
             let count = self.rocket_unlock_count.get();
@@ -3418,9 +3427,9 @@ impl Cartridge {
             }
         }
         if self.rocket_lock.get() == UNL_LOCKED_CGB && (0x0104..0x0134).contains(&addr) {
-            ROCKET_LOGO_XOR[(addr - 0x0104) as usize]
+            self.rocket_boot_logo.map(|logo| logo[(addr - 0x0104) as usize])
         } else {
-            0
+            None
         }
     }
 }
@@ -3428,10 +3437,9 @@ impl Cartridge {
 impl memory::Addressable for Cartridge {
     fn read(&self, addr: u16) -> u8 {
         // Unlicensed-board read front-end: Sachen boot lock + $01xx address
-        // descramble, Rocket boot lock + logo XOR window. Licensed carts
+        // descramble, Rocket boot lock + logo window. Licensed carts
         // (UnlMapper::None) skip this entirely.
         let mut addr = addr;
-        let mut xor = 0u8;
         match self.unl_mapper {
             UnlMapper::SachenMmc1 if addr < 0x8000 => {
                 addr = self.sachen_read_addr(addr, false);
@@ -3440,11 +3448,15 @@ impl memory::Addressable for Cartridge {
                 addr = self.sachen_read_addr(addr, true);
             }
             UnlMapper::Rocket if addr < 0x8000 => {
-                xor = self.rocket_read_xor(addr);
+                // Advances the lock counter; presents the boot ROM's logo during
+                // the locked-CGB window so the boot ROM's check passes.
+                if let Some(byte) = self.rocket_locked_logo(addr) {
+                    return byte;
+                }
             }
             _ => {}
         }
-        xor ^ match addr {
+        match addr {
             // ROM Bank 0 (0x0000-0x3FFF). Fixed to bank 0 except on MBC1 in
             // banking mode 1, where BANK2 also selects this region.
             mmio::CARTRIDGE_START..=mmio::CARTRIDGE_END => {
@@ -4142,12 +4154,20 @@ mod tests {
         rom
     }
 
-    const NINTENDO_LOGO: [u8; 48] = [
-        0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83,
-        0x00, 0x0C, 0x00, 0x0D, 0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E,
-        0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99, 0xBB, 0xBB, 0x67, 0x63,
-        0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
-    ];
+    // Synthetic 48-byte header-logo fixtures. Cartridge/unlicensed-mapper
+    // detection keys ONLY on the 48-byte SUM (compared against the LOGO_SUM_*
+    // constants), never on the individual bytes, so these stand-ins carry the
+    // required sums without embedding any real (copyrighted) logo. Readback
+    // assertions in the tests are self-consistent with whatever bytes these hold.
+    const fn logo_with_sum(fill: u8, last: u8) -> [u8; 48] {
+        let mut a = [fill; 48];
+        a[47] = last;
+        a
+    }
+    // Sum == LOGO_SUM_NINTENDO (5446): 47*0x71 + 0x87. Marks a "licensed" header.
+    const LICENSED_LOGO: [u8; 48] = logo_with_sum(0x71, 0x87);
+    // Sum == LOGO_SUM_ROCKET (2756): 47*0x39 + 0x4D. A Rocket cart's stored logo.
+    const ROCKET_LOGO: [u8; 48] = logo_with_sum(0x39, 0x4D);
 
     /// Sized ROM with a bank-index marker at offset 0x1000 of every 16KB bank.
     fn make_sized_rom(cartridge_type: u8, rom_size_code: u8, size: usize) -> Vec<u8> {
@@ -4164,14 +4184,14 @@ mod tests {
     fn licensed_shapes_are_not_misdetected() {
         // Plain 32KB ROM-only cart with the Nintendo logo (e.g. Tetris).
         let mut rom = make_rom(0x00, 0x00);
-        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
         rom[0x134..0x13A].copy_from_slice(b"TETRIS");
         assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
 
         // 128KB MBC1 cart titled GAME (the shape of the owner's descrambled
         // Sachen singles): must stay plain MBC1.
         let mut rom = make_sized_rom(0x01, 0x02, 0x20000);
-        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
         rom[0x134..0x138].copy_from_slice(b"GAME");
         assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
         let cart = Cartridge::from_bytes(&rom).unwrap();
@@ -4180,14 +4200,14 @@ mod tests {
         // Header claims 32KB but the file is 2MB with a normal logo
         // (gbmicrotest shape, type $03): still MBC1, never Wisdom Tree.
         let mut rom = make_sized_rom(0x03, 0x00, 0x200000);
-        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
         rom[0x134..0x13D].copy_from_slice(b"microtest");
         assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
 
         // A real 256KB MBC3+RAM+BATTERY ($10) cart NOT titled "TETRIS SET"
         // must stay MBC3 -- M161 detection is gated on the exact title.
         let mut rom = make_sized_rom(0x10, 0x03, 0x40000);
-        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
         rom[0x134..0x13B].copy_from_slice(b"POKEMON");
         assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::None);
         assert!(matches!(
@@ -4237,7 +4257,7 @@ mod tests {
         // Exodus shape: type $00, header claims 32KB, 128KB file, publisher
         // string in the ROM.
         let mut rom = make_sized_rom(0x00, 0x00, 0x20000);
-        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
         rom[0x300..0x30B].copy_from_slice(b"WISDOM TREE");
         assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::WisdomTree);
 
@@ -4264,18 +4284,16 @@ mod tests {
 
     #[test]
     fn rocket_games_registers_and_boot_lock() {
-        // Real Rocket carts store their own logo = Nintendo ^ pad (sums to
-        // 2756), which is what the detection keys on.
+        // Rocket carts store their own logo (sums to 2756), which is what the
+        // detection keys on.
         let mut rom = make_sized_rom(0x97, 0x04, 0x80000);
-        for i in 0..48 {
-            rom[0x104 + i] = NINTENDO_LOGO[i] ^ ROCKET_LOGO_XOR[i];
-        }
+        rom[0x104..0x134].copy_from_slice(&ROCKET_LOGO);
         assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::Rocket);
 
         let mut cart = Cartridge::from_bytes(&rom).unwrap();
         cart.skip_boot_handoff(); // no boot ROM: start unlocked
         // Unlocked reads return the raw (Rocket) logo.
-        assert_eq!(cart.read(0x0104), NINTENDO_LOGO[0] ^ ROCKET_LOGO_XOR[0]);
+        assert_eq!(cart.read(0x0104), ROCKET_LOGO[0]);
         // Inner bank at exactly $3F00 (0 -> 1), outer 256KB bank at $3FC0.
         assert_eq!(cart.read(0x5000), 1);
         cart.write(0x3F00, 0x05);
@@ -4289,19 +4307,22 @@ mod tests {
         cart.write(0x2000, 0x07);
         assert_eq!(cart.read(0x5000), 17);
 
-        // Boot lock: a fresh cart is locked; after 0x30 ROM reads it enters
-        // the CGB phase where $0104-$0133 reads are XOR-decoded to the
-        // Nintendo logo (the boot ROM check), and after 0x30 more it unlocks.
-        let cart = Cartridge::from_bytes(&rom).unwrap();
+        // Boot lock: a fresh cart is locked; after 0x30 ROM reads it enters the
+        // CGB phase where $0104-$0133 present the logo the boot ROM supplied
+        // (the boot ROM check), and after 0x30 more it unlocks. The logo is
+        // sourced from the boot ROM at runtime; simulate that here.
+        let mut cart = Cartridge::from_bytes(&rom).unwrap();
+        cart.set_rocket_boot_logo(LICENSED_LOGO);
         for _ in 0..0x31 {
             cart.read(0x0000);
         }
-        assert_eq!(cart.read(0x0104), NINTENDO_LOGO[0]);
-        assert_eq!(cart.read(0x0105), NINTENDO_LOGO[1]);
+        assert_eq!(cart.read(0x0104), LICENSED_LOGO[0]);
+        assert_eq!(cart.read(0x0105), LICENSED_LOGO[1]);
         for _ in 0..0x31 {
             cart.read(0x0000);
         }
-        assert_eq!(cart.read(0x0104), NINTENDO_LOGO[0] ^ ROCKET_LOGO_XOR[0]);
+        // Unlocked again: raw (Rocket) logo.
+        assert_eq!(cart.read(0x0104), ROCKET_LOGO[0]);
     }
 
     #[test]
@@ -4311,7 +4332,7 @@ mod tests {
         // and the Sachen logo (here: marker bytes) at the |0x80 copy.
         let mut rom = make_sized_rom(0x00, 0x00, 0x20000);
         for i in 0..48u16 {
-            rom[Cartridge::sachen_unscramble(0x104 + i) as usize] = NINTENDO_LOGO[i as usize];
+            rom[Cartridge::sachen_unscramble(0x104 + i) as usize] = LICENSED_LOGO[i as usize];
             rom[Cartridge::sachen_unscramble(0x184 + i) as usize] = 0xB0 | (i as u8 & 0x0F);
         }
         assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::SachenMmc1);
@@ -4330,9 +4351,9 @@ mod tests {
         // Unlock transition read, then the descrambled Nintendo logo is
         // visible at $0104.
         cart.read(0x0104);
-        assert_eq!(cart.read(0x0104), NINTENDO_LOGO[0]);
-        assert_eq!(cart.read(0x0105), NINTENDO_LOGO[1]);
-        assert_eq!(cart.read(0x0133), NINTENDO_LOGO[47]);
+        assert_eq!(cart.read(0x0104), LICENSED_LOGO[0]);
+        assert_eq!(cart.read(0x0105), LICENSED_LOGO[1]);
+        assert_eq!(cart.read(0x0133), LICENSED_LOGO[47]);
 
         // Masked outer banking (hhugboy/mGBA): base/mask only latch while
         // the inner bank has bits 4-5 set; effective switchable bank =
@@ -4347,7 +4368,7 @@ mod tests {
         // skip_boot_handoff unlocks immediately (no boot ROM).
         let mut fresh = Cartridge::from_bytes(&rom).unwrap();
         fresh.skip_boot_handoff();
-        assert_eq!(fresh.read(0x0104), NINTENDO_LOGO[0]);
+        assert_eq!(fresh.read(0x0104), LICENSED_LOGO[0]);
     }
 
     #[test]
@@ -4355,7 +4376,7 @@ mod tests {
         // Super Mario Special 3 shape: MBC1-spoofing header, Makon "MK"
         // licensee, 256KB.
         let mut rom = make_sized_rom(0x01, 0x03, 0x40000);
-        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
         rom[0x134..0x141].copy_from_slice(b"SUPER MARIO 3");
         rom[0x144] = b'M';
         rom[0x145] = b'K';
@@ -4397,7 +4418,7 @@ mod tests {
         // file.
         let mut rom = make_sized_rom(0xEA, 0x00, 0x40000);
         rom[RAM_SIZE_OFFSET] = 0x20;
-        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
         rom[0x134..0x13A].copy_from_slice(b"SONIC5");
         assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::ForceMbc1);
         let mut cart = Cartridge::from_bytes(&rom).unwrap();
@@ -4408,7 +4429,7 @@ mod tests {
 
         // Captain Knick-Knack: type $00 with a Tetris header on a 128KB file.
         let mut rom = make_sized_rom(0x00, 0x00, 0x20000);
-        rom[0x104..0x134].copy_from_slice(&NINTENDO_LOGO);
+        rom[0x104..0x134].copy_from_slice(&LICENSED_LOGO);
         rom[0x134..0x13A].copy_from_slice(b"TETRIS");
         assert_eq!(Cartridge::detect_unl_mapper(&rom), UnlMapper::ForceMbc1);
         let mut cart = Cartridge::from_bytes(&rom).unwrap();
