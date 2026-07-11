@@ -4,29 +4,11 @@
 
 use rustyboi_core_lib::gb::Frame;
 
-/// GB pixel buffer -> RGB888 using the original DMG green palette. For the
-/// DMG-oriented tools (movie/camera/printer/glitch); the sweep passes explicit
-/// per-model shades via [`frame_rgb_shades`].
+/// The presented RGB888 bytes. The core already applied the DMG base palette +
+/// LCD correction (mono) or the CGB/AGB/SGB colour (colour), keyed on the GB's
+/// hardware + `set_dmg_palette`/colour-correction, so this is now just a copy.
 pub fn frame_rgb(frame: &Frame) -> Vec<u8> {
-    frame_rgb_shades(
-        frame,
-        &[[0xE0, 0xF8, 0xD0], [0x88, 0xC0, 0x70], [0x34, 0x68, 0x56], [0x08, 0x18, 0x20]],
-    )
-}
-
-/// GB pixel buffer -> RGB888, mapping DMG shade indices (0 = lightest .. 3) via
-/// `shades` — get these from [`rustyboi_core_lib::gb::GB::mono_shades`] so the
-/// model + colour-correction is the core's single source of truth. `Color`
-/// frames are passed through verbatim (the core already applied the CGB/AGB/SGB
-/// palette and any LCD correction).
-pub fn frame_rgb_shades(frame: &Frame, shades: &[[u8; 3]; 4]) -> Vec<u8> {
-    match frame {
-        Frame::Monochrome(data) => data
-            .iter()
-            .flat_map(|&p| shades[(p as usize).min(3)])
-            .collect(),
-        Frame::Color(data) => data.to_vec(),
-    }
+    frame.rgb().to_vec()
 }
 
 /// RGB888 -> PNG (stored-deflate zlib, color type 2). No external deps.

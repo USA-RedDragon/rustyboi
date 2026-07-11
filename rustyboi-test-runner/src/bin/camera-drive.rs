@@ -106,21 +106,7 @@ fn encode_rgb_png(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
 }
 
 fn frame_rgb(frame: &Frame) -> Vec<u8> {
-    match frame {
-        Frame::Monochrome(data) => data
-            .iter()
-            .flat_map(|p| {
-                let g = match p {
-                    0 => 0xFF,
-                    1 => 0xAA,
-                    2 => 0x55,
-                    _ => 0x00,
-                };
-                [g, g, g]
-            })
-            .collect(),
-        Frame::Color(data) => data.to_vec(),
-    }
+    frame.rgb().to_vec()
 }
 
 fn fnv1a(data: &[u8]) -> u64 {

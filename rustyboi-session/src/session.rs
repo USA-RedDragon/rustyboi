@@ -261,6 +261,7 @@ impl Session {
         // caller's already-prepared machine here; every later (re)build funnels
         // through `apply_presentation`.
         gb.set_cgb_color_conversion(config.color_correction);
+        gb.set_dmg_palette(config.dmg_palette_choice);
         let rewind = RewindBuffer::new(config.rewind.depth, config.rewind.interval_frames);
         let palette = config.dmg_palette_choice;
         Session {
@@ -296,6 +297,7 @@ impl Session {
     /// loads. Presentation-only: it never affects emulation determinism.
     fn apply_presentation(&mut self) {
         self.gb.set_cgb_color_conversion(self.config.color_correction);
+        self.gb.set_dmg_palette(self.config.dmg_palette_choice);
     }
 
     /// Boot a freshly-built machine: run the supplied real boot ROM when the
@@ -879,6 +881,8 @@ impl Session {
         self.palette = choice;
         self.config.dmg_palette_choice = choice;
         self.config.dmg_palette.shades = palette_shades(choice, self.config.color_correction);
+        // The core applies the palette to mono frames now (unified RGB output).
+        self.gb.set_dmg_palette(choice);
     }
 
     /// The CGB colorization scheme for DMG games (Auto / a boot-ROM scheme).

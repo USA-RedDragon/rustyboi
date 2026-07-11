@@ -574,7 +574,7 @@ fn run_case_inner(case: &TestCase, options: &RunOptions) -> Result<(), String> {
             gb.run_until_lcd_frame(collect_audio, MAX_CYCLES_UNTIL_LCD_FRAME)
                 .map_err(|error| format!("{error} while running frame {frame_index}"))?
         };
-        last_frame = Some(frame::normalize_frame(frame));
+        last_frame = Some(frame::normalize_frame(&gb, &frame));
 
         if let Some(samples) = &captured_audio {
             let mut samples = samples
@@ -965,7 +965,7 @@ fn evaluate_png_shootout(
         match gb.run_until_lcd_frame(false, MAX_CYCLES_UNTIL_LCD_FRAME) {
             Ok((frame, _bp)) => {
                 budget -= 1;
-                let actual = frame::normalize_frame(frame);
+                let actual = frame::normalize_frame(gb, &frame);
                 // OR-match across pass refs; the shootout passes on the first
                 // match.
                 for expected in &expected_refs {
@@ -984,7 +984,7 @@ fn evaluate_png_shootout(
     if let Some(dir) = &options.dump_dir {
         let stem = refs[0].file_stem().and_then(|s| s.to_str()).unwrap_or("case");
         let last = gb.get_current_frame();
-        let actual = frame::normalize_frame(last);
+        let actual = frame::normalize_frame(gb, &last);
         let _ = frame::write_ppm(&dir.join(format!("{stem}.actual.ppm")), &actual);
         let _ = frame::write_ppm(&dir.join(format!("{stem}.expected.ppm")), &expected_refs[0]);
     }
@@ -1021,7 +1021,10 @@ fn evaluate_csp_png(
             let (_breakpoint, c) = gb.step_instruction(false);
             cycles += c as u64;
         }
-        frame::normalize_frame(gb.get_current_frame())
+        {
+            let f = gb.get_current_frame();
+            frame::normalize_frame(gb, &f)
+        }
     } else {
         run_csp_frames_until_ldbb(gb, frames, &mut input)?
     };
@@ -1102,7 +1105,8 @@ fn evaluate_csp_png_traced(
                 return Err(format!("frame {frame_index} timeout"));
             }
         }
-        last = Some(frame::normalize_frame(gb.get_current_frame()));
+        let f = gb.get_current_frame();
+        last = Some(frame::normalize_frame(gb, &f));
         if done {
             break;
         }
@@ -1152,7 +1156,8 @@ fn run_csp_frames_until_ldbb(
                 return Err(format!("frame {frame_index} timeout"));
             }
         }
-        last = Some(frame::normalize_frame(gb.get_current_frame()));
+        let f = gb.get_current_frame();
+        last = Some(frame::normalize_frame(gb, &f));
         if done {
             break;
         }
@@ -1412,7 +1417,7 @@ fn scan_for_later_png_match(
         let (frame, _breakpoint_hit) = gb
             .run_until_lcd_frame(false, MAX_CYCLES_UNTIL_LCD_FRAME)
             .map_err(|error| format!("{error} while scanning extra frame {extra_frame}"))?;
-        let actual = frame::normalize_frame(frame);
+        let actual = frame::normalize_frame(gb, &frame);
         if frame::frame_buffer_mismatch(&actual, expected).is_none() {
             return Ok(format!(
                 "; matched after +{extra_frame} frame(s), at --frames {}",

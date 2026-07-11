@@ -223,23 +223,37 @@ const GLYPHS: [[&str; 8]; 16] = [
     ],
 ];
 
-pub fn normalize_frame(frame: Frame) -> Vec<u32> {
-    match frame {
-        Frame::Monochrome(data) => data
-            .iter()
-            .map(|pixel| match pixel {
-                0 => 0xFFFFFF,
-                1 => 0xAAAAAA,
-                2 => 0x555555,
-                _ => 0x000000,
-            })
-            .collect(),
-        Frame::Color(data) => data
-            .chunks_exact(3)
-            .map(|chunk| {
-                ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | chunk[2] as u32
-            })
-            .collect(),
+/// Map DMG shade indices (0 = lightest .. 3) to the canonical grayscale the
+/// references are graded against — palette/correction-independent, so grading a
+/// green vs grey DMG frame is identical. This is the *correctness* domain.
+pub fn normalize_mono(shades: &[u8]) -> Vec<u32> {
+    shades
+        .iter()
+        .map(|pixel| match pixel {
+            0 => 0xFFFFFF,
+            1 => 0xAAAAAA,
+            2 => 0x555555,
+            _ => 0x000000,
+        })
+        .collect()
+}
+
+/// Pack RGB888 into `0x00RRGGBB` u32s.
+pub fn normalize_color(rgb: &[u8]) -> Vec<u32> {
+    rgb.chunks_exact(3)
+        .map(|chunk| ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | chunk[2] as u32)
+        .collect()
+}
+
+/// The canonical normalized frame for grading: a colour model by its RGB, a
+/// monochrome model by its shade indices (via [`GB::dmg_shade_frame`]) — NOT the
+/// presented, palette-coloured RGB. So the test suite compares emulated output,
+/// never the presentation palette or colour correction.
+pub fn normalize_frame(gb: &rustyboi_core_lib::gb::GB, frame: &Frame) -> Vec<u32> {
+    if gb.frame_renders_color() {
+        normalize_color(frame.rgb())
+    } else {
+        normalize_mono(gb.dmg_shade_frame())
     }
 }
 
@@ -936,7 +950,7 @@ mod tests {
         data[1] = 1;
         data[2] = 2;
         data[3] = 3; // black
-        let out = normalize_frame(Frame::Monochrome(data));
+        let out = normalize_mono(&data[..]);
         assert_eq!(out.len(), FRAMEBUFFER_SIZE);
         assert_eq!(&out[..4], &[0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000]);
     }
@@ -947,7 +961,7 @@ mod tests {
         data[0] = 0x12;
         data[1] = 0x34;
         data[2] = 0x56;
-        let out = normalize_frame(Frame::Color(data));
+        let out = normalize_color(&data[..]);
         assert_eq!(out.len(), FRAMEBUFFER_SIZE);
         assert_eq!(out[0], 0x123456);
         assert_eq!(out[1], 0x000000);

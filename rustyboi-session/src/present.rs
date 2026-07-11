@@ -37,26 +37,13 @@ fn put(out: &mut [u8], o: usize, r: u8, g: u8, b: u8, order: PixelOrder) {
     out[o + 3] = 0xFF;
 }
 
-/// Pack `frame` into 32-bit pixels written to `out`, which must be at least
-/// `pixels * 4` bytes (160*144 for a GB frame). `shades` are the DMG palette
-/// rows (lightest→darkest) from
-/// [`DmgPaletteChoice::shades_rgba`](rustyboi_core_lib::gb::DmgPaletteChoice::shades_rgba);
-/// only each row's RGB is used (alpha is forced opaque). `Frame::Color` is
-/// already display-ready RGB888 and copied straight through.
-pub fn frame_to_pixels(frame: &Frame, shades: &[[u8; 4]; 4], order: PixelOrder, out: &mut [u8]) {
-    match frame {
-        Frame::Monochrome(data) => {
-            for (i, &shade) in data.iter().enumerate() {
-                let s = shades[(shade as usize) & 3];
-                put(out, i * 4, s[0], s[1], s[2], order);
-            }
-        }
-        Frame::Color(data) => {
-            for (i, px) in data.chunks_exact(3).enumerate() {
-                put(out, i * 4, px[0], px[1], px[2], order);
-            }
-        }
-    }
+/// Pack `frame`'s RGB888 into 32-bit pixels written to `out`, which must be at
+/// least `pixels * 4` bytes (160*144 for a GB frame), in the host `order` with
+/// opaque alpha. The core now presents an always-RGB frame — the DMG base
+/// palette + LCD correction (mono) or the CGB/AGB/SGB colour is already applied
+/// — so this is a plain channel expansion, identical for every model.
+pub fn frame_to_pixels(frame: &Frame, order: PixelOrder, out: &mut [u8]) {
+    rgb_to_pixels(frame.rgb(), order, out);
 }
 
 /// Pack an RGB888 buffer (the SGB border composite) into 32-bit pixels written
@@ -72,25 +59,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn monochrome_maps_shades_in_both_orders() {
-        let shades = [
-            [0x11, 0x22, 0x33, 0xFF],
-            [0x44, 0x55, 0x66, 0xFF],
-            [0x77, 0x88, 0x99, 0xFF],
-            [0xAA, 0xBB, 0xCC, 0xFF],
-        ];
-        let mut data = Box::new([0u8; rustyboi_core_lib::ppu::FRAMEBUFFER_SIZE]);
-        data[0] = 0;
-        data[1] = 3;
-        let frame = Frame::Monochrome(data);
+    fn frame_to_pixels_expands_rgb_in_both_orders() {
+        let mut data = Box::new([0u8; rustyboi_core_lib::ppu::FRAMEBUFFER_SIZE * 3]);
+        data[0..3].copy_from_slice(&[0x11, 0x22, 0x33]);
+        data[3..6].copy_from_slice(&[0xAA, 0xBB, 0xCC]);
+        let frame = Frame(data);
 
         let mut rgba = vec![0u8; rustyboi_core_lib::ppu::FRAMEBUFFER_SIZE * 4];
-        frame_to_pixels(&frame, &shades, PixelOrder::Rgba, &mut rgba);
+        frame_to_pixels(&frame, PixelOrder::Rgba, &mut rgba);
         assert_eq!(&rgba[0..4], &[0x11, 0x22, 0x33, 0xFF]);
         assert_eq!(&rgba[4..8], &[0xAA, 0xBB, 0xCC, 0xFF]);
 
         let mut bgra = vec![0u8; rustyboi_core_lib::ppu::FRAMEBUFFER_SIZE * 4];
-        frame_to_pixels(&frame, &shades, PixelOrder::Bgra, &mut bgra);
+        frame_to_pixels(&frame, PixelOrder::Bgra, &mut bgra);
         assert_eq!(&bgra[0..4], &[0x33, 0x22, 0x11, 0xFF]);
         assert_eq!(&bgra[4..8], &[0xCC, 0xBB, 0xAA, 0xFF]);
     }

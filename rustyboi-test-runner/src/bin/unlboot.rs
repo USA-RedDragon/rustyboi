@@ -26,31 +26,14 @@ fn fnv1a(data: &[u8]) -> u64 {
 }
 
 fn frame_bytes(frame: &Frame) -> Vec<u8> {
-    match frame {
-        Frame::Monochrome(b) => b.to_vec(),
-        Frame::Color(b) => b.to_vec(),
-    }
+    frame.rgb().to_vec()
 }
 
 fn write_ppm(path: &PathBuf, frame: &Frame) {
     const W: usize = 160;
     const H: usize = 144;
     let mut out = format!("P6\n{W} {H}\n255\n").into_bytes();
-    match frame {
-        Frame::Monochrome(b) => {
-            // 2-bit shade -> grayscale
-            for &px in b.iter() {
-                let v = match px {
-                    0 => 0xFF,
-                    1 => 0xAA,
-                    2 => 0x55,
-                    _ => 0x00,
-                };
-                out.extend_from_slice(&[v, v, v]);
-            }
-        }
-        Frame::Color(b) => out.extend_from_slice(&b[..]),
-    }
+    out.extend_from_slice(frame.rgb());
     fs::write(path, out).expect("write ppm");
 }
 

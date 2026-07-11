@@ -82,7 +82,7 @@ mod imaging;
 #[path = "shared/masher.rs"]
 mod masher;
 use masher::masher;
-use imaging::{encode_rgb_webp, frame_rgb_shades, html_escape};
+use imaging::{encode_rgb_webp, frame_rgb, html_escape};
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Row {
@@ -780,9 +780,6 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
     let mut gb = GB::new(hardware);
     gb.insert(cart);
     gb.skip_bios();
-    // Model-aware mono palette from the core (default LCD): DMG green, MGB olive,
-    // SGB/AGB neutral grey. Color frames ignore it (corrected in the PPU).
-    let shades = gb.mono_shades();
 
     // Checkpoints at warmup and every ~quarter of the measured window.
     let span = cfg.frames - cfg.warmup;
@@ -806,7 +803,7 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
         }
         gb.set_input_state(masher(f, seed));
         let (frame, _bp) = gb.run_until_frame(false);
-        let h = frame_hash(&frame);
+        let h = frame_hash(&gb, &frame);
         hash_all = (hash_all ^ h).wrapping_mul(FNV_PRIME);
         if checkpoint_at.contains(&(f + 1)) {
             checkpoints.push((f + 1, hash_all));
@@ -819,13 +816,13 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
         // Classify + screenshot on the last non-blank frame of the final 120
         // (a run ending mid fade-to-black is not a boot failure).
         if f + 120 >= cfg.frames {
-            if frame_is_non_blank(&frame) {
+            if frame_is_non_blank(&gb, &frame) {
                 boot_ok = true;
                 if cfg.screens_dir.is_some() {
-                    final_rgb = Some(frame_rgb_shades(&frame, &shades));
+                    final_rgb = Some(frame_rgb(&frame));
                 }
             } else if f + 1 == cfg.frames && final_rgb.is_none() && cfg.screens_dir.is_some() {
-                final_rgb = Some(frame_rgb_shades(&frame, &shades));
+                final_rgb = Some(frame_rgb(&frame));
             }
         }
         if f % 256 == 0 && started.elapsed().as_secs() > cfg.timeout_secs {
@@ -1006,7 +1003,6 @@ fn capture_media(
     let mut gb = GB::new(hardware);
     gb.insert(cart);
     gb.skip_bios();
-    let shades = gb.mono_shades();
 
     let tag = hw_tag(hardware);
     // Audio is drained only when a video is actually being encoded. Encode temps
@@ -1054,7 +1050,7 @@ fn capture_media(
 
         let in_tail = f + 120 >= cfg.frames;
         let need_rgb = encoder.is_some() || in_tail;
-        let rgb = need_rgb.then(|| frame_rgb_shades(&frame, &shades));
+        let rgb = need_rgb.then(|| frame_rgb(&frame));
 
         if let Some(child) = &mut encoder
             && let (Some(stdin), Some(rgb)) = (child.stdin.as_mut(), &rgb)
@@ -1077,11 +1073,11 @@ fn capture_media(
             }
         }
 
-        let h = frame_hash(&frame);
+        let h = frame_hash(&gb, &frame);
         hash_all = (hash_all ^ h).wrapping_mul(FNV_PRIME);
         // Poster = last non-blank frame of the tail; falls back to the very
         // last frame if the run ended blank (mirrors `emulate`'s selection).
-        if in_tail && (frame_is_non_blank(&frame) || (f + 1 == cfg.frames && poster.is_none())) {
+        if in_tail && (frame_is_non_blank(&gb, &frame) || (f + 1 == cfg.frames && poster.is_none())) {
             poster = rgb;
         }
         if f % 256 == 0 && started.elapsed().as_secs() > cfg.timeout_secs {
@@ -1282,7 +1278,6 @@ fn capture_bios(
     // or mismatched file Errs here and this model is skipped, not the whole run.
     gb.load_bios(&path.to_string_lossy()).map_err(|e| format!("load_bios: {e}"))?;
     // NO skip_bios: power-on PC=0 runs the boot ROM itself.
-    let shades = gb.mono_shades();
 
     // Video encoder + PCM sidecar (only when videos are on). The hash is computed
     // regardless, so the regression row exists even without ffmpeg.
@@ -1323,7 +1318,7 @@ fn capture_bios(
     for f in 0..MAX_BIOS_FRAMES {
         let (frame, _bp) = gb.run_until_frame(collect_audio);
         frames = f + 1;
-        let rgb = frame_rgb_shades(&frame, &shades);
+        let rgb = frame_rgb(&frame);
         if let Some(child) = &mut encoder
             && let Some(stdin) = child.stdin.as_mut()
             && stdin.write_all(&rgb).is_err()
@@ -1343,7 +1338,7 @@ fn capture_bios(
                 buf.clear();
             }
         }
-        let h = frame_hash(&frame);
+        let h = frame_hash(&gb, &frame);
         hash_all = (hash_all ^ h).wrapping_mul(FNV_PRIME);
         poster = Some(rgb);
         // Handoff: the boot ROM has written FF50 (read flips 0x00 -> 0xFF). Record

@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use rustyboi_core_lib::cartridge::Cartridge;
-use rustyboi_core_lib::gb::{Frame, Hardware, GB};
+use rustyboi_core_lib::gb::{Hardware, GB};
 
 #[path = "shared/masher.rs"]
 mod masher;
@@ -64,10 +64,8 @@ fn main() {
         let (frame, _bp) = gb.run_until_frame(false);
         // Fold a couple bytes into a checksum so the frame work can't be
         // optimized away, and so we can sanity-check determinism.
-        let (b0, bm) = match &frame {
-            Frame::Monochrome(b) => (b[0], b[b.len() / 2]),
-            Frame::Color(b) => (b[0], b[b.len() / 2]),
-        };
+        let b = frame.rgb();
+        let (b0, bm) = (b[0], b[b.len() / 2]);
         checksum = checksum.wrapping_add(b0 as u64);
         checksum ^= (bm as u64) << 1;
     }
