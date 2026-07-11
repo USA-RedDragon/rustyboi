@@ -31,7 +31,7 @@ use rustyboi_core_lib::gb::{Hardware, GB};
 use rustyboi_core_lib::ppu::{
     CgbColorConversion, SGB_FRAME_HEIGHT, SGB_FRAME_SIZE, SGB_FRAME_WIDTH,
 };
-use rustyboi_session::action::{HardwareChoice, PaletteChoice};
+use rustyboi_session::action::{GbcDmgPalette, HardwareChoice, PaletteChoice};
 use rustyboi_session::ports::{MemStorage, MemWebcam};
 use rustyboi_session::{
     frame_to_pixels, rgb_to_pixels, AbstractInput, Config, GbButton, PixelOrder, Ports, Rumble,
@@ -82,6 +82,7 @@ struct RustyboiCore {
     session: Option<Session>,
     hardware_pref: HardwarePref,
     palette: PaletteChoice,
+    gbc_dmg_palette: GbcDmgPalette,
     color_correction: CgbColorConversion,
     framebuffer: Vec<u8>,
     /// Shared with the [`LibretroRumble`] port; `on_run` reads and forwards it.
@@ -111,6 +112,7 @@ retro_core!(RustyboiCore {
     session: None,
     hardware_pref: HardwarePref::Auto,
     palette: PaletteChoice::Grayscale,
+    gbc_dmg_palette: GbcDmgPalette::Auto,
     color_correction: CgbColorConversion::Linear,
     // Sized for the largest possible frame (SGB 256x224) so the same buffer
     // serves both the plain 160x144 and the composited SGB paths.
@@ -194,6 +196,13 @@ impl RustyboiCore {
                 PaletteChoice::from_option_id(value).unwrap_or(PaletteChoice::Grayscale);
             if let Some(session) = self.session.as_mut() {
                 session.init_palette_choice(self.palette);
+            }
+        }
+        if let Some(value) = get(core_options::KEY_GBC_DMG_PALETTE) {
+            self.gbc_dmg_palette =
+                GbcDmgPalette::from_option_id(value).unwrap_or(GbcDmgPalette::Auto);
+            if let Some(session) = self.session.as_mut() {
+                session.set_gbc_dmg_palette(self.gbc_dmg_palette);
             }
         }
         if let Some(value) = get(core_options::KEY_GBC_COLOR_CORRECTION) {
@@ -418,6 +427,9 @@ impl Core for RustyboiCore {
         let hardware = self.pick_hardware(&rom);
         let mut gb = GB::new(hardware);
         gb.insert(cartridge);
+        // Force the chosen CGB DMG-compat palette before booting (Auto = None);
+        // the skip_bios path colorizes a DMG game on CGB hardware with it.
+        gb.set_forced_compat_palette(self.gbc_dmg_palette.forced_id());
 
         // Boot: run the real boot ROM from the system directory if the user
         // asked for it and a matching file exists; otherwise fall back to the
@@ -451,6 +463,7 @@ impl Core for RustyboiCore {
             hardware,
             volume: 100,
             color_correction: self.color_correction,
+            gbc_dmg_palette: self.gbc_dmg_palette,
             dmg_palette: rustyboi_session::config::DmgPalette {
                 shades: self.palette.rgba_shades(),
             },

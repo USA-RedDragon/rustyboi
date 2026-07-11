@@ -75,6 +75,12 @@ pub struct GB {
     skip_bios: bool,
     #[serde(skip, default)]
     breakpoints: HashSet<u16>,
+    // A user-forced CGB DMG-compatibility palette id (overriding the boot ROM's
+    // title-hash auto-pick when a DMG game runs on CGB hardware). Boot-time only
+    // — the palette is latched into CGB registers during skip_bios, so this need
+    // not survive a savestate (the state already carries the applied palette).
+    #[serde(skip, default)]
+    forced_compat_palette: Option<u8>,
     // `+ Send` so a cloned GB (whose audio_output is always None) can be moved
     // to a worker thread for off-thread savestate serialization with NO unsafe:
     // GB is `Send` iff every field is, and this was the only field that wasn't.
@@ -92,6 +98,7 @@ impl Clone for GB {
             hardware: self.hardware,
             skip_bios: self.skip_bios,
             breakpoints: self.breakpoints.clone(),
+            forced_compat_palette: self.forced_compat_palette,
             audio_output: None, // Don't clone audio output - it will be recreated if needed
         }
     }
@@ -149,8 +156,18 @@ impl GB {
             skip_bios: false,
             hardware,
             breakpoints: HashSet::new(),
+            forced_compat_palette: None,
             audio_output: None, // Audio will be enabled when needed
         }
+    }
+
+    /// Force a specific CGB DMG-compatibility palette id (see
+    /// [`cgb_compat_palette::COMBO_SCHEMES`](crate::cgb_compat_palette::COMBO_SCHEMES)),
+    /// overriding the boot ROM's title-hash auto-pick for a DMG game running on
+    /// CGB hardware. `None` restores the automatic selection. Takes effect at the
+    /// next `skip_bios`; no effect on DMG hardware or CGB titles.
+    pub fn set_forced_compat_palette(&mut self, id: Option<u8>) {
+        self.forced_compat_palette = id;
     }
 
     pub fn skip_bios(&mut self) {
@@ -502,6 +519,12 @@ impl GB {
                     self.mmio.dmg_compat_key_combo(),
                 ) {
                     id = combo;
+                }
+                // A user-forced scheme overrides both the title-hash pick and any
+                // held-button combo. `None` (the default) leaves them untouched,
+                // so the automatic path stays byte-identical.
+                if let Some(forced) = self.forced_compat_palette {
+                    id = forced;
                 }
                 let pal = crate::cgb_compat_palette::palettes_for_id(id);
                 self.mmio.set_cgb_compat_dmg_palettes(&pal);
@@ -2123,5 +2146,50 @@ mod savestate_roundtrip_tests {
              (silent 100 ms windows = {silent}) -> ch4 latched into a continuous \
              buzz on the non-CGB path (Pokémon intro drumroll)"
         );
+    }
+}
+
+#[cfg(test)]
+mod forced_compat_palette_tests {
+    //! The user-selectable CGB DMG-compatibility palette override
+    //! (`set_forced_compat_palette`) must actually recolour a DMG game running
+    //! on CGB hardware, and `None` must leave the boot ROM's automatic pick
+    //! untouched.
+    use super::*;
+
+    /// A blank 32KB DMG-only cart (header CGB flag 0x00), so it boots on CGB in
+    /// DMG-compatibility mode and the boot ROM colorizes it.
+    fn dmg_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x143] = 0x00;
+        rom
+    }
+
+    /// The installed CGB BG palette 0 (all four RGB555 colours) after boot. A
+    /// blank screen shows only colour 0 (white for every scheme), so we compare
+    /// the whole palette — colours 1-3 are what distinguish the schemes.
+    fn cgb_bg_palette(forced: Option<u8>) -> [u16; 4] {
+        let mut gb = GB::new(Hardware::CGB);
+        gb.insert(cartridge::Cartridge::from_bytes(&dmg_rom()).unwrap());
+        gb.set_forced_compat_palette(forced);
+        gb.skip_bios();
+        // `bg_palette_pair` reads the raw palette RAM (the DMG-compat mode leaves
+        // `cgb_features_enabled` off, which would gate the FF69 read path).
+        [
+            gb.bg_palette_pair(0, 0),
+            gb.bg_palette_pair(0, 1),
+            gb.bg_palette_pair(0, 2),
+            gb.bg_palette_pair(0, 3),
+        ]
+    }
+
+    #[test]
+    fn forced_scheme_recolours_dmg_on_cgb() {
+        let auto = cgb_bg_palette(None);
+        // An unknown (non-Nintendo) title's auto pick is the default id 0x7C, so
+        // forcing that id is a no-op...
+        assert_eq!(cgb_bg_palette(Some(0x7C)), auto, "forcing the auto id changes nothing");
+        // ...while forcing the "Up" scheme (id 0x12) installs a different palette.
+        assert_ne!(cgb_bg_palette(Some(0x12)), auto, "forcing a different scheme must recolour");
     }
 }
