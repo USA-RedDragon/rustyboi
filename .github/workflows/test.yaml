@@ -88,7 +88,7 @@ jobs:
         shell: bash
         run: sudo softwareupdate --install-rosetta --agree-to-license
       - name: Cache cargo + target
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -97,7 +97,7 @@ jobs:
           key: cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-${{ matrix.target }}-
       - name: Cache ROM set
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: gb-test-roms
           key: roms-${{ matrix.os }}-v7.0-gambatte5a41a68c-shootout7c6ee9ba-daidcpp-magen050-ltgce015ca2-sketch02a-gbchw631e600
