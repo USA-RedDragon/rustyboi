@@ -45,7 +45,7 @@ serde = { version = "=1.0.227", features = ["derive"] }
 serde_json = "=1.0.145"
 
 [dependencies.web-sys]
-version = "=0.3.81"
+version = "=0.3.103"
 features = [
     # Main-thread rendering: the egui/wgpu driver draws into this canvas.
     "HtmlCanvasElement",
