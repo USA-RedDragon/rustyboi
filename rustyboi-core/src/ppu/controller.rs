@@ -471,14 +471,15 @@ mod color_tests {
     #[test]
     fn mono_shades_are_model_and_correction_aware() {
         use crate::gb::{mono_shades, Hardware};
-        // Linear is a neutral grey ramp for every model.
         let gray = [[255, 255, 255], [170, 170, 170], [85, 85, 85], [0, 0, 0]];
-        for hw in [Hardware::DMG, Hardware::MGB, Hardware::SGB, Hardware::CGB] {
-            assert_eq!(mono_shades(hw, ColorCorrection::Linear), gray);
-        }
-        // LCD: DMG green, MGB olive, SGB neutral grey (no LCD).
+        // Default palette per model: DMG→Green, MGB→Pocket, SGB→Grayscale.
+        // Linear = the raw base palette; LCD = its screen-rendered variant.
+        assert_eq!(mono_shades(Hardware::DMG, ColorCorrection::Linear)[0], [0x9B, 0xBC, 0x0F]);
         assert_eq!(mono_shades(Hardware::DMG, ColorCorrection::Lcd)[0], [224, 248, 208]);
+        assert_eq!(mono_shades(Hardware::MGB, ColorCorrection::Linear)[0], [0xC4, 0xCF, 0xA1]);
         assert_eq!(mono_shades(Hardware::MGB, ColorCorrection::Lcd)[0], [194, 206, 147]);
+        // SGB has no LCD → neutral grey either way.
+        assert_eq!(mono_shades(Hardware::SGB, ColorCorrection::Linear), gray);
         assert_eq!(mono_shades(Hardware::SGB, ColorCorrection::Lcd), gray);
     }
 }
@@ -1295,6 +1296,17 @@ pub enum ColorCorrection {
     #[default]
     Linear,
     Lcd,
+}
+
+/// The PPU's raw frame, before the presentation palette is applied: either DMG
+/// shade indices (0..=3) for a monochrome model, or already-corrected RGB888 for
+/// a colour model (CGB/AGB) or a colorized SGB. Internal to the core — the GB
+/// converts it to the unified always-RGB [`crate::gb::Frame`] using the DMG
+/// palette + colour correction, while the shade indices remain available
+/// (correction-independent) via [`Ppu::dmg_shade_frame`] for the test suite.
+pub enum RenderedFrame {
+    Monochrome(Box<[u8; FRAMEBUFFER_SIZE]>),
+    Color(Box<[u8; FRAMEBUFFER_SIZE * 3]>),
 }
 
 /// Game Boy Advance LCD colour curve as a 15-bit-colour -> RGB888 table, built
@@ -4721,7 +4733,7 @@ impl Ppu {
 
     /// True when this frame should be rendered to the RGB color framebuffer:
     /// either full CGB mode or DMG-compat-on-CGB.
-    fn renders_color(&self, mmio: &mmio::Mmio) -> bool {
+    pub fn renders_color(&self, mmio: &mmio::Mmio) -> bool {
         mmio.is_cgb_features_enabled() || self.is_cgb_compat_dmg(mmio)
     }
 
@@ -9405,7 +9417,7 @@ impl Ppu {
             && mmio.master_cc().wrapping_sub(self.last_drive_cc) <= window
     }
 
-    pub fn get_frame(&mut self, mmio: &mmio::Mmio) -> crate::gb::Frame {
+    pub fn get_frame(&mut self, mmio: &mmio::Mmio) -> RenderedFrame {
         self.have_frame = false;
         // Hardware panel blank: the LCD off state and the first frame after an
         // enable both show "whiter than white" (blank), not the framebuffer. The
@@ -9426,12 +9438,12 @@ impl Ppu {
                 // the last driven VBlank-line start (see
                 // `panel_recently_driven`).
                 if self.panel_recently_driven(mmio) {
-                    return crate::gb::Frame::Color(self.color_fb_b.clone());
+                    return RenderedFrame::Color(self.color_fb_b.clone());
                 }
                 // CGB white == RGB 0xFFFFFF.
-                return crate::gb::Frame::Color(boxed_filled(0xFF));
+                return RenderedFrame::Color(boxed_filled(0xFF));
             }
-            crate::gb::Frame::Color(self.color_fb_b.clone())
+            RenderedFrame::Color(self.color_fb_b.clone())
         } else if let Some(sgb) = mmio.sgb() {
             // MASK_EN Freeze: latch the frame completed at the freeze and keep
             // showing it (the transfer screens games draw behind the mask stay
@@ -9447,9 +9459,9 @@ impl Ppu {
         } else {
             if blank_panel {
                 // DMG white == shade index 0.
-                return crate::gb::Frame::Monochrome(boxed_filled(0));
+                return RenderedFrame::Monochrome(boxed_filled(0));
             }
-            crate::gb::Frame::Monochrome(self.fb_b.clone())
+            RenderedFrame::Monochrome(self.fb_b.clone())
         }
     }
 
@@ -9459,7 +9471,7 @@ impl Ppu {
     /// attribute cell (producing RGB888). When no palette command has run the
     /// frame stays monochrome, matching plain-GB (grayscale) behavior — which is
     /// what the `sgb-ext-test` grayscale reference expects.
-    fn sgb_frame(&self, sgb: &crate::sgb::Sgb) -> crate::gb::Frame {
+    fn sgb_frame(&self, sgb: &crate::sgb::Sgb) -> RenderedFrame {
         use crate::sgb::MaskMode;
         // MASK_EN: Freeze shows the latched pre-freeze frame; Black shows pure
         // black (the SNES blanks to color 0x0000); Color0 blanks to the shared
@@ -9474,17 +9486,17 @@ impl Ppu {
             if blank {
                 // Blank to shade 0 (Color0) / darkest for Black.
                 let fill = if matches!(sgb.mask, MaskMode::Black) { 3 } else { 0 };
-                return crate::gb::Frame::Monochrome(boxed_filled(fill));
+                return RenderedFrame::Monochrome(boxed_filled(fill));
             }
             let mut out: Box<[u8; FRAMEBUFFER_SIZE]> = boxed_filled(0);
             out.copy_from_slice(src);
-            return crate::gb::Frame::Monochrome(out);
+            return RenderedFrame::Monochrome(out);
         }
 
         // Colorized: build an RGB888 frame from the SGB palettes.
         let mut out: Box<[u8; FRAMEBUFFER_SIZE * 3]> = boxed_filled(0);
         if matches!(sgb.mask, MaskMode::Black) {
-            return crate::gb::Frame::Color(out);
+            return RenderedFrame::Color(out);
         }
         for y in 0..144usize {
             for x in 0..160usize {
@@ -9497,7 +9509,7 @@ impl Ppu {
                 out[idx * 3 + 2] = b;
             }
         }
-        crate::gb::Frame::Color(out)
+        RenderedFrame::Color(out)
     }
 
     /// Compose the full 256x224 Super Game Boy output: the SGB border

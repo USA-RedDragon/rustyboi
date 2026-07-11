@@ -16,7 +16,7 @@
 //! frame range, buttons: a b start select up down left right), `#` comments.
 
 use rustyboi_core_lib::cartridge::Cartridge;
-use rustyboi_core_lib::gb::{Frame, GB, Hardware};
+use rustyboi_core_lib::gb::{GB, Hardware};
 use rustyboi_core_lib::input::ButtonState;
 
 use std::fs;
@@ -93,21 +93,8 @@ fn load_gb(rom: &Path, sav: Option<&Path>) -> GB {
     gb
 }
 
-fn frame_rgb(frame: Frame) -> Vec<u8> {
-    match frame {
-        Frame::Monochrome(data) => data
-            .iter()
-            .flat_map(|&shade| {
-                let g = 0xFF - (shade & 3) * 0x55;
-                [g, g, g]
-            })
-            .collect(),
-        Frame::Color(data) => data.to_vec(),
-    }
-}
-
 fn dump_png(gb: &mut GB, dir: &Path, side: char, frame_no: u32) {
-    let rgb = frame_rgb(gb.get_current_frame());
+    let rgb = gb.get_current_frame().0.to_vec();
     let path = dir.join(format!("{side}-f{frame_no:06}.png"));
     fs::write(&path, encode_rgb_png(160, 144, &rgb)).unwrap();
 }

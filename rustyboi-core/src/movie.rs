@@ -216,7 +216,7 @@ impl<'a> Recorder<'a> {
         self.gb.set_input_state(input);
         self.inputs.push(input);
         let (frame, _breakpoint) = self.gb.run_until_frame(false);
-        frame_hash(&frame)
+        frame_hash(self.gb, &frame)
     }
 
     /// Frames recorded so far.
@@ -269,8 +269,8 @@ pub fn replay(movie: &Movie, gb: &mut GB, collect_frame_hashes: bool) -> ReplayR
     for input in &movie.inputs {
         gb.set_input_state(*input);
         let (frame, _breakpoint) = gb.run_until_frame(false);
-        final_frame_hash = frame_hash(&frame);
-        boot_ok = frame_is_non_blank(&frame);
+        final_frame_hash = frame_hash(gb, &frame);
+        boot_ok = frame_is_non_blank(gb, &frame);
         if collect_frame_hashes {
             frame_hashes.push(final_frame_hash);
         }
@@ -287,36 +287,40 @@ pub fn replay(movie: &Movie, gb: &mut GB, collect_frame_hashes: bool) -> ReplayR
 /// runs and machines; the golden-regression and per-frame trace key. Includes a
 /// 1-byte tag so a monochrome and a color frame of coincidentally-equal bytes
 /// never collide.
-pub fn frame_hash(frame: &Frame) -> u64 {
+/// Hashes the *canonical* frame — colour models by their RGB (tag 1), monochrome
+/// models by their shade indices (tag 0, via [`GB::dmg_shade_frame`]) — NOT the
+/// presented RGB. So the hash is independent of the DMG palette / colour
+/// correction, and recorded movies stay valid across presentation changes (a
+/// green vs grey DMG frame is the same emulation).
+pub fn frame_hash(gb: &GB, _frame: &Frame) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut h = OFFSET;
-    let fold = |b: u8, h: &mut u64| {
-        *h ^= b as u64;
-        *h = h.wrapping_mul(PRIME);
+    let mut fold = |b: u8| {
+        h ^= b as u64;
+        h = h.wrapping_mul(PRIME);
     };
-    match frame {
-        Frame::Monochrome(buf) => {
-            fold(0, &mut h);
-            for &b in buf.iter() {
-                fold(b, &mut h);
-            }
+    if gb.frame_renders_color() {
+        fold(1);
+        for &b in _frame.rgb().iter() {
+            fold(b);
         }
-        Frame::Color(buf) => {
-            fold(1, &mut h);
-            for &b in buf.iter() {
-                fold(b, &mut h);
-            }
+    } else {
+        fold(0);
+        for &b in gb.dmg_shade_frame().iter() {
+            fold(b);
         }
     }
     h
 }
 
-/// True if the frame contains any non-zero pixel (rendered something).
-pub fn frame_is_non_blank(frame: &Frame) -> bool {
-    match frame {
-        Frame::Monochrome(buf) => buf.iter().any(|&b| b != 0),
-        Frame::Color(buf) => buf.iter().any(|&b| b != 0),
+/// True if the frame rendered anything (any non-zero pixel), in the canonical
+/// domain — colour RGB or mono shade indices — so it matches [`frame_hash`].
+pub fn frame_is_non_blank(gb: &GB, frame: &Frame) -> bool {
+    if gb.frame_renders_color() {
+        frame.rgb().iter().any(|&b| b != 0)
+    } else {
+        gb.dmg_shade_frame().iter().any(|&b| b != 0)
     }
 }
 
@@ -383,6 +387,12 @@ impl Scenario {
     /// The current frame (for assertions).
     pub fn frame(&mut self) -> Frame {
         self.gb.get_current_frame()
+    }
+
+    /// The current frame's canonical hash (colour by RGB, mono by shade index).
+    pub fn frame_hash(&mut self) -> u64 {
+        let f = self.gb.get_current_frame();
+        frame_hash(&self.gb, &f)
     }
 
     /// Borrow the underlying `GB` (palette/memory accessors for assertions).
@@ -782,20 +792,8 @@ mod tests {
     fn scenario_runs_frames_deterministically() {
         let rom = test_rom();
         let cart = || Cartridge::from_bytes(&rom).unwrap();
-        let h1 = frame_hash(
-            &Scenario::new(Hardware::DMG)
-                .insert(cart())
-                .skip_bios()
-                .run_frames(10)
-                .frame(),
-        );
-        let h2 = frame_hash(
-            &Scenario::new(Hardware::DMG)
-                .insert(cart())
-                .skip_bios()
-                .run_frames(10)
-                .frame(),
-        );
+        let h1 = Scenario::new(Hardware::DMG).insert(cart()).skip_bios().run_frames(10).frame_hash();
+        let h2 = Scenario::new(Hardware::DMG).insert(cart()).skip_bios().run_frames(10).frame_hash();
         assert_eq!(h1, h2);
     }
 }

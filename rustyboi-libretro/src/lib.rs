@@ -428,8 +428,7 @@ impl Core for RustyboiCore {
             rgb_to_pixels(&border[..], PixelOrder::Bgra, &mut self.framebuffer);
             (SGB_WIDTH, SGB_HEIGHT)
         } else {
-            let shades = self.palette.shades_rgba(self.color_correction);
-            frame_to_pixels(&out.frame, &shades, PixelOrder::Bgra, &mut self.framebuffer);
+            frame_to_pixels(&out.frame, PixelOrder::Bgra, &mut self.framebuffer);
             (WIDTH, HEIGHT)
         };
 

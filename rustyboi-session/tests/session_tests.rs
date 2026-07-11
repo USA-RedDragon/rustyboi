@@ -117,7 +117,7 @@ fn savestate_save_load_restores_exact_state() {
 
     // Take the "truth" continuation hash from the saved point.
     let truth = s.run_frame(AbstractInput::none()).frame;
-    let truth_hash = frame_hash(&truth);
+    let truth_hash = frame_hash(s.gb(), &truth);
 
     // Advance further to diverge, then load the slot back.
     for _ in 0..10 {
@@ -131,7 +131,7 @@ fn savestate_save_load_restores_exact_state() {
     // The next frame from the restored state must hash identically to truth:
     // exact machine-state restoration.
     let restored = s.run_frame(AbstractInput::none()).frame;
-    assert_eq!(frame_hash(&restored), truth_hash);
+    assert_eq!(frame_hash(s.gb(), &restored), truth_hash);
 }
 
 #[test]
@@ -142,12 +142,14 @@ fn quicksave_quickload_round_trip() {
         s.run_frame(AbstractInput::none());
     }
     s.quicksave(42).unwrap();
-    let hash_after_save = frame_hash(&s.run_frame(AbstractInput::none()).frame);
+    let f = s.run_frame(AbstractInput::none()).frame;
+    let hash_after_save = frame_hash(s.gb(), &f);
     for _ in 0..5 {
         s.run_frame(AbstractInput::none());
     }
     s.quickload().unwrap();
-    assert_eq!(frame_hash(&s.run_frame(AbstractInput::none()).frame), hash_after_save);
+    let f = s.run_frame(AbstractInput::none()).frame;
+    assert_eq!(frame_hash(s.gb(), &f), hash_after_save);
 }
 
 #[test]
@@ -177,7 +179,7 @@ fn rewind_returns_to_an_earlier_frame() {
     for _ in 0..5 {
         let out = s.run_frame(AbstractInput::none());
         if out.frame_count == 3 {
-            hash_at_3 = frame_hash(&out.frame);
+            hash_at_3 = frame_hash(s.gb(), &out.frame);
         }
     }
     assert_eq!(s.frame_count(), 5);
@@ -201,13 +203,13 @@ fn rewind_returns_to_an_earlier_frame() {
         let mut last = 0;
         for _ in 0..4 {
             let (frame, _) = g.run_until_frame(false);
-            last = frame_hash(&frame);
+            last = frame_hash(&g, &frame);
         }
         last
     };
     let after = s.run_frame(AbstractInput::none());
     assert_eq!(after.frame_count, 4);
-    assert_eq!(frame_hash(&after.frame), fresh_hash_4);
+    assert_eq!(frame_hash(s.gb(), &after.frame), fresh_hash_4);
     let _ = hash_at_3;
 }
 
@@ -229,7 +231,8 @@ fn tas_record_then_replay_is_bit_identical() {
     ];
     let mut recorded_hashes = Vec::new();
     for &input in &script {
-        recorded_hashes.push(frame_hash(&s.run_frame(input).frame));
+        let f = s.run_frame(input).frame;
+        recorded_hashes.push(frame_hash(s.gb(), &f));
     }
     let movie = s.stop_recording().expect("movie");
     assert!(!s.is_recording());
@@ -246,7 +249,8 @@ fn tas_record_then_replay_is_bit_identical() {
     assert!(s2.is_playing());
     let mut played = Vec::new();
     for _ in 0..script.len() {
-        played.push(frame_hash(&s2.run_frame(AbstractInput::none()).frame));
+        let f = s2.run_frame(AbstractInput::none()).frame;
+        played.push(frame_hash(s2.gb(), &f));
     }
     assert_eq!(played, recorded_hashes, "session playback must be bit-identical");
     // Movie exhausted: playback auto-stops on the next frame.

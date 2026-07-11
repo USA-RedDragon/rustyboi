@@ -315,7 +315,7 @@ fn run_compat(rom_path: &Path, mode: &str, timeline: &[ButtonState]) -> Result<C
     for input in timeline {
         gb.set_input_state(*input);
         let (frame, _bp) = gb.run_until_frame(false);
-        let h = frame_hash(&frame);
+        let h = frame_hash(&gb, &frame);
         match first_hash {
             None => first_hash = Some(h),
             Some(f) if f != h => changed = true,
@@ -324,7 +324,7 @@ fn run_compat(rom_path: &Path, mode: &str, timeline: &[ButtonState]) -> Result<C
         last_frame = Some(frame);
     }
     let frame = last_frame.ok_or("no frames rendered")?;
-    let boot_ok = frame_is_non_blank(&frame);
+    let boot_ok = frame_is_non_blank(&gb, &frame);
     let png = encode_rgb_png(160, 144, &frame_rgb(&frame));
 
     Ok(CompatEntry {
