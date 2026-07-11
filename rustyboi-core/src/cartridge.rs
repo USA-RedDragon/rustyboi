@@ -28,6 +28,14 @@ pub enum CgbSupport {
     Only,        // CGB only (0xC0)
 }
 
+/// Destination-code ($014A) region hint: $00 = Japanese market, anything else
+/// = overseas. A header-level signal distinct from the No-Intro filename region.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Destination {
+    Japanese,
+    Overseas,
+}
+
 // Cartridge types for MBC1
 const MBC1: u8 = 0x01;
 const MBC1_RAM: u8 = 0x02;
@@ -261,6 +269,192 @@ pub enum CartridgeType {
     NtOld { v2: bool },
     /// Mani 4 in 1 one-shot 32KB bank-latch (M161 board).
     M161,
+}
+
+/// Publisher for a new-licensee code (two ASCII digits at $0144-$0145, used
+/// when the old code is $33). Common Pan Docs entries; `None` if unmapped.
+fn new_licensee(a: u8, b: u8) -> Option<&'static str> {
+    Some(match &[a, b] {
+        b"00" => "None",
+        b"01" | b"31" => "Nintendo",
+        b"08" | b"38" => "Capcom",
+        b"13" | b"69" => "Electronic Arts",
+        b"18" => "Hudson Soft",
+        b"20" => "KSS",
+        b"22" => "Planning Office WADA",
+        b"24" => "PCM Complete",
+        b"25" => "San-X",
+        b"28" => "Kemco",
+        b"29" => "SETA",
+        b"30" => "Viacom",
+        b"32" => "Bandai",
+        b"33" | b"93" => "Ocean/Acclaim",
+        b"34" | b"54" => "Konami",
+        b"35" => "Hector",
+        b"37" => "Taito",
+        b"39" => "Banpresto",
+        b"41" => "Ubi Soft",
+        b"42" => "Atlus",
+        b"44" => "Malibu",
+        b"46" => "Angel",
+        b"47" => "Bullet-Proof Software",
+        b"49" => "Irem",
+        b"50" => "Absolute",
+        b"51" => "Acclaim",
+        b"52" => "Activision",
+        b"53" => "American Sammy",
+        b"55" => "Hi Tech Entertainment",
+        b"56" => "LJN",
+        b"57" => "Matchbox",
+        b"58" => "Mattel",
+        b"59" => "Milton Bradley",
+        b"60" => "Titus",
+        b"61" => "Virgin",
+        b"64" => "LucasArts",
+        b"67" => "Ocean",
+        b"70" => "Infogrames",
+        b"71" => "Interplay",
+        b"72" => "Broderbund",
+        b"73" => "Sculptured Software",
+        b"75" => "The Sales Curve",
+        b"78" => "THQ",
+        b"79" => "Accolade",
+        b"80" => "Misawa Entertainment",
+        b"83" => "LOZC",
+        b"86" => "Tokuma Shoten",
+        b"87" => "Tsukuda Original",
+        b"91" => "Chunsoft",
+        b"92" => "Video System",
+        b"95" => "Varie",
+        b"96" => "Yonezawa/S'Pal",
+        b"97" => "Kaneko",
+        b"99" => "Pack-In-Video",
+        b"A4" => "Konami (Yu-Gi-Oh!)",
+        _ => return None,
+    })
+}
+
+/// Publisher for an old-licensee byte ($014B). Common Pan Docs entries;
+/// `None` if unmapped. $33 is handled by the caller (means "see new code").
+fn old_licensee(code: u8) -> Option<&'static str> {
+    Some(match code {
+        0x00 => "None",
+        0x01 | 0x31 => "Nintendo",
+        0x08 | 0x38 => "Capcom",
+        0x09 => "Hot-B",
+        0x0A | 0xE0 => "Jaleco",
+        0x0B => "Coconuts Japan",
+        0x0C | 0x6E => "Elite Systems",
+        0x13 | 0x69 => "Electronic Arts",
+        0x18 => "Hudson Soft",
+        0x19 => "ITC Entertainment",
+        0x1A => "Yanoman",
+        0x1F => "Virgin",
+        0x24 => "PCM Complete",
+        0x25 => "San-X",
+        0x28 => "Kotobuki Systems",
+        0x29 => "SETA",
+        0x30 | 0x70 => "Infogrames",
+        0x32 => "Bandai",
+        0x34 | 0x54 => "Konami",
+        0x35 => "Hector",
+        0x39 | 0x9D => "Banpresto",
+        0x3E => "Gremlin",
+        0x41 => "Ubi Soft",
+        0x42 | 0xEB => "Atlus",
+        0x44 | 0x4D => "Malibu",
+        0x46 | 0xCF => "Angel",
+        0x47 => "Spectrum Holobyte",
+        0x49 => "Irem",
+        0x4A => "Virgin",
+        0x4F => "U.S. Gold",
+        0x50 => "Absolute",
+        0x51 | 0xB0 => "Acclaim",
+        0x52 => "Activision",
+        0x53 => "American Sammy",
+        0x55 => "Park Place",
+        0x56 | 0xDB | 0xFF => "LJN",
+        0x57 => "Matchbox",
+        0x59 => "Milton Bradley",
+        0x5A => "Mindscape",
+        0x5C => "Naxat Soft",
+        0x5D => "Tradewest",
+        0x60 => "Titus",
+        0x61 => "Virgin",
+        0x67 => "Ocean",
+        0x6F => "Electro Brain",
+        0x71 => "Interplay",
+        0x72 | 0xAA => "Broderbund",
+        0x73 => "Sculptured Software",
+        0x75 => "The Sales Curve",
+        0x78 => "THQ",
+        0x79 => "Accolade",
+        0x7C => "Microprose",
+        0x7F | 0xC2 => "Kemco",
+        0x80 => "Misawa Entertainment",
+        0x83 => "LOZC",
+        0x86 | 0xC4 => "Tokuma Shoten",
+        0x8B => "Bullet-Proof Software",
+        0x8C => "Vic Tokai",
+        0x8E => "Ape",
+        0x8F => "I'Max",
+        0x91 => "Chunsoft",
+        0x92 => "Video System",
+        0x95 => "Varie",
+        0x96 => "Yonezawa/S'Pal",
+        0x97 => "Kaneko",
+        0x9A => "Nihon Bussan",
+        0x9B => "Tecmo",
+        0x9C => "Imagineer",
+        0xA2 | 0xB2 => "Bandai",
+        0xA4 => "Konami",
+        0xA6 => "Kawada",
+        0xA7 => "Takara",
+        0xA9 => "Technos Japan",
+        0xAC => "Toei Animation",
+        0xAF => "Namco",
+        0xB1 => "ASCII/Nexsoft",
+        0xB4 => "Square Enix",
+        0xB6 => "HAL Laboratory",
+        0xB7 => "SNK",
+        0xB9 | 0xCE => "Pony Canyon",
+        0xBA => "Culture Brain",
+        0xBB => "Sunsoft",
+        0xBD => "Sony Imagesoft",
+        0xBF => "Sammy",
+        0xC0 | 0xD0 => "Taito",
+        0xC3 => "Squaresoft",
+        0xC5 => "Data East",
+        0xC6 => "Tonkinhouse",
+        0xC8 => "Koei",
+        0xCA => "Ultra",
+        0xCB => "Vap",
+        0xCC => "Use Corporation",
+        0xCD => "Meldac",
+        0xD1 => "Sofel",
+        0xD2 => "Quest",
+        0xD3 => "Sigma Enterprises",
+        0xD4 => "ASK Kodansha",
+        0xD6 => "Naxat Soft",
+        0xD7 => "Copya System",
+        0xDA => "Tomy",
+        0xDD => "NCS",
+        0xDE => "Human",
+        0xDF => "Altron",
+        0xE1 => "Towa Chiki",
+        0xE2 => "Yutaka",
+        0xE3 => "Varie",
+        0xE5 => "Epoch",
+        0xE7 => "Athena",
+        0xE8 => "Asmik Ace",
+        0xE9 => "Natsume",
+        0xEA => "King Records",
+        0xEC => "Epic/Sony Records",
+        0xEE => "IGS",
+        0xF0 => "A Wave",
+        0xF3 => "Extreme Entertainment",
+        _ => return None,
+    })
 }
 
 /// 93LC56 serial-EEPROM interface state for MBC7 (Pan Docs "MBC7"). The
@@ -2005,6 +2199,132 @@ impl Cartridge {
     /// Check if this cartridge requires CGB hardware
     pub fn requires_cgb(&self) -> bool {
         matches!(self.cgb_support, CgbSupport::Only)
+    }
+
+    // -----------------------------------------------------------------------
+    // Header-fact accessors (reporting/tooling; no effect on emulation).
+    // -----------------------------------------------------------------------
+
+    /// Human-readable mapper name, e.g. `"MBC5+RAM+Battery"`, `"ROM ONLY"`,
+    /// `"HuC1"`. Reflects content-detected unlicensed boards (Sachen, NT, …),
+    /// not just the header type byte.
+    pub fn mapper_name(&self) -> &'static str {
+        use CartridgeType::*;
+        match self.get_cartridge_type() {
+            // $00 and $08 both decode to NoMBC{battery:false}; the raw type byte
+            // is the only thing that tells ROM ONLY from ROM+RAM apart.
+            NoMBC { battery: false } => {
+                if self.cartridge_type == ROM_RAM { "ROM+RAM" } else { "ROM ONLY" }
+            }
+            NoMBC { battery: true } => "ROM+RAM+Battery",
+            MBC1 { ram: false, .. } => "MBC1",
+            MBC1 { ram: true, battery: false } => "MBC1+RAM",
+            MBC1 { ram: true, battery: true } => "MBC1+RAM+Battery",
+            MBC2 { battery: false } => "MBC2",
+            MBC2 { battery: true } => "MBC2+Battery",
+            MBC3 { timer: true, ram: false, .. } => "MBC3+RTC+Battery",
+            MBC3 { timer: true, ram: true, .. } => "MBC3+RTC+RAM+Battery",
+            MBC3 { timer: false, ram: false, battery: false } => "MBC3",
+            MBC3 { timer: false, ram: true, battery: false } => "MBC3+RAM",
+            MBC3 { timer: false, ram: true, battery: true } => "MBC3+RAM+Battery",
+            MBC3 { timer: false, ram: false, battery: true } => "MBC3+Battery",
+            MBC5 { rumble: true, ram, battery } => match (ram, battery) {
+                (true, true) => "MBC5+Rumble+RAM+Battery",
+                (true, false) => "MBC5+Rumble+RAM",
+                _ => "MBC5+Rumble",
+            },
+            MBC5 { rumble: false, ram, battery } => match (ram, battery) {
+                (true, true) => "MBC5+RAM+Battery",
+                (true, false) => "MBC5+RAM",
+                _ => "MBC5",
+            },
+            MBC7 => "MBC7+Sensor+Rumble+RAM+Battery",
+            HuC1 => "HuC1+RAM+Battery",
+            HuC3 => "HuC3+RTC+RAM+Battery",
+            PocketCamera => "Pocket Camera",
+            WisdomTree => "Wisdom Tree",
+            Rocket => "Rocket Games",
+            Sachen { mmc2: false } => "Sachen MMC1",
+            Sachen { mmc2: true } => "Sachen MMC2",
+            NtOld { v2: false } => "NT (old, MBC1-style)",
+            NtOld { v2: true } => "NT (old, MBC3-style)",
+            M161 => "M161",
+        }
+    }
+
+    /// Total ROM size in bytes (all banks, `rom_banks * 16 KiB`).
+    pub fn rom_size_bytes(&self) -> usize {
+        self.rom_banks * 0x4000
+    }
+
+    /// External save-RAM size in bytes as actually wired (honors the 2 KiB
+    /// partial chip and MBC2/MBC7's built-in memory via `ram_data`). 0 = none.
+    pub fn ram_size_bytes(&self) -> usize {
+        self.ram_data.len()
+    }
+
+    /// Destination code ($014A). `None` if the header is unavailable (ROM
+    /// detached after a savestate load).
+    pub fn destination(&self) -> Option<Destination> {
+        self.rom_data.get(0x014A).map(|&b| {
+            if b == 0x00 { Destination::Japanese } else { Destination::Overseas }
+        })
+    }
+
+    /// Publisher name from the licensee code: the new-licensee ASCII pair
+    /// ($0144-$0145) when the old code ($014B) is $33, else the old code.
+    /// `None` if the header is unavailable or the code is unmapped.
+    pub fn licensee(&self) -> Option<&'static str> {
+        let old = *self.rom_data.get(0x014B)?;
+        if old == 0x33 {
+            let a = *self.rom_data.get(0x0144)?;
+            let b = *self.rom_data.get(0x0145)?;
+            new_licensee(a, b)
+        } else {
+            old_licensee(old)
+        }
+    }
+
+    /// Header checksum ($014D) validity — the boot ROM's `x = x - byte - 1`
+    /// fold over $0134-$014C. A failing check is what the DMG boot ROM hangs on.
+    pub fn header_checksum_valid(&self) -> bool {
+        let Some(hdr) = self.rom_data.get(0x0134..=0x014D) else {
+            return false;
+        };
+        let sum = hdr[..0x19].iter().fold(0u8, |a, &b| a.wrapping_sub(b).wrapping_sub(1));
+        sum == hdr[0x19]
+    }
+
+    /// Global checksum: 16-bit sum of every ROM byte except the two checksum
+    /// bytes at $014E-$014F. (Real hardware never verifies it.)
+    pub fn global_checksum(&self) -> u16 {
+        let mut sum: u16 = 0;
+        for (i, &b) in self.rom_data.iter().enumerate() {
+            if i != 0x014E && i != 0x014F {
+                sum = sum.wrapping_add(b as u16);
+            }
+        }
+        sum
+    }
+
+    /// Raw cartridge-type byte ($0147) as stored in the header.
+    pub fn cartridge_type_byte(&self) -> u8 {
+        self.cartridge_type
+    }
+
+    /// Header title ($0134-$0143), printable-ASCII-trimmed. Empty if unreadable.
+    pub fn title(&self) -> String {
+        let Some(raw) = self.rom_data.get(0x0134..0x0144) else {
+            return String::new();
+        };
+        let end = raw.iter().position(|&b| !(0x20..0x7f).contains(&b)).unwrap_or(raw.len());
+        std::str::from_utf8(&raw[..end]).unwrap_or("").trim().to_string()
+    }
+
+    /// CRC32 of the whole ROM (the No-Intro key), over the internal buffer with
+    /// no copy. `None` if the ROM is detached (post-savestate, before re-attach).
+    pub fn rom_crc32(&self) -> Option<u32> {
+        (!self.rom_data.is_empty()).then(|| crate::checksum::crc32(&self.rom_data))
     }
 
     /// Read from MBC3 RTC registers
@@ -4463,6 +4783,88 @@ mod tests {
         let mut wrong_logo = make_vf001_rom();
         wrong_logo[0x184] = wrong_logo[0x184].wrapping_add(1);
         assert_eq!(Cartridge::detect_unl_mapper(&wrong_logo), UnlMapper::None);
+    }
+
+    /// Write the correct boot-ROM header checksum into $014D.
+    fn fix_header_checksum(rom: &mut [u8]) {
+        let sum = rom[0x0134..0x014D].iter().fold(0u8, |a, &b| a.wrapping_sub(b).wrapping_sub(1));
+        rom[0x014D] = sum;
+    }
+
+    #[test]
+    fn mapper_name_covers_common_types() {
+        let cases: &[(u8, &str)] = &[
+            (0x00, "ROM ONLY"),
+            (MBC1, "MBC1"),
+            (MBC1_RAM_BATTERY, "MBC1+RAM+Battery"),
+            (MBC2_BATTERY, "MBC2+Battery"),
+            (MBC3_TIMER_RAM_BATTERY, "MBC3+RTC+RAM+Battery"),
+            (MBC3_RAM_BATTERY, "MBC3+RAM+Battery"),
+            (MBC5_RAM_BATTERY, "MBC5+RAM+Battery"),
+            (MBC5_RUMBLE_RAM_BATTERY, "MBC5+Rumble+RAM+Battery"),
+            (HUC1_RAM_BATTERY, "HuC1+RAM+Battery"),
+            (POCKET_CAMERA, "Pocket Camera"),
+        ];
+        for &(ty, name) in cases {
+            let cart = Cartridge::from_bytes(&make_rom(ty, 0x02)).unwrap();
+            assert_eq!(cart.mapper_name(), name, "type {ty:#04x}");
+        }
+    }
+
+    #[test]
+    fn rom_and_ram_size_bytes() {
+        // 256 KiB MBC5+RAM+BAT with an 8 KiB RAM code.
+        let mut rom = make_sized_rom(MBC5_RAM_BATTERY, 0x03, 0x40000);
+        rom[RAM_SIZE_OFFSET] = 0x02; // 8 KiB
+        let cart = Cartridge::from_bytes(&rom).unwrap();
+        assert_eq!(cart.rom_size_bytes(), 0x40000);
+        assert_eq!(cart.ram_size_bytes(), 0x2000);
+
+        // ROM ONLY, no RAM.
+        let cart = Cartridge::from_bytes(&make_rom(0x00, 0x00)).unwrap();
+        assert_eq!(cart.rom_size_bytes(), 0x8000);
+        assert_eq!(cart.ram_size_bytes(), 0);
+    }
+
+    #[test]
+    fn destination_and_licensee() {
+        let mut rom = make_rom(MBC1, 0x00);
+        rom[0x014A] = 0x00;
+        rom[0x014B] = 0x01; // old licensee: Nintendo
+        let cart = Cartridge::from_bytes(&rom).unwrap();
+        assert_eq!(cart.destination(), Some(Destination::Japanese));
+        assert_eq!(cart.licensee(), Some("Nintendo"));
+
+        // Overseas + new-licensee indirection ($014B == $33 -> read $0144-45).
+        let mut rom = make_rom(MBC1, 0x00);
+        rom[0x014A] = 0x01;
+        rom[0x014B] = 0x33;
+        rom[0x0144] = b'0';
+        rom[0x0145] = b'8'; // "08" -> Capcom
+        let cart = Cartridge::from_bytes(&rom).unwrap();
+        assert_eq!(cart.destination(), Some(Destination::Overseas));
+        assert_eq!(cart.licensee(), Some("Capcom"));
+    }
+
+    #[test]
+    fn header_and_global_checksum() {
+        let mut rom = make_rom(MBC3_RAM_BATTERY, 0x03);
+        fix_header_checksum(&mut rom);
+        let cart = Cartridge::from_bytes(&rom).unwrap();
+        assert!(cart.header_checksum_valid());
+        // global_checksum sums every byte except $014E-$014F.
+        let expected: u16 = rom
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != 0x014E && i != 0x014F)
+            .fold(0u16, |a, (_, &b)| a.wrapping_add(b as u16));
+        assert_eq!(cart.global_checksum(), expected);
+
+        // Corrupt a header byte -> checksum no longer matches.
+        let mut bad = rom.clone();
+        bad[0x0140] = bad[0x0140].wrapping_add(1);
+        let cart = Cartridge::from_bytes(&bad).unwrap();
+        assert!(!cart.header_checksum_valid());
     }
 
     #[test]
