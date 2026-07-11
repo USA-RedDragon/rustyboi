@@ -149,6 +149,12 @@ async function handleInit() {
   const uiState = emu.take_ui_state();
   if (uiState) post({ type: "UiState", json: uiState });
   status("Ready — load a ROM to start.");
+  // Kick off the No-Intro game-name index download (main thread owns fetch()).
+  // The bodies come back via a FinishNoIntro message.
+  const niUrls = emu.no_intro_fetch_urls();
+  if (niUrls && niUrls.length) {
+    post({ type: "FetchUrl", purpose: "no_intro", urls: Array.from(niUrls) });
+  }
   startLoop();
 }
 
@@ -227,6 +233,14 @@ self.onmessage = async (e) => {
         // The main thread fetched the libretro `.cht` body; parse it into the
         // session's fetched-cheat list and push the fresh UI state.
         emit(emu.finish_fetched_cheats(m.body || ""));
+        const uiState = emu.take_ui_state();
+        if (uiState) post({ type: "UiState", json: uiState });
+        break;
+      }
+      case "FinishNoIntro": {
+        // The main thread fetched the No-Intro DAT bodies; load them into the
+        // runtime game-name index (re-resolves the current ROM's display name).
+        emu.finish_no_intro_dats(m.bodies || []);
         const uiState = emu.take_ui_state();
         if (uiState) post({ type: "UiState", json: uiState });
         break;
