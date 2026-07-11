@@ -36,7 +36,7 @@ pollster = "0.3"
 rodio = { version = "0.19", default-features = false }
 serde_json = "1.0.145"
 # winit features are configured per-target below so Android doesn't pull wayland/x11.
-winit = { version = "0.29", default-features = false, features = ["rwh_06"] }
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 winit_input_helper = "0.16.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -44,7 +44,7 @@ ureq = { version = "2.10", default-features = false, features = ["tls", "gzip"] 
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
-winit = { version = "0.29", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }
 rfd = "0.15.4"
 gilrs = "0.11"
 rustls-native-certs = "0.8"
@@ -59,7 +59,7 @@ wasm-bindgen-futures = "0.4.54"
 [target.'cfg(target_os = "android")'.dependencies]
 # Use GameActivity through winit's android-activity backend (subclassable from
 # Kotlin/Java, forwards onActivityResult, better IME/lifecycle than NativeActivity).
-winit = { version = "0.29", default-features = false, features = ["android-game-activity", "rwh_06"] }
+winit = { version = "0.30", default-features = false, features = ["android-game-activity", "rwh_06"] }
 android_logger = "0.13"
 jni = "0.21"
 libc = "0.2"
