@@ -35,7 +35,7 @@ pollster = "=1.0.1"
 # hound for mp3/flac/vorbis/wav) — dead weight in the binary. Keep `playback`
 # (just pulls `dep:cpal`) for device output.
 rodio = { version = "=0.22.2", default-features = false, features = ["playback"] }
-serde_json = "=1.0.145"
+serde_json = "=1.0.150"
 # winit features are configured per-target below so Android doesn't pull wayland/x11.
 # `rwh_06` gates winit 0.30's raw-window-handle 0.6 trait impls (needed by wgpu
 # surface creation + egui-winit).
