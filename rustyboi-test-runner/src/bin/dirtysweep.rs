@@ -230,7 +230,7 @@ fn main() {
         .map(|p| {
             let r = run_one(p, &cfg);
             let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-            if n % 25 == 0 || n == total {
+            if n.is_multiple_of(25) || n == total {
                 eprintln!("  {n}/{total}");
             }
             r
@@ -276,8 +276,8 @@ fn report(results: &[GameResult], cfg: &Config) {
 
     let mut per_reg: [u64; 9] = [0; 9];
     for r in &rendered {
-        for i in 0..9 {
-            per_reg[i] += r.per_reg_dirty[i];
+        for (acc, dirty) in per_reg.iter_mut().zip(r.per_reg_dirty.iter()) {
+            *acc += dirty;
         }
     }
     let palette_blocked: u64 = rendered.iter().map(|r| r.palette_blocked).sum();

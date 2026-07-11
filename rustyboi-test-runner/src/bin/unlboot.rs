@@ -171,10 +171,10 @@ fn main() {
                 if hash == last_hash { " (unchanged)" } else { "" },
             );
             last_hash = hash;
-            if let Some(dir) = &out_dir {
-                if f == frames || shots.contains(&f) {
-                    write_ppm(&dir.join(format!("{name}-f{f}.ppm")), &frame);
-                }
+            if let Some(dir) = &out_dir
+                && (f == frames || shots.contains(&f))
+            {
+                write_ppm(&dir.join(format!("{name}-f{f}.ppm")), &frame);
             }
         }
     }
