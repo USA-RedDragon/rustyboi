@@ -685,9 +685,9 @@ impl Gui {
                         .on_disabled_hover_text("This game supplies its own colours");
                     });
 
-                    ui.menu_button("GBC Color Correction", |ui| {
+                    ui.menu_button("Color Correction", |ui| {
                         for (mode, label) in [
-                            (ColorCorrection::Linear, "Linear (raw RGB555)"),
+                            (ColorCorrection::Linear, "Linear (raw)"),
                             (ColorCorrection::Lcd, "LCD (corrected)"),
                         ] {
                             let selected = session.color_correction == mode;
@@ -1466,7 +1466,7 @@ impl Gui {
                             }
                         }
 
-                        ui.label("GBC Color Correction");
+                        ui.label("Color Correction");
                         for (mode, label) in [
                             (ColorCorrection::Linear, "Linear (raw)"),
                             (ColorCorrection::Lcd, "LCD (corrected)"),

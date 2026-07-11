@@ -40,7 +40,7 @@ fn put(out: &mut [u8], o: usize, r: u8, g: u8, b: u8, order: PixelOrder) {
 /// Pack `frame` into 32-bit pixels written to `out`, which must be at least
 /// `pixels * 4` bytes (160*144 for a GB frame). `shades` are the DMG palette
 /// rows (lightest→darkest) from
-/// [`DmgPaletteChoice::rgba_shades`](crate::action::DmgPaletteChoice::rgba_shades);
+/// [`DmgPaletteChoice::shades_rgba`](rustyboi_core_lib::gb::DmgPaletteChoice::shades_rgba);
 /// only each row's RGB is used (alpha is forced opaque). `Frame::Color` is
 /// already display-ready RGB888 and copied straight through.
 pub fn frame_to_pixels(frame: &Frame, shades: &[[u8; 4]; 4], order: PixelOrder, out: &mut [u8]) {

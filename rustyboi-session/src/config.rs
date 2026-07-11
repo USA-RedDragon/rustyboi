@@ -5,7 +5,7 @@
 //! DMG palette choice, input remap, rewind tuning, and the fast-forward factor.
 //! No host key codes, paths, or window state — those belong to the adapter.
 
-use crate::action::{GbcDmgPalette, GraphicsBackend, LcdEffect, ScalingMode, TextureFilter};
+use crate::action::{DmgPaletteChoice, GbcDmgPalette, GraphicsBackend, LcdEffect, ScalingMode, TextureFilter};
 use crate::input::InputMap;
 use crate::input_config::InputConfig;
 use crate::ports::{Storage, StorageError};
@@ -62,8 +62,14 @@ impl Default for RewindConfig {
 pub struct Config {
     /// Emulated hardware model.
     pub hardware: Hardware,
-    /// DMG shade palette (monochrome tint, used on DMG/MGB hardware).
+    /// DMG shade palette (monochrome tint, used on DMG/MGB hardware). A derived
+    /// cache of `dmg_palette_choice.shades_rgba(color_correction)`; the choice is
+    /// the source of truth. Kept so the renderer keeps a ready RGBA array.
     pub dmg_palette: DmgPalette,
+    /// The DMG base-palette choice (Green/Grayscale/Pocket). Composes with
+    /// `color_correction` to produce `dmg_palette.shades`.
+    #[serde(default)]
+    pub dmg_palette_choice: DmgPaletteChoice,
     /// CGB colorization for DMG games on CGB/AGB hardware (Auto / a boot-ROM
     /// scheme). `default` (`Auto`) so older blobs still load.
     #[serde(default)]
@@ -146,6 +152,7 @@ impl Default for Config {
         Config {
             hardware: Hardware::CGB,
             dmg_palette: DmgPalette::default(),
+            dmg_palette_choice: DmgPaletteChoice::default(),
             gbc_dmg_palette: GbcDmgPalette::default(),
             input_map: InputMap::default(),
             rewind: RewindConfig::default(),
