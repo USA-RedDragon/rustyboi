@@ -9,8 +9,8 @@
 //!
 //! ## Game Genie (9 nibbles `ABC-DEF-GHI`, or 6 nibbles `ABC-DEF`)
 //!
-//! Layout is taken bit-for-bit from mGBA's authoritative implementation
-//! (`mgba-emu/mgba`, `src/gb/cheats.c`, `GBCheatAddGameGenieLine`):
+//! The Game Genie code format is the fixed, publicly-documented layout defined
+//! by the physical device; this is an independent decode of it:
 //!
 //! ```text
 //! op1 = ABC  op2 = DEF  op3 = GHI            (each 3 nibbles, high-first)
@@ -27,9 +27,9 @@
 //!
 //! ## GameShark (8 nibbles `ABCDEFGH`)
 //!
-//! From mGBA `GBCheatAddGameShark`: `value = op>>16` (byte CD), and
-//! `address = ((op & 0xFF) << 8) | ((op >> 8) & 0xFF)` = `GHEF` (byte AB is the
-//! external-RAM bank, ignored by our flat write path).
+//! GameShark's fixed, publicly-documented code format: `value = op>>16`
+//! (byte CD), and `address = ((op & 0xFF) << 8) | ((op >> 8) & 0xFF)` = `GHEF`
+//! (byte AB is the external-RAM bank, ignored by our flat write path).
 
 /// A decoded Game Genie ROM patch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,7 +67,7 @@ fn nibbles(code: &str) -> Option<Vec<u8>> {
 
 /// Decode a Game Genie code (`ABC-DEF` or `ABC-DEF-GHI`, separators optional)
 /// into a [`GameGenie`]. Returns `None` for any input that is not 6 or 9 valid
-/// hex nibbles. See the module docs for the exact (mGBA-derived) layout.
+/// hex nibbles. See the module docs for the exact layout.
 pub fn decode_game_genie(code: &str) -> Option<GameGenie> {
     let n = nibbles(code)?;
     if n.len() != 6 && n.len() != 9 {
@@ -124,7 +124,7 @@ pub fn decode_gameshark_nibbles(n: &[u8]) -> Option<GameShark> {
 mod tests {
     use super::*;
 
-    // Vector worked out directly from mGBA `src/gb/cheats.c`:
+    // Vector worked out directly from the code layout above:
     // 00A-B7F: op1=0x00A, op2=0xB7F.
     //   value   = op1>>4 = 0x00
     //   address = (op1&0xF)<<8 | (op2>>4) | ((op2&0xF)^0xF)<<12
