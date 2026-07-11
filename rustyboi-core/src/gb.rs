@@ -22,19 +22,19 @@ pub enum Hardware {
           // leads CGB-A..E by 512 master-cc, plus the CGB-B-or-earlier APU
           // length-glitch gate below)
     CGBB, // Game Boy Color, CPU-CGB-A/B (boot state == CGB; differs only in
-          // the CGB-B-or-earlier APU length-glitch gate, SameBoy
-          // `model <= GB_MODEL_CGB_B`. SameSuite *_extra_length_clocking-cgbB)
+          // the CGB-B-or-earlier APU length-glitch gate (CGB silicon at
+          // revision B or older). SameSuite *_extra_length_clocking-cgbB)
     CGB,  // Game Boy Color, CGB-CPU-A..E
     CGBE, // Game Boy Color, CPU-CGB-D/E APU revision (boot state == CGB; the
-          // observable difference is the APU C-vs-D/E gate set, SameBoy
-          // `model <= GB_MODEL_CGB_C`. Default CGB models cgb04c/CPU-CGB-C —
-          // the gambatte-capture silicon; SameSuite hardware is CPU-CGB-E.)
+          // observable difference is the APU C-vs-D/E gate set (CGB-C-or-earlier
+          // vs CGB-D/E). Default CGB models cgb04c/CPU-CGB-C —
+          // the reference-capture silicon; SameSuite hardware is CPU-CGB-E.)
     AGB,  // Game Boy Advance in GBC-compatibility mode (CGB + isAgb() diffs)
 }
 
 impl Hardware {
     /// AGB (GBA-in-GBC-mode) hardware. AGB behaves like CGB everywhere except
-    /// the small Gambatte isAgb() diff set (PPU line-153/last-line/LYC timing,
+    /// the small AGB-vs-CGB diff set (PPU line-153/last-line/LYC timing,
     /// APU ch3 wave-RAM, GBA_FLAG power-on registers).
     pub fn is_agb(self) -> bool {
         matches!(self, Hardware::AGB)
@@ -46,8 +46,8 @@ impl Hardware {
         matches!(self, Hardware::CGB0 | Hardware::CGBB | Hardware::CGB | Hardware::CGBE | Hardware::AGB)
     }
 
-    /// CGB-B-or-earlier APU revision gate (SameBoy `GB_is_cgb(gb) &&
-    /// model <= GB_MODEL_CGB_B`): the NRx4 length-enable extra-clock glitch
+    /// CGB-B-or-earlier APU revision gate (CGB silicon at revision B or
+    /// older): the NRx4 length-enable extra-clock glitch
     /// fires regardless of the written bit-6 value ("current value is
     /// irrelevant on CGB-B and older"). SameSuite
     /// channel_*_extra_length_clocking-cgb0B/-cgb0/-cgbB validate this fork.
@@ -55,11 +55,11 @@ impl Hardware {
         matches!(self, Hardware::CGB0 | Hardware::CGBB)
     }
 
-    /// CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`). The
-    /// default `CGB` models cgb04c (CPU-CGB-C, the gambatte-capture silicon);
+    /// CGB-D/E APU revision gate (CGB silicon newer than revision C). The
+    /// default `CGB` models cgb04c (CPU-CGB-C, the reference-capture silicon);
     /// `CGBE` models the CPU-CGB-D/E silicon SameSuite was validated on.
     /// AGB intentionally stays on the C side: rustyboi's AGB model is pinned
-    /// to the Gambatte-AGB oracle set (SameBoy would order AGB > CGB_E).
+    /// to the AGB reference oracle (a strict revision order would place AGB > CGB_E).
     pub fn is_cgb_d_or_later(self) -> bool {
         matches!(self, Hardware::CGBE)
     }
@@ -122,18 +122,18 @@ impl GB {
         mmio.set_cgb_de(hardware.is_cgb_d_or_later());
         mmio.set_apu_cgb_le_b(hardware.is_cgb_b_or_earlier());
         mmio.set_apu_cgb_b(matches!(hardware, Hardware::CGBB));
-        // CGB-C-and-older PCM read glitch (SameBoy pcm_mask, model <=
-        // GB_MODEL_CGB_C). Real CPU-CGB-C silicon has it too, but the default
+        // CGB-C-and-older PCM read glitch (CGB silicon at revision C or older).
+        // Real CPU-CGB-C silicon has it too, but the default
         // CGB model intentionally keeps the SameSuite-calibrated D/E-clean
         // reads (same convention as the nrx2 zombie glitch): the internal
         // SameSuite rows for the non-revision-suffixed channel tests grade
-        // against tables real CGB-C fails, and no gambatte cgb04c capture
+        // against tables real CGB-C fails, and no cgb04c capture
         // pins the glitch. Only the explicit pre-C revisions consume it.
         mmio.set_apu_pcm_c_glitch(matches!(hardware, Hardware::CGB0 | Hardware::CGBB));
-        // NRx4 square step-back parity gate (SameBoy `!(model == CGB_D ||
-        // model == CGB_E)`): CGB-C-and-earlier AND AGB gate the step-back on
+        // NRx4 square step-back parity gate (all revisions except CGB-D/E):
+        // CGB-C-and-earlier AND AGB gate the step-back on
         // `sample_countdown & 1`; CGB-D/E apply it unconditionally. The default
-        // CGB keeps the unconditional gambatte-cgb04c placement, so only the
+        // CGB keeps the unconditional cgb04c placement, so only the
         // explicit pre-D / AGB revisions take the parity fork.
         mmio.set_apu_step_back_parity(matches!(
             hardware,
@@ -175,7 +175,7 @@ impl GB {
         // lines low (reads 0xCF). The SGB boot ROM leaves both lines high (0xFF)
         // after its packet handshake. On CGB the hand-off is cart-type dependent
         // (like the boot DIV counter): a CGB-flagged cart takes the full-CGB path
-        // and leaves the lines low (0xCF, gambatte fexx_ffxx_dumper_cgb), while a
+        // and leaves the lines low (0xCF, the fexx_ffxx_dumper_cgb oracle), while a
         // DMG-flagged cart runs the DMG-compat path and leaves them high (0xFF,
         // mooneye boot_hwio-C). Write a select-line pattern (bits 4-5); the read
         // path forces bits 6-7 to 1, so 0x30 -> 0xFF and 0x00 -> 0xCF.
@@ -190,8 +190,8 @@ impl GB {
         self.mmio.write(crate::input::JOYP, joyp_init);
         self.mmio.write(crate::ppu::LYC, 0x00);
         self.mmio.write(crate::ppu::BGP, 0xFC);
-        // OBP0/OBP1 post-boot value (Gambatte setInitial ffxxDump 0x48/0x49,
-        // mem_dumps.h): DMG leaves them uninitialised reading 0xFF; the CGB boot
+        // OBP0/OBP1 post-boot value (the post-boot ffxxDump oracle reads
+        // 0x48/0x49): DMG leaves them uninitialised reading 0xFF; the CGB boot
         // ROM zeroes the obj-palette I/O so FF48/FF49 read 0x00 (the
         // fexx_ffxx_dumper_cgb oracle reads 0x00 at FF48/FF49).
         let obp_init = match self.hardware {
@@ -235,11 +235,11 @@ impl GB {
         self.cpu.registers.a = match self.hardware {
             Hardware::DMG0 | Hardware::DMG | Hardware::SGB => 0x01,
             Hardware::MGB | Hardware::SGB2 => 0xFF,
-            // Gambatte setPostBiosState: a = cgb*0x10 | 0x01 (0x11 for CGB & AGB).
+            // Post-boot A register: cgb*0x10 | 0x01 (0x11 for CGB & AGB).
             Hardware::CGB0 | Hardware::CGBB | Hardware::CGB | Hardware::CGBE | Hardware::AGB => 0x11,
         };
         self.cpu.registers.b = match self.hardware {
-            // Gambatte setPostBiosState: b = cgb & agb. AGB sets B bit0 (the
+            // Post-boot B register: cgb & agb. AGB sets B bit0 (the
             // GBA-detection flag games read at boot); CGB/others leave B=0.
             Hardware::AGB => 0x01,
             Hardware::CGB0 | Hardware::CGBB | Hardware::CGB | Hardware::CGBE | Hardware::DMG | Hardware::MGB | Hardware::SGB | Hardware::SGB2 => 0x00,
@@ -314,11 +314,11 @@ impl GB {
             self.mmio.write(crate::memory::mmio::REG_VBK, 0x7E);
             self.mmio.write(crate::memory::mmio::REG_SVBK, 0xF8);
             // RP/IR (0xFF56) power-on: bits 1-5 hold 0x3E so the masked read
-            // returns 0x3E (Gambatte ffxxDump). Bits 0,6,7 start clear.
+            // returns 0x3E (post-boot ffxxDump oracle). Bits 0,6,7 start clear.
             self.mmio.set_io_register(0xFF56, 0x3E);
         }
 
-        // Work-RAM power-on contents (Gambatte setInitial*Wram). Fill via the
+        // Work-RAM power-on contents (post-boot WRAM oracle). Fill via the
         // normal bus, walking SVBK so each CGB bank receives its slice; fixed
         // bank 0 lives at 0xC000, the banked region at 0xD000.
         {
@@ -328,7 +328,7 @@ impl GB {
             crate::memory::init_wram_powerup(cgb, &mut wram);
             if cgb {
                 // The no-boot state models the capture session behind the
-                // gambatte `.dump` region oracles, whose power-on WRAM had the
+                // `.dump` region oracles, whose power-on WRAM had the
                 // C200-C20F line in the 00 phase (canonical `setInitialCgbWram`
                 // has it in the FF phase) plus one flipped bit: C208=01.
                 // Observed via the oamdmasrcC000_gdmasrcC0F0 dumps, whose GDMA
@@ -367,7 +367,7 @@ impl GB {
         // chains (each boot_div-<rev> ROM reads DIV six times at fixed NOP
         // offsets; the value is the unique post-boot 16-bit counter that
         // reproduces that revision's fingerprint on rustyboi's timer) and from
-        // the Gambatte hwtest CGB anchors (start_inc_1/_2 read DIV directly).
+        // the hwtest CGB anchors (start_inc_1/_2 read DIV directly).
         //
         // CGB/AGB counters are CART-TYPE dependent (resolved 2026-07-02; this
         // was previously documented as a two-oracle conflict). The CGB boot ROM
@@ -375,10 +375,10 @@ impl GB {
         // DIV counter at 0x1EA0; for DMG-flagged carts it additionally runs the
         // DMG-compat setup (logo-checksum palette lookup + KEY0 latch), handing
         // off 0x7D8 cc later at 0x2678. Both anchors are real hardware:
-        //   - CGB cart  -> 0x1EA0: Gambatte's hwtest CGB refs (start_inc_1/_2
+        //   - CGB cart  -> 0x1EA0: the hwtest CGB refs (start_inc_1/_2
         //     out1E/out1F, tc00_start_2, fexx_ffxx_dumper, 11 ch1/ch2 boot-phase
         //     sound tests) and BullyGB's initial-DIV check — all CGB-flagged
-        //     carts. (== Gambatte setPostBiosState cycleCounter 0x102A0 -
+        //     carts. (== the post-boot cycleCounter 0x102A0 -
         //     divLastUpdate -0x1C00, low 16 bits.)
         //   - DMG cart  -> 0x2678: mooneye misc/boot_div-cgbABCDE — a
         //     DMG-flagged cart, so Gekkio's fingerprint measured the compat
@@ -401,8 +401,8 @@ impl GB {
             // boot_div-A fingerprint (27 28 28 29 2a 2c), a DMG cart: AGB
             // compat path == CGB + 4 master-cc. The AGB boot ROM is the CGB
             // boot ROM with a trivial tail difference (B=1 hand-off), so the +4
-            // carries to the CGB-cart path: 0x1EA4 == Gambatte setPostBiosState
-            // 0x102A0 + agb*4 (the Gambatte-AGB bootstrap oracle's counter).
+            // carries to the CGB-cart path: 0x1EA4 == the post-boot
+            // 0x102A0 + agb*4 (the AGB bootstrap oracle's counter).
             // Verified: passes mooneye boot_div-A. AGB is opt-in, outside the
             // default suites.
             Hardware::AGB => {
@@ -445,9 +445,9 @@ impl GB {
 
         // Post-boot APU state. The boot ROM enables the APU and leaves channel 1
         // mid-tone; channel registers are gated behind APU-enable, so the writes
-        // above were dropped. Apply Gambatte's exact post-boot APU state directly
+        // above were dropped. Apply the exact post-boot APU state directly
         // (must follow the timer-counter set so the duty phase has the right cc).
-        // Wave RAM differs between DMG and CGB (Gambatte ioamhram dumps).
+        // Wave RAM differs between DMG and CGB (post-boot I/O dumps).
         let cgb = self.hardware.is_cgb_like();
         let wave_ram: [u8; 16] = if cgb {
             [0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF,
@@ -464,14 +464,14 @@ impl GB {
         let ch1_active = !matches!(self.hardware, Hardware::SGB | Hardware::SGB2);
         self.mmio.set_post_bios_audio_state(cgb, ch1_active);
 
-        // Post-boot power-on OAM / unusable-region / HRAM contents (Gambatte
-        // setInitial*Ioamhram). The boot ROM leaves these untouched, so they
+        // Post-boot power-on OAM / unusable-region / HRAM contents (post-boot
+        // I/O+OAM+HRAM dumps). The boot ROM leaves these untouched, so they
         // hold the hardware power-on pattern the fexx_* dumpers read back.
         self.mmio.set_post_bios_ioamhram(cgb);
 
         // Post-boot CGB palette RAM. The boot ROM leaves BG palette RAM
         // all-white and OBJ palette RAM holding the hardware power-on dump
-        // (Gambatte initstate cgbObjpDump). A program that renders a sprite
+        // (the cgbObjpDump oracle). A program that renders a sprite
         // without writing FF6A/FF6B observes these values; without this the
         // OBJ palette is all-zero (black). Matches scx_during_m3_spx2 etc.
         //
@@ -511,12 +511,12 @@ impl GB {
         // Post-boot VRAM contents. The boot ROM decompresses the Nintendo logo
         // from the cart header into the BG tile area (0x8010-0x819F) and writes
         // the logo tilemap (tile indices) at 0x9904-0x9910 / 0x9924-0x992F.
-        // These bytes are the exact post-boot bank-0 VRAM Gambatte's vram_dumper
+        // These bytes are the exact post-boot bank-0 VRAM the vram_dumper oracle
         // captures; real games can read them, so this is legitimate skip_bios
         // fidelity. VBK was set to bank 0 above, so plain bus writes land in
         // bank 0. Restricted to DMG/MGB: the CGB oamdma vram dumpers GDMA over
         // 0x8000 and assert the remaining VRAM is zero, so a CGB logo regresses
-        // them (Gambatte's CGB references for those tests assume cleared VRAM);
+        // them (the CGB references for those tests assume cleared VRAM);
         // the CGB vram_dumper logo cannot be matched without that regression.
         if !cgb {
             self.seed_boot_logo_vram();
@@ -532,7 +532,7 @@ impl GB {
         } else if !self.should_enable_cgb_features() {
             // DMG cart on CGB (compat mode): the real CGB boot ROM also leaves
             // the logo tile data — including the ® tile at 0x8190 — in VRAM
-            // bank 0 (Gambatte setInitialVram seeds 0x8010-0x819F for cgb too;
+            // bank 0 (the post-boot VRAM oracle seeds 0x8010-0x819F for cgb too;
             // only the tilemap is DMG-only). mealybug's compat sprites render
             // tile 0x19 (®) straight from this boot residue (m3_obp0_change
             // cgb_c); without it the sprite is all-transparent. The CGB-cart
@@ -542,7 +542,7 @@ impl GB {
         }
 
         // Post-boot PPU frame phase. The boot ROM leaves the LCD enabled and the
-        // PPU deep into a frame (Gambatte setInitialState `videoCycles`): the game
+        // PPU deep into a frame (the post-boot `videoCycles` oracle): the game
         // starts in VBlank at LY=144 (CGB) / LY=153 (DMG), not a fresh LY=0 OAM
         // search. Seed that here so the first instruction's LY/STAT reads match
         // hardware (display_startstate). Must follow the LCDC=0x91 write above.
@@ -555,8 +555,8 @@ impl GB {
     /// Header-logo-substituting carts (Sachen MMC1) get the boot expansion of
     /// THEIR logo instead: the real boot ROM reads the header through the
     /// locked mapper and decompresses whatever it sees, and those games check
-    /// the resulting VRAM tiles as copy protection (hhugboy pokes the same
-    /// expansion when no bootstrap is emulated).
+    /// the resulting VRAM tiles as copy protection (the same expansion is
+    /// poked in when no bootstrap is emulated).
     fn seed_boot_logo_vram(&mut self) {
         // $8010-$818F is exactly the boot ROM's decompression of the cart's own
         // header logo ($0104-$0133), so derive it from the header the user
@@ -597,11 +597,10 @@ impl GB {
     /// `skip_bios` no-boot state this also seeds the boot-ROM-final residue that
     /// the no-boot path deliberately omits (because the `.dump` region oracles
     /// were captured WITHOUT the boot ROM and need the zeroed/0x18 state):
-    ///   - CGB: the Nintendo logo in VRAM bank 0 (Gambatte `setInitialVram`,
-    ///     mem_dumps.h:3032) and the canonical 0x08-tail feax shadow
-    ///     (`setInitialCgbIoamhram` feaxDump, mem_dumps.h:3138).
+    ///   - CGB: the Nintendo logo in VRAM bank 0 (the post-boot VRAM oracle)
+    ///     and the canonical 0x08-tail feax shadow (the feaxDump oracle).
     ///   - DMG: the logo is already seeded by `skip_bios`; no extra residue
-    ///     (the canonical `setInitialDmgIoamhram` OAM is already applied).
+    ///     (the canonical post-boot DMG OAM is already applied).
     ///
     /// Select this per-oracle (SRAM dump) in the runner; the no-boot
     /// `skip_bios` must stay in use for the `.dump` region oracles.
@@ -683,8 +682,8 @@ impl GB {
     }
 
     /// Run the REAL boot ROM from power-on (PC=0x0000) until it hands off to the
-    /// cartridge. Mirrors Gambatte's testrunner, which executes the boot ROM
-    /// before every test instead of seeding a synthetic post-boot state.
+    /// cartridge. Mirrors a hardware-faithful testrunner, which executes the
+    /// boot ROM before every test instead of seeding a synthetic post-boot state.
     ///
     /// Preconditions: a cartridge is inserted and a matching boot ROM is loaded
     /// (`load_bios`). The CPU/peripherals are at their hardware power-on values
@@ -715,7 +714,7 @@ impl GB {
         }
 
         // Seed the hardware power-on RAM garbage BEFORE the boot ROM runs
-        // (mirrors Gambatte initializing ioamhram before loadBios). The boot ROM
+        // (mirrors initializing the I/O+OAM+HRAM region before loading the boot ROM). The boot ROM
         // overwrites what it writes and leaves OAM/HRAM/feax/wave RAM as this
         // power-on pattern — which the fexx_*/dumper oracles read back. Our
         // power-on memory init is all-zero, so without this the dumper regions
@@ -797,8 +796,7 @@ impl GB {
         // (the APU is stopped). The cart-local MBC3 RTC crystal really keeps
         // counting through STOP on hardware but rides master_cc here, so it
         // freezes too (accepted simplification; no licensed ROM STOPs).
-        // On wake the world advances 8 T-cycles before the CPU resumes
-        // (SameBoy GB_cpu_run: leave_stop_mode + GB_advance_cycles(gb, 8));
+        // On wake the world advances 8 T-cycles before the CPU resumes;
         // execution then continues at the post-STOP pc set by the opcode
         // (opcodes::stop): past both bytes (2-byte form) or at the operand
         // byte (1-byte interrupt-pending form).
@@ -1310,7 +1308,7 @@ mod stop_tests {
     //! STOP-mode / HALT-mode / NOP forks, the 1-vs-2-byte opcode length, the
     //! DIV reset, the whole-machine clock freeze, and the selected-line-only
     //! joypad wake. The armed-KEY1 speed-switch path (owned by the age spsw /
-    //! gambatte speedchange suites) gets a tripwire sanity check only.
+    //! speedchange suites) gets a tripwire sanity check only.
     use super::*;
     use crate::input::ButtonState;
 
@@ -1667,7 +1665,7 @@ mod stop_tests {
     }
 
     /// Armed-KEY1 tripwire: STOP with a speed switch armed takes the existing
-    /// CGB switch path (owned byte-exactly by age spsw / gambatte speedchange)
+    /// CGB switch path (owned byte-exactly by age spsw / speedchange)
     /// and must NOT enter the new low-power freeze.
     #[test]
     fn stop_with_armed_key1_still_speed_switches() {

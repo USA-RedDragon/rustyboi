@@ -5,7 +5,7 @@
 //! game pulses the P14/P15 select lines to serialise 128 bits (16 bytes) per
 //! packet. We interpret those packets HIGH-LEVEL (no SNES core): decode the
 //! command, apply its effect (player multiplexing, palettes, mask, ...) on the
-//! GB side directly. This is the model BGB/most emulators use and is exactly
+//! GB side directly. This is the high-level model most emulators use and is exactly
 //! what the GB-side `sgb-ext-test` protocol stress test checks.
 //!
 //! ALL of this is gated on `Hardware::SGB`/`SGB2` by the caller; on DMG/CGB the
@@ -325,8 +325,8 @@ impl Sgb {
                         // Stop pulse: on hardware EITHER a P14-low (0x20) OR a
                         // P15-low (0x10) pulse after the 128th bit terminates
                         // the packet and dispatches (sgb-ext-test CorruptStop
-                        // uses a 0x10 stop and real SGB accepts it; SameBoy
-                        // treats it as corrupt).
+                        // uses a 0x10 stop and real SGB accepts it; a stricter
+                        // HLE decoder would treat it as corrupt).
                         if self.write_index == command_size {
                             self.dispatch();
                             self.write_index = 0;
@@ -377,7 +377,7 @@ impl Sgb {
         match command {
             cmd::MLT_REQ => {
                 // Byte 1 bits 0-1 select the player count: 0->1, 1->2, 2->3, 3->4.
-                // NOTE: SameBoy's HLE folds the invalid `2` case up to 4 players;
+                // NOTE: some HLE decoders fold the invalid `2` case up to 4 players;
                 // real SGB silicon keeps it as a *glitched 3-player* mode, which
                 // SameSuite's command_mlt_req captures. We model the hardware,
                 // not the HLE: player_count = (byte1 & 3) + 1 with no fold.
@@ -484,7 +484,7 @@ impl Sgb {
 
     /// PAL_SET: select four system palettes (loaded by PAL_TRN) for the four
     /// active SGB palettes. Bytes 1-8 = four little-endian palette indices;
-    /// only 9 bits are decoded (0-511, SameBoy `cmd[n] + (cmd[n+1] & 1) * 0x100`).
+    /// only 9 bits are decoded (0-511, `cmd[n] + (cmd[n+1] & 1) * 0x100`).
     /// Byte 9: bit 7 = apply the attribute file selected by bits 0-5, bit 6 =
     /// cancel mask. Color 0 stays a shared backdrop: all palettes take
     /// palette 0's color 0.
@@ -839,7 +839,7 @@ mod tests {
 
     #[test]
     fn mlt_req_selects_player_count() {
-        // 0->1, 1->2, 2->3 (invalid/glitched), 3->4. No SameBoy 3->4 fold.
+        // 0->1, 1->2, 2->3 (invalid/glitched), 3->4. No 3->4 fold.
         for (sel, want) in [(0u8, 1u8), (1, 2), (2, 3), (3, 4)] {
             let mut sgb = Sgb::new();
             let mut pkt = [0u8; 16];

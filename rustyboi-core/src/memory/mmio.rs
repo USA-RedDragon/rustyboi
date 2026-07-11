@@ -35,10 +35,10 @@ const BIOS_HEADER_HOLE_START: u16 = 0x0100;
 const BIOS_HEADER_HOLE_END: u16 = 0x01FF;
 const BIOS_END: u16 = BIOS_START + BIOS_SIZE as u16 - 1;
 /// Expected masked CRC32 of the DMG boot ROM (byte 0xFD zeroed before hashing),
-/// matching Gambatte testrunner `loadBios("bios.gb", 0x100, 0x580A33B9)`.
+/// matching the expected DMG boot-ROM hash 0x580A33B9.
 pub const DMG_BIOS_CRC32: u32 = 0x580A33B9;
 /// Expected masked CRC32 of the CGB boot ROM (byte 0xFD zeroed before hashing),
-/// matching Gambatte testrunner `loadBios("bios.gbc", 0x900, 0x31672598)`.
+/// matching the expected CGB boot-ROM hash 0x31672598.
 pub const CGB_BIOS_CRC32: u32 = 0x31672598;
 pub const CARTRIDGE_START: u16 = 0x0000;
 pub const CARTRIDGE_SIZE: usize = 16384; // 16KB
@@ -48,7 +48,7 @@ pub const CARTRIDGE_BANK_SIZE: usize = 16384; // 16KB
 pub const CARTRIDGE_BANK_END: u16 = CARTRIDGE_BANK_START + CARTRIDGE_BANK_SIZE as u16 - 1;
 
 /// CRC32 (IEEE, the zlib/PNG polynomial) of a boot-ROM image with byte 0xFD
-/// forced to 0 before hashing. Gambatte's testrunner does the same masking so a
+/// forced to 0 before hashing. The reference test harness does the same masking so a
 /// boot ROM that only differs at 0xFD (a known per-revision byte) still matches.
 fn bios_masked_crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
@@ -162,9 +162,13 @@ pub struct Mmio {
     wram_bank: memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>,
     oam: memory::Memory<OAM_START, OAM_SIZE>,
     // CGB-only shadow for the 0xFEA0-0xFEFF "unused" region, which on CGB
-    // mirrors the OAM index space masked with 0xE7 (Gambatte ioamhram_ tail).
+    // mirrors the OAM index space masked with 0xE7.
     // Indexed by `(addr & 0xFF) & 0xE7` minus 0xA0 (reachable indices are
-    // 0xA0..=0xE7). Not present on DMG (writes ignored, reads 0xFF).
+    // 0xA0..=0xE7). On DMG, writes are ignored and reads return 0x00 (the shadow
+    // stays at its default); 0xFF is returned only while OAM is DMA-blocked.
+    // Documented: TCAGBD §2.10 "Unused Memory Area FEA0h-FEFFh" & Pan Docs
+    // "Memory Map / FEA0-FEFF range" (CGB = a revision-masked RAM area; our &0xE7
+    // fold reproduces TCAGBD's BGB-described three-groups-of-8 mirror pattern).
     #[serde(default = "default_oam_high", with = "serde_bytes")]
     oam_high: [u8; 0x60],
     timer: timer::Timer,
@@ -188,8 +192,8 @@ pub struct Mmio {
     hram: memory::Memory<HRAM_START, HRAM_SIZE>,
     ie_register: u8,
     audio: audio::Audio,
-    // OAM DMA state. Modeled on Gambatte's continuously-running engine:
-    // `dma_pos` mirrors `oamDmaPos_` and idles at 254 (-2). On an FF46 write
+    // OAM DMA state. Models the hardware's continuously-running OAM-DMA engine:
+    // `dma_pos` idles at 254 (-2). On an FF46 write
     // the engine is armed (`dma_active`) and `dma_start_pos = (dma_pos + 2)`;
     // the transfer of byte 0 therefore begins two M-cycles after the write.
     // Each M-cycle (4 dots) advances `dma_pos`; when it reaches `dma_start_pos`
@@ -203,12 +207,12 @@ pub struct Mmio {
     #[serde(default)]
     dma_subcycle: u8, // dots elapsed within the current M-cycle (0..=3)
     // Set when a CPU write lands in OAM (0xFE00-0xFE9F) this M-cycle, so the PPU
-    // can fire the sprite-snapshot `change(cc)` (Gambatte `oamChange` on a write).
+    // can fire the sprite snapshot on an OAM write.
     // Drained by the PPU each dot.
     #[serde(default)]
     oam_write_pending: bool,
-    // CGB VRAM-source OAM-DMA conflict reads return OAM[oamDmaPos_] and then
-    // zero that OAM byte (Gambatte `nontrivial_read`). The read path is &self,
+    // CGB VRAM-source OAM-DMA conflict reads return OAM[dma_pos] and then
+    // zero that OAM byte. The read path is &self,
     // so record the position here and apply the zero on the next DMA advance.
     // -1 = none.
     #[serde(skip, default = "default_pending_oam_zero")]
@@ -220,6 +224,9 @@ pub struct Mmio {
     // VRAM[(dma_src_addr & fetcher_bus_addr)] — both the fetcher and the DMA drive
     // the VRAM address bus, so the array is indexed by their bitwise-AND (the real
     // hardware "OAM DMA bus conflict"). Cleared each dot the PPU is not mode-3.
+    // Not in Pan Docs, TCAGBD, or GBCTR (GBCTR marks "OAM DMA bus conflicts" TODO;
+    // TCAGBD §9.6.3's VRAM-read corruption is the GDMA/HDMA engine, not OAM-DMA);
+    // the AND-with-fetcher formula is from real-silicon .dump captures.
     #[serde(skip, default)]
     fetcher_bus_addr: u16,
     #[serde(skip, default)]
@@ -304,17 +311,20 @@ pub struct Mmio {
     // Back-to-back GDMA word-bus conflict: set true while an OAM DMA is active once a
     // GDMA-conflict pass has run in this OAM-DMA lifetime, so the NEXT GDMA block (no
     // OAM-DMA completion in between) is recognised as a back-to-back second block.
+    // Not in Pan Docs, TCAGBD, or GBCTR; the 2x-GDMA word-bus first-word duplication
+    // is from real-silicon oamdumper .dump captures (not modelled by prior emulators).
     #[serde(skip, default)]
     gdma_conflict_ran: bool,
-    // Blocks-remaining-minus-one, matching Gambatte's `dmaLength/0x10 - 1`.
+    // Blocks remaining, minus one.
     // 0x7F means "fully done": FF55 reads as 0xFF.
+    // Pan Docs: CGB Registers (VRAM DMA) — https://gbdev.io/pandocs/CGB_Registers.html
     hdma_length: u8,
     // True while HDMA is armed (FF55 bit7 written as 1, not yet completed
     // or cancelled).
     #[serde(default)]
     hdma_enabled: bool,
     // True while a 0x10-byte block is scheduled to fire on the next CPU
-    // cycle. Mirrors Gambatte's `hdma_req` intreq flag. Set by the PPU at
+    // cycle. Mirrors the hardware's pending-DMA request. Set by the PPU at
     // Mode 3->0 boundary (when `hdma_enabled`) and by LCD enable/disable
     // edges; cleared after `run_hdma_block` runs.
     #[serde(default)]
@@ -325,28 +335,32 @@ pub struct Mmio {
     // boundary, so a state saved with a stall pending must resume with it.
     #[serde(default)]
     pending_dma_stall: u32,
-    // C7 (DMA prefetch absorption): Gambatte runs GDMA/HDMA as `intevent_dma` with
-    // a preceding `Interrupter::prefetch` that fetches the next opcode at the dma
-    // event cc with NO extra cc — the opcode-fetch M-cycle is folded into the dma's
-    // trailing `+4`. rustyboi copies the block synchronously and drains the cc as an
-    // idle stall, so the FIRST access after the stall starts its M-cycle one dot
-    // higher than Gambatte's (the absorbed prefetch M-cycle is double-counted). This
-    // flag, set when the stall is consumed, tells the next FF41 STAT-mode read to
-    // resolve at `master_cc - 1` (Gambatte's true read cc) so the post-DMA mode-3
-    // boundary `_1`/`_2` brackets land on the same sub-dot Gambatte does. Cleared
-    // after the first STAT mode read consumes it.
+    // DMA prefetch absorption: hardware runs GDMA/HDMA with a preceding opcode
+    // prefetch that fetches the next opcode at the DMA event cc with NO extra cc —
+    // the opcode-fetch M-cycle is folded into the DMA's trailing `+4`. rustyboi
+    // copies the block synchronously and drains the cc as an idle stall, so the
+    // FIRST access after the stall starts its M-cycle one dot higher than hardware
+    // (the absorbed prefetch M-cycle is double-counted). This flag, set when the
+    // stall is consumed, tells the next FF41 STAT-mode read to resolve at
+    // `master_cc - 1` (hardware's true read cc) so the post-DMA mode-3 boundary
+    // `_1`/`_2` brackets land on the same sub-dot hardware does. Cleared after the
+    // first STAT mode read consumes it.
+    // Not in Pan Docs, TCAGBD, or GBCTR; sub-cycle STAT-bias timing from test-ROM refs.
     #[serde(skip, default)]
     dma_prefetch_stat_bias: bool,
     // VRAM-source GDMA first-word latch. A GDMA whose source is VRAM reads
     // nothing (same-bus read: floats 0xFF), EXCEPT the transfer's first 16-bit
     // word, which latches the byte the CPU's absorbed next-opcode prefetch
-    // (Gambatte `intevent_dma` -> `Interrupter::prefetch`) left on the data
+    // left on the data
     // bus - duplicated into both bytes by the word bus. AntonioND
     // hdma_valid_sources real_gbc.sav row 8000 reads `3E 3E FF FF ...` (0x3E =
     // the `ld a,` opcode following the FF55 write). The prefetch byte is only
     // known at the CPU's next fetch, so `execute_gdma` arms this with the
     // first dest word's VRAM address (+ bank), and `Bus::fetch_opcode` patches
     // the two bytes with the fetched opcode. Consume-once.
+    // Base (VRAM-source DMA = "two unknown bytes then FFh"): TCAGBD §9.6.3; the
+    // identity of the two bytes (the word-duplicated prefetch opcode) is from the
+    // AntonioND hdma_valid_sources captures — not in Pan Docs/GBCTR.
     #[serde(skip, default)]
     gdma_vram_src_fixup: Option<(u16, bool)>,
     // Joypad IRQ input-filter delay for the JOYP select-write edge, in master
@@ -362,18 +376,18 @@ pub struct Mmio {
     joypad_irq_delay: u32,
     // OAM-DMA advance suppression for the GDMA/HDMA stall window. `execute_gdma`
     // / `run_hdma_block` fold the OAM-DMA's M-cycle advances INTO the transfer
-    // loop (Gambatte's `cc - 3 > lOam` gate inside `Memory::dma`). The same
+    // loop. The same
     // transfer cc are then drained as a CPU `pending_dma_stall`, during which
     // `step_dma` would advance the OAM-DMA a SECOND time. This counts those
-    // already-folded dots so `step_dma` skips them (mirrors Gambatte freezing
-    // `lastOamDmaUpdate_` at its post-loop value until the next `updateOamDma`).
+    // already-folded dots so `step_dma` skips them (the OAM-DMA stays frozen
+    // at its post-loop position until the next OAM-DMA update).
     // Serialized (additive `default`): the suppression window drains across the
     // CPU stall, spanning instruction boundaries.
     #[serde(default)]
     oam_dma_stall_suppress: u32,
     // Allow the OAM-DMA to advance this many M-cycles at HALT entry before the
-    // freeze takes hold (Gambatte `Memory::halt` runs `updateOamDma(cc + 4)`
-    // before halting, so the HALT instruction's own M-cycle moves the OAM-DMA;
+    // freeze takes hold (hardware advances the OAM-DMA by the HALT instruction's
+    // own M-cycle before halting, so that one M-cycle moves the OAM-DMA;
     // subsequent halt M-cycles freeze it). Set by `on_cpu_halt`, decremented by
     // `step_dma` advances. Serialized (additive `default`): the grace persists
     // across the whole HALT window, so a state saved mid-HALT with an armed grace
@@ -382,9 +396,9 @@ pub struct Mmio {
     #[serde(default)]
     halt_oam_grace: u8,
     // True while the CPU is parked in the STOP speed-switch unhalt window
-    // (0x20000 cycles). Gambatte's `Memory::stop` `intreq_.halt()`s for this
-    // window, so `updateOamDma` takes its `halted()` branch (advances
-    // `lastOamDmaUpdate_` WITHOUT moving `oamDmaPos_`). rustyboi drains the
+    // (0x20000 cycles). The CPU is halted for this
+    // window, so the OAM-DMA takes its halted branch (elapsed time is
+    // consumed WITHOUT moving `dma_pos`). rustyboi drains the
     // window via `stop_unhalt_cycles` without setting `cpu_halted`, so the
     // OAM-DMA must be frozen here too. Set on STOP entry, cleared at unhalt.
     // Serialized (additive `default`): the freeze persists across the whole STOP
@@ -392,20 +406,20 @@ pub struct Mmio {
     #[serde(default)]
     oam_dma_stop_freeze: bool,
     // Mirror of the HALT-entry `halt_oam_grace`, but for the STOP speed-switch.
-    // Gambatte's `Memory::stop` runs `updateOamDma(cc + 4)` BEFORE `intreq_.halt()`
-    // (memory.cpp:467-468), so the STOP instruction's own M-cycle advances the
+    // Hardware advances the OAM-DMA by the STOP instruction's own M-cycle before
+    // halting, so that M-cycle advances the
     // OAM-DMA one step before the freeze, and a transfer whose final byte's
-    // M-cycle lands in that window completes (endOamDma) rather than stalling to
-    // unhalt. Without it rustyboi froze one byte short (pos 158 vs Gambatte 160),
+    // M-cycle lands in that window completes (OAM-DMA end) rather than stalling to
+    // unhalt. Without it rustyboi froze one byte short (pos 158 vs hardware's 160),
     // so the post-window mode-2 sprite scan read the in-flight 0xFF source instead
     // of the completed OAM (oamdma_late_speedchange_stat_2: the line's left-edge
-    // sprite goes unmapped, m0Time -11, STAT read mode 0 where Gambatte reads
+    // sprite goes unmapped, mode-0 time -11, STAT read mode 0 where hardware reads
     // mode 3). Set on STOP entry alongside the freeze; consumed in `step_dma`.
     // Serialized (additive `default`): persists across the STOP window like the
     // freeze it pairs with.
     #[serde(default)]
     stop_oam_grace: u8,
-    // Mirrors Gambatte's `haltHdmaState_`.
+    // HDMA period/block state latched at HALT entry.
     #[serde(default)]
     halt_hdma_state: HaltHdmaState,
     // Cached `Ppu::is_hdma_period()` value, refreshed each PPU step. Read
@@ -421,14 +435,14 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_prev_period: bool,
 
-    // Mirrors `intreq_.halted()`. Gambatte suppresses the period-edge
-    // `flagHdmaReq` while halted (video.h:41 `if (!intreq_.halted())`); the
-    // halt-time block is governed instead by the `haltHdmaState_` machine and
+    // True while the CPU is in HALT. Hardware suppresses the period-edge
+    // HDMA request while halted; the
+    // halt-time block is governed instead by the `halt_hdma_state` machine and
     // re-flagged only on unhalt. Set by the HALT opcode, cleared on unhalt.
     #[serde(skip, default)]
     cpu_halted: bool,
 
-    // ENDGAME R2: true while the bus is advancing the world in
+    // True while the bus is advancing the world in
     // lockstep through an HDMA block's transfer cc (the event-interleaved dma()).
     // While set, `step_hdma` must NOT fire/arm a new block (the lockstep advance
     // only ticks timer/PPU through the in-flight transfer; the next m0-edge is
@@ -436,18 +450,18 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_lockstep_active: bool,
 
-    // ENDGAME R2: armed at a Requested-context (multi-block) HDMA unhalt so the
+    // Armed at a Requested-context (multi-block) HDMA unhalt so the
     // per-dot lockstep advance (run_to_min_event) applies ONLY to the block that
-    // fires during the resume instruction (the m21 5-bracket lever), not to the
+    // fires during the resume instruction, not to the
     // normal m0-edge / GDMA-calibration blocks (which keep the deferred-stall
     // path). Cleared when the resume instruction completes.
     #[serde(skip, default)]
     hdma_resume_lockstep_window: bool,
 
-    // CGB STOP speed-switch unhalt window. Gambatte's `Memory::stop` calls
-    // `intreq_.halt()` for the 0x20000-cycle unhalt window, so the HDMA
-    // period-edge `flagHdmaReq` is suppressed during the bridge + window
-    // (video.h:41 `if (!intreq_.halted())`). rustyboi's `cpu_halted` is only set
+    // CGB STOP speed-switch unhalt window. Hardware halts the CPU
+    // for the 0x20000-cycle unhalt window, so the HDMA
+    // period-edge request is suppressed during the bridge + window
+    // (the same halted gate that suppresses it during HALT). rustyboi's `cpu_halted` is only set
     // by the HALT opcode, not by STOP, so the m0-edge wrongly auto-arms a block
     // while the CPU is parked across the speed bridge. Set by `on_stop_window_enter`
     // / cleared by `stop_window_exit_reflag` so `step_hdma`'s arm gate (and edge
@@ -455,35 +469,36 @@ pub struct Mmio {
     #[serde(skip, default)]
     in_stop_window: bool,
 
-    // C1 HALT-wakeup access-cc skew guard. rustyboi does not yet model the
+    // HALT-wakeup access-cc skew guard. rustyboi does not yet model the
     // HALT-wakeup prefetch cost (the documented +9cc HALT bug), so the master_cc
     // the bus snapshots for memory accesses in the instruction stream resumed by a
-    // HALT-wakeup is one M-cycle too early. The FF41 (STAT) getStat-at-cc
+    // HALT-wakeup is one M-cycle too early. The FF41 (STAT) resolve-at-cc
     // resolution (`get_stat_mode_at_cc` mid-frame line tail) is the only consumer
     // sensitive to that sub-M-cycle skew, and the post-tick renderer register is
     // already correct there, so this flag tells the bus to defer the FF41 line-tail
     // override to the register while a HALT-woken stream is live. Set on HALT
     // wakeup, cleared when the CPU next halts again (re-arm). Without it the
-    // `halt/m0int_m0stat_*` / `late_m0*_halt_m0stat_*` (out2) reads regress against
-    // their HALT-free twins, which land the same access_cc but read mode 2.
+    // `halt/m0int_m0stat_*` / `late_m0*_halt_m0stat_*` reads would otherwise
+    // regress against their HALT-free twins, which land the same access_cc but
+    // read mode 2.
     #[serde(skip, default)]
     halt_wakeup_skew: bool,
 
     // Set at an m2-woken CGB HALT exit that charged the +4 halt-exit M-cycle as a
     // REAL cpu stall (sm83.rs `return 4`). Because the stall advances the whole
-    // woken stream 4cc, the `access_cc + 5` OAMSearch getStat read bias would
-    // double-count the +4; while this is live it drops to the +1 lyTime term.
+    // woken stream 4cc, the `access_cc + 5` OAM-scan STAT read bias would
+    // double-count the +4; while this is live it drops to the +1 the LY time term.
     // Cleared when the CPU next halts.
     #[serde(skip, default)]
     m2_halt_stall_charged_cgb: bool,
 
     // True when the live HALT-woken stream was woken by an m0- or m2-proximate
-    // LCD STAT IRQ (the wake landed on/near the m0/m2 event cc). The PTZ
+    // LCD STAT IRQ (the wake landed on/near the m0/m2 event cc). The
     // line-tail mode-2 overrides in `get_stat_mode_midframe` model the unmodeled
     // m0-wake-exit skew of exactly those streams (m0int_m0stat_scx* /
     // m2int_m0stat families); an LYC/m1-woken stream reading the same
-    // lineCycles zone must instead resolve the true closed-form mode (real
-    // DMG+CGB read mode 0 at lineCycles 449..452, gbc-hw-tests
+    // line cycles zone must instead resolve the true closed-form mode (real
+    // DMG+CGB read mode 0 at line cycles 449..452, gbc-hw-tests
     // lcd_irq_delay_timer: the ISR read one M-cycle before the LY-lead cycle
     // reads C0, not C2). Set at HALT wakeup, cleared when the CPU next halts.
     #[serde(skip, default)]
@@ -491,20 +506,20 @@ pub struct Mmio {
 
     // True when an SS->DS speed-switch STOP was executed while `halt_wakeup_skew`
     // was live (halt-wake -> STOP with no intervening HALT), i.e. the post-switch
-    // DS stream still carries the un-charged CGB halt-exit M-cycle (Gambatte
-    // memory.cpp:301 `cc += 4 * isCgb()`). Consumed by `get_ly_reg_at_cc` as the
+    // DS stream still carries the un-charged CGB halt-exit M-cycle (the +4 CGB
+    // halt-exit latency). Consumed by `get_ly_reg_at_cc` as the
     // DS analog of the single-speed `cgb_halt_exit` -5 read bias (daid
     // speed_switch_timing_ly: the vblank-STOP LY-read train samples 4cc closer to
     // the line wrap than the engine cc reflects; without it read 46 lands on the
     // `ly&(ly+1)` glitch dot instead of pre-incrementing). Armed at the STOP,
-    // cleared when the CPU next halts (the stream ends). The gambatte
+    // cleared when the CPU next halts (the stream ends). The
     // speedchange_ly*/enable_display DS LY probes never halt before their switch
     // (skew=false at STOP) and stay on the generic -1 path.
     #[serde(skip, default)]
     ssds_haltskew_ly_advance: bool,
 
     // True when the current HALT wakeup involved HDMA (a block was Low/Requested
-    // at halt or HDMA was enabled across the wakeup). The CGB halt-exit +4 getLyReg
+    // at halt or HDMA was enabled across the wakeup). The CGB halt-exit +4 LY-report
     // bias is already folded into the HDMA wakeup phase (the in-halt block transfer
     // / unhalt reflag), so the plain-wakeup bias must be suppressed for these.
     #[serde(skip, default)]
@@ -518,7 +533,7 @@ pub struct Mmio {
     // wake cc, and the wake-time hdma predicates cannot see a GDMA / late-armed
     // HDMA that the woken stream will fire only after the wake. On real
     // hardware those streams stall too; modeling that requires re-anchoring
-    // the whole DMA web (documented debt, no oracle currently distinguishes).
+    // the whole DMA web (documented debt; no test ROM currently distinguishes it).
     // Serialized (additive `default`) so a state saved after the ROM first
     // touched FF55 preserves the sticky exactly rather than self-healing.
     #[serde(default)]
@@ -533,30 +548,28 @@ pub struct Mmio {
     #[serde(default)]
     m3_lcdc_write_seen: bool,
 
-    // FAITHFUL EVENTCC: the cc at which the most-recent still-unserviced mode-0
-    // STAT IRQ's IF bit was raised, equal to Gambatte's
-    // `intreq_.eventTime(intevent_interrupts)` for that m0 IRQ
-    // (`predictedNextXposTime(166)`). The halt-exit `<2` fixup (memory.cpp:308)
+    // The cc at which the most-recent still-unserviced mode-0
+    // STAT IRQ's IF bit was raised, equal to the m0 IRQ event time
+    // (the mode-0 start at x-pos 166). The halt-exit `<2` fixup
     // reads this to decide the +4 wakeup latency. `None` once serviced/cleared or
     // when no closed-form master existed at flag time.
     #[serde(skip, default)]
     pending_m0_irq_fire_cc: Option<u64>,
 
-    // FAITHFUL EVENTCC: set at HALT-exit when Gambatte's memory.cpp:308 fixup
-    // `cc += 4 * (isCgb() || cc - eventTime < 2)` applies the +4 wakeup latency on
+    // Set at HALT-exit when the hardware +4 wakeup-latency fixup applies on
     // a non-CGB (DMG) wakeup — i.e. the wakeup landed within 2cc of the woken IRQ
-    // event time. The DMG halt-woken getStat read then samples +4cc later in the
-    // line (the same place the existing CGB `+5` read bias models the isCgb()
-    // branch). Cleared on the next HALT entry.
+    // event time. (Hardware charges the +4 unconditionally on CGB, or on DMG only
+    // when within 2cc of the event.) The DMG halt-woken STAT read then samples
+    // +4cc later in the line (the same place the existing CGB `+5` read bias models
+    // the CGB branch). Cleared on the next HALT entry.
     #[serde(skip, default)]
     halt_wake_plus4_dmg: bool,
 
-    // FAITHFUL HALT-EXIT (mooneye intr_2): master_cc at which the mode-2 STAT
-    // IRQ event last raised IF (Gambatte's eventTime for the m2 memevent). A
-    // DMG halt wake landing within 2cc of it takes the real +4 halt-exit
-    // M-cycle (memory.cpp:301 `cc += 4 * (isCgb() || cc - eventTime < 2)`) as
+    // (mooneye intr_2) master_cc at which the mode-2 STAT
+    // IRQ event last raised IF (the m2 event time). A
+    // DMG halt wake landing within 2cc of it takes the real +4 halt-exit M-cycle as
     // a genuine 4-cycle stall before the wake, so the whole woken instruction
-    // stream — not just biased reads — resumes on Gambatte's cc.
+    // stream — not just biased reads — resumes on hardware's cc.
     #[serde(skip, default)]
     last_m2_irq_fire_cc: Option<u64>,
 
@@ -566,10 +579,10 @@ pub struct Mmio {
     #[serde(skip, default)]
     last_m2_irq_ly: u8,
 
-    // FAITHFUL HALT-EXIT (mooneye hblank_ly_scx): the total halt-exit cc
-    // advance Gambatte charges a DMG m0-STAT-IRQ-woken wake — the ceil-to-
-    // M-cycle snap (`-cycles & 3`, cpu.cpp:533) plus the conditional +4
-    // (`cc - eventTime < 2`, memory.cpp:301) — derived from the m0 eventTime's
+    // (mooneye hblank_ly_scx) the total halt-exit cc
+    // advance hardware charges for a DMG m0-STAT-IRQ-woken wake — the ceil-to-
+    // M-cycle snap plus the conditional +4 (charged only when the wake lands
+    // within 2cc of the event) — derived from the m0 event time's
     // mod-4 phase. rustyboi's per-cycle halt loop wakes at the exact IF-set cc
     // instead, so the woken stream's single FF44 read must be re-anchored by
     // this advance at the consume site (get_ly_reg_at_cc). Read-side only (the
@@ -582,46 +595,44 @@ pub struct Mmio {
     // a CGB console running a DMG-flagged cart (hblank_ly_scx_timing-C: console is
     // CGB, `is_cgb_features_enabled()` is false, so neither the DMG unhalt block —
     // gated `!is_cgb()` — nor the `cgb_halt_exit` +5 — gated on cart features —
-    // fires). Gambatte's HALT-exit fixup (memory.cpp:301) is
-    // `cc += 4 * (isCgb() || cc - eventTime < 2)`; on CGB the `isCgb()` disjunct
+    // fires). Hardware's HALT-exit fixup charges +4 when CGB, or when the wake
+    // lands within 2cc of the event; on CGB the CGB disjunct
     // makes the +4 UNCONDITIONAL, so the full wake advance is the ceil-to-M-cycle
     // snap PLUS a flat +4 (vs the DMG conditional +4). Derived at unhalt from the
-    // m0 eventTime's mod-4 phase; consumed read-side by the woken FF44 read as
-    // `to_next - adv`. Yields constant tn (=9 delay_a / 5 delay_b) across the
-    // 51/50/49 per-SCX classes, exactly like the passing DMG -GS version.
+    // m0 event time's mod-4 phase; consumed read-side by the woken FF44 read as
+    // `to_next - adv`. Yields a constant next-read offset across the
+    // 51/50/49 per-SCX classes, matching the DMG path.
     #[serde(skip, default)]
     cgb_m0_halt_ly_advance: Option<u32>,
 
-    // HALT-PREFETCH (Lever A, RB_PREFETCH_CC). The pre-snap master_cc at real
-    // HALT entry (on_cpu_halt). This is the un-snapped HALT-entry cc that
-    // Gambatte's ceil_4(eventTime) snap (cpu.cpp:1075) would otherwise erase;
-    // compared against the captured m0 eventTime at unhalt to derive the
-    // M-cycle-granular phase bit that separates the byte-identical _1b/_2b
-    // streams. None when not in a real-halt window. Flag-OFF: stays None.
+    // The pre-snap master_cc at real HALT entry (on_cpu_halt). This is the
+    // un-snapped HALT-entry cc that hardware's ceil-to-M-cycle event-time snap
+    // would otherwise erase; compared against the captured m0 event time at
+    // unhalt to derive the M-cycle-granular phase bit that separates the two
+    // byte-identical woken instruction streams. None when not in a real-halt window.
     #[serde(skip, default)]
     halt_entry_cc: Option<u64>,
     // Per-stream HALT-prefetch phase (0 or 1), derived at unhalt from
-    // halt_entry_cc vs the snapped eventTime; carried onto the single woken
+    // halt_entry_cc vs the snapped event time; carried onto the single woken
     // FF41 read as access_cc += 4 * phase. Cleared at the consume site so it
-    // biases only the one woken instruction stream. Flag-OFF: stays 0.
+    // biases only the one woken instruction stream.
     #[serde(skip, default)]
     halt_prefetch_phase: u32,
-    // HALT-PREFETCH (R-PC, RB_TIMER_PUSH_PHASE): per-stream woken-PC push phase
-    // (0 or 1) for the CGB+Timer HALT-exit. Set 1 at unhalt when the HALT left a
-    // NON-advancing prefetch peek (Requested-HDMA halt-state): there the
-    // service_interrupt `pc -= 1` prefetch undo over-subtracts, so phase 1 tells
-    // it to re-add the +1, matching Gambatte's CONDITIONAL undo
-    // (interrupter.cpp:42 `if (prefetched_) pc_ -= 1`). Separate register from
-    // halt_prefetch_phase (the DMG+Lcd FF41 getStat consumer) so that path is
+    // Per-stream woken-PC push phase (0 or 1) for the CGB+Timer HALT-exit. Set 1
+    // at unhalt when the HALT left a NON-advancing prefetch peek (Requested-HDMA
+    // halt-state): there the service_interrupt `pc -= 1` prefetch undo
+    // over-subtracts, so phase 1 tells it to re-add the +1, matching hardware's
+    // CONDITIONAL prefetch undo (undone only when a prefetch actually occurred). Separate register
+    // from halt_prefetch_phase (the DMG+Lcd FF41 STAT consumer) so that path is
     // untouched. Cleared at the push consume so it biases only the one woken
-    // interrupt service. Flag-OFF: stays 0.
+    // interrupt service.
     #[serde(skip, default)]
     timer_push_phase: u32,
 
     // Whether the HDMA block owed for the *current* eligibility period has
     // already been serviced. rustyboi fires the period block immediately at the
-    // rising edge, whereas Gambatte defers it to the `intevent_dma` event; this
-    // flag lets `on_cpu_halt` recover Gambatte's distinction between "in period,
+    // rising edge, whereas hardware defers it to the DMA event; this
+    // flag lets `on_cpu_halt` recover hardware's distinction between "in period,
     // block already done" (hdma_high) and "in period, block still owed"
     // (hdma_requested -> fires on the deferred/unhalt path). Reset on the period
     // falling edge.
@@ -630,8 +641,8 @@ pub struct Mmio {
 
     // An HDMA-period rising edge that occurred WHILE the CPU was halted and whose
     // block was ALREADY serviced this period (the halt was entered in-period with
-    // the block done -> `haltHdmaState_ == High`). Gambatte's during-halt period
-    // `flagHdmaReq` is suppressed (video.h:41 `!intreq_.halted()`) AND consumed —
+    // the block done -> `halt_hdma_state == High`). Hardware's during-halt period
+    // HDMA request is suppressed (by the halted gate) AND consumed —
     // it never re-fires after unhalt; the next-line m0 edge fires the next block.
     // rustyboi's per-dot edge machine can resurrect that suppressed edge via the
     // STAT mode-3->0 fallback the first dot after unhalt (when the renderer's
@@ -646,9 +657,9 @@ pub struct Mmio {
     // High-at-halt unhalt: the next-line m0 edge consume that lands JUST AFTER the
     // unhalt (not during the halt window, so `hdma_halt_edge_consumed` was never
     // set for it). When a HALT was entered in-period with the block already served
-    // (`haltHdmaState_ == High`), Gambatte suppresses+consumes the during-halt m0
-    // `flagHdmaReq` for the immediately-following line; rustyboi's unhalt cc can land
-    // ONE dot before that line's m0 (vs Gambatte's unhalt landing just after it), so
+    // (`halt_hdma_state == High`), hardware suppresses+consumes the during-halt m0
+    // HDMA request for the immediately-following line; rustyboi's unhalt cc can land
+    // ONE dot before that line's m0 (vs hardware's unhalt landing just after it), so
     // the edge fires through the post-unhalt STAT 3->0 fallback instead of being
     // consumed (`hdma_late_m0halt_*_lcdoffset*_1`: a spurious extra block one line
     // early). This flag, set at the High-unhalt site, suppresses exactly the first
@@ -657,27 +668,24 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_high_unhalt_consume: bool,
 
-    // per-access STAGE 2 (FACET 3): when a Requested-at-halt HDMA
-    // block is reflagged+fired at unhalt, the NEXT line's m0 rising edge that
-    // re-arms the following block may fall WITHIN that block's transfer span. In
-    // Gambatte that m0 `memevent_hdma` is absorbed by the in-flight `dma()` (the
-    // event is processed at the block's end cc, its `flagHdmaReq` reschedules to
-    // the line AFTER), so the genuine next block fires a full line later. rustyboi
-    // fires synchronously at the per-dot m0 edge, so without this it arms the next
-    // block at that absorbed edge — one line early. This is the sub-block-cc
-    // discriminator the `hdma_transition_halt_late_unhalt_scx1_1` (m0 edge inside
-    // block span -> defer) vs `_2` (m0 edge past block span -> fire this line)
-    // canary pair probes: the only differing quantity at the dot grid is the
-    // absolute sub-dot phase of the post-unhalt m0 edge vs block1's transfer end.
-    // The window is `[block1_fire_cc, block1_fire_cc + 16*(2+2*ds)]` (the dma()
-    // transfer length, inclusive end — Gambatte's edge AT the transfer end is still
-    // absorbed); armed at the Requested unhalt reflag, `step_hdma` consumes every m0
-    // arm inside it and disarms on the first arm strictly past it.
+    // When a Requested-at-halt HDMA block is reflagged+fired at unhalt, the NEXT
+    // line's m0 rising edge that re-arms the following block may fall WITHIN that
+    // block's transfer span. In hardware that m0 HDMA event is
+    // absorbed by the in-flight transfer (the event is processed at the block's end
+    // cc, its HDMA request reschedules to the line AFTER), so the genuine next
+    // block fires a full line later. rustyboi fires synchronously at the per-dot m0
+    // edge, so without this it arms the next block at that absorbed edge — one line
+    // early. The absorption window is `[block1_fire_cc, block1_fire_cc + 16*(2+2*ds)]`
+    // (the dma() transfer length, inclusive end — an edge AT the transfer end is
+    // still absorbed); armed at the Requested unhalt reflag, `step_hdma` consumes
+    // every m0 arm inside it and disarms on the first arm strictly past it.
+    // HDMA transfers one block per H-Blank (base): TCAGBD §9.6.2. The m0-edge
+    // absorption-window sub-cycle timing is not in Pan Docs/TCAGBD/GBCTR — test-ROM refs.
     #[serde(skip, default)]
     hdma_peraccess_consume_pending: bool,
 
-    // Deferred HDMA block byte writes. Gambatte's `Memory::dma` reads each byte
-    // at `cc` but writes it to VRAM at `cc + (2 + 2*ds)` (memory.cpp:354/375),
+    // Deferred HDMA block byte writes. Hardware reads each byte
+    // at `cc` but writes it to VRAM at `cc + (2 + 2*ds)`,
     // so byte 0 lands one sub-M-cycle AFTER the trigger/prefetch boundary and
     // after VRAM unlocks. rustyboi fires the block synchronously; to place the
     // VRAM writes at the correct sub-M-cycle (the 4cc window the hdma_start /
@@ -691,8 +699,8 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_write_delay: u32,
 
-    // PC-in-DMA-dest prefetch absorption (Gambatte `Interrupter::prefetch` runs
-    // the next-opcode fetch at the instruction boundary, BEFORE the `dma()` event
+    // PC-in-DMA-dest prefetch absorption (hardware runs
+    // the next-opcode fetch at the instruction boundary, BEFORE the DMA event
     // overwrites VRAM). When a synchronous GDMA/HDMA block fires and the CPU's
     // very next opcode fetch lands on the block's first destination byte
     // (pc straddles ROM bank0->VRAM at 0x7FFE->0x8000), that opcode must read the
@@ -704,7 +712,7 @@ pub struct Mmio {
     hdma_fire_dest0: Option<u16>,
     #[serde(skip, default)]
     hdma_fire_dest0_prebyte: u8,
-    // The dma-event cc at which the block fired. Gambatte's `intevent_dma`
+    // The dma-event cc at which the block fired. The hardware
     // prefetch reads the next opcode at THIS cc (before the transfer), so the
     // prefetch's VRAM-lock decision must be taken here, not at rustyboi's
     // post-stall prefetch cc (which trails the fire by the whole transfer stall).
@@ -718,27 +726,26 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_snapshot_armed: bool,
 
-    // ENDGAME m25: resume-read pre-transfer shadow. When an HDMA
-    // block fires inside the Requested-context HALT-bug resume window
-    // (`hdma_resume_lockstep_window`), Gambatte's `Interrupter::prefetch(cc)` runs
-    // the resume instruction's reads at the dma-event cc, BEFORE `dma()` commits
-    // the dest writes. So a resume read of any in-block VRAM dest byte must observe
-    // the PRE-transfer value (the m21 lockstep advances the PPU to mode-0
-    // readable, but the dest byte read at 0x80FA must still be its pre-write
-    // value, not the just-transferred byte). Capture the pre-transfer bytes of the
-    // whole dest range at fire; `read()` serves them for the window's duration
-    // (one resume instruction). 1FFF-masked VRAM offset -> pre-byte.
+    // Resume-read pre-transfer shadow. When an HDMA block fires inside the
+    // Requested-context HALT-bug resume window (`hdma_resume_lockstep_window`),
+    // hardware runs the resume instruction's reads at the dma-event cc,
+    // BEFORE the DMA commits the dest writes. So a resume read of any in-block VRAM
+    // dest byte must observe the PRE-transfer value (the lockstep advances the PPU
+    // to mode-0 readable, but the dest byte read at 0x80FA must still be its
+    // pre-write value, not the just-transferred byte). Capture the pre-transfer
+    // bytes of the whole dest range at fire; `read()` serves them for the window's
+    // duration (one resume instruction). 1FFF-masked VRAM offset -> pre-byte.
     #[serde(skip, default)]
     hdma_resume_pre_shadow: std::collections::HashMap<u16, u8>,
-    // Armed for BOTH IME states (unlike the !ime lockstep window); scopes the m25
+    // Armed for BOTH IME states (unlike the !ime lockstep window); scopes the
     // pre-transfer shadow capture/serve through the resume read (HALT-bug double
     // execute OR the IME-on interrupt-service ISR read).
     #[serde(skip, default)]
     hdma_resume_shadow_window: bool,
 
-    /// FAITHFUL HALT-EXIT (CGB dma-due deferral): cc added to a VRAM WRITE's PPU
-    /// mode-block check for the deferred post-HALT `ld (nn),a`. Gambatte's
-    /// `intevent_dma` advances the PPU across block1's transfer before the CPU
+    /// (CGB dma-due deferral) cc added to a VRAM WRITE's PPU
+    /// mode-block check for the deferred post-HALT `ld (nn),a`. The hardware's
+    /// DMA event advances the PPU across block1's transfer before the CPU
     /// resumes, so that write lands in the post-transfer mode-0 window. rustyboi
     /// defers block1's stall (block2's next/same-line timing depends on that
     /// deferral), so instead of advancing the world it biases only this write's
@@ -746,9 +753,9 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_dma_due_write_cc_bias: u64,
 
-    // C7-full FF55-kick fire-timing: set when an FF55 bit7=1 write (enable or
-    // restart) wants to arm the first block immediately. Gambatte's `enableHdma`
-    // gates that immediate flag on the LIVE `isHdmaPeriod(cc + 4)` predicate, not
+    // FF55-kick fire-timing: set when an FF55 bit7=1 write (enable or
+    // restart) wants to arm the first block immediately. Hardware
+    // gates that immediate flag on the LIVE in-HBlank-period predicate (at cc+4), not
     // the 1-dot-lagged renderer period cache. The bus resolves this flag after
     // the FF55 write by evaluating the PPU's `hdma_period` at the write access cc;
     // if not in period the kick is dropped (the block then arms on the next
@@ -756,9 +763,9 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_kick_eval_pending: u8,
 
-    // FF55=00 disable-vs-m0-edge race (Gambatte `disableHdma`): a FF55 bit7=0
+    // FF55=00 disable-vs-m0-edge race: a FF55 bit7=0
     // write only clears the FUTURE m0-edge HDMA schedule; it CANNOT un-flag a
-    // block whose m0 edge already fired (`intevent_dma` latched -> `dma()` still
+    // block whose m0 edge already fired (the DMA event latched -> the transfer still
     // runs). The bus sets this BEFORE the FF55 write by evaluating the PPU's
     // `hdma_disable_fires(cc)` (true => m0 edge already passed => the block must
     // still run despite the disable). The write handler reads it: Some(true) =>
@@ -767,15 +774,15 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_disable_fires: Option<bool>,
 
-    // C7-full interrupt-vs-dma precedence: while an interrupt service is
+    // Interrupt-vs-dma precedence: while an interrupt service is
     // mid-flight (its PC pushes not yet complete), the M-cycle-boundary HDMA fire
-    // is suppressed so the block fires AFTER the pushes (memory.cpp:312-320). Set
+    // is suppressed so the block fires AFTER the pushes. Set
     // by `service_interrupt` around the pushes, cleared once it fires the block.
     #[serde(skip, default)]
     hdma_mcycle_fire_suppressed: bool,
 
     // Late-hdma-vs-interrupt unhalt precedence: set at unhalt when a Low-at-halt
-    // HDMA block did NOT reflag (Gambatte `isHdmaPeriod(cc)` false at unhalt), so
+    // HDMA block did NOT reflag (the reflag gate was false at unhalt), so
     // its m0-edge falls within the immediately-following interrupt service window.
     // The service then suppresses+reorders that block to fire AFTER its PC pushes
     // (the `late_hdma_vs_tima_*_halt_2` content tests: copy the pushed 0x11C9).
@@ -784,8 +791,8 @@ pub struct Mmio {
     hdma_unhalt_noreflag_deferred: bool,
 
     // Next-M-cycle dma() scheduling for the IME-off HALT-bug resume. A block
-    // reflagged at unhalt fires (in Gambatte) at the instruction boundary AFTER
-    // the resume instruction (`intevent_dma` runs after the opcode completes), so
+    // reflagged at unhalt fires (in hardware) at the instruction boundary AFTER
+    // the resume instruction (the DMA event runs after the opcode completes), so
     // its VRAM write lands AFTER the resume instruction's own memory read. The
     // synchronous m0-edge fire instead lands DURING the resume instruction,
     // ahead of that read (hdma_late_if_and_ie_halt_1: the `ld a,(80FA)` read sees
@@ -795,11 +802,11 @@ pub struct Mmio {
     #[serde(skip, default)]
     hdma_unhalt_reflag_deferred: bool,
 
-    // C7-full late-hdma-vs-interrupt re-order: the master_cc at which the most
-    // recent m0-edge HDMA block fired (read its 16 source bytes). Gambatte orders
-    // the `intevent_dma` (HDMA, flagged at `m0Time`) vs `intevent_interrupts`
-    // race by event time: DMA wins only when `m0Time <= minIntTime_` (the
-    // interrupt's serviceable cc). rustyboi fires the block greedily the dot the
+    // Late-hdma-vs-interrupt re-order: the master_cc at which the most
+    // recent m0-edge HDMA block fired (read its 16 source bytes). Hardware orders
+    // the DMA event (HDMA, flagged at the m0 time) vs the interrupt event
+    // race by event time: DMA wins only when the m0 time <= the interrupt's
+    // serviceable cc. rustyboi fires the block greedily the dot the
     // m0-edge is reached — one or two cc BEFORE the interrupt-triggering
     // instruction's boundary — so when an interrupt dispatches within the same
     // M-cycle window the block wrongly read pre-push memory. `service_interrupt`
@@ -847,7 +854,7 @@ pub struct Mmio {
     #[serde(skip, default)]
     cart_has_camera: bool,
     // AGB (GBA-in-GBC-mode) hardware flag. AGB behaves like CGB everywhere
-    // except a small, well-defined set of timing/APU diffs (Gambatte isAgb()).
+    // except a small, well-defined set of timing/APU diffs.
     // Set once at construction from Hardware::AGB; never toggled by cart compat
     // (an AGB is still an AGB even running a DMG-only cart).
     #[serde(default)]
@@ -870,7 +877,7 @@ impl Default for Mmio {
 /// palette RAM, so at game start it still holds this fixed hardware power-on
 /// pattern; games and hwtests that render sprites without programming FF6A/FF6B
 /// observe it. These are hardware values (a measured power-on state, the same
-/// bytes every real-silicon `.bin`/`.dump` OBJP oracle in the suite validates
+/// bytes every real-silicon `.bin`/`.dump` OBJP reference in the suite validates
 /// against), not authored data.
 const CGB_OBJP_POWERON: [u8; 64] = [
     0x00, 0x00, 0xF2, 0xAB, 0x61, 0xC2, 0xD9, 0xBA,
@@ -1108,12 +1115,12 @@ impl Mmio {
     }
 
     /// Set the AGB (GBA-in-GBC-mode) hardware flag. AGB == CGB plus the small
-    /// isAgb() diff set (Gambatte). Called once from `GB::new` for Hardware::AGB.
-    /// CGB-D/E silicon revision (SameBoy `model >= GB_MODEL_CGB_D`), for the
+    /// AGB-specific diff set. Called once from `GB::new` for Hardware::AGB.
+    /// CGB-D/E silicon revision (CGB-D-and-later silicon), for the
     /// PPU/timer revision gates (LY-153 window, end-of-vblank STAT, OAM read
     /// windows, speed-switch TIMA edge). Seeded from `GB::new` for
-    /// Hardware::CGBE; AGB stays on the C side (pinned to the Gambatte-AGB
-    /// oracles), mirroring `is_cgb_d_or_later`.
+    /// Hardware::CGBE; AGB stays on the C side (pinned to the AGB timing/APU diff
+    /// set), mirroring `is_cgb_d_or_later`.
     pub fn set_cgb_de(&mut self, de: bool) {
         self.cgb_de = de;
     }
@@ -1135,19 +1142,18 @@ impl Mmio {
         self.is_mgb = mgb;
     }
 
-    /// Whether this is AGB hardware (Gambatte isAgb()).
+    /// Whether this is AGB hardware.
     pub fn is_agb(&self) -> bool {
         self.is_agb
     }
 
-    /// Seed the CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`).
+    /// Seed the CGB-D/E APU revision gate (CGB-D-and-later silicon).
     /// Called once from `GB::new` for Hardware::CGBE.
     pub fn set_apu_cgb_de(&mut self, de: bool) {
         self.audio.set_cgb_de(de);
     }
 
-    /// Seed the CGB-B-or-earlier APU revision gate (SameBoy `GB_is_cgb &&
-    /// model <= GB_MODEL_CGB_B`). Called once from `GB::new` for
+    /// Seed the CGB-B-or-earlier APU revision gate (CGB-B-and-earlier silicon). Called once from `GB::new` for
     /// Hardware::CGB0/CGBB.
     pub fn set_apu_cgb_le_b(&mut self, le_b: bool) {
         self.audio.set_cgb_le_b(le_b);
@@ -1158,8 +1164,7 @@ impl Mmio {
         self.audio.set_cgb_b(b);
     }
 
-    /// CGB-C-and-older PCM read glitch (SameBoy `pcm_mask`, model <=
-    /// GB_MODEL_CGB_C; excludes AGB and CGB-D/E).
+    /// CGB-C-and-older PCM read glitch (CGB-C-and-older silicon; excludes AGB and CGB-D/E).
     pub fn set_apu_pcm_c_glitch(&mut self, on: bool) {
         self.audio.set_pcm_c_glitch(on);
     }
@@ -1323,7 +1328,7 @@ impl Mmio {
                 ));
             }
         };
-        // Faithful to Gambatte's testrunner loadBios(): zero byte 0xFD before
+        // Faithful to the boot-ROM load convention: zero byte 0xFD before
         // hashing (it differs between revisions / patched dumps) then crc32.
         let masked_crc = bios_masked_crc32(&data);
         if masked_crc != expected_crc {
@@ -1439,7 +1444,7 @@ impl Mmio {
         self.io_registers.read(ppu::LCD_CONTROL) & (ppu::LCDCFlags::DisplayEnable as u8) != 0
     }
 
-    /// per-access STAGE 1 (min-event idle fast path): true when the whole world is
+    /// Idle fast path: true when the whole world is
     /// idle except the timer+serial, so a span of dots can be bulk-skipped to the
     /// next scheduled event without losing any per-dot peripheral side effect.
     /// Requires: LCD off (no PPU renderer / mode edges / STAT-IRQ schedule),
@@ -1474,7 +1479,7 @@ impl Mmio {
             && !self.serial_device.drives_external_clock()
     }
 
-    /// per-access STAGE 1: bulk-advance the timer+serial to `target_cc` in one shot
+    /// Bulk-advance the timer+serial to `target_cc` in one shot
     /// (only call when `idle_bulk_skippable()` held for the entire span). Mirrors
     /// the order `resolve_one_dot` uses (timer, then serial) so the net effect is
     /// byte-identical to cranking each dot. `master_cc` is `timer.abs_cc`, so the
@@ -1500,7 +1505,7 @@ impl Mmio {
     }
 
     /// Write a timer register, then immediately deliver any glitch IRQ the write
-    /// scheduled (Gambatte flags it inline at the write cc). The write resolves
+    /// scheduled (hardware flags it inline at the write cc). The write resolves
     /// at the timer's current `abs_cc`, which the CPU positions at the access
     /// start cc.
     pub fn write_timer(&mut self, addr: u16, value: u8) {
@@ -1513,7 +1518,7 @@ impl Mmio {
         }
     }
 
-    /// FF0F store prelude (Gambatte `nontrivial_ff_write` 0x0F): pump timer
+    /// FF0F store prelude (the IF register): pump timer
     /// overflow events at the write cc and raise their IF BEFORE the store, so
     /// an exact-collision CPU write wins (see Timer::flush_overflow_for_ifreg_write).
     pub fn flush_timer_overflow_for_ifreg_write(&mut self) {
@@ -1554,7 +1559,7 @@ impl Mmio {
     fn step_serial_slow(&mut self) {
         // Serial now runs on the master cc (`abs_cc`), the SAME clock the timer
         // DIV/TIMA and APU derive from — no separate `cpu_t_phase` parallel
-        // clock (M8 serial merge). `abs_cc` is advanced at the start of the
+        // clock. `abs_cc` is advanced at the start of the
         // timer step within this same dot's tick, so it is the live cc here.
         // Serial::step is a no-op while no transfer is active (the common case),
         // so skip the per-dot clone entirely then. With a link peer attached the
@@ -1620,7 +1625,7 @@ impl Mmio {
     }
 
     /// SC (FF02) write: latches the value, then (re)schedules the transfer event
-    /// using the timer counter and the canonical WRITE access cc (M8). The write
+    /// using the timer counter and the canonical WRITE access cc. The write
     /// resolves at the access START cc (bus.rs routes FF02 to the start-cc path),
     /// so an abort (SC bit-0 cleared) lands before this access's `step_serial`
     /// can fire a completion the abort must suppress.
@@ -1744,7 +1749,7 @@ impl Mmio {
         self.serial.set_cgb(cgb);
     }
 
-    /// CGB *hardware* flag (mirrors Gambatte `isCgb()`): true whenever running on
+    /// CGB *hardware* flag: true whenever running on
     /// CGB hardware, including CGB-in-DMG-compat. Tracks `hardware == CGB` (set via
     /// `set_serial_cgb`), distinct from `is_cgb_features_enabled` (DMG-compat off).
     pub fn is_cgb(&self) -> bool {
@@ -1763,7 +1768,7 @@ impl Mmio {
     /// start cc, mirroring `sync_apu_for_read`. The per-dot `step_serial` during
     /// `tick_m` can complete the transfer and set the serial IF bit within the
     /// read cycle; capturing the value before ticking makes the CPU observe
-    /// serial state at the read's start (Gambatte resolves the read at cc).
+    /// serial state at the read's start (hardware resolves the read at cc).
     pub fn snapshot_serial_read(&self, addr: u16) -> u8 {
         self.read(addr)
     }
@@ -1840,7 +1845,7 @@ impl Mmio {
 
     /// Establish the post-`skip_bios` APU state. Syncs the APU cycle counter from
     /// the (already-set) timer counter first so the channel duty phase has the
-    /// correct cc base, then applies Gambatte's post-boot state.
+    /// correct cc base, then applies the hardware post-boot state.
     pub fn set_post_bios_audio_state(&mut self, cgb: bool, ch1_active: bool) {
         self.sync_apu_cc();
         self.audio.set_post_bios_state(cgb, ch1_active);
@@ -1874,16 +1879,16 @@ impl Mmio {
     /// Push the APU's 2 MHz cycle-counter inputs to the audio unit: the
     /// frame-sequencer step (FS phase, maintained independently of DIV writes)
     /// and the timer's internal counter (sub-step position). The controller
-    /// reconstructs Gambatte's `cycleCounter_` from these.
+    /// reconstructs the APU frame timing from these.
     /// Returns whether the APU clock advanced (see `Audio::sync_cc`).
     fn sync_apu_cc(&mut self) -> bool {
         let ds = self.is_double_speed_mode();
         self.sync_apu_cc_with_ds(ds)
     }
 
-    /// Like `sync_apu_cc`, but with an explicit double-speed flag. Gambatte's
-    /// `PSG::speedChange` calls `generateSamples(cpuCc, isDoubleSpeed())` with
-    /// the speed being LEFT, BEFORE the KEY1 toggle — so the flush to the switch
+    /// Like `sync_apu_cc`, but with an explicit double-speed flag. On a speed
+    /// switch the APU generates its pending samples at the speed being LEFT,
+    /// BEFORE the KEY1 toggle — so the flush to the switch
     /// cc must use the OLD speed's `>>(1+ds)` rate, not the just-toggled one.
     fn sync_apu_cc_with_ds(&mut self, ds: bool) -> bool {
         let abs_cc = self.timer.abs_cc();
@@ -1894,14 +1899,14 @@ impl Mmio {
 
     /// Sync the APU cycle counter to the exact CPU read cycle and advance the
     /// wave channel's fetch position, so an APU/wave-RAM read observes the
-    /// channel at the precise sub-M-cycle (Gambatte evaluates waveRamRead with
+    /// channel at the precise sub-M-cycle (a wave-RAM read resolves at
     /// the live cc). Only used on the read path (0xFF10-0xFF3F).
     pub fn sync_apu_for_read(&mut self) {
         self.sync_apu_cc();
         self.audio.sync_wave_for_read();
     }
 
-    /// Resolve the APU length subsystem at the canonical CPU-access cc (M7).
+    /// Resolve the APU length subsystem at the canonical CPU-access cc.
     /// `read_abs_cc` is the master cc at the access point — the SAME value the
     /// timer register access resolves on (`abs_cc + ACCESS_CC_OFF`). Drives the
     /// length-expiry comparison off one uniform per-access cc, with no
@@ -1912,16 +1917,16 @@ impl Mmio {
         self.audio.set_read_len_cc(read_abs_cc);
     }
 
-    /// Resolve the APU length subsystem at the canonical CPU WRITE access cc
-    /// (M8). Overlays `len_cc` to the write cc, then runs the actual register
+    /// Resolve the APU length subsystem at the canonical CPU WRITE access cc.
+    /// Overlays `len_cc` to the write cc, then runs the actual register
     /// write (whose NRx1/NRx4 length math consumes the overlaid cc), then
     /// restores the steady-state base. Mirrors `sync_apu_read_cc` for the read
     /// side: the trigger's length-expiry boundary is anchored to one uniform
     /// per-access clock, dissolving the write/read phase asymmetry.
     pub fn write_apu(&mut self, addr: u16, value: u8) {
         self.sync_apu_cc();
-        // Gambatte's `waveRamWrite` runs `updateWaveCounter(cc)` before the write
-        // so the corruption/active-fetch window (`waveCounter_ == cc+1`) and the
+        // Hardware advances the wave-channel fetch counter to the write cc first,
+        // so the corruption/active-fetch window (fetch position == cc+1) and the
         // overwritten wave-RAM byte are resolved at the live fetch position. The
         // per-dot `step` only advances the fetch on whole dots; sync it to the
         // exact write cc here, matching the read path.
@@ -1936,12 +1941,12 @@ impl Mmio {
 
     /// The canonical CPU-access cc the timer resolves register accesses on.
     /// Exposed so the bus can present the SAME cc to the APU/serial reads,
-    /// dissolving the per-peripheral phase constants (M7).
+    /// dissolving the per-peripheral phase constants.
     pub fn access_cc(&self) -> u64 {
         self.timer.access_cc()
     }
 
-    /// STAGE 2 (RB_FAITHFUL) event-cc dispatch: the cc the most recent still-
+    /// Event-cc dispatch: the cc the most recent still-
     /// undispatched TIMA IRQ fired at, or `None`. The CPU gates timer-interrupt
     /// eligibility on the boundary access cc having reached this cc.
     pub fn pending_timer_fire_cc(&self) -> Option<u64> {
@@ -1953,24 +1958,23 @@ impl Mmio {
         self.timer.next_overflow_deliver_cc()
     }
 
-    /// FAITHFUL EVENTCC: record the mode-0 STAT IRQ event cc when its IF bit is
-    /// raised (Gambatte `flagIrq(2, eventTimes_(memevent_m0irq))`).
+    /// Record the mode-0 STAT IRQ event cc when its IF bit is raised.
     pub fn set_pending_m0_irq_fire_cc(&mut self, cc: Option<u64>) {
         self.pending_m0_irq_fire_cc = cc;
     }
 
-    /// FAITHFUL EVENTCC: the recorded mode-0 STAT IRQ event cc (halt-exit `<2`
+    /// The recorded mode-0 STAT IRQ event cc (halt-exit `<2`
     /// fixup), or `None` if no unserviced m0 IRQ with a closed-form anchor.
     pub fn pending_m0_irq_fire_cc(&self) -> Option<u64> {
         self.pending_m0_irq_fire_cc
     }
 
-    /// EARLY (EI-loop) anchor cc of the next scheduled overflow (schedCc + IF_OFF).
+    /// EARLY (EI-loop) anchor cc of the next scheduled overflow (scheduled cc + IF_OFF).
     pub fn next_timer_overflow_ei_cc(&self) -> Option<u64> {
         self.timer.next_overflow_ei_cc()
     }
 
-    /// per-access STAGE 1: the EXACT cc the next timer overflow's IF bit is raised
+    /// The EXACT cc the next timer overflow's IF bit is raised
     /// at, with the same `fold` `step_to`/`update_irq_delivery` will apply. The
     /// min-event idle fast path lands on this cc so the overflow fires identically.
     pub fn next_timer_overflow_fire_cc(&self) -> Option<u64> {
@@ -1983,8 +1987,8 @@ impl Mmio {
     }
 
     /// EI-loop fast timer delivery: fire any imminent overflow at the early anchor
-    /// (`boundary >= schedCc + IF_OFF`) and raise its IF bit. Called by the CPU in
-    /// a non-halt/non-stop EI loop so the serviced ISR runs on Gambatte's exact
+    /// (`boundary >= scheduled cc + IF_OFF`) and raise its IF bit. Called by the CPU in
+    /// a non-halt/non-stop EI loop so the serviced ISR runs on hardware's exact
     /// phase, ahead of the normal `CC_OFF`-late per-dot delivery.
     pub fn force_ei_timer_delivery(&mut self, boundary: u64) {
         let mut timer = self.timer.clone();
@@ -1997,12 +2001,12 @@ impl Mmio {
         }
     }
 
-    /// STAGE 2: clear the recorded timer fire cc once the CPU dispatches the IRQ.
+    /// Clear the recorded timer fire cc once the CPU dispatches the IRQ.
     pub fn clear_timer_fire_cc(&mut self) {
         self.timer.clear_fire_cc();
     }
 
-    /// Mirror of `intreq_.halted()`: true while the CPU is in HALT. The FAST EI-loop
+    /// True while the CPU is in HALT. The FAST EI-loop
     /// timer IF-set grid keeps the HALT-wakeup IF-set on the late (`CC_OFF`) anchor
     /// while non-halt (EI-loop) overflows use the early grid.
     pub fn cpu_is_halted(&self) -> bool {
@@ -2020,8 +2024,8 @@ impl Mmio {
     /// CL1: the *honest* per-access cc — the true `abs_cc` at the START of the
     /// CPU access's M-cycle. `master_cc()` is incremented at the top of each
     /// dot-step, so before this access's `tick_m` it trails the M-cycle start by
-    /// exactly one dot; the true start is `master_cc + 1` (Gambatte resolves the
-    /// access at `cc`, then `cc += 4`). The old `access_cc()` = `master_cc + 5`
+    /// exactly one dot; the true start is `master_cc + 1` (hardware resolves the
+    /// access at `cc`, then advances `cc` by 4). The old `access_cc()` = `master_cc + 5`
     /// resolved the access at its END (`+4`) plus the same `+1` lag — a fixed
     /// offset that is right on average but off by the intra-instruction position.
     /// The PPU read-cc / access-gating consumers anchor here so CL2 (ISR-dispatch
@@ -2035,7 +2039,7 @@ impl Mmio {
 
     /// The raw master clock (`cc`, T-cycles) the whole engine advances. The PPU
     /// derives its dot-cycles from this against the LCD-enable anchor `p_now`
-    /// (Gambatte: PPU dot-cycles = `(cc - p_now) >> ds`).
+    /// (PPU dot-cycles = `(cc - p_now) >> ds`).
     pub fn master_cc(&self) -> u64 {
         self.timer.abs_cc()
     }
@@ -2049,7 +2053,7 @@ impl Mmio {
 
     /// Copy a single byte from `src` to the VRAM destination corresponding
     /// to `dst`. Shared by GDMA and HDMA. Caller advances `hdma_source` /
-    /// `hdma_dest`. Mirrors the inner-loop of Gambatte's `Memory::dma`:
+    /// `hdma_dest`. Models the hardware transfer inner loop:
     ///   - Source reads from VRAM (0x8000-0x9FFF) or >=0xE000 (WRAM
     ///     mirror / OAM / IO / HRAM) return 0xFF (open bus).
     ///   - Destination wraps within the currently selected VRAM bank
@@ -2089,7 +2093,7 @@ impl Mmio {
     }
 
     /// Resolve a single HDMA byte WITHOUT committing the VRAM write. Reads the
-    /// source byte at the current (fire) cc — matching Gambatte's read-at-cc —
+    /// source byte at the current (fire) cc — matching hardware's read-at-cc —
     /// and returns `(vram_addr, value, into_bank1)` for a deferred apply. Used by
     /// the deferred-block model so the VRAM write lands at the correct sub-M-cycle
     /// (`fire_cc + hdma_write_delay`) rather than coincident with the trigger.
@@ -2177,7 +2181,7 @@ impl Mmio {
         self.hdma_snapshot_armed = false;
     }
 
-    /// per-access STAGE 1: true while deferred HDMA block writes are still in their
+    /// True while deferred HDMA block writes are still in their
     /// per-dot countdown (`step_hdma_deferred` must run each dot to commit them at
     /// the right cc). Blocks the idle bulk-skip.
     pub fn has_pending_hdma_deferred(&self) -> bool {
@@ -2204,14 +2208,14 @@ impl Mmio {
 
     /// Execute a CGB General-Purpose DMA (GDMA) transfer synchronously.
     /// Copies `length` bytes from `self.hdma_source` into VRAM starting at
-    /// `self.hdma_dest`. Mirrors Gambatte's `Memory::dma`:
+    /// `self.hdma_dest`. Matches hardware:
     ///   - If the LCD is off, GDMA does not run.
     ///   - Destination clamped if it would overflow the 16-bit address
-    ///     space (memory.cpp:335-337).
+    ///     space.
     fn execute_gdma(&mut self, length: usize) {
-        // Gambatte `Memory::dma` (memory.cpp:332-343): the `length` bytes are
+        // In hardware the `length` bytes are
         // transferred regardless of LCD state. The LCD-off branch only zeroes the
-        // *remaining* HDMA block count (`dmaLength`), it does NOT skip the active
+        // *remaining* HDMA block count, it does NOT skip the active
         // transfer. A pure GDMA kick therefore still copies its bytes (and
         // interleaves the OAM DMA) with the LCD off. Skipping it here used to drop
         // the GDMA conflict on LCD-off re-runs of the oamdumper tests, letting a
@@ -2238,21 +2242,21 @@ impl Mmio {
         let ds = self.is_double_speed_mode();
         let per_byte_cc: i64 = if ds { 4 } else { 2 };
 
-        // OAM-DMA interleave (Gambatte `Memory::dma`). The OAM-DMA engine keeps
-        // advancing one M-cycle (4 cc) per `lOam += 4` step while the GDMA copies
+        // OAM-DMA interleave. The OAM-DMA engine keeps
+        // advancing one M-cycle (4 cc) per `loam += 4` step while the GDMA copies
         // bytes. The bus ran one `tick_m` (step_dma) before resolving this FF55
-        // write, leaving rustyboi's `dma_pos` one M-cycle BEHIND Gambatte's
-        // `oamDmaPos_` at the kick instant. Catch up by one M-cycle (advance the
+        // write, leaving rustyboi's `dma_pos` one M-cycle BEHIND the hardware
+        // position at the kick instant. Catch up by one M-cycle (advance the
         // OAM-DMA position without a conflict write) so the gate below fires on
-        // the same boundaries Gambatte does.
+        // the same boundaries hardware does.
         // A block fired inside the STOP speed-switch unhalt window must NOT advance
-        // the OAM-DMA: Gambatte's `Memory::dma` interleaves via `updateOamDma`, which
-        // takes its `halted()` branch (oamDmaPos_ frozen) while the CPU is
-        // `intreq_.halt()`ed across the STOP. rustyboi's `step_dma` already honors
+        // the OAM-DMA: hardware freezes the OAM-DMA position (its halted branch)
+        // while the CPU is
+        // halted across the STOP. rustyboi's `step_dma` already honors
         // `oam_dma_stop_freeze`, but the synchronous HDMA-block interleave here
-        // bypassed it, advancing oamDmaPos_ ~16 bytes and shifting the post-switch
+        // bypassed it, advancing `dma_pos` ~16 bytes and shifting the post-switch
         // in-flight conflict byte (hdma_transition_speedchange_oamdma: read 0x60
-        // where Gambatte's frozen position reads 0x71).
+        // where hardware's frozen position reads 0x71).
         let interleave = self.dma_active && !self.oam_dma_stop_freeze;
         // The one-M-cycle catch-up corrects the `step_dma` tick that ran before this
         // FF55 write resolved. A back-to-back second block follows its predecessor
@@ -2270,9 +2274,9 @@ impl Mmio {
         // block's low-address re-wrap must not re-clobber them (see
         // `dma_conflict_advance`). A single long GDMA (one pass) is never back-to-back.
         let back_to_back = interleave && self.gdma_conflict_ran;
-        // `lOam` mirrors Gambatte's relative `lastOamDmaUpdate_`: it starts at
+        // `loam` tracks the OAM-DMA's relative update cursor: it starts at
         // `-dma_subcycle` (dots already elapsed in the current M-cycle) and the
-        // per-byte cc advance is compared against `lOam + 3` (gate `cc-3 > lOam`).
+        // per-byte cc advance is compared against `loam + 3` (gate `cc-3 > loam`).
         let mut cc: i64 = 0;
         let mut loam: i64 = -(self.dma_subcycle as i64);
 
@@ -2288,25 +2292,25 @@ impl Mmio {
             dst = dst.wrapping_add(1);
         }
         // After the block, the OAM-DMA continues from the advanced position. The
-        // residual `lOam` phase becomes the next M-cycle's sub-cycle offset so
-        // `step_dma` resumes on the correct dot (mirrors Gambatte storing
-        // `lastOamDmaUpdate_ = lOam`).
+        // residual `loam` phase becomes the next M-cycle's sub-cycle offset so
+        // `step_dma` resumes on the correct dot (the OAM-DMA update cursor carries
+        // the residual phase forward).
         if interleave && self.dma_active {
             // Dots elapsed since the last OAM-DMA M-cycle fired. `step_dma` fires
             // when `dma_subcycle` reaches 4, so the residual phase `(cc - loam)`
             // (mod 4) is exactly the count already accrued toward the next
-            // M-cycle (mirrors Gambatte storing `lastOamDmaUpdate_ = lOam` and
-            // recomputing `(cc - lastOamDmaUpdate_) >> 2`).
+            // M-cycle (the OAM-DMA update cursor carries `loam` forward and
+            // recomputes the sub-cycle phase as `(cc - cursor) >> 2`).
             self.dma_subcycle = (cc - loam).rem_euclid(4) as u8;
         }
 
         self.hdma_source = src;
         self.hdma_dest = dst;
 
-        // Gambatte `Memory::dma` charges `2 + 2*ds` cc per byte for the entire
+        // Hardware charges `2 + 2*ds` cc per byte for the entire
         // transfer plus a single trailing `cc += 4`, regardless of block count
         // (the +4 setup is NOT per-block). For one block this is 36 SS / 68 DS.
-        // Gambatte runs GDMA as an event preceded by `Interrupter::prefetch`
+        // Hardware runs GDMA as an event preceded by an opcode prefetch
         // (the next opcode is fetched *before* the transfer's cc advance) and a
         // trailing `cc += 4`. Synchronous GDMA here charges the transfer up
         // front, so the post-stall return must absorb that prefetch/setup
@@ -2315,21 +2319,21 @@ impl Mmio {
         // master cc by ~1 dot at the read with the old +6 — see fix-gdma).
         //
         // Two back-to-back FF55=0 kicks (gdma_cycles_2xshort) drain as effectively
-        // ONE prefetch sequence: Gambatte's `Interrupter::prefetch` absorption
-        // happens once across the pair, not per `dma()` event. The first kick set
+        // ONE prefetch sequence: the prefetch absorption
+        // happens once across the pair, not per DMA event. The first kick set
         // `dma_prefetch_stat_bias` (its stall was drained, no STAT read has consumed
         // it yet); a second kick before that consumption must add only the raw
         // transfer + trailing setup (no second `+5`), else the post-stall STAT read
         // lands ~5 dots late at double speed (2xshort_ds_1 reads mode 0 where
-        // Gambatte still reads mode 3 at `cc + 2 < m0Time`).
+        // hardware still reads mode 3 at `cc + 2 < mode-0 time`).
         let (per_byte, setup) = if self.is_double_speed_mode() { (4, 5) } else { (2, 4) };
         let prefetch_fudge = if self.dma_prefetch_stat_bias { 0 } else { 5 };
         self.pending_dma_stall += (effective_length as u32) * per_byte + setup + prefetch_fudge;
         // The OAM-DMA M-cycles for the transfer were folded into the loop above.
-        // Suppress `step_dma` for Gambatte's true dma-event duration (the transfer
+        // Suppress `step_dma` for the true dma-event duration (the transfer
         // `per_byte` cc plus the single trailing `cc += 4`), NOT the extra `+5`
-        // CPU-stall prefetch fudge. Gambatte freezes `lastOamDmaUpdate_` for the
-        // event then catches the OAM-DMA up on the next `updateOamDma`; the residual
+        // CPU-stall prefetch fudge. Hardware freezes the OAM-DMA cursor for the
+        // event then catches the OAM-DMA up afterward; the residual
         // post-stall cc advance the OAM-DMA normally toward the next access.
         if interleave {
             self.oam_dma_stall_suppress = (effective_length as u32) * per_byte + 4;
@@ -2348,9 +2352,9 @@ impl Mmio {
         self.hdma_req_pending
     }
 
-    /// Whether this HDMA period's block has already been serviced (Gambatte:
-    /// the `intevent_dma` for this m0 edge already ran and acked, so
-    /// `hdmaReqFlagged` is false — no block is owed/`prefetched` at a STOP).
+    /// Whether this HDMA period's block has already been serviced (the DMA event
+    /// for this m0 edge already ran and acked, so no HDMA request is
+    /// flagged — no block is owed/prefetched at a STOP).
     pub fn hdma_block_done_this_period(&self) -> bool {
         self.hdma_block_done_this_period
     }
@@ -2362,25 +2366,25 @@ impl Mmio {
     }
 
     /// Arm the High-at-halt unhalt edge-consume: the first post-unhalt m0 HDMA edge
-    /// is suppressed (it was the during-halt edge Gambatte already consumed). Called
-    /// at the unhalt site when `haltHdmaState_ == High`.
+    /// is suppressed (it was the during-halt edge hardware already consumed). Called
+    /// at the unhalt site when `halt_hdma_state == High`.
     pub fn arm_hdma_high_unhalt_consume(&mut self) {
         self.hdma_high_unhalt_consume = true;
     }
 
-    /// per-access STAGE 2 (FACET 3): arm the Requested-unhalt sub-block-cc consume.
+    /// Arm the Requested-unhalt sub-block-cc consume.
     /// Called at the unhalt site when a `Requested`-at-halt block is reflagged so
     /// `step_hdma` can absorb the next-line m0 arm iff it falls within the freshly
-    /// fired block's transfer span (Gambatte's m0 `memevent_hdma` consumed by the
-    /// in-flight `dma()`), deferring the genuine next block one line.
+    /// fired block's transfer span (hardware's m0 HDMA event consumed by the
+    /// in-flight transfer), deferring the genuine next block one line.
     pub fn arm_hdma_peraccess_consume(&mut self) {
         self.hdma_peraccess_consume_pending = true;
     }
 
-    /// per-access STAGE 2 (FACET 3): when a post-unhalt m0 rising edge would arm the
+    /// When a post-unhalt m0 rising edge would arm the
     /// next HDMA block, decide whether it must instead be CONSUMED because it falls
-    /// within the just-fired (Requested-unhalt reflag) block's transfer span. Gambatte
-    /// processes the m0 `memevent_hdma` at the in-flight `dma()`'s end cc, so an edge
+    /// within the just-fired (Requested-unhalt reflag) block's transfer span. Hardware
+    /// processes the m0 HDMA event at the in-flight transfer's end cc, so an edge
     /// landing inside `[fire_cc, fire_cc + 16*(2+2*ds))` is absorbed and its block
     /// deferred to the next line; an edge at/after that span fires this line. Returns
     /// true (consume this arm, clearing the pending flag) iff a Requested-unhalt
@@ -2402,7 +2406,7 @@ impl Mmio {
         let ds = self.is_double_speed_mode() as u64;
         let span: u64 = 0x10 * (2 + 2 * ds);
         let now = self.master_cc();
-        // Inclusive end: Gambatte's m0 `memevent_hdma` lands AT the in-flight
+        // Inclusive end: hardware's m0 HDMA event landing AT the in-flight
         // block's transfer-end cc is still absorbed (the edge == block end is
         // consumed; only an edge strictly PAST the transfer fires its own block).
         let end = fire_cc.wrapping_add(span);
@@ -2424,7 +2428,7 @@ impl Mmio {
         self.hdma_last_fire_cc
     }
 
-    /// C7-full: whether an HDMA block is latched and would fire at the next
+    /// Whether an HDMA block is latched and would fire at the next
     /// M-cycle boundary (the `fire_pending_hdma_mcycle` precondition).
     pub fn hdma_fire_pending(&self) -> bool {
         self.hdma_req_pending && self.hdma_enabled
@@ -2449,22 +2453,22 @@ impl Mmio {
     }
 
     /// Freeze/unfreeze the OAM-DMA across the STOP speed-switch unhalt window
-    /// (Gambatte `updateOamDma` `halted()` branch — `oamDmaPos_` stays put).
+    /// (hardware's halted branch — the OAM-DMA position stays put).
     pub fn set_oam_dma_stop_freeze(&mut self, freeze: bool) {
         self.oam_dma_stop_freeze = freeze;
         if freeze {
-            // Gambatte's `Memory::stop` advances the OAM-DMA by the STOP's own
-            // M-cycle (`updateOamDma(cc + 4)`) before `intreq_.halt()`; arm the
+            // Hardware advances the OAM-DMA by the STOP's own
+            // M-cycle before halting; arm the
             // single grace step that `step_dma` consumes (mirrors `halt_oam_grace`).
             //
             // SCOPED to a transfer at its FINAL byte (`dma_pos >= 158`). rustyboi's
-            // eager per-dot OAM-DMA sits one M-cycle behind Gambatte's lazy
-            // `updateOamDma(cc + 4)` frozen position at the stop (pos 158 vs
-            // Gambatte's 159) — the grace + `dma_pos==159` final-byte bypass below
-            // completes the transfer (158 -> 159 -> 160 = endOamDma) before the
+            // eager per-dot OAM-DMA sits one M-cycle behind hardware's lazy
+            // frozen position at the stop (pos 158 vs
+            // hardware's 159) — the grace + `dma_pos==159` final-byte bypass below
+            // completes the transfer (158 -> 159 -> 160 = OAM-DMA end) before the
             // freeze, so the post-window mode-2 sprite scan reads the COMPLETED OAM
             // (oamdma_late_speedchange_stat_2: the line's left-edge sprite maps,
-            // m0Time +11, STAT read mode 3). A mid-transfer DMA (pos << 158, e.g.
+            // mode-0 time +11, STAT read mode 3). A mid-transfer DMA (pos << 158, e.g.
             // the in-flight conflict-byte reads oamdmasrcC0_speedchange_readC000 /
             // hdma_transition_speedchange_oamdma) must stay frozen at its calibrated
             // position — those read the in-flight byte after the switch — so the
@@ -2475,8 +2479,8 @@ impl Mmio {
         }
     }
 
-    /// CPU has left HALT. Clears the `intreq_.halted()` mirror so the
-    /// period-edge `flagHdmaReq` resumes (video.h:41).
+    /// CPU has left HALT. Clears the halted mirror so the
+    /// period-edge HDMA request resumes.
     pub fn clear_cpu_halt(&mut self) {
         self.cpu_halted = false;
     }
@@ -2490,22 +2494,22 @@ impl Mmio {
         self.in_stop_window = in_stop_window;
     }
 
-    /// True while the CGB STOP speed-switch unhalt window is open (Gambatte
-    /// `intreq_.halt()`): the HDMA period-edge `flagHdmaReq` is suppressed across
-    /// the speed bridge and stall (video.h:41). Set by `on_stop_window_enter`,
+    /// True while the CGB STOP speed-switch unhalt window is open (the CPU is
+    /// halted): the HDMA period-edge request is suppressed across
+    /// the speed bridge and stall. Set by `on_stop_window_enter`,
     /// cleared by `stop_window_exit_reflag`.
     pub fn in_stop_window(&self) -> bool {
         self.in_stop_window
     }
 
-    /// C1: mark/clear that the live instruction stream was resumed by a HALT
+    /// Mark/clear that the live instruction stream was resumed by a HALT
     /// wakeup (its access-cc is sub-M-cycle skewed; see field doc). Set on wakeup,
     /// cleared when the CPU halts again.
     pub fn set_halt_wakeup_skew(&mut self, v: bool) {
         self.halt_wakeup_skew = v;
     }
 
-    /// C1: true while a HALT-woken instruction stream is live (FF41 getStat-at-cc
+    /// True while a HALT-woken instruction stream is live (FF41 STAT resolve-at-cc
     /// line-tail override is deferred to the renderer register).
     pub fn halt_wakeup_skew(&self) -> bool {
         self.halt_wakeup_skew
@@ -2513,8 +2517,8 @@ impl Mmio {
 
     /// Set at an m2-woken CGB HALT exit that charged the +4 M-cycle as a REAL
     /// stall (`return 4` in sm83.rs). The stall already advanced the whole woken
-    /// stream (dispatch, reads) by 4cc, so the `access_cc + 5` OAMSearch getStat
-    /// read bias must NOT re-add the +4 — it drops to the +1 lyTime correction.
+    /// stream (dispatch, reads) by 4cc, so the `access_cc + 5` OAM-scan STAT
+    /// read bias must NOT re-add the +4 — it drops to the +1 the LY time correction.
     /// Cleared when the CPU next halts.
     pub fn set_m2_halt_stall_charged_cgb(&mut self, v: bool) {
         self.m2_halt_stall_charged_cgb = v;
@@ -2532,7 +2536,7 @@ impl Mmio {
         self.halt_wake_m0m2 = v;
     }
 
-    /// True while the live HALT-woken stream is m0/m2-woken (PTZ consumer).
+    /// True while the live HALT-woken stream is m0/m2-woken (line-tail override consumer).
     pub fn halt_wake_m0m2(&self) -> bool {
         self.halt_wake_m0m2
     }
@@ -2571,25 +2575,25 @@ impl Mmio {
         self.ssds_haltskew_ly_advance
     }
 
-    /// FAITHFUL EVENTCC: record the DMG HALT-exit `cc += 4` wakeup-latency decision
-    /// (Gambatte memory.cpp:308, `cc - eventTime < 2` branch).
+    /// Record the DMG HALT-exit `cc += 4` wakeup-latency decision
+    /// (the wakeup landed within 2cc of the IRQ event).
     pub fn set_halt_wake_plus4_dmg(&mut self, v: bool) {
         self.halt_wake_plus4_dmg = v;
     }
 
-    /// FAITHFUL HALT-EXIT (timer-read facet): arm/clear the halt-woken stream's
-    /// DIV/TIMA read re-anchor (Timer::halt_read_bias).
+    /// Arm/clear the halt-woken stream's DIV/TIMA read re-anchor
+    /// (Timer::halt_read_bias).
     pub fn set_halt_timer_read_bias(&mut self, bias: u32) {
         self.timer.set_halt_read_bias(bias);
     }
 
-    /// FAITHFUL HALT-EXIT: record the master_cc the mode-2 STAT IRQ event
-    /// raised IF at (its Gambatte eventTime; the per-dot dispatch fires at it).
+    /// Record the master_cc the mode-2 STAT IRQ event raised IF at (its event
+    /// time; the per-dot dispatch fires at it).
     pub fn set_last_m2_irq_fire_cc(&mut self, cc: u64) {
         self.last_m2_irq_fire_cc = Some(cc);
     }
 
-    /// FAITHFUL HALT-EXIT: the last mode-2 STAT IRQ IF-set master_cc.
+    /// The last mode-2 STAT IRQ IF-set master_cc.
     pub fn last_m2_irq_fire_cc(&self) -> Option<u64> {
         self.last_m2_irq_fire_cc
     }
@@ -2605,7 +2609,7 @@ impl Mmio {
         self.last_m2_irq_ly
     }
 
-    /// FAITHFUL HALT-EXIT: set the DMG m0-woken wake's halt-exit cc advance
+    /// Set the DMG m0-woken wake's halt-exit cc advance
     /// (snap + conditional +4) for the woken stream's FF44 read.
     pub fn set_dmg_m0_halt_ly_advance(&mut self, adv: Option<u32>) {
         self.dmg_m0_halt_ly_advance = adv;
@@ -2619,44 +2623,44 @@ impl Mmio {
         self.cgb_m0_halt_ly_advance
     }
 
-    /// FAITHFUL HALT-EXIT: the DMG m0-woken halt-exit advance, if this stream
+    /// The DMG m0-woken halt-exit advance, if this stream
     /// was woken by the mode-0 STAT IRQ at its event cc.
     pub fn dmg_m0_halt_ly_advance(&self) -> Option<u32> {
         self.dmg_m0_halt_ly_advance
     }
 
-    /// FAITHFUL EVENTCC: true when this DMG wakeup carried the +4 read-phase bias.
+    /// True when this DMG wakeup carried the +4 read-phase bias.
     pub fn halt_wake_plus4_dmg(&self) -> bool {
         self.halt_wake_plus4_dmg
     }
 
-    /// HALT-PREFETCH (Lever A): record the pre-snap master_cc at real HALT entry.
+    /// Record the pre-snap master_cc at real HALT entry.
     pub fn set_halt_entry_cc(&mut self, cc: Option<u64>) {
         self.halt_entry_cc = cc;
     }
 
-    /// HALT-PREFETCH (Lever A): the pre-snap HALT-entry master_cc, if captured.
+    /// The pre-snap HALT-entry master_cc, if captured.
     pub fn halt_entry_cc(&self) -> Option<u64> {
         self.halt_entry_cc
     }
 
-    /// HALT-PREFETCH (Lever A): set the per-stream prefetch phase count (0 or 1).
+    /// Set the per-stream HALT-prefetch phase count (0 or 1).
     pub fn set_halt_prefetch_phase(&mut self, phase: u32) {
         self.halt_prefetch_phase = phase;
     }
 
-    /// HALT-PREFETCH (Lever A): the per-stream prefetch phase carried onto the
+    /// The per-stream HALT-prefetch phase carried onto the
     /// single woken FF41 read (access_cc += 4 * phase).
     pub fn halt_prefetch_phase(&self) -> u32 {
         self.halt_prefetch_phase
     }
 
-    /// HALT-PREFETCH (R-PC): set the per-stream woken-PC push phase (0 or 1).
+    /// Set the per-stream woken-PC push phase (0 or 1).
     pub fn set_timer_push_phase(&mut self, phase: u32) {
         self.timer_push_phase = phase;
     }
 
-    /// HALT-PREFETCH (R-PC): the per-stream woken-PC push phase carried onto the
+    /// The per-stream woken-PC push phase carried onto the
     /// single CGB+Timer interrupt service (pushed resume PC += 1 instruction byte
     /// when 1).
     pub fn timer_push_phase(&self) -> u32 {
@@ -2675,12 +2679,12 @@ impl Mmio {
         self.hdma_is_in_period_cached = in_period;
     }
 
-    /// C7-full: resolve a pending FF55 bit7=1 kick (`hdma_kick_eval_pending`)
+    /// Resolve a pending FF55 bit7=1 kick (`hdma_kick_eval_pending`)
     /// against the LIVE HDMA-period predicate the bus evaluates at the write
-    /// access cc (Gambatte `enableHdma` -> `isHdmaPeriod(cc + 4)`). If in period
+    /// access cc (the in-HBlank-period predicate at cc+4). If in period
     /// the first block is armed immediately; otherwise the kick is dropped and the
-    /// block arms on the next Mode 3->0 edge (matching Gambatte scheduling
-    /// `memevent_hdma` to the next m0 without flagging now). Returns whether a kick
+    /// block arms on the next Mode 3->0 edge (hardware schedules the HDMA event
+    /// to the next m0 without flagging now). Returns whether a kick
     /// was pending (so the bus knows it consumed it).
     pub fn resolve_hdma_kick(&mut self, in_period: bool) -> bool {
         if self.hdma_kick_eval_pending == 0 {
@@ -2694,11 +2698,11 @@ impl Mmio {
             // the snapshot or the next opcode fetch.
             self.hdma_snapshot_armed = true;
             // DEFERRED-HDMA-FIRE: the kick services THIS period's block. Mark it
-            // done so an immediately-following `halt` captures `haltHdmaState_ =
-            // High` (Gambatte: in-period + already-serviced) rather than
+            // done so an immediately-following `halt` captures `halt_hdma_state =
+            // High` (in-period + already-serviced) rather than
             // `Requested`, which would re-fire a SECOND block on unhalt
             // (hdma_late_m0halt_*). The per-dot `hdma_period` is false mid-HBlank
-            // (post-m0Time crossing) so `step_hdma`'s own block_done set never
+            // (post-mode-0 time crossing) so `step_hdma`'s own block_done set never
             // fires for a kick-armed block; set it here at the in-period kick.
             self.hdma_block_done_this_period = true;
         }
@@ -2723,7 +2727,7 @@ impl Mmio {
 
     /// CGB: a BCPD/OCPD (FF69/FF6B) write during mode 3 is BLOCKED — the palette
     /// byte is not written — but the BGPI/OBPI auto-increment still happens
-    /// (SameBoy memory.c `GB_IO_BGPD` `cgb_palettes_blocked` path; SameSuite
+    /// (a hardware CGB palette-write-blocked quirk; SameSuite
     /// ppu/blocking_bgpi_increase subtest 3 reads BCPS=+1 after a mode-3 write).
     /// Called by the bus from the blocked-write drop path.
     pub fn palette_blocked_write_increment(&mut self, addr: u16) {
@@ -2766,8 +2770,7 @@ impl Mmio {
         (self.io_registers.read(ppu::LCD_STATUS) & 0x03) == 0
     }
 
-    /// CPU has just entered HALT. Mirrors Gambatte's `Memory::halt`
-    /// (memory.cpp:407): records the halt-HDMA state and acks any
+    /// CPU has just entered HALT. Records the halt-HDMA state and acks any
     /// currently flagged req so it does not double-fire on unhalt.
     /// Coarse fallback (no PPU access): uses the cached per-step period.
     pub fn on_cpu_halt(&mut self) {
@@ -2775,9 +2778,9 @@ impl Mmio {
         self.on_cpu_halt_with_period(Some(in_period));
     }
 
-    /// HALT-entry with a caller-supplied cycle-exact `isHdmaPeriod(cc)` (the Bus
+    /// HALT-entry with a caller-supplied cycle-exact HBlank-period flag (the Bus
     /// path computes this via the renderer's `m0_time_master`-anchored predictor,
-    /// the SAME predicate c04d78a uses for the unhalt re-flag). `None` => no
+    /// the SAME predicate used for the unhalt re-flag). `None` => no
     /// closed-form mode-0 anchor; fall back to the cached per-step period.
     pub fn on_cpu_halt_with_period(&mut self, in_period: Option<bool>) {
         self.on_cpu_halt_with_period_done(in_period, None)
@@ -2791,7 +2794,7 @@ impl Mmio {
     /// a hair EARLIER than the HALT-entry predicate's end bracket (`depth < 208/410`)
     /// — so a HALT landing in that sliver sees the flag already reset and wrongly
     /// captures `Requested` (re-firing a spurious second block at unhalt) where
-    /// Gambatte captures `High` (in-period, block done, no reflag). The fire-cc
+    /// hardware captures `High` (in-period, block done, no reflag). The fire-cc
     /// override is robust across that boundary disagreement
     /// (`hdma_late_m0halt_*_lcdoffset*_1`). `None` keeps the legacy flag behaviour.
     pub fn on_cpu_halt_with_period_done(
@@ -2800,7 +2803,7 @@ impl Mmio {
         block_done_override: Option<bool>,
     ) {
         self.cpu_halted = true;
-        // m25: a fresh HALT is a new resume context — drop any stale resume
+        // A fresh HALT is a new resume context — drop any stale resume
         // pre-transfer shadow window (bounds the IME-on arm's lifetime so it cannot
         // leak a stale pre-byte into a later unrelated VRAM read).
         if self.hdma_resume_shadow_window {
@@ -2810,35 +2813,34 @@ impl Mmio {
         // FAST EI-loop: entering HALT ends any prior EI fast-dispatch stream; the
         // HALT-woken ISR observes the timer IF re-flag on the LATE grid.
         self.timer.clear_isr_early_grid();
-        // Gambatte advances the OAM-DMA one M-cycle at halt entry (the HALT
-        // instruction's own M-cycle, `updateOamDma(cc + 4)` before
-        // `intreq_.halt()`); allow that single advance through the freeze. The
-        // FINAL completing byte (pos 159 -> 160 = endOamDma) is additionally let
-        // through in `step_dma` even past the grace, because Gambatte's halt-entry
-        // `updateOamDma(cc+4)` finishes a transfer whose last byte lands inside the
+        // Hardware advances the OAM-DMA one M-cycle at halt entry (the HALT
+        // instruction's own M-cycle, before halting); allow that single advance
+        // through the freeze. The
+        // FINAL completing byte (pos 159 -> 160 = OAM-DMA end) is additionally let
+        // through in `step_dma` even past the grace, because hardware's halt-entry
+        // advance finishes a transfer whose last byte lands inside the
         // halt window — see the `dma_pos == 159` bypass there.
         self.halt_oam_grace = 1;
-        // C1: a fresh HALT re-arms the wakeup-skew guard (the previous HALT-woken
+        // A fresh HALT re-arms the wakeup-skew guard (the previous HALT-woken
         // stream has ended).
         self.halt_wakeup_skew = false;
         self.m2_halt_stall_charged_cgb = false;
         self.halt_wake_m0m2 = false;
         self.ssds_haltskew_ly_advance = false;
-        // FAITHFUL EVENTCC: a fresh HALT ends the previous wakeup's +4 read bias.
+        // A fresh HALT ends the previous wakeup's +4 read bias.
         self.halt_wake_plus4_dmg = false;
         self.dmg_m0_halt_ly_advance = None;
         self.cgb_m0_halt_ly_advance = None;
-        // HALT-PREFETCH (Lever A): a fresh HALT supersedes the prior wakeup's
-        // prefetch-phase bias (and its captured pre-snap entry cc).
+        // A fresh HALT supersedes the prior wakeup's prefetch-phase bias (and its
+        // captured pre-snap entry cc).
         self.halt_entry_cc = None;
         self.halt_prefetch_phase = 0;
         self.timer_push_phase = 0;
-        // HALT-PREFETCH (Lever A): record the pre-snap HALT-entry master_cc here
-        // (above the DMG `!cgb_features_enabled` early-return) so the DMG R4
-        // streams capture it. This is the un-snapped cc Gambatte's
-        // ceil_4(eventTime) snap (cpu.cpp:1075) would erase; the unhalt
-        // derivation (sm83.rs) compares it against the captured m0 eventTime to
-        // separate the byte-identical _1b/_2b streams. Flag-OFF: never set.
+        // Record the pre-snap HALT-entry master_cc here (above the DMG
+        // `!cgb_features_enabled` early-return) so the DMG streams capture it. This
+        // is the un-snapped cc that hardware's ceil-to-M-cycle event-time snap would
+        // erase; the unhalt derivation (sm83.rs) compares it against the captured m0
+        // event time to separate the two byte-identical woken instruction streams.
         self.set_halt_entry_cc(Some(self.master_cc()));
         // A fresh HALT supersedes any pending High-unhalt edge-consume (the prior
         // unhalt's stream has ended); never let it span halts.
@@ -2848,32 +2850,32 @@ impl Mmio {
             self.halt_hdma_state = HaltHdmaState::Low;
             return;
         }
-        // Gambatte `Memory::halt`: haltHdmaState_ = (enabled && period) ? high : low,
+        // In hardware: halt_hdma_state = (enabled && period) ? high : low,
         // then `requested` if a block is currently flagged. rustyboi services the
         // period block immediately at the edge instead of holding a flag, so a
         // block that is *owed but not yet serviced* this period (would still be
-        // flagged in Gambatte) maps to `Requested`; one already serviced maps to
+        // flagged in hardware) maps to `Requested`; one already serviced maps to
         // `High`.
         let mut period = in_period.unwrap_or(self.hdma_is_in_period_cached);
         let mut block_done = block_done_override.unwrap_or(self.hdma_block_done_this_period);
-        // HALT-coincident HDMA fire rollback (Gambatte `Memory::halt` flag-then-event
+        // HALT-coincident HDMA fire rollback (hardware's flag-then-event
         // ordering). rustyboi services an HBlank-DMA block greedily the dot its m0
-        // edge latches; Gambatte instead FLAGS it (`flagHdmaReq`) and runs the block
-        // as the `intevent_dma` event that follows the HALT's own prefetch M-cycle.
+        // edge latches; hardware instead FLAGS it and runs the block
+        // as the DMA event that follows the HALT's own prefetch M-cycle.
         // When the HALT instruction executes on the very M-cycle that m0 edge lands,
-        // Gambatte therefore captures the block as `Requested` (held, NOT yet served)
+        // hardware therefore captures the block as `Requested` (held, NOT yet served)
         // and fires it at UNHALT — whereas rustyboi has already fired it this dot,
         // pinning the post-unhalt FF44 read 36cc early (the block's stall, which
-        // Gambatte inserts right after unhalt, was instead spent during the HALT).
+        // hardware inserts right after unhalt, was instead spent during the HALT).
         // Detect that exact coincidence (`hdma_last_fire_cc == halt cc`), roll the
         // just-fired block back to its pre-fire pointers, drop its deferred VRAM
         // writes and un-charge its stall, then capture `Requested` so the unhalt
-        // re-fires it on Gambatte's dot. Scoped to the same-M-cycle straddle so the
+        // re-fires it on hardware's dot. Scoped to the same-M-cycle straddle so the
         // ordinary in-period (`High`) and out-of-period (`Low` -> reflag) HALT
         // captures, whose block fired on an earlier dot, are untouched.
         let halt_cc = self.master_cc();
         // Use the PRE-fire enabled flag: a final block (length underflow) clears
-        // `hdma_enabled` inside `run_hdma_block`, but Gambatte still holds it enabled
+        // `hdma_enabled` inside `run_hdma_block`, but hardware still holds it enabled
         // and `Requested` at the coincident HALT.
         let pre_fire_enabled = self.hdma_pre_fire_state.map(|s| s.3).unwrap_or(false);
         // Record whether HDMA was armed at HALT entry (the value-read-downstream
@@ -2919,15 +2921,15 @@ impl Mmio {
         } else {
             HaltHdmaState::Low
         };
-        // Gambatte does ackDmaReq after copying the flag.
+        // Hardware acks the DMA request after copying the flag.
         self.hdma_req_pending = false;
     }
 
-    /// CGB STOP speed-switch entry (Gambatte `Memory::stop`, memory.cpp:453). Like
-    /// `Memory::halt` it captures `haltHdmaState_` and `intreq_.halt()`s for the
+    /// CGB STOP speed-switch entry. Like
+    /// a HALT it captures `halt_hdma_state` and halts the CPU for the
     /// 0x20000 unhalt window, so the per-dot HDMA period edge is suppressed across
     /// the speed bridge and stall (`in_stop_window`). `in_period_now` is
-    /// `hdmaIsEnabled() && isHdmaPeriod(stop_cc)` evaluated by the caller at the
+    /// HDMA-enabled AND in the HBlank period at `stop_cc`, evaluated by the caller at the
     /// stop cc (the exact `m0_time_master - gap` edge). The block is (re)flagged or
     /// dropped by `stop_window_exit_reflag` at the unhalt cc.
     pub fn on_stop_window_enter(&mut self, in_period_now: bool) {
@@ -2947,27 +2949,27 @@ impl Mmio {
         } else {
             HaltHdmaState::Low
         };
-        // Gambatte ackDmaReq after copying the flag.
+        // Hardware acks the DMA request after copying the flag.
         self.hdma_req_pending = false;
         self.in_stop_window = true;
     }
 
-    /// CGB STOP unhalt (Gambatte `intevent_unhalt` reflag gate, memory.cpp:224/304):
+    /// CGB STOP unhalt (the reflag gate):
     /// at the unhalt cc reflag the held block iff
-    /// `(hdmaEnabled && isHdmaPeriod(cc) && state==low) || state==requested`.
-    /// `in_period_unhalt` is `isHdmaPeriod(unhalt_cc)` (renderer-exact). Clears the
+    /// `(hdma_enabled && in_period && state==Low) || state==Requested`.
+    /// `in_period_unhalt` is the HBlank-period predicate at `unhalt_cc` (renderer-exact). Clears the
     /// stop-window suppression and fires the block when the gate passes.
     ///
     /// `window_end_edge`: when a `High`-at-stop block re-enters the HDMA period on a
     /// FRESH line during the 0x20000 unhalt window (its per-dot m0 edge is suppressed
-    /// while halted), Gambatte's `memevent_hdma` — scheduled at that line's mode-0 time
+    /// while halted), hardware — scheduled at that line's mode-0 time
     /// — fires the block right after unhalt, but only if the edge lands at/after the
-    /// unhalt cc (`m0_grid > unhaltAt`; an edge already consumed a line earlier does
+    /// unhalt cc (the m0 edge past the unhalt cc; an edge already consumed a line earlier does
     /// not re-fire). `window_end_edge = Some((m0_edge_cc, unhalt_cc))` carries the
     /// window-end line's mode-0 edge (`hdma_m0_edge`, master cc) and the unhalt cc so
     /// this boundary is resolved. When the edge wins, fire block2 here; otherwise the
     /// natural next-line per-dot m0 edge fires it (one line later), which is exactly
-    /// the `hdma_m0speedchange_late_m3wakeup_*` `_1` (edge wins -> outFF) vs `_2`
+    /// the `hdma_m0speedchange_late_m3wakeup_*` `_1` (edge wins -> outputs 0xFF) vs `_2`
     /// (edge misses -> block deferred one line -> out00) split.
     pub fn stop_window_exit_reflag_edge(
         &mut self,
@@ -2986,9 +2988,9 @@ impl Mmio {
         }
         // High-at-stop block that re-entered the HDMA period on a fresh line during
         // the window: fire it here iff the window-end line's mode-0 edge wins the
-        // `memevent_hdma`-vs-unhalt race. The unhalt cc runs 4 cc below Gambatte's
-        // `unhaltAt` (rustyboi's window exit = stop_cc + 0x20000, Gambatte's
-        // unhaltAt = stop_cc + 0x20000 + 4) and the m0 edge is the `m0_time_master`
+        // HDMA-event-vs-unhalt race. The unhalt cc runs 4 cc below hardware's
+        // the unhalt cc (rustyboi's window exit = stop_cc + 0x20000, hardware's
+        // is stop_cc + 0x20000 + 4) and the m0 edge is the `m0_time_master`
         // anchor, so the equivalent boundary is `edge > unhalt_cc - 12`.
         if matches!(self.halt_hdma_state, HaltHdmaState::High)
             && in_period_unhalt
@@ -3015,12 +3017,12 @@ impl Mmio {
         self.run_hdma_block_inner(false)
     }
 
-    /// Execute one HDMA block whose `dma()` event fires while the CPU is in the
-    /// STOP speed-switch halt window (Gambatte `Memory::dma` `halted()` branch,
-    /// memory.cpp:384). The 0x10 source bytes are still copied (the
+    /// Execute one HDMA block whose DMA event fires while the CPU is in the
+    /// STOP speed-switch halt window (hardware's halted branch). The 0x10 source
+    /// bytes are still copied (the
     /// `read_hdmadst00` destination-content tests depend on it), but FF55 is NOT
-    /// decremented: the halted branch leaves `ioamhram_[0x155]` at its written
-    /// value and only sets bit 7 (`| 0x80`), then `disableHdma` clears the
+    /// decremented: the halted branch leaves the FF55 length at its written
+    /// value and only sets bit 7 (`| 0x80`), then the HDMA-disable step clears the
     /// enable. So a single-block HDMA caught mid-stop reads back the written
     /// length with bit 7 set (`hdma_late_m3speedchange_hdma5_scx*_2` -> out80),
     /// not the completed 0xFF the normal length-wrap would produce.
@@ -3029,11 +3031,10 @@ impl Mmio {
     }
 
     fn run_hdma_block_inner(&mut self, halted: bool) -> u32 {
-        // Deferred byte-write placement. Gambatte's `Memory::dma` (memory.cpp:354/
-        // 375) reads each byte at the dma-event `cc` but commits the VRAM write at
+        // Deferred byte-write placement. Hardware reads each byte at the dma-event `cc` but commits the VRAM write at
         // `cc + (2 + 2*ds)` — so byte 0 lands a precise sub-M-cycle AFTER the
         // trigger/prefetch boundary and after VRAM unlocks. rustyboi resolves CPU
-        // reads at the POST-tick cc (one M-cycle later than Gambatte's read-at-cc),
+        // reads at the POST-tick cc (one M-cycle later than hardware's read-at-cc),
         // so a VRAM read in the same window only sees the new byte once the write
         // has actually landed. Reading the 16 source bytes NOW (read-at-cc) and
         // deferring their VRAM commits by `delay` dots reproduces the byte-0
@@ -3044,21 +3045,21 @@ impl Mmio {
         // VRAM bytes.
         let delay: u32 = if self.is_double_speed_mode() { 5 } else { 3 };
 
-        // OAM-DMA interleave (Gambatte `Memory::dma`): HDMA and GDMA share the SAME
-        // `dma()` inner loop (memory.cpp:280 `intevent_dma` -> `dma(cc)`; only the
+        // OAM-DMA interleave: HDMA and GDMA share the SAME
+        // `dma()` inner loop`; only the
         // byte count differs). When an OAM-DMA is concurrently active each gated
         // HDMA byte writes the HDMA-read `data` into `OAM[src & 0xFF]`
-        // (memory.cpp:357-372), NOT the OAM-DMA's own source byte. `execute_gdma`
+        //, NOT the OAM-DMA's own source byte. `execute_gdma`
         // already mirrors this; `run_hdma_block` previously advanced the OAM-DMA
         // with `dma_advance_one_mcycle` (its own source), dropping the conflict
         // overwrite the oamdma-transition tests probe. Use the same gated cadence.
         let ds = self.is_double_speed_mode();
         let per_byte_cc: i64 = if ds { 4 } else { 2 };
         // A block firing inside the STOP speed-switch halt window must NOT advance
-        // the OAM-DMA: Gambatte's `Memory::dma` interleaves via `updateOamDma`,
-        // whose `halted()` branch freezes `oamDmaPos_` while the CPU is
-        // `intreq_.halt()`ed across the STOP. Without this gate the block's
-        // interleave advanced oamDmaPos_ ~16 bytes, shifting the post-switch
+        // the OAM-DMA: hardware freezes the OAM-DMA position (its halted branch)
+        // while the CPU is
+        // halted across the STOP. Without this gate the block's
+        // interleave advanced `dma_pos` ~16 bytes, shifting the post-switch
         // in-flight conflict byte (hdma_transition_speedchange_oamdma: read 0x60
         // where the frozen position reads 0x71).
         let interleave = self.dma_active && !self.oam_dma_stop_freeze;
@@ -3066,9 +3067,9 @@ impl Mmio {
         // bus M-cycle; whether the current OAM-DMA byte for that M-cycle has
         // already been placed depends on the sub-cycle phase. When
         // `dma_subcycle == 0` an OAM-DMA M-cycle just completed, so rustyboi's
-        // `dma_pos` lags Gambatte's `oamDmaPos_` by one and must catch up;
+        // `dma_pos` lags hardware by one and must catch up;
         // when a byte is mid-flight (`dma_subcycle != 0`) the gated loop below
-        // already advances `dma_pos` on the same boundary Gambatte does, so an
+        // already advances `dma_pos` on the same boundary hardware does, so an
         // extra catch-up over-advances by one (suppresses the final conflict).
         if interleave && self.dma_subcycle == 0 {
             self.dma_advance_one_mcycle();
@@ -3087,9 +3088,9 @@ impl Mmio {
         let mut cc: i64 = 0;
         let mut loam: i64 = -(self.dma_subcycle as i64);
 
-        // ENDGAME m25: in the HALT-bug resume window, snapshot each dest byte's
+        // In the HALT-bug resume window, snapshot each dest byte's
         // PRE-transfer VRAM value before the write is queued, so the resume read
-        // (ordered before dma()'s commits in Gambatte) observes the old byte.
+        // (ordered before the DMA's commits in hardware) observes the old byte.
         let capture_resume_pre = self.hdma_resume_shadow_window;
         for _ in 0..0x10 {
             let src = self.hdma_source;
@@ -3114,7 +3115,7 @@ impl Mmio {
             self.dma_subcycle = (cc - loam).rem_euclid(4) as u8;
         }
         // The OAM-DMA M-cycles for this 0x10-byte block were folded into the loop
-        // above; suppress `step_dma` for Gambatte's true dma-event duration (the
+        // above; suppress `step_dma` for the true dma-event duration (the
         // 0x10-byte transfer plus the single trailing `cc += 4`) so the OAM-DMA is
         // not advanced twice (see `execute_gdma`).
         if interleave {
@@ -3123,9 +3124,9 @@ impl Mmio {
         self.hdma_write_delay = delay;
 
         if halted {
-            // Gambatte `Memory::dma` `halted()` branch (memory.cpp:384-393): the
-            // length is NOT recomputed — `ioamhram_[0x155]` keeps its written value
-            // and only bit 7 is set; the subsequent `disableHdma` clears the enable.
+            // Hardware's halted branch: the
+            // length is NOT recomputed — the FF55 length keeps its written value
+            // and only bit 7 is set; the subsequent HDMA-disable step clears the enable.
             // `hdma_length` already holds the written `length_blocks_minus_1`, so
             // leaving it and clearing `hdma_enabled` makes FF55 read
             // `hdma_length | 0x80` (the written length with bit 7), not the 0xFF a
@@ -3141,9 +3142,9 @@ impl Mmio {
         }
         self.hdma_req_pending = false;
 
-        // Stall: Gambatte `Memory::dma` advances `cc` by `(2 + 2*ds) * 16` per
-        // byte (= 32 / 64) plus a trailing `cc += 4`. Gambatte runs the block as
-        // an event preceded by `Interrupter::prefetch` (next opcode fetched
+        // Stall: hardware advances `cc` by `(2 + 2*ds) * 16` per
+        // byte (= 32 / 64) plus a trailing `cc += 4`. Hardware runs the block as
+        // an event preceded by an opcode prefetch (next opcode fetched
         // before the transfer's cc advance); synchronous HDMA here absorbs that
         // prefetch/setup overlap with +6 so the post-block stall return lands
         // the next STAT-mode read on the exact mode-0 dot (36+6 / 68+6).
@@ -3166,7 +3167,7 @@ impl Mmio {
             // `stop` is pending downstream): its cost is drained as a timer-ticking
             // idle slice, so it shifts the cc of every downstream instruction —
             // including the post-STOP TIMA read. That read resolves against the 2nd
-            // STOP's `divReset` anchor (identical either way), so the block cost sets
+            // STOP's `DIV reset` anchor (identical either way), so the block cost sets
             // its phase directly: the +6 leaves `read - anchor = 131162`, one TIMA
             // tick below the 131168 boundary (ds_6 reads F8 vs hardware F9). The full
             // 12cc CPU-prefetch overlap lands the read on 131168 — and the byte-exact
@@ -3175,14 +3176,14 @@ impl Mmio {
         } else {
             6
         };
-        // A post-STOP-unhalt HDMA block (Gambatte's prefetched `hdma_requested` fired
+        // A post-STOP-unhalt HDMA block (the prefetched request fired
         // at the speed-switch unhalt; `halt_hdma_state == Requested`) charges only the
         // pure transfer cc (32 SS / 64 DS) — NEITHER the trailing +4 NOR the +6
         // CPU-prefetch fudge. Those are faithful only for a STAT/LY-read-downstream
         // block (the `hdma_cycles`/`frame*_count` calibration tests, which are `Low`);
         // the Requested block's downstream value-read is a TIMA read several
         // instructions later (hdma_late_m3speedchange_tima), so the fudge pinned it one
-        // TIMA tick high. cctracer (`_3`): faithful cc-tlu == 131132 == Gambatte
+        // TIMA tick high. The `_3` reference: faithful cc-tlu == 131132
         // (8195 = F6); the old 36+6 lands 131142 (8196 = F7).
         if matches!(self.halt_hdma_state, HaltHdmaState::Requested) {
             return 16 * (2 + 2 * self.is_double_speed_mode() as u32);
@@ -3191,11 +3192,11 @@ impl Mmio {
         base + prefetch_fudge
     }
 
-    /// The byte the OAM-DMA engine copies into `OAM[pos]`. Mirrors Gambatte's
-    /// `oamDmaSrcPtr()`:
-    ///   - invalid / off source -> `rdisabledRam()` (filled with 0xFF).
-    ///   - WRAM source -> `wramdata(src_high >> 4 & 1)` indexed by the 12-bit
-    ///     offset (DMA source-high bit, NOT the CPU SVBK selection).
+    /// The byte the OAM-DMA engine copies into `OAM[pos]`. Models the hardware
+    /// OAM-DMA source pointer:
+    ///   - invalid / off source -> disabled RAM (reads 0xFF).
+    ///   - WRAM source -> the WRAM block selected by `src_high >> 4 & 1`, indexed by
+    ///     the 12-bit offset (DMA source-high bit, NOT the CPU SVBK selection).
     ///   - rom/sram/vram -> normal read of `source_base + pos`.
     fn dma_source_byte(&self, pos: u8) -> u8 {
         match self.dma_src_kind() {
@@ -3206,7 +3207,7 @@ impl Mmio {
             // is board-specific (`Cartridge::dma_sram_bus_read`): a lazy-CS
             // board returns SRAM[src & 0x1FFF] (AntonioND dma_valid_sources_gbc
             // real_gbc.sav rows E0-FF read the A000-BFFF fill: E0->A0..FF->BF),
-            // a strict board leaves the bus floating 0xFF (Gambatte
+            // a strict board leaves the bus floating 0xFF (the
             // srcE000_readFE00 cgb04c capture, RAMG on).
             4 => {
                 let src = self.dma_source_base.wrapping_add(pos as u16);
@@ -3237,6 +3238,10 @@ impl Mmio {
     ///
     /// The first locked M-cycle of a line (`fetcher_bus_warmup`) and any non-mode-3
     /// read fall back to the true VRAM source.
+    ///
+    /// Not in Pan Docs, TCAGBD, or GBCTR: GBCTR marks "OAM DMA bus conflicts" TODO,
+    /// and TCAGBD §9.6.3's VRAM-read corruption describes the GDMA/HDMA engine, not
+    /// OAM-DMA. The AND-with-fetcher model is from real-silicon .dump captures.
     fn dma_vram_conflict_or_source_byte(&mut self, pos: u8) -> u8 {
         let dma_addr = self.dma_source_base.wrapping_add(pos as u16);
         if self.dma_src_kind() != 2 || !self.fetcher_bus_locked {
@@ -3315,13 +3320,13 @@ impl Mmio {
         }
     }
 
-    /// Advance the OAM-DMA engine by one M-cycle (mirrors one iteration of
-    /// Gambatte's `updateOamDma` loop). Advances `dma_pos`, (re)starts the
+    /// Advance the OAM-DMA engine by one M-cycle (one iteration of
+    /// the hardware transfer loop). Advances `dma_pos`, (re)starts the
     /// transfer when it reaches `dma_start_pos`, copies the corresponding
     /// source byte into OAM, and ends the transfer at byte 160.
     fn dma_advance_one_mcycle(&mut self) {
         // Apply any deferred CGB VRAM-source conflict-read OAM zero before this
-        // M-cycle places a new byte (Gambatte zeroes inside the read itself).
+        // M-cycle places a new byte (hardware zeroes inside the read itself).
         let pending = self.pending_oam_zero.get();
         if pending >= 0 {
             self.oam.write(OAM_START + pending as u16, 0);
@@ -3331,7 +3336,7 @@ impl Mmio {
         self.dma_pos = self.dma_pos.wrapping_add(1);
 
         if self.dma_pos == self.dma_start_pos {
-            // startOamDma: transfer (re)starts from the top.
+            // OAM-DMA start: transfer (re)starts from the top.
             self.dma_pos = 0;
             self.dma_start_pos = 0;
         }
@@ -3340,7 +3345,7 @@ impl Mmio {
             let byte = self.dma_vram_conflict_or_source_byte(self.dma_pos);
             self.oam.write(OAM_START + self.dma_pos as u16, byte);
         } else if self.dma_pos == 160 {
-            // endOamDma: park the engine. Because no restart was requested
+            // OAM-DMA end: park the engine. Because no restart was requested
             // (`dma_start_pos == 0`), idle `dma_pos` at -2 and stop.
             if self.dma_start_pos == 0 {
                 self.dma_pos = 0xFE;
@@ -3352,14 +3357,14 @@ impl Mmio {
     /// One OAM-DMA M-cycle that fires *inside* a concurrent GDMA/HDMA transfer.
     /// Unlike `dma_advance_one_mcycle` (which writes the OAM-DMA's own source
     /// byte), the conflict path writes the GDMA-read byte `data` into
-    /// `OAM[src & 0xFF]` — the GDMA source low byte — mirroring Gambatte's
-    /// `Memory::dma` inner loop (memory.cpp:357-372). Cells the GDMA bus index
+    /// `OAM[src & 0xFF]` — the GDMA source low byte — mirroring the hardware
+    /// DMA inner loop. Cells the GDMA bus index
     /// touches get overwritten with GDMA data; cells the OAM-DMA already wrote
     /// keep their values.
     ///
     /// `back_to_back` engages the 16-bit-word-bus quirk of two consecutive GDMA
-    /// blocks (undocumented CGB silicon, captured by the gambatte oamdumper .dump
-    /// oracles; unmodelled by gambatte/SameBoy). When the SECOND block's source
+    /// blocks (undocumented CGB silicon, captured by the oamdumper .dump
+    /// references; unmodelled by other emulators). When the SECOND block's source
     /// low byte re-wraps over the low OAM cells the FIRST block already word-wrote
     /// (`src` high byte non-zero, `src & 0xFF < first-pass frontier`), hardware's
     /// word bus keeps the first block's value instead of re-clobbering — and that
@@ -3387,7 +3392,7 @@ impl Mmio {
             // block-boundary word, `src_lo == 7`) the GDMA source has just re-aligned
             // to a word boundary out of the frozen gap, so its low address bit shifts
             // up one and the latched byte is `mem[((src_lo + 1) << 1) | 1]` — the high
-            // byte of the re-aligned word (0x11 for the len09 oracle, matching both
+            // byte of the re-aligned word (0x11 for the len09 reference, matching both
             // the srcC000 and src8000 hardware captures).
             let lo = src & 0x00FF;
             // First block's source page: the second block advanced the source one page
@@ -3400,8 +3405,8 @@ impl Mmio {
             } else if p < OAM_SIZE {
                 self.oam.write(OAM_START + p as u16, data);
             } else if self.cgb_features_enabled {
-                // p >= 160 writes the `ioamhram_` tail (0xFEA0-0xFEFF) masked
-                // with 0xE7 (Gambatte memory.cpp:366, `!agbFlag_` branch).
+                // p >= 160 writes the OAM-shadow tail (0xFEA0-0xFEFF) masked
+                // with 0xE7 (the non-AGB branch).
                 self.oam_high[(p & 0xE7) - 0xA0] = data;
             }
         } else if self.dma_pos as usize == OAM_SIZE
@@ -3433,18 +3438,18 @@ impl Mmio {
     // PPU is on. DMG/MGB/SGB hardware only — CGB/AGB do not have the bug (gated by
     // the caller via `!is_cgb()`).
     //
-    // The corruption itself is similar to SameBoy's DMG model
-    // (Core/memory.c `GB_trigger_oam_bug` / `GB_trigger_oam_bug_read`), which is
-    // the reference that passes blargg's oam_bug suite. SameBoy indexes OAM by a
+    // The corruption follows the canonical DMG OAM-bug model
+    // (the write-trigger and read-trigger paths), which is
+    // the model that passes blargg's oam_bug suite. That model indexes OAM by a
     // BYTE offset `accessed_oam_row` (8, 16, .. 0x98 for the 20 rows; the row the
     // PPU scans LAGS the current M-cycle by one, so row 0 / offset 0 never
     // corrupts). rustyboi's caller passes the row index 0..19; offset = row*8.
     // The bitwise glitch formulas match Pan Docs ("Corruption Patterns") plus the
-    // DMG-revision-specific read cases SameBoy documents.
+    // DMG-revision-specific read cases the hardware model documents.
 
     /// Read an OAM 16-bit word at byte offset `off` (little-endian). `off` is a
     /// signed offset from the accessed row's base; out-of-range offsets read 0
-    /// (the SameBoy formulas only reach in-bounds rows for the gated cases).
+    /// (the corruption formulas only reach in-bounds rows for the gated cases).
     fn oam_w(&self, off: isize) -> u16 {
         if off < 0 || off as usize + 1 >= OAM_SIZE {
             return 0;
@@ -3474,23 +3479,23 @@ impl Mmio {
         self.oam.as_mut_slice()[dst as usize] = v;
     }
 
-    /// SameBoy `bitwise_glitch` (write corruption word0): `((a^c)&(b^c))^c`.
+    /// Write-corruption word0 formula: `((a^c)&(b^c))^c`.
     #[inline]
     fn bitwise_glitch(a: u16, b: u16, c: u16) -> u16 {
         ((a ^ c) & (b ^ c)) ^ c
     }
-    /// SameBoy `bitwise_glitch_read` (simple read corruption word0): `b|(a&c)`.
+    /// Simple read-corruption word0 formula: `b|(a&c)`.
     #[inline]
     fn bitwise_glitch_read(a: u16, b: u16, c: u16) -> u16 {
         b | (a & c)
     }
-    /// SameBoy `bitwise_glitch_read_secondary`: `(b&(a|c|d))|(a&c&d)`.
+    /// Secondary read-corruption formula: `(b&(a|c|d))|(a&c&d)`.
     #[inline]
     fn bitwise_glitch_read_secondary(a: u16, b: u16, c: u16, d: u16) -> u16 {
         (b & (a | c | d)) | (a & c & d)
     }
 
-    /// Write corruption (Pan Docs "Write Corruption" / SameBoy `GB_trigger_oam_bug`).
+    /// Write corruption (Pan Docs "Write Corruption").
     /// `row` is the PPU-scanned OAM row index (0..19); only rows >= 1 corrupt.
     /// word0 = bitwise_glitch(this, preceding-word0, preceding-word2); words 1..3
     /// copied from the preceding row.
@@ -3507,14 +3512,14 @@ impl Mmio {
         }
     }
 
-    /// Read corruption (SameBoy `GB_trigger_oam_bug_read`), faithful to the DMG
+    /// Read corruption, faithful to the DMG
     /// model including the revision-specific secondary/tertiary cases. `row` is the
     /// PPU-scanned row index (0..19); only rows >= 1 corrupt.
     pub fn oam_bug_read_corrupt(&mut self, row: usize) {
         if row == 0 || row >= 20 {
             return;
         }
-        let aor = row * 8; // SameBoy accessed_oam_row byte offset (8..0x98)
+        let aor = row * 8; // accessed-OAM-row byte offset (8..0x98)
         let base = aor as isize;
         if (aor & 0x18) == 0x10 {
             // oam_bug_secondary_read_corruption: base[-4] = read_secondary(
@@ -3634,7 +3639,7 @@ impl Mmio {
     #[cold]
     fn step_dma_slow(&mut self) {
         // During the GDMA/HDMA stall the OAM-DMA was already advanced inside the
-        // transfer loop (Gambatte folds it into `Memory::dma`); skip the dots that
+        // transfer loop (hardware folds it into the DMA event); skip the dots that
         // re-tick the same transfer time so the OAM-DMA is not double-advanced.
         if self.oam_dma_stall_suppress > 0 {
             self.oam_dma_stall_suppress -= 1;
@@ -3650,15 +3655,15 @@ impl Mmio {
             return;
         }
         self.dma_subcycle = 0;
-        // STOP speed-switch unhalt window: the CPU is `intreq_.halt()`ed for the
-        // 0x20000 cycles, so Gambatte's `updateOamDma` takes its `halted()` branch
-        // and freezes `oamDmaPos_`. Mid-transfer OAM-DMA must stay put across the
+        // STOP speed-switch unhalt window: the CPU is halted for the
+        // 0x20000 cycles, so the OAM-DMA takes its halted branch
+        // and freezes the OAM position. Mid-transfer OAM-DMA must stay put across the
         // window (oamdma_*_speedchange_* read the in-flight conflict byte after the
         // switch).
-        // STOP speed-switch freeze: mirror the HALT-entry grace. Gambatte's
-        // `Memory::stop` runs `updateOamDma(cc + 4)` before `intreq_.halt()`, so
+        // STOP speed-switch freeze: mirror the HALT-entry grace. Hardware's
+        // STOP handler advances the OAM-DMA by the STOP's own M-cycle before halting, so
         // the STOP's own M-cycle advances the OAM-DMA one step, and a transfer
-        // whose final byte (pos 159 -> 160 = endOamDma) lands in that window
+        // whose final byte (pos 159 -> 160 = OAM-DMA end) lands in that window
         // completes before the freeze. Same shape as the `cpu_halted` branch
         // below: one grace M-cycle, plus the pos==159 final-byte bypass.
         if self.oam_dma_stop_freeze {
@@ -3669,12 +3674,12 @@ impl Mmio {
             }
             // grace M-cycle, or the final byte: fall through to advance.
         } else
-        // While the CPU is halted the OAM-DMA position is FROZEN: Gambatte's
-        // `updateOamDma` halt branch consumes the elapsed M-cycles
-        // (`lastOamDmaUpdate_ += 4*cycles`) WITHOUT advancing `oamDmaPos_`. Keep
-        // the sub-M-cycle phase (reset above) but do not place a byte. Gambatte's
-        // `Memory::halt` still advances ONE M-cycle at halt entry
-        // (`updateOamDma(cc + 4)` runs before `intreq_.halt()`), i.e. the HALT
+        // While the CPU is halted the OAM-DMA position is FROZEN: the OAM-DMA's
+        // halt branch consumes the elapsed M-cycles
+        // WITHOUT advancing the OAM position. Keep
+        // the sub-M-cycle phase (reset above) but do not place a byte. Hardware's
+        // HALT handler still advances ONE M-cycle at halt entry
+        // (before the CPU actually halts), i.e. the HALT
         // instruction's own M-cycle moves the OAM-DMA; only subsequent halt
         // M-cycles freeze. `halt_oam_grace` lets exactly that one through.
         if self.cpu_halted {
@@ -3682,20 +3687,20 @@ impl Mmio {
                 self.halt_oam_grace -= 1;
             } else if self.dma_pos != 159 {
                 // Freeze the OAM-DMA mid-transfer during HALT. EXCEPTION: the very
-                // last byte (pos 159 -> 160 = endOamDma). Gambatte's `Memory::halt`
-                // runs `updateOamDma(cc)` THEN `updateOamDma(cc + 4)` before
-                // `intreq_.halt()`, so a transfer whose final byte's M-cycle lands
+                // last byte (pos 159 -> 160 = OAM-DMA end). Hardware
+                // advances the OAM-DMA twice at halt entry, before
+                // halting, so a transfer whose final byte's M-cycle lands
                 // inside the halt-entry window completes BEFORE the freeze rather
                 // than stalling to unhalt. rustyboi's per-dot `step_dma` catch-up
-                // sits one M-cycle behind Gambatte's `updateOamDma(cc)` at the halt
+                // sits one M-cycle behind hardware at the halt
                 // instant (the FF46 two-M-cycle arm phase), so the grace M-cycle
                 // only reaches pos 159; letting pos 159 -> 160 through here lands
-                // endOamDma at the same point Gambatte does. A mid-transfer DMA
+                // OAM-DMA end at the same point hardware does. A mid-transfer DMA
                 // (pos << 159, e.g. oamdmasrc80_halt_*: pos 11) stays frozen.
                 // Gating on the final byte keeps every existing freeze boundary
                 // (the read8000 / hdma_transition_oamdma cases) byte-identical,
                 // while letting oamdma_late_halt_stat_2 finish so LY=4's mode-2
-                // scan sees the real OAM sprite (m0Time +11, STAT read mode 3).
+                // scan sees the real OAM sprite (mode-0 time +11, STAT read mode 3).
                 return;
             }
         }
@@ -3711,7 +3716,7 @@ impl Mmio {
         if !self.cgb_features_enabled {
             return;
         }
-        // ENDGAME R2: while ticking the world in lockstep through an in-flight
+        // While ticking the world in lockstep through an in-flight
         // block transfer, do not arm/fire another block (the per-dot crank handles
         // the next m0-edge after the lockstep completes).
         if self.hdma_lockstep_active {
@@ -3721,9 +3726,9 @@ impl Mmio {
         let lcdc = self.io_registers.read(ppu::LCD_CONTROL);
         let lcd_on = lcdc & (ppu::LCDCFlags::DisplayEnable as u8) != 0;
 
-        // Cycle-exact HDMA-eligibility window from the PPU renderer (Gambatte
-        // `isHdmaPeriod`). When the LCD is off, treat it as permanently in the
-        // period (Gambatte fires HDMA immediately when armed). When the renderer
+        // Cycle-exact HDMA-eligibility window from the PPU renderer (the
+        // in-HBlank-period predicate). When the LCD is off, treat it as permanently in the
+        // period (hardware fires HDMA immediately when armed). When the renderer
         // cannot supply a closed-form mode-0 dot (window/first line), fall back
         // to the STAT mode-3->0 edge below.
         let in_period = if !lcd_on { true } else { period.unwrap_or(false) };
@@ -3741,11 +3746,11 @@ impl Mmio {
             self.hdma_halt_edge_consumed = false;
         }
 
-        // Gambatte's period-edge `flagHdmaReq` is suppressed while the CPU is
-        // halted (video.h:41 `if (!intreq_.halted())`): during HALT — and equally
-        // during the CGB STOP speed-switch window (`Memory::stop` also
-        // `intreq_.halt()`s, see `in_stop_window`) — the block is governed by the
-        // `haltHdmaState_` machine and re-flagged only on unhalt, so the edge must
+        // the period-edge HDMA request is suppressed on hardware while the CPU is
+        // halted: during HALT — and equally
+        // during the CGB STOP speed-switch window (which also halts the CPU,
+        // see `in_stop_window`) — the block is governed by the
+        // halt-HDMA state machine and re-flagged only on unhalt, so the edge must
         // NOT auto-arm here. Edge trackers are still advanced so the rising edge is
         // detected cleanly once the CPU unhalts.
         let arm_allowed = !self.cpu_halted && !self.in_stop_window;
@@ -3753,24 +3758,23 @@ impl Mmio {
             // Rising edge of the eligibility window arms a block.
             if arm_allowed && !self.hdma_prev_period && in_period && self.hdma_enabled {
                 // High-at-halt unhalt: consume the first post-unhalt m0 edge (the
-                // during-halt edge Gambatte already consumed, landing one dot past
+                // during-halt edge hardware already consumed, landing one dot past
                 // our slightly-early unhalt cc). Suppress this arm and clear.
                 if self.hdma_high_unhalt_consume {
                     self.hdma_high_unhalt_consume = false;
                 } else if self.peraccess_consume_m0_arm() {
                     // Requested-unhalt sub-block-cc consume: this m0 edge fell inside
-                    // block1's transfer span; Gambatte absorbs it and defers the next
+                    // block1's transfer span; hardware absorbs it and defers the next
                     // block one line. Suppress this arm.
                 } else {
                     self.hdma_req_pending = true;
                 }
             } else if !arm_allowed && !self.hdma_prev_period && in_period && self.hdma_enabled {
-                // A period rising edge while HALTED. Gambatte suppresses (and
-                // CONSUMES) the `flagHdmaReq` here. Whether this consumed edge must
-                // STILL fire its block after unhalt depends on `haltHdmaState_`:
+                // A period rising edge while HALTED. Hardware suppresses (and
+                // CONSUMES) the HDMA request here. Whether this consumed edge must
+                // STILL fire its block after unhalt depends on the halt-HDMA state:
                 //   - High (halt entered in-period, block already serviced this
-                //     period): the unhalt does NOT reflag (memory.cpp:304 gate fails
-                //     on High) and this period's block is gone — the NEXT line's m0
+                //     period): the unhalt does NOT reflag and this period's block is gone — the NEXT line's m0
                 //     edge fires the next block. Mark the edge consumed so rustyboi's
                 //     STAT-mode-3->0 fallback (which can resurrect this same m0 edge
                 //     the first dot after unhalt, once the closed-form `hdma_period`
@@ -3802,7 +3806,7 @@ impl Mmio {
             // so the fallback can resurrect an m0 edge the closed-form path already
             // recognized. When that edge was a during-halt period entry whose block
             // was already serviced (`hdma_halt_edge_consumed`, set above for a
-            // High-at-halt period re-entry), Gambatte has already consumed it; skip
+            // High-at-halt period re-entry), hardware has already consumed it; skip
             // the fallback arm so it is not re-fired post-unhalt (the spurious extra
             // block in hdma_m0halt_late_m3unhalt_*). A Low/Requested-at-halt period
             // entry leaves the flag clear, so its post-unhalt first block still fires
@@ -3838,12 +3842,12 @@ impl Mmio {
             self.hdma_prev_period = in_period;
         }
 
-        // C7-full event firing. Normally the block fires synchronously the dot the
+        // HDMA event firing. Normally the block fires synchronously the dot the
         // request is latched (the byte-landing timing the hdma_start/late read
         // tests are calibrated to). The ONLY exception is the interrupt-vs-dma
         // precedence window: while an interrupt service is pushing PC
         // (`hdma_mcycle_fire_suppressed`), a block latched mid-service is HELD and
-        // fired explicitly after the pushes (memory.cpp:312-320) so the pushed
+        // fired explicitly after the pushes so the pushed
         // return address is visible in the HDMA copy of that stack slot.
         if self.hdma_req_pending && self.hdma_enabled {
             if in_period {
@@ -3855,11 +3859,11 @@ impl Mmio {
         }
     }
 
-    /// C7-full: fire any latched HDMA block at a CPU M-cycle boundary (the
-    /// `intevent_dma` body). Called by the bus after each access M-cycle so the
+    /// Fire any latched HDMA block at a CPU M-cycle boundary (the
+    /// DMA-event body). Called by the bus after each access M-cycle so the
     /// copy lands one M-cycle after the trigger — and, when an interrupt service
     /// pushed to the block's source region during this M-cycle, AFTER those
-    /// pushes (memory.cpp:312-320 precedence). No-op when nothing is latched.
+    /// pushes. No-op when nothing is latched.
     pub fn fire_pending_hdma_mcycle(&mut self) {
         if !(self.hdma_req_pending && self.hdma_enabled) {
             return;
@@ -3867,7 +3871,7 @@ impl Mmio {
         // Snapshot the pre-fire block pointers so the late-hdma-vs-interrupt
         // re-order (see `reorder_late_hdma_after_pushes`) can restore them and
         // re-run the block reading post-push memory when an interrupt won the
-        // m0Time-vs-minIntTime race. Only meaningful while no OAM-DMA interleave
+        // m0-time-vs-interrupt-time race. Only meaningful while no OAM-DMA interleave
         // is active (the `late_hdma_vs_*` tests have none); a re-run with an
         // active OAM-DMA would double-advance its position, so the re-order is
         // gated on `!dma_active` at the service site.
@@ -3875,7 +3879,7 @@ impl Mmio {
             Some((self.hdma_source, self.hdma_dest, self.hdma_length, self.hdma_enabled));
         self.hdma_last_fire_cc = Some(self.master_cc());
         self.pending_dma_stall += self.run_hdma_block();
-        // Gambatte intevent_dma (memory.cpp:280): after the block, a halt-time
+        // The DMA event: after the block, a halt-time
         // `hdma_requested` collapses to `hdma_low` so a subsequent unhalt does
         // not re-fire it (the request has now been serviced).
         if self.halt_hdma_state == HaltHdmaState::Requested {
@@ -3885,7 +3889,7 @@ impl Mmio {
 
     /// Fire the latched HDMA block whose `dma()` event lands inside the STOP
     /// speed-switch halt window. Same copy as `fire_pending_hdma_mcycle` but with
-    /// the `halted()` FF55 semantics (no length decrement; see
+    /// the halted-branch FF55 semantics (no length decrement; see
     /// `run_hdma_block_stop_halt`).
     pub fn fire_pending_hdma_mcycle_stop_halt(&mut self) {
         if !(self.hdma_req_pending && self.hdma_enabled) {
@@ -3900,11 +3904,10 @@ impl Mmio {
         }
     }
 
-    /// C7-full late-hdma-vs-interrupt re-order (memory.cpp:312-320 / the
-    /// `intevent_dma` < `intevent_interrupts` event ordering). Gambatte resolves
-    /// the race by event time: the m0-edge HDMA (`flagHdmaReq` at `m0Time`) wins
-    /// over the interrupt only when `m0Time <= minIntTime_` (the interrupt's
-    /// serviceable cc); otherwise the interrupt's PC pushes run first and the
+    /// Late-hdma-vs-interrupt re-order. Hardware resolves
+    /// the race by event time: the m0-edge HDMA (requested at `mode-0 time`) wins
+    /// over the interrupt only when `mode-0 time <=` the interrupt's
+    /// serviceable cc; otherwise the interrupt's PC pushes run first and the
     /// block fires AFTER, so its copy of the source stack slot carries the pushed
     /// return address (`late_hdma_vs_ei/ie/tima/m0` content tests).
     ///
@@ -3950,13 +3953,13 @@ impl Mmio {
         self.hdma_pre_fire_state = None;
     }
 
-    /// C7-full: whether the M-cycle-boundary HDMA fire is currently suppressed
+    /// Whether the M-cycle-boundary HDMA fire is currently suppressed
     /// (an interrupt service is pushing PC; the block must fire after the pushes).
     pub fn hdma_mcycle_fire_suppressed(&self) -> bool {
         self.hdma_mcycle_fire_suppressed
     }
 
-    /// C7-full: begin/end suppression of the M-cycle-boundary HDMA fire around an
+    /// Begin/end suppression of the M-cycle-boundary HDMA fire around an
     /// interrupt service's PC pushes.
     pub fn set_hdma_mcycle_fire_suppressed(&mut self, v: bool) {
         self.hdma_mcycle_fire_suppressed = v;
@@ -3987,7 +3990,7 @@ impl Mmio {
         self.pending_dma_stall
     }
 
-    /// ENDGAME R2: mark/unmark the lockstep-transfer-advance window (suppresses
+    /// Mark/unmark the lockstep-transfer-advance window (suppresses
     /// `step_hdma` block arm/fire while the bus ticks the world through the
     /// in-flight block's transfer cc).
     pub fn set_hdma_lockstep_active(&mut self, v: bool) {
@@ -4001,13 +4004,13 @@ impl Mmio {
         self.cpu_halted || self.in_stop_window
     }
 
-    /// ENDGAME R2: the Requested-context resume-instruction window in which a
+    /// The Requested-context resume-instruction window in which a
     /// late-firing HDMA block must be advanced in lockstep (event-interleaved
     /// transfer) so the same-instruction resume read observes the extended line.
     pub fn set_hdma_resume_lockstep_window(&mut self, v: bool) {
         self.hdma_resume_lockstep_window = v;
         if !v {
-            // Resume instruction done — drop both the lockstep window and (m25) the
+            // Resume instruction done — drop both the lockstep window and the
             // pre-transfer shadow + its window.
             self.hdma_resume_shadow_window = false;
             self.hdma_resume_pre_shadow.clear();
@@ -4016,7 +4019,7 @@ impl Mmio {
     pub fn hdma_resume_lockstep_window(&self) -> bool {
         self.hdma_resume_lockstep_window
     }
-    /// FAITHFUL HALT-EXIT (CGB dma-due deferral): set/take the cc bias the deferred
+    /// (CGB dma-due deferral) set/take the cc bias the deferred
     /// post-HALT VRAM write adds to its PPU mode-block check (block1's transfer
     /// span). One-shot — consumed by the first VRAM write on the resume step.
     pub fn set_hdma_dma_due_write_cc_bias(&mut self, v: u64) {
@@ -4025,7 +4028,7 @@ impl Mmio {
     pub fn take_hdma_dma_due_write_cc_bias(&mut self) -> u64 {
         std::mem::take(&mut self.hdma_dma_due_write_cc_bias)
     }
-    /// m25: arm/clear the pre-transfer shadow window (armed for both IME states;
+    /// Arm/clear the pre-transfer shadow window (armed for both IME states;
     /// the lockstep advance window is separate and !ime-gated).
     pub fn set_hdma_resume_shadow_window(&mut self, v: bool) {
         self.hdma_resume_shadow_window = v;
@@ -4037,7 +4040,7 @@ impl Mmio {
         self.hdma_resume_shadow_window
     }
 
-    /// ENDGAME m25: pre-transfer VRAM byte for a resume-window read of an in-block
+    /// Pre-transfer VRAM byte for a resume-window read of an in-block
     /// dest address (the resume read is ordered before dma()'s commits). Returns
     /// None outside the window or for an address not in the just-fired block.
     pub fn hdma_resume_pre_byte(&self, addr: u16) -> Option<u8> {
@@ -4058,21 +4061,20 @@ impl Mmio {
     pub fn take_dma_stall(&mut self) -> u32 {
         let stall = std::mem::take(&mut self.pending_dma_stall);
         if stall > 0 {
-            // C7: arm the post-DMA STAT-read bias (prefetch absorption) so the
-            // first FF41 mode read after the stall resolves at Gambatte's read cc.
+            // Arm the post-DMA STAT-read bias (prefetch absorption) so the
+            // first FF41 mode read after the stall resolves at hardware's read cc.
             self.dma_prefetch_stat_bias = true;
         }
         stall
     }
 
-    /// C7: whether the next FF41 STAT-mode read should apply the post-DMA prefetch
+    /// Whether the next FF41 STAT-mode read should apply the post-DMA prefetch
     /// bias (resolve at `master_cc - 1`). Consumes the flag.
     pub fn take_dma_prefetch_stat_bias(&mut self) -> bool {
         std::mem::take(&mut self.dma_prefetch_stat_bias)
     }
 
-    /// Whether the OAM-DMA engine is armed/running (mirrors
-    /// `lastOamDmaUpdate_ != disabled_time`). Used by the bus to decide whether
+    /// Whether the OAM-DMA engine is armed/running. Used by the bus to decide whether
     /// the DMA M-cycle must be advanced before resolving a CPU write.
     pub fn dma_active(&self) -> bool {
         self.dma_active
@@ -4107,21 +4109,21 @@ impl Mmio {
     }
 
     /// True while a transfer is actively placing bytes into OAM (the window in
-    /// which the CPU bus conflicts with OAM DMA). Mirrors `oamDmaPos_ < 160`.
+    /// which the CPU bus conflicts with OAM DMA). Mirrors `dma_pos < 160`.
     fn dma_transfer_in_progress(&self) -> bool {
         self.dma_active && self.dma_pos < 160
     }
 
-    /// Public view of the OAM-DMA "placing bytes" window (`startOamDma` ..
-    /// `endOamDma`). The PPU's lazy sprite snapshot uses this to know when the
-    /// OAM source reads as disabled RAM (0xFF), mirroring Gambatte pointing
-    /// `oamReader_.oamram_` at `cart_.rdisabledRam()` for the DMA window.
+    /// Public view of the OAM-DMA "placing bytes" window (`OAM-DMA start` ..
+    /// `OAM-DMA end`). The PPU's lazy sprite snapshot uses this to know when the
+    /// OAM source reads as disabled RAM (0xFF), mirroring hardware pointing
+    /// the OAM reader at the disabled-RAM source for the DMA window.
     pub fn oam_dma_window_active(&self) -> bool {
         self.dma_transfer_in_progress()
     }
 
     /// Take (and clear) the pending-CPU-OAM-write flag. The PPU drains this each
-    /// dot to fire the sprite-snapshot `change(cc)` (Gambatte `oamChange`).
+    /// dot to fire the sprite snapshot on an OAM write.
     pub fn take_oam_write_pending(&mut self) -> bool {
         let p = self.oam_write_pending;
         self.oam_write_pending = false;
@@ -4131,7 +4133,7 @@ impl Mmio {
     /// Copy the 80 OAM position bytes (Y at even index, X at odd index, for each
     /// of the 40 sprites) into `out`. Reads the raw OAM buffer directly,
     /// bypassing the DMA-conflict bus logic — the PPU sprite snapshot wants the
-    /// true post-write OAM contents (Gambatte `oamram_[2*i]`/`[2*i+1]`).
+    /// true post-write OAM contents.
     pub fn peek_oam_pos(&self, out: &mut [u8; 80]) {
         for i in 0..40 {
             let base = OAM_START + (i as u16) * 4;
@@ -4234,10 +4236,9 @@ impl Mmio {
         false
     }
 
-    /// Source-region classification of the active OAM DMA (mirrors
-    /// `oamDmaInitSetup`/`cart_.oamDmaSrc()`): 0=rom 1=sram 2=vram 3=wram
+    /// Source-region classification of the active OAM DMA: 0=rom 1=sram 2=vram 3=wram
     /// 4=external-bus E000+ (CGB hardware only; see `dma_source_byte`).
-    /// Bus topology is a *hardware* property (Gambatte isCgb()), not a
+    /// Bus topology is a *hardware* property, not a
     /// DMG-compat one: a DMG cart on CGB still has internal WRAM and the CGB
     /// external-bus decode (AntonioND dma_valid_sources_dmg_mode real_gbc.sav
     /// rows C0-FF match the native-CGB grid, not the DMG one).
@@ -4255,16 +4256,16 @@ impl Mmio {
     }
 
     /// The WRAM "area" (bank slot) selected by the active OAM DMA during a CGB
-    /// conflicting WRAM access. Mirrors Gambatte's
-    /// `cart_.wramdata(ioamhram_[0x146] >> 4 & 1)`: bit 4 of the DMA source-high
-    /// byte (NOT the CPU's SVBK selection) chooses between the fixed bank-0
+    /// conflicting WRAM access. Mirrors hardware, where bit 4 of the DMA
+    /// source-high byte in FF46 (NOT the CPU's SVBK selection) chooses between
+    /// the fixed bank-0
     /// block (area 0) and the currently SVBK-banked block (area 1).
     fn dma_conflict_wram_area(&self) -> u8 {
         ((self.dma_source_base >> 8) >> 4 & 1) as u8
     }
 
     /// Read the WRAM byte seen on a CGB OAM-DMA conflicting access. The byte is
-    /// taken from `wramdata(area)[p & 0xFFF]`, so the address's C/D range is
+    /// taken from the DMA-selected WRAM area at `[p & 0xFFF]`, so the address's C/D range is
     /// ignored: only the 12-bit offset and the DMA-derived area matter.
     fn dma_conflict_wram_read(&self, addr: u16) -> u8 {
         let offset = addr & 0x0FFF;
@@ -4280,7 +4281,7 @@ impl Mmio {
     }
 
     /// Write the CPU byte into WRAM during a CGB OAM-DMA conflict, matching the
-    /// `wramdata(area)[p & 0xFFF]` routing used by `dma_conflict_wram_read`.
+    /// DMA-selected-area `[p & 0xFFF]` routing used by `dma_conflict_wram_read`.
     fn dma_conflict_wram_write(&mut self, addr: u16, value: u8) {
         let offset = addr & 0x0FFF;
         if self.dma_conflict_wram_area() == 0 {
@@ -4295,8 +4296,8 @@ impl Mmio {
     }
 
     /// Resolve a CPU write that lands in the OAM-DMA conflict area while a
-    /// transfer is in progress. Mirrors the conflict branch of Gambatte's
-    /// `nontrivial_write`: the write is redirected onto the shared bus, so the
+    /// transfer is in progress. Mirrors the hardware conflict branch: the write
+    /// is redirected onto the shared bus, so the
     /// DMA copies the CPU-driven byte into `OAM[dma_pos]` instead of the
     /// original source byte. Returns true if the write was consumed here (and
     /// must not reach normal memory).
@@ -4312,9 +4313,8 @@ impl Mmio {
                 self.oam.write(OAM_START + pos, byte);
             } else if self.dma_src_kind() != 3 {
                 // WRAM region with a non-WRAM source: the write still reaches
-                // WRAM, but on the bank slot chosen by the DMA source-high bit
-                // (Gambatte `wramdata(ioamhram_[0x146] >> 4 & 1)`), not the
-                // CPU's SVBK selection.
+                // WRAM, but on the bank slot chosen by the DMA source-high bit,
+                // not the CPU's SVBK selection.
                 self.dma_conflict_wram_write(addr, value);
             }
             // WRAM region with a WRAM source: write is swallowed (no effect).
@@ -4337,13 +4337,13 @@ impl Mmio {
     }
 
     /// Byte the CPU sees on a conflicting bus read while OAM DMA is mid-transfer.
-    /// Mirrors the conflict branch of Gambatte's `nontrivial_read`: the read
+    /// Mirrors the hardware conflict branch: the read
     /// observes `OAM[dma_pos]`, the byte the DMA just placed this M-cycle (the
     /// bus tick already advanced the engine before this read resolves). On CGB,
     /// a read of the WRAM region with a non-WRAM source instead returns the live
     /// WRAM byte.
     fn dma_conflict_byte(&self, addr: u16) -> u8 {
-        // Hardware-level CGB gates (Gambatte isCgb()): the WRAM-quirk read and
+        // Hardware-level CGB gates: the WRAM-quirk read and
         // VRAM-source zeroing are silicon bus behaviors, active in DMG-compat
         // too (AntonioND dma_valid_sources_dmg_mode real_gbc.sav probes D0/E8/
         // F8/FC/FD during E-src DMA read the area-routed WRAM quirk bytes).
@@ -4352,7 +4352,7 @@ impl Mmio {
         }
         let byte = self.oam.read(OAM_START + self.dma_pos as u16);
         // CGB with a VRAM source: the conflict read returns OAM[pos] but then
-        // zeroes that OAM byte (Gambatte `nontrivial_read`). Defer the zero to
+        // zeroes that OAM byte. Defer the zero to
         // the next DMA advance so the &self read path can record it.
         if self.is_cgb() && self.dma_src_kind() == 2 {
             self.pending_oam_zero.set(self.dma_pos as i16);
@@ -4361,7 +4361,7 @@ impl Mmio {
     }
 
     /// Whether a CPU access to `addr` conflicts with the in-progress OAM DMA.
-    /// Faithful port of Gambatte's `isInOamDmaConflictArea`: classify the DMA
+    /// Faithful hardware model: classify the DMA
     /// source into rom/sram/vram/wram/invalid, then test a per-4KB-block
     /// conflict bitmask (which differs between DMG and CGB).
     fn dma_address_conflicts(&self, addr: u16) -> bool {
@@ -4454,37 +4454,38 @@ impl Mmio {
 
     pub fn perform_speed_switch(&mut self) {
         if self.cgb_features_enabled && self.key1_switch_armed {
-            // Gambatte evaluates `isDoubleSpeed()` for the PSG/timer speed-change
-            // folds BEFORE toggling KEY1 (`ioamhram_[0x14D] ^= 0x81`), so capture
+            // Pan Docs: CGB Registers (KEY1/SPD) — https://gbdev.io/pandocs/CGB_Registers.html
+            // Hardware evaluates the current speed for the PSG/timer speed-change
+            // folds BEFORE toggling KEY1 (FF4D flips bit 7 and clears bit 0), so capture
             // the speed being LEFT here.
             let old_ds = self.is_double_speed_mode();
             // Toggle the speed mode
             self.key1_current_speed = !self.key1_current_speed;
             // Clear the armed bit
             self.key1_switch_armed = false;
-            // Gambatte's `Memory::stop` resets DIV and re-bases peripheral
+            // Hardware resets DIV and re-bases peripheral
             // timing on speed switch. We don't keep separately scaled internal
             // counters, so resetting DIV is the only resync we need; the
             // per-T-cycle stepping in gb.rs already produces the correct
             // half-rate PPU/audio cadence in double-speed.
-            // Gambatte applies `Tima::speedChange` (a 4-cycle TIMA phase shift
+            // Hardware applies a TIMA speed-change (a 4-cycle TIMA phase shift
             // for enabled fast timers) before the DIV reset; mirror that order.
             self.timer.speed_change();
             self.timer.stop_div_reset(self.cgb_de);
             if self.timer.take_pending_irq() {
                 self.request_interrupt(cpu::registers::InterruptFlag::Timer);
             }
-            // Gambatte order (memory.cpp:466): after the DIV reset (which the APU
-            // mirrors as a `PSG::divReset` fold on the next `sync_cc`), apply the
-            // `PSG::speedChange` fold. Sync first so the divReset fold + flush to
+            // Hardware order: after the DIV reset (which the APU
+            // mirrors as a DIV reset fold on the next sync), apply the
+            // speed change fold. Sync first so the DIV reset fold + flush to
             // the switch cc happen, then re-fold for the speed transition.
             //
-            // Gambatte's `Memory::stop` runs both `psg_.divReset(isDoubleSpeed())`
-            // and `psg_.speedChange(cc_, isDoubleSpeed())` with the OLD speed (the
-            // KEY1 toggle is AFTER), and flushes the speedChange to
-            // `cc_ = stopCc + 8 * !old_ds`, not to the current dot. KEY1 was already
+            // Hardware runs both the APU DIV reset
+            // and speed change with the OLD speed (the
+            // KEY1 toggle is AFTER), and flushes the speed change to
+            // `stop_cc + 8 * !old_ds`, not to the current dot. KEY1 was already
             // toggled above, so `is_double_speed_mode` now reports the NEW speed;
-            // sync with the captured `old_ds` so the divReset fold runs at the old
+            // sync with the captured `old_ds` so the DIV reset fold runs at the old
             // speed, then hand the stop cc to `psg_speed_change_at` for the faithful
             // `+8*!ds` flush.
             let stop_cc = self.timer.abs_cc();
@@ -4517,8 +4518,8 @@ impl Mmio {
                     None => EMPTY_BYTE,
                 }
             },
-            // VRAM-source OAM DMA reads through the live VBK pointer
-            // (Gambatte `vrambankptr()`), so a mid-DMA VBK write retargets
+            // VRAM-source OAM DMA reads through the live VBK pointer, so a
+            // mid-DMA VBK write retargets
             // subsequent source bytes. The mode-3 bus conflict is applied upstream
             // in `dma_vram_conflict_or_source_byte`; this path is the clean source.
             VRAM_START..=VRAM_END => {
@@ -4582,9 +4583,9 @@ impl Mmio {
         let now_off = value & de == 0;
         self.io_registers.write(ppu::LCD_CONTROL, value);
         self.stat_register_write_pending = true;
-        // Gambatte `lcdcChange` (memory.cpp:1144-1158): disabling the LCD while an
-        // HDMA is armed flags an HDMA request directly (`if (hdmaEnabled) flagHdmaReq`).
-        // With the LCD off `isHdmaPeriod` is permanently true, so the latched block
+        // On hardware, disabling the LCD while an
+        // HDMA is armed flags an HDMA request directly.
+        // With the LCD off the HDMA period is permanently active, so the latched block
         // fires on the next `step_hdma` (the LCD-off arming paths there require
         // `lcd_on`, so without this edge the block would never arm — hdma_disable_display).
         if was_on && now_off && self.cgb_features_enabled && self.hdma_enabled {
@@ -4678,15 +4679,14 @@ impl Mmio {
     /// Post-boot power-on contents of OAM (0xFE00-0xFE9F), the "unusable"
     /// 0xFEA0-0xFEFF shadow, and HRAM (0xFF80-0xFFFE). The boot ROM does not
     /// touch these (besides clearing OAM on CGB), so they retain the hardware
-    /// power-on pattern. Bytes are Gambatte's `setInitial{Dmg,Cgb}Ioamhram`
-    /// dumps (libgambatte/src/mem_dumps.h). Tests that read never-written OAM /
+    /// power-on pattern. Bytes are the captured DMG/CGB power-on OAM/HRAM contents. Tests that read never-written OAM /
     /// unusable / HRAM (the fexx_* dumpers) depend on these.
     /// Seed ONLY the hardware power-on RAM garbage that the boot ROM does not
     /// overwrite: OAM (0xFE00-0xFE9F), the 0xFEA0-0xFEFF shadow, HRAM
     /// (0xFF80-0xFFFE) and wave RAM (0xFF30-0xFF3F). Used BEFORE running the real
-    /// boot ROM (mirrors Gambatte initializing ioamhram before `loadBios`), so
+    /// boot ROM (mirrors initialising this RAM before the boot ROM runs), so
     /// the boot ROM executes on top of real power-on contents and any region it
-    /// leaves untouched reads back the hardware garbage the dumper oracles expect.
+    /// leaves untouched reads back the hardware garbage the dumper references expect.
     /// (CGB clears OAM during boot, so seeding OAM garbage is harmless there.)
     pub fn seed_power_on_ram(&mut self, cgb: bool) {
         // Reuses the exact captured OAM/FEAX/HRAM constants. The I/O register
@@ -4710,13 +4710,13 @@ impl Mmio {
             // CGB: OAM cleared to 0x00. The 0xFEA0-0xFEFF shadow holds the feax
             // dump (the read path masks the index with 0xE7). The 0xFEA0-0xFEFF
             // region on real CGB reflects boot-ROM bus residue and is NOT a clean
-            // power-on constant: the gdma-oamdumper `.dump` oracles read 0x18 at
-            // FEA0 (single-speed) while the `fexx_*_dumper_cgb.bin` oracles read
+            // power-on constant: the gdma-oamdumper `.dump` references read 0x18 at
+            // FEA0 (single-speed) while the `fexx_*_dumper_cgb.bin` references read
             // 0x08 (the canonical CGB power-on feax tail). OAM-DMA never writes the >=0xA0
             // tail (the OAM-DMA engine never advances past `oam_size`), so no DMA-path fix
             // can reconcile them — a single seed can satisfy only one family. The
             // 0x18-revision bytes are kept here because they leave more of the
-            // suite (the oamdumpers) passing; the canonical-0x08 fexx_ffxx oracle
+            // suite (the oamdumpers) passing; the canonical-0x08 fexx_ffxx reference
             // is unreachable without per-ROM boot residue.
             const CGB_FEAX: [u8; 0x60] = [
                 0x18, 0x01, 0xEF, 0xDE, 0x06, 0x48, 0xCD, 0xBD,
@@ -4757,20 +4757,19 @@ impl Mmio {
                 hram[0x00..0x30].copy_from_slice(&logo);
             }
             hram[0x30..].copy_from_slice(&CGB_HRAM_TAIL);
-            self.hram.as_mut_slice().copy_from_slice(&CGB_HRAM);
-            // BCPS/OCPS (FF68/FF6A) power-on read 0xC0/0xC1 (Gambatte ffxxDump
+            // BCPS/OCPS (FF68/FF6A) power-on read 0xC0/0xC1 (the ffxx dump
             // index 0x68/0x6A): bit 6 is unused (always 1) and bit 7 (the
             // auto-increment flag) is set in the power-on garbage; OCPS also
             // has index bit 0 set. The read path forces bit 6; seed the rest
             // here so an untouched FF68/FF6A reads 0xC0/0xC1
-            // (fexx_ffxx_dumper_cgb oracle).
+            // (fexx_ffxx_dumper_cgb reference).
             self.bg_palette_spec = 0xC0;
             self.obj_palette_spec = 0xC1;
             // NOTE on the post-boot VRAM logo: the CGB boot ROM decompresses the
-            // Nintendo logo into VRAM bank 0 (Gambatte `setInitialVram`,
-            // mem_dumps.h:3032, even bytes 0x8010..0x819F). The vram_dumper_cgb
-            // oracle reads this logo back (offset 0x10 -> 0xF0). It is intentionally
-            // NOT seeded here: the oamdma `*_vramdumper` `.dump` oracles read VRAM
+            // Nintendo logo into VRAM bank 0 (even bytes 0x8010..0x819F,
+            // per the hardware power-on image). The vram_dumper_cgb
+            // reference reads this logo back (offset 0x10 -> 0xF0). It is intentionally
+            // NOT seeded here: the oamdma `*_vramdumper` `.dump` references read VRAM
             // just past their GDMA dest region (e.g. 0x8140) and expect 0x00 — i.e.
             // they were captured with zeroed VRAM, not the logo. A single initial
             // VRAM state cannot satisfy both families (3 oamdma vramdumpers vs 1
@@ -4780,23 +4779,23 @@ impl Mmio {
             self.hdma_length = 0x7F;
             // FF46 (OAM-DMA register) is fully readable and reads back its last
             // written value; its CGB post-boot value is 0x00
-            // (fexx_ffxx_dumper_cgb / ioregs_reset oracle), seeded here so an
+            // (fexx_ffxx_dumper_cgb / ioregs_reset reference), seeded here so an
             // untouched FF46 reads 0x00 while a written value reads back.
             self.io_registers.write(REG_DMA, 0x00);
         } else {
             // DMG: OAM (0xFE00-0xFE9F) power-on state is per-unit nondeterministic
             // garbage (Pan Docs: uninitialised); 0xFEA0-0xFEFF reads 0x00. We seed
-            // OAM to 0x00 (not Gambatte's `setInitialDmgIoamhram` `oamDump` constant,
-            // mem_dumps.h:3194): that constant is a fabricated, internally
+            // OAM to 0x00 (not a fabricated captured-OAM reference dump): that dump
+            // constant is a fabricated, internally
             // inconsistent capture, not portable silicon behaviour. AGE
             // `stat-mode-sprites` (verified on real CPU-DMG-C) writes only sprite
             // slots 0-15 and leaves 16-39 untouched, then measures mode-3 length;
             // its real-hardware expected values require NO phantom sprites from the
-            // untouched slots -- i.e. a clean OAM. Gambatte's `oamDump` places 13
-            // phantom sprites on the measured lines, so Gambatte's own PPU would
-            // fail stat-mode-sprites with it. Proof it is not a fixed assertion:
-            // Gambatte's two DMG fexx dumper `.bin` references disagree on 105/160
-            // OAM bytes for the identical power-on. The `fexx_*_dumper` oracles skip
+            // untouched slots -- i.e. a clean OAM. that reference dump places 13
+            // phantom sprites on the measured lines, so an emulator using it
+            // would fail stat-mode-sprites. Proof it is not a fixed assertion:
+            // the two DMG fexx_dumper `.bin` references disagree on 105/160
+            // OAM bytes for the identical power-on. The `fexx_*_dumper` references skip
             // this region in the runner (see push_dump_cases); their deterministic
             // 0xFEA0-0xFFFF payload (the tests' actual named FEXX/FFXX subject) is
             // unaffected by the zero seed.
@@ -4824,7 +4823,7 @@ impl Mmio {
             self.hram.as_mut_slice().copy_from_slice(&DMG_HRAM);
             // FF46 (OAM-DMA register) is fully readable and reads back its last
             // written value; its DMG post-boot value is 0xFF (fexx_ffxx_dumper /
-            // ioregs_reset oracle), seeded here so an untouched FF46 reads 0xFF
+            // ioregs_reset reference), seeded here so an untouched FF46 reads 0xFF
             // while a written value reads back (mooneye oam_dma/reg_read).
             self.io_registers.write(REG_DMA, 0xFF);
         }
@@ -4832,10 +4831,10 @@ impl Mmio {
 
     /// Boot-ROM-final residue variant for the CGB 0xFEA0-0xFEFF shadow. The
     /// default `set_post_bios_ioamhram` seeds the 0x18-revision feax tail that
-    /// the oamdma `.dump` region oracles read; the dumper-with-boot-ROM oracles
-    /// (`fexx_ffxx_dumper_cgb`) instead read the canonical Gambatte
-    /// `setInitialCgbIoamhram` feaxDump (0x08 tail, mem_dumps.h:3138). Apply
-    /// that here; selected per-oracle so it does not disturb the .dump oracles.
+    /// the oamdma `.dump` region references read; the dumper-with-boot-ROM references
+    /// (`fexx_ffxx_dumper_cgb`) instead read the canonical
+    /// CGB power-on feax tail (0x08 tail). Apply
+    /// that here; selected per-reference so it does not disturb the .dump references.
     pub fn set_cgb_boot_residue_feax(&mut self) {
         const CGB_FEAX: [u8; 0x60] = [
             0x08, 0x01, 0xEF, 0xDE, 0x06, 0x4A, 0xCD, 0xBD,
@@ -4860,7 +4859,7 @@ impl memory::Addressable for Mmio {
         // While an OAM DMA transfer is in progress, a CPU read of a memory
         // region that conflicts with the DMA source returns the byte the DMA
         // is currently moving into OAM, not the real memory. I/O and HRAM are
-        // unaffected (Gambatte gates the conflict on `p < mm_hram_begin`).
+        // unaffected (the conflict is gated to addresses below HRAM).
         if self.dma_read_conflict_active() && self.dma_address_conflicts(addr) {
             return self.dma_conflict_byte(addr);
         }
@@ -4935,8 +4934,8 @@ impl memory::Addressable for Mmio {
                     }
                 },
                 // While a transfer is placing bytes into OAM the DMA owns the
-                // OAM bus, so a CPU read returns 0xFF (Gambatte's
-                // `oamDmaPos_ < oam_size` gate).
+                // OAM bus, so a CPU read returns 0xFF (the DMA transfer-in-progress
+                // gate).
                 OAM_START..=OAM_END => {
                     if self.dma_transfer_in_progress() {
                         0xFF
@@ -4945,10 +4944,10 @@ impl memory::Addressable for Mmio {
                     }
                 }
                 // 0xFEA0-0xFEFF. While an OAM-DMA transfer owns the bus the read
-                // returns 0xFF (Gambatte's `oamDmaPos_ < oam_size` gate). Otherwise
+                // returns 0xFF (the same DMA gate). Otherwise
                 // it returns the `oam_high` shadow: CGB hardware (incl. DMG-compat)
-                // mirrors into the OAM index space masked with 0xE7 (Gambatte
-                // ioamhram_ tail); DMG indexes directly and the shadow is
+                // mirrors into the OAM index space masked with 0xE7 (the
+                // OAM-shadow tail); DMG indexes directly and the shadow is
                 // initialised to 0x00. NOTE the &0xE7 decode is CPU-CGB-C-specific
                 // (our modeled default): cgb-acid-hell's revision probe (write
                 // 55->FEA0, 44->FEB8, read FEA0; picks per-revision tile tables)
@@ -4970,7 +4969,7 @@ impl memory::Addressable for Mmio {
                     match addr {
                         input::JOYP => self.input.read(addr),
                         // TAC: only bits 0-2 are implemented; the unused upper
-                        // bits always read 1 (Gambatte ORs 0xF8).
+                        // bits always read 1 (hardware ORs 0xF8).
                         timer::TAC => self.timer.read(addr) | 0xF8,
                         timer::DIV..=timer::TAC => self.timer.read(addr),
                         serial::SB => self.serial.read(addr),
@@ -4989,16 +4988,16 @@ impl memory::Addressable for Mmio {
                         audio::NR41..=audio::NR52 => self.audio.read(addr),
                         audio::WAV_START..=audio::WAV_END => self.audio.read(addr),
                         // OAM-DMA source register (0xFF46). Fully readable on both
-                        // models: it reads back the last written value (Gambatte
-                        // `nontrivial_ff_read` falls through to `ioamhram_[0x146]`,
-                        // no isCgb() gate — mooneye oam_dma/reg_read asserts this on
+                        // models: it reads back the last written value (the read
+                        // falls through to the stored FF46 byte with no CGB gate —
+                        // mooneye oam_dma/reg_read asserts this on
                         // DMG and CGB alike).
                         REG_DMA => self.io_registers.read(addr),
 
                         // KEY0 (0xFF4C, CGB DMG-compat select). Write-once and
                         // only meaningful while the boot ROM is mapped; once
-                        // boot is disabled it reads 0xFF on both models
-                        // (Gambatte `case 0x4C: if (!biosMode_) return 0xFF`).
+                        // boot is disabled it reads 0xFF on both models.
+                        // Pan Docs: CGB Registers (KEY0/SYS) — https://gbdev.io/pandocs/CGB_Registers.html
                         REG_KEY0 => {
                             if self.io_registers.read(REG_BOOT_OFF) != 0 {
                                 0xFF
@@ -5019,8 +5018,8 @@ impl memory::Addressable for Mmio {
                             }
                         },
                         // VBK (FF4F): bit 0 = current VRAM bank, bits 1-7 read 1.
-                        // The register is present on all CGB silicon (Gambatte
-                        // gates on isCgb()); a DMG cart in DMG-compat mode still
+                        // The register is present on all CGB silicon (gated on
+                        // being CGB hardware); a DMG cart in DMG-compat mode still
                         // reads it (bank locked at 0, so 0xFE). mooneye boot_hwio-C.
                         REG_VBK => {
                             if self.is_cgb() {
@@ -5030,9 +5029,8 @@ impl memory::Addressable for Mmio {
                             }
                         },
                         // HDMA1-4 (FF51-FF54) are write-only on real hardware;
-                        // reads always return 0xFF. See Gambatte
-                        // `nontrivial_ff_read` in memory.cpp, which falls
-                        // through to the never-written ioamhram_ shadow.
+                        // reads always return 0xFF: the read falls
+                        // through to the never-written I/O-shadow bytes.
                         REG_HDMA1 | REG_HDMA2 | REG_HDMA3 | REG_HDMA4 => 0xFF,
                         REG_HDMA5 => {
                             if self.cgb_features_enabled {
@@ -5053,7 +5051,7 @@ impl memory::Addressable for Mmio {
                         REG_SVBK => {
                             if self.cgb_features_enabled {
                                 // Read back the RAW written low 3 bits, not the
-                                // bank-0->1 remap (Gambatte stores the written
+                                // bank-0->1 remap (hardware stores the written
                                 // value verbatim; the remap is access-time only).
                                 (self.io_registers.read(REG_SVBK) & 0x07) | 0xF8
                             } else {
@@ -5099,7 +5097,7 @@ impl memory::Addressable for Mmio {
                             }
                         },
                         // Bit 7 of STAT is unused but always reads as 1 on real
-                        // hardware. See Gambatte memory.cpp case 0x41.
+                        // hardware.
                         ppu::LCD_STATUS => self.io_registers.read(addr) | 0x80,
 
                         // CGB-only registers with unused bits that read 1 (DMG
@@ -5123,8 +5121,8 @@ impl memory::Addressable for Mmio {
                             self.io_registers.read(0xFF6C) | 0xFE
                         }
                         // Undocumented FF72/FF73: plain 8-bit R/W scratch
-                        // registers present on all CGB silicon (Gambatte gates
-                        // them on isCgb(), not the cart CGB flag), so a DMG cart
+                        // registers present on all CGB silicon (gated on being CGB
+                        // hardware, not the cart CGB flag), so a DMG cart
                         // running in CGB DMG-compat mode still reads them back.
                         // mooneye boot_hwio-C / unused_hwio-C read 0x00 post-boot.
                         0xFF72 | 0xFF73 if self.is_cgb() => self.io_registers.read(addr),
@@ -5141,14 +5139,14 @@ impl memory::Addressable for Mmio {
                             if self.cgb_features_enabled => 0xFF,
 
                         // 0xFF78-0xFF7F are unmapped on both DMG and CGB.
-                        // Gambatte's nontrivial_ff_read falls through to a
+                        // the read falls through to a
                         // never-written 0xFF shadow; writes are dropped.
                         0xFF78..=0xFF7F => 0xFF,
 
                         // Genuinely unmapped IO holes on both models: no
                         // register backs them, so reads return open-bus 0xFF
-                        // (Gambatte nontrivial_ff_read falls through to the
-                        // never-written ioamhram_ shadow). 0xFF03 (between SC
+                        // (the read falls through to the
+                        // never-written I/O shadow). 0xFF03 (between SC
                         // and DIV), 0xFF08-0xFF0E (between TAC and IF), 0xFF15
                         // (NR20), 0xFF1F (NR40), 0xFF27-0xFF2F (between NR52 and
                         // wave RAM), 0xFF4E.
@@ -5164,12 +5162,12 @@ impl memory::Addressable for Mmio {
                         },
 
                         // PCM12 (0xFF76) / PCM34 (0xFF77): CGB-only digital
-                        // amplitude read-back (Gambatte memory.cpp case 0x76/0x77
-                        // -> PSG::pcm{12,34}Read, gated by isCgb() && isEnabled()).
+                        // amplitude read-back (FF76/FF77 return the PCM12/PCM34
+                        // amplitude, gated on being CGB hardware with the APU enabled).
                         // The channels were advanced to the read access cc in
                         // `Bus::read` (`sync_apu_read_cc`); the controller returns
                         // 0 when the APU is powered off.
-                        // Present on all CGB silicon (Gambatte gates on isCgb()),
+                        // Present on all CGB silicon (gated on being CGB hardware),
                         // so a DMG cart in CGB DMG-compat mode reads them too.
                         0xFF76 if self.is_cgb() => self.audio.pcm12(),
                         0xFF77 if self.is_cgb() => self.audio.pcm34(),
@@ -5256,9 +5254,9 @@ impl memory::Addressable for Mmio {
                     if !self.dma_transfer_in_progress() {
                         self.oam.write(addr, value);
                         // Flag the position-buffer change for the PPU snapshot
-                        // (Gambatte `lcd_.oamChange(cc)` on an OAM write). Only Y/X
-                        // (bytes 0,1 of each entry) feed the snapshot, but Gambatte
-                        // calls oamChange on any OAM write, so flag unconditionally.
+                        // on an OAM write. Only Y/X
+                        // (bytes 0,1 of each entry) feed the snapshot, but hardware
+                        // signals a snapshot change on any OAM write, so flag unconditionally.
                         self.oam_write_pending = true;
                     }
                 }
@@ -5289,12 +5287,11 @@ impl memory::Addressable for Mmio {
                             }
                         }
                         timer::DIV => {
-                            // Gambatte 0x04: realign the pending serial event to
+                            // DIV write (FF04): realign the pending serial event to
                             // the new divider phase before resetting DIV. Serial
                             // now shares the master cc, so feed the DIV write's
                             // canonical access cc (`access_cc()` = abs_cc + 5),
-                            // the same cc the timer's own divReset resolves on
-                            // (M8 serial merge).
+                            // the same cc the timer's own DIV reset resolves on.
                             let phase = self.timer.access_cc();
                             self.serial.realign_to_div(phase);
                             self.write_timer(addr, value);
@@ -5318,7 +5315,7 @@ impl memory::Addressable for Mmio {
                             // Write-once: once the boot ROM has been unmapped
                             // (stored byte non-zero), further writes are ignored
                             // and the register stays latched (reads 0xFF). This
-                            // matches hardware and Gambatte's sticky biosMode_.
+                            // matches hardware's sticky boot-mode latch.
                             if self.io_registers.read(REG_BOOT_OFF) == 0 {
                                 // When boot ROM is disabled, lock the KEY0 register
                                 if self.cgb_features_enabled && value != 0 {
@@ -5353,7 +5350,7 @@ impl memory::Addressable for Mmio {
                             if self.cgb_features_enabled {
                                 // Sticky HDMA/GDMA-machinery marker: src/dst
                                 // setup usually precedes the (one-time) vsync
-                                // halt in the gambatte dma preambles, so mark
+                                // halt in the DMA-preamble test ROMs, so mark
                                 // here too, not just on the FF55 trigger.
                                 self.hdma_machinery_used = true;
                                 self.hdma_source = (self.hdma_source & 0x00FF) | ((value as u16) << 8);
@@ -5362,7 +5359,7 @@ impl memory::Addressable for Mmio {
                         REG_HDMA2 => {
                             if self.cgb_features_enabled {
                                 // Low nibble of source low byte is masked off on real hardware.
-                                // See Gambatte memory.cpp case 0x52: `data & 0xF0`.
+                                // The low nibble is masked: `value & 0xF0`.
                                 self.hdma_source = (self.hdma_source & 0xFF00) | ((value as u16) & 0x00F0);
                             }
                         },
@@ -5374,7 +5371,7 @@ impl memory::Addressable for Mmio {
                         REG_HDMA4 => {
                             if self.cgb_features_enabled {
                                 // Low nibble of dest low byte is masked off on real hardware.
-                                // See Gambatte memory.cpp case 0x54: `data & 0xF0`.
+                                // The low nibble is masked: `value & 0xF0`.
                                 self.hdma_dest = (self.hdma_dest & 0xFF00) | ((value as u16) & 0x00F0);
                             }
                         },
@@ -5392,16 +5389,16 @@ impl memory::Addressable for Mmio {
                                 if self.hdma_enabled {
                                     // HDMA already armed: bit7=0 cancels,
                                     // bit7=1 restarts with new length / src
-                                    // / dst (Gambatte memory.cpp ~line 1266).
+                                    // / dst.
                                     if new_mode == 0 {
-                                        // FF55=00 disable-vs-m0-edge race
-                                        // (Gambatte `disableHdma`): the disable
+                                        // FF55=00 disable-vs-m0-edge race:
+                                        // the disable
                                         // only clears the FUTURE m0-edge schedule.
                                         // A block whose m0 edge already fired
-                                        // (`intevent_dma` latched) STILL runs. The
+                                        // (the DMA event latched) STILL runs. The
                                         // bus stashes that decision in
                                         // `hdma_disable_fires` by evaluating the
-                                        // PPU m0Time at this write's access cc.
+                                        // PPU mode-0 time at this write's access cc.
                                         // The race only exists while the period's
                                         // block is still OWED (latched by the m0
                                         // edge, not yet run). Once the block for
@@ -5419,7 +5416,7 @@ impl memory::Addressable for Mmio {
                                             // m0 edge already passed: keep the
                                             // request latched so the block fires
                                             // this M-cycle (step_hdma), exactly as
-                                            // Gambatte's `dma()` runs despite the
+                                            // hardware runs it despite the
                                             // disable. The block-fire decrements
                                             // length and ends HDMA normally.
                                             self.hdma_req_pending = true;
@@ -5429,8 +5426,8 @@ impl memory::Addressable for Mmio {
                                         } else {
                                             // Disable wins. Hardware latches the
                                             // WRITTEN length bits on every FF55
-                                            // write, including the cancel (SameBoy
-                                            // `hdma_steps_left = (value&0x7F)+1`
+                                            // write, including the cancel (it stores
+                                            // `(value & 0x7F) + 1`
                                             // before the abort early-return), so a
                                             // later read returns 0x80|written, NOT
                                             // the preserved remaining count
@@ -5445,13 +5442,13 @@ impl memory::Addressable for Mmio {
                                     } else {
                                         self.hdma_length = length_blocks_minus_1;
                                         if !lcd_on {
-                                            // LCD off: Gambatte fires immediately
+                                            // LCD off: hardware fires immediately
                                             // (no HDMA period concept).
                                             self.hdma_req_pending = true;
                                         } else {
                                             // LCD on: gate the immediate kick on the
-                                            // LIVE isHdmaPeriod(cc+4), resolved by
-                                            // the bus after this write (C7-full).
+                                            // LIVE in-HBlank-period predicate (at cc+4), resolved by
+                                            // the bus after this write.
                                             self.hdma_kick_eval_pending = 2;
                                         }
                                     }
@@ -5463,7 +5460,7 @@ impl memory::Addressable for Mmio {
                                 } else {
                                     // Arm HDMA. Fire the first block now if
                                     // LCD off; otherwise gate the immediate kick
-                                    // on the live isHdmaPeriod(cc+4) (resolved by
+                                    // on the live in-HBlank-period predicate (at cc+4, resolved by
                                     // the bus), else the Mode 3->0 trigger arms it.
                                     self.hdma_enabled = true;
                                     self.hdma_length = length_blocks_minus_1;
@@ -5526,8 +5523,8 @@ impl memory::Addressable for Mmio {
                         0xFF78..=0xFF7F => {}
 
                         // RP/IR (0xFF56): only bits 0,6,7 are writable; bits 1-5
-                        // retain their (power-on) value. Gambatte:
-                        // `(data & 0xC1) | (old & 0x3E)`.
+                        // retain their (power-on) value:
+                        // `(value & 0xC1) | (old & 0x3E)`.
                         0xFF56 if self.cgb_features_enabled => {
                             let old = self.io_registers.read(0xFF56);
                             self.io_registers.write(0xFF56, (value & 0xC1) | (old & 0x3E));

@@ -13,9 +13,11 @@ pub const TAC: u16 = 0xFF07;
 const TAC_ENABLE: u8 = 1 << 2; // Bit 2: Timer enable
 const TAC_FREQUENCY_MASK: u8 = 0b00000011; // Bits 0-1: Timer frequency
 
-// Hardware fact: TAC's 2-bit frequency select routes TIMA off DIV bit 9/3/5/7
-// (for `tac & 3` = 0/1/2/3). Storing `bit_index + 1` here lets TIMA derive as
-// `(cc - tima_last_update) >> clk`, one increment per `2^clk` T-cycles.
+// TAC's 2-bit frequency select routes TIMA off DIV bit 9/3/5/7 (for
+// `tac & 3` = 0/1/2/3), i.e. one increment per 256/4/16/64 M-cycles. Storing
+// `bit_index + 1` here lets TIMA derive as `(cc - tima_last_update) >> clk`,
+// one increment per `2^clk` T-cycles.
+// Pan Docs: Timer and Divider Registers — https://gbdev.io/pandocs/Timer_and_Divider_Registers.html
 const TIMA_CLOCK: [u32; 4] = [10, 4, 6, 8];
 
 // Sentinel "no event scheduled" marker placed far past any reachable `abs_cc`
@@ -23,37 +25,41 @@ const TIMA_CLOCK: [u32; 4] = [10, 4, 6, 8];
 // `tmatime`/`next_irq_event_time` is guarded by an explicit disabled check.
 const DISABLED_TIME: u64 = u64::MAX;
 
-// Offset mapping the per-dot `abs_cc` (incremented at the *start* of each dot's
-// `step`, so it trails the live access cc by one dot) to the cc at which a CPU
-// timer-register access resolves. A CPU access occupies a 4-dot M-cycle; its
+// Offset from the per-dot `abs_cc` (incremented at the *start* of each dot's
+// `step`, so it trails the live access cc by one dot) to the cc at which the
+// scheduled IRQ becomes IF-visible. A CPU access occupies a 4-dot M-cycle; the
 // effect lands at the M-cycle end (`+4`), plus one dot for the start-of-step
-// increment lag (`+1`) = `+5`. Empirically the sharp minimum of the tima suite
-// (13 failures, below the 17 baseline) sits exactly at +5, confirming the
-// scheduled-TIMA arithmetic is exact at this anchor.
+// increment lag (`+1`) = `+5`.
+// The three offsets below are sub-cycle model calibrations: not in Pan Docs,
+// TCAGBD, or GBCTR (emulator-internal per-dot phase constants). The hardware
+// behaviour they encode — the one-CPU-cycle lag between a TIMA overflow and its
+// IF bit becoming visible — IS documented (TCAGBD §4.3 "There is a delay of one
+// CPU cycle between the overflow and the IF flag being set"; §5.6); only the
+// split into read/EI/write sub-quanta is novel, derived from timer test-ROM refs.
 const CC_OFF: i64 = 5;
-/// EI-loop IF-visibility offset. The timer IF bit becomes visible at
-/// `schedCc + IF_OFF` (vs the `CC_OFF`-late gate cc used by HALT/STOP). A non-halt
-/// EI loop dispatches the IRQ at this early anchor so the ISR (and any TAC
-/// re-write) runs on Gambatte's exact divider phase. HALT/STOP keep `CC_OFF`.
+/// EI-loop IF-visibility offset. In a non-halt EI loop the timer IF bit is
+/// dispatched at the early anchor `sched_cc + IF_OFF`, where `sched_cc` is the
+/// scheduled overflow cc (vs the `CC_OFF`-late gate
+/// used by HALT/STOP) so the ISR (and any TAC re-write) runs on the correct
+/// divider phase.
 const IF_OFF: i64 = 1;
-/// Write-side canonical access-cc offset (M8). Swept against the ch2
-/// `late_reset_nr52` a/b pairs; the trigger's length boundary lands at this
-/// phase rather than the read's `CC_OFF`.
+/// Write-side access-cc offset. The write path (APU/serial trigger boundary
+/// math) resolves on a different sub-quantum phase than the read `CC_OFF`.
 const WRITE_CC_OFF: i64 = 0;
 
-// Hardware fact: the TMA reload / IRQ visibility lags the overflow tick by 3
-// T-cycles. Constant bias applied to `tmatime` and the scheduled IRQ cc.
+// The TMA reload / IF-set lags the overflow tick. Pan Docs documents this as one
+// M-cycle after the overflow (TIMA reads 0 for that M-cycle); TCAGBD §5.6 agrees
+// ("Timer interrupt is delayed 1 cycle (4 clocks) from the TIMA overflow ... It
+// could be less clocks, but the CPU can't check that"). This model applies a
+// 3 T-cycle bias to `tmatime` and the scheduled IRQ cc — a sub-cycle refinement
+// inside TCAGBD's "could be less clocks" allowance, not separately documented.
+// Pan Docs: Timer obscure behaviour — https://gbdev.io/pandocs/Timer_Obscure_Behaviour.html
 const TMA_OFF: u64 = 3;
 
-// ds-engine STAGE 1/7: the timer register access cc is the RAW master cc
-// (`abs_cc`, captured at the START of the CPU access M-cycle — proven by the
-// cctracer LP0 oracle to be Gambatte's read/write cc); the old
-// `access_cc()` = abs_cc + CC_OFF (=5) anchor and its RB_CC_OFF env sweep are
-// gone. The IRQ DELIVERY path in `step()` still folds CC_OFF back in
-// (`update_irq_delivery`) to keep the absolute fire cc unchanged.
-//
-// ds-engine STAGE 3/7: the closed-form (update-to-cc) APU frame sequencer is the
-// single FS path (the per-dot edge-detect fallback is deleted).
+// The timer register access cc is the raw master cc (`abs_cc`, captured at the
+// START of the CPU access M-cycle). The IRQ delivery path in `step()` folds
+// CC_OFF back in (`update_irq_delivery`) to keep the absolute fire cc unchanged.
+// The APU frame sequencer is driven by a single closed-form (update-to-cc) path.
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Timer {
@@ -102,70 +108,58 @@ pub struct Timer {
     // `step` (and the post-write flush in `mmio`) raise the actual IF bit.
     #[serde(default)]
     pending_irq: bool,
-    // APU-visible divider anchor. Equals `div_anchor` for normal FF04 writes, but
-    // for the CGB STOP speed-switch divReset it carries the APU's own switch-cc
-    // offset (`STOP_APU_DS_OFF`), which is calibrated independently of the
-    // TIMA/DIV-register `STOP_DS_OFF` (the square-duty sub-cycle phase rounds
-    // differently from the TIMA/DIV high-byte boundary).
+    // APU-visible divider anchor. Currently tracks `div_anchor` for every write
+    // (including the CGB STOP speed-switch DIV-write reset); kept as a separate field so
+    // the APU fold can diverge from the TIMA/DIV register anchor if needed.
     #[serde(default)]
     div_anchor_apu: u64,
-    // ds-engine STAGE 2 (RB_FAITHFUL event-cc dispatch): the raw-abs_cc cc at
-    // which the most recent still-undispatched TIMA IRQ became deliverable (its
-    // IF bit was raised). The CPU's faithful step gate makes the timer IRQ
-    // serviceable only once the boundary access cc has reached this cc, instead
-    // of off the instruction-start IF snapshot. DISABLED_TIME = none pending.
+    // The raw-abs_cc cc at which the most recent still-undispatched TIMA IRQ
+    // became deliverable (its IF bit was raised). The CPU step gate makes the
+    // timer IRQ serviceable only once the boundary access cc reaches this, rather
+    // than off the instruction-start IF snapshot. DISABLED_TIME = none pending.
     #[serde(default = "disabled_time")]
     last_fire_cc: u64,
-    // The EARLY (EI-loop) gate cc for the same undispatched IRQ: `schedCc + IF_OFF`.
+    // The early (EI-loop) gate cc for the same undispatched IRQ: scheduled
+    // overflow cc + IF_OFF.
     // The non-halt/non-stop dispatch gate uses this instead of `last_fire_cc`.
     #[serde(default = "disabled_time")]
     last_fire_cc_ei: u64,
-    // ds-engine STAGE 3 (RB_LAZYPERIPH): the `abs_cc` up to and including which
-    // the APU frame sequencer has been clocked. The closed-form FS counts
-    // DIV-bit-12/13 falling edges in `(last_apu_cc, abs_cc]` instead of per-dot
-    // edge detection. A DIV reset rebases this to the reset cc (the divider — and
-    // thus the FS phase — restarts from the new anchor).
+    // The `abs_cc` up to and including which the APU frame sequencer has been
+    // clocked. The closed-form FS counts DIV-bit-12/13 falling edges in
+    // `(last_apu_cc, abs_cc]`. A DIV reset rebases this to the reset cc (the
+    // divider — and thus the FS phase — restarts from the new anchor).
     #[serde(default)]
     last_apu_cc: u64,
     // Set when a timer IRQ was force-delivered to the EI loop at the early anchor
-    // (`force_ei_delivery`); the ensuing ISR runs ~4cc earlier than the normal
-    // +5-late service, so a STOP speed-switch issued inside that ISR enters its
-    // divider-derivation `abs_cc` shifted, and `stop_div_reset` must compensate the
-    // derivation anchor by `+STOP_EI_PROMOTE_ADJ`. Cleared by the STOP (consumed)
-    // and never persists past one STOP.
+    // (`force_ei_delivery`). Cleared (consumed) by the next STOP and by a normal
+    // delivery; does not persist past one STOP.
     #[serde(skip, default)]
     ei_promoted: bool,
 
-    /// FAST EI-loop: sticky "the current ISR / instruction stream was entered via
-    /// an EI fast-dispatch and therefore runs on the EARLY (`IF_OFF`) grid". Unlike
-    /// `ei_promoted` (a one-shot consumed by the STOP-divider adjust and reset when
-    /// the next fire is recorded), this persists through the whole ISR. While set,
-    /// an un-serviced overflow re-flags IF on the EARLY anchor (`update_irq_delivery`)
-    /// and the FF0F timer-bit READ samples at the access cc (`bus.rs`), so the ISR's
-    /// IF write / read / re-trigger all resolve on Gambatte's grid (irq_ifw /
-    /// irq_late_retrigger `_2`). SET by `force_ei_delivery`; CLEARED when the CPU
-    /// enters HALT (the HALT-woken ISR is not on the EI early grid — its IF-set stays
-    /// LATE: tc00_irq_1 / tc01_irq_1 / stopstart).
+    /// Sticky: the current ISR / instruction stream was entered via an EI
+    /// fast-dispatch and therefore runs on the early (`IF_OFF`) grid. Unlike the
+    /// one-shot `ei_promoted`, this persists through the whole ISR. While set, an
+    /// un-serviced overflow re-flags IF on the early anchor (`update_irq_delivery`)
+    /// and the FF0F timer-bit read samples at the access cc (`bus.rs`), so the
+    /// ISR's IF write / read / re-trigger all resolve on the same grid. Set by
+    /// `force_ei_delivery`; cleared when the CPU enters HALT (a HALT-woken ISR is
+    /// not on the early grid — its IF-set stays late).
     #[serde(skip, default)]
     isr_on_early_grid: bool,
-    // AGB (GBA-in-GBC-mode) hardware flag. Set once from
-    // `Mmio::set_agb`. Only consulted by `set_tac` for the AGB TAC-enable timer
-    // quirk; false for DMG/CGB so those targets are byte-identical.
+    // AGB (GBA-in-GBC-mode) hardware flag. Set once from `Mmio::set_agb`. Only
+    // consulted by `set_tac` for the AGB TAC-enable timer quirk; false for
+    // DMG/CGB so those targets are byte-identical.
     #[serde(skip, default)]
     is_agb: bool,
-    // FAITHFUL HALT-EXIT (timer-read facet). Gambatte's halted CPU resumes at
-    // ceil-to-M-cycle of the waking IRQ's eventTime, +4 more when the snap lands
-    // within 2cc of the event (cpu.cpp:531 `cc += cycles + (-cycles & 3)`,
-    // memory.cpp:301 `cc += 4*(isCgb() || cc - eventTime < 2)`). rustyboi's
-    // halted CPU steps per-cycle and wakes at the EXACT IF-set cc, so the whole
-    // woken instruction stream runs 2-5cc early; PPU reads on that stream are
-    // re-anchored by their own facets (halt_wake_plus4_dmg /
-    // dmg_m0_halt_ly_advance), and this is the DIV/TIMA-read analog: reads
-    // resolve at `access_cc + halt_read_bias` (gbmicrotest int_*_halt /
-    // *_int_halt_b cluster, verified vs Gambatte). Armed at each DMG Lcd/VBlank
-    // halt-wake with the per-phase advance, zeroed for other wakes; cleared by
-    // any timer register WRITE (a woken-stream write commits at the un-advanced
-    // cc, so post-write reads must return to that same anchor).
+    // Re-anchor for DIV/TIMA reads on a halt-woken instruction stream. rustyboi's
+    // halted CPU wakes at the exact IF-set cc, so the woken stream runs a few cc
+    // early; reads resolve at `access_cc + halt_read_bias` to land on the
+    // hardware read cc. Armed at each DMG LCD/VBlank halt-wake with the per-phase
+    // advance, zeroed for other wakes; cleared by any timer register WRITE (a
+    // woken-stream write commits at the un-advanced cc, so post-write reads must
+    // return to that anchor). Not in Pan Docs, TCAGBD, or GBCTR (a rustyboi
+    // wake-cc model correction, not a hardware register behaviour); derived from
+    // gbmicrotest halt/interrupt refs.
     #[serde(default)]
     halt_read_bias: u32,
 }
@@ -229,8 +223,8 @@ impl Timer {
         self.is_agb = agb;
     }
 
-    /// STAGE 2 (RB_FAITHFUL): the cc the most recent still-undispatched TIMA IRQ
-    /// became deliverable, or `None`. Cleared at dispatch via `clear_fire_cc`.
+    /// The cc the most recent still-undispatched TIMA IRQ became deliverable, or
+    /// `None`. Cleared at dispatch via `clear_fire_cc`.
     pub fn pending_fire_cc(&self) -> Option<u64> {
         if self.last_fire_cc != DISABLED_TIME {
             Some(self.last_fire_cc)
@@ -249,16 +243,16 @@ impl Timer {
         }
     }
 
-    /// STAGE 2: clear the recorded fire cc after the CPU dispatches the IRQ.
+    /// Clear the recorded fire cc after the CPU dispatches the IRQ.
     pub fn clear_fire_cc(&mut self) {
         self.last_fire_cc = DISABLED_TIME;
         self.last_fire_cc_ei = DISABLED_TIME;
     }
 
-    /// The DELIVERY cc of the NEXT scheduled timer overflow (the cc at which its IF
+    /// The delivery cc of the next scheduled timer overflow (the cc at which its IF
     /// bit will be raised: `next_irq_event_time + CC_OFF`), or `None` if disabled.
     /// Used by the EI-loop fast-dispatch to promote an imminent overflow so the
-    /// non-halt service runs on Gambatte's exact phase rather than +5 late.
+    /// non-halt service runs on the correct phase rather than CC_OFF late.
     pub fn next_overflow_deliver_cc(&self) -> Option<u64> {
         if self.tac & TAC_ENABLE != 0 && self.next_irq_event_time != DISABLED_TIME {
             Some(self.next_irq_event_time.wrapping_add(CC_OFF as u64))
@@ -267,12 +261,12 @@ impl Timer {
         }
     }
 
-    /// per-access STAGE 1: the EXACT cc at which the next scheduled overflow's IF
-    /// bit will be raised inside `update_irq_delivery` / `step_to`, accounting for
-    /// the same `fold` that path applies (`IF_OFF` on the non-halt early-ISR grid,
-    /// else `CC_OFF`). The min-event idle fast path lands precisely on this cc so
-    /// the overflow fires at the identical cc the per-dot crank would have, never
-    /// skipping past it. `None` when the timer is disabled / no overflow scheduled.
+    /// The exact cc at which the next scheduled overflow's IF bit will be raised
+    /// inside `update_irq_delivery` / `step_to`, accounting for the same `fold`
+    /// that path applies (`IF_OFF` on the non-halt early-ISR grid, else `CC_OFF`).
+    /// The min-event idle fast path lands precisely on this cc so the overflow
+    /// fires at the identical cc the per-dot crank would have. `None` when the
+    /// timer is disabled / no overflow scheduled.
     pub fn next_overflow_fire_cc(&self, cpu_halted: bool) -> Option<u64> {
         if self.tac & TAC_ENABLE == 0 || self.next_irq_event_time == DISABLED_TIME {
             return None;
@@ -282,7 +276,8 @@ impl Timer {
         Some(self.next_irq_event_time.wrapping_add(fold))
     }
 
-    /// EARLY (EI-loop) anchor cc of the next scheduled overflow: `schedCc + IF_OFF`.
+    /// Early (EI-loop) anchor cc of the next scheduled overflow:
+    /// `next_irq_event_time + IF_OFF`.
     /// The non-halt fast dispatch fires the overflow once the boundary reaches this.
     pub fn next_overflow_ei_cc(&self) -> Option<u64> {
         if self.tac & TAC_ENABLE != 0 && self.next_irq_event_time != DISABLED_TIME {
@@ -300,12 +295,9 @@ impl Timer {
         self.div_reset_count
     }
 
-    /// The access cc of the most recent DIV write. The APU divider-reset fold
-    /// must run at this cc, matching the single master counter it folds on.
-    /// Returns the APU-visible anchor, which
-    /// for a STOP speed-switch divReset carries the APU-specific switch-cc offset
-    /// (`div_anchor_apu` tracks `div_anchor` for every normal FF04 write and only
-    /// diverges across a STOP speed switch).
+    /// The APU-visible divider anchor of the most recent DIV write. The APU
+    /// divider-reset fold runs at this cc, matching the master counter it folds
+    /// on. Currently equal to `div_anchor` for every write.
     pub fn div_anchor_apu(&self) -> u64 {
         self.div_anchor_apu
     }
@@ -328,10 +320,11 @@ impl Timer {
         (0x100 - from as u64) << self.clk()
     }
 
-    /// The post-overflow TMA reload is observable for a 4-T-cycle window that
-    /// opens at `tmatime`. Report whether `cc` has entered that window (in which
-    /// case an observed TIMA now reads back as TMA), and retire the window once
-    /// `cc` has passed fully beyond it so it is not re-triggered.
+    /// The post-overflow TMA reload is observable for a 4-T-cycle (one M-cycle)
+    /// window that opens at `tmatime`; TIMA reads 0 until then. Report whether `cc`
+    /// has entered that window (in which case an observed TIMA now reads back as
+    /// TMA), and retire the window once `cc` has passed fully beyond it.
+    /// Pan Docs: Timer obscure behaviour — https://gbdev.io/pandocs/Timer_Obscure_Behaviour.html
     fn tma_reload_window_reached(&mut self, cc: u64) -> bool {
         if cc >= self.tmatime {
             if cc >= self.tmatime.wrapping_add(4) {
@@ -343,22 +336,18 @@ impl Timer {
         }
     }
 
-    /// cc at which a CPU register access resolves, relative to the per-dot
-    /// `abs_cc` (tuning lever `CC_OFF`). This is the canonical per-access cc the
-    /// timer, serial, and APU all resolve register accesses on (M7).
+    /// cc at which a CPU register access resolves: the raw master cc. This is the
+    /// per-access cc the timer, serial, and APU all resolve register accesses on.
     pub fn access_cc(&self) -> u64 {
-        // STAGE 1/7: the access resolves at the raw master cc, with no CC_OFF.
-        // The CPU positions `abs_cc` at the access M-cycle
-        // start before any tick, so `abs_cc` IS the access cc. (RB_CC_OFF env
-        // sweep deleted in stage 7.)
+        // The CPU positions `abs_cc` at the access M-cycle start before any tick,
+        // so `abs_cc` is the access cc.
         self.abs_cc
     }
 
-    /// cc at which a CPU register WRITE resolves. The write side is a separate
-    /// sub-quantum phase term from the read `access_cc()` (M8): the APU/serial
-    /// trigger boundary math (`nr4Change`, serial completion/abort) rounds
-    /// differently from the read `event`, so its canonical write cc carries its
-    /// own offset (`WRITE_CC_OFF`) rather than reusing the read's `CC_OFF`.
+    /// cc at which a CPU register write resolves. The write side is a separate
+    /// sub-quantum phase from the read `access_cc()`: the APU/serial trigger
+    /// boundary math rounds differently from the read event, so it carries its
+    /// own offset (`WRITE_CC_OFF`).
     pub fn write_access_cc(&self) -> u64 {
         (self.abs_cc as i64 + WRITE_CC_OFF) as u64
     }
@@ -384,41 +373,32 @@ impl Timer {
         }
     }
 
-    /// IRQ DELIVERY path (raw `abs_cc` per-dot). Under RB_EXACTCC the schedule is
-    /// anchored CC_OFF lower than the legacy access-cc anchor (writes now resolve
-    /// at the raw start cc, not abs_cc+CC_OFF), so the delivery comparison adds
-    /// CC_OFF back to keep the absolute fire cc — and thus steady state —
-    /// unchanged. Flag-off this is identical to `update_irq(abs_cc)`.
+    /// IRQ delivery path (raw `abs_cc` per-dot). The schedule is anchored in
+    /// access-cc space, so the delivery comparison adds the `fold` (`CC_OFF`, or
+    /// `IF_OFF` on the early grid) back to keep the absolute fire cc unchanged.
     fn update_irq_delivery(&mut self, abs_cc: u64, cpu_halted: bool) {
-        // The IF bit is normally raised at the LATE anchor (`CC_OFF`) so the
-        // HALT-wakeup detection AND the IF re-flag observation (irq_1-style tests)
-        // stay on the late grid. The non-halt EI-loop fast dispatch is handled by
-        // `force_ei_delivery` (the CPU calls it in a non-halt/non-stop EI loop): it
-        // does the same do_irq_event early so the ISR / TAC re-write runs on
-        // Gambatte's exact phase.
+        // The IF bit is normally raised at the late anchor (`CC_OFF`) so HALT-wakeup
+        // detection and the IF re-flag observation stay on the late grid. The
+        // non-halt EI-loop fast dispatch is handled by `force_ei_delivery`.
         //
-        // FAST EI-LOOP IF-SET GRID (irq_ifw / irq_late_retrigger `_2`): once the ISR
-        // is running on the early grid (`isr_on_early_grid`, set by force_ei_delivery
-        // and cleared on HALT entry), an UN-serviced overflow that only re-flags IF
-        // mid-ISR (the second overflow, IME off) must also raise IF on the EARLY
-        // anchor — otherwise it sits 4 cc late vs the ISR's own (early) IF write /
-        // re-trigger, putting the `_2` write/read on the wrong side of the boundary.
-        // Gambatte raises IF at the schedule cc and runs the ISR on that grid, so we
-        // mirror it. Gated to the non-halt early-grid context; HALTed or OFF keeps
-        // the baseline `CC_OFF` grid (tc00_irq_1 / tc01_irq_1 / stopstart). The
-        // timer-bit READ is also sampled at the access cc in this context (see
-        // bus.rs) so a read-only ISR (tc00_irq_ds_1) still misses an overflow that
-        // has not flagged at its read cc.
+        // Once the ISR runs on the early grid (`isr_on_early_grid`), an unserviced
+        // overflow that only re-flags IF mid-ISR (a second overflow with IME off)
+        // must also raise IF on the early anchor — otherwise it sits CC_OFF-IF_OFF
+        // cc late vs the ISR's own early IF write/re-trigger. Gated to the non-halt
+        // early-grid context; HALTed or OFF keeps the baseline `CC_OFF` grid. The
+        // timer-bit read is also sampled at the access cc in this context (see
+        // bus.rs) so a read-only ISR still misses an overflow that has not flagged
+        // at its read cc.
         let early = !cpu_halted && self.isr_on_early_grid;
         let fold = if early { IF_OFF as u64 } else { CC_OFF as u64 };
         while self.next_irq_event_time != DISABLED_TIME
             && abs_cc >= self.next_irq_event_time.wrapping_add(fold)
         {
-            // STAGE 2: record the deliverable cc (the IF-visible fire cc) before
-            // do_irq_event advances next_irq_event_time to the following period.
-            // The CPU's faithful event-cc gate compares the boundary access cc
-            // (raw master_cc) against this. Only record while none is pending so
-            // a back-to-back overflow keeps the earliest undispatched fire.
+            // Record the deliverable (IF-visible) fire cc before do_irq_event
+            // advances next_irq_event_time to the following period. The CPU's
+            // event-cc gate compares the boundary access cc against this. Only
+            // record while none is pending so a back-to-back overflow keeps the
+            // earliest undispatched fire.
             if self.last_fire_cc == DISABLED_TIME {
                 self.last_fire_cc = self.next_irq_event_time.wrapping_add(CC_OFF as u64);
                 self.last_fire_cc_ei = self.next_irq_event_time.wrapping_add(IF_OFF as u64);
@@ -432,12 +412,9 @@ impl Timer {
     }
 
     /// IF-register (FF0F) store collision: the store first pumps timer events at
-    /// the write cc, so an overflow whose schedule cc has
-    /// been reached (`schedCc <= write cc`, RAW grid) flags IF BEFORE the store
-    /// and the CPU write wins the collision. AntonioND div_resets_timer_overflow
-    /// (identical on real DMG and CGB) pins the exact-collision M-cycle: the
-    /// previous cell's overflow IF lands on the same write M-cycle as the next
-    /// cell's IF=0 and is cleared. Leaves the IF raise to the caller
+    /// the write cc, so an overflow whose schedule cc has been reached
+    /// (`next_irq_event_time <= write cc`) flags IF before the store, and the CPU write then
+    /// wins the collision on the same M-cycle. Leaves the IF raise to the caller
     /// (`take_pending_irq`); records the dispatch bookkeeping like the per-dot
     /// delivery so a surviving (re-set) bit keeps its fire-cc gate.
     pub fn flush_overflow_for_ifreg_write(&mut self) {
@@ -455,14 +432,12 @@ impl Timer {
     }
 
     /// EI-loop fast timer delivery. In a non-halt/non-stop EI loop the CPU calls
-    /// this at the EARLY anchor (`boundary >= schedCc + IF_OFF`) to fire an
-    /// imminent overflow BEFORE its normal `CC_OFF`-late per-dot delivery, so the
-    /// serviced ISR (and any TAC re-write) runs on Gambatte's exact divider phase.
-    /// Mirrors `update_irq_delivery` but keyed on the early anchor and only
-    /// reachable from the non-halt dispatch path. Returns true if it fired one (so
-    /// the CPU can raise the IF bit and service). Idempotent vs the per-dot path:
-    /// `do_irq_event` advances `next_irq_event_time`, so the later +5 delivery
-    /// will not re-fire the same overflow.
+    /// this at the early anchor (`boundary >= next_irq_event_time + IF_OFF`) to fire an
+    /// imminent overflow before its normal `CC_OFF`-late per-dot delivery, so the
+    /// serviced ISR (and any TAC re-write) runs on the correct divider phase.
+    /// Mirrors `update_irq_delivery` but keyed on the early anchor. Returns true if
+    /// it fired one. Idempotent vs the per-dot path: `do_irq_event` advances
+    /// `next_irq_event_time`, so the later `CC_OFF` delivery will not re-fire it.
     pub fn force_ei_delivery(&mut self, boundary: u64) -> bool {
         if self.tac & TAC_ENABLE == 0 {
             return false;
@@ -488,11 +463,10 @@ impl Timer {
         fired
     }
 
-    /// FAST EI-loop: is the current ISR running on the EARLY (`IF_OFF`) grid (set by
-    /// `force_ei_delivery`, cleared on HALT entry)? When true the un-serviced
+    /// Is the current ISR running on the early (`IF_OFF`) grid (set by
+    /// `force_ei_delivery`, cleared on HALT entry)? When true the unserviced
     /// overflow IF-set uses the early anchor and timer-bit reads sample at the
-    /// access cc, so the ISR's IF write/read/re-trigger all resolve on Gambatte's
-    /// grid (irq_ifw / irq_late_retrigger `_2`).
+    /// access cc, so the ISR's IF write/read/re-trigger all resolve on that grid.
     pub fn isr_on_early_grid(&self) -> bool {
         self.isr_on_early_grid && self.tac & TAC_ENABLE != 0
     }
@@ -561,9 +535,16 @@ impl Timer {
     }
 
     /// Store TAC (FF07). Changing the enable bit or the frequency selection can
-    /// produce a spurious TIMA increment: the DIV bit currently feeding TIMA sees
-    /// an edge. The `agbFlag`-style enable quirk is gated on `self.is_agb`, so
-    /// DMG/CGB stay byte-identical.
+    /// produce a spurious TIMA increment when the DIV bit feeding TIMA sees a
+    /// falling edge (documented: Pan Docs Timer Obscure Behaviour; TCAGBD §5.5
+    /// TAC-write glitch pseudocode). The AGB-specific enable quirk is gated on
+    /// `self.is_agb`, so DMG/CGB stay byte-identical: TCAGBD §5.5 records that
+    /// AGB/AGS differ ("AGB and AGS seem to have strange behaviour even in the
+    /// other statements", i.e. glitching even in the `old_enable == 0` case) but
+    /// calls the outcome a race condition that "cannot be predicted for every
+    /// device"; our deterministic old-bit-high/new-bit-low formula is a
+    /// refinement not spelled out in Pan Docs, TCAGBD, or GBCTR.
+    /// Pan Docs: Timer obscure behaviour — https://gbdev.io/pandocs/Timer_Obscure_Behaviour.html
     fn set_tac(&mut self, data: u8) {
         let cc = self.access_cc();
         if (self.tac ^ data) != 0 {
@@ -622,32 +603,37 @@ impl Timer {
         self.tac = data;
     }
 
-    /// DIV-write (FF04) reset. Resetting the divider drops the feeding DIV bit,
-    /// glitch-ticking TIMA by `(1 << (clk-1)) + 3`. `cc` is the resolution
-    /// cc: `access_cc()` for a CPU FF04 write, raw `abs_cc` for the STOP-internal
-    /// reset (the speed-switch DIV reset happens at the STOP cc, not a CPU
-    /// register-access M-cycle end).
+    /// DIV-write (FF04) reset. Resetting the divider can drop the DIV bit feeding
+    /// TIMA, glitch-ticking TIMA once (schedule back-shift of `(1 << (clk-1)) + 3`).
+    /// Documented: Pan Docs Timer Obscure Behaviour; TCAGBD §5.5 ("When writing to
+    /// DIV register the TIMA register can be increased if the counter has reached
+    /// half the clocks it needs to increase").
+    /// `cc` is the resolution cc: `access_cc()` for a CPU FF04 write, raw `abs_cc`
+    /// for the STOP-internal reset.
+    /// Pan Docs: Timer obscure behaviour — https://gbdev.io/pandocs/Timer_Obscure_Behaviour.html
     fn div_reset_at(&mut self, cc: u64) {
         self.div_reset_split(cc, cc);
     }
 
-    /// Generalized `Tima::divReset` allowing the TIMA-glitch/reset value to be
-    /// resolved at `tima_cc` while the divider/derivation anchor lands at
-    /// `anchor_cc`. For a normal FF04 write these are equal (`div_reset_at`); the
-    /// CGB STOP speed switch passes the true switch cc as `tima_cc` (so the reset
-    /// TIMA matches Gambatte's grid) and the read-grid anchor as `anchor_cc` (so
-    /// post-switch `read_cc - div_anchor` resolves the divider at the exact read
-    /// cc). The TIMA tick grid (`tima_last_update`) and IRQ schedule are based on
-    /// `anchor_cc` since post-switch reads/IRQs all arrive on that same read grid.
+    /// Divider reset allowing the TIMA-glitch/reset value to be resolved at
+    /// `tima_cc` while the divider/derivation anchor lands at `anchor_cc`. For a
+    /// normal FF04 write these are equal (`div_reset_at`); the CGB STOP speed
+    /// switch passes the true switch cc as `tima_cc` (so the reset TIMA matches the
+    /// hardware grid) and the read-grid anchor as `anchor_cc` (so post-switch
+    /// `read_cc - div_anchor` resolves the divider at the exact read cc). The TIMA
+    /// tick grid (`tima_last_update`) and IRQ schedule are based on `anchor_cc`
+    /// since post-switch reads/IRQs all arrive on that same read grid.
     fn div_reset_split(&mut self, tima_cc: u64, anchor_cc: u64) {
         self.div_reset_split_hold(tima_cc, anchor_cc, 0);
     }
 
-    /// `div_reset_split` with a CGB-D/E hold: the STOP speed-switch DIV reset's
-    /// immediate TIMA increment lands one M-cycle LATER on CPU-CGB-D/E for the
-    /// 65KHz/16KHz clocks (age spsw-tima: the cgbE variant probes every edge one
-    /// m-cycle after cgbBC and reads identical values). `de_hold` (0 or 4) shrinks
-    /// the divider phase back-shift so the glitch tick crosses 4 cc later.
+    /// `div_reset_split` with a CGB-D/E hold: on CGB-D/E the STOP speed-switch DIV
+    /// reset's immediate TIMA increment lands one M-cycle later for the 65KHz/16KHz
+    /// clocks. `de_hold` (0 or 4) shrinks the divider-phase back-shift so the
+    /// glitch tick crosses 4 cc later. Not in Pan Docs, TCAGBD, or GBCTR; TCAGBD
+    /// §5.5 only notes generally that "different revisions of the GBC have a
+    /// different behaviour", not this STOP-speed-switch per-revision TIMA timing.
+    /// Derived from age spsw-tima.
     fn div_reset_split_hold(&mut self, tima_cc: u64, anchor_cc: u64, de_hold: u64) {
         if self.tac & TAC_ENABLE != 0 {
             let clk = self.clk();
@@ -676,29 +662,22 @@ impl Timer {
         // the STOP path overrides `div_anchor_apu` afterward with its own offset.
         self.div_anchor_apu = anchor_cc;
         self.div_reset_count = self.div_reset_count.wrapping_add(1);
-        // Closed-form FS (RB_LAZYPERIPH): the divider restarts from this cc, so
-        // re-anchor the FS sync point to the reset cc — the divider counter (and
-        // thus the bit-12/13 falling-edge grid) is now relative to the new anchor.
+        // The divider restarts from this cc, so re-anchor the FS sync point to the
+        // reset cc — the divider counter (and thus the bit-12/13 falling-edge grid)
+        // is now relative to the new anchor.
         self.last_apu_cc = anchor_cc;
     }
 
     /// CGB STOP speed switch divider/TIMA re-derivation. The divider continues
-    /// ticking from the exact switch cc at the new speed. With the sub-dot engine
-    /// the divReset / tick-grid / APU fold all anchor at the bare `abs_cc` (the
-    /// switch cc is byte-exact to Gambatte's divReset cc — LEVER A).
-    /// CGB-D/E (`cgb_de`) delays the speed-switch DIV-reset immediate TIMA
-    /// increment by one M-cycle for the 65KHz/16KHz clocks (TAC&3 >= 2); the
-    /// 4KHz/262KHz clocks are revision-common (age spsw-tima applies no OFS
-    /// there). See `div_reset_split_hold`.
+    /// ticking from the switch cc at the new speed; the DIV-write reset / tick-grid / APU
+    /// fold all anchor at the bare `abs_cc`. CGB-D/E (`cgb_de`) delays the
+    /// speed-switch DIV-reset immediate TIMA increment by one M-cycle for the
+    /// 65KHz/16KHz clocks (TAC&3 >= 2); the 4KHz/262KHz clocks are revision-common.
+    /// See `div_reset_split_hold`. STOP DIV reset — Pan Docs: Timer and Divider
+    /// Registers — https://gbdev.io/pandocs/Timer_and_Divider_Registers.html
     pub fn stop_div_reset(&mut self, cgb_de: bool) {
-        // Consume the one-shot EI-promote flag (no longer adjusts the divReset cc).
+        // Consume the one-shot EI-promote flag.
         self.ei_promoted = false;
-        // LEVER A: with the K=4 STOP per-access skew removed (the unhalt-window
-        // operand-read 4cc charged in opcodes::stop), `abs_cc` at the speed switch
-        // maps to Gambatte's divReset cc with a CONSTANT boot offset (58368) in
-        // BOTH directions — cctracer-verified on speedchange2_tima00_2a: STOP1
-        // abs_cc 9312 -> Gambatte 67680, STOP2 140896 -> 199264, offset 58368. So
-        // the divReset / tick-grid / APU anchor collapse to the bare `abs_cc`.
         let anchor_cc = self.abs_cc;
         let de_hold = if cgb_de && (self.tac & TAC_FREQUENCY_MASK) >= 2 { 4 } else { 0 };
         self.div_reset_split_hold(anchor_cc, anchor_cc, de_hold);
@@ -719,11 +698,9 @@ impl Timer {
         self.divider()
     }
 
-    /// CGB STOP speed switch. Pulls the timer's tick anchor (and the scheduled
-    /// IRQ time) back by 4 T-cycles for an
-    /// enabled fast-frequency timer (`tac & 0x07 >= 0x05`). We additionally cover
-    /// the double->single direction the same way (the original per-dot model did
-    /// the catch-up for any enabled timer switching back to single speed).
+    /// CGB STOP speed switch. Pulls the timer's tick anchor (and the scheduled IRQ
+    /// time) back by 4 T-cycles for an enabled fast-frequency timer
+    /// (`tac & 0x07 >= 0x05`), in either speed direction.
     pub fn speed_change(&mut self) {
         let fast = (self.tac & 0x07) >= 0x05;
         if fast {
@@ -749,9 +726,9 @@ impl Timer {
         p
     }
 
-    /// FAST EI-loop: a HALT (entry or wakeup) ends any prior EI fast-dispatch
-    /// stream — the next ISR is HALT-driven and observes the IF re-flag on the
-    /// LATE grid (tc00_irq_1 / tc01_irq_1 / stopstart). Clears the early-grid stick.
+    /// A HALT (entry or wakeup) ends any prior EI fast-dispatch stream — the next
+    /// ISR is HALT-driven and observes the IF re-flag on the late grid. Clears the
+    /// early-grid stick.
     pub fn clear_isr_early_grid(&mut self) {
         self.isr_on_early_grid = false;
     }
@@ -759,7 +736,7 @@ impl Timer {
     /// Count DIV-bit-12 (single speed) / bit-13 (double speed) falling edges in
     /// the cc interval `(a, b]`. The divider counter is `cc - div_anchor`; bit N
     /// falls each time that counter passes a multiple of `2^(N+1)`. Used by the
-    /// closed-form APU frame-sequencer clock (RB_LAZYPERIPH).
+    /// closed-form APU frame-sequencer clock.
     fn apu_fs_edges(&self, a: u64, b: u64) -> u64 {
         if b <= a {
             return 0;
@@ -779,16 +756,12 @@ impl Timer {
     pub fn step(&mut self, ds: bool, cpu_halted: bool) -> (u64, bool) {
         self.abs_cc = self.abs_cc.wrapping_add(1);
 
-        // Scheduled TIMA IRQ: fire any event whose absolute cc has now passed.
-        // This delivers the IRQ at the same `abs_cc` anchor a CPU read resolves
-        // TIMA on.
-        // The IRQ is delivered as a real-time per-dot event keyed on the raw
-        // `abs_cc` (the cc the IF bit physically becomes visible to the CPU),
-        // whereas register read/write effects resolve at `access_cc()` (the CPU
-        // M-cycle's start cc). These are deliberately different anchors: the
-        // IF-visible cc trails the scheduled `next_irq_event_time` (set in
-        // access-cc space) by `CC_OFF` dots, which matches the hardware's late
-        // IRQ sampling relative to the access that scheduled it.
+        // Scheduled TIMA IRQ: fire any event whose absolute cc has now passed. The
+        // IRQ is a per-dot event keyed on the raw `abs_cc` (the cc the IF bit
+        // becomes visible to the CPU), whereas register read/write effects resolve
+        // at `access_cc()`. These are deliberately different anchors: the IF-visible
+        // cc trails the scheduled `next_irq_event_time` (in access-cc space) by
+        // `CC_OFF` dots, matching the hardware's late IRQ sampling.
         if self.tac & TAC_ENABLE != 0 {
             self.update_irq_delivery(self.abs_cc, cpu_halted);
         }
@@ -804,18 +777,16 @@ impl Timer {
         // the falling edge of DIV bit 12 (bit 13 in double speed), derived from
         // the SAME master `abs_cc`/`div_anchor` the timer/DIV use.
         self.last_double_speed = ds;
-        // Closed-form FS (stage 3/7, permanent): clock once per DIV-bit-12 (bit-13
-        // at DS) falling edge in (last_apu_cc, abs_cc]. The divider counter is
-        // (cc - div_anchor); bit N falls each time that counter crosses a
-        // multiple of 2^(N+1). Count = floor(c_now/P) - floor(c_prev/P).
+        // Clock once per DIV-bit-12 (bit-13 at DS) falling edge in
+        // (last_apu_cc, abs_cc].
         let edges = self.apu_fs_edges(self.last_apu_cc, self.abs_cc);
         self.last_apu_cc = self.abs_cc;
         (edges, timer_irq)
     }
 
-    /// per-access STAGE 1: bulk-advance the timer directly to `target_abs_cc`
-    /// (>= current abs_cc), producing the byte-identical net effect of calling
-    /// `step` once per intervening dot. Every part of `step` is span-based:
+    /// Bulk-advance the timer directly to `target_abs_cc` (>= current abs_cc),
+    /// producing the byte-identical net effect of calling `step` once per
+    /// intervening dot. Every part of `step` is span-based:
     /// `update_irq_delivery` is a `while` loop keyed on the absolute cc (it drains
     /// all overflows due <= abs_cc, so a single call at the final cc fires the same
     /// set as the per-dot calls), and `apu_fs_edges(last_apu_cc, abs_cc)` is a
