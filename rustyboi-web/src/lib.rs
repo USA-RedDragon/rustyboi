@@ -449,6 +449,7 @@ impl Emulator {
             use_real_boot_rom: self.session.use_real_boot_rom(),
             texture_filter: self.session.texture_filter(),
             lcd_effect: self.session.lcd_effect(),
+            printer_scale: self.session.printer_scale(),
             rewind_enabled: self.session.config().rewind.enabled,
             rewind_interval_frames: self.session.config().rewind.interval_frames,
             rewind_depth: self.session.config().rewind.depth,
