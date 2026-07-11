@@ -10,7 +10,6 @@
 use std::sync::{Arc, Mutex};
 
 use egui::{Context, ViewportId};
-use winit::event_loop::EventLoopWindowTarget;
 use winit::window::Window;
 
 use rustyboi_egui_lib::actions::{GuiAction, SessionUiState};
@@ -70,23 +69,26 @@ pub struct UiFrame {
 }
 
 impl UiHost {
-    /// Build the host bound to `event_loop` (egui-winit needs it for clipboard
-    /// / IME wiring). `pixels_per_point` is the initial DPI scale;
+    /// Build the host bound to `window` (egui-winit reads its display handle for
+    /// clipboard / IME wiring). `pixels_per_point` is the initial DPI scale;
     /// `max_texture_size` comes from the wgpu device limits. An optional
     /// externally-owned pending-dialog slot lets the file-picker callback
     /// survive a `UiHost` teardown (Android surface suspend/resume).
-    pub fn new<T>(
-        event_loop: &EventLoopWindowTarget<T>,
+    pub fn new(
+        window: &Window,
         pixels_per_point: f32,
         max_texture_size: usize,
         pending_dialog_result: Option<Arc<Mutex<Option<GuiAction>>>>,
     ) -> Self {
         let egui_ctx = Context::default();
+        // winit 0.30's `EventLoopWindowTarget` is gone; egui-winit 0.35 accepts
+        // any `HasDisplayHandle` as the display target and gained a `theme` arg.
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
             ViewportId::ROOT,
-            event_loop,
+            window,
             Some(pixels_per_point),
+            None,
             Some(max_texture_size),
         );
         let gui = match pending_dialog_result {
@@ -127,7 +129,7 @@ impl UiHost {
     /// e.g. the cheat-code entry). The web adapter uses this to suppress
     /// keyboard→GB-button input while the user is typing in the UI.
     pub fn wants_keyboard_input(&self) -> bool {
-        self.egui_ctx.wants_keyboard_input()
+        self.egui_ctx.egui_wants_keyboard_input()
     }
 
     /// The heavy [`DebugSnapshot`] sections the currently-open debug panels need.
@@ -215,10 +217,11 @@ impl UiHost {
             );
         }
 
+        // egui 0.35: `run_ui` hands the closure a root `Ui` (panels are now
+        // `Ui`-scoped); `Gui::ui` shows its panels inside it.
         let mut ui_result = None;
-        let full_output = self.egui_ctx.run(raw_input, |egui_ctx| {
-            ui_result =
-                Some(self.gui.ui(egui_ctx, paused, debug, fullscreen, session, held_pad));
+        let full_output = self.egui_ctx.run_ui(raw_input, |ui| {
+            ui_result = Some(self.gui.ui(ui, paused, debug, fullscreen, session, held_pad));
         });
 
         self.egui_state

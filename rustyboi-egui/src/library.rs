@@ -92,14 +92,14 @@ impl LibraryPanel {
         // the user does afterwards.
         const DEFAULT_WIDTH: f32 = 520.0;
         const DEFAULT_HEIGHT: f32 = 400.0;
-        let screen = ctx.screen_rect();
+        let screen = ctx.viewport_rect();
         let default_pos = egui::Pos2::new(
             (screen.center().x - DEFAULT_WIDTH * 0.5).max(screen.left()),
             screen.top() + 32.0,
         );
         egui::Window::new("ROM Library")
             .open(&mut open)
-            .frame(egui::Frame::window(&ctx.style()).fill(PANEL_BACKGROUND))
+            .frame(egui::Frame::window(&ctx.style_of(ctx.theme())).fill(PANEL_BACKGROUND))
             .default_pos(default_pos)
             .default_size([DEFAULT_WIDTH, DEFAULT_HEIGHT])
             .show(ctx, |ui| {
@@ -195,7 +195,7 @@ impl LibraryPanel {
                                     },
                                 )
                                 .min_size(egui::vec2(ui.available_width(), 0.0))
-                                .wrap(true);
+                                .wrap();
                                 if !present {
                                     // Tapping a missing recent still
                                     // attempts a load; the SAF layer
@@ -221,7 +221,7 @@ impl LibraryPanel {
                             }
                             let btn = egui::Button::new(label)
                                 .min_size(egui::vec2(ui.available_width(), 0.0))
-                                .wrap(true);
+                                .wrap();
                             if ui.add(btn).clicked() {
                                 action = Some(GuiAction::LoadRomFromUri(
                                     entry.uri.clone(),

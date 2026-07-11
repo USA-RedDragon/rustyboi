@@ -58,7 +58,7 @@ fn import_menu_button(
                 *pending = Some(make_action(file_data));
             }
         });
-        ui.close_menu();
+        ui.close();
     }
 }
 
@@ -281,7 +281,13 @@ impl Gui {
     /// debug panels render from (None when no panel is open, or on web until the
     /// worker's first snapshot arrives). The Connect/Disconnect-Printer menu
     /// label reads `session.printer_attached`.
-    pub fn ui(&mut self, ctx: &Context, paused: bool, debug: Option<&DebugSnapshot>, fullscreen: bool, session: &SessionUiState, held_pad: &std::collections::HashSet<rustyboi_session::input_config::PadButton>) -> UiOutput {
+    pub fn ui(&mut self, ui: &mut egui::Ui, paused: bool, debug: Option<&DebugSnapshot>, fullscreen: bool, session: &SessionUiState, held_pad: &std::collections::HashSet<rustyboi_session::input_config::PadButton>) -> UiOutput {
+        // egui 0.35 made panels `Ui`-scoped (`Context::run_ui` hands us a root
+        // `Ui`; panels carve space from it). Floating Areas/Windows still take a
+        // `&Context`, so keep a cheap Arc clone for those. Reserved panels (the
+        // top menu bar, the crash CentralPanel) get `ui`; everything else `ctx`.
+        let ctx_owned = ui.ctx().clone();
+        let ctx = &ctx_owned;
         let mut action = None;
         let mut any_menu_open = false;
 
@@ -310,7 +316,7 @@ impl Gui {
                 if fullscreen {
                     self.render_menu_bar_overlay(ctx, &mut action, &mut any_menu_open, paused, session);
                 } else {
-                    self.render_menu_bar(ctx, &mut action, &mut any_menu_open, paused, session);
+                    self.render_menu_bar(ui, &mut action, &mut any_menu_open, paused, session);
                 }
             }
             self.menu_open_last_frame = any_menu_open;
@@ -334,7 +340,7 @@ impl Gui {
         // shown — consumes the central area. The emulator framebuffer must be
         // drawn only inside this rect. Recomputed every frame, so it tracks the
         // menu bar opening/closing, theme/font changes, DPI and resizes.
-        let central = ctx.available_rect();
+        let central = ui.available_rect_before_wrap();
         let central_rect = CentralRect {
             x: central.min.x,
             y: central.min.y,
@@ -342,7 +348,7 @@ impl Gui {
             height: central.height().max(0.0),
         };
 
-        self.render_error_panel(ctx, &mut action);
+        self.render_error_panel(ui, &mut action);
 
         // Android mobile menu: floating soft button + full-screen
         // overlay. Rendered after the debug panels / error overlay so
@@ -384,8 +390,8 @@ impl Gui {
     /// Windowed menu bar: a reserved top panel (the game region is the space
     /// left below it).
     #[cfg(not(target_os = "android"))]
-    fn render_menu_bar(&mut self, ctx: &Context, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, session: &SessionUiState) {
-        egui::TopBottomPanel::top("menubar_container").show(ctx, |ui| {
+    fn render_menu_bar(&mut self, ui: &mut egui::Ui, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, session: &SessionUiState) {
+        egui::Panel::top("menubar_container").show(ui, |ui| {
             self.menu_bar_contents(ui, action, any_menu_open, paused, session);
         });
     }
@@ -395,15 +401,15 @@ impl Gui {
     /// unlike a reserved panel).
     #[cfg(not(target_os = "android"))]
     fn render_menu_bar_overlay(&mut self, ctx: &Context, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, session: &SessionUiState) {
-        let screen = ctx.screen_rect();
+        let screen = ctx.viewport_rect();
         egui::Area::new(egui::Id::new("menubar_overlay"))
             .order(egui::Order::Foreground)
             .fixed_pos(screen.left_top())
             .show(ctx, |ui| {
                 ui.set_width(screen.width());
-                egui::Frame::none()
-                    .fill(ctx.style().visuals.panel_fill)
-                    .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                egui::Frame::NONE
+                    .fill(ctx.style_of(ctx.theme()).visuals.panel_fill)
+                    .inner_margin(egui::Margin::symmetric(6, 2))
                     .show(ui, |ui| {
                         self.menu_bar_contents(ui, action, any_menu_open, paused, session);
                     });
@@ -413,14 +419,14 @@ impl Gui {
     #[cfg(not(target_os = "android"))]
     fn menu_bar_contents(&mut self, ui: &mut egui::Ui, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, session: &SessionUiState) {
         {
-            egui::menu::bar(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     *any_menu_open = true;
                     #[cfg(target_os = "android")]
                     {
                         if ui.button("ROM Library…").clicked() {
                             self.library.open = true;
-                            ui.close_menu();
+                            ui.close();
                         }
                         ui.separator();
                     }
@@ -438,7 +444,7 @@ impl Gui {
                                     *pending = Some(GuiAction::LoadRom(file_data));
                             }
                         });
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     // Cross-platform save-data import/export. Import picks a file
@@ -464,17 +470,17 @@ impl Gui {
                     ui.menu_button("Export", |ui| {
                         if ui.button(command_label(ActionKind::ExportState)).clicked() {
                             *action = Some(GuiAction::ExportState);
-                            ui.close_menu();
+                            ui.close();
                         }
                         if session.has_battery
                             && ui.button(command_label(ActionKind::ExportBatterySave)).clicked() {
                             *action = Some(GuiAction::ExportBatterySave);
-                            ui.close_menu();
+                            ui.close();
                         }
                         if session.has_rtc
                             && ui.button(command_label(ActionKind::ExportRtc)).clicked() {
                             *action = Some(GuiAction::ExportRtc);
-                            ui.close_menu();
+                            ui.close();
                         }
                     });
                     // Apply an IPS/UPS/BPS ROM patch (romhack/translation) to the
@@ -491,7 +497,7 @@ impl Gui {
                                         *pending = Some(GuiAction::ApplyPatch(file_data));
                                 }
                             });
-                            ui.close_menu();
+                            ui.close();
                         }
                     });
                     ui.separator();
@@ -500,11 +506,11 @@ impl Gui {
                     // slots (0-9) are keyed by ROM id under the save dir.
                     if ui.button(format!("{} (F5)", command_label(ActionKind::Quicksave))).clicked() {
                         *action = Some(GuiAction::Quicksave);
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button(format!("{} (F8)", command_label(ActionKind::Quickload))).clicked() {
                         *action = Some(GuiAction::Quickload);
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.menu_button(command_label(ActionKind::SaveSlot), |ui| {
                         for slot in 0u32..10 {
@@ -516,7 +522,7 @@ impl Gui {
                             };
                             if ui.button(label).clicked() {
                                 *action = Some(GuiAction::SaveSlot(slot));
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     });
@@ -527,14 +533,14 @@ impl Gui {
                         for &slot in &session.slots {
                             if ui.button(format!("Slot {slot}")).clicked() {
                                 *action = Some(GuiAction::LoadSlot(slot));
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     });
                     ui.separator();
                     if ui.button(command_label(ActionKind::Exit)).clicked() {
                         *action = Some(GuiAction::Exit);
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
 
@@ -542,13 +548,13 @@ impl Gui {
                     *any_menu_open = true;
                     if ui.button(command_label(ActionKind::Restart)).clicked() {
                         *action = Some(GuiAction::Restart);
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     let pause_text = if paused { "Resume" } else { "Pause" };
                     if ui.button(pause_text).clicked() {
                         *action = Some(GuiAction::TogglePause);
-                        ui.close_menu();
+                        ui.close();
                     }
                     let ff_text = if session.fast_forward {
                         "Fast-Forward: On (Tab)"
@@ -557,17 +563,17 @@ impl Gui {
                     };
                     if ui.button(ff_text).clicked() {
                         *action = Some(GuiAction::ToggleFastForward);
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Frame Advance (Backslash)").clicked() {
                         *action = Some(GuiAction::FrameAdvance);
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     let mut sgb_border = session.sgb_border;
                     if ui.checkbox(&mut sgb_border, "SGB border").clicked() {
                         *action = Some(GuiAction::ToggleSgbBorder);
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     let printer_text = if session.printer_attached {
@@ -577,7 +583,7 @@ impl Gui {
                     };
                     if ui.button(printer_text).clicked() {
                         *action = Some(GuiAction::TogglePrinter);
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     // TAS record/replay: record from the current state into a
@@ -590,14 +596,14 @@ impl Gui {
                     };
                     if ui.button(record_text).clicked() {
                         *action = Some(GuiAction::ToggleRecording);
-                        ui.close_menu();
+                        ui.close();
                     }
                     import_menu_button(ui, &self.pending_dialog_result,
                         command_label(ActionKind::LoadMovie),
                         "RustyBoi Movie", "rbmovie", GuiAction::LoadMovie);
                     if session.replaying && ui.button(command_label(ActionKind::StopReplay)).clicked() {
                         *action = Some(GuiAction::StopReplay);
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
 
@@ -628,7 +634,7 @@ impl Gui {
                                     let selected = session.hardware == choice;
                                     if ui.radio(selected, choice.label()).clicked() && !selected {
                                         *action = Some(GuiAction::SetHardware(choice));
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                 }
                             });
@@ -644,7 +650,7 @@ impl Gui {
                                 let selected = session.palette == choice;
                                 if ui.radio(selected, choice.label()).clicked() && !selected {
                                     *action = Some(GuiAction::SetPalette(choice));
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             }
                             ui.separator();
@@ -653,7 +659,7 @@ impl Gui {
                                 let selected = session.gbc_dmg_palette == choice;
                                 if ui.radio(selected, label).clicked() && !selected {
                                     *action = Some(GuiAction::SetGbcDmgPalette(choice));
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             }
                         })
@@ -669,7 +675,7 @@ impl Gui {
                             let selected = session.color_correction == mode;
                             if ui.radio(selected, label).clicked() && !selected {
                                 *action = Some(GuiAction::SetColorCorrection(mode));
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     });
@@ -682,7 +688,7 @@ impl Gui {
                             let selected = session.texture_filter == filter;
                             if ui.radio(selected, label).clicked() && !selected {
                                 *action = Some(GuiAction::SetTextureFilter(filter));
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     });
@@ -696,7 +702,7 @@ impl Gui {
                             let selected = session.lcd_effect == effect;
                             if ui.radio(selected, label).clicked() && !selected {
                                 *action = Some(GuiAction::SetLcdEffect(effect));
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     });
@@ -707,7 +713,7 @@ impl Gui {
                             let selected = session.printer_scale == scale;
                             if ui.radio(selected, format!("{scale}×")).clicked() && !selected {
                                 *action = Some(GuiAction::SetPrinterScale(scale));
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     });
@@ -716,7 +722,7 @@ impl Gui {
                         let mut on = session.use_real_boot_rom;
                         if ui.checkbox(&mut on, "Real Boot ROM").clicked() {
                             *action = Some(GuiAction::SetRealBootRom(on));
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui.button("Load Boot ROM…").clicked() {
                             let dialog = file_dialog::new()
@@ -730,7 +736,7 @@ impl Gui {
                                     *pending = Some(GuiAction::LoadBootRom(file_data));
                                 }
                             });
-                            ui.close_menu();
+                            ui.close();
                         }
                     }
 
@@ -785,7 +791,7 @@ impl Gui {
                     let mut on = session.touch_controls;
                     if ui.checkbox(&mut on, command_label(ActionKind::ToggleTouchControls)).clicked() {
                         *action = Some(GuiAction::ToggleTouchControls);
-                        ui.close_menu();
+                        ui.close();
                     }
                     {
                         let mut op = session.touch_opacity;
@@ -798,7 +804,7 @@ impl Gui {
                     }
                     if ui.button("Toggle Fullscreen").clicked() {
                         *action = Some(GuiAction::ToggleFullscreen);
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
             });
@@ -911,9 +917,9 @@ impl Gui {
         }
     }
 
-    fn render_error_panel(&mut self, ctx: &Context, action: &mut Option<GuiAction>) {
+    fn render_error_panel(&mut self, ui: &mut egui::Ui, action: &mut Option<GuiAction>) {
         if let Some(error_msg) = &self.error_message.clone() {
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.heading("🚨 Emulator Crashed");
                 ui.separator();
 
@@ -975,7 +981,7 @@ impl Gui {
     /// across phones, tablets and foldables.
     #[cfg(target_os = "android")]
     fn mobile_unit(ctx: &Context) -> f32 {
-        let screen = ctx.screen_rect();
+        let screen = ctx.viewport_rect();
         (screen.height() * 0.18)
             .min(screen.width() * 0.09)
             .clamp(56.0, 130.0)
@@ -994,7 +1000,7 @@ impl Gui {
     fn render_mobile_soft_button(&mut self, ctx: &Context) {
         let unit = Self::mobile_unit(ctx) * 0.75;
         let margin = unit * 0.35 * 0.75;
-        let screen = ctx.screen_rect();
+        let screen = ctx.viewport_rect();
         let pos = egui::Pos2::new(screen.left() + margin, screen.top() + margin);
         let size = egui::Vec2::splat(unit);
 
@@ -1015,7 +1021,7 @@ impl Gui {
                     egui::Color32::from_rgba_premultiplied(230, 230, 230, 220),
                 );
                 let painter = ui.painter();
-                painter.rect(rect, rect.width() * 0.18, fill, stroke);
+                painter.rect(rect, rect.width() * 0.18, fill, stroke, egui::StrokeKind::Middle);
                 painter.text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -1044,7 +1050,7 @@ impl Gui {
         paused: bool,
         session: &SessionUiState,
     ) {
-        let screen = ctx.screen_rect();
+        let screen = ctx.viewport_rect();
         let unit = Self::mobile_unit(ctx);
         let row_height = unit * 0.6;
 
@@ -1086,7 +1092,7 @@ impl Gui {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .fixed_size(egui::Vec2::new(panel_width, panel_max_height))
-            .frame(egui::Frame::window(&ctx.style()).fill(PANEL_BACKGROUND))
+            .frame(egui::Frame::window(&ctx.style_of(ctx.theme())).fill(PANEL_BACKGROUND))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading("Menu");
@@ -1445,7 +1451,7 @@ impl Gui {
         egui::Window::new("Cheats")
             .open(&mut open)
             .default_width(320.0)
-            .frame(egui::Frame::window(&ctx.style()).fill(PANEL_BACKGROUND))
+            .frame(egui::Frame::window(&ctx.style_of(ctx.theme())).fill(PANEL_BACKGROUND))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Code:");
@@ -1566,7 +1572,7 @@ impl Gui {
     fn render_breakpoint_panel(&mut self, ctx: &Context, action: &mut Option<GuiAction>, debug: Option<&DebugSnapshot>) {
         egui::Window::new("Breakpoint Manager")
             .default_width(300.0)
-            .frame(egui::Frame::window(&ctx.style()).fill(PANEL_BACKGROUND))
+            .frame(egui::Frame::window(&ctx.style_of(ctx.theme())).fill(PANEL_BACKGROUND))
             .show(ctx, |ui| {
                 ui.heading("Breakpoints");
                 ui.separator();
