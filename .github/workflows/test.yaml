@@ -66,7 +66,7 @@ jobs:
           - { os: macos, arch: x86_64, runs-on: macos-latest, target: x86_64-apple-darwin, rosetta: true }
           - { os: macos, arch: aarch64, runs-on: macos-latest, target: aarch64-apple-darwin }
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Install Rust
         shell: bash
         run: |
@@ -128,7 +128,7 @@ jobs:
         with:
           app-id: ${{ vars.AUTO_COMMIT_APP_ID }}
           private-key: ${{ secrets.AUTO_COMMIT_APP_KEY }}
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           token: ${{ steps.app-token.outputs.token }}
           ref: ${{ github.head_ref }}
