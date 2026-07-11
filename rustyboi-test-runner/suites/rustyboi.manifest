@@ -1,3 +1,4 @@
 # First-party rustyboi test ROMs (RGBDS; mooneye/png grading). GENERATED
 # from test-roms/build/<cat>/<name>.<model>.<grading>.{gb,gbc} — the filename
 # carries the model + grading. Build with `make -C test-roms`; do not hand-edit.
+ppu-window_scx_ignore-dmg|dmg|png|test-roms/build/ppu/window_scx_ignore.dmg.png.gb|test-roms/refs/ppu/window_scx_ignore.dmg.png
