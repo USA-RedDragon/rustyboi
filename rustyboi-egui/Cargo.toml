@@ -16,8 +16,8 @@ rustyboi-debugger = { path = "../rustyboi-debugger" }
 egui = "0.26"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-rfd = "0.15.4"
+rfd = "0.17.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-rfd = { version = "0.15.4", features = ["async-std"] }
+rfd = { version = "0.17.0", features = ["async-std"] }
 wasm-bindgen-futures = "0.4.54"
