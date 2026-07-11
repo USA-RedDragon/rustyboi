@@ -29,7 +29,7 @@ log = "=0.4.28"
 # the frontend + egui-wgpu use, so the handles handed to the frontend match.
 wgpu = "=0.19.4"
 # Block on the async adapter/device requests on native targets.
-pollster = "=0.3.0"
+pollster = "=0.4.0"
 # We only feed raw generated PCM (SamplesBuffer) to a Sink; no audio-file
 # decoding, so drop rodio's default codec decoders (symphonia/claxon/lewton/
 # hound for mp3/flac/vorbis/wav) — dead weight in the binary.
