@@ -22,7 +22,7 @@ use rustyboi_session::UiAction;
 use rustyboi_egui_lib::actions::GuiAction;
 
 use crate::contract::{drive_action, Frontend, PauseHint};
-use crate::palette::ColorPalette;
+use rustyboi_session::{frame_to_pixels, rgb_to_pixels, PaletteChoice, PixelOrder};
 use crate::renderer::{GameFrame, Renderer, SourceSize};
 use crate::ui_host::{ExtraEvents, UiHost};
 
@@ -147,7 +147,7 @@ impl App {
     /// [`App::draw`].
     pub fn new(
         mut session: Session,
-        palette: ColorPalette,
+        palette: PaletteChoice,
         rom_path: Option<String>,
         bios_path: Option<String>,
         should_pause: bool,
@@ -155,7 +155,7 @@ impl App {
         // Seed the session's presentation palette from the CLI/config choice so
         // the shared `apply`/`ui_state` path renders from one source (no persist
         // at startup — only a user SetPalette writes config).
-        session.init_palette_choice(palette.to_choice());
+        session.init_palette_choice(palette);
         let now = Instant::now();
         App {
             session,
@@ -400,6 +400,10 @@ impl App {
         SessionUiState {
             hardware: self.session.hardware_choice(),
             palette: self.session.palette(),
+            color_correction: self.session.color_correction(),
+            use_real_boot_rom: self.session.use_real_boot_rom(),
+            texture_filter: self.session.texture_filter(),
+            lcd_effect: self.session.lcd_effect(),
             rewind_enabled: cfg.rewind.enabled,
             rewind_interval_frames: cfg.rewind.interval_frames,
             rewind_depth: cfg.rewind.depth,
@@ -432,36 +436,18 @@ impl App {
             && let Some(rgb) = self.session.gb().sgb_composited_frame()
         {
             scratch.clear();
-            scratch.reserve((rgb.len() / 3) * 4);
-            for chunk in rgb.chunks_exact(3) {
-                scratch.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
-            }
+            scratch.resize((rgb.len() / 3) * 4, 0);
+            rgb_to_pixels(&rgb[..], PixelOrder::Rgba, scratch);
             return Some(GameFrame { size: SourceSize::Sgb, rgba: scratch });
         }
 
-        // The DMG presentation palette is session-owned; convert its choice.
-        let palette = ColorPalette::from_choice(self.session.palette());
+        // The DMG presentation palette is session-owned; the shared packer maps
+        // the frame into RGBA (byte-identical to the old inlined conversion).
+        let shades = self.session.palette().rgba_shades();
         let gb_frame = self.frame.as_ref()?;
         scratch.clear();
         scratch.resize(ppu::FRAMEBUFFER_SIZE * 4, 0);
-        match gb_frame {
-            gb::Frame::Monochrome(data) => {
-                let colors = palette.get_rgba_colors();
-                for (i, &pixel) in data.iter().enumerate() {
-                    let rgba = colors.get(pixel as usize).unwrap_or(&colors[3]);
-                    scratch[i * 4..i * 4 + 4].copy_from_slice(rgba);
-                }
-            }
-            gb::Frame::Color(data) => {
-                for (i, chunk) in data.chunks(3).enumerate() {
-                    let offset = i * 4;
-                    scratch[offset] = chunk[0];
-                    scratch[offset + 1] = chunk[1];
-                    scratch[offset + 2] = chunk[2];
-                    scratch[offset + 3] = 255;
-                }
-            }
-        };
+        frame_to_pixels(gb_frame, &shades, PixelOrder::Rgba, scratch);
         Some(GameFrame { size: SourceSize::Gb, rgba: scratch })
     }
 
@@ -699,7 +685,18 @@ impl App {
         let (paint, ui_frame) = {
             // Desktop renders every frame (force_repaint: true); repaint-gating is
             // a web concern (its main thread also composites the worker's frames).
-            ui.run(window, paused_for_ui, debug_snapshot.as_ref(), printer_attached, &ui_state, extra_events, &self.held_pad, true)
+            ui.run(
+                window,
+                crate::ui_host::UiRunInputs {
+                    paused: paused_for_ui,
+                    debug: debug_snapshot.as_ref(),
+                    printer_attached,
+                    session: &ui_state,
+                    extra_events,
+                    held_pad: &self.held_pad,
+                    force_repaint: true,
+                },
+            )
         };
 
         // Dispatch the action.
@@ -744,8 +741,11 @@ impl App {
         self.content_inset = (inset_w, inset_h);
 
         // Render: game letterboxed into the central region, egui on top. Push the
-        // current scaling policy from the session config first (one shared site).
+        // current presentation policy from the session config first (one shared
+        // site): letterboxing, texture filter, and LCD post-process effect.
         renderer.set_scaling_mode(self.session.scaling_mode());
+        renderer.set_texture_filter(self.session.texture_filter());
+        renderer.set_lcd_effect(self.session.lcd_effect());
         // Shrink the game region by the platform safe-area insets so it is not
         // drawn behind system bars / a display cutout (Android). No-op elsewhere.
         // Computed before `present` borrows self.

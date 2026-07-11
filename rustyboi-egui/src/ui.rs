@@ -5,7 +5,10 @@ use rustyboi_session::{DebugDetail, DebugSnapshot};
 use std::env;
 use std::sync::{Arc, Mutex};
 use egui::Context;
-use crate::actions::{ActionKind, GuiAction, ScalingMode, SessionUiState, COMMANDS};
+use crate::actions::{
+    ActionKind, CgbColorConversion, GuiAction, LcdEffect, ScalingMode, SessionUiState,
+    TextureFilter, COMMANDS,
+};
 // Hardware / palette pickers live only in the desktop Settings menu bar.
 #[cfg(not(target_os = "android"))]
 use crate::actions::{HardwareChoice, PaletteChoice};
@@ -555,36 +558,91 @@ impl Gui {
 
                     ui.separator();
                     ui.menu_button("Hardware Model", |ui| {
-                        for (choice, label) in [
-                            (HardwareChoice::Dmg, "DMG (Game Boy)"),
-                            (HardwareChoice::Cgb, "CGB (Game Boy Color)"),
-                            (HardwareChoice::Sgb, "SGB (Super Game Boy)"),
-                        ] {
-                            let selected = session.hardware == choice;
-                            if ui.radio(selected, label).clicked() && !selected {
-                                *action = Some(GuiAction::SetHardware(choice));
-                                ui.close_menu();
-                            }
+                        // All 10 core models, grouped by console family.
+                        for family in HardwareChoice::FAMILIES {
+                            ui.menu_button(family.label(), |ui| {
+                                for &choice in family.choices() {
+                                    let selected = session.hardware == choice;
+                                    if ui.radio(selected, choice.label()).clicked() && !selected {
+                                        *action = Some(GuiAction::SetHardware(choice));
+                                        ui.close_menu();
+                                    }
+                                }
+                            });
                         }
                         ui.separator();
                         ui.small("Changing hardware restarts the ROM.");
                     });
 
                     ui.menu_button("DMG Palette", |ui| {
-                        for (choice, label) in [
-                            (PaletteChoice::Grayscale, "Grayscale"),
-                            (PaletteChoice::OriginalGreen, "Original Green"),
-                            (PaletteChoice::Blue, "Blue"),
-                            (PaletteChoice::Brown, "Brown"),
-                            (PaletteChoice::Red, "Red"),
-                        ] {
+                        for choice in PaletteChoice::ALL {
                             let selected = session.palette == choice;
-                            if ui.radio(selected, label).clicked() && !selected {
+                            if ui.radio(selected, choice.label()).clicked() && !selected {
                                 *action = Some(GuiAction::SetPalette(choice));
                                 ui.close_menu();
                             }
                         }
                     });
+
+                    ui.menu_button("GBC Color Correction", |ui| {
+                        for (mode, label) in [
+                            (CgbColorConversion::Linear, "Linear (raw RGB555)"),
+                            (CgbColorConversion::Lcd, "LCD (corrected)"),
+                        ] {
+                            let selected = session.color_correction == mode;
+                            if ui.radio(selected, label).clicked() && !selected {
+                                *action = Some(GuiAction::SetColorCorrection(mode));
+                                ui.close_menu();
+                            }
+                        }
+                    });
+
+                    ui.menu_button("Texture Filter", |ui| {
+                        for (filter, label) in [
+                            (TextureFilter::Nearest, "Nearest (sharp)"),
+                            (TextureFilter::Linear, "Linear (smooth)"),
+                        ] {
+                            let selected = session.texture_filter == filter;
+                            if ui.radio(selected, label).clicked() && !selected {
+                                *action = Some(GuiAction::SetTextureFilter(filter));
+                            }
+                        }
+                    });
+
+                    ui.menu_button("LCD Effect", |ui| {
+                        for (effect, label) in [
+                            (LcdEffect::Off, "Off"),
+                            (LcdEffect::Grid, "LCD grid"),
+                            (LcdEffect::Scanlines, "Scanlines"),
+                        ] {
+                            let selected = session.lcd_effect == effect;
+                            if ui.radio(selected, label).clicked() && !selected {
+                                *action = Some(GuiAction::SetLcdEffect(effect));
+                            }
+                        }
+                    });
+
+                    {
+                        let mut on = session.use_real_boot_rom;
+                        if ui.checkbox(&mut on, "Real Boot ROM").clicked() {
+                            *action = Some(GuiAction::SetRealBootRom(on));
+                            ui.close_menu();
+                        }
+                        if ui.button("Load Boot ROM…").clicked() {
+                            let dialog = file_dialog::new()
+                                .add_filter("Boot ROM", &["bin", "rom"])
+                                .add_filter("All Files", &["*"]);
+                            let holder = Arc::clone(&self.pending_dialog_result);
+                            dialog.pick_file(move |file_data| {
+                                if let Some(file_data) = file_data
+                                    && let Ok(mut pending) = holder.lock()
+                                {
+                                    *pending = Some(GuiAction::LoadBootRom(file_data));
+                                }
+                            });
+                            ui.close_menu();
+                        }
+                    }
 
                     ui.menu_button("Rewind", |ui| {
                         let mut enabled = session.rewind_enabled;
@@ -1181,6 +1239,40 @@ impl Gui {
                             let selected = session.scaling == mode;
                             if ui.radio(selected, label).clicked() && !selected {
                                 *action = Some(GuiAction::SetScalingMode(mode));
+                            }
+                        }
+
+                        ui.label("GBC Color Correction");
+                        for (mode, label) in [
+                            (CgbColorConversion::Linear, "Linear (raw)"),
+                            (CgbColorConversion::Lcd, "LCD (corrected)"),
+                        ] {
+                            let selected = session.color_correction == mode;
+                            if ui.radio(selected, label).clicked() && !selected {
+                                *action = Some(GuiAction::SetColorCorrection(mode));
+                            }
+                        }
+
+                        ui.label("Texture Filter");
+                        for (filter, label) in [
+                            (TextureFilter::Nearest, "Nearest (sharp)"),
+                            (TextureFilter::Linear, "Linear (smooth)"),
+                        ] {
+                            let selected = session.texture_filter == filter;
+                            if ui.radio(selected, label).clicked() && !selected {
+                                *action = Some(GuiAction::SetTextureFilter(filter));
+                            }
+                        }
+
+                        ui.label("LCD Effect");
+                        for (effect, label) in [
+                            (LcdEffect::Off, "Off"),
+                            (LcdEffect::Grid, "LCD grid"),
+                            (LcdEffect::Scanlines, "Scanlines"),
+                        ] {
+                            let selected = session.lcd_effect == effect;
+                            if ui.radio(selected, label).clicked() && !selected {
+                                *action = Some(GuiAction::SetLcdEffect(effect));
                             }
                         }
 

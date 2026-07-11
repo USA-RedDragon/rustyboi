@@ -24,6 +24,26 @@ use crate::renderer::{EguiPaint, PhysicalRect};
 /// passes an empty vec.
 pub type ExtraEvents = Vec<egui::Event>;
 
+/// The per-frame inputs to [`UiHost::run`], grouped so the call stays readable
+/// (and doesn't trip `too_many_arguments`). Borrows live only for the call.
+pub struct UiRunInputs<'a> {
+    /// Whether emulation is paused (drives the Pause/Resume label + overlay).
+    pub paused: bool,
+    /// The debug read-model for the debug panels, if any are open.
+    pub debug: Option<&'a DebugSnapshot>,
+    /// Whether a Game Boy Printer is attached (`None` = unknown/no cart).
+    pub printer_attached: Option<bool>,
+    /// The session state the menus render their current selections from.
+    pub session: &'a SessionUiState,
+    /// Extra egui events to inject before the UI runs (Android IME synthesis).
+    pub extra_events: ExtraEvents,
+    /// Gamepad buttons currently held (forces a repaint for the keybind editor).
+    pub held_pad: &'a std::collections::HashSet<rustyboi_session::input_config::PadButton>,
+    /// Force a repaint even when egui sees no change (fresh session snapshot,
+    /// status/error text the caller knows about). Desktop always passes `true`.
+    pub force_repaint: bool,
+}
+
 /// The egui host: context + winit input bridge + the UI.
 pub struct UiHost {
     egui_ctx: Context,
@@ -152,17 +172,16 @@ impl UiHost {
     /// Run one egui frame. `extra_events` are injected before the UI runs
     /// (Android IME synthesis). Returns the paint output for the renderer plus
     /// the UI result (action / menu-open / game region in physical pixels).
-    pub fn run(
-        &mut self,
-        window: &Window,
-        paused: bool,
-        debug: Option<&DebugSnapshot>,
-        printer_attached: Option<bool>,
-        session: &SessionUiState,
-        extra_events: ExtraEvents,
-        held_pad: &std::collections::HashSet<rustyboi_session::input_config::PadButton>,
-        force_repaint: bool,
-    ) -> (EguiPaint, UiFrame) {
+    pub fn run(&mut self, window: &Window, inputs: UiRunInputs) -> (EguiPaint, UiFrame) {
+        let UiRunInputs {
+            paused,
+            debug,
+            printer_attached,
+            session,
+            extra_events,
+            held_pad,
+            force_repaint,
+        } = inputs;
         let mut raw_input = self.egui_state.take_egui_input(window);
         raw_input.events.extend(extra_events);
 

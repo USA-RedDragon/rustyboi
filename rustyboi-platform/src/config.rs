@@ -1,12 +1,13 @@
-//! CLI parsing. The presentation palette now lives in `rustyboi-frontend`
-//! (`ColorPalette`); this module only re-exports it for the call sites. GB-button
-//! bindings + hotkeys now live in the shared `rustyboi_session::InputConfig`
-//! (persisted config), not a desktop-private table.
+//! CLI parsing. The presentation palette is the shared
+//! [`PaletteChoice`](rustyboi_session::PaletteChoice); this module re-exports it
+//! for the call sites. GB-button bindings + hotkeys now live in the shared
+//! `rustyboi_session::InputConfig` (persisted config), not a desktop-private
+//! table.
 
 use clap::Parser;
 use rustyboi_core_lib::gb;
 
-pub use rustyboi_frontend_lib::ColorPalette;
+pub use rustyboi_frontend_lib::PaletteChoice;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -59,7 +60,7 @@ pub struct CleanConfig {
     #[cfg(not(target_os = "android"))]
     pub scale: u8,
     // Color palette
-    pub palette: ColorPalette,
+    pub palette: PaletteChoice,
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     // skip BIOS on startup
     pub skip_bios: bool,
@@ -85,7 +86,7 @@ impl RawConfig {
             state: self.state,
             #[cfg(not(target_os = "android"))]
             scale: self.scale,
-            palette: ColorPalette::from_str(&self.palette).unwrap_or_default(),
+            palette: PaletteChoice::from_str(&self.palette).unwrap_or(PaletteChoice::Grayscale),
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             skip_bios: _skip_bios,
             printer: self.printer,
