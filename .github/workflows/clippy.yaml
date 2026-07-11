@@ -40,7 +40,7 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features --fix || true
-      - uses: stefanzweifel/git-auto-commit-action@v6
+      - uses: stefanzweifel/git-auto-commit-action@4a55954c782fc1ea30b9056cd3e7a2b40ca8887d # v7.2.0
         with:
           commit_message: "chore: Apply clippy fixes"
           commit_user_name: usa-reddragon-auto-commit[bot]
