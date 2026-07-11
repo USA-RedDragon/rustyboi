@@ -312,39 +312,18 @@ impl Emulator {
             None
         };
         if let Some(rgb) = sgb {
-            let n = rgb.len() / 3;
-            for i in 0..n {
-                let s = i * 3;
-                let o = i * 4;
-                self.rgba[o] = rgb[s];
-                self.rgba[o + 1] = rgb[s + 1];
-                self.rgba[o + 2] = rgb[s + 2];
-                self.rgba[o + 3] = 0xFF;
-            }
+            rustyboi_session::rgb_to_pixels(&rgb[..], rustyboi_session::PixelOrder::Rgba, &mut self.rgba);
             self.frame_w = SGB_WIDTH;
             self.frame_h = SGB_HEIGHT;
             return;
         }
 
-        match frame {
-            Frame::Monochrome(shades) => {
-                let colors = &self.dmg_palette.shades;
-                for (i, &s) in shades.iter().enumerate() {
-                    let c = colors.get(s as usize).unwrap_or(&colors[3]);
-                    let o = i * 4;
-                    self.rgba[o..o + 4].copy_from_slice(c);
-                }
-            }
-            Frame::Color(rgb) => {
-                for (i, chunk) in rgb.chunks_exact(3).enumerate() {
-                    let o = i * 4;
-                    self.rgba[o] = chunk[0];
-                    self.rgba[o + 1] = chunk[1];
-                    self.rgba[o + 2] = chunk[2];
-                    self.rgba[o + 3] = 0xFF;
-                }
-            }
-        }
+        rustyboi_session::frame_to_pixels(
+            frame,
+            &self.dmg_palette.shades,
+            rustyboi_session::PixelOrder::Rgba,
+            &mut self.rgba,
+        );
         self.frame_w = GB_WIDTH;
         self.frame_h = GB_HEIGHT;
     }
@@ -451,6 +430,10 @@ impl Emulator {
         SessionUiState {
             hardware: self.session.hardware_choice(),
             palette: self.session.palette(),
+            color_correction: self.session.color_correction(),
+            use_real_boot_rom: self.session.use_real_boot_rom(),
+            texture_filter: self.session.texture_filter(),
+            lcd_effect: self.session.lcd_effect(),
             rewind_enabled: self.session.config().rewind.enabled,
             rewind_interval_frames: self.session.config().rewind.interval_frames,
             rewind_depth: self.session.config().rewind.depth,

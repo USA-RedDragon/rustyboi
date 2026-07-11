@@ -22,70 +22,14 @@ fn default_volume() -> u8 {
     100
 }
 
-use rustyboi_session::action::{HardwareChoice, PaletteChoice, ScalingMode};
-use rustyboi_session::{FetchedCheat, InputConfig, SessionUiState, UiAction};
-
-/// Serializable mirror of [`HardwareChoice`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WebHardware {
-    Dmg,
-    Cgb,
-    Sgb,
-}
-
-impl From<HardwareChoice> for WebHardware {
-    fn from(h: HardwareChoice) -> Self {
-        match h {
-            HardwareChoice::Dmg => WebHardware::Dmg,
-            HardwareChoice::Cgb => WebHardware::Cgb,
-            HardwareChoice::Sgb => WebHardware::Sgb,
-        }
-    }
-}
-
-impl From<WebHardware> for HardwareChoice {
-    fn from(h: WebHardware) -> Self {
-        match h {
-            WebHardware::Dmg => HardwareChoice::Dmg,
-            WebHardware::Cgb => HardwareChoice::Cgb,
-            WebHardware::Sgb => HardwareChoice::Sgb,
-        }
-    }
-}
-
-/// Serializable mirror of [`PaletteChoice`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WebPalette {
-    Grayscale,
-    OriginalGreen,
-    Blue,
-    Brown,
-    Red,
-}
-
-impl From<PaletteChoice> for WebPalette {
-    fn from(p: PaletteChoice) -> Self {
-        match p {
-            PaletteChoice::Grayscale => WebPalette::Grayscale,
-            PaletteChoice::OriginalGreen => WebPalette::OriginalGreen,
-            PaletteChoice::Blue => WebPalette::Blue,
-            PaletteChoice::Brown => WebPalette::Brown,
-            PaletteChoice::Red => WebPalette::Red,
-        }
-    }
-}
-
-impl From<WebPalette> for PaletteChoice {
-    fn from(p: WebPalette) -> Self {
-        match p {
-            WebPalette::Grayscale => PaletteChoice::Grayscale,
-            WebPalette::OriginalGreen => PaletteChoice::OriginalGreen,
-            WebPalette::Blue => PaletteChoice::Blue,
-            WebPalette::Brown => PaletteChoice::Brown,
-            WebPalette::Red => PaletteChoice::Red,
-        }
-    }
-}
+// The choice enums (`HardwareChoice`, `PaletteChoice`) and the value enums
+// (`ScalingMode`, `TextureFilter`, `LcdEffect`, `CgbColorConversion`) are all
+// serde-derived in the shared crate, so the web wire uses them directly — no
+// per-frontend mirror types.
+use rustyboi_session::action::{
+    HardwareChoice, LcdEffect, PaletteChoice, ScalingMode, TextureFilter,
+};
+use rustyboi_session::{CgbColorConversion, FetchedCheat, InputConfig, SessionUiState, UiAction};
 
 /// The subset of [`UiAction`] the web UI can emit and the worker services. Loads
 /// and debug actions are excluded (see the module docs). This is the JSON wire
@@ -104,8 +48,12 @@ pub enum WebAction {
     FrameAdvance,
     ToggleSgbBorder,
     ToggleTouchControls,
-    SetHardware(WebHardware),
-    SetPalette(WebPalette),
+    SetHardware(HardwareChoice),
+    SetPalette(PaletteChoice),
+    SetColorCorrection(CgbColorConversion),
+    SetRealBootRom(bool),
+    SetTextureFilter(TextureFilter),
+    SetLcdEffect(LcdEffect),
     SetRewindEnabled(bool),
     SetRewindInterval(u32),
     SetRewindDepth(usize),
@@ -137,8 +85,12 @@ impl WebAction {
             UiAction::FrameAdvance => WebAction::FrameAdvance,
             UiAction::ToggleSgbBorder => WebAction::ToggleSgbBorder,
             UiAction::ToggleTouchControls => WebAction::ToggleTouchControls,
-            UiAction::SetHardware(h) => WebAction::SetHardware((*h).into()),
-            UiAction::SetPalette(p) => WebAction::SetPalette((*p).into()),
+            UiAction::SetHardware(h) => WebAction::SetHardware(*h),
+            UiAction::SetPalette(p) => WebAction::SetPalette(*p),
+            UiAction::SetColorCorrection(c) => WebAction::SetColorCorrection(*c),
+            UiAction::SetRealBootRom(b) => WebAction::SetRealBootRom(*b),
+            UiAction::SetTextureFilter(f) => WebAction::SetTextureFilter(*f),
+            UiAction::SetLcdEffect(e) => WebAction::SetLcdEffect(*e),
             UiAction::SetRewindEnabled(b) => WebAction::SetRewindEnabled(*b),
             UiAction::SetRewindInterval(n) => WebAction::SetRewindInterval(*n),
             UiAction::SetRewindDepth(n) => WebAction::SetRewindDepth(*n),
@@ -170,8 +122,12 @@ impl WebAction {
             WebAction::FrameAdvance => UiAction::FrameAdvance,
             WebAction::ToggleSgbBorder => UiAction::ToggleSgbBorder,
             WebAction::ToggleTouchControls => UiAction::ToggleTouchControls,
-            WebAction::SetHardware(h) => UiAction::SetHardware(h.into()),
-            WebAction::SetPalette(p) => UiAction::SetPalette(p.into()),
+            WebAction::SetHardware(h) => UiAction::SetHardware(h),
+            WebAction::SetPalette(p) => UiAction::SetPalette(p),
+            WebAction::SetColorCorrection(c) => UiAction::SetColorCorrection(c),
+            WebAction::SetRealBootRom(b) => UiAction::SetRealBootRom(b),
+            WebAction::SetTextureFilter(f) => UiAction::SetTextureFilter(f),
+            WebAction::SetLcdEffect(e) => UiAction::SetLcdEffect(e),
             WebAction::SetRewindEnabled(b) => UiAction::SetRewindEnabled(b),
             WebAction::SetRewindInterval(n) => UiAction::SetRewindInterval(n),
             WebAction::SetRewindDepth(n) => UiAction::SetRewindDepth(n),
@@ -192,8 +148,16 @@ impl WebAction {
 /// reconstructed `SessionUiState` (via [`WebUiState::into_session`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WebUiState {
-    pub hardware: WebHardware,
-    pub palette: WebPalette,
+    pub hardware: HardwareChoice,
+    pub palette: PaletteChoice,
+    #[serde(default)]
+    pub color_correction: CgbColorConversion,
+    #[serde(default)]
+    pub use_real_boot_rom: bool,
+    #[serde(default)]
+    pub texture_filter: TextureFilter,
+    #[serde(default)]
+    pub lcd_effect: LcdEffect,
     pub rewind_enabled: bool,
     pub rewind_interval_frames: u32,
     pub rewind_depth: usize,
@@ -224,8 +188,12 @@ impl WebUiState {
     /// Build the wire snapshot from the session's [`SessionUiState`].
     pub fn from_session(s: &SessionUiState) -> WebUiState {
         WebUiState {
-            hardware: s.hardware.into(),
-            palette: s.palette.into(),
+            hardware: s.hardware,
+            palette: s.palette,
+            color_correction: s.color_correction,
+            use_real_boot_rom: s.use_real_boot_rom,
+            texture_filter: s.texture_filter,
+            lcd_effect: s.lcd_effect,
             rewind_enabled: s.rewind_enabled,
             rewind_interval_frames: s.rewind_interval_frames,
             rewind_depth: s.rewind_depth,
@@ -248,8 +216,12 @@ impl WebUiState {
     /// Reconstruct a [`SessionUiState`] for the egui `Gui` to render from.
     pub fn into_session(self) -> SessionUiState {
         SessionUiState {
-            hardware: self.hardware.into(),
-            palette: self.palette.into(),
+            hardware: self.hardware,
+            palette: self.palette,
+            color_correction: self.color_correction,
+            use_real_boot_rom: self.use_real_boot_rom,
+            texture_filter: self.texture_filter,
+            lcd_effect: self.lcd_effect,
             rewind_enabled: self.rewind_enabled,
             rewind_interval_frames: self.rewind_interval_frames,
             rewind_depth: self.rewind_depth,
