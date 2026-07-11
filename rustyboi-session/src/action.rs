@@ -43,6 +43,8 @@ pub enum LoadPurpose {
     /// A real boot ROM image (DMG or CGB), supplied to the session for the
     /// real-boot-ROM feature.
     BootRom,
+    /// A recorded TAS movie (`.rbmovie`), replayed deterministically.
+    Movie,
 }
 
 /// A single ROM discovered by the Android library scanner.
@@ -237,6 +239,12 @@ pub struct SessionUiState {
     /// Whether a Game Boy Printer is currently attached to the link port (drives
     /// the Connect/Disconnect menu label).
     pub printer_attached: bool,
+    /// Whether a TAS movie is currently being recorded (drives the
+    /// Record/Stop-Recording menu label).
+    pub recording: bool,
+    /// Whether a TAS movie is currently playing back (gates the Stop-Replay menu
+    /// item; live input is suppressed while true).
+    pub replaying: bool,
     /// Slot numbers that currently hold a saved state, ascending.
     pub slots: Vec<u32>,
     /// Active cheat codes, in insertion order.
@@ -283,6 +291,8 @@ impl Default for SessionUiState {
             fast_forward: false,
             touch_controls: cfg!(target_os = "android"),
             printer_attached: false,
+            recording: false,
+            replaying: false,
             slots: Vec::new(),
             cheats: Vec::new(),
             fetched_cheats: Vec::new(),
@@ -327,6 +337,15 @@ pub enum UiAction {
     ExportRtc,
     /// Toggle pause / resume.
     TogglePause,
+    /// Start recording a TAS movie from the current machine state, or stop the
+    /// in-progress recording and hand the finished movie back as a saveable
+    /// `.rbmovie` file (File → Export). One toggle drives both.
+    ToggleRecording,
+    /// Load a recorded TAS movie from a picked file and begin deterministic
+    /// playback.
+    LoadMovie(FileData),
+    /// Stop movie playback, resuming live input.
+    StopReplay,
     /// Plug/unplug a Game Boy Printer on the link port.
     TogglePrinter,
     /// Power-cycle the current console.
@@ -441,6 +460,9 @@ impl UiAction {
             UiAction::ApplyPatch(_) => ActionKind::ApplyPatch,
             UiAction::ExportRtc => ActionKind::ExportRtc,
             UiAction::TogglePause => ActionKind::TogglePause,
+            UiAction::ToggleRecording => ActionKind::ToggleRecording,
+            UiAction::LoadMovie(_) => ActionKind::LoadMovie,
+            UiAction::StopReplay => ActionKind::StopReplay,
             UiAction::TogglePrinter => ActionKind::TogglePrinter,
             UiAction::Restart => ActionKind::Restart,
             UiAction::ClearError => ActionKind::ClearError,
@@ -509,6 +531,9 @@ pub enum ActionKind {
     ExportRtc,
     ApplyPatch,
     TogglePause,
+    ToggleRecording,
+    LoadMovie,
+    StopReplay,
     TogglePrinter,
     Restart,
     ClearError,
@@ -746,6 +771,27 @@ pub const COMMANDS: &[CommandDescriptor] = &[
     CommandDescriptor {
         action_kind: ActionKind::TogglePrinter,
         label: "Game Boy Printer",
+        category: MenuCategory::Emulation,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::ToggleRecording,
+        label: "Record Movie",
+        category: MenuCategory::Emulation,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::LoadMovie,
+        label: "Play Movie…",
+        category: MenuCategory::Emulation,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
+        action_kind: ActionKind::StopReplay,
+        label: "Stop Replay",
         category: MenuCategory::Emulation,
         default_keybind: None,
         overlay_button: None,

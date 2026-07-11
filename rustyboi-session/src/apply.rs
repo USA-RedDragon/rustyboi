@@ -148,6 +148,52 @@ impl Session {
                 pause_changed: true,
             },
 
+            // Record from the current machine state (works from anywhere: the
+            // movie carries a savestate so replay reconstructs exactly here); a
+            // second toggle finishes it and hands the bytes to the frontend as a
+            // saveable `.rbmovie` (browser download on web).
+            UiAction::ToggleRecording => {
+                if self.is_recording() {
+                    match self.stop_recording() {
+                        Some(movie) => {
+                            let frames = movie.inputs.len();
+                            let mut o = ActionOutcome::default();
+                            o.push(PlatformRequest::SaveBytes {
+                                suggested_name: "recording.rbmovie".into(),
+                                bytes: movie.to_bytes(),
+                            });
+                            o.push(PlatformRequest::Status(format!(
+                                "Recording stopped ({frames} frames)"
+                            )));
+                            o
+                        }
+                        None => ActionOutcome::status("Not recording"),
+                    }
+                } else {
+                    match self.start_recording_from_state() {
+                        Ok(()) => ActionOutcome::status("Recording started"),
+                        Err(e) => {
+                            ActionOutcome::error(format!("Failed to start recording: {e}"))
+                        }
+                    }
+                }
+            }
+            UiAction::LoadMovie(file) => ActionOutcome {
+                requests: vec![PlatformRequest::LoadFile {
+                    file,
+                    purpose: LoadPurpose::Movie,
+                }],
+                pause_changed: false,
+            },
+            UiAction::StopReplay => {
+                if self.is_playing() {
+                    self.stop_playback();
+                    ActionOutcome::status("Replay stopped")
+                } else {
+                    ActionOutcome::default()
+                }
+            }
+
             UiAction::TogglePrinter => {
                 if self.gb().printer_attached() {
                     self.gb_mut().detach_serial_device();
@@ -477,6 +523,8 @@ mod tests {
         use UiAction::*;
         let actions = [
             TogglePause,
+            ToggleRecording,
+            StopReplay,
             TogglePrinter,
             Restart,
             ClearError,
