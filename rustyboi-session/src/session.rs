@@ -262,7 +262,7 @@ impl Session {
         // through `apply_presentation`.
         gb.set_cgb_color_conversion(config.color_correction);
         let rewind = RewindBuffer::new(config.rewind.depth, config.rewind.interval_frames);
-        let palette = DmgPaletteChoice::from_shades(config.dmg_palette.shades);
+        let palette = config.dmg_palette_choice;
         Session {
             gb,
             config,
@@ -877,7 +877,8 @@ impl Session {
     /// CLI/config-derived choice).
     pub fn init_palette_choice(&mut self, choice: DmgPaletteChoice) {
         self.palette = choice;
-        self.config.dmg_palette.shades = palette_shades(choice);
+        self.config.dmg_palette_choice = choice;
+        self.config.dmg_palette.shades = palette_shades(choice, self.config.color_correction);
     }
 
     /// The CGB colorization scheme for DMG games (Auto / a boot-ROM scheme).
@@ -914,6 +915,9 @@ impl Session {
     ) {
         self.config.color_correction = conversion;
         self.gb.set_cgb_color_conversion(conversion);
+        // Correction composes with the DMG base palette, so refresh the cached
+        // mono shades (Green/Pocket have distinct raw vs LCD variants).
+        self.config.dmg_palette.shades = palette_shades(self.palette, conversion);
         self.persist_config();
     }
 

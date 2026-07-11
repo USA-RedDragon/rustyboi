@@ -461,7 +461,7 @@ impl App {
 
         // The DMG presentation palette is session-owned; the shared packer maps
         // the frame into RGBA (byte-identical to the old inlined conversion).
-        let shades = self.session.palette().rgba_shades();
+        let shades = self.session.palette().shades_rgba(self.session.color_correction());
         let gb_frame = self.frame.as_ref()?;
         scratch.clear();
         scratch.resize(ppu::FRAMEBUFFER_SIZE * 4, 0);
@@ -1004,7 +1004,7 @@ mod fast_forward_tests {
             webcam: Box::new(MemWebcam::default()),
         };
         let session = Session::new(Config::default(), ports, [0u8; 32]);
-        App::new(session, DmgPaletteChoice::GreenLcd, None, None, true)
+        App::new(session, DmgPaletteChoice::Green, None, None, true)
     }
 
     #[test]
@@ -1127,7 +1127,7 @@ mod pause_and_load_tests {
     // every pause flag set and the auto-pause latch armed.
     fn paused_app() -> App {
         let session = Session::new(Config::default(), ports(), [0u8; 32]);
-        App::new(session, DmgPaletteChoice::GreenLcd, None, None, true)
+        App::new(session, DmgPaletteChoice::Green, None, None, true)
     }
 
     /// Minimal valid 32KB NoMBC ROM.
