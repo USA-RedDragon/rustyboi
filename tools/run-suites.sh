@@ -549,9 +549,14 @@ esac
 # commit -- skip silently if the binary/ROM set isn't ready (CI keeps the table
 # honest regardless). update_readme_report stages its own edits, so the table
 # and ratchet land in the same commit rather than aborting it.
+#
+# The staged-diff fast-skip only makes sense mid-commit (pre-commit exports
+# PRE_COMMIT=1); a manual `report-update` on a clean tree has nothing staged and
+# must still regenerate -- otherwise it is a silent no-op.
 if [ "$1" = "report-update" ]; then
-    if git diff --cached --quiet -- rustyboi-core rustyboi-test-runner/suites 2>/dev/null; then
-        exit 0  # no source/manifest change staged -> counts can't have moved
+    if [ -n "${PRE_COMMIT:-}" ] \
+        && git diff --cached --quiet -- rustyboi-core rustyboi-test-runner/suites 2>/dev/null; then
+        exit 0  # committing, but no source/manifest change staged -> counts can't have moved
     fi
     if [ -x "$BIN" ] && [ -f "$ROMS/.rb-setup-complete" ]; then
         update_readme_report
