@@ -106,6 +106,7 @@ JOBS="$RB_JOBS"
 # which is the /bin/bash that GitHub's macOS runners ship.
 threshold() {
     case "$1" in
+        rustyboi)           echo "1 20" ;;  # first-party RGBDS ROMs (test-roms/); png ROMs settle in <20 frames
         acid2)              echo "3 -" ;;
         cgb_acid_hell)      echo "1 -" ;;
         mealybug)           echo "51 -" ;;
@@ -139,7 +140,7 @@ threshold() {
 GAMBATTE_MAX_FAIL=9
 
 # Deterministic suite order for `all`.
-ORDER="acid2 cgb_acid_hell mealybug mooneye mooneye_wilbertpol age gbmicrotest \
+ORDER="rustyboi acid2 cgb_acid_hell mealybug mooneye mooneye_wilbertpol age gbmicrotest \
 samesuite_apu samesuite_nonapu samesuite_sgb sgb blargg blargg_singles \
 scribbltests turtle_tests little_things_gb bully strikethrough daid rtc3test \
 mbc3_tester cpp magentests little_things_extra sketchtests gbc_hw_tests gambatte"
@@ -196,7 +197,21 @@ setup() {
     sync_sketchtests_roms
     log "Sourcing gbc-hw-tests ROMs + real-device .sav oracles @ ${GBCHW_REF:0:12}"
     sync_gbchwtests_roms
+    log "Building first-party test ROMs (test-roms/, RGBDS)"
+    build_test_roms
     log "ROM setup complete"
+}
+
+# Assemble the first-party test ROMs (test-roms/) with RGBDS into their
+# gitignored build/ dir. The committed rustyboi.manifest references these built
+# ROMs, so they must exist before the suite runs. rgbds is a documented dev/CI
+# dependency; without it the rustyboi suite has no ROMs and misses its floor.
+build_test_roms() {
+    if command -v rgbasm >/dev/null 2>&1; then
+        make -C "$ROOT/test-roms" roms || warn "test-roms RGBDS build failed"
+    else
+        warn "rgbds (rgbasm) not found; skipping first-party test-roms build"
+    fi
 }
 
 # MagenTests (alloncm): eight prebuilt .gbc assets on the pinned release tag.
