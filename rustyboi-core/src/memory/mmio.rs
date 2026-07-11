@@ -434,6 +434,15 @@ pub struct Mmio {
     // cycle-exact HDMA-eligibility window. Not part of save state.
     #[serde(skip, default)]
     hdma_prev_period: bool,
+    // Enforces Pan Docs' "one 0x10-byte HBlank-DMA block per HBlank": set when a
+    // block fires, cleared on every LY change so a second edge (or an in-HBlank
+    // FF55 kick that coincides with the closed-form mode-0 edge) can't arm a
+    // second block for the same scanline. Keyed off LY (not the CPU-visible STAT
+    // mode, which lags the cycle-exact predicate). Transient timing state.
+    #[serde(skip, default)]
+    hdma_block_fired_this_hblank: bool,
+    #[serde(skip, default)]
+    hdma_last_dma_ly: i32,
 
     // True while the CPU is in HALT. Hardware suppresses the period-edge
     // HDMA request while halted; the
@@ -974,6 +983,8 @@ impl Mmio {
             hdma_is_in_period_cached: false,
             hdma_prev_stat_mode: 0,
             hdma_prev_period: false,
+            hdma_block_fired_this_hblank: false,
+            hdma_last_dma_ly: -1,
             cpu_halted: false,
             hdma_lockstep_active: false,
             hdma_resume_lockstep_window: false,
@@ -3742,6 +3753,26 @@ impl Mmio {
         let in_period = if !lcd_on { true } else { period.unwrap_or(false) };
         self.hdma_is_in_period_cached = in_period;
 
+        // Pan Docs: an HBlank DMA transfers exactly 0x10 bytes ONCE per HBlank.
+        // Clear the "already fired this HBlank" flag on every LY change — once per
+        // scanline, so it can never go stale across frames the way a raw-LY value
+        // compare would (that mis-fires when the same LY recurs, dropping tiles).
+        // The reset keys off LY, NOT the CPU-visible STAT mode: the in-HBlank FF55
+        // kick fires its block via the cycle-exact closed-form mode-0 predicate,
+        // which LEADS the STAT register by a few dots (the register can still read
+        // mode 2/3 while a block legitimately fires), so a STAT-mode reset would
+        // wipe the flag mid-HBlank and let the STAT-fallback edge arm a second
+        // block — completing the transfer a scanline early (this is exactly the
+        // Pokémon Crystal Elm's-lab cutscene bug: a 37-block HBlank DMA whose last
+        // block the game cancels finished a line early, turning the RES 7 cancel
+        // into a spurious GDMA that corrupted the lower screen for one frame).
+        let cur_ly = self.io_registers.read(ppu::LY) as i32;
+        if self.hdma_last_dma_ly != cur_ly {
+            self.hdma_last_dma_ly = cur_ly;
+            self.hdma_block_fired_this_hblank = false;
+        }
+        let block_fired_this_hblank = lcd_on && self.hdma_block_fired_this_hblank;
+
         // Reset the per-period "block already serviced" marker on the falling
         // edge so the next period's block is again owed.
         if self.hdma_prev_period && !in_period {
@@ -3763,8 +3794,10 @@ impl Mmio {
         // detected cleanly once the CPU unhalts.
         let arm_allowed = !self.cpu_halted && !self.in_stop_window;
         if lcd_on && period.is_some() {
-            // Rising edge of the eligibility window arms a block.
-            if arm_allowed && !self.hdma_prev_period && in_period && self.hdma_enabled {
+            // Rising edge of the eligibility window arms a block (unless this
+            // HBlank's one block already fired — see `block_fired_this_hblank`).
+            if arm_allowed && !self.hdma_prev_period && in_period && self.hdma_enabled
+                && !block_fired_this_hblank {
                 // High-at-halt unhalt: consume the first post-unhalt m0 edge (the
                 // during-halt edge hardware already consumed, landing one dot past
                 // our slightly-early unhalt cc). Suppress this arm and clear.
@@ -3823,6 +3856,7 @@ impl Mmio {
             if arm_allowed
                 && lcd_on
                 && !self.hdma_halt_edge_consumed
+                && !block_fired_this_hblank
                 && self.hdma_prev_stat_mode == 3
                 && mode == 0
                 && self.hdma_enabled
@@ -3886,6 +3920,9 @@ impl Mmio {
         self.hdma_pre_fire_state =
             Some((self.hdma_source, self.hdma_dest, self.hdma_length, self.hdma_enabled));
         self.hdma_last_fire_cc = Some(self.master_cc());
+        // This HBlank's one block has now fired; suppress a second on this line
+        // (cleared on the next LY change in `step_hdma`).
+        self.hdma_block_fired_this_hblank = true;
         self.pending_dma_stall += self.run_hdma_block();
         // The DMA event: after the block, a halt-time
         // `hdma_requested` collapses to `hdma_low` so a subsequent unhalt does
@@ -5548,5 +5585,79 @@ impl memory::Addressable for Mmio {
                 IE_REGISTER => self.ie_register = value,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod hblank_dma_tests {
+    //! Regression: Pan Docs specifies an HBlank DMA transfers exactly one
+    //! 0x10-byte block per HBlank. When an in-HBlank FF55 kick fires this HBlank's
+    //! block via the cycle-exact closed-form mode-0 predicate (which leads the
+    //! CPU-visible STAT mode), the STAT-fallback edge must NOT arm a SECOND block
+    //! for the same scanline — else the transfer finishes a line early. That early
+    //! finish is what turned Pokémon Crystal's Elm's-lab HBlank-DMA cancel into a
+    //! spurious mid-frame GDMA that corrupted the lower screen. The `hdma_block_
+    //! fired_this_hblank` flag enforces one block per line and, keyed off LY,
+    //! resets every scanline (so it never goes stale across frames).
+    use super::*;
+
+    /// A 5-block HBlank DMA (WRAM->VRAM), armed and enabled, positioned at the
+    /// STAT mode-3->0 edge of line 46 that the fallback path arms on.
+    fn armed_at_hblank_edge() -> Mmio {
+        let mut m = Mmio::new();
+        m.set_cgb_features_enabled(true);
+        m.io_registers.write(ppu::LCD_CONTROL, ppu::LCDCFlags::DisplayEnable as u8);
+        m.io_registers.write(ppu::LY, 46);
+        m.io_registers.write(ppu::LCD_STATUS, 0); // mode 0 (HBlank)
+        m.hdma_source = 0xC000;
+        m.hdma_dest = 0x8000;
+        m.hdma_length = 4; // blocks-1 => 5 blocks
+        m.hdma_enabled = true;
+        m.hdma_prev_stat_mode = 3;
+        m.hdma_prev_period = false;
+        m.hdma_halt_edge_consumed = false;
+        m.hdma_last_dma_ly = 46; // already synced to this line
+        m
+    }
+
+    #[test]
+    fn second_block_on_same_line_is_suppressed() {
+        let mut m = armed_at_hblank_edge();
+        // The in-HBlank kick already fired this line's block.
+        m.hdma_block_fired_this_hblank = true;
+        let len = m.hdma_length;
+        m.step_hdma(None); // STAT mode-3->0 fallback edge
+        assert_eq!(m.hdma_length, len, "a second block fired in the same HBlank");
+        assert!(!m.hdma_req_pending);
+    }
+
+    #[test]
+    fn flag_resets_on_ly_change_so_next_line_fires() {
+        let mut m = armed_at_hblank_edge();
+        m.hdma_block_fired_this_hblank = true;
+        // A new scanline: LY advanced past the recorded line.
+        m.io_registers.write(ppu::LY, 47);
+        m.step_hdma(None);
+        // The LY-change reset cleared the flag, so this line's edge arms its block.
+        assert!(!m.hdma_block_fired_this_hblank || m.hdma_req_pending || m.hdma_length < 4,
+            "the flag must clear on LY change so the next HBlank's block still fires");
+        assert_eq!(m.hdma_last_dma_ly, 47, "LY tracker follows the live line");
+    }
+
+    #[test]
+    fn same_ly_next_frame_still_fires_a_block() {
+        // The flag keys off LY *changes*, not the LY value, so the same LY
+        // recurring next frame is not mistaken for an already-serviced HBlank
+        // (a raw-LY compare regressed this, dropping tiles like the "P" glyph).
+        let mut m = armed_at_hblank_edge();
+        m.hdma_block_fired_this_hblank = true;
+        // Simulate a full frame passing: LY walks away and returns to 46.
+        for ly in [47u8, 48, 100, 0, 45, 46] {
+            m.io_registers.write(ppu::LY, ly);
+            m.step_hdma(None);
+        }
+        // Back on line 46 in a fresh frame, the flag is clear (it was reset on
+        // every LY change), so an edge here would arm normally.
+        assert!(!m.hdma_block_fired_this_hblank, "flag must not persist across a frame");
     }
 }
