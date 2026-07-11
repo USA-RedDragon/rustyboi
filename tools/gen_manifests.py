@@ -1311,7 +1311,42 @@ _GBCHW_HEADER = [
 
 # ---------------------------------------------------------------------------
 
+def gen_rustyboi(roms: Path, out: Path) -> None:
+    """First-party rustyboi test ROMs under test-roms/. Built ROMs are
+    build/<category>/<name>.<model>.<grading>.{gb,gbc}; the filename carries its
+    own runner metadata, so the manifest never drifts. Each ROM yields
+    `<category>-<name>-<model>|<model>|<grading>|<rom>[|<ref>]`; `png` ROMs
+    reference test-roms/refs/<category>/<name>.<model>.png (a derived oracle).
+    Independent of the external `roms` set."""
+    build = HERE / "test-roms" / "build"
+    lines: list[str] = []
+    if build.is_dir():
+        for cat_dir in sorted(p for p in build.iterdir() if p.is_dir()):
+            cat = cat_dir.name
+            for rom in sorted(cat_dir.iterdir()):
+                if rom.suffix not in (".gb", ".gbc"):
+                    continue
+                parts = rom.name[: -len(rom.suffix)].split(".")
+                if len(parts) != 3:
+                    raise SystemExit(
+                        f"bad ROM name test-roms/build/{cat}/{rom.name}: "
+                        "expected <name>.<model>.<grading>.{gb,gbc}"
+                    )
+                name, model, grading = parts
+                line = f"{cat}-{name}-{model}|{model}|{grading}|{rel_to_cwd(rom)}"
+                if grading == "png":
+                    ref = HERE / "test-roms" / "refs" / cat / f"{name}.{model}.png"
+                    line += f"|{rel_to_cwd(ref)}"
+                lines.append(line)
+    write_manifest(out, "rustyboi", [
+        "First-party rustyboi test ROMs (RGBDS; mooneye/png grading). GENERATED",
+        "from test-roms/build/<cat>/<name>.<model>.<grading>.{gb,gbc} — the filename",
+        "carries the model + grading. Build with `make -C test-roms`; do not hand-edit.",
+    ], lines)
+
+
 INTERNAL = {
+    "rustyboi": gen_rustyboi,
     "acid2": gen_acid2,
     "mealybug": gen_mealybug,
     "blargg": gen_blargg,
@@ -1345,7 +1380,10 @@ def main() -> int:
 
     only = set(args.only.split(",")) if args.only else None
     roms = args.roms
-    if not roms.is_dir():
+    # `rustyboi` scans test-roms/ and needs no external ROM set; only require the
+    # c-sp ROM dir when a suite that consumes it is selected.
+    needs_roms = only is None or bool(only - {"rustyboi"})
+    if needs_roms and not roms.is_dir():
         print(f"error: ROM set not found at {roms} (use --roms)", file=sys.stderr)
         return 1
     print(f"ROMs:    {roms}")
