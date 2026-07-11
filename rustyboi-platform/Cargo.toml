@@ -48,7 +48,7 @@ rustls = { version = "=0.23.41", default-features = false, features = ["ring", "
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }
-rfd = "=0.15.4"
+rfd = "=0.17.2"
 gilrs = "=0.11.2"
 rustls-native-certs = "=0.8.4"
 
