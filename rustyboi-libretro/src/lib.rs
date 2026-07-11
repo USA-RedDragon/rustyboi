@@ -179,12 +179,12 @@ struct GameSharkCode {
     "rustyboi_gbc_color_correction",
     "Video > GBC Colour Correction",
     "GBC Colour Correction",
-    "Colour conversion for Game Boy Color output. 'Gambatte' approximates the real LCD; 'Linear' is the raw RGB555 values.",
+    "Colour conversion for Game Boy Color output. 'LCD' approximates the real hardware LCD; 'Linear' is the raw RGB555 values.",
     "Colour conversion for Game Boy Color output.",
     "video_settings",
     {
         { "linear", "Linear (raw)" },
-        { "gambatte", "Gambatte (LCD)" },
+        { "lcd", "LCD (corrected)" },
     }
 })]
 struct RustyboiCore {
@@ -249,7 +249,7 @@ impl RustyboiCore {
     }
 
     /// Conventional RetroArch system-directory filename for the boot ROM of a
-    /// given model (matches the Gambatte / SameBoy core naming).
+    /// given model (matches the de-facto libretro core naming convention).
     fn boot_rom_filename(hardware: Hardware) -> &'static str {
         match hardware {
             Hardware::DMG0 | Hardware::DMG => "dmg_boot.bin",
@@ -308,7 +308,7 @@ impl RustyboiCore {
         }
         if let Some(value) = get("rustyboi_gbc_color_correction") {
             self.color_correction = match value {
-                "gambatte" => CgbColorConversion::Gambatte,
+                "lcd" => CgbColorConversion::Lcd,
                 _ => CgbColorConversion::Linear,
             };
             if let Some(gb) = self.gb.as_mut() {
@@ -408,8 +408,8 @@ impl RustyboiCore {
 /// Decode a Game Genie code (`AAA-BBB` or `AAA-BBB-CCC`) into
 /// (address, new value, optional compare value). Returns None on malformed
 /// input. Decoding is delegated to the single canonical implementation in
-/// [`rustyboi_core_lib::cheats::decode_game_genie`] (mGBA-derived nibble
-/// layout), shared with the session frontend.
+/// [`rustyboi_core_lib::cheats::decode_game_genie`] (standard Game Genie
+/// nibble layout), shared with the session frontend.
 fn parse_game_genie(code: &str) -> Option<(u16, u8, Option<u8>)> {
     let gg = rustyboi_core_lib::cheats::decode_game_genie(code)?;
     Some((gg.addr, gg.value, gg.compare))
