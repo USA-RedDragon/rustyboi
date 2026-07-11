@@ -1,19 +1,7 @@
 # Third-Party Notices
 
-rustyboi is licensed under the MIT License (see `LICENSE`). It bundles or
-derives from the third-party material listed below.
-
-## Bundled data
-
-### No-Intro game-name index (`rustyboi-session/data/no_intro.bin`)
-
-A compact CRC32 → game-name index used only to identify a loaded ROM for
-display and for locating its cheat file. Built by `tools/gen-nointro.py` from
-the No-Intro "Nintendo - Game Boy" and "Nintendo - Game Boy Color" DAT files as
-mirrored in the [libretro-database](https://github.com/libretro/libretro-database)
-project (`metadat/no-intro/`). The index contains factual checksum→title
-associations only. Credit to the No-Intro project and the libretro-database
-maintainers.
+rustyboi is licensed under the MIT License (see `LICENSE`). It derives from the
+third-party material listed below.
 
 ## Hardware constants and de-facto standard formats
 
