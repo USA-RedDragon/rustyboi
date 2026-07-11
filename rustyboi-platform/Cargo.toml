@@ -23,49 +23,49 @@ path = "src/lib.rs"
 rustyboi-core = { path = "../rustyboi-core" }
 rustyboi-frontend = { path = "../rustyboi-frontend" }
 rustyboi-session = { path = "../rustyboi-session" }
-clap = { version = "4.5.48", features = ["derive"] }
-log = "0.4.28"
+clap = { version = "=4.5.48", features = ["derive"] }
+log = "=0.4.28"
 # Raw wgpu for surface/adapter/device creation from the winit window. Same 0.19
 # the frontend + egui-wgpu use, so the handles handed to the frontend match.
-wgpu = "0.19"
+wgpu = "=0.19.4"
 # Block on the async adapter/device requests on native targets.
-pollster = "0.3"
+pollster = "=0.3.0"
 # We only feed raw generated PCM (SamplesBuffer) to a Sink; no audio-file
 # decoding, so drop rodio's default codec decoders (symphonia/claxon/lewton/
 # hound for mp3/flac/vorbis/wav) — dead weight in the binary.
-rodio = { version = "0.19", default-features = false }
-serde_json = "1.0.145"
+rodio = { version = "=0.19.0", default-features = false }
+serde_json = "=1.0.145"
 # winit features are configured per-target below so Android doesn't pull wayland/x11.
-winit = { version = "0.29", default-features = false, features = ["rwh_06"] }
-winit_input_helper = "0.16.0"
+winit = { version = "=0.29.15", default-features = false, features = ["rwh_06"] }
+winit_input_helper = "=0.16.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-ureq = { version = "2.10", default-features = false, features = ["tls", "gzip"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+ureq = { version = "=2.12.1", default-features = false, features = ["tls", "gzip"] }
+rustls = { version = "=0.23.41", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
-winit = { version = "0.29", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }
-rfd = "0.15.4"
-gilrs = "0.11"
-rustls-native-certs = "0.8"
+winit = { version = "=0.29.15", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }
+rfd = "=0.15.4"
+gilrs = "=0.11.2"
+rustls-native-certs = "=0.8.4"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-console_error_panic_hook = "0.1.7"
-console_log = "1.0.0"
-web-sys = { version = "0.3.81", features = ["GpuTextureFormat"] }
-wasm-bindgen = "0.2.104"
-wasm-bindgen-futures = "0.4.54"
+console_error_panic_hook = "=0.1.7"
+console_log = "=1.0.0"
+web-sys = { version = "=0.3.81", features = ["GpuTextureFormat"] }
+wasm-bindgen = "=0.2.104"
+wasm-bindgen-futures = "=0.4.54"
 
 [target.'cfg(target_os = "android")'.dependencies]
 # Use GameActivity through winit's android-activity backend (subclassable from
 # Kotlin/Java, forwards onActivityResult, better IME/lifecycle than NativeActivity).
-winit = { version = "0.29", default-features = false, features = ["android-game-activity", "rwh_06"] }
-android_logger = "0.13"
-jni = "0.21"
-libc = "0.2"
-ndk-context = "0.1"
-ndk-sys = "0.5"
+winit = { version = "=0.29.15", default-features = false, features = ["android-game-activity", "rwh_06"] }
+android_logger = "=0.13.3"
+jni = "=0.21.1"
+libc = "=0.2.186"
+ndk-context = "=0.1.1"
+ndk-sys = "=0.5.0"
 # Force rodio's transitive cpal to enable the oboe backend on Android.
 # Version is pinned to whatever rodio currently pulls in (see Cargo.lock);
 # bump alongside rodio upgrades.
-cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }
+cpal = { version = "=0.15.3", features = ["oboe-shared-stdcxx"] }
