@@ -36,7 +36,7 @@ winit = { version = "=0.29.15", default-features = false, features = ["rwh_06"] 
 
 wasm-bindgen = "=0.2.104"
 wasm-bindgen-futures = "=0.4.54"
-js-sys = "=0.3.81"
+js-sys = "=0.3.103"
 console_error_panic_hook = "=0.1.7"
 
 # Transport (de)serialization for UiAction / SessionUiState across the worker
