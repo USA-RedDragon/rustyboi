@@ -189,7 +189,7 @@ dependencies {
     // GameActivity AAR. Version must match the ABI expected by the
     // `android-activity` crate that winit 0.29 pulls in (android-activity 0.5
     // expects games-activity 2.0.x).
-    implementation("androidx.games:games-activity:2.0.2")
+    implementation("androidx.games:games-activity:4.4.2")
     // GameActivity transitively extends AppCompatActivity, so its supertypes
     // must be on the compile classpath.
     implementation("androidx.appcompat:appcompat:1.6.1")
