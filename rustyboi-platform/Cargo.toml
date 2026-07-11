@@ -64,7 +64,7 @@ wasm-bindgen-futures = "=0.4.76"
 # Kotlin/Java, forwards onActivityResult, better IME/lifecycle than NativeActivity).
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "android-game-activity"] }
 android_logger = "=0.15.1"
-jni = "=0.21.1"
+jni = "=0.22.4"
 libc = "=0.2.186"
 ndk-context = "=0.1.1"
 ndk-sys = "=0.6.0"
