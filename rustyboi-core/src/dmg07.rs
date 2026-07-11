@@ -316,8 +316,10 @@ mod tests {
 
     #[test]
     fn four_aa_enters_transmission_then_cc_indicator() {
-        let mut d = Dmg07::default();
-        d.size = 1;
+        let mut d = Dmg07 {
+            size: 1,
+            ..Default::default()
+        };
         // Connect P1 first.
         run(&mut d, 0, &[ACK, ACK, 0x10, 0x01]);
         // Send AA aligned to the header: four AA replies request entry.
@@ -339,9 +341,11 @@ mod tests {
         // SIZE = 2 (packet = 8 bytes), only P1 present. P1 submits two bytes per
         // packet in the first two transfers; the adapter echoes the PREVIOUS
         // packet's data (zeros on the first packet), P1..P4 order.
-        let mut d = Dmg07::default();
-        d.phase = Phase::Transmission;
-        d.size = 2;
+        let mut d = Dmg07 {
+            phase: Phase::Transmission,
+            size: 2,
+            ..Default::default()
+        };
         d.attached[0] = true;
         d.connected = 0x10;
 
@@ -366,9 +370,11 @@ mod tests {
 
     #[test]
     fn ff_run_restarts_ping_phase() {
-        let mut d = Dmg07::default();
-        d.phase = Phase::Transmission;
-        d.size = 1; // packet_len = 4, so 4 FF restart
+        let mut d = Dmg07 {
+            phase: Phase::Transmission,
+            size: 1, // packet_len = 4, so 4 FF restart
+            ..Default::default()
+        };
         d.attached[0] = true;
         d.connected = 0x10;
         let mut out = 0;
