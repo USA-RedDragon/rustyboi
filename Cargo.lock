@@ -2856,6 +2856,7 @@ dependencies = [
  "libc",
  "rust-libretro",
  "rustyboi-core",
+ "rustyboi-session",
 ]
 
 [[package]]
