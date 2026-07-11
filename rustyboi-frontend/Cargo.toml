@@ -25,7 +25,7 @@ egui-wgpu = "0.26.0"
 # are one and the same. Desktop/Android use the default native backends; the web
 # adapter needs the `webgl` feature (below) so wgpu targets WebGL2 on wasm —
 # WebGPU is not Firefox-stable, so the GL backend is the portable choice.
-wgpu = "=0.19.4"
+wgpu = "=22.1.0"
 # winit is needed only for the `Window`/`WindowEvent`/`EventLoopWindowTarget`
 # types egui-winit bridges — the frontend never creates a window itself; the
 # platform crate does, and forwards its winit events here. Features mirror the
@@ -43,7 +43,7 @@ egui-winit = { version = "0.26", default-features = false, features = ["links"] 
 # On wasm, wgpu must use its WebGL2 backend (Firefox has no stable WebGPU). This
 # feature pulls naga's GLSL out-path + the GL backend so the same Renderer runs
 # on a browser canvas surface.
-wgpu = { version = "=0.19.4", features = ["webgl"] }
+wgpu = { version = "=22.1.0", features = ["webgl"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 egui-winit = { version = "0.26", default-features = false, features = ["links"] }
