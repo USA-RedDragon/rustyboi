@@ -369,7 +369,8 @@ impl Gui {
         // Whether to show the on-screen controls is session-owned (toggled via
         // the `ToggleTouchControls` action); read the latest from the snapshot.
         if session.touch_controls && !suppress_touch {
-            self.touch_buttons = touch_controls::show(ctx, &mut self.touch_state);
+            let opacity = (session.touch_opacity.min(100) as f32 / 100.0).clamp(0.0, 1.0);
+            self.touch_buttons = touch_controls::show(ctx, &mut self.touch_state, opacity);
         } else {
             self.touch_buttons = input::ButtonState::default();
         }
@@ -765,6 +766,15 @@ impl Gui {
                     if ui.checkbox(&mut on, command_label(ActionKind::ToggleTouchControls)).clicked() {
                         *action = Some(GuiAction::ToggleTouchControls);
                         ui.close_menu();
+                    }
+                    {
+                        let mut op = session.touch_opacity;
+                        ui.add_enabled_ui(session.touch_controls, |ui| {
+                            ui.label("On-screen control opacity");
+                            if ui.add(egui::Slider::new(&mut op, 0..=100).suffix("%")).changed() {
+                                *action = Some(GuiAction::SetTouchOpacity(op));
+                            }
+                        });
                     }
                     if ui.button("Toggle Fullscreen").clicked() {
                         *action = Some(GuiAction::ToggleFullscreen);
@@ -1296,6 +1306,13 @@ impl Gui {
                             mobile_toggle_row(ui, row_size, "On-screen Controls", &mut on);
                             if on != session.touch_controls {
                                 *action = Some(GuiAction::ToggleTouchControls);
+                            }
+                        }
+                        if session.touch_controls {
+                            ui.label("On-screen control opacity");
+                            let mut op = session.touch_opacity;
+                            if ui.add(egui::Slider::new(&mut op, 0..=100).suffix("%")).changed() {
+                                *action = Some(GuiAction::SetTouchOpacity(op));
                             }
                         }
 

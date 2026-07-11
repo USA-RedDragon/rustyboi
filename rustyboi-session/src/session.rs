@@ -921,6 +921,17 @@ impl Session {
         self.persist_config();
     }
 
+    /// The on-screen touch control opacity (0..=100 percent).
+    pub fn touch_opacity(&self) -> u8 {
+        self.config.touch_opacity.min(100)
+    }
+
+    /// Set the on-screen touch control opacity (clamped 0..=100) and persist it.
+    pub fn set_touch_opacity(&mut self, opacity: u8) {
+        self.config.touch_opacity = opacity.min(100);
+        self.persist_config();
+    }
+
     /// Enable/disable rewind capture; persists the config.
     pub fn set_rewind_enabled(&mut self, enabled: bool) {
         self.config.rewind.enabled = enabled;
