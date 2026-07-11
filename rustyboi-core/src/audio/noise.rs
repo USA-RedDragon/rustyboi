@@ -11,7 +11,7 @@ pub struct Noise {
     nr44: u8, // Control
 
     // Internal state
-    enabled: bool, // SameBoy `is_active[GB_NOISE]` (NR52 status bit)
+    enabled: bool, // NR52 status bit (channel active)
     length_counter: u8,
     volume: u8,
     volume_direction: bool,
@@ -19,7 +19,7 @@ pub struct Noise {
     length_enabled: bool,
     fs_step: u8,
 
-    // --- Envelope (SameBoy div-anchored model, see square.rs) ---
+    // --- Envelope (DIV-anchored model, see square.rs) ---
     #[serde(default)]
     volume_countdown: u8,
     #[serde(default)]
@@ -36,13 +36,13 @@ pub struct Noise {
     // drives the cc-based length expiry and the ripple-counter advance.
     #[serde(default)]
     cc: u32,
-    // Absolute cc of length expiry (Gambatte `LengthCounter::counter_`).
+    // Absolute cc of length expiry.
     #[serde(default = "len_disabled")]
     len_counter: u32,
     #[serde(default)]
     len_cc: u32,
 
-    // --- SameBoy ripple-counter noise model (Core/apu.c noise_channel) ---
+    // --- Ripple-counter noise model ---
     // 14-bit ripple counter incremented every `divisor` 2 MHz cycles; the
     // LFSR steps on the RISING edge of counter bit (nr43 >> 4). This is what
     // makes frequency changes glitch-accurate (the counter keeps running
@@ -52,50 +52,50 @@ pub struct Noise {
     counter: u16,
     // 2 MHz cycles until the next counter increment.
     #[serde(default)]
-    counter_countdown: u32,
-    // Free-running 2 MHz cycle count since APU power-on (SameBoy
-    // `noise_channel.alignment`): accumulates in `run_batch` from elapsed
+    ripple_countdown: u32,
+    // Free-running 2 MHz cycle count since APU power-on (the LFSR
+    // alignment): accumulates in `run_batch` from elapsed
     // cycles only, so the DIV-reset/speed-switch cc folds never touch it.
     #[serde(default)]
     alignment: u32,
     // 7-bit LFSR width (NR43 bit 3).
     #[serde(default)]
     narrow: bool,
-    // SameBoy-convention 15-bit LFSR: starts at 0, feedback
+    // 15-bit LFSR: starts at 0, feedback
     // `(lfsr ^ (lfsr>>1) ^ 1) & 1` into the high bit(s); output = bit 0.
     #[serde(default)]
     lfsr: u16,
-    // Latched output bit (SameBoy `current_lfsr_sample`).
+    // Latched output bit.
     #[serde(default)]
     current_sample: bool,
-    // SameBoy `noise_counter_active` / `noise_background_counter_active`:
+    // Counter-active / background-counter-active:
     // the ripple counter runs while either is set (background counting keeps
     // the counter alive after DAC-off, with trigger-time glitches).
     #[serde(default)]
-    counter_active: bool,
+    ripple_active: bool,
     #[serde(default)]
     background_active: bool,
-    // SameBoy `countdown_reloaded` / `did_step_counter` write-quirk flags.
+    // Countdown-reloaded / did-step-counter write-quirk flags.
     #[serde(default)]
     countdown_reloaded: bool,
     #[serde(default)]
     did_step_counter: bool,
-    // SameBoy `lfsr_stepped_in_narrow` / `lfsr_bit_7_before_step`: LFSR-width
-    // switch history for the CGB-E NR43 category-1 glitch (see nr43_glitch_write).
+    // LFSR-width switch history for the CGB-E NR43 category-1 glitch (see
+    // nr43_glitch_write).
     #[serde(default)]
     lfsr_stepped_in_narrow: bool,
     #[serde(default)]
     lfsr_bit7_before_step: bool,
-    // DMG-only delayed channel start (SameBoy `dmg_delayed_start`).
+    // DMG-only delayed channel start.
     #[serde(default)]
     dmg_delayed_start: u32,
     // True only while re-applying the deferred NR44 trigger from `run_cycles`,
     // so `trigger` starts the channel instead of re-arming another deferral
-    // (SameBoy's delayed start is a one-shot). Not serialized: it never spans
+    // (the delayed start is a one-shot). Not serialized: it never spans
     // an instruction boundary.
     #[serde(skip)]
     in_deferred_reapply: bool,
-    // SameBoy `noise_started_with_dac_disabled`.
+    // Whether the noise channel started with its DAC disabled.
     #[serde(default)]
     started_with_dac_off: bool,
     // The 2 MHz cc up to which the ripple counter has been advanced.
@@ -106,7 +106,7 @@ pub struct Noise {
     cgb: bool,
     #[serde(default)]
     ds: bool,
-    // CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`): drops the
+    // CGB-D/E APU revision gate (model newer than CGB-C): drops the
     // <=CGB-C divisor-0 even-alignment DS trigger-countdown +2 (see nr44).
     #[serde(default)]
     cgb_de: bool,
@@ -144,12 +144,12 @@ impl Noise {
             len_counter: LEN_DISABLED,
             len_cc: 0,
             counter: 0,
-            counter_countdown: 0,
+            ripple_countdown: 0,
             alignment: 0,
             narrow: false,
             lfsr: 0,
             current_sample: false,
-            counter_active: false,
+            ripple_active: false,
             background_active: false,
             countdown_reloaded: false,
             did_step_counter: false,
@@ -182,13 +182,12 @@ impl Noise {
         self.ds = ds;
     }
 
-    /// CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`).
+    /// CGB-D/E APU revision gate (model newer than CGB-C).
     pub fn set_cgb_de(&mut self, de: bool) {
         self.cgb_de = de;
     }
 
-    /// CGB-B-or-earlier APU revision gate (SameBoy `GB_is_cgb && model <=
-    /// GB_MODEL_CGB_B`).
+    /// CGB-B-or-earlier APU revision gate (CGB with model <= CGB-B).
     pub fn set_cgb_le_b(&mut self, le_b: bool) {
         self.cgb_le_b = le_b;
     }
@@ -197,7 +196,7 @@ impl Noise {
         self.len_cc >= self.len_counter
     }
 
-    /// SameBoy `GB_apu_init` noise state (the APU struct memset at the NR52
+    /// APU-init noise state (the APU struct reset at the NR52
     /// 0->1 power-on): the ripple counter, its alignment and the LFSR restart
     /// from zero. The length counter is preserved (handled by the caller's
     /// register-zeroing path).
@@ -205,10 +204,10 @@ impl Noise {
         self.lfsr = 0;
         self.current_sample = false;
         self.counter = 0;
-        self.counter_countdown = 0;
+        self.ripple_countdown = 0;
         self.alignment = 0;
         self.narrow = false;
-        self.counter_active = false;
+        self.ripple_active = false;
         self.background_active = false;
         self.countdown_reloaded = false;
         self.did_step_counter = false;
@@ -232,14 +231,14 @@ impl Noise {
 
     const LEN_MASK: u16 = 0x3F;
 
-    /// Gambatte `LengthCounter::event` for channel 4.
+    /// Length-counter expiry for channel 4.
     pub fn length_event(&mut self) {
         self.len_counter = LEN_DISABLED;
         self.length_counter = 0;
         self.enabled = false;
     }
 
-    /// Gambatte `LengthCounter::nr1Change` (channel 4 / NR41).
+    /// Length-counter NR41 write handling (channel 4).
     fn len_nr1_change(&mut self, value: u8) {
         self.length_counter = ((!value as u16 & Self::LEN_MASK) + 1) as u8;
         self.len_counter = if self.nr44 & 0x40 != 0 {
@@ -249,7 +248,7 @@ impl Noise {
         };
     }
 
-    /// Gambatte `LengthCounter::nr4Change` (channel 4 / NR44) length handling.
+    /// Length-counter NR44 write handling (channel 4).
     fn len_nr4_change(&mut self, old_nr4: u8, new_nr4: u8) {
         if self.len_counter != LEN_DISABLED {
             self.length_counter =
@@ -257,7 +256,7 @@ impl Noise {
         }
         let mut dec: u8 = 0;
         // CGB-B and older: extra length clock regardless of the written bit-6
-        // value (SameBoy `model <= GB_MODEL_CGB_B`; SameSuite
+        // value (CGB-B-or-earlier revision; SameSuite
         // channel_4_extra_length_clocking-cgb0B).
         if new_nr4 & 0x40 != 0 || self.cgb_le_b {
             dec = ((!self.len_cc >> 12) & 1) as u8;
@@ -288,7 +287,7 @@ impl Noise {
         self.advance();
     }
 
-    /// SameBoy `resetCc` equivalent for a DIV write: the controller folds the
+    /// DIV-write cc reset: the controller folds the
     /// master cc; shift the run anchor so the elapsed-cycle stream (and thus
     /// `alignment`) is unaffected.
     pub fn reset_cc(&mut self, _cc: u32, delta: u32) {
@@ -302,7 +301,7 @@ impl Noise {
         // env_secondary_reload, dispatched by the controller).
     }
 
-    // --- Envelope (SameBoy div-anchored model; see square.rs for the
+    // --- Envelope (DIV-anchored model; see square.rs for the
     // sibling implementation and event cadence) ---
 
     fn is_active(&self) -> bool {
@@ -319,7 +318,7 @@ impl Noise {
     // channel; see audio/envelope.rs.
     crate::audio::envelope::impl_envelope_unit!();
 
-    // --- SameBoy ripple-counter machinery (Core/apu.c GB_apu_run noise) ---
+    // --- Ripple-counter machinery ---
 
     /// Advance the ripple counter/LFSR to the current `cc`.
     fn advance(&mut self) {
@@ -333,8 +332,8 @@ impl Noise {
     }
 
     fn run_cycles(&mut self, mut cycles: u32) {
-        // DMG delayed channel start (SameBoy `dmg_delayed_start` handling in
-        // GB_apu_run): the NR44 trigger takes effect 6 cycles later; the
+        // DMG delayed channel start: the NR44 trigger takes effect 6 cycles
+        // later; the
         // batch is split at the crossing and NR44 is re-applied there.
         if self.dmg_delayed_start > 0 {
             if self.dmg_delayed_start > cycles {
@@ -351,10 +350,11 @@ impl Noise {
                 // ripple counter/LFSR start at the right cc), where `alignment`
                 // has advanced by only the 6 deferred cycles; `6 & 3 == 2` flips
                 // only bit 1, so an odd `alignment & 3` stays odd and the re-apply
-                // would re-defer forever. (SameBoy avoids this because its
-                // `start_ch4` re-write fires at the end of `GB_apu_run`, after
-                // `alignment += cycles` over the whole scheduler quantum, landing
-                // on a varied alignment.) A game that re-triggers ch4 every frame
+                // would re-defer forever. (The hardware oracle avoids this
+                // because its start-ch4 re-write fires at the end of the run,
+                // after `alignment += cycles` over the whole scheduler quantum,
+                // landing on a varied alignment.) A game that re-triggers ch4
+                // every frame
                 // at such a sub-alignment — Pokémon R/B/Y's GameFreak-intro
                 // drumroll — otherwise has every trigger's `env_clock = false`
                 // clear the envelope every 6 cc, so the volume never steps and the
@@ -375,20 +375,20 @@ impl Noise {
 
     fn run_batch(&mut self, cycles: u32) {
         self.alignment = self.alignment.wrapping_add(cycles);
-        if !(self.counter_active || self.background_active) {
+        if !(self.ripple_active || self.background_active) {
             return;
         }
         let mut divisor = ((self.nr43 & 0x07) as u32) << 2;
         if divisor == 0 {
             divisor = 2;
         }
-        if self.counter_countdown == 0 {
-            self.counter_countdown = divisor;
+        if self.ripple_countdown == 0 {
+            self.ripple_countdown = divisor;
         }
         let mut cycles_left = cycles;
-        while cycles_left >= self.counter_countdown {
-            cycles_left -= self.counter_countdown;
-            self.counter_countdown = divisor;
+        while cycles_left >= self.ripple_countdown {
+            cycles_left -= self.ripple_countdown;
+            self.ripple_countdown = divisor;
             let mask = 1u16 << (self.nr43 >> 4);
             let old_bit = self.counter & mask != 0;
             self.counter = self.counter.wrapping_add(1) & 0x3FFF;
@@ -399,20 +399,20 @@ impl Noise {
             }
         }
         if cycles_left > 0 {
-            self.counter_countdown -= cycles_left;
+            self.ripple_countdown -= cycles_left;
             self.countdown_reloaded = false;
         } else {
             self.countdown_reloaded = true;
         }
     }
 
-    /// SameBoy `update_lfsr`: refresh the latched output bit from LFSR bit 0
+    /// Refresh the latched output bit from LFSR bit 0
     /// (used by the NR43 glitch paths that mutate the LFSR without stepping).
     fn update_lfsr(&mut self) {
         self.current_sample = self.lfsr & 1 != 0;
     }
 
-    /// SameBoy `step_lfsr`: feedback `(lfsr ^ lfsr>>1 ^ 1) & 1` into bit 14
+    /// Step the LFSR: feedback `(lfsr ^ lfsr>>1 ^ 1) & 1` into bit 14
     /// (and bit 6 in narrow mode); output = bit 0.
     fn step_lfsr(&mut self) {
         self.lfsr_bit7_before_step = self.lfsr & 0x80 != 0;
@@ -429,26 +429,26 @@ impl Noise {
         self.lfsr_stepped_in_narrow = self.narrow;
     }
 
-    /// SameBoy `prepare_noise_start` (Core/apu.c), CGB-C-and-older + DMG
+    /// Prepare noise start, CGB-C-and-older + DMG
     /// paths (cgb04c/dmg08 are the hardware oracles; AGB and CGB-D/E-specific
     /// branches omitted). Reloads the counter countdown with the
     /// alignment-dependent trigger phase and reseeds the LFSR.
     fn prepare_noise_start(&mut self) {
-        self.counter_active = self.nr42 & 0xF8 != 0;
+        self.ripple_active = self.nr42 & 0xF8 != 0;
         let was_started_with_dac_off = self.started_with_dac_off;
-        self.started_with_dac_off = !self.counter_active;
+        self.started_with_dac_off = !self.ripple_active;
         let mut divisor = (self.nr43 & 0x07) as u32;
         let was_background = self.background_active;
         self.background_active = true;
         let mut instant_step = false;
         let mut div_1_glitch = false;
 
-        if divisor > 1 && self.counter_countdown == 1 {
+        if divisor > 1 && self.ripple_countdown == 1 {
             self.counter = self.counter.wrapping_add(1) & 0x3FFF;
-        } else if divisor > 1 && self.counter_countdown == 2 && self.enabled && self.ds {
+        } else if divisor > 1 && self.ripple_countdown == 2 && self.enabled && self.ds {
             // model <= CGB_C in double speed
             self.counter = self.counter.wrapping_add(1) & 0x3FFF;
-        } else if self.counter_countdown == 2 && (self.alignment & 3) == 0 && self.enabled {
+        } else if self.ripple_countdown == 2 && (self.alignment & 3) == 0 && self.enabled {
             if divisor == 0 {
                 divisor = 8;
             } else if divisor == 1 {
@@ -493,18 +493,18 @@ impl Noise {
                 countdown -= 4;
             }
         } else if self.ds && !self.cgb_de {
-            // divisor 0, even alignment, double speed: SameBoy adds 2 here on
-            // model <= CGB_C; CGB-D/E hardware does not (SameSuite
+            // divisor 0, even alignment, double speed: the hardware oracle adds
+            // 2 here on model <= CGB_C; CGB-D/E hardware does not (SameSuite
             // channel_4_align \2-even rows pin the shorter countdown on its
             // CPU-CGB-E silicon — that suite runs under Hardware::CGBE. No
-            // gambatte cgb04c capture reaches this path, so the C-side +2 is
-            // pinned by SameBoy's revision gate alone).
+            // cgb04c capture reaches this path, so the C-side +2 is
+            // pinned by the revision gate alone).
             countdown += 2;
         }
 
         // Background counting glitches.
         if divisor > 1 {
-            if !self.counter_active && (self.alignment & 3) == 0 {
+            if !self.ripple_active && (self.alignment & 3) == 0 {
                 countdown += 4;
             }
         } else if was_background && !self.enabled && (self.alignment & 3) == 0 {
@@ -522,10 +522,10 @@ impl Noise {
         if div_1_glitch {
             countdown -= 4;
         }
-        self.counter_countdown = countdown.max(1) as u32;
+        self.ripple_countdown = countdown.max(1) as u32;
 
         if divisor == 0 && self.enabled && (self.alignment & 3) == 3 {
-            // Confirmed-but-unexplained constant on real hardware (SameBoy).
+            // Confirmed-but-unexplained constant on real hardware.
             self.lfsr = 0x0055;
         } else {
             self.lfsr = 0;
@@ -565,13 +565,13 @@ impl Noise {
         let dac_off =
             self.get_envelope_initial_volume() == 0 && !self.get_envelope_direction();
 
-        // SameBoy NR44 trigger: the envelope clock unlock/disarm happens
+        // NR44 trigger: the envelope clock unlock/disarm happens
         // unconditionally (before the DMG delayed-start deferral).
         self.env_locked = false;
         self.env_clock = false;
 
-        // DMG-only: an unaligned trigger is deferred 6 cycles (SameBoy
-        // `dmg_delayed_start`); the whole start runs at the crossing. The
+        // DMG-only: an unaligned trigger is deferred 6 cycles; the whole
+        // start runs at the crossing. The
         // deferred re-application (`in_deferred_reapply`) is that crossing: it
         // must start the channel, not re-arm the deferral (see `run_cycles`).
         if !self.cgb
@@ -587,7 +587,7 @@ impl Noise {
         self.prepare_noise_start();
         self.current_sample = false;
 
-        // Volume envelope init (SameBoy: reload volume + countdown from NR42).
+        // Volume envelope init (reload volume + countdown from NR42).
         self.volume = self.get_envelope_initial_volume();
         self.volume_direction = self.get_envelope_direction();
         self.volume_timer = self.get_envelope_period();
@@ -599,8 +599,8 @@ impl Noise {
         self.enabled = !dac_off;
     }
 
-    /// SameBoy master `nr43_write` (Core/apu.c, the issue-#397 rework),
-    /// CGB-E model: an NR43 write whose frequency nibble changes sends glitch
+    /// NR43-write glitch model,
+    /// CGB-E: an NR43 write whose frequency nibble changes sends glitch
     /// signals to the LFSR, categorized by the (old_bit, new_bit, glitch_bit)
     /// triple read from the ripple counter. `glitch_bit` reads the counter at
     /// an intermediate register value mixing the old low bits with the new
@@ -624,21 +624,21 @@ impl Noise {
         let new_bit = (effective_counter >> (new >> 4)) & 1 != 0;
 
         if old_bit == new_bit && new_bit != glitch_bit {
-            // Glitching write. Two categories; these are SameBoy's
+            // Glitching write. Two categories; these are the oracle's
             // deterministic common variants.
             if new_bit {
                 // Category 1.
                 if new & 0x80 == 0 {
                     self.step_lfsr();
                 } else {
-                    // Only happens under this odd condition (SameBoy).
+                    // Only happens under this odd condition.
                     let t1 = (old >> 4) & 7;
                     let t2 = (new >> 4) & 7;
                     if (t1 ^ 7) + t2 > 7 || ((t1 ^ 7) & t2) != 0 {
                         // Copy bit 8 to bit 7.
                         self.lfsr = (self.lfsr & !0x80) | ((self.lfsr >> 1) & 0x80);
                         // The specific cases below have non-deterministic
-                        // variants; these are SameBoy's deterministic picks.
+                        // variants; these are the oracle's deterministic picks.
                         if (t1 == 0 || t1 == 4) && t2 == 3 {
                             self.lfsr &= (self.lfsr >> 1) | 0x545;
                             self.update_lfsr();
@@ -742,25 +742,25 @@ impl Noise {
         }
     }
 
-    /// SameBoy NR43 write (`GB_apu_write` case GB_IO_NR43): if the counter
+    /// NR43 write: if the counter
     /// countdown just reloaded, re-derive it from the new divisor with the
     /// alignment-phase table ({2,1,4,3} on <=CGB-C, {2,1,0,3} on D/E), then
     /// run the revision write model. The ripple counter itself keeps running
     /// (frequency changes are inherently glitch-accurate).
     ///
-    /// CGB-E (`cgb_de`, SameSuite's validation silicon) takes the master-
-    /// SameBoy `nr43_write` glitch categories — SameSuite channel_4_freq_-
+    /// CGB-E (`cgb_de`, SameSuite's validation silicon) takes the full
+    /// `nr43_glitch_write` glitch categories — SameSuite channel_4_freq_-
     /// change (rev=cgbe) pins all 64 subtests of it.
     ///
-    /// <=CGB-C keeps only the reload-coincident LFSR step glitch. SameBoy
-    /// master additionally routes every <=CGB-C write through an $FF
+    /// <=CGB-C keeps only the reload-coincident LFSR step glitch. The reference
+    /// model additionally routes every <=CGB-C write through an $FF
     /// intermediate value ("all writes go through 3 intermediate values" on
-    /// pre-CGB-D silicon), but its own comments call the pre-D behavior
+    /// pre-CGB-D silicon), but the pre-D behavior is
     /// non-deterministic and instance-specific ("only 100% accurate in CGB-E
     /// mode"), and porting that leg regresses the C-model SameSuite rows
     /// channel_4_lfsr_15_7 / channel_4_lfsr_7_15 (measured: the $FF
     /// intermediate makes every width-only NR43 write glitch, since the $F
-    /// top nibble always differs). Our C-side oracles (gambatte cgb04c
+    /// top nibble always differs). Our C-side oracles (cgb04c
     /// captures + those rows) pin the glitch-free behavior, so the FF leg is
     /// deliberately not applied.
     fn write_nr43(&mut self, value: u8) {
@@ -776,7 +776,7 @@ impl Noise {
             } else {
                 table[(self.alignment & 3) as usize]
             };
-            self.counter_countdown = divisor + adj;
+            self.ripple_countdown = divisor + adj;
         }
         if self.cgb_de {
             self.nr43_glitch_write(value);
@@ -841,14 +841,14 @@ impl Noise {
         let cycles = read_cc.wrapping_sub(self.last_run_cc);
         if cycles > 0
             && cycles < 0x8000_0000
-            && (self.counter_active || self.background_active)
+            && (self.ripple_active || self.background_active)
             && self.dmg_delayed_start == 0
         {
             let mut divisor = ((self.nr43 & 0x07) as u32) << 2;
             if divisor == 0 {
                 divisor = 2;
             }
-            let mut countdown = self.counter_countdown;
+            let mut countdown = self.ripple_countdown;
             if countdown == 0 {
                 countdown = divisor;
             }
@@ -910,19 +910,19 @@ impl Addressable for Noise {
                     NR42 => {
                         self.advance();
                         if value & 0xF8 == 0 {
-                            // DAC off (SameBoy NR42 case): a running channel
+                            // DAC off (NR42 case): a running channel
                             // with a nonzero divisor gets a counter nudge and
                             // stops the background counting.
                             if self.enabled && self.nr43 & 0x07 != 0 {
-                                if self.counter_countdown <= 2 {
+                                if self.ripple_countdown <= 2 {
                                     self.counter = self.counter.wrapping_add(1) & 0x3FFF;
                                 }
                                 self.background_active = false;
                             }
                             self.enabled = false;
-                            self.counter_active = false;
+                            self.ripple_active = false;
                         } else if self.is_active() {
-                            // SameBoy: NR42 write on a playing channel applies
+                            // NR42 write on a playing channel applies
                             // the zombie-mode volume transform.
                             let old = self.nr42;
                             self.nrx2_glitch(value, old);

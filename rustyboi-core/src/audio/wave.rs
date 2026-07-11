@@ -18,7 +18,7 @@ pub struct Wave {
 
     wave_ram: [u8; 16],
 
-    // Length counter (Gambatte length_counter.cpp, cc-driven absolute expiry).
+    // Length counter (cc-driven absolute expiry).
     enabled: bool,
     length_counter: u16,
     length_enabled: bool,
@@ -28,12 +28,14 @@ pub struct Wave {
     #[serde(default)]
     len_cc: u32,
 
-    // Free-running 2 MHz cycle counter (Gambatte cycleCounter_), pushed by the
-    // controller. Channel 3's wave fetch is modelled cc-based per channel3.cpp.
+    // Free-running 2 MHz cycle counter, pushed by the controller. Channel 3's
+    // wave fetch is modelled cc-based.
     #[serde(default)]
     cc: u32,
 
-    // Wave fetch timing (channel3.cpp waveCounter_/lastReadTime_/wavePos_).
+    // Wave fetch timing: `wave_counter` is the cc of the next pending sample
+    // fetch, `last_read_time` the cc of the most recent one, and `wave_pos` the
+    // current nibble position (0..63 over the 16 wave-RAM bytes).
     #[serde(default = "disabled")]
     wave_counter: u32,
     #[serde(default)]
@@ -43,7 +45,8 @@ pub struct Wave {
     #[serde(default)]
     sample_buf: u8,
 
-    // master_: DAC on and channel triggered (drives the wave fetch / read gate).
+    // Channel master enable: DAC on and channel triggered (drives the wave
+    // fetch / read gate).
     #[serde(default)]
     master: bool,
     #[serde(default)]
@@ -52,7 +55,7 @@ pub struct Wave {
     cgb: bool,
     #[serde(default)]
     ds: bool,
-    // AGB ch3 wave-RAM behavior (Gambatte channel3 agb_): while playing,
+    // AGB ch3 wave-RAM behavior: while playing,
     // wave-RAM reads return 0xFF and writes are dropped unconditionally, and
     // the setNr0 sample-buffer restore is skipped.
     #[serde(default)]
@@ -124,8 +127,8 @@ impl Wave {
         self.len_cc >= self.len_counter
     }
 
-    /// Gambatte Channel3::resetCc: shift lastReadTime_ and waveCounter_ back by
-    /// the cc delta caused by a DIV write.
+    /// Shift the last-read and next-fetch cc anchors back by the cc delta
+    /// caused by a DIV write.
     pub fn reset_cc(&mut self, delta: u32) {
         self.last_read_time = self.last_read_time.wrapping_sub(delta);
         if self.wave_counter != COUNTER_DISABLED {
@@ -137,8 +140,8 @@ impl Wave {
         self.fs_step = step;
     }
 
-    /// Gambatte `Channel3::reset` (from `PSG::reset`): clears the sample buffer.
-    /// Length counter / wave RAM are preserved.
+    /// PSG reset: clears the sample buffer. Length counter / wave RAM are
+    /// preserved.
     pub fn psg_reset(&mut self) {
         self.sample_buf = 0;
         // CGB-B first-glitch-write swallow re-arms at APU power-on.
@@ -147,8 +150,8 @@ impl Wave {
 
     const LEN_MASK: u16 = 0xFF;
 
-    /// Gambatte `LengthCounter::event` for channel 3: expiry disables the
-    /// channel and its DAC/fetch (mirrors the prior FS-driven expiry).
+    /// Length-counter expiry for channel 3: disables the channel and its
+    /// DAC/fetch (mirrors the prior FS-driven expiry).
     pub fn length_event(&mut self) {
         self.len_counter = LEN_DISABLED;
         self.length_counter = 0;
@@ -158,7 +161,7 @@ impl Wave {
     }
 
 
-    /// Gambatte `LengthCounter::nr1Change` (channel 3 / NR31).
+    /// Length-counter NR31 write handling (channel 3).
     fn len_nr1_change(&mut self, value: u8) {
         self.length_counter = (!value as u16 & Self::LEN_MASK) + 1;
         self.len_counter = if self.nr34 & 0x40 != 0 {
@@ -168,7 +171,7 @@ impl Wave {
         };
     }
 
-    /// Gambatte `LengthCounter::nr4Change` (channel 3 / NR34) length handling.
+    /// Length-counter NR34 write handling (channel 3).
     fn len_nr4_change(&mut self, old_nr4: u8, new_nr4: u8) {
         if self.len_counter != LEN_DISABLED {
             self.length_counter =
@@ -176,7 +179,7 @@ impl Wave {
         }
         let mut dec: u16 = 0;
         // CGB-B and older: extra length clock regardless of the written bit-6
-        // value (SameBoy `model <= GB_MODEL_CGB_B`; SameSuite
+        // value (CGB-B-or-earlier revision; SameSuite
         // channel_3_extra_length_clocking-cgb0/-cgbB).
         if new_nr4 & 0x40 != 0 || self.cgb_le_b {
             dec = ((!self.len_cc >> 12) & 1) as u16;
@@ -209,24 +212,30 @@ impl Wave {
     }
 
     fn period(&self) -> u32 {
-        // The APU cycle counter now mirrors Gambatte's `cycleCounter_`, which
-        // advances at `>>(1+ds)` (half-rate at double speed). The wave fetch
-        // period `0x800 - freq` is in those same units regardless of speed
-        // (Gambatte channel3.cpp `toPeriod`), so no double-speed scaling.
+        // The APU cycle counter advances at `>>(1+ds)` (half-rate at double
+        // speed). The wave fetch period `0x800 - freq` is in those same units
+        // regardless of speed, so no double-speed scaling.
         to_period(self.nr33, self.nr34)
     }
 
-    /// channel3.cpp updateWaveCounter.
+    /// Advance the wave channel's sample-position up to the current cc. The
+    /// channel fetches one nibble-pair every `period` cc; `wave_counter` holds
+    /// the cc of the next pending fetch.
     fn update_wave_counter(&mut self) {
         let cc = self.cc;
-        if self.wave_counter != COUNTER_DISABLED && cc >= self.wave_counter {
-            let period = self.period();
-            let periods = (cc - self.wave_counter) / period;
-            self.last_read_time = self.wave_counter + periods * period;
-            self.wave_counter = self.last_read_time + period;
-            self.wave_pos = ((self.wave_pos as u32 + periods + 1) % 32) as u8;
-            self.sample_buf = self.wave_ram[(self.wave_pos / 2) as usize];
+        if self.wave_counter == COUNTER_DISABLED || cc < self.wave_counter {
+            return;
         }
+        let period = self.period();
+        // The pending fetch at `wave_counter`, plus every whole period elapsed
+        // since, each step the 32-entry position once (32 nibble-pairs wrap).
+        let elapsed = (cc - self.wave_counter) / period;
+        self.wave_pos = ((self.wave_pos as u32 + elapsed + 1) & 31) as u8;
+        // Re-anchor: the latest fetch sits `elapsed` periods past the pending
+        // one, and the next is scheduled one period beyond that.
+        self.last_read_time = self.wave_counter + elapsed * period;
+        self.wave_counter = self.last_read_time + period;
+        self.sample_buf = self.wave_ram[(self.wave_pos >> 1) as usize];
     }
 
     /// Seed the AGB flag before the first `step` so an early wave-RAM access
@@ -235,7 +244,7 @@ impl Wave {
         self.agb = agb;
     }
 
-    /// CGB-B-or-earlier APU revision gate (SameBoy `model <= GB_MODEL_CGB_B`).
+    /// CGB-B-or-earlier APU revision gate.
     pub fn set_cgb_le_b(&mut self, le_b: bool) {
         self.cgb_le_b = le_b;
     }
@@ -284,8 +293,8 @@ impl Wave {
         }
     }
 
-    /// channel3.cpp setNr4 trigger (DAC-gated). Length reload is handled in
-    /// `len_nr4_change` (Gambatte folds it into the length unit).
+    /// NR34 trigger (DAC-gated). Length reload is handled in `len_nr4_change`
+    /// (folded into the length unit).
     fn trigger(&mut self) {
         self.enabled = true;
 
@@ -311,9 +320,10 @@ impl Wave {
             }
             self.master = true;
             self.wave_pos = 0;
-            // Gambatte channel3.cpp setNr4: `waveCounter_ = cc + toPeriod + 3`,
-            // in `cycleCounter_` units with no double-speed term (the unified APU
-            // cc already carries the speed via its `>>(1+ds)` rate).
+            // The trigger schedules the first fetch one full period plus the
+            // fixed 3-cc trigger latency out from the current cc, in APU cc
+            // units with no double-speed term (the unified APU cc already
+            // carries the speed via its `>>(1+ds)` rate).
             self.wave_counter = self.cc + self.period() + 3;
             self.last_read_time = self.wave_counter;
         } else {
@@ -323,14 +333,14 @@ impl Wave {
         }
     }
 
-    /// channel3.cpp setNr0 (DAC enable/disable with sample-buffer latch).
+    /// NR30 write: DAC enable/disable with the sample-buffer latch.
     fn write_nr0(&mut self, value: u8) {
         let new_nr0 = value & 0x80;
         self.nr30 = new_nr0;
         self.dac_enabled = new_nr0 != 0;
         if new_nr0 == 0 {
-            // channel3.cpp:59 setNr0: AGB skips the sample-buffer restore on
-            // DAC-disable while playing (`!agb_ && master_`).
+            // On DAC-disable while playing, AGB silicon skips the sample-buffer
+            // restore (`!agb && master`).
             if !self.agb && self.master {
                 if self.wave_counter == self.cc.wrapping_add(1) {
                     self.sample_buf = self.wave_ram[0];
@@ -363,15 +373,15 @@ impl Wave {
         self.enabled
     }
 
-    /// CGB PCM34 low nibble for the wave channel (Gambatte `channel3.cpp`):
-    /// `isActive()` is `master_` and `vol_ = waveSample(wavePos_, sampleBuf_,
-    /// rshift_)` = `(pos%2 ? s&0xF : s>>4) >> rshift`, where `rshift` is
+    /// CGB PCM34 low nibble for the wave channel: while the channel master is
+    /// on, the selected nibble (`pos` even -> high nibble, odd -> low nibble) is
+    /// right-shifted by the output-level attenuation, where the shift is
     /// `min((nr32>>5 & 3) - 1, 4)` so output level 0 mutes (shift past the data).
     ///
     /// The sample comes from the LATCHED `sample_buf` (not a live wave-RAM read):
     /// after a fresh trigger `wave_pos=0` and `sample_buf` still holds its old /
     /// power-on-zeroed value until the first fetch (`update_wave_counter`) at
-    /// `wave_counter`, so the very first samples read 0 (channel3.h waveSample).
+    /// `wave_counter`, so the very first samples read 0.
     pub fn pcm_nibble(&self) -> u8 {
         if !self.master {
             return 0;
@@ -389,16 +399,16 @@ impl Wave {
         }
     }
 
-    /// channel3.h waveRamRead, evaluated at the exact read cc.
+    /// Wave-RAM read, evaluated at the exact read cc.
     pub fn read_wave_ram(&self, addr: u16) -> u8 {
         let mut index = (addr - WAV_START) as usize;
         if index >= 16 {
             return 0xFF;
         }
         if self.master {
-            // channel3.h:53 waveRamRead: AGB returns 0xFF unconditionally while
-            // playing; CGB allows only the just-accessed byte; DMG only when the
-            // read coincides with the channel's own fetch cc.
+            // Wave-RAM read while playing: AGB returns 0xFF unconditionally;
+            // CGB allows only the just-accessed byte; DMG only when the read
+            // coincides with the channel's own fetch cc.
             if self.agb || (!self.cgb && self.cc != self.last_read_time) {
                 return 0xFF;
             }
@@ -407,15 +417,15 @@ impl Wave {
         self.wave_ram[index]
     }
 
-    /// channel3.h waveRamWrite.
+    /// Wave-RAM write.
     pub fn write_wave_ram(&mut self, addr: u16, value: u8) {
         let mut index = (addr - WAV_START) as usize;
         if index >= 16 {
             return;
         }
         if self.master {
-            // channel3.h:64 waveRamWrite: AGB drops the write unconditionally
-            // while playing (mirrors waveRamRead).
+            // Wave-RAM write while playing: AGB drops it unconditionally
+            // (mirrors the read rule above).
             if self.agb || (!self.cgb && self.cc != self.last_read_time) {
                 return;
             }

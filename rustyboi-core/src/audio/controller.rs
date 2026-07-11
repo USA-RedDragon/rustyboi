@@ -55,73 +55,69 @@ pub struct Audio {
     // Sample generation timing
     fractional_cycles: f32,
 
-    // APU master clock mirroring Gambatte's `PSG::cycleCounter_` — an absolute
-    // 2 MHz counter (mod 0x8000_0000) anchored at boot. Driven from the timer's
-    // absolute `abs_cc` (Gambatte `cpuCc`): each `sync_cc` advances by
-    // `(abs_cc - last_update) >> (1 + ds)`, exactly like `PSG::generateSamples`.
+    // APU master clock — an absolute 2 MHz counter (mod 0x8000_0000) anchored
+    // at boot. Driven from the timer's absolute `abs_cc`: each `sync_cc`
+    // advances by `(abs_cc - last_update) >> (1 + ds)`.
     // Carries the full phase a DIV reset would otherwise drop, which the
     // cc-driven length counter needs across the power-on fold.
     #[serde(default)]
     cc: u32,
-    // Length-subsystem clock, mirroring Gambatte's `cycleCounter_` at the TRUE
-    // `generateSamples` rate `(cpuCc - lastUpdate) >> (1 + ds)`. The duty/envelope
-    // `cc` above advances at `>>1` in both speeds (its tuning is anchored there
-    // via the half-rate `step_audio` gating); but the length-expiry boundary
-    // `((cc>>13)+len)<<13` must advance at HALF that rate at double speed to land
-    // on Gambatte's boundary (the NR52 ch2 a/b straddle). This parallel clock
-    // carries the Gambatte length rate, folded identically to `cc` on DIV-reset /
-    // PSG::reset / speedChange.
+    // Length-subsystem clock. Mirrors `cc` exactly; kept as a separate field
+    // only so the read/write access-cc overlays can temporarily push a
+    // different length cc to the channels and restore it afterwards.
     #[serde(default)]
     len_cc: u32,
-    // Absolute CPU cc (Gambatte `lastUpdate_`) at the last clock advance; its
-    // bit-0 parity matters for the duty/divReset/speedchange folds.
+    // Absolute CPU cc at the last clock advance; its bit-0 parity feeds the
+    // duty / DIV-reset / speed-change folds.
     #[serde(default)]
     last_update: u64,
-    // Last-seen timer DIV-write count; a change triggers the `PSG::divReset` fold.
+    // Last-seen timer DIV-write count; a change triggers the DIV-reset fold.
     #[serde(default)]
     last_div_resets: u64,
     #[serde(default)]
     clock_anchored: bool,
-    // Double-speed flag from the last `sync_cc`, so the NR52-enable `PSG::reset`
-    // fold (which happens on the write path, without `ds`) uses the right speed.
+    // Double-speed flag from the last `sync_cc`, so the APU-enable fold (which
+    // runs on the write path, without `ds`) uses the right speed.
     #[serde(default)]
     cached_ds: bool,
     // The `ds` value last broadcast to the channels via push_cc; lets sync_cc
     // skip the redundant per-dot push when neither cc nor ds moved.
     #[serde(default)]
     last_pushed_ds: bool,
-    // CGB vs DMG flag for the post-BIOS SPU `cycleCounter_` boot anchor (the
-    // high-bit constant differs: 0x1E00 CGB / 0x2400 DMG, initstate.cpp).
+    // CGB vs DMG flag for the post-boot APU clock anchor (high-bit constant
+    // differs: 0x1E00 CGB / 0x2400 DMG).
+    // Not in Pan Docs, TCAGBD, or GBCTR (no audio chapter); post-boot APU
+    // clock phase reverse-engineered from test-ROM refs.
     #[serde(default)]
     boot_cgb: bool,
-    // SameBoy `lf_div` (Core/apu.c GB_apu_run: `lf_div ^= cycles & 1`): the
-    // free-running 1 MHz sub-phase of the 2 MHz APU clock. On hardware this
-    // parity NEVER folds — a DIV reset only steps the frame-sequencer phase
-    // (GB_apu_div_event) and a speed switch doesn't touch it — so it toggles
-    // ONLY in `advance_to` (the one place real 2 MHz cycles elapse) and is
-    // deliberately NOT part of the `div_reset_fold`/`speedChange` cc
-    // re-anchoring. Reset to 1 on APU power-on (SameBoy GB_apu_init) and
-    // seeded at the boot anchor to the post-BIOS hardware phase.
+    // Free-running 1 MHz sub-phase of the 2 MHz APU clock (`lf_div ^= cycles &
+    // 1`). This parity never folds: a DIV reset only steps the DIV-APU phase
+    // and a speed switch leaves it alone, so it toggles ONLY in `advance_to`
+    // and is deliberately outside the DIV-reset / speed-change cc re-anchoring.
+    // Reset to 1 on APU power-on, seeded at boot to the post-boot phase.
+    // Not in Pan Docs, TCAGBD, or GBCTR; free-running 1 MHz APU sub-phase from
+    // reverse-engineered from test-ROM refs.
     #[serde(default = "default_ctl_lf_div")]
     lf_div: u32,
-    // Per-access read cc (channel 2 MHz units) for the current APU register
-    // read, set by `set_read_len_cc`; a PCM12 read resolves the square duty at
-    // this canonical access cc (M7). Not serialized (transient per-access).
+    // Per-access read cc (2 MHz units) for the current APU register read, set
+    // by `set_read_len_cc`; a PCM12 read resolves the square duty at this
+    // access cc. Not serialized (transient per-access).
     #[serde(skip)]
     pcm_read_cc: Option<u32>,
-    // SameBoy `div_divider`: counts DIV-APU events (the 0x1000-cc boundaries
-    // of the master clock = DIV bit 12/13 falling edges, including the forced
-    // edge of a DIV write). The envelope frame runs at (div_divider & 7) == 7;
-    // its parity mirrors (cc >> 12) except for the power-on skip glitch below.
+    // Counts DIV-APU events (the 0x1000-cc master-clock boundaries = DIV bit
+    // 12/13 falling edges, including the forced edge of a DIV write). The 64 Hz
+    // envelope frame runs when (div_divider & 7) == 7.
+    // Pan Docs: Audio details — https://gbdev.io/pandocs/Audio_details.html
     #[serde(default)]
     div_divider: u16,
-    // SameBoy `skip_div_event` (GB_apu_init): powering the APU on while the
-    // DIV-APU bit is high skips the first (truncated) DIV-APU event entirely,
-    // with div_divider pre-set to 1. 0=inactive, 1=skipped, 2=skip.
+    // Powering the APU on while the DIV-APU bit is high skips the first
+    // (truncated) DIV-APU event, with div_divider pre-set to 1.
+    // 0=inactive, 1=skipped, 2=skip. The DIV-APU counter itself is in Pan Docs
+    // (Audio_details), but this power-on skip is not in Pan Docs, TCAGBD, or
+    // GBCTR; reverse-engineered from test-ROM refs.
     #[serde(default)]
     skip_div_event: u8,
-    // CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`), set once
-    // from Hardware::CGBE. false = the default cgb04c (CPU-CGB-C) model.
+    // CGB-D/E APU revision gate; false = the default CGB-C model.
     #[serde(default)]
     cgb_de: bool,
 }
@@ -166,11 +162,11 @@ impl Audio {
         }
     }
 
-    /// SameBoy `GB_apu_div_event` (a DIV-APU falling edge, the master clock
+    /// DIV-APU event (a DIV-APU falling edge, the master clock
     /// crossing a 0x1000-cc boundary): advance `div_divider` (unless the
     /// power-on skip glitch eats this event), run the 64 Hz envelope frame
     /// countdown, and consume any armed envelope ticks. Length and sweep stay
-    /// on their Gambatte cc-event models.
+    /// on their cc-event models.
     fn fs_div_event(&mut self) {
         let cc = self.cc;
         self.fs_div_event_at(cc);
@@ -178,10 +174,11 @@ impl Audio {
 
     /// The DIV-APU event with its exact boundary cc. `event_cc` feeds the
     /// envelope frame's trigger-race window: an NRx4 trigger 2 cc (one CPU
-    /// write M-cycle) or less before the frame boundary shares the hardware
-    /// M-cycle with the event, and its freshly-reloaded countdown escapes that
-    /// frame's decrement (Gambatte `nr4Init`'s `(cc + 2) & 0x7000` period
-    /// bump; pinned by the dmg08/cgb04c ch2_init_reset_env_counter brackets).
+    /// write M-cycle) or less before the frame boundary shares the M-cycle with
+    /// the event, and its freshly-reloaded countdown escapes that frame's
+    /// decrement (the envelope keys its frame quantum on `(cc + 2) & 0x7000`).
+    /// Pan Docs: Audio details, Obscure Behavior (envelope timer reload on
+    /// trigger) — https://gbdev.io/pandocs/Audio_details.html
     fn fs_div_event_at(&mut self, event_cc: u32) {
         match self.skip_div_event {
             2 => {
@@ -201,7 +198,7 @@ impl Audio {
         self.channel4.env_div_tick();
     }
 
-    /// SameBoy `GB_apu_div_secondary_event` (the rising edge, cc crossing a
+    /// DIV-APU secondary event (the rising edge, cc crossing a
     /// 0x800-offset boundary): reload zero envelope countdowns and arm the
     /// tick for the next DIV-APU event.
     fn fs_secondary_event(&mut self) {
@@ -214,13 +211,14 @@ impl Audio {
     /// clock advance from `pre_cc` over `cycles`, dispatching falling
     /// (div event) and rising (secondary) edges in order.
     ///
-    /// The hardware edge grid sits at cc ≡ -2 (mod 0x800): Gambatte's envelope
-    /// unit keys the frame quantum on `cc + 2` (`nr4Init`'s
-    /// `(cc + 2) & 0x7000` period bump), and the dmg08/cgb04c
-    /// ch2_init_env_counter_timing 1-cc brackets pin exactly that -2 offset
-    /// (a trigger 1-2 cc before a raw 0x1000 multiple must MISS that frame's
-    /// countdown decrement). cc + 2 ≡ 0 (mod 0x1000) is the falling edge
+    /// The hardware edge grid sits at cc ≡ -2 (mod 0x800): the envelope unit
+    /// keys the frame quantum on `cc + 2` (the `(cc + 2) & 0x7000` period
+    /// bump), so a trigger 1-2 cc before a raw 0x1000 multiple misses that
+    /// frame's countdown decrement. cc + 2 ≡ 0 (mod 0x1000) is the falling edge
     /// (DIV-APU event); cc + 2 ≡ 0x800 is the rising edge (secondary).
+    /// Base in Pan Docs (Audio_details: DIV-APU event grid + the envelope
+    /// trigger-reload race); the -2 sub-cycle edge phase is a novel refinement,
+    /// not in Pan Docs, TCAGBD, or GBCTR.
     fn fs_walk(&mut self, pre_cc: u32, cycles: u64) {
         if !self.audio_enabled {
             return;
@@ -247,79 +245,64 @@ impl Audio {
 
     const CC_MAX: u32 = 0x8000_0000;
 
-    /// Reconstruct Gambatte's free-running 2 MHz `cycleCounter_` from the
-    /// timer's internal counter (`ic >> 1`, the low 15 bits) and push it to the
-    /// square channels. Measured against the boot DIV phase, the frame-sequencer
-    /// position satisfies `cc>>12&7 == ((our fs_step) + 5) & 7`.
+    /// Advance the free-running 2 MHz APU cycle counter from the timer's
+    /// absolute cc and push it to the channels.
     ///
-    /// A DIV write resets the timer's internal counter, which drops the sub-step
-    /// part of cc. We mirror Gambatte's `divReset`/`Channel::resetCc`: preserve
-    /// the upper cc bits (the length `cc>>13` / FS-phase boundaries) and shift
-    /// only the duty unit by the resulting delta.
+    /// A DIV write resets the timer's internal counter, dropping the sub-step
+    /// part of cc. The DIV-reset fold preserves the upper cc bits (the length
+    /// `cc>>13` / frame-sequencer boundaries) and shifts only the duty unit by
+    /// the resulting delta.
     /// Returns whether the APU clock advanced (or a fold/anchor ran) this call,
     /// so `Mmio::step_audio` can skip the per-dot channel step on dots where the
-    /// clock is unmoved (the channels' per-dot work is then a no-op).
+    /// clock is unmoved.
     pub fn sync_cc(&mut self, abs_cc: u64, div_resets: u64, div_anchor: u64, ds: bool) -> bool {
         self.cached_ds = ds;
         if !self.clock_anchored {
-            // Defer the boot anchor past the abs_cc==0 pre-boot sync (Gambatte
-            // `loadState` sets `lastUpdate_ = cpuCc - 1` at the post-BIOS load,
-            // with cpuCc already advanced). Anchoring at abs_cc==0 with `-1` would
-            // underflow and freeze `advance_to`.
+            // Defer the boot anchor past the abs_cc==0 pre-boot sync: the
+            // post-boot anchor sets `last_update = abs_cc - 1`, which would
+            // underflow and freeze `advance_to` at abs_cc==0.
             if abs_cc == 0 {
                 self.last_div_resets = div_resets;
                 self.push_cc();
                 return true;
             }
-            // Faithful post-BIOS SPU `cycleCounter_` (Gambatte initstate.cpp
-            // setPostBiosState): `(cgb ? 0x1E00 : 0x2400) | (cpuCc>>1 & 0x1FF)`.
-            // The high bits are a fixed per-mode constant; only the low 9 bits
-            // come from `cpuCc>>1`. rustyboi's `abs_cc` boot origin is the DIV
-            // boot counter, whose low 9 bits of `>>1` match Gambatte's
-            // `cpuCc>>1 & 0x1FF` (verified CGB 0x150 / DMG 0x1E6), so we take the
-            // mode constant for the high bits and `abs_cc>>1` for the low 9.
+            // Post-boot APU cycle counter: a fixed per-mode high constant
+            // (0x1E00 CGB / 0x2400 DMG) OR the low 9 bits of `abs_cc>>1`.
+            // Not in Pan Docs, TCAGBD (§10 audio is one sentence), or GBCTR;
+            // post-boot APU clock anchor reverse-engineered from
+            // test-ROM refs.
             let high = if self.boot_cgb { 0x1E00u32 } else { 0x2400u32 };
             self.cc = (high | ((abs_cc >> 1) as u32 & 0x1FF)) & (Self::CC_MAX - 1);
             self.len_cc = self.cc;
-            // Faithful boot anchor (Gambatte loadState `lastUpdate_ = cpuCc - 1`):
-            // the floored boundary sits one cc below the current cpu cc so the
-            // first generateSamples picks up the right parity remainder.
+            // The floored boundary sits one cc below the current cpu cc so the
+            // first sample generation picks up the right parity remainder.
             self.last_update = abs_cc - 1;
             self.last_div_resets = div_resets;
             self.clock_anchored = true;
-            // Seed div_divider to the post-BIOS phase: the boot ROM powered
-            // NR52 on (no psg_reset runs at the boot handoff), and the real
-            // hardware's event count since that power-on leaves the envelope
-            // frame (div_divider & 7 == 7) on the absolute cc grid — frames at
-            // (cc+2) >> 12 ≡ 0 (mod 8), ticks at ≡ 1, exactly Gambatte's
-            // `nr4Init` quantum. Seed `div_divider = m - 1` for the current
-            // region m so the first crossing lands on that grid (CGB anchor
-            // 0x1E00 -> 0; DMG anchor 0x2400 -> 1 — the dmg08
-            // ch2_init_env_counter_timing brackets pin the DMG offset).
+            // Seed div_divider to the post-boot phase so the first crossing
+            // lands the envelope frame ((div_divider & 7) == 7) on the absolute
+            // cc grid: frames at (cc+2)>>12 ≡ 0 (mod 8), ticks at ≡ 1 (CGB
+            // anchor 0x1E00 -> 0; DMG anchor 0x2400 -> 1).
             self.div_divider = ((self.cc.wrapping_add(0) >> 12).wrapping_sub(1) & 7) as u16;
             self.skip_div_event = 0;
-            // Seed the free-running lf_div to the post-BIOS hardware phase.
-            // Calibrated: at single-speed instruction boundaries the passing
-            // SameSuite phase is lf_div=1 (trigger delay 5 fresh / 3 active),
-            // i.e. the invariant `lf_div == (cc&1)^1` at the anchor; from here
-            // it free-runs on elapsed 2 MHz cycles only.
+            // Seed the free-running lf_div to the post-boot phase (invariant
+            // `lf_div == (cc&1)^1` at the anchor); from here it free-runs on
+            // elapsed 2 MHz cycles only.
             self.lf_div = (self.cc & 1) ^ 1;
             self.push_cc();
             return true;
         }
 
-        // A DIV write resets the divider; mirror `PSG::divReset`. Gambatte runs
-        // `generateSamples(writeCc)` then `divReset` AT the DIV-write cc, so we
-        // advance to the DIV-write cc (`div_anchor`, the timer's access-cc for
-        // the FF04 write), fire any length events strictly before the fold, then
-        // fold `cycleCounter_` there — not at the (later) current dot.
+        // A DIV write resets the divider. Sample generation then the divider
+        // reset both run AT the DIV-write cc: advance to `div_anchor` (the
+        // timer's access cc for the FF04 write), fire any length events
+        // strictly before the fold, then fold there — not at the later dot.
         let mut folded = false;
         if div_resets != self.last_div_resets {
-            // Run the fold AT the FF04 write's canonical access cc (`div_anchor`,
-            // the timer's `access_cc()`), not the later current dot — so the
-            // length-expiry boundary `((cc>>13)+len)<<13` is anchored to the SAME
-            // per-access cc the subsequent NR52 read resolves on (M7). This is
-            // the mixed-anchor the prior `advance_to(abs_cc)` left open.
+            // Run the fold AT the FF04 write's access cc (`div_anchor`), not the
+            // later current dot, so the length-expiry boundary
+            // `((cc>>13)+len)<<13` is anchored to the same per-access cc the
+            // subsequent NR52 read resolves on.
             self.advance_to(div_anchor, ds);
             self.push_cc();
             self.fire_length_events(self.cc);
@@ -329,11 +312,9 @@ impl Audio {
         }
 
         // Steady state: skip the per-channel push + length poll when this dot
-        // advanced the APU clock by zero cycles AND the ds flag the channels
-        // hold is unchanged. `push_cc` only broadcasts `cc`/`len_cc`/`lf_div`/
-        // `ds`; none change when `cc` is unmoved and `ds` is stable, so the poll
-        // (keyed on `len_cc`) can produce no new expiry. Identical to always
-        // pushing, minus the redundant per-dot broadcast.
+        // advanced the APU clock by zero cycles AND the channels' ds flag is
+        // unchanged — nothing `push_cc` broadcasts would change, and the poll
+        // (keyed on `len_cc`) can produce no new expiry.
         let advanced = self.advance_to(abs_cc, ds);
         let pushed = advanced || ds != self.last_pushed_ds;
         if pushed {
@@ -346,32 +327,23 @@ impl Audio {
         folded || pushed
     }
 
-    /// Gambatte `PSG::generateSamples`: convert CPU cycles since `last_update` to
-    /// 2 MHz APU cycles and advance `cc`. We don't buffer audio here (the live
-    /// mixer is sampled elsewhere), so this only moves the clock.
+    /// Convert CPU cycles since `last_update` to 2 MHz APU cycles and advance
+    /// `cc`. Audio isn't buffered here (the live mixer is sampled elsewhere),
+    /// so this only moves the clock.
     fn advance_to(&mut self, abs_cc: u64, ds: bool) -> bool {
-        // rustyboi gates `step_audio` to half-rate in double speed, so the timer
-        // divider (`abs_cc`) already advances at the physical APU rate that the
-        // duty/envelope tuning was anchored to: shift by 1 in both speeds, i.e.
-        // `cc == abs_cc >> 1` at steady state (matching the prior `ic >> 1`).
-        // Count whole APU cycles using absolute even boundaries (floor(abs/2) -
-        // floor(last/2)), matching the prior direct `ic >> 1` so the floored
-        // phase aligns to absolute parity rather than the anchor's parity.
-        // Guard against a non-monotonic target (e.g. a DIV-write access cc that
-        // resolves slightly before the current dot anchor): never run backward.
-        // The duty/envelope/sweep `cc` AND the length `len_cc` both mirror
-        // Gambatte's single `cycleCounter_`, which advances at
-        // `(cpuCc - lastUpdate) >> (1 + ds)` (PSG::generateSamples). At double
-        // speed the divider runs twice as fast in CPU-cc terms, so the APU clock
-        // advances at HALF the rate — the duty period `(2048-freq)*2` is in the
-        // same 2 MHz units regardless of speed. (The earlier `>>1` duty rate ran
-        // the duty 2x too fast in DS, off the pos6→pos7 boundary.)
+        // `step_audio` is gated to half-rate in double speed, so `abs_cc`
+        // advances at the physical APU rate the duty/envelope tuning is
+        // anchored to: shift by 1 in both speeds. At double speed the divider
+        // runs twice as fast in CPU-cc terms, so the APU clock advances at half
+        // the rate — the duty period `(2048-freq)*2` is in the same 2 MHz units
+        // regardless of speed. Count whole APU cycles on absolute even
+        // boundaries so the floored phase aligns to absolute parity.
         let shift = 1 + ds as u32;
-        // Faithful `PSG::generateSamples`. `cycles` is the cc delta taken BEFORE
-        // the shift (Gambatte sound.cpp:142), and `last_update` advances by whole
-        // APU cycles (`cycles << shift`), staying a FLOORED boundary that preserves
-        // the sub-quantum remainder/parity. `cc` is the single real counter;
-        // `len_cc` mirrors it exactly (no dual clock).
+        // `cycles` is the cc delta taken BEFORE the shift; `last_update`
+        // advances by whole APU cycles (`cycles << shift`), staying a floored
+        // boundary that preserves the sub-quantum remainder/parity. Guard
+        // against a non-monotonic target (a DIV-write access cc that resolves
+        // just before the current dot): never run backward.
         if abs_cc <= self.last_update {
             return false;
         }
@@ -383,17 +355,16 @@ impl Audio {
         let pre_cc = self.cc;
         self.cc = ((self.cc as u64 + cycles) % Self::CC_MAX as u64) as u32;
         self.len_cc = self.cc;
-        // SameBoy GB_apu_run: the 1 MHz sub-phase free-runs on elapsed 2 MHz
-        // cycle parity (never folded).
+        // The 1 MHz sub-phase free-runs on elapsed 2 MHz cycle parity.
         self.lf_div ^= (cycles & 1) as u32;
         // Dispatch the DIV-APU (envelope) events crossed by this advance.
         self.fs_walk(pre_cc, cycles);
         true
     }
 
-    /// Gambatte `PSG::divReset`: re-fold `cycleCounter_` so the DIV-relative phase
+    /// Re-fold the APU cycle counter so the DIV-relative phase
     /// resets while the length `cc>>13` boundaries are preserved. The duty unit is
-    /// shifted by the resulting delta (`Channel::resetCc`).
+    /// shifted by the resulting delta.
     fn div_reset_fold(&mut self, ds: bool) {
         let div_offset = (self.last_update as u32) & (ds as u32);
         let cc = self.cc.wrapping_add(div_offset);
@@ -401,13 +372,14 @@ impl Audio {
             .wrapping_add(2 * (cc & 0x800))
             .wrapping_sub(div_offset)
             % Self::CC_MAX;
-        // Hardware DIV-write trigger: resetting DIV while the DIV-APU bit is
-        // high is a falling edge — the DIV-APU event fires AT the write. (The
-        // fold expresses the same thing by jumping cc forward across the
-        // 0x1000 boundary; the low-12-bit reset itself never crosses one.)
-        // The bit is read in the -2 event-grid frame (see fs_walk): a cc in
-        // the last 2 cells of the high half already fired its falling edge in
-        // advance_to and must not double-fire here.
+        // Resetting DIV while the DIV-APU bit is high is a falling edge — the
+        // DIV-APU event fires AT the write. (The fold expresses this by jumping
+        // cc forward across the 0x1000 boundary; the low-12-bit reset itself
+        // never crosses one.) The bit is read in the -2 event-grid frame (see
+        // fs_walk): a cc in the last 2 cells of the high half already fired its
+        // falling edge in advance_to and must not double-fire here.
+        // Pan Docs: Timer obscure behaviour (DIV write fires DIV-APU event) —
+        // https://gbdev.io/pandocs/Timer_Obscure_Behaviour.html
         if self.audio_enabled && cc.wrapping_add(0) & 0x800 != 0 {
             self.fs_div_event();
         }
@@ -418,9 +390,8 @@ impl Audio {
         self.channel2.reset_cc(delta);
         self.channel3.reset_cc(delta);
         self.channel4.reset_cc(old, delta);
-        // Single counter — `len_cc` mirrors `cc` (Gambatte folds the one
-        // `cycleCounter_`; the channels' `len_counter` boundaries survive because
-        // the fold preserves `cc & -0x1000`).
+        // `len_cc` mirrors `cc`; the channels' length boundaries survive
+        // because the fold preserves `cc & -0x1000`.
         self.len_cc = self.cc;
     }
 
@@ -431,16 +402,14 @@ impl Audio {
         self.channel2.set_cc(cc);
         self.channel3.set_cc(cc);
         self.channel4.set_cc(cc);
-        // SameBoy `lf_div` (the 1 MHz sub-phase for the trigger delay): the
-        // controller's free-running parity bit (toggled in `advance_to`,
-        // seeded at boot / APU power-on, immune to the DIV-reset and
-        // speed-switch cc folds — hardware never folds this phase).
+        // `lf_div`: the 1 MHz sub-phase for the trigger delay, immune to the
+        // DIV-reset and speed-switch cc folds.
         self.channel1.set_lf_div(self.lf_div);
         self.channel2.set_lf_div(self.lf_div);
         self.channel1.set_ds(self.cached_ds);
         self.channel2.set_ds(self.cached_ds);
         self.channel4.set_ds(self.cached_ds);
-        // The single counter — length cc is `cc` itself.
+        // Length cc is `cc` itself.
         let lcc = cc;
         self.channel1.set_len_cc(lcc);
         self.channel2.set_len_cc(lcc);
@@ -448,9 +417,9 @@ impl Audio {
         self.channel4.set_len_cc(lcc);
     }
 
-    /// Gambatte's length unit is a scheduled absolute-cc event: when the master
-    /// clock reaches a channel's `counter_` (`((cc>>13)+len)<<13`), the channel's
-    /// length expires (disables it). We poll it each clock advance.
+    /// The length unit is a scheduled absolute-cc event: when the master
+    /// clock reaches a channel's scheduled expiry cc (`((cc>>13)+len)<<13`), the
+    /// channel's length expires (disables it). We poll it each clock advance.
     fn fire_length_events(&mut self, _cc: u32) {
         if self.channel1.len_expired() {
             self.channel1.length_event();
@@ -466,16 +435,18 @@ impl Audio {
         }
     }
 
-    /// Gambatte `PSG::reset`, fired on the NR52 0→1 (APU enable) transition. Folds
+    /// APU-enable reset, fired on the NR52 0→1 (APU enable) transition. Folds
     /// the master clock from its large `abs_cc>>1`-anchored value down to the small
-    /// FS-anchored value Gambatte's `cycleCounter_` carries, then re-initializes
+    /// FS-anchored value the cycle counter carries, then re-initializes
     /// every channel's duty/envelope/LFSR sub-counter at the folded cc. The length
     /// counters survive (they're re-derived against the new small `cc>>13`).
     ///
-    /// This is the M2b fix: the length-expiry boundary `((cc>>13)+len)<<13` was
-    /// being computed against the un-folded large anchor, landing one 0x1000
-    /// quantum off Gambatte after a DIV write. Folding the whole APU clock here
-    /// re-anchors that boundary exactly like Gambatte.
+    /// Folding the whole APU clock here re-anchors the length-expiry boundary
+    /// `((cc>>13)+len)<<13`, which would otherwise be computed against the
+    /// un-folded large anchor and land one 0x1000 quantum off after a DIV write.
+    /// The observable effects (registers clear, length counters survive) are in
+    /// Pan Docs (Audio_Registers); this cc-fold mechanism is a model construct,
+    /// not in Pan Docs, TCAGBD, or GBCTR.
     fn psg_reset(&mut self, ds: bool) {
         // Skip the fold before the APU master clock is anchored (boot instant,
         // `cc`/`last_update` still 0): there's no accumulated phase to fold, and
@@ -483,7 +454,7 @@ impl Audio {
         // (the length quantum) for the rest of the run. The channel sub-counters
         // are still reset.
         if !self.clock_anchored {
-            // SameBoy GB_apu_init: APU power-on resets the 1 MHz sub-phase.
+            // APU power-on resets the 1 MHz sub-phase.
             self.lf_div = 1;
             self.div_divider = 0;
             self.skip_div_event = 0;
@@ -494,27 +465,24 @@ impl Audio {
             self.channel4.psg_reset();
             return;
         }
-        // SameBoy GB_apu_init (NR52 0->1): lf_div re-seeds at the power-on
-        // write cc. This is the ONLY event besides boot that re-seeds the
-        // free-running sub-phase. The seed is SPEED-DEPENDENT: the NR52
-        // write-effect instant sits at a different sub-position of the 2 MHz
-        // cell in double speed (a DS M-cycle covers one 2 MHz cycle, an SS
-        // M-cycle two), so the 1 MHz phase the duty unit latches differs by
-        // one: 1 in single speed (SameBoy's GB_apu_init frame), 0 in double
-        // speed. Measured: the SS seed carries the SameSuite channel_*_align/
-        // duty/delay set; the DS seed is pinned by the gambatte cgb04c
-        // ch1_duty0_pos6_to_pos7_timing_ds ladder (write-capture brackets).
-        // REVISION FORK: the DS seed 0 is the cgb04c (CPU-CGB-C) placement,
-        // one half of the C pair (with the square DS delay 5-2a-lf). CPU-CGB-
-        // D/E silicon (SameSuite's DS align tests) takes the SameBoy-literal
-        // pair instead: seed 1 always, DS delay 6-2a-lf (SameBoy's square
-        // delay is `6 + lf * (model < CGB_D && ds ? 1 : -1)`). Both are real
-        // hardware; `cgb_de` (Hardware::CGBE) selects the D/E side.
+        // APU power-on (NR52 0->1) re-seeds lf_div at the power-on write cc —
+        // the only event besides boot that re-seeds the free-running sub-phase.
+        // The seed is speed-dependent: a DS M-cycle covers one 2 MHz cycle, an
+        // SS M-cycle two, so the 1 MHz phase the duty unit latches differs by
+        // one (1 in single speed, 0 in double speed). This forks by revision:
+        // the DS seed 0 is the CGB-C placement (square DS delay 5-2a-lf);
+        // CGB-D/E takes seed 1 always with DS delay 6-2a-lf
+        // (`6 + lf * (model < CGB_D && ds ? 1 : -1)`). `cgb_de` selects the
+        // D/E side.
+        // Pan Docs notes a first-trigger duty quirk (Audio_details) and that
+        // APU revisions differ (CGB-02 vs 04/05 length glitch), but this
+        // per-revision DS/SS duty-trigger sub-phase is not in Pan Docs, TCAGBD,
+        // or GBCTR; reverse-engineered from test-ROM refs.
         self.lf_div = if self.cached_ds && !self.cgb_de { 0 } else { 1 };
-        // SameBoy GB_apu_init power-on DIV-APU glitch: enabling the APU while
-        // the DIV-APU bit (the half-period phase, read in the -2 event-grid
-        // frame of fs_walk) is high skips the first (truncated) DIV-APU
-        // event, with div_divider pre-set to 1.
+        // APU power-on DIV-APU glitch: enabling the APU while the DIV-APU bit
+        // (the half-period phase, read in the -2 event-grid frame of fs_walk)
+        // is high skips the first (truncated) DIV-APU event, with div_divider
+        // pre-set to 1.
         self.div_divider = 0;
         self.skip_div_event = 0;
         if self
@@ -527,9 +495,8 @@ impl Audio {
             self.skip_div_event = 2;
             self.div_divider = 1;
         }
-        // Faithful `PSG::reset` (sound.cpp:67). Single counter, no reconstruction-
-        // drift bias (`last_update` is the exact floored boundary, so `cc` already
-        // equals Gambatte's `cycleCounter_`).
+        // APU-enable reset. `last_update` is the exact floored boundary, so
+        // `cc` already equals the cycle counter.
         let div_offset = (self.last_update as u32) & (ds as u32);
         let cc = self.cc.wrapping_add(div_offset);
         let not_ds = (!ds) as u32;
@@ -538,11 +505,11 @@ impl Audio {
             % Self::CC_MAX;
         self.cc = folded;
         self.len_cc = folded;
-        // lastUpdate_ = ((lastUpdate_ + 3) & -4) - !ds  (parity re-anchor).
+        // Re-anchor last_update parity: ((last_update + 3) & -4) - !ds.
         self.last_update = (self.last_update.wrapping_add(3) & !3u64)
             .wrapping_sub(not_ds as u64);
-        // Push the folded cc into the channels first so ch4's `Lfsr::reset(cc)`
-        // anchors `backupCounter_` at the folded cc (Gambatte `reset(cc)`).
+        // Push the folded cc into the channels first so ch4's LFSR reset
+        // anchors its backup counter at the folded cc.
         self.push_cc();
         self.channel1.psg_reset();
         self.channel2.psg_reset();
@@ -550,32 +517,30 @@ impl Audio {
         self.channel4.psg_reset();
     }
 
-    /// Faithful `PSG::speedChange` (sound.cpp:106) for the
-    /// CGB STOP speed switch. `stop_cc` is the master cc the STOP resolves at
-    /// (Gambatte's `cc`); the flush target is `cc_ = stop_cc + 8 * !old_ds`. The
-    /// single counter is flushed to `cc_` at the OLD speed (`generateSamples`),
-    /// then `lastUpdate_ -= old_ds`, then the single→double divCycles/2 fold.
+    /// APU clock fold for the CGB STOP speed switch. `stop_cc` is the master cc
+    /// the STOP resolves at; the flush target is `cc_ = stop_cc + 8 * !old_ds`.
+    /// The counter is flushed to `cc_` at the OLD speed, then `last_update -=
+    /// old_ds`, then the single→double fold.
+    /// Base in TCAGBD (§5.1.1 double-speed uses the next DIV bit; §10 sound
+    /// frequency is unaffected by double speed); this STOP speed-switch cc-fold
+    /// is a novel refinement, not in Pan Docs, TCAGBD, or GBCTR.
     pub fn psg_speed_change_at(&mut self, old_ds: bool, stop_cc: u64) {
         if !self.clock_anchored {
             return;
         }
         let cc_ = stop_cc + 8 * (!old_ds as u64);
-        // generateSamples(cc_, old_ds) — flush the single counter to the switch cc.
+        // Flush the counter to the switch cc at the old speed.
         self.advance_to(cc_, old_ds);
-        // The real DS->SS STOP bridge advances the 1 MHz sub-phase by an ODD
-        // number of 2 MHz cycles relative to Gambatte's flush model, flipping
-        // the free-running lf_div (the SS->DS direction is parity-even —
-        // flipping it breaks the nr4init fresh-DS bracket). The duty GRIDS
-        // carried across the switch stay Gambatte-exact (an odd whole-clock
-        // advance breaks the carried-grid brackets, measured +6).
+        // The DS->SS STOP bridge advances the 1 MHz sub-phase by an odd number
+        // of 2 MHz cycles, flipping lf_div; the SS->DS direction is parity-even
+        // and leaves it alone.
         if old_ds {
             self.lf_div ^= 1;
         }
-        // lastUpdate_ -= ds
         if old_ds {
             self.last_update = self.last_update.wrapping_sub(1);
         }
-        // Only the single->double transition re-folds cycleCounter_.
+        // Only the single->double transition re-folds the counter.
         if !old_ds {
             let cc = self.cc;
             let div_cycles = cc & 0xFFF;
@@ -604,44 +569,37 @@ impl Audio {
         }
     }
 
-    /// Resolve the length subsystem at the canonical CPU-access cc on an APU
-    /// register read (M7). `read_abs_cc` is the master cc at the exact access
-    /// point (the same canonical cc the timer register access resolves on); it
-    /// may run a few dots ahead of the per-dot `self.last_update` that the
-    /// duty/envelope sub-counters are anchored to.
+    /// Resolve the length subsystem at the CPU-access cc on an APU register
+    /// read. `read_abs_cc` is the master cc at the exact access point (the same
+    /// cc the timer register access resolves on); it may run a few dots ahead
+    /// of the per-dot `self.last_update` the duty/envelope sub-counters use.
     ///
-    /// We overlay each channel's length-comparison cc (`len_cc`) at the access
-    /// cc — `self.cc + ((read_abs_cc>>1) - (last_update>>1))` — and fire any
-    /// length expiry there, WITHOUT disturbing `self.cc`/`last_update`/duty. This
-    /// makes the cycle-exact NR52 length-expiry boundary (`((cc>>13)+len)<<13`
-    /// vs the read cc) resolve at the same canonical access cc as the timer,
-    /// dissolving the per-peripheral phase constant.
+    /// Overlays each channel's length-comparison cc (`len_cc`) at the access cc
+    /// and fires any length expiry there, WITHOUT disturbing
+    /// `self.cc`/`last_update`/duty, so the NR52 length-expiry boundary
+    /// (`((cc>>13)+len)<<13` vs the read cc) resolves at the same access cc as
+    /// the timer.
     pub fn set_read_len_cc(&mut self, read_abs_cc: u64) {
         if !self.clock_anchored {
             return;
         }
         let shift = 1 + self.cached_ds as u32;
-        // Gambatte `generateSamples` advances by `(cpuCc - lastUpdate) >> (1+ds)`
-        // — the difference is taken BEFORE the shift. Flooring `read_abs_cc` and
-        // `last_update` independently (each `>>shift`) over-counts by one length-cc
-        // when they straddle a `>>shift` boundary, pushing the read one cc past the
-        // expiry boundary (the ch2 nr52 `_1a` off-by-one). Match Gambatte exactly.
+        // The delta is taken BEFORE the shift: flooring `read_abs_cc` and
+        // `last_update` independently would over-count by one length-cc when
+        // they straddle a `>>shift` boundary, pushing the read one cc past the
+        // expiry boundary.
         let delta = (read_abs_cc.wrapping_sub(self.last_update) >> shift) as u32;
         let lcc = self.len_cc.wrapping_add(delta);
-        // Record the per-access read cc (channel 2 MHz units) so a PCM12 read
-        // in this access resolves the square duty at the SAME canonical access
-        // clock (M7), not the earlier per-dot sync (`pcm_nibble_at`).
+        // Record the per-access read cc so a PCM12 read in this access resolves
+        // the square duty at the same access clock, not the earlier per-dot sync.
         self.pcm_read_cc = Some(self.cc.wrapping_add(delta));
         self.channel1.set_len_cc(lcc);
         self.channel2.set_len_cc(lcc);
         self.channel3.set_len_cc(lcc);
         self.channel4.set_len_cc(lcc);
         self.fire_length_events(lcc);
-        // Channel 4's PCM34 read resolves at the same per-access cc via the
-        // non-mutating shadow advance (`pcm_nibble_at`, keyed off
-        // `pcm_read_cc`).
         // Restore the steady-state length cc so the next per-dot `push_cc`
-        // (which uses the un-overlaid `len_cc`) doesn't see a stale ahead value.
+        // doesn't see a stale ahead value.
         let base = self.len_cc;
         self.channel1.set_len_cc(base);
         self.channel2.set_len_cc(base);
@@ -649,23 +607,21 @@ impl Audio {
         self.channel4.set_len_cc(base);
     }
 
-    /// Overlay the length subsystem cc (`len_cc`) at the canonical CPU WRITE
-    /// access cc, so the NRx1/NRx4 length-counter math (trigger reload + expiry
-    /// scheduling, `((len_cc>>13)+len)<<13`) is anchored to the SAME per-access
-    /// clock the subsequent NR52 read resolves on (M7 read side: `set_read_len_cc`).
-    /// The write side is a SEPARATE phase term from the read (the trigger's
-    /// `nr4Change` boundary rounding differs from the read's `event` rounding), so
-    /// `write_abs_cc` carries the write access cc (`abs_cc + APU_WRITE_CC_OFF`).
-    /// Unlike the read overlay we LEAVE `len_cc` set: the immediately-following
-    /// `audio.write` consumes it, and the next per-dot `push_cc` restores the
-    /// steady-state base. Duty/envelope (`self.cc`) are untouched.
+    /// Overlay the length subsystem cc (`len_cc`) at the CPU WRITE access cc,
+    /// so the NRx1/NRx4 length-counter math (trigger reload + expiry
+    /// scheduling, `((len_cc>>13)+len)<<13`) is anchored to the same per-access
+    /// clock the subsequent NR52 read resolves on. The write side is a separate
+    /// phase term from the read (its trigger-boundary rounding differs from the
+    /// read's event rounding), so `write_abs_cc` carries the write access cc.
+    /// Unlike the read overlay this LEAVES `len_cc` set: the immediately-
+    /// following `audio.write` consumes it, and the next per-dot `push_cc`
+    /// restores the steady-state base. Duty/envelope (`self.cc`) are untouched.
     pub fn set_write_len_cc(&mut self, write_abs_cc: u64) {
         if !self.clock_anchored {
             return;
         }
         let shift = 1 + self.cached_ds as u32;
-        // The BEFORE-shift delta (Gambatte generateSamples) over the single
-        // counter, matching the read path.
+        // Before-shift delta, matching the read path.
         let delta = (write_abs_cc.wrapping_sub(self.last_update) >> shift) as u32;
         let lcc = self.len_cc.wrapping_add(delta);
         self.channel1.set_len_cc(lcc);
@@ -687,18 +643,15 @@ impl Audio {
         self.channel4.set_len_cc(base);
     }
 
-    /// Apply Gambatte's post-`skip_bios` APU state. The boot ROM enables the APU
-    /// and leaves channel 1 mid-tone (the startup "ding"). `sync_cc` must run
-    /// first so the channels' duty event counter has the correct cc base.
-    /// `cgb` selects the CGB vs DMG duty phase (Gambatte `setPostBiosState`).
-    /// Record the CGB/DMG flag before the boot `sync_cc` anchors the SPU clock,
-    /// so the post-BIOS `cycleCounter_` high-bit constant is correct.
+    /// Record the CGB/DMG flag (and seed it into channel 4) before the boot
+    /// `sync_cc` anchors the APU clock, so the post-boot clock high-bit
+    /// constant is chosen correctly.
     pub fn set_boot_cgb(&mut self, cgb: bool) {
         self.boot_cgb = cgb;
         self.channel4.set_cgb(cgb);
     }
 
-    /// Seed the CGB-D/E APU revision gate (SameBoy `model > GB_MODEL_CGB_C`)
+    /// Seed the CGB-D/E APU revision gate (model newer than CGB-C)
     /// into the revision-forked units: the square duty-trigger DS delay pair
     /// (psg_reset lf seed + DS delay formula) and the ch4 divisor-0 DS
     /// countdown. Called once from `GB::new` for Hardware::CGBE.
@@ -709,8 +662,8 @@ impl Audio {
         self.channel4.set_cgb_de(de);
     }
 
-    /// Seed the CGB-B-or-earlier APU revision gate (SameBoy `GB_is_cgb &&
-    /// model <= GB_MODEL_CGB_B`) into all four channels' NRx4 length-glitch
+    /// Seed the CGB-B-or-earlier APU revision gate (CGB with model <= CGB-B)
+    /// into all four channels' NRx4 length-glitch
     /// fork. Called once from `GB::new` for Hardware::CGB0/CGBB.
     pub fn set_cgb_le_b(&mut self, le_b: bool) {
         self.channel1.set_cgb_le_b(le_b);
@@ -724,22 +677,22 @@ impl Audio {
         self.channel3.set_cgb_b(b);
     }
 
-    /// CGB-C-and-older PCM read glitch (SameBoy `pcm_mask` applied for
-    /// `model <= GB_MODEL_CGB_C`; excludes AGB and CGB-D/E).
+    /// CGB-C-and-older PCM read glitch (the pcm_mask applied for
+    /// model <= CGB-C; excludes AGB and CGB-D/E).
     pub fn set_pcm_c_glitch(&mut self, on: bool) {
         self.channel1.set_pcm_c_glitch(on);
         self.channel2.set_pcm_c_glitch(on);
     }
 
     /// NRx4 sample-index step-back parity gate for the two square channels
-    /// (true for CGB0/CGBB/AGB; SameBoy gates the step-back on
+    /// (true for CGB0/CGBB/AGB; the step-back is gated on
     /// `sample_countdown & 1` for those, unconditional on CGB-D/E).
     pub fn set_step_back_parity(&mut self, on: bool) {
         self.channel1.set_step_back_parity(on);
         self.channel2.set_step_back_parity(on);
     }
 
-    /// Seed the AGB flag into the wave channel (Gambatte channel3 agb_).
+    /// Seed the AGB flag into the wave channel.
     pub fn set_agb(&mut self, agb: bool) {
         self.channel3.set_agb(agb);
     }
@@ -747,9 +700,9 @@ impl Audio {
     /// Seed the post-boot APU state. `cgb` selects the CGB vs DMG channel-1
     /// startup-tone phase; `ch1_active` is the NR52 bit-0 (channel-1 running)
     /// state at hand-off. The DMG/MGB/CGB boot ROMs play the startup "ding" and
-    /// hand off with channel 1 still running (bit 0 = 1); the SGB boot ROM plays
-    /// no chime on the Game Boy side, so it hands off with channel 1 already
-    /// disabled (NR52 reads 0xF0, not 0xF1 — mooneye boot_hwio-S).
+    /// hand off with channel 1 still running (bit 0 = 1); the SGB boot ROM
+    /// plays no chime on the Game Boy side, so it hands off with channel 1
+    /// already disabled (NR52 reads 0xF0, not 0xF1).
     pub fn set_post_bios_state(&mut self, cgb: bool, ch1_active: bool) {
         self.audio_enabled = true;
         self.nr50 = 0x77;
@@ -757,7 +710,7 @@ impl Audio {
         self.nr52 = 0xF1;
 
         // Channel 1 startup-tone phase: CGB pos=6/high, offset 37*2; DMG pos=3,
-        // offset 69*2 (Gambatte initstate.cpp).
+        // offset 69*2.
         if cgb {
             self.channel1.set_post_bios_ch1(37 * 2, 6, true);
         } else {
@@ -814,10 +767,10 @@ impl Audio {
         self.frame_sequencer_step = (self.frame_sequencer_step + 1) % 8;
     }
 
-    /// per-access STAGE 1: true while the APU is powered (NR52 bit 7). The
-    /// min-event idle fast path only bulk-skips dots when audio is OFF, because a
-    /// powered APU steps its channel duty/freq counters per dot (`step`), which is
-    /// not span-collapsible like the frame sequencer.
+    /// True while the APU is powered (NR52 bit 7). The min-event idle fast path
+    /// only bulk-skips dots when audio is OFF, because a powered APU steps its
+    /// channel duty/freq counters per dot (`step`), which is not
+    /// span-collapsible like the frame sequencer.
     pub fn is_powered(&self) -> bool {
         self.audio_enabled
     }
@@ -850,16 +803,17 @@ impl Audio {
         }
     }
 
-    /// CGB PCM12 register (0xFF76): low nibble = channel 1 digital amplitude,
-    /// high nibble = channel 2 (Gambatte `memory.cpp` case 0x76 ->
-    /// `PSG::pcm12Read`). Returns 0 when the APU is powered off; the
-    /// CGB-only / power gating is applied by the caller in `mmio.rs`.
+    /// CGB PCM12 register (0xFF76): low nibble = channel 1 digital output, high
+    /// nibble = channel 2. Returns 0 when the APU is powered off; the CGB-only
+    /// / power gating is applied by the caller in `mmio.rs`.
+    /// Pan Docs: Audio details, PCM registers —
+    /// https://gbdev.io/pandocs/Audio_details.html
     pub fn pcm12(&self) -> u8 {
         if !self.audio_enabled {
             return 0;
         }
-        // Resolve the duty at the canonical per-access read cc (M7) when the
-        // read path recorded one; fall back to the per-dot state (mixer path).
+        // Resolve the duty at the per-access read cc when the read path
+        // recorded one; fall back to the per-dot state (mixer path).
         match self.pcm_read_cc {
             Some(rcc) => {
                 self.channel1.pcm_nibble_at(rcc) | (self.channel2.pcm_nibble_at(rcc) << 4)
@@ -869,14 +823,14 @@ impl Audio {
     }
 
     /// CGB PCM34 register (0xFF77): low nibble = channel 3, high nibble =
-    /// channel 4 (Gambatte `PSG::pcm34Read`).
+    /// channel 4.
     pub fn pcm34(&self) -> u8 {
         if !self.audio_enabled {
             return 0;
         }
-        // Channel 4 resolves at the canonical per-access read cc (M7) like
-        // PCM12; channel 3's fetch counter was already advanced on the read
-        // path (`sync_wave_for_read`).
+        // Channel 4 resolves at the per-access read cc like PCM12; channel 3's
+        // fetch counter was already advanced on the read path
+        // (`sync_wave_for_read`).
         let ch4 = match self.pcm_read_cc {
             Some(rcc) => self.channel4.pcm_nibble_at(rcc),
             _ => self.channel4.pcm_nibble(),
@@ -979,11 +933,13 @@ impl Addressable for Audio {
 
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
-            // NRx1 (length-load) registers stay writable while the APU is powered
-            // off on DMG; on CGB they are ignored like every other reg (Gambatte
-            // memory.cpp cases 0x11/0x16/0x1B/0x20: `if (!isEnabled() && isCgb())
-            // return;`, with NR11/NR21 additionally masked to `data & 0x3F` —
-            // only the length bits, not the duty bits, are applied while off).
+            // NRx1 length-load registers stay writable while the APU is off on
+            // DMG (monochrome models); on CGB they are ignored like every other
+            // register. While off, NR11/NR21 apply only the length bits
+            // (`& 0x3F`), not the duty bits.
+            // Pan Docs: Audio Registers (APU off makes registers read-only
+            // except NR52, and length timers on monochrome) —
+            // https://gbdev.io/pandocs/Audio_Registers.html
             NR11 => {
                 if self.audio_enabled {
                     self.channel1.write(addr, value);
@@ -1043,17 +999,17 @@ impl Addressable for Audio {
                 let now_enabled = (value >> 7) & 0x01 != 0;
 
                 if was_enabled && !now_enabled {
-                    // APU power-off (Gambatte memory.cpp case 0x26): while still
-                    // enabled, write 0 to every sound register 0x10-0x25, THEN
-                    // disable. The per-register writes go through the normal
-                    // (enabled) path, so each NRx1 length-load reloads its length
-                    // counter to its max (e.g. NR41=0 -> lengthCounter=64). This
-                    // is what makes the length counters survive on DMG the way the
-                    // blargg `08-len ctr during power` / `11-regs after power`
-                    // tests expect — a flat struct reset would zero them instead.
-                    // The free-running master clock (cc/lastUpdate) and wave RAM
-                    // are left untouched (Gambatte keeps `cycleCounter_` running
-                    // and `PSG::reset` never clears `waveRam_`).
+                    // APU power-off: while still enabled, write 0 to every sound
+                    // register 0x10-0x25, THEN disable. The per-register writes
+                    // take the normal (enabled) path, so each NRx1 length-load
+                    // reloads its length counter to its max (e.g. NR41=0 ->
+                    // length counter 64). On DMG this is what makes the length
+                    // counters survive power-off; a flat struct reset would zero
+                    // them. The free-running master clock (cc/last_update) and
+                    // wave RAM are left untouched.
+                    // Pan Docs: Audio Registers (off clears registers but not
+                    // wave RAM or the DIV-APU counter) —
+                    // https://gbdev.io/pandocs/Audio_Registers.html
                     for reg in NR10..=NR51 {
                         // Skip the unused gaps (FF15, FF1F) — open bus, no effect.
                         if reg == 0xFF15 || reg == 0xFF1F {
@@ -1065,7 +1021,7 @@ impl Addressable for Audio {
                     // zero-writes take the enabled path) and is cleared by the
                     // `audio_enabled = now_enabled` at the end of this branch.
                 } else if !was_enabled && now_enabled {
-                    // APU power-on (NR52 0→1): apply Gambatte's `PSG::reset` fold.
+                    // APU power-on (NR52 0→1): apply the APU-enable reset fold.
                     self.psg_reset(self.cached_ds);
                 }
                 self.audio_enabled = now_enabled;
