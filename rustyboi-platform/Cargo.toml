@@ -27,7 +27,7 @@ clap = { version = "=4.5.48", features = ["derive"] }
 log = "=0.4.28"
 # Raw wgpu for surface/adapter/device creation from the winit window. Same 0.19
 # the frontend + egui-wgpu use, so the handles handed to the frontend match.
-wgpu = "=0.19.4"
+wgpu = "=28.0.0"
 # Block on the async adapter/device requests on native targets.
 pollster = "=0.3.0"
 # We only feed raw generated PCM (SamplesBuffer) to a Sink; no audio-file
