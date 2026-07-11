@@ -119,9 +119,14 @@ val jniLibsDir = layout.projectDirectory.dir("src/main/jniLibs")
 
 fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks.register<Exec>(name) {
     workingDir = rustWorkspaceRoot.asFile
+    // cpal's Android backend links libaaudio.so directly, which the NDK only
+    // ships in its sysroot at API >= 26. cargo-ndk otherwise defaults to API 21
+    // (no libaaudio.so → link failure), so pin the link platform to our minSdk.
+    val ndkPlatform = (android.defaultConfig.minSdk ?: 26).toString()
     val args = mutableListOf(
         "cargo", "ndk",
         "-t", "arm64-v8a",
+        "-P", ndkPlatform,
         "-o", jniLibsDir.asFile.absolutePath,
         "build",
         "-p", "rustyboi-platform",
@@ -148,28 +153,20 @@ fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks
     inputs.file(rustWorkspaceRoot.file("Cargo.lock"))
     inputs.file(rustWorkspaceRoot.file("rustyboi-platform/Cargo.toml"))
     outputs.dir(jniLibsDir.dir("arm64-v8a"))
-
-    // cpal's `oboe-shared-stdcxx` feature dynamically links libc++_shared.so;
-    // copy it from the NDK into jniLibs so Android's loader can resolve it.
-    doLast {
-        val ndkRoot = System.getenv("ANDROID_NDK_ROOT")
-            ?: System.getenv("ANDROID_NDK_HOME")
-            ?: error("ANDROID_NDK_ROOT/ANDROID_NDK_HOME not set; required to locate libc++_shared.so")
-        val hostTag = when {
-            org.gradle.internal.os.OperatingSystem.current().isLinux -> "linux-x86_64"
-            org.gradle.internal.os.OperatingSystem.current().isMacOsX -> "darwin-x86_64"
-            org.gradle.internal.os.OperatingSystem.current().isWindows -> "windows-x86_64"
-            else -> error("Unsupported host OS")
-        }
-        val src = file("$ndkRoot/toolchains/llvm/prebuilt/$hostTag/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so")
-        require(src.exists()) { "libc++_shared.so not found at $src" }
-        val dst = jniLibsDir.dir("arm64-v8a").file("libc++_shared.so").asFile
-        src.copyTo(dst, overwrite = true)
-    }
 }
 
 val buildRustLibDebug = cargoNdkTask("buildRustLibDebug", "debug")
 val buildRustLibRelease = cargoNdkTask("buildRustLibRelease", "release")
+
+// We ship no unit or instrumented tests. Disabling their variant components
+// stops AGP from creating test components at all — which both trims
+// configuration time and avoids AGP 9.2.1's internal use of the deprecated
+// Project-object dependency notation when wiring test → main dependencies
+// (deprecated in Gradle 9, an error in Gradle 10).
+androidComponents.beforeVariants { variantBuilder ->
+    (variantBuilder as com.android.build.api.variant.HasUnitTestBuilder).enableUnitTest = false
+    (variantBuilder as com.android.build.api.variant.HasAndroidTestBuilder).enableAndroidTest = false
+}
 
 androidComponents.onVariants { variant ->
     val taskName = "buildRustLib${variant.name.replaceFirstChar { it.uppercase() }}"
