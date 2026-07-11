@@ -993,8 +993,7 @@ mod tests {
         assert_eq!(ta.sc_up[0].1, None, "held (peer never arms)");
         let held_for = ta.sc_down[0] - ta.sc_up[0].0;
         assert!(
-            held_for >= super::LINK_STALL_TIMEOUT_CC
-                && held_for < super::LINK_STALL_TIMEOUT_CC + 4096 + 512 + 256,
+            (super::LINK_STALL_TIMEOUT_CC..super::LINK_STALL_TIMEOUT_CC + 4096 + 512 + 256).contains(&held_for),
             "timeout release at ~{} cc (held {held_for})",
             super::LINK_STALL_TIMEOUT_CC
         );

@@ -4700,7 +4700,7 @@ mod tests {
         assert_eq!(cart.ram_data.len(), 32 * 1024);
         // Clock restored (catch-up window: allow a couple of live seconds).
         let (s, m, h, dl, dh) = mbc3_rtc(&cart);
-        assert!(s >= 11 && s <= 13, "seconds {s}");
+        assert!((11..=13).contains(&s), "seconds {s}");
         assert_eq!((m, h, dl, dh), (22, 13, 0x44, 0x01));
         // Sidecar was created and now wins over the footer.
         assert!(dir.join("game.rtc").exists());
