@@ -8131,7 +8131,28 @@ impl Ppu {
                         self.win_being_fetched = false;
                         break 'label;
                     }
+                    // A full-width HUD window (WX==7) triggers at LX==0 via the
+                    // live x+7==wx match and resets the FIFO. On hardware the
+                    // SCX&7 fine-scroll discard consumes the leading BACKGROUND
+                    // pixels before LX reaches 0, so a window activating exactly
+                    // at LX==0 is unaffected by it and draws from window-x 0 —
+                    // the bar stays locked to screen coordinates regardless of
+                    // SCX. rustyboi's trigger fires just before this discard and
+                    // clears the FIFO, so without this guard the discard wrongly
+                    // pops window pixels and the bar shifts left by SCX&7 (moving
+                    // with the camera one frame per horizontal scroll).
+                    //
+                    // Narrowly WX==7: WX<7 triggers at LX<0, inside the discard
+                    // region, so it legitimately keeps the discard (mealybug
+                    // m3_window_timing_wx_0 shifts the WX=0 window); the DMG wxA6
+                    // (WX==166) checkpoint window comes through the mode-3-start
+                    // path — flagged by win_draw_started_at_x0 — and keeps it too
+                    // (gambatte wxA6_scx7).
+                    let win_x0_locked = self.fetcher.is_fetching_window()
+                        && !self.win_draw_started_at_x0
+                        && mmio.read(WX) == 7;
                     if self.m3_pixels_discarded < target
+                        && !win_x0_locked
                         && let Ok(_) = self.fetcher.pixel_fifo.pop() {
                             self.m3_pixels_discarded += 1;
                             self.win_being_fetched = false;
