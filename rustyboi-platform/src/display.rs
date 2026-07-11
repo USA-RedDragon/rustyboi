@@ -879,7 +879,14 @@ fn run_gui_loop(
                 // Android IME: synthesize egui events winit drops (see below).
                 let extra_events = collect_extra_egui_events();
 
-                let requests = app.draw(&window, &mut rs.ui, &mut rs.renderer, extra_events, is_fullscreen, |action| {
+                // The menu-bar auto-hide flag is a desktop concern: Android is
+                // always fullscreen and uses the mobile menu, not the top bar
+                // (`is_fullscreen` only exists off-Android).
+                #[cfg(not(target_os = "android"))]
+                let fullscreen = is_fullscreen;
+                #[cfg(target_os = "android")]
+                let fullscreen = false;
+                let requests = app.draw(&window, &mut rs.ui, &mut rs.renderer, extra_events, fullscreen, |action| {
                     resolve_gui_action(action)
                 });
 
