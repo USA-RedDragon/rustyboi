@@ -879,7 +879,7 @@ fn run_gui_loop(
                 // Android IME: synthesize egui events winit drops (see below).
                 let extra_events = collect_extra_egui_events();
 
-                let requests = app.draw(&window, &mut rs.ui, &mut rs.renderer, extra_events, |action| {
+                let requests = app.draw(&window, &mut rs.ui, &mut rs.renderer, extra_events, is_fullscreen, |action| {
                     resolve_gui_action(action)
                 });
 
