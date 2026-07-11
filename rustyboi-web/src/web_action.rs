@@ -179,6 +179,8 @@ pub struct WebUiState {
     pub sgb_border: bool,
     pub fast_forward: bool,
     pub touch_controls: bool,
+    #[serde(default)]
+    pub printer_attached: bool,
     pub slots: Vec<u32>,
     pub cheats: Vec<String>,
     #[serde(default)]
@@ -215,6 +217,7 @@ impl WebUiState {
             sgb_border: s.sgb_border,
             fast_forward: s.fast_forward,
             touch_controls: s.touch_controls,
+            printer_attached: s.printer_attached,
             slots: s.slots.clone(),
             cheats: s.cheats.clone(),
             fetched_cheats: s.fetched_cheats.clone(),
@@ -245,6 +248,7 @@ impl WebUiState {
             sgb_border: self.sgb_border,
             fast_forward: self.fast_forward,
             touch_controls: self.touch_controls,
+            printer_attached: self.printer_attached,
             slots: self.slots,
             cheats: self.cheats,
             fetched_cheats: self.fetched_cheats,

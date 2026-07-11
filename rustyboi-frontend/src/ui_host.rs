@@ -31,8 +31,6 @@ pub struct UiRunInputs<'a> {
     pub paused: bool,
     /// The debug read-model for the debug panels, if any are open.
     pub debug: Option<&'a DebugSnapshot>,
-    /// Whether a Game Boy Printer is attached (`None` = unknown/no cart).
-    pub printer_attached: Option<bool>,
     /// The session state the menus render their current selections from.
     pub session: &'a SessionUiState,
     /// Extra egui events to inject before the UI runs (Android IME synthesis).
@@ -176,7 +174,6 @@ impl UiHost {
         let UiRunInputs {
             paused,
             debug,
-            printer_attached,
             session,
             extra_events,
             held_pad,
@@ -218,7 +215,7 @@ impl UiHost {
         let mut ui_result = None;
         let full_output = self.egui_ctx.run(raw_input, |egui_ctx| {
             ui_result =
-                Some(self.gui.ui(egui_ctx, paused, debug, printer_attached, session, held_pad));
+                Some(self.gui.ui(egui_ctx, paused, debug, session, held_pad));
         });
 
         self.egui_state
