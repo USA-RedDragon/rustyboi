@@ -1996,8 +1996,8 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
         if bios_has_video || bios_has_poster {
             let hero = if bios_has_video {
                 format!(
-                    "<video class=\"hero\" muted loop playsinline preload=\"none\" \
-                     data-poster=\"{bios_poster}\" data-src=\"./videos/{}\"></video>",
+                    "<img class=\"hero\" loading=\"lazy\" src=\"{bios_poster}\" \
+                     data-src=\"./videos/{}\" alt=\"\">",
                     html_escape(&bios_video_file),
                 )
             } else {
@@ -2047,18 +2047,16 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
                     format!(
                         "<div class=\"sgb-frame\">\
                          <img class=\"sgb-border\" loading=\"lazy\" src=\"{border_src}\" alt=\"\">\
-                         <video class=\"hero sgb-screen\" muted loop playsinline preload=\"none\" \
-                         data-poster=\"{poster}\" data-src=\"./videos/{}\"></video></div>",
+                         <img class=\"hero sgb-screen\" loading=\"lazy\" src=\"{poster}\" \
+                         data-src=\"./videos/{}\" alt=\"\"></div>",
                         html_escape(&video_file),
                     )
                 } else if sgb_border {
                     format!("<img class=\"hero\" loading=\"lazy\" src=\"{border_src}\" alt=\"\">")
                 } else if has_video {
-                    // Lazy: the observer assigns poster/src from data-* near the
-                    // viewport, so the page loads O(viewport) not O(page).
                     format!(
-                        "<video class=\"hero\" muted loop playsinline preload=\"none\" \
-                         data-poster=\"{poster}\" data-src=\"./videos/{}\"></video>",
+                        "<img class=\"hero\" loading=\"lazy\" src=\"{poster}\" \
+                         data-src=\"./videos/{}\" alt=\"\">",
                         html_escape(&video_file),
                     )
                 } else {
@@ -2089,9 +2087,6 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
         s.push_str("</div>");
     }
 
-    // Dependency-free behavior (lazy media + filter/sort/collapse/deep-link).
-    // The IntersectionObserver still drives LOADING so only near-viewport media
-    // is fetched; hidden/collapsed cards are display:none, so it releases them.
     s.push_str("<script>\n");
     s.push_str(include_str!("gallery.js"));
     s.push_str("\n</script>");
