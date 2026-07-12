@@ -51,20 +51,13 @@ jobs:
           path: target
           key: sweep-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: sweep-
-      - name: Download ROM library
+      - name: Restore PGO profile
         if: steps.gate.outputs.have == '1'
-        shell: bash
-        run: |
-          curl -fsSL "$ROMS_URL" -o /tmp/roms.zip
-          unzip -P "$ROMS_PASSWORD" -q /tmp/roms.zip -d "$RUNNER_TEMP/romlib"
-          LIB="$(dirname "$(find "$RUNNER_TEMP/romlib" -maxdepth 3 -type d -name GB | head -1)")"
-          [ -d "$LIB/GB" ] && [ -d "$LIB/GBC" ] || { echo "GB/ + GBC/ not found in zip" >&2; exit 1; }
-          echo "LIB=$LIB" >> "$GITHUB_ENV"
-          echo "$(ls "$LIB/GB" | wc -l) GB + $(ls "$LIB/GBC" | wc -l) GBC ROMs"
-      - name: Generate PGO profile
-        if: steps.gate.outputs.have == '1'
-        shell: bash
-        run: make pgo-gen CONTAINER=1 ROMS="$LIB/GB $LIB/GBC"
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/pgo
+          key: pgo-${{ hashFiles('**/Cargo.lock', 'tools/rust-cross.sh') }}
+          restore-keys: pgo-
       - name: Build sweep
         if: steps.gate.outputs.have == '1'
         shell: bash
