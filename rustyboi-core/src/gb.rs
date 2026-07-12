@@ -1060,6 +1060,16 @@ impl GB {
         self.ppu.dmg_shade_frame()
     }
 
+    /// The *presented* DMG shade indices (0..=3): the mono correctness domain the
+    /// test suite grades against — palette/correction-independent like
+    /// [`dmg_shade_frame`](GB::dmg_shade_frame) but with the panel blank (LCD off
+    /// / first frame after enable) and SGB mask applied, matching what the
+    /// presented [`Frame`] shows. Use this, not the raw back buffer, to grade a
+    /// monochrome frame.
+    pub fn presented_shade_frame(&self) -> Box<[u8; ppu::FRAMEBUFFER_SIZE]> {
+        self.ppu.presented_dmg_shades(&self.mmio)
+    }
+
     /// Whether the current frame is colour (CGB/AGB, or a colorized SGB) — i.e.
     /// the presented [`Frame`] carries real colour rather than palette-coloured
     /// DMG shades. Gates hash colour frames directly and mono frames via

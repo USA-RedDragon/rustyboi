@@ -246,14 +246,16 @@ pub fn normalize_color(rgb: &[u8]) -> Vec<u32> {
 }
 
 /// The canonical normalized frame for grading: a colour model by its RGB, a
-/// monochrome model by its shade indices (via [`GB::dmg_shade_frame`]) — NOT the
-/// presented, palette-coloured RGB. So the test suite compares emulated output,
-/// never the presentation palette or colour correction.
+/// monochrome model by its *presented* shade indices (via
+/// [`GB::presented_shade_frame`], which applies the panel blank + SGB mask) —
+/// NOT the presented, palette-coloured RGB. So the test suite compares emulated
+/// output (panel behaviour included), never the presentation palette or colour
+/// correction.
 pub fn normalize_frame(gb: &rustyboi_core_lib::gb::GB, frame: &Frame) -> Vec<u32> {
     if gb.frame_renders_color() {
         normalize_color(frame.rgb())
     } else {
-        normalize_mono(gb.dmg_shade_frame())
+        normalize_mono(&gb.presented_shade_frame()[..])
     }
 }
 
