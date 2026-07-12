@@ -934,6 +934,17 @@ impl GB {
         self.mmio.has_bios()
     }
 
+    /// Engage the per-sample channel tap ([ch1..4], nr50, nr51, enabled) —
+    /// recording/measurement companion to `enable_audio`.
+    pub fn set_channel_tap(&mut self, on: bool) {
+        self.mmio.set_channel_tap(on);
+    }
+
+    /// Take tapped channel samples accumulated since the last drain.
+    pub fn drain_channel_tap(&mut self) -> Vec<audio::ChannelSample> {
+        self.mmio.drain_channel_tap()
+    }
+
     // Audio management methods
     pub fn enable_audio(&mut self, mut output: Box<dyn audio::AudioOutput + Send>) -> Result<(), Box<dyn std::error::Error>> {
         if self.audio_output.is_some() {

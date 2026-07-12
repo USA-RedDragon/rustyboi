@@ -120,7 +120,17 @@ pub struct Audio {
     // CGB-D/E APU revision gate; false = the default CGB-C model.
     #[serde(default)]
     cgb_de: bool,
+    // Optional per-sample tap of the pre-mix channel outputs + mix registers,
+    // filled by `generate_samples` when engaged. Recording/measurement only;
+    // never serialized
+    #[serde(skip)]
+    channel_tap: Option<Vec<ChannelSample>>,
 }
+
+/// One tapped sample: pre-mix channel outputs [ch1..ch4] + the mix registers
+/// (nr50, nr51) + the master enable — everything `get_mixed_output` consumes,
+/// so the stereo mix is exactly reconstructible from the tap alone.
+pub type ChannelSample = ([f32; 4], u8, u8, bool);
 
 fn default_ctl_lf_div() -> u32 {
     1
@@ -159,7 +169,18 @@ impl Audio {
             div_divider: 0,
             skip_div_event: 0,
             cgb_de: false,
+            channel_tap: None,
         }
+    }
+
+    /// Engage/disengage the per-sample channel tap (recording/measurement).
+    pub fn set_channel_tap(&mut self, on: bool) {
+        self.channel_tap = on.then(Vec::new);
+    }
+
+    /// Take the tapped samples accumulated since the last drain.
+    pub fn drain_channel_tap(&mut self) -> Vec<ChannelSample> {
+        self.channel_tap.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// DIV-APU event (a DIV-APU falling edge, the master clock
@@ -952,6 +973,19 @@ impl Audio {
 
         while self.fractional_cycles >= CYCLES_PER_SAMPLE {
             samples.push(self.get_mixed_output());
+            if let Some(tap) = &mut self.channel_tap {
+                tap.push((
+                    [
+                        self.channel1.get_output(),
+                        self.channel2.get_output(),
+                        self.channel3.get_output(),
+                        self.channel4.get_output(),
+                    ],
+                    self.nr50,
+                    self.nr51,
+                    self.audio_enabled,
+                ));
+            }
             self.fractional_cycles -= CYCLES_PER_SAMPLE;
         }
 

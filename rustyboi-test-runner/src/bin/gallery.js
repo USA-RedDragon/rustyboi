@@ -28,18 +28,180 @@
 
   // ---- lazy media -----------------------------------------------------------
   // Cards ship a cheap <img> poster (native loading="lazy"); only cards near the
-  // viewport are UPGRADED to a live <video>, and never more than CAP at once.
-  // Emitting a <video> per card is what froze large galleries: constructing tens
-  // of thousands of media elements pins the main thread regardless of network or
-  // paint (content-visibility can't help — the elements still get built).
-  var CAP = 40;   // hard ceiling on simultaneous <video> elements
-  var live = [];  // currently-upgraded <video.hero> nodes
+  // viewport are UPGRADED to a live hero — a <canvas> playing the native .rbr
+  // recording (decoded by the wasm module) or a legacy <video> for mp4 — and
+  // never more than CAP at once. Materializing a media element per card is what
+  // froze large galleries; lazy upgrade + cap keeps live media O(viewport).
+  var CAP = 40;   // hard ceiling on simultaneous live heroes
+  var live = [];  // currently-upgraded hero nodes (<canvas> or <video>)
 
   function heroOf(card) { return card.querySelector('.hero'); }
 
   function upgrade(card) {
     var img = heroOf(card);
-    if (!img || img.tagName !== 'IMG' || !img.dataset.src) { return; } // no clip / already video
+    if (!img || img.tagName !== 'IMG') { return; }          // already live
+    if (img.dataset.rbr && window.RbrDecoder) { startCanvas(img); }
+    else if (img.dataset.src) { startVideo(img); }
+  }
+  function downgrade(card) {
+    var el = heroOf(card);
+    if (el && el.tagName !== 'IMG') { demote(el); }
+  }
+  function demote(el) {
+    if (el.tagName === 'CANVAS') { stopCanvas(el); }
+    else if (el.tagName === 'VIDEO') { stopVideo(el); }
+  }
+
+  // -- audio: one shared AudioContext, at most ONE audible card ----------------
+  // The context runs natively at 44100 (the recording rate), so buffers are
+  // never resampled — per-buffer resampling of tiny chunks is audible crackle.
+  // The audible card keeps a ~150ms window of buffers scheduled AHEAD of the
+  // clock (refilled each tick), so rAF jitter can't starve the stream; the
+  // audio decode cursor runs independently of the video frame index (both loop
+  // at the same period, staying phase-locked within the cushion).
+  var actx = null, again = null, audio = null; // audio = {canvas, dec, frame, nextTime}
+  var AHEAD = 0.15;   // keep this many seconds scheduled
+  var CUSHION = 0.05; // (re)start this far ahead of the clock
+
+  function audioCtxUp() {
+    if (!actx) {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      try { actx = new AC({ sampleRate: 44100, latencyHint: 'playback' }); }
+      catch (e) { actx = new AC(); }
+      again = actx.createGain();
+      again.gain.value = 0.35;
+      again.connect(actx.destination);
+    }
+    if (actx.state === 'suspended') { actx.resume(); }
+  }
+  function stopAudio() {
+    if (!audio) { return; }
+    audio.canvas.classList.remove('audible');
+    if (audio.dec && audio.dec.free) { audio.dec.free(); }
+    audio = null;
+  }
+  function startAudio(canvas) {
+    stopAudio();
+    audioCtxUp();
+    var st = { canvas: canvas, dec: null, frame: 0, nextTime: 0 };
+    audio = st;
+    canvas.classList.add('audible');
+    fetch(canvas.dataset.audio).then(function (r) { return r.arrayBuffer(); }).then(function (buf) {
+      if (audio !== st) { return; }             // switched away while fetching
+      try { st.dec = new window.RbrAudioDecoder(new Uint8Array(buf)); } catch (e) { stopAudio(); return; }
+      var vs = canvas.st;
+      st.frame = vs ? vs.frameIdx : 0;          // join at the video's position
+      st.dec.seekFrame(st.frame);
+      st.nextTime = 0;                          // fresh cushion on first fill
+    }).catch(function () {});
+  }
+  // Top the schedule up to AHEAD seconds; called from the audible card's tick.
+  // The audio cursor is SLAVED to the video position: rAF pacing and the audio
+  // hardware clock tick at slightly different real rates (display-rate rounding,
+  // DAC clock skew), so two free-running cursors drift apart without bound.
+  // Whenever the audio cursor leaves its expected band just ahead of the video
+  // frame, it reseeks — audio seeks are cheap (run-skipping); video seeks aren't.
+  function refillAudio(st, total) {
+    if (!st.dec) { return; }
+    var vs = st.canvas.st;
+    if (vs && total > 1) {
+      // Expected: audio decoded a bit past the shown frame (the scheduled
+      // lookahead). Out of band (behind, or > ~2x the window ahead) -> resync.
+      var lead = (st.frame - vs.frameIdx + total) % total;
+      var maxLead = Math.ceil((AHEAD * 2) * 59.7275) + 2;
+      if (lead < 1 || lead > maxLead) {
+        st.frame = (vs.frameIdx + 2) % total;
+        st.dec.seekFrame(st.frame);
+        st.nextTime = 0; // fresh cushion
+      }
+    }
+    var now = actx.currentTime;
+    if (st.nextTime < now + 0.001) { st.nextTime = now + CUSHION; } // (re)prime
+    var guard = 64; // bound work per tick even if AHEAD grows
+    while (st.nextTime - now < AHEAD && guard-- > 0) {
+      var inter;
+      try { inter = st.dec.nextFrame(); } catch (e) { stopAudio(); return; }
+      st.frame++;
+      if (!inter.length || (total > 0 && st.frame >= total)) {
+        st.frame = 0;
+        st.dec.seekFrame(0);                    // loop with the video's period
+        if (!inter.length) { continue; }
+      }
+      var n = inter.length / 2;
+      var buf = actx.createBuffer(2, n, 44100); // ctx is 44100: no resampling
+      var l = buf.getChannelData(0), r = buf.getChannelData(1);
+      for (var i = 0; i < n; i++) { l[i] = inter[2 * i]; r[i] = inter[2 * i + 1]; }
+      var src = actx.createBufferSource();
+      src.buffer = buf;
+      src.connect(again);
+      src.start(st.nextTime);
+      st.nextTime += n / 44100;
+    }
+  }
+
+  // -- native .rbr playback: <canvas> driven by the wasm Decoder --
+  function startCanvas(img) {
+    var canvas = document.createElement('canvas');
+    canvas.className = img.className;
+    canvas.width = 160; canvas.height = 144;
+    canvas.dataset.rbr = img.dataset.rbr;
+    if (img.dataset.audio) { canvas.dataset.audio = img.dataset.audio; }
+    canvas.dataset.poster = img.getAttribute('src') || '';
+    var st = { stopped: false, raf: 0, dec: null, frameIdx: 0 };
+    canvas.st = st;
+    img.replaceWith(canvas);
+    live.push(canvas);
+    enforceCap();
+    fetch(canvas.dataset.rbr).then(function (r) { return r.arrayBuffer(); }).then(function (buf) {
+      if (st.stopped) { return; }
+      var dec;
+      try { dec = new window.RbrDecoder(new Uint8Array(buf)); } catch (e) { return; }
+      st.dec = dec;
+      canvas.width = dec.width; canvas.height = dec.height;
+      var ctx = canvas.getContext('2d');
+      var frame = ctx.createImageData(dec.width, dec.height);
+      var ms = dec.frameMs || 16.7, last = -1e9;
+      function tick(t) {
+        if (st.stopped) { return; }
+        st.raf = requestAnimationFrame(tick);
+        if (t - last < ms) { return; }        // pace to the recording's fps
+        // Accumulate (don't snap to t): snapping loses the sub-tick remainder
+        // every frame, which at display rates that don't divide the recording
+        // fps runs the video measurably slow and drifts it against the audio
+        // clock. Clamp after long gaps (jank, background tab) instead of
+        // bursting to catch up.
+        last += ms;
+        if (t - last > 250) { last = t; }
+        try { frame.data.set(dec.nextFrame()); ctx.putImageData(frame, 0, 0); }
+        catch (e) { st.stopped = true; return; }
+        st.frameIdx = (st.frameIdx + 1) % Math.max(dec.frames, 1);
+        // This card is the audible one: keep its audio scheduled ~150ms ahead
+        // (the audio cursor loops on the same period, so A/V stay in phase).
+        if (audio && audio.canvas === canvas) { refillAudio(audio, dec.frames); }
+      }
+      st.raf = requestAnimationFrame(tick);
+    }).catch(function () {});
+  }
+  function stopCanvas(canvas) {
+    var k = live.indexOf(canvas); if (k >= 0) { live.splice(k, 1); }
+    if (audio && audio.canvas === canvas) { stopAudio(); }
+    var st = canvas.st;
+    if (st) {
+      st.stopped = true;
+      if (st.raf) { cancelAnimationFrame(st.raf); }
+      if (st.dec && st.dec.free) { st.dec.free(); }
+    }
+    var img = document.createElement('img');
+    img.className = canvas.className;
+    img.loading = 'lazy';
+    img.setAttribute('src', canvas.dataset.poster || '');
+    img.dataset.rbr = canvas.dataset.rbr || '';
+    if (canvas.dataset.audio) { img.dataset.audio = canvas.dataset.audio; }
+    canvas.replaceWith(img);
+  }
+
+  // -- legacy mp4 playback: <video> --
+  function startVideo(img) {
     var v = document.createElement('video');
     v.className = img.className;
     v.muted = true; v.loop = true; v.playsInline = true;
@@ -53,8 +215,7 @@
     live.push(v);
     enforceCap();
   }
-  function toImg(v) {
-    if (!v || v.tagName !== 'VIDEO') { return; }
+  function stopVideo(v) {
     var k = live.indexOf(v); if (k >= 0) { live.splice(k, 1); }
     var img = document.createElement('img');
     img.className = v.className.replace(/\s*audible/, '');
@@ -64,18 +225,17 @@
     v.pause(); v.removeAttribute('src'); try { v.load(); } catch (e) { /* ignore */ }
     v.replaceWith(img);
   }
-  function downgrade(card) { toImg(heroOf(card)); }
 
-  // Over CAP: drop the upgraded videos FARTHEST from the viewport so visible
-  // cards stay live. Cheap — at most CAP rects measured.
-  function vdist(v) {
-    var r = v.getBoundingClientRect(), mid = (r.top + r.bottom) / 2;
+  // Over CAP: drop the live heroes FARTHEST from the viewport so visible cards
+  // stay animated. Cheap — at most CAP rects measured.
+  function vdist(el) {
+    var r = el.getBoundingClientRect(), mid = (r.top + r.bottom) / 2;
     return mid < 0 ? -mid : (mid > innerHeight ? mid - innerHeight : 0);
   }
   function enforceCap() {
     if (live.length <= CAP) { return; }
     live.sort(function (a, b) { return vdist(a) - vdist(b); });
-    while (live.length > CAP) { toImg(live[live.length - 1]); }
+    while (live.length > CAP) { demote(live[live.length - 1]); }
   }
 
   // Observe CARDS (stable), not the swappable media node, so upgrade/downgrade
@@ -93,15 +253,35 @@
   function observePanel(p) { if (p) { cardsIn(p).forEach(function (c) { io.observe(c); }); } }
   function unwatchPanel(p) { if (p) { cardsIn(p).forEach(function (c) { io.unobserve(c); downgrade(c); }); } }
 
-  // Delegated click: click a hero to unmute its video (materializing the clip if
-  // it's still a poster); every other video in the tab re-mutes. One listener.
+  // The decoder module loads async; when ready, upgrade the .rbr cards already
+  // in the viewport (the observer won't re-fire for them on its own).
+  window.addEventListener('rbr-ready', function () {
+    var p = activePanel();
+    if (!p) { return; }
+    cardsIn(p).forEach(function (c) {
+      if (c.classList.contains('is-hidden')) { return; }
+      var r = c.getBoundingClientRect();
+      if (r.top < innerHeight + 300 && r.bottom > -300) { upgrade(c); }
+    });
+  });
+
+  // Delegated click: toggle audio on the clicked hero. A playing .rbr canvas
+  // with a recording unmutes via the wasm AudioDecoder (one audible card, the
+  // click satisfying the AudioContext gesture requirement); legacy mp4 videos
+  // keep their built-in track. Static posters ignore clicks.
   document.addEventListener('click', function (ev) {
     var hero = ev.target.closest ? ev.target.closest('.hero') : null;
     if (!hero) { return; }
     var card = hero.closest('.card'); if (!card) { return; }
+    if (hero.tagName === 'CANVAS') {
+      if (!hero.dataset.audio || !window.RbrAudioDecoder) { return; }
+      ev.preventDefault();
+      if (audio && audio.canvas === hero) { stopAudio(); } else { startAudio(hero); }
+      return;
+    }
     if (hero.tagName === 'IMG') {
-      if (!hero.dataset.src) { return; }   // static poster, no clip
-      upgrade(card); hero = heroOf(card);
+      if (!hero.dataset.src) { return; }   // static poster or not-yet-live card
+      startVideo(hero); hero = heroOf(card);
     }
     if (!hero || hero.tagName !== 'VIDEO') { return; }
     ev.preventDefault();
