@@ -1,3 +1,4 @@
+mod cartridge_info;
 mod cpu_registers;
 mod memory_explorer;
 pub(crate) mod pixels;

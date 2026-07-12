@@ -135,6 +135,7 @@ pub struct Gui {
     show_sprite_debug: bool,
     show_palette_explorer: bool,
     show_tile_explorer: bool,
+    show_cartridge_info: bool,
     show_keybind_settings: bool,
     show_breakpoint_panel: bool,
     show_cheats_panel: bool,
@@ -224,6 +225,7 @@ impl Gui {
             show_sprite_debug: false,
             show_palette_explorer: false,
             show_tile_explorer: false,
+            show_cartridge_info: false,
             show_keybind_settings: false,
             show_breakpoint_panel: false,
             show_cheats_panel: false,
@@ -634,6 +636,7 @@ impl Gui {
                     ui.checkbox(&mut self.show_sprite_debug, "Sprite Debug");
                     ui.checkbox(&mut self.show_palette_explorer, "Palette Explorer");
                     ui.checkbox(&mut self.show_tile_explorer, "Tile Explorer");
+                    ui.checkbox(&mut self.show_cartridge_info, "Cartridge Info");
                     ui.separator();
                     ui.checkbox(&mut self.show_breakpoint_panel, "Breakpoint Manager");
                 });
@@ -886,6 +889,10 @@ impl Gui {
             self.render_tile_explorer_panel(ctx, debug);
         }
 
+        if self.show_cartridge_info {
+            self.render_cartridge_info_panel(ctx, debug);
+        }
+
         if self.show_keybind_settings {
             self.render_keybind_settings_panel(ctx, action, session, held_pad);
         } else {
@@ -916,6 +923,7 @@ impl Gui {
                 || self.show_tile_explorer
                 || self.show_sprite_debug,
             stack: self.show_stack_explorer,
+            cartridge: self.show_cartridge_info,
         }
     }
 
@@ -931,6 +939,7 @@ impl Gui {
             || self.show_sprite_debug
             || self.show_palette_explorer
             || self.show_tile_explorer
+            || self.show_cartridge_info
             || self.show_breakpoint_panel
     }
 
@@ -1397,6 +1406,12 @@ impl Gui {
                             row_size,
                             "Tile Explorer",
                             &mut self.show_tile_explorer,
+                        );
+                        mobile_toggle_row(
+                            ui,
+                            row_size,
+                            "Cartridge Info",
+                            &mut self.show_cartridge_info,
                         );
                         mobile_toggle_row(
                             ui,
