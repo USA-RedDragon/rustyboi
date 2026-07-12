@@ -38,32 +38,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Restore PGO profile
-        id: pgocache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore or generate PGO profile
+        uses: ./.github/actions/pgo
         with:
-          path: target/pgo
-          key: pgo-${{ hashFiles('**/Cargo.lock', 'tools/rust-cross.sh') }}
-      - uses: ./.github/actions/free-disk-space
-        if: steps.pgocache.outputs.cache-hit != 'true'
-      - name: Fetch ROM library
-        id: roms
-        if: steps.pgocache.outputs.cache-hit != 'true'
-        shell: bash
-        env:
-          ROMS_URL: ${{ secrets.ROMS_URL }}
-          ROMS_PASSWORD: ${{ secrets.ROMS_PASSWORD }}
-        run: |
-          # ROMS_URL is a zip preserving ./GB ./GBC (same as the library sweep).
-          curl -fsSL "$ROMS_URL" -o /tmp/roms.zip
-          unzip -P "$ROMS_PASSWORD" -q /tmp/roms.zip -d "$RUNNER_TEMP/romlib"
-          LIB="$(dirname "$(find "$RUNNER_TEMP/romlib" -maxdepth 3 -type d -name GB | head -1)")"
-          [ -d "$LIB/GB" ] && [ -d "$LIB/GBC" ] || { echo "GB/ + GBC/ not in zip" >&2; exit 1; }
-          echo "lib=$LIB" >> "$GITHUB_OUTPUT"
-      - name: Generate profile
-        if: steps.pgocache.outputs.cache-hit != 'true'
-        shell: bash
-        run: make pgo-gen CONTAINER=1 ROMS="${{ steps.roms.outputs.lib }}/GB ${{ steps.roms.outputs.lib }}/GBC"
+          roms-url: ${{ secrets.ROMS_URL }}
+          roms-password: ${{ secrets.ROMS_PASSWORD }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pgo
