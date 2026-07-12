@@ -202,6 +202,8 @@ a {
   border: 1px solid #2e2e2e;
   border-radius: 9px;
   scroll-margin-top: 120px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 340px;
 }
 
 .card.is-hidden { display: none; }
