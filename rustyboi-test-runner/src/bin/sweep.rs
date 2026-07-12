@@ -22,7 +22,7 @@
 //!
 //!   sweep run      --roms DIR... [--list FILE] --out DIR [--frames N]
 //!                  [--warmup N] [--jobs N] [--timeout SECS] [--no-screens]
-//!                  [--strip-names] [--only SUBSTR]
+//!                  [--strip-names] [--only SUBSTR] [--shard K/N]
 //!       Sweep the library into DIR/manifest.jsonl + DIR/screens/*.webp.
 //!       No-Intro names are always on: each ROM is labeled by its canonical
 //!       No-Intro title (matched via CRC32 of the extracted ROM against the
@@ -153,7 +153,8 @@ fn main() -> ExitCode {
             eprintln!(
                 "usage:\n  sweep run     --roms DIR... [--list FILE] --out DIR [--frames N] \
                  [--warmup N] [--jobs N] [--timeout SECS] [--no-screens] [--no-videos] \
-                 [--no-bios-meta] [--bios-dir DIR] [--hardware dmg,cgb,sgb,agb] [--only SUBSTR]\n  \
+                 [--no-bios-meta] [--bios-dir DIR] [--hardware dmg,cgb,sgb,agb] [--only SUBSTR] \
+                 [--shard K/N]\n  \
                  sweep compare --base A.jsonl --cand B.jsonl [--min-ratio R] [--ignore-perf] \
                  [--out report.md]\n  \
                  sweep gallery --manifest M.jsonl --screens DIR [--videos DIR] [--out gallery.html]"
@@ -360,6 +361,7 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     let bios_dir = arg(args, "--bios-dir").map(PathBuf::from);
     let strip_names = args.iter().any(|a| a == "--strip-names");
     let only = arg(args, "--only");
+    let shard = arg(args, "--shard");
     if warmup >= frames {
         return Err("run: --warmup must be < --frames".into());
     }
@@ -406,6 +408,11 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     }
     roms.sort();
     roms.dedup_by(|a, b| a.0 == b.0);
+    // Shard AFTER sort+dedup so every shard slices the identical ordered list
+    // into a disjoint subset; the N partial manifests reconstruct the library.
+    if let Some(spec) = &shard {
+        apply_shard(&mut roms, spec)?;
+    }
     if roms.is_empty() {
         return Err("run: no ROMs found".into());
     }
@@ -2129,6 +2136,28 @@ fn parse_num(args: &[String], name: &str, default: usize) -> Result<usize, Strin
     }
 }
 
+/// Parse `--shard K/N` and reduce `roms` to the K-th of N interleaved slices
+/// (`index % n == k-1`, 1-based K). Interleaving (not chunking) keeps shard
+/// runtimes balanced when per-ROM cost varies along the sorted list, so CI can
+/// fan one sweep across N processes and concatenate the partial manifests back
+/// into the full library. Mirrors `apply_shard` in the test-suite runner.
+fn apply_shard(roms: &mut Vec<(String, PathBuf)>, shard: &str) -> Result<(), String> {
+    let (k, n) = shard
+        .split_once('/')
+        .and_then(|(k, n)| Some((k.parse::<usize>().ok()?, n.parse::<usize>().ok()?)))
+        .ok_or_else(|| format!("invalid --shard '{shard}' (expected K/N, e.g. 2/4)"))?;
+    if k == 0 || n == 0 || k > n {
+        return Err(format!("invalid --shard '{shard}' (need 1 <= K <= N)"));
+    }
+    let mut index = 0usize;
+    roms.retain(|_| {
+        let keep = index % n == k - 1;
+        index += 1;
+        keep
+    });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2224,6 +2253,34 @@ mod tests {
         // A different ROM must key differently.
         let other: Vec<u8> = rom.iter().map(|b| b ^ 0xff).collect();
         assert_ne!(bare, rom_sha(&other));
+    }
+
+    #[test]
+    fn shards_partition_roms_exactly() {
+        let all: Vec<(String, PathBuf)> =
+            (0..10).map(|i| (format!("{i:02}"), PathBuf::from(format!("{i}.gb")))).collect();
+
+        // Every ROM lands in exactly one of the 3 interleaved shards.
+        let mut seen = Vec::new();
+        for k in 1..=3 {
+            let mut shard = all.clone();
+            apply_shard(&mut shard, &format!("{k}/3")).unwrap();
+            for (key, _) in &shard {
+                assert!(!seen.contains(key), "{key} duplicated across shards");
+                seen.push(key.clone());
+            }
+        }
+        assert_eq!(seen.len(), 10, "shards must cover the whole list exactly once");
+
+        // 1/1 is the whole library unchanged.
+        let mut whole = all.clone();
+        apply_shard(&mut whole, "1/1").unwrap();
+        assert_eq!(whole, all);
+
+        for bad in ["0/4", "5/4", "x/4", "2", "2/0"] {
+            let mut v = all.clone();
+            assert!(apply_shard(&mut v, bad).is_err(), "{bad} should be rejected");
+        }
     }
 
     #[test]
