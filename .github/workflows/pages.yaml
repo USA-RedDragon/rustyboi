@@ -1,0 +1,59 @@
+name: Pages
+
+on:
+  workflow_run:
+    workflows: [Build, "Library Sweep"]
+    types: [completed]
+    branches: [claude]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      pages: write
+      id-token: write
+      actions: read
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Assemble site from newest artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          newest_run() { # newest non-expired artifact named $1 -> its run id
+            gh api "repos/${{ github.repository }}/actions/artifacts?name=$1&per_page=100" \
+              --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .workflow_run.id // empty'
+          }
+          app=$(newest_run web-www)
+          if [ -z "$app" ]; then
+            echo "no web-www artifact yet; nothing to deploy" >&2
+            exit 1
+          fi
+          gh run download "$app" -n web-www -D site
+          echo "app: run $app ($(du -sh site | cut -f1))"
+          compat=$(newest_run compat-gallery)
+          if [ -n "$compat" ]; then
+            gh run download "$compat" -n compat-gallery -D site/compat
+            echo "compat: run $compat ($(du -sh site/compat | cut -f1))"
+          else
+            echo "no compat-gallery yet; deploying app-only"
+          fi
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
