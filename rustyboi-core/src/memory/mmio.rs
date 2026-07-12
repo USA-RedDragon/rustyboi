@@ -2256,6 +2256,14 @@ impl Mmio {
         self.timer.abs_cc()
     }
 
+    pub fn set_channel_tap(&mut self, on: bool) {
+        self.audio.set_channel_tap(on);
+    }
+
+    pub fn drain_channel_tap(&mut self) -> Vec<audio::ChannelSample> {
+        self.audio.drain_channel_tap()
+    }
+
     pub fn generate_audio_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
         // Catch the lazy APU up to the current cc first so the mixer state the
         // down-sampler reads is the instruction-end state (the same state the

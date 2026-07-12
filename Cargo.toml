@@ -11,6 +11,8 @@ members = [
     "rustyboi-libretro",
     "rustyboi-libretro-sys",
     "rustyboi-web",
+    "rustyboi-replay",
+    "rustyboi-replay-web",
 ]
 default-members = ["rustyboi-core", "rustyboi-debugger", "rustyboi-egui", "rustyboi-platform"]
 
