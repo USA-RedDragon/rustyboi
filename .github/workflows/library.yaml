@@ -85,11 +85,10 @@ jobs:
     needs: build
     if: needs.build.outputs.have == '1'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     env:
       ROMS_URL: ${{ secrets.ROMS_URL }}
       ROMS_PASSWORD: ${{ secrets.ROMS_PASSWORD }}
