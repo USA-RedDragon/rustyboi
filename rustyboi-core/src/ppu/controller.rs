@@ -9371,6 +9371,28 @@ impl Ppu {
         &self.fb_b
     }
 
+    /// The *presented* DMG shade-index frame: the mono output `get_frame` would
+    /// serve, as palette/correction-independent shade indices, with the panel
+    /// blank (LCD off / first frame after enable) and SGB mask applied — unlike
+    /// [`dmg_shade_frame`](Self::dmg_shade_frame), which is the RAW rendered back
+    /// buffer (what the SGB *_TRN readout re-digitizes and the STOP checks read).
+    /// This is the grading-correct mono domain: it mirrors the non-colour
+    /// branches of [`get_frame`](Self::get_frame). Colour models (incl. colorized
+    /// SGB) are graded by RGB instead and never take this path.
+    pub fn presented_dmg_shades(&self, mmio: &mmio::Mmio) -> Box<[u8; FRAMEBUFFER_SIZE]> {
+        if let Some(sgb) = mmio.sgb() {
+            return match self.sgb_frame(sgb) {
+                RenderedFrame::Monochrome(m) => m,
+                RenderedFrame::Color(_) => self.fb_b.clone(),
+            };
+        }
+        if self.disabled || self.frames_since_enable < 2 {
+            boxed_filled(0)
+        } else {
+            self.fb_b.clone()
+        }
+    }
+
     /// Plain-STOP (low-power) panel effect, Pan Docs "Reducing Power
     /// Consumption": entering STOP with the LCD enabled blanks a DMG panel to
     /// white (the real panel also burns a single horizontal black line —
