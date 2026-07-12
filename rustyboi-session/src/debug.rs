@@ -38,22 +38,26 @@ pub struct DebugDetail {
     pub palettes: bool,
     /// A stack window around SP (Stack Explorer).
     pub stack: bool,
+    /// Cartridge header facts + CRC/checksums (Cartridge Info). Gated because
+    /// the CRC/global-checksum scan the whole ROM.
+    pub cartridge: bool,
 }
 
 impl DebugDetail {
     /// Nothing requested — the common case (no debug panel open).
     pub fn is_empty(&self) -> bool {
-        !(self.memory || self.vram || self.oam || self.palettes || self.stack)
+        !(self.memory || self.vram || self.oam || self.palettes || self.stack || self.cartridge)
     }
 
-    /// Pack the five section flags into a byte bitmask for the compact
-    /// main-thread→worker web message (bit 0 memory … bit 4 stack).
+    /// Pack the section flags into a byte bitmask for the compact
+    /// main-thread→worker web message (bit 0 memory … bit 5 cartridge).
     pub fn to_bits(self) -> u8 {
         (self.memory as u8)
             | (self.vram as u8) << 1
             | (self.oam as u8) << 2
             | (self.palettes as u8) << 3
             | (self.stack as u8) << 4
+            | (self.cartridge as u8) << 5
     }
 
     /// Inverse of [`DebugDetail::to_bits`].
@@ -64,6 +68,7 @@ impl DebugDetail {
             oam: bits & 0x04 != 0,
             palettes: bits & 0x08 != 0,
             stack: bits & 0x10 != 0,
+            cartridge: bits & 0x20 != 0,
         }
     }
 
@@ -75,6 +80,7 @@ impl DebugDetail {
             oam: self.oam || other.oam,
             palettes: self.palettes || other.palettes,
             stack: self.stack || other.stack,
+            cartridge: self.cartridge || other.cartridge,
         }
     }
 }
@@ -180,6 +186,35 @@ pub struct StackWindow {
     pub bytes: Vec<u8>,
 }
 
+/// Decoded cartridge header + integrity facts for the Cartridge Info panel.
+/// Static for the life of a ROM apart from the live bank fields. `DebugDetail::cartridge`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CartInfo {
+    pub title: String,
+    pub mapper: String,
+    /// Raw cartridge-type byte ($0147).
+    pub type_byte: u8,
+    pub rom_bytes: usize,
+    pub rom_banks: usize,
+    pub ram_bytes: usize,
+    /// "None" | "Compatible" | "Only".
+    pub cgb: String,
+    pub sgb: bool,
+    pub battery: bool,
+    pub rtc: bool,
+    pub rumble: bool,
+    pub camera: bool,
+    pub unlicensed: bool,
+    /// "Japanese" | "Overseas", or None if the header is unreadable.
+    pub destination: Option<String>,
+    pub licensee: Option<String>,
+    pub crc32: Option<u32>,
+    pub header_checksum_ok: bool,
+    pub global_checksum: u16,
+    /// Live: currently mapped ROM bank in the $4000-$7FFF window.
+    pub cur_rom_bank: usize,
+}
+
 /// The complete debug read-model. The baseline fields are always present and
 /// small; the `Option` sections are populated per [`DebugDetail`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -205,6 +240,8 @@ pub struct DebugSnapshot {
     pub palettes: Option<PaletteData>,
     /// A stack window around SP. `DebugDetail::stack`.
     pub stack: Option<StackWindow>,
+    /// Cartridge header facts. `DebugDetail::cartridge`.
+    pub cartridge: Option<CartInfo>,
 }
 
 /// Start of VRAM in the CPU address space.
@@ -335,6 +372,11 @@ impl Session {
             StackWindow { base, bytes }
         });
 
+        let cartridge = detail
+            .cartridge
+            .then(|| gb.cartridge().map(cart_info))
+            .flatten();
+
         DebugSnapshot {
             cgb,
             cpu,
@@ -347,7 +389,43 @@ impl Session {
             oam,
             palettes,
             stack,
+            cartridge,
         }
+    }
+}
+
+/// Decode a [`CartInfo`] from a live cartridge (Cartridge Info panel).
+fn cart_info(cart: &rustyboi_core_lib::cartridge::Cartridge) -> CartInfo {
+    use rustyboi_core_lib::cartridge::{CgbSupport, Destination};
+    let (_, hi_base) = cart.rom_bases();
+    CartInfo {
+        title: cart.title(),
+        mapper: cart.mapper_name().to_string(),
+        type_byte: cart.cartridge_type_byte(),
+        rom_bytes: cart.rom_size_bytes(),
+        rom_banks: cart.rom_size_bytes() / 0x4000,
+        ram_bytes: cart.ram_size_bytes(),
+        cgb: match cart.get_cgb_support() {
+            CgbSupport::None => "None",
+            CgbSupport::Compatible => "Compatible",
+            CgbSupport::Only => "Only",
+        }
+        .to_string(),
+        sgb: cart.supports_sgb(),
+        battery: cart.has_battery(),
+        rtc: cart.has_rtc(),
+        rumble: cart.has_rumble(),
+        camera: cart.has_camera(),
+        unlicensed: cart.is_unlicensed(),
+        destination: cart.destination().map(|d| match d {
+            Destination::Japanese => "Japanese".to_string(),
+            Destination::Overseas => "Overseas".to_string(),
+        }),
+        licensee: cart.licensee().map(str::to_string),
+        crc32: cart.rom_crc32(),
+        header_checksum_ok: cart.header_checksum_valid(),
+        global_checksum: cart.global_checksum(),
+        cur_rom_bank: hi_base / 0x4000,
     }
 }
 
@@ -495,6 +573,7 @@ mod tests {
             oam: true,
             palettes: true,
             stack: true,
+            cartridge: true,
         };
         let snap = session.debug_snapshot(detail);
         assert_eq!(snap.memory.as_ref().map(Vec::len), Some(0x10000));
@@ -514,6 +593,7 @@ mod tests {
             oam: true,
             palettes: true,
             stack: true,
+            cartridge: true,
         };
         let snap = session.debug_snapshot(detail);
         let bytes = snap.to_bytes();

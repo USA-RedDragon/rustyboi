@@ -1623,6 +1623,43 @@ mod offload_tests {
         c
     }
 
+    /// End-to-end: a loaded cartridge surfaces its header facts through the
+    /// Cartridge Info debug section.
+    #[test]
+    fn cartridge_info_snapshot_decodes_header() {
+        use crate::debug::DebugDetail;
+        // 256 KiB MBC5+RAM+BATTERY, CGB-compatible, Nintendo, Japanese, "TESTGAME".
+        let mut rom = vec![0u8; 0x40000];
+        rom[0x0134..0x013C].copy_from_slice(b"TESTGAME");
+        rom[0x0143] = 0x80; // CGB compatible
+        rom[0x0147] = 0x1B; // MBC5+RAM+BATTERY
+        rom[0x0148] = 0x03; // 256 KiB
+        rom[0x0149] = 0x03; // 32 KiB RAM
+        rom[0x014A] = 0x00; // Japanese
+        rom[0x014B] = 0x01; // old licensee: Nintendo
+        let sum = rom[0x0134..0x014D].iter().fold(0u8, |a, &b| a.wrapping_sub(b).wrapping_sub(1));
+        rom[0x014D] = sum; // valid header checksum
+
+        let mut s = Session::new(cfg(), test_ports(), [0u8; 32]);
+        s.finish_load_rom(&rom).expect("load rom");
+
+        let snap = s.debug_snapshot(DebugDetail { cartridge: true, ..Default::default() });
+        let c = snap.cartridge.expect("cartridge section present");
+        assert_eq!(c.title, "TESTGAME");
+        assert_eq!(c.mapper, "MBC5+RAM+Battery");
+        assert_eq!(c.type_byte, 0x1B);
+        assert_eq!(c.rom_bytes, 0x40000);
+        assert_eq!(c.rom_banks, 16);
+        assert_eq!(c.ram_bytes, 0x8000);
+        assert_eq!(c.cgb, "Compatible");
+        assert!(c.battery);
+        assert!(!c.rtc);
+        assert_eq!(c.destination.as_deref(), Some("Japanese"));
+        assert_eq!(c.licensee.as_deref(), Some("Nintendo"));
+        assert!(c.header_checksum_ok);
+        assert!(c.crc32.is_some());
+    }
+
     // The offloaded capture path must produce byte-identical rewind blobs to the
     // inline path: same WHAT (serialized state) captured at the same frames,
     // only serialized elsewhere. Two ROM-less machines run identically, so we
