@@ -64,7 +64,8 @@
 
 use rayon::prelude::*;
 use rustyboi_core_lib::audio::AudioOutput;
-use rustyboi_core_lib::cartridge::Cartridge;
+use rustyboi_core_lib::cartridge::{Cartridge, CgbSupport, Destination};
+use rustyboi_core_lib::checksum::crc32;
 use rustyboi_core_lib::gb::{Hardware, GB};
 use rustyboi_core_lib::movie::{frame_hash, frame_is_non_blank, sha256};
 use rustyboi_core_lib::ppu;
@@ -119,6 +120,25 @@ struct Row {
     ns_per_frame: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    // Cartridge-header enrichment for the gallery cards. All optional and
+    // skip-if-none so the committed baseline (`--strip-names`) stays byte-
+    // identical and old manifests deserialize unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mapper: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rom_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ram_bytes: Option<usize>,
+    /// Feature bitfield: 0 battery, 1 rtc, 2 rumble, 3 camera, 4 cgb-compat,
+    /// 5 cgb-only, 6 sgb, 7 unlicensed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cart_flags: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    destination: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    licensee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    header_ok: Option<bool>,
 }
 
 fn main() -> ExitCode {
@@ -280,18 +300,6 @@ fn nointro_map() -> std::collections::HashMap<u32, String> {
 fn rom_sha(bytes: &[u8]) -> String {
     let rom = Cartridge::extract_rom_bytes(bytes).unwrap_or_else(|_| bytes.to_vec());
     sha256(&rom)[..8].iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// CRC32 (reflected, poly 0xEDB88320) — the checksum No-Intro DATs key on.
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xEDB8_8320 & (0u32.wrapping_sub(crc & 1)));
-        }
-    }
-    !crc
 }
 
 /// Parse a No-Intro DAT into the crc->name map. Handles both formats DATs ship
@@ -519,6 +527,13 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
                         fps: None,
                         ns_per_frame: None,
                         error: None,
+                        mapper: None,
+                        rom_bytes: None,
+                        ram_bytes: None,
+                        cart_flags: None,
+                        destination: None,
+                        licensee: None,
+                        header_ok: None,
                     });
                 }
                 Ok(None) => {} // no dump for this model; capture_bios logged it
@@ -557,6 +572,13 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
             r.crc = None;
             r.fps = None;
             r.ns_per_frame = None;
+            r.mapper = None;
+            r.rom_bytes = None;
+            r.ram_bytes = None;
+            r.cart_flags = None;
+            r.destination = None;
+            r.licensee = None;
+            r.header_ok = None;
             serde_json::to_string(&r)
         } else {
             serde_json::to_string(row)
@@ -629,6 +651,13 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
         fps: None,
         ns_per_frame: None,
         error: None,
+        mapper: None,
+        rom_bytes: None,
+        ram_bytes: None,
+        cart_flags: None,
+        destination: None,
+        licensee: None,
+        header_ok: None,
     };
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
@@ -654,6 +683,34 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
         if let Some(nointro) = cfg.names.get(&c) {
             row.name = Some(nointro.clone());
         }
+    }
+
+    // Cartridge-header enrichment for the gallery. Parsing the header a second
+    // time here (before `emulate`) is cheap and is the only place the cart is
+    // available; a ROM that fails to parse keeps `None`s and still gets a row.
+    if let Ok(cart) = Cartridge::from_bytes(&bytes) {
+        row.mapper = Some(cart.mapper_name().to_string());
+        row.rom_bytes = Some(cart.rom_size_bytes());
+        row.ram_bytes = Some(cart.ram_size_bytes());
+        let mut f = 0u16;
+        if cart.has_battery() { f |= 1 << 0; }
+        if cart.has_rtc() { f |= 1 << 1; }
+        if cart.has_rumble() { f |= 1 << 2; }
+        if cart.has_camera() { f |= 1 << 3; }
+        match cart.get_cgb_support() {
+            CgbSupport::Compatible => f |= 1 << 4,
+            CgbSupport::Only => f |= 1 << 5,
+            CgbSupport::None => {}
+        }
+        if cart.supports_sgb() { f |= 1 << 6; }
+        if cart.is_unlicensed() { f |= 1 << 7; }
+        row.cart_flags = Some(f);
+        row.destination = cart.destination().map(|d| match d {
+            Destination::Japanese => "jp".to_string(),
+            Destination::Overseas => "intl".to_string(),
+        });
+        row.licensee = cart.licensee().map(str::to_string);
+        row.header_ok = Some(cart.header_checksum_valid());
     }
 
     // Wild-library ROMs are a fuzz surface; a panic in one must not kill the
@@ -1558,6 +1615,177 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
 }
 
 // ---------------------------------------------------------------------------
+// region classifier
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Region {
+    Us,
+    Japan,
+    Europe,
+    Global,
+}
+
+impl Region {
+    /// Filter/data-attribute key. Kept in sync with the gallery chip order.
+    const ALL: [Region; 4] = [Region::Us, Region::Japan, Region::Europe, Region::Global];
+    fn key(self) -> &'static str {
+        match self {
+            Region::Us => "us",
+            Region::Japan => "jp",
+            Region::Europe => "eu",
+            Region::Global => "global",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Region::Us => "US",
+            Region::Japan => "Japan",
+            Region::Europe => "Europe",
+            Region::Global => "Global",
+        }
+    }
+}
+
+/// One lowercased No-Intro region token -> bucket. Region words only; language
+/// codes (en, fr, ja, …) are deliberately absent so they never register.
+fn region_token(tok: &str) -> Option<Region> {
+    Some(match tok {
+        "usa" | "u" => Region::Us,
+        "japan" | "j" => Region::Japan,
+        "europe" | "e" | "uk" | "united kingdom" | "great britain" | "france" | "germany"
+        | "spain" | "italy" | "netherlands" | "sweden" | "norway" | "denmark" | "finland"
+        | "portugal" | "greece" | "ireland" | "poland" | "russia" | "belgium" | "austria"
+        | "switzerland" | "australia" | "new zealand" | "scandinavia" => Region::Europe,
+        "world" | "w" | "taiwan" | "hong kong" | "china" | "korea" | "asia" | "brazil"
+        | "canada" | "mexico" => Region::Global,
+        _ => return None,
+    })
+}
+
+/// GoodTools region combo like `(UE)` / `(JUE)`: 2-5 of the region letters.
+fn is_goodtools_combo(tok: &str) -> bool {
+    (2..=5).contains(&tok.len()) && tok.bytes().all(|b| b"UEJWFGSIABKCDN".contains(&b))
+}
+
+/// Bucket a No-Intro filename/title by its specific region paren token, exactly
+/// like `tools/sort-by-region.py`: the region is a *specific* paren token, not
+/// "the first paren" — `(Rev 1)`, `(SGB Enhanced)` and language lists like
+/// `(En,Fr,De)` are skipped. A multi-region list or a no-token name -> Global.
+fn region_of(name: &str) -> Region {
+    let mut rest = name;
+    while let Some(open) = rest.find('(') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find(')') else { break };
+        let tok = after[..close].trim();
+        rest = &after[close + 1..];
+        if tok.contains(',') {
+            let regions: Vec<Region> = tok
+                .split(',')
+                .filter_map(|p| region_token(p.trim().to_ascii_lowercase().as_str()))
+                .collect();
+            if regions.len() >= 2 {
+                return Region::Global; // multi-region list
+            }
+            if let [only] = regions[..] {
+                return only;
+            }
+            // else a language list etc. — not a region; keep scanning.
+        } else {
+            if let Some(r) = region_token(tok.to_ascii_lowercase().as_str()) {
+                return r;
+            }
+            if is_goodtools_combo(tok) {
+                return Region::Global;
+            }
+        }
+    }
+    Region::Global
+}
+
+/// Human ROM/RAM size. GB sizes are powers of two so the shifts are exact; the
+/// fractional arms only guard odd bank counts.
+fn human_bytes(n: usize) -> String {
+    const K: usize = 1 << 10;
+    const M: usize = 1 << 20;
+    match n {
+        0 => "—".to_string(),
+        n if n.is_multiple_of(M) => format!("{} MiB", n / M),
+        n if n >= M => format!("{:.1} MiB", n as f64 / M as f64),
+        n if n.is_multiple_of(K) => format!("{} KiB", n / K),
+        n if n >= K => format!("{:.1} KiB", n as f64 / K as f64),
+        n => format!("{n} B"),
+    }
+}
+
+/// Feature-glyph chips decoded from a `Row.cart_flags` bitfield.
+fn flag_glyphs(flags: u16) -> String {
+    let mut g = String::new();
+    if flags & (1 << 0) != 0 { g.push_str("<span class=\"g bat\">🔋 BAT</span>"); }
+    if flags & (1 << 1) != 0 { g.push_str("<span class=\"g rtc\">⏱ RTC</span>"); }
+    if flags & (1 << 2) != 0 { g.push_str("<span class=\"g rum\">〜 RMBL</span>"); }
+    if flags & (1 << 3) != 0 { g.push_str("<span class=\"g cam\">📷 CAM</span>"); }
+    if flags & (1 << 5) != 0 {
+        g.push_str("<span class=\"g cgb\">CGB only</span>");
+    } else if flags & (1 << 4) != 0 {
+        g.push_str("<span class=\"g cgb\">CGB</span>");
+    }
+    if flags & (1 << 6) != 0 { g.push_str("<span class=\"g sgb\">SGB</span>"); }
+    if flags & (1 << 7) != 0 { g.push_str("<span class=\"g unl\">UNL</span>"); }
+    g
+}
+
+/// The always-visible enrichment strip (mapper · crc · sizes · glyphs · pub).
+/// Empty when the row carries no captured header facts (old manifest) so cards
+/// degrade gracefully.
+fn card_detail(r: &Row) -> String {
+    if r.mapper.is_none() && r.rom_bytes.is_none() && r.cart_flags.is_none() {
+        return String::new();
+    }
+    let mut facts = String::new();
+    if let Some(m) = &r.mapper {
+        facts.push_str(&format!("<span class=\"fact mapper\">{}</span>", html_escape(m)));
+    }
+    if let Some(c) = &r.crc {
+        facts.push_str(&format!(
+            "<span class=\"fact\"><span class=\"k\">crc</span> {}</span>",
+            html_escape(&c.to_uppercase())
+        ));
+    }
+    if let Some(n) = r.rom_bytes {
+        facts.push_str(&format!(
+            "<span class=\"fact\"><span class=\"k\">rom</span> {}</span>",
+            human_bytes(n)
+        ));
+    }
+    if let Some(n) = r.ram_bytes.filter(|&n| n > 0) {
+        facts.push_str(&format!(
+            "<span class=\"fact\"><span class=\"k\">ram</span> {}</span>",
+            human_bytes(n)
+        ));
+    }
+    let glyphs = r.cart_flags.map(flag_glyphs).unwrap_or_default();
+    let glyph_row = if glyphs.is_empty() {
+        String::new()
+    } else {
+        format!("<div class=\"glyphs\">{glyphs}</div>")
+    };
+    let mut pubs: Vec<String> = Vec::new();
+    if let Some(l) = &r.licensee {
+        pubs.push(html_escape(l));
+    }
+    if let Some(d) = &r.destination {
+        pubs.push(if d == "jp" { "Japan".into() } else { "Overseas".into() });
+    }
+    let pub_row = if pubs.is_empty() {
+        String::new()
+    } else {
+        format!("<div class=\"pub\"><b>{}</b></div>", pubs.join(" · "))
+    };
+    format!("<div class=\"detail\"><div class=\"facts\">{facts}</div>{glyph_row}{pub_row}</div>")
+}
+
+// ---------------------------------------------------------------------------
 // gallery
 // ---------------------------------------------------------------------------
 
@@ -1640,27 +1868,7 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
     s.push_str("<!doctype html><html><head><meta charset=\"utf-8\">");
     s.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     s.push_str("<title>rustyboi library sweep</title><style>");
-    s.push_str(
-        "body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:24px}\
-         h1{font-weight:600;font-size:20px}\
-         .tabs{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0;position:sticky;top:0;background:#111;padding:8px 0;z-index:2}\
-         .tab{background:#1c1c1c;color:#ccc;border:1px solid #333;border-radius:6px;padding:6px 14px;font-size:14px;cursor:pointer}\
-         .tab.active{background:#2563eb;color:#fff;border-color:#2563eb}\
-         .tab-panel{display:none}.tab-panel.active{display:block}\
-         .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px}\
-         .card{background:#1c1c1c;border-radius:8px;padding:12px;border:1px solid #333}\
-         .card.meta-card{border-color:#f59e0b;background:#231a0d}\
-         .meta-badge{display:inline-block;font-size:11px;font-weight:600;color:#fbbf24;letter-spacing:.5px}\
-         .hero{width:100%;aspect-ratio:10/9;object-fit:contain;image-rendering:pixelated;border-radius:4px;background:#000;display:block;cursor:pointer}\
-         .hero.audible{outline:3px solid #4ade80;outline-offset:-3px}\
-         .sgb-frame{position:relative;width:100%;aspect-ratio:256/224;border-radius:4px;background:#000;overflow:hidden;display:block}\
-         .sgb-frame .sgb-border{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;image-rendering:pixelated;pointer-events:none;z-index:0}\
-         .hero.sgb-screen{position:absolute;left:18.75%;top:17.857%;width:62.5%;height:64.286%;aspect-ratio:auto;object-fit:fill;border-radius:0;z-index:1}\
-         .name{font-size:14px;margin-top:8px;word-break:break-all}\
-         .meta{font-size:12px;color:#999;display:flex;justify-content:space-between;margin-top:4px}\
-         .ok{color:#4ade80}.fail{color:#f87171}.err{color:#fbbf24}\
-         .empty{color:#888;margin-top:24px}",
-    );
+    s.push_str(include_str!("gallery.css"));
     s.push_str("</style></head><body>");
     s.push_str(&format!(
         "<h1>rustyboi library sweep &mdash; {ok}/{} in gameplay, median {:.0} fps</h1>",
@@ -1678,8 +1886,72 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
         return Ok(true);
     }
 
-    // Tab bar.
-    s.push_str("<div class=\"tabs\">");
+    // Region per row (from the No-Intro name), computed once and reused by both
+    // the dashboard and the per-tab grouping.
+    let regions: Vec<Region> = rows
+        .iter()
+        .map(|r| r.name.as_deref().map(region_of).unwrap_or(Region::Global))
+        .collect();
+
+    // Whole-library dashboard: status split, region split, top mappers. Counted
+    // over game rows that actually have media (a card somewhere).
+    let (mut n_ok, mut n_blank, mut n_err) = (0usize, 0usize, 0usize);
+    let mut reg_counts = [0usize; 4];
+    let mut disp = 0usize;
+    let mut mapper_counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (idx, r) in rows.iter().enumerate() {
+        if is_bios(r) || !poster_tags.contains_key(&r.rom_sha) {
+            continue;
+        }
+        disp += 1;
+        match (&r.error, r.boot_ok && r.changed) {
+            (Some(_), _) => n_err += 1,
+            (None, true) => n_ok += 1,
+            (None, false) => n_blank += 1,
+        }
+        if let Some(i) = Region::ALL.iter().position(|x| *x == regions[idx]) {
+            reg_counts[i] += 1;
+        }
+        if let Some(m) = &r.mapper {
+            *mapper_counts.entry(m.as_str()).or_default() += 1;
+        }
+    }
+    let mut top_mappers: Vec<(&str, usize)> = mapper_counts.into_iter().collect();
+    top_mappers.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let mapper_summary = top_mappers
+        .iter()
+        .take(6)
+        .map(|(m, c)| format!("{} <b>{c}</b>", html_escape(m)))
+        .collect::<Vec<_>>()
+        .join(" &middot; ");
+    s.push_str(&format!(
+        "<div class=\"dash\">\
+         <span class=\"stat\"><b>{disp}</b> games</span>\
+         <span class=\"stat\"><b class=\"ok\">{n_ok}</b> ok &middot; <b class=\"fail\">{n_blank}</b> blank &middot; <b class=\"err\">{n_err}</b> error</span>\
+         <span class=\"stat\">US <b>{}</b> &middot; JP <b>{}</b> &middot; EU <b>{}</b> &middot; GL <b>{}</b></span>{}</div>",
+        reg_counts[0], reg_counts[1], reg_counts[2], reg_counts[3],
+        if mapper_summary.is_empty() {
+            String::new()
+        } else {
+            format!("<span class=\"stat mp\">mappers: {mapper_summary}</span>")
+        },
+    ));
+
+    // Sticky control bar: search / sort / toggles, then tabs, then region chips.
+    s.push_str(
+        "<div class=\"bar\"><div class=\"toolbar\">\
+         <input type=\"search\" id=\"q\" placeholder=\"Search titles\u{2026}\" autocomplete=\"off\">\
+         <select id=\"sort\">\
+         <option value=\"name\">Name A\u{2013}Z</option>\
+         <option value=\"fps\">FPS \u{2193}</option>\
+         <option value=\"size\">Size \u{2193}</option>\
+         <option value=\"status\">Status</option>\
+         <option value=\"mapper\">Mapper</option>\
+         </select>\
+         <label><input type=\"checkbox\" id=\"failonly\"> failures only</label>\
+         <label><input type=\"checkbox\" id=\"dense\"> dense</label>\
+         <span class=\"count\" id=\"count\"></span></div><div class=\"tabs\">",
+    );
     for (i, tag) in tab_list.iter().enumerate() {
         let count = rows
             .iter()
@@ -1691,17 +1963,25 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
             html_escape(&tag.to_ascii_uppercase()),
         ));
     }
-    s.push_str("</div>");
+    s.push_str("</div><div class=\"chips\"><button class=\"chip active\" data-region=\"all\">All</button>");
+    for region in Region::ALL {
+        s.push_str(&format!(
+            "<button class=\"chip\" data-region=\"{}\">{}</button>",
+            region.key(),
+            region.label(),
+        ));
+    }
+    s.push_str("</div></div>");
 
-    // One panel per hardware tab; cards derived entirely from rom_sha + tag.
+    // One panel per hardware tab; within it, cards grouped into foldable region
+    // sections. The BIOS meta card sits in its own always-visible row.
     for (i, tag) in tab_list.iter().enumerate() {
         s.push_str(&format!(
-            "<div class=\"tab-panel{}\" id=\"panel-{tag}\"><div class=\"grid\">",
+            "<div class=\"tab-panel{}\" id=\"panel-{tag}\">",
             if i == 0 { " active" } else { "" }
         ));
-        // Pinned BIOS meta card: the model's boot animation (power-on -> cart
-        // handoff), reserved key `bios_<tag>`. A lazy video hero exactly like a
-        // game card; degrades to the poster still or absent entirely (old dirs).
+        // Pinned BIOS meta card (boot animation, key `bios_<tag>`): a lazy hero
+        // just like a game card, degrading to a still or absent (old dirs).
         let bios_poster = format!("./screens/bios_{tag}.webp");
         let bios_video_file = format!("bios_{tag}.mp4");
         let bios_has_video = videos_dir.join(&bios_video_file).exists();
@@ -1717,111 +1997,97 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
                 format!("<img class=\"hero\" loading=\"lazy\" src=\"{bios_poster}\" alt=\"\">")
             };
             s.push_str(&format!(
-                "<div class=\"card meta-card\">{hero}\
+                "<div class=\"biosrow\"><div class=\"grid\"><div class=\"card meta-card\">{hero}\
                  <div class=\"name\"><span class=\"meta-badge\">\u{25c8} Boot ROM \u{2014} {}</span></div>\
-                 <div class=\"meta\"><span>{} boot animation</span><span class=\"ok\">meta</span></div></div>",
+                 <div class=\"meta\"><span>{} boot animation</span><span class=\"ok\">meta</span></div></div></div></div>",
                 html_escape(&tag.to_ascii_uppercase()),
                 html_escape(&tag.to_ascii_uppercase()),
             ));
         }
-        for r in &rows {
-            let has_poster = poster_tags.get(&r.rom_sha).is_some_and(|t| t.contains(tag));
-            if !has_poster {
+        for region in Region::ALL {
+            let group: Vec<&Row> = rows
+                .iter()
+                .enumerate()
+                .filter(|(idx, r)| {
+                    regions[*idx] == region
+                        && poster_tags.get(&r.rom_sha).is_some_and(|t| t.contains(tag))
+                })
+                .map(|(_, r)| r)
+                .collect();
+            if group.is_empty() {
                 continue;
             }
-            let (status, cls) = match (&r.error, r.boot_ok && r.changed) {
-                (Some(_), _) => ("error", "err"),
-                (None, true) => ("ok", "ok"),
-                (None, false) => ("blank/static", "fail"),
-            };
-            let poster = format!("./screens/{}_{tag}.webp", r.rom_sha);
-            let video_file = format!("{}_{tag}.mp4", r.rom_sha);
-            let has_video = videos_dir.join(&video_file).exists();
-            // SGB cards whose game uploaded a border render inside a 256x224 frame
-            // still, with the 160x144 video composited into the GB-screen window
-            // at (48,40). The border img is lazy (loading="lazy") and pointer-none
-            // so clicks reach the video; every other card is unchanged.
-            let sgb_border = tag == "sgb" && border_shas.contains(&r.rom_sha);
-            let border_src = format!("./screens/{}_sgb_border.webp", r.rom_sha);
-            let hero = if sgb_border && has_video {
-                format!(
-                    "<div class=\"sgb-frame\">\
-                     <img class=\"sgb-border\" loading=\"lazy\" src=\"{border_src}\" alt=\"\">\
-                     <video class=\"hero sgb-screen\" muted loop playsinline preload=\"none\" \
-                     data-poster=\"{poster}\" data-src=\"./videos/{}\"></video></div>",
-                    html_escape(&video_file),
-                )
-            } else if sgb_border {
-                // Border still but no video: the framed still is the hero.
-                format!("<img class=\"hero\" loading=\"lazy\" src=\"{border_src}\" alt=\"\">")
-            } else if has_video {
-                // No eager poster/src: the observer assigns them from data-* when the
-                // card nears the viewport, so the page loads O(viewport) not O(page).
-                format!(
-                    "<video class=\"hero\" muted loop playsinline preload=\"none\" \
-                     data-poster=\"{poster}\" data-src=\"./videos/{}\"></video>",
-                    html_escape(&video_file),
-                )
-            } else {
-                format!("<img class=\"hero\" loading=\"lazy\" src=\"{poster}\" alt=\"\">")
-            };
-            let display_name = r.name.clone().unwrap_or_else(|| format!("sha:{}", r.rom_sha));
-            let fps = r.fps.map_or(String::new(), |f| format!("{f:.0} fps"));
             s.push_str(&format!(
-                "<div class=\"card\">{hero}<div class=\"name\">{}</div>\
-                 <div class=\"meta\"><span>{} {fps}</span><span class=\"{cls}\">{status}</span></div></div>",
-                html_escape(&display_name),
-                html_escape(&tag.to_ascii_uppercase()),
+                "<section class=\"region-group\" data-region=\"{}\">\
+                 <h2 class=\"region-head\"><span class=\"car\">\u{25be}</span>{} <span class=\"rc\">({})</span></h2>\
+                 <div class=\"grid\">",
+                region.key(),
+                region.label(),
+                group.len(),
             ));
+            for r in &group {
+                let (status, cls) = match (&r.error, r.boot_ok && r.changed) {
+                    (Some(_), _) => ("error", "err"),
+                    (None, true) => ("ok", "ok"),
+                    (None, false) => ("blank/static", "fail"),
+                };
+                let poster = format!("./screens/{}_{tag}.webp", r.rom_sha);
+                let video_file = format!("{}_{tag}.mp4", r.rom_sha);
+                let has_video = videos_dir.join(&video_file).exists();
+                let sgb_border = tag == "sgb" && border_shas.contains(&r.rom_sha);
+                let border_src = format!("./screens/{}_sgb_border.webp", r.rom_sha);
+                let hero = if sgb_border && has_video {
+                    format!(
+                        "<div class=\"sgb-frame\">\
+                         <img class=\"sgb-border\" loading=\"lazy\" src=\"{border_src}\" alt=\"\">\
+                         <video class=\"hero sgb-screen\" muted loop playsinline preload=\"none\" \
+                         data-poster=\"{poster}\" data-src=\"./videos/{}\"></video></div>",
+                        html_escape(&video_file),
+                    )
+                } else if sgb_border {
+                    format!("<img class=\"hero\" loading=\"lazy\" src=\"{border_src}\" alt=\"\">")
+                } else if has_video {
+                    // Lazy: the observer assigns poster/src from data-* near the
+                    // viewport, so the page loads O(viewport) not O(page).
+                    format!(
+                        "<video class=\"hero\" muted loop playsinline preload=\"none\" \
+                         data-poster=\"{poster}\" data-src=\"./videos/{}\"></video>",
+                        html_escape(&video_file),
+                    )
+                } else {
+                    format!("<img class=\"hero\" loading=\"lazy\" src=\"{poster}\" alt=\"\">")
+                };
+                let display_name = r.name.clone().unwrap_or_else(|| format!("sha:{}", r.rom_sha));
+                let fps_txt = r.fps.map_or(String::new(), |f| format!("{f:.0} fps"));
+                let fps_int = r.fps.unwrap_or(0.0) as i64;
+                let size_attr = r.rom_bytes.unwrap_or(0);
+                let id = format!("{tag}-{}", r.rom_sha);
+                let detail = card_detail(r);
+                s.push_str(&format!(
+                    "<div class=\"card\" id=\"{id}\" data-name=\"{}\" data-region=\"{}\" \
+                     data-status=\"{cls}\" data-mapper=\"{}\" data-size=\"{size_attr}\" data-fps=\"{fps_int}\">\
+                     {hero}<div class=\"name\">{}</div>\
+                     <div class=\"meta\"><span>{} {fps_txt}</span><span class=\"{cls}\">{status}</span></div>\
+                     {detail}\
+                     <div class=\"linkrow\"><button class=\"lk\" data-id=\"{id}\">\u{1f517} link</button></div></div>",
+                    html_escape(&display_name.to_lowercase()),
+                    region.key(),
+                    html_escape(r.mapper.as_deref().unwrap_or("")),
+                    html_escape(&display_name),
+                    html_escape(&tag.to_ascii_uppercase()),
+                ));
+            }
+            s.push_str("</div></section>");
         }
-        s.push_str("</div></div>");
+        s.push_str("</div>");
     }
 
-    // Dependency-free JS: the IntersectionObserver drives LOADING (not just
-    // play/pause) so only near-viewport media is fetched. Entering + active
-    // assigns poster/src from data-* then plays; leaving pauses, re-mutes, and
-    // releases the download (keeps the poster). Exactly one audible video.
-    s.push_str(
-        "<script>\
-        (function(){\
-        var vids=function(){return Array.prototype.slice.call(document.querySelectorAll('video.hero'));};\
-        function loadAndPlay(v){\
-          if(!v.src){v.poster=v.dataset.poster;v.src=v.dataset.src;v.load();}\
-          v.play().catch(function(){});\
-        }\
-        function release(v){\
-          v.pause();if(!v.muted){v.muted=true;v.classList.remove('audible');}\
-          if(v.src){v.removeAttribute('src');v.load();}\
-        }\
-        var io=new IntersectionObserver(function(es){\
-          es.forEach(function(e){var v=e.target;\
-            var panel=v.closest('.tab-panel');var active=panel&&panel.classList.contains('active');\
-            if(e.isIntersecting&&active){loadAndPlay(v);}\
-            else{release(v);}\
-          });\
-        },{rootMargin:'400px 0px'});\
-        vids().forEach(function(v){io.observe(v);\
-          v.addEventListener('click',function(ev){ev.preventDefault();\
-            if(v.muted){vids().forEach(function(o){if(o!==v){o.muted=true;o.classList.remove('audible');}});\
-              v.muted=false;v.classList.add('audible');loadAndPlay(v);}\
-            else{v.muted=true;v.classList.remove('audible');}\
-          });\
-        });\
-        function activate(tab){\
-          document.querySelectorAll('.tab').forEach(function(b){b.classList.toggle('active',b.dataset.tab===tab);});\
-          document.querySelectorAll('.tab-panel').forEach(function(p){\
-            var on=p.id==='panel-'+tab;p.classList.toggle('active',on);\
-            if(!on){p.querySelectorAll('video.hero').forEach(function(v){release(v);});}\
-          });\
-          var panel=document.getElementById('panel-'+tab);\
-          if(panel){panel.querySelectorAll('video.hero').forEach(function(v){\
-            var r=v.getBoundingClientRect();if(r.top<innerHeight&&r.bottom>0){loadAndPlay(v);}\
-          });}\
-        }\
-        document.querySelectorAll('.tab').forEach(function(b){b.addEventListener('click',function(){activate(b.dataset.tab);});});\
-        })();\
-        </script>",
-    );
+    // Dependency-free behavior (lazy media + filter/sort/collapse/deep-link).
+    // The IntersectionObserver still drives LOADING so only near-viewport media
+    // is fetched; hidden/collapsed cards are display:none, so it releases them.
+    s.push_str("<script>\n");
+    s.push_str(include_str!("gallery.js"));
+    s.push_str("\n</script>");
     s.push_str("</body></html>");
     std::fs::write(&out, &s).map_err(|e| format!("write {out}: {e}"))?;
     let cards: usize = tab_list
@@ -1866,6 +2132,34 @@ fn parse_num(args: &[String], name: &str, default: usize) -> Result<usize, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn region_classifier_matches_python() {
+        let cases: &[(&str, Region)] = &[
+            ("Tetris (USA)", Region::Us),
+            ("Kirby (U)", Region::Us),
+            ("Zelda (Europe)", Region::Europe),
+            ("Game (France)", Region::Europe),
+            ("Mario (Japan)", Region::Japan),
+            ("Foo (J)", Region::Japan),
+            ("Bar (World)", Region::Global),
+            ("Baz (USA, Europe)", Region::Global),
+            ("Qux (Japan, USA)", Region::Global),
+            ("Wobble (Taiwan)", Region::Global),
+            ("Combo (UE)", Region::Global),
+            ("Combo (JUE)", Region::Global),
+            // Language lists and revision/enhancement tokens are not regions.
+            ("Multi (En,Fr,De)", Region::Global),
+            ("Game (USA) (Rev 1)", Region::Us),
+            ("Game (Europe) (SGB Enhanced)", Region::Europe),
+            ("NoTokenHere", Region::Global),
+            // Specific region wins even when a language list precedes it.
+            ("Game (En,Fr,De) (Europe)", Region::Europe),
+        ];
+        for &(name, want) in cases {
+            assert_eq!(region_of(name), want, "{name:?}");
+        }
+    }
 
     /// Minimal single-file STORED (uncompressed) zip. Well-formed enough for
     /// `Cartridge::extract_rom_bytes` to unzip, without pulling in a zip writer.
