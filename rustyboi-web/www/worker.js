@@ -104,26 +104,32 @@ function loop() {
   lastNow = now;
 
   let ran = 0;
-  while (acc >= FRAME_MS && ran < MAX_FRAMES_PER_TICK) {
-    if (rewinding) {
-      // Step back one snapshot; if the buffer is exhausted, hold on the oldest
-      // frame (do NOT resume forward play while Backspace is still held). No
-      // audio while rewinding.
-      if (emu.rewind_step()) postFrameAndState();
-    } else {
-      const samples = emu.run_frame(); // fills the RGBA framebuffer
-      if (emu.has_rom()) postFrameAndState();
-      if (samples.length > 0) {
-        // Transfer the underlying buffer — no copy across the boundary.
-        post({ type: "Audio", samples }, [samples.buffer]);
+  try {
+    while (acc >= FRAME_MS && ran < MAX_FRAMES_PER_TICK) {
+      if (rewinding) {
+        // Step back one snapshot; if the buffer is exhausted, hold on the oldest
+        // frame (do NOT resume forward play while Backspace is still held). No
+        // audio while rewinding.
+        if (emu.rewind_step()) postFrameAndState();
+      } else {
+        const samples = emu.run_frame(); // fills the RGBA framebuffer
+        if (emu.has_rom()) postFrameAndState();
+        if (samples.length > 0) {
+          // Transfer the underlying buffer — no copy across the boundary.
+          post({ type: "Audio", samples }, [samples.buffer]);
+        }
       }
+      acc -= FRAME_MS;
+      ran++;
     }
-    acc -= FRAME_MS;
-    ran++;
+    // Hand any completed Game Boy Printer sheets (PNG bytes) to the main thread
+    // as downloads. Prints are rare, so this is an empty array almost every tick.
+    if (ran > 0) drainPrints();
+  } catch (err) {
+    running = false;
+    fail(err);
+    return;
   }
-  // Hand any completed Game Boy Printer sheets (PNG bytes) to the main thread
-  // as downloads. Prints are rare, so this is an empty array almost every tick.
-  if (ran > 0) drainPrints();
 
   // Shed a large backlog (backgrounded tab / long GC) instead of sprinting.
   if (acc > FRAME_MS * MAX_FRAMES_PER_TICK) acc = 0;
@@ -245,6 +251,7 @@ self.onmessage = async (e) => {
         // other place state is posted — is not running because no ROM is loaded.
         const uiState = emu.take_ui_state();
         if (uiState) post({ type: "UiState", json: uiState });
+        if (!running && emu.has_rom()) startLoop();
         break;
       }
       case "FinishCheats": {
