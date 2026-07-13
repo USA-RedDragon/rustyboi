@@ -105,7 +105,7 @@ jobs:
       # suites use the downloaded gb-test-roms and need no artifact.
       - name: Download first-party ROMs
         if: matrix.suite == 'rustyboi'
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: first-party-roms
           path: test-roms/build
@@ -175,7 +175,7 @@ jobs:
         run: rustup default stable
       # report-update runs every suite, including first-party `rustyboi`.
       - name: Download first-party ROMs
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: first-party-roms
           path: test-roms/build
