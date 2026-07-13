@@ -200,3 +200,41 @@ jobs:
             git commit -m 'docs: update test suite progress [skip ci]'
             git push
           fi
+
+  web-headless:
+    name: 'web / (${{ matrix.browser }})'
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chrome, firefox, safari]
+        os: [ubuntu-24.04, macos-latest]
+        exclude:
+          - { browser: safari, os: ubuntu-24.04 }
+          - { browser: chrome, os: macos-latest }
+          - { browser: firefox, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Cache cargo + build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: web-headless-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: web-headless-
+      - name: Install wasm-pack + wasm target
+        run: |
+          cargo install wasm-pack
+          rustup target add wasm32-unknown-unknown
+      - name: Run headless web tests (Chrome + Firefox)
+        run: |
+          sudo safaridriver --enable
+          export CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver"
+          export GECKODRIVER="$GECKOWEBDRIVER/geckodriver"
+          HEADLESS=true
+          if [[ "${{ matrix.browser }}" == "safari" ]]; then
+            HEADLESS=false
+          fi
+          wasm-pack test --headless=$HEADLESS --${{ matrix.browser }} rustyboi-web

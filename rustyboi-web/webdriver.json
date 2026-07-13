@@ -1,0 +1,16 @@
+{
+  "goog:chromeOptions": {
+    "args": [
+      "--enable-unsafe-swiftshader",
+      "--ignore-gpu-blocklist",
+      "--use-gl=angle",
+      "--use-angle=swiftshader"
+    ]
+  },
+  "moz:firefoxOptions": {
+    "prefs": {
+      "webgl.force-enabled": true,
+      "webgl.disabled": false
+    }
+  }
+}
