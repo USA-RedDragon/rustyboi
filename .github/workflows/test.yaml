@@ -29,6 +29,7 @@ jobs:
         os: [linux, windows, macos]
         arch: [x86_64, aarch64, armv7]
         suite:
+          - rustyboi
           - acid2
           - cgb_acid_hell
           - mealybug
