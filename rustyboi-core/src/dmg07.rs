@@ -128,11 +128,10 @@ impl Dmg07 {
                     self.rate = reply;
                 }
             }
-            3 => {
-                if player == 0 && reply != 0x00 {
+            3
+                if player == 0 && reply != 0x00 => {
                     self.size = reply;
                 }
-            }
             _ => {}
         }
 
