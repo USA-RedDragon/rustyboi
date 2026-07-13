@@ -7,11 +7,6 @@
 //! callback. Everything here runs on the main thread — the winit event loop
 //! *is* `UIApplicationMain`, and the picker is only ever launched from the egui
 //! draw on that thread.
-//!
-//! We use the pre-iOS-14 `initWithDocumentTypes:inMode:` (UTI strings) rather
-//! than the `UTType`-based initializer so the app keeps a min-iOS-13 target and
-//! avoids an extra objc2 crate; the deprecation is deliberate.
-#![allow(deprecated)]
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,11 +15,9 @@ use std::sync::Mutex;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
-use objc2_foundation::{NSArray, NSData, NSObjectProtocol, NSString, NSURL};
-use objc2_ui_kit::{
-    UIApplication, UIDocumentPickerDelegate, UIDocumentPickerMode,
-    UIDocumentPickerViewController,
-};
+use objc2_foundation::{NSArray, NSData, NSObjectProtocol, NSURL};
+use objc2_ui_kit::{UIApplication, UIDocumentPickerDelegate, UIDocumentPickerViewController};
+use objc2_uniform_type_identifiers::UTTypeData;
 
 use rustyboi_frontend_lib::ios_bridge::PickFileCallback;
 use rustyboi_frontend_lib::FileData;
@@ -122,6 +115,9 @@ fn finish(result: Option<FileData>) {
 /// Present the system document picker for a ROM. Installed on `ios_bridge` from
 /// `run_ios`; invoked from the egui draw (main thread). Delivers the picked
 /// file's bytes (or `None` on cancel/failure) to `callback`.
+// `keyWindow` is deprecated for multi-scene apps; this is a single-window winit
+// app (no scene manifest), so it returns the one correct window.
+#[allow(deprecated)]
 pub fn present_document_picker(callback: PickFileCallback) {
     let Some(mtm) = MainThreadMarker::new() else {
         callback(None);
@@ -135,13 +131,13 @@ pub fn present_document_picker(callback: PickFileCallback) {
         return;
     };
 
-    // "public.data" = any file; the user points at their .gb/.gbc/.zip.
-    let data_type = NSString::from_str("public.data");
-    let types = NSArray::from_slice(&[&*data_type]);
-    let picker = UIDocumentPickerViewController::initWithDocumentTypes_inMode(
+    // `UTTypeData` = any file; the user points at their .gb/.gbc/.zip.
+    // SAFETY: `UTTypeData` is a framework constant (a `&'static UTType`).
+    let data_type = unsafe { UTTypeData };
+    let types = NSArray::from_slice(&[data_type]);
+    let picker = UIDocumentPickerViewController::initForOpeningContentTypes(
         UIDocumentPickerViewController::alloc(mtm),
         &types,
-        UIDocumentPickerMode::Import,
     );
 
     let delegate = PickerDelegate::alloc(mtm).set_ivars(());
