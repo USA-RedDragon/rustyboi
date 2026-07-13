@@ -258,13 +258,14 @@ impl Renderer {
         surface_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+        present_mode: wgpu::PresentMode,
     ) -> Self {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             width: width.max(1),
             height: height.max(1),
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,

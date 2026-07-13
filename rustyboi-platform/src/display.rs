@@ -118,6 +118,15 @@ fn create_render_state(
     // Pick a non-sRGB surface format if available so the game texture (uploaded
     // as *_Srgb) composites the same as before; fall back to the first format.
     let caps = surface.get_capabilities(&adapter);
+    // Prefer Mailbox: it presents without blocking on vsync, so emulation isn't
+    // stalled during the present and the audio ring can hold a much smaller
+    // cushion. Fall back to Fifo (always supported) where Mailbox isn't offered.
+    let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else {
+        wgpu::PresentMode::Fifo
+    };
+    log::info!("surface present modes: {:?}; using {:?}", caps.present_modes, present_mode);
     let surface_format = caps
         .formats
         .iter()
@@ -126,7 +135,7 @@ fn create_render_state(
         .unwrap_or(caps.formats[0]);
 
     let max_texture_size = device.limits().max_texture_dimension_2d as usize;
-    let renderer = Renderer::new(surface, device, queue, surface_format, width, height);
+    let renderer = Renderer::new(surface, device, queue, surface_format, width, height, present_mode);
     let ui = UiHost::new(&window, scale_factor, max_texture_size, pending_dialog_result);
 
     Ok(RenderState { renderer, ui })
@@ -873,7 +882,10 @@ impl GuiApp<'_> {
         }
 
         // Advance one presented frame (paced inside the app), play audio, pump
-        // the workers.
+        // the workers. Report the audio backlog first so the app can pace off it
+        // (audio-clocked pacing): run ahead to refill the cushion after a hitch,
+        // pace to real time once it's full.
+        self.app.set_audio_backlog(self.audio.as_ref().map(|a| a.queued_frames()));
         let step = self.app.run_frame();
         if step.pump_workers {
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -888,6 +900,34 @@ impl GuiApp<'_> {
         }
         if let Some(a) = self.audio.as_mut() {
             a.push_samples(&step.audio);
+        }
+
+        // Android: the render/present is vsync-gated (Fifo) and dips below 60fps
+        // on a 60Hz surface whenever a frame grazes the vsync budget. With one
+        // emulation frame per present, that would slow the game AND starve audio
+        // in lockstep. Decouple them: while the audio backlog is short, advance
+        // extra emulation frames *without* rendering, feeding their audio. The
+        // game then runs at true 60fps with a fed audio cushion; the display just
+        // shows a couple fewer frames. Audio-clocked pacing keeps these extra
+        // `run_frame`s from sleeping. Capped so a long present stall can't spiral.
+        #[cfg(target_os = "android")]
+        {
+            const AUDIO_CATCHUP_TARGET: usize = 2;
+            const AUDIO_CATCHUP_MAX_FRAMES: u32 = 4;
+            let mut extra = 0;
+            while extra < AUDIO_CATCHUP_MAX_FRAMES
+                && self.audio.as_ref().is_some_and(|a| a.queued_frames() < AUDIO_CATCHUP_TARGET)
+            {
+                self.app.set_audio_backlog(self.audio.as_ref().map(|a| a.queued_frames()));
+                let catchup = self.app.run_frame();
+                if catchup.audio.is_empty() {
+                    break; // paused / not advancing — nothing to feed.
+                }
+                if let Some(a) = self.audio.as_mut() {
+                    a.push_samples(&catchup.audio);
+                }
+                extra += 1;
+            }
         }
 
         self.draw_frame(&window, event_loop);

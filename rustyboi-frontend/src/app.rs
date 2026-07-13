@@ -75,6 +75,16 @@ pub enum PlatformRequest {
 // ran 0.04% slow and systematically underfed the audio device.
 const TARGET_FRAME_TIME: Duration = Duration::from_micros(16743);
 
+/// Audio-clocked pacing target (Android): the emulator paces to real time while
+/// the audio backlog holds at/above this many frames, and runs ahead (no sleep)
+/// to refill when a scheduler hitch has drained it below. With a non-blocking
+/// (Mailbox) present, emulation isn't stalled during the present, so the ring
+/// only needs to bridge the ~16.7ms between per-frame refills — two frames of
+/// cushion rides out jitter with room to spare. Keep in sync with the catch-up
+/// target in `display.rs`.
+#[cfg(target_os = "android")]
+const AUDIO_CUSHION_TARGET_FRAMES: usize = 2;
+
 /// The portable app.
 ///
 /// It deliberately does NOT own the [`UiHost`] or [`Renderer`]: those are
@@ -122,6 +132,12 @@ pub struct App {
     last_frame_time: Instant,
     last_title_update: Instant,
     fps: f64,
+    /// Audio backlog in frames, reported by the platform each tick (`None` when
+    /// there's no audio device). Drives audio-clocked pacing on Android: pace to
+    /// real time while the cushion is full, run ahead to refill it after a hitch.
+    /// Only read on Android; stored (unused) elsewhere so the setter is uniform.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    audio_backlog: Option<usize>,
 
     /// The most recent chrome inset in *logical points*: how much wider/taller
     /// the window is than the egui central region (menu bar + any status
@@ -177,6 +193,7 @@ impl App {
             last_frame_time: now,
             last_title_update: now,
             fps: 0.0,
+            audio_backlog: None,
             content_inset: (0.0, 0.0),
             safe_insets: [0.0; 4],
             rgba_scratch: Vec::new(),
@@ -574,6 +591,24 @@ impl App {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn pace(&self) {
+        // Android: audio-clocked. When the audio device is driving and its
+        // backlog is at/above the cushion target we pace to real time (the device
+        // is the clock); when a hitch has drained the backlog below target we
+        // skip the sleep so emulation runs ahead and refills the cushion. Latency
+        // stays bounded at the target because we resume real-time pacing as soon
+        // as it's full. With no audio (`None`) we fall back to fixed pacing.
+        #[cfg(target_os = "android")]
+        if let Some(backlog) = self.audio_backlog {
+            if backlog >= AUDIO_CUSHION_TARGET_FRAMES {
+                self.fixed_pace();
+            }
+            return;
+        }
+        self.fixed_pace();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn fixed_pace(&self) {
         let elapsed = self.last_frame_time.elapsed();
         if elapsed < TARGET_FRAME_TIME {
             let remaining = TARGET_FRAME_TIME - elapsed;
@@ -588,6 +623,13 @@ impl App {
 
     #[cfg(target_arch = "wasm32")]
     fn pace(&self) {}
+
+    /// Report the platform's audio backlog (frames queued in the output device),
+    /// or `None` when there's no audio. Drives audio-clocked pacing; call before
+    /// [`App::run_frame`].
+    pub fn set_audio_backlog(&mut self, frames: Option<usize>) {
+        self.audio_backlog = frames;
+    }
 
     fn run_frame_on_core(&mut self) -> Option<(gb::Frame, bool)> {
         let gb = self.session.gb_mut();
