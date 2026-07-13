@@ -53,7 +53,7 @@ pub struct CleanConfig {
     pub rom: Option<String>,
     // Hardware type (DMG, CGB, SGB, etc.)
     pub hardware: gb::Hardware,
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
     // path to save state to load on startup
     pub state: Option<String>,
     // GUI scale factor
@@ -61,7 +61,7 @@ pub struct CleanConfig {
     pub scale: u8,
     // Color palette
     pub palette: PaletteChoice,
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
     // skip BIOS on startup
     pub skip_bios: bool,
     // attach a Game Boy Printer to the link port at startup
@@ -71,7 +71,7 @@ pub struct CleanConfig {
 impl RawConfig {
     pub fn clean(self) -> CleanConfig {
         let mut _skip_bios = self.skip_bios;
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
         {
             if self.bios.is_none() {
                 _skip_bios = true;
@@ -82,12 +82,12 @@ impl RawConfig {
             bios: self.bios,
             rom: self.rom,
             hardware: self.hardware,
-            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
             state: self.state,
             #[cfg(not(target_os = "android"))]
             scale: self.scale,
             palette: PaletteChoice::from_str(&self.palette).unwrap_or(PaletteChoice::Grayscale),
-            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
             skip_bios: _skip_bios,
             printer: self.printer,
         }

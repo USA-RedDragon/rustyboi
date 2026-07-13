@@ -1,7 +1,7 @@
 use rustyboi_core_lib::input;
 use rustyboi_session::{DebugDetail, DebugSnapshot};
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 use std::env;
 use std::sync::{Arc, Mutex};
 use egui::Context;
@@ -10,7 +10,7 @@ use crate::actions::{
     TextureFilter, COMMANDS,
 };
 // Hardware / palette pickers live only in the desktop Settings menu bar.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 use crate::actions::{GbcDmgPalette, HardwareChoice, PaletteChoice};
 use crate::file_dialog::{self, FileDialogBuilder};
 #[cfg(target_os = "android")]
@@ -37,7 +37,7 @@ fn command_label(kind: ActionKind) -> &'static str {
 /// Shared by the desktop menu bar and the mobile menu overlay so the import
 /// wiring lives once. `make_action` is `fn(FileData) -> GuiAction` — the picked
 /// bytes flow through the session's `finish_import_*` path per platform.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 fn import_menu_button(
     ui: &mut egui::Ui,
     pending: &Arc<Mutex<Option<GuiAction>>>,
@@ -65,7 +65,7 @@ fn import_menu_button(
 /// Render a single toggle row in the mobile menu overlay. Behaves like
 /// `ui.checkbox(...)` but lays out as a full-width row with a check
 /// glyph on the right so it matches the rest of the touch-sized rows.
-#[cfg(target_os = "android")]
+#[cfg(mobile)]
 fn mobile_toggle_row(ui: &mut egui::Ui, size: egui::Vec2, label: &str, value: &mut bool) {
     let glyph = if *value { "☑" } else { "☐" };
     let text = format!("{glyph}  {label}");
@@ -80,7 +80,7 @@ fn mobile_toggle_row(ui: &mut egui::Ui, size: egui::Vec2, label: &str, value: &m
 /// A full-width File → Import row for the mobile overlay: opens a file picker and
 /// stores the picked file wrapped by `make_action` into `pending`. Returns
 /// whether it was clicked (so the caller can close the overlay).
-#[cfg(target_os = "android")]
+#[cfg(mobile)]
 fn mobile_import_row(
     ui: &mut egui::Ui,
     size: egui::Vec2,
@@ -180,12 +180,12 @@ pub struct Gui {
     /// Android-only state: whether the full-screen menu overlay,
     /// triggered by the floating ☰ soft button, is currently visible.
     /// Replaces the desktop top menu bar on mobile.
-    #[cfg(target_os = "android")]
+    #[cfg(mobile)]
     show_mobile_menu: bool,
     /// Whether a menu-bar dropdown was open last frame. In fullscreen the
     /// auto-hiding menu bar stays revealed while a menu is open so it doesn't
     /// vanish mid-interaction.
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(mobile))]
     menu_open_last_frame: bool,
 }
 
@@ -249,9 +249,9 @@ impl Gui {
                 p.open = true;
                 p
             },
-            #[cfg(target_os = "android")]
+            #[cfg(mobile)]
             show_mobile_menu: false,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(not(mobile))]
             menu_open_last_frame: false,
         }
     }
@@ -306,7 +306,7 @@ impl Gui {
         // In fullscreen the bar auto-hides: it renders as a floating overlay (so
         // the game keeps the whole screen) only while the pointer is near the top
         // edge or a menu is open. Windowed, it's always shown as a reserved panel.
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(mobile))]
         {
             const REVEAL_ZONE_PX: f32 = 32.0;
             let reveal = !fullscreen
@@ -321,7 +321,7 @@ impl Gui {
             }
             self.menu_open_last_frame = any_menu_open;
         }
-        #[cfg(target_os = "android")]
+        #[cfg(mobile)]
         let _ = fullscreen;
         self.render_debug_panels(ctx, debug, &mut action, paused, session, held_pad);
         if self.show_cheats_panel {
@@ -355,7 +355,7 @@ impl Gui {
         // it can sit above any background UI, but before the touch
         // overlay so the overlay's backdrop intercepts touches that
         // would otherwise press D-pad / A-B buttons underneath.
-        #[cfg(target_os = "android")]
+        #[cfg(mobile)]
         {
             self.render_mobile_soft_button(ctx);
             if self.show_mobile_menu {
@@ -367,9 +367,9 @@ impl Gui {
         // Suppress on-screen controls while the mobile menu overlay is
         // open so taps on menu items do not also fire emulator inputs.
         let suppress_touch = {
-            #[cfg(target_os = "android")]
+            #[cfg(mobile)]
             { self.show_mobile_menu }
-            #[cfg(not(target_os = "android"))]
+            #[cfg(not(mobile))]
             { false }
         };
         // Whether to show the on-screen controls is session-owned (toggled via
@@ -389,7 +389,7 @@ impl Gui {
     }
     /// Windowed menu bar: a reserved top panel (the game region is the space
     /// left below it).
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(mobile))]
     fn render_menu_bar(&mut self, ui: &mut egui::Ui, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, session: &SessionUiState) {
         egui::Panel::top("menubar_container").show(ui, |ui| {
             self.menu_bar_contents(ui, action, any_menu_open, paused, session);
@@ -399,7 +399,7 @@ impl Gui {
     /// Fullscreen auto-hide menu bar: a floating top overlay that draws over the
     /// game (so the game keeps the full screen — `available_rect` is unchanged,
     /// unlike a reserved panel).
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(mobile))]
     fn render_menu_bar_overlay(&mut self, ctx: &Context, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, session: &SessionUiState) {
         let screen = ctx.viewport_rect();
         egui::Area::new(egui::Id::new("menubar_overlay"))
@@ -416,7 +416,7 @@ impl Gui {
             });
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(mobile))]
     fn menu_bar_contents(&mut self, ui: &mut egui::Ui, action: &mut Option<GuiAction>, any_menu_open: &mut bool, paused: bool, session: &SessionUiState) {
         {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -979,7 +979,7 @@ impl Gui {
     /// itself. Mirrors the formula in [`touch_controls`] so the soft
     /// button and on-screen D-pad/A-B groups stay visually consistent
     /// across phones, tablets and foldables.
-    #[cfg(target_os = "android")]
+    #[cfg(mobile)]
     fn mobile_unit(ctx: &Context) -> f32 {
         let screen = ctx.viewport_rect();
         (screen.height() * 0.18)
@@ -996,7 +996,7 @@ impl Gui {
     /// it extra padding, a left-aligned glyph (because `min_size` only
     /// expands the frame, not the text rect), and a darker fill than
     /// the D-pad/A-B buttons.
-    #[cfg(target_os = "android")]
+    #[cfg(mobile)]
     fn render_mobile_soft_button(&mut self, ctx: &Context) {
         let unit = Self::mobile_unit(ctx) * 0.75;
         let margin = unit * 0.35 * 0.75;
@@ -1042,7 +1042,7 @@ impl Gui {
     ///   2. A centered title-less `Window` with the same actions the
     ///      desktop bar exposes — File / Emulation / Debug / Settings —
     ///      laid out as wide vertically-stacked buttons for touch.
-    #[cfg(target_os = "android")]
+    #[cfg(mobile)]
     fn render_mobile_menu_overlay(
         &mut self,
         ctx: &Context,
@@ -1125,6 +1125,9 @@ impl Gui {
 
                         // --- File -----------------------------------
                         ui.label(egui::RichText::new("File").strong());
+                        // The SAF ROM library is Android-only; iOS loads ROMs
+                        // per-file through the document picker (Load ROM below).
+                        #[cfg(target_os = "android")]
                         if ui
                             .add(
                                 egui::Button::new("ROM Library…").min_size(row_size),

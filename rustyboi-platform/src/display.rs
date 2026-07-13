@@ -227,7 +227,11 @@ fn save_base() -> std::path::PathBuf {
     {
         crate::android::save_dir()
     }
-    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    #[cfg(target_os = "ios")]
+    {
+        crate::ios::save_dir()
+    }
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android"), not(target_os = "ios")))]
     {
         crate::ports::desktop_save_dir()
     }
@@ -621,7 +625,7 @@ impl ApplicationHandler for GuiApp<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // winit 0.30 creates windows here (an `ActiveEventLoop` is required).
         if self.window.is_none() {
-            #[cfg(not(target_os = "android"))]
+            #[cfg(not(mobile))]
             let attrs = {
                 let size = LogicalSize::new(
                     (WIDTH * (self.config.scale as u32)) as f64,
@@ -632,7 +636,8 @@ impl ApplicationHandler for GuiApp<'_> {
                     .with_inner_size(size)
                     .with_min_inner_size(LogicalSize::new(WIDTH as f64, HEIGHT as f64))
             };
-            #[cfg(target_os = "android")]
+            // Mobile (Android + iOS): the compositor sizes the surface fullscreen.
+            #[cfg(mobile)]
             let attrs = Window::default_attributes().with_title("RustyBoi");
             match event_loop.create_window(attrs) {
                 Ok(w) => self.window = Some(Arc::new(w)),
@@ -673,6 +678,11 @@ impl ApplicationHandler for GuiApp<'_> {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        // On mobile, backgrounding is the last reliable chance to flush SRAM
+        // before the OS may reclaim the app. Persists through the storage port
+        // (no-op for non-battery carts). Desktop keeps its own sidecar `.sav`.
+        #[cfg(mobile)]
+        self.app.session_mut().persist_battery();
         self.render_state = None;
     }
 
@@ -1231,8 +1241,17 @@ fn save_bytes_to_file(
         std::fs::write(&path, bytes)?;
         Ok(Some(path))
     }
-    // wasm + iOS: no native save dialog wired yet (iOS awaits UIDocumentPicker).
-    #[cfg(any(target_arch = "wasm32", target_os = "ios"))]
+    // iOS: write into the app's Documents dir. With UIFileSharingEnabled +
+    // LSSupportsOpeningDocumentsInPlace (Info.plist) the file is retrievable
+    // through the Files app / Finder, so exports aren't lost.
+    #[cfg(target_os = "ios")]
+    {
+        let path = crate::ios::documents_dir().join(suggested_name);
+        std::fs::write(&path, bytes)?;
+        Ok(Some(path))
+    }
+    // wasm: no filesystem export target.
+    #[cfg(target_arch = "wasm32")]
     {
         let _ = (suggested_name, bytes);
         Ok(None)
@@ -1243,12 +1262,12 @@ fn save_bytes_to_file(
 /// already-loaded content on web/Android).
 fn read_file_data(file_data: &FileData) -> Option<(Vec<u8>, Option<String>)> {
     match file_data {
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
         FileData::Path(path) => {
             let name = path.to_string_lossy().to_string();
             std::fs::read(path).ok().map(|b| (b, Some(name)))
         }
-        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+        #[cfg(any(target_arch = "wasm32", target_os = "android", target_os = "ios"))]
         FileData::Contents { name, data } => Some((data.clone(), Some(name.clone()))),
     }
 }

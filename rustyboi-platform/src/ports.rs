@@ -124,7 +124,7 @@ impl Webcam for NullWebcam {
 /// `~/Library/Application Support`, `%APPDATA%`), falling back to `~/.rustyboi`
 /// and finally a `rustyboi` directory in the working dir. No env knobs of our
 /// own — only the OS-standard `HOME`/`APPDATA` the platform itself defines.
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 pub fn desktop_save_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)

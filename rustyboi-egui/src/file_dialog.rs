@@ -202,9 +202,10 @@ mod android_impl {
 mod ios_impl {
     use super::*;
 
-    /// iOS file dialog stub. Real iOS file picking (UIDocumentPicker) is not yet
-    /// bridged; callbacks return `None` so the app compiles and runs without a
-    /// picker. TODO: wire UIDocumentPickerViewController on the Objective-C side.
+    /// iOS file dialog. `pick_file` forwards to the platform layer's
+    /// `UIDocumentPicker` bridge (installed on `ios_bridge` from `run_ios`);
+    /// `save_file` is unused (exports route through `SaveBytes` / the Documents
+    /// dir, never a save dialog — the same as web).
     pub struct FileDialogBuilderImpl;
 
     impl FileDialogBuilderImpl {
@@ -227,7 +228,7 @@ mod ios_impl {
         where
             F: FnOnce(Option<FileData>) + Send + 'static,
         {
-            callback(None);
+            crate::ios_bridge::pick_file(Box::new(callback));
         }
         fn save_file<F>(self, callback: F)
         where

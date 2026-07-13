@@ -1,6 +1,8 @@
 pub mod actions;
 #[cfg(target_os = "android")]
 pub mod android_bridge;
+#[cfg(target_os = "ios")]
+pub mod ios_bridge;
 mod debug;
 mod file_dialog;
 mod keybind_settings;

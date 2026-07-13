@@ -47,5 +47,7 @@ pub use rustyboi_egui_lib::actions::{self, FileData, GuiAction, HardwareChoice, 
 // on the frontend, never on egui directly.
 #[cfg(target_os = "android")]
 pub use rustyboi_egui_lib::android_bridge;
+#[cfg(target_os = "ios")]
+pub use rustyboi_egui_lib::ios_bridge;
 #[cfg(target_os = "android")]
 pub use rustyboi_egui_lib::library;
