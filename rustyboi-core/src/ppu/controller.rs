@@ -2888,7 +2888,7 @@ impl Ppu {
             // fraction: its boundary sits one eighth past the integer dot
             // (see the CGBWG_A12_ECHO block comment).
             let rise_vis = if sub.shifted {
-                8 * h as i64 + sub.phase8 >= 8 * (w + rise_eff + rearm) as i64 + 1
+                8 * h as i64 + sub.phase8 > 8 * (w + rise_eff + rearm) as i64
             } else {
                 h >= w + rise_eff + rearm
             };
