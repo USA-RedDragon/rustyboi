@@ -14,19 +14,18 @@ jobs:
   build:
     name: 'build / ${{ matrix.target }}'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    container:
-      image: ghcr.io/usa-reddragon/rust-cross:1.94.1@sha256:824108f3a93447345db239f23ae306d2d14ccf82430ad8de7f680ea3a4f9ce6e
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: aarch64-unknown-linux-musl
-            linker: aarch64-linux-musl-gcc
-          - target: armv7-unknown-linux-musleabihf
-            linker: arm-linux-musleabihf-gcc
-          - target: x86_64-unknown-linux-musl
-            linker: x86_64-linux-musl-gcc
+          - target: android
+            args: --release --bundle
+          - target: libretro
+            args: --all
+          - target: native
+            args: --all
+          - target: web
+            args: release
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Cache cargo + build
@@ -38,13 +37,6 @@ jobs:
             target
           key: cross-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cross-${{ matrix.target }}-
-      - name: Build test runner for ${{ matrix.target }}
-        env:
-          RUSTUP_TOOLCHAIN: '1.94.1'
+      - name: Build ${{ matrix.target }}
         run: |
-          triple_env="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
-          export "CARGO_TARGET_${triple_env}_LINKER=${{ matrix.linker }}"
-          # Scope to the test runner: a bare `cargo build` compiles the workspace
-          # default-members, which include rustyboi-platform (rodio -> cpal ->
-          # alsa-sys) -- a desktop GUI/audio crate that has no musl cross target.
-          cargo build --release -p rustyboi-test-runner --target ${{ matrix.target }}
+          ./tools/build-${{ matrix.target }}.sh ${{ matrix.args }}
