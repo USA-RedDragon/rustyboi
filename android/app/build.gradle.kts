@@ -37,13 +37,13 @@ val keystoreProps: Properties? = run {
 
 android {
     namespace = "dev.mcswain.rustyboi"
-    compileSdk = 34
-    ndkVersion = "26.1.10909125"
+    compileSdk = 37
+    ndkVersion = "27.3.13750724"
 
     defaultConfig {
         applicationId = "dev.mcswain.rustyboi"
-        minSdk = 28
-        targetSdk = 34
+        minSdk = 26
+        targetSdk = 37
         versionCode = 1
         versionName = "0.1.0"
 
@@ -133,16 +133,19 @@ fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks
     )
     if (cargoProfile == "release") args += "--release"
     commandLine = args
-    // Tune codegen for modern arm64 phones. minSdk 28 (Android 9, 2018+) on
-    // arm64-v8a effectively guarantees armv8.1-A LSE atomics. We schedule for
-    // Cortex-A55 (LITTLE core in nearly every modern big.LITTLE SoC) so the
-    // little cluster stays responsive; +lse/+rcpc raise the ISA floor for
-    // faster atomics, which the hot emulator loop benefits from. Release-only
-    // because debug builds prioritize compile time.
+    // Tune codegen for modern arm64 phones. Schedule for Cortex-A55 (the LITTLE
+    // core in nearly every modern big.LITTLE SoC) so the little cluster stays
+    // responsive. +outline-atomics uses LSE atomics at runtime when the CPU has
+    // them and falls back safely on armv8.0, so the fast path costs no
+    // compatibility down to minSdk 26. max-page-size=16384 aligns the .so to
+    // 16 KiB — NDK r27 leaves this opt-in (default only from r28), and it is
+    // required for Play + newer 16 KB-page devices. Release-only because debug
+    // builds prioritize compile time.
     if (cargoProfile == "release") {
         environment(
             "CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS",
-            "-C target-cpu=cortex-a55 -C target-feature=+lse,+rcpc",
+            "-C target-cpu=cortex-a55 -C target-feature=+outline-atomics " +
+                "-C link-arg=-Wl,-z,max-page-size=16384",
         )
     }
     inputs.dir(rustWorkspaceRoot.dir("rustyboi-platform/src"))
