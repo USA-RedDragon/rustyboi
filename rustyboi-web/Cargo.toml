@@ -5,7 +5,9 @@ edition = "2021"
 description = "WASM/Firefox web frontend for the rustyboi Game Boy / Color emulator"
 
 [lib]
-crate-type = ["cdylib"]
+# `rlib` (alongside `cdylib`) so the wasm-bindgen integration tests in `tests/`
+# can link the crate as a library; wasm-pack still uses the `cdylib` for builds.
+crate-type = ["cdylib", "rlib"]
 
 # wasm-pack's BUNDLED wasm-opt is too old to validate the post-MVP wasm features
 # LLVM emits (bulk-memory memory.copy/fill, sign-ext, ...). So disable it here
@@ -78,3 +80,8 @@ features = [
     "Gamepad",
     "GamepadButton",
 ]
+
+# Headless-browser tests (the wasm-only rewind/present path host tests can't
+# reach). Run with: wasm-pack test --headless --chrome rustyboi-web
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
