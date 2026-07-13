@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     container:
-      image: ghcr.io/usa-reddragon/rust-cross:1.94.1@sha256:824108f3a93447345db239f23ae306d2d14ccf82430ad8de7f680ea3a4f9ce6e
+      image: ghcr.io/usa-reddragon/rust-cross:1.94.1@sha256:cda506245016745341c45ac6710334745eb883d6e5712c2a58a0f676f7f0b0ae
     strategy:
       fail-fast: false
       matrix:
