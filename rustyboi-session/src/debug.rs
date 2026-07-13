@@ -450,8 +450,7 @@ mod tests {
     use rustyboi_core_lib::gb::Hardware;
 
     fn booted_session(hardware: Hardware) -> Session {
-        let mut config = Config::default();
-        config.hardware = hardware;
+        let config = Config { hardware, ..Default::default() };
         let ports = Ports {
             storage: Box::new(MemStorage::new()),
             rumble: Box::new(MemRumble::default()),

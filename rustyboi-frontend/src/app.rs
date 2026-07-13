@@ -806,19 +806,15 @@ impl App {
         region.width = (region.width - si_l - si_r).max(0.0);
         region.height = (region.height - si_t - si_b).max(0.0);
         let game = self.present();
-        if let Err(status) = renderer.render(game.as_ref(), region, paint) {
-            match status {
-                // Reconfigure + retry next frame (the platform loop syncs the
-                // surface to the window size before the next render).
-                wgpu::SurfaceStatus::Lost | wgpu::SurfaceStatus::Outdated => {
-                    let (w, h) = renderer.surface_size();
-                    renderer.resize(w, h);
-                }
-                // Validation errors surface through the device error scope; skip
-                // this frame. (Timeout/Occluded never reach here — render() maps
-                // them to Ok.)
-                _ => {}
-            }
+        // Reconfigure + retry next frame (the platform loop syncs the surface to
+        // the window size before the next render). Validation errors surface
+        // through the device error scope, so any other status just skips this
+        // frame (Timeout/Occluded never reach here — render() maps them to Ok).
+        if let Err(wgpu::SurfaceStatus::Lost | wgpu::SurfaceStatus::Outdated) =
+            renderer.render(game.as_ref(), region, paint)
+        {
+            let (w, h) = renderer.surface_size();
+            renderer.resize(w, h);
         }
 
         requests
@@ -1113,10 +1109,8 @@ mod restart_tests {
     // the session config (hardware override + DMG palette) untouched.
     #[test]
     fn restart_rebuild_preserves_hardware_and_palette() {
-        let mut cfg = Config::default();
-        cfg.hardware = Hardware::SGB;
         let custom = DmgPalette { shades: [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]] };
-        cfg.dmg_palette = custom;
+        let cfg = Config { hardware: Hardware::SGB, dmg_palette: custom, ..Default::default() };
 
         let mut session = Session::new(cfg, ports(), [0u8; 32]);
         let mut gb = GB::new(session.hardware());

@@ -41,8 +41,6 @@ use rustyboi_session::input_config::{
 };
 use rustyboi_session::{DebugSnapshot, GbButton, SessionUiState, UiAction};
 
-use crate::web_action::WebAction;
-
 /// State shared between the JS-facing [`WebApp`] handle and the spawned winit
 /// event loop. The JS shell writes the worker's frames/UI-state/status in; the
 /// loop reads them each redraw and calls back out through the JS closures.
@@ -77,7 +75,7 @@ struct Shared {
     last_debug_detail: Option<(bool, u8)>,
 
     // Outbound JS callbacks to the worker (installed by JS at construction):
-    /// `(jsonAction: string) => void` — post a `WebAction` to the worker.
+    /// `(jsonAction: string) => void` — post a `UiAction` (JSON) to the worker.
     post_action: js_sys::Function,
     /// `(mask: number) => void` — post a GB button bitmask to the worker.
     post_input: js_sys::Function,
@@ -193,17 +191,17 @@ impl WebApp {
         s.frame_dirty = true;
     }
 
-    /// Push a new UI-state snapshot (JSON [`crate::web_action::WebUiState`]) so
-    /// the egui menus/cheats/settings reflect live session state.
+    /// Push a new UI-state snapshot (JSON [`SessionUiState`]) so the egui
+    /// menus/cheats/settings reflect live session state.
     pub fn on_ui_state(&self, json: &str) {
-        if let Ok(state) = serde_json::from_str::<crate::web_action::WebUiState>(json) {
+        if let Ok(state) = serde_json::from_str::<SessionUiState>(json) {
             let title = match state.game_name.as_deref() {
                 Some(g) => format!("{g} — RustyBoi"),
                 None => "RustyBoi".to_string(),
             };
             {
                 let mut s = self.shared.borrow_mut();
-                s.ui_state = state.into_session();
+                s.ui_state = state;
                 s.ui_dirty = true;
             }
             // Reflect the identified game in the browser tab title. Snapshots
@@ -698,23 +696,20 @@ fn draw(
 
     // Render: the game texture (uploaded above) letterboxed into the central
     // region, egui on top. game: None — the retained texture is drawn via has_game.
-    if let Err(status) = renderer.render(None, ui_frame.region, paint) {
-        // wgpu 29: reconfigure + retry next frame on Lost/Outdated. Timeout /
-        // Occluded are handled inside render() (mapped to Ok); Validation is
-        // surfaced via the device error scope, so skip it here.
-        match status {
-            wgpu::SurfaceStatus::Lost | wgpu::SurfaceStatus::Outdated => {
-                let (w, h) = renderer.surface_size();
-                renderer.resize(w, h);
-            }
-            _ => {}
-        }
+    // wgpu 29: reconfigure + retry next frame on Lost/Outdated. Timeout /
+    // Occluded are handled inside render() (mapped to Ok); Validation is
+    // surfaced via the device error scope, so any other status is skipped.
+    if let Err(wgpu::SurfaceStatus::Lost | wgpu::SurfaceStatus::Outdated) =
+        renderer.render(None, ui_frame.region, paint)
+    {
+        let (w, h) = renderer.surface_size();
+        renderer.resize(w, h);
     }
 }
 
 /// Route the `UiAction` egui produced. Loads resolve on the main thread (the
 /// rfd picker already read the bytes into `FileData::Contents`); everything else
-/// the worker can service is lowered to a [`WebAction`] and posted as JSON.
+/// the worker can service is posted to it as the [`UiAction`]'s own JSON.
 /// Debug/OS-only actions are dropped (Phase B).
 fn dispatch_action(shared: &Rc<RefCell<Shared>>, action: UiAction) {
     match action {
@@ -750,25 +745,70 @@ fn dispatch_action(shared: &Rc<RefCell<Shared>>, action: UiAction) {
         UiAction::ExportBatterySave => request_export(shared, "battery"),
         UiAction::ExportRtc => request_export(shared, "rtc"),
         // Fullscreen is a main-thread DOM op (canvas Fullscreen API); the worker
-        // is not involved, so call the bridge here rather than posting a WebAction.
+        // is not involved, so call the bridge here rather than posting to it.
         UiAction::ToggleFullscreen => {
             let s = shared.borrow();
             let cb = s.toggle_fullscreen.clone();
             drop(s);
             let _ = cb.call0(&JsValue::NULL);
         }
-        other => {
-            if let Some(web_action) = WebAction::from_ui_action(&other) {
-                if let Ok(json) = serde_json::to_string(&web_action) {
-                    let s = shared.borrow();
-                    let cb = s.post_action.clone();
-                    drop(s);
-                    let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&json));
-                }
+
+        // No web path (deliberately dropped): SaveState writes an arbitrary host
+        // path (web uses ExportState / slots); Exit has no meaning in a tab; the
+        // debug stepping/breakpoint actions need a Phase-B `&GB` snapshot layer;
+        // LoadBootRom has no web picker wired yet.
+        UiAction::SaveState(_)
+        | UiAction::Exit
+        | UiAction::StepCycles(_)
+        | UiAction::StepFrames(_)
+        | UiAction::SetBreakpoint(_)
+        | UiAction::RemoveBreakpoint(_)
+        | UiAction::LoadBootRom(_) => {}
+
+        // Everything else is pure session state the worker applies. Post the
+        // `UiAction` itself as JSON — no mirror type. This arm is exhaustive (no
+        // `_`), so a new `UiAction` variant fails to compile here until its web
+        // routing is decided, rather than being silently dropped.
+        serviceable @ (UiAction::TogglePause
+        | UiAction::ToggleRecording
+        | UiAction::StopReplay
+        | UiAction::TogglePrinter
+        | UiAction::Restart
+        | UiAction::ClearError
+        | UiAction::SaveSlot(_)
+        | UiAction::LoadSlot(_)
+        | UiAction::Quicksave
+        | UiAction::Quickload
+        | UiAction::ToggleFastForward
+        | UiAction::FrameAdvance
+        | UiAction::ToggleSgbBorder
+        | UiAction::ToggleTouchControls
+        | UiAction::SetHardware(_)
+        | UiAction::SetPalette(_)
+        | UiAction::SetGbcDmgPalette(_)
+        | UiAction::SetColorCorrection(_)
+        | UiAction::SetRealBootRom(_)
+        | UiAction::SetTextureFilter(_)
+        | UiAction::SetLcdEffect(_)
+        | UiAction::SetPrinterScale(_)
+        | UiAction::SetTouchOpacity(_)
+        | UiAction::SetRewindEnabled(_)
+        | UiAction::SetRewindInterval(_)
+        | UiAction::SetRewindDepth(_)
+        | UiAction::SetVolume(_)
+        | UiAction::SetScalingMode(_)
+        | UiAction::SetInputConfig(_)
+        | UiAction::AddCheat(_)
+        | UiAction::AddCheats(_)
+        | UiAction::RemoveCheat(_)
+        | UiAction::GetCheats
+        | UiAction::ClearFetchedCheats) => {
+            if let Ok(json) = serde_json::to_string(&serviceable) {
+                let s = shared.borrow();
+                let cb = s.post_action.clone();
+                drop(s);
+                let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&json));
             }
-            // Dropped: SaveState-to-path (web uses ExportState / slots), Exit,
-            // and the debug actions (breakpoints/stepping) that need a Phase-B
-            // &GB snapshot.
         }
     }
 }
@@ -821,7 +861,7 @@ fn input_mask(state: rustyboi_session::ButtonState) -> u8 {
 
 /// Dispatch the hotkeys the resolver fired this frame. Fast-forward and rewind
 /// have worker paths (reuse `set_rewind` / the `ToggleFastForward` action);
-/// quicksave/quickload/pause route through the worker via a `WebAction`; exit and
+/// quicksave/quickload/pause route through the worker as a `UiAction`; exit and
 /// fullscreen are main-thread DOM ops (exit closes nothing on web, so it's a
 /// no-op; fullscreen calls the canvas bridge). Turbo is baked into the button
 /// state by the resolver, so it needs no dispatch here.

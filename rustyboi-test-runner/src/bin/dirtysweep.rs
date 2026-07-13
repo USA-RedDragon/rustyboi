@@ -317,7 +317,7 @@ fn report(results: &[GameResult], cfg: &Config) {
     println!("---------------------------------------------------------");
     println!(" Register ranking (cumulative dirty lines caused):");
     let mut ranked: Vec<(usize, u64)> = (0..9).map(|i| (i, per_reg[i])).collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|&(_, cnt)| std::cmp::Reverse(cnt));
     let reg_total: u64 = per_reg.iter().sum::<u64>().max(1);
     for (i, cnt) in ranked {
         println!(
