@@ -51,6 +51,7 @@ TARGETS=(
     "linux-x86_64|x86_64-unknown-linux-gnu|linux|"
     "linux-aarch64|aarch64-unknown-linux-gnu|linux|"
     "linux-armv7|armv7-unknown-linux-gnueabihf|linux|"
+    "linux-riscv64|riscv64gc-unknown-linux-gnu|linux|"
     "linux-x86_64-musl|x86_64-unknown-linux-musl|linux|musl"
     "linux-aarch64-musl|aarch64-unknown-linux-musl|linux|musl"
     "linux-armv7-musl|armv7-unknown-linux-musleabihf|linux|musl"
