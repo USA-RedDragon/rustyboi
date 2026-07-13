@@ -147,7 +147,7 @@ rc_build() {   # triple variant crt <extra cargo args...>
 
     local incmd="set -e; $pre
         cargo build --target $triple --release $*
-        chown -R $HOST_UIDGID target/$triple"
+        chown -R $HOST_UIDGID target"
     $ENGINE run --rm \
         -v "$PROJECT_ROOT":/project -w /project \
         -v "$CARGO_VOL":/usr/local/cargo/registry \
