@@ -17,8 +17,8 @@ rustyboi-session = { path = "../rustyboi-session" }
 egui = "=0.35.0"
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android"), not(target_os = "ios")))'.dependencies]
-rfd = "=0.15.4"
+rfd = "=0.17.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-rfd = { version = "=0.15.4", features = ["async-std"] }
+rfd = { version = "=0.17.2", features = ["async-std"] }
 wasm-bindgen-futures = "=0.4.76"
