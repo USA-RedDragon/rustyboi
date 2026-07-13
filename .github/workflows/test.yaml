@@ -12,6 +12,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Assemble the first-party test ROMs once and share them with every suite cell
+  # as an artifact. rgbds isn't apt-installable, ships no arm64-linux binary, and
+  # its Makefile needs make -- so building per-cell across win/mac/arm is fragile;
+  # the ROMs are platform-independent, so build once on linux-x86_64 (the one
+  # place the toolchain is trivial) and fan them out.
+  build-roms:
+    name: 'build first-party ROMs'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install RGBDS
+        shell: bash
+        run: |
+          curl -fsSL -o rgbds.tar.xz https://github.com/gbdev/rgbds/releases/download/v1.0.1/rgbds-linux-x86_64.tar.xz
+          mkdir -p "$HOME/rgbds" && tar xf rgbds.tar.xz -C "$HOME/rgbds"
+          echo "$HOME/rgbds" >> "$GITHUB_PATH"
+      - name: Assemble ROMs
+        shell: bash
+        run: make -C test-roms roms
+      - name: Upload ROMs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: first-party-roms
+          path: test-roms/build
+          retention-days: 1
+
   # One job, one matrix: os x arch x suite. Every cell RUNS its suite -- natively
   # where a hosted runner exists, and under qemu-user (binfmt) for the armv7 leg,
   # which has no native runner (hence its windows/macos exclusions: qemu-user is
@@ -22,6 +48,7 @@ jobs:
   test:
     name: '${{ matrix.suite }} / ${{ matrix.os }} / ${{ matrix.arch }}'
     runs-on: ${{ matrix.runs-on }}
+    needs: build-roms
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -73,25 +100,15 @@ jobs:
         run: |
           rustup default stable
           rustup target add ${{ matrix.target }}
-      # The first-party `rustyboi` suite assembles its ROMs from RGBDS source at
-      # setup time (test-roms/, gitignored build output), so rgbds must be on PATH.
-      # Version drift is fine: the source is portable 0.7–1.0 syntax and the suite
-      # grades rendered output, not ROM bytes.
-      - name: Install RGBDS (first-party test ROMs)
+      # The first-party `rustyboi` suite runs ROMs assembled by the build-roms
+      # job; drop them where run-suites.sh expects them (test-roms/build). Other
+      # suites use the downloaded gb-test-roms and need no artifact.
+      - name: Download first-party ROMs
         if: matrix.suite == 'rustyboi'
-        shell: bash
-        run: |
-          set -eu
-          case "${{ matrix.os }}" in
-            linux)   sudo apt-get update && sudo apt-get install -y rgbds ;;
-            macos)   brew install rgbds ;;
-            windows)
-              curl -fsSL -o rgbds.zip https://github.com/gbdev/rgbds/releases/download/v1.0.1/rgbds-win64.zip
-              mkdir -p "$HOME/rgbds"
-              unzip -o rgbds.zip -d "$HOME/rgbds"
-              cygpath -w "$HOME/rgbds" >> "$GITHUB_PATH"
-              ;;
-          esac
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: first-party-roms
+          path: test-roms/build
       - name: Set up qemu-user + arm cross toolchain
         if: matrix.qemu
         shell: bash
@@ -138,6 +155,7 @@ jobs:
   progress:
     name: 'suite progress -> README'
     runs-on: ubuntu-24.04
+    needs: build-roms
     timeout-minutes: 40
     permissions:
       contents: write
@@ -155,10 +173,12 @@ jobs:
       - name: Install Rust
         shell: bash
         run: rustup default stable
-      # report-update runs every suite, including first-party `rustyboi` (RGBDS).
-      - name: Install RGBDS
-        shell: bash
-        run: sudo apt-get update && sudo apt-get install -y rgbds
+      # report-update runs every suite, including first-party `rustyboi`.
+      - name: Download first-party ROMs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: first-party-roms
+          path: test-roms/build
       - name: Fetch ROMs
         shell: bash
         run: ./tools/run-suites.sh setup
