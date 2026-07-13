@@ -360,11 +360,9 @@ fn dispatch_hotkey(
 ) -> bool {
     match fired.action {
         HotkeyAction::FastForward => {
-            // Hold action: engage on the rising edge, released when the chord
-            // drops (no longer fired) — handled by the caller each frame.
-            if fired.rising && !app.is_fast_forward() {
-                app.toggle_fast_forward();
-            }
+            // Fully handled once per frame by `App::tick_fast_forward_hold`
+            // (engage on hold, release on chord drop, leave menu latch alone),
+            // so there is nothing to do on the per-fired-hotkey pass.
         }
         HotkeyAction::Rewind => {
             if app.rewind_enabled() {
@@ -861,14 +859,13 @@ impl GuiApp<'_> {
         // presses (egui never sees pad input).
         self.app.set_held_pad(held.pad.clone());
 
-        // Fast-forward is a hold action: keep it engaged only while the chord is
-        // active this frame, so releasing the chord turns it off.
+        // Reconcile fast-forward with the held-hotkey state. This engages the
+        // hold gesture (Tab) and releases it when the chord drops, while leaving
+        // a menu/touch toggle latched (the Android path, which has no keyboard).
         let ff_active = fired
             .iter()
             .any(|f| matches!(f.action, HotkeyAction::FastForward));
-        if !ff_active && self.app.is_fast_forward() {
-            self.app.toggle_fast_forward();
-        }
+        self.app.tick_fast_forward_hold(ff_active);
         for f in fired {
             #[cfg(not(target_os = "android"))]
             let exit = dispatch_hotkey(&mut self.app, f, &window, event_loop, &mut self.is_fullscreen);
