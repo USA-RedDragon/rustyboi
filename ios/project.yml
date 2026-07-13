@@ -49,6 +49,8 @@ targets:
       - sdk: AVFAudio.framework
       - sdk: AudioToolbox.framework
       - sdk: CoreAudio.framework
+      # Provides the UTTypeData constant used by the document picker (iOS 14+).
+      - sdk: UniformTypeIdentifiers.framework
 # A shared scheme so `xcodebuild -scheme rustyboi` resolves (XcodeGen does not
 # generate one implicitly). Required by tools/build-ios.sh and CI.
 schemes:
