@@ -32,7 +32,7 @@ jobs:
         shell: bash
         run: make -C test-roms roms
       - name: Upload ROMs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: first-party-roms
           path: test-roms/build
@@ -105,7 +105,7 @@ jobs:
       # suites use the downloaded gb-test-roms and need no artifact.
       - name: Download first-party ROMs
         if: matrix.suite == 'rustyboi'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: first-party-roms
           path: test-roms/build
@@ -175,7 +175,7 @@ jobs:
         run: rustup default stable
       # report-update runs every suite, including first-party `rustyboi`.
       - name: Download first-party ROMs
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: first-party-roms
           path: test-roms/build
