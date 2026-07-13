@@ -16,29 +16,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
-# Platform is a THIN adapter: it creates the winit window + wgpu surface/device,
-# pumps input, owns audio + file dialogs + worker threads + the Android JNI
-# entry, and hands off to `rustyboi-frontend::App` for all UI/render/logic. It
-# no longer depends on egui/egui-wgpu/pixels — the frontend owns those.
 rustyboi-core = { path = "../rustyboi-core" }
 rustyboi-frontend = { path = "../rustyboi-frontend" }
 rustyboi-session = { path = "../rustyboi-session" }
 clap = { version = "=4.6.1", features = ["derive"] }
 log = "=0.4.33"
-# Raw wgpu for surface/adapter/device creation from the winit window. Same 29
-# the frontend + egui-wgpu use, so the handles handed to the frontend match.
 wgpu = "=29.0.4"
-# Block on the async adapter/device requests on native targets.
 pollster = "=1.0.1"
-# We only feed raw generated PCM (SamplesBuffer) to a Player; no audio-file
-# decoding, so drop rodio's default codec decoders (symphonia/claxon/lewton/
-# hound for mp3/flac/vorbis/wav) — dead weight in the binary. Keep `playback`
-# (just pulls `dep:cpal`) for device output.
 rodio = { version = "=0.22.2", default-features = false, features = ["playback"] }
 serde_json = "=1.0.150"
-# winit features are configured per-target below so Android doesn't pull wayland/x11.
-# `rwh_06` gates winit 0.30's raw-window-handle 0.6 trait impls (needed by wgpu
-# surface creation + egui-winit).
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
 winit_input_helper = "=0.17.0"
 
@@ -47,10 +33,15 @@ ureq = { version = "=2.12.1", default-features = false, features = ["tls", "gzip
 rustls = { version = "=0.23.41", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
-winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }
-rfd = "=0.15.4"
 gilrs = "=0.11.2"
 rustls-native-certs = "=0.8.4"
+
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android"), not(target_os = "ios")))'.dependencies]
+winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }
+rfd = "=0.15.4"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "=0.1.7"
@@ -60,8 +51,6 @@ wasm-bindgen = "=0.2.126"
 wasm-bindgen-futures = "=0.4.76"
 
 [target.'cfg(target_os = "android")'.dependencies]
-# Use GameActivity through winit's android-activity backend (subclassable from
-# Kotlin/Java, forwards onActivityResult, better IME/lifecycle than NativeActivity).
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "android-game-activity"] }
 android_logger = "=0.15.1"
 jni = "=0.21.1"

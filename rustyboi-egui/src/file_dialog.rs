@@ -35,7 +35,7 @@ pub fn new() -> impl FileDialogBuilder {
     FileDialogBuilderImpl::new()
 }
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 mod sync_impl {
     use super::*;
 
@@ -198,7 +198,47 @@ mod android_impl {
     }
 }
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(target_os = "ios")]
+mod ios_impl {
+    use super::*;
+
+    /// iOS file dialog stub. Real iOS file picking (UIDocumentPicker) is not yet
+    /// bridged; callbacks return `None` so the app compiles and runs without a
+    /// picker. TODO: wire UIDocumentPickerViewController on the Objective-C side.
+    pub struct FileDialogBuilderImpl;
+
+    impl FileDialogBuilderImpl {
+        pub fn new() -> Self {
+            Self
+        }
+    }
+
+    impl FileDialogBuilder for FileDialogBuilderImpl {
+        fn add_filter(self, _name: &str, _extensions: &[&str]) -> Self {
+            self
+        }
+        fn set_directory<P: AsRef<std::path::Path>>(self, _path: P) -> Self {
+            self
+        }
+        fn set_file_name<S: AsRef<str>>(self, _name: S) -> Self {
+            self
+        }
+        fn pick_file<F>(self, callback: F)
+        where
+            F: FnOnce(Option<FileData>) + Send + 'static,
+        {
+            callback(None);
+        }
+        fn save_file<F>(self, callback: F)
+        where
+            F: FnOnce(Option<PathBuf>) + Send + 'static,
+        {
+            callback(None);
+        }
+    }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 use sync_impl::FileDialogBuilderImpl;
 
 #[cfg(target_arch = "wasm32")]
@@ -206,3 +246,6 @@ use async_impl::FileDialogBuilderImpl;
 
 #[cfg(target_os = "android")]
 use android_impl::FileDialogBuilderImpl;
+
+#[cfg(target_os = "ios")]
+use ios_impl::FileDialogBuilderImpl;
