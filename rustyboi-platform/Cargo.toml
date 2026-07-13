@@ -68,4 +68,4 @@ ndk-sys = "=0.6.0"
 # cpal never does, pinning us to the higher-latency Legacy path). Fed by a
 # lock-free SPSC ring from the emulator thread into oboe's real-time callback.
 oboe = { version = "=0.6.1", features = ["java-interface", "ndk-context"] }
-ringbuf = "=0.4.7"
+ringbuf = "=0.5.0"
