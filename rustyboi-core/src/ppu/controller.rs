@@ -4892,10 +4892,16 @@ impl Ppu {
                 // With CGB HBlank DMA armed, a block can fire a dot or two
                 // INTO HBlank via the per-dot STAT-mode-edge fallback (window
                 // lines have no closed-form mode-0 anchor), so HBlank dots
-                // are not inert then. VBlank has no mode-0 edges and stays
-                // skippable with HDMA armed.
+                // are only inert once this line's block has ALREADY fired
+                // (the rising edge is consumed; the falling edge and the LY
+                // change land past the interior) under a closed-form period
+                // anchor. VBlank has no mode-0 edges and stays skippable with
+                // HDMA armed.
                 if mmio.is_cgb_features_enabled()
                     && (mmio.hdma_is_enabled() || mmio.hdma_req_pending())
+                    && (mmio.hdma_req_pending()
+                        || !mmio.hdma_block_fired_this_hblank()
+                        || self.m0_time_master.is_none())
                 {
                     return 0;
                 }
