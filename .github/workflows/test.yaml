@@ -274,15 +274,32 @@ jobs:
         run: ./tools/run-suites.sh setup
       - name: Generate combined coverage (unit tests + ROM suites)
         run: |
+          export CARGO_TARGET_DIR=target/llvm-cov-target
           source <(cargo llvm-cov show-env --export-prefix)
-          cargo llvm-cov clean --workspace --profraw-only
+          rm -f "$CARGO_TARGET_DIR"/*.profraw "$CARGO_TARGET_DIR"/*.profdata
           cargo test \
             -p rustyboi-core -p rustyboi-session -p rustyboi-frontend \
             -p rustyboi-egui -p rustyboi-debugger -p rustyboi-test-runner \
             -p rustyboi-libretro-sys -p rustyboi-libretro -p rustyboi-platform
           cargo build --release -p rustyboi-test-runner
-          RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 ./tools/run-suites.sh all || true
-          cargo llvm-cov report --lcov --output-path lcov.info
+          # rustc hardcodes ATOMIC coverage counters (no opt-out); on the
+          # emulator's hot loop that measures 15-21x wall. Patching lock->nop on
+          # counter increments restores plain (racy-but-fine) counters: ~2.4x.
+          python3 tools/deatomize-coverage.py "$CARGO_TARGET_DIR/release/rustyboi-test-runner"
+          # Full board, EVERY suite. RB_SHARDS runs each suite as 4 separate
+          # single-threaded processes: instrumented threads false-share the
+          # in-process counter array (measured unrunnable); processes have
+          # private counters and merge via %p profraws. Report-only (|| true):
+          # the test matrix owns the regression gate.
+          RB_SKIP_SETUP=1 RB_SKIP_BUILD=1 RB_SHARDS=4 \
+            RB_BIN="$CARGO_TARGET_DIR/release/rustyboi-test-runner" \
+            ./tools/run-suites.sh all || true
+          # cargo-llvm-cov's `report` can't map the raw-cargo-built runner (suite
+          # coverage silently reads 0%); coverage-lcov.sh drives llvm-cov itself.
+          ./tools/coverage-lcov.sh lcov.info \
+            -p rustyboi-core -p rustyboi-session -p rustyboi-frontend \
+            -p rustyboi-egui -p rustyboi-debugger -p rustyboi-test-runner \
+            -p rustyboi-libretro-sys -p rustyboi-libretro -p rustyboi-platform
       - name: Upload to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
