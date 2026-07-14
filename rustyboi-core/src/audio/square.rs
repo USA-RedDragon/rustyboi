@@ -613,6 +613,31 @@ impl SquareWave {
         // nothing is FS-clocked here.
     }
 
+    /// Distance (in 2 MHz APU cycles) from `cur` to the nearest armed,
+    /// not-yet-reached ch1 sweep counter (event / apply / kill), for the lazy
+    /// catch-up chunker: the controller must stop a batched clock advance
+    /// exactly at each counter so the `cc >= counter` polls in `step` fire at
+    /// the same cc the per-dot crank fired them at. `None` when no future
+    /// counter is armed (counters already <= `cur` fire at the next poll in
+    /// both models; comparisons are deliberately linear, mirroring the polls).
+    pub(crate) fn next_sweep_stop(&self, cur: u32) -> Option<u32> {
+        if !self.channel1 || !self.master {
+            return None;
+        }
+        let mut best: Option<u32> = None;
+        for c in [
+            self.sweep_apply_counter,
+            self.sweep_counter,
+            self.sweep_kill_counter,
+        ] {
+            if c != COUNTER_DISABLED && c > cur {
+                let d = c - cur;
+                best = Some(best.map_or(d, |b| b.min(d)));
+            }
+        }
+        best
+    }
+
     /// The next swept frequency from the shadow register: `shadow ± (shadow >>
     /// shift)`, with NR10 bit 3 selecting the decreasing (subtract) direction.
     /// Pure arithmetic — the caller applies the negate latch / overflow-kill

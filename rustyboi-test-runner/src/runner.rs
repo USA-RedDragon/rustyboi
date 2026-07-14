@@ -745,6 +745,9 @@ fn evaluate_mem_value(gb: &mut GB, frames: usize, addr: u16, expected: u8) -> Re
         let (_breakpoint, c) = gb.step_instruction(false);
         cycles += c as u64;
     }
+    // The APU advances lazily; sync it so a check targeting an APU register
+    // (e.g. audio_testbench's NR52) observes live state like hardware would.
+    gb.sync_lazy_peripherals();
     let got = gb.read_memory(addr);
     if got == expected {
         Ok(())
