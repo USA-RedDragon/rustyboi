@@ -191,7 +191,7 @@ jobs:
           fi
 
   web:
-    name: 'web / (${{ matrix.browser }})'
+    name: 'web / ${{ matrix.browser }} / ${{ matrix.os }}'
     strategy:
       fail-fast: false
       matrix:
