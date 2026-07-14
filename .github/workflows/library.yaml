@@ -74,22 +74,18 @@ jobs:
         if: steps.gate.outputs.have == '1'
         shell: bash
         run: cargo build --release -p rustyboi-test-runner --bin sweep
-      - name: Fetch No-Intro DATs (optional)
-        if: ${{ steps.gate.outputs.have == '1' && env.NOINTRO_DAT_URL != '' }}
-        env:
-          NOINTRO_DAT_URL: ${{ secrets.NOINTRO_DAT_URL }}
+      - name: Fetch No-Intro DATs
+        if: steps.gate.outputs.have == '1'
         shell: bash
         run: |
-          # A zip of Logiqx DAT(s), or a single .dat. Extracted so the gallery
-          # labels ROMs with canonical No-Intro names (never committed).
-          curl -fsSL "$NOINTRO_DAT_URL" -o /tmp/dats.bin
-          mkdir -p "$RUNNER_TEMP/dats"
-          if unzip -tq /tmp/dats.bin >/dev/null 2>&1; then
-            unzip -q /tmp/dats.bin -d "$RUNNER_TEMP/dats"
+          # Public DATs (libretro-database) so the gallery/report label ROMs
+          # with canonical No-Intro names. Best-effort: on fetch failure the
+          # sweep just falls back to file names. Not committed.
+          if ./tools/fetch-nointro-dats.sh "$RUNNER_TEMP/dats"; then
+            echo "NAMES_ARGS=--names $RUNNER_TEMP/dats/gb.dat $RUNNER_TEMP/dats/gbc.dat" >> "$GITHUB_ENV"
           else
-            cp /tmp/dats.bin "$RUNNER_TEMP/dats/nointro.dat"
+            echo "No-Intro DAT fetch failed; gallery will use file names"
           fi
-          echo "NAMES_ARGS=--names $(find "$RUNNER_TEMP/dats" -iname '*.dat' -o -iname '*.xml' | tr '\n' ' ')" >> "$GITHUB_ENV"
       - name: Run library sweep
         if: steps.gate.outputs.have == '1'
         shell: bash
