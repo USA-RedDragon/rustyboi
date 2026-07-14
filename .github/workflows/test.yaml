@@ -219,11 +219,11 @@ jobs:
           rustup target add wasm32-unknown-unknown
       - name: Run web tests
         run: |
-          sudo safaridriver --enable
           export CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver"
           export GECKODRIVER="$GECKOWEBDRIVER/geckodriver"
           HEADLESS="--headless"
           if [[ "${{ matrix.browser }}" == "safari" ]]; then
             HEADLESS=""
+            sudo safaridriver --enable
           fi
           wasm-pack test $HEADLESS --${{ matrix.browser }} rustyboi-web
