@@ -131,17 +131,34 @@ rc_build() {   # triple variant crt <extra cargo args...>
         flags="$flags -C link-arg=-fuse-ld=bfd"
     fi
 
-    # Per-target env (linker / deployment target).
-    local pre=""
+    # PGO: the shared profile lives under target/ (mounted at /project). Apply
+    # it best-effort. IR PGO is target-portable, so a profile collected on the
+    # container's x86_64 host helps every cross target; rustc only WARNS on an
+    # incompatible profile (never breaks the build), and `pgo.sh flags` (run
+    # in-container below) suppresses it if the container toolchain rejects it.
+    # RB_NO_PGO=1 opts out.
+    # Profiles are version-keyed (profile-<rustc>.profdata); the in-container
+    # pgo.sh flags picks the one matching the CONTAINER's rustc, or emits
+    # nothing (host and container toolchains often differ). Attempt whenever any
+    # profile exists on the host tree (mounted at /project).
+    local pgo_pre=""
+    if [ -z "${RB_NO_PGO:-}" ] && ls "$PROJECT_ROOT"/target/pgo/profile-*.profdata >/dev/null 2>&1; then
+        pgo_pre='PGO="$(tools/pgo.sh flags 2>/dev/null || true)";'
+        flags="$flags \$PGO"
+    fi
+
+    # Per-target env (linker / deployment target). Seed with pgo_pre so $PGO is
+    # set before the RUSTFLAGS export that references it.
+    local pre="$pgo_pre"
     case "$variant" in
         android)
             local pfx lvar
             pfx="$(_rc_android_clang_prefix "$triple")"
             lvar="CARGO_TARGET_$(echo "$triple" | tr 'a-z-' 'A-Z_')_LINKER"
-            pre="export $lvar=\"\$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/${pfx}${ANDROID_API}-clang\";" ;;
+            pre="$pre export $lvar=\"\$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/${pfx}${ANDROID_API}-clang\";" ;;
         ios)
             # Modern LC_BUILD_VERSION (platform iOS), not the legacy min-10.0 cmd.
-            pre='export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-14.0}";' ;;
+            pre="$pre"' export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-14.0}";' ;;
     esac
     [ -n "$flags" ] && pre="$pre export RUSTFLAGS=\"$flags \${RUSTFLAGS:-}\";"
 

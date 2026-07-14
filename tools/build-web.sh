@@ -38,7 +38,11 @@ echo "==> wasm-pack build ($PACK_PROFILE; bundled wasm-opt disabled)"
 # `"files": [...]` array ("invalid type: sequence, expected a string"). Wipe the
 # out-dir first so it always generates fresh.
 rm -rf "rustyboi-web/$OUT"
-wasm-pack build rustyboi-web --target web --out-dir "$OUT" "$PACK_PROFILE"
+# PGO best-effort (host rustc == the one wasm-pack drives; IR profile is
+# target-portable, empty/incompatible => no-op). RB_NO_PGO=1 opts out.
+PGO_FLAGS="$("$(dirname "${BASH_SOURCE[0]}")/pgo.sh" flags 2>/dev/null || true)"
+RUSTFLAGS="$PGO_FLAGS ${RUSTFLAGS:-}" \
+    wasm-pack build rustyboi-web --target web --out-dir "$OUT" "$PACK_PROFILE"
 
 if command -v wasm-opt >/dev/null 2>&1; then
     before=$(stat -c%s "$WASM")
