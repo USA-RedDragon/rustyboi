@@ -700,13 +700,13 @@ impl ApplicationHandler for GuiApp<'_> {
         #[cfg(target_os = "android")]
         if let WindowEvent::KeyboardInput { event: ref key, .. } = event {
             use winit::keyboard::{NativeKeyCode, PhysicalKey};
-            if let PhysicalKey::Unidentified(NativeKeyCode::Android(code)) = key.physical_key {
-                if let Some(pb) = android_pad_button(code) {
-                    if key.state == winit::event::ElementState::Pressed {
-                        self.android_pad.insert(pb);
-                    } else {
-                        self.android_pad.remove(&pb);
-                    }
+            if let PhysicalKey::Unidentified(NativeKeyCode::Android(code)) = key.physical_key
+                && let Some(pb) = android_pad_button(code)
+            {
+                if key.state == winit::event::ElementState::Pressed {
+                    self.android_pad.insert(pb);
+                } else {
+                    self.android_pad.remove(&pb);
                 }
             }
         }
