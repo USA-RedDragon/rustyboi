@@ -73,9 +73,13 @@ impl<'a> Bus<'a> {
         // HDMA triggers on the PPU's exact mode-0 (HBlank) entry, so check it
         // AFTER the PPU has stepped this dot. Prefer the renderer's cycle-exact
         // `hdma_period` predicate; fall back to the STAT mode-edge when no
-        // closed-form mode-0 dot is available.
-        let period = self.ppu.hdma_period(double_speed);
-        self.mmio.step_hdma(period);
+        // closed-form mode-0 dot is available. HDMA exists only with CGB
+        // features, so skip the per-dot closed-form period resolve entirely
+        // otherwise (`step_hdma` is a no-op there).
+        if self.mmio.is_cgb_features_enabled() {
+            let period = self.ppu.hdma_period(double_speed);
+            self.mmio.step_hdma(period);
+        }
         // Drain any deferred HDMA block writes whose sub-M-cycle delay has elapsed
         // (byte i commits at fire + (2 + 2*ds)). Runs after step_hdma so a block
         // flagged this same dot begins its countdown here and only commits to VRAM
@@ -87,8 +91,15 @@ impl<'a> Bus<'a> {
         // dot's OAM-DMA-source conflict resolution. `step_dma` runs at the START
         // of the following dot (before that dot's `ppu.step`), so it reads the
         // address as latched HERE — one dot earlier — which is the phase the real
-        // bus conflict observes.
-        self.ppu.update_dma_fetcher_bus(self.mmio);
+        // bus conflict observes. Consumed ONLY by the OAM-DMA source-conflict
+        // paths inside `step_dma_slow`, which run iff `dma_active ||
+        // oam_dma_stall_suppress > 0` — and FF46 arms `dma_active`
+        // synchronously with the first byte landing 4 dots later, so gating the
+        // publish on the same predicate still refreshes the bus before any
+        // conflicted read can consume it.
+        if self.mmio.oam_dma_bus_snoop_needed() {
+            self.ppu.update_dma_fetcher_bus(self.mmio);
+        }
 
         // Advance the MBC3 RTC one T-cycle. The RTC crystal runs off the same
         // 4.194304 MHz master (dot) clock this loop cranks, so one dot == one

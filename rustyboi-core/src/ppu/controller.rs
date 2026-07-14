@@ -10560,7 +10560,24 @@ impl Ppu {
     /// `OAM-DMA start`/`OAM-DMA end`/`OAM change` plus the implicit `update(cc)` the
     /// mode-2 the event dispatch performs. Run after `abs_cc` is folded to the current dot,
     /// before the mode-2 scan reads the snapshot.
+    /// Per-dot gate for the OAM snapshot snoop. Inlined so the common no-event
+    /// dot pays one flag compare — the outlined body's stack frame (the
+    /// 80-byte pos buffer) was the hot loop's single biggest fixed cost.
+    #[inline]
     fn process_oam_reader_events(&mut self, mmio: &mut mmio::Mmio) {
+        // Fast path: with no OAM-DMA active, no pending CPU OAM write, no DMA
+        // window seen last dot, and the snapshot already seeded, neither
+        // `change()` trigger in the body can fire.
+        if self.oam_reader_seeded
+            && !self.prev_dma_writing
+            && !mmio.oam_snoop_event_possible()
+        {
+            return;
+        }
+        self.process_oam_reader_events_slow(mmio);
+    }
+
+    fn process_oam_reader_events_slow(&mut self, mmio: &mut mmio::Mmio) {
         let cc = self.abs_cc;
 
         // Lazy seed for the current LCD-on session.
@@ -10574,16 +10591,6 @@ impl Ppu {
             self.prev_dma_writing =
                 mmio.oam_dma_window_active() && !mmio.mgb_frozen_merge_active();
             self.oam_reader_seeded = true;
-            return;
-        }
-
-        // Fast path: with no OAM-DMA active, no pending CPU OAM write, and no
-        // DMA window seen last dot, neither `change()` trigger below can fire
-        // (`dma_writing` is necessarily false, so no edge; the pending-write
-        // take is necessarily false). `large_src` is only consumed inside the
-        // `change`/`update` walks, so skipping its per-dot refresh here is
-        // invisible — every walk entry point re-derives it first.
-        if !self.prev_dma_writing && !mmio.oam_snoop_event_possible() {
             return;
         }
 

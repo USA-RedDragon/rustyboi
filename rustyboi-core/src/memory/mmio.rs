@@ -4671,6 +4671,14 @@ impl Mmio {
         self.dma_active || self.oam_write_pending
     }
 
+    /// Whether the per-dot OAM-DMA bus-conflict publish
+    /// (`Ppu::update_dma_fetcher_bus`) has a possible consumer: the conflict
+    /// resolution inside `step_dma_slow` runs only under this same predicate.
+    #[inline]
+    pub fn oam_dma_bus_snoop_needed(&self) -> bool {
+        self.dma_active || self.oam_dma_stall_suppress != 0
+    }
+
     /// CPU-side write to FF44 (LY). On real hardware this resets the line
     /// counter to 0 (the value written is ignored). The PPU will observe the
     /// pending flag on its next step and re-arm internal scanline state.
