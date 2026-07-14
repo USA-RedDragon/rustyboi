@@ -4691,6 +4691,55 @@ impl Mmio {
             && !self.serial_device.drives_external_clock()
     }
 
+    /// Exclusive master-cc bound (clamped to `target`) up to which the per-dot
+    /// resolve loop needs ONLY the PPU family + CGB HDMA tracking + RTC +
+    /// t-phase per dot: the timer is a pure `abs_cc` bump (no overflow
+    /// delivery, no APU FS edge — `Timer::quiet_until`), serial and the JOYP
+    /// filter are idle, no OAM-DMA is in flight and no HDMA lockstep window is
+    /// armed. Every excluded condition can only change at a CPU access
+    /// boundary or at a bounded event cc, never silently inside the span
+    /// (an HDMA block firing mid-span touches `oam_dma_stall_suppress` only
+    /// when `dma_active`, which is excluded). Returns `master_cc()` when no
+    /// quiet span is available.
+    pub fn quiet_span_end(&self, target: u64) -> u64 {
+        if self.dma_active
+            || self.oam_dma_stall_suppress != 0
+            || self.joypad_irq_delay != 0
+            || self.serial.is_active()
+            || self.serial_device.drives_external_clock()
+            || self.hdma_resume_lockstep_window
+        {
+            return self.timer.abs_cc();
+        }
+        // `quiet_until` is exclusive: the dot landing ON the bound (an
+        // overflow delivery or FS-edge cc) must be a real `Timer::step`, so
+        // the bumped span may reach at most bound-1. `target` itself is a CPU
+        // access boundary with no event at it, so landing on it is fine.
+        target.min(self.timer.quiet_until(self.cpu_is_halted()).saturating_sub(1))
+    }
+
+    /// Raw one-dot master-clock bump for the quiet-span fast loop (see
+    /// `Timer::bump_cc_one`).
+    #[inline]
+    pub fn bump_master_cc_one(&mut self) {
+        self.timer.bump_cc_one();
+    }
+
+    /// Raw n-dot master-clock bump for the inert-PPU fast-forward. Same
+    /// soundness argument as `bump_master_cc_one`: every bumped dot lies
+    /// strictly below the quiet bound.
+    #[inline]
+    pub fn bump_master_cc_by(&mut self, n: u64) {
+        self.timer.bump_cc_by(n);
+    }
+
+    /// Batch t-phase advance for the inert-PPU fast-forward (the per-dot
+    /// counter is a plain increment).
+    #[inline]
+    pub fn advance_cpu_t_phase_by(&mut self, n: u64) {
+        self.cpu_t_phase = self.cpu_t_phase.wrapping_add(n);
+    }
+
     /// CPU-side write to FF44 (LY). On real hardware this resets the line
     /// counter to 0 (the value written is ignored). The PPU will observe the
     /// pending flag on its next step and re-arm internal scanline state.
