@@ -218,10 +218,6 @@ jobs:
           cargo install wasm-pack
           rustup target add wasm32-unknown-unknown
       - name: Run web tests
-        # Each browser sets ONLY its own driver. Setting CHROMEDRIVER/GECKODRIVER
-        # for the Safari leg makes wasm-pack pick that driver — `--geckodriver`/
-        # `--chromedriver` (which a *DRIVER path implies) override `--safari`, so
-        # Safari would actually run as Firefox. Safari also has no headless mode.
         run: |
           case "${{ matrix.browser }}" in
             chrome)
@@ -234,7 +230,7 @@ jobs:
               ;;
             safari)
               sudo safaridriver --enable
-              wasm-pack test --safari rustyboi-web
+              wasm-pack test --headless --safari rustyboi-web
               ;;
           esac
 
