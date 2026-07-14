@@ -14,3 +14,4 @@ GBEmulatorShootout/
 *.pyc
 
 lcov.info
+sweep-out/

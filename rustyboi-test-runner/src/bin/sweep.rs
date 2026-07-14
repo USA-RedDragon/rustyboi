@@ -1,0 +1,797 @@
+//! Library-wide regression + performance sweep.
+//!
+//! Runs every ROM in a game library under a deterministic input masher,
+//! recording per-ROM performance, a cumulative every-frame framebuffer hash,
+//! checkpoint hashes, and a final-frame screenshot. Two sweeps compare into a
+//! regression report: any hash difference is a behavior change (the library is
+//! ~1200 canaries wide), any fps drop beyond tolerance is a perf regression.
+//!
+//!   sweep run      --roms DIR... [--list FILE] --out DIR [--frames N]
+//!                  [--warmup N] [--jobs N] [--timeout SECS] [--no-screens]
+//!                  [--strip-names] [--names DAT...] [--only SUBSTR]
+//!       Sweep the library into DIR/manifest.jsonl + DIR/screens/*.png.
+//!       --strip-names produces the committable baseline: omits the ROM
+//!       title/path (rom_sha stays as the join identity) so no trademarked
+//!       names are committed, and drops machine-specific fps/ns_per_frame.
+//!       Screenshots are still written (used before serialization).
+//!       --names <dat>... labels each ROM by its canonical No-Intro name,
+//!       matched via CRC32 of the extracted ROM against Logiqx XML DAT(s)
+//!       (No-Intro / DAT-o-MATIC). Unmatched ROMs fall back to the file stem.
+//!       The DAT is supplied at runtime, never committed. Used for the gallery
+//!       and comparison reports; orthogonal to --strip-names (the baseline).
+//!
+//!   sweep compare  --base A.jsonl --cand B.jsonl [--min-ratio R]
+//!                  [--ignore-perf] [--out report.md]
+//!       Diff two manifests. Exit 1 on behavior mismatches, new errors,
+//!       missing ROMs, or (unless --ignore-perf) median-normalized per-ROM
+//!       fps ratios below R (default 0.90).
+//!
+//!       PERF CAVEAT: the parallel sweep measures each ROM once under N-way
+//!       memory-bandwidth contention, so per-ROM fps is noisy (±20% seen) —
+//!       fine for spotting gross regressions, NOT for fine per-ROM gating.
+//!       Confirm any flagged perf regression with a clean single-threaded
+//!       best-of-3 (`sweep run --list <one-rom> --jobs 1`) before believing
+//!       it. (Measured example: eight ROMs the parallel sweep called 0.75x
+//!       were all 1.33-1.39x FASTER clean — pure contention noise.) CI runs
+//!       --ignore-perf for this reason; perf is a local, quiet-machine check.
+//!
+//!   sweep gallery  --manifest M.jsonl --screens DIR [--out gallery.html]
+//!       Self-contained HTML gallery: screenshot, hardware, fps, boot status.
+//!
+//! Determinism: the core has no wall-clock/thread inputs (MBC3 RTC is
+//! cycle-derived; sidecars are never read by `Cartridge::from_bytes`), and the
+//! masher derives all input from the ROM's SHA-256 + frame index, so every
+//! hash in the manifest is reproducible across machines and builds. Only the
+//! fps/ns_per_frame fields vary run to run.
+
+use rayon::prelude::*;
+use rustyboi_core_lib::cartridge::Cartridge;
+use rustyboi_core_lib::gb::{Hardware, GB};
+use rustyboi_core_lib::input::ButtonState;
+use rustyboi_core_lib::movie::{frame_hash, frame_is_non_blank, sha256};
+use serde::{Deserialize, Serialize};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
+
+#[path = "shared/imaging.rs"]
+mod imaging;
+use imaging::{base64, encode_rgb_png, frame_rgb, html_escape};
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Row {
+    /// `<parent dir>/<file name>` — human-readable, but a trademarked game
+    /// title. Omitted from committed/anonymized manifests (`run --strip-names`);
+    /// `rom_sha` is the join identity so the baseline needs no titles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// First 8 bytes of the ROM file's SHA-256 (64-bit, collision-negligible
+    /// across a library). THE identity used to match rows between manifests: a
+    /// row present in one manifest but not the other means the library changed,
+    /// not the emulator. Opaque, so safe to commit.
+    rom_sha: String,
+    hardware: String,
+    frames: usize,
+    /// FNV fold of every frame's hash over the whole run (frame 0..frames).
+    hash_all: String,
+    /// (frame, hash) pairs for localizing where two runs diverge.
+    checkpoints: Vec<(usize, String)>,
+    boot_ok: bool,
+    changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ns_per_frame: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    let sub = args.get(1).map(String::as_str);
+    let rest = &args[args.len().min(2)..];
+    let result = match sub {
+        Some("run") => cmd_run(rest),
+        Some("compare") => cmd_compare(rest),
+        Some("gallery") => cmd_gallery(rest),
+        _ => {
+            eprintln!(
+                "usage:\n  sweep run     --roms DIR... [--list FILE] --out DIR [--frames N] \
+                 [--warmup N] [--jobs N] [--timeout SECS] [--no-screens] [--only SUBSTR]\n  \
+                 sweep compare --base A.jsonl --cand B.jsonl [--min-ratio R] [--ignore-perf] \
+                 [--out report.md]\n  \
+                 sweep gallery --manifest M.jsonl --screens DIR [--out gallery.html]"
+            );
+            return ExitCode::from(2);
+        }
+    };
+    match result {
+        Ok(ok) => {
+            if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// deterministic input masher
+// ---------------------------------------------------------------------------
+
+/// Stateless per-frame input. Frames 0..600: fixed title-clearing taps
+/// (START/A alternating, 6-frame holds so edge-triggered menus see press and
+/// release). Frames 600+: 30-frame slots from a per-ROM seeded xorshift —
+/// hold a weighted gameplay combo for 15 frames, release 15. START/SELECT are
+/// excluded from the gameplay phase (pause screens are static and would skew
+/// both hashes and perf toward idle menus) — except paired START taps (tap +
+/// counter-tap 60 frames later) so games whose intro outlasts the title phase
+/// still get entry chances, while games already in gameplay pause for at most
+/// ~60 frames per pair.
+fn masher(frame: usize, seed: u64) -> ButtonState {
+    let mut b = ButtonState::default();
+    let tap = |at: usize| frame >= at && frame < at + 6;
+    if frame < 600 {
+        if tap(120) || tap(280) || tap(440) {
+            b.start = true;
+        }
+        if tap(200) || tap(360) || tap(520) {
+            b.a = true;
+        }
+        return b;
+    }
+    if tap(800) || tap(860) || tap(1600) || tap(1660) || tap(2400) || tap(2460) {
+        b.start = true;
+        return b;
+    }
+    let slot = ((frame - 600) / 30) as u64;
+    if (frame - 600) % 30 >= 15 {
+        return b; // release half of the slot
+    }
+    // xorshift64* on seed ^ slot: stable per (ROM, slot), order-independent.
+    let mut x = seed ^ slot.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    let r = x.wrapping_mul(0x2545_F491_4F6C_DD1D) % 100;
+    match r {
+        0..=24 => b.right = true,
+        25..=39 => b.left = true,
+        40..=49 => b.down = true,
+        50..=59 => b.up = true,
+        60..=79 => b.a = true,
+        80..=89 => {
+            b.a = true;
+            b.right = true;
+        }
+        _ => b.b = true,
+    }
+    b
+}
+
+// ---------------------------------------------------------------------------
+// run
+// ---------------------------------------------------------------------------
+
+struct RunCfg {
+    frames: usize,
+    warmup: usize,
+    timeout_secs: u64,
+    screens_dir: Option<PathBuf>,
+    /// CRC32 -> No-Intro game name, from any `--names <dat>` Logiqx DAT files.
+    /// Empty = label rows by file stem.
+    names: std::collections::HashMap<u32, String>,
+}
+
+/// CRC32 (reflected, poly 0xEDB88320) — the checksum No-Intro DATs key on.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xEDB8_8320 & (0u32.wrapping_sub(crc & 1)));
+        }
+    }
+    !crc
+}
+
+/// Parse a Logiqx XML DAT (No-Intro / DAT-o-MATIC format) into the crc->name
+/// map. Structure: `<game name="Rampart (USA)"> <rom crc="ABCD1234" .../> </game>`.
+/// A lightweight tag scan — no XML dep — tracking the current game name and
+/// attaching it to each nested rom's CRC. Unknown/other formats contribute
+/// nothing (rows just fall back to file stems).
+fn parse_dat(text: &str, map: &mut std::collections::HashMap<u32, String>) {
+    let attr = |s: &str, key: &str| -> Option<String> {
+        let pat = format!("{key}=\"");
+        let i = s.find(&pat)? + pat.len();
+        let j = s[i..].find('"')? + i;
+        Some(s[i..j].to_string())
+    };
+    let mut cur: Option<String> = None;
+    for tag in text.split('<') {
+        if let Some(rest) = tag.strip_prefix("game ").or_else(|| tag.strip_prefix("machine ")) {
+            cur = attr(rest, "name");
+        } else if let Some(rest) = tag.strip_prefix("rom ")
+            && let (Some(name), Some(crc)) = (&cur, attr(rest, "crc"))
+            && let Ok(v) = u32::from_str_radix(crc.trim(), 16)
+        {
+            map.entry(v).or_insert_with(|| name.clone());
+        }
+    }
+}
+
+fn cmd_run(args: &[String]) -> Result<bool, String> {
+    let out_dir = PathBuf::from(arg(args, "--out").ok_or("run: --out <dir> required")?);
+    let frames: usize = parse_num(args, "--frames", 3000)?;
+    let warmup: usize = parse_num(args, "--warmup", 600)?;
+    let timeout_secs: u64 = parse_num(args, "--timeout", 300)? as u64;
+    let jobs: usize = parse_num(args, "--jobs", 0)?;
+    let no_screens = args.iter().any(|a| a == "--no-screens");
+    let strip_names = args.iter().any(|a| a == "--strip-names");
+    let only = arg(args, "--only");
+    if warmup >= frames {
+        return Err("run: --warmup must be < --frames".into());
+    }
+
+    let mut names = std::collections::HashMap::new();
+    for dat in multi_arg(args, "--names") {
+        let text = std::fs::read_to_string(&dat).map_err(|e| format!("read {dat}: {e}"))?;
+        parse_dat(&text, &mut names);
+    }
+    if !names.is_empty() {
+        eprintln!("loaded {} No-Intro names", names.len());
+    }
+
+    let mut roms: Vec<(String, PathBuf)> = Vec::new();
+    for dir in multi_arg(args, "--roms") {
+        let root = PathBuf::from(&dir);
+        let prefix = root
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        collect_roms(&root, &prefix, &mut roms)?;
+    }
+    if let Some(list) = arg(args, "--list") {
+        let text = std::fs::read_to_string(&list).map_err(|e| format!("read {list}: {e}"))?;
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            let p = PathBuf::from(line);
+            let key = rom_key(&p);
+            roms.push((key, p));
+        }
+    }
+    if let Some(pat) = &only {
+        roms.retain(|(k, _)| k.contains(pat.as_str()));
+    }
+    roms.sort();
+    roms.dedup_by(|a, b| a.0 == b.0);
+    if roms.is_empty() {
+        return Err("run: no ROMs found".into());
+    }
+
+    std::fs::create_dir_all(&out_dir).map_err(|e| format!("mkdir {}: {e}", out_dir.display()))?;
+    let screens_dir = if no_screens {
+        None
+    } else {
+        let d = out_dir.join("screens");
+        std::fs::create_dir_all(&d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
+        Some(d)
+    };
+    let cfg = RunCfg { frames, warmup, timeout_secs, screens_dir, names };
+
+    if jobs > 0 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(jobs)
+            .build_global()
+            .map_err(|e| format!("thread pool: {e}"))?;
+    }
+
+    let total = roms.len();
+    let done = AtomicUsize::new(0);
+    let started = Instant::now();
+    let mut rows: Vec<Row> = roms
+        .par_iter()
+        .map(|(key, path)| {
+            let row = run_one(key, path, &cfg);
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let status = match (&row.error, row.fps) {
+                (Some(e), _) => format!("ERROR: {e}"),
+                (None, Some(fps)) => format!("{fps:7.1} fps  {}", if row.boot_ok { "ok" } else { "BLANK" }),
+                _ => "done".into(),
+            };
+            eprintln!("[{n:4}/{total}] {key}  {status}");
+            row
+        })
+        .collect();
+    // Sort by rom_sha so the committed baseline has a stable, name-free order.
+    rows.sort_by(|a, b| a.rom_sha.cmp(&b.rom_sha));
+
+    let manifest = out_dir.join("manifest.jsonl");
+    let mut f = std::fs::File::create(&manifest).map_err(|e| format!("create manifest: {e}"))?;
+    for row in &rows {
+        // Screenshots were already written above using the in-memory key;
+        // --strip-names only affects what lands in the manifest. It also drops
+        // fps/ns_per_frame: this flag produces the committable baseline, and
+        // machine-specific timing there is pure noise (churns every regen,
+        // means nothing across machines). Behavior fields (hash_all,
+        // checkpoints, boot_ok, changed) are what a committed baseline gates.
+        let line = if strip_names {
+            let mut r = row.clone();
+            r.key = None;
+            r.name = None;
+            r.fps = None;
+            r.ns_per_frame = None;
+            serde_json::to_string(&r)
+        } else {
+            serde_json::to_string(row)
+        }
+        .map_err(|e| format!("serialize: {e}"))?;
+        writeln!(f, "{line}").map_err(|e| format!("write manifest: {e}"))?;
+    }
+
+    let errors = rows.iter().filter(|r| r.error.is_some()).count();
+    let blank = rows.iter().filter(|r| r.error.is_none() && !(r.boot_ok && r.changed)).count();
+    let med = median(
+        rows.iter().filter_map(|r| r.fps).collect::<Vec<_>>(),
+    );
+    println!(
+        "sweep: {} ROMs in {:.0}s — {} ok, {blank} blank/static, {errors} errors; median {:.0} fps -> {}",
+        rows.len(),
+        started.elapsed().as_secs_f64(),
+        rows.len() - errors - blank,
+        med.unwrap_or(0.0),
+        manifest.display()
+    );
+    Ok(true)
+}
+
+fn collect_roms(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("read dir {}: {e}", dir.display()))?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            let sub = format!("{prefix}/{}", entry.file_name().to_string_lossy());
+            collect_roms(&path, &sub, out)?;
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| matches!(e.to_ascii_lowercase().as_str(), "gb" | "gbc" | "zip"))
+            .unwrap_or(false)
+        {
+            let key = format!("{prefix}/{}", path.file_name().unwrap_or_default().to_string_lossy());
+            out.push((key, path));
+        }
+    }
+    Ok(())
+}
+
+fn rom_key(path: &Path) -> String {
+    let parent = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("{parent}/{}", path.file_name().unwrap_or_default().to_string_lossy())
+}
+
+fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut row = Row {
+        key: Some(key.to_string()),
+        name: Some(name),
+        rom_sha: String::new(),
+        hardware: String::new(),
+        frames: cfg.frames,
+        hash_all: String::new(),
+        checkpoints: Vec::new(),
+        boot_ok: false,
+        changed: false,
+        fps: None,
+        ns_per_frame: None,
+        error: None,
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            row.error = Some(format!("read: {e}"));
+            return row;
+        }
+    };
+    let sha = sha256(&bytes);
+    row.rom_sha = sha[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let seed = u64::from_le_bytes(sha[..8].try_into().unwrap());
+
+    // No-Intro name via CRC32 of the extracted ROM (not the zip container).
+    // Only when a DAT was loaded and the CRC matches; else keep the file stem.
+    if !cfg.names.is_empty()
+        && let Ok(rom) = Cartridge::extract_rom_bytes(&bytes)
+        && let Some(nointro) = cfg.names.get(&crc32(&rom))
+    {
+        row.name = Some(nointro.clone());
+    }
+
+    // Wild-library ROMs are a fuzz surface; a panic in one must not kill the
+    // sweep (or its rayon worker), so it demotes to an error row.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        emulate(&bytes, seed, cfg)
+    }));
+    match result {
+        Ok(Ok(out)) => {
+            row.hardware = out.hardware;
+            row.hash_all = format!("{:016x}", out.hash_all);
+            row.checkpoints = out
+                .checkpoints
+                .into_iter()
+                .map(|(f, h)| (f, format!("{h:016x}")))
+                .collect();
+            row.boot_ok = out.boot_ok;
+            row.changed = out.changed;
+            row.fps = Some(out.fps);
+            row.ns_per_frame = Some(out.ns_per_frame);
+            if let (Some(dir), Some(rgb)) = (&cfg.screens_dir, &out.final_rgb) {
+                let png = encode_rgb_png(160, 144, rgb);
+                let file = dir.join(format!("{}.png", sanitize(key)));
+                if let Err(e) = std::fs::write(&file, png) {
+                    eprintln!("screenshot {}: {e}", file.display());
+                }
+            }
+        }
+        Ok(Err(e)) => row.error = Some(e),
+        Err(p) => {
+            let msg = p
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| p.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".into());
+            row.error = Some(format!("panic: {msg}"));
+        }
+    }
+    row
+}
+
+struct EmuOut {
+    hardware: String,
+    hash_all: u64,
+    checkpoints: Vec<(usize, u64)>,
+    boot_ok: bool,
+    changed: bool,
+    fps: f64,
+    ns_per_frame: f64,
+    final_rgb: Option<Vec<u8>>,
+}
+
+fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
+    let cart = Cartridge::from_bytes(bytes).map_err(|e| format!("load: {e}"))?;
+    let hardware = if cart.supports_cgb() { Hardware::CGB } else { Hardware::DMG };
+    let mut gb = GB::new(hardware);
+    gb.insert(cart);
+    gb.skip_bios();
+
+    // Checkpoints at warmup and every ~quarter of the measured window.
+    let span = cfg.frames - cfg.warmup;
+    let checkpoint_at: Vec<usize> = (0..=4)
+        .map(|i| cfg.warmup + span * i / 4)
+        .collect();
+
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash_all: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut checkpoints = Vec::with_capacity(checkpoint_at.len());
+    let mut first_hash = None;
+    let mut changed = false;
+    let mut boot_ok = false;
+    let mut final_rgb = None;
+    let mut timer = None;
+    let started = Instant::now();
+
+    for f in 0..cfg.frames {
+        if f == cfg.warmup {
+            timer = Some(Instant::now());
+        }
+        gb.set_input_state(masher(f, seed));
+        let (frame, _bp) = gb.run_until_frame(false);
+        let h = frame_hash(&frame);
+        hash_all = (hash_all ^ h).wrapping_mul(FNV_PRIME);
+        if checkpoint_at.contains(&(f + 1)) {
+            checkpoints.push((f + 1, hash_all));
+        }
+        match first_hash {
+            None => first_hash = Some(h),
+            Some(fh) if fh != h => changed = true,
+            _ => {}
+        }
+        // Classify + screenshot on the last non-blank frame of the final 120
+        // (a run ending mid fade-to-black is not a boot failure).
+        if f + 120 >= cfg.frames {
+            if frame_is_non_blank(&frame) {
+                boot_ok = true;
+                if cfg.screens_dir.is_some() {
+                    final_rgb = Some(frame_rgb(&frame));
+                }
+            } else if f + 1 == cfg.frames && final_rgb.is_none() && cfg.screens_dir.is_some() {
+                final_rgb = Some(frame_rgb(&frame));
+            }
+        }
+        if f % 256 == 0 && started.elapsed().as_secs() > cfg.timeout_secs {
+            return Err(format!("timeout after {} frames", f + 1));
+        }
+    }
+
+    let elapsed = timer.expect("warmup < frames").elapsed();
+    let measured = span as f64;
+    Ok(EmuOut {
+        hardware: format!("{hardware:?}"),
+        hash_all,
+        checkpoints,
+        boot_ok,
+        changed,
+        fps: measured / elapsed.as_secs_f64(),
+        ns_per_frame: elapsed.as_nanos() as f64 / measured,
+        final_rgb,
+    })
+}
+
+fn sanitize(key: &str) -> String {
+    key.chars()
+        .map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '(' | ')' | '[' | ']' | '!' | '+' | ',' | '\'' | ' ') { c } else { '_' })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// compare
+// ---------------------------------------------------------------------------
+
+fn cmd_compare(args: &[String]) -> Result<bool, String> {
+    let base_path = arg(args, "--base").ok_or("compare: --base <manifest> required")?;
+    let cand_path = arg(args, "--cand").ok_or("compare: --cand <manifest> required")?;
+    let min_ratio: f64 = arg(args, "--min-ratio").map_or(Ok(0.90), |v| {
+        v.parse().map_err(|_| format!("bad --min-ratio {v:?}"))
+    })?;
+    let ignore_perf = args.iter().any(|a| a == "--ignore-perf");
+    let out = arg(args, "--out");
+
+    let base = load_manifest(&base_path)?;
+    let cand = load_manifest(&cand_path)?;
+    // Join on rom_sha, not the (trademarked, possibly-absent) title. The
+    // committed baseline carries no names; the candidate (a fresh sweep) does,
+    // so reports prefer the candidate's name and fall back to `sha:<hash>`.
+    let cand_map: std::collections::BTreeMap<&str, &Row> =
+        cand.iter().map(|r| (r.rom_sha.as_str(), r)).collect();
+    let base_shas: std::collections::BTreeSet<&str> =
+        base.iter().map(|r| r.rom_sha.as_str()).collect();
+    let label = |r: &Row| -> String {
+        r.name.clone().unwrap_or_else(|| format!("sha:{}", r.rom_sha))
+    };
+
+    let mut missing = Vec::new(); // sha in base, not in cand
+    let extra: Vec<String> = cand
+        .iter()
+        .filter(|r| !base_shas.contains(r.rom_sha.as_str()))
+        .map(&label)
+        .collect();
+    let mut new_errors = Vec::new();
+    let mut fixed_errors = 0usize;
+    let mut behavior = Vec::new();
+    let mut ratios: Vec<(f64, String)> = Vec::new();
+
+    for b in &base {
+        let Some(c) = cand_map.get(b.rom_sha.as_str()) else {
+            missing.push(label(b));
+            continue;
+        };
+        match (&b.error, &c.error) {
+            (None, Some(e)) => {
+                new_errors.push(format!("{}: {e}", label(c)));
+                continue;
+            }
+            (Some(_), None) => fixed_errors += 1,
+            (Some(_), Some(_)) => continue,
+            (None, None) => {}
+        }
+        if b.hash_all != c.hash_all {
+            let first_diff = b
+                .checkpoints
+                .iter()
+                .zip(&c.checkpoints)
+                .find(|(x, y)| x.1 != y.1)
+                .map(|(x, _)| x.0);
+            behavior.push(match first_diff {
+                Some(fr) => format!("{}: diverges by frame {fr}", label(c)),
+                None => format!("{}: diverges after last checkpoint", label(c)),
+            });
+        }
+        if let (Some(bf), Some(cf)) = (b.fps, c.fps)
+            && bf > 0.0
+        {
+            ratios.push((cf / bf, label(c)));
+        }
+    }
+
+    // Machine/load differences shift ALL ratios together; normalizing by the
+    // median isolates per-ROM regressions from global scale. The median itself
+    // is reported so a global slowdown is still visible.
+    let median_ratio = median(ratios.iter().map(|(r, _)| *r).collect());
+    let mut slow: Vec<(f64, &str)> = Vec::new();
+    if let Some(m) = median_ratio
+        && m > 0.0
+    {
+        slow = ratios
+            .iter()
+            .filter(|(r, _)| r / m < min_ratio)
+            .map(|(r, k)| (r / m, k.as_str()))
+            .collect();
+        slow.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    }
+
+    let mut report = String::new();
+    report.push_str(&format!(
+        "# sweep compare\n\nbase: `{base_path}` ({} ROMs)\ncand: `{cand_path}` ({} ROMs)\n\n",
+        base.len(),
+        cand.len()
+    ));
+    report.push_str(&format!(
+        "| check | result |\n|---|---|\n| behavior (hash) mismatches | {} |\n\
+         | new errors | {} |\n| fixed errors | {} |\n| missing ROMs (in base, gone from cand) | {} |\n\
+         | extra ROMs (new in cand) | {} |\n\
+         | median fps ratio (cand/base) | {} |\n| per-ROM slow outliers (<{min_ratio:.2}× median-normalized) | {} |\n\n",
+        behavior.len(),
+        new_errors.len(),
+        fixed_errors,
+        missing.len(),
+        extra.len(),
+        median_ratio.map_or("n/a".into(), |m| format!("{m:.3}")),
+        if ignore_perf { "ignored".to_string() } else { slow.len().to_string() },
+    ));
+    let mut section = |title: &str, items: &[String]| {
+        if !items.is_empty() {
+            report.push_str(&format!("## {title} ({})\n\n", items.len()));
+            for i in items.iter().take(200) {
+                report.push_str(&format!("- {i}\n"));
+            }
+            if items.len() > 200 {
+                report.push_str(&format!("- … {} more\n", items.len() - 200));
+            }
+            report.push('\n');
+        }
+    };
+    section("Behavior mismatches", &behavior);
+    section("New errors", &new_errors);
+    section("Missing ROMs", &missing);
+    section("Extra ROMs", &extra);
+    if !ignore_perf {
+        section(
+            "Slow outliers (median-normalized)",
+            &slow
+                .iter()
+                .map(|(r, k)| format!("{k}: {r:.3}×"))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    print!("{report}");
+    if let Some(out) = out {
+        std::fs::write(&out, &report).map_err(|e| format!("write {out}: {e}"))?;
+    }
+
+    let perf_fail = !ignore_perf && !slow.is_empty();
+    let ok = behavior.is_empty() && new_errors.is_empty() && missing.is_empty() && !perf_fail;
+    println!("compare: {}", if ok { "OK" } else { "REGRESSIONS FOUND" });
+    Ok(ok)
+}
+
+fn load_manifest(path: &str) -> Result<Vec<Row>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).map_err(|e| format!("{path}: {e}")))
+        .collect()
+}
+
+fn median(mut v: Vec<f64>) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Some(v[v.len() / 2])
+}
+
+// ---------------------------------------------------------------------------
+// gallery
+// ---------------------------------------------------------------------------
+
+fn cmd_gallery(args: &[String]) -> Result<bool, String> {
+    let manifest = arg(args, "--manifest").ok_or("gallery: --manifest <file> required")?;
+    let screens = arg(args, "--screens").ok_or("gallery: --screens <dir> required")?;
+    let out = arg(args, "--out").unwrap_or_else(|| "gallery.html".into());
+
+    let rows = load_manifest(&manifest)?;
+    let ok = rows
+        .iter()
+        .filter(|r| r.error.is_none() && r.boot_ok && r.changed)
+        .count();
+    let med = median(rows.iter().filter_map(|r| r.fps).collect());
+
+    let mut s = String::new();
+    s.push_str("<!doctype html><html><head><meta charset=\"utf-8\">");
+    s.push_str("<title>rustyboi library sweep</title><style>");
+    s.push_str(
+        "body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:24px}\
+         h1{font-weight:600}\
+         .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px}\
+         .card{background:#1c1c1c;border-radius:8px;padding:12px;border:1px solid #333}\
+         .card img{width:100%;image-rendering:pixelated;border-radius:4px;background:#000}\
+         .name{font-size:14px;margin-top:8px;word-break:break-all}\
+         .meta{font-size:12px;color:#999;display:flex;justify-content:space-between;margin-top:4px}\
+         .ok{color:#4ade80}.fail{color:#f87171}.err{color:#fbbf24}",
+    );
+    s.push_str("</style></head><body>");
+    s.push_str(&format!(
+        "<h1>rustyboi library sweep &mdash; {ok}/{} in gameplay, median {:.0} fps</h1><div class=\"grid\">",
+        rows.len(),
+        med.unwrap_or(0.0)
+    ));
+    for r in &rows {
+        let (status, cls) = match (&r.error, r.boot_ok && r.changed) {
+            (Some(_), _) => ("error", "err"),
+            (None, true) => ("ok", "ok"),
+            (None, false) => ("blank/static", "fail"),
+        };
+        // Gallery is built from a fresh (named) sweep; fall back gracefully if
+        // pointed at an anonymized manifest.
+        let img = r
+            .key
+            .as_deref()
+            .and_then(|k| std::fs::read(Path::new(&screens).join(format!("{}.png", sanitize(k)))).ok())
+            .map(|png| format!("<img src=\"data:image/png;base64,{}\" alt=\"\">", base64(&png)))
+            .unwrap_or_else(|| "<div style=\"aspect-ratio:10/9\"></div>".into());
+        let display_name = r.name.clone().unwrap_or_else(|| format!("sha:{}", r.rom_sha));
+        let fps = r.fps.map_or(String::new(), |f| format!("{f:.0} fps"));
+        s.push_str(&format!(
+            "<div class=\"card\">{img}<div class=\"name\">{}</div>\
+             <div class=\"meta\"><span>{} {fps}</span><span class=\"{cls}\">{status}</span></div></div>",
+            html_escape(&display_name),
+            html_escape(&r.hardware),
+        ));
+    }
+    s.push_str("</div></body></html>");
+    std::fs::write(&out, s).map_err(|e| format!("write {out}: {e}"))?;
+    println!("gallery: {} cards -> {out}", rows.len());
+    Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// arg helpers
+// ---------------------------------------------------------------------------
+
+fn arg(args: &[String], name: &str) -> Option<String> {
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
+}
+
+/// All values following `--flag` up to the next `--` flag (so `--roms A B C`).
+fn multi_arg(args: &[String], name: &str) -> Vec<String> {
+    let Some(i) = args.iter().position(|a| a == name) else {
+        return Vec::new();
+    };
+    args[i + 1..]
+        .iter()
+        .take_while(|a| !a.starts_with("--"))
+        .cloned()
+        .collect()
+}
+
+fn parse_num(args: &[String], name: &str, default: usize) -> Result<usize, String> {
+    match arg(args, name) {
+        Some(v) => v.parse().map_err(|_| format!("bad {name} {v:?}")),
+        None => Ok(default),
+    }
+}

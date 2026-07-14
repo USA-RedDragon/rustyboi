@@ -1209,14 +1209,21 @@ impl Cartridge {
         ))
     }
 
+    /// Decompress `data` to the raw ROM bytes: unzips a `PK\x03\x04` container
+    /// (the same extraction `from_bytes` does), else returns the bytes as-is.
+    /// Useful when a caller needs the actual ROM image — e.g. to hash it for a
+    /// No-Intro CRC32 lookup rather than hashing the zip container.
+    pub fn extract_rom_bytes(data: &[u8]) -> Result<Vec<u8>, io::Error> {
+        if data.len() >= 4 && &data[0..4] == b"PK\x03\x04" {
+            Self::extract_rom_from_zip_bytes(data)
+        } else {
+            Ok(data.to_vec())
+        }
+    }
+
     pub fn from_bytes(data: &[u8]) -> Result<Self, io::Error> {
         // Try to detect if this is a zip file by checking the magic bytes
-        let actual_data = if data.len() >= 4 && &data[0..4] == b"PK\x03\x04" {
-            // This looks like a ZIP file
-            Self::extract_rom_from_zip_bytes(data)?
-        } else {
-            data.to_vec()
-        };
+        let actual_data = Self::extract_rom_bytes(data)?;
         if actual_data.len() < 0x0150 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "ROM too small"));
         }

@@ -1,0 +1,122 @@
+name: Library Sweep
+
+# Behavioral + boot regression gate across the entire commercial game library
+# (~1200 ROMs = ~1200 canaries, far wider than the test suites), plus an HTML
+# screenshot gallery artifact. Requires the ROMS_URL secret: a zip of the
+# library preserving the GB/ and GBC/ directory layout (./GB/<rom>.zip,
+# ./GBC/<rom>.zip). Skips cleanly when the secret is absent (forks).
+#
+# The committed baseline (tools/library-baseline.jsonl) is regenerated with:
+#   cargo build --release -p rustyboi-test-runner --bin sweep
+#   ./target/release/sweep run --roms <lib>/GB <lib>/GBC --out sweep-out
+#   cp sweep-out/manifest.jsonl tools/library-baseline.jsonl
+# Hashes are machine-independent (deterministic core + seeded input masher);
+# only the fps fields differ across machines, and this job ignores perf
+# (--ignore-perf) because shared runners are too noisy to gate on. Perf gating
+# happens locally via `sweep compare` without that flag.
+
+on:
+  push:
+    branches: [claude]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.ref }}'
+  cancel-in-progress: true
+
+jobs:
+  sweep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      ROMS_URL: ${{ secrets.ROMS_URL }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Check for ROMS_URL secret
+        id: gate
+        shell: bash
+        run: |
+          if [ -n "$ROMS_URL" ]; then
+            echo "have=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "ROMS_URL secret not set; skipping library sweep"
+          fi
+      - name: Install Rust
+        if: steps.gate.outputs.have == '1'
+        shell: bash
+        run: rustup default stable
+      - name: Cache cargo + target
+        if: steps.gate.outputs.have == '1'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-x86_64-unknown-linux-gnu-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-x86_64-unknown-linux-gnu-
+      - name: Download ROM library
+        if: steps.gate.outputs.have == '1'
+        shell: bash
+        run: |
+          curl -fsSL "$ROMS_URL" -o /tmp/roms.zip
+          unzip -q /tmp/roms.zip -d "$RUNNER_TEMP/romlib"
+          # Tolerate an extra top-level directory inside the zip: find the
+          # parent that actually holds GB/ and GBC/.
+          LIB="$(dirname "$(find "$RUNNER_TEMP/romlib" -maxdepth 3 -type d -name GB | head -1)")"
+          [ -d "$LIB/GB" ] && [ -d "$LIB/GBC" ] || { echo "GB/ + GBC/ not found in zip" >&2; exit 1; }
+          echo "LIB=$LIB" >> "$GITHUB_ENV"
+          echo "$(ls "$LIB/GB" | wc -l) GB + $(ls "$LIB/GBC" | wc -l) GBC ROMs"
+      - name: Build sweep
+        if: steps.gate.outputs.have == '1'
+        shell: bash
+        run: cargo build --release -p rustyboi-test-runner --bin sweep
+      - name: Fetch No-Intro DATs (optional)
+        if: ${{ steps.gate.outputs.have == '1' && env.NOINTRO_DAT_URL != '' }}
+        env:
+          NOINTRO_DAT_URL: ${{ secrets.NOINTRO_DAT_URL }}
+        shell: bash
+        run: |
+          # A zip of Logiqx DAT(s), or a single .dat. Extracted so the gallery
+          # labels ROMs with canonical No-Intro names (never committed).
+          curl -fsSL "$NOINTRO_DAT_URL" -o /tmp/dats.bin
+          mkdir -p "$RUNNER_TEMP/dats"
+          if unzip -tq /tmp/dats.bin >/dev/null 2>&1; then
+            unzip -q /tmp/dats.bin -d "$RUNNER_TEMP/dats"
+          else
+            cp /tmp/dats.bin "$RUNNER_TEMP/dats/nointro.dat"
+          fi
+          echo "NAMES_ARGS=--names $(find "$RUNNER_TEMP/dats" -iname '*.dat' -o -iname '*.xml' | tr '\n' ' ')" >> "$GITHUB_ENV"
+      - name: Run library sweep
+        if: steps.gate.outputs.have == '1'
+        shell: bash
+        run: ./target/release/sweep run --roms "$LIB/GB" "$LIB/GBC" --out sweep-out ${NAMES_ARGS:-}
+      - name: Compare against baseline
+        if: steps.gate.outputs.have == '1'
+        shell: bash
+        run: |
+          ./target/release/sweep compare \
+            --base tools/library-baseline.jsonl \
+            --cand sweep-out/manifest.jsonl \
+            --ignore-perf --out sweep-out/report.md
+      - name: Build gallery
+        if: ${{ always() && steps.gate.outputs.have == '1' }}
+        shell: bash
+        run: |
+          ./target/release/sweep gallery \
+            --manifest sweep-out/manifest.jsonl \
+            --screens sweep-out/screens \
+            --out sweep-out/gallery.html
+      - name: Upload artifacts
+        if: ${{ always() && steps.gate.outputs.have == '1' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: library-sweep
+          path: |
+            sweep-out/gallery.html
+            sweep-out/report.md
+            sweep-out/manifest.jsonl
+          retention-days: 30
