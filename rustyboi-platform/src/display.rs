@@ -752,9 +752,18 @@ impl ApplicationHandler for GuiApp<'_> {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.render_state = None;
         self.audio = None;
-        self.rewind_worker = None;
-        self.png_worker = None;
-        self.fetch_worker = None;
+        // The background-worker fields are target-gated (see the struct), so the
+        // drops must carry the matching cfgs or non-desktop builds fail to
+        // compile with "no field" errors.
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        {
+            self.rewind_worker = None;
+            self.png_worker = None;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.fetch_worker = None;
+        }
         self.window = None;
     }
 }
