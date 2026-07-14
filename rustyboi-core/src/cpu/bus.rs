@@ -93,7 +93,9 @@ impl<'a> Bus<'a> {
         // closed-form mode-0 dot is available. HDMA exists only with CGB
         // features, so skip the per-dot closed-form period resolve entirely
         // otherwise (`step_hdma` is a no-op there).
-        if self.mmio.is_cgb_features_enabled() {
+        if self.mmio.is_cgb_features_enabled()
+            && self.mmio.master_cc() >= self.mmio.hdma_tracker_sleep_until()
+        {
             let period = self.ppu.hdma_period(double_speed);
             self.mmio.step_hdma(period);
         }
@@ -360,19 +362,7 @@ impl<'a> Bus<'a> {
         // observed at CPU access boundaries (RTC/camera registers resolve at
         // reads; the phase counter's only consumer is the parity gate here).
         let base_parity = (self.mmio.cpu_t_phase() & 1) as u32;
-        // Deep-mode-3 CGB HDMA tracker skip: constant within the span (the
-        // anchor only moves on CPU writes, i.e. at span boundaries), and
-        // conservative when the state changes mid-span (a span starting
-        // outside mode 3 keeps full per-dot tracking).
-        // Also requires no pending HDMA block request: step_hdma services
-        // Requested-block fires (halt-exit reflags) at ANY mode, and those are
-        // only armed at CPU boundaries — i.e. between spans, so the span-start
-        // check suffices (found by gambatte hdma_transition_*halt_late_unhalt).
-        let hdma_quiet_until = if cgb && !self.mmio.hdma_req_pending() {
-            self.ppu.hdma_tracker_quiet_until()
-        } else {
-            0
-        };
+
         let mut i = 0u32;
         while i < n {
             // Inert-PPU fast-forward: whole render dots from an even t-phase
@@ -400,7 +390,7 @@ impl<'a> Bus<'a> {
             } else {
                 self.ppu.step_subdot(self.mmio);
             }
-            if cgb && self.mmio.master_cc() >= hdma_quiet_until {
+            if cgb && self.mmio.master_cc() >= self.mmio.hdma_tracker_sleep_until() {
                 let period = self.ppu.hdma_period(double_speed);
                 self.mmio.step_hdma(period);
             }
