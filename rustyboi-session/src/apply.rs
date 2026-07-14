@@ -418,7 +418,7 @@ impl Session {
             }
 
             // OS-requiring: hand off to the frontend.
-            UiAction::SaveState(path) => match self.gb().to_state_bytes() {
+            UiAction::SaveState(path) => match self.gb_mut().to_state_bytes() {
                 Ok(bytes) => {
                     let mut o = ActionOutcome::default();
                     o.push(PlatformRequest::SaveStateBytes { path, bytes });
@@ -449,7 +449,7 @@ impl Session {
 
             // Export: produce a path-free SaveBytes request the frontend delivers
             // as a file (download on web, save dialog on desktop/Android).
-            UiAction::ExportState => match self.gb().to_state_bytes() {
+            UiAction::ExportState => match self.gb_mut().to_state_bytes() {
                 Ok(bytes) => {
                     let mut o = ActionOutcome::default();
                     o.push(PlatformRequest::SaveBytes {

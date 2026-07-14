@@ -299,8 +299,8 @@ impl Emulator {
 
     /// Export the full machine state (`.rustyboisave`), or an empty array when
     /// serialization fails / no ROM is loaded.
-    pub fn export_state(&self) -> js_sys::Uint8Array {
-        match self.session.gb().to_state_bytes() {
+    pub fn export_state(&mut self) -> js_sys::Uint8Array {
+        match self.session.gb_mut().to_state_bytes() {
             Ok(bytes) => js_sys::Uint8Array::from(bytes.as_slice()),
             Err(_) => js_sys::Uint8Array::new_with_length(0),
         }

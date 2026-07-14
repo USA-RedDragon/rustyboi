@@ -435,8 +435,8 @@ impl App {
 
     /// Serialize the current machine state to bytes (for File → Save State; the
     /// platform writes them).
-    pub fn state_bytes(&self) -> Result<Vec<u8>, String> {
-        self.session.gb().to_state_bytes().map_err(|e| e.to_string())
+    pub fn state_bytes(&mut self) -> Result<Vec<u8>, String> {
+        self.session.gb_mut().to_state_bytes().map_err(|e| e.to_string())
     }
 
     // --- UI state snapshot --------------------------------------------------
