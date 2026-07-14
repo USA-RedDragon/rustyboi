@@ -58,7 +58,6 @@ jobs:
 
       - name: Build web bundle
         run: |
-          wasm-opt --version
           tools/build-web.sh
 
       - name: Upload Pages artifact
