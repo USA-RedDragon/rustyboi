@@ -4645,6 +4645,33 @@ impl Mmio {
         self.io_registers.write(ppu::LCD_STATUS, value);
     }
 
+    /// Direct backing-store read of a plain PPU-owned IO register (LY, LYC,
+    /// BGP, OBP0, OBP1, ...) for the PPU's per-dot hot path. Byte-identical to
+    /// the full `read()` dispatch for these addresses: they have no special
+    /// read arms (they fall through to the raw IO shadow) and the OAM-DMA bus
+    /// conflict never applies at or above `OAM_START`.
+    #[inline]
+    pub fn ppu_io_reg(&self, addr: u16) -> u8 {
+        self.io_registers.read(addr)
+    }
+
+    /// Direct FF41 (STAT) read for the PPU's per-dot hot path; applies the
+    /// same always-set bit 7 the dispatched read does.
+    #[inline]
+    pub fn lcd_status_reg(&self) -> u8 {
+        self.io_registers.read(ppu::LCD_STATUS) | 0x80
+    }
+
+    /// Whether the PPU's per-dot OAM snapshot snoop could possibly observe an
+    /// event this dot: an OAM-DMA window edge needs `dma_active` (or the
+    /// PPU-side previous-window flag, checked by the caller) and a CPU OAM
+    /// write needs `oam_write_pending`. When both are clear and the PPU saw no
+    /// window last dot, `process_oam_reader_events` is a guaranteed no-op.
+    #[inline]
+    pub fn oam_snoop_event_possible(&self) -> bool {
+        self.dma_active || self.oam_write_pending
+    }
+
     /// CPU-side write to FF44 (LY). On real hardware this resets the line
     /// counter to 0 (the value written is ignored). The PPU will observe the
     /// pending flag on its next step and re-arm internal scanline state.

@@ -1605,6 +1605,15 @@ pub struct Ppu {
     sched_m0irq: u64,
     #[serde(default)]
     sched_oneshot_statirq: u64,
+    // Cached lower bound of the 9 scheduled STAT/apply event slots consumed by
+    // `dispatch_stat_events`, so the per-dot fast bail is a single compare
+    // instead of a 9-way min. Invariant: always <= the true minimum (0 =
+    // "dirty, recompute"). Refreshed at the end of every slow dispatch and
+    // zeroed by `stat_sched_touched()` at every site that can LOWER a slot.
+    // Deliberately NOT serialized: deserializes to 0 = dirty = safe.
+    #[serde(skip)]
+    #[serde(default)]
+    sched_min: u64,
     // Set when the m1 event flagged VBlank this frame so the render-machine
     // ly143->144 transition does NOT re-flag it (hardware has a single VBlank
     // source: the m1 event). Cleared when the m1 event re-arms for the next frame.
@@ -2005,6 +2014,7 @@ impl Ppu {
             sched_m2irq: stat_irq::DISABLED_TIME,
             sched_m0irq: stat_irq::DISABLED_TIME,
             sched_oneshot_statirq: stat_irq::DISABLED_TIME,
+            sched_min: 0,
             m1_vblank_fired: false,
             l154_vblank_glitch_window: false,
             lyc_irq: stat_irq::LycIrq::default(),
@@ -2522,7 +2532,18 @@ impl Ppu {
         }
     }
 
+    /// Per-dot LCDC delayed-commit pump. The queue is empty except for a few
+    /// dots after a CPU FF40 write, so the hot path is the empty check alone;
+    /// the drain loop lives out of line.
+    #[inline]
     pub fn step_lcdc_events(&mut self, mmio: &mmio::Mmio) {
+        if self.pending_lcdc_events.is_empty() {
+            return;
+        }
+        self.step_lcdc_events_slow(mmio);
+    }
+
+    fn step_lcdc_events_slow(&mut self, mmio: &mmio::Mmio) {
         let mut index = 0;
         while index < self.pending_lcdc_events.len() {
             if self.pending_lcdc_events[index].cycles_remaining > 0 {
@@ -4527,6 +4548,7 @@ impl Ppu {
         // independently by the halt-exit `<2` fixup via `m0_irq_event_cc_master`,
         // captured at the m0 IRQ flag site.
         self.sched_m0irq = abs;
+        self.stat_sched_touched();
     }
 
     /// FAITHFUL EVENTCC: the mode-0 STAT IRQ event time
@@ -4734,6 +4756,7 @@ impl Ppu {
         self.sched_m2irq = if m2 == stat_irq::DISABLED_TIME { m2 } else { (m2 as i64 + Self::m2_off(mmio.is_double_speed_mode())) as u64 };
         // m0irq is scheduled from the renderer's mode-0 prediction; (re)armed
         // when entering pixel transfer. Leave as-is here.
+        self.stat_sched_touched();
     }
 
     /// Double-speed sub-dot step. At DS the CPU runs two M-cycles per displayed
@@ -4756,17 +4779,40 @@ impl Ppu {
     }
 
     /// Fire any STAT IRQ events whose scheduled time has arrived at the current
-    /// `abs_cc`. Called once per dot from `step`.
+    /// `abs_cc`. Called once per dot from `step` (and at the DS odd half-dot
+    /// from `step_subdot`).
+    ///
+    /// Fast path: none of the ~10 scheduled events can fire this dot. Every
+    /// consumer gates on `sched_cc <= cc + off` with `off <= 2` (the m1/m0
+    /// double-speed anticipation), and the wy/scy/scx apply blocks use off 0.
+    /// So if the cached earliest scheduled cc (`sched_min`, a lower bound of
+    /// the true 9-way min — see the field doc) is still more than 2 dots away,
+    /// the whole body is a no-op.
+    #[inline]
     fn dispatch_stat_events(&mut self, mmio: &mut mmio::Mmio) {
+        if self.abs_cc + 2 < self.sched_min {
+            return;
+        }
+        self.dispatch_stat_events_slow(mmio);
+    }
+
+    /// Zero the cached scheduled-event lower bound so the next per-dot
+    /// dispatch recomputes it. Must be called by every path that can LOWER one
+    /// of the 9 slots (`wy2/wy1/scy/scx_apply_cc`, `sched_oneshot_statirq`,
+    /// `sched_m1irq/lycirq/m2irq/m0irq`); raise-only writes (to
+    /// DISABLED_TIME / later times) may skip it — a stale-LOW bound only costs
+    /// a redundant slow call, never a missed event.
+    #[inline]
+    fn stat_sched_touched(&mut self) {
+        self.sched_min = 0;
+    }
+
+    fn dispatch_stat_events_slow(&mut self, mmio: &mut mmio::Mmio) {
         let ds = mmio.is_double_speed_mode();
         let cc = self.abs_cc;
 
-        // Fast path: none of the ~10 scheduled events below can fire this dot.
-        // Every consumer gates on `sched_cc <= cc + off` with `off <= 2` (the
-        // m1/m0 double-speed anticipation), and the wy/scy/scx apply blocks use
-        // off 0. So if the earliest scheduled cc is still more than 2 dots away,
-        // the whole body is a no-op. Disabled slots hold huge sentinels
-        // (u64::MAX / DISABLED_TIME), so the min naturally excludes them.
+        // Disabled slots hold huge sentinels (u64::MAX / DISABLED_TIME), so the
+        // min naturally excludes them.
         let min_sched = self
             .wy2_apply_cc
             .min(self.wy1_apply_cc)
@@ -4778,6 +4824,7 @@ impl Ppu {
             .min(self.sched_m2irq)
             .min(self.sched_m0irq);
         if cc + 2 < min_sched {
+            self.sched_min = min_sched;
             return;
         }
 
@@ -4884,6 +4931,18 @@ impl Ppu {
             // m0irq re-arm happens at next pixel-transfer entry.
             self.sched_m0irq = stat_irq::DISABLED_TIME;
         }
+
+        // Refresh the cached fast-bail bound from the post-fire schedule.
+        self.sched_min = self
+            .wy2_apply_cc
+            .min(self.wy1_apply_cc)
+            .min(self.scy_apply_cc)
+            .min(self.scx_apply_cc)
+            .min(self.sched_oneshot_statirq)
+            .min(self.sched_m1irq)
+            .min(self.sched_lycirq)
+            .min(self.sched_m2irq)
+            .min(self.sched_m0irq);
     }
 
     fn m2_off(ds: bool) -> i64 {
@@ -5510,6 +5569,7 @@ impl Ppu {
         let delay = (base - ds as i64).max(0) as u64;
         self.wy2_pending = value;
         self.wy2_apply_cc = cc + delay;
+        self.stat_sched_touched();
     }
 
     /// FF47 (BGP) write hook. The CPU readback is immediate (handled by mmio), but
@@ -5841,6 +5901,7 @@ impl Ppu {
         };
         self.scy_pending = value;
         self.scy_apply_cc = cc + delay;
+        self.stat_sched_touched();
 
         // DMG BG bus-glitch SCY journal (see bg_wg_apply): record the exact
         // bus transition time of a mid-mode-3 SCY write; BG fetch reads
@@ -5883,6 +5944,7 @@ impl Ppu {
         // out of scope. Default 0 (live), env-overridable for future work.
         self.scx_pending = value;
         self.scx_apply_cc = cc;
+        self.stat_sched_touched();
 
         // DMG BG grid SCX journal (see bg_wg_apply): record the mid-mode-3 SCX
         // write so the tile-map column resolves it at the tile's reconstructed
@@ -6215,6 +6277,7 @@ impl Ppu {
             cc,
             cgb,
         );
+        self.stat_sched_touched();
     }
 
     /// Handles an LYC-register change.
@@ -6265,6 +6328,7 @@ impl Ppu {
                 mmio.request_interrupt(registers::InterruptFlag::Lcd);
             }
         }
+        self.stat_sched_touched();
     }
 
     /// The absolute clock value attributed to a register write. The write hook
@@ -6293,7 +6357,7 @@ impl Ppu {
     /// Phase D by writing FF44 directly, so this only anticipates lines
     /// 0..=152 (line 153 -> 0 already came through `write_ly_from_ppu`).
     fn effective_ly_for_lyc_compare(&self, mmio: &mmio::Mmio) -> u8 {
-        let ly = mmio.read(LY);
+        let ly = mmio.ppu_io_reg(LY);
         // STAT LYC compare: the next-line anticipation window is
         // `time-to-next-LY > 2 - (!isDoubleSpeed() && isAgb())`. The renderer's
         // line-cycle equivalent is `ticks >= 456 - thresh`; AGB single-speed
@@ -6541,10 +6605,10 @@ impl Ppu {
         // ly=0 transient is handled separately in Phase D by writing FF44
         // directly, so this anticipation only fires on lines 0..=152.
         let effective_ly = self.effective_ly_for_lyc_compare(mmio);
-        if mmio.read(LYC) == effective_ly {
-            mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) | (1 << 2)); // Set the LYC=LY flag
+        if mmio.ppu_io_reg(LYC) == effective_ly {
+            mmio.write_lcd_status_from_ppu(mmio.lcd_status_reg() | (1 << 2)); // Set the LYC=LY flag
         } else {
-            mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) & !(1 << 2)); // Clear the LYC=LY flag
+            mmio.write_lcd_status_from_ppu(mmio.lcd_status_reg() & !(1 << 2)); // Clear the LYC=LY flag
         }
 
         // (STAT IRQ delivery is handled entirely by the event model in
@@ -8490,10 +8554,10 @@ impl Ppu {
             self.bgp_defer_countdown -= 1;
             self.bgp_delayed = self.bgp_defer_hold;
         } else {
-            self.bgp_delayed = mmio.read(BGP);
+            self.bgp_delayed = mmio.ppu_io_reg(BGP);
         }
-        self.obp0_delayed = mmio.read(OBP0);
-        self.obp1_delayed = mmio.read(OBP1);
+        self.obp0_delayed = mmio.ppu_io_reg(OBP0);
+        self.obp1_delayed = mmio.ppu_io_reg(OBP1);
         self.ticks += 1;
     }
 
@@ -10513,6 +10577,16 @@ impl Ppu {
             return;
         }
 
+        // Fast path: with no OAM-DMA active, no pending CPU OAM write, and no
+        // DMA window seen last dot, neither `change()` trigger below can fire
+        // (`dma_writing` is necessarily false, so no edge; the pending-write
+        // take is necessarily false). `large_src` is only consumed inside the
+        // `change`/`update` walks, so skipping its per-dot refresh here is
+        // invisible — every walk entry point re-derives it first.
+        if !self.prev_dma_writing && !mmio.oam_snoop_event_possible() {
+            return;
+        }
+
         // Keep large-sprites source tracking the live LCDC OBJ-size bit (hardware
         // sets it on the LCDC write; the walk latches it into lsbuf per slot).
         self.oam_reader.large_src = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
@@ -10578,6 +10652,10 @@ impl Ppu {
     fn build_sprites_from_snapshot(&mut self, mmio: &mut mmio::Mmio) {
         let lc = self.ly_counter(mmio);
         let cc = self.abs_cc;
+        // Re-derive the walk's OBJ-size source here (the per-dot refresh in
+        // `process_oam_reader_events` is skipped on its no-event fast path).
+        // `lcdc` is constant within a dot, so this matches the old per-dot value.
+        self.oam_reader.large_src = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
         let mut pos = [0u8; 80];
         mmio.peek_oam_pos(&mut pos);
         self.oam_reader.update(cc, &lc, &pos);
