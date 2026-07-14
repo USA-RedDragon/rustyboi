@@ -370,3 +370,50 @@ fn run_manifest(
 fn collect_roms(args: &Args) -> Result<Vec<PathBuf>, String> {
     Ok(args.roms.clone())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_hex_u16_accepts_prefixed_and_bare() {
+        assert_eq!(parse_hex_u16("C000"), Ok(0xC000));
+        assert_eq!(parse_hex_u16("0xC000"), Ok(0xC000));
+        assert_eq!(parse_hex_u16("0x00"), Ok(0));
+        assert!(parse_hex_u16("gg").is_err());
+        assert!(parse_hex_u16("10000").is_err(), "overflows u16");
+    }
+
+    // Clap defaults, then override the fields under test.
+    fn args() -> Args {
+        Args::parse_from(["test-runner"])
+    }
+
+    #[test]
+    fn resolve_jobs_honors_explicit_count() {
+        let mut a = args();
+        a.jobs = Some(4);
+        assert_eq!(resolve_jobs(&a), 4);
+        a.jobs = Some(0);
+        assert_eq!(resolve_jobs(&a), 1, "0 clamps up to 1");
+    }
+
+    #[test]
+    fn resolve_jobs_defaults_to_at_least_one() {
+        assert!(resolve_jobs(&args()) >= 1);
+    }
+
+    #[test]
+    fn resolve_jobs_forces_serial_for_streamed_modes() {
+        for set in [
+            |a: &mut Args| a.fail_fast = true,
+            |a: &mut Args| a.trace_rom = Some("foo".to_string()),
+            |a: &mut Args| a.ss_dump = Some(4),
+        ] {
+            let mut a = args();
+            a.jobs = Some(8);
+            set(&mut a);
+            assert_eq!(resolve_jobs(&a), 1);
+        }
+    }
+}

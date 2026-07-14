@@ -502,3 +502,39 @@ const CGB_WRAM_DIFF: &[(u16, u8)] = &[
     (0x7FBC,0x7F), (0x7FBF,0xF7), (0x7FC9,0x7F), (0x7FCB,0x7F), (0x7FCD,0xBF), (0x7FCE,0x7F), (0x7FCF,0xFB), (0x7FDB,0xF7),
     (0x7FDF,0x7F), (0x7FE8,0xDF), (0x7FEC,0xFB), (0x7FF2,0xF7),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::init_wram_powerup;
+
+    // Characterize the block-fill structure. Exact bytes at individual
+    // addresses are perturbed by the sparse power-on DIFF tables, so assert on
+    // dominant fill within each half-block (tolerant of the handful of diffs)
+    // and on the documented non-zero purpose, not byte-for-byte.
+    #[test]
+    fn dmg_powerup_is_the_striped_nonzero_pattern() {
+        let mut wram = vec![0u8; 0x2000];
+        init_wram_powerup(false, &mut wram);
+
+        // Never-written WRAM must NOT read back as all-zero (the oamdma cases).
+        assert!(wram.contains(&0xFF), "expected some 0xFF fill");
+        // 0x000..0x100 is the 0x00 half; 0x100..0x200 is the 0xFF half.
+        let zeros = wram[0x000..0x100].iter().filter(|&&b| b == 0x00).count();
+        let ffs = wram[0x100..0x200].iter().filter(|&&b| b == 0xFF).count();
+        assert!(zeros >= 200, "0x00 half not dominant: {zeros}/256");
+        assert!(ffs >= 200, "0xFF half not dominant: {ffs}/256");
+    }
+
+    #[test]
+    fn cgb_powerup_fills_all_eight_banks_nonzero() {
+        let mut wram = vec![0u8; 0x8000];
+        init_wram_powerup(true, &mut wram);
+
+        // CGB stripes 0xFF/0x00 in 8-byte runs within each 16-byte row.
+        let ffs = wram[0x0000..0x0008].iter().filter(|&&b| b == 0xFF).count();
+        assert!(ffs >= 6, "first 8-byte run should be mostly 0xFF: {ffs}/8");
+        // Banks past bank 1 are mirrored from the low 4 KiB, so the upper half
+        // must also carry the pattern, not stay zero.
+        assert!(wram[0x4000..0x8000].contains(&0xFF), "upper banks blank");
+    }
+}

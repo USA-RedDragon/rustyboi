@@ -38,6 +38,28 @@ impl FrameMismatch {
     }
 }
 
+#[cfg(test)]
+mod describe_tests {
+    use super::FrameMismatch;
+
+    #[test]
+    fn describe_masks_alpha_and_reports_bounds() {
+        let m = FrameMismatch {
+            differing_pixels: 42,
+            first_x: 3,
+            first_y: 7,
+            max_x: 10,
+            max_y: 20,
+            actual: 0xFF112233,   // high byte (alpha) must be masked off
+            expected: 0x00445566,
+        };
+        assert_eq!(
+            m.describe(),
+            "42 differing pixels; first mismatch at (3, 7): actual #112233, expected #445566; bounds x=3..10, y=7..20"
+        );
+    }
+}
+
 const GLYPHS: [[&str; 8]; 16] = [
     [
         "........",

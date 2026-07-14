@@ -1287,3 +1287,26 @@ mod restart_tests {
         assert_eq!(session.config().dmg_palette, custom, "DMG palette preserved");
     }
 }
+
+#[cfg(test)]
+mod panic_message_tests {
+    use super::panic_message;
+
+    #[test]
+    fn formats_str_string_and_unknown_payloads() {
+        // The two common panic payload shapes carry their message through.
+        assert_eq!(
+            panic_message(Box::new("boom"), "during frame"),
+            "Emulator panic during frame: boom"
+        );
+        assert_eq!(
+            panic_message(Box::new("boom".to_string()), "on load"),
+            "Emulator panic on load: boom"
+        );
+        // Any other payload type degrades to a generic message, never panics.
+        assert_eq!(
+            panic_message(Box::new(42i32), "on load"),
+            "Emulator panic on load: Unknown error"
+        );
+    }
+}

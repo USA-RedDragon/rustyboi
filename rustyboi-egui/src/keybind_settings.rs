@@ -402,3 +402,31 @@ fn pad_menu(ui: &mut egui::Ui) -> Option<PadButton> {
     });
     picked
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chord_label_joins_triggers_and_marks_empty() {
+        assert_eq!(chord_label(&[]), "(empty)");
+
+        let a = InputTrigger::Key(KeyName::A);
+        assert_eq!(chord_label(&[a]), a.label());
+
+        let b = InputTrigger::Gb(GbButton::Start);
+        // Multiple triggers render as a " + "-joined chord.
+        assert_eq!(chord_label(&[a, b]), format!("{} + {}", a.label(), b.label()));
+    }
+
+    #[test]
+    fn key_from_egui_maps_known_keys_and_rejects_others() {
+        assert_eq!(key_from_egui(egui::Key::A), Some(KeyName::A));
+        assert_eq!(key_from_egui(egui::Key::Space), Some(KeyName::Space));
+        assert_eq!(key_from_egui(egui::Key::ArrowUp), Some(KeyName::Up));
+        assert_eq!(key_from_egui(egui::Key::F12), Some(KeyName::F12));
+        // Keys outside the GB/host vocabulary have no representation.
+        assert_eq!(key_from_egui(egui::Key::Delete), None);
+        assert_eq!(key_from_egui(egui::Key::Home), None);
+    }
+}
