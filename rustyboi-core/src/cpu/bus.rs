@@ -155,7 +155,16 @@ impl<'a> Bus<'a> {
         // staleness of out-of-band observers (frame_ready polls, audio
         // sample anchoring) to under two dozen M-cycles.
         const LAG_CARRY_CAP: u64 = 96;
-        if lag <= LAG_CARRY_CAP && self.lag_carry_ok(lag) {
+        // Only attempt the (bound-math) carry when it can chain: either this
+        // instruction was fully passive (lag >= 8: fetch plus at least one
+        // more deferred M-cycle/tail) or a chain is already in flight
+        // (foreign > 0). A 4-dot post-flush tail after an IO access isn't
+        // worth the per-instruction bound computation — busy-wait loops hit
+        // that case every iteration.
+        if lag <= LAG_CARRY_CAP
+            && (lag >= 8 || self.foreign > 0)
+            && self.lag_carry_ok(lag)
+        {
             self.mmio.set_cpu_lag(lag as u32);
             return;
         }
