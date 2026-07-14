@@ -3656,10 +3656,18 @@ impl Ppu {
         }
     }
 
-    fn bg_wg_apply(&self, mut fls: fetcher::FetcherLcdcState, ly: u8) -> fetcher::FetcherLcdcState {
+    /// Journal-application front door: the journals only fill on DMG
+    /// mid-mode-3 SCY/SCX/window-glitch writes, so the common per-dot case is
+    /// the inlined empty check.
+    #[inline]
+    fn bg_wg_apply(&self, fls: fetcher::FetcherLcdcState, ly: u8) -> fetcher::FetcherLcdcState {
         if self.wg_hist.is_empty() && self.bg_scy_hist.is_empty() && self.bg_scx_hist.is_empty() {
             return fls;
         }
+        self.bg_wg_apply_slow(fls, ly)
+    }
+
+    fn bg_wg_apply_slow(&self, mut fls: fetcher::FetcherLcdcState, ly: u8) -> fetcher::FetcherLcdcState {
         let k = self.fetcher.fetch_substep();
         if k > 2 {
             return fls; // PushToFIFO: no VRAM read
@@ -4284,11 +4292,15 @@ impl Ppu {
         std::mem::take(&mut self.pixel_debug_events)
     }
 
+    #[inline]
     fn record_fetch_debug_event(&mut self, event: fetcher::FetcherDebugEvent, mmio: &mmio::Mmio) {
         if !self.fetch_debug_events_enabled {
             return;
         }
+        self.record_fetch_debug_event_slow(event, mmio);
+    }
 
+    fn record_fetch_debug_event_slow(&mut self, event: fetcher::FetcherDebugEvent, mmio: &mmio::Mmio) {
         let kind = match event.kind {
             fetcher::FetcherDebugEventKind::TileNumber => FetchDebugEventKind::TileNumber,
             fetcher::FetcherDebugEventKind::TileDataLow => FetchDebugEventKind::TileDataLow,
@@ -4857,6 +4869,30 @@ impl Ppu {
             bound = bound.min(now.saturating_add(to_arm << (ds as u32)));
         }
         bound.saturating_sub(8)
+    }
+
+    /// One-compare pre-gate for `skip_inert_dots`: only mode 0/1/2 interiors
+    /// can be inert, so mode-3 dots skip the full-call attempt entirely.
+    #[inline]
+    pub fn maybe_inert_state(&self) -> bool {
+        matches!(self.state, State::HBlank | State::VBlank | State::OAMSearch)
+    }
+
+    /// Master-cc bound below which the CGB per-dot HDMA tracking is a proven
+    /// no-op for a span STARTING in mode 3: the closed-form period predicate
+    /// stays false until it leads the mode-0 entry by a few dots, so
+    /// `m0_time_master - 8` is a safe resume point; everything else the
+    /// tracker maintains (LY, period edges) is constant deep inside mode 3.
+    /// 0 = no skipping (unknown anchor or not in mode 3).
+    #[inline]
+    pub fn hdma_tracker_quiet_until(&self) -> u64 {
+        if !matches!(self.state, State::PixelTransfer) {
+            return 0;
+        }
+        match self.m0_time_master {
+            Some(m0) => m0.saturating_sub(8),
+            None => 0,
+        }
     }
 
     /// Fast-forward through inert HBlank/VBlank interior dots, where the whole
