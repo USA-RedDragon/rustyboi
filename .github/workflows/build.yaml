@@ -190,6 +190,9 @@ jobs:
     needs: [setup, pgo]
     if: ${{ always() && needs.setup.result == 'success' }}
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: ./.github/actions/free-disk-space
@@ -210,6 +213,11 @@ jobs:
           path: rustyboi-web/www
           if-no-files-found: error
           retention-days: 30
+      - name: Trigger Pages deploy
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/claude' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yaml -R "${{ github.repository }}" --ref "$GITHUB_REF_NAME"
 
   ios:
     name: ios
