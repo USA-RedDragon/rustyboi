@@ -228,6 +228,37 @@ impl<'a> Bus<'a> {
         self.tick_m();
     }
 
+    /// How many idle cycles the halted CPU can consume in one batch without
+    /// re-polling IF. Sound because every IF source is bounded below:
+    /// - timer: `next_timer_overflow_fire_cc` is the exact delivery cc;
+    /// - PPU STAT/VBlank: `sched_min + p_now` lower-bounds every scheduled
+    ///   dispatch slot (dirty = 0 = no batch), with an 8-cc margin covering
+    ///   the dispatch anticipation offsets (<= 2*ds + sub-dot) and the
+    ///   ly143->144 render VBlank fire (~3cc after the m1 event, which is
+    ///   itself in the min); LCD off raises nothing;
+    /// - serial transfers / link peers / a running joypad IRQ filter disable
+    ///   batching outright (return 1);
+    /// - every other `request_interrupt` site is CPU-write-driven and
+    ///   unreachable while halted.
+    /// The batch is also capped one line short of the PPU frame wrap so the
+    /// frame-loop return points (input-application boundaries) stay exact,
+    /// and globally at 456 dots (poll overhead is already amortized ~100x).
+    pub fn halted_idle_dots(&self) -> u32 {
+        if !self.mmio.halt_batchable() {
+            return 1;
+        }
+        let now = self.mmio.master_cc();
+        let ds = self.mmio.is_double_speed_mode();
+        let mut bound = self.ppu.next_stat_irq_lower_bound_master(now, ds);
+        if let Some(cc) = self.mmio.next_timer_overflow_fire_cc() {
+            bound = bound.min(cc);
+        }
+        let n = bound
+            .saturating_sub(now)
+            .min(self.ppu.dots_until_frame_wrap_conservative(ds));
+        n.clamp(1, 456) as u32
+    }
+
     pub fn master_cc_dbg(&self) -> u64 { self.mmio.master_cc() }
     pub fn oam_dma_active(&self) -> bool { self.mmio.dma_active() }
 

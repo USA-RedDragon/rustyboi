@@ -4679,6 +4679,18 @@ impl Mmio {
         self.dma_active || self.oam_dma_stall_suppress != 0
     }
 
+    /// Whether the halted CPU's idle batching is allowed: false while any
+    /// IF source that lacks a cheap closed-form fire bound is live — an
+    /// in-flight serial transfer, a link peer driving the external clock, or
+    /// the JOYP input-filter countdown. Timer and PPU IF sources are bounded
+    /// by the caller (`Bus::halted_idle_dots`).
+    #[inline]
+    pub fn halt_batchable(&self) -> bool {
+        self.joypad_irq_delay == 0
+            && !self.serial.is_active()
+            && !self.serial_device.drives_external_clock()
+    }
+
     /// CPU-side write to FF44 (LY). On real hardware this resets the line
     /// counter to 0 (the value written is ignored). The PPU will observe the
     /// pending flag on its next step and re-arm internal scanline state.
