@@ -157,16 +157,15 @@ pub fn android_app() -> &'static AndroidApp {
 /// where the game's bottom was clipped behind the navigation bar).
 pub fn safe_area_insets(surface_w: u32, surface_h: u32) -> (f32, f32, f32, f32) {
     let rect = android_app().content_rect();
-    // Before the first insets arrive `content_rect` can be empty/zero; treat a
-    // degenerate rect as "no insets" so we never collapse the game to nothing.
-    if rect.right <= rect.left || rect.bottom <= rect.top {
-        return (0.0, 0.0, 0.0, 0.0);
-    }
-    let left = rect.left.max(0) as f32;
-    let top = rect.top.max(0) as f32;
-    let right = (surface_w as i32 - rect.right).max(0) as f32;
-    let bottom = (surface_h as i32 - rect.bottom).max(0) as f32;
-    (left, top, right, bottom)
+    // The inset arithmetic is host-testable in `display::safe_insets_from_rect`.
+    crate::display::safe_insets_from_rect(
+        surface_w,
+        surface_h,
+        rect.left,
+        rect.top,
+        rect.right,
+        rect.bottom,
+    )
 }
 
 /// Returns the directory the app should use for app-internal config

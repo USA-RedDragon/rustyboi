@@ -543,3 +543,23 @@ impl Core for RustyboiCore {
 }
 
 libretro_core!(RustyboiCore);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Every emulated model must map to a boot-ROM filename the frontend looks up
+    // in its system directory, and the DMG/CGB families share the standard names.
+    #[test]
+    fn boot_rom_filename_covers_every_hardware() {
+        use rustyboi_core_lib::gb::Hardware::*;
+        for hw in [DMG0, DMG, MGB, SGB, SGB2, AGB, CGB0, CGBB, CGB, CGBE] {
+            let name = RustyboiCore::boot_rom_filename(hw);
+            assert!(name.ends_with("_boot.bin"), "{hw:?} -> unexpected {name:?}");
+        }
+        assert_eq!(RustyboiCore::boot_rom_filename(DMG), "dmg_boot.bin");
+        assert_eq!(RustyboiCore::boot_rom_filename(CGB), "cgb_boot.bin");
+        assert_eq!(RustyboiCore::boot_rom_filename(CGBE), "cgb_boot.bin");
+        assert_eq!(RustyboiCore::boot_rom_filename(SGB2), "sgb2_boot.bin");
+    }
+}

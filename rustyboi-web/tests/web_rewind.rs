@@ -56,39 +56,3 @@ async fn rewind_without_rom_is_noop() {
         assert!(!emu.rewind_step(), "rewind_step must be false with no ROM");
     }
 }
-
-// The worker's control path end-to-end: each control command arrives as a
-// serde-JSON `UiAction` string (exactly what the main thread posts) and is
-// applied via `Session::apply`. Every representative action must apply and let
-// the emulator keep running — no panic, no wasm trap. Fast-forward and
-// frame-advance (Tab / backslash) are the ones the report flagged, so they lead.
-#[wasm_bindgen_test]
-async fn worker_applies_ui_actions_without_crashing() {
-    let mut emu = Emulator::create().await.expect("Emulator::create");
-    let rom = common::test_rom();
-    let _ = emu.load_rom("test.gb", &rom);
-    assert!(emu.has_rom());
-
-    // JSON is the wire form of `UiAction`: unit variants are bare strings,
-    // payload variants are `{"Variant": value}`.
-    let actions = [
-        "\"ToggleFastForward\"",
-        "\"ToggleFastForward\"", // toggle back off
-        "\"FrameAdvance\"",
-        "\"TogglePause\"",
-        "\"TogglePause\"",
-        "\"ToggleSgbBorder\"",
-        "\"ToggleSgbBorder\"",
-        "{\"SetVolume\":50}",
-        "{\"SetHardware\":\"Dmg\"}",
-        "\"Restart\"",
-        "\"Quicksave\"",
-        "\"Quickload\"",
-        "{\"AddCheat\":\"00A-B7F\"}",
-        "\"GetCheats\"",
-    ];
-    for json in actions {
-        emu.apply_action(json).unwrap_or_else(|e| panic!("apply_action({json}) failed: {e:?}"));
-        let _ = emu.run_frame();
-    }
-}

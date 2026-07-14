@@ -23,11 +23,30 @@ pub fn test_rom() -> Vec<u8> {
     rom[0x147] = 0x00; // ROM only
     rom[0x148] = 0x00; // 32 KiB
     rom[0x149] = 0x00; // no RAM
-    // Header checksum over 0x134..=0x14C.
+    header_checksum(&mut rom);
+    rom
+}
+
+/// RAM size for the MBC3 fixture below: header code 0x02 = 8 KiB.
+pub const MBC3_RAM_BYTES: usize = 8 * 1024;
+
+/// Like [`test_rom`], but an MBC3 cartridge WITH battery-backed RAM + RTC (cart
+/// type 0x10 = MBC3+TIMER+RAM+BATTERY), for exercising the battery `.sav` and
+/// `.rtc` import/export round-trips.
+pub fn test_rom_mbc3() -> Vec<u8> {
+    let mut rom = test_rom();
+    rom[0x147] = 0x10; // MBC3 + TIMER + RAM + BATTERY
+    rom[0x149] = 0x02; // 8 KiB RAM
+    header_checksum(&mut rom);
+    rom
+}
+
+/// Header checksum over 0x134..=0x14C (the frontends' cartridge loader verifies
+/// nothing else, so this is enough to be accepted).
+fn header_checksum(rom: &mut [u8]) {
     let mut checksum: u8 = 0;
     for &b in &rom[0x134..0x14D] {
         checksum = checksum.wrapping_sub(b).wrapping_sub(1);
     }
     rom[0x14D] = checksum;
-    rom
 }
