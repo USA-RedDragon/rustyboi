@@ -44,13 +44,6 @@ jobs:
       - name: Roomy docker disk
         if: steps.gate.outputs.have == '1'
         uses: ./.github/actions/free-disk-space
-      - name: Cache build dir
-        if: steps.gate.outputs.have == '1'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target
-          key: sweep-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: sweep-
       - name: Restore or generate PGO profile
         if: steps.gate.outputs.have == '1'
         uses: ./.github/actions/pgo
@@ -58,6 +51,15 @@ jobs:
           roms-url: ${{ secrets.ROMS_URL }}
           roms-password: ${{ secrets.ROMS_PASSWORD }}
           free-disk: 'false'
+      - name: Cache build dir
+        if: steps.gate.outputs.have == '1'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target
+            !target/pgo
+          key: sweep-${{ hashFiles('**/Cargo.lock') }}-pgo${{ hashFiles('target/pgo/**') }}
+          restore-keys: sweep-
       - name: Build sweep
         if: steps.gate.outputs.have == '1'
         shell: bash
