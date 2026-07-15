@@ -44,20 +44,16 @@ jobs:
           else
             echo "ROMS_URL secret not set; skipping library sweep"
           fi
-      - name: Install Rust
+      - name: Roomy docker disk
         if: steps.gate.outputs.have == '1'
-        shell: bash
-        run: rustup default stable
-      - name: Cache cargo + target
+        uses: ./.github/actions/free-disk-space
+      - name: Cache build dir
         if: steps.gate.outputs.have == '1'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-x86_64-unknown-linux-gnu-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-x86_64-unknown-linux-gnu-
+          path: target
+          key: sweep-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: sweep-
       - name: Download ROM library
         if: steps.gate.outputs.have == '1'
         shell: bash
@@ -70,10 +66,14 @@ jobs:
           [ -d "$LIB/GB" ] && [ -d "$LIB/GBC" ] || { echo "GB/ + GBC/ not found in zip" >&2; exit 1; }
           echo "LIB=$LIB" >> "$GITHUB_ENV"
           echo "$(ls "$LIB/GB" | wc -l) GB + $(ls "$LIB/GBC" | wc -l) GBC ROMs"
+      - name: Generate PGO profile
+        if: steps.gate.outputs.have == '1'
+        shell: bash
+        run: make pgo-gen CONTAINER=1 ROMS="$LIB/GB $LIB/GBC"
       - name: Build sweep
         if: steps.gate.outputs.have == '1'
         shell: bash
-        run: cargo build --release -p rustyboi-test-runner --bin sweep
+        run: . tools/rust-cross.sh && rc_run 'RUSTFLAGS="$(make -s pgo-flags 2>/dev/null || true) ${RUSTFLAGS:-}" cargo build --release -p rustyboi-test-runner --bin sweep'
       - name: Run library sweep
         if: steps.gate.outputs.have == '1'
         shell: bash
