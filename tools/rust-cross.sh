@@ -124,7 +124,11 @@ rc_build() {   # triple variant crt <extra cargo args...>
     # with a note, so the build still succeeds.
     local zig_target=""
     if [ -z "$variant" ]; then
-        case "$triple" in *-linux-gnu|*-linux-gnueabihf) zig_target="$triple.2.17" ;; esac
+        case "$triple" in
+            # riscv64 didn't exist in glibc until 2.27
+            riscv64gc-*-linux-gnu)         zig_target="$triple.2.27" ;;
+            *-linux-gnu|*-linux-gnueabihf) zig_target="$triple.2.17" ;;
+        esac
     fi
 
     # Compose RUSTFLAGS: crt-static preference + riscv64-musl's ld.lld (its
