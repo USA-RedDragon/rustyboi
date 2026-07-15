@@ -1,19 +1,34 @@
 name: Roomy docker disk
 description: >
-  Point Docker's data-root at /mnt (the runner's large ephemeral disk, ~65 GB
-  free) so the big rust-cross image + cargo volume don't exhaust the ~20 GB on /.
-  Everything here builds in that image, so this is what "No space left on device"
-  needs — and it's a ~10 s daemon restart, not the minutes that deleting the
-  preinstalled tool cache took.
+  Some runner images split a small / and a big separate /mnt; there, point
+  Docker's data-root at the roomier disk so the rust-cross image + cargo volume +
+  build tree don't exhaust /. On the common single-large-disk runner (where /mnt
+  is the SAME filesystem as /) this is a no-op — just a df check.
 runs:
   using: composite
   steps:
     - shell: bash
       run: |
-        sudo systemctl stop docker.service docker.socket
-        sudo mkdir -p /mnt/docker
-        echo '{"data-root":"/mnt/docker"}' | sudo tee /etc/docker/daemon.json >/dev/null
-        sudo rm -rf /var/lib/docker
-        sudo systemctl start docker.service
-        docker info --format 'docker data-root: {{.DockerRootDir}}'
-        df -h / /mnt
+        root_src=$(df -P /  | awk 'NR==2{print $1}')
+        root_avail=$(df -Pk / | awk 'NR==2{print $4}')
+        target=""
+        for m in /mnt /datadrive; do
+          [ -d "$m" ] || continue
+          src=$(df -P "$m" 2>/dev/null | awk 'NR==2{print $1}')
+          [ -z "$src" ] && continue
+          [ "$src" = "$root_src" ] && continue          # same filesystem -> no gain
+          avail=$(df -Pk "$m" | awk 'NR==2{print $4}')
+          if [ "${avail:-0}" -gt "$root_avail" ]; then target="$m"; break; fi
+        done
+        if [ -n "$target" ]; then
+          echo "==> relocating docker to $target/docker (more free than /)"
+          sudo systemctl stop docker.service docker.socket
+          sudo mkdir -p "$target/docker"
+          printf '{"data-root":"%s/docker"}\n' "$target" | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo rm -rf /var/lib/docker
+          sudo systemctl start docker.service
+          docker info --format 'docker data-root: {{.DockerRootDir}}'
+        else
+          echo "==> single disk, $(df -h / | awk 'NR==2{print $4}') free on / — nothing to relocate"
+        fi
+        df -h /
