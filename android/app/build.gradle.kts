@@ -213,13 +213,10 @@ androidComponents.beforeVariants { variantBuilder ->
 }
 
 androidComponents.onVariants { variant ->
-    val taskName = "buildRustLib${variant.name.replaceFirstChar { it.uppercase() }}"
+    val cap = variant.name.replaceFirstChar { it.uppercase() }
     val provider = if (variant.buildType == "release") buildRustLibRelease else buildRustLibDebug
-    tasks.matching { it.name == "merge${variant.name.replaceFirstChar { it.uppercase() }}JniLibFolders" }
-        .configureEach { dependsOn(provider) }
-    tasks.matching { it.name == "merge${variant.name.replaceFirstChar { it.uppercase() }}NativeLibs" }
-        .configureEach { dependsOn(provider) }
-    tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(provider) }
+    tasks.matching { it.name == "merge${cap}JniLibFolders" }.configureEach { dependsOn(provider) }
+    tasks.matching { it.name == "merge${cap}NativeLibs" }.configureEach { dependsOn(provider) }
 }
 
 tasks.named("clean").configure {
