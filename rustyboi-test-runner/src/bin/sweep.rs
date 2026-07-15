@@ -1941,8 +1941,8 @@ fn human_bytes(n: usize) -> String {
 fn flag_glyphs(flags: u16) -> String {
     let mut g = String::new();
     if flags & (1 << 0) != 0 { g.push_str("<span class=\"g bat\">🔋 BAT</span>"); }
-    if flags & (1 << 1) != 0 { g.push_str("<span class=\"g rtc\">⏱ RTC</span>"); }
-    if flags & (1 << 2) != 0 { g.push_str("<span class=\"g rum\">〜 RMBL</span>"); }
+    if flags & (1 << 1) != 0 { g.push_str("<span class=\"g rtc\">⏱️ RTC</span>"); }
+    if flags & (1 << 2) != 0 { g.push_str("<span class=\"g rum\">📳 RMBL</span>"); }
     if flags & (1 << 3) != 0 { g.push_str("<span class=\"g cam\">📷 CAM</span>"); }
     if flags & (1 << 5) != 0 {
         g.push_str("<span class=\"g cgb\">CGB only</span>");
