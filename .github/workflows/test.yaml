@@ -1,7 +1,6 @@
 name: Test Suites
 on:
   push:
-    branches: [claude]
   pull_request:
 
 permissions:
