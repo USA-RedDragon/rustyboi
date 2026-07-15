@@ -6,6 +6,7 @@ gambatte-core/
 GBEmulatorShootout/
 /.baselines/
 /bios/*.bin
+/bios/*.sfc
 
 # Generated at build time from the CC-BY-SA-4.0 libretro-database No-Intro DATs
 # (see rustyboi-session/build.rs + tools/gen-nointro.py); not redistributed here.
@@ -16,3 +17,5 @@ GBEmulatorShootout/
 lcov.info
 rustyboi-web.lcov
 sweep-out/
+
+*.dat
