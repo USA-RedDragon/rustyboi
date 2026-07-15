@@ -115,6 +115,18 @@ _rc_android_clang_prefix() {
 rc_build() {   # triple variant crt <extra cargo args...>
     local triple="$1" variant="$2" crt="$3"; shift 3
 
+    # gnu-linux targets: link against an OLD glibc (2.17, ~CentOS 7 / 2013) via
+    # cargo-zigbuild, so the RELEASE binaries run on essentially any still-used
+    # distro instead of only the image's Trixie-era glibc. Without this, Rust
+    # std's pidfd_spawnp floors them at GLIBC_2.39 (ubuntu 24.04 / Debian 13 only).
+    # zig is the linker here, so the lld/bfd tweaks below don't apply. Needs zig +
+    # cargo-zigbuild in the image; if absent, falls back to a plain build (2.39)
+    # with a note, so the build still succeeds.
+    local zig_target=""
+    if [ -z "$variant" ]; then
+        case "$triple" in *-linux-gnu|*-linux-gnueabihf) zig_target="$triple.2.17" ;; esac
+    fi
+
     # Compose RUSTFLAGS: crt-static preference + riscv64-musl's ld.lld (its
     # musl-cross-make binutils `ld` is too old for Rust's RISC-V ISA attributes).
     local flags=""
@@ -127,7 +139,8 @@ rc_build() {   # triple variant crt <extra cargo args...>
     fi
     # rust-lld mislinks i686 *executables* as elf64 (`cc -m32` finds the 32-bit
     # objects, but lld stays 64-bit); GNU ld handles the -m32 emulation correctly.
-    if [ "$triple" = i686-unknown-linux-gnu ]; then
+    # (Only the non-zig path needs this; zig's linker handles -m32 itself.)
+    if [ -z "$zig_target" ] && [ "$triple" = i686-unknown-linux-gnu ]; then
         flags="$flags -C link-arg=-fuse-ld=bfd"
     fi
 
@@ -165,9 +178,22 @@ rc_build() {   # triple variant crt <extra cargo args...>
     # Chown only what this build wrote back to the host. rc_emit_* set RC_CHOWN
     # to the per-target dir (target/cross/<name>) so parallel `make -j` builds
     # don't each chown -R the whole shared target/ tree. Default: the whole tree.
+    # gnu-linux → cargo-zigbuild against glibc 2.17 (artifacts still land in the
+    # plain target/<triple>/release, so callers are unchanged); everything else →
+    # cargo build with the toolchain the image sets up per target.
+    local build_cmd="cargo build --target $triple --release $*"
+    if [ -n "$zig_target" ]; then
+        build_cmd="if command -v cargo-zigbuild >/dev/null 2>&1 && command -v zig >/dev/null 2>&1; then
+            cargo zigbuild --target $zig_target --release $*
+        else
+            echo 'rc_build: zig/cargo-zigbuild absent — plain build (glibc floors at ~2.39; add them to the image for portable gnu binaries)' >&2
+            cargo build --target $triple --release $*
+        fi"
+    fi
+
     local chown_path="${RC_CHOWN:-target}"
     local incmd="set -e; $pre
-        cargo build --target $triple --release $*
+        $build_cmd
         chown -R $HOST_UIDGID $chown_path"
     local cname="rcb-$$-$RANDOM"
     trap '"$ENGINE" kill "'"$cname"'" >/dev/null 2>&1 || true; exit 130' INT TERM
