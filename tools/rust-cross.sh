@@ -131,6 +131,13 @@ rc_build() {   # triple variant crt <extra cargo args...>
         esac
     fi
 
+    local cflags_pre=""
+    if [ -n "$zig_target" ] && [[ "$triple" == riscv64gc-*-linux-gnu ]]; then
+        local shim=/tmp/rb-zig-libc-shim
+        local cvar="CFLAGS_$(echo "$triple" | tr '-' '_')"
+        cflags_pre="mkdir -p $shim/gnu && : > $shim/gnu/stubs-lp64d.h; export $cvar=\"-I$shim \${$cvar:-}\";"
+    fi
+
     # Compose RUSTFLAGS: crt-static preference + riscv64-musl's ld.lld (its
     # musl-cross-make binutils `ld` is too old for Rust's RISC-V ISA attributes).
     local flags=""
@@ -168,8 +175,8 @@ rc_build() {   # triple variant crt <extra cargo args...>
     fi
 
     # Per-target env (linker / deployment target). Seed with pgo_pre so $PGO is
-    # set before the RUSTFLAGS export that references it.
-    local pre="$pgo_pre"
+    # set before the RUSTFLAGS export that references it, then the C-header shim.
+    local pre="$pgo_pre$cflags_pre"
     case "$variant" in
         android)
             local pfx lvar
