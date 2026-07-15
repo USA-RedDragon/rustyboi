@@ -187,7 +187,7 @@ is 0 until they are fixed; the auto-ratchet will raise it as they land.
 
 ### 14. `windesync-validate.gb` (dmg) — OPEN-TARGET (pre-CGB window-desync glitch)
 
-**Failure [R]:** `tools/run-suites.sh little_things_extra` → layout mismatch vs
+**Failure [R]:** `make suite SUITE=little_things_extra` → layout mismatch vs
 `gb-test-roms/little-things-gb/windesync-reference-sgb.png`, 705 pixels break
 the best recolor map.
 

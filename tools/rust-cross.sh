@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared machinery for cross-compiling rustyboi inside the USA-RedDragon/rust-cross
-# container image. NOT executed directly — sourced by build-libretro.sh and
-# build-native.sh, which supply their own output handling.
+# container image. NOT executed directly — sourced by the `libretro`/`native`
+# Makefile recipes and ios/Makefile, which supply their own output handling.
 #
 # The full target list lives here (TARGETS) so both scripts stay in lockstep.
 # The core defines the libretro C ABI by hand (no bindgen), so cross-compiling
@@ -134,16 +134,16 @@ rc_build() {   # triple variant crt <extra cargo args...>
     # PGO: the shared profile lives under target/ (mounted at /project). Apply
     # it best-effort. IR PGO is target-portable, so a profile collected on the
     # container's x86_64 host helps every cross target; rustc only WARNS on an
-    # incompatible profile (never breaks the build), and `pgo.sh flags` (run
-    # in-container below) suppresses it if the container toolchain rejects it.
-    # RB_NO_PGO=1 opts out.
+    # incompatible profile (never breaks the build), and `make -s pgo-flags`
+    # (run in-container below) suppresses it if the container toolchain rejects
+    # it. RB_NO_PGO=1 opts out. Requires GNU Make >= 3.82 in the image.
     # Profiles are version-keyed (profile-<rustc>.profdata); the in-container
-    # pgo.sh flags picks the one matching the CONTAINER's rustc, or emits
-    # nothing (host and container toolchains often differ). Attempt whenever any
-    # profile exists on the host tree (mounted at /project).
+    # pgo-flags picks the one matching the CONTAINER's rustc, or emits nothing
+    # (host and container toolchains often differ). Attempt whenever any profile
+    # exists on the host tree (mounted at /project).
     local pgo_pre=""
     if [ -z "${RB_NO_PGO:-}" ] && ls "$PROJECT_ROOT"/target/pgo/profile-*.profdata >/dev/null 2>&1; then
-        pgo_pre='PGO="$(tools/pgo.sh flags 2>/dev/null || true)";'
+        pgo_pre='PGO="$(make -s pgo-flags 2>/dev/null || true)";'
         flags="$flags \$PGO"
     fi
 
@@ -162,11 +162,89 @@ rc_build() {   # triple variant crt <extra cargo args...>
     esac
     [ -n "$flags" ] && pre="$pre export RUSTFLAGS=\"$flags \${RUSTFLAGS:-}\";"
 
+    # Chown only what this build wrote back to the host. rc_emit_* set RC_CHOWN
+    # to the per-target dir (target/cross/<name>) so parallel `make -j` builds
+    # don't each chown -R the whole shared target/ tree. Default: the whole tree.
+    local chown_path="${RC_CHOWN:-target}"
     local incmd="set -e; $pre
         cargo build --target $triple --release $*
-        chown -R $HOST_UIDGID target"
+        chown -R $HOST_UIDGID $chown_path"
     $ENGINE run --rm \
         -v "$PROJECT_ROOT":/project -w /project \
         -v "$CARGO_VOL":/usr/local/cargo/registry \
         "$IMAGE" sh -c "$incmd"
+}
+
+# --- Makefile fan-out support (make libretro/native TARGETS=...) --------------
+# The Makefile's libretro-%/native-% pattern rules call the rc_emit_* helpers
+# below, one per target name. This keeps the target matrix a single source of
+# truth here (Make asks for the name list via rc_names/rc_names_native) and the
+# per-OS artifact naming in bash, while Make owns the DAG, per-target
+# success/failure, and `-j` parallelism.
+
+# Print all target names (rc_names) / just the GUI-capable ones (empty variant).
+rc_names()        { local t; for t in "${TARGETS[@]}"; do field "$t" 0; done; }
+rc_names_native() { local t; for t in "${TARGETS[@]}"; do [ -z "$(field "$t" 3)" ] && field "$t" 0; done; return 0; }
+
+# Warm the shared cargo registry ONCE before the parallel per-target builds, so
+# they only READ it — concurrent cold downloads into $CARGO_VOL could race (the
+# .package-cache lock is per-container here, not shared across containers).
+rc_fetch() {
+    rc_engine
+    $ENGINE run --rm \
+        -v "$PROJECT_ROOT":/project -w /project \
+        -v "$CARGO_VOL":/usr/local/cargo/registry \
+        "$IMAGE" sh -c "cargo fetch --locked || cargo fetch"
+}
+
+# Build ONE libretro core for <name> into an ISOLATED target dir
+# (target/cross/<name>, so parallel builds don't contend on cargo's per-target-
+# dir build lock), then copy/rename into target/libretro/<name>/ by RetroArch's
+# rules with rustyboi_libretro.info alongside.
+rc_emit_libretro() {   # name
+    local name="$1" entry triple os variant crt tdir cargo_art ra_name src dir info
+    entry="$(rc_target_by_name "$name")" || { echo "Unknown target: $name" >&2; return 1; }
+    triple="$(field "$entry" 1)"; os="$(field "$entry" 2)"; variant="$(field "$entry" 3)"
+    rc_engine
+    echo "==> libretro $name  ($triple)"
+    crt=""; if [ "$variant" = musl ]; then crt="dynamic"; fi
+    tdir="target/cross/$name"
+    RC_CHOWN="$tdir" rc_build "$triple" "$variant" "$crt" -p rustyboi-libretro --target-dir "$tdir"
+    case "$os" in
+        windows)    cargo_art="rustyboi_libretro.dll" ;;
+        darwin|ios) cargo_art="librustyboi_libretro.dylib" ;;
+        *)          cargo_art="librustyboi_libretro.so" ;;
+    esac
+    case "$os" in
+        windows) ra_name="rustyboi_libretro.dll" ;;
+        darwin)  ra_name="rustyboi_libretro.dylib" ;;
+        ios)     ra_name="rustyboi_libretro_ios.dylib" ;;
+        android) ra_name="rustyboi_libretro_android.so" ;;
+        *)       ra_name="rustyboi_libretro.so" ;;
+    esac
+    src="$PROJECT_ROOT/$tdir/$triple/release/$cargo_art"
+    [ -f "$src" ] || { echo "ERROR: expected artifact missing: $src" >&2; return 1; }
+    dir="$PROJECT_ROOT/target/libretro/$name"; mkdir -p "$dir"; cp -f "$src" "$dir/$ra_name"
+    info="$PROJECT_ROOT/rustyboi-libretro/rustyboi_libretro.info"
+    if [ -f "$info" ]; then cp -f "$info" "$dir/"; fi
+    echo "    -> $dir/$ra_name"
+}
+
+# Build ONE desktop rustyboi binary for <name> into target/native/<name>/.
+# GUI-capable targets only (empty variant); rejects musl/android/ios names.
+rc_emit_native() {   # name
+    local name="$1" entry triple os variant tdir art src dir
+    entry="$(rc_target_by_name "$name")" || { echo "Unknown target: $name" >&2; return 1; }
+    variant="$(field "$entry" 3)"
+    if [ -n "$variant" ]; then echo "native: $name has no desktop GUI (variant=$variant)" >&2; return 1; fi
+    triple="$(field "$entry" 1)"; os="$(field "$entry" 2)"
+    rc_engine
+    echo "==> native $name  ($triple)"
+    tdir="target/cross/$name"
+    RC_CHOWN="$tdir" rc_build "$triple" "" "" -p rustyboi-platform --bin rustyboi --target-dir "$tdir"
+    case "$os" in windows) art="rustyboi.exe" ;; *) art="rustyboi" ;; esac
+    src="$PROJECT_ROOT/$tdir/$triple/release/$art"
+    [ -f "$src" ] || { echo "ERROR: expected binary missing: $src" >&2; return 1; }
+    dir="$PROJECT_ROOT/target/native/$name"; mkdir -p "$dir"; cp -f "$src" "$dir/$art"
+    echo "    -> $dir/$art"
 }

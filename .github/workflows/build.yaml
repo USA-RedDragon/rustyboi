@@ -23,19 +23,21 @@ jobs:
           # container = the build runs in the rust-cross image (its own rustc),
           # so its PGO profile must be generated in-container to match.
           - target: android
-            args: --release --bundle
+            makeargs: RELEASE=1 BUNDLE=1
             container: false
           - target: libretro
-            args: --all
+            mkflags: -j2 -k --output-sync=target
+            makeargs: TARGETS=all
             container: true
           - target: native
-            args: --all
+            mkflags: -j2 -k --output-sync=target
+            makeargs: TARGETS=all
             container: true
           - target: web
-            args: release
+            makeargs: MODE=release
             container: false
           - target: ios
-            args: ""
+            makeargs: ""
             container: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -59,17 +61,14 @@ jobs:
           LIB="$(dirname "$(find "$RUNNER_TEMP/romlib" -maxdepth 3 -type d -name GB | head -1)")"
           [ -d "$LIB/GB" ] && [ -d "$LIB/GBC" ] || { echo "GB/ + GBC/ not in zip" >&2; exit 1; }
           if [ "${{ matrix.container }}" = "true" ]; then
-            # match the rust-cross image's rustc
-            tools/pgo.sh gen --container --sweep "$LIB/GB" "$LIB/GBC"
+            make pgo-gen CONTAINER=1 ROMS="$LIB/GB $LIB/GBC"
           else
             rustup component add llvm-tools
-            tools/pgo.sh gen --sweep "$LIB/GB" "$LIB/GBC"
+            make pgo-gen ROMS="$LIB/GB $LIB/GBC"
           fi
       - name: Build ${{ matrix.target }}
         run: |
           cargo install cargo-ndk
           cargo install wasm-pack
           rustup target add x86_64-linux-android aarch64-linux-android i686-linux-android armv7-linux-androideabi
-          # build-*.sh apply the PGO profile via tools/pgo.sh flags (best-effort;
-          # no profile => plain build). RB_NO_PGO=1 would force plain.
-          ./tools/build-${{ matrix.target }}.sh ${{ matrix.args }}
+          make ${{ matrix.mkflags }} ${{ matrix.target }} ${{ matrix.makeargs }}

@@ -2,7 +2,7 @@
 name = "rustyboi-web"
 version = "0.1.0"
 edition = "2021"
-description = "WASM/Firefox web frontend for the rustyboi Game Boy / Color emulator"
+description = "WASM frontend for the rustyboi Game Boy / Color emulator"
 
 [lib]
 # `rlib` (alongside `cdylib`) so the wasm-bindgen integration tests in `tests/`
@@ -11,9 +11,9 @@ crate-type = ["cdylib", "rlib"]
 
 # wasm-pack's BUNDLED wasm-opt is too old to validate the post-MVP wasm features
 # LLVM emits (bulk-memory memory.copy/fill, sign-ext, ...). So disable it here
-# and run a current binaryen wasm-opt from `tools/build-web.sh` instead, which
+# and run a current binaryen wasm-opt from `make web` instead, which
 # passes `-all` (enable all features — required even on the latest binaryen).
-# Build with `tools/build-web.sh`, NOT bare `wasm-pack build`. Needs binaryen
+# Build with `make web`, NOT bare `wasm-pack build`. Needs binaryen
 # (`sudo pacman -S binaryen`).
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
