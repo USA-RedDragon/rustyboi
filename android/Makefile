@@ -19,7 +19,7 @@ build:
 	if [ $${#GRADLE_TASKS[@]} -eq 0 ]; then GRADLE_TASKS=("assembleDebug"); fi
 
 	# ---------- Preflight ----------
-	if ! command -v cargo-ndk >/dev/null 2>&1; then
+	if [ -z "$(SKIP_RUST)" ] && ! command -v cargo-ndk >/dev/null 2>&1; then
 	  echo "ERROR: cargo-ndk is not installed. Install it with: cargo install cargo-ndk"; exit 1
 	fi
 	for tgt in aarch64-linux-android x86_64-linux-android armv7-linux-androideabi i686-linux-android; do
@@ -57,6 +57,8 @@ build:
 	echo "Building rustyboi for Android ($$BUILD_PROFILE): $${GRADLE_TASKS[*]}..."
 	GRADLE_ARGS=()
 	for t in "$${GRADLE_TASKS[@]}"; do GRADLE_ARGS+=(":app:$$t"); done
+	if [ -n "$(ABI)" ]; then GRADLE_ARGS+=("-PabiFilter=$(ABI)"); fi
+	if [ -n "$(SKIP_RUST)" ]; then GRADLE_ARGS+=(-x :app:buildRustLibRelease -x :app:buildRustLibDebug); fi
 	# PGO best-effort: cargo-ndk (run by Gradle) inherits RUSTFLAGS; IR PGO is
 	# target-portable to the Android ABIs. RB_NO_PGO=1 opts out.
 	export RUSTFLAGS="$$(make -s pgo-flags 2>/dev/null || true) $${RUSTFLAGS:-}"
