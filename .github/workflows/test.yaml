@@ -175,7 +175,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y libc6-armhf-cross
+          sudo apt-get install -y libc6-armhf-cross libgcc-s1-armhf-cross
           docker run --privileged --rm tonistiigi/binfmt --install arm
           echo "QEMU_LD_PREFIX=/usr/arm-linux-gnueabihf" >> "$GITHUB_ENV"
       - name: Install Rosetta

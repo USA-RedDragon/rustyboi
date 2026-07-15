@@ -134,6 +134,9 @@ rc_build() {   # triple variant crt <extra cargo args...>
         static)  flags="-C target-feature=+crt-static" ;;
         dynamic) flags="-C target-feature=-crt-static" ;;
     esac
+    case "$triple" in
+        *-pc-windows-gnullvm) flags="$flags -C target-feature=+crt-static" ;;
+    esac
     if [ "$triple" = riscv64gc-unknown-linux-musl ]; then
         flags="$flags -C link-arg=-B\$(rustc --print sysroot)/lib/rustlib/\$(rustc --print host-tuple)/bin/gcc-ld -C link-arg=-fuse-ld=lld"
     fi
