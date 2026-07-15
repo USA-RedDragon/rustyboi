@@ -1,34 +1,24 @@
-name: Roomy docker disk
+name: Free up runner disk
 description: >
-  Some runner images split a small / and a big separate /mnt; there, point
-  Docker's data-root at the roomier disk so the rust-cross image + cargo volume +
-  build tree don't exhaust /. On the common single-large-disk runner (where /mnt
-  is the SAME filesystem as /) this is a no-op — just a df check.
+  Container builds (the rust-cross image + cargo registry volume + target tree)
+  can exhaust the runner's disk — unpacking the windows_*_gnu import libs alone
+  is a few GB. GitHub's ubuntu runners are a SINGLE filesystem (/mnt is the same
+  device as /, so there's no bigger mount to relocate Docker to); the only lever
+  is to delete space. The rust-cross image ships every toolchain we need, so the
+  runner's pre-installed SDKs are dead weight — remove the big ones. Done in
+  parallel so wall time is roughly the slowest single rm, not the sum.
 runs:
   using: composite
   steps:
     - shell: bash
       run: |
-        root_src=$(df -P /  | awk 'NR==2{print $1}')
-        root_avail=$(df -Pk / | awk 'NR==2{print $4}')
-        target=""
-        for m in /mnt /datadrive; do
-          [ -d "$m" ] || continue
-          src=$(df -P "$m" 2>/dev/null | awk 'NR==2{print $1}')
-          [ -z "$src" ] && continue
-          [ "$src" = "$root_src" ] && continue          # same filesystem -> no gain
-          avail=$(df -Pk "$m" | awk 'NR==2{print $4}')
-          if [ "${avail:-0}" -gt "$root_avail" ]; then target="$m"; break; fi
-        done
-        if [ -n "$target" ]; then
-          echo "==> relocating docker to $target/docker (more free than /)"
-          sudo systemctl stop docker.service docker.socket
-          sudo mkdir -p "$target/docker"
-          printf '{"data-root":"%s/docker"}\n' "$target" | sudo tee /etc/docker/daemon.json >/dev/null
-          sudo rm -rf /var/lib/docker
-          sudo systemctl start docker.service
-          docker info --format 'docker data-root: {{.DockerRootDir}}'
-        else
-          echo "==> single disk, $(df -h / | awk 'NR==2{print $4}') free on / — nothing to relocate"
-        fi
-        df -h /
+        echo "before: $(df -h --output=avail / | tail -1 | tr -d ' ') free on /"
+        # Unused by a docker/make build; the container has its own toolchains.
+        sudo rm -rf /usr/local/lib/android      & # ~11 GB  Android SDK/NDK
+        sudo rm -rf /usr/share/dotnet           & # ~3 GB   .NET
+        sudo rm -rf /opt/ghc /usr/local/.ghcup  & # ~5 GB   Haskell
+        sudo rm -rf /usr/share/swift            & # ~2 GB   Swift
+        sudo rm -rf /usr/local/share/powershell & # ~1 GB   PowerShell
+        sudo rm -rf /opt/hostedtoolcache/CodeQL & # ~5 GB   CodeQL bundles
+        wait
+        echo "after:  $(df -h --output=avail / | tail -1 | tr -d ' ') free on /"
