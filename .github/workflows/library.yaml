@@ -163,9 +163,6 @@ jobs:
     if: ${{ always() && needs.build.outputs.have == '1' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Fetch sweep binary
@@ -231,7 +228,3 @@ jobs:
             gathered/audio
           if-no-files-found: error
           retention-days: 30
-      - name: Trigger Pages deploy
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run pages.yaml -R "${{ github.repository }}" --ref "$GITHUB_REF_NAME"
