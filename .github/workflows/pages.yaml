@@ -1,10 +1,10 @@
 name: Pages
 
-# Dispatched by the Build and Library Sweep producers when they finish
-# publishing artifacts (a workflow_run trigger only registers from the default
-# branch, and CI lives on claude), or manually.
-
 on:
+  workflow_run:
+    workflows: [Build, "Library Sweep"]
+    types: [completed]
+    branches: [claude]
   workflow_dispatch:
 
 permissions:
@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   deploy:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -26,7 +27,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Assemble site from newest artifacts
         shell: bash
         env:
