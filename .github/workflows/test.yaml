@@ -417,3 +417,36 @@ jobs:
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  android-coverage:
+    name: 'android / coverage'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up JDK 17
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          # compileSdk 37 + build-tools for aapt2; ndkVersion is pinned in the
+          # app build so install it too (the native tasks are excluded below,
+          # but AGP resolves the pinned NDK while configuring the project).
+          packages: 'platforms;android-37 build-tools;36.0.0 ndk;27.3.13750724'
+      - name: Run Android unit tests + JaCoCo
+        working-directory: android
+        # Only the pure JVM helpers are under test; skip the cargo-ndk native
+        # library build (no Rust toolchain / cargo-ndk on this runner).
+        run: >-
+          ./gradlew --no-daemon
+          :app:testDebugUnitTest :app:jacocoTestReport
+          -x :app:buildRustLibDebug -x :app:buildRustLibRelease
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          files: android/app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml
+          flags: android
+          token: ${{ secrets.CODECOV_TOKEN }}
