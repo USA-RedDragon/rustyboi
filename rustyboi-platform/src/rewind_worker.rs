@@ -105,10 +105,13 @@ fn serializer_loop(rx: Receiver<Job>, done_tx: Sender<Finished>) {
         while let Ok(newer) = rx.try_recv() {
             job = newer;
         }
-        // The expensive part — off the emulation thread.
-        if let Ok(bytes) = job.gb.to_state_bytes()
-            && done_tx.send(Finished { frame: job.frame, bytes }).is_err() {
+        // The expensive part — serialize AND deflate-frame, both off the
+        // emulation thread; the ring stores the compact form directly.
+        if let Ok(bytes) = job.gb.to_state_bytes() {
+            let bytes = rustyboi_session::rewind::compress_snapshot(bytes);
+            if done_tx.send(Finished { frame: job.frame, bytes }).is_err() {
                 break; // main side gone
             }
+        }
     }
 }

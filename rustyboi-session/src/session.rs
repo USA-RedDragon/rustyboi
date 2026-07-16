@@ -390,7 +390,7 @@ impl Session {
                 // worst-case single-frame skip, never a leak.
                 self.pending_snapshot = Some((self.frame_count, self.gb.clone()));
             } else if let Ok(state) = self.gb.to_state_bytes() {
-                self.rewind.push(self.frame_count, state);
+                self.rewind.push(self.frame_count, crate::rewind::compress_snapshot(state));
             }
         }
 
@@ -560,7 +560,10 @@ impl Session {
     /// Returns the frame index restored to, or `None` if history is empty.
     pub fn rewind(&mut self) -> Option<u64> {
         let snap = self.rewind.rewind()?;
-        if self.restore_state(&snap.state).is_ok() {
+        // Ring blobs are deflate-framed (see `rewind::compress_snapshot`);
+        // unframed raw blobs pass through for hosts that push uncompressed.
+        let state = crate::rewind::decompress_snapshot(&snap.state)?;
+        if self.restore_state(&state).is_ok() {
             self.frame_count = snap.frame;
             Some(snap.frame)
         } else {
@@ -616,6 +619,11 @@ impl Session {
     /// the same drop-oldest policy as inline capture. Frames may arrive slightly
     /// out of order relative to live play, but each blob is self-describing
     /// (carries its own frame index) so restore is unaffected.
+    ///
+    /// Hosts should run the blob through [`crate::rewind::compress_snapshot`]
+    /// on their worker (as the inline path does) so the ring stores the compact
+    /// framed form; raw uncompressed blobs still restore correctly but forgo
+    /// the memory saving.
     pub fn push_rewind_bytes(&mut self, frame: u64, bytes: Vec<u8>) {
         self.rewind.push(frame, bytes);
     }
@@ -1529,11 +1537,11 @@ mod offload_tests {
             inline.run_frame(AbstractInput::none());
 
             offl.run_frame(AbstractInput::none());
-            // Synchronously stand in for the worker: serialize the clone and
-            // feed it back, exactly as the platform worker would.
+            // Synchronously stand in for the worker: serialize + compress the
+            // clone and feed it back, exactly as the platform worker would.
             if let Some((frame, mut gb)) = offl.take_pending_snapshot() {
                 let bytes = gb.to_state_bytes().expect("serialize clone");
-                offl.push_rewind_bytes(frame, bytes);
+                offl.push_rewind_bytes(frame, crate::rewind::compress_snapshot(bytes));
             }
         }
 
