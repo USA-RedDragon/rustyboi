@@ -151,7 +151,7 @@ impl RustyboiCore {
         }
         if let Some(value) = env.get_variable(core_options::KEY_GBC_COLOR_CORRECTION) {
             self.color_correction =
-                core_options::parse_color_correction(&value).unwrap_or(CgbColorConversion::Linear);
+                core_options::parse_color_correction(&value).unwrap_or(CgbColorConversion::Lcd);
             if let Some(session) = self.session.as_mut() {
                 session.set_color_correction(self.color_correction);
             }
