@@ -159,4 +159,59 @@ mod tests {
         one_fail.record(&result(Mode::Dmg, false));
         assert_eq!(one_fail.exit_code(), 1);
     }
+
+    // A failing case carrying distinctive field values, to inspect the record.
+    fn fail_case(mode: Mode, oracle: Oracle, detail: &str) -> CaseResult {
+        CaseResult {
+            case: TestCase {
+                rom_path: std::path::PathBuf::from("/roms/cool.gb"),
+                mode,
+                oracle,
+                revision: None,
+                input: Vec::new(),
+                frames: None,
+                cart_lazy_sram_cs: false,
+            },
+            passed: false,
+            detail: detail.to_string(),
+        }
+    }
+
+    #[test]
+    fn recorded_failure_captures_case_fields() {
+        let mut s = Summary::default();
+        s.record(&fail_case(
+            Mode::Cgb,
+            Oracle::Hex { marker: "out", expected: "1A".to_string() },
+            "boom",
+        ));
+        let f = &s.failures[0];
+        assert_eq!(f.rom, "/roms/cool.gb");
+        assert_eq!(f.mode, Mode::Cgb);
+        assert_eq!(f.oracle, "out1A"); // Oracle::label()
+        assert_eq!(f.detail, "boom");
+    }
+
+    #[test]
+    fn json_shape_names_fields_and_serializes_agb_defaults() {
+        let mut s = Summary {
+            skipped_roms: 3,
+            ..Default::default()
+        };
+        s.record(&fail_case(Mode::Dmg, Oracle::Serial, "why"));
+        let v = serde_json::to_value(&s).unwrap();
+
+        assert_eq!(v["total"], 1);
+        assert_eq!(v["failed"], 1);
+        assert_eq!(v["skipped_roms"], 3);
+        // The #[serde(default)] agb_* fields still serialize under their names.
+        assert_eq!(v["agb_total"], 0);
+        assert_eq!(v["agb_failed"], 0);
+
+        let f = &v["failures"][0];
+        assert_eq!(f["rom"], "/roms/cool.gb");
+        assert_eq!(f["mode"], "dmg"); // Mode serde rename_all = lowercase
+        assert_eq!(f["oracle"], "serial");
+        assert_eq!(f["detail"], "why");
+    }
 }
