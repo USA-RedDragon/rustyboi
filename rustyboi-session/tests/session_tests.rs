@@ -60,25 +60,6 @@ fn dmg_session(rom: &[u8]) -> Session {
     Session::with_gb(booted_gb(rom), config, fresh_ports(), sha256(rom))
 }
 
-/// Run a test body on a thread with a desktop-representative stack.
-///
-/// `serde_json`'s derived deserializer for the whole `GB` (the core's JSON
-/// savestate format) is a single huge recursive function whose stack frame, in
-/// an unoptimized `cargo test` build, exceeds the Rust test harness's default
-/// ~2 MiB thread stack. Real frontends deserialize on the main thread (8 MiB on
-/// desktop; the WASM/Android adapters size their own stack), so this only bites
-/// the test harness. We give the savestate-touching tests an 8 MiB stack — the
-/// same budget the desktop main thread has — rather than mask the format's real
-/// stack cost.
-fn with_big_stack<F: FnOnce() + Send + 'static>(f: F) {
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(f)
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
 #[test]
 fn run_frame_advances_one_frame() {
     let rom = test_rom();
@@ -125,7 +106,6 @@ fn fast_forward_advances_n_frames_per_call() {
 
 #[test]
 fn savestate_save_load_restores_exact_state() {
-    with_big_stack(|| {
     let rom = test_rom();
     let mut s = dmg_session(&rom);
     // Advance a few frames so the machine has non-trivial state.
@@ -152,12 +132,10 @@ fn savestate_save_load_restores_exact_state() {
     // exact machine-state restoration.
     let restored = s.run_frame(AbstractInput::none()).frame;
     assert_eq!(frame_hash(&restored), truth_hash);
-    });
 }
 
 #[test]
 fn quicksave_quickload_round_trip() {
-    with_big_stack(|| {
     let rom = test_rom();
     let mut s = dmg_session(&rom);
     for _ in 0..3 {
@@ -170,7 +148,6 @@ fn quicksave_quickload_round_trip() {
     }
     s.quickload().unwrap();
     assert_eq!(frame_hash(&s.run_frame(AbstractInput::none()).frame), hash_after_save);
-    });
 }
 
 #[test]
@@ -188,7 +165,6 @@ fn slot_listing_and_meta() {
 
 #[test]
 fn rewind_returns_to_an_earlier_frame() {
-    with_big_stack(|| {
     let rom = test_rom();
     let mut config = Config { hardware: Hardware::DMG, ..Default::default() };
     config.rewind.enabled = true;
@@ -233,7 +209,6 @@ fn rewind_returns_to_an_earlier_frame() {
     assert_eq!(after.frame_count, 4);
     assert_eq!(frame_hash(&after.frame), fresh_hash_4);
     let _ = hash_at_3;
-    });
 }
 
 #[test]

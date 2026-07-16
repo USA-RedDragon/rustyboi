@@ -171,9 +171,9 @@ pub struct Mmio {
     #[serde(default)]
     cartridge: Option<cartridge::Cartridge>,
     input: input::Input,
-    vram: memory::Memory<VRAM_START, VRAM_SIZE>,
-    wram: memory::Memory<WRAM_START, WRAM_SIZE>,
-    wram_bank: memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>,
+    vram: Box<memory::Memory<VRAM_START, VRAM_SIZE>>,
+    wram: Box<memory::Memory<WRAM_START, WRAM_SIZE>>,
+    wram_bank: Box<memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>>,
     oam: memory::Memory<OAM_START, OAM_SIZE>,
     // CGB-only shadow for the 0xFEA0-0xFEFF "unused" region, which on CGB
     // mirrors the OAM index space masked with 0xE7.
@@ -343,7 +343,7 @@ pub struct Mmio {
     key1_switch_armed: bool,  // Speed switch armed (KEY1 bit 0)
 
     // CGB VRAM bank 1 (bank 0 is the existing vram field)
-    vram_bank1: memory::Memory<VRAM_START, VRAM_SIZE>,
+    vram_bank1: Box<memory::Memory<VRAM_START, VRAM_SIZE>>,
 
     // CGB WRAM banks 2-7 (bank 1 is the existing wram_bank field)
     wram_banks: Vec<memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE>>, // Banks 2-7
@@ -948,9 +948,9 @@ impl Mmio {
             bios: None,
             cartridge: None,
             input: input::Input::new(),
-            vram: memory::Memory::new(),
-            wram: memory::Memory::new(),
-            wram_bank: memory::Memory::new(),
+            vram: Box::new(memory::Memory::new()),
+            wram: Box::new(memory::Memory::new()),
+            wram_bank: Box::new(memory::Memory::new()),
             oam: memory::Memory::new(),
             oam_high: [0; 0x60],
             timer: timer::Timer::new(),
@@ -994,7 +994,7 @@ impl Mmio {
             key0_dmg_mode: false,  // Default to full CGB mode
             key1_current_speed: false, // Start in normal speed mode
             key1_switch_armed: false,  // No speed switch armed initially
-            vram_bank1: memory::Memory::new(),
+            vram_bank1: Box::new(memory::Memory::new()),
             wram_banks: (0..6).map(|_| memory::Memory::new()).collect(), // Banks 2-7
             hdma_source: 0,
             hdma_dest: 0,

@@ -1789,26 +1789,11 @@ mod tas_tests {
         Session::new(Config::default(), test_ports(), [0u8; 32])
     }
 
-    // Reconstructing a `GB` from a movie's embedded savestate puts a full machine
-    // on the stack (plus serde_json's recursion), which overflows the test
-    // harness's default 2 MB thread stack in a debug build. Run such tests on a
-    // roomier thread — the same pattern the integration tests use — so plain
-    // `cargo test` passes without `RUST_MIN_STACK`.
-    fn with_big_stack<F: FnOnce() + Send + 'static>(f: F) {
-        std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn(f)
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
     // One ToggleRecording arms recording; a second stops it and hands back a
     // decodable `.rbmovie` whose frame count matches the frames stepped while
     // armed. Loading those bytes begins playback; StopReplay ends it.
     #[test]
     fn toggle_recording_round_trips_and_replays() {
-        with_big_stack(|| {
         let mut s = session();
 
         assert!(!s.is_recording());
@@ -1842,7 +1827,6 @@ mod tas_tests {
         assert!(s.is_playing(), "loading a movie begins playback");
         s.apply(UiAction::StopReplay, 0);
         assert!(!s.is_playing(), "StopReplay resumes live input");
-        });
     }
 
     // A movie recorded against a different ROM id is rejected rather than
