@@ -30,13 +30,22 @@ if [ "$is_web" = 1 ]; then
   exec "$rustc" "$@"
 fi
 
-# Non-web crate: drop only the instrumentation flags (keep cfgs, link-args, the
-# normal --emit=dep-info,link, everything else) so its cdylib/staticlib links.
+# Non-web crate: drop the instrumentation flags AND the web-only naga math-shim
+# link-args (keep cfgs, other link-args, the normal --emit=dep-info,link,
+# everything else) so its cdylib/staticlib links. The shim staticlib carries its
+# own Rust panic runtime (its `#[panic_handler]` emits `rust_begin_unwind` with
+# the fixed `__rustc` lang-item mangling), so linking it into any std wasm crate
+# collides with that crate's own `rust_begin_unwind` (duplicate symbol). Only
+# rustyboi-web references naga's libm symbols, and its own link tolerates the
+# shim via the paired `--allow-multiple-definition` — neither belongs on the
+# core/egui/frontend/debugger cdylibs, which don't need the shim at all.
 args=()
 for a in "$@"; do
   case "$a" in
     -Cinstrument-coverage | -Cinstrument-coverage=* | \
-    -Zno-profiler-runtime | --emit=llvm-ir)
+    -Zno-profiler-runtime | --emit=llvm-ir | \
+    -Clink-arg=*wasm-math-shims.o | \
+    -Clink-arg=--allow-multiple-definition)
       continue;;
     *) args+=("$a");;
   esac
