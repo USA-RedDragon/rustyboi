@@ -1,10 +1,16 @@
 #![warn(clippy::all)]
 // `#[unsafe(no_mangle)] fn android_main(...)` requires unsafe; gate the
-// lint so non-Android targets still forbid it. No unsafe elsewhere: the rewind
+// lint so other targets still forbid it. No unsafe elsewhere: the rewind
 // worker moves cloned `GB`s to its thread safely because `GB: Send` (its audio
 // sink is `Box<dyn AudioOutput + Send>`), and wgpu surface creation goes through
-// the safe `Arc<Window>` handle path.
-#![cfg_attr(not(any(target_os = "android", target_os = "ios")), forbid(unsafe_code))]
+// the safe `Arc<Window>` handle path. Windows gets `deny` instead of `forbid`
+// for exactly one scoped allow: the argumentless `timeBeginPeriod(1)` WinMM
+// FFI call in `display.rs` (the tick throttle's timer-resolution request).
+#![cfg_attr(
+    not(any(target_os = "android", target_os = "ios", target_os = "windows")),
+    forbid(unsafe_code)
+)]
+#![cfg_attr(target_os = "windows", deny(unsafe_code))]
 
 #[cfg(target_os = "android")]
 pub mod android;

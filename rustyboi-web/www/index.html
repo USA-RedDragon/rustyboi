@@ -209,9 +209,14 @@
             // m.rgba is a Uint8Array transferred from the worker. on_frame copies
             // its bytes into the wasm-side framebuffer, so the buffer is free the
             // moment it returns — transfer it back to the worker's pool (no
-            // per-frame allocation, so the GC sawtooth flattens).
+            // per-frame allocation, so the GC sawtooth flattens). The audio
+            // backlog piggybacks on this message: it is the DAC-trim input to
+            // the worker's pacing regulator (same signal as the native ring).
             app.on_frame(m.rgba, m.width, m.height);
-            send({ type: "ReturnBuffer", buf: m.rgba.buffer }, [m.rgba.buffer]);
+            send(
+              { type: "ReturnBuffer", buf: m.rgba.buffer, backlogPairs: audio.backlog_pairs() },
+              [m.rgba.buffer],
+            );
             break;
           case "UiState":
             app.on_ui_state(m.json);

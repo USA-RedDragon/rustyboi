@@ -1,18 +1,19 @@
 //! Platform audio output.
 //!
 //! Two backends behind one `Output` API (`start_device` / `push_samples` /
-//! `queued_frames`):
+//! `queued_pairs` / `consumed_pairs`), both built on the same lock-free SPSC
+//! ring so the backlog signal is sample-accurate — it is the DAC-trim input to
+//! the shared pacing regulator (`rustyboi_session::pacing`):
 //!
 //! - **Android** → oboe, requesting AAudio's LOW_LATENCY / MMAP path (which cpal
-//!   never asks for, pinning it to the higher-latency Legacy path). The emulator
-//!   pushes samples into a lock-free SPSC ring that oboe's real-time callback
-//!   drains. `queued_frames` reports the ring depth so the frame loop can pace
-//!   off it (audio-clocked pacing).
-//! - **Everything else** (desktop native) → rodio/cpal, which is already
-//!   low-latency there.
+//!   never asks for, pinning it to the higher-latency Legacy path); its
+//!   real-time callback drains the ring.
+//! - **Everything else** (desktop native + iOS) → cpal directly, stream opened
+//!   at the core's 44100Hz (the host resamples to the device rate); its
+//!   callback drains the ring.
 
 #[cfg(not(target_os = "android"))]
-pub use rodio_backend::Output;
+pub use cpal_backend::Output;
 
 #[cfg(target_os = "android")]
 pub use oboe_backend::Output;
@@ -21,28 +22,63 @@ pub use oboe_backend::Output;
 const SAMPLE_RATE: u32 = 44100;
 
 #[cfg(not(target_os = "android"))]
-mod rodio_backend {
+mod cpal_backend {
     use super::SAMPLE_RATE;
-    use rodio::buffer::SamplesBuffer;
-    use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player};
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use ringbuf::{
+        traits::{Consumer, Observer, Producer, Split},
+        HeapProd, HeapRb,
+    };
     use rustyboi_core_lib::audio::AudioOutput;
-    use std::num::NonZero;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
-    // One `SamplesBuffer` is appended per presented frame, so `Player::len()` is
-    // the backlog in frames. Prime a small cushion before the first sound; the
-    // frame loop's pacing keeps it healthy after that.
-    const CUSHION_PRIME_FRAMES: usize = 3;
-    const CUSHION_MAX_FRAMES: usize = 6;
+    /// Stereo sample *pairs* per emulated frame (44100 / 59.7275 fps), rounded.
+    /// Only sizes the ring and the startup pre-fill — the pacing regulator does
+    /// its frame math with the exact fractional constant (`pacing.rs`).
+    const SAMPLES_PER_FRAME: usize = 738;
+    /// Playback gain, applied on push (same as the Android backend's VOLUME).
+    const VOLUME: f32 = 0.3;
+    /// Ring capacity in frames. Generous — the pacing regulator holds the fill
+    /// near its target, so this is just a ceiling that bounds latency (the
+    /// excess is dropped on push).
+    const RING_FRAMES: usize = 32;
+    /// Frames of silence pre-pushed at device start. The host audio pipeline
+    /// fills its buffers by consuming fast for its first ~100-200ms; pre-filled
+    /// silence absorbs that one-time surge so it drains the ring instead of
+    /// demanding emulated frames, and whatever the pipeline doesn't eat plays
+    /// out inaudibly while the regulator's backlog trim settles the ring.
+    const PRIME_SILENCE_FRAMES: usize = 12;
 
+    /// Desktop/iOS output: a cpal stream opened AT THE CORE'S 44100Hz whose
+    /// callback drains the SPSC ring 1:1, zero-filling on underrun — exactly
+    /// the Android oboe model. The host does any device-rate conversion
+    /// (PipeWire/CoreAudio natively, WASAPI via AUTOCONVERTPCM), so ring
+    /// consumption is precisely 44100 pairs/s by the host audio clock: the
+    /// honest, sample-accurate signal the pacing regulator trims against.
+    /// (The previous rodio sink's mixer/converter stack consumed the ring at
+    /// the device rate when its span bootstrap mis-captured the source rate,
+    /// and leaked samples on every span re-bootstrap — 10-20%% zero-fill.)
     pub struct Output {
-        _stream: Option<MixerDeviceSink>,
-        sink: Option<Player>,
-        playing: bool,
+        stream: Option<cpal::Stream>,
+        prod: Option<HeapProd<f32>>,
+        scratch: Vec<f32>,
+        /// Cumulative stereo pairs pushed (including the startup silence), for
+        /// the `RB_LOG_FPS` consumption diagnostics.
+        pushed_pairs: u64,
+        /// Raw f32 samples the callback zero-filled because the ring was empty.
+        underrun_samples: Arc<AtomicU64>,
     }
 
     impl Output {
         pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-            Ok(Output { _stream: None, sink: None, playing: false })
+            Ok(Output {
+                stream: None,
+                prod: None,
+                scratch: Vec::new(),
+                pushed_pairs: 0,
+                underrun_samples: Arc::new(AtomicU64::new(0)),
+            })
         }
 
         pub fn start_device(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -53,49 +89,81 @@ mod rodio_backend {
             <Self as AudioOutput>::add_samples(self, samples)
         }
 
-        /// Backlog in frames; the frame loop paces off this.
-        pub fn queued_frames(&self) -> usize {
-            self.sink.as_ref().map_or(0, |s| s.len())
+        /// Backlog in stereo sample pairs — the sample-accurate signal the
+        /// pacing regulator trims against.
+        pub fn queued_pairs(&self) -> usize {
+            self.prod.as_ref().map_or(0, |p| p.occupied_len() / 2)
+        }
+
+        /// Cumulative stereo pairs the device has *consumed* (pushed minus
+        /// still-queued). Diagnostics: its rate should track 44100/s; a surge
+        /// marks a host pipeline fill / re-quantum event.
+        pub fn consumed_pairs(&self) -> u64 {
+            self.pushed_pairs.saturating_sub(self.queued_pairs() as u64)
+        }
+
+        /// Cumulative raw samples zero-filled on ring underrun (diagnostics —
+        /// the "gapless audio" acceptance signal; steady state must not grow).
+        pub fn underrun_samples(&self) -> u64 {
+            self.underrun_samples.load(Ordering::Relaxed)
         }
     }
 
     impl AudioOutput for Output {
         fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-            let stream = DeviceSinkBuilder::open_default_sink()?;
-            let sink = Player::connect_new(stream.mixer());
-            sink.set_volume(0.3);
-            sink.pause();
-            self._stream = Some(stream);
-            self.sink = Some(sink);
-            self.playing = false;
+            let (mut prod, mut cons) = HeapRb::<f32>::new(RING_FRAMES * SAMPLES_PER_FRAME * 2).split();
+            // Absorb the host pipeline's one-time startup fill with silence
+            // (see PRIME_SILENCE_FRAMES) so it can't fast-forward the game.
+            let silence = vec![0.0f32; PRIME_SILENCE_FRAMES * SAMPLES_PER_FRAME * 2];
+            prod.push_slice(&silence);
+            self.pushed_pairs = (silence.len() / 2) as u64;
+
+            let host = cpal::default_host();
+            let device = host
+                .default_output_device()
+                .ok_or("no default audio output device")?;
+            let config = cpal::StreamConfig {
+                channels: 2,
+                sample_rate: SAMPLE_RATE,
+                buffer_size: cpal::BufferSize::Default,
+            };
+            let underrun_samples = self.underrun_samples.clone();
+            let stream = device.build_output_stream(
+                &config,
+                move |data: &mut [f32], _| {
+                    // Real-time callback: drain the ring, zero-fill the rest.
+                    let got = cons.pop_slice(data);
+                    if got < data.len() {
+                        data[got..].fill(0.0);
+                        underrun_samples.fetch_add((data.len() - got) as u64, Ordering::Relaxed);
+                    }
+                },
+                |e| log::warn!("audio stream error: {e}"),
+                None,
+            )?;
+            stream.play()?;
+            log::info!("cpal stream opened at {SAMPLE_RATE}Hz stereo (host converts to device rate)");
+
+            self.stream = Some(stream);
+            self.prod = Some(prod);
             Ok(())
         }
 
         fn add_samples(&mut self, samples: &[(f32, f32)]) {
-            let Some(sink) = self.sink.as_ref() else { return };
+            let Some(prod) = self.prod.as_mut() else { return };
             if samples.is_empty() {
                 return;
             }
-            let mut interleaved = Vec::with_capacity(samples.len() * 2);
+            self.scratch.clear();
+            self.scratch.reserve(samples.len() * 2);
             for &(left, right) in samples {
-                interleaved.push(left);
-                interleaved.push(right);
+                self.scratch.push(left * VOLUME);
+                self.scratch.push(right * VOLUME);
             }
-            let channels = NonZero::new(2u16).unwrap();
-            let sample_rate = NonZero::new(SAMPLE_RATE).unwrap();
-            sink.append(SamplesBuffer::new(channels, sample_rate, interleaved));
-
-            let queued = sink.len();
-            if !self.playing {
-                if queued >= CUSHION_PRIME_FRAMES {
-                    sink.play();
-                    self.playing = true;
-                }
-            } else if queued > CUSHION_MAX_FRAMES {
-                while sink.len() > CUSHION_PRIME_FRAMES {
-                    sink.skip_one();
-                }
-            }
+            // A full ring (production outran the device) drops the excess,
+            // bounding latency.
+            let pushed = prod.push_slice(&self.scratch);
+            self.pushed_pairs += (pushed / 2) as u64;
         }
     }
 }
@@ -114,19 +182,22 @@ mod oboe_backend {
         HeapCons, HeapProd, HeapRb,
     };
     use rustyboi_core_lib::audio::AudioOutput;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::sync::Arc;
 
-    /// Stereo sample *pairs* per emulated frame (~44100 / 59.7 fps).
-    const SAMPLES_PER_FRAME: usize = 735;
+    /// Stereo sample *pairs* per emulated frame (44100 / 59.7275 fps), rounded.
+    /// Only sizes the ring and the startup pre-fill — the pacing regulator does
+    /// its frame math with the exact fractional constant (`pacing.rs`).
+    const SAMPLES_PER_FRAME: usize = 738;
     /// Playback gain, matching the desktop sink's `set_volume(0.3)`.
     const VOLUME: f32 = 0.3;
-    /// Ring capacity in frames. Generous — audio-clocked pacing holds the fill
+    /// Ring capacity in frames. Generous — the pacing regulator holds the fill
     /// near a small target, so this is just a ceiling that bounds latency.
     const RING_FRAMES: usize = 32;
-    /// Frames to buffer before starting the stream, so its first callback drains
-    /// a primed ring instead of underrunning into startup silence.
-    const PRIME_FRAMES: usize = 2;
+    /// Frames of silence pre-pushed at stream start — same rationale as the
+    /// desktop backend's constant of the same name: the host pipeline's one-time
+    /// startup fill drains silence instead of demanding emulated frames.
+    const PRIME_SILENCE_FRAMES: usize = 12;
     /// Log a backlog summary this often (~1s of audio).
     const REPORT_EVERY_FRAMES: u32 = 60;
 
@@ -135,6 +206,7 @@ mod oboe_backend {
     struct Callback {
         cons: HeapCons<f32>,
         underruns: Arc<AtomicU32>,
+        underrun_samples: Arc<AtomicU64>,
     }
 
     impl AudioOutputCallback for Callback {
@@ -145,18 +217,19 @@ mod oboe_backend {
             _stream: &mut dyn AudioOutputStreamSafe,
             frames: &mut [(f32, f32)],
         ) -> DataCallbackResult {
-            let mut underran = false;
+            let mut zero_filled: u64 = 0;
             for frame in frames.iter_mut() {
                 let mut lr = [0.0f32; 2];
                 if self.cons.pop_slice(&mut lr) == 2 {
                     *frame = (lr[0], lr[1]);
                 } else {
                     *frame = (0.0, 0.0);
-                    underran = true;
+                    zero_filled += 2;
                 }
             }
-            if underran {
+            if zero_filled > 0 {
                 self.underruns.fetch_add(1, Ordering::Relaxed);
+                self.underrun_samples.fetch_add(zero_filled, Ordering::Relaxed);
             }
             DataCallbackResult::Continue
         }
@@ -166,11 +239,13 @@ mod oboe_backend {
         stream: Option<AudioStreamAsync<OboeOutput, Callback>>,
         prod: Option<HeapProd<f32>>,
         underruns: Arc<AtomicU32>,
-        /// `false` until the ring is primed and the stream is started.
-        started: bool,
+        underrun_samples: Arc<AtomicU64>,
         scratch: Vec<f32>,
         /// Counts appended frames to throttle the underrun check to ~once/second.
         report_frames: u32,
+        /// Cumulative stereo pairs pushed (including the startup silence), for
+        /// consumption diagnostics — same contract as the desktop backend.
+        pushed_pairs: u64,
     }
 
     impl Output {
@@ -179,9 +254,10 @@ mod oboe_backend {
                 stream: None,
                 prod: None,
                 underruns: Arc::new(AtomicU32::new(0)),
-                started: false,
+                underrun_samples: Arc::new(AtomicU64::new(0)),
                 scratch: Vec::new(),
                 report_frames: 0,
+                pushed_pairs: 0,
             })
         }
 
@@ -193,18 +269,36 @@ mod oboe_backend {
             <Self as AudioOutput>::add_samples(self, samples)
         }
 
-        /// Backlog in frames (ring depth); the frame loop paces off this.
-        pub fn queued_frames(&self) -> usize {
-            self.prod
-                .as_ref()
-                .map_or(0, |p| p.occupied_len() / 2 / SAMPLES_PER_FRAME)
+        /// Backlog in stereo sample pairs — the sample-accurate signal the
+        /// pacing regulator trims against.
+        pub fn queued_pairs(&self) -> usize {
+            self.prod.as_ref().map_or(0, |p| p.occupied_len() / 2)
+        }
+
+        /// Cumulative stereo pairs the device has *consumed* (pushed minus
+        /// still-queued) — same contract as the desktop backend.
+        pub fn consumed_pairs(&self) -> u64 {
+            self.pushed_pairs.saturating_sub(self.queued_pairs() as u64)
+        }
+
+        /// Cumulative raw samples zero-filled on ring underrun — same contract
+        /// as the desktop backend.
+        pub fn underrun_samples(&self) -> u64 {
+            self.underrun_samples.load(Ordering::Relaxed)
         }
     }
 
     impl AudioOutput for Output {
         fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-            let (prod, cons) = HeapRb::<f32>::new(RING_FRAMES * SAMPLES_PER_FRAME * 2).split();
+            let (mut prod, cons) = HeapRb::<f32>::new(RING_FRAMES * SAMPLES_PER_FRAME * 2).split();
             let underruns = Arc::new(AtomicU32::new(0));
+            // Absorb the host pipeline's one-time startup fill with silence
+            // (see PRIME_SILENCE_FRAMES). The callback zero-fills on an empty
+            // ring, so the stream can start immediately — no deferred-start
+            // priming latch needed (same model as the desktop backend).
+            let silence = vec![0.0f32; PRIME_SILENCE_FRAMES * SAMPLES_PER_FRAME * 2];
+            prod.push_slice(&silence);
+            self.pushed_pairs = (silence.len() / 2) as u64;
 
             // Request the AAudio low-latency (MMAP) path. We feed 44.1kHz and let
             // oboe resample to the device rate so the fast path is preserved.
@@ -216,23 +310,25 @@ mod oboe_backend {
                 .set_channel_count::<Stereo>()
                 .set_sample_rate(SAMPLE_RATE as i32)
                 .set_sample_rate_conversion_quality(SampleRateConversionQuality::Medium)
-                .set_callback(Callback { cons, underruns: underruns.clone() })
+                .set_callback(Callback {
+                    cons,
+                    underruns: underruns.clone(),
+                    underrun_samples: self.underrun_samples.clone(),
+                })
                 .open_stream()
                 .map_err(|e| format!("oboe open_stream failed: {e:?}"))?;
 
-            // Opened but not started: `add_samples` starts it once the ring is
-            // primed, so the first callback drains real samples, not silence.
             log::info!(
                 "oboe stream opened: rate={}Hz burst={} frames, perf={:?}",
                 stream.get_sample_rate(),
                 stream.get_frames_per_burst(),
                 stream.get_performance_mode(),
             );
+            stream.start().map_err(|e| format!("oboe start failed: {e:?}"))?;
 
             self.stream = Some(stream);
             self.prod = Some(prod);
             self.underruns = underruns;
-            self.started = false;
             Ok(())
         }
 
@@ -247,19 +343,10 @@ mod oboe_backend {
                 self.scratch.push(left * VOLUME);
                 self.scratch.push(right * VOLUME);
             }
-            // If the ring is full (producer outran the device — shouldn't happen
-            // under audio-clocked pacing) the excess is dropped, bounding latency.
-            prod.push_slice(&self.scratch);
-
-            // Start the stream once the ring holds a cushion (avoids startup
-            // underruns draining an empty ring).
-            if !self.started
-                && prod.occupied_len() / 2 / SAMPLES_PER_FRAME >= PRIME_FRAMES
-                && let Some(stream) = self.stream.as_mut()
-            {
-                let _ = stream.start();
-                self.started = true;
-            }
+            // A full ring (production outran the device) drops the excess,
+            // bounding latency.
+            let pushed = prod.push_slice(&self.scratch);
+            self.pushed_pairs += (pushed / 2) as u64;
 
             // Stay silent when healthy; surface underruns only if they happen
             // (e.g. a device that can't hold the MMAP low-latency path).

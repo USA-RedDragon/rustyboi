@@ -34,7 +34,7 @@ use winit::keyboard::PhysicalKey;
 use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
 use winit::window::{Window, WindowId};
 
-use rustyboi_frontend_lib::renderer::{GameFrame, Renderer, SourceSize};
+use rustyboi_frontend_lib::renderer::{GameFrame, Present, Renderer, SourceSize};
 use rustyboi_frontend_lib::ui_host::UiHost;
 use rustyboi_session::input_config::{
     FiredHotkey, HeldInputs, HotkeyAction, InputTrigger, KeyName, PadButton, ResolveState,
@@ -259,42 +259,31 @@ impl WebApp {
 /// window exists (wgpu adapter/device requests are async on the web).
 struct WebRender {
     window: Arc<Window>,
-    renderer: Renderer,
+    /// Behind the `Present` trait like every other frontend, so the render
+    /// path stays backend-agnostic (web only builds the wgpu backend today).
+    renderer: Box<dyn Present>,
     ui: UiHost,
     /// Rolling presented-FPS estimate for the on-screen overlay.
     fps: FpsCounter,
 }
 
-/// A rolling frames-per-second estimate for the FPS overlay. On web the emulator
-/// runs in the worker (self-paced at ~59.7 fps) while this main thread composites
-/// at the display's rAF rate, so the meaningful rate is how often a *new* worker
-/// frame is presented — `tick` is called once per `frame_dirty` arrival and
-/// averages over a ~1s window so the reading stays steady.
+/// The FPS estimate for the overlay, built on the shared
+/// [`rustyboi_session::pacing::RateMeter`] so the readout policy matches every
+/// other platform. `tick` runs once per worker frame consumed by a composite
+/// (`frame_dirty` latch), approximating game rate from the main thread.
 #[derive(Default)]
 struct FpsCounter {
-    /// Timestamps (ms, `Date::now`) of recently presented frames.
-    samples: Vec<f64>,
-    fps: f32,
+    meter: rustyboi_session::pacing::RateMeter,
 }
 
 impl FpsCounter {
-    /// Record a presented frame at `now_ms` and refresh the averaged rate.
+    /// Record a consumed worker frame at `now_ms` (`Date::now`).
     fn tick(&mut self, now_ms: f64) {
-        self.samples.push(now_ms);
-        // Bound the buffer, then drop anything older than the 1s window.
-        if self.samples.len() > 240 {
-            self.samples.remove(0);
-        }
-        while self.samples.len() > 2 && now_ms - self.samples[0] > 1000.0 {
-            self.samples.remove(0);
-        }
-        let n = self.samples.len();
-        if n >= 2 {
-            let dur = now_ms - self.samples[0];
-            if dur > 0.0 {
-                self.fps = ((n - 1) as f64 / dur * 1000.0) as f32;
-            }
-        }
+        self.meter.record(now_ms / 1000.0, 1);
+    }
+
+    fn fps(&self) -> f32 {
+        self.meter.fps() as f32
     }
 }
 
@@ -423,7 +412,7 @@ impl ApplicationHandler for WebGuiApp {
                     &self.shared,
                     &render.window,
                     &mut render.ui,
-                    &mut render.renderer,
+                    render.renderer.as_mut(),
                     &self.held_keys,
                     &mut self.resolve_state,
                     &mut self.rewind_held,
@@ -514,7 +503,7 @@ async fn build_web_render(
         surface, device, queue, surface_format, width, height, wgpu::PresentMode::Fifo,
     );
     let ui = UiHost::new(&window, scale_factor, max_texture_size, None);
-    Ok(WebRender { window, renderer, ui, fps: FpsCounter::default() })
+    Ok(WebRender { window, renderer: Box::new(renderer), ui, fps: FpsCounter::default() })
 }
 
 /// Build the winit event loop, then hand it a [`WebGuiApp`] to drive. Returns as
@@ -588,7 +577,7 @@ fn draw(
     shared: &Rc<RefCell<Shared>>,
     window: &Window,
     ui: &mut UiHost,
-    renderer: &mut Renderer,
+    renderer: &mut dyn Present,
     held_keys: &HashSet<KeyName>,
     resolve_state: &mut ResolveState,
     rewind_held: &mut bool,
@@ -687,7 +676,7 @@ fn draw(
             // The FPS overlay reads a value that changes every frame, so it must
             // repaint continuously while shown (egui geometry is otherwise reused).
             force_repaint: force_repaint || debug_open || ui_state.show_fps,
-            fps: fps.fps,
+            fps: fps.fps(),
         },
     );
 
