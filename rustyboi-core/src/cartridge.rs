@@ -1041,15 +1041,17 @@ impl Cartridge {
         // content. Must run on the raw file image, before padding.
         let unl_mapper = Self::detect_unl_mapper(&data);
 
-        // Copy ROM data
+        // Copy ROM data. `Arc::from(&slice)` copies exactly once — going
+        // through an intermediate `Vec` and then `.into()` would copy twice
+        // and leave a ROM-sized transient for the allocator to retain.
         let expected_rom_size = rom_banks * 0x4000; // 16KB per bank
-        let rom_data = if data.len() >= expected_rom_size {
-            data[..expected_rom_size].to_vec()
+        let rom_data: Arc<[u8]> = if data.len() >= expected_rom_size {
+            Arc::from(&data[..expected_rom_size])
         } else {
             // Pad with 0xFF if ROM is smaller than expected
             let mut padded_rom = data.clone();
             padded_rom.resize(expected_rom_size, 0xFF);
-            padded_rom
+            padded_rom.into()
         };
 
         // Initialize RAM data. MBC7 carts declare RAM size 0x00 in the header;
@@ -1072,7 +1074,7 @@ impl Cartridge {
         let mbc1_multicart = Self::detect_mbc1_multicart(cartridge_type, &data);
 
         let mut cartridge = Cartridge {
-            rom_data: rom_data.into(),
+            rom_data,
             rom_bank_cache: Cell::new(None),
             ram_data,
             cartridge_type,
@@ -1248,15 +1250,15 @@ impl Cartridge {
         // Detect unlicensed mapper families (header-spoofing boards).
         let unl_mapper = Self::detect_unl_mapper(&actual_data);
 
-        // Copy ROM data
+        // Copy ROM data — single copy straight into the shared Arc (see `load`).
         let expected_rom_size = rom_banks * 0x4000; // 16KB per bank
-        let rom_data = if actual_data.len() >= expected_rom_size {
-            actual_data[..expected_rom_size].to_vec()
+        let rom_data: Arc<[u8]> = if actual_data.len() >= expected_rom_size {
+            Arc::from(&actual_data[..expected_rom_size])
         } else {
             // Pad with 0xFF if ROM is smaller than expected
             let mut padded_rom = actual_data.clone();
             padded_rom.resize(expected_rom_size, 0xFF);
-            padded_rom
+            padded_rom.into()
         };
 
         // Initialize RAM data (MBC7: 256-byte 93LC56 EEPROM, see `load`;
@@ -1275,7 +1277,7 @@ impl Cartridge {
         let mbc1_multicart = Self::detect_mbc1_multicart(cartridge_type, &actual_data);
 
         let cartridge = Cartridge {
-            rom_data: rom_data.into(),
+            rom_data,
             rom_bank_cache: Cell::new(None),
             ram_data,
             cartridge_type,
