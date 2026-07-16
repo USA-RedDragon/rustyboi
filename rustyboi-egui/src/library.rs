@@ -7,13 +7,24 @@
 //! [`LibraryPanel::set_tree_uri`]. User clicks return [`GuiAction`]s
 //! that the event loop dispatches into the Android bridge.
 
-#![cfg(target_os = "android")]
+//! Compiled on Android, and on the host under `cfg(test)` so the pure list/label
+//! logic ([`LibraryPanel::set_entries`], [`entry_label`]) can be unit-tested; the
+//! interactive `show()` renderer stays Android-only (it needs the Android-gated
+//! `GuiAction` variants and the platform bridge).
+#![cfg(any(target_os = "android", test))]
 
+#[cfg(target_os = "android")]
 use egui::Context;
 
-use crate::actions::{GuiAction, LibraryEntry};
+#[cfg(target_os = "android")]
+use crate::actions::GuiAction;
+use crate::actions::LibraryEntry;
+#[cfg(target_os = "android")]
 use crate::ui::PANEL_BACKGROUND;
 
+// `show()` (Android-only) is the sole reader of several fields; keep them off the
+// host dead-code lint without weakening the check on the real build.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 #[derive(Default)]
 pub struct LibraryPanel {
     pub open: bool,
@@ -68,6 +79,7 @@ impl LibraryPanel {
 
     /// Render the panel; returns a `GuiAction` if the user interacted
     /// with one of the buttons.
+    #[cfg(target_os = "android")]
     pub fn show(&mut self, ctx: &Context) -> Option<GuiAction> {
         if !self.open {
             return None;
@@ -234,5 +246,58 @@ fn entry_label(entry: &LibraryEntry) -> String {
         entry.name.clone()
     } else {
         entry.rel_path.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(rel_path: &str, name: &str, crc32: u32) -> LibraryEntry {
+        LibraryEntry {
+            uri: format!("content://{rel_path}"),
+            name: name.to_string(),
+            rel_path: rel_path.to_string(),
+            size_bytes: 0,
+            crc32,
+        }
+    }
+
+    #[test]
+    fn set_entries_sorts_case_insensitively_and_reports_count() {
+        let mut panel = LibraryPanel::default();
+        panel.begin_scan();
+        panel.set_entries(vec![
+            entry("Zelda.gb", "Zelda.gb", 0),
+            entry("apple.gb", "apple.gb", 0),
+            entry("Banana.gb", "Banana.gb", 0),
+        ]);
+
+        let order: Vec<&str> = panel.entries.iter().map(|e| e.rel_path.as_str()).collect();
+        // Case-insensitive: 'apple' precedes 'Banana' precedes 'Zelda', which a
+        // naive ASCII sort (uppercase < lowercase) would get wrong.
+        assert_eq!(order, ["apple.gb", "Banana.gb", "Zelda.gb"]);
+        assert_eq!(panel.status.as_deref(), Some("3 ROMs"));
+        // Receiving results ends the scanning state.
+        assert!(!panel.scanning);
+    }
+
+    #[test]
+    fn entry_label_prefers_no_intro_then_rel_path_then_name() {
+        // Merge a unique CRC into the shared index so this is order-independent.
+        const CRC: u32 = 0x1234_ABCD;
+        rustyboi_session::no_intro::load_dats(&[
+            "game (\n\tname \"Canonical No-Intro Name\"\n\trom ( crc 1234ABCD )\n)\n".to_string(),
+        ]);
+
+        // CRC hit wins over both path and name.
+        assert_eq!(
+            entry_label(&entry("some/path.gb", "path.gb", CRC)),
+            "Canonical No-Intro Name"
+        );
+        // Unknown CRC falls back to the relative path.
+        assert_eq!(entry_label(&entry("sub/dir/game.gb", "game.gb", 0)), "sub/dir/game.gb");
+        // Empty rel_path falls back to the bare filename.
+        assert_eq!(entry_label(&entry("", "bare.gb", 0)), "bare.gb");
     }
 }

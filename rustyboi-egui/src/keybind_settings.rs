@@ -419,14 +419,49 @@ mod tests {
         assert_eq!(chord_label(&[a, b]), format!("{} + {}", a.label(), b.label()));
     }
 
+    // The mapping is a feature contract: the whole typing keyboard (letters,
+    // digits, F-keys, arrows, and the common editing/whitespace keys) must be
+    // bindable, while keys with no host-agnostic `KeyName` must report None so
+    // the capture UI cleanly rejects them.
     #[test]
-    fn key_from_egui_maps_known_keys_and_rejects_others() {
+    fn key_from_egui_covers_every_bindable_key() {
+        use egui::Key as E;
+        let letters = [
+            E::A, E::B, E::C, E::D, E::E, E::F, E::G, E::H, E::I, E::J, E::K, E::L, E::M, E::N,
+            E::O, E::P, E::Q, E::R, E::S, E::T, E::U, E::V, E::W, E::X, E::Y, E::Z,
+        ];
+        let digits = [
+            E::Num0, E::Num1, E::Num2, E::Num3, E::Num4, E::Num5, E::Num6, E::Num7, E::Num8,
+            E::Num9,
+        ];
+        let fkeys = [
+            E::F1, E::F2, E::F3, E::F4, E::F5, E::F6, E::F7, E::F8, E::F9, E::F10, E::F11, E::F12,
+        ];
+        let misc = [
+            E::ArrowUp, E::ArrowDown, E::ArrowLeft, E::ArrowRight, E::Space, E::Enter, E::Tab,
+            E::Backspace, E::Escape, E::Backslash,
+        ];
+        for key in letters.iter().chain(&digits).chain(&fkeys).chain(&misc) {
+            assert!(
+                key_from_egui(*key).is_some(),
+                "bindable key {key:?} unexpectedly maps to None"
+            );
+        }
+    }
+
+    #[test]
+    fn key_from_egui_rejects_unsupported_keys() {
+        use egui::Key as E;
+        for key in [E::Delete, E::Home, E::End, E::Insert, E::PageUp, E::PageDown] {
+            assert_eq!(key_from_egui(key), None, "{key:?} should be unbindable");
+        }
+    }
+
+    #[test]
+    fn key_from_egui_maps_representative_keys_to_their_names() {
         assert_eq!(key_from_egui(egui::Key::A), Some(KeyName::A));
         assert_eq!(key_from_egui(egui::Key::Space), Some(KeyName::Space));
         assert_eq!(key_from_egui(egui::Key::ArrowUp), Some(KeyName::Up));
         assert_eq!(key_from_egui(egui::Key::F12), Some(KeyName::F12));
-        // Keys outside the GB/host vocabulary have no representation.
-        assert_eq!(key_from_egui(egui::Key::Delete), None);
-        assert_eq!(key_from_egui(egui::Key::Home), None);
     }
 }
