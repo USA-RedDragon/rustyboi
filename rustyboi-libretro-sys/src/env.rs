@@ -135,3 +135,106 @@ pub unsafe fn get_rumble_interface(cb: retro_environment_t) -> Option<retro_set_
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::raw::c_char;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    // A None callback (frontend never installed one) must make every wrapper
+    // report "unavailable" via the `call` early-out, never dereference.
+    #[test]
+    fn none_callback_is_inert() {
+        unsafe {
+            assert_eq!(get_variable(None, "any"), None);
+            assert_eq!(get_system_directory(None), None);
+            assert!(get_rumble_interface(None).is_none());
+            assert!(!get_variable_update(None));
+        }
+    }
+
+    // The callback answering `false` (command unsupported) yields no value.
+    unsafe extern "C" fn env_reject(_cmd: c_uint, _data: *mut c_void) -> bool {
+        false
+    }
+
+    // Answers GET_VARIABLE but never fills in `value` (null) — must be None.
+    unsafe extern "C" fn env_var_null(cmd: c_uint, _data: *mut c_void) -> bool {
+        cmd == RETRO_ENVIRONMENT_GET_VARIABLE
+    }
+
+    static GET_VAR_CMD: AtomicU32 = AtomicU32::new(0);
+    // Happy path: records the cmd id and returns a decodable value.
+    unsafe extern "C" fn env_var_ok(cmd: c_uint, data: *mut c_void) -> bool {
+        GET_VAR_CMD.store(cmd, Ordering::SeqCst);
+        if cmd != RETRO_ENVIRONMENT_GET_VARIABLE {
+            return false;
+        }
+        let var = unsafe { &mut *(data as *mut retro_variable) };
+        var.value = c"chosen".as_ptr();
+        true
+    }
+
+    #[test]
+    fn get_variable_paths() {
+        unsafe {
+            // cmd rejected.
+            assert_eq!(get_variable(Some(env_reject), "key"), None);
+            // ok but value left null.
+            assert_eq!(get_variable(Some(env_var_null), "key"), None);
+            // interior NUL in the key never reaches the callback.
+            assert_eq!(get_variable(Some(env_var_ok), "ba\0d"), None);
+            // happy path decodes the frontend's selection.
+            assert_eq!(get_variable(Some(env_var_ok), "key"), Some("chosen".to_string()));
+        }
+        assert_eq!(GET_VAR_CMD.load(Ordering::SeqCst), RETRO_ENVIRONMENT_GET_VARIABLE);
+    }
+
+    unsafe extern "C" fn env_sysdir_null(cmd: c_uint, _data: *mut c_void) -> bool {
+        cmd == RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY
+    }
+    unsafe extern "C" fn env_sysdir_ok(cmd: c_uint, data: *mut c_void) -> bool {
+        if cmd != RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY {
+            return false;
+        }
+        unsafe { *(data as *mut *const c_char) = c"/rb/system".as_ptr() };
+        true
+    }
+
+    #[test]
+    fn get_system_directory_paths() {
+        unsafe {
+            assert_eq!(get_system_directory(Some(env_reject)), None);
+            assert_eq!(get_system_directory(Some(env_sysdir_null)), None);
+            assert_eq!(
+                get_system_directory(Some(env_sysdir_ok)),
+                Some(PathBuf::from("/rb/system"))
+            );
+        }
+    }
+
+    unsafe extern "C" fn dummy_rumble(_port: c_uint, _effect: retro_rumble_effect, _s: u16) -> bool {
+        true
+    }
+    // ok, but leaves the interface fn None => treated as unavailable.
+    unsafe extern "C" fn env_rumble_none(cmd: c_uint, _data: *mut c_void) -> bool {
+        cmd == RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE
+    }
+    unsafe extern "C" fn env_rumble_ok(cmd: c_uint, data: *mut c_void) -> bool {
+        if cmd != RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE {
+            return false;
+        }
+        let iface = unsafe { &mut *(data as *mut retro_rumble_interface) };
+        iface.set_rumble_state = Some(dummy_rumble);
+        true
+    }
+
+    #[test]
+    fn get_rumble_interface_paths() {
+        unsafe {
+            assert!(get_rumble_interface(Some(env_rumble_none)).is_none());
+            assert!(get_rumble_interface(Some(env_rumble_ok)).is_some());
+        }
+    }
+}
