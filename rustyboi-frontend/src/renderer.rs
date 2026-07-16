@@ -1116,6 +1116,124 @@ mod tests {
         PhysicalRect { x, y, width: w, height: h }
     }
 
+    // --- pure helper fns (no GPU) ------------------------------------------
+
+    // uniform_bytes lays out the 80-byte block exactly: 64B transform, then the
+    // 8B source vec2, then the 4B effect u32, then 4B zero pad — all native-endian.
+    #[test]
+    fn uniform_bytes_is_the_exact_80_byte_layout() {
+        assert_eq!(UNIFORM_BYTES, 80);
+        let transform: [f32; 16] = [
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+        ];
+        let bytes = uniform_bytes(&transform, (160.0, 144.0), 2);
+        assert_eq!(bytes.len(), UNIFORM_BYTES);
+
+        let mut expect = Vec::new();
+        for v in &transform {
+            expect.extend_from_slice(&v.to_ne_bytes());
+        }
+        expect.extend_from_slice(&160.0f32.to_ne_bytes());
+        expect.extend_from_slice(&144.0f32.to_ne_bytes());
+        expect.extend_from_slice(&2u32.to_ne_bytes());
+        expect.extend_from_slice(&0u32.to_ne_bytes());
+        assert_eq!(bytes, expect);
+
+        // The four segments land at their documented offsets.
+        assert_eq!(&bytes[0..64], &expect[0..64]); // transform
+        assert_eq!(&bytes[64..72], &expect[64..72]); // source vec2
+        assert_eq!(&bytes[72..76], &2u32.to_ne_bytes()); // effect
+        assert_eq!(&bytes[76..80], &[0u8; 4]); // pad
+    }
+
+    #[test]
+    fn effect_code_is_exhaustive() {
+        assert_eq!(effect_code(LcdEffect::Off), 0);
+        assert_eq!(effect_code(LcdEffect::Grid), 1);
+        assert_eq!(effect_code(LcdEffect::Scanlines), 2);
+    }
+
+    #[test]
+    fn f32s_to_bytes_length_and_round_trip() {
+        let values = [-1.0f32, 0.0, 3.5, 1234.5, f32::MIN, f32::MAX];
+        let bytes = f32s_to_bytes(&values);
+        assert_eq!(bytes.len(), values.len() * 4);
+        let back: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(back, values);
+    }
+
+    #[test]
+    fn source_size_dimensions() {
+        assert_eq!(SourceSize::Gb.dimensions(), (160, 144));
+        assert_eq!(SourceSize::Sgb.dimensions(), (256, 224));
+    }
+
+    fn assert_matrix_close(got: [f32; 16], want: [f32; 16]) {
+        for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!((g - w).abs() < 1e-4, "matrix[{i}] = {g}, want {w}");
+        }
+    }
+
+    // The NDC transform for an exact integer fit: the source fills the whole
+    // surface, so scale is identity and there is no translation. (The existing
+    // tests only assert the scissor; this pins the returned matrix.)
+    #[test]
+    fn transform_exact_fit_is_identity() {
+        let (t, _s) = compute_layout(
+            (160.0, 144.0),
+            (800.0, 720.0),
+            rect(0.0, 0.0, 800.0, 720.0),
+            ScalingMode::FitAspect,
+        );
+        #[rustfmt::skip]
+        let want = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        assert_matrix_close(t, want);
+    }
+
+    // A fractional fit into an off-aspect region: equal scale on both axes
+    // (aspect-preserving), centered horizontally (tx=0) with a downward y offset
+    // for the 20px top inset. sw = sh = (700/144)/5 = 0.972222; ty = -0.027778.
+    #[test]
+    fn transform_fractional_fit_preserves_aspect_and_centers() {
+        let (t, _s) = compute_layout(
+            (160.0, 144.0),
+            (800.0, 720.0),
+            rect(0.0, 20.0, 800.0, 700.0),
+            ScalingMode::FitAspect,
+        );
+        let s = (700.0f32 / 144.0) / 5.0; // scale/surface on both axes
+        assert!((t[0] - s).abs() < 1e-4, "sw = {}", t[0]);
+        assert!((t[5] - s).abs() < 1e-4, "sh = {}", t[5]);
+        assert!((t[0] - t[5]).abs() < 1e-6, "aspect preserved: sw==sh");
+        assert!(t[12].abs() < 1e-4, "tx centered = {}", t[12]);
+        assert!((t[13] - (-0.027_778)).abs() < 1e-4, "ty = {}", t[13]);
+    }
+
+    // Stretch fills the region on both axes independently, so sw != sh here
+    // (the aspect is distorted): sw = 800/800 = 1, sh = 700/720 = 0.972222.
+    #[test]
+    fn transform_stretch_scales_axes_independently() {
+        let (t, _s) = compute_layout(
+            (160.0, 144.0),
+            (800.0, 720.0),
+            rect(0.0, 20.0, 800.0, 700.0),
+            ScalingMode::Stretch,
+        );
+        assert!((t[0] - 1.0).abs() < 1e-4, "sw = {}", t[0]);
+        assert!((t[5] - (700.0 / 720.0)).abs() < 1e-4, "sh = {}", t[5]);
+        assert!((t[0] - t[5]).abs() > 1e-3, "stretch distorts aspect");
+        assert!(t[12].abs() < 1e-4, "tx centered = {}", t[12]);
+        assert!((t[13] - (-0.027_778)).abs() < 1e-4, "ty y-flip = {}", t[13]);
+    }
+
     // A 160x144 game in a full 800x720 surface region scales 5x and fills it.
     #[test]
     fn exact_integer_fit_centers_and_fills() {
