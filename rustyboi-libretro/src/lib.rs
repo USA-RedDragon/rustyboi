@@ -785,7 +785,7 @@ mod tests {
             // unwrap_or path actually fired (not just an untouched default).
             core.hardware_pref = HardwarePref::Model(HardwareChoice::Sgb);
             core.palette = PaletteChoice::Pocket;
-            core.color_correction = CgbColorConversion::Lcd;
+            core.color_correction = CgbColorConversion::Linear;
             core.gbc_dmg_palette = GbcDmgPalette::Scheme(1);
 
             dispatch::set_environment(&mut core, Some(mock_env));
@@ -801,7 +801,7 @@ mod tests {
 
             assert_eq!(core.hardware_pref, HardwarePref::Auto);
             assert_eq!(core.palette, PaletteChoice::Grayscale);
-            assert_eq!(core.color_correction, CgbColorConversion::Linear);
+            assert_eq!(core.color_correction, CgbColorConversion::Lcd);
             assert_eq!(core.gbc_dmg_palette, GbcDmgPalette::Auto);
         }
 
