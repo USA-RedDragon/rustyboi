@@ -436,6 +436,7 @@ impl App {
             fast_forward: self.is_fast_forward(),
             fast_forward_factor: cfg.fast_forward_factor,
             touch_controls: self.session.touch_controls(),
+            show_fps: self.session.show_fps(),
             printer_attached: self.session.gb().printer_attached(),
             recording: self.session.is_recording(),
             replaying: self.session.is_playing(),
@@ -753,6 +754,7 @@ impl App {
                     extra_events,
                     held_pad: &self.held_pad,
                     force_repaint: true,
+                    fps: self.fps as f32,
                 },
             )
         };

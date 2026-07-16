@@ -288,7 +288,10 @@ impl Gui {
     /// debug panels render from (None when no panel is open, or on web until the
     /// worker's first snapshot arrives). The Connect/Disconnect-Printer menu
     /// label reads `session.printer_attached`.
-    pub fn ui(&mut self, ui: &mut egui::Ui, paused: bool, debug: Option<&DebugSnapshot>, fullscreen: bool, session: &SessionUiState, held_pad: &std::collections::HashSet<rustyboi_session::input_config::PadButton>) -> UiOutput {
+    // The per-frame inputs are bundled as `UiRunInputs` on the frontend side; the
+    // widget entry point still takes them positionally (one call site).
+    #[allow(clippy::too_many_arguments)]
+    pub fn ui(&mut self, ui: &mut egui::Ui, paused: bool, debug: Option<&DebugSnapshot>, fullscreen: bool, session: &SessionUiState, held_pad: &std::collections::HashSet<rustyboi_session::input_config::PadButton>, fps: f32) -> UiOutput {
         // egui 0.35 made panels `Ui`-scoped (`Context::run_ui` hands us a root
         // `Ui`; panels carve space from it). Floating Areas/Windows still take a
         // `&Context`, so keep a cheap Arc clone for those. Reserved panels (the
@@ -354,6 +357,14 @@ impl Gui {
             width: central.width().max(0.0),
             height: central.height().max(0.0),
         };
+
+        // FPS overlay: a floating, non-interactive label pinned to the top-right
+        // of the game region. Opt-in (session-owned toggle) so it costs nothing
+        // when off. This is the only way to read the frame rate on web / Android /
+        // iOS (which have no window title).
+        if session.show_fps {
+            Self::render_fps_overlay(ctx, central, fps);
+        }
 
         self.render_error_panel(ui, &mut action);
 
@@ -821,6 +832,13 @@ impl Gui {
                         ui.close();
                     }
                     {
+                        let mut show_fps = session.show_fps;
+                        if ui.checkbox(&mut show_fps, command_label(ActionKind::ToggleShowFps)).clicked() {
+                            *action = Some(GuiAction::ToggleShowFps);
+                            ui.close();
+                        }
+                    }
+                    {
                         let mut op = session.touch_opacity;
                         ui.add_enabled_ui(session.touch_controls, |ui| {
                             ui.label("On-screen control opacity");
@@ -913,6 +931,27 @@ impl Gui {
             || self.show_palette_explorer
             || self.show_tile_explorer
             || self.show_breakpoint_panel
+    }
+
+    /// Draw the FPS overlay: a small themed label in the top-right of the game
+    /// region (`central`, in egui points). Non-interactive and drawn on the
+    /// foreground so it floats over the framebuffer without claiming layout space.
+    fn render_fps_overlay(ctx: &Context, central: egui::Rect, fps: f32) {
+        let pos = egui::pos2(central.right() - 8.0, central.top() + 8.0);
+        egui::Area::new(egui::Id::new("fps_overlay"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .pivot(egui::Align2::RIGHT_TOP)
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{:.0} FPS", fps.max(0.0)))
+                            .monospace()
+                            .strong(),
+                    );
+                });
+            });
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1386,6 +1425,13 @@ impl Gui {
                             mobile_toggle_row(ui, row_size, "On-screen Controls", &mut on);
                             if on != session.touch_controls {
                                 *action = Some(GuiAction::ToggleTouchControls);
+                            }
+                        }
+                        {
+                            let mut show_fps = session.show_fps;
+                            mobile_toggle_row(ui, row_size, "Show FPS", &mut show_fps);
+                            if show_fps != session.show_fps {
+                                *action = Some(GuiAction::ToggleShowFps);
                             }
                         }
                         if session.touch_controls {
