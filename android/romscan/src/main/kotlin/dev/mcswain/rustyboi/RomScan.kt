@@ -9,7 +9,7 @@ import java.util.zip.ZipInputStream
  * can be unit-tested without the Android framework (no Context/ContentResolver/
  * Uri). [RustyboiActivity] delegates to these; there is no logic duplication.
  */
-internal object RomScan {
+object RomScan {
 
     /** Extension classification for ROM-library scanning (case-insensitive). */
     fun isRomFile(name: String): Boolean {

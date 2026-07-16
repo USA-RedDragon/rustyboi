@@ -5,7 +5,6 @@ import java.util.Properties
 
 plugins {
     id("com.android.application")
-    jacoco
 }
 
 // ---------------------------------------------------------------------------
@@ -93,9 +92,6 @@ android {
     buildTypes {
         getByName("debug") {
             isMinifyEnabled = false
-            // Instrument debug unit tests so JaCoCo can emit coverage (surfaced
-            // in Codecov by the `jacocoTestReport` task below).
-            enableUnitTestCoverage = true
         }
         getByName("release") {
             isMinifyEnabled = true
@@ -238,48 +234,7 @@ dependencies {
     // used by the ROM library scanner in RustyboiActivity.
     implementation("androidx.documentfile:documentfile:1.1.0")
 
-    // JVM unit tests for the pure RomScan helpers.
-    testImplementation("junit:junit:4.13.2")
-}
-
-// ---------------------------------------------------------------------------
-// JaCoCo coverage for the JVM unit tests
-// ---------------------------------------------------------------------------
-//
-// `testDebugUnitTest` (with `enableUnitTestCoverage` above) writes an exec file
-// under build/outputs/unit_test_code_coverage; this task turns it into the XML
-// report Codecov ingests (flags: android). Only the Kotlin app classes are
-// measured — GameActivity/JNI native code has no JVM bytecode to cover.
-tasks.register<JacocoReport>("jacocoTestReport") {
-    dependsOn("testDebugUnitTest")
-    group = "verification"
-    description = "Generate JaCoCo XML coverage from the debug JVM unit tests."
-
-    reports {
-        xml.required.set(true)
-        html.required.set(true)
-        csv.required.set(false)
-        xml.outputLocation.set(
-            layout.buildDirectory.file("reports/jacoco/jacocoTestReport/jacocoTestReport.xml"),
-        )
-    }
-
-    // Kotlin app classes (no Java sources in this module). AGP has moved this
-    // output between versions (built_in_kotlinc in AGP 9.x, tmp/kotlin-classes
-    // earlier), so measure whichever candidate root exists.
-    classDirectories.setFrom(
-        files(
-            layout.buildDirectory.dir("intermediates/built_in_kotlinc/debug/compileDebugKotlin/classes"),
-            layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
-        ),
-    )
-    sourceDirectories.setFrom(files("src/main/kotlin"))
-    executionData.setFrom(
-        fileTree(layout.buildDirectory) {
-            include(
-                "outputs/unit_test_code_coverage/debugUnitTest/testDebugUnitTest.exec",
-                "jacoco/testDebugUnitTest.exec",
-            )
-        },
-    )
+    // Pure JVM ROM-scan helpers. Unit tests + JaCoCo coverage for these live in
+    // the :romscan module so the coverage CI job needs only a JDK, no Android SDK.
+    implementation(project(":romscan"))
 }
