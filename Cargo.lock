@@ -3059,6 +3059,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "pollster 1.0.1",
  "rustyboi-core",
  "rustyboi-egui",
  "rustyboi-session",

@@ -210,7 +210,7 @@ pub struct EguiPaint {
 /// the emulator frame letterboxed under the egui UI. One `render` call does the
 /// whole composite (game scale pass, then egui pass) onto the acquired surface.
 pub struct Renderer {
-    surface: wgpu::Surface<'static>,
+    target: FrameTarget,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -236,14 +236,162 @@ pub struct Renderer {
     /// display's requestAnimationFrame, so refreshes routinely land with no new
     /// frame and would otherwise flash the game area black.
     has_game: bool,
-    /// Last frame's egui geometry, redrawn on `reuse` frames (unchanged UI) so
-    /// the per-frame vertex/index upload can be skipped.
-    egui_jobs: Vec<ClippedPrimitive>,
     /// Frame letterboxing policy the frontend pushes each frame from the session
     /// config. `FitAspect` (default) reproduces the historical layout exactly.
     scaling_mode: ScalingMode,
 
-    egui_renderer: egui_wgpu::Renderer,
+    egui: EguiCompositor,
+}
+
+/// Owns egui-wgpu's `Renderer` plus the cached paint jobs, isolating egui's
+/// *incremental* texture bookkeeping from the swapchain.
+///
+/// egui emits each font-atlas region exactly once — a full allocation
+/// (`ImageDelta.pos == None`), then per-glyph partial updates
+/// (`pos == Some(_)`). So its texture deltas MUST be applied on every frame egui
+/// produces them, *including a frame whose surface acquisition fails and is
+/// skipped*. Dropping a delta desyncs egui's renderer permanently: a later
+/// partial update lands on a texture that was never allocated and panics with
+/// "Tried to update a texture that has not been allocated yet." That was the
+/// macOS startup crash — its Retina surface returns `Outdated`/`Timeout` on the
+/// first `get_current_texture`, and the old `render` returned *before* uploading
+/// the font atlas, so the next frame's partial glyph update blew up (or, when it
+/// happened to survive, the atlas was simply missing and no UI drew).
+///
+/// Keeping the texture handling here, driven only by a `Device`/`Queue`
+/// (independent of the surface), lets `render` apply it before touching the
+/// swapchain and makes the ordering testable without a window (see the tests).
+struct EguiCompositor {
+    renderer: egui_wgpu::Renderer,
+    /// Last frame's egui geometry, redrawn on `reuse` frames (unchanged UI) so
+    /// the per-frame vertex/index upload can be skipped.
+    jobs: Vec<ClippedPrimitive>,
+}
+
+impl EguiCompositor {
+    fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+        let renderer = egui_wgpu::Renderer::new(
+            device,
+            surface_format,
+            egui_wgpu::RendererOptions {
+                msaa_samples: 1,
+                depth_stencil_format: None,
+                dithering: false,
+                predictable_texture_filtering: false,
+            },
+        );
+        Self { renderer, jobs: Vec::new() }
+    }
+
+    /// Apply egui's texture allocations/updates. Queue writes only, so this is
+    /// independent of the surface and `render` runs it *before* acquiring the
+    /// frame — see the type doc for why dropping these on a skipped frame is
+    /// fatal.
+    fn apply_textures(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, textures: &TexturesDelta) {
+        for (id, image_delta) in &textures.set {
+            self.renderer.update_texture(device, queue, *id, image_delta);
+        }
+    }
+
+    /// Upload this frame's vertex/index geometry (caching the jobs for reuse
+    /// frames). Returns any command buffers egui paint-callbacks produced, to be
+    /// submitted before the frame encoder.
+    fn upload_geometry(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        jobs: Vec<ClippedPrimitive>,
+        screen_descriptor: &ScreenDescriptor,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let bufs = self.renderer.update_buffers(device, queue, encoder, &jobs, screen_descriptor);
+        self.jobs = jobs;
+        bufs
+    }
+
+    /// Paint the cached jobs into `render_pass`.
+    fn paint(&self, render_pass: &mut wgpu::RenderPass<'static>, screen_descriptor: &ScreenDescriptor) {
+        self.renderer.render(render_pass, &self.jobs, screen_descriptor);
+    }
+
+    /// Free the textures egui retired this frame. Called after the frame's paint
+    /// on a rendered frame, or immediately on a skipped one (where nothing
+    /// referenced them), so a coincident surface error never leaks a texture.
+    fn free(&mut self, textures: &TexturesDelta) {
+        for id in &textures.free {
+            self.renderer.free_texture(id);
+        }
+    }
+}
+
+/// Where `render` sends a frame. Production always uses `Surface` — the window
+/// swapchain — and that arm behaves exactly as calling the surface directly.
+/// Tests use `Offscreen`: a plain texture plus a queue of surface statuses to
+/// hand back from `acquire`, so `render`'s surface-error handling (the macOS
+/// first-frame path that used to drop egui's font-atlas upload) can be driven
+/// deterministically without a window. The whole non-`Surface` arm is
+/// `#[cfg(test)]`, so release builds see a single-variant enum and identical
+/// codegen.
+enum FrameTarget {
+    Surface(wgpu::Surface<'static>),
+    #[cfg(test)]
+    Offscreen {
+        texture: wgpu::Texture,
+        /// Statuses returned by successive `acquire` calls (front = next); an
+        /// empty queue defaults to `Good` (a normal successful acquire).
+        statuses: std::collections::VecDeque<wgpu::SurfaceStatus>,
+    },
+}
+
+/// The outcome of acquiring a frame's color target.
+enum FrameAcquire {
+    /// A real swapchain image; `present` it after drawing.
+    Surface(wgpu::SurfaceTexture),
+    /// Draw into the target's own offscreen texture; nothing to present.
+    #[cfg(test)]
+    Offscreen,
+    /// Don't draw this frame; `render` returns this value verbatim. `Ok` skips
+    /// silently (Timeout/Occluded), `Err` asks the caller to reconfigure/retry.
+    Skip(Result<(), wgpu::SurfaceStatus>),
+}
+
+impl FrameTarget {
+    /// Acquire the next frame's target, mapping wgpu's surface status onto the
+    /// draw-or-skip decision `render` acts on.
+    fn acquire(&mut self) -> FrameAcquire {
+        match self {
+            // wgpu 29 returns a `CurrentSurfaceTexture` enum rather than a
+            // `Result<_, SurfaceError>`. Draw on Success/Suboptimal; hand the
+            // status back so the caller reconfigures on Outdated/Lost/Validation,
+            // and silently skip the frame on Timeout/Occluded.
+            FrameTarget::Surface(surface) => match surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(t)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(t) => FrameAcquire::Surface(t),
+                wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                    FrameAcquire::Skip(Ok(()))
+                }
+                wgpu::CurrentSurfaceTexture::Outdated => {
+                    FrameAcquire::Skip(Err(wgpu::SurfaceStatus::Outdated))
+                }
+                wgpu::CurrentSurfaceTexture::Lost => FrameAcquire::Skip(Err(wgpu::SurfaceStatus::Lost)),
+                wgpu::CurrentSurfaceTexture::Validation => {
+                    FrameAcquire::Skip(Err(wgpu::SurfaceStatus::Validation))
+                }
+            },
+            #[cfg(test)]
+            FrameTarget::Offscreen { statuses, .. } => {
+                match statuses.pop_front().unwrap_or(wgpu::SurfaceStatus::Good) {
+                    wgpu::SurfaceStatus::Good | wgpu::SurfaceStatus::Suboptimal => {
+                        FrameAcquire::Offscreen
+                    }
+                    wgpu::SurfaceStatus::Timeout | wgpu::SurfaceStatus::Occluded => {
+                        FrameAcquire::Skip(Ok(()))
+                    }
+                    s => FrameAcquire::Skip(Err(s)),
+                }
+            }
+        }
+    }
 }
 
 impl Renderer {
@@ -272,6 +420,56 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
+        Self::assemble(FrameTarget::Surface(surface), config, device, queue, surface_format)
+    }
+
+    /// Test-only: build an identical renderer that draws into an offscreen
+    /// texture instead of a window swapchain, so `render`'s full path — including
+    /// the surface-error branch that regressed on macOS — is exercisable
+    /// headlessly. Seed the statuses `acquire` should report per frame with
+    /// [`Renderer::inject_statuses`].
+    #[cfg(test)]
+    pub(crate) fn new_offscreen(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("rustyboi_offscreen_target"),
+            size: wgpu::Extent3d { width: config.width, height: config.height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target = FrameTarget::Offscreen { texture, statuses: std::collections::VecDeque::new() };
+        Self::assemble(target, config, device, queue, surface_format)
+    }
+
+    /// Shared GPU setup for [`Renderer::new`] and the test offscreen constructor:
+    /// everything downstream of the frame target (shaders, samplers, scale
+    /// pipeline, game sources, egui compositor).
+    fn assemble(
+        target: FrameTarget,
+        config: wgpu::SurfaceConfiguration,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
         let shader = wgpu::include_wgsl!("../shaders/scale.wgsl");
         let module = device.create_shader_module(shader);
 
@@ -420,19 +618,10 @@ impl Renderer {
             cache: None,
         });
 
-        let egui_renderer = egui_wgpu::Renderer::new(
-            &device,
-            surface_format,
-            egui_wgpu::RendererOptions {
-                msaa_samples: 1,
-                depth_stencil_format: None,
-                dithering: false,
-                predictable_texture_filtering: false,
-            },
-        );
+        let egui = EguiCompositor::new(&device, surface_format);
 
         Self {
-            surface,
+            target,
             device,
             queue,
             config,
@@ -449,9 +638,8 @@ impl Renderer {
             lcd_effect: LcdEffect::Off,
             clear_color: wgpu::Color::BLACK,
             has_game: false,
-            egui_jobs: Vec::new(),
             scaling_mode: ScalingMode::FitAspect,
-            egui_renderer,
+            egui,
         }
     }
 
@@ -500,7 +688,13 @@ impl Renderer {
         if width > 0 && height > 0 {
             self.config.width = width;
             self.config.height = height;
-            self.surface.configure(&self.device, &self.config);
+            match &self.target {
+                FrameTarget::Surface(surface) => surface.configure(&self.device, &self.config),
+                // The offscreen test target keeps its original size; the surface
+                // config still tracks the logical size for the screen descriptor.
+                #[cfg(test)]
+                FrameTarget::Offscreen { .. } => {}
+            }
         }
     }
 
@@ -559,23 +753,53 @@ impl Renderer {
             self.upload_game(frame);
         }
 
-        // wgpu 29 returns a `CurrentSurfaceTexture` enum rather than a
-        // `Result<_, SurfaceError>`. Present on Success/Suboptimal; hand the
-        // status back so the caller reconfigures on Outdated/Lost/Validation, and
-        // silently skip the frame on Timeout/Occluded.
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return Ok(());
+        // When `reuse` is set the UI is unchanged since last frame: skip egui's
+        // texture + vertex/index uploads (egui-wgpu's buffers still hold last
+        // frame's geometry) and just redraw the cached jobs. The game underneath
+        // still redraws every frame, so only egui's per-frame upload is elided.
+        let EguiPaint { jobs, textures, pixels_per_point, reuse } = egui;
+
+        // Apply egui's incremental texture allocations/updates BEFORE acquiring
+        // the surface. egui emits each font-atlas region exactly once, so these
+        // MUST land even on a frame the surface then forces us to skip — dropping
+        // them desyncs egui's renderer forever (a later partial update panics on
+        // an unallocated texture). This is queue-only work, independent of the
+        // swapchain, so it is always safe here. See `EguiCompositor` for the full
+        // rationale (this was the macOS first-frame crash).
+        if !reuse {
+            self.egui.apply_textures(&self.device, &self.queue, &textures);
+        }
+
+        // Acquire the frame's color target. On every non-rendering outcome the
+        // textures egui retired this frame are still freed (nothing painted them,
+        // so it is safe) so a coincident surface error never leaks a texture.
+        let surface_frame = match self.target.acquire() {
+            FrameAcquire::Surface(t) => Some(t),
+            #[cfg(test)]
+            FrameAcquire::Offscreen => None,
+            FrameAcquire::Skip(result) => {
+                self.egui.free(&textures);
+                return result;
             }
-            wgpu::CurrentSurfaceTexture::Outdated => return Err(wgpu::SurfaceStatus::Outdated),
-            wgpu::CurrentSurfaceTexture::Lost => return Err(wgpu::SurfaceStatus::Lost),
-            wgpu::CurrentSurfaceTexture::Validation => return Err(wgpu::SurfaceStatus::Validation),
         };
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view = match &surface_frame {
+            Some(t) => t.texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            // `None` only happens for the offscreen test target (in release the
+            // enum has no such arm and this branch is unreachable).
+            None => {
+                #[cfg(test)]
+                {
+                    match &self.target {
+                        FrameTarget::Offscreen { texture, .. } => {
+                            texture.create_view(&wgpu::TextureViewDescriptor::default())
+                        }
+                        FrameTarget::Surface(_) => unreachable!("surface never acquires as Offscreen"),
+                    }
+                }
+                #[cfg(not(test))]
+                unreachable!("surface acquire never yields None")
+            }
+        };
 
         let mut encoder = self
             .device
@@ -621,31 +845,20 @@ impl Renderer {
         }
 
         // --- egui pass: composite the UI on top ----------------------------
-        // When `reuse` is set the UI is unchanged since last frame: skip the
-        // texture + vertex/index uploads (egui-wgpu's buffers still hold last
-        // frame's geometry) and just redraw the cached jobs. The game underneath
-        // still redraws every frame, so only egui's per-frame upload is elided.
-        let EguiPaint { jobs, textures, pixels_per_point, reuse } = egui;
+        // Textures were already applied above (before surface acquisition); here
+        // we upload this frame's geometry (skipped on `reuse`, where egui-wgpu's
+        // buffers still hold last frame's jobs) and paint.
         let screen_descriptor = ScreenDescriptor {
             size_in_pixels: [self.config.width, self.config.height],
             pixels_per_point,
         };
-        // egui-wgpu's `update_buffers` now returns any command buffers its paint
+        // egui-wgpu's `update_buffers` returns any command buffers its paint
         // callbacks produced; they must be submitted before this frame's encoder.
         let mut egui_cmd_bufs = Vec::new();
         if !reuse {
-            for (id, image_delta) in &textures.set {
-                self.egui_renderer
-                    .update_texture(&self.device, &self.queue, *id, image_delta);
-            }
-            egui_cmd_bufs = self.egui_renderer.update_buffers(
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                &jobs,
-                &screen_descriptor,
-            );
-            self.egui_jobs = jobs;
+            egui_cmd_bufs =
+                self.egui
+                    .upload_geometry(&self.device, &self.queue, &mut encoder, jobs, &screen_descriptor);
         }
         {
             // egui-wgpu's `render` requires a `RenderPass<'static>` (wgpu 22+);
@@ -669,20 +882,83 @@ impl Renderer {
                     multiview_mask: None,
                 })
                 .forget_lifetime();
-            self.egui_renderer
-                .render(&mut rpass, &self.egui_jobs, &screen_descriptor);
+            self.egui.paint(&mut rpass, &screen_descriptor);
         }
 
         self.queue
             .submit(egui_cmd_bufs.into_iter().chain(std::iter::once(encoder.finish())));
-        output.present();
+        // Present the swapchain image (the offscreen test target has nothing to
+        // present — the drawn texture is read back directly).
+        if let Some(t) = surface_frame {
+            t.present();
+        }
 
         if !reuse {
-            for id in &textures.free {
-                self.egui_renderer.free_texture(id);
-            }
+            self.egui.free(&textures);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Renderer {
+    /// Queue the surface statuses the next `render` acquisitions report (only
+    /// meaningful for an offscreen test renderer).
+    pub(crate) fn inject_statuses(
+        &mut self,
+        statuses: impl IntoIterator<Item = wgpu::SurfaceStatus>,
+    ) {
+        if let FrameTarget::Offscreen { statuses: queue, .. } = &mut self.target {
+            queue.extend(statuses);
+        }
+    }
+
+    /// Read the offscreen target back as tightly-packed RGBA8 (`width*height*4`).
+    pub(crate) fn read_offscreen(&self) -> Vec<u8> {
+        let FrameTarget::Offscreen { texture, .. } = &self.target else {
+            panic!("read_offscreen requires an offscreen renderer");
+        };
+        let (w, h) = (self.config.width, self.config.height);
+        let unpadded = w * 4;
+        // `copy_texture_to_buffer` requires a 256-byte-aligned row stride.
+        let padded = unpadded.div_ceil(256) * 256;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rustyboi_offscreen_readback"),
+            size: (padded * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let data = slice.get_mapped_range();
+        let mut out = Vec::with_capacity((unpadded * h) as usize);
+        for row in 0..h {
+            let start = (row * padded) as usize;
+            out.extend_from_slice(&data[start..start + unpadded as usize]);
+        }
+        out
     }
 }
 
@@ -820,5 +1096,238 @@ mod tests {
     fn stretch_fills_region_ignoring_aspect() {
         let (_t, scissor) = compute_layout((160.0, 144.0), (800.0, 720.0), rect(0.0, 20.0, 800.0, 700.0), ScalingMode::Stretch);
         assert_eq!(scissor, (0, 20, 800, 700));
+    }
+
+    // --- Headless GPU tests: the egui texture-ordering invariant -----------
+    //
+    // These reproduce the macOS startup failure *deterministically and without a
+    // window*. egui emits its font atlas as a one-time full allocation
+    // (`ImageDelta.pos == None`) followed by per-glyph partial updates
+    // (`pos == Some`). The old `render` acquired the surface *before* applying
+    // those deltas and returned early on the Retina first-frame `Outdated`,
+    // dropping the allocation; egui never re-sent it, so either a later partial
+    // update panicked ("Tried to update a texture that has not been allocated
+    // yet") or the atlas was simply missing and no UI drew. `EguiCompositor` now
+    // owns this bookkeeping and `render` applies it before touching the surface.
+    //
+    // The tests run wherever a wgpu adapter exists — Metal on the macOS CI
+    // runner (the platform that regressed), lavapipe on Linux CI — and skip with
+    // a note when none does, so they never spuriously fail on a GPU-less box.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+    mod gpu {
+        use super::*;
+        use egui::epaint::{Color32, ColorImage, ImageData, ImageDelta, TextureId};
+        use egui::TextureOptions;
+        use std::sync::Arc;
+
+        /// A headless device + queue (no surface), or `None` when the runner has
+        /// no usable wgpu adapter (the test then skips).
+        fn headless_gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::all(),
+                flags: wgpu::InstanceFlags::default(),
+                memory_budget_thresholds: Default::default(),
+                backend_options: Default::default(),
+                display: None,
+            });
+            let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            }))
+            .ok()?;
+            let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("rustyboi_test_device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                ..Default::default()
+            }))
+            .ok()?;
+            Some((device, queue))
+        }
+
+        /// A whole-texture allocation delta (`pos == None`) — what egui emits the
+        /// first time it uploads the font atlas.
+        fn full_alloc(size: usize, color: Color32) -> ImageDelta {
+            let image = ColorImage::new([size, size], vec![color; size * size]);
+            ImageDelta { image: ImageData::Color(Arc::new(image)), options: TextureOptions::default(), pos: None }
+        }
+
+        /// A sub-region patch delta (`pos == Some`) — what egui emits when it
+        /// packs new glyphs into an already-allocated atlas.
+        fn patch(size: usize, at: [usize; 2]) -> ImageDelta {
+            let image = ColorImage::new([size, size], vec![Color32::from_rgb(10, 20, 30); size * size]);
+            ImageDelta { image: ImageData::Color(Arc::new(image)), options: TextureOptions::default(), pos: Some(at) }
+        }
+
+        fn set(id: TextureId, delta: ImageDelta) -> TexturesDelta {
+            TexturesDelta { set: vec![(id, delta)], free: vec![] }
+        }
+
+        /// Run `f`, returning whether it panicked, without the default hook
+        /// spamming the panic to stderr (we *expect* the panic here).
+        fn silently_catches_panic(f: impl FnOnce() + std::panic::UnwindSafe) -> bool {
+            let prev = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let r = std::panic::catch_unwind(f);
+            std::panic::set_hook(prev);
+            r.is_err()
+        }
+
+        // The failure mode itself: a partial update to a texture that was never
+        // allocated is exactly what a dropped delta leaves egui-wgpu to choke on.
+        // This pins *why* losing frame 0's allocation is fatal (not merely a
+        // blank frame) so the invariant the fix upholds can't be quietly removed.
+        #[test]
+        fn partial_update_without_allocation_panics() {
+            let Some((device, queue)) = headless_gpu() else {
+                eprintln!("skipping partial_update_without_allocation_panics: no wgpu adapter");
+                return;
+            };
+            let mut egui = EguiCompositor::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+            let deltas = set(TextureId::Managed(0), patch(2, [0, 0]));
+            let panicked = silently_catches_panic(std::panic::AssertUnwindSafe(|| {
+                egui.apply_textures(&device, &queue, &deltas);
+            }));
+            assert!(
+                panicked,
+                "a partial (pos=Some) update to an unallocated texture must panic — \
+                 this is the crash a dropped frame-0 allocation causes"
+            );
+        }
+
+        // The regression guard: the macOS sequence exactly. Frame 0 allocates the
+        // atlas but its surface acquisition fails (so nothing is painted); frame 1
+        // patches the atlas. Because the allocation is applied independent of the
+        // surface, frame 1 must NOT panic. This fails against the pre-fix ordering.
+        #[test]
+        fn atlas_allocation_survives_a_skipped_surface_frame() {
+            let Some((device, queue)) = headless_gpu() else {
+                eprintln!("skipping atlas_allocation_survives_a_skipped_surface_frame: no wgpu adapter");
+                return;
+            };
+            let mut egui = EguiCompositor::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+            let id = TextureId::Managed(0);
+
+            // Frame 0: atlas allocation. `render` applies texture deltas before
+            // acquiring the surface, so this lands even though the frame is then
+            // skipped (Retina `Outdated`). Model that skip by applying only the
+            // textures and rendering nothing.
+            egui.apply_textures(&device, &queue, &set(id, full_alloc(8, Color32::WHITE)));
+
+            // Frame 1: a partial glyph patch to the same atlas. Must succeed
+            // because the base allocation from frame 0 is present.
+            egui.apply_textures(&device, &queue, &set(id, patch(2, [1, 1])));
+            queue.submit(std::iter::empty());
+        }
+
+        /// Lay out a real egui frame that paints a solid `color` rect over the
+        /// whole `w`x`h` viewport, returning the paint output ready for `render`.
+        /// The mesh samples the font atlas' white texel, so the atlas is uploaded
+        /// too.
+        fn full_screen_egui_frame(w: u32, h: u32, color: Color32) -> EguiPaint {
+            let ctx = egui::Context::default();
+            let raw_input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(w as f32, h as f32),
+                )),
+                ..Default::default()
+            };
+            let full_output = ctx.run_ui(raw_input, |ui| {
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w as f32, h as f32)),
+                    0.0,
+                    color,
+                );
+            });
+            let ppp = ctx.pixels_per_point();
+            let jobs = ctx.tessellate(full_output.shapes, ppp);
+            EguiPaint { jobs, textures: full_output.textures_delta, pixels_per_point: ppp, reuse: false }
+        }
+
+        fn region(w: u32, h: u32) -> PhysicalRect {
+            PhysicalRect { x: 0.0, y: 0.0, width: w as f32, height: h as f32 }
+        }
+
+        // End-to-end: a real egui frame driven through the whole `Renderer::render`
+        // path (game pass + egui pass) onto an offscreen target must produce
+        // visible pixels. Guards the other half of the symptom — "the window opens
+        // but no egui elements appear."
+        #[test]
+        fn render_composites_visible_egui_pixels() {
+            let Some((device, queue)) = headless_gpu() else {
+                eprintln!("skipping render_composites_visible_egui_pixels: no wgpu adapter");
+                return;
+            };
+            const W: u32 = 64;
+            const H: u32 = 64;
+            let mut renderer =
+                Renderer::new_offscreen(device, queue, wgpu::TextureFormat::Rgba8Unorm, W, H);
+
+            let paint = full_screen_egui_frame(W, H, Color32::from_rgb(220, 30, 30));
+            renderer.render(None, region(W, H), paint).expect("offscreen render must succeed");
+
+            let px = renderer.read_offscreen();
+            let red = px
+                .chunks_exact(4)
+                .filter(|p| p[0] > 128 && p[1] < 128 && p[2] < 128)
+                .count();
+            assert!(
+                red > (W * H / 2) as usize,
+                "egui composite produced no visible pixels ({red} red of {}) — the UI would be blank",
+                W * H
+            );
+        }
+
+        // THE regression guard, exercised end-to-end through `Renderer::render`:
+        // the macOS first-frame sequence exactly. Frame 0 carries the atlas
+        // allocation but the surface reports `Outdated` (skip + return Err); frame
+        // 1 carries a partial atlas update and must render. Against the pre-fix
+        // ordering — texture deltas applied only after a *successful* acquire —
+        // frame 0's allocation is dropped and frame 1 panics ("Tried to update a
+        // texture that has not been allocated yet"). With the fix it renders.
+        #[test]
+        fn render_keeps_egui_textures_across_a_surface_error() {
+            let Some((device, queue)) = headless_gpu() else {
+                eprintln!("skipping render_keeps_egui_textures_across_a_surface_error: no wgpu adapter");
+                return;
+            };
+            const W: u32 = 64;
+            const H: u32 = 64;
+            let mut renderer =
+                Renderer::new_offscreen(device, queue, wgpu::TextureFormat::Rgba8Unorm, W, H);
+            // Frame 0 errors (Retina first-frame `Outdated`); frame 1 succeeds.
+            renderer.inject_statuses([wgpu::SurfaceStatus::Outdated, wgpu::SurfaceStatus::Good]);
+
+            let id = TextureId::Managed(0);
+
+            // Frame 0: allocate the atlas. `render` must return the surface error
+            // *after* applying the allocation (not drop it).
+            let frame0 = EguiPaint {
+                jobs: Vec::new(),
+                textures: set(id, full_alloc(8, Color32::WHITE)),
+                pixels_per_point: 1.0,
+                reuse: false,
+            };
+            let r0 = renderer.render(None, region(W, H), frame0);
+            assert!(
+                matches!(r0, Err(wgpu::SurfaceStatus::Outdated)),
+                "frame 0 should report the injected surface error, got {r0:?}"
+            );
+
+            // Frame 1: a partial atlas patch. Succeeds only because frame 0's
+            // allocation survived the skipped frame.
+            let frame1 = EguiPaint {
+                jobs: Vec::new(),
+                textures: set(id, patch(2, [1, 1])),
+                pixels_per_point: 1.0,
+                reuse: false,
+            };
+            renderer
+                .render(None, region(W, H), frame1)
+                .expect("frame 1 must render after a skipped frame 0 — a panic here is the bug");
+        }
     }
 }
