@@ -786,7 +786,7 @@ impl Gui {
                     });
 
                     ui.menu_button("Renderer", |ui| {
-                        for (backend, label) in rustyboi_session::GraphicsBackend::choices() {
+                        for (backend, label) in rustyboi_session::GraphicsBackend::choices().iter().copied() {
                             let selected = session.graphics_backend == backend;
                             if ui.radio(selected, label).clicked() && !selected {
                                 *action = Some(GuiAction::SetGraphicsBackend(backend));
@@ -1402,7 +1402,7 @@ impl Gui {
                         }
 
                         ui.label("Renderer (applies at next launch)");
-                        for (backend, label) in rustyboi_session::GraphicsBackend::choices() {
+                        for (backend, label) in rustyboi_session::GraphicsBackend::choices().iter().copied() {
                             let selected = session.graphics_backend == backend;
                             if ui.radio(selected, label).clicked() && !selected {
                                 *action = Some(GuiAction::SetGraphicsBackend(backend));
