@@ -51,6 +51,7 @@ TARGETS=(
     "windows-x86_64|x86_64-pc-windows-gnullvm|windows|"
     "windows-arm64|aarch64-pc-windows-gnullvm|windows|"
     "windows-i686|i686-pc-windows-gnullvm|windows|"
+    "wasm32-wasip1|wasm32-wasip1|wasm|wasm"
 )
 
 # --- target-table helpers ---
@@ -186,6 +187,8 @@ rc_build() {   # triple variant crt <extra cargo args...>
         ios)
             # Modern LC_BUILD_VERSION (platform iOS), not the legacy min-10.0 cmd.
             pre="$pre"' export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-14.0}";' ;;
+        wasm)
+            pre="$pre rustup target add $triple;" ;;
     esac
     [ -n "$flags" ] && pre="$pre export RUSTFLAGS=\"$flags \${RUSTFLAGS:-}\";"
 
@@ -332,6 +335,7 @@ rc_emit_runner() {   # name
     case "$variant" in
         "") ;;
         musl) crt="dynamic" ;;
+        wasm) ;;
         *) echo "runner: $name has no test host (variant=$variant)" >&2; return 1 ;;
     esac
     triple="$(field "$entry" 1)"; os="$(field "$entry" 2)"
@@ -340,7 +344,11 @@ rc_emit_runner() {   # name
     tdir="target/cross/$name"
     mkdir -p "$PROJECT_ROOT/$tdir"
     RC_CHOWN="$tdir" rc_build "$triple" "$variant" "$crt" -p rustyboi-test-runner --bin rustyboi-test-runner --target-dir "$tdir"
-    case "$os" in windows) art="rustyboi-test-runner.exe" ;; *) art="rustyboi-test-runner" ;; esac
+    case "$os" in
+        windows) art="rustyboi-test-runner.exe" ;;
+        wasm)    art="rustyboi-test-runner.wasm" ;;
+        *)       art="rustyboi-test-runner" ;;
+    esac
     src="$PROJECT_ROOT/$tdir/$triple/release/$art"
     [ -f "$src" ] || { echo "ERROR: expected runner missing: $src" >&2; return 1; }
     dir="$PROJECT_ROOT/target/runner/$name"; mkdir -p "$dir"; cp -f "$src" "$dir/$art"
