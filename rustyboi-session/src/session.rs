@@ -722,9 +722,15 @@ impl Session {
     /// Resolve the display name from raw ROM bytes. For construction paths that
     /// receive a pre-built machine plus the ROM bytes (desktop CLI `--rom`),
     /// where [`load_rom_bytes`](Self::load_rom_bytes) isn't on the path.
+    ///
+    /// Retains the extracted ROM as `original_rom` too, so a later
+    /// [`finish_no_intro_dats`](Self::finish_no_intro_dats) (the DAT index is
+    /// still empty at construction time) can re-resolve the No-Intro name, and so
+    /// [`apply_rom_patch`](Self::apply_rom_patch) has a pristine image to patch.
     pub fn set_rom_identity(&mut self, rom: &[u8]) {
         let rom = crate::rom_zip::extract_rom(rom);
         self.game_name = crate::no_intro::resolve_game_name(&rom);
+        self.original_rom = Some(rom);
     }
 
     /// Apply an updated config: reconfigures the rewind buffer to match (other
