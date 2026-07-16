@@ -30,6 +30,11 @@
 #   RB_JOBS     parallel case workers     (default: nproc-derived)
 #   RB_ROMS     ROM dir                   (default: gb-test-roms)
 #   RB_BIN      runner binary             (default: target/release/rustyboi-test-runner)
+#   RB_RUN_PREFIX  launcher prepended to every runner invocation (default: none =
+#               run RB_BIN directly). Set it to run a non-native build under a VM;
+#               the wasm CI target uses "wasmtime run --dir=. --dir=/tmp --" to run
+#               a wasm32-wasip1 RB_BIN under wasmtime (pair with RB_JOBS=1 -- plain
+#               wasip1 has no threads, and the runner only stays sequential there).
 #   RB_PGO      1 = build the runner profile-guided (instrumented build, short
 #               suite workload, -Cprofile-use rebuild). ~30-40% faster suite
 #               runs (the branch-dense per-dot dispatch is PGO's sweet spot),
@@ -90,6 +95,28 @@ if [ -n "$TARGET" ]; then
 else
     BIN="${RB_BIN:-target/release/rustyboi-test-runner$EXE}"
 fi
+# RB_RUN_PREFIX prepends a launcher to every runner invocation so the suites can
+# run under a non-native VM without touching the call sites. The wasm target
+# uses it: RB_RUN_PREFIX="wasmtime run --dir=. --dir=/tmp --" runs the
+# wasm32-wasip1 build under wasmtime -- the same wasm ISA the browser ships, so
+# it validates rustyboi-core's wasm codegen. The `--dir` preopens map the repo
+# (ROMs + manifests, resolved relative to CWD) and /tmp (the --json scratch
+# files), matching wasmtime's capability sandbox. Empty = native, run BIN
+# directly. Force --jobs 1 (RB_JOBS=1) with it: plain wasip1 has no threads and
+# the runner only stays single-threaded (never spawns) at jobs<=1.
+RUN_PREFIX="${RB_RUN_PREFIX:-}"
+# Invoke the runner: launcher (if any) + BIN + args. Word-splitting the prefix is
+# intentional -- it is a fixed command, never user ROM data.
+run_bin() {
+    if [ -n "$RUN_PREFIX" ]; then
+        $RUN_PREFIX "$BIN" "$@"
+    else
+        "$BIN" "$@"
+    fi
+}
+# A .wasm module isn't chmod +x, so gate on presence (-f) not executability (-x)
+# when running through a launcher.
+bin_ready() { if [ -n "$RUN_PREFIX" ]; then [ -f "$BIN" ]; else [ -x "$BIN" ]; fi; }
 # Default jobs: leave a core free, floor of 1. `nproc` is absent on some macOS
 # shells, so fall back to sysctl then 4.
 if [ -z "${RB_JOBS:-}" ]; then
@@ -451,11 +478,11 @@ run_suite() {
         local k
         for k in $(seq 1 "$RB_SHARDS"); do
             if [ "$frames" != "-" ]; then
-                "$BIN" --manifest "$manifest" --mode "$MODE" --jobs 1 \
+                run_bin --manifest "$manifest" --mode "$MODE" --jobs 1 \
                     --shard "$k/$RB_SHARDS" --frames "$frames" \
                     --json "$out.$k" >/dev/null 2>&1 &
             else
-                "$BIN" --manifest "$manifest" --mode "$MODE" --jobs 1 \
+                run_bin --manifest "$manifest" --mode "$MODE" --jobs 1 \
                     --shard "$k/$RB_SHARDS" --json "$out.$k" >/dev/null 2>&1 &
             fi
         done
@@ -473,11 +500,11 @@ PY
         rm -f "$out".*
     elif [ "$frames" != "-" ]; then
         log "Running suite '$suite' (mode=$MODE jobs=$JOBS ${frames#-} frames)"
-        "$BIN" --manifest "$manifest" --mode "$MODE" --jobs "$JOBS" \
+        run_bin --manifest "$manifest" --mode "$MODE" --jobs "$JOBS" \
             --frames "$frames" --json "$out" || true
     else
         log "Running suite '$suite' (mode=$MODE jobs=$JOBS ${frames#-} frames)"
-        "$BIN" --manifest "$manifest" --mode "$MODE" --jobs "$JOBS" \
+        run_bin --manifest "$manifest" --mode "$MODE" --jobs "$JOBS" \
             --json "$out" || true   # runner exits 1 on any fail; we gate on counts
     fi
 
@@ -601,10 +628,10 @@ generate_report() {
         frames="$(printf '%s' "$row" | cut -d' ' -f2)"
         out="$(mktemp)"
         if [ "$frames" != "-" ]; then
-            "$BIN" --manifest "$SUITES_DIR/$suite.manifest" --mode "$MODE" \
+            run_bin --manifest "$SUITES_DIR/$suite.manifest" --mode "$MODE" \
                 --jobs "$JOBS" --frames "$frames" --json "$out" >/dev/null 2>&1 || true
         else
-            "$BIN" --manifest "$SUITES_DIR/$suite.manifest" --mode "$MODE" \
+            run_bin --manifest "$SUITES_DIR/$suite.manifest" --mode "$MODE" \
                 --jobs "$JOBS" --json "$out" >/dev/null 2>&1 || true
         fi
         passed="$(json_field "$out" passed)"
@@ -652,8 +679,8 @@ fi
 
 # A suite (or 'all'/'report'): ensure ROMs + binary exist, then run.
 [ "${RB_SKIP_SETUP:-0}" = "1" ] || setup
-if [ "${RB_SKIP_BUILD:-0}" != "1" ] && [ ! -x "$BIN" ]; then build; fi
-[ -x "$BIN" ] || die "runner binary not found at $BIN (run: $0 build)"
+if [ "${RB_SKIP_BUILD:-0}" != "1" ] && ! bin_ready; then build; fi
+bin_ready || die "runner binary not found at $BIN (run: $0 build)"
 
 if [ "$1" = "report" ]; then generate_report; exit 0; fi
 
