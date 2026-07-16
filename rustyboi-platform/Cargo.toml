@@ -41,9 +41,6 @@ rfd = "=0.17.2"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
-# UIKit interop for the document picker (src/ios.rs). The 0.6/0.3 objc2
-# generation is already compiled transitively via egui-winit, so this adds no
-# new objc2 version to the graph.
 objc2 = "=0.6.4"
 objc2-foundation = { version = "=0.3.2", features = ["NSArray", "NSString", "NSURL", "NSData", "NSObject"] }
 objc2-ui-kit = { version = "=0.3.2", features = ["UIApplication", "UIWindow", "UIView", "UIViewController", "UIResponder", "UIDocumentPickerViewController", "objc2-uniform-type-identifiers"] }
@@ -63,8 +60,5 @@ jni = "=0.21.1"
 libc = "=0.2.186"
 ndk-context = "=0.1.1"
 ndk-sys = "=0.6.0"
-# Low-latency Android audio: oboe requests AAudio's MMAP/LOW_LATENCY path (which
-# cpal never does, pinning us to the higher-latency Legacy path). Fed by a
-# lock-free SPSC ring from the emulator thread into oboe's real-time callback.
 oboe = { version = "=0.6.1", features = ["java-interface", "ndk-context"] }
 ringbuf = "=0.5.1"

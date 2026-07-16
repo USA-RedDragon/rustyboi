@@ -197,6 +197,57 @@ pub enum ScalingMode {
     Stretch,
 }
 
+/// Which rendering backend the desktop frontend asks wgpu for. `Auto` probes in
+/// preference order (Vulkan, then anything hardware, then a software
+/// rasterizer); the explicit choices force one and fall back to the `Auto`
+/// chain (with a logged warning) if it is unavailable, so a stale persisted
+/// choice can never brick startup. Takes effect at the next launch — the
+/// surface/device pair is created once per window. Serde-derived so it
+/// persists in [`Config`](crate::config::Config); ignored by the web frontend
+/// (the browser picks WebGPU/WebGL itself).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GraphicsBackend {
+    #[default]
+    Auto,
+    Vulkan,
+    OpenGl,
+    Software,
+}
+
+impl GraphicsBackend {
+    /// Every choice paired with its menu label — the single list the Settings
+    /// UI is built from.
+    pub fn choices() -> [(GraphicsBackend, &'static str); 4] {
+        [
+            (GraphicsBackend::Auto, "Auto (Vulkan → OpenGL → Software)"),
+            (GraphicsBackend::Vulkan, "Vulkan"),
+            (GraphicsBackend::OpenGl, "OpenGL"),
+            (GraphicsBackend::Software, "Software (CPU)"),
+        ]
+    }
+
+    /// Stable string id (CLI flag value / future libretro option).
+    pub fn option_id(self) -> &'static str {
+        match self {
+            GraphicsBackend::Auto => "auto",
+            GraphicsBackend::Vulkan => "vulkan",
+            GraphicsBackend::OpenGl => "opengl",
+            GraphicsBackend::Software => "software",
+        }
+    }
+
+    /// Parse a string id (see [`option_id`](Self::option_id)), or `None`.
+    pub fn from_option_id(id: &str) -> Option<Self> {
+        match id {
+            "auto" => Some(GraphicsBackend::Auto),
+            "vulkan" => Some(GraphicsBackend::Vulkan),
+            "opengl" => Some(GraphicsBackend::OpenGl),
+            "software" => Some(GraphicsBackend::Software),
+            _ => None,
+        }
+    }
+}
+
 /// A snapshot of session-owned state the menus render current selections from
 /// (checkmarks, radio dots, slot list). The UI never mutates the session
 /// directly; it reads this and emits [`UiAction`]s the session applies.
@@ -233,6 +284,8 @@ pub struct SessionUiState {
     pub volume: u8,
     /// How the frame is letterboxed in the render region.
     pub scaling: ScalingMode,
+    /// Requested rendering backend (desktop; applied at next launch).
+    pub graphics_backend: GraphicsBackend,
     pub sgb_border: bool,
     /// Whether emulation is paused (drives the Pause/Resume menu label). On
     /// desktop the frontend owns pause and passes it separately, so this is only
@@ -291,6 +344,7 @@ impl Default for SessionUiState {
             rewind_depth: 90,
             volume: 50,
             scaling: ScalingMode::FitAspect,
+            graphics_backend: GraphicsBackend::Auto,
             sgb_border: true,
             paused: false,
             fast_forward: false,
@@ -416,6 +470,8 @@ pub enum UiAction {
     SetVolume(u8),
     /// Set how the frame is letterboxed in the render region.
     SetScalingMode(ScalingMode),
+    /// Choose the rendering backend (persisted; applied at next launch).
+    SetGraphicsBackend(GraphicsBackend),
     /// Toggle host fullscreen (platform hook: desktop window / web canvas;
     /// Android is already fullscreen). Transient — not persisted config.
     ToggleFullscreen,
@@ -502,6 +558,7 @@ impl UiAction {
             UiAction::SetRewindDepth(_) => ActionKind::SetRewindDepth,
             UiAction::SetVolume(_) => ActionKind::SetVolume,
             UiAction::SetScalingMode(_) => ActionKind::SetScalingMode,
+            UiAction::SetGraphicsBackend(_) => ActionKind::SetGraphicsBackend,
             UiAction::ToggleFullscreen => ActionKind::ToggleFullscreen,
             UiAction::SetInputConfig(_) => ActionKind::SetInputConfig,
             UiAction::AddCheat(_) => ActionKind::AddCheat,
@@ -573,6 +630,7 @@ pub enum ActionKind {
     SetRewindDepth,
     SetVolume,
     SetScalingMode,
+    SetGraphicsBackend,
     ToggleFullscreen,
     SetInputConfig,
     AddCheat,
@@ -1206,6 +1264,7 @@ mod tests {
             SetRewindDepth(42),
             SetVolume(80),
             SetScalingMode(ScalingMode::Stretch),
+            SetGraphicsBackend(GraphicsBackend::Software),
             ToggleFullscreen,
             SetInputConfig(InputConfig::default()),
             AddCheat("00A-B7F".into()),
@@ -1268,6 +1327,7 @@ mod tests {
                 | UiAction::SetRewindDepth(_)
                 | UiAction::SetVolume(_)
                 | UiAction::SetScalingMode(_)
+                | UiAction::SetGraphicsBackend(_)
                 | UiAction::ToggleFullscreen
                 | UiAction::SetInputConfig(_)
                 | UiAction::AddCheat(_)
@@ -1319,6 +1379,7 @@ mod tests {
             rewind_depth: 17,
             volume: 42,
             scaling: ScalingMode::IntegerAspect,
+            graphics_backend: GraphicsBackend::Software,
             sgb_border: false,
             paused: true,
             fast_forward: true,

@@ -5,7 +5,7 @@
 //! DMG palette choice, input remap, rewind tuning, and the fast-forward factor.
 //! No host key codes, paths, or window state — those belong to the adapter.
 
-use crate::action::{GbcDmgPalette, LcdEffect, ScalingMode, TextureFilter};
+use crate::action::{GbcDmgPalette, GraphicsBackend, LcdEffect, ScalingMode, TextureFilter};
 use crate::input::InputMap;
 use crate::input_config::InputConfig;
 use crate::ports::{Storage, StorageError};
@@ -81,6 +81,10 @@ pub struct Config {
     /// Frame letterboxing policy. `default` so older blobs still load.
     #[serde(default)]
     pub scaling: ScalingMode,
+    /// Requested rendering backend (desktop only; applied at next launch).
+    /// `default` (`Auto`) so older blobs still load.
+    #[serde(default)]
+    pub graphics_backend: GraphicsBackend,
     /// CGB colour-correction curve (raw RGB555 vs a hardware-LCD approximation).
     /// Applied to the machine at every (re)build. `default` (`Linear`) so older
     /// blobs still load and reproduce the historical output.
@@ -136,6 +140,7 @@ impl Default for Config {
             fast_forward_factor: 4,
             volume: 100,
             scaling: ScalingMode::default(),
+            graphics_backend: GraphicsBackend::default(),
             color_correction: CgbColorConversion::default(),
             use_real_boot_rom: false,
             texture_filter: TextureFilter::default(),
@@ -189,6 +194,7 @@ mod tests {
             fast_forward_factor: 8,
             volume: 40,
             scaling: ScalingMode::Stretch,
+            graphics_backend: GraphicsBackend::Software,
             ..Default::default()
         };
         cfg.rewind.depth = 42;

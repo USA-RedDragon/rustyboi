@@ -797,6 +797,7 @@ fn dispatch_action(shared: &Rc<RefCell<Shared>>, action: UiAction) {
         | UiAction::SetRewindDepth(_)
         | UiAction::SetVolume(_)
         | UiAction::SetScalingMode(_)
+        | UiAction::SetGraphicsBackend(_)
         | UiAction::SetInputConfig(_)
         | UiAction::AddCheat(_)
         | UiAction::AddCheats(_)

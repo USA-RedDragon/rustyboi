@@ -776,6 +776,17 @@ impl Gui {
                         }
                     });
 
+                    ui.menu_button("Renderer", |ui| {
+                        for (backend, label) in rustyboi_session::GraphicsBackend::choices() {
+                            let selected = session.graphics_backend == backend;
+                            if ui.radio(selected, label).clicked() && !selected {
+                                *action = Some(GuiAction::SetGraphicsBackend(backend));
+                            }
+                        }
+                        ui.separator();
+                        ui.weak("Applies at next launch");
+                    });
+
                     ui.separator();
                     ui.label("Volume");
                     let mut vol = session.volume;
@@ -1378,6 +1389,14 @@ impl Gui {
                             let selected = session.scaling == mode;
                             if ui.radio(selected, label).clicked() && !selected {
                                 *action = Some(GuiAction::SetScalingMode(mode));
+                            }
+                        }
+
+                        ui.label("Renderer (applies at next launch)");
+                        for (backend, label) in rustyboi_session::GraphicsBackend::choices() {
+                            let selected = session.graphics_backend == backend;
+                            if ui.radio(selected, label).clicked() && !selected {
+                                *action = Some(GuiAction::SetGraphicsBackend(backend));
                             }
                         }
 
