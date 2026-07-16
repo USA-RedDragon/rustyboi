@@ -4,9 +4,10 @@
 //! drift, container swap) fails here loudly — independent of whether the
 //! in-memory representation changes (e.g. heap-boxing the big buffers).
 //!
-//! Two fixtures cover both `fb_rle` framebuffer codec arms and both hardware
-//! shapes: dmg_acid2 (DMG shade runs → Rle; no CGB banks) and cgb_acid2
-//! (high-entropy RGB → Raw; vram_bank1 + wram_banks populated).
+//! Two fixtures cover the framebuffer codec arms and both hardware shapes:
+//! dmg_acid2 (DMG shade runs → byte-Rle mono buffers + Solid all-zero color
+//! pair; no CGB banks) and cgb_acid2 (high-entropy RGB → palette-indexed color
+//! buffers + Solid all-zero mono pair; vram_bank1 + wram_banks populated).
 //!
 //! Regenerating a fixture is an explicit, reviewed act:
 //!   cargo test -p rustyboi-core --test savestate_golden -- --ignored write_golden_fixtures
