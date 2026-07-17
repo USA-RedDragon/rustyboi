@@ -15,8 +15,9 @@ pending) · `parked` (not silicon-verified yet).
 | Behavior | Grading | Status | Notes |
 |---|---|---|---|
 | Window ignores the SCX fine-scroll discard (full-width WX==7) | png (dmg) | **ROM** | `ppu/window_scx_ignore` — fails pre-fix (markers shift x%8 5), passes post-fix. Rust test dropped. |
-| CGB panel repeats the previous image for the skipped first frame after LCDC.7 enable | png (cgb) | **ROM** | `ppu/lcd_enable_frame_repeat` — EA-style 2-line in-VBlank LCD off/on, graded mid-skipped-frame vs an all-black derived oracle; fails pre-fix (all white). SameBoy-measured on CGB-E (frame_repeat_countdown); corroborated by the EA CGB middleware (Madden/NHL 2000, MiB) never flashing on hardware. Bench-confirm candidate. |
-| DMG panel shows blank (white) for the skipped first frame after LCDC.7 enable | png (dmg) | **ROM** | `ppu/lcd_enable_frame_blank` — same script as the CGB repeat ROM, all-white oracle (Pan Docs "LCDC.7" blank rule); pins the CGB/DMG asymmetry. |
+| CGB panel repeats the previous image for the skipped first frame after LCDC.7 enable | png (cgb) | **ROM** | `ppu/lcd_enable_frame_repeat` — EA-style in-VBlank LCD off/on with palettes swapped to PalB during the off, graded mid-skipped-frame vs the derived PalA signature-pattern oracle (include/lcd_enable_pattern.inc). Discriminates blank-white, zeroed-buffer black, and back-buffer/in-flight PalB presents; fails pre-fix (all white). SameBoy-measured on CGB-E (frame_repeat_countdown); corroborated by the EA CGB middleware (Madden/NHL 2000, MiB) never flashing on hardware. Bench-confirm candidate. |
+| CGB panel resumes display right after the one skipped frame (repeat ends) | png (cgb) | **ROM** | `ppu/lcd_enable_frame_after` — same flip, graded two frames later vs the PalB pattern oracle; a panel stuck blanking (white) or stuck repeating the PalA image both fail. Guards over-regression of the repeat rule. |
+| DMG panel shows blank (white) for the skipped first frame after LCDC.7 enable | png (dmg) | **ROM** | `ppu/lcd_enable_frame_blank` — same script as the CGB repeat ROM (signature pattern, BGP=$E4), all-white oracle (Pan Docs "LCDC.7" blank rule); pins the CGB/DMG asymmetry — a wrong CGB-style repeat on DMG would show the pattern and fail. |
 
 ## Candidate list (silicon-verified, ROM pending)
 
