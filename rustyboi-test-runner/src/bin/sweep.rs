@@ -3,11 +3,24 @@
 //! Runs every ROM in a game library under a deterministic input masher,
 //! recording per-ROM performance, a cumulative every-frame framebuffer hash,
 //! checkpoint hashes, a final-frame screenshot, and one screenshot per
-//! checkpoint (`<key>_cpN.png`, rendered by `gallery` as a per-ROM strip so a
-//! blank/fading final frame doesn't hide what the run actually did). Two
-//! sweeps compare into a
-//! regression report: any hash difference is a behavior change (the library is
-//! ~1200 canaries wide), any fps drop beyond tolerance is a perf regression.
+//! checkpoint (rendered by `gallery` as a per-ROM strip so a blank/fading
+//! final frame doesn't hide what the run actually did). Two sweeps compare
+//! into a regression report: any hash difference is a behavior change (the
+//! library is ~1200 canaries wide), any fps drop beyond tolerance is a perf
+//! regression.
+//!
+//! MEDIA (privacy + hardware matrix): every emitted media file is keyed on the
+//! ROM's `rom_sha`, never the (trademarked) file name — `screens/<sha>_<hw>.png`,
+//! `screens/<sha>_<hw>_cpN.png`, `videos/<sha>_<hw>.mp4`. Media is captured on a
+//! SET of hardware models (default DMG,CGB,SGB,AGB via `--hardware`) so the
+//! gallery can tab between them; a CGB-only game on DMG legitimately renders the
+//! "cannot run on this system" panel — a real artifact, not an error. The media
+//! fan-out is gallery-only: the manifest that `compare` gates on carries exactly
+//! ONE canonical row per ROM (auto-detected hardware, no audio drain), produced
+//! by a code path byte-identical to a media-free run, so extra hardware/audio
+//! never perturb the regression hashes. When `ffmpeg` is on PATH and screenshots
+//! are enabled, each (ROM,hardware) also streams every frame to an HEVC encoder
+//! with the emulated APU audio muxed in as AAC (`--no-videos` to disable).
 //!
 //!   sweep run      --roms DIR... [--list FILE] --out DIR [--frames N]
 //!                  [--warmup N] [--jobs N] [--timeout SECS] [--no-screens]
@@ -52,14 +65,16 @@
 //! fps/ns_per_frame fields vary run to run.
 
 use rayon::prelude::*;
+use rustyboi_core_lib::audio::AudioOutput;
 use rustyboi_core_lib::cartridge::Cartridge;
 use rustyboi_core_lib::gb::{Hardware, GB};
 use rustyboi_core_lib::movie::{frame_hash, frame_is_non_blank, sha256};
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[path = "shared/imaging.rs"]
@@ -117,10 +132,11 @@ fn main() -> ExitCode {
         _ => {
             eprintln!(
                 "usage:\n  sweep run     --roms DIR... [--list FILE] --out DIR [--frames N] \
-                 [--warmup N] [--jobs N] [--timeout SECS] [--no-screens] [--only SUBSTR]\n  \
+                 [--warmup N] [--jobs N] [--timeout SECS] [--no-screens] [--no-videos] \
+                 [--hardware dmg,cgb,sgb,agb] [--only SUBSTR]\n  \
                  sweep compare --base A.jsonl --cand B.jsonl [--min-ratio R] [--ignore-perf] \
                  [--out report.md]\n  \
-                 sweep gallery --manifest M.jsonl --screens DIR [--out gallery.html]"
+                 sweep gallery --manifest M.jsonl --screens DIR [--videos DIR] [--out gallery.html]"
             );
             return ExitCode::from(2);
         }
@@ -154,9 +170,58 @@ struct RunCfg {
     warmup: usize,
     timeout_secs: u64,
     screens_dir: Option<PathBuf>,
+    /// Where per-(ROM,hardware) HEVC+AAC videos land. `Some` only when
+    /// screenshots are on, `--no-videos` is absent, and `ffmpeg` is on PATH.
+    videos_dir: Option<PathBuf>,
+    /// Hardware models the MEDIA fan-out captures (posters + videos). The
+    /// canonical manifest row is always the auto-detected model regardless of
+    /// this set (see `canonical_hardware`).
+    hardware: Vec<Hardware>,
     /// CRC32 -> No-Intro game name (auto-fetched DATs). Empty = file stems.
     names: std::collections::HashMap<u32, String>,
 }
+
+/// Short lowercase tag for a hardware model — the media-filename suffix and the
+/// gallery tab key. Equal to the lowercased `Debug` name, so DMG->"dmg",
+/// CGB->"cgb", SGB->"sgb", AGB->"agb", etc.
+fn hw_tag(hw: Hardware) -> String {
+    format!("{hw:?}").to_ascii_lowercase()
+}
+
+/// Parse a hardware tag (case-insensitive) into a `Hardware`. Accepts the short
+/// names in the default matrix plus every variant by its lowercased name.
+fn parse_hw(tag: &str) -> Option<Hardware> {
+    Some(match tag.trim().to_ascii_lowercase().as_str() {
+        "dmg" => Hardware::DMG,
+        "dmg0" => Hardware::DMG0,
+        "mgb" => Hardware::MGB,
+        "sgb" => Hardware::SGB,
+        "sgb2" => Hardware::SGB2,
+        "cgb0" => Hardware::CGB0,
+        "cgbb" => Hardware::CGBB,
+        "cgb" => Hardware::CGB,
+        "cgbe" => Hardware::CGBE,
+        "agb" => Hardware::AGB,
+        _ => return None,
+    })
+}
+
+/// The single hardware model the canonical manifest row is emulated on — the
+/// pre-media behavior: CGB for CGB-aware carts, DMG otherwise. Unchanged so the
+/// regression baseline and `compare` semantics stay byte-identical.
+fn canonical_hardware(cart: &Cartridge) -> Hardware {
+    if cart.supports_cgb() {
+        Hardware::CGB
+    } else {
+        Hardware::DMG
+    }
+}
+
+/// One audio duration second at the DMG dot rate — sample count / this = seconds.
+const AUDIO_RATE: u32 = 44100;
+/// GB frame rate as an exact rational (master clock / dots-per-frame).
+const FPS_NUM: u64 = 4_194_304;
+const FPS_DEN: u64 = 70_224;
 
 /// Cache dir for the auto-fetched No-Intro DATs. Override with RB_NOINTRO_DIR
 /// (e.g. to point at DATs fetched offline via tools/fetch-nointro-dats.sh).
@@ -282,11 +347,30 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     let timeout_secs: u64 = parse_num(args, "--timeout", 300)? as u64;
     let jobs: usize = parse_num(args, "--jobs", 0)?;
     let no_screens = args.iter().any(|a| a == "--no-screens");
+    let no_videos = args.iter().any(|a| a == "--no-videos");
     let strip_names = args.iter().any(|a| a == "--strip-names");
     let only = arg(args, "--only");
     if warmup >= frames {
         return Err("run: --warmup must be < --frames".into());
     }
+
+    // Media hardware matrix (posters + videos). Default DMG,CGB,SGB,AGB.
+    let hardware: Vec<Hardware> = match arg(args, "--hardware") {
+        Some(spec) => {
+            let mut hw = Vec::new();
+            for tag in spec.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+                let h = parse_hw(tag).ok_or_else(|| format!("run: unknown --hardware {tag:?}"))?;
+                if !hw.contains(&h) {
+                    hw.push(h);
+                }
+            }
+            if hw.is_empty() {
+                return Err("run: --hardware listed no models".into());
+            }
+            hw
+        }
+        None => vec![Hardware::DMG, Hardware::CGB, Hardware::SGB, Hardware::AGB],
+    };
 
     let names = nointro_map();
 
@@ -324,7 +408,20 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
         std::fs::create_dir_all(&d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
         Some(d)
     };
-    let cfg = RunCfg { frames, warmup, timeout_secs, screens_dir, names };
+    // Videos ride along with screenshots, but only if ffmpeg is present and not
+    // opted out. No ffmpeg -> one warning, PNG-only (the lazy-APU fast path is
+    // kept: no audio is drained unless a video is actually being encoded).
+    let videos_dir = if screens_dir.is_some() && !no_videos && ffmpeg_available() {
+        let d = out_dir.join("videos");
+        std::fs::create_dir_all(&d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
+        Some(d)
+    } else {
+        if screens_dir.is_some() && !no_videos {
+            eprintln!("sweep: ffmpeg not on PATH; emitting screenshots only, no videos");
+        }
+        None
+    };
+    let cfg = RunCfg { frames, warmup, timeout_secs, screens_dir, videos_dir, hardware, names };
 
     let pool = {
         let mut b = rayon::ThreadPoolBuilder::new();
@@ -479,6 +576,7 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
     }));
     match result {
         Ok(Ok(out)) => {
+            let canon_tag = out.hardware.to_ascii_lowercase();
             row.hardware = out.hardware;
             row.hash_all = format!("{:016x}", out.hash_all);
             row.checkpoints = out
@@ -490,21 +588,10 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
             row.changed = out.changed;
             row.fps = Some(out.fps);
             row.ns_per_frame = Some(out.ns_per_frame);
+            // Canonical-hardware media, keyed on rom_sha (never the filename, so
+            // the user's collection is never fingerprinted on disk or in HTML).
             if let Some(dir) = &cfg.screens_dir {
-                if let Some(rgb) = &out.final_rgb {
-                    let png = encode_rgb_png(160, 144, rgb);
-                    let file = dir.join(format!("{}.png", sanitize(key)));
-                    if let Err(e) = std::fs::write(&file, png) {
-                        eprintln!("screenshot {}: {e}", file.display());
-                    }
-                }
-                for (i, rgb) in out.checkpoint_rgbs.iter().enumerate() {
-                    let png = encode_rgb_png(160, 144, rgb);
-                    let file = dir.join(format!("{}_cp{i}.png", sanitize(key)));
-                    if let Err(e) = std::fs::write(&file, png) {
-                        eprintln!("screenshot {}: {e}", file.display());
-                    }
-                }
+                write_media_pngs(dir, &row.rom_sha, &canon_tag, out.final_rgb.as_ref(), &out.checkpoint_rgbs);
             }
         }
         Ok(Err(e)) => row.error = Some(e),
@@ -517,7 +604,65 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
             row.error = Some(format!("panic: {msg}"));
         }
     }
+
+    // MEDIA fan-out: capture each requested hardware model for the gallery
+    // (posters + optional HEVC/AAC videos), keyed on rom_sha. Runs only for
+    // non-errored ROMs with screenshots enabled; never touches the manifest
+    // row above. A panic in one model demotes to a skip, not a lost sweep.
+    if row.error.is_none()
+        && let Some(dir) = &cfg.screens_dir
+    {
+        let canon = out_hardware_of(&row);
+        for &hw in &cfg.hardware {
+            let tag = hw_tag(hw);
+            let is_canon = canon.as_deref() == Some(tag.as_str());
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                capture_media(&bytes, seed, cfg, hw, &row.rom_sha)
+            }));
+            match res {
+                Ok(Ok(m)) => {
+                    // The canonical model's poster/strip were already written by
+                    // the byte-identical manifest pass; don't overwrite them
+                    // (audio-drained media passes could differ if the APU ever
+                    // fed back into the PPU — keep the canary pristine).
+                    if !is_canon {
+                        write_media_pngs(dir, &row.rom_sha, &tag, m.poster.as_ref(), &m.checkpoint_rgbs);
+                    } else if out_hash_of(&row) != Some(m.hash_all) {
+                        // Divergence gate: draining audio changed the canonical
+                        // frame hashes. The manifest is safe (produced without
+                        // audio), but this must be surfaced, not hidden.
+                        eprintln!(
+                            "sweep: WARNING audio-drain hash divergence on {} [{tag}]: media {:016x} vs manifest {}",
+                            row.rom_sha, m.hash_all, out_hash_of(&row).unwrap_or_default()
+                        );
+                    }
+                    if std::env::var_os("RB_SWEEP_MEDIA_LOG").is_some() {
+                        let vdur = m.frames as f64 * FPS_DEN as f64 / FPS_NUM as f64;
+                        let adur = m.audio_samples as f64 / AUDIO_RATE as f64;
+                        eprintln!(
+                            "media {} [{tag}] frames={} audio_samples={} v={vdur:.2}s a={adur:.2}s drift={:.3}s video={}",
+                            row.rom_sha, m.frames, m.audio_samples, adur - vdur, m.video_written
+                        );
+                    }
+                }
+                Ok(Err(e)) => eprintln!("sweep: media {} [{tag}] failed: {e}", row.rom_sha),
+                Err(_) => eprintln!("sweep: media {} [{tag}] panicked; skipped", row.rom_sha),
+            }
+        }
+    }
     row
+}
+
+/// The canonical model tag stored on the manifest row (lowercased), or None if
+/// the run errored before emulation.
+fn out_hardware_of(row: &Row) -> Option<String> {
+    (!row.hardware.is_empty()).then(|| row.hardware.to_ascii_lowercase())
+}
+
+/// The canonical row's hash_all parsed back to u64, for the audio-drain
+/// divergence gate.
+fn out_hash_of(row: &Row) -> Option<u64> {
+    u64::from_str_radix(&row.hash_all, 16).ok()
 }
 
 struct EmuOut {
@@ -537,7 +682,7 @@ struct EmuOut {
 
 fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
     let cart = Cartridge::from_bytes(bytes).map_err(|e| format!("load: {e}"))?;
-    let hardware = if cart.supports_cgb() { Hardware::CGB } else { Hardware::DMG };
+    let hardware = canonical_hardware(&cart);
     let mut gb = GB::new(hardware);
     gb.insert(cart);
     gb.skip_bios();
@@ -610,10 +755,240 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
     })
 }
 
-fn sanitize(key: &str) -> String {
-    key.chars()
-        .map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '(' | ')' | '[' | ']' | '!' | '+' | ',' | '\'' | ' ') { c } else { '_' })
-        .collect()
+// ---------------------------------------------------------------------------
+// media capture (per hardware): rom_sha-keyed posters + HEVC/AAC videos
+// ---------------------------------------------------------------------------
+
+struct MediaOut {
+    /// Final non-blank frame (poster); mirrors `emulate`'s selection so the
+    /// canonical model's media and manifest agree.
+    poster: Option<Vec<u8>>,
+    checkpoint_rgbs: Vec<Vec<u8>>,
+    /// FNV fold over the run — compared to the manifest row for the canonical
+    /// model to prove audio drain never perturbs the frame hashes.
+    hash_all: u64,
+    frames: usize,
+    audio_samples: usize,
+    video_written: bool,
+}
+
+/// APU sink: `run_until_frame(true)` pushes generated samples here; the capture
+/// loop drains and streams them to a PCM sidecar each frame (never buffering
+/// the whole run). Registered ONLY when a video is being encoded, so poster-only
+/// and `--no-videos`/`--no-screens` passes keep the core's lazy-APU fast path.
+#[derive(Clone, Default)]
+struct SampleSink(Arc<Mutex<Vec<(f32, f32)>>>);
+impl AudioOutput for SampleSink {
+    fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+    fn add_samples(&mut self, samples: &[(f32, f32)]) {
+        self.0.lock().unwrap().extend_from_slice(samples);
+    }
+}
+
+fn f32_to_s16le(x: f32) -> [u8; 2] {
+    ((x.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()
+}
+
+/// Is `ffmpeg` on PATH and runnable? Probed once at startup.
+fn ffmpeg_available() -> bool {
+    Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// HEVC encoder reading rawvideo rgb24 over stdin -> a temp mp4. `pools=1`
+/// caps x265 threads since the sweep already parallelizes across ROMs.
+fn spawn_encoder(out: &Path) -> std::io::Result<std::process::Child> {
+    Command::new("ffmpeg")
+        .args([
+            "-loglevel", "error",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "160x144",
+            "-framerate", "4194304/70224", "-i", "-",
+            "-c:v", "libx265", "-preset", "fast", "-crf", "23",
+            "-x265-params", "log-level=error:pools=1",
+            "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-f", "mp4",
+        ])
+        .arg(out)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
+/// Second pass (`-c:v copy`, no re-encode): mux the HEVC video with the PCM
+/// audio as AAC. Returns true only if the muxed file was produced.
+fn mux_av(video: &Path, pcm: &Path, out: &Path) -> bool {
+    let status = Command::new("ffmpeg")
+        .args(["-loglevel", "error", "-i"])
+        .arg(video)
+        .args(["-f", "s16le", "-ar", "44100", "-ac", "2", "-i"])
+        .arg(pcm)
+        .args([
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "96k",
+            "-shortest", "-movflags", "+faststart",
+        ])
+        .arg(out)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    matches!(status, Ok(s) if s.success()) && out.exists()
+}
+
+/// Write a poster and its checkpoint strip, all keyed on `sha`_`tag` (never a
+/// filename). Errors are logged, not fatal.
+fn write_media_pngs(dir: &Path, sha: &str, tag: &str, poster: Option<&Vec<u8>>, cps: &[Vec<u8>]) {
+    if let Some(rgb) = poster {
+        let file = dir.join(format!("{sha}_{tag}.png"));
+        if let Err(e) = std::fs::write(&file, encode_rgb_png(160, 144, rgb)) {
+            eprintln!("screenshot {}: {e}", file.display());
+        }
+    }
+    for (i, rgb) in cps.iter().enumerate() {
+        let file = dir.join(format!("{sha}_{tag}_cp{i}.png"));
+        if let Err(e) = std::fs::write(&file, encode_rgb_png(160, 144, rgb)) {
+            eprintln!("screenshot {}: {e}", file.display());
+        }
+    }
+}
+
+/// Emulate `hardware` purely to produce media: poster + checkpoint strip, and —
+/// when `cfg.videos_dir` is set — an HEVC+AAC mp4 of the whole run. This never
+/// contributes to the manifest; it may drain audio (which the canonical
+/// manifest pass never does), and its frame hash is returned only so the caller
+/// can assert the drain didn't perturb rendering.
+fn capture_media(
+    bytes: &[u8],
+    seed: u64,
+    cfg: &RunCfg,
+    hardware: Hardware,
+    sha: &str,
+) -> Result<MediaOut, String> {
+    let cart = Cartridge::from_bytes(bytes).map_err(|e| format!("load: {e}"))?;
+    let mut gb = GB::new(hardware);
+    gb.insert(cart);
+    gb.skip_bios();
+
+    let tag = hw_tag(hardware);
+    // Audio is drained only when a video is actually being encoded.
+    let (tmp_video, tmp_pcm) = match &cfg.videos_dir {
+        Some(d) => (
+            Some(d.join(format!(".tmp_{sha}_{tag}.mp4"))),
+            Some(d.join(format!(".tmp_{sha}_{tag}.pcm"))),
+        ),
+        None => (None, None),
+    };
+    let mut encoder = None;
+    let mut pcm = None;
+    if let (Some(tv), Some(tp)) = (&tmp_video, &tmp_pcm) {
+        match spawn_encoder(tv) {
+            Ok(child) => {
+                encoder = Some(child);
+                pcm = std::fs::File::create(tp).ok().map(std::io::BufWriter::new);
+            }
+            Err(e) => eprintln!("sweep: ffmpeg spawn {sha} [{tag}]: {e}"),
+        }
+    }
+    let collect_audio = encoder.is_some();
+    let sink = SampleSink::default();
+    if collect_audio {
+        gb.enable_audio(Box::new(sink.clone())).map_err(|e| format!("audio: {e}"))?;
+    }
+
+    let span = cfg.frames - cfg.warmup;
+    let checkpoint_at: Vec<usize> = (0..=4).map(|i| cfg.warmup + span * i / 4).collect();
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash_all: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut checkpoint_rgbs = Vec::new();
+    let mut poster: Option<Vec<u8>> = None;
+    let mut audio_samples = 0usize;
+    let started = Instant::now();
+
+    for f in 0..cfg.frames {
+        gb.set_input_state(masher(f, seed));
+        let (frame, _bp) = gb.run_until_frame(collect_audio);
+
+        let is_cp = checkpoint_at.contains(&(f + 1));
+        let in_tail = f + 120 >= cfg.frames;
+        let need_rgb = encoder.is_some() || is_cp || in_tail;
+        let rgb = need_rgb.then(|| frame_rgb(&frame));
+
+        if let Some(child) = &mut encoder
+            && let (Some(stdin), Some(rgb)) = (child.stdin.as_mut(), &rgb)
+            && stdin.write_all(rgb).is_err()
+        {
+            // Encoder died (disk full, killed): stop streaming, keep posters.
+            encoder = None;
+        }
+        if collect_audio {
+            let mut buf = sink.0.lock().unwrap();
+            if !buf.is_empty() {
+                audio_samples += buf.len();
+                if let Some(w) = &mut pcm {
+                    for (l, r) in buf.iter() {
+                        let _ = w.write_all(&f32_to_s16le(*l));
+                        let _ = w.write_all(&f32_to_s16le(*r));
+                    }
+                }
+                buf.clear();
+            }
+        }
+
+        let h = frame_hash(&frame);
+        hash_all = (hash_all ^ h).wrapping_mul(FNV_PRIME);
+        if is_cp && let Some(rgb) = &rgb {
+            checkpoint_rgbs.push(rgb.clone());
+        }
+        // Poster = last non-blank frame of the tail; falls back to the very
+        // last frame if the run ended blank (mirrors `emulate`'s selection).
+        if in_tail && (frame_is_non_blank(&frame) || (f + 1 == cfg.frames && poster.is_none())) {
+            poster = rgb;
+        }
+        if f % 256 == 0 && started.elapsed().as_secs() > cfg.timeout_secs {
+            break; // slow ROM: emit what we captured rather than error the pass
+        }
+    }
+
+    // Flush the PCM sidecar before muxing.
+    if let Some(w) = pcm {
+        let _ = w.into_inner().map(|mut f| f.flush());
+    }
+    // Close the encoder's stdin (EOF) and wait for the mp4 to finalize.
+    let mut video_written = false;
+    if let Some(mut child) = encoder {
+        drop(child.stdin.take());
+        video_written = matches!(child.wait(), Ok(s) if s.success());
+    }
+    if video_written
+        && let (Some(vdir), Some(tv), Some(tp)) = (&cfg.videos_dir, &tmp_video, &tmp_pcm)
+    {
+        let final_mp4 = vdir.join(format!("{sha}_{tag}.mp4"));
+        // Mux audio in; on failure keep the video-only mp4 (still emitted).
+        if !(audio_samples > 0 && mux_av(tv, tp, &final_mp4)) {
+            let _ = std::fs::rename(tv, &final_mp4);
+        }
+    }
+    // Clean up temps (rename above may already have consumed tmp_video).
+    if let Some(tv) = &tmp_video {
+        let _ = std::fs::remove_file(tv);
+    }
+    if let Some(tp) = &tmp_pcm {
+        let _ = std::fs::remove_file(tp);
+    }
+
+    Ok(MediaOut {
+        poster,
+        checkpoint_rgbs,
+        hash_all,
+        frames: cfg.frames,
+        audio_samples,
+        video_written,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -781,6 +1156,14 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
 fn cmd_gallery(args: &[String]) -> Result<bool, String> {
     let manifest = arg(args, "--manifest").ok_or("gallery: --manifest <file> required")?;
     let screens = arg(args, "--screens").ok_or("gallery: --screens <dir> required")?;
+    let screens_dir = PathBuf::from(&screens);
+    // Videos default to the screens dir's sibling `videos/`.
+    let videos_dir = arg(args, "--videos").map(PathBuf::from).unwrap_or_else(|| {
+        screens_dir
+            .parent()
+            .map(|p| p.join("videos"))
+            .unwrap_or_else(|| PathBuf::from("videos"))
+    });
     let out = arg(args, "--out").unwrap_or_else(|| "gallery.html".into());
 
     let mut rows = load_manifest(&manifest)?;
@@ -803,75 +1186,195 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
         .count();
     let med = median(rows.iter().filter_map(|r| r.fps).collect());
 
+    // Media is probed off disk purely by rom_sha (never the filename): scan the
+    // screens dir for `<sha>_<tag>.png` posters (skipping `_cpN` checkpoints) to
+    // learn which hardware tabs actually have content. This keeps the compared
+    // manifest schema untouched — no per-hardware rows, no media sidecar.
+    let mut poster_tags: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    let mut tabs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    if let Ok(rd) = std::fs::read_dir(&screens_dir) {
+        for e in rd.flatten() {
+            let fname = e.file_name().to_string_lossy().into_owned();
+            let Some(stem) = fname.strip_suffix(".png") else { continue };
+            if stem.contains("_cp") || stem.len() < 18 {
+                continue; // checkpoint strip frame, or too short to be sha_tag
+            }
+            let (sha, rest) = stem.split_at(16);
+            let Some(tag) = rest.strip_prefix('_') else { continue };
+            if tag.is_empty() || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+                continue;
+            }
+            poster_tags.entry(sha.to_string()).or_default().insert(tag.to_string());
+            tabs.insert(tag.to_string());
+        }
+    }
+    // Preferred tab order (default matrix first), then any others alphabetically.
+    let order = ["dmg", "cgb", "sgb", "agb"];
+    let mut tab_list: Vec<String> = order.iter().filter(|t| tabs.contains(**t)).map(|t| t.to_string()).collect();
+    for t in &tabs {
+        if !tab_list.contains(t) {
+            tab_list.push(t.clone());
+        }
+    }
+
     let mut s = String::new();
     s.push_str("<!doctype html><html><head><meta charset=\"utf-8\">");
+    s.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     s.push_str("<title>rustyboi library sweep</title><style>");
     s.push_str(
         "body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:24px}\
-         h1{font-weight:600}\
+         h1{font-weight:600;font-size:20px}\
+         .tabs{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0;position:sticky;top:0;background:#111;padding:8px 0;z-index:2}\
+         .tab{background:#1c1c1c;color:#ccc;border:1px solid #333;border-radius:6px;padding:6px 14px;font-size:14px;cursor:pointer}\
+         .tab.active{background:#2563eb;color:#fff;border-color:#2563eb}\
+         .tab-panel{display:none}.tab-panel.active{display:block}\
          .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px}\
          .card{background:#1c1c1c;border-radius:8px;padding:12px;border:1px solid #333}\
-         .card img{width:100%;image-rendering:pixelated;border-radius:4px;background:#000}\
+         .hero{width:100%;aspect-ratio:10/9;object-fit:contain;image-rendering:pixelated;border-radius:4px;background:#000;display:block;cursor:pointer}\
+         .hero.audible{outline:3px solid #4ade80;outline-offset:-3px}\
          .name{font-size:14px;margin-top:8px;word-break:break-all}\
          .meta{font-size:12px;color:#999;display:flex;justify-content:space-between;margin-top:4px}\
          .ok{color:#4ade80}.fail{color:#f87171}.err{color:#fbbf24}\
          .strip{display:flex;gap:2px;margin-top:6px}\
-         .strip img{flex:1;min-width:0;image-rendering:pixelated;border-radius:2px;background:#000}",
+         .strip img{flex:1;min-width:0;image-rendering:pixelated;border-radius:2px;background:#000}\
+         .empty{color:#888;margin-top:24px}",
     );
     s.push_str("</style></head><body>");
     s.push_str(&format!(
-        "<h1>rustyboi library sweep &mdash; {ok}/{} in gameplay, median {:.0} fps</h1><div class=\"grid\">",
+        "<h1>rustyboi library sweep &mdash; {ok}/{} in gameplay, median {:.0} fps</h1>",
         rows.len(),
         med.unwrap_or(0.0)
     ));
-    for r in &rows {
-        let (status, cls) = match (&r.error, r.boot_ok && r.changed) {
-            (Some(_), _) => ("error", "err"),
-            (None, true) => ("ok", "ok"),
-            (None, false) => ("blank/static", "fail"),
-        };
-        // Gallery is built from a fresh (named) sweep; fall back gracefully if
-        // pointed at an anonymized manifest.
-        let img = r
-            .key
-            .as_deref()
-            .map(|k| format!("{}.png", sanitize(k)))
-            .filter(|file| Path::new(&screens).join(file).exists())
-            .map(|file| format!("<img src=\"./screens/{}\" alt=\"\">", html_escape(&file)))
-            .unwrap_or_else(|| "<div style=\"aspect-ratio:10/9\"></div>".into());
-        // Checkpoint strip: probe `<key>_cpN.png` on disk (older sweep dirs
-        // have none -> no strip). Labels come from the row's checkpoint frames.
-        let strip = r
-            .key
-            .as_deref()
-            .map(|k| {
-                (0..r.checkpoints.len())
-                    .map(|i| (i, format!("{}_cp{i}.png", sanitize(k))))
-                    .filter(|(_, file)| Path::new(&screens).join(file).exists())
-                    .map(|(i, file)| {
-                        format!(
-                            "<img src=\"./screens/{}\" alt=\"\" title=\"checkpoint {i} @ frame {}\">",
-                            html_escape(&file),
-                            r.checkpoints[i].0
-                        )
-                    })
-                    .collect::<String>()
-            })
-            .filter(|imgs| !imgs.is_empty())
-            .map(|imgs| format!("<div class=\"strip\">{imgs}</div>"))
-            .unwrap_or_default();
-        let display_name = r.name.clone().unwrap_or_else(|| format!("sha:{}", r.rom_sha));
-        let fps = r.fps.map_or(String::new(), |f| format!("{f:.0} fps"));
+
+    if tab_list.is_empty() {
+        // Old-format dir (sanitize-named PNGs) or no media: still valid HTML.
+        s.push_str("<p class=\"empty\">No rom_sha-keyed media found in this directory. \
+                    Re-run <code>sweep run</code> to regenerate media (filenames changed to \
+                    rom_sha).</p></body></html>");
+        std::fs::write(&out, &s).map_err(|e| format!("write {out}: {e}"))?;
+        println!("gallery: 0 cards (no media) -> {out}");
+        return Ok(true);
+    }
+
+    // Tab bar.
+    s.push_str("<div class=\"tabs\">");
+    for (i, tag) in tab_list.iter().enumerate() {
+        let count = rows
+            .iter()
+            .filter(|r| poster_tags.get(&r.rom_sha).is_some_and(|t| t.contains(tag)))
+            .count();
         s.push_str(&format!(
-            "<div class=\"card\">{img}{strip}<div class=\"name\">{}</div>\
-             <div class=\"meta\"><span>{} {fps}</span><span class=\"{cls}\">{status}</span></div></div>",
-            html_escape(&display_name),
-            html_escape(&r.hardware),
+            "<button class=\"tab{}\" data-tab=\"{tag}\">{} ({count})</button>",
+            if i == 0 { " active" } else { "" },
+            html_escape(&tag.to_ascii_uppercase()),
         ));
     }
-    s.push_str("</div></body></html>");
-    std::fs::write(&out, s).map_err(|e| format!("write {out}: {e}"))?;
-    println!("gallery: {} cards -> {out}", rows.len());
+    s.push_str("</div>");
+
+    // One panel per hardware tab; cards derived entirely from rom_sha + tag.
+    for (i, tag) in tab_list.iter().enumerate() {
+        s.push_str(&format!(
+            "<div class=\"tab-panel{}\" id=\"panel-{tag}\"><div class=\"grid\">",
+            if i == 0 { " active" } else { "" }
+        ));
+        for r in &rows {
+            let has_poster = poster_tags.get(&r.rom_sha).is_some_and(|t| t.contains(tag));
+            if !has_poster {
+                continue;
+            }
+            let (status, cls) = match (&r.error, r.boot_ok && r.changed) {
+                (Some(_), _) => ("error", "err"),
+                (None, true) => ("ok", "ok"),
+                (None, false) => ("blank/static", "fail"),
+            };
+            let poster = format!("./screens/{}_{tag}.png", r.rom_sha);
+            let video_file = format!("{}_{tag}.mp4", r.rom_sha);
+            let hero = if videos_dir.join(&video_file).exists() {
+                format!(
+                    "<video class=\"hero\" muted loop playsinline preload=\"none\" \
+                     poster=\"{poster}\" src=\"./videos/{}\"></video>",
+                    html_escape(&video_file),
+                )
+            } else {
+                format!("<img class=\"hero\" src=\"{poster}\" alt=\"\">")
+            };
+            // Checkpoint strip: probe `<sha>_<tag>_cpN.png` on disk.
+            let strip = (0..r.checkpoints.len())
+                .map(|c| format!("{}_{tag}_cp{c}.png", r.rom_sha))
+                .filter(|file| screens_dir.join(file).exists())
+                .enumerate()
+                .map(|(c, file)| {
+                    format!(
+                        "<img src=\"./screens/{}\" alt=\"\" title=\"checkpoint {c} @ frame {}\">",
+                        html_escape(&file),
+                        r.checkpoints[c].0
+                    )
+                })
+                .collect::<String>();
+            let strip = if strip.is_empty() {
+                String::new()
+            } else {
+                format!("<div class=\"strip\">{strip}</div>")
+            };
+            let display_name = r.name.clone().unwrap_or_else(|| format!("sha:{}", r.rom_sha));
+            let fps = r.fps.map_or(String::new(), |f| format!("{f:.0} fps"));
+            s.push_str(&format!(
+                "<div class=\"card\">{hero}{strip}<div class=\"name\">{}</div>\
+                 <div class=\"meta\"><span>{} {fps}</span><span class=\"{cls}\">{status}</span></div></div>",
+                html_escape(&display_name),
+                html_escape(&tag.to_ascii_uppercase()),
+            ));
+        }
+        s.push_str("</div></div>");
+    }
+
+    // Dependency-free JS: tab switch + autoplay-on-visible + click-to-unmute
+    // (exactly one audible video; hidden/off-screen videos pause AND re-mute).
+    s.push_str(
+        "<script>\
+        (function(){\
+        var vids=function(){return Array.prototype.slice.call(document.querySelectorAll('video.hero'));};\
+        var io=new IntersectionObserver(function(es){\
+          es.forEach(function(e){var v=e.target;\
+            var panel=v.closest('.tab-panel');var active=panel&&panel.classList.contains('active');\
+            if(e.isIntersecting&&active){v.play().catch(function(){});}\
+            else{v.pause();if(!v.muted){v.muted=true;v.classList.remove('audible');}}\
+          });\
+        },{threshold:0.25});\
+        vids().forEach(function(v){io.observe(v);\
+          v.addEventListener('click',function(ev){ev.preventDefault();\
+            if(v.muted){vids().forEach(function(o){if(o!==v){o.muted=true;o.classList.remove('audible');}});\
+              v.muted=false;v.classList.add('audible');v.play().catch(function(){});}\
+            else{v.muted=true;v.classList.remove('audible');}\
+          });\
+        });\
+        function activate(tab){\
+          document.querySelectorAll('.tab').forEach(function(b){b.classList.toggle('active',b.dataset.tab===tab);});\
+          document.querySelectorAll('.tab-panel').forEach(function(p){\
+            var on=p.id==='panel-'+tab;p.classList.toggle('active',on);\
+            if(!on){p.querySelectorAll('video.hero').forEach(function(v){v.pause();v.muted=true;v.classList.remove('audible');});}\
+          });\
+          var panel=document.getElementById('panel-'+tab);\
+          if(panel){panel.querySelectorAll('video.hero').forEach(function(v){\
+            var r=v.getBoundingClientRect();if(r.top<innerHeight&&r.bottom>0){v.play().catch(function(){});}\
+          });}\
+        }\
+        document.querySelectorAll('.tab').forEach(function(b){b.addEventListener('click',function(){activate(b.dataset.tab);});});\
+        })();\
+        </script>",
+    );
+    s.push_str("</body></html>");
+    std::fs::write(&out, &s).map_err(|e| format!("write {out}: {e}"))?;
+    let cards: usize = tab_list
+        .iter()
+        .map(|tag| {
+            rows.iter()
+                .filter(|r| poster_tags.get(&r.rom_sha).is_some_and(|t| t.contains(tag)))
+                .count()
+        })
+        .sum();
+    println!("gallery: {} tabs, {cards} cards -> {out}", tab_list.len());
     Ok(true)
 }
 
