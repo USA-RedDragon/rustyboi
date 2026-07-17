@@ -4,19 +4,17 @@
 
 use rustyboi_core_lib::gb::Frame;
 
-/// GB pixel buffer -> RGB888 (monochrome mapped to a gray ramp).
+/// GB pixel buffer -> RGB888 (monochrome mapped to the GreenLcd palette, the
+/// emulator's default DMG palette).
 pub fn frame_rgb(frame: &Frame) -> Vec<u8> {
     match frame {
         Frame::Monochrome(data) => data
             .iter()
-            .flat_map(|p| {
-                let g = match p {
-                    0 => 0xFFu8,
-                    1 => 0xAA,
-                    2 => 0x55,
-                    _ => 0x00,
-                };
-                [g, g, g]
+            .flat_map(|p| match p {
+                0 => [0xE0, 0xF8, 0xD0],
+                1 => [0x88, 0xC0, 0x70],
+                2 => [0x34, 0x68, 0x56],
+                _ => [0x08, 0x18, 0x20],
             })
             .collect(),
         Frame::Color(data) => data.to_vec(),
