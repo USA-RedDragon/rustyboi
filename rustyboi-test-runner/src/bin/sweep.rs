@@ -2,7 +2,10 @@
 //!
 //! Runs every ROM in a game library under a deterministic input masher,
 //! recording per-ROM performance, a cumulative every-frame framebuffer hash,
-//! checkpoint hashes, and a final-frame screenshot. Two sweeps compare into a
+//! checkpoint hashes, a final-frame screenshot, and one screenshot per
+//! checkpoint (`<key>_cpN.png`, rendered by `gallery` as a per-ROM strip so a
+//! blank/fading final frame doesn't hide what the run actually did). Two
+//! sweeps compare into a
 //! regression report: any hash difference is a behavior change (the library is
 //! ~1200 canaries wide), any fps drop beyond tolerance is a perf regression.
 //!
@@ -487,11 +490,20 @@ fn run_one(key: &str, path: &Path, cfg: &RunCfg) -> Row {
             row.changed = out.changed;
             row.fps = Some(out.fps);
             row.ns_per_frame = Some(out.ns_per_frame);
-            if let (Some(dir), Some(rgb)) = (&cfg.screens_dir, &out.final_rgb) {
-                let png = encode_rgb_png(160, 144, rgb);
-                let file = dir.join(format!("{}.png", sanitize(key)));
-                if let Err(e) = std::fs::write(&file, png) {
-                    eprintln!("screenshot {}: {e}", file.display());
+            if let Some(dir) = &cfg.screens_dir {
+                if let Some(rgb) = &out.final_rgb {
+                    let png = encode_rgb_png(160, 144, rgb);
+                    let file = dir.join(format!("{}.png", sanitize(key)));
+                    if let Err(e) = std::fs::write(&file, png) {
+                        eprintln!("screenshot {}: {e}", file.display());
+                    }
+                }
+                for (i, rgb) in out.checkpoint_rgbs.iter().enumerate() {
+                    let png = encode_rgb_png(160, 144, rgb);
+                    let file = dir.join(format!("{}_cp{i}.png", sanitize(key)));
+                    if let Err(e) = std::fs::write(&file, png) {
+                        eprintln!("screenshot {}: {e}", file.display());
+                    }
                 }
             }
         }
@@ -517,6 +529,10 @@ struct EmuOut {
     fps: f64,
     ns_per_frame: f64,
     final_rgb: Option<Vec<u8>>,
+    /// One RGB frame per entry in `checkpoints` (same order); empty when
+    /// screenshots are disabled. Pure copies taken at instants where the
+    /// checkpoint hash is already computed — no effect on emulation or hashes.
+    checkpoint_rgbs: Vec<Vec<u8>>,
 }
 
 fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
@@ -535,6 +551,7 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut hash_all: u64 = 0xcbf2_9ce4_8422_2325;
     let mut checkpoints = Vec::with_capacity(checkpoint_at.len());
+    let mut checkpoint_rgbs = Vec::new();
     let mut first_hash = None;
     let mut changed = false;
     let mut boot_ok = false;
@@ -552,6 +569,9 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
         hash_all = (hash_all ^ h).wrapping_mul(FNV_PRIME);
         if checkpoint_at.contains(&(f + 1)) {
             checkpoints.push((f + 1, hash_all));
+            if cfg.screens_dir.is_some() {
+                checkpoint_rgbs.push(frame_rgb(&frame));
+            }
         }
         match first_hash {
             None => first_hash = Some(h),
@@ -586,6 +606,7 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
         fps: measured / elapsed.as_secs_f64(),
         ns_per_frame: elapsed.as_nanos() as f64 / measured,
         final_rgb,
+        checkpoint_rgbs,
     })
 }
 
@@ -793,7 +814,9 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
          .card img{width:100%;image-rendering:pixelated;border-radius:4px;background:#000}\
          .name{font-size:14px;margin-top:8px;word-break:break-all}\
          .meta{font-size:12px;color:#999;display:flex;justify-content:space-between;margin-top:4px}\
-         .ok{color:#4ade80}.fail{color:#f87171}.err{color:#fbbf24}",
+         .ok{color:#4ade80}.fail{color:#f87171}.err{color:#fbbf24}\
+         .strip{display:flex;gap:2px;margin-top:6px}\
+         .strip img{flex:1;min-width:0;image-rendering:pixelated;border-radius:2px;background:#000}",
     );
     s.push_str("</style></head><body>");
     s.push_str(&format!(
@@ -816,10 +839,31 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
             .filter(|file| Path::new(&screens).join(file).exists())
             .map(|file| format!("<img src=\"./screens/{}\" alt=\"\">", html_escape(&file)))
             .unwrap_or_else(|| "<div style=\"aspect-ratio:10/9\"></div>".into());
+        // Checkpoint strip: probe `<key>_cpN.png` on disk (older sweep dirs
+        // have none -> no strip). Labels come from the row's checkpoint frames.
+        let strip = r
+            .key
+            .as_deref()
+            .map(|k| {
+                (0..r.checkpoints.len())
+                    .map(|i| (i, format!("{}_cp{i}.png", sanitize(k))))
+                    .filter(|(_, file)| Path::new(&screens).join(file).exists())
+                    .map(|(i, file)| {
+                        format!(
+                            "<img src=\"./screens/{}\" alt=\"\" title=\"checkpoint {i} @ frame {}\">",
+                            html_escape(&file),
+                            r.checkpoints[i].0
+                        )
+                    })
+                    .collect::<String>()
+            })
+            .filter(|imgs| !imgs.is_empty())
+            .map(|imgs| format!("<div class=\"strip\">{imgs}</div>"))
+            .unwrap_or_default();
         let display_name = r.name.clone().unwrap_or_else(|| format!("sha:{}", r.rom_sha));
         let fps = r.fps.map_or(String::new(), |f| format!("{f:.0} fps"));
         s.push_str(&format!(
-            "<div class=\"card\">{img}<div class=\"name\">{}</div>\
+            "<div class=\"card\">{img}{strip}<div class=\"name\">{}</div>\
              <div class=\"meta\"><span>{} {fps}</span><span class=\"{cls}\">{status}</span></div></div>",
             html_escape(&display_name),
             html_escape(&r.hardware),
