@@ -9793,6 +9793,23 @@ impl Ppu {
         }
         let m0t = self.m0_time_master? as i64;
         let cc = access_cc as i64;
+        // Line-identity staleness guard (same as `hdma_disable_fires`):
+        // `m0_time_master` is rebased at the mode-3 arm, so during the NEXT
+        // line's mode 2 (and early mode 3) it still holds the PREVIOUS line's
+        // m0 time. An FF55 enable written there is a mode-2/3 arm, not a
+        // late-in-HBlank same-line arm — hardware schedules it to the coming
+        // m0 edge with no immediate block. Without this, a window-active line
+        // (closed-form `hdma_period` = None, so only this predicate gates the
+        // kick) whose mode-3 runs long enough that the next line's mode-2 arm
+        // write lands < `limit` past the STALE anchor fires a spurious 37th
+        // block — Pokémon Crystal's 37-block HBlank tilemap transfer then
+        // completes a line early, so its readback-and-rewrite cancel
+        // (`ld a,[rHDMA5] / and $7f / ldh [rHDMA5],a`) sees 0xFF instead of
+        // 0x00 and becomes a 2KB GDMA over the displayed 9C00 freeze-frame
+        // map (Elm's-lab textbox corruption).
+        if m0t < self.line_start_master_cc(double_speed) {
+            return Some(false);
+        }
         // Start: in-period once the access cc reaches the mode-0 time. (the hardware
         // `cc + 4 >= mode-0 time`; the renderer-tick mode-0 time already folds the +4 phase
         // for the dma cluster, so a bare `cc >= m0t` brackets the enable pairs.)
@@ -9804,6 +9821,17 @@ impl Ppu {
         let depth = cc - m0t;
         let limit: i64 = if double_speed { 395 } else { 192 };
         Some(depth < limit)
+    }
+
+    /// The current line's start in master cc (the LY time anchor rebased one
+    /// line back) — the line-identity reference `hdma_disable_fires` and
+    /// `hdma_period_kick` use to reject a stale previous-line `m0_time_master`.
+    fn line_start_master_cc(&self, double_speed: bool) -> i64 {
+        let dsi = double_speed as i64;
+        let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
+        let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as i64;
+        let ly_time = self.p_now as i64 + self.abs_cc as i64 + (dots_to_next << dsi) + plus1;
+        ly_time - ((stat_irq::LCD_CYCLES_PER_LINE as i64) << dsi)
     }
 
     /// FF55=00 HDMA-DISABLE-vs-m0-edge race (the hardware HDMA-disable path): writing
@@ -9863,12 +9891,7 @@ impl Ppu {
         // `vram_readable_at_cc` uses) belongs to a completed line. Same-line
         // late writes (incl. the STOP-speedchange wakeup family, whose owed
         // block resolves ~129cc past m0t) keep the edge-fired answer.
-        let dsi = double_speed as i64;
-        let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
-        let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as i64;
-        let ly_time = self.p_now as i64 + self.abs_cc as i64 + (dots_to_next << dsi) + plus1;
-        let line_start = ly_time - ((stat_irq::LCD_CYCLES_PER_LINE as i64) << dsi);
-        if m0t < line_start {
+        if m0t < self.line_start_master_cc(double_speed) {
             return Some(false);
         }
         Some(cc >= edge)
