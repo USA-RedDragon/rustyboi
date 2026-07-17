@@ -34,6 +34,12 @@ jobs:
     env:
       ROMS_URL: ${{ secrets.ROMS_URL }}
       ROMS_PASSWORD: ${{ secrets.ROMS_PASSWORD }}
+      # Encrypted zip of the boot ROMs (the .bin files at the zip root, same
+      # names as bios/: dmg_boot.bin, cgb_boot.bin, sgb_boot.bin, agb_boot.bin,
+      # + obscure variants). Optional: when unset, BIOS boot-animation rows/media
+      # are simply skipped. Copyrighted, hence password-protected like ROMS_URL.
+      BIOS_URL: ${{ secrets.BIOS_URL }}
+      BIOS_PASSWORD: ${{ secrets.BIOS_PASSWORD }}
       # Media fan-out knob. The regression GATE (manifest -> compare) is
       # UNAFFECTED by this — it is always one canonical row per ROM, produced by
       # a media-free code path. This only controls the gallery media.
@@ -89,6 +95,15 @@ jobs:
           [ -d "$LIB/GB" ] && [ -d "$LIB/GBC" ] || { echo "GB/ + GBC/ not found in zip" >&2; exit 1; }
           echo "LIB=$LIB" >> "$GITHUB_ENV"
           echo "$(ls "$LIB/GB" | wc -l) GB + $(ls "$LIB/GBC" | wc -l) GBC ROMs"
+      - name: Download boot ROMs
+        if: ${{ steps.gate.outputs.have == '1' && env.BIOS_URL != '' }}
+        shell: bash
+        run: |
+          # Boot ROMs live at the zip root; extract into ./bios (the dir the
+          # sweep searches). Copyrighted -> encrypted like the ROM library.
+          curl -fsSL "$BIOS_URL" -o /tmp/bios.zip
+          unzip -P "$BIOS_PASSWORD" -q -o /tmp/bios.zip -d bios
+          echo "boot ROMs: $(ls bios/*.bin 2>/dev/null | wc -l)"
       - name: Generate PGO profile
         if: steps.gate.outputs.have == '1'
         shell: bash
@@ -100,7 +115,7 @@ jobs:
       - name: Run library sweep
         if: steps.gate.outputs.have == '1'
         shell: bash
-        run: ./target/release/sweep run --roms "$LIB/GB" "$LIB/GBC" --out sweep-out $SWEEP_MEDIA_ARGS
+        run: ./target/release/sweep run --roms "$LIB/GB" "$LIB/GBC" --out sweep-out --bios-dir bios $SWEEP_MEDIA_ARGS
       - name: Compare against baseline
         if: steps.gate.outputs.have == '1'
         shell: bash
