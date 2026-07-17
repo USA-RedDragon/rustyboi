@@ -1118,7 +1118,13 @@ impl Session {
     fn rebuild_current_gb(&self) -> Box<GB> {
         let mut gb = GB::new(self.config.hardware);
         if let Some(cart) = self.gb.cartridge() {
-            gb.insert(cart.clone());
+            let mut cart = cart.clone();
+            // Power-cycle semantics: the clone carries the running cart's
+            // volatile MBC latches (bank registers, banking mode); re-home
+            // them so e.g. an MBC1M multicart restarts into its game-select
+            // menu. Battery RAM/RTC state survives inside the clone.
+            cart.reset();
+            gb.insert(cart);
             self.boot_or_skip(&mut gb);
         }
         Box::new(gb)
