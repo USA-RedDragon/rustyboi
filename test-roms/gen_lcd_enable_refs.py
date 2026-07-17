@@ -14,12 +14,18 @@ Render rule (plain BG, no window/sprites, SCX=SCY=0, BG8000 addressing):
   CGB 8-bit channel = (v5*255)//31 (the runner's Linear conversion; the
   comparison masks to the top 5 bits, which equal v5 for every v5)
 
+  DMG shade = (BGP >> 2*c) & 3; the runner maps shades 0..3 to the grays
+  0xFFFFFF / 0xAAAAAA / 0x555555 / 0x000000
+
   lcd_enable_frame_repeat.cgb.png = pattern in PalA (the held image — the
       ROM swaps to PalB during the LCD-off, so the skipped in-flight frame
       renders in colors the panel never displayed)
   lcd_enable_frame_after.cgb.png  = pattern in PalB (PalA reversed per
       palette; the first frame DISPLAYED after the skip)
   lcd_enable_frame_blank.dmg.png  = all white (Pan Docs "LCDC.7" blank rule)
+  lcd_enable_frame_after.dmg.png  = pattern through BGP=$1B (the $E4
+      identity palette reversed per color; the first frame DISPLAYED after
+      the skip — pins the blank's END on DMG)
 
 Run from anywhere: `python3 test-roms/gen_lcd_enable_refs.py`.
 """
@@ -73,8 +79,23 @@ def render_cgb(pal):
     return px
 
 
+# Runner normalize_frame gray for DMG shades 0..3.
+DMG_GRAYS = [0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000]
+
+
+def render_dmg(bgp):
+    px = []
+    for y in range(H):
+        for x in range(W):
+            tx, ty = x >> 3, y >> 3
+            c = TILES[(tx + ty) & 3][y & 7][x & 7]
+            px.append(DMG_GRAYS[(bgp >> (2 * c)) & 3])
+    return px
+
+
 refs = ROOT / "test-roms" / "refs" / "ppu"
 write_png_rgb(refs / "lcd_enable_frame_repeat.cgb.png", W, H, render_cgb(PAL_A))
 write_png_rgb(refs / "lcd_enable_frame_after.cgb.png", W, H, render_cgb(PAL_B))
 write_png_rgb(refs / "lcd_enable_frame_blank.dmg.png", W, H, [0xFFFFFF] * (W * H))
-print(f"derived 3 oracles into {refs}")
+write_png_rgb(refs / "lcd_enable_frame_after.dmg.png", W, H, render_dmg(0x1B))
+print(f"derived 4 oracles into {refs}")
