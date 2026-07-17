@@ -128,8 +128,8 @@ pub fn bios_filename(hw: Hardware) -> Option<&'static str> {
     match hw {
         Hardware::DMG => Some("dmg_boot.bin"),
         Hardware::CGB => Some("cgb_boot.bin"),
-        // AGB uses the GBA's CGB-compat boot ROM.
-        Hardware::AGB => Some("cgb_agb_boot.bin"),
+        // AGB uses the GBA's CGB-compat boot ROM (SameBoy naming: agb_boot.bin).
+        Hardware::AGB => Some("agb_boot.bin"),
         Hardware::SGB => Some("sgb_boot.bin"),
         Hardware::DMG0 => Some("dmg0_boot.bin"),
         Hardware::MGB => Some("mgb_boot.bin"),

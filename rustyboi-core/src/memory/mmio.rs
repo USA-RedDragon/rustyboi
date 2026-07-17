@@ -41,7 +41,7 @@ pub const DMG_BIOS_CRC32: u32 = 0x580A33B9;
 /// matching the expected CGB boot-ROM hash 0x31672598.
 pub const CGB_BIOS_CRC32: u32 = 0x31672598;
 /// Expected masked CRC32 of the AGB (GBA CGB-compat) boot ROM. Recomputed from
-/// bios/cgb_agb_boot.bin via `bios_masked_crc32`; it differs from cgb_boot.bin
+/// bios/agb_boot.bin via `bios_masked_crc32`; it differs from cgb_boot.bin
 /// only in the AGB-detect bytes (0xF2-0xFB, 0x409-0x40A) — none at the masked
 /// 0xFD, so the mask cannot reconcile it with CGB and it needs its own entry.
 pub const AGB_BIOS_CRC32: u32 = 0x8F39DB2F;
