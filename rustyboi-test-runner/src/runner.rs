@@ -121,9 +121,9 @@ pub struct RunOptions {
 }
 
 /// Boot-ROM filename for a hardware model, or None when rustyboi has no distinct
-/// boot ROM provisioned for it. DMG/CGB/AGB/SGB have dumps; the revision variants
-/// (DMG0/MGB/SGB2/CGB0/CGBB/CGBE) currently fall through to `skip_bios` — add a
-/// filename here once a real dump is provisioned for one.
+/// boot ROM provisioned for it. DMG/CGB/AGB/SGB plus the revision variants
+/// DMG0/MGB/SGB2/CGB0/CGBE have dumps in `bios/`. CGBB (CPU-CGB-A/B) shares the
+/// standard CGB boot ROM — no distinct dump exists — so it maps to cgb_boot.bin.
 pub fn bios_filename(hw: Hardware) -> Option<&'static str> {
     match hw {
         Hardware::DMG => Some("dmg_boot.bin"),
@@ -131,12 +131,13 @@ pub fn bios_filename(hw: Hardware) -> Option<&'static str> {
         // AGB uses the GBA's CGB-compat boot ROM.
         Hardware::AGB => Some("cgb_agb_boot.bin"),
         Hardware::SGB => Some("sgb_boot.bin"),
-        Hardware::DMG0
-        | Hardware::MGB
-        | Hardware::SGB2
-        | Hardware::CGB0
-        | Hardware::CGBB
-        | Hardware::CGBE => None,
+        Hardware::DMG0 => Some("dmg0_boot.bin"),
+        Hardware::MGB => Some("mgb_boot.bin"),
+        Hardware::SGB2 => Some("sgb2_boot.bin"),
+        Hardware::CGB0 => Some("cgb0_boot.bin"),
+        Hardware::CGBE => Some("cgbE_boot.bin"),
+        // CGB-A/B CPU revision shares the standard CGB boot ROM (no distinct dump).
+        Hardware::CGBB => Some("cgb_boot.bin"),
     }
 }
 

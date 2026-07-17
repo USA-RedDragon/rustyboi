@@ -49,8 +49,21 @@ pub const AGB_BIOS_CRC32: u32 = 0x8F39DB2F;
 /// Unlike DMG/CGB/AGB we hold no local SGB dump to derive a masked value, and the
 /// SGB boot ROM has a single canonical dump (SHA-1 aa2f50a77dfb4823da96ba99309085a3c6278515),
 /// so it is accepted by its well-known unmasked crc instead of a masked one.
-/// (SGB2/MGB could be added the same way with their own crcs.)
 pub const SGB_BIOS_CRC32_UNMASKED: u32 = 0xEC8A83B9;
+/// Masked CRC32 of the early-Japanese DMG0 boot ROM. Recomputed from
+/// bios/dmg0_boot.bin via `bios_masked_crc32`; distinct from DMG at the masked crc.
+pub const DMG0_BIOS_CRC32: u32 = 0xEF84D063;
+/// Masked CRC32 of the SGB2 boot ROM. Recomputed from bios/sgb2_boot.bin via
+/// `bios_masked_crc32`. Note SGB and SGB2 dumps differ only at byte 0xFD, so both
+/// mask to this same value — the entry therefore also accepts SGB by masked crc
+/// (SGB additionally has the unmasked special case in `bios_crc_is_known`).
+pub const SGB2_BIOS_CRC32: u32 = 0xED48E98E;
+/// Masked CRC32 of the early CGB-0 boot ROM. Recomputed from bios/cgb0_boot.bin
+/// via `bios_masked_crc32`; distinct from CGB at the masked crc.
+pub const CGB0_BIOS_CRC32: u32 = 0x980038C6;
+/// Masked CRC32 of the CGB-E boot ROM. Recomputed from bios/cgbE_boot.bin via
+/// `bios_masked_crc32`; distinct from CGB at the masked crc.
+pub const CGBE_BIOS_CRC32: u32 = 0x99B2A283;
 pub const CARTRIDGE_START: u16 = 0x0000;
 pub const CARTRIDGE_SIZE: usize = 16384; // 16KB
 pub const CARTRIDGE_END: u16 = CARTRIDGE_START + CARTRIDGE_SIZE as u16 - 1;
@@ -93,8 +106,9 @@ fn bios_crc32(data: &[u8]) -> u32 {
 /// further revision.
 fn bios_masked_crc_set(len: usize) -> &'static [u32] {
     match len {
-        BIOS_SIZE => &[DMG_BIOS_CRC32],
-        CGB_BIOS_SIZE => &[CGB_BIOS_CRC32, AGB_BIOS_CRC32],
+        // MGB masks to DMG_BIOS_CRC32 (differs only at byte 0xFD) — covered here.
+        BIOS_SIZE => &[DMG_BIOS_CRC32, DMG0_BIOS_CRC32, SGB2_BIOS_CRC32],
+        CGB_BIOS_SIZE => &[CGB_BIOS_CRC32, AGB_BIOS_CRC32, CGB0_BIOS_CRC32, CGBE_BIOS_CRC32],
         _ => &[],
     }
 }
@@ -104,7 +118,6 @@ fn bios_masked_crc_set(len: usize) -> &'static [u32] {
 /// its masked crc is in `bios_masked_crc_set(len)` OR (256-byte only) its UNMASKED
 /// crc equals the canonical SGB dump — SGB is the one length-256 image we accept
 /// by unmasked crc because we hold no local file to derive a masked value.
-/// (SGB2/MGB could be added the same way with their crcs.)
 fn bios_crc_is_known(len: usize, masked: u32, unmasked: u32) -> bool {
     bios_masked_crc_set(len).contains(&masked)
         || (len == BIOS_SIZE && unmasked == SGB_BIOS_CRC32_UNMASKED)
@@ -6120,6 +6133,21 @@ mod hblank_dma_tests {
         assert!(bios_crc_is_known(CGB_BIOS_SIZE, AGB_BIOS_CRC32, 0));
         // SGB is accepted via its UNMASKED crc, regardless of the masked value.
         assert!(bios_crc_is_known(BIOS_SIZE, 0xDEAD_BEEF, SGB_BIOS_CRC32_UNMASKED));
+    }
+
+    /// The obscure-model boot ROMs added in Part 2 sit in the accepted masked set
+    /// for their length: DMG0/SGB2 at 256, CGB0/CGBE at 2304. MGB masks to DMG's
+    /// value (differs only at byte 0xFD) so DMG_BIOS_CRC32 covers it.
+    #[test]
+    fn extended_boot_crcs_are_accepted() {
+        assert!(bios_crc_is_known(BIOS_SIZE, DMG0_BIOS_CRC32, 0));
+        assert!(bios_crc_is_known(BIOS_SIZE, SGB2_BIOS_CRC32, 0));
+        assert!(bios_crc_is_known(CGB_BIOS_SIZE, CGB0_BIOS_CRC32, 0));
+        assert!(bios_crc_is_known(CGB_BIOS_SIZE, CGBE_BIOS_CRC32, 0));
+        // MGB shares DMG's masked crc (0x580A33B9).
+        assert!(bios_crc_is_known(BIOS_SIZE, DMG_BIOS_CRC32, 0));
+        // A 256-byte image with an unknown masked crc is still rejected.
+        assert!(!bios_crc_is_known(BIOS_SIZE, 0x1234_5678, 0));
     }
 
     /// The SGB unmasked path is 256-byte only and must not collide with DMG.
