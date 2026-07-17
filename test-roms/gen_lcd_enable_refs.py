@@ -23,6 +23,10 @@ Render rule (plain BG, no window/sprites, SCX=SCY=0, BG8000 addressing):
   lcd_enable_frame_after.cgb.png  = pattern in PalB (PalA reversed per
       palette; the first frame DISPLAYED after the skip)
   lcd_enable_frame_blank.dmg.png  = all white (Pan Docs "LCDC.7" blank rule)
+  lcd_enable_repeat_decay.cgb.png = all white (the panel-drive countdown —
+      SameBoy frame_repeat_countdown, measured on CGB-E: 144*456*2 + 3640
+      8 MHz cycles re-armed at each VBlank line start — expires during the
+      ROM's ~4.7-line off, so the skipped frame blanks instead of repeating)
   lcd_enable_frame_after.dmg.png  = pattern through BGP=$1B (the $E4
       identity palette reversed per color; the first frame DISPLAYED after
       the skip — pins the blank's END on DMG)
@@ -98,4 +102,5 @@ write_png_rgb(refs / "lcd_enable_frame_repeat.cgb.png", W, H, render_cgb(PAL_A))
 write_png_rgb(refs / "lcd_enable_frame_after.cgb.png", W, H, render_cgb(PAL_B))
 write_png_rgb(refs / "lcd_enable_frame_blank.dmg.png", W, H, [0xFFFFFF] * (W * H))
 write_png_rgb(refs / "lcd_enable_frame_after.dmg.png", W, H, render_dmg(0x1B))
-print(f"derived 4 oracles into {refs}")
+write_png_rgb(refs / "lcd_enable_repeat_decay.cgb.png", W, H, [0xFFFFFF] * (W * H))
+print(f"derived 5 oracles into {refs}")

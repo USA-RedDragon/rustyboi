@@ -8,4 +8,5 @@ ppu-lcd_enable_frame_after-cgb|cgb|png|test-roms/build/ppu/lcd_enable_frame_afte
 ppu-lcd_enable_frame_after-dmg|dmg|png|test-roms/build/ppu/lcd_enable_frame_after.dmg.png.gb|test-roms/refs/ppu/lcd_enable_frame_after.dmg.png
 ppu-lcd_enable_frame_blank-dmg|dmg|png|test-roms/build/ppu/lcd_enable_frame_blank.dmg.png.gb|test-roms/refs/ppu/lcd_enable_frame_blank.dmg.png
 ppu-lcd_enable_frame_repeat-cgb|cgb|png|test-roms/build/ppu/lcd_enable_frame_repeat.cgb.png.gbc|test-roms/refs/ppu/lcd_enable_frame_repeat.cgb.png
+ppu-lcd_enable_repeat_decay-cgb|cgb|png|test-roms/build/ppu/lcd_enable_repeat_decay.cgb.png.gbc|test-roms/refs/ppu/lcd_enable_repeat_decay.cgb.png
 ppu-window_scx_ignore-dmg|dmg|png|test-roms/build/ppu/window_scx_ignore.dmg.png.gb|test-roms/refs/ppu/window_scx_ignore.dmg.png
