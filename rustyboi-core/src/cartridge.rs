@@ -590,6 +590,22 @@ pub struct Cartridge {
     sram_cs_lazy: bool,
 }
 
+/// The ROM-derived identity of a cartridge: the expanded/padded image plus
+/// every field computed from it at load time (header decode + content
+/// heuristics). Immutable after construction, so `reset` carries it from the
+/// live cart instead of re-running the detection predicates (which were
+/// designed for the original file bytes, not the padded image). Consumed by
+/// `power_on`, the single construction site for a fresh cart.
+struct RomIdentity {
+    rom_data: Arc<[u8]>,
+    cartridge_type: u8,
+    rom_banks: usize,
+    ram_banks: usize,
+    unl_mapper: UnlMapper,
+    cgb_support: CgbSupport,
+    mbc1_multicart: bool,
+}
+
 /// Which per-dot RTC advance a cartridge needs. Cached by the MMIO so the hot
 /// `tick_rtc` path avoids recomputing `get_cartridge_type()` every dot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1079,6 +1095,22 @@ impl Cartridge {
             fs::read(path)?
         };
 
+        let mut cartridge = Self::from_rom_image(data)?;
+        cartridge.rom_path = Some(path.to_string());
+
+        // Try to load existing save file or create new one (only for battery-backed RAM)
+        cartridge.load_or_create_save_file()?;
+        // Restore the persisted RTC (with wall-clock catch-up) and attach the
+        // `.rtc` sidecar. Disk-load path only; in-memory loads skip this.
+        cartridge.attach_rtc_sidecar()?;
+
+        Ok(cartridge)
+    }
+
+    /// Shared constructor core: derive everything from an already-unzipped ROM
+    /// file image and hand it to `power_on`. `load` and `from_bytes` differ
+    /// only in how they obtain the bytes and in sidecar/save-file attachment.
+    fn from_rom_image(data: Vec<u8>) -> Result<Self, io::Error> {
         if data.len() < 0x0150 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "ROM too small"));
         }
@@ -1101,18 +1133,11 @@ impl Cartridge {
         // content. Must run on the raw file image, before padding.
         let unl_mapper = Self::detect_unl_mapper(&data);
 
-        // Copy ROM data. `Arc::from(&slice)` copies exactly once — going
-        // through an intermediate `Vec` and then `.into()` would copy twice
-        // and leave a ROM-sized transient for the allocator to retain.
-        let expected_rom_size = rom_banks * 0x4000; // 16KB per bank
-        let rom_data: Arc<[u8]> = if data.len() >= expected_rom_size {
-            Arc::from(&data[..expected_rom_size])
-        } else {
-            // Pad with 0xFF if ROM is smaller than expected
-            let mut padded_rom = data.clone();
-            padded_rom.resize(expected_rom_size, 0xFF);
-            padded_rom.into()
-        };
+        // Detect CGB support
+        let cgb_support = Self::detect_cgb_support(&data);
+
+        // Detect MBC1 multicart wiring from the per-segment logo layout.
+        let mbc1_multicart = Self::detect_mbc1_multicart(cartridge_type, &data);
 
         // Initialize RAM data. MBC7 carts declare RAM size 0x00 in the header;
         // their "save RAM" is the 93LC56 EEPROM: 256 bytes = 128 little-endian
@@ -1127,20 +1152,57 @@ impl Cartridge {
             vec![0xFF; Self::compute_ram_len(ram_size_code, ram_banks)]
         };
 
-        // Detect CGB support
-        let cgb_support = Self::detect_cgb_support(&data);
+        // Copy ROM data. `Arc::from(&slice)` copies exactly once — going
+        // through an intermediate `Vec` and then `.into()` would copy twice
+        // and leave a ROM-sized transient for the allocator to retain.
+        let expected_rom_size = rom_banks * 0x4000; // 16KB per bank
+        let rom_data: Arc<[u8]> = if data.len() >= expected_rom_size {
+            Arc::from(&data[..expected_rom_size])
+        } else {
+            // Pad with 0xFF if ROM is smaller than expected
+            let mut padded_rom = data;
+            padded_rom.resize(expected_rom_size, 0xFF);
+            padded_rom.into()
+        };
 
-        // Detect MBC1 multicart wiring from the per-segment logo layout.
-        let mbc1_multicart = Self::detect_mbc1_multicart(cartridge_type, &data);
+        let identity = RomIdentity {
+            rom_data,
+            cartridge_type,
+            rom_banks,
+            ram_banks,
+            unl_mapper,
+            cgb_support,
+            mbc1_multicart,
+        };
+        Ok(Self::power_on(identity, ram_data))
+    }
 
-        let mut cartridge = Cartridge {
+    /// Build a cartridge in its power-on state: every volatile mapper latch at
+    /// its documented initial value (bank registers homed, enable gates
+    /// closed, boot locks armed, no in-flight peripheral activity), RAM/RTC as
+    /// given/empty. This is the ONLY full `Cartridge` construction site, the
+    /// single source of truth for power-on values: `from_rom_image` builds new
+    /// carts through it and `reset` rebuilds the volatile domain from it, so a
+    /// new field added here is automatically volatile across `reset` unless
+    /// explicitly carried in reset's persist list.
+    fn power_on(identity: RomIdentity, ram_data: Vec<u8>) -> Self {
+        let RomIdentity {
+            rom_data,
+            cartridge_type,
+            rom_banks,
+            ram_banks,
+            unl_mapper,
+            cgb_support,
+            mbc1_multicart,
+        } = identity;
+        Cartridge {
             rom_data,
             rom_bank_cache: Cell::new(None),
             ram_data,
             cartridge_type,
             rom_banks,
             ram_banks,
-            rom_path: Some(path.to_string()),
+            rom_path: None,
             save_file: None,
             ram_enabled: false,
             rom_bank_low: 1, // Bank 0 cannot be selected for 0x4000-0x7FFF area
@@ -1219,15 +1281,7 @@ impl Cartridge {
             rtc_memory_synced: Vec::new(),
             rtc_file: None,
             host_managed_saves: false,
-        };
-
-        // Try to load existing save file or create new one (only for battery-backed RAM)
-        cartridge.load_or_create_save_file()?;
-        // Restore the persisted RTC (with wall-clock catch-up) and attach the
-        // `.rtc` sidecar. Disk-load path only; in-memory loads skip this.
-        cartridge.attach_rtc_sidecar()?;
-
-        Ok(cartridge)
+        }
     }
 
     /// Extract ROM data from zip bytes.
@@ -1292,147 +1346,12 @@ impl Cartridge {
     pub fn from_bytes(data: &[u8]) -> Result<Self, io::Error> {
         // Try to detect if this is a zip file by checking the magic bytes
         let actual_data = Self::extract_rom_bytes(data)?;
-        if actual_data.len() < 0x0150 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "ROM too small"));
-        }
-
-        // Re-expand trimmed MBC1 multicart dumps before any derived fields.
-        let actual_data = Self::reconstruct_trimmed_mbc1m(&actual_data).unwrap_or(actual_data);
-
-        // Read cartridge header information
-        let cartridge_type = actual_data[CARTRIDGE_TYPE_OFFSET];
-        let rom_size_code = actual_data[ROM_SIZE_OFFSET];
-        let ram_size_code = actual_data[RAM_SIZE_OFFSET];
-
-        // Calculate number of ROM banks (header size, widened to the real file).
-        let rom_banks = Self::compute_rom_banks(rom_size_code, actual_data.len())?;
-
-        // Calculate number of RAM banks
-        let ram_banks = Self::compute_ram_banks(ram_size_code);
-
-        // Detect unlicensed mapper families (header-spoofing boards).
-        let unl_mapper = Self::detect_unl_mapper(&actual_data);
-
-        // Copy ROM data — single copy straight into the shared Arc (see `load`).
-        let expected_rom_size = rom_banks * 0x4000; // 16KB per bank
-        let rom_data: Arc<[u8]> = if actual_data.len() >= expected_rom_size {
-            Arc::from(&actual_data[..expected_rom_size])
-        } else {
-            // Pad with 0xFF if ROM is smaller than expected
-            let mut padded_rom = actual_data.clone();
-            padded_rom.resize(expected_rom_size, 0xFF);
-            padded_rom.into()
-        };
-
-        // Initialize RAM data (MBC7: 256-byte 93LC56 EEPROM, see `load`;
-        // ForceMbc1 header-liars get no RAM, see `load`).
-        let ram_banks = if unl_mapper == UnlMapper::ForceMbc1 { 0 } else { ram_banks };
-        let ram_data = if cartridge_type == MBC7_SENSOR_RUMBLE_RAM_BATTERY {
-            vec![0xFF; 256]
-        } else {
-            vec![0xFF; Self::compute_ram_len(ram_size_code, ram_banks)]
-        };
-
-        // Detect CGB support
-        let cgb_support = Self::detect_cgb_support(&actual_data);
-
-        // Detect MBC1 multicart wiring from the per-segment logo layout.
-        let mbc1_multicart = Self::detect_mbc1_multicart(cartridge_type, &actual_data);
-
-        let cartridge = Cartridge {
-            rom_data,
-            rom_bank_cache: Cell::new(None),
-            ram_data,
-            cartridge_type,
-            rom_banks,
-            ram_banks,
-            rom_path: None, // No path for in-memory data
-            save_file: None,
-            ram_enabled: false,
-            rom_bank_low: 1, // Bank 0 cannot be selected for 0x4000-0x7FFF area
-            ram_bank_or_rom_bank_high: 0,
-            banking_mode: 0,
-            mbc1_multicart,
-            sram_cs_lazy: false,
-            mbc2_ram: vec![0xFF; MBC2_RAM_SIZE],
-            mbc3_ram_bank: 0,
-            mbc3_rtc_latch: 0,
-            mbc3_rtc_latched: false,
-            rtc_seconds: 0,
-            rtc_minutes: 0,
-            rtc_hours: 0,
-            rtc_days_low: 0,
-            rtc_days_high: 0,
-            rtc_seconds_latched: 0,
-            rtc_minutes_latched: 0,
-            rtc_hours_latched: 0,
-            rtc_days_low_latched: 0,
-            rtc_days_high_latched: 0,
-            rtc_cycle_accum: 0,
-            mbc5_rom_bank_low: 1,
-            mbc5_rom_bank_high: 0,
-            mbc5_ram_bank: 0,
-            mbc7_ram_enabled2: false,
-            mbc7_rom_bank: 1,
-            mbc7_accel_x: 0x8000,
-            mbc7_accel_y: 0x8000,
-            mbc7_accel_latched: false,
-            mbc7_sensor_x: 0.0,
-            mbc7_sensor_y: 0.0,
-            mbc7_eeprom: Mbc7Eeprom::default(),
-            huc3_mode: 0,
-            huc3_rom_bank: 1,
-            huc3_ram_bank: 0,
-            huc3_rtc_command: 0,
-            huc3_rtc_argument: 0,
-            huc3_rtc_result: 0,
-            huc3_rtc_address: 0,
-            huc3_rtc_mem: if cartridge_type == HUC3 { vec![0; 256] } else { Vec::new() },
-            huc3_rtc_accum: 0,
-            huc1_ir_mode: false,
-            huc1_rom_bank: 1,
-            huc1_ram_bank: 0,
-            huc1_ir_led: false,
-            cam_rom_bank: 1,
-            cam_ram_bank: 0,
-            cam_regs_selected: false,
-            cam_regs: serde_cam_regs(),
-            cam_clocks_left: 0,
-            cam_running: false,
-            cam_pending: Vec::new(),
-            cam_image: Vec::new(),
-            unl_mapper,
-            wt_bank: 0,
-            rocket_rom_bank: 1,
-            rocket_outer: 0,
-            rocket_lock: Cell::new(UNL_LOCKED_DMG),
-            rocket_unlock_count: Cell::new(0),
-            rocket_boot_logo: None,
-            sachen_base: 0,
-            sachen_mask: 0,
-            sachen_bank: 1,
-            sachen_lock: Cell::new(UNL_LOCKED_DMG),
-            sachen_transition: Cell::new(0),
-            nt_bank: 1,
-            nt_base: 0,
-            nt_bank_mask: 0,
-            nt_swapped: false,
-            m161_bank: 0,
-            m161_mapped: false,
-            cgb_support,
-            rumble_motor: false,
-            rtc_memory: Vec::new(),
-            rtc_memory_synced: Vec::new(),
-            rtc_file: None,
-            host_managed_saves: false,
-        };
 
         // In-memory loading intentionally skips save files so test runners and
         // WASM callers do not create sidecar files. This also skips the `.rtc`
         // sidecar + wall-clock catch-up: the RTC starts at zero and advances
         // only on the deterministic cycle-derived tick.
-
-        Ok(cartridge)
+        Self::from_rom_image(actual_data)
     }
 
     /// Clone the raw ROM image (all banks, already padded to `rom_banks`) out of
@@ -3433,88 +3352,63 @@ impl Cartridge {
         Arc::make_mut(&mut self.rom_data)[offset] = new;
     }
 
-    /// Power-cycle the mapper: return every VOLATILE latch (bank registers,
-    /// enable gates, banking modes, boot locks, in-flight peripheral state) to
-    /// the exact power-on values the constructors initialize. The battery-fed
-    /// domain survives — cartridge RAM, MBC2 built-in RAM, the MBC3 RTC time
-    /// registers, the HuC-3 RTC memory, and their sub-second accumulators —
-    /// just like pressing the console's reset/power button, which cuts mapper
-    /// power but not the cart battery. Transient hardware inputs (accelerometer
-    /// tilt, camera image) and host plumbing (file handles, rom_path,
-    /// host_managed_saves, sram_cs_lazy) are untouched.
+    /// Power-cycle the mapper: rebuild the cartridge in its power-on state
+    /// (`power_on`, the same derivation the constructors use) and carry over
+    /// ONLY what survives a real power cycle. The battery-fed domain persists
+    /// — cartridge RAM, MBC2 built-in RAM, the MBC3 RTC time registers, the
+    /// HuC-3 RTC memory, and their sub-second accumulators — just like
+    /// pressing the console's reset/power button, which cuts mapper power but
+    /// not the cart battery. Transient hardware inputs (accelerometer tilt,
+    /// camera image) and host plumbing (file handles, rom_path,
+    /// host_managed_saves, sram_cs_lazy, libretro RTC views, boot-logo seed)
+    /// persist too. Everything else — bank registers, enable gates, banking
+    /// modes, boot locks, in-flight peripheral state — comes from `fresh`, so
+    /// a new field is volatile across reset unless added to the carry list.
     ///
     /// Boot locks (Sachen/Rocket) re-arm here; a subsequent `skip_bios` runs
     /// `skip_boot_handoff` to unlock them when no boot ROM will execute.
     pub fn reset(&mut self) {
-        self.rom_bank_cache.set(None);
-        // MBC1 registers, also shared by MBC2 (RAMG/ROMB) and MBC3 (RAMG/ROMB).
-        self.ram_enabled = false;
-        self.rom_bank_low = 1;
-        self.ram_bank_or_rom_bank_high = 0;
-        self.banking_mode = 0;
-        // MBC3: latch registers clear; the RTC time itself is battery-backed.
-        self.mbc3_ram_bank = 0;
-        self.mbc3_rtc_latch = 0;
-        self.mbc3_rtc_latched = false;
-        self.rtc_seconds_latched = 0;
-        self.rtc_minutes_latched = 0;
-        self.rtc_hours_latched = 0;
-        self.rtc_days_low_latched = 0;
-        self.rtc_days_high_latched = 0;
-        // MBC5.
-        self.mbc5_rom_bank_low = 1;
-        self.mbc5_rom_bank_high = 0;
-        self.mbc5_ram_bank = 0;
-        self.rumble_motor = false;
-        // MBC7: EEPROM CONTENTS live in ram_data (persist); the serial-link
-        // state machine and accel latch are volatile, and the 93LC56 powers up
-        // write-disabled (EWDS).
-        self.mbc7_ram_enabled2 = false;
-        self.mbc7_rom_bank = 1;
-        self.mbc7_accel_x = 0x8000;
-        self.mbc7_accel_y = 0x8000;
-        self.mbc7_accel_latched = false;
-        self.mbc7_eeprom = Mbc7Eeprom::default();
-        // HuC-3: RTC MCU memory (huc3_rtc_mem) + accumulator persist.
-        self.huc3_mode = 0;
-        self.huc3_rom_bank = 1;
-        self.huc3_ram_bank = 0;
-        self.huc3_rtc_command = 0;
-        self.huc3_rtc_argument = 0;
-        self.huc3_rtc_result = 0;
-        self.huc3_rtc_address = 0;
-        // HuC-1.
-        self.huc1_ir_mode = false;
-        self.huc1_rom_bank = 1;
-        self.huc1_ram_bank = 0;
-        self.huc1_ir_led = false;
-        // Pocket Camera: photos live in ram_data (persist); an in-flight
-        // capture dies with the power.
-        self.cam_rom_bank = 1;
-        self.cam_ram_bank = 0;
-        self.cam_regs_selected = false;
-        self.cam_regs = serde_cam_regs();
-        self.cam_clocks_left = 0;
-        self.cam_running = false;
-        self.cam_pending = Vec::new();
-        // Unlicensed boards.
-        self.wt_bank = 0;
-        self.rocket_rom_bank = 1;
-        self.rocket_outer = 0;
-        self.rocket_lock.set(UNL_LOCKED_DMG);
-        self.rocket_unlock_count.set(0);
-        self.sachen_base = 0;
-        self.sachen_mask = 0;
-        self.sachen_bank = 1;
-        self.sachen_lock.set(UNL_LOCKED_DMG);
-        self.sachen_transition.set(0);
-        self.nt_bank = 1;
-        self.nt_base = 0;
-        self.nt_bank_mask = 0;
-        self.nt_swapped = false;
-        // M161: the one-shot latch is re-armed by reset on real hardware.
-        self.m161_bank = 0;
-        self.m161_mapped = false;
+        let fresh = Self::power_on(
+            RomIdentity {
+                rom_data: self.rom_data.clone(), // Arc: refcount bump, no copy
+                cartridge_type: self.cartridge_type,
+                rom_banks: self.rom_banks,
+                ram_banks: self.ram_banks,
+                unl_mapper: self.unl_mapper,
+                cgb_support: self.cgb_support.clone(),
+                mbc1_multicart: self.mbc1_multicart,
+            },
+            Vec::new(), // discarded: the battery-backed RAM is carried below
+        );
+        let carried = Cartridge {
+            // Battery-fed domain.
+            ram_data: std::mem::take(&mut self.ram_data),
+            mbc2_ram: std::mem::take(&mut self.mbc2_ram),
+            rtc_seconds: self.rtc_seconds,
+            rtc_minutes: self.rtc_minutes,
+            rtc_hours: self.rtc_hours,
+            rtc_days_low: self.rtc_days_low,
+            rtc_days_high: self.rtc_days_high,
+            rtc_cycle_accum: self.rtc_cycle_accum,
+            huc3_rtc_mem: std::mem::take(&mut self.huc3_rtc_mem),
+            huc3_rtc_accum: self.huc3_rtc_accum,
+            // Transient hardware inputs: power cycling the console nulls
+            // neither gravity nor the camera scene.
+            mbc7_sensor_x: self.mbc7_sensor_x,
+            mbc7_sensor_y: self.mbc7_sensor_y,
+            cam_image: std::mem::take(&mut self.cam_image),
+            // Host plumbing.
+            rom_path: self.rom_path.take(),
+            save_file: self.save_file.take(),
+            rtc_file: self.rtc_file.take(),
+            rtc_memory: std::mem::take(&mut self.rtc_memory),
+            rtc_memory_synced: std::mem::take(&mut self.rtc_memory_synced),
+            rocket_boot_logo: self.rocket_boot_logo,
+            host_managed_saves: self.host_managed_saves,
+            sram_cs_lazy: self.sram_cs_lazy,
+            ..fresh
+        };
+        *self = carried;
     }
 
     /// Boot-ROM handoff for skip_bios: the Sachen and Rocket boot locks model
@@ -5428,6 +5322,71 @@ mod tests {
         assert_eq!(cart.mbc5_rom_bank_high, 0);
         assert_eq!(cart.mbc5_ram_bank, 0);
         assert!(!cart.rumble_active());
+    }
+
+    /// Completeness proof for reset()'s carry list: hammer a cart's mapper
+    /// registers and persist domain, reset, and require the serialized bytes
+    /// to equal a same-ROM POWER-ON cart with only the persist domain grafted
+    /// in. Any serialized field that reset() fails to return to its power-on
+    /// value (or wrongly volatilizes) breaks the byte equality, for every
+    /// mapper family.
+    #[test]
+    fn reset_is_power_on_plus_persist_domain() {
+        let roms: Vec<Vec<u8>> = vec![
+            make_rom(MBC1_RAM_BATTERY, 0x03),
+            make_rom(MBC2_BATTERY, 0x00),
+            make_rom(MBC3_TIMER_RAM_BATTERY, 0x03),
+            make_rom(MBC5_RUMBLE_RAM, 0x03),
+            make_rom(MBC7_SENSOR_RUMBLE_RAM_BATTERY, 0x00),
+            make_rom(HUC1_RAM_BATTERY, 0x03),
+            make_rom(HUC3, 0x03),
+            make_rom(POCKET_CAMERA, 0x03),
+            make_trimmed_mbc1m(),
+        ];
+        for rom in roms {
+            let mut cart = Cartridge::from_bytes(&rom).unwrap();
+            let ct = cart.cartridge_type;
+            // Hammer every mapper-register window (enable gates, bank
+            // registers, modes, latches).
+            cart.write(0x0000, 0x0A);
+            for addr in (0x0000..0x8000u16).step_by(0x100) {
+                cart.write(addr | 0x55, 0x03);
+            }
+            // Dirty the persist domain: battery RAM, RTC time + accumulators.
+            if !cart.ram_data.is_empty() {
+                cart.ram_data[0] = 0xA5;
+            }
+            cart.mbc2_ram[3] = 0x0F;
+            cart.rtc_seconds = 12;
+            cart.rtc_minutes = 34;
+            cart.rtc_hours = 5;
+            cart.rtc_days_low = 0x67;
+            cart.rtc_days_high = 0x01;
+            cart.rtc_cycle_accum = 999;
+            if !cart.huc3_rtc_mem.is_empty() {
+                cart.huc3_rtc_mem[0x10] = 0xA;
+            }
+            cart.huc3_rtc_accum = 777;
+
+            cart.reset();
+
+            let mut fresh = Cartridge::from_bytes(&rom).unwrap();
+            fresh.ram_data = cart.ram_data.clone();
+            fresh.mbc2_ram = cart.mbc2_ram.clone();
+            fresh.rtc_seconds = cart.rtc_seconds;
+            fresh.rtc_minutes = cart.rtc_minutes;
+            fresh.rtc_hours = cart.rtc_hours;
+            fresh.rtc_days_low = cart.rtc_days_low;
+            fresh.rtc_days_high = cart.rtc_days_high;
+            fresh.rtc_cycle_accum = cart.rtc_cycle_accum;
+            fresh.huc3_rtc_mem = cart.huc3_rtc_mem.clone();
+            fresh.huc3_rtc_accum = cart.huc3_rtc_accum;
+            assert_eq!(
+                bincode::serialize(&cart).unwrap(),
+                bincode::serialize(&fresh).unwrap(),
+                "cartridge type {ct:#04x}: reset != power-on + persist domain"
+            );
+        }
     }
 
     #[test]
