@@ -423,12 +423,7 @@ impl Emulator {
             return;
         }
 
-        rustyboi_session::frame_to_pixels(
-            frame,
-            &self.dmg_palette.shades,
-            rustyboi_session::PixelOrder::Rgba,
-            &mut self.rgba,
-        );
+        rustyboi_session::frame_to_pixels(frame, rustyboi_session::PixelOrder::Rgba, &mut self.rgba);
         self.frame_w = GB_WIDTH;
         self.frame_h = GB_HEIGHT;
     }

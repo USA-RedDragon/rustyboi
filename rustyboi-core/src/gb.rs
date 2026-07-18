@@ -96,6 +96,11 @@ pub struct GB {
     mmio: memory::mmio::Mmio,
     ppu: ppu::Ppu,
     hardware: Hardware,
+    // The DMG/MGB mono base palette (presentation only — composes with the PPU's
+    // colour correction to colour a `Frame::Monochrome`). Not machine state, so
+    // it is skipped in the savestate; the frontend re-applies it after a restore.
+    #[serde(skip, default)]
+    dmg_palette: DmgPaletteChoice,
     #[serde(skip, default)]
     skip_bios: bool,
     #[serde(skip, default)]
@@ -121,6 +126,7 @@ impl Clone for GB {
             mmio: self.mmio.clone(),
             ppu: self.ppu.clone(),
             hardware: self.hardware,
+            dmg_palette: self.dmg_palette,
             skip_bios: self.skip_bios,
             breakpoints: self.breakpoints.clone(),
             forced_compat_palette: self.forced_compat_palette,
@@ -129,9 +135,20 @@ impl Clone for GB {
     }
 }
 
-pub enum Frame {
-    Monochrome(Box<[u8; ppu::FRAMEBUFFER_SIZE]>),
-    Color(Box<[u8; ppu::FRAMEBUFFER_SIZE * 3]>),
+/// The presented frame: always RGB888, 160×144, row-major (`[r,g,b, r,g,b, …]`,
+/// `FRAMEBUFFER_SIZE * 3` bytes). The core has already applied everything visual
+/// — the DMG base palette + LCD correction for a monochrome model, or the
+/// CGB/AGB/SGB colour (LCD-corrected) for a colour one — so every frontend just
+/// blits these bytes. The correction-independent shade indices, which the test
+/// suite compares against (palette/correction never enter correctness), stay
+/// available via [`GB::dmg_shade_frame`].
+pub struct Frame(pub Box<[u8; ppu::FRAMEBUFFER_SIZE * 3]>);
+
+impl Frame {
+    /// The RGB888 pixel bytes.
+    pub fn rgb(&self) -> &[u8; ppu::FRAMEBUFFER_SIZE * 3] {
+        &self.0
+    }
 }
 
 /// The DMG/MGB monochrome base palette (the colour "character"), orthogonal to
@@ -277,6 +294,7 @@ impl GB {
             ppu: ppu::Ppu::new(),
             skip_bios: false,
             hardware,
+            dmg_palette: DmgPaletteChoice::default_for(hardware),
             breakpoints: HashSet::new(),
             forced_compat_palette: None,
             audio_output: None, // Audio will be enabled when needed
@@ -1004,6 +1022,51 @@ impl GB {
         (false, cycles) // No breakpoint hit
     }
 
+    /// Advance nothing; convert the PPU's just-completed raw frame into the
+    /// presented always-RGB [`Frame`], applying the DMG base palette + colour
+    /// correction to a monochrome frame (colour frames are already corrected).
+    fn presented_frame(&mut self) -> Frame {
+        match self.ppu.get_frame(&self.mmio) {
+            ppu::RenderedFrame::Color(rgb) => Frame(rgb),
+            ppu::RenderedFrame::Monochrome(idx) => {
+                let shades = self.dmg_palette.shades(self.ppu.cgb_color_conversion());
+                let mut rgb = vec![0u8; ppu::FRAMEBUFFER_SIZE * 3].into_boxed_slice();
+                for (i, &s) in idx.iter().enumerate() {
+                    let c = shades[(s as usize) & 3];
+                    rgb[i * 3] = c[0];
+                    rgb[i * 3 + 1] = c[1];
+                    rgb[i * 3 + 2] = c[2];
+                }
+                Frame(rgb.try_into().expect("FRAMEBUFFER_SIZE * 3"))
+            }
+        }
+    }
+
+    /// The raw DMG shade indices (0..=3) of the current frame — the
+    /// correction/palette-independent representation the test suite compares.
+    /// Meaningful only for a monochrome frame (see [`GB::frame_renders_color`]).
+    pub fn dmg_shade_frame(&self) -> &[u8; ppu::FRAMEBUFFER_SIZE] {
+        self.ppu.dmg_shade_frame()
+    }
+
+    /// Whether the current frame is colour (CGB/AGB, or a colorized SGB) — i.e.
+    /// the presented [`Frame`] carries real colour rather than palette-coloured
+    /// DMG shades. Gates hash colour frames directly and mono frames via
+    /// [`dmg_shade_frame`](GB::dmg_shade_frame).
+    pub fn frame_renders_color(&self) -> bool {
+        self.ppu.renders_color(&self.mmio) || self.mmio.sgb().is_some_and(|s| s.colorized)
+    }
+
+    /// Set the DMG/MGB mono base palette (presentation only).
+    pub fn set_dmg_palette(&mut self, palette: DmgPaletteChoice) {
+        self.dmg_palette = palette;
+    }
+
+    /// The current DMG/MGB mono base palette.
+    pub fn dmg_palette(&self) -> DmgPaletteChoice {
+        self.dmg_palette
+    }
+
     pub fn run_until_frame(&mut self, collect_audio: bool) -> (Frame, bool) {
         let mut cpu_cycles_this_frame = 0u32;
         // Normal frame should be 70224 PPU dots (154 scanlines × 456 dots)
@@ -1017,7 +1080,7 @@ impl GB {
 
             if breakpoint_hit {
                 // Breakpoint hit - return current frame and indicate breakpoint hit
-                return (self.ppu.get_frame(&self.mmio), true);
+                return (self.presented_frame(), true);
             }
 
             // Check if PPU has completed a frame
@@ -1025,7 +1088,7 @@ impl GB {
                 // SGB *_TRN commands read a 4KB block from the displayed frame
                 // during the VBlank after the command (no-op on non-SGB hardware).
                 self.mmio.service_sgb_vram_transfer(self.ppu.dmg_shade_frame());
-                return (self.ppu.get_frame(&self.mmio), false);
+                return (self.presented_frame(), false);
             }
 
             // If PPU is disabled or taking too long, cap the cycles to prevent audio buildup
@@ -1036,7 +1099,7 @@ impl GB {
             };
             if cpu_cycles_this_frame >= max_cpu_cycles_per_frame {
                 // PPU disabled or stuck - return after reasonable cycle count to maintain timing
-                return (self.ppu.get_frame(&self.mmio), false);
+                return (self.presented_frame(), false);
             }
         }
     }
@@ -1053,7 +1116,7 @@ impl GB {
             cpu_cycles = cpu_cycles.saturating_add(cycles);
 
             if breakpoint_hit {
-                return Ok((self.ppu.get_frame(&self.mmio), true));
+                return Ok((self.presented_frame(), true));
             }
 
             if self.ppu.frame_ready() {
@@ -1061,7 +1124,7 @@ impl GB {
                 // during the VBlank after the command. Service any pending
                 // transfer at the frame boundary (no-op on non-SGB hardware).
                 self.mmio.service_sgb_vram_transfer(self.ppu.dmg_shade_frame());
-                return Ok((self.ppu.get_frame(&self.mmio), false));
+                return Ok((self.presented_frame(), false));
             }
 
             if cpu_cycles >= max_cycles {
@@ -1071,7 +1134,7 @@ impl GB {
     }
 
     pub fn get_current_frame(&mut self) -> Frame {
-        self.ppu.get_frame(&self.mmio)
+        self.presented_frame()
     }
 
     /// Immutable view of the Super Game Boy state (None on non-SGB hardware).
@@ -1835,21 +1898,24 @@ mod stop_tests {
             // rendered blank line is white 0xFF), so all-black afterwards
             // proves the STOP paint; the DMG frame shows the boot logo
             // (non-zero shades), so all-white afterwards proves it too.
-            let pre_ok = match gb.get_current_frame() {
-                Frame::Color(buf) => buf.iter().any(|&b| b != 0x00),
-                Frame::Monochrome(buf) => buf.iter().any(|&s| s != 0),
+            // Compare in the canonical domain: colour by RGB, mono by shade
+            // index (palette/correction-independent).
+            let pre_ok = if gb.frame_renders_color() {
+                gb.get_current_frame().rgb().iter().any(|&b| b != 0x00)
+            } else {
+                gb.dmg_shade_frame().iter().any(|&s| s != 0)
             };
             assert!(pre_ok, "premise: pre-STOP frame distinguishable ({hw:?})");
             step_until(&mut gb, 2_000_000, "STOP entry", |gb| gb.cpu.stopped);
-            match gb.get_current_frame() {
-                Frame::Color(buf) => {
-                    assert!(cgb, "color frame implies CGB here");
-                    assert!(buf.iter().all(|&b| b == 0x00), "CGB STOP panel is black");
-                }
-                Frame::Monochrome(buf) => {
-                    assert!(!cgb);
-                    assert!(buf.iter().all(|&s| s == 0), "DMG STOP panel is blank/white");
-                }
+            if gb.frame_renders_color() {
+                assert!(cgb, "color frame implies CGB here");
+                assert!(
+                    gb.get_current_frame().rgb().iter().all(|&b| b == 0x00),
+                    "CGB STOP panel is black"
+                );
+            } else {
+                assert!(!cgb);
+                assert!(gb.dmg_shade_frame().iter().all(|&s| s == 0), "DMG STOP panel is blank/white");
             }
         }
     }
@@ -1885,10 +1951,15 @@ mod savestate_roundtrip_tests {
     //! all-zero sprite buffer.
     use super::*;
 
-    fn frame_bytes(f: &Frame) -> Vec<u8> {
-        match f {
-            Frame::Monochrome(b) => b.to_vec(),
-            Frame::Color(b) => b.to_vec(),
+    /// Advance one frame and return its canonical bytes — colour by RGB, mono by
+    /// shade index — so a restore mismatch is a real emulation divergence, not a
+    /// presentation-palette difference (the palette is not saved).
+    fn frame_bytes(gb: &mut GB) -> Vec<u8> {
+        let (frame, _) = gb.run_until_frame(false);
+        if gb.frame_renders_color() {
+            frame.0.to_vec()
+        } else {
+            gb.dmg_shade_frame().to_vec()
         }
     }
 
@@ -1946,8 +2017,8 @@ mod savestate_roundtrip_tests {
         let mut restored = restore(&state);
         let mut any_content = false;
         for frame in 0..10 {
-            let orig = frame_bytes(&gb.run_until_frame(false).0);
-            let redo = frame_bytes(&restored.run_until_frame(false).0);
+            let orig = frame_bytes(&mut gb);
+            let redo = frame_bytes(&mut restored);
             assert_eq!(orig, redo, "frame {frame} differs after state restore");
             if orig.iter().any(|&p| p != orig[0]) {
                 any_content = true;
@@ -2013,8 +2084,8 @@ mod savestate_roundtrip_tests {
             "{label}: restored state not byte-identical at frame 0"
         );
         for frame in 0..frames {
-            let orig = frame_bytes(&gb.run_until_frame(false).0);
-            let redo = frame_bytes(&restored.run_until_frame(false).0);
+            let orig = frame_bytes(&mut gb);
+            let redo = frame_bytes(&mut restored);
             assert_eq!(orig, redo, "{label}: frame {frame} pixels differ after restore");
             assert_eq!(
                 gb.to_state_bytes().expect("serialize"),

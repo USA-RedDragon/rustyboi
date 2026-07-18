@@ -459,13 +459,12 @@ impl App {
             return Some(GameFrame { size: SourceSize::Sgb, rgba: scratch });
         }
 
-        // The DMG presentation palette is session-owned; the shared packer maps
-        // the frame into RGBA (byte-identical to the old inlined conversion).
-        let shades = self.session.palette().shades_rgba(self.session.color_correction());
+        // The core presents an always-RGB frame (DMG palette + correction already
+        // applied in-core); the shared packer just expands it to RGBA.
         let gb_frame = self.frame.as_ref()?;
         scratch.clear();
         scratch.resize(ppu::FRAMEBUFFER_SIZE * 4, 0);
-        frame_to_pixels(gb_frame, &shades, PixelOrder::Rgba, scratch);
+        frame_to_pixels(gb_frame, PixelOrder::Rgba, scratch);
         Some(GameFrame { size: SourceSize::Gb, rgba: scratch })
     }
 
