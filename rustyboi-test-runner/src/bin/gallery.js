@@ -21,46 +21,98 @@
 
   function $tabs() { return Array.prototype.slice.call(document.querySelectorAll('.tab')); }
   function $chips() { return Array.prototype.slice.call(document.querySelectorAll('.chip')); }
-  function vidsIn(root) {
-    return Array.prototype.slice.call((root || document).querySelectorAll('video.hero'));
-  }
   function activePanel() { return document.getElementById('panel-' + state.tab); }
+  function cardsIn(root) {
+    return Array.prototype.slice.call((root || document).querySelectorAll('.card'));
+  }
 
-  // ---- lazy media: load/play only near-viewport videos in the active panel ----
-  function loadAndPlay(v) {
-    if (!v.src) { v.poster = v.dataset.poster; v.src = v.dataset.src; v.load(); }
+  // ---- lazy media -----------------------------------------------------------
+  // Cards ship a cheap <img> poster (native loading="lazy"); only cards near the
+  // viewport are UPGRADED to a live <video>, and never more than CAP at once.
+  // Emitting a <video> per card is what froze large galleries: constructing tens
+  // of thousands of media elements pins the main thread regardless of network or
+  // paint (content-visibility can't help — the elements still get built).
+  var CAP = 40;   // hard ceiling on simultaneous <video> elements
+  var live = [];  // currently-upgraded <video.hero> nodes
+
+  function heroOf(card) { return card.querySelector('.hero'); }
+
+  function upgrade(card) {
+    var img = heroOf(card);
+    if (!img || img.tagName !== 'IMG' || !img.dataset.src) { return; } // no clip / already video
+    var v = document.createElement('video');
+    v.className = img.className;
+    v.muted = true; v.loop = true; v.playsInline = true;
+    v.setAttribute('muted', ''); v.setAttribute('playsinline', '');
+    v.preload = 'auto';
+    v.poster = img.getAttribute('src') || '';
+    v.dataset.src = img.dataset.src;
+    v.src = img.dataset.src;
+    img.replaceWith(v);
     v.play().catch(function () {});
+    live.push(v);
+    enforceCap();
   }
-  function release(v) {
-    v.pause();
-    if (!v.muted) { v.muted = true; v.classList.remove('audible'); }
-    if (v.src) { v.removeAttribute('src'); v.load(); }
+  function toImg(v) {
+    if (!v || v.tagName !== 'VIDEO') { return; }
+    var k = live.indexOf(v); if (k >= 0) { live.splice(k, 1); }
+    var img = document.createElement('img');
+    img.className = v.className.replace(/\s*audible/, '');
+    img.loading = 'lazy';
+    img.setAttribute('src', v.poster || '');
+    img.dataset.src = v.dataset.src || '';
+    v.pause(); v.removeAttribute('src'); try { v.load(); } catch (e) { /* ignore */ }
+    v.replaceWith(img);
   }
+  function downgrade(card) { toImg(heroOf(card)); }
+
+  // Over CAP: drop the upgraded videos FARTHEST from the viewport so visible
+  // cards stay live. Cheap — at most CAP rects measured.
+  function vdist(v) {
+    var r = v.getBoundingClientRect(), mid = (r.top + r.bottom) / 2;
+    return mid < 0 ? -mid : (mid > innerHeight ? mid - innerHeight : 0);
+  }
+  function enforceCap() {
+    if (live.length <= CAP) { return; }
+    live.sort(function (a, b) { return vdist(a) - vdist(b); });
+    while (live.length > CAP) { toImg(live[live.length - 1]); }
+  }
+
+  // Observe CARDS (stable), not the swappable media node, so upgrade/downgrade
+  // never churns the observer. Scoped to the active panel; activate() re-scopes.
   var io = new IntersectionObserver(function (entries) {
     entries.forEach(function (e) {
-      var v = e.target;
-      var panel = v.closest('.tab-panel');
+      var card = e.target;
+      var panel = card.closest('.tab-panel');
       var active = panel && panel.classList.contains('active');
-      var hidden = v.closest('.card') && v.closest('.card').classList.contains('is-hidden');
-      if (e.isIntersecting && active && !hidden) { loadAndPlay(v); }
-      else { release(v); }
+      if (e.isIntersecting && active && !card.classList.contains('is-hidden')) { upgrade(card); }
+      else { downgrade(card); }
     });
-  }, { rootMargin: '400px 0px' });
+  }, { rootMargin: '300px 0px' });
 
-  vidsIn(document).forEach(function (v) {
-    io.observe(v);
-    // Click toggles a single audible video (all others re-muted).
-    v.addEventListener('click', function (ev) {
-      ev.preventDefault();
-      if (v.muted) {
-        vidsIn(document).forEach(function (o) {
-          if (o !== v) { o.muted = true; o.classList.remove('audible'); }
-        });
-        v.muted = false; v.classList.add('audible'); loadAndPlay(v);
-      } else {
-        v.muted = true; v.classList.remove('audible');
-      }
-    });
+  function observePanel(p) { if (p) { cardsIn(p).forEach(function (c) { io.observe(c); }); } }
+  function unwatchPanel(p) { if (p) { cardsIn(p).forEach(function (c) { io.unobserve(c); downgrade(c); }); } }
+
+  // Delegated click: click a hero to unmute its video (materializing the clip if
+  // it's still a poster); every other video in the tab re-mutes. One listener.
+  document.addEventListener('click', function (ev) {
+    var hero = ev.target.closest ? ev.target.closest('.hero') : null;
+    if (!hero) { return; }
+    var card = hero.closest('.card'); if (!card) { return; }
+    if (hero.tagName === 'IMG') {
+      if (!hero.dataset.src) { return; }   // static poster, no clip
+      upgrade(card); hero = heroOf(card);
+    }
+    if (!hero || hero.tagName !== 'VIDEO') { return; }
+    ev.preventDefault();
+    if (hero.muted) {
+      (activePanel() || document).querySelectorAll('video.hero').forEach(function (o) {
+        if (o !== hero) { o.muted = true; o.classList.remove('audible'); }
+      });
+      hero.muted = false; hero.classList.add('audible'); hero.play().catch(function () {});
+    } else {
+      hero.muted = true; hero.classList.remove('audible');
+    }
   });
 
   // ---- prefs (localStorage) ----
@@ -155,14 +207,6 @@
       chip.textContent = REGION_LABEL[key] + ' (' + n + ')';
     });
     els.count.textContent = shown + ' shown';
-
-    // Play newly-visible near-viewport videos; release the rest.
-    vidsIn(panel).forEach(function (v) {
-      var card = v.closest('.card');
-      if (!card || card.classList.contains('is-hidden')) { release(v); return; }
-      var r = v.getBoundingClientRect();
-      if (r.top < innerHeight && r.bottom > 0) { loadAndPlay(v); }
-    });
   }
 
   function applyDense() {
@@ -177,13 +221,14 @@
       var first = $tabs()[0];
       tab = first ? first.dataset.tab : tab;
     }
+    var prev = state.tab;
+    if (prev && prev !== tab) { unwatchPanel(document.getElementById('panel-' + prev)); }
     state.tab = tab;
     $tabs().forEach(function (b) { b.classList.toggle('active', b.dataset.tab === tab); });
     document.querySelectorAll('.tab-panel').forEach(function (p) {
-      var on = p.id === 'panel-' + tab;
-      p.classList.toggle('active', on);
-      if (!on) { vidsIn(p).forEach(release); }
+      p.classList.toggle('active', p.id === 'panel-' + tab);
     });
+    observePanel(activePanel());
     apply();
     if (!noHash) { writeHash(); }
   }
