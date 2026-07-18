@@ -71,7 +71,7 @@ jobs:
       - name: Build libretro ${{ matrix.name }}
         run: make libretro TARGETS=${{ matrix.name }}
       - name: Publish libretro ${{ matrix.name }}
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/claude' }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: libretro-${{ matrix.name }}
@@ -100,7 +100,7 @@ jobs:
       - name: Build native ${{ matrix.name }}
         run: make native TARGETS=${{ matrix.name }}
       - name: Publish native ${{ matrix.name }}
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/claude' }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.name }}
@@ -136,7 +136,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Publish apk ${{ matrix.abi }}
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/claude' }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: android-apk-${{ matrix.abi }}
@@ -177,7 +177,7 @@ jobs:
             grep -qw "$a" <<<"$got" || { echo "::error::$a missing from .aab"; exit 1; }
           done
       - name: Publish .aab
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/claude' }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: android-aab
@@ -203,7 +203,7 @@ jobs:
         shell: bash
         run: . tools/rust-cross.sh && rc_run 'make web'
       - name: Publish built site
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/claude' }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: web-www
@@ -228,7 +228,7 @@ jobs:
       - name: Build ios
         run: make ios
       - name: Publish ios
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/claude' }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ios

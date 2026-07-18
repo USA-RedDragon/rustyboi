@@ -4,7 +4,7 @@ on:
   workflow_run:
     workflows: [Build, "Library Sweep"]
     types: [completed]
-    branches: [claude]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
