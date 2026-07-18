@@ -32,7 +32,7 @@ use rustyboi_libretro_sys::{
 use rustyboi_core_lib::cartridge::Cartridge;
 use rustyboi_core_lib::gb::{Hardware, GB};
 use rustyboi_core_lib::ppu::{
-    CgbColorConversion, SGB_FRAME_HEIGHT, SGB_FRAME_SIZE, SGB_FRAME_WIDTH,
+    ColorCorrection, SGB_FRAME_HEIGHT, SGB_FRAME_SIZE, SGB_FRAME_WIDTH,
 };
 use rustyboi_session::action::{GbcDmgPalette, HardwareChoice, PaletteChoice};
 use rustyboi_session::ports::{MemStorage, MemWebcam};
@@ -77,7 +77,7 @@ struct RustyboiCore {
     hardware_pref: HardwarePref,
     palette: PaletteChoice,
     gbc_dmg_palette: GbcDmgPalette,
-    color_correction: CgbColorConversion,
+    color_correction: ColorCorrection,
     framebuffer: Vec<u8>,
     /// Shared with the [`LibretroRumble`] port; `run` reads and forwards it.
     rumble_state: Rc<Cell<bool>>,
@@ -151,7 +151,7 @@ impl RustyboiCore {
         }
         if let Some(value) = env.get_variable(core_options::KEY_GBC_COLOR_CORRECTION) {
             self.color_correction =
-                core_options::parse_color_correction(&value).unwrap_or(CgbColorConversion::Lcd);
+                core_options::parse_color_correction(&value).unwrap_or(ColorCorrection::Lcd);
             if let Some(session) = self.session.as_mut() {
                 session.set_color_correction(self.color_correction);
             }
@@ -210,7 +210,7 @@ impl Core for RustyboiCore {
             hardware_pref: HardwarePref::Auto,
             palette: PaletteChoice::GreenLcd,
             gbc_dmg_palette: GbcDmgPalette::Auto,
-            color_correction: CgbColorConversion::Linear,
+            color_correction: ColorCorrection::Linear,
             // Sized for the largest possible frame (SGB 256x224) so the same
             // buffer serves both the plain 160x144 and the composited SGB paths.
             framebuffer: vec![0u8; SGB_FRAME_SIZE * 4],
@@ -785,7 +785,7 @@ mod tests {
             // unwrap_or path actually fired (not just an untouched default).
             core.hardware_pref = HardwarePref::Model(HardwareChoice::Sgb);
             core.palette = PaletteChoice::Pocket;
-            core.color_correction = CgbColorConversion::Linear;
+            core.color_correction = ColorCorrection::Linear;
             core.gbc_dmg_palette = GbcDmgPalette::Scheme(1);
 
             dispatch::set_environment(&mut core, Some(mock_env));
@@ -801,7 +801,7 @@ mod tests {
 
             assert_eq!(core.hardware_pref, HardwarePref::Auto);
             assert_eq!(core.palette, PaletteChoice::GreenLcd);
-            assert_eq!(core.color_correction, CgbColorConversion::Lcd);
+            assert_eq!(core.color_correction, ColorCorrection::Lcd);
             assert_eq!(core.gbc_dmg_palette, GbcDmgPalette::Auto);
         }
 

@@ -12,7 +12,7 @@ pub use rustyboi_session::action::{
     KeyBind, LcdEffect, MenuCategory, PaletteChoice, ScalingMode, SessionUiState, TextureFilter,
     UiAction, COMMANDS, FAST_FORWARD_SPEEDS, PRINTER_SCALES,
 };
-pub use rustyboi_session::CgbColorConversion;
+pub use rustyboi_session::ColorCorrection;
 
 pub use rustyboi_session::action::LibraryEntry;
 

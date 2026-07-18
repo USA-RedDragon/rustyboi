@@ -6,7 +6,7 @@ use std::env;
 use std::sync::{Arc, Mutex};
 use egui::Context;
 use crate::actions::{
-    ActionKind, CgbColorConversion, GuiAction, LcdEffect, ScalingMode, SessionUiState,
+    ActionKind, ColorCorrection, GuiAction, LcdEffect, ScalingMode, SessionUiState,
     TextureFilter, COMMANDS,
 };
 // Hardware / palette pickers live only in the desktop Settings menu bar.
@@ -687,8 +687,8 @@ impl Gui {
 
                     ui.menu_button("GBC Color Correction", |ui| {
                         for (mode, label) in [
-                            (CgbColorConversion::Linear, "Linear (raw RGB555)"),
-                            (CgbColorConversion::Lcd, "LCD (corrected)"),
+                            (ColorCorrection::Linear, "Linear (raw RGB555)"),
+                            (ColorCorrection::Lcd, "LCD (corrected)"),
                         ] {
                             let selected = session.color_correction == mode;
                             if ui.radio(selected, label).clicked() && !selected {
@@ -1467,8 +1467,8 @@ impl Gui {
 
                         ui.label("GBC Color Correction");
                         for (mode, label) in [
-                            (CgbColorConversion::Linear, "Linear (raw)"),
-                            (CgbColorConversion::Lcd, "LCD (corrected)"),
+                            (ColorCorrection::Linear, "Linear (raw)"),
+                            (ColorCorrection::Lcd, "LCD (corrected)"),
                         ] {
                             let selected = session.color_correction == mode;
                             if ui.radio(selected, label).clicked() && !selected {

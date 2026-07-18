@@ -134,6 +134,34 @@ pub enum Frame {
     Color(Box<[u8; ppu::FRAMEBUFFER_SIZE * 3]>),
 }
 
+/// The four DMG-shade colours (index 0 = lightest .. 3 = darkest) that a
+/// `Frame::Monochrome` maps to, for a given model and colour-correction setting.
+/// This is the single source of truth for mono → RGB across every frontend and
+/// the media sweep — there is no per-surface palette any more.
+///
+/// `Linear` is model-independent (a neutral grey ramp). `Lcd` is the most
+/// hardware-accurate render per model: the DMG's green tint, the Game Boy
+/// Pocket's olive-grey LCD (SameBoy's `GB_PALETTE_MGB`), or — for the SGB, which
+/// drives DMG shades to a TV through SNES palette RAM with no LCD of its own —
+/// the same neutral grey as `Linear`. `Color` frames (CGB/AGB) are corrected in
+/// the PPU and never consult this.
+pub fn mono_shades(hardware: Hardware, correction: ppu::ColorCorrection) -> [[u8; 3]; 4] {
+    const GRAY: [[u8; 3]; 4] = [[255, 255, 255], [170, 170, 170], [85, 85, 85], [0, 0, 0]];
+    match correction {
+        ppu::ColorCorrection::Linear => GRAY,
+        ppu::ColorCorrection::Lcd => match hardware {
+            // BGB-style green LCD (the DMG-01's screen).
+            Hardware::DMG | Hardware::DMG0 => {
+                [[224, 248, 208], [136, 192, 112], [52, 104, 86], [8, 24, 32]]
+            }
+            // Game Boy Pocket's olive-grey LCD (SameBoy GB_PALETTE_MGB).
+            Hardware::MGB => [[194, 206, 147], [129, 141, 102], [58, 76, 58], [7, 16, 14]],
+            // SGB/SGB2 have no LCD (TV output); CGB/AGB emit Color, mono only as a fallback.
+            _ => GRAY,
+        },
+    }
+}
+
 /// The ® tile the boot ROM leaves at VRAM $8190-$819F (tile index 0x19),
 /// interleaved even/0x00 bitplane layout. This is the only boot-logo tile that
 /// is boot-ROM-internal rather than a decompression of the cart's own header
@@ -997,8 +1025,14 @@ impl GB {
         self.ppu.sgb_composited_frame(&self.mmio)
     }
 
-    pub fn set_cgb_color_conversion(&mut self, conversion: ppu::CgbColorConversion) {
+    pub fn set_cgb_color_conversion(&mut self, conversion: ppu::ColorCorrection) {
         self.ppu.set_cgb_color_conversion(conversion);
+    }
+
+    /// The four DMG-shade colours (index 0 = lightest) for this machine's model
+    /// and colour-correction setting; see [`mono_shades`].
+    pub fn mono_shades(&self) -> [[u8; 3]; 4] {
+        mono_shades(self.hardware, self.ppu.cgb_color_conversion())
     }
 
     pub fn set_fetch_debug_events_enabled(&mut self, enabled: bool) {

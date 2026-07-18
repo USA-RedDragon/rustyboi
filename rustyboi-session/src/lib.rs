@@ -93,5 +93,5 @@ pub use session::{
 // crate for the common path.
 pub use rustyboi_core_lib::gb::{Frame, Hardware, GB};
 pub use rustyboi_core_lib::input::ButtonState;
-pub use rustyboi_core_lib::ppu::CgbColorConversion;
+pub use rustyboi_core_lib::ppu::ColorCorrection;
 pub use rustyboi_core_lib::movie::{self, sha256, Movie};

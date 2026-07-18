@@ -617,7 +617,7 @@ mod tests {
             ToggleShowFps,
             SetHardware(HardwareChoice::Dmg),
             SetPalette(PaletteChoice::Pocket),
-            SetColorCorrection(crate::CgbColorConversion::Lcd),
+            SetColorCorrection(crate::ColorCorrection::Lcd),
             SetRealBootRom(false),
             SetTextureFilter(crate::action::TextureFilter::Linear),
             SetLcdEffect(crate::action::LcdEffect::Grid),

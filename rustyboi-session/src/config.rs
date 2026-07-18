@@ -10,7 +10,7 @@ use crate::input::InputMap;
 use crate::input_config::InputConfig;
 use crate::ports::{Storage, StorageError};
 use rustyboi_core_lib::gb::Hardware;
-use rustyboi_core_lib::ppu::CgbColorConversion;
+use rustyboi_core_lib::ppu::ColorCorrection;
 use serde::{Deserialize, Serialize};
 
 /// Storage key the config blob lives under.
@@ -92,7 +92,7 @@ pub struct Config {
     /// Applied to the machine at every (re)build. `default` (`Linear`) so older
     /// blobs still load and reproduce the historical output.
     #[serde(default)]
-    pub color_correction: CgbColorConversion,
+    pub color_correction: ColorCorrection,
     /// Whether to run a real boot ROM (when one has been supplied via
     /// [`set_boot_rom`](crate::session::Session::set_boot_rom)) instead of the
     /// synthetic post-boot state. `default` (false) so older blobs still load.
@@ -153,7 +153,7 @@ impl Default for Config {
             volume: 100,
             scaling: ScalingMode::default(),
             graphics_backend: GraphicsBackend::default(),
-            color_correction: CgbColorConversion::default(),
+            color_correction: ColorCorrection::default(),
             use_real_boot_rom: false,
             texture_filter: TextureFilter::default(),
             lcd_effect: LcdEffect::default(),

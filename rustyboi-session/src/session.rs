@@ -902,7 +902,7 @@ impl Session {
     }
 
     /// The current CGB colour-correction curve.
-    pub fn color_correction(&self) -> rustyboi_core_lib::ppu::CgbColorConversion {
+    pub fn color_correction(&self) -> rustyboi_core_lib::ppu::ColorCorrection {
         self.config.color_correction
     }
 
@@ -910,7 +910,7 @@ impl Session {
     /// Presentation-only: it changes CGB output bytes but not emulation.
     pub fn set_color_correction(
         &mut self,
-        conversion: rustyboi_core_lib::ppu::CgbColorConversion,
+        conversion: rustyboi_core_lib::ppu::ColorCorrection,
     ) {
         self.config.color_correction = conversion;
         self.gb.set_cgb_color_conversion(conversion);
