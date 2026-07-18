@@ -21,17 +21,7 @@ pub fn apply_patch(rom: &[u8], patch: &[u8]) -> Result<Vec<u8>, String> {
 
 // --- CRC32 (IEEE, reflected) -----------------------------------------------
 
-pub(crate) fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
-}
+pub(crate) use rustyboi_core_lib::checksum::crc32;
 
 // --- IPS --------------------------------------------------------------------
 
