@@ -15,4 +15,5 @@ pub mod ppu;
 pub mod printer;
 pub mod serial;
 pub mod sgb;
+pub mod sgb_system_palette;
 pub mod timer;

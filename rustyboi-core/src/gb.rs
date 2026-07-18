@@ -5,6 +5,7 @@ use crate::memory;
 use crate::memory::Addressable;
 use crate::ppu;
 use crate::audio;
+use crate::sgb_system_palette;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -101,6 +102,11 @@ pub struct GB {
     // it is skipped in the savestate; the frontend re-applies it after a restore.
     #[serde(skip, default)]
     dmg_palette: DmgPaletteChoice,
+    // How a mono game is colourized on SGB/SGB2 (presentation only, same
+    // contract as `dmg_palette`: skipped in the savestate, re-applied by the
+    // frontend after a restore). Ignored on every other model.
+    #[serde(skip, default)]
+    sgb_palette: SgbPaletteChoice,
     #[serde(skip, default)]
     skip_bios: bool,
     #[serde(skip, default)]
@@ -127,6 +133,7 @@ impl Clone for GB {
             ppu: self.ppu.clone(),
             hardware: self.hardware,
             dmg_palette: self.dmg_palette,
+            sgb_palette: self.sgb_palette,
             skip_bios: self.skip_bios,
             breakpoints: self.breakpoints.clone(),
             forced_compat_palette: self.forced_compat_palette,
@@ -241,6 +248,94 @@ impl DmgPaletteChoice {
     }
 }
 
+/// How a DMG game running on SGB hardware is colourized (presentation only,
+/// like [`DmgPaletteChoice`]). A real SGB never shows a mono game in grayscale:
+/// the SNES-side firmware applies one of its 32 built-in system palettes, `1-A`
+/// by default, or that game's signature palette if it recognizes the title.
+///
+/// [`Auto`](Self::Auto) reproduces the hardware default and is therefore the
+/// default here; [`Grayscale`](Self::Grayscale) opts back out to the plain
+/// shade ramp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SgbPaletteChoice {
+    /// The firmware's own pick: the recognized per-game palette, else `1-A`.
+    #[default]
+    Auto,
+    /// A user-forced system palette, `0..=31` (`1-A`..`4-H`).
+    System(u8),
+    /// No colourization — the raw DMG shade ramp.
+    Grayscale,
+}
+
+impl SgbPaletteChoice {
+    /// All choices, in Settings-menu display order: Auto, the 32 system
+    /// palettes `1-A`..`4-H`, then Grayscale.
+    pub const ALL: [SgbPaletteChoice; 34] = {
+        let mut all = [SgbPaletteChoice::Auto; 34];
+        let mut i = 0;
+        while i < 32 {
+            all[i + 1] = SgbPaletteChoice::System(i as u8);
+            i += 1;
+        }
+        all[33] = SgbPaletteChoice::Grayscale;
+        all
+    };
+
+    /// The four presentation colours, or `None` for `Grayscale` (which defers
+    /// to the caller's mono ramp). `title`/licensees come from the cart header
+    /// and are only consulted by `Auto`.
+    pub fn shades(
+        self,
+        title: &[u8; 16],
+        old_licensee: u8,
+        new_licensee: [u8; 2],
+    ) -> Option<[[u8; 3]; 4]> {
+        let index = match self {
+            Self::Grayscale => return None,
+            Self::Auto => {
+                sgb_system_palette::select_auto(title, old_licensee, new_licensee)
+            }
+            Self::System(i) => i.min(31),
+        };
+        // The SGB has no LCD, so these are always the raw linear colours —
+        // `ColorCorrection` never applies (pinned by a test).
+        Some(sgb_system_palette::SGB_SYSTEM_PALETTES[index as usize].map(|w| {
+            let (r, g, b) = ppu::controller::rgb555_to_rgb888(w);
+            [r, g, b]
+        }))
+    }
+
+    /// A short human label for the Settings menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::System(i) => sgb_system_palette::label(i),
+            Self::Grayscale => "Grayscale",
+        }
+    }
+
+    /// Stable lowercase id (libretro option keys / CLI `--sgb-palette`).
+    pub fn option_id(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::System(i) => sgb_system_palette::option_id(i),
+            Self::Grayscale => "grayscale",
+        }
+    }
+
+    /// Parse a palette id (`"auto"`, `"1a"`..`"4h"`, `"grayscale"`), or `None`.
+    pub fn from_option_id(id: &str) -> Option<Self> {
+        let id = id.to_lowercase();
+        match id.as_str() {
+            "auto" => Some(Self::Auto),
+            "grayscale" | "gray" | "grey" | "none" => Some(Self::Grayscale),
+            _ => (0u8..32)
+                .find(|&i| sgb_system_palette::option_id(i) == id)
+                .map(Self::System),
+        }
+    }
+}
+
 /// The four DMG-shade colours for a model's default palette under `correction`.
 /// The single source of truth for mono → RGB in the media sweep (which has no
 /// user palette override); frontends use a user-selected [`DmgPaletteChoice`].
@@ -295,6 +390,7 @@ impl GB {
             skip_bios: false,
             hardware,
             dmg_palette: DmgPaletteChoice::default_for(hardware),
+            sgb_palette: SgbPaletteChoice::default(),
             breakpoints: HashSet::new(),
             forced_compat_palette: None,
             audio_output: None, // Audio will be enabled when needed
@@ -1040,7 +1136,9 @@ impl GB {
         match self.ppu.get_frame(&self.mmio) {
             ppu::RenderedFrame::Color(rgb) => Frame(rgb),
             ppu::RenderedFrame::Monochrome(idx) => {
-                let shades = self.dmg_palette.shades(self.ppu.cgb_color_conversion());
+                let shades = self
+                    .sgb_presentation_shades()
+                    .unwrap_or_else(|| self.dmg_palette.shades(self.ppu.cgb_color_conversion()));
                 let mut rgb = vec![0u8; ppu::FRAMEBUFFER_SIZE * 3].into_boxed_slice();
                 for (i, &s) in idx.iter().enumerate() {
                     let c = shades[(s as usize) & 3];
@@ -1086,6 +1184,33 @@ impl GB {
     /// The current DMG/MGB mono base palette.
     pub fn dmg_palette(&self) -> DmgPaletteChoice {
         self.dmg_palette
+    }
+
+    /// Set how a mono game is colourized on SGB hardware (presentation only;
+    /// no effect on other models).
+    pub fn set_sgb_palette(&mut self, palette: SgbPaletteChoice) {
+        self.sgb_palette = palette;
+    }
+
+    /// The current SGB colourization choice.
+    pub fn sgb_palette(&self) -> SgbPaletteChoice {
+        self.sgb_palette
+    }
+
+    /// The four RGB colours the SGB firmware would show this cart in, or `None`
+    /// when SGB colourization does not apply (not SGB hardware, or the user
+    /// asked for plain grayscale) and the caller should use its mono ramp.
+    fn sgb_presentation_shades(&self) -> Option<[[u8; 3]; 4]> {
+        if !matches!(self.hardware, Hardware::SGB | Hardware::SGB2) {
+            return None;
+        }
+        let mut title = [0u8; 16];
+        for (i, b) in title.iter_mut().enumerate() {
+            *b = self.mmio.read(0x0134 + i as u16);
+        }
+        let new_licensee = [self.mmio.read(0x0144), self.mmio.read(0x0145)];
+        let old_licensee = self.mmio.read(0x014B);
+        self.sgb_palette.shades(&title, old_licensee, new_licensee)
     }
 
     pub fn run_until_frame(&mut self, collect_audio: bool) -> (Frame, bool) {
@@ -2404,5 +2529,137 @@ mod forced_compat_palette_tests {
         assert_eq!(cgb_bg_palette(Some(0x7C)), auto, "forcing the auto id changes nothing");
         // ...while forcing the "Up" scheme (id 0x12) installs a different palette.
         assert_ne!(cgb_bg_palette(Some(0x12)), auto, "forcing a different scheme must recolour");
+    }
+}
+
+#[cfg(test)]
+mod sgb_palette_tests {
+    //! A DMG game on SGB hardware must come out colourized, not grey: a real
+    //! Super Game Boy powers on with system palette `1-A` and swaps in a
+    //! recognized game's own palette. These are presentation-only checks — the
+    //! frame stays `RenderedFrame::Monochrome`, so the suite/TAS grading domain
+    //! (`presented_shade_frame`) is untouched.
+    use super::*;
+
+    /// A blank 32KB mono cart. `title`/`old_licensee` go into the header so the
+    /// firmware's title recognition has something to match.
+    fn rom(title: &[u8], old_licensee: u8) -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x134..0x134 + title.len()].copy_from_slice(title);
+        rom[0x14B] = old_licensee;
+        rom
+    }
+
+    fn gb(hardware: Hardware, title: &[u8], old_licensee: u8) -> GB {
+        let mut gb = GB::new(hardware);
+        gb.insert(cartridge::Cartridge::from_bytes(&rom(title, old_licensee)).unwrap());
+        gb.skip_bios();
+        gb
+    }
+
+    /// The RGB triple the presented frame uses for DMG shade 0 (the whole
+    /// screen on a blank cart), i.e. colour 0 of whatever palette applied.
+    fn presented_shade0(gb: &mut GB) -> [u8; 3] {
+        let frame = gb.presented_frame();
+        [frame.0[0], frame.0[1], frame.0[2]]
+    }
+
+    fn color(index: u8, slot: usize) -> [u8; 3] {
+        let word = sgb_system_palette::SGB_SYSTEM_PALETTES[index as usize][slot];
+        let (r, g, b) = ppu::controller::rgb555_to_rgb888(word);
+        [r, g, b]
+    }
+
+    /// Out of the box, an unrecognized cart on an SGB presents system palette
+    /// 1-A — not the grey ramp a DMG would show.
+    #[test]
+    fn sgb_default_presents_1a() {
+        for hw in [Hardware::SGB, Hardware::SGB2] {
+            let mut gb = gb(hw, b"HOMEBREW", 0x00);
+            assert_eq!(gb.sgb_palette(), SgbPaletteChoice::Auto);
+            assert_eq!(presented_shade0(&mut gb), color(0, 0), "{hw:?} must present 1-A");
+            assert_ne!(presented_shade0(&mut gb), [255, 255, 255], "{hw:?} must not be grey");
+        }
+    }
+
+    /// A recognized Nintendo title gets its own palette, and a DMG runs the
+    /// same cart in mono — the colourization is SGB-only.
+    #[test]
+    fn recognized_title_and_non_sgb_models() {
+        let mut sgb = gb(Hardware::SGB, b"TETRIS", 0x01);
+        assert_eq!(presented_shade0(&mut sgb), color(17, 0)); // 3-B
+        assert_ne!(presented_shade0(&mut sgb), color(0, 0));
+
+        let mut dmg = gb(Hardware::DMG, b"TETRIS", 0x01);
+        assert_eq!(
+            presented_shade0(&mut dmg),
+            DmgPaletteChoice::default_for(Hardware::DMG)
+                .shades(dmg.ppu.cgb_color_conversion())[0]
+        );
+    }
+
+    /// The explicit overrides: a forced system palette wins over Auto, and
+    /// Grayscale opts back out to the mono ramp.
+    #[test]
+    fn forced_and_grayscale_overrides() {
+        let mut gb = gb(Hardware::SGB, b"TETRIS", 0x01);
+        gb.set_sgb_palette(SgbPaletteChoice::System(31));
+        assert_eq!(presented_shade0(&mut gb), color(31, 0)); // 4-H
+
+        gb.set_sgb_palette(SgbPaletteChoice::Grayscale);
+        assert_eq!(gb.sgb_presentation_shades(), None);
+        assert_eq!(
+            presented_shade0(&mut gb),
+            DmgPaletteChoice::default_for(Hardware::SGB).shades(gb.ppu.cgb_color_conversion())[0]
+        );
+    }
+
+    /// The SGB has no LCD panel, so its palettes are always the raw linear
+    /// colours: `ColorCorrection` must not touch the SGB presentation path.
+    #[test]
+    fn color_correction_does_not_affect_sgb_palettes() {
+        let mut gb = gb(Hardware::SGB, b"ZELDA", 0x01);
+        gb.set_cgb_color_conversion(ppu::ColorCorrection::Linear);
+        let linear = presented_shade0(&mut gb);
+        gb.set_cgb_color_conversion(ppu::ColorCorrection::Lcd);
+        assert_eq!(presented_shade0(&mut gb), linear);
+        assert_eq!(linear, color(5, 0)); // 1-F
+    }
+
+    /// The selector's plumbing surface (labels/ids/round-trip), mirroring the
+    /// `DmgPaletteChoice` contract the frontends consume.
+    #[test]
+    fn choice_ids_round_trip() {
+        assert_eq!(SgbPaletteChoice::ALL.len(), 34);
+        assert_eq!(SgbPaletteChoice::ALL[0], SgbPaletteChoice::Auto);
+        assert_eq!(SgbPaletteChoice::ALL[1], SgbPaletteChoice::System(0));
+        assert_eq!(SgbPaletteChoice::ALL[32], SgbPaletteChoice::System(31));
+        assert_eq!(SgbPaletteChoice::ALL[33], SgbPaletteChoice::Grayscale);
+        for choice in SgbPaletteChoice::ALL {
+            assert_eq!(SgbPaletteChoice::from_option_id(choice.option_id()), Some(choice));
+            assert!(!choice.label().is_empty());
+        }
+        assert_eq!(SgbPaletteChoice::System(0).label(), "1-A");
+        assert_eq!(SgbPaletteChoice::System(31).option_id(), "4h");
+        assert_eq!(SgbPaletteChoice::from_option_id("2H"), Some(SgbPaletteChoice::System(15)));
+        assert_eq!(SgbPaletteChoice::from_option_id("nope"), None);
+    }
+
+    /// The presentation choice must not leak into the savestate or the mono
+    /// grading domain (`#[serde(skip)]`), so suites/TAS/rewind stay identical.
+    #[test]
+    fn palette_is_not_machine_state() {
+        let mut a = gb(Hardware::SGB, b"TETRIS", 0x01);
+        let mut b = gb(Hardware::SGB, b"TETRIS", 0x01);
+        b.set_sgb_palette(SgbPaletteChoice::System(9));
+        a.run_until_frame(false);
+        b.run_until_frame(false);
+        assert_eq!(a.presented_shade_frame(), b.presented_shade_frame());
+        assert!(!a.frame_renders_color(), "non-aware SGB frames must stay mono-graded");
+        assert_eq!(
+            bincode::serialize(&a).unwrap(),
+            bincode::serialize(&b).unwrap(),
+            "sgb_palette must stay out of the savestate"
+        );
     }
 }
