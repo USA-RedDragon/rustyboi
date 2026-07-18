@@ -76,7 +76,7 @@ pub use apply::{ActionOutcome, FetchPurpose, PlatformRequest};
 pub use present::{frame_to_pixels, rgb_to_pixels, PixelOrder};
 pub use cheat_db::FetchedCheat;
 pub use config::Config;
-pub use debug::{DebugDetail, DebugSnapshot};
+pub use debug::{CartInfo, DebugDetail, DebugSnapshot};
 pub use input::{AbstractInput, GbButton, InputMap};
 pub use input_config::{
     FiredHotkey, HeldInputs, Hotkey, HotkeyAction, InputConfig, InputTrigger, KeyName, PadButton,
