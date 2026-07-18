@@ -937,9 +937,17 @@ fn spawn_encoder(out: &Path) -> std::io::Result<std::process::Child> {
 /// audio as AAC. Returns true only if the muxed file was produced.
 /// No `-shortest`: the whole run's video is the point, so keep every frame even
 /// when the audio track is marginally shorter (it just falls silent at the tail).
+///
+/// `-nostdin` + a null stdin are load-bearing: this mux reads only from files,
+/// but ffmpeg otherwise puts the inherited controlling terminal into
+/// non-blocking keyboard mode. Run many muxes at once (the per-ROM hardware
+/// passes are parallel) and they race on that shared tty's termios state until
+/// one is left doing a *blocking* read on it — hanging forever at 0% CPU and
+/// wedging every sweep thread that then `wait()`s on it. Detaching fd 0 from the
+/// tty makes that impossible.
 fn mux_av(video: &Path, pcm: &Path, out: &Path) -> bool {
     let status = ffmpeg_command()
-        .args(["-loglevel", "error", "-i"])
+        .args(["-nostdin", "-loglevel", "error", "-i"])
         .arg(video)
         .args(["-f", "s16le", "-ar", "44100", "-ac", "2", "-i"])
         .arg(pcm)
@@ -948,6 +956,7 @@ fn mux_av(video: &Path, pcm: &Path, out: &Path) -> bool {
             "-movflags", "+faststart",
         ])
         .arg(out)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
