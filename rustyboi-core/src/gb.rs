@@ -134,32 +134,101 @@ pub enum Frame {
     Color(Box<[u8; ppu::FRAMEBUFFER_SIZE * 3]>),
 }
 
-/// The four DMG-shade colours (index 0 = lightest .. 3 = darkest) that a
-/// `Frame::Monochrome` maps to, for a given model and colour-correction setting.
-/// This is the single source of truth for mono → RGB across every frontend and
-/// the media sweep — there is no per-surface palette any more.
-///
-/// `Linear` is model-independent (a neutral grey ramp). `Lcd` is the most
-/// hardware-accurate render per model: the DMG's green tint, the Game Boy
-/// Pocket's olive-grey LCD (SameBoy's `GB_PALETTE_MGB`), or — for the SGB, which
-/// drives DMG shades to a TV through SNES palette RAM with no LCD of its own —
-/// the same neutral grey as `Linear`. `Color` frames (CGB/AGB) are corrected in
-/// the PPU and never consult this.
-pub fn mono_shades(hardware: Hardware, correction: ppu::ColorCorrection) -> [[u8; 3]; 4] {
-    const GRAY: [[u8; 3]; 4] = [[255, 255, 255], [170, 170, 170], [85, 85, 85], [0, 0, 0]];
-    match correction {
-        ppu::ColorCorrection::Linear => GRAY,
-        ppu::ColorCorrection::Lcd => match hardware {
-            // BGB-style green LCD (the DMG-01's screen).
-            Hardware::DMG | Hardware::DMG0 => {
-                [[224, 248, 208], [136, 192, 112], [52, 104, 86], [8, 24, 32]]
-            }
-            // Game Boy Pocket's olive-grey LCD (SameBoy GB_PALETTE_MGB).
-            Hardware::MGB => [[194, 206, 147], [129, 141, 102], [58, 76, 58], [7, 16, 14]],
-            // SGB/SGB2 have no LCD (TV output); CGB/AGB emit Color, mono only as a fallback.
-            _ => GRAY,
-        },
+/// The DMG/MGB monochrome base palette (the colour "character"), orthogonal to
+/// the [`ColorCorrection`](ppu::ColorCorrection) toggle it composes with: the
+/// palette picks the four base colours, correction then applies the model's
+/// screen response (`Linear` = raw, `Lcd` = as the panel renders it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DmgPaletteChoice {
+    Grayscale,
+    #[default]
+    Green,
+    Pocket,
+}
+
+impl DmgPaletteChoice {
+    /// All choices, in Settings-menu display order.
+    pub const ALL: [DmgPaletteChoice; 3] =
+        [Self::Grayscale, Self::Green, Self::Pocket];
+
+    /// The model's default base palette: Green for the DMG-01, the Game Boy
+    /// Pocket's grey for the MGB, neutral grey elsewhere (SGB has no LCD; CGB/AGB
+    /// only hit this as a mono fallback).
+    pub fn default_for(hardware: Hardware) -> Self {
+        match hardware {
+            Hardware::DMG | Hardware::DMG0 => Self::Green,
+            Hardware::MGB => Self::Pocket,
+            _ => Self::Grayscale,
+        }
     }
+
+    /// The four shade colours (index 0 = lightest .. 3 = darkest), composing the
+    /// base palette with `correction`: `Linear` is the raw palette, `Lcd` its
+    /// screen-rendered variant. Neutral grey has no LCD tint (same either way).
+    pub fn shades(self, correction: ppu::ColorCorrection) -> [[u8; 3]; 4] {
+        use ppu::ColorCorrection::{Lcd, Linear};
+        match (self, correction) {
+            (Self::Grayscale, _) => [[255, 255, 255], [170, 170, 170], [85, 85, 85], [0, 0, 0]],
+            // Classic DMG green, raw.
+            (Self::Green, Linear) => {
+                [[0x9B, 0xBC, 0x0F], [0x8B, 0xAC, 0x0F], [0x30, 0x62, 0x30], [0x0F, 0x38, 0x0F]]
+            }
+            // DMG green as the LCD panel renders it (lighter, gamma-tinted).
+            (Self::Green, Lcd) => {
+                [[0xE0, 0xF8, 0xD0], [0x88, 0xC0, 0x70], [0x34, 0x68, 0x56], [0x08, 0x18, 0x20]]
+            }
+            // Game Boy Pocket grey, raw.
+            (Self::Pocket, Linear) => {
+                [[0xC4, 0xCF, 0xA1], [0x8B, 0x95, 0x6D], [0x4D, 0x53, 0x3C], [0x1F, 0x1F, 0x1F]]
+            }
+            // Pocket as the LCD renders it (SameBoy GB_PALETTE_MGB olive).
+            (Self::Pocket, Lcd) => {
+                [[0xC2, 0xCE, 0x93], [0x81, 0x8D, 0x66], [0x3A, 0x4C, 0x3A], [0x07, 0x10, 0x0E]]
+            }
+        }
+    }
+
+    /// [`shades`](Self::shades) with an opaque alpha byte, for RGBA consumers.
+    pub fn shades_rgba(self, correction: ppu::ColorCorrection) -> [[u8; 4]; 4] {
+        self.shades(correction).map(|[r, g, b]| [r, g, b, 0xFF])
+    }
+
+    /// A short human label for the Settings menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Grayscale => "Grayscale",
+            Self::Green => "Green",
+            Self::Pocket => "Game Boy Pocket",
+        }
+    }
+
+    /// Stable lowercase id (libretro option keys / CLI `--palette`).
+    pub fn option_id(self) -> &'static str {
+        match self {
+            Self::Grayscale => "grayscale",
+            Self::Green => "green",
+            Self::Pocket => "pocket",
+        }
+    }
+
+    /// Parse a palette id/name (accepts historical aliases), or `None`.
+    pub fn from_option_id(id: &str) -> Option<Self> {
+        match id.to_lowercase().as_str() {
+            "grayscale" | "gray" | "grey" => Some(Self::Grayscale),
+            "green" | "greenlinear" | "greenlcd" | "original" | "gameboy" | "lcd" | "dmg" => {
+                Some(Self::Green)
+            }
+            "pocket" | "mgb" => Some(Self::Pocket),
+            _ => None,
+        }
+    }
+}
+
+/// The four DMG-shade colours for a model's default palette under `correction`.
+/// The single source of truth for mono → RGB in the media sweep (which has no
+/// user palette override); frontends use a user-selected [`DmgPaletteChoice`].
+pub fn mono_shades(hardware: Hardware, correction: ppu::ColorCorrection) -> [[u8; 3]; 4] {
+    DmgPaletteChoice::default_for(hardware).shades(correction)
 }
 
 /// The ® tile the boot ROM leaves at VRAM $8190-$819F (tile index 0x19),

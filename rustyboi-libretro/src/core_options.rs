@@ -114,7 +114,7 @@ pub fn build() -> CoreOptions {
                 info: "Colour palette for original Game Boy (monochrome) output. No effect on Game Boy Color titles, which supply their own colours.",
                 category: "video_settings",
                 values: palette_values,
-                default: DmgPaletteChoice::GreenLcd.option_id().into(),
+                default: DmgPaletteChoice::Green.option_id().into(),
             },
             OptionDef {
                 key: KEY_GBC_DMG_PALETTE,

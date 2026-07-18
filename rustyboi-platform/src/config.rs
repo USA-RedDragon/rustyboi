@@ -96,7 +96,7 @@ impl RawConfig {
             state: self.state,
             #[cfg(not(target_os = "android"))]
             scale: self.scale,
-            palette: DmgPaletteChoice::from_str(&self.palette).unwrap_or(DmgPaletteChoice::GreenLcd),
+            palette: DmgPaletteChoice::from_option_id(&self.palette).unwrap_or(DmgPaletteChoice::Green),
             #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
             skip_bios: _skip_bios,
             printer: self.printer,
@@ -124,7 +124,7 @@ mod tests {
     fn clap_defaults_match_declarations() {
         let c = parse(&["rustyboi"]);
         assert_eq!(c.hardware, gb::Hardware::CGB);
-        assert_eq!(c.palette, DmgPaletteChoice::GreenLcd);
+        assert_eq!(c.palette, DmgPaletteChoice::Green);
         #[cfg(not(target_os = "android"))]
         assert_eq!(c.scale, 5);
     }
@@ -132,14 +132,14 @@ mod tests {
     #[test]
     fn garbage_palette_falls_back_to_green_lcd() {
         let c = parse(&["rustyboi", "--palette", "chartreuse"]);
-        assert_eq!(c.palette, DmgPaletteChoice::GreenLcd);
+        assert_eq!(c.palette, DmgPaletteChoice::Green);
     }
 
     #[test]
     fn known_palette_alias_is_honored() {
         // A recognized alias must NOT fall through to the Grayscale default.
         let c = parse(&["rustyboi", "--palette", "green"]);
-        assert_eq!(c.palette, DmgPaletteChoice::GreenLinear);
+        assert_eq!(c.palette, DmgPaletteChoice::Green);
     }
 
     #[test]

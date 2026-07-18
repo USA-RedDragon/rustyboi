@@ -115,7 +115,7 @@ fn serviceable_actions() -> Vec<UiAction> {
         ToggleTouchControls,
         SetHardware(HardwareChoice::Dmg),
         SetHardware(HardwareChoice::Cgb),
-        SetPalette(DmgPaletteChoice::GreenLcd),
+        SetPalette(DmgPaletteChoice::Green),
         SetGbcDmgPalette(GbcDmgPalette::Auto),
         SetGbcDmgPalette(GbcDmgPalette::Scheme(5)),
         SetColorCorrection(ColorCorrection::Lcd),

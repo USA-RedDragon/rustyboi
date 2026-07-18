@@ -505,10 +505,13 @@ impl Session {
     }
 }
 
-/// Map an application config palette to the RGBA shades stored in config, for
-/// [`Session::set_palette_choice`].
-pub(crate) fn palette_shades(choice: DmgPaletteChoice) -> [[u8; 4]; 4] {
-    choice.rgba_shades()
+/// The RGBA shades for a base palette composed with the colour-correction, as
+/// cached in `config.dmg_palette.shades`.
+pub(crate) fn palette_shades(
+    choice: DmgPaletteChoice,
+    correction: rustyboi_core_lib::ppu::ColorCorrection,
+) -> [[u8; 4]; 4] {
+    choice.shades_rgba(correction)
 }
 
 #[cfg(test)]
@@ -650,9 +653,12 @@ mod tests {
     #[test]
     fn set_palette_persists_choice() {
         let mut s = session();
-        s.apply(UiAction::SetPalette(DmgPaletteChoice::GreenLcd), 0);
-        assert_eq!(s.palette(), DmgPaletteChoice::GreenLcd);
-        assert_eq!(s.config().dmg_palette.shades, DmgPaletteChoice::GreenLcd.rgba_shades());
+        s.apply(UiAction::SetPalette(DmgPaletteChoice::Green), 0);
+        assert_eq!(s.palette(), DmgPaletteChoice::Green);
+        assert_eq!(
+            s.config().dmg_palette.shades,
+            DmgPaletteChoice::Green.shades_rgba(s.color_correction())
+        );
     }
 
     #[test]

@@ -137,7 +137,7 @@ impl RustyboiCore {
             self.sgb_border_enabled = value == core_options::ON;
         }
         if let Some(value) = env.get_variable(core_options::KEY_DMG_PALETTE) {
-            self.palette = DmgPaletteChoice::from_option_id(&value).unwrap_or(DmgPaletteChoice::GreenLcd);
+            self.palette = DmgPaletteChoice::from_option_id(&value).unwrap_or(DmgPaletteChoice::Green);
             if let Some(session) = self.session.as_mut() {
                 session.init_palette_choice(self.palette);
             }
@@ -208,7 +208,7 @@ impl Core for RustyboiCore {
         RustyboiCore {
             session: None,
             hardware_pref: HardwarePref::Auto,
-            palette: DmgPaletteChoice::GreenLcd,
+            palette: DmgPaletteChoice::Green,
             gbc_dmg_palette: GbcDmgPalette::Auto,
             color_correction: ColorCorrection::Linear,
             // Sized for the largest possible frame (SGB 256x224) so the same
@@ -319,7 +319,7 @@ impl Core for RustyboiCore {
             color_correction: self.color_correction,
             gbc_dmg_palette: self.gbc_dmg_palette,
             dmg_palette: rustyboi_session::config::DmgPalette {
-                shades: self.palette.rgba_shades(),
+                shades: self.palette.shades_rgba(self.color_correction),
             },
             rewind: rustyboi_session::config::RewindConfig {
                 enabled: false,
@@ -428,7 +428,7 @@ impl Core for RustyboiCore {
             rgb_to_pixels(&border[..], PixelOrder::Bgra, &mut self.framebuffer);
             (SGB_WIDTH, SGB_HEIGHT)
         } else {
-            let shades = self.palette.rgba_shades();
+            let shades = self.palette.shades_rgba(self.color_correction);
             frame_to_pixels(&out.frame, &shades, PixelOrder::Bgra, &mut self.framebuffer);
             (WIDTH, HEIGHT)
         };
@@ -800,7 +800,7 @@ mod tests {
             assert!(dispatch::load_game(&mut core, &info), "load_game failed");
 
             assert_eq!(core.hardware_pref, HardwarePref::Auto);
-            assert_eq!(core.palette, DmgPaletteChoice::GreenLcd);
+            assert_eq!(core.palette, DmgPaletteChoice::Green);
             assert_eq!(core.color_correction, ColorCorrection::Lcd);
             assert_eq!(core.gbc_dmg_palette, GbcDmgPalette::Auto);
         }
