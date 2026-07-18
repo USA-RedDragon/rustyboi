@@ -13,8 +13,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// SGB command numbers (packet byte 0, bits 7-3). Only the ones we act on are
-/// named; the rest are decoded but handled as no-ops (cleanly stubbed).
+/// SGB command numbers (packet byte 0, bits 7-3), per Pan Docs "SGB Command"
+/// numbering. Only the ones we act on are named; the rest are decoded but
+/// handled as no-ops (cleanly stubbed).
 mod cmd {
     pub const PAL01: u8 = 0x00;
     pub const PAL23: u8 = 0x01;
@@ -32,7 +33,13 @@ mod cmd {
     pub const MLT_REQ: u8 = 0x11;
     pub const CHR_TRN: u8 = 0x13;
     pub const PCT_TRN: u8 = 0x14;
-    pub const DATA_TRN: u8 = 0x0F;
+    /// DATA_SND ($0F): writes bytes carried IN THE PACKET to SNES WRAM. Despite
+    /// the `_SND`/`_TRN` similarity this is NOT a VRAM transfer — nothing is
+    /// read back from the GB screen.
+    pub const DATA_SND: u8 = 0x0F;
+    /// DATA_TRN ($10): transfers a 4KB VRAM block to SNES WRAM. A genuine VRAM
+    /// transfer, but SNES-side only (see the dispatch catch-all).
+    pub const DATA_TRN: u8 = 0x10;
     pub const SOUND: u8 = 0x08;
     pub const SOU_TRN: u8 = 0x09;
 }
@@ -419,7 +426,7 @@ impl Sgb {
             cmd::ATTR_DIV => self.attr_div(),
             cmd::ATTR_CHR => self.attr_chr(),
             cmd::ATTR_SET => self.attr_set(),
-            cmd::PAL_TRN | cmd::CHR_TRN | cmd::PCT_TRN | cmd::ATTR_TRN | cmd::DATA_TRN => {
+            cmd::PAL_TRN | cmd::CHR_TRN | cmd::PCT_TRN | cmd::ATTR_TRN => {
                 // VRAM block transfer: read 4KB from $8000 at the next VBlank.
                 // Byte 1 parameterises some transfers (CHR_TRN tile half); the
                 // command buffer is recycled before the read, so capture it now.
@@ -449,12 +456,33 @@ impl Sgb {
             cmd::SOU_TRN => {
                 // Transfers SNES-APU program/score/sample data via VRAM to the
                 // SNES sound chip. With no SNES APU modelled the data has no
-                // consumer, so this is recognised but not read (unlike DATA_TRN,
-                // whose VBlank VRAM read we do perform for framing fidelity).
+                // consumer, so this is recognised but not read.
+            }
+            cmd::DATA_SND | cmd::DATA_TRN => {
+                // $0F writes packet-carried bytes to SNES WRAM; $10 copies a 4KB
+                // VRAM block there. Both land SNES-side only, so like SOU_TRN
+                // they are recognised but not read.
+                //
+                // Neither may join the `_TRN` arm above. $0F is not a screen
+                // readout at all, and `pending_trn` is a SINGLE slot: either
+                // command arriving between a real PAL/CHR/PCT/ATTR_TRN and its
+                // VBlank would overwrite that slot and silently cancel the
+                // transfer, dropping the game's palette or border data. On
+                // hardware they write SNES WRAM and cannot cancel a queued
+                // transfer. ($0F was previously misnamed `DATA_TRN` and sat in
+                // that arm; see `data_snd_and_data_trn_do_not_pend_a_vram_read`.)
             }
             _ => {
-                // Other commands (DATA_SND, ICON_EN, ...) are decoded but have
-                // no GB-visible effect in our high-level model; ignore.
+                // Intentionally ignored (Pan Docs "SGB Command" numbering). Each
+                // acts purely on SNES-side state, which an HLE with no SNES core
+                // has no consumer for, and none is observable from the GB CPU:
+                //   ATRC_EN ($0C) enable/disable the SNES attraction demo
+                //   TEST_EN ($0D) enable the SNES test/burn-in mode
+                //   ICON_EN ($0E) enable/disable SGB icons + the sound menu
+                //   JUMP    ($12) set the SNES program counter / NMI+IRQ vectors
+                //   OBJ_TRN ($18) per-sprite SGB palettes (would need a per-pixel
+                //                 OBJ side-channel the pipeline does not carry)
+                //   PAL_PRI ($19) select ATF vs. per-game palette priority
             }
         }
     }
@@ -740,8 +768,9 @@ impl Sgb {
                 self.border_ready = true;
             }
             _ => {
-                // DATA_TRN writes SNES RAM: no GB-visible effect in our
-                // high-level model; the block is dropped.
+                // Unreachable via `dispatch`, which only pends the four screen-
+                // readout commands above; defensive fallback so a future
+                // addition to that arm drops its block rather than misreading it.
             }
         }
     }
@@ -1153,6 +1182,46 @@ mod tests {
         assert_eq!(sgb.attr[19], 2);
         assert_eq!(sgb.attr[20], 3, "wrapped to the next row");
         assert_eq!(sgb.attr[21], 0);
+    }
+
+    /// $0F is DATA_SND (packet bytes -> SNES WRAM) and $10 is DATA_TRN (VRAM ->
+    /// SNES WRAM); neither is a screen readout we can consume, so neither may
+    /// schedule a VBlank transfer. Regression: $0F was mislabelled `DATA_TRN`
+    /// and sat in the `_TRN` dispatch arm, so it pended a block that `apply_trn`
+    /// then dropped — and because `pending_trn` is a single slot, it CANCELLED
+    /// any real transfer still waiting for its VBlank.
+    #[test]
+    fn data_snd_and_data_trn_do_not_pend_a_vram_read() {
+        for cmd_num in [cmd::DATA_SND, cmd::DATA_TRN] {
+            let mut sgb = Sgb::new();
+            let mut pkt = [0u8; 16];
+            pkt[0] = (cmd_num << 3) | 1;
+            pkt[1] = 0xFF;
+            send_packet(&mut sgb, &pkt);
+            assert_eq!(
+                sgb.take_pending_trn(),
+                None,
+                "{cmd_num:#04x} must not schedule a VRAM transfer"
+            );
+        }
+
+        // ...and neither may cancel a PAL_TRN that is still awaiting its VBlank.
+        for cmd_num in [cmd::DATA_SND, cmd::DATA_TRN] {
+            let mut sgb = Sgb::new();
+            let mut pal = [0u8; 16];
+            pal[0] = (cmd::PAL_TRN << 3) | 1;
+            send_packet(&mut sgb, &pal);
+
+            let mut pkt = [0u8; 16];
+            pkt[0] = (cmd_num << 3) | 1;
+            send_packet(&mut sgb, &pkt);
+
+            assert_eq!(
+                sgb.take_pending_trn(),
+                Some(cmd::PAL_TRN),
+                "{cmd_num:#04x} must not cancel a pending PAL_TRN"
+            );
+        }
     }
 
     /// Feed ATTR_TRN a synthetic 4KB block, then ATTR_SET each file.
