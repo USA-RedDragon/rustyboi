@@ -28,7 +28,7 @@ pub const SGB_FRAME_SIZE: usize = SGB_FRAME_WIDTH * SGB_FRAME_HEIGHT;
 
 /// Convert an SGB/CGB RGB555 color word (bits: r=0-4, g=5-9, b=10-14) to RGB888
 /// using the linear 5-bit->8-bit scaling the emulator uses for CGB `Linear`.
-fn rgb555_to_rgb888(color: u16) -> (u8, u8, u8) {
+pub(crate) fn rgb555_to_rgb888(color: u16) -> (u8, u8, u8) {
     let r = color & 0x1F ;
     let g = (color >> 5) & 0x1F ;
     let b = (color >> 10) & 0x1F ;
