@@ -888,17 +888,36 @@ fn ffmpeg_available() -> bool {
         .unwrap_or(false)
 }
 
+/// An `ffmpeg` invocation at low CPU priority so a big media sweep stays
+/// responsive — the encoders yield to interactive apps instead of pinning
+/// cores. Unix runs it under `nice -n 19` (always present on Linux/macOS);
+/// elsewhere plain ffmpeg.
+fn ffmpeg_command() -> Command {
+    #[cfg(unix)]
+    {
+        let mut c = Command::new("nice");
+        c.args(["-n", "19", "ffmpeg"]);
+        c
+    }
+    #[cfg(not(unix))]
+    {
+        Command::new("ffmpeg")
+    }
+}
+
 /// H.264 encoder reading rawvideo rgb24 over stdin -> a temp mp4. H.264 plays
 /// in every browser (HEVC did not). `-threads 1` caps x264 since the sweep
-/// already parallelizes across ROMs; `-g 300` (long GOP) + `veryslow`/`crf 28`
-/// exploit the heavy temporal redundancy of tiny 160x144 menu-heavy clips.
+/// already parallelizes across ROMs; `-g 300` (long GOP) + `crf 28` exploit the
+/// heavy temporal redundancy of tiny 160x144 clips. `veryfast`: at 160x144 the
+/// slower presets are ~2x the CPU for NO size win (measured slightly LARGER on
+/// gameplay), so veryfast is both faster and smaller across a big library.
 fn spawn_encoder(out: &Path) -> std::io::Result<std::process::Child> {
-    Command::new("ffmpeg")
+    ffmpeg_command()
         .args([
             "-loglevel", "error",
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "160x144",
             "-framerate", "4194304/70224", "-i", "-",
-            "-c:v", "libx264", "-preset", "veryslow", "-crf", "28",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
             "-g", "300", "-threads", "1",
             "-pix_fmt", "yuv420p", "-f", "mp4",
         ])
@@ -914,7 +933,7 @@ fn spawn_encoder(out: &Path) -> std::io::Result<std::process::Child> {
 /// No `-shortest`: the whole run's video is the point, so keep every frame even
 /// when the audio track is marginally shorter (it just falls silent at the tail).
 fn mux_av(video: &Path, pcm: &Path, out: &Path) -> bool {
-    let status = Command::new("ffmpeg")
+    let status = ffmpeg_command()
         .args(["-loglevel", "error", "-i"])
         .arg(video)
         .args(["-f", "s16le", "-ar", "44100", "-ac", "2", "-i"])
