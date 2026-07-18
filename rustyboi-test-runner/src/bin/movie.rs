@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[path = "shared/imaging.rs"]
+#[allow(dead_code)] // shared toolbox: this bin uses a subset (e.g. not MonoPalette::Gray)
 mod imaging;
 use imaging::{base64, encode_rgb_png, frame_rgb, html_escape};
 

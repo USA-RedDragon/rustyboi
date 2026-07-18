@@ -4,18 +4,44 @@
 
 use rustyboi_core_lib::gb::Frame;
 
-/// GB pixel buffer -> RGB888 (monochrome mapped to the GreenLcd palette, the
-/// emulator's default DMG palette).
+/// Palette for mapping DMG shade indices (0-3) to RGB. `Color` frames already
+/// carry RGB888 and ignore this.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MonoPalette {
+    /// The DMG's green LCD tint — closest to an original Game Boy's screen.
+    DmgGreen,
+    /// Neutral grayscale = the SGB default system palette (0x7FFF/0x56B5/0x294A/
+    /// 0x0000 expanded linearly). The Super Game Boy has no LCD: it maps the DMG
+    /// shades through SNES palette RAM and drives them to a TV, so a game that
+    /// sends no PAL command shows this gray ramp, NOT green. Also the closest
+    /// match for the Pocket's (MGB) black-and-white LCD.
+    Gray,
+}
+
+/// GB pixel buffer -> RGB888 using the DMG green palette (the historical default
+/// for the DMG-oriented tools). Prefer [`frame_rgb_pal`] when the target
+/// hardware matters (e.g. SGB output is not green).
 pub fn frame_rgb(frame: &Frame) -> Vec<u8> {
+    frame_rgb_pal(frame, MonoPalette::DmgGreen)
+}
+
+/// GB pixel buffer -> RGB888 with an explicit monochrome palette. `Color` frames
+/// are passed through verbatim (the core already applied the CGB/SGB palette and
+/// any LCD correction).
+pub fn frame_rgb_pal(frame: &Frame, mono: MonoPalette) -> Vec<u8> {
+    let lut: [[u8; 3]; 4] = match mono {
+        MonoPalette::DmgGreen => [
+            [0xE0, 0xF8, 0xD0],
+            [0x88, 0xC0, 0x70],
+            [0x34, 0x68, 0x56],
+            [0x08, 0x18, 0x20],
+        ],
+        MonoPalette::Gray => [[255, 255, 255], [172, 172, 172], [82, 82, 82], [0, 0, 0]],
+    };
     match frame {
         Frame::Monochrome(data) => data
             .iter()
-            .flat_map(|p| match p {
-                0 => [0xE0, 0xF8, 0xD0],
-                1 => [0x88, 0xC0, 0x70],
-                2 => [0x34, 0x68, 0x56],
-                _ => [0x08, 0x18, 0x20],
-            })
+            .flat_map(|&p| lut[(p as usize).min(3)])
             .collect(),
         Frame::Color(data) => data.to_vec(),
     }
