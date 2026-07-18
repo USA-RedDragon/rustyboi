@@ -455,22 +455,35 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     // Sort by rom_sha so the committed baseline has a stable, name-free order.
     rows.sort_by(|a, b| a.rom_sha.cmp(&b.rom_sha));
 
-    // BIOS meta capture (once per media-matrix hardware model): the boot
-    // animation from power-on to cart handoff. Produces BOTH a regression row in
-    // the manifest (a deterministic `hash_all` over every boot frame, so
-    // `compare` flags boot-behavior drift) AND gallery media (poster always;
-    // H.264/AAC video when videos are on). Gated on screenshots being enabled
-    // (the media default); `--no-bios-meta` opts out; `--no-screens` disables it
-    // entirely (no rows, no media). Wholly separate from `emulate` — its own
-    // synthetic cart, ADDITIONAL rows keyed `bios_<tag>` that never touch or
-    // reorder any game row's bytes.
+    // BIOS meta capture (once per bootable hardware model): the boot animation
+    // from power-on to cart handoff. Produces BOTH a regression row in the
+    // manifest (a deterministic `hash_all` over every boot frame, so `compare`
+    // flags boot-behavior drift) AND gallery media (poster when screens on;
+    // H.264/AAC video when videos are on). INDEPENDENT of the game `--hardware`
+    // matrix: every model that has a provisioned boot ROM is captured, so the
+    // boot rows are identical regardless of media selection or CI trimming.
+    // `--no-bios-meta` is the full opt-out; `--no-screens`/`--no-videos` drop the
+    // media but NOT the hash row (the gate must be consistent either way).
+    // capture_bios cleanly skips (logs once) any model whose boot ROM is absent.
+    // Wholly separate from `emulate` — its own synthetic cart, ADDITIONAL rows
+    // keyed `bios_<tag>` that never touch or reorder any game row's bytes.
+    const BOOT_MODELS: [Hardware; 10] = [
+        Hardware::DMG,
+        Hardware::DMG0,
+        Hardware::MGB,
+        Hardware::SGB,
+        Hardware::SGB2,
+        Hardware::CGB0,
+        Hardware::CGBB,
+        Hardware::CGB,
+        Hardware::CGBE,
+        Hardware::AGB,
+    ];
     let mut bios_rows: Vec<Row> = Vec::new();
-    if !no_bios_meta
-        && let Some(sdir) = &cfg.screens_dir
-    {
-        for &hw in &cfg.hardware {
+    if !no_bios_meta {
+        for hw in BOOT_MODELS {
             let tag = hw_tag(hw);
-            match capture_bios(sdir, cfg.videos_dir.as_deref(), hw, bios_dir.as_deref(), timeout_secs) {
+            match capture_bios(cfg.screens_dir.as_deref(), cfg.videos_dir.as_deref(), hw, bios_dir.as_deref(), timeout_secs) {
                 Ok(Some(b)) => {
                     let vdur = b.frames as f64 * FPS_DEN as f64 / FPS_NUM as f64;
                     match b.handoff_frame {
@@ -1182,15 +1195,16 @@ struct BiosOut {
 /// — when `videos_dir` is set (ffmpeg present, videos enabled) — streaming every
 /// frame to the H.264 encoder with the APU boot "ding" muxed in as AAC, exactly
 /// the game-clip pipeline. Stops the frame after the boot ROM hands off (FF50
-/// flips to 0xFF). Emits `screens/bios_<tag>.webp` always and
-/// `videos/bios_<tag>.mp4` when video is on.
+/// flips to 0xFF). Emits `screens/bios_<tag>.webp` when `screens_dir` is set and
+/// `videos/bios_<tag>.mp4` when video is on; the `hash_all` regression row is
+/// returned regardless of media so the gate is consistent with or without media.
 ///
 /// Returns Ok(None) (logged once) when the model has no provisioned boot ROM or
-/// the file is absent — that's how SGB stays skipped until the user supplies
-/// `sgb_boot.bin`. Entirely separate from `emulate`: it builds its own cart and
+/// the file is absent — that's how a missing dump stays skipped until the user
+/// supplies it. Entirely separate from `emulate`: it builds its own cart and
 /// never perturbs any game row or hash.
 fn capture_bios(
-    screens_dir: &Path,
+    screens_dir: Option<&Path>,
     videos_dir: Option<&Path>,
     hw: Hardware,
     bios_dir: Option<&Path>,
@@ -1319,8 +1333,11 @@ fn capture_bios(
         let _ = std::fs::remove_file(tp);
     }
 
-    // Poster = the handoff frame (or the last captured frame if capped).
-    write_poster_png(screens_dir, "bios", &tag, poster.as_ref());
+    // Poster = the handoff frame (or the last captured frame if capped). Gated on
+    // screens being enabled; the hash row below is emitted regardless.
+    if let Some(sdir) = screens_dir {
+        write_poster_png(sdir, "bios", &tag, poster.as_ref());
+    }
 
     Ok(Some(BiosOut {
         frames,
