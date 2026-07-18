@@ -172,13 +172,26 @@ fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks
             "-C target-cpu=cortex-a55 -C target-feature=+outline-atomics",
         )
     }
-    inputs.dir(rustWorkspaceRoot.dir("rustyboi-platform/src"))
-    inputs.dir(rustWorkspaceRoot.dir("rustyboi-core/src"))
-    inputs.dir(rustWorkspaceRoot.dir("rustyboi-egui/src"))
-    inputs.dir(rustWorkspaceRoot.dir("rustyboi-debugger/src"))
+    // Full workspace-crate dependency closure of rustyboi-platform (verify with
+    // `cargo metadata`); a crate missing here leaves this task UP-TO-DATE after
+    // edits to it, packaging a stale .so. build.rs goes through files() so
+    // crates without one are tolerated (and picked up if added later).
+    listOf(
+        "rustyboi-platform",
+        "rustyboi-core",
+        "rustyboi-debugger",
+        "rustyboi-egui",
+        "rustyboi-frontend",
+        "rustyboi-session",
+    ).forEach { crate ->
+        inputs.dir(rustWorkspaceRoot.dir("$crate/src"))
+        inputs.file(rustWorkspaceRoot.file("$crate/Cargo.toml"))
+        inputs.files(rustWorkspaceRoot.file("$crate/build.rs"))
+    }
+    // Compiled into rustyboi-frontend via include_wgsl!.
+    inputs.dir(rustWorkspaceRoot.dir("rustyboi-frontend/shaders"))
     inputs.file(rustWorkspaceRoot.file("Cargo.toml"))
     inputs.file(rustWorkspaceRoot.file("Cargo.lock"))
-    inputs.file(rustWorkspaceRoot.file("rustyboi-platform/Cargo.toml"))
     abis.forEach { outputs.dir(jniLibsDir.dir(it)) }
 
     // cargo-ndk copies every cdylib the build produced, but only
