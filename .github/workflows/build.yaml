@@ -5,10 +5,15 @@ on:
 
 permissions:
   contents: read
+  actions: read   # pgo-restore polls the caches + runs API
 
 concurrency:
   group: '${{ github.workflow }} @ ${{ github.ref }}'
   cancel-in-progress: true
+
+# PGO profiles come from the standalone PGO workflow (pgo.yaml); each build job
+# restores them via .github/actions/pgo-restore (waits while generating,
+# degrades loudly if the PGO run failed).
 
 jobs:
   setup:
@@ -17,43 +22,19 @@ jobs:
     outputs:
       libretro: ${{ steps.gen.outputs.libretro }}
       native: ${{ steps.gen.outputs.native }}
-      has_roms: ${{ steps.gen.outputs.has_roms }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - id: gen
         shell: bash
-        env:
-          ROMS_URL: ${{ secrets.ROMS_URL }}
         run: |
           {
             echo "libretro=$(. tools/rust-cross.sh && rc_names_libretro | jq -Rsc 'split("\n")|map(select(length>0))')"
             echo "native=$(.   tools/rust-cross.sh && rc_names_native   | jq -Rsc 'split("\n")|map(select(length>0))')"
-            echo "has_roms=$([ -n "$ROMS_URL" ] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
-
-  pgo:
-    name: pgo
-    needs: setup
-    if: ${{ needs.setup.outputs.has_roms == 'true' }}
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Restore or generate PGO profile
-        uses: ./.github/actions/pgo
-        with:
-          roms-url: ${{ secrets.ROMS_URL }}
-          roms-password: ${{ secrets.ROMS_PASSWORD }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: pgo
-          path: target/pgo/
-          retention-days: 1
-          if-no-files-found: error
 
   libretro:
     name: 'libretro / ${{ matrix.name }}'
-    needs: [setup, pgo]
-    if: ${{ always() && needs.setup.result == 'success' }}
+    needs: setup
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -63,11 +44,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: ./.github/actions/free-disk-space
       - name: PGO profile
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: pgo
-          path: target/pgo
-        continue-on-error: true   # no profile (ROMS_URL unset / gen failed) => plain build
+        uses: ./.github/actions/pgo-restore
       - name: Build libretro ${{ matrix.name }}
         run: make libretro TARGETS=${{ matrix.name }}
       - name: Publish libretro ${{ matrix.name }}
@@ -81,8 +58,7 @@ jobs:
 
   native:
     name: 'native / ${{ matrix.name }}'
-    needs: [setup, pgo]
-    if: ${{ always() && needs.setup.result == 'success' }}
+    needs: setup
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -92,11 +68,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: ./.github/actions/free-disk-space
       - name: PGO profile
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: pgo
-          path: target/pgo
-        continue-on-error: true
+        uses: ./.github/actions/pgo-restore
       - name: Build native ${{ matrix.name }}
         run: make native TARGETS=${{ matrix.name }}
       - name: Publish native ${{ matrix.name }}
@@ -110,8 +82,6 @@ jobs:
 
   android:
     name: 'android / ${{ matrix.abi }}'
-    needs: [setup, pgo]
-    if: ${{ always() && needs.setup.result == 'success' }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -121,11 +91,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: ./.github/actions/free-disk-space
       - name: PGO profile
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: pgo
-          path: target/pgo
-        continue-on-error: true
+        uses: ./.github/actions/pgo-restore
       - name: Build android ${{ matrix.abi }}
         shell: bash
         run: . tools/rust-cross.sh && rc_run 'make android RELEASE=1 ABI=${{ matrix.abi }}'
@@ -146,18 +112,12 @@ jobs:
 
   android-bundle:
     name: android / aab
-    needs: [setup, pgo, android]
-    if: ${{ always() && needs.setup.result == 'success' && needs.android.result == 'success' }}
+    needs: android
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: ./.github/actions/free-disk-space
-      - name: PGO profile
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: pgo
-          path: target/pgo
-        continue-on-error: true
+      # No PGO restore: SKIP_RUST=1 below never compiles Rust.
       - name: Download per-ABI native libs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -187,18 +147,12 @@ jobs:
 
   web:
     name: web
-    needs: [setup, pgo]
-    if: ${{ always() && needs.setup.result == 'success' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: ./.github/actions/free-disk-space
       - name: PGO profile
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: pgo
-          path: target/pgo
-        continue-on-error: true
+        uses: ./.github/actions/pgo-restore
       - name: Build web
         shell: bash
         run: . tools/rust-cross.sh && rc_run 'make web'
@@ -213,18 +167,12 @@ jobs:
 
   ios:
     name: ios
-    needs: [setup, pgo]
-    if: ${{ always() && needs.setup.result == 'success' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: ./.github/actions/free-disk-space
       - name: PGO profile
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: pgo
-          path: target/pgo
-        continue-on-error: true
+        uses: ./.github/actions/pgo-restore
       - name: Build ios
         run: make ios
       - name: Publish ios

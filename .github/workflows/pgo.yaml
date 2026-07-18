@@ -1,0 +1,79 @@
+name: PGO
+
+# The ONE place PGO profiles are generated. Consumers (Build / Test Suites /
+# Library Sweep) never generate: they restore this workflow's actions-cache
+# entry via .github/actions/pgo-restore, which polls the run for the same
+# commit while the key (tools/pgo-cache-key.sh: Cargo.lock + rust-cross
+# toolchain) is still being generated. Runs on the same events as its
+# consumers so the cache scopes line up: pull_request saves land in the
+# merge-ref scope consumer PR runs read; push covers branch + main scopes.
+# On a warm cache the run exits green early, so pollers always find a
+# completed PGO run per commit.
+# ROMS_URL/ROMS_PASSWORD are REQUIRED — fork PRs without the secrets fail
+# this workflow by design (loud > silent); consumers then degrade to plain
+# builds with a ::warning::, never a hard fail.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.ref }}'
+  cancel-in-progress: false
+
+jobs:
+  profile:
+    name: generate profile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Compute cache key
+        id: key
+        shell: bash
+        run: echo "key=$(tools/pgo-cache-key.sh)" >> "$GITHUB_OUTPUT"
+      - name: Probe cache
+        id: probe
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/pgo
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+      - name: Roomy docker disk
+        if: steps.probe.outputs.cache-hit != 'true'
+        uses: ./.github/actions/free-disk-space
+      - name: Fetch ROM library
+        if: steps.probe.outputs.cache-hit != 'true'
+        id: roms
+        uses: ./.github/actions/rom-library
+        with:
+          roms-url: ${{ secrets.ROMS_URL }}
+          roms-password: ${{ secrets.ROMS_PASSWORD }}
+      - name: Generate profile
+        if: steps.probe.outputs.cache-hit != 'true'
+        shell: bash
+        run: make pgo-gen CONTAINER=1 ROMS="${{ steps.roms.outputs.lib }}/GB ${{ steps.roms.outputs.lib }}/GBC"
+      - name: Smoke-test profile
+        if: steps.probe.outputs.cache-hit != 'true'
+        shell: bash
+        # Bare (no `|| true`): freshly generated for the container toolchain,
+        # so pgo-flags must succeed AND emit flags.
+        run: . tools/rust-cross.sh && rc_run 'flags="$(make -s pgo-flags)" && test -n "$flags"'
+      - name: Save profile cache
+        if: steps.probe.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/pgo
+          key: ${{ steps.key.outputs.key }}
+      - name: Upload profile artifact (debugging aid)
+        if: steps.probe.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pgo
+          path: target/pgo/
+          retention-days: 3
+          if-no-files-found: error

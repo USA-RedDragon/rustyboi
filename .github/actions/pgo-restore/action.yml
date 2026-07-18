@@ -1,0 +1,119 @@
+name: PGO profile (restore)
+description: >-
+  Consumer side of the PGO pipeline. The PGO workflow (pgo.yaml) is the ONE
+  place profiles are generated; this action restores its actions-cache entry
+  (key: tools/pgo-cache-key.sh). When the key isn't present yet (fresh
+  Cargo.lock / toolchain bump), it WAITS on the PGO run for the same commit
+  instead of failing. Loudness split: a profile that should exist but fails to
+  restore or smoke-test is breakage -> fail the job; a profile legitimately
+  unavailable (PGO run failed / cancelled / wait budget exhausted) degrades to
+  a plain build with a ::warning:: — consumers never hard-fail on "not ready".
+  Needs `actions: read` on the workflow token for the caches + runs API.
+inputs:
+  wait-minutes:
+    description: Wait budget for the PGO workflow before degrading to a plain build
+    required: false
+    default: '45'
+  smoke:
+    description: >-
+      Post-restore smoke mode. 'container': the consumer builds through the
+      rust-cross container the profile was generated with, so `make pgo-flags`
+      must emit flags — empty is breakage. 'host': the host rustc can
+      legitimately differ from the container's, so empty flags only warn.
+    required: false
+    default: 'container'
+  github-token:
+    description: Token used to poll the caches API and PGO runs (actions:read)
+    required: false
+    default: ${{ github.token }}
+outputs:
+  restored:
+    description: "'true' if a profile was restored into target/pgo"
+    value: ${{ steps.poll.outputs.found }}
+runs:
+  using: composite
+  steps:
+    - name: Wait for PGO profile
+      id: poll
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        WAIT_MINUTES: ${{ inputs.wait-minutes }}
+        # For pull_request events the PGO run's head sha is the PR head, not
+        # github.sha (the synthetic merge commit).
+        HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      run: |
+        key="$(tools/pgo-cache-key.sh)"
+        echo "key=$key" >> "$GITHUB_OUTPUT"
+        if [ -z "${GH_TOKEN:-}" ]; then
+          echo "::error::pgo-restore: empty github-token (polling needs actions: read)"
+          exit 1
+        fi
+        wait_min="${WAIT_MINUTES:-45}"
+        poll="${RB_PGO_POLL_SECONDS:-30}"
+        deadline=$(( SECONDS + wait_min * 60 ))
+        grace=$(( SECONDS + 300 ))    # the PGO run may not be visible yet
+        ok_by=""
+        found=""
+        reason=""
+        while :; do
+          n="$(gh api "repos/$GITHUB_REPOSITORY/actions/caches?key=$key" --jq '.total_count' 2>/dev/null || true)"
+          if [ -n "$n" ] && [ "$n" -gt 0 ]; then found=true; break; fi
+          runs="$(gh run list --workflow=pgo.yaml --commit "$HEAD_SHA" --limit 20 --json status,conclusion 2>/dev/null || echo '[]')"
+          active="$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")"
+          succ="$(jq '[.[] | select(.conclusion == "success")] | length' <<<"$runs")"
+          total="$(jq 'length' <<<"$runs")"
+          if [ -z "$n" ]; then
+            state="caches API unreachable"
+          elif [ "$active" -gt 0 ]; then
+            state="PGO run in progress"
+          elif [ "$succ" -gt 0 ]; then
+            # Success but no cache yet: the save lands at the end of the run;
+            # allow a short window before concluding it will never appear.
+            [ -n "$ok_by" ] || ok_by=$(( SECONDS + 180 ))
+            if [ "$SECONDS" -ge "$ok_by" ]; then
+              reason="PGO run succeeded but cache '$key' never appeared"; break
+            fi
+            state="PGO run succeeded; waiting for its cache save"
+          elif [ "$total" -gt 0 ]; then
+            reason="PGO run for $HEAD_SHA concluded: $(jq -r '[.[].conclusion] | join(",")' <<<"$runs")"
+            break
+          elif [ "$SECONDS" -lt "$grace" ]; then
+            state="no PGO run visible for $HEAD_SHA yet"
+          else
+            reason="no PGO run appeared for $HEAD_SHA"; break
+          fi
+          if [ "$SECONDS" -ge "$deadline" ]; then
+            reason="wait budget (${wait_min}m) exhausted: $state"; break
+          fi
+          echo "pgo-restore: $state; retry in ${poll}s ($(( (deadline - SECONDS + 59) / 60 ))m left)"
+          sleep "$poll"
+        done
+        if [ -n "$found" ]; then
+          echo "pgo-restore: profile cache '$key' is available"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::PGO profile unavailable ($reason); building without PGO"
+          echo "found=false" >> "$GITHUB_OUTPUT"
+        fi
+    - name: Restore PGO profile
+      if: steps.poll.outputs.found == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: target/pgo
+        key: ${{ steps.poll.outputs.key }}
+        # The poll saw the key: a miss here is breakage, not "not ready".
+        fail-on-cache-miss: true
+    - name: Smoke-test profile (container)
+      if: steps.poll.outputs.found == 'true' && inputs.smoke == 'container'
+      shell: bash
+      # Bare (no `|| true`): the profile was generated by the container
+      # toolchain, so pgo-flags must succeed AND emit flags — a silently
+      # un-PGO'd build is breakage the best-effort build lines would swallow.
+      run: . tools/rust-cross.sh && rc_run 'flags="$(make -s pgo-flags)" && test -n "$flags"'
+    - name: Smoke-test profile (host)
+      if: steps.poll.outputs.found == 'true' && inputs.smoke == 'host'
+      shell: bash
+      run: |
+        flags="$(make -s pgo-flags)"
+        [ -n "$flags" ] || echo "::warning::PGO profile restored but not usable by the host rustc; building without PGO"

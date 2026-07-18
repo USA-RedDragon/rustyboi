@@ -2,9 +2,11 @@ name: Library Sweep
 
 # Behavioral + boot regression gate across the entire commercial game library
 # (~4000 ROMs = ~4000 canaries, far wider than the test suites), plus an HTML
-# screenshot gallery artifact. Requires the ROMS_URL secret: a zip of the
-# library preserving the GB/ and GBC/ directory layout (./GB/<rom>.zip,
-# ./GBC/<rom>.zip). Skips cleanly when the secret is absent (forks).
+# screenshot gallery artifact. ROMS_URL/ROMS_PASSWORD (library zip preserving
+# the GB/ + GBC/ layout: ./GB/<rom>.zip, ./GBC/<rom>.zip) and
+# BIOS_URL/BIOS_PASSWORD (boot ROMs) are REQUIRED — a missing secret fails the
+# run loudly instead of silently skipping. PGO comes from the standalone PGO
+# workflow (pgo.yaml) via .github/actions/pgo-restore.
 
 on:
   push:
@@ -13,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  actions: read   # pgo-restore polls the caches + runs API
 
 concurrency:
   group: '${{ github.workflow }} @ ${{ github.ref }}'
@@ -25,34 +28,27 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    outputs:
-      have: ${{ steps.gate.outputs.have }}
-    env:
-      ROMS_URL: ${{ secrets.ROMS_URL }}
-      ROMS_PASSWORD: ${{ secrets.ROMS_PASSWORD }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Check for ROMS_URL secret
-        id: gate
+      # Fail fast, before 40 sweep shards spin up on a misconfigured repo.
+      - name: Require sweep secrets
         shell: bash
+        env:
+          ROMS_URL: ${{ secrets.ROMS_URL }}
+          ROMS_PASSWORD: ${{ secrets.ROMS_PASSWORD }}
+          BIOS_URL: ${{ secrets.BIOS_URL }}
+          BIOS_PASSWORD: ${{ secrets.BIOS_PASSWORD }}
         run: |
-          if [ -n "$ROMS_URL" ]; then
-            echo "have=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "ROMS_URL secret not set; skipping library sweep"
-          fi
+          ok=1
+          for s in ROMS_URL ROMS_PASSWORD BIOS_URL BIOS_PASSWORD; do
+            [ -n "${!s}" ] || { echo "::error::$s secret is required for the library sweep"; ok=0; }
+          done
+          [ "$ok" = 1 ] || exit 1
       - name: Roomy docker disk
-        if: steps.gate.outputs.have == '1'
         uses: ./.github/actions/free-disk-space
-      - name: Restore or generate PGO profile
-        if: steps.gate.outputs.have == '1'
-        uses: ./.github/actions/pgo
-        with:
-          roms-url: ${{ secrets.ROMS_URL }}
-          roms-password: ${{ secrets.ROMS_PASSWORD }}
-          free-disk: 'false'
+      - name: PGO profile
+        uses: ./.github/actions/pgo-restore
       - name: Cache build dir
-        if: steps.gate.outputs.have == '1'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -61,11 +57,9 @@ jobs:
           key: sweep-${{ hashFiles('**/Cargo.lock') }}-pgo${{ hashFiles('target/pgo/**') }}
           restore-keys: sweep-
       - name: Build sweep
-        if: steps.gate.outputs.have == '1'
         shell: bash
         run: . tools/rust-cross.sh && rc_run 'RUSTFLAGS="$(make -s pgo-flags 2>/dev/null || true) ${RUSTFLAGS:-}" cargo build --release -p rustyboi-test-runner --bin sweep'
       - name: Upload sweep binary
-        if: steps.gate.outputs.have == '1'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sweep-bin
@@ -73,7 +67,6 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Build replay decoder wasm
-        if: steps.gate.outputs.have == '1'
         shell: bash
         run: |
           rustup target add wasm32-unknown-unknown
@@ -82,7 +75,6 @@ jobs:
             curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
           make replay-web
       - name: Upload replay decoder
-        if: steps.gate.outputs.have == '1'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: replay-decoder
@@ -94,7 +86,6 @@ jobs:
 
   sweep:
     needs: build
-    if: needs.build.outputs.have == '1'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -106,8 +97,6 @@ jobs:
           31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
         ]
     env:
-      ROMS_URL: ${{ secrets.ROMS_URL }}
-      ROMS_PASSWORD: ${{ secrets.ROMS_PASSWORD }}
       BIOS_URL: ${{ secrets.BIOS_URL }}
       BIOS_PASSWORD: ${{ secrets.BIOS_PASSWORD }}
     steps:
@@ -119,22 +108,23 @@ jobs:
         with:
           name: sweep-bin
       - name: Download ROM library
-        shell: bash
-        run: |
-          curl -fsSL "$ROMS_URL" -o /tmp/roms.zip
-          unzip -P "$ROMS_PASSWORD" -q /tmp/roms.zip -d "$RUNNER_TEMP/romlib"
-          LIB="$(dirname "$(find "$RUNNER_TEMP/romlib" -maxdepth 3 -type d -name GB | head -1)")"
-          [ -d "$LIB/GB" ] && [ -d "$LIB/GBC" ] || { echo "GB/ + GBC/ not found in zip" >&2; exit 1; }
-          echo "LIB=$LIB" >> "$GITHUB_ENV"
+        id: romlib
+        uses: ./.github/actions/rom-library
+        with:
+          roms-url: ${{ secrets.ROMS_URL }}
+          roms-password: ${{ secrets.ROMS_PASSWORD }}
       - name: Download boot ROMs
-        if: env.BIOS_URL != ''
         shell: bash
         run: |
+          [ -n "$BIOS_URL" ]      || { echo "::error::BIOS_URL secret is required (BIOS boot rows are part of the gate)"; exit 1; }
+          [ -n "$BIOS_PASSWORD" ] || { echo "::error::BIOS_PASSWORD secret is required"; exit 1; }
           curl -fsSL "$BIOS_URL" -o /tmp/bios.zip
           unzip -P "$BIOS_PASSWORD" -q -o /tmp/bios.zip -d bios
           echo "boot ROMs: $(ls bios/*.bin 2>/dev/null | wc -l)"
       - name: Run library sweep (shard ${{ matrix.shard }}/${{ strategy.job-total }})
         shell: bash
+        env:
+          LIB: ${{ steps.romlib.outputs.lib }}
         run: |
           chmod +x sweep   # upload-artifact drops the executable bit
           # Only shard 1 emits the ROM-independent BIOS boot rows; every other
@@ -160,7 +150,8 @@ jobs:
 
   recombine:
     needs: [build, sweep]
-    if: ${{ always() && needs.build.outputs.have == '1' }}
+    # always(): recombine even when some shards failed (build must have passed).
+    if: ${{ always() && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

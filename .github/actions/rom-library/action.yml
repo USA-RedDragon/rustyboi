@@ -1,0 +1,34 @@
+name: ROM library
+description: >-
+  Fetch + unpack the commercial ROM library zip (preserving the GB/ + GBC/
+  directory layout) and output where it landed. The secrets are REQUIRED: an
+  empty url or password is a loud failure, never a silent skip.
+inputs:
+  roms-url:
+    description: ROMS_URL secret (zip preserving GB/ + GBC/)
+    required: true
+  roms-password:
+    description: ROMS_PASSWORD secret
+    required: true
+outputs:
+  lib:
+    description: Directory containing GB/ and GBC/
+    value: ${{ steps.fetch.outputs.lib }}
+runs:
+  using: composite
+  steps:
+    - name: Fetch ROM library
+      id: fetch
+      shell: bash
+      env:
+        ROMS_URL: ${{ inputs.roms-url }}
+        ROMS_PASSWORD: ${{ inputs.roms-password }}
+      run: |
+        # `required: true` on action inputs is documentation only — enforce it.
+        [ -n "$ROMS_URL" ]      || { echo "::error::ROMS_URL secret is required"; exit 1; }
+        [ -n "$ROMS_PASSWORD" ] || { echo "::error::ROMS_PASSWORD secret is required"; exit 1; }
+        curl -fsSL "$ROMS_URL" -o /tmp/roms.zip
+        unzip -P "$ROMS_PASSWORD" -q /tmp/roms.zip -d "$RUNNER_TEMP/romlib"
+        LIB="$(dirname "$(find "$RUNNER_TEMP/romlib" -maxdepth 3 -type d -name GB | head -1)")"
+        [ -d "$LIB/GB" ] && [ -d "$LIB/GBC" ] || { echo "::error::GB/ + GBC/ not found in ROM zip"; exit 1; }
+        echo "lib=$LIB" >> "$GITHUB_OUTPUT"
