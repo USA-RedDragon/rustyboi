@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: read
+  actions: read   # pgo-restore polls the caches + runs API
 
 concurrency:
   group: '${{ github.workflow }} @ ${{ github.ref }}'
@@ -37,41 +38,10 @@ jobs:
           path: test-roms/build
           retention-days: 1
 
-  setup:
-    name: check ROM secret
-    runs-on: ubuntu-24.04
-    outputs:
-      has_roms: ${{ steps.gen.outputs.has_roms }}
-    steps:
-      - id: gen
-        shell: bash
-        env:
-          ROMS_URL: ${{ secrets.ROMS_URL }}
-        run: echo "has_roms=$([ -n "$ROMS_URL" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-
-  pgo:
-    name: pgo
-    needs: setup
-    if: ${{ needs.setup.outputs.has_roms == 'true' }}
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Restore or generate PGO profile
-        uses: ./.github/actions/pgo
-        with:
-          roms-url: ${{ secrets.ROMS_URL }}
-          roms-password: ${{ secrets.ROMS_PASSWORD }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: pgo
-          path: target/pgo/
-          retention-days: 1
-          if-no-files-found: error
-
+  # PGO profiles come from the standalone PGO workflow (pgo.yaml); pgo-restore
+  # waits while it generates and degrades loudly if it failed.
   build-runner:
     name: 'runner / ${{ matrix.name }}'
-    needs: [setup, pgo]
-    if: ${{ always() && needs.setup.result == 'success' }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -89,11 +59,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: ./.github/actions/free-disk-space
       - name: PGO profile
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: pgo
-          path: target/pgo
-        continue-on-error: true
+        uses: ./.github/actions/pgo-restore
       - name: Build runner ${{ matrix.name }}
         run: make runner TARGETS=${{ matrix.name }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -361,10 +327,12 @@ jobs:
               ;;
           esac
 
+  # No PGO: `make coverage` builds its own instrumented tree and never reads
+  # target/pgo (coverage instrumentation and -Cprofile-use don't mix here).
   coverage:
     name: 'host / coverage'
     runs-on: ubuntu-24.04
-    needs: [build-roms, pgo]
+    needs: build-roms
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -377,12 +345,6 @@ jobs:
         with:
           name: first-party-roms
           path: test-roms/build
-      - name: PGO profile
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: pgo
-          path: target/pgo
-        continue-on-error: true
       - name: Cache cargo + build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

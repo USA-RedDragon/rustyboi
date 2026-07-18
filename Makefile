@@ -268,6 +268,9 @@ pgo-flags: ## Print the -Cprofile-use fragment for the active rustc (empty if no
 	if echo "$$err" | grep -qiE 'invalid instrumentation profile|bad magic|truncated profile|unsupported.*version|malformed'; then
 	  echo "pgo: profile incompatible with active rustc (regenerate: make pgo-gen); building without PGO" >&2
 	else
+	  # Profile checksum in -Cmetadata: PGO/non-PGO builds must not share
+	  # artifacts, and a regenerated profile must trigger recompilation.
+	  HASH="$$(cksum "$$PROFILE" | cut -d' ' -f1)"
 	  echo "-Cprofile-use=$$PROFILE -Cmetadata=pgo-$$HASH"
 	fi
 
