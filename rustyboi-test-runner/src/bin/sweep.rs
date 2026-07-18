@@ -82,7 +82,7 @@ mod imaging;
 #[path = "shared/masher.rs"]
 mod masher;
 use masher::masher;
-use imaging::{encode_rgb_webp, frame_rgb_pal, html_escape, MonoPalette};
+use imaging::{encode_rgb_webp, frame_rgb_shades, html_escape};
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Row {
@@ -186,19 +186,6 @@ struct RunCfg {
 /// CGB->"cgb", SGB->"sgb", AGB->"agb", etc.
 fn hw_tag(hw: Hardware) -> String {
     format!("{hw:?}").to_ascii_lowercase()
-}
-
-/// Monochrome palette for a model's media, so mono frames match the real screen.
-/// SGB/SGB2 output DMG shades through SNES palette RAM to a TV (no green LCD), so
-/// a game that issues no PAL command shows the SGB default gray ramp — not green.
-/// MGB (Game Boy Pocket) has a true black-and-white LCD, also grayscale not green.
-/// (Colorized SGB and all CGB/AGB output arrives as `Frame::Color` and ignores
-/// this.) The original DMG (and DMG0) keep the green LCD tint.
-fn mono_palette_for(hw: Hardware) -> MonoPalette {
-    match hw {
-        Hardware::MGB | Hardware::SGB | Hardware::SGB2 => MonoPalette::Gray,
-        _ => MonoPalette::DmgGreen,
-    }
 }
 
 /// Parse a hardware tag (case-insensitive) into a `Hardware`. Accepts the short
@@ -793,6 +780,9 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
     let mut gb = GB::new(hardware);
     gb.insert(cart);
     gb.skip_bios();
+    // Model-aware mono palette from the core (default LCD): DMG green, MGB olive,
+    // SGB/AGB neutral grey. Color frames ignore it (corrected in the PPU).
+    let shades = gb.mono_shades();
 
     // Checkpoints at warmup and every ~quarter of the measured window.
     let span = cfg.frames - cfg.warmup;
@@ -832,10 +822,10 @@ fn emulate(bytes: &[u8], seed: u64, cfg: &RunCfg) -> Result<EmuOut, String> {
             if frame_is_non_blank(&frame) {
                 boot_ok = true;
                 if cfg.screens_dir.is_some() {
-                    final_rgb = Some(frame_rgb_pal(&frame, mono_palette_for(hardware)));
+                    final_rgb = Some(frame_rgb_shades(&frame, &shades));
                 }
             } else if f + 1 == cfg.frames && final_rgb.is_none() && cfg.screens_dir.is_some() {
-                final_rgb = Some(frame_rgb_pal(&frame, mono_palette_for(hardware)));
+                final_rgb = Some(frame_rgb_shades(&frame, &shades));
             }
         }
         if f % 256 == 0 && started.elapsed().as_secs() > cfg.timeout_secs {
@@ -1016,6 +1006,7 @@ fn capture_media(
     let mut gb = GB::new(hardware);
     gb.insert(cart);
     gb.skip_bios();
+    let shades = gb.mono_shades();
 
     let tag = hw_tag(hardware);
     // Audio is drained only when a video is actually being encoded. Encode temps
@@ -1063,7 +1054,7 @@ fn capture_media(
 
         let in_tail = f + 120 >= cfg.frames;
         let need_rgb = encoder.is_some() || in_tail;
-        let rgb = need_rgb.then(|| frame_rgb_pal(&frame, mono_palette_for(hardware)));
+        let rgb = need_rgb.then(|| frame_rgb_shades(&frame, &shades));
 
         if let Some(child) = &mut encoder
             && let (Some(stdin), Some(rgb)) = (child.stdin.as_mut(), &rgb)
@@ -1291,6 +1282,7 @@ fn capture_bios(
     // or mismatched file Errs here and this model is skipped, not the whole run.
     gb.load_bios(&path.to_string_lossy()).map_err(|e| format!("load_bios: {e}"))?;
     // NO skip_bios: power-on PC=0 runs the boot ROM itself.
+    let shades = gb.mono_shades();
 
     // Video encoder + PCM sidecar (only when videos are on). The hash is computed
     // regardless, so the regression row exists even without ffmpeg.
@@ -1331,7 +1323,7 @@ fn capture_bios(
     for f in 0..MAX_BIOS_FRAMES {
         let (frame, _bp) = gb.run_until_frame(collect_audio);
         frames = f + 1;
-        let rgb = frame_rgb_pal(&frame, mono_palette_for(hw));
+        let rgb = frame_rgb_shades(&frame, &shades);
         if let Some(child) = &mut encoder
             && let Some(stdin) = child.stdin.as_mut()
             && stdin.write_all(&rgb).is_err()
