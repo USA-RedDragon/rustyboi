@@ -13,7 +13,7 @@
 //!   palette, and the run/pause/error bookkeeping, driving emulation and UI. It
 //!   surfaces OS-only work as [`app::PlatformRequest`]s for the platform. The
 //!   DMG presentation palettes are the session's
-//!   [`PaletteChoice`](rustyboi_session::PaletteChoice) (one source of truth).
+//!   [`DmgPaletteChoice`](rustyboi_session::DmgPaletteChoice) (one source of truth).
 //!
 //! The `rustyboi-platform` crate is a thin adapter around this: it creates the
 //! winit window + wgpu surface/device, pumps winit events, owns audio, file
@@ -45,7 +45,7 @@ pub mod egui_events {
 
 // Re-export the egui action + UI-state types the platform must name to build
 // the `SessionUiState` snapshot and match `GuiAction`s it resolves (file loads).
-pub use rustyboi_egui_lib::actions::{self, FileData, GuiAction, HardwareChoice, PaletteChoice, SessionUiState};
+pub use rustyboi_egui_lib::actions::{self, FileData, GuiAction, HardwareChoice, DmgPaletteChoice, SessionUiState};
 
 // The Android JNI glue (in `rustyboi-platform`) installs handlers and drives the
 // ROM-library panel through these; re-export them so the platform depends only
