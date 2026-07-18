@@ -37,7 +37,9 @@ fn uniform_bytes(transform: &[f32; 16], source: (f32, f32), effect: u32) -> Vec<
 /// Map the session's [`LcdEffect`] to the shader's effect selector.
 fn effect_code(effect: LcdEffect) -> u32 {
     match effect {
-        LcdEffect::Off => 0,
+        // Auto is resolved to a concrete effect before it reaches the renderer;
+        // treat any stray Auto as Off.
+        LcdEffect::Auto | LcdEffect::Off => 0,
         LcdEffect::Grid => 1,
         LcdEffect::Scanlines => 2,
     }

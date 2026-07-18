@@ -713,6 +713,7 @@ impl Gui {
 
                     ui.menu_button("LCD Effect", |ui| {
                         for (effect, label) in [
+                            (LcdEffect::Auto, "Auto"),
                             (LcdEffect::Off, "Off"),
                             (LcdEffect::Grid, "LCD grid"),
                             (LcdEffect::Scanlines, "Scanlines"),
@@ -1489,6 +1490,7 @@ impl Gui {
 
                         ui.label("LCD Effect");
                         for (effect, label) in [
+                            (LcdEffect::Auto, "Auto"),
                             (LcdEffect::Off, "Off"),
                             (LcdEffect::Grid, "LCD grid"),
                             (LcdEffect::Scanlines, "Scanlines"),

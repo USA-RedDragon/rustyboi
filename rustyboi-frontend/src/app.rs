@@ -727,7 +727,7 @@ impl App {
         // site): letterboxing, texture filter, and LCD post-process effect.
         renderer.set_scaling_mode(self.session.scaling_mode());
         renderer.set_texture_filter(self.session.texture_filter());
-        renderer.set_lcd_effect(self.session.lcd_effect());
+        renderer.set_lcd_effect(self.session.lcd_effect().resolve(self.session.hardware()));
         // Shrink the game region by the platform safe-area insets so it is not
         // drawn behind system bars / a display cutout (Android). No-op elsewhere.
         // Computed before `present` borrows self.
