@@ -3,9 +3,6 @@
   "extends": [
     "local>USA-RedDragon/renovate-configs"
   ],
-  "baseBranchPatterns": [
-    "claude"
-  ],
   "packageRules": [
     {
       "groupName": "egui",

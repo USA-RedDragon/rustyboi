@@ -665,7 +665,7 @@ mod tests {
                 ButtonState::default(),
             ],
             meta: MovieMeta {
-                author: "claude".into(),
+                author: "rustyboi".into(),
                 rom_name: "test".into(),
                 frame_count: 3,
                 note: "round-trip".into(),
