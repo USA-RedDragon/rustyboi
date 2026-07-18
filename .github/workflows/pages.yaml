@@ -31,6 +31,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           newest_run() { # newest non-expired artifact named $1 -> its run id
             gh api "repos/${{ github.repository }}/actions/artifacts?name=$1&per_page=100" \
