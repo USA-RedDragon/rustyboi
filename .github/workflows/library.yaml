@@ -41,9 +41,6 @@ jobs:
           else
             echo "ROMS_URL secret not set; skipping library sweep"
           fi
-      - name: Install ffmpeg
-        shell: bash
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Roomy docker disk
         if: steps.gate.outputs.have == '1'
         uses: ./.github/actions/free-disk-space
@@ -80,6 +77,25 @@ jobs:
           path: target/release/sweep
           if-no-files-found: error
           retention-days: 1
+      - name: Build replay decoder wasm
+        if: steps.gate.outputs.have == '1'
+        shell: bash
+        run: |
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends binaryen
+          command -v wasm-pack >/dev/null 2>&1 || \
+            curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+          make replay-web
+      - name: Upload replay decoder
+        if: steps.gate.outputs.have == '1'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: replay-decoder
+          path: |
+            rustyboi-replay-web/pkg/rustyboi_replay_web.js
+            rustyboi-replay-web/pkg/rustyboi_replay_web_bg.wasm
+          if-no-files-found: error
+          retention-days: 1
 
   sweep:
     needs: build
@@ -96,9 +112,6 @@ jobs:
       BIOS_PASSWORD: ${{ secrets.BIOS_PASSWORD }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install ffmpeg
-        shell: bash
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Roomy docker disk
         uses: ./.github/actions/free-disk-space
       - name: Fetch sweep binary
@@ -130,9 +143,9 @@ jobs:
           [ "${{ matrix.shard }}" != "1" ] || bios_flag=""
           ./sweep run --roms "$LIB/GB" "$LIB/GBC" --out shard-out --bios-dir bios \
             --shard ${{ matrix.shard }}/${{ strategy.job-total }} $SWEEP_MEDIA_ARGS $bios_flag
-          # Name the partial manifest per shard so recombine can merge N of them
-          # into one directory without collision.
           mv shard-out/manifest.jsonl shard-out/manifest-${{ matrix.shard }}.jsonl
+          [ ! -f shard-out/audio/map.json ] || \
+            mv shard-out/audio/map.json shard-out/audio/map-${{ matrix.shard }}.json
       - name: Upload shard
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -141,7 +154,8 @@ jobs:
           path: |
             shard-out/manifest-${{ matrix.shard }}.jsonl
             shard-out/screens
-            shard-out/videos
+            shard-out/recordings
+            shard-out/audio
           retention-days: 30
 
   recombine:
@@ -155,19 +169,27 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: sweep-bin
+      - name: Fetch replay decoder
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: replay-decoder
+          path: decoder
       - name: Gather shard outputs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: shard-*
           merge-multiple: true
           path: gathered
-      - name: Merge manifests
+      - name: Merge manifests + audio maps
         shell: bash
         run: |
           chmod +x sweep
           cat gathered/manifest-*.jsonl > gathered/merged.jsonl
           echo "merged $(ls gathered/manifest-*.jsonl | wc -l) shard manifests -> $(wc -l < gathered/merged.jsonl) rows"
+          jq -s add gathered/audio/map-*.json > gathered/audio/map.json
+          echo "audio: $(ls gathered/audio/*.rba | wc -l) unique streams, $(jq length gathered/audio/map.json) clip mappings"
       - name: Compare against baseline (GATE)
+        id: compare
         shell: bash
         run: |
           ./sweep compare \
@@ -181,16 +203,28 @@ jobs:
           ./sweep gallery \
             --manifest gathered/merged.jsonl \
             --screens gathered/screens \
-            --out gathered/gallery.html
-      - name: Upload artifacts
+            --decoder decoder \
+            --out gathered/index.html
+      - name: Upload report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: library-sweep
           path: |
-            gathered/gallery.html
-            gathered/screens
-            gathered/videos
             gathered/report.md
             gathered/merged.jsonl
+          retention-days: 30
+      - name: Publish compat gallery bundle
+        if: ${{ always() && steps.compare.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compat-gallery
+          path: |
+            gathered/index.html
+            gathered/rustyboi_replay_web.js
+            gathered/rustyboi_replay_web_bg.wasm
+            gathered/screens
+            gathered/recordings
+            gathered/audio
+          if-no-files-found: error
           retention-days: 30
