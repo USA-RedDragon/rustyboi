@@ -144,6 +144,19 @@ web: ## Build the wasm frontend (MODE=release|profiling)
 	echo "==> sw-version.js BUILD_ID=$$sw_id"
 	echo "Serve for Firefox:  (cd rustyboi-web/www && python3 -m http.server 8080)"
 
+replay-web:
+	@$(NEED_382)
+	OUT=pkg
+	WASM="rustyboi-replay-web/$$OUT/rustyboi_replay_web_bg.wasm"
+	echo "==> wasm-pack build rustyboi-replay-web (--release; bundled wasm-opt disabled)"
+	rm -rf "rustyboi-replay-web/$$OUT"
+	wasm-pack build rustyboi-replay-web --target web --out-dir "$$OUT" --release
+	if command -v wasm-opt >/dev/null 2>&1; then
+	  before=$$(stat -c%s "$$WASM")
+	  wasm-opt -O3 -all "$$WASM" -o "$$WASM.tmp"; mv "$$WASM.tmp" "$$WASM"
+	  echo "==> wasm-opt: $$before -> $$(stat -c%s "$$WASM") bytes"
+	fi
+
 android: ## Build the Android app (RELEASE=1 BUNDLE=1 [ABI=arm64-v8a])
 	@$(NEED_382)
 	$(MAKE) -C android build RELEASE='$(RELEASE)' BUNDLE='$(BUNDLE)' ABI='$(ABI)'

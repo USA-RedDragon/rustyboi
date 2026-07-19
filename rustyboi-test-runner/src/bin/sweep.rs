@@ -23,7 +23,10 @@
 //!   sweep run      --roms DIR... [--list FILE] --out DIR [--frames N]
 //!                  [--warmup N] [--jobs N] [--timeout SECS] [--no-screens]
 //!                  [--strip-names] [--only SUBSTR] [--shard K/N]
-//!       Sweep the library into DIR/manifest.jsonl + DIR/screens/*.webp.
+//!                  [--no-recordings] [--rec-frames N] [--videos]
+//!       Sweep the library into DIR/manifest.jsonl + DIR/screens/*.webp +
+//!       DIR/recordings/*.rbr (native pixel-perfect gallery clips, on by
+//!       default; `--no-recordings` to skip, `--videos` for legacy mp4 instead).
 //!       No-Intro names are always on: each ROM is labeled by its canonical
 //!       No-Intro title (matched via CRC32 of the extracted ROM against the
 //!       public GB/GBC DATs, auto-fetched+cached; see nointro_map). Unmatched
@@ -152,9 +155,9 @@ fn main() -> ExitCode {
         _ => {
             eprintln!(
                 "usage:\n  sweep run     --roms DIR... [--list FILE] --out DIR [--frames N] \
-                 [--warmup N] [--jobs N] [--timeout SECS] [--no-screens] [--no-videos] \
-                 [--no-bios-meta] [--bios-dir DIR] [--hardware dmg,cgb,sgb,agb] [--only SUBSTR] \
-                 [--shard K/N]\n  \
+                 [--warmup N] [--jobs N] [--timeout SECS] [--no-screens] [--no-recordings] \
+                 [--rec-frames N] [--videos] [--no-bios-meta] [--bios-dir DIR] \
+                 [--hardware dmg,cgb,sgb,agb] [--only SUBSTR] [--shard K/N]\n  \
                  sweep compare --base A.jsonl --cand B.jsonl [--min-ratio R] [--ignore-perf] \
                  [--out report.md]\n  \
                  sweep gallery --manifest M.jsonl --screens DIR [--videos DIR] [--out gallery.html]"
@@ -194,6 +197,23 @@ struct RunCfg {
     /// Where per-(ROM,hardware) HEVC+AAC videos land. `Some` only when
     /// screenshots are on, `--no-videos` is absent, and `ffmpeg` is on PATH.
     videos_dir: Option<PathBuf>,
+    /// Where per-(ROM,hardware) `.rbr` native recordings land (`--recordings`).
+    /// Pixel-only (no audio drain), so it never perturbs the manifest hashes.
+    recordings_dir: Option<PathBuf>,
+    /// Where raw f32le interleaved PCM dumps land (`--dump-pcm`): audio-codec
+    /// measurement only, drains audio in the media pass like the mp4 path does.
+    pcm_dir: Option<PathBuf>,
+    /// Where per-sample channel-tap dumps land (`--dump-chan`): 20-byte records
+    /// of [ch1..ch4]f32le + nr50 + nr51 + enabled + pad. Measurement only.
+    chan_dir: Option<PathBuf>,
+    /// Where content-addressed `.rba` audio recordings land (rides with
+    /// `recordings_dir`). Model-identical audio dedups to one file by hash.
+    audio_dir: Option<PathBuf>,
+    /// clip key (`<rom_sha>_<tag>`) -> audio content hash, for the gallery.
+    audio_map: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+    /// How many leading frames each `.rbr` recording captures (a short gallery
+    /// loop, not the full run). Ignored unless `recordings_dir` is set.
+    rec_frames: usize,
     /// Hardware models the MEDIA fan-out captures (posters + videos). The
     /// canonical manifest row is always the auto-detected model regardless of
     /// this set (see `canonical_hardware`).
@@ -356,10 +376,17 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     let timeout_secs: u64 = parse_num(args, "--timeout", 300)? as u64;
     let jobs: usize = parse_num(args, "--jobs", 0)?;
     let no_screens = args.iter().any(|a| a == "--no-screens");
-    let no_videos = args.iter().any(|a| a == "--no-videos");
+    // Native `.rbr` recordings are the default gallery media; mp4 is opt-in
+    // (`--videos`) and `--recordings`/`--no-videos` stay accepted as no-ops for
+    // older invocations.
+    let videos = args.iter().any(|a| a == "--videos");
+    let no_recordings = args.iter().any(|a| a == "--no-recordings");
     let no_bios_meta = args.iter().any(|a| a == "--no-bios-meta");
     let bios_dir = arg(args, "--bios-dir").map(PathBuf::from);
     let strip_names = args.iter().any(|a| a == "--strip-names");
+    let dump_pcm = args.iter().any(|a| a == "--dump-pcm");
+    let dump_chan = args.iter().any(|a| a == "--dump-chan");
+    let rec_frames: usize = parse_num(args, "--rec-frames", 900)?;
     let only = arg(args, "--only");
     let shard = arg(args, "--shard");
     if warmup >= frames {
@@ -425,20 +452,65 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
         std::fs::create_dir_all(&d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
         Some(d)
     };
-    // Videos ride along with screenshots, but only if ffmpeg is present and not
-    // opted out. No ffmpeg -> one warning, PNG-only (the lazy-APU fast path is
-    // kept: no audio is drained unless a video is actually being encoded).
-    let videos_dir = if screens_dir.is_some() && !no_videos && ffmpeg_available() {
+    // Opt-in mp4 videos (`--videos`), only if ffmpeg is present. No ffmpeg -> one
+    // warning (the lazy-APU fast path is kept: no audio is drained unless a video
+    // is actually being encoded).
+    let videos_dir = if screens_dir.is_some() && videos && ffmpeg_available() {
         let d = out_dir.join("videos");
         std::fs::create_dir_all(&d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
         Some(d)
     } else {
-        if screens_dir.is_some() && !no_videos {
+        if screens_dir.is_some() && videos {
             eprintln!("sweep: ffmpeg not on PATH; emitting screenshots only, no videos");
         }
         None
     };
-    let cfg = RunCfg { frames, warmup, timeout_secs, screens_dir, videos_dir, hardware, names };
+    // Native `.rbr` recordings: the default gallery media (pixel-perfect, no
+    // ffmpeg, motion-compensated). Disable with `--no-recordings`.
+    let recordings_dir = if screens_dir.is_some() && !no_recordings {
+        let d = out_dir.join("recordings");
+        std::fs::create_dir_all(&d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
+        Some(d)
+    } else {
+        None
+    };
+    let pcm_dir = if dump_pcm {
+        let d = out_dir.join("pcm");
+        std::fs::create_dir_all(&d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
+        Some(d)
+    } else {
+        None
+    };
+    let chan_dir = if dump_chan {
+        let d = out_dir.join("chan");
+        std::fs::create_dir_all(&d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
+        Some(d)
+    } else {
+        None
+    };
+    let audio_dir = match &recordings_dir {
+        Some(_) => {
+            let d = out_dir.join("audio");
+            std::fs::create_dir_all(&d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
+            Some(d)
+        }
+        None => None,
+    };
+    let cfg = RunCfg {
+        frames,
+        warmup,
+        timeout_secs,
+        screens_dir,
+        videos_dir,
+        recordings_dir,
+        pcm_dir,
+        chan_dir,
+        audio_dir,
+        audio_map: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+        rec_frames,
+        hardware,
+        names,
+    };
 
     let pool = {
         let mut b = rayon::ThreadPoolBuilder::new();
@@ -501,7 +573,7 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     if !no_bios_meta {
         for hw in BOOT_MODELS {
             let tag = hw_tag(hw);
-            match capture_bios(cfg.screens_dir.as_deref(), cfg.videos_dir.as_deref(), hw, bios_dir.as_deref(), timeout_secs) {
+            match capture_bios(&cfg, hw, bios_dir.as_deref()) {
                 Ok(Some(b)) => {
                     let vdur = b.frames as f64 * FPS_DEN as f64 / FPS_NUM as f64;
                     match b.handoff_frame {
@@ -561,6 +633,17 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     // final `<sha>_<hw>.mp4` files.
     if let Some(vdir) = &cfg.videos_dir {
         let _ = std::fs::remove_dir_all(vdir.join(".sweep-tmp"));
+    }
+
+    // Gallery's clip -> audio-content-hash map (the `.rba` files themselves are
+    // content-addressed, so model-identical audio shares one file).
+    if let Some(adir) = &cfg.audio_dir {
+        let map = cfg.audio_map.lock().unwrap();
+        if !map.is_empty() {
+            let json = serde_json::to_string(&*map).map_err(|e| format!("audio map: {e}"))?;
+            std::fs::write(adir.join("map.json"), json)
+                .map_err(|e| format!("write audio map: {e}"))?;
+        }
     }
 
     let manifest = out_dir.join("manifest.jsonl");
@@ -1096,11 +1179,37 @@ fn capture_media(
             Err(e) => eprintln!("sweep: ffmpeg spawn {sha} [{tag}]: {e}"),
         }
     }
-    let collect_audio = encoder.is_some();
+    // Measurement tee (`--dump-pcm`): raw f32le interleaved PCM, exactly as the
+    // core emits it — input for audio-codec size experiments.
+    let mut pcm_f32 = cfg.pcm_dir.as_ref().and_then(|d| {
+        std::fs::File::create(d.join(format!("{sha}_{tag}.pcm")))
+            .ok()
+            .map(std::io::BufWriter::new)
+    });
+    let mut chan_out = cfg.chan_dir.as_ref().and_then(|d| {
+        std::fs::File::create(d.join(format!("{sha}_{tag}.chan")))
+            .ok()
+            .map(std::io::BufWriter::new)
+    });
+    // Native `.rba` audio: encode the channel tap over the recording window.
+    let mut audio_rec = (cfg.recordings_dir.is_some() && cfg.audio_dir.is_some())
+        .then(rustyboi_replay::AudioEncoder::new);
+    let collect_audio =
+        encoder.is_some() || pcm_f32.is_some() || chan_out.is_some() || audio_rec.is_some();
     let sink = SampleSink::default();
     if collect_audio {
         gb.enable_audio(Box::new(sink.clone())).map_err(|e| format!("audio: {e}"))?;
     }
+    if chan_out.is_some() || audio_rec.is_some() {
+        gb.set_channel_tap(true);
+    }
+
+    // Native `.rbr` recording of the first `rec_frames` frames (a short gallery
+    // loop). Pixel-only — never drains audio or touches the manifest hashes.
+    let mut rec = cfg
+        .recordings_dir
+        .as_ref()
+        .map(|_| rustyboi_replay::Encoder::new(160, 144));
 
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut hash_all: u64 = 0xcbf2_9ce4_8422_2325;
@@ -1113,8 +1222,19 @@ fn capture_media(
         let (frame, _bp) = gb.run_until_frame(collect_audio);
 
         let in_tail = f + 120 >= cfg.frames;
-        let need_rgb = encoder.is_some() || in_tail;
+        let recording_now = rec.is_some() && f < cfg.rec_frames;
+        let need_rgb = encoder.is_some() || in_tail || recording_now;
         let rgb = need_rgb.then(|| frame_rgb(&frame));
+
+        if recording_now
+            && let (Some(enc), Some(rgb)) = (&mut rec, &rgb)
+        {
+            // SCX/SCY at frame end drive the recording's motion compensation
+            // (exact scroll → the background delta cancels for free).
+            let scx = gb.read_memory(0xFF43);
+            let scy = gb.read_memory(0xFF42);
+            enc.push_rgb_scroll(rgb, scx, scy);
+        }
 
         if let Some(child) = &mut encoder
             && let (Some(stdin), Some(rgb)) = (child.stdin.as_mut(), &rgb)
@@ -1133,7 +1253,35 @@ fn capture_media(
                         let _ = w.write_all(&f32_to_s16le(*r));
                     }
                 }
+                if let Some(w) = &mut pcm_f32 {
+                    for (l, r) in buf.iter() {
+                        let _ = w.write_all(&l.to_le_bytes());
+                        let _ = w.write_all(&r.to_le_bytes());
+                    }
+                }
                 buf.clear();
+            }
+            drop(buf);
+            if chan_out.is_some() || audio_rec.is_some() {
+                let tapped = gb.drain_channel_tap();
+                if let Some(enc) = &mut audio_rec
+                    && f < cfg.rec_frames
+                {
+                    enc.push(&tapped);
+                }
+                if let Some(w) = &mut chan_out {
+                    for (chs, nr50, nr51, en) in &tapped {
+                        for c in chs {
+                            let _ = w.write_all(&c.to_le_bytes());
+                        }
+                        let _ = w.write_all(&[*nr50, *nr51, u8::from(*en), 0]);
+                    }
+                }
+                // Recording window over (and no dump in flight): stop tapping so
+                // the tail of the run doesn't accumulate unused samples.
+                if f + 1 == cfg.rec_frames && chan_out.is_none() {
+                    gb.set_channel_tap(false);
+                }
             }
         }
 
@@ -1163,6 +1311,12 @@ fn capture_media(
     if let Some(w) = pcm {
         let _ = w.into_inner().map(|mut f| f.flush());
     }
+    if let Some(w) = pcm_f32 {
+        let _ = w.into_inner().map(|mut f| f.flush());
+    }
+    if let Some(w) = chan_out {
+        let _ = w.into_inner().map(|mut f| f.flush());
+    }
     // Close the encoder's stdin (EOF) and wait for the mp4 to finalize.
     let mut video_written = false;
     if let Some(mut child) = encoder {
@@ -1184,6 +1338,31 @@ fn capture_media(
     }
     if let Some(tp) = &tmp_pcm {
         let _ = std::fs::remove_file(tp);
+    }
+
+    // Serialize the native recording (atomic single write, no temp dance needed).
+    if let (Some(enc), Some(dir)) = (&rec, &cfg.recordings_dir) {
+        let file = dir.join(format!("{sha}_{tag}.rbr"));
+        if let Err(e) = std::fs::write(&file, enc.finish()) {
+            eprintln!("recording {}: {e}", file.display());
+        }
+    }
+    // Serialize the audio, content-addressed: model-identical streams hash to
+    // the same file, so the library-wide dedup falls out of the file names.
+    // tmp+rename keeps concurrent captures of the same hash race-safe.
+    if let (Some(enc), Some(adir)) = (&audio_rec, &cfg.audio_dir)
+        && !enc.is_empty()
+    {
+        let blob = enc.finish(FPS_NUM as u32, FPS_DEN as u32);
+        let hash: String = sha256(&blob)[..8].iter().map(|b| format!("{b:02x}")).collect();
+        let file = adir.join(format!("{hash}.rba"));
+        if !file.exists() {
+            let tmp = adir.join(format!(".{hash}.{sha}_{tag}.tmp"));
+            if std::fs::write(&tmp, &blob).is_ok() {
+                let _ = std::fs::rename(&tmp, &file);
+            }
+        }
+        cfg.audio_map.lock().unwrap().insert(format!("{sha}_{tag}"), hash);
     }
 
     Ok(MediaOut {
@@ -1315,12 +1494,12 @@ struct BiosOut {
 /// supplies it. Entirely separate from `emulate`: it builds its own cart and
 /// never perturbs any game row or hash.
 fn capture_bios(
-    screens_dir: Option<&Path>,
-    videos_dir: Option<&Path>,
+    cfg: &RunCfg,
     hw: Hardware,
     bios_dir: Option<&Path>,
-    timeout_secs: u64,
 ) -> Result<Option<BiosOut>, String> {
+    let (screens_dir, videos_dir) = (cfg.screens_dir.as_deref(), cfg.videos_dir.as_deref());
+    let timeout_secs = cfg.timeout_secs;
     let tag = hw_tag(hw);
     let Some(file) = bios_filename(hw) else {
         return Ok(None); // no distinct dump for this model (revision variants)
@@ -1364,10 +1543,17 @@ fn capture_bios(
             Err(e) => eprintln!("sweep: ffmpeg spawn bios [{tag}]: {e}"),
         }
     }
-    let collect_audio = encoder.is_some();
+    // Native boot recording (animation + chime), whole boot — it's short.
+    let mut rec = cfg.recordings_dir.as_ref().map(|_| rustyboi_replay::Encoder::new(160, 144));
+    let mut audio_rec = (cfg.recordings_dir.is_some() && cfg.audio_dir.is_some())
+        .then(rustyboi_replay::AudioEncoder::new);
+    let collect_audio = encoder.is_some() || audio_rec.is_some();
     let sink = SampleSink::default();
     if collect_audio {
         gb.enable_audio(Box::new(sink.clone())).map_err(|e| format!("audio: {e}"))?;
+    }
+    if audio_rec.is_some() {
+        gb.set_channel_tap(true);
     }
 
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -1383,6 +1569,12 @@ fn capture_bios(
         let (frame, _bp) = gb.run_until_frame(collect_audio);
         frames = f + 1;
         let rgb = frame_rgb(&frame);
+        if let Some(enc) = &mut rec {
+            enc.push_rgb_scroll(&rgb, gb.read_memory(0xFF43), gb.read_memory(0xFF42));
+        }
+        if let Some(enc) = &mut audio_rec {
+            enc.push(&gb.drain_channel_tap());
+        }
         if let Some(child) = &mut encoder
             && let Some(stdin) = child.stdin.as_mut()
             && stdin.write_all(&rgb).is_err()
@@ -1451,6 +1643,26 @@ fn capture_bios(
     // screens being enabled; the hash row below is emitted regardless.
     if let Some(sdir) = screens_dir {
         write_poster_png(sdir, "bios", &tag, poster.as_ref());
+    }
+    if let (Some(enc), Some(dir)) = (&rec, &cfg.recordings_dir) {
+        let file = dir.join(format!("bios_{tag}.rbr"));
+        if let Err(e) = std::fs::write(&file, enc.finish()) {
+            eprintln!("recording {}: {e}", file.display());
+        }
+    }
+    if let (Some(enc), Some(adir)) = (&audio_rec, &cfg.audio_dir)
+        && !enc.is_empty()
+    {
+        let blob = enc.finish(FPS_NUM as u32, FPS_DEN as u32);
+        let hash: String = sha256(&blob)[..8].iter().map(|b| format!("{b:02x}")).collect();
+        let file = adir.join(format!("{hash}.rba"));
+        if !file.exists() {
+            let tmp = adir.join(format!(".{hash}.bios_{tag}.tmp"));
+            if std::fs::write(&tmp, &blob).is_ok() {
+                let _ = std::fs::rename(&tmp, &file);
+            }
+        }
+        cfg.audio_map.lock().unwrap().insert(format!("bios_{tag}"), hash);
     }
 
     Ok(Some(BiosOut {
@@ -1807,6 +2019,38 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
             .map(|p| p.join("videos"))
             .unwrap_or_else(|| PathBuf::from("videos"))
     });
+    // Native `.rbr` recordings (preferred over mp4 for the animated cards) and
+    // the decoder wasm/glue to copy next to the page (`--decoder <pkg-dir>`).
+    let recordings_dir = arg(args, "--recordings").map(PathBuf::from).unwrap_or_else(|| {
+        screens_dir
+            .parent()
+            .map(|p| p.join("recordings"))
+            .unwrap_or_else(|| PathBuf::from("recordings"))
+    });
+    // Decoder wasm/glue to copy beside the page; defaults to the built pkg so a
+    // repo-root `sweep gallery` after `make replay-web` just works.
+    let decoder_dir = arg(args, "--decoder").map(PathBuf::from).or_else(|| {
+        let d = PathBuf::from("rustyboi-replay-web/pkg");
+        d.join("rustyboi_replay_web.js").exists().then_some(d)
+    });
+    if decoder_dir.is_none() {
+        eprintln!(
+            "gallery: WARNING decoder pkg not found (run `make replay-web`, or pass --decoder); \
+             cards will be posters-only"
+        );
+    }
+    // clip key -> audio content hash (written by `run` alongside recordings/).
+    let audio_dir = arg(args, "--audio").map(PathBuf::from).unwrap_or_else(|| {
+        screens_dir
+            .parent()
+            .map(|p| p.join("audio"))
+            .unwrap_or_else(|| PathBuf::from("audio"))
+    });
+    let audio_map: std::collections::HashMap<String, String> =
+        std::fs::read_to_string(audio_dir.join("map.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
     let out = arg(args, "--out").unwrap_or_else(|| "gallery.html".into());
 
     let mut rows = load_manifest(&manifest)?;
@@ -1990,11 +2234,23 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
         // Pinned BIOS meta card (boot animation, key `bios_<tag>`): a lazy hero
         // just like a game card, degrading to a still or absent (old dirs).
         let bios_poster = format!("./screens/bios_{tag}.webp");
+        let bios_rbr_file = format!("bios_{tag}.rbr");
         let bios_video_file = format!("bios_{tag}.mp4");
-        let bios_has_video = videos_dir.join(&bios_video_file).exists();
+        let bios_has_rbr = recordings_dir.join(&bios_rbr_file).exists();
+        let bios_has_video = !bios_has_rbr && videos_dir.join(&bios_video_file).exists();
         let bios_has_poster = screens_dir.join(format!("bios_{tag}.webp")).exists();
-        if bios_has_video || bios_has_poster {
-            let hero = if bios_has_video {
+        if bios_has_rbr || bios_has_video || bios_has_poster {
+            let hero = if bios_has_rbr {
+                let audio_attr = audio_map
+                    .get(&format!("bios_{tag}"))
+                    .map(|h| format!(" data-audio=\"./audio/{}.rba\"", html_escape(h)))
+                    .unwrap_or_default();
+                format!(
+                    "<img class=\"hero\" loading=\"lazy\" src=\"{bios_poster}\" \
+                     data-rbr=\"./recordings/{}\"{audio_attr} alt=\"\">",
+                    html_escape(&bios_rbr_file),
+                )
+            } else if bios_has_video {
                 format!(
                     "<img class=\"hero\" loading=\"lazy\" src=\"{bios_poster}\" \
                      data-src=\"./videos/{}\" alt=\"\">",
@@ -2039,26 +2295,38 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
                     (None, false) => ("blank/static", "fail"),
                 };
                 let poster = format!("./screens/{}_{tag}.webp", r.rom_sha);
+                let rbr_file = format!("{}_{tag}.rbr", r.rom_sha);
                 let video_file = format!("{}_{tag}.mp4", r.rom_sha);
-                let has_video = videos_dir.join(&video_file).exists();
+                let has_rbr = recordings_dir.join(&rbr_file).exists();
+                let has_video = !has_rbr && videos_dir.join(&video_file).exists();
+                // The one attribute that turns a poster into an animated hero:
+                // prefer the native recording (canvas), fall back to mp4 (video).
+                let mut motion_attr = if has_rbr {
+                    format!("data-rbr=\"./recordings/{}\"", html_escape(&rbr_file))
+                } else if has_video {
+                    format!("data-src=\"./videos/{}\"", html_escape(&video_file))
+                } else {
+                    String::new()
+                };
+                if has_rbr
+                    && let Some(hash) = audio_map.get(&format!("{}_{tag}", r.rom_sha))
+                {
+                    motion_attr
+                        .push_str(&format!(" data-audio=\"./audio/{}.rba\"", html_escape(hash)));
+                }
+                let has_motion = has_rbr || has_video;
                 let sgb_border = tag == "sgb" && border_shas.contains(&r.rom_sha);
                 let border_src = format!("./screens/{}_sgb_border.webp", r.rom_sha);
-                let hero = if sgb_border && has_video {
+                let hero = if sgb_border && has_motion {
                     format!(
                         "<div class=\"sgb-frame\">\
                          <img class=\"sgb-border\" loading=\"lazy\" src=\"{border_src}\" alt=\"\">\
-                         <img class=\"hero sgb-screen\" loading=\"lazy\" src=\"{poster}\" \
-                         data-src=\"./videos/{}\" alt=\"\"></div>",
-                        html_escape(&video_file),
+                         <img class=\"hero sgb-screen\" loading=\"lazy\" src=\"{poster}\" {motion_attr} alt=\"\"></div>",
                     )
                 } else if sgb_border {
                     format!("<img class=\"hero\" loading=\"lazy\" src=\"{border_src}\" alt=\"\">")
-                } else if has_video {
-                    format!(
-                        "<img class=\"hero\" loading=\"lazy\" src=\"{poster}\" \
-                         data-src=\"./videos/{}\" alt=\"\">",
-                        html_escape(&video_file),
-                    )
+                } else if has_motion {
+                    format!("<img class=\"hero\" loading=\"lazy\" src=\"{poster}\" {motion_attr} alt=\"\">")
                 } else {
                     format!("<img class=\"hero\" loading=\"lazy\" src=\"{poster}\" alt=\"\">")
                 };
@@ -2087,6 +2355,39 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
         s.push_str("</div>");
     }
 
+    // Native-recording playback: pull in the tiny `.rbr` decoder module, which
+    // sets `window.RbrDecoder` and fires `rbr-ready`. The classic gallery script
+    // below runs regardless (posters + filtering work even if the module fails,
+    // e.g. over file://), upgrading cards to animated canvases once it's ready.
+    let uses_rbr = s.contains("data-rbr=");
+    if !uses_rbr {
+        eprintln!(
+            "gallery: WARNING no recordings found at {} — cards will be static posters \
+             (pass --recordings or generate from the sweep output root)",
+            recordings_dir.display()
+        );
+    }
+    if uses_rbr {
+        if let Some(dir) = &decoder_dir {
+            let dst = std::path::Path::new(&out)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            for f in ["rustyboi_replay_web.js", "rustyboi_replay_web_bg.wasm"] {
+                if let Err(e) = std::fs::copy(dir.join(f), dst.join(f)) {
+                    eprintln!("gallery: copy decoder {f}: {e}");
+                }
+            }
+        }
+        s.push_str(
+            "<script type=\"module\">\n\
+             import init, { Decoder, AudioDecoder } from './rustyboi_replay_web.js';\n\
+             init().then(() => { window.RbrDecoder = Decoder; \
+             window.RbrAudioDecoder = AudioDecoder; \
+             window.dispatchEvent(new Event('rbr-ready')); }).catch((e) => \
+             console.warn('rbr decoder failed to load (serve over HTTP, not file://):', e));\n\
+             </script>\n",
+        );
+    }
     s.push_str("<script>\n");
     s.push_str(include_str!("gallery.js"));
     s.push_str("\n</script>");
@@ -2108,8 +2409,21 @@ fn cmd_gallery(args: &[String]) -> Result<bool, String> {
 // arg helpers
 // ---------------------------------------------------------------------------
 
+/// Value of `--flag`. A following `--other` token is NOT a value (a bare flag
+/// must never swallow its neighbor), and a later `--flag value` occurrence
+/// wins over an earlier bare one.
 fn arg(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
+    let mut from = 0;
+    while let Some(pos) = args[from..].iter().position(|a| a == name) {
+        let at = from + pos;
+        if let Some(v) = args.get(at + 1)
+            && !v.starts_with("--")
+        {
+            return Some(v.clone());
+        }
+        from = at + 1;
+    }
+    None
 }
 
 /// All values following `--flag` up to the next `--` flag (so `--roms A B C`).
