@@ -99,8 +99,10 @@ jobs:
           - little_things_gb
           - bully
           - strikethrough
+          - daid
           - rtc3test
           - mbc3_tester
+          - cpp
           - magentests
           - little_things_extra
           - sketchtests
