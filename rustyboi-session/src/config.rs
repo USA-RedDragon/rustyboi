@@ -12,7 +12,7 @@ use crate::action::{
 use crate::input::InputMap;
 use crate::input_config::InputConfig;
 use crate::ports::{Storage, StorageError};
-use rustyboi_core_lib::gb::Hardware;
+use rustyboi_core_lib::gb::{Hardware, Region};
 use rustyboi_core_lib::ppu::ColorCorrection;
 use serde::{Deserialize, Serialize};
 
@@ -65,6 +65,11 @@ impl Default for RewindConfig {
 pub struct Config {
     /// Emulated hardware model.
     pub hardware: Hardware,
+    /// Host TV region. Only an SGB1 reads it — it has no crystal and divides the
+    /// host SNES's master clock by 5, so it runs ~2.4% fast on NTSC and ~1.5%
+    /// fast on PAL. `default` (`Ntsc`) so older blobs still load.
+    #[serde(default)]
+    pub region: Region,
     /// DMG shade palette (monochrome tint, used on DMG/MGB hardware). A derived
     /// cache of `dmg_palette_choice.shades_rgba(color_correction)`; the choice is
     /// the source of truth. Kept so the renderer keeps a ready RGBA array.
@@ -160,6 +165,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             hardware: Hardware::CGB,
+            region: Region::default(),
             dmg_palette: DmgPalette::default(),
             dmg_palette_choice: DmgPaletteChoice::default(),
             gbc_dmg_palette: GbcDmgPalette::default(),

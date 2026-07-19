@@ -1306,6 +1306,13 @@ impl Mmio {
         self.is_agb
     }
 
+    /// Set the machine's real-time CPU clock, which fixes how many dots make
+    /// one 44.1 kHz host sample. Real-time mapping only — no dot-domain timing
+    /// depends on it. Called from `GB::new` and `GB::set_region`.
+    pub fn set_cpu_hz(&mut self, hz: u32) {
+        self.audio.set_cpu_hz(hz);
+    }
+
     /// Seed the CGB-D/E APU revision gate (CGB-D-and-later silicon).
     /// Called once from `GB::new` for Hardware::CGBE.
     pub fn set_apu_cgb_de(&mut self, de: bool) {

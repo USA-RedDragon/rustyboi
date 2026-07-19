@@ -1068,6 +1068,10 @@ impl GuiApp<'_> {
         // mode (all of which early-return cheaply when idle).
         let now = self.pacing_epoch.elapsed().as_secs_f64();
         let paused = self.app.is_effectively_paused();
+        // Retune to the running machine: an SGB1 is clocked by the host SNES
+        // (÷5) and genuinely runs ~61.17 fps, not 59.73. Idempotent, so it can
+        // ride the tick and pick up a hardware/region change immediately.
+        self.regulator.set_cpu_hz(self.app.session().cpu_hz());
         let granted = self.regulator.frames_to_run(
             now,
             self.audio.as_ref().map(|a| a.queued_pairs()),

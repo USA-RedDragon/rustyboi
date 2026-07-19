@@ -12,6 +12,18 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 
+/// TV region of the host the machine is plugged into. Only the SGB1 cares: it
+/// has no crystal of its own and divides the host SNES's master clock by 5, so
+/// an NTSC and a PAL SNES clock the same cartridge at different rates. Every
+/// other model (including the SGB2, which *does* have its own crystal) runs at
+/// the DMG's 4.194304 MHz regardless.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, clap::ValueEnum, PartialEq, Eq)]
+pub enum Region {
+    #[default]
+    Ntsc,
+    Pal,
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, clap::ValueEnum, PartialEq, Eq)]
 pub enum Hardware {
     DMG,  // Original DMG-01
@@ -33,7 +45,34 @@ pub enum Hardware {
     AGB,  // Game Boy Advance in GBC-compatibility mode (CGB + isAgb() diffs)
 }
 
+/// The DMG's crystal: 4.194304 MHz. Every model but the SGB1 runs at this rate.
+pub const DMG_CPU_HZ: u32 = 4_194_304;
+/// NTSC SGB1: the NTSC SNES master clock (21.477270 MHz) / 5. ~2.4% fast.
+pub const SGB_NTSC_CPU_HZ: u32 = 21_477_270 / 5;
+/// PAL SGB1: the PAL SNES master clock (21.281370 MHz) / 5. ~1.5% fast.
+pub const SGB_PAL_CPU_HZ: u32 = 21_281_370 / 5;
+
 impl Hardware {
+    /// The machine's CPU/dot clock in Hz — a **real-time** quantity only. The
+    /// emulated dot timeline is deliberately unaffected (a frame is 70224 dots
+    /// on every model); this rate maps that timeline onto wall-clock seconds,
+    /// so it sets audio pitch, the host sample cadence, and the presented frame
+    /// rate, and nothing else.
+    ///
+    /// The SGB1 has no crystal: it divides the host SNES's master clock by 5,
+    /// so it runs ~2.4% fast on NTSC and ~1.5% fast on PAL. The SGB2 added its
+    /// own crystal precisely to fix that, so it is region-independent and
+    /// exactly DMG-rate.
+    pub fn cpu_hz(self, region: Region) -> u32 {
+        match self {
+            Hardware::SGB => match region {
+                Region::Ntsc => SGB_NTSC_CPU_HZ,
+                Region::Pal => SGB_PAL_CPU_HZ,
+            },
+            _ => DMG_CPU_HZ,
+        }
+    }
+
     /// AGB (GBA-in-GBC-mode) hardware. AGB behaves like CGB everywhere except
     /// the small AGB-vs-CGB diff set (PPU line-153/last-line/LYC timing,
     /// APU ch3 wave-RAM, GBA_FLAG power-on registers).
@@ -107,6 +146,12 @@ pub struct GB {
     // frontend after a restore). Ignored on every other model.
     #[serde(skip, default)]
     sgb_palette: SgbPaletteChoice,
+    // Host TV region — only an SGB1 reads it (its clock is the host SNES's / 5).
+    // Real-time mapping only, never machine state: the dot timeline is identical
+    // in both regions, so it is skipped in the savestate and the frontend
+    // re-applies it after a restore exactly like `dmg_palette`.
+    #[serde(skip, default)]
+    region: Region,
     #[serde(skip, default)]
     skip_bios: bool,
     #[serde(skip, default)]
@@ -134,6 +179,7 @@ impl Clone for GB {
             hardware: self.hardware,
             dmg_palette: self.dmg_palette,
             sgb_palette: self.sgb_palette,
+            region: self.region,
             skip_bios: self.skip_bios,
             breakpoints: self.breakpoints.clone(),
             forced_compat_palette: self.forced_compat_palette,
@@ -383,12 +429,14 @@ impl GB {
         if matches!(hardware, Hardware::SGB | Hardware::SGB2) {
             mmio.enable_sgb();
         }
+        mmio.set_cpu_hz(hardware.cpu_hz(Region::default()));
         GB {
             cpu: cpu::SM83::new(),
             mmio,
             ppu: ppu::Ppu::new(),
             skip_bios: false,
             hardware,
+            region: Region::default(),
             dmg_palette: DmgPaletteChoice::default_for(hardware),
             sgb_palette: SgbPaletteChoice::default(),
             breakpoints: HashSet::new(),
@@ -1211,6 +1259,24 @@ impl GB {
         let new_licensee = [self.mmio.read(0x0144), self.mmio.read(0x0145)];
         let old_licensee = self.mmio.read(0x014B);
         self.sgb_palette.shades(&title, old_licensee, new_licensee)
+    }
+
+    /// Set the host TV region. Only an SGB1 changes behaviour (its clock is the
+    /// host SNES's / 5); it retunes the APU's host-sample cadence and nothing
+    /// else — the dot timeline is byte-identical in both regions.
+    pub fn set_region(&mut self, region: Region) {
+        self.region = region;
+        self.mmio.set_cpu_hz(self.hardware.cpu_hz(region));
+    }
+
+    /// The current host TV region.
+    pub fn region(&self) -> Region {
+        self.region
+    }
+
+    /// This machine's real-time CPU clock in Hz (see [`Hardware::cpu_hz`]).
+    pub fn cpu_hz(&self) -> u32 {
+        self.hardware.cpu_hz(self.region)
     }
 
     pub fn run_until_frame(&mut self, collect_audio: bool) -> (Frame, bool) {
@@ -2661,5 +2727,131 @@ mod sgb_palette_tests {
             bincode::serialize(&b).unwrap(),
             "sgb_palette must stay out of the savestate"
         );
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    //! The SGB1's SNES-derived clock.
+    //!
+    //! **Why these are Rust tests and not a first-party test ROM.** A Game Boy
+    //! cannot observe its own crystal: DIV, the timer, LY, and serial all
+    //! divide down from the *same* clock, so every ratio a ROM can measure is
+    //! identical on an SGB1 and a DMG. This change deliberately leaves the dot
+    //! timeline untouched (a frame is 70224 dots on every model), so a test ROM
+    //! would produce byte-identical output before and after it — a
+    //! non-discriminating oracle. What actually changed is the *real-time*
+    //! mapping: how many wall-clock seconds those dots take and what pitch the
+    //! host DAC plays them at. That is host-side and only assertable here.
+    use super::*;
+
+    /// Every model runs at the DMG's crystal rate except the SGB1, which has
+    /// none and divides the host SNES's master clock by 5.
+    #[test]
+    fn cpu_hz_per_model_and_region() {
+        // NTSC SNES 21.477270 MHz / 5; PAL SNES 21.281370 MHz / 5.
+        assert_eq!(Hardware::SGB.cpu_hz(Region::Ntsc), 4_295_454);
+        assert_eq!(Hardware::SGB.cpu_hz(Region::Pal), 4_256_274);
+
+        // The SGB2 gained its own crystal precisely to fix the SGB1's drift, so
+        // it is DMG-rate and region-independent — the whole point of the model.
+        for region in [Region::Ntsc, Region::Pal] {
+            assert_eq!(Hardware::SGB2.cpu_hz(region), DMG_CPU_HZ, "SGB2 {region:?}");
+            for hw in [
+                Hardware::DMG,
+                Hardware::DMG0,
+                Hardware::MGB,
+                Hardware::CGB0,
+                Hardware::CGBB,
+                Hardware::CGB,
+                Hardware::CGBE,
+                Hardware::AGB,
+            ] {
+                assert_eq!(hw.cpu_hz(region), DMG_CPU_HZ, "{hw:?} {region:?}");
+            }
+        }
+    }
+
+    /// The documented speedups, from the ratio rather than the raw figures.
+    #[test]
+    fn sgb1_runs_fast_by_the_documented_margins() {
+        let pct = |hz: u32| (f64::from(hz) / f64::from(DMG_CPU_HZ) - 1.0) * 100.0;
+        let ntsc = pct(Hardware::SGB.cpu_hz(Region::Ntsc));
+        let pal = pct(Hardware::SGB.cpu_hz(Region::Pal));
+        assert!((ntsc - 2.4).abs() < 0.05, "NTSC SGB1 is {ntsc:.2}% fast, expected ~2.4%");
+        assert!((pal - 1.5).abs() < 0.05, "PAL SGB1 is {pal:.2}% fast, expected ~1.5%");
+        // NTSC must be the faster of the two, and the SGB2 must not move at all.
+        assert!(ntsc > pal);
+        assert_eq!(pct(Hardware::SGB2.cpu_hz(Region::Ntsc)), 0.0);
+    }
+
+    /// A fixed number of dots must yield FEWER host samples on an SGB1 — that
+    /// deficit is exactly what pitches its audio up and what the frame cadence
+    /// must compensate for. Measured through the public sample path, not the
+    /// stored ratio, so it pins observable behaviour.
+    fn samples_over_one_frame(hw: Hardware, region: Region) -> usize {
+        let mut gb = GB::new(hw);
+        gb.set_region(region);
+        // One frame of dots, fed in one go: the dot count is model-independent.
+        gb.mmio.generate_audio_samples(70_224).len()
+    }
+
+    #[test]
+    fn a_frame_of_dots_yields_fewer_samples_on_an_sgb1() {
+        let dmg = samples_over_one_frame(Hardware::DMG, Region::Ntsc);
+        let sgb_ntsc = samples_over_one_frame(Hardware::SGB, Region::Ntsc);
+        let sgb_pal = samples_over_one_frame(Hardware::SGB, Region::Pal);
+
+        // 70224 dots / (4194304/44100) = 738.4 pairs at DMG rate.
+        assert_eq!(dmg, 738);
+        assert!(sgb_ntsc < dmg, "NTSC SGB1 {sgb_ntsc} should be < DMG {dmg}");
+        assert!(sgb_pal < dmg, "PAL SGB1 {sgb_pal} should be < DMG {dmg}");
+        assert!(sgb_ntsc < sgb_pal, "NTSC SGB1 is the faster clock");
+
+        // Every other model is region-independent and DMG-rate — the SGB2's
+        // own crystal is the entire reason it exists.
+        for hw in [Hardware::DMG, Hardware::SGB2, Hardware::CGB, Hardware::AGB] {
+            assert_eq!(samples_over_one_frame(hw, Region::Ntsc), dmg, "{hw:?} NTSC");
+            assert_eq!(samples_over_one_frame(hw, Region::Pal), dmg, "{hw:?} PAL");
+        }
+    }
+
+    /// `GB::new` defaults to NTSC and `set_region` round-trips.
+    #[test]
+    fn region_defaults_to_ntsc_and_round_trips() {
+        let mut gb = GB::new(Hardware::SGB);
+        assert_eq!(gb.region(), Region::Ntsc);
+        assert_eq!(gb.cpu_hz(), 4_295_454);
+        gb.set_region(Region::Pal);
+        assert_eq!(gb.region(), Region::Pal);
+        assert_eq!(gb.cpu_hz(), 4_256_274);
+    }
+
+    /// **THE regression guard.** The clock is a real-time mapping and NOTHING
+    /// else: two machines differing only in region must remain byte-identical
+    /// in the dot domain forever. This is what keeps all 28 suites, TAS
+    /// replays, and savestates model-independent — if a future change lets
+    /// `cpu_hz` leak into dot-domain timing (DIV, LY, serial, the frame cap),
+    /// this diverges immediately.
+    #[test]
+    fn region_never_touches_the_dot_timeline() {
+        let run = |region: Region| {
+            let mut gb = GB::new(Hardware::SGB);
+            gb.set_region(region);
+            gb.skip_bios();
+            for _ in 0..4 {
+                gb.run_until_frame(false);
+            }
+            gb.to_state_bytes().expect("savestate")
+        };
+        assert_eq!(
+            run(Region::Ntsc),
+            run(Region::Pal),
+            "region changed emulated machine state — the dot clock must be fixed"
+        );
+
+        // The serial link stall timeout is denominated in dots (4 frames), not
+        // seconds, so it too is model-independent.
+        assert_eq!(crate::serial::LINK_STALL_TIMEOUT_CC, 4 * 70224);
     }
 }
