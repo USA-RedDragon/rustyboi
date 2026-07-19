@@ -212,6 +212,10 @@ impl App {
     /// (the FPS readout is game speed). The platform's tick loop calls this
     /// every tick, including idle ones.
     pub fn note_frames(&mut self, now_seconds: f64, emulated: u32) {
+        // Grade against the running machine's own rate: an SGB1 is clocked by
+        // the host SNES (÷5) and locks at ~61.17 fps, so measuring it against a
+        // DMG's 59.73 would report a permanent drift walk on a perfect session.
+        self.meter.set_cpu_hz(self.session.cpu_hz());
         self.meter.record(now_seconds, emulated);
     }
 

@@ -46,8 +46,9 @@ const HEIGHT: u32 = 144;
 // SGB composited output (GB screen + 256x224 border).
 const SGB_WIDTH: u32 = SGB_FRAME_WIDTH as u32;
 const SGB_HEIGHT: u32 = SGB_FRAME_HEIGHT as u32;
-// 4194304 Hz CPU clock / 70224 dots per frame => 59.7275 fps.
-const FPS: f64 = 4194304.0 / 70224.0;
+// Dots per frame (154 scanlines × 456). Fixed on every model; the CPU clock the
+// frame rate divides it by is not — an SGB1's is the host SNES's / 5.
+const DOTS_PER_FRAME: f64 = 70224.0;
 // rustyboi resamples APU output to a fixed host rate (see audio::controller).
 const SAMPLE_RATE: f64 = 44100.0;
 // Bytes of little-endian payload-length header prefixed to each savestate.
@@ -269,7 +270,15 @@ impl Core for RustyboiCore {
                 max_height: SGB_HEIGHT,
                 aspect_ratio: base_w as f32 / base_h as f32,
             },
-            fps: FPS,
+            // Report the machine's true rate: an SGB1 has no crystal and runs
+            // off the host SNES's clock (÷5), so it presents ~61.17 fps, not
+            // 59.73. Without a session loaded, fall back to the DMG rate.
+            fps: self
+                .session
+                .as_ref()
+                .map_or(rustyboi_session::pacing::NOMINAL_FPS, |s| {
+                    f64::from(s.cpu_hz()) / DOTS_PER_FRAME
+                }),
             sample_rate: SAMPLE_RATE,
         }
     }

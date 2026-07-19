@@ -263,6 +263,7 @@ impl Session {
         gb.set_cgb_color_conversion(config.color_correction);
         gb.set_dmg_palette(config.dmg_palette_choice);
         gb.set_sgb_palette(config.sgb_palette);
+        gb.set_region(config.region);
         let rewind = RewindBuffer::new(config.rewind.depth, config.rewind.interval_frames);
         let palette = config.dmg_palette_choice;
         Session {
@@ -300,6 +301,19 @@ impl Session {
         self.gb.set_cgb_color_conversion(self.config.color_correction);
         self.gb.set_dmg_palette(self.config.dmg_palette_choice);
         self.gb.set_sgb_palette(self.config.sgb_palette);
+        // Real-time mapping, so it is `#[serde(skip)]` in the core and must be
+        // re-seeded here after a savestate restore (same contract as the
+        // palette above).
+        self.gb.set_region(self.config.region);
+    }
+
+    /// The running machine's real-time CPU clock in Hz. An SGB1 derives its
+    /// clock from the host SNES (÷5) and so runs ~2.4% fast on NTSC / ~1.5% on
+    /// PAL; every other model, the SGB2 included, is exactly 4 194 304 Hz.
+    /// Platforms feed this to [`crate::pacing::Regulator::set_cpu_hz`] so the
+    /// presented frame rate matches the machine.
+    pub fn cpu_hz(&self) -> u32 {
+        self.config.hardware.cpu_hz(self.config.region)
     }
 
     /// Boot a freshly-built machine: run the supplied real boot ROM when the
@@ -312,6 +326,9 @@ impl Session {
         // the skip_bios colorization path picks it up when a DMG game runs on CGB
         // hardware. No effect on DMG hardware or CGB titles.
         gb.set_forced_compat_palette(self.config.gbc_dmg_palette.forced_id());
+        // Every rebuild path (hardware change, reset, ROM load) funnels through
+        // here, so this is where a fresh machine picks up the host TV region.
+        gb.set_region(self.config.region);
         if self.config.use_real_boot_rom
             && let Some(bytes) = self.boot_rom.as_deref()
             && gb.load_bios_bytes(bytes).is_ok()
@@ -2244,5 +2261,61 @@ mod cheat_tests {
         // A later fetch replaces the previous pending list.
         assert_eq!(s.finish_fetched_cheats("cheats = 0\n"), 0);
         assert!(s.fetched_cheats().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    //! `Session::cpu_hz` — the one value every platform feeds to the pacing
+    //! regulator and (for libretro) reports as AV timing.
+    use super::*;
+    use crate::ports::{MemRumble, MemStorage, MemWebcam};
+    use rustyboi_core_lib::gb::Region;
+
+    fn test_ports() -> Ports {
+        Ports {
+            storage: Box::new(MemStorage::new()),
+            rumble: Box::new(MemRumble::default()),
+            webcam: Box::new(MemWebcam::default()),
+        }
+    }
+
+    fn session_for(hardware: Hardware, region: Region) -> Session {
+        let c = Config { hardware, region, ..Default::default() };
+        Session::new(c, test_ports(), [0u8; 32])
+    }
+
+    /// Only the SGB1 tracks the host TV region; everything else — the SGB2
+    /// included, which is precisely why it was made — is DMG-rate.
+    #[test]
+    fn session_cpu_hz_follows_hardware_and_region() {
+        assert_eq!(session_for(Hardware::SGB, Region::Ntsc).cpu_hz(), 4_295_454);
+        assert_eq!(session_for(Hardware::SGB, Region::Pal).cpu_hz(), 4_256_274);
+        for hw in [Hardware::DMG, Hardware::MGB, Hardware::SGB2, Hardware::CGB, Hardware::AGB] {
+            for region in [Region::Ntsc, Region::Pal] {
+                assert_eq!(session_for(hw, region).cpu_hz(), 4_194_304, "{hw:?} {region:?}");
+            }
+        }
+    }
+
+    /// The region is `#[serde(skip)]` in the core (it is host mapping, not
+    /// machine state), so the session must re-seed it after every machine
+    /// replacement — otherwise an SGB1 silently drops to DMG pitch on the first
+    /// savestate load. `apply_presentation` is that contract.
+    #[test]
+    fn region_survives_a_machine_replacement() {
+        let mut s = session_for(Hardware::SGB, Region::Pal);
+        assert_eq!(s.gb.region(), Region::Pal);
+        // A fresh machine, exactly as the restore/reset paths install one.
+        s.replace_machine(GB::new(Hardware::SGB), [0u8; 32]);
+        assert_eq!(s.gb.region(), Region::Pal, "region lost across replace_machine");
+        assert_eq!(s.cpu_hz(), 4_256_274);
+    }
+
+    /// A default config is NTSC, so the out-of-the-box SGB1 is the ~2.4%-fast
+    /// machine most people actually owned.
+    #[test]
+    fn default_region_is_ntsc() {
+        assert_eq!(Config::default().region, Region::Ntsc);
     }
 }

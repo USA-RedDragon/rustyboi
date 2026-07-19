@@ -26,11 +26,40 @@
 //! Android, and the web worker share this one implementation, and its
 //! behavior is provable in ordinary unit tests with no display or audio.
 
-/// Exact emulated frame rate: 70224 dots at 4.194304 MHz.
-pub const NOMINAL_FPS: f64 = 4_194_304.0 / 70_224.0;
+/// Dots in one emulated frame (154 scanlines × 456 dots). Fixed on every model
+/// — a machine's clock changes how fast these dots are played back in real
+/// time, never how many there are.
+pub const DOTS_PER_FRAME: f64 = 70_224.0;
 
-/// Exact stereo sample pairs per emulated frame at the core's 44100 Hz.
-pub const SAMPLES_PER_FRAME_F64: f64 = 44_100.0 / NOMINAL_FPS;
+/// The host output rate every audio backend consumes.
+pub const HOST_SAMPLE_RATE: f64 = 44_100.0;
+
+/// Exact emulated frame rate for DMG-rate hardware: 70224 dots at 4.194304 MHz.
+/// Every model but the SGB1 runs at this rate; see [`nominal_fps`] for the
+/// general case.
+pub const NOMINAL_FPS: f64 = 4_194_304.0 / DOTS_PER_FRAME;
+
+/// Exact stereo sample pairs per emulated frame at DMG rate.
+pub const SAMPLES_PER_FRAME_F64: f64 = HOST_SAMPLE_RATE / NOMINAL_FPS;
+
+/// Emulated frames per real second for a machine clocked at `cpu_hz`. An NTSC
+/// SGB1 (4 295 454 Hz — the host SNES's clock / 5) presents ~61.17 fps, which
+/// is exactly where its characteristic stutter on a 60 Hz display comes from.
+pub fn nominal_fps(cpu_hz: u32) -> f64 {
+    f64::from(cpu_hz) / DOTS_PER_FRAME
+}
+
+/// Stereo sample pairs per emulated frame for a machine clocked at `cpu_hz`.
+///
+/// This is the counterpart of the core's `cpu_hz / 44100` downsample ratio, and
+/// the pair must stay consistent: the core emits `DOTS_PER_FRAME / (cpu_hz /
+/// 44100)` pairs per frame and this rate presents `cpu_hz / DOTS_PER_FRAME`
+/// frames per second, whose product is exactly 44 100 pairs/second on **every**
+/// model. Change one without the other and the host output rate drifts off
+/// 44.1 kHz.
+pub fn samples_per_frame(cpu_hz: u32) -> f64 {
+    HOST_SAMPLE_RATE / nominal_fps(cpu_hz)
+}
 
 /// Ring-depth FLOOR (in frames) the stretch steers toward — the control
 /// variable is the windowed *minimum* backlog, not the mean. Device pulls
@@ -77,6 +106,11 @@ pub struct Regulator {
     /// Latest audio stretch ratio (output/input pairs) — see
     /// [`Regulator::audio_stretch`].
     stretch: f64,
+    /// The machine's frame rate this regulator paces to, and the matching
+    /// sample pairs per frame. Both derive from the model's CPU clock, so an
+    /// SGB1 paces at its true ~61.17 fps instead of a DMG's 59.73.
+    fps: f64,
+    samples_per_frame: f64,
 }
 
 impl Default for Regulator {
@@ -86,7 +120,15 @@ impl Default for Regulator {
 }
 
 impl Regulator {
+    /// A regulator at the DMG rate. Platforms that know their model should use
+    /// [`Regulator::for_cpu_hz`] (or call [`Regulator::set_cpu_hz`] per tick, so
+    /// a hardware change mid-session retunes the pacing).
     pub fn new() -> Self {
+        Self::for_cpu_hz(4_194_304)
+    }
+
+    /// A regulator pacing a machine clocked at `cpu_hz`.
+    pub fn for_cpu_hz(cpu_hz: u32) -> Self {
         // Seed one token so the very first tick shows a frame immediately.
         // The min-window buckets start at infinity: an empty window must not
         // read as "backlog was zero".
@@ -97,7 +139,25 @@ impl Regulator {
             win_min: f64::INFINITY,
             prev_win_min: f64::INFINITY,
             stretch: 1.0,
+            fps: nominal_fps(cpu_hz),
+            samples_per_frame: samples_per_frame(cpu_hz),
         }
+    }
+
+    /// Retune to a machine clocked at `cpu_hz`. Cheap and idempotent, so the
+    /// platform tick loop can call it unconditionally; switching hardware model
+    /// or TV region mid-session then takes effect on the next frame.
+    pub fn set_cpu_hz(&mut self, cpu_hz: u32) {
+        let fps = nominal_fps(cpu_hz);
+        if fps != self.fps {
+            self.fps = fps;
+            self.samples_per_frame = samples_per_frame(cpu_hz);
+        }
+    }
+
+    /// The frame rate this regulator is pacing to.
+    pub fn nominal_fps(&self) -> f64 {
+        self.fps
     }
 
     /// How many frames to emulate this tick.
@@ -144,7 +204,7 @@ impl Regulator {
         // steers the RESAMPLE RATIO only; the game rate below is pure wall
         // clock, so no audio clock can bend the timeline.
         if let Some(p) = backlog_pairs {
-            let backlog = p as f64 / SAMPLES_PER_FRAME_F64;
+            let backlog = p as f64 / self.samples_per_frame;
             if now - self.win_start >= STRETCH_WINDOW_SECS {
                 self.prev_win_min = self.win_min;
                 self.win_start = now;
@@ -162,7 +222,7 @@ impl Regulator {
             self.stretch = 1.0;
         }
 
-        self.tokens = (self.tokens + dt * NOMINAL_FPS).min(BUCKET_CAP);
+        self.tokens = (self.tokens + dt * self.fps).min(BUCKET_CAP);
 
         // Deliberately NO backlog ceiling on production: a host consuming
         // slower than nominal must not be able to command the game to skip
@@ -195,7 +255,7 @@ impl Regulator {
     /// ~one per frame instead of oversampling; a late wake is harmless (the
     /// bucket banks the elapsed time).
     pub fn seconds_until_next_frame(&self) -> f64 {
-        ((1.0 - self.tokens) / NOMINAL_FPS).max(0.0)
+        ((1.0 - self.tokens) / self.fps).max(0.0)
     }
 }
 
@@ -266,7 +326,7 @@ impl Stretcher {
 /// samples, low-passed with an EMA. Emission is tick-quantized, so a naive
 /// per-frame-timestamp window wobbles ±1 tick at the endpoints even when the
 /// long-run rate is exact; sampling counts on a coarser grid removes that.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RateMeter {
     /// (now_seconds, cumulative emulated count) samples, ~500ms apart.
     samples: std::collections::VecDeque<(f64, u64)>,
@@ -285,6 +345,16 @@ pub struct RateMeter {
     /// the meter reads the true rate within one sample period (~0.5s) of
     /// frames starting, instead of climbing from 0 over several seconds.
     last_active_at: Option<f64>,
+    /// The machine's frame rate the drift counter measures against — an SGB1
+    /// legitimately runs ~61.17 fps, and grading it against a DMG's 59.73 would
+    /// make a perfectly-locked session look like it was racing.
+    fps: f64,
+}
+
+impl Default for RateMeter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Half-second sampling grid.
@@ -305,8 +375,33 @@ const METER_EMA_TAU_SECS: f64 = 3.0;
 const METER_GAP_RESET_SECS: f64 = 0.25;
 
 impl RateMeter {
+    /// A meter at the DMG rate; see [`RateMeter::set_cpu_hz`].
     pub fn new() -> Self {
-        Self::default()
+        Self::for_cpu_hz(4_194_304)
+    }
+
+    /// A meter grading a machine clocked at `cpu_hz`.
+    pub fn for_cpu_hz(cpu_hz: u32) -> Self {
+        RateMeter {
+            samples: std::collections::VecDeque::new(),
+            emulated: 0,
+            ema: None,
+            origin: None,
+            idle_secs: 0.0,
+            last_active_at: None,
+            fps: nominal_fps(cpu_hz),
+        }
+    }
+
+    /// Retune to a machine clocked at `cpu_hz` — cheap and idempotent, so the
+    /// tick loop can call it unconditionally.
+    pub fn set_cpu_hz(&mut self, cpu_hz: u32) {
+        self.fps = nominal_fps(cpu_hz);
+    }
+
+    /// The frame rate this meter grades against.
+    pub fn nominal_fps(&self) -> f64 {
+        self.fps
     }
 
     /// Record one tick at time `now` (seconds, same clock as the regulator)
@@ -384,7 +479,7 @@ impl RateMeter {
                     + self
                         .last_active_at
                         .map_or(0.0, |t| (now - t - METER_GAP_RESET_SECS).max(0.0));
-                self.emulated as f64 - (now - t0 - idle) * NOMINAL_FPS
+                self.emulated as f64 - (now - t0 - idle) * self.fps
             }
             None => 0.0,
         }
@@ -403,6 +498,13 @@ mod tests {
     /// Drive the regulator over simulated ticks. `tick_hz` is the platform
     /// cadence; `jitter` adds a deterministic ±bound wobble to each tick;
     /// `backlog` models the audio ring from actual production/consumption.
+    /// The DMG-rate clock most of these tests run at.
+    const DMG_HZ: u32 = 4_194_304;
+    /// The NTSC SGB1: the host SNES's 21.477270 MHz / 5, ~2.4% fast.
+    const SGB_NTSC_HZ: u32 = 4_295_454;
+    /// The PAL SGB1: the host SNES's 21.281370 MHz / 5, ~1.5% fast.
+    const SGB_PAL_HZ: u32 = 4_256_274;
+
     struct Sim {
         reg: Regulator,
         now: f64,
@@ -411,17 +513,35 @@ mod tests {
         /// Device consumption in pairs/second (44100 nominal).
         consume_rate: f64,
         frames: u64,
+        /// The machine being paced — every rate assertion is relative to this,
+        /// so the same simulation grades a DMG and an SGB1 correctly.
+        cpu_hz: u32,
     }
 
     impl Sim {
         fn new(audio: bool) -> Self {
+            Self::for_cpu_hz(audio, DMG_HZ)
+        }
+
+        fn for_cpu_hz(audio: bool, cpu_hz: u32) -> Self {
             Sim {
-                reg: Regulator::new(),
+                reg: Regulator::for_cpu_hz(cpu_hz),
                 now: 0.0,
-                backlog_pairs: audio.then_some(8.0 * SAMPLES_PER_FRAME_F64), // primed ring
+                // Primed ring.
+                backlog_pairs: audio.then_some(8.0 * samples_per_frame(cpu_hz)),
                 consume_rate: 44_100.0,
                 frames: 0,
+                cpu_hz,
             }
+        }
+
+        /// The rate this sim's machine should lock to.
+        fn target_fps(&self) -> f64 {
+            nominal_fps(self.cpu_hz)
+        }
+
+        fn samples_per_frame(&self) -> f64 {
+            samples_per_frame(self.cpu_hz)
         }
 
         /// One tick after `dt` seconds; returns frames run.
@@ -439,7 +559,7 @@ mod tests {
             );
             if let Some(b) = self.backlog_pairs.as_mut() {
                 // Production reaches the ring through the stretcher.
-                *b += f64::from(n) * SAMPLES_PER_FRAME_F64 * self.reg.audio_stretch();
+                *b += f64::from(n) * samples_per_frame(self.cpu_hz) * self.reg.audio_stretch();
             }
             self.frames += u64::from(n);
             n
@@ -471,10 +591,10 @@ mod tests {
             let (t0, f0) = (sim.now, sim.frames);
             sim.run(60.0, hz, jitter);
             let rate = (sim.frames - f0) as f64 / (sim.now - t0);
-            let err = (rate - NOMINAL_FPS).abs() / NOMINAL_FPS;
+            let err = (rate - sim.target_fps()).abs() / sim.target_fps();
             assert!(
                 err < 0.0005,
-                "cadence {hz}Hz jitter {jitter}: rate {rate:.4} vs {NOMINAL_FPS:.4} (err {err:.5})"
+                "cadence {hz}Hz jitter {jitter}: rate {rate:.4} vs {:.4} (err {err:.5})", sim.target_fps()
             );
         }
     }
@@ -495,7 +615,7 @@ mod tests {
         }
         for s in [&sim, &late] {
             let rate = s.frames as f64 / s.now;
-            let err = (rate - NOMINAL_FPS).abs() / NOMINAL_FPS;
+            let err = (rate - s.target_fps()).abs() / s.target_fps();
             assert!(err < 0.0005, "no-audio rate {rate:.4} (err {err:.5})");
         }
     }
@@ -531,7 +651,7 @@ mod tests {
         sim.run(0.5, 60.0, 0.0);
         sim.consume_rate = 44_100.0;
         sim.run(4.5, 60.0, 0.0);
-        let budget = (5.0 * NOMINAL_FPS + BUCKET_CAP + 2.0) as u64;
+        let budget = (5.0 * sim.target_fps() + BUCKET_CAP + 2.0) as u64;
         assert!(
             sim.frames <= budget,
             "first 5s ran {} frames (budget {budget})",
@@ -559,7 +679,7 @@ mod tests {
         let (t0, f0) = (sim.now, sim.frames);
         sim.run(15.0, 60.0, 0.0);
         let rate = (sim.frames - f0) as f64 / (sim.now - t0);
-        let err = (rate - NOMINAL_FPS).abs() / NOMINAL_FPS;
+        let err = (rate - sim.target_fps()).abs() / sim.target_fps();
         assert!(err < 0.001, "post-stall rate {rate:.4}");
     }
 
@@ -625,15 +745,16 @@ mod tests {
                 false,
                 false,
             );
+            let per_frame = sim.samples_per_frame();
+            let stretch = sim.reg.audio_stretch();
             if let Some(b) = sim.backlog_pairs.as_mut() {
                 // Ring cap: pushes beyond 32 frames drop (as the backend does).
-                *b = (*b + f64::from(n) * SAMPLES_PER_FRAME_F64 * sim.reg.audio_stretch())
-                    .min(32.0 * SAMPLES_PER_FRAME_F64);
+                *b = (*b + f64::from(n) * per_frame * stretch).min(32.0 * per_frame);
             }
             sim.frames += u64::from(n);
         }
         let rate = (sim.frames - f0) as f64 / (sim.now - t0);
-        let err = (rate - NOMINAL_FPS).abs() / NOMINAL_FPS;
+        let err = (rate - sim.target_fps()).abs() / sim.target_fps();
         assert!(
             err < 0.002,
             "bursty consumption biased the rate to {rate:.4} (err {err:.5})"
@@ -734,7 +855,7 @@ mod tests {
         let (t0, f0) = (sim.now, sim.frames);
         sim.run(60.0, 60.0, 0.0);
         let rate = (sim.frames - f0) as f64 / (sim.now - t0);
-        let err = (rate - NOMINAL_FPS).abs() / NOMINAL_FPS;
+        let err = (rate - sim.target_fps()).abs() / sim.target_fps();
         assert!(
             err < 0.0005,
             "game rate {rate:.4} bent by the device clock (err {err:.5})"
@@ -845,5 +966,139 @@ mod tests {
         );
         let drift = meter.drift_frames(sim.now);
         assert!(drift.abs() < 4.0, "drift walked to {drift:.2} frames");
+    }
+
+    // --- the SGB1 clock model ------------------------------------------------
+
+    /// **THE identity that keeps the two coupled sites in balance.** The core
+    /// emits `70224 / (cpu_hz/44100)` sample pairs per frame and the regulator
+    /// presents `cpu_hz / 70224` frames per second. Their product must be
+    /// exactly 44 100 pairs/second on EVERY model — that is what lets an SGB1
+    /// be pitched up 2.4% while the host DAC still receives its true rate.
+    /// Change the pitch site without the cadence site (or vice versa) and this
+    /// fails.
+    #[test]
+    fn host_sample_rate_is_44100_on_every_model() {
+        for (name, hz) in [
+            ("DMG", DMG_HZ),
+            ("SGB1 NTSC", SGB_NTSC_HZ),
+            ("SGB1 PAL", SGB_PAL_HZ),
+            ("SGB2", DMG_HZ),
+            ("CGB", DMG_HZ),
+        ] {
+            // Exactly the core's `generate_samples` ratio.
+            let cycles_per_sample = f64::from(hz) / HOST_SAMPLE_RATE;
+            let pairs_per_frame = DOTS_PER_FRAME / cycles_per_sample;
+            let pairs_per_second = pairs_per_frame * nominal_fps(hz);
+            assert!(
+                (pairs_per_second - HOST_SAMPLE_RATE).abs() < 1e-6,
+                "{name}: host output {pairs_per_second:.4} Hz, must be 44100"
+            );
+            // And the session's own helper must agree with that pairs/frame.
+            assert!((samples_per_frame(hz) - pairs_per_frame).abs() < 1e-9, "{name}");
+        }
+    }
+
+    /// The frame cadence each model presents at. An SGB1 on a 60 Hz display
+    /// runs ~61.17 fps — more frames than the panel can show — which is exactly
+    /// where its characteristic periodic stutter comes from.
+    #[test]
+    fn nominal_fps_per_model() {
+        let fps = |hz| (nominal_fps(hz) * 100.0).round() / 100.0;
+        assert_eq!(fps(SGB_NTSC_HZ), 61.17);
+        assert_eq!(fps(SGB_PAL_HZ), 60.61);
+        // SGB2 and DMG are the same machine rate — the SGB2's own crystal is
+        // the entire reason it exists.
+        assert_eq!(fps(DMG_HZ), 59.73);
+        assert!((nominal_fps(DMG_HZ) - NOMINAL_FPS).abs() < 1e-12);
+        // Ordering: NTSC SGB1 > PAL SGB1 > DMG-rate.
+        assert!(nominal_fps(SGB_NTSC_HZ) > nominal_fps(SGB_PAL_HZ));
+        assert!(nominal_fps(SGB_PAL_HZ) > nominal_fps(DMG_HZ));
+    }
+
+    /// The regulator actually paces to the model's rate, not a hardcoded 59.73
+    /// — the whole point of Phase 5. Same lock quality as the DMG path.
+    #[test]
+    fn regulator_locks_to_each_models_rate() {
+        for (name, hz) in [("DMG", DMG_HZ), ("SGB1 NTSC", SGB_NTSC_HZ), ("SGB1 PAL", SGB_PAL_HZ)] {
+            let mut sim = Sim::for_cpu_hz(true, hz);
+            sim.run(15.0, 60.0, 0.0); // prime drain + trim settle
+            let (t0, f0) = (sim.now, sim.frames);
+            sim.run(60.0, 60.0, 0.0);
+            let rate = (sim.frames - f0) as f64 / (sim.now - t0);
+            let err = (rate - sim.target_fps()).abs() / sim.target_fps();
+            assert!(
+                err < 0.0005,
+                "{name}: paced {rate:.4} fps, expected {:.4} (err {err:.5})",
+                sim.target_fps()
+            );
+        }
+    }
+
+    /// An SGB1 must genuinely outrun a DMG in wall-clock frames — a regression
+    /// here (e.g. the regulator quietly falling back to the const) would leave
+    /// the SGB1 running at DMG speed with no other symptom.
+    #[test]
+    fn sgb1_outruns_a_dmg_over_the_same_wall_clock() {
+        let frames_in_60s = |hz| {
+            let mut sim = Sim::for_cpu_hz(true, hz);
+            sim.run(15.0, 60.0, 0.0);
+            let f0 = sim.frames;
+            sim.run(60.0, 60.0, 0.0);
+            sim.frames - f0
+        };
+        let dmg = frames_in_60s(DMG_HZ);
+        let sgb = frames_in_60s(SGB_NTSC_HZ);
+        assert!(sgb > dmg, "SGB1 ran {sgb} frames vs DMG {dmg} in the same minute");
+        let pct = (sgb as f64 / dmg as f64 - 1.0) * 100.0;
+        assert!((pct - 2.4).abs() < 0.2, "SGB1 ran {pct:.2}% fast, expected ~2.4%");
+    }
+
+    /// `set_cpu_hz` retunes a live regulator (the platform tick calls it every
+    /// frame, so switching model or region mid-session must take effect).
+    #[test]
+    fn set_cpu_hz_retunes_a_live_regulator() {
+        let mut reg = Regulator::new();
+        assert!((reg.nominal_fps() - NOMINAL_FPS).abs() < 1e-12);
+        reg.set_cpu_hz(SGB_NTSC_HZ);
+        assert!((reg.nominal_fps() - nominal_fps(SGB_NTSC_HZ)).abs() < 1e-12);
+        // Idempotent: re-setting the same rate changes nothing.
+        reg.set_cpu_hz(SGB_NTSC_HZ);
+        assert!((reg.nominal_fps() - nominal_fps(SGB_NTSC_HZ)).abs() < 1e-12);
+        reg.set_cpu_hz(DMG_HZ);
+        assert!((reg.nominal_fps() - NOMINAL_FPS).abs() < 1e-12);
+    }
+
+    /// The drift counter must grade against the machine's own rate: an SGB1
+    /// locked at its true 61.17 fps is NOT drifting, and reporting it as such
+    /// would bury the signal the counter exists for.
+    #[test]
+    fn meter_grades_an_sgb1_against_its_own_rate() {
+        let mut meter = RateMeter::for_cpu_hz(SGB_NTSC_HZ);
+        let period = 1.0 / nominal_fps(SGB_NTSC_HZ);
+        let mut now = 0.0;
+        for _ in 0..(nominal_fps(SGB_NTSC_HZ) * 30.0) as u32 {
+            now += period;
+            meter.record(now, 1);
+        }
+        let fps = meter.fps();
+        assert!(
+            (fps - nominal_fps(SGB_NTSC_HZ)).abs() < 0.2,
+            "meter read {fps:.2} for an SGB1, expected ~61.17"
+        );
+        assert!(meter.drift_frames(now).abs() < 4.0, "a locked SGB1 read as drifting");
+
+        // The same stream graded as a DMG would look badly fast — proof the
+        // rate-awareness is load-bearing and not cosmetic.
+        let mut dmg_meter = RateMeter::new();
+        let mut now = 0.0;
+        for _ in 0..(nominal_fps(SGB_NTSC_HZ) * 30.0) as u32 {
+            now += period;
+            dmg_meter.record(now, 1);
+        }
+        assert!(
+            dmg_meter.drift_frames(now) > 30.0,
+            "DMG-graded SGB1 stream should show a large positive drift"
+        );
     }
 }

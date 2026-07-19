@@ -55,6 +55,13 @@ pub struct Audio {
     // Sample generation timing
     fractional_cycles: f32,
 
+    // Dots per 44.1 kHz host sample = cpu_hz / 44100. Host resampling only, not
+    // machine state (an SGB1's dot timeline is identical to a DMG's — only the
+    // wall-clock rate those dots are played back at differs), so it is skipped
+    // in the savestate and re-seeded from the model by `GB::set_region`.
+    #[serde(skip, default = "default_cycles_per_sample")]
+    cycles_per_sample: f32,
+
     // APU master clock — an absolute 2 MHz counter (mod 0x8000_0000) anchored
     // at boot. Driven from the timer's absolute `abs_cc`: each `sync_cc`
     // advances by `(abs_cc - last_update) >> (1 + ds)`.
@@ -136,6 +143,14 @@ fn default_ctl_lf_div() -> u32 {
     1
 }
 
+/// The host output rate every backend consumes. Fixed: the machine's clock
+/// changes how many dots fill one sample, never the samples-per-second.
+pub const HOST_SAMPLE_RATE: f32 = 44100.0;
+
+fn default_cycles_per_sample() -> f32 {
+    crate::gb::DMG_CPU_HZ as f32 / HOST_SAMPLE_RATE
+}
+
 impl Default for Audio {
     fn default() -> Self {
         Self::new()
@@ -157,6 +172,7 @@ impl Audio {
             frame_sequencer_timer: 8192,
             audio_enabled: false,
             fractional_cycles: 0.0,
+            cycles_per_sample: default_cycles_per_sample(),
             cc: 0,
             last_update: 0,
             last_div_resets: 0,
@@ -748,6 +764,19 @@ impl Audio {
     /// into the revision-forked units: the square duty-trigger DS delay pair
     /// (psg_reset lf seed + DS delay formula) and the ch4 divisor-0 DS
     /// countdown. Called once from `GB::new` for Hardware::CGBE.
+    /// Set the machine's real-time CPU clock, which fixes how many dots make one
+    /// 44.1 kHz host sample. Affects only the downsample ratio in
+    /// `generate_samples` — no channel timer, length counter, or frame-sequencer
+    /// step reads it, so the dot-domain APU state stays byte-identical.
+    pub fn set_cpu_hz(&mut self, hz: u32) {
+        self.cycles_per_sample = hz as f32 / HOST_SAMPLE_RATE;
+    }
+
+    /// Dots per host sample (`cpu_hz / 44100`).
+    pub fn cycles_per_sample(&self) -> f32 {
+        self.cycles_per_sample
+    }
+
     pub fn set_cgb_de(&mut self, de: bool) {
         self.cgb_de = de;
         self.channel1.set_cgb_de(de);
@@ -967,11 +996,14 @@ impl Audio {
         // Channels are advanced per-dot via `step` (called from the Bus tick),
         // so here we only down-sample the live mixer output. Re-stepping here
         // would double-advance the channel timers and corrupt their phase.
-        const CYCLES_PER_SAMPLE: f32 = 4194304.0 / 44100.0;
+        // The divisor is the machine's own clock (an SGB1's is the host SNES's
+        // / 5), so a fixed 70224-dot frame yields fewer host samples and every
+        // tone comes out at `cpu_hz / period` — pitched up 2.4% on an NTSC SGB1.
+        let cycles_per_sample = self.cycles_per_sample;
 
         self.fractional_cycles += cpu_cycles as f32;
 
-        while self.fractional_cycles >= CYCLES_PER_SAMPLE {
+        while self.fractional_cycles >= cycles_per_sample {
             samples.push(self.get_mixed_output());
             if let Some(tap) = &mut self.channel_tap {
                 tap.push((
@@ -986,7 +1018,7 @@ impl Audio {
                     self.audio_enabled,
                 ));
             }
-            self.fractional_cycles -= CYCLES_PER_SAMPLE;
+            self.fractional_cycles -= cycles_per_sample;
         }
 
         samples

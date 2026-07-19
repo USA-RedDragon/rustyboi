@@ -180,6 +180,9 @@ impl Emulator {
     /// `performance.now()`. The uncapped-fast-forward sprint path bypasses
     /// this (the worker checks `uncapped_fast_forward` first).
     pub fn frames_to_run(&mut self, now_ms: f64) -> u32 {
+        // Retune to the running machine (an SGB1 runs ~61.17 fps — its clock is
+        // the host SNES's / 5). Idempotent, so it rides the tick.
+        self.regulator.set_cpu_hz(self.session.cpu_hz());
         self.regulator.frames_to_run(
             now_ms / 1000.0,
             self.audio_backlog_pairs,
