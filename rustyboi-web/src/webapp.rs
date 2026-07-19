@@ -820,6 +820,7 @@ fn dispatch_action(shared: &Rc<RefCell<Shared>>, action: UiAction) {
         | UiAction::SetHardware(_)
         | UiAction::SetPalette(_)
         | UiAction::SetGbcDmgPalette(_)
+        | UiAction::SetSgbPalette(_)
         | UiAction::SetColorCorrection(_)
         | UiAction::SetRealBootRom(_)
         | UiAction::SetTextureFilter(_)

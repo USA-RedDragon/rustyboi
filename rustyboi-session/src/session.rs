@@ -6,7 +6,7 @@
 //! through the boxed service ports; video+audio come back as return values.
 //! No wall clock, no filesystem, no threads: WASM-clean.
 
-use crate::action::{HardwareChoice, DmgPaletteChoice, ScalingMode};
+use crate::action::{HardwareChoice, DmgPaletteChoice, ScalingMode, SgbPaletteChoice};
 use crate::apply::palette_shades;
 use crate::audio::{CaptureSink, SampleBuf};
 use crate::cheats::{Cheat, CheatError, CheatSet};
@@ -262,6 +262,7 @@ impl Session {
         // through `apply_presentation`.
         gb.set_cgb_color_conversion(config.color_correction);
         gb.set_dmg_palette(config.dmg_palette_choice);
+        gb.set_sgb_palette(config.sgb_palette);
         let rewind = RewindBuffer::new(config.rewind.depth, config.rewind.interval_frames);
         let palette = config.dmg_palette_choice;
         Session {
@@ -298,6 +299,7 @@ impl Session {
     fn apply_presentation(&mut self) {
         self.gb.set_cgb_color_conversion(self.config.color_correction);
         self.gb.set_dmg_palette(self.config.dmg_palette_choice);
+        self.gb.set_sgb_palette(self.config.sgb_palette);
     }
 
     /// Boot a freshly-built machine: run the supplied real boot ROM when the
@@ -904,6 +906,34 @@ impl Session {
     /// True when no cart is loaded (the setting is harmless then).
     pub fn dmg_palette_active(&self) -> bool {
         self.gb.cartridge().is_none_or(|c| !c.supports_cgb())
+    }
+
+    /// The SGB colorization choice for DMG games (Auto / a system palette /
+    /// Grayscale).
+    pub fn sgb_palette(&self) -> SgbPaletteChoice {
+        self.config.sgb_palette
+    }
+
+    /// Change the SGB colorization for DMG games; persists the config.
+    /// Presentation-only — applied live, no machine rebuild.
+    pub fn set_sgb_palette(&mut self, choice: SgbPaletteChoice) {
+        self.init_sgb_palette(choice);
+        self.persist_config();
+    }
+
+    /// Seed the SGB colorization without persisting (startup, from the
+    /// CLI/config-derived choice).
+    pub fn init_sgb_palette(&mut self, choice: SgbPaletteChoice) {
+        self.config.sgb_palette = choice;
+        self.gb.set_sgb_palette(choice);
+    }
+
+    /// Whether the SGB palette setting applies to the loaded machine: only on
+    /// SGB/SGB2 hardware, where the SNES-side firmware colourizes mono output.
+    /// Reads the machine (not the config) so it cannot drift from what is
+    /// actually running.
+    pub fn sgb_palette_active(&self) -> bool {
+        self.gb.sgb().is_some()
     }
 
     /// The current CGB colour-correction curve.

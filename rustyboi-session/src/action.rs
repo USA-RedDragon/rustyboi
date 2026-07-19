@@ -79,6 +79,13 @@ pub struct LibraryEntry {
 /// [`DmgPaletteChoice::shades`](rustyboi_core_lib::gb::DmgPaletteChoice::shades).
 pub use rustyboi_core_lib::gb::DmgPaletteChoice;
 
+/// How a DMG game is colourized on SGB/SGB2 hardware: `Auto` reproduces the
+/// SNES-side firmware's own pick (the recognized per-title palette, else `1-A`),
+/// `System(i)` forces one of the 32 built-in system palettes (`1-A`..`4-H`), and
+/// `Grayscale` opts back out to the plain shade ramp. Presentation-only, and
+/// inert on non-SGB hardware.
+pub use rustyboi_core_lib::gb::SgbPaletteChoice;
+
 /// The CGB colorization applied to a DMG game running on CGB/AGB hardware:
 /// `Auto` keeps the boot ROM's title-hash pick; `Scheme(id)` forces one of the
 /// boot-ROM button-combo palettes
@@ -326,6 +333,11 @@ pub struct SessionUiState {
     /// Whether the DMG palette settings apply to the loaded game (false for a
     /// CGB title, which supplies its own colours — the menu is greyed out).
     pub dmg_palette_active: bool,
+    /// SGB colorization scheme for DMG games (Auto / a system palette / off).
+    pub sgb_palette: SgbPaletteChoice,
+    /// Whether the SGB palette setting applies to the loaded machine (only on
+    /// SGB/SGB2 hardware — the menu is greyed out elsewhere).
+    pub sgb_palette_active: bool,
     /// CGB colour-correction curve (raw RGB555 vs a hardware-LCD approximation).
     pub color_correction: crate::ColorCorrection,
     /// Whether a real boot ROM is run (when one has been supplied) instead of
@@ -400,6 +412,8 @@ impl Default for SessionUiState {
             palette: DmgPaletteChoice::Green,
             gbc_dmg_palette: GbcDmgPalette::Auto,
             dmg_palette_active: true,
+            sgb_palette: SgbPaletteChoice::Auto,
+            sgb_palette_active: false,
             color_correction: crate::ColorCorrection::Lcd,
             use_real_boot_rom: false,
             texture_filter: TextureFilter::Nearest,
@@ -516,6 +530,9 @@ pub enum UiAction {
     SetPalette(DmgPaletteChoice),
     /// Change the CGB colorization for DMG games (Auto / a boot-ROM scheme).
     SetGbcDmgPalette(GbcDmgPalette),
+    /// Change the SGB colorization for DMG games (Auto / a system palette /
+    /// Grayscale). Presentation-only — no machine rebuild.
+    SetSgbPalette(SgbPaletteChoice),
     /// Change the CGB colour-correction curve (Linear/LCD).
     SetColorCorrection(crate::ColorCorrection),
     /// Enable/disable running a real boot ROM (rebuilds the machine).
@@ -621,6 +638,7 @@ impl UiAction {
             UiAction::SetHardware(_) => ActionKind::SetHardware,
             UiAction::SetPalette(_) => ActionKind::SetPalette,
             UiAction::SetGbcDmgPalette(_) => ActionKind::SetGbcDmgPalette,
+            UiAction::SetSgbPalette(_) => ActionKind::SetSgbPalette,
             UiAction::SetColorCorrection(_) => ActionKind::SetColorCorrection,
             UiAction::SetRealBootRom(_) => ActionKind::SetRealBootRom,
             UiAction::SetTextureFilter(_) => ActionKind::SetTextureFilter,
@@ -695,6 +713,7 @@ pub enum ActionKind {
     SetHardware,
     SetPalette,
     SetGbcDmgPalette,
+    SetSgbPalette,
     SetColorCorrection,
     SetRealBootRom,
     SetTextureFilter,
@@ -984,6 +1003,13 @@ pub const COMMANDS: &[CommandDescriptor] = &[
         overlay_button: None,
     },
     CommandDescriptor {
+        action_kind: ActionKind::SetSgbPalette,
+        label: "SGB Palette (DMG games)",
+        category: MenuCategory::Settings,
+        default_keybind: None,
+        overlay_button: None,
+    },
+    CommandDescriptor {
         action_kind: ActionKind::SetColorCorrection,
         label: "GBC Color Correction",
         category: MenuCategory::Settings,
@@ -1242,6 +1268,7 @@ mod tests {
             SetHardware(HardwareChoice::Dmg),
             SetPalette(DmgPaletteChoice::Green),
             SetGbcDmgPalette(GbcDmgPalette::Auto),
+            SetSgbPalette(SgbPaletteChoice::System(11)),
             SetColorCorrection(crate::ColorCorrection::Lcd),
             SetRealBootRom(true),
             SetTextureFilter(TextureFilter::Linear),
@@ -1307,6 +1334,7 @@ mod tests {
                 | UiAction::SetHardware(_)
                 | UiAction::SetPalette(_)
                 | UiAction::SetGbcDmgPalette(_)
+                | UiAction::SetSgbPalette(_)
                 | UiAction::SetColorCorrection(_)
                 | UiAction::SetRealBootRom(_)
                 | UiAction::SetTextureFilter(_)
@@ -1361,6 +1389,8 @@ mod tests {
             palette: DmgPaletteChoice::Pocket,
             gbc_dmg_palette: GbcDmgPalette::Scheme(7),
             dmg_palette_active: false,
+            sgb_palette: SgbPaletteChoice::System(21),
+            sgb_palette_active: true,
             color_correction: crate::ColorCorrection::Lcd,
             use_real_boot_rom: true,
             texture_filter: TextureFilter::Linear,

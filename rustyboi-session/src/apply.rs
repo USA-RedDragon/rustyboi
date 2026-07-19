@@ -301,6 +301,10 @@ impl Session {
                     pause_changed: true,
                 }
             }
+            UiAction::SetSgbPalette(choice) => {
+                self.set_sgb_palette(choice);
+                ActionOutcome::default()
+            }
             UiAction::SetColorCorrection(conversion) => {
                 self.set_color_correction(conversion);
                 ActionOutcome::default()
@@ -620,6 +624,7 @@ mod tests {
             ToggleShowFps,
             SetHardware(HardwareChoice::Dmg),
             SetPalette(DmgPaletteChoice::Pocket),
+            SetSgbPalette(crate::action::SgbPaletteChoice::System(4)),
             SetColorCorrection(crate::ColorCorrection::Lcd),
             SetRealBootRom(false),
             SetTextureFilter(crate::action::TextureFilter::Linear),

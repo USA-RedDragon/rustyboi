@@ -561,6 +561,7 @@ fn run_gui_loop(
     let mut app = App::new(
         session,
         config.palette,
+        config.sgb_palette,
         config.rom.clone(),
         config.bios.clone(),
         should_start_paused,

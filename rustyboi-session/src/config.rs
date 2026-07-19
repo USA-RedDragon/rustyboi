@@ -5,7 +5,10 @@
 //! DMG palette choice, input remap, rewind tuning, and the fast-forward factor.
 //! No host key codes, paths, or window state — those belong to the adapter.
 
-use crate::action::{DmgPaletteChoice, GbcDmgPalette, GraphicsBackend, LcdEffect, ScalingMode, TextureFilter};
+use crate::action::{
+    DmgPaletteChoice, GbcDmgPalette, GraphicsBackend, LcdEffect, ScalingMode, SgbPaletteChoice,
+    TextureFilter,
+};
 use crate::input::InputMap;
 use crate::input_config::InputConfig;
 use crate::ports::{Storage, StorageError};
@@ -74,6 +77,12 @@ pub struct Config {
     /// scheme). `default` (`Auto`) so older blobs still load.
     #[serde(default)]
     pub gbc_dmg_palette: GbcDmgPalette,
+    /// How a DMG game is colourized on SGB/SGB2 hardware (`Auto` = the
+    /// firmware's own per-title pick, else a forced system palette or the raw
+    /// shade ramp). Presentation-only. `default` (`Auto`) so older blobs still
+    /// load.
+    #[serde(default)]
+    pub sgb_palette: SgbPaletteChoice,
     /// Abstract-button remap table.
     pub input_map: InputMap,
     /// Rewind buffer settings.
@@ -154,6 +163,7 @@ impl Default for Config {
             dmg_palette: DmgPalette::default(),
             dmg_palette_choice: DmgPaletteChoice::default(),
             gbc_dmg_palette: GbcDmgPalette::default(),
+            sgb_palette: SgbPaletteChoice::default(),
             input_map: InputMap::default(),
             rewind: RewindConfig::default(),
             fast_forward_factor: 4,

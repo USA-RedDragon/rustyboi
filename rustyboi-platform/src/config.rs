@@ -8,6 +8,7 @@ use clap::Parser;
 use rustyboi_core_lib::gb;
 
 pub use rustyboi_frontend_lib::DmgPaletteChoice;
+pub use rustyboi_session::SgbPaletteChoice;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -35,6 +36,11 @@ pub struct RawConfig {
     /// Color palette (greenlcd, grayscale, green, pocket, ...)
     #[arg(short, long, default_value = "greenlcd")]
     palette: String,
+
+    /// SGB colorization for DMG games: auto (the firmware's own pick), a system
+    /// palette 1a..4h, or grayscale. Only applies on SGB hardware.
+    #[arg(long, default_value = "auto")]
+    sgb_palette: String,
 
     /// Skip BIOS on startup
     #[arg(long, default_value_t = false)]
@@ -68,6 +74,8 @@ pub struct CleanConfig {
     pub scale: u8,
     // Color palette
     pub palette: DmgPaletteChoice,
+    // SGB colorization for DMG games (only applies on SGB hardware)
+    pub sgb_palette: SgbPaletteChoice,
     #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
     // skip BIOS on startup
     pub skip_bios: bool,
@@ -97,6 +105,8 @@ impl RawConfig {
             #[cfg(not(target_os = "android"))]
             scale: self.scale,
             palette: DmgPaletteChoice::from_option_id(&self.palette).unwrap_or(DmgPaletteChoice::Green),
+            sgb_palette: SgbPaletteChoice::from_option_id(&self.sgb_palette)
+                .unwrap_or(SgbPaletteChoice::Auto),
             #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
             skip_bios: _skip_bios,
             printer: self.printer,
@@ -140,6 +150,29 @@ mod tests {
         // A recognized alias must NOT fall through to the Grayscale default.
         let c = parse(&["rustyboi", "--palette", "green"]);
         assert_eq!(c.palette, DmgPaletteChoice::Green);
+    }
+
+    #[test]
+    fn sgb_palette_defaults_to_auto() {
+        assert_eq!(parse(&["rustyboi"]).sgb_palette, SgbPaletteChoice::Auto);
+    }
+
+    #[test]
+    fn sgb_palette_accepts_a_system_palette_id() {
+        assert_eq!(
+            parse(&["rustyboi", "--sgb-palette", "2h"]).sgb_palette,
+            SgbPaletteChoice::System(15)
+        );
+        assert_eq!(
+            parse(&["rustyboi", "--sgb-palette", "grayscale"]).sgb_palette,
+            SgbPaletteChoice::Grayscale
+        );
+    }
+
+    #[test]
+    fn garbage_sgb_palette_falls_back_to_auto() {
+        let c = parse(&["rustyboi", "--sgb-palette", "9z"]);
+        assert_eq!(c.sgb_palette, SgbPaletteChoice::Auto);
     }
 
     #[test]

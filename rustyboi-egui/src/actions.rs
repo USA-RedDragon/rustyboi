@@ -9,8 +9,8 @@
 
 pub use rustyboi_session::action::{
     ActionKind, CommandDescriptor, FileData, GbcDmgPalette, HardwareChoice, HardwareFamily,
-    KeyBind, LcdEffect, MenuCategory, DmgPaletteChoice, ScalingMode, SessionUiState, TextureFilter,
-    UiAction, COMMANDS, FAST_FORWARD_SPEEDS, PRINTER_SCALES,
+    KeyBind, LcdEffect, MenuCategory, DmgPaletteChoice, ScalingMode, SessionUiState,
+    SgbPaletteChoice, TextureFilter, UiAction, COMMANDS, FAST_FORWARD_SPEEDS, PRINTER_SCALES,
 };
 pub use rustyboi_session::ColorCorrection;
 

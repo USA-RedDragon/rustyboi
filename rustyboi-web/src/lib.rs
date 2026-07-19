@@ -538,6 +538,8 @@ impl Emulator {
             palette: self.session.palette(),
             gbc_dmg_palette: self.session.gbc_dmg_palette(),
             dmg_palette_active: self.session.dmg_palette_active(),
+            sgb_palette: self.session.sgb_palette(),
+            sgb_palette_active: self.session.sgb_palette_active(),
             color_correction: self.session.color_correction(),
             use_real_boot_rom: self.session.use_real_boot_rom(),
             texture_filter: self.session.texture_filter(),
