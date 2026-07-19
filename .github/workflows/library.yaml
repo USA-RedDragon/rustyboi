@@ -51,13 +51,13 @@ jobs:
           path: target
           key: sweep-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: sweep-
-      - name: Restore PGO profile
+      - name: Restore or generate PGO profile
         if: steps.gate.outputs.have == '1'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: ./.github/actions/pgo
         with:
-          path: target/pgo
-          key: pgo-${{ hashFiles('**/Cargo.lock', 'tools/rust-cross.sh') }}
-          restore-keys: pgo-
+          roms-url: ${{ secrets.ROMS_URL }}
+          roms-password: ${{ secrets.ROMS_PASSWORD }}
+          free-disk: 'false'
       - name: Build sweep
         if: steps.gate.outputs.have == '1'
         shell: bash
