@@ -12,6 +12,7 @@ use rustyboi_session::config::Config;
 use rustyboi_session::input::{AbstractInput, GbButton};
 use rustyboi_session::ports::{MemRumble, MemStorage, MemWebcam};
 use rustyboi_session::session::{Ports, RunMode, Session};
+use rustyboi_session::{SgbPaletteChoice, UiAction};
 
 /// A synthetic DMG ROM that endlessly increments BGP so successive frames
 /// differ (gives the frame hash something to bite on). Mirrors the core movie
@@ -368,4 +369,115 @@ fn imported_battery_persists_through_storage_and_reload() {
     // storage port). `finish_load_rom` should hydrate the persisted battery.
     s.finish_load_rom(&rom).expect("reload rom");
     assert_eq!(s.gb().cartridge().unwrap().save_ram(), pattern.as_slice());
+}
+
+// --- SGB system-palette selector (presentation-only wiring) ----------------
+//
+// This selector is host-side UI/config plumbing: it changes only how already-
+// emulated mono output is graded for display, and is invisible to the Game Boy
+// CPU (the core field is `#[serde(skip)]` and never reaches the bus). There is
+// no GB-observable behaviour for a first-party test ROM to assert, so the
+// contract is pinned here at the session/action layer instead.
+
+fn sgb_session(rom: &[u8]) -> Session {
+    let cart = Cartridge::from_bytes(rom).expect("load test ROM");
+    let mut gb = GB::new(Hardware::SGB);
+    gb.insert(cart);
+    gb.skip_bios();
+    let config = Config { hardware: Hardware::SGB, ..Default::default() };
+    Session::with_gb(Box::new(gb), config, fresh_ports(), sha256(rom))
+}
+
+#[test]
+fn sgb_palette_defaults_to_auto() {
+    let rom = test_rom();
+    let s = sgb_session(&rom);
+    assert_eq!(s.sgb_palette(), SgbPaletteChoice::Auto);
+    assert_eq!(s.config().sgb_palette, SgbPaletteChoice::Auto);
+    // `with_gb` must have seeded the machine from the config.
+    assert_eq!(s.gb().sgb_palette(), SgbPaletteChoice::Auto);
+}
+
+#[test]
+fn set_sgb_palette_action_updates_config_and_core() {
+    let rom = test_rom();
+    let mut s = sgb_session(&rom);
+    let out = s.apply(UiAction::SetSgbPalette(SgbPaletteChoice::System(9)), 0);
+    assert_eq!(s.sgb_palette(), SgbPaletteChoice::System(9));
+    assert_eq!(s.config().sgb_palette, SgbPaletteChoice::System(9));
+    assert_eq!(s.gb().sgb_palette(), SgbPaletteChoice::System(9));
+    // Presentation-only: no resize, no rebuild, no pause change.
+    assert!(out.requests.is_empty(), "SetSgbPalette must not emit platform requests");
+    assert!(!out.pause_changed);
+
+    s.apply(UiAction::SetSgbPalette(SgbPaletteChoice::Grayscale), 0);
+    assert_eq!(s.gb().sgb_palette(), SgbPaletteChoice::Grayscale);
+}
+
+#[test]
+fn sgb_palette_survives_a_machine_rebuild() {
+    let rom = test_rom();
+    let mut s = sgb_session(&rom);
+    s.apply(UiAction::SetSgbPalette(SgbPaletteChoice::System(17)), 0);
+    // Restart rebuilds the machine; `apply_presentation` must re-seed the choice.
+    s.apply(UiAction::Restart, 0);
+    assert_eq!(s.gb().sgb_palette(), SgbPaletteChoice::System(17));
+}
+
+#[test]
+fn sgb_palette_active_only_on_sgb_hardware() {
+    let rom = test_rom();
+    assert!(sgb_session(&rom).sgb_palette_active(), "SGB hardware colourizes mono output");
+    assert!(!dmg_session(&rom).sgb_palette_active(), "DMG hardware has no SNES-side firmware");
+}
+
+#[test]
+fn init_sgb_palette_seeds_without_persisting() {
+    let rom = test_rom();
+    let mut s = sgb_session(&rom);
+    s.init_sgb_palette(SgbPaletteChoice::System(3));
+    assert_eq!(s.gb().sgb_palette(), SgbPaletteChoice::System(3));
+    assert_eq!(s.config().sgb_palette, SgbPaletteChoice::System(3));
+}
+
+#[test]
+fn sgb_palette_round_trips_through_persisted_config() {
+    let rom = test_rom();
+    let mut s = sgb_session(&rom);
+    s.apply(UiAction::SetSgbPalette(SgbPaletteChoice::System(31)), 0);
+    let blob = serde_json::to_vec(s.config()).expect("serialize config");
+    let restored: Config = serde_json::from_slice(&blob).expect("deserialize config");
+    assert_eq!(restored.sgb_palette, SgbPaletteChoice::System(31));
+}
+
+#[test]
+fn config_blob_without_sgb_palette_defaults_to_auto() {
+    // `#[serde(default)]`: a config written before this setting existed must
+    // still load, landing on the hardware-accurate default.
+    let blob = serde_json::to_value(Config::default()).expect("serialize");
+    let mut map = blob.as_object().expect("config is a map").clone();
+    assert!(map.remove("sgb_palette").is_some(), "field must be present when written");
+    let restored: Config =
+        serde_json::from_value(serde_json::Value::Object(map)).expect("legacy blob loads");
+    assert_eq!(restored.sgb_palette, SgbPaletteChoice::Auto);
+}
+
+#[test]
+fn sgb_palette_option_ids_round_trip_for_every_choice() {
+    // All 34 choices (Auto + 32 system palettes + Grayscale) must survive the
+    // id round-trip the libretro option table and `--sgb-palette` rely on, and
+    // every id must be unique.
+    let mut ids = std::collections::HashSet::new();
+    for choice in SgbPaletteChoice::ALL {
+        let id = choice.option_id();
+        assert_eq!(
+            SgbPaletteChoice::from_option_id(id),
+            Some(choice),
+            "option id {id} must round-trip"
+        );
+        assert!(ids.insert(id), "duplicate option id {id}");
+        assert!(!choice.label().is_empty(), "every choice needs a menu label");
+    }
+    assert_eq!(ids.len(), 34);
+    assert_eq!(SgbPaletteChoice::from_option_id("nonsense"), None);
 }

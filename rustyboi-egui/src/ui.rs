@@ -11,7 +11,7 @@ use crate::actions::{
 };
 // Hardware / palette pickers live only in the desktop Settings menu bar.
 #[cfg(not(mobile))]
-use crate::actions::{GbcDmgPalette, HardwareChoice, DmgPaletteChoice};
+use crate::actions::{GbcDmgPalette, HardwareChoice, DmgPaletteChoice, SgbPaletteChoice};
 use crate::file_dialog::{self, FileDialogBuilder};
 #[cfg(target_os = "android")]
 use crate::library::LibraryPanel;
@@ -686,6 +686,39 @@ impl Gui {
                         })
                         .response
                         .on_disabled_hover_text("This game supplies its own colours");
+                    });
+
+                    ui.add_enabled_ui(session.sgb_palette_active, |ui| {
+                        ui.menu_button(command_label(ActionKind::SetSgbPalette), |ui| {
+                            let mut pick = |ui: &mut egui::Ui, choice: SgbPaletteChoice| {
+                                let selected = session.sgb_palette == choice;
+                                if ui.radio(selected, choice.label()).clicked() && !selected {
+                                    *action = Some(GuiAction::SetSgbPalette(choice));
+                                    ui.close();
+                                }
+                            };
+                            pick(ui, SgbPaletteChoice::Auto);
+                            ui.small("The SGB firmware's own per-title pick.");
+                            ui.separator();
+                            // The 32 system palettes are too many for one flat
+                            // menu, so they nest by set (1-A..1-H, 2-A..) —
+                            // eight per submenu, matching how the hardware
+                            // names them.
+                            for set in 0..4u8 {
+                                let label = format!("{}-A … {}-H", set + 1, set + 1);
+                                ui.menu_button(label, |ui| {
+                                    for i in 0..8u8 {
+                                        pick(ui, SgbPaletteChoice::System(set * 8 + i));
+                                    }
+                                });
+                            }
+                            ui.separator();
+                            pick(ui, SgbPaletteChoice::Grayscale);
+                            ui.separator();
+                            ui.small(format!("Current: {}", session.sgb_palette.label()));
+                        })
+                        .response
+                        .on_disabled_hover_text("Only Super Game Boy hardware colourizes mono games");
                     });
 
                     ui.menu_button("Color Correction", |ui| {

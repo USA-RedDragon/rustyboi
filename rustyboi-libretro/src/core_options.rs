@@ -8,7 +8,7 @@
 
 use rustyboi_libretro_sys::{CoreOptions, OptionCategory, OptionDef, OptionValue};
 
-use rustyboi_session::action::{GbcDmgPalette, HardwareChoice, DmgPaletteChoice};
+use rustyboi_session::action::{GbcDmgPalette, HardwareChoice, DmgPaletteChoice, SgbPaletteChoice};
 use rustyboi_session::ColorCorrection;
 
 /// Option keys, defined once and referenced by both the generated table and the
@@ -18,6 +18,7 @@ pub const KEY_REAL_BOOT_ROM: &str = "rustyboi_real_boot_rom";
 pub const KEY_SGB_BORDER: &str = "rustyboi_sgb_border";
 pub const KEY_DMG_PALETTE: &str = "rustyboi_dmg_palette";
 pub const KEY_GBC_DMG_PALETTE: &str = "rustyboi_gbc_dmg_palette";
+pub const KEY_SGB_PALETTE: &str = "rustyboi_sgb_palette";
 pub const KEY_GBC_COLOR_CORRECTION: &str = "rustyboi_gbc_color_correction";
 
 /// Canonical on/off value ids (the libretro convention).
@@ -61,6 +62,11 @@ pub fn build() -> CoreOptions {
     let gbc_dmg_values: Vec<OptionValue> = GbcDmgPalette::choices()
         .into_iter()
         .map(|(c, label)| value(c.option_id(), label))
+        .collect();
+
+    let sgb_palette_values: Vec<OptionValue> = SgbPaletteChoice::ALL
+        .into_iter()
+        .map(|p| value(p.option_id(), p.label()))
         .collect();
 
     let color_values: Vec<OptionValue> =
@@ -124,6 +130,15 @@ pub fn build() -> CoreOptions {
                 category: "video_settings",
                 values: gbc_dmg_values,
                 default: GbcDmgPalette::Auto.option_id().into(),
+            },
+            OptionDef {
+                key: KEY_SGB_PALETTE,
+                desc: "Video > SGB Palette (DMG games)",
+                desc_categorized: "SGB Palette (DMG games)",
+                info: "Super Game Boy colorization for original Game Boy games. 'Auto' reproduces the SGB firmware's own pick (the recognized per-title palette, else 1-A); the others force one of the 32 built-in system palettes, or 'Grayscale' for the raw shade ramp. Only applies on Super Game Boy hardware.",
+                category: "video_settings",
+                values: sgb_palette_values,
+                default: SgbPaletteChoice::Auto.option_id().into(),
             },
             OptionDef {
                 key: KEY_GBC_COLOR_CORRECTION,
@@ -210,6 +225,11 @@ mod tests {
         let pal = values_for(KEY_DMG_PALETTE);
         for p in DmgPaletteChoice::ALL {
             assert!(pal.iter().any(|v| v == p.option_id()), "palette list missing {}", p.option_id());
+        }
+
+        let sgb = values_for(KEY_SGB_PALETTE);
+        for p in SgbPaletteChoice::ALL {
+            assert!(sgb.iter().any(|v| v == p.option_id()), "sgb palette list missing {}", p.option_id());
         }
 
         let gbc = values_for(KEY_GBC_DMG_PALETTE);

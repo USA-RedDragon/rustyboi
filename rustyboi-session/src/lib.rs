@@ -70,7 +70,7 @@ pub use action::LibraryEntry;
 pub use action::{
     ActionKind, CommandDescriptor, FileData, GbcDmgPalette, GraphicsBackend, HardwareChoice,
     HardwareFamily, KeyBind, LcdEffect, LoadPurpose, MenuCategory, DmgPaletteChoice, ScalingMode,
-    SessionUiState, TextureFilter, UiAction, COMMANDS, PRINTER_SCALES,
+    SessionUiState, SgbPaletteChoice, TextureFilter, UiAction, COMMANDS, PRINTER_SCALES,
 };
 pub use apply::{ActionOutcome, FetchPurpose, PlatformRequest};
 pub use present::{frame_to_pixels, rgb_to_pixels, PixelOrder};

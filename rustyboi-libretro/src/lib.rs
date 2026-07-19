@@ -34,7 +34,7 @@ use rustyboi_core_lib::gb::{Hardware, GB};
 use rustyboi_core_lib::ppu::{
     ColorCorrection, SGB_FRAME_HEIGHT, SGB_FRAME_SIZE, SGB_FRAME_WIDTH,
 };
-use rustyboi_session::action::{GbcDmgPalette, HardwareChoice, DmgPaletteChoice};
+use rustyboi_session::action::{GbcDmgPalette, HardwareChoice, DmgPaletteChoice, SgbPaletteChoice};
 use rustyboi_session::ports::{MemStorage, MemWebcam};
 use rustyboi_session::{
     frame_to_pixels, rgb_to_pixels, AbstractInput, Config, GbButton, PixelOrder, Ports, Rumble,
@@ -77,6 +77,7 @@ struct RustyboiCore {
     hardware_pref: HardwarePref,
     palette: DmgPaletteChoice,
     gbc_dmg_palette: GbcDmgPalette,
+    sgb_palette: SgbPaletteChoice,
     color_correction: ColorCorrection,
     framebuffer: Vec<u8>,
     /// Shared with the [`LibretroRumble`] port; `run` reads and forwards it.
@@ -149,6 +150,13 @@ impl RustyboiCore {
                 session.set_gbc_dmg_palette(self.gbc_dmg_palette);
             }
         }
+        if let Some(value) = env.get_variable(core_options::KEY_SGB_PALETTE) {
+            self.sgb_palette =
+                SgbPaletteChoice::from_option_id(&value).unwrap_or(SgbPaletteChoice::Auto);
+            if let Some(session) = self.session.as_mut() {
+                session.init_sgb_palette(self.sgb_palette);
+            }
+        }
         if let Some(value) = env.get_variable(core_options::KEY_GBC_COLOR_CORRECTION) {
             self.color_correction =
                 core_options::parse_color_correction(&value).unwrap_or(ColorCorrection::Lcd);
@@ -210,6 +218,7 @@ impl Core for RustyboiCore {
             hardware_pref: HardwarePref::Auto,
             palette: DmgPaletteChoice::Green,
             gbc_dmg_palette: GbcDmgPalette::Auto,
+            sgb_palette: SgbPaletteChoice::Auto,
             color_correction: ColorCorrection::Linear,
             // Sized for the largest possible frame (SGB 256x224) so the same
             // buffer serves both the plain 160x144 and the composited SGB paths.
@@ -318,6 +327,7 @@ impl Core for RustyboiCore {
             volume: 100,
             color_correction: self.color_correction,
             gbc_dmg_palette: self.gbc_dmg_palette,
+            sgb_palette: self.sgb_palette,
             dmg_palette: rustyboi_session::config::DmgPalette {
                 shades: self.palette.shades_rgba(self.color_correction),
             },

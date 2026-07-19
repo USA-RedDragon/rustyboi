@@ -22,7 +22,7 @@ use rustyboi_session::UiAction;
 use rustyboi_egui_lib::actions::GuiAction;
 
 use crate::contract::{drive_action, Frontend, PauseHint};
-use rustyboi_session::{frame_to_pixels, rgb_to_pixels, DmgPaletteChoice, PixelOrder};
+use rustyboi_session::{frame_to_pixels, rgb_to_pixels, DmgPaletteChoice, PixelOrder, SgbPaletteChoice};
 use crate::renderer::{GameFrame, Present, SourceSize};
 use crate::ui_host::{ExtraEvents, UiHost};
 
@@ -139,14 +139,16 @@ impl App {
     pub fn new(
         mut session: Session,
         palette: DmgPaletteChoice,
+        sgb_palette: SgbPaletteChoice,
         rom_path: Option<String>,
         bios_path: Option<String>,
         should_pause: bool,
     ) -> Self {
-        // Seed the session's presentation palette from the CLI/config choice so
+        // Seed the session's presentation palettes from the CLI/config choice so
         // the shared `apply`/`ui_state` path renders from one source (no persist
         // at startup — only a user SetPalette writes config).
         session.init_palette_choice(palette);
+        session.init_sgb_palette(sgb_palette);
         let now = Instant::now();
         App {
             session,
@@ -409,6 +411,8 @@ impl App {
             palette: self.session.palette(),
             gbc_dmg_palette: self.session.gbc_dmg_palette(),
             dmg_palette_active: self.session.dmg_palette_active(),
+            sgb_palette: self.session.sgb_palette(),
+            sgb_palette_active: self.session.sgb_palette_active(),
             color_correction: self.session.color_correction(),
             use_real_boot_rom: self.session.use_real_boot_rom(),
             texture_filter: self.session.texture_filter(),
@@ -991,7 +995,7 @@ fn panic_message(panic_info: Box<dyn std::any::Any + Send>, context: &str) -> St
 #[cfg(test)]
 mod fast_forward_tests {
     use super::App;
-    use rustyboi_session::action::DmgPaletteChoice;
+    use rustyboi_session::action::{DmgPaletteChoice, SgbPaletteChoice};
     use rustyboi_session::config::Config;
     use rustyboi_session::ports::{MemRumble, MemStorage, MemWebcam};
     use rustyboi_session::session::{Ports, Session};
@@ -1003,7 +1007,7 @@ mod fast_forward_tests {
             webcam: Box::new(MemWebcam::default()),
         };
         let session = Session::new(Config::default(), ports, [0u8; 32]);
-        App::new(session, DmgPaletteChoice::Green, None, None, true)
+        App::new(session, DmgPaletteChoice::Green, SgbPaletteChoice::Auto, None, None, true)
     }
 
     #[test]
@@ -1109,7 +1113,7 @@ mod restart_tests {
 mod pause_and_load_tests {
     use super::App;
     use crate::contract::{Frontend, PauseHint};
-    use rustyboi_session::action::DmgPaletteChoice;
+    use rustyboi_session::action::{DmgPaletteChoice, SgbPaletteChoice};
     use rustyboi_session::config::Config;
     use rustyboi_session::ports::{MemRumble, MemStorage, MemWebcam};
     use rustyboi_session::session::{Ports, Session};
@@ -1126,7 +1130,7 @@ mod pause_and_load_tests {
     // every pause flag set and the auto-pause latch armed.
     fn paused_app() -> App {
         let session = Session::new(Config::default(), ports(), [0u8; 32]);
-        App::new(session, DmgPaletteChoice::Green, None, None, true)
+        App::new(session, DmgPaletteChoice::Green, SgbPaletteChoice::Auto, None, None, true)
     }
 
     /// Minimal valid 32KB NoMBC ROM.
