@@ -284,20 +284,6 @@ fn config_serde_round_trips_via_session() {
     assert_eq!(s.mode(), RunMode::FastForward(9));
 }
 
-#[test]
-fn input_remap_applies_through_run_frame() {
-    let rom = test_rom();
-    let mut cfg = Config { hardware: Hardware::DMG, ..Default::default() };
-    // Swap A and B.
-    cfg.input_map.remap(GbButton::A, GbButton::B);
-    cfg.input_map.remap(GbButton::B, GbButton::A);
-    let map = cfg.input_map.clone();
-    let _ = Session::with_gb(booted_gb(&rom), cfg, fresh_ports(), sha256(&rom));
-    // Verify the resolved state at the map level (deterministic, no frame needed).
-    let state = map.resolve(AbstractInput::from_pressed([GbButton::B]));
-    assert!(state.a && !state.b);
-}
-
 /// An MBC1 ROM with 8 KiB battery-backed RAM (type 0x03, RAM size code 0x02),
 /// so `has_battery()` is true and there is real SRAM to import/export.
 fn battery_rom() -> Vec<u8> {

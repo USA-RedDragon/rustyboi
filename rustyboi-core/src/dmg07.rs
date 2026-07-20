@@ -264,9 +264,6 @@ impl FourPlayerPort {
         self.hub.lock().unwrap().exchange(self.player, self.reply)
     }
 
-    pub fn player_id(&self) -> usize {
-        self.player + 1
-    }
 }
 
 impl Clone for FourPlayerPort {

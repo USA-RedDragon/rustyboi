@@ -23,9 +23,6 @@ pub enum OamBugKind {
 pub struct Bus<'a> {
     pub mmio: &'a mut Mmio,
     pub ppu: &'a mut Ppu,
-    // Dots elapsed since this instruction started; drives the double-speed PPU
-    // gate. Resets per instruction.
-    dot: u32,
     ticked: u32,
     // Deferred passive-read M-cycles (in dots): a CPU read of plain memory
     // (ROM/WRAM/HRAM with no OAM-DMA machinery live) returns a value that no
@@ -50,7 +47,6 @@ impl<'a> Bus<'a> {
         Bus {
             mmio,
             ppu,
-            dot: 0,
             ticked: 0,
             lag,
             foreign: lag,
@@ -288,7 +284,6 @@ impl<'a> Bus<'a> {
             // the exact dot the per-dot path would have, then allow the skip.
             if !self.ppu.is_lcd_disabled() && !self.mmio.lcd_display_enabled() {
                 self.resolve_one_dot();
-                self.dot = self.dot.wrapping_add(1);
                 self.ticked += 1;
                 continue;
             }
@@ -308,7 +303,6 @@ impl<'a> Bus<'a> {
                     .unwrap_or(target_cc);
                 let span = next_event.wrapping_sub(self.mmio.master_cc());
                 self.mmio.bulk_advance_idle(next_event);
-                self.dot = self.dot.wrapping_add(span as u32);
                 self.ticked += span as u32;
             } else if self.try_quiet_span(target_cc) {
                 // Quiet-span fast loop consumed a chunk of the span; the
@@ -316,7 +310,6 @@ impl<'a> Bus<'a> {
             } else {
                 let stall_before = self.mmio.peek_dma_stall();
                 self.resolve_one_dot();
-                self.dot = self.dot.wrapping_add(1);
                 self.ticked += 1;
                 // Event-interleaved HDMA transfer. A block that just fired in
                 // `step_hdma` queued its transfer cc as `pending_dma_stall` (the
@@ -337,7 +330,6 @@ impl<'a> Bus<'a> {
                         self.mmio.set_hdma_lockstep_active(true);
                         for _ in 0..delta {
                             self.resolve_one_dot();
-                            self.dot = self.dot.wrapping_add(1);
                             self.ticked += 1;
                         }
                         self.mmio.set_hdma_lockstep_active(false);
@@ -409,7 +401,6 @@ impl<'a> Bus<'a> {
         }
         self.mmio.tick_rtc(n as u64);
         self.mmio.advance_cpu_t_phase_by(n as u64);
-        self.dot = self.dot.wrapping_add(n);
         self.ticked += n;
         true
     }
@@ -1059,7 +1050,6 @@ impl<'a> Bus<'a> {
         let mut acked = false;
         while self.mmio.master_cc() < target {
             self.resolve_one_dot();
-            self.dot = self.dot.wrapping_add(1);
             self.ticked += 1;
             let crossed = if bit == lcd_bit && !ds {
                 if m0_retrig_window {

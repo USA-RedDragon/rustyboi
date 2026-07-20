@@ -607,12 +607,6 @@ impl SquareWave {
         }
     }
 
-    pub fn step_frame_sequencer(&mut self, _step: u8) {
-        // Length is a cc-driven absolute expiry event (see `length_event`) and
-        // the frequency sweep is now a cc-driven event polled in `step`, so
-        // nothing is FS-clocked here.
-    }
-
     /// Distance (in 2 MHz APU cycles) from `cur` to the nearest armed,
     /// not-yet-reached ch1 sweep counter (event / apply / kill), for the lazy
     /// catch-up chunker: the controller must stop a batched clock advance

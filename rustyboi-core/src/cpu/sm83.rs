@@ -683,7 +683,6 @@ impl SM83 {
     fn service_interrupt(&mut self, bus: &mut crate::cpu::Bus, just_unhalted: bool) -> u32 {
         self.registers.ime = false;
         self.ime_enable_delay = 0;
-        bus.clear_delayed_writes();
 
         // Interrupt-vs-dma precedence: an HDMA block whose m0-edge latch is LATER
         // than the interrupt's service cc fires AFTER the PC pushes, so a pushed

@@ -88,7 +88,9 @@ pub struct Config {
     /// load.
     #[serde(default)]
     pub sgb_palette: SgbPaletteChoice,
-    /// Abstract-button remap table.
+    /// Placeholder for the retired abstract-button remap table (see
+    /// [`InputMap`]); persisted blobs carry it, nothing consumes it.
+    #[serde(default)]
     pub input_map: InputMap,
     /// Rewind buffer settings.
     pub rewind: RewindConfig,
@@ -113,9 +115,10 @@ pub struct Config {
     /// blobs still load and reproduce the historical output.
     #[serde(default)]
     pub color_correction: ColorCorrection,
-    /// Whether to run a real boot ROM (when one has been supplied via
-    /// [`set_boot_rom`](crate::session::Session::set_boot_rom)) instead of the
-    /// synthetic post-boot state. `default` (false) so older blobs still load.
+    /// Persisted menu flag for the real-boot-ROM feature. The session has no
+    /// boot-ROM byte-supply path, so it currently has no effect there (only the
+    /// platform `--bios` CLI loads a BIOS). Kept for config-blob compatibility;
+    /// `default` (false) so older blobs still load.
     #[serde(default)]
     pub use_real_boot_rom: bool,
     /// Upscale texture filter (presentation-only). `default` (`Nearest`).

@@ -516,7 +516,6 @@ const CGB_FIRST_FRAME_LOCK_DOT: u128 = 82;
 // At double speed the CGB first-frame VRAM/OAM lock engages one dot earlier than
 // the single-speed boundary.
 const CGB_FIRST_FRAME_LOCK_DOT_DS: u128 = 81;
-fn dmg_first_frame_lock_dot() -> u128 { DMG_FIRST_FRAME_LOCK_DOT }
 fn cgb_first_frame_lock_dot(double_speed: bool) -> u128 {
     if double_speed { CGB_FIRST_FRAME_LOCK_DOT_DS } else { CGB_FIRST_FRAME_LOCK_DOT }
 }
@@ -719,20 +718,6 @@ const WXEN_COMMIT_DELAY: i64 = 3;
 const WYTRIG_COMMIT_DELAY: i64 = 3;
 const LINE153_LY0_DOT_DS: i64 = 6;
 const GETSTAT_OFF_DS: i64 = -1;
-
-// DS offsets re-derived after the double-speed STAT sub-dot step (step_subdot)
-// gave the IRQ model true odd-cc resolution: m2 relaxes -2 -> -1 (the odd-cc
-// fire is now caught by the sub-dot rather than rounded down), and the write cc
-// tightens -3 -> -4.
-fn write_cc_off_ds() -> i64 { 0 }
-fn m0irq_off_ds() -> i64 { M0IRQ_OFFSET }
-fn m2irq_off_ds() -> i64 { -1 }
-// Single-speed offsets (the compiled-in calibrated constants).
-fn dmg_mode0_offset() -> i32 { DMG_MODE0_OFFSET }
-fn cgb_mode0_offset() -> i32 { CGB_MODE0_OFFSET }
-fn m0irq_off_ss() -> i64 { M0IRQ_OFFSET }
-fn m2irq_off_ss() -> i64 { M2IRQ_OFFSET }
-fn write_cc_off_ss() -> i64 { WRITE_CC_OFFSET }
 
 // A tile-column index the real grid can never produce (`(spx-grid0) >> 3` is
 // always an integer, never a half-step), used to mark "no column charged yet"
@@ -1411,7 +1396,9 @@ pub struct Ppu {
     fetcher_cadence_tick: u8,
 
     // Window state tracking
-    window_line_counter: u8,    // Internal counter for window Y position
+    // Serialized placeholder (wire-format pinned); superseded by `win_y_pos`.
+    // Never read or written outside `new`.
+    window_line_counter: u8,
     // The hardware `window Y position`: the window's internal Y line, incremented by 1 ONLY
     // at the moment the window actually begins drawing on a line (the mode-3-start window checkpoint /
     // pixel output draw-start), NOT per-line whenever ly > wy. Initialized to 0xFF
@@ -1473,7 +1460,10 @@ pub struct Ppu {
     win_wx_enable_resolved: bool,
 
     // STAT interrupt state tracking
-    previous_stat_interrupt_line: bool, // Previous state of STAT interrupt line for edge detection
+    // Serialized placeholder (wire-format pinned); the edge-detection latch it
+    // fed was superseded by the event-scheduled STAT model. Never read.
+    previous_stat_interrupt_line: bool,
+    // Serialized placeholder (wire-format pinned); never read.
     #[serde(default)]
     mode2_irq_pretriggered_for_next_line: bool,
     // True for the first scanline after LCDC.7 transitions 0 -> 1. On real
@@ -1492,12 +1482,8 @@ pub struct Ppu {
     // LY=0 Mode 2 pretrigger (both of which originally checked LY==153).
     #[serde(default)]
     line_153_ly_zeroed: bool,
-    // True once the current line's Mode 0 (HBlank) FF41 mode bits and
-    // STAT IRQ have been pretriggered. The hardware STAT resolve reports mode
-    // 0 starting two cycles before the actual Mode 3 -> Mode 0 transition
-    // (`cc + 2 < the current line's mode-0 (HBlank) time`); pretrigger Mode 0 from the pixel
-    // push at x == 158 so the FF41 read-back and the wired-OR mode-0 IRQ
-    // fire at the right cycle. Reset when entering PixelTransfer.
+    // Serialized placeholder (wire-format pinned); the mode-0 pretrigger is
+    // tracked by `mode0_reported_this_line` now. Never read.
     #[serde(default)]
     mode0_pretriggered_this_line: bool,
     // Number of BG pixels discarded so far for SCX fine-scroll alignment at
@@ -2533,7 +2519,6 @@ impl Ppu {
         self.lyc_irq.set_cgb(mmio.is_cgb());
         self.lyc_irq.seed(mmio.read(LCD_STATUS), lyc);
         self.mstat_irq.seed(mmio.read(LCD_STATUS), lyc);
-        self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
         self.reschedule_all_stat_events(mmio);
         self.sched_m0irq = stat_irq::DISABLED_TIME;
         self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
@@ -4897,11 +4882,10 @@ impl Ppu {
         // (= that exact dot) here armed the m0 IRQ early and broke the
         // m2int_m0irq / m0enable / enable_display / vramw_m3end m0-IRQ clusters.
         // Arm from the m3-length dot instead — the same anchor core-loop used —
-        // so the IRQ fires on the calibrated boundary again. (Env-overridable to
-        // restore the exact-mode-0 time arm for diagnostics.)
+        // so the IRQ fires on the calibrated boundary again.
         let mode0_within_line = {
             let m3_len = self.compute_m3_length(mmio, is_cgb);
-            let offset = if is_cgb { cgb_mode0_offset() } else { dmg_mode0_offset() };
+            let offset = if is_cgb { CGB_MODE0_OFFSET } else { DMG_MODE0_OFFSET };
             self.ticks as i64 + m3_len as i64 + offset as i64
         };
         let mut remaining = mode0_within_line - self.ticks as i64;
@@ -4931,7 +4915,7 @@ impl Ppu {
             remaining -= self.m0irq_xpos166_advance(mmio, is_cgb);
         }
         let ds = mmio.is_double_speed_mode();
-        let mut off = if ds { m0irq_off_ds() } else { m0irq_off_ss() };
+        let mut off = M0IRQ_OFFSET;
         if is_cgb && !ds && (mmio.read(SCX) & 0x07) == 2 {
             off += M0IRQ_SCX2_CGB_OFFSET;
         }
@@ -5085,26 +5069,12 @@ impl Ppu {
             }
         }
         self.process_oam_reader_events(mmio);
-        if mmio.take_ly_write_pending() {
-            self.reset_lcd_pipeline();
-            mmio.write_ly_from_ppu(0);
-            self.state = State::OAMSearch;
-            self.enter_scheduled_mode2(mmio);
-            self.line_cycle = 0;
-            self.internal_ly_val = 0;
-            self.stat_reg_committed = mmio.read(LCD_STATUS);
-            self.lyc_irq.lcd_reset();
-            self.mstat_irq.lcd_reset(self.lyc_irq.lyc_reg_src());
-            self.reschedule_all_stat_events(mmio);
-            self.sched_m0irq = stat_irq::DISABLED_TIME;
-        }
         let effective_ly = self.effective_ly_for_lyc_compare(mmio);
         if mmio.read(LYC) == effective_ly {
             mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) | (1 << 2));
         } else {
             mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) & !(1 << 2));
         }
-        self.check_and_trigger_stat_interrupt(mmio);
         self.update_window_y_latch(mmio);
     }
 
@@ -5600,8 +5570,10 @@ impl Ppu {
             .min(self.sched_m0irq);
     }
 
-    fn m2_off(ds: bool) -> i64 {
-        if ds { m2irq_off_ds() } else { m2irq_off_ss() }
+    fn m2_off(_ds: bool) -> i64 {
+        // DS and SS converged on -1 after the double-speed STAT sub-dot step
+        // (step_subdot) gave the IRQ model true odd-cc resolution.
+        M2IRQ_OFFSET
     }
 
     fn do_mode2_irq_event(&mut self, mmio: &mut mmio::Mmio, ds: bool) {
@@ -5630,40 +5602,6 @@ impl Ppu {
         let delta = stat_irq::mode2_reschedule_delta(ly, stat, ds);
         self.sched_m2irq = self.sched_m2irq.wrapping_add(delta);
     }
-
-    /// Calculate the current state of the STAT interrupt line based on all interrupt sources
-    fn calculate_stat_interrupt_line(&self, mmio: &mmio::Mmio) -> bool {
-        let stat_register = mmio.read(LCD_STATUS);
-
-        // Extract enable bits for each interrupt source
-        let mode_0_int_enable = (stat_register & (1 << 3)) != 0; // HBlank
-        let mode_1_int_enable = (stat_register & (1 << 4)) != 0; // VBlank
-        let mode_2_int_enable = (stat_register & (1 << 5)) != 0; // OAM Search
-        let lyc_int_enable = (stat_register & (1 << 6)) != 0;    // LYC=LY
-
-        // Extract current state flags
-        let current_mode = stat_register & 0x03; // Bits 1-0: PPU mode
-        let lyc_equals_ly = (stat_register & (1 << 2)) != 0;     // Bit 2: LYC=LY flag
-
-        // Check each interrupt source and OR them together
-        let mut interrupt_line = false;
-
-        // Mode interrupts
-        match current_mode {
-            0 if mode_0_int_enable => interrupt_line = true, // HBlank
-            1 if mode_1_int_enable => interrupt_line = true, // VBlank
-            2 if mode_2_int_enable => interrupt_line = true, // OAM Search
-            _ => {}
-        }
-
-        // LYC=LY interrupt
-        if lyc_int_enable && lyc_equals_ly {
-            interrupt_line = true;
-        }
-
-        interrupt_line
-    }
-
 
     // Window-Y activation latch. Hardware compares LY against WY at three fixed
     // checkpoints per frame; once any comparison hits, the window is armed for the
@@ -6155,27 +6093,16 @@ impl Ppu {
         self.objsize_dot_history.clear();
         self.sprite_fetch_recs.clear();
         self.pixel_transfer_warmup = 0;
-        self.window_line_counter = 0;
         self.win_y_pos = 0xFF;
         self.win_draw_start = false;
         self.window_y_triggered = false;
         self.window_started_this_line = false;
-        self.mode2_irq_pretriggered_for_next_line = false;
         self.first_line_after_enable = false;
         self.line_153_ly_zeroed = false;
-        self.mode0_pretriggered_this_line = false;
         self.m3_pixels_discarded = 0;
         self.scheduled_mode0_dot = None;
         self.m0_time_master = None;
         self.cgbp_block_start_cc = None;
-    }
-
-    /// Latch the current wired-OR STAT line state for edge bookkeeping. IRQ
-    /// delivery is now handled exclusively by the event-scheduled model
-    /// (`dispatch_stat_events` + the FF41/FF45 write hooks), so this no longer
-    /// fires interrupts.
-    fn check_and_trigger_stat_interrupt(&mut self, mmio: &mut mmio::Mmio) {
-        self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
     }
 
     /// Re-evaluate the LYC=LY flag and the STAT edge after a CPU write to
@@ -6596,7 +6523,7 @@ impl Ppu {
         let cc = self.write_cc(ds);
         // SCX has no positive lever in the sweep (delay 1/2 == net-zero vs the
         // live read); the SCX-write straddles need the read-cc convergent root,
-        // out of scope. Default 0 (live), env-overridable for future work.
+        // out of scope. Applied live (delay 0).
         self.scx_pending = value;
         self.scx_apply_cc = cc;
         self.stat_sched_touched();
@@ -6736,7 +6663,6 @@ impl Ppu {
         // Keep the LYC=LY readback flag (FF41 bit 2) in sync regardless of LCD
         // state; only its IRQ side-effects are gated by enable.
         if self.disabled {
-            self.previous_stat_interrupt_line = false;
             // STAT-write quirk (the FF41 write path): with the LCD off, an FF41
             // write while the LYC=LY flag is set and LYC IRQ was disabled flags
             // a STAT IRQ. On CGB the written data must also set LYC-IRQ-enable;
@@ -6777,7 +6703,6 @@ impl Ppu {
 
         // Re-sync the LYC=LY readback flag after the change.
         self.sync_lyc_flag(mmio);
-        self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
     }
 
     fn sync_lyc_flag(&self, mmio: &mut mmio::Mmio) {
@@ -6996,7 +6921,7 @@ impl Ppu {
     /// resolving CPU write (0 on an even T-phase, 1 on an odd one), giving the
     /// STAT model half-PPU-dot precision.
     fn write_cc(&self, ds: bool) -> u64 {
-        let off = if ds { write_cc_off_ds() } else { write_cc_off_ss() };
+        let off = WRITE_CC_OFFSET;
         // `write_subdot` carries the sub-PPU-dot parity of the resolving CPU
         // write. In practice the STAT/render tests align via whole-instruction
         // polling loops, so writes land on M-cycle (even) phases and this term
@@ -7051,9 +6976,6 @@ impl Ppu {
         // leak into this line's OAM scan; a mid-mode-2 size write rearms it.
         self.objsize_apply_cc = wy2_disabled();
         Self::set_lcd_status_mode(mmio, 2);
-        // IRQ delivery is handled by the event model; just latch the line.
-        self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
-        self.mode2_irq_pretriggered_for_next_line = false;
         // Arm the cgbp begin boundary (the hardware CGB-palette-accessible window: blocked once
         // `line cycles(cc) + ds >= 80`) as soon as the line's mode 2 begins, so a
         // BCPD/OCPD write landing in late mode 2 (before M3 is armed) sees it.
@@ -7100,15 +7022,11 @@ impl Ppu {
         };
         if should_anticipate_mode2 && (mmio.read(LCD_STATUS) & 0x03) != 2 {
             Self::set_lcd_status_mode(mmio, 2);
-            self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
         }
     }
 
     pub fn step(&mut self, mmio: &mut mmio::Mmio) {
         if self.disabled {
-            // While the LCD is off the LY counter is held at 0; consume any
-            // pending CPU write so it doesn't affect the next enable.
-            let _ = mmio.take_ly_write_pending();
             if mmio.read(LCD_CONTROL)&(LCDCFlags::DisplayEnable as u8) != 0 {
                 self.sync_lcdc_from_mmio(mmio);
                 self.disabled = false;
@@ -7141,8 +7059,6 @@ impl Ppu {
                     mmio.request_interrupt(registers::InterruptFlag::Lcd);
                 }
                 Self::set_lcd_status_mode(mmio, 0);
-                self.previous_stat_interrupt_line = self.calculate_stat_interrupt_line(mmio);
-                self.check_and_trigger_stat_interrupt(mmio);
                 // Initialize the event-scheduled IRQ clock at enable: LY=0,
                 // line_cycle=0. Mirror the hardware LCDC-change enable branch.
                 self.line_cycle = 0;
@@ -7199,9 +7115,6 @@ impl Ppu {
             self.reset_lcd_pipeline();
             Self::set_lcd_status_mode(mmio, 0);
             self.disabled = true;
-            self.previous_stat_interrupt_line = false;
-            // The LCD just turned off; drop any pending LY write.
-            let _ = mmio.take_ly_write_pending();
             // Re-arm the sprite snapshot for the next display-enable.
             self.oam_reader_seeded = false;
             let _ = mmio.take_oam_write_pending();
@@ -7268,23 +7181,6 @@ impl Ppu {
         // OAM writes, mirroring the hardware OAM-DMA start / OAM-DMA end / OAM change events.
         self.process_oam_reader_events(mmio);
 
-        // CPU writes to FF44 (LY) reset the line counter to 0 and re-arm the
-        // PPU at the start of an OAM search. (An FF44 write invalidates the
-        // fast budget, so `fast` implies no pending write.)
-        if !fast && mmio.take_ly_write_pending() {
-            self.reset_lcd_pipeline();
-            mmio.write_ly_from_ppu(0);
-            self.state = State::OAMSearch;
-            self.enter_scheduled_mode2(mmio);
-            self.line_cycle = 0;
-            self.internal_ly_val = 0;
-            self.stat_reg_committed = mmio.read(LCD_STATUS);
-            self.lyc_irq.lcd_reset();
-            self.mstat_irq.lcd_reset(self.lyc_irq.lyc_reg_src());
-            self.reschedule_all_stat_events(mmio);
-            self.sched_m0irq = stat_irq::DISABLED_TIME;
-        }
-
         // LYC=LY compare uses an "effective LY" that anticipates the
         // next-line value in the last 2 dots of any line (matches the hardware
         // `the LYC-compare-LY calc` `time-to-next-LY <= 2` threshold). Line 153's earlier
@@ -7298,10 +7194,6 @@ impl Ppu {
                 mmio.write_lcd_status_from_ppu(mmio.lcd_status_reg() & !(1 << 2)); // Clear the LYC=LY flag
             }
         }
-
-        // (STAT IRQ delivery is handled entirely by the event model in
-        // dispatch_stat_events; `previous_stat_interrupt_line` is a write-only
-        // legacy latch, so the per-dot recompute here was pure dead work.)
 
         // hardware-style window-Y (window-enable master) latch. The trigger is sticky for
         // the frame and is evaluated at three points: ly0 mode-2 start
@@ -7319,11 +7211,9 @@ impl Ppu {
                 // hardware-style three-point check in `update_window_y_latch`,
                 // which runs near the previous line's end.
                 if self.ticks == 0 {
-                    // window Y position is now incremented at window draw-start (see the
+                    // window Y position is incremented at window draw-start (see the
                     // PixelTransfer start_window site), matching the hardware
-                    // mode-3-start window-checkpoint semantics. The old per-line `window_line_counter`
-                    // increment here (every line with ly > wy) is removed; the
-                    // counter is no longer consumed by the fetcher.
+                    // mode-3-start window-checkpoint semantics.
                     // Reset window line flag for new scanline
                     self.window_started_this_line = false;
                     self.win_start_dot = None;
@@ -7345,10 +7235,9 @@ impl Ppu {
                 // VRAM/OAM writability (line cycles-based, not mode-3 start).
                 if self.first_line_after_enable {
                     let is_cgb = mmio.is_cgb_features_enabled();
-                    let lock_dot = if is_cgb { cgb_first_frame_lock_dot(mmio.is_double_speed_mode()) } else { dmg_first_frame_lock_dot() };
+                    let lock_dot = if is_cgb { cgb_first_frame_lock_dot(mmio.is_double_speed_mode()) } else { DMG_FIRST_FRAME_LOCK_DOT };
                     if self.ticks == lock_dot && (mmio.read(LCD_STATUS) & 0x03) != 3 {
                         Self::set_lcd_status_mode(mmio, 3);
-                        self.check_and_trigger_stat_interrupt(mmio);
                     }
                     // Install the closed-form master-cc anchors for the first line
                     // BEFORE M3 arms, so the CPU-access gates (OAM/VRAM/cgbp) resolve
@@ -7532,7 +7421,6 @@ impl Ppu {
                     // lines use normal Mode 2 timing.
                     let was_first_line = self.first_line_after_enable;
                     self.first_line_after_enable = false;
-                    self.mode0_pretriggered_this_line = false;
                     self.mode0_reported_this_line = false;
                     self.line_rendered_this_line = false;
                     self.wxa6_lineend_applied = false;
@@ -7670,7 +7558,6 @@ impl Ppu {
                     // timing; the live f1 xpos mapping does not align there, so
                     // latch the discard immediately (pre-write SCX), as before.
                     self.m3_discard_target = if was_first_line { self.m3_arm_scx as i8 } else { -1 };
-                    self.check_and_trigger_stat_interrupt(mmio);
 
                     if was_first_line {
                         // First line after LCD enable: install the SAME closed-form
@@ -8117,7 +8004,6 @@ impl Ppu {
                         if !self.mode0_reported_this_line {
                             self.mode0_reported_this_line = true;
                             Self::set_lcd_status_mode(mmio, 0);
-                            self.check_and_trigger_stat_interrupt(mmio);
                         }
                         // Flush remaining FIFO pixels to fill all 160 columns; the
                         // pipeline may lag the closed-form boundary by a few dots.
@@ -9108,7 +8994,6 @@ impl Ppu {
                         if !self.mode0_reported_this_line {
                             self.mode0_reported_this_line = true;
                             Self::set_lcd_status_mode(mmio, 0);
-                            self.check_and_trigger_stat_interrupt(mmio);
                         }
                     } else if window_deferred {
                         self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
@@ -9156,7 +9041,6 @@ impl Ppu {
                             mmio.request_interrupt(registers::InterruptFlag::VBlank);
                         }
                         self.m1_vblank_fired = false;
-                        self.check_and_trigger_stat_interrupt(mmio);
                     } else {
                         // Continue to next visible scanline
                         let next_ly = current_ly.saturating_add(1);
@@ -9197,7 +9081,6 @@ impl Ppu {
                     } else {
                         mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) & !(1 << 2));
                     }
-                    self.check_and_trigger_stat_interrupt(mmio);
                 }
 
                 if self.ticks == 455 {
@@ -9219,7 +9102,6 @@ impl Ppu {
                         self.next_sprite_fetch_index = 0;
                         self.sprite_fetch_stall = 0;
                         self.pixel_transfer_warmup = 0;
-                        self.window_line_counter = 0;
                         self.win_y_pos = 0xFF;
                         // NOTE: win_draw_start / win_draw_started are intentionally
                         // NOT reset here. The hardware resets window Y position at the line-0 mode-2 checkpoint but
@@ -10030,9 +9912,8 @@ impl Ppu {
     /// model, and that boundary feeds the HDMA trigger / VRAM-unlock the dma
     /// suite measures. Env-overridable, gated per SCX&7 phase and per speed so
     /// it cannot touch co-calibrated clusters at other phases.
-    fn dma_scx_m0_nudge(&self, double_speed: bool, vram: bool) -> i64 {
+    fn dma_scx_m0_nudge(&self, _double_speed: bool, vram: bool) -> i64 {
         let scx = self.m3_arm_scx & 0x07;
-        let suffix = if double_speed { "_DS" } else { "" };
         // Two surgical, phase-scoped boundary nudges, each a clean -1 on the dma
         // cluster with zero regressions across the co-calibrated clusters
         // (window / scx_during_m3 / cgbpal_m3 / enable_display / scy / oamdma):
@@ -10050,14 +9931,9 @@ impl Ppu {
         //
         // SCX&7==0 was -2 on dma-only but regresses two window m2int_wxA6
         // busyread tests, so it is deliberately left unbiased (default 0).
-        let _ = suffix;
-        let default = match (vram, scx) {
+        match (vram, scx) {
             (false, 1) => -1,
             (true, 3) => -1,
-            _ => 0,
-        };
-        match scx {
-            0 | 1 | 2 | 3 | 5 => default,
             _ => 0,
         }
     }
@@ -11237,16 +11113,6 @@ impl Ppu {
         !self.disabled && self.state == State::PixelTransfer
     }
 
-    /// True when the renderer is in the OAM-search (mode 2) phase of an active
-    /// line — the pre-pixel-transfer window where the per-dot stepper's `line_cycle`
-    /// and PPU-clock phase are already byte-exact vs hardware (no mode-3-length
-    /// coupling has accumulated yet). Used by the Stage-2 STOP DS->SS re-anchor.
-    pub fn is_in_oam_search(&self) -> bool {
-        !self.disabled
-            && (self.lcdc & (LCDCFlags::DisplayEnable as u8)) != 0
-            && self.state == State::OAMSearch
-    }
-
     /// True when the renderer is on an ACTIVE rendering line (LCD on, LY 0..143):
     /// OAMSearch / PixelTransfer / HBlank of a visible line. An SS->DS speed switch
     /// here makes the per-dot renderer overshoot the post-window mode-3->mode-0
@@ -11259,21 +11125,6 @@ impl Ppu {
             && (self.lcdc & (LCDCFlags::DisplayEnable as u8)) != 0
             && self.internal_ly_val < 144
             && self.state != State::VBlank
-    }
-
-    /// Arm the SS->DS-during-mode3 bridge pullback marker (the SS->DS bridge
-    /// dropped 2 dots). A following DS->SS switch consumes it.
-    pub fn arm_sc_mode3_pullback(&mut self) {
-        self.sc_mode3_pullback_pending = true;
-    }
-
-    /// Consume the SS->DS-during-mode3 pullback marker, returning whether it was
-    /// set. Used by the DS->SS bridge to restore the 2 dropped dots for the
-    /// double-switch speedchange families.
-    pub fn take_sc_mode3_pullback(&mut self) -> bool {
-        let p = self.sc_mode3_pullback_pending;
-        self.sc_mode3_pullback_pending = false;
-        p
     }
 
     pub fn get_x(&self) -> u8 {

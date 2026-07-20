@@ -270,11 +270,6 @@ impl Wave {
         }
     }
 
-    pub fn step_frame_sequencer(&mut self, _step: u8) {
-        // Length is now a cc-driven absolute expiry event (see `length_event`).
-        // Channel 3 has no envelope/sweep, so nothing else is FS-clocked.
-    }
-
     fn get_output_level(&self) -> u8 {
         (self.nr32 >> 5) & 0x03
     }

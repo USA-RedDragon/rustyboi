@@ -11,7 +11,6 @@ use rustyboi_frontend_lib::actions::{FileData, GuiAction};
 use rustyboi_frontend_lib::{App, PlatformRequest, Renderer, ResolvedAction, UiHost};
 use rustyboi_session::input_config::{FiredHotkey, HeldInputs, HotkeyAction, KeyName};
 // Desktop (gilrs) + Android (native key events) both map physical pads to this.
-#[cfg(not(target_arch = "wasm32"))]
 use rustyboi_session::input_config::PadButton;
 use rustyboi_session::Session;
 
@@ -29,21 +28,7 @@ use winit::window::{Window, WindowId};
 use winit::window::Fullscreen;
 use winit_input_helper::WinitInputHelper;
 
-// The platform crate's own wasm rendering path is legacy — the web frontend is
-// `rustyboi-web`, and nothing builds this crate for wasm. These winit-0.29-era
-// imports are kept cfg-gated so native/Android builds ignore them.
-#[cfg(target_arch = "wasm32")]
-use std::rc::Rc;
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::JsCast;
-#[cfg(target_arch = "wasm32")]
-use winit::event::Event;
-#[cfg(target_arch = "wasm32")]
-use winit::window::WindowBuilder;
-#[cfg(target_arch = "wasm32")]
-use winit::platform::web::WindowExtWebSys;
-
-// Used by the desktop + wasm window sizing; the Android entry sizes to the
+// Used by the desktop window sizing; the Android entry sizes to the
 // native surface, so these are unreferenced there.
 #[cfg_attr(target_os = "android", allow(dead_code))]
 const WIDTH: u32 = 160;
@@ -56,15 +41,6 @@ const HEIGHT: u32 = 144;
 struct RenderState {
     renderer: Box<dyn rustyboi_frontend_lib::Present>,
     ui: UiHost,
-}
-
-#[cfg(target_arch = "wasm32")]
-fn get_window_size() -> LogicalSize<f64> {
-    let client_window = web_sys::window().unwrap();
-    LogicalSize::new(
-        client_window.inner_width().unwrap().as_f64().unwrap(),
-        client_window.inner_height().unwrap().as_f64().unwrap(),
-    )
 }
 
 /// Create the wgpu surface + device + queue from `window`, then build the
@@ -220,55 +196,13 @@ fn create_render_state(
     Ok(RenderState { renderer: Box::new(renderer), ui })
 }
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 pub fn run_with_gui(gb: Box<gb::GB>, config: &config::CleanConfig) -> Result<(), PlatformError> {
     // winit 0.30: the window is created inside `ApplicationHandler::resumed`, so
     // the entry point just builds the event loop and hands off to the shared
     // handler (see `run_gui_loop`).
     let event_loop = EventLoop::new().map_err(PlatformError::from_display)?;
     run_gui_loop(event_loop, gb, config)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub async fn run_with_gui_async(gb: Box<gb::GB>, config: config::CleanConfig) {
-    let event_loop = EventLoop::new().unwrap();
-    let size = LogicalSize::new(
-        (WIDTH * (config.scale as u32)) as f64,
-        (HEIGHT * (config.scale as u32)) as f64,
-    );
-    let window = WindowBuilder::new()
-        .with_title("RustyBoi")
-        .with_inner_size(size)
-        .with_min_inner_size(LogicalSize::new(WIDTH as f64, HEIGHT as f64))
-        .build(&event_loop)
-        .unwrap();
-
-    web_sys::window()
-        .and_then(|win| win.document())
-        .and_then(|doc| doc.body())
-        .and_then(|body| {
-            body.append_child(&web_sys::Element::from(window.canvas().unwrap()))
-                .ok()
-        })
-        .expect("couldn't append canvas to document body");
-
-    let window = Rc::new(window);
-    let closure = wasm_bindgen::closure::Closure::wrap(Box::new({
-        let window = Rc::clone(&window);
-        move |_e: web_sys::Event| {
-            let _ = window.request_inner_size(get_window_size());
-        }
-    }) as Box<dyn FnMut(_)>);
-    web_sys::window()
-        .unwrap()
-        .add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
-        .unwrap();
-    closure.forget();
-    let _ = window.request_inner_size(get_window_size());
-
-    if let Err(e) = run_gui_loop(event_loop, window, gb, &config) {
-        eprintln!("Error in GUI loop: {e}");
-    }
 }
 
 /// Android entry. Builds an `EventLoop` bound to the supplied `AndroidApp` and
@@ -310,13 +244,9 @@ fn save_base() -> std::path::PathBuf {
     {
         crate::ios::save_dir()
     }
-    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android"), not(target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         crate::ports::desktop_save_dir()
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        std::path::PathBuf::from(".")
     }
 }
 
@@ -439,7 +369,7 @@ pub(crate) fn safe_insets_from_rect(
 /// Fold all connected gamepads' held buttons into the abstract [`PadButton`] set:
 /// standard face/shoulder/trigger buttons + D-pad via the hat OR the left stick.
 /// Draining `next_event` refreshes the cached state `is_pressed`/`value` read.
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 fn collect_gamepad_held(gilrs: &mut gilrs::Gilrs, pad: &mut std::collections::HashSet<PadButton>) {
     use gilrs::{Axis, Button};
     while gilrs.next_event().is_some() {}
@@ -549,7 +479,7 @@ fn run_gui_loop(
     session_config.hardware = config.hardware;
 
     // `mut` only used on native, where offloaded rewind is enabled below.
-    #[cfg_attr(any(target_arch = "wasm32", target_os = "android"), allow(unused_mut))]
+    #[cfg_attr(target_os = "android", allow(unused_mut))]
     let mut session = {
         session_from_gb(gb, config.rom.as_ref().and_then(|p| std::fs::read(p).ok()).as_deref(), session_config, ports)
     };
@@ -566,29 +496,28 @@ fn run_gui_loop(
     }
 
     // Native desktop: offloaded rewind capture (worker serializes off-thread).
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[cfg(not(target_os = "android"))]
     let rewind_worker = {
         session.set_rewind_offloaded(true);
         Some(crate::rewind_worker::RewindWorker::new())
     };
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[cfg(not(target_os = "android"))]
     let png_worker: Option<crate::png_worker::PngWorker> = None;
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[cfg(not(target_os = "android"))]
     let next_print_index: Option<(String, u32)> = None;
 
     // Native desktop: physical gamepad support (gilrs). `None` if no backend is
     // available; buttons are OR'd into the keyboard/touch input each frame.
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[cfg(not(target_os = "android"))]
     let gilrs = gilrs::Gilrs::new().ok();
     // Android has no gilrs backend: controller buttons arrive as native key
     // events. Track the held pad-button set here and merge into HeldInputs.
     #[cfg(target_os = "android")]
     let android_pad: std::collections::HashSet<PadButton> = std::collections::HashSet::new();
 
-    // Cheat-DB HTTP fetch worker (desktop + Android; wasm uses browser fetch).
+    // Cheat-DB HTTP fetch worker (desktop + Android).
     // Created lazily on the first `Get cheats` so a session that never fetches
     // pays nothing.
-    #[cfg(not(target_arch = "wasm32"))]
     let mut fetch_worker: Option<crate::fetch_worker::FetchWorker> = None;
 
     // Per-frame edge/phase state for the shared input resolver (hotkey rising
@@ -614,7 +543,6 @@ fn run_gui_loop(
     // No-Intro game-name index: load cached DATs immediately, download any that
     // are missing. The data is CC-BY-SA-4.0 libretro-database material that is
     // never embedded in the binary; `no_intro_fetch_urls` logs the attribution.
-    #[cfg(not(target_arch = "wasm32"))]
     {
         let urls = app.session().no_intro_fetch_urls();
         let (cached, missing) = crate::no_intro_cache::split_cached(&save_base(), &urls);
@@ -685,15 +613,14 @@ fn run_gui_loop(
         n_key_press_time: None,
         f_last_repeat_time: None,
         n_last_repeat_time: None,
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        #[cfg(not(target_os = "android"))]
         rewind_worker,
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        #[cfg(not(target_os = "android"))]
         png_worker,
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        #[cfg(not(target_os = "android"))]
         next_print_index,
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        #[cfg(not(target_os = "android"))]
         gilrs,
-        #[cfg(not(target_arch = "wasm32"))]
         fetch_worker,
         #[cfg(target_os = "android")]
         android_pad,
@@ -744,15 +671,14 @@ struct GuiApp<'c> {
     n_key_press_time: Option<Instant>,
     f_last_repeat_time: Option<Instant>,
     n_last_repeat_time: Option<Instant>,
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[cfg(not(target_os = "android"))]
     rewind_worker: Option<crate::rewind_worker::RewindWorker>,
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[cfg(not(target_os = "android"))]
     png_worker: Option<crate::png_worker::PngWorker>,
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[cfg(not(target_os = "android"))]
     next_print_index: Option<(String, u32)>,
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[cfg(not(target_os = "android"))]
     gilrs: Option<gilrs::Gilrs>,
-    #[cfg(not(target_arch = "wasm32"))]
     fetch_worker: Option<crate::fetch_worker::FetchWorker>,
     #[cfg(target_os = "android")]
     android_pad: std::collections::HashSet<PadButton>,
@@ -939,12 +865,11 @@ impl ApplicationHandler for GuiApp<'_> {
         // The background-worker fields are target-gated (see the struct), so the
         // drops must carry the matching cfgs or non-desktop builds fail to
         // compile with "no field" errors.
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        #[cfg(not(target_os = "android"))]
         {
             self.rewind_worker = None;
             self.png_worker = None;
         }
-        #[cfg(not(target_arch = "wasm32"))]
         {
             self.fetch_worker = None;
         }
@@ -1020,9 +945,9 @@ impl GuiApp<'_> {
         // the shared config: GB-button bindings drive the button state, chord
         // hotkeys drive features. Then OR the egui touch overlay on top and
         // dispatch any fired hotkeys.
-        #[cfg_attr(any(target_arch = "wasm32", target_os = "android"), allow(unused_mut))]
+        #[cfg_attr(target_os = "android", allow(unused_mut))]
         let mut held = held_inputs_from_keyboard(&self.input);
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        #[cfg(not(target_os = "android"))]
         if let Some(g) = self.gilrs.as_mut() {
             collect_gamepad_held(g, &mut held.pad);
         }
@@ -1136,14 +1061,14 @@ impl GuiApp<'_> {
             }
         }
         if pump {
-            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            #[cfg(not(target_os = "android"))]
             pump_workers(
                 &mut self.app,
                 self.rewind_worker.as_mut(),
                 &mut self.png_worker,
                 &mut self.next_print_index,
             );
-            #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+            #[cfg(target_os = "android")]
             drain_printer_sheets_unsupported(&mut self.app);
         }
 
@@ -1164,7 +1089,6 @@ impl GuiApp<'_> {
         // here instead. Sleep overshoot (macOS coalescing) is harmless in this
         // position: it delays only the next *tick*; the regulator banks the
         // elapsed time and game speed is unaffected.
-        #[cfg(not(target_arch = "wasm32"))]
         {
             // One tick per emulated frame period. Sub-frame precision is
             // pointless here (the regulator absorbs tick jitter), so the
@@ -1227,7 +1151,6 @@ impl GuiApp<'_> {
 
         // Deliver any completed cheat-DB fetches into the session so the cheat
         // picker shows them; report the outcome in the status bar.
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(worker) = self.fetch_worker.as_mut() {
             for done in worker.drain_finished() {
                 use rustyboi_session::FetchPurpose;
@@ -1538,7 +1461,7 @@ fn save_bytes_to_file(
     suggested_name: &str,
     bytes: &[u8],
 ) -> Result<Option<std::path::PathBuf>, std::io::Error> {
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let Some(path) = rfd::FileDialog::new().set_file_name(suggested_name).save_file() else {
             return Ok(None);
@@ -1561,24 +1484,18 @@ fn save_bytes_to_file(
         std::fs::write(&path, bytes)?;
         Ok(Some(path))
     }
-    // wasm: no filesystem export target.
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = (suggested_name, bytes);
-        Ok(None)
-    }
 }
 
 /// Read the bytes + display name behind a `FileData` (a disk path on desktop, or
 /// already-loaded content on web/Android).
 fn read_file_data(file_data: &FileData) -> Option<(Vec<u8>, Option<String>)> {
     match file_data {
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         FileData::Path(path) => {
             let name = path.to_string_lossy().to_string();
             std::fs::read(path).ok().map(|b| (b, Some(name)))
         }
-        #[cfg(any(target_arch = "wasm32", target_os = "android", target_os = "ios"))]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         FileData::Contents { name, data } => Some((data.clone(), Some(name.clone()))),
     }
 }
@@ -1599,8 +1516,8 @@ fn collect_extra_egui_events() -> Vec<rustyboi_frontend_lib::egui_events::Event>
 
 /// Drain a rewind snapshot to the background serializer, push back finished
 /// blobs, and drain any finished printer sheets to the PNG worker. Called once
-/// per emulated frame (native desktop only; wasm/Android keep inline capture).
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+/// per emulated frame (native desktop only; Android keeps inline capture).
+#[cfg(not(target_os = "android"))]
 fn pump_workers(
     app: &mut App,
     rewind_worker: Option<&mut crate::rewind_worker::RewindWorker>,
@@ -1740,9 +1657,9 @@ fn handle_android_library(
     }
 }
 
-/// On wasm/Android there is no off-thread PNG sink; drain and warn (rewind stays
+/// On Android there is no off-thread PNG sink; drain and warn (rewind stays
 /// on the session's inline capture path there, so nothing else to pump).
-#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+#[cfg(target_os = "android")]
 fn drain_printer_sheets_unsupported(app: &mut App) {
     let sheets = app.session_mut().take_prints();
     if !sheets.is_empty() {

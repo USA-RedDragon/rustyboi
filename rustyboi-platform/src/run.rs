@@ -6,22 +6,7 @@ use crate::error::PlatformError;
 use clap::Parser;
 
 pub fn run() -> Result<(), PlatformError> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        std::panic::set_hook(Box::new(console_error_panic_hook::hook));
-        console_log::init_with_level(log::Level::Trace).expect("error initializing logger");
-
-        let config = config::RawConfig::try_parse_from(std::iter::empty::<String>())
-            .expect("Failed to create default config")
-            .clean();
-        wasm_bindgen_futures::spawn_local(display::run_with_gui_async(
-            Box::new(gb::GB::new(config.hardware)),
-            config,
-        ));
-        return Ok(());
-    }
-
-    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android"), not(target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         use rustyboi_core_lib::cartridge;
 
