@@ -270,16 +270,24 @@ impl RustyboiCore {
         let gb = session.gb_mut();
 
         let mut descriptors: Vec<MemoryDescriptor> = Vec::new();
-        // Cartridge save RAM (0xA000-0xBFFF window).
-        if let Some(cart) = gb.cartridge_mut() {
-            descriptors.push(MemoryDescriptor::new(cart.save_ram_mut(), 0xA000, MemoryKind::SaveRam));
+        // SAFETY for every `MemoryDescriptor::new` below: each region is reached
+        // through `self.session`'s heap-owned `GB`. `Session` outlives the
+        // content (it is dropped only in `unload_game`/`deinit`, which is also
+        // where the frontend stops using these pointers), and the buffers are
+        // boxed, so the `GB` itself moving would not move them. None of these is
+        // a temporary, a stack array, or a growable `Vec`.
+        unsafe {
+            // Cartridge save RAM (0xA000-0xBFFF window).
+            if let Some(cart) = gb.cartridge_mut() {
+                descriptors.push(MemoryDescriptor::new(cart.save_ram_mut(), 0xA000, MemoryKind::SaveRam));
+            }
+            // System RAM: WRAM bank 0 (0xC000) then the switchable bank (0xD000).
+            descriptors.push(MemoryDescriptor::new(gb.wram_bank0_mut(), 0xC000, MemoryKind::SystemRam));
+            descriptors.push(MemoryDescriptor::new(gb.wram_bank1_mut(), 0xD000, MemoryKind::SystemRam));
+            // High RAM (0xFF80-0xFFFE) and Video RAM (0x8000-0x9FFF), bank 0.
+            descriptors.push(MemoryDescriptor::new(gb.hram_mut(), 0xFF80, MemoryKind::SystemRam));
+            descriptors.push(MemoryDescriptor::new(gb.vram_mut(), 0x8000, MemoryKind::VideoRam));
         }
-        // System RAM: WRAM bank 0 (0xC000) then the switchable bank (0xD000).
-        descriptors.push(MemoryDescriptor::new(gb.wram_bank0_mut(), 0xC000, MemoryKind::SystemRam));
-        descriptors.push(MemoryDescriptor::new(gb.wram_bank1_mut(), 0xD000, MemoryKind::SystemRam));
-        // High RAM (0xFF80-0xFFFE) and Video RAM (0x8000-0x9FFF), bank 0.
-        descriptors.push(MemoryDescriptor::new(gb.hram_mut(), 0xFF80, MemoryKind::SystemRam));
-        descriptors.push(MemoryDescriptor::new(gb.vram_mut(), 0x8000, MemoryKind::VideoRam));
 
         env.set_memory_maps(&descriptors);
     }
