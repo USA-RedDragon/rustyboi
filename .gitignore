@@ -1,7 +1,8 @@
 /target
 *.rustyboisave
 
-gb-test-roms/
+# keep this unslashed: agent worktrees symlink gb-test-roms to the main checkout
+gb-test-roms
 gambatte-core/
 GBEmulatorShootout/
 /.baselines/
