@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
-pub enum Flag {
+pub(crate) enum Flag {
     Carry = 1<<4,
     HalfCarry = 1<<5,
     Negative = 1<<6,
@@ -9,7 +9,7 @@ pub enum Flag {
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-pub enum InterruptFlag {
+pub(crate) enum InterruptFlag {
     Joypad = 1<<4,
     Serial = 1<<3,
     Timer = 1<<2,
@@ -58,7 +58,7 @@ impl Registers {
         }
     }
 
-    pub fn set_flag(&mut self, flag: Flag, value: bool) {
+    pub(crate) fn set_flag(&mut self, flag: Flag, value: bool) {
         if value {
             self.f |= flag as u8;
         } else {
@@ -66,7 +66,7 @@ impl Registers {
         }
     }
 
-    pub fn get_flag(&self, flag: Flag) -> bool {
+    pub(crate) fn get_flag(&self, flag: Flag) -> bool {
         (self.f & (flag as u8)) != 0
     }
 }

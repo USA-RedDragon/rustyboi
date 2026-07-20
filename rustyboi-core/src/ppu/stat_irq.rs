@@ -35,7 +35,7 @@ const MODE2_IRQ_LINE_CYCLE_LY0: i64 = LCD_CYCLES_PER_LINE as i64 - 2;
 pub(super) struct LyCounter {
     pub ly: u32,
     pub time: u64,
-    pub ds: bool,
+    pub(crate) ds: bool,
 }
 
 impl LyCounter {
@@ -82,7 +82,7 @@ impl LyCounter {
 
 pub(super) struct LyCmp {
     pub ly: u32,
-    pub time_to_next_ly: i64,
+    pub(crate) time_to_next_ly: i64,
 }
 
 /// The LY value the LYC=LY comparator uses. In the final few dots of a line the

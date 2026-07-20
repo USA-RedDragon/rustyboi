@@ -8,8 +8,10 @@ use std::ops::{Deref, DerefMut};
 /// write or a plain OAM-bus read.
 /// Pan Docs: OAM Corruption Bug — https://gbdev.io/pandocs/OAM_Corruption_Bug.html
 #[derive(Clone, Copy)]
-pub enum OamBugKind {
+pub(crate) enum OamBugKind {
     Write,
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     Read,
 }
 
@@ -20,7 +22,7 @@ pub enum OamBugKind {
 /// `master_cc` by the access duration and a single `run_to(target_cc)` resolves
 /// every peripheral up to that cc; at double speed a CPU access lands on an
 /// exact odd/even `master_cc`.
-pub struct Bus<'a> {
+pub(crate) struct Bus<'a> {
     pub mmio: &'a mut Mmio,
     pub ppu: &'a mut Ppu,
     ticked: u32,
@@ -125,7 +127,7 @@ impl<'a> Bus<'a> {
     }
 
     /// Tick the remaining internal (non-memory) cycles of an instruction.
-    pub fn tick_remaining(&mut self, total_cycles: u32) {
+    pub(crate) fn tick_remaining(&mut self, total_cycles: u32) {
         // Cycles attributable to THIS instruction so far: resolved dots plus
         // deferred (lag) dots, minus the carried-in foreign lag (counted into
         // `ticked` if it flushed, still sitting in `lag` if not).
@@ -173,7 +175,7 @@ impl<'a> Bus<'a> {
     /// re-parking it. For out-of-band observers (GB::sync_lazy_peripherals)
     /// and paths that must not leave a carried tail (STOP entry/wake,
     /// serialization) — including after a tick_remaining that just parked.
-    pub fn flush_all_lag(&mut self) {
+    pub(crate) fn flush_all_lag(&mut self) {
         self.lag = self.lag.wrapping_add(self.mmio.take_cpu_lag());
         self.flush_lag();
     }
@@ -214,7 +216,7 @@ impl<'a> Bus<'a> {
     /// instruction's returned cycle count by the `tick_remaining` reconciliation
     /// at the end of `step`, so it only shifts WHEN the doubled instruction's
     /// operand read resolves — not the instruction length.
-    pub fn tick_opcode_fetch_mcycle(&mut self) {
+    pub(crate) fn tick_opcode_fetch_mcycle(&mut self) {
         self.tick_m();
     }
 
@@ -408,7 +410,7 @@ impl<'a> Bus<'a> {
     /// Tick one internal (non-memory) M-cycle, for opcodes that need their
     /// internal cycles placed at the right point (e.g. CALL's SP-dec before the
     /// stack pushes) rather than batched at instruction end.
-    pub fn internal_cycle(&mut self) {
+    pub(crate) fn internal_cycle(&mut self) {
         self.tick_m();
     }
 
@@ -428,7 +430,7 @@ impl<'a> Bus<'a> {
     /// The batch is also capped one line short of the PPU frame wrap so the
     /// frame-loop return points (input-application boundaries) stay exact,
     /// and globally at 456 dots (poll overhead is already amortized ~100x).
-    pub fn halted_idle_dots(&self) -> u32 {
+    pub(crate) fn halted_idle_dots(&self) -> u32 {
         if !self.mmio.halt_batchable() {
             return 1;
         }
@@ -452,8 +454,8 @@ impl<'a> Bus<'a> {
         n.clamp(1, 456) as u32
     }
 
-    pub fn master_cc_dbg(&self) -> u64 { self.mmio.master_cc() }
-    pub fn oam_dma_active(&self) -> bool { self.mmio.dma_active() }
+    pub(crate) fn master_cc_dbg(&self) -> u64 { self.mmio.master_cc() }
+    pub(crate) fn oam_dma_active(&self) -> bool { self.mmio.dma_active() }
 
     /// Non-ticking instruction-stream peek for the HALT-bug prefetch: the byte
     /// after HALT is read at the current cc WITHOUT advancing it; the +4 charge is
@@ -470,7 +472,7 @@ impl<'a> Bus<'a> {
     /// this fetch every M-cycle; when the pc byte lives in VRAM and mode 3 locks
     /// it, the fetch reads open-bus 0xFF (= rst $38), the hardware escape from the
     /// loop. Still no tick: the +4 fetch charge stays deferred to consumption.
-    pub fn peek_fetch(&mut self, addr: u16) -> u8 {
+    pub(crate) fn peek_fetch(&mut self, addr: u16) -> u8 {
         self.flush_lag();
         if self.ppu_locks_access(addr, self.mmio.master_cc()) {
             return 0xFF;
@@ -485,33 +487,35 @@ impl<'a> Bus<'a> {
     /// Timing model (a memory access resolves at its own M-cycle) is documented in
     /// GBCTR "CPU core timing" (fetch/execute overlap); the event-dispatch anchor
     /// itself is emulator-internal. Not in Pan Docs.
-    pub fn access_cc(&self) -> u64 {
+    pub(crate) fn access_cc(&self) -> u64 {
         self.mmio.master_cc()
     }
 
     /// The cc at which the most recent still-undispatched TIMA IRQ fired, or `None`.
-    pub fn pending_timer_fire_cc(&self) -> Option<u64> {
+    pub(crate) fn pending_timer_fire_cc(&self) -> Option<u64> {
         self.mmio.pending_timer_fire_cc()
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Delivery cc of the next scheduled timer overflow (EI-loop fast-dispatch).
-    pub fn next_timer_overflow_cc(&self) -> Option<u64> {
+    pub(crate) fn next_timer_overflow_cc(&self) -> Option<u64> {
         self.mmio.next_timer_overflow_cc()
     }
 
     /// EARLY (EI-loop) gate cc of the undispatched timer IRQ.
-    pub fn pending_timer_fire_cc_ei(&self) -> Option<u64> {
+    pub(crate) fn pending_timer_fire_cc_ei(&self) -> Option<u64> {
         self.mmio.pending_timer_fire_cc_ei()
     }
 
     /// EI-loop fast timer delivery (non-halt/non-stop): fire an imminent overflow
     /// at the early anchor and raise its IF bit.
-    pub fn force_ei_timer_delivery(&mut self, boundary: u64) {
+    pub(crate) fn force_ei_timer_delivery(&mut self, boundary: u64) {
         self.mmio.force_ei_timer_delivery(boundary);
     }
 
     /// EARLY (EI-loop) anchor cc of the next scheduled timer overflow.
-    pub fn next_timer_overflow_ei_cc(&self) -> Option<u64> {
+    pub(crate) fn next_timer_overflow_ei_cc(&self) -> Option<u64> {
         self.mmio.next_timer_overflow_ei_cc()
     }
 
@@ -525,7 +529,7 @@ impl<'a> Bus<'a> {
     /// anchor exists (window / first line).
     /// HDMA-pauses-on-HALT is documented in Pan Docs (CGB Registers, FF55) and
     /// TCAGBD §9.6.2; the sub-cycle the HDMA-active window reflag timing is from test-ROM refs.
-    pub fn hdma_in_period_for_unhalt(&self) -> bool {
+    pub(crate) fn hdma_in_period_for_unhalt(&self) -> bool {
         self.hdma_in_period_for_unhalt_adj(0)
     }
 
@@ -541,7 +545,7 @@ impl<'a> Bus<'a> {
     /// disturbing the mode-0 ENTRY bracket. The non-fast (HALT-late) path passes 0.
     /// HDMA-pauses-on-HALT base-documented (Pan Docs CGB Registers, FF55; TCAGBD
     /// §9.6.2); the fast-path period-bracket adjustment is from test-ROM refs.
-    pub fn hdma_in_period_for_unhalt_adj(&self, limit_adj: i64) -> bool {
+    pub(crate) fn hdma_in_period_for_unhalt_adj(&self, limit_adj: i64) -> bool {
         let lcd_on = self.mmio.read(ppu::LCD_CONTROL) & (ppu::LCDCFlags::DisplayEnable as u8) != 0;
         if !lcd_on {
             return true;
@@ -562,7 +566,7 @@ impl<'a> Bus<'a> {
     /// synchronous baseline) when no closed-form anchor exists.
     /// HDMA-resumes-on-unhalt base-documented (Pan Docs CGB Registers, FF55; TCAGBD
     /// §9.6.2); the fires-before-pushes ordering vs interrupt service is from test-ROM refs.
-    pub fn hdma_unhalt_fires_before_pushes(&self) -> bool {
+    pub(crate) fn hdma_unhalt_fires_before_pushes(&self) -> bool {
         let lcd_on = self.mmio.read(ppu::LCD_CONTROL) & (ppu::LCDCFlags::DisplayEnable as u8) != 0;
         if !lcd_on {
             return true;
@@ -584,7 +588,7 @@ impl<'a> Bus<'a> {
     /// no closed-form mode-0 anchor exists (window / first line).
     /// HDMA-halts-with-the-CPU base-documented (Pan Docs CGB Registers, FF55; TCAGBD
     /// §9.6.2); the sub-cycle period-latch straddle boundary is from test-ROM refs.
-    pub fn on_cpu_halt(&mut self) {
+    pub(crate) fn on_cpu_halt(&mut self) {
         self.flush_lag();
         let lcd_on = self.mmio.read(ppu::LCD_CONTROL) & (ppu::LCDCFlags::DisplayEnable as u8) != 0;
         let ds = self.mmio.is_double_speed_mode();
@@ -614,7 +618,7 @@ impl<'a> Bus<'a> {
     }
 
     /// Clear the recorded timer fire cc after the CPU dispatches it.
-    pub fn clear_timer_fire_cc(&mut self) {
+    pub(crate) fn clear_timer_fire_cc(&mut self) {
         self.mmio.clear_timer_fire_cc();
     }
 
@@ -687,7 +691,7 @@ impl<'a> Bus<'a> {
     /// Not in Pan Docs, TCAGBD, or GBCTR; sub-cycle timing from test-ROM refs. (GBCTR
     /// notes instruction-fetch/OAM-DMA conflicts exist but leaves the details — and
     /// HDMA/GDMA bus conflicts entirely — as TODO.)
-    pub fn fetch_opcode(&mut self, pc: u16) -> u8 {
+    pub(crate) fn fetch_opcode(&mut self, pc: u16) -> u8 {
         if let Some((pre, fire_cc)) = self.mmio.take_dma_prefetch_shadow(pc) {
             // Charge the M-cycle exactly as a normal fetch would (the read path
             // ticks before resolving), then resolve against the fire-cc lock.
@@ -760,7 +764,7 @@ impl<'a> Bus<'a> {
     /// triggers a write corruption during mode 2. `pre_value` is the register's
     /// value before the inc/dec.
     /// Pan Docs: OAM Corruption Bug — https://gbdev.io/pandocs/OAM_Corruption_Bug.html
-    pub fn oam_bug_idu(&mut self, pre_value: u16) {
+    pub(crate) fn oam_bug_idu(&mut self, pre_value: u16) {
         self.flush_lag();
         if !(0xFE00..=0xFEFF).contains(&pre_value) {
             return;
@@ -1004,7 +1008,7 @@ impl<'a> Bus<'a> {
     /// Not in Pan Docs, TCAGBD, or GBCTR; sub-cycle timing from test-ROM refs. (TCAGBD
     /// §4.7 explicitly flags the mode-0 STAT IF-ack case as untested; §4.9 / Pan Docs
     /// base-document only the 5-M-cycle IF-clear, not the per-source sub-cc offsets.)
-    pub fn interrupt_low_push_ack(&mut self, sp: u16, value: u8, bit: u8) {
+    pub(crate) fn interrupt_low_push_ack(&mut self, sp: u16, value: u8, bit: u8) {
         self.flush_lag();
         self.ppu.invalidate_fast_span();
         // Stack byte stores at the access start (the push data is fixed for the

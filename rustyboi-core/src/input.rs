@@ -72,7 +72,7 @@ impl Input {
 
     /// Turn on Super Game Boy JOYP-packet handling. Called once from `GB::new`
     /// for Hardware::SGB/SGB2 only; leaves DMG/CGB behavior untouched.
-    pub fn enable_sgb(&mut self) {
+    pub(crate) fn enable_sgb(&mut self) {
         self.sgb = Some(crate::sgb::Sgb::new());
     }
 
@@ -80,7 +80,7 @@ impl Input {
     /// cart's JOYP writes must not be interpreted as SGB packets. Called from
     /// `GB::insert` with the cartridge header verdict; no-op on non-SGB
     /// hardware.
-    pub fn set_sgb_unlocked(&mut self, unlocked: bool) {
+    pub(crate) fn set_sgb_unlocked(&mut self, unlocked: bool) {
         if let Some(sgb) = self.sgb.as_mut() {
             sgb.set_locked(!unlocked);
         }
@@ -94,7 +94,7 @@ impl Input {
 
     /// Mutable access to the SGB state, for servicing pending VRAM (_TRN)
     /// transfers from the memory unit. `None` on non-SGB hardware.
-    pub fn sgb_mut(&mut self) -> Option<&mut crate::sgb::Sgb> {
+    pub(crate) fn sgb_mut(&mut self) -> Option<&mut crate::sgb::Sgb> {
         self.sgb.as_mut()
     }
 
@@ -158,7 +158,7 @@ impl Input {
     /// a group whose buttons are held pulls those lines low, and the joypad
     /// interrupt (IF bit 4) fires on any such edge exactly as for a fresh key
     /// press (Pan Docs "Joypad Input"). The caller raises IF bit 4.
-    pub fn write_joyp(&mut self, value: u8) -> bool {
+    pub(crate) fn write_joyp(&mut self, value: u8) -> bool {
         // SGB packet reception: feed every JOYP write to the SGB state
         // machine (RESET/bit pulses on P14/P15). This runs BEFORE the
         // normal joypad response and only exists on SGB hardware.

@@ -20,10 +20,10 @@
 
 /// The three palettes the boot ROM installs for a DMG cart: CGB BG palette 0
 /// and OBJ palettes 0/1, each 4 RGB555 little-endian color pairs.
-pub struct CompatPalettes {
+pub(crate) struct CompatPalettes {
     pub bg: [u8; 8],
-    pub obj0: [u8; 8],
-    pub obj1: [u8; 8],
+    pub(crate) obj0: [u8; 8],
+    pub(crate) obj1: [u8; 8],
 }
 
 /// $06C7: title checksums of Nintendo-published DMG games. The first 65 map
@@ -122,7 +122,7 @@ const KEY_COMBO_ID: [u8; 12] = [
 
 /// Palette ID for a cart header, per the boot ROM's $0475-$04D6 walk:
 /// `title` = $0134-$0143, `old_licensee` = $014B, `new_licensee` = $0144-$0145.
-pub fn select_palette_id(title: &[u8; 16], old_licensee: u8, new_licensee: [u8; 2]) -> u8 {
+pub(crate) fn select_palette_id(title: &[u8; 16], old_licensee: u8, new_licensee: [u8; 2]) -> u8 {
     let default = PALETTE_PER_CHECKSUM[0];
     let nintendo = if old_licensee == 0x33 {
         new_licensee == *b"01"
@@ -156,7 +156,7 @@ pub fn select_palette_id(title: &[u8; 16], old_licensee: u8, new_licensee: [u8; 
 
 /// Palette ID forced by a button combo held at boot ($0589-$05C8), or None if
 /// the held-button byte is not one of the 12 recognized combos.
-pub fn key_combo_palette_id(combo: u8) -> Option<u8> {
+pub(crate) fn key_combo_palette_id(combo: u8) -> Option<u8> {
     KEY_COMBO_JOYP
         .iter()
         .position(|&c| c == combo)
@@ -188,7 +188,7 @@ pub const COMBO_SCHEMES: [(&str, &str, u8); 12] = [
 /// (obj0, obj1, bg) offset triplet, and the top 3 bits select per-slot whether
 /// OBJ0/OBJ1 take their own column or fall back (OBJ0 to the BG palette, OBJ1
 /// to the OBJ0 column or the BG palette).
-pub fn palettes_for_id(id: u8) -> CompatPalettes {
+pub(crate) fn palettes_for_id(id: u8) -> CompatPalettes {
     let comb = (id & 0x1F) as usize * 3;
     let (s0, s1, s2) = (
         PALETTE_COMBINATIONS[comb],

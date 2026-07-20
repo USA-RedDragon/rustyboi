@@ -287,7 +287,7 @@ const CAM_SENSOR_EXTRA_LINES: usize = 8;
 const CAM_SENSOR_H: usize = CAM_H + CAM_SENSOR_EXTRA_LINES; // 120
 
 #[derive(Clone, Debug)]
-pub enum CartridgeType {
+pub(crate) enum CartridgeType {
     NoMBC { battery: bool },
     MBC1 { ram: bool, battery: bool },
     MBC2 { battery: bool },
@@ -886,7 +886,7 @@ struct RomIdentity {
 /// Which per-dot RTC advance a cartridge needs. Cached by the MMIO so the hot
 /// `tick_rtc` path avoids recomputing `get_cartridge_type()` every dot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RtcTickKind {
+pub(crate) enum RtcTickKind {
     #[default]
     None,
     Mbc3,
@@ -1660,7 +1660,7 @@ impl Cartridge {
     /// the constructors do, so the already-restored bank registers index the same
     /// bytes. All other runtime state (RAM, bank regs, RTC) is already present
     /// from deserialize; this only refills the read-only ROM.
-    pub fn attach_rom(&mut self, rom: Vec<u8>) {
+    pub(crate) fn attach_rom(&mut self, rom: Vec<u8>) {
         // A caller may re-attach the ORIGINAL file bytes (not a `detach_rom`
         // image), so apply the same trimmed-MBC1M expansion as the
         // constructors; the serialized bank registers assume the physical
@@ -1927,7 +1927,7 @@ impl Cartridge {
     /// Bounds-checked raw ROM byte (open-bus 0xFF past the image), mirroring
     /// the banked read arms.
     #[inline]
-    pub fn rom_byte(&self, offset: usize) -> u8 {
+    pub(crate) fn rom_byte(&self, offset: usize) -> u8 {
         self.rom_data.get(offset).copied().unwrap_or(0xFF)
     }
 
@@ -2363,7 +2363,7 @@ impl Cartridge {
     /// the HALT bit (bit 6 of days_high) freezes advancement but the
     /// sub-second accumulator keeps running so the halt/resume boundary lands
     /// on an exact second, matching hardware.
-    pub fn rtc_tick(&mut self, cycles: u64, kind: RtcTickKind) {
+    pub(crate) fn rtc_tick(&mut self, cycles: u64, kind: RtcTickKind) {
         if cycles == 0 {
             return;
         }
@@ -2553,7 +2553,7 @@ impl Cartridge {
     /// for the GB Camera); it is the intended path for a frontend to drive the
     /// accelerometer and is awaiting frontend wiring, so it is currently unused.
     #[allow(dead_code)]
-    pub fn set_accelerometer(&mut self, x_g: f32, y_g: f32) {
+    pub(crate) fn set_accelerometer(&mut self, x_g: f32, y_g: f32) {
         self.mbc7_sensor_x = x_g;
         self.mbc7_sensor_y = y_g;
     }
@@ -3188,7 +3188,7 @@ impl Cartridge {
     /// not the RAM chip select) and models the plain RAMG-gated array: enabled
     /// banked RAM drives its byte, anything else leaves the bus floating
     /// (0xFF, matching the RAM-less srcE000 cgb04c captures).
-    pub fn dma_sram_bus_read(&self, addr: u16) -> u8 {
+    pub(crate) fn dma_sram_bus_read(&self, addr: u16) -> u8 {
         if self.sram_cs_lazy && self.ram_enabled && !self.ram_data.is_empty() {
             let offset =
                 ((addr as usize & 0x1FFF) + self.get_ram_bank() * 0x2000) % self.ram_data.len();
@@ -3199,7 +3199,7 @@ impl Cartridge {
     }
 
     /// Select the board's SRAM chip-select decode (see `dma_sram_bus_read`).
-    pub fn set_sram_cs_lazy(&mut self, lazy: bool) {
+    pub(crate) fn set_sram_cs_lazy(&mut self, lazy: bool) {
         self.sram_cs_lazy = lazy;
     }
 
@@ -3220,7 +3220,7 @@ impl Cartridge {
     }
 
     /// Classify the per-dot RTC advance once, so the hot path can cache it.
-    pub fn rtc_kind(&self) -> RtcTickKind {
+    pub(crate) fn rtc_kind(&self) -> RtcTickKind {
         match self.get_cartridge_type() {
             CartridgeType::MBC3 { timer: true, .. } => RtcTickKind::Mbc3,
             CartridgeType::HuC3 => RtcTickKind::HuC3,
@@ -3230,7 +3230,7 @@ impl Cartridge {
 
     /// True if the cartridge needs the per-dot peripheral clock tick (an RTC
     /// crystal or the camera capture countdown).
-    pub fn needs_clock_tick(&self) -> bool {
+    pub(crate) fn needs_clock_tick(&self) -> bool {
         self.has_rtc() || self.has_camera()
     }
 
@@ -3343,7 +3343,7 @@ impl Cartridge {
     /// dots at single speed; the caller doubles the span in CGB double-speed
     /// mode, where the PHI cartridge clock runs at 2.097152 MHz). No-op
     /// unless a capture is actively running.
-    pub fn cam_tick(&mut self, phi_quarters: u64) {
+    pub(crate) fn cam_tick(&mut self, phi_quarters: u64) {
         if !self.cam_running || phi_quarters == 0 {
             return;
         }
@@ -3599,11 +3599,13 @@ impl Cartridge {
         &mut self.rtc_memory
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Read-only mirror of [`rtc_memory_mut`](Self::rtc_memory_mut): the
     /// serialized RTC region. Empty for carts without an RTC. Takes `&mut self`
     /// only because it must refresh the region from live state first (the
     /// pointer stays stable), but performs no external mutation.
-    pub fn rtc_memory(&mut self) -> &[u8] {
+    pub(crate) fn rtc_memory(&mut self) -> &[u8] {
         self.rtc_memory_refresh();
         &self.rtc_memory
     }
@@ -3771,7 +3773,7 @@ impl Cartridge {
     /// the cart's power-on state as seen BY a real boot ROM; when the boot is
     /// skipped they must start unlocked (the lock state is reset without a
     /// bootstrap). No-op for every other mapper.
-    pub fn skip_boot_handoff(&mut self) {
+    pub(crate) fn skip_boot_handoff(&mut self) {
         match self.get_cartridge_type() {
             CartridgeType::Sachen { .. } => self.sachen_lock.set(UNL_UNLOCKED),
             CartridgeType::Rocket => self.rocket_lock.set(UNL_UNLOCKED),
@@ -3787,7 +3789,7 @@ impl Cartridge {
     /// bootstrap is emulated). Locked MMC1 reads force RA7 high and pass
     /// through the $01xx descramble, so the bytes come from
     /// unscramble($0184+i) — bit 7 survives the bit-swap.
-    pub fn boot_logo_override(&self) -> Option<[u8; 48]> {
+    pub(crate) fn boot_logo_override(&self) -> Option<[u8; 48]> {
         if !matches!(self.get_cartridge_type(), CartridgeType::Sachen { mmc2: false }) {
             return None;
         }
@@ -3803,7 +3805,7 @@ impl Cartridge {
     /// tiles at $8010: normally the cart's own $0104-$0133, or the locked-mapper
     /// substitution for Sachen MMC1 (`boot_logo_override`). Read straight from
     /// `rom_data` (no bus side effects) so skip_bios never perturbs mapper state.
-    pub fn boot_logo_bytes(&self) -> [u8; 48] {
+    pub(crate) fn boot_logo_bytes(&self) -> [u8; 48] {
         if let Some(logo) = self.boot_logo_override() {
             return logo;
         }
@@ -3862,7 +3864,7 @@ impl Cartridge {
     /// Provide the boot ROM's Nintendo logo to the Rocket mapper (sourced from
     /// the loaded boot ROM by `Mmio`). Only consulted during the mapper's
     /// locked-CGB phase, so no logo data is embedded in the cartridge itself.
-    pub fn set_rocket_boot_logo(&mut self, logo: [u8; 48]) {
+    pub(crate) fn set_rocket_boot_logo(&mut self, logo: [u8; 48]) {
         self.rocket_boot_logo = Some(logo);
     }
 
@@ -3870,7 +3872,7 @@ impl Cartridge {
     /// is the loaded ROM's own data; the CGB boot ROM copies it through HRAM
     /// while verifying it, so `Mmio` reuses it to reconstruct the post-boot HRAM
     /// residue instead of embedding the bitmap. `None` if the ROM is too short.
-    pub fn header_logo(&self) -> Option<[u8; 48]> {
+    pub(crate) fn header_logo(&self) -> Option<[u8; 48]> {
         let slice = self.rom_data.get(0x0104..0x0134)?;
         let mut logo = [0u8; 48];
         logo.copy_from_slice(slice);

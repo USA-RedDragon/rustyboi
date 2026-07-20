@@ -18,10 +18,10 @@ pub const SC: u16 = 0xFF02;
 /// Pan Docs notes a transfer with no clock never completes, so software must
 /// time out — Serial Data Transfer:
 /// https://gbdev.io/pandocs/Serial_Data_Transfer_(Link_Cable).html
-pub const LINK_STALL_TIMEOUT_CC: u64 = 4 * 70224;
+pub(crate) const LINK_STALL_TIMEOUT_CC: u64 = 4 * 70224;
 
 /// What the link-port device offers an internal-clock transfer at start.
-pub enum LinkStart {
+pub(crate) enum LinkStart {
     /// No peer (or a non-blocking peer that always has a byte ready is
     /// covered by `Ready`): 0xFF shifts in at the hardware disconnected
     /// timing.
@@ -104,7 +104,7 @@ impl LinkSideState {
 /// their timelines. Purely a passive exchange buffer: no wall clock, no
 /// threads required — determinism is inherited from the pump schedule.
 #[derive(Default)]
-pub struct LinkCable {
+pub(crate) struct LinkCable {
     sides: [LinkSideState; 2],
 }
 
@@ -129,7 +129,7 @@ impl LinkCable {
 /// not serializable and a cloned instance must not ghost-drive its twin's
 /// cable): a severed end behaves like a cable with no partner plugged in.
 #[derive(Serialize, Deserialize)]
-pub struct LinkPeer {
+pub(crate) struct LinkPeer {
     #[serde(skip)]
     cable: Arc<Mutex<LinkCable>>,
     side: u8,
@@ -159,7 +159,7 @@ impl LinkPeer {
     }
 
     /// Seed the live-SB mirror at attach time with the instance's current SB.
-    pub fn seed_live_sb(&self, sb: u8) {
+    pub(crate) fn seed_live_sb(&self, sb: u8) {
         self.mirror_sb(sb);
     }
 
@@ -246,7 +246,7 @@ impl LinkPeer {
 /// are only loosely coupled), and completes external-clock transfers when the
 /// peer's window deposits its byte.
 #[derive(Serialize, Deserialize, Clone, Default)]
-pub enum SerialDevice {
+pub(crate) enum SerialDevice {
     #[default]
     Disconnected,
     Printer(printer::GbPrinter),
@@ -261,21 +261,23 @@ pub enum SerialDevice {
 }
 
 impl SerialDevice {
-    pub fn is_link(&self) -> bool {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    pub(crate) fn is_link(&self) -> bool {
         matches!(self, SerialDevice::Link(_))
     }
 
     /// True for devices that drive the clock externally and complete transfers
     /// via the idle deposit poll (a link peer or the DMG-07 adapter) rather than
     /// this Game Boy's own internal-clock window.
-    pub fn drives_external_clock(&self) -> bool {
+    pub(crate) fn drives_external_clock(&self) -> bool {
         matches!(self, SerialDevice::Link(_) | SerialDevice::FourPlayer(_))
     }
 
     /// Observe an SC write and answer what an internal-clock transfer start
     /// exchanges with. Also maintains a link peer's armed/live mirrors, so it
     /// must be called for every SC write.
-    pub fn sc_write(&mut self, value: u8, sb: u8) -> LinkStart {
+    pub(crate) fn sc_write(&mut self, value: u8, sb: u8) -> LinkStart {
         match self {
             SerialDevice::Disconnected => LinkStart::Disconnected,
             SerialDevice::Printer(p) => LinkStart::Ready(p.preloaded_response()),
@@ -295,7 +297,7 @@ impl SerialDevice {
     /// shifted out, `rx` the byte shifted in (== SB at completion), `cc` the
     /// master clock at completion (deterministic device timing; never
     /// wall-clock).
-    pub fn receive_byte(&mut self, tx: u8, rx: u8, cc: u64) {
+    pub(crate) fn receive_byte(&mut self, tx: u8, rx: u8, cc: u64) {
         match self {
             SerialDevice::Disconnected => {}
             SerialDevice::Printer(p) => p.receive_byte(tx, cc),
@@ -310,7 +312,7 @@ impl SerialDevice {
     }
 
     /// Keep the peer's / adapter's view of our outgoing SB in sync.
-    pub fn link_mirror_sb(&mut self, sb: u8) {
+    pub(crate) fn link_mirror_sb(&mut self, sb: u8) {
         match self {
             SerialDevice::Link(l) => l.mirror_sb(sb),
             SerialDevice::FourPlayer(p) => p.mirror_sb(sb),
@@ -319,7 +321,7 @@ impl SerialDevice {
     }
 
     /// Stalled internal-clock transfer: the peer's byte once its side arms.
-    pub fn link_poll_peer(&mut self) -> Option<u8> {
+    pub(crate) fn link_poll_peer(&mut self) -> Option<u8> {
         match self {
             SerialDevice::Link(l) => l.poll_peer(),
             _ => None,
@@ -327,7 +329,7 @@ impl SerialDevice {
     }
 
     /// Stall-timeout fallback byte (peer's live shift register / 0xFF).
-    pub fn link_peer_live_sb(&self) -> u8 {
+    pub(crate) fn link_peer_live_sb(&self) -> u8 {
         match self {
             SerialDevice::Link(l) => l.peer_live_sb(),
             _ => 0xFF,
@@ -337,7 +339,7 @@ impl SerialDevice {
     /// A byte the external clock source (link peer or DMG-07) has ready for our
     /// armed external-clock side. The adapter always has its next protocol byte
     /// ready, clocking one exchange per pull (deposit-on-arm cadence).
-    pub fn link_take_deposit(&mut self) -> Option<u8> {
+    pub(crate) fn link_take_deposit(&mut self) -> Option<u8> {
         match self {
             SerialDevice::Link(l) => l.take_deposit(),
             SerialDevice::FourPlayer(p) => Some(p.clock()),
@@ -346,7 +348,7 @@ impl SerialDevice {
     }
 
     /// External-clock completion applied: drop our armed mirror.
-    pub fn link_disarm(&mut self, sb: u8) {
+    pub(crate) fn link_disarm(&mut self, sb: u8) {
         if let SerialDevice::Link(l) = self {
             l.disarm(sb);
         }
@@ -419,7 +421,7 @@ impl Serial {
         }
     }
 
-    pub fn set_cgb(&mut self, cgb: bool) {
+    pub(crate) fn set_cgb(&mut self, cgb: bool) {
         self.cgb = cgb;
     }
 
@@ -430,7 +432,7 @@ impl Serial {
     /// True while a serial transfer is in flight (its `complete_at` event is
     /// pending). Blocks the idle bulk-skip so the bit-shift and completion IRQ
     /// land at the exact cc.
-    pub fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         self.active
     }
 
@@ -438,7 +440,7 @@ impl Serial {
     /// `link` is what the attached serial device offers an internal-clock
     /// start, latched here — at transfer start — the way the peer's shift
     /// register contents would be.
-    pub fn schedule_sc(&mut self, value: u8, divider: u16, phase: u64, link: LinkStart) {
+    pub(crate) fn schedule_sc(&mut self, value: u8, divider: u16, phase: u64, link: LinkStart) {
         self.sc = value;
         self.schedule(divider, phase, link);
     }
@@ -505,19 +507,19 @@ impl Serial {
     }
 
     /// True while an internal-clock transfer is holding for the link peer.
-    pub fn link_waiting(&self) -> bool {
+    pub(crate) fn link_waiting(&self) -> bool {
         self.link_wait
     }
 
     /// Master cc at which the current link hold began.
-    pub fn link_wait_since(&self) -> u64 {
+    pub(crate) fn link_wait_since(&self) -> u64 {
         self.link_wait_since
     }
 
     /// Release a held internal-clock transfer: the peer's byte `rx` became
     /// available at master cc `phase`, so the 8-bit window's clock starts
     /// there (snapped to the DIV grid exactly like a fresh SC start).
-    pub fn resume_link(&mut self, rx: u8, divider: u16, phase: u64) {
+    pub(crate) fn resume_link(&mut self, rx: u8, divider: u16, phase: u64) {
         debug_assert!(self.active && self.link_wait);
         self.rx_latch = rx;
         self.link_wait = false;
@@ -527,13 +529,15 @@ impl Serial {
     }
 
     /// Raw SC latch (no unused-bit fill), for link-port state decisions.
-    pub fn sc_raw(&self) -> u8 {
+    pub(crate) fn sc_raw(&self) -> u8 {
         self.sc
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Debug/test: the pending transfer's completion event cc (None when idle
     /// or while holding for the link peer).
-    pub fn transfer_complete_at(&self) -> Option<u64> {
+    pub(crate) fn transfer_complete_at(&self) -> Option<u64> {
         (self.active && !self.link_wait).then_some(self.complete_at)
     }
 
@@ -541,7 +545,7 @@ impl Serial {
     /// peer's byte replaces SB wholesale (all 8 external clock edges arrive
     /// "at once" from this instance's perspective) and the transfer-start
     /// flag clears. The caller raises the serial IRQ.
-    pub fn complete_external(&mut self, byte: u8) {
+    pub(crate) fn complete_external(&mut self, byte: u8) {
         self.sb = byte;
         self.sc &= !SC_TRANSFER_START;
     }
@@ -556,7 +560,7 @@ impl Serial {
     /// from this counter, it is not affected by DIV register" (and §6: the serial
     /// internal timer "can't be reseted by any means"). Our DIV-write realignment
     /// follows the later reverse-engineered model, NOT TCAGBD. Unresolved vs hardware.
-    pub fn realign_to_div(&mut self, phase: u64) {
+    pub(crate) fn realign_to_div(&mut self, phase: u64) {
         // A link-held transfer has no running clock to realign; its window is
         // re-anchored (DIV-snapped) wholesale when the peer's byte arrives.
         if !self.active || self.link_wait || self.complete_at <= phase {

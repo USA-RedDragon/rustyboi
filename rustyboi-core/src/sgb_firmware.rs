@@ -59,18 +59,18 @@ pub const SGB1_FIRMWARE_LEN: usize = 0x0004_0000;
 /// Length of the canonical SGB2 program-ROM dump (512 KiB).
 pub const SGB2_FIRMWARE_LEN: usize = 0x0008_0000;
 /// CRC32 of the canonical SGB1 program-ROM dump.
-pub const SGB1_FIRMWARE_CRC32: u32 = 0x8A4A_174F;
+pub(crate) const SGB1_FIRMWARE_CRC32: u32 = 0x8A4A_174F;
 /// CRC32 of the canonical SGB2 program-ROM dump.
-pub const SGB2_FIRMWARE_CRC32: u32 = 0xCB17_6E45;
+pub(crate) const SGB2_FIRMWARE_CRC32: u32 = 0xCB17_6E45;
 
 /// Border tile store handed to `Sgb`: 256 SNES 4bpp tiles x 32 bytes. Neither
 /// firmware fills all of it (SGB1 uses 109 tiles, SGB2 128), so the tail is
 /// zero — colour index 0 is transparent, so unused tiles simply never draw.
-pub const BORDER_TILES_LEN: usize = 0x2000;
+pub(crate) const BORDER_TILES_LEN: usize = 0x2000;
 /// Border tilemap: 32x32 LE16 entries (the compositor draws the top 28 rows).
-pub const BORDER_MAP_LEN: usize = 0x800;
+pub(crate) const BORDER_MAP_LEN: usize = 0x800;
 /// Colours handed out: SNES BG palettes 0-7, 16 colours each.
-pub const BORDER_PAL_COLORS: usize = 128;
+pub(crate) const BORDER_PAL_COLORS: usize = 128;
 
 /// Which firmware image a dump is, decided by length + CRC32.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +134,7 @@ const SGB2_LAYOUT: Layout = Layout {
 
 /// The decoded system border, in exactly the shape `Sgb` stores it.
 #[derive(Clone)]
-pub struct SgbBorder {
+pub(crate) struct SgbBorder {
     /// 4bpp tile data, exactly [`BORDER_TILES_LEN`] bytes (zero-padded).
     pub tiles: Vec<u8>,
     /// Tilemap bytes, exactly [`BORDER_MAP_LEN`].
@@ -143,7 +143,7 @@ pub struct SgbBorder {
     /// words. Longer than the 64 a PCT_TRN produces *on purpose*: the length
     /// is what tells the compositor the tilemap's palette field is the full
     /// 3 bits rather than the PCT_TRN 4-7 window.
-    pub pals: Vec<u16>,
+    pub(crate) pals: Vec<u16>,
 }
 
 /// Plain CRC32 (same polynomial/convention as the boot-ROM check in `mmio`).
@@ -280,7 +280,7 @@ fn asset(rom: &[u8], src: Source, what: &str) -> Result<Vec<u8>, String> {
 /// The tileset is zero-padded up to [`BORDER_TILES_LEN`] so it drops straight
 /// into `Sgb`'s CHR_TRN-shaped store; the padding tiles are all colour 0, i.e.
 /// fully transparent, and no tilemap entry references them anyway.
-pub fn extract_border(rom: &[u8]) -> Result<SgbBorder, String> {
+pub(crate) fn extract_border(rom: &[u8]) -> Result<SgbBorder, String> {
     let layout = match identify(rom)? {
         SgbFirmware::Sgb1 => &SGB1_LAYOUT,
         SgbFirmware::Sgb2 => &SGB2_LAYOUT,

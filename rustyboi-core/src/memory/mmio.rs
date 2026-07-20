@@ -36,40 +36,40 @@ const BIOS_HEADER_HOLE_END: u16 = 0x01FF;
 const BIOS_END: u16 = BIOS_START + BIOS_SIZE as u16 - 1;
 /// Expected masked CRC32 of the DMG boot ROM (byte 0xFD zeroed before hashing),
 /// matching the expected DMG boot-ROM hash 0x580A33B9.
-pub const DMG_BIOS_CRC32: u32 = 0x580A33B9;
+pub(crate) const DMG_BIOS_CRC32: u32 = 0x580A33B9;
 /// Expected masked CRC32 of the CGB boot ROM (byte 0xFD zeroed before hashing),
 /// matching the expected CGB boot-ROM hash 0x31672598.
-pub const CGB_BIOS_CRC32: u32 = 0x31672598;
+pub(crate) const CGB_BIOS_CRC32: u32 = 0x31672598;
 /// Expected masked CRC32 of the AGB (GBA CGB-compat) boot ROM. Recomputed from
 /// bios/agb_boot.bin via `bios_masked_crc32`; it differs from cgb_boot.bin
 /// only in the AGB-detect bytes (0xF2-0xFB, 0x409-0x40A) — none at the masked
 /// 0xFD, so the mask cannot reconcile it with CGB and it needs its own entry.
-pub const AGB_BIOS_CRC32: u32 = 0x8F39DB2F;
+pub(crate) const AGB_BIOS_CRC32: u32 = 0x8F39DB2F;
 /// Canonical SGB boot ROM CRC32 — UNMASKED (plain crc32 of all 256 bytes).
 /// Unlike DMG/CGB/AGB we hold no local SGB dump to derive a masked value, and the
 /// SGB boot ROM has a single canonical dump (SHA-1 aa2f50a77dfb4823da96ba99309085a3c6278515),
 /// so it is accepted by its well-known unmasked crc instead of a masked one.
-pub const SGB_BIOS_CRC32_UNMASKED: u32 = 0xEC8A83B9;
+pub(crate) const SGB_BIOS_CRC32_UNMASKED: u32 = 0xEC8A83B9;
 /// Masked CRC32 of the early-Japanese DMG0 boot ROM. Recomputed from
 /// bios/dmg0_boot.bin via `bios_masked_crc32`; distinct from DMG at the masked crc.
-pub const DMG0_BIOS_CRC32: u32 = 0xEF84D063;
+pub(crate) const DMG0_BIOS_CRC32: u32 = 0xEF84D063;
 /// Masked CRC32 of the SGB2 boot ROM. Recomputed from bios/sgb2_boot.bin via
 /// `bios_masked_crc32`. Note SGB and SGB2 dumps differ only at byte 0xFD, so both
 /// mask to this same value — the entry therefore also accepts SGB by masked crc
 /// (SGB additionally has the unmasked special case in `bios_crc_is_known`).
-pub const SGB2_BIOS_CRC32: u32 = 0xED48E98E;
+pub(crate) const SGB2_BIOS_CRC32: u32 = 0xED48E98E;
 /// Masked CRC32 of the early CGB-0 boot ROM. Recomputed from bios/cgb0_boot.bin
 /// via `bios_masked_crc32`; distinct from CGB at the masked crc.
-pub const CGB0_BIOS_CRC32: u32 = 0x980038C6;
+pub(crate) const CGB0_BIOS_CRC32: u32 = 0x980038C6;
 /// Masked CRC32 of the CGB-E boot ROM. Recomputed from bios/cgbE_boot.bin via
 /// `bios_masked_crc32`; distinct from CGB at the masked crc.
-pub const CGBE_BIOS_CRC32: u32 = 0x99B2A283;
-pub const CARTRIDGE_START: u16 = 0x0000;
-pub const CARTRIDGE_SIZE: usize = 16384; // 16KB
-pub const CARTRIDGE_END: u16 = CARTRIDGE_START + CARTRIDGE_SIZE as u16 - 1;
-pub const CARTRIDGE_BANK_START: u16 = 0x4000;
-pub const CARTRIDGE_BANK_SIZE: usize = 16384; // 16KB
-pub const CARTRIDGE_BANK_END: u16 = CARTRIDGE_BANK_START + CARTRIDGE_BANK_SIZE as u16 - 1;
+pub(crate) const CGBE_BIOS_CRC32: u32 = 0x99B2A283;
+pub(crate) const CARTRIDGE_START: u16 = 0x0000;
+pub(crate) const CARTRIDGE_SIZE: usize = 16384; // 16KB
+pub(crate) const CARTRIDGE_END: u16 = CARTRIDGE_START + CARTRIDGE_SIZE as u16 - 1;
+pub(crate) const CARTRIDGE_BANK_START: u16 = 0x4000;
+pub(crate) const CARTRIDGE_BANK_SIZE: usize = 16384; // 16KB
+pub(crate) const CARTRIDGE_BANK_END: u16 = CARTRIDGE_BANK_START + CARTRIDGE_BANK_SIZE as u16 - 1;
 
 /// CRC32 (IEEE, the zlib/PNG polynomial) of a boot-ROM image with byte 0xFD
 /// forced to 0 before hashing. The reference test harness does the same masking so a
@@ -182,7 +182,7 @@ const HRAM_SIZE: usize = 127; // 127 bytes
 const HRAM_END: u16 = HRAM_START + HRAM_SIZE as u16 - 1;
 const IE_REGISTER: u16 = 0xFFFF; // Interrupt Enable Register
 
-pub const REG_BOOT_OFF: u16 = 0xFF50; // Boot ROM disable
+pub(crate) const REG_BOOT_OFF: u16 = 0xFF50; // Boot ROM disable
 pub const REG_DMA: u16 = 0xFF46; // DMA Transfer and Start Address
 
 // CGB-specific registers
@@ -206,7 +206,7 @@ pub(crate) const REG_OCPD: u16 = 0xFF6B; // Object Color Palette Data
 /// Mode 0 should immediately fire an HDMA block.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[derive(Default)]
-pub enum HaltHdmaState {
+pub(crate) enum HaltHdmaState {
     /// Not in an HDMA period when halt was entered.
     #[default]
     Low,
@@ -1177,7 +1177,7 @@ impl Mmio {
         *self = new;
     }
 
-    pub fn insert_cartridge(&mut self, cartridge: cartridge::Cartridge) {
+    pub(crate) fn insert_cartridge(&mut self, cartridge: cartridge::Cartridge) {
         self.passive_pages_valid = false;
         self.cart_has_clock = cartridge.needs_clock_tick();
         self.cart_rtc_kind = cartridge.rtc_kind();
@@ -1191,7 +1191,7 @@ impl Mmio {
     /// Re-derive the cached `cart_has_clock` flag from the current cartridge.
     /// Called after a state-file load, where the cartridge is restored via
     /// serde rather than `insert_cartridge`.
-    pub fn resync_cart_flags(&mut self) {
+    pub(crate) fn resync_cart_flags(&mut self) {
         self.cart_has_clock = self.cartridge.as_ref().is_some_and(|c| c.needs_clock_tick());
         self.cart_rtc_kind = self
             .cartridge
@@ -1227,7 +1227,7 @@ impl Mmio {
     /// would otherwise revert to default-CGB after a load. Pure re-application of
     /// the console's fixed hardware identity (`is_agb`/`cgb_de`, which DO survive
     /// at this level) via the existing setters — must not change emulation.
-    pub fn reseed_hardware_flags(&mut self, hw: crate::gb::Hardware) {
+    pub(crate) fn reseed_hardware_flags(&mut self, hw: crate::gb::Hardware) {
         self.set_agb(hw.is_agb());
         self.set_apu_cgb_de(hw.is_cgb_d_or_later());
         self.set_apu_cgb_le_b(hw.is_cgb_b_or_earlier());
@@ -1249,7 +1249,7 @@ impl Mmio {
     /// image (`Cartridge::rom_data` is `#[serde(skip)]`); this supplies it from a
     /// live machine's cartridge exactly as the frontends do.
     #[cfg(test)]
-    pub fn debug_graft_cartridge(&mut self, src: &Mmio) {
+    pub(crate) fn debug_graft_cartridge(&mut self, src: &Mmio) {
         self.bios = src.bios.clone();
         if let Some(rom) = src.cartridge.as_ref().filter(|c| c.has_rom()).map(|c| c.detach_rom()) {
             self.reattach_rom(&rom);
@@ -1257,7 +1257,7 @@ impl Mmio {
         self.resync_cart_flags();
     }
 
-    pub fn set_cgb_features_enabled(&mut self, enabled: bool) {
+    pub(crate) fn set_cgb_features_enabled(&mut self, enabled: bool) {
         self.cgb_features_enabled = enabled;
     }
 
@@ -1268,15 +1268,15 @@ impl Mmio {
     /// windows, speed-switch TIMA edge). Seeded from `GB::new` for
     /// Hardware::CGBE; AGB stays on the C side (pinned to the AGB timing/APU diff
     /// set), mirroring `is_cgb_d_or_later`.
-    pub fn set_cgb_de(&mut self, de: bool) {
+    pub(crate) fn set_cgb_de(&mut self, de: bool) {
         self.cgb_de = de;
     }
 
-    pub fn is_cgb_de(&self) -> bool {
+    pub(crate) fn is_cgb_de(&self) -> bool {
         self.cgb_de
     }
 
-    pub fn set_agb(&mut self, agb: bool) {
+    pub(crate) fn set_agb(&mut self, agb: bool) {
         self.is_agb = agb;
         self.audio.set_agb(agb);
         self.timer.set_agb(agb);
@@ -1285,12 +1285,12 @@ impl Mmio {
     /// Set the MGB (Game Boy Pocket) hardware flag. Only gates the undocumented
     /// OAM-DMA-during-HALT OAM merge (`mgb_frozen_oam_entry`). Called once from
     /// `GB::new` for Hardware::MGB.
-    pub fn set_mgb(&mut self, mgb: bool) {
+    pub(crate) fn set_mgb(&mut self, mgb: bool) {
         self.is_mgb = mgb;
     }
 
     /// Whether this is AGB hardware.
-    pub fn is_agb(&self) -> bool {
+    pub(crate) fn is_agb(&self) -> bool {
         self.is_agb
     }
 
@@ -1303,32 +1303,32 @@ impl Mmio {
 
     /// Seed the CGB-D/E APU revision gate (CGB-D-and-later silicon).
     /// Called once from `GB::new` for Hardware::CGBE.
-    pub fn set_apu_cgb_de(&mut self, de: bool) {
+    pub(crate) fn set_apu_cgb_de(&mut self, de: bool) {
         self.audio.set_cgb_de(de);
     }
 
     /// Seed the CGB-B-or-earlier APU revision gate (CGB-B-and-earlier silicon). Called once from `GB::new` for
     /// Hardware::CGB0/CGBB.
-    pub fn set_apu_cgb_le_b(&mut self, le_b: bool) {
+    pub(crate) fn set_apu_cgb_le_b(&mut self, le_b: bool) {
         self.audio.set_cgb_le_b(le_b);
     }
 
     /// CPU-CGB-A/B (Hardware::CGBB) wave first-glitch-write swallow.
-    pub fn set_apu_cgb_b(&mut self, b: bool) {
+    pub(crate) fn set_apu_cgb_b(&mut self, b: bool) {
         self.audio.set_cgb_b(b);
     }
 
     /// CGB-C-and-older PCM read glitch (CGB-C-and-older silicon; excludes AGB and CGB-D/E).
-    pub fn set_apu_pcm_c_glitch(&mut self, on: bool) {
+    pub(crate) fn set_apu_pcm_c_glitch(&mut self, on: bool) {
         self.audio.set_pcm_c_glitch(on);
     }
 
     /// NRx4 square step-back parity gate (true for CGB0/CGBB/AGB).
-    pub fn set_apu_step_back_parity(&mut self, on: bool) {
+    pub(crate) fn set_apu_step_back_parity(&mut self, on: bool) {
         self.audio.set_step_back_parity(on);
     }
 
-    pub fn is_cgb_features_enabled(&self) -> bool {
+    pub(crate) fn is_cgb_features_enabled(&self) -> bool {
         self.cgb_features_enabled
     }
 
@@ -1363,7 +1363,7 @@ impl Mmio {
     /// contents (`CGB_OBJP_POWERON`). Games (and hwtests) that render sprites/BG
     /// without writing FF68-FF6B observe these values, so skip_bios must
     /// reproduce them instead of all-zero (black).
-    pub fn set_post_bios_cgb_palettes(&mut self) {
+    pub(crate) fn set_post_bios_cgb_palettes(&mut self) {
         // BG palette RAM: every color = 0x7FFF (0xFF, 0x7F).
         for i in (0..64).step_by(2) {
             self.bg_palette_ram[i] = 0xFF;
@@ -1385,7 +1385,7 @@ impl Mmio {
     ///   OBJ0: #FFFFFF #FF8484 #943939 #000000  (OBJ1 identical)
     /// The remaining BG palettes stay all-white and the remaining OBJ palettes
     /// keep the hardware power-on dump, matching the real boot ROM end state.
-    pub fn set_cgb_compat_dmg_palettes(&mut self, pal: &crate::cgb_compat_palette::CompatPalettes) {
+    pub(crate) fn set_cgb_compat_dmg_palettes(&mut self, pal: &crate::cgb_compat_palette::CompatPalettes) {
         // Start from the normal CGB power-on palette state (BG all-white, OBJ
         // power-on dump) so palettes the boot ROM does not touch match hardware.
         self.set_post_bios_cgb_palettes();
@@ -1404,7 +1404,7 @@ impl Mmio {
     /// Currently-held buttons as the CGB boot ROM's $021D joypad poll encodes
     /// them (dpad in the high nibble: Right/Left/Up/Down = bits 4-7; A/B/
     /// Select/Start = bits 0-3), for the boot-time palette-combo override.
-    pub fn dmg_compat_key_combo(&self) -> u8 {
+    pub(crate) fn dmg_compat_key_combo(&self) -> u8 {
         let i = &self.input;
         (u8::from(i.right) << 4)
             | (u8::from(i.left) << 5)
@@ -1423,7 +1423,7 @@ impl Mmio {
     /// palette that the PPU indexes via BGP/OBP. The normal `read_bg_palette_data`
     /// returns 0xFF in that state, which is correct for the CPU bus but wrong for
     /// the internal PPU lookup.
-    pub fn bg_palette_pair_raw(&self, palette_idx: u8, color_idx: u8) -> (u8, u8) {
+    pub(crate) fn bg_palette_pair_raw(&self, palette_idx: u8, color_idx: u8) -> (u8, u8) {
         let offset = (palette_idx as usize) * 8 + (color_idx as usize) * 2;
         if offset + 1 < 64 {
             (self.bg_palette_ram[offset], self.bg_palette_ram[offset + 1])
@@ -1434,7 +1434,7 @@ impl Mmio {
 
     /// Read a CGB OBJ palette color (RGB555 byte pair) ignoring the
     /// `cgb_features_enabled` gate. See `bg_palette_pair_raw`.
-    pub fn obj_palette_pair_raw(&self, palette_idx: u8, color_idx: u8) -> (u8, u8) {
+    pub(crate) fn obj_palette_pair_raw(&self, palette_idx: u8, color_idx: u8) -> (u8, u8) {
         let offset = (palette_idx as usize) * 8 + (color_idx as usize) * 2;
         if offset + 1 < 64 {
             (self.obj_palette_ram[offset], self.obj_palette_ram[offset + 1])
@@ -1459,7 +1459,7 @@ impl Mmio {
         }
     }
 
-    pub fn get_cartridge(&self) -> Option<&cartridge::Cartridge> {
+    pub(crate) fn get_cartridge(&self) -> Option<&cartridge::Cartridge> {
         self.cartridge.as_ref()
     }
 
@@ -1545,7 +1545,7 @@ impl Mmio {
 
     /// True while the boot ROM overlay is mapped (FF50 still 0 and a boot ROM is
     /// loaded). After the boot ROM writes FF50 the overlay is gone.
-    pub fn bios_mapped(&self) -> bool {
+    pub(crate) fn bios_mapped(&self) -> bool {
         self.bios.is_some() && self.io_registers.read(REG_BOOT_OFF) == 0
     }
 
@@ -1575,7 +1575,7 @@ impl Mmio {
         None
     }
 
-    pub fn step_timer(&mut self) {
+    pub(crate) fn step_timer(&mut self) {
         // The timer never touches its own copy inside mmio during a step, so it
         // can advance in place; it needs only these two flags from mmio and
         // returns the mmio effects (APU FS edges + a possible TIMA IRQ), which
@@ -1600,7 +1600,7 @@ impl Mmio {
     /// mode, so its span is scaled accordingly. No-op for carts without a
     /// peripheral clock.
     #[inline]
-    pub fn tick_rtc(&mut self, cycles: u64) {
+    pub(crate) fn tick_rtc(&mut self, cycles: u64) {
         if !self.cart_has_clock {
             return;
         }
@@ -1615,7 +1615,7 @@ impl Mmio {
         }
     }
 
-    pub fn lcd_display_enabled(&self) -> bool {
+    pub(crate) fn lcd_display_enabled(&self) -> bool {
         self.io_registers.read(ppu::LCD_CONTROL) & (ppu::LCDCFlags::DisplayEnable as u8) != 0
     }
 
@@ -1632,7 +1632,7 @@ impl Mmio {
     /// no-op. This is purely an advance-mechanism optimization: the per-dot
     /// fallback in `Bus::run_to` handles every cc the guard rejects, so behavior is
     /// byte-identical to the per-dot crank.
-    pub fn idle_bulk_skippable(&self) -> bool {
+    pub(crate) fn idle_bulk_skippable(&self) -> bool {
         let lcd_on = self.io_registers.read(ppu::LCD_CONTROL)
             & (ppu::LCDCFlags::DisplayEnable as u8)
             != 0;
@@ -1659,7 +1659,7 @@ impl Mmio {
     /// byte-identical to cranking each dot. `master_cc` is `timer.abs_cc`, so the
     /// timer's `step_to` carries the master cc to the target and the serial step
     /// observes the final phase.
-    pub fn bulk_advance_idle(&mut self, target_cc: u64) {
+    pub(crate) fn bulk_advance_idle(&mut self, target_cc: u64) {
         let dots = target_cc.wrapping_sub(self.master_cc());
         let mut timer = self.timer.clone();
         timer.step_to(target_cc, self);
@@ -1682,7 +1682,7 @@ impl Mmio {
     /// scheduled (hardware flags it inline at the write cc). The write resolves
     /// at the timer's current `abs_cc`, which the CPU positions at the access
     /// start cc.
-    pub fn write_timer(&mut self, addr: u16, value: u8) {
+    pub(crate) fn write_timer(&mut self, addr: u16, value: u8) {
         let mut timer = self.timer.clone();
         timer.write(addr, value);
         let irq = timer.take_pending_irq();
@@ -1695,7 +1695,7 @@ impl Mmio {
     /// FF0F store prelude (the IF register): pump timer
     /// overflow events at the write cc and raise their IF BEFORE the store, so
     /// an exact-collision CPU write wins (see Timer::flush_overflow_for_ifreg_write).
-    pub fn flush_timer_overflow_for_ifreg_write(&mut self) {
+    pub(crate) fn flush_timer_overflow_for_ifreg_write(&mut self) {
         let mut timer = self.timer.clone();
         timer.flush_overflow_for_ifreg_write();
         let irq = timer.take_pending_irq();
@@ -1708,7 +1708,7 @@ impl Mmio {
     /// Count down the JOYP select-write IRQ filter delay (one call per dot)
     /// and raise the IF bit when it elapses. See `joypad_irq_delay`.
     #[inline]
-    pub fn step_joypad_irq_delay(&mut self) {
+    pub(crate) fn step_joypad_irq_delay(&mut self) {
         if self.joypad_irq_delay > 0 {
             self.joypad_irq_delay -= 1;
             if self.joypad_irq_delay == 0 {
@@ -1718,7 +1718,7 @@ impl Mmio {
     }
 
     #[inline]
-    pub fn step_serial(&mut self) {
+    pub(crate) fn step_serial(&mut self) {
         // Fast path (the common case: serial idle, no link peer): inlined into
         // the per-dot loop, no wasm call. Serial::step is a no-op while no
         // transfer is active; with no external-clock peer there is nothing to
@@ -1803,7 +1803,7 @@ impl Mmio {
     /// resolves at the access START cc (bus.rs routes FF02 to the start-cc path),
     /// so an abort (SC bit-0 cleared) lands before this access's `step_serial`
     /// can fire a completion the abort must suppress.
-    pub fn write_serial_sc(&mut self, value: u8) {
+    pub(crate) fn write_serial_sc(&mut self, value: u8) {
         let divider = self.timer.internal_counter();
         let phase = self.timer.write_access_cc();
         // The device observes every SC write (a link peer mirrors our
@@ -1816,7 +1816,7 @@ impl Mmio {
     /// SB (FF01) write: store the register and keep a link peer's live
     /// shift-register mirror in sync (what the peer's master window would
     /// clock out of us right now). No-op mirror for other devices.
-    pub fn write_serial_sb(&mut self, value: u8) {
+    pub(crate) fn write_serial_sb(&mut self, value: u8) {
         self.serial.write(serial::SB, value);
         self.serial_device.link_mirror_sb(value);
     }
@@ -1827,7 +1827,7 @@ impl Mmio {
     /// here, mirroring the real peer's shift-register reload. `rx` is the
     /// byte our shift register received (a link peer records it as our new
     /// live shift-register contents).
-    pub fn serial_device_receive(&mut self, tx: u8, rx: u8, cc: u64) {
+    pub(crate) fn serial_device_receive(&mut self, tx: u8, rx: u8, cc: u64) {
         self.serial_device.receive_byte(tx, rx, cc);
     }
 
@@ -1840,39 +1840,51 @@ impl Mmio {
     /// instance). The cable side's live-SB mirror seeds from our current SB so
     /// a master window on the peer immediately exchanges with real register
     /// contents.
-    pub fn attach_link(&mut self, peer: serial::LinkPeer) {
+    pub(crate) fn attach_link(&mut self, peer: serial::LinkPeer) {
         peer.seed_live_sb(self.serial.read(serial::SB));
         self.serial_device = serial::SerialDevice::Link(peer);
     }
 
-    pub fn link_attached(&self) -> bool {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    pub(crate) fn link_attached(&self) -> bool {
         self.serial_device.is_link()
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Plug this Game Boy into a 4-Player Adapter (DMG-07) port.
-    pub fn attach_four_player(&mut self, mut port: crate::dmg07::FourPlayerPort) {
+    pub(crate) fn attach_four_player(&mut self, mut port: crate::dmg07::FourPlayerPort) {
         port.mirror_sb(self.serial.read(serial::SB));
         self.serial_device = serial::SerialDevice::FourPlayer(port);
     }
 
-    pub fn four_player_attached(&self) -> bool {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    pub(crate) fn four_player_attached(&self) -> bool {
         matches!(self.serial_device, serial::SerialDevice::FourPlayer(_))
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Plug a Mobile Adapter GB into the link port.
-    pub fn attach_mobile_adapter(&mut self, adapter: crate::mobile::MobileAdapter) {
+    pub(crate) fn attach_mobile_adapter(&mut self, adapter: crate::mobile::MobileAdapter) {
         self.serial_device = serial::SerialDevice::Mobile(adapter);
     }
 
-    pub fn mobile_adapter(&self) -> Option<&crate::mobile::MobileAdapter> {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    pub(crate) fn mobile_adapter(&self) -> Option<&crate::mobile::MobileAdapter> {
         match &self.serial_device {
             serial::SerialDevice::Mobile(m) => Some(m),
             _ => None,
         }
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Debug/test: the in-flight serial transfer's completion event cc.
-    pub fn serial_transfer_complete_at(&self) -> Option<u64> {
+    pub(crate) fn serial_transfer_complete_at(&self) -> Option<u64> {
         self.serial.transfer_complete_at()
     }
 
@@ -1881,45 +1893,53 @@ impl Mmio {
         self.serial_device = serial::SerialDevice::Disconnected;
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Plug one end of a shared IR channel into this GBC's IR port. The current
     /// emitter level (RP bit 0) is published immediately so a mid-session
     /// connect sees the right state.
-    pub fn attach_ir(&mut self, link: crate::ir::IrLink) {
+    pub(crate) fn attach_ir(&mut self, link: crate::ir::IrLink) {
         let led = (self.io_registers.read(0xFF56) & 0x01) != 0;
         self.ir_device = crate::ir::IrDevice::Link(link);
         self.ir_device.set_emitter(led);
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Diagnostic self-test: make the IR port see its own emitter (as though an
     /// IR mirror were held to it). Not how two GBCs communicate.
-    pub fn set_ir_loopback(&mut self) {
+    pub(crate) fn set_ir_loopback(&mut self) {
         self.ir_device = crate::ir::IrDevice::Loopback;
     }
 
-    pub fn ir_attached(&self) -> bool {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    pub(crate) fn ir_attached(&self) -> bool {
         self.ir_device.is_connected()
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Unplug the IR partner (back to a lone GBC that never sees light).
-    pub fn detach_ir(&mut self) {
+    pub(crate) fn detach_ir(&mut self) {
         self.ir_device = crate::ir::IrDevice::Disconnected;
     }
 
-    pub fn printer(&self) -> Option<&crate::printer::GbPrinter> {
+    pub(crate) fn printer(&self) -> Option<&crate::printer::GbPrinter> {
         match &self.serial_device {
             serial::SerialDevice::Printer(p) => Some(p),
             _ => None,
         }
     }
 
-    pub fn printer_mut(&mut self) -> Option<&mut crate::printer::GbPrinter> {
+    pub(crate) fn printer_mut(&mut self) -> Option<&mut crate::printer::GbPrinter> {
         match &mut self.serial_device {
             serial::SerialDevice::Printer(p) => Some(p),
             _ => None,
         }
     }
 
-    pub fn set_serial_cgb(&mut self, cgb: bool) {
+    pub(crate) fn set_serial_cgb(&mut self, cgb: bool) {
         self.serial.set_cgb(cgb);
     }
 
@@ -1943,7 +1963,7 @@ impl Mmio {
     /// `tick_m` can complete the transfer and set the serial IF bit within the
     /// read cycle; capturing the value before ticking makes the CPU observe
     /// serial state at the read's start (hardware resolves the read at cc).
-    pub fn snapshot_serial_read(&self, addr: u16) -> u8 {
+    pub(crate) fn snapshot_serial_read(&self, addr: u16) -> u8 {
         self.read(addr)
     }
 
@@ -1954,7 +1974,7 @@ impl Mmio {
     /// byte-identical to the full dispatch for every mapped page (the Bus
     /// fast path has already excluded DMA conflicts and IO).
     #[inline]
-    pub fn passive_read(&mut self, addr: u16) -> u8 {
+    pub(crate) fn passive_read(&mut self, addr: u16) -> u8 {
         // HRAM (FF80-FFFE) sits in the mixed top page; serve it directly
         // (identical to the dispatch's HRAM arm).
         if addr >= 0xFF80 {
@@ -2005,41 +2025,41 @@ impl Mmio {
 
     /// Take the carried cross-instruction lag (Bus construction).
     #[inline]
-    pub fn take_cpu_lag(&mut self) -> u32 {
+    pub(crate) fn take_cpu_lag(&mut self) -> u32 {
         std::mem::take(&mut self.cpu_lag)
     }
 
     /// Park unresolved passive-read dots across an instruction boundary.
     #[inline]
-    pub fn set_cpu_lag(&mut self, lag: u32) {
+    pub(crate) fn set_cpu_lag(&mut self, lag: u32) {
         self.cpu_lag = lag;
     }
 
     /// Carried cross-instruction lag, if any.
     #[inline]
-    pub fn cpu_lag(&self) -> u32 {
+    pub(crate) fn cpu_lag(&self) -> u32 {
         self.cpu_lag
     }
 
     /// Raw pending-and-enabled interrupt bits (IF & IE, low 5), read directly
     /// off the backing stores for the lag-carry gate.
     #[inline]
-    pub fn pending_if_ie(&self) -> u8 {
+    pub(crate) fn pending_if_ie(&self) -> u8 {
         self.io_registers.read(cpu::registers::INTERRUPT_FLAG) & self.ie_register & 0x1F
     }
 
-    pub fn request_interrupt(&mut self, flag: cpu::registers::InterruptFlag) {
+    pub(crate) fn request_interrupt(&mut self, flag: cpu::registers::InterruptFlag) {
         let current = self.read(cpu::registers::INTERRUPT_FLAG);
         self.write(cpu::registers::INTERRUPT_FLAG, current | flag as u8);
     }
 
-    pub fn clock_apu_frame_sequencer(&mut self) {
+    pub(crate) fn clock_apu_frame_sequencer(&mut self) {
         self.audio.clock_frame_sequencer();
     }
 
     /// Initialize the timer's internal 16-bit counter at boot. See
     /// `Timer::set_internal_counter`.
-    pub fn set_timer_internal_counter(&mut self, value: u16) {
+    pub(crate) fn set_timer_internal_counter(&mut self, value: u16) {
         self.timer.set_internal_counter(value);
     }
 
@@ -2052,21 +2072,21 @@ impl Mmio {
     /// Write a raw byte into the generic IO-register backing store, bypassing
     /// per-register write masking. Used by `skip_bios` to seed power-on values
     /// (e.g. RP unused bits) that the masked write path cannot set.
-    pub fn set_io_register(&mut self, addr: u16, value: u8) {
+    pub(crate) fn set_io_register(&mut self, addr: u16, value: u8) {
         self.io_registers.write(addr, value);
     }
 
     /// Establish the post-`skip_bios` APU state. Syncs the APU cycle counter from
     /// the (already-set) timer counter first so the channel duty phase has the
     /// correct cc base, then applies the hardware post-boot state.
-    pub fn set_post_bios_audio_state(&mut self, cgb: bool, ch1_active: bool) {
+    pub(crate) fn set_post_bios_audio_state(&mut self, cgb: bool, ch1_active: bool) {
         self.sync_apu_cc();
         self.audio.set_post_bios_state(cgb, ch1_active);
     }
 
     /// Record the CGB flag for the APU boot anchor. Must run before any audio
     /// register write or `sync_apu_cc` that would anchor the SPU clock.
-    pub fn set_audio_boot_cgb(&mut self, cgb: bool) {
+    pub(crate) fn set_audio_boot_cgb(&mut self, cgb: bool) {
         self.audio.set_boot_cgb(cgb);
     }
 
@@ -2075,7 +2095,7 @@ impl Mmio {
     /// `read()` path. CPU reads/writes sync automatically via `Bus`; a raw
     /// `mmio.read(NR52)` from the host does not, and would otherwise see the
     /// APU as of its last CPU access.
-    pub fn sync_apu(&mut self) {
+    pub(crate) fn sync_apu(&mut self) {
         self.sync_apu_cc();
     }
 
@@ -2105,11 +2125,13 @@ impl Mmio {
         self.audio.sync_cc(abs_cc, div_resets, div_anchor, ds, cgb, agb);
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Sync the APU cycle counter to the exact CPU read cycle and advance the
     /// wave channel's fetch position, so an APU/wave-RAM read observes the
     /// channel at the precise sub-M-cycle (a wave-RAM read resolves at
     /// the live cc). Only used on the read path (0xFF10-0xFF3F).
-    pub fn sync_apu_for_read(&mut self) {
+    pub(crate) fn sync_apu_for_read(&mut self) {
         self.sync_apu_cc();
         self.audio.sync_wave_for_read();
     }
@@ -2119,7 +2141,7 @@ impl Mmio {
     /// timer register access resolves on (`abs_cc + ACCESS_CC_OFF`). Drives the
     /// length-expiry comparison off one uniform per-access cc, with no
     /// APU-specific additive constant.
-    pub fn sync_apu_read_cc(&mut self, read_abs_cc: u64) {
+    pub(crate) fn sync_apu_read_cc(&mut self, read_abs_cc: u64) {
         self.sync_apu_cc();
         self.audio.sync_wave_for_read();
         self.audio.set_read_len_cc(read_abs_cc);
@@ -2131,7 +2153,7 @@ impl Mmio {
     /// restores the steady-state base. Mirrors `sync_apu_read_cc` for the read
     /// side: the trigger's length-expiry boundary is anchored to one uniform
     /// per-access clock, dissolving the write/read phase asymmetry.
-    pub fn write_apu(&mut self, addr: u16, value: u8) {
+    pub(crate) fn write_apu(&mut self, addr: u16, value: u8) {
         self.sync_apu_cc();
         // Hardware advances the wave-channel fetch counter to the write cc first,
         // so the corruption/active-fetch window (fetch position == cc+1) and the
@@ -2150,47 +2172,49 @@ impl Mmio {
     /// The canonical CPU-access cc the timer resolves register accesses on.
     /// Exposed so the bus can present the SAME cc to the APU/serial reads,
     /// dissolving the per-peripheral phase constants.
-    pub fn access_cc(&self) -> u64 {
+    pub(crate) fn access_cc(&self) -> u64 {
         self.timer.access_cc()
     }
 
     /// Event-cc dispatch: the cc the most recent still-
     /// undispatched TIMA IRQ fired at, or `None`. The CPU gates timer-interrupt
     /// eligibility on the boundary access cc having reached this cc.
-    pub fn pending_timer_fire_cc(&self) -> Option<u64> {
+    pub(crate) fn pending_timer_fire_cc(&self) -> Option<u64> {
         self.timer.pending_fire_cc()
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Delivery cc of the next scheduled timer overflow (EI-loop fast-dispatch).
-    pub fn next_timer_overflow_cc(&self) -> Option<u64> {
+    pub(crate) fn next_timer_overflow_cc(&self) -> Option<u64> {
         self.timer.next_overflow_deliver_cc()
     }
 
     /// Record the mode-0 STAT IRQ event cc when its IF bit is raised.
-    pub fn set_pending_m0_irq_fire_cc(&mut self, cc: Option<u64>) {
+    pub(crate) fn set_pending_m0_irq_fire_cc(&mut self, cc: Option<u64>) {
         self.pending_m0_irq_fire_cc = cc;
     }
 
     /// The recorded mode-0 STAT IRQ event cc (halt-exit `<2`
     /// fixup), or `None` if no unserviced m0 IRQ with a closed-form anchor.
-    pub fn pending_m0_irq_fire_cc(&self) -> Option<u64> {
+    pub(crate) fn pending_m0_irq_fire_cc(&self) -> Option<u64> {
         self.pending_m0_irq_fire_cc
     }
 
     /// EARLY (EI-loop) anchor cc of the next scheduled overflow (scheduled cc + IF_OFF).
-    pub fn next_timer_overflow_ei_cc(&self) -> Option<u64> {
+    pub(crate) fn next_timer_overflow_ei_cc(&self) -> Option<u64> {
         self.timer.next_overflow_ei_cc()
     }
 
     /// The EXACT cc the next timer overflow's IF bit is raised
     /// at, with the same `fold` `step_to`/`update_irq_delivery` will apply. The
     /// min-event idle fast path lands on this cc so the overflow fires identically.
-    pub fn next_timer_overflow_fire_cc(&self) -> Option<u64> {
+    pub(crate) fn next_timer_overflow_fire_cc(&self) -> Option<u64> {
         self.timer.next_overflow_fire_cc(self.cpu_is_halted())
     }
 
     /// EARLY (EI-loop) gate cc of the undispatched timer IRQ.
-    pub fn pending_timer_fire_cc_ei(&self) -> Option<u64> {
+    pub(crate) fn pending_timer_fire_cc_ei(&self) -> Option<u64> {
         self.timer.pending_fire_cc_ei()
     }
 
@@ -2198,7 +2222,7 @@ impl Mmio {
     /// (`boundary >= scheduled cc + IF_OFF`) and raise its IF bit. Called by the CPU in
     /// a non-halt/non-stop EI loop so the serviced ISR runs on hardware's exact
     /// phase, ahead of the normal `CC_OFF`-late per-dot delivery.
-    pub fn force_ei_timer_delivery(&mut self, boundary: u64) {
+    pub(crate) fn force_ei_timer_delivery(&mut self, boundary: u64) {
         let mut timer = self.timer.clone();
         let fired = timer.force_ei_delivery(boundary);
         self.timer = timer;
@@ -2210,14 +2234,14 @@ impl Mmio {
     }
 
     /// Clear the recorded timer fire cc once the CPU dispatches the IRQ.
-    pub fn clear_timer_fire_cc(&mut self) {
+    pub(crate) fn clear_timer_fire_cc(&mut self) {
         self.timer.clear_fire_cc();
     }
 
     /// True while the CPU is in HALT. The FAST EI-loop
     /// timer IF-set grid keeps the HALT-wakeup IF-set on the late (`CC_OFF`) anchor
     /// while non-halt (EI-loop) overflows use the early grid.
-    pub fn cpu_is_halted(&self) -> bool {
+    pub(crate) fn cpu_is_halted(&self) -> bool {
         self.cpu_halted
     }
 
@@ -2225,10 +2249,12 @@ impl Mmio {
     /// uses this to sample the timer IF bit at the access cc (rather than the
     /// M-cycle end) so a read-only early-grid ISR (tc00_irq_ds_1) still misses an
     /// overflow whose early IF-set has not yet been reached at the read cc.
-    pub fn timer_isr_on_early_grid(&self) -> bool {
+    pub(crate) fn timer_isr_on_early_grid(&self) -> bool {
         self.timer.isr_on_early_grid()
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// CL1: the *honest* per-access cc — the true `abs_cc` at the START of the
     /// CPU access's M-cycle. `master_cc()` is incremented at the top of each
     /// dot-step, so before this access's `tick_m` it trails the M-cycle start by
@@ -2241,7 +2267,7 @@ impl Mmio {
     /// PPU respond at the exact point, instead of a baked-in `+5`. The four-dot
     /// difference vs `access_cc()` is folded into the PPU consumer constants
     /// (`get_stat_mode3to0_at_cc`, `cpu_access_blocked`) so this is net-zero.
-    pub fn ppu_access_cc(&self) -> u64 {
+    pub(crate) fn ppu_access_cc(&self) -> u64 {
         self.timer.abs_cc().wrapping_add(1)
     }
 
@@ -2260,7 +2286,7 @@ impl Mmio {
         self.audio.drain_channel_tap()
     }
 
-    pub fn generate_audio_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
+    pub(crate) fn generate_audio_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
         // Catch the lazy APU up to the current cc first so the mixer state the
         // down-sampler reads is the instruction-end state (the same state the
         // per-dot crank used to leave it in).
@@ -2365,7 +2391,7 @@ impl Mmio {
     /// value together with the dma-event fire cc (for the prefetch's VRAM-lock
     /// decision). One-shot. Returns None when no fire is pending or `pc` is not
     /// the block's first dest byte.
-    pub fn take_dma_prefetch_shadow(&mut self, pc: u16) -> Option<(u8, u64)> {
+    pub(crate) fn take_dma_prefetch_shadow(&mut self, pc: u16) -> Option<(u8, u64)> {
         if self.hdma_fire_dest0 == Some(pc) {
             self.hdma_fire_dest0 = None;
             return Some((self.hdma_fire_dest0_prebyte, self.hdma_fire_cc));
@@ -2375,12 +2401,12 @@ impl Mmio {
 
     /// Consume the pending VRAM-source GDMA first-word latch (see the field
     /// doc); returns the first dest word's VRAM address + bank flag.
-    pub fn take_gdma_vram_src_fixup(&mut self) -> Option<(u16, bool)> {
+    pub(crate) fn take_gdma_vram_src_fixup(&mut self) -> Option<(u16, bool)> {
         self.gdma_vram_src_fixup.take()
     }
 
     /// Patch the latched first word with the absorbed-prefetch byte.
-    pub fn apply_gdma_vram_src_fixup(&mut self, addr: u16, byte: u8, into_bank1: bool) {
+    pub(crate) fn apply_gdma_vram_src_fixup(&mut self, addr: u16, byte: u8, into_bank1: bool) {
         for a in [addr, addr.wrapping_add(1)] {
             let a = VRAM_START | (a & 0x1FFF);
             if into_bank1 {
@@ -2393,7 +2419,7 @@ impl Mmio {
 
     /// Clear any stale DMA prefetch-shadow (called once the next opcode has been
     /// fetched without consuming it, so it cannot leak to a later access).
-    pub fn clear_dma_prefetch_shadow(&mut self) {
+    pub(crate) fn clear_dma_prefetch_shadow(&mut self) {
         self.hdma_fire_dest0 = None;
         self.hdma_snapshot_armed = false;
     }
@@ -2401,14 +2427,14 @@ impl Mmio {
     /// True while deferred HDMA block writes are still in their
     /// per-dot countdown (`step_hdma_deferred` must run each dot to commit them at
     /// the right cc). Blocks the idle bulk-skip.
-    pub fn has_pending_hdma_deferred(&self) -> bool {
+    pub(crate) fn has_pending_hdma_deferred(&self) -> bool {
         !self.hdma_pending_writes.is_empty()
     }
 
     /// Drain the deferred-HDMA write buffer one dot. When the delay expires the
     /// resolved bytes are committed to VRAM in order.
     #[inline]
-    pub fn step_hdma_deferred(&mut self) {
+    pub(crate) fn step_hdma_deferred(&mut self) {
         if self.hdma_pending_writes.is_empty() {
             return;
         }
@@ -2565,31 +2591,31 @@ impl Mmio {
     // HDMA accessors used by gb.rs / cpu / ppu.
     // ----------------------------------------------------------------------
 
-    pub fn hdma_is_enabled(&self) -> bool {
+    pub(crate) fn hdma_is_enabled(&self) -> bool {
         self.cgb_features_enabled && self.hdma_enabled
     }
 
-    pub fn hdma_req_pending(&self) -> bool {
+    pub(crate) fn hdma_req_pending(&self) -> bool {
         self.hdma_req_pending
     }
 
     /// Whether this HDMA period's block has already been serviced (the DMA event
     /// for this m0 edge already ran and acked, so no HDMA request is
     /// flagged — no block is owed/prefetched at a STOP).
-    pub fn hdma_block_done_this_period(&self) -> bool {
+    pub(crate) fn hdma_block_done_this_period(&self) -> bool {
         self.hdma_block_done_this_period
     }
 
     /// Remaining HDMA blocks minus one (the FF55 length field). 0 => the next
     /// block completes the transfer.
-    pub fn hdma_length(&self) -> u8 {
+    pub(crate) fn hdma_length(&self) -> u8 {
         self.hdma_length
     }
 
     /// Arm the High-at-halt unhalt edge-consume: the first post-unhalt m0 HDMA edge
     /// is suppressed (it was the during-halt edge hardware already consumed). Called
     /// at the unhalt site when `halt_hdma_state == High`.
-    pub fn arm_hdma_high_unhalt_consume(&mut self) {
+    pub(crate) fn arm_hdma_high_unhalt_consume(&mut self) {
         self.hdma_high_unhalt_consume = true;
     }
 
@@ -2598,7 +2624,7 @@ impl Mmio {
     /// `step_hdma` can absorb the next-line m0 arm iff it falls within the freshly
     /// fired block's transfer span (hardware's m0 HDMA event consumed by the
     /// in-flight transfer), deferring the genuine next block one line.
-    pub fn arm_hdma_peraccess_consume(&mut self) {
+    pub(crate) fn arm_hdma_peraccess_consume(&mut self) {
         self.hdma_peraccess_consume_pending = true;
     }
 
@@ -2645,17 +2671,17 @@ impl Mmio {
     }
 
     /// Master cc of the last HDMA block fire (None if none in-flight this period).
-    pub fn hdma_last_fire_cc(&self) -> Option<u64> {
+    pub(crate) fn hdma_last_fire_cc(&self) -> Option<u64> {
         self.hdma_last_fire_cc
     }
 
     /// Whether an HDMA block is latched and would fire at the next
     /// M-cycle boundary (the `fire_pending_hdma_mcycle` precondition).
-    pub fn hdma_fire_pending(&self) -> bool {
+    pub(crate) fn hdma_fire_pending(&self) -> bool {
         self.hdma_req_pending && self.hdma_enabled
     }
 
-    pub fn set_hdma_req(&mut self) {
+    pub(crate) fn set_hdma_req(&mut self) {
         if self.cgb_features_enabled && self.hdma_enabled {
             self.hdma_req_pending = true;
         }
@@ -2666,27 +2692,27 @@ impl Mmio {
 
     /// Master cc below which the per-dot HDMA tracker may be skipped.
     #[inline]
-    pub fn hdma_tracker_sleep_until(&self) -> u64 {
+    pub(crate) fn hdma_tracker_sleep_until(&self) -> u64 {
         self.hdma_tracker_sleep_until
     }
 
     /// PPU-installed HDMA-tracker sleep bound (see the field doc).
     #[inline]
-    pub fn set_hdma_tracker_sleep(&mut self, until: u64) {
+    pub(crate) fn set_hdma_tracker_sleep(&mut self, until: u64) {
         self.hdma_tracker_sleep_until = until;
     }
 
-    pub fn halt_hdma_state(&self) -> HaltHdmaState {
+    pub(crate) fn halt_hdma_state(&self) -> HaltHdmaState {
         self.halt_hdma_state
     }
 
-    pub fn set_halt_hdma_state(&mut self, s: HaltHdmaState) {
+    pub(crate) fn set_halt_hdma_state(&mut self, s: HaltHdmaState) {
         self.halt_hdma_state = s;
     }
 
     /// Freeze/unfreeze the OAM-DMA across the STOP speed-switch unhalt window
     /// (hardware's halted branch — the OAM-DMA position stays put).
-    pub fn set_oam_dma_stop_freeze(&mut self, freeze: bool) {
+    pub(crate) fn set_oam_dma_stop_freeze(&mut self, freeze: bool) {
         self.oam_dma_stop_freeze = freeze;
         if freeze {
             // Hardware advances the OAM-DMA by the STOP's own
@@ -2713,7 +2739,7 @@ impl Mmio {
 
     /// CPU has left HALT. Clears the halted mirror so the
     /// period-edge HDMA request resumes.
-    pub fn clear_cpu_halt(&mut self) {
+    pub(crate) fn clear_cpu_halt(&mut self) {
         self.cpu_halted = false;
     }
 
@@ -2721,7 +2747,7 @@ impl Mmio {
     /// serialized sources (`cpu.halted` / `cpu.stop_unhalt_cycles`). Both are
     /// `#[serde(skip)]` here, so without this a state saved mid-HALT or mid-STOP
     /// resumes with the mirror cleared. Pure re-seed of derived state.
-    pub fn sync_cpu_mirror_flags(&mut self, cpu_halted: bool, in_stop_window: bool) {
+    pub(crate) fn sync_cpu_mirror_flags(&mut self, cpu_halted: bool, in_stop_window: bool) {
         self.cpu_halted = cpu_halted;
         self.in_stop_window = in_stop_window;
     }
@@ -2730,20 +2756,20 @@ impl Mmio {
     /// halted): the HDMA period-edge request is suppressed across
     /// the speed bridge and stall. Set by `on_stop_window_enter`,
     /// cleared by `stop_window_exit_reflag`.
-    pub fn in_stop_window(&self) -> bool {
+    pub(crate) fn in_stop_window(&self) -> bool {
         self.in_stop_window
     }
 
     /// Mark/clear that the live instruction stream was resumed by a HALT
     /// wakeup (its access-cc is sub-M-cycle skewed; see field doc). Set on wakeup,
     /// cleared when the CPU halts again.
-    pub fn set_halt_wakeup_skew(&mut self, v: bool) {
+    pub(crate) fn set_halt_wakeup_skew(&mut self, v: bool) {
         self.halt_wakeup_skew = v;
     }
 
     /// True while a HALT-woken instruction stream is live (FF41 STAT resolve-at-cc
     /// line-tail override is deferred to the renderer register).
-    pub fn halt_wakeup_skew(&self) -> bool {
+    pub(crate) fn halt_wakeup_skew(&self) -> bool {
         self.halt_wakeup_skew
     }
 
@@ -2752,38 +2778,38 @@ impl Mmio {
     /// stream (dispatch, reads) by 4cc, so the `access_cc + 5` OAM-scan STAT
     /// read bias must NOT re-add the +4 — it drops to the +1 the LY time correction.
     /// Cleared when the CPU next halts.
-    pub fn set_m2_halt_stall_charged_cgb(&mut self, v: bool) {
+    pub(crate) fn set_m2_halt_stall_charged_cgb(&mut self, v: bool) {
         self.m2_halt_stall_charged_cgb = v;
     }
 
     /// True while a CGB m2-woken stream that took the real +4 halt-exit stall is
     /// live (see setter).
-    pub fn m2_halt_stall_charged_cgb(&self) -> bool {
+    pub(crate) fn m2_halt_stall_charged_cgb(&self) -> bool {
         self.m2_halt_stall_charged_cgb
     }
 
     /// Mark whether the live HALT-woken stream was woken by an m0/m2-proximate
     /// LCD STAT IRQ (see field doc). Set at HALT wakeup, cleared on the next HALT.
-    pub fn set_halt_wake_m0m2(&mut self, v: bool) {
+    pub(crate) fn set_halt_wake_m0m2(&mut self, v: bool) {
         self.halt_wake_m0m2 = v;
     }
 
     /// True while the live HALT-woken stream is m0/m2-woken (line-tail override consumer).
-    pub fn halt_wake_m0m2(&self) -> bool {
+    pub(crate) fn halt_wake_m0m2(&self) -> bool {
         self.halt_wake_m0m2
     }
 
     /// Sticky: this ROM has driven the HDMA/GDMA machinery (FF55 written).
-    pub fn hdma_machinery_used(&self) -> bool {
+    pub(crate) fn hdma_machinery_used(&self) -> bool {
         self.hdma_machinery_used
     }
 
     /// Sticky: this ROM has written LCDC during mode 3 (mid-m3 fetcher race).
-    pub fn set_m3_lcdc_write_seen(&mut self) {
+    pub(crate) fn set_m3_lcdc_write_seen(&mut self) {
         self.m3_lcdc_write_seen = true;
     }
 
-    pub fn m3_lcdc_write_seen(&self) -> bool {
+    pub(crate) fn m3_lcdc_write_seen(&self) -> bool {
         self.m3_lcdc_write_seen
     }
 
@@ -2791,119 +2817,121 @@ impl Mmio {
     /// real stall — as opposed to the m2-woken stall, whose co-tuned read/write
     /// biases must stay untouched. The stall flag is shared
     /// (`m2_halt_stall_charged_cgb`); the wake-source flag separates the classes.
-    pub fn cgb_lcd_stall_charged_no_bias(&self) -> bool {
+    pub(crate) fn cgb_lcd_stall_charged_no_bias(&self) -> bool {
         self.m2_halt_stall_charged_cgb && !self.halt_wake_m0m2
     }
 
     /// Arm the halt-woken SS->DS LY-read advance (see field doc). Called at the
     /// speed-switch STOP when the executing stream is halt-woken.
-    pub fn set_ssds_haltskew_ly_advance(&mut self) {
+    pub(crate) fn set_ssds_haltskew_ly_advance(&mut self) {
         self.ssds_haltskew_ly_advance = true;
     }
 
     /// True while the live DS stream is a halt-woken one that crossed an SS->DS
     /// speed switch (consumed by `get_ly_reg_at_cc`).
-    pub fn ssds_haltskew_ly_advance(&self) -> bool {
+    pub(crate) fn ssds_haltskew_ly_advance(&self) -> bool {
         self.ssds_haltskew_ly_advance
     }
 
     /// Record the DMG HALT-exit `cc += 4` wakeup-latency decision
     /// (the wakeup landed within 2cc of the IRQ event).
-    pub fn set_halt_wake_plus4_dmg(&mut self, v: bool) {
+    pub(crate) fn set_halt_wake_plus4_dmg(&mut self, v: bool) {
         self.halt_wake_plus4_dmg = v;
     }
 
     /// Arm/clear the halt-woken stream's DIV/TIMA read re-anchor
     /// (Timer::halt_read_bias).
-    pub fn set_halt_timer_read_bias(&mut self, bias: u32) {
+    pub(crate) fn set_halt_timer_read_bias(&mut self, bias: u32) {
         self.timer.set_halt_read_bias(bias);
     }
 
     /// Record the master_cc the mode-2 STAT IRQ event raised IF at (its event
     /// time; the per-dot dispatch fires at it).
-    pub fn set_last_m2_irq_fire_cc(&mut self, cc: u64) {
+    pub(crate) fn set_last_m2_irq_fire_cc(&mut self, cc: u64) {
         self.last_m2_irq_fire_cc = Some(cc);
     }
 
     /// The last mode-2 STAT IRQ IF-set master_cc.
-    pub fn last_m2_irq_fire_cc(&self) -> Option<u64> {
+    pub(crate) fn last_m2_irq_fire_cc(&self) -> Option<u64> {
         self.last_m2_irq_fire_cc
     }
 
     /// Record the LY the last mode-2 STAT IRQ event was raised for.
-    pub fn set_last_m2_irq_ly(&mut self, ly: u8) {
+    pub(crate) fn set_last_m2_irq_ly(&mut self, ly: u8) {
         self.last_m2_irq_ly = ly;
     }
 
     /// The LY of the last mode-2 STAT IRQ event (rendering line 0..143, or 144
     /// for the VBlank-entry mode-2 quirk).
-    pub fn last_m2_irq_ly(&self) -> u8 {
+    pub(crate) fn last_m2_irq_ly(&self) -> u8 {
         self.last_m2_irq_ly
     }
 
     /// Set the DMG m0-woken wake's halt-exit cc advance
     /// (snap + conditional +4) for the woken stream's FF44 read.
-    pub fn set_dmg_m0_halt_ly_advance(&mut self, adv: Option<u32>) {
+    pub(crate) fn set_dmg_m0_halt_ly_advance(&mut self, adv: Option<u32>) {
         self.dmg_m0_halt_ly_advance = adv;
     }
 
-    pub fn set_cgb_m0_halt_ly_advance(&mut self, adv: Option<u32>) {
+    pub(crate) fn set_cgb_m0_halt_ly_advance(&mut self, adv: Option<u32>) {
         self.cgb_m0_halt_ly_advance = adv;
     }
 
-    pub fn cgb_m0_halt_ly_advance(&self) -> Option<u32> {
+    pub(crate) fn cgb_m0_halt_ly_advance(&self) -> Option<u32> {
         self.cgb_m0_halt_ly_advance
     }
 
     /// The DMG m0-woken halt-exit advance, if this stream
     /// was woken by the mode-0 STAT IRQ at its event cc.
-    pub fn dmg_m0_halt_ly_advance(&self) -> Option<u32> {
+    pub(crate) fn dmg_m0_halt_ly_advance(&self) -> Option<u32> {
         self.dmg_m0_halt_ly_advance
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// True when this DMG wakeup carried the +4 read-phase bias.
-    pub fn halt_wake_plus4_dmg(&self) -> bool {
+    pub(crate) fn halt_wake_plus4_dmg(&self) -> bool {
         self.halt_wake_plus4_dmg
     }
 
     /// Record the pre-snap master_cc at real HALT entry.
-    pub fn set_halt_entry_cc(&mut self, cc: Option<u64>) {
+    pub(crate) fn set_halt_entry_cc(&mut self, cc: Option<u64>) {
         self.halt_entry_cc = cc;
     }
 
     /// The pre-snap HALT-entry master_cc, if captured.
-    pub fn halt_entry_cc(&self) -> Option<u64> {
+    pub(crate) fn halt_entry_cc(&self) -> Option<u64> {
         self.halt_entry_cc
     }
 
     /// Set the per-stream HALT-prefetch phase count (0 or 1).
-    pub fn set_halt_prefetch_phase(&mut self, phase: u32) {
+    pub(crate) fn set_halt_prefetch_phase(&mut self, phase: u32) {
         self.halt_prefetch_phase = phase;
     }
 
     /// The per-stream HALT-prefetch phase carried onto the
     /// single woken FF41 read (access_cc += 4 * phase).
-    pub fn halt_prefetch_phase(&self) -> u32 {
+    pub(crate) fn halt_prefetch_phase(&self) -> u32 {
         self.halt_prefetch_phase
     }
 
     /// Set the per-stream woken-PC push phase (0 or 1).
-    pub fn set_timer_push_phase(&mut self, phase: u32) {
+    pub(crate) fn set_timer_push_phase(&mut self, phase: u32) {
         self.timer_push_phase = phase;
     }
 
     /// The per-stream woken-PC push phase carried onto the
     /// single CGB+Timer interrupt service (pushed resume PC += 1 instruction byte
     /// when 1).
-    pub fn timer_push_phase(&self) -> u32 {
+    pub(crate) fn timer_push_phase(&self) -> u32 {
         self.timer_push_phase
     }
 
-    pub fn set_halt_wakeup_hdma(&mut self, v: bool) {
+    pub(crate) fn set_halt_wakeup_hdma(&mut self, v: bool) {
         self.halt_wakeup_hdma = v;
     }
 
-    pub fn halt_wakeup_hdma(&self) -> bool {
+    pub(crate) fn halt_wakeup_hdma(&self) -> bool {
         self.halt_wakeup_hdma
     }
 
@@ -2914,7 +2942,7 @@ impl Mmio {
     /// block arms on the next Mode 3->0 edge (hardware schedules the HDMA event
     /// to the next m0 without flagging now). Returns whether a kick
     /// was pending (so the bus knows it consumed it).
-    pub fn resolve_hdma_kick(&mut self, in_period: bool) -> bool {
+    pub(crate) fn resolve_hdma_kick(&mut self, in_period: bool) -> bool {
         if self.hdma_kick_eval_pending == 0 {
             return false;
         }
@@ -2947,7 +2975,7 @@ impl Mmio {
     }
 
     /// Whether an FF55 bit7=1 kick is awaiting the bus's live-period resolution.
-    pub fn hdma_kick_eval_pending(&self) -> bool {
+    pub(crate) fn hdma_kick_eval_pending(&self) -> bool {
         self.hdma_kick_eval_pending != 0
     }
 
@@ -2958,7 +2986,7 @@ impl Mmio {
     /// OAM-DMA has already written (the CPU view returns 0xFF for the whole DMA
     /// window). Used by the sprite-list build for ghost-sampled slots, whose
     /// hardware tile/attribute fetch sees the DMA's in-flight data.
-    pub fn ppu_read_oam_live(&self, addr: u16) -> u8 {
+    pub(crate) fn ppu_read_oam_live(&self, addr: u16) -> u8 {
         self.oam.read(addr)
     }
 
@@ -2967,7 +2995,7 @@ impl Mmio {
     /// (a hardware CGB palette-write-blocked quirk; SameSuite
     /// ppu/blocking_bgpi_increase subtest 3 reads BCPS=+1 after a mode-3 write).
     /// Called by the bus from the blocked-write drop path.
-    pub fn palette_blocked_write_increment(&mut self, addr: u16) {
+    pub(crate) fn palette_blocked_write_increment(&mut self, addr: u16) {
         if !self.cgb_features_enabled {
             return;
         }
@@ -2982,11 +3010,11 @@ impl Mmio {
         }
     }
 
-    pub fn set_hdma_disable_fires(&mut self, v: Option<bool>) {
+    pub(crate) fn set_hdma_disable_fires(&mut self, v: Option<bool>) {
         self.hdma_disable_fires = v;
     }
 
-    pub fn hdma_is_in_period_cached(&self) -> bool {
+    pub(crate) fn hdma_is_in_period_cached(&self) -> bool {
         self.hdma_is_in_period_cached
     }
 
@@ -2995,7 +3023,7 @@ impl Mmio {
     /// gate (matching `step_hdma`'s fallback edge model) so unhalt re-flagging
     /// works on the window / first-line paths where no closed-form mode-0 dot
     /// exists. LCD-off counts as permanently in period.
-    pub fn hdma_in_period_for_unhalt(&self) -> bool {
+    pub(crate) fn hdma_in_period_for_unhalt(&self) -> bool {
         let lcdc = self.io_registers.read(ppu::LCD_CONTROL);
         let lcd_on = lcdc & (ppu::LCDCFlags::DisplayEnable as u8) != 0;
         if !lcd_on {
@@ -3007,19 +3035,23 @@ impl Mmio {
         (self.io_registers.read(ppu::LCD_STATUS) & 0x03) == 0
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// CPU has just entered HALT. Records the halt-HDMA state and acks any
     /// currently flagged req so it does not double-fire on unhalt.
     /// Coarse fallback (no PPU access): uses the cached per-step period.
-    pub fn on_cpu_halt(&mut self) {
+    pub(crate) fn on_cpu_halt(&mut self) {
         let in_period = self.hdma_is_in_period_cached;
         self.on_cpu_halt_with_period(Some(in_period));
     }
 
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// HALT-entry with a caller-supplied cycle-exact HBlank-period flag (the Bus
     /// path computes this via the renderer's `m0_time_master`-anchored predictor,
     /// the SAME predicate used for the unhalt re-flag). `None` => no
     /// closed-form mode-0 anchor; fall back to the cached per-step period.
-    pub fn on_cpu_halt_with_period(&mut self, in_period: Option<bool>) {
+    pub(crate) fn on_cpu_halt_with_period(&mut self, in_period: Option<bool>) {
         self.on_cpu_halt_with_period_done(in_period, None)
     }
 
@@ -3034,7 +3066,7 @@ impl Mmio {
     /// hardware captures `High` (in-period, block done, no reflag). The fire-cc
     /// override is robust across that boundary disagreement
     /// (`hdma_late_m0halt_*_lcdoffset*_1`). `None` keeps the legacy flag behaviour.
-    pub fn on_cpu_halt_with_period_done(
+    pub(crate) fn on_cpu_halt_with_period_done(
         &mut self,
         in_period: Option<bool>,
         block_done_override: Option<bool>,
@@ -3169,7 +3201,7 @@ impl Mmio {
     /// HDMA-enabled AND in the HBlank period at `stop_cc`, evaluated by the caller at the
     /// stop cc (the exact `m0_time_master - gap` edge). The block is (re)flagged or
     /// dropped by `stop_window_exit_reflag` at the unhalt cc.
-    pub fn on_stop_window_enter(&mut self, in_period_now: bool) {
+    pub(crate) fn on_stop_window_enter(&mut self, in_period_now: bool) {
         if !self.cgb_features_enabled {
             self.halt_hdma_state = HaltHdmaState::Low;
             self.in_stop_window = true;
@@ -3208,7 +3240,7 @@ impl Mmio {
     /// natural next-line per-dot m0 edge fires it (one line later), which is exactly
     /// the `hdma_m0speedchange_late_m3wakeup_*` `_1` (edge wins -> outputs 0xFF) vs `_2`
     /// (edge misses -> block deferred one line -> out00) split.
-    pub fn stop_window_exit_reflag_edge(
+    pub(crate) fn stop_window_exit_reflag_edge(
         &mut self,
         in_period_unhalt: bool,
         window_end_edge: Option<(i64, i64)>,
@@ -3242,7 +3274,7 @@ impl Mmio {
         }
     }
 
-    pub fn stop_window_exit_reflag(&mut self, in_period_unhalt: bool) {
+    pub(crate) fn stop_window_exit_reflag(&mut self, in_period_unhalt: bool) {
         self.stop_window_exit_reflag_edge(in_period_unhalt, None);
     }
 
@@ -3250,7 +3282,7 @@ impl Mmio {
     /// `hdma_req_pending && hdma_enabled`. Bytes are copied synchronously;
     /// callers charge the returned CPU-cycle stall via the outer per-cycle
     /// loop so PPU/timer/audio continue to tick during the transfer.
-    pub fn run_hdma_block(&mut self) -> u32 {
+    pub(crate) fn run_hdma_block(&mut self) -> u32 {
         self.run_hdma_block_inner(false)
     }
 
@@ -3263,7 +3295,7 @@ impl Mmio {
     /// enable. So a single-block HDMA caught mid-stop reads back the written
     /// length with bit 7 set (`hdma_late_m3speedchange_hdma5_scx*_2` -> out80),
     /// not the completed 0xFF the normal length-wrap would produce.
-    pub fn run_hdma_block_stop_halt(&mut self) -> u32 {
+    pub(crate) fn run_hdma_block_stop_halt(&mut self) -> u32 {
         self.run_hdma_block_inner(true)
     }
 
@@ -3736,7 +3768,7 @@ impl Mmio {
     /// `row` is the PPU-scanned OAM row index (0..19); only rows >= 1 corrupt.
     /// word0 = bitwise_glitch(this, preceding-word0, preceding-word2); words 1..3
     /// copied from the preceding row.
-    pub fn oam_bug_write_corrupt(&mut self, row: usize) {
+    pub(crate) fn oam_bug_write_corrupt(&mut self, row: usize) {
         if row == 0 || row >= 20 {
             return;
         }
@@ -3752,7 +3784,7 @@ impl Mmio {
     /// Read corruption, faithful to the DMG
     /// model including the revision-specific secondary/tertiary cases. `row` is the
     /// PPU-scanned row index (0..19); only rows >= 1 corrupt.
-    pub fn oam_bug_read_corrupt(&mut self, row: usize) {
+    pub(crate) fn oam_bug_read_corrupt(&mut self, row: usize) {
         if row == 0 || row >= 20 {
             return;
         }
@@ -3863,7 +3895,7 @@ impl Mmio {
     }
 
     #[inline]
-    pub fn step_dma(&mut self) {
+    pub(crate) fn step_dma(&mut self) {
         // Fast path (the common case: no OAM-DMA in flight): inlined into the
         // per-dot loop so no wasm call is made. Firefox pays a real cost per
         // wasm call on the ~4M-dots/sec hot path; the cold work is outlined.
@@ -3949,7 +3981,7 @@ impl Mmio {
     /// enabled, then services any pending request by transferring one 0x10-byte
     /// block. `run_hdma_block` is otherwise never invoked, so without this the
     /// HDMA engine never moves bytes.
-    pub fn step_hdma(&mut self, period: Option<bool>) {
+    pub(crate) fn step_hdma(&mut self, period: Option<bool>) {
         if !self.cgb_features_enabled {
             return;
         }
@@ -4161,7 +4193,7 @@ impl Mmio {
     /// copy lands one M-cycle after the trigger — and, when an interrupt service
     /// pushed to the block's source region during this M-cycle, AFTER those
     /// pushes. No-op when nothing is latched.
-    pub fn fire_pending_hdma_mcycle(&mut self) {
+    pub(crate) fn fire_pending_hdma_mcycle(&mut self) {
         if !(self.hdma_req_pending && self.hdma_enabled) {
             return;
         }
@@ -4188,7 +4220,7 @@ impl Mmio {
     /// speed-switch halt window. Same copy as `fire_pending_hdma_mcycle` but with
     /// the halted-branch FF55 semantics (no length decrement; see
     /// `run_hdma_block_stop_halt`).
-    pub fn fire_pending_hdma_mcycle_stop_halt(&mut self) {
+    pub(crate) fn fire_pending_hdma_mcycle_stop_halt(&mut self) {
         if !(self.hdma_req_pending && self.hdma_enabled) {
             return;
         }
@@ -4217,7 +4249,7 @@ impl Mmio {
     /// writes so the post-push source bytes land instead. Gated on no active
     /// OAM-DMA interleave (the only safe re-run; the vs tests have none) and on
     /// the block actually having fired this M-cycle window.
-    pub fn reorder_late_hdma_after_pushes(&mut self, service_access_cc: u64) {
+    pub(crate) fn reorder_late_hdma_after_pushes(&mut self, service_access_cc: u64) {
         if self.dma_active {
             return;
         }
@@ -4252,52 +4284,54 @@ impl Mmio {
 
     /// Whether the M-cycle-boundary HDMA fire is currently suppressed
     /// (an interrupt service is pushing PC; the block must fire after the pushes).
-    pub fn hdma_mcycle_fire_suppressed(&self) -> bool {
+    pub(crate) fn hdma_mcycle_fire_suppressed(&self) -> bool {
         self.hdma_mcycle_fire_suppressed
     }
 
     /// Begin/end suppression of the M-cycle-boundary HDMA fire around an
     /// interrupt service's PC pushes.
-    pub fn set_hdma_mcycle_fire_suppressed(&mut self, v: bool) {
+    pub(crate) fn set_hdma_mcycle_fire_suppressed(&mut self, v: bool) {
         self.hdma_mcycle_fire_suppressed = v;
     }
 
     /// Late-hdma-vs-interrupt unhalt precedence: whether the just-unhalted HDMA
     /// block did NOT reflag at unhalt (its m0-edge falls within the following
     /// interrupt service and must fire AFTER the PC pushes).
-    pub fn hdma_unhalt_noreflag_deferred(&self) -> bool {
+    pub(crate) fn hdma_unhalt_noreflag_deferred(&self) -> bool {
         self.hdma_unhalt_noreflag_deferred
     }
 
-    pub fn hdma_unhalt_reflag_deferred(&self) -> bool {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    pub(crate) fn hdma_unhalt_reflag_deferred(&self) -> bool {
         self.hdma_unhalt_reflag_deferred
     }
 
-    pub fn set_hdma_unhalt_reflag_deferred(&mut self, v: bool) {
+    pub(crate) fn set_hdma_unhalt_reflag_deferred(&mut self, v: bool) {
         self.hdma_unhalt_reflag_deferred = v;
     }
 
-    pub fn set_hdma_unhalt_noreflag_deferred(&mut self, v: bool) {
+    pub(crate) fn set_hdma_unhalt_noreflag_deferred(&mut self, v: bool) {
         self.hdma_unhalt_noreflag_deferred = v;
     }
 
     /// Read the pending DMA stall without consuming it or arming the post-DMA
     /// STAT-read bias (unlike `take_dma_stall`).
-    pub fn peek_dma_stall(&self) -> u32 {
+    pub(crate) fn peek_dma_stall(&self) -> u32 {
         self.pending_dma_stall
     }
 
     /// Mark/unmark the lockstep-transfer-advance window (suppresses
     /// `step_hdma` block arm/fire while the bus ticks the world through the
     /// in-flight block's transfer cc).
-    pub fn set_hdma_lockstep_active(&mut self, v: bool) {
+    pub(crate) fn set_hdma_lockstep_active(&mut self, v: bool) {
         self.hdma_lockstep_active = v;
     }
 
     /// The Requested-context resume-instruction window in which a
     /// late-firing HDMA block must be advanced in lockstep (event-interleaved
     /// transfer) so the same-instruction resume read observes the extended line.
-    pub fn set_hdma_resume_lockstep_window(&mut self, v: bool) {
+    pub(crate) fn set_hdma_resume_lockstep_window(&mut self, v: bool) {
         self.hdma_resume_lockstep_window = v;
         if !v {
             // Resume instruction done — drop both the lockstep window and the
@@ -4306,34 +4340,36 @@ impl Mmio {
             self.hdma_resume_pre_shadow.clear();
         }
     }
-    pub fn hdma_resume_lockstep_window(&self) -> bool {
+    pub(crate) fn hdma_resume_lockstep_window(&self) -> bool {
         self.hdma_resume_lockstep_window
     }
     /// (CGB dma-due deferral) set/take the cc bias the deferred
     /// post-HALT VRAM write adds to its PPU mode-block check (block1's transfer
     /// span). One-shot — consumed by the first VRAM write on the resume step.
-    pub fn set_hdma_dma_due_write_cc_bias(&mut self, v: u64) {
+    pub(crate) fn set_hdma_dma_due_write_cc_bias(&mut self, v: u64) {
         self.hdma_dma_due_write_cc_bias = v;
     }
-    pub fn take_hdma_dma_due_write_cc_bias(&mut self) -> u64 {
+    pub(crate) fn take_hdma_dma_due_write_cc_bias(&mut self) -> u64 {
         std::mem::take(&mut self.hdma_dma_due_write_cc_bias)
     }
     /// Arm/clear the pre-transfer shadow window (armed for both IME states;
     /// the lockstep advance window is separate and !ime-gated).
-    pub fn set_hdma_resume_shadow_window(&mut self, v: bool) {
+    pub(crate) fn set_hdma_resume_shadow_window(&mut self, v: bool) {
         self.hdma_resume_shadow_window = v;
         if !v {
             self.hdma_resume_pre_shadow.clear();
         }
     }
-    pub fn hdma_resume_shadow_window(&self) -> bool {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    pub(crate) fn hdma_resume_shadow_window(&self) -> bool {
         self.hdma_resume_shadow_window
     }
 
     /// Pre-transfer VRAM byte for a resume-window read of an in-block
     /// dest address (the resume read is ordered before dma()'s commits). Returns
     /// None outside the window or for an address not in the just-fired block.
-    pub fn hdma_resume_pre_byte(&self, addr: u16) -> Option<u8> {
+    pub(crate) fn hdma_resume_pre_byte(&self, addr: u16) -> Option<u8> {
         if !self.hdma_resume_shadow_window {
             return None;
         }
@@ -4343,12 +4379,12 @@ impl Mmio {
     /// Drop `amount` cc from the pending DMA stall (saturating). Used to absorb a
     /// deferred stop_halt HDMA block's transfer span into the STOP unhalt window
     /// rather than charging it as a separate post-window stall.
-    pub fn reduce_dma_stall(&mut self, amount: u32) {
+    pub(crate) fn reduce_dma_stall(&mut self, amount: u32) {
         self.pending_dma_stall = self.pending_dma_stall.saturating_sub(amount);
     }
 
     /// Consume the CPU-cycle stall owed for completed HDMA/GDMA transfers.
-    pub fn take_dma_stall(&mut self) -> u32 {
+    pub(crate) fn take_dma_stall(&mut self) -> u32 {
         let stall = std::mem::take(&mut self.pending_dma_stall);
         if stall > 0 {
             // Arm the post-DMA STAT-read bias (prefetch absorption) so the
@@ -4360,13 +4396,13 @@ impl Mmio {
 
     /// Whether the next FF41 STAT-mode read should apply the post-DMA prefetch
     /// bias (resolve at `master_cc - 1`). Consumes the flag.
-    pub fn take_dma_prefetch_stat_bias(&mut self) -> bool {
+    pub(crate) fn take_dma_prefetch_stat_bias(&mut self) -> bool {
         std::mem::take(&mut self.dma_prefetch_stat_bias)
     }
 
     /// Whether the OAM-DMA engine is armed/running. Used by the bus to decide whether
     /// the DMA M-cycle must be advanced before resolving a CPU write.
-    pub fn dma_active(&self) -> bool {
+    pub(crate) fn dma_active(&self) -> bool {
         self.dma_active
     }
 
@@ -4375,7 +4411,7 @@ impl Mmio {
     /// is then resolved against this address (the bus-conflict AND). `locked` false
     /// (any non-mode-3 dot) makes a VRAM-source DMA read return true VRAM again, so
     /// the HBlank/mode-0 window stays the clean identity source.
-    pub fn set_fetcher_vram_bus(&mut self, addr: u16, bank: u8, locked: bool) {
+    pub(crate) fn set_fetcher_vram_bus(&mut self, addr: u16, bank: u8, locked: bool) {
         // Rising edge of the lock (mode-3 entry): arm the warmup so the first
         // VRAM-source OAM-DMA M-cycle of this lock window reads clean VRAM.
         if locked && !self.fetcher_bus_locked {
@@ -4393,7 +4429,7 @@ impl Mmio {
     /// the conflict engages one M-cycle earlier than the lock. `active` false
     /// clears the window. The CGB path never sets this (the AND lock at mode-3
     /// entry already byte-matches its dumps).
-    pub fn set_dmg_prefetch_bus(&mut self, addr: u16, active: bool) {
+    pub(crate) fn set_dmg_prefetch_bus(&mut self, addr: u16, active: bool) {
         self.dmg_prefetch_active = active;
         self.dmg_prefetch_addr = if active { addr } else { 0 };
     }
@@ -4408,13 +4444,13 @@ impl Mmio {
     /// `OAM-DMA end`). The PPU's lazy sprite snapshot uses this to know when the
     /// OAM source reads as disabled RAM (0xFF), mirroring hardware pointing
     /// the OAM reader at the disabled-RAM source for the DMA window.
-    pub fn oam_dma_window_active(&self) -> bool {
+    pub(crate) fn oam_dma_window_active(&self) -> bool {
         self.dma_transfer_in_progress()
     }
 
     /// Take (and clear) the pending-CPU-OAM-write flag. The PPU drains this each
     /// dot to fire the sprite snapshot on an OAM write.
-    pub fn take_oam_write_pending(&mut self) -> bool {
+    pub(crate) fn take_oam_write_pending(&mut self) -> bool {
         let p = self.oam_write_pending;
         self.oam_write_pending = false;
         p
@@ -4424,7 +4460,7 @@ impl Mmio {
     /// of the 40 sprites) into `out`. Reads the raw OAM buffer directly,
     /// bypassing the DMA-conflict bus logic — the PPU sprite snapshot wants the
     /// true post-write OAM contents.
-    pub fn peek_oam_pos(&self, out: &mut [u8; 80]) {
+    pub(crate) fn peek_oam_pos(&self, out: &mut [u8; 80]) {
         for i in 0..40 {
             let base = OAM_START + (i as u16) * 4;
             let (y, x) = match self.mgb_frozen_oam_entry(i as u8) {
@@ -4488,7 +4524,7 @@ impl Mmio {
     /// frozen mid-transfer and its C-byte write is pending). The PPU treats this
     /// like a *non-disabled* OAM window: the frozen bus is stuck, so the Y/X scan
     /// reads the merged OAM (via `peek_oam_pos`) rather than the DMA-window ghost.
-    pub fn mgb_frozen_merge_active(&self) -> bool {
+    pub(crate) fn mgb_frozen_merge_active(&self) -> bool {
         if !self.is_mgb || !self.cpu_halted || !self.dma_active || self.halt_oam_grace > 0 {
             return false;
         }
@@ -4502,7 +4538,7 @@ impl Mmio {
     /// Public view of the MGB frozen-OAM merge for a sprite's tile (offset 2) and
     /// attribute (offset 3) bytes. `None` when the merge does not apply, so the
     /// caller falls back to the normal OAM read.
-    pub fn mgb_frozen_oam_tile_attr(&self, entry: u8) -> Option<(u8, u8)> {
+    pub(crate) fn mgb_frozen_oam_tile_attr(&self, entry: u8) -> Option<(u8, u8)> {
         self.mgb_frozen_oam_entry(entry).map(|e| (e[2], e[3]))
     }
 
@@ -4681,13 +4717,13 @@ impl Mmio {
 
     /// Enable Super Game Boy JOYP-packet handling on the joypad. Called once
     /// from `GB::new` for Hardware::SGB/SGB2 only.
-    pub fn enable_sgb(&mut self) {
+    pub(crate) fn enable_sgb(&mut self) {
         self.input.enable_sgb();
     }
 
     /// Apply the SGB command-unlock gate from the cartridge header (Pan Docs
     /// "SGB Unlocking"). No-op on non-SGB hardware.
-    pub fn set_sgb_unlocked(&mut self, unlocked: bool) {
+    pub(crate) fn set_sgb_unlocked(&mut self, unlocked: bool) {
         self.input.set_sgb_unlocked(unlocked);
     }
 
@@ -4707,7 +4743,7 @@ impl Mmio {
     /// addressing (Donkey Kong '94 transfers with LCDC.4=0), scroll, BGP —
     /// exactly like hardware. Call once per VBlank with the completed frame.
     /// No-op on non-SGB hardware.
-    pub fn service_sgb_vram_transfer(&mut self, shade_frame: &[u8; crate::ppu::FRAMEBUFFER_SIZE]) {
+    pub(crate) fn service_sgb_vram_transfer(&mut self, shade_frame: &[u8; crate::ppu::FRAMEBUFFER_SIZE]) {
         let pending = self.input.sgb_mut().and_then(|s| s.take_pending_trn());
         if let Some(command) = pending {
             let mut block = [0u8; 0x1000];
@@ -4734,15 +4770,15 @@ impl Mmio {
 
     // CGB Speed switching methods
     #[inline]
-    pub fn is_double_speed_mode(&self) -> bool {
+    pub(crate) fn is_double_speed_mode(&self) -> bool {
         self.cgb_features_enabled && self.key1_current_speed
     }
 
-    pub fn is_speed_switch_armed(&self) -> bool {
+    pub(crate) fn is_speed_switch_armed(&self) -> bool {
         self.cgb_features_enabled && self.key1_switch_armed
     }
 
-    pub fn perform_speed_switch(&mut self) {
+    pub(crate) fn perform_speed_switch(&mut self) {
         if self.cgb_features_enabled && self.key1_switch_armed {
             // Pan Docs: CGB Registers (KEY1/SPD) — https://gbdev.io/pandocs/CGB_Registers.html
             // Hardware evaluates the current speed for the PSG/timer speed-change
@@ -4853,7 +4889,7 @@ impl Mmio {
         }
     }
 
-    pub fn write_lcd_status_from_ppu(&mut self, value: u8) {
+    pub(crate) fn write_lcd_status_from_ppu(&mut self, value: u8) {
         self.io_registers.write(ppu::LCD_STATUS, value);
     }
 
@@ -4863,14 +4899,14 @@ impl Mmio {
     /// read arms (they fall through to the raw IO shadow) and the OAM-DMA bus
     /// conflict never applies at or above `OAM_START`.
     #[inline]
-    pub fn ppu_io_reg(&self, addr: u16) -> u8 {
+    pub(crate) fn ppu_io_reg(&self, addr: u16) -> u8 {
         self.io_registers.read(addr)
     }
 
     /// Direct FF41 (STAT) read for the PPU's per-dot hot path; applies the
     /// same always-set bit 7 the dispatched read does.
     #[inline]
-    pub fn lcd_status_reg(&self) -> u8 {
+    pub(crate) fn lcd_status_reg(&self) -> u8 {
         self.io_registers.read(ppu::LCD_STATUS) | 0x80
     }
 
@@ -4880,7 +4916,7 @@ impl Mmio {
     /// write needs `oam_write_pending`. When both are clear and the PPU saw no
     /// window last dot, `process_oam_reader_events` is a guaranteed no-op.
     #[inline]
-    pub fn oam_snoop_event_possible(&self) -> bool {
+    pub(crate) fn oam_snoop_event_possible(&self) -> bool {
         self.dma_active || self.oam_write_pending
     }
 
@@ -4888,7 +4924,7 @@ impl Mmio {
     /// (`Ppu::update_dma_fetcher_bus`) has a possible consumer: the conflict
     /// resolution inside `step_dma_slow` runs only under this same predicate.
     #[inline]
-    pub fn oam_dma_bus_snoop_needed(&self) -> bool {
+    pub(crate) fn oam_dma_bus_snoop_needed(&self) -> bool {
         self.dma_active || self.oam_dma_stall_suppress != 0
     }
 
@@ -4898,7 +4934,7 @@ impl Mmio {
     /// the JOYP input-filter countdown. Timer and PPU IF sources are bounded
     /// by the caller (`Bus::halted_idle_dots`).
     #[inline]
-    pub fn halt_batchable(&self) -> bool {
+    pub(crate) fn halt_batchable(&self) -> bool {
         self.joypad_irq_delay == 0
             && !self.serial.is_active()
             && !self.serial_device.drives_external_clock()
@@ -4914,7 +4950,7 @@ impl Mmio {
     /// (an HDMA block firing mid-span touches `oam_dma_stall_suppress` only
     /// when `dma_active`, which is excluded). Returns `master_cc()` when no
     /// quiet span is available.
-    pub fn quiet_span_end(&self, target: u64) -> u64 {
+    pub(crate) fn quiet_span_end(&self, target: u64) -> u64 {
         if self.dma_active
             || self.oam_dma_stall_suppress != 0
             || self.joypad_irq_delay != 0
@@ -4936,14 +4972,14 @@ impl Mmio {
     /// HBlank DMA whose block fired leaves the rest of the HBlank interior
     /// event-free.
     #[inline]
-    pub fn hdma_block_fired_this_hblank(&self) -> bool {
+    pub(crate) fn hdma_block_fired_this_hblank(&self) -> bool {
         self.hdma_block_fired_this_hblank
     }
 
     /// Raw one-dot master-clock bump for the quiet-span fast loop (see
     /// `Timer::bump_cc_one`).
     #[inline]
-    pub fn bump_master_cc_one(&mut self) {
+    pub(crate) fn bump_master_cc_one(&mut self) {
         self.timer.bump_cc_one();
     }
 
@@ -4951,38 +4987,38 @@ impl Mmio {
     /// soundness argument as `bump_master_cc_one`: every bumped dot lies
     /// strictly below the quiet bound.
     #[inline]
-    pub fn bump_master_cc_by(&mut self, n: u64) {
+    pub(crate) fn bump_master_cc_by(&mut self, n: u64) {
         self.timer.bump_cc_by(n);
     }
 
     /// Batch t-phase advance for the inert-PPU fast-forward (the per-dot
     /// counter is a plain increment).
     #[inline]
-    pub fn advance_cpu_t_phase_by(&mut self, n: u64) {
+    pub(crate) fn advance_cpu_t_phase_by(&mut self, n: u64) {
         self.cpu_t_phase = self.cpu_t_phase.wrapping_add(n);
     }
 
     /// PPU-side update of FF44 (LY). Bypasses the CPU-write reset semantics so
     /// the PPU can advance the line counter through normal scanline progression.
-    pub fn write_ly_from_ppu(&mut self, value: u8) {
+    pub(crate) fn write_ly_from_ppu(&mut self, value: u8) {
         self.io_registers.write(ppu::LY, value);
     }
 
     /// The persistent CPU T-cycle phase (survives instruction boundaries).
     #[inline]
-    pub fn cpu_t_phase(&self) -> u64 {
+    pub(crate) fn cpu_t_phase(&self) -> u64 {
         self.cpu_t_phase
     }
 
     /// Advance the persistent CPU T-cycle phase by one.
     #[inline]
-    pub fn advance_cpu_t_phase(&mut self) {
+    pub(crate) fn advance_cpu_t_phase(&mut self) {
         self.cpu_t_phase = self.cpu_t_phase.wrapping_add(1);
     }
 
     /// Consume the pending STAT-register-write signal. Returns true if the CPU
     /// wrote to FF40, FF41, or FF45 since the last call.
-    pub fn take_stat_register_write_pending(&mut self) -> bool {
+    pub(crate) fn take_stat_register_write_pending(&mut self) -> bool {
         let pending = self.stat_register_write_pending;
         self.stat_register_write_pending = false;
         pending
@@ -4990,7 +5026,7 @@ impl Mmio {
 
     /// Consume the pending FF41 (STAT) write signal. True if FF41 was written
     /// since the last call, even if the value was unchanged.
-    pub fn take_ff41_write_pending(&mut self) -> bool {
+    pub(crate) fn take_ff41_write_pending(&mut self) -> bool {
         let pending = self.ff41_write_pending;
         self.ff41_write_pending = false;
         pending
@@ -5000,29 +5036,29 @@ impl Mmio {
 
     /// Mutable handle to the inserted cartridge, used by the libretro frontend
     /// to reach battery-backed save RAM and RTC bytes.
-    pub fn get_cartridge_mut(&mut self) -> Option<&mut cartridge::Cartridge> {
+    pub(crate) fn get_cartridge_mut(&mut self) -> Option<&mut cartridge::Cartridge> {
         self.cartridge.as_mut()
     }
 
     /// Fixed work-RAM bank (0xC000-0xCFFF) as a mutable slice.
-    pub fn wram_bank0_slice_mut(&mut self) -> &mut [u8] {
+    pub(crate) fn wram_bank0_slice_mut(&mut self) -> &mut [u8] {
         self.wram.as_mut_slice()
     }
 
     /// Switchable work-RAM bank region (0xD000-0xDFFF) as a mutable slice. On
     /// CGB this is bank 1; banks 2-7 are not contiguous so only this slice is
     /// exposed as the canonical system-RAM bank window.
-    pub fn wram_bank1_slice_mut(&mut self) -> &mut [u8] {
+    pub(crate) fn wram_bank1_slice_mut(&mut self) -> &mut [u8] {
         self.wram_bank.as_mut_slice()
     }
 
     /// High RAM (0xFF80-0xFFFE) as a mutable slice.
-    pub fn hram_slice_mut(&mut self) -> &mut [u8] {
+    pub(crate) fn hram_slice_mut(&mut self) -> &mut [u8] {
         self.hram.as_mut_slice()
     }
 
     /// Video RAM bank 0 (0x8000-0x9FFF) as a mutable slice.
-    pub fn vram_slice_mut(&mut self) -> &mut [u8] {
+    pub(crate) fn vram_slice_mut(&mut self) -> &mut [u8] {
         self.vram.as_mut_slice()
     }
 
@@ -5038,7 +5074,7 @@ impl Mmio {
     /// the boot ROM executes on top of real power-on contents and any region it
     /// leaves untouched reads back the hardware garbage the dumper references expect.
     /// (CGB clears OAM during boot, so seeding OAM garbage is harmless there.)
-    pub fn seed_power_on_ram(&mut self, cgb: bool) {
+    pub(crate) fn seed_power_on_ram(&mut self, cgb: bool) {
         // Reuses the exact captured OAM/FEAX/HRAM constants. The I/O register
         // seeds it also sets (FF68/FF6A/HDMA5) are harmless: the boot ROM
         // rewrites them. Wave RAM is seeded by the caller via the bus.
@@ -5055,7 +5091,7 @@ impl Mmio {
         }
     }
 
-    pub fn set_post_bios_ioamhram(&mut self, cgb: bool) {
+    pub(crate) fn set_post_bios_ioamhram(&mut self, cgb: bool) {
         if cgb {
             // CGB: OAM cleared to 0x00. The 0xFEA0-0xFEFF shadow holds the feax
             // dump (the read path masks the index with 0xE7). The 0xFEA0-0xFEFF
@@ -5185,7 +5221,7 @@ impl Mmio {
     /// (`fexx_ffxx_dumper_cgb`) instead read the canonical
     /// CGB power-on feax tail (0x08 tail). Apply
     /// that here; selected per-reference so it does not disturb the .dump references.
-    pub fn set_cgb_boot_residue_feax(&mut self) {
+    pub(crate) fn set_cgb_boot_residue_feax(&mut self) {
         const CGB_FEAX: [u8; 0x60] = [
             0x08, 0x01, 0xEF, 0xDE, 0x06, 0x4A, 0xCD, 0xBD,
             0x08, 0x01, 0xEF, 0xDE, 0x06, 0x4A, 0xCD, 0xBD,

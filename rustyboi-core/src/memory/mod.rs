@@ -8,7 +8,7 @@ pub(crate) use buffer::boxed_filled;
 /// hardware, mirroring the captured DMG/CGB power-on WRAM contents. `wram` must be 0x2000 bytes (DMG, 2 banks)
 /// or 0x8000 bytes (CGB, 8 banks). Tests that read never-written WRAM (e.g. the
 /// oamdma srcFE00 cases) depend on these bytes rather than an all-zero fill.
-pub fn init_wram_powerup(cgb: bool, wram: &mut [u8]) {
+pub(crate) fn init_wram_powerup(cgb: bool, wram: &mut [u8]) {
     if cgb {
         for addr in (0x0000..0x0800).step_by(0x10) {
             wram[addr..addr + 0x08].fill(0xFF);

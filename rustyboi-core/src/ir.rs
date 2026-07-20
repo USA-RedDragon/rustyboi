@@ -31,12 +31,14 @@ struct IrChannel {
 }
 
 /// One end of a shared IR channel.
-pub struct IrLink {
+pub(crate) struct IrLink {
     channel: Arc<Mutex<IrChannel>>,
     side: usize,
 }
 
 impl IrLink {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Mint a channel and hand back its two ends. Attach each to a GBC via
     /// [`crate::gb::GB::attach_ir_peer`] (or [`crate::gb::GB::connect_ir`],
     /// which does both).
@@ -69,11 +71,15 @@ impl Clone for IrLink {
 /// The IR partner plugged into the GBC IR port. Disconnected by default — a
 /// lone GBC's receiver always reads "no light", exactly as with no transport.
 #[derive(Clone, Default)]
-pub enum IrDevice {
+pub(crate) enum IrDevice {
     #[default]
     Disconnected,
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// A second GBC instance sharing an [`IrLink`].
     Link(IrLink),
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Diagnostic self-test: the port sees its OWN emitter (as though an IR
     /// mirror were held to it). Not how two GBCs communicate — tests only.
     Loopback,
@@ -81,7 +87,7 @@ pub enum IrDevice {
 
 impl IrDevice {
     /// Publish this port's emitter state (RP bit 0) to any connected partner.
-    pub fn set_emitter(&self, led_on: bool) {
+    pub(crate) fn set_emitter(&self, led_on: bool) {
         if let IrDevice::Link(l) = self {
             l.publish(led_on);
         }
@@ -89,7 +95,7 @@ impl IrDevice {
 
     /// True if the port currently sees incoming IR light. `own_led` is this
     /// port's own emitter, consulted only by the loopback self-test.
-    pub fn receiving(&self, own_led: bool) -> bool {
+    pub(crate) fn receiving(&self, own_led: bool) -> bool {
         match self {
             IrDevice::Disconnected => false,
             IrDevice::Link(l) => l.peer_lit(),
@@ -97,7 +103,9 @@ impl IrDevice {
         }
     }
 
-    pub fn is_connected(&self) -> bool {
+    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
+    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    pub(crate) fn is_connected(&self) -> bool {
         !matches!(self, IrDevice::Disconnected)
     }
 }
