@@ -251,6 +251,14 @@ pub struct Mmio {
     // the overlay read path maps 0x000-0x0FF (+ 0x200-0x8FF for CGB) to these.
     #[serde(skip, default)]
     bios: Option<Vec<u8>>,
+    // The Super Game Boy's own power-on border, decoded from the user's SNES-side
+    // SGB firmware dump (`sgb1.sfc`/`sgb2.sfc`) by `load_sgb_firmware_bytes`.
+    // Like `bios` this is a host-supplied asset, not machine state: `serde(skip)`
+    // keeps savestates free of it and the adapter re-installs it on every build.
+    // The DECODED border is retained rather than the 256/512 KiB source image —
+    // it is the only thing consumed, and `Mmio` is cloned on the hot rewind path.
+    #[serde(skip, default)]
+    sgb_firmware: Option<Box<crate::sgb_firmware::SgbBorder>>,
     // The cartridge's RUNTIME state (RAM, bank registers, RTC, ...) is serialized
     // so a state fully round-trips the MBC; the multi-MB read-only ROM image is
     // held out via `Cartridge::rom_data` being `#[serde(skip)]` and re-attached on
@@ -1035,6 +1043,7 @@ impl Mmio {
     pub fn new() -> Self {
         Mmio {
             bios: None,
+            sgb_firmware: None,
             cartridge: None,
             input: input::Input::new(),
             vram: Box::new(memory::Memory::new()),
@@ -1515,6 +1524,44 @@ impl Mmio {
 
     pub fn has_bios(&self) -> bool {
         self.bios.is_some()
+    }
+
+    /// Load the SNES-side Super Game Boy firmware (`sgb1.sfc` / `sgb2.sfc`)
+    /// and seed its power-on border, which is what a real SGB shows until the
+    /// running game replaces it with CHR_TRN + PCT_TRN.
+    ///
+    /// A SEPARATE path from [`load_bios_bytes`](Self::load_bios_bytes): that
+    /// one is for the 256/2304-byte GB boot ROMs and `validate_bios_bytes`
+    /// rejects everything else. This validates against the two known SNES
+    /// program-ROM dumps (see [`crate::sgb_firmware::identify`]) and errors
+    /// out on anything it does not recognise, since the asset offsets are
+    /// pinned to those exact images.
+    ///
+    /// No-op on non-SGB hardware (the border store only exists there), and
+    /// never fatal: content always runs without a firmware dump.
+    pub fn load_sgb_firmware_bytes(&mut self, data: &[u8]) -> Result<(), io::Error> {
+        let border = crate::sgb_firmware::extract_border(data)
+            .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?;
+        self.sgb_firmware = Some(Box::new(border));
+        self.seed_sgb_default_border();
+        Ok(())
+    }
+
+    /// Push the decoded firmware border into the SGB receiver's border store.
+    /// Runs at load time; the store is plain `Sgb` state from then on, so a
+    /// game's own CHR_TRN / PCT_TRN overwrites it exactly as on hardware.
+    fn seed_sgb_default_border(&mut self) {
+        let Some(border) = self.sgb_firmware.as_deref() else {
+            return;
+        };
+        if let Some(sgb) = self.input.sgb_mut() {
+            sgb.seed_default_border(&border.tiles, &border.map, &border.pals);
+        }
+    }
+
+    /// Whether an SGB firmware dump has been installed.
+    pub fn has_sgb_firmware(&self) -> bool {
+        self.sgb_firmware.is_some()
     }
 
     /// True while the boot ROM overlay is mapped (FF50 still 0 and a boot ROM is
@@ -6191,5 +6238,100 @@ mod hblank_dma_tests {
         assert!(validate_bios_bytes(&[0u8; CGB_BIOS_SIZE]).is_err());
         // AGB's masked crc at the wrong (256) length is rejected.
         assert!(!bios_crc_is_known(BIOS_SIZE, AGB_BIOS_CRC32, 0));
+    }
+}
+
+#[cfg(test)]
+mod sgb_border_palette_tests {
+    //! The SGB border compositor's palette indexing.
+    //!
+    //! The tilemap's palette field is 3 bits (SNES BG palettes 0-7), but the
+    //! two producers of a border constrain it differently:
+    //!
+    //! * a game's PCT_TRN can only supply BG palettes 4-7, so `border()` hands
+    //!   over exactly those 64 colours and the field's low 2 bits index them;
+    //! * the firmware's own border is unconstrained — SGB1's tilemap selects
+    //!   palettes **0 and 4**, SGB2's **0, 4 and 5** — so it hands over all
+    //!   eight palettes (128 colours) and the full 3-bit field applies.
+    //!
+    //! Collapsing the firmware's field under `& 3` would draw everything the
+    //! SGB1 border paints from palette 4 in palette 0's colours instead. These
+    //! tests pin both halves against each other.
+    use super::*;
+
+    /// A one-tile border: tile 0 pixel (0,0) is colour 5, everything else is
+    /// colour 0 (transparent). `pal_field` goes into map entry 0.
+    fn seeded(pal_field: u16, colors: usize) -> (Mmio, Vec<u16>) {
+        let mut tiles = vec![0u8; 0x2000];
+        tiles[0] = 0x80; // row 0, plane 0, leftmost pixel
+        tiles[16] = 0x80; // row 0, plane 2  => colour 0b0101 = 5
+        let mut map = vec![0u8; 0x800];
+        map[..2].copy_from_slice(&(pal_field << 10).to_le_bytes());
+        // Distinct, non-zero colours so a mis-indexed read cannot coincide.
+        let pals: Vec<u16> = (0..colors as u16).map(|i| 0x0421 + i * 3).collect();
+
+        let mut mmio = Mmio::new();
+        mmio.enable_sgb();
+        mmio.input
+            .sgb_mut()
+            .expect("SGB enabled")
+            .seed_default_border(&tiles, &map, &pals);
+        (mmio, pals)
+    }
+
+    /// The composited RGB at pixel (0,0), i.e. the one opaque border pixel.
+    fn top_left(mmio: &Mmio) -> [u8; 3] {
+        let ppu = crate::ppu::Ppu::new();
+        let frame = ppu
+            .sgb_composited_frame(mmio, crate::ppu::controller::SGB_BOOT_SHADES)
+            .expect("border is renderable");
+        [frame[0], frame[1], frame[2]]
+    }
+
+    fn rgb(word: u16) -> [u8; 3] {
+        let (r, g, b) = crate::ppu::controller::rgb555_to_rgb888(word);
+        [r, g, b]
+    }
+
+    /// Game-supplied shape (PCT_TRN: 64 colours). Palette field 4 must keep
+    /// selecting the FIRST of the four supplied palettes — this is the path
+    /// real games exercise and it must not change.
+    #[test]
+    fn pct_trn_border_keeps_the_two_bit_palette_window() {
+        for (field, want_pal) in [(4u16, 0usize), (5, 1), (6, 2), (7, 3)] {
+            let (mmio, pals) = seeded(field, 64);
+            assert_eq!(
+                top_left(&mmio),
+                rgb(pals[want_pal * 16 + 5]),
+                "PCT_TRN palette field {field} must index supplied palette {want_pal}"
+            );
+        }
+    }
+
+    /// Firmware shape (128 colours). The full 3-bit field applies, so palette
+    /// field 4 reads BG palette 4 — NOT palette 0, which is what the PCT_TRN
+    /// window would have collapsed it to.
+    #[test]
+    fn firmware_border_uses_the_full_three_bit_palette_field() {
+        for field in 0..8u16 {
+            let (mmio, pals) = seeded(field, 128);
+            let want = pals[usize::from(field) * 16 + 5];
+            assert_eq!(top_left(&mmio), rgb(want), "palette field {field}");
+            if field >= 4 {
+                // The bug this guards: `& 3` would have read palette field-4.
+                let collapsed = pals[usize::from(field & 3) * 16 + 5];
+                assert_ne!(want, collapsed);
+                assert_ne!(top_left(&mmio), rgb(collapsed), "field {field} collapsed");
+            }
+        }
+    }
+
+    /// Palette fields 0 and 4 are the two SGB1's own border tilemap uses; under
+    /// the old 2-bit window they were the same palette. They must differ.
+    #[test]
+    fn firmware_border_separates_palette_zero_from_palette_four() {
+        let (zero, _) = seeded(0, 128);
+        let (four, _) = seeded(4, 128);
+        assert_ne!(top_left(&zero), top_left(&four));
     }
 }

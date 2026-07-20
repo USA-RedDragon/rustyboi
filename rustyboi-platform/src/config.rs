@@ -17,6 +17,13 @@ pub struct RawConfig {
     #[arg(short, long)]
     bios: Option<String>,
 
+    /// SNES-side Super Game Boy firmware (`sgb1.sfc` / `sgb2.sfc`), optional.
+    /// Supplies the SGB's own power-on border, which a real unit shows until
+    /// the game transfers one. Defaults to `bios/sgb1.sfc` (SGB) or
+    /// `bios/sgb2.sfc` (SGB2) if present. Only used on SGB hardware.
+    #[arg(long)]
+    sgb_firmware: Option<String>,
+
     // Hardware type (DMG, CGB, SGB, etc.)
     #[arg(short = 't', long, default_value = "cgb")]
     hardware: gb::Hardware,
@@ -62,6 +69,8 @@ pub struct RawConfig {
 pub struct CleanConfig {
     // path to BIOS file
     pub bios: Option<String>,
+    // path to the SNES-side SGB firmware (None = probe the default location)
+    pub sgb_firmware: Option<String>,
     // path to ROM file
     pub rom: Option<String>,
     // Hardware type (DMG, CGB, SGB, etc.)
@@ -98,6 +107,7 @@ impl RawConfig {
 
         CleanConfig {
             bios: self.bios,
+            sgb_firmware: self.sgb_firmware,
             rom: self.rom,
             hardware: self.hardware,
             #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]

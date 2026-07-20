@@ -328,6 +328,34 @@ fn now_epoch_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Read the SNES-side Super Game Boy firmware for this run, or `None`.
+///
+/// Source order: an explicit `--sgb-firmware` path, else the conventional
+/// `bios/sgb1.sfc` (SGB) / `bios/sgb2.sfc` (SGB2) beside the working
+/// directory. The bytes are handed to the session as-is; the core validates
+/// them. Never fatal: without a dump the SGB just keeps today's borderless
+/// presentation, and nothing about the artwork ships with rustyboi.
+#[cfg(not(target_arch = "wasm32"))]
+fn sgb_firmware_bytes(config: &config::CleanConfig) -> Option<Vec<u8>> {
+    if !matches!(config.hardware, gb::Hardware::SGB | gb::Hardware::SGB2) {
+        return None;
+    }
+    if let Some(path) = config.sgb_firmware.as_deref() {
+        return match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                eprintln!("could not read --sgb-firmware '{path}': {e}");
+                None
+            }
+        };
+    }
+    let default = match config.hardware {
+        gb::Hardware::SGB2 => "bios/sgb2.sfc",
+        _ => "bios/sgb1.sfc",
+    };
+    std::fs::read(default).ok()
+}
+
 /// Build a `Session` around an already-prepared `GB`, deriving the ROM id from
 /// `rom_bytes` (all-zero when no cartridge is inserted).
 fn session_from_gb(
@@ -525,6 +553,17 @@ fn run_gui_loop(
     let mut session = {
         session_from_gb(gb, config.rom.as_ref().and_then(|p| std::fs::read(p).ok()).as_deref(), session_config, ports)
     };
+
+    // The SGB's own power-on border, sourced from the user's firmware dump.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(bytes) = sgb_firmware_bytes(config) {
+        session.set_sgb_firmware(Some(bytes));
+        if session.has_sgb_firmware() {
+            println!("SGB firmware loaded; showing the system border");
+        } else {
+            eprintln!("SGB firmware was not recognised; continuing without a default border");
+        }
+    }
 
     // Native desktop: offloaded rewind capture (worker serializes off-thread).
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
