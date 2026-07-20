@@ -22,3 +22,9 @@ rfd = "=0.17.2"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 rfd = "=0.17.2"
 wasm-bindgen-futures = "=0.4.76"
+
+# cargo-machete matches `extern crate` names by source text; these deps are used
+# under their renamed `_lib` lib names (see the `[lib] name` comments), which the
+# tool cannot see. Without this it reports them as unused on every run.
+[package.metadata.cargo-machete]
+ignored = ["rustyboi-core", "rustyboi-debugger"]

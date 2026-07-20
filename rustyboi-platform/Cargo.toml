@@ -56,3 +56,9 @@ libc = "=0.2.186"
 ndk-context = "=0.1.1"
 ndk-sys = "=0.6.0"
 oboe = { version = "=0.6.1", features = ["java-interface", "ndk-context"] }
+
+# cargo-machete matches `extern crate` names by source text; these deps are used
+# under their renamed `_lib` lib names (see the `[lib] name` comments), which the
+# tool cannot see. Without this it reports them as unused on every run.
+[package.metadata.cargo-machete]
+ignored = ["rustyboi-core", "rustyboi-frontend"]
