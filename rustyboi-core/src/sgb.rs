@@ -84,7 +84,7 @@ mod cmd {
 /// (1) an SPC700 + S-DSP core, (2) the sound driver and samples, runtime-sourced
 /// from the user's firmware image like the border and never embedded, and (3) a
 /// mix of the DSP's stereo output into the host stream at one of the existing
-/// sinks — `Audio::get_mixed_output` (core), `CaptureSink` (session) or the
+/// sinks — `Audio::mix_tap_sample` (core), `CaptureSink` (session) or the
 /// platform pre-ring `add_samples`. Nothing GB-side would change: the GB APU,
 /// the dot timeline and the savestate format are unaffected. The SGB1-vs-SGB2
 /// clock difference is already modelled and is orthogonal — it only rescales the

@@ -369,19 +369,24 @@ impl Wave {
         }
     }
 
+    /// Whether the channel's DAC is powered. CH3 is the exception to the
+    /// `NRx2 & $F8` rule: its DAC is bit 7 of NR30 (Pan Docs, DACs).
+    pub(super) fn dac_on(&self) -> bool {
+        self.dac_enabled
+    }
+
+    /// The channel's analog output, taken from the LATCHED `sample_buf` by way
+    /// of [`Wave::pcm_nibble`] — not from a live wave-RAM read. Pan Docs:
+    /// "CH3 does not emit samples directly, but stores every sample read into a
+    /// buffer, and emits that continuously; (re)triggering the channel does not
+    /// clear nor refresh this buffer, so the last sample ever read will be
+    /// emitted again." The audible path and the CGB-observable PCM34 path are
+    /// therefore the same latch, which is what hardware has.
     pub(super) fn get_output(&self) -> f32 {
-        if !self.master || !self.dac_enabled {
+        if !self.dac_on() {
             return 0.0;
         }
-        let byte_index = (self.wave_pos / 2) as usize;
-        let sample = if self.wave_pos.is_multiple_of(2) {
-            (self.wave_ram[byte_index] >> 4) & 0x0F
-        } else {
-            self.wave_ram[byte_index] & 0x0F
-        };
-        let output_level = self.get_output_level();
-        let shifted = if output_level == 0 { 0 } else { sample >> (output_level - 1) };
-        (shifted as f32) / 15.0
+        crate::audio::analog::dac_analog(self.pcm_nibble())
     }
 
     pub(super) fn is_enabled(&self) -> bool {

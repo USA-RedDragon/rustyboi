@@ -858,15 +858,21 @@ impl Noise {
         self.nr43 = value;
     }
 
+    /// Whether the channel's DAC is powered, i.e. `NR42 & $F8 != 0` (Pan Docs,
+    /// DACs) — the same predicate `trigger` reads as `dac_off`, but live rather
+    /// than latched into `enabled`, so a length-expired channel still reports
+    /// its DAC.
+    pub(super) fn dac_on(&self) -> bool {
+        self.nr42 & 0xF8 != 0
+    }
+
+    /// The channel's analog output. The audible path and the CGB-observable
+    /// PCM34 path are the same digital sample by construction.
     pub(super) fn get_output(&self) -> f32 {
-        if !self.enabled || self.volume == 0 {
+        if !self.dac_on() {
             return 0.0;
         }
-        if self.current_sample {
-            (self.volume as f32) / 15.0
-        } else {
-            0.0
-        }
+        crate::audio::analog::dac_analog(self.pcm_nibble())
     }
 
     pub(super) fn is_enabled(&self) -> bool {

@@ -1032,15 +1032,23 @@ impl SquareWave {
         }
     }
 
+    /// Whether the channel's DAC is powered, i.e. `NRx2 & $F8 != 0` (Pan Docs,
+    /// DACs). Deliberately read straight off the register rather than off
+    /// `master`: `master` is also cleared by the sweep-overflow and NR10
+    /// neg-cancel kills, which deactivate the CHANNEL while leaving the DAC
+    /// powered — and a live DAC fed the deactivated channel's digital 0 sits
+    /// at analog +1, it does not go silent.
+    pub(super) fn dac_on(&self) -> bool {
+        self.nr2() & 0xF8 != 0
+    }
+
+    /// The channel's analog output. The audible path and the CGB-observable
+    /// PCM12 path are the same digital sample by construction.
     pub(super) fn get_output(&self) -> f32 {
-        if !self.enabled || !self.master || self.volume == 0 || self.sample_surpressed {
+        if !self.dac_on() {
             return 0.0;
         }
-        if self.high {
-            (self.volume as f32) / 15.0
-        } else {
-            0.0
-        }
+        crate::audio::analog::dac_analog(self.pcm_nibble())
     }
 
     pub(super) fn is_enabled(&self) -> bool {

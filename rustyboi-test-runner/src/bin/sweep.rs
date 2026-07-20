@@ -2562,6 +2562,119 @@ fn apply_shard(roms: &mut Vec<(String, PathBuf)>, shard: &str) -> Result<(), Str
 mod tests {
     use super::*;
 
+    /// The `.rba` decoder reproduces the core's mixer bit-for-bit.
+    ///
+    /// `rustyboi_replay::mix` is a hand-maintained clone of the core's
+    /// `Audio::mix_stereo` — f32 operation order included — and the compat
+    /// gallery rebuilds every recording's audio through it. Nothing pinned the
+    /// two against each other, so a drift between them would have been silent.
+    /// This drives a real APU, records exactly the tap the gallery records, and
+    /// requires the decoded stream to equal the core's own mix of those same
+    /// samples EXACTLY: `==` on f32, not an epsilon.
+    ///
+    /// The boundary being pinned is the tap, which is pre-analog-stage by
+    /// construction. The per-channel DAC-off fade and the model-gated output
+    /// high-pass are continuous and stateful and both sit downstream of it —
+    /// the encoder's palette could not represent them, and a seekable decoder
+    /// could not reconstruct the filter state anyway (see `mix`'s docs). So the
+    /// mixer is the whole of what `.rba` encodes, and the whole of what this
+    /// asserts.
+    #[test]
+    fn rba_decode_matches_the_cores_own_mix_bit_for_bit() {
+        use rustyboi_core_lib::audio::Audio;
+
+        let mut gb = GB::new(Hardware::DMG);
+        gb.insert(Cartridge::from_bytes(&vec![0u8; 0x8000]).unwrap());
+        gb.skip_bios();
+        gb.set_channel_tap(true);
+
+        // All four channels live at once, so every plane carries real content.
+        gb.write_memory(0xFF26, 0x80); // NR52: APU on
+        gb.write_memory(0xFF25, 0xFF); // NR51: everything to both sides
+        gb.write_memory(0xFF24, 0x77); // NR50: full volume
+        for i in 0..16u16 {
+            gb.write_memory(0xFF30 + i, 0x1Fu8.wrapping_mul(i as u8 + 1));
+        }
+        gb.write_memory(0xFF11, 0x80); // CH1 duty 2
+        gb.write_memory(0xFF12, 0xF3);
+        gb.write_memory(0xFF13, 0x00);
+        gb.write_memory(0xFF14, 0x83);
+        gb.write_memory(0xFF16, 0x40); // CH2 duty 1
+        gb.write_memory(0xFF17, 0xA2);
+        gb.write_memory(0xFF18, 0x40);
+        gb.write_memory(0xFF19, 0x84);
+        gb.write_memory(0xFF1A, 0x80); // CH3 DAC on
+        gb.write_memory(0xFF1C, 0x20);
+        gb.write_memory(0xFF1D, 0x00);
+        gb.write_memory(0xFF1E, 0x82);
+        gb.write_memory(0xFF21, 0xF2); // CH4
+        gb.write_memory(0xFF22, 0x37);
+        gb.write_memory(0xFF23, 0x80);
+
+        let mut enc = rustyboi_replay::AudioEncoder::new();
+        let mut tapped: Vec<rustyboi_replay::ChannelSample> = Vec::new();
+        for f in 0..40 {
+            gb.run_until_frame(true);
+            let chunk = gb.drain_channel_tap();
+            tapped.extend_from_slice(&chunk);
+            enc.push(&chunk);
+            // Move every plane the format encodes: panning, master volume, a
+            // DAC teardown (whose fade runs post-tap), and an APU power cycle.
+            match f {
+                10 => gb.write_memory(0xFF25, 0xF1),
+                15 => gb.write_memory(0xFF24, 0x34),
+                20 => gb.write_memory(0xFF12, 0x00),
+                25 => gb.write_memory(0xFF26, 0x00),
+                30 => {
+                    gb.write_memory(0xFF26, 0x80);
+                    gb.write_memory(0xFF25, 0xFF);
+                    gb.write_memory(0xFF24, 0x77);
+                    gb.write_memory(0xFF21, 0xF2);
+                    gb.write_memory(0xFF22, 0x37);
+                    gb.write_memory(0xFF23, 0x80);
+                }
+                _ => {}
+            }
+        }
+
+        assert!(tapped.len() > 20_000, "tap was too short: {}", tapped.len());
+        assert!(
+            tapped.iter().any(|&(chs, ..)| chs.iter().any(|&v| v != 0.0)),
+            "premise: the APU produced nothing to compare"
+        );
+        assert!(
+            tapped.iter().any(|&(.., en)| !en) && tapped.iter().any(|&(.., en)| en),
+            "premise: the enabled plane never changed"
+        );
+
+        let blob = enc.finish(rustyboi_replay::FPS_NUM, rustyboi_replay::FPS_DEN);
+        let mut dec = rustyboi_replay::AudioDecoder::new(blob).expect("decode .rba");
+        assert_eq!(dec.sample_count() as usize, tapped.len(), "sample count");
+        assert_eq!(dec.sample_rate(), rustyboi_replay::AUDIO_RATE);
+
+        let mut got = Vec::new();
+        let mut at = 0usize;
+        let mut frame = 0u32;
+        while at < tapped.len() {
+            let n = dec.frame_into(frame, &mut got).expect("decode frame");
+            assert!(n > 0, "frame {frame} decoded nothing at sample {at}");
+            for k in 0..n {
+                let want = Audio::mix_tap_sample(tapped[at + k]);
+                let have = (got[k * 2], got[k * 2 + 1]);
+                assert_eq!(
+                    have,
+                    want,
+                    "sample {} (frame {frame}) drifted: the replay mixer is no \
+                     longer a bit-for-bit clone of the core's",
+                    at + k
+                );
+            }
+            at += n;
+            frame += 1;
+        }
+        assert_eq!(at, tapped.len(), "decoder did not cover the whole stream");
+    }
+
     #[test]
     fn region_classifier_matches_python() {
         let cases: &[(&str, Region)] = &[

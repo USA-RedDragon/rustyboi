@@ -1277,6 +1277,7 @@ impl Mmio {
             crate::gb::Hardware::CGB0 | crate::gb::Hardware::CGBB | crate::gb::Hardware::AGB
         ));
         self.set_serial_cgb(hw.is_cgb_like());
+        self.set_apu_analog_model(hw.analog_model());
     }
 
     /// Test-only: re-attach the ROM (+ boot ROM) from another Mmio after a
@@ -1341,6 +1342,12 @@ impl Mmio {
     /// Called once from `GB::new` for Hardware::CGBE.
     pub(crate) fn set_apu_cgb_de(&mut self, de: bool) {
         self.audio.set_cgb_de(de);
+    }
+
+    /// Seed the APU's analog stage (DAC-off fade + output high-pass) from the
+    /// machine model. Both share one RC family per machine.
+    pub(crate) fn set_apu_analog_model(&mut self, model: audio::AnalogModel) {
+        self.audio.set_analog_model(model);
     }
 
     /// Seed the CGB-B-or-earlier APU revision gate (CGB-B-and-earlier silicon). Called once from `GB::new` for

@@ -103,6 +103,23 @@ impl Hardware {
     pub(crate) fn is_cgb_d_or_later(self) -> bool {
         matches!(self, Hardware::CGBE)
     }
+
+    /// Which analog output stage this machine wires up. Pan Docs: the high-pass
+    /// "is more aggressive on GBA than on GBC, which itself is more aggressive
+    /// than on DMG"; blargg measured the MGB on the CGB side of that split.
+    /// The SGBs feed the SNES's own audio path, but their Game-Boy-side APU is
+    /// DMG silicon, so they take the DMG filter.
+    pub(crate) fn analog_model(self) -> crate::audio::AnalogModel {
+        match self {
+            Hardware::DMG | Hardware::DMG0 | Hardware::SGB | Hardware::SGB2 => {
+                crate::audio::AnalogModel::Dmg
+            }
+            Hardware::AGB => crate::audio::AnalogModel::Agb,
+            Hardware::MGB | Hardware::CGB0 | Hardware::CGBB | Hardware::CGB | Hardware::CGBE => {
+                crate::audio::AnalogModel::CgbMgb
+            }
+        }
+    }
 }
 
 /// How a cartridge pairs with a given piece of hardware. No variant means the
@@ -447,6 +464,7 @@ impl GB {
         mmio.set_serial_cgb(hardware.is_cgb_like());
         mmio.set_agb(hardware.is_agb());
         mmio.set_mgb(matches!(hardware, Hardware::MGB));
+        mmio.set_apu_analog_model(hardware.analog_model());
         mmio.set_apu_cgb_de(hardware.is_cgb_d_or_later());
         mmio.set_cgb_de(hardware.is_cgb_d_or_later());
         mmio.set_apu_cgb_le_b(hardware.is_cgb_b_or_earlier());
@@ -1194,17 +1212,30 @@ impl GB {
         // execution then continues at the post-STOP pc set by the opcode
         // (opcodes::stop): past both bytes (2-byte form) or at the operand
         // byte (1-byte interrupt-pending form).
+        let is_double_speed = self.mmio.is_double_speed_mode();
+
         if self.cpu.stopped {
-            if self.mmio.read(crate::input::JOYP) & 0x0F != 0x0F {
+            let cycles = if self.mmio.read(crate::input::JOYP) & 0x0F != 0x0F {
                 self.cpu.stopped = false;
                 let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);
                 bus.tick_remaining(8);
                 // STOP-wake semantics are asserted against raw master_cc by
                 // hardware tests; never leave the wake advance carried.
                 bus.flush_all_lag();
-                return (false, 8);
-            }
-            return (false, 4);
+                8
+            } else {
+                4
+            };
+            // The APU is frozen along with the rest of the machine, but the
+            // host's stream is not: emitting nothing across a STOP window
+            // starves the sink, and slides recorded audio ahead of the video it
+            // was captured against. Emit the nominal count instead, through the
+            // same path the running case uses so the channel tap and the sink
+            // stay sample-aligned. Since the generators are stopped, every
+            // sample re-reads the same held DAC levels and the analog stage
+            // decays them to true silence rather than hard-cutting.
+            self.emit_audio(collect_audio, cycles, is_double_speed);
+            return (false, cycles);
         }
 
         self.ppu.step_scheduled_stat_events(&mut self.mmio);
@@ -1213,7 +1244,6 @@ impl GB {
         // ticked inline by `Bus` at each memory access's true cycle, so reads
         // observe — and writes mutate — live state; the remaining internal
         // cycles are ticked afterward.
-        let is_double_speed = self.mmio.is_double_speed_mode();
         let cycles = {
             let mut bus = cpu::Bus::new(&mut self.mmio, &mut self.ppu);
             let cycles = self.cpu.step(&mut bus);
@@ -1226,22 +1256,28 @@ impl GB {
             cycles
         };
 
-        // Generate audio samples if requested
-        let audio_samples = if collect_audio {
-            // In double speed mode, audio runs at normal speed, so we need to adjust the cycle count
-            let audio_cycles = if is_double_speed { cycles / 2 } else { cycles };
-            self.mmio.generate_audio_samples(audio_cycles)
-        } else {
-            Vec::new()
-        };
+        self.emit_audio(collect_audio, cycles, is_double_speed);
+
+        (false, cycles) // No breakpoint hit
+    }
+
+    /// Down-sample `cycles` worth of APU output into the channel tap and the
+    /// audio sink. The single emission point for both the running and the STOP
+    /// paths — the sweep harness drains tap and sink per frame and they must
+    /// not desync.
+    fn emit_audio(&mut self, collect_audio: bool, cycles: u32, is_double_speed: bool) {
+        if !collect_audio {
+            return;
+        }
+        // In double speed mode, audio runs at normal speed, so we need to adjust the cycle count
+        let audio_cycles = if is_double_speed { cycles / 2 } else { cycles };
+        let audio_samples = self.mmio.generate_audio_samples(audio_cycles);
 
         // Send audio samples directly to output as they're generated
         if !audio_samples.is_empty()
             && let Some(audio_output) = &mut self.audio_output {
                 audio_output.add_samples(&audio_samples);
         }
-
-        (false, cycles) // No breakpoint hit
     }
 
     /// Advance nothing; convert the PPU's just-completed raw frame into the
@@ -2054,6 +2090,67 @@ mod stop_tests {
         );
     }
 
+    /// A STOP window freezes the machine, but NOT the host's audio clock. The
+    /// stopped path used to return before the audio block, so a STOP emitted
+    /// zero samples: the host stream starves, and a recording's audio slides
+    /// earlier than the video it was captured with. It must emit the same
+    /// nominal count per frame as a running machine — the APU being frozen
+    /// changes what the samples contain, not how many there are.
+    #[test]
+    fn a_stopped_frame_emits_the_same_sample_count_as_a_running_one() {
+        use crate::audio::AudioOutput;
+        use std::sync::{Arc, Mutex};
+
+        struct Cap(Arc<Mutex<Vec<(f32, f32)>>>);
+        impl AudioOutput for Cap {
+            fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+                Ok(())
+            }
+            fn add_samples(&mut self, s: &[(f32, f32)]) {
+                self.0.lock().unwrap().extend_from_slice(s);
+            }
+        }
+
+        // Per-frame sample counts over `frames` frames, discarding the first
+        // (the STOP machine spends part of it still running).
+        fn per_frame_counts(code: &[u8], frames: usize) -> Vec<usize> {
+            let mut gb = gb_with(code, Hardware::DMG, 0x00);
+            let buf = Arc::new(Mutex::new(Vec::new()));
+            gb.enable_audio(Box::new(Cap(buf.clone()))).unwrap();
+            let mut counts = Vec::new();
+            let mut seen = 0;
+            for _ in 0..frames {
+                gb.run_until_frame(true);
+                let now = buf.lock().unwrap().len();
+                counts.push(now - seen);
+                seen = now;
+            }
+            counts.remove(0);
+            counts
+        }
+
+        // JOYP=$30 deselects both button groups, so this STOP never wakes.
+        let stopped = per_frame_counts(&[0x3E, 0x30, 0xE0, 0x00, 0x10, 0x00, 0x18, 0xFE], 6);
+        // A machine that never stops: `jr self`.
+        let running = per_frame_counts(&[0x18, 0xFE], 6);
+
+        // 70224 dots / (4194304/44100) = 738.4 pairs, so frames alternate
+        // between 738 and 739 as the fractional accumulator carries. A stopped
+        // machine steps in fixed 4-cycle quanta where a running one steps whole
+        // instructions, so the two land that carry on different frames; what
+        // must match is the rate, not the per-frame cadence.
+        assert_eq!(
+            stopped.iter().sum::<usize>(),
+            running.iter().sum::<usize>(),
+            "a STOP window must emit the nominal sample count, not starve the \
+             stream (stopped {stopped:?} vs running {running:?})"
+        );
+        assert!(
+            stopped.iter().all(|&n| (738..=739).contains(&n)),
+            "every stopped frame is one nominal frame of audio, got {stopped:?}"
+        );
+    }
+
     const BTN_NONE: ButtonState = ButtonState {
         a: false,
         b: false,
@@ -2683,23 +2780,32 @@ mod savestate_roundtrip_tests {
 
         let samples = buf.lock().unwrap();
         assert!(!samples.is_empty(), "no audio was generated");
-        // Channel 4's DAC is on and volume is 15, so the enabled channel emits a
-        // nonzero level whenever the LFSR output bit is high. A live (advancing)
-        // LFSR flips that bit, so the stream must contain BOTH a nonzero level
-        // and a zero level. A frozen/latched channel would hold one value.
-        let saw_high = samples.iter().any(|&(l, _)| l != 0.0);
-        let saw_low = samples.iter().any(|&(l, _)| l == 0.0);
-        assert!(saw_high, "channel 4 produced no output at all (LFSR/DAC dead)");
+        // Channel 4's DAC is on and volume is 15, so the enabled channel sits at
+        // one of two distinct analog levels depending on the LFSR output bit. A
+        // live (advancing) LFSR keeps flipping between them; a frozen/latched
+        // one holds a single level, which the output high-pass then pulls to 0.
+        //
+        // Which two levels those are is the DAC convention's business, not this
+        // test's: assert only that there ARE two, well separated, and that the
+        // stream keeps crossing between them.
+        let lo = samples.iter().map(|&(l, _)| l).fold(f32::INFINITY, f32::min);
+        let hi = samples
+            .iter()
+            .map(|&(l, _)| l)
+            .fold(f32::NEG_INFINITY, f32::max);
         assert!(
-            saw_low && saw_high,
-            "channel 4 output is constant -> LFSR is latched (never advances)"
+            hi - lo > 0.05,
+            "channel 4 output spans only {:.5} -> LFSR is latched (never advances), \
+             or the channel is dead entirely",
+            hi - lo
         );
 
-        // Stronger check: the stream must have many transitions, not just a
-        // one-time settle. Count level changes across the captured samples.
+        // Stronger check: the stream must keep crossing between the two levels,
+        // not settle once. Count midpoint crossings across the capture.
+        let mid = 0.5 * (lo + hi);
         let transitions = samples
             .windows(2)
-            .filter(|w| (w[0].0 != 0.0) != (w[1].0 != 0.0))
+            .filter(|w| (w[0].0 > mid) != (w[1].0 > mid))
             .count();
         assert!(
             transitions > 100,
@@ -2762,8 +2868,16 @@ mod savestate_roundtrip_tests {
 
         // Over 100 ms RMS windows in that section, a rhythmic drumroll produces
         // both loud hits AND several near-silent gaps between them. The latch bug
-        // fills the gaps with a continuous ~0.1 noise floor, so silent windows
+        // fills the gaps with a continuous noise floor, so silent windows
         // collapse to zero. Require both a loud hit and multiple silent gaps.
+        //
+        // The measured distribution over this window is sharply trimodal, with
+        // two wide gaps to put the thresholds in: true silence at or below
+        // 0.004 (most windows land on the high-pass's ~7e-6 residual, i.e. the
+        // analog stage really does settle to zero rather than to a DC offset),
+        // decay/attack tails from 0.017 to 0.092, and hits from 0.14 up to 0.32.
+        // 0.01 and 0.12 sit in the middle of those gaps. Of 35 windows, 10 come
+        // out silent and 19 loud, so the required counts keep ~2x margin.
         let samples = buf.lock().unwrap();
         assert!(!samples.is_empty(), "no audio generated");
         let win = 44100 / 10; // 100 ms
@@ -2783,14 +2897,14 @@ mod savestate_roundtrip_tests {
             if rms < 0.01 {
                 silent += 1;
             }
-            if rms > 0.15 {
+            if rms > 0.12 {
                 loud += 1;
             }
             i += win;
         }
-        assert!(loud > 4, "drumroll never played (loud windows = {loud})");
+        assert!(loud > 8, "drumroll never played (loud windows = {loud})");
         assert!(
-            silent >= 4,
+            silent >= 6,
             "noise channel did not fall silent between drum hits \
              (silent 100 ms windows = {silent}) -> ch4 latched into a continuous \
              buzz on the non-CGB path (Pokémon intro drumroll)"
