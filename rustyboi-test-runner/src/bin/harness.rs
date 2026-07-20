@@ -45,6 +45,7 @@ use rustyboi_core_lib::input::ButtonState;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use rustyboi_test_runner_lib::cli::{Cli, parse_frame_list};
 use rustyboi_test_runner_lib::imaging::{encode_rgb_png, fnv1a, frame_rgb, write_ppm};
 use rustyboi_test_runner_lib::script;
 
@@ -92,87 +93,11 @@ fn main() -> ExitCode {
 }
 
 // ---------------------------------------------------------------------------
-// shared strict CLI parser (one stack for every subcommand)
-// ---------------------------------------------------------------------------
-
-#[derive(Default)]
-struct Cli {
-    positionals: Vec<String>,
-    /// `--flag value` occurrences in order (flags may repeat, e.g. `--press`).
-    values: Vec<(String, String)>,
-    switches: Vec<String>,
-}
-
-/// Parse `args` against the subcommand's declared flags. Unlike the old
-/// standalone bins' ad-hoc parsers, an undeclared `--flag` is an error instead
-/// of being silently ignored (a typo used to silently change semantics).
-fn parse_cli(args: &[String], value_flags: &[&str], switch_flags: &[&str]) -> Result<Cli, String> {
-    let mut cli = Cli::default();
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        if a.starts_with("--") {
-            if value_flags.contains(&a) {
-                let v = args.get(i + 1).ok_or_else(|| format!("{a} requires a value"))?;
-                cli.values.push((a.to_string(), v.clone()));
-                i += 2;
-            } else if switch_flags.contains(&a) {
-                cli.switches.push(a.to_string());
-                i += 1;
-            } else {
-                return Err(format!("unknown flag {a} (try --help)"));
-            }
-        } else {
-            cli.positionals.push(a.to_string());
-            i += 1;
-        }
-    }
-    Ok(cli)
-}
-
-impl Cli {
-    /// First occurrence of `--name value` (matches the old bins' `arg_value`).
-    fn value(&self, name: &str) -> Option<&str> {
-        self.values.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
-    }
-
-    fn values<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> {
-        self.values.iter().filter(move |(n, _)| n == name).map(|(_, v)| v.as_str())
-    }
-
-    fn has(&self, name: &str) -> bool {
-        self.switches.iter().any(|s| s == name)
-    }
-
-    fn parsed<T: std::str::FromStr>(&self, name: &str, default: T) -> Result<T, String> {
-        match self.value(name) {
-            Some(v) => v.parse().map_err(|_| format!("bad {name} {v:?}")),
-            None => Ok(default),
-        }
-    }
-
-    fn no_positionals(&self) -> Result<(), String> {
-        match self.positionals.first() {
-            Some(p) => Err(format!("unexpected argument {p:?} (try --help)")),
-            None => Ok(()),
-        }
-    }
-}
-
-/// Comma-separated frame list (`--shots`, `--vram-frames`).
-fn parse_frame_list<T: std::str::FromStr>(spec: &str) -> Result<Vec<T>, String> {
-    spec.split(',')
-        .filter(|s| !s.is_empty())
-        .map(|s| s.parse().map_err(|_| format!("bad frame index {s:?}")))
-        .collect()
-}
-
-// ---------------------------------------------------------------------------
 // sramdump
 // ---------------------------------------------------------------------------
 
 fn cmd_sramdump(args: &[String]) -> Result<(), String> {
-    let cli = parse_cli(args, &[], &[])?;
+    let cli = Cli::parse(args, &[], &[])?;
     let p = &cli.positionals;
     let (rom, out) = match (p.first(), p.get(1)) {
         (Some(rom), Some(out)) => (rom, out),
@@ -212,7 +137,7 @@ fn cmd_sramdump(args: &[String]) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 fn cmd_glitch(args: &[String]) -> Result<(), String> {
-    let cli = parse_cli(
+    let cli = Cli::parse(
         args,
         &["--rom", "--state", "--frames", "--out", "--vram-frames"],
         &["--dump-all"],
@@ -274,7 +199,7 @@ fn cmd_glitch(args: &[String]) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 fn cmd_unlboot(args: &[String]) -> Result<(), String> {
-    let cli = parse_cli(args, &["--hw", "--out", "--press", "--shots"], &["--detect-only"])?;
+    let cli = Cli::parse(args, &["--hw", "--out", "--press", "--shots"], &["--detect-only"])?;
     let mut positionals = cli.positionals.iter();
     let path = positionals.next().ok_or_else(|| format!("usage: {USAGE_UNLBOOT}"))?;
     // Any further positional is the frame count (last one wins, as before).
@@ -421,7 +346,7 @@ fn load_sensor_image(path: &str) -> [u8; 128 * 112] {
 }
 
 fn cmd_camera_drive(args: &[String]) -> Result<(), String> {
-    let cli = parse_cli(
+    let cli = Cli::parse(
         args,
         &["--rom", "--frames", "--sav", "--image", "--input", "--out", "--screens", "--shots"],
         &[],
@@ -491,7 +416,7 @@ fn cmd_camera_drive(args: &[String]) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 fn cmd_printer_drive(args: &[String]) -> Result<(), String> {
-    let cli = parse_cli(
+    let cli = Cli::parse(
         args,
         &["--rom", "--mode", "--frames", "--input", "--out", "--screens"],
         &[],

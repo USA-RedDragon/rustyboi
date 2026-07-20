@@ -86,6 +86,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use rustyboi_test_runner_lib::cli::reject_unknown_flags;
 use rustyboi_test_runner_lib::imaging::{encode_rgb_webp, frame_rgb, html_escape};
 use rustyboi_test_runner_lib::masher::masher;
 use rustyboi_test_runner_lib::runner::bios_filename;
@@ -146,27 +147,38 @@ struct Row {
     header_ok: Option<bool>,
 }
 
+const USAGE_RUN: &str = "sweep run     --roms DIR... [--list FILE] --out DIR [--frames N] \
+                         [--warmup N] [--jobs N] [--timeout SECS] [--no-screens] \
+                         [--no-recordings] [--rec-frames N] [--videos] [--no-bios-meta] \
+                         [--bios-dir DIR] [--hardware dmg,cgb,sgb,agb] [--only SUBSTR] \
+                         [--shard K/N] [--strip-names] [--dump-pcm] [--dump-chan]";
+const USAGE_COMPARE: &str = "sweep compare --base A.jsonl --cand B.jsonl [--min-ratio R] \
+                             [--ignore-perf] [--out report.md]";
+const USAGE_GALLERY: &str = "sweep gallery --manifest M.jsonl --screens DIR [--videos DIR] \
+                             [--recordings DIR] [--audio DIR] [--decoder DIR] \
+                             [--out gallery.html]";
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let sub = args.get(1).map(String::as_str);
     let rest = &args[args.len().min(2)..];
-    let result = match sub {
-        Some("run") => cmd_run(rest),
-        Some("compare") => cmd_compare(rest),
-        Some("gallery") => cmd_gallery(rest),
+    type Cmd = fn(&[String]) -> Result<bool, String>;
+    let (usage, run): (&str, Cmd) = match sub {
+        Some("run") => (USAGE_RUN, cmd_run),
+        Some("compare") => (USAGE_COMPARE, cmd_compare),
+        Some("gallery") => (USAGE_GALLERY, cmd_gallery),
         _ => {
-            eprintln!(
-                "usage:\n  sweep run     --roms DIR... [--list FILE] --out DIR [--frames N] \
-                 [--warmup N] [--jobs N] [--timeout SECS] [--no-screens] [--no-recordings] \
-                 [--rec-frames N] [--videos] [--no-bios-meta] [--bios-dir DIR] \
-                 [--hardware dmg,cgb,sgb,agb] [--only SUBSTR] [--shard K/N]\n  \
-                 sweep compare --base A.jsonl --cand B.jsonl [--min-ratio R] [--ignore-perf] \
-                 [--out report.md]\n  \
-                 sweep gallery --manifest M.jsonl --screens DIR [--videos DIR] [--out gallery.html]"
-            );
+            eprintln!("usage:\n  {USAGE_RUN}\n  {USAGE_COMPARE}\n  {USAGE_GALLERY}");
             return ExitCode::from(2);
         }
     };
+    // Handled before the subcommand's strict parse, which would otherwise
+    // reject `--help` as an undeclared flag.
+    if rest.iter().any(|a| a == "--help" || a == "-h") {
+        println!("usage: {usage}");
+        return ExitCode::SUCCESS;
+    }
+    let result = run(rest);
     match result {
         Ok(ok) => {
             if ok {
@@ -377,7 +389,25 @@ fn parse_dat(text: &str, map: &mut std::collections::HashMap<u32, String>) {
     }
 }
 
+/// Every flag `run` accepts. Declared up front so an undeclared one is a hard
+/// error: a typo used to sail through and silently change what the sweep
+/// measured.
+const RUN_VALUE_FLAGS: &[&str] = &[
+    "--out", "--frames", "--warmup", "--timeout", "--jobs", "--bios-dir", "--rec-frames",
+    "--only", "--shard", "--hardware", "--roms", "--list",
+];
+/// `--recordings`/`--no-videos` are genuine no-ops kept for older invocations
+/// (native `.rbr` recordings are the default and mp4 is opt-in via `--videos`).
+/// They are declared rather than merely tolerated, so the claim that they are
+/// "accepted as no-ops" is now enforced instead of being a side effect of the
+/// parser ignoring everything it did not recognise.
+const RUN_SWITCH_FLAGS: &[&str] = &[
+    "--no-screens", "--videos", "--no-recordings", "--no-bios-meta", "--strip-names",
+    "--dump-pcm", "--dump-chan", "--recordings", "--no-videos",
+];
+
 fn cmd_run(args: &[String]) -> Result<bool, String> {
+    reject_unknown_flags(args, RUN_VALUE_FLAGS, RUN_SWITCH_FLAGS)?;
     let out_dir = PathBuf::from(arg(args, "--out").ok_or("run: --out <dir> required")?);
     let frames: usize = parse_num(args, "--frames", 3000)?;
     let warmup: usize = parse_num(args, "--warmup", 600)?;
@@ -385,8 +415,8 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     let jobs: usize = parse_num(args, "--jobs", 0)?;
     let no_screens = args.iter().any(|a| a == "--no-screens");
     // Native `.rbr` recordings are the default gallery media; mp4 is opt-in
-    // (`--videos`) and `--recordings`/`--no-videos` stay accepted as no-ops for
-    // older invocations.
+    // (`--videos`). `--recordings`/`--no-videos` are the no-ops declared in
+    // RUN_SWITCH_FLAGS.
     let videos = args.iter().any(|a| a == "--videos");
     let no_recordings = args.iter().any(|a| a == "--no-recordings");
     let no_bios_meta = args.iter().any(|a| a == "--no-bios-meta");
@@ -1747,6 +1777,11 @@ fn capture_bios(
 // ---------------------------------------------------------------------------
 
 fn cmd_compare(args: &[String]) -> Result<bool, String> {
+    reject_unknown_flags(
+        args,
+        &["--base", "--cand", "--min-ratio", "--out"],
+        &["--ignore-perf"],
+    )?;
     let base_path = arg(args, "--base").ok_or("compare: --base <manifest> required")?;
     let cand_path = arg(args, "--cand").ok_or("compare: --cand <manifest> required")?;
     let min_ratio: f64 = arg(args, "--min-ratio").map_or(Ok(0.90), |v| {
@@ -2076,6 +2111,12 @@ fn card_detail(r: &Row) -> String {
 // ---------------------------------------------------------------------------
 
 fn cmd_gallery(args: &[String]) -> Result<bool, String> {
+    // NB `--videos` is a directory here, unlike `run`'s bare switch.
+    reject_unknown_flags(
+        args,
+        &["--manifest", "--screens", "--videos", "--recordings", "--audio", "--decoder", "--out"],
+        &[],
+    )?;
     let manifest = arg(args, "--manifest").ok_or("gallery: --manifest <file> required")?;
     let screens = arg(args, "--screens").ok_or("gallery: --screens <dir> required")?;
     let screens_dir = PathBuf::from(&screens);

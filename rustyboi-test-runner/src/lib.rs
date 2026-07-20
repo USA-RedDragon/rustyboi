@@ -10,6 +10,7 @@
 //!
 //! Module split:
 //!   * [`app`] — the suite runner binary's own logic (`src/main.rs` is a stub).
+//!   * [`cli`] — strict flag parsing; an undeclared `--flag` is always an error.
 //!   * [`imaging`], [`masher`], [`script`] — the former `src/bin/shared/`.
 //!   * `expectation`/`frame`/`report` stay crate-private: they are the runner's
 //!     internals. [`runner`] is public but exposes only the handful of items the
@@ -20,6 +21,7 @@ mod frame;
 mod report;
 
 pub mod app;
+pub mod cli;
 pub mod imaging;
 pub mod masher;
 pub mod runner;

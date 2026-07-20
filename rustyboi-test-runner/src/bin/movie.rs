@@ -17,22 +17,25 @@ use rustyboi_core_lib::movie::{sha256, MovieMeta, Recorder};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use rustyboi_test_runner_lib::cli::reject_unknown_flags;
 use rustyboi_test_runner_lib::script::expand_timeline;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let sub = args.get(1).map(String::as_str);
     let rest = &args[args.len().min(2)..];
-    let result = match sub {
-        Some("record") => cmd_record(rest),
-        _ => {
-            eprintln!(
-                "usage:\n  movie record  --rom R [--movie M] [--mode dmg|cgb|auto] \
-                 [--frames N] [--input SCRIPT] [--author A] [--golden FILE]"
-            );
-            return ExitCode::from(2);
-        }
-    };
+    const USAGE_RECORD: &str = "movie record  --rom R [--movie M] [--mode dmg|cgb|auto] \
+                                [--frames N] [--input SCRIPT] [--author A] [--golden FILE]";
+    if sub != Some("record") {
+        eprintln!("usage:\n  {USAGE_RECORD}");
+        return ExitCode::from(2);
+    }
+    // Handled before the strict parse, which would reject `--help` as undeclared.
+    if rest.iter().any(|a| a == "--help" || a == "-h") {
+        println!("usage: {USAGE_RECORD}");
+        return ExitCode::SUCCESS;
+    }
+    let result = cmd_record(rest);
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -43,6 +46,11 @@ fn main() -> ExitCode {
 }
 
 fn cmd_record(args: &[String]) -> Result<(), String> {
+    reject_unknown_flags(
+        args,
+        &["--rom", "--movie", "--mode", "--frames", "--input", "--author", "--golden"],
+        &[],
+    )?;
     let rom_path = arg(args, "--rom").ok_or("record: --rom <path> required")?;
     let mode = arg(args, "--mode").unwrap_or_else(|| "auto".into());
     let frames: usize = parse_num(args, "--frames", 900)?;
