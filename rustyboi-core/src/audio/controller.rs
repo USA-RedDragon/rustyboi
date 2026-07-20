@@ -424,7 +424,7 @@ impl Audio {
         if !advanced && ds != self.last_pushed_ds {
             self.push_cc();
             self.fire_length_events(self.cc);
-            self.step_channels(cgb, agb, ds);
+            self.step_channels(cgb, agb);
         }
     }
 
@@ -477,20 +477,20 @@ impl Audio {
             // Per-dot postlude at the chunk end.
             self.push_cc();
             self.fire_length_events(self.cc);
-            self.step_channels(cgb, agb, ds);
+            self.step_channels(cgb, agb);
         }
         any
     }
 
     /// The retired per-dot `Audio::step` body: channel catch-up + cc-event
     /// polls (ch1 sweep triple), run at every catch-up chunk end.
-    fn step_channels(&mut self, cgb: bool, agb: bool, ds: bool) {
+    fn step_channels(&mut self, cgb: bool, agb: bool) {
         if !self.audio_enabled {
             return;
         }
         self.channel1.step(cgb);
         self.channel2.step(cgb);
-        self.channel3.step(cgb, agb, ds);
+        self.channel3.step(cgb, agb);
         self.channel4.step();
     }
 
