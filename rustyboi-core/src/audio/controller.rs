@@ -281,6 +281,46 @@ impl Audio {
 
     const CC_MAX: u32 = 0x8000_0000;
 
+    // Epoch fold: the master clock is kept well below the CC_MAX wrap by
+    // rebasing cc (and every channel anchor derived from it) down by a fixed
+    // delta whenever a clock advance leaves cc at or above the threshold.
+    // Without it the `% CC_MAX` wrap (~17 emulated minutes) strands every
+    // absolute-cc anchor ~2^31 in the future and all four channels freeze
+    // until an NR52 power cycle.
+    //
+    // The delta is a multiple of every consumed grid — length 0x2000, sweep
+    // 0x4000, DIV-APU 0x800/0x1000, envelope frame 0x8000 — and even, so every
+    // relative phase (including the `lf_div == (cc&1)^1` parity relation)
+    // survives. The threshold exceeds the maximum scheduled-ahead distance
+    // (length <= ~0x20_2000, sweep <= 0x2_0000, wave <= period+3), so at fold
+    // time every armed target is > cc >= threshold > delta and the plain
+    // ordering of armed comparisons is preserved; stale/disarmed anchors are
+    // shifted with wrapping_sub. While the APU is powered, chunks are grid-
+    // bounded (<= 0x800 cc) so the fold keeps cc < threshold + 0x800 and the
+    // CC_MAX modulo is unreachable; the modulo stays for the powered-off
+    // giant chunk, where every foldable anchor is dormant (the power-off
+    // register-zeroing pass disarms all length targets, and the surviving
+    // sweep/env anchors are rescheduled on trigger before any poll).
+    const EPOCH_FOLD_THRESHOLD: u32 = 0x6000_0000;
+    const EPOCH_FOLD_DELTA: u32 = 0x4000_0000;
+
+    /// Rebase the clock epoch when a clock advance leaves `cc` at or above
+    /// the fold threshold: shift `cc`/`len_cc` and every channel anchor down
+    /// by `EPOCH_FOLD_DELTA`. Total and phase-preserving, unlike the DIV-reset
+    /// / speed-change / power-on folds (which deliberately drop phase).
+    fn epoch_fold(&mut self) {
+        if self.cc < Self::EPOCH_FOLD_THRESHOLD {
+            return;
+        }
+        let delta = Self::EPOCH_FOLD_DELTA;
+        self.cc -= delta;
+        self.len_cc = self.cc;
+        self.channel1.epoch_fold(delta);
+        self.channel2.epoch_fold(delta);
+        self.channel3.epoch_fold(delta);
+        self.channel4.epoch_fold(delta);
+    }
+
     /// Lazily catch the whole APU (clock AND channels) up to the timer's
     /// absolute cc. This is the ONLY driver of APU time: the per-dot crank no
     /// longer steps audio, so every observer path (APU register reads/writes,
@@ -420,6 +460,8 @@ impl Audio {
             // (at most one — the chunker never crosses two boundaries).
             self.fs_walk(pre_cc, chunk);
             any = true;
+            // Rebase the epoch before the postlude broadcasts cc.
+            self.epoch_fold();
             // Per-dot postlude at the chunk end.
             self.push_cc();
             self.fire_length_events(self.cc);
@@ -472,6 +514,9 @@ impl Audio {
         self.lf_div ^= (cycles & 1) as u32;
         // Dispatch the DIV-APU (envelope) events crossed by this advance.
         self.fs_walk(pre_cc, cycles);
+        // Rebase the epoch here too: this path (the speed-change flush) does
+        // not run the chunked postlude, but one sync can advance far.
+        self.epoch_fold();
         true
     }
 
@@ -1162,5 +1207,140 @@ impl Addressable for Audio {
             // 0xFF27-0xFF2F): writes are ignored.
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sync(audio: &mut Audio, abs: u64) {
+        audio.sync_cc(abs, 0, 0, false, true, false);
+    }
+
+    fn distinct(values: &[u8]) -> usize {
+        let mut seen = [false; 256];
+        let mut n = 0;
+        for &v in values {
+            if !seen[v as usize] {
+                seen[v as usize] = true;
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// The APU master clock `cc` is kept mod 2^31 and wraps every ~17 emulated
+    /// minutes. Channel state anchored on absolute cc (duty countdown anchor,
+    /// wave fetch counter, noise ripple anchor, scheduled length expiries) must
+    /// be rebased at that wrap; without the epoch fold the wrap strands every
+    /// anchor ~2^31 in the future and all four channels freeze until an NR52
+    /// power cycle. This drives `Audio` directly across the wrap (abs CPU cc
+    /// 2^32 = cc 2^31 in single speed) and asserts each channel still moves.
+    #[test]
+    fn channels_survive_master_clock_epoch_wrap() {
+        // abs CPU cc where the APU cc (abs >> 1, plus the small boot anchor)
+        // crosses 2^31.
+        const WRAP: u64 = 1 << 32;
+        const SLICE: u64 = 1 << 17;
+
+        let mut audio = Audio::new();
+        audio.set_boot_cgb(true);
+        sync(&mut audio, 0);
+        sync(&mut audio, 100);
+
+        audio.write(NR52, 0x80);
+        audio.write(NR51, 0xFF);
+        audio.write(NR50, 0x77);
+        for (i, b) in (0..16u16).map(|i| (i, 0x01u8.wrapping_add(0x22u8.wrapping_mul(i as u8)))) {
+            audio.write(WAV_START + i, b);
+        }
+
+        // Quiet-advance most of the epoch in one sync.
+        sync(&mut audio, WRAP - (1 << 23));
+
+        // Arm all four channels. Periods are chosen to not divide the 2^16-cc
+        // sample slice, so a live channel shows a different phase each slice
+        // (freq 0x000/period 4096 would be stroboscopic at this slice size).
+        audio.write(NR12, 0xF0);
+        audio.write(NR13, 0x00);
+        audio.write(NR14, 0x83);
+        audio.write(NR22, 0xF0);
+        audio.write(NR23, 0x00);
+        audio.write(NR24, 0x83);
+        audio.write(NR30, 0x80);
+        audio.write(NR32, 0x20);
+        audio.write(NR33, 0x00);
+        audio.write(NR34, 0x81);
+        audio.write(NR42, 0xF0);
+        audio.write(NR43, 0x77);
+        audio.write(NR44, 0x80);
+
+        let mut pre12 = Vec::new();
+        let mut pre3 = Vec::new();
+        let mut pre4 = Vec::new();
+        let mut post12 = Vec::new();
+        let mut post3 = Vec::new();
+        let mut post4 = Vec::new();
+        let mut record = |audio: &mut Audio, abs: u64| {
+            sync(audio, abs);
+            let (p12, p34) = (audio.pcm12(), audio.pcm34());
+            // Keep a wrap-point margin: the APU cc crosses 2^31 slightly
+            // before abs == WRAP (the boot anchor offsets it by a few kcc).
+            if abs <= WRAP - (1 << 18) {
+                pre12.push(p12);
+                pre3.push(p34 & 0x0F);
+                pre4.push(p34 >> 4);
+            } else if abs >= WRAP + (1 << 18) {
+                post12.push(p12);
+                post3.push(p34 & 0x0F);
+                post4.push(p34 >> 4);
+            }
+        };
+
+        let mut abs = WRAP - (1 << 21);
+        while abs < WRAP - 0x8_0000 {
+            record(&mut audio, abs);
+            abs += SLICE;
+        }
+
+        // Length expiry scheduled across the epoch boundary: the target
+        // `((len_cc>>13)+64)<<13` lands >= 2^31 and can never fire once the
+        // clock wraps back below it.
+        sync(&mut audio, WRAP - 0x8_0000);
+        audio.write(NR21, 0x00);
+        audio.write(NR24, 0xC0);
+
+        while abs <= WRAP + (1 << 23) {
+            record(&mut audio, abs);
+            abs += SLICE;
+        }
+
+        // More than one emulated second past the wrap, then check NR52.
+        sync(&mut audio, WRAP + (1 << 23) + (1 << 22));
+        let nr52 = audio.read(NR52);
+
+        // Pre-wrap canary: the harness itself must observe live channels.
+        assert!(distinct(&pre12) >= 2, "pre-wrap canary: pcm12 static ({pre12:02x?})");
+        assert!(distinct(&pre3) >= 2, "pre-wrap canary: wave nibble static ({pre3:02x?})");
+        assert!(distinct(&pre4) >= 2, "pre-wrap canary: noise nibble static ({pre4:02x?})");
+        // Post-wrap: every channel must still be moving. Accumulate so one
+        // failure report names every frozen unit.
+        let mut failures = Vec::new();
+        if distinct(&post12) < 2 {
+            failures.push(format!("square duty frozen (pcm12 all {:#04x})", post12[0]));
+        }
+        if distinct(&post3) < 2 {
+            failures.push(format!("wave position frozen (pcm34 low all {:#x})", post3[0]));
+        }
+        if distinct(&post4) < 2 {
+            failures.push(format!("noise LFSR frozen (pcm34 high all {:#x})", post4[0]));
+        }
+        if nr52 & 0x02 != 0 {
+            failures.push(format!(
+                "ch2 length expiry scheduled across the epoch boundary never fired (NR52={nr52:#04x})"
+            ));
+        }
+        assert!(failures.is_empty(), "after the 2^31 epoch wrap: {}", failures.join("; "));
     }
 }

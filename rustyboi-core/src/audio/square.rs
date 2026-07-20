@@ -354,6 +354,30 @@ impl SquareWave {
         self.fs_step = step;
     }
 
+    /// Master-clock epoch rebase: shift every absolute-cc anchor down by
+    /// `delta` (total and phase-preserving, unlike `reset_cc`). Sentinel-
+    /// guarded counters are skipped when disarmed so a sentinel can never
+    /// become a reachable value.
+    pub fn epoch_fold(&mut self, delta: u32) {
+        self.cc = self.cc.wrapping_sub(delta);
+        self.len_cc = self.len_cc.wrapping_sub(delta);
+        self.last_pos_cc = self.last_pos_cc.wrapping_sub(delta);
+        for counter in [
+            &mut self.last_tick_cc,
+            &mut self.env_trigger_cc,
+            &mut self.sweep_counter,
+            &mut self.sweep_apply_counter,
+            &mut self.sweep_kill_counter,
+        ] {
+            if *counter != COUNTER_DISABLED {
+                *counter = counter.wrapping_sub(delta);
+            }
+        }
+        if self.len_counter != LEN_DISABLED {
+            self.len_counter = self.len_counter.wrapping_sub(delta);
+        }
+    }
+
     /// Channel reset (called from the APU-enable reset on
     /// the NR52 0→1 enable). Re-initializes the duty + envelope sub-counters at
     /// the freshly-folded cc. The length counter is intentionally preserved

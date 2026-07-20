@@ -229,6 +229,22 @@ impl Noise {
         self.fs_step = step;
     }
 
+    /// Master-clock epoch rebase: shift every absolute-cc anchor down by
+    /// `delta`. `alignment` is an elapsed-cycle accumulator (wrap-safe by
+    /// design) and the counter/LFSR state is cc-free, so only the cc anchors
+    /// move.
+    pub fn epoch_fold(&mut self, delta: u32) {
+        self.cc = self.cc.wrapping_sub(delta);
+        self.len_cc = self.len_cc.wrapping_sub(delta);
+        self.last_run_cc = self.last_run_cc.wrapping_sub(delta);
+        if self.env_trigger_cc != LEN_DISABLED {
+            self.env_trigger_cc = self.env_trigger_cc.wrapping_sub(delta);
+        }
+        if self.len_counter != LEN_DISABLED {
+            self.len_counter = self.len_counter.wrapping_sub(delta);
+        }
+    }
+
     const LEN_MASK: u16 = 0x3F;
 
     /// Length-counter expiry for channel 4.
