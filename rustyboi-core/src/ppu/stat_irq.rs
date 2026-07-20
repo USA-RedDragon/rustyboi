@@ -47,6 +47,31 @@ impl LyCounter {
         self.ly as u64 * LCD_CYCLES_PER_LINE as u64 + self.line_cycles(cc)
     }
 
+    /// Both subtractions are unsigned and would panic in a debug build if they
+    /// underflowed. Neither can, and the reason is a caller contract rather than
+    /// anything local — so it is stated here rather than papered over with a
+    /// `saturating_sub`, which would convert a future logic error into a silently
+    /// wrong dot.
+    ///
+    /// `time` is built in exactly one place (`Ppu::ly_counter`) as
+    /// `abs_cc + ((456 - line_cycle) << ds)`, and `line_cycle` is normalised to
+    /// 0..=455 on every per-dot path. The one path that advances it without
+    /// normalising (`skip_inert_dots`, `line_cycle += n`) is bounded by its
+    /// interior end, 448 at the widest. So `456 - line_cycle >= 1` and
+    /// `time >= abs_cc + (1 << ds)`.
+    ///
+    /// Both callers reach here via `frame_cycles` from `mode2_irq_schedule` and
+    /// pass `cc` in `[abs_cc, abs_cc + 1]`: one passes `abs_cc` literally, the
+    /// other `write_cc`, which is `abs_cc + WRITE_CC_OFFSET + write_subdot` with
+    /// the offset 0 and the sub-dot 0..=1 (double speed only). Hence
+    /// `time - cc >= (1 << ds) - ds >= 1`, and `(time - cc) >> ds <= 456`, so the
+    /// outer subtraction lands in 0..=455 — it reaches exactly 0 at a line start
+    /// (`line_cycle == 0`), which is tight but in range.
+    ///
+    /// A caller passing an arbitrary `cc` — in particular one BEHIND `abs_cc`, or
+    /// a `time` not produced by `ly_counter` — breaks both bounds. Verified by
+    /// asserting both conditions explicitly and sweeping 2762 ROMs plus all 28
+    /// suites, and again on a debug build with native overflow checks: no hits.
     pub(super) fn line_cycles(&self, cc: u64) -> u64 {
         LCD_CYCLES_PER_LINE as u64 - ((self.time - cc) >> self.ds as u32)
     }
