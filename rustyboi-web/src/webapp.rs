@@ -86,7 +86,8 @@ struct Shared {
     /// `(on: boolean) => void` — set the worker's hold-to-rewind state.
     set_rewind: js_sys::Function,
     /// `(purpose: string, name: string, bytes: Uint8Array) => void` — post a
-    /// picked import file to the worker (purpose ∈ state|battery|rtc|patch).
+    /// picked import file to the worker (purpose ∈
+    /// state|battery|rtc|patch|movie|sgb_firmware).
     import_file: js_sys::Function,
     /// `(kind: string) => void` — ask the worker to produce export bytes
     /// (kind ∈ state|battery|rtc); the worker posts them back for JS to download.
@@ -772,6 +773,10 @@ fn dispatch_action(shared: &Rc<RefCell<Shared>>, action: UiAction) {
         UiAction::ImportRtc(file) => post_import(shared, "rtc", file),
         UiAction::ApplyPatch(file) => post_import(shared, "patch", file),
         UiAction::LoadMovie(file) => post_import(shared, "movie", file),
+        // The SGB system border's only source is the user's own SNES-side
+        // firmware dump; the worker validates it, installs it, and persists it
+        // to IndexedDB so it survives a reload.
+        UiAction::LoadSgbFirmware(file) => post_import(shared, "sgb_firmware", file),
         // Exports: the worker owns the session bytes, so ask it to produce them;
         // it posts them back and the JS shell triggers the browser download.
         UiAction::ExportState => request_export(shared, "state"),
@@ -852,7 +857,8 @@ fn dispatch_action(shared: &Rc<RefCell<Shared>>, action: UiAction) {
 }
 
 /// Post a picked import file to the worker with its `purpose` (state|battery|
-/// rtc|patch). The rfd picker already read the bytes into `Contents`.
+/// rtc|patch|movie|sgb_firmware). The rfd picker already read the bytes into
+/// `Contents`.
 fn post_import(shared: &Rc<RefCell<Shared>>, purpose: &str, file: rustyboi_session::FileData) {
     let Some((name, data)) = file_contents(file) else { return };
     let s = shared.borrow();

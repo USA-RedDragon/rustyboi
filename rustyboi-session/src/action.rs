@@ -44,6 +44,9 @@ pub enum LoadPurpose {
     /// A real boot ROM image (DMG or CGB), supplied to the session for the
     /// real-boot-ROM feature.
     BootRom,
+    /// A SNES-side Super Game Boy firmware dump (`sgb1.sfc` / `sgb2.sfc`), the
+    /// only source of the SGB system border.
+    SgbFirmware,
     /// A recorded TAS movie (`.rbmovie`), replayed deterministically.
     Movie,
 }
@@ -550,6 +553,9 @@ pub enum UiAction {
     /// Supply real boot ROM bytes from a picked file (routed like a battery/RTC
     /// import through the frontend's file resolver).
     LoadBootRom(FileData),
+    /// Supply SNES-side Super Game Boy firmware bytes from a picked file, the
+    /// source of the SGB system border. Routed through the same file resolver.
+    LoadSgbFirmware(FileData),
     /// Enable/disable rewind capture.
     SetRewindEnabled(bool),
     /// Set the rewind snapshot interval (frames between captures).
@@ -649,6 +655,7 @@ impl UiAction {
             UiAction::SetPrinterScale(_) => ActionKind::SetPrinterScale,
             UiAction::SetTouchOpacity(_) => ActionKind::SetTouchOpacity,
             UiAction::LoadBootRom(_) => ActionKind::LoadBootRom,
+            UiAction::LoadSgbFirmware(_) => ActionKind::LoadSgbFirmware,
             UiAction::SetRewindEnabled(_) => ActionKind::SetRewindEnabled,
             UiAction::SetRewindInterval(_) => ActionKind::SetRewindInterval,
             UiAction::SetRewindDepth(_) => ActionKind::SetRewindDepth,
@@ -725,6 +732,7 @@ pub enum ActionKind {
     SetPrinterScale,
     SetTouchOpacity,
     LoadBootRom,
+    LoadSgbFirmware,
     SetRewindEnabled,
     SetRewindInterval,
     SetRewindDepth,
@@ -1281,6 +1289,7 @@ mod tests {
             SetPrinterScale(4),
             SetTouchOpacity(50),
             LoadBootRom(file()),
+            LoadSgbFirmware(file()),
             SetRewindEnabled(true),
             SetRewindInterval(3),
             SetRewindDepth(42),
@@ -1348,6 +1357,7 @@ mod tests {
                 | UiAction::SetPrinterScale(_)
                 | UiAction::SetTouchOpacity(_)
                 | UiAction::LoadBootRom(_)
+                | UiAction::LoadSgbFirmware(_)
                 | UiAction::SetRewindEnabled(_)
                 | UiAction::SetRewindInterval(_)
                 | UiAction::SetRewindDepth(_)

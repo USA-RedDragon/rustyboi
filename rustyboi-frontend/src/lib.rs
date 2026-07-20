@@ -29,7 +29,7 @@ pub mod renderer;
 pub mod soft;
 pub mod ui_host;
 
-pub use app::{App, FrameStep, PlatformRequest, ResolvedAction};
+pub use app::{sgb_firmware_label, App, FrameStep, PlatformRequest, ResolvedAction};
 pub use contract::{drive_action, Frontend, PauseHint};
 pub use renderer::{GameFrame, PhysicalRect, Present, Renderer, SourceSize};
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]

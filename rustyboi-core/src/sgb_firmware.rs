@@ -379,6 +379,24 @@ mod tests {
         assert!(extract_border(&vec![0u8; 1024]).is_err());
     }
 
+    /// The two canonical dumps identify as themselves — the gate every frontend
+    /// (desktop probe, browser file picker) runs before installing a picked
+    /// file. Skips silently when the user has no dumps.
+    #[test]
+    fn identify_accepts_the_two_real_dumps() {
+        let dumps = super::firmware_test::dumps();
+        if dumps.is_empty() {
+            return;
+        }
+        assert_eq!(identify(&dumps[0]).unwrap(), SgbFirmware::Sgb1);
+        assert_eq!(identify(&dumps[1]).unwrap(), SgbFirmware::Sgb2);
+        // A dump padded/truncated by even one byte is not that image.
+        let mut long = dumps[0].clone();
+        long.push(0);
+        assert!(identify(&long).is_err());
+        assert!(identify(&dumps[0][..dumps[0].len() - 1]).is_err());
+    }
+
     /// Truncating a real firmware at any point must be rejected cleanly (no
     /// panic, no out-of-bounds), never silently produce a border.
     #[test]

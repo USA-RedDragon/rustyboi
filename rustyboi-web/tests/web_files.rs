@@ -152,3 +152,45 @@ async fn worker_applies_every_serviceable_action() {
         let _ = emu.run_frame();
     }
 }
+
+// SGB firmware: the browser's only source of the system border is a file the
+// user picks. Junk must come back as an Error request — never a wasm trap (a
+// panic here is unrecoverable) — and must leave the machine borderless.
+#[wasm_bindgen_test]
+async fn junk_sgb_firmware_is_rejected_without_trapping() {
+    let mut emu = Emulator::create().await.expect("create");
+    let _ = emu.load_rom("test.gb", &common::test_rom());
+    // Every shape a picker can hand over: empty, a boot ROM, a Game Boy ROM,
+    // and right-sized-but-wrong-contents images.
+    for junk in [
+        Vec::new(),
+        vec![0u8; 256],
+        common::test_rom(),
+        vec![0u8; 0x0004_0000],
+        vec![0xFFu8; 0x0008_0000],
+    ] {
+        let reqs = emu.load_sgb_firmware(&junk);
+        assert_eq!(reqs.length(), 1, "expected exactly one Error request");
+        let ty = js_sys::Reflect::get(&reqs.get(0), &"type".into()).expect("type");
+        assert_eq!(ty.as_string().as_deref(), Some("Error"), "junk was accepted");
+        assert!(!emu.has_sgb_firmware(), "junk produced a border");
+    }
+    // The machine still runs afterwards.
+    let _ = emu.run_frame();
+}
+
+// With no firmware supplied (the default, and what a first-visit browser session
+// looks like), the emulator simply has no system border — no error, no crash.
+#[wasm_bindgen_test]
+async fn absent_sgb_firmware_degrades_to_no_border() {
+    let mut emu = Emulator::create().await.expect("create");
+    let _ = emu.load_rom("test.gb", &common::test_rom());
+    emu.apply_action("\"ToggleSgbBorder\"").expect("toggle border");
+    for _ in 0..5 {
+        let _ = emu.run_frame();
+    }
+    assert!(!emu.has_sgb_firmware());
+    // Frames keep coming at the plain GB size (no 256x224 composite).
+    assert_eq!(emu.frame_width(), 160);
+    assert_eq!(emu.frame_height(), 144);
+}

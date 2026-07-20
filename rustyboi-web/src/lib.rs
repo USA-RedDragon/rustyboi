@@ -30,7 +30,7 @@ mod storage;
 mod webapp;
 
 use rustyboi_session::config::DmgPalette;
-use rustyboi_session::ports::{Rumble, Webcam};
+use rustyboi_session::ports::{Rumble, Storage, Webcam};
 use rustyboi_session::{
     AbstractInput, Config, DebugDetail, Frame, GbButton, Hardware, Ports, Session,
 };
@@ -73,6 +73,13 @@ const SGB_WIDTH: u32 = 256;
 const SGB_HEIGHT: u32 = 224;
 /// RGBA scratch large enough for the SGB composite (the biggest source).
 const RGBA_LEN: usize = (SGB_WIDTH * SGB_HEIGHT * 4) as usize;
+
+/// IndexedDB key holding the user's SNES-side SGB firmware dump. The browser has
+/// no `bios/` directory to probe (the desktop adapter's source), so the picked
+/// file is kept in the same store as config/saves and re-installed at startup.
+/// Only bytes that passed [`rustyboi_core_lib::sgb_firmware::identify`] are ever
+/// written here, and no artwork is stored — just the user's own file.
+const SGB_FIRMWARE_KEY: &str = "firmware/sgb";
 
 /// No-op rumble: browsers have no cartridge motor. (Gamepad haptics could hook
 /// here later.)
@@ -153,7 +160,16 @@ impl Emulator {
             rumble: Box::new(NullRumble),
             webcam: Box::new(NullWebcam),
         };
-        let session = Session::new(config, ports, [0u8; 32]);
+        let mut session = Session::new(config, ports, [0u8; 32]);
+
+        // Re-install a previously picked SGB firmware dump. Re-validated rather
+        // than trusted: a partially-written or hand-edited entry must degrade to
+        // "no border", never to a bad decode. Absent = today's behaviour.
+        if let Some(fw) = storage.read(SGB_FIRMWARE_KEY) {
+            if rustyboi_core_lib::sgb_firmware::identify(&fw).is_ok() {
+                session.set_sgb_firmware(Some(fw));
+            }
+        }
 
         Ok(Emulator {
             session,
@@ -301,6 +317,39 @@ impl Emulator {
             Err(e) => vec![PlatformRequest::Error(format!("Failed to load movie: {e}"))],
         };
         requests_to_js(&reqs)
+    }
+
+    /// Install a SNES-side Super Game Boy firmware dump (`sgb1.sfc` /
+    /// `sgb2.sfc`) the user picked, so SGB games show the firmware's own system
+    /// border. Validated FIRST (length + CRC32): the session keeps whatever it
+    /// is handed, so an unrecognised dump would otherwise leave the previous
+    /// border in place while reporting success — and a rejection must be a
+    /// message, never a wasm trap. Valid bytes are persisted to IndexedDB, since
+    /// the browser has no `bios/` directory for the desktop adapter's probe.
+    /// Returns Status/Error requests.
+    pub fn load_sgb_firmware(&mut self, bytes: &[u8]) -> Array {
+        let reqs = match rustyboi_core_lib::sgb_firmware::identify(bytes) {
+            Ok(which) => {
+                self.session.finish_load_sgb_firmware(bytes);
+                let stored = self.storage.write(SGB_FIRMWARE_KEY, bytes).is_ok();
+                let name = rustyboi_frontend_lib::sgb_firmware_label(which);
+                let msg = if stored {
+                    format!("{name} firmware loaded; showing the system border")
+                } else {
+                    format!("{name} firmware loaded (could not be saved for next time)")
+                };
+                vec![PlatformRequest::ClearError, PlatformRequest::Status(msg)]
+            }
+            Err(e) => vec![PlatformRequest::Error(format!(
+                "Not a Super Game Boy firmware dump: {e}"
+            ))],
+        };
+        requests_to_js(&reqs)
+    }
+
+    /// Whether the running machine has an SGB system border from firmware.
+    pub fn has_sgb_firmware(&self) -> bool {
+        self.session.has_sgb_firmware()
     }
 
     /// Feed a downloaded libretro `.cht` body (fetched on the main thread) into
