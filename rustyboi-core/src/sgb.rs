@@ -14,8 +14,9 @@
 use serde::{Deserialize, Serialize};
 
 /// SGB command numbers (packet byte 0, bits 7-3), per Pan Docs "SGB Command"
-/// numbering. Only the ones we act on are named; the rest are decoded but
-/// handled as no-ops (cleanly stubbed).
+/// numbering. Named here are the commands we act on plus the sound/data ones we
+/// decode and deliberately ignore (see [`SgbSound`]); every other command is
+/// received normally and falls through to the no-op arm of the dispatch.
 mod cmd {
     pub const PAL01: u8 = 0x00;
     pub const PAL23: u8 = 0x01;
@@ -33,24 +34,51 @@ mod cmd {
     pub const MLT_REQ: u8 = 0x11;
     pub const CHR_TRN: u8 = 0x13;
     pub const PCT_TRN: u8 = 0x14;
-    /// DATA_SND ($0F): writes bytes carried IN THE PACKET to SNES WRAM. Despite
-    /// the `_SND`/`_TRN` similarity this is NOT a VRAM transfer — nothing is
-    /// read back from the GB screen.
+    /// DATA_SND ($0F): writes bytes carried IN THE PACKET to SNES WRAM — bytes
+    /// 1-3 are the 24-bit destination, byte 4 the count ($01-$0B), bytes 5.. the
+    /// data. Despite the `_SND`/`_TRN` similarity this is NOT a VRAM transfer —
+    /// nothing is read back from the GB screen.
     pub const DATA_SND: u8 = 0x0F;
-    /// DATA_TRN ($10): transfers a 4KB VRAM block to SNES WRAM. A genuine VRAM
-    /// transfer, but SNES-side only (see the dispatch catch-all).
+    /// DATA_TRN ($10): transfers a 4KB VRAM block to the SNES WRAM address in
+    /// bytes 1-3. A genuine VRAM transfer, but SNES-side only (see the dispatch).
     pub const DATA_TRN: u8 = 0x10;
+    /// SOUND ($08): start/stop the firmware's canned sound effects and the BGM
+    /// mute. Decoded into [`SgbSound`]; produces no audio, see that type.
     pub const SOUND: u8 = 0x08;
+    /// SOU_TRN ($09): VRAM transfer of driver code, sound scores or samples into
+    /// S-APU RAM (Pan Docs: $0400-$2AFF program, $2B00-$4AFF score, $4DB0-$EEFF
+    /// sampling data). SNES-side only, and inert here for the same reason as
+    /// [`SgbSound`].
     pub const SOU_TRN: u8 = 0x09;
 }
 
-/// State requested by the SGB SOUND command ($08). Grounded in Pan Docs "SGB
-/// Command $08 — SOUND": the SGB reproduces these on the SNES APU (an SPC700
-/// running the SGB BIOS' N-SPC engine plus a sample ROM). That audio HLE is out
-/// of scope — no public spec reproduces the SGB sound-data ROM or an SPC700
-/// model here — so this records *what was requested* (effect codes, pitch,
-/// volume, mute) for a frontend hook or a test to inspect, rather than
-/// synthesising audio. Effect code $80 stops the corresponding effect.
+/// Decoded payload of the SGB SOUND command ($08) — recorded, never played.
+///
+/// Packet layout (Pan Docs "SGB Command $08 — SOUND", fixed length 1): byte 1 =
+/// Effect A code, byte 2 = Effect B code, byte 3 = attributes (A pitch bits 0-1,
+/// A volume bits 2-3, B pitch bits 4-5, B volume bits 6-7), byte 4 = music score
+/// code, bytes 5-F zero. Effect A codes run $00-$30 and Effect B codes $00-$19;
+/// $80 stops either effect. The effects themselves are canned samples in the SGB
+/// firmware played on fixed S-DSP voices (A on 6-7, B on 0/1/4/5), so A and B
+/// sound simultaneously.
+///
+/// **rustyboi decodes this and intentionally produces no audio.** SGB sound is
+/// generated entirely SNES-side: the SPC700 runs the sound driver contained in
+/// the SGB firmware and the S-DSP mixes that firmware's sample data. None of it
+/// is observable from the Game Boy — no register, no interrupt, no return path
+/// through the JOYP link — so ignoring it is exact for everything the GB can
+/// see; only the host's speakers differ from a real SGB. This struct exists so
+/// the request is inspectable (tests, a future frontend hook) instead of lost.
+///
+/// Seam for a future implementation, which would have to add all three of:
+/// (1) an SPC700 + S-DSP core, (2) the sound driver and samples, runtime-sourced
+/// from the user's firmware image like the border and never embedded, and (3) a
+/// mix of the DSP's stereo output into the host stream at one of the existing
+/// sinks — `Audio::get_mixed_output` (core), `CaptureSink` (session) or the
+/// platform pre-ring `add_samples`. Nothing GB-side would change: the GB APU,
+/// the dot timeline and the savestate format are unaffected. The SGB1-vs-SGB2
+/// clock difference is already modelled and is orthogonal — it only rescales the
+/// GB APU's `cycles_per_sample`, while the SNES APU has its own crystal.
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct SgbSound {
     /// Sound Effect A code (port 1, decrescendo). See Pan Docs' Effect A table.
@@ -191,10 +219,10 @@ pub struct Sgb {
     locked: bool,
 
     // ---- SGB sound (SOUND $08) ----
-    /// Last state requested by the SOUND command. Decoded from the packet; the
-    /// SNES-APU audio HLE that would make it audible is out of scope (see
-    /// [`SgbSound`]). `SOU_TRN` ($09) is recognised as a sound-data transfer but
-    /// likewise has no consumer without the SNES APU.
+    /// Last state requested by the SOUND command, decoded from the packet and
+    /// deliberately not acted on ([`SgbSound`] documents why, and where an SNES
+    /// APU would attach). `SOU_TRN` ($09), `DATA_SND` ($0F) and `DATA_TRN` ($10)
+    /// have no state here at all: they only feed SNES-side memory.
     #[serde(default)]
     sound: SgbSound,
 }
@@ -256,8 +284,8 @@ impl Sgb {
     }
 
     /// The state requested by the most recent SGB SOUND command (effect codes,
-    /// pitch, volume, mute). A frontend with an SNES-APU HLE would consume this;
-    /// the GB-only model records it but produces no audio (see [`SgbSound`]).
+    /// pitch, volume, mute). Nothing in-tree consumes it — it is the read side
+    /// of the deferred-audio seam described on [`SgbSound`].
     pub fn sound(&self) -> SgbSound {
         self.sound
     }
@@ -434,10 +462,8 @@ impl Sgb {
                 self.pending_trn_param = self.command[1];
             }
             cmd::SOUND => {
-                // Pan Docs "SOUND": byte 1 = Effect A code, byte 2 = Effect B
-                // code, byte 3 = attributes (A pitch/volume in bits 0-3, B
-                // pitch/volume in bits 4-7), byte 4 = music score. We decode the
-                // request; the SNES-APU synthesis is out of scope (see SgbSound).
+                // Decode only — the effects play on the SNES APU, which this
+                // emulator does not model (layout + rationale on SgbSound).
                 let attr = self.command[3];
                 let a_volume = (attr >> 2) & 0x03;
                 self.sound = SgbSound {
@@ -454,13 +480,17 @@ impl Sgb {
                 };
             }
             cmd::SOU_TRN => {
-                // Transfers SNES-APU program/score/sample data via VRAM to the
-                // SNES sound chip. With no SNES APU modelled the data has no
-                // consumer, so this is recognised but not read.
+                // A real 4KB VRAM transfer on hardware, but its payload is
+                // driver code / scores / samples for the S-APU. We do not queue
+                // the read: nothing would consume the bytes, and the single
+                // `pending_trn` slot is reserved for the transfers we do act on
+                // (see the DATA_SND note below). Restoring audio means giving
+                // this arm a consumer, not changing the GB side (see SgbSound).
             }
             cmd::DATA_SND | cmd::DATA_TRN => {
-                // $0F writes packet-carried bytes to SNES WRAM; $10 copies a 4KB
-                // VRAM block there. Both land SNES-side only, so like SOU_TRN
+                // $0F writes up to 11 packet-carried bytes to the SNES WRAM
+                // address in bytes 1-3; $10 copies a 4KB VRAM block to the same
+                // kind of address. Both land SNES-side only, so like SOU_TRN
                 // they are recognised but not read.
                 //
                 // Neither may join the `_TRN` arm above. $0F is not a screen
