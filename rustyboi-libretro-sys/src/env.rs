@@ -20,7 +20,7 @@ unsafe fn call(cb: retro_environment_t, cmd: c_uint, data: *mut c_void) -> bool 
 
 /// # Safety
 /// `cb` must be the live environment callback.
-pub unsafe fn set_support_no_game(cb: retro_environment_t, supported: bool) {
+pub(crate) unsafe fn set_support_no_game(cb: retro_environment_t, supported: bool) {
     let mut v = supported;
     unsafe {
         call(cb, RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &mut v as *mut bool as *mut c_void);
@@ -29,7 +29,7 @@ pub unsafe fn set_support_no_game(cb: retro_environment_t, supported: bool) {
 
 /// # Safety
 /// `cb` must be the live environment callback.
-pub unsafe fn set_pixel_format(cb: retro_environment_t, fmt: retro_pixel_format) -> bool {
+pub(crate) unsafe fn set_pixel_format(cb: retro_environment_t, fmt: retro_pixel_format) -> bool {
     let mut f = fmt;
     unsafe { call(cb, RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &mut f as *mut _ as *mut c_void) }
 }
@@ -38,7 +38,7 @@ pub unsafe fn set_pixel_format(cb: retro_environment_t, fmt: retro_pixel_format)
 /// `cb` must be the live environment callback; `descriptors` must be
 /// NUL-terminated (a final all-zero `retro_input_descriptor`) and outlive
 /// content (the frontend keeps the `description` pointers).
-pub unsafe fn set_input_descriptors(cb: retro_environment_t, descriptors: &[retro_input_descriptor]) {
+pub(crate) unsafe fn set_input_descriptors(cb: retro_environment_t, descriptors: &[retro_input_descriptor]) {
     unsafe {
         call(
             cb,
@@ -52,7 +52,7 @@ pub unsafe fn set_input_descriptors(cb: retro_environment_t, descriptors: &[retr
 ///
 /// # Safety
 /// `cb` must be the live environment callback.
-pub unsafe fn get_variable_update(cb: retro_environment_t) -> bool {
+pub(crate) unsafe fn get_variable_update(cb: retro_environment_t) -> bool {
     let mut updated = false;
     unsafe {
         call(
@@ -68,7 +68,7 @@ pub unsafe fn get_variable_update(cb: retro_environment_t) -> bool {
 ///
 /// # Safety
 /// `cb` must be the live environment callback.
-pub unsafe fn get_variable(cb: retro_environment_t, key: &str) -> Option<String> {
+pub(crate) unsafe fn get_variable(cb: retro_environment_t, key: &str) -> Option<String> {
     let ckey = CString::new(key).ok()?;
     let mut var = retro_variable {
         key: ckey.as_ptr(),
@@ -86,7 +86,7 @@ pub unsafe fn get_variable(cb: retro_environment_t, key: &str) -> Option<String>
 /// # Safety
 /// `cb` must be the live environment callback; `opts` (and everything it points
 /// at) must outlive the call — the frontend copies the strings.
-pub unsafe fn set_core_options_v2(cb: retro_environment_t, opts: *const retro_core_options_v2) {
+pub(crate) unsafe fn set_core_options_v2(cb: retro_environment_t, opts: *const retro_core_options_v2) {
     unsafe { call(cb, RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, opts as *mut c_void) };
 }
 
@@ -94,13 +94,13 @@ pub unsafe fn set_core_options_v2(cb: retro_environment_t, opts: *const retro_co
 /// `cb` must be the live environment callback; the descriptor array referenced
 /// by `map` must outlive the call, and the pointers it holds must stay valid for
 /// as long as the frontend may read them (the lifetime of the content).
-pub unsafe fn set_memory_maps(cb: retro_environment_t, mut map: retro_memory_map) {
+pub(crate) unsafe fn set_memory_maps(cb: retro_environment_t, mut map: retro_memory_map) {
     unsafe { call(cb, RETRO_ENVIRONMENT_SET_MEMORY_MAPS, &mut map as *mut _ as *mut c_void) };
 }
 
 /// # Safety
 /// `cb` must be the live environment callback.
-pub unsafe fn set_game_geometry(cb: retro_environment_t, mut geom: retro_game_geometry) {
+pub(crate) unsafe fn set_game_geometry(cb: retro_environment_t, mut geom: retro_game_geometry) {
     unsafe { call(cb, RETRO_ENVIRONMENT_SET_GEOMETRY, &mut geom as *mut _ as *mut c_void) };
 }
 
@@ -108,7 +108,7 @@ pub unsafe fn set_game_geometry(cb: retro_environment_t, mut geom: retro_game_ge
 ///
 /// # Safety
 /// `cb` must be the live environment callback.
-pub unsafe fn get_system_directory(cb: retro_environment_t) -> Option<PathBuf> {
+pub(crate) unsafe fn get_system_directory(cb: retro_environment_t) -> Option<PathBuf> {
     let mut dir: *const std::os::raw::c_char = std::ptr::null();
     let ok = unsafe {
         call(cb, RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &mut dir as *mut _ as *mut c_void)
@@ -124,7 +124,7 @@ pub unsafe fn get_system_directory(cb: retro_environment_t) -> Option<PathBuf> {
 ///
 /// # Safety
 /// `cb` must be the live environment callback.
-pub unsafe fn get_rumble_interface(cb: retro_environment_t) -> Option<retro_set_rumble_state_t> {
+pub(crate) unsafe fn get_rumble_interface(cb: retro_environment_t) -> Option<retro_set_rumble_state_t> {
     let mut iface = retro_rumble_interface { set_rumble_state: None };
     let ok = unsafe {
         call(cb, RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE, &mut iface as *mut _ as *mut c_void)
@@ -142,7 +142,7 @@ pub unsafe fn get_rumble_interface(cb: retro_environment_t) -> Option<retro_set_
 ///
 /// # Safety
 /// `cb` must be the live environment callback.
-pub unsafe fn get_log_interface(cb: retro_environment_t) -> retro_log_printf_t {
+pub(crate) unsafe fn get_log_interface(cb: retro_environment_t) -> retro_log_printf_t {
     let mut iface = retro_log_callback { log: None };
     let ok =
         unsafe { call(cb, RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &mut iface as *mut _ as *mut c_void) };
