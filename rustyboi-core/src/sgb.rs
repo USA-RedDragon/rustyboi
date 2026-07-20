@@ -775,12 +775,35 @@ impl Sgb {
         }
     }
 
-    /// Border data for the compositor: (4bpp tiles, tilemap bytes, palettes
-    /// 4-7). None until BOTH a CHR_TRN (tiles) and a PCT_TRN (map+palettes)
-    /// have run — games send CHR_TRN first and PCT_TRN last, so gating on
-    /// both avoids flashing a half-loaded border. (Without a CHR_TRN, real
-    /// hardware would show the boot-ROM's built-in border tiles, which our
-    /// HLE has no copy of.)
+    /// Install the SGB firmware's own power-on border (see
+    /// [`crate::sgb_firmware`]). This is what a real Super Game Boy shows
+    /// before — and instead of — any game-supplied border, so it is seeded at
+    /// machine build when the user has supplied a firmware dump. A later
+    /// CHR_TRN / PCT_TRN overwrites the corresponding field and takes over.
+    ///
+    /// `pals` carries all 8 SNES BG palettes (128 colours) rather than the 64
+    /// a PCT_TRN delivers; [`border`](Self::border)'s consumers key off that
+    /// length. See [`crate::sgb_firmware::SgbBorder::pals`].
+    pub fn seed_default_border(&mut self, tiles: &[u8], map: &[u8], pals: &[u16]) {
+        self.border_tiles = tiles.to_vec();
+        self.border_map = map.to_vec();
+        self.border_pals = pals.to_vec();
+        self.border_ready = true;
+    }
+
+    /// Border data for the compositor: (4bpp tiles, tilemap bytes, palettes).
+    ///
+    /// None until either the SGB firmware's default border has been seeded
+    /// ([`seed_default_border`](Self::seed_default_border)) or BOTH a CHR_TRN
+    /// (tiles) and a PCT_TRN (map+palettes) have run — games send CHR_TRN
+    /// first and PCT_TRN last, so gating on both avoids flashing a
+    /// half-loaded border.
+    ///
+    /// The palette slice is either 64 words (PCT_TRN: SNES BG palettes 4-7,
+    /// which is all a game can address) or 128 (firmware default: BG palettes
+    /// 0-7 — its tilemaps really do select outside the 4-7 window). Callers
+    /// read the length to know how many bits of the tilemap's palette field
+    /// are meaningful.
     pub fn border(&self) -> Option<(&[u8], &[u8], &[u16])> {
         if !self.border_ready || self.border_map.len() < 0x700 || self.border_pals.len() < 64 {
             return None;
@@ -1363,6 +1386,57 @@ mod tests {
         assert_eq!((u16::from_le_bytes([map[0], map[1]]) >> 10) & 7, 4);
         assert_eq!(pals[0], 0x100);
         assert_eq!(pals[63], 0x13F);
+    }
+
+    /// A seeded firmware border is renderable immediately (no CHR_TRN/PCT_TRN
+    /// needed) and carries all 8 SNES BG palettes; a game's own transfers then
+    /// replace it, restoring the 64-colour PCT_TRN shape.
+    #[test]
+    fn seeded_default_border_is_overridden_by_game_transfers() {
+        let mut sgb = Sgb::new();
+        assert!(sgb.border().is_none());
+
+        let mut tiles = vec![0u8; 0x2000];
+        tiles[0] = 0xFF;
+        let mut map = vec![0u8; 0x800];
+        map[..2].copy_from_slice(&(4u16 << 10).to_le_bytes());
+        let pals: Vec<u16> = (0..128u16).map(|i| 0x200 + i).collect();
+        sgb.seed_default_border(&tiles, &map, &pals);
+
+        let (t, m, p) = sgb.border().expect("seeded border is renderable");
+        assert_eq!(t[0], 0xFF);
+        assert_eq!((u16::from_le_bytes([m[0], m[1]]) >> 10) & 7, 4);
+        assert_eq!(p.len(), 128, "the full 8 BG palettes");
+        assert_eq!(p[64], 0x240, "palette 4 colour 0 is addressable");
+
+        // The game now sends its own border; both halves must take over.
+        let mut chr = vec![0u8; 0x1000];
+        chr[0] = 0x0F;
+        let mut pkt = [0u8; 16];
+        pkt[0] = (cmd::CHR_TRN << 3) | 1;
+        pkt[1] = 0;
+        send_packet(&mut sgb, &pkt);
+        let c = sgb.take_pending_trn().unwrap();
+        sgb.apply_trn(c, &chr);
+
+        let mut pct = vec![0u8; 0x1000];
+        pct[..2].copy_from_slice(&(7u16 << 10).to_le_bytes());
+        for i in 0..64u16 {
+            let v = 0x300 + i;
+            pct[0x800 + i as usize * 2..0x802 + i as usize * 2]
+                .copy_from_slice(&v.to_le_bytes());
+        }
+        pkt[0] = (cmd::PCT_TRN << 3) | 1;
+        pkt[1] = 0;
+        send_packet(&mut sgb, &pkt);
+        let c = sgb.take_pending_trn().unwrap();
+        sgb.apply_trn(c, &pct);
+
+        let (t, m, p) = sgb.border().expect("game border ready");
+        assert_eq!(t[0], 0x0F, "game tiles replaced the firmware's");
+        assert_eq!((u16::from_le_bytes([m[0], m[1]]) >> 10) & 7, 7);
+        assert_eq!(p.len(), 64, "back to the PCT_TRN palette shape");
+        assert_eq!(p[0], 0x300);
     }
 
     /// ATTR_CHR data continues across packet boundaries: 3 packets carry

@@ -26,6 +26,11 @@ pub const SGB_FRAME_WIDTH: usize = 256;
 pub const SGB_FRAME_HEIGHT: usize = 224;
 pub const SGB_FRAME_SIZE: usize = SGB_FRAME_WIDTH * SGB_FRAME_HEIGHT;
 
+/// The grayscale ramp `Sgb` powers on with (the SGB boot palette). Only used
+/// as the composited centre's shades when no SGB system palette applies, i.e.
+/// the user explicitly chose `Grayscale`.
+pub const SGB_BOOT_SHADES: [u16; 4] = [0x7FFF, 0x56B5, 0x294A, 0x0000];
+
 /// Convert an SGB/CGB RGB555 color word (bits: r=0-4, g=5-9, b=10-14) to RGB888
 /// using the linear 5-bit->8-bit scaling the emulator uses for CGB `Linear`.
 pub(crate) fn rgb555_to_rgb888(color: u16) -> (u8, u8, u8) {
@@ -9554,6 +9559,7 @@ impl Ppu {
     pub fn sgb_composited_frame(
         &self,
         mmio: &mmio::Mmio,
+        uncolorized: [u16; 4],
     ) -> Option<Box<[u8; SGB_FRAME_SIZE * 3]>> {
         let sgb = mmio.sgb()?;
         let (tiles, map, pals) = sgb.border()?;
@@ -9577,9 +9583,10 @@ impl Ppu {
         }
 
         // 2. GB screen at (48, 40), mirroring sgb_frame's mask semantics.
-        // When no palette command has run yet the default grayscale ramp
-        // (the boot palette values) colorizes the center.
-        const GRAY: [u16; 4] = [0x7FFF, 0x56B5, 0x294A, 0x0000];
+        // Until a palette command runs, `uncolorized` supplies the four
+        // shades — the caller passes the SGB system palette the firmware
+        // would have picked for this cart, so a non-aware game shows its
+        // 1-A/Auto colours inside the border instead of grey.
         let src: &[u8] = match self.sgb_freeze_fb.as_deref() {
             Some(f) if f.len() == FRAMEBUFFER_SIZE => f,
             _ => &self.fb_b[..],
@@ -9592,7 +9599,7 @@ impl Ppu {
                     _ => {
                         let shade = src[y * 160 + x] & 3;
                         sgb.color_for(x / 8, y / 8, shade)
-                            .unwrap_or(GRAY[shade as usize])
+                            .unwrap_or(uncolorized[shade as usize])
                     }
                 };
                 put(&mut out, 48 + x, 40 + y, rgb555);
@@ -9604,6 +9611,15 @@ impl Ppu {
         // skip). 4bpp pixel bits come from byte pairs (plane 0/1) at row*2
         // and (plane 2/3) at row*2+16; bit 7 = leftmost pixel when not
         // X-flipped.
+        //
+        // The tilemap's palette field is 3 bits (SNES BG palettes 0-7), but a
+        // PCT_TRN can only deliver palettes 4-7, so for a game-supplied border
+        // `pals` holds exactly those four and the field's low 2 bits index
+        // them (4->0 .. 7->3). The firmware's own border is not so
+        // constrained — SGB1's map selects palettes 0 and 4, SGB2's 0, 4 and 5
+        // — so `Sgb::seed_default_border` hands over all eight palettes and
+        // the full 3-bit field applies. The slice length distinguishes the two.
+        let pal_mask = if pals.len() >= 128 { 7 } else { 3 };
         for tile_y in 0..28usize {
             for tile_x in 0..32usize {
                 let e = (tile_y * 32 + tile_x) * 2;
@@ -9612,7 +9628,7 @@ impl Ppu {
                     continue;
                 }
                 let tile = (entry & 0xFF) as usize;
-                let pal = ((entry >> 10) & 3) as usize;
+                let pal = ((entry >> 10) & pal_mask) as usize;
                 let xf: usize = if entry & 0x4000 != 0 { 0 } else { 7 };
                 let yf: usize = if entry & 0x8000 != 0 { 7 } else { 0 };
                 for y in 0..8usize {

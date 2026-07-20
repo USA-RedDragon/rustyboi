@@ -223,6 +223,13 @@ pub struct Session {
     /// `skip_bios`. The session is WASM-clean, so it never reads a file itself —
     /// the adapter resolves the bytes and installs them via `set_boot_rom`.
     boot_rom: Option<Vec<u8>>,
+    /// SNES-side Super Game Boy firmware (`sgb1.sfc` / `sgb2.sfc`) supplied by
+    /// the adapter. Carries the SGB's power-on system border, which a real
+    /// unit shows until the game transfers its own; `None` = no dump available
+    /// and SGB output keeps today's borderless presentation. Like `boot_rom`
+    /// this is a host resource, not config: the session is WASM-clean and never
+    /// reads a file, and it is re-installed on every machine (re)build.
+    sgb_firmware: Option<Vec<u8>>,
 
     // --- debug-step requests set by `apply`, drained by the frontend --------
     pending_step_cycles: Option<u32>,
@@ -287,6 +294,7 @@ impl Session {
             touch_controls: cfg!(mobile),
             palette,
             boot_rom: None,
+            sgb_firmware: None,
             pending_step_cycles: None,
             pending_step_frames: None,
             printer_strips: Vec::new(),
@@ -329,6 +337,11 @@ impl Session {
         // Every rebuild path (hardware change, reset, ROM load) funnels through
         // here, so this is where a fresh machine picks up the host TV region.
         gb.set_region(self.config.region);
+        // ...and its SGB system border. Unrecognised firmware is ignored (the
+        // machine simply has no default border); inert on non-SGB hardware.
+        if let Some(fw) = self.sgb_firmware.as_deref() {
+            let _ = gb.load_sgb_firmware_bytes(fw);
+        }
         if self.config.use_real_boot_rom
             && let Some(bytes) = self.boot_rom.as_deref()
             && gb.load_bios_bytes(bytes).is_ok()
@@ -1003,6 +1016,32 @@ impl Session {
             let gb = self.rebuild_current_gb();
             self.replace_machine(*gb, self.rom_id);
         }
+    }
+
+    /// Install (or clear) the SNES-side SGB firmware the adapter resolved from
+    /// a file — `bios/sgb1.sfc` for SGB hardware, `bios/sgb2.sfc` for SGB2.
+    /// Applies to the running machine immediately and to every later rebuild.
+    ///
+    /// The border is presentation state, not boot state, so this deliberately
+    /// does NOT rebuild the machine: a running game keeps playing and simply
+    /// gains its default border. A dump that fails validation is retained but
+    /// has no effect (see [`GB::load_sgb_firmware_bytes`]).
+    pub fn set_sgb_firmware(&mut self, bytes: Option<Vec<u8>>) {
+        self.sgb_firmware = bytes;
+        if let Some(fw) = self.sgb_firmware.as_deref() {
+            let _ = self.gb.load_sgb_firmware_bytes(fw);
+        }
+    }
+
+    /// Finish an SGB-firmware import: store the resolved bytes and install them
+    /// into the running machine.
+    pub fn finish_load_sgb_firmware(&mut self, bytes: &[u8]) {
+        self.set_sgb_firmware(Some(bytes.to_vec()));
+    }
+
+    /// Whether the running machine has an SGB system border from firmware.
+    pub fn has_sgb_firmware(&self) -> bool {
+        self.gb.has_sgb_firmware()
     }
 
     /// The current upscale texture filter (presentation-only).

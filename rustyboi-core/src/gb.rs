@@ -336,6 +336,26 @@ impl SgbPaletteChoice {
         old_licensee: u8,
         new_licensee: [u8; 2],
     ) -> Option<[[u8; 3]; 4]> {
+        // The SGB has no LCD, so these are always the raw linear colours —
+        // `ColorCorrection` never applies (pinned by a test).
+        self.shades_rgb555(title, old_licensee, new_licensee)
+            .map(|p| {
+                p.map(|w| {
+                    let (r, g, b) = ppu::controller::rgb555_to_rgb888(w);
+                    [r, g, b]
+                })
+            })
+    }
+
+    /// The same four colours as [`shades`](Self::shades), still as the RGB555
+    /// words the firmware stores. The SGB border compositor works in RGB555,
+    /// so it takes this form directly.
+    pub fn shades_rgb555(
+        self,
+        title: &[u8; 16],
+        old_licensee: u8,
+        new_licensee: [u8; 2],
+    ) -> Option<[u16; 4]> {
         let index = match self {
             Self::Grayscale => return None,
             Self::Auto => {
@@ -343,12 +363,7 @@ impl SgbPaletteChoice {
             }
             Self::System(i) => i.min(31),
         };
-        // The SGB has no LCD, so these are always the raw linear colours —
-        // `ColorCorrection` never applies (pinned by a test).
-        Some(sgb_system_palette::SGB_SYSTEM_PALETTES[index as usize].map(|w| {
-            let (r, g, b) = ppu::controller::rgb555_to_rgb888(w);
-            [r, g, b]
-        }))
+        Some(sgb_system_palette::SGB_SYSTEM_PALETTES[index as usize])
     }
 
     /// A short human label for the Settings menu.
@@ -1078,6 +1093,20 @@ impl GB {
         self.mmio.has_bios()
     }
 
+    /// Install the SNES-side Super Game Boy firmware (`sgb1.sfc`/`sgb2.sfc`)
+    /// from raw bytes (WASM-clean; no filesystem access) and seed the system
+    /// border it carries. Unrecognised images are rejected; see
+    /// [`Mmio::load_sgb_firmware_bytes`](crate::memory::mmio::Mmio::load_sgb_firmware_bytes).
+    /// Inert on non-SGB hardware.
+    pub fn load_sgb_firmware_bytes(&mut self, bytes: &[u8]) -> Result<(), std::io::Error> {
+        self.mmio.load_sgb_firmware_bytes(bytes)
+    }
+
+    /// Whether an SGB firmware dump is installed (so the default border shows).
+    pub fn has_sgb_firmware(&self) -> bool {
+        self.mmio.has_sgb_firmware()
+    }
+
     /// Engage the per-sample channel tap ([ch1..4], nr50, nr51, enabled) —
     /// recording/measurement companion to `enable_audio`.
     pub fn set_channel_tap(&mut self, on: bool) {
@@ -1249,6 +1278,17 @@ impl GB {
     /// when SGB colourization does not apply (not SGB hardware, or the user
     /// asked for plain grayscale) and the caller should use its mono ramp.
     fn sgb_presentation_shades(&self) -> Option<[[u8; 3]; 4]> {
+        self.sgb_presentation_shades_rgb555().map(|p| {
+            p.map(|w| {
+                let (r, g, b) = ppu::controller::rgb555_to_rgb888(w);
+                [r, g, b]
+            })
+        })
+    }
+
+    /// [`sgb_presentation_shades`](Self::sgb_presentation_shades) in the
+    /// RGB555 domain the SGB border compositor works in.
+    fn sgb_presentation_shades_rgb555(&self) -> Option<[u16; 4]> {
         if !matches!(self.hardware, Hardware::SGB | Hardware::SGB2) {
             return None;
         }
@@ -1258,7 +1298,8 @@ impl GB {
         }
         let new_licensee = [self.mmio.read(0x0144), self.mmio.read(0x0145)];
         let old_licensee = self.mmio.read(0x014B);
-        self.sgb_palette.shades(&title, old_licensee, new_licensee)
+        self.sgb_palette
+            .shades_rgb555(&title, old_licensee, new_licensee)
     }
 
     /// Set the host TV region. Only an SGB1 changes behaviour (its clock is the
@@ -1366,7 +1407,14 @@ impl GB {
     /// SGB borders call it after `run_until_frame` returns a frame; see
     /// `ppu::SGB_FRAME_WIDTH/HEIGHT`.
     pub fn sgb_composited_frame(&self) -> Option<Box<[u8; ppu::SGB_FRAME_SIZE * 3]>> {
-        self.ppu.sgb_composited_frame(&self.mmio)
+        // Before the game sends a palette command the centre is uncolorized;
+        // feed the compositor the system palette the firmware would have
+        // picked for this cart so it matches the plain 160x144 presentation
+        // (which takes the same choice via `sgb_presentation_shades`).
+        let uncolorized = self
+            .sgb_presentation_shades_rgb555()
+            .unwrap_or(ppu::controller::SGB_BOOT_SHADES);
+        self.ppu.sgb_composited_frame(&self.mmio, uncolorized)
     }
 
     pub fn set_cgb_color_conversion(&mut self, conversion: ppu::ColorCorrection) {
@@ -2857,5 +2905,142 @@ mod clock_tests {
         // The serial link stall timeout is denominated in dots (4 frames), not
         // seconds, so it too is model-independent.
         assert_eq!(crate::serial::LINK_STALL_TIMEOUT_CC, 4 * 70224);
+    }
+}
+
+#[cfg(test)]
+mod sgb_default_border_tests {
+    //! The SGB's own power-on border, decompressed at runtime from the user's
+    //! SNES-side firmware dump (see [`crate::sgb_firmware`]). A real Super
+    //! Game Boy shows this until the running game replaces it with CHR_TRN +
+    //! PCT_TRN.
+    //!
+    //! No artwork is embedded in the repo, so the firmware-backed tests are
+    //! skip-if-absent (mirroring `cgb_compat_palette::tables_match_cgb_boot_bin`)
+    //! and pin only shapes and a hash, never bytes.
+    use super::*;
+    use crate::sgb_firmware;
+
+    /// `[sgb1, sgb2]` paired with the model each drives, or empty when the
+    /// user has no dumps.
+    fn firmwares() -> Vec<(Vec<u8>, Hardware)> {
+        sgb_firmware::firmware_test::dumps()
+            .into_iter()
+            .zip([Hardware::SGB, Hardware::SGB2])
+            .collect()
+    }
+
+    fn machine(hardware: Hardware) -> GB {
+        let mut gb = GB::new(hardware);
+        gb.insert(cartridge::Cartridge::from_bytes(&vec![0u8; 0x8000]).unwrap());
+        gb.skip_bios();
+        gb
+    }
+
+    /// FNV-1a 64. Only used to pin decoded output without storing any of it.
+    fn digest(border: &sgb_firmware::SgbBorder) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let bytes = border
+            .tiles
+            .iter()
+            .copied()
+            .chain(border.map.iter().copied())
+            .chain(border.pals.iter().flat_map(|w| w.to_le_bytes()));
+        for b in bytes {
+            h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01B3);
+        }
+        h
+    }
+
+    /// Without firmware an SGB has no border and frontends fall back to the
+    /// plain 160x144 frame — today's behaviour, unchanged.
+    #[test]
+    fn no_firmware_means_no_border() {
+        for hw in [Hardware::SGB, Hardware::SGB2] {
+            let gb = machine(hw);
+            assert!(!gb.has_sgb_firmware());
+            assert!(gb.sgb().expect("SGB receiver").border().is_none());
+            assert!(gb.sgb_composited_frame().is_none(), "{hw:?}");
+        }
+    }
+
+    /// Loading the firmware seeds the system border, in the exact shape
+    /// `Sgb::border()`'s size gate wants: the 3488-byte (SGB1) / 4096-byte
+    /// (SGB2) tileset zero-padded to 0x2000, the full 0x800 tilemap, and all
+    /// eight SNES BG palettes.
+    #[test]
+    fn firmware_seeds_the_system_border() {
+        for (rom, hw) in firmwares() {
+            let mut gb = machine(hw);
+            gb.load_sgb_firmware_bytes(&rom)
+                .unwrap_or_else(|e| panic!("{hw:?} firmware rejected: {e}"));
+            assert!(gb.has_sgb_firmware());
+
+            let (tiles, map, pals) = gb.sgb().unwrap().border().expect("system border");
+            assert_eq!(tiles.len(), sgb_firmware::BORDER_TILES_LEN, "{hw:?}");
+            assert_eq!(map.len(), sgb_firmware::BORDER_MAP_LEN, "{hw:?}");
+            assert_eq!(pals.len(), sgb_firmware::BORDER_PAL_COLORS, "{hw:?}");
+            // The tail past the real tileset is padding, i.e. transparent.
+            let used = if hw == Hardware::SGB { 3488 } else { 4096 };
+            assert!(tiles[used..].iter().all(|&b| b == 0), "{hw:?} padding");
+            assert!(tiles[..used].iter().any(|&b| b != 0), "{hw:?} has artwork");
+
+            // ...and the frontends' composite is now available.
+            let frame = gb.sgb_composited_frame().expect("composited frame");
+            assert_eq!(frame.len(), ppu::SGB_FRAME_SIZE * 3);
+        }
+    }
+
+    /// The decoded border is pinned by hash, so a regression in the SGB1-LZ
+    /// decoder or in the asset offsets is caught without any artwork entering
+    /// the repo. Both models must decode to distinct borders.
+    #[test]
+    fn decoded_border_is_stable() {
+        let fws = firmwares();
+        if fws.is_empty() {
+            return;
+        }
+        // Cross-checked against an independent Python implementation of the
+        // $01:D6BB format: same digest, so the decoder agrees byte-for-byte.
+        const GOLDEN: [u64; 2] = [3_328_962_800_932_883_815, 656_769_387_348_559_691];
+        let mut seen = Vec::new();
+        for ((rom, hw), want) in fws.iter().zip(GOLDEN) {
+            let border = sgb_firmware::extract_border(rom).expect("border decodes");
+            let got = digest(&border);
+            assert_eq!(got, want, "{hw:?} decoded border digest");
+            seen.push(got);
+        }
+        assert_ne!(seen[0], seen[1], "SGB1 and SGB2 ship different borders");
+    }
+
+    /// The firmware border must not be mistaken for the boot-ROM path: the
+    /// two validators are independent and each rejects the other's images.
+    #[test]
+    fn firmware_and_boot_rom_paths_are_separate() {
+        let mut gb = machine(Hardware::SGB);
+        // A boot-ROM-sized image is not SGB firmware.
+        assert!(gb.load_sgb_firmware_bytes(&[0u8; 256]).is_err());
+        assert!(gb.load_sgb_firmware_bytes(&[0u8; 2304]).is_err());
+        assert!(!gb.has_sgb_firmware());
+        // ...and firmware-sized garbage is rejected by the CRC gate.
+        assert!(
+            gb.load_sgb_firmware_bytes(&vec![0u8; sgb_firmware::SGB1_FIRMWARE_LEN])
+                .is_err()
+        );
+        assert!(gb.sgb().unwrap().border().is_none());
+    }
+
+    /// Loading the firmware onto a DMG/CGB is accepted but inert: there is no
+    /// SGB receiver to hold a border and nothing about the machine changes.
+    #[test]
+    fn non_sgb_hardware_ignores_the_firmware() {
+        let fws = firmwares();
+        if fws.is_empty() {
+            return;
+        }
+        let mut gb = machine(Hardware::CGB);
+        gb.load_sgb_firmware_bytes(&fws[0].0).expect("accepted");
+        assert!(gb.sgb().is_none());
+        assert!(gb.sgb_composited_frame().is_none());
     }
 }
