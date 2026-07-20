@@ -1208,7 +1208,7 @@ impl Addressable for Audio {
                     // value a while-off NRx1 write loaded afterwards, matching
                     // SameBoy's `!GB_is_cgb(gb) && (value & 0x80)` restore. The
                     // expiry targets stay disarmed: the NRx4 zero-writes above
-                    // already set them to LEN_DISABLED, and none of these
+                    // already set them to COUNTER_DISABLED, and none of these
                     // setters rearm one.
                     self.channel1.set_length_counter(0);
                     self.channel2.set_length_counter(0);
