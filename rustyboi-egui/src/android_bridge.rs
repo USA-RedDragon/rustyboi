@@ -56,6 +56,12 @@ struct Handlers {
     toast: Option<ToastHandler>,
 }
 
+// Poison-recovering per the tree-wide convention (see `rustyboi_core_lib::ir`).
+// This is the cascade's worst case: the accessors below invoke a handler *while
+// holding the guard*, so one panicking platform callback would poison the lock
+// and permanently brick every file pick, save, scan and toast for the rest of
+// the process. The guarded value is a registry of independent handler slots
+// that a panic in a handler cannot corrupt, so recovery is exactly right.
 static HANDLERS: Mutex<Handlers> = Mutex::new(Handlers {
     pick: None,
     save: None,
@@ -68,7 +74,7 @@ static HANDLERS: Mutex<Handlers> = Mutex::new(Handlers {
 
 /// Install the platform-provided handlers. Call once from `android_main`.
 pub fn install(pick: PickFileHandler, save: SaveFileHandler) {
-    let mut h = HANDLERS.lock().expect("android_bridge handlers poisoned");
+    let mut h = HANDLERS.lock().unwrap_or_else(|e| e.into_inner());
     h.pick = Some(pick);
     h.save = Some(save);
 }
@@ -81,14 +87,14 @@ pub fn install_library(
     scan: ScanHandler,
     load_rom: LoadRomHandler,
 ) {
-    let mut h = HANDLERS.lock().expect("android_bridge handlers poisoned");
+    let mut h = HANDLERS.lock().unwrap_or_else(|e| e.into_inner());
     h.pick_tree = Some(pick_tree);
     h.scan = Some(scan);
     h.load_rom = Some(load_rom);
 }
 
 pub(crate) fn pick_file(callback: PickFileCallback) {
-    let h = HANDLERS.lock().expect("android_bridge handlers poisoned");
+    let h = HANDLERS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(pick) = h.pick.as_ref() {
         pick(callback);
     } else {
@@ -98,7 +104,7 @@ pub(crate) fn pick_file(callback: PickFileCallback) {
 }
 
 pub(crate) fn save_file(file_name: Option<String>, callback: SaveFileCallback) {
-    let h = HANDLERS.lock().expect("android_bridge handlers poisoned");
+    let h = HANDLERS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(save) = h.save.as_ref() {
         save(file_name, callback);
     } else {
@@ -109,7 +115,7 @@ pub(crate) fn save_file(file_name: Option<String>, callback: SaveFileCallback) {
 /// Ask the platform layer to launch the SAF tree picker. Result lands
 /// on the supplied callback asynchronously.
 pub fn pick_tree(callback: TreePickCallback) {
-    let h = HANDLERS.lock().expect("android_bridge handlers poisoned");
+    let h = HANDLERS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(handler) = h.pick_tree.as_ref() {
         handler(callback);
     } else {
@@ -119,7 +125,7 @@ pub fn pick_tree(callback: TreePickCallback) {
 
 /// Ask the platform layer to scan the given SAF tree URI for ROMs.
 pub fn scan_library(tree_uri: String, callback: ScanCallback) {
-    let h = HANDLERS.lock().expect("android_bridge handlers poisoned");
+    let h = HANDLERS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(handler) = h.scan.as_ref() {
         handler(tree_uri, callback);
     } else {
@@ -132,7 +138,7 @@ pub fn scan_library(tree_uri: String, callback: ScanCallback) {
 /// ROM bytes, locating/creating the sibling `.sav`, and (on success)
 /// stashing the SAV fd before invoking the callback.
 pub fn load_rom_from_uri(uri: String, callback: LoadRomCallback) {
-    let h = HANDLERS.lock().expect("android_bridge handlers poisoned");
+    let h = HANDLERS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(handler) = h.load_rom.as_ref() {
         handler(uri, callback);
     } else {
@@ -142,14 +148,14 @@ pub fn load_rom_from_uri(uri: String, callback: LoadRomCallback) {
 
 /// Install the soft-keyboard handler. Call once from `android_main`.
 pub fn install_ime(handler: ImeHandler) {
-    let mut h = HANDLERS.lock().expect("android_bridge handlers poisoned");
+    let mut h = HANDLERS.lock().unwrap_or_else(|e| e.into_inner());
     h.ime = Some(handler);
 }
 
 /// Request that the on-screen keyboard be shown (`true`) or hidden
 /// (`false`). No-op if the IME handler hasn't been installed yet.
 pub fn set_ime_visible(visible: bool) {
-    let h = HANDLERS.lock().expect("android_bridge handlers poisoned");
+    let h = HANDLERS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(handler) = h.ime.as_ref() {
         handler(visible);
     }
@@ -157,7 +163,7 @@ pub fn set_ime_visible(visible: bool) {
 
 /// Install the toast handler. Call once from `android_main`.
 pub fn install_toast(handler: ToastHandler) {
-    let mut h = HANDLERS.lock().expect("android_bridge handlers poisoned");
+    let mut h = HANDLERS.lock().unwrap_or_else(|e| e.into_inner());
     h.toast = Some(handler);
 }
 
@@ -165,7 +171,7 @@ pub fn install_toast(handler: ToastHandler) {
 /// toast handler hasn't been installed yet (e.g. before `android_main`
 /// has finished wiring the bridge).
 pub fn show_toast(message: impl Into<String>) {
-    let h = HANDLERS.lock().expect("android_bridge handlers poisoned");
+    let h = HANDLERS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(handler) = h.toast.as_ref() {
         handler(message.into());
     }

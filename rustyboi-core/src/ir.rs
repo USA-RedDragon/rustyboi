@@ -50,14 +50,27 @@ impl IrLink {
         )
     }
 
+    // POISON CONVENTION (tree-wide). A `Mutex`/`RwLock` guarding *plain data* is
+    // unlocked with `unwrap_or_else(|e| e.into_inner())`, never `unwrap()`/
+    // `expect()`. Rationale: `unwrap()` turns one unrelated panic into a
+    // permanent cascade — every later lock panics too, so a transient failure
+    // anywhere leaves a dead emulator. Recovery is only correct when a panic
+    // mid-update cannot leave the guarded value inconsistent: here the value is
+    // two independent `bool`s written one at a time, so the worst a torn update
+    // can produce is a stale emitter level that the next publish overwrites.
+    //
+    // Do NOT apply this to state with a multi-step invariant — see
+    // `crate::serial::LinkPeer` and `crate::dmg07::Dmg07`, which deliberately
+    // keep `unwrap()` and explain why. Those are survivors, not oversights.
+
     /// Publish this port's emitter level (RP bit 0).
     fn publish(&self, led_on: bool) {
-        self.channel.lock().unwrap().led[self.side] = led_on;
+        self.channel.lock().unwrap_or_else(|e| e.into_inner()).led[self.side] = led_on;
     }
 
     /// True while the peer's emitter is lit (this port's received signal).
     fn peer_lit(&self) -> bool {
-        self.channel.lock().unwrap().led[self.side ^ 1]
+        self.channel.lock().unwrap_or_else(|e| e.into_inner()).led[self.side ^ 1]
     }
 }
 
@@ -135,6 +148,29 @@ mod tests {
         let d = IrDevice::Loopback;
         assert!(d.receiving(true));
         assert!(!d.receiving(false));
+    }
+
+    /// The poison convention above, exercised: a panic that unwinds while the
+    /// channel lock is held must not brick every later access.
+    #[test]
+    fn poisoned_channel_still_serves_both_ends() {
+        let (a, b) = IrLink::pair();
+        // Poison the shared channel exactly as an unrelated panic would: unwind
+        // out of a thread that is holding the guard.
+        let channel = a.channel.clone();
+        let joined = std::thread::spawn(move || {
+            let _guard = channel.lock().unwrap();
+            panic!("unrelated failure while holding the IR channel");
+        })
+        .join();
+        assert!(joined.is_err(), "the helper thread must actually have panicked");
+        assert!(a.channel.is_poisoned(), "the channel must actually be poisoned");
+
+        // Pre-fix this panicked; the port must keep working instead.
+        a.publish(true);
+        assert!(b.peer_lit(), "B must still see A's emitter through a poisoned lock");
+        a.publish(false);
+        assert!(!b.peer_lit(), "and must still see it go dark");
     }
 
     #[test]

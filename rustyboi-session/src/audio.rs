@@ -35,7 +35,38 @@ impl AudioOutput for CaptureSink {
     fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
+    // Poison-recovering per the tree-wide convention (see `rustyboi_core_lib::ir`):
+    // the buffer is plain accumulated samples, so the worst a panic mid-append
+    // can leave is a partial frame's audio that the next drain clears. Bricking
+    // every later frame's audio on an unrelated panic would be far worse.
     fn add_samples(&mut self, samples: &[(f32, f32)]) {
-        self.buf.lock().unwrap().extend_from_slice(samples);
+        self.buf.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(samples);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A panic elsewhere must not permanently silence audio capture.
+    #[test]
+    fn poisoned_buffer_still_captures() {
+        let buf: SampleBuf = Arc::new(Mutex::new(Vec::new()));
+        let poisoner = Arc::clone(&buf);
+        let joined = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("unrelated failure while holding the sample buffer");
+        })
+        .join();
+        assert!(joined.is_err(), "the helper thread must actually have panicked");
+        assert!(buf.is_poisoned(), "the buffer must actually be poisoned");
+
+        // Pre-fix this panicked, permanently killing audio for the session.
+        let mut sink = CaptureSink::new(Arc::clone(&buf));
+        sink.add_samples(&[(0.25, -0.25), (0.5, -0.5)]);
+        assert_eq!(
+            *buf.lock().unwrap_or_else(|e| e.into_inner()),
+            vec![(0.25, -0.25), (0.5, -0.5)]
+        );
     }
 }

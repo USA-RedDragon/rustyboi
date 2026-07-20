@@ -262,6 +262,13 @@ impl FourPlayerPort {
 
     /// The adapter clocks the port whenever it is armed for an external-clock
     /// transfer: run one exchange and hand back the adapter's byte.
+    // POISON SURVIVOR — the `unwrap()` is deliberate; do NOT convert it to the
+    // `into_inner()` recovery used for plain data (see `crate::ir::IrLink`).
+    // `Dmg07` is a protocol state machine: one `exchange` advances `phase`, the
+    // per-port `pos` cursors, the AA/FF run counters and the `prev`/`cur`
+    // packet double-buffer together. A panic unwinding mid-exchange can leave
+    // the cursor advanced but the phase un-transitioned, and recovering would
+    // silently broadcast misaligned packets to all four players. Fail fast.
     pub fn clock(&mut self) -> u8 {
         self.hub.lock().unwrap().exchange(self.player, self.reply)
     }

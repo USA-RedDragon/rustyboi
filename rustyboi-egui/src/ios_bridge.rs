@@ -17,17 +17,20 @@ use super::actions::FileData;
 pub type PickFileCallback = Box<dyn FnOnce(Option<FileData>) + Send + 'static>;
 pub type PickFileHandler = Box<dyn Fn(PickFileCallback) + Send + Sync + 'static>;
 
+// Poison-recovering per the tree-wide convention (see `rustyboi_core_lib::ir`);
+// `pick_file` invokes the handler while holding the guard, so a panicking
+// handler would otherwise brick the picker permanently. Plain handler slot.
 static HANDLER: Mutex<Option<PickFileHandler>> = Mutex::new(None);
 
 /// Install the platform-provided pick-file handler. Call once from `run_ios`.
 pub fn install(pick: PickFileHandler) {
-    *HANDLER.lock().expect("ios_bridge handler poisoned") = Some(pick);
+    *HANDLER.lock().unwrap_or_else(|e| e.into_inner()) = Some(pick);
 }
 
 /// Ask the platform layer to present the document picker. The picked file's
 /// bytes land on `callback` (or `None` if cancelled / no handler installed).
 pub(crate) fn pick_file(callback: PickFileCallback) {
-    let h = HANDLER.lock().expect("ios_bridge handler poisoned");
+    let h = HANDLER.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(pick) = h.as_ref() {
         pick(callback);
     } else {
