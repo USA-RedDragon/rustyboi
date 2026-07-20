@@ -806,9 +806,11 @@ impl Audio {
         self.channel4.set_len_cc(base);
     }
 
-    /// Record the CGB/DMG flag (and seed it into channel 4) before the boot
-    /// `sync_cc` anchors the APU clock, so the post-boot clock high-bit
-    /// constant is chosen correctly.
+    /// Record the CGB/DMG flag (and seed it into channel 4). Called from
+    /// `GB::new`, before any audio write can anchor the SPU clock, so the
+    /// post-boot clock high-bit constant, the DMG-only NRx1-writable-while-off
+    /// exception, and channel 4's DMG deferred-trigger fork are right on
+    /// every boot path (skip_bios AND the real boot ROM).
     pub(crate) fn set_boot_cgb(&mut self, cgb: bool) {
         self.boot_cgb = cgb;
         self.channel4.set_cgb(cgb);
@@ -897,7 +899,15 @@ impl Audio {
             self.channel1.set_enabled(false);
         }
 
-        self.channel2.set_length_counter(0x40);
+        // Hardware post-boot length counters: the boot ROMs write no NRx1 but
+        // NR11 (=0x80, loading CH1's 64 — seeded in set_post_bios_ch1 above),
+        // so CH2/CH3/CH4 hold the power-on value 0. A later trigger with
+        // length enabled reloads a 0 counter to its max (64/256/64). Seeded
+        // explicitly so no skip_bios boot-table write can leak a DMG
+        // while-off length load into the hidden counters.
+        self.channel2.set_length_counter(0);
+        self.channel3.set_length_counter(0);
+        self.channel4.set_length_counter(0);
     }
 
     /// Clock the frame sequencer one step. Called by the timer at the exact dot
