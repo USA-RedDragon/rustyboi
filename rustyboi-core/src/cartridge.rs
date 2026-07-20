@@ -1995,52 +1995,65 @@ impl Cartridge {
     /// Returns the number of bytes actually copied (truncated to the
     /// cart's RAM size). No-op for non-battery carts.
     pub fn load_sram_bytes(&mut self, bytes: &[u8]) -> Result<usize, io::Error> {
-        if !self.has_battery() {
+        if !self.has_battery() || self.save_ram().is_empty() {
             return Ok(0);
         }
-        let copied = match self.get_cartridge_type() {
-            CartridgeType::MBC2 { .. } => {
-                let n = bytes.len().min(self.mbc2_ram.len());
-                self.mbc2_ram[..n].copy_from_slice(&bytes[..n]);
-                // MBC2 stores 4-bit nibbles; mask to be safe.
-                for b in &mut self.mbc2_ram[..n] {
-                    *b &= 0x0F;
-                }
-                n
-            }
-            _ => {
-                if self.ram_data.is_empty() {
-                    return Ok(0);
-                }
-                let n = bytes.len().min(self.ram_data.len());
-                self.ram_data[..n].copy_from_slice(&bytes[..n]);
-                n
-            }
-        };
+        let copied = self.load_save_image(bytes);
         // If a save file is attached, flush the current RAM image so the
         // internal sidecar mirrors the freshly-loaded state.
+        self.flush_save_image()?;
+        Ok(copied)
+    }
+
+    /// Copy a save image into the cart's battery-backed buffer — MBC2's
+    /// built-in array or the external RAM banks — and report the bytes taken.
+    /// The single load policy behind every save-attachment path:
+    ///
+    /// Only the RAM-sized prefix is taken. An oversized file is legitimate for
+    /// the de-facto RTC-carrying `.sav` (an appended footer, read separately by
+    /// `read_sav_rtc_footer`), and for the rest it is still the safer of the
+    /// options: `attach_save_file_at` opens the file for streaming writes
+    /// whether or not it loaded anything, so refusing to load never actually
+    /// protected the bytes — it only discarded the user's save as well. Callers
+    /// that want a mis-picked file rejected outright go through
+    /// `import_save_ram`, which bounds the size before delegating here.
+    ///
+    /// MBC2 nibble masking is not cosmetic. The built-in RAM is physically
+    /// 512 x 4 bits: the upper nibble has no storage cell on the die, which is
+    /// why the read path returns `0xF0 | nibble` for the undriven lines. Masking
+    /// on load keeps `save_ram()` exports and the streamed sidecar (whose
+    /// `write_mbc2_ram_byte` already masks) from carrying bits the silicon
+    /// cannot hold.
+    fn load_save_image(&mut self, bytes: &[u8]) -> usize {
+        let is_mbc2 = matches!(self.get_cartridge_type(), CartridgeType::MBC2 { .. });
+        let dst = self.save_ram_mut();
+        let n = bytes.len().min(dst.len());
+        dst[..n].copy_from_slice(&bytes[..n]);
+        if is_mbc2 {
+            for b in &mut dst[..n] {
+                *b &= 0x0F;
+            }
+        }
+        n
+    }
+
+    /// Rewrite the whole attached sidecar from the live save RAM. No-op when
+    /// no save file is attached.
+    fn flush_save_image(&mut self) -> Result<(), io::Error> {
         let is_mbc2 = matches!(self.get_cartridge_type(), CartridgeType::MBC2 { .. });
         if let Some(ref mut file) = self.save_file {
             file.seek(SeekFrom::Start(0))?;
+            // Disjoint field borrows: `save_ram()` would re-borrow all of self.
             let buf: &[u8] = if is_mbc2 { &self.mbc2_ram } else { &self.ram_data };
             file.write_all(buf)?;
             file.flush()?;
         }
-        Ok(copied)
+        Ok(())
     }
 
     fn attach_save_file_at(&mut self, save_path: &Path) -> Result<(), io::Error> {
         // Only process save files for cartridges with battery-backed RAM
-        if !self.has_battery() || self.host_managed_saves {
-            return Ok(());
-        }
-
-        // For MBC2, we need to save the built-in RAM instead of external RAM
-        let save_data_is_empty = match self.get_cartridge_type() {
-            CartridgeType::MBC2 { .. } => self.mbc2_ram.is_empty(),
-            _ => self.ram_data.is_empty(),
-        };
-        if save_data_is_empty {
+        if !self.has_battery() || self.host_managed_saves || self.save_ram().is_empty() {
             return Ok(());
         }
 
@@ -2053,36 +2066,10 @@ impl Cartridge {
             }
 
         if save_path.exists() {
-            // Load existing save file
             let loaded_data = fs::read(save_path)?;
-            match self.get_cartridge_type() {
-                CartridgeType::MBC2 { .. } => {
-                    if loaded_data.len() <= self.mbc2_ram.len() {
-                        self.mbc2_ram[..loaded_data.len()].copy_from_slice(&loaded_data);
-                        println!("Loaded MBC2 save file: {}", save_path.display());
-                    }
-                }
-                _ => {
-                    // A file larger than the cart RAM is normal: the de-facto
-                    // RTC-carrying `.sav` format appends an RTC footer (read
-                    // separately by `read_sav_rtc_footer`). Load the RAM-sized prefix.
-                    let n = loaded_data.len().min(self.ram_data.len());
-                    self.ram_data[..n].copy_from_slice(&loaded_data[..n]);
-                    println!("Loaded save file: {}", save_path.display());
-                }
-            }
+            self.load_save_image(&loaded_data);
         } else {
-            // Create new save file with current RAM data
-            match self.get_cartridge_type() {
-                CartridgeType::MBC2 { .. } => {
-                    fs::write(save_path, &self.mbc2_ram)?;
-                    println!("Created new MBC2 save file: {}", save_path.display());
-                }
-                _ => {
-                    fs::write(save_path, &self.ram_data)?;
-                    println!("Created new save file: {}", save_path.display());
-                }
-            }
+            fs::write(save_path, self.save_ram())?;
         }
 
         // Open file handle for efficient streaming writes
@@ -6019,6 +6006,85 @@ mod tests {
         assert!(Cartridge::reconstruct_trimmed_mbc1m(&single).is_none());
         let cart = Cartridge::from_bytes(&single).unwrap();
         assert!(!cart.mbc1_multicart);
+    }
+
+    fn save_test_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rustyboi-{tag}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// MBC2's built-in RAM is physically 512 x 4 bits, so the upper nibble has
+    /// no storage cell. Every load path must mask it off, or `save_ram()`
+    /// exports and the streamed sidecar carry bits the silicon cannot hold —
+    /// and the two entry points must agree byte-for-byte.
+    #[test]
+    fn mbc2_save_loads_mask_to_four_bits_on_every_path() {
+        let image: Vec<u8> = (0..MBC2_RAM_SIZE).map(|i| (i as u8) | 0xF0).collect();
+
+        // Bytes entry point.
+        let mut via_bytes = Cartridge::from_bytes(&make_rom(MBC2_BATTERY, 0x00)).unwrap();
+        via_bytes.load_sram_bytes(&image).unwrap();
+        assert!(
+            via_bytes.save_ram().iter().all(|&b| b & 0xF0 == 0),
+            "load_sram_bytes left MBC2 upper nibbles set"
+        );
+
+        // Path entry point.
+        let dir = save_test_dir("mbc2-mask");
+        let sav = dir.join("game.sav");
+        fs::write(&sav, &image).unwrap();
+        let mut via_path = Cartridge::from_bytes(&make_rom(MBC2_BATTERY, 0x00)).unwrap();
+        via_path.attach_save_file(&sav).unwrap();
+        assert!(
+            via_path.save_ram().iter().all(|&b| b & 0xF0 == 0),
+            "attach_save_file left MBC2 upper nibbles set"
+        );
+
+        assert_eq!(via_bytes.save_ram(), via_path.save_ram());
+        // The masking is emulation-invisible (the read path re-masks the
+        // undriven upper lines), but the exported image is what the user's
+        // .sav ends up holding. RAMG must be open for the array to answer.
+        via_path.write(0x0000, 0x0A);
+        assert_eq!(via_path.read(0xA001), 0xF0 | (image[1] & 0x0F));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An oversized save loads its RAM-sized prefix rather than being silently
+    /// discarded — including on MBC2, which used to skip the file entirely
+    /// while still opening it for streaming writes.
+    #[test]
+    fn oversized_save_loads_prefix_instead_of_being_skipped() {
+        let dir = save_test_dir("oversize");
+
+        // MBC2: 512-byte array, hand it 512 + a trailing footer.
+        let mut image: Vec<u8> = vec![0x03; MBC2_RAM_SIZE];
+        image.extend_from_slice(&[0xAB; 64]);
+        let sav = dir.join("mbc2.sav");
+        fs::write(&sav, &image).unwrap();
+        let mut cart = Cartridge::from_bytes(&make_rom(MBC2_BATTERY, 0x00)).unwrap();
+        cart.attach_save_file(&sav).unwrap();
+        assert!(
+            cart.save_ram().iter().all(|&b| b == 0x03),
+            "oversized MBC2 save was skipped instead of prefix-loaded"
+        );
+
+        // Non-MBC2 keeps its long-standing prefix behavior (the de-facto
+        // RTC-footer .sav format depends on it).
+        let mut image: Vec<u8> = vec![0x5A; 0x2000];
+        image.extend_from_slice(&[0xCD; 48]);
+        let sav = dir.join("mbc3.sav");
+        fs::write(&sav, &image).unwrap();
+        let mut cart = Cartridge::from_bytes(&make_rom(MBC3_RAM_BATTERY, 0x02)).unwrap();
+        cart.attach_save_file(&sav).unwrap();
+        assert!(cart.save_ram()[..0x2000].iter().all(|&b| b == 0x5A));
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     /// Build an in-memory zip from (name, bytes) members.
