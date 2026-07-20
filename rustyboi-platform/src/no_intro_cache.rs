@@ -24,7 +24,7 @@ fn cache_filename(url: &str) -> &str {
 
 /// Persist a downloaded DAT `body` for `url`. Best-effort: a write failure just
 /// means we re-download next launch.
-pub fn store(base: &Path, url: &str, body: &str) {
+pub(crate) fn store(base: &Path, url: &str, body: &str) {
     let d = dir(base);
     if std::fs::create_dir_all(&d).is_ok() {
         let _ = std::fs::write(d.join(cache_filename(url)), body);
@@ -34,7 +34,7 @@ pub fn store(base: &Path, url: &str, body: &str) {
 /// Split `urls` into `(cached bodies, urls still needing a download)`. A URL whose
 /// cache file exists and reads back is served from disk; the rest are returned for
 /// the caller to fetch (and later [`store`]).
-pub fn split_cached(base: &Path, urls: &[String]) -> (Vec<String>, Vec<String>) {
+pub(crate) fn split_cached(base: &Path, urls: &[String]) -> (Vec<String>, Vec<String>) {
     let d = dir(base);
     let mut cached = Vec::new();
     let mut missing = Vec::new();

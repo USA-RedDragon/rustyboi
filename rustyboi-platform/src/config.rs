@@ -7,12 +7,12 @@
 use clap::Parser;
 use rustyboi_core_lib::gb;
 
-pub use rustyboi_frontend_lib::DmgPaletteChoice;
-pub use rustyboi_session::SgbPaletteChoice;
+pub(crate) use rustyboi_frontend_lib::DmgPaletteChoice;
+pub(crate) use rustyboi_session::SgbPaletteChoice;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
-pub struct RawConfig {
+pub(crate) struct RawConfig {
     /// BIOS file path, optional
     #[arg(short, long)]
     bios: Option<String>,
@@ -66,7 +66,7 @@ pub struct RawConfig {
     graphics: Option<String>,
 }
 
-pub struct CleanConfig {
+pub(crate) struct CleanConfig {
     // path to BIOS file
     pub bios: Option<String>,
     // path to the SNES-side SGB firmware (None = probe the default location)
@@ -96,7 +96,7 @@ pub struct CleanConfig {
 }
 
 impl RawConfig {
-    pub fn clean(self) -> CleanConfig {
+    pub(crate) fn clean(self) -> CleanConfig {
         let mut _skip_bios = self.skip_bios;
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
