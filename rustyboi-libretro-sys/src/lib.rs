@@ -46,6 +46,7 @@ static mut AUDIO_SAMPLE: retro_audio_sample_t = None;
 static mut INPUT_POLL: retro_input_poll_t = None;
 static mut INPUT_STATE: retro_input_state_t = None;
 static mut RUMBLE: retro_set_rumble_state_t = None;
+static mut LOG: retro_log_printf_t = None;
 // Keeps the built core-option C table alive for the frontend's lifetime.
 static mut OPTIONS: Option<OwnedOptions> = None;
 
@@ -294,6 +295,39 @@ impl Environment {
     pub fn set_rumble(&self, strong: u16, weak: u16) {
         set_rumble(strong, weak);
     }
+    /// Write one line to the frontend's log (RetroArch's log window / file), or
+    /// to stderr when the frontend offers no logging interface.
+    pub fn log(&self, level: LogLevel, msg: &str) {
+        log_line(level, msg);
+    }
+}
+
+/// Severity for [`Environment::log`], mirroring `retro_log_level`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LogLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    fn to_ffi(self) -> retro_log_level {
+        match self {
+            LogLevel::Info => RETRO_LOG_INFO,
+            LogLevel::Warn => RETRO_LOG_WARN,
+            LogLevel::Error => RETRO_LOG_ERROR,
+        }
+    }
+}
+
+/// Log one line through the frontend, else stderr. Always sent as `("%s\n", s)`
+/// so a `%` in the message can never be read as a format directive.
+fn log_line(level: LogLevel, msg: &str) {
+    match (unsafe { *(&raw const LOG) }, CString::new(msg)) {
+        (Some(f), Ok(c)) => unsafe { f(level.to_ffi(), c"%s\n".as_ptr(), c.as_ptr()) },
+        // No frontend logger (or an interior NUL the C side can't carry).
+        _ => eprintln!("[rustyboi] {msg}"),
+    }
 }
 
 /// Drive both rumble motors via the stored interface (0 = off).
@@ -428,6 +462,9 @@ impl OwnedOptions {
 #[doc(hidden)]
 pub fn set_env_cb(cb: retro_environment_t) {
     unsafe { ENV = cb };
+    // The logger is fetched here rather than lazily so it is already in place
+    // for anything the core logs from `set_environment` / `init` onwards.
+    unsafe { LOG = env::get_log_interface(cb) };
 }
 #[doc(hidden)]
 pub fn set_video_cb(cb: retro_video_refresh_t) {
@@ -460,6 +497,7 @@ pub fn clear() {
         INPUT_POLL = None;
         INPUT_STATE = None;
         RUMBLE = None;
+        LOG = None;
         OPTIONS = None;
     }
 }

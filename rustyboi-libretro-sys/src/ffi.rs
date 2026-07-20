@@ -19,6 +19,12 @@ pub type retro_rumble_effect = c_uint;
 pub const RETRO_RUMBLE_STRONG: retro_rumble_effect = 0;
 pub const RETRO_RUMBLE_WEAK: retro_rumble_effect = 1;
 
+// --- log levels ---
+pub type retro_log_level = c_uint;
+pub const RETRO_LOG_INFO: retro_log_level = 1;
+pub const RETRO_LOG_WARN: retro_log_level = 2;
+pub const RETRO_LOG_ERROR: retro_log_level = 3;
+
 // --- device / input ids ---
 pub const RETRO_DEVICE_JOYPAD: c_uint = 1;
 pub const RETRO_DEVICE_ID_JOYPAD_B: c_uint = 0;
@@ -50,6 +56,7 @@ pub const RETRO_ENVIRONMENT_GET_VARIABLE: c_uint = 15;
 pub const RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE: c_uint = 17;
 pub const RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME: c_uint = 18;
 pub const RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE: c_uint = 23;
+pub const RETRO_ENVIRONMENT_GET_LOG_INTERFACE: c_uint = 27;
 pub const RETRO_ENVIRONMENT_SET_GEOMETRY: c_uint = 37;
 pub const RETRO_ENVIRONMENT_SET_MEMORY_MAPS: c_uint = 65572; // 0x10000 EXPERIMENTAL | 36
 pub const RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2: c_uint = 67;
@@ -67,6 +74,10 @@ pub type retro_input_state_t =
     Option<unsafe extern "C" fn(port: c_uint, device: c_uint, index: c_uint, id: c_uint) -> i16>;
 pub type retro_set_rumble_state_t =
     Option<unsafe extern "C" fn(port: c_uint, effect: retro_rumble_effect, strength: u16) -> bool>;
+// The frontend's logger is C-variadic printf; we only ever call it as
+// ("%s\n", cstr), which needs no format parsing on our side.
+pub type retro_log_printf_t =
+    Option<unsafe extern "C" fn(level: retro_log_level, fmt: *const c_char, ...)>;
 
 // --- structs (repr(C), field-for-field with libretro.h) ---
 #[repr(C)]
@@ -147,6 +158,11 @@ pub struct retro_rumble_interface {
     pub set_rumble_state: retro_set_rumble_state_t,
 }
 
+#[repr(C)]
+pub struct retro_log_callback {
+    pub log: retro_log_printf_t,
+}
+
 // --- core options v2 ---
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -192,6 +208,7 @@ mod tests {
     fn environment_command_ids() {
         assert_eq!(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, 65572);
         assert_eq!(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, 0x10000 | 36);
+        assert_eq!(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, 27);
     }
 
     // Joypad button ids are the RETRO_DEVICE_ID_JOYPAD_* ordinals the frontend

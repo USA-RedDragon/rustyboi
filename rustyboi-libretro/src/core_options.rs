@@ -16,6 +16,7 @@ use rustyboi_session::ColorCorrection;
 pub const KEY_HARDWARE: &str = "rustyboi_hardware";
 pub const KEY_REAL_BOOT_ROM: &str = "rustyboi_real_boot_rom";
 pub const KEY_SGB_BORDER: &str = "rustyboi_sgb_border";
+pub const KEY_SGB_SYSTEM_BORDER: &str = "rustyboi_sgb_system_border";
 pub const KEY_DMG_PALETTE: &str = "rustyboi_dmg_palette";
 pub const KEY_GBC_DMG_PALETTE: &str = "rustyboi_gbc_dmg_palette";
 pub const KEY_SGB_PALETTE: &str = "rustyboi_sgb_palette";
@@ -112,6 +113,15 @@ pub fn build() -> CoreOptions {
                 category: "video_settings",
                 values: on_off(),
                 default: OFF.into(),
+            },
+            OptionDef {
+                key: KEY_SGB_SYSTEM_BORDER,
+                desc: "Video > SGB System Border",
+                desc_categorized: "SGB System Border",
+                info: "Show the Super Game Boy's own power-on border until the game supplies one, decoded from your SGB firmware dump (sgb1.sfc / sgb2.sfc) in the frontend's system directory. Without that file nothing changes. Needs 'Super Game Boy Border' on to be visible. Enabling applies at once; disabling takes effect on content reload.",
+                category: "video_settings",
+                values: on_off(),
+                default: ON.into(),
             },
             OptionDef {
                 key: KEY_DMG_PALETTE,

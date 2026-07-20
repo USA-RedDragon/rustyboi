@@ -31,7 +31,16 @@ disk_control = "false"
 is_experimental = "false"
 
 # Firmware / BIOS
-# rustyboi boots without an external BIOS (skip_bios), so no firmware is required.
-firmware_count = 0
+# rustyboi boots without an external BIOS (skip_bios), so nothing here is
+# required. The Super Game Boy dumps are optional and only ever presentational:
+# with one in the system directory the SGB shows its own power-on border (the
+# "SGB System Border" core option) until a game uploads its own.
+firmware_count = 2
+firmware0_desc = "sgb1.sfc (Super Game Boy SNES firmware, optional)"
+firmware0_path = "sgb1.sfc"
+firmware0_opt = "true"
+firmware1_desc = "sgb2.sfc (Super Game Boy 2 SNES firmware, optional)"
+firmware1_path = "sgb2.sfc"
+firmware1_opt = "true"
 
 description = "rustyboi is a cycle-accurate Game Boy / Game Boy Color emulator written in Rust. This libretro core provides video, audio, joypad input, runtime-serialized save states, battery SRAM and MBC3 RTC persistence, Game Genie / GameShark cheats, memory maps for RetroAchievements and RAM tools, MBC5 rumble, and selectable hardware model plus DMG palette and GBC colour-correction options. Sensors (accelerometer / light / microphone) and link-cable multiplayer are unsupported."
