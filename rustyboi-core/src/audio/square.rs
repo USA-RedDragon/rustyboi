@@ -100,6 +100,13 @@ pub(super) struct SquareWave {
     // D/E double-speed trigger-delay placement (see the nr4 trigger below).
     #[serde(default)]
     cgb_de: bool,
+    // AGB (GBA-in-GBC-mode) hardware flag. Only gates the NRx2 zombie
+    // transform, where AGB sides with CGB-D/E (single application) even though
+    // `cgb_de` is false for it (see `nrx2_glitch`). Not serialized: re-seeded
+    // from the state's `hardware` identity by `Mmio::reseed_hardware_flags`,
+    // so adding it leaves the savestate layout untouched.
+    #[serde(skip)]
+    agb: bool,
     // CGB-B-or-earlier APU revision gate (CGB with model <= CGB-B): the NRx4
     // length-glitch extra clock fires regardless of
     // the written bit-6 value (see `length_nr4_change`).
@@ -233,6 +240,7 @@ impl SquareWave {
             lf_div: 1,
             ds: false,
             cgb_de: false,
+            agb: false,
             cgb_le_b: false,
             pcm_c_glitch: false,
             step_back_parity: false,
@@ -276,6 +284,11 @@ impl SquareWave {
     /// CGB-D/E APU revision gate (model newer than CGB-C).
     pub(super) fn set_cgb_de(&mut self, de: bool) {
         self.cgb_de = de;
+    }
+
+    /// AGB hardware flag; see the `agb` field and `nrx2_glitch`.
+    pub(super) fn set_agb(&mut self, agb: bool) {
+        self.agb = agb;
     }
 
     /// CGB-B-or-earlier APU revision gate (CGB with model <= CGB-B).

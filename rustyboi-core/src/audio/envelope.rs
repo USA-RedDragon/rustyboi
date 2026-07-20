@@ -8,7 +8,8 @@
 //! six shared helpers directly into each channel `impl`. Both expansions are
 //! the same tokens, so the two channels stay bit-for-bit identical by
 //! construction. Each host `impl` must provide `nr2(&self) -> u8` and
-//! `is_active(&self) -> bool` and carry the six envelope fields plus `cgb`.
+//! `is_active(&self) -> bool` and carry the six envelope fields plus the three
+//! hardware-identity flags the zombie fork reads (`cgb`, `cgb_de`, `agb`).
 
 macro_rules! impl_envelope_unit {
     () => {
@@ -63,12 +64,16 @@ macro_rules! impl_envelope_unit {
             }
         }
 
-        /// The NRx2 zombie glitch: CGB-D/E apply the transform once; older
-        /// revisions (and DMG) pass through an FF intermediate value, applying
-        /// it twice. rustyboi's CGB target follows the SameSuite-calibrated D/E
-        /// behavior; DMG takes the pre-CGB double application.
+        /// The NRx2 zombie glitch, forked by silicon revision: DMG-class
+        /// silicon and CGB revisions 0/A/B/C pass the write through an 0xFF
+        /// intermediate, applying the transform TWICE; CGB-D/E and AGB apply it
+        /// once. SameBoy forks identically on `model <= GB_MODEL_CGB_C`
+        /// (Core/apu.c), and its model order (Core/model.h) places AGB_A above
+        /// CGB_E — so AGB takes the single application even though `cgb_de`
+        /// (which means "CGB-D/E silicon") is false for it, hence the explicit
+        /// `agb` term rather than a bare `!cgb_de`.
         fn nrx2_glitch(&mut self, value: u8, old: u8) {
-            if self.cgb {
+            if self.cgb && (self.cgb_de || self.agb) {
                 self.nrx2_glitch_step(value, old);
             } else {
                 self.nrx2_glitch_step(0xFF, old);

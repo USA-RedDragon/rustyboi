@@ -454,10 +454,12 @@ impl GB {
         // CGB-C-and-older PCM read glitch (CGB silicon at revision C or older).
         // Real CPU-CGB-C silicon has it too, but the default
         // CGB model intentionally keeps the SameSuite-calibrated D/E-clean
-        // reads (same convention as the nrx2 zombie glitch): the internal
-        // SameSuite rows for the non-revision-suffixed channel tests grade
-        // against tables real CGB-C fails, and no cgb04c capture
-        // pins the glitch. Only the explicit pre-C revisions consume it.
+        // reads: the internal SameSuite rows for the non-revision-suffixed
+        // channel tests grade against tables real CGB-C fails, and no cgb04c
+        // capture pins the glitch. Only the explicit pre-C revisions consume
+        // it. (The nrx2 zombie glitch used to share this convention; it no
+        // longer does — it forks on the true revision boundary, with the
+        // SameSuite zombie rows pinned to rev=cgbe instead. See `nrx2_glitch`.)
         mmio.set_apu_pcm_c_glitch(matches!(hardware, Hardware::CGB0 | Hardware::CGBB));
         // NRx4 square step-back parity gate (all revisions except CGB-D/E):
         // CGB-C-and-earlier AND AGB gate the step-back on

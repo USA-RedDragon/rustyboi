@@ -6,6 +6,9 @@
 #
 #   dmg        -> .gb  (no -C)
 #   cgb, agb   -> .gbc (-C)
+#   cgbe       -> .gbc (-C) the same CGB cart, but run on CPU-CGB-D/E silicon.
+#                 For the CGB-side of a CGB revision asymmetry: the header is
+#                 identical to `cgb`, only the runner's hardware pin differs.
 #   sgb, sgb2  -> .gb  with the SGB header entries Pan Docs "Unlocking SGB
 #                 Functions" requires: `-s` sets the SGB flag $0146 to $03 and
 #                 `-l 0x33` sets the old licensee code $014B to $33. Both are
@@ -42,10 +45,10 @@ roms:
 	  model=$$(echo "$$base" | awk -F. '{print $$(NF-1)}'); \
 	  case "$$model" in \
 	    dmg)       ext=gb;  fixflags="-v -p 0xFF" ;; \
-	    cgb|agb)   ext=gbc; fixflags="-v -C -p 0xFF" ;; \
+	    cgb|cgbe|agb) ext=gbc; fixflags="-v -C -p 0xFF" ;; \
 	    sgb|sgb2|sgbcart) ext=gb; fixflags="-v -s -l 0x33 -p 0xFF" ;; \
 	    sgblocked) ext=gb;  fixflags="-v -p 0xFF" ;; \
-	    *) echo "unknown model '$$model' in $$src (expected dmg|cgb|agb|sgb|sgb2|sgbcart|sgblocked)"; exit 1 ;; \
+	    *) echo "unknown model '$$model' in $$src (expected dmg|cgb|cgbe|agb|sgb|sgb2|sgbcart|sgblocked)"; exit 1 ;; \
 	  esac; \
 	  out=build/$$base.$$ext; \
 	  mkdir -p "$$(dirname "$$out")"; \
