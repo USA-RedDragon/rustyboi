@@ -407,8 +407,8 @@ impl MobileAdapter {
         (CMD_ERROR, vec![command, code])
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Test/inspection: has a session been started (adapter detected + handshook)?
     pub(crate) fn session_started(&self) -> bool {
         self.session_started

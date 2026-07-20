@@ -10,8 +10,13 @@ use std::ops::{Deref, DerefMut};
 #[derive(Clone, Copy)]
 pub(crate) enum OamBugKind {
     Write,
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    /// KEEP. Never constructed today, so `dead_code` fires on it — but this is a
+    /// modelling gap, not dead code: `oam_bug_corrupt` handles it and
+    /// `Ppu::oam_bug_mode2_row_read` exists, only the read-side trigger is
+    /// unwired. Deleting the variant would silently remove the read half of the
+    /// OAM corruption bug (Pan Docs documents both halves) and take the
+    /// `oam_bug_mode2_row_read` path with it. Wire the trigger instead.
+    #[allow(dead_code)]
     Read,
 }
 

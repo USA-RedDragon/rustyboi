@@ -109,10 +109,9 @@ pub fn load_dats(bodies: &[String]) {
     *INDEX.write().expect("no_intro index poisoned") = merged.into_iter().collect();
 }
 
-/// Replace the runtime index outright with `entries` (sorted by crc here). Mainly
-/// for tests / callers that already hold parsed pairs; frontends use [`load_dats`].
-// No caller left after the visibility narrowing; kept pending triage.
-#[allow(dead_code)]
+/// Replace the runtime index outright with `entries` (sorted by crc here).
+/// `cfg(test)`: frontends use [`load_dats`]; only the index tests call this.
+#[cfg(test)]
 pub(crate) fn set_index(mut entries: Vec<(u32, String)>) {
     entries.sort_by_key(|(c, _)| *c);
     entries.dedup_by_key(|(c, _)| *c);

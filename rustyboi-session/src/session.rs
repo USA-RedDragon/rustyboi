@@ -660,13 +660,6 @@ impl Session {
         }
     }
 
-    /// Whether offloaded rewind capture is active.
-    // No caller left after the visibility narrowing; kept pending triage.
-    #[allow(dead_code)]
-    pub(crate) fn rewind_offloaded(&self) -> bool {
-        self.rewind_offloaded
-    }
-
     /// Take the cheap snapshot captured this frame (offloaded mode only), if a
     /// capture was due. The caller serializes the returned `GB` on a worker
     /// (via [`rustyboi_core_lib::gb::GB::to_state_bytes`]) and feeds the result

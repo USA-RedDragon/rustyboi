@@ -242,8 +242,8 @@ pub(crate) struct FourPlayerPort {
 }
 
 impl FourPlayerPort {
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Mint a hub and hand back `n` ports (2-4). Attach each to a Game Boy via
     /// [`crate::gb::GB::attach_four_player_port`] (or
     /// [`crate::gb::GB::connect_four_player`], which does both).
