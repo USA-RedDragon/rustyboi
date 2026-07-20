@@ -7605,6 +7605,145 @@ impl Ppu {
         false
     }
 
+    /// Mode 1 (VBlank) for one dot: the line-153 early LY=0 flip and the
+    /// end-of-line advance / frame swap. Lifted verbatim out of `step`'s
+    /// `State::VBlank` arm.
+    ///
+    /// Returns `true` when the line ended on this dot. In `step` that path was
+    /// a bare `return`, so the caller must return immediately and skip the
+    /// trailing DMG palette latch — the early exit is preserved, not dropped.
+    fn step_vblank(&mut self, mmio: &mut mmio::Mmio) -> bool {
+        // Partway through line 153, FF44 reads as 0 even though the
+        // line itself has not ended. Update LYC=LY immediately so the
+        // STAT line for LYC==0 fires one line earlier than the
+        // visible LY=0 scanline.
+        // The hardware LYC-compare-LY calc anticipates the line-153 LY=0 compare by
+        // `line time - 6 - 6*double_speed`. At DS line time=912cc, so the
+        // LY->0 flip lands 12cc = dot 6 into line 153 -- the same dot as
+        // single speed (whose `line time-6` likewise resolves to dot 6 in its
+        // own dot units). So both speeds use dot 6; the DS probes
+        // (lyc0flag_ds / lyc153flag_ds) read C5 at line cycles>=6, C1 before.
+        let line_153_zero_dot = if mmio.is_double_speed_mode() {
+            LINE153_LY0_DOT_DS.max(0) as u128
+        } else {
+            LINE_153_LY_ZERO_DOT
+        };
+        if !self.line_153_ly_zeroed
+            && self.ticks == line_153_zero_dot
+            && mmio.read(LY) == 153
+        {
+            mmio.write_ly_from_ppu(0);
+            self.line_153_ly_zeroed = true;
+            if mmio.read(LYC) == 0 {
+                mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) | (1 << 2));
+            } else {
+                mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) & !(1 << 2));
+            }
+        }
+
+        if self.ticks == 455 {
+            self.ticks = 0;
+            let current_ly = mmio.read(LY);
+            let end_of_frame = current_ly >= 153 || self.line_153_ly_zeroed;
+
+            if end_of_frame {
+                mmio.write_ly_from_ppu(0);
+                self.line_153_ly_zeroed = false;
+                self.state = State::OAMSearch;
+                // Arm the DMG "line 154" STAT-write VBlank-IF glitch window
+                // at the exact frame-wrap dot (LY 153->0, VBlank exit). A
+                // FF41 write within this window clears the still-pending
+                // VBlank IF (see `l154_vblank_glitch_window`). Disarmed a few
+                // dots into the new frame by `step` (below).
+                self.l154_vblank_glitch_window = true;
+                self.enter_scheduled_mode2(mmio);
+                self.next_sprite_fetch_index = 0;
+                self.sprite_fetch_stall = 0;
+                self.pixel_transfer_warmup = 0;
+                self.win_y_pos = 0xFF;
+                // NOTE: win_draw_start / win_draw_started are intentionally
+                // NOT reset here. The hardware resets window Y position at the line-0 mode-2 checkpoint but
+                // leaves the window-draw state (both bits) untouched across the frame
+                // boundary, so a window armed on the last visible line (e.g.
+                // DMG wx==166 on line 143, where pixel output branch B arms
+                // win_draw_start even with the window then disabled) carries
+                // through vblank and activates the window on the next frame's
+                // line 0 (the mode-3-start window checkpoint consumes win_draw_start, the window-Y increment).
+                // This is the wxA6 window-enable-master-persistence path.
+                self.window_y_triggered = false;
+                self.window_started_this_line = false;
+
+                // CGB panel repeat (see `panel_holds_image`): the first
+                // frame completed after an LCDC.7 enable is never driven
+                // to the panel. When the drive countdown had not expired
+                // at this frame's VBlank entry (a brief LCD off — under
+                // ~4 lines from its VBlank-line start), it REPEATS the
+                // previously displayed image for that skipped frame:
+                // discard the rendered pixels, keep the front buffer, and
+                // treat the panel as resynced (the next frame displays).
+                // A panel undriven for longer has decayed to blank: fall
+                // through to the normal swap, and get_frame blanks it.
+                // DMG panels show the blank for the skipped frame instead
+                // of repeating (SameBoy: CGB-only REPEAT vblank type).
+                let repeat_skip =
+                    self.frames_since_enable == 0 && self.repeat_skip_pending;
+                self.repeat_skip_pending = false;
+                if repeat_skip {
+                    self.color_fb_a.fill(0);
+                    self.frames_since_enable = 2;
+                } else if self.renders_color(mmio) {
+                    // CGB / DMG-compat-on-CGB: swap color framebuffers
+                    std::mem::swap(&mut self.color_fb_b, &mut self.color_fb_a);
+                    self.color_fb_a.fill(0);
+                } else {
+                    // DMG mode: swap monochrome framebuffers
+                    std::mem::swap(&mut self.fb_b, &mut self.fb_a);
+                    self.fb_a.fill(0);
+                }
+
+                self.have_frame = true;
+                // Count this completed frame toward post-enable resync so
+                // get_frame stops blanking once a full frame has displayed.
+                if !repeat_skip {
+                    self.frames_since_enable = self.frames_since_enable.saturating_add(1);
+                }
+                // The panel holds a real image only while completed frames
+                // are actually displayed (not blanked by the resync rule);
+                // a blanked skipped frame means the panel decayed to white.
+                self.panel_holds_image = self.frames_since_enable >= 2;
+                // The SS->DS-mode3 the LY counter re-anchor is a phase artifact
+                // local to the frame(s) right after the switch; once two
+                // frame wraps have re-settled the line phase (age lcd-align-ly:
+                // multiple STOP windows push its LY reads several frames past
+                // the switch) it no longer applies and the LY-register reads
+                // resolve through the standard DS window. The age `ly`
+                // mode-3-switch probes read within 0-1 wraps and keep it.
+                if self.ssds_mode3_ly_advance {
+                    self.ssds_mode3_frames = self.ssds_mode3_frames.saturating_add(1);
+                    if self.ssds_mode3_frames >= 2 {
+                        self.ssds_mode3_ly_advance = false;
+                    }
+                }
+            } else if (144..153).contains(&current_ly) {
+                let next_ly = current_ly.saturating_add(1);
+                mmio.write_ly_from_ppu(next_ly);
+                // Panel drive re-arm at the start of every VBlank line
+                // through 152 (SameBoy re-arms `frame_repeat_countdown`
+                // per vblank line, not per frame): an LCD off STARTING
+                // mid-VBlank measures its decay from the most recent
+                // line start, so late-VBlank offs (the EA flip at
+                // LY 145+) still repeat. Line 153 does not re-arm.
+                if next_ly <= 152
+                    && (self.frames_since_enable != 0 || self.repeat_skip_pending)
+                {
+                    self.last_drive_cc = mmio.master_cc();
+                }
+            }
+            return true;
+        }
+        false
+    }
+
     pub fn step(&mut self, mmio: &mut mmio::Mmio) {
         if self.disabled {
             if mmio.read(LCD_CONTROL)&(LCDCFlags::DisplayEnable as u8) != 0 {
@@ -9028,132 +9167,7 @@ impl Ppu {
                 }
             },
             State::VBlank => {
-                // Partway through line 153, FF44 reads as 0 even though the
-                // line itself has not ended. Update LYC=LY immediately so the
-                // STAT line for LYC==0 fires one line earlier than the
-                // visible LY=0 scanline.
-                // The hardware LYC-compare-LY calc anticipates the line-153 LY=0 compare by
-                // `line time - 6 - 6*double_speed`. At DS line time=912cc, so the
-                // LY->0 flip lands 12cc = dot 6 into line 153 -- the same dot as
-                // single speed (whose `line time-6` likewise resolves to dot 6 in its
-                // own dot units). So both speeds use dot 6; the DS probes
-                // (lyc0flag_ds / lyc153flag_ds) read C5 at line cycles>=6, C1 before.
-                let line_153_zero_dot = if mmio.is_double_speed_mode() {
-                    LINE153_LY0_DOT_DS.max(0) as u128
-                } else {
-                    LINE_153_LY_ZERO_DOT
-                };
-                if !self.line_153_ly_zeroed
-                    && self.ticks == line_153_zero_dot
-                    && mmio.read(LY) == 153
-                {
-                    mmio.write_ly_from_ppu(0);
-                    self.line_153_ly_zeroed = true;
-                    if mmio.read(LYC) == 0 {
-                        mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) | (1 << 2));
-                    } else {
-                        mmio.write_lcd_status_from_ppu(mmio.read(LCD_STATUS) & !(1 << 2));
-                    }
-                }
-
-                if self.ticks == 455 {
-                    self.ticks = 0;
-                    let current_ly = mmio.read(LY);
-                    let end_of_frame = current_ly >= 153 || self.line_153_ly_zeroed;
-
-                    if end_of_frame {
-                        mmio.write_ly_from_ppu(0);
-                        self.line_153_ly_zeroed = false;
-                        self.state = State::OAMSearch;
-                        // Arm the DMG "line 154" STAT-write VBlank-IF glitch window
-                        // at the exact frame-wrap dot (LY 153->0, VBlank exit). A
-                        // FF41 write within this window clears the still-pending
-                        // VBlank IF (see `l154_vblank_glitch_window`). Disarmed a few
-                        // dots into the new frame by `step` (below).
-                        self.l154_vblank_glitch_window = true;
-                        self.enter_scheduled_mode2(mmio);
-                        self.next_sprite_fetch_index = 0;
-                        self.sprite_fetch_stall = 0;
-                        self.pixel_transfer_warmup = 0;
-                        self.win_y_pos = 0xFF;
-                        // NOTE: win_draw_start / win_draw_started are intentionally
-                        // NOT reset here. The hardware resets window Y position at the line-0 mode-2 checkpoint but
-                        // leaves the window-draw state (both bits) untouched across the frame
-                        // boundary, so a window armed on the last visible line (e.g.
-                        // DMG wx==166 on line 143, where pixel output branch B arms
-                        // win_draw_start even with the window then disabled) carries
-                        // through vblank and activates the window on the next frame's
-                        // line 0 (the mode-3-start window checkpoint consumes win_draw_start, the window-Y increment).
-                        // This is the wxA6 window-enable-master-persistence path.
-                        self.window_y_triggered = false;
-                        self.window_started_this_line = false;
-
-                        // CGB panel repeat (see `panel_holds_image`): the first
-                        // frame completed after an LCDC.7 enable is never driven
-                        // to the panel. When the drive countdown had not expired
-                        // at this frame's VBlank entry (a brief LCD off — under
-                        // ~4 lines from its VBlank-line start), it REPEATS the
-                        // previously displayed image for that skipped frame:
-                        // discard the rendered pixels, keep the front buffer, and
-                        // treat the panel as resynced (the next frame displays).
-                        // A panel undriven for longer has decayed to blank: fall
-                        // through to the normal swap, and get_frame blanks it.
-                        // DMG panels show the blank for the skipped frame instead
-                        // of repeating (SameBoy: CGB-only REPEAT vblank type).
-                        let repeat_skip =
-                            self.frames_since_enable == 0 && self.repeat_skip_pending;
-                        self.repeat_skip_pending = false;
-                        if repeat_skip {
-                            self.color_fb_a.fill(0);
-                            self.frames_since_enable = 2;
-                        } else if self.renders_color(mmio) {
-                            // CGB / DMG-compat-on-CGB: swap color framebuffers
-                            std::mem::swap(&mut self.color_fb_b, &mut self.color_fb_a);
-                            self.color_fb_a.fill(0);
-                        } else {
-                            // DMG mode: swap monochrome framebuffers
-                            std::mem::swap(&mut self.fb_b, &mut self.fb_a);
-                            self.fb_a.fill(0);
-                        }
-
-                        self.have_frame = true;
-                        // Count this completed frame toward post-enable resync so
-                        // get_frame stops blanking once a full frame has displayed.
-                        if !repeat_skip {
-                            self.frames_since_enable = self.frames_since_enable.saturating_add(1);
-                        }
-                        // The panel holds a real image only while completed frames
-                        // are actually displayed (not blanked by the resync rule);
-                        // a blanked skipped frame means the panel decayed to white.
-                        self.panel_holds_image = self.frames_since_enable >= 2;
-                        // The SS->DS-mode3 the LY counter re-anchor is a phase artifact
-                        // local to the frame(s) right after the switch; once two
-                        // frame wraps have re-settled the line phase (age lcd-align-ly:
-                        // multiple STOP windows push its LY reads several frames past
-                        // the switch) it no longer applies and the LY-register reads
-                        // resolve through the standard DS window. The age `ly`
-                        // mode-3-switch probes read within 0-1 wraps and keep it.
-                        if self.ssds_mode3_ly_advance {
-                            self.ssds_mode3_frames = self.ssds_mode3_frames.saturating_add(1);
-                            if self.ssds_mode3_frames >= 2 {
-                                self.ssds_mode3_ly_advance = false;
-                            }
-                        }
-                    } else if (144..153).contains(&current_ly) {
-                        let next_ly = current_ly.saturating_add(1);
-                        mmio.write_ly_from_ppu(next_ly);
-                        // Panel drive re-arm at the start of every VBlank line
-                        // through 152 (SameBoy re-arms `frame_repeat_countdown`
-                        // per vblank line, not per frame): an LCD off STARTING
-                        // mid-VBlank measures its decay from the most recent
-                        // line start, so late-VBlank offs (the EA flip at
-                        // LY 145+) still repeat. Line 153 does not re-arm.
-                        if next_ly <= 152
-                            && (self.frames_since_enable != 0 || self.repeat_skip_pending)
-                        {
-                            self.last_drive_cc = mmio.master_cc();
-                        }
-                    }
+                if self.step_vblank(mmio) {
                     return;
                 }
             },
