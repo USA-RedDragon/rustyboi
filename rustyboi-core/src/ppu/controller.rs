@@ -1336,14 +1336,6 @@ pub struct Ppu {
     ticks: u128,
     x: u8,
 
-    // Optional, off-by-default "dirty line" observer for the scanline-renderer
-    // feasibility study. `None` in every normal / test-suite run, so the
-    // register-write path's `if let Some(probe)` is skipped and emulation is
-    // byte-identical. Never mutates emulation state — pure counter. Not
-    // serialized (a study aid, not machine state).
-    #[serde(skip, default)]
-    dirty_probe: Option<Box<crate::ppu::dirty_probe::DirtyLineProbe>>,
-
     // Sprite data for current scanline
     sprites_on_line: Vec<Sprite>,
     current_oam_sprite_index: usize, // Current sprite being checked during OAM search
@@ -2249,7 +2241,6 @@ impl Ppu {
             state: State::OAMSearch,
             ticks: 0,
             x: 0,
-            dirty_probe: None,
             sprites_on_line: Vec::new(),
             current_oam_sprite_index: 0,
             oam_reader: OamReader::default(),
@@ -2528,54 +2519,6 @@ impl Ppu {
     /// bus's sticky mid-m3 LCDC-writer marker (CGB halt-exit stall scoping).
     pub fn in_pixel_transfer(&self) -> bool {
         self.state == State::PixelTransfer
-    }
-
-    // ---- Dirty-line probe (scanline-renderer feasibility study) ----
-    // All no-ops / inert unless a probe is attached; never mutate emulation.
-
-    /// Attach a fresh dirty-line probe (study aid; off by default). Idempotent.
-    pub fn attach_dirty_probe(&mut self) {
-        self.dirty_probe = Some(Box::new(crate::ppu::dirty_probe::DirtyLineProbe::new()));
-    }
-
-    /// Detach and return the probe (with its accumulated counters).
-    pub fn take_dirty_probe(&mut self) -> Option<Box<crate::ppu::dirty_probe::DirtyLineProbe>> {
-        self.dirty_probe.take()
-    }
-
-    /// Borrow the probe for reading counters.
-    pub fn dirty_probe(&self) -> Option<&crate::ppu::dirty_probe::DirtyLineProbe> {
-        self.dirty_probe.as_deref()
-    }
-
-    /// Fold the current frame into the probe totals and reset per-frame marks.
-    pub fn dirty_probe_end_frame(&mut self) {
-        if let Some(p) = self.dirty_probe.as_mut() {
-            p.end_frame();
-        }
-    }
-
-    /// Bus hook: record a watched-register write at its issue cc. `blocked` is
-    /// true for a mid-mode-3 CGB palette write the PPU drops (does not affect
-    /// the current line). No-op when no probe is attached, so the default
-    /// (probe = None) path is byte-identical to an un-instrumented build.
-    #[inline]
-    pub fn dirty_probe_register_write(
-        &mut self,
-        reg: crate::ppu::dirty_probe::WatchedReg,
-        blocked: bool,
-    ) {
-        // The probe only cares about writes during mode 3 of a visible line.
-        // In `State::PixelTransfer` the PPU is by definition on a visible line
-        // (LY 0..=143); `internal_ly()` is that line.
-        if self.dirty_probe.is_none() {
-            return;
-        }
-        let mode3 = self.state == State::PixelTransfer;
-        let ly = self.internal_ly();
-        if let Some(p) = self.dirty_probe.as_mut() {
-            p.record_write(reg, ly, mode3, blocked);
-        }
     }
 
     pub fn handle_lcdc_write(&mut self, value: u8, mmio: &mmio::Mmio) {
@@ -7359,11 +7302,6 @@ impl Ppu {
                     };
                     Self::set_lcd_status_mode(mmio, 3);
                     self.state = State::PixelTransfer;
-                    // Dirty-line probe: this visible line is now being rendered
-                    // (mode-3 reached). No-op unless a probe is attached.
-                    if let Some(p) = self.dirty_probe.as_mut() {
-                        p.mark_line_rendered(self.internal_ly_val);
-                    }
                     // The hardware mode-3-start window checkpoint: if win_draw_start was armed from the
                     // previous line (DMG wx==166 case) and the window is enabled,
                     // the window draws from xpos 0 this line (the window-Y increment), even
