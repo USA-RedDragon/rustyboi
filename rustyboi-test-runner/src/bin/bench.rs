@@ -1,3 +1,4 @@
+use std::process::ExitCode;
 use std::time::Instant;
 
 use rustyboi_core_lib::cartridge::Cartridge;
@@ -5,11 +6,13 @@ use rustyboi_core_lib::gb::{Hardware, GB};
 
 use rustyboi_test_runner_lib::masher::masher;
 
-fn main() {
+// Returns `ExitCode` rather than calling `std::process::exit`, which skips every
+// destructor still on the stack. Matches the other bins in this crate.
+fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("usage: bench <rom.zip|rom.gb|rom.gbc> [frames] [--drive]");
-        std::process::exit(1);
+        return ExitCode::from(1);
     }
     let path = &args[1];
     // --drive feeds the deterministic gameplay masher each frame — used by the
@@ -82,4 +85,5 @@ fn main() {
         ns_per_frame,
         checksum
     );
+    ExitCode::SUCCESS
 }
