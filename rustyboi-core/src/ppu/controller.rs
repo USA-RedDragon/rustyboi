@@ -7089,6 +7089,465 @@ impl Ppu {
         let _ = mmio.take_oam_write_pending();
     }
 
+    /// Mode 2 (OAM search) for one dot: the per-line reset at dot 0, the
+    /// two-dots-per-slot sprite scan, and the mode-2 -> mode-3 arm. Lifted
+    /// verbatim out of `step`'s `State::OAMSearch` arm.
+    fn step_mode2(&mut self, mmio: &mut mmio::Mmio) {
+        // Window line-counter bookkeeping at the start of Mode 2. The WY
+        // trigger latch (`window_y_triggered`/window-enable master) is handled by the
+        // hardware-style three-point check in `update_window_y_latch`,
+        // which runs near the previous line's end.
+        if self.ticks == 0 {
+            // window Y position is incremented at window draw-start (see the
+            // PixelTransfer start_window site), matching the hardware
+            // mode-3-start window-checkpoint semantics.
+            // Reset window line flag for new scanline
+            self.window_started_this_line = false;
+            self.win_start_dot = None;
+            self.predicted_win_start_dot = None;
+            self.win_wx_penalty_resolved = false;
+            self.win_wx_enable_resolved = false;
+
+            // Initialize OAM search state
+            self.sprites_on_line.clear();
+            self.current_oam_sprite_index = 0;
+            self.next_sprite_fetch_index = 0;
+            self.sprite_fetch_stall = 0;
+            self.pixel_transfer_warmup = 0;
+        }
+
+        // First line after enable: VRAM/OAM lock (PPU reports mode 3)
+        // at the normal mode-2->3 boundary, even though the real pixel
+        // fetch starts later at FIRST_FRAME_ARM_DOT. Matches the hardware
+        // VRAM/OAM writability (line cycles-based, not mode-3 start).
+        if self.first_line_after_enable {
+            let is_cgb = mmio.is_cgb_features_enabled();
+            let lock_dot = if is_cgb { cgb_first_frame_lock_dot(mmio.is_double_speed_mode()) } else { DMG_FIRST_FRAME_LOCK_DOT };
+            if self.ticks == lock_dot && (mmio.read(LCD_STATUS) & 0x03) != 3 {
+                Self::set_lcd_status_mode(mmio, 3);
+            }
+            // Install the closed-form master-cc anchors for the first line
+            // BEFORE M3 arms, so the CPU-access gates (OAM/VRAM/cgbp) resolve
+            // the mode-3 END boundary (`cc + 2 >= mode-0 time`) during this pre-M3
+            // OAMSearch phase too. On hardware the PPU machine is fully seeded
+            // at enable (`cycles = -(mode-3-start line cycle + 2)`), so
+            // `the current line's mode-0 (HBlank) time` is predictable from the start of the line;
+            // here it is enable-anchored (`p_now`) and uses the first-line
+            // m3-start (+2). OAM is blocked from line start to mode-0 time (mode 2
+            // and mode 3 alike) — the inactive-period guard above keeps it
+            // accessible until `lu_`. Recomputed each tick so a mid-line SCX/
+            // window change tracks (the M3-arm site re-installs the final
+            // value). No closed-form anchor existed here before (the gates
+            // fell back to the first-line FF41 mode register, which reports
+            // mode 0 and wrongly unblocked OAM in this window).
+            let m3_len = self.compute_m3_length(mmio, is_cgb);
+            self.m0_time_master = Some(self.m0_time_exact(mmio, m3_len, is_cgb, true));
+            self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
+        }
+
+        // Perform sprite search distributed across 80 ticks
+        // Check one sprite every 2 ticks (40 sprites × 2 ticks = 80 ticks)
+        // Skipped on the first scanline after LCD enable (no Mode 2 phase).
+        if !self.first_line_after_enable
+            && self.ticks.is_multiple_of(2)
+            && self.current_oam_sprite_index < OAM_SPRITE_COUNT
+        {
+            // Exact-cc OBJ-size override: when a mid-mode-2 size write is
+            // pending, this slot's size is the value visible as-of its own
+            // abs_cc (write_cc + 2*cgb), instead of the one-slot-lagged
+            // snapshot. With no pending change `objsize_large_at_cc` falls
+            // back to the lagged snapshot semantics (the steady state is
+            // unchanged). Sampled BEFORE the OAM read so this entry uses
+            // the size effective at its read cc (the hardware per-entry size latch).
+            if self.objsize_apply_cc != wy2_disabled() {
+                self.scan_obj_size_large = self.objsize_large_at_cc(self.abs_cc);
+            }
+            // Record this slot's size for the snapshot rebuild, set for
+            // every scanned slot (even once 10 sprites are found, so the
+            // rebuild has a valid size for all 40 entries).
+            {
+                let idx = self.current_oam_sprite_index;
+                self.scan_slot_large[idx] = self.scan_obj_size_large;
+            }
+            self.check_single_sprite_for_scanline(mmio, self.current_oam_sprite_index);
+            self.current_oam_sprite_index += 1;
+            // Latch the OBJ-size for the NEXT scan slot from the live LCDC
+            // (DMG: write applies to entries scanned after it commits, not
+            // the one just read; the hardware per-slot size latch).
+            self.scan_obj_size_large = self.lcdc_has(LCDCFlags::SpriteSize);
+        }
+
+        let is_cgb = mmio.is_cgb_features_enabled();
+        let pixel_transfer_arm_dot = if self.first_line_after_enable {
+            if is_cgb {
+                CGB_FIRST_FRAME_ARM_DOT
+            } else {
+                DMG_FIRST_FRAME_ARM_DOT
+            }
+        } else if is_cgb {
+            CGB_PIXEL_TRANSFER_ARM_DOT
+        } else {
+            DMG_PIXEL_TRANSFER_ARM_DOT
+        };
+
+        if self.ticks == pixel_transfer_arm_dot {
+            // Rebuild the sprite list from the lazy OAM snapshot (the hardware
+            // OAM-scan-end snapshot flush + sprite mapping). This replaces
+            // the incremental per-dot scan's `sprites_on_line` so visibility
+            // honors the DMA-disabled-source window via the posbuf cap.
+            // Rebuild the sprite list from the lazy OAM snapshot (the hardware
+            // OAM-scan-end snapshot flush + sprite mapping). On
+            // the first line after enable there is no mode-2 scan; the
+            // snapshot is held inactive (display-enable) so skip the rebuild.
+            if !self.first_line_after_enable {
+                self.build_sprites_from_snapshot(mmio);
+            }
+            // Sort sprites by priority after OAM search is complete
+            if is_cgb {
+                // CGB mode: Sort by OAM index only (already in order, but ensure it)
+                self.sprites_on_line.sort_by_key(|sprite| sprite.oam_index);
+            } else {
+                // DMG mode: Sort by X coordinate first, then OAM index
+                self.sprites_on_line.sort_by(|a, b| {
+                    a.x.cmp(&b.x).then(a.oam_index.cmp(&b.oam_index))
+                });
+            }
+
+            self.x = 0;
+            self.fetcher.reset();
+            // Clear any pending sub-cc scx column lever from the previous
+            // line; a new write this line re-arms it.
+            self.subcc_scx_apply_cc = wy2_disabled();
+            self.prologue_rekey_armed = false;
+            self.next_sprite_fetch_index = 0;
+            self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
+            self.m3_last_sprite_commit_tick = 0;
+            self.sprite_fetch_stall = 0;
+            self.fetcher_cadence_tick = 0;
+            self.win_fetch_anchor = None;
+            self.win_first_tile_chop = 0;
+            self.win_being_fetched = false;
+            self.insert_bg_pixel = false;
+            self.win_wx0_delayed = false;
+            self.dmg_wx_trigger_pending = None;
+            {
+                let we_now =
+                    self.lcdc_has(LCDCFlags::WindowDisplayEnable);
+                self.we_dot_hist = [we_now; 5];
+                self.we_glitch_tile_starts = [None; 2];
+                self.we_glitch_discard_insert = false;
+                self.we_insert_suppressed = false;
+            }
+            // CGB arms two dots later, so use a shorter warmup to keep the first visible pixel aligned.
+            self.pixel_transfer_warmup = if is_cgb {
+                CGB_PIXEL_TRANSFER_WARMUP
+            } else {
+                DMG_PIXEL_TRANSFER_WARMUP
+            };
+            Self::set_lcd_status_mode(mmio, 3);
+            self.state = State::PixelTransfer;
+            // The hardware mode-3-start window checkpoint: if win_draw_start was armed from the
+            // previous line (DMG wx==166 case) and the window is enabled,
+            // the window draws from xpos 0 this line (the window-Y increment), even
+            // though WX is unchanged. Otherwise the window-draw state clears to 0.
+            {
+                let win_en = self.lcdc_has(LCDCFlags::WindowDisplayEnable);
+                // The hardware mode-3-start window checkpoint: if win_draw_start is set and
+                // the window is enabled, the window-draw state becomes win_draw_started
+                // and window Y position increments; otherwise the window-draw state clears.
+                if self.win_draw_start && win_en && !self.first_line_after_enable {
+                    self.win_y_pos = self.win_y_pos.wrapping_add(1);
+                    self.win_draw_started = true;
+                    self.win_draw_started_at_x0 = true;
+                    // The window is `started` from line begin: fetch
+                    // window tiles from xpos 0 (after the SCX discard
+                    // prefix), not BG. The hardware mode-3-start checkpoint seeds
+                    // wscx = tile_len + scx%8, so the first window tile
+                    // column is wscx/8 == 1 (for scx<8).
+                    let scx = (mmio.read(SCX) & 0x07) as u32;
+                    let start_tile = ((8 + scx) / 8) as u8;
+                    self.fetcher.start_window_at_tile(0, start_tile);
+                    self.win_kill_tap_late = false;
+                    self.window_started_this_line = true;
+                    self.win_start_dot = Some(self.ticks);
+                } else {
+                    self.win_draw_started_at_x0 = false;
+                    // The hardware mode-3-start checkpoint: when win_draw_start was
+                    // NOT armed, the window-draw state clears to 0 (win_draw_started
+                    // bit dropped). Normal (non-wxA6) windows re-set this on
+                    // the same line via the live x+7==wx start below, so this
+                    // only persistently clears the bit on lines where the
+                    // window does not (re)start — which is what lets the DMG
+                    // wxA6 START-NOW branch fire again when WY next matches.
+                    if win_en && !self.first_line_after_enable {
+                        self.win_draw_started = false;
+                    }
+                }
+                self.win_draw_start = false;
+            }
+            // DMG wx==166 (lcd_hres+6): the hardware pixel-output runs at EVERY
+            // xpos as the fetcher walks the line; the wx==xpos==166 branch
+            // therefore fires at the END of mode 3 (xpos reaches
+            // 166), AFTER the line's mid-mode-3 WE-off has had its effect on
+            // the window-draw state — NOT at M3 start. Relocating this branch to the
+            // mode-3 -> HBlank transition (where xpos==166) is what lets the
+            // steady-state wxA6 sequence converge: f0(the window-Y increment, state->2) ->
+            // WE-off(state==2 -> clears started, state->0, stops window) ->
+            // THIS branch B at xpos==166(state |= win_draw_start, state->1) ->
+            // HBlank WE-on(state==win_draw_start -> the window-Y increment, state->3). That
+            // is the TWO window Y position increments per line (8px/4rows) the window
+            // diagonal needs, and the WE-off now actually reverts the right
+            // columns to BG (it no longer sees win_draw_start pre-armed). See
+            // the relocated block at the mode-3 -> HBlank boundary below.
+            // First scanline after enable is now armed; subsequent
+            // lines use normal Mode 2 timing.
+            let was_first_line = self.first_line_after_enable;
+            self.first_line_after_enable = false;
+            self.mode0_reported_this_line = false;
+            self.line_rendered_this_line = false;
+            self.wxa6_lineend_applied = false;
+            // SCX fine-scroll discard target (the mode-3-start fine-scroll phase): the
+            // break xpos is resolved over the first M3 dots by re-reading
+            // SCX live (see the early-window loop in PixelTransfer). Seed
+            // it unlatched (-1) and record the arm dot for xpos tracking.
+            self.m3_pixels_discarded = 0;
+            self.m3_arm_dot = self.ticks;
+            // Per-pixel BG-enable history: anchor the
+            // plot-cc origin at mode-3 entry and seed the line's history
+            // with the BG-enable bit in effect now. Mid-mode-3 LCDC.0
+            // writes append (commit_cc, bgen) entries (handle_lcdc_write).
+            self.bgen_history.clear();
+            // Seed at boundary column 0 (applies to all columns until the
+            // first mid-mode-3 toggle).
+            self.bgen_history.push((
+                0,
+                self.lcdc_has(LCDCFlags::BGDisplay),
+            ));
+            // Per-line tile-index-is-tile-data glitch targets (the hardware
+            // tile-select glitch); mid-mode-3 falling LCDC.4 writes append the
+            // single (cc, k) read each arms (see handle_lcdc_write).
+            self.tidxtd_glitch.clear();
+            // DMG window bus-glitch state is per-line (see wg_apply).
+            self.wg_hist.clear();
+            self.bg_tile_buf.clear();
+            self.win_tile_buf.clear();
+            self.wg_anchor_cc = None;
+            self.wg_dpre = 0;
+            self.bg_anchor_cc = None;
+            self.bg_scy_hist.clear();
+            self.bg_scx_hist.clear();
+            // CGB-compat journal flavor (see the CGBWG_* consts): DMG cart on
+            // CGB hardware (compat mode runs with CGB features OFF, so
+            // it shares the DMG render paths; the journals resolve
+            // with the CGB grid/transition rules instead).
+            self.wg_cgb = mmio.is_cgb() && !mmio.is_cgb_features_enabled();
+            // Per-pixel DMG palette histories: seed each at boundary 0 with
+            // the 1-dot-delayed register value (`*_delayed`, refreshed at the
+            // end of every dot), NOT the live register. A BGP/OBP write on the
+            // dot the PPU enters mode 3 has already updated mmio but must not
+            // yet color column 0 — the column-0 pixel sees the prior dot's
+            // value (the hardware DMG-palette-during-mode-3 behavior: the write at mode-3 entry
+            // leaves column 0 white). Mid-mode-3 writes after entry append
+            // (boundary_col, value) entries via on_{bgp,obp0,obp1}_write, which
+            // land at column >= 1 so column 0 keeps this seed.
+            self.bgp_history.clear();
+            self.bgp_history.push((0, self.bgp_delayed));
+            self.bgp_dot_history.clear();
+            // CGB-compat (wg_cgb) resolves BGP per dot from this history; unlike
+            // the DMG per-dot `bgp_delayed` latch, real CGB silicon colors the
+            // mode-3 column-0 pixel with the LIVE BGP register (age m3-bg-bgp-ncm:
+            // the pre-frame BGP is already latched at mode-3 arm). DMG keeps the
+            // 1-dot-delayed seed (dmgpalette_during_m3, via bgp_history).
+            let bgp_dot_seed = if self.wg_cgb { mmio.read(BGP) } else { self.bgp_delayed };
+            self.bgp_dot_history.push((0, bgp_dot_seed));
+            // Clear any leftover DMG BGP phase-hold from the previous line.
+            self.bgp_defer_countdown = 0;
+            self.obp0_history.clear();
+            self.obp0_history.push((0, self.obp0_delayed));
+            self.obp1_history.clear();
+            self.obp1_history.push((0, self.obp1_delayed));
+            self.obp0_dot_history.clear();
+            self.obp0_dot_history.push((0, self.obp0_delayed));
+            self.obp1_dot_history.clear();
+            self.obp1_dot_history.push((0, self.obp1_delayed));
+            // DMG mid-mode-3 OBJ-enable/OBJ-size toggle model: seed the
+            // per-column OBJ-enable history and the per-dot OBJ-size
+            // history with the bits in effect at mode-3 entry, and reset
+            // the per-sprite live fetch records (all Pending).
+            self.objen_history.clear();
+            self.objen_history.push((
+                0,
+                self.lcdc_has(LCDCFlags::SpriteDisplayEnable),
+            ));
+            self.objsize_dot_history.clear();
+            self.objsize_dot_history.push((
+                0,
+                self.lcdc_has(LCDCFlags::SpriteSize),
+            ));
+            self.sprite_fetch_recs.clear();
+            self.sprite_fetch_recs
+                .resize(self.sprites_on_line.len(), SpriteFetchRec::default());
+            self.bgp_writes.clear();
+            // Carry a mode-2 BGP write into this line's spike cadence as a
+            // neighbor-only entry (see on_bgp_write); a mode-3 partner within
+            // BGP_SPIKE_CADENCE_CC then paints its spike (age m3-bg-bgp).
+            if let Some((cc, v)) = self.bgp_mode2_pending.take()
+                && !mmio.is_cgb()
+            {
+                self.bgp_writes.push((cc, 0xFF, v));
+                // The mode-2 write is the true settled BGP entering mode 3
+                // (bgp_delayed lags a dot and can miss a late-mode-2 write),
+                // so re-seed column 0's palette + the spike's `old` baseline
+                // with it — the restore's glitch then ORs against FF, painting
+                // its victim column with the pre-restore (glitch) shade.
+                self.bgp_history.clear();
+                self.bgp_history.push((0, v));
+                self.bgp_delayed = v;
+            }
+            // 160-entry per-column BG-index scratch; ensure sized (deserialized
+            // saves may carry an empty vec) and clear to -1 (no BG pixel yet).
+            self.line_bg_idx.clear();
+            self.line_bg_idx.resize(160, -1);
+            self.m3_arm_scx = mmio.read(SCX) & 0x07 ;
+            self.m3_arm_scx_full = mmio.read(SCX) as i16;
+            // First line after enable: resolve the SCX value the fine-scroll
+            // discard actually samples. The mode-3-start fine-scroll phase reads SCX once
+            // at the M3-start dot; a mid-discard SCX write (visible at
+            // `write_cc + 2*cgb`) counts only if it lands at/before that
+            // sample dot, which sits `prev_scx % 8` dots past M3-arm (the
+            // discard prefix of the value in effect at M3-start). Evaluate the
+            // pending f1 latch (from on_scx_write, still intact here) at
+            // `arm_cc + prev_scx%8`. Matches hardware byte-exact on the
+            // ly0_late_scx7 SCX-write sweep (initial-SCX shifts the sample
+            // dot, flipping whether the SCX=7 write enters the mode-0 time).
+            if was_first_line {
+                let ds = mmio.is_double_speed_mode() as u32;
+                let prev_scx = (self.scx_prev_f1 & 0x07) as u64;
+                // `prev_scx` is a count of PPU dots; convert to master cc
+                // (1 dot = 1<<ds cc) so the sample dot is phase-correct at
+                // double speed (where the f1 latch's apply cc is write_cc+4).
+                let sample_cc = self.abs_cc + (prev_scx << ds);
+                self.first_line_scx_override = Some(self.scx_f1_pending_at_cc(sample_cc));
+            } else {
+                self.first_line_scx_override = None;
+            }
+            // Seed the exact-cc f1 latch at the SCX value live at M3
+            // start; clear any pending write latch left from a prior
+            // line so it cannot leak into this line's discard.
+            self.scx_prev_f1 = mmio.read(SCX);
+            self.scx_f1_apply_cc = wy2_disabled();
+            // The first line after display enable has bespoke warmup/arm
+            // timing; the live f1 xpos mapping does not align there, so
+            // latch the discard immediately (pre-write SCX), as before.
+            self.m3_discard_target = if was_first_line { self.m3_arm_scx as i8 } else { -1 };
+
+            if was_first_line {
+                // First line after LCD enable: install the SAME closed-form
+                // master-cc anchors the normal-line path uses, computed for
+                // this line, so the CPU-access gates (cgbp/oam/vram) and the
+                // STAT-resolve mode reads resolve at the access cc instead of
+                // falling back to the hand-tuned FIRST_FRAME per-dot pipeline.
+                //
+                // On hardware the LCDC-write handling seeds the PPU at enable with `now =
+                // enable_cc`, resets the LY counter to (0, enable_cc), no sprites
+                // (display-enable clears the buffer), and `cycles =
+                // -(mode-3-start line cycle + 2)` — so the first M3 begins 2 dots
+                // later than a normal line. `m0_time_exact(.., first_line)`
+                // adds that +2 to the mode-0 line-cycle; `cgbp_begin_exact`
+                // (the line cycles+ds>=80 begin boundary) is enable-anchored
+                // already (it shares the same the LY time as a normal line).
+                // The inactive-period gate (`display_enable_inactive_until`,
+                // the hardware OAM-reader lookup-until was seeded at enable.
+                let m3_len = self.compute_m3_length(mmio, is_cgb);
+                let m0t = self.m0_time_exact(mmio, m3_len, is_cgb, true);
+                self.m0_time_master = Some(m0t);
+                // The override applied only to this first-line mode-0 time anchor;
+                // clear it so the per-tick / next-frame m3_len reads live SCX.
+                self.first_line_scx_override = None;
+                self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
+                // The within-line reported mode-0 dot / m0 IRQ arm keep the
+                // calibrated FIRST_FRAME timing (the first-line pixel
+                // pipeline arms later than a normal line); only the
+                // closed-form access/STAT-resolve anchors above are installed.
+                self.scheduled_mode0_dot = None;
+            } else {
+                // Closed-form mode-0 schedule, including window-start lines
+                // (compute_m3_length applies the window penalty). Mid-mode-3
+                // window-enable toggles (set_lcdc_visible) and WX changes
+                // (PixelTransfer) invalidate it, falling back to the live
+                // emergent x==160 transition.
+                let m3_len = self.compute_m3_length(mmio, is_cgb);
+                let ds = mmio.is_double_speed_mode() as u32;
+                // Byte-exact mode-0 time, the LY time-anchored (ENGINE_LAZY_PPU.md):
+                // mode-0 time = (p_now + ly_counter().time + 1)
+                // − ((456 − (m3_len + BASE)) << ds)
+                // BASE = 84 (CGB SS+DS), 83 (DMG — the `1−cgb` term already
+                // lives in m3_len). `p_now + ly_counter().time` is the
+                // next-LY master cc; +1 corrects rustyboi's LY counter.time
+                // running 1 master-cc below the hardware LY time.
+                // The runtime sprite0-at-scx fine-scroll stall (the hardware
+                // mode-3-start fine-scroll) extends the real mode-3 -> mode-0 transition
+                // past the predictor's mode-0 time; fold it into the renderer /
+                // STAT-read boundary here (m0_irq_event_cc_master subtracts
+                // it back for the predictor-timed m0 STAT IRQ).
+                let m0t = self.m0_time_exact(mmio, m3_len, is_cgb, false)
+                    + ((self.sprite0_scx_extra(mmio, is_cgb) as u64) << ds);
+                self.m0_time_master = Some(m0t);
+                // Deep mode 3 is HDMA-tracker-quiet until the closed-form
+                // period can lead the mode-0 entry (m0t - 8).
+                if is_cgb {
+                    mmio.set_hdma_tracker_sleep(m0t.saturating_sub(8));
+                }
+                // The within-line mode-0 dot is DERIVED from the same exact
+                // mode-0 time (master cc) so the eager-grid consumers (reported
+                // FF41 mode poke, m0 IRQ arm, cgbp tick fallback) ride the
+                // identical boundary: dot = arm_ticks + (m0t − arm_cc) >> ds.
+                let arm_cc = mmio.master_cc() as i64;
+                let dot = self.ticks as i64 + (((m0t as i64) - arm_cc) >> ds);
+                self.scheduled_mode0_dot = Some(dot.max(0) as u128);
+                self.m3_scheduled_wx = mmio.read(WX);
+                self.m3_scheduled_win = self.window_will_start(mmio, is_cgb);
+                // Predict the DMG dot at which the window's StartWindowDraw
+                // mode-3 penalty commits, so a disable landing on it (one
+                // PPU step before the PixelTransfer latch sets
+                // `win_start_dot`) is still treated as "started". The window
+                // draws when visible x reaches max(0, WX-7); x begins
+                // advancing `WARMUP + 8` dots past the M3 arm (the first BG
+                // tile fill) plus the SCX fine-scroll discard. The penalty
+                // commits at the fetcher's window-tile boundary, one dot
+                // ahead of the first window pixel reaching x (the `-1`), so
+                // a disable on the dot before the visible start still keeps
+                // it (late_disable_*_wx11 vs the same-tile wx10).
+                self.predicted_win_start_dot =
+                    if !is_cgb && self.m3_scheduled_win {
+                        let wx = self.m3_scheduled_wx as i64;
+                        let x_at_start = (wx - 7).max(0);
+                        Some(
+                            (self.m3_arm_dot as i64
+                                + DMG_PIXEL_TRANSFER_WARMUP as i64
+                                + 8
+                                + (self.m3_arm_scx as i64)
+                                + x_at_start
+                                - 1)
+                                .max(0) as u128,
+                        )
+                    } else {
+                        None
+                    };
+                // cgbp begin boundary (the hardware CGB-palette-accessible window: blocked once
+                // `line cycles(cc) + ds >= 80`), byte-exact from the LY time
+                // anchor — see `cgbp_begin_exact`.
+                self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
+            }
+            // Arm the mode-0 (HBlank) STAT IRQ event at the predicted
+            // mode-0 start, in absolute clock terms. Hardware schedules
+            // memevent_m0irq only when m0 is enabled, but keeps the time
+            // current for FF41/FF45 immediate-trigger checks; we always
+            // arm it (dispatch gates on the enable in mstat_irq).
+            self.arm_m0irq_for_current_line(mmio, was_first_line);
+        }
+    }
+
     pub fn step(&mut self, mmio: &mut mmio::Mmio) {
         if self.disabled {
             if mmio.read(LCD_CONTROL)&(LCDCFlags::DisplayEnable as u8) != 0 {
@@ -7185,461 +7644,7 @@ impl Ppu {
         }
 
         match self.state {
-            State::OAMSearch => {
-                // Window line-counter bookkeeping at the start of Mode 2. The WY
-                // trigger latch (`window_y_triggered`/window-enable master) is handled by the
-                // hardware-style three-point check in `update_window_y_latch`,
-                // which runs near the previous line's end.
-                if self.ticks == 0 {
-                    // window Y position is incremented at window draw-start (see the
-                    // PixelTransfer start_window site), matching the hardware
-                    // mode-3-start window-checkpoint semantics.
-                    // Reset window line flag for new scanline
-                    self.window_started_this_line = false;
-                    self.win_start_dot = None;
-                    self.predicted_win_start_dot = None;
-                    self.win_wx_penalty_resolved = false;
-                    self.win_wx_enable_resolved = false;
-
-                    // Initialize OAM search state
-                    self.sprites_on_line.clear();
-                    self.current_oam_sprite_index = 0;
-                    self.next_sprite_fetch_index = 0;
-                    self.sprite_fetch_stall = 0;
-                    self.pixel_transfer_warmup = 0;
-                }
-
-                // First line after enable: VRAM/OAM lock (PPU reports mode 3)
-                // at the normal mode-2->3 boundary, even though the real pixel
-                // fetch starts later at FIRST_FRAME_ARM_DOT. Matches the hardware
-                // VRAM/OAM writability (line cycles-based, not mode-3 start).
-                if self.first_line_after_enable {
-                    let is_cgb = mmio.is_cgb_features_enabled();
-                    let lock_dot = if is_cgb { cgb_first_frame_lock_dot(mmio.is_double_speed_mode()) } else { DMG_FIRST_FRAME_LOCK_DOT };
-                    if self.ticks == lock_dot && (mmio.read(LCD_STATUS) & 0x03) != 3 {
-                        Self::set_lcd_status_mode(mmio, 3);
-                    }
-                    // Install the closed-form master-cc anchors for the first line
-                    // BEFORE M3 arms, so the CPU-access gates (OAM/VRAM/cgbp) resolve
-                    // the mode-3 END boundary (`cc + 2 >= mode-0 time`) during this pre-M3
-                    // OAMSearch phase too. On hardware the PPU machine is fully seeded
-                    // at enable (`cycles = -(mode-3-start line cycle + 2)`), so
-                    // `the current line's mode-0 (HBlank) time` is predictable from the start of the line;
-                    // here it is enable-anchored (`p_now`) and uses the first-line
-                    // m3-start (+2). OAM is blocked from line start to mode-0 time (mode 2
-                    // and mode 3 alike) — the inactive-period guard above keeps it
-                    // accessible until `lu_`. Recomputed each tick so a mid-line SCX/
-                    // window change tracks (the M3-arm site re-installs the final
-                    // value). No closed-form anchor existed here before (the gates
-                    // fell back to the first-line FF41 mode register, which reports
-                    // mode 0 and wrongly unblocked OAM in this window).
-                    let m3_len = self.compute_m3_length(mmio, is_cgb);
-                    self.m0_time_master = Some(self.m0_time_exact(mmio, m3_len, is_cgb, true));
-                    self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
-                }
-
-                // Perform sprite search distributed across 80 ticks
-                // Check one sprite every 2 ticks (40 sprites × 2 ticks = 80 ticks)
-                // Skipped on the first scanline after LCD enable (no Mode 2 phase).
-                if !self.first_line_after_enable
-                    && self.ticks.is_multiple_of(2)
-                    && self.current_oam_sprite_index < OAM_SPRITE_COUNT
-                {
-                    // Exact-cc OBJ-size override: when a mid-mode-2 size write is
-                    // pending, this slot's size is the value visible as-of its own
-                    // abs_cc (write_cc + 2*cgb), instead of the one-slot-lagged
-                    // snapshot. With no pending change `objsize_large_at_cc` falls
-                    // back to the lagged snapshot semantics (the steady state is
-                    // unchanged). Sampled BEFORE the OAM read so this entry uses
-                    // the size effective at its read cc (the hardware per-entry size latch).
-                    if self.objsize_apply_cc != wy2_disabled() {
-                        self.scan_obj_size_large = self.objsize_large_at_cc(self.abs_cc);
-                    }
-                    // Record this slot's size for the snapshot rebuild, set for
-                    // every scanned slot (even once 10 sprites are found, so the
-                    // rebuild has a valid size for all 40 entries).
-                    {
-                        let idx = self.current_oam_sprite_index;
-                        self.scan_slot_large[idx] = self.scan_obj_size_large;
-                    }
-                    self.check_single_sprite_for_scanline(mmio, self.current_oam_sprite_index);
-                    self.current_oam_sprite_index += 1;
-                    // Latch the OBJ-size for the NEXT scan slot from the live LCDC
-                    // (DMG: write applies to entries scanned after it commits, not
-                    // the one just read; the hardware per-slot size latch).
-                    self.scan_obj_size_large = self.lcdc_has(LCDCFlags::SpriteSize);
-                }
-
-                let is_cgb = mmio.is_cgb_features_enabled();
-                let pixel_transfer_arm_dot = if self.first_line_after_enable {
-                    if is_cgb {
-                        CGB_FIRST_FRAME_ARM_DOT
-                    } else {
-                        DMG_FIRST_FRAME_ARM_DOT
-                    }
-                } else if is_cgb {
-                    CGB_PIXEL_TRANSFER_ARM_DOT
-                } else {
-                    DMG_PIXEL_TRANSFER_ARM_DOT
-                };
-
-                if self.ticks == pixel_transfer_arm_dot {
-                    // Rebuild the sprite list from the lazy OAM snapshot (the hardware
-                    // OAM-scan-end snapshot flush + sprite mapping). This replaces
-                    // the incremental per-dot scan's `sprites_on_line` so visibility
-                    // honors the DMA-disabled-source window via the posbuf cap.
-                    // Rebuild the sprite list from the lazy OAM snapshot (the hardware
-                    // OAM-scan-end snapshot flush + sprite mapping). On
-                    // the first line after enable there is no mode-2 scan; the
-                    // snapshot is held inactive (display-enable) so skip the rebuild.
-                    if !self.first_line_after_enable {
-                        self.build_sprites_from_snapshot(mmio);
-                    }
-                    // Sort sprites by priority after OAM search is complete
-                    if is_cgb {
-                        // CGB mode: Sort by OAM index only (already in order, but ensure it)
-                        self.sprites_on_line.sort_by_key(|sprite| sprite.oam_index);
-                    } else {
-                        // DMG mode: Sort by X coordinate first, then OAM index
-                        self.sprites_on_line.sort_by(|a, b| {
-                            a.x.cmp(&b.x).then(a.oam_index.cmp(&b.oam_index))
-                        });
-                    }
-
-                    self.x = 0;
-                    self.fetcher.reset();
-                    // Clear any pending sub-cc scx column lever from the previous
-                    // line; a new write this line re-arms it.
-                    self.subcc_scx_apply_cc = wy2_disabled();
-                    self.prologue_rekey_armed = false;
-                    self.next_sprite_fetch_index = 0;
-                    self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
-                    self.m3_last_sprite_commit_tick = 0;
-                    self.sprite_fetch_stall = 0;
-                    self.fetcher_cadence_tick = 0;
-                    self.win_fetch_anchor = None;
-                    self.win_first_tile_chop = 0;
-                    self.win_being_fetched = false;
-                    self.insert_bg_pixel = false;
-                    self.win_wx0_delayed = false;
-                    self.dmg_wx_trigger_pending = None;
-                    {
-                        let we_now =
-                            self.lcdc_has(LCDCFlags::WindowDisplayEnable);
-                        self.we_dot_hist = [we_now; 5];
-                        self.we_glitch_tile_starts = [None; 2];
-                        self.we_glitch_discard_insert = false;
-                        self.we_insert_suppressed = false;
-                    }
-                    // CGB arms two dots later, so use a shorter warmup to keep the first visible pixel aligned.
-                    self.pixel_transfer_warmup = if is_cgb {
-                        CGB_PIXEL_TRANSFER_WARMUP
-                    } else {
-                        DMG_PIXEL_TRANSFER_WARMUP
-                    };
-                    Self::set_lcd_status_mode(mmio, 3);
-                    self.state = State::PixelTransfer;
-                    // The hardware mode-3-start window checkpoint: if win_draw_start was armed from the
-                    // previous line (DMG wx==166 case) and the window is enabled,
-                    // the window draws from xpos 0 this line (the window-Y increment), even
-                    // though WX is unchanged. Otherwise the window-draw state clears to 0.
-                    {
-                        let win_en = self.lcdc_has(LCDCFlags::WindowDisplayEnable);
-                        // The hardware mode-3-start window checkpoint: if win_draw_start is set and
-                        // the window is enabled, the window-draw state becomes win_draw_started
-                        // and window Y position increments; otherwise the window-draw state clears.
-                        if self.win_draw_start && win_en && !self.first_line_after_enable {
-                            self.win_y_pos = self.win_y_pos.wrapping_add(1);
-                            self.win_draw_started = true;
-                            self.win_draw_started_at_x0 = true;
-                            // The window is `started` from line begin: fetch
-                            // window tiles from xpos 0 (after the SCX discard
-                            // prefix), not BG. The hardware mode-3-start checkpoint seeds
-                            // wscx = tile_len + scx%8, so the first window tile
-                            // column is wscx/8 == 1 (for scx<8).
-                            let scx = (mmio.read(SCX) & 0x07) as u32;
-                            let start_tile = ((8 + scx) / 8) as u8;
-                            self.fetcher.start_window_at_tile(0, start_tile);
-                            self.win_kill_tap_late = false;
-                            self.window_started_this_line = true;
-                            self.win_start_dot = Some(self.ticks);
-                        } else {
-                            self.win_draw_started_at_x0 = false;
-                            // The hardware mode-3-start checkpoint: when win_draw_start was
-                            // NOT armed, the window-draw state clears to 0 (win_draw_started
-                            // bit dropped). Normal (non-wxA6) windows re-set this on
-                            // the same line via the live x+7==wx start below, so this
-                            // only persistently clears the bit on lines where the
-                            // window does not (re)start — which is what lets the DMG
-                            // wxA6 START-NOW branch fire again when WY next matches.
-                            if win_en && !self.first_line_after_enable {
-                                self.win_draw_started = false;
-                            }
-                        }
-                        self.win_draw_start = false;
-                    }
-                    // DMG wx==166 (lcd_hres+6): the hardware pixel-output runs at EVERY
-                    // xpos as the fetcher walks the line; the wx==xpos==166 branch
-                    // therefore fires at the END of mode 3 (xpos reaches
-                    // 166), AFTER the line's mid-mode-3 WE-off has had its effect on
-                    // the window-draw state — NOT at M3 start. Relocating this branch to the
-                    // mode-3 -> HBlank transition (where xpos==166) is what lets the
-                    // steady-state wxA6 sequence converge: f0(the window-Y increment, state->2) ->
-                    // WE-off(state==2 -> clears started, state->0, stops window) ->
-                    // THIS branch B at xpos==166(state |= win_draw_start, state->1) ->
-                    // HBlank WE-on(state==win_draw_start -> the window-Y increment, state->3). That
-                    // is the TWO window Y position increments per line (8px/4rows) the window
-                    // diagonal needs, and the WE-off now actually reverts the right
-                    // columns to BG (it no longer sees win_draw_start pre-armed). See
-                    // the relocated block at the mode-3 -> HBlank boundary below.
-                    // First scanline after enable is now armed; subsequent
-                    // lines use normal Mode 2 timing.
-                    let was_first_line = self.first_line_after_enable;
-                    self.first_line_after_enable = false;
-                    self.mode0_reported_this_line = false;
-                    self.line_rendered_this_line = false;
-                    self.wxa6_lineend_applied = false;
-                    // SCX fine-scroll discard target (the mode-3-start fine-scroll phase): the
-                    // break xpos is resolved over the first M3 dots by re-reading
-                    // SCX live (see the early-window loop in PixelTransfer). Seed
-                    // it unlatched (-1) and record the arm dot for xpos tracking.
-                    self.m3_pixels_discarded = 0;
-                    self.m3_arm_dot = self.ticks;
-                    // Per-pixel BG-enable history: anchor the
-                    // plot-cc origin at mode-3 entry and seed the line's history
-                    // with the BG-enable bit in effect now. Mid-mode-3 LCDC.0
-                    // writes append (commit_cc, bgen) entries (handle_lcdc_write).
-                    self.bgen_history.clear();
-                    // Seed at boundary column 0 (applies to all columns until the
-                    // first mid-mode-3 toggle).
-                    self.bgen_history.push((
-                        0,
-                        self.lcdc_has(LCDCFlags::BGDisplay),
-                    ));
-                    // Per-line tile-index-is-tile-data glitch targets (the hardware
-                    // tile-select glitch); mid-mode-3 falling LCDC.4 writes append the
-                    // single (cc, k) read each arms (see handle_lcdc_write).
-                    self.tidxtd_glitch.clear();
-                    // DMG window bus-glitch state is per-line (see wg_apply).
-                    self.wg_hist.clear();
-                    self.bg_tile_buf.clear();
-                    self.win_tile_buf.clear();
-                    self.wg_anchor_cc = None;
-                    self.wg_dpre = 0;
-                    self.bg_anchor_cc = None;
-                    self.bg_scy_hist.clear();
-                    self.bg_scx_hist.clear();
-                    // CGB-compat journal flavor (see the CGBWG_* consts): DMG cart on
-                    // CGB hardware (compat mode runs with CGB features OFF, so
-                    // it shares the DMG render paths; the journals resolve
-                    // with the CGB grid/transition rules instead).
-                    self.wg_cgb = mmio.is_cgb() && !mmio.is_cgb_features_enabled();
-                    // Per-pixel DMG palette histories: seed each at boundary 0 with
-                    // the 1-dot-delayed register value (`*_delayed`, refreshed at the
-                    // end of every dot), NOT the live register. A BGP/OBP write on the
-                    // dot the PPU enters mode 3 has already updated mmio but must not
-                    // yet color column 0 — the column-0 pixel sees the prior dot's
-                    // value (the hardware DMG-palette-during-mode-3 behavior: the write at mode-3 entry
-                    // leaves column 0 white). Mid-mode-3 writes after entry append
-                    // (boundary_col, value) entries via on_{bgp,obp0,obp1}_write, which
-                    // land at column >= 1 so column 0 keeps this seed.
-                    self.bgp_history.clear();
-                    self.bgp_history.push((0, self.bgp_delayed));
-                    self.bgp_dot_history.clear();
-                    // CGB-compat (wg_cgb) resolves BGP per dot from this history; unlike
-                    // the DMG per-dot `bgp_delayed` latch, real CGB silicon colors the
-                    // mode-3 column-0 pixel with the LIVE BGP register (age m3-bg-bgp-ncm:
-                    // the pre-frame BGP is already latched at mode-3 arm). DMG keeps the
-                    // 1-dot-delayed seed (dmgpalette_during_m3, via bgp_history).
-                    let bgp_dot_seed = if self.wg_cgb { mmio.read(BGP) } else { self.bgp_delayed };
-                    self.bgp_dot_history.push((0, bgp_dot_seed));
-                    // Clear any leftover DMG BGP phase-hold from the previous line.
-                    self.bgp_defer_countdown = 0;
-                    self.obp0_history.clear();
-                    self.obp0_history.push((0, self.obp0_delayed));
-                    self.obp1_history.clear();
-                    self.obp1_history.push((0, self.obp1_delayed));
-                    self.obp0_dot_history.clear();
-                    self.obp0_dot_history.push((0, self.obp0_delayed));
-                    self.obp1_dot_history.clear();
-                    self.obp1_dot_history.push((0, self.obp1_delayed));
-                    // DMG mid-mode-3 OBJ-enable/OBJ-size toggle model: seed the
-                    // per-column OBJ-enable history and the per-dot OBJ-size
-                    // history with the bits in effect at mode-3 entry, and reset
-                    // the per-sprite live fetch records (all Pending).
-                    self.objen_history.clear();
-                    self.objen_history.push((
-                        0,
-                        self.lcdc_has(LCDCFlags::SpriteDisplayEnable),
-                    ));
-                    self.objsize_dot_history.clear();
-                    self.objsize_dot_history.push((
-                        0,
-                        self.lcdc_has(LCDCFlags::SpriteSize),
-                    ));
-                    self.sprite_fetch_recs.clear();
-                    self.sprite_fetch_recs
-                        .resize(self.sprites_on_line.len(), SpriteFetchRec::default());
-                    self.bgp_writes.clear();
-                    // Carry a mode-2 BGP write into this line's spike cadence as a
-                    // neighbor-only entry (see on_bgp_write); a mode-3 partner within
-                    // BGP_SPIKE_CADENCE_CC then paints its spike (age m3-bg-bgp).
-                    if let Some((cc, v)) = self.bgp_mode2_pending.take()
-                        && !mmio.is_cgb()
-                    {
-                        self.bgp_writes.push((cc, 0xFF, v));
-                        // The mode-2 write is the true settled BGP entering mode 3
-                        // (bgp_delayed lags a dot and can miss a late-mode-2 write),
-                        // so re-seed column 0's palette + the spike's `old` baseline
-                        // with it — the restore's glitch then ORs against FF, painting
-                        // its victim column with the pre-restore (glitch) shade.
-                        self.bgp_history.clear();
-                        self.bgp_history.push((0, v));
-                        self.bgp_delayed = v;
-                    }
-                    // 160-entry per-column BG-index scratch; ensure sized (deserialized
-                    // saves may carry an empty vec) and clear to -1 (no BG pixel yet).
-                    self.line_bg_idx.clear();
-                    self.line_bg_idx.resize(160, -1);
-                    self.m3_arm_scx = mmio.read(SCX) & 0x07 ;
-                    self.m3_arm_scx_full = mmio.read(SCX) as i16;
-                    // First line after enable: resolve the SCX value the fine-scroll
-                    // discard actually samples. The mode-3-start fine-scroll phase reads SCX once
-                    // at the M3-start dot; a mid-discard SCX write (visible at
-                    // `write_cc + 2*cgb`) counts only if it lands at/before that
-                    // sample dot, which sits `prev_scx % 8` dots past M3-arm (the
-                    // discard prefix of the value in effect at M3-start). Evaluate the
-                    // pending f1 latch (from on_scx_write, still intact here) at
-                    // `arm_cc + prev_scx%8`. Matches hardware byte-exact on the
-                    // ly0_late_scx7 SCX-write sweep (initial-SCX shifts the sample
-                    // dot, flipping whether the SCX=7 write enters the mode-0 time).
-                    if was_first_line {
-                        let ds = mmio.is_double_speed_mode() as u32;
-                        let prev_scx = (self.scx_prev_f1 & 0x07) as u64;
-                        // `prev_scx` is a count of PPU dots; convert to master cc
-                        // (1 dot = 1<<ds cc) so the sample dot is phase-correct at
-                        // double speed (where the f1 latch's apply cc is write_cc+4).
-                        let sample_cc = self.abs_cc + (prev_scx << ds);
-                        self.first_line_scx_override = Some(self.scx_f1_pending_at_cc(sample_cc));
-                    } else {
-                        self.first_line_scx_override = None;
-                    }
-                    // Seed the exact-cc f1 latch at the SCX value live at M3
-                    // start; clear any pending write latch left from a prior
-                    // line so it cannot leak into this line's discard.
-                    self.scx_prev_f1 = mmio.read(SCX);
-                    self.scx_f1_apply_cc = wy2_disabled();
-                    // The first line after display enable has bespoke warmup/arm
-                    // timing; the live f1 xpos mapping does not align there, so
-                    // latch the discard immediately (pre-write SCX), as before.
-                    self.m3_discard_target = if was_first_line { self.m3_arm_scx as i8 } else { -1 };
-
-                    if was_first_line {
-                        // First line after LCD enable: install the SAME closed-form
-                        // master-cc anchors the normal-line path uses, computed for
-                        // this line, so the CPU-access gates (cgbp/oam/vram) and the
-                        // STAT-resolve mode reads resolve at the access cc instead of
-                        // falling back to the hand-tuned FIRST_FRAME per-dot pipeline.
-                        //
-                        // On hardware the LCDC-write handling seeds the PPU at enable with `now =
-                        // enable_cc`, resets the LY counter to (0, enable_cc), no sprites
-                        // (display-enable clears the buffer), and `cycles =
-                        // -(mode-3-start line cycle + 2)` — so the first M3 begins 2 dots
-                        // later than a normal line. `m0_time_exact(.., first_line)`
-                        // adds that +2 to the mode-0 line-cycle; `cgbp_begin_exact`
-                        // (the line cycles+ds>=80 begin boundary) is enable-anchored
-                        // already (it shares the same the LY time as a normal line).
-                        // The inactive-period gate (`display_enable_inactive_until`,
-                        // the hardware OAM-reader lookup-until was seeded at enable.
-                        let m3_len = self.compute_m3_length(mmio, is_cgb);
-                        let m0t = self.m0_time_exact(mmio, m3_len, is_cgb, true);
-                        self.m0_time_master = Some(m0t);
-                        // The override applied only to this first-line mode-0 time anchor;
-                        // clear it so the per-tick / next-frame m3_len reads live SCX.
-                        self.first_line_scx_override = None;
-                        self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
-                        // The within-line reported mode-0 dot / m0 IRQ arm keep the
-                        // calibrated FIRST_FRAME timing (the first-line pixel
-                        // pipeline arms later than a normal line); only the
-                        // closed-form access/STAT-resolve anchors above are installed.
-                        self.scheduled_mode0_dot = None;
-                    } else {
-                        // Closed-form mode-0 schedule, including window-start lines
-                        // (compute_m3_length applies the window penalty). Mid-mode-3
-                        // window-enable toggles (set_lcdc_visible) and WX changes
-                        // (PixelTransfer) invalidate it, falling back to the live
-                        // emergent x==160 transition.
-                        let m3_len = self.compute_m3_length(mmio, is_cgb);
-                        let ds = mmio.is_double_speed_mode() as u32;
-                        // Byte-exact mode-0 time, the LY time-anchored (ENGINE_LAZY_PPU.md):
-                        // mode-0 time = (p_now + ly_counter().time + 1)
-                        // − ((456 − (m3_len + BASE)) << ds)
-                        // BASE = 84 (CGB SS+DS), 83 (DMG — the `1−cgb` term already
-                        // lives in m3_len). `p_now + ly_counter().time` is the
-                        // next-LY master cc; +1 corrects rustyboi's LY counter.time
-                        // running 1 master-cc below the hardware LY time.
-                        // The runtime sprite0-at-scx fine-scroll stall (the hardware
-                        // mode-3-start fine-scroll) extends the real mode-3 -> mode-0 transition
-                        // past the predictor's mode-0 time; fold it into the renderer /
-                        // STAT-read boundary here (m0_irq_event_cc_master subtracts
-                        // it back for the predictor-timed m0 STAT IRQ).
-                        let m0t = self.m0_time_exact(mmio, m3_len, is_cgb, false)
-                            + ((self.sprite0_scx_extra(mmio, is_cgb) as u64) << ds);
-                        self.m0_time_master = Some(m0t);
-                        // Deep mode 3 is HDMA-tracker-quiet until the closed-form
-                        // period can lead the mode-0 entry (m0t - 8).
-                        if is_cgb {
-                            mmio.set_hdma_tracker_sleep(m0t.saturating_sub(8));
-                        }
-                        // The within-line mode-0 dot is DERIVED from the same exact
-                        // mode-0 time (master cc) so the eager-grid consumers (reported
-                        // FF41 mode poke, m0 IRQ arm, cgbp tick fallback) ride the
-                        // identical boundary: dot = arm_ticks + (m0t − arm_cc) >> ds.
-                        let arm_cc = mmio.master_cc() as i64;
-                        let dot = self.ticks as i64 + (((m0t as i64) - arm_cc) >> ds);
-                        self.scheduled_mode0_dot = Some(dot.max(0) as u128);
-                        self.m3_scheduled_wx = mmio.read(WX);
-                        self.m3_scheduled_win = self.window_will_start(mmio, is_cgb);
-                        // Predict the DMG dot at which the window's StartWindowDraw
-                        // mode-3 penalty commits, so a disable landing on it (one
-                        // PPU step before the PixelTransfer latch sets
-                        // `win_start_dot`) is still treated as "started". The window
-                        // draws when visible x reaches max(0, WX-7); x begins
-                        // advancing `WARMUP + 8` dots past the M3 arm (the first BG
-                        // tile fill) plus the SCX fine-scroll discard. The penalty
-                        // commits at the fetcher's window-tile boundary, one dot
-                        // ahead of the first window pixel reaching x (the `-1`), so
-                        // a disable on the dot before the visible start still keeps
-                        // it (late_disable_*_wx11 vs the same-tile wx10).
-                        self.predicted_win_start_dot =
-                            if !is_cgb && self.m3_scheduled_win {
-                                let wx = self.m3_scheduled_wx as i64;
-                                let x_at_start = (wx - 7).max(0);
-                                Some(
-                                    (self.m3_arm_dot as i64
-                                        + DMG_PIXEL_TRANSFER_WARMUP as i64
-                                        + 8
-                                        + (self.m3_arm_scx as i64)
-                                        + x_at_start
-                                        - 1)
-                                        .max(0) as u128,
-                                )
-                            } else {
-                                None
-                            };
-                        // cgbp begin boundary (the hardware CGB-palette-accessible window: blocked once
-                        // `line cycles(cc) + ds >= 80`), byte-exact from the LY time
-                        // anchor — see `cgbp_begin_exact`.
-                        self.cgbp_block_start_cc = Some(self.cgbp_begin_exact(mmio));
-                    }
-                    // Arm the mode-0 (HBlank) STAT IRQ event at the predicted
-                    // mode-0 start, in absolute clock terms. Hardware schedules
-                    // memevent_m0irq only when m0 is enabled, but keeps the time
-                    // current for FF41/FF45 immediate-trigger checks; we always
-                    // arm it (dispatch gates on the enable in mstat_irq).
-                    self.arm_m0irq_for_current_line(mmio, was_first_line);
-                }
-            },
+            State::OAMSearch => self.step_mode2(mmio),
             State::PixelTransfer => 'label: {
                 // Shift the DMG WE per-dot visibility history (see we_dot_hist).
                 self.we_dot_hist = [
