@@ -1107,13 +1107,21 @@ fn ffmpeg_command() -> Command {
 /// heavy temporal redundancy of tiny 160x144 clips. `veryfast`: at 160x144 the
 /// slower presets are ~2x the CPU for NO size win (measured slightly LARGER on
 /// gameplay), so veryfast is both faster and smaller across a big library.
+///
+/// Do not "restore" veryslow/25: those are the pre-measurement values, and an
+/// unrelated commit once reverted the args to them while leaving this rationale
+/// in place, so code and comment disagreed until it was caught in review.
+/// Re-measured on this sweep's own output: on a boot animation veryfast/28 is
+/// 12548 B in 0.17s against veryslow/25's 13563 B in 0.50s — smaller AND ~3x
+/// faster; on a static test pattern the two are within 1% and veryfast is still
+/// ~2x faster.
 fn spawn_encoder(out: &Path) -> std::io::Result<std::process::Child> {
     ffmpeg_command()
         .args([
             "-loglevel", "error",
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "160x144",
             "-framerate", "4194304/70224", "-i", "-",
-            "-c:v", "libx264", "-preset", "veryslow", "-crf", "25",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
             "-g", "300", "-threads", "1",
             "-pix_fmt", "yuv420p", "-f", "mp4",
         ])
