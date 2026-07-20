@@ -1,6 +1,7 @@
 mod analog;
 pub mod controller;
 mod envelope;
+mod length;
 mod noise;
 mod output;
 mod square;

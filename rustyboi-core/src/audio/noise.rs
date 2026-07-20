@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::audio::length::COUNTER_DISABLED;
 use crate::audio::{NR41, NR42, NR43, NR44};
 use crate::memory::Addressable;
 
@@ -25,7 +26,7 @@ pub(super) struct Noise {
     #[serde(default)]
     env_locked: bool,
     // cc of the last NR44 trigger (frame-boundary race window, see square.rs).
-    #[serde(default = "len_disabled")]
+    #[serde(default = "crate::audio::length::counter_disabled")]
     env_trigger_cc: u32,
 
     // Free-running 2 MHz cycle counter (controller cc), pushed each sync;
@@ -33,7 +34,7 @@ pub(super) struct Noise {
     #[serde(default)]
     cc: u32,
     // Absolute cc of length expiry.
-    #[serde(default = "len_disabled")]
+    #[serde(default = "crate::audio::length::counter_disabled")]
     len_counter: u32,
     #[serde(default)]
     len_cc: u32,
@@ -119,12 +120,6 @@ pub(super) struct Noise {
     cgb_le_b: bool,
 }
 
-const LEN_DISABLED: u32 = 0xFFFF_FFFF;
-
-fn len_disabled() -> u32 {
-    LEN_DISABLED
-}
-
 impl Noise {
     pub(super) fn new() -> Self {
         Noise {
@@ -139,9 +134,9 @@ impl Noise {
             env_clock: false,
             env_should_lock: false,
             env_locked: false,
-            env_trigger_cc: LEN_DISABLED,
+            env_trigger_cc: COUNTER_DISABLED,
             cc: 0,
-            len_counter: LEN_DISABLED,
+            len_counter: COUNTER_DISABLED,
             len_cc: 0,
             counter: 0,
             ripple_countdown: 0,
@@ -171,10 +166,6 @@ impl Noise {
         self.cc = cc;
     }
 
-    pub(super) fn set_len_cc(&mut self, cc: u32) {
-        self.len_cc = cc;
-    }
-
     pub(super) fn set_cgb(&mut self, cgb: bool) {
         self.cgb = cgb;
     }
@@ -196,15 +187,6 @@ impl Noise {
     /// CGB-B-or-earlier APU revision gate (CGB with model <= CGB-B).
     pub(super) fn set_cgb_le_b(&mut self, le_b: bool) {
         self.cgb_le_b = le_b;
-    }
-
-    pub(super) fn len_expired(&self) -> bool {
-        self.len_cc >= self.len_counter
-    }
-
-    /// Directly seed the hidden length counter (post-boot state seeding).
-    pub fn set_length_counter(&mut self, value: u8) {
-        self.length_counter = value;
     }
 
     /// APU-init noise state (the APU struct reset at the NR52
@@ -243,61 +225,39 @@ impl Noise {
         self.cc = self.cc.wrapping_sub(delta);
         self.len_cc = self.len_cc.wrapping_sub(delta);
         self.last_run_cc = self.last_run_cc.wrapping_sub(delta);
-        if self.env_trigger_cc != LEN_DISABLED {
+        if self.env_trigger_cc != COUNTER_DISABLED {
             self.env_trigger_cc = self.env_trigger_cc.wrapping_sub(delta);
         }
-        if self.len_counter != LEN_DISABLED {
+        if self.len_counter != COUNTER_DISABLED {
             self.len_counter = self.len_counter.wrapping_sub(delta);
         }
     }
 
-    const LEN_MASK: u16 = 0x3F;
+    /// The channel's NR44 register byte (the length unit's enable/trigger).
+    fn nr4(&self) -> u8 {
+        self.nr44
+    }
 
-    /// Length-counter expiry for channel 4.
-    pub(super) fn length_event(&mut self) {
-        self.len_counter = LEN_DISABLED;
-        self.length_counter = 0;
+    /// Length teardown for channel 4: the channel simply stops. (The
+    /// `master`/DAC state is owned by NR42 here, unlike channel 3.)
+    fn len_disable(&mut self) {
         self.enabled = false;
     }
 
-    /// Length-counter NR41 write handling (channel 4).
-    fn len_nr1_change(&mut self, value: u8) {
-        self.length_counter = ((!value as u16 & Self::LEN_MASK) + 1) as u8;
-        self.len_counter = if self.nr44 & 0x40 != 0 {
-            ((self.len_cc >> 13) + self.length_counter as u32) << 13
-        } else {
-            LEN_DISABLED
-        };
+    /// No extra-clock fork on the noise channel; see `Wave::len_swallow`.
+    fn len_swallow(&mut self, _new_nr4: u8, dec: u8) -> u8 {
+        dec
     }
 
-    /// Length-counter NR44 write handling (channel 4).
-    fn len_nr4_change(&mut self, old_nr4: u8, new_nr4: u8) {
-        if self.len_counter != LEN_DISABLED {
-            self.length_counter =
-                (self.len_counter >> 13).wrapping_sub(self.len_cc >> 13) as u8;
-        }
-        let mut dec: u8 = 0;
-        // CGB-B and older: extra length clock regardless of the written bit-6
-        // value (CGB-B-or-earlier revision; SameSuite
-        // channel_4_extra_length_clocking-cgb0B).
-        if new_nr4 & 0x40 != 0 || self.cgb_le_b {
-            dec = ((!self.len_cc >> 12) & 1) as u8;
-            if old_nr4 & 0x40 == 0 && self.length_counter != 0 {
-                self.length_counter -= dec;
-                if self.length_counter == 0 {
-                    self.enabled = false;
-                }
-            }
-        }
-        if new_nr4 & 0x80 != 0 && self.length_counter == 0 {
-            self.length_counter = (Self::LEN_MASK as u8) + 1 - dec;
-        }
-        self.len_counter = if new_nr4 & 0x40 != 0 && self.length_counter != 0 {
-            ((self.len_cc >> 13) + self.length_counter as u32) << 13
-        } else {
-            LEN_DISABLED
-        };
-    }
+    // The six shared length helpers (set_len_cc, len_expired,
+    // set_length_counter, length_event, len_nr1_change, len_nr4_change); see
+    // audio/length.rs.
+    crate::audio::length::impl_length_unit!(
+        mask: 0x3F,
+        counter: u8,
+        on_disable: len_disable,
+        pre_dec: len_swallow,
+    );
 
     pub(super) fn step(&mut self) {
         self.advance();
