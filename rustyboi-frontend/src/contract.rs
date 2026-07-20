@@ -20,7 +20,7 @@ use rustyboi_session::{Session, UiAction};
 /// A frontend implements this once; [`drive_action`] then performs every UI
 /// command through it. Missing any method is a compile error at the
 /// `drive_action::<ThisFrontend>` instantiation.
-pub trait Frontend {
+pub(crate) trait Frontend {
     /// Mutable access to the owned session (the driver applies actions to it).
     fn session_mut(&mut self) -> &mut Session;
 
@@ -77,7 +77,7 @@ pub trait Frontend {
 /// the frontend can apply the exact bookkeeping each one needs (they differ:
 /// toggle flips user-pause, restart resets it, error-clear pauses).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PauseHint {
+pub(crate) enum PauseHint {
     TogglePause,
     Restart,
     ClearError,
@@ -91,7 +91,7 @@ pub enum PauseHint {
 /// Apply a [`UiAction`] through the shared [`Session::apply`], then route the
 /// resulting host work to the `Frontend`. This is the one path every windowed
 /// frontend uses; the generic bound makes the capability set compile-checked.
-pub fn drive_action<F: Frontend>(frontend: &mut F, action: UiAction, timestamp: u64) {
+pub(crate) fn drive_action<F: Frontend>(frontend: &mut F, action: UiAction, timestamp: u64) {
     let pause_hint = pause_hint_for(&action);
     let outcome = frontend.session_mut().apply(action, timestamp);
 
