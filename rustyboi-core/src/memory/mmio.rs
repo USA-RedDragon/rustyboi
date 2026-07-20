@@ -200,6 +200,29 @@ pub(crate) const REG_BCPD: u16 = 0xFF69; // Background Color Palette Data
 pub const REG_OCPS: u16 = 0xFF6A; // Object Color Palette Specification
 pub(crate) const REG_OCPD: u16 = 0xFF6B; // Object Color Palette Data
 
+/// Per-register "unused bits read 1" masks, OR-ed into the raw value on read.
+///
+/// Only registers whose read is a pure `raw | mask` appear here. Registers
+/// whose set bits are conditional — SC's DMG-compat bit 1, RP/IR's
+/// light-sensing bit 1 — stay expressed as code at their dispatch arm, and
+/// HDMA5's bit 7 is a transfer-status flag rather than an unused bit, so it
+/// is not a mask either.
+///
+/// These are hardware-observed values (mooneye boot_hwio / unused_hwio pin
+/// most of them); change one only against a hardware reference.
+mod or_mask {
+    pub(super) const TAC: u8 = 0xF8; // FF07: bits 3-7 unused
+    pub(super) const IF: u8 = 0xE0; // FF0F: bits 5-7 unused
+    pub(super) const STAT: u8 = 0x80; // FF41: bit 7 unused
+    pub(super) const KEY0: u8 = 0xFE; // FF4C: only bit 0 (DMG-compat select)
+    pub(super) const KEY1: u8 = 0x7E; // FF4D: bit 7 = speed, bit 0 = armed
+    pub(super) const VBK: u8 = 0xFE; // FF4F: only bit 0 (VRAM bank)
+    pub(super) const BCPS: u8 = 0x40; // FF68: bit 6 unused
+    pub(super) const OCPS: u8 = 0x40; // FF6A: bit 6 unused
+    pub(super) const OPRI: u8 = 0xFE; // FF6C: only bit 0
+    pub(super) const SVBK: u8 = 0xF8; // FF70: only bits 0-2 (WRAM bank)
+    pub(super) const FF75: u8 = 0x8F; // FF75: only bits 4-6 R/W
+}
 
 /// CGB HDMA halt-state machine
 /// Captured at HALT and consulted on unhalt to decide whether the next
@@ -4924,7 +4947,7 @@ impl Mmio {
     /// same always-set bit 7 the dispatched read does.
     #[inline]
     pub(crate) fn lcd_status_reg(&self) -> u8 {
-        self.io_registers.read(ppu::LCD_STATUS) | 0x80
+        self.io_registers.read(ppu::LCD_STATUS) | or_mask::STAT
     }
 
     /// Whether the PPU's per-dot OAM snapshot snoop could possibly observe an
@@ -5379,7 +5402,7 @@ impl memory::Addressable for Mmio {
                         input::JOYP => self.input.read(addr),
                         // TAC: only bits 0-2 are implemented; the unused upper
                         // bits always read 1 (hardware ORs 0xF8).
-                        timer::TAC => self.timer.read(addr) | 0xF8,
+                        timer::TAC => self.timer.read(addr) | or_mask::TAC,
                         timer::DIV..=timer::TAC => self.timer.read(addr),
                         serial::SB => self.serial.read(addr),
                         // SC (FF02) fast-clock select (bit 1) exists only with CGB
@@ -5390,7 +5413,7 @@ impl memory::Addressable for Mmio {
                         serial::SC => {
                             self.serial.read(addr) | if self.cgb_features_enabled { 0x00 } else { 0x02 }
                         }
-                cpu::registers::INTERRUPT_FLAG => self.io_registers.read(addr) | 0xE0,
+                cpu::registers::INTERRUPT_FLAG => self.io_registers.read(addr) | or_mask::IF,
                         audio::NR10..=audio::NR14 => self.audio.read(addr),
                         audio::NR21..=audio::NR24 => self.audio.read(addr),
                         audio::NR30..=audio::NR34 => self.audio.read(addr),
@@ -5411,7 +5434,7 @@ impl memory::Addressable for Mmio {
                             if self.io_registers.read(REG_BOOT_OFF) != 0 {
                                 0xFF
                             } else if self.cgb_features_enabled {
-                                (if self.key0_dmg_mode { 0x01 } else { 0x00 }) | 0xFE
+                                (if self.key0_dmg_mode { 0x01 } else { 0x00 }) | or_mask::KEY0
                             } else {
                                 0xFF
                             }
@@ -5421,7 +5444,7 @@ impl memory::Addressable for Mmio {
                                 // KEY1: Current speed (bit 7) | Switch armed (bit 0)
                                 let speed_bit = if self.key1_current_speed { 0x80 } else { 0x00 };
                                 let armed_bit = if self.key1_switch_armed { 0x01 } else { 0x00 };
-                                speed_bit | armed_bit | 0x7E // Bits 1-6 = 1, bit 7 = current speed, bit 0 = switch armed
+                                speed_bit | armed_bit | or_mask::KEY1
                             } else {
                                 0xFF // DMG hardware returns 0xFF for CGB registers
                             }
@@ -5432,7 +5455,7 @@ impl memory::Addressable for Mmio {
                         // reads it (bank locked at 0, so 0xFE). mooneye boot_hwio-C.
                         REG_VBK => {
                             if self.is_cgb() {
-                                self.vram_bank | 0xFE // Bit 0 = bank, bits 1-7 = 1
+                                self.vram_bank | or_mask::VBK
                             } else {
                                 0xFF // DMG hardware returns 0xFF for CGB registers
                             }
@@ -5462,7 +5485,7 @@ impl memory::Addressable for Mmio {
                                 // Read back the RAW written low 3 bits, not the
                                 // bank-0->1 remap (hardware stores the written
                                 // value verbatim; the remap is access-time only).
-                                (self.io_registers.read(REG_SVBK) & 0x07) | 0xF8
+                                (self.io_registers.read(REG_SVBK) & 0x07) | or_mask::SVBK
                             } else {
                                 0xFF
                             }
@@ -5474,7 +5497,7 @@ impl memory::Addressable for Mmio {
                         // reads 0xC8. Bit 6 is unused and reads 1.
                         REG_BCPS => {
                             if self.is_cgb() {
-                                self.bg_palette_spec | 0x40
+                                self.bg_palette_spec | or_mask::BCPS
                             } else {
                                 0xFF
                             }
@@ -5491,7 +5514,7 @@ impl memory::Addressable for Mmio {
                         // at 16. mooneye boot_hwio-C reads 0xD0. Bit 6 reads 1.
                         REG_OCPS => {
                             if self.is_cgb() {
-                                self.obj_palette_spec | 0x40
+                                self.obj_palette_spec | or_mask::OCPS
                             } else {
                                 0xFF
                             }
@@ -5505,7 +5528,7 @@ impl memory::Addressable for Mmio {
                         },
                         // Bit 7 of STAT is unused but always reads as 1 on real
                         // hardware.
-                        ppu::LCD_STATUS => self.io_registers.read(addr) | 0x80,
+                        ppu::LCD_STATUS => self.io_registers.read(addr) | or_mask::STAT,
 
                         // CGB-only registers with unused bits that read 1 (DMG
                         // returns 0xFF, handled by the FF51-77 catch-all below).
@@ -5525,7 +5548,7 @@ impl memory::Addressable for Mmio {
                         }
                         // OPRI (0xFF6C): only bit 0 implemented; bits 1-7 read 1.
                         0xFF6C if self.cgb_features_enabled => {
-                            self.io_registers.read(0xFF6C) | 0xFE
+                            self.io_registers.read(0xFF6C) | or_mask::OPRI
                         }
                         // Undocumented FF72/FF73: plain 8-bit R/W scratch
                         // registers present on all CGB silicon (gated on being CGB
@@ -5537,7 +5560,7 @@ impl memory::Addressable for Mmio {
                         // rest read 1. Present on all CGB silicon regardless of
                         // the cart CGB flag (mooneye unused_hwio-C: 0x8F post-boot).
                         0xFF75 if self.is_cgb() => {
-                            self.io_registers.read(0xFF75) | 0x8F
+                            self.io_registers.read(0xFF75) | or_mask::FF75
                         }
                         // Unmapped CGB IO holes (no register) read open-bus
                         // 0xFF: FF57-FF67, FF6D-FF6F, FF71. (FF68/6A/6C/70 are
