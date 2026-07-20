@@ -363,7 +363,7 @@ impl InputConfig {
         match trigger {
             InputTrigger::Key(k) => held.keys.contains(&k),
             InputTrigger::Pad(p) => held.pad.contains(&p),
-            InputTrigger::Gb(b) => gb_button(gb, b),
+            InputTrigger::Gb(b) => b.get(gb),
         }
     }
 
@@ -394,7 +394,7 @@ impl InputConfig {
         let mut raw = ButtonState::default();
         for (button, triggers) in &self.gb_bindings {
             let pressed = triggers.iter().any(|t| Self::trigger_held(*t, held, &empty));
-            set_gb_button(&mut raw, *button, pressed);
+            button.set(&mut raw, pressed);
         }
 
         if state.prev_active.len() != self.hotkeys.len() {
@@ -419,11 +419,11 @@ impl InputConfig {
             }
 
             if let Some(consumed) = hotkey.action.consumed_gb() {
-                set_gb_button(&mut out, consumed, false);
+                consumed.set(&mut out, false);
             }
             if let HotkeyAction::Turbo(btn) = hotkey.action
                 && turbo_on {
-                    set_gb_button(&mut out, btn, true);
+                    btn.set(&mut out, true);
                 }
 
             if hotkey.action.is_hold() || !was {
@@ -435,32 +435,6 @@ impl InputConfig {
         }
 
         (out, fired)
-    }
-}
-
-fn gb_button(s: &ButtonState, b: GbButton) -> bool {
-    match b {
-        GbButton::A => s.a,
-        GbButton::B => s.b,
-        GbButton::Start => s.start,
-        GbButton::Select => s.select,
-        GbButton::Up => s.up,
-        GbButton::Down => s.down,
-        GbButton::Left => s.left,
-        GbButton::Right => s.right,
-    }
-}
-
-fn set_gb_button(s: &mut ButtonState, b: GbButton, v: bool) {
-    match b {
-        GbButton::A => s.a = v,
-        GbButton::B => s.b = v,
-        GbButton::Start => s.start = v,
-        GbButton::Select => s.select = v,
-        GbButton::Up => s.up = v,
-        GbButton::Down => s.down = v,
-        GbButton::Left => s.left = v,
-        GbButton::Right => s.right = v,
     }
 }
 

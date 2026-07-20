@@ -175,24 +175,11 @@ impl TouchLayout {
         for &(x, y) in pointers {
             for b in &self.buttons {
                 if b.rect.contains(x, y) {
-                    set_button(&mut state, b.button, true);
+                    b.button.set(&mut state, true);
                 }
             }
         }
         state
-    }
-}
-
-fn set_button(s: &mut ButtonState, b: GbButton, pressed: bool) {
-    match b {
-        GbButton::A => s.a = pressed,
-        GbButton::B => s.b = pressed,
-        GbButton::Start => s.start = pressed,
-        GbButton::Select => s.select = pressed,
-        GbButton::Up => s.up = pressed,
-        GbButton::Down => s.down = pressed,
-        GbButton::Left => s.left = pressed,
-        GbButton::Right => s.right = pressed,
     }
 }
 

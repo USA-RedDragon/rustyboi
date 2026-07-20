@@ -40,8 +40,10 @@ impl GbButton {
         GbButton::Right,
     ];
 
-    /// Set this button's bit in a `ButtonState`.
-    fn set(self, s: &mut ButtonState, pressed: bool) {
+    /// Set this button's field in a `ButtonState`. The single abstract-button →
+    /// `ButtonState` field mapping in the crate; `input_config` and `overlay`
+    /// both route through this pair rather than re-spelling the match.
+    pub fn set(self, s: &mut ButtonState, pressed: bool) {
         match self {
             GbButton::A => s.a = pressed,
             GbButton::B => s.b = pressed,
@@ -51,6 +53,20 @@ impl GbButton {
             GbButton::Down => s.down = pressed,
             GbButton::Left => s.left = pressed,
             GbButton::Right => s.right = pressed,
+        }
+    }
+
+    /// Read this button's field from a `ButtonState`.
+    pub fn get(self, s: &ButtonState) -> bool {
+        match self {
+            GbButton::A => s.a,
+            GbButton::B => s.b,
+            GbButton::Start => s.start,
+            GbButton::Select => s.select,
+            GbButton::Up => s.up,
+            GbButton::Down => s.down,
+            GbButton::Left => s.left,
+            GbButton::Right => s.right,
         }
     }
 }
