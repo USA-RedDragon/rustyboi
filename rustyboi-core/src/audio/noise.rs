@@ -440,7 +440,9 @@ impl Noise {
         if divisor > 1 && self.ripple_countdown == 1 {
             self.counter = self.counter.wrapping_add(1) & 0x3FFF;
         } else if divisor > 1 && self.ripple_countdown == 2 && self.enabled && self.ds {
-            // model <= CGB_C in double speed
+            // <=CGB_C double-speed behavior, deliberately ungated (applied to
+            // all revisions): no D/E oracle reaches this path, so the D/E fork
+            // is omitted pending hardware captures — not a missing `!cgb_de`.
             self.counter = self.counter.wrapping_add(1) & 0x3FFF;
         } else if self.ripple_countdown == 2 && (self.alignment & 3) == 0 && self.enabled {
             if divisor == 0 {
@@ -461,8 +463,10 @@ impl Noise {
         let mut countdown: i32 = if divisor == 0 { 6 } else { divisor as i32 * 4 + 6 };
         if self.alignment & 1 != 0 {
             if divisor == 0 {
-                // model <= CGB_C (DMG uses the was_background variants, but
-                // <=C is the cgb04c behavior; DMG08's r=0 path matches +1)
+                // <=CGB_C-derived (cgb04c) behavior, deliberately ungated:
+                // DMG08's r=0 path matches the +1 too, and no D/E oracle
+                // discriminates this path — the D/E fork is omitted pending
+                // hardware captures, not a missing `!cgb_de`.
                 countdown += 1;
             } else if self.alignment & 2 != 0 {
                 if divisor == 1 && !self.enabled {
@@ -479,7 +483,9 @@ impl Noise {
         } else if divisor != 0 {
             if self.alignment & 2 != 0 {
                 if self.ds && divisor == 1 {
-                    countdown += 2; // <= CGB_C in double speed
+                    // <=CGB_C double-speed behavior, deliberately ungated (all
+                    // revisions): D/E fork omitted pending oracles.
+                    countdown += 2;
                 } else {
                     countdown -= 2;
                 }
@@ -511,7 +517,9 @@ impl Noise {
             }
         }
         if divisor == 0 && was_background && !self.enabled && self.ds {
-            countdown -= 1; // <= CGB_C
+            // <=CGB_C behavior, deliberately ungated (all revisions): D/E fork
+            // omitted pending oracles.
+            countdown -= 1;
         }
         if div_1_glitch {
             countdown -= 4;

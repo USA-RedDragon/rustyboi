@@ -35,13 +35,13 @@ pub struct Wave {
 
     // Wave fetch timing: `wave_counter` is the cc of the next pending sample
     // fetch, `last_read_time` the cc of the most recent one, and `wave_pos` the
-    // current nibble position (0..63 over the 16 wave-RAM bytes).
+    // current nibble position (0..31 over the 16 wave-RAM bytes).
     #[serde(default = "disabled")]
     wave_counter: u32,
     #[serde(default)]
     last_read_time: u32,
     #[serde(default)]
-    wave_pos: u8, // 0..63 (2 * 16 nibbles)
+    wave_pos: u8, // 0..31 (16 bytes = 32 nibbles)
     #[serde(default)]
     sample_buf: u8,
 

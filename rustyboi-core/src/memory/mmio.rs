@@ -2265,10 +2265,7 @@ impl Mmio {
         // down-sampler reads is the instruction-end state (the same state the
         // per-dot crank used to leave it in).
         self.sync_apu_cc();
-        let mut audio = self.audio.clone();
-        let samples = audio.generate_samples(self, cpu_cycles);
-        self.audio = audio;
-        samples
+        self.audio.generate_samples(cpu_cycles)
     }
 
     /// Copy a single byte from `src` to the VRAM destination corresponding
