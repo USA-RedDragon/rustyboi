@@ -3,10 +3,11 @@ use crate::audio::{NR10, NR11, NR12, NR13, NR14, NR21, NR22, NR23, NR24};
 use crate::memory::Addressable;
 
 // The APU sound cycle counter is a free-running 2 MHz value; the frame
-// sequencer position is `(cc >> 12) & 7`. Our FS step (the index about to be
-// clocked) is offset from that by +3 (measured empirically against the boot
-// DIV phase): `fs_step == ((cc >> 12) + 3) & 7`. Equivalently, length clocks
-// when `(cc >> 12) & 7` is in {5,7,1,3} and envelope at {2}.
+// sequencer position is `(cc >> 12) & 7`. The step about to be clocked is
+// offset from that by +3 (measured empirically against the boot DIV phase):
+// `((cc >> 12) + 3) & 7`. Equivalently, length clocks when `(cc >> 12) & 7` is
+// in {5,7,1,3} and envelope at {2}. The phase is derived from `cc` on demand;
+// no step counter is stored.
 //
 // Duty timing uses absolute event counters (`next_pos_update`); envelope and
 // length use absolute `cc`-based counters.
@@ -157,8 +158,6 @@ pub(super) struct SquareWave {
     // --- Length counter (cc-event model) ---
     #[serde(default)]
     length_counter: u16,
-    #[serde(default)]
-    length_enabled: bool,
     // Absolute cc of length expiry:
     // `((cc>>13)+length_counter)<<13` when enabled, else `LEN_DISABLED`.
     #[serde(default = "len_disabled")]
@@ -170,8 +169,6 @@ pub(super) struct SquareWave {
     // --- Frequency sweep (Channel 1 only) ---
     #[serde(default)]
     sweep_shadow_frequency: u16,
-    #[serde(default)]
-    fs_step: u8,
 
     // cc-driven sweep (Channel 1). Absolute-cc event
     // counter, negate latch, and the CGB flag the sweep trigger init needs.
@@ -254,11 +251,9 @@ impl SquareWave {
             volume: 0,
             master: false,
             length_counter: 0,
-            length_enabled: false,
             len_counter: LEN_DISABLED,
             len_cc: 0,
             sweep_shadow_frequency: 0,
-            fs_step: 0,
             sweep_counter: COUNTER_DISABLED,
             sweep_apply_counter: COUNTER_DISABLED,
             sweep_kill_counter: COUNTER_DISABLED,
@@ -361,10 +356,6 @@ impl SquareWave {
         // preserved across the DIV-reset fold (the countdown is kept).
         self.update_pos();
         self.last_pos_cc = self.last_pos_cc.wrapping_sub(delta);
-    }
-
-    pub(super) fn set_fs_step(&mut self, step: u8) {
-        self.fs_step = step;
     }
 
     /// Master-clock epoch rebase: shift every absolute-cc anchor down by
@@ -893,7 +884,6 @@ impl SquareWave {
         }
 
         self.length_nr4_change(old_nr4, value);
-        self.length_enabled = value & 0x40 != 0;
 
         if self.channel1 {
             self.nr14 = value;

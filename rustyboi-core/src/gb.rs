@@ -2517,6 +2517,205 @@ mod savestate_roundtrip_tests {
         }
     }
 
+    /// The APU half of the round-trip, asserted on the *audio* the restored
+    /// machine goes on to produce rather than on its serialized bytes: with all
+    /// four channels live (sweep, both envelope directions, length counters
+    /// armed, wave RAM loaded, a stepping LFSR), a restored machine must emit a
+    /// sample-for-sample identical stream. ROM-free and self-driving, so it
+    /// pins the channels themselves rather than some ROM's incidental mix.
+    ///
+    /// The state-bytes comparisons elsewhere in this module cannot catch an APU
+    /// field that restores wrong-but-serializes-the-same; only re-running the
+    /// mixer can. Regression guard for the dead-field removal that dropped the
+    /// per-channel `length_enabled`/`fs_step` mirrors and the noise envelope's
+    /// `volume_timer`/`volume_direction`.
+    #[test]
+    fn savestate_roundtrips_a_fully_live_apu() {
+        use std::sync::{Arc, Mutex};
+
+        type Samples = Arc<Mutex<Vec<(f32, f32)>>>;
+
+        #[derive(Clone)]
+        struct Cap(Samples);
+        impl audio::AudioOutput for Cap {
+            fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+                Ok(())
+            }
+            fn add_samples(&mut self, s: &[(f32, f32)]) {
+                self.0.lock().unwrap().extend_from_slice(s);
+            }
+        }
+
+        /// A machine with every channel programmed and triggered. Length is
+        /// enabled (NRx4 bit 6) on CH1/CH3 and left off on CH2/CH4, so both
+        /// arms of the length path are live across the restore.
+        fn live_apu_machine() -> (GB, Samples) {
+            let rom = vec![0u8; 0x8000];
+            let mut gb = GB::new(Hardware::DMG);
+            gb.insert(cartridge::Cartridge::from_bytes(&rom).unwrap());
+            gb.skip_bios();
+            let buf = Arc::new(Mutex::new(Vec::new()));
+            gb.enable_audio(Box::new(Cap(buf.clone()))).unwrap();
+
+            gb.write_memory(0xFF26, 0x80); // NR52: APU on
+            gb.write_memory(0xFF25, 0xFF); // NR51: every channel to both sides
+            gb.write_memory(0xFF24, 0x77); // NR50: full volume both sides
+
+            // CH1: sweeping square, decreasing envelope, length armed.
+            gb.write_memory(0xFF10, 0x35); // NR10: sweep period 3, down, shift 5
+            gb.write_memory(0xFF11, 0x80); // NR11: duty 2, length load 0
+            gb.write_memory(0xFF12, 0xF3); // NR12: vol 15, decrease, period 3
+            gb.write_memory(0xFF13, 0x00); // NR13: freq low
+            gb.write_memory(0xFF14, 0xC5); // NR14: trigger + length enable
+
+            // CH2: square, INCREASING envelope, length off.
+            gb.write_memory(0xFF16, 0x40); // NR21: duty 1
+            gb.write_memory(0xFF17, 0x28); // NR22: vol 2, increase, period 0
+            gb.write_memory(0xFF18, 0x80); // NR23: freq low
+            gb.write_memory(0xFF19, 0x86); // NR24: trigger, length disabled
+
+            // CH3: wave, length armed, a non-uniform pattern so the sample
+            // index (not just the DAC level) is observable.
+            gb.write_memory(0xFF1A, 0x80); // NR30: DAC on
+            for i in 0..16u16 {
+                gb.write_memory(0xFF30 + i, (i as u8) * 0x11);
+            }
+            gb.write_memory(0xFF1B, 0x00); // NR31: length load
+            gb.write_memory(0xFF1C, 0x20); // NR32: volume 100%
+            gb.write_memory(0xFF1D, 0x00); // NR33: freq low
+            gb.write_memory(0xFF1E, 0xC6); // NR34: trigger + length enable
+
+            // CH4: noise, decreasing envelope, stepping LFSR, length off.
+            gb.write_memory(0xFF20, 0x00); // NR41: length load
+            gb.write_memory(0xFF21, 0xF1); // NR42: vol 15, decrease, period 1
+            gb.write_memory(0xFF22, 0x37); // NR43: mid divisor/shift
+            gb.write_memory(0xFF23, 0x80); // NR44: trigger, length disabled
+            (gb, buf)
+        }
+
+        let (mut gb, orig_buf) = live_apu_machine();
+        // Settle mid-envelope/mid-sweep so the capture point is not a boundary.
+        for _ in 0..6 {
+            gb.run_until_frame(true);
+        }
+
+        let state = gb.to_state_bytes().expect("serialize");
+        let mut restored = restore_with_rom(&state, &gb);
+        // The sink is `#[serde(skip)]`, so the restored machine has none; the
+        // live machine keeps the one it already has (`enable_audio` no-ops when
+        // a sink is attached), so drop the settle-phase capture instead.
+        let redo_buf = Arc::new(Mutex::new(Vec::new()));
+        restored.enable_audio(Box::new(Cap(redo_buf.clone()))).unwrap();
+        orig_buf.lock().unwrap().clear();
+
+        for frame in 0..8 {
+            gb.run_until_frame(true);
+            restored.run_until_frame(true);
+            assert_eq!(
+                gb.to_state_bytes().expect("serialize"),
+                restored.to_state_bytes().expect("serialize"),
+                "machine state diverged after APU restore at frame {frame}"
+            );
+        }
+
+        let orig = orig_buf.lock().unwrap();
+        let redo = redo_buf.lock().unwrap();
+        assert!(!orig.is_empty(), "no audio was generated");
+        // The mix must be non-trivial, or an all-silence stream would match
+        // itself and prove nothing.
+        assert!(
+            orig.iter().any(|&(l, _)| l != orig[0].0),
+            "captured audio is a constant level; the channels were not live"
+        );
+        assert_eq!(orig.len(), redo.len(), "restored machine emitted a different sample count");
+        assert_eq!(*orig, *redo, "restored APU produced a different audio stream");
+    }
+
+    /// Analog continuity across a load. The output high-pass and the DAC-off
+    /// fade are continuous RC state; if they restored to a default the filter
+    /// would restart from zero and ring out a step transient on every load —
+    /// and RetroArch's rewind unserializes once per frame, so that transient
+    /// would land on every rewound frame.
+    ///
+    /// Asserted two ways: the restored machine's samples must equal the live
+    /// machine's continuation bit-for-bit, and the single step ACROSS the
+    /// save/load seam must be no larger than the tone's own steady-state
+    /// sample-to-sample step (a restarted filter shows up as a jump there).
+    #[test]
+    fn savestate_is_analog_continuous_across_a_load() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Cap(Arc<Mutex<Vec<(f32, f32)>>>);
+        impl audio::AudioOutput for Cap {
+            fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+                Ok(())
+            }
+            fn add_samples(&mut self, s: &[(f32, f32)]) {
+                self.0.lock().unwrap().extend_from_slice(s);
+            }
+        }
+
+        // A steady tone: one square channel, flat envelope, no sweep, no
+        // length. The high-pass settles to a periodic steady state, which is
+        // what makes a restart transient visible.
+        let rom = vec![0u8; 0x8000];
+        let mut gb = GB::new(Hardware::DMG);
+        gb.insert(cartridge::Cartridge::from_bytes(&rom).unwrap());
+        gb.skip_bios();
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        gb.enable_audio(Box::new(Cap(buf.clone()))).unwrap();
+        gb.write_memory(0xFF26, 0x80); // NR52: APU on
+        gb.write_memory(0xFF25, 0x22); // NR51: channel 2 to both sides
+        gb.write_memory(0xFF24, 0x77); // NR50: full volume
+        gb.write_memory(0xFF16, 0x80); // NR21: duty 2
+        gb.write_memory(0xFF17, 0xF0); // NR22: vol 15, no envelope stepping
+        gb.write_memory(0xFF18, 0x00); // NR23: freq low
+        gb.write_memory(0xFF19, 0x86); // NR24: trigger, length disabled
+
+        // Settle the high-pass well past its time constant.
+        for _ in 0..30 {
+            gb.run_until_frame(true);
+        }
+
+        // The steady-state step size, measured on the settled tone.
+        buf.lock().unwrap().clear();
+        gb.run_until_frame(true);
+        let before = buf.lock().unwrap().clone();
+        assert!(before.len() > 64, "too few samples to characterise the tone");
+        let max_step = before
+            .windows(2)
+            .map(|w| (w[1].0 - w[0].0).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_step > 0.0, "the tone is a constant; nothing to compare");
+        let seam_from = before.last().unwrap().0;
+
+        // Save at this instant, then advance the live machine and a restored
+        // copy over the same span.
+        let state = gb.to_state_bytes().expect("serialize");
+        let mut restored = restore_with_rom(&state, &gb);
+        let redo_buf = Arc::new(Mutex::new(Vec::new()));
+        restored.enable_audio(Box::new(Cap(redo_buf.clone()))).unwrap();
+        buf.lock().unwrap().clear();
+        gb.run_until_frame(true);
+        restored.run_until_frame(true);
+        let after_live = buf.lock().unwrap().clone();
+        let after_restored = redo_buf.lock().unwrap().clone();
+
+        assert_eq!(
+            after_live, after_restored,
+            "restored machine's analog output diverged from the live continuation"
+        );
+
+        // The seam itself: no step larger than the tone's own steady-state step.
+        let seam_step = (after_restored[0].0 - seam_from).abs();
+        assert!(
+            seam_step <= max_step,
+            "analog discontinuity across the load: seam step {seam_step} exceeds \
+             the tone's steady-state step {max_step} (the filter restarted)"
+        );
+    }
+
     /// The hardware-revision flags (`#[serde(skip)]` on the timer/APU sub-structs)
     /// must be re-derived on load from the serialized `hardware` identity, not
     /// silently revert to default-CGB. A round-tripped AGB must still report AGB.

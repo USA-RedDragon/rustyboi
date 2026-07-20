@@ -14,10 +14,6 @@ pub(super) struct Noise {
     enabled: bool, // NR52 status bit (channel active)
     length_counter: u8,
     volume: u8,
-    volume_direction: bool,
-    volume_timer: u8,
-    length_enabled: bool,
-    fs_step: u8,
 
     // --- Envelope (DIV-anchored model, see square.rs) ---
     #[serde(default)]
@@ -139,10 +135,6 @@ impl Noise {
             enabled: false,
             length_counter: 0,
             volume: 0,
-            volume_direction: false,
-            volume_timer: 0,
-            length_enabled: false,
-            fs_step: 0,
             volume_countdown: 0,
             env_clock: false,
             env_should_lock: false,
@@ -236,16 +228,11 @@ impl Noise {
         self.started_with_dac_off = false;
         self.last_run_cc = self.cc;
         self.volume = 0;
-        self.volume_timer = 0;
         self.volume_countdown = 0;
         self.env_clock = false;
         self.env_should_lock = false;
         self.env_locked = false;
         self.enabled = false;
-    }
-
-    pub(super) fn set_fs_step(&mut self, step: u8) {
-        self.fs_step = step;
     }
 
     /// Master-clock epoch rebase: shift every absolute-cc anchor down by
@@ -584,16 +571,11 @@ impl Noise {
         (self.nr42 >> 3) & 0x01 != 0
     }
 
-    fn get_envelope_period(&self) -> u8 {
-        self.nr42 & 0x07
-    }
-
     fn write_nrx4(&mut self, value: u8) {
         let trigger = (value >> 7) & 0x01 != 0;
         let old_nr4 = self.nr44;
 
         self.len_nr4_change(old_nr4, value);
-        self.length_enabled = (value >> 6) & 0x01 != 0;
         self.nr44 = value;
 
         if trigger {
@@ -641,8 +623,6 @@ impl Noise {
 
         // Volume envelope init (reload volume + countdown from NR42).
         self.volume = self.get_envelope_initial_volume();
-        self.volume_direction = self.get_envelope_direction();
-        self.volume_timer = self.get_envelope_period();
         self.volume_countdown = self.nr42 & 7;
         // A deferred start belongs to its 6-cc crossing, not to the end of the
         // batch that happened to contain it: the envelope's frame-escape race

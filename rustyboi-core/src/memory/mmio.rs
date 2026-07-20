@@ -1635,12 +1635,9 @@ impl Mmio {
         // we apply here. No per-dot clone.
         let ds = self.is_double_speed_mode();
         let cpu_halted = self.cpu_is_halted();
-        let (fs_edges, timer_irq) = self.timer.step(ds, cpu_halted);
+        let timer_irq = self.timer.step(ds, cpu_halted);
         if timer_irq {
             self.request_interrupt(cpu::registers::InterruptFlag::Timer);
-        }
-        for _ in 0..fs_edges {
-            self.clock_apu_frame_sequencer();
         }
     }
 
@@ -2099,10 +2096,6 @@ impl Mmio {
     pub(crate) fn request_interrupt(&mut self, flag: cpu::registers::InterruptFlag) {
         let current = self.read(cpu::registers::INTERRUPT_FLAG);
         self.write(cpu::registers::INTERRUPT_FLAG, current | flag as u8);
-    }
-
-    pub(crate) fn clock_apu_frame_sequencer(&mut self) {
-        self.audio.clock_frame_sequencer();
     }
 
     /// Initialize the timer's internal 16-bit counter at boot. See

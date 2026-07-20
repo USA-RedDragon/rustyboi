@@ -21,8 +21,6 @@ pub(super) struct Wave {
     // Length counter (cc-driven absolute expiry).
     enabled: bool,
     length_counter: u16,
-    length_enabled: bool,
-    fs_step: u8,
     #[serde(default = "len_disabled")]
     len_counter: u32,
     #[serde(default)]
@@ -95,8 +93,6 @@ impl Wave {
             wave_ram: [0; 16],
             enabled: false,
             length_counter: 0,
-            length_enabled: false,
-            fs_step: 0,
             len_counter: LEN_DISABLED,
             len_cc: 0,
             cc: 0,
@@ -139,10 +135,6 @@ impl Wave {
         if self.wave_counter != COUNTER_DISABLED {
             self.wave_counter = self.wave_counter.wrapping_sub(delta);
         }
-    }
-
-    pub(super) fn set_fs_step(&mut self, step: u8) {
-        self.fs_step = step;
     }
 
     /// Master-clock epoch rebase: shift every absolute-cc anchor down by
@@ -300,7 +292,6 @@ impl Wave {
         let old_nr4 = self.nr34;
 
         self.len_nr4_change(old_nr4, value);
-        self.length_enabled = (value >> 6) & 0x01 != 0;
         self.nr34 = value & !0x80;
 
         if trigger {

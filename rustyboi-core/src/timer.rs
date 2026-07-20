@@ -124,12 +124,6 @@ pub(crate) struct Timer {
     // The non-halt/non-stop dispatch gate uses this instead of `last_fire_cc`.
     #[serde(default = "disabled_time")]
     last_fire_cc_ei: u64,
-    // The `abs_cc` up to and including which the APU frame sequencer has been
-    // clocked. The closed-form FS counts DIV-bit-12/13 falling edges in
-    // `(last_apu_cc, abs_cc]`. A DIV reset rebases this to the reset cc (the
-    // divider — and thus the FS phase — restarts from the new anchor).
-    #[serde(default)]
-    last_apu_cc: u64,
     /// Sticky: the current ISR / instruction stream was entered via an EI
     /// fast-dispatch and therefore runs on the early (`IF_OFF`) grid; it
     /// persists through the whole ISR. While set, an
@@ -198,7 +192,6 @@ impl Timer {
             div_anchor_apu: 0,
             last_fire_cc: DISABLED_TIME,
             last_fire_cc_ei: DISABLED_TIME,
-            last_apu_cc: 0,
             isr_on_early_grid: false,
             is_agb: false,
             halt_read_bias: 0,
@@ -652,10 +645,6 @@ impl Timer {
         // the STOP path overrides `div_anchor_apu` afterward with its own offset.
         self.div_anchor_apu = anchor_cc;
         self.div_reset_count = self.div_reset_count.wrapping_add(1);
-        // The divider restarts from this cc, so re-anchor the FS sync point to the
-        // reset cc — the divider counter (and thus the bit-12/13 falling-edge grid)
-        // is now relative to the new anchor.
-        self.last_apu_cc = anchor_cc;
     }
 
     /// CGB STOP speed switch divider/TIMA re-derivation. The divider continues
@@ -679,7 +668,6 @@ impl Timer {
         self.div_anchor = 0;
         self.div_anchor_apu = 0;
         self.tima_last_update = self.abs_cc;
-        self.last_apu_cc = self.abs_cc;
     }
 
     pub(crate) fn internal_counter(&self) -> u16 {
@@ -721,27 +709,12 @@ impl Timer {
         self.isr_on_early_grid = false;
     }
 
-    /// Count DIV-bit-12 (single speed) / bit-13 (double speed) falling edges in
-    /// the cc interval `(a, b]`. The divider counter is `cc - div_anchor`; bit N
-    /// falls each time that counter passes a multiple of `2^(N+1)`. Used by the
-    /// closed-form APU frame-sequencer clock.
-    fn apu_fs_edges(&self, a: u64, b: u64) -> u64 {
-        if b <= a {
-            return 0;
-        }
-        let shift = if self.last_double_speed { 14 } else { 13 }; // N+1
-        let ca = a.wrapping_sub(self.div_anchor);
-        let cb = b.wrapping_sub(self.div_anchor);
-        (cb >> shift).wrapping_sub(ca >> shift)
-    }
-
     /// Advance the timer one dot. Takes the two hardware flags it needs by value
-    /// (instead of borrowing mmio) and returns `(fs_edges, timer_irq)`: the
-    /// number of APU-frame-sequencer falling edges to clock and whether a TIMA
-    /// overflow IRQ should be raised. The caller (`Mmio::step_timer`) applies
-    /// both to mmio. Keeping mmio out of here lets the timer step in place with
-    /// no per-dot clone (it never touches its own copy inside mmio anyway).
-    pub fn step(&mut self, ds: bool, cpu_halted: bool) -> (u64, bool) {
+    /// (instead of borrowing mmio) and returns whether a TIMA overflow IRQ
+    /// should be raised. The caller (`Mmio::step_timer`) applies it to mmio.
+    /// Keeping mmio out of here lets the timer step in place with no per-dot
+    /// clone (it never touches its own copy inside mmio anyway).
+    pub fn step(&mut self, ds: bool, cpu_halted: bool) -> bool {
         self.abs_cc = self.abs_cc.wrapping_add(1);
 
         // Scheduled TIMA IRQ: fire any event whose absolute cc has now passed. The
@@ -760,26 +733,17 @@ impl Timer {
             false
         };
 
-        // The APU frame sequencer (sweep + noise-envelope legs that remain
-        // FS-clocked; length is now cc-driven in the controller) is clocked by
-        // the falling edge of DIV bit 12 (bit 13 in double speed), derived from
-        // the SAME master `abs_cc`/`div_anchor` the timer/DIV use.
+        // Recorded for `quiet_until`, which bounds the idle fast path at the
+        // next DIV-bit-12 (bit-13 in double speed) falling edge.
         self.last_double_speed = ds;
-        // Clock once per DIV-bit-12 (bit-13 at DS) falling edge in
-        // (last_apu_cc, abs_cc].
-        let edges = self.apu_fs_edges(self.last_apu_cc, self.abs_cc);
-        self.last_apu_cc = self.abs_cc;
-        (edges, timer_irq)
+        timer_irq
     }
 
     /// Raw one-dot master-clock bump for the quiet-span fast loop: byte-
     /// identical to `step` for any dot proven to cross no scheduled overflow
     /// delivery and no APU FS edge (see `quiet_until`) — `update_irq_delivery`
     /// is then a no-op (its while-loop condition is keyed on absolute ccs and
-    /// a later call drains at the identical ccs), `pending_irq` stays false,
-    /// and `apu_fs_edges(last_apu_cc, abs_cc)` self-heals at the next real
-    /// step (the closed-form count over the widened span is still 0 + later
-    /// edges).
+    /// a later call drains at the identical ccs) and `pending_irq` stays false.
     #[inline]
     pub(crate) fn bump_cc_one(&mut self) {
         self.abs_cc = self.abs_cc.wrapping_add(1);
@@ -817,9 +781,7 @@ impl Timer {
     /// intervening dot. Every part of `step` is span-based:
     /// `update_irq_delivery` is a `while` loop keyed on the absolute cc (it drains
     /// all overflows due <= abs_cc, so a single call at the final cc fires the same
-    /// set as the per-dot calls), and `apu_fs_edges(last_apu_cc, abs_cc)` is a
-    /// closed-form count over the half-open span (one call over the whole span
-    /// equals the sum of per-dot calls). The only per-dot bookkeeping is the
+    /// set as the per-dot calls). The only per-dot bookkeeping is the
     /// `abs_cc += 1`, which is collapsed to a single assignment here. This is the
     /// timer half of the min-event-jump idle fast path (`Bus::run_to`); it is only
     /// invoked when the world is provably idle except for the timer (LCD off, no
@@ -835,11 +797,6 @@ impl Timer {
         }
         self.flush_pending_irq(mmio);
         self.last_double_speed = mmio.is_double_speed_mode();
-        let edges = self.apu_fs_edges(self.last_apu_cc, self.abs_cc);
-        for _ in 0..edges {
-            mmio.clock_apu_frame_sequencer();
-        }
-        self.last_apu_cc = self.abs_cc;
     }
 }
 
