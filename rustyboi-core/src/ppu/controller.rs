@@ -7965,6 +7965,144 @@ impl Ppu {
         }
     }
 
+    /// Window activation during mode 3: the live `x + 7 == WX` (and WX<7
+    /// immediate) comparator that switches the fetcher over to window tiles,
+    /// with the DMG/CGB WX-range rules and the fetch restart.
+    ///
+    /// Lifted verbatim out of `step_mode3_dot`. Three sites inside it ended the
+    /// dot early (`break 'label` originally, `return` after that extraction), so
+    /// the helper returns `bool` and the caller re-issues the `return` — the
+    /// early exits are preserved explicitly rather than lost to the code motion.
+    fn mode3_activate_window(&mut self, mmio: &mut mmio::Mmio, trigger_we: bool) -> bool {
+        if self.window_y_active_with(mmio, trigger_we)
+            && !self.fetcher.is_fetching_window()
+        {
+            let wx = mmio.read(WX);
+            let is_cgb = mmio.is_cgb_features_enabled();
+            // DMG never starts the window drawing at WX==166; CGB does.
+            let wx_allowed = wx <= 166 && (is_cgb || wx != 166);
+            // WX=0-6 can trigger immediately, WX=7+ needs exact match with X+7.
+            // On DMG, WX 1..6 activates ONLY via the exact pos==WX-7
+            // prologue match (the EARLY check above); reaching pos 0 with
+            // WX 1..6 means the match was missed (WX rewritten
+            // mid-prologue) and the window does not start this line.
+            // WX=0 and CGB keep the immediate x==0 start.
+            let is_dmg = !is_cgb;
+            // DMG one-dot-late activation (the position+6 check):
+            // when the exact x+7==WX dot did not activate (the comparator
+            // read the WE-off pulse), the very next dot still matches via
+            // WX == x+6 and starts the window one pixel late (at WX-6).
+            let should_start_window = wx_allowed
+                && if wx < 7 {
+                    self.x == 0 && !(is_dmg && (1..7).contains(&wx))
+                } else {
+                    self.x + 7 == wx || (is_dmg && self.x >= 1 && self.x + 6 == wx)
+                };
+
+            // DMG WX=0 + SCX&7>0 quirk: the window activates one T-cycle
+            // later. The would-be trigger dot is dead (no pop, no
+            // activation); trigger next dot.
+            if should_start_window
+                && !is_cgb
+                && wx == 0
+                && !self.win_wx0_delayed
+                && (if self.m3_discard_target >= 0 {
+                    self.m3_discard_target as u8
+                } else {
+                    mmio.read(SCX) & 0x07
+                }) != 0
+            {
+                self.win_wx0_delayed = true;
+                return true;
+            }
+
+            if should_start_window {
+                // DMG exact-match mid-line trigger: defer the commit one
+                // dot so a WX store landing on the commit dot is seen by
+                // the comparator (see dmg_wx_trigger_pending).
+                if is_dmg && wx >= 7 && self.x + 7 == wx {
+                    self.dmg_wx_trigger_pending = Some((self.ticks, wx));
+                    return true;
+                }
+                // Window draw-start (the mode-3-start window checkpoint /
+                // plot win_draw_start).
+                self.begin_window_draw(self.x);
+                // DMG: hardware restarts the fetcher ON the trigger dot
+                // (TileNumber now; low/high/push at t+2/t+4/t+6), so the
+                // first window pixel pops exactly 6 dots after the
+                // trigger regardless of the global fetch parity. Run the
+                // TileNumber substep immediately and phase-lock the rest
+                // of the startup to this dot (see win_fetch_anchor).
+                if !is_cgb {
+                    // WX 1..6: the comparator matched chop = (7-WX) dots
+                    // into the discard prologue, so the activation lies
+                    // chop dots in the PAST. Catch the fetch up by
+                    // running every substep whose anchored phase
+                    // (0,2,4,6) has already elapsed, anchor the cadence
+                    // at ticks - chop, and pace the chop discard pops
+                    // 1/dot from the x==0 prologue below. WX=0 keeps the
+                    // plain trigger (separate activation-position quirk
+                    // cluster; see win_wx0_delayed).
+                    let chop = if (1..7).contains(&wx) { 7 - wx } else { 0 };
+                    self.win_first_tile_chop = chop;
+                    // DMG window bus-glitch grid origin (see wg_apply):
+                    // this TileNumber's conceptual dot is `chop` dots in
+                    // the past; a pre-window sprite stall delayed the
+                    // anchored trigger by its live charged penalty
+                    // (SpriteFetchRec) that hardware does NOT share
+                    // (its own delay is D_pre, folded in at read
+                    // evaluation).
+                    self.wg_set_anchor(chop as u64);
+                    let mut phase = 0u8;
+                    loop {
+                        let fls = self.wg_apply(self.fetcher_lcdc_state());
+                        if let Some(event) = self.fetcher.step(
+                            mmio,
+                            fls,
+                            crate::ppu::fetcher::FetchPos {
+                                window_line: self.win_y_pos,
+                                display_x: self.x,
+                                pending_discard: 0,
+                                scy: self.scy_delayed,
+                                scx: self.scx_delayed,
+                            },
+                        ) {
+                            if matches!(
+                                event.kind,
+                                crate::ppu::fetcher::FetcherDebugEventKind::TileNumber
+                            ) {
+                                self.subcc_last_tn_cc = self.abs_cc;
+                            }
+                            self.record_fetch_debug_event(event, mmio);
+                        }
+                        phase += 2;
+                        if phase > chop {
+                            break;
+                        }
+                    }
+                    // chop >= 6: the first tile's push already elapsed
+                    // (phase 6), so its first discard pop is due on this
+                    // very dot.
+                    if chop >= 6 && self.fetcher.pixel_fifo.pop().is_ok() {
+                        self.win_first_tile_chop -= 1;
+                    }
+                    self.win_fetch_anchor =
+                        Some(self.ticks.wrapping_sub(chop as u128));
+                }
+                // The post-window sprite group restarts the BG-tile grid
+                // (hardware resets the previous sprite tile number to none after
+                // the window split), so the first post-window sprite in a
+                // tile is again charged the leading rate.
+                self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
+                if self.win_start_dot.is_none() {
+                    self.win_start_dot = Some(self.ticks);
+                }
+                return true; // Skip this cycle to let window fetching start
+            }
+        }
+        false
+    }
+
     fn step_mode3_dot(&mut self, mmio: &mut mmio::Mmio, fast: bool) {
         // Shift the DMG WE per-dot visibility history (see we_dot_hist).
         self.we_dot_hist = [
@@ -8801,131 +8939,8 @@ impl Ppu {
                 _ => self.we_dot_hist[0],
             }
         };
-        if self.window_y_active_with(mmio, trigger_we)
-            && !self.fetcher.is_fetching_window()
-        {
-            let wx = mmio.read(WX);
-            let is_cgb = mmio.is_cgb_features_enabled();
-            // DMG never starts the window drawing at WX==166; CGB does.
-            let wx_allowed = wx <= 166 && (is_cgb || wx != 166);
-            // WX=0-6 can trigger immediately, WX=7+ needs exact match with X+7.
-            // On DMG, WX 1..6 activates ONLY via the exact pos==WX-7
-            // prologue match (the EARLY check above); reaching pos 0 with
-            // WX 1..6 means the match was missed (WX rewritten
-            // mid-prologue) and the window does not start this line.
-            // WX=0 and CGB keep the immediate x==0 start.
-            let is_dmg = !is_cgb;
-            // DMG one-dot-late activation (the position+6 check):
-            // when the exact x+7==WX dot did not activate (the comparator
-            // read the WE-off pulse), the very next dot still matches via
-            // WX == x+6 and starts the window one pixel late (at WX-6).
-            let should_start_window = wx_allowed
-                && if wx < 7 {
-                    self.x == 0 && !(is_dmg && (1..7).contains(&wx))
-                } else {
-                    self.x + 7 == wx || (is_dmg && self.x >= 1 && self.x + 6 == wx)
-                };
-
-            // DMG WX=0 + SCX&7>0 quirk: the window activates one T-cycle
-            // later. The would-be trigger dot is dead (no pop, no
-            // activation); trigger next dot.
-            if should_start_window
-                && !is_cgb
-                && wx == 0
-                && !self.win_wx0_delayed
-                && (if self.m3_discard_target >= 0 {
-                    self.m3_discard_target as u8
-                } else {
-                    mmio.read(SCX) & 0x07
-                }) != 0
-            {
-                self.win_wx0_delayed = true;
-                return;
-            }
-
-            if should_start_window {
-                // DMG exact-match mid-line trigger: defer the commit one
-                // dot so a WX store landing on the commit dot is seen by
-                // the comparator (see dmg_wx_trigger_pending).
-                if is_dmg && wx >= 7 && self.x + 7 == wx {
-                    self.dmg_wx_trigger_pending = Some((self.ticks, wx));
-                    return;
-                }
-                // Window draw-start (the mode-3-start window checkpoint /
-                // plot win_draw_start).
-                self.begin_window_draw(self.x);
-                // DMG: hardware restarts the fetcher ON the trigger dot
-                // (TileNumber now; low/high/push at t+2/t+4/t+6), so the
-                // first window pixel pops exactly 6 dots after the
-                // trigger regardless of the global fetch parity. Run the
-                // TileNumber substep immediately and phase-lock the rest
-                // of the startup to this dot (see win_fetch_anchor).
-                if !is_cgb {
-                    // WX 1..6: the comparator matched chop = (7-WX) dots
-                    // into the discard prologue, so the activation lies
-                    // chop dots in the PAST. Catch the fetch up by
-                    // running every substep whose anchored phase
-                    // (0,2,4,6) has already elapsed, anchor the cadence
-                    // at ticks - chop, and pace the chop discard pops
-                    // 1/dot from the x==0 prologue below. WX=0 keeps the
-                    // plain trigger (separate activation-position quirk
-                    // cluster; see win_wx0_delayed).
-                    let chop = if (1..7).contains(&wx) { 7 - wx } else { 0 };
-                    self.win_first_tile_chop = chop;
-                    // DMG window bus-glitch grid origin (see wg_apply):
-                    // this TileNumber's conceptual dot is `chop` dots in
-                    // the past; a pre-window sprite stall delayed the
-                    // anchored trigger by its live charged penalty
-                    // (SpriteFetchRec) that hardware does NOT share
-                    // (its own delay is D_pre, folded in at read
-                    // evaluation).
-                    self.wg_set_anchor(chop as u64);
-                    let mut phase = 0u8;
-                    loop {
-                        let fls = self.wg_apply(self.fetcher_lcdc_state());
-                        if let Some(event) = self.fetcher.step(
-                            mmio,
-                            fls,
-                            crate::ppu::fetcher::FetchPos {
-                                window_line: self.win_y_pos,
-                                display_x: self.x,
-                                pending_discard: 0,
-                                scy: self.scy_delayed,
-                                scx: self.scx_delayed,
-                            },
-                        ) {
-                            if matches!(
-                                event.kind,
-                                crate::ppu::fetcher::FetcherDebugEventKind::TileNumber
-                            ) {
-                                self.subcc_last_tn_cc = self.abs_cc;
-                            }
-                            self.record_fetch_debug_event(event, mmio);
-                        }
-                        phase += 2;
-                        if phase > chop {
-                            break;
-                        }
-                    }
-                    // chop >= 6: the first tile's push already elapsed
-                    // (phase 6), so its first discard pop is due on this
-                    // very dot.
-                    if chop >= 6 && self.fetcher.pixel_fifo.pop().is_ok() {
-                        self.win_first_tile_chop -= 1;
-                    }
-                    self.win_fetch_anchor =
-                        Some(self.ticks.wrapping_sub(chop as u128));
-                }
-                // The post-window sprite group restarts the BG-tile grid
-                // (hardware resets the previous sprite tile number to none after
-                // the window split), so the first post-window sprite in a
-                // tile is again charged the leading rate.
-                self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
-                if self.win_start_dot.is_none() {
-                    self.win_start_dot = Some(self.ticks);
-                }
-                return; // Skip this cycle to let window fetching start
-            }
+        if self.mode3_activate_window(mmio, trigger_we) {
+            return;
         }
 
         // WX<7 chopped window start: the prologue discard pops that ran
