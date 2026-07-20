@@ -1066,11 +1066,13 @@ mod restart_tests {
     //! Regression coverage for the Restart action preserving user settings.
     //!
     //! Restart must power-cycle the *same console* the user configured, not fall
-    //! back to a default machine. The old implementation reset the `GB` in place
-    //! (`GB::reset`), which does not re-apply the model-derived hardware flags set
-    //! only in `GB::new` (SGB/CGB/MGB/AGB + PPU/APU revision gates) — so an SGB
-    //! (or any non-default model) silently degraded on restart. These tests pin
-    //! the rebuild path Restart now uses to the session's chosen hardware.
+    //! back to a default machine. The original implementation reset the `GB` in
+    //! place, and `GB::reset` did not re-apply the model-derived hardware flags
+    //! (SGB/CGB/MGB/AGB + PPU/APU revision gates) that `GB::new` seeds — so an
+    //! SGB, or any non-default model, silently degraded on restart. `GB::reset`
+    //! has since been fixed to seed through the same helper as `GB::new`; these
+    //! tests pin both the rebuild path Restart uses and the in-place path that
+    //! is no longer lossy.
     use rustyboi_core_lib::cartridge::Cartridge;
     use rustyboi_core_lib::gb::{Hardware, GB};
     use rustyboi_session::config::{Config, DmgPalette};
@@ -1092,22 +1094,23 @@ mod restart_tests {
         rom
     }
 
-    // The mechanism the fix relies on: `GB::reset` (old restart) drops the SGB
-    // model state, while rebuilding via `GB::new(hardware)` (new restart)
-    // restores it. If this ever flips, in-place reset would again be viable and
-    // the frontend rebuild could be reconsidered.
+    // `GB::reset` used to drop the model-derived state, which is why Restart
+    // rebuilds. It no longer does: `GB::new` and `GB::reset` seed through one
+    // shared helper, so both paths preserve the model. Restart keeps the
+    // rebuild (it also re-runs cartridge insertion and clears rewind), but the
+    // in-place path is no longer the trap it was — this pins that.
     #[test]
-    fn in_place_reset_loses_model_state_rebuild_keeps_it() {
+    fn in_place_reset_preserves_model_state_like_rebuild() {
         let mut gb = GB::new(Hardware::SGB);
         assert!(gb.sgb().is_some(), "fresh SGB machine must expose SGB state");
 
         gb.reset();
         assert!(
-            gb.sgb().is_none(),
-            "in-place reset drops SGB model state (the old-restart bug)"
+            gb.sgb().is_some(),
+            "in-place reset must re-seed SGB model state"
         );
 
-        // The rebuild path Restart now takes.
+        // The rebuild path Restart takes agrees with it.
         let rebuilt = GB::new(Hardware::SGB);
         assert!(rebuilt.sgb().is_some(), "rebuild restores SGB model state");
     }

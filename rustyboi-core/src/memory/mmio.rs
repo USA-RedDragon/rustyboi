@@ -1233,8 +1233,13 @@ impl Mmio {
         if let Some(cart) = new.cartridge.as_mut() {
             cart.reset();
         }
-        new.is_agb = self.is_agb;
-        new.cgb_de = self.cgb_de;
+        // Model identity (`is_agb`, `cgb_de`, `is_mgb`, `serial.cgb`, the SGB
+        // unit, the CPU clock, the APU revision gates) is deliberately NOT
+        // carried across from the old Mmio: raw field copies would skip the
+        // setters' fanout into the timer and the APU, leaving those subsystems
+        // disagreeing with the Mmio. `GB::reset` — the only caller — re-seeds
+        // all of it from `GB::hardware` via `GB::seed_hardware_flags`.
+        //
         // The console/cart pairing is unchanged across a reset, so the
         // cart-derived caches must not revert to the no-cart defaults of
         // `Self::new` (losing cart_has_clock would silently stop the RTC).
@@ -1293,15 +1298,35 @@ impl Mmio {
     /// would otherwise revert to default-CGB after a load. Pure re-application of
     /// the console's fixed hardware identity (`is_agb`/`cgb_de`, which DO survive
     /// at this level) via the existing setters — must not change emulation.
+    ///
+    /// This is the SUBSET a savestate cannot carry. It is not a whole machine
+    /// identity: `is_mgb`, `cgb_de`, the APU boot-CGB anchor, the SGB unit and
+    /// the CPU clock are all absent here because a reload gets them back through
+    /// serde. Construction and in-place reset need those too, so they go through
+    /// `GB::seed_hardware_flags`, which wraps this.
     pub(crate) fn reseed_hardware_flags(&mut self, hw: crate::gb::Hardware) {
         self.set_agb(hw.is_agb());
         self.set_apu_cgb_de(hw.is_cgb_d_or_later());
         self.set_apu_cgb_le_b(hw.is_cgb_b_or_earlier());
         self.set_apu_cgb_b(matches!(hw, crate::gb::Hardware::CGBB));
+        // CGB-C-and-older PCM read glitch (CGB silicon at revision C or older).
+        // Real CPU-CGB-C silicon has it too, but the default
+        // CGB model intentionally keeps the SameSuite-calibrated D/E-clean
+        // reads: the internal SameSuite rows for the non-revision-suffixed
+        // channel tests grade against tables real CGB-C fails, and no cgb04c
+        // capture pins the glitch. Only the explicit pre-C revisions consume
+        // it. (The nrx2 zombie glitch used to share this convention; it no
+        // longer does — it forks on the true revision boundary, with the
+        // SameSuite zombie rows pinned to rev=cgbe instead. See `nrx2_glitch`.)
         self.set_apu_pcm_c_glitch(matches!(
             hw,
             crate::gb::Hardware::CGB0 | crate::gb::Hardware::CGBB
         ));
+        // NRx4 square step-back parity gate (all revisions except CGB-D/E):
+        // CGB-C-and-earlier AND AGB gate the step-back on
+        // `sample_countdown & 1`; CGB-D/E apply it unconditionally. The default
+        // CGB keeps the unconditional cgb04c placement, so only the
+        // explicit pre-D / AGB revisions take the parity fork.
         self.set_apu_step_back_parity(matches!(
             hw,
             crate::gb::Hardware::CGB0 | crate::gb::Hardware::CGBB | crate::gb::Hardware::AGB

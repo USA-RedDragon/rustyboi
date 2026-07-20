@@ -434,35 +434,24 @@ const REGISTERED_MARK_TILE: [u8; 0x10] = [
 ];
 
 impl GB {
-    pub fn new(hardware: Hardware) -> Self {
-        let mut mmio = memory::mmio::Mmio::new();
-        mmio.set_serial_cgb(hardware.is_cgb_like());
-        mmio.set_agb(hardware.is_agb());
+    /// Apply every model-derived hardware flag to a power-on [`memory::mmio::Mmio`].
+    ///
+    /// The single source of truth for machine identity: `GB::new` and
+    /// `GB::reset` both seed through here, so the two cannot drift. `Mmio::reset`
+    /// rebuilds itself out of `Mmio::new`, so without this an in-place reset
+    /// silently degraded a CGB/AGB/SGB machine to the power-on defaults —
+    /// invisibly, because the cart-derived `cgb_features_enabled` DOES survive a
+    /// reset and keeps the display in colour. libretro's `retro_reset` is the
+    /// only production caller of the in-place path.
+    ///
+    /// The revision-gate predicates live in [`memory::mmio::Mmio::reseed_hardware_flags`],
+    /// which the savestate reload path runs too; what is added on top of it here
+    /// is the seeding a savestate carries by itself but a fresh or just-reset
+    /// `Mmio` does not.
+    fn seed_hardware_flags(mmio: &mut memory::mmio::Mmio, hardware: Hardware, region: Region) {
+        mmio.reseed_hardware_flags(hardware);
         mmio.set_mgb(matches!(hardware, Hardware::MGB));
-        mmio.set_apu_analog_model(hardware.analog_model());
-        mmio.set_apu_cgb_de(hardware.is_cgb_d_or_later());
         mmio.set_cgb_de(hardware.is_cgb_d_or_later());
-        mmio.set_apu_cgb_le_b(hardware.is_cgb_b_or_earlier());
-        mmio.set_apu_cgb_b(matches!(hardware, Hardware::CGBB));
-        // CGB-C-and-older PCM read glitch (CGB silicon at revision C or older).
-        // Real CPU-CGB-C silicon has it too, but the default
-        // CGB model intentionally keeps the SameSuite-calibrated D/E-clean
-        // reads: the internal SameSuite rows for the non-revision-suffixed
-        // channel tests grade against tables real CGB-C fails, and no cgb04c
-        // capture pins the glitch. Only the explicit pre-C revisions consume
-        // it. (The nrx2 zombie glitch used to share this convention; it no
-        // longer does — it forks on the true revision boundary, with the
-        // SameSuite zombie rows pinned to rev=cgbe instead. See `nrx2_glitch`.)
-        mmio.set_apu_pcm_c_glitch(matches!(hardware, Hardware::CGB0 | Hardware::CGBB));
-        // NRx4 square step-back parity gate (all revisions except CGB-D/E):
-        // CGB-C-and-earlier AND AGB gate the step-back on
-        // `sample_countdown & 1`; CGB-D/E apply it unconditionally. The default
-        // CGB keeps the unconditional cgb04c placement, so only the
-        // explicit pre-D / AGB revisions take the parity fork.
-        mmio.set_apu_step_back_parity(matches!(
-            hardware,
-            Hardware::CGB0 | Hardware::CGBB | Hardware::AGB
-        ));
         // CGB vs DMG APU gating (NRx1-writable-while-off exception, post-boot
         // APU clock anchor, ch4 deferred-trigger fork). Seeded here — before
         // any audio write can anchor the SPU clock — so a session that runs
@@ -471,7 +460,12 @@ impl GB {
         if matches!(hardware, Hardware::SGB | Hardware::SGB2) {
             mmio.enable_sgb();
         }
-        mmio.set_cpu_hz(hardware.cpu_hz(Region::default()));
+        mmio.set_cpu_hz(hardware.cpu_hz(region));
+    }
+
+    pub fn new(hardware: Hardware) -> Self {
+        let mut mmio = memory::mmio::Mmio::new();
+        Self::seed_hardware_flags(&mut mmio, hardware, Region::default());
         GB {
             cpu: cpu::SM83::new(),
             mmio,
@@ -1816,6 +1810,22 @@ impl GB {
 
     pub fn reset(&mut self) {
         self.mmio.reset();
+        // `Mmio::reset` hands back a power-on Mmio, which knows nothing about
+        // the model it is part of. Re-apply the identity from `self.hardware`
+        // (the surviving source of truth) exactly as construction does, or the
+        // machine silently continues as a default CGB. `self.region`, not the
+        // default, so a region set after construction survives too.
+        Self::seed_hardware_flags(&mut self.mmio, self.hardware, self.region);
+        // The SGB header unlock gate is cart-derived, and the cart outlives the
+        // reset while the SGB receiver does not — `seed_hardware_flags` installs
+        // a fresh, unlocked one. Re-derive the gate from the surviving cart
+        // exactly as `insert` does, or a reset SGB would start honouring packet
+        // traffic from a cart that never declared SGB support.
+        let sgb_unlocked = self
+            .mmio
+            .get_cartridge()
+            .is_some_and(cartridge::Cartridge::supports_sgb);
+        self.mmio.set_sgb_unlocked(sgb_unlocked);
         self.ppu.reset();
         self.cpu.halted = false;
         self.cpu.stopped = false;
@@ -3564,5 +3574,210 @@ mod sgb_default_border_tests {
         gb.load_sgb_firmware_bytes(&fws[0].0).expect("accepted");
         assert!(gb.sgb().is_none());
         assert!(gb.sgb_composited_frame().is_none());
+    }
+}
+
+#[cfg(test)]
+mod reset_identity_tests {
+    //! `GB::reset` is a power cycle, not a model downgrade.
+    //!
+    //! `GB::new` seeds a dozen model-derived flags into the `Mmio` (serial
+    //! CGB, AGB, MGB, the SGB unit, the real-time CPU clock and the six APU
+    //! revision gates). `Mmio::reset` rebuilds itself out of `Mmio::new`, so
+    //! each of those is a power-on default again unless `GB::reset` re-applies
+    //! it. libretro's `retro_reset` is the only production caller, so a user
+    //! resetting a CGB/AGB/SGB core there silently continued on a degraded
+    //! machine — and because the cart-derived `cgb_features_enabled` IS
+    //! carried, the display stayed in colour and hid it.
+    //!
+    //! Every assertion compares the reset machine against a freshly
+    //! constructed one of the same model, so what is pinned is "reset ==
+    //! power cycle" rather than a hand-copied constant.
+    use super::*;
+    use crate::audio::NR52;
+    use crate::timer::{DIV, TAC, TIMA};
+
+    /// Wave RAM ($FF30-$FF3F).
+    const WAVE_RAM: u16 = 0xFF30;
+
+    /// 32KB NoMBC ROM of NOPs, booted past the BIOS. The CGB flag at $0143 is
+    /// set because the SC probe below needs CGB features actually enabled: the
+    /// `Mmio` read path ORs the fast-clock-select bit back in under DMG-compat,
+    /// which would mask `serial.cgb` on a DMG-only cart.
+    fn machine(hardware: Hardware) -> GB {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x143] = 0x80;
+        let mut gb = GB::new(hardware);
+        gb.insert(cartridge::Cartridge::from_bytes(&rom).unwrap());
+        gb.skip_bios();
+        gb
+    }
+
+    /// Drive at least `budget` T-cycles of machine time through the CPU.
+    fn step_t(gb: &mut GB, mut budget: u64) {
+        while budget > 0 {
+            let (_, cycles) = gb.step_instruction(false);
+            budget = budget.saturating_sub(cycles.max(4) as u64);
+        }
+    }
+
+    /// SC ($FF02) unused-bit read-back: 0x7C on CGB-family silicon, 0x7E
+    /// everywhere else. Rides `serial.cgb`, which only `set_serial_cgb` sets.
+    fn sc(gb: &GB) -> u8 {
+        gb.read_memory(crate::serial::SC)
+    }
+
+    /// Wave-RAM-while-playing signature. With ch3 running, AGB returns 0xFF
+    /// for every wave-RAM read while CGB hands back the byte the channel is
+    /// currently on. Rides `wave.agb`, reachable only through `set_agb`'s
+    /// fanout into the APU.
+    fn wave_signature(gb: &mut GB) -> Vec<u8> {
+        gb.write_memory(NR52, 0x80);
+        for i in 0..16u16 {
+            gb.write_memory(WAVE_RAM + i, (i as u8).wrapping_mul(17));
+        }
+        gb.write_memory(crate::audio::NR30, 0x80);
+        gb.write_memory(crate::audio::NR34, 0x80);
+        let mut out = Vec::new();
+        for _ in 0..8 {
+            step_t(gb, 64);
+            gb.sync_lazy_peripherals();
+            out.push(gb.read_memory(WAVE_RAM));
+        }
+        out
+    }
+
+    /// TAC re-enable signature. Only an AGB timer bumps TIMA when a frequency
+    /// change moves the feeding DIV bit high->low, so sweeping (old freq, new
+    /// freq, delay) separates an AGB timer from a CGB one. Rides
+    /// `timer.is_agb`, reachable only through `set_agb`'s fanout.
+    fn tac_signature(gb: &mut GB) -> Vec<u8> {
+        let mut out = Vec::new();
+        for old in 0..4u8 {
+            for new in 0..4u8 {
+                for delay in [4u64, 8, 16, 32, 64, 128] {
+                    gb.write_memory(TAC, 0x04 | old);
+                    gb.write_memory(DIV, 0);
+                    gb.write_memory(TIMA, 0);
+                    step_t(gb, delay);
+                    gb.write_memory(TAC, 0x04 | new);
+                    out.push(gb.read_memory(TIMA));
+                }
+            }
+        }
+        out
+    }
+
+    /// The observables are only worth asserting on if they separate the models
+    /// they claim to separate.
+    #[test]
+    fn identity_observables_discriminate() {
+        assert_eq!(sc(&machine(Hardware::CGB)), 0x7C, "CGB SC read-back");
+        assert_eq!(sc(&machine(Hardware::AGB)), 0x7C, "AGB SC read-back");
+        assert_eq!(sc(&machine(Hardware::MGB)), 0x7E, "MGB SC read-back");
+        assert_eq!(sc(&machine(Hardware::SGB)), 0x7E, "SGB SC read-back");
+
+        assert!(machine(Hardware::SGB).sgb().is_some(), "SGB unit present");
+        assert!(machine(Hardware::CGB).sgb().is_none(), "no SGB unit on CGB");
+
+        assert_ne!(
+            wave_signature(&mut machine(Hardware::AGB)),
+            wave_signature(&mut machine(Hardware::CGB)),
+            "wave-RAM probe must separate an AGB APU from a CGB one"
+        );
+        assert_ne!(
+            tac_signature(&mut machine(Hardware::AGB)),
+            tac_signature(&mut machine(Hardware::CGB)),
+            "TAC probe must separate an AGB timer from a CGB one"
+        );
+    }
+
+    /// The model a machine was built as must still be that model after a reset.
+    #[test]
+    fn model_identity_survives_in_place_reset() {
+        for hardware in [
+            Hardware::CGB,
+            Hardware::CGBE,
+            Hardware::AGB,
+            Hardware::SGB,
+            Hardware::MGB,
+        ] {
+            let mut gb = machine(hardware);
+            let before_sc = sc(&gb);
+            let before_sgb = gb.sgb().is_some();
+
+            gb.reset();
+
+            assert_eq!(sc(&gb), before_sc, "{hardware:?}: SC identity lost across reset");
+            assert_eq!(
+                gb.sgb().is_some(),
+                before_sgb,
+                "{hardware:?}: SGB unit lost across reset"
+            );
+
+            // The APU revision gates, against a machine power-cycled the other way.
+            let mut reference = machine(hardware);
+            assert_eq!(
+                wave_signature(&mut gb),
+                wave_signature(&mut reference),
+                "{hardware:?}: APU revision gates lost across reset"
+            );
+        }
+    }
+
+    /// A reset AGB must still be an AGB in all three places `set_agb` fans out
+    /// to: the `Mmio` itself, the timer, and the APU channels.
+    #[test]
+    fn agb_fanout_survives_in_place_reset() {
+        let mut gb = machine(Hardware::AGB);
+        gb.reset();
+
+        assert!(gb.mmio.is_agb(), "Mmio forgot it is an AGB after reset");
+        assert_eq!(
+            tac_signature(&mut gb),
+            tac_signature(&mut machine(Hardware::AGB)),
+            "timer forgot it is an AGB after reset"
+        );
+        assert_eq!(
+            wave_signature(&mut gb),
+            wave_signature(&mut machine(Hardware::AGB)),
+            "APU forgot it is an AGB after reset"
+        );
+    }
+
+    /// Catch-all for the serialized half of the identity (`is_mgb`, `cgb_de`,
+    /// `serial.cgb`, the SGB unit): a reset machine and a freshly built one
+    /// must serialize to the same bytes.
+    ///
+    /// This is also what pins the cart-derived SGB command-unlock gate, whose
+    /// only other observable would be a full JOYP packet drive: the receiver
+    /// `seed_hardware_flags` installs is unlocked, so without `reset`
+    /// re-deriving the gate a reset SGB starts honouring packets from a cart
+    /// that never declared SGB support.
+    #[test]
+    fn reset_machine_serializes_like_a_fresh_one() {
+        for hardware in [
+            Hardware::CGB,
+            Hardware::CGBE,
+            Hardware::AGB,
+            Hardware::SGB,
+            Hardware::MGB,
+        ] {
+            let mut gb = machine(hardware);
+            gb.reset();
+            let mut reference = machine(hardware);
+            let after = gb.to_state_bytes().unwrap();
+            let fresh = reference.to_state_bytes().unwrap();
+            // Report the first divergence; the states are multi-KB, so
+            // assert_eq! here would bury the run in two byte dumps.
+            let first_diff = after.iter().zip(fresh.iter()).position(|(a, b)| a != b);
+            assert!(
+                first_diff.is_none() && after.len() == fresh.len(),
+                "{hardware:?}: reset machine does not match a power-cycled one \
+                 (len {} vs {}, first differing byte {first_diff:?})",
+                after.len(),
+                fresh.len()
+            );
+        }
     }
 }
