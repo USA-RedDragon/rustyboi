@@ -269,6 +269,66 @@ impl Fetcher {
         }
     }
 
+    // One bitplane of a BG/window tile-data fetch, shared by the TileDataLow and
+    // TileDataHigh substeps. Returns the address read, the byte, and this tile's
+    // x-flip so the caller can run its own bitplane merge (the two merges differ:
+    // low assigns, high ORs in shifted by one).
+    //
+    // The two planes differ in exactly two side effects, both preserved here:
+    //   - the tile-data-select latch goes to `last_low_tds` vs `last_high_tds`;
+    //   - only the HIGH plane publishes `last_vram_addr`/`last_vram_bank`. The
+    //     tile-data-LOW read is a transient on the VRAM address bus; the OAM-DMA
+    //     conflict bus keeps holding the tile-NUMBER address driven on the
+    //     previous substep through this read, and only the tile-data-high
+    //     address takes over. Publishing on the low plane would break those
+    //     hardware bus hold windows.
+    fn fetch_tile_data_byte(
+        &mut self,
+        mmio: &mmio::Mmio,
+        lcdc_state: FetcherLcdcState,
+        tile_line: u8,
+        high: bool,
+    ) -> (u16, u8, bool) {
+        let cgb = mmio.is_cgb_features_enabled();
+        let y_flip = cgb && (self.tile_attributes & 0x40) != 0;
+        let x_flip = cgb && (self.tile_attributes & 0x20) != 0;
+        let eff_line = if y_flip { 7 - tile_line } else { tile_line };
+        let plane = u16::from(high);
+        let addr = self.get_tile_data_address(self.tile_num, eff_line, lcdc_state.lcdc) + plane;
+        let tds = (lcdc_state.lcdc & (ppu::LCDCFlags::BGWindowTileDataSelect as u8)) != 0;
+        if high {
+            self.last_high_tds = tds;
+        } else {
+            self.last_low_tds = tds;
+        }
+
+        // In CGB mode, use VRAM bank specified in tile attributes (bit 3)
+        let tile_data_bank = if cgb && (self.tile_attributes & 0x08) != 0 {
+            1
+        } else {
+            0
+        };
+        if high {
+            self.last_vram_addr = addr;
+            self.last_vram_bank = tile_data_bank;
+        }
+        let mut byte = if lcdc_state.cgb_tile_index_is_tile_data && self.tile_num < 0x80 {
+            self.tile_num
+        } else {
+            mmio.read_vram_bank(tile_data_bank, addr)
+        };
+        // DMG bus-glitch OR-read: mid-read tile-data-select transition
+        // (LCDC.4, address bit A12) returns the union of both banks'
+        // bytes for this bitplane.
+        if let Some(l2) = lcdc_state.or_lcdc {
+            let alt = self.get_tile_data_address(self.tile_num, eff_line, l2) + plane;
+            if alt != addr {
+                byte |= mmio.read_vram_bank(tile_data_bank, alt);
+            }
+        }
+        (addr, byte, x_flip)
+    }
+
     pub(super) fn step(
         &mut self,
         mmio: &mut mmio::Mmio,
@@ -399,41 +459,9 @@ impl Fetcher {
                 })
             }
             State::TileDataLow => {
-                let cgb = mmio.is_cgb_features_enabled();
-                let y_flip = cgb && (self.tile_attributes & 0x40) != 0;
-                let x_flip = cgb && (self.tile_attributes & 0x20) != 0;
-                let eff_line = if y_flip { 7 - tile_line } else { tile_line };
                 // Fetch the low byte of the tile data using the correct addressing method
-                let addr = self.get_tile_data_address(self.tile_num, eff_line, lcdc_state.lcdc);
-                self.last_low_tds =
-                    (lcdc_state.lcdc & (ppu::LCDCFlags::BGWindowTileDataSelect as u8)) != 0;
-
-                // In CGB mode, use VRAM bank specified in tile attributes (bit 3)
-                let tile_data_bank = if cgb && (self.tile_attributes & 0x08) != 0 {
-                    1
-                } else {
-                    0
-                };
-                // NOTE: the tile-data-LOW read is a transient on the VRAM address
-                // bus; the OAM-DMA conflict bus continues to hold the tile-NUMBER
-                // address driven on the previous substep through the next read. So
-                // we do NOT update `last_vram_addr` here (matching the hardware bus
-                // hold windows: tile-number held through tile-data-low, then the
-                // tile-data-high address takes over).
-                let mut low_byte = if lcdc_state.cgb_tile_index_is_tile_data && self.tile_num < 0x80 {
-                    self.tile_num
-                } else {
-                    mmio.read_vram_bank(tile_data_bank, addr)
-                };
-                // DMG bus-glitch OR-read: mid-read tile-data-select transition
-                // (LCDC.4, address bit A12) returns the union of both banks'
-                // bytes for this bitplane.
-                if let Some(l2) = lcdc_state.or_lcdc {
-                    let alt = self.get_tile_data_address(self.tile_num, eff_line, l2);
-                    if alt != addr {
-                        low_byte |= mmio.read_vram_bank(tile_data_bank, alt);
-                    }
-                }
+                let (addr, low_byte, x_flip) =
+                    self.fetch_tile_data_byte(mmio, lcdc_state, tile_line, false);
 
                 for i in 0..8 {
                     let bit = if x_flip { i } else { 7 - i };
@@ -455,35 +483,9 @@ impl Fetcher {
                 })
             }
             State::TileDataHigh => {
-                let cgb = mmio.is_cgb_features_enabled();
-                let y_flip = cgb && (self.tile_attributes & 0x40) != 0;
-                let x_flip = cgb && (self.tile_attributes & 0x20) != 0;
-                let eff_line = if y_flip { 7 - tile_line } else { tile_line };
                 // Fetch the high byte of the tile data using the correct addressing method
-                let addr = self.get_tile_data_address(self.tile_num, eff_line, lcdc_state.lcdc) + 1;
-                self.last_high_tds =
-                    (lcdc_state.lcdc & (ppu::LCDCFlags::BGWindowTileDataSelect as u8)) != 0;
-
-                // In CGB mode, use VRAM bank specified in tile attributes (bit 3)
-                let tile_data_bank = if cgb && (self.tile_attributes & 0x08) != 0 {
-                    1
-                } else {
-                    0
-                };
-                self.last_vram_addr = addr;
-                self.last_vram_bank = tile_data_bank;
-                let mut high_byte = if lcdc_state.cgb_tile_index_is_tile_data && self.tile_num < 0x80 {
-                    self.tile_num
-                } else {
-                    mmio.read_vram_bank(tile_data_bank, addr)
-                };
-                // DMG bus-glitch OR-read (see TileDataLow).
-                if let Some(l2) = lcdc_state.or_lcdc {
-                    let alt = self.get_tile_data_address(self.tile_num, eff_line, l2) + 1;
-                    if alt != addr {
-                        high_byte |= mmio.read_vram_bank(tile_data_bank, alt);
-                    }
-                }
+                let (addr, high_byte, x_flip) =
+                    self.fetch_tile_data_byte(mmio, lcdc_state, tile_line, true);
 
                 for i in 0..8 {
                     let bit = if x_flip { i } else { 7 - i };
