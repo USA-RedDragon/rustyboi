@@ -263,6 +263,8 @@ const BANKING_MODE_END: u16 = 0x7FFF;
 // External RAM area
 const EXTERNAL_RAM_START: u16 = 0xA000;
 const EXTERNAL_RAM_END: u16 = 0xBFFF;
+/// One external-RAM bank as seen through the $A000-$BFFF window.
+const RAM_BANK_SIZE: usize = 0x2000;
 
 // MBC2 specific ranges
 const MBC2_RAM_SIZE: usize = 512; // 512 x 4 bits
@@ -1948,6 +1950,31 @@ impl Cartridge {
         bases
     }
 
+    /// Byte index into `ram_data` for a banked external-RAM access at `addr`
+    /// (which must be inside the $A000-$BFFF window). `None` when the board
+    /// carries no RAM array, so callers keep their open-bus/no-op branch. A
+    /// chip smaller than the selected window mirrors, hence the modulo.
+    #[inline]
+    fn banked_ram_offset(&self, addr: u16) -> Option<usize> {
+        if self.ram_data.is_empty() {
+            return None;
+        }
+        Some(
+            ((addr - EXTERNAL_RAM_START) as usize + self.get_ram_bank() * RAM_BANK_SIZE)
+                % self.ram_data.len(),
+        )
+    }
+
+    /// As `banked_ram_offset`, for boards that wire RAM straight through with
+    /// no bank register (NoMBC, Rocket/Sachen, NT/Makon old).
+    #[inline]
+    fn unbanked_ram_offset(&self, addr: u16) -> Option<usize> {
+        if self.ram_data.is_empty() {
+            return None;
+        }
+        Some((addr - EXTERNAL_RAM_START) as usize % self.ram_data.len())
+    }
+
     /// Get the save file path for this cartridge
     fn get_save_file_path(&self) -> Option<String> {
         self.rom_path.as_ref().map(|path| {
@@ -3190,8 +3217,11 @@ impl Cartridge {
     /// (0xFF, matching the RAM-less srcE000 cgb04c captures).
     pub(crate) fn dma_sram_bus_read(&self, addr: u16) -> u8 {
         if self.sram_cs_lazy && self.ram_enabled && !self.ram_data.is_empty() {
-            let offset =
-                ((addr as usize & 0x1FFF) + self.get_ram_bank() * 0x2000) % self.ram_data.len();
+            // NOT `banked_ram_offset`: `addr` here reaches $E000-$FFFF, and the
+            // captures pin the wrapped decode ($E000 -> $A000), which `addr -
+            // EXTERNAL_RAM_START` would not produce.
+            let offset = ((addr as usize & 0x1FFF) + self.get_ram_bank() * RAM_BANK_SIZE)
+                % self.ram_data.len();
             self.ram_data[offset]
         } else {
             0xFF
@@ -4011,9 +4041,9 @@ impl memory::Addressable for Cartridge {
             EXTERNAL_RAM_START..=EXTERNAL_RAM_END => {
                 match self.get_cartridge_type() {
                     CartridgeType::MBC1 { ram: true, .. } => {
-                        if self.ram_enabled && !self.ram_data.is_empty() {
-                            let ram_bank = self.get_ram_bank();
-                            let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
+                        if self.ram_enabled
+                            && let Some(offset) = self.banked_ram_offset(addr)
+                        {
                             self.ram_data[offset]
                         } else {
                             0xFF
@@ -4039,9 +4069,7 @@ impl memory::Addressable for Cartridge {
                             let ram_select_max = if self.is_mbc30() { 0x07 } else { 0x03 };
                             if self.mbc3_ram_bank <= ram_select_max {
                                 // RAM bank access
-                                if !self.ram_data.is_empty() {
-                                    let ram_bank = self.get_ram_bank();
-                                    let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
+                                if let Some(offset) = self.banked_ram_offset(addr) {
                                     self.ram_data[offset]
                                 } else {
                                     0xFF
@@ -4065,9 +4093,9 @@ impl memory::Addressable for Cartridge {
                         }
                     }
                     CartridgeType::MBC5 { ram: true, .. } => {
-                        if self.ram_enabled && !self.ram_data.is_empty() {
-                            let ram_bank = self.get_ram_bank();
-                            let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
+                        if self.ram_enabled
+                            && let Some(offset) = self.banked_ram_offset(addr)
+                        {
                             self.ram_data[offset]
                         } else {
                             0xFF
@@ -4103,12 +4131,8 @@ impl memory::Addressable for Cartridge {
                             // (Pan Docs HuC1). No IR transport is modeled, so
                             // this always reads the documented idle 0xC0.
                             0xC0
-                        } else if !self.ram_data.is_empty() {
+                        } else if let Some(offset) = self.banked_ram_offset(addr) {
                             // RAM is always enabled (no MBC1-style gate).
-                            let ram_bank = self.get_ram_bank();
-                            let offset = ((addr - EXTERNAL_RAM_START) as usize
-                                + (ram_bank * 0x2000))
-                                % self.ram_data.len();
                             self.ram_data[offset]
                         } else {
                             0xFF
@@ -4129,12 +4153,8 @@ impl memory::Addressable for Cartridge {
                             // "When the capture process is active all RAM
                             // banks will return 00h when read."
                             0x00
-                        } else if !self.ram_data.is_empty() {
+                        } else if let Some(offset) = self.banked_ram_offset(addr) {
                             // No read gate: RAM reads are always enabled.
-                            let ram_bank = self.get_ram_bank();
-                            let offset = ((addr - EXTERNAL_RAM_START) as usize
-                                + (ram_bank * 0x2000))
-                                % self.ram_data.len();
                             self.ram_data[offset]
                         } else {
                             0xFF
@@ -4145,11 +4165,7 @@ impl memory::Addressable for Cartridge {
                             // 0x0 = RAM read-only, 0xA = RAM read/write; both
                             // read the banked external RAM.
                             0x0 | 0xA => {
-                                if !self.ram_data.is_empty() {
-                                    let ram_bank = self.get_ram_bank();
-                                    let offset = ((addr - EXTERNAL_RAM_START) as usize
-                                        + (ram_bank * 0x2000))
-                                        % self.ram_data.len();
+                                if let Some(offset) = self.banked_ram_offset(addr) {
                                     self.ram_data[offset]
                                 } else {
                                     0xFF
@@ -4180,9 +4196,7 @@ impl memory::Addressable for Cartridge {
                         // straight through at A000-BFFF -- no banking, no
                         // enable gate. A smaller chip mirrors across the
                         // window (address modulo its size).
-                        if !self.ram_data.is_empty() {
-                            let offset =
-                                (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
+                        if let Some(offset) = self.unbanked_ram_offset(addr) {
                             self.ram_data[offset]
                         } else {
                             0xFF
@@ -4191,9 +4205,7 @@ impl memory::Addressable for Cartridge {
                     // Rocket/Sachen boards wire any RAM straight through with
                     // no enable gate (RAM is mapped unconditionally).
                     CartridgeType::Rocket | CartridgeType::Sachen { .. } => {
-                        if !self.ram_data.is_empty() {
-                            let offset =
-                                (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
+                        if let Some(offset) = self.unbanked_ram_offset(addr) {
                             self.ram_data[offset]
                         } else {
                             0xFF
@@ -4201,12 +4213,13 @@ impl memory::Addressable for Cartridge {
                     }
                     // NT/Makon old boards gate RAM MBC3-style ($0A to
                     // $0000-$1FFF), unbanked.
-                    CartridgeType::NtOld { .. }
-                        if self.ram_enabled && !self.ram_data.is_empty() => {
-                            let offset =
-                                (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
+                    CartridgeType::NtOld { .. } if self.ram_enabled => {
+                        if let Some(offset) = self.unbanked_ram_offset(addr) {
                             self.ram_data[offset]
+                        } else {
+                            0xFF
                         }
+                    }
                     _ => 0xFF,
                 }
             }
@@ -4493,9 +4506,9 @@ impl memory::Addressable for Cartridge {
             EXTERNAL_RAM_START..=EXTERNAL_RAM_END => {
                 match self.get_cartridge_type() {
                     CartridgeType::MBC1 { ram: true, .. } => {
-                        if self.ram_enabled && !self.ram_data.is_empty() {
-                            let ram_bank = self.get_ram_bank();
-                            let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
+                        if self.ram_enabled
+                            && let Some(offset) = self.banked_ram_offset(addr)
+                        {
                             // Use our dual-write method that writes to both RAM and save file
                             let _ = self.write_ram_byte(offset, value); // Ignore errors for now
                         }
@@ -4514,9 +4527,7 @@ impl memory::Addressable for Cartridge {
                             let ram_select_max = if self.is_mbc30() { 0x07 } else { 0x03 };
                             if self.mbc3_ram_bank <= ram_select_max {
                                 // RAM bank access
-                                if !self.ram_data.is_empty() {
-                                    let ram_bank = self.get_ram_bank();
-                                    let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
+                                if let Some(offset) = self.banked_ram_offset(addr) {
                                     let _ = self.write_ram_byte(offset, value);
                                 }
                             } else if (0x08..=0x0C).contains(&self.mbc3_ram_bank) {
@@ -4532,9 +4543,9 @@ impl memory::Addressable for Cartridge {
                         }
                     }
                     CartridgeType::MBC5 { ram: true, .. } => {
-                        if self.ram_enabled && !self.ram_data.is_empty() {
-                            let ram_bank = self.get_ram_bank();
-                            let offset = ((addr - EXTERNAL_RAM_START) as usize + (ram_bank * 0x2000)) % self.ram_data.len();
+                        if self.ram_enabled
+                            && let Some(offset) = self.banked_ram_offset(addr)
+                        {
                             let _ = self.write_ram_byte(offset, value);
                         }
                     }
@@ -4576,12 +4587,8 @@ impl memory::Addressable for Cartridge {
                             // $00 off). Latched for a future IR transport;
                             // nothing observes it yet.
                             self.huc1_ir_led = value & 0x01 != 0;
-                        } else if !self.ram_data.is_empty() {
+                        } else if let Some(offset) = self.banked_ram_offset(addr) {
                             // RAM is always enabled (no MBC1-style gate).
-                            let ram_bank = self.get_ram_bank();
-                            let offset = ((addr - EXTERNAL_RAM_START) as usize
-                                + (ram_bank * 0x2000))
-                                % self.ram_data.len();
                             let _ = self.write_ram_byte(offset, value);
                         }
                     }
@@ -4592,14 +4599,10 @@ impl memory::Addressable for Cartridge {
                             self.cam_reg_write(addr & 0x7F, value);
                         } else if self.ram_enabled
                             && !self.cam_running
-                            && !self.ram_data.is_empty()
+                            && let Some(offset) = self.banked_ram_offset(addr)
                         {
                             // RAM writes need the $0A gate and are ignored
                             // while the capture unit is working.
-                            let ram_bank = self.get_ram_bank();
-                            let offset = ((addr - EXTERNAL_RAM_START) as usize
-                                + (ram_bank * 0x2000))
-                                % self.ram_data.len();
                             let _ = self.write_ram_byte(offset, value);
                         }
                     }
@@ -4608,11 +4611,7 @@ impl memory::Addressable for Cartridge {
                             // RAM read/write. Mode 0x0 (read-only) ignores
                             // writes.
                             0xA => {
-                                if !self.ram_data.is_empty() {
-                                    let ram_bank = self.get_ram_bank();
-                                    let offset = ((addr - EXTERNAL_RAM_START) as usize
-                                        + (ram_bank * 0x2000))
-                                        % self.ram_data.len();
+                                if let Some(offset) = self.banked_ram_offset(addr) {
                                     let _ = self.write_ram_byte(offset, value);
                                 }
                             }
@@ -4639,27 +4638,22 @@ impl memory::Addressable for Cartridge {
                     CartridgeType::NoMBC { .. } => {
                         // Straight-through RAM, no enable gate (see the read
                         // path). Battery variants ($09) stream to the .sav.
-                        if !self.ram_data.is_empty() {
-                            let offset =
-                                (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
+                        if let Some(offset) = self.unbanked_ram_offset(addr) {
                             let _ = self.write_ram_byte(offset, value);
                         }
                     }
                     // Straight-through, ungated (see the read path).
                     CartridgeType::Rocket | CartridgeType::Sachen { .. } => {
-                        if !self.ram_data.is_empty() {
-                            let offset =
-                                (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
+                        if let Some(offset) = self.unbanked_ram_offset(addr) {
                             let _ = self.write_ram_byte(offset, value);
                         }
                     }
                     // MBC3-style enable gate, unbanked.
-                    CartridgeType::NtOld { .. }
-                        if self.ram_enabled && !self.ram_data.is_empty() => {
-                            let offset =
-                                (addr - EXTERNAL_RAM_START) as usize % self.ram_data.len();
+                    CartridgeType::NtOld { .. } if self.ram_enabled => {
+                        if let Some(offset) = self.unbanked_ram_offset(addr) {
                             let _ = self.write_ram_byte(offset, value);
                         }
+                    }
                     _ => {}
                 }
             }
