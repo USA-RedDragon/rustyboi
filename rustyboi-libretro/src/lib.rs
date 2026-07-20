@@ -606,9 +606,10 @@ impl Core for RustyboiCore {
     fn serialize_size(&mut self) -> usize {
         // Queried ONCE; the frontend pre-allocates savestate/rewind/netplay
         // buffers of this size, so it must be a stable upper bound. The state is
-        // bincode (ROM held out); only the RLE-coded framebuffer portion drifts
-        // with content. A 1/64 + 64 KiB pad plus the 8-byte header covers that;
-        // serialize also guards the write.
+        // the core's magic+version header + bincode (ROM held out), so
+        // `bytes.len()` already covers that header; only the RLE-coded
+        // framebuffer portion drifts with content. A 1/64 + 64 KiB pad plus our
+        // own 8-byte length prefix covers that; serialize also guards the write.
         match self.gb_mut() {
             Some(gb) => match gb.to_state_bytes() {
                 Ok(bytes) => SERIALIZE_HEADER_LEN + bytes.len() + bytes.len() / 64 + 64 * 1024,
