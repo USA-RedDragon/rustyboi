@@ -5,6 +5,10 @@ apu-len_extra_clock-cgb|cgb|mooneye|test-roms/build/apu/len_extra_clock.cgb.moon
 apu-len_extra_clock-dmg|dmg|mooneye|test-roms/build/apu/len_extra_clock.dmg.mooneye.gb
 apu-nrx2_zombie-cgb|cgb|mooneye|test-roms/build/apu/nrx2_zombie.cgb.mooneye.gbc
 apu-nrx2_zombie-cgbe|cgb|mooneye|test-roms/build/apu/nrx2_zombie.cgbe.mooneye.gbc|rev=cgbe
+apu-postboot_len_no_write-cgb|cgb|mooneye|test-roms/build/apu/postboot_len_no_write.cgb.mooneye.gbc
+apu-postboot_len_no_write-dmg|dmg|mooneye|test-roms/build/apu/postboot_len_no_write.dmg.mooneye.gb
+apu-power_cycle_len_no_trigger-cgb|cgb|mooneye|test-roms/build/apu/power_cycle_len_no_trigger.cgb.mooneye.gbc
+apu-power_cycle_len_no_trigger-dmg|dmg|mooneye|test-roms/build/apu/power_cycle_len_no_trigger.dmg.mooneye.gb
 cartridge-vf001_protection-cgb|cgb|mooneye|test-roms/build/cartridge/vf001_protection.cgb.mooneye.gbc
 dma-hdma_ff55_cancel_after_block-cgb|cgb|mooneye|test-roms/build/dma/hdma_ff55_cancel_after_block.cgb.mooneye.gbc
 dma-hdma_ff55_countdown_ds-cgb|cgb|mooneye|test-roms/build/dma/hdma_ff55_countdown_ds.cgb.mooneye.gbc

@@ -17,9 +17,11 @@
 ;     falling edge there). All src/apu/ cycle counting anchors t=0 at the DIV
 ;     reset inside this macro.
 ;
-; Length-counter power-off/power-on retention is deliberately NOT relied on
-; anywhere here: every ROM must write NRx1 after `apu_power_cycle` before using
-; a counter value.
+; Length-counter power-off/power-on retention is deliberately NOT relied on by
+; these helpers: a ROM that wants a known counter must write NRx1 after
+; `apu_power_cycle`. The one exception is `power_cycle_len_no_trigger`, whose
+; whole subject is what the counters hold across a power cycle — it re-derives
+; the timeline from the same t=0 anchor and documents every value it depends on.
 
 IF !DEF(APU_INC)
 DEF APU_INC EQU 1
@@ -69,6 +71,11 @@ DEF AUDHIGH_LEN_ON  EQU $40
 ; One length tick in single-speed M-cycles (16384 T-cycles at 256 Hz).
 DEF APU_LEN_TICK_MCYCLES EQU 4096
 
+; ApuPollChannelOffTicks spin count. Its loop body is 36 M-cycles of real work
+; plus ApuDelayBC's 7*BC + 3, so 36 + 7*580 = 4096 = exactly one length tick.
+DEF APU_TICK_POLL_SPIN EQU (APU_LEN_TICK_MCYCLES - 36) / 7
+ASSERT 36 + 7 * APU_TICK_POLL_SPIN == APU_LEN_TICK_MCYCLES
+
 ; Scratch: the per-subtest pass bitmask (sgb_packet.inc's SGB_RESULT pattern).
 DEF APU_RESULT EQU $C0F2
 
@@ -108,6 +115,26 @@ MACRO apu_record   ; \1 = bit mask
 .recorded\@:
 ENDM
 
+; Grade HL against the inclusive window [\1 - \2, \1 + \2]: A := 0 on a hit,
+; A := 1 on a miss, ready for `apu_record`. Clobbers A.
+MACRO apu_grade_window   ; \1 = expected, \2 = half-width
+    ld a, l
+    sub LOW((\1) - (\2))
+    ld a, h
+    sbc HIGH((\1) - (\2))
+    jr c, .miss\@                        ; HL < low bound
+    ld a, LOW((\1) + (\2))
+    sub l
+    ld a, HIGH((\1) + (\2))
+    sbc h
+    jr c, .miss\@                        ; HL > high bound
+    xor a
+    jr .graded\@
+.miss\@:
+    ld a, 1
+.graded\@:
+ENDM
+
 SECTION "apu_helpers", ROM0
 
 ; Burn 7*BC + 3 M-cycles including the ret (apu_delay_mcycles wraps this).
@@ -138,5 +165,34 @@ ApuPollChannelOff:
     or e                   ; 1
     jr nz, .poll           ; 3
     ret                    ; timeout: HL = bound
+
+; Same contract, but the sample period is exactly one length tick
+; (APU_LEN_TICK_MCYCLES), so HL comes back in LENGTH TICKS instead of poll
+; iterations: HL = the number of samples that still saw the bit set. The
+; sampling period equals the tick period, so the loop never drifts against the
+; length clock and HL is the counter value the trigger loaded, off by at most
+; one (the sub-tick offset between the caller's write and the first sample
+; decides whether the last tick is observed). Two things the 15-M-cycle poller
+; cannot do: reach channel 3's 256-tick full reload (which overflows HL at
+; 15 M-cycles per iteration) and report a result already in the units the
+; length-counter model is written in.
+; C = channel mask, DE = sample bound (HL = the bound on timeout).
+; Clobbers A, DE, HL.
+ApuPollChannelOffTicks:
+    ld hl, 0
+.poll:
+    ldh a, [rNR52]                       ; 3
+    and c                                ; 1
+    ret z                                ; 2 not taken
+    inc hl                               ; 2
+    dec de                               ; 2
+    ld a, d                              ; 1
+    or e                                 ; 1
+    ret z                                ; 2 not taken; timeout: HL = bound
+    push bc                              ; 4
+    ld bc, APU_TICK_POLL_SPIN            ; 3
+    call ApuDelayBC                      ; 6 + 7*BC + 3
+    pop bc                               ; 3
+    jr .poll                             ; 3
 
 ENDC

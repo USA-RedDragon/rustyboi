@@ -216,8 +216,8 @@ impl Noise {
 
     /// APU-init noise state (the APU struct reset at the NR52
     /// 0->1 power-on): the ripple counter, its alignment and the LFSR restart
-    /// from zero. The length counter is preserved (handled by the caller's
-    /// register-zeroing path).
+    /// from zero. The length counter is preserved: power-off already zeroed it,
+    /// so preserving is what lets a DMG while-off NRx1 write survive power-on.
     pub(super) fn psg_reset(&mut self) {
         self.lfsr = 0;
         self.current_sample = false;

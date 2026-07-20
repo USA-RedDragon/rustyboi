@@ -602,7 +602,8 @@ impl Audio {
     /// Folding the whole APU clock here re-anchors the length-expiry boundary
     /// `((cc>>13)+len)<<13`, which would otherwise be computed against the
     /// un-folded large anchor and land one 0x1000 quantum off after a DIV write.
-    /// The observable effects (registers clear, length counters survive) are in
+    /// The observable effects (registers clear, length counters survive — which
+    /// after the power-off zeroing means 0, or a DMG while-off NRx1 load) are in
     /// Pan Docs (Audio_Registers); this cc-fold mechanism is a model construct,
     /// not in Pan Docs, TCAGBD, or GBCTR.
     fn psg_reset(&mut self, ds: bool) {
@@ -1188,12 +1189,9 @@ impl Addressable for Audio {
                 if was_enabled && !now_enabled {
                     // APU power-off: while still enabled, write 0 to every sound
                     // register 0x10-0x25, THEN disable. The per-register writes
-                    // take the normal (enabled) path, so each NRx1 length-load
-                    // reloads its length counter to its max (e.g. NR41=0 ->
-                    // length counter 64). On DMG this is what makes the length
-                    // counters survive power-off; a flat struct reset would zero
-                    // them. The free-running master clock (cc/last_update) and
-                    // wave RAM are left untouched.
+                    // take the normal (enabled) path, so the NRx4 zero-writes
+                    // disarm every length expiry. The free-running master clock
+                    // (cc/last_update) and wave RAM are left untouched.
                     // Pan Docs: Audio Registers (off clears registers but not
                     // wave RAM or the DIV-APU counter) —
                     // https://gbdev.io/pandocs/Audio_Registers.html
@@ -1204,6 +1202,22 @@ impl Addressable for Audio {
                         }
                         self.write(reg, 0);
                     }
+                    // The cascade's NRx1=0 writes reload each length counter to
+                    // its max; hardware instead leaves the counters at zero
+                    // (gbdev wiki "Power Control": "always zero at power on
+                    // (CGB-02, CGB-04, CGB-05)"; SameBoy Core/apu.c memsets the
+                    // APU state in its NR52 power-off handler). Undo the
+                    // reloads. `psg_reset` (power-on) preserves counters, so
+                    // what survives a power cycle is 0 — or, on DMG only, the
+                    // value a while-off NRx1 write loaded afterwards, matching
+                    // SameBoy's `!GB_is_cgb(gb) && (value & 0x80)` restore. The
+                    // expiry targets stay disarmed: the NRx4 zero-writes above
+                    // already set them to LEN_DISABLED, and none of these
+                    // setters rearm one.
+                    self.channel1.set_length_counter(0);
+                    self.channel2.set_length_counter(0);
+                    self.channel3.set_length_counter(0);
+                    self.channel4.set_length_counter(0);
                     // `audio_enabled` stays true through the loop above (so the
                     // zero-writes take the enabled path) and is cleared by the
                     // `audio_enabled = now_enabled` at the end of this branch.
