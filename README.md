@@ -8,9 +8,11 @@ A Game Boy emulator written in Rust for learning purposes. Not usable, likely ne
 
 Passing cases per suite, refreshed automatically on every pull request
 (`make report`). See [SUITES.md](SUITES.md) for what each suite
-is, how it is graded, and where its ROMs come from. Every one of the currently
-failing ROMs is individually proven and documented in
-[KNOWN_FAILURES.md](KNOWN_FAILURES.md).
+is, how it is graded, and where its ROMs come from.
+[KNOWN_FAILURES.md](KNOWN_FAILURES.md) adjudicates the failing set: every
+gbmicrotest and gambatte failure is individually proven there; the
+gbc_hw_tests failures are newly adopted and still pending per-ROM
+adjudication.
 
 <!-- SUITE-PROGRESS:START -->
 | Suite | Passing | Total |

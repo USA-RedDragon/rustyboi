@@ -1,6 +1,6 @@
 # Known Failures — every failing ROM, with proof
 
-17 of 6465 test cases fail across the 26 suites: 4 in gbmicrotest, 9 in gambatte, 4 in little_things_extra. This document details every one, with evidence. It makes **no assumptions**: every claim is tagged with its provenance, and reproducible claims include the command that re-verifies them against this tree.
+86 of 6670 test cases fail across the 28 suites: 4 in gbmicrotest, 9 in gambatte, 73 in gbc_hw_tests. The 13 gbmicrotest + gambatte failures are each adjudicated below, with evidence. The 73 gbc_hw_tests failures are newly adopted and **pending per-ROM adjudication** — that section states plainly what has and has not been proven, rather than pretending. Adjudicated entries make **no assumptions**: every claim is tagged with its provenance, and reproducible claims include the command that re-verifies them against this tree.
 
 Provenance tags:
 
@@ -178,49 +178,51 @@ The `srcC000` twin **passes**. Poking C113=F7 flips which of the two passes — 
 
 ---
 
-## little_things_extra — 4 failures (0/4) — all OPEN-TARGET
+## gbc_hw_tests — 73 failures (120/193) — PENDING ADJUDICATION
 
-Adopted 2026-07 from the nitro2k01/little-things-gb releases (see SUITES.md for
-fetch + grading provenance). Both underlying behaviors are genuine accuracy
-gaps, newly discovered by suite adoption — not excused floors. The suite floor
-is 0 until they are fixed; the auto-ratchet will raise it as they land.
+Adopted in bd0ad76e from AntonioND/gbc-hw-tests (real-device SRAM captures;
+see SUITES.md for grading provenance and the revision caveat). **These 73
+failures have not yet been adjudicated per-ROM** — no entry to the standard of
+the sections above exists for any of them, and this document does not pretend
+otherwise. SUITES.md's promise that per-ROM adjudication lives here is, for
+this suite, an open work item.
 
-### 14. `windesync-validate.gb` (dmg) — OPEN-TARGET (pre-CGB window-desync glitch)
+What is known only at the suite level [D: SUITES.md]: the captures come from
+one unit per class and the CGB unit's silicon revision is undocumented, so
+rev-sensitive families (speed-switch sub-timing, STOP sub-dot, mode-2/3 LCD
+timing) may encode revision differences against the modeled CGB-04 rather
+than emulator bugs — but no individual failure has been classified as such.
+Until each ROM gets a verdict class with evidence, every one of the 73 counts
+as an open accuracy work item. The 120/193 floor is a ratcheted progress
+floor, not a proven ceiling.
 
-**Failure [R]:** `make suite SUITE=little_things_extra` → layout mismatch vs
-`gb-test-roms/little-things-gb/windesync-reference-sgb.png`, 705 pixels break
-the best recolor map.
+---
 
-**Oracle [D]:** the reference was digitally captured from a **real Super Game
-Boy with a logic analyzer** by the test author (nitro2k01) — real silicon, not
-an emulator. The quirk (rediscovered via *Star Trek 25th Anniversary*): after
-the window has triggered once in a frame and is then disabled via LCDCF_WINON,
-every later WX hit with `(WX&7)==7-(SCX&7)` emits one BGP-color-0 glitch pixel
-and shifts the rest of the line right by one. BGB and SameBoy model it.
+## Resolved — little_things_extra (now 4/4)
 
-**State [V]:** rustyboi renders the failure cross in the *should-trigger*
-section (glitch not modeled) — and its output does not even match the typical
-no-glitch-emulator layout (1890 recolor-breaking px vs the upstream
-`failedtest-dmg.png`): the *should-not-trigger* section also shows shifted
-artifacts, so there are additional window-disable path differences to dig into.
+Adopted 2026-07 from the nitro2k01/little-things-gb releases (see SUITES.md
+for fetch + grading provenance) at 0/4, with both underlying behaviors
+classified OPEN-TARGET — genuine accuracy gaps, not excused floors. Both are
+now fixed and the suite floor is ratcheted to 4/4; the entries are kept here
+as the resolution record.
 
-### 15–17. `double-halt-cancel.gb` (dmg+cgb) + `double-halt-cancel-gbconly.gb` (cgb) — OPEN-TARGET (double-HALT is not a lockup)
+### 14. `windesync-validate.gb` (dmg) — RESOLVED
 
-**Failure [R]:** verdict screen reads `FATE: HALTED! … RESULT: FAIL!` — rustyboi
-permanently sleeps on `halt halt` with IME=0.
+Pre-CGB window-desync glitch: after the window triggers once in a frame and is
+disabled via LCDCF_WINON, every later WX hit with `(WX&7)==7-(SCX&7)` emits one
+BGP-color-0 glitch pixel and shifts the rest of the line right by one (oracle:
+nitro2k01's logic-analyzer capture from a real Super Game Boy). Fixed by
+0ab79f24 (`ppu: complete the DMG WE-off window-desync insert glitch`, the
+SameBoy #278 behavior); floor ratcheted 3→4 in 1002131b.
 
-**Hardware behavior [D]:** the halt bug is PC-increment inhibition, so the CPU
-*refetches the second `halt` byte forever*; the ROM runs that pair inside VRAM,
-and when mode-3 VRAM locking makes the fetch read `$FF` the CPU executes
-`rst $38` and escapes. Expected screen (BGB capture, author-endorsed;
-BGB/SameBoy/Gambatte agree): `FATE: RST $38 / RET ADDR:+0001 / LY: 01 /
-DIV: 02.15 / RESULT: PASS!` (CGB timing differs by one cycle — VRAM reads lock
-one cycle later — which the separate CGB reference encodes).
+### 15–17. `double-halt-cancel.gb` (dmg+cgb) + `double-halt-cancel-gbconly.gb` (cgb) — RESOLVED
 
-**Work item [V]:** model halted-CPU wake as a continuous refetch of the
-post-HALT byte (sensitive to VRAM lock state), not a static sleep; then verify
-the DIV/LY timing text matches to the cycle. Fixing the core behavior flips all
-three rows.
+Double `halt` with IME=0 is not a lockup: PC-increment inhibition makes the
+CPU refetch the second `halt` byte forever, so mode-3 VRAM locking turns the
+fetch into `$FF` (`rst $38`) and execution escapes. Fixed by 24398b29
+(`cpu: HALT prefetch is a real bus read` — halted wake modeled as a continuous
+refetch of the post-HALT byte, sensitive to VRAM lock state), flipping all
+three rows; floor ratcheted 0→3 in f11ac25e.
 
 ---
 
@@ -228,4 +230,5 @@ three rows.
 
 - **gbmicrotest:** 509/513 is the maximum for any register-level emulator without inventing oracles. +2 (`500-scx-timing`, `minimal`) become gradeable the day a hardware capture of the absolute byte exists; `temp` is capturable in principle; `halt_op_dupe_delay` requires characterizing analog die physics.
 - **gambatte:** 7 (residue tail) + 1 (fexx) + 1 (C113) = **9 is the permanent minimum for any deterministic emulator, including a perfect gate-level one** — every failing byte is pinned oppositely by a *currently-passing* capture of the same physical quantity, and the exhaustive subset search confirms the current choices are globally optimal.
-- Every failing case is therefore accounted for above, byte by byte.
+- **gbc_hw_tests:** 120/193 is a ratcheted progress floor, **not** an adjudicated ceiling — the 73 failures are open work items pending per-ROM adjudication (see that section).
+- 4 + 9 + 73 = 86: every gbmicrotest and gambatte failure is accounted for above, byte by byte; the gbc_hw_tests failures are counted honestly but not yet accounted for individually.

@@ -1,7 +1,8 @@
 # Public GB/GBC test suites (c-sp / gameboy-test-roms + friends)
 
-> Per-ROM proof and explanation for every currently failing test lives in
-> [KNOWN_FAILURES.md](KNOWN_FAILURES.md).
+> Per-ROM adjudication of the failing set lives in
+> [KNOWN_FAILURES.md](KNOWN_FAILURES.md) — gbmicrotest + gambatte fully
+> proven; gbc_hw_tests still pending.
 
 rustyboi is graded against the public Game Boy / Game Boy Color hardware-test
 suites in addition to the Gambatte hwtests. These are wired into the main
@@ -204,8 +205,9 @@ tellinglys), fetched by `sync_little_things_extra`:
   exact screen. The `-gbconly` ROM differs from the base ROM only in the
   header CGB flag + checksums (cmp-verified), so it shares the CGB reference.
 
-Currently **0 / 4** passing — all four are genuine accuracy targets, see
-[KNOWN_FAILURES.md](KNOWN_FAILURES.md).
+All **4 / 4** now pass — adopted at 0/4 with both underlying gaps (window
+desync, double-HALT refetch escape) as genuine accuracy targets, since fixed;
+see the resolved section of [KNOWN_FAILURES.md](KNOWN_FAILURES.md).
 
 ### sketchtests — `suites/sketchtests.manifest` (`serial_text`)
 
@@ -263,8 +265,8 @@ grades its input-free `not_pressed` capture.
 > (speed-switch sub-timing, STOP sub-dot, mode-2/3 LCD timing) may disagree with
 > rustyboi's modeled CGB-04 revision — such a mismatch is a *revision
 > difference*, not necessarily an emulator bug. The suite is graded honestly
-> regardless (no fudging to inflate the count); per-ROM adjudication lives in
-> `KNOWN_FAILURES.md`.
+> regardless (no fudging to inflate the count); per-ROM adjudication is
+> tracked in `KNOWN_FAILURES.md` and is still pending for this suite.
 
 Initial adoption score: **87 / 193** (CGB 69 / 152, DMG 18 / 41), run at 800
 frames (the mode-2 / echo-RAM tests sweep a full frame across many repetitions
