@@ -1326,6 +1326,10 @@ _GBCHW_HEADER = [
 RUSTYBOI_MODELS: dict[str, tuple[str, list[str]]] = {
     "dmg": ("dmg", []),
     "cgb": ("cgb", []),
+    # Same CGB cart image as `cgb`, pinned to CPU-CGB-D/E silicon: the header is
+    # identical, only the hardware the runner instantiates differs. For ROMs
+    # that grade a CGB revision asymmetry from both sides.
+    "cgbe": ("cgb", ["rev=cgbe"]),
     "agb": ("agb", []),
     "sgb": ("dmg", ["rev=sgb"]),
     "sgb2": ("dmg", ["rev=sgb2"]),

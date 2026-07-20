@@ -47,6 +47,14 @@ DEF rNR51 EQU $FF25   ; sound panning
 DEF rNR52 EQU $FF26   ; audio master control
 DEF rWAVE EQU $FF30   ; wave RAM base ($FF30-$FF3F)
 
+; CGB-only digital-output taps (Pan Docs, "Audio Registers"): PCM12 reports
+; CH1 in the low nibble and CH2 in the high nibble, PCM34 the same for CH3/CH4.
+; Each nibble is the channel's CURRENT digital output -- the envelope volume
+; while the duty step is high, 0 while it is low -- so a reader that wants the
+; volume itself must sample across a full duty period and take the maximum.
+DEF rPCM12 EQU $FF76
+DEF rPCM34 EQU $FF77
+
 ; NR52 bits.
 DEF AUDENA_ON  EQU $80
 DEF AUDENA_CH1 EQU $01

@@ -110,6 +110,13 @@ pub(super) struct Noise {
     // <=CGB-C divisor-0 even-alignment DS trigger-countdown +2 (see nr44).
     #[serde(default)]
     cgb_de: bool,
+    // AGB (GBA-in-GBC-mode) hardware flag. Only gates the NRx2 zombie
+    // transform, where AGB sides with CGB-D/E (single application) even though
+    // `cgb_de` is false for it (see `nrx2_glitch`). Not serialized: re-seeded
+    // from the state's `hardware` identity by `Mmio::reseed_hardware_flags`,
+    // so adding it leaves the savestate layout untouched.
+    #[serde(skip)]
+    agb: bool,
     // CGB-B-or-earlier APU revision gate (see `len_nr4_change`).
     #[serde(default)]
     cgb_le_b: bool,
@@ -162,6 +169,7 @@ impl Noise {
             cgb: false,
             ds: false,
             cgb_de: false,
+            agb: false,
             cgb_le_b: false,
         }
     }
@@ -185,6 +193,11 @@ impl Noise {
     /// CGB-D/E APU revision gate (model newer than CGB-C).
     pub(super) fn set_cgb_de(&mut self, de: bool) {
         self.cgb_de = de;
+    }
+
+    /// AGB hardware flag; see the `agb` field and `nrx2_glitch`.
+    pub(super) fn set_agb(&mut self, agb: bool) {
+        self.agb = agb;
     }
 
     /// CGB-B-or-earlier APU revision gate (CGB with model <= CGB-B).

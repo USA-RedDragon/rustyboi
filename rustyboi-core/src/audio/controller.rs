@@ -870,9 +870,14 @@ impl Audio {
         self.channel2.set_step_back_parity(on);
     }
 
-    /// Seed the AGB flag into the wave channel.
+    /// Seed the AGB flag into the wave channel (ch3 wave-RAM behavior) and into
+    /// the three envelope channels, where AGB takes the CGB-D/E side of the
+    /// NRx2 zombie transform (see `nrx2_glitch`).
     pub(crate) fn set_agb(&mut self, agb: bool) {
+        self.channel1.set_agb(agb);
+        self.channel2.set_agb(agb);
         self.channel3.set_agb(agb);
+        self.channel4.set_agb(agb);
     }
 
     /// Seed the post-boot APU state. `cgb` selects the CGB vs DMG channel-1
