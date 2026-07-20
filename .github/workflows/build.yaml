@@ -23,7 +23,7 @@ jobs:
       libretro: ${{ steps.gen.outputs.libretro }}
       native: ${{ steps.gen.outputs.native }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: gen
         shell: bash
         run: |
@@ -41,7 +41,7 @@ jobs:
       matrix:
         name: ${{ fromJSON(needs.setup.outputs.libretro) }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/free-disk-space
       - name: PGO profile
         uses: ./.github/actions/pgo-restore
@@ -65,7 +65,7 @@ jobs:
       matrix:
         name: ${{ fromJSON(needs.setup.outputs.native) }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/free-disk-space
       - name: PGO profile
         uses: ./.github/actions/pgo-restore
@@ -88,7 +88,7 @@ jobs:
       matrix:
         abi: [arm64-v8a, armeabi-v7a, x86_64, x86]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/free-disk-space
       - name: PGO profile
         uses: ./.github/actions/pgo-restore
@@ -115,7 +115,7 @@ jobs:
     needs: android
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/free-disk-space
       # No PGO restore: SKIP_RUST=1 below never compiles Rust.
       - name: Download per-ABI native libs
@@ -149,7 +149,7 @@ jobs:
     name: web
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/free-disk-space
       - name: PGO profile
         uses: ./.github/actions/pgo-restore
@@ -169,7 +169,7 @@ jobs:
     name: ios
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/free-disk-space
       - name: PGO profile
         uses: ./.github/actions/pgo-restore
