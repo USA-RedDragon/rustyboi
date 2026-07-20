@@ -766,54 +766,29 @@ impl App {
                             Err(e) => requests.push(PlatformRequest::Error(format!("Failed to load state: {e}"))),
                         }
                     }
+                    // The bytes-only finishes: `Session::finish_file` owns both
+                    // the finisher call and the resulting Status/Error/ClearError
+                    // sequence, so the wording lives in one place instead of once
+                    // per frontend. Only the app-side bookkeeping stays here.
                     Some(ResolvedAction::ImportBattery { bytes }) => {
-                        match self.session.finish_import_battery(&bytes) {
-                            Ok(()) => requests.push(PlatformRequest::Status("Battery save imported".into())),
-                            Err(e) => requests.push(PlatformRequest::Error(format!("Failed to import battery save: {e}"))),
-                        }
+                        self.finish_file(LoadPurpose::Battery, &bytes, requests, |_| {});
                     }
                     Some(ResolvedAction::ImportRtc { bytes }) => {
-                        match self.session.finish_import_rtc(&bytes) {
-                            Ok(()) => requests.push(PlatformRequest::Status("RTC imported".into())),
-                            Err(e) => requests.push(PlatformRequest::Error(format!("Failed to import RTC: {e}"))),
-                        }
+                        self.finish_file(LoadPurpose::Rtc, &bytes, requests, |_| {});
                     }
                     Some(ResolvedAction::ApplyPatch { bytes }) => {
-                        match self.session.apply_rom_patch(&bytes) {
-                            Ok(_) => {
-                                self.error_state = None;
-                                self.frame = None;
-                                requests.push(PlatformRequest::ClearError);
-                                requests.push(PlatformRequest::Status("Patch applied".into()));
-                            }
-                            Err(e) => requests.push(PlatformRequest::Error(format!("Failed to apply patch: {e}"))),
-                        }
+                        self.finish_file(LoadPurpose::Patch, &bytes, requests, |app| {
+                            app.error_state = None;
+                            app.frame = None;
+                        });
                     }
-                    // Validate before installing: the session retains whatever it
-                    // is given, and a rejected dump would otherwise silently keep
-                    // the previous border while reporting success.
                     Some(ResolvedAction::LoadSgbFirmware { bytes }) => {
-                        match rustyboi_core_lib::sgb_firmware::identify(&bytes) {
-                            Ok(which) => {
-                                self.session.finish_load_sgb_firmware(&bytes);
-                                requests.push(PlatformRequest::Status(
-                                    format!("{} firmware loaded; showing the system border", sgb_firmware_label(which)),
-                                ));
-                            }
-                            Err(e) => requests.push(PlatformRequest::Error(format!(
-                                "Not a Super Game Boy firmware dump: {e}"
-                            ))),
-                        }
+                        self.finish_file(LoadPurpose::SgbFirmware, &bytes, requests, |_| {});
                     }
                     Some(ResolvedAction::LoadMovie { bytes }) => {
-                        match self.session.finish_load_movie(&bytes) {
-                            Ok(()) => {
-                                self.manually_paused = self.user_paused;
-                                requests.push(PlatformRequest::ClearError);
-                                requests.push(PlatformRequest::Status("Movie loaded — replaying".into()));
-                            }
-                            Err(e) => requests.push(PlatformRequest::Error(format!("Failed to load movie: {e}"))),
-                        }
+                        self.finish_file(LoadPurpose::Movie, &bytes, requests, |app| {
+                            app.manually_paused = app.user_paused;
+                        });
                     }
                     None => {}
                 }
@@ -825,6 +800,26 @@ impl App {
                 requests.append(&mut self.pending_requests);
             }
         }
+    }
+
+    /// Hand resolved file `bytes` to [`Session::finish_file`], run `on_success`
+    /// for the app-side bookkeeping the session can't know about, then route the
+    /// outcome through the same `Frontend` capability methods `drive_action`
+    /// uses — so a finish-produced request is handled identically to an
+    /// apply-produced one.
+    fn finish_file(
+        &mut self,
+        purpose: LoadPurpose,
+        bytes: &[u8],
+        requests: &mut Vec<PlatformRequest>,
+        on_success: impl FnOnce(&mut Self),
+    ) {
+        let outcome = self.session.finish_file(purpose, bytes);
+        if outcome.succeeded() {
+            on_success(self);
+        }
+        crate::contract::route_outcome(self, outcome);
+        requests.append(&mut self.pending_requests);
     }
 }
 
@@ -841,10 +836,7 @@ pub enum ResolvedAction {
 
 /// Human label for an identified SGB firmware image, used in the status line.
 pub fn sgb_firmware_label(which: rustyboi_core_lib::sgb_firmware::SgbFirmware) -> &'static str {
-    match which {
-        rustyboi_core_lib::sgb_firmware::SgbFirmware::Sgb1 => "Super Game Boy",
-        rustyboi_core_lib::sgb_firmware::SgbFirmware::Sgb2 => "Super Game Boy 2",
-    }
+    rustyboi_session::sgb_firmware_label(which)
 }
 
 /// The app is a windowed [`Frontend`]: the shared [`drive_action`] driver

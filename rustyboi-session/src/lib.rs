@@ -89,6 +89,15 @@ pub use session::{
     FrameOutput, Ports, RunMode, Session, SessionError, SlotMeta, GB_SIZE, QUICK_SLOT, SGB_SIZE,
 };
 
+/// Human label for an identified SGB firmware image, used in the status line
+/// `finish_file` produces (and re-exported by the frontend crate for the menus).
+pub fn sgb_firmware_label(which: rustyboi_core_lib::sgb_firmware::SgbFirmware) -> &'static str {
+    match which {
+        rustyboi_core_lib::sgb_firmware::SgbFirmware::Sgb1 => "Super Game Boy",
+        rustyboi_core_lib::sgb_firmware::SgbFirmware::Sgb2 => "Super Game Boy 2",
+    }
+}
+
 // Re-export the core types adapters need so a frontend can depend on just this
 // crate for the common path.
 pub use rustyboi_core_lib::gb::{Frame, Hardware, Region, GB};
