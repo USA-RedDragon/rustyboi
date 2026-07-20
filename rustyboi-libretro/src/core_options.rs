@@ -13,28 +13,28 @@ use rustyboi_session::ColorCorrection;
 
 /// Option keys, defined once and referenced by both the generated table and the
 /// parser in [`super::RustyboiCore::read_options`], so a typo can't desync them.
-pub const KEY_HARDWARE: &str = "rustyboi_hardware";
-pub const KEY_REAL_BOOT_ROM: &str = "rustyboi_real_boot_rom";
-pub const KEY_SGB_BORDER: &str = "rustyboi_sgb_border";
-pub const KEY_SGB_SYSTEM_BORDER: &str = "rustyboi_sgb_system_border";
-pub const KEY_DMG_PALETTE: &str = "rustyboi_dmg_palette";
-pub const KEY_GBC_DMG_PALETTE: &str = "rustyboi_gbc_dmg_palette";
-pub const KEY_SGB_PALETTE: &str = "rustyboi_sgb_palette";
-pub const KEY_GBC_COLOR_CORRECTION: &str = "rustyboi_gbc_color_correction";
+pub(crate) const KEY_HARDWARE: &str = "rustyboi_hardware";
+pub(crate) const KEY_REAL_BOOT_ROM: &str = "rustyboi_real_boot_rom";
+pub(crate) const KEY_SGB_BORDER: &str = "rustyboi_sgb_border";
+pub(crate) const KEY_SGB_SYSTEM_BORDER: &str = "rustyboi_sgb_system_border";
+pub(crate) const KEY_DMG_PALETTE: &str = "rustyboi_dmg_palette";
+pub(crate) const KEY_GBC_DMG_PALETTE: &str = "rustyboi_gbc_dmg_palette";
+pub(crate) const KEY_SGB_PALETTE: &str = "rustyboi_sgb_palette";
+pub(crate) const KEY_GBC_COLOR_CORRECTION: &str = "rustyboi_gbc_color_correction";
 
 /// Canonical on/off value ids (the libretro convention).
-pub const OFF: &str = "disabled";
-pub const ON: &str = "enabled";
+pub(crate) const OFF: &str = "disabled";
+pub(crate) const ON: &str = "enabled";
 
 /// The colour-correction modes as (id, label, value) — the single source for
 /// both the generated option and its parser, so the two can't disagree.
-pub const COLOR_CORRECTION: [(&str, &str, ColorCorrection); 2] = [
+pub(crate) const COLOR_CORRECTION: [(&str, &str, ColorCorrection); 2] = [
     ("linear", "Linear (raw)", ColorCorrection::Linear),
     ("lcd", "LCD (corrected)", ColorCorrection::Lcd),
 ];
 
 /// Parse a colour-correction id, or `None` if unrecognized.
-pub fn parse_color_correction(id: &str) -> Option<ColorCorrection> {
+pub(crate) fn parse_color_correction(id: &str) -> Option<ColorCorrection> {
     COLOR_CORRECTION.iter().find(|(k, _, _)| *k == id).map(|(_, _, v)| *v)
 }
 
@@ -48,7 +48,7 @@ fn on_off() -> Vec<OptionValue> {
 }
 
 /// Build the full option table from the shared enums.
-pub fn build() -> CoreOptions {
+pub(crate) fn build() -> CoreOptions {
     // "Auto" is libretro-only (header sniff); the concrete models come from the
     // shared enum so the list can never drift from what the core can emulate.
     let mut hardware_values = vec![value("auto", "Auto (CGB / DMG by header)")];
