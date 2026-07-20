@@ -467,3 +467,31 @@ fn sgb_palette_option_ids_round_trip_for_every_choice() {
     assert_eq!(ids.len(), 34);
     assert_eq!(SgbPaletteChoice::from_option_id("nonsense"), None);
 }
+
+// `Session::ui_state()` is the single producer of the UI read-model: every
+// frontend calls it instead of hand-copying the ~35 fields. Pin that it
+// actually reflects session state, and that `volume` goes through the clamping
+// accessor — the desktop builder used to read `config.volume` raw while the web
+// worker read the clamped `volume()`, which is the drift this collapsed.
+#[test]
+fn ui_state_reflects_the_session_and_clamps_volume() {
+    let rom = test_rom();
+    let mut s = dmg_session(&rom);
+
+    let ui = s.ui_state();
+    assert!(ui.has_rom, "a session holding a cartridge reports has_rom");
+    assert_eq!(ui.volume, s.volume());
+    assert_eq!(ui.scaling, s.scaling_mode());
+    assert_eq!(ui.fast_forward_factor, s.fast_forward_factor());
+    assert_eq!(ui.input, *s.input_config());
+    assert!(!ui.fast_forward);
+
+    // An over-100 volume (only reachable from a hand-edited config) must be
+    // reported clamped, not raw.
+    s.apply(UiAction::SetVolume(200), 0);
+    assert_eq!(s.ui_state().volume, 100, "volume is reported clamped");
+
+    // A session-side toggle shows up without any frontend bookkeeping.
+    s.apply(UiAction::ToggleFastForward, 0);
+    assert_eq!(s.ui_state().fast_forward, s.is_fast_forward());
+}
