@@ -40,6 +40,10 @@ static ANDROID_APP: OnceLock<AndroidApp> = OnceLock::new();
 /// SAF only allows a single in-flight `startActivityForResult` per request
 /// code; we serialize requests by overwriting any prior pending callback
 /// with `None` (cancelled).
+// The `PENDING_*` slots and `LAST_IME_TEXT` below are poison-recovering per the
+// tree-wide convention (see `rustyboi_core_lib::ir`): each is a single
+// `Option<callback>` slot (or a text buffer) that a panic cannot leave torn, and
+// a poisoned slot must not brick every later file pick / scan / IME poll.
 static PENDING_PICK: Mutex<Option<PickFileCallback>> = Mutex::new(None);
 
 /// SAF tree-picker callback (set when the user invokes the ROM library
@@ -65,7 +69,7 @@ static PENDING_SAV_FD: Mutex<Option<RawFd>> = Mutex::new(None);
 pub fn take_pending_sav_fd() -> Option<RawFd> {
     PENDING_SAV_FD
         .lock()
-        .expect("PENDING_SAV_FD poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .take()
 }
 
@@ -105,7 +109,7 @@ pub fn drain_ime_egui_events() -> Vec<rustyboi_frontend_lib::egui_events::Event>
     }
     let app = android_app();
     let state = app.text_input_state();
-    let mut last = LAST_IME_TEXT.lock().unwrap();
+    let mut last = LAST_IME_TEXT.lock().unwrap_or_else(|e| e.into_inner());
     if state.text == *last {
         return events;
     }
@@ -236,7 +240,7 @@ fn android_main(app: AndroidApp) {
             // Stash the callback; the matching `nativeOnRomPicked` JNI extern
             // will pop it once the user selects a file (or cancels).
             {
-                let mut slot = PENDING_PICK.lock().expect("PENDING_PICK poisoned");
+                let mut slot = PENDING_PICK.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(prev) = slot.replace(callback) {
                     // Drop a previous in-flight request by cancelling it.
                     prev(None);
@@ -260,7 +264,7 @@ fn android_main(app: AndroidApp) {
             if !dispatched {
                 // Couldn't reach Java — surface a cancellation immediately.
                 let cb = {
-                    let mut slot = PENDING_PICK.lock().expect("PENDING_PICK poisoned");
+                    let mut slot = PENDING_PICK.lock().unwrap_or_else(|e| e.into_inner());
                     slot.take()
                 };
                 if let Some(cb) = cb {
@@ -284,7 +288,7 @@ fn android_main(app: AndroidApp) {
     android_bridge::install_library(
         Box::new(|callback| {
             {
-                let mut slot = PENDING_TREE.lock().expect("PENDING_TREE poisoned");
+                let mut slot = PENDING_TREE.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(prev) = slot.replace(callback) {
                     prev(None);
                 }
@@ -300,7 +304,7 @@ fn android_main(app: AndroidApp) {
             })
             .unwrap_or(false);
             if !dispatched {
-                let cb = PENDING_TREE.lock().expect("PENDING_TREE poisoned").take();
+                let cb = PENDING_TREE.lock().unwrap_or_else(|e| e.into_inner()).take();
                 if let Some(cb) = cb {
                     cb(None);
                 }
@@ -308,7 +312,7 @@ fn android_main(app: AndroidApp) {
         }),
         Box::new(|tree_uri, callback| {
             {
-                let mut slot = PENDING_SCAN.lock().expect("PENDING_SCAN poisoned");
+                let mut slot = PENDING_SCAN.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(prev) = slot.replace(callback) {
                     prev(None);
                 }
@@ -336,7 +340,7 @@ fn android_main(app: AndroidApp) {
             })
             .unwrap_or(false);
             if !dispatched {
-                let cb = PENDING_SCAN.lock().expect("PENDING_SCAN poisoned").take();
+                let cb = PENDING_SCAN.lock().unwrap_or_else(|e| e.into_inner()).take();
                 if let Some(cb) = cb {
                     cb(None);
                 }
@@ -344,7 +348,7 @@ fn android_main(app: AndroidApp) {
         }),
         Box::new(|rom_uri, callback| {
             {
-                let mut slot = PENDING_LOAD.lock().expect("PENDING_LOAD poisoned");
+                let mut slot = PENDING_LOAD.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(prev) = slot.replace(callback) {
                     prev(None);
                 }
@@ -372,7 +376,7 @@ fn android_main(app: AndroidApp) {
             })
             .unwrap_or(false);
             if !dispatched {
-                let cb = PENDING_LOAD.lock().expect("PENDING_LOAD poisoned").take();
+                let cb = PENDING_LOAD.lock().unwrap_or_else(|e| e.into_inner()).take();
                 if let Some(cb) = cb {
                     cb(None);
                 }
@@ -917,7 +921,7 @@ fn active_network_handle(env: &mut JNIEnv<'_>, context_raw: jobject) -> Option<u
 
 fn invoke_pending(result: Option<FileData>) {
     let cb = {
-        let mut slot = PENDING_PICK.lock().expect("PENDING_PICK poisoned");
+        let mut slot = PENDING_PICK.lock().unwrap_or_else(|e| e.into_inner());
         slot.take()
     };
     if let Some(cb) = cb {
@@ -955,7 +959,7 @@ pub extern "system" fn Java_dev_mcswain_rustyboi_RustyboiActivity_nativeOnTreePi
         }
     };
     log::info!("nativeOnTreePicked: {:?}", uri);
-    let cb = PENDING_TREE.lock().expect("PENDING_TREE poisoned").take();
+    let cb = PENDING_TREE.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(cb) = cb {
         cb(uri);
     } else {
@@ -973,7 +977,7 @@ pub extern "system" fn Java_dev_mcswain_rustyboi_RustyboiActivity_nativeOnLibrar
     _class: JClass<'local>,
     entries_json: JString<'local>,
 ) {
-    let cb = PENDING_SCAN.lock().expect("PENDING_SCAN poisoned").take();
+    let cb = PENDING_SCAN.lock().unwrap_or_else(|e| e.into_inner()).take();
     let Some(cb) = cb else {
         log::warn!("scan callback fired with no pending request");
         return;
@@ -1062,11 +1066,11 @@ pub extern "system" fn Java_dev_mcswain_rustyboi_RustyboiActivity_nativeOnRomLoa
     };
     if sav_fd >= 0 {
         log::info!("nativeOnRomLoaded: sav fd {sav_fd}");
-        *PENDING_SAV_FD.lock().expect("PENDING_SAV_FD poisoned") =
+        *PENDING_SAV_FD.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(sav_fd as RawFd);
     } else {
         log::info!("nativeOnRomLoaded: no sav fd (-1)");
-        *PENDING_SAV_FD.lock().expect("PENDING_SAV_FD poisoned") = None;
+        *PENDING_SAV_FD.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
     log::info!(
         "nativeOnRomLoaded: {} bytes ({})",
@@ -1087,7 +1091,7 @@ pub extern "system" fn Java_dev_mcswain_rustyboi_RustyboiActivity_nativeOnRomLoa
 }
 
 fn invoke_load(result: Option<FileData>) {
-    let cb = PENDING_LOAD.lock().expect("PENDING_LOAD poisoned").take();
+    let cb = PENDING_LOAD.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(cb) = cb {
         cb(result);
     } else {

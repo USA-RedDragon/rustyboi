@@ -20,6 +20,10 @@ use crate::patch::crc32;
 
 /// The runtime index as `(crc32, name)` sorted by crc for binary search. Empty
 /// until a frontend downloads the DATs and calls [`load_dats`].
+// Poison-recovering per the tree-wide convention (see `rustyboi_core_lib::ir`):
+// this is a lookup cache, replaced by whole-vector assignment, so no panic can
+// tear it. A poisoned index must degrade to a stale/missing display name, never
+// panic every ROM the library scans from then on.
 static INDEX: RwLock<Vec<(u32, String)>> = RwLock::new(Vec::new());
 
 /// The base of the raw libretro-database No-Intro DAT tree.
@@ -96,7 +100,7 @@ pub fn load_dats(bodies: &[String]) {
     // BTreeMap keeps the merged set sorted by crc and dedupes (last write wins).
     let mut merged: BTreeMap<u32, String> = BTreeMap::new();
     {
-        let existing = INDEX.read().expect("no_intro index poisoned");
+        let existing = INDEX.read().unwrap_or_else(|e| e.into_inner());
         for (crc, name) in existing.iter() {
             merged.insert(*crc, name.clone());
         }
@@ -106,7 +110,7 @@ pub fn load_dats(bodies: &[String]) {
             merged.insert(crc, name);
         }
     }
-    *INDEX.write().expect("no_intro index poisoned") = merged.into_iter().collect();
+    *INDEX.write().unwrap_or_else(|e| e.into_inner()) = merged.into_iter().collect();
 }
 
 /// Replace the runtime index outright with `entries` (sorted by crc here).
@@ -115,14 +119,14 @@ pub fn load_dats(bodies: &[String]) {
 pub(crate) fn set_index(mut entries: Vec<(u32, String)>) {
     entries.sort_by_key(|(c, _)| *c);
     entries.dedup_by_key(|(c, _)| *c);
-    *INDEX.write().expect("no_intro index poisoned") = entries;
+    *INDEX.write().unwrap_or_else(|e| e.into_inner()) = entries;
 }
 
 /// The canonical No-Intro name for a ROM's CRC32, or `None` if unindexed (or the
 /// index hasn't been downloaded yet). For callers that already have the checksum
 /// (e.g. the ROM library, which CRC32s files during its scan).
 pub fn name_for_crc(crc: u32) -> Option<String> {
-    let idx = INDEX.read().expect("no_intro index poisoned");
+    let idx = INDEX.read().unwrap_or_else(|e| e.into_inner());
     idx.binary_search_by_key(&crc, |(c, _)| *c).ok().map(|i| idx[i].1.clone())
 }
 

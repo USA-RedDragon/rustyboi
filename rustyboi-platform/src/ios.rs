@@ -53,6 +53,8 @@ pub fn documents_dir() -> PathBuf {
 // ---------------------------------------------------------------------------
 
 // The in-flight pick callback (one picker at a time; main thread only).
+// Poison-recovering per the tree-wide convention (see `rustyboi_core_lib::ir`):
+// a plain one-slot `Option`, and a poisoned slot must not brick the picker.
 static PENDING: Mutex<Option<PickFileCallback>> = Mutex::new(None);
 // A strong ref to the live delegate, kept because `picker.delegate` is weak.
 // Stored as a raw pointer (Retained isn't Send) and reclaimed in `finish`.
@@ -107,7 +109,7 @@ fn finish(result: Option<FileData>) {
         // SAFETY: `raw` came from `Retained::into_raw` in `present_document_picker`.
         drop(unsafe { Retained::from_raw(raw as *mut PickerDelegate) });
     }
-    if let Some(cb) = PENDING.lock().expect("ios picker PENDING poisoned").take() {
+    if let Some(cb) = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take() {
         cb(result);
     }
 }
@@ -123,7 +125,7 @@ pub fn present_document_picker(callback: PickFileCallback) {
         callback(None);
         return;
     };
-    *PENDING.lock().expect("ios picker PENDING poisoned") = Some(callback);
+    *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(callback);
 
     let app = UIApplication::sharedApplication(mtm);
     let Some(root) = app.keyWindow().and_then(|w| w.rootViewController()) else {

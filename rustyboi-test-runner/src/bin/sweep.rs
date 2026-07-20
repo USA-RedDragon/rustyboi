@@ -224,6 +224,10 @@ struct RunCfg {
     /// `recordings_dir`). Model-identical audio dedups to one file by hash.
     audio_dir: Option<PathBuf>,
     /// clip key (`<rom_sha>_<tag>`) -> audio content hash, for the gallery.
+    // Poison-recovering at its use sites per the tree-wide convention (see
+    // `rustyboi_core_lib::ir`): the sweep fans out over the library with rayon,
+    // so one ROM panicking must not poison this shared map and abort every
+    // remaining ROM. A content-hash map cannot be left torn by a panic.
     audio_map: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
     /// How many leading frames each `.rbr` recording captures (a short gallery
     /// loop, not the full run). Ignored unless `recordings_dir` is set.
@@ -677,7 +681,7 @@ fn cmd_run(args: &[String]) -> Result<bool, String> {
     // Gallery's clip -> audio-content-hash map (the `.rba` files themselves are
     // content-addressed, so model-identical audio shares one file).
     if let Some(adir) = &cfg.audio_dir {
-        let map = cfg.audio_map.lock().unwrap();
+        let map = cfg.audio_map.lock().unwrap_or_else(|e| e.into_inner());
         if !map.is_empty() {
             let json = serde_json::to_string(&*map).map_err(|e| format!("audio map: {e}"))?;
             std::fs::write(adir.join("map.json"), json)
@@ -1065,7 +1069,7 @@ impl AudioOutput for SampleSink {
         Ok(())
     }
     fn add_samples(&mut self, samples: &[(f32, f32)]) {
-        self.0.lock().unwrap().extend_from_slice(samples);
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(samples);
     }
 }
 
@@ -1305,7 +1309,7 @@ fn capture_media(
             encoder = None;
         }
         if collect_audio {
-            let mut buf = sink.0.lock().unwrap();
+            let mut buf = sink.0.lock().unwrap_or_else(|e| e.into_inner());
             if !buf.is_empty() {
                 audio_samples += buf.len();
                 if let Some(w) = &mut pcm {
@@ -1426,7 +1430,7 @@ fn capture_media(
                 let _ = std::fs::rename(&tmp, &file);
             }
         }
-        cfg.audio_map.lock().unwrap().insert(format!("{sha}_{tag}"), hash);
+        cfg.audio_map.lock().unwrap_or_else(|e| e.into_inner()).insert(format!("{sha}_{tag}"), hash);
     }
 
     Ok(MediaOut {
@@ -1687,7 +1691,7 @@ fn capture_bios(
             encoder = None; // encoder died: keep the poster/hash, stop streaming
         }
         if collect_audio {
-            let mut buf = sink.0.lock().unwrap();
+            let mut buf = sink.0.lock().unwrap_or_else(|e| e.into_inner());
             if !buf.is_empty() {
                 audio_samples += buf.len();
                 if let Some(w) = &mut pcm {
@@ -1767,7 +1771,7 @@ fn capture_bios(
                 let _ = std::fs::rename(&tmp, &file);
             }
         }
-        cfg.audio_map.lock().unwrap().insert(format!("bios_{tag}"), hash);
+        cfg.audio_map.lock().unwrap_or_else(|e| e.into_inner()).insert(format!("bios_{tag}"), hash);
     }
 
     Ok(Some(BiosOut {

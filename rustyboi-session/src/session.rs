@@ -352,7 +352,7 @@ impl Session {
     /// playback the recorded input overrides `raw`.
     pub fn run_frame(&mut self, raw: AbstractInput) -> FrameOutput {
         let live_state = raw.button_state();
-        self.audio_buf.lock().unwrap().clear();
+        self.audio_buf.lock().unwrap_or_else(|e| e.into_inner()).clear();
 
         let (frame, advanced) = match self.mode {
             RunMode::Paused => (self.gb.get_current_frame(), false),
@@ -385,10 +385,10 @@ impl Session {
             RunMode::FastForward(_) if self.config.ff_uncapped() => Vec::new(),
             RunMode::FastForward(n) => {
                 let drained: Vec<(f32, f32)> =
-                    self.audio_buf.lock().unwrap().drain(..).collect();
+                    self.audio_buf.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
                 decimate_samples(&drained, n.max(1), gain)
             }
-            _ => scale_samples(self.audio_buf.lock().unwrap().drain(..), gain),
+            _ => scale_samples(self.audio_buf.lock().unwrap_or_else(|e| e.into_inner()).drain(..), gain),
         };
         FrameOutput { frame, audio, frame_count: self.frame_count, advanced }
     }

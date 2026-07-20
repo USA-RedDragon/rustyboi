@@ -153,6 +153,17 @@ impl LinkPeer {
         (self.side & 1) as usize ^ 1
     }
 
+    // POISON SURVIVOR — the `unwrap()`s below are deliberate; do NOT convert
+    // them to the `into_inner()` recovery used for plain data (see
+    // `crate::ir::IrLink`). A side's `live_sb` / `armed` / `armed_internal` /
+    // deposit FIFO are one protocol state that must agree: `sc_write` and
+    // `complete_master` each update several of them, so a panic unwinding
+    // mid-update can leave a side armed with a stale shift register, or a
+    // completed byte never deposited. Recovering would resume a desynced link
+    // and hand the guest wrong bytes silently. For an emulator graded on
+    // hardware accuracy a loud panic beats quietly wrong emulation, so this
+    // stays fail-fast.
+
     /// Sync our live-SB mirror (SB writes, completed-shift results).
     fn mirror_sb(&self, sb: u8) {
         self.cable.lock().unwrap().sides[self.me()].live_sb = sb;
