@@ -629,8 +629,6 @@ pub struct Cartridge {
 
     // MBC3 state
     mbc3_ram_bank: u8,   // 0x00-0x03 for RAM, 0x08-0x0C for RTC
-    mbc3_rtc_latch: u8,  // RTC latch register
-    mbc3_rtc_latched: bool, // Whether RTC registers are latched
 
     // MBC3 RTC registers
     rtc_seconds: u8,     // 0-59
@@ -926,8 +924,6 @@ impl Clone for Cartridge {
             sram_cs_lazy: self.sram_cs_lazy,
             mbc2_ram: self.mbc2_ram.clone(),
             mbc3_ram_bank: self.mbc3_ram_bank,
-            mbc3_rtc_latch: self.mbc3_rtc_latch,
-            mbc3_rtc_latched: self.mbc3_rtc_latched,
             rtc_seconds: self.rtc_seconds,
             rtc_minutes: self.rtc_minutes,
             rtc_hours: self.rtc_hours,
@@ -1464,8 +1460,6 @@ impl Cartridge {
             sram_cs_lazy: false,
             mbc2_ram: vec![0xFF; MBC2_RAM_SIZE],
             mbc3_ram_bank: 0,
-            mbc3_rtc_latch: 0,
-            mbc3_rtc_latched: false,
             rtc_seconds: 0,
             rtc_minutes: 0,
             rtc_hours: 0,
@@ -2336,7 +2330,6 @@ impl Cartridge {
         self.rtc_hours_latched = self.rtc_hours;
         self.rtc_days_low_latched = self.rtc_days_low;
         self.rtc_days_high_latched = self.rtc_days_high;
-        self.mbc3_rtc_latched = true;
         // Keep the persisted latched shadows fresh: other tools reconstruct the
         // clock from the blob's LATCHED fields + timestamp, so they matter
         // for cross-tool reads. No-op without a sidecar.
@@ -4454,7 +4447,6 @@ impl memory::Addressable for Cartridge {
                         // write); latch-rtc-test writes random values here and
                         // expects each to re-latch.
                         self.latch_rtc();
-                        self.mbc3_rtc_latch = value;
                     }
                     CartridgeType::MBC3 { .. } => {
                         // Non-timer MBC3 ignores this register
@@ -5845,7 +5837,6 @@ mod tests {
         cart.write(0x4000, 0x08); // map RTC seconds
         cart.write(0x6000, 0x00); // latch edge
         cart.write(0x6000, 0x01);
-        assert!(cart.mbc3_rtc_latched);
         assert_eq!(cart.rtc_seconds_latched, 12);
         cart.ram_data[0] = 0x5A; // battery RAM must survive
 
@@ -5853,8 +5844,6 @@ mod tests {
         assert!(!cart.ram_enabled);
         assert_eq!(cart.rom_bank_low, 1);
         assert_eq!(cart.mbc3_ram_bank, 0);
-        assert_eq!(cart.mbc3_rtc_latch, 0);
-        assert!(!cart.mbc3_rtc_latched);
         assert_eq!(
             (
                 cart.rtc_seconds_latched,
