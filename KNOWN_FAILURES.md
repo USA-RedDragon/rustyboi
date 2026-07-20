@@ -198,34 +198,6 @@ floor, not a proven ceiling.
 
 ---
 
-## Resolved — little_things_extra (now 4/4)
-
-Adopted 2026-07 from the nitro2k01/little-things-gb releases (see SUITES.md
-for fetch + grading provenance) at 0/4, with both underlying behaviors
-classified OPEN-TARGET — genuine accuracy gaps, not excused floors. Both are
-now fixed and the suite floor is ratcheted to 4/4; the entries are kept here
-as the resolution record.
-
-### 14. `windesync-validate.gb` (dmg) — RESOLVED
-
-Pre-CGB window-desync glitch: after the window triggers once in a frame and is
-disabled via LCDCF_WINON, every later WX hit with `(WX&7)==7-(SCX&7)` emits one
-BGP-color-0 glitch pixel and shifts the rest of the line right by one (oracle:
-nitro2k01's logic-analyzer capture from a real Super Game Boy). Fixed by
-0ab79f24 (`ppu: complete the DMG WE-off window-desync insert glitch`, the
-SameBoy #278 behavior); floor ratcheted 3→4 in 1002131b.
-
-### 15–17. `double-halt-cancel.gb` (dmg+cgb) + `double-halt-cancel-gbconly.gb` (cgb) — RESOLVED
-
-Double `halt` with IME=0 is not a lockup: PC-increment inhibition makes the
-CPU refetch the second `halt` byte forever, so mode-3 VRAM locking turns the
-fetch into `$FF` (`rst $38`) and execution escapes. Fixed by 24398b29
-(`cpu: HALT prefetch is a real bus read` — halted wake modeled as a continuous
-refetch of the post-HALT byte, sensitive to VRAM lock state), flipping all
-three rows; floor ratcheted 0→3 in f11ac25e.
-
----
-
 ## Floor arithmetic
 
 - **gbmicrotest:** 509/513 is the maximum for any register-level emulator without inventing oracles. +2 (`500-scx-timing`, `minimal`) become gradeable the day a hardware capture of the absolute byte exists; `temp` is capturable in principle; `halt_op_dupe_delay` requires characterizing analog die physics.
