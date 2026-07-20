@@ -351,6 +351,13 @@ impl Session {
                 }],
                 pause_changed: false,
             },
+            UiAction::LoadSgbFirmware(file) => ActionOutcome {
+                requests: vec![PlatformRequest::LoadFile {
+                    file,
+                    purpose: LoadPurpose::SgbFirmware,
+                }],
+                pause_changed: false,
+            },
             UiAction::SetRewindEnabled(enabled) => {
                 self.set_rewind_enabled(enabled);
                 ActionOutcome::default()

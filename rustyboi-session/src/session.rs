@@ -2323,3 +2323,144 @@ mod clock_tests {
         assert_eq!(Config::default().region, Region::Ntsc);
     }
 }
+
+#[cfg(test)]
+mod sgb_firmware_tests {
+    //! The SGB **system border** delivery contract every adapter shares: the
+    //! session never reads a file, it is handed bytes (desktop probes `bios/`,
+    //! the browser hands over a picked file it kept in IndexedDB). Nothing about
+    //! the artwork ships with rustyboi, so absence is the normal case and must
+    //! be silent.
+    use super::*;
+    use crate::action::{FileData, LoadPurpose, UiAction};
+    use crate::apply::PlatformRequest;
+    use crate::ports::{MemRumble, MemStorage, MemWebcam};
+
+    fn test_ports() -> Ports {
+        Ports {
+            storage: Box::new(MemStorage::new()),
+            rumble: Box::new(MemRumble::default()),
+            webcam: Box::new(MemWebcam::default()),
+        }
+    }
+
+    fn sgb_session(hardware: Hardware) -> Session {
+        let c = Config { hardware, ..Default::default() };
+        Session::new(c, test_ports(), [0u8; 32])
+    }
+
+    /// `[(bytes, hardware)]` for the dumps the user actually has, else empty.
+    /// Read here rather than through the core's crate-private helper.
+    fn dumps() -> Vec<(Vec<u8>, Hardware)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for (name, hw) in [("bios/sgb1.sfc", Hardware::SGB), ("bios/sgb2.sfc", Hardware::SGB2)] {
+            match std::fs::read(root.join(name)) {
+                Ok(d) => out.push((d, hw)),
+                Err(_) => return Vec::new(),
+            }
+        }
+        out
+    }
+
+    /// The default: no firmware, no border, no complaint. This is what every
+    /// browser session looks like until the user picks a dump.
+    #[test]
+    fn no_firmware_degrades_to_no_border() {
+        for hw in [Hardware::SGB, Hardware::SGB2] {
+            let s = sgb_session(hw);
+            assert!(!s.has_sgb_firmware(), "{hw:?}");
+            assert!(s.gb().sgb_composited_frame().is_none(), "{hw:?}");
+        }
+    }
+
+    /// Junk of every shape a file picker can produce is retained but inert —
+    /// never a panic (in wasm a panic is unrecoverable) and never a border.
+    #[test]
+    fn unrecognised_firmware_is_inert_not_fatal() {
+        let mut s = sgb_session(Hardware::SGB);
+        let junk: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            vec![0u8; 256],
+            vec![0xFFu8; 2304],
+            vec![0u8; rustyboi_core_lib::sgb_firmware::SGB1_FIRMWARE_LEN],
+            vec![0u8; rustyboi_core_lib::sgb_firmware::SGB2_FIRMWARE_LEN],
+        ];
+        for bytes in junk {
+            let len = bytes.len();
+            s.finish_load_sgb_firmware(&bytes);
+            assert!(!s.has_sgb_firmware(), "{len}-byte junk produced a border");
+            assert!(s.gb().sgb_composited_frame().is_none(), "{len}-byte junk");
+        }
+        // And clearing is always safe.
+        s.set_sgb_firmware(None);
+        assert!(!s.has_sgb_firmware());
+    }
+
+    /// A minimal cartridge, so the rebuild path below has content to power-cycle
+    /// (`rebuild_current_gb` only rebuilds a machine that holds a cart).
+    fn tiny_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x100] = 0x00; // NOP
+        rom[0x101] = 0xC3; // JP 0x0100
+        rom[0x102] = 0x00;
+        rom[0x103] = 0x01;
+        let mut checksum: u8 = 0;
+        for &b in &rom[0x134..0x14D] {
+            checksum = checksum.wrapping_sub(b).wrapping_sub(1);
+        }
+        rom[0x14D] = checksum;
+        rom
+    }
+
+    /// A real dump installs a border and, because the session keeps the bytes,
+    /// keeps it across the machine rebuild a power-cycle performs.
+    /// Skipped when the user has no dumps (nothing is embedded).
+    #[test]
+    fn real_firmware_installs_and_survives_a_rebuild() {
+        for (fw, hw) in dumps() {
+            let mut s = sgb_session(hw);
+            s.finish_load_rom(&tiny_rom()).expect("cartridge loads");
+            s.finish_load_sgb_firmware(&fw);
+            assert!(s.has_sgb_firmware(), "{hw:?} firmware rejected");
+            assert!(s.gb().sgb_composited_frame().is_some(), "{hw:?} border missing");
+
+            // A power-cycle funnels through `boot_or_skip`, which re-installs it.
+            s.apply(UiAction::Restart, 0);
+            assert!(s.has_sgb_firmware(), "{hw:?} lost its border on rebuild");
+        }
+    }
+
+    /// Junk after a good dump must not silently pass as "still working": the
+    /// core keeps the previous border, so adapters validate BEFORE installing.
+    /// This pins the behaviour the adapters compensate for.
+    #[test]
+    fn bad_firmware_after_a_good_one_keeps_the_old_border() {
+        let Some((rom, hw)) = dumps().into_iter().next() else { return };
+        let mut s = sgb_session(hw);
+        s.finish_load_sgb_firmware(&rom);
+        s.finish_load_sgb_firmware(&[0u8; 64]);
+        assert!(s.has_sgb_firmware(), "the previous border should be retained");
+    }
+
+    /// The picked file routes through the same resolve-then-finish path as a
+    /// battery/RTC import: `apply` asks the platform for the bytes.
+    #[test]
+    fn load_action_asks_the_platform_for_the_file() {
+        let mut s = sgb_session(Hardware::SGB);
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+        let file = FileData::Path(std::path::PathBuf::from("sgb1.sfc"));
+        #[cfg(any(target_arch = "wasm32", target_os = "android", target_os = "ios"))]
+        let file = FileData::Contents { name: "sgb1.sfc".into(), data: Vec::new() };
+        let out = s.apply(UiAction::LoadSgbFirmware(file), 0);
+        assert!(out.requests.iter().any(|r| matches!(
+            r,
+            PlatformRequest::LoadFile { purpose: LoadPurpose::SgbFirmware, .. }
+        )));
+        // Purely a request — nothing installed yet, so still no border.
+        assert!(!s.has_sgb_firmware());
+    }
+}

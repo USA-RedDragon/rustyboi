@@ -778,7 +778,8 @@ impl App {
             | GuiAction::ImportBatterySave(_)
             | GuiAction::ImportRtc(_)
             | GuiAction::ApplyPatch(_)
-            | GuiAction::LoadMovie(_)) => {
+            | GuiAction::LoadMovie(_)
+            | GuiAction::LoadSgbFirmware(_)) => {
                 match resolve(&action) {
                     Some(ResolvedAction::LoadRom { bytes, path }) => {
                         match self.load_rom_bytes(bytes, path) {
@@ -825,6 +826,22 @@ impl App {
                             Err(e) => requests.push(PlatformRequest::Error(format!("Failed to apply patch: {e}"))),
                         }
                     }
+                    // Validate before installing: the session retains whatever it
+                    // is given, and a rejected dump would otherwise silently keep
+                    // the previous border while reporting success.
+                    Some(ResolvedAction::LoadSgbFirmware { bytes }) => {
+                        match rustyboi_core_lib::sgb_firmware::identify(&bytes) {
+                            Ok(which) => {
+                                self.session.finish_load_sgb_firmware(&bytes);
+                                requests.push(PlatformRequest::Status(
+                                    format!("{} firmware loaded; showing the system border", sgb_firmware_label(which)),
+                                ));
+                            }
+                            Err(e) => requests.push(PlatformRequest::Error(format!(
+                                "Not a Super Game Boy firmware dump: {e}"
+                            ))),
+                        }
+                    }
                     Some(ResolvedAction::LoadMovie { bytes }) => {
                         match self.session.finish_load_movie(&bytes) {
                             Ok(()) => {
@@ -856,6 +873,15 @@ pub enum ResolvedAction {
     ImportRtc { bytes: Vec<u8> },
     ApplyPatch { bytes: Vec<u8> },
     LoadMovie { bytes: Vec<u8> },
+    LoadSgbFirmware { bytes: Vec<u8> },
+}
+
+/// Human label for an identified SGB firmware image, used in the status line.
+pub fn sgb_firmware_label(which: rustyboi_core_lib::sgb_firmware::SgbFirmware) -> &'static str {
+    match which {
+        rustyboi_core_lib::sgb_firmware::SgbFirmware::Sgb1 => "Super Game Boy",
+        rustyboi_core_lib::sgb_firmware::SgbFirmware::Sgb2 => "Super Game Boy 2",
+    }
 }
 
 /// The app is a windowed [`Frontend`]: the shared [`drive_action`] driver

@@ -793,6 +793,26 @@ impl Gui {
                             });
                             ui.close();
                         }
+                        // The SGB system border lives in the SNES-side cartridge
+                        // firmware, not in any Game Boy ROM, so it can only come
+                        // from the user's own sgb1/sgb2 dump.
+                        let fw = ui
+                            .button("Load SGB Firmware…")
+                            .on_hover_text("Super Game Boy sgb1.sfc / sgb2.sfc — supplies the system border");
+                        if fw.clicked() {
+                            let dialog = file_dialog::new()
+                                .add_filter("SGB Firmware", &["sfc", "smc", "bin"])
+                                .add_filter("All Files", &["*"]);
+                            let holder = Arc::clone(&self.pending_dialog_result);
+                            dialog.pick_file(move |file_data| {
+                                if let Some(file_data) = file_data
+                                    && let Ok(mut pending) = holder.lock()
+                                {
+                                    *pending = Some(GuiAction::LoadSgbFirmware(file_data));
+                                }
+                            });
+                            ui.close();
+                        }
                     }
 
                     ui.menu_button("Rewind", |ui| {

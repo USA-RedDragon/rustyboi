@@ -1449,6 +1449,10 @@ fn resolve_gui_action(action: &GuiAction) -> Option<ResolvedAction> {
             let (bytes, _path) = read_file_data(file_data)?;
             Some(ResolvedAction::LoadMovie { bytes })
         }
+        GuiAction::LoadSgbFirmware(file_data) => {
+            let (bytes, _path) = read_file_data(file_data)?;
+            Some(ResolvedAction::LoadSgbFirmware { bytes })
+        }
         _ => None,
     }
 }
