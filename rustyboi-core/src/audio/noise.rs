@@ -295,12 +295,6 @@ impl Noise {
         self.last_run_cc = self.last_run_cc.wrapping_sub(delta);
     }
 
-    pub fn step_frame_sequencer(&mut self, _step: u8) {
-        // Length is a cc-driven absolute expiry event (see `length_event`);
-        // the envelope is DIV-APU-event driven (env_div_tick /
-        // env_secondary_reload, dispatched by the controller).
-    }
-
     // --- Envelope (DIV-anchored model; see square.rs for the
     // sibling implementation and event cadence) ---
 

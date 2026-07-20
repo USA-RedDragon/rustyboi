@@ -105,12 +105,22 @@ impl AbstractInput {
             GbButton::Right => 7,
         }
     }
+
+    /// The concrete `ButtonState` the core consumes.
+    pub(crate) fn button_state(self) -> ButtonState {
+        let mut state = ButtonState::default();
+        for b in GbButton::ALL {
+            if self.is_pressed(b) {
+                b.set(&mut state, true);
+            }
+        }
+        state
+    }
 }
 
-/// Abstract-button remap: each logical GB button is driven by some *source*
-/// abstract button. The identity map (A→A, Up→Up, …) is the default; a config
-/// can e.g. swap A/B or rotate the d-pad without the session knowing anything
-/// about host keys. Stored as an 8-entry table indexed by target button.
+/// Persisted-config placeholder for the retired abstract-button remap system
+/// (the live remapping lives in `InputConfig`). Kept so older `Config` blobs —
+/// which carry this table — still load; nothing resolves through it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputMap {
     /// `source[target]` = the abstract button whose press drives `target`.
@@ -125,58 +135,16 @@ impl Default for InputMap {
     }
 }
 
-impl InputMap {
-    /// Identity map.
-    pub fn identity() -> Self {
-        Self::default()
-    }
-
-    /// Point `target` at `source`: pressing the abstract `source` button now
-    /// drives the GB `target` button.
-    pub fn remap(&mut self, target: GbButton, source: GbButton) {
-        for entry in &mut self.source {
-            if entry.0 == target {
-                entry.1 = source;
-                return;
-            }
-        }
-        self.source.push((target, source));
-    }
-
-    /// Resolve an abstract input through the remap into a concrete
-    /// `ButtonState` the core consumes.
-    pub fn resolve(&self, input: AbstractInput) -> ButtonState {
-        let mut state = ButtonState::default();
-        for &(target, source) in &self.source {
-            if input.is_pressed(source) {
-                target.set(&mut state, true);
-            }
-        }
-        state
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn identity_map_is_passthrough() {
-        let map = InputMap::identity();
+    fn button_state_is_passthrough() {
         let input = AbstractInput::from_pressed([GbButton::A, GbButton::Up]);
-        let state = map.resolve(input);
+        let state = input.button_state();
         assert!(state.a && state.up);
         assert!(!state.b && !state.start && !state.down);
-    }
-
-    #[test]
-    fn remap_swaps_buttons() {
-        let mut map = InputMap::identity();
-        map.remap(GbButton::A, GbButton::B);
-        map.remap(GbButton::B, GbButton::A);
-        // Host classified a B press: with the swap it drives A.
-        let state = map.resolve(AbstractInput::from_pressed([GbButton::B]));
-        assert!(state.a && !state.b);
     }
 
     #[test]

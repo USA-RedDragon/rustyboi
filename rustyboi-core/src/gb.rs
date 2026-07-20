@@ -1787,7 +1787,6 @@ impl GB {
         self.cpu.halted = false;
         self.cpu.stopped = false;
         self.cpu.ime_enable_delay = 0;
-        self.mmio.clear_delayed_writes();
         if self.skip_bios {
             self.skip_bios();
         } else {

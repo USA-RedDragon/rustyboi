@@ -217,19 +217,14 @@ pub struct Session {
     /// The DMG presentation palette choice (the concrete shades live in
     /// `config.dmg_palette`; this is the menu selection they mirror).
     palette: DmgPaletteChoice,
-    /// Real boot ROM bytes supplied by the adapter (DMG or CGB), run in place of
-    /// `skip_bios` when `config.use_real_boot_rom` is set and this is `Some`.
-    /// `None` = no boot ROM available; the session always falls back to
-    /// `skip_bios`. The session is WASM-clean, so it never reads a file itself —
-    /// the adapter resolves the bytes and installs them via `set_boot_rom`.
-    boot_rom: Option<Vec<u8>>,
     /// SNES-side Super Game Boy firmware (`sgb1.sfc` / `sgb2.sfc`) supplied by
     /// the adapter. Carries the SGB's power-on system border, which a real
     /// unit shows until the game transfers its own; `None` = no dump available
-    /// and SGB output keeps today's borderless presentation. Like `boot_rom`
-    /// this is a host resource, not config: the session is WASM-clean and never
-    /// reads a file, and it is re-installed on every machine (re)build.
+    /// and SGB output keeps today's borderless presentation. A host resource,
+    /// not config: the session is WASM-clean and never reads a file, and it is
+    /// re-installed on every machine (re)build.
     sgb_firmware: Option<Vec<u8>>,
+
 
     // --- debug-step requests set by `apply`, drained by the frontend --------
     pending_step_cycles: Option<u32>,
@@ -293,7 +288,6 @@ impl Session {
             sgb_border: true,
             touch_controls: cfg!(mobile),
             palette,
-            boot_rom: None,
             sgb_firmware: None,
             pending_step_cycles: None,
             pending_step_frames: None,
@@ -324,11 +318,10 @@ impl Session {
         self.config.hardware.cpu_hz(self.config.region)
     }
 
-    /// Boot a freshly-built machine: run the supplied real boot ROM when the
-    /// feature is enabled and bytes are available (and valid for the model),
-    /// else seed the synthetic post-boot state. A wrong/mismatched boot ROM
-    /// fails validation inside `load_bios_bytes` and falls back to `skip_bios`,
-    /// so content always loads.
+    /// Boot a freshly-built machine by seeding the synthetic post-boot state.
+    /// (No session path supplies real boot-ROM bytes; the `use_real_boot_rom`
+    /// config flag persists but only the platform `--bios` CLI loads a BIOS,
+    /// bypassing the session.)
     fn boot_or_skip(&self, gb: &mut GB) {
         // Force the chosen CGB DMG-compat palette (Auto = None) before booting so
         // the skip_bios colorization path picks it up when a DMG game runs on CGB
@@ -342,25 +335,16 @@ impl Session {
         if let Some(fw) = self.sgb_firmware.as_deref() {
             let _ = gb.load_sgb_firmware_bytes(fw);
         }
-        if self.config.use_real_boot_rom
-            && let Some(bytes) = self.boot_rom.as_deref()
-            && gb.load_bios_bytes(bytes).is_ok()
-            && gb.has_bios()
-        {
-            gb.run_boot_rom();
-        } else {
-            gb.skip_bios();
-        }
+        gb.skip_bios();
     }
 
     // --- run loop -----------------------------------------------------------
 
     /// Advance the machine per the current [`RunMode`] and return the frame +
-    /// audio. `raw` is the host's abstract input for this frame; it is resolved
-    /// through the config's remap. During movie playback the recorded input
-    /// overrides `raw`.
+    /// audio. `raw` is the host's abstract input for this frame. During movie
+    /// playback the recorded input overrides `raw`.
     pub fn run_frame(&mut self, raw: AbstractInput) -> FrameOutput {
-        let live_state = self.config.input_map.resolve(raw);
+        let live_state = raw.button_state();
         self.audio_buf.lock().unwrap().clear();
 
         let (frame, advanced) = match self.mode {
@@ -997,25 +981,6 @@ impl Session {
         let gb = self.rebuild_current_gb();
         self.replace_machine(*gb, self.rom_id);
         self.persist_config();
-    }
-
-    /// Install real boot ROM bytes (DMG or CGB) the adapter resolved from a file.
-    /// Does not itself validate the image — validation happens at boot time in
-    /// [`GB::load_bios_bytes`](rustyboi_core_lib::gb::GB::load_bios_bytes), which
-    /// falls back to `skip_bios` on a bad/mismatched ROM. Not persisted (the raw
-    /// ROM is a resource the adapter re-supplies), unlike the enable flag.
-    pub fn set_boot_rom(&mut self, bytes: Option<Vec<u8>>) {
-        self.boot_rom = bytes;
-    }
-
-    /// Finish a boot-ROM import: store the resolved bytes and, if the feature is
-    /// already enabled, rebuild the machine so it boots with the new ROM.
-    pub fn finish_load_boot_rom(&mut self, bytes: &[u8]) {
-        self.boot_rom = Some(bytes.to_vec());
-        if self.config.use_real_boot_rom {
-            let gb = self.rebuild_current_gb();
-            self.replace_machine(*gb, self.rom_id);
-        }
     }
 
     /// Install (or clear) the SNES-side SGB firmware the adapter resolved from

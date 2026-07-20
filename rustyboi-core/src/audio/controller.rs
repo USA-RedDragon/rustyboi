@@ -851,25 +851,16 @@ impl Audio {
     /// stays phase-locked to DIV (and reacts to DIV writes).
     pub fn clock_frame_sequencer(&mut self) {
         if self.audio_enabled {
-            self.step_frame_sequencer();
+            // Length/envelope/sweep are cc-event driven; the step counter and the
+            // channels' fs_step mirrors are serialized savestate fields, so they
+            // keep ticking to preserve the wire format.
+            let step = self.frame_sequencer_step;
+            self.channel1.set_fs_step(step);
+            self.channel2.set_fs_step(step);
+            self.channel3.set_fs_step(step);
+            self.channel4.set_fs_step(step);
+            self.frame_sequencer_step = (self.frame_sequencer_step + 1) % 8;
         }
-    }
-
-    fn step_frame_sequencer(&mut self) {
-        let step = self.frame_sequencer_step;
-        self.channel1.step_frame_sequencer(step);
-        self.channel2.step_frame_sequencer(step);
-        self.channel3.step_frame_sequencer(step);
-        self.channel4.step_frame_sequencer(step);
-
-        // Channels need to know which step was just clocked so their NRx4 write
-        // handlers can model the length-counter "extra clock" quirk.
-        self.channel1.set_fs_step(step);
-        self.channel2.set_fs_step(step);
-        self.channel3.set_fs_step(step);
-        self.channel4.set_fs_step(step);
-
-        self.frame_sequencer_step = (self.frame_sequencer_step + 1) % 8;
     }
 
     /// True while the APU is powered (NR52 bit 7). The min-event idle fast path

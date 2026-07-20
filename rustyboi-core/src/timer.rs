@@ -130,15 +130,9 @@ pub struct Timer {
     // divider — and thus the FS phase — restarts from the new anchor).
     #[serde(default)]
     last_apu_cc: u64,
-    // Set when a timer IRQ was force-delivered to the EI loop at the early anchor
-    // (`force_ei_delivery`). Cleared (consumed) by the next STOP and by a normal
-    // delivery; does not persist past one STOP.
-    #[serde(skip, default)]
-    ei_promoted: bool,
-
     /// Sticky: the current ISR / instruction stream was entered via an EI
-    /// fast-dispatch and therefore runs on the early (`IF_OFF`) grid. Unlike the
-    /// one-shot `ei_promoted`, this persists through the whole ISR. While set, an
+    /// fast-dispatch and therefore runs on the early (`IF_OFF`) grid; it
+    /// persists through the whole ISR. While set, an
     /// un-serviced overflow re-flags IF on the early anchor (`update_irq_delivery`)
     /// and the FF0F timer-bit read samples at the access cc (`bus.rs`), so the
     /// ISR's IF write / read / re-trigger all resolve on the same grid. Set by
@@ -205,7 +199,6 @@ impl Timer {
             last_fire_cc: DISABLED_TIME,
             last_fire_cc_ei: DISABLED_TIME,
             last_apu_cc: 0,
-            ei_promoted: false,
             isr_on_early_grid: false,
             is_agb: false,
             halt_read_bias: 0,
@@ -402,10 +395,6 @@ impl Timer {
             if self.last_fire_cc == DISABLED_TIME {
                 self.last_fire_cc = self.next_irq_event_time.wrapping_add(CC_OFF as u64);
                 self.last_fire_cc_ei = self.next_irq_event_time.wrapping_add(IF_OFF as u64);
-                // A normally-delivered (not force-promoted) IRQ resets the one-shot
-                // EI-promotion flag so a stale promotion from an earlier ISR cannot
-                // mis-bias a later, normally-entered STOP.
-                self.ei_promoted = false;
             }
             self.do_irq_event();
         }
@@ -454,7 +443,6 @@ impl Timer {
             fired = true;
         }
         if fired {
-            self.ei_promoted = true;
             // Sticky: the ISR this dispatch enters runs on the EARLY grid, so a
             // mid-ISR overflow re-flags IF early and FF0F reads/writes resolve on
             // that grid (see `update_irq_delivery` / the FF0F read+write in bus.rs).
@@ -676,8 +664,6 @@ impl Timer {
     /// See `div_reset_split_hold`. STOP DIV reset — Pan Docs: Timer and Divider
     /// Registers — https://gbdev.io/pandocs/Timer_and_Divider_Registers.html
     pub fn stop_div_reset(&mut self, cgb_de: bool) {
-        // Consume the one-shot EI-promote flag.
-        self.ei_promoted = false;
         let anchor_cc = self.abs_cc;
         let de_hold = if cgb_de && (self.tac & TAC_FREQUENCY_MASK) >= 2 { 4 } else { 0 };
         self.div_reset_split_hold(anchor_cc, anchor_cc, de_hold);

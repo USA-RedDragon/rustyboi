@@ -220,14 +220,6 @@ impl DirtyLineProbe {
         }
     }
 
-    /// Fraction of rendered visible lines that were clean (fast-path coverage).
-    pub fn clean_line_fraction(&self) -> f64 {
-        if self.total_visible_lines == 0 {
-            return 1.0;
-        }
-        1.0 - (self.total_dirty_lines as f64 / self.total_visible_lines as f64)
-    }
-
     /// Per-game dirty-line percentage.
     pub fn dirty_line_pct(&self) -> f64 {
         if self.total_visible_lines == 0 {

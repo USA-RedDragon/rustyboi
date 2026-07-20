@@ -218,19 +218,6 @@ pub enum HaltHdmaState {
 
 
 
-#[derive(Serialize, Deserialize, Clone)]
-struct DelayedMmioWrite {
-    addr: u16,
-    value: u8,
-    cycles_remaining: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AppliedMmioWrite {
-    pub addr: u16,
-    pub value: u8,
-}
-
 /// One 4KB page of the passive-read map (see `Mmio::passive_read`). `Rom`
 /// carries the byte base of the page inside the bank-resolved ROM image; the
 /// WRAM variants name the backing buffer; `Fallback` takes the full dispatch.
@@ -297,8 +284,6 @@ pub struct Mmio {
     // Arc-backed channel is a live connection, not persistable state.
     #[serde(skip, default)]
     ir_device: crate::ir::IrDevice,
-    #[serde(skip, default)]
-    delayed_writes: Vec<DelayedMmioWrite>,
     // Passive-read page table: 4KB pages resolved to their backing region so
     // the Bus's passive fast path (plain ROM/WRAM/echo reads) skips the full
     // address dispatch and per-access bank derivation. Rebuilt lazily;
@@ -407,10 +392,6 @@ pub struct Mmio {
     #[serde(skip, default)]
     poison_tiledata_base: Option<u16>,
 
-    // Set true when the CPU writes to FF44 (LY). Consumed by the PPU on its
-    // next step to reset internal scanline timing. Not part of save state.
-    #[serde(skip, default)]
-    ly_write_pending: bool,
     // Set true when the CPU writes to a register that affects the STAT line
     // (FF40 LCDC, FF41 STAT, FF45 LYC). Consumed by the PPU between CPU
     // instructions to re-run LYC compare and the STAT edge detector so that
@@ -1055,7 +1036,6 @@ impl Mmio {
             serial: serial::Serial::new(),
             serial_device: serial::SerialDevice::Disconnected,
             ir_device: crate::ir::IrDevice::Disconnected,
-            delayed_writes: Vec::new(),
             passive_pages: [PassivePage::Fallback; 16],
             passive_pages_valid: false,
             hdma_tracker_sleep_until: 0,
@@ -1078,7 +1058,6 @@ impl Mmio {
             fetcher_bus_locked: false,
             fetcher_bus_warmup: false,
             poison_tiledata_base: None,
-            ly_write_pending: false,
             stat_register_write_pending: false,
             ff41_write_pending: false,
             cpu_t_phase: 0,
@@ -1665,7 +1644,6 @@ impl Mmio {
             && !self.hdma_req_pending
             && !self.audio.is_powered()
             && !self.serial.is_active()
-            && self.delayed_writes.is_empty()
             && self.joypad_irq_delay == 0
             && !self.has_pending_hdma_deferred()
             // An external clock source (link peer or DMG-07 adapter) deposits on
@@ -2053,45 +2031,6 @@ impl Mmio {
     pub fn request_interrupt(&mut self, flag: cpu::registers::InterruptFlag) {
         let current = self.read(cpu::registers::INTERRUPT_FLAG);
         self.write(cpu::registers::INTERRUPT_FLAG, current | flag as u8);
-    }
-
-    /// Queue a CPU write to land `cycles_until_write` T-cycles later (0 = now).
-    /// Models the sub-instruction landing cycle of certain register writes.
-    pub fn queue_delayed_write(&mut self, addr: u16, value: u8, cycles_until_write: u32) {
-        if cycles_until_write > 0 {
-            self.delayed_writes.push(DelayedMmioWrite {
-                addr,
-                value,
-                cycles_remaining: cycles_until_write,
-            });
-        } else {
-            self.write(addr, value);
-        }
-    }
-
-    pub fn step_delayed_writes(&mut self) -> Vec<AppliedMmioWrite> {
-        let mut applied = Vec::new();
-        let mut index = 0;
-        while index < self.delayed_writes.len() {
-            if self.delayed_writes[index].cycles_remaining > 0 {
-                self.delayed_writes[index].cycles_remaining -= 1;
-            }
-            if self.delayed_writes[index].cycles_remaining == 0 {
-                let write = self.delayed_writes.remove(index);
-                self.write(write.addr, write.value);
-                applied.push(AppliedMmioWrite {
-                    addr: write.addr,
-                    value: write.value,
-                });
-            } else {
-                index += 1;
-            }
-        }
-        applied
-    }
-
-    pub fn clear_delayed_writes(&mut self) {
-        self.delayed_writes.clear();
     }
 
     pub fn clock_apu_frame_sequencer(&mut self) {
@@ -2740,10 +2679,6 @@ impl Mmio {
         self.hdma_tracker_sleep_until = until;
     }
 
-    pub fn ack_hdma_req(&mut self) {
-        self.hdma_req_pending = false;
-    }
-
     pub fn halt_hdma_state(&self) -> HaltHdmaState {
         self.halt_hdma_state
     }
@@ -2973,10 +2908,6 @@ impl Mmio {
 
     pub fn halt_wakeup_hdma(&self) -> bool {
         self.halt_wakeup_hdma
-    }
-
-    pub fn update_hdma_period_cache(&mut self, in_period: bool) {
-        self.hdma_is_in_period_cached = in_period;
     }
 
     /// Resolve a pending FF55 bit7=1 kick (`hdma_kick_eval_pending`)
@@ -4366,13 +4297,6 @@ impl Mmio {
         self.hdma_lockstep_active = v;
     }
 
-    /// Whether the CPU is in a HALT or STOP window (the block fires during the halt;
-    /// the event-interleaved transfer advance is scoped to this context so plain
-    /// non-halt blocks — the `hdma_cycles`/`gdma_cycles` calibration — are unchanged).
-    pub fn in_halt_or_stop(&self) -> bool {
-        self.cpu_halted || self.in_stop_window
-    }
-
     /// The Requested-context resume-instruction window in which a
     /// late-firing HDMA block must be advanced in lockstep (event-interleaved
     /// transfer) so the same-instruction resume read observes the extended line.
@@ -4863,12 +4787,12 @@ impl Mmio {
         }
     }
 
-    pub fn is_dmg_compatibility_mode(&self) -> bool {
-        self.cgb_features_enabled && self.key0_dmg_mode
-    }
-
-    // Private helper to read during DMA without triggering DMA conflicts
+    // Private helper to read during DMA without triggering DMA conflicts.
+    // Only reached from `dma_source_byte` for source kinds 0/1/2, so `addr` is
+    // always below 0xC000 (ROM / VRAM / external RAM); WRAM and E000+ sources
+    // take the conflict-WRAM / external-bus paths instead.
     fn read_during_dma(&self, addr: u16) -> u8 {
+        debug_assert!(addr < 0xC000, "read_during_dma: source kind contract violated");
         match addr {
             CARTRIDGE_START..=CARTRIDGE_END => {
                 // Boot-ROM overlay first (DMG 0x000-0x0FF, CGB 0x000-0x0FF +
@@ -4904,36 +4828,6 @@ impl Mmio {
                     None => EMPTY_BYTE,
                 }
             },
-            WRAM_START..=WRAM_END => self.wram.read(addr),
-            WRAM_BANK_START..=WRAM_BANK_END => self.wram_bank.read(addr),
-            ECHO_RAM_START..=ECHO_RAM_END => {
-                let addr = addr - 0x2000;
-                match addr {
-                    0..WRAM_START => panic!("This is literally never possible"),
-                    WRAM_START..=WRAM_END => self.wram.read(addr),
-                    WRAM_BANK_START..=ECHO_RAM_MIRROR_END => self.wram_bank.read(addr),
-                    0xDE00..=0xFFFF => panic!("This is literally never possible"),
-                }
-            },
-            IO_REGISTERS_START..=IO_REGISTERS_END => {
-                match addr {
-                    input::JOYP => self.input.read(addr),
-                    timer::DIV..=timer::TAC => self.timer.read(addr),
-                        serial::SB => self.serial.read(addr),
-                        // SC (FF02) fast-clock select (bit 1) exists only with CGB
-                        // features active (a real CGB cart). In DMG-compat mode
-                        // (DMG cart on CGB) the bit is absent and reads 1, so OR it
-                        // into serial's hardware read (which already forces bits
-                        // 2-6). mooneye boot_hwio-*/unused_hwio-C: SC reads 0x7E.
-                        serial::SC => {
-                            self.serial.read(addr) | if self.cgb_features_enabled { 0x00 } else { 0x02 }
-                        }
-                cpu::registers::INTERRUPT_FLAG => self.io_registers.read(addr) | 0xE0,
-                    REG_DMA => self.io_registers.read(addr),
-                    _ => self.io_registers.read(addr),
-                }
-            }
-            HRAM_START..=HRAM_END => self.hram.read(addr),
             _ => EMPTY_BYTE,
         }
     }
@@ -5071,25 +4965,10 @@ impl Mmio {
         self.cpu_t_phase = self.cpu_t_phase.wrapping_add(n);
     }
 
-    /// CPU-side write to FF44 (LY). On real hardware this resets the line
-    /// counter to 0 (the value written is ignored). The PPU will observe the
-    /// pending flag on its next step and re-arm internal scanline state.
-    fn write_ly_from_cpu(&mut self) {
-        // FF44 (LY) is read-only on hardware; CPU writes are ignored.
-    }
-
     /// PPU-side update of FF44 (LY). Bypasses the CPU-write reset semantics so
     /// the PPU can advance the line counter through normal scanline progression.
     pub fn write_ly_from_ppu(&mut self, value: u8) {
         self.io_registers.write(ppu::LY, value);
-    }
-
-    /// Consume the pending LY-write signal. Returns true if the CPU wrote to
-    /// FF44 since the last call.
-    pub fn take_ly_write_pending(&mut self) -> bool {
-        let pending = self.ly_write_pending;
-        self.ly_write_pending = false;
-        pending
     }
 
     /// The persistent CPU T-cycle phase (survives instruction boundaries).
@@ -5797,7 +5676,8 @@ impl memory::Addressable for Mmio {
                         REG_DMA => self.start_oam_dma(value),
                         ppu::LCD_CONTROL => self.write_lcd_control(value),
                         ppu::LCD_STATUS => self.write_lcd_status(value),
-                        ppu::LY => self.write_ly_from_cpu(),
+                        // FF44 (LY) is read-only on hardware; CPU writes are ignored.
+                        ppu::LY => {}
                         ppu::LYC => {
                             self.io_registers.write(addr, value);
                             self.stat_register_write_pending = true;

@@ -318,9 +318,6 @@ impl GbPrinter {
         std::mem::take(&mut self.completed)
     }
 
-    pub fn has_completed(&self) -> bool {
-        !self.completed.is_empty()
-    }
 }
 
 /// Pan Docs printer RLE: control byte high-bit set = repeat the following

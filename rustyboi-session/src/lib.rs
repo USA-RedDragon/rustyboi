@@ -42,8 +42,8 @@
 //!   (headless null-rumble here, real motor there) without the session's type
 //!   changing.
 //!
-//! The value types that DO benefit from monomorphization ([`input::InputMap`],
-//! [`cheats::CheatSet`], [`rewind::RewindBuffer`]) are plain concrete structs.
+//! The value types that DO benefit from monomorphization ([`cheats::CheatSet`],
+//! [`rewind::RewindBuffer`]) are plain concrete structs.
 
 pub mod action;
 pub mod apply;

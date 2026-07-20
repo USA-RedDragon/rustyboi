@@ -23,17 +23,15 @@ mod error;
 #[cfg(target_os = "android")]
 pub mod library;
 mod ports;
-// Native-desktop background workers. Not built for wasm (no threads) or Android
-// (no print/rewind-offload sink on the mobile path).
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+// Native-desktop background workers. Not built for Android (no
+// print/rewind-offload sink on the mobile path).
+#[cfg(not(target_os = "android"))]
 mod png_worker;
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 mod rewind_worker;
 // The cheat-DB HTTP fetch worker runs on both desktop and Android (both link
-// ureq); only wasm (no threads, uses the browser `fetch`) opts out.
-#[cfg(not(target_arch = "wasm32"))]
+// ureq).
 mod fetch_worker;
-#[cfg(not(target_arch = "wasm32"))]
 mod no_intro_cache;
 mod run;
 

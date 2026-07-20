@@ -13,13 +13,13 @@ mod display;
 mod error;
 #[cfg(not(target_os = "android"))]
 mod ports;
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 mod png_worker;
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 mod rewind_worker;
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 mod fetch_worker;
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 mod no_intro_cache;
 #[cfg(not(target_os = "android"))]
 mod run;
