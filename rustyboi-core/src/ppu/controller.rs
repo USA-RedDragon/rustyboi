@@ -7548,6 +7548,63 @@ impl Ppu {
         }
     }
 
+    /// Mode 0 (HBlank) for one dot. Lifted verbatim out of `step`'s
+    /// `State::HBlank` arm.
+    ///
+    /// Returns `true` when the line ended on this dot. In `step` that path was
+    /// a bare `return`, so the caller must return immediately and skip the
+    /// trailing DMG palette latch — the early exit is preserved, not dropped.
+    fn step_hblank(&mut self, mmio: &mut mmio::Mmio) -> bool {
+        if self.ticks == 455 {
+            self.ticks = 0;
+            let current_ly = mmio.read(LY);
+
+            if current_ly >= 143 {
+                mmio.write_ly_from_ppu(144);
+                self.state = State::VBlank;
+                // Panel drive marker: SameBoy re-arms
+                // `frame_repeat_countdown` at the start of EVERY VBlank
+                // line 144-152 (including the skipped frame's), not once
+                // per frame; this is the line-144 anchor and the VBlank
+                // else-branch below advances it through line 152. The
+                // skipped frame's repeat decision samples the window
+                // BEFORE this entry re-arms it (SameBoy checks the
+                // countdown before the re-arm on the same line); a
+                // skipped frame denied the repeat (panel already
+                // decayed) does not re-arm — the panel stays undriven
+                // until a displayed frame.
+                if self.frames_since_enable == 0 {
+                    self.repeat_skip_pending =
+                        self.renders_color(mmio) && self.panel_recently_driven(mmio);
+                }
+                if self.frames_since_enable != 0 || self.repeat_skip_pending {
+                    self.last_drive_cc = mmio.master_cc();
+                }
+                Self::set_lcd_status_mode(mmio, 1);
+                // The m1 event already flagged VBlank (line_cycle 454, ~3cc
+                // earlier); re-flagging here would re-set bit 0 after a CPU
+                // IF-write between the two cc cleared it (lycint143_m1irq_ifw
+                // `_2`, m2m1irq_ifw `_3`). Only flag if the m1 event did not
+                // (e.g. LCD enabled mid-frame with no armed m1 schedule).
+                if !self.m1_vblank_fired {
+                    mmio.request_interrupt(registers::InterruptFlag::VBlank);
+                }
+                self.m1_vblank_fired = false;
+            } else {
+                // Continue to next visible scanline
+                let next_ly = current_ly.saturating_add(1);
+                mmio.write_ly_from_ppu(next_ly);
+                self.state = State::OAMSearch;
+                self.enter_scheduled_mode2(mmio);
+                self.next_sprite_fetch_index = 0;
+                self.sprite_fetch_stall = 0;
+                self.pixel_transfer_warmup = 0;
+            }
+            return true;
+        }
+        false
+    }
+
     pub fn step(&mut self, mmio: &mut mmio::Mmio) {
         if self.disabled {
             if mmio.read(LCD_CONTROL)&(LCDCFlags::DisplayEnable as u8) != 0 {
@@ -8966,51 +9023,7 @@ impl Ppu {
                 }
             },
             State::HBlank => {
-                if self.ticks == 455 {
-                    self.ticks = 0;
-                    let current_ly = mmio.read(LY);
-
-                    if current_ly >= 143 {
-                        mmio.write_ly_from_ppu(144);
-                        self.state = State::VBlank;
-                        // Panel drive marker: SameBoy re-arms
-                        // `frame_repeat_countdown` at the start of EVERY VBlank
-                        // line 144-152 (including the skipped frame's), not once
-                        // per frame; this is the line-144 anchor and the VBlank
-                        // else-branch below advances it through line 152. The
-                        // skipped frame's repeat decision samples the window
-                        // BEFORE this entry re-arms it (SameBoy checks the
-                        // countdown before the re-arm on the same line); a
-                        // skipped frame denied the repeat (panel already
-                        // decayed) does not re-arm — the panel stays undriven
-                        // until a displayed frame.
-                        if self.frames_since_enable == 0 {
-                            self.repeat_skip_pending =
-                                self.renders_color(mmio) && self.panel_recently_driven(mmio);
-                        }
-                        if self.frames_since_enable != 0 || self.repeat_skip_pending {
-                            self.last_drive_cc = mmio.master_cc();
-                        }
-                        Self::set_lcd_status_mode(mmio, 1);
-                        // The m1 event already flagged VBlank (line_cycle 454, ~3cc
-                        // earlier); re-flagging here would re-set bit 0 after a CPU
-                        // IF-write between the two cc cleared it (lycint143_m1irq_ifw
-                        // `_2`, m2m1irq_ifw `_3`). Only flag if the m1 event did not
-                        // (e.g. LCD enabled mid-frame with no armed m1 schedule).
-                        if !self.m1_vblank_fired {
-                            mmio.request_interrupt(registers::InterruptFlag::VBlank);
-                        }
-                        self.m1_vblank_fired = false;
-                    } else {
-                        // Continue to next visible scanline
-                        let next_ly = current_ly.saturating_add(1);
-                        mmio.write_ly_from_ppu(next_ly);
-                        self.state = State::OAMSearch;
-                        self.enter_scheduled_mode2(mmio);
-                        self.next_sprite_fetch_index = 0;
-                        self.sprite_fetch_stall = 0;
-                        self.pixel_transfer_warmup = 0;
-                    }
+                if self.step_hblank(mmio) {
                     return;
                 }
             },
