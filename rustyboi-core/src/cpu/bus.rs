@@ -501,13 +501,6 @@ impl<'a> Bus<'a> {
         self.mmio.pending_timer_fire_cc()
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
-    /// Delivery cc of the next scheduled timer overflow (EI-loop fast-dispatch).
-    pub(crate) fn next_timer_overflow_cc(&self) -> Option<u64> {
-        self.mmio.next_timer_overflow_cc()
-    }
-
     /// EARLY (EI-loop) gate cc of the undispatched timer IRQ.
     pub(crate) fn pending_timer_fire_cc_ei(&self) -> Option<u64> {
         self.mmio.pending_timer_fire_cc_ei()

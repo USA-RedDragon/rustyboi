@@ -2310,13 +2310,6 @@ impl Mmio {
         self.timer.pending_fire_cc()
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
-    /// Delivery cc of the next scheduled timer overflow (EI-loop fast-dispatch).
-    pub(crate) fn next_timer_overflow_cc(&self) -> Option<u64> {
-        self.timer.next_overflow_deliver_cc()
-    }
-
     /// Record the mode-0 STAT IRQ event cc when its IF bit is raised.
     pub(crate) fn set_pending_m0_irq_fire_cc(&mut self, cc: Option<u64>) {
         self.pending_m0_irq_fire_cc = cc;

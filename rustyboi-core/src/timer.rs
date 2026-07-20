@@ -235,20 +235,6 @@ impl Timer {
         self.last_fire_cc_ei = DISABLED_TIME;
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
-    /// The delivery cc of the next scheduled timer overflow (the cc at which its IF
-    /// bit will be raised: `next_irq_event_time + CC_OFF`), or `None` if disabled.
-    /// Used by the EI-loop fast-dispatch to promote an imminent overflow so the
-    /// non-halt service runs on the correct phase rather than CC_OFF late.
-    pub(crate) fn next_overflow_deliver_cc(&self) -> Option<u64> {
-        if self.tac & TAC_ENABLE != 0 && self.next_irq_event_time != DISABLED_TIME {
-            Some(self.next_irq_event_time.wrapping_add(CC_OFF as u64))
-        } else {
-            None
-        }
-    }
-
     /// The exact cc at which the next scheduled overflow's IF bit will be raised
     /// inside `update_irq_delivery` / `step_to`, accounting for the same `fold`
     /// that path applies (`IF_OFF` on the non-halt early-ISR grid, else `CC_OFF`).
