@@ -1968,35 +1968,35 @@ impl Mmio {
         self.serial_device = serial::SerialDevice::Link(peer);
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     pub(crate) fn link_attached(&self) -> bool {
         self.serial_device.is_link()
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Plug this Game Boy into a 4-Player Adapter (DMG-07) port.
     pub(crate) fn attach_four_player(&mut self, mut port: crate::dmg07::FourPlayerPort) {
         port.mirror_sb(self.serial.read(serial::SB));
         self.serial_device = serial::SerialDevice::FourPlayer(port);
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     pub(crate) fn four_player_attached(&self) -> bool {
         matches!(self.serial_device, serial::SerialDevice::FourPlayer(_))
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Plug a Mobile Adapter GB into the link port.
     pub(crate) fn attach_mobile_adapter(&mut self, adapter: crate::mobile::MobileAdapter) {
         self.serial_device = serial::SerialDevice::Mobile(adapter);
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     pub(crate) fn mobile_adapter(&self) -> Option<&crate::mobile::MobileAdapter> {
         match &self.serial_device {
             serial::SerialDevice::Mobile(m) => Some(m),
@@ -2004,8 +2004,8 @@ impl Mmio {
         }
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Debug/test: the in-flight serial transfer's completion event cc.
     pub(crate) fn serial_transfer_complete_at(&self) -> Option<u64> {
         self.serial.transfer_complete_at()
@@ -2016,8 +2016,8 @@ impl Mmio {
         self.serial_device = serial::SerialDevice::Disconnected;
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Plug one end of a shared IR channel into this GBC's IR port. The current
     /// emitter level (RP bit 0) is published immediately so a mid-session
     /// connect sees the right state.
@@ -2027,22 +2027,22 @@ impl Mmio {
         self.ir_device.set_emitter(led);
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Diagnostic self-test: make the IR port see its own emitter (as though an
     /// IR mirror were held to it). Not how two GBCs communicate.
     pub(crate) fn set_ir_loopback(&mut self) {
         self.ir_device = crate::ir::IrDevice::Loopback;
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     pub(crate) fn ir_attached(&self) -> bool {
         self.ir_device.is_connected()
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Unplug the IR partner (back to a lone GBC that never sees light).
     pub(crate) fn detach_ir(&mut self) {
         self.ir_device = crate::ir::IrDevice::Disconnected;
