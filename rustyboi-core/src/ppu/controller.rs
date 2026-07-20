@@ -114,7 +114,7 @@ mod fb_rle {
     const TAG: usize = 4;
     const LEN: usize = 8;
 
-    pub fn serialize<S: Serializer, const N: usize>(
+    pub(super) fn serialize<S: Serializer, const N: usize>(
         buf: &[u8; N],
         s: S,
     ) -> Result<S::Ok, S::Error> {
@@ -217,7 +217,7 @@ mod fb_rle {
         Ok(buf.into_boxed_slice().try_into().unwrap_or_else(|_| unreachable!()))
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
+    pub(super) fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
         d: D,
     ) -> Result<Box<[u8; N]>, D::Error> {
         match EncodedOwned::deserialize(d)? {
@@ -1005,7 +1005,7 @@ pub(crate) mod bool40 {
     use super::OAM_SPRITE_COUNT;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub fn serialize<S: Serializer>(v: &[bool; OAM_SPRITE_COUNT], s: S) -> Result<S::Ok, S::Error> {
+    pub(crate) fn serialize<S: Serializer>(v: &[bool; OAM_SPRITE_COUNT], s: S) -> Result<S::Ok, S::Error> {
         let mut mask: u64 = 0;
         for (i, &b) in v.iter().enumerate() {
             if b {
@@ -1015,7 +1015,7 @@ pub(crate) mod bool40 {
         mask.serialize(s)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
         d: D,
     ) -> Result<[bool; OAM_SPRITE_COUNT], D::Error> {
         let mask = u64::deserialize(d)?;

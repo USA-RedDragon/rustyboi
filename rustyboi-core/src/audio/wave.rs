@@ -9,7 +9,7 @@ fn to_period(nr3: u8, nr4: u8) -> u32 {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Wave {
+pub(super) struct Wave {
     nr30: u8, // DAC enable
     nr31: u8, // Sound length
     nr32: u8, // Output level
@@ -85,7 +85,7 @@ fn len_disabled() -> u32 {
 }
 
 impl Wave {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Wave {
             nr30: 0,
             nr31: 0,
@@ -115,28 +115,28 @@ impl Wave {
         }
     }
 
-    pub fn set_cc(&mut self, cc: u32) {
+    pub(super) fn set_cc(&mut self, cc: u32) {
         self.cc = cc;
     }
 
-    pub fn set_len_cc(&mut self, cc: u32) {
+    pub(super) fn set_len_cc(&mut self, cc: u32) {
         self.len_cc = cc;
     }
 
-    pub fn len_expired(&self) -> bool {
+    pub(super) fn len_expired(&self) -> bool {
         self.len_cc >= self.len_counter
     }
 
     /// Shift the last-read and next-fetch cc anchors back by the cc delta
     /// caused by a DIV write.
-    pub fn reset_cc(&mut self, delta: u32) {
+    pub(super) fn reset_cc(&mut self, delta: u32) {
         self.last_read_time = self.last_read_time.wrapping_sub(delta);
         if self.wave_counter != COUNTER_DISABLED {
             self.wave_counter = self.wave_counter.wrapping_sub(delta);
         }
     }
 
-    pub fn set_fs_step(&mut self, step: u8) {
+    pub(super) fn set_fs_step(&mut self, step: u8) {
         self.fs_step = step;
     }
 
@@ -157,7 +157,7 @@ impl Wave {
 
     /// PSG reset: clears the sample buffer. Length counter / wave RAM are
     /// preserved.
-    pub fn psg_reset(&mut self) {
+    pub(super) fn psg_reset(&mut self) {
         self.sample_buf = 0;
         // CGB-B first-glitch-write swallow re-arms at APU power-on.
         self.glitch_armed = false;
@@ -167,7 +167,7 @@ impl Wave {
 
     /// Length-counter expiry for channel 3: disables the channel and its
     /// DAC/fetch (mirrors the prior FS-driven expiry).
-    pub fn length_event(&mut self) {
+    pub(super) fn length_event(&mut self) {
         self.len_counter = LEN_DISABLED;
         self.length_counter = 0;
         self.enabled = false;
@@ -255,21 +255,21 @@ impl Wave {
 
     /// Seed the AGB flag before the first `step` so an early wave-RAM access
     /// (before the channel has ticked) already sees AGB semantics.
-    pub fn set_agb(&mut self, agb: bool) {
+    pub(super) fn set_agb(&mut self, agb: bool) {
         self.agb = agb;
     }
 
     /// CGB-B-or-earlier APU revision gate.
-    pub fn set_cgb_le_b(&mut self, le_b: bool) {
+    pub(super) fn set_cgb_le_b(&mut self, le_b: bool) {
         self.cgb_le_b = le_b;
     }
 
     /// CPU-CGB-A/B (Hardware::CGBB) wave first-glitch-write swallow.
-    pub fn set_cgb_b(&mut self, b: bool) {
+    pub(super) fn set_cgb_b(&mut self, b: bool) {
         self.cgb_b = b;
     }
 
-    pub fn step(&mut self, cgb: bool, agb: bool, ds: bool) {
+    pub(super) fn step(&mut self, cgb: bool, agb: bool, ds: bool) {
         self.cgb = cgb;
         self.agb = agb;
         self.ds = ds;
@@ -279,7 +279,7 @@ impl Wave {
     }
 
     /// Advance the wave fetch counter to the current cc for the CPU read path.
-    pub fn sync_for_read(&mut self) {
+    pub(super) fn sync_for_read(&mut self) {
         if self.master {
             self.update_wave_counter();
         }
@@ -364,7 +364,7 @@ impl Wave {
         }
     }
 
-    pub fn get_output(&self) -> f32 {
+    pub(super) fn get_output(&self) -> f32 {
         if !self.master || !self.dac_enabled {
             return 0.0;
         }
@@ -379,7 +379,7 @@ impl Wave {
         (shifted as f32) / 15.0
     }
 
-    pub fn is_enabled(&self) -> bool {
+    pub(super) fn is_enabled(&self) -> bool {
         self.enabled
     }
 
@@ -392,7 +392,7 @@ impl Wave {
     /// after a fresh trigger `wave_pos=0` and `sample_buf` still holds its old /
     /// power-on-zeroed value until the first fetch (`update_wave_counter`) at
     /// `wave_counter`, so the very first samples read 0.
-    pub fn pcm_nibble(&self) -> u8 {
+    pub(super) fn pcm_nibble(&self) -> u8 {
         if !self.master {
             return 0;
         }
@@ -410,7 +410,7 @@ impl Wave {
     }
 
     /// Wave-RAM read, evaluated at the exact read cc.
-    pub fn read_wave_ram(&self, addr: u16) -> u8 {
+    pub(super) fn read_wave_ram(&self, addr: u16) -> u8 {
         let mut index = (addr - WAV_START) as usize;
         if index >= 16 {
             return 0xFF;
@@ -428,7 +428,7 @@ impl Wave {
     }
 
     /// Wave-RAM write.
-    pub fn write_wave_ram(&mut self, addr: u16, value: u8) {
+    pub(super) fn write_wave_ram(&mut self, addr: u16, value: u8) {
         let mut index = (addr - WAV_START) as usize;
         if index >= 16 {
             return;

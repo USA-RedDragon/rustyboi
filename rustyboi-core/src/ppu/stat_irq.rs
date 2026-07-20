@@ -13,17 +13,17 @@
 // external source's control flow; the constants are the load-bearing part.
 use serde::{Deserialize, Serialize};
 
-pub const LCD_CYCLES_PER_LINE: u32 = 456;
-pub const LCD_LINES_PER_FRAME: u32 = 154;
-pub const LCD_VRES: u32 = 144;
-pub const LCD_CYCLES_PER_FRAME: u64 = LCD_LINES_PER_FRAME as u64 * LCD_CYCLES_PER_LINE as u64;
+pub(super) const LCD_CYCLES_PER_LINE: u32 = 456;
+pub(super) const LCD_LINES_PER_FRAME: u32 = 154;
+pub(super) const LCD_VRES: u32 = 144;
+pub(super) const LCD_CYCLES_PER_FRAME: u64 = LCD_LINES_PER_FRAME as u64 * LCD_CYCLES_PER_LINE as u64;
 
-pub const STAT_M0EN: u8 = 0x08;
-pub const STAT_M1EN: u8 = 0x10;
-pub const STAT_M2EN: u8 = 0x20;
-pub const STAT_LYCEN: u8 = 0x40;
+pub(super) const STAT_M0EN: u8 = 0x08;
+pub(super) const STAT_M1EN: u8 = 0x10;
+pub(super) const STAT_M2EN: u8 = 0x20;
+pub(super) const STAT_LYCEN: u8 = 0x40;
 
-pub const DISABLED_TIME: u64 = u64::MAX / 4;
+pub(super) const DISABLED_TIME: u64 = u64::MAX / 4;
 
 const MODE1_IRQ_FRAME_CYCLE: i64 = LCD_VRES as i64 * LCD_CYCLES_PER_LINE as i64 - 2;
 const MODE2_IRQ_LINE_CYCLE: i64 = LCD_CYCLES_PER_LINE as i64 - 4;
@@ -32,26 +32,26 @@ const MODE2_IRQ_LINE_CYCLE_LY0: i64 = LCD_CYCLES_PER_LINE as i64 - 2;
 /// A snapshot of the LY counter used to place frame/line events on the absolute
 /// dot clock. `time` is the absolute `cc` (dots) at which LY next increments.
 #[derive(Clone, Copy)]
-pub struct LyCounter {
+pub(super) struct LyCounter {
     pub ly: u32,
     pub time: u64,
     pub ds: bool,
 }
 
 impl LyCounter {
-    pub fn line_time(&self) -> u64 {
+    pub(super) fn line_time(&self) -> u64 {
         (LCD_CYCLES_PER_LINE as u64) << self.ds as u32
     }
 
-    pub fn frame_cycles(&self, cc: u64) -> u64 {
+    pub(super) fn frame_cycles(&self, cc: u64) -> u64 {
         self.ly as u64 * LCD_CYCLES_PER_LINE as u64 + self.line_cycles(cc)
     }
 
-    pub fn line_cycles(&self, cc: u64) -> u64 {
+    pub(super) fn line_cycles(&self, cc: u64) -> u64 {
         LCD_CYCLES_PER_LINE as u64 - ((self.time - cc) >> self.ds as u32)
     }
 
-    pub fn next_line_cycle(&self, line_cycle: i64, cc: u64) -> u64 {
+    pub(super) fn next_line_cycle(&self, line_cycle: i64, cc: u64) -> u64 {
         // The candidate dot may land more than one line ahead of `cc` (the target
         // line-cycle already passed this line); if so, pull it back by exactly one
         // line so it names the current line's occurrence. The distance is measured
@@ -65,7 +65,7 @@ impl LyCounter {
         }
     }
 
-    pub fn next_frame_cycle(&self, frame_cycle: i64, cc: u64) -> u64 {
+    pub(super) fn next_frame_cycle(&self, frame_cycle: i64, cc: u64) -> u64 {
         let span = ((LCD_LINES_PER_FRAME as i64 - 1 - self.ly as i64) * LCD_CYCLES_PER_LINE as i64
             + frame_cycle)
             << self.ds as u32;
@@ -80,7 +80,7 @@ impl LyCounter {
     }
 }
 
-pub struct LyCmp {
+pub(super) struct LyCmp {
     pub ly: u32,
     pub time_to_next_ly: i64,
 }
@@ -88,7 +88,7 @@ pub struct LyCmp {
 /// The LY value the LYC=LY comparator uses. In the final few dots of a line the
 /// comparator already anticipates the upcoming line, so this returns that
 /// upcoming LY together with the remaining dots until it takes effect.
-pub fn get_lyc_cmp_ly(lc: &LyCounter, cc: u64) -> LyCmp {
+pub(super) fn get_lyc_cmp_ly(lc: &LyCounter, cc: u64) -> LyCmp {
     let ds = lc.ds as i64;
     let line_time = lc.line_time() as i64;
     let mut ttnl = lc.time as i64 - cc as i64;
@@ -117,15 +117,15 @@ pub fn get_lyc_cmp_ly(lc: &LyCounter, cc: u64) -> LyCmp {
 
 /// The LY value one line later. LY counts 0..=153 and wraps to 0 after the
 /// final line, so advancing modulo the frame height gives the next line.
-pub fn inc_ly(ly: u32) -> u32 {
+pub(super) fn inc_ly(ly: u32) -> u32 {
     (ly + 1) % LCD_LINES_PER_FRAME
 }
 
-pub fn mode1_irq_schedule(lc: &LyCounter, cc: u64) -> u64 {
+pub(super) fn mode1_irq_schedule(lc: &LyCounter, cc: u64) -> u64 {
     lc.next_frame_cycle(MODE1_IRQ_FRAME_CYCLE, cc)
 }
 
-pub fn mode2_irq_schedule(stat: u8, lc: &LyCounter, cc: u64) -> u64 {
+pub(super) fn mode2_irq_schedule(stat: u8, lc: &LyCounter, cc: u64) -> u64 {
     if stat & STAT_M2EN == 0 {
         return DISABLED_TIME;
     }
@@ -152,7 +152,7 @@ pub fn mode2_irq_schedule(stat: u8, lc: &LyCounter, cc: u64) -> u64 {
 // and a delayed "committed" copy, because FF41/FF45 writes take effect a couple
 // of dots after the store on real hardware.
 #[derive(Clone, Copy, Serialize, Deserialize, Default)]
-pub struct LycIrq {
+pub(super) struct LycIrq {
     pub time: u64,
     lyc_reg_src: u8,
     stat_reg_src: u8,
@@ -187,15 +187,15 @@ fn lyc_blocked_by_m2_or_m1(ly: u32, stat: u8) -> bool {
 }
 
 impl LycIrq {
-    pub fn set_cgb(&mut self, cgb: bool) {
+    pub(super) fn set_cgb(&mut self, cgb: bool) {
         self.cgb = cgb;
     }
 
-    pub fn lyc_reg_src(&self) -> u8 {
+    pub(super) fn lyc_reg_src(&self) -> u8 {
         self.lyc_reg_src
     }
 
-    pub fn lcd_reset(&mut self) {
+    pub(super) fn lcd_reset(&mut self) {
         self.stat_reg = self.stat_reg_src;
         self.lyc_reg = self.lyc_reg_src;
     }
@@ -224,18 +224,18 @@ impl LycIrq {
         }
     }
 
-    pub fn stat_reg_change(&mut self, stat: u8, lc: &LyCounter, cc: u64) {
+    pub(super) fn stat_reg_change(&mut self, stat: u8, lc: &LyCounter, cc: u64) {
         let lyc = self.lyc_reg_src;
         self.reg_change(stat, lyc, lc, cc);
     }
 
-    pub fn lyc_reg_change(&mut self, lyc: u8, lc: &LyCounter, cc: u64) {
+    pub(super) fn lyc_reg_change(&mut self, lyc: u8, lc: &LyCounter, cc: u64) {
         let stat = self.stat_reg_src;
         self.reg_change(stat, lyc, lc, cc);
     }
 
     /// Returns true if an LYC IRQ should be flagged.
-    pub fn do_event(&mut self, lc: &LyCounter) -> bool {
+    pub(super) fn do_event(&mut self, lc: &LyCounter) -> bool {
         let mut flag = false;
         if (self.stat_reg | self.stat_reg_src) & STAT_LYCEN != 0 {
             // The event fires just before the line boundary, so it compares
@@ -250,14 +250,14 @@ impl LycIrq {
         flag
     }
 
-    pub fn reschedule(&mut self, lc: &LyCounter, cc: u64) {
+    pub(super) fn reschedule(&mut self, lc: &LyCounter, cc: u64) {
         self.time = lyc_schedule(self.stat_reg, self.lyc_reg, lc, cc)
             .min(lyc_schedule(self.stat_reg_src, self.lyc_reg_src, lc, cc));
     }
 
     /// Seed all source/committed registers from the live FF41/FF45 values,
     /// e.g. on LCD enable. Does not schedule; call `reschedule` afterwards.
-    pub fn seed(&mut self, stat: u8, lyc: u8) {
+    pub(super) fn seed(&mut self, stat: u8, lyc: u8) {
         self.stat_reg_src = stat;
         self.lyc_reg_src = lyc;
         self.stat_reg = stat;
@@ -272,22 +272,22 @@ impl LycIrq {
 // coincident LYC match on the same line. Holds a delayed copy of STAT/LYC for
 // the same write-latency reason as the LYC event above.
 #[derive(Clone, Copy, Serialize, Deserialize, Default)]
-pub struct MStatIrq {
+pub(super) struct MStatIrq {
     lyc_reg: u8,
     stat_reg: u8,
 }
 
 impl MStatIrq {
-    pub fn lcd_reset(&mut self, lyc_reg: u8) {
+    pub(super) fn lcd_reset(&mut self, lyc_reg: u8) {
         self.lyc_reg = lyc_reg;
     }
 
-    pub fn seed(&mut self, stat: u8, lyc: u8) {
+    pub(super) fn seed(&mut self, stat: u8, lyc: u8) {
         self.stat_reg = stat;
         self.lyc_reg = lyc;
     }
 
-    pub fn lyc_reg_change(
+    pub(super) fn lyc_reg_change(
         &mut self,
         lyc: u8,
         next_m0: u64,
@@ -301,7 +301,7 @@ impl MStatIrq {
         }
     }
 
-    pub fn stat_reg_change(
+    pub(super) fn stat_reg_change(
         &mut self,
         stat: u8,
         next_m0: u64,
@@ -315,7 +315,7 @@ impl MStatIrq {
         }
     }
 
-    pub fn do_m0_event(&mut self, ly: u32, stat: u8, lyc: u8) -> bool {
+    pub(super) fn do_m0_event(&mut self, ly: u32, stat: u8, lyc: u8) -> bool {
         let flag = ((stat | self.stat_reg) & STAT_M0EN != 0)
             && ((self.stat_reg & STAT_LYCEN == 0) || ly != self.lyc_reg as u32);
         self.lyc_reg = lyc;
@@ -323,14 +323,14 @@ impl MStatIrq {
         flag
     }
 
-    pub fn do_m1_event(&mut self, stat: u8) -> bool {
+    pub(super) fn do_m1_event(&mut self, stat: u8) -> bool {
         let flag =
             (stat & STAT_M1EN != 0) && (self.stat_reg & (STAT_M2EN | STAT_M0EN) == 0);
         self.stat_reg = stat;
         flag
     }
 
-    pub fn do_m2_event(&mut self, ly: u32, stat: u8, lyc: u8) -> bool {
+    pub(super) fn do_m2_event(&mut self, ly: u32, stat: u8, lyc: u8) -> bool {
         let blocked_by_m1 = ly == 0 && (self.stat_reg & STAT_M1EN != 0);
         // Mode 2 begins a line, so its coincident-LYC check uses the previous
         // line's number (line 0 has no predecessor, so it clamps to 0).
@@ -352,7 +352,7 @@ impl MStatIrq {
 
 /// DMG variant. `m0_irq_time` is the absolute dot of the current line's mode-0
 /// IRQ (DISABLED_TIME if none scheduled).
-pub fn stat_change_triggers_dmg(
+pub(super) fn stat_change_triggers_dmg(
     old: u8,
     lc: &LyCounter,
     cc: u64,
@@ -459,7 +459,7 @@ fn stat_change_triggers_m0lyc_or_m1_cgb(
     !m1_blocked && (m1_fire || lyc_fire)
 }
 
-pub fn stat_change_triggers_cgb(
+pub(super) fn stat_change_triggers_cgb(
     old: u8,
     data: u8,
     lc: &LyCounter,
@@ -512,7 +512,7 @@ fn lyc_change_blocked_by_m0_or_m1(
     (stat & STAT_M0EN != 0) && m0_irq_time > lc.time && data as u32 == lc.ly
 }
 
-pub fn lyc_change_triggers_stat_irq(
+pub(super) fn lyc_change_triggers_stat_irq(
     old: u8,
     data: u8,
     lc: &LyCounter,
@@ -546,7 +546,7 @@ pub fn lyc_change_triggers_stat_irq(
 /// enabled the sources coincide once per frame; otherwise mode 2 recurs each
 /// line, with LY=0 (line 153) and the last visible line shifting the delta by
 /// the LY=0 slot's offset.
-pub fn mode2_reschedule_delta(ly: u32, stat: u8, ds: bool) -> u64 {
+pub(super) fn mode2_reschedule_delta(ly: u32, stat: u8, ds: bool) -> u64 {
     let mut next = LCD_CYCLES_PER_FRAME;
     if stat & STAT_M0EN == 0 {
         next = LCD_CYCLES_PER_LINE as u64;

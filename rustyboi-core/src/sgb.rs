@@ -20,38 +20,38 @@ use serde::{Deserialize, Serialize};
 /// `OBJ_TRN`. Every other command is received normally and falls through to the
 /// no-op arm of the dispatch.
 mod cmd {
-    pub const PAL01: u8 = 0x00;
-    pub const PAL23: u8 = 0x01;
-    pub const PAL03: u8 = 0x02;
-    pub const PAL12: u8 = 0x03;
-    pub const ATTR_BLK: u8 = 0x04;
-    pub const ATTR_LIN: u8 = 0x05;
-    pub const ATTR_DIV: u8 = 0x06;
-    pub const ATTR_CHR: u8 = 0x07;
-    pub const PAL_SET: u8 = 0x0A;
-    pub const PAL_TRN: u8 = 0x0B;
-    pub const MASK_EN: u8 = 0x17;
-    pub const ATTR_TRN: u8 = 0x15;
-    pub const ATTR_SET: u8 = 0x16;
-    pub const MLT_REQ: u8 = 0x11;
-    pub const CHR_TRN: u8 = 0x13;
-    pub const PCT_TRN: u8 = 0x14;
+    pub(super) const PAL01: u8 = 0x00;
+    pub(super) const PAL23: u8 = 0x01;
+    pub(super) const PAL03: u8 = 0x02;
+    pub(super) const PAL12: u8 = 0x03;
+    pub(super) const ATTR_BLK: u8 = 0x04;
+    pub(super) const ATTR_LIN: u8 = 0x05;
+    pub(super) const ATTR_DIV: u8 = 0x06;
+    pub(super) const ATTR_CHR: u8 = 0x07;
+    pub(super) const PAL_SET: u8 = 0x0A;
+    pub(super) const PAL_TRN: u8 = 0x0B;
+    pub(super) const MASK_EN: u8 = 0x17;
+    pub(super) const ATTR_TRN: u8 = 0x15;
+    pub(super) const ATTR_SET: u8 = 0x16;
+    pub(super) const MLT_REQ: u8 = 0x11;
+    pub(super) const CHR_TRN: u8 = 0x13;
+    pub(super) const PCT_TRN: u8 = 0x14;
     /// DATA_SND ($0F): writes bytes carried IN THE PACKET to SNES WRAM — bytes
     /// 1-3 are the 24-bit destination, byte 4 the count ($01-$0B), bytes 5.. the
     /// data. Despite the `_SND`/`_TRN` similarity this is NOT a VRAM transfer —
     /// nothing is read back from the GB screen.
-    pub const DATA_SND: u8 = 0x0F;
+    pub(super) const DATA_SND: u8 = 0x0F;
     /// DATA_TRN ($10): transfers a 4KB VRAM block to the SNES WRAM address in
     /// bytes 1-3. A genuine VRAM transfer, but SNES-side only (see the dispatch).
-    pub const DATA_TRN: u8 = 0x10;
+    pub(super) const DATA_TRN: u8 = 0x10;
     /// SOUND ($08): start/stop the firmware's canned sound effects and the BGM
     /// mute. Decoded into [`SgbSound`]; produces no audio, see that type.
-    pub const SOUND: u8 = 0x08;
+    pub(super) const SOUND: u8 = 0x08;
     /// SOU_TRN ($09): VRAM transfer of driver code, sound scores or samples into
     /// S-APU RAM (Pan Docs: $0400-$2AFF program, $2B00-$4AFF score, $4DB0-$EEFF
     /// sampling data). SNES-side only, and inert here for the same reason as
     /// [`SgbSound`].
-    pub const SOU_TRN: u8 = 0x09;
+    pub(super) const SOU_TRN: u8 = 0x09;
     /// OBJ_TRN ($18): "Super NES OBJ Mode". **Severed on every retail SGB** —
     /// Pan Docs lists it under "Removed Commands": these "do nothing on all
     /// retail SGB revisions", and the descriptions "only apply to some
@@ -59,7 +59,7 @@ mod cmd {
     /// `rts`; the handler survives only as unreferenced dead code. Doing
     /// nothing here IS the hardware behavior — see the dispatch arm for why
     /// this must not be modelled and must not join the `_TRN` group.
-    pub const OBJ_TRN: u8 = 0x18;
+    pub(super) const OBJ_TRN: u8 = 0x18;
 }
 
 /// Decoded payload of the SGB SOUND command ($08) — recorded, never played.

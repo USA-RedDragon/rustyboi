@@ -33,7 +33,7 @@ fn to_period(freq: u16) -> u32 {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct SquareWave {
+pub(super) struct SquareWave {
     channel1: bool,
 
     nr10: u8,
@@ -207,7 +207,7 @@ fn len_disabled() -> u32 {
 }
 
 impl SquareWave {
-    pub fn new(channel1: bool) -> Self {
+    pub(super) fn new(channel1: bool) -> Self {
         SquareWave {
             channel1,
             nr10: 0,
@@ -259,46 +259,46 @@ impl SquareWave {
         }
     }
 
-    pub fn set_cc(&mut self, cc: u32) {
+    pub(super) fn set_cc(&mut self, cc: u32) {
         self.cc = cc;
     }
 
     /// The `lf_div` (2 MHz sub-phase) used by the trigger delay formula.
-    pub fn set_lf_div(&mut self, lf_div: u32) {
+    pub(super) fn set_lf_div(&mut self, lf_div: u32) {
         self.lf_div = lf_div;
     }
 
     /// CGB double-speed flag.
-    pub fn set_ds(&mut self, ds: bool) {
+    pub(super) fn set_ds(&mut self, ds: bool) {
         self.ds = ds;
     }
 
     /// CGB-D/E APU revision gate (model newer than CGB-C).
-    pub fn set_cgb_de(&mut self, de: bool) {
+    pub(super) fn set_cgb_de(&mut self, de: bool) {
         self.cgb_de = de;
     }
 
     /// CGB-B-or-earlier APU revision gate (CGB with model <= CGB-B).
-    pub fn set_cgb_le_b(&mut self, le_b: bool) {
+    pub(super) fn set_cgb_le_b(&mut self, le_b: bool) {
         self.cgb_le_b = le_b;
     }
 
     /// CGB-C-and-older PCM read glitch (the pcm_mask, model <= CGB-C).
-    pub fn set_pcm_c_glitch(&mut self, on: bool) {
+    pub(super) fn set_pcm_c_glitch(&mut self, on: bool) {
         self.pcm_c_glitch = on;
     }
 
     /// NRx4 step-back parity gate (true for CGB0/CGBB/AGB; the step-back is
     /// gated on `sample_countdown & 1` for those, unconditional on D/E).
-    pub fn set_step_back_parity(&mut self, on: bool) {
+    pub(super) fn set_step_back_parity(&mut self, on: bool) {
         self.step_back_parity = on;
     }
 
-    pub fn set_len_cc(&mut self, cc: u32) {
+    pub(super) fn set_len_cc(&mut self, cc: u32) {
         self.len_cc = cc;
     }
 
-    pub fn len_expired(&self) -> bool {
+    pub(super) fn len_expired(&self) -> bool {
         self.len_cc >= self.len_counter
     }
 
@@ -306,7 +306,7 @@ impl SquareWave {
     /// ROM leaves ch1 playing the startup tone: master/enabled with duty pos/phase
     /// mid-cycle. `pos_offset` is the duty next-pos-update offset (in 2 MHz
     /// units) added to the current cc; `pos`/`high` are the duty-unit phase.
-    pub fn set_post_bios_ch1(&mut self, pos_offset: u32, pos: u8, high: bool) {
+    pub(super) fn set_post_bios_ch1(&mut self, pos_offset: u32, pos: u8, high: bool) {
         self.nr11 = 0xBF;
         self.nr12 = 0xF3;
         self.nr13 = 0xC1;
@@ -332,7 +332,7 @@ impl SquareWave {
         self.length_counter = 0x40;
     }
 
-    pub fn set_length_counter(&mut self, value: u16) {
+    pub(super) fn set_length_counter(&mut self, value: u16) {
         self.length_counter = value;
     }
 
@@ -341,7 +341,7 @@ impl SquareWave {
     /// underlying cycle counter is reset by a DIV write. The envelope and length
     /// counters are intentionally left alone — they key on absolute `cc>>13` /
     /// `cc>>15` boundaries that survive the reset.
-    pub fn reset_cc(&mut self, delta: u32) {
+    pub(super) fn reset_cc(&mut self, delta: u32) {
         // Advance the duty countdown to the current (pre-fold) cc, then shift the
         // countdown anchor by the same delta the controller applies to `cc`, so the
         // subsequent `set_cc(folded)` sees a zero delta and the countdown/index are
@@ -350,7 +350,7 @@ impl SquareWave {
         self.last_pos_cc = self.last_pos_cc.wrapping_sub(delta);
     }
 
-    pub fn set_fs_step(&mut self, step: u8) {
+    pub(super) fn set_fs_step(&mut self, step: u8) {
         self.fs_step = step;
     }
 
@@ -382,7 +382,7 @@ impl SquareWave {
     /// the NR52 0→1 enable). Re-initializes the duty + envelope sub-counters at
     /// the freshly-folded cc. The length counter is intentionally preserved
     /// (the length counter survives the APU-enable reset).
-    pub fn psg_reset(&mut self) {
+    pub(super) fn psg_reset(&mut self) {
         // Duty-unit reset. The duty phase resets to 0 only on APU-off; the
         // NR52 0→1 enable path re-anchors the countdown but keeps the
         // sub-counter idle until a trigger. Index resets to 0 here (APU was off).
@@ -574,7 +574,7 @@ impl SquareWave {
     }
 
     /// Length-counter expiry: disables the channel.
-    pub fn length_event(&mut self) {
+    pub(super) fn length_event(&mut self) {
         self.len_counter = LEN_DISABLED;
         self.length_counter = 0;
         self.enabled = false;
@@ -588,7 +588,7 @@ impl SquareWave {
         self.update_pos();
     }
 
-    pub fn step(&mut self, cgb: bool) {
+    pub(super) fn step(&mut self, cgb: bool) {
         // Both channels need the CGB-features flag (the trigger pre-increment
         // quirk is CGB-D/E only); ch1 also uses it for the sweep trigger init.
         self.cgb = cgb;
@@ -1019,7 +1019,7 @@ impl SquareWave {
         }
     }
 
-    pub fn get_output(&self) -> f32 {
+    pub(super) fn get_output(&self) -> f32 {
         if !self.enabled || !self.master || self.volume == 0 || self.sample_surpressed {
             return 0.0;
         }
@@ -1030,13 +1030,13 @@ impl SquareWave {
         }
     }
 
-    pub fn is_enabled(&self) -> bool {
+    pub(super) fn is_enabled(&self) -> bool {
         self.enabled
     }
 
     /// Force the channel's active/length-running flag (NR52 status bit). Used by
     /// the SGB post-boot seed to hand off with channel 1 already stopped.
-    pub fn set_enabled(&mut self, enabled: bool) {
+    pub(super) fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
 
@@ -1045,7 +1045,7 @@ impl SquareWave {
     /// output is still surpressed (the `sample_surpressed` flag); otherwise the
     /// current duty high-state times the envelope volume.
     ///
-    pub fn pcm_nibble(&self) -> u8 {
+    pub(super) fn pcm_nibble(&self) -> u8 {
         // A length-expired channel (enabled=false, is_active=false)
         // reports 0 — the digital sample stops with the channel, even though
         // the DAC (master) state survives (SameSuite channel_*_stop_div).
@@ -1064,7 +1064,7 @@ impl SquareWave {
     /// subsystem resolves on (M7). Advances a SHADOW copy of the duty
     /// countdown from the per-dot state to `read_cc` without mutating the
     /// channel (the read must not disturb the real per-dot stream).
-    pub fn pcm_nibble_at(&self, read_cc: u32) -> u8 {
+    pub(super) fn pcm_nibble_at(&self, read_cc: u32) -> u8 {
         if !self.is_active() {
             return 0;
         }
