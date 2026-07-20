@@ -282,6 +282,7 @@ impl Fetcher {
     //     previous substep through this read, and only the tile-data-high
     //     address takes over. Publishing on the low plane would break those
     //     hardware bus hold windows.
+    #[inline(always)]
     fn fetch_tile_data_byte(
         &mut self,
         mmio: &mmio::Mmio,
