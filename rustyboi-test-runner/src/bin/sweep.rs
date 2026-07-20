@@ -86,13 +86,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-#[path = "shared/imaging.rs"]
-#[allow(dead_code)] // shared toolbox: this bin uses a subset (e.g. not frame_rgb)
-mod imaging;
-#[path = "shared/masher.rs"]
-mod masher;
-use masher::masher;
-use imaging::{encode_rgb_webp, frame_rgb, html_escape};
+use rustyboi_test_runner_lib::imaging::{encode_rgb_webp, frame_rgb, html_escape};
+use rustyboi_test_runner_lib::masher::masher;
+use rustyboi_test_runner_lib::runner::bios_filename;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Row {
@@ -1412,26 +1408,6 @@ fn capture_media(
 /// Safety cap on a boot animation's length (~10s at 59.7fps): if the boot ROM
 /// never hands off (wrong/corrupt dump), stop rather than loop forever.
 const MAX_BIOS_FRAMES: usize = 600;
-
-/// Boot-ROM filename per hardware model. Mirrors the test-runner's
-/// `runner::bios_filename`; that module lives in a binary-only crate this bin
-/// can't import, so the provisioned dumps are re-listed here. Keep in sync.
-fn bios_filename(hw: Hardware) -> Option<&'static str> {
-    match hw {
-        Hardware::DMG => Some("dmg_boot.bin"),
-        Hardware::CGB => Some("cgb_boot.bin"),
-        // AGB uses the GBA's CGB-compat boot ROM (SameBoy naming: agb_boot.bin).
-        Hardware::AGB => Some("agb_boot.bin"),
-        Hardware::SGB => Some("sgb_boot.bin"),
-        Hardware::DMG0 => Some("dmg0_boot.bin"),
-        Hardware::MGB => Some("mgb_boot.bin"),
-        Hardware::SGB2 => Some("sgb2_boot.bin"),
-        Hardware::CGB0 => Some("cgb0_boot.bin"),
-        Hardware::CGBE => Some("cgbE_boot.bin"),
-        // CGB-A/B CPU revision shares the standard CGB boot ROM (no distinct dump).
-        Hardware::CGBB => Some("cgb_boot.bin"),
-    }
-}
 
 /// Locate a boot ROM the same way the test-runner does: `--bios-dir` first (if
 /// given), then `bios/` relative to CWD, then `../bios/` relative to the crate

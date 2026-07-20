@@ -1,6 +1,5 @@
 //! The `frame:BUTTONS` input-script DSL shared by the `movie` and `harness`
-//! bins (this directory is not auto-binned; each bin pulls it in via
-//! `#[path = "shared/script.rs"]`).
+//! bins.
 //!
 //! A script is `;`-separated `frame:BUTTONS` entries; BUTTONS is a
 //! `+`-separated list of A,B,START,SELECT,UP,DOWN,LEFT,RIGHT (empty =
@@ -8,12 +7,12 @@
 
 use rustyboi_core_lib::input::ButtonState;
 
-pub(crate) struct Event {
+pub struct Event {
     pub frame: usize,
     pub buttons: ButtonState,
 }
 
-pub(crate) fn parse_buttons(spec: &str) -> ButtonState {
+fn parse_buttons(spec: &str) -> ButtonState {
     let mut b = ButtonState::default();
     for name in spec.split('+').filter(|s| !s.is_empty()) {
         match name.to_ascii_uppercase().as_str() {
@@ -32,7 +31,7 @@ pub(crate) fn parse_buttons(spec: &str) -> ButtonState {
 }
 
 /// Parse a script into frame-sorted events.
-pub(crate) fn parse_script(script: &str) -> Vec<Event> {
+pub fn parse_script(script: &str) -> Vec<Event> {
     let mut events: Vec<Event> = script
         .split(';')
         .filter(|s| !s.trim().is_empty())
@@ -52,7 +51,7 @@ pub(crate) fn parse_script(script: &str) -> Vec<Event> {
 
 /// Expand a script into one `ButtonState` per frame for `frames` frames: the
 /// button state at each frame is the most recent event at or before it.
-pub(crate) fn expand_timeline(script: &str, frames: usize) -> Vec<ButtonState> {
+pub fn expand_timeline(script: &str, frames: usize) -> Vec<ButtonState> {
     let events = parse_script(script);
     let mut timeline = Vec::with_capacity(frames);
     let mut cur = ButtonState::default();

@@ -124,7 +124,7 @@ pub(crate) struct RunOptions {
 /// boot ROM provisioned for it. DMG/CGB/AGB/SGB plus the revision variants
 /// DMG0/MGB/SGB2/CGB0/CGBE have dumps in `bios/`. CGBB (CPU-CGB-A/B) shares the
 /// standard CGB boot ROM — no distinct dump exists — so it maps to cgb_boot.bin.
-pub(crate) fn bios_filename(hw: Hardware) -> Option<&'static str> {
+pub fn bios_filename(hw: Hardware) -> Option<&'static str> {
     match hw {
         Hardware::DMG => Some("dmg_boot.bin"),
         Hardware::CGB => Some("cgb_boot.bin"),

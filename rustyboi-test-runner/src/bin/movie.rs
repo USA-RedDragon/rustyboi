@@ -17,10 +17,7 @@ use rustyboi_core_lib::movie::{sha256, MovieMeta, Recorder};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-#[path = "shared/script.rs"]
-#[allow(dead_code)] // shared toolbox: this bin uses a subset (only expand_timeline)
-mod script;
-use script::expand_timeline;
+use rustyboi_test_runner_lib::script::expand_timeline;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();

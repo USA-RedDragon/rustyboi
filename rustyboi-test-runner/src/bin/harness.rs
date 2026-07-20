@@ -45,13 +45,8 @@ use rustyboi_core_lib::input::ButtonState;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-#[path = "shared/imaging.rs"]
-#[allow(dead_code)] // shared toolbox: this bin uses a subset (e.g. not base64)
-mod imaging;
-#[path = "shared/script.rs"]
-#[allow(dead_code)] // shared toolbox: this bin uses a subset (not expand_timeline)
-mod script;
-use imaging::{encode_rgb_png, fnv1a, frame_rgb, write_ppm};
+use rustyboi_test_runner_lib::imaging::{encode_rgb_png, fnv1a, frame_rgb, write_ppm};
+use rustyboi_test_runner_lib::script;
 
 const USAGE_SRAMDUMP: &str = "harness sramdump <rom> <out.bin> [frames] [dmg|cgb]";
 const USAGE_GLITCH: &str = "harness glitch --rom <rom-or-zip> --state <savestate.rustyboisave> \
