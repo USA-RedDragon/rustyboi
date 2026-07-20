@@ -31,13 +31,13 @@ struct Job {
 }
 
 /// A completed serialization, ready to push into the rewind ring.
-pub struct Finished {
+pub(crate) struct Finished {
     pub frame: u64,
     pub bytes: Vec<u8>,
 }
 
 /// Owns the background serializer thread and the two channels to it.
-pub struct RewindWorker {
+pub(crate) struct RewindWorker {
     /// Pending clones awaiting serialization. Drop-oldest is enforced by the
     /// worker, which coalesces to the newest queued job (see `serializer_loop`),
     /// so a slow serialize can never stall the emulation thread or replay a
@@ -50,7 +50,7 @@ pub struct RewindWorker {
 }
 
 impl RewindWorker {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (tx, rx) = mpsc::channel::<Job>();
         let (done_tx, done_rx) = mpsc::channel::<Finished>();
 
@@ -65,7 +65,7 @@ impl RewindWorker {
     /// Submit a cloned machine for serialization. Cheap on the emulation thread
     /// — it only moves the clone into the channel. If the worker is busy the
     /// clone queues and is coalesced away by a newer one (drop-oldest).
-    pub fn submit(&mut self, frame: u64, gb: Box<GB>) {
+    pub(crate) fn submit(&mut self, frame: u64, gb: Box<GB>) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Job { frame, gb });
         }
@@ -73,7 +73,7 @@ impl RewindWorker {
 
     /// Non-blocking drain of finished serializations. Returns each `(frame,
     /// bytes)` ready to push into the rewind ring.
-    pub fn drain_finished(&mut self) -> Vec<Finished> {
+    pub(crate) fn drain_finished(&mut self) -> Vec<Finished> {
         let mut out = Vec::new();
         // try_recv yields Ok until the queue drains, then an Err (Empty or
         // Disconnected) ends the loop.

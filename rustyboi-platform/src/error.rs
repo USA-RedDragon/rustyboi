@@ -7,12 +7,12 @@ use std::fmt;
 pub struct PlatformError(String);
 
 impl PlatformError {
-    pub fn new(msg: impl Into<String>) -> Self {
+    pub(crate) fn new(msg: impl Into<String>) -> Self {
         PlatformError(msg.into())
     }
 
     /// Wrap any `Display` (winit `OsError`/`EventLoopError`, etc.) as a message.
-    pub fn from_display(e: impl fmt::Display) -> Self {
+    pub(crate) fn from_display(e: impl fmt::Display) -> Self {
         PlatformError(e.to_string())
     }
 }

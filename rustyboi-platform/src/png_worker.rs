@@ -21,13 +21,13 @@ struct Job {
 }
 
 /// Owns the background PNG encoder/writer thread.
-pub struct PngWorker {
+pub(crate) struct PngWorker {
     tx: Option<Sender<Job>>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl PngWorker {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (tx, rx) = mpsc::channel::<Job>();
         let handle = std::thread::Builder::new()
             .name("printer-png".to_string())
@@ -54,7 +54,7 @@ impl PngWorker {
     /// Queue a sheet to be encoded and written to `path`. Cheap on the caller —
     /// moves the sheet into the channel; the encode + disk write happen on the
     /// worker.
-    pub fn write_sheet(&mut self, path: PathBuf, sheet: PrintSheet) {
+    pub(crate) fn write_sheet(&mut self, path: PathBuf, sheet: PrintSheet) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Job { path, sheet });
         }

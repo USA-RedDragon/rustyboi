@@ -17,7 +17,7 @@ use rustyboi_session::Ports;
 /// (`state/<romhex>/slot0`, `config/session.json`, …) map straight onto a
 /// relative file path under the base; the `/`-separated key becomes nested
 /// directories, created on demand.
-pub struct FsStorage {
+pub(crate) struct FsStorage {
     base: PathBuf,
 }
 
@@ -25,7 +25,7 @@ impl FsStorage {
     /// Root the store at `base`, creating it if needed. Falls back to the
     /// current directory if creation fails (never panics: a savestate write
     /// failing later is preferable to refusing to launch).
-    pub fn new(base: PathBuf) -> Self {
+    pub(crate) fn new(base: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(&base);
         FsStorage { base }
     }
@@ -101,7 +101,7 @@ impl Storage for FsStorage {
 /// No-op rumble adapter. Structured as its own type so the follow-up can drop
 /// in a real gilrs-driven motor without touching the session wiring.
 #[derive(Default)]
-pub struct NullRumble;
+pub(crate) struct NullRumble;
 
 impl Rumble for NullRumble {
     fn set(&mut self, _on: bool) {}
@@ -110,7 +110,7 @@ impl Rumble for NullRumble {
 /// No-op webcam adapter: never yields a frame, so the Game Boy Camera holds its
 /// last sensor image. A real capture source replaces this in the follow-up.
 #[derive(Default)]
-pub struct NullWebcam;
+pub(crate) struct NullWebcam;
 
 impl Webcam for NullWebcam {
     fn grab(&mut self) -> Option<Vec<u8>> {
@@ -125,7 +125,7 @@ impl Webcam for NullWebcam {
 /// and finally a `rustyboi` directory in the working dir. No env knobs of our
 /// own — only the OS-standard `HOME`/`APPDATA` the platform itself defines.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn desktop_save_dir() -> PathBuf {
+pub(crate) fn desktop_save_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
@@ -149,7 +149,7 @@ pub fn desktop_save_dir() -> PathBuf {
 }
 
 /// Build the concrete port set for this platform, rooted at `base`.
-pub fn build_ports(base: PathBuf) -> Ports {
+pub(crate) fn build_ports(base: PathBuf) -> Ports {
     Ports {
         storage: Box::new(FsStorage::new(base)),
         rumble: Box::new(NullRumble),

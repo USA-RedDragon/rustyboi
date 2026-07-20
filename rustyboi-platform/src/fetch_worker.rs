@@ -22,7 +22,7 @@ struct Job {
 }
 
 /// A completed fetch, ready to feed back into the session.
-pub struct Finished {
+pub(crate) struct Finished {
     pub purpose: FetchPurpose,
     /// The URL that produced the body (the first candidate that returned 2xx), or
     /// `None` on failure. Used to name the on-disk cache file for No-Intro DATs.
@@ -33,14 +33,14 @@ pub struct Finished {
 
 /// Owns the background HTTP thread and the channels to it. Created lazily (first
 /// fetch), then reused for the process lifetime.
-pub struct FetchWorker {
+pub(crate) struct FetchWorker {
     tx: Option<Sender<Job>>,
     done_rx: Receiver<Finished>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl FetchWorker {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (tx, rx) = mpsc::channel::<Job>();
         let (done_tx, done_rx) = mpsc::channel::<Finished>();
         let handle = std::thread::Builder::new()
@@ -52,14 +52,14 @@ impl FetchWorker {
 
     /// Enqueue a fetch. Cheap on the caller — it only moves the URLs into the
     /// channel.
-    pub fn submit(&mut self, urls: Vec<String>, purpose: FetchPurpose) {
+    pub(crate) fn submit(&mut self, urls: Vec<String>, purpose: FetchPurpose) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Job { urls, purpose });
         }
     }
 
     /// Non-blocking drain of completed fetches.
-    pub fn drain_finished(&mut self) -> Vec<Finished> {
+    pub(crate) fn drain_finished(&mut self) -> Vec<Finished> {
         let mut out = Vec::new();
         // try_recv yields Ok until the queue drains, then an Err (Empty or
         // Disconnected) ends the loop.

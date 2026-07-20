@@ -13,7 +13,7 @@
 //!   callback drains the ring.
 
 #[cfg(not(target_os = "android"))]
-pub use cpal_backend::Output;
+pub(crate) use cpal_backend::Output;
 
 #[cfg(target_os = "android")]
 pub use oboe_backend::Output;
@@ -59,7 +59,7 @@ mod cpal_backend {
     /// (The previous rodio sink's mixer/converter stack consumed the ring at
     /// the device rate when its span bootstrap mis-captured the source rate,
     /// and leaked samples on every span re-bootstrap — 10-20%% zero-fill.)
-    pub struct Output {
+    pub(crate) struct Output {
         stream: Option<cpal::Stream>,
         prod: Option<HeapProd<f32>>,
         scratch: Vec<f32>,
@@ -71,7 +71,7 @@ mod cpal_backend {
     }
 
     impl Output {
-        pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        pub(crate) fn new() -> Result<Self, Box<dyn std::error::Error>> {
             Ok(Output {
                 stream: None,
                 prod: None,
@@ -81,30 +81,30 @@ mod cpal_backend {
             })
         }
 
-        pub fn start_device(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        pub(crate) fn start_device(&mut self) -> Result<(), Box<dyn std::error::Error>> {
             <Self as AudioOutput>::start(self)
         }
 
-        pub fn push_samples(&mut self, samples: &[(f32, f32)]) {
+        pub(crate) fn push_samples(&mut self, samples: &[(f32, f32)]) {
             <Self as AudioOutput>::add_samples(self, samples)
         }
 
         /// Backlog in stereo sample pairs — the sample-accurate signal the
         /// pacing regulator trims against.
-        pub fn queued_pairs(&self) -> usize {
+        pub(crate) fn queued_pairs(&self) -> usize {
             self.prod.as_ref().map_or(0, |p| p.occupied_len() / 2)
         }
 
         /// Cumulative stereo pairs the device has *consumed* (pushed minus
         /// still-queued). Diagnostics: its rate should track 44100/s; a surge
         /// marks a host pipeline fill / re-quantum event.
-        pub fn consumed_pairs(&self) -> u64 {
+        pub(crate) fn consumed_pairs(&self) -> u64 {
             self.pushed_pairs.saturating_sub(self.queued_pairs() as u64)
         }
 
         /// Cumulative raw samples zero-filled on ring underrun (diagnostics —
         /// the "gapless audio" acceptance signal; steady state must not grow).
-        pub fn underrun_samples(&self) -> u64 {
+        pub(crate) fn underrun_samples(&self) -> u64 {
             self.underrun_samples.load(Ordering::Relaxed)
         }
     }

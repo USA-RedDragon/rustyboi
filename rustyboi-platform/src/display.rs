@@ -197,7 +197,7 @@ fn create_render_state(
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn run_with_gui(gb: Box<gb::GB>, config: &config::CleanConfig) -> Result<(), PlatformError> {
+pub(crate) fn run_with_gui(gb: Box<gb::GB>, config: &config::CleanConfig) -> Result<(), PlatformError> {
     // winit 0.30: the window is created inside `ApplicationHandler::resumed`, so
     // the entry point just builds the event loop and hands off to the shared
     // handler (see `run_gui_loop`).
