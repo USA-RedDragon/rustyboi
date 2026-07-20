@@ -7092,6 +7092,7 @@ impl Ppu {
     /// Mode 2 (OAM search) for one dot: the per-line reset at dot 0, the
     /// two-dots-per-slot sprite scan, and the mode-2 -> mode-3 arm. Lifted
     /// verbatim out of `step`'s `State::OAMSearch` arm.
+    #[inline(always)]
     fn step_mode2(&mut self, mmio: &mut mmio::Mmio) {
         // Window line-counter bookkeeping at the start of Mode 2. The WY
         // trigger latch (`window_y_triggered`/window-enable master) is handled by the
@@ -7554,6 +7555,7 @@ impl Ppu {
     /// Returns `true` when the line ended on this dot. In `step` that path was
     /// a bare `return`, so the caller must return immediately and skip the
     /// trailing DMG palette latch — the early exit is preserved, not dropped.
+    #[inline(always)]
     fn step_hblank(&mut self, mmio: &mut mmio::Mmio) -> bool {
         if self.ticks == 455 {
             self.ticks = 0;
@@ -7612,6 +7614,7 @@ impl Ppu {
     /// Returns `true` when the line ended on this dot. In `step` that path was
     /// a bare `return`, so the caller must return immediately and skip the
     /// trailing DMG palette latch — the early exit is preserved, not dropped.
+    #[inline(always)]
     fn step_vblank(&mut self, mmio: &mut mmio::Mmio) -> bool {
         // Partway through line 153, FF44 reads as 0 even though the
         // line itself has not ended. Update LYC=LY immediately so the
@@ -7761,6 +7764,7 @@ impl Ppu {
     ///
     /// Lifted verbatim out of `step_mode3_dot`. The block had no early exit of
     /// its own, so it needs no "stop this dot" signal back to the caller.
+    #[inline(always)]
     fn mode3_rekey_wx_change(&mut self, mmio: &mmio::Mmio, fast: bool) {
         if !fast
             && self.scheduled_mode0_dot.is_some()
@@ -7973,6 +7977,7 @@ impl Ppu {
     /// dot early (`break 'label` originally, `return` after that extraction), so
     /// the helper returns `bool` and the caller re-issues the `return` — the
     /// early exits are preserved explicitly rather than lost to the code motion.
+    #[inline(always)]
     fn mode3_activate_window(&mut self, mmio: &mut mmio::Mmio, trigger_we: bool) -> bool {
         if self.window_y_active_with(mmio, trigger_we)
             && !self.fetcher.is_fetching_window()
@@ -8111,6 +8116,7 @@ impl Ppu {
     /// there is no "stop this dot" signal to plumb. It did write one of the
     /// caller's locals — `push_this_dot`, which it only ever sets to `true` —
     /// so that becomes the return value and the caller re-applies it.
+    #[inline(always)]
     fn mode3_fetch_step(&mut self, mmio: &mut mmio::Mmio, cadence_even: bool, fetcher_lcdc_state: fetcher::FetcherLcdcState, pending_discard: u8) -> bool {
         let mut push_this_dot = false;
         if cadence_even
@@ -8442,6 +8448,7 @@ impl Ppu {
         push_this_dot
     }
 
+    #[inline(always)]
     fn step_mode3_dot(&mut self, mmio: &mut mmio::Mmio, fast: bool) {
         // Shift the DMG WE per-dot visibility history (see we_dot_hist).
         self.we_dot_hist = [
