@@ -4845,7 +4845,7 @@ impl Ppu {
     fn m0_time_exact(&self, mmio: &mmio::Mmio, m3_len: u128, is_cgb: bool, first_line: bool) -> u64 {
         let ds = mmio.is_double_speed_mode() as u32;
         let base: i64 = if is_cgb { 84 } else { 83 };
-        let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
+        let plus1 = self.ly_plus1();
         let ly_time = self.p_now as i64 + self.ly_counter(mmio).time as i64 + plus1;
         let m0_line_cycle = m3_len as i64 + base + if first_line { 2 } else { 0 };
         (ly_time - ((456 - m0_line_cycle) << ds)).max(0) as u64
@@ -6943,7 +6943,7 @@ impl Ppu {
     /// `line cycles(cc) + ds >= 80`, i.e. at line-cycle `80 - ds`.
     fn cgbp_begin_exact(&self, mmio: &mmio::Mmio) -> u64 {
         let ds = mmio.is_double_speed_mode() as i64;
-        let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
+        let plus1 = self.ly_plus1();
         let ly_time = self.p_now as i64 + self.ly_counter(mmio).time as i64 + plus1;
         (ly_time - ((456 - (80 - ds)) << ds)).max(0) as u64
     }
@@ -9746,15 +9746,44 @@ impl Ppu {
         Some(depth < limit)
     }
 
+    /// The shared LY-time gate phase: the DS->SS speed-change bridge drops the
+    /// `+1` the LY counter correction carries, and every consumer of an LY time
+    /// must sample the same phase.
+    #[inline]
+    fn ly_plus1(&self) -> i64 {
+        if self.lytime_no_plus1 { 0 } else { 1 }
+    }
+
+    /// The LY time in master cc, anchored on `abs_cc` plus the dots remaining in
+    /// the current line.
+    ///
+    /// NOTE: this is NOT interchangeable with the `p_now + ly_counter(mmio).time`
+    /// anchor used by `m0_time_exact` / `cgbp_begin_exact`. Both name "the LY
+    /// time", but they reach it by different routes — this one from `abs_cc` and
+    /// the live `line_cycle`, the other by reading the LY counter through mmio —
+    /// and only the latter is enable-anchored. They are left as two formulas
+    /// deliberately; collapsing them would be a semantic bet, not code motion.
+    ///
+    /// The `LCD_CYCLES_PER_LINE - self.line_cycle` subtraction is u32 and is kept
+    /// verbatim: it is the original's arithmetic, including its debug-overflow
+    /// behaviour if `line_cycle` were ever to exceed the line length.
+    fn ly_time_master(&self, ds: i64) -> i64 {
+        let plus1 = self.ly_plus1();
+        let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as i64;
+        self.p_now as i64 + self.abs_cc as i64 + (dots_to_next << ds) + plus1
+    }
+
+    /// The hardware `line cycles(cc) = 456 - ((the LY time - cc) >> ds)`.
+    fn line_cycles_at(&self, cc: i64, ds: i64) -> i64 {
+        stat_irq::LCD_CYCLES_PER_LINE as i64 - ((self.ly_time_master(ds) - cc) >> ds)
+    }
+
     /// The current line's start in master cc (the LY time anchor rebased one
     /// line back) — the line-identity reference `hdma_disable_fires` and
     /// `hdma_period_kick` use to reject a stale previous-line `m0_time_master`.
     fn line_start_master_cc(&self, double_speed: bool) -> i64 {
         let dsi = double_speed as i64;
-        let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
-        let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as i64;
-        let ly_time = self.p_now as i64 + self.abs_cc as i64 + (dots_to_next << dsi) + plus1;
-        ly_time - ((stat_irq::LCD_CYCLES_PER_LINE as i64) << dsi)
+        self.ly_time_master(dsi) - ((stat_irq::LCD_CYCLES_PER_LINE as i64) << dsi)
     }
 
     /// FF55=00 HDMA-DISABLE-vs-m0-edge race (the hardware HDMA-disable path): writing
@@ -9896,10 +9925,7 @@ impl Ppu {
                 let cc = access_cc as i64;
                 let ds = double_speed as i64;
                 let wrap_lc = if is_read {
-                    let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
-                    let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as i64;
-                    let ly_time = self.p_now as i64 + self.abs_cc as i64 + (dots_to_next << ds) + plus1;
-                    stat_irq::LCD_CYCLES_PER_LINE as i64 - ((ly_time - cc) >> ds)
+                    self.line_cycles_at(cc, ds)
                 } else {
                     self.line_cycle as i64 - self.lytime_no_plus1 as i64
                 };
@@ -9976,7 +10002,7 @@ impl Ppu {
                 // `plus1` here instead of the fixed `cc_end` (+1). Without it the
                 // lcdoffset variants (multi-`stop` LCD-enable phase) land 1 cc off:
                 // base (plus1=1) needs `cc+1`, lcdoffset (plus1=0) needs raw `cc`.
-                let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
+                let plus1 = self.ly_plus1();
                 let begun = cc + plus1 >= start as i64;
                 // The hardware CGB-palette-accessible window: accessible once `cc >= mode-0 time + 2`.
                 // `mode-0 time` is `the current line's mode-0 (HBlank) time at cc` — the CURRENT line's
@@ -10025,7 +10051,7 @@ impl Ppu {
             self.cgbp_block_start_cc.map(|start| {
                 let offset = if is_read { 4 - 3 * is_cgb as i64 } else { 1 };
                 let vram_begin = start as i64 - (offset << ds);
-                let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
+                let plus1 = self.ly_plus1();
                 cc + plus1 >= vram_begin
             })
         } else {
@@ -10102,10 +10128,7 @@ impl Ppu {
         let oam_line_cycle = if kind != 1 {
             0
         } else if is_read {
-            let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
-            let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as i64;
-            let ly_time = self.p_now as i64 + self.abs_cc as i64 + (dots_to_next << ds) + plus1;
-            stat_irq::LCD_CYCLES_PER_LINE as i64 - ((ly_time - cc) >> ds)
+            self.line_cycles_at(cc, ds)
         } else {
             self.line_cycle as i64 - self.lytime_no_plus1 as i64
         };
@@ -10179,10 +10202,7 @@ impl Ppu {
         let dsi = ds as i64;
         // The hardware `line cycles(cc) = 456 - ((the LY time - cc) >> ds)` (the same LY time
         // phase the OAM-read END boundary uses in `cpu_access_blocked`).
-        let plus1 = if self.lytime_no_plus1 { 0 } else { 1 };
-        let dots_to_next = (stat_irq::LCD_CYCLES_PER_LINE - self.line_cycle) as i64;
-        let ly_time = self.p_now as i64 + self.abs_cc as i64 + (dots_to_next << dsi) + plus1;
-        let line_cycles = stat_irq::LCD_CYCLES_PER_LINE as i64 - ((ly_time - cc) >> dsi);
+        let line_cycles = self.line_cycles_at(cc, dsi);
         // mode-2 readable window (before the mode-3 lock) OR mode-0 reached.
         let mode2_readable = line_cycles + dsi < 76 + 3 * is_cgb as i64;
         let mode0_reached = cc + 2 >= m0t;
