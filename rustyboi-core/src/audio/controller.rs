@@ -1247,6 +1247,74 @@ mod tests {
         audio.sync_cc(abs, 0, 0, false, true, false);
     }
 
+    /// Sync a DMG APU (`cgb = false`), so channel 4 takes the DMG-only
+    /// deferred-trigger fork.
+    fn dmg_sync(audio: &mut Audio, abs: u64) {
+        audio.sync_cc(abs, 0, 0, false, false, false);
+    }
+
+    /// A powered-on DMG APU with channel 4 armed (volume 15, envelope period
+    /// `period`, fastest LFSR) but not yet triggered, plus the abs CPU cc the
+    /// clock is parked at.
+    ///
+    /// `phase` shifts the boot anchor by 0-3 APU cc. The noise `alignment`
+    /// counts 2 MHz cycles since the NR52 0->1 write, and the DMG deferral only
+    /// engages when `alignment & 3 != 0`, so callers sweep `phase` to land the
+    /// ripple phase they need at their trigger cc.
+    fn dmg_noise_apu(phase: u64, period: u8) -> (Audio, u64) {
+        let mut audio = Audio::new();
+        audio.set_boot_cgb(false);
+        dmg_sync(&mut audio, 0);
+        let abs = 0x400 + phase * 2;
+        dmg_sync(&mut audio, abs);
+        audio.write(NR52, 0x80);
+        audio.write(NR42, 0xF0 | period); // volume 15, decreasing
+        audio.write(NR43, 0x00); // divisor 0 / shift 0: fastest LFSR
+        (audio, abs)
+    }
+
+    /// Advance the APU clock to exactly `target_cc`: coarse syncs (the
+    /// controller chunks them internally) until the last few cc, then one cc
+    /// per sync so we land on the exact cc. The power-on `last_update`
+    /// re-anchor can eat one cc, hence the creep tail.
+    fn advance_to_cc(audio: &mut Audio, abs: &mut u64, target_cc: u32) {
+        while audio.cc + 8 < target_cc {
+            *abs += 2 * (target_cc - audio.cc - 8) as u64;
+            dmg_sync(audio, *abs);
+        }
+        while audio.cc != target_cc {
+            *abs += 2;
+            dmg_sync(audio, *abs);
+        }
+    }
+
+    /// The channel-4 envelope volume, read back through PCM34's high nibble.
+    /// That nibble is `volume` only while the LFSR output bit is high, so take
+    /// the maximum over a window; the fastest NR43 setting steps the LFSR every
+    /// 4 cc, so a 0x100-cc window always catches a high bit. PCM34 is a
+    /// CGB-only register on the bus, but `Audio::pcm34` is just live channel
+    /// state (the CGB gate lives in the MMIO read path), so it reads fine here.
+    fn probe_ch4_volume(audio: &mut Audio, abs: &mut u64, at_cc: u32) -> u8 {
+        let mut v = 0;
+        for i in 0..0x100 {
+            advance_to_cc(audio, abs, at_cc + i);
+            v = v.max(audio.pcm34() >> 4);
+        }
+        assert_ne!(v, 0, "PCM34 probe never saw a high LFSR bit at cc {at_cc:#x}");
+        v
+    }
+
+    /// The cc of the next 64 Hz envelope frame. The frame runs on a DIV-APU
+    /// falling edge (cc a multiple of 0x1000) whose post-bump `div_divider & 7`
+    /// is 7; `div_divider` bumps once per falling edge.
+    fn next_env_frame_cc(audio: &Audio) -> u32 {
+        let mut k = 7u32.wrapping_sub(audio.div_divider as u32) & 7;
+        if k == 0 {
+            k = 8;
+        }
+        (((audio.cc >> 12) + 1) << 12) + (k - 1) * 0x1000
+    }
+
     fn distinct(values: &[u8]) -> usize {
         let mut seen = [false; 256];
         let mut n = 0;
@@ -1371,5 +1439,147 @@ mod tests {
             ));
         }
         assert!(failures.is_empty(), "after the 2^31 epoch wrap: {}", failures.join("; "));
+    }
+
+    /// A DMG NR44 trigger landing on an unaligned ripple phase is deferred 6 cc
+    /// (`dmg_delayed_start`), and the crossing re-applies it as the real start.
+    /// A SECOND trigger arriving while that deferral is still in flight must
+    /// RESTART the one delayed-start pipeline, not run a start of its own: the
+    /// deferral bailout used to require `dmg_delayed_start == 0`, so the
+    /// retrigger fell through to a full immediate start (LFSR reseed,
+    /// `prepare_noise_start`, envelope reload) and the still-armed crossing then
+    /// fired a SECOND complete start a couple of cc later, at a different
+    /// `alignment & 3`. Hardware has one pipeline; a retrigger inside it
+    /// restarts that pipeline.
+    ///
+    /// The deferral is a sub-10-cc phenomenon, so this drives `Audio` directly.
+    /// Observables (both DMG-legal as live channel state): NR52 bit 3 for the
+    /// cc the channel actually starts on, and PCM34's high nibble for the LFSR
+    /// output. Two starts cannot be faked by one, because they reseed the LFSR
+    /// and the ripple countdown twice at different cc — so the whole
+    /// post-trigger trace is compared against a reference run that performs a
+    /// SINGLE deferred trigger at the same cc.
+    #[test]
+    fn dmg_noise_retrigger_inside_deferral_starts_once() {
+        // APU cc of the first trigger, and cc sampled after the second.
+        const T1: u32 = 0x4000;
+        const WINDOW: u32 = 256;
+
+        // Pick a power-on phase whose `alignment & 3` at T1 is unaligned, i.e.
+        // one the DMG deferral engages on. A deferred trigger leaves NR52 bit 3
+        // clear at the write cc; an immediate start sets it.
+        let phase = (0..4u64)
+            .find(|&phase| {
+                let (mut audio, mut abs) = dmg_noise_apu(phase, 0);
+                advance_to_cc(&mut audio, &mut abs, T1);
+                audio.write(NR44, 0x80);
+                audio.read(NR52) & 0x08 == 0
+            })
+            .expect("no power-on phase puts the ch4 trigger on an unaligned ripple phase");
+
+        // T1+4 is 4 cc into the 6-cc deferral. `4 % 4 == 0` keeps
+        // `alignment & 3` unaligned there too, so the reference run's lone
+        // trigger defers exactly like the retrigger restarts.
+        let trace = |trigger_at_t1: bool| -> Vec<(bool, u8)> {
+            let (mut audio, mut abs) = dmg_noise_apu(phase, 0);
+            advance_to_cc(&mut audio, &mut abs, T1);
+            if trigger_at_t1 {
+                audio.write(NR44, 0x80);
+            }
+            advance_to_cc(&mut audio, &mut abs, T1 + 4);
+            audio.write(NR44, 0x80);
+            (0..WINDOW)
+                .map(|i| {
+                    advance_to_cc(&mut audio, &mut abs, T1 + 4 + i);
+                    (audio.read(NR52) & 0x08 != 0, audio.pcm34() >> 4)
+                })
+                .collect()
+        };
+        let retriggered = trace(true);
+        let single = trace(false);
+
+        // One start, at the RESTARTED crossing: 6 cc after the SECOND write.
+        // Offset 0 is the bug's immediate start.
+        assert_eq!(
+            retriggered.iter().position(|&(on, _)| on),
+            Some(6),
+            "channel 4 started at the wrong offset from the retrigger that \
+             landed inside the DMG deferral (0 = the buggy immediate start, \
+             6 = the restarted delayed-start crossing)"
+        );
+        // ...and it is ONE start, not two 2 cc apart.
+        assert_eq!(
+            retriggered, single,
+            "retriggering inside the DMG noise deferral did not collapse to a \
+             single start: the (NR52 ch4 bit, PCM34 high nibble) trace diverges \
+             from a single deferred trigger at the same cc"
+        );
+    }
+
+    /// A deferred DMG noise trigger re-applies from inside `advance`, where
+    /// `self.cc` is the CHUNK END — up to a whole DIV-APU grid cell past the
+    /// actual +6 crossing. `trigger()` anchoring `env_trigger_cc` there inflates
+    /// the envelope's 2-cc frame-escape window (`envelope.rs`
+    /// `env_frame_countdown`), so a trigger that should sit inside the 64 Hz
+    /// frame escapes its decrement and the whole envelope steps one frame late.
+    ///
+    /// Both legs write NR44 just below a 64 Hz frame boundary and then take ONE
+    /// sync across it; the controller's chunker stops one cc before the
+    /// boundary, so the chunk end is always `event_cc - 1` while the crossing
+    /// lands where the write placed it. The legs pin the boundary from both
+    /// sides: a crossing 3 cc before the frame must NOT escape, one 2 cc before
+    /// must. On the unfixed anchor both read `event_cc - 1` and both escape.
+    ///
+    /// Read out through the envelope: NR42 period 1 steps the volume 15 -> 14
+    /// one frame after the trigger, so an escaped frame leaves 15 where 14 is
+    /// due, sampled well clear of the next frame boundary.
+    #[test]
+    fn dmg_deferred_noise_trigger_anchors_env_race_at_the_crossing() {
+        // `lead` = cc from the NR44 write to the frame boundary; the deferral
+        // crossing lands 6 cc after the write, i.e. at `event_cc - (lead - 6)`.
+        let run = |phase: u64, lead: u32| -> Option<u8> {
+            let (mut audio, mut abs) = dmg_noise_apu(phase, 1);
+            // Clear of the power-on DIV-APU skip glitch before reading
+            // `div_divider` to locate the frame.
+            advance_to_cc(&mut audio, &mut abs, 0x8000);
+            let event_cc = next_env_frame_cc(&audio);
+            advance_to_cc(&mut audio, &mut abs, event_cc - lead);
+            audio.write(NR44, 0x80);
+            if audio.read(NR52) & 0x08 != 0 {
+                return None; // aligned ripple phase: no deferral at this phase
+            }
+            // One sync across the crossing AND the frame boundary. The chunker
+            // caps the first chunk at `event_cc - 1`, putting the crossing
+            // strictly inside it — the gap this test is about.
+            abs += 2 * 32;
+            dmg_sync(&mut audio, abs);
+            assert!(audio.cc > event_cc, "sync did not clear the frame boundary");
+            assert!(
+                audio.read(NR52) & 0x08 != 0,
+                "the deferred trigger never started the channel"
+            );
+            Some(probe_ch4_volume(&mut audio, &mut abs, event_cc + 0x4000))
+        };
+        let sweep = |lead: u32| {
+            (0..4u64).find_map(|phase| run(phase, lead)).unwrap_or_else(|| {
+                panic!("no power-on phase defers a trigger {lead} cc before the frame")
+            })
+        };
+
+        let crossing_3_cc_before = sweep(9);
+        let crossing_2_cc_before = sweep(8);
+
+        assert_eq!(
+            crossing_3_cc_before, 14,
+            "a deferred DMG trigger whose crossing lands 3 cc before the 64 Hz \
+             frame must NOT escape that frame's envelope decrement -- got the \
+             escaped (one frame late) volume, so `env_trigger_cc` was anchored \
+             at the chunk end instead of the crossing"
+        );
+        assert_eq!(
+            crossing_2_cc_before, 15,
+            "a deferred trigger whose crossing lands 2 cc before the frame is \
+             inside the escape window and must still skip the decrement"
+        );
     }
 }
