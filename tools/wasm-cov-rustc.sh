@@ -3,13 +3,12 @@
 # (its lib + integration tests), NOT its dependencies.
 #
 # Why: the wasm coverage build sets `-Cinstrument-coverage` workspace-wide, but
-# rustyboi-core / -egui / -frontend / -debugger each also emit a `cdylib` +
-# `staticlib` in the same rustc call, and instrumenting those makes their final
-# wasm link require `__llvm_profile_runtime` — a symbol only the minicov runtime
-# provides, and those crates don't (and mustn't) depend on minicov. Scoping
-# instrumentation to rustyboi-web sidesteps that AND is exactly what we want to
-# measure (the web glue). rustyboi-web's own cdylib link resolves the symbol via
-# its cfg-gated minicov dep; the test binaries get it from wasm-bindgen-test.
+# rustyboi-web's deps are exactly what we do NOT want to measure — the target is
+# the web glue. Scoping instrumentation to rustyboi-web also keeps every
+# `__llvm_profile_runtime` reference inside the one crate that can resolve it:
+# rustyboi-web's own cdylib link gets the symbol from its cfg-gated minicov dep,
+# and the test binaries get it from wasm-bindgen-test. No other workspace crate
+# depends on minicov (or should).
 #
 # The coverage cfg (`--cfg=wasm_bindgen_unstable_test_coverage`) is left on every
 # crate so wasm-bindgen-test still compiles its `__wbgtest_cov_dump` path.
@@ -32,13 +31,12 @@ fi
 
 # Non-web crate: drop the instrumentation flags AND the web-only naga math-shim
 # link-args (keep cfgs, other link-args, the normal --emit=dep-info,link,
-# everything else) so its cdylib/staticlib links. The shim staticlib carries its
-# own Rust panic runtime (its `#[panic_handler]` emits `rust_begin_unwind` with
-# the fixed `__rustc` lang-item mangling), so linking it into any std wasm crate
-# collides with that crate's own `rust_begin_unwind` (duplicate symbol). Only
-# rustyboi-web references naga's libm symbols, and its own link tolerates the
-# shim via the paired `--allow-multiple-definition` — neither belongs on the
-# core/egui/frontend/debugger cdylibs, which don't need the shim at all.
+# everything else). The shim staticlib carries its own Rust panic runtime (its
+# `#[panic_handler]` emits `rust_begin_unwind` with the fixed `__rustc`
+# lang-item mangling), so linking it into any std wasm crate collides with that
+# crate's own `rust_begin_unwind` (duplicate symbol). Only rustyboi-web
+# references naga's libm symbols, and only its link tolerates the shim via the
+# paired `--allow-multiple-definition`.
 args=()
 for a in "$@"; do
   case "$a" in

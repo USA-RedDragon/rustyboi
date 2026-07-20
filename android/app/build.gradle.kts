@@ -193,23 +193,6 @@ fun cargoNdkTask(name: String, cargoProfile: String): TaskProvider<Exec> = tasks
     inputs.file(rustWorkspaceRoot.file("Cargo.toml"))
     inputs.file(rustWorkspaceRoot.file("Cargo.lock"))
     abis.forEach { outputs.dir(jniLibsDir.dir(it)) }
-
-    // cargo-ndk copies every cdylib the build produced, but only
-    // rustyboi_platform_lib is the JNI entry the manifest loads
-    // (android.app.lib_name); core/debugger/egui/frontend are statically linked
-    // into it already, so their standalone cdylibs are dead weight in the APK.
-    // Capture a plain path String (not the Gradle Directory) so the execution-time
-    // action stays configuration-cache serializable.
-    val jniLibsPath = jniLibsDir.asFile.absolutePath
-    doLast {
-        abis.forEach { abi ->
-            File("$jniLibsPath/$abi").listFiles()?.forEach { f ->
-                if (f.name.endsWith(".so") && f.name != "librustyboi_platform_lib.so") {
-                    f.delete()
-                }
-            }
-        }
-    }
 }
 
 val buildRustLibDebug = cargoNdkTask("buildRustLibDebug", "debug")
