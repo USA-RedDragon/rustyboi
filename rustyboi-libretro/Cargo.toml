@@ -8,8 +8,8 @@ name = "rustyboi_libretro"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rustyboi-core = { path = "../rustyboi-core" }
-rustyboi-session = { path = "../rustyboi-session" }
+rustyboi-core = { workspace = true }
+rustyboi-session = { workspace = true }
 rustyboi-libretro-sys = { path = "../rustyboi-libretro-sys" }
 
 # cargo-machete matches `extern crate` names by source text; these deps are used

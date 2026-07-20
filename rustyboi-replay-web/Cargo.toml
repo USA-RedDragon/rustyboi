@@ -8,8 +8,8 @@ name = "rustyboi_replay_web"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rustyboi-replay = { path = "../rustyboi-replay", default-features = false }
-wasm-bindgen = "=0.2.126"
+rustyboi-replay = { workspace = true }
+wasm-bindgen = { workspace = true }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

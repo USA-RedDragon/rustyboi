@@ -16,17 +16,17 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
-rustyboi-core = { path = "../rustyboi-core" }
-rustyboi-frontend = { path = "../rustyboi-frontend" }
-rustyboi-session = { path = "../rustyboi-session" }
-clap = { version = "=4.6.2", features = ["derive"] }
+rustyboi-core = { workspace = true }
+rustyboi-frontend = { workspace = true }
+rustyboi-session = { workspace = true }
+clap = { workspace = true }
 log = "=0.4.33"
-wgpu = "=29.0.4"
-pollster = "=1.0.1"
+wgpu = { workspace = true }
+pollster = { workspace = true }
 cpal = "=0.18.1"
 ringbuf = "=0.5.1"
-serde_json = "=1.0.150"
-winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
+serde_json = { workspace = true }
+winit = { workspace = true }
 winit_input_helper = "=0.17.0"
 ureq = { version = "=3.3.0", default-features = false, features = ["rustls", "gzip"] }
 
@@ -35,21 +35,21 @@ gilrs = "=0.11.2"
 rustls-native-certs = "=0.8.4"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }
-rfd = "=0.17.2"
+winit = { workspace = true, features = ["wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }
+rfd = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "=0.61.2", features = ["Win32_Media"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
-winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
+winit = { workspace = true }
 objc2 = "=0.6.4"
 objc2-foundation = { version = "=0.3.2", features = ["NSArray", "NSString", "NSURL", "NSData", "NSObject"] }
 objc2-ui-kit = { version = "=0.3.2", features = ["UIApplication", "UIWindow", "UIView", "UIViewController", "UIResponder", "UIDocumentPickerViewController", "objc2-uniform-type-identifiers"] }
 objc2-uniform-type-identifiers = { version = "=0.3.2", features = ["UTType", "UTCoreTypes"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
-winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "android-game-activity"] }
+winit = { workspace = true, features = ["android-game-activity"] }
 android_logger = "=0.15.1"
 jni = "=0.21.1"
 libc = "=0.2.186"

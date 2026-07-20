@@ -11,17 +11,17 @@ name = "rustyboi_egui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
-rustyboi-core = { path = "../rustyboi-core" }
+rustyboi-core = { workspace = true }
 rustyboi-debugger = { path = "../rustyboi-debugger" }
-rustyboi-session = { path = "../rustyboi-session" }
-egui = "=0.35.0"
+rustyboi-session = { workspace = true }
+egui = { workspace = true }
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android"), not(target_os = "ios")))'.dependencies]
-rfd = "=0.17.2"
+rfd = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-rfd = "=0.17.2"
-wasm-bindgen-futures = "=0.4.76"
+rfd = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
 
 # cargo-machete matches `extern crate` names by source text; these deps are used
 # under their renamed `_lib` lib names (see the `[lib] name` comments), which the
