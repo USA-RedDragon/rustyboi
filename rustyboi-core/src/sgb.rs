@@ -14,9 +14,11 @@
 use serde::{Deserialize, Serialize};
 
 /// SGB command numbers (packet byte 0, bits 7-3), per Pan Docs "SGB Command"
-/// numbering. Named here are the commands we act on plus the sound/data ones we
-/// decode and deliberately ignore (see [`SgbSound`]); every other command is
-/// received normally and falls through to the no-op arm of the dispatch.
+/// numbering. Named here are the commands we act on, plus the ones we
+/// deliberately ignore but that earn a named dispatch arm because ignoring them
+/// is a decision worth pinning: the sound/data commands (see [`SgbSound`]) and
+/// `OBJ_TRN`. Every other command is received normally and falls through to the
+/// no-op arm of the dispatch.
 mod cmd {
     pub const PAL01: u8 = 0x00;
     pub const PAL23: u8 = 0x01;
@@ -50,6 +52,14 @@ mod cmd {
     /// sampling data). SNES-side only, and inert here for the same reason as
     /// [`SgbSound`].
     pub const SOU_TRN: u8 = 0x09;
+    /// OBJ_TRN ($18): "Super NES OBJ Mode". **Severed on every retail SGB** —
+    /// Pan Docs lists it under "Removed Commands": these "do nothing on all
+    /// retail SGB revisions", and the descriptions "only apply to some
+    /// prototype units". The SGB firmware's dispatch entry for $18 is a bare
+    /// `rts`; the handler survives only as unreferenced dead code. Doing
+    /// nothing here IS the hardware behavior — see the dispatch arm for why
+    /// this must not be modelled and must not join the `_TRN` group.
+    pub const OBJ_TRN: u8 = 0x18;
 }
 
 /// Decoded payload of the SGB SOUND command ($08) — recorded, never played.
@@ -502,6 +512,52 @@ impl Sgb {
                 // transfer. ($0F was previously misnamed `DATA_TRN` and sat in
                 // that arm; see `data_snd_and_data_trn_do_not_pend_a_vram_read`.)
             }
+            cmd::OBJ_TRN => {
+                // "Super NES OBJ Mode", and a no-op on PURPOSE: modelling it
+                // would make us LESS accurate to the retail hardware we target.
+                //
+                // What it was: while enabled, the SNES DMAs 24 of its OWN OAM
+                // entries every frame out of a window of GB VRAM ($8F90-$8FFF,
+                // reached by the usual "display tiles $F9-$FF on the bottom BG
+                // row" screen-readout trick) into SNES OAM slots 64-87, and the
+                // SNES OBJ engine draws them anywhere on the 256x224 screen from
+                // SNES character data, in SNES OBJ palettes 4-7. Packet bytes
+                // 2-9 name the four system palettes that fill those OBJ palettes
+                // (only when byte 1 bit 1 is set); byte 1 bit 0 is the enable.
+                //
+                // NOTE FOR ANYONE PLANNING TO "FINISH" THIS: it has nothing to
+                // do with the Game Boy's own sprites. GB OAM is never read (the
+                // ICD2 bridge only captures rendered GB video), GB OBJ attribute
+                // bits play no part, and no GB-rendered pixel is recolored. It
+                // is an independent SNES sprite layer, so there is no hook for
+                // it anywhere in the GB PPU — a per-pixel "which OBJ palette
+                // produced this pixel" side-channel through the sprite mixer
+                // would implement a feature that does not exist. (An earlier
+                // comment here described it that way; it was wrong.)
+                //
+                // Why it stays inert: Pan Docs now files $18 under "Removed
+                // Commands" — it does "nothing on all retail SGB revisions", the
+                // firmware dispatching it straight to `rts`. Real silicon
+                // ignores it, so we ignore it. Gambatte-core stubs it for the
+                // same reason; SameBoy has no $18 case at all. LLE emulators
+                // (bsnes/ares/Mesen2) inherit the same `rts` by running the real
+                // firmware. Booting every SGB-flagged title in a ~8000-ROM
+                // library for 900 frames found exactly ONE that even sends $18 —
+                // Nettou Real Bout Garou Densetsu Special, a single packet at
+                // init (`C1 03 04 00 05 00 06 00 07 00 ..`). TCRF names Bomberman
+                // Quest as a second sender (past that window), and reports that
+                // BOTH load no data to go with the command, so the packet is
+                // inert on hardware too. Real Bout's border and colorization
+                // render fully without it.
+                //
+                // It must NOT join the `_TRN` arm above despite the name. $18 is
+                // not a screen readout we consume, and `pending_trn` is a SINGLE
+                // slot: a game that sends OBJ_TRN between a real PAL/CHR/PCT/
+                // ATTR_TRN and its VBlank would overwrite that slot and silently
+                // cancel the transfer, dropping its palettes or border. This is
+                // the same trap $0F fell into; see
+                // `obj_trn_does_not_pend_a_vram_read`.
+            }
             _ => {
                 // Intentionally ignored (Pan Docs "SGB Command" numbering). Each
                 // acts purely on SNES-side state, which an HLE with no SNES core
@@ -510,8 +566,6 @@ impl Sgb {
                 //   TEST_EN ($0D) enable the SNES test/burn-in mode
                 //   ICON_EN ($0E) enable/disable SGB icons + the sound menu
                 //   JUMP    ($12) set the SNES program counter / NMI+IRQ vectors
-                //   OBJ_TRN ($18) per-sprite SGB palettes (would need a per-pixel
-                //                 OBJ side-channel the pipeline does not carry)
                 //   PAL_PRI ($19) select ATF vs. per-game palette priority
             }
         }
@@ -1275,6 +1329,50 @@ mod tests {
                 "{cmd_num:#04x} must not cancel a pending PAL_TRN"
             );
         }
+    }
+
+    /// OBJ_TRN ($18) is severed on every retail SGB (Pan Docs "Removed
+    /// Commands"; the firmware dispatches it to a bare `rts`), so receiving it
+    /// must change nothing at all. The packet under test is the exact one the
+    /// only shipping game that sends it uses — Nettou Real Bout Garou Densetsu
+    /// Special, `C1 03 04 00 05 00 06 00 07 00 ..`: enable + change-OBJ-color,
+    /// system palettes 4/5/6/7 into SNES OBJ palettes 4-7.
+    ///
+    /// The `_TRN` suffix is the trap: $18 is not a screen readout we consume,
+    /// and `pending_trn` is a single slot, so filing it with the real transfers
+    /// would let it silently cancel a PAL/CHR/PCT/ATTR_TRN still waiting for its
+    /// VBlank — exactly the bug $0F had (see
+    /// `data_snd_and_data_trn_do_not_pend_a_vram_read`).
+    #[test]
+    fn obj_trn_does_not_pend_a_vram_read() {
+        let real_bout = [
+            0xC1u8, 0x03, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(real_bout[0], (cmd::OBJ_TRN << 3) | 1, "header decodes as OBJ_TRN");
+
+        let mut sgb = Sgb::new();
+        let before = Sgb::new();
+        send_packet(&mut sgb, &real_bout);
+        assert_eq!(sgb.take_pending_trn(), None, "$18 must not schedule a VRAM transfer");
+        // "Does nothing" in full: no colorization, no palette/attribute edit, no
+        // mask change. A future implementation that draws SNES sprites would be
+        // wrong for retail hardware, and this is what pins that.
+        assert!(!sgb.colorized, "$18 must not colorize");
+        assert_eq!(sgb.palettes, before.palettes, "$18 must not touch the palettes");
+        assert_eq!(sgb.attr, before.attr, "$18 must not touch the attribute map");
+        assert_eq!(sgb.mask, before.mask, "$18 must not touch the mask");
+
+        // ...and it must not cancel a PAL_TRN still awaiting its VBlank.
+        let mut sgb = Sgb::new();
+        let mut pal = [0u8; 16];
+        pal[0] = (cmd::PAL_TRN << 3) | 1;
+        send_packet(&mut sgb, &pal);
+        send_packet(&mut sgb, &real_bout);
+        assert_eq!(
+            sgb.take_pending_trn(),
+            Some(cmd::PAL_TRN),
+            "$18 must not cancel a pending PAL_TRN"
+        );
     }
 
     /// Feed ATTR_TRN a synthetic 4KB block, then ATTR_SET each file.
