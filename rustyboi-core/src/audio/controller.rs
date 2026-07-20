@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::audio::{wave, square, noise};
+use crate::audio::{analog, wave, square, noise};
 use crate::memory::Addressable;
 
 pub(crate) const NR10: u16 = 0xFF10; // Channel 1 sweep register
@@ -131,11 +131,20 @@ pub struct Audio {
     // never serialized
     #[serde(skip)]
     channel_tap: Option<Vec<ChannelSample>>,
+    // The analog output stage (DAC-off fade + output high-pass). RC charge, not
+    // machine state: never serialized, and re-seeded from the model by
+    // `set_analog_model` on construction and after a savestate load.
+    #[serde(skip)]
+    analog: analog::AnalogStage,
 }
 
 /// One tapped sample: pre-mix channel outputs [ch1..ch4] + the mix registers
-/// (nr50, nr51) + the master enable — everything `get_mixed_output` consumes,
-/// so the stereo mix is exactly reconstructible from the tap alone.
+/// (nr50, nr51) + the master enable — everything [`Audio::mix_tap_sample`]
+/// consumes, so the stereo mix is exactly reconstructible from the tap alone.
+///
+/// The channel outputs are post-DAC but PRE-analog-stage: the DAC-off fade and
+/// the output high-pass are continuous and sit downstream of the tap, so a tap
+/// value is always one of the 16 DAC levels or 0.0 for an unpowered DAC.
 pub type ChannelSample = ([f32; 4], u8, u8, bool);
 
 fn default_ctl_lf_div() -> u32 {
@@ -185,7 +194,15 @@ impl Audio {
             skip_div_event: 0,
             cgb_de: false,
             channel_tap: None,
+            analog: analog::AnalogStage::default(),
         }
+    }
+
+    /// Select the analog stage's model family (the DAC-off fade and output
+    /// high-pass share one RC per machine). Called from `GB::new` and re-applied
+    /// after a savestate load, exactly like the other hardware-identity setters.
+    pub(crate) fn set_analog_model(&mut self, model: analog::AnalogModel) {
+        self.analog.set_model(model);
     }
 
     /// Engage/disengage the per-sample channel tap (recording/measurement).
@@ -941,34 +958,6 @@ impl Audio {
         self.audio_enabled
     }
 
-    pub(crate) fn get_master_volume_left(&self) -> u8 {
-        (self.nr50 >> 4) & 0x07
-    }
-
-    pub(crate) fn get_master_volume_right(&self) -> u8 {
-        self.nr50 & 0x07
-    }
-
-    pub(crate) fn is_channel_left_enabled(&self, channel: u8) -> bool {
-        match channel {
-            1 => (self.nr51 >> 4) & 0x01 != 0,
-            2 => (self.nr51 >> 5) & 0x01 != 0,
-            3 => (self.nr51 >> 6) & 0x01 != 0,
-            4 => (self.nr51 >> 7) & 0x01 != 0,
-            _ => false,
-        }
-    }
-
-    pub(crate) fn is_channel_right_enabled(&self, channel: u8) -> bool {
-        match channel {
-            1 => self.nr51 & 0x01 != 0,
-            2 => (self.nr51 >> 1) & 0x01 != 0,
-            3 => (self.nr51 >> 2) & 0x01 != 0,
-            4 => (self.nr51 >> 3) & 0x01 != 0,
-            _ => false,
-        }
-    }
-
     /// CGB PCM12 register (0xFF76): low nibble = channel 1 digital output, high
     /// nibble = channel 2. Returns 0 when the APU is powered off; the CGB-only
     /// / power gating is applied by the caller in `mmio.rs`.
@@ -1004,57 +993,75 @@ impl Audio {
         self.channel3.pcm_nibble() | (ch4 << 4)
     }
 
-    /// The four GB channels mixed to stereo. On an SGB this is still the whole
-    /// output: the SGB's own effects come from the SNES APU, which is decoded
-    /// but not synthesised ([`crate::sgb::SgbSound`]); adding them later means
-    /// summing into this stream here or at a downstream sink, with no change to
-    /// the channels below.
-    pub(crate) fn get_mixed_output(&self) -> (f32, f32) {
-        if !self.audio_enabled {
+    /// The four post-DAC analog channel levels, in channel order. Each is
+    /// either one of the 16 DAC levels or 0.0 for an unpowered DAC — a small
+    /// discrete alphabet, which is what the tap (and the `.rba` per-plane
+    /// palette encoder behind it) requires. The DAC-off fade and the output
+    /// high-pass are continuous and therefore live strictly downstream.
+    fn channel_outputs(&self) -> [f32; 4] {
+        [
+            self.channel1.get_output(),
+            self.channel2.get_output(),
+            self.channel3.get_output(),
+            self.channel4.get_output(),
+        ]
+    }
+
+    /// Which channels currently have a powered DAC, in channel order.
+    fn channel_dacs_on(&self) -> [bool; 4] {
+        [
+            self.channel1.dac_on(),
+            self.channel2.dac_on(),
+            self.channel3.dac_on(),
+            self.channel4.dac_on(),
+        ]
+    }
+
+    /// The mixer proper: NR51 routing, NR50 master volume, and the 4-channel
+    /// normalize. Pure — it is the whole of what a tap sample reconstructs to.
+    ///
+    /// `rustyboi_replay::mix` is a bit-for-bit clone of this function and the
+    /// f32 operation order is load-bearing (the compat gallery rebuilds audio
+    /// through it); the two must change together.
+    fn mix_stereo(ch: [f32; 4], nr50: u8, nr51: u8, enabled: bool) -> (f32, f32) {
+        if !enabled {
             return (0.0, 0.0);
         }
-
-        let ch1_output = self.channel1.get_output();
-        let ch2_output = self.channel2.get_output();
-        let ch3_output = self.channel3.get_output();
-        let ch4_output = self.channel4.get_output();
 
         let mut left_mix = 0.0;
         let mut right_mix = 0.0;
 
-        if self.is_channel_left_enabled(1) {
-            left_mix += ch1_output;
+        for (i, &out) in ch.iter().enumerate() {
+            if nr51 & (1 << (i + 4)) != 0 {
+                left_mix += out;
+            }
         }
-        if self.is_channel_left_enabled(2) {
-            left_mix += ch2_output;
-        }
-        if self.is_channel_left_enabled(3) {
-            left_mix += ch3_output;
-        }
-        if self.is_channel_left_enabled(4) {
-            left_mix += ch4_output;
-        }
-
-        if self.is_channel_right_enabled(1) {
-            right_mix += ch1_output;
-        }
-        if self.is_channel_right_enabled(2) {
-            right_mix += ch2_output;
-        }
-        if self.is_channel_right_enabled(3) {
-            right_mix += ch3_output;
-        }
-        if self.is_channel_right_enabled(4) {
-            right_mix += ch4_output;
+        for (i, &out) in ch.iter().enumerate() {
+            if nr51 & (1 << i) != 0 {
+                right_mix += out;
+            }
         }
 
         // Apply master volume
-        left_mix *= (self.get_master_volume_left() as f32 + 1.0) / 8.0;
-        right_mix *= (self.get_master_volume_right() as f32 + 1.0) / 8.0;
+        left_mix *= (((nr50 >> 4) & 0x07) as f32 + 1.0) / 8.0;
+        right_mix *= ((nr50 & 0x07) as f32 + 1.0) / 8.0;
 
         // Divide by 4 to normalize since we're summing 4 channels
         (left_mix / 4.0, right_mix / 4.0)
     }
+
+    /// Reconstruct the stereo mix of one tapped sample. This is the canonical
+    /// definition the `.rba` decoder reproduces; exposed so a consumer holding
+    /// tap data can check its own reconstruction against the core's.
+    ///
+    /// The result is PRE-analog-stage: it carries neither the DAC-off fade nor
+    /// the output high-pass, both of which are continuous, stateful, and
+    /// downstream of the tap.
+    pub fn mix_tap_sample(sample: ChannelSample) -> (f32, f32) {
+        let (ch, nr50, nr51, enabled) = sample;
+        Self::mix_stereo(ch, nr50, nr51, enabled)
+    }
+
 
     pub(crate) fn generate_samples(&mut self, cpu_cycles: u32) -> Vec<(f32, f32)> {
         let mut samples = Vec::new();
@@ -1071,24 +1078,35 @@ impl Audio {
         self.fractional_cycles += cpu_cycles as f32;
 
         while self.fractional_cycles >= cycles_per_sample {
-            samples.push(self.get_mixed_output());
-            if let Some(tap) = &mut self.channel_tap {
-                tap.push((
-                    [
-                        self.channel1.get_output(),
-                        self.channel2.get_output(),
-                        self.channel3.get_output(),
-                        self.channel4.get_output(),
-                    ],
-                    self.nr50,
-                    self.nr51,
-                    self.audio_enabled,
-                ));
-            }
+            samples.push(self.analog_sample());
             self.fractional_cycles -= cycles_per_sample;
         }
 
         samples
+    }
+
+    /// One host sample, taken all the way through the analog stage: the DACs'
+    /// discrete levels are tapped, then faded (for any DAC that has gone
+    /// unpowered), mixed, and high-passed.
+    ///
+    /// The tap is deliberately taken BEFORE the fade and the high-pass. Both
+    /// are continuous, so tapping downstream of them would hand the `.rba`
+    /// per-plane encoder an unbounded value alphabet — its palette is a `u16`,
+    /// and building one over a fade ramp would both overflow it and make
+    /// encoding quadratic.
+    ///
+    /// On an SGB this is still the whole output: the SGB's own effects come
+    /// from the SNES APU, which is decoded but not synthesised
+    /// ([`crate::sgb::SgbSound`]); adding them later means summing into this
+    /// stream here or at a downstream sink, with no change to the channels.
+    fn analog_sample(&mut self) -> (f32, f32) {
+        let raw = self.channel_outputs();
+        if let Some(tap) = &mut self.channel_tap {
+            tap.push((raw, self.nr50, self.nr51, self.audio_enabled));
+        }
+        let faded = self.analog.fade(raw, self.channel_dacs_on());
+        let (left, right) = Self::mix_stereo(faded, self.nr50, self.nr51, self.audio_enabled);
+        self.analog.high_pass(left, right)
     }
 }
 
@@ -1580,6 +1598,213 @@ mod tests {
             crossing_2_cc_before, 15,
             "a deferred trigger whose crossing lands 2 cc before the frame is \
              inside the escape window and must still skip the decrement"
+        );
+    }
+
+    /// A powered-on CGB APU with everything routed to both sides at full master
+    /// volume, parked at the returned abs CPU cc.
+    fn powered_apu() -> (Audio, u64) {
+        let mut audio = Audio::new();
+        audio.set_boot_cgb(true);
+        sync(&mut audio, 0);
+        sync(&mut audio, 0x400);
+        audio.write(NR52, 0x80);
+        audio.write(NR51, 0xFF);
+        audio.write(NR50, 0x77);
+        (audio, 0x400)
+    }
+
+    /// The DAC's polarity, observed through the real channel path rather than
+    /// through `dac_analog` alone. Pan Docs: "the digital range $0 to $F is
+    /// linearly translated to the analog range -1 to 1 … the slope is negative:
+    /// 'digital 0' maps to 'analog 1'". A 50 %-duty square at volume 15 spends
+    /// half its period at digital 15 and half at digital 0, so its pre-mix
+    /// output must visit exactly the two rails — and never 0.0, which under the
+    /// old unipolar convention was where digital 0 sat.
+    #[test]
+    fn dac_maps_digital_zero_to_plus_one_and_digital_fifteen_to_minus_one() {
+        let (mut audio, mut abs) = powered_apu();
+        audio.write(NR21, 0x80); // duty 2 (50%)
+        audio.write(NR22, 0xF0); // volume 15, no envelope: DAC on
+        audio.write(NR23, 0x00);
+        audio.write(NR24, 0x83); // trigger
+
+        let mut saw_zero = false;
+        let mut saw_fifteen = false;
+        for _ in 0..4000 {
+            abs += 8;
+            sync(&mut audio, abs);
+            let digital = audio.channel2.pcm_nibble();
+            let analog = audio.channel_outputs()[1];
+            match digital {
+                0 => {
+                    assert_eq!(analog, 1.0, "digital 0 must be analog +1");
+                    saw_zero = true;
+                }
+                15 => {
+                    assert_eq!(analog, -1.0, "digital 15 must be analog -1");
+                    saw_fifteen = true;
+                }
+                d => panic!("a 50% duty at volume 15 has no digital {d}"),
+            }
+        }
+        assert!(saw_zero && saw_fifteen, "the square never swung between rails");
+    }
+
+    /// An unpowered DAC contributes analog 0 to the tap — the endpoint the fade
+    /// coasts to. Pan Docs' recommended pop-free silencing (write $08 to NRx2)
+    /// is the discriminating case: it zeroes the digital output while KEEPING
+    /// the DAC powered, so the channel must sit at analog +1, not at silence.
+    #[test]
+    fn a_silenced_channel_holds_analog_one_while_only_a_dead_dac_reads_zero() {
+        let (mut audio, mut abs) = powered_apu();
+        audio.write(NR21, 0x80);
+        audio.write(NR22, 0xF0);
+        audio.write(NR23, 0x00);
+        audio.write(NR24, 0x83);
+        abs += 64;
+        sync(&mut audio, abs);
+
+        // $08: volume 0, envelope increasing -> digital 0 with the DAC still on.
+        audio.write(NR22, 0x08);
+        audio.write(NR24, 0x83);
+        abs += 64;
+        sync(&mut audio, abs);
+        assert!(audio.channel2.dac_on(), "$08 must keep the DAC powered");
+        assert_eq!(audio.channel2.pcm_nibble(), 0);
+        assert_eq!(
+            audio.channel_outputs()[1],
+            1.0,
+            "a silenced-but-powered channel sits at analog +1, not at 0"
+        );
+
+        // $00: the DAC goes down, and with it the channel's contribution.
+        audio.write(NR22, 0x00);
+        abs += 64;
+        sync(&mut audio, abs);
+        assert!(!audio.channel2.dac_on(), "$00 must unpower the DAC");
+        assert_eq!(
+            audio.channel_outputs()[1],
+            0.0,
+            "an unpowered DAC contributes analog 0"
+        );
+    }
+
+    /// CH3 emits its LATCHED sample buffer, not a live wave-RAM read. Pan Docs:
+    /// "CH3 does not emit samples directly, but stores every sample read into a
+    /// buffer, and emits that continuously; (re)triggering the channel does not
+    /// clear nor refresh this buffer". The buffer is cleared when the APU is
+    /// powered on, so a channel triggered over an all-$FF wave RAM must still
+    /// emit digital 0 until its first fetch lands — a live read would give
+    /// digital 15 immediately. The audible path and PCM34 must agree throughout.
+    #[test]
+    fn wave_emits_the_latched_sample_buffer_not_a_live_wave_ram_read() {
+        let (mut audio, mut abs) = powered_apu();
+        for i in 0..16u16 {
+            audio.write(WAV_START + i, 0xFF);
+        }
+        audio.write(NR30, 0x80); // DAC on
+        audio.write(NR32, 0x20); // output level 1: no shift
+        audio.write(NR33, 0x00);
+        audio.write(NR34, 0x87); // trigger, slow period so the first fetch is far off
+
+        assert!(audio.channel3.dac_on());
+        assert_eq!(
+            audio.channel3.pcm_nibble(),
+            0,
+            "the power-on-cleared buffer still reads 0 right after the trigger"
+        );
+        assert_eq!(
+            audio.channel_outputs()[2],
+            1.0,
+            "a live wave-RAM read would have emitted digital 15 (analog -1) here"
+        );
+
+        // Run until the first fetch replaces the buffer; the audible path must
+        // track PCM34 exactly, sample for sample, the whole way.
+        let mut reached_fifteen = false;
+        for _ in 0..4000 {
+            abs += 8;
+            sync(&mut audio, abs);
+            let digital = audio.channel3.pcm_nibble();
+            assert_eq!(
+                audio.channel_outputs()[2],
+                super::analog::dac_analog(digital),
+                "the audible path diverged from PCM34 at digital {digital}"
+            );
+            reached_fifteen |= digital == 15;
+        }
+        assert!(
+            reached_fifteen,
+            "the fetch never latched the $FF wave RAM into the buffer"
+        );
+    }
+
+    /// The high-pass and the DAC-off fade are the analog stage's continuous
+    /// state, and both are deliberately absent from the tap: the `.rba`
+    /// per-plane encoder builds a `u16` palette of DISTINCT values, so a
+    /// continuous ramp there would blow past 65,535 uniques. Whatever the APU
+    /// is doing, a tap sample may only ever carry one of the 16 DAC levels or
+    /// the unpowered-DAC 0.0.
+    #[test]
+    fn tapped_channel_values_stay_a_small_discrete_alphabet() {
+        let (mut audio, mut abs) = powered_apu();
+        audio.set_channel_tap(true);
+        for i in 0..16u16 {
+            audio.write(WAV_START + i, 0x1Fu8.wrapping_mul(i as u8 + 1));
+        }
+        // All four channels live, then torn down one DAC at a time so the fade
+        // is running underneath while the tap is sampled.
+        audio.write(NR12, 0xF3);
+        audio.write(NR13, 0x00);
+        audio.write(NR14, 0x83);
+        audio.write(NR22, 0xA2);
+        audio.write(NR23, 0x40);
+        audio.write(NR24, 0x84);
+        audio.write(NR30, 0x80);
+        audio.write(NR32, 0x40);
+        audio.write(NR33, 0x00);
+        audio.write(NR34, 0x82);
+        audio.write(NR42, 0xF2);
+        audio.write(NR43, 0x37);
+        audio.write(NR44, 0x80);
+
+        let mut allowed: Vec<f32> = (0..=15).map(super::analog::dac_analog).collect();
+        allowed.push(0.0);
+
+        for step in 0..600 {
+            abs += 128;
+            sync(&mut audio, abs);
+            audio.generate_samples(64);
+            match step {
+                200 => audio.write(NR12, 0x00),
+                300 => audio.write(NR30, 0x00),
+                400 => audio.write(NR42, 0x00),
+                500 => audio.write(NR22, 0x00),
+                _ => {}
+            }
+        }
+
+        let tap = audio.drain_channel_tap();
+        // 600 * 64 cycles / (4194304/44100) cycles per sample.
+        assert!(tap.len() > 350, "tap collected only {} samples", tap.len());
+        let mut distinct: Vec<f32> = Vec::new();
+        for (chs, ..) in &tap {
+            for &v in chs {
+                assert!(
+                    allowed.contains(&v),
+                    "tapped {v} is not a DAC level -- the fade or the high-pass \
+                     leaked upstream of the tap"
+                );
+                if !distinct.contains(&v) {
+                    distinct.push(v);
+                }
+            }
+        }
+        assert!(
+            distinct.len() <= 17,
+            "tap alphabet grew to {} values",
+            distinct.len()
         );
     }
 }

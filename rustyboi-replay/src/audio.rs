@@ -8,7 +8,7 @@ use crate::stream::{src_byte, src_take, src_varint, DecodeError, Source};
 // spot (x0.483 vs coding the stereo mix): each channel's DAC stream has a tiny
 // alphabet (<=16 levels) and its runs aren't broken by the other channels'
 // edges. The decoder rebuilds the exact stereo mix with the same arithmetic as
-// the core's `get_mixed_output` (NR51 pan masks, NR50 volume, /4) — proven
+// the core's `Audio::mix_tap_sample` (NR51 pan masks, NR50 volume, /4) — proven
 // byte-exact on real PCM — so no APU is ever needed client-side.
 //
 // Container (little-endian):
@@ -179,7 +179,7 @@ fn read_plane<T: Copy, F: Fn(&mut Source) -> Result<T, DecodeError>>(
 }
 
 /// Decodes an `.rba` to interleaved stereo f32, one video frame's span at a
-/// time, reproducing `get_mixed_output`'s arithmetic exactly.
+/// time, reproducing `Audio::mix_tap_sample`'s arithmetic exactly.
 pub struct AudioDecoder {
     rate: u32,
     fps_num: u32,
@@ -281,9 +281,29 @@ impl AudioDecoder {
     }
 }
 
-/// The core's `get_mixed_output` arithmetic, bit-for-bit: conditional adds in
+/// The core's `Audio::mix_stereo` arithmetic, bit-for-bit: conditional adds in
 /// channel order, then master volume `(vol+1)/8`, then /4 — f32 op order
-/// matters for exact reconstruction (proven byte-exact on real PCM).
+/// matters for exact reconstruction (proven byte-exact on real PCM). The two
+/// must change together; `rustyboi-test-runner`'s
+/// `core_mix_and_replay_decode_agree_bit_for_bit` pins them against each other.
+///
+/// The boundary this reproduces is deliberately PRE-analog-stage. The core
+/// applies two further, continuous stages after the mixer — the per-channel
+/// DAC-off fade and the model-gated output high-pass — and neither is
+/// reproduced here:
+///
+///   * The tap they would have to be recorded from is upstream of them by
+///     construction: the per-plane encoder above builds a `u16` palette of
+///     distinct values, which a continuous fade ramp would both overflow and
+///     make quadratic to encode. A tap value is always one of 16 DAC levels or
+///     0.0.
+///   * The high-pass is stateful, and `seek_frame` seeks this decoder freely.
+///     Filter state at an arbitrary seek target is not reconstructible without
+///     decoding everything before it, so the decoded stream stays pre-HPF
+///     rather than carrying a filter whose state depends on how you got here.
+///
+/// The practical effect on playback is the absence of a DC-removal stage, which
+/// costs a static offset rather than any of the signal.
 fn mix(chs: [f32; 4], nr50: u8, nr51: u8, enabled: bool) -> (f32, f32) {
     if !enabled {
         return (0.0, 0.0);
