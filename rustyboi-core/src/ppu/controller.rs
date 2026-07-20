@@ -5715,12 +5715,7 @@ impl Ppu {
         let x_flip = cgb && (tile_attrs & 0x20) != 0;
         let tile_line = (bg_y % 8) as u8;
         let eff_line = if y_flip { 7 - tile_line } else { tile_line };
-        let data_addr: u16 = if (lcdc & (LCDCFlags::BGWindowTileDataSelect as u8)) != 0 {
-            0x8000 + (tile_num as u16) * 16 + (eff_line as u16) * 2
-        } else {
-            let signed = tile_num as i8;
-            ((0x9000u16 as i16).wrapping_add((signed as i16) * 16 + (eff_line as i16) * 2)) as u16
-        };
+        let data_addr = self.fetcher.get_tile_data_address(tile_num, eff_line, lcdc);
         let bank = if cgb && (tile_attrs & 0x08) != 0 { 1 } else { 0 };
         let low = mmio.read_vram_bank(bank, data_addr);
         let high = mmio.read_vram_bank(bank, data_addr + 1);
