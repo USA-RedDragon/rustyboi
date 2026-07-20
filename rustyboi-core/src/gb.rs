@@ -998,18 +998,6 @@ impl GB {
         compatibility
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
-    /// How the currently-inserted cartridge pairs with the current hardware.
-    ///
-    /// Returns [`Compatibility::Full`] when no cartridge is loaded.
-    pub(crate) fn cartridge_compatibility(&self) -> Compatibility {
-        match self.mmio.get_cartridge() {
-            Some(cartridge) => cartridge_compatibility(self.hardware, cartridge),
-            None => Compatibility::Full,
-        }
-    }
-
     /// Check if CGB features should be enabled
     /// CGB features are enabled when:
     /// 1. Hardware is CGB, AND
@@ -1470,14 +1458,6 @@ impl GB {
         self.ppu.set_cgb_color_conversion(conversion);
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
-    /// The four DMG-shade colours (index 0 = lightest) for this machine's model
-    /// and colour-correction setting; see [`mono_shades`].
-    pub(crate) fn mono_shades(&self) -> [[u8; 3]; 4] {
-        mono_shades(self.hardware, self.ppu.cgb_color_conversion())
-    }
-
     pub fn set_fetch_debug_events_enabled(&mut self, enabled: bool) {
         self.ppu.set_fetch_debug_events_enabled(enabled);
     }
@@ -1556,16 +1536,16 @@ impl GB {
         b.mmio.attach_link(pb);
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Plug one end of a link cable into this instance (the other end goes to
     /// a second instance, possibly owned by another window/process transport).
     pub(crate) fn attach_link_peer(&mut self, peer: crate::serial::LinkPeer) {
         self.mmio.attach_link(peer);
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     pub(crate) fn link_attached(&self) -> bool {
         self.mmio.link_attached()
     }
@@ -1575,8 +1555,8 @@ impl GB {
         self.mmio.detach_serial_device();
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Point two GBC instances' IR ports at each other (Pan Docs "GBC Infrared
     /// Communication"). Each side's emitter (RP bit 0) illuminates the other's
     /// receiver (RP bit 1). The harness pumps both instances (any interleave);
@@ -1589,36 +1569,36 @@ impl GB {
         b.mmio.attach_ir(lb);
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Plug one end of a shared IR channel into this instance (the other end
     /// goes to a second instance, possibly behind a socket/process transport).
     pub(crate) fn attach_ir_peer(&mut self, link: crate::ir::IrLink) {
         self.mmio.attach_ir(link);
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Diagnostic self-test: make this instance's IR port see its own emitter.
     pub(crate) fn set_ir_loopback(&mut self) {
         self.mmio.set_ir_loopback();
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     pub(crate) fn ir_attached(&self) -> bool {
         self.mmio.ir_attached()
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Unplug the IR partner (back to a lone GBC that never sees light).
     pub(crate) fn detach_ir(&mut self) {
         self.mmio.detach_ir();
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Connect 2-4 Game Boys through a 4-Player Adapter (DMG-07). The adapter is
     /// the clock master, so each Game Boy uses external-clock serial; the shared
     /// hub runs the Pan Docs ping/transmission protocol. The frontend pumps all
@@ -1631,22 +1611,22 @@ impl GB {
         }
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Plug one DMG-07 port into this instance (the other ports go to other
     /// instances, possibly behind a socket/process transport).
     pub(crate) fn attach_four_player_port(&mut self, port: crate::dmg07::FourPlayerPort) {
         self.mmio.attach_four_player(port);
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     pub(crate) fn four_player_attached(&self) -> bool {
         self.mmio.four_player_attached()
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Plug a Mobile Adapter GB into the link port. The adapter answers the
     /// libmobile packet protocol (session begin/end, config read/write); live
     /// networking is out of scope (see `crate::mobile`).
@@ -1654,8 +1634,8 @@ impl GB {
         self.mmio.attach_mobile_adapter(crate::mobile::MobileAdapter::new());
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// True once a game has completed the START "NINTENDO" handshake with an
     /// attached Mobile Adapter (i.e. detected it and begun a session).
     pub(crate) fn mobile_session_started(&self) -> bool {
@@ -1666,8 +1646,8 @@ impl GB {
         self.mmio.printer().is_some()
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Debug/test: the in-flight serial transfer's completion event cc
     /// (None while idle or while a link transfer holds for the peer).
     pub(crate) fn serial_transfer_complete_at(&self) -> Option<u64> {
@@ -1799,23 +1779,12 @@ impl GB {
             .map(|c| c.detach_rom())
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
-    // `&mut self` is forced by `to_state_bytes`, which syncs lazy subsystems first.
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) fn to_state_file(&mut self, path: &str) -> Result<(), io::Error> {
-        fs::write(path, self.to_state_bytes()?)?;
-        Ok(())
-    }
-
     /// Serialize the whole machine to a savestate byte buffer. WASM-clean (no
     /// filesystem): the caller owns the bytes. Uses a compact binary format
     /// (bincode) — `serde_bytes` blobs (VRAM/WRAM/OAM/framebuffers) become
     /// length-prefixed byte runs, not JSON number-arrays, so a snapshot is
     /// ~its raw size instead of megabytes of text (inline web rewind was
-    /// stalling on the JSON encode). Mirrors `to_state_file`, so a state saved
-    /// one way round-trips through the other.
-    ///
+    /// stalling on the JSON encode).    ///
     /// Deliberately unversioned while the project is pre-release: the layout
     /// moves freely and old states are simply invalid. A stale buffer therefore
     /// fails as an opaque bincode error, or — if it happens to decode — yields a
@@ -1833,7 +1802,7 @@ impl GB {
     }
 
     /// Reconstruct a machine from a savestate buffer produced by
-    /// `to_state_bytes` (or `to_state_file`). Re-derives the `#[serde(skip)]`
+    /// `to_state_bytes`. Re-derives the `#[serde(skip)]`
     /// cartridge-flag cache exactly as `from_state_file` does. WASM-clean.
     ///
     /// Unversioned (see `to_state_bytes`): a buffer from a different layout is

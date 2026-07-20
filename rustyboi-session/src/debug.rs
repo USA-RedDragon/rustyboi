@@ -102,24 +102,6 @@ pub struct CpuState {
     pub ime: bool,
 }
 
-// The four F-register flag accessors have no caller left after the visibility
-// narrowing; kept (not deleted) pending triage.
-#[allow(dead_code)]
-impl CpuState {
-    pub(crate) fn flag_z(&self) -> bool {
-        self.f & 0x80 != 0
-    }
-    pub(crate) fn flag_n(&self) -> bool {
-        self.f & 0x40 != 0
-    }
-    pub(crate) fn flag_h(&self) -> bool {
-        self.f & 0x20 != 0
-    }
-    pub(crate) fn flag_c(&self) -> bool {
-        self.f & 0x10 != 0
-    }
-}
-
 /// PPU pipeline state (formerly read via `get_ppu_debug_info`'s live `&Ppu`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PpuMode {

@@ -261,8 +261,8 @@ pub(crate) enum SerialDevice {
 }
 
 impl SerialDevice {
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     pub(crate) fn is_link(&self) -> bool {
         matches!(self, SerialDevice::Link(_))
     }
@@ -533,8 +533,8 @@ impl Serial {
         self.sc
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Debug/test: the pending transfer's completion event cc (None when idle
     /// or while holding for the link peer).
     pub(crate) fn transfer_complete_at(&self) -> Option<u64> {

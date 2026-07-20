@@ -293,18 +293,21 @@ impl Sgb {
         self.locked = locked;
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// The state requested by the most recent SGB SOUND command (effect codes,
-    /// pitch, volume, mute). Nothing in-tree consumes it — it is the read side
-    /// of the deferred-audio seam described on [`SgbSound`].
+    /// pitch, volume, mute). No production consumer — it is the read side of the
+    /// deferred-audio seam described on [`SgbSound`] — but the SOUND-command
+    /// decode tests read it, so it is `cfg(test)` rather than deleted: dropping
+    /// it would take the only coverage of that decode with it. Make it
+    /// unconditional when SGB audio is wired up.
+    #[cfg(test)]
     pub(crate) fn sound(&self) -> SgbSound {
         self.sound
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
     /// Number of players currently selected by MLT_REQ (1/2/3-glitch/4).
+    /// `cfg(test)` for the same reason as [`Sgb::sound`]: the MLT_REQ decode
+    /// tests are its only readers.
+    #[cfg(test)]
     pub(crate) fn players(&self) -> u8 {
         self.players
     }

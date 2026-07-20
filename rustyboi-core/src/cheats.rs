@@ -51,37 +51,6 @@ pub struct GameShark {
     pub value: u8,
 }
 
-#[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
-/// Turn a hex character into its 0-15 value, or `None` if not a hex digit.
-fn hex_nibble(c: char) -> Option<u8> {
-    c.to_digit(16).map(|d| d as u8)
-}
-
-#[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
-/// Strip separators and decode a code string into hex nibbles. Whitespace,
-/// `-` and `:` are ignored; any other non-hex character fails.
-fn nibbles(code: &str) -> Option<Vec<u8>> {
-    code.chars()
-        .filter(|c| !c.is_whitespace() && *c != '-' && *c != ':')
-        .map(hex_nibble)
-        .collect()
-}
-
-#[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
-/// Decode a Game Genie code (`ABC-DEF` or `ABC-DEF-GHI`, separators optional)
-/// into a [`GameGenie`]. Returns `None` for any input that is not 6 or 9 valid
-/// hex nibbles. See the module docs for the exact layout.
-pub(crate) fn decode_game_genie(code: &str) -> Option<GameGenie> {
-    let n = nibbles(code)?;
-    if n.len() != 6 && n.len() != 9 {
-        return None;
-    }
-    decode_game_genie_nibbles(&n)
-}
-
 /// Decode from already-extracted nibbles (6 or 9). Shared with frontends that
 /// have their own length dispatch.
 pub fn decode_game_genie_nibbles(n: &[u8]) -> Option<GameGenie> {
@@ -103,18 +72,6 @@ pub fn decode_game_genie_nibbles(n: &[u8]) -> Option<GameGenie> {
     Some(GameGenie { addr, value, compare })
 }
 
-#[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
-/// Decode an 8-nibble GameShark code (`ABCDEFGH`, separators optional) into a
-/// [`GameShark`]. Returns `None` unless it is exactly 8 valid hex nibbles.
-pub(crate) fn decode_gameshark(code: &str) -> Option<GameShark> {
-    let n = nibbles(code)?;
-    if n.len() != 8 {
-        return None;
-    }
-    decode_gameshark_nibbles(&n)
-}
-
 /// Decode from already-extracted nibbles (exactly 8).
 pub fn decode_gameshark_nibbles(n: &[u8]) -> Option<GameShark> {
     if n.len() != 8 {
@@ -131,6 +88,25 @@ pub fn decode_gameshark_nibbles(n: &[u8]) -> Option<GameShark> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// String-form parsing used to live in the production decoders; only the
+    /// nibble entry points are reachable now (session decodes to nibbles first),
+    /// so it lives here to keep these vectors readable while still exercising
+    /// the real `*_nibbles` path.
+    fn nibbles(code: &str) -> Option<Vec<u8>> {
+        code.chars()
+            .filter(|c| !c.is_whitespace() && *c != '-' && *c != ':')
+            .map(|c| c.to_digit(16).map(|d| d as u8))
+            .collect()
+    }
+
+    fn decode_game_genie(code: &str) -> Option<GameGenie> {
+        decode_game_genie_nibbles(&nibbles(code)?)
+    }
+
+    fn decode_gameshark(code: &str) -> Option<GameShark> {
+        decode_gameshark_nibbles(&nibbles(code)?)
+    }
 
     // Vector worked out directly from the code layout above:
     // 00A-B7F: op1=0x00A, op2=0xB7F.

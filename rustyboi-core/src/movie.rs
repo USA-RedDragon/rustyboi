@@ -328,8 +328,10 @@ pub fn frame_is_non_blank(gb: &GB, frame: &Frame) -> bool {
 // Scripted rendering-test DSL
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+/// `cfg(test)`: no production consumer, but the CGB boot-palette-combo and
+/// determinism tests below are built on it — deleting it would take that
+/// coverage with it. Make it unconditional if a bin ever needs the DSL.
+#[cfg(test)]
 /// A fluent builder for scripted, deterministic rendering scenarios: pick
 /// hardware, insert a ROM, optionally hold buttons across `skip_bios` (to drive
 /// the CGB boot palette combo), then run N frames and inspect the final frame.
@@ -347,6 +349,7 @@ pub(crate) struct Scenario {
     held: ButtonState,
 }
 
+#[cfg(test)]
 impl Scenario {
     #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
     // unfinished-feature code lives here — check the feature roadmap before deleting.

@@ -37,8 +37,8 @@ pub(crate) struct IrLink {
 }
 
 impl IrLink {
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Mint a channel and hand back its two ends. Attach each to a GBC via
     /// [`crate::gb::GB::attach_ir_peer`] (or [`crate::gb::GB::connect_ir`],
     /// which does both).
@@ -74,12 +74,12 @@ impl Clone for IrLink {
 pub(crate) enum IrDevice {
     #[default]
     Disconnected,
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// A second GBC instance sharing an [`IrLink`].
     Link(IrLink),
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     /// Diagnostic self-test: the port sees its OWN emitter (as though an IR
     /// mirror were held to it). Not how two GBCs communicate — tests only.
     Loopback,
@@ -103,8 +103,8 @@ impl IrDevice {
         }
     }
 
-    #[allow(dead_code)] // no in-tree caller; `pub` was masking dead_code. Unwired-peripheral and
-    // unfinished-feature code lives here — check the feature roadmap before deleting.
+    #[allow(dead_code)] // KEEP (owner decision 2026-07-20): implemented peripheral awaiting frontend
+    // wiring, not rot. No in-tree caller, so `dead_code` fires; do not delete.
     pub(crate) fn is_connected(&self) -> bool {
         !matches!(self, IrDevice::Disconnected)
     }

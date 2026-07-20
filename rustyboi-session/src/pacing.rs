@@ -39,9 +39,10 @@ pub(crate) const HOST_SAMPLE_RATE: f64 = 44_100.0;
 /// general case.
 pub const NOMINAL_FPS: f64 = 4_194_304.0 / DOTS_PER_FRAME;
 
-/// Exact stereo sample pairs per emulated frame at DMG rate.
-// No user left after the visibility narrowing; kept pending triage.
-#[allow(dead_code)]
+/// Exact stereo sample pairs per emulated frame at DMG rate. `cfg(test)`: no
+/// production consumer after the visibility narrowing, but the pacing tests
+/// assert against it.
+#[cfg(test)]
 pub(crate) const SAMPLES_PER_FRAME_F64: f64 = HOST_SAMPLE_RATE / NOMINAL_FPS;
 
 /// Emulated frames per real second for a machine clocked at `cpu_hz`. An NTSC
