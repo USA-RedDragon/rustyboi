@@ -7744,6 +7744,1337 @@ impl Ppu {
         false
     }
 
+    /// Mode 3 (pixel transfer) for one dot: the fetcher/FIFO advance, the
+    /// SCX fine-scroll rekeys, the window-activation paths and the mode-3 ->
+    /// mode-0 transition. Lifted verbatim out of `step`'s
+    /// `State::PixelTransfer` arm.
+    ///
+    /// That arm was a `'label: { .. }` block whose 16 `break 'label;` sites mean
+    /// "this dot is done, but `step` still runs its trailing DMG palette latch".
+    /// As a method each of those is a plain `return;` with the same meaning:
+    /// control resumes at the caller after the `match`, which is where the
+    /// labelled break landed. No early exit is added or dropped.
+    fn step_mode3_dot(&mut self, mmio: &mut mmio::Mmio, fast: bool) {
+        // Shift the DMG WE per-dot visibility history (see we_dot_hist).
+        self.we_dot_hist = [
+            self.lcdc_has(LCDCFlags::WindowDisplayEnable),
+            self.we_dot_hist[0],
+            self.we_dot_hist[1],
+            self.we_dot_hist[2],
+            self.we_dot_hist[3],
+        ];
+        // A mid-mode-3 WX change before the window starts invalidates the
+        // closed-form schedule; fall back to the live emergent transition.
+        // The `win_wx_enable_resolved` latch suppresses re-entry on the dots
+        // after a clean WX-enable was handled (the WX != arm-WX condition
+        // stays true every subsequent dot until the window draws).
+        if !fast
+            && self.scheduled_mode0_dot.is_some()
+            && !self.window_started_this_line
+            && !self.win_wx_enable_resolved
+            && (mmio.read(WX) != self.m3_scheduled_wx
+                || self.window_will_start(mmio, mmio.is_cgb_features_enabled())
+                    != self.m3_scheduled_win)
+        {
+            // WX-write-ENABLE: the window was out of range at M3 arm
+            // (`!m3_scheduled_win`, so m0_time_master has NO StartWindowDraw
+            // penalty) and a mid-mode-3 WX write brings it into range so the
+            // window will now start this line. The hardware next-mode-0 prediction
+            // re-runs with the window included, moving the mode-3 end
+            // WIN_M3_PENALTY dots later. ADD that penalty (symmetric to the
+            // LCDC window-enable path) iff the write lands before the window
+            // tile commits — otherwise the fetcher already passed the window
+            // start and no penalty accrues. Scoped CGB / no sprites; the live
+            // pipeline is untouched, only the read-at-cc mode-0 time is shifted.
+            let now_will_start =
+                self.window_will_start(mmio, mmio.is_cgb_features_enabled());
+            // Only the WX-into-range case: WX itself changed from out of range
+            // (arm WX > 166, no window scheduled) to in range. A window that
+            // newly starts for any OTHER reason (a mid-mode-3 WY trigger with
+            // WX unchanged and already in range) is NOT this lever and must
+            // keep nulling (the late_wy / late_scx_late_wy cluster).
+            let arm_wx = self.m3_scheduled_wx as i32;
+            let wx_now = mmio.read(WX) as i32;
+            let wx_into_range = arm_wx > 166 && (0..=166).contains(&wx_now);
+            let wx_enable_clean = !self.m3_scheduled_win
+                && now_will_start
+                && wx_into_range
+                && mmio.is_cgb_features_enabled()
+                && !mmio.is_double_speed_mode()
+                && self.sprites_on_line.is_empty();
+            let mut keep_schedule = false;
+            if wx_enable_clean && let Some(m0t) = self.m0_time_master {
+                // Latch: this clean WX-enable is now resolved for the line, so
+                // later dots (WX still != arm) do not re-enter and null.
+                self.win_wx_enable_resolved = true;
+                keep_schedule = true;
+                let wx = mmio.read(WX) as i32;
+                let x_at_start = (wx - 7).max(0);
+                let warmup = CGB_PIXEL_TRANSFER_WARMUP as i64;
+                // SCX>3 / scx5 fine-scroll: the x==0 window-tile commit runs
+                // two dots later per extra discarded SCX dot, mirroring the
+                // late-WX-disable accrual shift.
+                let win_fine = if wx <= 7 {
+                    2 * (((self.m3_arm_scx & 7) as i64) - 3).max(0)
+                } else {
+                    0
+                };
+                let commit_dot = self.m3_arm_dot as i64
+                    + warmup
+                    + 8
+                    + self.m3_arm_scx as i64
+                    + x_at_start as i64
+                    + win_fine
+                    + WXEN_COMMIT_DELAY;
+                if (self.ticks as i64) < commit_dot {
+                    let pen = (WIN_M3_PENALTY as i64) << (mmio.is_double_speed_mode() as i64);
+                    self.m0_time_master = Some((m0t as i64 + pen).max(0) as u64);
+                    // Keep the closed-form schedule (mode-3 end shifts with
+                    // the penalty); only the master mode-0 time moved.
+                }
+                // else: window starts but the write is past the commit dot, so
+                // no penalty is added — the no-window mode-0 time captured at arm is
+                // the correct (mode-0-earlier) boundary; keep the schedule.
+            }
+            // WY-trigger ENABLE (symmetric to the WX-into-range branch above):
+            // WX is UNCHANGED and already in range, but the window newly starts
+            // this line because a mid-mode-3 WY write made `window_y_active`
+            // true (the window-enable master / `wy2 == ly` gate flipped). The hardware
+            // next-mode-0 prediction then runs with the window included, moving the
+            // mode-3 end WIN_M3_PENALTY dots later — BUT only if the WY trigger
+            // lands before the fetcher reaches the window-start xpos. For an
+            // x==0 window (the late_wy / late_scx_late_wy cluster, WX in 0..=7)
+            // that commit dot is `m3_arm_dot + scx&7 + COMMIT`: the f0/f1
+            // dispatch reaches xpos 0 (the window tile) `scx&7` dots into M3.
+            // (Measured byte-exact via cctracer: mode-0 time = no-window + 6 for the
+            // `_1` reps that trigger 1 dot in, == no-window for the `_2`/`_3`
+            // reps that trigger 5+ dots in; the boundary is m3_arm_dot+scx+3 at
+            // both scx=0 and scx=4.) If the trigger lands at/after the commit
+            // dot, the fetcher already passed xpos 0 so no penalty accrues and
+            // the no-window mode-0 time (captured at arm) is the correct boundary.
+            // Scoped CGB / single speed / no sprites / x==0 window; the live
+            // pipeline is untouched, only the read-at-cc mode-0 time is shifted.
+            if !keep_schedule
+                && !self.m3_scheduled_win
+                && now_will_start
+                && arm_wx == wx_now
+                && (0..=7).contains(&wx_now)
+                && mmio.is_cgb_features_enabled()
+                && !mmio.is_double_speed_mode()
+                && self.sprites_on_line.is_empty()
+                && let Some(m0t) = self.m0_time_master
+            {
+                // This WY-trigger enable is resolved for the line; suppress
+                // re-entry on later dots (window_will_start stays != arm).
+                self.win_wx_enable_resolved = true;
+                keep_schedule = true;
+                // Commit dot = the M3 dot at which the fetcher reaches the
+                // window-start xpos. For an x==0 window (WX 0..=7) that is
+                // `m3_arm_dot + scx&7 + WX + 3`: the SCX fine-scroll discard
+                // (scx&7 dots) then the WX-pixel BG prefix before the window
+                // tile, plus the fixed f0/f1 dispatch lead (3). A WY trigger
+                // before this dot adds the StartWindowDraw penalty (mode 3
+                // runs WIN_M3_PENALTY longer); at/after it the fetcher already
+                // passed xpos 0, so no penalty accrues. (cctracer: the `_1`
+                // reps of late_wy_*_wx00 / late_wy_*_wx07 / late_scx_late_wy
+                // keep the +6 mode-0 time, the `_2`/`_3` reps drop it; the WX-shift
+                // separates the wx00 `_1` boundary from the wx07 `_1`.)
+                let commit_dot = self.m3_arm_dot as i64
+                    + (self.m3_arm_scx & 7) as i64
+                    + wx_now as i64
+                    + WYTRIG_COMMIT_DELAY;
+                if (self.ticks as i64) < commit_dot {
+                    self.m0_time_master =
+                        Some((m0t as i64 + WIN_M3_PENALTY as i64).max(0) as u64);
+                }
+                // else: no penalty — keep the no-window mode-0 time captured at arm.
+            }
+            // DMG WY-trigger enable (mirror of the CGB branch above). A
+            // mid-mode-3 WY==LY trigger with an x==0 window (WX 0..=7,
+            // unchanged) brings the window into play this line. Hardware keeps
+            // a finite (window-inclusive or no-window) mode-0 time, so the FF41
+            // line-tail read resolves a concrete mode 0/3 boundary; nulling
+            // m0_time_master here would defer to the renderer register (always
+            // mode 3), passing the out3 `_1`/`_2` reps but FAILING the out0
+            // `_3` rep (late_wy_FFto2_ly2_wx00_3 / late_scx_late_wy_FFto4_ly4
+            // _wx00_3). Keep the no-window mode-0 time and add WIN_M3_PENALTY iff the
+            // WY trigger lands before the window-tile commit dot. The DMG commit
+            // dot is the CGB form (`m3_arm_dot + scx&7 + WX + 3`) plus the
+            // DMG pixel-transfer warmup less one (`DMG_WARMUP - 1` = 3):
+            // measured ticks at the WY block bracket it across WX/SCX (wx00:
+            // pen@84,no-pen@88; scx4: pen@84/88,no-pen@92; wx07: pen@88/92,
+            // no-pen@96; scx3+wx07: pen@88/92,no-pen@96), so commit_dot =
+            // m3_arm_dot + scx&7 + WX + 3 + 3 separates pen vs no-pen at every
+            // rep. Scoped DMG / SS / no sprites / x==0 (WX 0..=7).
+            if !keep_schedule
+                && !self.m3_scheduled_win
+                && now_will_start
+                && arm_wx == wx_now
+                && (0..=7).contains(&wx_now)
+                && !mmio.is_cgb_features_enabled()
+                && !mmio.is_double_speed_mode()
+                && self.sprites_on_line.is_empty()
+                && let Some(m0t) = self.m0_time_master
+            {
+                self.win_wx_enable_resolved = true;
+                keep_schedule = true;
+                let commit_dot = self.m3_arm_dot as i64
+                    + (self.m3_arm_scx & 7) as i64
+                    + wx_now as i64
+                    + WYTRIG_COMMIT_DELAY
+                    + (DMG_PIXEL_TRANSFER_WARMUP as i64 - 1);
+                if (self.ticks as i64) < commit_dot {
+                    self.m0_time_master =
+                        Some((m0t as i64 + WIN_M3_PENALTY as i64).max(0) as u64);
+                }
+                // else: no penalty — keep the no-window mode-0 time captured at arm.
+            }
+            // WX-DISABLE of a WX<7 (visible x==0) window that WAS scheduled at
+            // M3 arm: the immediate-start window's StartWindowDraw penalty
+            // locks the moment the fetcher fetches the window tile (the hardware
+            // `xpos == wx` compare uses the WX register, so a smaller WX commits
+            // earlier). A WX-write moving WX out of range at/after that commit
+            // dot keeps the window-inclusive m0_time_master (mode 3 persists ->
+            // out3); before it the existing null applies (refund -> mode 0). The
+            // commit dot is `m3_arm_dot + DMG_WARMUP + 5 + scx&7 + WX` (the first
+            // BG tile fill plus the WX-pixel BG prefix before the window tile,
+            // less the f0/f1 dispatch lead). The late_wx_wx03_{1,2} DMG reps
+            // bracket it at WX=3 (write at dot 88 = before -> out0; dot 92 =
+            // at commit -> out3); WX=7 (late_wx_1) commits 4 dots later (dot
+            // 96) so the same dot-92 disable still nulls (out0). Scoped DMG /
+            // single speed / no sprites / WX<7; the WX>=7 reps keep the existing
+            // `>= 7` graduated branch below. window_started_this_line is still
+            // false at this dot (the latch lags the closed-form commit).
+            if !keep_schedule
+                && self.m3_scheduled_win
+                && (self.m3_scheduled_wx as i32) < 7
+                && !now_will_start
+                && !mmio.is_cgb_features_enabled()
+                && !mmio.is_double_speed_mode()
+                && self.sprites_on_line.is_empty()
+                && self.m0_time_master.is_some()
+            {
+                let commit_dot = self.m3_arm_dot as i64
+                    + DMG_PIXEL_TRANSFER_WARMUP as i64
+                    + 5
+                    + (self.m3_arm_scx & 7) as i64
+                    + self.m3_scheduled_wx as i64;
+                if (self.ticks as i64) >= commit_dot {
+                    keep_schedule = true;
+                    self.win_wx_penalty_resolved = true;
+                }
+            }
+            if !keep_schedule {
+                self.scheduled_mode0_dot = None;
+                self.m0_time_master = None;
+            }
+        }
+        // late_wx: a mid-mode-3 WX write AFTER the window has started,
+        // moving WX out of range, cancels the remaining window draw and
+        // refunds the unaccrued StartWindowDraw penalty from the
+        // read-at-cc mode-0 time. Graduated like late_disable (one accrued dot
+        // per drawn window dot, capped at WIN_M3_PENALTY); a nonzero SCX
+        // fine-scroll prefix advances the accrual one dot. WX<7 windows
+        // (immediate x==0 start) lock at win_start (no refund once
+        // started). CGB single-speed / no sprites; live pipeline
+        // untouched; applied once per line.
+        // DMG late-WX window-disable refund. DMG is BINARY (not graduated like
+        // CGB): a WX-out-of-range write that lands BEFORE the window-tile
+        // commit (`ws + scx&7 + 2` dots into the x==0 window draw) fully
+        // refunds WIN_M3_PENALTY from the read-at-cc mode-0 time so the FF41 read
+        // resolves the no-window mode-0 boundary; at/after the commit the
+        // window-inclusive mode-0 time captured at M3 arm is kept (mode 3). The
+        // late_wx_scx{2,3,5}_{1,2} DMG reps bracket the per-SCX commit: at the
+        // 4-dots-in write, scx0/scx2 already committed (out3, keep) while
+        // scx3/scx5 have not (out0, refund); the 8-dots-in write is always
+        // committed (out3). WX<7 immediate-start windows lock at win_start
+        // (no refund). DMG / no sprites / SS.
+        if !fast
+            && self.m0_time_master.is_some()
+            && self.window_started_this_line
+            && !mmio.is_cgb_features_enabled()
+            && self.sprites_on_line.is_empty()
+            && mmio.read(WX) != self.m3_scheduled_wx
+            && !self.win_wx_penalty_resolved
+            && (self.m3_scheduled_wx as i32) >= 7
+        {
+            let wx_now = mmio.read(WX) as i32;
+            let wx_in_range = (0..=166).contains(&wx_now);
+            if let (Some(ws), Some(m0t)) = (self.win_start_dot, self.m0_time_master)
+                && !wx_in_range
+            {
+                let commit = ws as i64 + (self.m3_arm_scx & 7) as i64 + 2;
+                if (self.ticks as i64) < commit {
+                    self.m0_time_master =
+                        Some((m0t as i64 - WIN_M3_PENALTY as i64).max(0) as u64);
+                }
+                self.win_wx_penalty_resolved = true;
+            }
+        }
+        else if self.m0_time_master.is_some()
+            && self.window_started_this_line
+            && mmio.is_cgb_features_enabled()
+            && !mmio.is_double_speed_mode()
+            && self.sprites_on_line.is_empty()
+            && mmio.read(WX) != self.m3_scheduled_wx
+            && !self.win_wx_penalty_resolved
+        {
+            let wx_now = mmio.read(WX) as i32;
+            let wx_in_range = (0..=166).contains(&wx_now);
+            if let (Some(ws), Some(m0t)) = (self.win_start_dot, self.m0_time_master)
+                && !wx_in_range
+            {
+                if (self.m3_scheduled_wx as i32) < 7 {
+                    // Immediate-start window: penalty already locked.
+                    self.win_wx_penalty_resolved = true;
+                } else {
+                    let scx_bias = if (self.m3_arm_scx & 7) != 0 { 1 } else { 0 };
+                    // SCX > 3 fine-scroll: the x==0 window's StartWindowDraw
+                    // penalty accrual begins later than win_start_dot by two
+                    // dots per extra discarded SCX dot (the mode-3-start dispatch
+                    // runs the window-tile fetch that much later). Without
+                    // this the scx5 boundary is 4 dots too early and the
+                    // late_wx_scx5_1 refund is fully accrued (drops to 0).
+                    let scx_late = 2 * (((self.m3_arm_scx & 7) as i64) - 3).max(0);
+                    let drawn = (self.ticks as i64) - ws as i64 + scx_bias - scx_late;
+                    let accrued = drawn.clamp(0, WIN_M3_PENALTY as i64);
+                    let refund = WIN_M3_PENALTY as i64 - accrued;
+                    self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
+                    self.win_wx_penalty_resolved = true;
+                }
+            }
+        }
+        // Double-speed late-WX window-disable refund. Unlike single speed
+        // (graduated per drawn dot), the DS StartWindowDraw penalty is BINARY:
+        // a WX-out-of-range write that lands BEFORE the window-tile commits
+        // (`ws + scx&7 + 1` dots into the window draw) fully refunds the
+        // WIN_M3_PENALTY (<<1 cc at DS), so the FF41 read resolves the
+        // no-window mode-0 boundary; at/after the commit the penalty is locked
+        // and the window-inclusive mode-0 time (captured at arm) is kept. cctracer
+        // ground truth: late_wx_scx5_ds_1 (write 2 dots into the x==0 window,
+        // scx5) takes the full 12-cc refund -> mode 0 (out0); the `_ds_2` reps
+        // (write 2 dots later, or scx0 1 dot in) keep the full mode-0 time -> mode 3
+        // (out3). CGB / no sprites; live pipeline untouched, only read-at-cc.
+        else if self.m0_time_master.is_some()
+            && self.window_started_this_line
+            && mmio.is_cgb_features_enabled()
+            && mmio.is_double_speed_mode()
+            && self.sprites_on_line.is_empty()
+            && mmio.read(WX) != self.m3_scheduled_wx
+            && !self.win_wx_penalty_resolved
+            && (self.m3_scheduled_wx as i32) >= 7
+        {
+            let wx_now = mmio.read(WX) as i32;
+            let wx_in_range = (0..=166).contains(&wx_now);
+            if let (Some(ws), Some(m0t)) = (self.win_start_dot, self.m0_time_master)
+                && !wx_in_range
+            {
+                let commit = ws as i64 + (self.m3_arm_scx & 7) as i64 + 1;
+                if (self.ticks as i64) < commit {
+                    let refund = (WIN_M3_PENALTY as i64) << 1;
+                    self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
+                }
+                self.win_wx_penalty_resolved = true;
+            }
+        }
+        // ATOMIC mode-3 END: mode 3 ends at the exact closed-form mode-0 time
+        // (master cc), and EVERYTHING (eager FF41 mode register, mode-0
+        // STAT check, VRAM/OAM/cgbp unblock, m0 IRQ) is driven off this one
+        // boundary. The pixel pipeline is now image-only: at the transition
+        // we flush any remaining FIFO pixels to x==160 so the visible line
+        // is complete, and the pipeline's own x==160 push no longer drives
+        // timing. When no closed-form mode-0 time exists (first line after
+        // enable / mid-M3 invalidation), fall back to the live x==160 push.
+        if let Some(m0t) = self.m0_time_master
+            && mmio.master_cc() >= m0t {
+                self.scheduled_mode0_dot = None;
+                // Timing report (FF41 mode-0, STAT/m0 IRQ) fires at the exact
+                // mode-0 time regardless of pixel progress.
+                if !self.mode0_reported_this_line {
+                    self.mode0_reported_this_line = true;
+                    Self::set_lcd_status_mode(mmio, 0);
+                }
+                // Flush remaining FIFO pixels to fill all 160 columns; the
+                // pipeline may lag the closed-form boundary by a few dots.
+                while self.x < 160 && self.draw_fifo_pixel(mmio) {}
+                // On window-start lines the window fetch restart can leave
+                // the FIFO momentarily empty at mode-0 time (the last 1-2 window
+                // pixels are still being fetched). The timing has already
+                // been reported above; keep the renderer alive (image-only)
+                // until x==160 so the final window pixel is drawn, then enter
+                // HBlank via the x==160 fallback below. For all other lines
+                // the flush completed the line, so end mode 3 now.
+                if !(self.window_started_this_line && self.x < 160) {
+                    // DMG wx==166 pixel output-at-xpos166 (mode-3 end). See
+                    // apply_dmg_wxa6_lineend_windraw.
+                    self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
+                    self.cgb_train_reresolve(mmio);
+                    self.win_train_reresolve(mmio);
+                    self.resolve_bgp_spikes(mmio);
+                    // Leaving mode 3: drop any leftover preamble fast budget so the
+                    // next line recomputes against the fresh schedule.
+                    self.fast_dots_left = 0;
+                    self.state = State::HBlank;
+                    return;
+                }
+            }
+
+        // The hardware mode-3-start fine-scroll break resolution. The f1 loop
+        // runs xpos = 0,1,2,... one per M3 dot, re-reading p.scx each
+        // step, and breaks (fixing the discard count) at the first xpos
+        // with xpos%8 == scx%8. xpos == ticks - arm dot, so reading SCX
+        // here samples it at the same early M3 dots hardware does -
+        // independent of the FIFO/warmup latency that delays the pops.
+        // Once resolved the target is frozen, so a later SCX write past
+        // the break has no effect (matching the single-write tests).
+        if self.x == 0 && self.m3_discard_target < 0 {
+            const F1_OFFSET: i64 = -1;
+            let xpos = ((self.ticks as i64 - self.m3_arm_dot as i64 + F1_OFFSET).max(0)) as u32;
+            // Exact-cc SCX read: sample SCX as-of this f1 dot's abs_cc
+            // (honoring the CGB +2cc SCX change delay) so a mid-discard
+            // write lands on the correct iteration, instead of the
+            // immediate register read whose visibility depends on the
+            // per-dot PPU-step-vs-CPU-write ordering within a dot.
+            let scx_break_full = self.scx_f1_pending_at_cc(self.abs_cc);
+            let scx_live = (scx_break_full & 0x07) as u32;
+            if xpos % 8 == scx_live || xpos >= 80 {
+                // The hardware mode-3-start fine-scroll phase re-reads SCX live at its case-0 tile
+                // fetch, so a mid-discard SCX write that crosses a tile-column
+                // boundary makes the FIRST displayed tile come from the new
+                // column (scx_break/8), not the column queued into the FIFO at
+                // M3 arm. When that happens, discard the whole stale first tile
+                // and refetch from the live column: reset the fetcher/FIFO and
+                // set the discard to scx_break%8 so the next BG fetch (which
+                // derives its column from scx_delayed at x==0) lands on the
+                // correct column, then trims the fine-scroll prefix. The mode-3
+                // length / timing is owned by the STAT resolve (m0_time_master), so this
+                // is render-only.
+                // The displayed first tile's COLUMN is read at the hardware's
+                // last case-0 (the greatest multiple-of-8 xpos <= break),
+                // NOT at the break dot: the mode-3-start fine-scroll phase only reloads `reg1`
+                // (tile number, from scx/8) when `xpos % tile_len == 0`.
+                // For a break inside the first tile (xpos < 8) that is
+                // xpos==0 -> the M3-arm column, so no re-fetch is needed
+                // even if a later f1 dot saw a column-crossing SCX. Only a
+                // break that loops PAST tile_len (xpos >= 8) reloads at
+                // xpos==8 from the then-live SCX. Sample SCX at that dot.
+                let case0_xpos = (xpos / 8) * 8;
+                let ds_u = mmio.is_double_speed_mode() as u32;
+                let back = ((xpos - case0_xpos) as u64) << ds_u;
+                let scx_col_full =
+                    self.scx_f1_pending_at_cc(self.abs_cc.wrapping_sub(back));
+                let arm_col = ((self.m3_arm_scx_full.max(0) as u16) >> 3) & 0x1F;
+                let brk_col = (scx_col_full as u16 >> 3) & 0x1F;
+                // CGB f1 first-tile re-fetch (both single and double speed):
+                // a mid-f1 SCX write whose break column differs from the
+                // armed column rewrites the first queued BG tile. The
+                // sub-cc clock carries the DS sub-dot phase via the
+                // `delta << ds` mode0/mode-0 time nudge below, so the same
+                // re-fetch applies at double speed (the DMG mode-3-start
+                // fine-scroll uses a different +1 tile-column phase the
+                // discard model already matches, so it stays excluded).
+                if mmio.is_cgb_features_enabled()
+                    && self.m3_arm_scx_full >= 0
+                    && brk_col != arm_col
+                {
+                    // Only the FIRST queued BG tile is stale: rewrite the
+                    // 8 oldest FIFO entries in place with the tile at the
+                    // break column, then discard scx_break%8 fine pixels.
+                    // Subsequent tiles keep their live-SCX columns (the
+                    // fetcher re-reads scx_delayed), so a later SCX write
+                    // that moves the steady-state column is preserved.
+                    let bg_y = (self.scy_delayed as u16
+                        + mmio.read(LY) as u16) & 0xFF;
+                    self.rewrite_first_fifo_tile(mmio, brk_col, bg_y);
+                    self.m3_pixels_discarded = 0;
+                    self.m3_discard_target = (scx_break_full & 0x07) as i8;
+                    if let Some(dot) = self.scheduled_mode0_dot {
+                        let delta = xpos as i64 - self.m3_arm_scx as i64;
+                        self.scheduled_mode0_dot = Some((dot as i64 + delta).max(0) as u128);
+                        if let Some(m0t) = self.m0_time_master {
+                            let ds = mmio.is_double_speed_mode() as u32;
+                            self.m0_time_master =
+                                Some((m0t as i64 + (delta << ds)).max(0) as u64);
+                        }
+                    }
+                    return;
+                }
+                // Discard the full xpos count: a mid-discard SCX change can
+                // push the break past tile_len (hardware loops on to the
+                // next matching xpos), discarding more than 7 pixels.
+                self.m3_discard_target = xpos as i8;
+                // The closed-form mode-0 schedule assumed m3_arm_scx dots
+                // of discard; nudge it by the actual difference so M3 ends
+                // at the right dot (the extra discards lengthen M3).
+                if let Some(dot) = self.scheduled_mode0_dot {
+                    let delta = xpos as i64 - self.m3_arm_scx as i64;
+                    self.scheduled_mode0_dot = Some((dot as i64 + delta).max(0) as u128);
+                    if let Some(m0t) = self.m0_time_master {
+                        let ds = mmio.is_double_speed_mode() as u32;
+                        self.m0_time_master =
+                            Some((m0t as i64 + (delta << ds)).max(0) as u64);
+                    }
+                }
+            }
+        }
+
+        if self.sprite_fetch_stall > 0 {
+            self.sprite_fetch_stall -= 1;
+            return;
+        }
+
+        if self.fetcher.pixel_fifo.size() != 0 && self.pixel_transfer_warmup == 0 {
+            self.sprite_fetch_stall = self.sprite_fetch_penalty_for_current_x(mmio).unwrap_or(0);
+            if self.sprite_fetch_stall > 0 {
+                self.sprite_fetch_stall -= 1;
+                return;
+            }
+        }
+
+        // DMG WX 1..6 EARLY window activation: the WX comparator matches
+        // during the discard prologue at position WX-7 (activating while
+        // position_in_line is still negative), i.e. (7-WX) dots
+        // BEFORE the first visible pop. Evaluating it there — not at the
+        // pos-0 trigger below — matters when WX is rewritten mid-prologue:
+        // hardware activates with the OLD WX (a WX=4 activation beats a
+        // WX=LY rewrite by 1-3 dots on every row). pos = ticks - (m3_arm_dot + 12 + scx&7) maps our
+        // pipeline's pop timeline (even arm: TN arm+2 .. push arm+8,
+        // warmup 4, first visible pop arm+12+scx). The activation then
+        // runs the restart fetch on real dots (anchored cadence) and the
+        // remaining (7-WX) prologue pops chop the first window tile, so
+        // the first VISIBLE pixel still lands at pos-0 + 6. Exact-match
+        // only; any miss falls back to the pos-0 trigger below.
+        if !mmio.is_cgb_features_enabled()
+            && self.x == 0
+            && !self.fetcher.is_fetching_window()
+            && !self.first_line_after_enable
+            && self.m3_discard_target >= 0
+            // Comparator WE tap (see we_dot_hist): delayed, not live.
+            && self.window_y_active_with(mmio, self.we_dot_hist[1] && self.we_dot_hist[2])
+        {
+            let wx = mmio.read(WX);
+            // WX==0 with SCX&7==0 takes the same early-comparator
+            // activation with chop 7 (window column 7 lands at screen
+            // x0 — the WX=0 window's left 7 columns are off-screen).
+            // SCX&7>0 keeps the pos-0 trigger + one-dot delay quirk
+            // (win_wx0_delayed).
+            if (1..7).contains(&wx) || (wx == 0 && self.m3_discard_target == 0) {
+                let s = self.m3_discard_target as i64;
+                // pos-0 dot (first visible pop absent windows): TN runs
+                // at the first even dot after arm, push +6, warmup 4,
+                // + the scx fine discard pops.
+                let base = self.m3_arm_dot as i64 + 12 - (self.m3_arm_dot & 1) as i64
+                    + s;
+                // The comparator's activation dot is pos == WX-7, but a
+                // CPU WX store's new value reaches the comparator within
+                // the same dot on hardware while our mmio only exposes it
+                // to the NEXT dot — so evaluate one dot later (pos ==
+                // WX-6) with the then-visible WX. This brackets the
+                // rewrite race: a WX=6->LY rewrite one dot after the pos -1
+                // match must WIN (no window starts), while a WX=4/5 must
+                // LOSE (window starts with the old WX 4/5).
+                let pos = self.ticks as i64 - base;
+                if pos == wx as i64 - 6 {
+                    self.begin_window_draw(0);
+                    self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
+                    if self.win_start_dot.is_none() {
+                        self.win_start_dot = Some(self.ticks);
+                    }
+                    // Remaining prologue pops become the first-tile chop;
+                    // the warmup/scx-discard bookkeeping is superseded
+                    // (their dots are consumed by the restart fetch).
+                    self.win_first_tile_chop = 7 - wx;
+                    self.pixel_transfer_warmup = 0;
+                    self.m3_pixels_discarded = self.m3_discard_target as u8;
+                    // The activation dot itself was one dot ago: its
+                    // TileNumber is due now (catch-up), low/high/push at
+                    // +1/+3/+5 via the anchored cadence.
+                    self.wg_set_anchor(0);
+                    let fls = self.wg_apply(self.fetcher_lcdc_state());
+                    if let Some(event) = self.fetcher.step(
+                        mmio,
+                        fls,
+                        crate::ppu::fetcher::FetchPos {
+                            window_line: self.win_y_pos,
+                            display_x: self.x,
+                            pending_discard: 0,
+                            scy: self.scy_delayed,
+                            scx: self.scx_delayed,
+                        },
+                    ) {
+                        if matches!(
+                            event.kind,
+                            crate::ppu::fetcher::FetcherDebugEventKind::TileNumber
+                        ) {
+                            self.subcc_last_tn_cc = self.abs_cc;
+                        }
+                        self.record_fetch_debug_event(event, mmio);
+                    }
+                    self.win_fetch_anchor = Some(self.ticks.wrapping_sub(1));
+                    return;
+                }
+            }
+        }
+
+        // Whether this dot executed a PushToFIFO fetch substep — the
+        // window-reactivation insert fires on the pop of a window tile's
+        // FIRST pixel, i.e. our push dot (on hardware: the fetcher at its
+        // TileNumber T1 step with the BG FIFO holding 8, the cycle right
+        // after its push-at-empty).
+        let mut push_this_dot = false;
+        // Fetcher cadence: on CGB, decouple from absolute self.ticks so that
+        // sprite-fetch stall dots don't flip the fetcher's even/odd phase
+        // (matches hardware). On DMG, keep the original self.ticks gate.
+        let cadence_even = if mmio.is_cgb_features_enabled() {
+            let even = self.fetcher_cadence_tick.is_multiple_of(2);
+            self.fetcher_cadence_tick = self.fetcher_cadence_tick.wrapping_add(1);
+            even
+        } else if let Some(anchor) = self.win_fetch_anchor {
+            // Window-startup fetch: phase-locked to the trigger dot so
+            // the first window pixel pops exactly 6 dots after it.
+            self.ticks.wrapping_sub(anchor).is_multiple_of(2)
+        } else {
+            self.ticks.is_multiple_of(2)
+        };
+
+        // DMG mid-mode-3 WE-off window kill (the hardware TileNumber-T1
+        // window-trigger clear): the window fetcher re-samples the
+        // window-enable bit at each TileNumber step with a one-dot
+        // delayed sample (we_dot_hist[2]); reading OFF reverts the fetch
+        // to BG from THIS tile on (the already-pushed window pixels in
+        // the FIFO drain out, so a killed window always shows a multiple
+        // of 8 pixels). A WE-off pulse short enough that its delayed
+        // sample misses every TileNumber dot leaves the window running.
+        // (An implementation that latched the window-draw state at the write would
+        // instead kill the window on any pulse.)
+        if cadence_even
+            && !mmio.is_cgb_features_enabled()
+            && self.fetcher.is_fetching_window()
+            && self.fetcher.fetch_state_is_tile_number()
+            && !self.we_dot_hist[if self.win_kill_tap_late { 3 } else { 2 }]
+        {
+            self.fetcher.stop_window_with_extra(0);
+            self.window_started_this_line = false;
+            self.win_being_fetched = false;
+        }
+
+        // DMG BG fetch-grid origin (see bg_wg_apply): the line's first
+        // BG TileNumber read runs on this dot, before any sprite stall.
+        if cadence_even
+            && !mmio.is_cgb_features_enabled()
+            && self.bg_anchor_cc.is_none()
+            && !self.fetcher.is_fetching_window()
+            && self.fetcher.fetch_state_is_tile_number()
+            && self.fetcher.get_tile_index() == 0
+        {
+            self.bg_anchor_cc = Some(self.abs_cc);
+        }
+        let fetcher_lcdc_state =
+            self.bg_wg_apply(self.wg_apply(self.fetcher_lcdc_state()), mmio.read(LY));
+        // Pixels still to be discarded for SCX fine-scroll: they sit in
+        // the FIFO but won't be displayed, so the BG tile column (derived
+        // from display_x + FIFO depth) must not count them.
+        let pending_discard = if self.x == 0 {
+            (self.m3_discard_target.max(0) as u8).saturating_sub(self.m3_pixels_discarded)
+        } else {
+            0
+        };
+        if cadence_even
+            && let Some(event) = self.fetcher.step(mmio, fetcher_lcdc_state, crate::ppu::fetcher::FetchPos {
+                window_line: self.win_y_pos,
+                display_x: self.x,
+                pending_discard,
+                scy: self.scy_delayed,
+                scx: self.scx_delayed,
+            }) {
+                if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::TileNumber) {
+                    self.subcc_last_tn_cc = self.abs_cc;
+                }
+                if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo) {
+                    push_this_dot = true;
+                    // The display-x at which this tile's first pixel will
+                    // pop (the hardware push-at-empty dot), SIGNED: during
+                    // the SCX fine-scroll discard prologue the boundary
+                    // sits at the hardware position -(pending discards) < 0.
+                    if !mmio.is_cgb_features_enabled() {
+                        let first_x = self.x as i32 + event.fifo_size as i32
+                            - 8
+                            - pending_discard as i32;
+                        if (0..160).contains(&first_x) {
+                            // Visible boundary: queue for the pop-side
+                            // WE-off zero-pixel insert check.
+                            if let Some(slot) = self
+                                .we_glitch_tile_starts
+                                .iter_mut()
+                                .find(|s| s.is_none())
+                            {
+                                *slot = Some(first_x as u8);
+                            }
+                        } else if first_x < 0 && !mmio.is_cgb() {
+                            // Discard-prologue boundary (a known hardware
+                            // quirk): evaluate the WE-off insert HERE, at
+                            // the push dot. logical position = first_x+7
+                            // (hardware clamps out-of-range to 0, matching
+                            // WX==0). A hit inserts a color-0 pixel that
+                            // the prologue itself swallows — one discard
+                            // dot consumes it instead of a real pixel
+                            // (see we_glitch_discard_insert). Pre-CGB
+                            // MACHINES only (non-CGB hardware): the CGB
+                            // PPU has no insert glitch even in DMG-compat.
+                            let logical = first_x + 7;
+                            let logical =
+                                if (0..=167).contains(&logical) { logical } else { 0 };
+                            if self.window_y_triggered
+                                && !self.fetcher.is_fetching_window()
+                                && !self.we_dot_hist[2]
+                                && !self.we_insert_suppressed
+                                && mmio.read(WX) as i32 == logical
+                            {
+                                self.we_glitch_discard_insert = true;
+                            }
+                        }
+                    }
+                    // CGB-compat up-pulse LCDC.4 train: buffer each BG tile
+                    // so a line-end re-resolve against the COMPLETE journal
+                    // can fix the tiles fetched before the whole pulse train
+                    // was journaled (see cgb_train_reresolve).
+                    if self.wg_cgb && !event.fetching_window && !self.wg_hist.is_empty() {
+                        let first_x = (self.x as i32 + event.fifo_size as i32
+                            - 8
+                            - pending_discard as i32)
+                            .max(0);
+                        if (0..160).contains(&first_x) {
+                            self.bg_tile_buf.push(CapturedBgTile {
+                                n: event.tile_index as u64,
+                                tn: event.tile_num,
+                                first_x: first_x as u8,
+                                y: self.fetcher.latched_y(),
+                                live_low_tds: self.fetcher.last_low_tds(),
+                                live_high_tds: self.fetcher.last_high_tds(),
+                            });
+                        }
+                    }
+                    // WINDOW analog (win_train_reresolve): the window internal
+                    // line is win_y_pos (not latched_y, which the window fetch
+                    // does not update).
+                    if self.wg_cgb && event.fetching_window && !self.wg_hist.is_empty() {
+                        let first_x = (self.x as i32 + event.fifo_size as i32
+                            - 8
+                            - pending_discard as i32)
+                            .max(0);
+                        if (0..160).contains(&first_x) {
+                            self.win_tile_buf.push(CapturedWinTile {
+                                n: event.tile_index as u64,
+                                tn: event.tile_num,
+                                first_x: first_x as u8,
+                                y: self.win_y_pos,
+                                live_low_tds: self.fetcher.last_low_tds(),
+                                live_high_tds: self.fetcher.last_high_tds(),
+                            });
+                        }
+                    }
+                }
+                // The window fetch anchor persists for the rest of
+                // the line — the hardware fetch grid stays phase-locked
+                // to the restart (pushes every 8 dots from the anchor),
+                // so the reactivation-insert columns stay at
+                // window_start + 8k. It resets at the next M3 arm or window
+                // restart.
+                // Sub-cc column adjustment: a BG tile whose column was committed
+                // at TileNumber under the OLD scx, but whose pixels are
+                // PLOTTED after the write's apply cc (write_cc + 2*cgb),
+                // must render under the NEW scx (a mid-mode-3 SCX write
+                // samples the column at plot time, not fetch time). Only the single in-flight straddle
+                // tile (armed at the write) is corrected, and only at the
+                // exact plot-vs-apply phase (gap == 4); see the gap comment
+                // below.
+                let mut armed_this_event = false;
+                if self.subcc_rekey_armed
+                    && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
+                {
+                    // The single in-flight tile (column committed under the
+                    // OLD scx before the write) just pushed. Its first
+                    // displayed pixel sits at display column == the xpos the
+                    // fetcher used (xpos == display_x + fifo - pending); its
+                    // plot cc is abs_cc + (xpos - current display x). If that
+                    // plot cc is strictly after the apply cc the tile must
+                    // render under the NEW scx (the hardware SCX change samples
+                    // the column at plot, not fetch); re-key the 8 newest
+                    // FIFO entries with the NEW-scx column using the
+                    // fetcher's exact xpos/cgb_adj. Disarm afterwards.
+                    self.subcc_rekey_armed = false;
+                    let dsf = mmio.is_double_speed_mode() as u32;
+                    let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
+                    // plot cc = abs_cc + the dot distance to this tile's
+                    // first displayed pixel. The dot delta must be scaled
+                    // to master cc (1 dot = 1<<ds cc) so the gap resonance
+                    // is in master cc at both speeds.
+                    let plot_cc = self.abs_cc as i64
+                        + ((xpos as i64 - self.x as i64) << dsf);
+                    // SS (validated Stage 1b, broke-0 across the full
+                    // suite incl. DMG): the in-flight straddle flips to NEW
+                    // at the exact plot-vs-apply phase gap==4.
+                    let gap = plot_cc - self.subcc_scx_apply_cc as i64;
+                    // DMG SS + low-X sprite: the sprite-fetch dot during the
+                    // discard prologue shifts the whole line's BG-fetch phase
+                    // one tile, so a steady-state mid-line SCX write's
+                    // OLD->NEW column boundary also lands one tile LATER than
+                    // the no-sprite cadence the gap==4 rekey assumes. The
+                    // in-flight tile plots just before the boundary, so keep
+                    // it OLD (suppress the flip); the NEXT tile, fetched after
+                    // the write, is already NEW. Mirrors the CGB gap==1
+                    // first-line revert. Without the sprite (scx_during_m3_4/5)
+                    // gap==4 stays as the validated steady-state flip.
+                    let dmg_ss_lowx_sprite = dsf == 0
+                        && !mmio.is_cgb_features_enabled()
+                        && self.lcdc_has(LCDCFlags::SpriteDisplayEnable)
+                        && self.sprites_on_line.iter().any(|s| s.x <= 8);
+                    // DS (Stage 2): the gap proxy is ambiguous across
+                    // initial-scx, but the underlying resonance is that the
+                    // write's apply cc lands at the MIDPOINT of the armed
+                    // tile's fetcher step. The BG fetcher advances one step
+                    // every 2 dots == (2<<ds) cc; the armed tile's column
+                    // was latched at TileNumber (subcc_last_tn_cc) and
+                    // The hardware SCX-write handling re-derives that
+                    // single tile NEW only when apply falls half a step
+                    // (1<<ds cc) past the latch, modulo the step:
+                    // (apply_cc - tn_cc) % (2<<ds) == (1<<ds)
+                    // At DS this is (apply-tn)%4==2, which flips ds_3/4/5
+                    // across every initial-scx (0761/0360/...) where the
+                    // cruder gap/span proxies disagree. SS keeps gap==4
+                    // (the DMG cadence differs and the mod phase regresses
+                    // the DMG SS set, so SS is left exactly as Stage 1b).
+                    let flip = if dsf == 0 {
+                        gap == 4 && !dmg_ss_lowx_sprite
+                    } else {
+                        let step = 2i64 << dsf;
+                        let phase = (self.subcc_scx_apply_cc as i64
+                            - self.subcc_last_tn_cc as i64).rem_euclid(step);
+                        phase == (1i64 << dsf)
+                    };
+                    // DS two-tile straddle gate: a low-X sprite on the line
+                    // shifts the BG fetch phase one tile while the DS FIFO
+                    // carries an extra tile, so the OLD->NEW scx boundary lands
+                    // one tile LATER than the non-sprite DS cadence and the
+                    // in-flight straddle tile stays OLD instead of flipping to
+                    // NEW (with a further one-tile LY0 shift handled below).
+                    // The non-sprite DS cases (lowspr==0) are a single-tile
+                    // straddle handled correctly by the NEW rewrite below and
+                    // MUST keep it.
+                    let ds_two_tile = dsf == 1
+                        && mmio.is_cgb_features_enabled()
+                        && self.sprites_on_line.iter().any(|s| s.x <= 16);
+                    if flip {
+                        let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                        let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                        if ds_two_tile {
+                            // DS spx straddle: a low-X sprite shifts the BG
+                            // fetch phase one tile while the DS FIFO carries an
+                            // extra tile, so the OLD->NEW scx boundary lands one
+                            // tile LATER than the non-sprite DS cadence. The
+                            // in-flight straddle tile -- which the non-sprite DS
+                            // flip would push to the NEW scx -- actually plots
+                            // just before the boundary, so it stays the OLD scx
+                            // (natural xpos column) on EVERY line. On the first
+                            // rendered line (LY==0) the boundary lands one tile
+                            // later still, so the NEXT tile (already fetched
+                            // under the NEW scx) must also revert to the OLD scx;
+                            // on LY>=1 that next tile keeps the NEW scx.
+                            if old_col != new_col {
+                                let bg_y = (self.scy_delayed as u16
+                                    + mmio.read(LY) as u16) & 0xFF;
+                                let pixels = self.bg_pixels_at_col(mmio, old_col, bg_y);
+                                let off = (xpos as usize).saturating_sub(self.x as usize);
+                                self.fetcher.pixel_fifo.overwrite_at(off, &pixels);
+                            }
+                            // First-line second-tile revert: on LY==0 the
+                            // fetcher dispatch can land the OLD->NEW boundary
+                            // one tile later than on LY>=1, so the second
+                            // straddle tile (already fetched NEW) reverts to
+                            // OLD. Whether that one-tile shift happens depends
+                            // on the sprite-fetch sub-tile phase: an even
+                            // shifting sprite x consumes the extra dot that
+                            // pushes the second tile's fetch past the apply on
+                            // LY0 (sprite x==2), an odd one does not (x==1),
+                            // so the revert is gated on the low sprite x parity.
+                            let lowspr_even = self
+                                .sprites_on_line
+                                .iter()
+                                .filter(|s| s.x <= 16)
+                                .map(|s| s.x)
+                                .min()
+                                .is_some_and(|x| x % 2 == 0);
+                            if mmio.read(LY) == 0 && lowspr_even {
+                                self.ds_straddle_next_old = true;
+                                armed_this_event = true;
+                            }
+                        } else if new_col != old_col {
+                            let bg_y = (self.scy_delayed as u16
+                                + mmio.read(LY) as u16) & 0xFF;
+                            let pixels = self.bg_pixels_at_col(mmio, new_col, bg_y);
+                            self.fetcher.pixel_fifo.overwrite_newest(&pixels);
+                        }
+                    } else if dsf == 0
+                        && mmio.is_cgb_features_enabled()
+                        && gap == 1
+                        && self.sprites_on_line.iter().any(|s| s.x >= 1 && s.x <= 8)
+                    {
+                        // First rendered line (LY=0) straddle, CGB SS: the
+                        // line after LCD-enable runs its mode-3 fetcher
+                        // through a different warmup/dispatch phase, so the
+                        // write's apply lands one fetcher step EARLIER
+                        // relative to the in-flight tile (gap==1 here vs
+                        // gap==5 on LY>=1, same xpos). The armed tile stays
+                        // OLD (it plots just before the boundary), AND the
+                        // NEXT tile -- which the per-dot fetcher already
+                        // read NEW because the first-line dispatch lags the
+                        // boundary by one tile -- must be reverted to OLD so
+                        // the OLD->NEW boundary lands one tile later, exactly
+                        // as the hardware first-line xpos
+                        // does. On LY>=1 (gap==5) this revert does NOT fire,
+                        // so those lines keep the boundary one tile earlier.
+                        self.subcc_revert_next_old = true;
+                        armed_this_event = true;
+                    }
+                }
+                // Sprite-shifted revert: the tile pushed right after the
+                // armed straddle tile was fetched with the NEW scx one tile
+                // too early (FIFO depth 8 vs 9 due to a sprite-fetch dot);
+                // rewrite its 8 entries back to the OLD-scx column so the
+                // OLD->NEW boundary lands one tile later (matching the hardware
+                // fetcher-xpos boundary).
+                if self.subcc_revert_next_old
+                    && !armed_this_event
+                    && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
+                {
+                    self.subcc_revert_next_old = false;
+                    let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
+                    let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                    let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                    if new_col != old_col {
+                        let bg_y = (self.scy_delayed as u16
+                            + mmio.read(LY) as u16) & 0xFF;
+                        let pixels = self.bg_pixels_at_col(mmio, old_col, bg_y);
+                        self.fetcher.pixel_fifo.overwrite_newest(&pixels);
+                    }
+                }
+                // DS two-tile straddle, SECOND tile (LY0 only): this tile was
+                // fetched under the NEW scx (the per-dot fetcher advanced past
+                // the apply) but on the first rendered line the OLD->NEW
+                // boundary lands one tile later, so it plots under the OLD scx
+                // at its natural column. Rewrite it in place by exact display
+                // offset (xpos - self.x) so the low-X sprite's FIFO shift does
+                // not misplace it.
+                if self.ds_straddle_next_old
+                    && !armed_this_event
+                    && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
+                {
+                    self.ds_straddle_next_old = false;
+                    let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
+                    let new_col2 = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                    let old_col2 = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                    if new_col2 != old_col2 {
+                        let bg_y = (self.scy_delayed as u16
+                            + mmio.read(LY) as u16) & 0xFF;
+                        let pixels = self.bg_pixels_at_col(mmio, old_col2, bg_y);
+                        let off = (xpos as usize).saturating_sub(self.x as usize);
+                        self.fetcher.pixel_fifo.overwrite_at(off, &pixels);
+                    }
+                }
+                // First-tile (f1) prologue straddle (DMG SS): the in-flight
+                // 2nd tile -- whose column was latched under the OLD scx one
+                // dot before a mid-prologue (x==0) SCX write -- just pushed.
+                // On hardware it plots after the write, so re-key its 8 newest
+                // FIFO entries to the NEW scx column (the first queued tile,
+                // pushed before the write, keeps OLD). Uses the fetcher's exact
+                // latched xpos/cgb_adj so the column matches the hardware
+                // plot-time sample.
+                if self.prologue_rekey_armed
+                    && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
+                {
+                    self.prologue_rekey_armed = false;
+                    let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
+                    let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                    let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
+                    if new_col != old_col {
+                        let bg_y = (self.scy_delayed as u16
+                            + mmio.read(LY) as u16) & 0xFF;
+                        let pixels = self.bg_pixels_at_col(mmio, new_col, bg_y);
+                        self.fetcher.pixel_fifo.overwrite_newest(&pixels);
+                    }
+                }
+                self.record_fetch_debug_event(event, mmio);
+        }
+
+        if self.fetcher.pixel_fifo.size() == 0 {
+            return;
+        }
+
+        if self.pixel_transfer_warmup > 0 {
+            self.pixel_transfer_warmup -= 1;
+            return;
+        }
+
+        // DMG deferred WX-comparator commit (see dmg_wx_trigger_pending):
+        // the exact x+7==wx match armed on the previous dot commits now
+        // iff WX still reads the matched value — the hardware comparator
+        // samples WX through the end of the CPU store's M-cycle, so a
+        // store landing on the commit dot kills the match. The restart is
+        // executed as-of the arm dot (TileNumber catch-up + anchor one
+        // dot back), byte-identical to the immediate start for stable WX.
+        if !mmio.is_cgb_features_enabled()
+            && let Some((arm_dot, arm_wx)) = self.dmg_wx_trigger_pending.take()
+            && self.ticks == arm_dot.wrapping_add(1)
+                && mmio.read(WX) == arm_wx
+                && self.x + 7 == arm_wx
+                && !self.fetcher.is_fetching_window()
+            {
+                self.begin_window_draw(self.x);
+                self.win_first_tile_chop = 0;
+                // The activation dot was one dot ago: its TileNumber is
+                // due now (catch-up); low/high/push at +1/+3/+5 via the
+                // anchored cadence.
+                self.wg_set_anchor(1);
+                let fls = self.wg_apply(self.fetcher_lcdc_state());
+                if let Some(event) = self.fetcher.step(
+                    mmio,
+                    fls,
+                    crate::ppu::fetcher::FetchPos {
+                        window_line: self.win_y_pos,
+                        display_x: self.x,
+                        pending_discard: 0,
+                        scy: self.scy_delayed,
+                        scx: self.scx_delayed,
+                    },
+                ) {
+                    if matches!(
+                        event.kind,
+                        crate::ppu::fetcher::FetcherDebugEventKind::TileNumber
+                    ) {
+                        self.subcc_last_tn_cc = self.abs_cc;
+                    }
+                    self.record_fetch_debug_event(event, mmio);
+                }
+                self.win_fetch_anchor = Some(self.ticks.wrapping_sub(1));
+                self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
+                if self.win_start_dot.is_none() {
+                    self.win_start_dot = Some(self.ticks.wrapping_sub(1));
+                }
+                return;
+            }
+            // else: canceled — the WX store on the commit dot rewrote the
+            // comparator input; no window starts (fall through).
+
+        // Check if we should start window rendering. On DMG the
+        // window-enable bit feeding the WX comparator is the DELAYED
+        // per-dot tap (we_dot_hist, samples one and two dots back) —
+        // an 8-cycle WE-off pulse blocks 9 consecutive comparator dots
+        // on hardware. CGB keeps the live bit. When the x==0 trigger
+        // fires with SCX fine discards still pending, our check runs
+        // `pending` dots BEFORE the hardware comparator dot (position 0
+        // pops that much later), so the taps shift toward the present
+        // accordingly (a disable right before the x==0 check dot must
+        // still block the start).
+        let trigger_we = if mmio.is_cgb_features_enabled() {
+            self.lcdc_has(LCDCFlags::WindowDisplayEnable)
+        } else {
+            let pending = if self.x == 0 && self.m3_discard_target >= 0 {
+                (self.m3_discard_target as u8)
+                    .saturating_sub(self.m3_pixels_discarded)
+            } else {
+                0
+            };
+            match pending {
+                0 => self.we_dot_hist[1] && self.we_dot_hist[2],
+                1 => self.we_dot_hist[0] && self.we_dot_hist[1],
+                _ => self.we_dot_hist[0],
+            }
+        };
+        if self.window_y_active_with(mmio, trigger_we)
+            && !self.fetcher.is_fetching_window()
+        {
+            let wx = mmio.read(WX);
+            let is_cgb = mmio.is_cgb_features_enabled();
+            // DMG never starts the window drawing at WX==166; CGB does.
+            let wx_allowed = wx <= 166 && (is_cgb || wx != 166);
+            // WX=0-6 can trigger immediately, WX=7+ needs exact match with X+7.
+            // On DMG, WX 1..6 activates ONLY via the exact pos==WX-7
+            // prologue match (the EARLY check above); reaching pos 0 with
+            // WX 1..6 means the match was missed (WX rewritten
+            // mid-prologue) and the window does not start this line.
+            // WX=0 and CGB keep the immediate x==0 start.
+            let is_dmg = !is_cgb;
+            // DMG one-dot-late activation (the position+6 check):
+            // when the exact x+7==WX dot did not activate (the comparator
+            // read the WE-off pulse), the very next dot still matches via
+            // WX == x+6 and starts the window one pixel late (at WX-6).
+            let should_start_window = wx_allowed
+                && if wx < 7 {
+                    self.x == 0 && !(is_dmg && (1..7).contains(&wx))
+                } else {
+                    self.x + 7 == wx || (is_dmg && self.x >= 1 && self.x + 6 == wx)
+                };
+
+            // DMG WX=0 + SCX&7>0 quirk: the window activates one T-cycle
+            // later. The would-be trigger dot is dead (no pop, no
+            // activation); trigger next dot.
+            if should_start_window
+                && !is_cgb
+                && wx == 0
+                && !self.win_wx0_delayed
+                && (if self.m3_discard_target >= 0 {
+                    self.m3_discard_target as u8
+                } else {
+                    mmio.read(SCX) & 0x07
+                }) != 0
+            {
+                self.win_wx0_delayed = true;
+                return;
+            }
+
+            if should_start_window {
+                // DMG exact-match mid-line trigger: defer the commit one
+                // dot so a WX store landing on the commit dot is seen by
+                // the comparator (see dmg_wx_trigger_pending).
+                if is_dmg && wx >= 7 && self.x + 7 == wx {
+                    self.dmg_wx_trigger_pending = Some((self.ticks, wx));
+                    return;
+                }
+                // Window draw-start (the mode-3-start window checkpoint /
+                // plot win_draw_start).
+                self.begin_window_draw(self.x);
+                // DMG: hardware restarts the fetcher ON the trigger dot
+                // (TileNumber now; low/high/push at t+2/t+4/t+6), so the
+                // first window pixel pops exactly 6 dots after the
+                // trigger regardless of the global fetch parity. Run the
+                // TileNumber substep immediately and phase-lock the rest
+                // of the startup to this dot (see win_fetch_anchor).
+                if !is_cgb {
+                    // WX 1..6: the comparator matched chop = (7-WX) dots
+                    // into the discard prologue, so the activation lies
+                    // chop dots in the PAST. Catch the fetch up by
+                    // running every substep whose anchored phase
+                    // (0,2,4,6) has already elapsed, anchor the cadence
+                    // at ticks - chop, and pace the chop discard pops
+                    // 1/dot from the x==0 prologue below. WX=0 keeps the
+                    // plain trigger (separate activation-position quirk
+                    // cluster; see win_wx0_delayed).
+                    let chop = if (1..7).contains(&wx) { 7 - wx } else { 0 };
+                    self.win_first_tile_chop = chop;
+                    // DMG window bus-glitch grid origin (see wg_apply):
+                    // this TileNumber's conceptual dot is `chop` dots in
+                    // the past; a pre-window sprite stall delayed the
+                    // anchored trigger by its live charged penalty
+                    // (SpriteFetchRec) that hardware does NOT share
+                    // (its own delay is D_pre, folded in at read
+                    // evaluation).
+                    self.wg_set_anchor(chop as u64);
+                    let mut phase = 0u8;
+                    loop {
+                        let fls = self.wg_apply(self.fetcher_lcdc_state());
+                        if let Some(event) = self.fetcher.step(
+                            mmio,
+                            fls,
+                            crate::ppu::fetcher::FetchPos {
+                                window_line: self.win_y_pos,
+                                display_x: self.x,
+                                pending_discard: 0,
+                                scy: self.scy_delayed,
+                                scx: self.scx_delayed,
+                            },
+                        ) {
+                            if matches!(
+                                event.kind,
+                                crate::ppu::fetcher::FetcherDebugEventKind::TileNumber
+                            ) {
+                                self.subcc_last_tn_cc = self.abs_cc;
+                            }
+                            self.record_fetch_debug_event(event, mmio);
+                        }
+                        phase += 2;
+                        if phase > chop {
+                            break;
+                        }
+                    }
+                    // chop >= 6: the first tile's push already elapsed
+                    // (phase 6), so its first discard pop is due on this
+                    // very dot.
+                    if chop >= 6 && self.fetcher.pixel_fifo.pop().is_ok() {
+                        self.win_first_tile_chop -= 1;
+                    }
+                    self.win_fetch_anchor =
+                        Some(self.ticks.wrapping_sub(chop as u128));
+                }
+                // The post-window sprite group restarts the BG-tile grid
+                // (hardware resets the previous sprite tile number to none after
+                // the window split), so the first post-window sprite in a
+                // tile is again charged the leading rate.
+                self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
+                if self.win_start_dot.is_none() {
+                    self.win_start_dot = Some(self.ticks);
+                }
+                return; // Skip this cycle to let window fetching start
+            }
+        }
+
+        // WX<7 chopped window start: the prologue discard pops that ran
+        // past the (earlier) activation position chop the first window
+        // tile's leading pixels, one per dot (see win_first_tile_chop).
+        if self.x == 0 && self.win_first_tile_chop > 0 {
+            if self.fetcher.pixel_fifo.pop().is_ok() {
+                self.win_first_tile_chop -= 1;
+                self.win_being_fetched = false;
+            }
+            return;
+        }
+
+        // SCX fine-scroll discard (the mode-3-start fine-scroll per-dot loop):
+        // while x == 0, re-read the LIVE SCX each dot. If we have not
+        // yet discarded `scx % 8` BG pixels, pop one and consume the
+        // dot. A mid-M3 SCX write changes this count (and the fetched
+        // tile column, since TileNumber re-reads SCX live).
+        if self.x == 0 {
+            // Hold output until the f1 break is resolved (target latched).
+            if self.m3_discard_target < 0 {
+                return;
+            }
+            let target = self.m3_discard_target as u8;
+            // WE-off insert glitch, prologue variant: the inserted
+            // color-0 pixel sits at the FRONT of the stream and is the
+            // first pixel this discard dot drops — no real FIFO pixel
+            // is consumed, so one extra leading BG pixel survives and
+            // the visible line shifts right by one.
+            if self.m3_pixels_discarded < target && self.we_glitch_discard_insert {
+                self.we_glitch_discard_insert = false;
+                self.m3_pixels_discarded += 1;
+                self.win_being_fetched = false;
+                return;
+            }
+            // A full-width HUD window (WX==7) triggers at LX==0 via the
+            // live x+7==wx match and resets the FIFO. On hardware the
+            // SCX&7 fine-scroll discard consumes the leading BACKGROUND
+            // pixels before LX reaches 0, so a window activating exactly
+            // at LX==0 is unaffected by it and draws from window-x 0 —
+            // the bar stays locked to screen coordinates regardless of
+            // SCX. rustyboi's trigger fires just before this discard and
+            // clears the FIFO, so without this guard the discard wrongly
+            // pops window pixels and the bar shifts left by SCX&7 (moving
+            // with the camera one frame per horizontal scroll).
+            //
+            // Narrowly WX==7: WX<7 triggers at LX<0, inside the discard
+            // region, so it legitimately keeps the discard (mealybug
+            // m3_window_timing_wx_0 shifts the WX=0 window); the DMG wxA6
+            // (WX==166) checkpoint window comes through the mode-3-start
+            // path — flagged by win_draw_started_at_x0 — and keeps it too
+            // (gambatte wxA6_scx7).
+            let win_x0_locked = self.fetcher.is_fetching_window()
+                && !self.win_draw_started_at_x0
+                && mmio.read(WX) == 7;
+            if self.m3_pixels_discarded < target
+                && !win_x0_locked
+                && let Ok(_) = self.fetcher.pixel_fifo.pop() {
+                    self.m3_pixels_discarded += 1;
+                    self.win_being_fetched = false;
+                    return;
+            }
+        }
+
+        // Put a pixel from the FIFO on screen with sprite mixing.
+        // Stop visible output at x==160; the scheduled dot ends Mode 3.
+        if self.x >= 160 {
+            return;
+        }
+        // DMG window reactivation zero pixel (the hardware BG-pixel insert):
+        // the WX comparator matches again with the window already active
+        // (past its startup fetch), exactly at the pop of a window
+        // tile's FIRST pixel — our push-at-empty dot (fetcher at
+        // the tile-number fetch step with bg_fifo.size == 8, the cycle right after its
+        // push; the insert diagonal sits at x == 8k + (8 - chop)). The pop
+        // below then renders a color-0 pixel WITHOUT consuming the FIFO,
+        // inserting one pixel into the line.
+        if !mmio.is_cgb_features_enabled()
+            && self.window_started_this_line
+            && self.fetcher.is_fetching_window()
+            && !self.win_being_fetched
+            && push_this_dot
+            && self.fetcher.pixel_fifo.size() == 8
+            && mmio.read(WX) == self.x + 7
+        {
+            self.insert_bg_pixel = true;
+        }
+        // DMG WE-off zero-pixel insertion glitch: with the window Y-latch
+        // triggered but the window enable OFF (delayed tap, see
+        // we_dot_hist), a tile-boundary pop (the push-at-empty dot; our
+        // queued first-pixel x) where WX == x+7 renders one color-0 pixel
+        // WITHOUT consuming the FIFO (a single white pixel at x = WX-7 on
+        // the trigger-missed rows).
+        // Pan Docs: Window mid-frame behavior — https://gbdev.io/pandocs/Window.html
+        let mut at_tile_boundary = false;
+        for slot in self.we_glitch_tile_starts.iter_mut() {
+            if let Some(fx) = *slot {
+                if fx == self.x {
+                    at_tile_boundary = true;
+                    *slot = None;
+                } else if fx < self.x {
+                    // Stale (chop/discard consumed the boundary pop).
+                    *slot = None;
+                }
+            }
+        }
+        // Pre-CGB machines only (!is_cgb): the CGB PPU has no WE-off
+        // insert glitch even in DMG-compat mode (the line is unshifted).
+        if !mmio.is_cgb()
+            && self.window_y_triggered
+            && !self.fetcher.is_fetching_window()
+            && !self.we_dot_hist[2]
+            && !self.we_insert_suppressed
+            && at_tile_boundary
+            && mmio.read(WX) == self.x + 7
+        {
+            self.insert_bg_pixel = true;
+            // The inserted pixel shifts every later boundary one to the
+            // right.
+            for fx in self.we_glitch_tile_starts.iter_mut().flatten() {
+                *fx = fx.saturating_add(1);
+            }
+        }
+        if self.draw_fifo_pixel(mmio) && self.x == 160 {
+            // Fallback end-of-mode-3 at the x==160 pixel push, used in two
+            // distinct cases:
+            // (a) no closed-form mode-0 time exists (first line after enable /
+            // mid-M3 invalidation): report mode 0 here and end mode 3.
+            // (b) the mode-0 time timing report ALREADY fired above, but the
+            // window fetch restart left the FIFO short, so the renderer
+            // was kept alive to draw the final window pixel; now that
+            // x==160 we end mode 3 WITHOUT re-reporting (the FF41 mode-0
+            // poke / STAT IRQ already fired at the exact mode-0 time).
+            // When mode-0 time is known and the FIFO was complete, the transition
+            // is driven off master_cc above and the renderer never reaches
+            // this x==160 fallback before that boundary, so we must NOT end
+            // mode 3 early here on ordinary (non-window) lines.
+            let window_deferred = self.window_started_this_line && self.mode0_reported_this_line;
+            if self.m0_time_master.is_none() {
+                self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
+                self.resolve_bgp_spikes(mmio);
+                // Leaving mode 3: drop any leftover preamble fast budget so the
+                // next line recomputes against the fresh schedule.
+                self.fast_dots_left = 0;
+                self.state = State::HBlank;
+                if !self.mode0_reported_this_line {
+                    self.mode0_reported_this_line = true;
+                    Self::set_lcd_status_mode(mmio, 0);
+                }
+            } else if window_deferred {
+                self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
+                self.resolve_bgp_spikes(mmio);
+                // Leaving mode 3: drop any leftover preamble fast budget so the
+                // next line recomputes against the fresh schedule.
+                self.fast_dots_left = 0;
+                self.state = State::HBlank;
+            }
+        }
+    }
+
     pub fn step(&mut self, mmio: &mut mmio::Mmio) {
         if self.disabled {
             if mmio.read(LCD_CONTROL)&(LCDCFlags::DisplayEnable as u8) != 0 {
@@ -7841,1326 +9172,7 @@ impl Ppu {
 
         match self.state {
             State::OAMSearch => self.step_mode2(mmio),
-            State::PixelTransfer => 'label: {
-                // Shift the DMG WE per-dot visibility history (see we_dot_hist).
-                self.we_dot_hist = [
-                    self.lcdc_has(LCDCFlags::WindowDisplayEnable),
-                    self.we_dot_hist[0],
-                    self.we_dot_hist[1],
-                    self.we_dot_hist[2],
-                    self.we_dot_hist[3],
-                ];
-                // A mid-mode-3 WX change before the window starts invalidates the
-                // closed-form schedule; fall back to the live emergent transition.
-                // The `win_wx_enable_resolved` latch suppresses re-entry on the dots
-                // after a clean WX-enable was handled (the WX != arm-WX condition
-                // stays true every subsequent dot until the window draws).
-                if !fast
-                    && self.scheduled_mode0_dot.is_some()
-                    && !self.window_started_this_line
-                    && !self.win_wx_enable_resolved
-                    && (mmio.read(WX) != self.m3_scheduled_wx
-                        || self.window_will_start(mmio, mmio.is_cgb_features_enabled())
-                            != self.m3_scheduled_win)
-                {
-                    // WX-write-ENABLE: the window was out of range at M3 arm
-                    // (`!m3_scheduled_win`, so m0_time_master has NO StartWindowDraw
-                    // penalty) and a mid-mode-3 WX write brings it into range so the
-                    // window will now start this line. The hardware next-mode-0 prediction
-                    // re-runs with the window included, moving the mode-3 end
-                    // WIN_M3_PENALTY dots later. ADD that penalty (symmetric to the
-                    // LCDC window-enable path) iff the write lands before the window
-                    // tile commits — otherwise the fetcher already passed the window
-                    // start and no penalty accrues. Scoped CGB / no sprites; the live
-                    // pipeline is untouched, only the read-at-cc mode-0 time is shifted.
-                    let now_will_start =
-                        self.window_will_start(mmio, mmio.is_cgb_features_enabled());
-                    // Only the WX-into-range case: WX itself changed from out of range
-                    // (arm WX > 166, no window scheduled) to in range. A window that
-                    // newly starts for any OTHER reason (a mid-mode-3 WY trigger with
-                    // WX unchanged and already in range) is NOT this lever and must
-                    // keep nulling (the late_wy / late_scx_late_wy cluster).
-                    let arm_wx = self.m3_scheduled_wx as i32;
-                    let wx_now = mmio.read(WX) as i32;
-                    let wx_into_range = arm_wx > 166 && (0..=166).contains(&wx_now);
-                    let wx_enable_clean = !self.m3_scheduled_win
-                        && now_will_start
-                        && wx_into_range
-                        && mmio.is_cgb_features_enabled()
-                        && !mmio.is_double_speed_mode()
-                        && self.sprites_on_line.is_empty();
-                    let mut keep_schedule = false;
-                    if wx_enable_clean && let Some(m0t) = self.m0_time_master {
-                        // Latch: this clean WX-enable is now resolved for the line, so
-                        // later dots (WX still != arm) do not re-enter and null.
-                        self.win_wx_enable_resolved = true;
-                        keep_schedule = true;
-                        let wx = mmio.read(WX) as i32;
-                        let x_at_start = (wx - 7).max(0);
-                        let warmup = CGB_PIXEL_TRANSFER_WARMUP as i64;
-                        // SCX>3 / scx5 fine-scroll: the x==0 window-tile commit runs
-                        // two dots later per extra discarded SCX dot, mirroring the
-                        // late-WX-disable accrual shift.
-                        let win_fine = if wx <= 7 {
-                            2 * (((self.m3_arm_scx & 7) as i64) - 3).max(0)
-                        } else {
-                            0
-                        };
-                        let commit_dot = self.m3_arm_dot as i64
-                            + warmup
-                            + 8
-                            + self.m3_arm_scx as i64
-                            + x_at_start as i64
-                            + win_fine
-                            + WXEN_COMMIT_DELAY;
-                        if (self.ticks as i64) < commit_dot {
-                            let pen = (WIN_M3_PENALTY as i64) << (mmio.is_double_speed_mode() as i64);
-                            self.m0_time_master = Some((m0t as i64 + pen).max(0) as u64);
-                            // Keep the closed-form schedule (mode-3 end shifts with
-                            // the penalty); only the master mode-0 time moved.
-                        }
-                        // else: window starts but the write is past the commit dot, so
-                        // no penalty is added — the no-window mode-0 time captured at arm is
-                        // the correct (mode-0-earlier) boundary; keep the schedule.
-                    }
-                    // WY-trigger ENABLE (symmetric to the WX-into-range branch above):
-                    // WX is UNCHANGED and already in range, but the window newly starts
-                    // this line because a mid-mode-3 WY write made `window_y_active`
-                    // true (the window-enable master / `wy2 == ly` gate flipped). The hardware
-                    // next-mode-0 prediction then runs with the window included, moving the
-                    // mode-3 end WIN_M3_PENALTY dots later — BUT only if the WY trigger
-                    // lands before the fetcher reaches the window-start xpos. For an
-                    // x==0 window (the late_wy / late_scx_late_wy cluster, WX in 0..=7)
-                    // that commit dot is `m3_arm_dot + scx&7 + COMMIT`: the f0/f1
-                    // dispatch reaches xpos 0 (the window tile) `scx&7` dots into M3.
-                    // (Measured byte-exact via cctracer: mode-0 time = no-window + 6 for the
-                    // `_1` reps that trigger 1 dot in, == no-window for the `_2`/`_3`
-                    // reps that trigger 5+ dots in; the boundary is m3_arm_dot+scx+3 at
-                    // both scx=0 and scx=4.) If the trigger lands at/after the commit
-                    // dot, the fetcher already passed xpos 0 so no penalty accrues and
-                    // the no-window mode-0 time (captured at arm) is the correct boundary.
-                    // Scoped CGB / single speed / no sprites / x==0 window; the live
-                    // pipeline is untouched, only the read-at-cc mode-0 time is shifted.
-                    if !keep_schedule
-                        && !self.m3_scheduled_win
-                        && now_will_start
-                        && arm_wx == wx_now
-                        && (0..=7).contains(&wx_now)
-                        && mmio.is_cgb_features_enabled()
-                        && !mmio.is_double_speed_mode()
-                        && self.sprites_on_line.is_empty()
-                        && let Some(m0t) = self.m0_time_master
-                    {
-                        // This WY-trigger enable is resolved for the line; suppress
-                        // re-entry on later dots (window_will_start stays != arm).
-                        self.win_wx_enable_resolved = true;
-                        keep_schedule = true;
-                        // Commit dot = the M3 dot at which the fetcher reaches the
-                        // window-start xpos. For an x==0 window (WX 0..=7) that is
-                        // `m3_arm_dot + scx&7 + WX + 3`: the SCX fine-scroll discard
-                        // (scx&7 dots) then the WX-pixel BG prefix before the window
-                        // tile, plus the fixed f0/f1 dispatch lead (3). A WY trigger
-                        // before this dot adds the StartWindowDraw penalty (mode 3
-                        // runs WIN_M3_PENALTY longer); at/after it the fetcher already
-                        // passed xpos 0, so no penalty accrues. (cctracer: the `_1`
-                        // reps of late_wy_*_wx00 / late_wy_*_wx07 / late_scx_late_wy
-                        // keep the +6 mode-0 time, the `_2`/`_3` reps drop it; the WX-shift
-                        // separates the wx00 `_1` boundary from the wx07 `_1`.)
-                        let commit_dot = self.m3_arm_dot as i64
-                            + (self.m3_arm_scx & 7) as i64
-                            + wx_now as i64
-                            + WYTRIG_COMMIT_DELAY;
-                        if (self.ticks as i64) < commit_dot {
-                            self.m0_time_master =
-                                Some((m0t as i64 + WIN_M3_PENALTY as i64).max(0) as u64);
-                        }
-                        // else: no penalty — keep the no-window mode-0 time captured at arm.
-                    }
-                    // DMG WY-trigger enable (mirror of the CGB branch above). A
-                    // mid-mode-3 WY==LY trigger with an x==0 window (WX 0..=7,
-                    // unchanged) brings the window into play this line. Hardware keeps
-                    // a finite (window-inclusive or no-window) mode-0 time, so the FF41
-                    // line-tail read resolves a concrete mode 0/3 boundary; nulling
-                    // m0_time_master here would defer to the renderer register (always
-                    // mode 3), passing the out3 `_1`/`_2` reps but FAILING the out0
-                    // `_3` rep (late_wy_FFto2_ly2_wx00_3 / late_scx_late_wy_FFto4_ly4
-                    // _wx00_3). Keep the no-window mode-0 time and add WIN_M3_PENALTY iff the
-                    // WY trigger lands before the window-tile commit dot. The DMG commit
-                    // dot is the CGB form (`m3_arm_dot + scx&7 + WX + 3`) plus the
-                    // DMG pixel-transfer warmup less one (`DMG_WARMUP - 1` = 3):
-                    // measured ticks at the WY block bracket it across WX/SCX (wx00:
-                    // pen@84,no-pen@88; scx4: pen@84/88,no-pen@92; wx07: pen@88/92,
-                    // no-pen@96; scx3+wx07: pen@88/92,no-pen@96), so commit_dot =
-                    // m3_arm_dot + scx&7 + WX + 3 + 3 separates pen vs no-pen at every
-                    // rep. Scoped DMG / SS / no sprites / x==0 (WX 0..=7).
-                    if !keep_schedule
-                        && !self.m3_scheduled_win
-                        && now_will_start
-                        && arm_wx == wx_now
-                        && (0..=7).contains(&wx_now)
-                        && !mmio.is_cgb_features_enabled()
-                        && !mmio.is_double_speed_mode()
-                        && self.sprites_on_line.is_empty()
-                        && let Some(m0t) = self.m0_time_master
-                    {
-                        self.win_wx_enable_resolved = true;
-                        keep_schedule = true;
-                        let commit_dot = self.m3_arm_dot as i64
-                            + (self.m3_arm_scx & 7) as i64
-                            + wx_now as i64
-                            + WYTRIG_COMMIT_DELAY
-                            + (DMG_PIXEL_TRANSFER_WARMUP as i64 - 1);
-                        if (self.ticks as i64) < commit_dot {
-                            self.m0_time_master =
-                                Some((m0t as i64 + WIN_M3_PENALTY as i64).max(0) as u64);
-                        }
-                        // else: no penalty — keep the no-window mode-0 time captured at arm.
-                    }
-                    // WX-DISABLE of a WX<7 (visible x==0) window that WAS scheduled at
-                    // M3 arm: the immediate-start window's StartWindowDraw penalty
-                    // locks the moment the fetcher fetches the window tile (the hardware
-                    // `xpos == wx` compare uses the WX register, so a smaller WX commits
-                    // earlier). A WX-write moving WX out of range at/after that commit
-                    // dot keeps the window-inclusive m0_time_master (mode 3 persists ->
-                    // out3); before it the existing null applies (refund -> mode 0). The
-                    // commit dot is `m3_arm_dot + DMG_WARMUP + 5 + scx&7 + WX` (the first
-                    // BG tile fill plus the WX-pixel BG prefix before the window tile,
-                    // less the f0/f1 dispatch lead). The late_wx_wx03_{1,2} DMG reps
-                    // bracket it at WX=3 (write at dot 88 = before -> out0; dot 92 =
-                    // at commit -> out3); WX=7 (late_wx_1) commits 4 dots later (dot
-                    // 96) so the same dot-92 disable still nulls (out0). Scoped DMG /
-                    // single speed / no sprites / WX<7; the WX>=7 reps keep the existing
-                    // `>= 7` graduated branch below. window_started_this_line is still
-                    // false at this dot (the latch lags the closed-form commit).
-                    if !keep_schedule
-                        && self.m3_scheduled_win
-                        && (self.m3_scheduled_wx as i32) < 7
-                        && !now_will_start
-                        && !mmio.is_cgb_features_enabled()
-                        && !mmio.is_double_speed_mode()
-                        && self.sprites_on_line.is_empty()
-                        && self.m0_time_master.is_some()
-                    {
-                        let commit_dot = self.m3_arm_dot as i64
-                            + DMG_PIXEL_TRANSFER_WARMUP as i64
-                            + 5
-                            + (self.m3_arm_scx & 7) as i64
-                            + self.m3_scheduled_wx as i64;
-                        if (self.ticks as i64) >= commit_dot {
-                            keep_schedule = true;
-                            self.win_wx_penalty_resolved = true;
-                        }
-                    }
-                    if !keep_schedule {
-                        self.scheduled_mode0_dot = None;
-                        self.m0_time_master = None;
-                    }
-                }
-                // late_wx: a mid-mode-3 WX write AFTER the window has started,
-                // moving WX out of range, cancels the remaining window draw and
-                // refunds the unaccrued StartWindowDraw penalty from the
-                // read-at-cc mode-0 time. Graduated like late_disable (one accrued dot
-                // per drawn window dot, capped at WIN_M3_PENALTY); a nonzero SCX
-                // fine-scroll prefix advances the accrual one dot. WX<7 windows
-                // (immediate x==0 start) lock at win_start (no refund once
-                // started). CGB single-speed / no sprites; live pipeline
-                // untouched; applied once per line.
-                // DMG late-WX window-disable refund. DMG is BINARY (not graduated like
-                // CGB): a WX-out-of-range write that lands BEFORE the window-tile
-                // commit (`ws + scx&7 + 2` dots into the x==0 window draw) fully
-                // refunds WIN_M3_PENALTY from the read-at-cc mode-0 time so the FF41 read
-                // resolves the no-window mode-0 boundary; at/after the commit the
-                // window-inclusive mode-0 time captured at M3 arm is kept (mode 3). The
-                // late_wx_scx{2,3,5}_{1,2} DMG reps bracket the per-SCX commit: at the
-                // 4-dots-in write, scx0/scx2 already committed (out3, keep) while
-                // scx3/scx5 have not (out0, refund); the 8-dots-in write is always
-                // committed (out3). WX<7 immediate-start windows lock at win_start
-                // (no refund). DMG / no sprites / SS.
-                if !fast
-                    && self.m0_time_master.is_some()
-                    && self.window_started_this_line
-                    && !mmio.is_cgb_features_enabled()
-                    && self.sprites_on_line.is_empty()
-                    && mmio.read(WX) != self.m3_scheduled_wx
-                    && !self.win_wx_penalty_resolved
-                    && (self.m3_scheduled_wx as i32) >= 7
-                {
-                    let wx_now = mmio.read(WX) as i32;
-                    let wx_in_range = (0..=166).contains(&wx_now);
-                    if let (Some(ws), Some(m0t)) = (self.win_start_dot, self.m0_time_master)
-                        && !wx_in_range
-                    {
-                        let commit = ws as i64 + (self.m3_arm_scx & 7) as i64 + 2;
-                        if (self.ticks as i64) < commit {
-                            self.m0_time_master =
-                                Some((m0t as i64 - WIN_M3_PENALTY as i64).max(0) as u64);
-                        }
-                        self.win_wx_penalty_resolved = true;
-                    }
-                }
-                else if self.m0_time_master.is_some()
-                    && self.window_started_this_line
-                    && mmio.is_cgb_features_enabled()
-                    && !mmio.is_double_speed_mode()
-                    && self.sprites_on_line.is_empty()
-                    && mmio.read(WX) != self.m3_scheduled_wx
-                    && !self.win_wx_penalty_resolved
-                {
-                    let wx_now = mmio.read(WX) as i32;
-                    let wx_in_range = (0..=166).contains(&wx_now);
-                    if let (Some(ws), Some(m0t)) = (self.win_start_dot, self.m0_time_master)
-                        && !wx_in_range
-                    {
-                        if (self.m3_scheduled_wx as i32) < 7 {
-                            // Immediate-start window: penalty already locked.
-                            self.win_wx_penalty_resolved = true;
-                        } else {
-                            let scx_bias = if (self.m3_arm_scx & 7) != 0 { 1 } else { 0 };
-                            // SCX > 3 fine-scroll: the x==0 window's StartWindowDraw
-                            // penalty accrual begins later than win_start_dot by two
-                            // dots per extra discarded SCX dot (the mode-3-start dispatch
-                            // runs the window-tile fetch that much later). Without
-                            // this the scx5 boundary is 4 dots too early and the
-                            // late_wx_scx5_1 refund is fully accrued (drops to 0).
-                            let scx_late = 2 * (((self.m3_arm_scx & 7) as i64) - 3).max(0);
-                            let drawn = (self.ticks as i64) - ws as i64 + scx_bias - scx_late;
-                            let accrued = drawn.clamp(0, WIN_M3_PENALTY as i64);
-                            let refund = WIN_M3_PENALTY as i64 - accrued;
-                            self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
-                            self.win_wx_penalty_resolved = true;
-                        }
-                    }
-                }
-                // Double-speed late-WX window-disable refund. Unlike single speed
-                // (graduated per drawn dot), the DS StartWindowDraw penalty is BINARY:
-                // a WX-out-of-range write that lands BEFORE the window-tile commits
-                // (`ws + scx&7 + 1` dots into the window draw) fully refunds the
-                // WIN_M3_PENALTY (<<1 cc at DS), so the FF41 read resolves the
-                // no-window mode-0 boundary; at/after the commit the penalty is locked
-                // and the window-inclusive mode-0 time (captured at arm) is kept. cctracer
-                // ground truth: late_wx_scx5_ds_1 (write 2 dots into the x==0 window,
-                // scx5) takes the full 12-cc refund -> mode 0 (out0); the `_ds_2` reps
-                // (write 2 dots later, or scx0 1 dot in) keep the full mode-0 time -> mode 3
-                // (out3). CGB / no sprites; live pipeline untouched, only read-at-cc.
-                else if self.m0_time_master.is_some()
-                    && self.window_started_this_line
-                    && mmio.is_cgb_features_enabled()
-                    && mmio.is_double_speed_mode()
-                    && self.sprites_on_line.is_empty()
-                    && mmio.read(WX) != self.m3_scheduled_wx
-                    && !self.win_wx_penalty_resolved
-                    && (self.m3_scheduled_wx as i32) >= 7
-                {
-                    let wx_now = mmio.read(WX) as i32;
-                    let wx_in_range = (0..=166).contains(&wx_now);
-                    if let (Some(ws), Some(m0t)) = (self.win_start_dot, self.m0_time_master)
-                        && !wx_in_range
-                    {
-                        let commit = ws as i64 + (self.m3_arm_scx & 7) as i64 + 1;
-                        if (self.ticks as i64) < commit {
-                            let refund = (WIN_M3_PENALTY as i64) << 1;
-                            self.m0_time_master = Some((m0t as i64 - refund).max(0) as u64);
-                        }
-                        self.win_wx_penalty_resolved = true;
-                    }
-                }
-                // ATOMIC mode-3 END: mode 3 ends at the exact closed-form mode-0 time
-                // (master cc), and EVERYTHING (eager FF41 mode register, mode-0
-                // STAT check, VRAM/OAM/cgbp unblock, m0 IRQ) is driven off this one
-                // boundary. The pixel pipeline is now image-only: at the transition
-                // we flush any remaining FIFO pixels to x==160 so the visible line
-                // is complete, and the pipeline's own x==160 push no longer drives
-                // timing. When no closed-form mode-0 time exists (first line after
-                // enable / mid-M3 invalidation), fall back to the live x==160 push.
-                if let Some(m0t) = self.m0_time_master
-                    && mmio.master_cc() >= m0t {
-                        self.scheduled_mode0_dot = None;
-                        // Timing report (FF41 mode-0, STAT/m0 IRQ) fires at the exact
-                        // mode-0 time regardless of pixel progress.
-                        if !self.mode0_reported_this_line {
-                            self.mode0_reported_this_line = true;
-                            Self::set_lcd_status_mode(mmio, 0);
-                        }
-                        // Flush remaining FIFO pixels to fill all 160 columns; the
-                        // pipeline may lag the closed-form boundary by a few dots.
-                        while self.x < 160 && self.draw_fifo_pixel(mmio) {}
-                        // On window-start lines the window fetch restart can leave
-                        // the FIFO momentarily empty at mode-0 time (the last 1-2 window
-                        // pixels are still being fetched). The timing has already
-                        // been reported above; keep the renderer alive (image-only)
-                        // until x==160 so the final window pixel is drawn, then enter
-                        // HBlank via the x==160 fallback below. For all other lines
-                        // the flush completed the line, so end mode 3 now.
-                        if !(self.window_started_this_line && self.x < 160) {
-                            // DMG wx==166 pixel output-at-xpos166 (mode-3 end). See
-                            // apply_dmg_wxa6_lineend_windraw.
-                            self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
-                            self.cgb_train_reresolve(mmio);
-                            self.win_train_reresolve(mmio);
-                            self.resolve_bgp_spikes(mmio);
-                            // Leaving mode 3: drop any leftover preamble fast budget so the
-                            // next line recomputes against the fresh schedule.
-                            self.fast_dots_left = 0;
-                            self.state = State::HBlank;
-                            break 'label;
-                        }
-                    }
-
-                // The hardware mode-3-start fine-scroll break resolution. The f1 loop
-                // runs xpos = 0,1,2,... one per M3 dot, re-reading p.scx each
-                // step, and breaks (fixing the discard count) at the first xpos
-                // with xpos%8 == scx%8. xpos == ticks - arm dot, so reading SCX
-                // here samples it at the same early M3 dots hardware does -
-                // independent of the FIFO/warmup latency that delays the pops.
-                // Once resolved the target is frozen, so a later SCX write past
-                // the break has no effect (matching the single-write tests).
-                if self.x == 0 && self.m3_discard_target < 0 {
-                    const F1_OFFSET: i64 = -1;
-                    let xpos = ((self.ticks as i64 - self.m3_arm_dot as i64 + F1_OFFSET).max(0)) as u32;
-                    // Exact-cc SCX read: sample SCX as-of this f1 dot's abs_cc
-                    // (honoring the CGB +2cc SCX change delay) so a mid-discard
-                    // write lands on the correct iteration, instead of the
-                    // immediate register read whose visibility depends on the
-                    // per-dot PPU-step-vs-CPU-write ordering within a dot.
-                    let scx_break_full = self.scx_f1_pending_at_cc(self.abs_cc);
-                    let scx_live = (scx_break_full & 0x07) as u32;
-                    if xpos % 8 == scx_live || xpos >= 80 {
-                        // The hardware mode-3-start fine-scroll phase re-reads SCX live at its case-0 tile
-                        // fetch, so a mid-discard SCX write that crosses a tile-column
-                        // boundary makes the FIRST displayed tile come from the new
-                        // column (scx_break/8), not the column queued into the FIFO at
-                        // M3 arm. When that happens, discard the whole stale first tile
-                        // and refetch from the live column: reset the fetcher/FIFO and
-                        // set the discard to scx_break%8 so the next BG fetch (which
-                        // derives its column from scx_delayed at x==0) lands on the
-                        // correct column, then trims the fine-scroll prefix. The mode-3
-                        // length / timing is owned by the STAT resolve (m0_time_master), so this
-                        // is render-only.
-                        // The displayed first tile's COLUMN is read at the hardware's
-                        // last case-0 (the greatest multiple-of-8 xpos <= break),
-                        // NOT at the break dot: the mode-3-start fine-scroll phase only reloads `reg1`
-                        // (tile number, from scx/8) when `xpos % tile_len == 0`.
-                        // For a break inside the first tile (xpos < 8) that is
-                        // xpos==0 -> the M3-arm column, so no re-fetch is needed
-                        // even if a later f1 dot saw a column-crossing SCX. Only a
-                        // break that loops PAST tile_len (xpos >= 8) reloads at
-                        // xpos==8 from the then-live SCX. Sample SCX at that dot.
-                        let case0_xpos = (xpos / 8) * 8;
-                        let ds_u = mmio.is_double_speed_mode() as u32;
-                        let back = ((xpos - case0_xpos) as u64) << ds_u;
-                        let scx_col_full =
-                            self.scx_f1_pending_at_cc(self.abs_cc.wrapping_sub(back));
-                        let arm_col = ((self.m3_arm_scx_full.max(0) as u16) >> 3) & 0x1F;
-                        let brk_col = (scx_col_full as u16 >> 3) & 0x1F;
-                        // CGB f1 first-tile re-fetch (both single and double speed):
-                        // a mid-f1 SCX write whose break column differs from the
-                        // armed column rewrites the first queued BG tile. The
-                        // sub-cc clock carries the DS sub-dot phase via the
-                        // `delta << ds` mode0/mode-0 time nudge below, so the same
-                        // re-fetch applies at double speed (the DMG mode-3-start
-                        // fine-scroll uses a different +1 tile-column phase the
-                        // discard model already matches, so it stays excluded).
-                        if mmio.is_cgb_features_enabled()
-                            && self.m3_arm_scx_full >= 0
-                            && brk_col != arm_col
-                        {
-                            // Only the FIRST queued BG tile is stale: rewrite the
-                            // 8 oldest FIFO entries in place with the tile at the
-                            // break column, then discard scx_break%8 fine pixels.
-                            // Subsequent tiles keep their live-SCX columns (the
-                            // fetcher re-reads scx_delayed), so a later SCX write
-                            // that moves the steady-state column is preserved.
-                            let bg_y = (self.scy_delayed as u16
-                                + mmio.read(LY) as u16) & 0xFF;
-                            self.rewrite_first_fifo_tile(mmio, brk_col, bg_y);
-                            self.m3_pixels_discarded = 0;
-                            self.m3_discard_target = (scx_break_full & 0x07) as i8;
-                            if let Some(dot) = self.scheduled_mode0_dot {
-                                let delta = xpos as i64 - self.m3_arm_scx as i64;
-                                self.scheduled_mode0_dot = Some((dot as i64 + delta).max(0) as u128);
-                                if let Some(m0t) = self.m0_time_master {
-                                    let ds = mmio.is_double_speed_mode() as u32;
-                                    self.m0_time_master =
-                                        Some((m0t as i64 + (delta << ds)).max(0) as u64);
-                                }
-                            }
-                            break 'label;
-                        }
-                        // Discard the full xpos count: a mid-discard SCX change can
-                        // push the break past tile_len (hardware loops on to the
-                        // next matching xpos), discarding more than 7 pixels.
-                        self.m3_discard_target = xpos as i8;
-                        // The closed-form mode-0 schedule assumed m3_arm_scx dots
-                        // of discard; nudge it by the actual difference so M3 ends
-                        // at the right dot (the extra discards lengthen M3).
-                        if let Some(dot) = self.scheduled_mode0_dot {
-                            let delta = xpos as i64 - self.m3_arm_scx as i64;
-                            self.scheduled_mode0_dot = Some((dot as i64 + delta).max(0) as u128);
-                            if let Some(m0t) = self.m0_time_master {
-                                let ds = mmio.is_double_speed_mode() as u32;
-                                self.m0_time_master =
-                                    Some((m0t as i64 + (delta << ds)).max(0) as u64);
-                            }
-                        }
-                    }
-                }
-
-                if self.sprite_fetch_stall > 0 {
-                    self.sprite_fetch_stall -= 1;
-                    break 'label;
-                }
-
-                if self.fetcher.pixel_fifo.size() != 0 && self.pixel_transfer_warmup == 0 {
-                    self.sprite_fetch_stall = self.sprite_fetch_penalty_for_current_x(mmio).unwrap_or(0);
-                    if self.sprite_fetch_stall > 0 {
-                        self.sprite_fetch_stall -= 1;
-                        break 'label;
-                    }
-                }
-
-                // DMG WX 1..6 EARLY window activation: the WX comparator matches
-                // during the discard prologue at position WX-7 (activating while
-                // position_in_line is still negative), i.e. (7-WX) dots
-                // BEFORE the first visible pop. Evaluating it there — not at the
-                // pos-0 trigger below — matters when WX is rewritten mid-prologue:
-                // hardware activates with the OLD WX (a WX=4 activation beats a
-                // WX=LY rewrite by 1-3 dots on every row). pos = ticks - (m3_arm_dot + 12 + scx&7) maps our
-                // pipeline's pop timeline (even arm: TN arm+2 .. push arm+8,
-                // warmup 4, first visible pop arm+12+scx). The activation then
-                // runs the restart fetch on real dots (anchored cadence) and the
-                // remaining (7-WX) prologue pops chop the first window tile, so
-                // the first VISIBLE pixel still lands at pos-0 + 6. Exact-match
-                // only; any miss falls back to the pos-0 trigger below.
-                if !mmio.is_cgb_features_enabled()
-                    && self.x == 0
-                    && !self.fetcher.is_fetching_window()
-                    && !self.first_line_after_enable
-                    && self.m3_discard_target >= 0
-                    // Comparator WE tap (see we_dot_hist): delayed, not live.
-                    && self.window_y_active_with(mmio, self.we_dot_hist[1] && self.we_dot_hist[2])
-                {
-                    let wx = mmio.read(WX);
-                    // WX==0 with SCX&7==0 takes the same early-comparator
-                    // activation with chop 7 (window column 7 lands at screen
-                    // x0 — the WX=0 window's left 7 columns are off-screen).
-                    // SCX&7>0 keeps the pos-0 trigger + one-dot delay quirk
-                    // (win_wx0_delayed).
-                    if (1..7).contains(&wx) || (wx == 0 && self.m3_discard_target == 0) {
-                        let s = self.m3_discard_target as i64;
-                        // pos-0 dot (first visible pop absent windows): TN runs
-                        // at the first even dot after arm, push +6, warmup 4,
-                        // + the scx fine discard pops.
-                        let base = self.m3_arm_dot as i64 + 12 - (self.m3_arm_dot & 1) as i64
-                            + s;
-                        // The comparator's activation dot is pos == WX-7, but a
-                        // CPU WX store's new value reaches the comparator within
-                        // the same dot on hardware while our mmio only exposes it
-                        // to the NEXT dot — so evaluate one dot later (pos ==
-                        // WX-6) with the then-visible WX. This brackets the
-                        // rewrite race: a WX=6->LY rewrite one dot after the pos -1
-                        // match must WIN (no window starts), while a WX=4/5 must
-                        // LOSE (window starts with the old WX 4/5).
-                        let pos = self.ticks as i64 - base;
-                        if pos == wx as i64 - 6 {
-                            self.begin_window_draw(0);
-                            self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
-                            if self.win_start_dot.is_none() {
-                                self.win_start_dot = Some(self.ticks);
-                            }
-                            // Remaining prologue pops become the first-tile chop;
-                            // the warmup/scx-discard bookkeeping is superseded
-                            // (their dots are consumed by the restart fetch).
-                            self.win_first_tile_chop = 7 - wx;
-                            self.pixel_transfer_warmup = 0;
-                            self.m3_pixels_discarded = self.m3_discard_target as u8;
-                            // The activation dot itself was one dot ago: its
-                            // TileNumber is due now (catch-up), low/high/push at
-                            // +1/+3/+5 via the anchored cadence.
-                            self.wg_set_anchor(0);
-                            let fls = self.wg_apply(self.fetcher_lcdc_state());
-                            if let Some(event) = self.fetcher.step(
-                                mmio,
-                                fls,
-                                crate::ppu::fetcher::FetchPos {
-                                    window_line: self.win_y_pos,
-                                    display_x: self.x,
-                                    pending_discard: 0,
-                                    scy: self.scy_delayed,
-                                    scx: self.scx_delayed,
-                                },
-                            ) {
-                                if matches!(
-                                    event.kind,
-                                    crate::ppu::fetcher::FetcherDebugEventKind::TileNumber
-                                ) {
-                                    self.subcc_last_tn_cc = self.abs_cc;
-                                }
-                                self.record_fetch_debug_event(event, mmio);
-                            }
-                            self.win_fetch_anchor = Some(self.ticks.wrapping_sub(1));
-                            break 'label;
-                        }
-                    }
-                }
-
-                // Whether this dot executed a PushToFIFO fetch substep — the
-                // window-reactivation insert fires on the pop of a window tile's
-                // FIRST pixel, i.e. our push dot (on hardware: the fetcher at its
-                // TileNumber T1 step with the BG FIFO holding 8, the cycle right
-                // after its push-at-empty).
-                let mut push_this_dot = false;
-                // Fetcher cadence: on CGB, decouple from absolute self.ticks so that
-                // sprite-fetch stall dots don't flip the fetcher's even/odd phase
-                // (matches hardware). On DMG, keep the original self.ticks gate.
-                let cadence_even = if mmio.is_cgb_features_enabled() {
-                    let even = self.fetcher_cadence_tick.is_multiple_of(2);
-                    self.fetcher_cadence_tick = self.fetcher_cadence_tick.wrapping_add(1);
-                    even
-                } else if let Some(anchor) = self.win_fetch_anchor {
-                    // Window-startup fetch: phase-locked to the trigger dot so
-                    // the first window pixel pops exactly 6 dots after it.
-                    self.ticks.wrapping_sub(anchor).is_multiple_of(2)
-                } else {
-                    self.ticks.is_multiple_of(2)
-                };
-
-                // DMG mid-mode-3 WE-off window kill (the hardware TileNumber-T1
-                // window-trigger clear): the window fetcher re-samples the
-                // window-enable bit at each TileNumber step with a one-dot
-                // delayed sample (we_dot_hist[2]); reading OFF reverts the fetch
-                // to BG from THIS tile on (the already-pushed window pixels in
-                // the FIFO drain out, so a killed window always shows a multiple
-                // of 8 pixels). A WE-off pulse short enough that its delayed
-                // sample misses every TileNumber dot leaves the window running.
-                // (An implementation that latched the window-draw state at the write would
-                // instead kill the window on any pulse.)
-                if cadence_even
-                    && !mmio.is_cgb_features_enabled()
-                    && self.fetcher.is_fetching_window()
-                    && self.fetcher.fetch_state_is_tile_number()
-                    && !self.we_dot_hist[if self.win_kill_tap_late { 3 } else { 2 }]
-                {
-                    self.fetcher.stop_window_with_extra(0);
-                    self.window_started_this_line = false;
-                    self.win_being_fetched = false;
-                }
-
-                // DMG BG fetch-grid origin (see bg_wg_apply): the line's first
-                // BG TileNumber read runs on this dot, before any sprite stall.
-                if cadence_even
-                    && !mmio.is_cgb_features_enabled()
-                    && self.bg_anchor_cc.is_none()
-                    && !self.fetcher.is_fetching_window()
-                    && self.fetcher.fetch_state_is_tile_number()
-                    && self.fetcher.get_tile_index() == 0
-                {
-                    self.bg_anchor_cc = Some(self.abs_cc);
-                }
-                let fetcher_lcdc_state =
-                    self.bg_wg_apply(self.wg_apply(self.fetcher_lcdc_state()), mmio.read(LY));
-                // Pixels still to be discarded for SCX fine-scroll: they sit in
-                // the FIFO but won't be displayed, so the BG tile column (derived
-                // from display_x + FIFO depth) must not count them.
-                let pending_discard = if self.x == 0 {
-                    (self.m3_discard_target.max(0) as u8).saturating_sub(self.m3_pixels_discarded)
-                } else {
-                    0
-                };
-                if cadence_even
-                    && let Some(event) = self.fetcher.step(mmio, fetcher_lcdc_state, crate::ppu::fetcher::FetchPos {
-                        window_line: self.win_y_pos,
-                        display_x: self.x,
-                        pending_discard,
-                        scy: self.scy_delayed,
-                        scx: self.scx_delayed,
-                    }) {
-                        if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::TileNumber) {
-                            self.subcc_last_tn_cc = self.abs_cc;
-                        }
-                        if matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo) {
-                            push_this_dot = true;
-                            // The display-x at which this tile's first pixel will
-                            // pop (the hardware push-at-empty dot), SIGNED: during
-                            // the SCX fine-scroll discard prologue the boundary
-                            // sits at the hardware position -(pending discards) < 0.
-                            if !mmio.is_cgb_features_enabled() {
-                                let first_x = self.x as i32 + event.fifo_size as i32
-                                    - 8
-                                    - pending_discard as i32;
-                                if (0..160).contains(&first_x) {
-                                    // Visible boundary: queue for the pop-side
-                                    // WE-off zero-pixel insert check.
-                                    if let Some(slot) = self
-                                        .we_glitch_tile_starts
-                                        .iter_mut()
-                                        .find(|s| s.is_none())
-                                    {
-                                        *slot = Some(first_x as u8);
-                                    }
-                                } else if first_x < 0 && !mmio.is_cgb() {
-                                    // Discard-prologue boundary (a known hardware
-                                    // quirk): evaluate the WE-off insert HERE, at
-                                    // the push dot. logical position = first_x+7
-                                    // (hardware clamps out-of-range to 0, matching
-                                    // WX==0). A hit inserts a color-0 pixel that
-                                    // the prologue itself swallows — one discard
-                                    // dot consumes it instead of a real pixel
-                                    // (see we_glitch_discard_insert). Pre-CGB
-                                    // MACHINES only (non-CGB hardware): the CGB
-                                    // PPU has no insert glitch even in DMG-compat.
-                                    let logical = first_x + 7;
-                                    let logical =
-                                        if (0..=167).contains(&logical) { logical } else { 0 };
-                                    if self.window_y_triggered
-                                        && !self.fetcher.is_fetching_window()
-                                        && !self.we_dot_hist[2]
-                                        && !self.we_insert_suppressed
-                                        && mmio.read(WX) as i32 == logical
-                                    {
-                                        self.we_glitch_discard_insert = true;
-                                    }
-                                }
-                            }
-                            // CGB-compat up-pulse LCDC.4 train: buffer each BG tile
-                            // so a line-end re-resolve against the COMPLETE journal
-                            // can fix the tiles fetched before the whole pulse train
-                            // was journaled (see cgb_train_reresolve).
-                            if self.wg_cgb && !event.fetching_window && !self.wg_hist.is_empty() {
-                                let first_x = (self.x as i32 + event.fifo_size as i32
-                                    - 8
-                                    - pending_discard as i32)
-                                    .max(0);
-                                if (0..160).contains(&first_x) {
-                                    self.bg_tile_buf.push(CapturedBgTile {
-                                        n: event.tile_index as u64,
-                                        tn: event.tile_num,
-                                        first_x: first_x as u8,
-                                        y: self.fetcher.latched_y(),
-                                        live_low_tds: self.fetcher.last_low_tds(),
-                                        live_high_tds: self.fetcher.last_high_tds(),
-                                    });
-                                }
-                            }
-                            // WINDOW analog (win_train_reresolve): the window internal
-                            // line is win_y_pos (not latched_y, which the window fetch
-                            // does not update).
-                            if self.wg_cgb && event.fetching_window && !self.wg_hist.is_empty() {
-                                let first_x = (self.x as i32 + event.fifo_size as i32
-                                    - 8
-                                    - pending_discard as i32)
-                                    .max(0);
-                                if (0..160).contains(&first_x) {
-                                    self.win_tile_buf.push(CapturedWinTile {
-                                        n: event.tile_index as u64,
-                                        tn: event.tile_num,
-                                        first_x: first_x as u8,
-                                        y: self.win_y_pos,
-                                        live_low_tds: self.fetcher.last_low_tds(),
-                                        live_high_tds: self.fetcher.last_high_tds(),
-                                    });
-                                }
-                            }
-                        }
-                        // The window fetch anchor persists for the rest of
-                        // the line — the hardware fetch grid stays phase-locked
-                        // to the restart (pushes every 8 dots from the anchor),
-                        // so the reactivation-insert columns stay at
-                        // window_start + 8k. It resets at the next M3 arm or window
-                        // restart.
-                        // Sub-cc column adjustment: a BG tile whose column was committed
-                        // at TileNumber under the OLD scx, but whose pixels are
-                        // PLOTTED after the write's apply cc (write_cc + 2*cgb),
-                        // must render under the NEW scx (a mid-mode-3 SCX write
-                        // samples the column at plot time, not fetch time). Only the single in-flight straddle
-                        // tile (armed at the write) is corrected, and only at the
-                        // exact plot-vs-apply phase (gap == 4); see the gap comment
-                        // below.
-                        let mut armed_this_event = false;
-                        if self.subcc_rekey_armed
-                            && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
-                        {
-                            // The single in-flight tile (column committed under the
-                            // OLD scx before the write) just pushed. Its first
-                            // displayed pixel sits at display column == the xpos the
-                            // fetcher used (xpos == display_x + fifo - pending); its
-                            // plot cc is abs_cc + (xpos - current display x). If that
-                            // plot cc is strictly after the apply cc the tile must
-                            // render under the NEW scx (the hardware SCX change samples
-                            // the column at plot, not fetch); re-key the 8 newest
-                            // FIFO entries with the NEW-scx column using the
-                            // fetcher's exact xpos/cgb_adj. Disarm afterwards.
-                            self.subcc_rekey_armed = false;
-                            let dsf = mmio.is_double_speed_mode() as u32;
-                            let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
-                            // plot cc = abs_cc + the dot distance to this tile's
-                            // first displayed pixel. The dot delta must be scaled
-                            // to master cc (1 dot = 1<<ds cc) so the gap resonance
-                            // is in master cc at both speeds.
-                            let plot_cc = self.abs_cc as i64
-                                + ((xpos as i64 - self.x as i64) << dsf);
-                            // SS (validated Stage 1b, broke-0 across the full
-                            // suite incl. DMG): the in-flight straddle flips to NEW
-                            // at the exact plot-vs-apply phase gap==4.
-                            let gap = plot_cc - self.subcc_scx_apply_cc as i64;
-                            // DMG SS + low-X sprite: the sprite-fetch dot during the
-                            // discard prologue shifts the whole line's BG-fetch phase
-                            // one tile, so a steady-state mid-line SCX write's
-                            // OLD->NEW column boundary also lands one tile LATER than
-                            // the no-sprite cadence the gap==4 rekey assumes. The
-                            // in-flight tile plots just before the boundary, so keep
-                            // it OLD (suppress the flip); the NEXT tile, fetched after
-                            // the write, is already NEW. Mirrors the CGB gap==1
-                            // first-line revert. Without the sprite (scx_during_m3_4/5)
-                            // gap==4 stays as the validated steady-state flip.
-                            let dmg_ss_lowx_sprite = dsf == 0
-                                && !mmio.is_cgb_features_enabled()
-                                && self.lcdc_has(LCDCFlags::SpriteDisplayEnable)
-                                && self.sprites_on_line.iter().any(|s| s.x <= 8);
-                            // DS (Stage 2): the gap proxy is ambiguous across
-                            // initial-scx, but the underlying resonance is that the
-                            // write's apply cc lands at the MIDPOINT of the armed
-                            // tile's fetcher step. The BG fetcher advances one step
-                            // every 2 dots == (2<<ds) cc; the armed tile's column
-                            // was latched at TileNumber (subcc_last_tn_cc) and
-                            // The hardware SCX-write handling re-derives that
-                            // single tile NEW only when apply falls half a step
-                            // (1<<ds cc) past the latch, modulo the step:
-                            // (apply_cc - tn_cc) % (2<<ds) == (1<<ds)
-                            // At DS this is (apply-tn)%4==2, which flips ds_3/4/5
-                            // across every initial-scx (0761/0360/...) where the
-                            // cruder gap/span proxies disagree. SS keeps gap==4
-                            // (the DMG cadence differs and the mod phase regresses
-                            // the DMG SS set, so SS is left exactly as Stage 1b).
-                            let flip = if dsf == 0 {
-                                gap == 4 && !dmg_ss_lowx_sprite
-                            } else {
-                                let step = 2i64 << dsf;
-                                let phase = (self.subcc_scx_apply_cc as i64
-                                    - self.subcc_last_tn_cc as i64).rem_euclid(step);
-                                phase == (1i64 << dsf)
-                            };
-                            // DS two-tile straddle gate: a low-X sprite on the line
-                            // shifts the BG fetch phase one tile while the DS FIFO
-                            // carries an extra tile, so the OLD->NEW scx boundary lands
-                            // one tile LATER than the non-sprite DS cadence and the
-                            // in-flight straddle tile stays OLD instead of flipping to
-                            // NEW (with a further one-tile LY0 shift handled below).
-                            // The non-sprite DS cases (lowspr==0) are a single-tile
-                            // straddle handled correctly by the NEW rewrite below and
-                            // MUST keep it.
-                            let ds_two_tile = dsf == 1
-                                && mmio.is_cgb_features_enabled()
-                                && self.sprites_on_line.iter().any(|s| s.x <= 16);
-                            if flip {
-                                let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                                let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                                if ds_two_tile {
-                                    // DS spx straddle: a low-X sprite shifts the BG
-                                    // fetch phase one tile while the DS FIFO carries an
-                                    // extra tile, so the OLD->NEW scx boundary lands one
-                                    // tile LATER than the non-sprite DS cadence. The
-                                    // in-flight straddle tile -- which the non-sprite DS
-                                    // flip would push to the NEW scx -- actually plots
-                                    // just before the boundary, so it stays the OLD scx
-                                    // (natural xpos column) on EVERY line. On the first
-                                    // rendered line (LY==0) the boundary lands one tile
-                                    // later still, so the NEXT tile (already fetched
-                                    // under the NEW scx) must also revert to the OLD scx;
-                                    // on LY>=1 that next tile keeps the NEW scx.
-                                    if old_col != new_col {
-                                        let bg_y = (self.scy_delayed as u16
-                                            + mmio.read(LY) as u16) & 0xFF;
-                                        let pixels = self.bg_pixels_at_col(mmio, old_col, bg_y);
-                                        let off = (xpos as usize).saturating_sub(self.x as usize);
-                                        self.fetcher.pixel_fifo.overwrite_at(off, &pixels);
-                                    }
-                                    // First-line second-tile revert: on LY==0 the
-                                    // fetcher dispatch can land the OLD->NEW boundary
-                                    // one tile later than on LY>=1, so the second
-                                    // straddle tile (already fetched NEW) reverts to
-                                    // OLD. Whether that one-tile shift happens depends
-                                    // on the sprite-fetch sub-tile phase: an even
-                                    // shifting sprite x consumes the extra dot that
-                                    // pushes the second tile's fetch past the apply on
-                                    // LY0 (sprite x==2), an odd one does not (x==1),
-                                    // so the revert is gated on the low sprite x parity.
-                                    let lowspr_even = self
-                                        .sprites_on_line
-                                        .iter()
-                                        .filter(|s| s.x <= 16)
-                                        .map(|s| s.x)
-                                        .min()
-                                        .is_some_and(|x| x % 2 == 0);
-                                    if mmio.read(LY) == 0 && lowspr_even {
-                                        self.ds_straddle_next_old = true;
-                                        armed_this_event = true;
-                                    }
-                                } else if new_col != old_col {
-                                    let bg_y = (self.scy_delayed as u16
-                                        + mmio.read(LY) as u16) & 0xFF;
-                                    let pixels = self.bg_pixels_at_col(mmio, new_col, bg_y);
-                                    self.fetcher.pixel_fifo.overwrite_newest(&pixels);
-                                }
-                            } else if dsf == 0
-                                && mmio.is_cgb_features_enabled()
-                                && gap == 1
-                                && self.sprites_on_line.iter().any(|s| s.x >= 1 && s.x <= 8)
-                            {
-                                // First rendered line (LY=0) straddle, CGB SS: the
-                                // line after LCD-enable runs its mode-3 fetcher
-                                // through a different warmup/dispatch phase, so the
-                                // write's apply lands one fetcher step EARLIER
-                                // relative to the in-flight tile (gap==1 here vs
-                                // gap==5 on LY>=1, same xpos). The armed tile stays
-                                // OLD (it plots just before the boundary), AND the
-                                // NEXT tile -- which the per-dot fetcher already
-                                // read NEW because the first-line dispatch lags the
-                                // boundary by one tile -- must be reverted to OLD so
-                                // the OLD->NEW boundary lands one tile later, exactly
-                                // as the hardware first-line xpos
-                                // does. On LY>=1 (gap==5) this revert does NOT fire,
-                                // so those lines keep the boundary one tile earlier.
-                                self.subcc_revert_next_old = true;
-                                armed_this_event = true;
-                            }
-                        }
-                        // Sprite-shifted revert: the tile pushed right after the
-                        // armed straddle tile was fetched with the NEW scx one tile
-                        // too early (FIFO depth 8 vs 9 due to a sprite-fetch dot);
-                        // rewrite its 8 entries back to the OLD-scx column so the
-                        // OLD->NEW boundary lands one tile later (matching the hardware
-                        // fetcher-xpos boundary).
-                        if self.subcc_revert_next_old
-                            && !armed_this_event
-                            && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
-                        {
-                            self.subcc_revert_next_old = false;
-                            let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
-                            let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                            let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                            if new_col != old_col {
-                                let bg_y = (self.scy_delayed as u16
-                                    + mmio.read(LY) as u16) & 0xFF;
-                                let pixels = self.bg_pixels_at_col(mmio, old_col, bg_y);
-                                self.fetcher.pixel_fifo.overwrite_newest(&pixels);
-                            }
-                        }
-                        // DS two-tile straddle, SECOND tile (LY0 only): this tile was
-                        // fetched under the NEW scx (the per-dot fetcher advanced past
-                        // the apply) but on the first rendered line the OLD->NEW
-                        // boundary lands one tile later, so it plots under the OLD scx
-                        // at its natural column. Rewrite it in place by exact display
-                        // offset (xpos - self.x) so the low-X sprite's FIFO shift does
-                        // not misplace it.
-                        if self.ds_straddle_next_old
-                            && !armed_this_event
-                            && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
-                        {
-                            self.ds_straddle_next_old = false;
-                            let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
-                            let new_col2 = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                            let old_col2 = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                            if new_col2 != old_col2 {
-                                let bg_y = (self.scy_delayed as u16
-                                    + mmio.read(LY) as u16) & 0xFF;
-                                let pixels = self.bg_pixels_at_col(mmio, old_col2, bg_y);
-                                let off = (xpos as usize).saturating_sub(self.x as usize);
-                                self.fetcher.pixel_fifo.overwrite_at(off, &pixels);
-                            }
-                        }
-                        // First-tile (f1) prologue straddle (DMG SS): the in-flight
-                        // 2nd tile -- whose column was latched under the OLD scx one
-                        // dot before a mid-prologue (x==0) SCX write -- just pushed.
-                        // On hardware it plots after the write, so re-key its 8 newest
-                        // FIFO entries to the NEW scx column (the first queued tile,
-                        // pushed before the write, keeps OLD). Uses the fetcher's exact
-                        // latched xpos/cgb_adj so the column matches the hardware
-                        // plot-time sample.
-                        if self.prologue_rekey_armed
-                            && matches!(event.kind, crate::ppu::fetcher::FetcherDebugEventKind::PushToFifo)
-                        {
-                            self.prologue_rekey_armed = false;
-                            let (xpos, cgb_adj, _) = self.fetcher.subcc_last_column_inputs();
-                            let new_col = (((self.subcc_scx_new as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                            let old_col = (((self.subcc_scx_old as u16) + xpos + cgb_adj as u16) / 8) % 32;
-                            if new_col != old_col {
-                                let bg_y = (self.scy_delayed as u16
-                                    + mmio.read(LY) as u16) & 0xFF;
-                                let pixels = self.bg_pixels_at_col(mmio, new_col, bg_y);
-                                self.fetcher.pixel_fifo.overwrite_newest(&pixels);
-                            }
-                        }
-                        self.record_fetch_debug_event(event, mmio);
-                }
-
-                if self.fetcher.pixel_fifo.size() == 0 {
-                    break 'label;
-                }
-
-                if self.pixel_transfer_warmup > 0 {
-                    self.pixel_transfer_warmup -= 1;
-                    break 'label;
-                }
-
-                // DMG deferred WX-comparator commit (see dmg_wx_trigger_pending):
-                // the exact x+7==wx match armed on the previous dot commits now
-                // iff WX still reads the matched value — the hardware comparator
-                // samples WX through the end of the CPU store's M-cycle, so a
-                // store landing on the commit dot kills the match. The restart is
-                // executed as-of the arm dot (TileNumber catch-up + anchor one
-                // dot back), byte-identical to the immediate start for stable WX.
-                if !mmio.is_cgb_features_enabled()
-                    && let Some((arm_dot, arm_wx)) = self.dmg_wx_trigger_pending.take()
-                    && self.ticks == arm_dot.wrapping_add(1)
-                        && mmio.read(WX) == arm_wx
-                        && self.x + 7 == arm_wx
-                        && !self.fetcher.is_fetching_window()
-                    {
-                        self.begin_window_draw(self.x);
-                        self.win_first_tile_chop = 0;
-                        // The activation dot was one dot ago: its TileNumber is
-                        // due now (catch-up); low/high/push at +1/+3/+5 via the
-                        // anchored cadence.
-                        self.wg_set_anchor(1);
-                        let fls = self.wg_apply(self.fetcher_lcdc_state());
-                        if let Some(event) = self.fetcher.step(
-                            mmio,
-                            fls,
-                            crate::ppu::fetcher::FetchPos {
-                                window_line: self.win_y_pos,
-                                display_x: self.x,
-                                pending_discard: 0,
-                                scy: self.scy_delayed,
-                                scx: self.scx_delayed,
-                            },
-                        ) {
-                            if matches!(
-                                event.kind,
-                                crate::ppu::fetcher::FetcherDebugEventKind::TileNumber
-                            ) {
-                                self.subcc_last_tn_cc = self.abs_cc;
-                            }
-                            self.record_fetch_debug_event(event, mmio);
-                        }
-                        self.win_fetch_anchor = Some(self.ticks.wrapping_sub(1));
-                        self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
-                        if self.win_start_dot.is_none() {
-                            self.win_start_dot = Some(self.ticks.wrapping_sub(1));
-                        }
-                        break 'label;
-                    }
-                    // else: canceled — the WX store on the commit dot rewrote the
-                    // comparator input; no window starts (fall through).
-
-                // Check if we should start window rendering. On DMG the
-                // window-enable bit feeding the WX comparator is the DELAYED
-                // per-dot tap (we_dot_hist, samples one and two dots back) —
-                // an 8-cycle WE-off pulse blocks 9 consecutive comparator dots
-                // on hardware. CGB keeps the live bit. When the x==0 trigger
-                // fires with SCX fine discards still pending, our check runs
-                // `pending` dots BEFORE the hardware comparator dot (position 0
-                // pops that much later), so the taps shift toward the present
-                // accordingly (a disable right before the x==0 check dot must
-                // still block the start).
-                let trigger_we = if mmio.is_cgb_features_enabled() {
-                    self.lcdc_has(LCDCFlags::WindowDisplayEnable)
-                } else {
-                    let pending = if self.x == 0 && self.m3_discard_target >= 0 {
-                        (self.m3_discard_target as u8)
-                            .saturating_sub(self.m3_pixels_discarded)
-                    } else {
-                        0
-                    };
-                    match pending {
-                        0 => self.we_dot_hist[1] && self.we_dot_hist[2],
-                        1 => self.we_dot_hist[0] && self.we_dot_hist[1],
-                        _ => self.we_dot_hist[0],
-                    }
-                };
-                if self.window_y_active_with(mmio, trigger_we)
-                    && !self.fetcher.is_fetching_window()
-                {
-                    let wx = mmio.read(WX);
-                    let is_cgb = mmio.is_cgb_features_enabled();
-                    // DMG never starts the window drawing at WX==166; CGB does.
-                    let wx_allowed = wx <= 166 && (is_cgb || wx != 166);
-                    // WX=0-6 can trigger immediately, WX=7+ needs exact match with X+7.
-                    // On DMG, WX 1..6 activates ONLY via the exact pos==WX-7
-                    // prologue match (the EARLY check above); reaching pos 0 with
-                    // WX 1..6 means the match was missed (WX rewritten
-                    // mid-prologue) and the window does not start this line.
-                    // WX=0 and CGB keep the immediate x==0 start.
-                    let is_dmg = !is_cgb;
-                    // DMG one-dot-late activation (the position+6 check):
-                    // when the exact x+7==WX dot did not activate (the comparator
-                    // read the WE-off pulse), the very next dot still matches via
-                    // WX == x+6 and starts the window one pixel late (at WX-6).
-                    let should_start_window = wx_allowed
-                        && if wx < 7 {
-                            self.x == 0 && !(is_dmg && (1..7).contains(&wx))
-                        } else {
-                            self.x + 7 == wx || (is_dmg && self.x >= 1 && self.x + 6 == wx)
-                        };
-
-                    // DMG WX=0 + SCX&7>0 quirk: the window activates one T-cycle
-                    // later. The would-be trigger dot is dead (no pop, no
-                    // activation); trigger next dot.
-                    if should_start_window
-                        && !is_cgb
-                        && wx == 0
-                        && !self.win_wx0_delayed
-                        && (if self.m3_discard_target >= 0 {
-                            self.m3_discard_target as u8
-                        } else {
-                            mmio.read(SCX) & 0x07
-                        }) != 0
-                    {
-                        self.win_wx0_delayed = true;
-                        break 'label;
-                    }
-
-                    if should_start_window {
-                        // DMG exact-match mid-line trigger: defer the commit one
-                        // dot so a WX store landing on the commit dot is seen by
-                        // the comparator (see dmg_wx_trigger_pending).
-                        if is_dmg && wx >= 7 && self.x + 7 == wx {
-                            self.dmg_wx_trigger_pending = Some((self.ticks, wx));
-                            break 'label;
-                        }
-                        // Window draw-start (the mode-3-start window checkpoint /
-                        // plot win_draw_start).
-                        self.begin_window_draw(self.x);
-                        // DMG: hardware restarts the fetcher ON the trigger dot
-                        // (TileNumber now; low/high/push at t+2/t+4/t+6), so the
-                        // first window pixel pops exactly 6 dots after the
-                        // trigger regardless of the global fetch parity. Run the
-                        // TileNumber substep immediately and phase-lock the rest
-                        // of the startup to this dot (see win_fetch_anchor).
-                        if !is_cgb {
-                            // WX 1..6: the comparator matched chop = (7-WX) dots
-                            // into the discard prologue, so the activation lies
-                            // chop dots in the PAST. Catch the fetch up by
-                            // running every substep whose anchored phase
-                            // (0,2,4,6) has already elapsed, anchor the cadence
-                            // at ticks - chop, and pace the chop discard pops
-                            // 1/dot from the x==0 prologue below. WX=0 keeps the
-                            // plain trigger (separate activation-position quirk
-                            // cluster; see win_wx0_delayed).
-                            let chop = if (1..7).contains(&wx) { 7 - wx } else { 0 };
-                            self.win_first_tile_chop = chop;
-                            // DMG window bus-glitch grid origin (see wg_apply):
-                            // this TileNumber's conceptual dot is `chop` dots in
-                            // the past; a pre-window sprite stall delayed the
-                            // anchored trigger by its live charged penalty
-                            // (SpriteFetchRec) that hardware does NOT share
-                            // (its own delay is D_pre, folded in at read
-                            // evaluation).
-                            self.wg_set_anchor(chop as u64);
-                            let mut phase = 0u8;
-                            loop {
-                                let fls = self.wg_apply(self.fetcher_lcdc_state());
-                                if let Some(event) = self.fetcher.step(
-                                    mmio,
-                                    fls,
-                                    crate::ppu::fetcher::FetchPos {
-                                        window_line: self.win_y_pos,
-                                        display_x: self.x,
-                                        pending_discard: 0,
-                                        scy: self.scy_delayed,
-                                        scx: self.scx_delayed,
-                                    },
-                                ) {
-                                    if matches!(
-                                        event.kind,
-                                        crate::ppu::fetcher::FetcherDebugEventKind::TileNumber
-                                    ) {
-                                        self.subcc_last_tn_cc = self.abs_cc;
-                                    }
-                                    self.record_fetch_debug_event(event, mmio);
-                                }
-                                phase += 2;
-                                if phase > chop {
-                                    break;
-                                }
-                            }
-                            // chop >= 6: the first tile's push already elapsed
-                            // (phase 6), so its first discard pop is due on this
-                            // very dot.
-                            if chop >= 6 && self.fetcher.pixel_fifo.pop().is_ok() {
-                                self.win_first_tile_chop -= 1;
-                            }
-                            self.win_fetch_anchor =
-                                Some(self.ticks.wrapping_sub(chop as u128));
-                        }
-                        // The post-window sprite group restarts the BG-tile grid
-                        // (hardware resets the previous sprite tile number to none after
-                        // the window split), so the first post-window sprite in a
-                        // tile is again charged the leading rate.
-                        self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
-                        if self.win_start_dot.is_none() {
-                            self.win_start_dot = Some(self.ticks);
-                        }
-                        break 'label; // Skip this cycle to let window fetching start
-                    }
-                }
-
-                // WX<7 chopped window start: the prologue discard pops that ran
-                // past the (earlier) activation position chop the first window
-                // tile's leading pixels, one per dot (see win_first_tile_chop).
-                if self.x == 0 && self.win_first_tile_chop > 0 {
-                    if self.fetcher.pixel_fifo.pop().is_ok() {
-                        self.win_first_tile_chop -= 1;
-                        self.win_being_fetched = false;
-                    }
-                    break 'label;
-                }
-
-                // SCX fine-scroll discard (the mode-3-start fine-scroll per-dot loop):
-                // while x == 0, re-read the LIVE SCX each dot. If we have not
-                // yet discarded `scx % 8` BG pixels, pop one and consume the
-                // dot. A mid-M3 SCX write changes this count (and the fetched
-                // tile column, since TileNumber re-reads SCX live).
-                if self.x == 0 {
-                    // Hold output until the f1 break is resolved (target latched).
-                    if self.m3_discard_target < 0 {
-                        break 'label;
-                    }
-                    let target = self.m3_discard_target as u8;
-                    // WE-off insert glitch, prologue variant: the inserted
-                    // color-0 pixel sits at the FRONT of the stream and is the
-                    // first pixel this discard dot drops — no real FIFO pixel
-                    // is consumed, so one extra leading BG pixel survives and
-                    // the visible line shifts right by one.
-                    if self.m3_pixels_discarded < target && self.we_glitch_discard_insert {
-                        self.we_glitch_discard_insert = false;
-                        self.m3_pixels_discarded += 1;
-                        self.win_being_fetched = false;
-                        break 'label;
-                    }
-                    // A full-width HUD window (WX==7) triggers at LX==0 via the
-                    // live x+7==wx match and resets the FIFO. On hardware the
-                    // SCX&7 fine-scroll discard consumes the leading BACKGROUND
-                    // pixels before LX reaches 0, so a window activating exactly
-                    // at LX==0 is unaffected by it and draws from window-x 0 —
-                    // the bar stays locked to screen coordinates regardless of
-                    // SCX. rustyboi's trigger fires just before this discard and
-                    // clears the FIFO, so without this guard the discard wrongly
-                    // pops window pixels and the bar shifts left by SCX&7 (moving
-                    // with the camera one frame per horizontal scroll).
-                    //
-                    // Narrowly WX==7: WX<7 triggers at LX<0, inside the discard
-                    // region, so it legitimately keeps the discard (mealybug
-                    // m3_window_timing_wx_0 shifts the WX=0 window); the DMG wxA6
-                    // (WX==166) checkpoint window comes through the mode-3-start
-                    // path — flagged by win_draw_started_at_x0 — and keeps it too
-                    // (gambatte wxA6_scx7).
-                    let win_x0_locked = self.fetcher.is_fetching_window()
-                        && !self.win_draw_started_at_x0
-                        && mmio.read(WX) == 7;
-                    if self.m3_pixels_discarded < target
-                        && !win_x0_locked
-                        && let Ok(_) = self.fetcher.pixel_fifo.pop() {
-                            self.m3_pixels_discarded += 1;
-                            self.win_being_fetched = false;
-                            break 'label;
-                    }
-                }
-
-                // Put a pixel from the FIFO on screen with sprite mixing.
-                // Stop visible output at x==160; the scheduled dot ends Mode 3.
-                if self.x >= 160 {
-                    break 'label;
-                }
-                // DMG window reactivation zero pixel (the hardware BG-pixel insert):
-                // the WX comparator matches again with the window already active
-                // (past its startup fetch), exactly at the pop of a window
-                // tile's FIRST pixel — our push-at-empty dot (fetcher at
-                // the tile-number fetch step with bg_fifo.size == 8, the cycle right after its
-                // push; the insert diagonal sits at x == 8k + (8 - chop)). The pop
-                // below then renders a color-0 pixel WITHOUT consuming the FIFO,
-                // inserting one pixel into the line.
-                if !mmio.is_cgb_features_enabled()
-                    && self.window_started_this_line
-                    && self.fetcher.is_fetching_window()
-                    && !self.win_being_fetched
-                    && push_this_dot
-                    && self.fetcher.pixel_fifo.size() == 8
-                    && mmio.read(WX) == self.x + 7
-                {
-                    self.insert_bg_pixel = true;
-                }
-                // DMG WE-off zero-pixel insertion glitch: with the window Y-latch
-                // triggered but the window enable OFF (delayed tap, see
-                // we_dot_hist), a tile-boundary pop (the push-at-empty dot; our
-                // queued first-pixel x) where WX == x+7 renders one color-0 pixel
-                // WITHOUT consuming the FIFO (a single white pixel at x = WX-7 on
-                // the trigger-missed rows).
-                // Pan Docs: Window mid-frame behavior — https://gbdev.io/pandocs/Window.html
-                let mut at_tile_boundary = false;
-                for slot in self.we_glitch_tile_starts.iter_mut() {
-                    if let Some(fx) = *slot {
-                        if fx == self.x {
-                            at_tile_boundary = true;
-                            *slot = None;
-                        } else if fx < self.x {
-                            // Stale (chop/discard consumed the boundary pop).
-                            *slot = None;
-                        }
-                    }
-                }
-                // Pre-CGB machines only (!is_cgb): the CGB PPU has no WE-off
-                // insert glitch even in DMG-compat mode (the line is unshifted).
-                if !mmio.is_cgb()
-                    && self.window_y_triggered
-                    && !self.fetcher.is_fetching_window()
-                    && !self.we_dot_hist[2]
-                    && !self.we_insert_suppressed
-                    && at_tile_boundary
-                    && mmio.read(WX) == self.x + 7
-                {
-                    self.insert_bg_pixel = true;
-                    // The inserted pixel shifts every later boundary one to the
-                    // right.
-                    for fx in self.we_glitch_tile_starts.iter_mut().flatten() {
-                        *fx = fx.saturating_add(1);
-                    }
-                }
-                if self.draw_fifo_pixel(mmio) && self.x == 160 {
-                    // Fallback end-of-mode-3 at the x==160 pixel push, used in two
-                    // distinct cases:
-                    // (a) no closed-form mode-0 time exists (first line after enable /
-                    // mid-M3 invalidation): report mode 0 here and end mode 3.
-                    // (b) the mode-0 time timing report ALREADY fired above, but the
-                    // window fetch restart left the FIFO short, so the renderer
-                    // was kept alive to draw the final window pixel; now that
-                    // x==160 we end mode 3 WITHOUT re-reporting (the FF41 mode-0
-                    // poke / STAT IRQ already fired at the exact mode-0 time).
-                    // When mode-0 time is known and the FIFO was complete, the transition
-                    // is driven off master_cc above and the renderer never reaches
-                    // this x==160 fallback before that boundary, so we must NOT end
-                    // mode 3 early here on ordinary (non-window) lines.
-                    let window_deferred = self.window_started_this_line && self.mode0_reported_this_line;
-                    if self.m0_time_master.is_none() {
-                        self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
-                        self.resolve_bgp_spikes(mmio);
-                        // Leaving mode 3: drop any leftover preamble fast budget so the
-                        // next line recomputes against the fresh schedule.
-                        self.fast_dots_left = 0;
-                        self.state = State::HBlank;
-                        if !self.mode0_reported_this_line {
-                            self.mode0_reported_this_line = true;
-                            Self::set_lcd_status_mode(mmio, 0);
-                        }
-                    } else if window_deferred {
-                        self.apply_dmg_wxa6_lineend_windraw(mmio, mmio.is_cgb_features_enabled());
-                        self.resolve_bgp_spikes(mmio);
-                        // Leaving mode 3: drop any leftover preamble fast budget so the
-                        // next line recomputes against the fresh schedule.
-                        self.fast_dots_left = 0;
-                        self.state = State::HBlank;
-                    }
-                }
-            },
+            State::PixelTransfer => self.step_mode3_dot(mmio, fast),
             State::HBlank => {
                 if self.step_hblank(mmio) {
                     return;
