@@ -1083,18 +1083,6 @@ impl<'a> Bus<'a> {
         if addr >= 0xFE00 {
             self.ppu.invalidate_fast_span();
         }
-        // Dirty-line probe (scanline-renderer feasibility study). Off by default
-        // (probe = None => this whole block is inert). Sample at the write's ISSUE
-        // cc, before any M-cycle tick, so `in_pixel_transfer()`/LY reflect the
-        // state the write races against. A watched CGB palette (BCPD/OCPD) write
-        // that lands during mode 3 is dropped by the PPU (`ppu_blocks`), so it does
-        // not affect the current line; record it as `blocked`.
-        if let Some(reg) = ppu::WatchedReg::from_addr(addr) {
-            let blocked = matches!(reg, ppu::WatchedReg::Bcpd | ppu::WatchedReg::Ocpd)
-                && !self.mmio.dma_active()
-                && self.ppu_blocks(addr, false, self.mmio.master_cc());
-            self.ppu.dirty_probe_register_write(reg, blocked);
-        }
         // Registers belonging to peripherals we tick inline (timer/serial/DMA)
         // latch at the end of the write M-cycle, so advance first. Everything else
         // (PPU registers, RAM) takes effect as the access is issued.

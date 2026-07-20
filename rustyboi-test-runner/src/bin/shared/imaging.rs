@@ -1,8 +1,9 @@
-//! Frame -> RGB/PNG/base64/HTML helpers shared by the `movie` and `sweep`
-//! bins (this directory is not auto-binned; each bin pulls it in via
+//! Frame -> RGB/PNG/PPM/hash/base64/HTML helpers shared by the `sweep` and
+//! `harness` bins (this directory is not auto-binned; each bin pulls it in via
 //! `#[path = "shared/imaging.rs"]`).
 
 use rustyboi_core_lib::gb::Frame;
+use std::path::Path;
 
 /// The presented RGB888 bytes. The core already applied the DMG base palette +
 /// LCD correction (mono) or the CGB/AGB/SGB colour (colour), keyed on the GB's
@@ -93,4 +94,25 @@ pub fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// FNV-1a 64; the harness subcommands print these as framebuffer checksums.
+#[allow(dead_code)]
+pub fn fnv1a(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Write a 160x144 frame as a binary P6 PPM.
+#[allow(dead_code)]
+pub fn write_ppm(path: &Path, frame: &Frame) {
+    const W: usize = 160;
+    const H: usize = 144;
+    let mut out = format!("P6\n{W} {H}\n255\n").into_bytes();
+    out.extend_from_slice(frame.rgb());
+    std::fs::write(path, out).expect("write ppm");
 }
