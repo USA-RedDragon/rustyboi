@@ -3149,7 +3149,7 @@ dependencies = [
  "clap",
  "cpal",
  "gilrs",
- "jni 0.21.1",
+ "jni 0.22.4",
  "libc",
  "log",
  "ndk-context",
