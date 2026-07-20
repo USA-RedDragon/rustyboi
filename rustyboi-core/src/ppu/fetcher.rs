@@ -229,7 +229,7 @@ impl Fetcher {
 
     // Calculate the correct tile map base address based on LCDC.6 (WindowTileMapDisplaySelect)
     fn get_window_tile_map_base(&self, lcdc: u8) -> u16 {
-        let window_tile_map_select = (lcdc & (ppu::LCDCFlags::WindowTileMapDisplaySelect as u8)) != 0;
+        let window_tile_map_select = ppu::lcdc_has(lcdc, ppu::LCDCFlags::WindowTileMapDisplaySelect);
 
         if window_tile_map_select {
             TILE_MAP_9C00_BASE // LCDC.6 = 1: Use $9C00-$9FFF
@@ -240,7 +240,7 @@ impl Fetcher {
 
     // Calculate the correct tile map base address based on LCDC.3 (BGTileMapDisplaySelect)
     fn get_tile_map_base(&self, lcdc: u8) -> u16 {
-        let bg_tile_map_select = (lcdc & (ppu::LCDCFlags::BGTileMapDisplaySelect as u8)) != 0;
+        let bg_tile_map_select = ppu::lcdc_has(lcdc, ppu::LCDCFlags::BGTileMapDisplaySelect);
 
         if bg_tile_map_select {
             TILE_MAP_9C00_BASE // LCDC.3 = 1: Use $9C00-$9FFF
@@ -251,7 +251,7 @@ impl Fetcher {
 
     // Calculate the correct tile data address based on LCDC.4 (BGWindowTileDataSelect)
     pub(crate) fn get_tile_data_address(&self, tile_id: u8, tile_line: u8, lcdc: u8) -> u16 {
-        let bg_window_tile_data_select = (lcdc & (ppu::LCDCFlags::BGWindowTileDataSelect as u8)) != 0;
+        let bg_window_tile_data_select = ppu::lcdc_has(lcdc, ppu::LCDCFlags::BGWindowTileDataSelect);
 
         if bg_window_tile_data_select {
             // $8000 method: unsigned addressing
@@ -295,7 +295,7 @@ impl Fetcher {
         let eff_line = if y_flip { 7 - tile_line } else { tile_line };
         let plane = u16::from(high);
         let addr = self.get_tile_data_address(self.tile_num, eff_line, lcdc_state.lcdc) + plane;
-        let tds = (lcdc_state.lcdc & (ppu::LCDCFlags::BGWindowTileDataSelect as u8)) != 0;
+        let tds = ppu::lcdc_has(lcdc_state.lcdc, ppu::LCDCFlags::BGWindowTileDataSelect);
         if high {
             self.last_high_tds = tds;
         } else {

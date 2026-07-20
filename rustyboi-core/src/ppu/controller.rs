@@ -1223,6 +1223,16 @@ pub(crate) enum LCDCFlags {
     DisplayEnable = 1<<7,
 }
 
+// Test one LCDC bit in an arbitrary LCDC byte. The `Ppu::lcdc_has` method below
+// covers the common `self.lcdc` case; this free form is for the sites that
+// deliberately test a DIFFERENT byte (a fetcher-latched `lcdc_state.lcdc`, a
+// pre-write `old_lcdc`, the OR-read glitch's second LCDC), where silently
+// substituting the live register would change behaviour.
+#[inline]
+pub(crate) fn lcdc_has(lcdc: u8, f: LCDCFlags) -> bool {
+    (lcdc & (f as u8)) != 0
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub enum State {
     OAMSearch,
@@ -2424,7 +2434,7 @@ impl Ppu {
     /// hardware. Must run after LCDC=0x91 and `sync_lcdc_from_mmio`.
     pub(crate) fn set_post_bios_state(&mut self, mmio: &mut mmio::Mmio, dmg0: bool) {
         // LCD must be on for this to apply (skip_bios writes LCDC=0x91 first).
-        if self.lcdc & (LCDCFlags::DisplayEnable as u8) == 0 {
+        if !self.lcdc_has(LCDCFlags::DisplayEnable) {
             return;
         }
         let cgb = mmio.is_cgb_features_enabled();
@@ -3056,6 +3066,12 @@ impl Ppu {
     //     first two sites but nested under `!is_cgb` at the main trigger, and
     //     the main trigger runs a multi-phase catch-up loop rather than a
     //     single substep.
+    // Test one LCDC bit in the PPU's live LCDC latch.
+    #[inline]
+    fn lcdc_has(&self, f: LCDCFlags) -> bool {
+        lcdc_has(self.lcdc, f)
+    }
+
     fn begin_window_draw(&mut self, window_x: u8) {
         self.win_y_pos = self.win_y_pos.wrapping_add(1);
         self.win_draw_started = true;
@@ -3186,7 +3202,7 @@ impl Ppu {
                 // with OBJ on is a live-walk artifact (the match dot was
                 // consumed by a tile-boundary pop the walk never saw — window
                 // pos%8 == 0 sprites); hardware fetched it.
-                let objon = (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0;
+                let objon = self.lcdc_has(LCDCFlags::SpriteDisplayEnable);
                 let counted = match rec.phase {
                     SpriteFetchPhase::Fetched => true,
                     SpriteFetchPhase::Pending => objon,
@@ -3457,14 +3473,14 @@ impl Ppu {
             let counted = match rec.phase {
                 SpriteFetchPhase::Fetched => true,
                 SpriteFetchPhase::Pending => {
-                    (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0
+                    self.lcdc_has(LCDCFlags::SpriteDisplayEnable)
                 }
                 // CGB: an Aborted zero-penalty record with OBJ on is a
                 // live-walk artifact (see wg_apply); hardware fetched it.
                 SpriteFetchPhase::Aborted => {
                     self.wg_cgb
                         && rec.penalty == 0
-                        && (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0
+                        && self.lcdc_has(LCDCFlags::SpriteDisplayEnable)
                 }
             };
             if !counted {
@@ -3660,8 +3676,8 @@ impl Ppu {
         // if any"). Returns (arm dot, bp1 byte). Sprite tiles always read
         // unsigned $8000; y-flip and 8x16 masking follow the OAM attributes.
         let sprite_bp1_before = |dot: i64| -> Option<(i64, u8)> {
-            let obj_on = (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0;
-            let tall = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+            let obj_on = self.lcdc_has(LCDCFlags::SpriteDisplayEnable);
+            let tall = self.lcdc_has(LCDCFlags::SpriteSize);
             let height: i32 = if tall { 16 } else { 8 };
             let mut best: Option<(i64, u8)> = None;
             for (i, s) in self.sprites_on_line.iter().enumerate() {
@@ -4934,7 +4950,7 @@ impl Ppu {
     /// put, but every scheduled event time carried the old `ds` cc-factor, so
     /// recompute them from the live `abs_cc` under the new speed.
     pub(crate) fn speed_change(&mut self, mmio: &mmio::Mmio) {
-        if self.disabled || self.lcdc & (LCDCFlags::DisplayEnable as u8) == 0 {
+        if self.disabled || !self.lcdc_has(LCDCFlags::DisplayEnable) {
             return;
         }
         self.reschedule_all_stat_events(mmio);
@@ -5022,7 +5038,7 @@ impl Ppu {
     /// rendered-bridge per-dot loop, so the only difference from a bridge `step`
     /// is the absence of render-latch motion.
     fn step_stat_phase_only(&mut self, mmio: &mut mmio::Mmio) {
-        if self.disabled || self.lcdc & (LCDCFlags::DisplayEnable as u8) == 0 {
+        if self.disabled || !self.lcdc_has(LCDCFlags::DisplayEnable) {
             return;
         }
         // --- STAT-phase region of `step` (no render match, no `ticks += 1`) ---
@@ -5369,7 +5385,7 @@ impl Ppu {
                 self.check_single_sprite_for_scanline(mmio, idx);
                 self.current_oam_sprite_index += 1;
                 self.scan_obj_size_large =
-                    (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+                    self.lcdc_has(LCDCFlags::SpriteSize);
             }
         }
         self.ticks += n as u128;
@@ -5590,7 +5606,7 @@ impl Ppu {
         // `self.lcdc` was committed one dot early by pending_lcdc_events.
         let win_en = match self.we_win_bit_exact {
             Some((commit_cc, _new, old)) if self.abs_cc <= commit_cc => old,
-            _ => (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0,
+            _ => self.lcdc_has(LCDCFlags::WindowDisplayEnable),
         };
         if !win_en {
             return;
@@ -5727,7 +5743,7 @@ impl Ppu {
     fn bg_pixels_at_col(&self, mmio: &mmio::Mmio, tile_col: u16, bg_y: u16) -> [crate::ppu::fifo::BgPixel; 8] {
         let lcdc = self.lcdc;
         let cgb = mmio.is_cgb_features_enabled();
-        let map_base: u16 = if (lcdc & (LCDCFlags::BGTileMapDisplaySelect as u8)) != 0 {
+        let map_base: u16 = if lcdc_has(lcdc, LCDCFlags::BGTileMapDisplaySelect) {
             0x9C00
         } else {
             0x9800
@@ -5769,7 +5785,7 @@ impl Ppu {
     // catches late-frame WY writes that land after the three window-enable master
     // checkpoints (e.g. WY=ly written during the same line's mode 3).
     fn window_y_active(&self, mmio: &mmio::Mmio) -> bool {
-        self.window_y_active_with(mmio, (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0)
+        self.window_y_active_with(mmio, self.lcdc_has(LCDCFlags::WindowDisplayEnable))
     }
 
     // window_y_active with an explicit window-enable sample. The DMG mid-mode-3
@@ -5826,7 +5842,7 @@ impl Ppu {
             return;
         }
         self.wxa6_lineend_applied = true;
-        let win_en_now = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
+        let win_en_now = self.lcdc_has(LCDCFlags::WindowDisplayEnable);
         let we_gate = self.window_y_triggered
             || (self.wy2 == mmio.read(LY) && win_en_now);
         if !we_gate {
@@ -5862,7 +5878,7 @@ impl Ppu {
                 .bgen_history
                 .last()
                 .map(|&(_, b)| b)
-                .unwrap_or((self.lcdc & (LCDCFlags::BGDisplay as u8)) != 0);
+                .unwrap_or(self.lcdc_has(LCDCFlags::BGDisplay));
         }
         let mut bgen = self.bgen_history[0].1;
         for &(boundary_col, b) in self.bgen_history.iter() {
@@ -5905,7 +5921,7 @@ impl Ppu {
             }
         }
 
-        let obj_enabled = (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0;
+        let obj_enabled = self.lcdc_has(LCDCFlags::SpriteDisplayEnable);
         let mut sprite_xs: Vec<i32> = self.sprites_on_line.iter().map(|s| s.x as i32).collect();
         sprite_xs.sort_unstable();
         cycles += sprite_tile_walk_cost(&sprite_xs, scx, nwx, targetx, obj_enabled || is_cgb);
@@ -5976,7 +5992,7 @@ impl Ppu {
         // Sprites. The single faithful tile-walk model (shared with the live
         // renderer via `sprite_tile_walk_cost`). Only count if OBJ enabled (or
         // CGB always evaluates them).
-        let obj_enabled = (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0;
+        let obj_enabled = self.lcdc_has(LCDCFlags::SpriteDisplayEnable);
         let target_x = 167;
         let mut sprite_xs: Vec<i32> = self.sprites_on_line.iter().map(|s| s.x as i32).collect();
         sprite_xs.sort_unstable();
@@ -5998,7 +6014,7 @@ impl Ppu {
     /// to `m0_time_master` (the renderer/STAT boundary) and subtracted back out in
     /// `m0_irq_event_cc_master`. Mooneye intr_2_mode0_timing_sprites_scx{1..4}.
     fn sprite0_scx_extra(&self, mmio: &mmio::Mmio, is_cgb: bool) -> i64 {
-        let obj_enabled = (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0;
+        let obj_enabled = self.lcdc_has(LCDCFlags::SpriteDisplayEnable);
         if !(obj_enabled || is_cgb) {
             return 0;
         }
@@ -6521,7 +6537,7 @@ impl Ppu {
         // without the sprite). The no-sprite SS straddle (scx_during_m3_4/5) is
         // handled correctly by the steady-state gap==4 rekey and must NOT re-key
         // here, so the sprite gate is required to protect those cases.
-        let sprites_enabled = (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0;
+        let sprites_enabled = self.lcdc_has(LCDCFlags::SpriteDisplayEnable);
         let low_x_sprite = sprites_enabled
             && self.sprites_on_line.iter().any(|s| s.x <= 8);
         self.prologue_rekey_armed = !self.disabled
@@ -6566,7 +6582,7 @@ impl Ppu {
                 self.objsize_prev_large
             }
         } else {
-            (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0
+            self.lcdc_has(LCDCFlags::SpriteSize)
         }
     }
 
@@ -6905,7 +6921,7 @@ impl Ppu {
         // line's mode2) is applied per-slot after the scan, so sprite-0 keeps
         // the pre-boundary size. This is the late_sizechange 1-cc M2-boundary
         // discriminator (the hardware OAM scanner's per-entry size latch).
-        self.scan_obj_size_large = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+        self.scan_obj_size_large = self.lcdc_has(LCDCFlags::SpriteSize);
         // Clear any exact-cc OBJ-size latch left from a prior line so it cannot
         // leak into this line's OAM scan; a mid-mode-2 size write rearms it.
         self.objsize_apply_cc = wy2_disabled();
@@ -7033,7 +7049,7 @@ impl Ppu {
                     let cc = mmio.master_cc().wrapping_sub(self.p_now);
                     self.oam_reader.cgb = mmio.is_cgb_features_enabled();
                     self.oam_reader.large_src =
-                        (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+                        self.lcdc_has(LCDCFlags::SpriteSize);
                     let dma_writing =
                         mmio.oam_dma_window_active() && !mmio.mgb_frozen_merge_active();
                     self.oam_reader.src_disabled = dma_writing;
@@ -7221,7 +7237,7 @@ impl Ppu {
                     // Latch the OBJ-size for the NEXT scan slot from the live LCDC
                     // (DMG: write applies to entries scanned after it commits, not
                     // the one just read; the hardware per-slot size latch).
-                    self.scan_obj_size_large = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+                    self.scan_obj_size_large = self.lcdc_has(LCDCFlags::SpriteSize);
                 }
 
                 let is_cgb = mmio.is_cgb_features_enabled();
@@ -7279,7 +7295,7 @@ impl Ppu {
                     self.dmg_wx_trigger_pending = None;
                     {
                         let we_now =
-                            (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
+                            self.lcdc_has(LCDCFlags::WindowDisplayEnable);
                         self.we_dot_hist = [we_now; 5];
                         self.we_glitch_tile_starts = [None; 2];
                         self.we_glitch_discard_insert = false;
@@ -7298,7 +7314,7 @@ impl Ppu {
                     // the window draws from xpos 0 this line (the window-Y increment), even
                     // though WX is unchanged. Otherwise the window-draw state clears to 0.
                     {
-                        let win_en = (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0;
+                        let win_en = self.lcdc_has(LCDCFlags::WindowDisplayEnable);
                         // The hardware mode-3-start window checkpoint: if win_draw_start is set and
                         // the window is enabled, the window-draw state becomes win_draw_started
                         // and window Y position increments; otherwise the window-draw state clears.
@@ -7368,7 +7384,7 @@ impl Ppu {
                     // first mid-mode-3 toggle).
                     self.bgen_history.push((
                         0,
-                        (self.lcdc & (LCDCFlags::BGDisplay as u8)) != 0,
+                        self.lcdc_has(LCDCFlags::BGDisplay),
                     ));
                     // Per-line tile-index-is-tile-data glitch targets (the hardware
                     // tile-select glitch); mid-mode-3 falling LCDC.4 writes append the
@@ -7424,12 +7440,12 @@ impl Ppu {
                     self.objen_history.clear();
                     self.objen_history.push((
                         0,
-                        (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0,
+                        self.lcdc_has(LCDCFlags::SpriteDisplayEnable),
                     ));
                     self.objsize_dot_history.clear();
                     self.objsize_dot_history.push((
                         0,
-                        (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0,
+                        self.lcdc_has(LCDCFlags::SpriteSize),
                     ));
                     self.sprite_fetch_recs.clear();
                     self.sprite_fetch_recs
@@ -7597,7 +7613,7 @@ impl Ppu {
             State::PixelTransfer => 'label: {
                 // Shift the DMG WE per-dot visibility history (see we_dot_hist).
                 self.we_dot_hist = [
-                    (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0,
+                    self.lcdc_has(LCDCFlags::WindowDisplayEnable),
                     self.we_dot_hist[0],
                     self.we_dot_hist[1],
                     self.we_dot_hist[2],
@@ -8367,7 +8383,7 @@ impl Ppu {
                             // gap==4 stays as the validated steady-state flip.
                             let dmg_ss_lowx_sprite = dsf == 0
                                 && !mmio.is_cgb_features_enabled()
-                                && (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0
+                                && self.lcdc_has(LCDCFlags::SpriteDisplayEnable)
                                 && self.sprites_on_line.iter().any(|s| s.x <= 8);
                             // DS (Stage 2): the gap proxy is ambiguous across
                             // initial-scx, but the underlying resonance is that the
@@ -8616,7 +8632,7 @@ impl Ppu {
                 // accordingly (a disable right before the x==0 check dot must
                 // still block the start).
                 let trigger_we = if mmio.is_cgb_features_enabled() {
-                    (self.lcdc & (LCDCFlags::WindowDisplayEnable as u8)) != 0
+                    self.lcdc_has(LCDCFlags::WindowDisplayEnable)
                 } else {
                     let pending = if self.x == 0 && self.m3_discard_target >= 0 {
                         (self.m3_discard_target as u8)
@@ -9117,7 +9133,7 @@ impl Ppu {
     /// the only window in which the fetcher drives VRAM. Outside it a VRAM-source
     /// OAM-DMA read sees true VRAM (the clean HBlank/mode-0 identity window).
     pub(crate) fn update_dma_fetcher_bus(&self, mmio: &mut mmio::Mmio) {
-        let lcd_on = !self.disabled && (self.lcdc & (LCDCFlags::DisplayEnable as u8)) != 0;
+        let lcd_on = !self.disabled && self.lcdc_has(LCDCFlags::DisplayEnable);
         let locked = lcd_on && self.state == State::PixelTransfer;
         let (addr, bank) = self.fetcher.last_vram_bus();
         mmio.set_fetcher_vram_bus(addr, bank, locked);
@@ -9139,7 +9155,7 @@ impl Ppu {
         if prefetch {
             // First BG tile-number address for this line (display column 0):
             // tilemap_base + ((ly + scy)/8 % 32)*32 + (scx/8 % 32).
-            let map_base: u16 = if (self.lcdc & (LCDCFlags::BGTileMapDisplaySelect as u8)) != 0 {
+            let map_base: u16 = if self.lcdc_has(LCDCFlags::BGTileMapDisplaySelect) {
                 0x9C00
             } else {
                 0x9800
@@ -9201,7 +9217,7 @@ impl Ppu {
     /// wake. LCD-off STOP (the recommended sequence) leaves the already-blank
     /// panel untouched.
     pub(crate) fn enter_stop_mode_panel(&mut self, mmio: &mmio::Mmio) {
-        if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
+        if self.disabled || !self.lcdc_has(LCDCFlags::DisplayEnable) {
             return;
         }
         if self.renders_color(mmio) {
@@ -9491,7 +9507,7 @@ impl Ppu {
     /// 1-M-cycle "just before / at first corruption" boundary). Returns None when
     /// the LCD is off or the PPU is not in mode 2. This is the WRITE/IDU path row.
     pub(crate) fn oam_bug_mode2_row(&self) -> Option<u8> {
-        if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
+        if self.disabled || !self.lcdc_has(LCDCFlags::DisplayEnable) {
             return None;
         }
         if self.state != State::OAMSearch {
@@ -10244,7 +10260,7 @@ impl Ppu {
     /// access cc does not resolve into the mode-1 window (then the bus keeps the
     /// renderer register).
     pub(crate) fn get_stat_mode_at_cc(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<u8> {
-        if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
+        if self.disabled || !self.lcdc_has(LCDCFlags::DisplayEnable) {
             return None;
         }
         let ds = mmio.is_double_speed_mode();
@@ -10622,7 +10638,7 @@ impl Ppu {
     /// mid-mode-3 lines): there the renderer register is the correct emergent
     /// value and the caller defers to it. Everywhere else this is authoritative.
     pub(crate) fn get_stat(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<u8> {
-        if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
+        if self.disabled || !self.lcdc_has(LCDCFlags::DisplayEnable) {
             return None;
         }
         // Compose the two byte-exact closed-form resolvers in the same order the
@@ -10647,7 +10663,7 @@ impl Ppu {
     /// stat |= lycflag iff the LYC register == LYC compare.ly && LYC compare.time-to-next-LY > 2
     /// (the AGB `2 - 1` term is dropped: rustyboi targets DMG/CGB only).
     pub(crate) fn get_lyc_flag_at_cc(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<bool> {
-        if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
+        if self.disabled || !self.lcdc_has(LCDCFlags::DisplayEnable) {
             return None;
         }
         // Reanchor the LY counter.time to master cc (`p_now + lc.time`), matching
@@ -10728,7 +10744,7 @@ impl Ppu {
     ///
     /// Returns None when the LCD is off (the bus keeps the renderer register).
     pub(crate) fn get_ly_reg_at_cc(&self, mmio: &mmio::Mmio, access_cc: u64) -> Option<u8> {
-        if self.disabled || (self.lcdc & (LCDCFlags::DisplayEnable as u8)) == 0 {
+        if self.disabled || !self.lcdc_has(LCDCFlags::DisplayEnable) {
             return None;
         }
         let ds = mmio.is_double_speed_mode();
@@ -11033,7 +11049,7 @@ impl Ppu {
     /// the renderer is not advancing a mode-3 window, so no overshoot occurs.
     pub(crate) fn is_on_rendering_line(&self) -> bool {
         !self.disabled
-            && (self.lcdc & (LCDCFlags::DisplayEnable as u8)) != 0
+            && self.lcdc_has(LCDCFlags::DisplayEnable)
             && self.internal_ly_val < 144
             && self.state != State::VBlank
     }
@@ -11200,7 +11216,7 @@ impl Ppu {
             mmio.peek_oam_pos(&mut pos);
             self.oam_reader.reset(&pos, cgb);
             self.oam_reader.lu = cc;
-            self.oam_reader.large_src = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+            self.oam_reader.large_src = self.lcdc_has(LCDCFlags::SpriteSize);
             self.prev_dma_writing =
                 mmio.oam_dma_window_active() && !mmio.mgb_frozen_merge_active();
             self.oam_reader_seeded = true;
@@ -11209,7 +11225,7 @@ impl Ppu {
 
         // Keep large-sprites source tracking the live LCDC OBJ-size bit (hardware
         // sets it on the LCDC write; the walk latches it into lsbuf per slot).
-        self.oam_reader.large_src = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+        self.oam_reader.large_src = self.lcdc_has(LCDCFlags::SpriteSize);
 
         // `pos` (the 80-byte Y/X snapshot) is only consumed by the `change()`
         // calls below, which fire only on a DMA-window edge or a pending OAM
@@ -11275,7 +11291,7 @@ impl Ppu {
         // Re-derive the walk's OBJ-size source here (the per-dot refresh in
         // `process_oam_reader_events` is skipped on its no-event fast path).
         // `lcdc` is constant within a dot, so this matches the old per-dot value.
-        self.oam_reader.large_src = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+        self.oam_reader.large_src = self.lcdc_has(LCDCFlags::SpriteSize);
         let mut pos = [0u8; 80];
         mmio.peek_oam_pos(&mut pos);
         self.oam_reader.update(cc, &lc, &pos);
@@ -11346,7 +11362,7 @@ impl Ppu {
     // column). Mirrors `sprite_fetch_penalty_for_current_x`'s trigger match;
     // used by the DMG stall-aware LCDC.0 boundary.
     fn dmg_unfetched_sprite_at(&self, col: u8) -> bool {
-        if (self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
+        if !self.lcdc_has(LCDCFlags::SpriteDisplayEnable) {
             return false;
         }
         self.sprites_on_line
@@ -11358,7 +11374,7 @@ impl Ppu {
 
     fn sprite_fetch_penalty_for_current_x(&mut self, mmio: &mmio::Mmio) -> Option<u8> {
         let lcdc = self.lcdc;
-        if (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 && !mmio.is_cgb_features_enabled() {
+        if !lcdc_has(lcdc, LCDCFlags::SpriteDisplayEnable) && !mmio.is_cgb_features_enabled() {
             return None;
         }
 
@@ -11455,7 +11471,7 @@ impl Ppu {
         let bg_color_rgb = self.get_cgb_bg_color(mmio, palette_idx, bg_pixel_idx, screen_x);
 
         // Check if sprites are enabled
-        if (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
+        if !lcdc_has(lcdc, LCDCFlags::SpriteDisplayEnable) {
             return bg_color_rgb;
         }
 
@@ -11473,7 +11489,7 @@ impl Ppu {
 
             // Sprite is 8 pixels wide
             if (0..8).contains(&relative_x) {
-                let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
+                let sprite_height = if lcdc_has(lcdc, LCDCFlags::SpriteSize) { 16 } else { 8 };
                 if relative_y >= 0 && relative_y < sprite_height as i16 {
                     // Get sprite pixel data
                     if let Some(sprite_pixel_idx) = self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8)
@@ -11583,7 +11599,7 @@ impl Ppu {
         // mid-mode-3 sprite consumers apply here too — only the final color
         // lookup differs (CGB palette RAM vs grayscale).
         let objen_toggled = self.objen_history.len() > 1;
-        if !objen_toggled && (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
+        if !objen_toggled && !lcdc_has(lcdc, LCDCFlags::SpriteDisplayEnable) {
             return bg_color_rgb;
         }
 
@@ -11619,7 +11635,7 @@ impl Ppu {
                 // implies a y-visible scan, so the bound is the scan range
                 // (0..16) not the live size.
                 let objsize_toggled = self.objsize_dot_history.len() > 1;
-                let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
+                let sprite_height = if lcdc_has(lcdc, LCDCFlags::SpriteSize) { 16 } else { 8 };
                 let y_in_range = if objsize_toggled {
                     (0..16).contains(&relative_y)
                 } else {
@@ -11685,7 +11701,7 @@ impl Ppu {
         // per column from the history. Otherwise keep the live-LCDC fast path
         // (identical to the single seeded entry).
         let objen_toggled = self.objen_history.len() > 1;
-        if !objen_toggled && (lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) == 0 {
+        if !objen_toggled && !lcdc_has(lcdc, LCDCFlags::SpriteDisplayEnable) {
             return bg_color;
         }
 
@@ -11732,7 +11748,7 @@ impl Ppu {
                 // membership already implies the sprite was scanned y-visible,
                 // so the bound is the scan range (0..16), not the live size.
                 let objsize_toggled = self.objsize_dot_history.len() > 1;
-                let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
+                let sprite_height = if lcdc_has(lcdc, LCDCFlags::SpriteSize) { 16 } else { 8 };
                 let y_in_range = if objsize_toggled {
                     (0..16).contains(&relative_y)
                 } else {
@@ -11780,7 +11796,7 @@ impl Ppu {
     // Get a specific pixel from a sprite's tile data
     fn get_sprite_pixel(&self, mmio: &mmio::Mmio, sprite: &Sprite, sprite_x: u8, sprite_y: u8) -> Option<u8> {
         let lcdc = self.lcdc;
-        let sprite_height = if (lcdc & (LCDCFlags::SpriteSize as u8)) != 0 { 16 } else { 8 };
+        let sprite_height = if lcdc_has(lcdc, LCDCFlags::SpriteSize) { 16 } else { 8 };
 
         if sprite_x >= 8 || sprite_y >= sprite_height {
             return None;
@@ -11842,7 +11858,7 @@ impl Ppu {
             .objen_history
             .first()
             .map(|&(_, b)| b)
-            .unwrap_or((self.lcdc & (LCDCFlags::SpriteDisplayEnable as u8)) != 0);
+            .unwrap_or(self.lcdc_has(LCDCFlags::SpriteDisplayEnable));
         for &(apply_tick, b) in self.objen_history.iter() {
             if apply_tick <= tick {
                 on = b;
@@ -11859,7 +11875,7 @@ impl Ppu {
             .objsize_dot_history
             .first()
             .map(|&(_, l)| l)
-            .unwrap_or((self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0);
+            .unwrap_or(self.lcdc_has(LCDCFlags::SpriteSize));
         for &(apply_tick, l) in self.objsize_dot_history.iter() {
             if apply_tick <= tick {
                 large = l;
@@ -11891,7 +11907,7 @@ impl Ppu {
     ) -> Option<u8> {
         let Some(rec) = rec.filter(|r| r.phase == SpriteFetchPhase::Fetched) else {
             // No per-fetch record: resolve both bytes with the live size.
-            let large = (self.lcdc & (LCDCFlags::SpriteSize as u8)) != 0;
+            let large = self.lcdc_has(LCDCFlags::SpriteSize);
             return self.obj_pixel_with_sizes(mmio, sprite, rel_x, screen_y, large, large);
         };
         let fetch_end = rec.arm_tick + rec.penalty as u128;
