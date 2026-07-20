@@ -22,9 +22,10 @@ use std::ffi::CStr;
 use std::rc::Rc;
 
 use rustyboi_libretro_sys::{
-    libretro_core, AvInfo, Core, Environment, Frame, Game, Geometry, MemoryDescriptor, MemoryKind,
-    SystemInfo, RETRO_DEVICE_ID_JOYPAD_A, RETRO_DEVICE_ID_JOYPAD_B, RETRO_DEVICE_ID_JOYPAD_DOWN,
-    RETRO_DEVICE_ID_JOYPAD_LEFT, RETRO_DEVICE_ID_JOYPAD_RIGHT, RETRO_DEVICE_ID_JOYPAD_SELECT,
+    libretro_core, AvInfo, Core, Environment, Frame, Game, Geometry, LogLevel, MemoryDescriptor,
+    MemoryKind, SystemInfo, RETRO_DEVICE_ID_JOYPAD_A, RETRO_DEVICE_ID_JOYPAD_B,
+    RETRO_DEVICE_ID_JOYPAD_DOWN, RETRO_DEVICE_ID_JOYPAD_LEFT, RETRO_DEVICE_ID_JOYPAD_RIGHT,
+    RETRO_DEVICE_ID_JOYPAD_SELECT,
     RETRO_DEVICE_ID_JOYPAD_START, RETRO_DEVICE_ID_JOYPAD_UP, RETRO_MEMORY_RTC,
     RETRO_MEMORY_SAVE_RAM, RETRO_MEMORY_SYSTEM_RAM, RETRO_MEMORY_VIDEO_RAM,
 };
@@ -86,6 +87,7 @@ struct RustyboiCore {
     rumble_enabled: bool,
     use_real_boot_rom: bool,
     sgb_border_enabled: bool,
+    sgb_system_border: bool,
     // Tracks the geometry currently advertised so `run` only requests a new
     // geometry when the SGB border toggles the output dimensions.
     sgb_border_active: bool,
@@ -121,11 +123,99 @@ impl RustyboiCore {
         }
     }
 
+    /// Conventional system-directory filename for the SNES-side Super Game Boy
+    /// firmware dump of a model, or `None` for hardware that has none. Matches
+    /// the desktop frontend's `bios/sgb1.sfc` / `bios/sgb2.sfc` convention, so
+    /// one dump serves both frontends.
+    fn sgb_firmware_filename(hardware: Hardware) -> Option<&'static str> {
+        match hardware {
+            Hardware::SGB => Some("sgb1.sfc"),
+            Hardware::SGB2 => Some("sgb2.sfc"),
+            _ => None,
+        }
+    }
+
+    /// Install the SGB system border from the user's own SNES firmware dump in
+    /// the frontend's system directory. That border is what a real Super Game
+    /// Boy shows until the running game uploads its own with CHR_TRN/PCT_TRN.
+    ///
+    /// Absence is the normal case and never an error: without the dump the SGB
+    /// just keeps today's borderless presentation. Nothing of the artwork ships
+    /// with the core — it is decoded at runtime from the user's own ROM, and a
+    /// file that isn't one of the known dumps is rejected by the core.
+    ///
+    /// Deliberately NOT called from `unserialize`: RetroArch rewind unserializes
+    /// every frame, and the seeded border is part of the savestate anyway, so
+    /// re-reading a megabyte of firmware there would be pure cost.
+    fn load_sgb_firmware(&mut self, env: &Environment) {
+        let want = self.sgb_system_border;
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        if !want {
+            // Stops later machine rebuilds from re-seeding it. A border already
+            // seeded into the running machine is plain SGB state from then on
+            // (exactly as a game's own border is) and stays until content
+            // reloads — hence "takes effect on content reload" in the option.
+            session.set_sgb_firmware(None);
+            return;
+        }
+        let hardware = session.hardware_choice().to_hardware();
+        let Some(name) = Self::sgb_firmware_filename(hardware) else {
+            return;
+        };
+        let Some(dir) = env.system_directory() else {
+            env.log(
+                LogLevel::Warn,
+                "SGB system border: the frontend reports no system directory; continuing without one",
+            );
+            return;
+        };
+        let path = dir.join(name);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                env.log(
+                    LogLevel::Info,
+                    &format!(
+                        "SGB system border: no firmware at {} ({e}); continuing without one",
+                        path.display()
+                    ),
+                );
+                return;
+            }
+        };
+        session.finish_load_sgb_firmware(&bytes);
+        if session.has_sgb_firmware() {
+            env.log(
+                LogLevel::Info,
+                &format!("SGB system border: loaded firmware {}", path.display()),
+            );
+        } else {
+            // Rejected by the core's validator (not one of the known dumps, or
+            // truncated). Drop the bytes again so a megabyte of unusable data
+            // isn't held for the content's lifetime.
+            session.set_sgb_firmware(None);
+            env.log(
+                LogLevel::Warn,
+                &format!(
+                    "SGB system border: ignoring {}: not a recognised Super Game Boy firmware dump",
+                    path.display()
+                ),
+            );
+        }
+    }
+
     /// Read every core option from the frontend and apply the effects that can
     /// change live (colour correction, DMG palette). Hardware model,
     /// real-boot-ROM and SGB border only take effect on the next content load /
     /// geometry check, which is why this is safe to call from both load and
     /// options-changed.
+    ///
+    /// Only the option *state* is latched for the SGB system border: fetching
+    /// the firmware is [`load_sgb_firmware`](Self::load_sgb_firmware), which
+    /// both callers run afterwards — at load time there is no session yet, so
+    /// applying it from here would silently do nothing.
     fn read_options(&mut self, env: &Environment) {
         if let Some(value) = env.get_variable(core_options::KEY_HARDWARE) {
             self.hardware_pref = HardwareChoice::from_option_id(&value)
@@ -137,6 +227,9 @@ impl RustyboiCore {
         }
         if let Some(value) = env.get_variable(core_options::KEY_SGB_BORDER) {
             self.sgb_border_enabled = value == core_options::ON;
+        }
+        if let Some(value) = env.get_variable(core_options::KEY_SGB_SYSTEM_BORDER) {
+            self.sgb_system_border = value == core_options::ON;
         }
         if let Some(value) = env.get_variable(core_options::KEY_DMG_PALETTE) {
             self.palette = DmgPaletteChoice::from_option_id(&value).unwrap_or(DmgPaletteChoice::Green);
@@ -228,6 +321,7 @@ impl Core for RustyboiCore {
             rumble_enabled: false,
             use_real_boot_rom: false,
             sgb_border_enabled: false,
+            sgb_system_border: true,
             sgb_border_active: false,
         }
     }
@@ -355,6 +449,10 @@ impl Core for RustyboiCore {
         let rom_id = rustyboi_session::sha256(&rom);
         self.session = Some(Session::with_gb(Box::new(gb), config, ports, rom_id));
 
+        // Presentation asset, so it goes in only once the session exists — the
+        // `read_options` above ran with `self.session` still None.
+        self.load_sgb_firmware(env);
+
         // Geometry starts at the plain GB size; `run` switches to 256x224 the
         // first frame the SGB border becomes available.
         self.sgb_border_active = false;
@@ -389,6 +487,10 @@ impl Core for RustyboiCore {
 
     fn options_changed(&mut self, env: &Environment) {
         self.read_options(env);
+        // Toggling the system border on mid-content installs it immediately (a
+        // running game just gains its default border); toggling it off only
+        // stops future rebuilds — see `load_sgb_firmware`.
+        self.load_sgb_firmware(env);
     }
 
     fn cheat_reset(&mut self) {
@@ -904,6 +1006,242 @@ mod tests {
             let mut core = load_core(&mbc3_battery_rtc_rom());
             assert!(core.memory(RETRO_MEMORY_SAVE_RAM).is_some());
             assert!(core.memory(RETRO_MEMORY_RTC).is_some());
+        }
+    }
+
+    // Delivery of the SNES-side SGB firmware from the frontend's system
+    // directory. The border it seeds is an off-screen 256x224 composite the
+    // frontend draws; GB-side code cannot observe it (it is not in VRAM, not
+    // readable through any register, and does not affect timing), so there is
+    // no test ROM that could assert on it — host-side tests against the real
+    // dispatch entry points are the right and only level here.
+    //
+    // The firmware dumps are the user's own property and git-ignored, so the
+    // cases that need a real one are skip-if-absent, exactly like the core's
+    // own firmware tests.
+    mod sgb_firmware_delivery {
+        use super::*;
+        use rustyboi_libretro_sys::{dispatch, ffi};
+        use std::ffi::{c_char, c_uint, c_void, CStr, CString};
+        use std::path::{Path, PathBuf};
+        use std::sync::Mutex;
+
+        // What the mock frontend answers. Both hold their strings for the whole
+        // test (the C contract lends the core a borrowed pointer); ENV_GUARD
+        // serializes the tests that mutate them.
+        static VARS: Mutex<Vec<(String, CString)>> = Mutex::new(Vec::new());
+        static SYSDIR: Mutex<Option<CString>> = Mutex::new(None);
+        static OPTIONS_UPDATED: Mutex<bool> = Mutex::new(false);
+
+        fn set_vars(pairs: &[(&str, &str)]) {
+            *VARS.lock().unwrap() = pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), CString::new(*v).unwrap()))
+                .collect();
+        }
+
+        fn set_sysdir(dir: Option<&Path>) {
+            *SYSDIR.lock().unwrap() =
+                dir.map(|d| CString::new(d.to_str().expect("utf-8 path")).unwrap());
+        }
+
+        unsafe extern "C" fn mock_env(cmd: c_uint, data: *mut c_void) -> bool {
+            match cmd {
+                ffi::RETRO_ENVIRONMENT_SET_PIXEL_FORMAT
+                | ffi::RETRO_ENVIRONMENT_SET_MEMORY_MAPS
+                | ffi::RETRO_ENVIRONMENT_SET_GEOMETRY => true,
+                // Unset keys answer `false` (frontend has no value), which
+                // leaves the core's current setting alone.
+                ffi::RETRO_ENVIRONMENT_GET_VARIABLE => {
+                    let var = unsafe { &mut *(data as *mut ffi::retro_variable) };
+                    let key = unsafe { CStr::from_ptr(var.key) }.to_string_lossy().into_owned();
+                    let vars = VARS.lock().unwrap();
+                    match vars.iter().find(|(k, _)| *k == key) {
+                        Some((_, value)) => {
+                            var.value = value.as_ptr();
+                            true
+                        }
+                        None => false,
+                    }
+                }
+                ffi::RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE => {
+                    let mut updated = OPTIONS_UPDATED.lock().unwrap();
+                    unsafe { *(data as *mut bool) = *updated };
+                    // One-shot, like a real frontend's flag.
+                    *updated = false;
+                    true
+                }
+                ffi::RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY => {
+                    let dir = SYSDIR.lock().unwrap();
+                    match dir.as_ref() {
+                        Some(d) => {
+                            unsafe { *(data as *mut *const c_char) = d.as_ptr() };
+                            true
+                        }
+                        None => false,
+                    }
+                }
+                _ => false,
+            }
+        }
+
+        fn minimal_rom() -> Vec<u8> {
+            let mut rom = vec![0u8; 0x8000];
+            let mut chk: u8 = 0;
+            for &b in &rom[0x134..=0x14C] {
+                chk = chk.wrapping_sub(b).wrapping_sub(1);
+            }
+            rom[0x14D] = chk;
+            rom
+        }
+
+        fn load_core(rom: &[u8]) -> RustyboiCore {
+            let mut core = RustyboiCore::new();
+            dispatch::set_environment(&mut core, Some(mock_env));
+            dispatch::init(&mut core);
+            let info = ffi::retro_game_info {
+                path: std::ptr::null(),
+                data: rom.as_ptr() as *const c_void,
+                size: rom.len(),
+                meta: std::ptr::null(),
+            };
+            assert!(dispatch::load_game(&mut core, &info), "load_game failed");
+            core
+        }
+
+        fn has_border(core: &RustyboiCore) -> bool {
+            let session = core.session.as_ref().expect("session");
+            let seeded = session.has_sgb_firmware();
+            // A seeded border must actually reach the composited output the
+            // frontend draws, not just be stored.
+            assert_eq!(seeded, session.gb().sgb_composited_frame().is_some());
+            seeded
+        }
+
+        /// The workspace `bios/` dump, or `None` when the user has no copy.
+        fn real_firmware_dir() -> Option<PathBuf> {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?.join("bios");
+            dir.join("sgb1.sfc").is_file().then_some(dir)
+        }
+
+        fn scratch_dir(name: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!("rustyboi-libretro-{name}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create scratch dir");
+            dir
+        }
+
+        // Both frontends read the same user dump, so the filenames must match
+        // the desktop `bios/sgb1.sfc` / `bios/sgb2.sfc` convention, and no
+        // non-SGB model may go looking for one.
+        #[test]
+        fn firmware_filename_maps_sgb_models_only() {
+            use rustyboi_core_lib::gb::Hardware::*;
+            assert_eq!(RustyboiCore::sgb_firmware_filename(SGB), Some("sgb1.sfc"));
+            assert_eq!(RustyboiCore::sgb_firmware_filename(SGB2), Some("sgb2.sfc"));
+            for hw in [DMG0, DMG, MGB, AGB, CGB0, CGBB, CGB, CGBE] {
+                assert_eq!(RustyboiCore::sgb_firmware_filename(hw), None, "{hw:?}");
+            }
+        }
+
+        // No system directory, no file in it, and a file that is not a real
+        // dump must all degrade to "no system border" — content still loads,
+        // nothing panics.
+        #[test]
+        fn absent_or_invalid_firmware_degrades_to_no_border() {
+            let _guard = super::ENV_GUARD.lock().unwrap();
+            set_vars(&[
+                (core_options::KEY_HARDWARE, HardwareChoice::Sgb.option_id()),
+                (core_options::KEY_SGB_SYSTEM_BORDER, core_options::ON),
+            ]);
+
+            // 1. Frontend reports no system directory at all.
+            set_sysdir(None);
+            let core = load_core(&minimal_rom());
+            assert!(!has_border(&core), "no system directory must mean no border");
+
+            // 2. System directory exists but holds no firmware.
+            let dir = scratch_dir("sgb-empty");
+            set_sysdir(Some(&dir));
+            let core = load_core(&minimal_rom());
+            assert!(!has_border(&core), "missing firmware must mean no border");
+
+            // 3. A file with the right name but the wrong size: rejected on
+            // length, and the core carries on borderless.
+            std::fs::write(dir.join("sgb1.sfc"), vec![0x5Au8; 64 * 1024]).expect("write junk");
+            let core = load_core(&minimal_rom());
+            assert!(!has_border(&core), "wrong-sized firmware must be rejected");
+
+            // 4. ...and one of exactly the right size but the wrong contents,
+            // which only the checksum can catch.
+            let len = rustyboi_core_lib::sgb_firmware::SGB1_FIRMWARE_LEN;
+            std::fs::write(dir.join("sgb1.sfc"), vec![0u8; len]).expect("write junk");
+            let core = load_core(&minimal_rom());
+            assert!(!has_border(&core), "corrupt firmware must be rejected");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        // The real dump seeds the border, and the core option gates it in both
+        // directions at load time. Skipped when the user has no dump.
+        #[test]
+        fn real_firmware_seeds_the_border_and_the_option_gates_it() {
+            let Some(dir) = real_firmware_dir() else {
+                return;
+            };
+            let _guard = super::ENV_GUARD.lock().unwrap();
+            set_sysdir(Some(&dir));
+
+            set_vars(&[
+                (core_options::KEY_HARDWARE, HardwareChoice::Sgb.option_id()),
+                (core_options::KEY_SGB_SYSTEM_BORDER, core_options::ON),
+            ]);
+            let core = load_core(&minimal_rom());
+            assert!(core.sgb_system_border);
+            assert!(has_border(&core), "sgb1.sfc must seed the system border");
+
+            // Disabled: the same file is present and must be left alone.
+            set_vars(&[
+                (core_options::KEY_HARDWARE, HardwareChoice::Sgb.option_id()),
+                (core_options::KEY_SGB_SYSTEM_BORDER, core_options::OFF),
+            ]);
+            let core = load_core(&minimal_rom());
+            assert!(!core.sgb_system_border);
+            assert!(!has_border(&core), "disabled option must not load firmware");
+
+            // Non-SGB hardware never looks for a dump, even with one present.
+            set_vars(&[
+                (core_options::KEY_HARDWARE, HardwareChoice::Cgb.option_id()),
+                (core_options::KEY_SGB_SYSTEM_BORDER, core_options::ON),
+            ]);
+            let core = load_core(&minimal_rom());
+            assert!(!has_border(&core), "CGB must not gain an SGB border");
+        }
+
+        // Turning the option on mid-content installs the border on the running
+        // machine (the frontend polls the update flag from retro_run).
+        #[test]
+        fn enabling_the_option_mid_content_installs_the_border() {
+            let Some(dir) = real_firmware_dir() else {
+                return;
+            };
+            let _guard = super::ENV_GUARD.lock().unwrap();
+            set_sysdir(Some(&dir));
+            set_vars(&[
+                (core_options::KEY_HARDWARE, HardwareChoice::Sgb.option_id()),
+                (core_options::KEY_SGB_SYSTEM_BORDER, core_options::OFF),
+            ]);
+            let mut core = load_core(&minimal_rom());
+            assert!(!has_border(&core));
+
+            set_vars(&[
+                (core_options::KEY_HARDWARE, HardwareChoice::Sgb.option_id()),
+                (core_options::KEY_SGB_SYSTEM_BORDER, core_options::ON),
+            ]);
+            *OPTIONS_UPDATED.lock().unwrap() = true;
+            dispatch::run(&mut core);
+            assert!(core.sgb_system_border);
+            assert!(has_border(&core), "enabling mid-content must install the border");
         }
     }
 }

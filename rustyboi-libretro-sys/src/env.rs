@@ -136,6 +136,23 @@ pub unsafe fn get_rumble_interface(cb: retro_environment_t) -> Option<retro_set_
     }
 }
 
+/// Ask for the frontend's logging interface; returns its `printf` fn if it has
+/// one. Optional by design — a frontend without a logger is not an error, the
+/// caller just falls back to stderr.
+///
+/// # Safety
+/// `cb` must be the live environment callback.
+pub unsafe fn get_log_interface(cb: retro_environment_t) -> retro_log_printf_t {
+    let mut iface = retro_log_callback { log: None };
+    let ok =
+        unsafe { call(cb, RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &mut iface as *mut _ as *mut c_void) };
+    if ok {
+        iface.log
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +167,7 @@ mod tests {
             assert_eq!(get_variable(None, "any"), None);
             assert_eq!(get_system_directory(None), None);
             assert!(get_rumble_interface(None).is_none());
+            assert!(get_log_interface(None).is_none());
             assert!(!get_variable_update(None));
         }
     }
@@ -235,6 +253,39 @@ mod tests {
         unsafe {
             assert!(get_rumble_interface(Some(env_rumble_none)).is_none());
             assert!(get_rumble_interface(Some(env_rumble_ok)).is_some());
+        }
+    }
+
+    unsafe extern "C" fn dummy_log_fixed(_level: retro_log_level, _fmt: *const c_char) {}
+    // Rust can't *define* a C-variadic fn on stable (only declare the pointer
+    // type), so the mock logger is a fixed-arity fn transmuted to the variadic
+    // type. It is only stored and inspected here, never called.
+    fn dummy_log() -> retro_log_printf_t {
+        type Fixed = unsafe extern "C" fn(retro_log_level, *const c_char);
+        type Variadic = unsafe extern "C" fn(retro_log_level, *const c_char, ...);
+        Some(unsafe { std::mem::transmute::<Fixed, Variadic>(dummy_log_fixed) })
+    }
+    // ok, but leaves the log fn None => treated as unavailable.
+    unsafe extern "C" fn env_log_none(cmd: c_uint, _data: *mut c_void) -> bool {
+        cmd == RETRO_ENVIRONMENT_GET_LOG_INTERFACE
+    }
+    unsafe extern "C" fn env_log_ok(cmd: c_uint, data: *mut c_void) -> bool {
+        if cmd != RETRO_ENVIRONMENT_GET_LOG_INTERFACE {
+            return false;
+        }
+        let iface = unsafe { &mut *(data as *mut retro_log_callback) };
+        iface.log = dummy_log();
+        true
+    }
+
+    // A frontend with no logger (rejects the command, or accepts it but leaves
+    // the fn null) must yield None so the caller falls back to stderr.
+    #[test]
+    fn get_log_interface_paths() {
+        unsafe {
+            assert!(get_log_interface(Some(env_reject)).is_none());
+            assert!(get_log_interface(Some(env_log_none)).is_none());
+            assert!(get_log_interface(Some(env_log_ok)).is_some());
         }
     }
 }
