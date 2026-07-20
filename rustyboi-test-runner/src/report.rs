@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Default, Serialize)]
-pub struct Summary {
+pub(crate) struct Summary {
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
@@ -22,7 +22,7 @@ pub struct Summary {
 }
 
 #[derive(Debug, Serialize)]
-pub struct FailureRecord {
+pub(crate) struct FailureRecord {
     pub rom: String,
     pub mode: Mode,
     pub oracle: String,
@@ -30,7 +30,7 @@ pub struct FailureRecord {
 }
 
 impl Summary {
-    pub fn record(&mut self, result: &CaseResult) {
+    pub(crate) fn record(&mut self, result: &CaseResult) {
         self.total += 1;
 
         match result.case.mode {
@@ -58,12 +58,12 @@ impl Summary {
         }
     }
 
-    pub fn exit_code(&self) -> u8 {
+    pub(crate) fn exit_code(&self) -> u8 {
         if self.failed == 0 { 0 } else { 1 }
     }
 }
 
-pub fn print_failure(result: &CaseResult) {
+pub(crate) fn print_failure(result: &CaseResult) {
     println!(
         "\nFAILED: {} {} {}: {}",
         result.case.rom_path.display(),
@@ -73,7 +73,7 @@ pub fn print_failure(result: &CaseResult) {
     );
 }
 
-pub fn print_summary(summary: &Summary) {
+pub(crate) fn print_summary(summary: &Summary) {
     println!("\nRan {} total tests.", summary.total);
     println!("{} total failures.", summary.failed);
 
@@ -96,7 +96,7 @@ pub fn print_summary(summary: &Summary) {
     }
 }
 
-pub fn write_json(summary: &Summary, path: &Path) -> Result<(), String> {
+pub(crate) fn write_json(summary: &Summary, path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)

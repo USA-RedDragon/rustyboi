@@ -5,13 +5,13 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 
-pub const GB_WIDTH: usize = 160;
-pub const GB_HEIGHT: usize = 144;
+pub(crate) const GB_WIDTH: usize = 160;
+pub(crate) const GB_HEIGHT: usize = 144;
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const RGB_MASK: u32 = 0xF8F8F8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FrameMismatch {
+pub(crate) struct FrameMismatch {
     pub differing_pixels: usize,
     pub first_x: usize,
     pub first_y: usize,
@@ -22,7 +22,7 @@ pub struct FrameMismatch {
 }
 
 impl FrameMismatch {
-    pub fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         format!(
             "{} differing pixels; first mismatch at ({}, {}): actual #{:06X}, expected #{:06X}; bounds x={}..{}, y={}..{}",
             self.differing_pixels,
@@ -226,7 +226,7 @@ const GLYPHS: [[&str; 8]; 16] = [
 /// Map DMG shade indices (0 = lightest .. 3) to the canonical grayscale the
 /// references are graded against — palette/correction-independent, so grading a
 /// green vs grey DMG frame is identical. This is the *correctness* domain.
-pub fn normalize_mono(shades: &[u8]) -> Vec<u32> {
+pub(crate) fn normalize_mono(shades: &[u8]) -> Vec<u32> {
     shades
         .iter()
         .map(|pixel| match pixel {
@@ -239,7 +239,7 @@ pub fn normalize_mono(shades: &[u8]) -> Vec<u32> {
 }
 
 /// Pack RGB888 into `0x00RRGGBB` u32s.
-pub fn normalize_color(rgb: &[u8]) -> Vec<u32> {
+pub(crate) fn normalize_color(rgb: &[u8]) -> Vec<u32> {
     rgb.chunks_exact(3)
         .map(|chunk| ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | chunk[2] as u32)
         .collect()
@@ -251,7 +251,7 @@ pub fn normalize_color(rgb: &[u8]) -> Vec<u32> {
 /// NOT the presented, palette-coloured RGB. So the test suite compares emulated
 /// output (panel behaviour included), never the presentation palette or colour
 /// correction.
-pub fn normalize_frame(gb: &rustyboi_core_lib::gb::GB, frame: &Frame) -> Vec<u32> {
+pub(crate) fn normalize_frame(gb: &rustyboi_core_lib::gb::GB, frame: &Frame) -> Vec<u32> {
     if gb.frame_renders_color() {
         normalize_color(frame.rgb())
     } else {
@@ -260,11 +260,11 @@ pub fn normalize_frame(gb: &rustyboi_core_lib::gb::GB, frame: &Frame) -> Vec<u32
 }
 
 #[cfg(test)]
-pub fn matches_hex_output(frame: &[u32], expected: &str) -> bool {
+pub(crate) fn matches_hex_output(frame: &[u32], expected: &str) -> bool {
     hex_output_mismatch(frame, expected).is_none()
 }
 
-pub fn hex_output_mismatch(frame: &[u32], expected: &str) -> Option<String> {
+pub(crate) fn hex_output_mismatch(frame: &[u32], expected: &str) -> Option<String> {
     let mut matched_glyphs = 0;
 
     for (tile_index, character) in expected.chars().enumerate() {
@@ -294,11 +294,11 @@ pub fn hex_output_mismatch(frame: &[u32], expected: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-pub fn frame_buffers_equal(left: &[u32], right: &[u32]) -> bool {
+pub(crate) fn frame_buffers_equal(left: &[u32], right: &[u32]) -> bool {
     frame_buffer_mismatch(left, right).is_none()
 }
 
-pub fn frame_buffer_mismatch(left: &[u32], right: &[u32]) -> Option<FrameMismatch> {
+pub(crate) fn frame_buffer_mismatch(left: &[u32], right: &[u32]) -> Option<FrameMismatch> {
     if left.len() != FRAMEBUFFER_SIZE || right.len() != FRAMEBUFFER_SIZE {
         return Some(FrameMismatch {
             differing_pixels: FRAMEBUFFER_SIZE,
@@ -323,7 +323,7 @@ pub fn frame_buffer_mismatch(left: &[u32], right: &[u32]) -> Option<FrameMismatc
 /// passes if there is a consistent 1:1 mapping between actual and expected
 /// colors across EVERY pixel — so a genuine layout error (a color that maps two
 /// ways, i.e. a localized wrong pixel) still fails and cannot be laundered.
-pub fn frame_buffer_mismatch_recolor(actual: &[u32], expected: &[u32]) -> Option<FrameMismatch> {
+pub(crate) fn frame_buffer_mismatch_recolor(actual: &[u32], expected: &[u32]) -> Option<FrameMismatch> {
     if actual.len() != FRAMEBUFFER_SIZE || expected.len() != FRAMEBUFFER_SIZE {
         return frame_buffer_mismatch(actual, expected);
     }
@@ -350,7 +350,7 @@ pub fn frame_buffer_mismatch_recolor(actual: &[u32], expected: &[u32]) -> Option
     None
 }
 
-pub fn audio_matches(samples: &[(f32, f32)], audible: bool) -> bool {
+pub(crate) fn audio_matches(samples: &[(f32, f32)], audible: bool) -> bool {
     let all_same = samples
         .first()
         .map(|first| samples.iter().all(|sample| sample == first))
@@ -359,7 +359,7 @@ pub fn audio_matches(samples: &[(f32, f32)], audible: bool) -> bool {
     if audible { !all_same } else { all_same }
 }
 
-pub fn read_png_rgb(path: &Path) -> Result<Vec<u32>, String> {
+pub(crate) fn read_png_rgb(path: &Path) -> Result<Vec<u32>, String> {
     let data = fs::read(path).map_err(|error| format!("failed to read PNG: {error}"))?;
     decode_png_rgba(&data)
 }
@@ -384,7 +384,7 @@ fn pil_luminance(rgb: u32) -> u8 {
 /// (the shootout fails on any histogram bucket whose value is strictly > 50).
 /// Returns `None` on a pass, or `Some(describe)` on a mismatch (with the worst
 /// pixel and its grayscale values, for diagnostics).
-pub fn shootout_mismatch(actual: &[u32], expected: &[u32]) -> Option<FrameMismatch> {
+pub(crate) fn shootout_mismatch(actual: &[u32], expected: &[u32]) -> Option<FrameMismatch> {
     if actual.len() != FRAMEBUFFER_SIZE || expected.len() != FRAMEBUFFER_SIZE {
         return Some(FrameMismatch {
             differing_pixels: FRAMEBUFFER_SIZE,
@@ -429,7 +429,7 @@ pub fn shootout_mismatch(actual: &[u32], expected: &[u32]) -> Option<FrameMismat
     })
 }
 
-pub fn write_ppm(path: &Path, frame: &[u32]) -> Result<(), String> {
+pub(crate) fn write_ppm(path: &Path, frame: &[u32]) -> Result<(), String> {
     if frame.len() != FRAMEBUFFER_SIZE {
         return Err(format!(
             "expected {FRAMEBUFFER_SIZE} pixels, got {}",
