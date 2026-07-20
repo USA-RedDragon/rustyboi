@@ -4,9 +4,10 @@ name: Library Sweep
 # (~4000 ROMs = ~4000 canaries, far wider than the test suites), plus an HTML
 # screenshot gallery artifact. ROMS_URL/ROMS_PASSWORD (library zip preserving
 # the GB/ + GBC/ layout: ./GB/<rom>.zip, ./GBC/<rom>.zip) and
-# BIOS_URL/BIOS_PASSWORD (boot ROMs) are REQUIRED — a missing secret fails the
-# run loudly instead of silently skipping. PGO comes from the standalone PGO
-# workflow (pgo.yaml) via .github/actions/pgo-restore.
+# BIOS_URL/BIOS_PASSWORD (boot ROMs, plus the optional sgb1/sgb2.sfc SNES-side
+# SGB firmware the gallery's default border is decoded from) are REQUIRED — a
+# missing secret fails the run loudly instead of silently skipping. PGO comes
+# from the standalone PGO workflow (pgo.yaml) via .github/actions/pgo-restore.
 
 on:
   push:
@@ -121,6 +122,17 @@ jobs:
           curl -fsSL "$BIOS_URL" -o /tmp/bios.zip
           unzip -P "$BIOS_PASSWORD" -q -o /tmp/bios.zip -d bios
           echo "boot ROMs: $(ls bios/*.bin 2>/dev/null | wc -l)"
+          # The SNES-side SGB firmware (sgb1.sfc/sgb2.sfc) rides in the same
+          # archive and unzips into the same dir the sweep is handed via
+          # --bios-dir, so it needs no separate wiring — but it is OPTIONAL:
+          # without it the SGB gallery cards simply show a border only for
+          # games that upload their own. Report presence loudly either way so a
+          # silently-missing dump is visible in the log rather than showing up
+          # as mysteriously border-less cards.
+          echo "SGB firmware: $(ls bios/*.sfc 2>/dev/null | wc -l) ($(ls bios/*.sfc 2>/dev/null | xargs -r -n1 basename | tr '\n' ' '))"
+          for f in sgb1.sfc sgb2.sfc; do
+            [ -f "bios/$f" ] || echo "::warning::$f not in the BIOS archive; SGB cards get no default border (gallery-only, not a gate failure)"
+          done
       - name: Run library sweep (shard ${{ matrix.shard }}/${{ strategy.job-total }})
         shell: bash
         env:
