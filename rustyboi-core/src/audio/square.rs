@@ -28,6 +28,16 @@ fn duty_out(duty: u8, index: u8) -> bool {
     DUTIES[(index as usize & 7) + (duty as usize) * 8] != 0
 }
 
+// The base-relative `regs` indexing in this file assumes each channel's five
+// registers are contiguous from its base — NR10 for channel 1, and NR20 (the
+// slot hardware leaves unmapped, one below NR21) for channel 2. Pin that
+// against the real register map so a future map edit cannot silently
+// desynchronise the index arithmetic.
+const _: () = {
+    assert!(NR11 == NR10 + 1 && NR12 == NR10 + 2 && NR13 == NR10 + 3 && NR14 == NR10 + 4);
+    assert!(NR22 == NR21 + 1 && NR23 == NR21 + 2 && NR24 == NR21 + 3);
+};
+
 fn to_period(freq: u16) -> u32 {
     (2048 - freq as u32) * 2
 }
@@ -36,15 +46,11 @@ fn to_period(freq: u16) -> u32 {
 pub(super) struct SquareWave {
     channel1: bool,
 
-    nr10: u8,
-    nr11: u8,
-    nr12: u8,
-    nr13: u8,
-    nr14: u8,
-    nr21: u8,
-    nr22: u8,
-    nr23: u8,
-    nr24: u8,
+    // NRx0..NRx4 for whichever channel this is: index = `addr - base`, with
+    // base NR10 for channel 1 and NR20 for channel 2. Index 0 is the sweep
+    // register, which only channel 1 has; channel 2's slot is NR20, which
+    // hardware does not map, so it is never written and stays 0.
+    regs: [u8; 5],
 
     enabled: bool,
 
@@ -203,15 +209,7 @@ impl SquareWave {
     pub(super) fn new(channel1: bool) -> Self {
         SquareWave {
             channel1,
-            nr10: 0,
-            nr11: 0,
-            nr12: 0,
-            nr13: 0,
-            nr14: 0,
-            nr21: 0,
-            nr22: 0,
-            nr23: 0,
-            nr24: 0,
+            regs: [0; 5],
             enabled: false,
             cc: 0,
             period: 4096,
@@ -296,10 +294,10 @@ impl SquareWave {
     /// mid-cycle. `pos_offset` is the duty next-pos-update offset (in 2 MHz
     /// units) added to the current cc; `pos`/`high` are the duty-unit phase.
     pub(super) fn set_post_bios_ch1(&mut self, pos_offset: u32, pos: u8, high: bool) {
-        self.nr11 = 0xBF;
-        self.nr12 = 0xF3;
-        self.nr13 = 0xC1;
-        self.nr14 = 0x07;
+        self.regs[1] = 0xBF;
+        self.regs[2] = 0xF3;
+        self.regs[3] = 0xC1;
+        self.regs[4] = 0x07;
         self.master = true;
         self.enabled = true;
         // Post-boot the startup-ding envelope has already decayed to 0
@@ -387,23 +385,15 @@ impl SquareWave {
     }
 
     fn freq(&self) -> u16 {
-        if self.channel1 {
-            ((self.nr14 as u16 & 0x07) << 8) | self.nr13 as u16
-        } else {
-            ((self.nr24 as u16 & 0x07) << 8) | self.nr23 as u16
-        }
+        ((self.regs[4] as u16 & 0x07) << 8) | self.regs[3] as u16
     }
 
     fn duty(&self) -> u8 {
-        if self.channel1 {
-            self.nr11 >> 6
-        } else {
-            self.nr21 >> 6
-        }
+        self.regs[1] >> 6
     }
 
     fn nr2(&self) -> u8 {
-        if self.channel1 { self.nr12 } else { self.nr22 }
+        self.regs[2]
     }
 
     // --- Duty unit ---
@@ -503,11 +493,7 @@ impl SquareWave {
         let old = self.nr2();
         if (value & 0xF8) == 0 {
             // DAC off disables the channel.
-            if self.channel1 {
-                self.nr12 = value;
-            } else {
-                self.nr22 = value;
-            }
+            self.regs[2] = value;
             self.master = false;
             self.enabled = false;
             return;
@@ -518,17 +504,29 @@ impl SquareWave {
             // (no reschedule) — ticks stay anchored to the DIV-APU events.
             self.nrx2_glitch(value, old);
         }
-        if self.channel1 {
-            self.nr12 = value;
-        } else {
-            self.nr22 = value;
-        }
+        self.regs[2] = value;
     }
 
     // --- Length counter (cc-driven) ---
 
     fn nr4(&self) -> u8 {
-        if self.channel1 { self.nr14 } else { self.nr24 }
+        self.regs[4]
+    }
+
+    /// Index of `addr` in `regs`. Panics on any address the controller should
+    /// never route to this instance — the other channel's block, and channel
+    /// 2's NR20 slot, which hardware leaves unmapped. That is the same
+    /// invariant the two per-channel match arms asserted before.
+    fn reg_index(&self, addr: u16) -> usize {
+        let base = if self.channel1 { NR10 } else { NR21 - 1 };
+        let index = addr.wrapping_sub(base);
+        assert!(
+            index <= 4 && (self.channel1 || index != 0),
+            "Invalid address for Channel {} SquareWave: {:#X}",
+            if self.channel1 { 1 } else { 2 },
+            addr
+        );
+        index as usize
     }
 
     /// Length teardown for channels 1/2: the channel simply stops. (The
@@ -555,11 +553,7 @@ impl SquareWave {
     /// NRx1 write: store the register, run the shared length reload, then let
     /// the duty unit latch the new duty.
     fn write_nrx1(&mut self, value: u8) {
-        if self.channel1 {
-            self.nr11 = value;
-        } else {
-            self.nr21 = value;
-        }
+        self.regs[1] = value;
         self.len_nr1_change(value);
         self.duty_nr1_change();
     }
@@ -645,7 +639,7 @@ impl SquareWave {
     /// Pure arithmetic — the caller applies the negate latch / overflow-kill
     /// side effects.
     fn sweep_next_freq(&self) -> u16 {
-        let nr0 = self.nr10;
+        let nr0 = self.regs[0];
         let step = self.sweep_shadow_frequency >> (nr0 & 0x07) as u16;
         if nr0 & 0x08 != 0 {
             self.sweep_shadow_frequency.wrapping_sub(step)
@@ -658,7 +652,7 @@ impl SquareWave {
     /// (set once a decreasing sweep is calculated) only. Used by the deferred
     /// second calculation (the disable lands later).
     fn sweep_calc_freq_raw(&mut self) -> u16 {
-        if self.nr10 & 0x08 != 0 {
+        if self.regs[0] & 0x08 != 0 {
             self.sweep_neg = true;
         }
         self.sweep_next_freq()
@@ -687,7 +681,7 @@ impl SquareWave {
     /// shadow and applies the pinned side effects.
     fn sweep_apply_freq(&mut self) {
         let at_cc = self.sweep_counter.wrapping_sub(4);
-        let nr0 = self.nr10;
+        let nr0 = self.regs[0];
         if nr0 & 0x70 == 0 || nr0 & 0x07 == 0 {
             return;
         }
@@ -701,10 +695,10 @@ impl SquareWave {
     /// sweep-event cc.
     fn sweep_event(&mut self) {
         let event_cc = self.sweep_counter;
-        let period = ((self.nr10 & 0x70) >> 4) as u32;
+        let period = ((self.regs[0] & 0x70) >> 4) as u32;
         if period != 0 {
             let freq = self.sweep_calc_freq();
-            if freq & 2048 == 0 && (self.nr10 & 0x07) != 0 {
+            if freq & 2048 == 0 && (self.regs[0] & 0x07) != 0 {
                 self.sweep_shadow_frequency = freq;
                 self.set_freq_at(freq, self.sweep_counter);
                 // The second calculation ("overflow is checked after adding
@@ -714,7 +708,7 @@ impl SquareWave {
                 let freq2 = self.sweep_calc_freq_raw();
                 if freq2 & 2048 != 0 {
                     self.sweep_kill_counter =
-                        event_cc.wrapping_add(2 * (self.nr10 & 0x07) as u32);
+                        event_cc.wrapping_add(2 * (self.regs[0] & 0x07) as u32);
                 }
             }
             self.sweep_counter = self.sweep_counter.wrapping_add(period << 14);
@@ -745,8 +739,8 @@ impl SquareWave {
         self.sweep_kill_counter = COUNTER_DISABLED;
         self.sweep_neg = false;
         self.sweep_shadow_frequency = self.freq();
-        let period = ((self.nr10 & 0x70) >> 4) as u32;
-        let rsh = (self.nr10 & 0x07) as u32;
+        let period = ((self.regs[0] & 0x70) >> 4) as u32;
+        let rsh = (self.regs[0] & 0x07) as u32;
         if period | rsh != 0 {
             let cgb2 = if self.cgb { 2 } else { 0 };
             self.sweep_counter = ((((self.cc.wrapping_add(2).wrapping_add(cgb2)) >> 14)
@@ -784,8 +778,8 @@ impl SquareWave {
         self.cc = saved;
         self.period = to_period(new_freq);
         // Reflect the swept frequency back into the period registers.
-        self.nr13 = (new_freq & 0xFF) as u8;
-        self.nr14 = (self.nr14 & 0xF8) | ((new_freq >> 8) & 0x07) as u8;
+        self.regs[3] = (new_freq & 0xFF) as u8;
+        self.regs[4] = (self.regs[4] & 0xF8) | ((new_freq >> 8) & 0x07) as u8;
     }
 
     // --- NRx4 / trigger ---
@@ -828,11 +822,7 @@ impl SquareWave {
 
         self.len_nr4_change(old_nr4, value);
 
-        if self.channel1 {
-            self.nr14 = value;
-        } else {
-            self.nr24 = value;
-        }
+        self.regs[4] = value;
         self.period = to_period(self.freq());
 
         // `just_reloaded` reload from the new sample length.
@@ -1071,77 +1061,29 @@ impl SquareWave {
 
 impl Addressable for SquareWave {
     fn read(&self, addr: u16) -> u8 {
-        match addr {
-            NR10..=NR14 => {
-                if self.channel1 {
-                    match addr {
-                        NR10 => self.nr10 | 0x80,
-                        NR11 => self.nr11 | 0x3F,
-                        NR12 => self.nr12,
-                        NR13 => 0xFF,
-                        NR14 => self.nr14 | 0xBF,
-                        _ => 0xFF,
-                    }
-                } else {
-                    panic!("Invalid read from Channel 2 SquareWave: {:#X}", addr);
-                }
-            }
-            NR21..=NR24 => {
-                if !self.channel1 {
-                    match addr {
-                        NR21 => self.nr21 | 0x3F,
-                        NR22 => self.nr22,
-                        NR23 => 0xFF,
-                        NR24 => self.nr24 | 0xBF,
-                        _ => 0xFF,
-                    }
-                } else {
-                    panic!("Invalid read from Channel 1 SquareWave: {:#X}", addr);
-                }
-            }
-            _ => panic!("Invalid address for SquareWave: {:#X}", addr),
-        }
+        // Read-back masks, identical for both channels: NRx0 reads with bit 7
+        // set, NRx1's length load is write-only (only the duty bits read
+        // back), NRx2 reads raw, NRx3 is entirely write-only, and NRx4 reads
+        // back only its length-enable bit. These are pinned by the suites; do
+        // not widen them.
+        const READ_MASK: [u8; 5] = [0x80, 0x3F, 0x00, 0xFF, 0xBF];
+        let i = self.reg_index(addr);
+        self.regs[i] | READ_MASK[i]
     }
 
     fn write(&mut self, addr: u16, value: u8) {
-        match addr {
-            NR10..=NR14 => {
-                if self.channel1 {
-                    match addr {
-                        NR10 => {
-                            self.sweep_nr0_change(value);
-                            self.nr10 = value;
-                        }
-                        NR11 => self.write_nrx1(value),
-                        NR12 => self.write_nrx2(value),
-                        NR13 => {
-                            self.nr13 = value;
-                            self.write_nrx3();
-                        }
-                        NR14 => self.write_nrx4(value),
-                        _ => {}
-                    }
-                } else {
-                    panic!("Invalid write to Channel 2 SquareWave: {:#X}", addr);
-                }
+        match self.reg_index(addr) {
+            0 => {
+                self.sweep_nr0_change(value);
+                self.regs[0] = value;
             }
-            NR21..=NR24 => {
-                if !self.channel1 {
-                    match addr {
-                        NR21 => self.write_nrx1(value),
-                        NR22 => self.write_nrx2(value),
-                        NR23 => {
-                            self.nr23 = value;
-                            self.write_nrx3();
-                        }
-                        NR24 => self.write_nrx4(value),
-                        _ => {}
-                    }
-                } else {
-                    panic!("Invalid write to Channel 1 SquareWave: {:#X}", addr);
-                }
+            1 => self.write_nrx1(value),
+            2 => self.write_nrx2(value),
+            3 => {
+                self.regs[3] = value;
+                self.write_nrx3();
             }
-            _ => panic!("Invalid address for SquareWave: {:#X}", addr),
+            _ => self.write_nrx4(value),
         }
     }
 }
