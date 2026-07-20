@@ -186,15 +186,79 @@ mod tests {
         assert!((f - 0.996).abs() < 5e-4, "DMG charge at 44.1 kHz was {f}");
     }
 
-    /// Pan Docs orders the three families by aggressiveness; a more aggressive
-    /// filter pulls harder, i.e. has the SMALLER charge factor.
+    /// The per-cycle factors against blargg's published figures.
+    ///
+    /// This replaces an ordering test (AGB < CGB < DMG) that could not fail:
+    /// AGB's factor is *defined* as CGB's squared, and squaring any factor in
+    /// (0, 1) shrinks it, so the ordering held for every possible value of the
+    /// two constants — the CGB constant could be set to 0.5 with the whole
+    /// suite still green. Pinning the published values instead is strictly
+    /// stronger, since the documented ordering follows from them.
+    ///
+    /// AGB is the exception and is asserted only against its own definition:
+    /// no measured AGB constant is published (Pan Docs gives only "more
+    /// aggressive than GBC"), so there is nothing to independently assert it
+    /// against. That assertion pins the documented derivation, not silicon.
     #[test]
-    fn charge_factors_follow_the_documented_model_ordering() {
-        let dmg = AnalogModel::Dmg.charge_per_sample();
-        let cgb = AnalogModel::CgbMgb.charge_per_sample();
-        let agb = AnalogModel::Agb.charge_per_sample();
-        assert!(agb < cgb, "AGB ({agb}) is more aggressive than CGB ({cgb})");
-        assert!(cgb < dmg, "CGB ({cgb}) is more aggressive than DMG ({dmg})");
+    fn charge_factors_match_their_published_per_cycle_values() {
+        assert_eq!(
+            AnalogModel::Dmg.charge_per_cycle(),
+            0.999958,
+            "blargg, Game Boy Sound Hardware: DMG-03/05/06"
+        );
+        assert_eq!(
+            AnalogModel::CgbMgb.charge_per_cycle(),
+            0.998943,
+            "blargg, Game Boy Sound Hardware: MGB-01, CGB-02/04/05"
+        );
+        let cgb = AnalogModel::CgbMgb.charge_per_cycle();
+        assert_eq!(
+            AnalogModel::Agb.charge_per_cycle(),
+            cgb * cgb,
+            "AGB is defined as the CGB factor squared"
+        );
+    }
+
+    /// Which filter each machine wires up — asserted by nothing until now.
+    ///
+    /// The entry worth pinning is MGB: it is DMG-family silicon and takes the
+    /// DMG side of every other model split in the codebase, but here it takes
+    /// the CGB factor, because blargg measured MGB-01 with the CGB constant
+    /// (see the citation on `Hardware::analog_model`). The SGBs run the other
+    /// way — they feed the SNES's audio path but their Game-Boy-side APU is DMG
+    /// silicon, so they keep the DMG filter.
+    ///
+    /// The table is written out independently rather than re-deriving from the
+    /// mapping under test, and the coverage check below makes a newly added
+    /// `Hardware` variant fail here until it is deliberately classified.
+    #[test]
+    fn every_hardware_model_maps_to_its_analog_stage() {
+        use crate::gb::Hardware;
+        use clap::ValueEnum;
+
+        const EXPECTED: &[(Hardware, AnalogModel)] = &[
+            (Hardware::DMG, AnalogModel::Dmg),
+            (Hardware::DMG0, AnalogModel::Dmg),
+            (Hardware::SGB, AnalogModel::Dmg),
+            (Hardware::SGB2, AnalogModel::Dmg),
+            (Hardware::MGB, AnalogModel::CgbMgb),
+            (Hardware::CGB0, AnalogModel::CgbMgb),
+            (Hardware::CGBB, AnalogModel::CgbMgb),
+            (Hardware::CGB, AnalogModel::CgbMgb),
+            (Hardware::CGBE, AnalogModel::CgbMgb),
+            (Hardware::AGB, AnalogModel::Agb),
+        ];
+
+        for &(hw, want) in EXPECTED {
+            assert_eq!(hw.analog_model(), want, "{hw:?} wired up the wrong analog model");
+        }
+        for hw in Hardware::value_variants() {
+            assert!(
+                EXPECTED.iter().any(|&(h, _)| h == *hw),
+                "{hw:?} is unclassified here -- a new Hardware variant must \
+                 pick an analog model explicitly"
+            );
+        }
     }
 
     /// A constant input is a pure DC bias, which the high-pass must remove.
