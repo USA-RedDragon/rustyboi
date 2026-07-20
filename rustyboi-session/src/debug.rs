@@ -102,17 +102,20 @@ pub struct CpuState {
     pub ime: bool,
 }
 
+// The four F-register flag accessors have no caller left after the visibility
+// narrowing; kept (not deleted) pending triage.
+#[allow(dead_code)]
 impl CpuState {
-    pub fn flag_z(&self) -> bool {
+    pub(crate) fn flag_z(&self) -> bool {
         self.f & 0x80 != 0
     }
-    pub fn flag_n(&self) -> bool {
+    pub(crate) fn flag_n(&self) -> bool {
         self.f & 0x40 != 0
     }
-    pub fn flag_h(&self) -> bool {
+    pub(crate) fn flag_h(&self) -> bool {
         self.f & 0x20 != 0
     }
-    pub fn flag_c(&self) -> bool {
+    pub(crate) fn flag_c(&self) -> bool {
         self.f & 0x10 != 0
     }
 }
@@ -259,7 +262,7 @@ const STACK_BELOW: u16 = 0xE0;
 const STACK_LEN: usize = 0x1C0;
 /// Bytes captured from PC for the CPU panel's 5-instruction disassembly window
 /// (covers 5 back-to-back 3-byte instructions plus the final operand fetch).
-pub const PC_WINDOW: usize = 20;
+pub(crate) const PC_WINDOW: usize = 20;
 
 impl Session {
     /// Build a read-only [`DebugSnapshot`] of the current machine. `detail`
@@ -512,7 +515,7 @@ impl DebugSnapshot {
 }
 
 /// Convert a Game Boy Color RGB555 value to RGB888 (matches the panels' scaling).
-pub fn rgb555_to_888(rgb555: u16) -> (u8, u8, u8) {
+pub(crate) fn rgb555_to_888(rgb555: u16) -> (u8, u8, u8) {
     let r = ((rgb555 & 0x1F) * 255 / 31) as u8;
     let g = (((rgb555 >> 5) & 0x1F) * 255 / 31) as u8;
     let b = (((rgb555 >> 10) & 0x1F) * 255 / 31) as u8;

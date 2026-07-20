@@ -70,7 +70,7 @@ pub trait Webcam {
 }
 
 /// Expected pixel count of a [`Webcam::grab`] frame (128 x 112 grayscale).
-pub const WEBCAM_PIXELS: usize = 128 * 112;
+pub(crate) const WEBCAM_PIXELS: usize = 128 * 112;
 
 /// A byte-oriented transport for link cable / IR / Mobile Adapter traffic.
 /// Stub-friendly: a null adapter that never sends and always returns empty is

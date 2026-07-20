@@ -48,7 +48,7 @@ pub fn compress_snapshot(raw: Vec<u8>) -> Vec<u8> {
 
 /// Decode a ring blob back to the raw savestate bytes. Unframed blobs are
 /// returned as-is (legacy/raw input); a corrupt deflate stream yields `None`.
-pub fn decompress_snapshot(blob: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn decompress_snapshot(blob: &[u8]) -> Option<Vec<u8>> {
     if blob.len() < 8 {
         return Some(blob.to_vec());
     }

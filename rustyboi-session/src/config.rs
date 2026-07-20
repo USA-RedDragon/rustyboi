@@ -17,7 +17,7 @@ use rustyboi_core_lib::ppu::ColorCorrection;
 use serde::{Deserialize, Serialize};
 
 /// Storage key the config blob lives under.
-pub const CONFIG_KEY: &str = "config/session.json";
+pub(crate) const CONFIG_KEY: &str = "config/session.json";
 
 /// A four-shade DMG palette (RGBA8 per shade, lightest→darkest). Host-agnostic:
 /// the adapter maps these to its own pixel format. Presentation-only; does not

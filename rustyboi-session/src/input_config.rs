@@ -348,7 +348,7 @@ impl ResolveState {
 }
 
 /// Autofire flips the driven button every this many frames.
-pub const TURBO_PERIOD: u64 = 2;
+pub(crate) const TURBO_PERIOD: u64 = 2;
 
 /// A hotkey that fired this frame (edge for toggles, level for holds).
 #[derive(Debug, Clone, Copy, PartialEq)]

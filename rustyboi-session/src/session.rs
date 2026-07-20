@@ -637,7 +637,7 @@ impl Session {
     }
 
     /// Drop rewind history (e.g. on ROM change).
-    pub fn clear_rewind(&mut self) {
+    pub(crate) fn clear_rewind(&mut self) {
         self.rewind.clear();
         self.pending_snapshot = None;
     }
@@ -661,7 +661,9 @@ impl Session {
     }
 
     /// Whether offloaded rewind capture is active.
-    pub fn rewind_offloaded(&self) -> bool {
+    // No caller left after the visibility narrowing; kept pending triage.
+    #[allow(dead_code)]
+    pub(crate) fn rewind_offloaded(&self) -> bool {
         self.rewind_offloaded
     }
 
@@ -699,7 +701,7 @@ impl Session {
     /// Begin recording from the current machine state (re-record entry point):
     /// snapshots the live `GB` into the movie's start so replay reconstructs
     /// exactly here.
-    pub fn start_recording_from_state(&mut self) -> Result<(), SessionError> {
+    pub(crate) fn start_recording_from_state(&mut self) -> Result<(), SessionError> {
         let state = self.gb.to_state_bytes().map_err(|e| SessionError::State(e.to_string()))?;
         self.recording =
             Some(Recording::from_savestate(self.rom_id, self.config.hardware, state));
@@ -739,7 +741,7 @@ impl Session {
     }
 
     /// Stop playback, resuming live input.
-    pub fn stop_playback(&mut self) {
+    pub(crate) fn stop_playback(&mut self) {
         self.playback = None;
     }
 
@@ -816,7 +818,7 @@ impl Session {
     }
 
     /// Set whether the SGB border composite is presented.
-    pub fn set_sgb_border(&mut self, on: bool) {
+    pub(crate) fn set_sgb_border(&mut self, on: bool) {
         self.sgb_border = on;
     }
 
@@ -826,7 +828,7 @@ impl Session {
     }
 
     /// Set whether the on-screen touch overlay is shown.
-    pub fn set_touch_controls(&mut self, on: bool) {
+    pub(crate) fn set_touch_controls(&mut self, on: bool) {
         self.touch_controls = on;
     }
 
@@ -837,7 +839,7 @@ impl Session {
 
     /// Whether the SGB border is actually being presented this frame (toggle on
     /// AND the machine offers a composite).
-    pub fn showing_sgb_border(&self) -> bool {
+    pub(crate) fn showing_sgb_border(&self) -> bool {
         self.sgb_border && self.gb.sgb_composited_frame().is_some()
     }
 
@@ -881,7 +883,7 @@ impl Session {
 
     /// Change the emulated hardware model and rebuild the machine for it,
     /// carrying the current cartridge. Persists the config.
-    pub fn set_hardware_choice(&mut self, choice: HardwareChoice) {
+    pub(crate) fn set_hardware_choice(&mut self, choice: HardwareChoice) {
         self.config.hardware = choice.to_hardware();
         let gb = self.rebuild_current_gb();
         self.replace_machine(*gb, self.rom_id);
@@ -889,7 +891,7 @@ impl Session {
     }
 
     /// Change the DMG presentation palette; persists the config.
-    pub fn set_palette_choice(&mut self, choice: DmgPaletteChoice) {
+    pub(crate) fn set_palette_choice(&mut self, choice: DmgPaletteChoice) {
         self.init_palette_choice(choice);
         self.persist_config();
     }
@@ -933,7 +935,7 @@ impl Session {
 
     /// Change the SGB colorization for DMG games; persists the config.
     /// Presentation-only — applied live, no machine rebuild.
-    pub fn set_sgb_palette(&mut self, choice: SgbPaletteChoice) {
+    pub(crate) fn set_sgb_palette(&mut self, choice: SgbPaletteChoice) {
         self.init_sgb_palette(choice);
         self.persist_config();
     }
@@ -979,7 +981,7 @@ impl Session {
 
     /// Enable/disable running a real boot ROM. Rebuilds the machine (a boot mode
     /// change only takes effect from power-on) and persists the config.
-    pub fn set_real_boot_rom(&mut self, enabled: bool) {
+    pub(crate) fn set_real_boot_rom(&mut self, enabled: bool) {
         self.config.use_real_boot_rom = enabled;
         let gb = self.rebuild_current_gb();
         self.replace_machine(*gb, self.rom_id);
@@ -1041,7 +1043,7 @@ impl Session {
     }
 
     /// Set the printer output upscale factor (clamped ≥ 1) and persist it.
-    pub fn set_printer_scale(&mut self, scale: u8) {
+    pub(crate) fn set_printer_scale(&mut self, scale: u8) {
         self.config.printer_scale = scale.max(1);
         self.persist_config();
     }
@@ -1052,7 +1054,7 @@ impl Session {
     }
 
     /// Set the on-screen touch control opacity (clamped 0..=100) and persist it.
-    pub fn set_touch_opacity(&mut self, opacity: u8) {
+    pub(crate) fn set_touch_opacity(&mut self, opacity: u8) {
         self.config.touch_opacity = opacity.min(100);
         self.persist_config();
     }
@@ -1063,13 +1065,13 @@ impl Session {
     }
 
     /// Enable/disable the on-screen FPS overlay; persists the config.
-    pub fn set_show_fps(&mut self, on: bool) {
+    pub(crate) fn set_show_fps(&mut self, on: bool) {
         self.config.show_fps = on;
         self.persist_config();
     }
 
     /// Enable/disable rewind capture; persists the config.
-    pub fn set_rewind_enabled(&mut self, enabled: bool) {
+    pub(crate) fn set_rewind_enabled(&mut self, enabled: bool) {
         self.config.rewind.enabled = enabled;
         self.rewind
             .reconfigure(self.config.rewind.depth, self.config.rewind.interval_frames);
@@ -1078,7 +1080,7 @@ impl Session {
 
     /// Set the rewind snapshot interval (frames between captures, ≥ 1);
     /// persists the config.
-    pub fn set_rewind_interval(&mut self, interval_frames: u32) {
+    pub(crate) fn set_rewind_interval(&mut self, interval_frames: u32) {
         self.config.rewind.interval_frames = interval_frames.max(1);
         self.rewind
             .reconfigure(self.config.rewind.depth, self.config.rewind.interval_frames);
@@ -1086,7 +1088,7 @@ impl Session {
     }
 
     /// Set how many rewind snapshots are retained (≥ 1); persists the config.
-    pub fn set_rewind_depth(&mut self, depth: usize) {
+    pub(crate) fn set_rewind_depth(&mut self, depth: usize) {
         self.config.rewind.depth = depth.max(1);
         self.rewind
             .reconfigure(self.config.rewind.depth, self.config.rewind.interval_frames);
@@ -1136,7 +1138,7 @@ impl Session {
     /// Choose the rendering backend; persists the config. The running window
     /// keeps its current surface/device — the choice applies at the next
     /// launch (see [`crate::action::GraphicsBackend`]).
-    pub fn set_graphics_backend(&mut self, backend: crate::action::GraphicsBackend) {
+    pub(crate) fn set_graphics_backend(&mut self, backend: crate::action::GraphicsBackend) {
         self.config.graphics_backend = backend;
         self.persist_config();
     }
@@ -1148,7 +1150,7 @@ impl Session {
 
     /// Replace the rebindable input map (GB-button bindings + chord hotkeys);
     /// persists the config. The adapter's next `resolve` call sees the new map.
-    pub fn set_input_config(&mut self, input: crate::input_config::InputConfig) {
+    pub(crate) fn set_input_config(&mut self, input: crate::input_config::InputConfig) {
         self.config.input = input;
         self.persist_config();
     }
@@ -1196,13 +1198,13 @@ impl Session {
 
     /// Queue a multi-instruction debug step (consumed by the frontend's run
     /// loop via [`Session::take_step_cycles`]).
-    pub fn request_step_cycles(&mut self, count: u32) {
+    pub(crate) fn request_step_cycles(&mut self, count: u32) {
         self.pending_step_cycles = Some(count);
     }
 
     /// Queue a multi-frame debug step (consumed via
     /// [`Session::take_step_frames`]).
-    pub fn request_step_frames(&mut self, count: u32) {
+    pub(crate) fn request_step_frames(&mut self, count: u32) {
         self.pending_step_frames = Some(count);
     }
 
@@ -1379,7 +1381,7 @@ impl Session {
     /// image into the current cartridge (called after a ROM load so a battery
     /// imported in a prior session survives a reload on storage-only platforms).
     /// No-op when nothing is stored, or for non-battery carts.
-    pub fn hydrate_battery(&mut self) {
+    pub(crate) fn hydrate_battery(&mut self) {
         let key = self.battery_key();
         let Some(bytes) = self.ports.storage.read(&key) else { return };
         if let Some(cart) = self.gb.cartridge_mut()
@@ -1432,7 +1434,7 @@ impl Session {
 
     /// Remove a cheat by its raw code string. Game Genie removal takes effect on
     /// the next ROM (re)load (an applied ROM patch cannot be reverted in place).
-    pub fn remove_cheat(&mut self, code: &str) -> bool {
+    pub(crate) fn remove_cheat(&mut self, code: &str) -> bool {
         self.cheats.remove(code)
     }
 
@@ -1451,14 +1453,14 @@ impl Session {
     /// The raw bytes of the currently-loaded ROM (unpatched), or `None` if no
     /// ROM has been loaded from bytes. Used to identify the game for the cheat-DB
     /// fetch.
-    pub fn original_rom_bytes(&self) -> Option<&[u8]> {
+    pub(crate) fn original_rom_bytes(&self) -> Option<&[u8]> {
         self.original_rom.as_deref()
     }
 
     /// The candidate libretro-cheat-DB URLs for the loaded game, or `None` if no
     /// ROM is loaded or the ROM isn't in the No-Intro index. The frontend fetches
     /// these (in order) and feeds the body to [`finish_fetched_cheats`].
-    pub fn cheat_fetch_urls(&self) -> Option<Vec<String>> {
+    pub(crate) fn cheat_fetch_urls(&self) -> Option<Vec<String>> {
         let rom = self.original_rom.as_deref()?;
         let name = crate::no_intro::identify(rom)?;
         Some(crate::cheat_db::candidate_urls(&name, crate::cheat_db::is_cgb(rom)))
@@ -1501,7 +1503,7 @@ impl Session {
     }
 
     /// Discard the pending fetched-cheat list (user closed the picker).
-    pub fn clear_fetched_cheats(&mut self) {
+    pub(crate) fn clear_fetched_cheats(&mut self) {
         self.fetched_cheats.clear();
     }
 

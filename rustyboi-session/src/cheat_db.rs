@@ -33,7 +33,7 @@ const GBC_FOLDER: &str = "Nintendo - Game Boy Color";
 
 /// Whether a ROM's cartridge header marks it as Game Boy Color. The CGB flag is
 /// header byte `0x0143`: `0x80` (CGB-enhanced) or `0xC0` (CGB-only) ⇒ Color.
-pub fn is_cgb(rom: &[u8]) -> bool {
+pub(crate) fn is_cgb(rom: &[u8]) -> bool {
     matches!(rom.get(0x0143), Some(0x80) | Some(0xC0))
 }
 
@@ -41,7 +41,7 @@ pub fn is_cgb(rom: &[u8]) -> bool {
 /// by the cartridge's CGB flag first, then the other folder (entries are
 /// occasionally misfiled). `name` is the canonical No-Intro name; it is
 /// percent-encoded here.
-pub fn candidate_urls(name: &str, cgb: bool) -> Vec<String> {
+pub(crate) fn candidate_urls(name: &str, cgb: bool) -> Vec<String> {
     let folders = if cgb {
         [GBC_FOLDER, GB_FOLDER]
     } else {
@@ -116,7 +116,7 @@ fn hex_digit(n: u8) -> char {
 /// GameShark/Game Genie codes. Entries with an empty code list are dropped.
 /// Robust to blank lines, stray whitespace, and out-of-order keys; unknown keys
 /// are ignored.
-pub fn parse_cht(body: &str) -> Vec<FetchedCheat> {
+pub(crate) fn parse_cht(body: &str) -> Vec<FetchedCheat> {
     // Collect desc/code per index, then emit in ascending index order.
     let mut descs: std::collections::BTreeMap<u32, String> = Default::default();
     let mut codes: std::collections::BTreeMap<u32, Vec<String>> = Default::default();
@@ -191,7 +191,7 @@ fn unquote(s: &str) -> String {
 /// descriptions: the named XML/HTML basics, a couple of accented letters seen in
 /// the DB, and numeric (`&#NN;` / `&#xHH;`) references. Unknown entities are left
 /// verbatim so nothing is silently dropped.
-pub fn decode_entities(s: &str) -> String {
+pub(crate) fn decode_entities(s: &str) -> String {
     if !s.contains('&') {
         return s.to_string();
     }
