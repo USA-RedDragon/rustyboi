@@ -440,7 +440,7 @@ pub(super) fn daa(cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
 
 pub(super) fn jp_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let low = mmio.read(cpu.registers.pc) as u16;
-    let high = mmio.read(cpu.registers.pc + 1) as u16;
+    let high = mmio.read(cpu.registers.pc.wrapping_add(1)) as u16;
     let addr = (high << 8) | low;
     cpu.registers.pc = addr;
     16
@@ -448,8 +448,8 @@ pub(super) fn jp_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
 
 pub(super) fn jr_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let offset = mmio.read(cpu.registers.pc) as i8;
-    cpu.registers.pc += 1;
-    cpu.registers.pc = ((cpu.registers.pc as i16) + (offset as i16)) as u16;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(offset as i16 as u16);
     12
 }
 
@@ -465,17 +465,17 @@ pub(super) fn rrca(cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
 
 pub(super) fn ld_memory_imm_16_sp(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let low = mmio.read(cpu.registers.pc) as u16;
-    let high = mmio.read(cpu.registers.pc + 1) as u16;
+    let high = mmio.read(cpu.registers.pc.wrapping_add(1)) as u16;
     let addr = (high << 8) | low;
-    cpu.registers.pc += 2;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(2);
     mmio.write(addr, (cpu.registers.sp & 0x00FF) as u8);
-    mmio.write(addr + 1, ((cpu.registers.sp & 0xFF00) >> 8) as u8);
+    mmio.write(addr.wrapping_add(1), ((cpu.registers.sp & 0xFF00) >> 8) as u8);
     20
 }
 
 pub(super) fn add_sp_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let offset = mmio.read(cpu.registers.pc) as i8;
-    cpu.registers.pc += 1;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
     let sp = cpu.registers.sp;
     let result = (sp as i16).wrapping_add(offset as i16) as u16;
     cpu.registers.sp = result;
@@ -561,7 +561,7 @@ pub(super) fn halt(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
 
 pub(super) fn ld_hl_sp_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let offset = mmio.read(cpu.registers.pc) as i8;
-    cpu.registers.pc += 1;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
     let sp = cpu.registers.sp;
     let result = (sp as i16).wrapping_add(offset as i16) as u16;
 
@@ -610,7 +610,7 @@ pub(super) fn rra(cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
 
 pub(super) fn adc_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let value = mmio.read(cpu.registers.pc);
-    cpu.registers.pc += 1;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
     let carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 };
     let a = cpu.registers.a;
     let result = (a as u16) + (value as u16) + (carry as u16);
@@ -625,7 +625,7 @@ pub(super) fn adc_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
 
 pub(super) fn xor_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let value = mmio.read(cpu.registers.pc);
-    cpu.registers.pc += 1;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
     let result = cpu.registers.a ^ value;
     cpu.registers.a = result;
     cpu.registers.set_flag(registers::Flag::Zero, result == 0);
@@ -699,7 +699,7 @@ pub(super) fn scf(cpu: &mut cpu::SM83, _mmio: &mut crate::cpu::Bus) -> u32 {
 
 pub(super) fn and_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let value = mmio.read(cpu.registers.pc);
-    cpu.registers.pc += 1;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
     let result = cpu.registers.a & value;
     cpu.registers.a = result;
     cpu.registers.set_flag(registers::Flag::Zero, result == 0);
@@ -711,7 +711,7 @@ pub(super) fn and_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
 
 pub(super) fn or_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let value = mmio.read(cpu.registers.pc);
-    cpu.registers.pc += 1;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
     let result = cpu.registers.a | value;
     cpu.registers.a = result;
     cpu.registers.set_flag(registers::Flag::Zero, result == 0);
@@ -769,25 +769,25 @@ pub(super) fn ld_memory_hl_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) 
     let addr = ((cpu.registers.h as u16) << 8) | (cpu.registers.l as u16);
     let value = mmio.read(cpu.registers.pc);
     mmio.write(addr, value);
-    cpu.registers.pc += 1;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
     12
 }
 
 pub(super) fn ld_memory_imm_a_16(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let low = mmio.read(cpu.registers.pc) as u16;
-    let high = mmio.read(cpu.registers.pc + 1) as u16;
+    let high = mmio.read(cpu.registers.pc.wrapping_add(1)) as u16;
     let addr = (high << 8) | low;
     mmio.write(addr, cpu.registers.a);
-    cpu.registers.pc += 2;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(2);
     16
 }
 
 pub(super) fn ld_sp_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let low = mmio.read(cpu.registers.pc) as u16;
-    let high = mmio.read(cpu.registers.pc + 1) as u16;
+    let high = mmio.read(cpu.registers.pc.wrapping_add(1)) as u16;
     let value = (high << 8) | low;
     cpu.registers.sp = value;
-    cpu.registers.pc += 2;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(2);
     12
 }
 
@@ -820,9 +820,9 @@ pub(super) fn ld_memory_c_a(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> 
 
 pub(super) fn call_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let low = mmio.read(cpu.registers.pc) as u16;
-    let high = mmio.read(cpu.registers.pc + 1) as u16;
+    let high = mmio.read(cpu.registers.pc.wrapping_add(1)) as u16;
     let addr = (high << 8) | low;
-    cpu.registers.pc += 2;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(2);
 
     mmio.internal_cycle(); // SP-dec internal M-cycle, before the pushes
     cpu.registers.sp = cpu.registers.sp.wrapping_sub(2);
@@ -835,7 +835,7 @@ pub(super) fn call_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
 
 pub(super) fn cp_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let value = mmio.read(cpu.registers.pc);
-    cpu.registers.pc += 1;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
     let result = cpu.registers.a.wrapping_sub(value);
     cpu.registers.set_flag(registers::Flag::Zero, result == 0);
     cpu.registers.set_flag(registers::Flag::Negative, true);
@@ -846,7 +846,7 @@ pub(super) fn cp_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
 
 pub(super) fn add_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let value = mmio.read(cpu.registers.pc);
-    cpu.registers.pc += 1;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
     let a = cpu.registers.a;
     let result = (a as u16) + (value as u16);
 
@@ -860,7 +860,7 @@ pub(super) fn add_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
 
 pub(super) fn sub_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let value = mmio.read(cpu.registers.pc);
-    cpu.registers.pc += 1;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
     let a = cpu.registers.a;
     let result = (a as i16) - (value as i16);
 
@@ -876,7 +876,7 @@ pub(super) fn ldh_a_memory_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) 
     let offset = mmio.read(cpu.registers.pc) as u16;
     let addr = 0xFF00 | offset;
     cpu.registers.a = mmio.read(addr);
-    cpu.registers.pc += 1;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
     12
 }
 
@@ -884,7 +884,7 @@ pub(super) fn ldh_memory_imm_a(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) 
     let offset = mmio.read(cpu.registers.pc) as u16;
     let addr = 0xFF00 | offset;
     mmio.write(addr, cpu.registers.a);
-    cpu.registers.pc += 1;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
     12
 }
 
@@ -899,7 +899,7 @@ pub(super) fn ld_memory_hl_dec_a(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus
 
 pub(super) fn sbc_a_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let value = mmio.read(cpu.registers.pc);
-    cpu.registers.pc += 1;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
 
     let carry = if cpu.registers.get_flag(registers::Flag::Carry) { 1 } else { 0 };
     let a = cpu.registers.a;
@@ -915,10 +915,10 @@ pub(super) fn sbc_a_imm(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 
 
 pub(super) fn ld_a_memory_imm_16(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
     let low = mmio.read(cpu.registers.pc) as u16;
-    let high = mmio.read(cpu.registers.pc + 1) as u16;
+    let high = mmio.read(cpu.registers.pc.wrapping_add(1)) as u16;
     let addr = (high << 8) | low;
     cpu.registers.a = mmio.read(addr);
-    cpu.registers.pc += 2;
+    cpu.registers.pc = cpu.registers.pc.wrapping_add(2);
     16
 }
 
@@ -933,12 +933,12 @@ macro_rules! make_jp_cond {
         pub(super) fn $name(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             if $cond(cpu) {
                 let low = mmio.read(cpu.registers.pc) as u16;
-                let high = mmio.read(cpu.registers.pc + 1) as u16;
+                let high = mmio.read(cpu.registers.pc.wrapping_add(1)) as u16;
                 let addr = (high << 8) | low;
                 cpu.registers.pc = addr;
                 16
             } else {
-                cpu.registers.pc += 2;
+                cpu.registers.pc = cpu.registers.pc.wrapping_add(2);
                 12
             }
         }
@@ -973,7 +973,7 @@ macro_rules! make_ld_register_imm {
         pub(super) fn $name(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             let val = mmio.read(cpu.registers.pc);
             cpu.registers.$reg = val as u8;
-            cpu.registers.pc += 1;
+            cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
             8
         }
     };
@@ -1171,11 +1171,11 @@ macro_rules! make_ld_16_bit_imm {
     ($name:ident, $reg1:ident, $reg2:ident) => {
         pub(super) fn $name(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             let low = mmio.read(cpu.registers.pc) as u16;
-            let high = mmio.read(cpu.registers.pc + 1) as u16;
+            let high = mmio.read(cpu.registers.pc.wrapping_add(1)) as u16;
             let value = (high << 8) | low;
             cpu.registers.$reg1 = (value >> 8) as u8;
             cpu.registers.$reg2 = (value & 0x00FF) as u8;
-            cpu.registers.pc += 2;
+            cpu.registers.pc = cpu.registers.pc.wrapping_add(2);
             12
         }
     };
@@ -1185,9 +1185,9 @@ macro_rules! make_jr_cond {
     ($name:ident, $cond:expr) => {
         pub(super) fn $name(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             let offset = mmio.read(cpu.registers.pc) as i8;
-            cpu.registers.pc += 1;
+            cpu.registers.pc = cpu.registers.pc.wrapping_add(1);
             if $cond(cpu) {
-                cpu.registers.pc = ((cpu.registers.pc as i16) + (offset as i16)) as u16;
+                cpu.registers.pc = cpu.registers.pc.wrapping_add(offset as i16 as u16);
                 12
             } else {
                 8
@@ -1548,9 +1548,9 @@ macro_rules! make_call_cond {
     ($name:ident, $cond:expr) => {
         pub(super) fn $name(cpu: &mut cpu::SM83, mmio: &mut crate::cpu::Bus) -> u32 {
             let low = mmio.read(cpu.registers.pc) as u16;
-            let high = mmio.read(cpu.registers.pc + 1) as u16;
+            let high = mmio.read(cpu.registers.pc.wrapping_add(1)) as u16;
             let addr = (high << 8) | low;
-            cpu.registers.pc += 2;
+            cpu.registers.pc = cpu.registers.pc.wrapping_add(2);
             if $cond(cpu) {
                 // Faithful conditional-CALL M-cycle layout (mooneye call_cc_timing2):
                 //   M1 nn-low read, M2 nn-high read (above), M3 internal SP-dec delay,
@@ -2030,3 +2030,91 @@ make_sbc_a_register!(sbc_a_d, d);
 make_sbc_a_register!(sbc_a_e, e);
 make_sbc_a_register!(sbc_a_h, h);
 make_sbc_a_register!(sbc_a_l, l);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::mmio::Mmio;
+    use crate::ppu::Ppu;
+
+    /// Drive one handler with `pc` parked at a chosen address. The u16 program
+    /// counter wraps on hardware, so every one of these must complete rather
+    /// than overflow-panic under the debug profile.
+    fn at_pc(pc: u16, f: impl FnOnce(&mut cpu::SM83, &mut crate::cpu::Bus)) -> cpu::SM83 {
+        let mut sm83 = cpu::SM83::new();
+        let mut mmio = Mmio::new();
+        let mut ppu = Ppu::new();
+        sm83.registers.pc = pc;
+        {
+            let mut bus = crate::cpu::Bus::new(&mut mmio, &mut ppu);
+            f(&mut sm83, &mut bus);
+        }
+        sm83
+    }
+
+    #[test]
+    fn jp_imm_reads_its_operand_across_the_pc_wrap() {
+        at_pc(0xFFFF, |cpu, bus| {
+            jp_imm(cpu, bus);
+        });
+    }
+
+    #[test]
+    fn ld_16_bit_imm_reads_its_operand_across_the_pc_wrap() {
+        at_pc(0xFFFF, |cpu, bus| {
+            ld_bc_imm(cpu, bus);
+        });
+    }
+
+    #[test]
+    fn call_imm_reads_its_operand_across_the_pc_wrap() {
+        at_pc(0xFFFF, |cpu, bus| {
+            call_imm(cpu, bus);
+        });
+    }
+
+    /// `pc` lands on 0x0000 after the wrap, so the operand fetch itself is the
+    /// overflow site rather than the post-increment.
+    #[test]
+    fn ld_imm_advances_pc_across_the_wrap() {
+        let cpu = at_pc(0xFFFF, |cpu, bus| {
+            ld_b_imm(cpu, bus);
+        });
+        assert_eq!(cpu.registers.pc, 0x0000);
+    }
+
+    /// `jr` computes its target in i16, which overflows for pc near 0x8000 even
+    /// though the u16 result is perfectly representable.
+    #[test]
+    fn jr_imm_target_does_not_overflow_i16_near_0x8000() {
+        let cpu = at_pc(0x7FFF, |cpu, bus| {
+            jr_imm(cpu, bus);
+        });
+        // Operand byte at 0x7FFF reads as open-bus/ROM; only the arithmetic is
+        // under test, so just require a completed, wrapped u16 target.
+        let _ = cpu.registers.pc;
+    }
+
+    #[test]
+    fn jr_imm_advances_pc_across_the_wrap() {
+        at_pc(0xFFFF, |cpu, bus| {
+            jr_imm(cpu, bus);
+        });
+    }
+
+    #[test]
+    fn ld_memory_imm_16_sp_writes_its_high_byte_across_the_address_wrap() {
+        let mut sm83 = cpu::SM83::new();
+        let mut mmio = Mmio::new();
+        let mut ppu = Ppu::new();
+        // Point the operand at an address pair that straddles the 0xFFFF wrap by
+        // writing the little-endian target 0xFFFF into work RAM and running there.
+        sm83.registers.pc = 0xC000;
+        mmio.write(0xC000, 0xFF);
+        mmio.write(0xC001, 0xFF);
+        {
+            let mut bus = crate::cpu::Bus::new(&mut mmio, &mut ppu);
+            ld_memory_imm_16_sp(&mut sm83, &mut bus);
+        }
+    }
+}

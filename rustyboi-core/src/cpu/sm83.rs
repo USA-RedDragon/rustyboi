@@ -1140,7 +1140,7 @@ impl SM83 {
 
     fn execute_cb(&mut self, mmio: &mut crate::cpu::Bus) -> u32 {
         let opcode = mmio.read(self.registers.pc);
-        self.registers.pc += 1;
+        self.registers.pc = self.registers.pc.wrapping_add(1);
         match opcode {
             0x00 => opcodes::rlc_b(self, mmio),
             0x01 => opcodes::rlc_c(self, mmio),
@@ -1399,5 +1399,26 @@ impl SM83 {
             0xFE => opcodes::set_7_hl(self, mmio),
             0xFF => opcodes::set_7_a(self, mmio),
         }
+    }
+}
+
+#[cfg(test)]
+mod pc_wrap_tests {
+    use super::*;
+
+    /// The CB-prefix operand fetch is the one dispatch-side `pc` advance that did
+    /// not wrap: a `0xCB` prefix fetched at 0xFFFE leaves `pc` at 0xFFFF, so the
+    /// suffix fetch advances straight through the u16 boundary.
+    #[test]
+    fn cb_prefix_suffix_fetch_advances_pc_across_the_wrap() {
+        let mut sm83 = SM83::new();
+        let mut mmio = memory::mmio::Mmio::new();
+        let mut ppu = crate::ppu::Ppu::new();
+        sm83.registers.pc = 0xFFFF;
+        {
+            let mut bus = crate::cpu::Bus::new(&mut mmio, &mut ppu);
+            sm83.execute_cb(&mut bus);
+        }
+        assert_eq!(sm83.registers.pc, 0x0000);
     }
 }
