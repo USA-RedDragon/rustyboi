@@ -1,6 +1,17 @@
 use crate::{cpu::opcodes, cpu::registers, memory, memory::Addressable};
 use serde::{Deserialize, Serialize};
 
+/// The five interrupt sources in hardware service priority, highest first.
+/// Both dispatch queries walk this one table rather than repeating the order as
+/// a branch chain. Pan Docs: Interrupts — https://gbdev.io/pandocs/Interrupts.html
+const INTERRUPT_PRIORITY: [registers::InterruptFlag; 5] = [
+    registers::InterruptFlag::VBlank,
+    registers::InterruptFlag::Lcd,
+    registers::InterruptFlag::Timer,
+    registers::InterruptFlag::Serial,
+    registers::InterruptFlag::Joypad,
+];
+
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct SM83 {
     pub registers: registers::Registers,
@@ -835,46 +846,24 @@ impl SM83 {
         }
     }
 
-    pub(crate) fn get_interrupt_flag(&self, flag: registers::InterruptFlag, mmio: &memory::mmio::Mmio) -> bool {
-        (mmio.read(registers::INTERRUPT_FLAG) & (flag as u8)) != 0
-    }
-
-    pub(crate) fn get_interrupt_enable_flag(&self, flag: registers::InterruptFlag, mmio: &memory::mmio::Mmio) -> bool {
-        (mmio.read(registers::INTERRUPT_ENABLE) & (flag as u8)) != 0
+    /// Highest-priority armed interrupt (IE & IF), skipping any source whose bit
+    /// is set in `exclude`. IE and IF are each read once for the whole walk;
+    /// `Mmio::read` takes `&self`, so no read in the chain can observe a value a
+    /// later one would not.
+    fn pending_interrupt(&self, mmio: &memory::mmio::Mmio, exclude: u8) -> Option<registers::InterruptFlag> {
+        let armed = mmio.read(registers::INTERRUPT_ENABLE) & mmio.read(registers::INTERRUPT_FLAG) & !exclude;
+        INTERRUPT_PRIORITY.into_iter().find(|flag| armed & (*flag as u8) != 0)
     }
 
     fn get_pending_interrupt(&self, mmio: &memory::mmio::Mmio) -> Option<registers::InterruptFlag> {
-        // Check interrupts in priority order (highest to lowest)
-        if self.get_interrupt_enable_flag(registers::InterruptFlag::VBlank, mmio) && self.get_interrupt_flag(registers::InterruptFlag::VBlank, mmio) {
-            Some(registers::InterruptFlag::VBlank)
-        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Lcd, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Lcd, mmio) {
-            Some(registers::InterruptFlag::Lcd)
-        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Timer, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Timer, mmio) {
-            Some(registers::InterruptFlag::Timer)
-        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Serial, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Serial, mmio) {
-            Some(registers::InterruptFlag::Serial)
-        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Joypad, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Joypad, mmio) {
-            Some(registers::InterruptFlag::Joypad)
-        } else {
-            None
-        }
+        self.pending_interrupt(mmio, 0)
     }
 
     /// Like `get_pending_interrupt` but skips the Timer source. Used by the
     /// event-cc dispatch gate when the timer IRQ's fire cc has not yet been
     /// reached, so a lower-priority armed interrupt can still dispatch.
     fn get_pending_interrupt_excluding_timer(&self, mmio: &memory::mmio::Mmio) -> Option<registers::InterruptFlag> {
-        if self.get_interrupt_enable_flag(registers::InterruptFlag::VBlank, mmio) && self.get_interrupt_flag(registers::InterruptFlag::VBlank, mmio) {
-            Some(registers::InterruptFlag::VBlank)
-        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Lcd, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Lcd, mmio) {
-            Some(registers::InterruptFlag::Lcd)
-        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Serial, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Serial, mmio) {
-            Some(registers::InterruptFlag::Serial)
-        } else if self.get_interrupt_enable_flag(registers::InterruptFlag::Joypad, mmio) && self.get_interrupt_flag(registers::InterruptFlag::Joypad, mmio) {
-            Some(registers::InterruptFlag::Joypad)
-        } else {
-            None
-        }
+        self.pending_interrupt(mmio, registers::InterruptFlag::Timer as u8)
     }
 
     fn execute(&mut self, opcode: u8, mmio: &mut crate::cpu::Bus) -> u32 {
@@ -1420,5 +1409,68 @@ mod pc_wrap_tests {
             sm83.execute_cb(&mut bus);
         }
         assert_eq!(sm83.registers.pc, 0x0000);
+    }
+}
+
+#[cfg(test)]
+mod interrupt_priority_tests {
+    use super::*;
+    use registers::InterruptFlag::{Joypad, Lcd, Serial, Timer, VBlank};
+
+    /// The table-driven lookup replaced two hand-written if/else chains. This
+    /// pins it against those chains over every IE/IF combination, for both the
+    /// plain query and the timer-excluding one.
+    #[test]
+    fn table_lookup_matches_the_original_branch_chains() {
+        let mut mmio = memory::mmio::Mmio::new();
+        let cpu = SM83::new();
+        for ie in 0u8..=0x1F {
+            for iflag in 0u8..=0x1F {
+                mmio.write(registers::INTERRUPT_ENABLE, ie);
+                mmio.write(registers::INTERRUPT_FLAG, iflag);
+                let e = mmio.read(registers::INTERRUPT_ENABLE);
+                let f = mmio.read(registers::INTERRUPT_FLAG);
+                let armed = |flag: registers::InterruptFlag| (e & flag as u8) != 0 && (f & flag as u8) != 0;
+
+                // The pre-refactor priority chain, spelled out.
+                let want = if armed(VBlank) {
+                    Some(VBlank)
+                } else if armed(Lcd) {
+                    Some(Lcd)
+                } else if armed(Timer) {
+                    Some(Timer)
+                } else if armed(Serial) {
+                    Some(Serial)
+                } else if armed(Joypad) {
+                    Some(Joypad)
+                } else {
+                    None
+                };
+                // ...and its timer-skipping twin.
+                let want_no_timer = if armed(VBlank) {
+                    Some(VBlank)
+                } else if armed(Lcd) {
+                    Some(Lcd)
+                } else if armed(Serial) {
+                    Some(Serial)
+                } else if armed(Joypad) {
+                    Some(Joypad)
+                } else {
+                    None
+                };
+
+                let as_bit = |o: Option<registers::InterruptFlag>| o.map(|flag| flag as u8);
+                assert_eq!(
+                    as_bit(cpu.get_pending_interrupt(&mmio)),
+                    as_bit(want),
+                    "IE={ie:#04X} IF={iflag:#04X}"
+                );
+                assert_eq!(
+                    as_bit(cpu.get_pending_interrupt_excluding_timer(&mmio)),
+                    as_bit(want_no_timer),
+                    "excluding timer, IE={ie:#04X} IF={iflag:#04X}"
+                );
+            }
+        }
     }
 }
