@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use super::actions::FileData;
 
 /// Trait for file dialog operations that can be either sync or async
-pub trait FileDialogBuilder {
+pub(crate) trait FileDialogBuilder {
     /// Add a file filter to the dialog
     fn add_filter(self, name: &str, extensions: &[&str]) -> Self;
 
@@ -31,7 +31,7 @@ pub trait FileDialogBuilder {
 }
 
 /// Factory function to create a new file dialog builder
-pub fn new() -> impl FileDialogBuilder {
+pub(crate) fn new() -> impl FileDialogBuilder {
     FileDialogBuilderImpl::new()
 }
 
@@ -39,12 +39,12 @@ pub fn new() -> impl FileDialogBuilder {
 mod sync_impl {
     use super::*;
 
-    pub struct FileDialogBuilderImpl {
+    pub(super) struct FileDialogBuilderImpl {
         dialog: rfd::FileDialog,
     }
 
     impl FileDialogBuilderImpl {
-        pub fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
                 dialog: rfd::FileDialog::new(),
             }
@@ -89,12 +89,12 @@ mod sync_impl {
 mod async_impl {
     use super::*;
 
-    pub struct FileDialogBuilderImpl {
+    pub(super) struct FileDialogBuilderImpl {
         dialog: rfd::AsyncFileDialog,
     }
 
     impl FileDialogBuilderImpl {
-        pub fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
                 dialog: rfd::AsyncFileDialog::new(),
             }
@@ -154,12 +154,12 @@ mod android_impl {
     /// Android file dialog: dispatches the request to a platform-installed
     /// bridge (set up from `android_main`) which fires a SAF intent and
     /// returns the bytes asynchronously via the callback.
-    pub struct FileDialogBuilderImpl {
+    pub(super) struct FileDialogBuilderImpl {
         file_name: Option<String>,
     }
 
     impl FileDialogBuilderImpl {
-        pub fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self { file_name: None }
         }
     }
@@ -206,10 +206,10 @@ mod ios_impl {
     /// `UIDocumentPicker` bridge (installed on `ios_bridge` from `run_ios`);
     /// `save_file` is unused (exports route through `SaveBytes` / the Documents
     /// dir, never a save dialog — the same as web).
-    pub struct FileDialogBuilderImpl;
+    pub(super) struct FileDialogBuilderImpl;
 
     impl FileDialogBuilderImpl {
-        pub fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self
         }
     }

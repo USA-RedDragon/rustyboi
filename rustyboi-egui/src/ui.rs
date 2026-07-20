@@ -17,7 +17,7 @@ use crate::file_dialog::{self, FileDialogBuilder};
 use crate::library::LibraryPanel;
 use crate::touch_controls;
 
-pub const PANEL_BACKGROUND: egui::Color32 = egui::Color32::from_rgba_premultiplied(64, 64, 64, 220);
+pub(crate) const PANEL_BACKGROUND: egui::Color32 = egui::Color32::from_rgba_premultiplied(64, 64, 64, 220);
 
 /// The menu label for a command, looked up in the shared [`COMMANDS`] table so a
 /// single edit there re-labels every frontend. Falls back to the debug name if a

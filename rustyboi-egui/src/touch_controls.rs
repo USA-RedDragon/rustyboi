@@ -20,14 +20,14 @@ use rustyboi_session::overlay::{OverlayRect, OverlayShape, TouchLayout};
 /// Cross-frame state for the touch overlay. Tracks each currently pressed touch
 /// (by platform-provided id) so we can recognise more than one finger at once.
 #[derive(Default)]
-pub struct TouchState {
+pub(crate) struct TouchState {
     active: HashMap<u64, Pos2>,
 }
 
 /// Render the touch overlay and return the current button state.
 /// Draw the on-screen controls at `opacity` (0.0 = invisible .. 1.0 = the full
 /// default look) and return the resulting button state.
-pub fn show(ctx: &Context, touch_state: &mut TouchState, opacity: f32) -> ButtonState {
+pub(crate) fn show(ctx: &Context, touch_state: &mut TouchState, opacity: f32) -> ButtonState {
     // Drain incoming touch events and update our active-touch map.
     ctx.input(|i| {
         for event in &i.events {
