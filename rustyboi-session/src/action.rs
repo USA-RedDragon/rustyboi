@@ -506,6 +506,8 @@ pub enum UiAction {
     SetBreakpoint(u16),
     /// Remove a PC breakpoint.
     RemoveBreakpoint(u16),
+    /// Remove every PC breakpoint (Breakpoint Manager "Clear All").
+    ClearBreakpoints,
     /// Save the current machine into numbered savestate slot `n`.
     SaveSlot(u32),
     /// Load numbered savestate slot `n`.
@@ -626,6 +628,7 @@ impl UiAction {
             UiAction::StepFrames(_) => ActionKind::StepFrames,
             UiAction::SetBreakpoint(_) => ActionKind::SetBreakpoint,
             UiAction::RemoveBreakpoint(_) => ActionKind::RemoveBreakpoint,
+            UiAction::ClearBreakpoints => ActionKind::ClearBreakpoints,
             UiAction::SaveSlot(_) => ActionKind::SaveSlot,
             UiAction::LoadSlot(_) => ActionKind::LoadSlot,
             UiAction::Quicksave => ActionKind::Quicksave,
@@ -701,6 +704,7 @@ pub enum ActionKind {
     StepFrames,
     SetBreakpoint,
     RemoveBreakpoint,
+    ClearBreakpoints,
     SaveSlot,
     LoadSlot,
     Quicksave,
@@ -1256,6 +1260,7 @@ mod tests {
             StepFrames(1),
             SetBreakpoint(0x100),
             RemoveBreakpoint(0x100),
+            ClearBreakpoints,
             SaveSlot(1),
             LoadSlot(1),
             Quicksave,
@@ -1322,6 +1327,7 @@ mod tests {
                 | UiAction::StepFrames(_)
                 | UiAction::SetBreakpoint(_)
                 | UiAction::RemoveBreakpoint(_)
+                | UiAction::ClearBreakpoints
                 | UiAction::SaveSlot(_)
                 | UiAction::LoadSlot(_)
                 | UiAction::Quicksave

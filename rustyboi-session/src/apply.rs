@@ -223,6 +223,10 @@ impl Session {
                 self.gb_mut().remove_breakpoint(address);
                 ActionOutcome::status(format!("Breakpoint removed from ${address:04X}"))
             }
+            UiAction::ClearBreakpoints => {
+                self.gb_mut().clear_breakpoints();
+                ActionOutcome::status("All breakpoints cleared")
+            }
 
             UiAction::SaveSlot(slot) => match self.save_slot(slot, timestamp) {
                 Ok(()) => ActionOutcome::status(format!("Saved to slot {slot}")),
@@ -615,6 +619,7 @@ mod tests {
             StepFrames(2),
             SetBreakpoint(0x100),
             RemoveBreakpoint(0x100),
+            ClearBreakpoints,
             Quicksave,
             Quickload,
             ToggleFastForward,
@@ -749,5 +754,40 @@ mod tests {
         s.finish_fetched_cheats(body);
         s.apply(UiAction::ClearFetchedCheats, 0);
         assert!(s.fetched_cheats().is_empty());
+    }
+
+    // Regression: "Clear All" once looped RemoveBreakpoint into a single
+    // Option slot, so only the last breakpoint was removed. One
+    // ClearBreakpoints must remove every breakpoint.
+    #[test]
+    fn clear_breakpoints_removes_every_breakpoint() {
+        let mut s = session();
+        for addr in [0x0040u16, 0x0100, 0x4000, 0xFF80] {
+            s.apply(UiAction::SetBreakpoint(addr), 0);
+        }
+        assert_eq!(s.gb().get_breakpoints().len(), 4);
+
+        let out = s.apply(UiAction::ClearBreakpoints, 0);
+        assert!(s.gb().get_breakpoints().is_empty());
+        assert!(out
+            .requests
+            .iter()
+            .any(|r| matches!(r, PlatformRequest::Status(_))));
+    }
+
+    // The same action posted exactly as the worker boundary receives it
+    // (`UiAction`'s own serde JSON) must deserialize and clear everything.
+    #[test]
+    fn clear_breakpoints_posted_as_wire_json_removes_all() {
+        let mut s = session();
+        for addr in [0x0100u16, 0x0200, 0xC000] {
+            s.apply(UiAction::SetBreakpoint(addr), 0);
+        }
+        assert_eq!(s.gb().get_breakpoints().len(), 3);
+
+        let posted: UiAction = serde_json::from_str("\"ClearBreakpoints\"")
+            .expect("worker wire must accept ClearBreakpoints");
+        s.apply(posted, 0);
+        assert!(s.gb().get_breakpoints().is_empty());
     }
 }
