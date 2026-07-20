@@ -3,6 +3,13 @@ name = "rustyboi-test-runner"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary to make the lib name
+# unique and wouldn't conflict with the bin name. This seems to be only an issue
+# on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "rustyboi_test_runner_lib"
+crate-type = ["rlib"]
+
 [dependencies]
 clap = { workspace = true }
 flate2 = "=1.1.9"

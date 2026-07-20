@@ -3,9 +3,7 @@ use std::time::Instant;
 use rustyboi_core_lib::cartridge::Cartridge;
 use rustyboi_core_lib::gb::{Hardware, GB};
 
-#[path = "shared/masher.rs"]
-mod masher;
-use masher::masher;
+use rustyboi_test_runner_lib::masher::masher;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

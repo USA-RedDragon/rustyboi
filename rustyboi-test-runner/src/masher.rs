@@ -1,7 +1,7 @@
 //! Deterministic per-frame gameplay input, shared by the `sweep` harness and
-//! the `bench` PGO-drive mode (pulled in via `#[path = "shared/masher.rs"]`).
-//! Stateless: input is a pure function of (frame, seed), so it needs no history
-//! and is identical across runs and thread counts.
+//! the `bench` PGO-drive mode. Stateless: input is a pure function of
+//! (frame, seed), so it needs no history and is identical across runs and
+//! thread counts.
 
 use rustyboi_core_lib::input::ButtonState;
 
@@ -12,7 +12,7 @@ use rustyboi_core_lib::input::ButtonState;
 /// screens are static and would skew toward idle menus) except paired START taps
 /// (tap + counter-tap 60 frames later) so a long intro still gets entry chances
 /// while a game already in play pauses for at most ~60 frames per pair.
-pub(crate) fn masher(frame: usize, seed: u64) -> ButtonState {
+pub fn masher(frame: usize, seed: u64) -> ButtonState {
     let mut b = ButtonState::default();
     let tap = |at: usize| frame >= at && frame < at + 6;
     if frame < 600 {
