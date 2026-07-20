@@ -6988,99 +6988,116 @@ impl Ppu {
         }
     }
 
+    /// Body of the LCD off->on transition in `step`. Cold: runs only on the
+    /// dot an LCDC DisplayEnable rising edge is observed, so it is kept out of
+    /// the hot per-dot path to keep `step`'s layout tight.
+    #[cold]
+    #[inline(never)]
+    fn enter_lcd_enabled(&mut self, mmio: &mut mmio::Mmio) {
+            self.sync_lcdc_from_mmio(mmio);
+            self.disabled = false;
+            mmio.write_ly_from_ppu(0);
+            self.reset_lcd_pipeline();
+            self.state = State::OAMSearch;
+            // First line after enable: STAT reports mode 0 (not 2), no
+            // Mode 2 STAT IRQ fires, and M3 starts later than usual.
+            self.first_line_after_enable = true;
+            // First-frame-after-enable blanking: the panel shows the LCD-off
+            // blank for the frame produced immediately after this enable.
+            self.frames_since_enable = 0;
+            // The OAM snapshot at enable holds inactive until `cc + (2*40 << ds) + 1`.
+            // the STAT resolve reports mode 0 (suppresses mode 2/3) for `cc < lu_`.
+            {
+                let ds_u = mmio.is_double_speed_mode() as u32;
+                self.display_enable_inactive_until =
+                    mmio.master_cc().wrapping_add((80u64 << ds_u) + 1);
+            }
+            // Carried-edge LYC=0 IRQ on enable (the LCDC-enable write): when
+            // the LYC IRQ source is enabled, LYC==0 and the pre-enable STAT
+            // did NOT already hold the LYC=LY coincidence flag, enabling the
+            // LCD flags a STAT IRQ immediately. The pre-enable lycflag is
+            // bit 2 of the stored FF41 (untouched by the mode write below).
+            let pre_enable_stat = mmio.read(LCD_STATUS);
+            if pre_enable_stat & (1 << 6) != 0
+                && mmio.read(LYC) == 0
+                && pre_enable_stat & (1 << 2) == 0
+            {
+                mmio.request_interrupt(registers::InterruptFlag::Lcd);
+            }
+            Self::set_lcd_status_mode(mmio, 0);
+            // Initialize the event-scheduled IRQ clock at enable: LY=0,
+            // line_cycle=0. Mirror the hardware LCDC-change enable branch.
+            self.line_cycle = 0;
+            self.internal_ly_val = 0;
+            // Anchor the PPU dot-clock onto the master cc at LCD enable
+            // (hardware seeds the PPU-clock base here). `abs_cc` keeps its accumulated
+            // value across an off/on cycle. The derive at the end of THIS step
+            // must reproduce the old post-increment value (pre + 1<<ds), so the
+            // anchor subtracts that one dot the old accumulator added below.
+            let ds_inc = 1u64 << mmio.is_double_speed_mode() as u32;
+            self.p_now = mmio.master_cc().wrapping_sub(self.abs_cc + ds_inc);
+            self.lytime_no_plus1 = false;
+            self.sc_mode3_pullback_pending = false;
+            self.wy2 = mmio.read(WY);
+            self.wy2_apply_cc = wy2_disabled();
+            self.wy1 = mmio.read(WY);
+            self.wy1_apply_cc = wy2_disabled();
+            self.scy_delayed = mmio.read(SCY);
+            self.scy_apply_cc = wy2_disabled();
+            self.scx_delayed = mmio.read(SCX);
+            self.scx_apply_cc = wy2_disabled();
+            self.stat_reg_committed = mmio.read(LCD_STATUS);
+            // See note in `enable_display`: LYC/STAT timing follows the CGB
+            // LCD controller on CGB hardware regardless of DMG-compat mode.
+            self.lyc_irq.set_cgb(mmio.is_cgb());
+            self.lyc_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
+            self.mstat_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
+            self.lyc_irq.lcd_reset();
+            self.mstat_irq.lcd_reset(self.lyc_irq.lyc_reg_src());
+            self.reschedule_all_stat_events(mmio);
+            self.sched_m0irq = stat_irq::DISABLED_TIME;
+            self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
+            // OAM snapshot at LCD enable: zero the snapshot and
+            // hold it inactive (no sprites) until `cc + (80<<ds) + 1`. abs_cc
+            // is re-derived below; display-enable is anchored to that dot.
+            {
+                let ds = mmio.is_double_speed_mode();
+                let cc = mmio.master_cc().wrapping_sub(self.p_now);
+                self.oam_reader.cgb = mmio.is_cgb_features_enabled();
+                self.oam_reader.large_src =
+                    self.lcdc_has(LCDCFlags::SpriteSize);
+                let dma_writing =
+                    mmio.oam_dma_window_active() && !mmio.mgb_frozen_merge_active();
+                self.oam_reader.src_disabled = dma_writing;
+                self.oam_reader.enable_display(cc, ds);
+                self.prev_dma_writing = dma_writing;
+                self.oam_reader_seeded = true;
+            }
+    }
+
+    /// Body of the LCD on->off transition in `step`. Cold for the same reason
+    /// as `enter_lcd_enabled`.
+    #[cold]
+    #[inline(never)]
+    fn enter_lcd_disabled(&mut self, mmio: &mut mmio::Mmio) {
+        mmio.write_ly_from_ppu(0);
+        self.reset_lcd_pipeline();
+        Self::set_lcd_status_mode(mmio, 0);
+        self.disabled = true;
+        // Re-arm the sprite snapshot for the next display-enable.
+        self.oam_reader_seeded = false;
+        let _ = mmio.take_oam_write_pending();
+    }
+
     pub fn step(&mut self, mmio: &mut mmio::Mmio) {
         if self.disabled {
             if mmio.read(LCD_CONTROL)&(LCDCFlags::DisplayEnable as u8) != 0 {
-                self.sync_lcdc_from_mmio(mmio);
-                self.disabled = false;
-                mmio.write_ly_from_ppu(0);
-                self.reset_lcd_pipeline();
-                self.state = State::OAMSearch;
-                // First line after enable: STAT reports mode 0 (not 2), no
-                // Mode 2 STAT IRQ fires, and M3 starts later than usual.
-                self.first_line_after_enable = true;
-                // First-frame-after-enable blanking: the panel shows the LCD-off
-                // blank for the frame produced immediately after this enable.
-                self.frames_since_enable = 0;
-                // The OAM snapshot at enable holds inactive until `cc + (2*40 << ds) + 1`.
-                // the STAT resolve reports mode 0 (suppresses mode 2/3) for `cc < lu_`.
-                {
-                    let ds_u = mmio.is_double_speed_mode() as u32;
-                    self.display_enable_inactive_until =
-                        mmio.master_cc().wrapping_add((80u64 << ds_u) + 1);
-                }
-                // Carried-edge LYC=0 IRQ on enable (the LCDC-enable write): when
-                // the LYC IRQ source is enabled, LYC==0 and the pre-enable STAT
-                // did NOT already hold the LYC=LY coincidence flag, enabling the
-                // LCD flags a STAT IRQ immediately. The pre-enable lycflag is
-                // bit 2 of the stored FF41 (untouched by the mode write below).
-                let pre_enable_stat = mmio.read(LCD_STATUS);
-                if pre_enable_stat & (1 << 6) != 0
-                    && mmio.read(LYC) == 0
-                    && pre_enable_stat & (1 << 2) == 0
-                {
-                    mmio.request_interrupt(registers::InterruptFlag::Lcd);
-                }
-                Self::set_lcd_status_mode(mmio, 0);
-                // Initialize the event-scheduled IRQ clock at enable: LY=0,
-                // line_cycle=0. Mirror the hardware LCDC-change enable branch.
-                self.line_cycle = 0;
-                self.internal_ly_val = 0;
-                // Anchor the PPU dot-clock onto the master cc at LCD enable
-                // (hardware seeds the PPU-clock base here). `abs_cc` keeps its accumulated
-                // value across an off/on cycle. The derive at the end of THIS step
-                // must reproduce the old post-increment value (pre + 1<<ds), so the
-                // anchor subtracts that one dot the old accumulator added below.
-                let ds_inc = 1u64 << mmio.is_double_speed_mode() as u32;
-                self.p_now = mmio.master_cc().wrapping_sub(self.abs_cc + ds_inc);
-                self.lytime_no_plus1 = false;
-                self.sc_mode3_pullback_pending = false;
-                self.wy2 = mmio.read(WY);
-                self.wy2_apply_cc = wy2_disabled();
-                self.wy1 = mmio.read(WY);
-                self.wy1_apply_cc = wy2_disabled();
-                self.scy_delayed = mmio.read(SCY);
-                self.scy_apply_cc = wy2_disabled();
-                self.scx_delayed = mmio.read(SCX);
-                self.scx_apply_cc = wy2_disabled();
-                self.stat_reg_committed = mmio.read(LCD_STATUS);
-                // See note in `enable_display`: LYC/STAT timing follows the CGB
-                // LCD controller on CGB hardware regardless of DMG-compat mode.
-                self.lyc_irq.set_cgb(mmio.is_cgb());
-                self.lyc_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
-                self.mstat_irq.seed(mmio.read(LCD_STATUS), mmio.read(LYC));
-                self.lyc_irq.lcd_reset();
-                self.mstat_irq.lcd_reset(self.lyc_irq.lyc_reg_src());
-                self.reschedule_all_stat_events(mmio);
-                self.sched_m0irq = stat_irq::DISABLED_TIME;
-                self.sched_oneshot_statirq = stat_irq::DISABLED_TIME;
-                // OAM snapshot at LCD enable: zero the snapshot and
-                // hold it inactive (no sprites) until `cc + (80<<ds) + 1`. abs_cc
-                // is re-derived below; display-enable is anchored to that dot.
-                {
-                    let ds = mmio.is_double_speed_mode();
-                    let cc = mmio.master_cc().wrapping_sub(self.p_now);
-                    self.oam_reader.cgb = mmio.is_cgb_features_enabled();
-                    self.oam_reader.large_src =
-                        self.lcdc_has(LCDCFlags::SpriteSize);
-                    let dma_writing =
-                        mmio.oam_dma_window_active() && !mmio.mgb_frozen_merge_active();
-                    self.oam_reader.src_disabled = dma_writing;
-                    self.oam_reader.enable_display(cc, ds);
-                    self.prev_dma_writing = dma_writing;
-                    self.oam_reader_seeded = true;
-                }
+                self.enter_lcd_enabled(mmio);
             } else {
                 return;
             }
         } else if self.lcdc&(LCDCFlags::DisplayEnable as u8) == 0 {
-            mmio.write_ly_from_ppu(0);
-            self.reset_lcd_pipeline();
-            Self::set_lcd_status_mode(mmio, 0);
-            self.disabled = true;
-            // Re-arm the sprite snapshot for the next display-enable.
-            self.oam_reader_seeded = false;
-            let _ = mmio.take_oam_write_pending();
+            self.enter_lcd_disabled(mmio);
             return;
         }
 
