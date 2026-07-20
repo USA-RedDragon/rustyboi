@@ -555,6 +555,8 @@ impl Session {
     }
 
     /// All slot numbers with a saved state for the current ROM, ascending.
+    /// The reserved quick slot shares the key prefix but is not a numbered
+    /// slot, so it is excluded.
     pub fn list_slots(&self) -> Vec<u32> {
         let mut hex = String::with_capacity(64);
         for b in self.rom_id {
@@ -567,6 +569,7 @@ impl Session {
             .list(&prefix)
             .into_iter()
             .filter_map(|k| k.rsplit("slot").next().and_then(|n| n.parse().ok()))
+            .filter(|&n| n != QUICK_SLOT)
             .collect();
         slots.sort_unstable();
         slots
@@ -2145,6 +2148,15 @@ mod slot_and_import_tests {
         s.save_slot(1, 1).unwrap();
         s.save_slot(9, 1).unwrap();
         assert_eq!(s.list_slots(), vec![1, 5, 9]);
+    }
+
+    #[test]
+    fn list_slots_excludes_the_quick_slot() {
+        let mut s = session();
+        s.run_frame(AbstractInput::none());
+        s.quicksave(1).unwrap();
+        s.save_slot(2, 1).unwrap();
+        assert_eq!(s.list_slots(), vec![2]);
     }
 
     #[test]
