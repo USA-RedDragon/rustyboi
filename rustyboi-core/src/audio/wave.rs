@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 use crate::audio::{NR30, NR31, NR32, NR33, NR34, WAV_START, WAV_END};
+use crate::audio::length::COUNTER_DISABLED;
 use crate::memory::Addressable;
-
-const COUNTER_DISABLED: u32 = 0xFFFF_FFFF;
 
 fn to_period(nr3: u8, nr4: u8) -> u32 {
     0x800 - (((nr4 as u32) << 8 & 0x700) | nr3 as u32)
@@ -21,7 +20,7 @@ pub(super) struct Wave {
     // Length counter (cc-driven absolute expiry).
     enabled: bool,
     length_counter: u16,
-    #[serde(default = "len_disabled")]
+    #[serde(default = "crate::audio::length::counter_disabled")]
     len_counter: u32,
     #[serde(default)]
     len_cc: u32,
@@ -34,7 +33,7 @@ pub(super) struct Wave {
     // Wave fetch timing: `wave_counter` is the cc of the next pending sample
     // fetch, `last_read_time` the cc of the most recent one, and `wave_pos` the
     // current nibble position (0..31 over the 16 wave-RAM bytes).
-    #[serde(default = "disabled")]
+    #[serde(default = "crate::audio::length::counter_disabled")]
     wave_counter: u32,
     #[serde(default)]
     last_read_time: u32,
@@ -72,16 +71,6 @@ pub(super) struct Wave {
     glitch_armed: bool,
 }
 
-fn disabled() -> u32 {
-    COUNTER_DISABLED
-}
-
-const LEN_DISABLED: u32 = COUNTER_DISABLED;
-
-fn len_disabled() -> u32 {
-    LEN_DISABLED
-}
-
 impl Wave {
     pub(super) fn new() -> Self {
         Wave {
@@ -93,7 +82,7 @@ impl Wave {
             wave_ram: [0; 16],
             enabled: false,
             length_counter: 0,
-            len_counter: LEN_DISABLED,
+            len_counter: COUNTER_DISABLED,
             len_cc: 0,
             cc: 0,
             wave_counter: COUNTER_DISABLED,
@@ -115,19 +104,6 @@ impl Wave {
         self.cc = cc;
     }
 
-    pub(super) fn set_len_cc(&mut self, cc: u32) {
-        self.len_cc = cc;
-    }
-
-    pub(super) fn len_expired(&self) -> bool {
-        self.len_cc >= self.len_counter
-    }
-
-    /// Directly seed the hidden length counter (post-boot state seeding).
-    pub fn set_length_counter(&mut self, value: u16) {
-        self.length_counter = value;
-    }
-
     /// Shift the last-read and next-fetch cc anchors back by the cc delta
     /// caused by a DIV write.
     pub(super) fn reset_cc(&mut self, delta: u32) {
@@ -147,7 +123,7 @@ impl Wave {
         if self.wave_counter != COUNTER_DISABLED {
             self.wave_counter = self.wave_counter.wrapping_sub(delta);
         }
-        if self.len_counter != LEN_DISABLED {
+        if self.len_counter != COUNTER_DISABLED {
             self.len_counter = self.len_counter.wrapping_sub(delta);
         }
     }
@@ -160,68 +136,42 @@ impl Wave {
         self.glitch_armed = false;
     }
 
-    const LEN_MASK: u16 = 0xFF;
+    /// The channel's NR34 register byte (the length unit's enable/trigger).
+    fn nr4(&self) -> u8 {
+        self.nr34
+    }
 
-    /// Length-counter expiry for channel 3: disables the channel and its
-    /// DAC/fetch (mirrors the prior FS-driven expiry).
-    pub(super) fn length_event(&mut self) {
-        self.len_counter = LEN_DISABLED;
-        self.length_counter = 0;
+    /// Length teardown for channel 3. Unlike channels 1/2/4 this also drops
+    /// `master` and disarms the fetch counter, because CH3's DAC is NR30 bit 7
+    /// rather than an NRx2 high nibble.
+    fn len_disable(&mut self) {
         self.enabled = false;
         self.master = false;
         self.wave_counter = COUNTER_DISABLED;
     }
 
-
-    /// Length-counter NR31 write handling (channel 3).
-    fn len_nr1_change(&mut self, value: u8) {
-        self.length_counter = (!value as u16 & Self::LEN_MASK) + 1;
-        self.len_counter = if self.nr34 & 0x40 != 0 {
-            ((self.len_cc >> 13) + self.length_counter as u32) << 13
-        } else {
-            LEN_DISABLED
-        };
+    /// CPU-CGB-A/B wave-only quirk: the value-irrelevant extra-clock leg
+    /// (written bit 6 clear) swallows its FIRST parity-armed write after
+    /// power-on; later glitch writes clock normally. CGB-0 clocks on every
+    /// parity-armed write (SameSuite ch3 extra_length_clocking -cgb0 vs -cgbB
+    /// tables). No other channel forks here.
+    fn len_swallow(&mut self, new_nr4: u8, dec: u16) -> u16 {
+        if self.cgb_b && new_nr4 & 0x40 == 0 && dec != 0 && !self.glitch_armed {
+            self.glitch_armed = true;
+            return 0;
+        }
+        dec
     }
 
-    /// Length-counter NR34 write handling (channel 3).
-    fn len_nr4_change(&mut self, old_nr4: u8, new_nr4: u8) {
-        if self.len_counter != LEN_DISABLED {
-            self.length_counter =
-                ((self.len_counter >> 13).wrapping_sub(self.len_cc >> 13)) as u16;
-        }
-        let mut dec: u16 = 0;
-        // CGB-B and older: extra length clock regardless of the written bit-6
-        // value (CGB-B-or-earlier revision; SameSuite
-        // channel_3_extra_length_clocking-cgb0/-cgbB).
-        if new_nr4 & 0x40 != 0 || self.cgb_le_b {
-            dec = ((!self.len_cc >> 12) & 1) as u16;
-            // CPU-CGB-A/B wave-only quirk: the value-irrelevant glitch leg
-            // (written bit 6 clear) swallows its FIRST parity-armed write
-            // after power-on; later glitch writes clock normally. CGB-0
-            // clocks on every parity-armed write (SameSuite ch3
-            // extra_length_clocking -cgb0 vs -cgbB tables).
-            if self.cgb_b && new_nr4 & 0x40 == 0 && dec != 0 && !self.glitch_armed {
-                self.glitch_armed = true;
-                dec = 0;
-            }
-            if old_nr4 & 0x40 == 0 && self.length_counter != 0 {
-                self.length_counter -= dec;
-                if self.length_counter == 0 {
-                    self.enabled = false;
-                    self.master = false;
-                    self.wave_counter = COUNTER_DISABLED;
-                }
-            }
-        }
-        if new_nr4 & 0x80 != 0 && self.length_counter == 0 {
-            self.length_counter = Self::LEN_MASK + 1 - dec;
-        }
-        self.len_counter = if new_nr4 & 0x40 != 0 && self.length_counter != 0 {
-            ((self.len_cc >> 13) + self.length_counter as u32) << 13
-        } else {
-            LEN_DISABLED
-        };
-    }
+    // The six shared length helpers (set_len_cc, len_expired,
+    // set_length_counter, length_event, len_nr1_change, len_nr4_change); see
+    // audio/length.rs.
+    crate::audio::length::impl_length_unit!(
+        mask: 0xFF,
+        counter: u16,
+        on_disable: len_disable,
+        pre_dec: len_swallow,
+    );
 
     fn period(&self) -> u32 {
         // The APU cycle counter advances at `>>(1+ds)` (half-rate at double

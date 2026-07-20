@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::audio::length::COUNTER_DISABLED;
 use crate::audio::{NR10, NR11, NR12, NR13, NR14, NR21, NR22, NR23, NR24};
 use crate::memory::Addressable;
 
@@ -11,8 +12,6 @@ use crate::memory::Addressable;
 //
 // Duty timing uses absolute event counters (`next_pos_update`); envelope and
 // length use absolute `cc`-based counters.
-
-const COUNTER_DISABLED: u32 = 0xFFFF_FFFF;
 
 // Duty table: the digital output for a given
 // (current_sample_index + duty*8). `current_sample_index` INCREMENTS each duty
@@ -70,7 +69,7 @@ pub(super) struct SquareWave {
     // consumes `sample_countdown + 1` cycles (`cycles_left -= countdown+1`),
     // reloading to `(2047-freq)*2 + 1`. `-1` (u32::MAX) means "not yet reloaded"
     // (inits to -1). `sample_length` here == freq.
-    #[serde(default = "disabled")]
+    #[serde(default = "crate::audio::length::counter_disabled")]
     sample_countdown: u32,
     // `delay`: extra 2 MHz cycles added to the first countdown at trigger
     // so the first duty edge lands at the hardware-accurate phase.
@@ -110,7 +109,7 @@ pub(super) struct SquareWave {
     agb: bool,
     // CGB-B-or-earlier APU revision gate (CGB with model <= CGB-B): the NRx4
     // length-glitch extra clock fires regardless of
-    // the written bit-6 value (see `length_nr4_change`).
+    // the written bit-6 value (see `len_nr4_change`).
     #[serde(default)]
     cgb_le_b: bool,
     // CGB-C-and-older PCM read glitch (the pcm_mask, applied for
@@ -126,7 +125,7 @@ pub(super) struct SquareWave {
     // cc of the most recent duty tick and whether the pre-tick digital sample
     // was 0 (the `cycles_left == 0 && samples[i] == 0` mask condition,
     // re-derivable against any access cc).
-    #[serde(default = "disabled")]
+    #[serde(default = "crate::audio::length::counter_disabled")]
     last_tick_cc: u32,
     #[serde(default)]
     last_tick_pre_zero: bool,
@@ -146,7 +145,7 @@ pub(super) struct SquareWave {
     #[serde(default)]
     env_locked: bool,
     // cc of the last NRx4 trigger (for the frame-boundary race window).
-    #[serde(default = "disabled")]
+    #[serde(default = "crate::audio::length::counter_disabled")]
     env_trigger_cc: u32,
     #[serde(default)]
     volume: u8,
@@ -159,8 +158,8 @@ pub(super) struct SquareWave {
     #[serde(default)]
     length_counter: u16,
     // Absolute cc of length expiry:
-    // `((cc>>13)+length_counter)<<13` when enabled, else `LEN_DISABLED`.
-    #[serde(default = "len_disabled")]
+    // `((cc>>13)+length_counter)<<13` when enabled, else `COUNTER_DISABLED`.
+    #[serde(default = "crate::audio::length::counter_disabled")]
     len_counter: u32,
     // Length-subsystem cc (duty/envelope use `cc`; length uses this phased cc).
     #[serde(default)]
@@ -172,7 +171,7 @@ pub(super) struct SquareWave {
 
     // cc-driven sweep (Channel 1). Absolute-cc event
     // counter, negate latch, and the CGB flag the sweep trigger init needs.
-    #[serde(default = "disabled")]
+    #[serde(default = "crate::audio::length::counter_disabled")]
     sweep_counter: u32,
     // The swept frequency APPLICATION instant: the 128 Hz DIV-APU edge,
     // 4 cc before the event grid (the sweep-calculation trigger
@@ -180,14 +179,14 @@ pub(super) struct SquareWave {
     // side effects land later). SameSuite channel_1_sweep_restart round 1
     // pins this: the period-2 duty must NOT tick at event-3 with the old
     // period (oracle duty index 3-not-4 at the retrigger).
-    #[serde(default = "disabled")]
+    #[serde(default = "crate::audio::length::counter_disabled")]
     sweep_apply_counter: u32,
     // Deferred sweep overflow disable:
     // the post-event "second calculation" overflow check takes (NR10 & 7)
     // 1 MHz cycles on hardware; the channel stays audible until it lands
     // (SameSuite channel_1_sweep rows around the 128 Hz event pin the
     // 2*(NR10&7) cc gap). Absolute-cc event; COUNTER_DISABLED when idle.
-    #[serde(default = "disabled")]
+    #[serde(default = "crate::audio::length::counter_disabled")]
     sweep_kill_counter: u32,
     #[serde(default)]
     sweep_neg: bool,
@@ -198,16 +197,6 @@ pub(super) struct SquareWave {
 
 fn default_lf_div() -> u32 {
     1
-}
-
-fn disabled() -> u32 {
-    COUNTER_DISABLED
-}
-
-const LEN_DISABLED: u32 = COUNTER_DISABLED;
-
-fn len_disabled() -> u32 {
-    LEN_DISABLED
 }
 
 impl SquareWave {
@@ -251,7 +240,7 @@ impl SquareWave {
             volume: 0,
             master: false,
             length_counter: 0,
-            len_counter: LEN_DISABLED,
+            len_counter: COUNTER_DISABLED,
             len_cc: 0,
             sweep_shadow_frequency: 0,
             sweep_counter: COUNTER_DISABLED,
@@ -302,14 +291,6 @@ impl SquareWave {
         self.step_back_parity = on;
     }
 
-    pub(super) fn set_len_cc(&mut self, cc: u32) {
-        self.len_cc = cc;
-    }
-
-    pub(super) fn len_expired(&self) -> bool {
-        self.len_cc >= self.len_counter
-    }
-
     /// Post-boot channel-1 mid-tone state. The boot
     /// ROM leaves ch1 playing the startup tone: master/enabled with duty pos/phase
     /// mid-cycle. `pos_offset` is the duty next-pos-update offset (in 2 MHz
@@ -338,10 +319,6 @@ impl SquareWave {
         self.delay = 0;
         self.sample_surpressed = false;
         self.length_counter = 0x40;
-    }
-
-    pub(super) fn set_length_counter(&mut self, value: u16) {
-        self.length_counter = value;
     }
 
     /// Shift the duty event counter backward by `delta` (the DIV-reset fold
@@ -377,7 +354,7 @@ impl SquareWave {
                 *counter = counter.wrapping_sub(delta);
             }
         }
-        if self.len_counter != LEN_DISABLED {
+        if self.len_counter != COUNTER_DISABLED {
             self.len_counter = self.len_counter.wrapping_sub(delta);
         }
     }
@@ -550,38 +527,41 @@ impl SquareWave {
 
     // --- Length counter (cc-driven) ---
 
-    fn length_mask(&self) -> u16 {
-        0x3F
-    }
-
     fn nr4(&self) -> u8 {
         if self.channel1 { self.nr14 } else { self.nr24 }
     }
 
-    /// NRx1 write handling. The NRx1 write reloads the length
-    /// load and (re)schedules the absolute expiry cc from the current NRx4
-    /// length-enable bit.
+    /// Length teardown for channels 1/2: the channel simply stops. (The
+    /// `master`/DAC state is owned by NRx2 here, unlike channel 3.)
+    fn len_disable(&mut self) {
+        self.enabled = false;
+    }
+
+    /// No extra-clock fork on the square channels; see `Wave::len_swallow`.
+    fn len_swallow(&mut self, _new_nr4: u8, dec: u16) -> u16 {
+        dec
+    }
+
+    // The six shared length helpers (set_len_cc, len_expired,
+    // set_length_counter, length_event, len_nr1_change, len_nr4_change); see
+    // audio/length.rs.
+    crate::audio::length::impl_length_unit!(
+        mask: 0x3F,
+        counter: u16,
+        on_disable: len_disable,
+        pre_dec: len_swallow,
+    );
+
+    /// NRx1 write: store the register, run the shared length reload, then let
+    /// the duty unit latch the new duty.
     fn write_nrx1(&mut self, value: u8) {
         if self.channel1 {
             self.nr11 = value;
         } else {
             self.nr21 = value;
         }
-        let mask = self.length_mask();
-        self.length_counter = (!value as u16 & mask) + 1;
-        self.len_counter = if self.nr4() & 0x40 != 0 {
-            ((self.len_cc >> 13) + self.length_counter as u32) << 13
-        } else {
-            LEN_DISABLED
-        };
+        self.len_nr1_change(value);
         self.duty_nr1_change();
-    }
-
-    /// Length-counter expiry: disables the channel.
-    pub(super) fn length_event(&mut self) {
-        self.len_counter = LEN_DISABLED;
-        self.length_counter = 0;
-        self.enabled = false;
     }
 
     fn duty_nr1_change(&mut self) {
@@ -810,43 +790,6 @@ impl SquareWave {
 
     // --- NRx4 / trigger ---
 
-    /// NR4 write length-unit handling, folded into the
-    /// NRx4 write. Re-derives the length counter from the absolute expiry cc,
-    /// then applies the length-enable `dec = ~cc>>12 & 1` extra-clock quirk and the
-    /// trigger reload, finally rescheduling the absolute expiry.
-    fn length_nr4_change(&mut self, old_nr4: u8, new_nr4: u8) {
-        let mask = self.length_mask();
-        if self.len_counter != LEN_DISABLED {
-            self.length_counter =
-                ((self.len_counter >> 13).wrapping_sub(self.len_cc >> 13)) as u16;
-        }
-
-        let mut dec: u16 = 0;
-        // CGB-B and older: the length-enable extra-clock glitch fires
-        // regardless of the written bit-6 value (`(value & 0x40) ||
-        // (cgb && model <= CGB_B)` — "current value is
-        // irrelevant"; SameSuite channel_*_extra_length_clocking-cgb0B).
-        if new_nr4 & 0x40 != 0 || self.cgb_le_b {
-            dec = ((!self.len_cc >> 12) & 1) as u16;
-            if old_nr4 & 0x40 == 0 && self.length_counter != 0 {
-                self.length_counter -= dec;
-                if self.length_counter == 0 {
-                    self.enabled = false;
-                }
-            }
-        }
-
-        if new_nr4 & 0x80 != 0 && self.length_counter == 0 {
-            self.length_counter = mask + 1 - dec;
-        }
-
-        self.len_counter = if new_nr4 & 0x40 != 0 && self.length_counter != 0 {
-            ((self.len_cc >> 13) + self.length_counter as u32) << 13
-        } else {
-            LEN_DISABLED
-        };
-    }
-
     fn write_nrx4(&mut self, value: u8) {
         let trigger = value & 0x80 != 0;
         let old_nr4 = self.nr4();
@@ -883,7 +826,7 @@ impl SquareWave {
             // nops-28 pins the stale-high read).
         }
 
-        self.length_nr4_change(old_nr4, value);
+        self.len_nr4_change(old_nr4, value);
 
         if self.channel1 {
             self.nr14 = value;
@@ -906,7 +849,7 @@ impl SquareWave {
     fn trigger(&mut self) {
         self.enabled = true;
 
-        // Length-counter reload + reschedule is handled in `length_nr4_change`.
+        // Length-counter reload + reschedule is handled in `len_nr4_change`.
 
         // `is_active` before the trigger = the channel was already
         // playing (DAC on + previously triggered). `master` carries that here.
