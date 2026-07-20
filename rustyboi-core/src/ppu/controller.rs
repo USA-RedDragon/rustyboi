@@ -3041,6 +3041,31 @@ impl Ppu {
     // Derive the hardware window fetch-grid origin F at a DMG x==0 window
     // start (the immediate TileNumber catch-up runs on the current dot, `chop`
     // dots after the conceptual grid origin). See wg_apply.
+    // The window draw-start state transition shared by all three activation
+    // sites (early WX 1..6, the DMG deferred WX commit, and the main trigger):
+    // hardware increments the window Y position here — once per line the window
+    // actually begins drawing, not per-line in M2 — and restarts the fetcher in
+    // window mode at `window_x`.
+    //
+    // Deliberately NOT part of this helper, because the three sites genuinely
+    // differ past this point and the differences are load-bearing:
+    //   - `m3_sprite_prev_tile` reset and the `win_start_dot` latch happen only
+    //     at the early-WX site;
+    //   - `win_first_tile_chop` is `7 - wx` / `0` / a `!is_cgb`-gated `chop`;
+    //   - `wg_set_anchor` and the fetcher catch-up are unconditional at the
+    //     first two sites but nested under `!is_cgb` at the main trigger, and
+    //     the main trigger runs a multi-phase catch-up loop rather than a
+    //     single substep.
+    fn begin_window_draw(&mut self, window_x: u8) {
+        self.win_y_pos = self.win_y_pos.wrapping_add(1);
+        self.win_draw_started = true;
+        self.fetcher.start_window(window_x);
+        self.we_glitch_tile_starts = [None; 2];
+        self.win_kill_tap_late = true;
+        self.window_started_this_line = true;
+        self.win_being_fetched = true;
+    }
+
     fn wg_set_anchor(&mut self, chop: u64) {
         self.wg_anchor_cc = None;
         self.wg_dpre = 0;
@@ -8090,13 +8115,7 @@ impl Ppu {
                         // LOSE (window starts with the old WX 4/5).
                         let pos = self.ticks as i64 - base;
                         if pos == wx as i64 - 6 {
-                            self.win_y_pos = self.win_y_pos.wrapping_add(1);
-                            self.win_draw_started = true;
-                            self.fetcher.start_window(0);
-                            self.we_glitch_tile_starts = [None; 2];
-                            self.win_kill_tap_late = true;
-                            self.window_started_this_line = true;
-                            self.win_being_fetched = true;
+                            self.begin_window_draw(0);
                             self.m3_sprite_prev_tile = SPRITE_TILE_NONE;
                             if self.win_start_dot.is_none() {
                                 self.win_start_dot = Some(self.ticks);
@@ -8550,13 +8569,7 @@ impl Ppu {
                         && self.x + 7 == arm_wx
                         && !self.fetcher.is_fetching_window()
                     {
-                        self.win_y_pos = self.win_y_pos.wrapping_add(1);
-                        self.win_draw_started = true;
-                        self.fetcher.start_window(self.x);
-                        self.we_glitch_tile_starts = [None; 2];
-                        self.win_kill_tap_late = true;
-                        self.window_started_this_line = true;
-                        self.win_being_fetched = true;
+                        self.begin_window_draw(self.x);
                         self.win_first_tile_chop = 0;
                         // The activation dot was one dot ago: its TileNumber is
                         // due now (catch-up); low/high/push at +1/+3/+5 via the
@@ -8667,17 +8680,9 @@ impl Ppu {
                             self.dmg_wx_trigger_pending = Some((self.ticks, wx));
                             break 'label;
                         }
-                        // Window draw-start: hardware increments window Y position here
-                        // (the mode-3-start window checkpoint / plot win_draw_start), once per line
-                        // the window actually begins drawing, not per-line in M2.
-                        self.win_y_pos = self.win_y_pos.wrapping_add(1);
-                        self.win_draw_started = true;
-                        // Start window rendering
-                        self.fetcher.start_window(self.x);
-                        self.we_glitch_tile_starts = [None; 2];
-                        self.win_kill_tap_late = true;
-                        self.window_started_this_line = true;
-                        self.win_being_fetched = true;
+                        // Window draw-start (the mode-3-start window checkpoint /
+                        // plot win_draw_start).
+                        self.begin_window_draw(self.x);
                         // DMG: hardware restarts the fetcher ON the trigger dot
                         // (TileNumber now; low/high/push at t+2/t+4/t+6), so the
                         // first window pixel pops exactly 6 dots after the
