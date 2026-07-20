@@ -9,6 +9,9 @@ use crate::sgb_system_palette;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+// Every `fs` consumer is either `#[cfg(not(target_arch = "wasm32"))]`
+// (`from_state_file`) or test-only, so on wasm32 the import would be unused.
+#[cfg(any(not(target_arch = "wasm32"), test))]
 use std::fs;
 use std::io;
 
