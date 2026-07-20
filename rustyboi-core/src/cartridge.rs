@@ -288,7 +288,7 @@ const CAM_RAM_IMAGE_OFFSET: usize = 0x0100;
 const CAM_SENSOR_EXTRA_LINES: usize = 8;
 const CAM_SENSOR_H: usize = CAM_H + CAM_SENSOR_EXTRA_LINES; // 120
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum CartridgeType {
     NoMBC { battery: bool },
     MBC1 { ram: bool, battery: bool },
@@ -588,6 +588,17 @@ pub struct Cartridge {
     // reads). `serde(skip)` deserializes to None = recompute.
     #[serde(skip, default)]
     rom_bank_cache: Cell<Option<(usize, usize)>>,
+    // Cached decode of (`unl_mapper`, `cartridge_type`) -> CartridgeType, which
+    // every external-RAM access derived two or three times over (the mapper
+    // match, then again inside `get_ram_bank`, then `is_mbc30` on MBC3). Both
+    // inputs are fixed at construction: nothing assigns `cartridge_type`, and
+    // the only runtime write to `unl_mapper` (`vf001_write`) mutates the
+    // Vf001 PAYLOAD, never the variant — and the decode ignores that payload.
+    // So unlike `rom_bank_cache` this never needs invalidating. `serde(skip)`
+    // deserializes to None = recompute, so it is correct even if consulted
+    // before `attach_rom`.
+    #[serde(skip, default)]
+    cartridge_type_cache: Cell<Option<CartridgeType>>,
     // External RAM data - all banks
     ram_data: Vec<u8>,
     // Cartridge type
@@ -900,6 +911,7 @@ impl Clone for Cartridge {
         Cartridge {
             rom_data: self.rom_data.clone(),
             rom_bank_cache: self.rom_bank_cache.clone(),
+            cartridge_type_cache: self.cartridge_type_cache.clone(),
             ram_data: self.ram_data.clone(),
             cartridge_type: self.cartridge_type,
             rom_banks: self.rom_banks,
@@ -1494,6 +1506,7 @@ impl Cartridge {
         Cartridge {
             rom_data,
             rom_bank_cache: Cell::new(None),
+            cartridge_type_cache: Cell::new(None),
             ram_data,
             cartridge_type,
             rom_banks,
@@ -1684,7 +1697,21 @@ impl Cartridge {
         !self.rom_data.is_empty()
     }
 
+    /// Decoded mapper for this board. Hot: the external-RAM read/write arms
+    /// hit it two to three times per access, so the pure
+    /// (`unl_mapper`, `cartridge_type`) -> `CartridgeType` decode below is
+    /// memoized (see `cartridge_type_cache` for why it never goes stale).
+    #[inline]
     fn get_cartridge_type(&self) -> CartridgeType {
+        if let Some(ty) = self.cartridge_type_cache.get() {
+            return ty;
+        }
+        let ty = self.decode_cartridge_type();
+        self.cartridge_type_cache.set(Some(ty));
+        ty
+    }
+
+    fn decode_cartridge_type(&self) -> CartridgeType {
         // Content-detected unlicensed boards override the (spoofed) header
         // type byte.
         match self.unl_mapper {
