@@ -1311,13 +1311,40 @@ _GBCHW_HEADER = [
 
 # ---------------------------------------------------------------------------
 
+# Model tokens the first-party ROM filenames may carry, mapped to the runner's
+# `<mode>` field plus any trailing tokens the case needs. dmg/cgb/agb run on the
+# mode's own default hardware. The SGB models all run in the runner's `dmg` mode
+# with a `rev=` pin, exactly as the external sgb/samesuite_sgb manifests do,
+# because Hardware::SGB is a DMG-class machine behind an ICD2 rather than a
+# separate runner mode. `sgblocked` is SGB hardware with a cart header that does
+# NOT unlock SGB functions (see test-roms/Makefile).
+#
+# No `frames=` pin is needed for the SGB ROMs even though they spend ~50 frames
+# on the documented SGB warm-up and inter-packet waits: `mooneye` grading runs to
+# its own 250M-cycle done-marker budget (~3600 frames), not the suite's frame
+# count.
+RUSTYBOI_MODELS: dict[str, tuple[str, list[str]]] = {
+    "dmg": ("dmg", []),
+    "cgb": ("cgb", []),
+    "agb": ("agb", []),
+    "sgb": ("dmg", ["rev=sgb"]),
+    "sgb2": ("dmg", ["rev=sgb2"]),
+    "sgblocked": ("dmg", ["rev=sgb"]),
+    # SGB-flagged cart on plain DMG hardware: no rev= pin, so the case runs on
+    # the mode's default Hardware::DMG. The model token only changes the header
+    # the Makefile fixes in.
+    "sgbcart": ("dmg", []),
+}
+
+
 def gen_rustyboi(roms: Path, out: Path) -> None:
     """First-party rustyboi test ROMs under test-roms/. Built ROMs are
     build/<category>/<name>.<model>.<grading>.{gb,gbc}; the filename carries its
     own runner metadata, so the manifest never drifts. Each ROM yields
-    `<category>-<name>-<model>|<model>|<grading>|<rom>[|<ref>]`; `png` ROMs
-    reference test-roms/refs/<category>/<name>.<model>.png (a derived oracle).
-    Independent of the external `roms` set."""
+    `<category>-<name>-<model>|<mode>|<grading>|<rom>[|<ref>][|<tokens>...]`;
+    `png` ROMs reference test-roms/refs/<category>/<name>.<model>.png (a derived
+    oracle). The `<model>` token maps to the runner mode plus any `rev=`/`frames=`
+    pins via RUSTYBOI_MODELS. Independent of the external `roms` set."""
     build = HERE / "test-roms" / "build"
     lines: list[str] = []
     if build.is_dir():
@@ -1333,10 +1360,18 @@ def gen_rustyboi(roms: Path, out: Path) -> None:
                         "expected <name>.<model>.<grading>.{gb,gbc}"
                     )
                 name, model, grading = parts
-                line = f"{cat}-{name}-{model}|{model}|{grading}|{rel_to_cwd(rom)}"
+                if model not in RUSTYBOI_MODELS:
+                    raise SystemExit(
+                        f"bad model '{model}' in test-roms/build/{cat}/{rom.name}: "
+                        f"expected one of {'|'.join(RUSTYBOI_MODELS)}"
+                    )
+                mode, tokens = RUSTYBOI_MODELS[model]
+                line = f"{cat}-{name}-{model}|{mode}|{grading}|{rel_to_cwd(rom)}"
                 if grading == "png":
                     ref = HERE / "test-roms" / "refs" / cat / f"{name}.{model}.png"
                     line += f"|{rel_to_cwd(ref)}"
+                for token in tokens:
+                    line += f"|{token}"
                 lines.append(line)
     write_manifest(out, "rustyboi", [
         "First-party rustyboi test ROMs (RGBDS; mooneye/png grading). GENERATED",

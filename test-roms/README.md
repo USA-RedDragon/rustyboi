@@ -20,8 +20,33 @@ build/     (gitignored) built ROMs
 
 The filename carries the ROM's runner metadata, so the manifest can't drift:
 
-- `<model>` ∈ `dmg` | `cgb` | `agb` — the hardware the runner emulates. Built as
-  `.gb` (dmg) or `.gbc` (cgb/agb, `rgbfix -C`).
+- `<model>` — the hardware the runner emulates *and* the cartridge header the
+  ROM is fixed with. The two travel together because some behaviors (the SGB
+  unlock gate) are only observable as a combination of the two.
+
+  | token | header | runner hardware |
+  |---|---|---|
+  | `dmg` | plain, `.gb` | DMG |
+  | `cgb` / `agb` | `rgbfix -C`, `.gbc` | CGB / AGB |
+  | `sgb` / `sgb2` | `rgbfix -s -l 0x33`, `.gb` | SGB / SGB2 (`rev=` pin) |
+  | `sgbcart` | `rgbfix -s -l 0x33`, `.gb` | DMG |
+  | `sgblocked` | plain, `.gb` | SGB (`rev=` pin) |
+
+  SGB ROMs need **both** header entries Pan Docs "Unlocking SGB Functions"
+  requires — SGB flag `$0146 = $03` and old licensee `$014B = $33` — or the SGB
+  ignores every command packet. `rgbfix -s` sets the flag and warns that it
+  "will be ignored by the SGB unless the old licensee code (-l) is 0x33".
+
+  `sgbcart` and `sgblocked` exist to test the two halves of that gate: an
+  SGB-flagged cart in a plain Game Boy (must not multiplex) and an unflagged
+  cart in an SGB (must be ignored). Using plain `dmg` for the first is a trap —
+  an unflagged build is gated out of SGB behavior anyway, so it passes even on
+  an emulator that never gates the SGB joypad path on SGB hardware.
+
+  There is no separate runner *mode* for SGB: the SGB models all run in `dmg`
+  mode with a `rev=sgb`/`rev=sgb2` token, exactly as the external `sgb` and
+  `samesuite_sgb` manifests do, because Hardware::SGB is a DMG-class machine
+  behind an ICD2. `tools/gen_manifests.py` (`RUSTYBOI_MODELS`) owns that mapping.
 - `<grading>` — the runner oracle:
   - `mooneye`: the ROM self-verifies, loads the Fibonacci signature
     (B=3,C=5,D=8,E=13,H=21,L=34) and runs `LD B,B`; the runner checks the
