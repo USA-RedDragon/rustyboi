@@ -1332,66 +1332,9 @@ impl Cartridge {
         self.unl_mapper
     }
 
-    /// Extract ROM data from a zip file, looking for common ROM file extensions
-    #[cfg(not(target_arch = "wasm32"))]
-    fn extract_rom_from_zip(path: &str) -> Result<Vec<u8>, io::Error> {
-        let file = File::open(path)?;
-        let mut archive = ZipArchive::new(file)?;
-
-        // Common Game Boy ROM extensions
-        let rom_extensions = [".gb", ".gbc", ".sgb"];
-
-        // First, try to find a file with a ROM extension
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
-            let name = file.name().to_lowercase();
-
-            if rom_extensions.iter().any(|ext| name.ends_with(ext)) {
-                let mut data = Vec::with_capacity(file.size() as usize);
-                file.read_to_end(&mut data)?;
-                println!("Found ROM in zip: {}", file.name());
-                return Ok(data);
-            }
-        }
-
-        // If no ROM extension found, look for the largest file (common case)
-        let mut largest_file_index = 0;
-        let mut largest_size = 0;
-
-        for i in 0..archive.len() {
-            let file = archive.by_index(i)?;
-            if !file.is_dir() && file.size() > largest_size {
-                largest_size = file.size();
-                largest_file_index = i;
-            }
-        }
-
-        if largest_size > 0 {
-            let mut file = archive.by_index(largest_file_index)?;
-            let mut data = Vec::with_capacity(file.size() as usize);
-            file.read_to_end(&mut data)?;
-            println!("Using largest file in zip as ROM: {} ({} bytes)", file.name(), data.len());
-            return Ok(data);
-        }
-
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "No suitable ROM file found in zip archive"
-        ))
-    }
-
     pub fn load(path: &str) -> Result<Self, io::Error> {
         let data = if path.to_lowercase().ends_with(".zip") {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                Self::extract_rom_from_zip(path)?
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                // For WASM, read the zip file and extract from bytes
-                let zip_data = fs::read(path)?;
-                Self::extract_rom_from_zip_bytes(&zip_data)?
-            }
+            Self::extract_rom_from_zip_bytes(&fs::read(path)?)?
         } else {
             fs::read(path)?
         };
@@ -1593,7 +1536,10 @@ impl Cartridge {
         }
     }
 
-    /// Extract ROM data from zip bytes.
+    /// Extract the ROM image from an in-memory zip container: prefer a member
+    /// with a Game Boy extension, else the largest non-directory member.
+    /// `load` reads the file in and comes through here too, so the path and
+    /// byte entry points cannot drift apart.
     fn extract_rom_from_zip_bytes(data: &[u8]) -> Result<Vec<u8>, io::Error> {
         use std::io::Cursor;
 
@@ -6073,5 +6019,60 @@ mod tests {
         assert!(Cartridge::reconstruct_trimmed_mbc1m(&single).is_none());
         let cart = Cartridge::from_bytes(&single).unwrap();
         assert!(!cart.mbc1_multicart);
+    }
+
+    /// Build an in-memory zip from (name, bytes) members.
+    fn make_zip(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = SimpleFileOptions::default();
+        for (name, bytes) in members {
+            w.start_file(*name, opts).unwrap();
+            std::io::Write::write_all(&mut w, bytes).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    /// The extractor prefers a Game Boy extension over a larger sibling, and
+    /// falls back to the largest member when no member carries one.
+    #[test]
+    fn zip_extraction_prefers_rom_extension_then_largest() {
+        let rom = make_rom(MBC1, 0x00);
+        let zipped = make_zip(&[
+            ("readme.txt", vec![0xAA; rom.len() * 2]),
+            ("game.gb", rom.clone()),
+        ]);
+        assert_eq!(Cartridge::extract_rom_from_zip_bytes(&zipped).unwrap(), rom);
+
+        // No ROM extension anywhere: the largest non-directory member wins.
+        let big = make_rom(MBC1, 0x00);
+        let zipped = make_zip(&[("small.bin", vec![0x11; 16]), ("big.bin", big.clone())]);
+        assert_eq!(Cartridge::extract_rom_from_zip_bytes(&zipped).unwrap(), big);
+
+        // Nothing usable at all.
+        assert!(Cartridge::extract_rom_from_zip_bytes(&make_zip(&[])).is_err());
+    }
+
+    /// `load` (path entry point) and `extract_rom_bytes` (bytes entry point)
+    /// must agree, since both now route through one extractor.
+    #[test]
+    fn zip_path_and_bytes_entry_points_agree() {
+        let rom = make_rom(MBC1, 0x00);
+        let zipped = make_zip(&[("decoy.txt", vec![0xAA; 4]), ("game.gb", rom.clone())]);
+
+        let dir = std::env::temp_dir().join(format!(
+            "rustyboi-zip-test-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("game.zip");
+        fs::write(&zip_path, &zipped).unwrap();
+
+        let from_path = Cartridge::load(zip_path.to_str().unwrap()).unwrap();
+        assert_eq!(Cartridge::extract_rom_bytes(&zipped).unwrap(), rom);
+        assert_eq!(from_path.rom_data[..rom.len()], rom[..]);
+
+        fs::remove_dir_all(&dir).ok();
     }
 }
