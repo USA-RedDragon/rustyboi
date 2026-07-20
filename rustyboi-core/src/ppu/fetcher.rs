@@ -78,7 +78,7 @@ const TILE_MAP_9800_BASE: u16 = 0x9800; // Tile map area 0
 const TILE_MAP_9C00_BASE: u16 = 0x9C00; // Tile map area 1
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct Fetcher {
+pub(super) struct Fetcher {
     state: State,
     pub pixel_fifo: fifo::Fifo,
 
@@ -142,7 +142,7 @@ pub struct Fetcher {
 }
 
 impl Fetcher {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Fetcher {
             state: State::TileNumber,
             pixel_fifo: fifo::Fifo::new(),
@@ -170,11 +170,11 @@ impl Fetcher {
     /// (tile-number or tile-data read). Used by the OAM-DMA-source bus-conflict
     /// model. Stable between fetch substeps, so it reflects the byte latched on the
     /// VRAM data bus at the current dot.
-    pub fn last_vram_bus(&self) -> (u16, u8) {
+    pub(super) fn last_vram_bus(&self) -> (u16, u8) {
         (self.last_vram_addr, self.last_vram_bank)
     }
 
-    pub fn reset(&mut self) {
+    pub(super) fn reset(&mut self) {
         self.state = State::TileNumber;
         self.pixel_fifo.reset();
         self.tile_num = 0;
@@ -192,7 +192,7 @@ impl Fetcher {
     }
 
     // Start fetching window tiles when WX condition is met
-    pub fn start_window(&mut self, window_x: u8) {
+    pub(super) fn start_window(&mut self, window_x: u8) {
         self.start_window_at_tile(window_x, 0);
     }
 
@@ -201,7 +201,7 @@ impl Fetcher {
     // "already started" path (DMG wx==166 wraparound) starts at column
     // wscx/8 == (tile_len + scx%8)/8 == 1, since the hardware seeds
     // wscx = tile_len + scx%8 there.
-    pub fn start_window_at_tile(&mut self, window_x: u8, start_tile: u8) {
+    pub(super) fn start_window_at_tile(&mut self, window_x: u8, start_tile: u8) {
         self.fetching_window = true;
         self.window_x_start = window_x;
         self.tile_index = start_tile;
@@ -217,7 +217,7 @@ impl Fetcher {
     // boundary (`xpos == endx`); a WE-off that lands mid-tile (`xpos != endx`)
     // lets the already-committed in-progress tile finish before reverting. The
     // controller passes extra=1 in that mid-tile case, 0 at a tile boundary.
-    pub fn stop_window_with_extra(&mut self, extra: u8) {
+    pub(super) fn stop_window_with_extra(&mut self, extra: u8) {
         if extra == 0 {
             self.fetching_window = false;
             self.stop_window_after_tiles = 0;
@@ -269,7 +269,7 @@ impl Fetcher {
         }
     }
 
-    pub fn step(
+    pub(super) fn step(
         &mut self,
         mmio: &mut mmio::Mmio,
         lcdc_state: FetcherLcdcState,
@@ -540,15 +540,15 @@ impl Fetcher {
         }
     }
 
-    pub fn get_pixel_buffer(&self) -> [u8; 8] {
+    pub(super) fn get_pixel_buffer(&self) -> [u8; 8] {
         self.pixel_buffer
     }
 
-    pub fn get_fifo_size(&self) -> usize {
+    pub(super) fn get_fifo_size(&self) -> usize {
         self.pixel_fifo.size()
     }
 
-    pub fn get_tile_index(&self) -> u8 {
+    pub(super) fn get_tile_index(&self) -> u8 {
         self.tile_index
     }
 
@@ -556,62 +556,62 @@ impl Fetcher {
     // controller re-resolves the tile's completed reads at their reconstructed
     // hardware dots when a mid-fetch LCDC.3/4 or SCY write lands after our
     // (earlier) read executed. Only valid before the tile's PushToFIFO.
-    pub fn patch_tile_num(&mut self, tile_num: u8) {
+    pub(super) fn patch_tile_num(&mut self, tile_num: u8) {
         self.tile_num = tile_num;
     }
 
-    pub fn last_bg_tn_col(&self) -> u8 {
+    pub(super) fn last_bg_tn_col(&self) -> u8 {
         self.last_bg_tn_col
     }
 
     // The (scy+ly) pixel row latched at the tile's TileNumber read — the row the
     // fetcher used to address this tile's data bytes (CGB-compat train re-resolve).
-    pub fn latched_y(&self) -> u8 {
+    pub(super) fn latched_y(&self) -> u8 {
         self.latched_y
     }
 
     // The live tile-data-select bits used for the last tile's LOW / HIGH reads.
-    pub fn last_low_tds(&self) -> bool {
+    pub(super) fn last_low_tds(&self) -> bool {
         self.last_low_tds
     }
-    pub fn last_high_tds(&self) -> bool {
+    pub(super) fn last_high_tds(&self) -> bool {
         self.last_high_tds
     }
 
     // Replace the low bitplane of the in-flight pixel buffer (DMG: no x-flip).
-    pub fn patch_pixel_buffer_low(&mut self, low_byte: u8) {
+    pub(super) fn patch_pixel_buffer_low(&mut self, low_byte: u8) {
         for i in 0..8 {
             self.pixel_buffer[i] = (self.pixel_buffer[i] & !1) | ((low_byte >> (7 - i)) & 0x01);
         }
     }
 
     // Replace the high bitplane of the in-flight pixel buffer (DMG: no x-flip).
-    pub fn patch_pixel_buffer_high(&mut self, high_byte: u8) {
+    pub(super) fn patch_pixel_buffer_high(&mut self, high_byte: u8) {
         for i in 0..8 {
             self.pixel_buffer[i] =
                 (self.pixel_buffer[i] & !2) | (((high_byte >> (7 - i)) & 0x01) << 1);
         }
     }
 
-    pub fn is_fetching_window(&self) -> bool {
+    pub(super) fn is_fetching_window(&self) -> bool {
         self.fetching_window
     }
 
-    pub fn window_x_start_dbg(&self) -> u8 {
+    pub(super) fn window_x_start_dbg(&self) -> u8 {
         self.window_x_start
     }
 
     // True when the next step() will run the TileNumber substep (the one that
     // derives the BG tile-map column). The sub-cc column lever only reroutes SCX
     // on that substep.
-    pub fn fetch_state_is_tile_number(&self) -> bool {
+    pub(super) fn fetch_state_is_tile_number(&self) -> bool {
         matches!(self.state, State::TileNumber)
     }
 
     // The substep the next step() will run: 0 = TileNumber, 1 = TileDataLow,
     // 2 = TileDataHigh, 3 = PushToFIFO. Drives the DMG window bus-glitch
     // hardware-dot reconstruction (each substep is one VRAM read, 2 dots apart).
-    pub fn fetch_substep(&self) -> u8 {
+    pub(super) fn fetch_substep(&self) -> u8 {
         match self.state {
             State::TileNumber => 0,
             State::TileDataLow => 1,
@@ -623,7 +623,7 @@ impl Fetcher {
     // The (xpos, cgb_adj, scx) the last BG TileNumber used to derive its column.
     // The controller recomputes the column under a NEW scx with the
     // same xpos/cgb_adj to re-key the just-pushed tile.
-    pub fn subcc_last_column_inputs(&self) -> (u16, u8, u8) {
+    pub(super) fn subcc_last_column_inputs(&self) -> (u16, u8, u8) {
         (self.subcc_xpos, self.subcc_cgb_adj, self.subcc_used_scx)
     }
 }

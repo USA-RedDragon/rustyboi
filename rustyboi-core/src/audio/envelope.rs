@@ -80,7 +80,7 @@ macro_rules! impl_envelope_unit {
         /// countdown decrements (mod 8) while no tick is armed. A trigger 2 cc
         /// or less before the boundary shares the event's hardware M-cycle: the
         /// fresh countdown escapes this decrement (see fs_div_event_at).
-        pub fn env_frame_countdown(&mut self, event_cc: u32) {
+        pub(super) fn env_frame_countdown(&mut self, event_cc: u32) {
             if event_cc.wrapping_sub(self.env_trigger_cc) <= 2 {
                 return;
             }
@@ -91,7 +91,7 @@ macro_rules! impl_envelope_unit {
 
         /// DIV-APU secondary event (rising edge, 512 Hz): a zero countdown on an
         /// active channel reloads from NRx2 and arms the tick for the next event.
-        pub fn env_secondary_reload(&mut self) {
+        pub(super) fn env_secondary_reload(&mut self) {
             if self.is_active() && self.volume_countdown == 0 {
                 let nr2 = self.nr2();
                 self.volume_countdown = nr2 & 7;
@@ -101,7 +101,7 @@ macro_rules! impl_envelope_unit {
         }
 
         /// DIV-APU event: consume an armed tick.
-        pub fn env_div_tick(&mut self) {
+        pub(super) fn env_div_tick(&mut self) {
             if !self.env_clock {
                 return;
             }

@@ -3,7 +3,7 @@ use crate::audio::{NR41, NR42, NR43, NR44};
 use crate::memory::Addressable;
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Noise {
+pub(super) struct Noise {
     // Sound channel registers
     nr41: u8, // Sound length
     nr42: u8, // Volume envelope
@@ -122,7 +122,7 @@ fn len_disabled() -> u32 {
 }
 
 impl Noise {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Noise {
             nr41: 0,
             nr42: 0,
@@ -166,33 +166,33 @@ impl Noise {
         }
     }
 
-    pub fn set_cc(&mut self, cc: u32) {
+    pub(super) fn set_cc(&mut self, cc: u32) {
         self.cc = cc;
     }
 
-    pub fn set_len_cc(&mut self, cc: u32) {
+    pub(super) fn set_len_cc(&mut self, cc: u32) {
         self.len_cc = cc;
     }
 
-    pub fn set_cgb(&mut self, cgb: bool) {
+    pub(super) fn set_cgb(&mut self, cgb: bool) {
         self.cgb = cgb;
     }
 
-    pub fn set_ds(&mut self, ds: bool) {
+    pub(super) fn set_ds(&mut self, ds: bool) {
         self.ds = ds;
     }
 
     /// CGB-D/E APU revision gate (model newer than CGB-C).
-    pub fn set_cgb_de(&mut self, de: bool) {
+    pub(super) fn set_cgb_de(&mut self, de: bool) {
         self.cgb_de = de;
     }
 
     /// CGB-B-or-earlier APU revision gate (CGB with model <= CGB-B).
-    pub fn set_cgb_le_b(&mut self, le_b: bool) {
+    pub(super) fn set_cgb_le_b(&mut self, le_b: bool) {
         self.cgb_le_b = le_b;
     }
 
-    pub fn len_expired(&self) -> bool {
+    pub(super) fn len_expired(&self) -> bool {
         self.len_cc >= self.len_counter
     }
 
@@ -200,7 +200,7 @@ impl Noise {
     /// 0->1 power-on): the ripple counter, its alignment and the LFSR restart
     /// from zero. The length counter is preserved (handled by the caller's
     /// register-zeroing path).
-    pub fn psg_reset(&mut self) {
+    pub(super) fn psg_reset(&mut self) {
         self.lfsr = 0;
         self.current_sample = false;
         self.counter = 0;
@@ -225,7 +225,7 @@ impl Noise {
         self.enabled = false;
     }
 
-    pub fn set_fs_step(&mut self, step: u8) {
+    pub(super) fn set_fs_step(&mut self, step: u8) {
         self.fs_step = step;
     }
 
@@ -248,7 +248,7 @@ impl Noise {
     const LEN_MASK: u16 = 0x3F;
 
     /// Length-counter expiry for channel 4.
-    pub fn length_event(&mut self) {
+    pub(super) fn length_event(&mut self) {
         self.len_counter = LEN_DISABLED;
         self.length_counter = 0;
         self.enabled = false;
@@ -293,20 +293,20 @@ impl Noise {
         };
     }
 
-    pub fn step(&mut self) {
+    pub(super) fn step(&mut self) {
         self.advance();
     }
 
     /// Resolve the ripple counter/LFSR to the current cc for the CPU read
     /// path.
-    pub fn sync_for_read(&mut self) {
+    pub(super) fn sync_for_read(&mut self) {
         self.advance();
     }
 
     /// DIV-write cc reset: the controller folds the
     /// master cc; shift the run anchor so the elapsed-cycle stream (and thus
     /// `alignment`) is unaffected.
-    pub fn reset_cc(&mut self, _cc: u32, delta: u32) {
+    pub(super) fn reset_cc(&mut self, _cc: u32, delta: u32) {
         self.advance();
         self.last_run_cc = self.last_run_cc.wrapping_sub(delta);
     }
@@ -820,7 +820,7 @@ impl Noise {
         self.nr43 = value;
     }
 
-    pub fn get_output(&self) -> f32 {
+    pub(super) fn get_output(&self) -> f32 {
         if !self.enabled || self.volume == 0 {
             return 0.0;
         }
@@ -831,13 +831,13 @@ impl Noise {
         }
     }
 
-    pub fn is_enabled(&self) -> bool {
+    pub(super) fn is_enabled(&self) -> bool {
         self.enabled
     }
 
     /// CGB PCM34 high nibble for the noise channel: the latched LFSR output
     /// bit times the envelope volume while the channel is active.
-    pub fn pcm_nibble(&self) -> u8 {
+    pub(super) fn pcm_nibble(&self) -> u8 {
         if !self.enabled {
             return 0;
         }
@@ -851,7 +851,7 @@ impl Noise {
     /// PCM34 nibble resolved at the canonical CPU READ access cc (M7) via a
     /// non-mutating shadow advance of the ripple counter, mirroring the
     /// squares' `pcm_nibble_at`.
-    pub fn pcm_nibble_at(&self, read_cc: u32) -> u8 {
+    pub(super) fn pcm_nibble_at(&self, read_cc: u32) -> u8 {
         if !self.enabled {
             return 0;
         }

@@ -6,20 +6,20 @@ use serde::{Deserialize, Serialize};
 // stores 0 for attrs. The actual palette RAM / BGP color is resolved live at
 // shift-out time, as on hardware.
 #[derive(Serialize, Deserialize, Clone, Copy, Default)]
-pub struct BgPixel {
+pub(super) struct BgPixel {
     pub color: u8,
     pub attrs: u8,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct Fifo {
+pub(super) struct Fifo {
     size: usize,
     head: usize,
     data: Vec<BgPixel>,
 }
 
 impl Fifo {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Fifo {
             size: 0,
             head: 0,
@@ -27,18 +27,18 @@ impl Fifo {
         }
     }
 
-    pub fn reset(&mut self) {
+    pub(super) fn reset(&mut self) {
         self.size = 0;
         self.head = 0;
         self.data.clear();
     }
 
-    pub fn push(&mut self, value: BgPixel) {
+    pub(super) fn push(&mut self, value: BgPixel) {
         self.data.push(value);
         self.size += 1;
     }
 
-    pub fn pop(&mut self) -> Result<BgPixel, &'static str> {
+    pub(super) fn pop(&mut self) -> Result<BgPixel, &'static str> {
         if self.size == 0 {
             return Err("FIFO is empty");
         }
@@ -52,7 +52,7 @@ impl Fifo {
         Ok(value)
     }
 
-    pub fn size(&self) -> usize {
+    pub(super) fn size(&self) -> usize {
         self.size
     }
 
@@ -65,7 +65,7 @@ impl Fifo {
     // Overwrite the `n` newest (most recently pushed) entries in place.
     // Used by the sub-cc SCX column lever to re-key the just-fetched tile to the
     // NEW scx column when a mid-mode-3 write's apply cc precedes the tile's plot.
-    pub fn overwrite_newest(&mut self, pixels: &[BgPixel]) {
+    pub(super) fn overwrite_newest(&mut self, pixels: &[BgPixel]) {
         let n = pixels.len();
         if n == 0 || n > self.size {
             return;
@@ -82,7 +82,7 @@ impl Fifo {
     // tile at its exact display column regardless of FIFO depth / sprite shift
     // (which makes the "newest N" target ambiguous). Entries beyond the current
     // queue are silently skipped.
-    pub fn overwrite_at(&mut self, offset: usize, pixels: &[BgPixel]) {
+    pub(super) fn overwrite_at(&mut self, offset: usize, pixels: &[BgPixel]) {
         for (i, p) in pixels.iter().enumerate() {
             if offset + i >= self.size {
                 break;
@@ -94,7 +94,7 @@ impl Fifo {
         }
     }
 
-    pub fn overwrite_oldest(&mut self, pixels: &[BgPixel]) {
+    pub(super) fn overwrite_oldest(&mut self, pixels: &[BgPixel]) {
         for (i, p) in pixels.iter().enumerate() {
             if i >= self.size {
                 break;
