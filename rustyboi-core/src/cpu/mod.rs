@@ -4,4 +4,4 @@ mod opcodes;
 pub mod registers;
 
 pub use bus::Bus;
-pub use sm83::*;
+pub use sm83::SM83;
