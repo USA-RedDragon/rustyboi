@@ -11599,7 +11599,6 @@ impl Ppu {
     }
 
     fn mix_background_and_sprites_compat(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8, screen_x: u8, screen_y: u8, bg_enabled_col: bool) -> (u8, u8, u8) {
-        let lcdc = self.lcdc;
         let bg_enabled = bg_enabled_col;
 
         // BG shade via BGP at this pixel's pop dot, then look up BG palette 0 in CGB
@@ -11611,95 +11610,34 @@ impl Ppu {
 
         let effective_bg_pixel_idx = if bg_enabled { bg_pixel_idx } else { 0 };
 
-        // OBJ-enable gate. Mirrors the DMG mixer: with a mid-mode-3 LCDC.1
-        // toggle this line, hardware gates each sprite pixel on the bit AT THAT
-        // PIXEL'S pop dot (resolved per column from the history); otherwise the
-        // live-LCDC fast path is exact. The DMG-compat renderer runs on CGB
-        // hardware but through the same fetch/FIFO machinery, so all the DMG
-        // mid-mode-3 sprite consumers apply here too — only the final color
-        // lookup differs (CGB palette RAM vs grayscale).
-        let objen_toggled = self.objen_history.len() > 1;
-        if !objen_toggled && !lcdc_has(lcdc, LCDCFlags::SpriteDisplayEnable) {
+        // The DMG-compat renderer runs on CGB hardware but through the same
+        // fetch/FIFO machinery, so every DMG mid-mode-3 sprite consumer applies
+        // here too — only the final color lookup differs (CGB palette RAM vs
+        // grayscale). The one exception is the stale-FIFO pop quirk, a DMG-CPU
+        // artifact that a CGB in compat mode does not reproduce.
+        let stale_pop_quirk = !mmio.is_cgb() || mmio.is_cgb_features_enabled();
+        let Some((sprite, sprite_pixel_idx)) = self.first_winning_sprite_pixel(
+            mmio,
+            screen_x,
+            screen_y,
+            effective_bg_pixel_idx,
+            stale_pop_quirk,
+        ) else {
             return bg_color_rgb;
-        }
+        };
 
-        for (spr_i, sprite) in self.sprites_on_line.iter().enumerate() {
-            // Mid-mode-3 OBJ-enable toggle (see the DMG mixer for the full
-            // rationale): per-sprite fetch-abort gate + per-pixel pop-dot gate
-            // with the 15-dot stale-FIFO quirk.
-            if objen_toggled {
-                let rec = self.sprite_fetch_recs.get(spr_i);
-                if rec.map(|r| r.phase) == Some(SpriteFetchPhase::Aborted) {
-                    continue;
-                }
-                // The 15-dot stale-FIFO pop quirk is a DMG-CPU artifact; the CGB
-                // pixel gate samples LCDC.1 at the plain pop dot (no quirk).
-                // De Morgan of `!(is_cgb && !cgb_features_enabled)`: the stale-pop
-                // quirk applies on DMG hardware or a CGB running with CGB features.
-                let stale = (!mmio.is_cgb() || mmio.is_cgb_features_enabled())
-                    && rec
-                        .filter(|r| r.phase == SpriteFetchPhase::Fetched)
-                        .is_some_and(|r| self.ticks >= r.arm_tick + 15);
-                if !self.objen_at_tick(self.ticks + stale as u128) {
-                    continue;
-                }
-            }
-            let sprite_actual_x = sprite.x as i16 - 8;
-            let sprite_actual_y = sprite.y as i16 - 16;
-            let relative_x = screen_x as i16 - sprite_actual_x;
-            let relative_y = screen_y as i16 - sprite_actual_y;
-            if (0..8).contains(&relative_x) {
-                // Mid-mode-3 OBJ-size (LCDC.2) toggle: the size bit is sampled
-                // at each tile-data byte's own fetch dot (per-byte row
-                // addressing via obj_pixel_sized); list membership already
-                // implies a y-visible scan, so the bound is the scan range
-                // (0..16) not the live size.
-                let objsize_toggled = self.objsize_dot_history.len() > 1;
-                let sprite_height = if lcdc_has(lcdc, LCDCFlags::SpriteSize) { 16 } else { 8 };
-                let y_in_range = if objsize_toggled {
-                    (0..16).contains(&relative_y)
-                } else {
-                    relative_y >= 0 && relative_y < sprite_height as i16
-                };
-                if y_in_range {
-                    let px = if objsize_toggled {
-                        self.obj_pixel_sized(
-                            mmio,
-                            sprite,
-                            self.sprite_fetch_recs.get(spr_i),
-                            relative_x as u8,
-                            screen_y,
-                        )
-                    } else {
-                        self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8)
-                    };
-                    if let Some(sprite_pixel_idx) = px
-                        && sprite_pixel_idx != 0 {
-                        // DMG-compat: OBP0/OBP1 selected by attr bit 4, shade
-                        // sampled at THIS pixel's pop dot (dot-keyed history,
-                        // like the DMG mixer), then the shade is looked up in
-                        // OBJ palette 0/1 of CGB palette RAM.
-                        let use_obp1 = sprite.attributes.palette;
-                        let obj_shade =
-                            self.dmg_sprite_palette_shade(sprite_pixel_idx, use_obp1, self.ticks);
-                        let pal = if use_obp1 { 1 } else { 0 };
-                        let (slo, shi) = mmio.obj_palette_pair_raw(pal, obj_shade);
-                        let sprite_color_rgb = self.cgb_color_to_rgb(slo, shi, mmio.is_agb());
-                        if !sprite.attributes.priority || effective_bg_pixel_idx == 0 {
-                            return sprite_color_rgb;
-                        }
-                    }
-                }
-            }
-        }
-
-        bg_color_rgb
+        // DMG-compat: OBP0/OBP1 selected by attr bit 4, shade sampled at THIS
+        // pixel's pop dot (dot-keyed history, like the DMG mixer), then the
+        // shade is looked up in OBJ palette 0/1 of CGB palette RAM.
+        let use_obp1 = sprite.attributes.palette;
+        let obj_shade = self.dmg_sprite_palette_shade(sprite_pixel_idx, use_obp1, self.ticks);
+        let pal = if use_obp1 { 1 } else { 0 };
+        let (slo, shi) = mmio.obj_palette_pair_raw(pal, obj_shade);
+        self.cgb_color_to_rgb(slo, shi, mmio.is_agb())
     }
 
     // Mix background pixel with sprites at the given screen coordinates
     fn mix_background_and_sprites(&self, mmio: &mmio::Mmio, bg_pixel_idx: u8, screen_x: u8, screen_y: u8, bg_enabled_col: bool) -> u8 {
-        let lcdc = self.lcdc;
-
         // Per-pixel BG-enable: DMG BG-off forces this column's BG layer to white
         // (palette color 0) for the exact span the toggle covers. Use the
         // column's BG-enable from the line history, not the final LCDC.0.
@@ -11716,16 +11654,61 @@ impl Ppu {
         // For sprite priority calculation, we need the original bg_pixel_idx
         let effective_bg_pixel_idx = if bg_enabled { bg_pixel_idx } else { 0 };
 
+        // The 15-dot stale-FIFO pop quirk is a DMG-CPU artifact and applies
+        // unconditionally on this path.
+        let Some((sprite, sprite_pixel_idx)) =
+            self.first_winning_sprite_pixel(mmio, screen_x, screen_y, effective_bg_pixel_idx, true)
+        else {
+            return bg_color;
+        };
+
+        if mmio.is_cgb() {
+            // CGB: OBP sampled per pixel (true-color palette-RAM pipeline).
+            self.get_sprite_palette_color(mmio, sprite_pixel_idx, sprite.attributes.palette, screen_x)
+        } else {
+            // DMG mid-mode-3 OBP-write model: OBP sampled at this pixel's pop
+            // dot from the dot-keyed history (see dmg_sprite_palette_shade).
+            self.dmg_sprite_palette_shade(sprite_pixel_idx, sprite.attributes.palette, self.ticks)
+        }
+    }
+
+    // Get a specific pixel from a sprite's tile data
+    // The per-sprite walk shared by the DMG and DMG-compat mixers: scan
+    // `sprites_on_line` in list order and return the first sprite whose pixel at
+    // (screen_x, screen_y) is opaque AND wins the BG-priority test, with that
+    // pixel's colour index. `None` means no sprite contributes and the caller
+    // keeps its background colour — which is what both callers did on both the
+    // OBJ-disabled fast path and on falling out of the loop.
+    //
+    // `stale_pop_quirk` carries the ONE behavioural difference between the two
+    // callers. The 15-dot stale-FIFO pop quirk is a DMG-CPU artifact: the DMG
+    // mixer applies it unconditionally, while the DMG-compat mixer passes
+    // `!is_cgb() || is_cgb_features_enabled()` (De Morgan of `!(is_cgb &&
+    // !cgb_features_enabled)`) because a CGB running DMG-compat samples LCDC.1
+    // at the plain pop dot with no quirk.
+    //
+    // NOT usable by `mix_background_and_sprites_color`. That mixer resolves
+    // object-to-object priority across the WHOLE list (CGB OAM-index order, or
+    // DMG x-then-OAM) and only then tests BG priority, where these two
+    // early-return on the first opaque sprite that beats BG. That is a different
+    // algorithm, not a different colour tail, so it keeps its own walk.
+    fn first_winning_sprite_pixel(
+        &self,
+        mmio: &mmio::Mmio,
+        screen_x: u8,
+        screen_y: u8,
+        effective_bg_pixel_idx: u8,
+        stale_pop_quirk: bool,
+    ) -> Option<(&Sprite, u8)> {
         // OBJ-enable gate. With a mid-mode-3 LCDC.1 toggle this line, hardware
         // gates each sprite pixel on the bit AT THAT PIXEL'S pop dot — resolve
         // per column from the history. Otherwise keep the live-LCDC fast path
         // (identical to the single seeded entry).
         let objen_toggled = self.objen_history.len() > 1;
-        if !objen_toggled && !lcdc_has(lcdc, LCDCFlags::SpriteDisplayEnable) {
-            return bg_color;
+        if !objen_toggled && !self.lcdc_has(LCDCFlags::SpriteDisplayEnable) {
+            return None;
         }
 
-        // Find the highest priority sprite at this position
         for (spr_i, sprite) in self.sprites_on_line.iter().enumerate() {
             // Mid-mode-3 OBJ-enable toggle:
             // - per-sprite FETCH gate: a sprite whose fetch was aborted
@@ -11745,9 +11728,10 @@ impl Ppu {
                 if rec.map(|r| r.phase) == Some(SpriteFetchPhase::Aborted) {
                     continue;
                 }
-                let stale = rec
-                    .filter(|r| r.phase == SpriteFetchPhase::Fetched)
-                    .is_some_and(|r| self.ticks >= r.arm_tick + 15);
+                let stale = stale_pop_quirk
+                    && rec
+                        .filter(|r| r.phase == SpriteFetchPhase::Fetched)
+                        .is_some_and(|r| self.ticks >= r.arm_tick + 15);
                 if !self.objen_at_tick(self.ticks + stale as u128) {
                     continue;
                 }
@@ -11755,12 +11739,8 @@ impl Ppu {
             // Sprite X coordinate is offset by 8, Y coordinate is offset by 16
             let sprite_actual_x = sprite.x as i16 - 8;
             let sprite_actual_y = sprite.y as i16 - 16;
-
-            // Check if this screen pixel is within the sprite bounds
             let relative_x = screen_x as i16 - sprite_actual_x;
             let relative_y = screen_y as i16 - sprite_actual_y;
-
-            // Sprite is 8 pixels wide
             if (0..8).contains(&relative_x) {
                 // Mid-mode-3 OBJ-size (LCDC.2) toggle this line: hardware
                 // samples the size bit at each tile-data byte's own fetch dot
@@ -11768,14 +11748,13 @@ impl Ppu {
                 // membership already implies the sprite was scanned y-visible,
                 // so the bound is the scan range (0..16), not the live size.
                 let objsize_toggled = self.objsize_dot_history.len() > 1;
-                let sprite_height = if lcdc_has(lcdc, LCDCFlags::SpriteSize) { 16 } else { 8 };
+                let sprite_height = if self.lcdc_has(LCDCFlags::SpriteSize) { 16 } else { 8 };
                 let y_in_range = if objsize_toggled {
                     (0..16).contains(&relative_y)
                 } else {
                     relative_y >= 0 && relative_y < sprite_height as i16
                 };
                 if y_in_range {
-                    // Get sprite pixel data
                     let px = if objsize_toggled {
                         self.obj_pixel_sized(
                             mmio,
@@ -11787,33 +11766,23 @@ impl Ppu {
                     } else {
                         self.get_sprite_pixel(mmio, sprite, relative_x as u8, relative_y as u8)
                     };
+                    // The colour lookups both callers run here are pure (&self /
+                    // &Mmio), so deferring them to the winner alone — rather than
+                    // computing one per opaque sprite and discarding the losers —
+                    // is unobservable.
                     if let Some(sprite_pixel_idx) = px
-                        && sprite_pixel_idx != 0 { // Sprite pixel is not transparent
-                            let sprite_color = if mmio.is_cgb() {
-                                // CGB: OBP sampled per pixel (true-color palette-RAM pipeline).
-                                self.get_sprite_palette_color(mmio, sprite_pixel_idx, sprite.attributes.palette, screen_x)
-                            } else {
-                                // DMG mid-mode-3 OBP-write model: OBP sampled at
-                                // this pixel's pop dot from the dot-keyed history
-                                // (see dmg_sprite_palette_shade).
-                                self.dmg_sprite_palette_shade(sprite_pixel_idx, sprite.attributes.palette, self.ticks)
-                            };
-
-                            // Handle sprite priority
-                            if !sprite.attributes.priority || effective_bg_pixel_idx == 0 {
-                                // Sprite appears above background or background is transparent
-                                return sprite_color;
-                            }
-                            // If sprite has priority=1 and background is not color 0, background wins
-                        }
+                        && sprite_pixel_idx != 0
+                        && (!sprite.attributes.priority || effective_bg_pixel_idx == 0)
+                    {
+                        return Some((sprite, sprite_pixel_idx));
+                    }
                 }
             }
         }
 
-        bg_color
+        None
     }
 
-    // Get a specific pixel from a sprite's tile data
     fn get_sprite_pixel(&self, mmio: &mmio::Mmio, sprite: &Sprite, sprite_x: u8, sprite_y: u8) -> Option<u8> {
         let lcdc = self.lcdc;
         let sprite_height = if lcdc_has(lcdc, LCDCFlags::SpriteSize) { 16 } else { 8 };
