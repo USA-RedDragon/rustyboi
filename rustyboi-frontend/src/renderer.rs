@@ -946,6 +946,12 @@ impl Renderer {
     }
 }
 
+/// How long any single GPU test may take before it is declared wedged. Generous
+/// next to the ~0.2s these actually need, small next to the unbounded park it
+/// replaces.
+#[cfg(test)]
+const GPU_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[cfg(test)]
 impl Renderer {
     /// Queue the surface statuses the next `render` acquisitions report (only
@@ -997,7 +1003,14 @@ impl Renderer {
         self.queue.submit(std::iter::once(encoder.finish()));
         let slice = buffer.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        // Bounded, not `wait_indefinitely`: a wedged driver must fail the test
+        // loudly rather than park the harness forever.
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(GPU_TEST_TIMEOUT),
+            })
+            .expect("offscreen readback poll timed out — the GPU/driver is wedged");
         let data = slice.get_mapped_range();
         let mut out = Vec::with_capacity((unpadded * h) as usize);
         for row in 0..h {
@@ -1316,16 +1329,19 @@ mod tests {
     // The tests run wherever a wgpu adapter exists — Metal on the macOS CI
     // runner (the platform that regressed), lavapipe on Linux CI — and skip with
     // a note when none does, so they never spuriously fail on a GPU-less box.
+    //
+    // They share one device and run one at a time (see `with_gpu`): a device per
+    // test deadlocked the NVIDIA driver under libtest's thread pool.
     #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
     mod gpu {
         use super::*;
         use egui::epaint::{Color32, ColorImage, ImageData, ImageDelta, TextureId};
         use egui::TextureOptions;
-        use std::sync::Arc;
+        use std::sync::{Arc, Mutex, OnceLock};
 
-        /// A headless device + queue (no surface), or `None` when the runner has
-        /// no usable wgpu adapter (the test then skips).
-        fn headless_gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+        /// Build the one headless device + queue this binary ever uses, or
+        /// `None` when the runner has no usable wgpu adapter.
+        fn create_headless_gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::all(),
                 flags: wgpu::InstanceFlags::default(),
@@ -1348,6 +1364,76 @@ mod tests {
             }))
             .ok()?;
             Some((device, queue))
+        }
+
+        /// The process-wide headless GPU. Built at most once.
+        ///
+        /// One device for the whole binary is not just an optimization: creating
+        /// and driving more than one `VkDevice` concurrently in a single process
+        /// deadlocks the NVIDIA proprietary Vulkan driver. A `headless_gpu()` per
+        /// `#[test]` did exactly that under libtest's thread pool, and the tests
+        /// then parked forever in priority-inheritance futex waits inside the
+        /// driver (visible as `rt_mutex_schedule` wchans and stalled `[vkcf]`/
+        /// `[vkrt]`/`[vkps]` driver threads). Two concurrent devices were enough
+        /// to hang a run; one device never did.
+        fn shared_gpu() -> Option<&'static (wgpu::Device, wgpu::Queue)> {
+            static GPU: OnceLock<Option<(wgpu::Device, wgpu::Queue)>> = OnceLock::new();
+            GPU.get_or_init(create_headless_gpu).as_ref()
+        }
+
+        /// Serializes the GPU tests against each other. The shared device removes
+        /// the multi-`VkDevice` hazard; this removes concurrent submission on top
+        /// of it, so the driver only ever sees one test at a time.
+        static GPU_SERIAL: Mutex<()> = Mutex::new(());
+
+        /// Kills the process with a loud diagnostic if the test it guards has not
+        /// finished within [`GPU_TEST_TIMEOUT`]. A driver-level deadlock cannot be
+        /// unwound out of — the wedged thread never returns to Rust — so aborting
+        /// is the only way to turn a silent hang into a visible failure.
+        struct Watchdog(#[allow(dead_code)] std::sync::mpsc::Sender<()>);
+
+        impl Watchdog {
+            fn arm(test: &'static str) -> Self {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    if rx.recv_timeout(GPU_TEST_TIMEOUT)
+                        == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    {
+                        // Straight to fd 2, not `eprintln!`: libtest's output
+                        // capture is inherited by spawned threads and is only
+                        // drained when the test returns — which is exactly what
+                        // is never going to happen here. The macro would send
+                        // this diagnostic into a buffer the abort then discards.
+                        use std::io::Write as _;
+                        let mut err = std::io::stderr();
+                        let _ = write!(
+                            err,
+                            "\n=== GPU TEST WEDGED ===\n\
+                             {test} did not finish within {GPU_TEST_TIMEOUT:?}.\n\
+                             The wgpu device or its driver is deadlocked; aborting so this \
+                             fails loudly instead of hanging the test run.\n\n"
+                        );
+                        let _ = err.flush();
+                        std::process::abort();
+                    }
+                });
+                Self(tx)
+            }
+        }
+
+        /// Runs `body` against the shared device with the GPU serialized and a
+        /// watchdog armed, or skips with a note when the runner has no adapter.
+        fn with_gpu(test: &'static str, body: impl FnOnce(&wgpu::Device, &wgpu::Queue)) {
+            // `partial_update_without_allocation_panics` panics on purpose inside
+            // this region (it catches its own panic, but be robust anyway): a
+            // poisoned lock must not cascade into failures in every other test.
+            let _serial = GPU_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let Some((device, queue)) = shared_gpu() else {
+                eprintln!("skipping {test}: no wgpu adapter");
+                return;
+            };
+            let _watchdog = Watchdog::arm(test);
+            body(device, queue);
         }
 
         /// A whole-texture allocation delta (`pos == None`) — what egui emits the
@@ -1384,20 +1470,18 @@ mod tests {
         // blank frame) so the invariant the fix upholds can't be quietly removed.
         #[test]
         fn partial_update_without_allocation_panics() {
-            let Some((device, queue)) = headless_gpu() else {
-                eprintln!("skipping partial_update_without_allocation_panics: no wgpu adapter");
-                return;
-            };
-            let mut egui = EguiCompositor::new(&device, wgpu::TextureFormat::Rgba8Unorm);
-            let deltas = set(TextureId::Managed(0), patch(2, [0, 0]));
-            let panicked = silently_catches_panic(std::panic::AssertUnwindSafe(|| {
-                egui.apply_textures(&device, &queue, &deltas);
-            }));
-            assert!(
-                panicked,
-                "a partial (pos=Some) update to an unallocated texture must panic — \
-                 this is the crash a dropped frame-0 allocation causes"
-            );
+            with_gpu("partial_update_without_allocation_panics", |device, queue| {
+                let mut egui = EguiCompositor::new(device, wgpu::TextureFormat::Rgba8Unorm);
+                let deltas = set(TextureId::Managed(0), patch(2, [0, 0]));
+                let panicked = silently_catches_panic(std::panic::AssertUnwindSafe(|| {
+                    egui.apply_textures(device, queue, &deltas);
+                }));
+                assert!(
+                    panicked,
+                    "a partial (pos=Some) update to an unallocated texture must panic — \
+                     this is the crash a dropped frame-0 allocation causes"
+                );
+            });
         }
 
         // The regression guard: the macOS sequence exactly. Frame 0 allocates the
@@ -1406,23 +1490,21 @@ mod tests {
         // surface, frame 1 must NOT panic. This fails against the pre-fix ordering.
         #[test]
         fn atlas_allocation_survives_a_skipped_surface_frame() {
-            let Some((device, queue)) = headless_gpu() else {
-                eprintln!("skipping atlas_allocation_survives_a_skipped_surface_frame: no wgpu adapter");
-                return;
-            };
-            let mut egui = EguiCompositor::new(&device, wgpu::TextureFormat::Rgba8Unorm);
-            let id = TextureId::Managed(0);
+            with_gpu("atlas_allocation_survives_a_skipped_surface_frame", |device, queue| {
+                let mut egui = EguiCompositor::new(device, wgpu::TextureFormat::Rgba8Unorm);
+                let id = TextureId::Managed(0);
 
-            // Frame 0: atlas allocation. `render` applies texture deltas before
-            // acquiring the surface, so this lands even though the frame is then
-            // skipped (Retina `Outdated`). Model that skip by applying only the
-            // textures and rendering nothing.
-            egui.apply_textures(&device, &queue, &set(id, full_alloc(8, Color32::WHITE)));
+                // Frame 0: atlas allocation. `render` applies texture deltas before
+                // acquiring the surface, so this lands even though the frame is then
+                // skipped (Retina `Outdated`). Model that skip by applying only the
+                // textures and rendering nothing.
+                egui.apply_textures(device, queue, &set(id, full_alloc(8, Color32::WHITE)));
 
-            // Frame 1: a partial glyph patch to the same atlas. Must succeed
-            // because the base allocation from frame 0 is present.
-            egui.apply_textures(&device, &queue, &set(id, patch(2, [1, 1])));
-            queue.submit(std::iter::empty());
+                // Frame 1: a partial glyph patch to the same atlas. Must succeed
+                // because the base allocation from frame 0 is present.
+                egui.apply_textures(device, queue, &set(id, patch(2, [1, 1])));
+                queue.submit(std::iter::empty());
+            });
         }
 
         /// Lay out a real egui frame that paints a solid `color` rect over the
@@ -1460,28 +1542,31 @@ mod tests {
         // but no egui elements appear."
         #[test]
         fn render_composites_visible_egui_pixels() {
-            let Some((device, queue)) = headless_gpu() else {
-                eprintln!("skipping render_composites_visible_egui_pixels: no wgpu adapter");
-                return;
-            };
-            const W: u32 = 64;
-            const H: u32 = 64;
-            let mut renderer =
-                Renderer::new_offscreen(device, queue, wgpu::TextureFormat::Rgba8Unorm, W, H);
+            with_gpu("render_composites_visible_egui_pixels", |device, queue| {
+                const W: u32 = 64;
+                const H: u32 = 64;
+                let mut renderer = Renderer::new_offscreen(
+                    device.clone(),
+                    queue.clone(),
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    W,
+                    H,
+                );
 
-            let paint = full_screen_egui_frame(W, H, Color32::from_rgb(220, 30, 30));
-            renderer.render(None, region(W, H), paint).expect("offscreen render must succeed");
+                let paint = full_screen_egui_frame(W, H, Color32::from_rgb(220, 30, 30));
+                renderer.render(None, region(W, H), paint).expect("offscreen render must succeed");
 
-            let px = renderer.read_offscreen();
-            let red = px
-                .chunks_exact(4)
-                .filter(|p| p[0] > 128 && p[1] < 128 && p[2] < 128)
-                .count();
-            assert!(
-                red > (W * H / 2) as usize,
-                "egui composite produced no visible pixels ({red} red of {}) — the UI would be blank",
-                W * H
-            );
+                let px = renderer.read_offscreen();
+                let red = px
+                    .chunks_exact(4)
+                    .filter(|p| p[0] > 128 && p[1] < 128 && p[2] < 128)
+                    .count();
+                assert!(
+                    red > (W * H / 2) as usize,
+                    "egui composite produced no visible pixels ({red} red of {}) — the UI would be blank",
+                    W * H
+                );
+            });
         }
 
         // THE regression guard, exercised end-to-end through `Renderer::render`:
@@ -1493,44 +1578,48 @@ mod tests {
         // texture that has not been allocated yet"). With the fix it renders.
         #[test]
         fn render_keeps_egui_textures_across_a_surface_error() {
-            let Some((device, queue)) = headless_gpu() else {
-                eprintln!("skipping render_keeps_egui_textures_across_a_surface_error: no wgpu adapter");
-                return;
-            };
-            const W: u32 = 64;
-            const H: u32 = 64;
-            let mut renderer =
-                Renderer::new_offscreen(device, queue, wgpu::TextureFormat::Rgba8Unorm, W, H);
-            // Frame 0 errors (Retina first-frame `Outdated`); frame 1 succeeds.
-            renderer.inject_statuses([wgpu::SurfaceStatus::Outdated, wgpu::SurfaceStatus::Good]);
+            with_gpu("render_keeps_egui_textures_across_a_surface_error", |device, queue| {
+                const W: u32 = 64;
+                const H: u32 = 64;
+                let mut renderer = Renderer::new_offscreen(
+                    device.clone(),
+                    queue.clone(),
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    W,
+                    H,
+                );
+                // Frame 0 errors (Retina first-frame `Outdated`); frame 1 succeeds.
+                renderer
+                    .inject_statuses([wgpu::SurfaceStatus::Outdated, wgpu::SurfaceStatus::Good]);
 
-            let id = TextureId::Managed(0);
+                let id = TextureId::Managed(0);
 
-            // Frame 0: allocate the atlas. `render` must return the surface error
-            // *after* applying the allocation (not drop it).
-            let frame0 = EguiPaint {
-                jobs: Vec::new(),
-                textures: set(id, full_alloc(8, Color32::WHITE)),
-                pixels_per_point: 1.0,
-                reuse: false,
-            };
-            let r0 = renderer.render(None, region(W, H), frame0);
-            assert!(
-                matches!(r0, Err(wgpu::SurfaceStatus::Outdated)),
-                "frame 0 should report the injected surface error, got {r0:?}"
-            );
+                // Frame 0: allocate the atlas. `render` must return the surface error
+                // *after* applying the allocation (not drop it).
+                let frame0 = EguiPaint {
+                    jobs: Vec::new(),
+                    textures: set(id, full_alloc(8, Color32::WHITE)),
+                    pixels_per_point: 1.0,
+                    reuse: false,
+                };
+                let r0 = renderer.render(None, region(W, H), frame0);
+                assert!(
+                    matches!(r0, Err(wgpu::SurfaceStatus::Outdated)),
+                    "frame 0 should report the injected surface error, got {r0:?}"
+                );
 
-            // Frame 1: a partial atlas patch. Succeeds only because frame 0's
-            // allocation survived the skipped frame.
-            let frame1 = EguiPaint {
-                jobs: Vec::new(),
-                textures: set(id, patch(2, [1, 1])),
-                pixels_per_point: 1.0,
-                reuse: false,
-            };
-            renderer
-                .render(None, region(W, H), frame1)
-                .expect("frame 1 must render after a skipped frame 0 — a panic here is the bug");
+                // Frame 1: a partial atlas patch. Succeeds only because frame 0's
+                // allocation survived the skipped frame.
+                let frame1 = EguiPaint {
+                    jobs: Vec::new(),
+                    textures: set(id, patch(2, [1, 1])),
+                    pixels_per_point: 1.0,
+                    reuse: false,
+                };
+                renderer.render(None, region(W, H), frame1).expect(
+                    "frame 1 must render after a skipped frame 0 — a panic here is the bug",
+                );
+            });
         }
     }
 }
