@@ -13,3 +13,8 @@ ppu-lcd_enable_frame_blank-dmg|dmg|png|test-roms/build/ppu/lcd_enable_frame_blan
 ppu-lcd_enable_frame_repeat-cgb|cgb|png|test-roms/build/ppu/lcd_enable_frame_repeat.cgb.png.gbc|test-roms/refs/ppu/lcd_enable_frame_repeat.cgb.png
 ppu-lcd_enable_repeat_decay-cgb|cgb|png|test-roms/build/ppu/lcd_enable_repeat_decay.cgb.png.gbc|test-roms/refs/ppu/lcd_enable_repeat_decay.cgb.png
 ppu-window_scx_ignore-dmg|dmg|png|test-roms/build/ppu/window_scx_ignore.dmg.png.gb|test-roms/refs/ppu/window_scx_ignore.dmg.png
+sgb-mlt_req_header_locked-sgblocked|dmg|mooneye|test-roms/build/sgb/mlt_req_header_locked.sgblocked.mooneye.gb|rev=sgb
+sgb-mlt_req_no_multiplex-sgbcart|dmg|mooneye|test-roms/build/sgb/mlt_req_no_multiplex.sgbcart.mooneye.gb
+sgb-mlt_req_player_cycle-sgb|dmg|mooneye|test-roms/build/sgb/mlt_req_player_cycle.sgb.mooneye.gb|rev=sgb
+sgb-mlt_req_player_cycle-sgb2|dmg|mooneye|test-roms/build/sgb/mlt_req_player_cycle.sgb2.mooneye.gb|rev=sgb2
+sgb-packet_reset_aborts-sgb|dmg|mooneye|test-roms/build/sgb/packet_reset_aborts.sgb.mooneye.gb|rev=sgb
