@@ -196,6 +196,11 @@ impl Noise {
         self.len_cc >= self.len_counter
     }
 
+    /// Directly seed the hidden length counter (post-boot state seeding).
+    pub fn set_length_counter(&mut self, value: u8) {
+        self.length_counter = value;
+    }
+
     /// APU-init noise state (the APU struct reset at the NR52
     /// 0->1 power-on): the ripple counter, its alignment and the LFSR restart
     /// from zero. The length counter is preserved (handled by the caller's

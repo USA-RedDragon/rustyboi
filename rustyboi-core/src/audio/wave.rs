@@ -127,6 +127,11 @@ impl Wave {
         self.len_cc >= self.len_counter
     }
 
+    /// Directly seed the hidden length counter (post-boot state seeding).
+    pub fn set_length_counter(&mut self, value: u16) {
+        self.length_counter = value;
+    }
+
     /// Shift the last-read and next-fetch cc anchors back by the cc delta
     /// caused by a DIV write.
     pub(super) fn reset_cc(&mut self, delta: u32) {

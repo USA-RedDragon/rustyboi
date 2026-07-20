@@ -468,6 +468,11 @@ impl GB {
             hardware,
             Hardware::CGB0 | Hardware::CGBB | Hardware::AGB
         ));
+        // CGB vs DMG APU gating (NRx1-writable-while-off exception, post-boot
+        // APU clock anchor, ch4 deferred-trigger fork). Seeded here — before
+        // any audio write can anchor the SPU clock — so a session that runs
+        // the REAL boot ROM (never calls skip_bios) still gets CGB semantics.
+        mmio.set_audio_boot_cgb(hardware.is_cgb_like());
         if matches!(hardware, Hardware::SGB | Hardware::SGB2) {
             mmio.enable_sgb();
         }
@@ -552,12 +557,14 @@ impl GB {
         self.mmio.write(crate::audio::NR21, 0x3F);
         self.mmio.write(crate::audio::NR22, 0x00);
         self.mmio.write(crate::audio::NR24, 0xBF);
+        // NR31/NR41 are deliberately absent from this table: they read 0xFF
+        // regardless of the stored value, and writing them while the APU is
+        // off is a DMG length-counter load (counter 1) — a leak the real boot
+        // ROMs never produce, since they write no NRx1 but NR11.
         self.mmio.write(crate::audio::NR30, 0x7F);
-        self.mmio.write(crate::audio::NR31, 0xFF);
         self.mmio.write(crate::audio::NR32, 0x9F);
         self.mmio.write(crate::audio::NR33, 0xFF);
         self.mmio.write(crate::audio::NR34, 0xBF);
-        self.mmio.write(crate::audio::NR41, 0xFF);
         self.mmio.write(crate::audio::NR42, 0x00);
         self.mmio.write(crate::audio::NR43, 0x00);
         self.mmio.write(crate::audio::NR44, 0xBF);
@@ -782,13 +789,13 @@ impl GB {
             Hardware::DMG0 => 0x1830,
         };
         self.mmio.set_timer_internal_counter(boot_counter);
-        // Record the CGB flag before any audio write anchors the SPU clock, so
-        // the boot SPU `cycleCounter_` high-bit constant (0x1E00/0x2400) is right.
-        self.mmio.set_audio_boot_cgb(self.hardware.is_cgb_like());
 
         // Post-boot APU state. The boot ROM enables the APU and leaves channel 1
-        // mid-tone; channel registers are gated behind APU-enable, so the writes
-        // above were dropped. Apply the exact post-boot APU state directly
+        // mid-tone. The channel-register writes above were dropped where the
+        // APU-enable gate applies (everything but the NRx1 length bits, which
+        // stay writable while off on DMG — set_post_bios_state re-seeds those
+        // counters to the hardware post-boot values, so no boot-table write
+        // leaks through). Apply the exact post-boot APU state directly
         // (must follow the timer-counter set so the duty phase has the right cc).
         // Wave RAM differs between DMG and CGB (post-boot I/O dumps).
         let cgb = self.hardware.is_cgb_like();
@@ -2786,6 +2793,174 @@ mod savestate_roundtrip_tests {
              (silent 100 ms windows = {silent}) -> ch4 latched into a continuous \
              buzz on the non-CGB path (Pokémon intro drumroll)"
         );
+    }
+}
+
+#[cfg(test)]
+mod apu_boot_semantics_tests {
+    //! Boot-path APU gating: `boot_cgb` must hold from construction (a
+    //! real-BIOS CGB session never calls `skip_bios`, so `GB::new` is the only
+    //! place that can seed it), and `skip_bios` must hand off the hardware
+    //! power-on length counters (0 for CH2/CH3/CH4 — the boot ROMs never write
+    //! NR21/NR31/NR41 — and 64 for CH1 from the boot ROM's NR11=0x80 write).
+    use super::*;
+    use crate::audio::{NR14, NR22, NR24, NR30, NR34, NR41, NR42, NR43, NR44, NR52};
+
+    /// Blank 32KB NoMBC ROM (all NOPs).
+    fn nop_rom_gb(hardware: Hardware) -> GB {
+        let mut gb = GB::new(hardware);
+        gb.insert(cartridge::Cartridge::from_bytes(&vec![0u8; 0x8000]).unwrap());
+        gb
+    }
+
+    /// One length tick every 16384 T-cycles (256 Hz) in single speed.
+    const LENGTH_TICK_T: u64 = 16384;
+
+    /// Drive at least `budget` T-cycles of machine time through the CPU.
+    fn step_t_cycles(gb: &mut GB, mut budget: u64) {
+        while budget > 0 {
+            let (_, cycles) = gb.step_instruction(false);
+            budget = budget.saturating_sub(cycles.max(4) as u64);
+        }
+    }
+
+    fn nr52(gb: &mut GB) -> u8 {
+        gb.sync_lazy_peripherals();
+        gb.read_memory(NR52)
+    }
+
+    /// A CGB constructed for a real-BIOS run (NO `skip_bios`) must reject NRx1
+    /// writes while the APU is off: the accept-while-off length-load exception
+    /// is DMG-only, gated on `boot_cgb`, which only `GB::new` can seed on this
+    /// path. With the write rejected, CH4's length counter stays at the
+    /// power-on 0, so a trigger with length enabled reloads it to 64 and the
+    /// channel survives well past one length tick. An accepted write
+    /// (NR41=0x3F -> counter 1) kills the channel at the first tick.
+    #[test]
+    fn cgb_rejects_nrx1_while_apu_off_without_skip_bios() {
+        let mut gb = nop_rom_gb(Hardware::CGB);
+
+        assert_eq!(
+            nr52(&mut gb) & 0x80,
+            0x00,
+            "APU must be off at power-on (before any boot ROM ran)"
+        );
+
+        // Write NR41 while the APU is off. DMG accepts this as a length load
+        // (counter 1); CGB must drop it.
+        gb.write_memory(NR41, 0x3F);
+
+        // Power the APU on and trigger CH4 with length DISABLED, without
+        // rewriting NR41: a power-on counter of 0 reloads to the full 64 on
+        // trigger; an accepted write-while-off (counter 1) is kept as-is.
+        // Splitting trigger and length-enable into two writes keeps the
+        // trigger+enable extra-length-clock reload quirk out of the picture,
+        // so the outcome is length-period-phase independent.
+        gb.write_memory(NR52, 0x80);
+        gb.write_memory(NR42, 0xF0); // DAC on, no envelope
+        gb.write_memory(NR43, 0x00);
+        gb.write_memory(NR44, 0x80); // trigger, length disabled
+
+        // (covers the DMG-path 6-cycle deferred noise trigger)
+        step_t_cycles(&mut gb, 2 * LENGTH_TICK_T);
+        assert_ne!(nr52(&mut gb) & 0x08, 0, "CH4 did not start on trigger");
+
+        // Now enable the length counter without retriggering.
+        gb.write_memory(NR44, 0x40);
+
+        // ~3 length periods: a counter of 1 is dead within one tick in any
+        // phase; the 64 the trigger reloaded from 0 is not.
+        step_t_cycles(&mut gb, 3 * LENGTH_TICK_T);
+        assert_ne!(
+            nr52(&mut gb) & 0x08,
+            0,
+            "CH4 died within 3 length ticks of enabling length -> the NR41 \
+             write while the APU was off was accepted on CGB (DMG-only \
+             exception leaked: boot_cgb was not seeded at construction)"
+        );
+
+        // And the counter really was reloaded to 64 by the trigger, not left
+        // free-running: the channel must expire by ~64 ticks.
+        step_t_cycles(&mut gb, 70 * LENGTH_TICK_T);
+        assert_eq!(
+            nr52(&mut gb) & 0x08,
+            0,
+            "CH4 never expired -> length counter was not reloaded to 64"
+        );
+    }
+
+    /// After `skip_bios`, the hidden length counters must be the hardware
+    /// post-boot values: 0 for CH2/CH3/CH4 (so a trigger with length enabled
+    /// reloads to 64/256/64) and 64 for CH1. The old boot table's NR21/NR31/
+    /// NR41 writes leaked DMG length loads of 1, killing CH3/CH4 one tick
+    /// after any length-enabled trigger that did not rewrite NRx1.
+    #[test]
+    fn skip_bios_seeds_power_on_length_counters() {
+        for hardware in [Hardware::DMG, Hardware::CGB] {
+            let mut gb = nop_rom_gb(hardware);
+            gb.skip_bios();
+
+            assert_ne!(nr52(&mut gb) & 0x80, 0, "{hardware:?}: APU off after skip_bios");
+
+            // Trigger all four channels with length DISABLED and NO NRx1
+            // writes (NRx2/NR30 only turn the DACs on): a power-on counter of
+            // 0 reloads to the full max on trigger (64/256/64); a leaked
+            // length load of 1 is kept as-is. Trigger and length-enable are
+            // separate writes so the trigger+enable extra-length-clock reload
+            // quirk cannot rescue a counter of 1 (phase-independent outcome).
+            gb.write_memory(NR22, 0xF0);
+            gb.write_memory(NR24, 0x80);
+            gb.write_memory(NR30, 0x80);
+            gb.write_memory(NR34, 0x80);
+            gb.write_memory(NR42, 0xF0);
+            gb.write_memory(NR44, 0x80);
+            gb.write_memory(NR14, 0x80); // CH1: retrigger, counter carries ~64
+
+            // (covers the DMG-path 6-cycle deferred noise trigger)
+            step_t_cycles(&mut gb, 2 * LENGTH_TICK_T);
+            assert_eq!(
+                nr52(&mut gb) & 0x0F,
+                0x0F,
+                "{hardware:?}: not all channels started on trigger"
+            );
+
+            // Enable every length counter without retriggering.
+            gb.write_memory(NR14, 0x40);
+            gb.write_memory(NR24, 0x40);
+            gb.write_memory(NR34, 0x40);
+            gb.write_memory(NR44, 0x40);
+
+            // ~3 length ticks: a leaked counter of 1 is dead within one tick
+            // in any phase; the max-reloads (and CH1's carried 64) are not.
+            step_t_cycles(&mut gb, 3 * LENGTH_TICK_T);
+            let alive = nr52(&mut gb) & 0x0F;
+            assert_eq!(
+                alive,
+                0x0F,
+                "{hardware:?}: channel(s) died within 3 length ticks of \
+                 enabling length (NR52 low nibble {alive:#06b}) -> skip_bios \
+                 seeded garbage length counters (leaked DMG length loads of 1)"
+            );
+
+            // By ~73 ticks the 64-count channels (CH1/CH2/CH4) have expired;
+            // CH3's 256-reload keeps it alive.
+            step_t_cycles(&mut gb, 70 * LENGTH_TICK_T);
+            let alive = nr52(&mut gb) & 0x0F;
+            assert_eq!(
+                alive,
+                0x04,
+                "{hardware:?}: after ~73 length ticks expected only CH3 alive \
+                 (NR52 low nibble {alive:#06b}): CH1/CH2/CH4 carry 64, CH3 256"
+            );
+
+            // And CH3 expires by ~269 ticks (256-reload, not free-running).
+            step_t_cycles(&mut gb, 196 * LENGTH_TICK_T);
+            let alive = nr52(&mut gb) & 0x0F;
+            assert_eq!(
+                alive, 0,
+                "{hardware:?}: CH3 never expired -> counter was not reloaded to 256"
+            );
+        }
     }
 }
 
