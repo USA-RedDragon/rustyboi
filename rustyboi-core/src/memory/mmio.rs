@@ -2161,7 +2161,20 @@ impl Mmio {
         let div_anchor = self.timer.div_anchor_apu();
         // The channels only read these three read-only flags from mmio, so pass
         // them by value to sidestep the &mut-self borrow.
-        let cgb = self.is_cgb_features_enabled();
+        // Silicon, not cart mode (`is_cgb_features_enabled`): the APU die has no
+        // CGB/DMG mode bit, so KEY0/DMG-compat cannot change channel behavior.
+        // This is what ch4 already used (`boot_cgb`, also `is_cgb_like`), so a
+        // DMG-header cart on CGB used to get DMG rules from ch1-3 and CGB rules
+        // from ch4. SameBoy gates its whole APU on `GB_is_cgb` (silicon) and
+        // never on `GB_is_cgb_in_cgb_mode` (cart mode) — Core/apu.c wave-RAM
+        // read :1129 / write :1697.
+        //
+        // No suite ROM observes this: only SameSuite ss50/ss51 run a DMG-header
+        // ROM on CGB hardware, and neither performs a wave-RAM access whose
+        // outcome differs between the two rules (measured: 9 writes, all with
+        // `cc == last_read_time`, where DMG and CGB agree). Compat-mode APU
+        // behavior is therefore inferred, not verified — queued for the bench.
+        let cgb = self.is_cgb();
         let agb = self.is_agb();
         self.audio.sync_cc(abs_cc, div_resets, div_anchor, ds, cgb, agb);
     }
