@@ -25,8 +25,12 @@
 #
 #   make            build all ROMs, then regenerate the runner manifest
 #   make roms       build all ROMs only
-#   make manifest   regenerate rustyboi-test-runner/suites/rustyboi.manifest
+#   make manifest   build all ROMs, then regenerate
+#                   rustyboi-test-runner/suites/rustyboi.manifest from build/
 #   make clean      remove build/
+#
+# Safe under `make -j`: the manifest is generated from the built ROMs, so it is
+# ordered after `roms` rather than run alongside it.
 
 RGBASM  := rgbasm
 RGBLINK := rgblink
@@ -59,7 +63,10 @@ roms:
 	  rm -f "$$out.o"; \
 	done
 
-manifest:
+# Order-only on `roms`: the generator scans build/ and emits one manifest line
+# per ROM found, so under `make -j` it would otherwise race the ROM build and
+# silently write a manifest listing only whatever had been linked so far.
+manifest: | roms
 	@cd .. && $(PYTHON) tools/gen_manifests.py --only rustyboi
 
 clean:
