@@ -2010,14 +2010,9 @@ impl Mmio {
         }
         pages[0xC] = PassivePage::Wram0;
         pages[0xE] = PassivePage::WramEcho;
-        pages[0xD] = if self.cgb_features_enabled {
-            match self.wram_bank_select {
-                0 | 1 => PassivePage::WramBankMain,
-                2..=7 => PassivePage::WramBankIdx(self.wram_bank_select - 2),
-                _ => PassivePage::WramBankMain,
-            }
-        } else {
-            PassivePage::WramBankMain
+        pages[0xD] = match self.banked_wram_index() {
+            Some(bank_index) => PassivePage::WramBankIdx(bank_index as u8),
+            None => PassivePage::WramBankMain,
         };
         self.passive_pages = pages;
         self.passive_pages_valid = true;
@@ -4590,6 +4585,21 @@ impl Mmio {
         ((self.dma_source_base >> 8) >> 4 & 1) as u8
     }
 
+    /// Bank index for an OAM-DMA-conflict WRAM access, or `None` for the base
+    /// `wram_bank` buffer.
+    ///
+    /// Deliberately NOT [`Mmio::banked_wram_index`]: this path applies the
+    /// SVBK select unconditionally, with no `cgb_features_enabled` gate. The
+    /// conflict path is only reachable on CGB, so the gate is redundant rather
+    /// than contradictory — but the two are not textually interchangeable and
+    /// must not be merged without proving the gate can never differ here.
+    fn dma_conflict_wram_index(&self) -> Option<usize> {
+        match self.wram_bank_select {
+            2..=7 => Some((self.wram_bank_select - 2) as usize),
+            _ => None,
+        }
+    }
+
     /// Read the WRAM byte seen on a CGB OAM-DMA conflicting access. The byte is
     /// taken from the DMA-selected WRAM area at `[p & 0xFFF]`, so the address's C/D range is
     /// ignored: only the 12-bit offset and the DMA-derived area matter.
@@ -4598,10 +4608,9 @@ impl Mmio {
         if self.dma_conflict_wram_area() == 0 {
             self.wram.read(WRAM_START + offset)
         } else {
-            match self.wram_bank_select {
-                2..=7 => self.wram_banks[(self.wram_bank_select - 2) as usize]
-                    .read(WRAM_BANK_START + offset),
-                _ => self.wram_bank.read(WRAM_BANK_START + offset),
+            match self.dma_conflict_wram_index() {
+                Some(bank_index) => self.wram_banks[bank_index].read(WRAM_BANK_START + offset),
+                None => self.wram_bank.read(WRAM_BANK_START + offset),
             }
         }
     }
@@ -4613,10 +4622,11 @@ impl Mmio {
         if self.dma_conflict_wram_area() == 0 {
             self.wram.write(WRAM_START + offset, value);
         } else {
-            match self.wram_bank_select {
-                2..=7 => self.wram_banks[(self.wram_bank_select - 2) as usize]
-                    .write(WRAM_BANK_START + offset, value),
-                _ => self.wram_bank.write(WRAM_BANK_START + offset, value),
+            match self.dma_conflict_wram_index() {
+                Some(bank_index) => {
+                    self.wram_banks[bank_index].write(WRAM_BANK_START + offset, value)
+                },
+                None => self.wram_bank.write(WRAM_BANK_START + offset, value),
             }
         }
     }
@@ -5040,6 +5050,38 @@ impl Mmio {
         self.cartridge.as_mut()
     }
 
+    /// Index into `wram_banks` (which holds banks 2-7) for the currently
+    /// selected CGB WRAM bank, or `None` when the access routes to the base
+    /// `wram_bank` buffer. SVBK remaps a written 0 to 1 on the way in, so
+    /// selects 0 and 1 both land on `wram_bank`, as does any out-of-range
+    /// value; DMG has no bank switching at all.
+    fn banked_wram_index(&self) -> Option<usize> {
+        if self.cgb_features_enabled {
+            match self.wram_bank_select {
+                2..=7 => Some((self.wram_bank_select - 2) as usize),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Currently banked work-RAM buffer for 0xD000-0xDFFF accesses.
+    fn banked_wram(&self) -> &memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE> {
+        match self.banked_wram_index() {
+            Some(bank_index) => &self.wram_banks[bank_index],
+            None => &self.wram_bank,
+        }
+    }
+
+    /// Mutable counterpart of [`Mmio::banked_wram`].
+    fn banked_wram_mut(&mut self) -> &mut memory::Memory<WRAM_BANK_START, WRAM_BANK_SIZE> {
+        match self.banked_wram_index() {
+            Some(bank_index) => &mut self.wram_banks[bank_index],
+            None => &mut self.wram_bank,
+        }
+    }
+
     /// Fixed work-RAM bank (0xC000-0xCFFF) as a mutable slice.
     pub(crate) fn wram_bank0_slice_mut(&mut self) -> &mut [u8] {
         self.wram.as_mut_slice()
@@ -5283,39 +5325,13 @@ impl memory::Addressable for Mmio {
                     }
                 },
                 WRAM_START..=WRAM_END => self.wram.read(addr),
-                WRAM_BANK_START..=WRAM_BANK_END => {
-                    if self.cgb_features_enabled {
-                        match self.wram_bank_select {
-                            0 | 1 => self.wram_bank.read(addr), // Bank 0 and 1 use the original wram_bank
-                            2..=7 => {
-                                let bank_index = (self.wram_bank_select - 2) as usize;
-                                self.wram_banks[bank_index].read(addr)
-                            },
-                            _ => self.wram_bank.read(addr), // Fallback to bank 1
-                        }
-                    } else {
-                        self.wram_bank.read(addr) // DMG always uses bank 1
-                    }
-                },
+                WRAM_BANK_START..=WRAM_BANK_END => self.banked_wram().read(addr),
                 ECHO_RAM_START..=ECHO_RAM_END => {
                     let addr = addr - 0x2000;
                     match addr {
                         0..WRAM_START => panic!("This is literally never possible"),
                         WRAM_START..=WRAM_END => self.wram.read(addr),
-                        WRAM_BANK_START..=ECHO_RAM_MIRROR_END => {
-                            if self.cgb_features_enabled {
-                                match self.wram_bank_select {
-                                    0 | 1 => self.wram_bank.read(addr), // Bank 0 and 1 use the original wram_bank
-                                    2..=7 => {
-                                        let bank_index = (self.wram_bank_select - 2) as usize;
-                                        self.wram_banks[bank_index].read(addr)
-                                    },
-                                    _ => self.wram_bank.read(addr), // Fallback to bank 1
-                                }
-                            } else {
-                                self.wram_bank.read(addr) // DMG always uses bank 1
-                            }
-                        },
+                        WRAM_BANK_START..=ECHO_RAM_MIRROR_END => self.banked_wram().read(addr),
                         0xDE00..=0xFFFF => panic!("This is literally never possible"),
                     }
                 },
@@ -5608,38 +5624,14 @@ impl memory::Addressable for Mmio {
                     if let Some(cart) = self.cartridge.as_mut() { cart.write(addr, value) }
                 },
                 WRAM_START..=WRAM_END => self.wram.write(addr, value),
-                WRAM_BANK_START..=WRAM_BANK_END => {
-                    if self.cgb_features_enabled {
-                        match self.wram_bank_select {
-                            0 | 1 => self.wram_bank.write(addr, value), // Bank 0 and 1 use the original wram_bank
-                            2..=7 => {
-                                let bank_index = (self.wram_bank_select - 2) as usize;
-                                self.wram_banks[bank_index].write(addr, value)
-                            },
-                            _ => self.wram_bank.write(addr, value), // Fallback to bank 1
-                        }
-                    } else {
-                        self.wram_bank.write(addr, value) // DMG always uses bank 1
-                    }
-                },
+                WRAM_BANK_START..=WRAM_BANK_END => self.banked_wram_mut().write(addr, value),
                 ECHO_RAM_START..=ECHO_RAM_END => {
                     let addr = addr - 0x2000;
                     match addr {
                         0..WRAM_START => panic!("This is literally never possible"),
                         WRAM_START..=WRAM_END => self.wram.write(addr, value),
                         WRAM_BANK_START..=ECHO_RAM_MIRROR_END => {
-                            if self.cgb_features_enabled {
-                                match self.wram_bank_select {
-                                    0 | 1 => self.wram_bank.write(addr, value), // Bank 0 and 1 use the original wram_bank
-                                    2..=7 => {
-                                        let bank_index = (self.wram_bank_select - 2) as usize;
-                                        self.wram_banks[bank_index].write(addr, value)
-                                    },
-                                    _ => self.wram_bank.write(addr, value), // Fallback to bank 1
-                                }
-                            } else {
-                                self.wram_bank.write(addr, value) // DMG always uses bank 1
-                            }
+                            self.banked_wram_mut().write(addr, value)
                         },
                         0xDE00..=0xFFFF => panic!("This is literally never possible"),
                     }
