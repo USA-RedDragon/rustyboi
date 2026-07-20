@@ -50,8 +50,6 @@ pub(super) struct Wave {
     dac_enabled: bool,
 
     cgb: bool,
-    #[serde(default)]
-    ds: bool,
     // AGB ch3 wave-RAM behavior: while playing,
     // wave-RAM reads return 0xFF and writes are dropped unconditionally, and
     // the setNr0 sample-buffer restore is skipped.
@@ -92,7 +90,6 @@ impl Wave {
             master: false,
             dac_enabled: false,
             cgb: false,
-            ds: false,
             agb: false,
             cgb_le_b: false,
             cgb_b: false,
@@ -216,10 +213,9 @@ impl Wave {
         self.cgb_b = b;
     }
 
-    pub(super) fn step(&mut self, cgb: bool, agb: bool, ds: bool) {
+    pub(super) fn step(&mut self, cgb: bool, agb: bool) {
         self.cgb = cgb;
         self.agb = agb;
-        self.ds = ds;
         if self.master {
             self.update_wave_counter();
         }

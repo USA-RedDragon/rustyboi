@@ -59,10 +59,6 @@ pub(super) struct SquareWave {
     cc: u32,
 
     // --- Duty unit (countdown model) ---
-    // `period` = (2048-freq)*2, the steady-state duty tick interval in 2 MHz
-    // cycles. Kept for the freq-write path.
-    #[serde(default)]
-    period: u32,
     // `current_sample_index`: the duty phase (0..7), INCREMENTING. NOT
     // reset on trigger — only APU-off resets it.
     #[serde(default)]
@@ -212,7 +208,6 @@ impl SquareWave {
             regs: [0; 5],
             enabled: false,
             cc: 0,
-            period: 4096,
             pos: 0,
             high: false,
             sample_countdown: COUNTER_DISABLED,
@@ -306,7 +301,6 @@ impl SquareWave {
         // matching the real-cgb04c `fexx_ffxx_dumper` capture where FF76 (PCM12)
         // reads 0x00 while NR52 reads 0xF1.
         self.volume = 0x00;
-        self.period = to_period(self.freq());
         self.pos = pos;
         self.high = high;
         // Seed the countdown from the post-boot phase offset: the next
@@ -470,7 +464,6 @@ impl SquareWave {
     /// reload (the countdown keeps running).
     fn write_nrx3(&mut self) {
         self.update_pos();
-        self.period = to_period(self.freq());
         if self.just_reloaded {
             self.sample_countdown = self.duty_tick_reload();
         }
@@ -776,7 +769,6 @@ impl SquareWave {
         self.cc = at_cc;
         self.update_pos();
         self.cc = saved;
-        self.period = to_period(new_freq);
         // Reflect the swept frequency back into the period registers.
         self.regs[3] = (new_freq & 0xFF) as u8;
         self.regs[4] = (self.regs[4] & 0xF8) | ((new_freq >> 8) & 0x07) as u8;
@@ -823,7 +815,6 @@ impl SquareWave {
         self.len_nr4_change(old_nr4, value);
 
         self.regs[4] = value;
-        self.period = to_period(self.freq());
 
         // `just_reloaded` reload from the new sample length.
         if self.just_reloaded {
@@ -860,7 +851,6 @@ impl SquareWave {
         let dac_off = (nr2 & 0xF8) == 0;
 
         // Duty period from the (possibly just-written) frequency.
-        self.period = to_period(self.freq());
 
         // NRx4 trigger: the duty countdown/delay place
         // the first edge at the hardware-accurate phase. `sample_length` == freq.
