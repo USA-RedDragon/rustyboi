@@ -19,3 +19,6 @@ rustyboi-web.lcov
 sweep-out/
 
 *.dat
+
+# Session working file - never commit
+/MAINTAINABILITY_AUDIT.md
