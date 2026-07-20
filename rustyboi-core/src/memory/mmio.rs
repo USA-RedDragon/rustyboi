@@ -1332,30 +1332,50 @@ impl Mmio {
         self.cgb_features_enabled
     }
 
+    /// RGB555 byte pair for one CGB palette color: 8 palettes of 4 colors, two
+    /// bytes each. Out-of-range indices read back as open bus.
+    fn palette_pair(ram: &[u8; 64], palette_idx: u8, color_idx: u8) -> (u8, u8) {
+        let offset = (palette_idx as usize) * 8 + (color_idx as usize) * 2;
+        if offset + 1 < 64 {
+            (ram[offset], ram[offset + 1])
+        } else {
+            (0xFF, 0xFF)
+        }
+    }
+
+    /// Apply the BCPS/OCPS auto-increment: when bit 7 is set the 6-bit address
+    /// advances and wraps within the palette window, leaving bit 7 intact.
+    fn palette_spec_increment(spec: u8) -> u8 {
+        if (spec & 0x80) != 0 {
+            (spec & 0x80) | (((spec & 0x3F) + 1) & 0x3F)
+        } else {
+            spec
+        }
+    }
+
+    /// BCPD/OCPD read: the low 6 bits of the spec address the palette window.
+    fn palette_data_read(spec: u8, ram: &[u8; 64]) -> u8 {
+        ram[(spec & 0x3F) as usize] // Bits 0-5 = address
+    }
+
+    /// BCPD/OCPD write: store at the spec-addressed byte, then auto-increment.
+    fn palette_data_write(spec: &mut u8, ram: &mut [u8; 64], value: u8) {
+        ram[(*spec & 0x3F) as usize] = value; // Bits 0-5 = address
+        *spec = Self::palette_spec_increment(*spec);
+    }
+
     pub fn read_bg_palette_data(&self, palette_idx: u8, color_idx: u8) -> (u8, u8) {
         if !self.cgb_features_enabled || palette_idx >= 8 || color_idx >= 4 {
             return (0xFF, 0xFF); // Invalid access
         }
-
-        let offset = (palette_idx * 8 + color_idx * 2) as usize;
-        if offset + 1 < 64 {
-            (self.bg_palette_ram[offset], self.bg_palette_ram[offset + 1])
-        } else {
-            (0xFF, 0xFF)
-        }
+        Self::palette_pair(&self.bg_palette_ram, palette_idx, color_idx)
     }
 
     pub fn read_obj_palette_data(&self, palette_idx: u8, color_idx: u8) -> (u8, u8) {
         if !self.cgb_features_enabled || palette_idx >= 8 || color_idx >= 4 {
             return (0xFF, 0xFF); // Invalid access
         }
-
-        let offset = (palette_idx * 8 + color_idx * 2) as usize;
-        if offset + 1 < 64 {
-            (self.obj_palette_ram[offset], self.obj_palette_ram[offset + 1])
-        } else {
-            (0xFF, 0xFF)
-        }
+        Self::palette_pair(&self.obj_palette_ram, palette_idx, color_idx)
     }
 
     /// Seed the CGB power-on palette RAM. The boot ROM leaves BG palette RAM
@@ -1424,23 +1444,13 @@ impl Mmio {
     /// returns 0xFF in that state, which is correct for the CPU bus but wrong for
     /// the internal PPU lookup.
     pub(crate) fn bg_palette_pair_raw(&self, palette_idx: u8, color_idx: u8) -> (u8, u8) {
-        let offset = (palette_idx as usize) * 8 + (color_idx as usize) * 2;
-        if offset + 1 < 64 {
-            (self.bg_palette_ram[offset], self.bg_palette_ram[offset + 1])
-        } else {
-            (0xFF, 0xFF)
-        }
+        Self::palette_pair(&self.bg_palette_ram, palette_idx, color_idx)
     }
 
     /// Read a CGB OBJ palette color (RGB555 byte pair) ignoring the
     /// `cgb_features_enabled` gate. See `bg_palette_pair_raw`.
     pub(crate) fn obj_palette_pair_raw(&self, palette_idx: u8, color_idx: u8) -> (u8, u8) {
-        let offset = (palette_idx as usize) * 8 + (color_idx as usize) * 2;
-        if offset + 1 < 64 {
-            (self.obj_palette_ram[offset], self.obj_palette_ram[offset + 1])
-        } else {
-            (0xFF, 0xFF)
-        }
+        Self::palette_pair(&self.obj_palette_ram, palette_idx, color_idx)
     }
 
     /// Read from specific VRAM bank for debugging purposes
@@ -2999,10 +3009,7 @@ impl Mmio {
         } else {
             &mut self.obj_palette_spec
         };
-        if (*spec & 0x80) != 0 {
-            let new_index = ((*spec & 0x3F) + 1) & 0x3F;
-            *spec = (*spec & 0x80) | new_index;
-        }
+        *spec = Self::palette_spec_increment(*spec);
     }
 
     pub(crate) fn set_hdma_disable_fires(&mut self, v: Option<bool>) {
@@ -5474,8 +5481,7 @@ impl memory::Addressable for Mmio {
                         },
                         REG_BCPD => {
                             if self.cgb_features_enabled {
-                                let index = (self.bg_palette_spec & 0x3F) as usize; // Bits 0-5 = address
-                                self.bg_palette_ram[index]
+                                Self::palette_data_read(self.bg_palette_spec, &self.bg_palette_ram)
                             } else {
                                 0xFF
                             }
@@ -5492,8 +5498,7 @@ impl memory::Addressable for Mmio {
                         },
                         REG_OCPD => {
                             if self.cgb_features_enabled {
-                                let index = (self.obj_palette_spec & 0x3F) as usize; // Bits 0-5 = address
-                                self.obj_palette_ram[index]
+                                Self::palette_data_read(self.obj_palette_spec, &self.obj_palette_ram)
                             } else {
                                 0xFF
                             }
@@ -5888,14 +5893,11 @@ impl memory::Addressable for Mmio {
                         },
                         REG_BCPD => {
                             if self.cgb_features_enabled {
-                                let index = (self.bg_palette_spec & 0x3F) as usize; // Bits 0-5 = address
-                                self.bg_palette_ram[index] = value;
-
-                                // Auto-increment if bit 7 is set
-                                if (self.bg_palette_spec & 0x80) != 0 {
-                                    let new_index = ((self.bg_palette_spec & 0x3F) + 1) & 0x3F;
-                                    self.bg_palette_spec = (self.bg_palette_spec & 0x80) | new_index;
-                                }
+                                Self::palette_data_write(
+                                    &mut self.bg_palette_spec,
+                                    &mut self.bg_palette_ram,
+                                    value,
+                                );
                             }
                         },
                         REG_OCPS => {
@@ -5905,14 +5907,11 @@ impl memory::Addressable for Mmio {
                         },
                         REG_OCPD => {
                             if self.cgb_features_enabled {
-                                let index = (self.obj_palette_spec & 0x3F) as usize; // Bits 0-5 = address
-                                self.obj_palette_ram[index] = value;
-
-                                // Auto-increment if bit 7 is set
-                                if (self.obj_palette_spec & 0x80) != 0 {
-                                    let new_index = ((self.obj_palette_spec & 0x3F) + 1) & 0x3F;
-                                    self.obj_palette_spec = (self.obj_palette_spec & 0x80) | new_index;
-                                }
+                                Self::palette_data_write(
+                                    &mut self.obj_palette_spec,
+                                    &mut self.obj_palette_ram,
+                                    value,
+                                );
                             }
                         },
 
