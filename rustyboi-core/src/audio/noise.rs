@@ -89,12 +89,13 @@ pub(super) struct Noise {
     // DMG-only delayed channel start.
     #[serde(default)]
     dmg_delayed_start: u32,
-    // True only while re-applying the deferred NR44 trigger from `run_cycles`,
-    // so `trigger` starts the channel instead of re-arming another deferral
-    // (the delayed start is a one-shot). Not serialized: it never spans
-    // an instruction boundary.
+    // `Some(crossing_cc)` only while re-applying the deferred NR44 trigger from
+    // `run_cycles`, so `trigger` starts the channel instead of re-arming
+    // another deferral (the delayed start is a one-shot), and anchors
+    // `env_trigger_cc` at the crossing rather than at the chunk end `self.cc`
+    // sits on. Not serialized: it never spans an instruction boundary.
     #[serde(skip)]
-    in_deferred_reapply: bool,
+    deferred_reapply_cc: Option<u32>,
     // Whether the noise channel started with its DAC disabled.
     #[serde(default)]
     started_with_dac_off: bool,
@@ -163,7 +164,7 @@ impl Noise {
             lfsr_stepped_in_narrow: false,
             lfsr_bit7_before_step: false,
             dmg_delayed_start: 0,
-            in_deferred_reapply: false,
+            deferred_reapply_cc: None,
             started_with_dac_off: false,
             last_run_cc: 0,
             cgb: false,
@@ -369,6 +370,10 @@ impl Noise {
             } else {
                 let head = self.dmg_delayed_start;
                 self.dmg_delayed_start = 0;
+                // The crossing sits `head` cc into this batch; `self.cc` is
+                // already the batch END, which is what `trigger` would
+                // otherwise anchor the envelope race on.
+                let crossing_cc = self.cc.wrapping_sub(cycles).wrapping_add(head);
                 cycles -= head;
                 self.run_batch(head);
                 let nr44 = self.nr44 | 0x80;
@@ -387,12 +392,12 @@ impl Noise {
                 // drumroll — otherwise has every trigger's `env_clock = false`
                 // clear the envelope every 6 cc, so the volume never steps and the
                 // noise channel latches into a continuous buzz instead of a
-                // decaying drum hit. `in_deferred_reapply` makes the crossing a
+                // decaying drum hit. `deferred_reapply_cc` makes the crossing a
                 // one-shot start (never a re-defer), matching hardware/CGB and the
                 // SameSuite channel_4 delay/alignment tests.
-                self.in_deferred_reapply = true;
+                self.deferred_reapply_cc = Some(crossing_cc);
                 self.write_nrx4(nr44);
-                self.in_deferred_reapply = false;
+                self.deferred_reapply_cc = None;
                 if cycles == 0 {
                     return;
                 }
@@ -608,12 +613,23 @@ impl Noise {
 
         // DMG-only: an unaligned trigger is deferred 6 cycles; the whole
         // start runs at the crossing. The
-        // deferred re-application (`in_deferred_reapply`) is that crossing: it
+        // deferred re-application (`deferred_reapply_cc`) is that crossing: it
         // must start the channel, not re-arm the deferral (see `run_cycles`).
+        //
+        // A trigger arriving while a deferral is still in flight RESTARTS that
+        // deferral whatever the ripple phase now is: the silicon has one
+        // delayed-start pipeline, and re-entering it re-runs it rather than
+        // executing a start of its own. Starting here instead would run a
+        // complete start at this cc AND leave the crossing armed to run a
+        // second one (fresh `prepare_noise_start` at another `alignment & 3`,
+        // another LFSR reseed, `env_trigger_cc` moved) a few cc later.
+        // Unlike the re-defer loop the `deferred_reapply_cc` guard exists to
+        // stop, this restart cannot self-sustain: only a CPU write reaches
+        // here, so the pipeline always completes 6 cc after the last write of
+        // a retrigger burst.
         if !self.cgb
-            && (self.alignment & 3) != 0
-            && self.dmg_delayed_start == 0
-            && !self.in_deferred_reapply
+            && self.deferred_reapply_cc.is_none()
+            && ((self.alignment & 3) != 0 || self.dmg_delayed_start > 0)
         {
             self.dmg_delayed_start = 6;
             return;
@@ -628,7 +644,11 @@ impl Noise {
         self.volume_direction = self.get_envelope_direction();
         self.volume_timer = self.get_envelope_period();
         self.volume_countdown = self.nr42 & 7;
-        self.env_trigger_cc = self.cc;
+        // A deferred start belongs to its 6-cc crossing, not to the end of the
+        // batch that happened to contain it: the envelope's frame-escape race
+        // (`env_frame_countdown`) is only 2 cc wide, so anchoring on the batch
+        // end would let a start spuriously escape a 64 Hz decrement.
+        self.env_trigger_cc = self.deferred_reapply_cc.unwrap_or(self.cc);
 
         self.did_step_counter = (self.alignment & 3) == 2;
 
