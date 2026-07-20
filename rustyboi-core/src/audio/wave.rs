@@ -140,6 +140,21 @@ impl Wave {
         self.fs_step = step;
     }
 
+    /// Master-clock epoch rebase: shift every absolute-cc anchor down by
+    /// `delta`. `last_read_time` is shifted even though it is compared for
+    /// equality only, to stay consistent with `wave_counter`.
+    pub fn epoch_fold(&mut self, delta: u32) {
+        self.cc = self.cc.wrapping_sub(delta);
+        self.len_cc = self.len_cc.wrapping_sub(delta);
+        self.last_read_time = self.last_read_time.wrapping_sub(delta);
+        if self.wave_counter != COUNTER_DISABLED {
+            self.wave_counter = self.wave_counter.wrapping_sub(delta);
+        }
+        if self.len_counter != LEN_DISABLED {
+            self.len_counter = self.len_counter.wrapping_sub(delta);
+        }
+    }
+
     /// PSG reset: clears the sample buffer. Length counter / wave RAM are
     /// preserved.
     pub fn psg_reset(&mut self) {
